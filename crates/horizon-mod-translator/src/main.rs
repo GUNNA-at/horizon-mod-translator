@@ -24,6 +24,15 @@ fn main() -> ExitCode {
         for (m, n) in top.iter().take(15) {
             println!("  {n:5}  {}.{}{}", m.owner, m.name, m.desc);
         }
+        let regs = horizon_mod_translator::registrations(&classes);
+        let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+        for r in &regs {
+            *by.entry(r.registry.as_str()).or_default() += 1;
+        }
+        println!("  registrations in code: {} {by:?}", regs.len());
+        for r in regs.iter().take(5) {
+            println!("    {} {}", r.registry, r.name);
+        }
     }
     ExitCode::SUCCESS
 }

@@ -45,3 +45,92 @@ pub fn api_calls(classes: &[ClassFile]) -> BTreeMap<Member, usize> {
     }
     m
 }
+
+pub mod insn;
+
+/// A registration the mod's code makes: registry and name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Registration {
+    /// `block`, `item`, `block_entity_type`, ... (from the register call), or `unknown`.
+    pub registry: String,
+    pub name: String,
+    /// The class the registering code lives in.
+    pub class: String,
+}
+
+fn registry_of(m: &Member) -> String {
+    if m.owner.contains("Registrate") {
+        return match m.name.as_str() {
+            "blockEntity" => "block_entity_type",
+            "entity" => "entity_type",
+            n => n,
+        }
+        .into();
+    }
+    let o = m.owner.rsplit('/').next().unwrap_or(&m.owner);
+    let lower = format!("{o}.{}", m.name).to_ascii_lowercase();
+    for (k, v) in [
+        ("blockentit", "block_entity_type"),
+        ("block", "block"),
+        ("item", "item"),
+        ("entit", "entity_type"),
+        ("menu", "menu"),
+        ("sound", "sound_event"),
+        ("creativemodetab", "creative_mode_tab"),
+        ("recipe", "recipe_serializer"),
+        ("particle", "particle_type"),
+    ] {
+        if lower.contains(k) {
+            return v.into();
+        }
+    }
+    "unknown".into()
+}
+
+/// Registrate's builder entry points (`REGISTRATE.block("name", ...)`), used by Create and others.
+const REGISTRATE: [&str; 6] = ["block", "item", "blockEntity", "entity", "menu", "fluid"];
+
+fn registers(m: &Member) -> bool {
+    (m.name.starts_with("register")
+        && (m.owner.contains("DeferredRegister") || m.owner == "net/minecraft/core/Registry"))
+        || (m.owner.contains("Registrate") && REGISTRATE.contains(&m.name.as_str()))
+}
+
+/// Names registered through `DeferredRegister.register*` and `Registry.register`:
+/// the string constant pushed last before the call.
+pub fn registrations(classes: &[ClassFile]) -> Vec<Registration> {
+    let mut out = Vec::new();
+    for c in classes {
+        for m in &c.methods {
+            let Some(code) = &m.code else { continue };
+            let Ok(insns) = insn::decode(&code.bytes) else { continue };
+            let mut last: Option<String> = None;
+            for i in insns {
+                match (i.op, &i.arg) {
+                    (insn::op::LDC | insn::op::LDC_W, insn::Operand::Int(idx)) => {
+                        last = match c.pool.get(*idx as usize) {
+                            Some(class::Const::String(s)) => c.utf8(*s).ok(),
+                            _ => last,
+                        };
+                    }
+                    (insn::op::INVOKEVIRTUAL | insn::op::INVOKESTATIC | insn::op::INVOKEINTERFACE, arg) => {
+                        let idx = match arg {
+                            insn::Operand::Int(i) => *i as u16,
+                            insn::Operand::IndexCount(i, _) => *i,
+                            _ => continue,
+                        };
+                        if let Some(call) = c.member(idx).filter(registers)
+                            && let Some(name) = last.take()
+                        {
+                            out.push(Registration { registry: registry_of(&call), name, class: c.name.clone() });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}

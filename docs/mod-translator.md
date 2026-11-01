@@ -35,7 +35,10 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       Measured: Macaw's Fences 19 classes / 89 API methods; Create 2692 classes, 24833 methods,
       3579 distinct API methods. Top Create calls: BlockState.getValue/getBlock/setValue,
       Direction, Level.getBlockState/getBlockEntity, ItemStack, BlockPos, Vec3, CompoundTag.
-- [ ] Registration extraction
+- [x] Instruction decoder (`insn.rs`, tested) and registration extraction from code
+      (DeferredRegister, Registry.register, Registrate). Macaw's Fences: 180 blocks + 180 items (matches
+      carry). Create: 187 blocks, 114 block entity types, 53 items.
+- [ ] Feed code registrations into the carry (blocks the data alone misses)
 - [ ] Codegen + horizon-compat first slice
 - [ ] In-game verification
 
