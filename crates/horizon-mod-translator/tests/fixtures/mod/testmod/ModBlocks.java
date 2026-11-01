@@ -11,4 +11,5 @@ public class ModBlocks {
     public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = DeferredRegister.create(Registries.BLOCK_ENTITY_TYPE, "testmod");
     public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<CounterBlockEntity>> COUNTER_BE =
         BLOCK_ENTITIES.register("counter", () -> BlockEntityType.Builder.of(CounterBlockEntity::new, COUNTER.get()).build(null));
+    public static final DeferredBlock<SwitchBlock> SWITCH = BLOCKS.register("switch", () -> new SwitchBlock(BlockBehaviour.Properties.of()));
 }

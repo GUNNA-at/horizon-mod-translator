@@ -78,6 +78,13 @@ fn main() {
         glue::block_entity_tick(&mut rt, &mut host, [8, 64, 8], "testmod:counter", &mut nbt);
         println!("be tick {step}: nbt={nbt:?} above={}", host.block_state([8, 65, 8]));
     }
+    // Right clicks: toggles, and passes while sneaking.
+    host.set_block_state([12, 64, 12], "testmod:switch[powered=false]");
+    let took = glue::use_block(&mut rt, &mut host, [12, 64, 12], "testmod:switch[powered=false]", 1);
+    println!("click: took={took} now={} above={}", host.block_state([12, 64, 12]), host.block_state([12, 65, 12]));
+    host.sneaking = true;
+    let took = glue::use_block(&mut rt, &mut host, [12, 64, 12], "testmod:switch[powered=true]", 1);
+    println!("sneak click: took={took} now={}", host.block_state([12, 64, 12]));
     let mut un: Vec<_> = rt.unmapped.keys().collect();
     un.sort();
     println!("unmapped: {un:?}");
@@ -95,7 +102,7 @@ fn main() {
     assert!(out.status.success(), "{}\n{stdout}", String::from_utf8_lossy(&out.stderr));
     eprintln!("{stdout}");
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines[0], r#"registered: ["block testmod:counter", "block testmod:grow", "block_entity_type testmod:counter"]"#);
+    assert_eq!(lines[0], r#"registered: ["block testmod:counter", "block testmod:grow", "block testmod:switch", "block_entity_type testmod:counter"]"#);
     assert_eq!(lines[1], "tick 0: ran=true above=minecraft:stone");
     assert_eq!(lines[2], "tick 1: ran=true above=minecraft:dirt");
     assert_eq!(lines[3], "tick 2: ran=true above=minecraft:dirt");
@@ -105,6 +112,8 @@ fn main() {
     assert_eq!(lines[7], r#"be tick 2: nbt={"count": Int(2)} above=minecraft:air"#);
     assert_eq!(lines[8], r#"be tick 3: nbt={"count": Int(3)} above=minecraft:stone"#);
     assert_eq!(lines[9], r#"be tick 4: nbt={"count": Int(4)} above=minecraft:stone"#);
-    assert_eq!(lines[10], "unmapped: []");
+    assert_eq!(lines[10], "click: took=true now=testmod:switch[powered=true] above=minecraft:stone");
+    assert_eq!(lines[11], "sneak click: took=false now=testmod:switch[powered=true]");
+    assert_eq!(lines[12], "unmapped: []");
     fs::remove_dir_all(&root).unwrap();
 }

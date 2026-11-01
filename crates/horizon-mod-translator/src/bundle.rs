@@ -246,9 +246,28 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
     if !blocks.is_empty() {
         let dir = content.join("data").join(&id).join("horizon/block");
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let props = crate::props::block_properties(classes);
         for b in &blocks {
-            fs::write(dir.join(format!("{b}.json")), "{ \"template\": \"minecraft:grass_block\", \"item\": true }\n")
-                .map_err(|e| e.to_string())?;
+            let mut json = String::from("{ \"template\": \"minecraft:grass_block\", \"item\": true");
+            if let Some(ps) = props.get(b.as_str()) {
+                let defs: Vec<String> = ps
+                    .iter()
+                    .filter(|p| p.name != "snowy") // the template's own
+                    .map(|p| {
+                        if p.values == ["false", "true"] {
+                            format!("\"{}\": {{ \"type\": \"boolean\" }}", p.name)
+                        } else {
+                            let vs: Vec<String> = p.values.iter().map(|v| format!("\"{v}\"")).collect();
+                            format!("\"{}\": {{ \"type\": \"enum\", \"values\": [{}] }}", p.name, vs.join(", "))
+                        }
+                    })
+                    .collect();
+                if !defs.is_empty() {
+                    json.push_str(&format!(", \"state_properties\": {{ {} }}", defs.join(", ")));
+                }
+            }
+            json.push_str(" }\n");
+            fs::write(dir.join(format!("{b}.json")), json).map_err(|e| e.to_string())?;
         }
         fs::write(
             content.join("horizon-mod.toml"),

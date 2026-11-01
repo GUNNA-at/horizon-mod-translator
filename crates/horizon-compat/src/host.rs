@@ -17,6 +17,18 @@ pub trait Host {
     fn game_time(&self) -> i64 {
         0
     }
+    /// The acting player (the one whose click or action runs the mod): sneaking.
+    fn player_sneaking(&self) -> bool {
+        false
+    }
+    /// The acting player is in creative mode.
+    fn player_creative(&self) -> bool {
+        false
+    }
+    /// The acting player's main-hand stack: item id and count.
+    fn player_held(&self) -> Option<(String, u32)> {
+        None
+    }
 }
 
 /// A world in a map, for tests and tools. Unset positions are air.
@@ -24,6 +36,9 @@ pub trait Host {
 pub struct MemoryHost {
     pub blocks: HashMap<[i32; 3], String>,
     pub time: i64,
+    pub sneaking: bool,
+    pub creative: bool,
+    pub held: Option<(String, u32)>,
 }
 
 impl Host for MemoryHost {
@@ -36,6 +51,15 @@ impl Host for MemoryHost {
     }
     fn game_time(&self) -> i64 {
         self.time
+    }
+    fn player_sneaking(&self) -> bool {
+        self.sneaking
+    }
+    fn player_creative(&self) -> bool {
+        self.creative
+    }
+    fn player_held(&self) -> Option<(String, u32)> {
+        self.held.clone()
     }
 }
 

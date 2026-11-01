@@ -89,7 +89,7 @@ fn property(rt: &mut Rt, name: &str, kind: &str) -> V {
 }
 
 /// Vanilla's `BlockStateProperties` fields: (field, property name, kind).
-fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
+pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
     let kind = match field {
         "FACING" | "HORIZONTAL_FACING" | "FACING_HOPPER" | "VERTICAL_DIRECTION" => "direction",
         "AXIS" | "HORIZONTAL_AXIS" => "axis",
@@ -409,6 +409,35 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
         }
 
+        // Players and interactions
+        (o, n) if o.starts_with("net/minecraft/") && (o.ends_with("/Player") || o.ends_with("/ServerPlayer") || o.ends_with("/LivingEntity") || o.ends_with("/Entity")) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "level" | "isLocalPlayer") => {
+            match n {
+                "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" => V::I(rt.host().is_some_and(|h| h.player_sneaking()) as i32),
+                "isCreative" => V::I(rt.host().is_some_and(|h| h.player_creative()) as i32),
+                "isSpectator" | "isLocalPlayer" => V::I(0),
+                "level" => rt.new_object("net/minecraft/server/level/ServerLevel"),
+                _ => {
+                    // The main hand (the hook's hand); the off hand is empty here.
+                    let off = name == "getItemInHand" && rt.get_field(a(1), "$ordinal").i() == 1;
+                    match rt.host().and_then(|h| h.player_held()).filter(|_| !off) {
+                        Some((id, count)) => stack(rt, &id, count as i32),
+                        None => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
+                    }
+                }
+            }
+        }
+        ("net/minecraft/world/InteractionResult" | "net/minecraft/world/ItemInteractionResult", "sidedSuccess") => {
+            let client = a(0).i() != 0;
+            result(rt, owner, if client { "SUCCESS" } else { "CONSUME" })
+        }
+        ("net/minecraft/world/InteractionResult" | "net/minecraft/world/ItemInteractionResult", "consumesAction") => {
+            let n = name_of(rt, a(0));
+            V::I(matches!(n.as_str(), "SUCCESS" | "CONSUME" | "SUCCESS_NO_ITEM_USED" | "CONSUME_PARTIAL" | "SKIP_DEFAULT_BLOCK_INTERACTION") as i32)
+        }
+        ("net/minecraft/world/phys/BlockHitResult", "getBlockPos") => rt.get_field(a(0), "$pos"),
+        ("net/minecraft/world/phys/BlockHitResult", "getDirection") => rt.get_field(a(0), "$dir"),
+        ("net/minecraft/world/phys/BlockHitResult", "getLocation") => rt.get_field(a(0), "$loc"),
+        ("net/minecraft/world/phys/BlockHitResult", "isInside") => V::I(0),
         // Block entities
         ("net/minecraft/world/level/block/entity/BlockEntity", "<init>") => {
             rt.put_field(a(0), "$type", a(1));
@@ -578,6 +607,27 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     })
 }
 
+/// An `InteractionResult` / `ItemInteractionResult` constant, by name (interned: compared by identity).
+pub fn result(rt: &mut Rt, class: &str, name: &str) -> V {
+    let (class, name) = (class.to_owned(), name.to_owned());
+    rt.intern(format!("result/{class}/{name}"), move |rt| {
+        let c: &'static str = rt.static_key(&class);
+        rt.alloc(c, Data::Str(name))
+    })
+}
+
+/// A `BlockHitResult` for a click on `pos`'s face `face` (a direction ordinal).
+pub fn hit(rt: &mut Rt, pos: [i32; 3], face: i64) -> V {
+    let h = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+    let p = crate::api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+    let d = direction(rt, face);
+    let l = vec3(rt, pos[0] as f64 + 0.5, pos[1] as f64 + 0.5, pos[2] as f64 + 0.5);
+    rt.put_field(h, "$pos", p);
+    rt.put_field(h, "$dir", d);
+    rt.put_field(h, "$loc", l);
+    h
+}
+
 /// Static fields this module owns: `BlockStateProperties.*`, `ItemStack.EMPTY`, `Items.*`.
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match owner {
@@ -592,6 +642,18 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             rt.intern("stack/empty".into(), |rt| stack(rt, "minecraft:air", 0))
         }
         "net/minecraft/world/item/Items" => item(rt, &field.to_ascii_lowercase()),
+        "net/minecraft/world/InteractionResult" | "net/minecraft/world/ItemInteractionResult" => result(rt, owner, field),
+        "net/minecraft/world/InteractionHand" => {
+            let ordinal = if field == "OFF_HAND" { 1 } else { 0 };
+            let f = field.to_owned();
+            rt.intern(format!("hand/{f}"), move |rt| {
+                let o = rt.new_object("net/minecraft/world/InteractionHand");
+                rt.put_field(o, "$ordinal", V::I(ordinal));
+                let n = rt.string(&f);
+                rt.put_field(o, "$name", n);
+                o
+            })
+        }
         "java/lang/Boolean" if field == "TRUE" || field == "FALSE" => boolean(rt, field == "TRUE"),
         "net/minecraft/core/Direction$Axis" => axis(rt, AXIS_NAMES.iter().position(|a| a.eq_ignore_ascii_case(field))? as i64),
         _ => return None,

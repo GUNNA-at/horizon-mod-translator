@@ -49,6 +49,7 @@ pub fn api_calls(classes: &[ClassFile]) -> BTreeMap<Member, usize> {
 pub mod bundle;
 pub mod codegen;
 pub mod insn;
+pub mod props;
 
 /// A registration the mod's code makes: registry and name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -154,3 +154,44 @@ pub fn block_entity_removed(rt: &mut Rt, pos: [i32; 3]) {
     rt.block_entities.remove(&pos);
     rt.block_entity_meta.remove(&pos);
 }
+
+const USE_ITEM_ON: &str = "useItemOn.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/ItemInteractionResult;";
+const USE_WITHOUT_ITEM: &str = "useWithoutItem.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/InteractionResult;";
+
+/// `right_click_block`: the acting player right clicks the mod block at `pos` on face `face` (a
+/// direction ordinal), as `ServerPlayerGameMode.useItemOn` asks the block: `useItemOn` with the held
+/// stack first, then, when it passes to the default, `useWithoutItem`. True when the block took the
+/// click (the game's own handling then stops).
+pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, face: i64) -> bool {
+    let Some((b, class)) = mod_block(rt, state) else { return false };
+    let Some(overrides) = rt.overrides else { return false };
+    let (with_item, without) = (overrides(class, USE_ITEM_ON), overrides(class, USE_WITHOUT_ITEM));
+    if !with_item && !without {
+        return false;
+    }
+    rt.with_host(host, |rt| {
+        let Some(vc) = rt.vcall else { return false };
+        let st = api::state(rt, state);
+        let l = level(rt);
+        let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+        let player = rt.new_object("net/minecraft/server/level/ServerPlayer");
+        let hit = crate::api_common::hit(rt, pos, face);
+        let mut took = None;
+        if with_item {
+            let hand = api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
+            let stack = api::call(rt, "net/minecraft/world/entity/player/Player.getItemInHand.(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;", &[player, hand]);
+            let r = vc(rt, USE_ITEM_ON, USE_ITEM_ON, &[b, stack, st, l, p, player, hand, hit]);
+            let name = rt.str_of(r).unwrap_or("PASS_TO_DEFAULT_BLOCK_INTERACTION").to_owned();
+            if name != "PASS_TO_DEFAULT_BLOCK_INTERACTION" {
+                took = Some(true); // consumed, skipped or failed: the click is the block's
+            }
+        }
+        if took.is_none() && without {
+            let r = vc(rt, USE_WITHOUT_ITEM, USE_WITHOUT_ITEM, &[b, st, l, p, player, hit]);
+            let name = rt.str_of(r).unwrap_or("PASS").to_owned();
+            took = Some(name != "PASS");
+        }
+        rt.thrown = None;
+        took.unwrap_or(false)
+    })
+}
