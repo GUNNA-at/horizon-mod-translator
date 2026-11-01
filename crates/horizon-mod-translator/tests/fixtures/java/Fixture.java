@@ -65,6 +65,16 @@ public class Fixture {
     }
     static int callerName() { return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getSimpleName().hashCode(); }
     public static int caller(int k) { return callerName() + k; }
+    interface Named { String name(); default int score() { return name().length() * 10; } }
+    interface Ranked extends Named { default int rank() { return score() + 1; } }
+    static class Plain implements Ranked { public String name() { return "plain"; } }
+    static class Loud extends Plain { public int score() { return 1000; } }
+    public static int inherited(int k) {
+        Ranked a = new Plain();
+        Ranked b = new Loud();
+        // Default methods inherited from superinterfaces, and one a subclass overrides.
+        return a.rank() * 10000 + b.rank() + k;
+    }
     public static int concat(int k) {
         String s = "k=" + k + " half=" + (k / 2.0) + " big=" + (k * 1e9) + " ok=" + (k > 2) + " c=" + (char) ('a' + k % 26) + " L=" + (long) k * 3_000_000_000L + " n=" + null;
         return s.length() * 31 + (s.equals("k=0 half=0.0 big=0.0 ok=false c=a L=0 n=null") ? 1 : 0);

@@ -175,14 +175,36 @@ impl<'a> Program<'a> {
 
     /// The mod class that implements `name desc` for an object of `class`
     /// (walking up the mod's own superclasses).
+    /// The class whose code runs for `name.desc` on an object of `class`, as the JVM resolves it:
+    /// the class and its superclasses first, then default methods of its superinterfaces.
     fn resolve(&self, class: &str, name: &str, desc: &str) -> Option<String> {
-        let mut c = self.classes.get(class)?;
-        loop {
-            if c.methods.iter().any(|m| m.name == name && m.desc == desc && m.code.is_some()) {
-                return Some(c.name.clone());
+        let start = self.classes.get(class)?;
+        let mut chain = Vec::new();
+        let mut c = Some(*start);
+        while let Some(k) = c {
+            if k.methods.iter().any(|m| m.name == name && m.desc == desc && m.code.is_some()) {
+                return Some(k.name.clone());
             }
-            c = self.classes.get(c.superclass.as_deref()?)?;
+            chain.push(k);
+            c = k.superclass.as_deref().and_then(|s| self.classes.get(s).copied());
         }
+        if name.starts_with('<') {
+            return None;
+        }
+        // Superinterfaces, breadth first: an inherited default method (never a static or private one).
+        let mut queue: std::collections::VecDeque<&str> = chain.iter().flat_map(|k| k.interfaces.iter().map(String::as_str)).collect();
+        let mut seen = BTreeSet::new();
+        while let Some(i) = queue.pop_front() {
+            if !seen.insert(i) {
+                continue;
+            }
+            let Some(k) = self.classes.get(i) else { continue };
+            if k.methods.iter().any(|m| m.name == name && m.desc == desc && m.code.is_some() && m.access & 0x000a == 0) {
+                return Some(k.name.clone());
+            }
+            queue.extend(k.interfaces.iter().map(String::as_str));
+        }
+        None
     }
 
     fn unsupported(&mut self, what: &str) {
