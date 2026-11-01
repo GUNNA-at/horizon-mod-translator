@@ -46,6 +46,7 @@ pub fn api_calls(classes: &[ClassFile]) -> BTreeMap<Member, usize> {
     m
 }
 
+pub mod bundle;
 pub mod codegen;
 pub mod insn;
 

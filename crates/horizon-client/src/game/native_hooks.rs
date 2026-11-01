@@ -338,7 +338,7 @@ pub(super) use horizon_world::level::flags;
 /// The hook points' API version. The launcher reads this line from the
 /// source it builds; keep its form.
 #[allow(dead_code)]
-pub(crate) const NATIVE_HOOKS_API: u32 = 80;
+pub(crate) const NATIVE_HOOKS_API: u32 = 81;
 
 impl GameLevel<'_> {
     /// An authoritative server committed a changed state through `Level.setBlock`.
@@ -3612,6 +3612,52 @@ impl GameLevel<'_> {
         value: &str,
     ) -> Option<BlockStateId> {
         with_property(self.registry, state, key, value)
+    }
+    /// The block state at `pos` as text, `minecraft:stone` or
+    /// `create:shaft[axis=y]` (properties sorted by name): what translated
+    /// Java mods (`horizon-compat`) read. Air where nothing is loaded. API 81.
+    pub(super) fn native_state_text(&self, pos: [i32; 3]) -> String {
+        let state = self.block_state(BlockPos::new(pos[0], pos[1], pos[2]));
+        let Some(info) = self.registry.state(state) else {
+            return "minecraft:air".to_owned();
+        };
+        let mut props: Vec<(&String, &String)> = info.properties.iter().collect();
+        props.sort();
+        if props.is_empty() {
+            return info.name.to_string();
+        }
+        let inner: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        format!("{}[{}]", info.name, inner.join(","))
+    }
+    /// Sets the block at `pos` from text as [`Self::native_state_text`] gives it
+    /// (properties not named keep the block's defaults), through
+    /// `Level.setBlock` with `flags`. False off an authoritative server, for an
+    /// unknown block or property, or no change. API 81.
+    pub(super) fn native_set_state_text(
+        &mut self,
+        ticks: &mut Ticks,
+        pos: [i32; 3],
+        text: &str,
+        flags: i32,
+    ) -> bool {
+        if !self.native_authoritative {
+            return false;
+        }
+        let (name, props) = match text.split_once('[') {
+            Some((n, rest)) => (n, rest.trim_end_matches(']')),
+            None => (text, ""),
+        };
+        let Some(mut id) = self.registry.default_state(name) else {
+            return false;
+        };
+        for (k, v) in props.split(',').filter_map(|p| p.split_once('=')) {
+            match with_property(self.registry, id, k, v) {
+                Some(next) => id = next,
+                None => return false,
+            }
+        }
+        let b = self.behaviours;
+        b.set_block(self, ticks, BlockPos::new(pos[0], pos[1], pos[2]), id, flags)
     }
     /// This level's own random (vanilla's `Level.random`): the stream
     /// `native_level_random(dimension)` hands a server hook, for a world hook

@@ -31,6 +31,24 @@ fn translate(jar: &Path, out: &Path) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("bundle") && args.len() == 3 {
+        let jar = Path::new(&args[1]);
+        let result = horizon_mod_translator::classes(jar)
+            .and_then(|c| horizon_mod_translator::bundle::write(jar, &c, Path::new(&args[2])));
+        return match result {
+            Ok((id, left)) => {
+                println!("{id}: native mod bundle in {}", args[2]);
+                for l in left {
+                    println!("  not translated: {l}");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if args.first().map(String::as_str) == Some("translate") && args.len() == 3 {
         return match translate(Path::new(&args[1]), Path::new(&args[2])) {
             Ok(()) => ExitCode::SUCCESS,
@@ -41,7 +59,7 @@ fn main() -> ExitCode {
         };
     }
     if args.first().map(String::as_str) != Some("coverage") || args.len() < 2 {
-        eprintln!("usage: horizon-mod-translator coverage <jar>... | translate <jar> <out dir>");
+        eprintln!("usage: horizon-mod-translator coverage <jar>... | translate <jar> <out dir> | bundle <jar> <out dir>");
         return ExitCode::FAILURE;
     }
     for jar in &args[1..] {

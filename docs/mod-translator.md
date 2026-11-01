@@ -57,8 +57,13 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       classes' static init, resolves DeferredRegister suppliers), lazy `<clinit>`, API for DeferredRegister,
       Level get/setBlock, BlockState, Blocks.*, builder chains. Test `--test hook`: a NeoForge-style mod
       compiled against our stubs registers `testmod:grow` and its tick changes the world; 0 unmapped.
-- [ ] Next: (1) native-mod bundle generation: a horizon-mixin bundle whose hooks call `glue` with a Host
-      over GameLevel helpers; a `horizon-native-mods` bundle per mod whose hooks
+- [x] Native-mod bundle: `horizon-mod-translator bundle <jar> <out>` writes horizon-mixin.toml (HEAD
+      injections on tick_block, random_tick), helpers implementing Host over GameLevel, and `engine/` (the
+      translated code + horizon-compat inlined as `engine::compat`: horizon-mixins allows bundle crates
+      only registry deps, no path/workspace/package). New GameLevel helpers (API 81):
+      `native_state_text`, `native_set_state_text`. horizon-mixins (pinned ddd9700) applies the test
+      bundle to a symlink-free copy of the tree: status ok. Building the modded game: (in progress)
+- [ ] Next: a `horizon-native-mods` bundle per mod whose hooks
       (tick_block, use_item_on, neighbor_changed, place_block, block_entity_tick...) call the mod's overrides
       through `vcall`; (2) grow `horizon-compat/src/api.rs` by the coverage list (Level, BlockState,
       ItemStack, CompoundTag, Vec3 first); (3) API callbacks into lambdas (DeferredRegister suppliers);
