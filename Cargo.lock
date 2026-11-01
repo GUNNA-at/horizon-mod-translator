@@ -1489,6 +1489,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-compat"
+version = "0.1.0"
+
+[[package]]
 name = "horizon-core"
 version = "0.1.0"
 dependencies = [
