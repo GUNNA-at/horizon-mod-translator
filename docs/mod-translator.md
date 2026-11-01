@@ -132,3 +132,6 @@ Pass `--game-dir`: the game folder defaults to the working directory.
 - [ ] Next: Create's kinetic network (KineticBlockEntity speed propagation) through the translated block-entity ticks;
   measure what `MISSING=1 coverage create.jar` lists on that path.
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
+- Disk: a game build with Create's engine under `--profile fast` (incremental) filled ~100 GB across a few target dirs and
+  stopped the session (ENOSPC). Build it with `CARGO_INCREMENTAL=0 CARGO_PROFILE_FAST_INCREMENTAL=false
+  CARGO_PROFILE_FAST_DEBUG=0`, keep one target dir for it, and delete stage/target dirs you no longer need.
