@@ -39,7 +39,13 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       (DeferredRegister, Registry.register, Registrate). Macaw's Fences: 180 blocks + 180 items (matches
       carry). Create: 187 blocks, 114 block entity types, 53 items.
 - [ ] Feed code registrations into the carry (blocks the data alone misses)
-- [ ] Codegen + horizon-compat first slice
+- [ ] Codegen + horizon-compat first slice. Plan: `crates/horizon-compat` = runtime (V enum: I/J/F/D/Ref,
+      object heap, static fields) + API impls keyed by mangled `owner.name.desc`; unmapped → logging stub.
+      Codegen (`horizon-mod-translator/src/codegen.rs`): one Rust fn per Java method, body = `loop { match pc }`
+      state machine over decoded insns; invokes on mod classes → generated fns with a class-name vtable;
+      invokes on API → `horizon_compat::api::call`. Hooks: wire overridden Block/BlockEntity methods to
+      native hooks (tick_block, block_entity_tick, use_item_on, neighbor_changed, update_shape, place_block).
+      Typed locals from descriptors later (perf).
 - [ ] In-game verification
 
 ## Resume
