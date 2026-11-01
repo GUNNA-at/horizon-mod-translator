@@ -25,6 +25,10 @@
 //!   `<out>/check.json`.
 //! - `port <pack> <work> [--from <folder>] [--resources <prepared>]`: every
 //!   step for the portable mods, as the launcher's "Import modpack" runs it.
+//! - `install <jar|folder|pack> <game>`: drop in one mod jar, a folder of
+//!   jars or a pack; what Horizon runs is installed into
+//!   `<game>/horizon-mods/` (and a pack's resource packs into
+//!   `<game>/resourcepacks/`), with what doesn't port listed per mod.
 //! - `upgrade-datapack <pack> <out> | --world <world>`: a 26.2 data pack
 //!   (zip or folder) with its world generation rewritten in 26.3's formats
 //!   (`docs/datapack-upgrade.md`), into the folder `<out>`, or into
@@ -38,7 +42,7 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "usage: horizon-port-pack import <pack> <work> | inventory <work> [--offline] | fetch <work> [--from <folder>] [<mod id>...] | carry <work> [--resources <prepared>] [<mod id>...] | report <work> | check <jar> <out> | port <pack> <work> [--from <folder>] [--resources <prepared>] | upgrade-datapack <pack> (<out> | --world <world>)";
+const USAGE: &str = "usage: horizon-port-pack import <pack> <work> | inventory <work> [--offline] | fetch <work> [--from <folder>] [<mod id>...] | carry <work> [--resources <prepared>] [<mod id>...] | report <work> | check <jar> <out> | port <pack> <work> [--from <folder>] [--resources <prepared>] | install <jar|folder|pack> <game dir> [--work <dir>] [--from <folder>] [--resources <prepared>] [--offline] | upgrade-datapack <pack> (<out> | --world <world>)";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -46,6 +50,7 @@ fn main() -> ExitCode {
         let from = option(&mut args, "--from")?;
         let resources = option(&mut args, "--resources")?;
         let world = option(&mut args, "--world")?;
+        let work = option(&mut args, "--work")?;
         let offline = take_flag(&mut args, "--offline");
         let path = |i: usize| args.get(i).map(Path::new).ok_or(USAGE.to_owned());
         let rest = || args.get(2..).unwrap_or_default().to_vec();
@@ -92,6 +97,33 @@ fn main() -> ExitCode {
                 pipeline::inventory(work, offline, log)?;
                 pipeline::port(work, resources.as_deref(), from.as_deref(), log)?;
                 println!("{}", work.join("coverage.md").display());
+                Ok(())
+            }
+            Some("install") => {
+                let opts = horizon_port_pack::install::Options {
+                    work: work.as_deref(),
+                    resources: resources.as_deref(),
+                    from: from.as_deref(),
+                    offline,
+                };
+                let out = horizon_port_pack::install::install(path(1)?, path(2)?, &opts, log)?;
+                let ok = out.mods.iter().filter(|m| m.path.is_some()).count();
+                println!("installed {ok} of {} mods", out.mods.len());
+                for m in &out.mods {
+                    match &m.path {
+                        Some(p) => println!("  + {} ({}) -> {}", m.mod_id, m.verdict.label(), p.display()),
+                        None => println!("  - {}: {}", m.mod_id, m.summary),
+                    }
+                }
+                for l in &out.left_off {
+                    println!("  left off: {l}");
+                }
+                for r in &out.resourcepacks {
+                    println!("  resource pack: {}", r.display());
+                }
+                if let Some(r) = &out.report {
+                    println!("{}", r.display());
+                }
                 Ok(())
             }
             Some("upgrade-datapack") => {
