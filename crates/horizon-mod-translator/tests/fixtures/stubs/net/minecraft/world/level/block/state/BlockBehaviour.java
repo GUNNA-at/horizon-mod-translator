@@ -5,5 +5,6 @@ import net.minecraft.util.RandomSource;
 public abstract class BlockBehaviour {
     public BlockBehaviour(Properties p) {}
     protected void tick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {}
+    protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {}
     public static class Properties { public static Properties of() { return null; } public Properties strength(float f) { return this; } }
 }

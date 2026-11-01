@@ -132,6 +132,27 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
     for (hook, glue) in BLOCK_HOOKS {
         fs::write(out.join(format!("{hook}.rs")), helper(&bundle_id, &krate, hook, glue).replace(&format!("\"{bundle_id}:\""), &format!("\"{id}:\""))).map_err(|e| e.to_string())?;
     }
+    // The blocks the code registers, as a content mod (a folder mod for `horizon-mods/`): the game
+    // knows them, and their random ticks reach the translated `randomTick`.
+    let content = out.join("content");
+    let blocks: Vec<String> = crate::registrations(classes)
+        .into_iter()
+        .filter(|r| r.registry == "block")
+        .map(|r| r.name.rsplit(':').next().unwrap_or(&r.name).to_owned())
+        .collect();
+    if !blocks.is_empty() {
+        let dir = content.join("data").join(&id).join("horizon/block");
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        for b in &blocks {
+            fs::write(dir.join(format!("{b}.json")), "{ \"template\": \"minecraft:grass_block\", \"item\": true }\n")
+                .map_err(|e| e.to_string())?;
+        }
+        fs::write(
+            content.join("horizon-mod.toml"),
+            format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"0.1.0\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\n"),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     let left: Vec<String> = program.unsupported.iter().map(|(k, n)| format!("{k} ({n})")).collect();
     Ok((id, left))
 }

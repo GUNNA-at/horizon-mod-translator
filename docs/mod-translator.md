@@ -62,7 +62,13 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       translated code + horizon-compat inlined as `engine::compat`: horizon-mixins allows bundle crates
       only registry deps, no path/workspace/package). New GameLevel helpers (API 81):
       `native_state_text`, `native_set_state_text`. horizon-mixins (pinned ddd9700) applies the test
-      bundle to a symlink-free copy of the tree: status ok. Building the modded game: (in progress)
+      bundle to a symlink-free copy of the tree: status ok. Modded game builds (fast profile).
+- [x] IN GAME: the bundle step also writes a content mod for code-registered blocks (template
+      grass_block for random ticks; this build has no `random_ticks` field). Test mod jar → bundle →
+      horizon-mixins apply → modded horizon-client → launched offscreen (horizon-ctl, fresh HORIZON_HOME,
+      `--dev-mod content`, resources prepared from the official 26.3 client/server jars + libraries,
+      SHA-1 checked, kept in scratch): `/setblock 0 120 0 testmod:grow`, random_tick_speed 1000 → the
+      translated randomTick/tick put stone above, then dirt. Repro: see "In-game test" below.
 - [ ] Next: a `horizon-native-mods` bundle per mod whose hooks
       (tick_block, use_item_on, neighbor_changed, place_block, block_entity_tick...) call the mod's overrides
       through `vcall`; (2) grow `horizon-compat/src/api.rs` by the coverage list (Level, BlockState,
@@ -82,3 +88,14 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
 ## Resume
 
 `git checkout mod-translator`, read this file, take the first unchecked item.
+
+## In-game test
+
+```sh
+cargo run -p horizon-mod-translator -- bundle testmod.jar out/          # out/{horizon-mixin.toml,*.rs,engine,content}
+horizon-mixins apply --workspace <symlink-free copy of this tree> --mods <dir with out/ minus content> --out stage
+(cd stage && cargo build --profile fast -p horizon-client --bin horizon-client)
+horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative --offscreen --wait \
+  --resources <prepared> --dev-mod out/content --game-dir <scratch>
+```
+Pass `--game-dir`: the game folder defaults to the working directory.

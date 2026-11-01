@@ -9,6 +9,11 @@ import net.minecraft.world.level.block.state.*;
 public class GrowBlock extends Block {
     public GrowBlock(BlockBehaviour.Properties p) { super(p); }
     @Override
+    protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
+        tick(state, level, pos, random);
+    }
+
+    @Override
     protected void tick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
         if (level.isClientSide()) return;
         BlockPos up = pos.above();
