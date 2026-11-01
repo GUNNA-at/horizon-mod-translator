@@ -115,3 +115,10 @@ horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative 
   --resources <prepared> --dev-mod out/content --game-dir <scratch>
 ```
 Pass `--game-dir`: the game folder defaults to the working directory.
+
+### 2026-11-01: Create in game
+- Game built with Create's full translated engine (`--profile fast`, 13.5 min, 170 MB binary): builds and runs.
+- Create's content mod loads (fix: blocks whose properties sort before `snowy` use the `minecraft:stone` template).
+- `/setblock` works for shaft, cogwheel, andesite_casing, gearbox and hand_crank, and the game keeps ticking.
+- [ ] Create blocks render invisible (outline only): its block models/textures don't resolve yet. Next item.
+- Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
