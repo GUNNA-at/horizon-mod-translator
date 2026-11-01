@@ -127,5 +127,8 @@ Pass `--game-dir`: the game folder defaults to the working directory.
 - [x] Every Create blockstate loads: `props.rs` follows mod-to-mod property aliases, fields inherited from vanilla
   superclasses (PipeBlock.NORTH...), and vanilla superclass definitions (RotatedPillarBlock gives axis...). Verified in
   game: fluid pipe, radial chassis, whistle extension, girder shaft, funnel, press and basin render.
-- [ ] Next: wire right_click_block → `glue::use_block` in bundles, then the kinetic network.
+- [x] Bundles inject `right_click_block` → `glue::use_block` (main hand; a click the block takes cancels the game's own use).
+  Verified in game with `horizon-ctl interact`: testmod:switch toggles powered=false→true→false and places stone above.
+- [ ] Next: Create's kinetic network (KineticBlockEntity speed propagation) through the translated block-entity ticks;
+  measure what `MISSING=1 coverage create.jar` lists on that path.
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
