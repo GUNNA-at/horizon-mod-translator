@@ -1543,6 +1543,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-mod-translator"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zip",
+]
+
+[[package]]
 name = "horizon-mods"
 version = "0.1.0"
 dependencies = [

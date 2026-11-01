@@ -31,7 +31,10 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
 - [x] `install` command: jar/folder/pack → `horizon-mods/` (commit f1dbd01). Tested on Macaw's Fences
       (150 blocks, 222 recipes) and Create (content refused: code). Not yet checked in game: needs
       `versions/26.3/26.3.jar` in the Minecraft folder (play 26.3 once) to run `horizon-prepare`.
-- [ ] Class parser + unmapped-API coverage report per jar
+- [x] Class parser + API coverage report (`cargo run -p horizon-mod-translator -- coverage <jar>`).
+      Measured: Macaw's Fences 19 classes / 89 API methods; Create 2692 classes, 24833 methods,
+      3579 distinct API methods. Top Create calls: BlockState.getValue/getBlock/setValue,
+      Direction, Level.getBlockState/getBlockEntity, ItemStack, BlockPos, Vec3, CompoundTag.
 - [ ] Registration extraction
 - [ ] Codegen + horizon-compat first slice
 - [ ] In-game verification
