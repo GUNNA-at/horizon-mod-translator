@@ -18,21 +18,21 @@ fn mod_block(rt: &Rt, state: &str) -> Option<(V, &'static str)> {
 }
 
 /// Runs `key` on the block's object with the game as host. Returns whether it ran.
-fn run(rt: &mut Rt, host: Box<dyn Host>, state: &str, key: &'static str, extra: impl FnOnce(&mut Rt) -> Vec<V>) -> (bool, Box<dyn Host>) {
-    let Some((b, class)) = mod_block(rt, state) else { return (false, host) };
+fn run(rt: &mut Rt, host: &mut dyn Host, state: &str, key: &'static str, extra: impl FnOnce(&mut Rt) -> Vec<V>) -> bool {
+    let Some((b, class)) = mod_block(rt, state) else { return false };
     if !rt.overrides.is_some_and(|o| o(class, key)) {
-        return (false, host);
+        return false;
     }
-    rt.host = Some(host);
-    let st = api::state(rt, state);
-    let mut args = vec![b, st];
-    args.extend(extra(rt));
-    if let Some(vc) = rt.vcall {
-        vc(rt, key, key, &args);
-    }
-    rt.thrown = None; // an exception escaping a hook ends that call only, as the game logs and goes on
-    let host = rt.host.take().expect("host");
-    (true, host)
+    rt.with_host(host, |rt| {
+        let st = api::state(rt, state);
+        let mut args = vec![b, st];
+        args.extend(extra(rt));
+        if let Some(vc) = rt.vcall {
+            vc(rt, key, key, &args);
+        }
+        rt.thrown = None; // an exception escaping a hook ends that call only, as the game logs and goes on
+    });
+    true
 }
 
 fn level(rt: &mut Rt) -> V {
@@ -40,7 +40,7 @@ fn level(rt: &mut Rt) -> V {
 }
 
 /// `tick_block` (a scheduled tick): `BlockBehaviour.tick`.
-pub fn tick_block(rt: &mut Rt, host: Box<dyn Host>, pos: [i32; 3], state: &str) -> (bool, Box<dyn Host>) {
+pub fn tick_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {
     run(rt, host, state, TICK, |rt| {
         let l = level(rt);
         let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
@@ -50,7 +50,7 @@ pub fn tick_block(rt: &mut Rt, host: Box<dyn Host>, pos: [i32; 3], state: &str) 
 }
 
 /// `random_tick`: `BlockBehaviour.randomTick`.
-pub fn random_tick(rt: &mut Rt, host: Box<dyn Host>, pos: [i32; 3], state: &str) -> (bool, Box<dyn Host>) {
+pub fn random_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {
     run(rt, host, state, RANDOM_TICK, |rt| {
         let l = level(rt);
         let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
@@ -60,7 +60,7 @@ pub fn random_tick(rt: &mut Rt, host: Box<dyn Host>, pos: [i32; 3], state: &str)
 }
 
 /// `neighbor_changed`: `BlockBehaviour.neighborChanged`.
-pub fn neighbor_changed(rt: &mut Rt, host: Box<dyn Host>, pos: [i32; 3], state: &str, from: [i32; 3], changed_block: &str, moved: bool) -> (bool, Box<dyn Host>) {
+pub fn neighbor_changed(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, from: [i32; 3], changed_block: &str, moved: bool) -> bool {
     let changed = changed_block.to_owned();
     run(rt, host, state, NEIGHBOR, move |rt| {
         let l = level(rt);

@@ -60,14 +60,13 @@ fn main() {
     let mut names: Vec<_> = rt.registered.keys().filter(|(_, n)| n.starts_with("testmod:")).map(|(r, n)| format!("{r} {n}")).collect();
     names.sort();
     println!("registered: {names:?}");
-    let mut host: Box<dyn Host> = Box::new(MemoryHost::default());
+    let mut host = MemoryHost::default();
     host.set_block_state([4, 64, 4], "testmod:grow");
     for step in 0..3 {
-        let (ran, h) = glue::tick_block(&mut rt, host, [4, 64, 4], "testmod:grow");
-        host = h;
+        let ran = glue::tick_block(&mut rt, &mut host, [4, 64, 4], "testmod:grow");
         println!("tick {step}: ran={ran} above={}", host.block_state([4, 65, 4]));
     }
-    let (ran, _) = glue::tick_block(&mut rt, host, [0, 0, 0], "minecraft:stone");
+    let ran = glue::tick_block(&mut rt, &mut host, [0, 0, 0], "minecraft:stone");
     println!("vanilla block: ran={ran}");
     let mut un: Vec<_> = rt.unmapped.keys().collect();
     un.sort();

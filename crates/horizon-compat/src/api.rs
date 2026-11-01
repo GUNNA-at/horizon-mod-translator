@@ -221,20 +221,20 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // The level
         (_, "getBlockState") if level => {
             let p = pos_of(rt, a(1));
-            let text = rt.host.as_ref().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
+            let text = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
             state(rt, &text)
         }
         (_, "setBlock" | "setBlockAndUpdate") if level => {
             let p = pos_of(rt, a(1));
             let text = rt.str_of(a(2)).unwrap_or("minecraft:air").to_owned();
-            V::I(rt.host.as_mut().is_some_and(|h| h.set_block_state(p, &text)) as i32)
+            V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, &text)) as i32)
         }
         (_, "removeBlock" | "destroyBlock") if level => {
             let p = pos_of(rt, a(1));
-            V::I(rt.host.as_mut().is_some_and(|h| h.set_block_state(p, "minecraft:air")) as i32)
+            V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, "minecraft:air")) as i32)
         }
-        (_, "isClientSide") if level => V::I(rt.host.as_ref().is_some_and(|h| !h.is_server()) as i32),
-        (_, "getGameTime") if level => V::J(rt.host.as_ref().map_or(0, |h| h.game_time())),
+        (_, "isClientSide") if level => V::I(rt.host().is_some_and(|h| !h.is_server()) as i32),
+        (_, "getGameTime") if level => V::J(rt.host().map_or(0, |h| h.game_time())),
 
         // Block states
         (STATE | "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase", n) => {

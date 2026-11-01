@@ -84,8 +84,8 @@ pub struct Rt {
     /// Superclasses of classes the runtime knows (the mod's own, registered by
     /// generated code, and the JDK's exceptions).
     pub supers: HashMap<&'static str, &'static str>,
-    /// The game, while a hook runs translated code.
-    pub host: Option<Box<dyn host::Host>>,
+    /// The game, only while a hook runs translated code (see [`Rt::with_host`]).
+    host: Option<std::ptr::NonNull<dyn host::Host>>,
     /// The generated `vcall` and `lambda_call`, so API code can call back into the mod.
     pub vcall: Option<fn(&mut Rt, &'static str, &'static str, &[V]) -> V>,
     pub lambda_call: Option<fn(&mut Rt, &str, &[V]) -> Option<V>>,
@@ -123,6 +123,27 @@ impl Default for Rt {
 }
 
 impl Rt {
+    /// Runs `f` with `host` as the game. The host is borrowed for exactly this call.
+    pub fn with_host<R>(&mut self, host: &mut dyn host::Host, f: impl FnOnce(&mut Rt) -> R) -> R {
+        // SAFETY: the pointer lives in `self.host` only until `f` returns, while `host` is
+        // mutably borrowed by this call; nothing else can reach it, and it is cleared after.
+        let erased: &mut (dyn host::Host + 'static) = unsafe { std::mem::transmute(host) };
+        let previous = self.host.replace(std::ptr::NonNull::from(erased));
+        let r = f(self);
+        self.host = previous;
+        r
+    }
+
+    pub fn host(&self) -> Option<&dyn host::Host> {
+        // SAFETY: see `with_host`: set only while the borrowed host is alive.
+        self.host.map(|p| unsafe { &*p.as_ptr() })
+    }
+
+    pub fn host_mut(&mut self) -> Option<&mut dyn host::Host> {
+        // SAFETY: as above; `&mut self` makes this the only access.
+        self.host.map(|p| unsafe { &mut *p.as_ptr() })
+    }
+
     /// Calls a functional-interface method on `target` (a lambda or a mod object).
     pub fn call_functional(&mut self, key: &'static str, target: V, args: &[V]) -> V {
         let mut all = vec![target];
