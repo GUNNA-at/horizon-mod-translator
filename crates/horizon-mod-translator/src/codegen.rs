@@ -410,12 +410,12 @@ impl<'a> Program<'a> {
         let mut slot = 0usize;
         let mut ai = 0usize;
         if !is_static {
-            let _ = writeln!(s, "    l[0] = args[0];");
+            let _ = writeln!(s, "    l[0] = args.first().copied().unwrap_or_default();");
             slot = 1;
             ai = 1;
         }
         for k in arg_kinds(desc) {
-            let _ = writeln!(s, "    l[{slot}] = args[{ai}];");
+            let _ = writeln!(s, "    l[{slot}] = args.get({ai}).copied().unwrap_or_default();");
             slot += if k == 'J' || k == 'D' { 2 } else { 1 };
             ai += 1;
         }
