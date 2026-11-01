@@ -52,7 +52,13 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       compiles clean in 9 s. Create: 1.16M lines in 69 files; unsupported: record ObjectMethods (487),
       SwitchBootstraps.typeSwitch (1), multianewarray (2). Create's translated crate compiles with 0 errors (debug, 136 s).
 - [x] Records (ObjectMethods equals/hashCode/toString) and multianewarray; differential 65 results.
-- [ ] Next: (1) wire generated code to Horizon: a `horizon-native-mods` bundle per mod whose hooks
+- [x] Runtime ↔ game: `horizon_compat::host::Host` (MemoryHost for tests), `glue::{tick_block, random_tick,
+      neighbor_changed}`, generated `init` (callbacks, `overrides` table) and `start` (runs registering
+      classes' static init, resolves DeferredRegister suppliers), lazy `<clinit>`, API for DeferredRegister,
+      Level get/setBlock, BlockState, Blocks.*, builder chains. Test `--test hook`: a NeoForge-style mod
+      compiled against our stubs registers `testmod:grow` and its tick changes the world; 0 unmapped.
+- [ ] Next: (1) native-mod bundle generation: a horizon-mixin bundle whose hooks call `glue` with a Host
+      over GameLevel helpers; a `horizon-native-mods` bundle per mod whose hooks
       (tick_block, use_item_on, neighbor_changed, place_block, block_entity_tick...) call the mod's overrides
       through `vcall`; (2) grow `horizon-compat/src/api.rs` by the coverage list (Level, BlockState,
       ItemStack, CompoundTag, Vec3 first); (3) API callbacks into lambdas (DeferredRegister suppliers);

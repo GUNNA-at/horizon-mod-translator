@@ -114,11 +114,154 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             let ax = AXIS[native(rt, a(0))[0].clamp(0, 5) as usize];
             rt.alloc("net/minecraft/core/Direction$Axis", Data::Native("Axis", [ax as i64, 0, 0, 0]))
         }
-        _ => {
-            *rt.unmapped.entry(key).or_insert(0) += 1;
-            V::Void
-        }
+        _ => match world(rt, key, args) {
+            Some(v) => v,
+            None => {
+                // Builder chains (`Properties.of().strength(1f).noOcclusion()`): a method
+                // returning its own class hands back the receiver.
+                if let Some((owner, rest)) = key.split_once('.')
+                    && rest.ends_with(&format!(")L{owner};"))
+                {
+                    // A static factory (`Properties.of()`) makes one; a chained call returns its receiver.
+                    return if a(0).r() != 0 && rt.class_of(a(0)) == owner { a(0) } else { rt.new_object(owner) };
+                }
+                *rt.unmapped.entry(key).or_insert(0) += 1;
+                V::Void
+            }
+        },
     }
+}
+
+const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
+const BLOCK: &str = "net/minecraft/world/level/block/Block";
+
+/// A block state value (its text, `minecraft:stone` or `create:shaft[axis=y]`).
+pub fn state(rt: &mut Rt, text: &str) -> V {
+    rt.alloc(STATE, Data::Str(text.to_owned()))
+}
+
+/// A block value: the mod's own Block object when it registered one by that name.
+pub fn block(rt: &mut Rt, name: &str) -> V {
+    if let Some(v) = rt.registered.get(&("block".to_owned(), name.to_owned())) {
+        return *v;
+    }
+    // Interned, so `state.getBlock() == Blocks.STONE` holds as in Java.
+    let v = rt.alloc(BLOCK, Data::Str(name.to_owned()));
+    rt.registered.insert(("block".to_owned(), name.to_owned()), v);
+    v
+}
+
+/// The name of a block value (vanilla or the mod's).
+fn block_name(rt: &Rt, b: V) -> String {
+    rt.str_of(b).map(str::to_owned).or_else(|| rt.registered_name(b, "block").map(str::to_owned)).unwrap_or_default()
+}
+
+fn pos_of(rt: &Rt, v: V) -> [i32; 3] {
+    let h = native(rt, v);
+    [h[0] as i32, h[1] as i32, h[2] as i32]
+}
+
+fn qualified(rt: &Rt, name: &str) -> String {
+    if name.contains(':') { name.to_owned() } else { format!("{}:{name}", rt.namespace) }
+}
+
+/// Registration, the level and block states: the API that reaches the game.
+fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let (owner, rest) = key.split_once('.')?;
+    let (name, desc) = rest.split_once('.')?;
+    let level = owner.starts_with("net/minecraft/") && (owner.ends_with("Level") || owner.ends_with("LevelAccessor") || owner.ends_with("LevelReader") || owner.ends_with("BlockGetter") || owner.ends_with("LevelWriter"));
+    Some(match (owner, name) {
+        // NeoForge registration
+        ("net/neoforged/neoforge/registries/DeferredRegister", "create") => {
+            let registry = rt.str_of(a(0)).unwrap_or("unknown").to_owned();
+            let ns = rt.str_of(a(1)).unwrap_or("").to_owned();
+            if rt.namespace.is_empty() {
+                rt.namespace = ns;
+            }
+            let r = rt.new_object(owner);
+            let reg = rt.string(&registry);
+            rt.put_field(r, "$registry", reg);
+            r
+        }
+        ("net/neoforged/neoforge/registries/DeferredRegister", "createBlocks" | "createItems") => {
+            let ns = rt.str_of(a(0)).unwrap_or("").to_owned();
+            if rt.namespace.is_empty() {
+                rt.namespace = ns;
+            }
+            let kind = if name == "createBlocks" { "block" } else { "item" };
+            let r = rt.new_object(owner);
+            let reg = rt.string(kind);
+            rt.put_field(r, "$registry", reg);
+            r
+        }
+        (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") && desc.starts_with("(Ljava/lang/String;") => {
+            let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("unknown").to_owned();
+            let id = qualified(rt, rt.str_of(a(1)).unwrap_or(""));
+            rt.suppliers.push((registry, id.clone(), a(2)));
+            holder(rt, &id)
+        }
+        (o, "registerBlock" | "registerItem") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
+            let registry = if name == "registerBlock" { "block" } else { "item" };
+            let id = qualified(rt, rt.str_of(a(1)).unwrap_or(""));
+            let props = if desc.contains("Properties;)") || args.len() > 3 { a(3) } else { V::NULL };
+            let apply = rt.lambda("compat:apply", vec![a(2), props]);
+            rt.suppliers.push((registry.into(), id.clone(), apply));
+            holder(rt, &id)
+        }
+        (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => V::Void, // (IEventBus)
+        (o, "get" | "value") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
+            let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned();
+            if rt.registered.keys().all(|(_, n)| *n != id) {
+                rt.resolve_registrations();
+            }
+            rt.registered.iter().find(|((_, n), _)| *n == id).map(|(_, v)| *v).unwrap_or(V::NULL)
+        }
+
+        // The level
+        (_, "getBlockState") if level => {
+            let p = pos_of(rt, a(1));
+            let text = rt.host.as_ref().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
+            state(rt, &text)
+        }
+        (_, "setBlock" | "setBlockAndUpdate") if level => {
+            let p = pos_of(rt, a(1));
+            let text = rt.str_of(a(2)).unwrap_or("minecraft:air").to_owned();
+            V::I(rt.host.as_mut().is_some_and(|h| h.set_block_state(p, &text)) as i32)
+        }
+        (_, "removeBlock" | "destroyBlock") if level => {
+            let p = pos_of(rt, a(1));
+            V::I(rt.host.as_mut().is_some_and(|h| h.set_block_state(p, "minecraft:air")) as i32)
+        }
+        (_, "isClientSide") if level => V::I(rt.host.as_ref().is_some_and(|h| !h.is_server()) as i32),
+        (_, "getGameTime") if level => V::J(rt.host.as_ref().map_or(0, |h| h.game_time())),
+
+        // Block states
+        (STATE | "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase", n) => {
+            let text = rt.str_of(a(0)).unwrap_or("minecraft:air").to_owned();
+            let (b, _) = crate::host::split_state(&text);
+            match n {
+                "getBlock" => block(rt, &b.to_owned()),
+                "isAir" => V::I(matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") as i32),
+                "is" if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") => V::I((block_name(rt, a(1)) == b) as i32),
+                "equals" => V::I((rt.str_of(a(1)) == Some(text.as_str())) as i32),
+                _ => return None,
+            }
+        }
+        (BLOCK, "defaultBlockState") | (_, "defaultBlockState") => {
+            let n = block_name(rt, a(0));
+            state(rt, &n)
+        }
+        (BLOCK, "<init>") => V::Void,
+        _ => return None,
+    })
+}
+
+fn holder(rt: &mut Rt, id: &str) -> V {
+    let h = rt.new_object("net/neoforged/neoforge/registries/DeferredHolder");
+    let s = rt.string(id);
+    rt.put_field(h, "$id", s);
+    h
 }
 
 fn offset(rt: &mut Rt, p: V, d: [i64; 3], n: i64) -> V {
@@ -137,6 +280,14 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         "net/minecraft/core/Direction.WEST" => dir(rt, 4),
         "net/minecraft/core/Direction.EAST" => dir(rt, 5),
         "net/minecraft/core/BlockPos.ZERO" => block_pos(rt, 0, 0, 0),
+        k if k.starts_with("net/minecraft/core/registries/Registries.") => {
+            let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            rt.string(&n)
+        }
+        k if k.starts_with("net/minecraft/world/level/block/Blocks.") => {
+            let n = format!("minecraft:{}", k.rsplit('.').next().unwrap_or("").to_ascii_lowercase());
+            block(rt, &n)
+        }
         _ => {
             *rt.unmapped.entry(key).or_insert(0) += 1;
             V::NULL

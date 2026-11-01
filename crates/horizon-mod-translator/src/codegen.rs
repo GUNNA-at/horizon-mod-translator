@@ -172,13 +172,21 @@ impl<'a> Program<'a> {
     }
 
     fn tables(&self, classes: &[&ClassFile]) -> String {
-        let mut out = String::from("/// Registers the mod's class hierarchy with the runtime. Call once, before anything else.\npub fn init(rt: &mut Rt) {\n");
+        let mut out = String::from("/// Registers the mod's class hierarchy and callbacks with the runtime. Call once, before anything else.\npub fn init(rt: &mut Rt) {\n    rt.vcall = Some(vcall);\n    rt.lambda_call = Some(lambda_call);\n    rt.overrides = Some(overrides);\n");
         for c in classes {
             if let Some(sup) = &c.superclass {
                 let _ = writeln!(out, "    rt.supers.insert({:?}, {sup:?});", c.name);
             }
         }
         out.push_str("}\n\n");
+        // Mod loading's registration phase: classes holding registers initialise, then suppliers resolve.
+        out.push_str("/// Runs the mod's registrations, as NeoForge's loading does. Call after `init`.\npub fn start(rt: &mut Rt) {\n");
+        for c in classes {
+            if c.fields.iter().any(|f| f.access & 0x0008 != 0 && f.desc.contains("neoforged/neoforge/registries/DeferredRegister")) {
+                let _ = writeln!(out, "    {}", self.ensure(&c.name).replace("return V::Void;", "return;"));
+            }
+        }
+        out.push_str("    rt.resolve_registrations();\n}\n\n");
         out.push_str(&self.dispatch());
         out.push_str(&self.lambda_table());
         out
@@ -199,15 +207,7 @@ impl<'a> Program<'a> {
                 }
             }
         }
-        out.push_str("/// Registers the mod's class hierarchy with the runtime. Call once, before anything else.\npub fn init(rt: &mut Rt) {\n");
-        for c in &classes {
-            if let Some(sup) = &c.superclass {
-                let _ = writeln!(out, "    rt.supers.insert({:?}, {sup:?});", c.name);
-            }
-        }
-        out.push_str("}\n\n");
-        out.push_str(&self.dispatch());
-        out.push_str(&self.lambda_table());
+        out.push_str(&self.tables(&classes));
         out
     }
 
@@ -239,6 +239,16 @@ impl<'a> Program<'a> {
                 }
             }
         }
+        let mut table = String::from("/// Whether a mod class implements `key` (`name.desc`) itself or through a mod superclass.\npub fn overrides(class: &str, key: &str) -> bool {\n    matches!((class, key),\n        (\"\", \"\")");
+        for class in self.classes.keys() {
+            for (name, desc) in &keys {
+                if self.resolve(class, name, desc).is_some() {
+                    let _ = write!(table, "\n        | ({class:?}, {:?})", format!("{name}.{desc}"));
+                }
+            }
+        }
+        table.push_str(")\n}\n\n");
+        s.insert_str(0, &table);
         s.push_str("        _ => match lambda_call(rt, class, args) {\n            Some(r) => r,\n            None => api::call(rt, owner_key, args),\n        },\n    }\n}\n");
         s
     }
@@ -550,7 +560,8 @@ impl<'a> Program<'a> {
             0xba => self.indy(c, idx as u16, &go),
             0xbb => {
                 let class = c.class_name(idx as u16).unwrap_or_default();
-                format!("let v = rt.new_object({class:?}); s.push(v); {go}")
+                let init = if class != c.name { self.ensure(&class) } else { String::new() };
+                format!("{init}let v = rt.new_object({class:?}); s.push(v); {go}")
             }
             0xbc => {
                 let zero = match idx {
@@ -594,14 +605,27 @@ impl<'a> Program<'a> {
         }
     }
 
+    /// Runs `class`'s static initialiser first if it has one and hasn't run (JVMS 5.5).
+    fn ensure(&self, class: &str) -> String {
+        let has = self.classes.get(class).is_some_and(|c| c.methods.iter().any(|m| m.name == "<clinit>"));
+        if !has {
+            return String::new();
+        }
+        format!(
+            "if rt.initialized.insert({class:?}) {{ {}(rt, &[]); if rt.thrown.is_some() {{ return V::Void; }} }} ",
+            fn_name(class, "<clinit>", "()V")
+        )
+    }
+
     fn field(&mut self, c: &ClassFile, op: u8, idx: u16, go: &str) -> String {
         let Some(m) = c.member(idx) else { return go.to_owned() };
+        let init = if matches!(op, 0xb2 | 0xb3) && m.owner != c.name { self.ensure(&m.owner) } else { String::new() };
         let pop = "s.pop().unwrap_or_default()";
         let skey = format!("{}.{}", m.owner, m.name);
         match op {
-            0xb2 if self.own(&m.owner) => format!("let v = rt.statics.get({skey:?}).copied().unwrap_or_default(); s.push(v); {go}"),
+            0xb2 if self.own(&m.owner) => format!("{init}let v = rt.statics.get({skey:?}).copied().unwrap_or_default(); s.push(v); {go}"),
             0xb2 => format!("let v = api::get_static(rt, {skey:?}); s.push(v); {go}"),
-            0xb3 => format!("let v = {pop}; rt.statics.insert({skey:?}, v); {go}"),
+            0xb3 => format!("{init}let v = {pop}; rt.statics.insert({skey:?}, v); {go}"),
             0xb4 => format!("let o = {pop}; s.push(rt.get_field(o, {:?})); {go}", m.name),
             _ => format!("let v = {pop}; let o = {pop}; rt.put_field(o, {:?}, v); {go}", m.name),
         }
@@ -611,7 +635,8 @@ impl<'a> Program<'a> {
         let Some(m) = c.member(idx) else { return go.to_owned() };
         let n = arg_kinds(&m.desc).len() + usize::from(op != 0xb8);
         let key = self.key(&m);
-        let collect = format!("let at = s.len().saturating_sub({n}); let args: Vec<V> = s.split_off(at);");
+        let init = if op == 0xb8 && m.owner != c.name { self.ensure(&m.owner) } else { String::new() };
+        let collect = format!("{init}let at = s.len().saturating_sub({n}); let args: Vec<V> = s.split_off(at);");
         let push = if returns_value(&m.desc) { "s.push(r);" } else { "" };
         let call = match op {
             // static, or a direct (super/constructor/private) call

@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 
 pub mod api;
+pub mod glue;
+pub mod host;
 
 /// A JVM value. References index [`Rt::heap`]; 0 is null.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -70,7 +72,6 @@ pub struct Object {
 }
 
 /// The translated mod's runtime state.
-#[derive(Default)]
 pub struct Rt {
     pub heap: Vec<Object>,
     pub statics: HashMap<&'static str, V>,
@@ -83,9 +84,83 @@ pub struct Rt {
     /// Superclasses of classes the runtime knows (the mod's own, registered by
     /// generated code, and the JDK's exceptions).
     pub supers: HashMap<&'static str, &'static str>,
+    /// The game, while a hook runs translated code.
+    pub host: Option<Box<dyn host::Host>>,
+    /// The generated `vcall` and `lambda_call`, so API code can call back into the mod.
+    pub vcall: Option<fn(&mut Rt, &'static str, &'static str, &[V]) -> V>,
+    pub lambda_call: Option<fn(&mut Rt, &str, &[V]) -> Option<V>>,
+    /// Whether a mod class implements a method itself (`name.desc`), so glue calls only real overrides.
+    pub overrides: Option<fn(&str, &str) -> bool>,
+    /// Registered objects by registry and name (`block`, `create:shaft` → the mod's Block).
+    pub registered: HashMap<(String, String), V>,
+    /// Suppliers registered and not yet resolved.
+    pub suppliers: Vec<(String, String, V)>,
+    /// The mod's namespace (its mod id), for names registered without one.
+    pub namespace: String,
+    /// Classes whose static initialiser ran.
+    pub initialized: std::collections::HashSet<&'static str>,
+}
+
+impl Default for Rt {
+    fn default() -> Rt {
+        Rt {
+            heap: Vec::new(),
+            statics: HashMap::new(),
+            strings: HashMap::new(),
+            unmapped: HashMap::new(),
+            thrown: None,
+            supers: HashMap::new(),
+            host: None,
+            vcall: None,
+            lambda_call: None,
+            overrides: None,
+            registered: HashMap::new(),
+            suppliers: Vec::new(),
+            namespace: String::new(),
+            initialized: Default::default(),
+        }
+    }
 }
 
 impl Rt {
+    /// Calls a functional-interface method on `target` (a lambda or a mod object).
+    pub fn call_functional(&mut self, key: &'static str, target: V, args: &[V]) -> V {
+        let mut all = vec![target];
+        all.extend_from_slice(args);
+        let class = self.class_of(target);
+        if class == "compat:apply" {
+            // `Function.apply(captured[1])` on captured[0]: a registerBlock factory with its properties.
+            let c = self.captured(target);
+            let (f, arg) = (c.first().copied().unwrap_or_default(), c.get(1).copied().unwrap_or_default());
+            return self.call_functional("java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", f, &[arg]);
+        }
+        if let Some(lc) = self.lambda_call
+            && let Some(r) = lc(self, class, &all)
+        {
+            return r;
+        }
+        match self.vcall {
+            Some(vc) => vc(self, key, key, &all),
+            None => V::Void,
+        }
+    }
+
+    /// Resolves registered suppliers (NeoForge does this when registries fire), in order.
+    pub fn resolve_registrations(&mut self) {
+        let pending = std::mem::take(&mut self.suppliers);
+        for (registry, name, supplier) in pending {
+            let obj = self.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", supplier, &[]);
+            if obj.r() != 0 {
+                self.registered.insert((registry, name), obj);
+            }
+        }
+    }
+
+    /// The registered name of a mod object (`create:shaft`), if it is one.
+    pub fn registered_name(&self, obj: V, registry: &str) -> Option<&str> {
+        self.registered.iter().find(|((r, _), v)| r == registry && **v == obj).map(|((_, n), _)| n.as_str())
+    }
+
     pub fn new() -> Rt {
         let mut rt = Rt::default();
         rt.heap.push(Object { class: "null", data: Data::Array(Vec::new()) });
