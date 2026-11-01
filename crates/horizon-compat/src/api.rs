@@ -166,13 +166,32 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             let ax = AXIS[native(rt, a(0))[0].clamp(0, 5) as usize];
             crate::api_common::axis(rt, ax as i64)
         }
+        // Caller-sensitive code: the translator records the calling class before such calls.
+        "java/lang/StackWalker.getInstance.()Ljava/lang/StackWalker;" | "java/lang/StackWalker.getInstance.(Ljava/lang/StackWalker$Option;)Ljava/lang/StackWalker;" => {
+            rt.new_object("java/lang/StackWalker")
+        }
+        "java/lang/StackWalker.getCallerClass.()Ljava/lang/Class;" => {
+            let c = rt.caller_class;
+            rt.alloc("java/lang/Class", Data::Str(c.into()))
+        }
+        "java/lang/Class.getName.()Ljava/lang/String;" | "java/lang/Class.getTypeName.()Ljava/lang/String;" | "java/lang/Class.getPackageName.()Ljava/lang/String;" | "java/lang/Class.getSimpleName.()Ljava/lang/String;" => {
+            let n = rt.str_of(a(0)).unwrap_or("").replace('/', ".");
+            let out = if key.contains("getPackageName") {
+                n.rsplit_once('.').map_or(String::new(), |(p, _)| p.to_owned())
+            } else if key.contains("getSimpleName") {
+                n.rsplit(['.', '$']).next().unwrap_or("").to_owned()
+            } else {
+                n
+            };
+            rt.string(&out)
+        }
         k if exception_class(k) && k.contains(".<init>.(Ljava/lang/String;") => {
             rt.put_field(a(0), "message", a(1));
             V::Void
         }
         k if exception_class(k) && k.contains(".<init>.") => V::Void,
         k if exception_class(k) && (k.contains(".getMessage.") || k.contains(".getLocalizedMessage.")) => rt.get_field(a(0), "message"),
-        _ => match crate::neo::call(rt, key, args).or_else(|| crate::jutil::call(rt, key, args)).or_else(|| world(rt, key, args)) {
+        _ => match crate::neo::call(rt, key, args).or_else(|| crate::jlang::call(rt, key, args)).or_else(|| crate::jutil::call(rt, key, args)).or_else(|| world(rt, key, args)) {
             Some(v) => v,
             None => {
                 // Builder chains (`Properties.of().strength(1f).noOcclusion()`): a method

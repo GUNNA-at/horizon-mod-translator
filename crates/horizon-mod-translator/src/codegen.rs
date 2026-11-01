@@ -115,6 +115,9 @@ pub struct Program<'a> {
     lambdas: BTreeMap<String, (u8, Member)>,
     /// The mod's id: picks its `@Mod` class among several (libraries bundled in its jar have theirs).
     pub mod_id: Option<String>,
+    /// Methods (`name.desc`) that ask who called them (`StackWalker.getCallerClass`): calls to
+    /// them record the calling class first. Everything else keeps no call stack.
+    caller_sensitive: BTreeSet<String>,
 }
 
 impl<'a> Program<'a> {
@@ -125,6 +128,18 @@ impl<'a> Program<'a> {
             unsupported: BTreeMap::new(),
             lambdas: BTreeMap::new(),
             mod_id: None,
+            caller_sensitive: classes
+                .iter()
+                .flat_map(|c| c.methods.iter().map(move |m| (c, m)))
+                .filter(|(c, m)| {
+                    m.code.is_some()
+                        && c.called_by(m).iter().any(|k| {
+                            (k.owner == "java/lang/StackWalker" && k.name == "getCallerClass")
+                                || (k.owner.ends_with("/Reflection") && k.name == "getCallerClass")
+                        })
+                })
+                .map(|(_, m)| format!("{}.{}", m.name, m.desc))
+                .collect(),
         }
     }
 
@@ -700,7 +715,12 @@ impl<'a> Program<'a> {
         let n = arg_kinds(&m.desc).len() + usize::from(op != 0xb8);
         let key = self.key(&m);
         let init = if op == 0xb8 && m.owner != c.name { self.ensure(&m.owner) } else { String::new() };
-        let collect = format!("{init}let at = s.len().saturating_sub({n}); let args: Vec<V> = s.split_off(at);");
+        let caller = if self.caller_sensitive.contains(&format!("{}.{}", m.name, m.desc)) {
+            format!("rt.caller_class = {:?}; ", c.name)
+        } else {
+            String::new()
+        };
+        let collect = format!("{init}{caller}let at = s.len().saturating_sub({n}); let args: Vec<V> = s.split_off(at);");
         let push = if returns_value(&m.desc) { "s.push(r);" } else { "" };
         let call = match op {
             // static, or a direct (super/constructor/private) call

@@ -262,6 +262,21 @@ impl ClassFile {
             .filter_map(|i| self.member(i))
             .collect()
     }
+
+    /// The methods one of this class's methods calls (its invoke instructions' targets).
+    pub fn called_by(&self, m: &Method) -> Vec<Member> {
+        let Some(code) = &m.code else { return Vec::new() };
+        crate::insn::decode(&code.bytes)
+            .unwrap_or_default()
+            .iter()
+            .filter(|i| matches!(i.op, 0xb6..=0xb9))
+            .filter_map(|i| match i.arg {
+                crate::insn::Operand::Int(idx) => self.member(idx as u16),
+                crate::insn::Operand::IndexCount(idx, _) => self.member(idx),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 fn skip_attributes(r: &mut Reader) -> Result<(), String> {

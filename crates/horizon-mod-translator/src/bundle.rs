@@ -25,7 +25,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 
 /// horizon-compat's sources, carried in each bundle as its own sibling crate: bundle crates may
 /// depend only on Horizon's Cargo.lock registry crates and on siblings (horizon-mixins' rule).
-const COMPAT: [(&str, &str); 8] = [
+const COMPAT: [(&str, &str); 9] = [
     ("lib.rs", include_str!("../../horizon-compat/src/lib.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
     ("api_common.rs", include_str!("../../horizon-compat/src/api_common.rs")),
@@ -34,6 +34,7 @@ const COMPAT: [(&str, &str); 8] = [
     ("glue.rs", include_str!("../../horizon-compat/src/glue.rs")),
     ("jutil.rs", include_str!("../../horizon-compat/src/jutil.rs")),
     ("neo.rs", include_str!("../../horizon-compat/src/neo.rs")),
+    ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
 ];
 
 /// Block hooks the bundle wires: (hook name, glue function).

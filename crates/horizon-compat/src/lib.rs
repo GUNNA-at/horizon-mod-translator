@@ -8,6 +8,7 @@ pub mod api;
 pub mod api_common;
 pub mod glue;
 pub mod host;
+pub mod jlang;
 pub mod jutil;
 pub mod neo;
 pub mod nbt;
@@ -121,6 +122,8 @@ pub struct Rt {
     pub listeners: Vec<(String, V)>,
     /// Each lambda object's functional interface and its method name.
     pub lambda_info: HashMap<u32, (&'static str, &'static str)>,
+    /// The class of the last call into a caller-sensitive method (`StackWalker.getCallerClass`).
+    pub caller_class: &'static str,
     /// Registries the mod makes (`ResourceKey.createRegistryKey`), fired after vanilla's.
     pub custom_registries: Vec<String>,
     /// The mod's live block entities, by position.
@@ -154,6 +157,7 @@ impl Default for Rt {
             iter_sources: HashMap::new(),
             listeners: Vec::new(),
             lambda_info: HashMap::new(),
+            caller_class: "java/lang/Object",
             custom_registries: Vec::new(),
             block_entities: HashMap::new(),
             block_entity_meta: HashMap::new(),
