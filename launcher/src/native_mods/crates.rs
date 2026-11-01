@@ -8,6 +8,10 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+/// Horizon's own crates a mod's crate may name with `{ workspace = true }`: the runtime of
+/// translated Java mods (docs/mod-translator.md). Each is in the root `[workspace.dependencies]`.
+pub(super) const HORIZON_CRATES: [&str; 1] = ["horizon-compat"];
+
 /// Where horizon-mixins stages the mods' crates, in the workspace it writes.
 pub(super) const DIR: &str = "native-crates";
 /// The post-build steps it found, in mod order.
@@ -117,6 +121,12 @@ pub(super) fn wanted(stage: &Path) -> Result<Vec<Wanted>, String> {
                 };
                 validate_sibling_path(mod_id, manifest, path, package, &staged_manifests)?;
                 continue;
+            }
+            if dep.get("workspace").and_then(|v| v.as_bool()) == Some(true)
+                && HORIZON_CRATES.contains(&key.as_str())
+                && dep.get("package").is_none()
+            {
+                continue; // Horizon's own crate, already in its workspace
             }
             out.push(Wanted {
                 mod_id: mod_id.to_owned(),
@@ -660,6 +670,16 @@ checksum = "def"
             fs::create_dir_all(sibling.join("Cargo.toml")).unwrap();
             "local = { path = \"../not_a_crate\" }".into()
         });
+    }
+
+    #[test]
+    fn horizon_compat_from_the_workspace_is_allowed_and_others_are_not() {
+        let stage = StageFixture::new();
+        stage.add_crate("translated", "engine", "translated-engine", "[dependencies]\nhorizon-compat = { workspace = true }\n");
+        assert_eq!(wanted(stage.root()), Ok(Vec::new()));
+        let stage = StageFixture::new();
+        stage.add_crate("translated", "engine", "translated-engine", "[dependencies]\nhorizon-client = { workspace = true }\n");
+        assert!(wanted(stage.root()).is_ok_and(|w| w.iter().any(|w| w.name == "horizon-client")));
     }
 
     #[test]

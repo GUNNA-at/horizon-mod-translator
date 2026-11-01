@@ -40,6 +40,11 @@ members = [
 ]
 resolver = "2"
 
+[workspace.dependencies]
+# Horizon crates a native mod's own crate may use with `{ workspace = true }`
+# (launcher/src/native_mods/crates.rs `HORIZON_CRATES`).
+horizon-compat = { path = "crates/horizon-compat" }
+
 [workspace.package]
 edition = "2024"
 license = "MIT"
