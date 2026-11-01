@@ -269,6 +269,29 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
             json.push_str(" }\n");
             fs::write(dir.join(format!("{b}.json")), json).map_err(|e| e.to_string())?;
         }
+        // The mod's own look: its assets (blockstates, models, textures, lang) from the jar.
+        if let Ok(f) = fs::File::open(jar)
+            && let Ok(mut zip) = zip::ZipArchive::new(f)
+        {
+            let prefix = format!("assets/{id}/");
+            for i in 0..zip.len() {
+                let Ok(mut e) = zip.by_index(i) else { continue };
+                let Some(name) = e.enclosed_name() else { continue };
+                let path = name.to_string_lossy().into_owned();
+                let resource = [".json", ".png", ".mcmeta", ".ogg"].iter().any(|x| path.ends_with(x));
+                if !e.is_file() || !path.starts_with(&prefix) || !resource {
+                    continue;
+                }
+                let target = content.join(&name);
+                if let Some(parent) = target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let mut bytes = Vec::new();
+                if e.read_to_end(&mut bytes).is_ok() {
+                    let _ = fs::write(target, bytes);
+                }
+            }
+        }
         fs::write(
             content.join("horizon-mod.toml"),
             format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"0.1.0\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\n"),
