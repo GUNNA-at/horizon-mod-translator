@@ -8,6 +8,7 @@ pub mod api;
 pub mod api_common;
 pub mod glue;
 pub mod host;
+pub mod jutil;
 pub mod nbt;
 
 /// A JVM value. References index [`Rt::heap`]; 0 is null.
@@ -67,6 +68,14 @@ pub enum Data {
     Map(HashMap<String, V>),
     /// An API object Horizon owns, by kind and handle (a block state id, a position...).
     Native(&'static str, [i64; 4]),
+    /// A `java.util` list (also deques and queues, and a map entry's key and value).
+    List(Vec<V>),
+    /// A `java.util` map or set ([`jutil::Table`]).
+    Table(jutil::Table),
+    /// An iterator: the items it walks and the next position.
+    Iter(Vec<V>, usize),
+    /// A stream's elements (streams here are eager).
+    Stream(Vec<V>),
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +114,8 @@ pub struct Rt {
     pub initialized: std::collections::HashSet<&'static str>,
     /// Values Java compares by identity, one object each (see `api_common`).
     pub interned: HashMap<String, V>,
+    /// The collection an iterator, key set or map entry came from, for `remove()` and `setValue`.
+    pub iter_sources: HashMap<u32, V>,
     /// The mod's live block entities, by position.
     pub block_entities: HashMap<[i32; 3], V>,
     /// For each live block entity: its block, and whether its last save wrote anything.
@@ -133,6 +144,7 @@ impl Default for Rt {
             namespace: String::new(),
             initialized: Default::default(),
             interned: HashMap::new(),
+            iter_sources: HashMap::new(),
             block_entities: HashMap::new(),
             block_entity_meta: HashMap::new(),
             keys: HashMap::new(),

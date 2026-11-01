@@ -157,7 +157,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             let ax = AXIS[native(rt, a(0))[0].clamp(0, 5) as usize];
             crate::api_common::axis(rt, ax as i64)
         }
-        _ => match world(rt, key, args) {
+        _ => match crate::jutil::call(rt, key, args).or_else(|| world(rt, key, args)) {
             Some(v) => v,
             None => {
                 // Builder chains (`Properties.of().strength(1f).noOcclusion()`): a method
