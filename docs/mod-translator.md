@@ -124,6 +124,8 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   by screenshot). The earlier "invisible" was a misread: the player had fallen below the blocks.
 - [x] Every block uses template `minecraft:stone` with `properties.random_ticks = true` (grass_block made casings spread and
   turn to dirt).
-- [ ] 4 multipart blockstates don't load (fluid_pipe, metal_girder_encased_shaft, radial_chassis, steam_whistle_extension):
-  their properties are built in code (loops or maps) that `props.rs` doesn't follow yet. Next item.
+- [x] Every Create blockstate loads: `props.rs` follows mod-to-mod property aliases, fields inherited from vanilla
+  superclasses (PipeBlock.NORTH...), and vanilla superclass definitions (RotatedPillarBlock gives axis...). Verified in
+  game: fluid pipe, radial chassis, whistle extension, girder shaft, funnel, press and basin render.
+- [ ] Next: wire right_click_block → `glue::use_block` in bundles, then the kinetic network.
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

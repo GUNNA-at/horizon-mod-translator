@@ -98,6 +98,8 @@ fn enum_values(classes: &BTreeMap<&str, &ClassFile>, class: &str) -> Vec<String>
 /// The properties a mod's static fields hold, by `Owner.FIELD`.
 fn mod_properties(classes: &BTreeMap<&str, &ClassFile>) -> BTreeMap<String, Prop> {
     let mut out = BTreeMap::new();
+    // `static final BooleanProperty TOP = GirderBlock.TOP;`: one mod field naming another's property.
+    let mut aliases: Vec<(String, String)> = Vec::new();
     for c in classes.values() {
         let Some(code) = c.methods.iter().find(|m| m.name == "<clinit>").and_then(|m| m.code.as_ref()) else { continue };
         let insns = insn::decode(&code.bytes).unwrap_or_default();
@@ -113,6 +115,16 @@ fn mod_properties(classes: &BTreeMap<&str, &ClassFile>) -> BTreeMap<String, Prop
                 && let Some(p) = vanilla(&from.name)
             {
                 out.insert(format!("{}.{}", to.owner, to.name), p);
+                continue;
+            }
+            if i.op == op::GETSTATIC
+                && let Some(next) = insns.get(n + 1)
+                && next.op == op::PUTSTATIC
+                && let (Some(from), Operand::Int(to)) = (c.member(idx as u16), &next.arg)
+                && let Some(to) = c.member(*to as u16)
+                && classes.contains_key(from.owner.as_str())
+            {
+                aliases.push((format!("{}.{}", from.owner, from.name), format!("{}.{}", to.owner, to.name)));
                 continue;
             }
             if i.op != op::INVOKESTATIC {
@@ -169,7 +181,52 @@ fn mod_properties(classes: &BTreeMap<&str, &ClassFile>) -> BTreeMap<String, Prop
             }
         }
     }
+    // Aliases of aliases resolve in a few rounds.
+    for _ in 0..8 {
+        let mut grew = false;
+        for (from, to) in &aliases {
+            if !out.contains_key(to)
+                && let Some(p) = out.get(from).cloned()
+            {
+                out.insert(to.clone(), p);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     out
+}
+
+/// The properties a vanilla block class adds in its own `createBlockStateDefinition`, for a mod
+/// class that extends it and calls `super`.
+fn vanilla_super(class: &str) -> &'static [&'static str] {
+    match class.rsplit('/').next().unwrap_or(class) {
+        "RotatedPillarBlock" => &["AXIS"],
+        "HorizontalDirectionalBlock" | "FaceAttachedHorizontalDirectionalBlock" => &["HORIZONTAL_FACING"],
+        "DirectionalBlock" => &["FACING"],
+        "SlabBlock" => &["SLAB_TYPE", "WATERLOGGED"],
+        "StairBlock" => &["HORIZONTAL_FACING", "HALF", "STAIRS_SHAPE", "WATERLOGGED"],
+        _ => &[],
+    }
+}
+
+/// A field a mod class reads by its own name that it doesn't declare: inherited, so look it up in
+/// its superclasses; one of vanilla's resolves by name.
+fn inherited(classes: &BTreeMap<&str, &ClassFile>, mod_props: &BTreeMap<String, Prop>, owner: &str, name: &str) -> Option<Prop> {
+    let mut at = classes.get(owner).copied();
+    while let Some(c) = at {
+        if let Some(p) = mod_props.get(&format!("{}.{}", c.name, name)) {
+            return Some(p.clone());
+        }
+        match c.superclass.as_deref() {
+            Some(s) if classes.contains_key(s) => at = classes.get(s).copied(),
+            Some(s) if s.starts_with("net/minecraft/world/level/block/") => return vanilla(name),
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// The properties a block class adds in `createBlockStateDefinition`, walking up its mod superclasses.
@@ -185,9 +242,11 @@ fn class_properties(classes: &BTreeMap<&str, &ClassFile>, mod_props: &BTreeMap<S
                 }
                 let Operand::Int(idx) = i.arg else { continue };
                 let Some(f) = c.member(idx as u16) else { continue };
-                let prop = mod_props.get(&format!("{}.{}", f.owner, f.name)).cloned().or_else(|| {
-                    f.owner.starts_with("net/minecraft/world/level/block/").then(|| vanilla(&f.name)).flatten()
-                });
+                let prop = mod_props
+                    .get(&format!("{}.{}", f.owner, f.name))
+                    .cloned()
+                    .or_else(|| f.owner.starts_with("net/minecraft/world/level/block/").then(|| vanilla(&f.name)).flatten())
+                    .or_else(|| inherited(classes, mod_props, &f.owner, &f.name));
                 if let Some(p) = prop
                     && !out.iter().any(|q| q.name == p.name)
                 {
@@ -196,6 +255,15 @@ fn class_properties(classes: &BTreeMap<&str, &ClassFile>, mod_props: &BTreeMap<S
             }
         }
         at = c.superclass.as_deref().and_then(|s| classes.get(s).copied());
+        if at.is_none()
+            && let Some(s) = c.superclass.as_deref()
+        {
+            for p in vanilla_super(s).iter().filter_map(|f| vanilla(f)) {
+                if !out.iter().any(|q| q.name == p.name) {
+                    out.push(p);
+                }
+            }
+        }
     }
     out
 }
