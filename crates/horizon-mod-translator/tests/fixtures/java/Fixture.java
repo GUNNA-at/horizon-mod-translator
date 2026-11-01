@@ -81,4 +81,17 @@ public class Fixture {
         Object o = new Boom(0);
         return r + (o instanceof RuntimeException ? 1 : 0) + (o instanceof Boom ? 10 : 0);
     }
+
+    record Point(int x, String label) {}
+    public static int records(int k) {
+        Point a = new Point(k, "p" + k), b = new Point(k, "p" + k), c = new Point(k + 1, "q");
+        return (a.equals(b) ? 1 : 0) + (a.equals(c) ? 2 : 0) + a.hashCode() + a.toString().length() * 1000 + (a.toString().equals("Point[x=" + k + ", label=p" + k + "]") ? 7 : 0);
+    }
+    public static int grid(int n) {
+        int[][] g = new int[n][n + 1];
+        for (int i = 0; i < n; i++) for (int j = 0; j <= n; j++) g[i][j] = i * j;
+        int s = 0;
+        for (int[] row : g) for (int v : row) s += v;
+        return s + g.length * 100 + (n > 0 ? g[0].length : 0);
+    }
 }

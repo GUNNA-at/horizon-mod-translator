@@ -51,6 +51,7 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
 - [x] `translate <jar> <out>` CLI: writes a crate (split into part*.rs). Macaw's Fences: 16.7k lines,
       compiles clean in 9 s. Create: 1.16M lines in 69 files; unsupported: record ObjectMethods (487),
       SwitchBootstraps.typeSwitch (1), multianewarray (2). Compiling Create: (in progress)
+- [x] Records (ObjectMethods equals/hashCode/toString) and multianewarray; differential 65 results.
 - [ ] Next: then a `translate` CLI that emits a
       native-mod crate wired to hooks.
 - [ ] (old plan item) Plan: `crates/horizon-compat` = runtime (V enum: I/J/F/D/Ref,

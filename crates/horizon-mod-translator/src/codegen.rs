@@ -299,6 +299,26 @@ impl<'a> Program<'a> {
                 self.lambdas.insert(key.clone(), (kind, m));
                 format!("{collect} let v = rt.lambda({key:?}, a); s.push(v); {go}")
             }
+            ("java/lang/runtime/ObjectMethods", "bootstrap") => {
+                let names = args.get(1).and_then(|&i| string(i)).unwrap_or_default();
+                let kinds: Vec<char> = args
+                    .iter()
+                    .skip(2)
+                    .filter_map(|&i| c.handle(i))
+                    .map(|(_, m)| raw_kinds(&format!("({})V", m.desc)).chars().next().unwrap_or('L'))
+                    .collect();
+                let fields: Vec<String> = names
+                    .split(';')
+                    .filter(|n| !n.is_empty())
+                    .zip(kinds.iter().chain(std::iter::repeat(&'L')))
+                    .map(|(n, k)| format!("({n:?}, {k:?})"))
+                    .collect();
+                let simple = c.name.rsplit(['/', '$']).next().unwrap_or(&c.name).to_owned();
+                format!(
+                    "{collect} let v = rt.record_method({_name:?}, {simple:?}, &[{}], &a); s.push(v); {go}",
+                    fields.join(", ")
+                )
+            }
             (o, n) => {
                 self.unsupported(&format!("invokedynamic {o}.{n}"));
                 format!("{collect} s.push(V::NULL); {go}")
@@ -550,10 +570,21 @@ impl<'a> Program<'a> {
                 format!("let a = {pop}; s.push(V::I(rt.instance_of(a, {class:?}) as i32)); {go}")
             }
             0xc2 | 0xc3 => format!("s.pop(); {go}"),
-            0xc5 => {
-                self.unsupported("multianewarray");
-                format!("s.push(V::NULL); {go}")
-            }
+            0xc5 => match &i.arg {
+                Operand::IndexCount(t, dims) => {
+                    let ty = c.class_name(*t).unwrap_or_default();
+                    let zero = match ty.trim_start_matches('[').chars().next() {
+                        Some('J') => "V::J(0)",
+                        Some('F') => "V::F(0.0)",
+                        Some('D') => "V::D(0.0)",
+                        Some('L') => "V::NULL",
+                        _ => "V::I(0)",
+                    };
+                    let zero = if ty.len() - ty.trim_start_matches('[').len() > *dims as usize { "V::NULL" } else { zero };
+                    format!("let at = s.len().saturating_sub({dims}); let d: Vec<i32> = s.split_off(at).iter().map(|v| v.i()).collect(); let v = rt.new_multi(&d, {zero}); s.push(v); {go}")
+                }
+                _ => go,
+            },
             0xc6 => format!("let a = {pop}.r(); {}", cmp_jump("a == 0")),
             0xc7 => format!("let a = {pop}.r(); {}", cmp_jump("a != 0")),
             op => {

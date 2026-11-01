@@ -204,6 +204,83 @@ impl Rt {
         self.thrown = Some(e);
     }
 
+    /// `new T[a][b]...`: nested arrays, innermost filled with `zero`.
+    pub fn new_multi(&mut self, dims: &[i32], zero: V) -> V {
+        match dims {
+            [] => zero,
+            [n] => self.new_array(*n, zero),
+            [n, rest @ ..] => {
+                let outer = self.new_array(*n, V::NULL);
+                for i in 0..(*n).max(0) {
+                    let inner = self.new_multi(rest, zero);
+                    self.array_set(outer, i, inner);
+                }
+                outer
+            }
+        }
+    }
+
+    /// `Objects.equals` for translated values: strings by content, boxed
+    /// integers by value, other references by identity.
+    pub fn java_equals(&self, a: V, b: V) -> bool {
+        if a == b {
+            return true;
+        }
+        match (self.str_of(a), self.str_of(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => {
+                matches!((a, b), (V::R(x), V::R(y)) if x != 0 && y != 0
+                    && self.class_of(a) == "java/lang/Integer" && self.class_of(b) == "java/lang/Integer"
+                    && self.get_field(a, "value") == self.get_field(b, "value"))
+            }
+        }
+    }
+
+    /// `hashCode` for translated values, as the JDK computes it for
+    /// primitives and strings; other objects hash by identity.
+    pub fn java_hash(&self, v: V) -> i32 {
+        match v {
+            V::Void => 0,
+            V::I(i) => i,
+            V::J(j) => (j ^ (j >> 32)) as i32,
+            V::F(f) => f.to_bits() as i32,
+            V::D(d) => {
+                let b = d.to_bits() as i64;
+                (b ^ (b >> 32)) as i32
+            }
+            V::R(0) => 0,
+            V::R(r) => match self.str_of(v) {
+                Some(s) => s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32)),
+                None if self.class_of(v) == "java/lang/Integer" => self.get_field(v, "value").i(),
+                None => r as i32,
+            },
+        }
+    }
+
+    /// A record's generated `equals`, `hashCode` and `toString`
+    /// (`ObjectMethods.bootstrap`): `fields` are (name, kind).
+    pub fn record_method(&mut self, which: &str, simple_name: &str, fields: &[(&'static str, char)], args: &[V]) -> V {
+        let this = args.first().copied().unwrap_or_default();
+        match which {
+            "equals" => {
+                let other = args.get(1).copied().unwrap_or_default();
+                let same = other.r() != 0
+                    && self.class_of(this) == self.class_of(other)
+                    && fields.iter().all(|(f, _)| self.java_equals(self.get_field(this, f), self.get_field(other, f)));
+                V::I(same as i32)
+            }
+            "hashCode" => V::I(fields.iter().fold(0i32, |h, (f, _)| h.wrapping_mul(31).wrapping_add(self.java_hash(self.get_field(this, f))))),
+            _ => {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(f, k)| format!("{f}={}", self.to_java_string(self.get_field(this, f), *k)))
+                    .collect();
+                let text = format!("{simple_name}[{}]", parts.join(", "));
+                self.alloc("java/lang/String", Data::Str(text))
+            }
+        }
+    }
+
     /// A lambda object: its class is the implementing method's key, its data the captured values.
     pub fn lambda(&mut self, implementation: &'static str, captured: Vec<V>) -> V {
         self.alloc(implementation, Data::Array(captured))
