@@ -81,7 +81,11 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       createTickerHelper/Level.getBlockEntity, inherited-member resolution up mod superclasses (javac names
       the mod class for inherited statics), API base constructors. Hook test: counter BE ticks, saves
       `count`, survives losing its live object, acts on tick 3.
-- [ ] Next: wire block-entity hooks in the bundle (Game-level Host helpers + Nbt<->Compound); a `horizon-native-mods` bundle per mod whose hooks
+- [x] Block-entity hooks in bundles (block_entity, block_entity_ticks, block_entity_tick on Game; Game helpers
+      `native_state_text_at` / `native_set_state_text_at`, API 81; Compound<->Nbt keeping unmodelled tags).
+      IN GAME: `testmod:counter`'s translated block entity ticks each server tick and places stone on its
+      3rd tick; random ticks of mod blocks are always the mod's (template behaviour suppressed).
+- [ ] Next: a `horizon-native-mods` bundle per mod whose hooks
       (tick_block, use_item_on, neighbor_changed, place_block, block_entity_tick...) call the mod's overrides
       through `vcall`; (2) grow `horizon-compat/src/api.rs` by the coverage list (Level, BlockState,
       ItemStack, CompoundTag, Vec3 first); (3) API callbacks into lambdas (DeferredRegister suppliers);

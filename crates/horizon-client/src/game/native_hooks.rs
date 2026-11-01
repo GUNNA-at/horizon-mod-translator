@@ -3722,6 +3722,42 @@ impl Game<'_> {
     pub(super) fn native_on(&self, mod_id: &str) -> bool {
         !self.settings.mods.disabled.contains(mod_id)
     }
+    /// The block state at `pos` in the current level as text, as
+    /// `GameLevel::native_state_text` gives it: for hooks on `Game` (block
+    /// entity ticks). API 81.
+    pub(super) fn native_state_text_at(&self, pos: [i32; 3]) -> String {
+        let state = self.world.block(pos[0], pos[1], pos[2]);
+        let Some(info) = self.pack.assets.registry.state(state) else {
+            return "minecraft:air".to_owned();
+        };
+        let mut props: Vec<(&String, &String)> = info.properties.iter().collect();
+        props.sort();
+        if props.is_empty() {
+            return info.name.to_string();
+        }
+        let inner: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        format!("{}[{}]", info.name, inner.join(","))
+    }
+    /// Sets the block at `pos` in the current authoritative level from text
+    /// (`GameLevel::native_set_state_text` for hooks on `Game`). API 81.
+    pub(super) fn native_set_state_text_at(&mut self, pos: [i32; 3], text: &str, flags: i32) -> bool {
+        let (name, props) = match text.split_once('[') {
+            Some((n, rest)) => (n, rest.trim_end_matches(']')),
+            None => (text, ""),
+        };
+        let registry = self.pack.assets.registry;
+        let Some(mut id) = registry.default_state(name) else {
+            return false;
+        };
+        for (k, v) in props.split(',').filter_map(|p| p.split_once('=')) {
+            match with_property(registry, id, k, v) {
+                Some(next) => id = next,
+                None => return false,
+            }
+        }
+        let dimension = self.dim.id().to_owned();
+        self.native_set_block(&dimension, pos, id, flags)
+    }
     /// Sets a block in the current authoritative level through `Level.setBlock`.
     /// Returns false for another dimension, an invalid state, or no change.
     /// `flags` selects vanilla's neighbour and shape updates; Horizon sends

@@ -49,14 +49,17 @@ pub fn tick_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) 
     })
 }
 
-/// `random_tick`: `BlockBehaviour.randomTick`.
+/// `random_tick`: `BlockBehaviour.randomTick`. A mod block's random tick is always the mod's,
+/// even when it has none: the block's template (which gives it random ticks) must not act.
 pub fn random_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {
-    run(rt, host, state, RANDOM_TICK, |rt| {
+    let mine = mod_block(rt, state).is_some();
+    let ran = run(rt, host, state, RANDOM_TICK, |rt| {
         let l = level(rt);
         let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
         let r = rt.new_object("net/minecraft/util/RandomSource");
         vec![l, p, r]
-    })
+    });
+    ran || mine
 }
 
 /// `neighbor_changed`: `BlockBehaviour.neighborChanged`.
@@ -93,8 +96,15 @@ pub fn block_entity_ticks(rt: &Rt, block: &str) -> bool {
 
 /// The mod's block entity object at `pos`, made with `newBlockEntity` and loaded from `nbt` the first time.
 fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Option<V> {
-    if let Some(be) = rt.block_entities.get(&pos) {
-        return Some(*be);
+    let (block, _) = crate::host::split_state(state);
+    if let Some(be) = rt.block_entities.get(&pos).copied() {
+        // The same block entity, unless the block changed or the game hands a fresh one (an empty
+        // compound where the live one had saved data): then it is made again.
+        let fresh = rt.block_entity_meta.get(&pos).is_some_and(|(b, saved)| b != block || (*saved && nbt.is_empty()));
+        if !fresh {
+            return Some(be);
+        }
+        rt.block_entities.remove(&pos);
     }
     let (b, _) = mod_block(rt, state)?;
     let vc = rt.vcall?;
@@ -133,6 +143,8 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
         vc(rt, SAVE, SAVE, &[be, tag, provider]);
         rt.thrown = None;
         *nbt = crate::nbt::from_runtime(rt, tag);
+        let (block, _) = crate::host::split_state(state);
+        rt.block_entity_meta.insert(pos, (block.to_owned(), !nbt.is_empty()));
         true
     })
 }
@@ -140,4 +152,5 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
 /// The block entity at `pos` was removed (its block broken or replaced).
 pub fn block_entity_removed(rt: &mut Rt, pos: [i32; 3]) {
     rt.block_entities.remove(&pos);
+    rt.block_entity_meta.remove(&pos);
 }

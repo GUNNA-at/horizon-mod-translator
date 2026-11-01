@@ -107,6 +107,8 @@ pub struct Rt {
     pub interned: HashMap<String, V>,
     /// The mod's live block entities, by position.
     pub block_entities: HashMap<[i32; 3], V>,
+    /// For each live block entity: its block, and whether its last save wrote anything.
+    pub block_entity_meta: HashMap<[i32; 3], (String, bool)>,
     /// Keys made at runtime (`static_key`).
     keys: HashMap<String, &'static str>,
     /// The runtime's random stream (`RandomSource` without the game's own).
@@ -132,6 +134,7 @@ impl Default for Rt {
             initialized: Default::default(),
             interned: HashMap::new(),
             block_entities: HashMap::new(),
+            block_entity_meta: HashMap::new(),
             keys: HashMap::new(),
             random_state: 0x9E37_79B9_7F4A_7C15,
         }
