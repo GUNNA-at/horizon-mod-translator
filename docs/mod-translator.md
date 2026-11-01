@@ -50,9 +50,14 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       instanceof (`init(rt)` registers supers), ArithmeticException; differential 59 results.
 - [x] `translate <jar> <out>` CLI: writes a crate (split into part*.rs). Macaw's Fences: 16.7k lines,
       compiles clean in 9 s. Create: 1.16M lines in 69 files; unsupported: record ObjectMethods (487),
-      SwitchBootstraps.typeSwitch (1), multianewarray (2). Compiling Create: (in progress)
+      SwitchBootstraps.typeSwitch (1), multianewarray (2). Create's translated crate compiles with 0 errors (debug, 136 s).
 - [x] Records (ObjectMethods equals/hashCode/toString) and multianewarray; differential 65 results.
-- [ ] Next: then a `translate` CLI that emits a
+- [ ] Next: (1) wire generated code to Horizon: a `horizon-native-mods` bundle per mod whose hooks
+      (tick_block, use_item_on, neighbor_changed, place_block, block_entity_tick...) call the mod's overrides
+      through `vcall`; (2) grow `horizon-compat/src/api.rs` by the coverage list (Level, BlockState,
+      ItemStack, CompoundTag, Vec3 first); (3) API callbacks into lambdas (DeferredRegister suppliers);
+      (4) in-game test (needs versions/26.3/26.3.jar for horizon-prepare).
+- [ ] Old: then a `translate` CLI that emits a
       native-mod crate wired to hooks.
 - [ ] (old plan item) Plan: `crates/horizon-compat` = runtime (V enum: I/J/F/D/Ref,
       object heap, static fields) + API impls keyed by mangled `owner.name.desc`; unmapped → logging stub.
