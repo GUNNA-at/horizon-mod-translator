@@ -113,6 +113,8 @@ pub struct Program<'a> {
     pub unsupported: BTreeMap<String, usize>,
     /// Lambda implementations seen: key → (handle kind, member).
     lambdas: BTreeMap<String, (u8, Member)>,
+    /// The mod's id: picks its `@Mod` class among several (libraries bundled in its jar have theirs).
+    pub mod_id: Option<String>,
 }
 
 impl<'a> Program<'a> {
@@ -122,7 +124,34 @@ impl<'a> Program<'a> {
             keys: BTreeSet::new(),
             unsupported: BTreeMap::new(),
             lambdas: BTreeMap::new(),
+            mod_id: None,
         }
+    }
+
+    /// The `@Mod` class FML would construct, and the constructor it would call (one taking the
+    /// event bus): the class whose annotation names the mod id, or the only candidate.
+    fn mod_main(&self) -> Option<(&'a ClassFile, &'a crate::class::Method)> {
+        let utf8 = |c: &ClassFile, text: &str| c.pool.iter().any(|k| matches!(k, crate::class::Const::Utf8(s) if s == text));
+        let mut found: Vec<(&'a ClassFile, &'a crate::class::Method)> = Vec::new();
+        for c in self.classes.values() {
+            if !utf8(c, "Lnet/neoforged/fml/common/Mod;") {
+                continue;
+            }
+            let ctor = c
+                .methods
+                .iter()
+                .filter(|m| m.name == "<init>" && m.code.is_some())
+                .max_by_key(|m| (m.desc.contains("IEventBus"), m.desc.len()));
+            if let Some(m) = ctor {
+                found.push((c, m));
+            }
+        }
+        if let Some(id) = &self.mod_id
+            && let Some(hit) = found.iter().find(|(c, _)| utf8(c, id))
+        {
+            return Some(*hit);
+        }
+        (found.len() == 1).then(|| found[0])
     }
 
     fn own(&self, class: &str) -> bool {
@@ -185,6 +214,18 @@ impl<'a> Program<'a> {
             if c.fields.iter().any(|f| f.access & 0x0008 != 0 && f.desc.contains("neoforged/neoforge/registries/DeferredRegister")) {
                 let _ = writeln!(out, "    {}", self.ensure(&c.name).replace("return V::Void;", "return;"));
             }
+        }
+        // FML constructs the `@Mod` class with the mod bus, then fires the registration events.
+        if let Some((main, ctor)) = self.mod_main() {
+            let params = crate::class::param_classes(&ctor.desc);
+            let _ = writeln!(out, "    {{\n        let this = rt.new_object({:?});", main.name);
+            let _ = writeln!(out, "        let mut args = vec![this];");
+            for p in &params {
+                let _ = writeln!(out, "        let v = horizon_compat::neo::constructor_arg(rt, {p:?}); args.push(v);");
+            }
+            let _ = writeln!(out, "        {}", self.ensure(&main.name).replace("return V::Void;", "return;"));
+            let _ = writeln!(out, "        {}(rt, &args);\n        rt.thrown = None;\n    }}", fn_name(&main.name, "<init>", &ctor.desc));
+            out.push_str("    horizon_compat::neo::fire_registrations(rt);\n");
         }
         out.push_str("    rt.resolve_registrations();\n}\n\n");
         out.push_str(&self.dispatch());

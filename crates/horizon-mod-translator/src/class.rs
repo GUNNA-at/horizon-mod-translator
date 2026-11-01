@@ -272,3 +272,37 @@ fn skip_attributes(r: &mut Reader) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// A method descriptor's parameter types, as class names (`I` for an int, `[Lx;` for arrays).
+pub fn param_classes(desc: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(params) = desc.strip_prefix('(').and_then(|d| d.split(')').next()) else { return out };
+    let b = params.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let start = i;
+        while i < b.len() && b[i] == b'[' {
+            i += 1;
+        }
+        if i < b.len() && b[i] == b'L' {
+            let end = params[i..].find(';').map_or(b.len(), |e| i + e);
+            out.push(if start == i { params[i + 1..end].to_owned() } else { params[start..=end].to_owned() });
+            i = end + 1;
+        } else {
+            out.push(params[start..=i.min(b.len() - 1)].to_owned());
+            i += 1;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod param_tests {
+    #[test]
+    fn param_classes_of_a_mod_constructor() {
+        assert_eq!(
+            super::param_classes("(Lnet/neoforged/bus/api/IEventBus;Lnet/neoforged/fml/ModContainer;I[J)V"),
+            ["net/neoforged/bus/api/IEventBus", "net/neoforged/fml/ModContainer", "I", "[J"]
+        );
+    }
+}

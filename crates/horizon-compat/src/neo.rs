@@ -1,0 +1,344 @@
+//! NeoForge's mod loading, natively: the mod event bus, `RegisterEvent` for each registry,
+//! `DeferredHolder`, `ResourceKey` and `ResourceLocation`. A translated mod is constructed as
+//! FML constructs it (its `@Mod` class gets the event bus), then registration events fire, so
+//! registration libraries (Registrate and the like) run their own translated code.
+//!
+//! Registry names are their path (`block`, `item`, `block_entity_type`), as
+//! `Registries.BLOCK` reads in [`crate::api::get_static`]; an element's `ResourceKey` is
+//! `registry#namespace:path`; a `ResourceLocation` is its `namespace:path` string.
+use crate::{Rt, V};
+
+/// The registries `RegisterEvent` fires for, in NeoForge's order (blocks before items, items
+/// before what refers to them).
+pub const REGISTRIES: [&str; 22] = [
+    "attribute",
+    "sound_event",
+    "fluid",
+    "mob_effect",
+    "block",
+    "entity_type",
+    "item",
+    "potion",
+    "particle_type",
+    "block_entity_type",
+    "custom_stat",
+    "menu",
+    "recipe_type",
+    "recipe_serializer",
+    "creative_mode_tab",
+    "data_component_type",
+    "enchantment_effect_component_type",
+    "armor_material",
+    "worldgen/feature",
+    "loot_condition_type",
+    "loot_function_type",
+    "attachment_types",
+];
+
+const REGISTER_EVENT: &str = "net/neoforged/neoforge/registries/RegisterEvent";
+const ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
+
+/// The last parameter type of a method descriptor (`(La;Lnet/x/Event;)V` → `net/x/Event`).
+fn last_param(desc: &str) -> Option<&str> {
+    let params = desc.strip_prefix('(')?.split(')').next()?;
+    let mut last = None;
+    let mut rest = params;
+    while !rest.is_empty() {
+        let start = rest;
+        let mut dims = 0;
+        while rest.starts_with('[') {
+            rest = &rest[1..];
+            dims += 1;
+        }
+        if let Some(r) = rest.strip_prefix('L') {
+            let end = r.find(';')?;
+            last = Some(if dims == 0 { &r[..end] } else { &start[..dims + end + 2] });
+            rest = &r[end + 1..];
+        } else {
+            last = Some(&start[..dims + 1]);
+            rest = &rest[1..];
+        }
+    }
+    last
+}
+
+/// The event class a listener object takes: a lambda's implementation names it as its last parameter.
+fn listener_event(rt: &Rt, listener: V) -> String {
+    let class = rt.class_of(listener);
+    class.rsplit_once('.').and_then(|(_, desc)| last_param(desc)).unwrap_or("").to_owned()
+}
+
+/// Whether an event of class `event` reaches a listener for `wanted` (its own class or a superclass).
+fn reaches(rt: &Rt, event: &str, wanted: &str) -> bool {
+    let mut c = event;
+    loop {
+        if c == wanted {
+            return true;
+        }
+        match rt.supers.get(c) {
+            Some(&s) => c = s,
+            None => return false,
+        }
+    }
+}
+
+/// Posts `event` (an object of class `class`) to the mod bus's listeners.
+pub fn post(rt: &mut Rt, class: &str, event: V) {
+    let listeners: Vec<(String, V)> = rt.listeners.clone();
+    for (wanted, l) in listeners {
+        if reaches(rt, class, &wanted) {
+            rt.call_functional(ACCEPT, l, &[event]);
+            rt.thrown = None;
+        }
+    }
+}
+
+/// Fires `RegisterEvent` once per registry, as NeoForge does after mod construction.
+pub fn fire_registrations(rt: &mut Rt) {
+    let mut names: Vec<String> = REGISTRIES.iter().map(|s| s.to_string()).collect();
+    for extra in rt.custom_registries.clone() {
+        if !names.contains(&extra) {
+            names.push(extra);
+        }
+    }
+    for registry in names {
+        let ev = rt.new_object(REGISTER_EVENT);
+        let key = rt.string(&registry);
+        rt.put_field(ev, "$registry", key);
+        post(rt, REGISTER_EVENT, ev);
+    }
+}
+
+fn location(rt: &Rt, v: V) -> String {
+    let s = rt.str_of(v).unwrap_or("");
+    if s.contains(':') { s.to_owned() } else { format!("minecraft:{s}") }
+}
+
+/// A `ResourceKey`'s registry and element location (`block#create:shaft` → (`block`, `create:shaft`)).
+pub fn split_key(rt: &Rt, key: V) -> (String, String) {
+    let s = rt.str_of(key).unwrap_or("");
+    match s.split_once('#') {
+        Some((r, l)) => (r.to_owned(), l.to_owned()),
+        None => (String::new(), s.to_owned()),
+    }
+}
+
+fn register(rt: &mut Rt, registry: &str, name: &str, obj: V) {
+    if obj.r() != 0 {
+        rt.registered.insert((registry.to_owned(), name.to_owned()), obj);
+    }
+}
+
+fn name_of(rt: &Rt, v: V) -> String {
+    let s = rt.str_of(v).unwrap_or("");
+    let s = s.split_once('#').map_or(s, |(_, l)| l);
+    if s.contains(':') { s.to_owned() } else { format!("{}:{s}", rt.namespace) }
+}
+
+/// A NeoForge loading call, or None when this module doesn't model it.
+pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let (owner, rest) = key.split_once('.')?;
+    let (name, desc) = rest.split_once('.')?;
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match (owner, name) {
+        ("net/neoforged/bus/api/IEventBus", "addListener") => {
+            let listener = *args.last()?;
+            // A class argument names the event; otherwise the lambda's parameter does.
+            let wanted = args
+                .iter()
+                .find(|&&v| rt.class_of(v) == "java/lang/Class")
+                .and_then(|&v| rt.str_of(v).map(str::to_owned))
+                .unwrap_or_else(|| listener_event(rt, listener));
+            rt.listeners.push((wanted, listener));
+            V::Void
+        }
+        ("net/neoforged/bus/api/IEventBus", "register") => V::Void,
+        ("net/neoforged/bus/api/IEventBus", "post") => {
+            let class = rt.class_of(a(1));
+            post(rt, class, a(1));
+            a(1)
+        }
+        (REGISTER_EVENT, "getRegistryKey") => rt.get_field(a(0), "$registry"),
+        (REGISTER_EVENT, "register") => {
+            let this = a(0);
+            let registry = rt.get_field(this, "$registry");
+            if !crate::jutil::equals(rt, registry, a(1)) {
+                return Some(V::Void);
+            }
+            let reg = rt.str_of(registry).unwrap_or("").to_owned();
+            if desc.contains("Ljava/util/function/Consumer;") {
+                let helper = rt.new_object("net/neoforged/neoforge/registries/RegisterEvent$RegisterHelper");
+                rt.put_field(helper, "$registry", registry);
+                rt.call_functional(ACCEPT, a(2), &[helper]);
+            } else {
+                let obj = rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", a(3), &[]);
+                let n = name_of(rt, a(2));
+                register(rt, &reg, &n, obj);
+            }
+            V::Void
+        }
+        ("net/neoforged/neoforge/registries/RegisterEvent$RegisterHelper", "register") => {
+            let registry = rt.get_field(a(0), "$registry");
+            let reg = rt.str_of(registry).unwrap_or("").to_owned();
+            let n = name_of(rt, a(1));
+            register(rt, &reg, &n, a(2));
+            V::Void
+        }
+        // ResourceLocation: its `namespace:path` string.
+        ("net/minecraft/resources/ResourceLocation", "fromNamespaceAndPath") => {
+            let s = format!("{}:{}", rt.str_of(a(0)).unwrap_or("minecraft"), rt.str_of(a(1)).unwrap_or(""));
+            rt.string(&s)
+        }
+        ("net/minecraft/resources/ResourceLocation", "withDefaultNamespace") => {
+            let s = format!("minecraft:{}", rt.str_of(a(0)).unwrap_or(""));
+            rt.string(&s)
+        }
+        ("net/minecraft/resources/ResourceLocation", "parse" | "tryParse" | "bySeparator") => {
+            let s = location(rt, a(0));
+            rt.string(&s)
+        }
+        ("net/minecraft/resources/ResourceLocation", "getNamespace" | "getPath") => {
+            let s = location(rt, a(0));
+            let (ns, path) = s.split_once(':').unwrap_or(("minecraft", &s));
+            let part = if name == "getNamespace" { ns } else { path }.to_owned();
+            rt.string(&part)
+        }
+        ("net/minecraft/resources/ResourceLocation", "toString" | "toLanguageKey" | "toShortLanguageKey") => {
+            let s = location(rt, a(0));
+            let s = if name == "toString" { s } else { s.replace(':', ".") };
+            rt.string(&s)
+        }
+        ("net/minecraft/resources/ResourceLocation", "withPath" | "withPrefix" | "withSuffix") => {
+            let s = location(rt, a(0));
+            let (ns, path) = s.split_once(':').unwrap_or(("minecraft", &s));
+            let arg = rt.str_of(a(1)).unwrap_or("").to_owned();
+            let path = match name {
+                "withPath" => arg,
+                "withPrefix" => format!("{arg}{path}"),
+                _ => format!("{path}{arg}"),
+            };
+            let s = format!("{ns}:{path}");
+            rt.string(&s)
+        }
+        // ResourceKey: `registry#location`; a registry's own key is its name.
+        ("net/minecraft/resources/ResourceKey", "create") => {
+            let reg = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let loc = location(rt, a(1));
+            rt.string(&format!("{reg}#{loc}"))
+        }
+        ("net/minecraft/resources/ResourceKey", "createRegistryKey") => {
+            let loc = location(rt, a(0));
+            let path = loc.split_once(':').map_or(loc.as_str(), |(_, p)| p).to_owned();
+            if !rt.custom_registries.contains(&path) && !REGISTRIES.contains(&path.as_str()) {
+                rt.custom_registries.push(path.clone());
+            }
+            rt.string(&path)
+        }
+        ("net/minecraft/resources/ResourceKey", "location") => {
+            let (reg, loc) = split_key(rt, a(0));
+            let s = if reg.is_empty() { format!("minecraft:{loc}") } else { loc };
+            rt.string(&s)
+        }
+        ("net/minecraft/resources/ResourceKey", "registry" | "registryKey") => {
+            let (reg, _) = split_key(rt, a(0));
+            let s = if name == "registry" { format!("minecraft:{reg}") } else { reg };
+            rt.string(&s)
+        }
+        ("net/minecraft/resources/ResourceKey", "isFor") => {
+            let (reg, _) = split_key(rt, a(0));
+            V::I((Some(reg.as_str()) == rt.str_of(a(1))) as i32)
+        }
+        // DeferredHolder and its subclasses: a registry and a name, resolved when asked.
+        (o, "create") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && !o.ends_with("DeferredRegister") => {
+            let (registry, id) = if desc.starts_with("(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;") {
+                let id = location(rt, a(1));
+                (rt.str_of(a(0)).unwrap_or("").to_owned(), id)
+            } else {
+                split_key(rt, a(0))
+            };
+            let class: &'static str = if o.ends_with("DeferredBlock") || o.ends_with("DeferredItem") { rt.static_key(o) } else { "net/neoforged/neoforge/registries/DeferredHolder" };
+            let h = rt.new_object(class);
+            let (r, i) = (rt.string(&registry), rt.string(&id));
+            rt.put_field(h, "$registry", r);
+            rt.put_field(h, "$id", i);
+            h
+        }
+        (o, "get" | "value") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && rt.get_field(a(0), "$id").r() != 0 => {
+            let reg = rt.get_field(a(0), "$registry");
+            let id = rt.get_field(a(0), "$id");
+            let k = (rt.str_of(reg).unwrap_or("").to_owned(), rt.str_of(id).unwrap_or("").to_owned());
+            rt.registered.get(&k).copied().unwrap_or(V::NULL)
+        }
+        (o, "getId") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => rt.get_field(a(0), "$id"),
+        (o, "getKey" | "unwrapKey") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && rt.get_field(a(0), "$id").r() != 0 => {
+            let reg = rt.get_field(a(0), "$registry");
+            let id = rt.get_field(a(0), "$id");
+            let s = format!("{}#{}", rt.str_of(reg).unwrap_or(""), rt.str_of(id).unwrap_or(""));
+            let k = rt.string(&s);
+            if name == "unwrapKey" {
+                let o = rt.new_object("java/util/Optional");
+                rt.put_field(o, "value", k);
+                o
+            } else {
+                k
+            }
+        }
+        (o, "isBound") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
+            let reg = rt.get_field(a(0), "$registry");
+            let id = rt.get_field(a(0), "$id");
+            let k = (rt.str_of(reg).unwrap_or("").to_owned(), rt.str_of(id).unwrap_or("").to_owned());
+            V::I(rt.registered.contains_key(&k) as i32)
+        }
+        _ => return None,
+    })
+}
+
+/// Loading objects a mod's constructor takes: the event bus, its container, the side.
+pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
+    match class {
+        "net/neoforged/bus/api/IEventBus" => rt.new_object("net/neoforged/bus/api/IEventBus"),
+        "net/neoforged/fml/ModContainer" => rt.new_object("net/neoforged/fml/ModContainer"),
+        "net/neoforged/api/distmarker/Dist" => crate::api::get_static(rt, "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER"),
+        _ => V::NULL,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Data;
+
+    #[test]
+    fn last_param_of_descriptors() {
+        assert_eq!(last_param("(Lcom/x/A;Lnet/neoforged/neoforge/registries/RegisterEvent;)V"), Some("net/neoforged/neoforge/registries/RegisterEvent"));
+        assert_eq!(last_param("(IJ[Ljava/lang/String;)V"), Some("[Ljava/lang/String;"));
+        assert_eq!(last_param("()V"), None);
+    }
+
+    #[test]
+    fn register_event_reaches_listeners_and_holders_resolve() {
+        let mut rt = Rt::new();
+        // A listener as a lambda over `RegisterEvent`, registering through a helper.
+        let seen = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        let listener = rt.lambda("t/Mod.onRegister.(Lnet/neoforged/neoforge/registries/RegisterEvent;)V", vec![seen]);
+        call(&mut rt, "net/neoforged/bus/api/IEventBus.addListener.(Ljava/util/function/Consumer;)V", &[V::NULL, listener]);
+        assert_eq!(rt.listeners, [("net/neoforged/neoforge/registries/RegisterEvent".to_owned(), listener)]);
+        // Holders: a block one, resolved once something registers `t:thing`.
+        let block = crate::api::get_static(&mut rt, "net/minecraft/core/registries/Registries.BLOCK");
+        let id = rt.string("t:thing");
+        let h = call(&mut rt, "net/neoforged/neoforge/registries/DeferredHolder.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/neoforged/neoforge/registries/DeferredHolder;", &[block, id]).unwrap();
+        assert_eq!(call(&mut rt, "net/neoforged/neoforge/registries/DeferredHolder.get.()Ljava/lang/Object;", &[h]), Some(V::NULL));
+        let ev = rt.new_object(REGISTER_EVENT);
+        rt.put_field(ev, "$registry", block);
+        let helper = rt.new_object("net/neoforged/neoforge/registries/RegisterEvent$RegisterHelper");
+        rt.put_field(helper, "$registry", block);
+        let thing = rt.new_object("t/ThingBlock");
+        call(&mut rt, "net/neoforged/neoforge/registries/RegisterEvent$RegisterHelper.register.(Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Object;)V", &[helper, id, thing]);
+        assert_eq!(call(&mut rt, "net/neoforged/neoforge/registries/DeferredHolder.get.()Ljava/lang/Object;", &[h]), Some(thing));
+        assert_eq!(rt.registered.get(&("block".to_owned(), "t:thing".to_owned())), Some(&thing));
+        // Keys: registry and location.
+        let k = call(&mut rt, "net/minecraft/resources/ResourceKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[block, id]).unwrap();
+        let loc = call(&mut rt, "net/minecraft/resources/ResourceKey.location.()Lnet/minecraft/resources/ResourceLocation;", &[k]).unwrap();
+        assert_eq!(rt.str_of(loc), Some("t:thing"));
+    }
+}

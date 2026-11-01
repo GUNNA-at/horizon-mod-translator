@@ -335,6 +335,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         Data::Stream(_) => 's',
         _ => '?',
     });
+    let class = rt.class_of(this);
+    if data_kind == Some('t') && class.starts_with("com/google/common/collect/") {
+        if class.ends_with("Multimap") {
+            return multimap_call(rt, name, args);
+        }
+        if class.ends_with("Table") {
+            return guava_table_call(rt, name, args);
+        }
+    }
     match data_kind? {
         'l' if rt.class_of(this) == "java/util/Map$Entry" => entry_call(rt, name, args),
         'l' => list_call(rt, name, desc, args),
@@ -372,6 +381,13 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             m
         }
         ("java/util/Map", "entry") => entry(rt, a(0), a(1)),
+        // Guava: a row → (column → value) table, and key → collection multimaps.
+        (o, "create") if (o.ends_with("BasedTable") || o.ends_with("Multimap")) && o.starts_with("com/google/common/collect/") => {
+            let class: &'static str = rt.static_key(o);
+            rt.alloc(class, Data::Table(Table::default()))
+        }
+        ("com/google/common/base/Preconditions", "checkNotNull") => a(0),
+        ("com/google/common/base/Preconditions", _) => V::Void,
         ("java/util/Collections", "emptyList" | "emptySet" | "emptyMap") => match name {
             "emptyMap" => rt.alloc("java/util/HashMap", Data::Table(Table::default())),
             "emptySet" => new_set(rt, &[]),
@@ -943,6 +959,201 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// A row's map in a Guava table, made on first use (a live view, as Guava's `row`).
+fn row(rt: &mut Rt, t: V, r: V) -> V {
+    if let Some(m) = table_get(rt, t, r) {
+        return m;
+    }
+    let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+    table_put(rt, t, r, m);
+    m
+}
+
+fn guava_table_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    Some(match name {
+        "put" => {
+            let m = row(rt, this, a(1));
+            table_put(rt, m, a(2), a(3))
+        }
+        "get" => match table_get(rt, this, a(1)) {
+            Some(m) => table_get(rt, m, a(2)).unwrap_or(V::NULL),
+            None => V::NULL,
+        },
+        "contains" => {
+            let hit = table_get(rt, this, a(1)).is_some_and(|m| table_get(rt, m, a(2)).is_some());
+            V::I(hit as i32)
+        }
+        "containsRow" => V::I(table_get(rt, this, a(1)).is_some() as i32),
+        "row" => row(rt, this, a(1)),
+        "column" => {
+            let out = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+            for (r, m) in table_entries(rt, this) {
+                if let Some(v) = table_get(rt, m, a(1)) {
+                    table_put(rt, out, r, v);
+                }
+            }
+            out
+        }
+        "rowKeySet" => {
+            let keys: Vec<V> = table_entries(rt, this).into_iter().map(|(k, _)| k).collect();
+            new_set(rt, &keys)
+        }
+        "rowMap" => this_as_map(rt, this),
+        "values" => {
+            let mut out = Vec::new();
+            for (_, m) in table_entries(rt, this) {
+                out.extend(table_entries(rt, m).into_iter().map(|(_, v)| v));
+            }
+            new_list(rt, out)
+        }
+        "size" => {
+            let rows = table_entries(rt, this);
+            V::I(rows.iter().map(|(_, m)| table_entries(rt, *m).len() as i32).sum())
+        }
+        "isEmpty" => {
+            let rows = table_entries(rt, this);
+            V::I(rows.iter().all(|(_, m)| table_entries(rt, *m).is_empty()) as i32)
+        }
+        "clear" => {
+            put_table(rt, this, Table::default());
+            V::Void
+        }
+        "remove" => match table_get(rt, this, a(1)) {
+            Some(m) => table_remove(rt, m, a(2)).unwrap_or(V::NULL),
+            None => V::NULL,
+        },
+        _ => return None,
+    })
+}
+
+/// A plain map with the same entries (Guava's `asMap`/`rowMap`): values are the live collections.
+fn this_as_map(rt: &mut Rt, this: V) -> V {
+    let out = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+    for (k, v) in table_entries(rt, this) {
+        table_put(rt, out, k, v);
+    }
+    out
+}
+
+fn multimap_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let set_values = rt.class_of(this).contains("HashMultimap") || rt.class_of(this).contains("SetMultimap");
+    let values = |rt: &mut Rt, k: V, make: bool| -> Option<V> {
+        if let Some(c) = table_get(rt, this, k) {
+            return Some(c);
+        }
+        if !make {
+            return None;
+        }
+        let c = if set_values { new_set(rt, &[]) } else { new_list(rt, Vec::new()) };
+        table_put(rt, this, k, c);
+        Some(c)
+    };
+    Some(match name {
+        "put" => {
+            let c = values(rt, a(1), true)?;
+            if set_values {
+                let fresh = table_get(rt, c, a(2)).is_none();
+                if fresh {
+                    table_put(rt, c, a(2), V::I(1));
+                }
+                V::I(fresh as i32)
+            } else {
+                list_mut(rt, c)?.push(a(2));
+                V::I(1)
+            }
+        }
+        "putAll" => {
+            let c = values(rt, a(1), true)?;
+            for v in elements(rt, a(2)) {
+                if set_values {
+                    table_put(rt, c, v, V::I(1));
+                } else {
+                    list_mut(rt, c)?.push(v);
+                }
+            }
+            V::I(1)
+        }
+        // Guava's `get` is a live view, empty when absent.
+        "get" => values(rt, a(1), true)?,
+        "removeAll" => match table_remove(rt, this, a(1)) {
+            Some(c) => c,
+            None => new_list(rt, Vec::new()),
+        },
+        "remove" => match values(rt, a(1), false) {
+            Some(c) => {
+                let items = elements(rt, c);
+                let pos = items.iter().position(|&e| equals(rt, e, a(2)));
+                if let Some(p) = pos {
+                    if set_values {
+                        table_remove(rt, c, items[p]);
+                    } else {
+                        list_mut(rt, c)?.remove(p);
+                    }
+                }
+                V::I(pos.is_some() as i32)
+            }
+            None => V::I(0),
+        },
+        "containsKey" => {
+            let hit = values(rt, a(1), false).is_some_and(|c| !elements(rt, c).is_empty());
+            V::I(hit as i32)
+        }
+        "containsEntry" => {
+            let hit = match values(rt, a(1), false) {
+                Some(c) => elements(rt, c).into_iter().any(|e| equals(rt, e, a(2))),
+                None => false,
+            };
+            V::I(hit as i32)
+        }
+        "size" => {
+            let total: usize = table_entries(rt, this).into_iter().map(|(_, c)| elements(rt, c).len()).sum();
+            V::I(total as i32)
+        }
+        "isEmpty" => {
+            let empty = table_entries(rt, this).into_iter().all(|(_, c)| elements(rt, c).is_empty());
+            V::I(empty as i32)
+        }
+        "clear" => {
+            put_table(rt, this, Table::default());
+            V::Void
+        }
+        "asMap" => this_as_map(rt, this),
+        "keySet" => {
+            let keys: Vec<V> = table_entries(rt, this).into_iter().filter(|(_, c)| !elements(rt, *c).is_empty()).map(|(k, _)| k).collect();
+            new_set(rt, &keys)
+        }
+        "values" => {
+            let mut out = Vec::new();
+            for (_, c) in table_entries(rt, this) {
+                out.extend(elements(rt, c));
+            }
+            new_list(rt, out)
+        }
+        "entries" => {
+            let mut out = Vec::new();
+            for (k, c) in table_entries(rt, this) {
+                for v in elements(rt, c) {
+                    out.push(entry(rt, k, v));
+                }
+            }
+            new_list(rt, out)
+        }
+        "forEach" => {
+            for (k, c) in table_entries(rt, this) {
+                for v in elements(rt, c) {
+                    rt.call_functional("java/util/function/BiConsumer.accept.(Ljava/lang/Object;Ljava/lang/Object;)V", a(1), &[k, v]);
+                }
+            }
+            V::Void
+        }
+        _ => return None,
+    })
+}
+
 fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -1125,6 +1336,27 @@ mod tests {
         let x2 = rt.alloc("java/lang/String", Data::Str("x".into()));
         assert_eq!(c(&mut rt, "java/util/Set.add.(Ljava/lang/Object;)Z", &[s, x2]), V::I(0));
         assert_eq!(c(&mut rt, "java/util/Set.size.()I", &[s]), V::I(1));
+    }
+
+    #[test]
+    fn guava_tables_and_multimaps() {
+        let mut rt = Rt::new();
+        let t = c(&mut rt, "com/google/common/collect/HashBasedTable.create.()Lcom/google/common/collect/HashBasedTable;", &[]);
+        let (block, item) = (rt.string("block"), rt.string("item"));
+        let (shaft, cog) = (rt.string("shaft"), rt.string("cog"));
+        c(&mut rt, "com/google/common/collect/Table.put.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[t, block, shaft, V::I(1)]);
+        c(&mut rt, "com/google/common/collect/Table.put.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[t, block, cog, V::I(2)]);
+        c(&mut rt, "com/google/common/collect/Table.put.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[t, item, shaft, V::I(3)]);
+        let r = c(&mut rt, "com/google/common/collect/Table.row.(Ljava/lang/Object;)Ljava/util/Map;", &[t, block]);
+        assert_eq!(c(&mut rt, "java/util/Map.size.()I", &[r]), V::I(2));
+        assert_eq!(c(&mut rt, "com/google/common/collect/Table.get.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[t, item, shaft]), V::I(3));
+        let m = c(&mut rt, "com/google/common/collect/ArrayListMultimap.create.()Lcom/google/common/collect/ArrayListMultimap;", &[]);
+        assert_eq!(c(&mut rt, "com/google/common/collect/Multimap.isEmpty.()Z", &[m]), V::I(1));
+        c(&mut rt, "com/google/common/collect/Multimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z", &[m, block, V::I(7)]);
+        c(&mut rt, "com/google/common/collect/Multimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z", &[m, block, V::I(8)]);
+        let got = c(&mut rt, "com/google/common/collect/Multimap.get.(Ljava/lang/Object;)Ljava/util/Collection;", &[m, block]);
+        assert_eq!(elements(&rt, got), [V::I(7), V::I(8)]);
+        assert_eq!(c(&mut rt, "com/google/common/collect/Multimap.size.()I", &[m]), V::I(2));
     }
 
     #[test]

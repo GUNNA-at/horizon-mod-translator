@@ -9,6 +9,7 @@ pub mod api_common;
 pub mod glue;
 pub mod host;
 pub mod jutil;
+pub mod neo;
 pub mod nbt;
 
 /// A JVM value. References index [`Rt::heap`]; 0 is null.
@@ -116,6 +117,10 @@ pub struct Rt {
     pub interned: HashMap<String, V>,
     /// The collection an iterator, key set or map entry came from, for `remove()` and `setValue`.
     pub iter_sources: HashMap<u32, V>,
+    /// The mod event bus's listeners: the event class each takes, and the listener.
+    pub listeners: Vec<(String, V)>,
+    /// Registries the mod makes (`ResourceKey.createRegistryKey`), fired after vanilla's.
+    pub custom_registries: Vec<String>,
     /// The mod's live block entities, by position.
     pub block_entities: HashMap<[i32; 3], V>,
     /// For each live block entity: its block, and whether its last save wrote anything.
@@ -145,6 +150,8 @@ impl Default for Rt {
             initialized: Default::default(),
             interned: HashMap::new(),
             iter_sources: HashMap::new(),
+            listeners: Vec::new(),
+            custom_registries: Vec::new(),
             block_entities: HashMap::new(),
             block_entity_meta: HashMap::new(),
             keys: HashMap::new(),

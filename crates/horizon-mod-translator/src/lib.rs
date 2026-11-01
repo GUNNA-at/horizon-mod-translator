@@ -29,6 +29,33 @@ pub fn classes(jar: &Path) -> Result<Vec<ClassFile>, String> {
             out.push(c);
         }
     }
+    // Libraries the mod bundles (`META-INF/jarjar/*.jar`, NeoForge's jar-in-jar) run inside it:
+    // translate them with it. A class the mod itself has wins.
+    let have: std::collections::HashSet<String> = out.iter().map(|c| c.name.clone()).collect();
+    for i in 0..zip.len() {
+        let mut e = zip.by_index(i).map_err(|e| e.to_string())?;
+        let name = e.name().map_err(|e| e.to_string())?.into_owned();
+        if !(name.starts_with("META-INF/jarjar/") && name.ends_with(".jar")) {
+            continue;
+        }
+        let mut b = Vec::new();
+        e.read_to_end(&mut b).map_err(|e| e.to_string())?;
+        let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) else { continue };
+        for j in 0..inner.len() {
+            let Ok(mut f) = inner.by_index(j) else { continue };
+            let Ok(n) = f.name().map(|n| n.into_owned()) else { continue };
+            if !n.ends_with(".class") || n.starts_with("META-INF/") {
+                continue;
+            }
+            let mut cb = Vec::new();
+            if f.read_to_end(&mut cb).is_ok()
+                && let Ok(c) = ClassFile::parse(&cb)
+                && !have.contains(&c.name)
+            {
+                out.push(c);
+            }
+        }
+    }
     Ok(out)
 }
 

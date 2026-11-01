@@ -25,7 +25,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 
 /// horizon-compat's sources, carried in each bundle as its own sibling crate: bundle crates may
 /// depend only on Horizon's Cargo.lock registry crates and on siblings (horizon-mixins' rule).
-const COMPAT: [(&str, &str); 7] = [
+const COMPAT: [(&str, &str); 8] = [
     ("lib.rs", include_str!("../../horizon-compat/src/lib.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
     ("api_common.rs", include_str!("../../horizon-compat/src/api_common.rs")),
@@ -33,6 +33,7 @@ const COMPAT: [(&str, &str); 7] = [
     ("host.rs", include_str!("../../horizon-compat/src/host.rs")),
     ("glue.rs", include_str!("../../horizon-compat/src/glue.rs")),
     ("jutil.rs", include_str!("../../horizon-compat/src/jutil.rs")),
+    ("neo.rs", include_str!("../../horizon-compat/src/neo.rs")),
 ];
 
 /// Block hooks the bundle wires: (hook name, glue function).
@@ -243,6 +244,7 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
     let bundle_id = format!("{id}_translated");
     let krate = format!("{}_translated_engine", id.replace('-', "_"));
     let mut program = Program::new(classes);
+    program.mod_id = Some(id.clone());
     let files = program.emit_files(40);
     let src = out.join("engine/src");
     fs::create_dir_all(&src).map_err(|e| e.to_string())?;
