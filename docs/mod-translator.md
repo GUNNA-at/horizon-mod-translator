@@ -129,8 +129,14 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   game: fluid pipe, radial chassis, whistle extension, girder shaft, funnel, press and basin render.
 - [x] Bundles inject `right_click_block` → `glue::use_block` (main hand; a click the block takes cancels the game's own use).
   Verified in game with `horizon-ctl interact`: testmod:switch toggles powered=false→true→false and places stone above.
-- [ ] Next: Create's kinetic network (KineticBlockEntity speed propagation) through the translated block-entity ticks;
-  measure what `MISSING=1 coverage create.jar` lists on that path.
+- [x] `HORIZON_COMPAT_TRACE=1` prints each unmapped API call once, from a real game. Create's first run showed
+  Java collections, its bundled libraries (Registrate) and NeoForge loading were missing, so no Create block got a
+  block entity.
+- [x] `jutil.rs`: java.util collections, iterators, streams, atomics, Guava Table/Multimap, natively.
+- [x] `neo.rs` + codegen: the `@Mod` class is constructed with a native mod bus and `RegisterEvent` fires per registry;
+  `META-INF/jarjar` libraries translate with the mod (Create: 1.39M lines with Registrate, Flywheel, Ponder).
+- [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
+  block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
 - Disk: a game build with Create's engine under `--profile fast` (incremental) filled ~100 GB across a few target dirs and
   stopped the session (ENOSPC). Build it with `CARGO_INCREMENTAL=0 CARGO_PROFILE_FAST_INCREMENTAL=false

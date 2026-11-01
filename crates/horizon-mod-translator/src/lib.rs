@@ -117,6 +117,16 @@ fn registry_of(m: &Member) -> String {
     "unknown".into()
 }
 
+/// Whether `name` can be a registry name (`shaft`, `create:shaft`, `worldgen/ore`): a string
+/// pushed before a register call can also be a message or a format.
+fn valid_name(name: &str) -> bool {
+    let ok = |s: &str| !s.is_empty() && s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'/' | b'-'));
+    match name.split_once(':') {
+        Some((ns, path)) => ok(ns) && ok(path),
+        None => ok(name),
+    }
+}
+
 /// Registrate's builder entry points (`REGISTRATE.block("name", ...)`), used by Create and others.
 const REGISTRATE: [&str; 6] = ["block", "item", "blockEntity", "entity", "menu", "fluid"];
 
@@ -151,6 +161,7 @@ pub fn registrations(classes: &[ClassFile]) -> Vec<Registration> {
                         };
                         if let Some(call) = c.member(idx).filter(registers)
                             && let Some(name) = last.take()
+                            && valid_name(&name)
                         {
                             out.push(Registration { registry: registry_of(&call), name, class: c.name.clone() });
                         }
