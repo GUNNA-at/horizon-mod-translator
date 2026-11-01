@@ -266,6 +266,10 @@ impl<'a> Program<'a> {
             "/// Virtual dispatch over the mod's classes; API calls when no mod class implements it.\n\
              pub fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {\n\
              \x20   let class = rt.class_of(args.first().copied().unwrap_or_default());\n\
+             \x20   vcall_as(rt, class, owner_key, key, args)\n\
+             }\n\n\
+             /// `vcall` as if the receiver were of class `class` (a lambda's interface, for its default methods).\n\
+             pub fn vcall_as(rt: &mut Rt, class: &str, owner_key: &'static str, key: &'static str, args: &[V]) -> V {\n\
              \x20   match (class, key) {\n",
         );
         for class in self.classes.keys() {
@@ -290,7 +294,23 @@ impl<'a> Program<'a> {
         }
         table.push_str(")\n}\n\n");
         s.insert_str(0, &table);
-        s.push_str("        _ => match lambda_call(rt, class, args) {\n            Some(r) => r,\n            None => api::call(rt, owner_key, args),\n        },\n    }\n}\n");
+        s.push_str(concat!(
+            "        _ => {\n",
+            "            let recv = args.first().copied().unwrap_or_default();\n",
+            "            match rt.lambda_info.get(&recv.r()).copied() {\n",
+            "                // A lambda: its own method runs its implementation; anything else is a default\n",
+            "                // method of its interface (the mod's, or the API's).\n",
+            "                Some((iface, sam)) if !(key.starts_with(sam) && key.as_bytes().get(sam.len()) == Some(&b'.')) => {\n",
+            "                    if class != iface { vcall_as(rt, iface, owner_key, key, args) } else { api::call(rt, owner_key, args) }\n",
+            "                }\n",
+            "                _ => match lambda_call(rt, rt.class_of(recv), args) {\n",
+            "                    Some(r) => r,\n",
+            "                    None => api::call(rt, owner_key, args),\n",
+            "                },\n",
+            "            }\n",
+            "        }\n",
+            "    }\n}\n"
+        ));
         s
     }
 
@@ -348,7 +368,10 @@ impl<'a> Program<'a> {
                 };
                 let key = format!("{}.{}.{}", m.owner, m.name, m.desc);
                 self.lambdas.insert(key.clone(), (kind, m));
-                format!("{collect} let v = rt.lambda({key:?}, a); s.push(v); {go}")
+                // The functional interface and its method: other calls on the lambda are the
+                // interface's default methods.
+                let iface = desc.rsplit(')').next().unwrap_or("").trim_start_matches('L').trim_end_matches(';').to_owned();
+                format!("{collect} let v = rt.lambda({key:?}, a); rt.lambda_info.insert(v.r(), ({iface:?}, {_name:?})); s.push(v); {go}")
             }
             ("java/lang/runtime/ObjectMethods", "bootstrap") => {
                 let names = args.get(1).and_then(|&i| string(i)).unwrap_or_default();

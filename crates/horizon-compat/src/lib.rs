@@ -119,6 +119,8 @@ pub struct Rt {
     pub iter_sources: HashMap<u32, V>,
     /// The mod event bus's listeners: the event class each takes, and the listener.
     pub listeners: Vec<(String, V)>,
+    /// Each lambda object's functional interface and its method name.
+    pub lambda_info: HashMap<u32, (&'static str, &'static str)>,
     /// Registries the mod makes (`ResourceKey.createRegistryKey`), fired after vanilla's.
     pub custom_registries: Vec<String>,
     /// The mod's live block entities, by position.
@@ -151,6 +153,7 @@ impl Default for Rt {
             interned: HashMap::new(),
             iter_sources: HashMap::new(),
             listeners: Vec::new(),
+            lambda_info: HashMap::new(),
             custom_registries: Vec::new(),
             block_entities: HashMap::new(),
             block_entity_meta: HashMap::new(),
