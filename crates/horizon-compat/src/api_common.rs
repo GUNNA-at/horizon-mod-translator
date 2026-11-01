@@ -369,6 +369,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         ("net/minecraft/nbt/CompoundTag", n) if n.starts_with("put") => {
             let key = name_of(rt, a(1));
+            let kind = match n {
+                "putByte" | "putBoolean" => crate::nbt::BYTE,
+                "putShort" => crate::nbt::SHORT,
+                "putInt" => crate::nbt::INT,
+                "putLong" => crate::nbt::LONG,
+                "putFloat" => crate::nbt::FLOAT,
+                "putDouble" => crate::nbt::DOUBLE,
+                "putString" => crate::nbt::STRING,
+                _ => crate::nbt::TAG,
+            };
+            map_put(rt, a(0), crate::nbt::kind_key(&key), V::I(kind));
             map_put(rt, a(0), key, a(2));
             if n == "put" { a(2) } else { V::Void }
         }
@@ -398,6 +409,38 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
         }
 
+        // Block entities
+        ("net/minecraft/world/level/block/entity/BlockEntity", "<init>") => {
+            rt.put_field(a(0), "$type", a(1));
+            rt.put_field(a(0), "$pos", a(2));
+            rt.put_field(a(0), "$state", a(3));
+            V::Void
+        }
+        (o, "getBlockPos") if o.ends_with("BlockEntity") => rt.get_field(a(0), "$pos"),
+        (o, "getBlockState") if o.ends_with("BlockEntity") => rt.get_field(a(0), "$state"),
+        (o, "getType") if o.ends_with("BlockEntity") => rt.get_field(a(0), "$type"),
+        (o, "getLevel" | "hasLevel") if o.ends_with("BlockEntity") => {
+            if name == "hasLevel" { V::I(1) } else { rt.new_object("net/minecraft/server/level/ServerLevel") }
+        }
+        (o, "setChanged") if o.ends_with("BlockEntity") => V::Void,
+        ("net/minecraft/world/level/block/entity/BlockEntityType$Builder", "of") => {
+            let b = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType$Builder");
+            rt.put_field(b, "$factory", a(0));
+            b
+        }
+        ("net/minecraft/world/level/block/entity/BlockEntityType$Builder", "build") => {
+            let t = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType");
+            let f = rt.get_field(a(0), "$factory");
+            rt.put_field(t, "$factory", f);
+            t
+        }
+        (o, "createTickerHelper") if o.ends_with("BaseEntityBlock") => {
+            if a(0) == a(1) { a(2) } else { V::NULL }
+        }
+        (o, "getBlockEntity") if o.starts_with("net/minecraft/") && (o.ends_with("Level") || o.ends_with("LevelAccessor") || o.ends_with("BlockGetter") || o.ends_with("LevelReader")) => {
+            let h = native(rt, a(1));
+            rt.block_entities.get(&[h[0] as i32, h[1] as i32, h[2] as i32]).copied().unwrap_or(V::NULL)
+        }
         // Vec3
         ("net/minecraft/world/phys/Vec3", "<init>") if desc == "(DDD)V" => {
             rt.put_field(a(0), "x", a(1));

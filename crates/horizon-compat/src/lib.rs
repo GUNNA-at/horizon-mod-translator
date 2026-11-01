@@ -8,6 +8,7 @@ pub mod api;
 pub mod api_common;
 pub mod glue;
 pub mod host;
+pub mod nbt;
 
 /// A JVM value. References index [`Rt::heap`]; 0 is null.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -104,6 +105,10 @@ pub struct Rt {
     pub initialized: std::collections::HashSet<&'static str>,
     /// Values Java compares by identity, one object each (see `api_common`).
     pub interned: HashMap<String, V>,
+    /// The mod's live block entities, by position.
+    pub block_entities: HashMap<[i32; 3], V>,
+    /// Keys made at runtime (`static_key`).
+    keys: HashMap<String, &'static str>,
     /// The runtime's random stream (`RandomSource` without the game's own).
     pub random_state: u64,
 }
@@ -126,12 +131,24 @@ impl Default for Rt {
             namespace: String::new(),
             initialized: Default::default(),
             interned: HashMap::new(),
+            block_entities: HashMap::new(),
+            keys: HashMap::new(),
             random_state: 0x9E37_79B9_7F4A_7C15,
         }
     }
 }
 
 impl Rt {
+    /// A `&'static str` for a key built at runtime, made once per distinct key.
+    pub fn static_key(&mut self, key: &str) -> &'static str {
+        if let Some(k) = self.keys.get(key) {
+            return k;
+        }
+        let k: &'static str = Box::leak(key.to_owned().into_boxed_str());
+        self.keys.insert(key.to_owned(), k);
+        k
+    }
+
     /// Runs `f` with `host` as the game. The host is borrowed for exactly this call.
     pub fn with_host<R>(&mut self, host: &mut dyn host::Host, f: impl FnOnce(&mut Rt) -> R) -> R {
         // SAFETY: the pointer lives in `self.host` only until `f` returns, while `host` is

@@ -68,6 +68,16 @@ fn main() {
     }
     let ran = glue::tick_block(&mut rt, &mut host, [0, 0, 0], "minecraft:stone");
     println!("vanilla block: ran={ran}");
+    // A machine: its block entity ticks, saves, and survives losing its live object.
+    println!("counter: entity={:?} ticks={} grow: entity={:?}", glue::block_entity_id(&rt, "testmod:counter"), glue::block_entity_ticks(&rt, "testmod:counter"), glue::block_entity_id(&rt, "testmod:grow"));
+    let mut nbt = std::collections::BTreeMap::new();
+    for step in 1..=4 {
+        if step == 3 {
+            glue::block_entity_removed(&mut rt, [8, 64, 8]); // as a chunk unloading and loading again
+        }
+        glue::block_entity_tick(&mut rt, &mut host, [8, 64, 8], "testmod:counter", &mut nbt);
+        println!("be tick {step}: nbt={nbt:?} above={}", host.block_state([8, 65, 8]));
+    }
     let mut un: Vec<_> = rt.unmapped.keys().collect();
     un.sort();
     println!("unmapped: {un:?}");
@@ -85,11 +95,16 @@ fn main() {
     assert!(out.status.success(), "{}\n{stdout}", String::from_utf8_lossy(&out.stderr));
     eprintln!("{stdout}");
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines[0], r#"registered: ["block testmod:grow"]"#);
+    assert_eq!(lines[0], r#"registered: ["block testmod:counter", "block testmod:grow", "block_entity_type testmod:counter"]"#);
     assert_eq!(lines[1], "tick 0: ran=true above=minecraft:stone");
     assert_eq!(lines[2], "tick 1: ran=true above=minecraft:dirt");
     assert_eq!(lines[3], "tick 2: ran=true above=minecraft:dirt");
     assert_eq!(lines[4], "vanilla block: ran=false");
-    assert_eq!(lines[5], "unmapped: []");
+    assert_eq!(lines[5], r#"counter: entity=Some("testmod:counter") ticks=true grow: entity=None"#);
+    assert_eq!(lines[6], r#"be tick 1: nbt={"count": Int(1)} above=minecraft:air"#);
+    assert_eq!(lines[7], r#"be tick 2: nbt={"count": Int(2)} above=minecraft:air"#);
+    assert_eq!(lines[8], r#"be tick 3: nbt={"count": Int(3)} above=minecraft:stone"#);
+    assert_eq!(lines[9], r#"be tick 4: nbt={"count": Int(4)} above=minecraft:stone"#);
+    assert_eq!(lines[10], "unmapped: []");
     fs::remove_dir_all(&root).unwrap();
 }

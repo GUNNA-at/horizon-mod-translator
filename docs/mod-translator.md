@@ -76,7 +76,12 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       state properties (vanilla + mod bool/int/enum, interned identity), CompoundTag, Vec3, ItemStack/Item,
       Mth, RandomSource, Component, Enum, Optional. Create 28.1% → 46.0% of class uses mapped
       (594/3579 methods); Fences 56% → 67%. `MISSING=1 ... coverage <jar>` lists the next ones.
-- [ ] Next: a `horizon-native-mods` bundle per mod whose hooks
+- [x] Block entities in the runtime: `glue::{block_entity_id, block_entity_ticks, block_entity_tick,
+      block_entity_removed}`, NBT bridge (`compat::nbt::Nbt`, typed puts), BlockEntity/BlockEntityType.Builder/
+      createTickerHelper/Level.getBlockEntity, inherited-member resolution up mod superclasses (javac names
+      the mod class for inherited statics), API base constructors. Hook test: counter BE ticks, saves
+      `count`, survives losing its live object, acts on tick 3.
+- [ ] Next: wire block-entity hooks in the bundle (Game-level Host helpers + Nbt<->Compound); a `horizon-native-mods` bundle per mod whose hooks
       (tick_block, use_item_on, neighbor_changed, place_block, block_entity_tick...) call the mod's overrides
       through `vcall`; (2) grow `horizon-compat/src/api.rs` by the coverage list (Level, BlockState,
       ItemStack, CompoundTag, Vec3 first); (3) API callbacks into lambdas (DeferredRegister suppliers);

@@ -37,8 +37,42 @@ fn native(rt: &Rt, v: V) -> [i64; 4] {
 }
 
 /// Calls the API method `key` (`owner.name.desc`). For instance methods
-/// `args[0]` is the receiver.
+/// `args[0]` is the receiver. A key naming one of the mod's own classes (a
+/// member it inherits from the API, as `javac` writes inherited calls) is
+/// resolved up the class's superclasses, as the JVM resolves it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
+    let before = rt.unmapped.get(key).copied().unwrap_or(0);
+    let r = call_exact(rt, key, args);
+    if rt.unmapped.get(key).copied().unwrap_or(0) == before {
+        return r;
+    }
+    let Some((mut owner, rest)) = key.split_once('.') else { return r };
+    while let Some(&sup) = rt.supers.get(owner) {
+        let up = rt.static_key(&format!("{sup}.{rest}"));
+        let seen = rt.unmapped.get(up).copied().unwrap_or(0);
+        let r2 = call_exact(rt, up, args);
+        if rt.unmapped.get(up).copied().unwrap_or(0) == seen {
+            // Resolved: the miss on the mod's own name doesn't count.
+            if let Some(n) = rt.unmapped.get_mut(key) {
+                *n -= 1;
+                if *n == 0 {
+                    rt.unmapped.remove(key);
+                }
+            }
+            return r2;
+        }
+        if let Some(n) = rt.unmapped.get_mut(up) {
+            *n -= 1;
+            if *n == 0 {
+                rt.unmapped.remove(up);
+            }
+        }
+        owner = sup;
+    }
+    r
+}
+
+fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     match key {
         // java.lang
@@ -252,6 +286,10 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             state(rt, &n)
         }
         (BLOCK, "<init>") => V::Void,
+        // The API's base constructors a mod's own classes call (`super(properties)`): their state
+        // lives in the runtime's fields, so nothing more to do.
+        (o, "<init>") if o.starts_with("net/minecraft/world/level/block/") && (o.ends_with("Block") || o.ends_with("BlockBehaviour")) => V::Void,
+        (o, "<init>") if o.starts_with("net/minecraft/world/item/") && o.ends_with("Item") => V::Void,
         _ => return crate::api_common::call(rt, owner, name, desc, args),
     })
 }

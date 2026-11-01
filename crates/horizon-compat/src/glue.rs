@@ -70,3 +70,74 @@ pub fn neighbor_changed(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: 
         vec![l, p, b, f, V::I(moved as i32)]
     })
 }
+
+const NEW_BLOCK_ENTITY: &str = "newBlockEntity.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/entity/BlockEntity;";
+const GET_TICKER: &str = "getTicker.(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/entity/BlockEntityType;)Lnet/minecraft/world/level/block/entity/BlockEntityTicker;";
+const TICKER_TICK: &str = "net/minecraft/world/level/block/entity/BlockEntityTicker.tick.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/entity/BlockEntity;)V";
+const LOAD: &str = "loadAdditional.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
+const SAVE: &str = "saveAdditional.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
+
+fn implements(rt: &Rt, block: &str, key: &str) -> bool {
+    mod_block(rt, block).is_some_and(|(_, class)| rt.overrides.is_some_and(|o| o(class, key)))
+}
+
+/// `native_block_entity`: the id of the block's block entity, when the mod's block makes one.
+pub fn block_entity_id(rt: &Rt, block: &str) -> Option<String> {
+    implements(rt, block, NEW_BLOCK_ENTITY).then(|| block.to_owned())
+}
+
+/// `native_block_entity_ticks`: whether the mod's block gives its block entity a ticker.
+pub fn block_entity_ticks(rt: &Rt, block: &str) -> bool {
+    implements(rt, block, GET_TICKER)
+}
+
+/// The mod's block entity object at `pos`, made with `newBlockEntity` and loaded from `nbt` the first time.
+fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Option<V> {
+    if let Some(be) = rt.block_entities.get(&pos) {
+        return Some(*be);
+    }
+    let (b, _) = mod_block(rt, state)?;
+    let vc = rt.vcall?;
+    let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+    let st = api::state(rt, state);
+    let be = vc(rt, NEW_BLOCK_ENTITY, NEW_BLOCK_ENTITY, &[b, p, st]);
+    if be.r() == 0 {
+        return None;
+    }
+    let tag = crate::nbt::to_runtime(rt, nbt);
+    let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
+    vc(rt, LOAD, LOAD, &[be, tag, provider]);
+    rt.block_entities.insert(pos, be);
+    Some(be)
+}
+
+/// `native_block_entity_tick`: one server tick of the mod's block entity at `pos`, whose saved
+/// compound is `nbt` (read before, written after).
+pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, nbt: &mut std::collections::BTreeMap<String, crate::nbt::Nbt>) -> bool {
+    let Some((b, _)) = mod_block(rt, state) else { return false };
+    rt.with_host(host, |rt| {
+        let Some(be) = block_entity(rt, pos, state, nbt) else { return false };
+        let Some(vc) = rt.vcall else { return false };
+        let level = level(rt);
+        let st = api::state(rt, state);
+        let ty = rt.get_field(be, "$type");
+        let ticker = vc(rt, GET_TICKER, GET_TICKER, &[b, level, st, ty]);
+        if ticker.r() != 0 {
+            let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+            rt.call_functional(TICKER_TICK, ticker, &[level, p, st, be]);
+        }
+        rt.thrown = None;
+        let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
+        api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
+        let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
+        vc(rt, SAVE, SAVE, &[be, tag, provider]);
+        rt.thrown = None;
+        *nbt = crate::nbt::from_runtime(rt, tag);
+        true
+    })
+}
+
+/// The block entity at `pos` was removed (its block broken or replaced).
+pub fn block_entity_removed(rt: &mut Rt, pos: [i32; 3]) {
+    rt.block_entities.remove(&pos);
+}
