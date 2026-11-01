@@ -69,7 +69,17 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         owner = sup;
     }
+    trace_unmapped(rt, key);
     r
+}
+
+/// With `HORIZON_COMPAT_TRACE` set, each API method the mod calls that isn't mapped is printed
+/// once, the first time it runs: what a mod needs next, from a real game.
+fn trace_unmapped(rt: &Rt, key: &'static str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("HORIZON_COMPAT_TRACE").is_some()) && rt.unmapped.get(key) == Some(&1) {
+        eprintln!("horizon-compat: unmapped {key}");
+    }
 }
 
 fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
