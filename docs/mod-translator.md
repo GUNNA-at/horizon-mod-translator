@@ -46,7 +46,9 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       superclasses.
 - [x] invokedynamic: lambdas (captures, method refs, ctor refs) and string concat, Java number formatting;
       differential now 54 results.
-- [ ] Next: exceptions (try/catch tables); then a `translate` CLI that emits a
+- [x] Exceptions: handler tables, propagation through calls (`rt.thrown`), hierarchy-aware catch and
+      instanceof (`init(rt)` registers supers), ArithmeticException; differential 59 results.
+- [ ] Next: then a `translate` CLI that emits a
       native-mod crate wired to hooks.
 - [ ] (old plan item) Plan: `crates/horizon-compat` = runtime (V enum: I/J/F/D/Ref,
       object heap, static fields) + API impls keyed by mangled `owner.name.desc`; unmapped → logging stub.

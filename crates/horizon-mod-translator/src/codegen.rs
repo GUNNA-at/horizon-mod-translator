@@ -13,6 +13,9 @@ use std::{
     fmt::Write,
 };
 
+/// The pseudo-instruction offset of a method's unwind block.
+const THROW: usize = usize::MAX - 1;
+
 /// FNV-1a, for short stable suffixes on generated names.
 fn hash(s: &str) -> u32 {
     s.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
@@ -158,6 +161,13 @@ impl<'a> Program<'a> {
                 }
             }
         }
+        out.push_str("/// Registers the mod's class hierarchy with the runtime. Call once, before anything else.\npub fn init(rt: &mut Rt) {\n");
+        for c in &classes {
+            if let Some(sup) = &c.superclass {
+                let _ = writeln!(out, "    rt.supers.insert({:?}, {sup:?});", c.name);
+            }
+        }
+        out.push_str("}\n\n");
         out.push_str(&self.dispatch());
         out.push_str(&self.lambda_table());
         out
@@ -287,6 +297,7 @@ impl<'a> Program<'a> {
             }
         };
         let _ = writeln!(s, "    let mut pc: usize = 0;");
+        let _ = writeln!(s, "    let mut thrown_at: usize = 0;");
         let _ = writeln!(s, "    loop {{");
         let _ = writeln!(s, "        match pc {{");
         for (n, i) in insns.iter().enumerate() {
@@ -294,6 +305,19 @@ impl<'a> Program<'a> {
             let body = self.insn(c, i, next);
             let _ = writeln!(s, "            {} => {{ {body} }}", i.at);
         }
+        // Unwinding: the first handler covering the throwing instruction whose
+        // class matches catches; otherwise the exception leaves the method.
+        let _ = writeln!(s, "            {THROW} => {{");
+        let _ = writeln!(s, "                let e = rt.thrown.unwrap_or_default();");
+        for (start, end, handler, class) in &code.handlers {
+            let test = if class.is_empty() { "true".to_owned() } else { format!("rt.instance_of(e, {class:?})") };
+            let _ = writeln!(
+                s,
+                "                if thrown_at >= {start} && thrown_at < {end} && {test} {{ rt.thrown = None; s.clear(); s.push(e); pc = {handler}; continue; }}"
+            );
+        }
+        let _ = writeln!(s, "                return V::Void;");
+        let _ = writeln!(s, "            }}");
         let _ = writeln!(s, "            _ => return V::Void,");
         let _ = writeln!(s, "        }}\n    }}\n}}\n");
         s
@@ -386,12 +410,12 @@ impl<'a> Program<'a> {
             0x69 => bin("j", "J", "a.wrapping_mul(b)"),
             0x6a => bin("f", "F", "a * b"),
             0x6b => bin("d", "D", "a * b"),
-            0x6c => bin("i", "I", "horizon_compat::idiv(a, b)"),
-            0x6d => bin("j", "J", "horizon_compat::ldiv(a, b)"),
+            0x6c => format!("let b = {pop}.i(); let a = {pop}.i(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; }} else {{ s.push(V::I(horizon_compat::idiv(a, b))); {go} }}", at = i.at),
+            0x6d => format!("let b = {pop}.j(); let a = {pop}.j(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; }} else {{ s.push(V::J(horizon_compat::ldiv(a, b))); {go} }}", at = i.at),
             0x6e => bin("f", "F", "a / b"),
             0x6f => bin("d", "D", "a / b"),
-            0x70 => bin("i", "I", "horizon_compat::irem(a, b)"),
-            0x71 => bin("j", "J", "horizon_compat::lrem(a, b)"),
+            0x70 => format!("let b = {pop}.i(); let a = {pop}.i(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; }} else {{ s.push(V::I(horizon_compat::irem(a, b))); {go} }}", at = i.at),
+            0x71 => format!("let b = {pop}.j(); let a = {pop}.j(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; }} else {{ s.push(V::J(horizon_compat::lrem(a, b))); {go} }}", at = i.at),
             0x72 => bin("f", "F", "a % b"),
             0x73 => bin("d", "D", "a % b"),
             0x74 => format!("let a = {pop}.i(); s.push(V::I(a.wrapping_neg())); {go}"),
@@ -464,7 +488,7 @@ impl<'a> Program<'a> {
             0xac..=0xb0 => format!("return {pop};"),
             0xb1 => "return V::Void;".into(),
             0xb2..=0xb5 => self.field(c, i.op, idx as u16, &go),
-            0xb6..=0xb9 => self.invoke(c, i.op, idx as u16, &go),
+            0xb6..=0xb9 => self.invoke(c, i.op, idx as u16, &go, i.at),
             0xba => self.indy(c, idx as u16, &go),
             0xbb => {
                 let class = c.class_name(idx as u16).unwrap_or_default();
@@ -481,15 +505,11 @@ impl<'a> Program<'a> {
             }
             0xbd => format!("let n = {pop}.i(); let v = rt.new_array(n, V::NULL); s.push(v); {go}"),
             0xbe => format!("let a = {pop}; s.push(V::I(rt.array_len(a))); {go}"),
-            0xbf => {
-                // A thrown exception ends the method; the mod's catch blocks aren't translated yet.
-                self.unsupported("athrow");
-                "return V::Void;".into()
-            }
+            0xbf => format!("let e = {pop}; rt.thrown = Some(e); thrown_at = {}; pc = {THROW};", i.at),
             0xc0 => go, // checkcast: translated code trusts the mod's types
             0xc1 => {
                 let class = c.class_name(idx as u16).unwrap_or_default();
-                format!("let a = {pop}; s.push(V::I((a.r() != 0 && rt.class_of(a) == {class:?}) as i32)); {go}")
+                format!("let a = {pop}; s.push(V::I(rt.instance_of(a, {class:?}) as i32)); {go}")
             }
             0xc2 | 0xc3 => format!("s.pop(); {go}"),
             0xc5 => {
@@ -518,7 +538,7 @@ impl<'a> Program<'a> {
         }
     }
 
-    fn invoke(&mut self, c: &ClassFile, op: u8, idx: u16, go: &str) -> String {
+    fn invoke(&mut self, c: &ClassFile, op: u8, idx: u16, go: &str, at: usize) -> String {
         let Some(m) = c.member(idx) else { return go.to_owned() };
         let n = arg_kinds(&m.desc).len() + usize::from(op != 0xb8);
         let key = self.key(&m);
@@ -532,6 +552,6 @@ impl<'a> Program<'a> {
             },
             _ => format!("vcall(rt, {key:?}, {:?}, &args)", format!("{}.{}", m.name, m.desc)),
         };
-        format!("{collect} let r = {call}; {push} {go}")
+        format!("{collect} let r = {call}; if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; }} else {{ {push} {go} }}")
     }
 }

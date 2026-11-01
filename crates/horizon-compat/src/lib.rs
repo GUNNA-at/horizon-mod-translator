@@ -78,12 +78,20 @@ pub struct Rt {
     strings: HashMap<String, u32>,
     /// API methods the mod called that Horizon doesn't map yet, with counts.
     pub unmapped: HashMap<&'static str, u64>,
+    /// The exception being thrown, while it unwinds.
+    pub thrown: Option<V>,
+    /// Superclasses of classes the runtime knows (the mod's own, registered by
+    /// generated code, and the JDK's exceptions).
+    pub supers: HashMap<&'static str, &'static str>,
 }
 
 impl Rt {
     pub fn new() -> Rt {
         let mut rt = Rt::default();
         rt.heap.push(Object { class: "null", data: Data::Array(Vec::new()) });
+        for (c, sup) in JDK_SUPERS {
+            rt.supers.insert(c, sup);
+        }
         rt
     }
 
@@ -156,7 +164,46 @@ impl Rt {
     }
 }
 
+/// The JDK's own throwables, with their superclasses.
+const JDK_SUPERS: [(&str, &str); 12] = [
+    ("java/lang/Throwable", "java/lang/Object"),
+    ("java/lang/Exception", "java/lang/Throwable"),
+    ("java/lang/Error", "java/lang/Throwable"),
+    ("java/lang/RuntimeException", "java/lang/Exception"),
+    ("java/lang/ArithmeticException", "java/lang/RuntimeException"),
+    ("java/lang/IllegalArgumentException", "java/lang/RuntimeException"),
+    ("java/lang/IllegalStateException", "java/lang/RuntimeException"),
+    ("java/lang/NullPointerException", "java/lang/RuntimeException"),
+    ("java/lang/IndexOutOfBoundsException", "java/lang/RuntimeException"),
+    ("java/lang/ArrayIndexOutOfBoundsException", "java/lang/IndexOutOfBoundsException"),
+    ("java/lang/UnsupportedOperationException", "java/lang/RuntimeException"),
+    ("java/lang/NumberFormatException", "java/lang/IllegalArgumentException"),
+];
+
 impl Rt {
+    /// Whether `v` is an instance of `class` (walking known superclasses).
+    pub fn instance_of(&self, v: V, class: &str) -> bool {
+        if v.r() == 0 {
+            return false;
+        }
+        let mut c = self.class_of(v);
+        loop {
+            if c == class || class == "java/lang/Object" {
+                return true;
+            }
+            match self.supers.get(c) {
+                Some(s) => c = s,
+                None => return false,
+            }
+        }
+    }
+
+    /// Starts throwing a new exception of `class`.
+    pub fn throw_new(&mut self, class: &'static str) {
+        let e = self.new_object(class);
+        self.thrown = Some(e);
+    }
+
     /// A lambda object: its class is the implementing method's key, its data the captured values.
     pub fn lambda(&mut self, implementation: &'static str, captured: Vec<V>) -> V {
         self.alloc(implementation, Data::Array(captured))

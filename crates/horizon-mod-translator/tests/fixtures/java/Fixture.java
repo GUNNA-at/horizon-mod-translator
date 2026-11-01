@@ -60,4 +60,25 @@ public class Fixture {
         String s = "k=" + k + " half=" + (k / 2.0) + " big=" + (k * 1e9) + " ok=" + (k > 2) + " c=" + (char) ('a' + k % 26) + " L=" + (long) k * 3_000_000_000L + " n=" + null;
         return s.length() * 31 + (s.equals("k=0 half=0.0 big=0.0 ok=false c=a L=0 n=null") ? 1 : 0);
     }
+
+    static class Boom extends IllegalStateException { int code; Boom(int c) { code = c; } }
+    static int risky(int k) {
+        if (k == 1) throw new Boom(41);
+        if (k == 2) return 10 / (k - 2);
+        if (k == 3) throw new IllegalArgumentException();
+        return k * 100;
+    }
+    public static int exceptions(int k) {
+        int r = 0;
+        try {
+            try { r = risky(k); }
+            catch (Boom b) { r = b.code + 1; }
+            catch (ArithmeticException e) { r = -2; }
+            finally { r += 1000; }
+        } catch (RuntimeException e) {
+            r = (e instanceof IllegalArgumentException) ? -3 : -4;
+        }
+        Object o = new Boom(0);
+        return r + (o instanceof RuntimeException ? 1 : 0) + (o instanceof Boom ? 10 : 0);
+    }
 }

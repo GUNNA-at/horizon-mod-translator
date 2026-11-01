@@ -21,6 +21,7 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("nested", "(I)I", &["0", "5", "40"]),
     ("lambdas", "(I)I", &["0", "5", "-9"]),
     ("concat", "(I)I", &["0", "7", "123", "-4"]),
+    ("exceptions", "(I)I", &["0", "1", "2", "3", "4"]),
 ];
 
 fn has(tool: &str) -> bool {
@@ -103,7 +104,7 @@ fn translated_fixture_matches_the_jvm() {
         ),
     )
     .unwrap();
-    let mut main = String::from("mod fixture;\nuse fixture::*;\nuse horizon_compat::{Rt, V};\nfn main() {\n    let mut rt = Rt::new();\n");
+    let mut main = String::from("mod fixture;\nuse fixture::*;\nuse horizon_compat::{Rt, V};\nfn main() {\n    let mut rt = Rt::new();\n    init(&mut rt);\n");
     // Static initialiser first, as the JVM runs it.
     if parsed.iter().any(|c| c.name == "Fixture" && c.methods.iter().any(|m| m.name == "<clinit>")) {
         main.push_str(&format!("    {}(&mut rt, &[]);\n", horizon_mod_translator::codegen::fn_name("Fixture", "<clinit>", "()V")));
@@ -136,7 +137,7 @@ fn translated_fixture_matches_the_jvm() {
     for (e, a) in expected.lines().zip(actual.lines()) {
         assert_eq!(a, e);
     }
-    assert_eq!(expected.lines().count(), 54, "{expected}");
+    assert_eq!(expected.lines().count(), 59, "{expected}");
     assert_eq!(expected.lines().count(), actual.lines().count());
     eprintln!("{actual}");
     assert!(program.unsupported.is_empty(), "{:?}", program.unsupported);

@@ -37,6 +37,8 @@ pub struct Code {
     pub max_stack: u16,
     pub max_locals: u16,
     pub bytes: Vec<u8>,
+    /// (start, end, handler, catch class or "" for any).
+    pub handlers: Vec<(u16, u16, u16, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,7 +174,14 @@ impl ClassFile {
                     let mut c = Reader { b: body, i: 0 };
                     let (max_stack, max_locals) = (c.u2()?, c.u2()?);
                     let n = c.u4()? as usize;
-                    code = Some(Code { max_stack, max_locals, bytes: c.take(n)?.to_vec() });
+                    let bytes = c.take(n)?.to_vec();
+                    let mut handlers = Vec::new();
+                    for _ in 0..c.u2()? {
+                        let (start, end, handler, ty) = (c.u2()?, c.u2()?, c.u2()?, c.u2()?);
+                        let class = if ty == 0 { String::new() } else { cf.class_name(ty)? };
+                        handlers.push((start, end, handler, class));
+                    }
+                    code = Some(Code { max_stack, max_locals, bytes, handlers });
                 }
             }
             cf.methods.push(Method { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, code });
