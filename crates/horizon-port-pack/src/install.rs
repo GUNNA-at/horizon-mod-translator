@@ -21,6 +21,8 @@ use std::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct Installed {
     pub mod_id: String,
+    /// The translated code's native mod bundle, in `<game>/horizon-native-mods/`.
+    pub native: Option<PathBuf>,
     pub verdict: Verdict,
     pub summary: String,
     /// Where its folder mod went, when it was installed.
@@ -89,6 +91,37 @@ fn mod_id(carry: &Path) -> String {
         })
 }
 
+/// Translates the jar's code into a native mod bundle in `<game>/horizon-native-mods/<id>_translated/`
+/// (docs/mod-translator.md); its content mod for code-registered blocks goes to `horizon-mods/`
+/// unless the carry-over already made one.
+fn translate(jar: &Path, game: &Path, log: Log) -> Option<PathBuf> {
+    let classes = horizon_mod_translator::classes(jar).ok()?;
+    if classes.is_empty() {
+        return None;
+    }
+    let id = horizon_mod_translator::bundle::mod_id(jar)?;
+    let out = game.join("horizon-native-mods").join(format!("{id}_translated"));
+    let _ = fs::remove_dir_all(&out);
+    match horizon_mod_translator::bundle::write(jar, &classes, &out) {
+        Ok((_, left)) => {
+            for l in left {
+                log(format!("{id}: not translated: {l}"));
+            }
+            let content = out.join("content");
+            let mods = game.join("horizon-mods").join(&id);
+            if content.is_dir() && !mods.exists() {
+                let _ = copy_dir(&content, &mods);
+            }
+            let _ = fs::remove_dir_all(&content);
+            Some(out)
+        }
+        Err(e) => {
+            log(format!("{id}: code not translated: {e}"));
+            None
+        }
+    }
+}
+
 /// Copies the loadable carries into `<game>/horizon-mods/<id>/`.
 fn place(carries: &[PathBuf], game: &Path, out: &mut Outcome) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     let (on, off) = pipeline::loadable(carries);
@@ -111,6 +144,7 @@ fn jars(jars: &[PathBuf], game: &Path, work: &Path, log: Log) -> Result<Outcome,
         let stem = jar.file_stem().unwrap_or_default().to_string_lossy().into_owned();
         let dir = work.join("mods").join(&stem);
         let _ = fs::remove_dir_all(&dir);
+        let native = translate(jar, game, log);
         match check::check(jar, &dir) {
             Ok(c) => {
                 log(format!("{}: {}. {}", c.mod_id, c.verdict.label(), c.summary));
@@ -118,12 +152,13 @@ fn jars(jars: &[PathBuf], game: &Path, work: &Path, log: Log) -> Result<Outcome,
                 if c.verdict != Verdict::No && carry.join(horizon_mods::manifest::MANIFEST).is_file() {
                     carries.push(carry.clone());
                 }
-                checked.push((c, carry));
+                checked.push((c, carry, native));
             }
             Err(e) => {
                 log(format!("{}: {e}", jar.display()));
                 out.mods.push(Installed {
                     mod_id: stem,
+                    native,
                     verdict: Verdict::No,
                     summary: e,
                     path: None,
@@ -132,11 +167,12 @@ fn jars(jars: &[PathBuf], game: &Path, work: &Path, log: Log) -> Result<Outcome,
         }
     }
     let placed = place(&carries, game, &mut out)?;
-    for (c, carry) in checked {
+    for (c, carry, native) in checked {
         let path = placed.iter().find(|(from, _)| *from == carry).map(|(_, to)| to.clone());
         out.mods.push(Installed {
             mod_id: c.mod_id,
-            verdict: if path.is_none() { Verdict::No } else { c.verdict },
+            verdict: if path.is_none() && native.is_none() { Verdict::No } else { c.verdict },
+            native,
             summary: c.summary,
             path,
         });
@@ -168,6 +204,7 @@ fn pack(
     for (carry, to) in place(&carries, game, &mut out)? {
         out.mods.push(Installed {
             mod_id: mod_id(&carry),
+            native: None,
             verdict: Verdict::Works,
             summary: String::new(),
             path: Some(to),
@@ -177,10 +214,38 @@ fn pack(
         if !out.mods.iter().any(|m| m.mod_id == row.key) && row.status != crate::report::Status::Ported {
             out.mods.push(Installed {
                 mod_id: row.key.clone(),
+                native: None,
                 verdict: Verdict::No,
                 summary: row.reason.clone(),
                 path: None,
             });
+        }
+    }
+    // Every jar's code, translated into native mod bundles.
+    {
+        let records: Vec<crate::inventory::Record> =
+            pipeline::read_json(&work.join("inventory.json")).unwrap_or_default();
+        let mut jars: Vec<PathBuf> = records
+            .iter()
+            .filter_map(|r| r.jar.as_ref())
+            .map(|j| if Path::new(j).is_absolute() { PathBuf::from(j) } else { work.join(j) })
+            .filter(|p| is_jar(p))
+            .collect();
+        jars.sort();
+        jars.dedup();
+        for jar in jars {
+            let Some(native) = translate(&jar, game, log) else { continue };
+            let id = horizon_mod_translator::bundle::mod_id(&jar).unwrap_or_default();
+            match out.mods.iter_mut().find(|m| m.mod_id == id) {
+                Some(m) => m.native = Some(native),
+                None => out.mods.push(Installed {
+                    mod_id: id,
+                    native: Some(native),
+                    verdict: Verdict::Partly,
+                    summary: "code translated".into(),
+                    path: None,
+                }),
+            }
         }
     }
     let packs = work.join("resourcepacks");

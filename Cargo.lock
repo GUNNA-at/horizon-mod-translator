@@ -1595,6 +1595,7 @@ dependencies = [
 name = "horizon-port-pack"
 version = "0.1.0"
 dependencies = [
+ "horizon-mod-translator",
  "horizon-mods",
  "serde",
  "serde_json",

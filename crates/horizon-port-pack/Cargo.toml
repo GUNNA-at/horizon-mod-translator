@@ -7,6 +7,7 @@ rust-version = "1.86"
 description = "Port a Java modpack to Horizon: import, inventory, classification and data carry-over (docs/modpacks.md)"
 
 [dependencies]
+horizon-mod-translator = { path = "../horizon-mod-translator" }
 # Content path rules only (no runtime): what the game's content loader accepts.
 horizon-mods = { path = "../horizon-mods", default-features = false }
 serde = { version = "1", features = ["derive"] }

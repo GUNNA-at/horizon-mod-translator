@@ -112,7 +112,11 @@ fn main() -> ExitCode {
                 for m in &out.mods {
                     match &m.path {
                         Some(p) => println!("  + {} ({}) -> {}", m.mod_id, m.verdict.label(), p.display()),
+                        None if m.native.is_some() => println!("  + {}: code only", m.mod_id),
                         None => println!("  - {}: {}", m.mod_id, m.summary),
+                    }
+                    if let Some(n) = &m.native {
+                        println!("      code translated to native Rust -> {}", n.display());
                     }
                 }
                 for l in &out.left_off {

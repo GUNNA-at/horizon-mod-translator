@@ -69,6 +69,9 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
       `--dev-mod content`, resources prepared from the official 26.3 client/server jars + libraries,
       SHA-1 checked, kept in scratch): `/setblock 0 120 0 testmod:grow`, random_tick_speed 1000 → the
       translated randomTick/tick put stone above, then dirt. Repro: see "In-game test" below.
+- [x] `horizon-port-pack install` translates every jar's code too (single jars, folders, packs via
+      inventory jar paths) into `<game>/horizon-native-mods/<id>_translated/`, plus the content mod for
+      code-registered blocks. Drop of Fences + Create: both translated; Create's only gap is one typeSwitch.
 - [ ] Next: a `horizon-native-mods` bundle per mod whose hooks
       (tick_block, use_item_on, neighbor_changed, place_block, block_entity_tick...) call the mod's overrides
       through `vcall`; (2) grow `horizon-compat/src/api.rs` by the coverage list (Level, BlockState,
