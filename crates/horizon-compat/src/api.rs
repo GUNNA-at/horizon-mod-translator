@@ -20,14 +20,13 @@ const OPPOSITE: [i64; 6] = [1, 0, 3, 2, 5, 4];
 const AXIS: [i32; 6] = [1, 1, 2, 2, 0, 0];
 
 const BLOCK_POS: &str = "net/minecraft/core/BlockPos";
-const DIRECTION: &str = "net/minecraft/core/Direction";
 
 pub fn block_pos(rt: &mut Rt, x: i64, y: i64, z: i64) -> V {
     rt.alloc(BLOCK_POS, Data::Native("BlockPos", [x, y, z, 0]))
 }
 
 pub fn direction(rt: &mut Rt, ordinal: i64) -> V {
-    rt.alloc(DIRECTION, Data::Native("Direction", [ordinal, 0, 0, 0]))
+    crate::api_common::direction(rt, ordinal)
 }
 
 fn native(rt: &Rt, v: V) -> [i64; 4] {
@@ -112,7 +111,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         "net/minecraft/core/Direction.getStepZ.()I" => V::I(DIRECTIONS[native(rt, a(0))[0].clamp(0, 5) as usize][2] as i32),
         "net/minecraft/core/Direction.getAxis.()Lnet/minecraft/core/Direction$Axis;" => {
             let ax = AXIS[native(rt, a(0))[0].clamp(0, 5) as usize];
-            rt.alloc("net/minecraft/core/Direction$Axis", Data::Native("Axis", [ax as i64, 0, 0, 0]))
+            crate::api_common::axis(rt, ax as i64)
         }
         _ => match world(rt, key, args) {
             Some(v) => v,
@@ -137,7 +136,7 @@ const BLOCK: &str = "net/minecraft/world/level/block/Block";
 
 /// A block state value (its text, `minecraft:stone` or `create:shaft[axis=y]`).
 pub fn state(rt: &mut Rt, text: &str) -> V {
-    rt.alloc(STATE, Data::Str(text.to_owned()))
+    crate::api_common::state(rt, text)
 }
 
 /// A block value: the mod's own Block object when it registered one by that name.
@@ -245,7 +244,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "isAir" => V::I(matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") as i32),
                 "is" if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") => V::I((block_name(rt, a(1)) == b) as i32),
                 "equals" => V::I((rt.str_of(a(1)) == Some(text.as_str())) as i32),
-                _ => return None,
+                _ => return crate::api_common::call(rt, owner, name, desc, args),
             }
         }
         (BLOCK, "defaultBlockState") | (_, "defaultBlockState") => {
@@ -253,7 +252,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             state(rt, &n)
         }
         (BLOCK, "<init>") => V::Void,
-        _ => return None,
+        _ => return crate::api_common::call(rt, owner, name, desc, args),
     })
 }
 
@@ -271,6 +270,11 @@ fn offset(rt: &mut Rt, p: V, d: [i64; 3], n: i64) -> V {
 
 /// Static fields of API classes (`Direction.UP`...).
 pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
+    if let Some((o, f)) = key.split_once('.')
+        && let Some(v) = crate::api_common::get_static(rt, o, f)
+    {
+        return v;
+    }
     let dir = |rt: &mut Rt, o| direction(rt, o);
     match key {
         "net/minecraft/core/Direction.DOWN" => dir(rt, 0),

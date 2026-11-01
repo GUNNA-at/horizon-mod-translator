@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 pub mod api;
+pub mod api_common;
 pub mod glue;
 pub mod host;
 
@@ -61,6 +62,8 @@ pub enum Data {
     Fields(HashMap<&'static str, V>),
     Str(String),
     Array(Vec<V>),
+    /// A string-keyed map (`CompoundTag`).
+    Map(HashMap<String, V>),
     /// An API object Horizon owns, by kind and handle (a block state id, a position...).
     Native(&'static str, [i64; 4]),
 }
@@ -99,6 +102,10 @@ pub struct Rt {
     pub namespace: String,
     /// Classes whose static initialiser ran.
     pub initialized: std::collections::HashSet<&'static str>,
+    /// Values Java compares by identity, one object each (see `api_common`).
+    pub interned: HashMap<String, V>,
+    /// The runtime's random stream (`RandomSource` without the game's own).
+    pub random_state: u64,
 }
 
 impl Default for Rt {
@@ -118,6 +125,8 @@ impl Default for Rt {
             suppliers: Vec::new(),
             namespace: String::new(),
             initialized: Default::default(),
+            interned: HashMap::new(),
+            random_state: 0x9E37_79B9_7F4A_7C15,
         }
     }
 }

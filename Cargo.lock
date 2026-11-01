@@ -1550,6 +1550,7 @@ dependencies = [
 name = "horizon-mod-translator"
 version = "0.1.0"
 dependencies = [
+ "horizon-compat",
  "serde",
  "serde_json",
  "zip",

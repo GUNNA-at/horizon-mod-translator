@@ -72,6 +72,10 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
 - [x] `horizon-port-pack install` translates every jar's code too (single jars, folders, packs via
       inventory jar paths) into `<game>/horizon-native-mods/<id>_translated/`, plus the content mod for
       code-registered blocks. Drop of Fences + Create: both translated; Create's only gap is one typeSwitch.
+- [x] API coverage metric in `coverage` (each API method called once through the runtime). api_common:
+      state properties (vanilla + mod bool/int/enum, interned identity), CompoundTag, Vec3, ItemStack/Item,
+      Mth, RandomSource, Component, Enum, Optional. Create 28.1% → 46.0% of class uses mapped
+      (594/3579 methods); Fences 56% → 67%. `MISSING=1 ... coverage <jar>` lists the next ones.
 - [ ] Next: a `horizon-native-mods` bundle per mod whose hooks
       (tick_block, use_item_on, neighbor_changed, place_block, block_entity_tick...) call the mod's overrides
       through `vcall`; (2) grow `horizon-compat/src/api.rs` by the coverage list (Level, BlockState,

@@ -71,6 +71,34 @@ fn main() -> ExitCode {
             }
         };
         let calls = horizon_mod_translator::api_calls(&classes);
+        // Which of them the runtime maps: call each once and see whether it counts as unmapped.
+        let (mut mapped, mut sites, mut mapped_sites) = (0usize, 0usize, 0usize);
+        let mut missing: Vec<(usize, String)> = Vec::new();
+        for (m, n) in &calls {
+            let key: &'static str = Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
+            let mut rt = horizon_compat::Rt::new();
+            let args = vec![horizon_compat::V::NULL; horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + 1];
+            horizon_compat::api::call(&mut rt, key, &args);
+            sites += n;
+            if rt.unmapped.is_empty() {
+                mapped += 1;
+                mapped_sites += n;
+            } else {
+                missing.push((*n, key.to_owned()));
+            }
+        }
+        missing.sort_by(|a, b| b.0.cmp(&a.0));
+        println!(
+            "  mapped: {mapped} of {} API methods ({:.1}%), {mapped_sites} of {sites} class uses ({:.1}%)",
+            calls.len(),
+            100.0 * mapped as f64 / calls.len().max(1) as f64,
+            100.0 * mapped_sites as f64 / sites.max(1) as f64
+        );
+        if std::env::var_os("MISSING").is_some() {
+            for (n, k) in missing.iter().take(60) {
+                println!("  missing {n:5} {k}");
+            }
+        }
         let methods: usize = classes.iter().map(|c| c.methods.len()).sum();
         println!("{jar}: {} classes, {methods} methods, {} distinct API methods called", classes.len(), calls.len());
         let mut top: Vec<_> = calls.into_iter().collect();
