@@ -19,6 +19,8 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("overflow", "(I)I", &["0", "3000", "-77777"]),
     ("casts", "(D)I", &["0", "1e10", "-3.75", "65601.5", "NaN"]),
     ("nested", "(I)I", &["0", "5", "40"]),
+    ("lambdas", "(I)I", &["0", "5", "-9"]),
+    ("concat", "(I)I", &["0", "7", "123", "-4"]),
 ];
 
 fn has(tool: &str) -> bool {
@@ -134,7 +136,7 @@ fn translated_fixture_matches_the_jvm() {
     for (e, a) in expected.lines().zip(actual.lines()) {
         assert_eq!(a, e);
     }
-    assert_eq!(expected.lines().count(), 47, "{expected}");
+    assert_eq!(expected.lines().count(), 54, "{expected}");
     assert_eq!(expected.lines().count(), actual.lines().count());
     eprintln!("{actual}");
     assert!(program.unsupported.is_empty(), "{:?}", program.unsupported);

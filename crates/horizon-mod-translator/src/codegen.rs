@@ -63,6 +63,41 @@ pub fn arg_kinds(desc: &str) -> Vec<char> {
     out
 }
 
+/// Argument kinds keeping booleans and chars apart ('Z', 'C'), for string conversion.
+pub fn raw_kinds(desc: &str) -> String {
+    let inner = &desc[1..desc.find(')').unwrap_or(1)];
+    let mut out = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            'L' => {
+                for d in chars.by_ref() {
+                    if d == ';' {
+                        break;
+                    }
+                }
+                out.push('L');
+            }
+            '[' => {
+                while chars.peek() == Some(&'[') {
+                    chars.next();
+                }
+                if chars.next() == Some('L') {
+                    for d in chars.by_ref() {
+                        if d == ';' {
+                            break;
+                        }
+                    }
+                }
+                out.push('L');
+            }
+            'B' | 'S' => out.push('I'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn returns_value(desc: &str) -> bool {
     !desc.ends_with(")V")
 }
@@ -73,6 +108,8 @@ pub struct Program<'a> {
     /// Static strings, emitted once.
     keys: BTreeSet<String>,
     pub unsupported: BTreeMap<String, usize>,
+    /// Lambda implementations seen: key → (handle kind, member).
+    lambdas: BTreeMap<String, (u8, Member)>,
 }
 
 impl<'a> Program<'a> {
@@ -81,6 +118,7 @@ impl<'a> Program<'a> {
             classes: classes.iter().map(|c| (c.name.as_str(), c)).collect(),
             keys: BTreeSet::new(),
             unsupported: BTreeMap::new(),
+            lambdas: BTreeMap::new(),
         }
     }
 
@@ -121,6 +159,7 @@ impl<'a> Program<'a> {
             }
         }
         out.push_str(&self.dispatch());
+        out.push_str(&self.lambda_table());
         out
     }
 
@@ -152,8 +191,71 @@ impl<'a> Program<'a> {
                 }
             }
         }
-        s.push_str("        _ => api::call(rt, owner_key, args),\n    }\n}\n");
+        s.push_str("        _ => match lambda_call(rt, class, args) {\n            Some(r) => r,\n            None => api::call(rt, owner_key, args),\n        },\n    }\n}\n");
         s
+    }
+
+    /// Calls on lambda objects: captured values first, then the call's own arguments.
+    fn lambda_table(&self) -> String {
+        let mut s = String::from(
+            "/// A call on a lambda object (its class is the implementation's key).\n\
+             pub fn lambda_call(rt: &mut Rt, class: &str, args: &[V]) -> Option<V> {\n\
+             \x20   let mut full = rt.captured(args.first().copied().unwrap_or_default());\n\
+             \x20   full.extend_from_slice(args.get(1..).unwrap_or_default());\n\
+             \x20   Some(match class {\n",
+        );
+        for (key, (kind, m)) in &self.lambdas {
+            let call = match (kind, self.resolve(&m.owner, &m.name, &m.desc)) {
+                (8, imp) => {
+                    let init = match imp {
+                        Some(imp) => format!("{}(rt, &a);", fn_name(&imp, &m.name, &m.desc)),
+                        None => format!("api::call(rt, {key:?}, &a);"),
+                    };
+                    format!("{{ let o = rt.new_object({:?}); let mut a = vec![o]; a.extend(full); {init} o }}", m.owner)
+                }
+                (5 | 9, _) => format!("vcall(rt, {key:?}, {:?}, &full)", format!("{}.{}", m.name, m.desc)),
+                (_, Some(imp)) => format!("{}(rt, &full)", fn_name(&imp, &m.name, &m.desc)),
+                (_, None) => format!("api::call(rt, {key:?}, &full)"),
+            };
+            let _ = writeln!(s, "        {key:?} => {call},");
+        }
+        s.push_str("        _ => return None,\n    })\n}\n");
+        s
+    }
+
+    fn indy(&mut self, c: &ClassFile, idx: u16, go: &str) -> String {
+        let Some((bsm, _name, desc)) = c.indy(idx) else { return go.to_owned() };
+        let Some((handle, args)) = c.bootstrap.get(bsm as usize).cloned() else { return go.to_owned() };
+        let Some((_, factory)) = c.handle(handle) else { return go.to_owned() };
+        let n = arg_kinds(&desc).len();
+        let collect = format!("let at = s.len().saturating_sub({n}); let a: Vec<V> = s.split_off(at);");
+        let string = |i: u16| match c.pool.get(i as usize) {
+            Some(Const::String(u)) => c.utf8(*u).ok(),
+            _ => None,
+        };
+        match (factory.owner.as_str(), factory.name.as_str()) {
+            ("java/lang/invoke/StringConcatFactory", "makeConcatWithConstants") => {
+                let recipe = args.first().and_then(|&i| string(i)).unwrap_or_default();
+                let consts: Vec<String> = args.iter().skip(1).filter_map(|&i| string(i)).collect();
+                format!(
+                    "{collect} let v = rt.concat({recipe:?}, {:?}, &a, &{consts:?}); s.push(v); {go}",
+                    raw_kinds(&desc)
+                )
+            }
+            ("java/lang/invoke/LambdaMetafactory", "metafactory" | "altMetafactory") => {
+                let Some((kind, m)) = args.get(1).and_then(|&i| c.handle(i)) else {
+                    self.unsupported("lambda without an implementation handle");
+                    return format!("s.push(V::NULL); {go}");
+                };
+                let key = format!("{}.{}.{}", m.owner, m.name, m.desc);
+                self.lambdas.insert(key.clone(), (kind, m));
+                format!("{collect} let v = rt.lambda({key:?}, a); s.push(v); {go}")
+            }
+            (o, n) => {
+                self.unsupported(&format!("invokedynamic {o}.{n}"));
+                format!("{collect} s.push(V::NULL); {go}")
+            }
+        }
     }
 
     fn method(&mut self, c: &ClassFile, name: &str, desc: &str, is_static: bool, code: &crate::class::Code) -> String {
@@ -363,11 +465,7 @@ impl<'a> Program<'a> {
             0xb1 => "return V::Void;".into(),
             0xb2..=0xb5 => self.field(c, i.op, idx as u16, &go),
             0xb6..=0xb9 => self.invoke(c, i.op, idx as u16, &go),
-            0xba => {
-                self.unsupported("invokedynamic (lambdas, string concatenation)");
-                // Pop nothing we can't see; push a placeholder for the produced value.
-                format!("s.push(V::NULL); {go}")
-            }
+            0xba => self.indy(c, idx as u16, &go),
             0xbb => {
                 let class = c.class_name(idx as u16).unwrap_or_default();
                 format!("let v = rt.new_object({class:?}); s.push(v); {go}")

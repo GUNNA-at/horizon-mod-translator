@@ -63,6 +63,8 @@ pub struct ClassFile {
     pub interfaces: Vec<String>,
     pub fields: Vec<Field>,
     pub methods: Vec<Method>,
+    /// `BootstrapMethods`: (method handle index, static argument indices).
+    pub bootstrap: Vec<(u16, Vec<u16>)>,
 }
 
 struct Reader<'a> {
@@ -144,6 +146,7 @@ impl ClassFile {
             interfaces: Vec::new(),
             fields: Vec::new(),
             methods: Vec::new(),
+            bootstrap: Vec::new(),
         };
         cf.access = r.u2()?;
         cf.name = cf.class_name(r.u2()?)?;
@@ -173,6 +176,20 @@ impl ClassFile {
                 }
             }
             cf.methods.push(Method { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, code });
+        }
+        for _ in 0..r.u2()? {
+            let an = r.u2()?;
+            let len = r.u4()? as usize;
+            let body = r.take(len)?;
+            if cf.utf8(an)? == "BootstrapMethods" {
+                let mut b = Reader { b: body, i: 0 };
+                for _ in 0..b.u2()? {
+                    let handle = b.u2()?;
+                    let n = b.u2()?;
+                    let args = (0..n).map(|_| b.u2()).collect::<Result<Vec<_>, _>>()?;
+                    cf.bootstrap.push((handle, args));
+                }
+            }
         }
         Ok(cf)
     }
@@ -207,6 +224,21 @@ impl ClassFile {
             name: self.utf8(*n).ok()?,
             desc: self.utf8(*d).ok()?,
         })
+    }
+
+    /// The method a `MethodHandle` constant points at.
+    pub fn handle(&self, i: u16) -> Option<(u8, Member)> {
+        match self.pool.get(i as usize)? {
+            Const::MethodHandle(kind, r) => Some((*kind, self.member(*r)?)),
+            _ => None,
+        }
+    }
+
+    /// An `invokedynamic` site: (bootstrap index, name, descriptor).
+    pub fn indy(&self, i: u16) -> Option<(u16, String, String)> {
+        let Const::InvokeDynamic(bsm, nt) = self.pool.get(i as usize)? else { return None };
+        let Const::NameAndType(n, d) = self.pool.get(*nt as usize)? else { return None };
+        Some((*bsm, self.utf8(*n).ok()?, self.utf8(*d).ok()?))
     }
 
     /// Every method reference in the pool (what the class calls).

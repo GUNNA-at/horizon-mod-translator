@@ -45,4 +45,19 @@ public class Fixture {
     public static int overflow(int x) { return x * 1_000_003 + Integer.MAX_VALUE; }
     public static int casts(double d) { return (int) d + (int) (float) d + (byte) (int) d + (char) (int) d; }
     public static int nested(int n) { int c = 0; outer: for (int i = 0; i < n; i++) { for (int j = 0; j < n; j++) { if (i * j > n) continue outer; c += i ^ j; } } return c; }
+
+    interface IntOp { int apply(int x); }
+    static int twice(IntOp f, int x) { return f.apply(f.apply(x)); }
+    static int square(int x) { return x * x; }
+    public static int lambdas(int k) {
+        int base = k + 1;
+        IntOp add = x -> x + base;
+        IntOp sq = Fixture::square;
+        java.util.function.Supplier<Shape> make = Square::new;
+        return twice(add, k) + twice(sq, 3) + make.get().sides();
+    }
+    public static int concat(int k) {
+        String s = "k=" + k + " half=" + (k / 2.0) + " big=" + (k * 1e9) + " ok=" + (k > 2) + " c=" + (char) ('a' + k % 26) + " L=" + (long) k * 3_000_000_000L + " n=" + null;
+        return s.length() * 31 + (s.equals("k=0 half=0.0 big=0.0 ok=false c=a L=0 n=null") ? 1 : 0);
+    }
 }

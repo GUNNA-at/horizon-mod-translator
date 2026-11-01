@@ -156,6 +156,85 @@ impl Rt {
     }
 }
 
+impl Rt {
+    /// A lambda object: its class is the implementing method's key, its data the captured values.
+    pub fn lambda(&mut self, implementation: &'static str, captured: Vec<V>) -> V {
+        self.alloc(implementation, Data::Array(captured))
+    }
+
+    pub fn captured(&self, v: V) -> Vec<V> {
+        match self.heap.get(v.r() as usize).map(|o| &o.data) {
+            Some(Data::Array(c)) => c.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `String.valueOf` of a value whose static kind is `kind` ('I', 'Z', 'C', 'J', 'F', 'D', 'L').
+    pub fn to_java_string(&self, v: V, kind: char) -> String {
+        match kind {
+            'Z' => (v.i() != 0).to_string(),
+            'C' => char::from_u32(v.i() as u32 & 0xffff).map_or_else(String::new, String::from),
+            'J' => v.j().to_string(),
+            'F' => java_double(v.f() as f64, true),
+            'D' => java_double(v.d(), false),
+            'L' => match self.str_of(v) {
+                Some(s) => s.to_owned(),
+                None if v.r() == 0 => "null".into(),
+                None => match self.heap.get(v.r() as usize).map(|o| &o.data) {
+                    Some(Data::Fields(f)) if f.contains_key("value") => f["value"].i().to_string(),
+                    _ => format!("{}@{:x}", self.class_of(v).replace('/', "."), v.r()),
+                },
+            },
+            _ => v.i().to_string(),
+        }
+    }
+
+    /// `StringConcatFactory.makeConcatWithConstants`: `\u{1}` takes the next
+    /// argument, `\u{2}` the next constant.
+    pub fn concat(&mut self, recipe: &str, kinds: &str, args: &[V], constants: &[&str]) -> V {
+        let mut out = String::new();
+        let (mut a, mut c) = (0, 0);
+        let kinds: Vec<char> = kinds.chars().collect();
+        for ch in recipe.chars() {
+            match ch {
+                '\u{1}' => {
+                    out.push_str(&self.to_java_string(args.get(a).copied().unwrap_or_default(), kinds.get(a).copied().unwrap_or('L')));
+                    a += 1;
+                }
+                '\u{2}' => {
+                    out.push_str(constants.get(c).copied().unwrap_or(""));
+                    c += 1;
+                }
+                ch => out.push(ch),
+            }
+        }
+        self.alloc("java/lang/String", Data::Str(out))
+    }
+}
+
+/// `Double.toString` / `Float.toString`: shortest round-trip digits, as the
+/// JDK prints them since 19, with Java's `1.0`, `1.0E10` and `NaN` forms.
+pub fn java_double(d: f64, float: bool) -> String {
+    if d.is_nan() {
+        return "NaN".into();
+    }
+    if d.is_infinite() {
+        return if d > 0.0 { "Infinity" } else { "-Infinity" }.into();
+    }
+    if d == 0.0 {
+        return if d.is_sign_negative() { "-0.0" } else { "0.0" }.into();
+    }
+    let a = d.abs();
+    if (1e-3..1e7).contains(&a) {
+        let s = if float { format!("{}", d as f32) } else { format!("{d}") };
+        return if s.contains('.') { s } else { format!("{s}.0") };
+    }
+    let s = if float { format!("{:e}", d as f32) } else { format!("{d:e}") };
+    let (m, e) = s.split_once('e').unwrap_or((&s, "0"));
+    let m = if m.contains('.') { m.to_owned() } else { format!("{m}.0") };
+    format!("{m}E{e}")
+}
+
 /// Java's integer division and remainder: no panic on zero (the JVM would
 /// throw; translated code returns 0) and `MIN / -1` wraps.
 pub fn idiv(a: i32, b: i32) -> i32 {
