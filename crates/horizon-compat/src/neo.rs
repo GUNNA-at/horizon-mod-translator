@@ -88,7 +88,7 @@ pub fn post(rt: &mut Rt, class: &str, event: V) {
     for (wanted, l) in listeners {
         if reaches(rt, class, &wanted) {
             rt.call_functional(ACCEPT, l, &[event]);
-            rt.thrown = None;
+            rt.report_thrown(class);
         }
     }
 }

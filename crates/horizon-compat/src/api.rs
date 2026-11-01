@@ -69,16 +69,25 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         owner = sup;
     }
-    trace_unmapped(rt, key);
+    trace_unmapped(rt, key, args);
     r
 }
 
 /// With `HORIZON_COMPAT_TRACE` set, each API method the mod calls that isn't mapped is printed
 /// once, the first time it runs: what a mod needs next, from a real game.
-fn trace_unmapped(rt: &Rt, key: &'static str) {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("HORIZON_COMPAT_TRACE").is_some()) && rt.unmapped.get(key) == Some(&1) {
-        eprintln!("horizon-compat: unmapped {key}");
+/// A key on a JDK exception class (`java/lang/IllegalStateException.<init>...`).
+fn exception_class(key: &str) -> bool {
+    let owner = key.split('.').next().unwrap_or("");
+    owner.starts_with("java/") && (owner.ends_with("Exception") || owner.ends_with("Error") || owner.ends_with("Throwable"))
+}
+
+fn trace_unmapped(rt: &Rt, key: &'static str, args: &[V]) {
+    if Rt::tracing() && rt.unmapped.get(key) == Some(&1) {
+        let on = match args.first() {
+            Some(&v @ V::R(_)) => format!(" (on {})", rt.class_of(v)),
+            _ => String::new(),
+        };
+        eprintln!("horizon-compat: unmapped {key}{on}");
     }
 }
 
@@ -157,6 +166,12 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             let ax = AXIS[native(rt, a(0))[0].clamp(0, 5) as usize];
             crate::api_common::axis(rt, ax as i64)
         }
+        k if exception_class(k) && k.contains(".<init>.(Ljava/lang/String;") => {
+            rt.put_field(a(0), "message", a(1));
+            V::Void
+        }
+        k if exception_class(k) && k.contains(".<init>.") => V::Void,
+        k if exception_class(k) && (k.contains(".getMessage.") || k.contains(".getLocalizedMessage.")) => rt.get_field(a(0), "message"),
         _ => match crate::neo::call(rt, key, args).or_else(|| crate::jutil::call(rt, key, args)).or_else(|| world(rt, key, args)) {
             Some(v) => v,
             None => {

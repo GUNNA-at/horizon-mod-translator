@@ -212,7 +212,7 @@ impl<'a> Program<'a> {
         out.push_str("/// Runs the mod's registrations, as NeoForge's loading does. Call after `init`.\npub fn start(rt: &mut Rt) {\n");
         for c in classes {
             if c.fields.iter().any(|f| f.access & 0x0008 != 0 && f.desc.contains("neoforged/neoforge/registries/DeferredRegister")) {
-                let _ = writeln!(out, "    {}", self.ensure(&c.name).replace("return V::Void;", "return;"));
+                let _ = writeln!(out, "    {}", self.ensure(&c.name).replace("if rt.thrown.is_some() { return V::Void; }", &format!("rt.report_thrown({:?});", c.name)));
             }
         }
         // FML constructs the `@Mod` class with the mod bus, then fires the registration events.
@@ -223,8 +223,8 @@ impl<'a> Program<'a> {
             for p in &params {
                 let _ = writeln!(out, "        let v = horizon_compat::neo::constructor_arg(rt, {p:?}); args.push(v);");
             }
-            let _ = writeln!(out, "        {}", self.ensure(&main.name).replace("return V::Void;", "return;"));
-            let _ = writeln!(out, "        {}(rt, &args);\n        rt.thrown = None;\n    }}", fn_name(&main.name, "<init>", &ctor.desc));
+            let _ = writeln!(out, "        {}", self.ensure(&main.name).replace("if rt.thrown.is_some() { return V::Void; }", &format!("rt.report_thrown({:?});", main.name)));
+            let _ = writeln!(out, "        {}(rt, &args);\n        rt.report_thrown(\"the mod's constructor\");\n    }}", fn_name(&main.name, "<init>", &ctor.desc));
             out.push_str("    horizon_compat::neo::fire_registrations(rt);\n");
         }
         out.push_str("    rt.resolve_registrations();\n}\n\n");

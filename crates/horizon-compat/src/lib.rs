@@ -346,6 +346,24 @@ impl Rt {
     }
 
     /// Starts throwing a new exception of `class`.
+    /// Whether `HORIZON_COMPAT_TRACE` is set: report unmapped calls and uncaught exceptions.
+    pub fn tracing() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("HORIZON_COMPAT_TRACE").is_some())
+    }
+
+    /// An exception nothing caught, at a top level (`what`: a static initialiser, the mod's
+    /// constructor, an event listener): reported when tracing, then dropped so loading goes on.
+    pub fn report_thrown(&mut self, what: &str) {
+        if let Some(e) = self.thrown.take()
+            && Self::tracing()
+        {
+            let msg = self.get_field(e, "message");
+            let msg = self.str_of(msg).unwrap_or("").to_owned();
+            eprintln!("horizon-compat: uncaught {} in {what}: {msg}", self.class_of(e));
+        }
+    }
+
     pub fn throw_new(&mut self, class: &'static str) {
         let e = self.new_object(class);
         self.thrown = Some(e);
