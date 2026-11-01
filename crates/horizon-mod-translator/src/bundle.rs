@@ -248,15 +248,12 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let props = crate::props::block_properties(classes);
         for b in &blocks {
-            // grass_block random-ticks, but brings `snowy`, and the game orders a template's
-            // properties before the mod's: a block with a property named before it takes stone.
-            let early = props.get(b.as_str()).is_some_and(|ps| ps.iter().any(|p| p.name.as_str() < "snowy"));
-            let template = if early { "minecraft:stone" } else { "minecraft:grass_block" };
-            let mut json = format!("{{ \"template\": \"{template}\", \"item\": true");
+            // Stone has no state properties and no behaviour of its own; `random_ticks` keeps the
+            // mod's `randomTick` reachable.
+            let mut json = String::from("{ \"template\": \"minecraft:stone\", \"properties\": { \"random_ticks\": true }, \"item\": true");
             if let Some(ps) = props.get(b.as_str()) {
                 let defs: Vec<String> = ps
                     .iter()
-                    .filter(|p| early || p.name != "snowy") // grass_block's own
                     .map(|p| {
                         if p.values == ["false", "true"] {
                             format!("\"{}\": {{ \"type\": \"boolean\" }}", p.name)

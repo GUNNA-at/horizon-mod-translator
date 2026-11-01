@@ -120,5 +120,10 @@ Pass `--game-dir`: the game folder defaults to the working directory.
 - Game built with Create's full translated engine (`--profile fast`, 13.5 min, 170 MB binary): builds and runs.
 - Create's content mod loads (fix: blocks whose properties sort before `snowy` use the `minecraft:stone` template).
 - `/setblock` works for shaft, cogwheel, andesite_casing, gearbox and hand_crank, and the game keeps ticking.
-- [ ] Create blocks render invisible (outline only): its block models/textures don't resolve yet. Next item.
+- [x] Create blocks render with Create's own models (shaft, cogwheel, large cogwheel, casing, gearbox, hand crank, verified
+  by screenshot). The earlier "invisible" was a misread: the player had fallen below the blocks.
+- [x] Every block uses template `minecraft:stone` with `properties.random_ticks = true` (grass_block made casings spread and
+  turn to dirt).
+- [ ] 4 multipart blockstates don't load (fluid_pipe, metal_girder_encased_shaft, radial_chassis, steam_whistle_extension):
+  their properties are built in code (loops or maps) that `props.rs` doesn't follow yet. Next item.
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
