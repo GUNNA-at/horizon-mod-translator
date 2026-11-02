@@ -75,6 +75,13 @@ public class Fixture {
         // Default methods inherited from superinterfaces, and one a subclass overrides.
         return a.rank() * 10000 + b.rank() + k;
     }
+    enum Form { CUBE, SLAB, STAIR_STEP }
+    public static int enums(int k) {
+        Form s = Form.values()[k];
+        // name() and toString() feed ids such as "create:" + name().toLowerCase(Locale.ROOT).
+        String id = "mod:" + s.name().toLowerCase(java.util.Locale.ROOT) + "/" + s;
+        return id.hashCode() + s.compareTo(Form.SLAB) * 7 + s.ordinal();
+    }
     public static int concat(int k) {
         String s = "k=" + k + " half=" + (k / 2.0) + " big=" + (k * 1e9) + " ok=" + (k > 2) + " c=" + (char) ('a' + k % 26) + " L=" + (long) k * 3_000_000_000L + " n=" + null;
         return s.length() * 31 + (s.equals("k=0 half=0.0 big=0.0 ok=false c=a L=0 n=null") ? 1 : 0);

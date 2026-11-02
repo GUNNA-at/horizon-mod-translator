@@ -191,6 +191,14 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         k if exception_class(k) && k.contains(".<init>.") => V::Void,
         k if exception_class(k) && (k.contains(".getMessage.") || k.contains(".getLocalizedMessage.")) => rt.get_field(a(0), "message"),
+        // `array.clone()` (an enum's `values()`): a shallow copy.
+        k if k.starts_with('[') && k.contains(".clone.") => {
+            let this = a(0);
+            match rt.heap.get(this.r() as usize).map(|o| (o.class, o.data.clone())) {
+                Some((class, d @ Data::Array(_))) => rt.alloc(class, d),
+                _ => V::NULL,
+            }
+        }
         _ => match crate::neo::call(rt, key, args).or_else(|| crate::jlang::call(rt, key, args)).or_else(|| crate::jutil::call(rt, key, args)).or_else(|| world(rt, key, args)) {
             Some(v) => v,
             None => {

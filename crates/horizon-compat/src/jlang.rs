@@ -148,8 +148,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => return None,
         }),
         "java/lang/Enum" => Some(match name {
-            "name" | "toString" => rt.get_field(a(0), "name"),
-            "compareTo" => V::I(rt.get_field(a(0), "ordinal").i() - rt.get_field(a(1), "ordinal").i()),
+            "name" | "toString" => rt.get_field(a(0), "$name"),
+            "compareTo" => V::I(rt.get_field(a(0), "$ordinal").i() - rt.get_field(a(1), "$ordinal").i()),
             "hashCode" => V::I(a(0).r() as i32),
             "equals" => V::I((a(0) == a(1)) as i32),
             "getDeclaringClass" => {

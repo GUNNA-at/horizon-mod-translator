@@ -300,7 +300,18 @@ impl<'a> Program<'a> {
             }
         }
         let mut s = String::from(
-            "/// Virtual dispatch over the mod's classes; API calls when no mod class implements it.\n\
+            "/// `String.valueOf(v)` for an object: its mod class's own `toString()`, an enum constant's name,\n\
+             /// or `v` itself (strings, boxes and API objects, which the runtime prints).\n\
+             pub fn java_string(rt: &mut Rt, v: V) -> V {\n\
+             \x20   if !matches!(v, V::R(_)) || v.r() == 0 || rt.str_of(v).is_some() { return v; }\n\
+             \x20   let class = rt.class_of(v).to_owned();\n\
+             \x20   if overrides(&class, \"toString.()Ljava/lang/String;\") {\n\
+             \x20       return vcall(rt, \"java/lang/Object.toString.()Ljava/lang/String;\", \"toString.()Ljava/lang/String;\", &[v]);\n\
+             \x20   }\n\
+             \x20   let name = rt.get_field(v, \"$name\");\n\
+             \x20   if rt.str_of(name).is_some() { name } else { v }\n\
+             }\n\n\
+             /// Virtual dispatch over the mod's classes; API calls when no mod class implements it.\n\
              pub fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {\n\
              \x20   let class = rt.class_of(args.first().copied().unwrap_or_default());\n\
              \x20   vcall_as(rt, class, owner_key, key, args)\n\
@@ -393,10 +404,16 @@ impl<'a> Program<'a> {
             ("java/lang/invoke/StringConcatFactory", "makeConcatWithConstants") => {
                 let recipe = args.first().and_then(|&i| string(i)).unwrap_or_default();
                 let consts: Vec<String> = args.iter().skip(1).filter_map(|&i| string(i)).collect();
-                format!(
-                    "{collect} let v = rt.concat({recipe:?}, {:?}, &a, &{consts:?}); s.push(v); {go}",
-                    raw_kinds(&desc)
-                )
+                // Objects print through their own `toString()`, as `String.valueOf` does.
+                let kinds = raw_kinds(&desc);
+                let fix: String = kinds
+                    .chars()
+                    .enumerate()
+                    .filter(|&(_, k)| k == 'L')
+                    .map(|(i, _)| format!(" a[{i}] = java_string(rt, a[{i}]);"))
+                    .collect();
+                let fix = if fix.is_empty() { fix } else { format!(" let mut a = a;{fix}") };
+                format!("{collect}{fix} let v = rt.concat({recipe:?}, {kinds:?}, &a, &{consts:?}); s.push(v); {go}")
             }
             ("java/lang/invoke/LambdaMetafactory", "metafactory" | "altMetafactory") => {
                 let Some((kind, m)) = args.get(1).and_then(|&i| c.handle(i)) else {
@@ -751,6 +768,18 @@ impl<'a> Program<'a> {
                 None => format!("api::call(rt, {key:?}, &args)"),
             },
             _ => format!("vcall(rt, {key:?}, {:?}, &args)", format!("{}.{}", m.name, m.desc)),
+        };
+        // `String.valueOf(Object)` and `append(Object)` print through the object's own `toString()`.
+        let to_string = matches!(
+            key.as_str(),
+            "java/lang/String.valueOf.(Ljava/lang/Object;)Ljava/lang/String;"
+                | "java/lang/StringBuilder.append.(Ljava/lang/Object;)Ljava/lang/StringBuilder;"
+                | "java/lang/StringBuffer.append.(Ljava/lang/Object;)Ljava/lang/StringBuffer;"
+        );
+        let collect = if to_string {
+            format!("{collect} let mut args = args; if let Some(l) = args.len().checked_sub(1) {{ args[l] = java_string(rt, args[l]); }}")
+        } else {
+            collect
         };
         format!("{collect} let r = {call}; if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; }} else {{ {push} {go} }}")
     }
