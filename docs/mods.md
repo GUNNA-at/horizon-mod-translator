@@ -103,8 +103,9 @@ do from their `getRenderShape` and their swapped models.
 A native mod whose code registers its blocks and items can declare them at startup instead of in files
 (`native_content`): `content.declare_block(id, json)` and `content.declare_item(id, json)` take what the
 file would hold, check it the same way and replace a declaration of the same id. Translated NeoForge mods
-declare every block and item their registration makes, with the states, default state and properties
-their code gives.
+declare every block and item their registration makes, with the states, default state, properties and
+shapes their code gives. A declaration from code that the game then can't build is left out with a
+warning naming it, and the rest of the mod's content loads; a file's still refuses its mod.
 
 A block copies its template's states. It can also declare state properties of
 its own, which its template does not have — how a pipe says which sides it

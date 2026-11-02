@@ -17,7 +17,7 @@
 use crate::{Result, blocks::MAP_COLORS};
 use horizon_core::geometry::{Aabb, Axis, ShapeOp, Vec3, VoxelShape};
 use horizon_mods::content::{
-    Block, Content, CreativeTab, EntityType, MenuType, MobEffect, Rarity, StateProperty,
+    Block, BlockShapes, Content, CreativeTab, EntityType, MenuType, MobEffect, Rarity, StateProperty,
 };
 use horizon_world::nbt::{self, Compound, JavaString, Limits, Tag};
 use serde::{Deserialize, Serialize, de};
@@ -680,66 +680,6 @@ impl<'a> Plan<'a> {
                 let states = range(&decl.template).ok_or_else(|| {
                     format!("{}: template {} is not a block", decl.id, decl.template)
                 })?;
-                let shapes = if let Some(spec) = &decl.shapes {
-                    let Some(J::Arr(rows)) = facts.get("states") else {
-                        unreachable!()
-                    };
-                    let mut used = BTreeSet::new();
-                    let mut out = Vec::new();
-                    for id in states.clone() {
-                        let J::Arr(row) = &rows[id as usize] else {
-                            unreachable!()
-                        };
-                        let Some(J::Str(value)) = row
-                            .get(4)
-                            .and_then(|x| x.get("properties"))
-                            .and_then(|x| x.get(&spec.property))
-                        else {
-                            return Err(format!(
-                                "{}: template state lacks property {}",
-                                decl.id, spec.property
-                            )
-                            .into());
-                        };
-                        let boxes = spec.values.get(value).ok_or_else(|| {
-                            format!("{}: no shape for {}={value}", decl.id, spec.property)
-                        })?;
-                        used.insert(value.as_str());
-                        let mut shape = VoxelShape::empty();
-                        for b in boxes {
-                            let part = VoxelShape::from_box(Aabb::new(
-                                Vec3::new(b[0], b[1], b[2]),
-                                Vec3::new(b[3], b[4], b[5]),
-                            ))?;
-                            shape = shape.join_unoptimized(&part, ShapeOp::OR)?;
-                        }
-                        out.push(shape);
-                    }
-                    if used.len() != spec.values.len() {
-                        return Err(format!(
-                            "{}: shape values include an unknown {} value",
-                            decl.id, spec.property
-                        )
-                        .into());
-                    }
-                    Some(out)
-                } else if let Some(size) = decl.thickness {
-                    let Some(J::Arr(rows)) = facts.get("states") else {
-                        unreachable!()
-                    };
-                    let shapes = states.clone().map(|id| {
-                        let props = match &rows[id as usize] {
-                            J::Arr(row) => row.get(4).and_then(|p| p.get("properties")),
-                            _ => None,
-                        };
-                        let sides = ["down", "up", "north", "south", "west", "east"]
-                            .map(|k| matches!(props.and_then(|p| p.get(k)), Some(J::Str(v)) if v == "true"));
-                        horizon_world::collision::pipe_shape(size.into(), sides)
-                    });
-                    Some(shapes.collect::<std::io::Result<_>>()?)
-                } else {
-                    None
-                };
                 let mut default = *defaults.get(&decl.template).ok_or_else(|| {
                     format!(
                         "{}: template {} has no default state",
@@ -785,6 +725,62 @@ impl<'a> Plan<'a> {
                 }
                 let combos = combinations(&decl.state_properties, &decl.default_state)
                     .map_err(|e| format!("{}: {e}", decl.id))?;
+                // One shape per state, in registry order: a template state's, for each
+                // combination of the block's own properties.
+                let shapes = if let Some(spec) = &decl.shapes {
+                    let mut used = BTreeSet::new();
+                    let mut out = Vec::new();
+                    for id in states.clone() {
+                        let template = |name: &str| match properties(id).and_then(|p| p.get(name)) {
+                            Some(J::Str(v)) => Some(v.clone()),
+                            _ => None,
+                        };
+                        for combo in &combos {
+                            let boxes = spec
+                                .boxes(template, combo)
+                                .map_err(|e| format!("{}: {e}", decl.id))?;
+                            if let BlockShapes::Property(p) = spec {
+                                let value = combo
+                                    .iter()
+                                    .find(|(k, _)| *k == p.property)
+                                    .map(|(_, v)| v.clone())
+                                    .or_else(|| template(&p.property));
+                                used.extend(value);
+                            }
+                            let mut shape = VoxelShape::empty();
+                            for b in boxes {
+                                let part = VoxelShape::from_box(Aabb::new(
+                                    Vec3::new(b[0], b[1], b[2]),
+                                    Vec3::new(b[3], b[4], b[5]),
+                                ))?;
+                                shape = shape.join_unoptimized(&part, ShapeOp::OR)?;
+                            }
+                            out.push(shape);
+                        }
+                    }
+                    if let BlockShapes::Property(p) = spec
+                        && used.len() != p.values.len()
+                    {
+                        return Err(format!(
+                            "{}: shape values include an unknown {} value",
+                            decl.id, p.property
+                        )
+                        .into());
+                    }
+                    Some(out)
+                } else if let Some(size) = decl.thickness {
+                    let mut out = Vec::new();
+                    for id in states.clone() {
+                        let props = properties(id);
+                        let sides = ["down", "up", "north", "south", "west", "east"]
+                            .map(|k| matches!(props.and_then(|p| p.get(k)), Some(J::Str(v)) if v == "true"));
+                        let shape = horizon_world::collision::pipe_shape(size.into(), sides)?;
+                        out.extend(std::iter::repeat_n(shape, combos.len()));
+                    }
+                    Some(out)
+                } else {
+                    None
+                };
                 // A `default_state` key the block itself declares is its own,
                 // and `combinations` already checks that value against the
                 // property. Only a key the template already has narrows which
@@ -972,7 +968,6 @@ impl<'a> Plan<'a> {
             // One row per template state per combination the block declares,
             // so its states stay one run in registry order.
             for (next, (id, combo)) in (b.rename.first..).zip(b.state_combinations()) {
-                let t = (id - b.rename.states.start) as usize;
                 let mut row = list[id as usize].clone();
                 for r in &renames {
                     row.rename(r, ids);
@@ -987,7 +982,7 @@ impl<'a> Plan<'a> {
                     }
                     self.override_gameplay(b, combo, &mut row);
                     if let Some(shapes) = &b.shapes {
-                        let shape = &shapes[t];
+                        let shape = &shapes[(next - b.rename.first) as usize];
                         let boxes = shape
                             .boxes()
                             .iter()
@@ -1344,16 +1339,20 @@ impl<'a> Plan<'a> {
         };
         for block in &self.blocks {
             if let Some(shapes) = &block.shapes {
-                let fanout = block.combos.len();
+                // One shape per state; equal ones share an entry.
+                let mut seen: Vec<(Tag, i32)> = Vec::new();
                 for (i, shape) in shapes.iter().enumerate() {
-                    let id = entries.len() as i32;
-                    entries.push(encode_shape(shape));
-                    // One shape per template state, shared by every combination
-                    // of it: the geometry is the template's, the properties are
-                    // the block's.
-                    for c in 0..fanout {
-                        indices.push((block.rename.first as usize + i * fanout + c, id));
-                    }
+                    let encoded = encode_shape(shape);
+                    let id = match seen.iter().find(|(s, _)| *s == encoded) {
+                        Some((_, id)) => *id,
+                        None => {
+                            let id = entries.len() as i32;
+                            entries.push(encoded.clone());
+                            seen.push((encoded, id));
+                            id
+                        }
+                    };
+                    indices.push((block.rename.first as usize + i, id));
                 }
             }
         }

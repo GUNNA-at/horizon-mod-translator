@@ -96,7 +96,19 @@ pub(super) fn content_root(
             log::warn!("Horizon: mod {} content not loaded: {e}", m.id);
         }
     }
-    match mod_content::resource_root(root, &mods, &here.join(".horizon-cache")) {
+    // A block or item a mod's code declared that the game can't build (the error names it first)
+    // is left out with a warning, and the rest is built again: one declaration doesn't cost every
+    // mod its content.
+    let mut built = mod_content::resource_root(root, &mods, &here.join(".horizon-cache"));
+    for _ in 0..64 {
+        let Err(e) = &built else { break };
+        let e = e.to_string();
+        let id = e.split_once(": ").map_or("", |(id, _)| id).to_owned();
+        let Some(m) = mods.iter_mut().find_map(|m| m.content.leave_out(&id).then_some(m)) else { break };
+        log::warn!("Horizon: mod {} {id} left out: {e}", m.id);
+        built = mod_content::resource_root(root, &mods, &here.join(".horizon-cache"));
+    }
+    match built {
         Ok(out) => {
             if out != root {
                 log::info!(

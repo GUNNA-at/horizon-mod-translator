@@ -156,12 +156,74 @@ impl RandomTicks {
     }
 }
 
-/// Per-state outline and collision boxes, selected by one state property.
+/// Outline and collision boxes by state, each `[min x, y, z, max x, y, z]` (a block is 0 to 1):
+/// by one state property, its template's or its own (`{"property": "axis", "values": {...}}`), by
+/// its own properties' values (`{"states": {"axis=x,powered=true": [...]}, "default": [...]}`,
+/// properties sorted by name, states not listed taking `default`), or the same for every state
+/// (`[[...]]`).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum BlockShapes {
+    Property(PropertyShapes),
+    States(StateShapes),
+    All(Vec<[f64; 6]>),
+}
+
+/// Shapes selected by one state property.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct BlockShapes {
+pub struct PropertyShapes {
     pub property: String,
     pub values: BTreeMap<String, Vec<[f64; 6]>>,
+}
+
+/// Shapes by the block's own state properties' values.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct StateShapes {
+    pub states: BTreeMap<String, Vec<[f64; 6]>>,
+    pub default: Vec<[f64; 6]>,
+}
+
+impl BlockShapes {
+    /// A state's boxes: `template` reads its template state's properties, `own` holds its values
+    /// of the block's own.
+    pub fn boxes(
+        &self,
+        template: impl Fn(&str) -> Option<String>,
+        own: &[(String, String)],
+    ) -> Result<&[[f64; 6]], String> {
+        match self {
+            BlockShapes::All(boxes) => Ok(boxes),
+            BlockShapes::Property(p) => {
+                let value = own
+                    .iter()
+                    .find(|(k, _)| *k == p.property)
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| template(&p.property))
+                    .ok_or_else(|| format!("its states lack property {}", p.property))?;
+                p.values
+                    .get(&value)
+                    .map(Vec::as_slice)
+                    .ok_or_else(|| format!("no shape for {}={value}", p.property))
+            }
+            BlockShapes::States(s) => {
+                let mut sorted: Vec<&(String, String)> = own.iter().collect();
+                sorted.sort();
+                let key: Vec<String> = sorted.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                Ok(s.states.get(&key.join(",")).map_or(&s.default[..], Vec::as_slice))
+            }
+        }
+    }
+
+    /// Every list of boxes it holds.
+    fn lists(&self) -> Vec<&Vec<[f64; 6]>> {
+        match self {
+            BlockShapes::All(boxes) => vec![boxes],
+            BlockShapes::Property(p) => p.values.values().collect(),
+            BlockShapes::States(s) => s.states.values().chain(std::iter::once(&s.default)).collect(),
+        }
+    }
 }
 
 /// A state property a block declares on its own, beside its template's.
@@ -390,6 +452,8 @@ pub struct Content {
     pub menu_types: Vec<MenuType>,
     /// The namespaces it owns: the mod id, then the manifest's `namespaces`.
     pub namespaces: Vec<String>,
+    /// Blocks and items its code declared ([`Content::declare_block`]), by id.
+    pub declared: Vec<String>,
 }
 
 /// Reads a mod's content files ([`Content::reader`]).
@@ -479,6 +543,7 @@ impl Content {
             entity_types: Vec::new(),
             menu_types: Vec::new(),
             namespaces: manifest.owned_namespaces().map(str::to_owned).collect(),
+            declared: Vec::new(),
         };
         content.check(manifest)?;
         Ok(content)
@@ -526,7 +591,20 @@ impl Content {
             Some(old) => *old = block,
             None => self.blocks.push(block),
         }
+        self.declared.push(id.to_owned());
         Ok(())
+    }
+
+    /// Leaves out a block or item its code declared (and the block's item), when the game can't
+    /// build it: one declaration doesn't cost the mod the rest. False for one its files declare.
+    pub fn leave_out(&mut self, id: &str) -> bool {
+        if !self.declared.iter().any(|d| d == id) {
+            return false;
+        }
+        self.declared.retain(|d| d != id);
+        self.blocks.retain(|b| b.id != id);
+        self.items.retain(|i| i.id != id);
+        true
     }
 
     /// Declares an item as its file `data/<mod id>/horizon/item/<path>.json` would ([`Self::declare_block`]).
@@ -553,6 +631,7 @@ impl Content {
             components: file.components,
             crafting_remainder: file.crafting_remainder,
         };
+        self.declared.push(id.to_owned());
         match self.items.iter_mut().find(|i| i.id == id) {
             Some(old) => *old = item,
             None => self.items.push(item),
@@ -823,6 +902,9 @@ fn check_components(
     Ok(())
 }
 
+/// Boxes in one shape.
+pub const MAX_SHAPE_BOXES: usize = 64;
+
 fn check_block(file: &BlockFile) -> Result<(), String> {
     if !vanilla_id(&file.template) {
         return Err(format!(
@@ -831,16 +913,36 @@ fn check_block(file: &BlockFile) -> Result<(), String> {
         ));
     }
     if let Some(shapes) = &file.shapes {
-        if shapes.property.is_empty() || shapes.values.is_empty() {
-            return Err("shapes needs a property and values".into());
+        match shapes {
+            BlockShapes::Property(p) if p.property.is_empty() || p.values.is_empty() => {
+                return Err("shapes needs a property and values".into());
+            }
+            BlockShapes::States(st) => {
+                // Keys name the block's own properties, sorted, each once, with their values.
+                for key in st.states.keys() {
+                    let pairs: Vec<(&str, &str)> = key.split(',').filter_map(|kv| kv.split_once('=')).collect();
+                    let known = |(k, v): &(&str, &str)| {
+                        file.state_properties.get(*k).is_some_and(|p| p.values().contains(v))
+                    };
+                    let sorted = pairs.windows(2).all(|w| w[0].0 < w[1].0);
+                    if pairs.is_empty() || pairs.len() != key.split(',').count() || !sorted || !pairs.iter().all(known) {
+                        return Err(format!(
+                            "shapes: state {key:?} is not the block's own properties, sorted by name, with their values"
+                        ));
+                    }
+                }
+            }
+            _ => {}
         }
-        for boxes in shapes.values.values() {
-            if boxes.len() > 16
+        for boxes in shapes.lists() {
+            if boxes.len() > MAX_SHAPE_BOXES
                 || boxes
                     .iter()
                     .any(|b| b.iter().any(|n| !n.is_finite()) || (0..3).any(|i| b[i] > b[i + 3]))
             {
-                return Err("shape needs at most 16 finite boxes with ordered bounds".into());
+                return Err(format!(
+                    "shape needs at most {MAX_SHAPE_BOXES} finite boxes with ordered bounds"
+                ));
             }
         }
     }
@@ -1359,6 +1461,39 @@ capabilities = ["registries"]
     }
 
     #[test]
+    fn shapes_follow_a_property_the_block_owns_or_its_own_states() {
+        let own = r#""state_properties": {"axis": {"type": "enum", "values": ["x", "y", "z"]}, "powered": {"type": "boolean"}}"#;
+        let block = |shapes: &str| {
+            let text = format!(r#"{{"template": "minecraft:glass", {own}, "shapes": {shapes}}}"#);
+            let files: &[(&str, &[u8])] = &[("data/ruby/horizon/block/shaft.json", text.as_bytes())];
+            hmod("shapes", MANIFEST_TEXT, files)
+        };
+        let none = |_: &str| None;
+        let state = |axis: &str, powered: &str| [("axis".to_owned(), axis.to_owned()), ("powered".to_owned(), powered.to_owned())];
+        // By its own `axis`: a shaft along each axis.
+        let by_axis = block(r#"{"property": "axis", "values": {"x": [[0, 0.375, 0.375, 1, 0.625, 0.625]], "y": [[0.375, 0, 0.375, 0.625, 1, 0.625]], "z": [[0.375, 0.375, 0, 0.625, 0.625, 1]]}}"#).unwrap();
+        let shapes = by_axis.blocks[0].shapes.clone().unwrap();
+        assert_eq!(shapes.boxes(none, &state("y", "false")).unwrap(), [[0.375, 0.0, 0.375, 0.625, 1.0, 0.625]]);
+        // By its own states: listed ones, `default` for the rest.
+        let by_state = block(r#"{"states": {"axis=x,powered=true": [[0, 0, 0, 1, 0.5, 1]]}, "default": [[0, 0, 0, 1, 1, 1]]}"#).unwrap();
+        let shapes = by_state.blocks[0].shapes.clone().unwrap();
+        assert_eq!(shapes.boxes(none, &state("x", "true")).unwrap(), [[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]);
+        assert_eq!(shapes.boxes(none, &state("y", "true")).unwrap(), [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]);
+        // The same for every state.
+        let all = block(r#"[[0.25, 0, 0.25, 0.75, 0.5, 0.75]]"#).unwrap();
+        assert_eq!(all.blocks[0].shapes.clone().unwrap().boxes(none, &state("z", "false")).unwrap().len(), 1);
+        // States that aren't the block's own, or not sorted by name.
+        for bad in [
+            r#"{"states": {"facing=north": [[0, 0, 0, 1, 1, 1]]}, "default": []}"#,
+            r#"{"states": {"powered=true,axis=x": [[0, 0, 0, 1, 1, 1]]}, "default": []}"#,
+            r#"{"states": {"axis=w": [[0, 0, 0, 1, 1, 1]]}, "default": []}"#,
+        ] {
+            let e = block(bad).err().unwrap();
+            assert!(e.contains("shapes"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
     fn code_declares_blocks_and_items_as_files_do() {
         // A native mod's registrations, declared at startup: checked as files, replacing one of
         // the same id.
@@ -1393,6 +1528,22 @@ capabilities = ["registries"]
         }
         assert_eq!(c.blocks.len(), 2);
         assert_eq!(c.items.len(), 1);
+    }
+
+    #[test]
+    fn only_what_code_declared_is_left_out() {
+        let files: &[(&str, &[u8])] = &[("data/ruby/horizon/block/casing.json", br#"{"template": "minecraft:stone"}"#)];
+        let mut c = hmod("leave-out", MANIFEST_TEXT, files).unwrap();
+        c.declare_block("ruby:shaft", r#"{"template": "minecraft:glass"}"#).unwrap();
+        c.declare_item("ruby:wrench", r#"{"template": "minecraft:stick"}"#).unwrap();
+        // A block its files declare stays (its mod is refused, as before); the code's go one by one.
+        assert!(!c.leave_out("ruby:casing"));
+        assert!(c.leave_out("ruby:shaft"));
+        assert!(c.leave_out("ruby:wrench"));
+        assert!(!c.leave_out("ruby:shaft"));
+        let ids: Vec<&str> = c.blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["ruby:casing"]);
+        assert!(c.items.is_empty());
     }
 
     #[test]

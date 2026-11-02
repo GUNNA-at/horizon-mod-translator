@@ -239,12 +239,63 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     draws its `shaft_half` partial facing east. Create's renderer code runs natively on the window thread.
     Test tips: the world's seed changes per run, so clear an area and lay a floor; stand the camera on that
     floor (a teleport into the air falls during the wait); wait ~11 s so the chat fades.
-  - [ ] Static models under rotating parts: the chunk mesher still draws the shaft's own model under the
-    turning one. Plan: content property `render_shape` (`model`/`entityblock_animated`/`invisible`, all
-    states or per state; uncommitted work in `horizon-mods/src/content.rs` + `mod_content.rs`), set by a
-    startup hook `native_content_block` from the mod's own code: `getRenderShape` of the default state, and
-    a probe of `ModelEvent.ModifyBakingResult` (Create's `BracketedKineticBlockModel` for shafts and
-    cogwheels returns no quads unless the model data is virtual or bracketed).
+  - [x] Static models under rotating parts (harness-verified; in-game check pending): content property
+    `render_shape` (`model`/`entityblock_animated`/`invisible`, all states or by one own property), set
+    at startup by the hook `native_content_block` from the mod's own code (`glue::render_shape`, on a
+    runtime of its own, `with_probe_runtime`, since it fires the client's setup): `getRenderShape` of
+    each state (one property varied at a time), and for models swapped in `ModelEvent.ModifyBakingResult`
+    (probe models at every block's location) a wrapper with no quads under empty model data whose block
+    entity renderer draws something. Result for Create: shaft, cogwheel, large cogwheel, hand crank,
+    valve handle, flywheel, crushing wheel, gantry shaft, powered shaft, turntable, large water wheel
+    → `entityblock_animated`; water wheel structure → `invisible`; doors, copycats, factory gauge keep
+    their models (a door's `visible` isn't a property of the content block: an answer read from a
+    property the state lacks is unknown; data-driven models have no quads without their data).
+    Fixes found on the way, each silently breaking much more than models:
+    - `Dist` values were fresh strings, so catnip's `FMLLoader.getDist() == Dist.CLIENT` was false and
+      every `executeOnClientOnly` block was skipped. Now one enum object per constant.
+    - Pairs compared by identity, so Registrate never found the `onRegister` callbacks it files under
+      `Pair.of(name, registry)`: none of Create's register callbacks ran (model swaps, casing
+      connectivity, movement/interaction behaviours...). Pairs are values now (equals, hashCode).
+    - Constructor references (`BeltBlock::new`, how Registrate makes every block) didn't run the
+      class's static initialiser, and a class's own methods skip it, so `BeltBlock.CASING` read null.
+      `new` through a reference initialises as `new` does, and initialising a class initialises its
+      mod superclasses first (JVMS 5.5).
+    - Guava `MultimapBuilder`, `ImmutableList/Set/Map.builder()`.
+    - Block entities were loaded from the game's compound even when empty (a block just placed):
+      once Create's behaviours were found (their `TYPE` keys had been null), the creative motor's
+      speed setting read 0 from it. Now only saved data is loaded, as vanilla.
+    - `DimensionDataStorage` (Create's train and logistics networks): in memory, one object per
+      name. Gap: not written to the world's `data/` folder yet.
+    Harness (`scratchpad/harness`): 531 blocks registered; motor + 3 shafts at 16 RPM with a
+    network; 0 unmapped calls while ticking; the client's 4 parts turn between frames; the shape
+    probe runs on its own runtime (it makes that runtime a client).
+  - [x] Every block and item from the mod's own registration (commits 83dfd35, bd499b9; harness
+    `DECLARE=<content dir>`): `blocks.rs` records `BlockBehaviour.Properties` / `Item.Properties` calls and
+    each block's state definition, and the bundle's `native_content` hook declares them
+    (`Content::declare_block/declare_item`). Create: 465 blocks (186 from files alone) and 107 items, none
+    refused, with Create's hardness, sounds, map colours, stack sizes, states and defaults. Registrate
+    composes property callbacks with `NonNullFunction.andThen`, whose body is a private interface lambda:
+    private methods are now called directly however they are reached (commit 16e6333).
+  - [x] Shapes (`shapes.rs`): `VoxelShape`/`Shapes`/`Block.box`/joins/`AABB`/`CollisionContext`; each block
+    with its own `getShape` is asked for every state's outline (empty context, origin, no level) and
+    declares it (content `shapes`: one list, by one property, or by state against a default; up to 64
+    boxes). Full opaque cubes keep `minecraft:stone`, the rest take `minecraft:glass` (light reaches the
+    block entity renderer's parts). Float noise from Create's rotated shapes rounds to 1/256.
+  - [x] A block whose own property sorts before its vanilla template's (Create's glass pipe: `alt` before a
+    pillar's `axis`) takes a stateless template. The game refused all of Create's content for that one
+    block, so now a code-declared block the game can't build is left out with a warning and the rest
+    loads (`Content::leave_out`, retried in `game/mods.rs`).
+  - [x] 2026-11-02 IN GAME (`scratchpad/video.sh`, game built 21:25): Create's content loads (572 blocks and
+    items declared, none refused, shapes per state), shafts are lit and textured on glass templates, a motor
+    drives shafts into a cogwheel meshed with a second one: 16 RPM, then -16 RPM past the mesh (read with
+    `data get block`). Frames differ on the gears and shafts, not on static blocks. Video:
+    https://claude.ai/artifact/6ReCVHYJmEUnpjW2BxLhVs (ffmpeg from Homebrew is broken here;
+    `scratchpad/encode.swift` writes the MP4 with AVFoundation). `scratchpad/play-create.sh` opens the
+    same scene in a window for a person to play.
+  - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
+    `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
+  - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
+    `PipeBlock`'s getShape isn't Create's), item `getDefaultInstance`, title-screen panorama calls.
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick
