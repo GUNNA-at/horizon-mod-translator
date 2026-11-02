@@ -258,6 +258,15 @@ impl<'a> Program<'a> {
     /// (walking up the mod's own superclasses).
     /// The class whose code runs for `name.desc` on an object of `class`, as the JVM resolves it:
     /// the class and its superclasses first, then default methods of its superinterfaces.
+    /// Whether `class` declares `name desc` as a private method with code: called directly however
+    /// it is invoked (Java 11 reaches private methods with `invokevirtual`/`invokeinterface`, and a
+    /// lambda's body, `lambda$...`, is one), since it is never inherited or overridden.
+    fn private_method(&self, class: &str, name: &str, desc: &str) -> bool {
+        self.classes
+            .get(class)
+            .is_some_and(|k| k.methods.iter().any(|m| m.name == name && m.desc == desc && m.code.is_some() && m.access & 0x0002 != 0 && m.access & 0x0008 == 0))
+    }
+
     fn resolve(&self, class: &str, name: &str, desc: &str) -> Option<String> {
         let start = self.classes.get(class)?;
         let mut chain = Vec::new();
@@ -605,6 +614,7 @@ impl<'a> Program<'a> {
                     let ensure = self.ensure(&m.owner).replace("return V::Void;", "return Some(V::Void);");
                     format!("{{ {ensure}let o = rt.new_object_id({:?}, {}); let mut a = vec![o]; a.extend(full); {init} o }}", m.owner, self.cid(&m.owner))
                 }
+                (5 | 9, _) if self.private_method(&m.owner, &m.name, &m.desc) => format!("{}(rt, &full)", fn_name(&m.owner, &m.name, &m.desc)),
                 (5 | 9, _) => {
                     // The API's key when no mod class implements it (as at call sites).
                     let owner_key = match self.api_owner(&m.owner) {
@@ -1071,6 +1081,7 @@ impl<'a> Program<'a> {
                 Some(imp) => format!("{}(rt, &args)", fn_name(&imp, &m.name, &m.desc)),
                 None => format!("api::call(rt, {:?}, &args)", api_key(self)),
             },
+            _ if self.private_method(&m.owner, &m.name, &m.desc) => format!("{}(rt, &args)", fn_name(&m.owner, &m.name, &m.desc)),
             // Virtual: the method's dispatcher jumps on the receiver's class id.
             _ => {
                 let nd = format!("{}.{}", m.name, m.desc);

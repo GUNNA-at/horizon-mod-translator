@@ -56,6 +56,18 @@ public class Fixture {
         java.util.function.Supplier<Shape> make = Square::new;
         return twice(add, k) + twice(sq, 3) + make.get().sides();
     }
+    // A mod's own function type over the JDK's (Registrate's `NonNullFunction`): its default
+    // method's lambda body is a private method of the interface.
+    interface Chain extends java.util.function.Function<Integer, Integer> {
+        default Chain then(Chain next) { return x -> next.apply(apply(x)); }
+    }
+    // Registrate's `NonNullUnaryOperator`: the lambda the default method runs on is of a sub-interface.
+    interface Unary extends Chain {}
+    public static int chained(int k) {
+        Unary inc = x -> x + 1;
+        Chain dbl = x -> x * 2;
+        return inc.then(dbl).then(inc).apply(k);
+    }
     interface Step { int run(int x); default Step then(Step next) { return x -> next.run(run(x)); } default int twiceRun(int x) { return run(run(x)); } }
     public static int defaults(int k) {
         Step inc = x -> x + 1;
