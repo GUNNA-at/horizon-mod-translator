@@ -366,6 +366,27 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             };
             direction(rt, o)
         }
+        // `Direction.getNearest(x, y, z)`: the largest dot product with a direction's normal, the first
+        // on ties, in `Direction`'s order; north unless one is above `Float.MIN_VALUE`.
+        ("net/minecraft/core/Direction", "getNearest") if args.len() >= 3 => {
+            let f = |v: V| match v {
+                V::I(i) => i as f32,
+                V::F(x) => x as f32,
+                V::D(x) => x as f32,
+                V::J(j) => j as f32,
+                _ => 0.0,
+            };
+            let (x, y, z) = (f(a(0)), f(a(1)), f(a(2)));
+            let (mut best, mut at) = (f32::from_bits(1), 2);
+            for (i, n) in crate::api::DIRECTIONS.iter().enumerate() {
+                let dot = x * n[0] as f32 + y * n[1] as f32 + z * n[2] as f32;
+                if dot > best {
+                    best = dot;
+                    at = i as i64;
+                }
+            }
+            direction(rt, at)
+        }
         ("net/minecraft/core/Direction$Axis", "choose") => args.get(1 + native(rt, a(0))[0].clamp(0, 2) as usize).copied().unwrap_or_default(),
         ("net/minecraft/core/Direction$Axis", "getName" | "getSerializedName" | "toString") => {
             let n = AXIS_NAMES[native(rt, a(0))[0].clamp(0, 2) as usize];
@@ -775,6 +796,11 @@ mod tests {
         let up = api::direction(&mut rt, 1);
         assert_eq!(c(&mut rt, "net/minecraft/core/Direction$Plane.test.(Lnet/minecraft/core/Direction;)Z", &[horizontal, east]), V::I(1));
         assert_eq!(c(&mut rt, "net/minecraft/core/Direction$Plane.test.(Lnet/minecraft/core/Direction;)Z", &[horizontal, up]), V::I(0));
+        // Nearest: (1, 0, 0) is east; (0, 0, 0) falls back to north; a tie goes to the first (down before up).
+        let nearest = "net/minecraft/core/Direction.getNearest.(FFF)Lnet/minecraft/core/Direction;";
+        assert_eq!(c(&mut rt, nearest, &[V::F(1.0), V::F(0.0), V::F(0.0)]), api::direction(&mut rt, 5));
+        assert_eq!(c(&mut rt, nearest, &[V::F(0.0), V::F(0.0), V::F(0.0)]), north);
+        assert_eq!(c(&mut rt, nearest, &[V::F(0.0), V::F(-2.0), V::F(-2.0)]), api::direction(&mut rt, 0));
     }
 
     #[test]
