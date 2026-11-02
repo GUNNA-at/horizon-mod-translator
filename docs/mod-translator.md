@@ -105,6 +105,29 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
 
 `git checkout mod-translator`, read this file, take the first unchecked item.
 
+## Fast loop: the harness (use this first)
+
+The runtime is two crates: `horizon-compat-core` (the object model: `Rt`, values, heap, dispatch
+tables) and `horizon-compat` (the API mapping). The game bundle inlines both (direct calls). For
+tools, `bundle <jar> <out> --runtime <path to crates/horizon-compat-core>` makes an engine that
+depends on the core crate only and reaches the mapping through `Fns` (`horizon_compat::install()`).
+A harness that links that engine plus `horizon-compat` rebuilds only the mapping crate and relinks
+when a mapping changes; the engine recompiles only when generated code or the core changes
+(~10 min for Create at opt-level 1). The bundler rewrites only changed files, so don't delete the
+bundle directory between runs.
+
+```sh
+horizon-mod-translator bundle create.jar cb-h --runtime $PWD/crates/horizon-compat-core
+# harness/Cargo.toml: engine = { package = "create-translated-engine", path = "../cb-h/engine" },
+#                     horizon-compat = { path = ".../crates/horizon-compat" }, [profile.release] opt-level = 1
+# main: horizon_compat::install(); engine::with_runtime(|rt| ...) ; drive glue::* with host::MemoryHost
+CARGO_INCREMENTAL=0 cargo build --release && HORIZON_COMPAT_TRACE=1 target/release/create-harness
+```
+
+Keep changes in the mapping (`horizon-compat`) where possible: a change to `horizon-compat-core`
+rebuilds every engine. Minecraft's class families for `instanceof` are the mapping's
+(`api_common::api_is_a`) for that reason.
+
 ## In-game test
 
 ```sh
@@ -143,6 +166,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
 - [x] 2026-11-02 harness: Create registers 515 blocks, 550 items, 114 block entities, 8 fluids, no uncaught
   exceptions; shaft/creative_motor/cogwheel resolve to Create's classes with block entities that tick. Fixes: the
   `DeferredHolder` super constructor (Registrate's `RegistryEntry`), `Lazy`, `Registry.register`, loggers, `Pair`.
+- [x] Runtime split into horizon-compat-core + horizon-compat; `bundle --runtime` for the harness (see Fast loop).
+- [x] `instanceof`/`isAssignableFrom` follow interfaces (generated init registers them) and Minecraft's families.
+- [x] Annotations parsed; `@EventBusSubscriber` classes and `bus.register(Class|obj)` listen with `@SubscribeEvent`
+  methods; every `@Mod` class is constructed (bundled mods first); `NeoForge.EVENT_BUS`; `LevelEvent.Load` fires
+  when the level is first used. Hook test covers a static subscriber and a registered object.
+- [x] Block entities: `BlockEntityType.create` (the factory), the Java fields (`level`, `worldPosition`,
+  `blockState`), the glue puts each in the level with its current state; `ModConfigSpec` values are their defaults.
+- [ ] Next: harness kinetic test (creative motor east + 3 shafts, 40 ticks): read `Speed` from saved NBT; fix
+  what the trace shows; then the game.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
