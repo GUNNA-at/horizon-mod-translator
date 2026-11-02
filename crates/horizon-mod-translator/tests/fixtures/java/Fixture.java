@@ -82,6 +82,17 @@ public class Fixture {
         String id = "mod:" + s.name().toLowerCase(java.util.Locale.ROOT) + "/" + s;
         return id.hashCode() + s.compareTo(Form.SLAB) * 7 + s.ordinal();
     }
+    interface Spins { }
+    static class Gear implements Spins { }
+    static class BigGear extends Gear { }
+    public static int interfaces(int k) {
+        Object o = k == 0 ? new BigGear() : "text";
+        // instanceof and isAssignableFrom see interfaces a superclass implements.
+        int r = (o instanceof Spins ? 1 : 0) + (o instanceof Gear ? 2 : 0);
+        r += Spins.class.isAssignableFrom(BigGear.class) ? 4 : 0;
+        r += Gear.class.isAssignableFrom(Spins.class) ? 8 : 0;
+        return r + k * 100;
+    }
     public static int concat(int k) {
         String s = "k=" + k + " half=" + (k / 2.0) + " big=" + (k * 1e9) + " ok=" + (k > 2) + " c=" + (char) ('a' + k % 26) + " L=" + (long) k * 3_000_000_000L + " n=" + null;
         return s.length() * 31 + (s.equals("k=0 half=0.0 big=0.0 ok=false c=a L=0 n=null") ? 1 : 0);

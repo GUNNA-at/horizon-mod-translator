@@ -24,6 +24,7 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("caller", "(I)I", &["0", "1"]),
     ("inherited", "(I)I", &["0", "2"]),
     ("enums", "(I)I", &["0", "2"]),
+    ("interfaces", "(I)I", &["0", "1"]),
     ("concat", "(I)I", &["0", "7", "123", "-4"]),
     ("exceptions", "(I)I", &["0", "1", "2", "3", "4"]),
     ("records", "(I)I", &["0", "5", "-12"]),
@@ -143,7 +144,7 @@ fn translated_fixture_matches_the_jvm() {
     for (e, a) in expected.lines().zip(actual.lines()) {
         assert_eq!(a, e);
     }
-    assert_eq!(expected.lines().count(), 74, "{expected}");
+    assert_eq!(expected.lines().count(), 76, "{expected}");
     assert_eq!(expected.lines().count(), actual.lines().count());
     eprintln!("{actual}");
     assert!(program.unsupported.is_empty(), "{:?}", program.unsupported);

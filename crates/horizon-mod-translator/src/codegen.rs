@@ -243,6 +243,9 @@ impl<'a> Program<'a> {
             if let Some(sup) = &c.superclass {
                 let _ = writeln!(out, "    rt.supers.insert({:?}, {sup:?});", c.name);
             }
+            if !c.interfaces.is_empty() {
+                let _ = writeln!(out, "    rt.interfaces.insert({:?}, &{:?});", c.name, c.interfaces);
+            }
         }
         out.push_str("}\n\n");
         // Mod loading's registration phase: classes holding registers initialise, then suppliers resolve.

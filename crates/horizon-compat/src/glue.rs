@@ -30,7 +30,7 @@ fn run(rt: &mut Rt, host: &mut dyn Host, state: &str, key: &'static str, extra: 
         if let Some(vc) = rt.vcall {
             vc(rt, key, key, &args);
         }
-        rt.thrown = None; // an exception escaping a hook ends that call only, as the game logs and goes on
+        rt.report_thrown(key); // an exception escaping a hook ends that call only, as the game logs and goes on
     });
     true
 }
@@ -111,12 +111,14 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
     let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
     let st = api::state(rt, state);
     let be = vc(rt, NEW_BLOCK_ENTITY, NEW_BLOCK_ENTITY, &[b, p, st]);
+    rt.report_thrown("newBlockEntity");
     if be.r() == 0 {
         return None;
     }
     let tag = crate::nbt::to_runtime(rt, nbt);
     let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
     vc(rt, LOAD, LOAD, &[be, tag, provider]);
+    rt.report_thrown("loadAdditional");
     rt.block_entities.insert(pos, be);
     Some(be)
 }
@@ -136,12 +138,12 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
             let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
             rt.call_functional(TICKER_TICK, ticker, &[level, p, st, be]);
         }
-        rt.thrown = None;
+        rt.report_thrown("the block entity's tick");
         let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
         api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
         let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
         vc(rt, SAVE, SAVE, &[be, tag, provider]);
-        rt.thrown = None;
+        rt.report_thrown("saveAdditional");
         *nbt = crate::nbt::from_runtime(rt, tag);
         let (block, _) = crate::host::split_state(state);
         rt.block_entity_meta.insert(pos, (block.to_owned(), !nbt.is_empty()));
@@ -191,7 +193,7 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
             let name = rt.str_of(r).unwrap_or("PASS").to_owned();
             took = Some(name != "PASS");
         }
-        rt.thrown = None;
+        rt.report_thrown("a right click");
         took.unwrap_or(false)
     })
 }

@@ -23,19 +23,44 @@ pub fn mod_id(jar: &Path) -> Option<String> {
     None
 }
 
-/// horizon-compat's sources, carried in each bundle as its own sibling crate: bundle crates may
-/// depend only on Horizon's Cargo.lock registry crates and on siblings (horizon-mixins' rule).
-const COMPAT: [(&str, &str); 9] = [
-    ("lib.rs", include_str!("../../horizon-compat/src/lib.rs")),
+/// The runtime's sources, carried in each bundle as the engine's own `compat` module: bundle
+/// crates may depend only on Horizon's Cargo.lock registry crates (horizon-mixins' rule). The
+/// core's root becomes `compat/mod.rs`; horizon-compat's root is left out (its modules are
+/// declared there instead).
+const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
+const COMPAT: [(&str, &str); 8] = [
+    ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
     ("api_common.rs", include_str!("../../horizon-compat/src/api_common.rs")),
     ("nbt.rs", include_str!("../../horizon-compat/src/nbt.rs")),
-    ("host.rs", include_str!("../../horizon-compat/src/host.rs")),
     ("glue.rs", include_str!("../../horizon-compat/src/glue.rs")),
     ("jutil.rs", include_str!("../../horizon-compat/src/jutil.rs")),
     ("neo.rs", include_str!("../../horizon-compat/src/neo.rs")),
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
 ];
+
+/// The core's root inlined: without the installable entry points (inlined, `api` and `neo` are
+/// the mapping's own modules), and declaring the mapping's modules.
+fn inlined_core() -> String {
+    let (head, rest) = CORE.split_once("// BEGIN ENGINE ENTRY POINTS").expect("core entry point markers");
+    let (_, tail) = rest.split_once("// END ENGINE ENTRY POINTS").expect("core entry point markers");
+    let mods: String = COMPAT
+        .iter()
+        .filter(|(n, _)| *n != "host.rs")
+        .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
+        .collect();
+    format!("{head}{tail}\n{mods}")
+}
+
+/// Writes `contents` unless the file already holds exactly that, so an unchanged engine keeps its
+/// mtimes and Cargo does not rebuild it.
+fn put(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let (path, contents) = (path.as_ref(), contents.as_ref());
+    if fs::read(path).is_ok_and(|old| old == contents) {
+        return Ok(());
+    }
+    fs::write(path, contents)
+}
 
 /// Block hooks the bundle wires: (hook name, glue function).
 const BLOCK_HOOKS: [(&str, &str); 2] = [("tick_block", "tick_block"), ("random_tick", "random_tick")];
@@ -241,6 +266,15 @@ fn mixin_toml(id: &str, version: &str) -> String {
 
 /// Writes the bundle for `jar` into `out`. Returns the mod id and what the translation left out.
 pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, Vec<String>), String> {
+    write_with(jar, classes, out, None)
+}
+
+/// [`write`], with the engine linking the runtime core crate at `runtime` (a path to
+/// `horizon-compat-core`) instead of carrying the runtime inlined. The engine then calls the API
+/// mapping through `horizon_compat::install()`, so tools that link `horizon-compat` themselves
+/// rebuild only that crate when the mapping changes. Such a bundle is for tools (harnesses), not
+/// for horizon-mixins, which allows no path dependencies.
+pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option<&Path>) -> Result<(String, Vec<String>), String> {
     let id = mod_id(jar).ok_or_else(|| format!("{}: no NeoForge mod id", jar.display()))?;
     let bundle_id = format!("{id}_translated");
     let krate = format!("{}_translated_engine", id.replace('-', "_"));
@@ -249,39 +283,48 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
     let files = program.emit_files(40);
     let src = out.join("engine/src");
     fs::create_dir_all(&src).map_err(|e| e.to_string())?;
-    fs::write(
+    let deps = match runtime {
+        Some(core) => format!("\n[dependencies]\nhorizon-compat-core = {{ path = {:?} }}\n", core.display().to_string()),
+        None => String::new(),
+    };
+    put(
         out.join("engine/Cargo.toml"),
         format!(
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n",
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n{deps}",
             krate.replace('_', "-")
         ),
     )
     .map_err(|e| e.to_string())?;
-    // The runtime as the engine's own `compat` module (bundle crates take no path dependencies).
-    let compat_dir = src.join("compat");
-    fs::create_dir_all(&compat_dir).map_err(|e| e.to_string())?;
-    for (name, text) in COMPAT {
-        let name = if name == "lib.rs" { "mod.rs" } else { name };
-        let text = text.replace("crate::", "crate::compat::").replace("#![", "// #![");
-        fs::write(compat_dir.join(name), text).map_err(|e| e.to_string())?;
-    }
+    let root = if runtime.is_some() {
+        "/// The runtime core; the API mapping comes through `horizon_compat::install()`.\npub use horizon_compat_core as horizon_compat;\nuse horizon_compat::"
+    } else {
+        // The runtime as the engine's own `compat` module (bundle crates take no path dependencies).
+        let compat_dir = src.join("compat");
+        fs::create_dir_all(&compat_dir).map_err(|e| e.to_string())?;
+        let core = inlined_core();
+        for (name, text) in std::iter::once(("mod.rs", core.as_str())).chain(COMPAT) {
+            let text = text.replace("crate::", "crate::compat::").replace("#![", "// #![");
+            put(compat_dir.join(name), text).map_err(|e| e.to_string())?;
+        }
+        "pub mod compat;\n/// The runtime (also for the hook helpers compiled into the game).\npub use compat as horizon_compat;\nuse horizon_compat::"
+    };
     for (name, mut text) in files {
         if name == "lib.rs" {
-            text = text.replacen("use horizon_compat::", "pub mod compat;\n/// The runtime (also for the hook helpers compiled into the game).\npub use compat as horizon_compat;\nuse horizon_compat::", 1);
+            text = text.replacen("use horizon_compat::", root, 1);
             text.push_str(&format!(
                 "\nthread_local! {{\n    static RUNTIME: std::cell::RefCell<Option<Rt>> = const {{ std::cell::RefCell::new(None) }};\n}}\n\n\
                  /// The mod's runtime on this thread, made and registered on first use.\n\
                  pub fn with_runtime<R>(f: impl FnOnce(&mut Rt) -> R) -> R {{\n    RUNTIME.with(|cell| {{\n        let mut slot = cell.borrow_mut();\n        let rt = slot.get_or_insert_with(|| {{\n            let mut rt = Rt::new();\n            rt.namespace = {id:?}.into();\n            init(&mut rt);\n            start(&mut rt);\n            rt\n        }});\n        f(rt)\n    }})\n}}\n"
             ));
         }
-        fs::write(src.join(&name), text).map_err(|e| e.to_string())?;
+        put(src.join(&name), text).map_err(|e| e.to_string())?;
     }
-    fs::write(out.join("horizon-mixin.toml"), mixin_toml(&bundle_id, "0.1.0")).map_err(|e| e.to_string())?;
+    put(out.join("horizon-mixin.toml"), mixin_toml(&bundle_id, "0.1.0")).map_err(|e| e.to_string())?;
     for (hook, text) in block_entity_helpers(&bundle_id, &id, &krate) {
-        fs::write(out.join(format!("{hook}.rs")), text).map_err(|e| e.to_string())?;
+        put(out.join(format!("{hook}.rs")), text).map_err(|e| e.to_string())?;
     }
     for (hook, glue) in BLOCK_HOOKS {
-        fs::write(out.join(format!("{hook}.rs")), helper(&bundle_id, &krate, hook, glue).replace(&format!("\"{bundle_id}:\""), &format!("\"{id}:\""))).map_err(|e| e.to_string())?;
+        put(out.join(format!("{hook}.rs")), helper(&bundle_id, &krate, hook, glue).replace(&format!("\"{bundle_id}:\""), &format!("\"{id}:\""))).map_err(|e| e.to_string())?;
     }
     // The blocks the code registers, as a content mod (a folder mod for `horizon-mods/`): the game
     // knows them, and their random ticks reach the translated `randomTick`.
@@ -316,7 +359,7 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
                 }
             }
             json.push_str(" }\n");
-            fs::write(dir.join(format!("{b}.json")), json).map_err(|e| e.to_string())?;
+            put(dir.join(format!("{b}.json")), json).map_err(|e| e.to_string())?;
         }
         // The mod's own look: its assets (blockstates, models, textures, lang) from the jar.
         if let Ok(f) = fs::File::open(jar)
@@ -337,11 +380,11 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
                 }
                 let mut bytes = Vec::new();
                 if e.read_to_end(&mut bytes).is_ok() {
-                    let _ = fs::write(target, bytes);
+                    let _ = put(target, bytes);
                 }
             }
         }
-        fs::write(
+        put(
             content.join("horizon-mod.toml"),
             format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"0.1.0\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\n"),
         )
@@ -355,16 +398,22 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
 mod tests {
     #[test]
     fn bundles_carry_every_runtime_source_file() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../horizon-compat/src");
-        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .flatten()
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut on_disk: Vec<String> = ["horizon-compat-core/src", "horizon-compat/src"]
+            .iter()
+            .flat_map(|d| std::fs::read_dir(root.join(d)).unwrap().flatten())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".rs"))
+            .filter(|n| n.ends_with(".rs") && n != "lib.rs")
             .collect();
         on_disk.sort();
         let mut carried: Vec<String> = super::COMPAT.iter().map(|(n, _)| n.to_string()).collect();
         carried.sort();
         assert_eq!(carried, on_disk);
+        // The inlined core declares every carried mapping module and drops the installable entry points.
+        let core = super::inlined_core();
+        assert!(!core.contains("pub fn install_fns"));
+        for n in carried.iter().filter(|n| *n != "host.rs") {
+            assert!(core.contains(&format!("pub mod {};", n.trim_end_matches(".rs"))), "{n}");
+        }
     }
 }

@@ -166,6 +166,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let target = rt.str_of(a(0)).unwrap_or("").to_owned();
                 V::I(rt.instance_of(a(1), &target) as i32)
             }
+            "isAssignableFrom" => {
+                let (this, other) = (rt.str_of(a(0)).unwrap_or("").to_owned(), rt.str_of(a(1)).unwrap_or("").to_owned());
+                V::I(rt.is_a(&other, &this) as i32)
+            }
             "cast" => a(1),
             "desiredAssertionStatus" => V::I(0),
             "hashCode" => V::I(string_hash(rt.str_of(a(0)).unwrap_or(""))),

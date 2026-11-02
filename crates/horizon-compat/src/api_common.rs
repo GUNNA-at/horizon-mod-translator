@@ -9,18 +9,6 @@ use std::collections::HashMap;
 const DIRECTION_NAMES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
 const AXIS_NAMES: [&str; 3] = ["x", "y", "z"];
 
-impl Rt {
-    /// The one object for `key`, made by `make` the first time.
-    pub fn intern(&mut self, key: String, make: impl FnOnce(&mut Rt) -> V) -> V {
-        if let Some(v) = self.interned.get(&key) {
-            return *v;
-        }
-        let v = make(self);
-        self.interned.insert(key, v);
-        v
-    }
-}
-
 pub fn direction(rt: &mut Rt, ordinal: i64) -> V {
     let o = ordinal.clamp(0, 5);
     rt.intern(format!("dir/{o}"), |rt| {
@@ -463,6 +451,16 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.put_field(t, "$factory", f);
             t
         }
+        // `type.create(pos, state)`: the factory the type was built with.
+        ("net/minecraft/world/level/block/entity/BlockEntityType", "create") => {
+            let f = rt.get_field(a(0), "$factory");
+            if f.r() == 0 {
+                V::NULL
+            } else {
+                rt.call_functional("net/minecraft/world/level/block/entity/BlockEntityType$BlockEntitySupplier.create.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/entity/BlockEntity;", f, &[a(1), a(2)])
+            }
+        }
+        ("net/minecraft/world/level/block/entity/BlockEntityType", "isValid") => V::I(1),
         (o, "createTickerHelper") if o.ends_with("BaseEntityBlock") => {
             if a(0) == a(1) { a(2) } else { V::NULL }
         }

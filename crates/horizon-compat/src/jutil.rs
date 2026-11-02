@@ -6,25 +6,15 @@
 //! values (positions, states) by value, and a mod object through its own translated `equals`
 //! and `hashCode` when it overrides them, by identity otherwise.
 use crate::{Data, Rt, V};
-use std::collections::HashMap;
 
-/// A map or set: entries in insertion order (sorted, for a `TreeMap`), indexed by hash.
-#[derive(Debug, Clone, Default)]
-pub struct Table {
-    pub entries: Vec<(V, V)>,
-    index: HashMap<i32, Vec<usize>>,
-    /// A `TreeMap`/`TreeSet`: entries kept sorted, by `comparator` when it isn't null.
-    pub sorted: bool,
-    pub comparator: V,
-}
+pub use crate::Table;
 
-impl Table {
-    fn reindex(&mut self, rt: &mut Rt) {
-        self.index.clear();
-        for (i, (k, _)) in self.entries.iter().enumerate() {
-            let h = hash(rt, *k);
-            self.index.entry(h).or_default().push(i);
-        }
+/// Rebuilds a table's hash index after its entries moved.
+fn reindex(t: &mut Table, rt: &mut Rt) {
+    t.index.clear();
+    for i in 0..t.entries.len() {
+        let h = hash(rt, t.entries[i].0);
+        t.index.entry(h).or_default().push(i);
     }
 }
 
@@ -119,7 +109,7 @@ pub fn compare(rt: &mut Rt, comparator: V, a: V, b: V) -> i32 {
             None => 0,
         },
         // Enums: by ordinal.
-        _ => (rt.get_field(a, "ordinal").i()).cmp(&rt.get_field(b, "ordinal").i()) as i32,
+        _ => (rt.get_field(a, "$ordinal").i()).cmp(&rt.get_field(b, "$ordinal").i()) as i32,
     }
 }
 
@@ -173,7 +163,7 @@ pub fn table_put(rt: &mut Rt, m: V, k: V, v: V) -> V {
                     }
                 }
                 t.entries.insert(at, (k, v));
-                t.reindex(rt);
+                reindex(&mut t, rt);
             } else {
                 let h = hash(rt, k);
                 t.entries.push((k, v));
@@ -197,7 +187,7 @@ fn table_remove(rt: &mut Rt, m: V, k: V) -> Option<V> {
     let mut t = take_table(rt, m)?;
     let r = find(rt, &t, k).map(|i| t.entries.remove(i).1);
     if r.is_some() {
-        t.reindex(rt);
+        reindex(&mut t, rt);
     }
     put_table(rt, m, t);
     r

@@ -31,10 +31,16 @@ fn translate(jar: &Path, out: &Path) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("bundle") && args.len() == 3 {
+    // `bundle <jar> <out> [--runtime <horizon-compat-core dir>]`: with `--runtime`, a bundle for
+    // tools whose engine links the runtime core instead of carrying it (see `bundle::write_with`).
+    let runtime = match (args.get(3).map(String::as_str), args.get(4)) {
+        (Some("--runtime"), Some(dir)) => Some(Path::new(dir).to_path_buf()),
+        _ => None,
+    };
+    if args.first().map(String::as_str) == Some("bundle") && (args.len() == 3 || (args.len() == 5 && runtime.is_some())) {
         let jar = Path::new(&args[1]);
         let result = horizon_mod_translator::classes(jar)
-            .and_then(|c| horizon_mod_translator::bundle::write(jar, &c, Path::new(&args[2])));
+            .and_then(|c| horizon_mod_translator::bundle::write_with(jar, &c, Path::new(&args[2]), runtime.as_deref()));
         return match result {
             Ok((id, left)) => {
                 println!("{id}: native mod bundle in {}", args[2]);
@@ -59,7 +65,7 @@ fn main() -> ExitCode {
         };
     }
     if args.first().map(String::as_str) != Some("coverage") || args.len() < 2 {
-        eprintln!("usage: horizon-mod-translator coverage <jar>... | translate <jar> <out dir> | bundle <jar> <out dir>");
+        eprintln!("usage: horizon-mod-translator coverage <jar>... | translate <jar> <out dir> | bundle <jar> <out dir> [--runtime <horizon-compat-core dir>]");
         return ExitCode::FAILURE;
     }
     for jar in &args[1..] {

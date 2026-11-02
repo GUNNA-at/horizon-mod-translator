@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "Runtime for NeoForge mods translated to native Rust: values, objects, the Minecraft API mapped onto Horizon"
 
+[dependencies]
+horizon-compat-core = { path = "../horizon-compat-core" }
+
 [lints]
 workspace = true
