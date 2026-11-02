@@ -73,6 +73,7 @@ pub(super) fn content_root(
                 continue;
             }
         };
+        super::Game::native_content(&mut content);
         for block in &mut content.blocks {
             super::Game::native_content_block(block);
         }

@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "name": "content",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_content"
+    }
+  ],
+  "rust_summary": "a content mod's whole content before the resources are built (`native_content`): code declares blocks and items as files would (`Content::declare_block`, `declare_item`).",
+  "doc_summary": "`native_content(content)` gets each enabled content mod's content (`horizon_mods::Content`) before its blocks one by one (`native_content_block`) and before the game builds its resources, at startup and on each resource reload, on the thread that builds the resource root. A mod whose code registers its blocks and items declares them there with `content.declare_block(id, json)` and `content.declare_item(id, json)`: the JSON is what a file `data/<mod id>/horizon/block/<path>.json` (or `item/`) would hold, checked the same way, and replaces a declaration of the same id ([mods.md](mods.md)). Bundles need \"hooks\": @API:content@."
+}

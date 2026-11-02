@@ -1762,6 +1762,16 @@ impl Game<'_> {
     ) {
         let _ = (pos, entity, tag);
     }
+    /// A content mod's content as its files declare it, before its blocks
+    /// one by one (`native_content_block`) and before the game builds its
+    /// resources: a mod whose code registers its blocks and items declares
+    /// them here, checked as files are (`Content::declare_block`,
+    /// `Content::declare_item`). Asked for every enabled content mod, at
+    /// startup and on each resource reload, on the thread that builds the
+    /// resource root; no world or resources exist yet. API @API:content@.
+    pub(super) fn native_content(content: &mut horizon_mods::Content) {
+        let _ = content;
+    }
     /// A content mod's block as its files declare it, before the game
     /// builds its resources from them: change what only code knows, such
     /// as `properties.render_shape` for a block its block entity renderer

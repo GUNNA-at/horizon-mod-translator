@@ -511,6 +511,71 @@ impl Content {
     }
 
     /// Where content may go, and the declarations.
+    /// Declares a block as its file `data/<mod id>/horizon/block/<path>.json` would, checked the
+    /// same way, for a native mod whose blocks its code registers (`native_content`). It replaces
+    /// a block of the same id.
+    pub fn declare_block(&mut self, id: &str, json: &str) -> Result<(), String> {
+        self.own_id(id)?;
+        let file: BlockFile = serde_json::from_str(json).map_err(|e| format!("{id}: {e}"))?;
+        check_block(&file).map_err(|e| format!("{id}: {e}"))?;
+        if file.item && self.items.iter().any(|i| i.id == id) {
+            return Err(format!("{id}: {id} is also an item"));
+        }
+        let block = block_of(id.to_owned(), file);
+        match self.blocks.iter_mut().find(|b| b.id == id) {
+            Some(old) => *old = block,
+            None => self.blocks.push(block),
+        }
+        Ok(())
+    }
+
+    /// Declares an item as its file `data/<mod id>/horizon/item/<path>.json` would ([`Self::declare_block`]).
+    pub fn declare_item(&mut self, id: &str, json: &str) -> Result<(), String> {
+        self.own_id(id)?;
+        let file: ItemFile = serde_json::from_str(json).map_err(|e| format!("{id}: {e}"))?;
+        check_item(&file).map_err(|e| format!("{id}: {e}"))?;
+        if self.blocks.iter().any(|b| b.item && b.id == id) {
+            return Err(format!("{id}: {id} is also a block's item"));
+        }
+        if let Some(rest) = &file.crafting_remainder {
+            let own = self.blocks.iter().any(|b| b.item && &b.id == rest) || self.items.iter().any(|i| &i.id == rest) || rest == id;
+            if rest == "minecraft:air" || !(vanilla_id(rest) || own) {
+                return Err(format!(
+                    "{id}: crafting_remainder {rest:?} is not a vanilla item (minecraft:...) or one of this mod's"
+                ));
+            }
+        }
+        let item = Item {
+            id: id.to_owned(),
+            template: file.template,
+            max_stack_size: file.max_stack_size,
+            rarity: file.rarity,
+            components: file.components,
+            crafting_remainder: file.crafting_remainder,
+        };
+        match self.items.iter_mut().find(|i| i.id == id) {
+            Some(old) => *old = item,
+            None => self.items.push(item),
+        }
+        Ok(())
+    }
+
+    /// An id this mod may declare: `<mod id>:<path>`, the path as a file name's.
+    fn own_id(&self, id: &str) -> Result<(), String> {
+        let own = self.namespaces.first().map(String::as_str).unwrap_or_default();
+        match id.split_once(':') {
+            Some((ns, path))
+                if ns == own
+                    && !path.is_empty()
+                    && path.split('/').all(|p| !p.is_empty() && p != "..")
+                    && path.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-./".contains(&b)) =>
+            {
+                Ok(())
+            }
+            _ => Err(format!("{id:?} is not an id of this mod ({own}:<path>)")),
+        }
+    }
+
     fn check(&mut self, manifest: &Manifest) -> Result<(), String> {
         let id = manifest.id.as_str();
         if !self.files.is_empty() && !manifest.capabilities.contains(&Capability::Registries) {
@@ -586,36 +651,13 @@ impl Content {
             if file.item {
                 ids.insert(block.clone());
             }
-            self.blocks.push(Block {
-                id: block,
-                template: file.template,
-                properties: file.properties,
-                shapes: file.shapes,
-                state_properties: file.state_properties,
-                default_state: file.default_state,
-                item: file.item,
-                components: file.components,
-                connects_to: file
-                    .connects_to
-                    .map(|t| t.trim_start_matches('#').to_owned()),
-                thickness: file.thickness,
-            });
+            self.blocks.push(block_of(block, file));
         }
         let mut remainders = Vec::new();
         for (item, name) in items {
             let file: ItemFile =
                 serde_json::from_slice(&self.file(&name)?).map_err(|e| format!("{name}: {e}"))?;
-            if !vanilla_id(&file.template) {
-                return Err(format!(
-                    "{name}: template {:?} is not a vanilla item (minecraft:...)",
-                    file.template
-                ));
-            }
-            if file.max_stack_size.is_some_and(|n| !(1..=99).contains(&n)) {
-                return Err(format!("{name}: max_stack_size is 1 to 99"));
-            }
-            check_components(&file.components, &["max_stack_size", "rarity"])
-                .map_err(|e| format!("{name}: {e}"))?;
+            check_item(&file).map_err(|e| format!("{name}: {e}"))?;
             if !ids.insert(item.clone()) {
                 return Err(format!("{name}: {item} is also a block's item"));
             }
@@ -722,6 +764,36 @@ impl Content {
         }
         Ok(())
     }
+}
+
+fn block_of(id: String, file: BlockFile) -> Block {
+    Block {
+        id,
+        template: file.template,
+        properties: file.properties,
+        shapes: file.shapes,
+        state_properties: file.state_properties,
+        default_state: file.default_state,
+        item: file.item,
+        components: file.components,
+        connects_to: file
+            .connects_to
+            .map(|t| t.trim_start_matches('#').to_owned()),
+        thickness: file.thickness,
+    }
+}
+
+fn check_item(file: &ItemFile) -> Result<(), String> {
+    if !vanilla_id(&file.template) {
+        return Err(format!(
+            "template {:?} is not a vanilla item (minecraft:...)",
+            file.template
+        ));
+    }
+    if file.max_stack_size.is_some_and(|n| !(1..=99).contains(&n)) {
+        return Err("max_stack_size is 1 to 99".into());
+    }
+    check_components(&file.components, &["max_stack_size", "rarity"])
 }
 
 /// Namespaced component types, removals as `{}`, and none of `fields`,
@@ -1284,6 +1356,43 @@ capabilities = ["registries"]
             let e = block(bad).err().unwrap();
             assert!(e.contains("render_shape"), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn code_declares_blocks_and_items_as_files_do() {
+        // A native mod's registrations, declared at startup: checked as files, replacing one of
+        // the same id.
+        let files: &[(&str, &[u8])] = &[(
+            "data/ruby/horizon/block/shaft.json",
+            br#"{"template": "minecraft:stone"}"#,
+        )];
+        let mut c = hmod("declared", MANIFEST_TEXT, files).unwrap();
+        c.declare_block(
+            "ruby:shaft",
+            r#"{"template": "minecraft:glass", "state_properties": {"axis": {"type": "enum", "values": ["x", "y", "z"]}}, "default_state": {"axis": "y"}}"#,
+        )
+        .unwrap();
+        c.declare_block("ruby:cogwheel", r#"{"template": "minecraft:stone", "item": false}"#).unwrap();
+        c.declare_item("ruby:wrench", r#"{"template": "minecraft:stick", "max_stack_size": 1}"#).unwrap();
+        let ids: Vec<&str> = c.blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["ruby:shaft", "ruby:cogwheel"]);
+        assert_eq!(c.blocks[0].template, "minecraft:glass");
+        assert_eq!(c.blocks[0].default_state["axis"], "y");
+        assert_eq!(c.items[0].max_stack_size, Some(1));
+        // Another mod's id, a block's item again, or what a file couldn't hold either.
+        for (id, json, item) in [
+            ("minecraft:shaft", r#"{"template": "minecraft:stone"}"#, false),
+            ("ruby:wrench", r#"{"template": "minecraft:stone"}"#, false),
+            ("ruby:shaft", r#"{"template": "minecraft:stick"}"#, true),
+            ("ruby:press", r#"{"template": "create:casing"}"#, false),
+            ("ruby:press", r#"{"template": "minecraft:stone", "speed": 1}"#, false),
+            ("ruby:gear", r#"{"template": "minecraft:stick", "max_stack_size": 100}"#, true),
+        ] {
+            let r = if item { c.declare_item(id, json) } else { c.declare_block(id, json) };
+            assert!(r.is_err(), "{id} {json}");
+        }
+        assert_eq!(c.blocks.len(), 2);
+        assert_eq!(c.items.len(), 1);
     }
 
     #[test]

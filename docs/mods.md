@@ -100,6 +100,12 @@ renderer draws it, as a chest: a turning shaft whose renderer draws it at its an
 mod can set it from code before the resources are built (`native_content_block`), as translated NeoForge mods
 do from their `getRenderShape` and their swapped models.
 
+A native mod whose code registers its blocks and items can declare them at startup instead of in files
+(`native_content`): `content.declare_block(id, json)` and `content.declare_item(id, json)` take what the
+file would hold, check it the same way and replace a declaration of the same id. Translated NeoForge mods
+declare every block and item their registration makes, with the states, default state and properties
+their code gives.
+
 A block copies its template's states. It can also declare state properties of
 its own, which its template does not have — how a pipe says which sides it
 connects to, or a machine whether it is running. Its states then become its
