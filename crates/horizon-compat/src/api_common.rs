@@ -6,8 +6,8 @@
 use crate::{Data, Rt, V};
 use std::collections::HashMap;
 
-const DIRECTION_NAMES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
-const AXIS_NAMES: [&str; 3] = ["x", "y", "z"];
+pub(crate) const DIRECTION_NAMES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
+pub(crate) const AXIS_NAMES: [&str; 3] = ["x", "y", "z"];
 
 /// Minecraft's own class families, for `instanceof` past the mod's classes: the API's classes
 /// aren't translated, so a mod block extending `RotatedPillarBlock` is a `Block` by this table.
@@ -90,21 +90,31 @@ fn native(rt: &Rt, v: V) -> [i64; 4] {
     }
 }
 
-fn name_of(rt: &Rt, v: V) -> String {
+pub(crate) fn name_of(rt: &Rt, v: V) -> String {
     rt.str_of(v).map(str::to_owned).unwrap_or_default()
 }
 
 /// A block-state property: its name and kind (`bool`, `int`, `direction`, `axis`, or an enum's class).
-fn property(rt: &mut Rt, name: &str, kind: &str) -> V {
-    let (name, kind) = (name.to_owned(), kind.to_owned());
-    rt.intern(format!("prop/{name}/{kind}"), move |rt| {
-        let p = rt.new_object("net/minecraft/world/level/block/state/properties/Property");
-        let n = rt.string(&name);
-        let k = rt.string(&kind);
-        rt.put_field(p, "$name", n);
-        rt.put_field(p, "$kind", k);
+fn new_property(rt: &mut Rt, name: &str, kind: &str) -> V {
+    let p = rt.new_object("net/minecraft/world/level/block/state/properties/Property");
+    let n = rt.string(name);
+    let k = rt.string(kind);
+    rt.put_field(p, "$name", n);
+    rt.put_field(p, "$kind", k);
+    p
+}
+
+/// Vanilla's property in `BlockStateProperties.<field>`: one object per field, as Java's (`FACING`
+/// and `HORIZONTAL_FACING` share a name, not their values).
+fn vanilla_property_object(rt: &mut Rt, field: &str) -> Option<V> {
+    let (name, kind) = vanilla_property(field)?;
+    let f = field.to_owned();
+    Some(rt.intern(format!("prop/field/{field}"), move |rt| {
+        let p = new_property(rt, &name, kind);
+        let fv = rt.string(&f);
+        rt.put_field(p, "$field", fv);
         p
-    })
+    }))
 }
 
 /// Vanilla's `BlockStateProperties` fields: (field, property name, kind).
@@ -124,7 +134,23 @@ pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
         | "NATURAL" | "OMINOUS" | "TIP" | "EYE" | "HAS_RECORD" | "IN_WATER" | "ENABLED_POWER" => "bool",
         _ => "string",
     };
+    // The property's own name where it isn't the field's (`DOOR_HINGE` is `hinge`).
     let name = match field {
+        "DOUBLE_BLOCK_HALF" => "half".to_owned(),
+        "DOOR_HINGE" => "hinge".to_owned(),
+        "SLAB_TYPE" | "CHEST_TYPE" | "PISTON_TYPE" => "type".to_owned(),
+        "STAIRS_SHAPE" | "RAIL_SHAPE" | "RAIL_SHAPE_STRAIGHT" => "shape".to_owned(),
+        "ATTACH_FACE" => "face".to_owned(),
+        "BED_PART" => "part".to_owned(),
+        "MODE_COMPARATOR" | "STRUCTUREBLOCK_MODE" => "mode".to_owned(),
+        "BELL_ATTACHMENT" => "attachment".to_owned(),
+        "NOTEBLOCK_INSTRUMENT" => "instrument".to_owned(),
+        "DRIPSTONE_THICKNESS" => "thickness".to_owned(),
+        "BAMBOO_LEAVES" => "leaves".to_owned(),
+        "NORTH_WALL" | "NORTH_REDSTONE" => "north".to_owned(),
+        "EAST_WALL" | "EAST_REDSTONE" => "east".to_owned(),
+        "SOUTH_WALL" | "SOUTH_REDSTONE" => "south".to_owned(),
+        "WEST_WALL" | "WEST_REDSTONE" => "west".to_owned(),
         "HORIZONTAL_FACING" | "FACING_HOPPER" => "facing".to_owned(),
         "HORIZONTAL_AXIS" => "axis".to_owned(),
         "VERTICAL_DIRECTION" => "vertical_direction".to_owned(),
@@ -169,7 +195,7 @@ fn value_of(rt: &mut Rt, kind: &str, text: &str) -> V {
 }
 
 /// A Java property value's text in a state.
-fn text_of(rt: &Rt, v: V) -> String {
+pub(crate) fn text_of(rt: &Rt, v: V) -> String {
     match rt.class_of(v) {
         "java/lang/Boolean" => (rt.get_field(v, "value").i() != 0).to_string(),
         "java/lang/Integer" => rt.get_field(v, "value").i().to_string(),
@@ -182,7 +208,7 @@ fn text_of(rt: &Rt, v: V) -> String {
     }
 }
 
-fn prop_parts(rt: &Rt, p: V) -> (String, String) {
+pub(crate) fn prop_parts(rt: &Rt, p: V) -> (String, String) {
     (name_of(rt, rt.get_field(p, "$name")), name_of(rt, rt.get_field(p, "$kind")))
 }
 
@@ -321,7 +347,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 let class = name_of(rt, a(1));
                 if class == "net/minecraft/core/Direction$Axis" { "axis".to_owned() } else if class == "net/minecraft/core/Direction" { "direction".to_owned() } else { class }
             };
-            property(rt, &pname, &kind)
+            // Each `create` makes its own property, as Java's: two mods' `power` may differ.
+            let p = new_property(rt, &pname, &kind);
+            crate::blocks::created_property(rt, p, o, desc, args);
+            p
         }
         (_, "getName") if owner.starts_with("net/minecraft/world/level/block/state/properties/") => rt.get_field(a(0), "$name"),
         ("java/lang/Boolean", "valueOf") if desc == "(Z)Ljava/lang/Boolean;" => boolean(rt, a(0).i() != 0),
@@ -710,8 +739,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         | "net/minecraft/world/level/block/HorizontalDirectionalBlock"
         | "net/minecraft/world/level/block/DirectionalBlock"
         | "net/minecraft/world/level/block/RotatedPillarBlock" => {
-            let (name, kind) = vanilla_property(field)?;
-            property(rt, &name, kind)
+            vanilla_property_object(rt, field)?
         }
         "net/minecraft/world/item/ItemStack" if field == "EMPTY" => {
             rt.intern("stack/empty".into(), |rt| stack(rt, "minecraft:air", 0))

@@ -1,0 +1,839 @@
+//! A mod's registered blocks and items as content declarations (the game's `native_content`).
+//! A block's constructor records what vanilla's `Block` constructor collects: the
+//! `BlockBehaviour.Properties` it was given (strength, sounds, light, map colour, occlusion), the
+//! state properties its `createBlockStateDefinition` declares and its default state (each
+//! property's first value, then what `registerDefaultState` sets). An item's constructor records its
+//! `Item.Properties`.
+use crate::{api, api_common, jutil, Data, Rt, V};
+
+pub const BLOCK_PROPERTIES: &str = "net/minecraft/world/level/block/state/BlockBehaviour$Properties";
+const ITEM_PROPERTIES: &str = "net/minecraft/world/item/Item$Properties";
+const SOUND_TYPE: &str = "net/minecraft/world/level/block/SoundType";
+const MAP_COLOR: &str = "net/minecraft/world/level/material/MapColor";
+const DYE_COLOR: &str = "net/minecraft/world/item/DyeColor";
+const RARITY: &str = "net/minecraft/world/item/Rarity";
+const BUILDER: &str = "net/minecraft/world/level/block/state/StateDefinition$Builder";
+const DEFINE: &str = "createBlockStateDefinition.(Lnet/minecraft/world/level/block/state/StateDefinition$Builder;)V";
+const DEFINE_KEY: &str = "net/minecraft/world/level/block/Block.createBlockStateDefinition.(Lnet/minecraft/world/level/block/state/StateDefinition$Builder;)V";
+const GET_SHAPE: &str = "getShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+const PREDICATE: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
+const TO_INT: &str = "java/util/function/ToIntFunction.applyAsInt.(Ljava/lang/Object;)I";
+const APPLY: &str = "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
+
+/// `MapColor`'s constants by id, as vanilla numbers them.
+const MAP_COLORS: [&str; 62] = [
+    "NONE", "GRASS", "SAND", "WOOL", "FIRE", "ICE", "METAL", "PLANT", "SNOW", "CLAY", "DIRT", "STONE", "WATER", "WOOD", "QUARTZ",
+    "COLOR_ORANGE", "COLOR_MAGENTA", "COLOR_LIGHT_BLUE", "COLOR_YELLOW", "COLOR_LIGHT_GREEN", "COLOR_PINK", "COLOR_GRAY",
+    "COLOR_LIGHT_GRAY", "COLOR_CYAN", "COLOR_PURPLE", "COLOR_BLUE", "COLOR_BROWN", "COLOR_GREEN", "COLOR_RED", "COLOR_BLACK", "GOLD",
+    "DIAMOND", "LAPIS", "EMERALD", "PODZOL", "NETHER", "TERRACOTTA_WHITE", "TERRACOTTA_ORANGE", "TERRACOTTA_MAGENTA",
+    "TERRACOTTA_LIGHT_BLUE", "TERRACOTTA_YELLOW", "TERRACOTTA_LIGHT_GREEN", "TERRACOTTA_PINK", "TERRACOTTA_GRAY",
+    "TERRACOTTA_LIGHT_GRAY", "TERRACOTTA_CYAN", "TERRACOTTA_PURPLE", "TERRACOTTA_BLUE", "TERRACOTTA_BROWN", "TERRACOTTA_GREEN",
+    "TERRACOTTA_RED", "TERRACOTTA_BLACK", "CRIMSON_NYLIUM", "CRIMSON_STEM", "CRIMSON_HYPHAE", "WARPED_NYLIUM", "WARPED_STEM",
+    "WARPED_HYPHAE", "WARPED_WART_BLOCK", "DEEPSLATE", "RAW_IRON", "GLOW_LICHEN",
+];
+
+/// `DyeColor`'s constants in order, with the map colour each one's blocks take.
+const DYES: [(&str, u8); 16] = [
+    ("WHITE", 8), ("ORANGE", 15), ("MAGENTA", 16), ("LIGHT_BLUE", 17), ("YELLOW", 18), ("LIME", 19), ("PINK", 20), ("GRAY", 21),
+    ("LIGHT_GRAY", 22), ("CYAN", 23), ("PURPLE", 24), ("BLUE", 25), ("BROWN", 26), ("GREEN", 27), ("RED", 28), ("BLACK", 29),
+];
+
+/// `SoundType` constants and a vanilla block that sounds the same, for a declaration's `sounds`.
+const SOUNDS: [(&str, &str); 30] = [
+    ("WOOD", "minecraft:oak_planks"), ("STONE", "minecraft:stone"), ("METAL", "minecraft:iron_block"), ("GLASS", "minecraft:glass"),
+    ("WOOL", "minecraft:white_wool"), ("SAND", "minecraft:sand"), ("GRAVEL", "minecraft:gravel"), ("GRASS", "minecraft:grass_block"),
+    ("SNOW", "minecraft:snow_block"), ("LADDER", "minecraft:ladder"), ("ANVIL", "minecraft:anvil"), ("SLIME_BLOCK", "minecraft:slime_block"),
+    ("HONEY_BLOCK", "minecraft:honey_block"), ("NETHERITE_BLOCK", "minecraft:netherite_block"), ("COPPER", "minecraft:copper_block"),
+    ("LANTERN", "minecraft:lantern"), ("NETHER_BRICKS", "minecraft:nether_bricks"), ("DEEPSLATE", "minecraft:deepslate"),
+    ("POLISHED_DEEPSLATE", "minecraft:polished_deepslate"), ("DEEPSLATE_BRICKS", "minecraft:deepslate_bricks"),
+    ("DEEPSLATE_TILES", "minecraft:deepslate_tiles"), ("TUFF", "minecraft:tuff"), ("CALCITE", "minecraft:calcite"),
+    ("AMETHYST", "minecraft:amethyst_block"), ("BASALT", "minecraft:basalt"), ("BONE_BLOCK", "minecraft:bone_block"),
+    ("SCAFFOLDING", "minecraft:scaffolding"), ("NETHERRACK", "minecraft:netherrack"), ("SOUL_SAND", "minecraft:soul_sand"),
+    ("MUD_BRICKS", "minecraft:mud_bricks"),
+];
+
+/// Vanilla blocks mods copy properties from (`Properties.ofFullCopy`): destroy time, explosion
+/// resistance, whether drops need the right tool, map colour.
+const COPIED: [(&str, f32, f32, bool, u8); 14] = [
+    ("minecraft:stone", 1.5, 6.0, true, 11),
+    ("minecraft:andesite", 1.5, 6.0, true, 11),
+    ("minecraft:granite", 1.5, 6.0, true, 10),
+    ("minecraft:diorite", 1.5, 6.0, true, 14),
+    ("minecraft:deepslate", 3.0, 6.0, true, 59),
+    ("minecraft:iron_block", 5.0, 6.0, true, 6),
+    ("minecraft:gold_block", 3.0, 6.0, true, 30),
+    ("minecraft:copper_block", 3.0, 6.0, true, 15),
+    ("minecraft:netherite_block", 50.0, 1200.0, true, 29),
+    ("minecraft:oak_planks", 2.0, 3.0, false, 13),
+    ("minecraft:spruce_planks", 2.0, 3.0, false, 34),
+    ("minecraft:stripped_spruce_wood", 2.0, 2.0, false, 34),
+    ("minecraft:glass", 0.3, 0.3, false, 0),
+    ("minecraft:white_wool", 0.8, 0.8, false, 8),
+];
+
+/// The vanilla block a mod block copies when it extends one of these classes: its states, shapes
+/// and behaviour (a door opens). The rest copy a property-less block.
+const TEMPLATES: [(&str, &str); 7] = [
+    ("DoorBlock", "minecraft:oak_door"),
+    ("TrapDoorBlock", "minecraft:oak_trapdoor"),
+    ("SlabBlock", "minecraft:smooth_stone_slab"),
+    ("StairBlock", "minecraft:stone_stairs"),
+    ("LadderBlock", "minecraft:ladder"),
+    ("RotatedPillarBlock", "minecraft:quartz_pillar"),
+    ("IronBarsBlock", "minecraft:iron_bars"),
+];
+
+/// The properties a vanilla block class adds in its own `createBlockStateDefinition`
+/// (`BlockStateProperties` fields), for a mod class that extends it.
+fn vanilla_definition(class: &str) -> &'static [&'static str] {
+    match class.rsplit('/').next().unwrap_or(class) {
+        "RotatedPillarBlock" => &["AXIS"],
+        "SlabBlock" => &["SLAB_TYPE", "WATERLOGGED"],
+        "StairBlock" => &["HORIZONTAL_FACING", "HALF", "STAIRS_SHAPE", "WATERLOGGED"],
+        "DoorBlock" => &["HORIZONTAL_FACING", "OPEN", "DOOR_HINGE", "POWERED", "DOUBLE_BLOCK_HALF"],
+        "TrapDoorBlock" => &["HORIZONTAL_FACING", "OPEN", "HALF", "POWERED", "WATERLOGGED"],
+        "LadderBlock" => &["HORIZONTAL_FACING", "WATERLOGGED"],
+        "IronBarsBlock" | "FenceBlock" => &["NORTH", "EAST", "WEST", "SOUTH", "WATERLOGGED"],
+        "WallBlock" => &["UP", "NORTH_WALL", "EAST_WALL", "WEST_WALL", "SOUTH_WALL", "WATERLOGGED"],
+        "FenceGateBlock" => &["HORIZONTAL_FACING", "OPEN", "POWERED", "IN_WALL"],
+        "ButtonBlock" => &["HORIZONTAL_FACING", "POWERED", "ATTACH_FACE"],
+        "LeverBlock" => &["ATTACH_FACE", "HORIZONTAL_FACING", "POWERED"],
+        "PressurePlateBlock" => &["POWERED"],
+        "WeightedPressurePlateBlock" => &["POWER"],
+        "ChainBlock" => &["WATERLOGGED", "AXIS"],
+        "LanternBlock" => &["HANGING", "WATERLOGGED"],
+        "WallTorchBlock" => &["HORIZONTAL_FACING"],
+        _ => &[],
+    }
+}
+
+/// Values of vanilla's `BlockStateProperties` fields, in Java's order (the first is the one
+/// `StateDefinition.any()` takes).
+fn vanilla_values(field: &str) -> Option<Vec<String>> {
+    let list = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect());
+    let range = |a: i32, b: i32| Some((a..=b).map(|i| i.to_string()).collect());
+    match field {
+        "FACING" => list(&["north", "east", "south", "west", "up", "down"]),
+        "HORIZONTAL_FACING" => list(&["north", "east", "south", "west"]),
+        "FACING_HOPPER" => list(&["down", "north", "south", "west", "east"]),
+        "VERTICAL_DIRECTION" => list(&["up", "down"]),
+        "AXIS" => list(&["x", "y", "z"]),
+        "HORIZONTAL_AXIS" => list(&["x", "z"]),
+        "SLAB_TYPE" => list(&["top", "bottom", "double"]),
+        "HALF" => list(&["top", "bottom"]),
+        "STAIRS_SHAPE" => list(&["straight", "inner_left", "inner_right", "outer_left", "outer_right"]),
+        "DOUBLE_BLOCK_HALF" => list(&["upper", "lower"]),
+        "DOOR_HINGE" => list(&["left", "right"]),
+        "ATTACH_FACE" => list(&["floor", "wall", "ceiling"]),
+        "NORTH_WALL" | "EAST_WALL" | "SOUTH_WALL" | "WEST_WALL" => list(&["none", "low", "tall"]),
+        "NORTH_REDSTONE" | "EAST_REDSTONE" | "SOUTH_REDSTONE" | "WEST_REDSTONE" => list(&["up", "side", "none"]),
+        "BED_PART" => list(&["head", "foot"]),
+        "CHEST_TYPE" => list(&["single", "left", "right"]),
+        "PISTON_TYPE" => list(&["normal", "sticky"]),
+        "MODE_COMPARATOR" => list(&["compare", "subtract"]),
+        "BELL_ATTACHMENT" => list(&["floor", "ceiling", "single_wall", "double_wall"]),
+        "TILT" => list(&["none", "unstable", "partial", "full"]),
+        "RAIL_SHAPE" => list(&RAIL_SHAPES),
+        "RAIL_SHAPE_STRAIGHT" => list(&RAIL_SHAPES[..6]),
+        "AGE_1" => range(0, 1),
+        "AGE_2" => range(0, 2),
+        "AGE_3" => range(0, 3),
+        "AGE_4" => range(0, 4),
+        "AGE_5" => range(0, 5),
+        "AGE_7" => range(0, 7),
+        "AGE_15" | "POWER" | "LEVEL" | "ROTATION_16" => range(0, 15),
+        "AGE_25" => range(0, 25),
+        "LEVEL_FLOWING" => range(1, 8),
+        "LEVEL_CAULDRON" => range(1, 3),
+        "LEVEL_COMPOSTER" => range(0, 8),
+        "LEVEL_HONEY" => range(0, 5),
+        "DISTANCE" => range(1, 7),
+        "STABILITY_DISTANCE" | "MOISTURE" => range(0, 7),
+        "STAGE" => range(0, 1),
+        "DELAY" => range(1, 4),
+        "NOTE" => range(0, 24),
+        "LAYERS" => range(1, 8),
+        "BITES" => range(0, 6),
+        "PICKLES" | "EGGS" | "CANDLES" | "FLOWER_AMOUNT" | "SEGMENT_AMOUNT" => range(1, 4),
+        "HATCH" => range(0, 2),
+        "RESPAWN_ANCHOR_CHARGES" => range(0, 4),
+        "DUSTED" => range(0, 3),
+        _ => match api_common::vanilla_property(field) {
+            Some((_, "bool")) => list(&["true", "false"]),
+            _ => None,
+        },
+    }
+}
+
+/// `RailShape`'s constants in order; the first six are `RAIL_SHAPE_STRAIGHT`'s.
+const RAIL_SHAPES: [&str; 10] = [
+    "north_south", "east_west", "ascending_east", "ascending_west", "ascending_north", "ascending_south", "south_east", "south_west",
+    "north_west", "north_east",
+];
+
+/// The value vanilla's constructor gives a property its class's definition adds (`DoorBlock`
+/// starts closed, unpowered, lower half), where `StateDefinition.any()` would take another.
+fn vanilla_default(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "DOUBLE_BLOCK_HALF" => "lower",
+        "HALF" | "SLAB_TYPE" => "bottom",
+        "STAIRS_SHAPE" => "straight",
+        "DOOR_HINGE" => "left",
+        "ATTACH_FACE" => "wall",
+        "AXIS" => "y",
+        "HORIZONTAL_FACING" | "FACING" => "north",
+        "POWER" => "0",
+        f => match api_common::vanilla_property(f) {
+            Some((_, "bool")) => "false",
+            _ => return None,
+        },
+    })
+}
+
+/// Values of vanilla enums a mod's own property may take (`EnumProperty.create(name, Half.class)`).
+fn vanilla_enum(class: &str) -> Option<&'static [&'static str]> {
+    Some(match class.rsplit('/').next().unwrap_or(class) {
+        "SlabType" => &["top", "bottom", "double"],
+        "Half" => &["top", "bottom"],
+        "StairsShape" => &["straight", "inner_left", "inner_right", "outer_left", "outer_right"],
+        "DoubleBlockHalf" => &["upper", "lower"],
+        "DoorHingeSide" => &["left", "right"],
+        "AttachFace" => &["floor", "wall", "ceiling"],
+        "WallSide" => &["none", "low", "tall"],
+        "RedstoneSide" => &["up", "side", "none"],
+        "BedPart" => &["head", "foot"],
+        "ChestType" => &["single", "left", "right"],
+        "PistonType" => &["normal", "sticky"],
+        "ComparatorMode" => &["compare", "subtract"],
+        "BellAttachType" => &["floor", "ceiling", "single_wall", "double_wall"],
+        "Tilt" => &["none", "unstable", "partial", "full"],
+        "RailShape" => &RAIL_SHAPES,
+        "DyeColor" => &[
+            "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown",
+            "green", "red", "black",
+        ],
+        _ => return None,
+    })
+}
+
+/// Calls this module answers (before the general mapping): property builders record what they're
+/// given, block constructors collect their states.
+pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let (owner, rest) = key.split_once('.')?;
+    let (name, desc) = rest.split_once('.')?;
+    match (owner, name) {
+        (BLOCK_PROPERTIES, _) => block_properties(rt, name, desc, args),
+        (ITEM_PROPERTIES, _) => item_properties(rt, name, args),
+        (BUILDER, "add") => {
+            let list = rt.get_field(a(0), "$props");
+            for p in jutil::elements(rt, a(1)) {
+                add_property(rt, list, p);
+            }
+            Some(a(0))
+        }
+        // `super.createBlockStateDefinition(builder)` reaching a vanilla class: what it adds.
+        (o, "createBlockStateDefinition") if o.starts_with("net/minecraft/world/level/block/") => {
+            add_vanilla_definition(rt, a(1), o);
+            Some(V::Void)
+        }
+        (_, "registerDefaultState") if desc == "(Lnet/minecraft/world/level/block/state/BlockState;)V" => {
+            let text = rt.str_of(a(1)).unwrap_or("").to_owned();
+            let (_, props) = crate::host::split_state(&text);
+            let joined: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let s = rt.string(&joined.join(","));
+            rt.put_field(a(0), "$default", s);
+            Some(V::Void)
+        }
+        // A mod block's default state: its registered name with the properties its constructor set.
+        (_, "defaultBlockState") if desc == "()Lnet/minecraft/world/level/block/state/BlockState;" => {
+            let d = rt.get_field(a(0), "$default");
+            let props = rt.str_of(d)?.to_owned();
+            let block = rt.registered_name(a(0), "block").unwrap_or("").to_owned();
+            let text = if props.is_empty() { block } else { format!("{block}[{props}]") };
+            Some(api::state(rt, &text))
+        }
+        (o, "<init>") if o.starts_with("net/minecraft/world/level/block/") && desc.contains("Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;") => {
+            let props = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == BLOCK_PROPERTIES).unwrap_or(V::NULL);
+            constructed(rt, a(0), o, props);
+            Some(V::Void)
+        }
+        (o, "<init>") if o.starts_with("net/minecraft/world/item/") && desc.contains("Lnet/minecraft/world/item/Item$Properties;") => {
+            if let Some(p) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == ITEM_PROPERTIES) {
+                rt.put_field(a(0), "$properties", p);
+            }
+            Some(V::Void)
+        }
+        _ => None,
+    }
+}
+
+/// Static fields this module owns: `SoundType`, `MapColor`, `DyeColor`, `Rarity` constants.
+pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    match owner {
+        SOUND_TYPE => {
+            let (f, _) = SOUNDS.iter().find(|(f, _)| *f == field)?;
+            Some(named(rt, SOUND_TYPE, f))
+        }
+        MAP_COLOR => {
+            let id = MAP_COLORS.iter().position(|c| *c == field)?;
+            let o = named(rt, MAP_COLOR, MAP_COLORS[id]);
+            rt.put_field(o, "id", V::I(id as i32));
+            Some(o)
+        }
+        DYE_COLOR => {
+            let i = DYES.iter().position(|(d, _)| *d == field)?;
+            Some(api::api_enum(rt, DYE_COLOR, DYES[i].0, i as i32))
+        }
+        RARITY => {
+            const R: [&str; 4] = ["COMMON", "UNCOMMON", "RARE", "EPIC"];
+            let i = R.iter().position(|r| *r == field)?;
+            Some(api::api_enum(rt, RARITY, R[i], i as i32))
+        }
+        _ => None,
+    }
+}
+
+/// One object per named constant of a class that isn't an enum (`SoundType.METAL`).
+fn named(rt: &mut Rt, class: &'static str, name: &'static str) -> V {
+    rt.intern(format!("const/{class}.{name}"), |rt| {
+        let o = rt.new_object(class);
+        let n = rt.string(name);
+        rt.put_field(o, "$name", n);
+        o
+    })
+}
+
+/// `BlockBehaviour.Properties`: the calls a declaration needs are kept on the object; the others
+/// return the receiver through the general mapping's builder rule.
+fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let set = |rt: &mut Rt, f: &'static str, v: V| {
+        rt.put_field(this, f, v);
+        Some(this)
+    };
+    match name {
+        "ofFullCopy" | "ofLegacyCopy" | "copy" => {
+            let p = rt.new_object(BLOCK_PROPERTIES);
+            let from = a(0);
+            match rt.str_of(from) {
+                // A vanilla block (`Blocks.ANDESITE`): named, its values from the table.
+                Some(n) => {
+                    let s = rt.string(&n.to_owned());
+                    rt.put_field(p, "$copy", s);
+                }
+                // A mod block: what its own properties recorded.
+                None => {
+                    let src = rt.get_field(from, "$properties");
+                    if let Some(Data::Fields(f)) = rt.heap.get(src.r() as usize).map(|o| o.data.clone()) {
+                        for (k, v) in f {
+                            rt.put_field(p, k, v);
+                        }
+                    }
+                }
+            }
+            Some(p)
+        }
+        "strength" if desc.starts_with("(FF)") => {
+            rt.put_field(this, "$destroy", a(1));
+            set(rt, "$resist", a(2))
+        }
+        "strength" => {
+            rt.put_field(this, "$destroy", a(1));
+            set(rt, "$resist", a(1))
+        }
+        "destroyTime" => set(rt, "$destroy", a(1)),
+        "explosionResistance" => set(rt, "$resist", a(1)),
+        "instabreak" => {
+            rt.put_field(this, "$destroy", V::F(0.0));
+            set(rt, "$resist", V::F(0.0))
+        }
+        "sound" => set(rt, "$sound", a(1)),
+        "lightLevel" => set(rt, "$light", a(1)),
+        "noOcclusion" => set(rt, "$noOcclusion", V::I(1)),
+        "noCollission" | "noCollision" => {
+            rt.put_field(this, "$noOcclusion", V::I(1));
+            set(rt, "$noCollision", V::I(1))
+        }
+        "requiresCorrectToolForDrops" => set(rt, "$requiresTool", V::I(1)),
+        "friction" => set(rt, "$friction", a(1)),
+        "randomTicks" => set(rt, "$randomTicks", V::I(1)),
+        "mapColor" => set(rt, "$mapColor", a(1)),
+        _ => None,
+    }
+}
+
+/// `Item.Properties`: stack size, durability, rarity.
+fn item_properties(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let field = match name {
+        "<init>" => return Some(V::Void),
+        "stacksTo" => "$stacksTo",
+        "durability" => "$durability",
+        "rarity" => "$rarity",
+        "fireResistant" => {
+            rt.put_field(this, "$fireResistant", V::I(1));
+            return Some(this);
+        }
+        _ => return None,
+    };
+    rt.put_field(this, field, a(1));
+    Some(this)
+}
+
+/// A block's construction reaching vanilla's `Block` constructor (through `vanilla`, the first
+/// vanilla class above the mod's): its properties, the states its definition declares, and
+/// `StateDefinition.any()` as the default state until `registerDefaultState` sets another.
+fn constructed(rt: &mut Rt, b: V, vanilla: &str, props: V) {
+    rt.put_field(b, "$properties", props);
+    let vanilla_class = rt.string(vanilla);
+    rt.put_field(b, "$vanilla", vanilla_class);
+    let builder = rt.new_object(BUILDER);
+    let list = jutil::new_list(rt, Vec::new());
+    rt.put_field(builder, "$props", list);
+    rt.put_field(b, "$state-props", list);
+    let class = rt.class_of(b);
+    match rt.vcall {
+        Some(vc) if rt.overrides.is_some_and(|o| o(class, DEFINE)) => {
+            vc(rt, DEFINE_KEY, DEFINE, &[b, builder]);
+            rt.report_thrown("createBlockStateDefinition");
+        }
+        _ => add_vanilla_definition(rt, builder, vanilla),
+    }
+    let mut any = Vec::new();
+    for p in jutil::elements(rt, list) {
+        let (pname, _) = api_common::prop_parts(rt, p);
+        let values = property_values(rt, p);
+        let field = rt.str_of(rt.get_field(p, "$field")).map(str::to_owned);
+        let vanilla_set = (rt.get_field(p, "$vanilla-default").i() != 0)
+            .then(|| field.as_deref().and_then(vanilla_default))
+            .flatten()
+            .filter(|v| values.iter().any(|x| x == v));
+        if let Some(first) = vanilla_set.map(str::to_owned).or_else(|| values.into_iter().next()) {
+            any.push(format!("{pname}={first}"));
+        }
+    }
+    any.sort();
+    let s = rt.string(&any.join(","));
+    rt.put_field(b, "$default", s);
+}
+
+fn add_vanilla_definition(rt: &mut Rt, builder: V, class: &str) {
+    let list = rt.get_field(builder, "$props");
+    for field in vanilla_definition(class) {
+        if let Some(p) = api_common::get_static(rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties", field) {
+            add_property(rt, list, p);
+            // Its vanilla constructor sets this one's default.
+            rt.put_field(p, "$vanilla-default", V::I(1));
+        }
+    }
+}
+
+/// Adds a property to a definition's list, once per name (a definition can't hold two).
+fn add_property(rt: &mut Rt, list: V, p: V) {
+    if list.r() == 0 || p.r() == 0 {
+        return;
+    }
+    let (name, _) = api_common::prop_parts(rt, p);
+    let mut items = jutil::elements(rt, list);
+    if items.iter().any(|q| api_common::prop_parts(rt, *q).0 == name) {
+        return;
+    }
+    items.push(p);
+    if let Some(o) = rt.heap.get_mut(list.r() as usize) {
+        o.data = Data::List(items);
+    }
+}
+
+/// A property made by `BooleanProperty.create` and friends (`owner`, `desc`, `args` of that call):
+/// the values it takes beyond its kind's.
+pub fn created_property(rt: &mut Rt, p: V, owner: &str, desc: &str, args: &[V]) {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    if owner.ends_with("IntegerProperty") {
+        rt.put_field(p, "$min", a(1));
+        rt.put_field(p, "$max", a(2));
+        return;
+    }
+    let direction = owner.ends_with("DirectionProperty");
+    if !direction && !owner.ends_with("EnumProperty") {
+        return;
+    }
+    // The constants it may take: given, or all its class's, filtered by a predicate.
+    let given = if direction { 1 } else { 2 };
+    let candidates: Vec<V> = if desc.contains("[L") || desc.contains("Ljava/util/Collection;") || desc.contains("Ljava/util/List;") {
+        let listed = jutil::elements(rt, a(given));
+        if listed.is_empty() && rt.array_len(a(given)) > 0 {
+            (0..rt.array_len(a(given))).map(|i| rt.array_get(a(given), i)).collect()
+        } else {
+            listed
+        }
+    } else {
+        let all = if direction {
+            (0..6).map(|o| api_common::direction(rt, o)).collect()
+        } else {
+            let (_, kind) = api_common::prop_parts(rt, p);
+            enum_constants(rt, &kind)
+        };
+        if desc.contains("Ljava/util/function/Predicate;") {
+            let pred = a(given);
+            all.into_iter().filter(|c| rt.call_functional(PREDICATE, pred, &[*c]).i() != 0).collect()
+        } else if direction {
+            all
+        } else {
+            return; // every constant: read from the class when asked
+        }
+    };
+    let texts: Vec<V> = candidates
+        .iter()
+        .map(|c| {
+            let t = api_common::text_of(rt, *c);
+            rt.string(&t)
+        })
+        .collect();
+    let l = jutil::new_list(rt, texts);
+    rt.put_field(p, "$values", l);
+}
+
+/// A mod enum's constants, in order (`values()`).
+fn enum_constants(rt: &mut Rt, class: &str) -> Vec<V> {
+    match rt.reflect(class, "values", &[]) {
+        Some(arr) if arr.r() != 0 => (0..rt.array_len(arr)).map(|i| rt.array_get(arr, i)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A property's values in Java's order, as they read in a state.
+pub fn property_values(rt: &mut Rt, p: V) -> Vec<String> {
+    let listed = rt.get_field(p, "$values");
+    if listed.r() != 0 {
+        return jutil::elements(rt, listed).iter().map(|v| rt.str_of(*v).unwrap_or("").to_owned()).collect();
+    }
+    let field = rt.str_of(rt.get_field(p, "$field")).map(str::to_owned);
+    if let Some(v) = field.as_deref().and_then(vanilla_values) {
+        return v;
+    }
+    let (_, kind) = api_common::prop_parts(rt, p);
+    match kind.as_str() {
+        "bool" => vec!["true".into(), "false".into()],
+        "int" => {
+            let (lo, hi) = (rt.get_field(p, "$min").i(), rt.get_field(p, "$max").i());
+            (lo..=hi.max(lo)).map(|i| i.to_string()).collect()
+        }
+        "axis" => vec!["x".into(), "y".into(), "z".into()],
+        "direction" => api_common::DIRECTION_NAMES.iter().map(|s| s.to_string()).collect(),
+        class => match vanilla_enum(class) {
+            Some(v) => v.iter().map(|s| s.to_string()).collect(),
+            None => {
+                let constants = enum_constants(rt, class);
+                constants.iter().map(|c| api_common::text_of(rt, *c)).collect()
+            }
+        },
+    }
+}
+
+/// Every block the mod registered (outside `minecraft`), as `(id, declaration)`: the JSON of a
+/// content block file (docs/mods.md).
+pub fn block_declarations(rt: &mut Rt) -> Vec<(String, String)> {
+    let mut blocks: Vec<(String, V)> = rt
+        .registered
+        .iter()
+        .filter(|((r, n), _)| r == "block" && own_id(n))
+        .map(|((_, n), v)| (n.clone(), *v))
+        .collect();
+    blocks.sort_by(|a, b| a.0.cmp(&b.0));
+    let items: std::collections::HashSet<String> = rt.registered.keys().filter(|(r, _)| r == "item").map(|(_, n)| n.clone()).collect();
+    blocks.into_iter().map(|(name, b)| {
+        let item = items.contains(&name);
+        let json = block_declaration(rt, &name, b, item);
+        (name, json)
+    }).collect()
+}
+
+/// A registered name of the mod's own: `<namespace>:<path>` outside `minecraft`.
+fn own_id(name: &str) -> bool {
+    name.split_once(':').is_some_and(|(ns, path)| !ns.is_empty() && ns != "minecraft" && !path.is_empty())
+}
+
+/// A state property's name or value as states spell them: lower case letters, digits, `_`.
+fn state_name(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// One block's declaration.
+fn block_declaration(rt: &mut Rt, name: &str, b: V, item: bool) -> String {
+    let props = rt.get_field(b, "$properties");
+    let vanilla = rt.str_of(rt.get_field(b, "$vanilla")).unwrap_or("").to_owned();
+    let list = rt.get_field(b, "$state-props");
+    let mut states: Vec<(String, Vec<String>)> = Vec::new();
+    for p in jutil::elements(rt, list) {
+        let (pname, _) = api_common::prop_parts(rt, p);
+        // Values a state can spell (a property whose values aren't known is left out).
+        let values: Vec<String> = property_values(rt, p).into_iter().filter(|v| state_name(v)).collect();
+        if !values.is_empty() && state_name(&pname) {
+            states.push((pname, values));
+        }
+    }
+    let default_text = rt.str_of(rt.get_field(b, "$default")).unwrap_or("").to_owned();
+    let mut default: Vec<(String, String)> = Vec::new();
+    for (pname, values) in &states {
+        let set = default_text.split(',').filter_map(|kv| kv.split_once('=')).find(|(k, _)| k == pname).map(|(_, v)| v.to_owned());
+        let v = set.filter(|v| values.contains(v)).unwrap_or_else(|| values[0].clone());
+        default.push((pname.clone(), v));
+    }
+    let default_state = if default.is_empty() { name.to_owned() } else {
+        let inner: Vec<String> = default.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        format!("{name}[{}]", inner.join(","))
+    };
+
+    // The template: a vanilla block of the same kind (a door), else one without states that lets
+    // light through when the block isn't a full cube or doesn't occlude, else stone.
+    let simple = vanilla.rsplit('/').next().unwrap_or("");
+    let class = rt.class_of(b);
+    let template = match TEMPLATES.iter().find(|(c, _)| *c == simple) {
+        Some((_, t)) => t.to_string(),
+        None => {
+            let see_through = rt.get_field(props, "$noOcclusion").i() != 0
+                // A shape of its own: until shapes are read, taken as not a full cube.
+                || rt.overrides.is_some_and(|o| o(class, GET_SHAPE));
+            if see_through { "minecraft:glass".into() } else { "minecraft:stone".into() }
+        }
+    };
+    let template_props: Vec<String> = match TEMPLATES.iter().find(|(c, _)| *c == simple) {
+        Some(_) => vanilla_definition(&vanilla).iter().filter_map(|f| api_common::vanilla_property(f).map(|(n, _)| n)).collect(),
+        None => Vec::new(),
+    };
+
+    let mut p = Vec::new();
+    let copy = rt.str_of(rt.get_field(props, "$copy")).map(str::to_owned);
+    let copied = copy.as_deref().and_then(|c| COPIED.iter().find(|(n, ..)| *n == c));
+    let f = |rt: &Rt, k: &'static str| -> Option<f32> {
+        let v = rt.get_field(props, k);
+        (props.r() != 0 && v != V::NULL && v != V::Void).then(|| v.f())
+    };
+    let has = |rt: &Rt, k: &'static str| props.r() != 0 && !matches!(rt.get_field(props, k), V::NULL | V::Void);
+    let destroy = if has(rt, "$destroy") { f(rt, "$destroy") } else { copied.map(|c| c.1) };
+    let resist = if has(rt, "$resist") { f(rt, "$resist") } else { copied.map(|c| c.2) };
+    if let Some(d) = destroy.filter(|d| d.is_finite()) {
+        p.push(format!("\"hardness\": {}", num(d)));
+    }
+    if let Some(r) = resist.filter(|r| r.is_finite() && *r >= 0.0) {
+        p.push(format!("\"explosion_resistance\": {}", num(r)));
+    }
+    let tool = rt.get_field(props, "$requiresTool").i() != 0 || (!has(rt, "$requiresTool") && copied.is_some_and(|c| c.3));
+    if tool {
+        p.push("\"requires_tool\": true".into());
+    }
+    if has(rt, "$friction") {
+        p.push(format!("\"friction\": {}", num(rt.get_field(props, "$friction").f())));
+    }
+    if let Some(sound) = sound_block(rt, rt.get_field(props, "$sound")).or_else(|| copy.clone()) {
+        p.push(format!("\"sounds\": \"{sound}\""));
+    }
+    let map = map_color(rt, rt.get_field(props, "$mapColor"), &default_state).or_else(|| copied.map(|c| c.4));
+    if let Some(m) = map {
+        p.push(format!("\"map_color\": {m}"));
+    }
+    let light = rt.get_field(props, "$light");
+    if props.r() != 0 && light.r() != 0 {
+        let st = api::state(rt, &default_state);
+        let level = rt.call_functional(TO_INT, light, &[st]).i();
+        rt.thrown = None;
+        if (1..=15).contains(&level) {
+            p.push(format!("\"light\": {level}"));
+        }
+    }
+    if rt.get_field(props, "$randomTicks").i() != 0 {
+        p.push("\"random_ticks\": true".into());
+    }
+
+    let own: Vec<String> = states
+        .iter()
+        .filter(|(n, _)| !template_props.contains(n))
+        .map(|(n, values)| {
+            if values.len() == 2 && values.contains(&"true".to_owned()) && values.contains(&"false".to_owned()) {
+                format!("\"{n}\": {{\"type\": \"boolean\"}}")
+            } else {
+                let vs: Vec<String> = values.iter().map(|v| format!("\"{v}\"")).collect();
+                format!("\"{n}\": {{\"type\": \"enum\", \"values\": [{}]}}", vs.join(", "))
+            }
+        })
+        .collect();
+    let defaults: Vec<String> = default.iter().map(|(k, v)| format!("\"{k}\": \"{v}\"")).collect();
+    format!(
+        "{{\"template\": \"{template}\", \"item\": {item}, \"properties\": {{{}}}, \"state_properties\": {{{}}}, \"default_state\": {{{}}}}}",
+        p.join(", "),
+        own.join(", "),
+        defaults.join(", ")
+    )
+}
+
+/// A number as JSON writes it.
+fn num(x: f32) -> String {
+    if x.fract() == 0.0 && x.abs() < 1e9 { format!("{x:.1}") } else { format!("{x}") }
+}
+
+/// The vanilla block whose sounds a `SoundType` value names.
+fn sound_block(rt: &Rt, sound: V) -> Option<String> {
+    let n = rt.str_of(rt.get_field(sound, "$name"))?;
+    SOUNDS.iter().find(|(f, _)| *f == n).map(|(_, b)| b.to_string())
+}
+
+/// A map colour id from `mapColor(MapColor)`, `mapColor(DyeColor)` or `mapColor(state -> ...)`.
+fn map_color(rt: &mut Rt, v: V, default_state: &str) -> Option<u8> {
+    if v.r() == 0 {
+        return None;
+    }
+    let v = match rt.class_of(v) {
+        MAP_COLOR | DYE_COLOR => v,
+        _ => {
+            let st = api::state(rt, default_state);
+            let r = rt.call_functional(APPLY, v, &[st]);
+            rt.thrown = None;
+            r
+        }
+    };
+    match rt.class_of(v) {
+        MAP_COLOR => Some(rt.get_field(v, "id").i().clamp(0, 61) as u8),
+        DYE_COLOR => DYES.get(rt.get_field(v, "$ordinal").i() as usize).map(|d| d.1),
+        _ => None,
+    }
+}
+
+/// Every item the mod registered that isn't a block's own item, as `(id, declaration)`.
+pub fn item_declarations(rt: &mut Rt) -> Vec<(String, String)> {
+    let blocks: std::collections::HashSet<String> = rt.registered.keys().filter(|(r, _)| r == "block").map(|(_, n)| n.clone()).collect();
+    let mut items: Vec<(String, V)> = rt
+        .registered
+        .iter()
+        .filter(|((r, n), _)| r == "item" && own_id(n) && !blocks.contains(n))
+        .map(|((_, n), v)| (n.clone(), *v))
+        .collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items
+        .into_iter()
+        .map(|(name, i)| {
+            let props = rt.get_field(i, "$properties");
+            let mut fields = vec!["\"template\": \"minecraft:stick\"".to_owned()];
+            let durability = rt.get_field(props, "$durability").i();
+            let stack = if durability > 0 { 1 } else { rt.get_field(props, "$stacksTo").i() };
+            if props.r() != 0 && (1..=99).contains(&stack) && stack != 64 {
+                fields.push(format!("\"max_stack_size\": {stack}"));
+            }
+            let rarity = rt.get_field(props, "$rarity");
+            if props.r() != 0 && rarity.r() != 0 {
+                let r = rt.str_of(rt.get_field(rarity, "$name")).unwrap_or("COMMON").to_ascii_lowercase();
+                if r != "common" {
+                    fields.push(format!("\"rarity\": \"{r}\""));
+                }
+            }
+            if durability > 0 {
+                fields.push(format!("\"components\": {{\"minecraft:max_damage\": {durability}, \"minecraft:damage\": 0}}"));
+            }
+            (name, format!("{{{}}}", fields.join(", ")))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OF: &str = "net/minecraft/world/level/block/state/BlockBehaviour$Properties.of.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;";
+
+    fn props(rt: &mut Rt) -> V {
+        api::call(rt, OF, &[])
+    }
+
+    #[test]
+    fn properties_keep_what_a_declaration_needs() {
+        let mut rt = Rt::new();
+        let p = props(&mut rt);
+        let metal = api::get_static(&mut rt, "net/minecraft/world/level/block/SoundType.METAL");
+        let color = api::get_static(&mut rt, "net/minecraft/world/level/material/MapColor.COLOR_ORANGE");
+        let k = |s: &str| -> &'static str { Box::leak(format!("{BLOCK_PROPERTIES}.{s}").into_boxed_str()) };
+        let q = api::call(&mut rt, k("strength.(FF)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[p, V::F(3.0), V::F(6.0)]);
+        assert_eq!(q, p);
+        api::call(&mut rt, k("sound.(Lnet/minecraft/world/level/block/SoundType;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[p, metal]);
+        api::call(&mut rt, k("mapColor.(Lnet/minecraft/world/level/material/MapColor;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[p, color]);
+        api::call(&mut rt, k("noOcclusion.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[p]);
+        api::call(&mut rt, k("requiresCorrectToolForDrops.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[p]);
+        // A plain block built with them, registered as `ruby:gear` with an item.
+        let b = rt.new_object("net/minecraft/world/level/block/Block");
+        api::call(&mut rt, "net/minecraft/world/level/block/Block.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[b, p]);
+        rt.registered.insert(("block".into(), "ruby:gear".into()), b);
+        rt.registered.insert(("item".into(), "ruby:gear".into()), V::NULL);
+        let decl = block_declarations(&mut rt);
+        assert_eq!(decl.len(), 1);
+        let (id, json) = &decl[0];
+        assert_eq!(id, "ruby:gear");
+        for part in [
+            "\"template\": \"minecraft:glass\"",
+            "\"item\": true",
+            "\"hardness\": 3.0",
+            "\"explosion_resistance\": 6.0",
+            "\"requires_tool\": true",
+            "\"sounds\": \"minecraft:iron_block\"",
+            "\"map_color\": 15",
+        ] {
+            assert!(json.contains(part), "{part} in {json}");
+        }
+    }
+
+    #[test]
+    fn copied_properties_take_the_vanilla_blocks_values() {
+        let mut rt = Rt::new();
+        let andesite = api::get_static(&mut rt, "net/minecraft/world/level/block/Blocks.ANDESITE");
+        let p = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.ofFullCopy.(Lnet/minecraft/world/level/block/state/BlockBehaviour;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[andesite]);
+        let b = rt.new_object("net/minecraft/world/level/block/Block");
+        api::call(&mut rt, "net/minecraft/world/level/block/Block.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[b, p]);
+        rt.registered.insert(("block".into(), "ruby:casing".into()), b);
+        let (_, json) = block_declarations(&mut rt).remove(0);
+        for part in ["\"template\": \"minecraft:stone\"", "\"item\": false", "\"hardness\": 1.5", "\"sounds\": \"minecraft:andesite\"", "\"map_color\": 11"] {
+            assert!(json.contains(part), "{part} in {json}");
+        }
+    }
+
+    #[test]
+    fn a_pillar_declares_its_axis_and_the_default_its_constructor_sets() {
+        // A mod block extending `RotatedPillarBlock` without its own definition: vanilla's adds the
+        // axis; the template is a pillar, so the axis is the template's.
+        let mut rt = Rt::new();
+        let p = props(&mut rt);
+        let b = rt.new_object("net/minecraft/world/level/block/RotatedPillarBlock");
+        api::call(&mut rt, "net/minecraft/world/level/block/RotatedPillarBlock.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[b, p]);
+        // As vanilla's `RotatedPillarBlock` constructor leaves it: along y.
+        let d = api::call(&mut rt, "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;", &[b]);
+        assert_eq!(rt.str_of(d), Some("[axis=y]"));
+        // Its own constructor: `registerDefaultState(defaultBlockState().setValue(AXIS, Z))`.
+        let axis = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.AXIS");
+        let z = api::get_static(&mut rt, "net/minecraft/core/Direction$Axis.Z");
+        let s = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;", &[d, axis, z]);
+        api::call(&mut rt, "net/minecraft/world/level/block/Block.registerDefaultState.(Lnet/minecraft/world/level/block/state/BlockState;)V", &[b, s]);
+        rt.registered.insert(("block".into(), "ruby:log".into()), b);
+        let d = api::call(&mut rt, "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;", &[b]);
+        assert_eq!(rt.str_of(d), Some("ruby:log[axis=z]"));
+        let (_, json) = block_declarations(&mut rt).remove(0);
+        assert!(json.contains("\"template\": \"minecraft:quartz_pillar\""), "{json}");
+        assert!(json.contains("\"state_properties\": {}"), "{json}");
+        assert!(json.contains("\"default_state\": {\"axis\": \"z\"}"), "{json}");
+    }
+
+    #[test]
+    fn mod_properties_take_their_own_values() {
+        let mut rt = Rt::new();
+        let n = rt.string("level");
+        let level = api::call(&mut rt, "net/minecraft/world/level/block/state/properties/IntegerProperty.create.(Ljava/lang/String;II)Lnet/minecraft/world/level/block/state/properties/IntegerProperty;", &[n, V::I(1), V::I(4)]);
+        let n2 = rt.string("level");
+        let other = api::call(&mut rt, "net/minecraft/world/level/block/state/properties/IntegerProperty.create.(Ljava/lang/String;II)Lnet/minecraft/world/level/block/state/properties/IntegerProperty;", &[n2, V::I(0), V::I(2)]);
+        assert_ne!(level, other);
+        assert_eq!(property_values(&mut rt, level), ["1", "2", "3", "4"]);
+        assert_eq!(property_values(&mut rt, other), ["0", "1", "2"]);
+        // `FACING` and `HORIZONTAL_FACING` share a name, not their values.
+        let facing = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.FACING");
+        let horizontal = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.HORIZONTAL_FACING");
+        assert_eq!(property_values(&mut rt, facing).len(), 6);
+        assert_eq!(property_values(&mut rt, horizontal), ["north", "east", "south", "west"]);
+    }
+}

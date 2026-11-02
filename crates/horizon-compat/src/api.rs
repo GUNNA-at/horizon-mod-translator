@@ -270,7 +270,8 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
                 _ => V::NULL,
             }
         }
-        _ => match crate::neo::call(rt, key, args)
+        _ => match crate::blocks::call(rt, key, args)
+            .or_else(|| crate::neo::call(rt, key, args))
             .or_else(|| crate::jlang::call(rt, key, args))
             .or_else(|| crate::jutil::call(rt, key, args))
             .or_else(|| crate::tags::call(rt, key, args))
@@ -573,7 +574,9 @@ fn offset(rt: &mut Rt, p: V, d: [i64; 3], n: i64) -> V {
 /// Static fields of API classes (`Direction.UP`...).
 pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
     if let Some((o, f)) = key.split_once('.')
-        && let Some(v) = crate::api_common::get_static(rt, o, f).or_else(|| crate::render::get_static(rt, o, f))
+        && let Some(v) = crate::api_common::get_static(rt, o, f)
+            .or_else(|| crate::render::get_static(rt, o, f))
+            .or_else(|| crate::blocks::get_static(rt, o, f))
     {
         return v;
     }
