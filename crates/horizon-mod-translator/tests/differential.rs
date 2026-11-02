@@ -111,7 +111,7 @@ fn translated_fixture_matches_the_jvm() {
         ),
     )
     .unwrap();
-    let mut main = String::from("mod fixture;\nuse fixture::*;\nuse horizon_compat::{Rt, V};\nfn main() {\n    let mut rt = Rt::new();\n    init(&mut rt);\n");
+    let mut main = String::from("mod fixture;\nuse fixture::*;\nuse horizon_compat::{Rt, V};\nfn main() {\n    horizon_compat::install();\n    let mut rt = Rt::new();\n    init(&mut rt);\n");
     // Static initialiser first, as the JVM runs it.
     if parsed.iter().any(|c| c.name == "Fixture" && c.methods.iter().any(|m| m.name == "<clinit>")) {
         main.push_str(&format!("    {}(&mut rt, &[]);\n", horizon_mod_translator::codegen::fn_name("Fixture", "<clinit>", "()V")));

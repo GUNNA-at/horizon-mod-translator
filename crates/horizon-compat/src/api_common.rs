@@ -9,6 +9,28 @@ use std::collections::HashMap;
 const DIRECTION_NAMES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
 const AXIS_NAMES: [&str; 3] = ["x", "y", "z"];
 
+/// Minecraft's own class families, for `instanceof` past the mod's classes: the API's classes
+/// aren't translated, so a mod block extending `RotatedPillarBlock` is a `Block` by this table.
+/// The core's `Rt::is_a` asks it (directly when inlined, through `Fns` otherwise).
+pub fn api_is_a(c: &str, class: &str) -> bool {
+    let family = |pkg: &str, suffix: &str| c.starts_with(pkg) && c.ends_with(suffix);
+    match class {
+        "net/minecraft/world/level/block/Block" | "net/minecraft/world/level/block/state/BlockBehaviour" => {
+            family("net/minecraft/world/level/block/", "Block") && !c.contains("/entity/")
+        }
+        "net/minecraft/world/level/block/EntityBlock" => c == "net/minecraft/world/level/block/BaseEntityBlock",
+        "net/minecraft/world/item/Item" => family("net/minecraft/world/item/", "Item"),
+        "net/minecraft/world/level/block/entity/BlockEntity" => family("net/minecraft/world/level/block/entity/", "BlockEntity"),
+        "net/minecraft/world/entity/Entity" => c.starts_with("net/minecraft/world/entity/") && !c.contains('$'),
+        "java/lang/Throwable" => c.starts_with("java/lang/") && (c.ends_with("Exception") || c.ends_with("Error")),
+        "java/lang/Exception" => c.starts_with("java/lang/") && c.ends_with("Exception"),
+        "java/lang/RuntimeException" => {
+            matches!(c, "java/lang/IllegalArgumentException" | "java/lang/IllegalStateException" | "java/lang/NullPointerException" | "java/lang/UnsupportedOperationException" | "java/lang/ClassCastException" | "java/lang/ArithmeticException" | "java/lang/IndexOutOfBoundsException" | "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/NumberFormatException")
+        }
+        _ => false,
+    }
+}
+
 pub fn direction(rt: &mut Rt, ordinal: i64) -> V {
     let o = ordinal.clamp(0, 5);
     rt.intern(format!("dir/{o}"), |rt| {

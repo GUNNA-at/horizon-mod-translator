@@ -15,5 +15,11 @@ pub mod neo;
 
 /// Makes this mapping the one engines that link `horizon-compat-core` alone call.
 pub fn install() {
-    install_fns(Fns { call: api::call, get_static: api::get_static, constructor_arg: neo::constructor_arg, fire_registrations: neo::fire_registrations });
+    install_fns(Fns {
+        call: api::call,
+        get_static: api::get_static,
+        constructor_arg: neo::constructor_arg,
+        fire_registrations: neo::fire_registrations,
+        api_is_a: api_common::api_is_a,
+    });
 }

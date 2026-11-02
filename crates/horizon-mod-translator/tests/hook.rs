@@ -54,6 +54,7 @@ fn a_translated_mod_block_ticks_through_the_hook() {
         r#"mod testmod;
 use horizon_compat::{glue, host::{Host, MemoryHost}, Rt};
 fn main() {
+    horizon_compat::install();
     let mut rt = Rt::new();
     testmod::init(&mut rt);
     testmod::start(&mut rt);

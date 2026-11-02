@@ -49,7 +49,8 @@ fn inlined_core() -> String {
         .filter(|(n, _)| *n != "host.rs")
         .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
         .collect();
-    format!("{head}{tail}\n{mods}")
+    // `Rt::is_a` asks the mapping's table of Minecraft's class families.
+    format!("{head}{tail}\n{mods}pub use api_common::api_is_a;\n")
 }
 
 /// Writes `contents` unless the file already holds exactly that, so an unchanged engine keeps its

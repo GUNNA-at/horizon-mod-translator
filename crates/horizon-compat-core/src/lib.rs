@@ -376,7 +376,7 @@ impl Rt {
 
     /// Whether class `c` is `class` or a subtype of it: its superclasses and every interface they
     /// implement, as the JVM's `instanceof` and `Class.isAssignableFrom` answer. Past the mod's own
-    /// classes, Minecraft's are known by family ([`api_is_a`]).
+    /// classes, Minecraft's are known by family (`api_is_a`, horizon-compat's table).
     pub fn is_a(&self, c: &str, class: &str) -> bool {
         if class == "java/lang/Object" {
             return true;
@@ -613,27 +613,6 @@ pub fn d2i(d: f64) -> i32 {
     d as i32
 }
 
-/// Minecraft's own class families, for `instanceof` past the mod's classes: the API's classes
-/// aren't translated, so a mod block extending `RotatedPillarBlock` is a `Block` by this table.
-pub fn api_is_a(c: &str, class: &str) -> bool {
-    let family = |pkg: &str, suffix: &str| c.starts_with(pkg) && c.ends_with(suffix);
-    match class {
-        "net/minecraft/world/level/block/Block" | "net/minecraft/world/level/block/state/BlockBehaviour" => {
-            family("net/minecraft/world/level/block/", "Block") && !c.contains("/entity/")
-        }
-        "net/minecraft/world/level/block/EntityBlock" => c == "net/minecraft/world/level/block/BaseEntityBlock",
-        "net/minecraft/world/item/Item" => family("net/minecraft/world/item/", "Item"),
-        "net/minecraft/world/level/block/entity/BlockEntity" => family("net/minecraft/world/level/block/entity/", "BlockEntity"),
-        "net/minecraft/world/entity/Entity" => c.starts_with("net/minecraft/world/entity/") && !c.contains('$'),
-        "java/lang/Throwable" => c.starts_with("java/lang/") && (c.ends_with("Exception") || c.ends_with("Error")),
-        "java/lang/Exception" => c.starts_with("java/lang/") && c.ends_with("Exception"),
-        "java/lang/RuntimeException" => {
-            matches!(c, "java/lang/IllegalArgumentException" | "java/lang/IllegalStateException" | "java/lang/NullPointerException" | "java/lang/UnsupportedOperationException" | "java/lang/ClassCastException" | "java/lang/ArithmeticException" | "java/lang/IndexOutOfBoundsException" | "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/NumberFormatException")
-        }
-        _ => false,
-    }
-}
-
 /// A map or set: entries in insertion order (sorted, for a `TreeMap`), indexed by hash. The
 /// operations live in `horizon-compat`'s `jutil`, which hashes keys as Java does.
 #[derive(Debug, Clone, Default)]
@@ -656,6 +635,8 @@ pub struct Fns {
     pub get_static: fn(&mut Rt, &'static str) -> V,
     pub constructor_arg: fn(&mut Rt, &str) -> V,
     pub fire_registrations: fn(&mut Rt),
+    /// Minecraft's class families for `instanceof` (`api_common::api_is_a`).
+    pub api_is_a: fn(&str, &str) -> bool,
 }
 
 static FNS: std::sync::OnceLock<Fns> = std::sync::OnceLock::new();
@@ -667,6 +648,12 @@ pub fn install_fns(f: Fns) {
 
 fn fns() -> &'static Fns {
     FNS.get().expect("call horizon_compat::install() before running a translated engine")
+}
+
+/// Minecraft's class families, from the installed mapping; none known before `install()` (the
+/// mod's own classes still answer through their registered hierarchy).
+fn api_is_a(c: &str, class: &str) -> bool {
+    FNS.get().is_some_and(|f| (f.api_is_a)(c, class))
 }
 
 /// The API calls generated code makes, through the installed mapping.
