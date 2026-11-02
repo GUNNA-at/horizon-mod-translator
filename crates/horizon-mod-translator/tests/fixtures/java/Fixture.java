@@ -152,6 +152,17 @@ public class Fixture {
         set.add(b);
         return r + set.size() * 1000000 + (a.equals(b) ? 2000000 : 0) + (a.hashCode() == k * 31 ? 4000000 : 0);
     }
+    // Static fields named through a subclass or an implementing class resolve to the class that
+    // declares them (`CreativeMotorBlock.FACING` is `DirectionalKineticBlock.FACING`).
+    static class Holder { static final Object KEY = new Object(); static int count = 7; }
+    static class SubHolder extends Holder { }
+    interface Limits { int LIMIT = limit(); }
+    static int limit() { return 40; }
+    static class Limited implements Limits { }
+    public static int staticFields(int k) {
+        SubHolder.count += k;
+        return SubHolder.count * 100 + (SubHolder.KEY == Holder.KEY && SubHolder.KEY != null ? 1 : 0) + Limited.LIMIT * 10000;
+    }
     public static int grid(int n) {
         int[][] g = new int[n][n + 1];
         for (int i = 0; i < n; i++) for (int j = 0; j <= n; j++) g[i][j] = i * j;

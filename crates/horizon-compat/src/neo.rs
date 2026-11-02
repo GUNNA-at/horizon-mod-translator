@@ -6,7 +6,7 @@
 //! Registry names are their path (`block`, `item`, `block_entity_type`), as
 //! `Registries.BLOCK` reads in [`crate::api::get_static`]; an element's `ResourceKey` is
 //! `registry#namespace:path`; a `ResourceLocation` is its `namespace:path` string.
-use crate::{Rt, V};
+use crate::{Data, Rt, V};
 
 /// The registries `RegisterEvent` fires for, in NeoForge's order (blocks before items, items
 /// before what refers to them).
@@ -107,6 +107,63 @@ pub fn fire_registrations(rt: &mut Rt) {
         rt.put_field(ev, "$registry", key);
         post(rt, REGISTER_EVENT, ev);
     }
+}
+
+fn is_registry(owner: &str) -> bool {
+    matches!(
+        owner,
+        "net/minecraft/core/Registry"
+            | "net/minecraft/core/DefaultedRegistry"
+            | "net/minecraft/core/WritableRegistry"
+            | "net/minecraft/core/MappedRegistry"
+            | "net/minecraft/core/DefaultedMappedRegistry"
+            | "net/minecraft/core/IdMap"
+            | "net/minecraft/core/HolderLookup$RegistryLookup"
+            | "net/minecraft/core/HolderGetter"
+    )
+}
+
+/// The name an object is registered under in `registry` (`create:shaft`).
+fn registry_name_of(rt: &Rt, registry: &str, obj: V) -> Option<String> {
+    if obj.r() == 0 {
+        return None;
+    }
+    rt.registered_name(obj, registry).map(str::to_owned)
+}
+
+/// A registry lookup's id: a `ResourceLocation` (`ns:path`) or a `ResourceKey` (`registry#ns:path`).
+fn name_in(rt: &Rt, v: V) -> String {
+    let s = rt.str_of(v).unwrap_or("");
+    let s = s.split_once('#').map_or(s, |(_, l)| l);
+    if s.contains(':') { s.to_owned() } else { format!("minecraft:{s}") }
+}
+
+/// What `registry` holds under `id`: the mod's registrations, vanilla's blocks and items.
+fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
+    if let Some(v) = rt.registered.get(&(registry.to_owned(), id.to_owned())) {
+        return *v;
+    }
+    match registry {
+        "block" if id.starts_with("minecraft:") => crate::api::block(rt, id),
+        "item" if id.starts_with("minecraft:") => crate::api_common::item(rt, id),
+        _ => V::NULL,
+    }
+}
+
+/// A registry entry's `Holder`: its key and value.
+fn registry_holder(rt: &mut Rt, registry: &str, id: &str, value: V) -> V {
+    let h = rt.new_object("net/minecraft/core/Holder$Reference");
+    let (r, i) = (rt.string(registry), rt.string(id));
+    rt.put_field(h, "$registry", r);
+    rt.put_field(h, "$id", i);
+    rt.put_field(h, "$value", value);
+    h
+}
+
+fn optional(rt: &mut Rt, v: V) -> V {
+    let o = rt.new_object("java/util/Optional");
+    rt.put_field(o, "value", v);
+    o
 }
 
 fn location(rt: &Rt, v: V) -> String {
@@ -302,6 +359,99 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.put_field(a(0), "$registry", r);
             rt.put_field(a(0), "$id", i);
             V::Void
+        }
+        // A registry read back (registries are their path, `block`): what was registered under a
+        // name, and vanilla's blocks and items by name.
+        (o, n) if is_registry(o) && rt.str_of(a(0)).is_some() && !matches!(n, "register" | "registerForHolder") => {
+            let reg = rt.str_of(a(0)).unwrap_or("").to_owned();
+            match n {
+                "getKey" => match registry_name_of(rt, &reg, a(1)) {
+                    Some(k) => rt.string(&k),
+                    None => V::NULL,
+                },
+                "getResourceKey" => {
+                    let v = match registry_name_of(rt, &reg, a(1)) {
+                        Some(k) => rt.string(&format!("{reg}#{k}")),
+                        None => V::NULL,
+                    };
+                    optional(rt, v)
+                }
+                "get" | "getValue" | "getOptional" | "getOrThrow" | "containsKey" | "getHolder" | "getHolderOrThrow" | "wrapAsHolder" => {
+                    let id = if n == "wrapAsHolder" { registry_name_of(rt, &reg, a(1)).unwrap_or_default() } else { name_in(rt, a(1)) };
+                    let v = registry_get(rt, &reg, &id);
+                    match n {
+                        "containsKey" => V::I((v.r() != 0) as i32),
+                        "getOptional" => optional(rt, v),
+                        "getHolder" => {
+                            let h = if v.r() != 0 { registry_holder(rt, &reg, &id, v) } else { V::NULL };
+                            optional(rt, h)
+                        }
+                        "getHolderOrThrow" | "wrapAsHolder" => registry_holder(rt, &reg, &id, v),
+                        _ => v,
+                    }
+                }
+                "keySet" | "entrySet" | "stream" | "iterator" | "size" | "holders" | "listElements" => {
+                    let mut entries: Vec<(String, V)> = rt.registered.iter().filter(|((r, _), _)| *r == reg).map(|((_, k), v)| (k.clone(), *v)).collect();
+                    entries.sort_by(|x, y| x.0.cmp(&y.0));
+                    match n {
+                        "size" => V::I(entries.len() as i32),
+                        "keySet" => {
+                            let keys: Vec<V> = entries.iter().map(|(k, _)| rt.string(k)).collect();
+                            crate::jutil::new_set_of(rt, &keys)
+                        }
+                        "holders" | "listElements" => {
+                            let hs: Vec<V> = entries.iter().map(|(k, v)| registry_holder(rt, &reg, k, *v)).collect();
+                            rt.alloc("java/util/stream/Stream", Data::Stream(hs))
+                        }
+                        "entrySet" => {
+                            let mut es = Vec::new();
+                            for (k, v) in &entries {
+                                let key = rt.string(&format!("{reg}#{k}"));
+                                es.push(rt.alloc("java/util/Map$Entry", Data::List(vec![key, *v])));
+                            }
+                            crate::jutil::new_set_of(rt, &es)
+                        }
+                        "stream" => {
+                            let vs: Vec<V> = entries.iter().map(|(_, v)| *v).collect();
+                            rt.alloc("java/util/stream/Stream", Data::Stream(vs))
+                        }
+                        _ => {
+                            let vs: Vec<V> = entries.iter().map(|(_, v)| *v).collect();
+                            crate::jutil::new_iter(rt, vs)
+                        }
+                    }
+                }
+                "key" => rt.string(&reg),
+                _ => return None,
+            }
+        }
+        // The level's registries: each is its registry key (its path).
+        (o, "registryAccess") if o.starts_with("net/minecraft/") && (o.ends_with("Level") || o.ends_with("LevelAccessor") || o.ends_with("LevelReader") || o.ends_with("MinecraftServer")) => {
+            rt.intern("compat:registry-access".into(), |rt| rt.new_object("net/minecraft/core/RegistryAccess"))
+        }
+        (o, "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup") if o.starts_with("net/minecraft/core/") && (o.contains("RegistryAccess") || o.contains("HolderLookup") || o.contains("HolderGetter")) => {
+            let key = a(1);
+            if matches!(name, "registry" | "lookup") { optional(rt, key) } else { key }
+        }
+        ("net/neoforged/bus/api/Event", "<init>") => V::Void,
+        // A registry entry's `Holder` made above: its value, key and name.
+        ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference", n) if rt.get_field(a(0), "$registry").r() != 0 => {
+            let (reg, id) = (rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned(), rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned());
+            match n {
+                "value" | "get" => {
+                    let v = rt.get_field(a(0), "$value");
+                    if v.r() != 0 { v } else { registry_get(rt, &reg, &id) }
+                }
+                "isBound" => V::I(1),
+                "key" => rt.string(&format!("{reg}#{id}")),
+                "unwrapKey" => {
+                    let k = rt.string(&format!("{reg}#{id}"));
+                    optional(rt, k)
+                }
+                "getRegisteredName" => rt.string(&id),
+                "is" => V::I((name_in(rt, a(1)) == id) as i32),
+                _ => return None,
+            }
         }
         // Vanilla's static registration (`Registry.register(BuiltInRegistries.X, id, value)`).
         ("net/minecraft/core/Registry", "register" | "registerForHolder") => {

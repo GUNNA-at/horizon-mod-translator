@@ -294,6 +294,18 @@ pub fn state(rt: &mut Rt, text: &str) -> V {
     crate::api_common::state(rt, text)
 }
 
+/// A vanilla enum constant: one object per constant (Java compares them by identity), with the
+/// `$name` and `$ordinal` that `name()`, `ordinal()` and `compareTo` read.
+pub fn api_enum(rt: &mut Rt, class: &'static str, name: &'static str, ordinal: i32) -> V {
+    rt.intern(format!("enum/{class}.{name}"), |rt| {
+        let o = rt.new_object(class);
+        let n = rt.string(name);
+        rt.put_field(o, "$name", n);
+        rt.put_field(o, "$ordinal", V::I(ordinal));
+        o
+    })
+}
+
 /// A block value: the mod's own Block object when it registered one by that name.
 pub fn block(rt: &mut Rt, name: &str) -> V {
     if let Some(v) = rt.registered.get(&("block".to_owned(), name.to_owned())) {
@@ -465,6 +477,21 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             rt.string(n)
         }
         k if k.starts_with("java/util/Locale.") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
+        // Vanilla enums the mod reads constants of: one object per constant, named and ordered as Java's.
+        k if k.starts_with("net/minecraft/ChatFormatting.") => {
+            const NAMES: [&str; 22] = [
+                "BLACK", "DARK_BLUE", "DARK_GREEN", "DARK_AQUA", "DARK_RED", "DARK_PURPLE", "GOLD", "GRAY", "DARK_GRAY", "BLUE", "GREEN", "AQUA", "RED",
+                "LIGHT_PURPLE", "YELLOW", "WHITE", "OBFUSCATED", "BOLD", "STRIKETHROUGH", "UNDERLINE", "ITALIC", "RESET",
+            ];
+            let f = k.rsplit('.').next().unwrap_or("");
+            match NAMES.iter().position(|n| *n == f) {
+                Some(i) => api_enum(rt, "net/minecraft/ChatFormatting", NAMES[i], i as i32),
+                None => {
+                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    V::NULL
+                }
+            }
+        }
         k if k.starts_with("net/minecraft/core/registries/Registries.") => {
             let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
             rt.string(&n)

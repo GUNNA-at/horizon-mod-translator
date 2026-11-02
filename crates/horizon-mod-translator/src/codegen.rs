@@ -31,6 +31,38 @@ pub fn fn_name(class: &str, name: &str, desc: &str) -> String {
     format!("j_{clean}_{:08x}", hash(&format!("{class}.{name}{desc}")))
 }
 
+fn ident(name: &str) -> String {
+    name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect()
+}
+
+/// The dispatcher of instance method `nd` (`name.desc`): `fn(rt, cid, owner_key, args) -> V`.
+fn dispatcher(nd: &str) -> String {
+    format!("d_{}_{:08x}", ident(nd.split('.').next().unwrap_or("")), hash(nd))
+}
+
+/// Whether a class id implements `nd`: `fn(cid) -> bool`.
+fn overrider(nd: &str) -> String {
+    format!("o_{}_{:08x}", ident(nd.split('.').next().unwrap_or("")), hash(nd))
+}
+
+/// A match pattern for a set of ids: runs of consecutive ids as ranges.
+fn ids_pattern(ids: &[u32]) -> String {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i < ids.len() {
+        let mut j = i;
+        while j + 1 < ids.len() && ids[j + 1] == ids[j] + 1 {
+            j += 1;
+        }
+        parts.push(if j > i { format!("{}..={}", ids[i], ids[j]) } else { ids[i].to_string() });
+        i = j + 1;
+    }
+    if parts.is_empty() { "0xFFFF_FFFF".to_owned() } else { parts.join(" | ") }
+}
+
 /// Argument kinds from a method descriptor: 'I' (int-like), 'J', 'F', 'D', 'L' (reference).
 pub fn arg_kinds(desc: &str) -> Vec<char> {
     let inner = &desc[1..desc.find(')').unwrap_or(1)];
@@ -120,6 +152,12 @@ pub struct Program<'a> {
     lambdas: BTreeMap<String, (u8, Member)>,
     /// `META-INF/services`: interface → implementations (internal names), for `ServiceLoader`.
     pub services: BTreeMap<String, Vec<String>>,
+    /// Each mod class's id (1.., in name order): objects carry it, and virtual calls jump on it.
+    class_ids: BTreeMap<String, u32>,
+    /// Instance methods (`name.desc`) some mod class implements: each gets a dispatcher.
+    vkeys: BTreeSet<String>,
+    /// Each lambda implementation's id in `lambda_call` (as first seen).
+    lambda_ids: BTreeMap<String, u32>,
     /// The mod's id: picks its `@Mod` class among several (libraries bundled in its jar have theirs).
     pub mod_id: Option<String>,
     /// Methods (`name.desc`) that ask who called them (`StackWalker.getCallerClass`): calls to
@@ -135,6 +173,19 @@ impl<'a> Program<'a> {
             unsupported: BTreeMap::new(),
             lambdas: BTreeMap::new(),
             services: BTreeMap::new(),
+            class_ids: {
+                let mut names: Vec<&str> = classes.iter().map(|c| c.name.as_str()).collect();
+                names.sort_unstable();
+                names.dedup();
+                names.iter().enumerate().map(|(i, n)| (n.to_string(), i as u32 + 1)).collect()
+            },
+            vkeys: classes
+                .iter()
+                .flat_map(|c| c.methods.iter())
+                .filter(|m| m.code.is_some() && m.access & 0x0008 == 0 && !m.name.starts_with('<'))
+                .map(|m| format!("{}.{}", m.name, m.desc))
+                .collect(),
+            lambda_ids: BTreeMap::new(),
             mod_id: None,
             caller_sensitive: classes
                 .iter()
@@ -191,6 +242,16 @@ impl<'a> Program<'a> {
 
     fn own(&self, class: &str) -> bool {
         self.classes.contains_key(class)
+    }
+
+    /// A class's id; 0 for the API's.
+    fn cid(&self, class: &str) -> u32 {
+        self.class_ids.get(class).copied().unwrap_or(0)
+    }
+
+    fn lambda_id(&mut self, key: &str) -> u32 {
+        let next = self.lambda_ids.len() as u32;
+        *self.lambda_ids.entry(key.to_owned()).or_insert(next)
     }
 
     /// The mod class that implements `name desc` for an object of `class`
@@ -293,8 +354,17 @@ impl<'a> Program<'a> {
         files
     }
 
-    fn tables(&self, classes: &[&ClassFile]) -> String {
-        let mut out = String::from("/// Registers the mod's class hierarchy and callbacks with the runtime. Call once, before anything else.\npub fn init(rt: &mut Rt) {\n    rt.vcall = Some(vcall);\n    rt.lambda_call = Some(lambda_call);\n    rt.overrides = Some(overrides);\n    rt.reflect = Some(reflect);\n");
+    fn tables(&mut self, classes: &[&ClassFile]) -> String {
+        // Listeners made from `@SubscribeEvent` methods dispatch through `lambda_call` too.
+        for (key, _, _) in self.subscriber_methods() {
+            self.lambda_id(&key);
+        }
+        let mut out = String::from(
+            "/// Registers the mod's class hierarchy and callbacks with the runtime. Call once, before anything else.\n\
+             pub fn init(rt: &mut Rt) {\n    rt.vcall = Some(vcall);\n    rt.lambda_call = Some(lambda_call);\n    rt.overrides = Some(overrides);\n    rt.reflect = Some(reflect);\n\
+             \x20   rt.class_ids.extend(CLASS_IDS.iter().copied());\n\
+             \x20   rt.vkeys.extend(VKEYS.iter().map(|&(k, d, o)| (k, (d, o))));\n",
+        );
         for c in classes {
             if let Some(sup) = &c.superclass {
                 let _ = writeln!(out, "    rt.supers.insert({:?}, {sup:?});", c.name);
@@ -307,7 +377,8 @@ impl<'a> Program<'a> {
         let mut subs: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (key, kind, m) in self.subscriber_methods() {
             let Some(event) = crate::class::param_classes(&m.desc).last().cloned() else { continue };
-            subs.entry(m.owner.clone()).or_default().push(format!("({event:?}, {key:?}, {})", kind == 6));
+            let lid = self.lambda_ids[&key];
+            subs.entry(m.owner.clone()).or_default().push(format!("({event:?}, {key:?}, {}, {lid})", kind == 6));
         }
         for (class, list) in subs {
             let _ = writeln!(out, "    rt.subscribers.insert({class:?}, vec![{}]);", list.join(", "));
@@ -325,7 +396,7 @@ impl<'a> Program<'a> {
         let mains = self.mod_mains();
         for (main, ctor) in &mains {
             let params = crate::class::param_classes(&ctor.desc);
-            let _ = writeln!(out, "    {{\n        let this = rt.new_object({:?});", main.name);
+            let _ = writeln!(out, "    {{\n        let this = rt.new_object_id({:?}, {});", main.name, self.cid(&main.name));
             let _ = writeln!(out, "        let mut args = vec![this];");
             for p in &params {
                 let _ = writeln!(out, "        let v = horizon_compat::neo::constructor_arg(rt, {p:?}); args.push(v);");
@@ -342,6 +413,16 @@ impl<'a> Program<'a> {
             out.push_str("    horizon_compat::neo::fire_registrations(rt);\n");
         }
         out.push_str("    rt.resolve_registrations();\n}\n\n");
+        // Class ids by name, and each dispatched method's dispatcher, both sorted (binary search).
+        out.push_str("static CLASS_IDS: &[(&str, u32)] = &[\n");
+        for (name, id) in &self.class_ids {
+            let _ = writeln!(out, "    ({name:?}, {id}),");
+        }
+        out.push_str("];\n\nstatic VKEYS: &[(&str, horizon_compat::Dispatch, fn(u32) -> bool)] = &[\n");
+        for nd in &self.vkeys {
+            let _ = writeln!(out, "    ({nd:?}, {}, {}),", dispatcher(nd), overrider(nd));
+        }
+        out.push_str("];\n\n");
         out.push_str(&self.dispatch());
         out.push_str(&self.lambda_table());
         out.push_str(&self.reflect_table());
@@ -366,9 +447,10 @@ impl<'a> Program<'a> {
             if concrete && c.methods.iter().any(|m| m.name == "<init>" && m.desc == "()V" && m.code.is_some()) {
                 let _ = writeln!(
                     s,
-                    "        ({:?}, \"<init>.()V\") => {{ {ensure}let o = rt.new_object({:?}); {}(rt, &[o]); o }}",
+                    "        ({:?}, \"<init>.()V\") => {{ {ensure}let o = rt.new_object_id({:?}, {}); {}(rt, &[o]); o }}",
                     c.name,
                     c.name,
+                    self.cid(&c.name),
                     fn_name(&c.name, "<init>", "()V")
                 );
             }
@@ -407,106 +489,140 @@ impl<'a> Program<'a> {
         out
     }
 
-    /// `vcall(rt, key, args)`: virtual and interface calls, by the receiver's class.
+    /// Virtual dispatch: a dispatcher per instance method (`name.desc`) that some mod class
+    /// implements, jumping on the receiver's class id; and the runtime's entry points by key.
     fn dispatch(&self) -> String {
-        let mut keys: BTreeSet<(String, String)> = BTreeSet::new();
-        for c in self.classes.values() {
-            for m in c.methods.iter().filter(|m| m.code.is_some() && m.access & 0x0008 == 0) {
-                if m.name != "<init>" {
-                    keys.insert((m.name.clone(), m.desc.clone()));
-                }
-            }
-        }
-        let mut s = String::from(
+        let ts = "toString.()Ljava/lang/String;";
+        let to_string = if self.vkeys.contains(ts) {
+            format!(
+                "    if {}(cid) {{ return {}(rt, cid, \"java/lang/Object.toString.()Ljava/lang/String;\", &[v]); }}\n",
+                overrider(ts),
+                dispatcher(ts)
+            )
+        } else {
+            String::new()
+        };
+        let mut s = format!(
             "/// `String.valueOf(v)` for an object: its mod class's own `toString()`, an enum constant's name,\n\
              /// or `v` itself (strings, boxes and API objects, which the runtime prints).\n\
-             pub fn java_string(rt: &mut Rt, v: V) -> V {\n\
-             \x20   if !matches!(v, V::R(_)) || v.r() == 0 || rt.str_of(v).is_some() { return v; }\n\
-             \x20   let class = rt.class_of(v).to_owned();\n\
-             \x20   if overrides(&class, \"toString.()Ljava/lang/String;\") {\n\
-             \x20       return vcall(rt, \"java/lang/Object.toString.()Ljava/lang/String;\", \"toString.()Ljava/lang/String;\", &[v]);\n\
-             \x20   }\n\
+             pub fn java_string(rt: &mut Rt, v: V) -> V {{\n\
+             \x20   if !matches!(v, V::R(_)) || v.r() == 0 || rt.str_of(v).is_some() {{ return v; }}\n\
+             \x20   let cid = rt.cid(v);\n\
+             {to_string}\
              \x20   let name = rt.get_field(v, \"$name\");\n\
-             \x20   if rt.str_of(name).is_some() { name } else { v }\n\
-             }\n\n\
-             /// Virtual dispatch over the mod's classes; API calls when no mod class implements it.\n\
-             pub fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {\n\
-             \x20   let class = rt.class_of(args.first().copied().unwrap_or_default());\n\
-             \x20   vcall_as(rt, class, owner_key, key, args)\n\
-             }\n\n\
-             /// `vcall` as if the receiver were of class `class` (a lambda's interface, for its default methods).\n\
-             pub fn vcall_as(rt: &mut Rt, class: &str, owner_key: &'static str, key: &'static str, args: &[V]) -> V {\n\
-             \x20   match (class, key) {\n",
+             \x20   if rt.str_of(name).is_some() {{ name }} else {{ v }}\n\
+             }}\n\n"
         );
-        for class in self.classes.keys() {
-            for (name, desc) in &keys {
-                if let Some(imp) = self.resolve(class, name, desc) {
-                    let _ = writeln!(
-                        s,
-                        "        ({class:?}, {:?}) => {}(rt, args),",
-                        format!("{name}.{desc}"),
-                        fn_name(&imp, name, desc)
-                    );
-                }
-            }
-        }
-        let mut table = String::from("/// Whether a mod class implements `key` (`name.desc`) itself or through a mod superclass.\npub fn overrides(class: &str, key: &str) -> bool {\n    matches!((class, key),\n        (\"\", \"\")");
-        for class in self.classes.keys() {
-            for (name, desc) in &keys {
-                if self.resolve(class, name, desc).is_some() {
-                    let _ = write!(table, "\n        | ({class:?}, {:?})", format!("{name}.{desc}"));
-                }
-            }
-        }
-        table.push_str(")\n}\n\n");
-        s.insert_str(0, &table);
         s.push_str(concat!(
-            "        _ => {\n",
-            "            let recv = args.first().copied().unwrap_or_default();\n",
-            "            match rt.lambda_info.get(&recv.r()).copied() {\n",
-            "                // A lambda: its own method runs its implementation; anything else is a default\n",
-            "                // method of its interface (the mod's, or the API's).\n",
-            "                Some((iface, sam)) if !(key.starts_with(sam) && key.as_bytes().get(sam.len()) == Some(&b'.')) => {\n",
-            "                    if class != iface { vcall_as(rt, iface, owner_key, key, args) } else { api::call(rt, owner_key, args) }\n",
-            "                }\n",
-            "                _ => match lambda_call(rt, rt.class_of(recv), args) {\n",
-            "                    Some(r) => r,\n",
-            "                    None => api::call(rt, owner_key, args),\n",
-            "                },\n",
+            "/// Virtual dispatch by key (`name.desc`): the runtime's calls back into the mod.\n",
+            "pub fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {\n",
+            "    let cid = rt.recv_cid(args);\n",
+            "    vcall_cid(rt, cid, owner_key, key, args)\n",
+            "}\n\n",
+            "fn vcall_cid(rt: &mut Rt, cid: u32, owner_key: &'static str, key: &'static str, args: &[V]) -> V {\n",
+            "    match rt.vkeys.get(key).copied() {\n",
+            "        Some((d, _)) => d(rt, cid, owner_key, args),\n",
+            "        None => vcall_miss(rt, cid, owner_key, key, args),\n",
+            "    }\n",
+            "}\n\n",
+            "/// `vcall` as if the receiver were of class `class` (a lambda's interface, for its default methods).\n",
+            "pub fn vcall_as(rt: &mut Rt, class: &str, owner_key: &'static str, key: &'static str, args: &[V]) -> V {\n",
+            "    let cid = rt.class_ids.get(class).copied().unwrap_or(0);\n",
+            "    vcall_cid(rt, cid, owner_key, key, args)\n",
+            "}\n\n",
+            "/// No mod class of the receiver implements `key`: a lambda's own method (or a default method of\n",
+            "/// its interface), or the API's.\n",
+            "pub fn vcall_miss(rt: &mut Rt, cid: u32, owner_key: &'static str, key: &'static str, args: &[V]) -> V {\n",
+            "    if cid & horizon_compat::LAMBDA == 0 {\n",
+            "        return api::call(rt, owner_key, args);\n",
+            "    }\n",
+            "    let recv = args.first().copied().unwrap_or_default();\n",
+            "    match rt.lambda_info.get(&recv.r()).copied() {\n",
+            "        Some((iface, sam)) if !(key.starts_with(sam) && key.as_bytes().get(sam.len()) == Some(&b'.')) => {\n",
+            "            let icid = rt.class_ids.get(iface).copied().unwrap_or(0);\n",
+            "            match rt.vkeys.get(key).copied() {\n",
+            "                Some((d, o)) if icid != 0 && o(icid) => d(rt, icid, owner_key, args),\n",
+            "                _ => api::call(rt, owner_key, args),\n",
             "            }\n",
             "        }\n",
-            "    }\n}\n"
+            "        _ => match lambda_call(rt, cid & !horizon_compat::LAMBDA, args) {\n",
+            "            Some(r) => r,\n",
+            "            None => api::call(rt, owner_key, args),\n",
+            "        },\n",
+            "    }\n",
+            "}\n\n",
+            "/// Whether a mod class implements `key` (`name.desc`) itself or through a mod superclass.\n",
+            "pub fn overrides(class: &str, key: &str) -> bool {\n",
+            "    let Ok(c) = CLASS_IDS.binary_search_by(|(n, _)| (*n).cmp(class)) else { return false };\n",
+            "    let Ok(k) = VKEYS.binary_search_by(|(n, _, _)| (*n).cmp(key)) else { return false };\n",
+            "    (VKEYS[k].2)(CLASS_IDS[c].1)\n",
+            "}\n\n",
         ));
+        for nd in &self.vkeys {
+            let Some((name, desc)) = nd.split_once('.') else { continue };
+            let mut by_imp: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+            for (class, &id) in &self.class_ids {
+                if let Some(imp) = self.resolve(class, name, desc) {
+                    by_imp.entry(imp).or_default().push(id);
+                }
+            }
+            let _ = writeln!(s, "pub fn {}(rt: &mut Rt, cid: u32, owner_key: &'static str, args: &[V]) -> V {{\n    match cid {{", dispatcher(nd));
+            let mut all = Vec::new();
+            for (imp, ids) in &by_imp {
+                let _ = writeln!(s, "        {} => {}(rt, args),", ids_pattern(ids), fn_name(imp, name, desc));
+                all.extend_from_slice(ids);
+            }
+            let _ = writeln!(s, "        _ => vcall_miss(rt, cid, owner_key, {nd:?}, args),\n    }}\n}}");
+            let _ = writeln!(s, "pub fn {}(cid: u32) -> bool {{\n    matches!(cid, {})\n}}\n", overrider(nd), ids_pattern(&all));
+        }
         s
     }
 
-    /// Calls on lambda objects: captured values first, then the call's own arguments.
+    /// Calls on lambda objects, by lambda id: captured values first, then the call's own arguments.
     fn lambda_table(&self) -> String {
         let mut s = String::from(
-            "/// A call on a lambda object (its class is the implementation's key).\n\
-             pub fn lambda_call(rt: &mut Rt, class: &str, args: &[V]) -> Option<V> {\n\
+            "/// A call on a lambda object (`lid`: its implementation's id).\n\
+             pub fn lambda_call(rt: &mut Rt, lid: u32, args: &[V]) -> Option<V> {\n\
              \x20   let mut full = rt.captured(args.first().copied().unwrap_or_default());\n\
              \x20   full.extend_from_slice(args.get(1..).unwrap_or_default());\n\
-             \x20   Some(match class {\n",
+             \x20   Some(match lid {\n",
         );
         let mut all = self.lambdas.clone();
         for (key, kind, m) in self.subscriber_methods() {
             all.entry(key).or_insert((kind, m));
         }
+        let mut rows: Vec<(u32, String)> = Vec::new();
         for (key, (kind, m)) in &all {
+            let Some(&lid) = self.lambda_ids.get(key) else { continue };
+            let nd = format!("{}.{}", m.name, m.desc);
             let call = match (kind, self.resolve(&m.owner, &m.name, &m.desc)) {
                 (8, imp) => {
                     let init = match imp {
                         Some(imp) => format!("{}(rt, &a);", fn_name(&imp, &m.name, &m.desc)),
                         None => format!("api::call(rt, {key:?}, &a);"),
                     };
-                    format!("{{ let o = rt.new_object({:?}); let mut a = vec![o]; a.extend(full); {init} o }}", m.owner)
+                    format!("{{ let o = rt.new_object_id({:?}, {}); let mut a = vec![o]; a.extend(full); {init} o }}", m.owner, self.cid(&m.owner))
                 }
-                (5 | 9, _) => format!("vcall(rt, {key:?}, {:?}, &full)", format!("{}.{}", m.name, m.desc)),
+                (5 | 9, _) => {
+                    // The API's key when no mod class implements it (as at call sites).
+                    let owner_key = match self.api_owner(&m.owner) {
+                        Some(api) => format!("{api}.{nd}"),
+                        None => key.clone(),
+                    };
+                    if self.vkeys.contains(&nd) {
+                        format!("{{ let cid = rt.recv_cid(&full); {}(rt, cid, {owner_key:?}, &full) }}", dispatcher(&nd))
+                    } else {
+                        format!("{{ let cid = rt.recv_cid(&full); vcall_miss(rt, cid, {owner_key:?}, {nd:?}, &full) }}")
+                    }
+                }
                 (_, Some(imp)) => format!("{}(rt, &full)", fn_name(&imp, &m.name, &m.desc)),
                 (_, None) => format!("api::call(rt, {key:?}, &full)"),
             };
-            let _ = writeln!(s, "        {key:?} => {call},");
+            rows.push((lid, format!("        {lid} => {call}, // {key}")));
+        }
+        rows.sort();
+        for (_, row) in rows {
+            let _ = writeln!(s, "{row}");
         }
         s.push_str("        _ => return None,\n    })\n}\n");
         s
@@ -547,7 +663,8 @@ impl<'a> Program<'a> {
                 // The functional interface and its method: other calls on the lambda are the
                 // interface's default methods.
                 let iface = desc.rsplit(')').next().unwrap_or("").trim_start_matches('L').trim_end_matches(';').to_owned();
-                format!("{collect} let v = rt.lambda({key:?}, a); rt.lambda_info.insert(v.r(), ({iface:?}, {_name:?})); s.push(v); {go}")
+                let lid = self.lambda_id(&key);
+                format!("{collect} let v = rt.lambda_id({key:?}, {lid}, a); rt.lambda_info.insert(v.r(), ({iface:?}, {_name:?})); s.push(v); {go}")
             }
             ("java/lang/runtime/ObjectMethods", "bootstrap") => {
                 let names = args.get(1).and_then(|&i| string(i)).unwrap_or_default();
@@ -618,12 +735,14 @@ impl<'a> Program<'a> {
         let _ = writeln!(s, "            {THROW} => {{");
         let _ = writeln!(s, "                let e = rt.thrown.unwrap_or_default();");
         for (start, end, handler, class) in &code.handlers {
-            let test = if class.is_empty() { "true".to_owned() } else { format!("rt.instance_of(e, {class:?})") };
+            let test = if class.is_empty() { "true".to_owned() } else { format!("rt.instance_of_static(e, {class:?})") };
             let _ = writeln!(
                 s,
-                "                if thrown_at >= {start} && thrown_at < {end} && {test} {{ rt.thrown = None; s.clear(); s.push(e); pc = {handler}; continue; }}"
+                "                if thrown_at >= {start} && thrown_at < {end} && {test} {{ rt.thrown = None; rt.unwinding.clear(); s.clear(); s.push(e); pc = {handler}; continue; }}"
             );
         }
+        // Not caught here: the exception leaves the method (recorded for `HORIZON_COMPAT_TRACE`).
+        let _ = writeln!(s, "                rt.unwound({:?});", format!("{}.{}", c.name, name));
         let _ = writeln!(s, "                return V::Void;");
         let _ = writeln!(s, "            }}");
         let _ = writeln!(s, "            _ => return V::Void,");
@@ -801,7 +920,7 @@ impl<'a> Program<'a> {
             0xbb => {
                 let class = c.class_name(idx as u16).unwrap_or_default();
                 let init = if class != c.name { self.ensure(&class) } else { String::new() };
-                format!("{init}let v = rt.new_object({class:?}); s.push(v); {go}")
+                format!("{init}let v = rt.new_object_id({class:?}, {}); s.push(v); {go}", self.cid(&class))
             }
             0xbc => {
                 let zero = match idx {
@@ -818,7 +937,7 @@ impl<'a> Program<'a> {
             0xc0 => go, // checkcast: translated code trusts the mod's types
             0xc1 => {
                 let class = c.class_name(idx as u16).unwrap_or_default();
-                format!("let a = {pop}; s.push(V::I(rt.instance_of(a, {class:?}) as i32)); {go}")
+                format!("let a = {pop}; s.push(V::I(rt.instance_of_static(a, {class:?}) as i32)); {go}")
             }
             0xc2 | 0xc3 => format!("s.pop(); {go}"),
             0xc5 => match &i.arg {
@@ -857,13 +976,48 @@ impl<'a> Program<'a> {
         )
     }
 
+    /// The class declaring static field `name` as the JVM resolves a reference through `owner`
+    /// (JVMS 5.4.3.2): `owner`, its superinterfaces, then its superclass, recursively. Past the
+    /// mod's classes, the API class the chain reaches (`MyBlock.FACING` → vanilla's own class).
+    fn field_owner(&self, owner: &str, name: &str) -> String {
+        let mut c = owner;
+        loop {
+            let Some(k) = self.classes.get(c) else { return c.to_owned() };
+            if k.fields.iter().any(|f| f.name == name) {
+                return k.name.clone();
+            }
+            if let Some(i) = self.interface_field(k, name) {
+                return i;
+            }
+            match k.superclass.as_deref() {
+                Some(sup) => c = sup,
+                None => return owner.to_owned(),
+            }
+        }
+    }
+
+    fn interface_field(&self, k: &ClassFile, name: &str) -> Option<String> {
+        for i in &k.interfaces {
+            let Some(ik) = self.classes.get(i.as_str()) else { continue };
+            if ik.fields.iter().any(|f| f.name == name) {
+                return Some(ik.name.clone());
+            }
+            if let Some(found) = self.interface_field(ik, name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
     fn field(&mut self, c: &ClassFile, op: u8, idx: u16, go: &str) -> String {
         let Some(m) = c.member(idx) else { return go.to_owned() };
-        let init = if matches!(op, 0xb2 | 0xb3) && m.owner != c.name { self.ensure(&m.owner) } else { String::new() };
+        let owner = if matches!(op, 0xb2 | 0xb3) { self.field_owner(&m.owner, &m.name) } else { m.owner.clone() };
+        // The declaring class initialises, as the JVM does (not the subclass the reference names).
+        let init = if matches!(op, 0xb2 | 0xb3) && owner != c.name { self.ensure(&owner) } else { String::new() };
         let pop = "s.pop().unwrap_or_default()";
-        let skey = format!("{}.{}", m.owner, m.name);
+        let skey = format!("{owner}.{}", m.name);
         match op {
-            0xb2 if self.own(&m.owner) => format!("{init}let v = rt.statics.get({skey:?}).copied().unwrap_or_default(); s.push(v); {go}"),
+            0xb2 if self.own(&owner) => format!("{init}let v = rt.statics.get({skey:?}).copied().unwrap_or_default(); s.push(v); {go}"),
             0xb2 => format!("let v = api::get_static(rt, {skey:?}); s.push(v); {go}"),
             0xb3 => format!("{init}let v = {pop}; rt.statics.insert({skey:?}, v); {go}"),
             0xb4 => format!("let o = {pop}; s.push(rt.get_field(o, {:?})); {go}", m.name),
@@ -895,7 +1049,16 @@ impl<'a> Program<'a> {
                 Some(imp) => format!("{}(rt, &args)", fn_name(&imp, &m.name, &m.desc)),
                 None => format!("api::call(rt, {:?}, &args)", api_key(self)),
             },
-            _ => format!("vcall(rt, {:?}, {:?}, &args)", api_key(self), format!("{}.{}", m.name, m.desc)),
+            // Virtual: the method's dispatcher jumps on the receiver's class id.
+            _ => {
+                let nd = format!("{}.{}", m.name, m.desc);
+                let owner_key = api_key(self);
+                if self.vkeys.contains(&nd) {
+                    format!("{{ let cid = rt.recv_cid(&args); {}(rt, cid, {owner_key:?}, &args) }}", dispatcher(&nd))
+                } else {
+                    format!("{{ let cid = rt.recv_cid(&args); vcall_miss(rt, cid, {owner_key:?}, {nd:?}, &args) }}")
+                }
+            }
         };
         // `String.valueOf(Object)` and `append(Object)` print through the object's own `toString()`.
         let to_string = matches!(

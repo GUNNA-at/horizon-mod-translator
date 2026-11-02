@@ -78,8 +78,17 @@ pub enum Data {
 #[derive(Debug, Clone)]
 pub struct Object {
     pub class: &'static str,
+    /// The mod class's id (generated `CLASS_IDS`), [`LAMBDA`] plus the implementation's id for a
+    /// lambda, 0 for everything else. Virtual calls jump on it.
+    pub cid: u32,
     pub data: Data,
 }
+
+/// The bit marking a lambda object's id ([`Object::cid`]).
+pub const LAMBDA: u32 = 1 << 31;
+
+/// A generated dispatcher: `(rt, receiver's class id, the call's API key, args)`.
+pub type Dispatch = fn(&mut Rt, u32, &'static str, &[V]) -> V;
 
 /// The translated mod's runtime state.
 pub struct Rt {
@@ -100,7 +109,19 @@ pub struct Rt {
     host: Option<std::ptr::NonNull<dyn host::Host>>,
     /// The generated `vcall` and `lambda_call`, so API code can call back into the mod.
     pub vcall: Option<fn(&mut Rt, &'static str, &'static str, &[V]) -> V>,
-    pub lambda_call: Option<fn(&mut Rt, &str, &[V]) -> Option<V>>,
+    /// A call on a lambda object by its implementation's id.
+    pub lambda_call: Option<fn(&mut Rt, u32, &[V]) -> Option<V>>,
+    /// Mod class ids by name (generated `CLASS_IDS`).
+    pub class_ids: HashMap<&'static str, u32>,
+    /// Each instance method some mod class implements (`name.desc`): its dispatcher, and whether a
+    /// class id implements it.
+    pub vkeys: HashMap<&'static str, (Dispatch, fn(u32) -> bool)>,
+    /// `instanceof` answers by (class, target) names' addresses: both are static strings.
+    is_a_cache: std::cell::RefCell<HashMap<(usize, usize, usize, usize), bool>>,
+    /// Methods an uncaught exception left, innermost first (with `HORIZON_COMPAT_TRACE`).
+    pub unwinding: Vec<&'static str>,
+    /// `registered` by (object, registry), and the size it was built at.
+    registered_index: std::cell::RefCell<(usize, HashMap<(u32, String), String>)>,
     /// Whether a mod class implements a method itself (`name.desc`), so glue calls only real overrides.
     pub overrides: Option<fn(&str, &str) -> bool>,
     /// Reflection over the mod's classes (generated): `(class, what, args)` with `what` one of
@@ -124,7 +145,7 @@ pub struct Rt {
     pub listeners: Vec<(String, V)>,
     /// `@SubscribeEvent` methods by class (registered by generated code): (event class, method
     /// key, static). [`Rt::subscribe_class`] and [`Rt::subscribe_object`] listen with them.
-    pub subscribers: HashMap<&'static str, Vec<(&'static str, &'static str, bool)>>,
+    pub subscribers: HashMap<&'static str, Vec<(&'static str, &'static str, bool, u32)>>,
     /// Each lambda object's functional interface and its method name.
     pub lambda_info: HashMap<u32, (&'static str, &'static str)>,
     /// The class of the last call into a caller-sensitive method (`StackWalker.getCallerClass`).
@@ -155,6 +176,11 @@ impl Default for Rt {
             host: None,
             vcall: None,
             lambda_call: None,
+            class_ids: HashMap::new(),
+            vkeys: HashMap::new(),
+            is_a_cache: Default::default(),
+            unwinding: Vec::new(),
+            registered_index: Default::default(),
             overrides: None,
             reflect: None,
             registered: HashMap::new(),
@@ -218,8 +244,10 @@ impl Rt {
             let (f, arg) = (c.first().copied().unwrap_or_default(), c.get(1).copied().unwrap_or_default());
             return self.call_functional("java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", f, &[arg]);
         }
-        if let Some(lc) = self.lambda_call
-            && let Some(r) = lc(self, class, &all)
+        let cid = self.cid(target);
+        if cid & LAMBDA != 0
+            && let Some(lc) = self.lambda_call
+            && let Some(r) = lc(self, cid & !LAMBDA, &all)
         {
             return r;
         }
@@ -244,12 +272,27 @@ impl Rt {
 
     /// The registered name of a mod object (`create:shaft`), if it is one.
     pub fn registered_name(&self, obj: V, registry: &str) -> Option<&str> {
+        // Indexed by object, rebuilt when registrations were added; checked against the map.
+        let found = {
+            let mut index = self.registered_index.borrow_mut();
+            if index.0 != self.registered.len() {
+                index.1 = self.registered.iter().map(|((r, n), v)| ((v.r(), r.clone()), n.clone())).collect();
+                index.0 = self.registered.len();
+            }
+            index.1.get(&(obj.r(), registry.to_owned())).cloned()
+        };
+        if let Some(name) = found
+            && let Some(((_, n), v)) = self.registered.get_key_value(&(registry.to_owned(), name))
+            && *v == obj
+        {
+            return Some(n.as_str());
+        }
         self.registered.iter().find(|((r, _), v)| r == registry && **v == obj).map(|((_, n), _)| n.as_str())
     }
 
     pub fn new() -> Rt {
         let mut rt = Rt::default();
-        rt.heap.push(Object { class: "null", data: Data::Array(Vec::new()) });
+        rt.heap.push(Object { class: "null", cid: 0, data: Data::Array(Vec::new()) });
         for (c, sup) in JDK_SUPERS {
             rt.supers.insert(c, sup);
         }
@@ -257,12 +300,36 @@ impl Rt {
     }
 
     pub fn alloc(&mut self, class: &'static str, data: Data) -> V {
-        self.heap.push(Object { class, data });
+        self.alloc_cid(class, 0, data)
+    }
+
+    pub fn alloc_cid(&mut self, class: &'static str, cid: u32, data: Data) -> V {
+        self.heap.push(Object { class, cid, data });
         V::R(self.heap.len() as u32 - 1)
     }
 
+    /// A new object of `class`, a mod class's carrying its id (looked up by name).
     pub fn new_object(&mut self, class: &'static str) -> V {
-        self.alloc(class, Data::Fields(HashMap::new()))
+        let cid = self.class_ids.get(class).copied().unwrap_or(0);
+        self.alloc_cid(class, cid, Data::Fields(HashMap::new()))
+    }
+
+    /// A new object of `class` whose id generated code knows.
+    pub fn new_object_id(&mut self, class: &'static str, cid: u32) -> V {
+        self.alloc_cid(class, cid, Data::Fields(HashMap::new()))
+    }
+
+    /// An object's class id ([`Object::cid`]); 0 for null and non-objects.
+    pub fn cid(&self, v: V) -> u32 {
+        match v {
+            V::R(r) if r != 0 => self.heap.get(r as usize).map_or(0, |o| o.cid),
+            _ => 0,
+        }
+    }
+
+    /// The receiver's class id in a call's arguments.
+    pub fn recv_cid(&self, args: &[V]) -> u32 {
+        self.cid(args.first().copied().unwrap_or_default())
     }
 
     pub fn string(&mut self, s: &str) -> V {
@@ -356,9 +423,9 @@ impl Rt {
     /// Listens with `class`'s static `@SubscribeEvent` methods: an `@EventBusSubscriber` class, or
     /// `bus.register(Foo.class)`.
     pub fn subscribe_class(&mut self, class: &str) {
-        for (event, key, is_static) in self.subscribers.get(class).cloned().unwrap_or_default() {
+        for (event, key, is_static, id) in self.subscribers.get(class).cloned().unwrap_or_default() {
             if is_static {
-                let l = self.lambda(key, Vec::new());
+                let l = self.lambda_id(key, id, Vec::new());
                 self.listeners.push((event.to_owned(), l));
             }
         }
@@ -368,9 +435,9 @@ impl Rt {
     pub fn subscribe_object(&mut self, obj: V) {
         let mut class = Some(self.class_of(obj));
         while let Some(c) = class {
-            for (event, key, is_static) in self.subscribers.get(c).cloned().unwrap_or_default() {
+            for (event, key, is_static, id) in self.subscribers.get(c).cloned().unwrap_or_default() {
                 if !is_static {
-                    let l = self.lambda(key, vec![obj]);
+                    let l = self.lambda_id(key, id, vec![obj]);
                     self.listeners.push((event.to_owned(), l));
                 }
             }
@@ -380,6 +447,22 @@ impl Rt {
 
     pub fn instance_of(&self, v: V, class: &str) -> bool {
         v.r() != 0 && self.is_a(self.class_of(v), class)
+    }
+
+    /// [`Rt::instance_of`] for generated code (`instanceof`, `catch`): both names are static
+    /// strings, so answers are kept by their addresses.
+    pub fn instance_of_static(&self, v: V, class: &'static str) -> bool {
+        if v.r() == 0 || matches!(v, V::Void) {
+            return false;
+        }
+        let c = self.class_of(v);
+        let key = (c.as_ptr() as usize, c.len(), class.as_ptr() as usize, class.len());
+        if let Some(&hit) = self.is_a_cache.borrow().get(&key) {
+            return hit;
+        }
+        let answer = self.is_a(c, class);
+        self.is_a_cache.borrow_mut().insert(key, answer);
+        answer
     }
 
     /// Whether class `c` is `class` or a subtype of it: its superclasses and every interface they
@@ -419,12 +502,27 @@ impl Rt {
     /// An exception nothing caught, at a top level (`what`: a static initialiser, the mod's
     /// constructor, an event listener): reported when tracing, then dropped so loading goes on.
     pub fn report_thrown(&mut self, what: &str) {
+        let path = std::mem::take(&mut self.unwinding);
         if let Some(e) = self.thrown.take()
             && Self::tracing()
         {
             let msg = self.get_field(e, "message");
             let msg = self.str_of(msg).unwrap_or("").to_owned();
             eprintln!("horizon-compat: uncaught {} in {what}: {msg}", self.class_of(e));
+            for m in path.iter().take(24) {
+                eprintln!("    at {m}");
+            }
+        }
+    }
+
+    /// An exception left method `m` uncaught (generated code calls this as it unwinds).
+    #[inline]
+    pub fn unwound(&mut self, m: &'static str) {
+        if Self::tracing() {
+            if self.unwinding.len() > 256 {
+                self.unwinding.clear();
+            }
+            self.unwinding.push(m);
         }
     }
 
@@ -523,6 +621,11 @@ impl Rt {
     /// A lambda object: its class is the implementing method's key, its data the captured values.
     pub fn lambda(&mut self, implementation: &'static str, captured: Vec<V>) -> V {
         self.alloc(implementation, Data::Array(captured))
+    }
+
+    /// A lambda the generated `lambda_call` runs by `id`.
+    pub fn lambda_id(&mut self, implementation: &'static str, id: u32, captured: Vec<V>) -> V {
+        self.alloc_cid(implementation, LAMBDA | id, Data::Array(captured))
     }
 
     pub fn captured(&self, v: V) -> Vec<V> {
