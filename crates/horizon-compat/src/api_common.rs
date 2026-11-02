@@ -547,10 +547,112 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let n = name_of(rt, a(0));
             V::I(matches!(n.as_str(), "SUCCESS" | "CONSUME" | "SUCCESS_NO_ITEM_USED" | "CONSUME_PARTIAL" | "SKIP_DEFAULT_BLOCK_INTERACTION") as i32)
         }
+        ("net/minecraft/world/phys/BlockHitResult", "<init>") => {
+            // (Vec3 location, Direction, BlockPos, boolean inside[, boolean worldBorder])
+            rt.put_field(a(0), "$loc", a(1));
+            rt.put_field(a(0), "$dir", a(2));
+            rt.put_field(a(0), "$pos", a(3));
+            rt.put_field(a(0), "$inside", V::I(a(4).i()));
+            V::Void
+        }
+        ("net/minecraft/world/phys/BlockHitResult", "miss") => {
+            let h = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+            rt.put_field(h, "$loc", a(0));
+            rt.put_field(h, "$dir", a(1));
+            rt.put_field(h, "$pos", a(2));
+            rt.put_field(h, "$miss", V::I(1));
+            h
+        }
+        ("net/minecraft/world/phys/BlockHitResult", "withDirection" | "withPosition") => {
+            let h = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+            for f in ["$loc", "$dir", "$pos", "$inside", "$miss"] {
+                let v = rt.get_field(a(0), f);
+                rt.put_field(h, f, v);
+            }
+            rt.put_field(h, if name == "withDirection" { "$dir" } else { "$pos" }, a(1));
+            h
+        }
         ("net/minecraft/world/phys/BlockHitResult", "getBlockPos") => rt.get_field(a(0), "$pos"),
         ("net/minecraft/world/phys/BlockHitResult", "getDirection") => rt.get_field(a(0), "$dir"),
-        ("net/minecraft/world/phys/BlockHitResult", "getLocation") => rt.get_field(a(0), "$loc"),
-        ("net/minecraft/world/phys/BlockHitResult", "isInside") => V::I(0),
+        ("net/minecraft/world/phys/BlockHitResult" | "net/minecraft/world/phys/HitResult", "getLocation") => rt.get_field(a(0), "$loc"),
+        ("net/minecraft/world/phys/BlockHitResult", "isInside") => V::I(rt.get_field(a(0), "$inside").i()),
+        ("net/minecraft/world/phys/BlockHitResult" | "net/minecraft/world/phys/HitResult", "getType") => {
+            let miss = rt.get_field(a(0), "$miss").i() != 0;
+            crate::api::api_enum(rt, "net/minecraft/world/phys/HitResult$Type", if miss { "MISS" } else { "BLOCK" }, if miss { 0 } else { 1 })
+        }
+        // Placing a block: vanilla's `BlockPlaceContext` (`glue::state_for_placement` makes one from
+        // the game's). `UseOnContext` calls on one reach it too: its class decides, as Java dispatches.
+        (o, n) if o.starts_with("net/minecraft/world/item/context/") && rt.class_of(a(0)) == PLACE_CONTEXT && n != "<init>" && n != "at" => {
+            return place_context_call(rt, n, args);
+        }
+        ("net/minecraft/world/item/context/BlockPlaceContext", "at") => {
+            // A context for placing at `pos` against its face `direction` (vanilla: a hit at that face's centre).
+            let (c, p, d) = (a(0), a(1), a(2));
+            let n = native(rt, p);
+            let step = DIRECTION_STEPS[native(rt, d)[0].clamp(0, 5) as usize];
+            let hit = vec3(
+                rt,
+                n[0] as f64 + 0.5 + step[0] as f64 * 0.5,
+                n[1] as f64 + 0.5 + step[1] as f64 * 0.5,
+                n[2] as f64 + 0.5 + step[2] as f64 * 0.5,
+            );
+            let h = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+            rt.put_field(h, "$loc", hit);
+            rt.put_field(h, "$dir", d);
+            rt.put_field(h, "$pos", p);
+            let ctx = rt.new_object(PLACE_CONTEXT);
+            for f in ["$level", "$player", "$item", "$hand"] {
+                let v = rt.get_field(c, f);
+                rt.put_field(ctx, f, v);
+            }
+            place_context_from_hit(rt, ctx, h);
+            ctx
+        }
+        ("net/minecraft/world/item/context/BlockPlaceContext" | "net/minecraft/world/item/context/UseOnContext", "<init>") => {
+            // (Level, Player, InteractionHand, ItemStack, BlockHitResult), (Player, InteractionHand,
+            // BlockHitResult) or (UseOnContext): the fields the getters read.
+            let ctx = a(0);
+            if desc.starts_with("(Lnet/minecraft/world/item/context/UseOnContext;") {
+                for f in ["$level", "$player", "$item", "$hand", "$hitResult"] {
+                    let v = rt.get_field(a(1), f);
+                    rt.put_field(ctx, f, v);
+                }
+                let h = rt.get_field(a(1), "$hitResult");
+                place_context_from_hit(rt, ctx, h);
+                return Some(V::Void);
+            }
+            let (level, player, hand, item, h) = if desc.starts_with("(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;") {
+                (a(1), a(2), a(3), a(4), a(5))
+            } else if desc.starts_with("(Lnet/minecraft/world/entity/player/Player;") {
+                let player = a(1);
+                let stack = call(rt, "net/minecraft/world/entity/player/Player", "getItemInHand", "(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;", &[player, a(2)]).unwrap_or(V::NULL);
+                (crate::glue::level(rt), player, a(2), stack, a(3))
+            } else {
+                return Some(V::Void);
+            };
+            rt.put_field(ctx, "$level", level);
+            rt.put_field(ctx, "$player", player);
+            rt.put_field(ctx, "$hand", hand);
+            rt.put_field(ctx, "$item", item);
+            place_context_from_hit(rt, ctx, h);
+            V::Void
+        }
+        ("net/minecraft/core/Direction", "orderedByNearest") => {
+            let (yaw, pitch) = (rt.get_field(a(0), "$yaw").f(), rt.get_field(a(0), "$pitch").f());
+            directions(rt, &ordered_by_nearest(yaw, pitch))
+        }
+        ("net/minecraft/core/Direction", "fromYRot") => direction(rt, horizontal_facing(a(0).d() as f32)),
+        // The acting player's look (an object `glue` made carries it; others look south, level).
+        (o, n) if o.starts_with("net/minecraft/") && (o.ends_with("/Player") || o.ends_with("/ServerPlayer") || o.ends_with("/LivingEntity") || o.ends_with("/Entity")) && matches!(n, "getYRot" | "getXRot" | "getViewYRot" | "getViewXRot" | "getYHeadRot" | "getVisualRotationYInDegrees" | "getDirection" | "getMotionDirection") => {
+            let (yaw, pitch) = (rt.get_field(a(0), "$yaw").f(), rt.get_field(a(0), "$pitch").f());
+            match n {
+                "getXRot" | "getViewXRot" => V::F(pitch),
+                "getDirection" | "getMotionDirection" => direction(rt, horizontal_facing(yaw)),
+                _ => V::F(yaw),
+            }
+        }
+        ("net/minecraft/util/Mth", "sin") => V::F(mth_sin(a(0))),
+        ("net/minecraft/util/Mth", "cos") => V::F(mth_cos(a(0))),
         // Block entities
         // Block entities: the API's state lives in the fields Java names (`level`, `worldPosition`,
         // `blockState`, `remove`), which mod subclasses read directly.
@@ -730,8 +832,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             _ => return None,
         },
         ("net/minecraft/util/Mth", "sqrt") => V::F(a(0).f().sqrt()),
-        ("net/minecraft/util/Mth", "sin") => V::F((a(0).f() as f64).sin() as f32),
-        ("net/minecraft/util/Mth", "cos") => V::F((a(0).f() as f64).cos() as f32),
         ("net/minecraft/util/Mth", "positiveModulo") => match desc {
             "(II)I" => V::I(a(0).i().rem_euclid(a(1).i().max(1))),
             "(FF)F" => V::F(a(0).f().rem_euclid(a(1).f())),
@@ -780,6 +880,195 @@ pub fn hit(rt: &mut Rt, pos: [i32; 3], face: i64) -> V {
     rt.put_field(h, "$dir", d);
     rt.put_field(h, "$loc", l);
     h
+}
+
+const PLACE_CONTEXT: &str = "net/minecraft/world/item/context/BlockPlaceContext";
+/// `Direction.getNormal()` by ordinal (down, up, north, south, west, east).
+const DIRECTION_STEPS: [[i64; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
+
+/// Vanilla's `Mth.sin`: a 65536-entry table of `Math.sin`, so angles round as the game rounds them.
+fn mth_sin(v: V) -> f32 {
+    let x = match v {
+        V::D(d) => d,
+        other => other.f() as f64,
+    };
+    let i = ((x * 10430.378350470453) as i64 & 65535) as f64;
+    (i * std::f64::consts::PI * 2.0 / 65536.0).sin() as f32
+}
+
+fn mth_cos(v: V) -> f32 {
+    let x = match v {
+        V::D(d) => d,
+        other => other.f() as f64,
+    };
+    let i = ((x * 10430.378350470453 + 16384.0) as i64 & 65535) as f64;
+    (i * std::f64::consts::PI * 2.0 / 65536.0).sin() as f32
+}
+
+/// `Direction.fromYRot`: the horizontal direction a yaw faces, as an ordinal.
+pub(crate) fn horizontal_facing(yaw: f32) -> i64 {
+    // 2D data values 0..3 are south, west, north, east.
+    [3, 4, 2, 5][((yaw as f64 / 90.0 + 0.5).floor() as i64 & 3) as usize]
+}
+
+/// `Direction.orderedByNearest(entity)` for a look of `yaw`, `pitch` (degrees), as ordinals.
+pub(crate) fn ordered_by_nearest(yaw: f32, pitch: f32) -> [i64; 6] {
+    let x_rot = pitch * (std::f32::consts::PI / 180.0);
+    let y_rot = -yaw * (std::f32::consts::PI / 180.0);
+    let (ps, pc) = (mth_sin(V::F(x_rot)), mth_cos(V::F(x_rot)));
+    let (ys, yc) = (mth_sin(V::F(y_rot)), mth_cos(V::F(y_rot)));
+    let (east, up, south) = (ys > 0.0, ps < 0.0, yc > 0.0);
+    let x = if east { ys } else { -ys };
+    let y = if up { -ps } else { ps };
+    let z = if south { yc } else { -yc };
+    let (xm, zm) = (x * pc, z * pc);
+    let dx = if east { 5 } else { 4 };
+    let dy = if up { 1 } else { 0 };
+    let dz = if south { 3 } else { 2 };
+    let opposite = |d: i64| d ^ 1;
+    let three = |a: i64, b: i64, c: i64| [a, b, c, opposite(c), opposite(b), opposite(a)];
+    if x > z {
+        if y > xm {
+            three(dy, dx, dz)
+        } else if zm > y {
+            three(dx, dz, dy)
+        } else {
+            three(dx, dy, dz)
+        }
+    } else if y > zm {
+        three(dy, dz, dx)
+    } else if xm > y {
+        three(dz, dx, dy)
+    } else {
+        three(dz, dy, dx)
+    }
+}
+
+fn directions(rt: &mut Rt, order: &[i64]) -> V {
+    let arr = rt.new_array(order.len() as i32, V::NULL);
+    for (i, d) in order.iter().enumerate() {
+        let v = direction(rt, *d);
+        rt.array_set(arr, i as i32, v);
+    }
+    arr
+}
+
+/// Whether a block the game reports can be replaced by a placement (`canBeReplaced`), for contexts
+/// mod code makes itself: air, fluids and the plants and snow a placement overwrites.
+fn replaceable(state: &str) -> bool {
+    let (name, props) = crate::host::split_state(state);
+    matches!(
+        name,
+        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "minecraft:water" | "minecraft:lava"
+            | "minecraft:short_grass" | "minecraft:tall_grass" | "minecraft:fern" | "minecraft:large_fern"
+            | "minecraft:dead_bush" | "minecraft:vine" | "minecraft:glow_lichen" | "minecraft:seagrass"
+            | "minecraft:tall_seagrass" | "minecraft:structure_void" | "minecraft:fire" | "minecraft:soul_fire"
+            | "minecraft:light" | "minecraft:bubble_column" | "minecraft:hanging_roots" | "minecraft:crimson_roots"
+            | "minecraft:warped_roots" | "minecraft:nether_sprouts"
+    ) || (name == "minecraft:snow" && props.iter().any(|(k, v)| *k == "layers" && *v == "1"))
+}
+
+/// Fills a context's click from a `BlockHitResult`, as vanilla's constructor does: the block goes into
+/// the clicked block when that can be replaced, else beside it.
+fn place_context_from_hit(rt: &mut Rt, ctx: V, h: V) {
+    let p = rt.get_field(h, "$pos");
+    let d = rt.get_field(h, "$dir");
+    let pos = native(rt, p);
+    let face = native(rt, d)[0].clamp(0, 5);
+    let clicked = rt.host().map(|host| host.block_state([pos[0] as i32, pos[1] as i32, pos[2] as i32])).unwrap_or_default();
+    let replace = replaceable(&clicked);
+    let s = DIRECTION_STEPS[face as usize];
+    let place = if replace { p } else { crate::api::block_pos(rt, pos[0] + s[0], pos[1] + s[1], pos[2] + s[2]) };
+    let loc = rt.get_field(h, "$loc");
+    let inside = rt.get_field(h, "$inside");
+    rt.put_field(ctx, "$hitResult", h);
+    rt.put_field(ctx, "$hitPos", p);
+    rt.put_field(ctx, "$pos", place);
+    rt.put_field(ctx, "$face", d);
+    rt.put_field(ctx, "$hit", loc);
+    rt.put_field(ctx, "$inside", V::I(inside.i()));
+    rt.put_field(ctx, "$replace", V::I(replace as i32));
+    let player = rt.get_field(ctx, "$player");
+    let yaw = rt.get_field(player, "$yaw");
+    let pitch = rt.get_field(player, "$pitch");
+    rt.put_field(ctx, "$yaw", V::F(yaw.f()));
+    rt.put_field(ctx, "$pitch", V::F(pitch.f()));
+}
+
+/// The context a placement hands `getStateForPlacement`, from the game's.
+pub fn place_context(rt: &mut Rt, p: &crate::glue::Placement) -> V {
+    let ctx = rt.new_object(PLACE_CONTEXT);
+    let level = crate::glue::level(rt);
+    let player = rt.new_object("net/minecraft/server/level/ServerPlayer");
+    rt.put_field(player, "$yaw", V::F(p.yaw));
+    rt.put_field(player, "$pitch", V::F(p.pitch));
+    let hand = get_static(rt, "net/minecraft/world/InteractionHand", "MAIN_HAND").unwrap_or(V::NULL);
+    let item = if p.item.is_empty() { get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL) } else { stack(rt, &p.item, 1) };
+    let pos = crate::api::block_pos(rt, p.pos[0] as i64, p.pos[1] as i64, p.pos[2] as i64);
+    let hit_pos = crate::api::block_pos(rt, p.hit_pos[0] as i64, p.hit_pos[1] as i64, p.hit_pos[2] as i64);
+    let face = direction(rt, p.face);
+    let hit = vec3(rt, p.hit[0], p.hit[1], p.hit[2]);
+    let h = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+    rt.put_field(h, "$loc", hit);
+    rt.put_field(h, "$dir", face);
+    rt.put_field(h, "$pos", hit_pos);
+    rt.put_field(h, "$inside", V::I(p.inside as i32));
+    for (f, v) in [
+        ("$level", level),
+        ("$player", player),
+        ("$hand", hand),
+        ("$item", item),
+        ("$hitResult", h),
+        ("$hitPos", hit_pos),
+        ("$pos", pos),
+        ("$face", face),
+        ("$hit", hit),
+        ("$inside", V::I(p.inside as i32)),
+        ("$replace", V::I(p.replace_clicked as i32)),
+        ("$yaw", V::F(p.yaw)),
+        ("$pitch", V::F(p.pitch)),
+    ] {
+        rt.put_field(ctx, f, v);
+    }
+    ctx
+}
+
+/// `BlockPlaceContext`'s getters (and `UseOnContext`'s, which it extends).
+fn place_context_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let c = args.first().copied().unwrap_or_default();
+    let (yaw, pitch) = (rt.get_field(c, "$yaw").f(), rt.get_field(c, "$pitch").f());
+    Some(match name {
+        "getLevel" => rt.get_field(c, "$level"),
+        "getClickedPos" => rt.get_field(c, "$pos"),
+        "getPlayer" => rt.get_field(c, "$player"),
+        "getClickedFace" => rt.get_field(c, "$face"),
+        "getClickLocation" => rt.get_field(c, "$hit"),
+        "getHitResult" => rt.get_field(c, "$hitResult"),
+        "isInside" => V::I(rt.get_field(c, "$inside").i()),
+        "getItemInHand" => rt.get_field(c, "$item"),
+        "getHand" => rt.get_field(c, "$hand"),
+        "isSecondaryUseActive" => V::I(rt.host().is_some_and(|h| h.player_sneaking()) as i32),
+        "replacingClickedOnBlock" => V::I(rt.get_field(c, "$replace").i()),
+        // Asked while the game places: the position takes the block.
+        "canPlace" => V::I(1),
+        "getRotation" => V::F(yaw),
+        "getHorizontalDirection" => direction(rt, horizontal_facing(yaw)),
+        "getNearestLookingDirection" => direction(rt, ordered_by_nearest(yaw, pitch)[0]),
+        "getNearestLookingVerticalDirection" => direction(rt, if pitch < 0.0 { 1 } else { 0 }),
+        "getNearestLookingDirections" => {
+            let mut order = ordered_by_nearest(yaw, pitch).to_vec();
+            if rt.get_field(c, "$replace").i() == 0 {
+                // The face clicked against comes first: its opposite leads, the rest keep their order.
+                let face = native(rt, rt.get_field(c, "$face"))[0].clamp(0, 5) ^ 1;
+                if let Some(i) = order.iter().position(|d| *d == face) {
+                    let d = order.remove(i);
+                    order.insert(0, d);
+                }
+            }
+            directions(rt, &order)
+        }
+        _ => return None,
+    })
 }
 
 /// Static fields this module owns: `BlockStateProperties.*`, `ItemStack.EMPTY`, `Items.*`.

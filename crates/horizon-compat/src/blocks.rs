@@ -222,6 +222,55 @@ fn vanilla_enum(class: &str) -> Option<&'static [&'static str]> {
 }
 
 /// Calls this module answers (before the general mapping): property builders record what they're
+/// Vanilla's `getStateForPlacement` for block class `class` on block `b`: a pillar's axis is the
+/// clicked face's, a face-attached block (lever, button) takes the first looking direction (floor or
+/// ceiling facing the player's way, else the wall it looks at), anything else its default state.
+fn vanilla_placement(rt: &mut Rt, class: &str, b: V, ctx: V) -> V {
+    let default = api::call(rt, "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;", &[b]);
+    let Some(text) = rt.str_of(default).map(str::to_owned) else { return default };
+    let ordinal = |rt: &mut Rt, key: &'static str| -> i64 {
+        let d = api::call(rt, key, &[ctx]);
+        match rt.heap.get(d.r() as usize).map(|o| &o.data) {
+            Some(Data::Native("Direction", n)) => n[0],
+            _ => 2,
+        }
+    };
+    const NAMES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
+    let set = |text: &str, key: &str, value: &str| -> String {
+        let (block, mut props) = crate::host::split_state(text);
+        for p in props.iter_mut() {
+            if p.0 == key {
+                p.1 = value;
+            }
+        }
+        crate::host::join_state(block, props)
+    };
+    let out = match class.rsplit('/').next().unwrap_or("") {
+        "RotatedPillarBlock" => {
+            let face = ordinal(rt, "net/minecraft/world/item/context/BlockPlaceContext.getClickedFace.()Lnet/minecraft/core/Direction;");
+            set(&text, "axis", ["y", "y", "z", "z", "x", "x"][face.clamp(0, 5) as usize])
+        }
+        "FaceAttachedHorizontalDirectionalBlock" => {
+            let first = {
+                let arr = api::call(rt, "net/minecraft/world/item/context/BlockPlaceContext.getNearestLookingDirections.()[Lnet/minecraft/core/Direction;", &[ctx]);
+                let d = rt.array_get(arr, 0);
+                match rt.heap.get(d.r() as usize).map(|o| &o.data) {
+                    Some(Data::Native("Direction", n)) => n[0],
+                    _ => 2,
+                }
+            };
+            if first <= 1 {
+                let h = ordinal(rt, "net/minecraft/world/item/context/BlockPlaceContext.getHorizontalDirection.()Lnet/minecraft/core/Direction;");
+                set(&set(&text, "face", if first == 1 { "ceiling" } else { "floor" }), "facing", NAMES[h.clamp(2, 5) as usize])
+            } else {
+                set(&set(&text, "face", "wall"), "facing", NAMES[(first ^ 1) as usize])
+            }
+        }
+        _ => text,
+    };
+    api::state(rt, &out)
+}
+
 /// given, block constructors collect their states.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -257,6 +306,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let block = rt.registered_name(a(0), "block").unwrap_or("").to_owned();
             let text = if props.is_empty() { block } else { format!("{block}[{props}]") };
             Some(api::state(rt, &text))
+        }
+        // `super.getStateForPlacement(context)` reaching a vanilla class: its own rule where it has one
+        // that only reads the click, else `Block`'s (the default state).
+        (o, "getStateForPlacement") if o.starts_with("net/minecraft/world/level/block/") && desc.starts_with("(Lnet/minecraft/world/item/context/BlockPlaceContext;)") => {
+            Some(vanilla_placement(rt, o, a(0), a(1)))
         }
         (o, "<init>") if o.starts_with("net/minecraft/world/level/block/") && desc.contains("Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;") => {
             let props = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == BLOCK_PROPERTIES).unwrap_or(V::NULL);

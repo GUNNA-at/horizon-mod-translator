@@ -3637,7 +3637,13 @@ impl GameLevel<'_> {
     /// `create:shaft[axis=y]` (properties sorted by name): what translated
     /// Java mods (`horizon-compat`) read. Air where nothing is loaded. API 81.
     pub(super) fn native_state_text(&self, pos: [i32; 3]) -> String {
-        let state = self.block_state(BlockPos::new(pos[0], pos[1], pos[2]));
+        self.native_state_id_text(self.block_state(BlockPos::new(pos[0], pos[1], pos[2])))
+    }
+    /// A block state as text, as [`Self::native_state_text`] gives a
+    /// position's: the state a hook is handed (`native_state_for_placement`'s
+    /// `state`) in the form translated Java mods read. Air for an id past the
+    /// state table. API 81.
+    pub(super) fn native_state_id_text(&self, state: BlockStateId) -> String {
         let Some(info) = self.registry.state(state) else {
             return "minecraft:air".to_owned();
         };
@@ -3648,6 +3654,21 @@ impl GameLevel<'_> {
         }
         let inner: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
         format!("{}[{}]", info.name, inner.join(","))
+    }
+    /// The block state text names, as [`Self::native_state_text`] writes it
+    /// (properties not named keep the block's defaults): what a hook answers
+    /// with an id (`native_state_for_placement`). None for an unknown block,
+    /// property or value. API 81.
+    pub(super) fn native_state_from_text(&self, text: &str) -> Option<BlockStateId> {
+        let (name, props) = match text.split_once('[') {
+            Some((n, rest)) => (n, rest.trim_end_matches(']')),
+            None => (text, ""),
+        };
+        let mut id = self.registry.default_state(name)?;
+        for (k, v) in props.split(',').filter_map(|p| p.split_once('=')) {
+            id = with_property(self.registry, id, k, v)?;
+        }
+        Some(id)
     }
     /// Sets the block at `pos` from text as [`Self::native_state_text`] gives it
     /// (properties not named keep the block's defaults), through
@@ -3663,19 +3684,9 @@ impl GameLevel<'_> {
         if !self.native_authoritative {
             return false;
         }
-        let (name, props) = match text.split_once('[') {
-            Some((n, rest)) => (n, rest.trim_end_matches(']')),
-            None => (text, ""),
-        };
-        let Some(mut id) = self.registry.default_state(name) else {
+        let Some(id) = self.native_state_from_text(text) else {
             return false;
         };
-        for (k, v) in props.split(',').filter_map(|p| p.split_once('=')) {
-            match with_property(self.registry, id, k, v) {
-                Some(next) => id = next,
-                None => return false,
-            }
-        }
         let b = self.behaviours;
         b.set_block(self, ticks, BlockPos::new(pos[0], pos[1], pos[2]), id, flags)
     }

@@ -292,6 +292,13 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     https://claude.ai/artifact/6ReCVHYJmEUnpjW2BxLhVs (ffmpeg from Homebrew is broken here;
     `scratchpad/encode.swift` writes the MP4 with AVFoundation). `scratchpad/play-create.sh` opens the
     same scene in a window for a person to play.
+  - [x] Hand placement (harness `PLACE=1`): the bundle's `state_for_placement` hook builds a `BlockPlaceContext`
+    (clicked face and position, look directions as vanilla's `Direction.orderedByNearest`, sneaking, item) and
+    asks the block's own `getStateForPlacement`; `super` calls reaching vanilla get its rule (pillar axis,
+    face-attached). Harness: shaft takes the clicked face's axis, motor faces a neighbouring shaft (else away
+    from the look), cogwheel follows a shaft's axis, press and fan face as in Create. Gaps: every answer is
+    `waterlogged=true` (no `getFluidState` yet), and blocks inheriting vanilla's rule without overriding it
+    (analog lever) aren't asked. New game helpers `native_state_id_text`, `native_state_from_text` (API 81).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

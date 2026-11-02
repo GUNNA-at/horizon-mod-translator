@@ -235,6 +235,60 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
     })
 }
 
+const STATE_FOR_PLACEMENT: &str = "getStateForPlacement.(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;";
+const STATE_FOR_PLACEMENT_KEY: &str =
+    "net/minecraft/world/level/block/Block.getStateForPlacement.(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;";
+
+/// A player placing a block: what vanilla's `BlockPlaceContext` holds.
+#[derive(Clone, Debug, Default)]
+pub struct Placement {
+    /// Where the block goes (`getClickedPos`).
+    pub pos: [i32; 3],
+    /// The block that was clicked.
+    pub hit_pos: [i32; 3],
+    /// The clicked face, a direction ordinal (down, up, north, south, west, east).
+    pub face: i64,
+    /// Where the click landed.
+    pub hit: [f64; 3],
+    /// The click hit the inside of the clicked block's shape.
+    pub inside: bool,
+    /// The placer's rotation, in degrees.
+    pub yaw: f32,
+    pub pitch: f32,
+    /// The item in hand (`create:shaft`); empty for none.
+    pub item: String,
+    /// The block goes into the clicked position (`replacingClickedOnBlock`).
+    pub replace_clicked: bool,
+}
+
+/// `Block.getStateForPlacement` of the mod's block whose default state is `state`: `Some(Some(text))`
+/// is the state it goes in, `Some(None)` refuses the placement (Java's null), `None` leaves it to the
+/// game (no placement of its own, or its code threw). The host answers the level's blocks and
+/// whether the placer sneaks (`isSecondaryUseActive`, `isShiftKeyDown`).
+pub fn state_for_placement(rt: &mut Rt, host: &mut dyn Host, state: &str, placement: &Placement) -> Option<Option<String>> {
+    rt.safe_point();
+    let (b, class) = mod_block(rt, state)?;
+    if !rt.overrides.is_some_and(|o| o(class, STATE_FOR_PLACEMENT)) {
+        return None;
+    }
+    rt.with_host(host, |rt| {
+        let vc = rt.vcall?;
+        let ctx = crate::api_common::place_context(rt, placement);
+        let r = vc(rt, STATE_FOR_PLACEMENT_KEY, STATE_FOR_PLACEMENT, &[b, ctx]);
+        if rt.thrown.is_some() {
+            rt.report_thrown("getStateForPlacement");
+            return None;
+        }
+        if r.r() == 0 {
+            return Some(None);
+        }
+        // Only a state of the block placed is an answer (the game checks it too).
+        let text = rt.str_of(r)?.to_owned();
+        let (name, _) = crate::host::split_state(state);
+        (crate::host::split_state(&text).0 == name).then_some(Some(text))
+    })
+}
+
 const HANDLE_UPDATE_TAG: &str = "handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
 const HANDLE_UPDATE_TAG_KEY: &str =
     "net/minecraft/world/level/block/entity/BlockEntity.handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
