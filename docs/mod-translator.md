@@ -173,6 +173,13 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   when the level is first used. Hook test covers a static subscriber and a registered object.
 - [x] Block entities: `BlockEntityType.create` (the factory), the Java fields (`level`, `worldPosition`,
   `blockState`), the glue puts each in the level with its current state; `ModConfigSpec` values are their defaults.
+- [x] Reflection (commit f3eec22): a generated `reflect(rt, class, what, args)` table initialises classes
+  (`Class.forName`), runs no-argument constructors (`newInstance`, `getConstructor().newInstance()`, Flywheel's
+  `DependencyInjection`), returns enum constants (`getEnumConstants`, Create's `readEnum`) and lists
+  `META-INF/services` providers of the jar and its jarjar (`ServiceLoader`, catnip's platform helpers).
+  `Class.forName` of a class neither the mod's nor the platform's throws `ClassNotFoundException` (optional
+  dependencies). `Object.hashCode/equals` are Object's own (identity), so `super.hashCode()` in an override no
+  longer recurses; `Rt::call_functional` dispatches mod objects by `name.desc`. Differential: 78 results.
 - [ ] Next: harness kinetic test (creative motor east + 3 shafts, 40 ticks): read `Speed` from saved NBT; fix
   what the trace shows; then the game.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
