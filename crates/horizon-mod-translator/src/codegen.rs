@@ -601,7 +601,9 @@ impl<'a> Program<'a> {
                         Some(imp) => format!("{}(rt, &a);", fn_name(&imp, &m.name, &m.desc)),
                         None => format!("api::call(rt, {key:?}, &a);"),
                     };
-                    format!("{{ let o = rt.new_object_id({:?}, {}); let mut a = vec![o]; a.extend(full); {init} o }}", m.owner, self.cid(&m.owner))
+                    // A constructor reference (`BeltBlock::new`) initialises the class as `new` does.
+                    let ensure = self.ensure(&m.owner).replace("return V::Void;", "return Some(V::Void);");
+                    format!("{{ {ensure}let o = rt.new_object_id({:?}, {}); let mut a = vec![o]; a.extend(full); {init} o }}", m.owner, self.cid(&m.owner))
                 }
                 (5 | 9, _) => {
                     // The API's key when no mod class implements it (as at call sites).
@@ -972,15 +974,28 @@ impl<'a> Program<'a> {
     }
 
     /// Runs `class`'s static initialiser first if it has one and hasn't run (JVMS 5.5).
+    /// Initialises `class` before its use, as the JVM does (JVMS 5.5): its mod superclasses first,
+    /// from the top, then the class; each static initialiser runs once.
     fn ensure(&self, class: &str) -> String {
-        let has = self.classes.get(class).is_some_and(|c| c.methods.iter().any(|m| m.name == "<clinit>"));
-        if !has {
-            return String::new();
+        let mut chain = Vec::new();
+        let mut c = Some(class);
+        while let Some(name) = c {
+            let Some(k) = self.classes.get(name) else { break };
+            if k.methods.iter().any(|m| m.name == "<clinit>") {
+                chain.push(k.name.clone());
+            }
+            c = k.superclass.as_deref();
         }
-        format!(
-            "if rt.initialized.insert({class:?}) {{ {}(rt, &[]); if rt.thrown.is_some() {{ return V::Void; }} }} ",
-            fn_name(class, "<clinit>", "()V")
-        )
+        chain
+            .iter()
+            .rev()
+            .map(|k| {
+                format!(
+                    "if rt.initialized.insert({k:?}) {{ {}(rt, &[]); if rt.thrown.is_some() {{ return V::Void; }} }} ",
+                    fn_name(k, "<clinit>", "()V")
+                )
+            })
+            .collect()
     }
 
     /// The class declaring static field `name` as the JVM resolves a reference through `owner`
