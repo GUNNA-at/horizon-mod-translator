@@ -214,6 +214,30 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   Staging tip: apply mixins into a fresh folder, then `rsync -r --checksum` (no `-t`) into the old stage, so
   unchanged files keep their times and cargo rebuilds only what changed.
 - [ ] Next: the client half. Rotating parts are drawn by Create's block entity renderers
+  - [x] Runtime side (commit 18dff8f): setup events (common, client, `RegisterRenderers`), `enqueueWork` and
+    `CompletableFuture`, PoseStack/JOML/Axis natives (`horizon-compat/src/render.rs`), catnip's
+    `SuperByteBuffer` as intrinsics drawn through `Host::draw_model` (one call per buffer), and the glue:
+    `glue::render_block_entity`, `glue::block_entity_update_tag`, `glue::client_tick`, client `level`.
+  - [x] Translator intrinsics: a method whose key is in `render::INTRINSICS` is emitted as
+    `api::call(rt, KEY, args)` (codegen `method()`).
+  - [ ] Harness client test (scratch `harness/src/main.rs` has it: renders each block entity on its own
+    thread's runtime at two moments and counts draws whose transform changed). Regenerate `cb-h` with
+    `--runtime crates/horizon-compat-core`, rebuild the harness, run it, fix unmapped calls.
+    Watch: Guava `CacheBuilder`/`Cache.get(key, Callable)` (catnip's `SuperByteBufferCache`) is unmapped;
+    `CreateClient`'s constructor throws in Flywheel's `LayoutBuilderImpl.build` and may skip registering
+    the buffer cache compartments.
+  - [ ] Bundle hooks (`bundle.rs`): `block_entity_submit` (game `&self` = `value = "self"`, draw
+    `&mut crate::game::native_block_entity_draw::BlockEntityDraw`; Host gives `partial_tick` and
+    `draw_model`: push, multiply the pose, draw, pop; light from vanilla packing `block16 | sky16 << 16`
+    to Horizon's `sky16 | block16 << 8`), `block_entity_update_tag` (live tag, else the saved nbt),
+    `tick` (client tick when `native_window()`), and `block_changed` → `native_block_entity_sync` in the
+    server hosts.
+  - [ ] Horizon: `BlockEntityDraw::transform([f32; 16])` (column-major) and
+    `Game::native_draw_model(draw, "create:block/shaft_half", tint)`: resolve from
+    `pack.render.model_library`, `bake_model`, cache per name (keep the library `Arc` to notice reloads),
+    sprites from `gui.atlas.sprites` (names without `minecraft:`). State models go through
+    `native_draw_block`. Create's kinetic blocks keep their static chunk model (no `getRenderShape`
+    override in the jar): check the mesher doesn't draw the shaft twice once the renderer draws it.
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick

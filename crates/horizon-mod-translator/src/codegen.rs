@@ -698,6 +698,13 @@ impl<'a> Program<'a> {
         let f = fn_name(&c.name, name, desc);
         let _ = writeln!(s, "/// `{}.{}{}`", c.name, name, desc);
         let _ = writeln!(s, "pub fn {f}(rt: &mut Rt, args: &[V]) -> V {{");
+        // An intrinsic: the runtime does this method's work natively (a whole buffer drawn in one
+        // call, say, instead of its translated per-vertex loop).
+        let key = format!("{}.{}.{}", c.name, name, desc);
+        if horizon_compat::render::INTRINSICS.contains(&key.as_str()) {
+            let _ = writeln!(s, "    api::call(rt, {key:?}, args)\n}}\n");
+            return s;
+        }
         let _ = writeln!(s, "    let mut l = [V::Void; {}];", (code.max_locals as usize).max(1));
         // Arguments to local slots: wide values take two.
         let mut slot = 0usize;
