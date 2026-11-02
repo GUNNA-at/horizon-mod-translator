@@ -209,6 +209,20 @@ fn map_get(rt: &Rt, tag: V, key: &str) -> Option<V> {
     }
 }
 
+/// `tag.copy()`: nested compounds copied too, as NBT copies are deep.
+fn copy_tag(rt: &mut Rt, tag: V) -> V {
+    let entries: Vec<(String, V)> = match rt.heap.get(tag.r() as usize).map(|o| &o.data) {
+        Some(Data::Map(m)) => m.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        _ => return compound(rt),
+    };
+    let mut out = HashMap::new();
+    for (k, v) in entries {
+        let v = if matches!(v, V::R(r) if r != 0) && rt.class_of(v) == "net/minecraft/nbt/CompoundTag" { copy_tag(rt, v) } else { v };
+        out.insert(k, v);
+    }
+    rt.alloc("net/minecraft/nbt/CompoundTag", Data::Map(out))
+}
+
 fn map_put(rt: &mut Rt, tag: V, key: String, v: V) {
     if let Some(crate::Object { data: Data::Map(m), .. }) = rt.heap.get_mut(tag.r() as usize) {
         m.insert(key, v);
@@ -454,6 +468,23 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             map_put(rt, a(0), key, a(2));
             if n == "put" { a(2) } else { V::Void }
         }
+        ("net/minecraft/nbt/CompoundTag", "isEmpty" | "size" | "getAllKeys") => {
+            let keys: Vec<String> = match rt.heap.get(a(0).r() as usize).map(|o| &o.data) {
+                Some(Data::Map(m)) => m.keys().filter(|k| !k.starts_with('\u{1}')).cloned().collect(),
+                _ => Vec::new(),
+            };
+            match name {
+                "isEmpty" => V::I(keys.is_empty() as i32),
+                "size" => V::I(keys.len() as i32),
+                _ => {
+                    let mut keys = keys;
+                    keys.sort();
+                    let items: Vec<V> = keys.iter().map(|k| rt.string(k)).collect();
+                    crate::jutil::new_set_of(rt, &items)
+                }
+            }
+        }
+        ("net/minecraft/nbt/CompoundTag", "copy") => copy_tag(rt, a(0)),
         ("net/minecraft/nbt/CompoundTag", "contains") => {
             let key = name_of(rt, a(1));
             V::I(map_get(rt, a(0), &key).is_some() as i32)
@@ -461,6 +492,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/nbt/CompoundTag", "remove") => {
             let key = name_of(rt, a(1));
             if let Some(crate::Object { data: Data::Map(m), .. }) = rt.heap.get_mut(a(0).r() as usize) {
+                m.remove(&crate::nbt::kind_key(&key));
                 m.remove(&key);
             }
             V::Void
@@ -541,6 +573,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::Void
         }
         (o, "setChanged" | "onLoad" | "onChunkUnloaded" | "invalidateCapabilities") if o.ends_with("BlockEntity") => V::Void,
+        // The base class saves and loads nothing of its own beyond what the glue writes (id, position).
+        (o, "saveAdditional" | "loadAdditional" | "requestModelDataUpdate" | "onDataPacket" | "handleUpdateTag") if o.ends_with("BlockEntity") => V::Void,
+        (o, "getUpdateTag") if o.ends_with("BlockEntity") => compound(rt),
+        (o, "getUpdatePacket") if o.ends_with("BlockEntity") => V::NULL,
         ("net/minecraft/world/level/block/entity/BlockEntityType$Builder", "of") => {
             let b = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType$Builder");
             rt.put_field(b, "$factory", a(0));

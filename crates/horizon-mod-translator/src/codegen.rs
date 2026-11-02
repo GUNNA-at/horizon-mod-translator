@@ -227,6 +227,42 @@ impl<'a> Program<'a> {
         None
     }
 
+    /// The API type a call on the mod's `owner` reaches when no mod class implements the method:
+    /// a class's first superclass outside the mod, or a mod interface's only API superinterface.
+    /// None when `owner` is not the mod's (the key is already the API's) or it is ambiguous.
+    fn api_owner(&self, owner: &str) -> Option<String> {
+        let start = self.classes.get(owner)?;
+        if start.access & 0x0200 == 0 {
+            let mut k = *start;
+            loop {
+                let sup = k.superclass.as_deref()?;
+                match self.classes.get(sup) {
+                    Some(next) => k = next,
+                    None => return Some(sup.to_owned()),
+                }
+            }
+        }
+        let mut api = BTreeSet::new();
+        let mut queue: std::collections::VecDeque<&str> = start.interfaces.iter().map(String::as_str).collect();
+        let mut seen = BTreeSet::new();
+        while let Some(i) = queue.pop_front() {
+            if !seen.insert(i) {
+                continue;
+            }
+            match self.classes.get(i) {
+                Some(k) => queue.extend(k.interfaces.iter().map(String::as_str)),
+                None => {
+                    api.insert(i);
+                }
+            }
+        }
+        let mut it = api.into_iter();
+        match (it.next(), it.next()) {
+            (Some(only), None) => Some(only.to_owned()),
+            _ => None,
+        }
+    }
+
     fn unsupported(&mut self, what: &str) {
         *self.unsupported.entry(what.to_owned()).or_insert(0) += 1;
     }
@@ -847,13 +883,19 @@ impl<'a> Program<'a> {
         };
         let collect = format!("{init}{caller}let at = s.len().saturating_sub({n}); let args: Vec<V> = s.split_off(at);");
         let push = if returns_value(&m.desc) { "s.push(r);" } else { "" };
+        // A method no mod class implements, called through a mod class (`this.getLevel()` in a
+        // mod block entity): the API class it is inherited from, found now rather than per call.
+        let api_key = |this: &mut Self| match this.api_owner(&m.owner) {
+            Some(api) => this.key(&Member { owner: api, name: m.name.clone(), desc: m.desc.clone() }),
+            None => key.clone(),
+        };
         let call = match op {
             // static, or a direct (super/constructor/private) call
             0xb8 | 0xb7 => match self.resolve(&m.owner, &m.name, &m.desc) {
                 Some(imp) => format!("{}(rt, &args)", fn_name(&imp, &m.name, &m.desc)),
-                None => format!("api::call(rt, {key:?}, &args)"),
+                None => format!("api::call(rt, {:?}, &args)", api_key(self)),
             },
-            _ => format!("vcall(rt, {key:?}, {:?}, &args)", format!("{}.{}", m.name, m.desc)),
+            _ => format!("vcall(rt, {:?}, {:?}, &args)", api_key(self), format!("{}.{}", m.name, m.desc)),
         };
         // `String.valueOf(Object)` and `append(Object)` print through the object's own `toString()`.
         let to_string = matches!(

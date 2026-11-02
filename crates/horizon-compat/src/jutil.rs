@@ -235,6 +235,11 @@ pub fn new_list(rt: &mut Rt, items: Vec<V>) -> V {
     rt.alloc("java/util/ArrayList", Data::List(items))
 }
 
+/// A `LinkedHashSet` of `items`, in order.
+pub fn new_set_of(rt: &mut Rt, items: &[V]) -> V {
+    new_set(rt, items)
+}
+
 fn new_set(rt: &mut Rt, items: &[V]) -> V {
     let s = rt.alloc("java/util/LinkedHashSet", Data::Table(Table::default()));
     for &i in items {
