@@ -266,7 +266,14 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let current = props.iter().find(|(k, _)| *k == pname).map(|(_, v)| v.to_string());
             match name {
                 "hasProperty" => V::I(current.is_some() as i32),
-                "getValue" => value_of(rt, &kind, current.as_deref().unwrap_or("")),
+                "getValue" => {
+                    // Read back by `glue::render_shape`: an answer that rests on a property the
+                    // game's state doesn't have isn't the block's.
+                    if current.is_none() {
+                        rt.interned.insert("compat:missing-property".into(), V::I(1));
+                    }
+                    value_of(rt, &kind, current.as_deref().unwrap_or(""))
+                }
                 "getOptionalValue" => {
                     let v = current.map(|c| value_of(rt, &kind, &c)).unwrap_or(V::NULL);
                     let o = rt.new_object("java/util/Optional");

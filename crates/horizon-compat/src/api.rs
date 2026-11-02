@@ -296,6 +296,12 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
 
 const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
 const BLOCK: &str = "net/minecraft/world/level/block/Block";
+const STATE_DEFINITION: &str = "net/minecraft/world/level/block/state/StateDefinition";
+const DATA_STORAGE: &str = "net/minecraft/world/level/storage/DimensionDataStorage";
+const SAVED_DATA: &str = "net/minecraft/world/level/saveddata/SavedData";
+const SAVED_DATA_FACTORY: &str = "net/minecraft/world/level/saveddata/SavedData$Factory";
+/// 1.21.1's `RenderShape`, in declaration order (ordinals).
+pub const RENDER_SHAPES: [&str; 3] = ["INVISIBLE", "ENTITYBLOCK_ANIMATED", "MODEL"];
 
 /// A block state value (its text, `minecraft:stone` or `create:shaft[axis=y]`).
 pub fn state(rt: &mut Rt, text: &str) -> V {
@@ -460,6 +466,33 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // A client level has no server (`ClientLevel.getServer` is null).
         (_, "getServer") if level && rt.get_field(a(0), "isClientSide").i() != 0 => V::NULL,
         (_, "getServer") if level => rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer")),
+        // Saved data (`DimensionDataStorage`): one object per name, made by its factory's
+        // constructor the first time it's asked for. Kept in memory: not yet written to the world's
+        // `data/` folder, so a mod's networks (Create's trains) start over with the game.
+        (_, "getDataStorage") if level => rt.intern("compat:data-storage".into(), |rt| rt.new_object(DATA_STORAGE)),
+        (SAVED_DATA_FACTORY, "<init>") => {
+            rt.put_field(a(0), "$constructor", a(1));
+            rt.put_field(a(0), "$deserializer", a(2));
+            V::Void
+        }
+        (DATA_STORAGE, n @ ("computeIfAbsent" | "get")) => {
+            let key = format!("saved-data/{}", rt.str_of(a(2)).unwrap_or_default());
+            match rt.interned.get(&key) {
+                Some(d) => *d,
+                None if n == "get" => V::NULL,
+                None => {
+                    let make = rt.get_field(a(1), "$constructor");
+                    let d = rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", make, &[]);
+                    if d.r() != 0 {
+                        rt.interned.insert(key, d);
+                    }
+                    d
+                }
+            }
+        }
+        (SAVED_DATA, "setDirty") => V::Void,
+        (SAVED_DATA, "isDirty") => V::I(0),
+        (SAVED_DATA, "<init>") => V::Void,
         ("net/minecraft/server/MinecraftServer" | "net/minecraft/server/dedicated/DedicatedServer", n) => match n {
             "getTickCount" => V::I(rt.host().map_or(0, |h| h.game_time()) as i32),
             // One level is modelled: the one the hook runs in.
@@ -485,6 +518,31 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (BLOCK, "defaultBlockState") | (_, "defaultBlockState") => {
             let n = block_name(rt, a(0));
             state(rt, &n)
+        }
+        // A block's states, as far as the runtime knows them: its default one.
+        (_, "getStateDefinition") if desc == "()Lnet/minecraft/world/level/block/state/StateDefinition;" => {
+            let b = a(0);
+            rt.intern(format!("state-definition/{}", b.r()), |rt| {
+                let d = rt.new_object(STATE_DEFINITION);
+                rt.put_field(d, "$block", b);
+                d
+            })
+        }
+        (STATE_DEFINITION, n) => {
+            let b = rt.get_field(a(0), "$block");
+            match n {
+                "getOwner" => b,
+                "any" => {
+                    let name = block_name(rt, b);
+                    state(rt, &name)
+                }
+                "getPossibleStates" => {
+                    let name = block_name(rt, b);
+                    let s = state(rt, &name);
+                    crate::jutil::new_list(rt, vec![s])
+                }
+                _ => return crate::api_common::call(rt, owner, name, desc, args),
+            }
         }
         (BLOCK, "<init>") => V::Void,
         // The API's base constructors a mod's own classes call (`super(properties)`): their state
@@ -536,8 +594,9 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         }
         // NeoForge's game event bus: one object, as the mod bus (events route by class).
         "net/neoforged/neoforge/common/NeoForge.EVENT_BUS" => rt.intern("compat:game-bus".into(), |rt| rt.new_object("net/neoforged/bus/api/IEventBus")),
-        "net/neoforged/api/distmarker/Dist.CLIENT" | "net/neoforged/fml/loading/FMLEnvironment.dist" => rt.string("CLIENT"),
-        "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER" => rt.string("DEDICATED_SERVER"),
+        // The side, one object per constant: catnip compares `FMLLoader.getDist() == Dist.CLIENT`.
+        "net/neoforged/api/distmarker/Dist.CLIENT" | "net/neoforged/fml/loading/FMLEnvironment.dist" => api_enum(rt, "net/neoforged/api/distmarker/Dist", "CLIENT", 0),
+        "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER" => api_enum(rt, "net/neoforged/api/distmarker/Dist", "DEDICATED_SERVER", 1),
         k if k.starts_with("net/neoforged/bus/api/EventPriority.") => {
             let n = k.rsplit('.').next().unwrap_or("");
             rt.string(n)
@@ -561,6 +620,16 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         k if k.starts_with("net/minecraft/core/registries/Registries.") => {
             let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
             rt.string(&n)
+        }
+        k if k.starts_with("net/minecraft/world/level/block/RenderShape.") => {
+            let f = k.rsplit('.').next().unwrap_or("");
+            match RENDER_SHAPES.iter().position(|n| *n == f) {
+                Some(i) => api_enum(rt, "net/minecraft/world/level/block/RenderShape", RENDER_SHAPES[i], i as i32),
+                None => {
+                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    V::NULL
+                }
+            }
         }
         k if k.starts_with("net/minecraft/world/level/block/Blocks.") => {
             let n = format!("minecraft:{}", k.rsplit('.').next().unwrap_or("").to_ascii_lowercase());
@@ -594,5 +663,31 @@ mod tests {
         call(&mut rt, "net/minecraft/Nope.x.()V", &[]);
         call(&mut rt, "net/minecraft/Nope.x.()V", &[]);
         assert_eq!(rt.unmapped["net/minecraft/Nope.x.()V"], 2);
+    }
+
+    #[test]
+    fn saved_data_is_made_once_per_name() {
+        // A mod's `SavedData.Factory` constructor (a lambda): each call makes a new object.
+        fn construct(rt: &mut Rt, _id: u32, _args: &[V]) -> Option<V> {
+            Some(rt.new_object("test/Tracks"))
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(construct);
+        let make = rt.lambda_id("java/util/function/Supplier", 1, Vec::new());
+        let factory = rt.new_object(SAVED_DATA_FACTORY);
+        call(&mut rt, "net/minecraft/world/level/saveddata/SavedData$Factory.<init>.(Ljava/util/function/Supplier;Ljava/util/function/BiFunction;)V", &[factory, make, V::NULL]);
+        let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+        let storage = call(&mut rt, "net/minecraft/server/level/ServerLevel.getDataStorage.()Lnet/minecraft/world/level/storage/DimensionDataStorage;", &[level]);
+        let compute = "net/minecraft/world/level/storage/DimensionDataStorage.computeIfAbsent.(Lnet/minecraft/world/level/saveddata/SavedData$Factory;Ljava/lang/String;)Lnet/minecraft/world/level/saveddata/SavedData;";
+        let get = "net/minecraft/world/level/storage/DimensionDataStorage.get.(Lnet/minecraft/world/level/saveddata/SavedData$Factory;Ljava/lang/String;)Lnet/minecraft/world/level/saveddata/SavedData;";
+        let name = rt.string("create_tracks");
+        let other = rt.string("create_logistics");
+        assert_eq!(call(&mut rt, get, &[storage, factory, name]), V::NULL);
+        let first = call(&mut rt, compute, &[storage, factory, name]);
+        assert_eq!(rt.class_of(first), "test/Tracks");
+        assert_eq!(call(&mut rt, compute, &[storage, factory, name]), first);
+        assert_eq!(call(&mut rt, get, &[storage, factory, name]), first);
+        let second = call(&mut rt, compute, &[storage, factory, other]);
+        assert_ne!(second, first);
     }
 }

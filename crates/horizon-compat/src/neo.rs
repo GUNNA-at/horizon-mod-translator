@@ -489,9 +489,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // The side: Horizon runs mods in the client.
         ("net/neoforged/fml/loading/FMLLoader", "isProduction") => V::I(1),
-        ("net/neoforged/fml/loading/FMLLoader" | "net/neoforged/fml/loading/FMLEnvironment", "getDist") => rt.string("CLIENT"),
-        ("net/neoforged/api/distmarker/Dist", "isClient") => V::I((rt.str_of(a(0)) == Some("CLIENT")) as i32),
-        ("net/neoforged/api/distmarker/Dist", "isDedicatedServer") => V::I((rt.str_of(a(0)) == Some("DEDICATED_SERVER")) as i32),
+        ("net/neoforged/fml/loading/FMLLoader" | "net/neoforged/fml/loading/FMLEnvironment", "getDist") => {
+            crate::api::get_static(rt, "net/neoforged/api/distmarker/Dist.CLIENT")
+        }
+        ("net/neoforged/api/distmarker/Dist", "isClient" | "isDedicatedServer") => {
+            let side = rt.get_field(a(0), "$name");
+            let want = if name == "isClient" { "CLIENT" } else { "DEDICATED_SERVER" };
+            V::I((rt.str_of(side) == Some(want)) as i32)
+        }
         (o, "isBound") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
             let reg = rt.get_field(a(0), "$registry");
             let id = rt.get_field(a(0), "$id");
@@ -630,6 +635,21 @@ pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
 mod tests {
     use super::*;
     use crate::Data;
+
+    #[test]
+    fn the_side_is_one_constant_however_it_is_asked() {
+        // catnip: `FMLLoader.getDist() == Dist.CLIENT ? Env.CLIENT : Env.SERVER`, by identity.
+        let mut rt = Rt::new();
+        let asked = call(&mut rt, "net/neoforged/fml/loading/FMLLoader.getDist.()Lnet/neoforged/api/distmarker/Dist;", &[]).unwrap();
+        let client = crate::api::get_static(&mut rt, "net/neoforged/api/distmarker/Dist.CLIENT");
+        assert_eq!(asked, client);
+        assert_eq!(crate::api::get_static(&mut rt, "net/neoforged/fml/loading/FMLEnvironment.dist"), client);
+        let server = crate::api::get_static(&mut rt, "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER");
+        assert_ne!(server, client);
+        let is_client = "net/neoforged/api/distmarker/Dist.isClient.()Z";
+        assert_eq!(call(&mut rt, is_client, &[client]), Some(V::I(1)));
+        assert_eq!(call(&mut rt, is_client, &[server]), Some(V::I(0)));
+    }
 
     #[test]
     fn config_values_are_their_defaults_boxed_as_java_boxes_them() {

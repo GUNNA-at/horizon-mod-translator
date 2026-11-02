@@ -137,10 +137,15 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
     if be.r() == 0 {
         return None;
     }
-    let tag = crate::nbt::to_runtime(rt, nbt);
-    let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
-    vc(rt, LOAD, LOAD, &[be, tag, provider]);
-    rt.report_thrown("loadAdditional");
+    // Loaded only from saved data, as vanilla's: a block entity just placed keeps what its
+    // constructor set (an empty compound would read every field as absent: Create's creative motor
+    // would lose its default speed).
+    if !nbt.is_empty() {
+        let tag = crate::nbt::to_runtime(rt, nbt);
+        let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
+        vc(rt, LOAD, LOAD, &[be, tag, provider]);
+        rt.report_thrown("loadAdditional");
+    }
     rt.block_entities.insert(pos, be);
     Some(be)
 }
@@ -239,6 +244,115 @@ const GET_UPDATE_TAG_KEY: &str =
 const BER_RENDER: &str = "render.(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V";
 const BER_RENDER_KEY: &str = "net/minecraft/client/renderer/blockentity/BlockEntityRenderer.render.(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V";
 const PROVIDER_CREATE: &str = "net/minecraft/client/renderer/blockentity/BlockEntityRendererProvider.create.(Lnet/minecraft/client/renderer/blockentity/BlockEntityRendererProvider$Context;)Lnet/minecraft/client/renderer/blockentity/BlockEntityRenderer;";
+const GET_RENDER_SHAPE: &str = "getRenderShape.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/RenderShape;";
+const GET_RENDER_SHAPE_KEY: &str =
+    "net/minecraft/world/level/block/state/BlockBehaviour.getRenderShape.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/RenderShape;";
+const MODIFY_BAKING_RESULT: &str = "net/neoforged/neoforge/client/event/ModelEvent$ModifyBakingResult";
+
+/// `native_content_block` (startup): what draws the mod block's `state` in the world, by the mod's
+/// own code. `"invisible"` or `"entityblock_animated"` when its `getRenderShape` says so, and
+/// `"entityblock_animated"` too when the model its client swaps in (`ModelEvent.ModifyBakingResult`,
+/// as Create's `BracketedKineticBlockModel` on shafts and cogwheels) has no quads of its own: its
+/// block entity renderer draws it. None when chunks draw its model as usual, or it isn't the mod's.
+pub fn render_shape(rt: &mut Rt, state: &str) -> Option<&'static str> {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    let (b, class) = mod_block(rt, state)?;
+    let vc = rt.vcall?;
+    if rt.overrides.is_some_and(|o| o(class, GET_RENDER_SHAPE)) {
+        let st = api::state(rt, state);
+        rt.interned.remove("compat:missing-property");
+        let shape = vc(rt, GET_RENDER_SHAPE_KEY, GET_RENDER_SHAPE, &[b, st]);
+        // Thrown, or read from a property the game's state lacks (a door the content declares
+        // without its `visible`): unknown, so chunks keep drawing it.
+        let unknown = rt.thrown.is_some() || rt.interned.remove("compat:missing-property").is_some();
+        rt.report_thrown("getRenderShape");
+        let name = rt.get_field(shape, "$name");
+        match rt.str_of(name) {
+            _ if unknown => return None,
+            Some("INVISIBLE") => return Some("invisible"),
+            Some("ENTITYBLOCK_ANIMATED") => return Some("entityblock_animated"),
+            _ => {}
+        }
+    }
+    let models = swapped_models(rt);
+    let name = crate::host::split_state(state).0.to_owned();
+    let location = crate::render::model_location(&name, &name);
+    let key = rt.string(&location);
+    let model = crate::jutil::table_get(rt, models, key)?;
+    if model.r() == 0 || rt.get_field(model, "$probe").i() != 0 {
+        return None;
+    }
+    let st = api::state(rt, state);
+    let data = api::get_static(rt, "net/neoforged/neoforge/client/model/data/ModelData.EMPTY");
+    // While probing, every model the runtime stands in for has quads: a wrapper drawing another
+    // block's model (a copycat's material) isn't taken for one that draws nothing.
+    rt.interned.insert("compat:probing".into(), V::I(1));
+    let quads = vc(rt, crate::render::GET_QUADS_KEY, crate::render::GET_QUADS, &[model, st, V::NULL, V::NULL, data, V::NULL]);
+    rt.interned.remove("compat:probing");
+    let threw = rt.thrown.is_some();
+    rt.report_thrown("a swapped block model's getQuads");
+    let empty = !threw && quads.r() != 0 && crate::jutil::elements(rt, quads).is_empty();
+    // A model drawn from its block entity's data (Create's factory gauge) has no quads without it
+    // either: only a block whose renderer draws it is the renderer's.
+    (empty && renderer_draws(rt, state)).then_some("entityblock_animated")
+}
+
+/// Whether the mod's block entity renderer draws anything for a fresh block entity at `state`.
+/// Fires the client's setup: ask on a runtime of its own (the bundles' `with_probe_runtime`).
+fn renderer_draws(rt: &mut Rt, state: &str) -> bool {
+    const AT: [i32; 3] = [0, -4096, 0];
+    struct Probe {
+        state: String,
+        draws: usize,
+    }
+    impl Host for Probe {
+        fn block_state(&self, pos: [i32; 3]) -> String {
+            if pos == AT { self.state.clone() } else { "minecraft:air".into() }
+        }
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+            false
+        }
+        fn is_server(&self) -> bool {
+            false
+        }
+        fn draw_model(&mut self, _model: &crate::host::Model, _pose: &[f32; 16], _color: u32, _light: u32) -> bool {
+            self.draws += 1;
+            true
+        }
+    }
+    let mut probe = Probe { state: state.to_owned(), draws: 0 };
+    render_block_entity(rt, &mut probe, AT, state, &std::collections::BTreeMap::new(), crate::render::FULL_BRIGHT);
+    probe.draws > 0
+}
+
+/// The block models after the mod's `ModelEvent.ModifyBakingResult` listeners ran, posted once per
+/// runtime over a probe model at each of the mod's blocks (its default state's location).
+fn swapped_models(rt: &mut Rt) -> V {
+    if let Some(&models) = rt.interned.get("compat:baked-models") {
+        return models;
+    }
+    let models = rt.alloc("java/util/HashMap", crate::Data::Table(crate::Table::default()));
+    rt.interned.insert("compat:baked-models".into(), models);
+    let mut blocks: Vec<String> = rt
+        .registered
+        .iter()
+        .filter(|((r, _), v)| r == "block" && rt.class_of(**v) != "net/minecraft/world/level/block/Block")
+        .map(|((_, n), _)| n.clone())
+        .collect();
+    blocks.sort();
+    for name in blocks {
+        let probe = rt.new_object("net/minecraft/client/resources/model/BakedModel");
+        rt.put_field(probe, "$probe", V::I(1));
+        let key = rt.string(&crate::render::model_location(&name, &name));
+        crate::jutil::table_put(rt, models, key, probe);
+    }
+    let ev = rt.new_object(MODIFY_BAKING_RESULT);
+    rt.put_field(ev, "$models", models);
+    crate::neo::post(rt, MODIFY_BAKING_RESULT, ev);
+    models
+}
+
 const CLIENT_TICK_PRE: &str = "net/neoforged/neoforge/client/event/ClientTickEvent$Pre";
 const CLIENT_TICK_POST: &str = "net/neoforged/neoforge/client/event/ClientTickEvent$Post";
 
@@ -283,10 +397,13 @@ fn client_block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::colle
             be
         }
     };
-    let tag = crate::nbt::to_runtime(rt, nbt);
-    let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
-    vc(rt, HANDLE_UPDATE_TAG_KEY, HANDLE_UPDATE_TAG, &[be, tag, provider]);
-    rt.report_thrown("handleUpdateTag");
+    // An empty update tag isn't sent (vanilla's chunk data carries none), so nothing is loaded.
+    if !nbt.is_empty() {
+        let tag = crate::nbt::to_runtime(rt, nbt);
+        let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
+        vc(rt, HANDLE_UPDATE_TAG_KEY, HANDLE_UPDATE_TAG, &[be, tag, provider]);
+        rt.report_thrown("handleUpdateTag");
+    }
     rt.put_field(be, "$synced", V::J(synced));
     rt.put_field(be, "$loaded", V::I(1));
     Some(be)

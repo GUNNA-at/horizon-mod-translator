@@ -325,6 +325,45 @@ fn arg(args: &[V], i: usize) -> V {
     args.get(i).copied().unwrap_or_default()
 }
 
+const BAKED_MODEL_WRAPPER: &str = "net/neoforged/neoforge/client/model/BakedModelWrapper";
+const MODEL_DATA: &str = "net/neoforged/neoforge/client/model/data/ModelData";
+const GET_QUADS_DESC: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/util/RandomSource;Lnet/neoforged/neoforge/client/model/data/ModelData;Lnet/minecraft/client/renderer/RenderType;)Ljava/util/List;";
+/// NeoForge's `getQuads` (with model data and render type), the one chunk meshing asks.
+pub const GET_QUADS: &str = "getQuads.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/util/RandomSource;Lnet/neoforged/neoforge/client/model/data/ModelData;Lnet/minecraft/client/renderer/RenderType;)Ljava/util/List;";
+pub const GET_QUADS_KEY: &str = "net/minecraft/client/resources/model/BakedModel.getQuads.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/util/RandomSource;Lnet/neoforged/neoforge/client/model/data/ModelData;Lnet/minecraft/client/renderer/RenderType;)Ljava/util/List;";
+const GET_QUADS_VANILLA: &str = "getQuads.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/util/RandomSource;)Ljava/util/List;";
+const GET_QUADS_VANILLA_KEY: &str = "net/minecraft/client/resources/model/BakedModel.getQuads.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/util/RandomSource;)Ljava/util/List;";
+
+/// A block state's model location, as `BlockModelShaper.stateToModelLocation` names it:
+/// `create:shaft#axis=x` (`name#` for a state without properties).
+pub fn model_location(name: &str, state: &str) -> String {
+    let props = state.split_once('[').map_or("", |(_, p)| p.trim_end_matches(']'));
+    format!("{name}#{props}")
+}
+
+/// A `ModelData.Builder`, starting from `from`'s values (null: none).
+fn model_data_builder(rt: &mut Rt, from: V) -> V {
+    let b = rt.new_object("net/neoforged/neoforge/client/model/data/ModelData$Builder");
+    let props = rt.alloc("java/util/HashMap", crate::Data::Table(crate::Table::default()));
+    if from.r() != 0 {
+        let old = rt.get_field(from, "$props");
+        for (k, v) in crate::jutil::table_pairs(rt, old) {
+            crate::jutil::table_put(rt, props, k, v);
+        }
+    }
+    rt.put_field(b, "$props", props);
+    b
+}
+
+/// The value `data` holds for `prop`, if it holds one (`ModelData.EMPTY` holds none).
+fn model_data_get(rt: &mut Rt, data: V, prop: V) -> Option<V> {
+    let props = rt.get_field(data, "$props");
+    if props.r() == 0 {
+        return None;
+    }
+    crate::jutil::table_get(rt, props, prop)
+}
+
 fn matrix4(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     let this = a(0);
@@ -975,10 +1014,84 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             "getRenderTypes" => single(rt, "net/neoforged/neoforge/client/ChunkRenderTypeSet"),
             "useAmbientOcclusion" | "isGui3d" | "usesBlockLight" => V::I(1),
             "isCustomRenderer" => V::I(0),
-            "getQuads" => crate::jutil::new_list(rt, Vec::new()),
+            // A probe model (`glue::render_shape`) has a quad on every side, so a wrapper passing
+            // them through is told apart from one that draws nothing.
+            "getQuads" => {
+                let probing = rt.get_field(a(0), "$probe").i() != 0 || rt.interned.contains_key("compat:probing");
+                let quads = if probing { vec![a(0)] } else { Vec::new() };
+                crate::jutil::new_list(rt, quads)
+            }
             "getModelData" => a(4),
             _ => return None,
         },
+        // NeoForge's `BakedModelWrapper`: what the mod's subclass leaves alone, the model it wraps answers.
+        (BAKED_MODEL_WRAPPER, "<init>") => {
+            rt.put_field(a(0), "originalModel", a(1));
+            V::Void
+        }
+        (BAKED_MODEL_WRAPPER, n) => {
+            let inner = rt.get_field(a(0), "originalModel");
+            let mut args = args.to_vec();
+            if let Some(this) = args.first_mut() {
+                *this = inner;
+            }
+            if n == "getQuads" && inner.r() != 0 {
+                let vc = rt.vcall?;
+                return Some(if desc == GET_QUADS_DESC {
+                    vc(rt, GET_QUADS_KEY, GET_QUADS, &args)
+                } else {
+                    vc(rt, GET_QUADS_VANILLA_KEY, GET_QUADS_VANILLA, &args)
+                });
+            }
+            return client(rt, "net/minecraft/client/resources/model/BakedModel", n, desc, &args);
+        }
+        // Model data: values by property (compared by identity, as Java's `ModelProperty` is).
+        (MODEL_DATA, n) => match n {
+            "builder" => model_data_builder(rt, V::NULL),
+            "derive" => model_data_builder(rt, a(0)),
+            "has" => V::I(model_data_get(rt, a(0), a(1)).is_some() as i32),
+            "get" => model_data_get(rt, a(0), a(1)).unwrap_or(V::NULL),
+            "getProperties" => {
+                let props = rt.get_field(a(0), "$props");
+                let keys: Vec<V> = crate::jutil::table_keys(rt, props);
+                crate::jutil::new_set_of(rt, &keys)
+            }
+            _ => return None,
+        },
+        ("net/neoforged/neoforge/client/model/data/ModelData$Builder", n) => match n {
+            "with" => {
+                let props = rt.get_field(a(0), "$props");
+                crate::jutil::table_put(rt, props, a(1), a(2));
+                a(0)
+            }
+            "build" => {
+                let data = rt.new_object(MODEL_DATA);
+                let props = rt.get_field(a(0), "$props");
+                let copy = rt.alloc("java/util/HashMap", crate::Data::Table(crate::Table::default()));
+                for (k, v) in crate::jutil::table_pairs(rt, props) {
+                    crate::jutil::table_put(rt, copy, k, v);
+                }
+                rt.put_field(data, "$props", copy);
+                data
+            }
+            _ => return None,
+        },
+        ("net/neoforged/neoforge/client/model/data/ModelProperty", "<init>") => V::Void,
+        ("net/neoforged/neoforge/client/model/data/ModelProperty", "test") => V::I(1),
+        // The baked models a mod may replace (`glue::render_shape` posts it with probe models).
+        ("net/neoforged/neoforge/client/event/ModelEvent$ModifyBakingResult", "getModels") => rt.get_field(a(0), "$models"),
+        // A block state's model location (`create:shaft#axis=x`), kept as its string.
+        ("net/minecraft/client/renderer/block/BlockModelShaper", "stateToModelLocation") => {
+            let (name, state) = if desc.starts_with("(Lnet/minecraft/resources/ResourceLocation;") {
+                (rt.str_of(a(0)).unwrap_or("").to_owned(), a(1))
+            } else {
+                let text = rt.str_of(a(0)).unwrap_or("").to_owned();
+                (crate::host::split_state(&text).0.to_owned(), a(0))
+            };
+            let text = rt.str_of(state).unwrap_or("").to_owned();
+            let location = model_location(&name, &text);
+            rt.string(&location)
+        }
         // Blocks draw in the solid layer here (the host picks its own passes).
         ("net/neoforged/neoforge/client/ChunkRenderTypeSet", n) => match n {
             "contains" => V::I((rt.str_of(rt.get_field(a(1), "$name")) == Some("solid")) as i32),
@@ -1162,6 +1275,38 @@ mod tests {
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    #[test]
+    fn model_data_holds_values_by_property() {
+        let mut rt = Rt::new();
+        let empty = get_static(&mut rt, MODEL_DATA, "EMPTY").unwrap();
+        let prop = rt.new_object("net/neoforged/neoforge/client/model/data/ModelProperty");
+        let other = rt.new_object("net/neoforged/neoforge/client/model/data/ModelProperty");
+        let has = "net/neoforged/neoforge/client/model/data/ModelData.has.(Lnet/neoforged/neoforge/client/model/data/ModelProperty;)Z";
+        let get = "net/neoforged/neoforge/client/model/data/ModelData.get.(Lnet/neoforged/neoforge/client/model/data/ModelProperty;)Ljava/lang/Object;";
+        assert_eq!(call(&mut rt, has, &[empty, prop]), Some(V::I(0)));
+        let b = call(&mut rt, "net/neoforged/neoforge/client/model/data/ModelData.builder.()Lnet/neoforged/neoforge/client/model/data/ModelData$Builder;", &[]).unwrap();
+        let bracket = rt.string("bracket");
+        let with = "net/neoforged/neoforge/client/model/data/ModelData$Builder.with.(Lnet/neoforged/neoforge/client/model/data/ModelProperty;Ljava/lang/Object;)Lnet/neoforged/neoforge/client/model/data/ModelData$Builder;";
+        assert_eq!(call(&mut rt, with, &[b, prop, bracket]), Some(b));
+        let data = call(&mut rt, "net/neoforged/neoforge/client/model/data/ModelData$Builder.build.()Lnet/neoforged/neoforge/client/model/data/ModelData;", &[b]).unwrap();
+        assert_eq!(call(&mut rt, has, &[data, prop]), Some(V::I(1)));
+        assert_eq!(call(&mut rt, has, &[data, other]), Some(V::I(0)));
+        assert_eq!(call(&mut rt, get, &[data, prop]), Some(bracket));
+        assert_eq!(call(&mut rt, get, &[empty, prop]), Some(V::NULL));
+        // `derive` starts from the values it was made from; the original keeps its own.
+        let d = call(&mut rt, "net/neoforged/neoforge/client/model/data/ModelData.derive.()Lnet/neoforged/neoforge/client/model/data/ModelData$Builder;", &[data]).unwrap();
+        call(&mut rt, with, &[d, other, bracket]);
+        let derived = call(&mut rt, "net/neoforged/neoforge/client/model/data/ModelData$Builder.build.()Lnet/neoforged/neoforge/client/model/data/ModelData;", &[d]).unwrap();
+        assert_eq!(call(&mut rt, has, &[derived, prop]), Some(V::I(1)));
+        assert_eq!(call(&mut rt, has, &[data, other]), Some(V::I(0)));
+    }
+
+    #[test]
+    fn model_locations_name_the_state_as_block_model_shaper_does() {
+        assert_eq!(model_location("create:shaft", "create:shaft[axis=x]"), "create:shaft#axis=x");
+        assert_eq!(model_location("create:gearbox", "create:gearbox"), "create:gearbox#");
     }
 
     #[test]

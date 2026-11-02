@@ -62,7 +62,20 @@ pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
             return rt.get_field(a, "value") == rt.get_field(b, "value");
         }
     }
+    // Pairs are values (Registrate keys its pending callbacks by `Pair.of(name, registry)`).
+    if is_pair(rt.class_of(a)) && is_pair(rt.class_of(b)) {
+        let (l1, l2, r1, r2) = (rt.get_field(a, "$left"), rt.get_field(b, "$left"), rt.get_field(a, "$right"), rt.get_field(b, "$right"));
+        return (l1 == l2 || equals(rt, l1, l2)) && (r1 == r2 || equals(rt, r1, r2));
+    }
     false
+}
+
+/// commons-lang's and DataFixerUpper's pairs (the runtime keeps both as `$left`, `$right`).
+fn is_pair(class: &str) -> bool {
+    matches!(
+        class,
+        "org/apache/commons/lang3/tuple/Pair" | "org/apache/commons/lang3/tuple/ImmutablePair" | "org/apache/commons/lang3/tuple/MutablePair" | "com/mojang/datafixers/util/Pair"
+    )
 }
 
 /// `v.hashCode()` as Java answers it: the object's own `hashCode` when its mod class overrides it.
@@ -91,6 +104,12 @@ pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
             }
             Some(Data::Fields(f)) if f.contains_key("value") && rt.class_of(v).starts_with("java/lang/") => {
                 return rt.java_hash(f["value"]);
+            }
+            // commons-lang's `Pair.hashCode`: the halves' hashes, xor'd.
+            Some(Data::Fields(_)) if is_pair(rt.class_of(v)) => {
+                let (l, r) = (rt.get_field(v, "$left"), rt.get_field(v, "$right"));
+                let half = |rt: &mut Rt, x: V| if x.r() == 0 && matches!(x, V::R(_)) { 0 } else { hash(rt, x) };
+                return half(rt, l) ^ half(rt, r);
             }
             _ => {}
         }
@@ -208,6 +227,16 @@ fn table_remove(rt: &mut Rt, m: V, k: V) -> Option<V> {
     r
 }
 
+/// The key-value pairs of the map at `m`, in its order (none when it isn't one).
+pub fn table_pairs(rt: &Rt, m: V) -> Vec<(V, V)> {
+    table_entries(rt, m)
+}
+
+/// The keys of the map at `m`, in its order.
+pub fn table_keys(rt: &Rt, m: V) -> Vec<V> {
+    table_entries(rt, m).into_iter().map(|(k, _)| k).collect()
+}
+
 fn table_entries(rt: &Rt, m: V) -> Vec<(V, V)> {
     match rt.heap.get(m.r() as usize).map(|o| &o.data) {
         Some(Data::Table(t)) => t.entries.clone(),
@@ -300,6 +329,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if owner.starts_with("com/google/common/cache/") {
         return cache_call(rt, owner, name, args);
+    }
+    // Guava's immutable collection builders: filled in place, `build` copies.
+    if owner.starts_with("com/google/common/collect/Immutable") && owner.ends_with("$Builder") {
+        return immutable_builder_call(rt, owner, name, desc, args);
     }
     // Guava's `MapMaker`: weak or concurrent settings make no difference to one thread's map.
     if owner == "com/google/common/collect/MapMaker" {
@@ -592,6 +625,46 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         (o, "create") if (o.ends_with("BasedTable") || o.ends_with("Multimap")) && o.starts_with("com/google/common/collect/") => {
             let class: &'static str = rt.static_key(o);
             rt.alloc(class, Data::Table(Table::default()))
+        }
+        // `MultimapBuilder.hashKeys().arrayListValues().build()`: the keys' order makes no
+        // difference here; the values' kind says whether a key holds a list or a set.
+        ("com/google/common/collect/MultimapBuilder", "hashKeys" | "linkedHashKeys" | "treeKeys" | "enumKeys") => {
+            rt.new_object("com/google/common/collect/MultimapBuilder$MultimapBuilderWithKeys")
+        }
+        ("com/google/common/collect/MultimapBuilder$MultimapBuilderWithKeys", n) => {
+            if n.ends_with("SetValues") {
+                rt.new_object("com/google/common/collect/MultimapBuilder$SetMultimapBuilder")
+            } else {
+                rt.new_object("com/google/common/collect/MultimapBuilder$ListMultimapBuilder")
+            }
+        }
+        ("com/google/common/collect/MultimapBuilder$SetMultimapBuilder" | "com/google/common/collect/MultimapBuilder$ListMultimapBuilder", "build") => {
+            let class = if owner.ends_with("SetMultimapBuilder") { "com/google/common/collect/HashMultimap" } else { "com/google/common/collect/ArrayListMultimap" };
+            let m = rt.alloc(class, Data::Table(Table::default()));
+            // `build(multimap)` starts with its entries.
+            if args.len() > 1 {
+                for (k, c) in table_entries(rt, a(1)) {
+                    let copy = if class.contains("Hash") { new_set(rt, &elements(rt, c)) } else { new_list(rt, elements(rt, c)) };
+                    table_put(rt, m, k, copy);
+                }
+            }
+            m
+        }
+        (
+            "com/google/common/collect/ImmutableList"
+            | "com/google/common/collect/ImmutableSet"
+            | "com/google/common/collect/ImmutableSortedSet"
+            | "com/google/common/collect/ImmutableMap"
+            | "com/google/common/collect/ImmutableSortedMap"
+            | "com/google/common/collect/ImmutableBiMap",
+            "builder" | "builderWithExpectedSize" | "naturalOrder",
+        ) => {
+            let class: &'static str = rt.static_key(&format!("{owner}$Builder"));
+            if owner.ends_with("Map") {
+                rt.alloc(class, Data::Table(Table::default()))
+            } else {
+                rt.alloc(class, Data::List(Vec::new()))
+            }
         }
         ("com/google/common/base/Preconditions", "checkNotNull") => a(0),
         ("com/google/common/base/Preconditions", _) => V::Void,
@@ -1319,6 +1392,71 @@ fn guava_table_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// `ImmutableList.Builder` and its kin: `add`/`addAll`/`put`/`putAll` fill it and return it,
+/// `build` makes the collection (a set's builder drops repeats; a map's keeps the last value).
+fn immutable_builder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let map = owner.ends_with("Map$Builder");
+    Some(match name {
+        "<init>" => {
+            let data = if map { Data::Table(Table::default()) } else { Data::List(Vec::new()) };
+            if let Some(o) = rt.heap.get_mut(this.r() as usize) {
+                o.data = data;
+            }
+            V::Void
+        }
+        "add" => {
+            let items = if desc.starts_with("([") { elements(rt, a(1)) } else { vec![a(1)] };
+            list_mut(rt, this)?.extend(items);
+            this
+        }
+        "addAll" => {
+            let items = match rt.heap.get(a(1).r() as usize).map(|o| &o.data) {
+                Some(Data::Iter(..)) => {
+                    let rest = elements(rt, a(1));
+                    if let Some(Data::Iter(items, at)) = rt.heap.get_mut(a(1).r() as usize).map(|o| &mut o.data) {
+                        *at = items.len();
+                    }
+                    rest
+                }
+                _ => elements(rt, a(1)),
+            };
+            list_mut(rt, this)?.extend(items);
+            this
+        }
+        "put" if map => {
+            if desc.starts_with("(Ljava/util/Map$Entry;") {
+                let kv = elements(rt, a(1));
+                table_put(rt, this, kv.first().copied().unwrap_or_default(), kv.get(1).copied().unwrap_or_default());
+            } else {
+                table_put(rt, this, a(1), a(2));
+            }
+            this
+        }
+        "putAll" if map => {
+            for (k, v) in table_entries(rt, a(1)) {
+                table_put(rt, this, k, v);
+            }
+            this
+        }
+        "orderEntriesByValue" => this,
+        "build" | "buildOrThrow" | "buildKeepingLast" => {
+            if map {
+                let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+                for (k, v) in table_entries(rt, this) {
+                    table_put(rt, m, k, v);
+                }
+                m
+            } else {
+                let items = elements(rt, this);
+                if owner.contains("Set") { new_set(rt, &items) } else { new_list(rt, items) }
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// A plain map with the same entries (Guava's `asMap`/`rowMap`): values are the live collections.
 fn this_as_map(rt: &mut Rt, this: V) -> V {
     let out = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
@@ -1648,6 +1786,60 @@ mod tests {
         let got = c(&mut rt, "com/google/common/collect/Multimap.get.(Ljava/lang/Object;)Ljava/util/Collection;", &[m, block]);
         assert_eq!(elements(&rt, got), [V::I(7), V::I(8)]);
         assert_eq!(c(&mut rt, "com/google/common/collect/Multimap.size.()I", &[m]), V::I(2));
+    }
+
+    #[test]
+    fn registrate_finds_its_pending_callbacks_under_an_equal_pair() {
+        // Registrate files a builder's `onRegister` callbacks under `Pair.of(name, registry)` before
+        // the entry exists, and takes them back with a new pair of the same halves.
+        let mut rt = Rt::new();
+        let pair = |rt: &mut Rt, l: &str, r: &str| {
+            let (l, r) = (rt.string(l), rt.string(r));
+            crate::jlang::call(rt, "org/apache/commons/lang3/tuple/Pair.of.(Ljava/lang/Object;Ljava/lang/Object;)Lorg/apache/commons/lang3/tuple/Pair;", &[l, r]).unwrap()
+        };
+        let b = c(&mut rt, "com/google/common/collect/MultimapBuilder.hashKeys.()Lcom/google/common/collect/MultimapBuilder$MultimapBuilderWithKeys;", &[]);
+        let b = c(&mut rt, "com/google/common/collect/MultimapBuilder$MultimapBuilderWithKeys.arrayListValues.()Lcom/google/common/collect/MultimapBuilder$ListMultimapBuilder;", &[b]);
+        let m = c(&mut rt, "com/google/common/collect/MultimapBuilder$ListMultimapBuilder.build.()Lcom/google/common/collect/ListMultimap;", &[b]);
+        let put = "com/google/common/collect/Multimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z";
+        let filed = pair(&mut rt, "shaft", "block");
+        c(&mut rt, put, &[m, filed, V::I(1)]);
+        c(&mut rt, put, &[m, filed, V::I(2)]);
+        let other = pair(&mut rt, "cogwheel", "block");
+        c(&mut rt, put, &[m, other, V::I(3)]);
+        let asked = pair(&mut rt, "shaft", "block");
+        let got = c(&mut rt, "com/google/common/collect/Multimap.removeAll.(Ljava/lang/Object;)Ljava/util/Collection;", &[m, asked]);
+        assert_eq!(elements(&rt, got), [V::I(1), V::I(2)]);
+        assert_eq!(c(&mut rt, "com/google/common/collect/Multimap.size.()I", &[m]), V::I(1));
+        // Halves differing in one place are another key.
+        let item = pair(&mut rt, "cogwheel", "item");
+        assert_eq!(c(&mut rt, "com/google/common/collect/Multimap.containsKey.(Ljava/lang/Object;)Z", &[m, item]), V::I(0));
+    }
+
+    #[test]
+    fn guava_immutable_builders_collect_what_they_are_given() {
+        let mut rt = Rt::new();
+        let b = c(&mut rt, "com/google/common/collect/ImmutableList.builder.()Lcom/google/common/collect/ImmutableList$Builder;", &[]);
+        let add = "com/google/common/collect/ImmutableList$Builder.add.(Ljava/lang/Object;)Lcom/google/common/collect/ImmutableList$Builder;";
+        assert_eq!(c(&mut rt, add, &[b, V::I(1)]), b, "chains");
+        c(&mut rt, add, &[b, V::I(2)]);
+        let more = new_list(&mut rt, vec![V::I(3), V::I(1)]);
+        c(&mut rt, "com/google/common/collect/ImmutableList$Builder.addAll.(Ljava/lang/Iterable;)Lcom/google/common/collect/ImmutableList$Builder;", &[b, more]);
+        let list = c(&mut rt, "com/google/common/collect/ImmutableList$Builder.build.()Lcom/google/common/collect/ImmutableList;", &[b]);
+        assert_eq!(elements(&rt, list), [V::I(1), V::I(2), V::I(3), V::I(1)]);
+        // A set's builder drops repeats; a map's keeps a key's last value.
+        let s = c(&mut rt, "com/google/common/collect/ImmutableSet.builder.()Lcom/google/common/collect/ImmutableSet$Builder;", &[]);
+        for v in [1, 2, 1] {
+            c(&mut rt, "com/google/common/collect/ImmutableSet$Builder.add.(Ljava/lang/Object;)Lcom/google/common/collect/ImmutableSet$Builder;", &[s, V::I(v)]);
+        }
+        let set = c(&mut rt, "com/google/common/collect/ImmutableSet$Builder.build.()Lcom/google/common/collect/ImmutableSet;", &[s]);
+        assert_eq!(elements(&rt, set), [V::I(1), V::I(2)]);
+        let m = c(&mut rt, "com/google/common/collect/ImmutableMap.builder.()Lcom/google/common/collect/ImmutableMap$Builder;", &[]);
+        let k = rt.string("speed");
+        let put = "com/google/common/collect/ImmutableMap$Builder.put.(Ljava/lang/Object;Ljava/lang/Object;)Lcom/google/common/collect/ImmutableMap$Builder;";
+        c(&mut rt, put, &[m, k, V::I(8)]);
+        c(&mut rt, put, &[m, k, V::I(16)]);
+        let map = c(&mut rt, "com/google/common/collect/ImmutableMap$Builder.buildKeepingLast.()Lcom/google/common/collect/ImmutableMap;", &[m]);
+        assert_eq!(c(&mut rt, "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[map, k]), V::I(16));
     }
 
     #[test]
