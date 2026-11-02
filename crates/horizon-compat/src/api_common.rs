@@ -19,6 +19,7 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
             family("net/minecraft/world/level/block/", "Block") && !c.contains("/entity/")
         }
         "net/minecraft/world/level/block/EntityBlock" => c == "net/minecraft/world/level/block/BaseEntityBlock",
+        "net/minecraft/world/phys/shapes/CollisionContext" => c == crate::shapes::ENTITY_COLLISION_CONTEXT,
         "net/minecraft/world/item/Item" => family("net/minecraft/world/item/", "Item"),
         "net/minecraft/world/level/block/entity/BlockEntity" => family("net/minecraft/world/level/block/entity/", "BlockEntity"),
         "net/minecraft/world/entity/Entity" => c.starts_with("net/minecraft/world/entity/") && !c.contains('$'),
@@ -115,6 +116,55 @@ fn vanilla_property_object(rt: &mut Rt, field: &str) -> Option<V> {
         rt.put_field(p, "$field", fv);
         p
     }))
+}
+
+/// The `BlockStateProperties` field that vanilla block class `class`'s property field `field` holds:
+/// most keep the name (`DoorBlock.OPEN` is `OPEN`); these don't.
+fn block_class_property<'a>(class: &str, field: &'a str) -> &'a str {
+    let simple = class.rsplit('/').next().unwrap_or(class);
+    // Classes whose `FACING` is `HORIZONTAL_FACING` (`DirectionalBlock`'s and the rest are `FACING`).
+    const HORIZONTAL: [&str; 33] = [
+        "HorizontalDirectionalBlock", "FaceAttachedHorizontalDirectionalBlock", "LeverBlock", "ButtonBlock",
+        "GrindstoneBlock", "BellBlock", "ChestBlock", "EnderChestBlock", "TrappedChestBlock", "LadderBlock",
+        "TrapDoorBlock", "DoorBlock", "StairBlock", "FenceGateBlock", "AbstractFurnaceBlock", "FurnaceBlock",
+        "BlastFurnaceBlock", "SmokerBlock", "CampfireBlock", "LecternBlock", "BedBlock", "AnvilBlock",
+        "WallSignBlock", "WallBannerBlock", "StonecutterBlock", "LoomBlock", "BeehiveBlock", "DiodeBlock",
+        "RepeaterBlock", "ComparatorBlock", "CocoaBlock", "CarvedPumpkinBlock", "WallTorchBlock",
+    ];
+    match (simple, field) {
+        ("SlabBlock", "TYPE") => "SLAB_TYPE",
+        ("ChestBlock" | "TrappedChestBlock", "TYPE") => "CHEST_TYPE",
+        ("DoorBlock" | "DoublePlantBlock" | "TallFlowerBlock" | "SmallDripleafBlock", "HALF") => "DOUBLE_BLOCK_HALF",
+        ("DoorBlock", "HINGE") => "DOOR_HINGE",
+        ("StairBlock", "SHAPE") => "STAIRS_SHAPE",
+        ("FaceAttachedHorizontalDirectionalBlock" | "LeverBlock" | "ButtonBlock" | "GrindstoneBlock", "FACE") => "ATTACH_FACE",
+        ("CropBlock" | "StemBlock", "AGE") => "AGE_7",
+        ("BeetrootBlock" | "NetherWartBlock" | "SweetBerryBushBlock", "AGE") => "AGE_3",
+        ("CocoaBlock", "AGE") => "AGE_2",
+        ("CactusBlock" | "SugarCaneBlock" | "FireBlock", "AGE") => "AGE_15",
+        ("BeehiveBlock", "HONEY_LEVEL") => "LEVEL_HONEY",
+        ("RedStoneWireBlock", "NORTH") => "NORTH_REDSTONE",
+        ("RedStoneWireBlock", "EAST") => "EAST_REDSTONE",
+        ("RedStoneWireBlock", "SOUTH") => "SOUTH_REDSTONE",
+        ("RedStoneWireBlock", "WEST") => "WEST_REDSTONE",
+        ("ComparatorBlock", "MODE") => "MODE_COMPARATOR",
+        (s, "FACING") if HORIZONTAL.contains(&s) => "HORIZONTAL_FACING",
+        _ => field,
+    }
+}
+
+/// Whether `BlockStateProperties` has field `f`: the enum-valued ones by name, the rest by kind
+/// (`Blocks.ANDESITE` or `SoundType.METAL` are not properties).
+fn state_property_field(f: &str) -> bool {
+    vanilla_property(f).is_some_and(|(_, kind)| kind != "string")
+        || matches!(
+            f,
+            "HALF" | "DOUBLE_BLOCK_HALF" | "DOOR_HINGE" | "SLAB_TYPE" | "CHEST_TYPE" | "PISTON_TYPE" | "STAIRS_SHAPE"
+                | "RAIL_SHAPE" | "RAIL_SHAPE_STRAIGHT" | "ATTACH_FACE" | "BED_PART" | "MODE_COMPARATOR"
+                | "STRUCTUREBLOCK_MODE" | "BELL_ATTACHMENT" | "NOTEBLOCK_INSTRUMENT" | "DRIPSTONE_THICKNESS"
+                | "BAMBOO_LEAVES" | "NORTH_WALL" | "EAST_WALL" | "SOUTH_WALL" | "WEST_WALL" | "NORTH_REDSTONE"
+                | "EAST_REDSTONE" | "SOUTH_REDSTONE" | "WEST_REDSTONE" | "SCULK_SENSOR_PHASE" | "TILT" | "ORIENTATION"
+        )
 }
 
 /// Vanilla's `BlockStateProperties` fields: (field, property name, kind).
@@ -735,11 +785,23 @@ pub fn hit(rt: &mut Rt, pos: [i32; 3], face: i64) -> V {
 /// Static fields this module owns: `BlockStateProperties.*`, `ItemStack.EMPTY`, `Items.*`.
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match owner {
-        "net/minecraft/world/level/block/state/properties/BlockStateProperties"
-        | "net/minecraft/world/level/block/HorizontalDirectionalBlock"
-        | "net/minecraft/world/level/block/DirectionalBlock"
-        | "net/minecraft/world/level/block/RotatedPillarBlock" => {
-            vanilla_property_object(rt, field)?
+        "net/minecraft/world/level/block/state/properties/BlockStateProperties" => vanilla_property_object(rt, field)?,
+        "net/minecraft/world/level/block/PipeBlock" if field == "PROPERTY_BY_DIRECTION" => {
+            rt.intern("prop/pipe-by-direction".into(), |rt| {
+                let m = rt.alloc("java/util/HashMap", Data::Table(Default::default()));
+                for (o, f) in ["DOWN", "UP", "NORTH", "SOUTH", "WEST", "EAST"].into_iter().enumerate() {
+                    let d = direction(rt, o as i64);
+                    if let Some(p) = vanilla_property_object(rt, f) {
+                        crate::jutil::table_put(rt, m, d, p);
+                    }
+                }
+                m
+            })
+        }
+        // A vanilla block class's own property field (`SlabBlock.TYPE`, `DoorBlock.OPEN`): the
+        // `BlockStateProperties` field it holds.
+        o if o.starts_with("net/minecraft/world/level/block/") && !o[32..].contains('/') && state_property_field(block_class_property(o, field)) => {
+            vanilla_property_object(rt, block_class_property(o, field))?
         }
         "net/minecraft/world/item/ItemStack" if field == "EMPTY" => {
             rt.intern("stack/empty".into(), |rt| stack(rt, "minecraft:air", 0))

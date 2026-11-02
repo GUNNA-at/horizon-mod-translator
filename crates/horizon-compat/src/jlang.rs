@@ -974,6 +974,122 @@ fn math(name: &str, ks: &[char], args: &[V]) -> Option<V> {
     })
 }
 
+/// commons-lang3's mutable holders (`MutableObject`, `MutableBoolean`, `MutableInt`...): one value
+/// each, in field `value`.
+fn mutable(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let kind = owner.rsplit('/').next().unwrap_or(owner).trim_start_matches("Mutable");
+    let zero = match kind {
+        "Object" => V::NULL,
+        "Long" => V::J(0),
+        "Float" => V::F(0.0),
+        "Double" => V::D(0.0),
+        _ => V::I(0),
+    };
+    // A boxed number or boolean argument (`setValue(Number)`): its value.
+    let unbox = |rt: &Rt, v: V| match v {
+        V::R(r) if r != 0 && kind != "Object" => rt.get_field(v, "value"),
+        v => v,
+    };
+    let get = |rt: &Rt| match rt.get_field(a(0), "value") {
+        V::Void => zero,
+        v => v,
+    };
+    let num = |v: V| -> f64 {
+        match v {
+            V::I(i) => i as f64,
+            V::J(j) => j as f64,
+            V::F(f) => f as f64,
+            V::D(d) => d,
+            _ => 0.0,
+        }
+    };
+    let of = |x: f64| match kind {
+        "Long" => V::J(x as i64),
+        "Float" => V::F(x as f32),
+        "Double" => V::D(x),
+        _ => V::I(x as i64 as i32),
+    };
+    let add = |rt: &mut Rt, by: f64| -> (V, V) {
+        let old = get(rt);
+        let new = match (old, kind) {
+            (V::I(i), "Int" | "Short" | "Byte") => V::I(i.wrapping_add(by as i32)),
+            (V::J(j), "Long") => V::J(j.wrapping_add(by as i64)),
+            (v, _) => of(num(v) + by),
+        };
+        rt.put_field(a(0), "value", new);
+        (old, new)
+    };
+    Some(match name {
+        "<init>" => {
+            let v = if desc == "()V" { zero } else { unbox(rt, a(1)) };
+            rt.put_field(a(0), "value", v);
+            V::Void
+        }
+        "getValue" if kind == "Object" => get(rt),
+        "getValue" => {
+            let class: &'static str = match kind {
+                "Long" => "java/lang/Long",
+                "Float" => "java/lang/Float",
+                "Double" => "java/lang/Double",
+                "Boolean" => return Some(get(rt)),
+                _ => "java/lang/Integer",
+            };
+            let v = get(rt);
+            let o = rt.new_object(class);
+            rt.put_field(o, "value", v);
+            o
+        }
+        "setValue" => {
+            let v = unbox(rt, a(1));
+            rt.put_field(a(0), "value", v);
+            V::Void
+        }
+        "booleanValue" | "isTrue" => get(rt),
+        "isFalse" => V::I((get(rt).i() == 0) as i32),
+        "setTrue" | "setFalse" => {
+            rt.put_field(a(0), "value", V::I((name == "setTrue") as i32));
+            V::Void
+        }
+        "intValue" => V::I(num(get(rt)) as i64 as i32),
+        "longValue" => V::J(num(get(rt)) as i64),
+        "floatValue" => V::F(num(get(rt)) as f32),
+        "doubleValue" => V::D(num(get(rt))),
+        "increment" | "decrement" => {
+            add(rt, if name == "increment" { 1.0 } else { -1.0 });
+            V::Void
+        }
+        "incrementAndGet" | "decrementAndGet" => add(rt, if name == "incrementAndGet" { 1.0 } else { -1.0 }).1,
+        "getAndIncrement" | "getAndDecrement" => add(rt, if name == "getAndIncrement" { 1.0 } else { -1.0 }).0,
+        "add" | "subtract" => {
+            let by = num(unbox(rt, a(1)));
+            add(rt, if name == "add" { by } else { -by });
+            V::Void
+        }
+        "addAndGet" => {
+            let by = num(unbox(rt, a(1)));
+            add(rt, by).1
+        }
+        "getAndAdd" => {
+            let by = num(unbox(rt, a(1)));
+            add(rt, by).0
+        }
+        "toString" => {
+            let v = get(rt);
+            let t = match v {
+                V::I(i) if kind == "Boolean" => (i != 0).to_string(),
+                V::I(i) => i.to_string(),
+                V::J(j) => j.to_string(),
+                V::F(f) => f.to_string(),
+                V::D(d) => d.to_string(),
+                _ => return None,
+            };
+            rt.string(&t)
+        }
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,14 +1162,21 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.intern("compat:logger".into(), |rt| rt.new_object("org/apache/logging/log4j/Logger"))
         }
         ("org/apache/logging/log4j/MarkerManager", "getMarker") => a(0),
-        ("org/apache/commons/lang3/tuple/Pair" | "org/apache/commons/lang3/tuple/ImmutablePair" | "com/mojang/datafixers/util/Pair", "of" | "<init>") => {
-            let (p, l, r) = if name == "<init>" { (a(0), a(1), a(2)) } else { (rt.new_object("org/apache/commons/lang3/tuple/Pair"), a(0), a(1)) };
+        ("org/apache/commons/lang3/tuple/Pair" | "org/apache/commons/lang3/tuple/ImmutablePair" | "org/apache/commons/lang3/tuple/MutablePair" | "com/mojang/datafixers/util/Pair", "of" | "<init>") => {
+            let made = if owner.ends_with("MutablePair") { "org/apache/commons/lang3/tuple/MutablePair" } else { "org/apache/commons/lang3/tuple/Pair" };
+            let (p, l, r) = if name == "<init>" { (a(0), a(1), a(2)) } else { (rt.new_object(made), a(0), a(1)) };
             rt.put_field(p, "$left", l);
             rt.put_field(p, "$right", r);
             if name == "<init>" { V::Void } else { p }
         }
-        (o, "getLeft" | "getKey" | "getFirst" | "left") if o.ends_with("/Pair") || o.ends_with("ImmutablePair") => rt.get_field(a(0), "$left"),
-        (o, "getRight" | "getValue" | "getSecond" | "right") if o.ends_with("/Pair") || o.ends_with("ImmutablePair") => rt.get_field(a(0), "$right"),
+        (o, "getLeft" | "getKey" | "getFirst" | "left") if o.ends_with("Pair") => rt.get_field(a(0), "$left"),
+        (o, "getRight" | "getValue" | "getSecond" | "right") if o.ends_with("Pair") => rt.get_field(a(0), "$right"),
+        ("org/apache/commons/lang3/tuple/MutablePair", "setLeft" | "setRight" | "setValue") => {
+            let old = rt.get_field(a(0), if name == "setLeft" { "$left" } else { "$right" });
+            rt.put_field(a(0), if name == "setLeft" { "$left" } else { "$right" }, a(1));
+            if name == "setValue" { old } else { V::Void }
+        }
+        (o, _) if o.starts_with("org/apache/commons/lang3/mutable/Mutable") => return mutable(rt, o, name, desc, args),
         ("java/lang/Record", "<init>") => V::Void,
         _ => return None,
     })

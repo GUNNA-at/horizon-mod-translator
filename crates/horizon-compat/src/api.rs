@@ -271,6 +271,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             }
         }
         _ => match crate::blocks::call(rt, key, args)
+            .or_else(|| crate::shapes::call(rt, key, args))
             .or_else(|| crate::neo::call(rt, key, args))
             .or_else(|| crate::jlang::call(rt, key, args))
             .or_else(|| crate::jutil::call(rt, key, args))
@@ -577,6 +578,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         && let Some(v) = crate::api_common::get_static(rt, o, f)
             .or_else(|| crate::render::get_static(rt, o, f))
             .or_else(|| crate::blocks::get_static(rt, o, f))
+            .or_else(|| crate::shapes::get_static(rt, o, f))
     {
         return v;
     }

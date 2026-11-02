@@ -28,12 +28,13 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// core's root becomes `compat/mod.rs`; horizon-compat's root is left out (its modules are
 /// declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 12] = [
+const COMPAT: [(&str, &str); 13] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
     ("api_common.rs", include_str!("../../horizon-compat/src/api_common.rs")),
     ("blocks.rs", include_str!("../../horizon-compat/src/blocks.rs")),
+    ("shapes.rs", include_str!("../../horizon-compat/src/shapes.rs")),
     ("nbt.rs", include_str!("../../horizon-compat/src/nbt.rs")),
     ("glue.rs", include_str!("../../horizon-compat/src/glue.rs")),
     ("jutil.rs", include_str!("../../horizon-compat/src/jutil.rs")),

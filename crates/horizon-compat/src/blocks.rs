@@ -16,6 +16,11 @@ const BUILDER: &str = "net/minecraft/world/level/block/state/StateDefinition$Bui
 const DEFINE: &str = "createBlockStateDefinition.(Lnet/minecraft/world/level/block/state/StateDefinition$Builder;)V";
 const DEFINE_KEY: &str = "net/minecraft/world/level/block/Block.createBlockStateDefinition.(Lnet/minecraft/world/level/block/state/StateDefinition$Builder;)V";
 const GET_SHAPE: &str = "getShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+const GET_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.getShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+/// States a block's shapes are read for, at most; past that its template's shapes stay.
+const MAX_SHAPE_STATES: usize = 4096;
+/// Boxes in a declared shape, as content allows (`horizon_mods::content::MAX_SHAPE_BOXES`).
+const MAX_SHAPE_BOXES: usize = 64;
 const PREDICATE: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 const TO_INT: &str = "java/util/function/ToIntFunction.applyAsInt.(Ljava/lang/Object;)I";
 const APPLY: &str = "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
@@ -591,18 +596,32 @@ fn block_declaration(rt: &mut Rt, name: &str, b: V, item: bool) -> String {
     // light through when the block isn't a full cube or doesn't occlude, else stone.
     let simple = vanilla.rsplit('/').next().unwrap_or("");
     let class = rt.class_of(b);
-    let template = match TEMPLATES.iter().find(|(c, _)| *c == simple) {
-        Some((_, t)) => t.to_string(),
-        None => {
-            let see_through = rt.get_field(props, "$noOcclusion").i() != 0
-                // A shape of its own: until shapes are read, taken as not a full cube.
-                || rt.overrides.is_some_and(|o| o(class, GET_SHAPE));
-            if see_through { "minecraft:glass".into() } else { "minecraft:stone".into() }
-        }
-    };
-    let template_props: Vec<String> = match TEMPLATES.iter().find(|(c, _)| *c == simple) {
+    let mut vanilla_template = TEMPLATES.iter().find(|(c, _)| *c == simple).map(|(_, t)| t.to_string());
+    let mut template_props: Vec<String> = match vanilla_template {
         Some(_) => vanilla_definition(&vanilla).iter().filter_map(|f| api_common::vanilla_property(f).map(|(n, _)| n)).collect(),
         None => Vec::new(),
+    };
+    // The game orders a block's states by property name, its template's first: a property of its
+    // own that sorts before one of the template's can't be added to it, so such a block (Create's
+    // glass pipe: `alt` beside a pillar's `axis`) takes a template without states and owns them all.
+    if states.iter().any(|(n, _)| !template_props.contains(n) && template_props.iter().any(|t| n < t)) {
+        vanilla_template = None;
+        template_props.clear();
+    }
+    // A shape of its own (`getShape`), read for every state; a vanilla template keeps its own.
+    let own_shape = rt.overrides.is_some_and(|o| o(class, GET_SHAPE));
+    let shapes = if vanilla_template.is_none() && own_shape { state_shapes(rt, b, name, &states) } else { None };
+    let template = match vanilla_template {
+        Some(t) => t,
+        None => {
+            let full = match &shapes {
+                Some(s) => s.iter().all(|(_, boxes)| boxes[..] == [FULL_BOX]),
+                // Unread: taken as not a full cube.
+                None => !own_shape,
+            };
+            let see_through = rt.get_field(props, "$noOcclusion").i() != 0 || !full;
+            if see_through { "minecraft:glass".into() } else { "minecraft:stone".into() }
+        }
     };
 
     let mut p = Vec::new();
@@ -661,12 +680,121 @@ fn block_declaration(rt: &mut Rt, name: &str, b: V, item: bool) -> String {
         })
         .collect();
     let defaults: Vec<String> = default.iter().map(|(k, v)| format!("\"{k}\": \"{v}\"")).collect();
+    let shapes = shapes.and_then(|s| shapes_json(&s)).map_or(String::new(), |j| format!(", \"shapes\": {j}"));
     format!(
-        "{{\"template\": \"{template}\", \"item\": {item}, \"properties\": {{{}}}, \"state_properties\": {{{}}}, \"default_state\": {{{}}}}}",
+        "{{\"template\": \"{template}\", \"item\": {item}, \"properties\": {{{}}}, \"state_properties\": {{{}}}, \"default_state\": {{{}}}{shapes}}}",
         p.join(", "),
         own.join(", "),
         defaults.join(", ")
     )
+}
+
+const FULL_BOX: crate::shapes::Box3 = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+/// Each state of the block (its properties' values, by name) with its outline from its own
+/// `getShape`, asked as vanilla asks with no entity: an empty collision context at the origin, no
+/// level. None when a state's shape can't be read (it throws, reads the level, or isn't a shape the
+/// runtime made), when the block has too many states, or a shape isn't finite.
+fn state_shapes(rt: &mut Rt, b: V, name: &str, states: &[(String, Vec<String>)]) -> Option<Vec<(Vec<(String, String)>, Vec<crate::shapes::Box3>)>> {
+    let vc = rt.vcall?;
+    let count = states.iter().try_fold(1usize, |n, (_, vs)| n.checked_mul(vs.len()))?;
+    if count > MAX_SHAPE_STATES {
+        return None;
+    }
+    let ctx = crate::shapes::empty_context(rt);
+    let origin = crate::shapes::origin(rt);
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        // The i-th combination, the last property changing fastest.
+        let mut rest = i;
+        let mut combo = vec![(String::new(), String::new()); states.len()];
+        for (k, (pname, values)) in states.iter().enumerate().rev() {
+            combo[k] = (pname.clone(), values[rest % values.len()].clone());
+            rest /= values.len();
+        }
+        let text = if combo.is_empty() {
+            name.to_owned()
+        } else {
+            let inner: Vec<String> = combo.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            format!("{name}[{}]", inner.join(","))
+        };
+        let st = api::state(rt, &text);
+        rt.interned.remove("compat:missing-property");
+        let shape = vc(rt, GET_SHAPE_KEY, GET_SHAPE, &[b, st, V::NULL, origin, ctx]);
+        let unknown = rt.thrown.is_some() || rt.interned.remove("compat:missing-property").is_some();
+        rt.report_thrown("getShape");
+        let boxes = crate::shapes::boxes(rt, shape).filter(|_| !unknown)?;
+        if boxes.iter().flatten().any(|x| !x.is_finite()) {
+            return None;
+        }
+        // Float noise from rotating shapes (`0.37499998`) rounds away, so equal shapes compare
+        // equal and files read as written.
+        let snapped: Vec<crate::shapes::Box3> = boxes.iter().map(|b| b.map(|x| {
+            let r = (x * 256.0).round() / 256.0;
+            if (x - r).abs() < 1.0e-6 { r } else { x }
+        })).collect();
+        let mut boxes = crate::shapes::optimized(&snapped);
+        if boxes.len() > MAX_SHAPE_BOXES {
+            boxes = vec![crate::shapes::bounds(&boxes)];
+        }
+        combo.sort();
+        out.push((combo, boxes));
+    }
+    Some(out)
+}
+
+/// The `shapes` a content declaration holds for these states: one list when every state has the
+/// same (None when that is a full block, the template's own), by one property when that decides
+/// it, else the states that differ from the most common shape. Keys list properties by name.
+fn shapes_json(shapes: &[(Vec<(String, String)>, Vec<crate::shapes::Box3>)]) -> Option<String> {
+    let list = |boxes: &[crate::shapes::Box3]| {
+        let each: Vec<String> = boxes.iter().map(|b| {
+            let n: Vec<String> = b.iter().map(|x| format!("{x}")).collect();
+            format!("[{}]", n.join(", "))
+        }).collect();
+        format!("[{}]", each.join(", "))
+    };
+    let first = &shapes.first()?.1;
+    if shapes.iter().all(|(_, s)| s == first) {
+        return (first[..] != [FULL_BOX]).then(|| list(first));
+    }
+    // One property deciding the shape.
+    let props: Vec<&String> = shapes[0].0.iter().map(|(k, _)| k).collect();
+    for (pi, pname) in props.iter().enumerate() {
+        let mut by: Vec<(&str, &Vec<crate::shapes::Box3>)> = Vec::new();
+        let decides = shapes.iter().all(|(combo, s)| {
+            let v = combo[pi].1.as_str();
+            match by.iter().find(|(x, _)| *x == v) {
+                Some((_, t)) => *t == s,
+                None => {
+                    by.push((v, s));
+                    true
+                }
+            }
+        });
+        if decides {
+            let values: Vec<String> = by.iter().map(|(v, s)| format!("\"{v}\": {}", list(s))).collect();
+            return Some(format!("{{\"property\": \"{pname}\", \"values\": {{{}}}}}", values.join(", ")));
+        }
+    }
+    // By state: the most common shape is the default.
+    let mut counts: Vec<(&Vec<crate::shapes::Box3>, usize)> = Vec::new();
+    for (_, s) in shapes {
+        match counts.iter_mut().find(|(t, _)| *t == s) {
+            Some(c) => c.1 += 1,
+            None => counts.push((s, 1)),
+        }
+    }
+    let default = counts.iter().max_by_key(|(_, n)| *n)?.0;
+    let states: Vec<String> = shapes
+        .iter()
+        .filter(|(_, s)| s != default)
+        .map(|(combo, s)| {
+            let key: Vec<String> = combo.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            format!("\"{}\": {}", key.join(","), list(s))
+        })
+        .collect();
+    Some(format!("{{\"states\": {{{}}}, \"default\": {}}}", states.join(", "), list(default)))
 }
 
 /// A number as JSON writes it.
@@ -835,5 +963,26 @@ mod tests {
         let horizontal = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.HORIZONTAL_FACING");
         assert_eq!(property_values(&mut rt, facing).len(), 6);
         assert_eq!(property_values(&mut rt, horizontal), ["north", "east", "south", "west"]);
+    }
+
+    #[test]
+    fn vanilla_block_classes_hold_the_properties_vanilla_gives_them() {
+        let mut rt = Rt::new();
+        let mut field = |rt: &mut Rt, key: &'static str| {
+            let p = api::get_static(rt, key);
+            (api_common::prop_parts(rt, p).0, property_values(rt, p))
+        };
+        // A horizontal block's FACING is the four-way one; a directional block's has six.
+        let (name, values) = field(&mut rt, "net/minecraft/world/level/block/HorizontalDirectionalBlock.FACING");
+        assert_eq!((name.as_str(), values.len()), ("facing", 4));
+        assert_eq!(field(&mut rt, "net/minecraft/world/level/block/DirectionalBlock.FACING").1.len(), 6);
+        assert_eq!(field(&mut rt, "net/minecraft/world/level/block/SlabBlock.TYPE").0, "type");
+        assert_eq!(field(&mut rt, "net/minecraft/world/level/block/DoorBlock.HALF").1, ["upper", "lower"]);
+        assert_eq!(field(&mut rt, "net/minecraft/world/level/block/LeverBlock.POWERED").0, "powered");
+        // A pipe's sides, by direction.
+        let by = api::get_static(&mut rt, "net/minecraft/world/level/block/PipeBlock.PROPERTY_BY_DIRECTION");
+        let up = api_common::direction(&mut rt, 1);
+        let p = jutil::table_get(&mut rt, by, up).unwrap();
+        assert_eq!(api_common::prop_parts(&rt, p).0, "up");
     }
 }
