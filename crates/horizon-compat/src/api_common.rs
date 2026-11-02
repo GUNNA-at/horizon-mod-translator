@@ -427,19 +427,37 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/world/phys/BlockHitResult", "getLocation") => rt.get_field(a(0), "$loc"),
         ("net/minecraft/world/phys/BlockHitResult", "isInside") => V::I(0),
         // Block entities
+        // Block entities: the API's state lives in the fields Java names (`level`, `worldPosition`,
+        // `blockState`, `remove`), which mod subclasses read directly.
         ("net/minecraft/world/level/block/entity/BlockEntity", "<init>") => {
             rt.put_field(a(0), "$type", a(1));
+            rt.put_field(a(0), "type", a(1));
             rt.put_field(a(0), "$pos", a(2));
+            rt.put_field(a(0), "worldPosition", a(2));
             rt.put_field(a(0), "$state", a(3));
+            rt.put_field(a(0), "blockState", a(3));
             V::Void
         }
         (o, "getBlockPos") if o.ends_with("BlockEntity") => rt.get_field(a(0), "$pos"),
         (o, "getBlockState") if o.ends_with("BlockEntity") => rt.get_field(a(0), "$state"),
-        (o, "getType") if o.ends_with("BlockEntity") => rt.get_field(a(0), "$type"),
-        (o, "getLevel" | "hasLevel") if o.ends_with("BlockEntity") => {
-            if name == "hasLevel" { V::I(1) } else { rt.new_object("net/minecraft/server/level/ServerLevel") }
+        (o, "setBlockState") if o.ends_with("BlockEntity") => {
+            rt.put_field(a(0), "$state", a(1));
+            rt.put_field(a(0), "blockState", a(1));
+            V::Void
         }
-        (o, "setChanged") if o.ends_with("BlockEntity") => V::Void,
+        (o, "getType") if o.ends_with("BlockEntity") => rt.get_field(a(0), "$type"),
+        (o, "getLevel") if o.ends_with("BlockEntity") => rt.get_field(a(0), "level"),
+        (o, "hasLevel") if o.ends_with("BlockEntity") => V::I((rt.get_field(a(0), "level").r() != 0) as i32),
+        (o, "setLevel") if o.ends_with("BlockEntity") => {
+            rt.put_field(a(0), "level", a(1));
+            V::Void
+        }
+        (o, "isRemoved") if o.ends_with("BlockEntity") => V::I((rt.get_field(a(0), "remove").i() != 0) as i32),
+        (o, "setRemoved" | "clearRemoved") if o.ends_with("BlockEntity") => {
+            rt.put_field(a(0), "remove", V::I((name == "setRemoved") as i32));
+            V::Void
+        }
+        (o, "setChanged" | "onLoad" | "onChunkUnloaded" | "invalidateCapabilities") if o.ends_with("BlockEntity") => V::Void,
         ("net/minecraft/world/level/block/entity/BlockEntityType$Builder", "of") => {
             let b = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType$Builder");
             rt.put_field(b, "$factory", a(0));

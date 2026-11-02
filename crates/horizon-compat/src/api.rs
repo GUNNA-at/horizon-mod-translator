@@ -319,6 +319,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, "minecraft:air")) as i32)
         }
         (_, "isClientSide") if level => V::I(rt.host().is_some_and(|h| !h.is_server()) as i32),
+        (_, "isLoaded" | "hasChunkAt" | "isAreaLoaded" | "hasChunksAt" | "isInWorldBounds") if level => V::I(1),
         (_, "getGameTime") if level => V::J(rt.host().map_or(0, |h| h.game_time())),
 
         // Block states
@@ -328,6 +329,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             match n {
                 "getBlock" => block(rt, &b.to_owned()),
                 "isAir" => V::I(matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") as i32),
+                "hasBlockEntity" => V::I(crate::glue::block_entity_id(rt, b).is_some() as i32),
                 "is" if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") => V::I((block_name(rt, a(1)) == b) as i32),
                 "equals" => V::I((rt.str_of(a(1)) == Some(text.as_str())) as i32),
                 _ => return crate::api_common::call(rt, owner, name, desc, args),

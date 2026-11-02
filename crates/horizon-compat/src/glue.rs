@@ -35,8 +35,14 @@ fn run(rt: &mut Rt, host: &mut dyn Host, state: &str, key: &'static str, extra: 
     true
 }
 
-fn level(rt: &mut Rt) -> V {
-    rt.new_object("net/minecraft/server/level/ServerLevel")
+/// The level translated code sees: one object (so `level == level` holds), the authoritative
+/// server's (`isClientSide` is a field mods read).
+pub fn level(rt: &mut Rt) -> V {
+    rt.intern("compat:level".into(), |rt| {
+        let l = rt.new_object("net/minecraft/server/level/ServerLevel");
+        rt.put_field(l, "isClientSide", V::I(0));
+        l
+    })
 }
 
 /// `tick_block` (a scheduled tick): `BlockBehaviour.tick`.
@@ -132,6 +138,12 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
         let Some(vc) = rt.vcall else { return false };
         let level = level(rt);
         let st = api::state(rt, state);
+        // In its level, with the block's current state, as the game's block entity is.
+        if rt.get_field(be, "level").r() == 0 {
+            rt.put_field(be, "level", level);
+        }
+        rt.put_field(be, "$state", st);
+        rt.put_field(be, "blockState", st);
         let ty = rt.get_field(be, "$type");
         let ticker = vc(rt, GET_TICKER, GET_TICKER, &[b, level, st, ty]);
         if ticker.r() != 0 {

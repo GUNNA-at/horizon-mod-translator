@@ -333,8 +333,83 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let k = (rt.str_of(reg).unwrap_or("").to_owned(), rt.str_of(id).unwrap_or("").to_owned());
             V::I(rt.registered.contains_key(&k) as i32)
         }
+        // NeoForge configs: a value is its default (Horizon has no config files for translated mods
+        // yet), boxed as Java boxes it.
+        (CONFIG_BUILDER, "<init>") => V::Void,
+        (CONFIG_BUILDER, "configure") => {
+            let made = rt.call_functional("java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", a(1), &[a(0)]);
+            let spec = rt.new_object("net/neoforged/neoforge/common/ModConfigSpec");
+            let pair = rt.new_object("org/apache/commons/lang3/tuple/Pair");
+            rt.put_field(pair, "$left", made);
+            rt.put_field(pair, "$right", spec);
+            pair
+        }
+        (CONFIG_BUILDER, "build") => rt.new_object("net/neoforged/neoforge/common/ModConfigSpec"),
+        (CONFIG_BUILDER, n) if n.starts_with("define") => {
+            let params = desc_params(desc);
+            let default = match params.get(1).map(String::as_str) {
+                Some("Z") => boxed(rt, "java/lang/Boolean", a(2)),
+                Some("I") => boxed(rt, "java/lang/Integer", a(2)),
+                Some("J") => boxed(rt, "java/lang/Long", a(2)),
+                Some("D") => boxed(rt, "java/lang/Double", a(2)),
+                Some("Ljava/util/function/Supplier;") => rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", a(2), &[]),
+                _ => a(2),
+            };
+            let class: &'static str = rt.static_key(desc.rsplit(')').next().unwrap_or("").trim_start_matches('L').trim_end_matches(';'));
+            let v = rt.new_object(class);
+            rt.put_field(v, "$value", default);
+            v
+        }
+        (CONFIG_BUILDER, _) => a(0), // comment, push, pop, translation, worldRestart...
+        (o, n) if o.starts_with("net/neoforged/neoforge/common/ModConfigSpec$") && o.ends_with("Value") => {
+            let v = rt.get_field(a(0), "$value");
+            match n {
+                "get" | "getDefault" | "getRaw" => v,
+                "getAsInt" | "getAsLong" | "getAsDouble" | "getAsBoolean" => rt.get_field(v, "value"),
+                "set" => {
+                    rt.put_field(a(0), "$value", a(1));
+                    V::Void
+                }
+                "save" | "clearCache" => V::Void,
+                _ => return None,
+            }
+        }
+        ("net/neoforged/fml/ModContainer", "registerConfig" | "registerExtensionPoint") => V::Void,
         _ => return None,
     })
+}
+
+const CONFIG_BUILDER: &str = "net/neoforged/neoforge/common/ModConfigSpec$Builder";
+
+/// A `java.lang` box of `v`.
+fn boxed(rt: &mut Rt, class: &'static str, v: V) -> V {
+    let o = rt.new_object(class);
+    rt.put_field(o, "value", v);
+    o
+}
+
+/// A method descriptor's parameter types, as written (`I`, `Ljava/lang/String;`, `[I`...).
+fn desc_params(desc: &str) -> Vec<String> {
+    let inner = desc.trim_start_matches('(').split(')').next().unwrap_or("");
+    let (mut out, mut cur) = (Vec::new(), String::new());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        cur.push(c);
+        match c {
+            '[' => continue,
+            'L' => {
+                for d in chars.by_ref() {
+                    cur.push(d);
+                    if d == ';' {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+        out.push(std::mem::take(&mut cur));
+    }
+    out
 }
 
 /// Loading objects a mod's constructor takes: the event bus, its container, the side.
@@ -351,6 +426,25 @@ pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
 mod tests {
     use super::*;
     use crate::Data;
+
+    #[test]
+    fn config_values_are_their_defaults_boxed_as_java_boxes_them() {
+        let mut rt = Rt::new();
+        let b = rt.new_object(CONFIG_BUILDER);
+        let name = rt.string("maxRotationSpeed");
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| call(rt, key, args).unwrap();
+        // Comments and sections hand the builder back, so chains keep going.
+        let note = rt.string("RPM");
+        assert_eq!(c(&mut rt, "net/neoforged/neoforge/common/ModConfigSpec$Builder.comment.(Ljava/lang/String;)Lnet/neoforged/neoforge/common/ModConfigSpec$Builder;", &[b, note]), b);
+        let iv = c(&mut rt, "net/neoforged/neoforge/common/ModConfigSpec$Builder.defineInRange.(Ljava/lang/String;III)Lnet/neoforged/neoforge/common/ModConfigSpec$IntValue;", &[b, name, V::I(256), V::I(64), V::I(65535)]);
+        assert_eq!(c(&mut rt, "net/neoforged/neoforge/common/ModConfigSpec$IntValue.getAsInt.()I", &[iv]), V::I(256));
+        let boxed = c(&mut rt, "net/neoforged/neoforge/common/ModConfigSpec$ConfigValue.get.()Ljava/lang/Object;", &[iv]);
+        assert_eq!((rt.class_of(boxed), rt.get_field(boxed, "value")), ("java/lang/Integer", V::I(256)));
+        let dv = c(&mut rt, "net/neoforged/neoforge/common/ModConfigSpec$Builder.defineInRange.(Ljava/lang/String;DDD)Lnet/neoforged/neoforge/common/ModConfigSpec$DoubleValue;", &[b, name, V::D(0.5), V::D(0.0), V::D(1.0)]);
+        assert_eq!(c(&mut rt, "net/neoforged/neoforge/common/ModConfigSpec$DoubleValue.getAsDouble.()D", &[dv]), V::D(0.5));
+        let bv = c(&mut rt, "net/neoforged/neoforge/common/ModConfigSpec$Builder.define.(Ljava/lang/String;Z)Lnet/neoforged/neoforge/common/ModConfigSpec$BooleanValue;", &[b, name, V::I(1)]);
+        assert_eq!(c(&mut rt, "net/neoforged/neoforge/common/ModConfigSpec$BooleanValue.getAsBoolean.()Z", &[bv]), V::I(1));
+    }
 
     #[test]
     fn last_param_of_descriptors() {
