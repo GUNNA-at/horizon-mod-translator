@@ -374,6 +374,19 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         "net/minecraft/core/Direction.WEST" => dir(rt, 4),
         "net/minecraft/core/Direction.EAST" => dir(rt, 5),
         "net/minecraft/core/BlockPos.ZERO" => block_pos(rt, 0, 0, 0),
+        // `BuiltInRegistries.TRIGGER_TYPES` is registry `trigger_type`, as its key says.
+        k if k.starts_with("net/minecraft/core/registries/BuiltInRegistries.") => {
+            let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            let n = if n.ends_with("_types") || n == "attributes" { n.trim_end_matches('s').to_owned() } else { n };
+            rt.string(&n)
+        }
+        "net/neoforged/api/distmarker/Dist.CLIENT" | "net/neoforged/fml/loading/FMLEnvironment.dist" => rt.string("CLIENT"),
+        "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER" => rt.string("DEDICATED_SERVER"),
+        k if k.starts_with("net/neoforged/bus/api/EventPriority.") => {
+            let n = k.rsplit('.').next().unwrap_or("");
+            rt.string(n)
+        }
+        k if k.starts_with("java/util/Locale.") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
         k if k.starts_with("net/minecraft/core/registries/Registries.") => {
             let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
             rt.string(&n)

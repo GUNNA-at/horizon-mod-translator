@@ -58,6 +58,9 @@ fn string_hash(s: &str) -> i32 {
 
 /// A `java.lang` call (`owner.name.desc`), or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    if let Some(v) = libs(rt, key, args) {
+        return Some(v);
+    }
     let (owner, rest) = key.split_once('.')?;
     let (name, desc) = rest.split_once('.')?;
     if !owner.starts_with("java/lang/") {
@@ -832,4 +835,32 @@ mod tests {
         let out = c(&mut rt, "java/lang/String.format.(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;", &[f, arr]);
         assert_eq!(rt.str_of(out), Some("shaft has 007 rpm (0.13)"));
     }
+}
+
+/// Small libraries mods lean on: loggers (dropped), commons-lang `Pair`, `Record`'s constructor.
+fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let (owner, rest) = key.split_once('.')?;
+    let (name, desc) = rest.split_once('.')?;
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let logger = matches!(owner, "org/apache/logging/log4j/Logger" | "org/slf4j/Logger" | "java/util/logging/Logger");
+    Some(match (owner, name) {
+        (_, n) if logger && n.starts_with("is") && n.ends_with("Enabled") => V::I(0),
+        (_, _) if logger => {
+            if desc.ends_with(")V") { V::Void } else { V::NULL }
+        }
+        ("org/apache/logging/log4j/LogManager" | "org/slf4j/LoggerFactory" | "com/mojang/logging/LogUtils", "getLogger") => {
+            rt.intern("compat:logger".into(), |rt| rt.new_object("org/apache/logging/log4j/Logger"))
+        }
+        ("org/apache/logging/log4j/MarkerManager", "getMarker") => a(0),
+        ("org/apache/commons/lang3/tuple/Pair" | "org/apache/commons/lang3/tuple/ImmutablePair" | "com/mojang/datafixers/util/Pair", "of" | "<init>") => {
+            let (p, l, r) = if name == "<init>" { (a(0), a(1), a(2)) } else { (rt.new_object("org/apache/commons/lang3/tuple/Pair"), a(0), a(1)) };
+            rt.put_field(p, "$left", l);
+            rt.put_field(p, "$right", r);
+            if name == "<init>" { V::Void } else { p }
+        }
+        (o, "getLeft" | "getKey" | "getFirst" | "left") if o.ends_with("/Pair") || o.ends_with("ImmutablePair") => rt.get_field(a(0), "$left"),
+        (o, "getRight" | "getValue" | "getSecond" | "right") if o.ends_with("/Pair") || o.ends_with("ImmutablePair") => rt.get_field(a(0), "$right"),
+        ("java/lang/Record", "<init>") => V::Void,
+        _ => return None,
+    })
 }

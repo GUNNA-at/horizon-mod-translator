@@ -283,6 +283,50 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 k
             }
         }
+        // `super(key)` from a mod's own holder class (Registrate's `RegistryEntry`).
+        (o, "<init>") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && desc.starts_with("(Lnet/minecraft/resources/ResourceKey;") => {
+            let (registry, id) = split_key(rt, a(1));
+            let (r, i) = (rt.string(&registry), rt.string(&id));
+            rt.put_field(a(0), "$registry", r);
+            rt.put_field(a(0), "$id", i);
+            V::Void
+        }
+        // Vanilla's static registration (`Registry.register(BuiltInRegistries.X, id, value)`).
+        ("net/minecraft/core/Registry", "register" | "registerForHolder") => {
+            let reg = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let n = if desc.starts_with("(Lnet/minecraft/core/Registry;Lnet/minecraft/resources/ResourceKey;") {
+                split_key(rt, a(1)).1
+            } else {
+                location(rt, a(1))
+            };
+            register(rt, &reg, &n, a(2));
+            a(2)
+        }
+        // NeoForge's `Lazy`: a supplier run once.
+        ("net/neoforged/neoforge/common/util/Lazy", "of" | "concurrentOf") => {
+            let l = rt.new_object("net/neoforged/neoforge/common/util/Lazy");
+            rt.put_field(l, "$supplier", a(0));
+            l
+        }
+        ("net/neoforged/neoforge/common/util/Lazy", "get") => {
+            let this = a(0);
+            if rt.get_field(this, "$done").i() == 0 {
+                let f = rt.get_field(this, "$supplier");
+                let v = rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", f, &[]);
+                rt.put_field(this, "$value", v);
+                rt.put_field(this, "$done", V::I(1));
+            }
+            rt.get_field(this, "$value")
+        }
+        ("net/neoforged/neoforge/common/util/Lazy", "invalidate") => {
+            rt.put_field(a(0), "$done", V::I(0));
+            V::Void
+        }
+        // The side: Horizon runs mods in the client.
+        ("net/neoforged/fml/loading/FMLLoader", "isProduction") => V::I(1),
+        ("net/neoforged/fml/loading/FMLLoader" | "net/neoforged/fml/loading/FMLEnvironment", "getDist") => rt.string("CLIENT"),
+        ("net/neoforged/api/distmarker/Dist", "isClient") => V::I((rt.str_of(a(0)) == Some("CLIENT")) as i32),
+        ("net/neoforged/api/distmarker/Dist", "isDedicatedServer") => V::I((rt.str_of(a(0)) == Some("DEDICATED_SERVER")) as i32),
         (o, "isBound") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
             let reg = rt.get_field(a(0), "$registry");
             let id = rt.get_field(a(0), "$id");
