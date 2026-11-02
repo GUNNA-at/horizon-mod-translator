@@ -206,8 +206,19 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   game's compound both ways, so `Source` (a shaft's int-array source position) is saved.
 - [x] Level services while ticking: `tickRateManager` (never frozen), `getChunkSource().blockChanged`,
   `dimensionType` (the overworld's), `getServer` (`getTickCount`, `overworld`), `sendParticles`, `Vec3i.ZERO`.
-- [ ] Next: in-game kinetic test (`scratchpad/kinetic.sh`): build the game with the regenerated bundle, read Speed
-  with `data get block`.
+- [x] 2026-11-02 IN-GAME kinetic test PASSES (`scratchpad/kinetic.sh`, game built with the regenerated bundle,
+  8.5 min when only the engine and horizon-client recompile): `/setblock` a creative motor (facing east) and three
+  shafts, then `data get block`: motor `{Speed: 16.0f, Network: {Capacity: 262144.0f, AddedCapacity: 16384.0f,
+  Id: -7971459268543L, Stress: 0.0f, Size: 1}}`, shaft `{Speed: 16.0f, Network: {Size: 3, Id: (the same)},
+  Source: [I; -28, 65, 8]}`. Create's own kinetic code runs natively in the Rust game's server thread.
+  Staging tip: apply mixins into a fresh folder, then `rsync -r --checksum` (no `-t`) into the old stage, so
+  unchanged files keep their times and cargo rebuilds only what changed.
+- [ ] Next: the client half. Rotating parts are drawn by Create's block entity renderers
+  (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
+  `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
+  (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick
+  (`ClientTickEvent`, catnip's `AnimationTickHolder`), and drawing through `native_block_entity_submit`
+  (PoseStack, JOML, catnip's buffers as natives: one draw call per buffer, no per-vertex translated code).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
