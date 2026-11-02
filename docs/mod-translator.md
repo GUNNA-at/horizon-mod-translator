@@ -180,8 +180,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   `Class.forName` of a class neither the mod's nor the platform's throws `ClassNotFoundException` (optional
   dependencies). `Object.hashCode/equals` are Object's own (identity), so `super.hashCode()` in an override no
   longer recurses; `Rt::call_functional` dispatches mod objects by `name.desc`. Differential: 78 results.
+- [x] Dispatch by class id (commit 59f833f): objects carry their mod class's id (`Object::cid`, generated
+  `CLASS_IDS`); each instance method some mod class implements gets a dispatcher `d_<name>_<hash>(rt, cid,
+  owner_key, args)` that jumps on the id (runs of ids as ranges), plus `o_...(cid)` (overrides). Lambdas carry
+  `LAMBDA | id` and `lambda_call` matches on the id. `instanceof` answers are cached by name addresses.
+  Calls through a mod class to an API-only method name the API class at translation time.
+- [x] Static fields resolve to the declaring class (JVMS 5.4.3.2): `CreativeMotorBlock.FACING` read null before,
+  so the motor turned the wrong way and no shaft connected. Differential case `staticFields`.
+- [x] Registries read back (`getKey`, `get`, `containsKey`, `getHolder`, `keySet`, `holders`...), `registryAccess`,
+  `Holder` reads, `ChatFormatting` constants, `CompoundTag.isEmpty/size/getAllKeys/copy`.
+- [x] `HORIZON_COMPAT_TRACE=1`: an uncaught exception prints the methods it left (`at Class.method`).
+- Harness numbers before the static-field fix: 40 ticks of 4 kinetic block entities in ~30 ms (unoptimised
+  string dispatch); motor Speed -16 (null FACING), shafts 0.
 - [ ] Next: harness kinetic test (creative motor east + 3 shafts, 40 ticks): read `Speed` from saved NBT; fix
   what the trace shows; then the game.
+- [ ] Then: a garbage collector (mark from the runtime's roots at a hook's outermost entry, free list); the heap
+  only grows today, so long sessions leak.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
