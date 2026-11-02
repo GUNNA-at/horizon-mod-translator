@@ -228,24 +228,23 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `CreateClient`'s constructor); catnip's real buffer is `ShadeSeparatingSuperByteBuffer` (the legacy
     `DefaultSuperByteBuffer.rotate` returns null); `Quaternionf.setAngleAxis`, `Direction.toYRot`,
     Flywheel's `TransformStack.of` (a mixin method on `PoseStack`), `Collections.binarySearch`.
-  - [ ] (was) Harness client test (scratch `harness/src/main.rs` has it: renders each block entity on its own
-    thread's runtime at two moments and counts draws whose transform changed). Regenerate `cb-h` with
-    `--runtime crates/horizon-compat-core`, rebuild the harness, run it, fix unmapped calls.
-    Watch: Guava `CacheBuilder`/`Cache.get(key, Callable)` (catnip's `SuperByteBufferCache`) is unmapped;
-    `CreateClient`'s constructor throws in Flywheel's `LayoutBuilderImpl.build` and may skip registering
-    the buffer cache compartments.
-  - [ ] Bundle hooks (`bundle.rs`): `block_entity_submit` (game `&self` = `value = "self"`, draw
-    `&mut crate::game::native_block_entity_draw::BlockEntityDraw`; Host gives `partial_tick` and
-    `draw_model`: push, multiply the pose, draw, pop; light from vanilla packing `block16 | sky16 << 16`
-    to Horizon's `sky16 | block16 << 8`), `block_entity_update_tag` (live tag, else the saved nbt),
-    `tick` (client tick when `native_window()`), and `block_changed` → `native_block_entity_sync` in the
-    server hosts.
-  - [ ] Horizon: `BlockEntityDraw::transform([f32; 16])` (column-major) and
-    `Game::native_draw_model(draw, "create:block/shaft_half", tint)`: resolve from
-    `pack.render.model_library`, `bake_model`, cache per name (keep the library `Arc` to notice reloads),
-    sprites from `gui.atlas.sprites` (names without `minecraft:`). State models go through
-    `native_draw_block`. Create's kinetic blocks keep their static chunk model (no `getRenderShape`
-    override in the jar): check the mesher doesn't draw the shaft twice once the renderer draws it.
+  - [x] Bundle hooks (`bundle.rs`, commit 4393432): `block_entity_submit` (Host: `partial_tick`, `draw_model`:
+    push, multiply the pose, draw, pop; light from `LightTexture.pack` to Horizon's `sky16 | block16 << 8`),
+    `block_entity_update_tag` (live tag, else the saved nbt), `tick` (client tick when `native_window()`),
+    and `block_changed` → `native_block_entity_sync` in the server hosts.
+  - [x] Horizon: `BlockEntityDraw::transform([f32; 16])` and `Game::native_draw_model(draw, name, tint)` (named
+    models baked once per model library; fragment `block_entity_draw_model.json`).
+  - [x] 2026-11-02 IN-GAME render test PASSES (`scratchpad/render.sh`): a creative motor and four shafts on a
+    cleared stone floor, two screenshots 0.35 s apart: the shafts turn (their stripes move) and the motor
+    draws its `shaft_half` partial facing east. Create's renderer code runs natively on the window thread.
+    Test tips: the world's seed changes per run, so clear an area and lay a floor; stand the camera on that
+    floor (a teleport into the air falls during the wait); wait ~11 s so the chat fades.
+  - [ ] Static models under rotating parts: the chunk mesher still draws the shaft's own model under the
+    turning one. Plan: content property `render_shape` (`model`/`entityblock_animated`/`invisible`, all
+    states or per state; uncommitted work in `horizon-mods/src/content.rs` + `mod_content.rs`), set by a
+    startup hook `native_content_block` from the mod's own code: `getRenderShape` of the default state, and
+    a probe of `ModelEvent.ModifyBakingResult` (Create's `BracketedKineticBlockModel` for shafts and
+    cogwheels returns no quads unless the model data is virtual or bracketed).
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick
