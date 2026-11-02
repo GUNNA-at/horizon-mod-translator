@@ -105,6 +105,11 @@ fn returns_value(desc: &str) -> bool {
     !desc.ends_with(")V")
 }
 
+const MOD: &str = "Lnet/neoforged/fml/common/Mod;";
+const SUBSCRIBE_EVENT: &str = "Lnet/neoforged/bus/api/SubscribeEvent;";
+/// `@EventBusSubscriber` (NeoForge 21) and its older home on `@Mod`.
+const EVENT_BUS_SUBSCRIBER: [&str; 2] = ["Lnet/neoforged/fml/common/EventBusSubscriber;", "Lnet/neoforged/fml/common/Mod$EventBusSubscriber;"];
+
 /// The translation of a set of classes (one jar).
 pub struct Program<'a> {
     classes: BTreeMap<&'a str, &'a ClassFile>,
@@ -145,11 +150,12 @@ impl<'a> Program<'a> {
 
     /// The `@Mod` class FML would construct, and the constructor it would call (one taking the
     /// event bus): the class whose annotation names the mod id, or the only candidate.
-    fn mod_main(&self) -> Option<(&'a ClassFile, &'a crate::class::Method)> {
-        let utf8 = |c: &ClassFile, text: &str| c.pool.iter().any(|k| matches!(k, crate::class::Const::Utf8(s) if s == text));
+    /// The `@Mod` classes FML constructs, each with the constructor it would pick (the one taking
+    /// the mod bus): mods bundled in the jar first, the jar's own mod (`mod_id`) last.
+    fn mod_mains(&self) -> Vec<(&'a ClassFile, &'a crate::class::Method)> {
         let mut found: Vec<(&'a ClassFile, &'a crate::class::Method)> = Vec::new();
         for c in self.classes.values() {
-            if !utf8(c, "Lnet/neoforged/fml/common/Mod;") {
+            if c.annotation_of(MOD).is_none() {
                 continue;
             }
             let ctor = c
@@ -161,12 +167,23 @@ impl<'a> Program<'a> {
                 found.push((c, m));
             }
         }
-        if let Some(id) = &self.mod_id
-            && let Some(hit) = found.iter().find(|(c, _)| utf8(c, id))
-        {
-            return Some(*hit);
+        let own = |c: &ClassFile| c.annotation_of(MOD).and_then(|a| a.value("value")) == self.mod_id.as_deref();
+        found.sort_by_key(|(c, _)| (own(c), c.name.clone()));
+        found
+    }
+
+    /// `@SubscribeEvent` methods: (key, handle kind as a lambda's, the method), so listeners made
+    /// from them dispatch through `lambda_call`.
+    fn subscriber_methods(&self) -> Vec<(String, u8, Member)> {
+        let mut out = Vec::new();
+        for c in self.classes.values() {
+            for m in c.methods.iter().filter(|m| m.code.is_some() && m.annotations.iter().any(|a| a.ty == SUBSCRIBE_EVENT)) {
+                let kind = if m.access & 0x0008 != 0 { 6 } else { 5 };
+                let member = Member { owner: c.name.clone(), name: m.name.clone(), desc: m.desc.clone() };
+                out.push((format!("{}.{}.{}", c.name, m.name, m.desc), kind, member));
+            }
         }
-        (found.len() == 1).then(|| found[0])
+        out
     }
 
     fn own(&self, class: &str) -> bool {
@@ -247,6 +264,15 @@ impl<'a> Program<'a> {
                 let _ = writeln!(out, "    rt.interfaces.insert({:?}, &{:?});", c.name, c.interfaces);
             }
         }
+        // `@SubscribeEvent` methods by class: what `bus.register(...)` and `@EventBusSubscriber` listen with.
+        let mut subs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (key, kind, m) in self.subscriber_methods() {
+            let Some(event) = crate::class::param_classes(&m.desc).last().cloned() else { continue };
+            subs.entry(m.owner.clone()).or_default().push(format!("({event:?}, {key:?}, {})", kind == 6));
+        }
+        for (class, list) in subs {
+            let _ = writeln!(out, "    rt.subscribers.insert({class:?}, vec![{}]);", list.join(", "));
+        }
         out.push_str("}\n\n");
         // Mod loading's registration phase: classes holding registers initialise, then suppliers resolve.
         out.push_str("/// Runs the mod's registrations, as NeoForge's loading does. Call after `init`.\npub fn start(rt: &mut Rt) {\n");
@@ -255,8 +281,10 @@ impl<'a> Program<'a> {
                 let _ = writeln!(out, "    {}", self.ensure(&c.name).replace("if rt.thrown.is_some() { return V::Void; }", &format!("rt.report_thrown({:?});", c.name)));
             }
         }
-        // FML constructs the `@Mod` class with the mod bus, then fires the registration events.
-        if let Some((main, ctor)) = self.mod_main() {
+        // FML constructs each `@Mod` class with the mod bus and registers its `@EventBusSubscriber`
+        // classes, then fires the registration events.
+        let mains = self.mod_mains();
+        for (main, ctor) in &mains {
             let params = crate::class::param_classes(&ctor.desc);
             let _ = writeln!(out, "    {{\n        let this = rt.new_object({:?});", main.name);
             let _ = writeln!(out, "        let mut args = vec![this];");
@@ -264,7 +292,14 @@ impl<'a> Program<'a> {
                 let _ = writeln!(out, "        let v = horizon_compat::neo::constructor_arg(rt, {p:?}); args.push(v);");
             }
             let _ = writeln!(out, "        {}", self.ensure(&main.name).replace("if rt.thrown.is_some() { return V::Void; }", &format!("rt.report_thrown({:?});", main.name)));
-            let _ = writeln!(out, "        {}(rt, &args);\n        rt.report_thrown(\"the mod's constructor\");\n    }}", fn_name(&main.name, "<init>", &ctor.desc));
+            let _ = writeln!(out, "        {}(rt, &args);\n        rt.report_thrown({:?});\n    }}", fn_name(&main.name, "<init>", &ctor.desc), format!("the constructor of {}", main.name));
+        }
+        for c in classes {
+            if EVENT_BUS_SUBSCRIBER.iter().any(|t| c.annotation_of(t).is_some()) {
+                let _ = writeln!(out, "    rt.subscribe_class({:?});", c.name);
+            }
+        }
+        if !mains.is_empty() {
             out.push_str("    horizon_compat::neo::fire_registrations(rt);\n");
         }
         out.push_str("    rt.resolve_registrations();\n}\n\n");
@@ -374,7 +409,11 @@ impl<'a> Program<'a> {
              \x20   full.extend_from_slice(args.get(1..).unwrap_or_default());\n\
              \x20   Some(match class {\n",
         );
-        for (key, (kind, m)) in &self.lambdas {
+        let mut all = self.lambdas.clone();
+        for (key, kind, m) in self.subscriber_methods() {
+            all.entry(key).or_insert((kind, m));
+        }
+        for (key, (kind, m)) in &all {
             let call = match (kind, self.resolve(&m.owner, &m.name, &m.desc)) {
                 (8, imp) => {
                     let init = match imp {

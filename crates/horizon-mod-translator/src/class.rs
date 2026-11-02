@@ -47,6 +47,23 @@ pub struct Method {
     pub name: String,
     pub desc: String,
     pub code: Option<Code>,
+    /// Its runtime-visible annotations (`@SubscribeEvent`...).
+    pub annotations: Vec<Annotation>,
+}
+
+/// A runtime-visible annotation: its type and element values, each as text (a constant, an enum
+/// constant's name, a class descriptor; an array's items joined by `,`).
+#[derive(Debug, Clone, Default)]
+pub struct Annotation {
+    /// The type's descriptor, as `Lnet/neoforged/bus/api/SubscribeEvent;`.
+    pub ty: String,
+    pub values: Vec<(String, String)>,
+}
+
+impl Annotation {
+    pub fn value(&self, name: &str) -> Option<&str> {
+        self.values.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +84,8 @@ pub struct ClassFile {
     pub methods: Vec<Method>,
     /// `BootstrapMethods`: (method handle index, static argument indices).
     pub bootstrap: Vec<(u16, Vec<u16>)>,
+    /// Its runtime-visible annotations (`@Mod`, `@EventBusSubscriber`...).
+    pub annotations: Vec<Annotation>,
 }
 
 struct Reader<'a> {
@@ -149,6 +168,7 @@ impl ClassFile {
             fields: Vec::new(),
             methods: Vec::new(),
             bootstrap: Vec::new(),
+            annotations: Vec::new(),
         };
         cf.access = r.u2()?;
         cf.name = cf.class_name(r.u2()?)?;
@@ -166,10 +186,14 @@ impl ClassFile {
         for _ in 0..r.u2()? {
             let (access, name, desc) = (r.u2()?, r.u2()?, r.u2()?);
             let mut code = None;
+            let mut annotations = Vec::new();
             for _ in 0..r.u2()? {
                 let an = r.u2()?;
                 let len = r.u4()? as usize;
                 let body = r.take(len)?;
+                if cf.utf8(an)? == "RuntimeVisibleAnnotations" {
+                    annotations = cf.annotations(body)?;
+                }
                 if cf.utf8(an)? == "Code" {
                     let mut c = Reader { b: body, i: 0 };
                     let (max_stack, max_locals) = (c.u2()?, c.u2()?);
@@ -184,12 +208,15 @@ impl ClassFile {
                     code = Some(Code { max_stack, max_locals, bytes, handlers });
                 }
             }
-            cf.methods.push(Method { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, code });
+            cf.methods.push(Method { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, code, annotations });
         }
         for _ in 0..r.u2()? {
             let an = r.u2()?;
             let len = r.u4()? as usize;
             let body = r.take(len)?;
+            if cf.utf8(an)? == "RuntimeVisibleAnnotations" {
+                cf.annotations = cf.annotations(body)?;
+            }
             if cf.utf8(an)? == "BootstrapMethods" {
                 let mut b = Reader { b: body, i: 0 };
                 for _ in 0..b.u2()? {
@@ -201,6 +228,48 @@ impl ClassFile {
             }
         }
         Ok(cf)
+    }
+
+    /// A `RuntimeVisibleAnnotations` attribute's annotations.
+    fn annotations(&self, body: &[u8]) -> Result<Vec<Annotation>, String> {
+        let mut r = Reader { b: body, i: 0 };
+        (0..r.u2()?).map(|_| self.annotation(&mut r)).collect()
+    }
+
+    fn annotation(&self, r: &mut Reader) -> Result<Annotation, String> {
+        let ty = self.utf8(r.u2()?)?;
+        let mut values = Vec::new();
+        for _ in 0..r.u2()? {
+            let name = self.utf8(r.u2()?)?;
+            values.push((name, self.element_value(r)?));
+        }
+        Ok(Annotation { ty, values })
+    }
+
+    fn element_value(&self, r: &mut Reader) -> Result<String, String> {
+        Ok(match r.u1()? {
+            b's' => self.utf8(r.u2()?)?,
+            b'e' => {
+                r.u2()?; // the enum's type
+                self.utf8(r.u2()?)?
+            }
+            b'c' => self.utf8(r.u2()?)?,
+            b'@' => self.annotation(r)?.ty,
+            b'[' => (0..r.u2()?).map(|_| self.element_value(r)).collect::<Result<Vec<_>, _>>()?.join(","),
+            _ => match self.pool.get(r.u2()? as usize) {
+                Some(Const::Int(i)) => i.to_string(),
+                Some(Const::Long(j)) => j.to_string(),
+                Some(Const::Float(f)) => f.to_string(),
+                Some(Const::Double(d)) => d.to_string(),
+                Some(Const::Utf8(s)) => s.clone(),
+                _ => String::new(),
+            },
+        })
+    }
+
+    /// The annotation of type `ty` (a descriptor), when the class has it.
+    pub fn annotation_of(&self, ty: &str) -> Option<&Annotation> {
+        self.annotations.iter().find(|a| a.ty == ty)
     }
 
     pub fn utf8(&self, i: u16) -> Result<String, String> {

@@ -38,12 +38,20 @@ fn run(rt: &mut Rt, host: &mut dyn Host, state: &str, key: &'static str, extra: 
 /// The level translated code sees: one object (so `level == level` holds), the authoritative
 /// server's (`isClientSide` is a field mods read).
 pub fn level(rt: &mut Rt) -> V {
-    rt.intern("compat:level".into(), |rt| {
-        let l = rt.new_object("net/minecraft/server/level/ServerLevel");
-        rt.put_field(l, "isClientSide", V::I(0));
-        l
-    })
+    if let Some(l) = rt.interned.get("compat:level") {
+        return *l;
+    }
+    let l = rt.new_object("net/minecraft/server/level/ServerLevel");
+    rt.put_field(l, "isClientSide", V::I(0));
+    rt.interned.insert("compat:level".into(), l);
+    // Loading it, mods hear `LevelEvent.Load` (Create sets up its kinetic networks there).
+    let ev = rt.new_object(LEVEL_LOAD);
+    rt.put_field(ev, "$level", l);
+    crate::neo::post(rt, LEVEL_LOAD, ev);
+    l
 }
+
+const LEVEL_LOAD: &str = "net/neoforged/neoforge/event/level/LevelEvent$Load";
 
 /// `tick_block` (a scheduled tick): `BlockBehaviour.tick`.
 pub fn tick_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {

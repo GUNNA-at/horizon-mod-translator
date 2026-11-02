@@ -382,6 +382,8 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             let n = if n.ends_with("_types") || n == "attributes" { n.trim_end_matches('s').to_owned() } else { n };
             rt.string(&n)
         }
+        // NeoForge's game event bus: one object, as the mod bus (events route by class).
+        "net/neoforged/neoforge/common/NeoForge.EVENT_BUS" => rt.intern("compat:game-bus".into(), |rt| rt.new_object("net/neoforged/bus/api/IEventBus")),
         "net/neoforged/api/distmarker/Dist.CLIENT" | "net/neoforged/fml/loading/FMLEnvironment.dist" => rt.string("CLIENT"),
         "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER" => rt.string("DEDICATED_SERVER"),
         k if k.starts_with("net/neoforged/bus/api/EventPriority.") => {

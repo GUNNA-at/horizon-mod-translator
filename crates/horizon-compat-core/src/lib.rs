@@ -117,6 +117,9 @@ pub struct Rt {
     pub iter_sources: HashMap<u32, V>,
     /// The mod event bus's listeners: the event class each takes, and the listener.
     pub listeners: Vec<(String, V)>,
+    /// `@SubscribeEvent` methods by class (registered by generated code): (event class, method
+    /// key, static). [`Rt::subscribe_class`] and [`Rt::subscribe_object`] listen with them.
+    pub subscribers: HashMap<&'static str, Vec<(&'static str, &'static str, bool)>>,
     /// Each lambda object's functional interface and its method name.
     pub lambda_info: HashMap<u32, (&'static str, &'static str)>,
     /// The class of the last call into a caller-sensitive method (`StackWalker.getCallerClass`).
@@ -143,6 +146,7 @@ impl Default for Rt {
             thrown: None,
             supers: HashMap::new(),
             interfaces: HashMap::new(),
+            subscribers: HashMap::new(),
             host: None,
             vcall: None,
             lambda_call: None,
@@ -339,6 +343,31 @@ impl Rt {
         let v = make(self);
         self.interned.insert(key, v);
         v
+    }
+
+    /// Listens with `class`'s static `@SubscribeEvent` methods: an `@EventBusSubscriber` class, or
+    /// `bus.register(Foo.class)`.
+    pub fn subscribe_class(&mut self, class: &str) {
+        for (event, key, is_static) in self.subscribers.get(class).cloned().unwrap_or_default() {
+            if is_static {
+                let l = self.lambda(key, Vec::new());
+                self.listeners.push((event.to_owned(), l));
+            }
+        }
+    }
+
+    /// Listens with `obj`'s instance `@SubscribeEvent` methods, its superclasses' too: `bus.register(obj)`.
+    pub fn subscribe_object(&mut self, obj: V) {
+        let mut class = Some(self.class_of(obj));
+        while let Some(c) = class {
+            for (event, key, is_static) in self.subscribers.get(c).cloned().unwrap_or_default() {
+                if !is_static {
+                    let l = self.lambda(key, vec![obj]);
+                    self.listeners.push((event.to_owned(), l));
+                }
+            }
+            class = self.supers.get(c).copied();
+        }
     }
 
     pub fn instance_of(&self, v: V, class: &str) -> bool {

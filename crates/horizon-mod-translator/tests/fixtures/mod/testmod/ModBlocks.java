@@ -12,4 +12,7 @@ public class ModBlocks {
     public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<CounterBlockEntity>> COUNTER_BE =
         BLOCK_ENTITIES.register("counter", () -> BlockEntityType.Builder.of(CounterBlockEntity::new, COUNTER.get()).build(null));
     public static final DeferredBlock<SwitchBlock> SWITCH = BLOCKS.register("switch", () -> new SwitchBlock(BlockBehaviour.Properties.of()));
+    static {
+        net.neoforged.neoforge.common.NeoForge.EVENT_BUS.register(new ModEvents.LoadCounter());
+    }
 }

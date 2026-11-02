@@ -152,7 +152,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.listeners.push((wanted, listener));
             V::Void
         }
-        ("net/neoforged/bus/api/IEventBus", "register") => V::Void,
+        // `bus.register(Foo.class)` listens with its static `@SubscribeEvent` methods, `bus.register(obj)`
+        // with the object's.
+        ("net/neoforged/bus/api/IEventBus", "register") => {
+            if rt.class_of(a(1)) == "java/lang/Class" {
+                let class = rt.str_of(a(1)).unwrap_or("").to_owned();
+                rt.subscribe_class(&class);
+            } else {
+                rt.subscribe_object(a(1));
+            }
+            V::Void
+        }
+        // Level events: the level they're about.
+        (o, "getLevel") if o.starts_with("net/neoforged/neoforge/event/level/LevelEvent") => rt.get_field(a(0), "$level"),
         ("net/neoforged/bus/api/IEventBus", "post") => {
             let class = rt.class_of(a(1));
             post(rt, class, a(1));
