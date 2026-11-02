@@ -135,6 +135,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
 - [x] `jutil.rs`: java.util collections, iterators, streams, atomics, Guava Table/Multimap, natively.
 - [x] `neo.rs` + codegen: the `@Mod` class is constructed with a native mod bus and `RegisterEvent` fires per registry;
   `META-INF/jarjar` libraries translate with the mod (Create: 1.39M lines with Registrate, Flywheel, Ponder).
+- [x] Method resolution follows the JVM: superclasses, then inherited interface default methods (Registrate's builders).
+- [x] Enums: `array.clone()` (so `values()`), `name()`/`compareTo` read `$name`/`$ordinal`; string concat,
+  `String.valueOf(Object)` and `append(Object)` call a mod object's own `toString()` (generated `java_string`).
+- Memory: compiling Create's engine at opt-level 3 swapped for hours on this 24 GB Mac; the harness builds with
+  `CARGO_PROFILE_RELEASE_OPT_LEVEL=1`. Stop leftover offscreen games before a build.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
