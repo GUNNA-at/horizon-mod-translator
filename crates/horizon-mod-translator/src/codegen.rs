@@ -118,6 +118,8 @@ pub struct Program<'a> {
     pub unsupported: BTreeMap<String, usize>,
     /// Lambda implementations seen: key → (handle kind, member).
     lambdas: BTreeMap<String, (u8, Member)>,
+    /// `META-INF/services`: interface → implementations (internal names), for `ServiceLoader`.
+    pub services: BTreeMap<String, Vec<String>>,
     /// The mod's id: picks its `@Mod` class among several (libraries bundled in its jar have theirs).
     pub mod_id: Option<String>,
     /// Methods (`name.desc`) that ask who called them (`StackWalker.getCallerClass`): calls to
@@ -132,6 +134,7 @@ impl<'a> Program<'a> {
             keys: BTreeSet::new(),
             unsupported: BTreeMap::new(),
             lambdas: BTreeMap::new(),
+            services: BTreeMap::new(),
             mod_id: None,
             caller_sensitive: classes
                 .iter()
@@ -255,7 +258,7 @@ impl<'a> Program<'a> {
     }
 
     fn tables(&self, classes: &[&ClassFile]) -> String {
-        let mut out = String::from("/// Registers the mod's class hierarchy and callbacks with the runtime. Call once, before anything else.\npub fn init(rt: &mut Rt) {\n    rt.vcall = Some(vcall);\n    rt.lambda_call = Some(lambda_call);\n    rt.overrides = Some(overrides);\n");
+        let mut out = String::from("/// Registers the mod's class hierarchy and callbacks with the runtime. Call once, before anything else.\npub fn init(rt: &mut Rt) {\n    rt.vcall = Some(vcall);\n    rt.lambda_call = Some(lambda_call);\n    rt.overrides = Some(overrides);\n    rt.reflect = Some(reflect);\n");
         for c in classes {
             if let Some(sup) = &c.superclass {
                 let _ = writeln!(out, "    rt.supers.insert({:?}, {sup:?});", c.name);
@@ -305,7 +308,48 @@ impl<'a> Program<'a> {
         out.push_str("    rt.resolve_registrations();\n}\n\n");
         out.push_str(&self.dispatch());
         out.push_str(&self.lambda_table());
+        out.push_str(&self.reflect_table());
         out
+    }
+
+    /// `reflect(rt, class, what, args)` (see `Rt::reflect`): what `Class.forName`,
+    /// `newInstance`, `getEnumConstants` and `ServiceLoader` reach. Constructors by name are the
+    /// no-argument ones of concrete classes (what those APIs call).
+    fn reflect_table(&self) -> String {
+        let mut s = String::from(
+            "/// Reflection over the mod's classes (see `Rt::reflect`).\n\
+             pub fn reflect(rt: &mut Rt, class: &str, what: &str, args: &[V]) -> Option<V> {\n\
+             \x20   Some(match (class, what) {\n",
+        );
+        for c in self.classes.values() {
+            let ensure = self.ensure(&c.name).replace("return V::Void;", "return Some(V::Void);");
+            if !ensure.is_empty() {
+                let _ = writeln!(s, "        ({:?}, \"<clinit>\") => {{ {ensure}V::Void }}", c.name);
+            }
+            let concrete = c.access & 0x0600 == 0;
+            if concrete && c.methods.iter().any(|m| m.name == "<init>" && m.desc == "()V" && m.code.is_some()) {
+                let _ = writeln!(
+                    s,
+                    "        ({:?}, \"<init>.()V\") => {{ {ensure}let o = rt.new_object({:?}); {}(rt, &[o]); o }}",
+                    c.name,
+                    c.name,
+                    fn_name(&c.name, "<init>", "()V")
+                );
+            }
+            if c.access & 0x4000 != 0
+                && let Some(m) = c.methods.iter().find(|m| m.name == "values" && m.access & 0x0008 != 0 && m.desc.starts_with("()[") && m.code.is_some())
+            {
+                let _ = writeln!(s, "        ({:?}, \"values\") => {{ {ensure}{}(rt, &[]) }}", c.name, fn_name(&c.name, "values", &m.desc));
+            }
+        }
+        for (iface, impls) in &self.services {
+            let _ = writeln!(
+                s,
+                "        ({iface:?}, \"services\") => {{ let names: &[&str] = &{impls:?}; let a = rt.new_array(names.len() as i32, V::NULL); for (i, n) in names.iter().enumerate() {{ let v = rt.string(n); rt.array_set(a, i as i32, v); }} a }}"
+            );
+        }
+        s.push_str("        _ => return None,\n    })\n}\n");
+        s
     }
 
     pub fn emit(&mut self) -> String {

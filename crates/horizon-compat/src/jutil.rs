@@ -26,8 +26,22 @@ fn overrides(rt: &Rt, v: V, key: &str) -> bool {
     rt.overrides.is_some_and(|o| o(rt.class_of(v), key))
 }
 
-/// `a.equals(b)` as Java answers it.
+/// `a.equals(b)` as Java answers it: the object's own `equals` when its mod class overrides it.
 pub fn equals(rt: &mut Rt, a: V, b: V) -> bool {
+    if equals_own(rt, a, b) {
+        return true;
+    }
+    if overrides(rt, a, EQUALS)
+        && let Some(vc) = rt.vcall
+    {
+        return vc(rt, "java/lang/Object.equals.(Ljava/lang/Object;)Z", EQUALS, &[a, b]).i() != 0;
+    }
+    false
+}
+
+/// `equals` without a mod's override: what `Object.equals` (and `super.equals` up to it) answers
+/// for the runtime's own values (strings, boxes, positions, lists by content; objects by identity).
+pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
     if a == b || rt.java_equals(a, b) {
         return true;
     }
@@ -48,16 +62,22 @@ pub fn equals(rt: &mut Rt, a: V, b: V) -> bool {
             return rt.get_field(a, "value") == rt.get_field(b, "value");
         }
     }
-    if overrides(rt, a, EQUALS)
-        && let Some(vc) = rt.vcall
-    {
-        return vc(rt, "java/lang/Object.equals.(Ljava/lang/Object;)Z", EQUALS, &[a, b]).i() != 0;
-    }
     false
 }
 
-/// `v.hashCode()` as Java answers it.
+/// `v.hashCode()` as Java answers it: the object's own `hashCode` when its mod class overrides it.
 pub fn hash(rt: &mut Rt, v: V) -> i32 {
+    if overrides(rt, v, HASH_CODE)
+        && let Some(vc) = rt.vcall
+    {
+        return vc(rt, "java/lang/Object.hashCode.()I", HASH_CODE, &[v]).i();
+    }
+    hash_own(rt, v)
+}
+
+/// `hashCode` without a mod's override: what `Object.hashCode` (and `super.hashCode` up to it)
+/// answers (content for strings, boxes and positions; identity for objects).
+pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
     if let V::R(r) = v
         && r != 0
     {
@@ -73,11 +93,6 @@ pub fn hash(rt: &mut Rt, v: V) -> i32 {
                 return rt.java_hash(f["value"]);
             }
             _ => {}
-        }
-        if overrides(rt, v, HASH_CODE)
-            && let Some(vc) = rt.vcall
-        {
-            return vc(rt, "java/lang/Object.hashCode.()I", HASH_CODE, &[v]).i();
         }
     }
     rt.java_hash(v)
@@ -228,7 +243,7 @@ fn new_set(rt: &mut Rt, items: &[V]) -> V {
     s
 }
 
-fn new_iter(rt: &mut Rt, items: Vec<V>) -> V {
+pub fn new_iter(rt: &mut Rt, items: Vec<V>) -> V {
     rt.alloc("java/util/Iterator", Data::Iter(items, 0))
 }
 

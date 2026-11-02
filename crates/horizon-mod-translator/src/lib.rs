@@ -59,6 +59,45 @@ pub fn classes(jar: &Path) -> Result<Vec<ClassFile>, String> {
     Ok(out)
 }
 
+/// `META-INF/services` of a jar and the jars it bundles: interface → implementations, in
+/// internal names (`a/b/C`), as `ServiceLoader` finds them. The jar's own entries come first.
+pub fn services(jar: &Path) -> Result<BTreeMap<String, Vec<String>>, String> {
+    fn read(zip: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>, out: &mut BTreeMap<String, Vec<String>>, nested: &mut Vec<Vec<u8>>) {
+        for i in 0..zip.len() {
+            let Ok(mut e) = zip.by_index(i) else { continue };
+            let Ok(name) = e.name().map(|n| n.into_owned()) else { continue };
+            let mut b = Vec::new();
+            if name.starts_with("META-INF/jarjar/") && name.ends_with(".jar") {
+                if e.read_to_end(&mut b).is_ok() {
+                    nested.push(b);
+                }
+                continue;
+            }
+            let Some(iface) = name.strip_prefix("META-INF/services/").filter(|n| !n.is_empty() && !n.contains('/')) else { continue };
+            if e.read_to_end(&mut b).is_err() {
+                continue;
+            }
+            let list = out.entry(iface.replace('.', "/")).or_default();
+            for line in String::from_utf8_lossy(&b).lines() {
+                let class = line.split('#').next().unwrap_or("").trim();
+                if !class.is_empty() && !list.iter().any(|c| *c == class.replace('.', "/")) {
+                    list.push(class.replace('.', "/"));
+                }
+            }
+        }
+    }
+    let f = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
+    let mut zip = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
+    let (mut out, mut nested) = (BTreeMap::new(), Vec::new());
+    read(&mut zip, &mut out, &mut nested);
+    for b in nested {
+        if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) {
+            read(&mut inner, &mut out, &mut Vec::new());
+        }
+    }
+    Ok(out)
+}
+
 /// API methods the mod calls, with the number of its classes calling each.
 pub fn api_calls(classes: &[ClassFile]) -> BTreeMap<Member, usize> {
     let mut m = BTreeMap::new();

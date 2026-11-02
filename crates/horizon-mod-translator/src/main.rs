@@ -7,6 +7,7 @@ use std::{path::Path, process::ExitCode};
 fn translate(jar: &Path, out: &Path) -> Result<(), String> {
     let classes = horizon_mod_translator::classes(jar)?;
     let mut program = horizon_mod_translator::codegen::Program::new(&classes);
+    program.services = horizon_mod_translator::services(jar)?;
     let files = program.emit_files(40);
     let lines: usize = files.iter().map(|(_, f)| f.lines().count()).sum();
     let src = out.join("src");

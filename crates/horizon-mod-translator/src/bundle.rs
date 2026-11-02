@@ -281,6 +281,7 @@ pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option
     let krate = format!("{}_translated_engine", id.replace('-', "_"));
     let mut program = Program::new(classes);
     program.mod_id = Some(id.clone());
+    program.services = crate::services(jar)?;
     let files = program.emit_files(40);
     let src = out.join("engine/src");
     fs::create_dir_all(&src).map_err(|e| e.to_string())?;

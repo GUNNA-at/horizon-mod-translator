@@ -18,6 +18,123 @@ fn new_str(rt: &mut Rt, s: String) -> V {
     rt.alloc("java/lang/String", Data::Str(s))
 }
 
+/// A `Class` object for `name` (internal form, `a/b/C`).
+pub fn class_object(rt: &mut Rt, name: &str) -> V {
+    rt.alloc("java/lang/Class", Data::Str(name.into()))
+}
+
+/// Whether `Class.forName` finds `name` (internal form) outside the mod: the JDK's, the game's and
+/// the loader's classes, and the libraries the game ships.
+fn platform_class(name: &str) -> bool {
+    [
+        "java/", "javax/", "jdk/", "sun/", "net/minecraft/", "com/mojang/", "net/neoforged/", "org/slf4j/", "org/apache/",
+        "com/google/", "it/unimi/", "io/netty/", "org/joml/", "org/lwjgl/",
+    ]
+    .iter()
+    .any(|p| name.starts_with(p))
+}
+
+/// Throws a new `class` with `msg`; the value a throwing call leaves (null).
+fn throw_with(rt: &mut Rt, class: &'static str, msg: &str) -> V {
+    let e = rt.new_object(class);
+    let m = rt.string(msg);
+    rt.put_field(e, "message", m);
+    rt.thrown = Some(e);
+    V::NULL
+}
+
+/// The descriptor of a class named as `Class.getName` does (`int`, `[I`, `a/b/C`).
+fn descriptor_of(name: &str) -> String {
+    match name {
+        "int" => "I".into(),
+        "long" => "J".into(),
+        "boolean" => "Z".into(),
+        "byte" => "B".into(),
+        "char" => "C".into(),
+        "short" => "S".into(),
+        "float" => "F".into(),
+        "double" => "D".into(),
+        "void" => "V".into(),
+        n if n.starts_with('[') => n.replace('.', "/"),
+        n => format!("L{};", n.replace('.', "/")),
+    }
+}
+
+/// `new C(args)` by reflection: the mod's constructor with descriptor `desc`.
+fn construct(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
+    match rt.reflect(class, &format!("<init>.{desc}"), args) {
+        Some(o) => o,
+        None if rt.thrown.is_some() => V::NULL,
+        None => throw_with(rt, "java/lang/NoSuchMethodException", &format!("{}.<init>{desc}", class.replace('/', "."))),
+    }
+}
+
+// `ServiceLoader`: the implementations `META-INF/services` names (translated with the
+// mod), each made once with its no-argument constructor, in the file's order.
+fn service_loader(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match name {
+        "load" | "loadInstalled" => {
+            let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let names = match rt.reflect(&n, "services", &[]) {
+                Some(v) => v,
+                None => rt.new_array(0, V::NULL),
+            };
+            let l = rt.new_object("java/util/ServiceLoader");
+            rt.put_field(l, "$names", names);
+            l
+        }
+        "reload" => {
+            rt.put_field(a(0), "$providers", V::NULL);
+            V::Void
+        }
+        "findFirst" | "iterator" | "forEach" => {
+            let providers = service_providers(rt, a(0));
+            if rt.thrown.is_some() {
+                return Some(V::NULL);
+            }
+            match name {
+                "findFirst" => {
+                    let o = rt.new_object("java/util/Optional");
+                    rt.put_field(o, "value", providers.first().copied().unwrap_or(V::NULL));
+                    o
+                }
+                "iterator" => crate::jutil::new_iter(rt, providers),
+                _ => {
+                    for p in providers {
+                        rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", a(1), &[p]);
+                        if rt.thrown.is_some() {
+                            break;
+                        }
+                    }
+                    V::Void
+                }
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// A `ServiceLoader`'s providers, made on first use and kept, as the JDK's loader caches them.
+fn service_providers(rt: &mut Rt, loader: V) -> Vec<V> {
+    let made = rt.get_field(loader, "$providers");
+    if made.r() != 0 {
+        return crate::jutil::elements(rt, made);
+    }
+    let names: Vec<String> = crate::jutil::elements(rt, rt.get_field(loader, "$names")).iter().map(|&n| text(rt, n)).collect();
+    let mut out = Vec::new();
+    for n in names {
+        let p = construct(rt, &n, "()V", &[]);
+        if rt.thrown.is_some() {
+            return out;
+        }
+        out.push(p);
+    }
+    let list = crate::jutil::new_list(rt, out.clone());
+    rt.put_field(loader, "$providers", list);
+    out
+}
+
 /// The JVM's kind letter of each parameter in `desc`.
 fn kinds(desc: &str) -> Vec<char> {
     let mut out = Vec::new();
@@ -63,6 +180,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     let (owner, rest) = key.split_once('.')?;
     let (name, desc) = rest.split_once('.')?;
+    if owner == "java/util/ServiceLoader" {
+        return service_loader(rt, name, args);
+    }
     if !owner.starts_with("java/lang/") {
         return None;
     }
@@ -116,8 +236,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let c = rt.class_of(a(0));
                 rt.alloc("java/lang/Class", Data::Str(c.into()))
             }
-            "hashCode" => V::I(crate::jutil::hash(rt, a(0))),
-            "equals" => V::I(crate::jutil::equals(rt, a(0), a(1)) as i32),
+            // Object's own: `super.hashCode()` from an override must not come back to it.
+            "hashCode" => V::I(crate::jutil::hash_own(rt, a(0))),
+            "equals" => V::I(crate::jutil::equals_own(rt, a(0), a(1)) as i32),
             "toString" => {
                 let s = text(rt, a(0));
                 new_str(rt, s)
@@ -162,6 +283,56 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => return None,
         }),
         "java/lang/Class" => Some(match name {
+            // `Class.forName`: the mod's classes (initialised unless asked not to) and the
+            // platform's; anything else is absent, as an optional dependency that isn't installed.
+            "forName" => {
+                let n = text(rt, a(0)).replace('.', "/");
+                if rt.is_mod_class(&n) {
+                    if ks.len() == 1 || a(1).i() != 0 {
+                        rt.reflect(&n, "<clinit>", &[]);
+                        if rt.thrown.is_some() {
+                            return Some(V::NULL);
+                        }
+                    }
+                    class_object(rt, &n)
+                } else if platform_class(&n) {
+                    class_object(rt, &n)
+                } else {
+                    throw_with(rt, "java/lang/ClassNotFoundException", &n.replace('/', "."))
+                }
+            }
+            "newInstance" => {
+                let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+                construct(rt, &n, "()V", &[])
+            }
+            "getConstructor" | "getDeclaredConstructor" => {
+                let mut d = String::from("(");
+                for p in crate::jutil::elements(rt, a(1)) {
+                    d.push_str(&descriptor_of(rt.str_of(p).unwrap_or("java/lang/Object")));
+                }
+                d.push_str(")V");
+                let c = rt.new_object("java/lang/reflect/Constructor");
+                rt.put_field(c, "$class", a(0));
+                let d = rt.string(&d);
+                rt.put_field(c, "$desc", d);
+                c
+            }
+            "getEnumConstants" => {
+                let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+                rt.reflect(&n, "values", &[]).unwrap_or(V::NULL)
+            }
+            "isEnum" => {
+                let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+                V::I(rt.reflect(&n, "values", &[]).is_some() as i32)
+            }
+            "getSuperclass" => {
+                let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+                match rt.supers.get(n.as_str()).copied() {
+                    Some(sup) => class_object(rt, sup),
+                    None if n == "java/lang/Object" => V::NULL,
+                    None => class_object(rt, "java/lang/Object"),
+                }
+            }
             "isInstance" => {
                 let target = rt.str_of(a(0)).unwrap_or("").to_owned();
                 V::I(rt.instance_of(a(1), &target) as i32)
@@ -174,9 +345,23 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "desiredAssertionStatus" => V::I(0),
             "hashCode" => V::I(string_hash(rt.str_of(a(0)).unwrap_or(""))),
             "equals" => V::I((rt.str_of(a(0)) == rt.str_of(a(1))) as i32),
-            "isEnum" | "isInterface" | "isArray" | "isRecord" => V::I(0),
+            "isInterface" | "isArray" | "isRecord" => V::I(0),
             _ => return None,
         }),
+        "java/lang/reflect/Constructor" => Some(match name {
+            "newInstance" => {
+                let class = rt.get_field(a(0), "$class");
+                let n = rt.str_of(class).unwrap_or("").to_owned();
+                let d = text(rt, rt.get_field(a(0), "$desc"));
+                let vals = crate::jutil::elements(rt, a(1));
+                construct(rt, &n, &d, &vals)
+            }
+            "getDeclaringClass" => rt.get_field(a(0), "$class"),
+            "setAccessible" => V::Void,
+            "trySetAccessible" => V::I(1),
+            _ => return None,
+        }),
+
         "java/lang/Thread" => Some(match name {
             "currentThread" => rt.new_object("java/lang/Thread"),
             "getName" => rt.string("Server thread"),
@@ -229,6 +414,11 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
     let u = utf16(&s);
     let arg_s = |rt: &Rt, i: usize| text(rt, a(i));
     Some(match name {
+        "formatted" => {
+            let vals = crate::jutil::elements(rt, a(1));
+            let out = format_java(rt, &s, &vals);
+            new_str(rt, out)
+        }
         "length" => V::I(u.len() as i32),
         "isEmpty" => V::I(u.is_empty() as i32),
         "isBlank" => V::I(s.trim().is_empty() as i32),

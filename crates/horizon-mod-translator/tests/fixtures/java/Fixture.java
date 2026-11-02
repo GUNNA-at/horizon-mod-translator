@@ -124,6 +124,34 @@ public class Fixture {
         Point a = new Point(k, "p" + k), b = new Point(k, "p" + k), c = new Point(k + 1, "q");
         return (a.equals(b) ? 1 : 0) + (a.equals(c) ? 2 : 0) + a.hashCode() + a.toString().length() * 1000 + (a.toString().equals("Point[x=" + k + ", label=p" + k + "]") ? 7 : 0);
     }
+    // Reflection, as Flywheel's and catnip's loaders and Create's enum readers use it.
+    public static class Impl implements Spins { public int v = 7; public Impl() { v = 42; } }
+    static class Keyed {
+        final int k;
+        Keyed(int k) { this.k = k; }
+        // super.hashCode() and super.equals() are Object's (identity), never these overrides again.
+        @Override public int hashCode() { return super.hashCode() != 0 ? k * 31 : -1; }
+        @Override public boolean equals(Object o) { return super.equals(o) || (o instanceof Keyed other && other.k == k); }
+    }
+    public static int reflection(int k) {
+        int r = 0;
+        try {
+            Object o = Class.forName("Fixture$Impl").getConstructor().newInstance();
+            r += (o instanceof Spins ? 1 : 0) + ((Impl) o).v;
+            r += Form.class.getEnumConstants().length * 100 + (Form.class.isEnum() ? 1000 : 0) + (Impl.class.isEnum() ? 2000 : 0);
+            try { Class.forName("not.a.Thing"); r += 5000; } catch (ClassNotFoundException e) { r += 10000; }
+            Spins s = java.util.ServiceLoader.load(Spins.class).findFirst().orElse(null);
+            r += s instanceof Impl i ? i.v * 1000 : -1;
+        } catch (ReflectiveOperationException e) {
+            return -1;
+        }
+        r += "%d-%s".formatted(k, "x").length() * 100000;
+        Keyed a = new Keyed(k), b = new Keyed(k);
+        java.util.Set<Keyed> set = new java.util.HashSet<>();
+        set.add(a);
+        set.add(b);
+        return r + set.size() * 1000000 + (a.equals(b) ? 2000000 : 0) + (a.hashCode() == k * 31 ? 4000000 : 0);
+    }
     public static int grid(int n) {
         int[][] g = new int[n][n + 1];
         for (int i = 0; i < n; i++) for (int j = 0; j <= n; j++) g[i][j] = i * j;

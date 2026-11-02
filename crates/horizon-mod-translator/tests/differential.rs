@@ -29,6 +29,7 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("exceptions", "(I)I", &["0", "1", "2", "3", "4"]),
     ("records", "(I)I", &["0", "5", "-12"]),
     ("grid", "(I)I", &["0", "1", "6"]),
+    ("reflection", "(I)I", &["3", "-12"]),
 ];
 
 fn has(tool: &str) -> bool {
@@ -85,6 +86,11 @@ fn translated_fixture_matches_the_jvm() {
         .status()
         .unwrap();
     assert!(ok.success());
+    // A service the fixture loads, packed as a mod jar packs it.
+    fs::create_dir_all(classes.join("META-INF/services")).unwrap();
+    fs::write(classes.join("META-INF/services/Fixture$Spins"), "# providers\nFixture$Impl\n").unwrap();
+    let jar = root.join("fixture.jar");
+    assert!(Command::new("jar").arg("cf").arg(&jar).arg("-C").arg(&classes).arg(".").status().unwrap().success());
     let java = Command::new("java").args(["-cp", classes.to_str().unwrap(), "Runner"]).output().unwrap();
     assert!(java.status.success(), "{}", String::from_utf8_lossy(&java.stderr));
     let expected = String::from_utf8(java.stdout).unwrap();
@@ -97,6 +103,7 @@ fn translated_fixture_matches_the_jvm() {
         .map(|e| horizon_mod_translator::class::ClassFile::parse(&fs::read(e.path()).unwrap()).unwrap())
         .collect();
     let mut program = horizon_mod_translator::codegen::Program::new(&parsed);
+    program.services = horizon_mod_translator::services(&jar).unwrap();
     let module = program.emit();
 
     // The generated crate.
@@ -144,7 +151,7 @@ fn translated_fixture_matches_the_jvm() {
     for (e, a) in expected.lines().zip(actual.lines()) {
         assert_eq!(a, e);
     }
-    assert_eq!(expected.lines().count(), 76, "{expected}");
+    assert_eq!(expected.lines().count(), 78, "{expected}");
     assert_eq!(expected.lines().count(), actual.lines().count());
     eprintln!("{actual}");
     assert!(program.unsupported.is_empty(), "{:?}", program.unsupported);

@@ -103,6 +103,11 @@ pub struct Rt {
     pub lambda_call: Option<fn(&mut Rt, &str, &[V]) -> Option<V>>,
     /// Whether a mod class implements a method itself (`name.desc`), so glue calls only real overrides.
     pub overrides: Option<fn(&str, &str) -> bool>,
+    /// Reflection over the mod's classes (generated): `(class, what, args)` with `what` one of
+    /// `<clinit>` (initialise it), `<init>.()V` (construct it), `values` (an enum's constants) or
+    /// `services` (the implementations `META-INF/services` names for an interface, as a String[]).
+    /// None when the mod has no such class or member.
+    pub reflect: Option<fn(&mut Rt, &str, &str, &[V]) -> Option<V>>,
     /// Registered objects by registry and name (`block`, `create:shaft` → the mod's Block).
     pub registered: HashMap<(String, String), V>,
     /// Suppliers registered and not yet resolved.
@@ -151,6 +156,7 @@ impl Default for Rt {
             vcall: None,
             lambda_call: None,
             overrides: None,
+            reflect: None,
             registered: HashMap::new(),
             suppliers: Vec::new(),
             namespace: String::new(),
@@ -217,8 +223,10 @@ impl Rt {
         {
             return r;
         }
+        // A mod object implementing the interface: dispatch on its class by `name.desc`.
+        let short: &'static str = key.split_once('.').map_or(key, |(_, r)| r);
         match self.vcall {
-            Some(vc) => vc(self, key, key, &all),
+            Some(vc) => vc(self, key, short, &all),
             None => V::Void,
         }
     }
@@ -418,6 +426,16 @@ impl Rt {
             let msg = self.str_of(msg).unwrap_or("").to_owned();
             eprintln!("horizon-compat: uncaught {} in {what}: {msg}", self.class_of(e));
         }
+    }
+
+    /// [`Rt::reflect`]: None without a generated table.
+    pub fn reflect(&mut self, class: &str, what: &str, args: &[V]) -> Option<V> {
+        self.reflect.and_then(|f| f(self, class, what, args))
+    }
+
+    /// Whether `class` is one of the mod's own (translated) classes.
+    pub fn is_mod_class(&self, class: &str) -> bool {
+        self.supers.contains_key(class)
     }
 
     pub fn throw_new(&mut self, class: &'static str) {

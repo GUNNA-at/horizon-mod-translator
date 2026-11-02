@@ -24,6 +24,15 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         "net/minecraft/world/entity/Entity" => c.starts_with("net/minecraft/world/entity/") && !c.contains('$'),
         "java/lang/Throwable" => c.starts_with("java/lang/") && (c.ends_with("Exception") || c.ends_with("Error")),
         "java/lang/Exception" => c.starts_with("java/lang/") && c.ends_with("Exception"),
+        "java/lang/ReflectiveOperationException" => matches!(
+            c,
+            "java/lang/ClassNotFoundException"
+                | "java/lang/InstantiationException"
+                | "java/lang/IllegalAccessException"
+                | "java/lang/NoSuchMethodException"
+                | "java/lang/NoSuchFieldException"
+                | "java/lang/reflect/InvocationTargetException"
+        ),
         "java/lang/RuntimeException" => {
             matches!(c, "java/lang/IllegalArgumentException" | "java/lang/IllegalStateException" | "java/lang/NullPointerException" | "java/lang/UnsupportedOperationException" | "java/lang/ClassCastException" | "java/lang/ArithmeticException" | "java/lang/IndexOutOfBoundsException" | "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/NumberFormatException")
         }
