@@ -138,3 +138,41 @@ pub fn from_runtime(rt: &Rt, v: V) -> BTreeMap<String, Nbt> {
     }
     out
 }
+
+/// A hash of a compound's contents (keys, kinds and values), to tell when data changed.
+pub fn hash(tag: &BTreeMap<String, Nbt>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    fn walk(n: &Nbt, h: &mut std::collections::hash_map::DefaultHasher) {
+        std::mem::discriminant(n).hash(h);
+        match n {
+            Nbt::Byte(v) => v.hash(h),
+            Nbt::Short(v) => v.hash(h),
+            Nbt::Int(v) => v.hash(h),
+            Nbt::Long(v) => v.hash(h),
+            Nbt::Float(v) => v.to_bits().hash(h),
+            Nbt::Double(v) => v.to_bits().hash(h),
+            Nbt::String(v) => v.hash(h),
+            Nbt::List(l) => {
+                l.len().hash(h);
+                l.iter().for_each(|e| walk(e, h));
+            }
+            Nbt::Compound(c) => {
+                c.len().hash(h);
+                for (k, v) in c {
+                    k.hash(h);
+                    walk(v, h);
+                }
+            }
+            Nbt::ByteArray(a) => a.hash(h),
+            Nbt::IntArray(a) => a.hash(h),
+            Nbt::LongArray(a) => a.hash(h),
+        }
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    tag.len().hash(&mut h);
+    for (k, v) in tag {
+        k.hash(&mut h);
+        walk(v, &mut h);
+    }
+    h.finish()
+}

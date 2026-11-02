@@ -295,6 +295,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if let Some(v) = statics(rt, owner, name, desc, args) {
         return Some(v);
     }
+    if matches!(owner, "java/util/concurrent/CompletableFuture" | "java/util/concurrent/Future" | "java/util/concurrent/CompletionStage") {
+        return future_call(rt, name, args);
+    }
     if !util_owner(owner) {
         return None;
     }
@@ -363,6 +366,77 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         's' => stream_call(rt, name, args),
         _ => None,
     }
+}
+
+/// A done `CompletableFuture` holding `value`: work runs at once here (one thread), so every
+/// future is complete when made.
+pub fn completed_future(rt: &mut Rt, value: V) -> V {
+    let f = rt.new_object("java/util/concurrent/CompletableFuture");
+    rt.put_field(f, "$value", value);
+    f
+}
+
+const RUN: &str = "java/lang/Runnable.run.()V";
+const SUPPLY: &str = "java/util/function/Supplier.get.()Ljava/lang/Object;";
+const APPLY: &str = "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
+const ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
+const BI_APPLY: &str = "java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+const BI_ACCEPT: &str = "java/util/function/BiConsumer.accept.(Ljava/lang/Object;Ljava/lang/Object;)V";
+
+/// `CompletableFuture` and its stages, run at once (nothing ever fails asynchronously).
+fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let value = |rt: &Rt| rt.get_field(a(0), "$value");
+    Some(match name {
+        "<init>" => V::Void,
+        "completedFuture" | "completedStage" => completed_future(rt, a(0)),
+        "supplyAsync" => {
+            let v = rt.call_functional(SUPPLY, a(0), &[]);
+            completed_future(rt, v)
+        }
+        "runAsync" => {
+            rt.call_functional(RUN, a(0), &[]);
+            completed_future(rt, V::NULL)
+        }
+        "allOf" | "anyOf" => completed_future(rt, V::NULL),
+        "join" | "get" | "getNow" | "resultNow" => value(rt),
+        "isDone" => V::I(1),
+        "isCancelled" | "isCompletedExceptionally" | "cancel" => V::I(0),
+        "complete" => {
+            rt.put_field(a(0), "$value", a(1));
+            V::I(1)
+        }
+        "thenRun" | "thenRunAsync" => {
+            rt.call_functional(RUN, a(1), &[]);
+            completed_future(rt, V::NULL)
+        }
+        "thenAccept" | "thenAcceptAsync" => {
+            let v = value(rt);
+            rt.call_functional(ACCEPT, a(1), &[v]);
+            completed_future(rt, V::NULL)
+        }
+        "thenApply" | "thenApplyAsync" => {
+            let v = value(rt);
+            let r = rt.call_functional(APPLY, a(1), &[v]);
+            completed_future(rt, r)
+        }
+        "thenCompose" | "thenComposeAsync" => {
+            let v = value(rt);
+            rt.call_functional(APPLY, a(1), &[v])
+        }
+        "handle" | "handleAsync" => {
+            let v = value(rt);
+            let r = rt.call_functional(BI_APPLY, a(1), &[v, V::NULL]);
+            completed_future(rt, r)
+        }
+        "whenComplete" | "whenCompleteAsync" => {
+            let v = value(rt);
+            rt.call_functional(BI_ACCEPT, a(1), &[v, V::NULL]);
+            a(0)
+        }
+        "exceptionally" | "toCompletableFuture" | "orTimeout" => a(0),
+        _ => return None,
+    })
 }
 
 fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {

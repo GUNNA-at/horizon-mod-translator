@@ -1,0 +1,1139 @@
+//! Drawing on the client, natively. Minecraft's rendering API as translated code meets it:
+//! `PoseStack`, JOML's matrices, vectors and quaternions, `Axis`, `RenderType`,
+//! `MultiBufferSource`, the client's `Minecraft` and its block renderer, light and overlay
+//! packing, and block entity renderers' registration (`BlockEntityRenderers.register`).
+//!
+//! Libraries mods draw with get native halves where the translated code would run once per
+//! vertex (the translator's intrinsics, [`INTRINSICS`]): catnip's `SuperByteBuffer` keeps the model
+//! it was made from, its transforms run as catnip wrote them, and `renderInto` is one
+//! [`Host::draw_model`](crate::host::Host::draw_model).
+use crate::host::Model;
+use crate::{Data, Rt, V};
+
+/// A 4x4 matrix, column-major as JOML stores it (`m00 m01 m02 m03` is the first column).
+pub type M4 = [f32; 16];
+type M3 = [f32; 9];
+
+pub const IDENTITY: M4 = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+const IDENTITY3: M3 = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+/// `OverlayTexture.NO_OVERLAY`: `pack(0, 10)`.
+pub const NO_OVERLAY: i32 = 10 << 16;
+/// `LightTexture.FULL_BRIGHT`: block and sky light 15.
+pub const FULL_BRIGHT: i32 = 15 << 4 | 15 << 20;
+
+/// Methods the translator replaces with this module's native ones (their Java bodies would run
+/// per vertex, or reach a GPU backend Horizon draws without).
+pub const INTRINSICS: &[&str] = &[
+    CREATE_FOR_BLOCK,
+    RENDER_INTO,
+    "net/createmod/catnip/render/DefaultSuperByteBuffer.isEmpty.()Z",
+    PARTIAL_GET,
+    SUPPORTS_VISUALIZATION,
+];
+const CREATE_FOR_BLOCK: &str = "net/createmod/catnip/render/SuperBufferFactory.createForBlock.(Lnet/minecraft/client/resources/model/BakedModel;Lnet/minecraft/world/level/block/state/BlockState;Lcom/mojang/blaze3d/vertex/PoseStack;)Lnet/createmod/catnip/render/SuperByteBuffer;";
+const RENDER_INTO: &str = "net/createmod/catnip/render/DefaultSuperByteBuffer.renderInto.(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;)V";
+const PARTIAL_GET: &str = "dev/engine_room/flywheel/lib/model/baked/PartialModel.get.()Lnet/minecraft/client/resources/model/BakedModel;";
+/// Flywheel's instancing needs its GPU backend: off, so mods draw with their block entity renderers.
+const SUPPORTS_VISUALIZATION: &str = "dev/engine_room/flywheel/api/visualization/VisualizationManager.supportsVisualization.(Lnet/minecraft/world/level/LevelAccessor;)Z";
+const SBB: &str = "net/createmod/catnip/render/DefaultSuperByteBuffer";
+const SBB_RESET: &str = "reset.()Lnet/createmod/catnip/render/DefaultSuperByteBuffer;";
+
+// ---- matrix arithmetic ----
+
+/// `a * b`.
+pub fn mul4(a: &M4, b: &M4) -> M4 {
+    let mut r = [0.0; 16];
+    for c in 0..4 {
+        for row in 0..4 {
+            r[c * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[c * 4 + k]).sum();
+        }
+    }
+    r
+}
+
+fn mul3(a: &M3, b: &M3) -> M3 {
+    let mut r = [0.0; 9];
+    for c in 0..3 {
+        for row in 0..3 {
+            r[c * 3 + row] = (0..3).map(|k| a[k * 3 + row] * b[c * 3 + k]).sum();
+        }
+    }
+    r
+}
+
+fn translation(x: f32, y: f32, z: f32) -> M4 {
+    let mut m = IDENTITY;
+    m[12] = x;
+    m[13] = y;
+    m[14] = z;
+    m
+}
+
+fn scaling(x: f32, y: f32, z: f32) -> M4 {
+    let mut m = IDENTITY;
+    m[0] = x;
+    m[5] = y;
+    m[10] = z;
+    m
+}
+
+/// A unit quaternion's rotation as a 3x3 matrix (JOML's `Matrix3f.rotation(Quaternionfc)`).
+fn quat_m3([x, y, z, w]: [f32; 4]) -> M3 {
+    let (w2, x2, y2, z2) = (w * w, x * x, y * y, z * z);
+    let (dzw, dxy, dxz, dyw, dyz, dxw) = (2.0 * z * w, 2.0 * x * y, 2.0 * x * z, 2.0 * y * w, 2.0 * y * z, 2.0 * x * w);
+    [w2 + x2 - z2 - y2, dxy + dzw, dxz - dyw, dxy - dzw, y2 - z2 + w2 - x2, dyz + dxw, dyw + dxz, dyz - dxw, z2 - y2 - x2 + w2]
+}
+
+fn m3_to_m4(m: &M3) -> M4 {
+    [m[0], m[1], m[2], 0.0, m[3], m[4], m[5], 0.0, m[6], m[7], m[8], 0.0, 0.0, 0.0, 0.0, 1.0]
+}
+
+fn m4_to_m3(m: &M4) -> M3 {
+    [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]]
+}
+
+fn quat_m4(q: [f32; 4]) -> M4 {
+    m3_to_m4(&quat_m3(q))
+}
+
+/// `a * b` (JOML's `a.mul(b)`): `b`'s rotation first.
+fn quat_mul([ax, ay, az, aw]: [f32; 4], [bx, by, bz, bw]: [f32; 4]) -> [f32; 4] {
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+}
+
+/// The rotation by `angle` radians about `(x, y, z)` (`rotationAxis`).
+fn quat_axis(angle: f32, x: f32, y: f32, z: f32) -> [f32; 4] {
+    let (s, c) = (angle * 0.5).sin_cos();
+    let len = (x * x + y * y + z * z).sqrt();
+    if len == 0.0 {
+        return [0.0, 0.0, 0.0, 1.0];
+    }
+    [x / len * s, y / len * s, z / len * s, c]
+}
+
+fn quat_x(angle: f32) -> [f32; 4] {
+    quat_axis(angle, 1.0, 0.0, 0.0)
+}
+fn quat_y(angle: f32) -> [f32; 4] {
+    quat_axis(angle, 0.0, 1.0, 0.0)
+}
+fn quat_z(angle: f32) -> [f32; 4] {
+    quat_axis(angle, 0.0, 0.0, 1.0)
+}
+
+/// `v` turned by unit quaternion `q`.
+fn quat_rotate(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    transform3(&quat_m3(q), v)
+}
+
+fn transform3(m: &M3, [x, y, z]: [f32; 3]) -> [f32; 3] {
+    [m[0] * x + m[3] * y + m[6] * z, m[1] * x + m[4] * y + m[7] * z, m[2] * x + m[5] * y + m[8] * z]
+}
+
+fn transform4(m: &M4, [x, y, z, w]: [f32; 4]) -> [f32; 4] {
+    [
+        m[0] * x + m[4] * y + m[8] * z + m[12] * w,
+        m[1] * x + m[5] * y + m[9] * z + m[13] * w,
+        m[2] * x + m[6] * y + m[10] * z + m[14] * w,
+        m[3] * x + m[7] * y + m[11] * z + m[15] * w,
+    ]
+}
+
+/// The general inverse (a singular matrix gives the identity).
+fn invert4(m: &M4) -> M4 {
+    let mut inv = [0.0f32; 16];
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if det == 0.0 {
+        return IDENTITY;
+    }
+    inv.map(|v| v / det)
+}
+
+fn invert3(m: &M3) -> M3 {
+    let [a, b, c, d, e, f, g, h, i] = *m;
+    let det = a * (e * i - f * h) - d * (b * i - c * h) + g * (b * f - c * e);
+    if det == 0.0 {
+        return IDENTITY3;
+    }
+    let r = [e * i - f * h, c * h - b * i, b * f - c * e, f * g - d * i, a * i - c * g, c * d - a * f, d * h - e * g, b * g - a * h, a * e - b * d];
+    r.map(|v| v / det)
+}
+
+fn transpose3(m: &M3) -> M3 {
+    [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
+}
+
+/// The normal matrix of `m` (its upper 3x3's inverse transpose, `Matrix4f.normal`).
+fn normal_of(m: &M4) -> M3 {
+    transpose3(&invert3(&m4_to_m3(m)))
+}
+
+// ---- JOML objects: matrices as float arrays, vectors and quaternions with their public fields ----
+
+fn floats<const N: usize>(rt: &Rt, v: V, default: [f32; N]) -> [f32; N] {
+    match rt.heap.get(v.r() as usize).map(|o| &o.data) {
+        Some(Data::Array(a)) if a.len() == N => std::array::from_fn(|i| a[i].f()),
+        _ => default,
+    }
+}
+
+fn set_floats<const N: usize>(rt: &mut Rt, v: V, m: [f32; N]) {
+    if let Some(o) = rt.heap.get_mut(v.r() as usize) {
+        match &mut o.data {
+            Data::Array(a) if a.len() == N => {
+                for (slot, f) in a.iter_mut().zip(m) {
+                    *slot = V::F(f);
+                }
+            }
+            data => *data = Data::Array(m.iter().map(|f| V::F(*f)).collect()),
+        }
+    }
+}
+
+pub fn mat4(rt: &Rt, v: V) -> M4 {
+    floats(rt, v, IDENTITY)
+}
+fn set_mat4(rt: &mut Rt, v: V, m: M4) {
+    set_floats(rt, v, m);
+}
+pub fn new_mat4(rt: &mut Rt, m: M4) -> V {
+    rt.alloc("org/joml/Matrix4f", Data::Array(m.iter().map(|f| V::F(*f)).collect()))
+}
+fn mat3(rt: &Rt, v: V) -> M3 {
+    floats(rt, v, IDENTITY3)
+}
+fn set_mat3(rt: &mut Rt, v: V, m: M3) {
+    set_floats(rt, v, m);
+}
+fn new_mat3(rt: &mut Rt, m: M3) -> V {
+    rt.alloc("org/joml/Matrix3f", Data::Array(m.iter().map(|f| V::F(*f)).collect()))
+}
+
+fn quat(rt: &Rt, v: V) -> [f32; 4] {
+    [rt.get_field(v, "x").f(), rt.get_field(v, "y").f(), rt.get_field(v, "z").f(), rt.get_field(v, "w").f()]
+}
+fn set_quat(rt: &mut Rt, v: V, [x, y, z, w]: [f32; 4]) {
+    rt.put_field(v, "x", V::F(x));
+    rt.put_field(v, "y", V::F(y));
+    rt.put_field(v, "z", V::F(z));
+    rt.put_field(v, "w", V::F(w));
+}
+pub fn new_quat(rt: &mut Rt, q: [f32; 4]) -> V {
+    let o = rt.new_object("org/joml/Quaternionf");
+    set_quat(rt, o, q);
+    o
+}
+
+fn vec3(rt: &Rt, v: V) -> [f32; 3] {
+    [rt.get_field(v, "x").f(), rt.get_field(v, "y").f(), rt.get_field(v, "z").f()]
+}
+fn set_vec3(rt: &mut Rt, v: V, [x, y, z]: [f32; 3]) {
+    rt.put_field(v, "x", V::F(x));
+    rt.put_field(v, "y", V::F(y));
+    rt.put_field(v, "z", V::F(z));
+}
+fn vec4(rt: &Rt, v: V) -> [f32; 4] {
+    [rt.get_field(v, "x").f(), rt.get_field(v, "y").f(), rt.get_field(v, "z").f(), rt.get_field(v, "w").f()]
+}
+fn set_vec4(rt: &mut Rt, v: V, [x, y, z, w]: [f32; 4]) {
+    rt.put_field(v, "x", V::F(x));
+    rt.put_field(v, "y", V::F(y));
+    rt.put_field(v, "z", V::F(z));
+    rt.put_field(v, "w", V::F(w));
+}
+
+/// The client's calls this module models (`owner.name.desc`), or None.
+pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let (owner, rest) = key.split_once('.')?;
+    let (name, desc) = rest.split_once('.')?;
+    match owner {
+        "org/joml/Matrix4f" | "org/joml/Matrix4fc" => matrix4(rt, name, desc, args),
+        "org/joml/Matrix3f" | "org/joml/Matrix3fc" => matrix3(rt, name, desc, args),
+        "org/joml/Quaternionf" | "org/joml/Quaternionfc" => quaternion(rt, name, desc, args),
+        "org/joml/Vector3f" | "org/joml/Vector3fc" => vector3(rt, name, desc, args),
+        "org/joml/Vector4f" | "org/joml/Vector4fc" => vector4(rt, name, desc, args),
+        "com/mojang/blaze3d/vertex/PoseStack" => pose_stack(rt, name, desc, args),
+        "com/mojang/blaze3d/vertex/PoseStack$Pose" => pose(rt, name, desc, args),
+        "com/mojang/math/Axis" => axis(rt, name, args),
+        _ if INTRINSICS.contains(&key) => intrinsic(rt, key, args),
+        _ => client(rt, owner, name, desc, args),
+    }
+}
+
+/// Static fields this module owns.
+pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    Some(match (owner, field) {
+        ("com/mojang/math/Axis", f) => {
+            let i = ["XN", "XP", "YN", "YP", "ZN", "ZP"].iter().position(|n| *n == f)? as i32;
+            rt.intern(format!("axis/{i}"), |rt| {
+                let o = rt.new_object("com/mojang/math/Axis");
+                rt.put_field(o, "$axis", V::I(i));
+                o
+            })
+        }
+        ("net/minecraft/client/renderer/texture/OverlayTexture", "NO_OVERLAY") => V::I(NO_OVERLAY),
+        ("net/minecraft/client/renderer/texture/OverlayTexture", "NO_WHITE_U") => V::I(0),
+        ("net/minecraft/client/renderer/texture/OverlayTexture", "RED_OVERLAY_V") => V::I(3),
+        ("net/minecraft/client/renderer/texture/OverlayTexture", "WHITE_OVERLAY_V") => V::I(10),
+        ("net/minecraft/client/renderer/LightTexture", "FULL_BRIGHT") => V::I(FULL_BRIGHT),
+        ("net/minecraft/client/renderer/LightTexture", "FULL_SKY") => V::I(15 << 20),
+        ("net/minecraft/client/renderer/LightTexture", "FULL_BLOCK") => V::I(15 << 4),
+        ("net/neoforged/neoforge/client/model/data/ModelData", "EMPTY") => {
+            rt.intern("compat:model-data".into(), |rt| rt.new_object("net/neoforged/neoforge/client/model/data/ModelData"))
+        }
+        _ => return None,
+    })
+}
+
+fn arg(args: &[V], i: usize) -> V {
+    args.get(i).copied().unwrap_or_default()
+}
+
+fn matrix4(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    let m = mat4(rt, this);
+    let set = |rt: &mut Rt, n: M4| {
+        set_mat4(rt, this, n);
+        this
+    };
+    Some(match (name, desc) {
+        ("<init>", "()V") => {
+            set(rt, IDENTITY);
+            V::Void
+        }
+        ("<init>", "(Lorg/joml/Matrix4fc;)V") => {
+            let src = mat4(rt, a(1));
+            set(rt, src);
+            V::Void
+        }
+        ("<init>", "(Lorg/joml/Matrix3fc;)V") => {
+            let src = m3_to_m4(&mat3(rt, a(1)));
+            set(rt, src);
+            V::Void
+        }
+        ("identity", _) => set(rt, IDENTITY),
+        ("set", "(Lorg/joml/Matrix4fc;)Lorg/joml/Matrix4f;") => {
+            let src = mat4(rt, a(1));
+            set(rt, src)
+        }
+        ("mul", "(Lorg/joml/Matrix4fc;)Lorg/joml/Matrix4f;") => {
+            let r = mul4(&m, &mat4(rt, a(1)));
+            set(rt, r)
+        }
+        ("mul", "(Lorg/joml/Matrix4fc;Lorg/joml/Matrix4f;)Lorg/joml/Matrix4f;") => {
+            let r = mul4(&m, &mat4(rt, a(1)));
+            set_mat4(rt, a(2), r);
+            a(2)
+        }
+        ("mulLocal", "(Lorg/joml/Matrix4fc;)Lorg/joml/Matrix4f;") => {
+            let r = mul4(&mat4(rt, a(1)), &m);
+            set(rt, r)
+        }
+        ("translate", "(FFF)Lorg/joml/Matrix4f;") => set(rt, mul4(&m, &translation(a(1).f(), a(2).f(), a(3).f()))),
+        ("translate", "(Lorg/joml/Vector3fc;)Lorg/joml/Matrix4f;") => {
+            let [x, y, z] = vec3(rt, a(1));
+            set(rt, mul4(&m, &translation(x, y, z)))
+        }
+        ("translateLocal", "(FFF)Lorg/joml/Matrix4f;") => set(rt, mul4(&translation(a(1).f(), a(2).f(), a(3).f()), &m)),
+        ("translation", "(FFF)Lorg/joml/Matrix4f;") => set(rt, translation(a(1).f(), a(2).f(), a(3).f())),
+        ("scale", "(FFF)Lorg/joml/Matrix4f;") => set(rt, mul4(&m, &scaling(a(1).f(), a(2).f(), a(3).f()))),
+        ("scale", "(F)Lorg/joml/Matrix4f;") => set(rt, mul4(&m, &scaling(a(1).f(), a(1).f(), a(1).f()))),
+        ("rotate", "(Lorg/joml/Quaternionfc;)Lorg/joml/Matrix4f;") => {
+            let q = quat(rt, a(1));
+            set(rt, mul4(&m, &quat_m4(q)))
+        }
+        ("rotate", "(FFFF)Lorg/joml/Matrix4f;") => set(rt, mul4(&m, &quat_m4(quat_axis(a(1).f(), a(2).f(), a(3).f(), a(4).f())))),
+        ("rotateX", "(F)Lorg/joml/Matrix4f;") => set(rt, mul4(&m, &quat_m4(quat_x(a(1).f())))),
+        ("rotateY", "(F)Lorg/joml/Matrix4f;") => set(rt, mul4(&m, &quat_m4(quat_y(a(1).f())))),
+        ("rotateZ", "(F)Lorg/joml/Matrix4f;") => set(rt, mul4(&m, &quat_m4(quat_z(a(1).f())))),
+        ("rotation", "(Lorg/joml/Quaternionfc;)Lorg/joml/Matrix4f;") => {
+            let q = quat(rt, a(1));
+            set(rt, quat_m4(q))
+        }
+        ("rotateAround", "(Lorg/joml/Quaternionfc;FFF)Lorg/joml/Matrix4f;") => {
+            let q = quat(rt, a(1));
+            let (x, y, z) = (a(2).f(), a(3).f(), a(4).f());
+            set(rt, mul4(&mul4(&mul4(&m, &translation(x, y, z)), &quat_m4(q)), &translation(-x, -y, -z)))
+        }
+        ("invert", "()Lorg/joml/Matrix4f;") => set(rt, invert4(&m)),
+        ("invert", "(Lorg/joml/Matrix4f;)Lorg/joml/Matrix4f;") => {
+            set_mat4(rt, a(1), invert4(&m));
+            a(1)
+        }
+        ("normal", "(Lorg/joml/Matrix3f;)Lorg/joml/Matrix3f;") => {
+            set_mat3(rt, a(1), normal_of(&m));
+            a(1)
+        }
+        ("transformPosition", "(Lorg/joml/Vector3f;)Lorg/joml/Vector3f;") => {
+            let [x, y, z] = vec3(rt, a(1));
+            let [x, y, z, _] = transform4(&m, [x, y, z, 1.0]);
+            set_vec3(rt, a(1), [x, y, z]);
+            a(1)
+        }
+        ("transformDirection", "(Lorg/joml/Vector3f;)Lorg/joml/Vector3f;") => {
+            let [x, y, z] = vec3(rt, a(1));
+            let [x, y, z, _] = transform4(&m, [x, y, z, 0.0]);
+            set_vec3(rt, a(1), [x, y, z]);
+            a(1)
+        }
+        ("transform", "(Lorg/joml/Vector4f;)Lorg/joml/Vector4f;") => {
+            let v = transform4(&m, vec4(rt, a(1)));
+            set_vec4(rt, a(1), v);
+            a(1)
+        }
+        ("getTranslation", "(Lorg/joml/Vector3f;)Lorg/joml/Vector3f;") => {
+            set_vec3(rt, a(1), [m[12], m[13], m[14]]);
+            a(1)
+        }
+        ("get", "([F)[F") => {
+            if let Some(Data::Array(out)) = rt.heap.get_mut(a(1).r() as usize).map(|o| &mut o.data) {
+                for (slot, f) in out.iter_mut().zip(m) {
+                    *slot = V::F(f);
+                }
+            }
+            a(1)
+        }
+        (n, "()F") if n.len() == 3 && n.starts_with('m') => {
+            let b = n.as_bytes();
+            let (c, r) = ((b[1] - b'0') as usize, (b[2] - b'0') as usize);
+            V::F(*m.get(c * 4 + r)?)
+        }
+        _ => return None,
+    })
+}
+
+fn matrix3(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    let m = mat3(rt, this);
+    let set = |rt: &mut Rt, n: M3| {
+        set_mat3(rt, this, n);
+        this
+    };
+    Some(match (name, desc) {
+        ("<init>", "()V") => {
+            set(rt, IDENTITY3);
+            V::Void
+        }
+        ("<init>", "(Lorg/joml/Matrix3fc;)V") => {
+            let src = mat3(rt, a(1));
+            set(rt, src);
+            V::Void
+        }
+        ("<init>", "(Lorg/joml/Matrix4fc;)V") => {
+            let src = m4_to_m3(&mat4(rt, a(1)));
+            set(rt, src);
+            V::Void
+        }
+        ("identity", _) => set(rt, IDENTITY3),
+        ("set", "(Lorg/joml/Matrix3fc;)Lorg/joml/Matrix3f;") => {
+            let src = mat3(rt, a(1));
+            set(rt, src)
+        }
+        ("set", "(Lorg/joml/Matrix4fc;)Lorg/joml/Matrix3f;") => {
+            let src = m4_to_m3(&mat4(rt, a(1)));
+            set(rt, src)
+        }
+        ("mul", "(Lorg/joml/Matrix3fc;)Lorg/joml/Matrix3f;") => {
+            let r = mul3(&m, &mat3(rt, a(1)));
+            set(rt, r)
+        }
+        ("rotate", "(Lorg/joml/Quaternionfc;)Lorg/joml/Matrix3f;") => {
+            let q = quat(rt, a(1));
+            set(rt, mul3(&m, &quat_m3(q)))
+        }
+        ("rotation", "(Lorg/joml/Quaternionfc;)Lorg/joml/Matrix3f;") => {
+            let q = quat(rt, a(1));
+            set(rt, quat_m3(q))
+        }
+        ("scale", "(FFF)Lorg/joml/Matrix3f;") => set(rt, mul3(&m, &[a(1).f(), 0.0, 0.0, 0.0, a(2).f(), 0.0, 0.0, 0.0, a(3).f()])),
+        ("scale", "(F)Lorg/joml/Matrix3f;") => set(rt, mul3(&m, &[a(1).f(), 0.0, 0.0, 0.0, a(1).f(), 0.0, 0.0, 0.0, a(1).f()])),
+        ("invert", "()Lorg/joml/Matrix3f;") => set(rt, invert3(&m)),
+        ("transpose", "()Lorg/joml/Matrix3f;") => set(rt, transpose3(&m)),
+        ("transform", "(Lorg/joml/Vector3f;)Lorg/joml/Vector3f;") => {
+            let v = transform3(&m, vec3(rt, a(1)));
+            set_vec3(rt, a(1), v);
+            a(1)
+        }
+        (n, "()F") if n.len() == 3 && n.starts_with('m') => {
+            let b = n.as_bytes();
+            let (c, r) = ((b[1] - b'0') as usize, (b[2] - b'0') as usize);
+            V::F(*m.get(c * 3 + r)?)
+        }
+        _ => return None,
+    })
+}
+
+fn quaternion(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    let q = quat(rt, this);
+    let set = |rt: &mut Rt, n: [f32; 4]| {
+        set_quat(rt, this, n);
+        this
+    };
+    let f = |i| a(i).f();
+    Some(match (name, desc) {
+        ("<init>", "()V") => {
+            set(rt, [0.0, 0.0, 0.0, 1.0]);
+            V::Void
+        }
+        ("<init>", "(FFFF)V") => {
+            set(rt, [f(1), f(2), f(3), f(4)]);
+            V::Void
+        }
+        ("<init>", "(Lorg/joml/Quaternionfc;)V") => {
+            let src = quat(rt, a(1));
+            set(rt, src);
+            V::Void
+        }
+        ("identity", _) => set(rt, [0.0, 0.0, 0.0, 1.0]),
+        ("set", "(Lorg/joml/Quaternionfc;)Lorg/joml/Quaternionf;") => {
+            let src = quat(rt, a(1));
+            set(rt, src)
+        }
+        ("set", "(FFFF)Lorg/joml/Quaternionf;") => set(rt, [f(1), f(2), f(3), f(4)]),
+        ("mul", "(Lorg/joml/Quaternionfc;)Lorg/joml/Quaternionf;") => {
+            let r = quat_mul(q, quat(rt, a(1)));
+            set(rt, r)
+        }
+        ("mul", "(Lorg/joml/Quaternionfc;Lorg/joml/Quaternionf;)Lorg/joml/Quaternionf;") => {
+            let r = quat_mul(q, quat(rt, a(1)));
+            set_quat(rt, a(2), r);
+            a(2)
+        }
+        ("premul", "(Lorg/joml/Quaternionfc;)Lorg/joml/Quaternionf;") => {
+            let r = quat_mul(quat(rt, a(1)), q);
+            set(rt, r)
+        }
+        ("rotationX", _) => set(rt, quat_x(f(1))),
+        ("rotationY", _) => set(rt, quat_y(f(1))),
+        ("rotationZ", _) => set(rt, quat_z(f(1))),
+        ("rotateX", "(F)Lorg/joml/Quaternionf;") => set(rt, quat_mul(q, quat_x(f(1)))),
+        ("rotateY", "(F)Lorg/joml/Quaternionf;") => set(rt, quat_mul(q, quat_y(f(1)))),
+        ("rotateZ", "(F)Lorg/joml/Quaternionf;") => set(rt, quat_mul(q, quat_z(f(1)))),
+        ("rotationXYZ", "(FFF)Lorg/joml/Quaternionf;") => set(rt, quat_mul(quat_mul(quat_x(f(1)), quat_y(f(2))), quat_z(f(3)))),
+        ("rotationYXZ", "(FFF)Lorg/joml/Quaternionf;") => set(rt, quat_mul(quat_mul(quat_y(f(1)), quat_x(f(2))), quat_z(f(3)))),
+        ("rotationZYX", "(FFF)Lorg/joml/Quaternionf;") => set(rt, quat_mul(quat_mul(quat_z(f(1)), quat_y(f(2))), quat_x(f(3)))),
+        ("rotateXYZ", "(FFF)Lorg/joml/Quaternionf;") => set(rt, quat_mul(q, quat_mul(quat_mul(quat_x(f(1)), quat_y(f(2))), quat_z(f(3))))),
+        ("rotateYXZ", "(FFF)Lorg/joml/Quaternionf;") => set(rt, quat_mul(q, quat_mul(quat_mul(quat_y(f(1)), quat_x(f(2))), quat_z(f(3))))),
+        ("rotateZYX", "(FFF)Lorg/joml/Quaternionf;") => set(rt, quat_mul(q, quat_mul(quat_mul(quat_z(f(1)), quat_y(f(2))), quat_x(f(3))))),
+        ("rotationAxis", "(FFFF)Lorg/joml/Quaternionf;") => set(rt, quat_axis(f(1), f(2), f(3), f(4))),
+        ("rotationAxis", "(FLorg/joml/Vector3fc;)Lorg/joml/Quaternionf;") => {
+            let [x, y, z] = vec3(rt, a(2));
+            set(rt, quat_axis(f(1), x, y, z))
+        }
+        ("rotateAxis", "(FFFF)Lorg/joml/Quaternionf;") => set(rt, quat_mul(q, quat_axis(f(1), f(2), f(3), f(4)))),
+        ("rotateAxis", "(FLorg/joml/Vector3fc;)Lorg/joml/Quaternionf;") => {
+            let [x, y, z] = vec3(rt, a(2));
+            set(rt, quat_mul(q, quat_axis(f(1), x, y, z)))
+        }
+        ("fromAxisAngleRad", "(FFFF)Lorg/joml/Quaternionf;") => set(rt, quat_axis(f(4), f(1), f(2), f(3))),
+        ("fromAxisAngleDeg", "(FFFF)Lorg/joml/Quaternionf;") => set(rt, quat_axis(f(4).to_radians(), f(1), f(2), f(3))),
+        ("conjugate", "()Lorg/joml/Quaternionf;") => set(rt, [-q[0], -q[1], -q[2], q[3]]),
+        ("invert", "()Lorg/joml/Quaternionf;") => {
+            let n = q.iter().map(|v| v * v).sum::<f32>();
+            let n = if n == 0.0 { 1.0 } else { n };
+            set(rt, [-q[0] / n, -q[1] / n, -q[2] / n, q[3] / n])
+        }
+        ("normalize", "()Lorg/joml/Quaternionf;") => {
+            let n = q.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let n = if n == 0.0 { 1.0 } else { n };
+            set(rt, q.map(|v| v / n))
+        }
+        ("transform", "(Lorg/joml/Vector3f;)Lorg/joml/Vector3f;") => {
+            let v = quat_rotate(q, vec3(rt, a(1)));
+            set_vec3(rt, a(1), v);
+            a(1)
+        }
+        ("x", "()F") => V::F(q[0]),
+        ("y", "()F") => V::F(q[1]),
+        ("z", "()F") => V::F(q[2]),
+        ("w", "()F") => V::F(q[3]),
+        _ => return None,
+    })
+}
+
+fn vector3(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    let v = vec3(rt, this);
+    let set = |rt: &mut Rt, n: [f32; 3]| {
+        set_vec3(rt, this, n);
+        this
+    };
+    let f = |i| a(i).f();
+    Some(match (name, desc) {
+        ("<init>", "()V") => {
+            set(rt, [0.0; 3]);
+            V::Void
+        }
+        ("<init>", "(FFF)V") => {
+            set(rt, [f(1), f(2), f(3)]);
+            V::Void
+        }
+        ("<init>", "(F)V") => {
+            set(rt, [f(1); 3]);
+            V::Void
+        }
+        ("<init>", "(Lorg/joml/Vector3fc;)V") => {
+            let src = vec3(rt, a(1));
+            set(rt, src);
+            V::Void
+        }
+        ("set", "(FFF)Lorg/joml/Vector3f;") => set(rt, [f(1), f(2), f(3)]),
+        ("set", "(Lorg/joml/Vector3fc;)Lorg/joml/Vector3f;") => {
+            let src = vec3(rt, a(1));
+            set(rt, src)
+        }
+        ("zero", _) => set(rt, [0.0; 3]),
+        ("x", "()F") => V::F(v[0]),
+        ("y", "()F") => V::F(v[1]),
+        ("z", "()F") => V::F(v[2]),
+        ("add", "(FFF)Lorg/joml/Vector3f;") => set(rt, [v[0] + f(1), v[1] + f(2), v[2] + f(3)]),
+        ("add", "(Lorg/joml/Vector3fc;)Lorg/joml/Vector3f;") => {
+            let o = vec3(rt, a(1));
+            set(rt, [v[0] + o[0], v[1] + o[1], v[2] + o[2]])
+        }
+        ("sub", "(FFF)Lorg/joml/Vector3f;") => set(rt, [v[0] - f(1), v[1] - f(2), v[2] - f(3)]),
+        ("sub", "(Lorg/joml/Vector3fc;)Lorg/joml/Vector3f;") => {
+            let o = vec3(rt, a(1));
+            set(rt, [v[0] - o[0], v[1] - o[1], v[2] - o[2]])
+        }
+        ("mul", "(F)Lorg/joml/Vector3f;") => set(rt, v.map(|c| c * f(1))),
+        ("mul", "(FFF)Lorg/joml/Vector3f;") => set(rt, [v[0] * f(1), v[1] * f(2), v[2] * f(3)]),
+        ("mul", "(Lorg/joml/Vector3fc;)Lorg/joml/Vector3f;") => {
+            let o = vec3(rt, a(1));
+            set(rt, [v[0] * o[0], v[1] * o[1], v[2] * o[2]])
+        }
+        ("mul", "(Lorg/joml/Matrix3fc;)Lorg/joml/Vector3f;") | ("transform", "(Lorg/joml/Matrix3fc;)Lorg/joml/Vector3f;") => {
+            let m = mat3(rt, a(1));
+            set(rt, transform3(&m, v))
+        }
+        ("rotate", "(Lorg/joml/Quaternionfc;)Lorg/joml/Vector3f;") => {
+            let q = quat(rt, a(1));
+            set(rt, quat_rotate(q, v))
+        }
+        ("negate", "()Lorg/joml/Vector3f;") => set(rt, v.map(|c| -c)),
+        ("normalize", "()Lorg/joml/Vector3f;") => {
+            let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            set(rt, if n == 0.0 { v } else { v.map(|c| c / n) })
+        }
+        ("length", "()F") => V::F((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()),
+        ("lengthSquared", "()F") => V::F(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]),
+        ("dot", "(Lorg/joml/Vector3fc;)F") => {
+            let o = vec3(rt, a(1));
+            V::F(v[0] * o[0] + v[1] * o[1] + v[2] * o[2])
+        }
+        ("cross", "(Lorg/joml/Vector3fc;)Lorg/joml/Vector3f;") => {
+            let o = vec3(rt, a(1));
+            set(rt, [v[1] * o[2] - v[2] * o[1], v[2] * o[0] - v[0] * o[2], v[0] * o[1] - v[1] * o[0]])
+        }
+        ("distance", "(Lorg/joml/Vector3fc;)F") => {
+            let o = vec3(rt, a(1));
+            V::F(((v[0] - o[0]).powi(2) + (v[1] - o[1]).powi(2) + (v[2] - o[2]).powi(2)).sqrt())
+        }
+        ("lerp", "(Lorg/joml/Vector3fc;F)Lorg/joml/Vector3f;") => {
+            let o = vec3(rt, a(1));
+            let t = f(2);
+            set(rt, [v[0] + (o[0] - v[0]) * t, v[1] + (o[1] - v[1]) * t, v[2] + (o[2] - v[2]) * t])
+        }
+        _ => return None,
+    })
+}
+
+fn vector4(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    let v = vec4(rt, this);
+    let set = |rt: &mut Rt, n: [f32; 4]| {
+        set_vec4(rt, this, n);
+        this
+    };
+    let f = |i| a(i).f();
+    Some(match (name, desc) {
+        ("<init>", "()V") => {
+            set(rt, [0.0, 0.0, 0.0, 1.0]);
+            V::Void
+        }
+        ("<init>", "(FFFF)V") => {
+            set(rt, [f(1), f(2), f(3), f(4)]);
+            V::Void
+        }
+        ("set", "(FFFF)Lorg/joml/Vector4f;") => set(rt, [f(1), f(2), f(3), f(4)]),
+        ("mul", "(Lorg/joml/Matrix4fc;)Lorg/joml/Vector4f;") => {
+            let m = mat4(rt, a(1));
+            set(rt, transform4(&m, v))
+        }
+        ("x", "()F") => V::F(v[0]),
+        ("y", "()F") => V::F(v[1]),
+        ("z", "()F") => V::F(v[2]),
+        ("w", "()F") => V::F(v[3]),
+        _ => return None,
+    })
+}
+
+// ---- PoseStack: a list of poses, each a pose matrix and a normal matrix ----
+
+fn new_pose(rt: &mut Rt, m: M4, n: M3) -> V {
+    let pm = new_mat4(rt, m);
+    let nm = new_mat3(rt, n);
+    let p = rt.new_object("com/mojang/blaze3d/vertex/PoseStack$Pose");
+    rt.put_field(p, "pose", pm);
+    rt.put_field(p, "normal", nm);
+    p
+}
+
+/// A new `PoseStack` at `m` (the identity for vanilla's constructor).
+pub fn new_pose_stack(rt: &mut Rt, m: M4) -> V {
+    let p = new_pose(rt, m, normal_of(&m));
+    rt.alloc("com/mojang/blaze3d/vertex/PoseStack", Data::List(vec![p]))
+}
+
+fn poses(rt: &Rt, stack: V) -> Vec<V> {
+    match rt.heap.get(stack.r() as usize).map(|o| &o.data) {
+        Some(Data::List(l)) => l.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// The top pose of `stack` (`PoseStack.last()`).
+fn last(rt: &Rt, stack: V) -> V {
+    match rt.heap.get(stack.r() as usize).map(|o| &o.data) {
+        Some(Data::List(l)) => l.last().copied().unwrap_or_default(),
+        _ => V::NULL,
+    }
+}
+
+/// `stack.last().pose()` as a matrix.
+pub fn last_pose(rt: &Rt, stack: V) -> M4 {
+    let p = last(rt, stack);
+    mat4(rt, rt.get_field(p, "pose"))
+}
+
+fn pose_mats(rt: &Rt, p: V) -> (V, V) {
+    (rt.get_field(p, "pose"), rt.get_field(p, "normal"))
+}
+
+fn pose_stack(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    if name == "<init>" {
+        let p = new_pose(rt, IDENTITY, IDENTITY3);
+        if let Some(o) = rt.heap.get_mut(this.r() as usize) {
+            o.data = Data::List(vec![p]);
+        }
+        return Some(V::Void);
+    }
+    let top = last(rt, this);
+    let (pm, nm) = pose_mats(rt, top);
+    let (m, n) = (mat4(rt, pm), mat3(rt, nm));
+    Some(match (name, desc) {
+        ("pushPose", _) => {
+            let copy = new_pose(rt, m, n);
+            if let Some(Data::List(l)) = rt.heap.get_mut(this.r() as usize).map(|o| &mut o.data) {
+                l.push(copy);
+            }
+            V::Void
+        }
+        ("popPose", _) => {
+            if let Some(Data::List(l)) = rt.heap.get_mut(this.r() as usize).map(|o| &mut o.data)
+                && l.len() > 1
+            {
+                l.pop();
+            }
+            V::Void
+        }
+        ("last", _) => top,
+        ("clear" | "isEmpty", "()Z") => V::I((poses(rt, this).len() <= 1) as i32),
+        ("setIdentity", _) => {
+            set_mat4(rt, pm, IDENTITY);
+            set_mat3(rt, nm, IDENTITY3);
+            V::Void
+        }
+        ("translate", "(DDD)V") => {
+            set_mat4(rt, pm, mul4(&m, &translation(a(1).d() as f32, a(2).d() as f32, a(3).d() as f32)));
+            V::Void
+        }
+        ("translate", "(FFF)V") => {
+            set_mat4(rt, pm, mul4(&m, &translation(a(1).f(), a(2).f(), a(3).f())));
+            V::Void
+        }
+        ("translate", "(Lnet/minecraft/world/phys/Vec3;)V") => {
+            let to = ["x", "y", "z"].map(|c| rt.get_field(a(1), c).d() as f32);
+            set_mat4(rt, pm, mul4(&m, &translation(to[0], to[1], to[2])));
+            V::Void
+        }
+        ("scale", "(FFF)V") => {
+            let (x, y, z) = (a(1).f(), a(2).f(), a(3).f());
+            set_mat4(rt, pm, mul4(&m, &scaling(x, y, z)));
+            // PoseStack.scale: a uniform scale keeps normals (but for their sign), any other
+            // divides them.
+            if x.abs() == y.abs() && y.abs() == z.abs() {
+                if x < 0.0 || y < 0.0 || z < 0.0 {
+                    set_mat3(rt, nm, mul3(&n, &[x.signum(), 0.0, 0.0, 0.0, y.signum(), 0.0, 0.0, 0.0, z.signum()]));
+                }
+            } else {
+                set_mat3(rt, nm, mul3(&n, &[1.0 / x, 0.0, 0.0, 0.0, 1.0 / y, 0.0, 0.0, 0.0, 1.0 / z]));
+            }
+            V::Void
+        }
+        ("mulPose", "(Lorg/joml/Quaternionf;)V" | "(Lorg/joml/Quaternionfc;)V") => {
+            let q = quat(rt, a(1));
+            set_mat4(rt, pm, mul4(&m, &quat_m4(q)));
+            set_mat3(rt, nm, mul3(&n, &quat_m3(q)));
+            V::Void
+        }
+        ("mulPose", "(Lorg/joml/Matrix4f;)V" | "(Lorg/joml/Matrix4fc;)V") => {
+            let by = mat4(rt, a(1));
+            let r = mul4(&m, &by);
+            set_mat4(rt, pm, r);
+            set_mat3(rt, nm, normal_of(&r));
+            V::Void
+        }
+        ("rotateAround", "(Lorg/joml/Quaternionf;FFF)V" | "(Lorg/joml/Quaternionfc;FFF)V") => {
+            let q = quat(rt, a(1));
+            let (x, y, z) = (a(2).f(), a(3).f(), a(4).f());
+            set_mat4(rt, pm, mul4(&mul4(&mul4(&m, &translation(x, y, z)), &quat_m4(q)), &translation(-x, -y, -z)));
+            set_mat3(rt, nm, mul3(&n, &quat_m3(q)));
+            V::Void
+        }
+        _ => return None,
+    })
+}
+
+fn pose(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    let (pm, nm) = pose_mats(rt, this);
+    Some(match (name, desc) {
+        ("pose", _) => pm,
+        ("normal", _) => nm,
+        ("copy", _) => {
+            let (m, n) = (mat4(rt, pm), mat3(rt, nm));
+            new_pose(rt, m, n)
+        }
+        ("transformNormal", "(FFFLorg/joml/Vector3f;)Lorg/joml/Vector3f;") => {
+            let n = mat3(rt, nm);
+            let v = transform3(&n, [a(1).f(), a(2).f(), a(3).f()]);
+            set_vec3(rt, a(4), v);
+            a(4)
+        }
+        _ => return None,
+    })
+}
+
+/// `Axis.XP.rotationDegrees(90)` and the like: a quaternion about a fixed axis.
+fn axis(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let angle = match name {
+        "rotation" => a(1).f(),
+        "rotationDegrees" => a(1).f().to_radians(),
+        "of" => {
+            let [x, y, z] = vec3(rt, a(0));
+            let o = rt.new_object("com/mojang/math/Axis");
+            rt.put_field(o, "$axis", V::I(6));
+            set_vec3(rt, o, [x, y, z]);
+            return Some(o);
+        }
+        _ => return None,
+    };
+    let q = match rt.get_field(a(0), "$axis").i() {
+        0 => quat_x(-angle),
+        1 => quat_x(angle),
+        2 => quat_y(-angle),
+        3 => quat_y(angle),
+        4 => quat_z(-angle),
+        5 => quat_z(angle),
+        _ => {
+            let [x, y, z] = vec3(rt, a(0));
+            quat_axis(angle, x, y, z)
+        }
+    };
+    Some(new_quat(rt, q))
+}
+
+// ---- the client: Minecraft, its renderers, render types, buffers ----
+
+/// The interned object for a client singleton (`Minecraft`, its block renderer...).
+fn single(rt: &mut Rt, class: &'static str) -> V {
+    rt.intern(format!("client/{class}"), |rt| rt.new_object(class))
+}
+
+/// A `RenderType` by name (`solid`, `cutout_mipped`, `entity_cutout`...): one object each.
+pub fn render_type(rt: &mut Rt, name: &str) -> V {
+    let n = name.to_owned();
+    rt.intern(format!("render-type/{name}"), move |rt| {
+        let o = rt.new_object("net/minecraft/client/renderer/RenderType");
+        let s = rt.string(&n);
+        rt.put_field(o, "$name", s);
+        o
+    })
+}
+
+/// `RenderType.chunkBufferLayers()`, in vanilla's order.
+const CHUNK_LAYERS: [&str; 5] = ["solid", "cutout_mipped", "cutout", "translucent", "tripwire"];
+
+/// snake_case of a `RenderType` factory's name (`cutoutMipped` → `cutout_mipped`).
+fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_uppercase() {
+            out.push('_');
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    Some(match (owner, name) {
+        ("net/minecraft/client/Minecraft", "getInstance") => {
+            let mc = single(rt, "net/minecraft/client/Minecraft");
+            // Its public fields: the level this client draws.
+            if rt.get_field(mc, "level").r() == 0 && crate::neo::is_client(rt) {
+                let level = crate::glue::level(rt);
+                rt.put_field(mc, "level", level);
+            }
+            mc
+        }
+        ("net/minecraft/client/Minecraft", "getBlockRenderer") => single(rt, "net/minecraft/client/renderer/block/BlockRenderDispatcher"),
+        ("net/minecraft/client/Minecraft", "getTimer") => single(rt, "net/minecraft/client/DeltaTracker"),
+        ("net/minecraft/client/Minecraft", "getModelManager") => single(rt, "net/minecraft/client/resources/model/ModelManager"),
+        ("net/minecraft/client/Minecraft", "getItemRenderer") => single(rt, "net/minecraft/client/renderer/entity/ItemRenderer"),
+        ("net/minecraft/client/Minecraft", "getBlockEntityRenderDispatcher") => {
+            single(rt, "net/minecraft/client/renderer/blockentity/BlockEntityRenderDispatcher")
+        }
+        ("net/minecraft/client/Minecraft", "getEntityRenderDispatcher") => single(rt, "net/minecraft/client/renderer/entity/EntityRenderDispatcher"),
+        ("net/minecraft/client/Minecraft", "isPaused") => V::I(0),
+        ("net/minecraft/client/Minecraft", "isSameThread") => V::I(1),
+        ("net/minecraft/client/DeltaTracker" | "net/minecraft/client/DeltaTracker$Timer", n) => match n {
+            "getGameTimeDeltaPartialTick" => V::F(rt.host().map_or(0.0, |h| h.partial_tick())),
+            "getGameTimeDeltaTicks" | "getRealtimeDeltaTicks" => V::F(1.0),
+            _ => return None,
+        },
+        // A block state's model: drawn by the host when a buffer made from it is.
+        ("net/minecraft/client/renderer/block/BlockRenderDispatcher", "getBlockModel") => {
+            let m = rt.new_object("net/minecraft/client/resources/model/BakedModel");
+            rt.put_field(m, "$state", a(1));
+            m
+        }
+        ("net/minecraft/client/resources/model/BakedModel", n) => match n {
+            "getRenderTypes" => single(rt, "net/neoforged/neoforge/client/ChunkRenderTypeSet"),
+            "useAmbientOcclusion" | "isGui3d" | "usesBlockLight" => V::I(1),
+            "isCustomRenderer" => V::I(0),
+            "getQuads" => crate::jutil::new_list(rt, Vec::new()),
+            "getModelData" => a(4),
+            _ => return None,
+        },
+        // Blocks draw in the solid layer here (the host picks its own passes).
+        ("net/neoforged/neoforge/client/ChunkRenderTypeSet", n) => match n {
+            "contains" => V::I((rt.str_of(rt.get_field(a(1), "$name")) == Some("solid")) as i32),
+            "isEmpty" => V::I(0),
+            "asList" => {
+                let solid = render_type(rt, "solid");
+                crate::jutil::new_list(rt, vec![solid])
+            }
+            "iterator" => {
+                let solid = render_type(rt, "solid");
+                crate::jutil::new_iter(rt, vec![solid])
+            }
+            _ => return None,
+        },
+        ("net/minecraft/client/renderer/RenderType", "chunkBufferLayers") => {
+            let layers: Vec<V> = CHUNK_LAYERS.iter().map(|n| render_type(rt, n)).collect();
+            crate::jutil::new_list(rt, layers)
+        }
+        // Any other factory (`solid()`, `entityCutout(texture)`...) names its type.
+        ("net/minecraft/client/renderer/RenderType", n) if desc.ends_with(")Lnet/minecraft/client/renderer/RenderType;") => {
+            let n = if n == "create" { rt.str_of(a(0)).unwrap_or("custom").to_owned() } else { snake(n) };
+            render_type(rt, &n)
+        }
+        ("net/minecraft/client/renderer/RenderType", "toString" | "name") => rt.get_field(a(0), "$name"),
+        ("net/minecraft/client/renderer/MultiBufferSource" | "net/minecraft/client/renderer/MultiBufferSource$BufferSource", "getBuffer") => {
+            let ty = a(1);
+            rt.intern(format!("consumer/{}", ty.r()), |rt| {
+                let c = rt.new_object("com/mojang/blaze3d/vertex/VertexConsumer");
+                rt.put_field(c, "$type", ty);
+                c
+            })
+        }
+        // Vertices written one by one are not drawn yet; the consumer chains as vanilla's does.
+        ("com/mojang/blaze3d/vertex/VertexConsumer", _) => {
+            if desc.ends_with(")V") {
+                V::Void
+            } else {
+                a(0)
+            }
+        }
+        ("net/minecraft/client/renderer/texture/OverlayTexture", "pack") => {
+            if desc == "(II)I" {
+                V::I(a(0).i() | a(1).i() << 16)
+            } else {
+                V::I((a(0).f() * 15.0) as i32 | (if a(1).i() != 0 { 3 } else { 10 }) << 16)
+            }
+        }
+        ("net/minecraft/client/renderer/texture/OverlayTexture", "u") => V::I((a(0).f() * 15.0) as i32),
+        ("net/minecraft/client/renderer/texture/OverlayTexture", "v") => V::I(if a(0).i() != 0 { 3 } else { 10 }),
+        ("net/minecraft/client/renderer/LightTexture", "pack") => V::I(a(0).i() << 4 | a(1).i() << 20),
+        ("net/minecraft/client/renderer/LightTexture", "block") => V::I(a(0).i() >> 4 & 0xFFFF),
+        ("net/minecraft/client/renderer/LightTexture", "sky") => V::I(a(0).i() >> 20 & 0xFFFF),
+        // Block entity renderers, by their block entity type's registered name.
+        ("net/minecraft/client/renderer/blockentity/BlockEntityRenderers", "register")
+        | ("net/neoforged/neoforge/client/event/EntityRenderersEvent$RegisterRenderers", "registerBlockEntityRenderer") => {
+            let (ty, provider) = if owner.ends_with("BlockEntityRenderers") { (a(0), a(1)) } else { (a(1), a(2)) };
+            if let Some(id) = rt.registered_name(ty, "block_entity_type").map(str::to_owned) {
+                rt.interned.insert(format!("ber/{id}"), provider);
+            }
+            V::Void
+        }
+        ("net/minecraft/client/renderer/blockentity/BlockEntityRendererProvider$Context", n) => match n {
+            "getBlockRenderDispatcher" => single(rt, "net/minecraft/client/renderer/block/BlockRenderDispatcher"),
+            "getBlockEntityRenderDispatcher" => single(rt, "net/minecraft/client/renderer/blockentity/BlockEntityRenderDispatcher"),
+            "getItemRenderer" => single(rt, "net/minecraft/client/renderer/entity/ItemRenderer"),
+            "getEntityRenderer" => single(rt, "net/minecraft/client/renderer/entity/EntityRenderDispatcher"),
+            "getModelSet" => single(rt, "net/minecraft/client/model/geom/EntityModelSet"),
+            "getFont" => single(rt, "net/minecraft/client/gui/Font"),
+            "bakeLayer" => rt.new_object("net/minecraft/client/model/geom/ModelPart"),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+// ---- intrinsics ----
+
+fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    Some(match key {
+        // `SuperBufferFactory.createForBlock(model, state, poseStack)`: catnip's buffer, keeping the
+        // model and the pose it was made under instead of its vertices (as the constructor sets it
+        // up otherwise: no overlay, a shift output, a transform stack one pose deep).
+        CREATE_FOR_BLOCK => {
+            let base = last_pose(rt, a(3));
+            let sbb = rt.new_object(SBB);
+            rt.put_field(sbb, "overlay", V::I(NO_OVERLAY));
+            let shift = rt.new_object("net/createmod/catnip/render/SuperByteBuffer$ShiftOutput");
+            rt.put_field(sbb, "shiftOutput", shift);
+            let transforms = new_pose_stack(rt, IDENTITY);
+            pose_stack(rt, "pushPose", "()V", &[transforms]);
+            rt.put_field(sbb, "transforms", transforms);
+            rt.put_field(sbb, "$model", a(1));
+            let base = new_mat4(rt, base);
+            rt.put_field(sbb, "$base", base);
+            sbb
+        }
+        // `renderInto(poseStack, consumer)`: the model once, under the stack's pose and the buffer's
+        // transforms, coloured and lit as catnip would each vertex; then `reset()`, as catnip does.
+        RENDER_INTO => {
+            let this = a(0);
+            let outer = last_pose(rt, a(1));
+            let inner = last_pose(rt, rt.get_field(this, "transforms"));
+            let base = mat4(rt, rt.get_field(this, "$base"));
+            let m = mul4(&mul4(&outer, &inner), &base);
+            let color = if rt.get_field(this, "shouldColor").i() != 0 {
+                let c = |f| rt.get_field(this, f).i().clamp(0, 255) as u32;
+                c("a") << 24 | c("r") << 16 | c("g") << 8 | c("b")
+            } else {
+                0xFFFF_FFFF
+            };
+            let light = if rt.get_field(this, "hasCustomLight").i() != 0 { rt.get_field(this, "packedLightCoordinates").i() } else { 0 };
+            let model = rt.get_field(this, "$model");
+            if let Some(model) = model_of(rt, model)
+                && let Some(h) = rt.host_mut()
+            {
+                h.draw_model(&model, &m, color, light as u32);
+            }
+            if let Some(vc) = rt.vcall {
+                vc(rt, SBB_RESET, SBB_RESET, &[this]);
+            }
+            V::Void
+        }
+        "net/createmod/catnip/render/DefaultSuperByteBuffer.isEmpty.()Z" => V::I(model_of(rt, rt.get_field(a(0), "$model")).is_none() as i32),
+        // `PartialModel.get()`: the model at its location, baked by the host on first draw.
+        PARTIAL_GET => {
+            let location = rt.get_field(a(0), "modelLocation");
+            let m = rt.new_object("net/minecraft/client/resources/model/BakedModel");
+            rt.put_field(m, "$name", location);
+            m
+        }
+        SUPPORTS_VISUALIZATION => V::I(0),
+        _ => return None,
+    })
+}
+
+/// What a `BakedModel` object draws: a block state's model or a model by location.
+fn model_of(rt: &Rt, model: V) -> Option<Model> {
+    if let Some(s) = rt.str_of(rt.get_field(model, "$state")) {
+        return Some(Model::State(s.to_owned()));
+    }
+    rt.str_of(rt.get_field(model, "$name")).map(|n| Model::Named(n.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: &[f32], b: &[f32]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    #[test]
+    fn rotations_turn_counterclockwise_seen_from_the_positive_axis() {
+        // A quarter turn about +Y takes +X to -Z (JOML, Minecraft's `Axis.YP`).
+        assert!(close(&quat_rotate(quat_y(std::f32::consts::FRAC_PI_2), [1.0, 0.0, 0.0]), &[0.0, 0.0, -1.0]));
+        // About +Z, +X goes to +Y; about +X, +Y goes to +Z.
+        assert!(close(&quat_rotate(quat_z(std::f32::consts::FRAC_PI_2), [1.0, 0.0, 0.0]), &[0.0, 1.0, 0.0]));
+        assert!(close(&quat_rotate(quat_x(std::f32::consts::FRAC_PI_2), [0.0, 1.0, 0.0]), &[0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn pose_stack_composes_as_vanilla() {
+        let mut rt = Rt::new();
+        let ps = new_pose_stack(&mut rt, IDENTITY);
+        pose_stack(&mut rt, "translate", "(FFF)V", &[ps, V::F(0.5), V::F(0.5), V::F(0.5)]);
+        pose_stack(&mut rt, "pushPose", "()V", &[ps]);
+        let q = new_quat(&mut rt, quat_z(std::f32::consts::FRAC_PI_2));
+        pose_stack(&mut rt, "mulPose", "(Lorg/joml/Quaternionf;)V", &[ps, q]);
+        pose_stack(&mut rt, "translate", "(FFF)V", &[ps, V::F(-0.5), V::F(-0.5), V::F(-0.5)]);
+        // The block's corner (0, 0, 0) turned a quarter about the block's centre's z axis.
+        let [x, y, z, _] = transform4(&last_pose(&rt, ps), [0.0, 0.0, 0.0, 1.0]);
+        assert!(close(&[x, y, z], &[1.0, 0.0, 0.0]));
+        pose_stack(&mut rt, "popPose", "()V", &[ps]);
+        let [x, y, z, _] = transform4(&last_pose(&rt, ps), [0.0, 0.0, 0.0, 1.0]);
+        assert!(close(&[x, y, z], &[0.5, 0.5, 0.5]));
+        assert_eq!(pose_stack(&mut rt, "clear", "()Z", &[ps]), Some(V::I(1)));
+    }
+
+    #[test]
+    fn inverse_undoes() {
+        let m = mul4(&mul4(&translation(1.0, 2.0, 3.0), &quat_m4(quat_axis(0.7, 1.0, 2.0, 0.5))), &scaling(2.0, 2.0, 2.0));
+        assert!(close(&mul4(&m, &invert4(&m)), &IDENTITY));
+    }
+}

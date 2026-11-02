@@ -41,8 +41,10 @@ pub fn level(rt: &mut Rt) -> V {
     if let Some(l) = rt.interned.get("compat:level") {
         return *l;
     }
-    let l = rt.new_object("net/minecraft/server/level/ServerLevel");
-    rt.put_field(l, "isClientSide", V::I(0));
+    // The client's runtime (the render thread's) draws a client level.
+    let client = crate::neo::is_client(rt);
+    let l = rt.new_object(if client { "net/minecraft/client/multiplayer/ClientLevel" } else { "net/minecraft/server/level/ServerLevel" });
+    rt.put_field(l, "isClientSide", V::I(client as i32));
     rt.interned.insert("compat:level".into(), l);
     // Loading it, mods hear `LevelEvent.Load` (Create sets up its kinetic networks there).
     let ev = rt.new_object(LEVEL_LOAD);
@@ -226,4 +228,129 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
         rt.report_thrown("a right click");
         took.unwrap_or(false)
     })
+}
+
+const HANDLE_UPDATE_TAG: &str = "handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
+const HANDLE_UPDATE_TAG_KEY: &str =
+    "net/minecraft/world/level/block/entity/BlockEntity.handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
+const GET_UPDATE_TAG: &str = "getUpdateTag.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag;";
+const GET_UPDATE_TAG_KEY: &str =
+    "net/minecraft/world/level/block/entity/BlockEntity.getUpdateTag.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag;";
+const BER_RENDER: &str = "render.(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V";
+const BER_RENDER_KEY: &str = "net/minecraft/client/renderer/blockentity/BlockEntityRenderer.render.(Lnet/minecraft/world/level/block/entity/BlockEntity;FLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;II)V";
+const PROVIDER_CREATE: &str = "net/minecraft/client/renderer/blockentity/BlockEntityRendererProvider.create.(Lnet/minecraft/client/renderer/blockentity/BlockEntityRendererProvider$Context;)Lnet/minecraft/client/renderer/blockentity/BlockEntityRenderer;";
+const CLIENT_TICK_PRE: &str = "net/neoforged/neoforge/client/event/ClientTickEvent$Pre";
+const CLIENT_TICK_POST: &str = "net/neoforged/neoforge/client/event/ClientTickEvent$Post";
+
+/// `native_block_entity_update_tag` (server): what players are sent of the mod block entity at
+/// `pos`, its `getUpdateTag`. None when its object isn't live here (players get its saved data).
+pub fn block_entity_update_tag(rt: &mut Rt, pos: [i32; 3]) -> Option<std::collections::BTreeMap<String, crate::nbt::Nbt>> {
+    rt.safe_point();
+    let be = rt.block_entities.get(&pos).copied()?;
+    let vc = rt.vcall?;
+    let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
+    let tag = vc(rt, GET_UPDATE_TAG_KEY, GET_UPDATE_TAG, &[be, provider]);
+    rt.report_thrown("getUpdateTag");
+    (tag.r() != 0).then(|| crate::nbt::from_runtime(rt, tag))
+}
+
+/// The client's copy of the mod block entity at `pos`: made the first time, and loaded from `nbt`
+/// (the update tag the server sent) whenever that changes, as `handleUpdateTag` does in vanilla.
+fn client_block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Option<V> {
+    let (block, _) = crate::host::split_state(state);
+    let synced = crate::nbt::hash(nbt) as i64;
+    let vc = rt.vcall?;
+    let be = match rt.block_entities.get(&pos).copied() {
+        Some(be) if rt.block_entity_meta.get(&pos).is_some_and(|(b, _)| b == block) => {
+            if rt.get_field(be, "$synced").j() == synced && rt.get_field(be, "$loaded").i() != 0 {
+                return Some(be);
+            }
+            be
+        }
+        _ => {
+            let (b, _) = mod_block(rt, state)?;
+            let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+            let st = api::state(rt, state);
+            let be = vc(rt, NEW_BLOCK_ENTITY, NEW_BLOCK_ENTITY, &[b, p, st]);
+            rt.report_thrown("newBlockEntity");
+            if be.r() == 0 {
+                return None;
+            }
+            let l = level(rt);
+            rt.put_field(be, "level", l);
+            rt.block_entities.insert(pos, be);
+            rt.block_entity_meta.insert(pos, (block.to_owned(), true));
+            be
+        }
+    };
+    let tag = crate::nbt::to_runtime(rt, nbt);
+    let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
+    vc(rt, HANDLE_UPDATE_TAG_KEY, HANDLE_UPDATE_TAG, &[be, tag, provider]);
+    rt.report_thrown("handleUpdateTag");
+    rt.put_field(be, "$synced", V::J(synced));
+    rt.put_field(be, "$loaded", V::I(1));
+    Some(be)
+}
+
+/// `native_block_entity_submit` (client): draws the mod block entity at `pos` with the renderer its
+/// mod registered for its type (`BlockEntityRenderers.register`), under a pose stack at the block's
+/// corner. `nbt` is the update tag the server sent; `light` is the block's, packed as
+/// `LightTexture.pack`. False when the block entity has no renderer.
+pub fn render_block_entity(
+    rt: &mut Rt,
+    host: &mut dyn Host,
+    pos: [i32; 3],
+    state: &str,
+    nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
+    light: i32,
+) -> bool {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    crate::neo::fire_client_setup(rt);
+    if mod_block(rt, state).is_none() {
+        return false;
+    }
+    rt.with_host(host, |rt| {
+        let Some(be) = client_block_entity(rt, pos, state, nbt) else { return false };
+        let ty = rt.get_field(be, "$type");
+        let Some(id) = rt.registered_name(ty, "block_entity_type").map(str::to_owned) else { return false };
+        let Some(provider) = rt.interned.get(&format!("ber/{id}")).copied() else { return false };
+        let renderer = match rt.interned.get(&format!("ber-made/{id}")).copied() {
+            Some(r) => r,
+            None => {
+                let ctx = rt.new_object("net/minecraft/client/renderer/blockentity/BlockEntityRendererProvider$Context");
+                let r = rt.call_functional(PROVIDER_CREATE, provider, &[ctx]);
+                rt.report_thrown("a block entity renderer's constructor");
+                rt.interned.insert(format!("ber-made/{id}"), r);
+                r
+            }
+        };
+        let Some(vc) = rt.vcall else { return false };
+        if renderer.r() == 0 {
+            return false;
+        }
+        let st = api::state(rt, state);
+        rt.put_field(be, "$state", st);
+        rt.put_field(be, "blockState", st);
+        let stack = crate::render::new_pose_stack(rt, crate::render::IDENTITY);
+        let buffers = rt.intern("compat:buffers".into(), |rt| rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource"));
+        let partial = rt.host().map_or(0.0, |h| h.partial_tick());
+        vc(rt, BER_RENDER_KEY, BER_RENDER, &[renderer, be, V::F(partial), stack, buffers, V::I(light), V::I(crate::render::NO_OVERLAY)]);
+        rt.report_thrown("a block entity renderer");
+        true
+    })
+}
+
+/// The client's tick (`ClientTickEvent.Pre`, then `.Post`): animation clocks advance here (catnip's
+/// `AnimationTickHolder`).
+pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    crate::neo::fire_client_setup(rt);
+    rt.with_host(host, |rt| {
+        for class in [CLIENT_TICK_PRE, CLIENT_TICK_POST] {
+            let ev = rt.new_object(class);
+            crate::neo::post(rt, class, ev);
+        }
+    });
 }

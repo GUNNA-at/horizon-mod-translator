@@ -107,6 +107,9 @@ pub fn fire_registrations(rt: &mut Rt) {
         rt.put_field(ev, "$registry", key);
         post(rt, REGISTER_EVENT, ev);
     }
+    // The registries are full: then common setup, as NeoForge's loading goes on.
+    rt.resolve_registrations();
+    fire_common_setup(rt);
 }
 
 fn is_registry(owner: &str) -> bool {
@@ -537,8 +540,47 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
         }
         ("net/neoforged/fml/ModContainer", "registerConfig" | "registerExtensionPoint") => V::Void,
+        // A setup event's deferred work runs at once (one thread here), and its future is done.
+        (o, "enqueueWork") if o.starts_with("net/neoforged/fml/event/lifecycle/") => {
+            let value = if desc.starts_with("(Ljava/lang/Runnable;") {
+                rt.call_functional("java/lang/Runnable.run.()V", a(1), &[]);
+                V::NULL
+            } else {
+                rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", a(1), &[])
+            };
+            crate::jutil::completed_future(rt, value)
+        }
         _ => return None,
     })
+}
+
+const COMMON_SETUP: &str = "net/neoforged/fml/event/lifecycle/FMLCommonSetupEvent";
+const CLIENT_SETUP: &str = "net/neoforged/fml/event/lifecycle/FMLClientSetupEvent";
+const REGISTER_RENDERERS: &str = "net/neoforged/neoforge/client/event/EntityRenderersEvent$RegisterRenderers";
+
+/// `FMLCommonSetupEvent`, once the registries are filled, as NeoForge's loading fires it on both
+/// sides.
+pub fn fire_common_setup(rt: &mut Rt) {
+    let ev = rt.new_object(COMMON_SETUP);
+    post(rt, COMMON_SETUP, ev);
+}
+
+/// The client's own setup, once, on the runtime that draws: `EntityRenderersEvent.RegisterRenderers`
+/// and `FMLClientSetupEvent` (Registrate registers block entity renderers there).
+pub fn fire_client_setup(rt: &mut Rt) {
+    if rt.interned.contains_key("compat:client") {
+        return;
+    }
+    rt.interned.insert("compat:client".into(), V::I(1));
+    let ev = rt.new_object(REGISTER_RENDERERS);
+    post(rt, REGISTER_RENDERERS, ev);
+    let ev = rt.new_object(CLIENT_SETUP);
+    post(rt, CLIENT_SETUP, ev);
+}
+
+/// Whether this runtime is the client's (its setup has fired): its level is a client level.
+pub fn is_client(rt: &Rt) -> bool {
+    rt.interned.contains_key("compat:client")
 }
 
 const CONFIG_BUILDER: &str = "net/neoforged/neoforge/common/ModConfigSpec$Builder";

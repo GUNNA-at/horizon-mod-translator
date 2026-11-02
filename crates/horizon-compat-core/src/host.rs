@@ -4,6 +4,14 @@
 //! strings' interned ids, so the runtime never depends on Horizon's tables.
 use std::collections::HashMap;
 
+/// A model a block entity draws (`BakedModel`): a block state's, or one named by its location (a
+/// mod's part model, `create:block/shaft_half`, never placed as a block).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Model {
+    State(String),
+    Named(String),
+}
+
 pub trait Host {
     /// The block state at a position, as `minecraft:stone` or `create:shaft[axis=y]`.
     fn block_state(&self, pos: [i32; 3]) -> String;
@@ -29,6 +37,20 @@ pub trait Host {
     fn player_held(&self) -> Option<(String, u32)> {
         None
     }
+    /// Players are sent the block at `pos` and its block entity's update tag again
+    /// (`ServerChunkCache.blockChanged`, `Level.sendBlockUpdated`).
+    fn block_changed(&mut self, _pos: [i32; 3]) {}
+    /// Drawing a block entity: the frame's partial tick, 0 to 1.
+    fn partial_tick(&self) -> f32 {
+        0.0
+    }
+    /// Drawing a block entity: adds `model` under `pose` (a column-major 4x4 matrix, in blocks from
+    /// the drawn block's lower north-west corner), times `color` (0xAARRGGBB), lit by `light`
+    /// (`LightTexture.pack`: block light in bits 4..8, sky light in bits 20..24). False when the game
+    /// has no such model.
+    fn draw_model(&mut self, _model: &Model, _pose: &[f32; 16], _color: u32, _light: u32) -> bool {
+        false
+    }
 }
 
 /// A world in a map, for tests and tools. Unset positions are air.
@@ -39,6 +61,12 @@ pub struct MemoryHost {
     pub sneaking: bool,
     pub creative: bool,
     pub held: Option<(String, u32)>,
+    /// Positions sent to players again (`block_changed`), in order.
+    pub changed: Vec<[i32; 3]>,
+    /// The partial tick drawing reads.
+    pub partial: f32,
+    /// What was drawn: model, pose, colour, light.
+    pub drawn: Vec<(Model, [f32; 16], u32, u32)>,
 }
 
 impl Host for MemoryHost {
@@ -60,6 +88,16 @@ impl Host for MemoryHost {
     }
     fn player_held(&self) -> Option<(String, u32)> {
         self.held.clone()
+    }
+    fn block_changed(&mut self, pos: [i32; 3]) {
+        self.changed.push(pos);
+    }
+    fn partial_tick(&self) -> f32 {
+        self.partial
+    }
+    fn draw_model(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32) -> bool {
+        self.drawn.push((model.clone(), *pose, color, light));
+        true
     }
 }
 

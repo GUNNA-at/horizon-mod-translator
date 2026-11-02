@@ -272,6 +272,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             .or_else(|| crate::jlang::call(rt, key, args))
             .or_else(|| crate::jutil::call(rt, key, args))
             .or_else(|| crate::tags::call(rt, key, args))
+            .or_else(|| crate::render::call(rt, key, args))
             .or_else(|| world(rt, key, args))
         {
             Some(v) => v,
@@ -419,8 +420,22 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => return None,
         },
         (_, "getChunkSource") if level => rt.intern("compat:chunk-source".into(), |rt| rt.new_object("net/minecraft/server/level/ServerChunkCache")),
-        ("net/minecraft/server/level/ServerChunkCache" | "net/minecraft/world/level/chunk/ChunkSource", "blockChanged") => V::Void,
-        (_, "sendBlockUpdated" | "blockUpdated" | "updateNeighbourForOutputSignal" | "updateNeighborsAt" | "blockEntityChanged") if level => V::Void,
+        // Players see the block entity's new data (Create's `sendData`).
+        ("net/minecraft/server/level/ServerChunkCache" | "net/minecraft/world/level/chunk/ChunkSource", "blockChanged") => {
+            let p = pos_of(rt, a(1));
+            if let Some(h) = rt.host_mut() {
+                h.block_changed(p);
+            }
+            V::Void
+        }
+        (_, "sendBlockUpdated") if level => {
+            let p = pos_of(rt, a(1));
+            if let Some(h) = rt.host_mut() {
+                h.block_changed(p);
+            }
+            V::Void
+        }
+        (_, "blockUpdated" | "updateNeighbourForOutputSignal" | "updateNeighborsAt" | "blockEntityChanged") if level => V::Void,
         // Particles are the client's: the server sends none to the game yet.
         (_, "sendParticles") if level => V::I(0),
         (_, "addParticle" | "addAlwaysVisibleParticle" | "playSound" | "playLocalSound" | "levelEvent" | "gameEvent") if level => V::Void,
@@ -496,7 +511,7 @@ fn offset(rt: &mut Rt, p: V, d: [i64; 3], n: i64) -> V {
 /// Static fields of API classes (`Direction.UP`...).
 pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
     if let Some((o, f)) = key.split_once('.')
-        && let Some(v) = crate::api_common::get_static(rt, o, f)
+        && let Some(v) = crate::api_common::get_static(rt, o, f).or_else(|| crate::render::get_static(rt, o, f))
     {
         return v;
     }

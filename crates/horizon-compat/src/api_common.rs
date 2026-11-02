@@ -481,7 +481,16 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (o, "setChanged" | "onLoad" | "onChunkUnloaded" | "invalidateCapabilities") if o.ends_with("BlockEntity") => V::Void,
         // The base class saves and loads nothing of its own beyond what the glue writes (id, position).
-        (o, "saveAdditional" | "loadAdditional" | "requestModelDataUpdate" | "onDataPacket" | "handleUpdateTag") if o.ends_with("BlockEntity") => V::Void,
+        (o, "saveAdditional" | "loadAdditional" | "requestModelDataUpdate" | "onDataPacket") if o.ends_with("BlockEntity") => V::Void,
+        // Vanilla's `handleUpdateTag`: `loadWithComponents`, which loads through the block entity's
+        // own `loadAdditional`.
+        (o, "handleUpdateTag") if o.ends_with("BlockEntity") => {
+            const LOAD: &str = "loadAdditional.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
+            if let Some(vc) = rt.vcall {
+                vc(rt, "net/minecraft/world/level/block/entity/BlockEntity.loadAdditional.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V", LOAD, &[a(0), a(1), a(2)]);
+            }
+            V::Void
+        }
         (o, "getUpdateTag") if o.ends_with("BlockEntity") => compound(rt),
         (o, "getUpdatePacket") if o.ends_with("BlockEntity") => V::NULL,
         ("net/minecraft/world/level/block/entity/BlockEntityType$Builder", "of") => {
