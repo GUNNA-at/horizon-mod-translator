@@ -407,6 +407,48 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "isClientSide") if level => V::I(rt.host().is_some_and(|h| !h.is_server()) as i32),
         (_, "isLoaded" | "hasChunkAt" | "isAreaLoaded" | "hasChunksAt" | "isInWorldBounds") if level => V::I(1),
         (_, "getGameTime") if level => V::J(rt.host().map_or(0, |h| h.game_time())),
+        // The level's server services. Ticking is never frozen or stepped here (`/tick` isn't modelled
+        // for mods), and the game syncs changed blocks and block entities itself.
+        (_, "tickRateManager") if level => rt.intern("compat:tick-rate".into(), |rt| rt.new_object("net/minecraft/server/ServerTickRateManager")),
+        ("net/minecraft/world/TickRateManager" | "net/minecraft/server/ServerTickRateManager", n) => match n {
+            "isFrozen" | "isSteppingForward" | "isSprinting" => V::I(0),
+            "runsNormally" => V::I(1),
+            "tickrate" => V::F(20.0),
+            "nanosecondsPerTick" => V::J(50_000_000),
+            "millisecondsPerTick" => V::F(50.0),
+            _ => return None,
+        },
+        (_, "getChunkSource") if level => rt.intern("compat:chunk-source".into(), |rt| rt.new_object("net/minecraft/server/level/ServerChunkCache")),
+        ("net/minecraft/server/level/ServerChunkCache" | "net/minecraft/world/level/chunk/ChunkSource", "blockChanged") => V::Void,
+        (_, "sendBlockUpdated" | "blockUpdated" | "updateNeighbourForOutputSignal" | "updateNeighborsAt" | "blockEntityChanged") if level => V::Void,
+        // Particles are the client's: the server sends none to the game yet.
+        (_, "sendParticles") if level => V::I(0),
+        (_, "addParticle" | "addAlwaysVisibleParticle" | "playSound" | "playLocalSound" | "levelEvent" | "gameEvent") if level => V::Void,
+        (_, "dimensionType") if level => rt.intern("compat:dimension-type".into(), |rt| rt.new_object("net/minecraft/world/level/dimension/DimensionType")),
+        // The overworld's type (`DimensionTypes.OVERWORLD`).
+        ("net/minecraft/world/level/dimension/DimensionType", n) => match n {
+            "minY" => V::I(-64),
+            "height" | "logicalHeight" => V::I(384),
+            "ultraWarm" | "hasCeiling" | "piglinSafe" | "respawnAnchorWorks" | "hasFixedTime" => V::I(0),
+            "natural" | "hasSkyLight" | "bedWorks" | "hasRaids" => V::I(1),
+            "coordinateScale" => V::D(1.0),
+            "ambientLight" => V::F(0.0),
+            _ => return None,
+        },
+        (_, "getMinY" | "getMinBuildHeight") if level => V::I(-64),
+        (_, "getMaxY") if level => V::I(319),
+        (_, "getMaxBuildHeight") if level => V::I(320),
+        (_, "getHeight") if level && desc == "()I" => V::I(384),
+        (_, "getSeaLevel") if level => V::I(63),
+        (_, "getServer") if level => rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer")),
+        ("net/minecraft/server/MinecraftServer" | "net/minecraft/server/dedicated/DedicatedServer", n) => match n {
+            "getTickCount" => V::I(rt.host().map_or(0, |h| h.game_time()) as i32),
+            // One level is modelled: the one the hook runs in.
+            "overworld" | "getLevel" => crate::glue::level(rt),
+            "isDedicatedServer" | "isPublished" | "isHardcore" => V::I(0),
+            "isSameThread" => V::I(1),
+            _ => return None,
+        },
 
         // Block states
         (STATE | "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase", n) => {
@@ -466,7 +508,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         "net/minecraft/core/Direction.SOUTH" => dir(rt, 3),
         "net/minecraft/core/Direction.WEST" => dir(rt, 4),
         "net/minecraft/core/Direction.EAST" => dir(rt, 5),
-        "net/minecraft/core/BlockPos.ZERO" => block_pos(rt, 0, 0, 0),
+        "net/minecraft/core/BlockPos.ZERO" | "net/minecraft/core/Vec3i.ZERO" => block_pos(rt, 0, 0, 0),
         // `BuiltInRegistries.TRIGGER_TYPES` is registry `trigger_type`, as its key says.
         k if k.starts_with("net/minecraft/core/registries/BuiltInRegistries.") => {
             let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();

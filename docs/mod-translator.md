@@ -196,10 +196,18 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   every shaft Speed 16.0 with a Network id (Create's own RotationPropagator, KineticNetwork, stress values). 40
   ticks of the 4 block entities take 7.8 ms (class-id dispatch; 30 ms before), ~13 objects allocated per block
   entity tick. Engine compile 5 min (9 before). Load (all registrations) 0.2 s.
+- [x] Garbage collector (commit 9774764, `horizon-compat-core/src/gc.rs`): mark and sweep from the runtime's roots
+  (statics, registries, interned values, strings, block entities, listeners, suppliers, `Rt::pinned`), freed slots
+  reused. It runs at a hook's outermost entry (`Rt::safe_point`, no translated frame live) once the live count passes
+  `collect_at`. Stress check in the harness (`GC_STRESS=1`: a collection at every hook entry): after load 33,641 of
+  83,701 objects stay (3 ms per collection); 40 kinetic ticks later 33,730 are live and every Speed is still 16.
+- [x] NBT tag model (`tags.rs`): `CompoundTag` keeps each value's kind, `ListTag`, numeric/string/array tags,
+  `NbtUtils` (block pos as an int array, UUIDs, block states); the block-entity hook carries lists and arrays to the
+  game's compound both ways, so `Source` (a shaft's int-array source position) is saved.
+- [x] Level services while ticking: `tickRateManager` (never frozen), `getChunkSource().blockChanged`,
+  `dimensionType` (the overworld's), `getServer` (`getTickCount`, `overworld`), `sendParticles`, `Vec3i.ZERO`.
 - [ ] Next: in-game kinetic test (`scratchpad/kinetic.sh`): build the game with the regenerated bundle, read Speed
   with `data get block`.
-- [ ] Then: a garbage collector (mark from the runtime's roots at a hook's outermost entry, free list); the heap
-  only grows today, so long sessions leak.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

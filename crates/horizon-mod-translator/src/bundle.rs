@@ -151,7 +151,11 @@ fn {id}_block_entity_tick(
             Tag::Double(d) => Nbt::Double(f64::from_bits(*d)),
             Tag::String(s) => Nbt::String(s.to_string_lossy()),
             Tag::Compound(c) => Nbt::Compound(c.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect()),
-            _ => return None,
+            Tag::List(l) => Nbt::List(l.iter().filter_map(to_nbt).collect()),
+            Tag::ByteArray(a) => Nbt::ByteArray(a.iter().map(|b| *b as i8).collect()),
+            Tag::IntArray(a) => Nbt::IntArray(a.clone()),
+            Tag::LongArray(a) => Nbt::LongArray(a.clone()),
+            Tag::End => return None,
         }})
     }}
     fn to_tag(n: &Nbt) -> Option<Tag> {{
@@ -164,7 +168,10 @@ fn {id}_block_entity_tick(
             Nbt::Double(d) => Tag::Double(d.to_bits()),
             Nbt::String(s) => Tag::String(JavaString::from(s.as_str())),
             Nbt::Compound(c) => Tag::Compound(c.iter().filter_map(|(k, v)| Some((JavaString::from(k.as_str()), to_tag(v)?))).collect::<Compound>()),
-            _ => return None,
+            Nbt::List(l) => Tag::List(l.iter().filter_map(to_tag).collect()),
+            Nbt::ByteArray(a) => Tag::ByteArray(a.iter().map(|b| *b as u8).collect()),
+            Nbt::IntArray(a) => Tag::IntArray(a.clone()),
+            Nbt::LongArray(a) => Tag::LongArray(a.clone()),
         }})
     }}
     struct Host<'a, 'b> {{
@@ -182,13 +189,8 @@ fn {id}_block_entity_tick(
     let mut nbt: BTreeMap<String, Nbt> = entity.nbt.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect();
     let mut host = Host {{ game }};
     if {krate}::with_runtime(|rt| {c}::glue::block_entity_tick(rt, &mut host, pos, &state, &mut nbt)) {{
-        // Tags the runtime doesn't model (lists, arrays) stay as they were.
-        entity.nbt.retain(|_, v| to_nbt(v).is_none());
-        for (k, v) in &nbt {{
-            if let Some(t) = to_tag(v) {{
-                entity.nbt.insert(JavaString::from(k.as_str()), t);
-            }}
-        }}
+        // What the block entity saved, all of it: keys it dropped are gone.
+        entity.nbt = nbt.iter().filter_map(|(k, v)| Some((JavaString::from(k.as_str()), to_tag(v)?))).collect::<Compound>();
     }}
 }}
 "#)),
