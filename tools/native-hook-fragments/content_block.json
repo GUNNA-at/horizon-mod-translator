@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "name": "content_block",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_content_block"
+    }
+  ],
+  "rust_summary": "content blocks as their files declare them, before the resources are built (`native_content_block`), and the `render_shape` block property.",
+  "doc_summary": "`native_content_block(block)` gets each content block of every enabled mod (`horizon_mods::content::Block`) before the game builds its resources from them, at startup and on each resource reload, on the thread that builds the resource root: a mod changes what only its code knows. The block property `render_shape` (`model`, `entityblock_animated`, `invisible`, for every state or by one of the block's own state properties) says whether chunks draw the block's model ([mods.md](mods.md)); a block its block entity renderer draws sets `entityblock_animated`, so the chunk doesn't draw a second copy under it. Bundles need \"hooks\": @API:content_block@."
+}

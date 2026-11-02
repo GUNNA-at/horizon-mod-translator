@@ -66,13 +66,16 @@ pub(super) fn content_root(
         {
             continue;
         }
-        let content = match Content::read(path, m) {
+        let mut content = match Content::read(path, m) {
             Ok(content) => content,
             Err(e) => {
                 log::warn!("Horizon: mod {} content not loaded: {e}", m.id);
                 continue;
             }
         };
+        for block in &mut content.blocks {
+            super::Game::native_content_block(block);
+        }
         let known = match &mut known {
             Some(types) => types,
             None => match mod_content::known_components(root) {

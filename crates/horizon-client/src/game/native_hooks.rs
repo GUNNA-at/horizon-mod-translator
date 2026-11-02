@@ -1762,6 +1762,16 @@ impl Game<'_> {
     ) {
         let _ = (pos, entity, tag);
     }
+    /// A content mod's block as its files declare it, before the game
+    /// builds its resources from them: change what only code knows, such
+    /// as `properties.render_shape` for a block its block entity renderer
+    /// draws (`getRenderShape`, or a baked model swapped for one without
+    /// quads). Asked for every content block of every enabled mod, at
+    /// startup and on each resource reload, on the thread that builds the
+    /// resource root; no world or resources exist yet. API @API:content_block@.
+    pub(super) fn native_content_block(block: &mut horizon_mods::content::Block) {
+        let _ = block;
+    }
     /// Draw the mod block entity at `pos`, of block `block`
     /// (`mymod:machine`), on this client: once a frame while it is in view
     /// (vanilla's `BlockEntityRenderer.submit`: within 64 blocks, its chunk

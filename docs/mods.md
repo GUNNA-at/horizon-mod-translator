@@ -92,6 +92,14 @@ ticks still grows: `"random_ticks": true` for every state (or `false`, to stop a
 `state_properties`) is one of the values. The block's native `native_random_tick` hook then fires as it does
 for a vanilla block that ticks, and its sections count it.
 
+`render_shape` says whether the world's chunks draw the block's model, as vanilla's
+`getRenderShape(state)`: `"model"` (they do, the default), `"entityblock_animated"` (only its block entity
+renderer draws it, as a chest: a turning shaft whose renderer draws it at its angle) or `"invisible"`
+(nothing does). The same for every state, or `{ "shape": "invisible", "property": "running", "values":
+["true"] }` for the states whose own state property is one of the values, `"model"` for the others. A native
+mod can set it from code before the resources are built (`native_content_block`), as translated NeoForge mods
+do from their `getRenderShape` and their swapped models.
+
 A block copies its template's states. It can also declare state properties of
 its own, which its template does not have — how a pipe says which sides it
 connects to, or a machine whether it is running. Its states then become its

@@ -88,6 +88,45 @@ pub struct BlockProperties {
     pub sounds: Option<String>,
     /// Which states tick randomly, whatever the template does (`isRandomlyTicking`).
     pub random_ticks: Option<RandomTicks>,
+    /// How the chunk mesher draws the block (`BlockBehaviour.getRenderShape(state)`), whatever the
+    /// template does.
+    pub render_shape: Option<RenderShapes>,
+}
+
+/// A block's `RenderShape` by state: `model` (the chunk draws its block model), `entityblock_animated`
+/// (only its block entity renderer draws it, as a chest's) or `invisible`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum RenderShapes {
+    /// Every state.
+    All(String),
+    /// `shape` for the states whose own state property `property` is one of `values`; `model` for
+    /// the others.
+    States {
+        shape: String,
+        property: String,
+        values: Vec<String>,
+    },
+}
+
+impl RenderShapes {
+    /// The shapes a declaration may name, as `RenderShape`'s constants are spelled in the block facts.
+    pub const SHAPES: [&str; 3] = ["model", "entityblock_animated", "invisible"];
+
+    /// A state's shape, `combo` being its values of the block's own state properties: lower case,
+    /// as declared.
+    pub fn shape(&self, combo: &[(String, String)]) -> &str {
+        match self {
+            RenderShapes::All(shape) => shape,
+            RenderShapes::States { shape, property, values } => {
+                if combo.iter().any(|(name, value)| name == property && values.contains(value)) {
+                    shape
+                } else {
+                    "model"
+                }
+            }
+        }
+    }
 }
 
 /// Which of a block's states get random ticks (`BlockBehaviour.isRandomlyTicking(state)`), so a
@@ -776,6 +815,22 @@ fn check_block(file: &BlockFile) -> Result<(), String> {
             ));
         }
     }
+    if let Some(shapes) = &p.render_shape {
+        let shape = match shapes {
+            RenderShapes::All(shape) | RenderShapes::States { shape, .. } => shape,
+        };
+        if !RenderShapes::SHAPES.contains(&shape.as_str()) {
+            return Err(format!("render_shape is one of {:?}, not {shape:?}", RenderShapes::SHAPES));
+        }
+        if let RenderShapes::States { property, values, .. } = shapes {
+            let declared = file.state_properties.get(property).map(StateProperty::values);
+            if declared.is_none_or(|all| values.is_empty() || values.iter().any(|v| !all.contains(&v.as_str()))) {
+                return Err(format!(
+                    "render_shape needs values of the block's own state property {property:?} (state_properties)"
+                ));
+            }
+        }
+    }
     let finite = |v: Option<f32>| v.is_none_or(f32::is_finite);
     if !finite(p.hardness) || !finite(p.explosion_resistance) || !finite(p.friction) {
         return Err("hardness, explosion_resistance and friction are numbers".into());
@@ -1194,6 +1249,41 @@ capabilities = ["registries"]
             assert!(e.contains("random_ticks"), "{bad}: {e}");
         }
         assert!(block("3").is_err());
+    }
+
+    #[test]
+    fn blocks_say_which_states_their_renderer_draws_instead_of_the_chunk() {
+        let own = r#""state_properties": {"running": {"type": "boolean"}}"#;
+        let block = |shape: &str| {
+            let text = format!(
+                r#"{{"template": "minecraft:stone", {own}, "properties": {{"render_shape": {shape}}}}}"#
+            );
+            let files: &[(&str, &[u8])] = &[("data/ruby/horizon/block/shaft.json", text.as_bytes())];
+            hmod("render-shape", MANIFEST_TEXT, files)
+        };
+        let shapes =
+            |c: Result<Content, String>| c.unwrap().blocks[0].properties.render_shape.clone();
+        let state = |v: &str| [("running".to_owned(), v.to_owned())];
+        // Every state: a shaft its block entity renderer turns.
+        let all = shapes(block(r#""entityblock_animated""#)).unwrap();
+        assert_eq!(all.shape(&state("false")), "entityblock_animated");
+        // Some states: drawn by its renderer only while it runs, as a model otherwise.
+        let some = shapes(block(
+            r#"{"shape": "invisible", "property": "running", "values": ["true"]}"#,
+        ))
+        .unwrap();
+        assert_eq!(some.shape(&state("true")), "invisible");
+        assert_eq!(some.shape(&state("false")), "model");
+        // An unknown shape, or a property that isn't the block's own.
+        for bad in [
+            r#""ENTITYBLOCK_ANIMATED""#,
+            r#""animated""#,
+            r#"{"shape": "invisible", "property": "lit", "values": ["true"]}"#,
+            r#"{"shape": "invisible", "property": "running", "values": []}"#,
+        ] {
+            let e = block(bad).err().unwrap();
+            assert!(e.contains("render_shape"), "{bad}: {e}");
+        }
     }
 
     #[test]
