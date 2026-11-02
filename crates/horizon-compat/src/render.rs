@@ -27,17 +27,27 @@ pub const FULL_BRIGHT: i32 = 15 << 4 | 15 << 20;
 pub const INTRINSICS: &[&str] = &[
     CREATE_FOR_BLOCK,
     RENDER_INTO,
-    "net/createmod/catnip/render/DefaultSuperByteBuffer.isEmpty.()Z",
+    SBB_IS_EMPTY,
+    DEFAULT_RENDER_INTO,
+    DEFAULT_IS_EMPTY,
     PARTIAL_GET,
     SUPPORTS_VISUALIZATION,
 ];
 const CREATE_FOR_BLOCK: &str = "net/createmod/catnip/render/SuperBufferFactory.createForBlock.(Lnet/minecraft/client/resources/model/BakedModel;Lnet/minecraft/world/level/block/state/BlockState;Lcom/mojang/blaze3d/vertex/PoseStack;)Lnet/createmod/catnip/render/SuperByteBuffer;";
-const RENDER_INTO: &str = "net/createmod/catnip/render/DefaultSuperByteBuffer.renderInto.(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;)V";
+/// catnip's buffer of a baked model (what `createForBlock` makes).
+const RENDER_INTO: &str = "net/createmod/catnip/render/ShadeSeparatingSuperByteBuffer.renderInto.(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;)V";
+const SBB_IS_EMPTY: &str = "net/createmod/catnip/render/ShadeSeparatingSuperByteBuffer.isEmpty.()Z";
+/// catnip's older buffer of mesh data.
+const DEFAULT_RENDER_INTO: &str = "net/createmod/catnip/render/DefaultSuperByteBuffer.renderInto.(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;)V";
+const DEFAULT_IS_EMPTY: &str = "net/createmod/catnip/render/DefaultSuperByteBuffer.isEmpty.()Z";
 const PARTIAL_GET: &str = "dev/engine_room/flywheel/lib/model/baked/PartialModel.get.()Lnet/minecraft/client/resources/model/BakedModel;";
 /// Flywheel's instancing needs its GPU backend: off, so mods draw with their block entity renderers.
 const SUPPORTS_VISUALIZATION: &str = "dev/engine_room/flywheel/api/visualization/VisualizationManager.supportsVisualization.(Lnet/minecraft/world/level/LevelAccessor;)Z";
-const SBB: &str = "net/createmod/catnip/render/DefaultSuperByteBuffer";
-const SBB_RESET: &str = "reset.()Lnet/createmod/catnip/render/DefaultSuperByteBuffer;";
+const SBB: &str = "net/createmod/catnip/render/ShadeSeparatingSuperByteBuffer";
+const SBB_RESET: &str = "reset.()Lnet/createmod/catnip/render/SuperByteBuffer;";
+const SBB_RESET_KEY: &str = "net/createmod/catnip/render/ShadeSeparatingSuperByteBuffer.reset.()Lnet/createmod/catnip/render/SuperByteBuffer;";
+const DEFAULT_RESET: &str = "reset.()Lnet/createmod/catnip/render/DefaultSuperByteBuffer;";
+const DEFAULT_RESET_KEY: &str = "net/createmod/catnip/render/DefaultSuperByteBuffer.reset.()Lnet/createmod/catnip/render/DefaultSuperByteBuffer;";
 
 // ---- matrix arithmetic ----
 
@@ -293,6 +303,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
                 o
             })
         }
+        // The block atlas (a ResourceLocation, which the runtime keeps as its string).
+        ("net/minecraft/world/inventory/InventoryMenu", "BLOCK_ATLAS") | ("net/minecraft/client/renderer/texture/TextureAtlas", "LOCATION_BLOCKS") => {
+            rt.string("minecraft:textures/atlas/blocks.png")
+        }
         ("net/minecraft/client/renderer/texture/OverlayTexture", "NO_OVERLAY") => V::I(NO_OVERLAY),
         ("net/minecraft/client/renderer/texture/OverlayTexture", "NO_WHITE_U") => V::I(0),
         ("net/minecraft/client/renderer/texture/OverlayTexture", "RED_OVERLAY_V") => V::I(3),
@@ -542,6 +556,16 @@ fn quaternion(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         ("rotateYXZ", "(FFF)Lorg/joml/Quaternionf;") => set(rt, quat_mul(q, quat_mul(quat_mul(quat_y(f(1)), quat_x(f(2))), quat_z(f(3))))),
         ("rotateZYX", "(FFF)Lorg/joml/Quaternionf;") => set(rt, quat_mul(q, quat_mul(quat_mul(quat_z(f(1)), quat_y(f(2))), quat_x(f(3))))),
         ("rotationAxis", "(FFFF)Lorg/joml/Quaternionf;") => set(rt, quat_axis(f(1), f(2), f(3), f(4))),
+        // JOML's `setAngleAxis`: the axis as given (not normalized), the angle in radians.
+        ("setAngleAxis", "(FFFF)Lorg/joml/Quaternionf;") => {
+            let (s, c) = (f(1) * 0.5).sin_cos();
+            set(rt, [f(2) * s, f(3) * s, f(4) * s, c])
+        }
+        ("setAngleAxis", "(DDDD)Lorg/joml/Quaternionf;") => {
+            let d = |i| a(i).d();
+            let (s, c) = (d(1) * 0.5).sin_cos();
+            set(rt, [(d(2) * s) as f32, (d(3) * s) as f32, (d(4) * s) as f32, c as f32])
+        }
         ("rotationAxis", "(FLorg/joml/Vector3fc;)Lorg/joml/Quaternionf;") => {
             let [x, y, z] = vec3(rt, a(2));
             set(rt, quat_axis(f(1), x, y, z))
@@ -932,6 +956,9 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         }
         ("net/minecraft/client/Minecraft", "getEntityRenderDispatcher") => single(rt, "net/minecraft/client/renderer/entity/EntityRenderDispatcher"),
         ("net/minecraft/client/Minecraft", "isPaused") => V::I(0),
+        // F3: closed (debug overlays a mod draws over the world stay off).
+        ("net/minecraft/client/Minecraft", "getDebugOverlay") => single(rt, "net/minecraft/client/gui/components/DebugScreenOverlay"),
+        ("net/minecraft/client/gui/components/DebugScreenOverlay", _) if desc.ends_with(")Z") => V::I(0),
         ("net/minecraft/client/Minecraft", "isSameThread") => V::I(1),
         ("net/minecraft/client/DeltaTracker" | "net/minecraft/client/DeltaTracker$Timer", n) => match n {
             "getGameTimeDeltaPartialTick" => V::F(rt.host().map_or(0.0, |h| h.partial_tick())),
@@ -1013,6 +1040,17 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             }
             V::Void
         }
+        // Entity renderers, by their entity type's registered name (drawn once entities are).
+        ("net/neoforged/neoforge/client/event/EntityRenderersEvent$RegisterRenderers", "registerEntityRenderer")
+        | ("net/minecraft/client/renderer/entity/EntityRenderers", "register") => {
+            let (ty, provider) = if owner.ends_with("EntityRenderers") { (a(0), a(1)) } else { (a(1), a(2)) };
+            if let Some(id) = rt.registered_name(ty, "entity_type").map(str::to_owned) {
+                rt.interned.insert(format!("er/{id}"), provider);
+            }
+            V::Void
+        }
+        // Work for the render thread's next frame (GPU objects): there is no GPU state to set up.
+        ("com/mojang/blaze3d/systems/RenderSystem", "recordRenderCall") => V::Void,
         ("net/minecraft/client/renderer/blockentity/BlockEntityRendererProvider$Context", n) => match n {
             "getBlockRenderDispatcher" => single(rt, "net/minecraft/client/renderer/block/BlockRenderDispatcher"),
             "getBlockEntityRenderDispatcher" => single(rt, "net/minecraft/client/renderer/blockentity/BlockEntityRenderDispatcher"),
@@ -1033,37 +1071,58 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     Some(match key {
         // `SuperBufferFactory.createForBlock(model, state, poseStack)`: catnip's buffer, keeping the
-        // model and the pose it was made under instead of its vertices (as the constructor sets it
-        // up otherwise: no overlay, a shift output, a transform stack one pose deep).
+        // model and the pose it was made under instead of its vertices; its other fields as its
+        // constructor sets them, then its own `reset()` (white, no overlay, a fresh transform).
         CREATE_FOR_BLOCK => {
             let base = last_pose(rt, a(3));
             let sbb = rt.new_object(SBB);
-            rt.put_field(sbb, "overlay", V::I(NO_OVERLAY));
+            let transforms = new_pose_stack(rt, IDENTITY);
+            rt.put_field(sbb, "transforms", transforms);
+            let model_mat = new_mat4(rt, IDENTITY);
+            rt.put_field(sbb, "modelMat", model_mat);
+            let normal_mat = rt.alloc("org/joml/Matrix3f", Data::Array(IDENTITY3.iter().map(|&f| V::F(f)).collect()));
+            rt.put_field(sbb, "normalMat", normal_mat);
+            for (field, class) in [("pos", "org/joml/Vector4f"), ("lightPos", "org/joml/Vector4f"), ("normal", "org/joml/Vector3f"), ("lightDir0", "org/joml/Vector3f"), ("lightDir1", "org/joml/Vector3f")] {
+                let v = rt.new_object(class);
+                for c in ["x", "y", "z", "w"].iter().take(if class.ends_with('4') || class.ends_with("4f") { 4 } else { 3 }) {
+                    rt.put_field(v, c, V::F(0.0));
+                }
+                rt.put_field(sbb, field, v);
+            }
             let shift = rt.new_object("net/createmod/catnip/render/SuperByteBuffer$ShiftOutput");
             rt.put_field(sbb, "shiftOutput", shift);
-            let transforms = new_pose_stack(rt, IDENTITY);
-            pose_stack(rt, "pushPose", "()V", &[transforms]);
-            rt.put_field(sbb, "transforms", transforms);
+            let swap = rt.alloc("[I", Data::Array(Vec::new()));
+            rt.put_field(sbb, "shadeSwapVertices", swap);
+            rt.put_field(sbb, "invertFakeDiffuseNormal", V::I(0));
             rt.put_field(sbb, "$model", a(1));
             let base = new_mat4(rt, base);
             rt.put_field(sbb, "$base", base);
+            if let Some(vc) = rt.vcall {
+                vc(rt, SBB_RESET_KEY, SBB_RESET, &[sbb]);
+            }
             sbb
         }
         // `renderInto(poseStack, consumer)`: the model once, under the stack's pose and the buffer's
         // transforms, coloured and lit as catnip would each vertex; then `reset()`, as catnip does.
-        RENDER_INTO => {
+        RENDER_INTO | DEFAULT_RENDER_INTO => {
             let this = a(0);
             let outer = last_pose(rt, a(1));
             let inner = last_pose(rt, rt.get_field(this, "transforms"));
             let base = mat4(rt, rt.get_field(this, "$base"));
             let m = mul4(&mul4(&outer, &inner), &base);
-            let color = if rt.get_field(this, "shouldColor").i() != 0 {
-                let c = |f| rt.get_field(this, f).i().clamp(0, 255) as u32;
-                c("a") << 24 | c("r") << 16 | c("g") << 8 | c("b")
+            let modern = key == RENDER_INTO;
+            let color = if modern {
+                // Float channels, 1 for untouched.
+                let c = |rt: &Rt, f| (rt.get_field(this, f).f().clamp(0.0, 1.0) * 255.0).round() as u32;
+                c(rt, "a") << 24 | c(rt, "r") << 16 | c(rt, "g") << 8 | c(rt, "b")
+            } else if rt.get_field(this, "shouldColor").i() != 0 {
+                let c = |rt: &Rt, f| rt.get_field(this, f).i().clamp(0, 255) as u32;
+                c(rt, "a") << 24 | c(rt, "r") << 16 | c(rt, "g") << 8 | c(rt, "b")
             } else {
                 0xFFFF_FFFF
             };
-            let light = if rt.get_field(this, "hasCustomLight").i() != 0 { rt.get_field(this, "packedLightCoordinates").i() } else { 0 };
+            let light_field = if modern { "packedLight" } else { "packedLightCoordinates" };
+            let light = if rt.get_field(this, "hasCustomLight").i() != 0 { rt.get_field(this, light_field).i() } else { 0 };
             let model = rt.get_field(this, "$model");
             if let Some(model) = model_of(rt, model)
                 && let Some(h) = rt.host_mut()
@@ -1071,11 +1130,12 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
                 h.draw_model(&model, &m, color, light as u32);
             }
             if let Some(vc) = rt.vcall {
-                vc(rt, SBB_RESET, SBB_RESET, &[this]);
+                let (k, short) = if modern { (SBB_RESET_KEY, SBB_RESET) } else { (DEFAULT_RESET_KEY, DEFAULT_RESET) };
+                vc(rt, k, short, &[this]);
             }
             V::Void
         }
-        "net/createmod/catnip/render/DefaultSuperByteBuffer.isEmpty.()Z" => V::I(model_of(rt, rt.get_field(a(0), "$model")).is_none() as i32),
+        SBB_IS_EMPTY | DEFAULT_IS_EMPTY => V::I(model_of(rt, rt.get_field(a(0), "$model")).is_none() as i32),
         // `PartialModel.get()`: the model at its location, baked by the host on first draw.
         PARTIAL_GET => {
             let location = rt.get_field(a(0), "modelLocation");

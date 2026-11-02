@@ -214,6 +214,8 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         // 2D values: SOUTH 0, WEST 1, NORTH 2, EAST 3; up and down -1.
         "net/minecraft/core/Direction.get2DDataValue.()I" => V::I([-1, -1, 2, 0, 1, 3][native(rt, a(0))[0].clamp(0, 5) as usize]),
+        // `(data2d & 3) * 90`: south 0, west 90, north 180, east 270 (up and down: 270).
+        "net/minecraft/core/Direction.toYRot.()F" => V::F((([-1i32, -1, 2, 0, 1, 3][native(rt, a(0))[0].clamp(0, 5) as usize] & 3) * 90) as f32),
         "net/minecraft/core/Direction.from3DDataValue.(I)Lnet/minecraft/core/Direction;" => direction(rt, (a(0).i() % 6).abs() as i64),
         "net/minecraft/core/Direction.from2DDataValue.(I)Lnet/minecraft/core/Direction;" => direction(rt, [3, 4, 2, 5][(a(0).i() % 4).unsigned_abs() as usize]),
         // Around the vertical axis: north, east, south, west.
@@ -455,6 +457,8 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "getMaxBuildHeight") if level => V::I(320),
         (_, "getHeight") if level && desc == "()I" => V::I(384),
         (_, "getSeaLevel") if level => V::I(63),
+        // A client level has no server (`ClientLevel.getServer` is null).
+        (_, "getServer") if level && rt.get_field(a(0), "isClientSide").i() != 0 => V::NULL,
         (_, "getServer") if level => rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer")),
         ("net/minecraft/server/MinecraftServer" | "net/minecraft/server/dedicated/DedicatedServer", n) => match n {
             "getTickCount" => V::I(rt.host().map_or(0, |h| h.game_time()) as i32),

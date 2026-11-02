@@ -298,6 +298,17 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if matches!(owner, "java/util/concurrent/CompletableFuture" | "java/util/concurrent/Future" | "java/util/concurrent/CompletionStage") {
         return future_call(rt, name, args);
     }
+    if owner.starts_with("com/google/common/cache/") {
+        return cache_call(rt, owner, name, args);
+    }
+    // Guava's `MapMaker`: weak or concurrent settings make no difference to one thread's map.
+    if owner == "com/google/common/collect/MapMaker" {
+        return Some(match name {
+            "<init>" => V::Void,
+            "makeMap" => rt.alloc("java/util/concurrent/ConcurrentHashMap", Data::Table(Table::default())),
+            _ => a(0),
+        });
+    }
     if !util_owner(owner) {
         return None;
     }
@@ -374,6 +385,118 @@ pub fn completed_future(rt: &mut Rt, value: V) -> V {
     let f = rt.new_object("java/util/concurrent/CompletableFuture");
     rt.put_field(f, "$value", value);
     f
+}
+
+const CALL: &str = "java/util/concurrent/Callable.call.()Ljava/lang/Object;";
+const LOAD: &str = "com/google/common/cache/CacheLoader.load.(Ljava/lang/Object;)Ljava/lang/Object;";
+const CACHE: &str = "com/google/common/cache/LocalCache$LocalLoadingCache";
+
+/// Guava's caches (`CacheBuilder`, `Cache`, `LoadingCache`): a cache is an object holding a real map
+/// (`$map`, what `asMap` gives) and its loader (`$loader`, null for a plain `Cache`). Nothing expires
+/// and nothing is evicted, so removal listeners never run: what a mod caches stays until it
+/// invalidates it, which is what its own code expects of a cache that stays under its limits.
+fn cache_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let map = |rt: &mut Rt, cache: V| -> V {
+        let m = rt.get_field(cache, "$map");
+        if m.r() != 0 {
+            return m;
+        }
+        let m = rt.alloc("java/util/HashMap", Data::Table(Table::default()));
+        rt.put_field(cache, "$map", m);
+        m
+    };
+    let new_cache = |rt: &mut Rt, loader: V| -> V {
+        let c = rt.new_object(CACHE);
+        let m = rt.alloc("java/util/HashMap", Data::Table(Table::default()));
+        rt.put_field(c, "$map", m);
+        rt.put_field(c, "$loader", loader);
+        c
+    };
+    Some(match (owner, name) {
+        // The builder: settings are ignored (see above); `build` makes the cache.
+        ("com/google/common/cache/CacheBuilder", "newBuilder" | "from") => rt.new_object("com/google/common/cache/CacheBuilder"),
+        ("com/google/common/cache/CacheBuilder", "build") => new_cache(rt, if args.len() > 1 { a(1) } else { V::NULL }),
+        ("com/google/common/cache/CacheBuilder", "<init>") => V::Void,
+        ("com/google/common/cache/CacheBuilder", _) => a(0),
+        // `CacheLoader`: a mod's subclass overrides `load`; `from` wraps a function.
+        ("com/google/common/cache/CacheLoader", "<init>") => V::Void,
+        ("com/google/common/cache/CacheLoader", "from") => {
+            let l = rt.new_object("com/google/common/cache/CacheLoader$FunctionToCacheLoader");
+            rt.put_field(l, "$function", a(0));
+            l
+        }
+        ("com/google/common/cache/CacheLoader$FunctionToCacheLoader", "load") => {
+            let f = rt.get_field(a(0), "$function");
+            rt.call_functional(APPLY, f, &[a(1)])
+        }
+        (_, "getIfPresent") => {
+            let m = map(rt, a(0));
+            table_get(rt, m, a(1)).unwrap_or(V::NULL)
+        }
+        // `Cache.get(key, Callable)` and `LoadingCache.get(key)`: the cached value, else the loader's,
+        // kept. A null loaded value is Guava's `InvalidCacheLoadException`; here it is just not kept.
+        (_, "get" | "getUnchecked" | "apply") => {
+            let (cache, key) = (a(0), a(1));
+            let m = map(rt, cache);
+            if let Some(v) = table_get(rt, m, key) {
+                return Some(v);
+            }
+            let v = if args.len() > 2 {
+                rt.call_functional(CALL, a(2), &[])
+            } else {
+                let loader = rt.get_field(cache, "$loader");
+                if loader.r() == 0 {
+                    return Some(V::NULL);
+                }
+                match rt.vcall {
+                    Some(vc) => vc(rt, LOAD, "load.(Ljava/lang/Object;)Ljava/lang/Object;", &[loader, key]),
+                    None => V::NULL,
+                }
+            };
+            if rt.thrown.is_none() && v.r() != 0 {
+                table_put(rt, m, key, v);
+            }
+            v
+        }
+        (_, "put") => {
+            let m = map(rt, a(0));
+            table_put(rt, m, a(1), a(2));
+            V::Void
+        }
+        (_, "putAll") => {
+            let m = map(rt, a(0));
+            for (k, v) in table_entries(rt, a(1)) {
+                table_put(rt, m, k, v);
+            }
+            V::Void
+        }
+        (_, "invalidate" | "refresh") => {
+            let m = map(rt, a(0));
+            table_remove(rt, m, a(1));
+            V::Void
+        }
+        (_, "invalidateAll") if args.len() > 1 => {
+            let m = map(rt, a(0));
+            let keys = elements(rt, a(1));
+            for k in keys {
+                table_remove(rt, m, k);
+            }
+            V::Void
+        }
+        (_, "invalidateAll") => {
+            let m = rt.alloc("java/util/HashMap", Data::Table(Table::default()));
+            rt.put_field(a(0), "$map", m);
+            V::Void
+        }
+        (_, "asMap") => map(rt, a(0)),
+        (_, "size") => {
+            let m = map(rt, a(0));
+            V::J(table_entries(rt, m).len() as i64)
+        }
+        (_, "cleanUp") => V::Void,
+        _ => return None,
+    })
 }
 
 const RUN: &str = "java/lang/Runnable.run.()V";
@@ -482,6 +605,31 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             _ => new_list(rt, vec![a(0)]),
         },
         ("java/util/Collections", n) if n.starts_with("unmodifiable") || n.starts_with("synchronized") => a(0),
+        // `Collections.binarySearch(list, key[, comparator])`: the index, else `-(insertion point) - 1`.
+        ("java/util/Collections", "binarySearch") => {
+            let items = elements(rt, a(0));
+            let cmp = if args.len() > 2 { a(2) } else { V::NULL };
+            let (mut lo, mut hi) = (0i32, items.len() as i32 - 1);
+            while lo <= hi {
+                let mid = (lo + hi) >> 1;
+                let c = compare(rt, cmp, items[mid as usize], a(1));
+                if c < 0 {
+                    lo = mid + 1;
+                } else if c > 0 {
+                    hi = mid - 1;
+                } else {
+                    return Some(V::I(mid));
+                }
+            }
+            V::I(-(lo + 1))
+        }
+        // Commons Lang's in-place reversal of an array.
+        ("org/apache/commons/lang3/ArrayUtils", "reverse") => {
+            if let Some(Data::Array(items)) = rt.heap.get_mut(a(0).r() as usize).map(|o| &mut o.data) {
+                items.reverse();
+            }
+            V::Void
+        }
         ("java/util/Collections", "sort") | ("java/util/List", "sort") => {
             sort(rt, a(0), args.get(1).copied().unwrap_or(V::NULL));
             V::Void
@@ -910,26 +1058,82 @@ fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// What a map gives for a missing key: null, or for a fastutil map of primitive values its
+/// `defaultReturnValue` (zero unless set, kept in an unsorted table's unused comparator slot).
+fn missing(rt: &Rt, m: V, desc: &str) -> V {
+    let ret = desc.rsplit(')').next().unwrap_or("");
+    if ret.starts_with('L') || ret.starts_with('[') {
+        return V::NULL;
+    }
+    if let Some(Data::Table(t)) = rt.heap.get(m.r() as usize).map(|o| &o.data)
+        && !t.sorted
+        && matches!(t.comparator, V::I(_) | V::J(_) | V::F(_) | V::D(_))
+    {
+        return t.comparator;
+    }
+    match ret {
+        "J" => V::J(0),
+        "F" => V::F(0.0),
+        "D" => V::D(0.0),
+        "V" => V::Void,
+        _ => V::I(0),
+    }
+}
+
 fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
-    let _ = desc;
+    // A stored value, or what a missing key gives (`missing`).
+    let found = |rt: &Rt, v: Option<V>| v.unwrap_or_else(|| missing(rt, this, desc));
     Some(match name {
         "size" => V::I(table_entries(rt, this).len() as i32),
         "isEmpty" => V::I(table_entries(rt, this).is_empty() as i32),
-        "get" => table_get(rt, this, a(1)).unwrap_or(V::NULL),
+        // fastutil: what `get` of a missing key gives.
+        "defaultReturnValue" if args.len() > 1 => {
+            if let Some(Data::Table(t)) = rt.heap.get_mut(this.r() as usize).map(|o| &mut o.data)
+                && !t.sorted
+            {
+                t.comparator = a(1);
+            }
+            V::Void
+        }
+        "defaultReturnValue" => missing(rt, this, desc),
+        "get" | "getInt" | "getLong" | "getFloat" | "getDouble" | "getBoolean" | "getByte" | "getShort" | "getChar" => {
+            let v = table_get(rt, this, a(1));
+            found(rt, v)
+        }
+        "removeInt" | "removeLong" | "removeFloat" | "removeDouble" | "removeBoolean" => {
+            let v = table_remove(rt, this, a(1));
+            found(rt, v)
+        }
+        // `Object2IntOpenHashMap.addTo`: adds to the value (the default when missing); the old one.
+        "addTo" => {
+            let old = table_get(rt, this, a(1)).unwrap_or_else(|| missing(rt, this, desc));
+            let new = match (old, a(2)) {
+                (V::J(x), V::J(y)) => V::J(x.wrapping_add(y)),
+                (V::F(x), V::F(y)) => V::F(x + y),
+                (V::D(x), V::D(y)) => V::D(x + y),
+                (x, y) => V::I(x.i().wrapping_add(y.i())),
+            };
+            table_put(rt, this, a(1), new);
+            old
+        }
         "getOrDefault" => table_get(rt, this, a(1)).unwrap_or(a(2)),
         "containsKey" => V::I(table_get(rt, this, a(1)).is_some() as i32),
         "containsValue" => {
             let vals: Vec<V> = table_entries(rt, this).into_iter().map(|(_, v)| v).collect();
             V::I(vals.into_iter().any(|v| equals(rt, v, a(2 - 1))) as i32)
         }
-        "put" => table_put(rt, this, a(1), a(2)),
+        "put" => {
+            let had = table_get(rt, this, a(1));
+            table_put(rt, this, a(1), a(2));
+            found(rt, had)
+        }
         "putIfAbsent" => match table_get(rt, this, a(1)) {
             Some(v) if v.r() != 0 || !matches!(v, V::R(_)) => v,
             _ => {
                 table_put(rt, this, a(1), a(2));
-                V::NULL
+                missing(rt, this, desc)
             }
         },
         "putAll" => {
@@ -938,7 +1142,10 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
-        "remove" => table_remove(rt, this, a(1)).unwrap_or(V::NULL),
+        "remove" => {
+            let v = table_remove(rt, this, a(1));
+            found(rt, v)
+        }
         "clear" => {
             let (sorted, comparator) = match rt.heap.get(this.r() as usize).map(|o| &o.data) {
                 Some(Data::Table(t)) => (t.sorted, t.comparator),

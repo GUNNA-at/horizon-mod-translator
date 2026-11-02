@@ -121,6 +121,13 @@ impl BlockEntityDraw {
     pub fn scale(&mut self, by: [f32; 3]) {
         self.apply(Mat4::from_scale(Vec3::from_array(by)));
     }
+    /// Multiplies the pose by `m`, a 4×4 matrix in column-major order (JOML's
+    /// `Matrix4f.get(float[])`), as `PoseStack.mulPose(Matrix4f)` does: a
+    /// mod's own pose math applied in one call.
+    /// API @API:block_entity_draw_model@.
+    pub fn transform(&mut self, m: [f32; 16]) {
+        self.apply(Mat4::from_cols_array(&m));
+    }
     /// Keeps what this call drew: the block is drawn the same again, with
     /// neither `native_block_entity_submit` nor
     /// `native_block_entity_render_bounding_box` called, until its state,
@@ -185,6 +192,47 @@ pub struct CubeFace<'a> {
 fn shaded(tint: u32, brightness: f32) -> u32 {
     let c = |shift: u32| (((tint >> shift) & 255) as f32 * brightness) as u32;
     0xFF00_0000 | c(0) << 16 | c(8) << 8 | c(16)
+}
+
+/// Models baked for `native_draw_model`, by location, with the library they
+/// were baked from: another library (the packs changed) bakes them again.
+type NamedModels = (
+    Option<std::sync::Arc<horizon_assets::resolve::ModelLibrary>>,
+    FxHashMap<String, Option<std::sync::Arc<[horizon_assets::bake::ModelQuad]>>>,
+);
+
+thread_local! {
+    static NAMED_MODELS: std::cell::RefCell<NamedModels> = std::cell::RefCell::default();
+}
+
+/// Model `name` of `library`, baked as a block model with no rotation; None
+/// when it doesn't resolve or bake.
+fn named_model(
+    library: &std::sync::Arc<horizon_assets::resolve::ModelLibrary>,
+    name: &str,
+) -> Option<std::sync::Arc<[horizon_assets::bake::ModelQuad]>> {
+    NAMED_MODELS.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if !cache
+            .0
+            .as_ref()
+            .is_some_and(|l| std::sync::Arc::ptr_eq(l, library))
+        {
+            cache.0 = Some(library.clone());
+            cache.1.clear();
+        }
+        cache
+            .1
+            .entry(name.to_owned())
+            .or_insert_with(|| {
+                let model = library.resolve(name).ok()?;
+                let transform = horizon_assets::bake::BlockModelTransform::new([0; 3], false);
+                horizon_assets::bake::bake_block_model(&model, transform)
+                    .ok()
+                    .map(std::sync::Arc::from)
+            })
+            .clone()
+    })
 }
 
 /// Game ticks kept geometry stays after it was last drawn, as signs' text.
@@ -508,6 +556,60 @@ impl Game<'_> {
         }
         let pose = draw.pose();
         self.submit_item_world(&item, pose, draw.light, &mut draw.vertices);
+        true
+    }
+
+    /// Draws block model `model` (`mymod:block/cog_half`, a model file's
+    /// location) under `draw`'s pose, as it is baked with no blockstate
+    /// rotation (vanilla's standalone models, NeoForge's
+    /// `ModelEvent.RegisterAdditional`): the parts of a machine that move,
+    /// which no block state draws. `tint` (0xRRGGBB, 0xFFFFFF for none)
+    /// multiplies every face. Baked on first use and kept until the resource
+    /// packs change. False for a model the packs don't have.
+    /// API @API:block_entity_draw_model@.
+    pub(super) fn native_draw_model(
+        &self,
+        draw: &mut BlockEntityDraw,
+        model: &str,
+        tint: u32,
+    ) -> bool {
+        let Ok(library) = self.pack.render.model_library.as_ref() else {
+            return false;
+        };
+        let Some(quads) = named_model(library, model) else {
+            return false;
+        };
+        use horizon_client::item_render::{direction_vector, transform_normal};
+        let pose = draw.pose();
+        let color = if tint & 0xFF_FFFF == 0xFF_FFFF {
+            u32::MAX
+        } else {
+            shaded(tint, 1.0)
+        };
+        for quad in quads.iter() {
+            let name = quad.material.sprite.trim_start_matches("minecraft:");
+            let Some(s) = self.gui.atlas.sprites.get(name).copied() else {
+                continue;
+            };
+            let n = transform_normal(pose, direction_vector(quad.facing));
+            let n = n.to_array().map(|v| (v.clamp(-1.0, 1.0) * 127.0) as i8);
+            let emission = u32::from(quad.light_emission) * 16;
+            let light = (draw.light & 0xFF) | (draw.light >> 8 & 0xFF).max(emission) << 8;
+            for k in 0..4 {
+                let uv = quad.uv[k];
+                draw.vertices.push(Vertex {
+                    normal: [n[0], n[1], n[2], 127],
+                    pos: pose
+                        .transform_point3(Vec3::from_array(quad.positions[k]))
+                        .to_array(),
+                    uv: [s.u0 + uv[0] * (s.u1 - s.u0), s.v0 + uv[1] * (s.v1 - s.v0)],
+                    layer: 0,
+                    color,
+                    light,
+                    glint_uv: [0.0, 0.0],
+                });
+            }
+        }
         true
     }
 

@@ -220,7 +220,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `glue::render_block_entity`, `glue::block_entity_update_tag`, `glue::client_tick`, client `level`.
   - [x] Translator intrinsics: a method whose key is in `render::INTRINSICS` is emitted as
     `api::call(rt, KEY, args)` (codegen `method()`).
-  - [ ] Harness client test (scratch `harness/src/main.rs` has it: renders each block entity on its own
+  - [x] Harness client test passes: the motor and three shafts draw (4 of 4) on the client's own runtime,
+    each turning between frames at Create's rate (speed × 0.3 degrees a tick, plus its 22.5° offset on
+    alternate shafts); the motor's `shaft_half` partial model faces east. 4 draws take ~130 µs a frame.
+    Fixes on the way: Guava caches (`CacheBuilder`, `Cache.get(key, Callable)`, `LoadingCache`) and
+    `MapMaker`; fastutil maps' `defaultReturnValue` (its absence made Flywheel's layout builder throw in
+    `CreateClient`'s constructor); catnip's real buffer is `ShadeSeparatingSuperByteBuffer` (the legacy
+    `DefaultSuperByteBuffer.rotate` returns null); `Quaternionf.setAngleAxis`, `Direction.toYRot`,
+    Flywheel's `TransformStack.of` (a mixin method on `PoseStack`), `Collections.binarySearch`.
+  - [ ] (was) Harness client test (scratch `harness/src/main.rs` has it: renders each block entity on its own
     thread's runtime at two moments and counts draws whose transform changed). Regenerate `cb-h` with
     `--runtime crates/horizon-compat-core`, rebuild the harness, run it, fix unmapped calls.
     Watch: Guava `CacheBuilder`/`Cache.get(key, Callable)` (catnip's `SuperByteBufferCache`) is unmapped;

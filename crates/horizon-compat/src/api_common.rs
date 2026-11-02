@@ -241,6 +241,23 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     const BASE: &str = "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase";
     const HOLDER: &str = "net/minecraft/world/level/block/state/StateHolder";
     Some(match (owner, name) {
+        // Flywheel's mixins onto vanilla types (`flywheel$setVisualizer`...): its instancing is off
+        // (`VisualizationManager.supportsVisualization` is false), so they keep nothing.
+        // Flywheel's `TransformStack.of(poseStack)`: its own wrapper over the stack.
+        (_, "flywheel$transformStack") => {
+            let t = rt.new_object("dev/engine_room/flywheel/lib/transform/PoseTransformStack");
+            rt.put_field(t, "stack", a(0));
+            t
+        }
+        (_, n) if n.starts_with("flywheel$") => {
+            if desc.ends_with(")V") {
+                V::Void
+            } else if desc.ends_with(")Z") {
+                V::I(0)
+            } else {
+                V::NULL
+            }
+        }
         // Block-state properties
         (STATE | BASE | HOLDER, "getValue" | "getOptionalValue" | "hasProperty" | "setValue" | "cycle" | "trySetValue") => {
             let text = name_of(rt, a(0));

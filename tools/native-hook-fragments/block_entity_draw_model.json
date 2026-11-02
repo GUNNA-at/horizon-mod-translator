@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "drawing standalone block models and whole poses for mod block entities\n(`native_draw_model`, `BlockEntityDraw::transform`).",
+  "doc_summary": "standalone block models for drawing mod block entities: in `native_block_entity_submit`, `native_draw_model(draw, model,\ntint)` draws a model file by its location (`mymod:block/cog_half`), baked with no blockstate rotation on first use and kept\nuntil the resource packs change: the moving parts of a machine that no block state draws (NeoForge's\n`ModelEvent.RegisterAdditional`). `draw.transform(m)` multiplies the pose by a column-major 4×4 matrix, as\n`PoseStack.mulPose(Matrix4f)`. Bundles that use them need `\"hooks\": @API:block_entity_draw_model@`.",
+  "comments": [
+    "crates/horizon-client/src/game/native_block_entity_draw.rs"
+  ]
+}
