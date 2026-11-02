@@ -28,8 +28,9 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// core's root becomes `compat/mod.rs`; horizon-compat's root is left out (its modules are
 /// declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 8] = [
+const COMPAT: [(&str, &str); 10] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
+    ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
     ("api_common.rs", include_str!("../../horizon-compat/src/api_common.rs")),
     ("nbt.rs", include_str!("../../horizon-compat/src/nbt.rs")),
@@ -37,6 +38,7 @@ const COMPAT: [(&str, &str); 8] = [
     ("jutil.rs", include_str!("../../horizon-compat/src/jutil.rs")),
     ("neo.rs", include_str!("../../horizon-compat/src/neo.rs")),
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
+    ("tags.rs", include_str!("../../horizon-compat/src/tags.rs")),
 ];
 
 /// The core's root inlined: without the installable entry points (inlined, `api` and `neo` are
@@ -46,7 +48,7 @@ fn inlined_core() -> String {
     let (_, tail) = rest.split_once("// END ENGINE ENTRY POINTS").expect("core entry point markers");
     let mods: String = COMPAT
         .iter()
-        .filter(|(n, _)| *n != "host.rs")
+        .filter(|(n, _)| !matches!(*n, "host.rs" | "gc.rs"))
         .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
         .collect();
     // `Rt::is_a` asks the mapping's table of Minecraft's class families.

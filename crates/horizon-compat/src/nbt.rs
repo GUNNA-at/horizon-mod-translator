@@ -48,13 +48,59 @@ pub fn to_runtime(rt: &mut Rt, tag: &BTreeMap<String, Nbt>) -> V {
             Nbt::Double(d) => (V::D(*d), DOUBLE),
             Nbt::String(s) => (rt.string(s), STRING),
             Nbt::Compound(c) => (to_runtime(rt, c), TAG),
-            // Lists and arrays stay out of the runtime for now: kept as they were by the glue.
-            _ => continue,
+            other => match element_to_runtime(rt, other) {
+                Some(v) => (v, crate::tags::kind_of(rt, v)),
+                None => continue,
+            },
         };
         map.insert(k.clone(), value);
         map.insert(kind_key(k), V::I(kind));
     }
     rt.alloc("net/minecraft/nbt/CompoundTag", Data::Map(map))
+}
+
+/// A tag object for a list element or an array (lists hold tag objects, as Java's `ListTag` does).
+fn element_to_runtime(rt: &mut Rt, n: &Nbt) -> Option<V> {
+    let numeric = |rt: &mut Rt, kind: i32, class: &'static str, bits: i64| rt.alloc(class, Data::Native("nbt", [kind as i64, bits, 0, 0]));
+    Some(match n {
+        Nbt::Byte(b) => numeric(rt, BYTE, "net/minecraft/nbt/ByteTag", *b as i64),
+        Nbt::Short(x) => numeric(rt, SHORT, "net/minecraft/nbt/ShortTag", *x as i64),
+        Nbt::Int(i) => numeric(rt, INT, "net/minecraft/nbt/IntTag", *i as i64),
+        Nbt::Long(l) => numeric(rt, LONG, "net/minecraft/nbt/LongTag", *l),
+        Nbt::Float(f) => numeric(rt, FLOAT, "net/minecraft/nbt/FloatTag", f.to_bits() as i64),
+        Nbt::Double(d) => numeric(rt, DOUBLE, "net/minecraft/nbt/DoubleTag", d.to_bits() as i64),
+        Nbt::String(s) => rt.alloc("net/minecraft/nbt/StringTag", Data::Str(s.clone())),
+        Nbt::Compound(c) => to_runtime(rt, c),
+        Nbt::List(items) => {
+            let items: Vec<V> = items.iter().filter_map(|i| element_to_runtime(rt, i)).collect();
+            crate::tags::new_list(rt, items)
+        }
+        Nbt::IntArray(a) => rt.alloc("net/minecraft/nbt/IntArrayTag", Data::Array(a.iter().map(|&i| V::I(i)).collect())),
+        Nbt::LongArray(a) => rt.alloc("net/minecraft/nbt/LongArrayTag", Data::Array(a.iter().map(|&i| V::J(i)).collect())),
+        Nbt::ByteArray(a) => rt.alloc("net/minecraft/nbt/ByteArrayTag", Data::Array(a.iter().map(|&i| V::I(i as i32)).collect())),
+    })
+}
+
+/// Game NBT from a tag object (a list element, an array, a compound).
+fn element_from_runtime(rt: &Rt, v: V) -> Option<Nbt> {
+    let o = rt.heap.get(v.r() as usize)?;
+    Some(match (&o.data, o.class) {
+        (Data::Map(_), _) => Nbt::Compound(from_runtime(rt, v)),
+        (Data::List(items), _) => Nbt::List(items.iter().filter_map(|&i| element_from_runtime(rt, i)).collect()),
+        (Data::Array(a), "net/minecraft/nbt/LongArrayTag") => Nbt::LongArray(a.iter().map(|x| x.j()).collect()),
+        (Data::Array(a), "net/minecraft/nbt/ByteArrayTag") => Nbt::ByteArray(a.iter().map(|x| x.i() as i8).collect()),
+        (Data::Array(a), _) => Nbt::IntArray(a.iter().map(|x| x.i()).collect()),
+        (Data::Native("nbt", h), _) => match h[0] as i32 {
+            BYTE => Nbt::Byte(h[1] as i8),
+            SHORT => Nbt::Short(h[1] as i16),
+            INT => Nbt::Int(h[1] as i32),
+            LONG => Nbt::Long(h[1]),
+            FLOAT => Nbt::Float(f32::from_bits(h[1] as u32)),
+            _ => Nbt::Double(f64::from_bits(h[1] as u64)),
+        },
+        (Data::Str(s), _) => Nbt::String(s.clone()),
+        _ => return None,
+    })
 }
 
 /// Game NBT from a runtime `CompoundTag`.
@@ -75,6 +121,10 @@ pub fn from_runtime(rt: &Rt, v: V) -> BTreeMap<String, Nbt> {
             (TAG, v) if matches!(rt.heap.get(v.r() as usize).map(|o| &o.data), Some(Data::Map(_))) => {
                 Nbt::Compound(from_runtime(rt, *v))
             }
+            (crate::tags::K_LIST | crate::tags::K_INT_ARRAY | crate::tags::K_LONG_ARRAY | crate::tags::K_BYTE_ARRAY, v) => match element_from_runtime(rt, *v) {
+                Some(n) => n,
+                None => continue,
+            },
             (_, V::I(i)) => Nbt::Int(*i),
             (_, V::J(l)) => Nbt::Long(*l),
             (_, V::F(f)) => Nbt::Float(*f),

@@ -6,6 +6,7 @@
 //! links this crate alone, so the mapping builds as its own small crate.
 use std::collections::HashMap;
 
+pub mod gc;
 pub mod host;
 
 /// A JVM value. References index [`Rt::heap`]; 0 is null.
@@ -120,6 +121,12 @@ pub struct Rt {
     is_a_cache: std::cell::RefCell<HashMap<(usize, usize, usize, usize), bool>>,
     /// Methods an uncaught exception left, innermost first (with `HORIZON_COMPAT_TRACE`).
     pub unwinding: Vec<&'static str>,
+    /// Freed heap slots, reused by allocations ([`gc`]).
+    pub free: Vec<u32>,
+    /// Live objects at which the next collection runs.
+    pub collect_at: usize,
+    /// Values the game holds across hook calls: roots for the collector.
+    pub pinned: Vec<V>,
     /// `registered` by (object, registry), and the size it was built at.
     registered_index: std::cell::RefCell<(usize, HashMap<(u32, String), String>)>,
     /// Whether a mod class implements a method itself (`name.desc`), so glue calls only real overrides.
@@ -181,6 +188,9 @@ impl Default for Rt {
             is_a_cache: Default::default(),
             unwinding: Vec::new(),
             registered_index: Default::default(),
+            free: Vec::new(),
+            collect_at: 200_000,
+            pinned: Vec::new(),
             overrides: None,
             reflect: None,
             registered: HashMap::new(),
@@ -304,8 +314,20 @@ impl Rt {
     }
 
     pub fn alloc_cid(&mut self, class: &'static str, cid: u32, data: Data) -> V {
+        if let Some(r) = self.free.pop() {
+            self.heap[r as usize] = Object { class, cid, data };
+            return V::R(r);
+        }
         self.heap.push(Object { class, cid, data });
         V::R(self.heap.len() as u32 - 1)
+    }
+
+    /// A point where no translated code runs (a hook's outermost entry, before it makes any
+    /// value): collects garbage when enough was allocated.
+    pub fn safe_point(&mut self) {
+        if self.host.is_none() {
+            self.maybe_collect();
+        }
     }
 
     /// A new object of `class`, a mod class's carrying its id (looked up by name).

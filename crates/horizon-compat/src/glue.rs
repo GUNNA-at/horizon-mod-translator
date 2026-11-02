@@ -55,6 +55,8 @@ const LEVEL_LOAD: &str = "net/neoforged/neoforge/event/level/LevelEvent$Load";
 
 /// `tick_block` (a scheduled tick): `BlockBehaviour.tick`.
 pub fn tick_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
     run(rt, host, state, TICK, |rt| {
         let l = level(rt);
         let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
@@ -66,6 +68,8 @@ pub fn tick_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) 
 /// `random_tick`: `BlockBehaviour.randomTick`. A mod block's random tick is always the mod's,
 /// even when it has none: the block's template (which gives it random ticks) must not act.
 pub fn random_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
     let mine = mod_block(rt, state).is_some();
     let ran = run(rt, host, state, RANDOM_TICK, |rt| {
         let l = level(rt);
@@ -78,6 +82,8 @@ pub fn random_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str)
 
 /// `neighbor_changed`: `BlockBehaviour.neighborChanged`.
 pub fn neighbor_changed(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, from: [i32; 3], changed_block: &str, moved: bool) -> bool {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
     let changed = changed_block.to_owned();
     run(rt, host, state, NEIGHBOR, move |rt| {
         let l = level(rt);
@@ -140,6 +146,8 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
 /// `native_block_entity_tick`: one server tick of the mod's block entity at `pos`, whose saved
 /// compound is `nbt` (read before, written after).
 pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, nbt: &mut std::collections::BTreeMap<String, crate::nbt::Nbt>) -> bool {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
     let Some((b, _)) = mod_block(rt, state) else { return false };
     rt.with_host(host, |rt| {
         let Some(be) = block_entity(rt, pos, state, nbt) else { return false };
@@ -185,6 +193,8 @@ const USE_WITHOUT_ITEM: &str = "useWithoutItem.(Lnet/minecraft/world/level/block
 /// stack first, then, when it passes to the default, `useWithoutItem`. True when the block took the
 /// click (the game's own handling then stops).
 pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, face: i64) -> bool {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
     let Some((b, class)) = mod_block(rt, state) else { return false };
     let Some(overrides) = rt.overrides else { return false };
     let (with_item, without) = (overrides(class, USE_ITEM_ON), overrides(class, USE_WITHOUT_ITEM));

@@ -268,7 +268,12 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
                 _ => V::NULL,
             }
         }
-        _ => match crate::neo::call(rt, key, args).or_else(|| crate::jlang::call(rt, key, args)).or_else(|| crate::jutil::call(rt, key, args)).or_else(|| world(rt, key, args)) {
+        _ => match crate::neo::call(rt, key, args)
+            .or_else(|| crate::jlang::call(rt, key, args))
+            .or_else(|| crate::jutil::call(rt, key, args))
+            .or_else(|| crate::tags::call(rt, key, args))
+            .or_else(|| world(rt, key, args))
+        {
             Some(v) => v,
             None => {
                 // Builder chains (`Properties.of().strength(1f).noOcclusion()`): a method

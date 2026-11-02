@@ -202,32 +202,6 @@ fn compound(rt: &mut Rt) -> V {
     rt.alloc("net/minecraft/nbt/CompoundTag", Data::Map(HashMap::new()))
 }
 
-fn map_get(rt: &Rt, tag: V, key: &str) -> Option<V> {
-    match rt.heap.get(tag.r() as usize).map(|o| &o.data) {
-        Some(Data::Map(m)) => m.get(key).copied(),
-        _ => None,
-    }
-}
-
-/// `tag.copy()`: nested compounds copied too, as NBT copies are deep.
-fn copy_tag(rt: &mut Rt, tag: V) -> V {
-    let entries: Vec<(String, V)> = match rt.heap.get(tag.r() as usize).map(|o| &o.data) {
-        Some(Data::Map(m)) => m.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        _ => return compound(rt),
-    };
-    let mut out = HashMap::new();
-    for (k, v) in entries {
-        let v = if matches!(v, V::R(r) if r != 0) && rt.class_of(v) == "net/minecraft/nbt/CompoundTag" { copy_tag(rt, v) } else { v };
-        out.insert(k, v);
-    }
-    rt.alloc("net/minecraft/nbt/CompoundTag", Data::Map(out))
-}
-
-fn map_put(rt: &mut Rt, tag: V, key: String, v: V) {
-    if let Some(crate::Object { data: Data::Map(m), .. }) = rt.heap.get_mut(tag.r() as usize) {
-        m.insert(key, v);
-    }
-}
 
 fn stack(rt: &mut Rt, item_name: &str, count: i32) -> V {
     let s = rt.new_object("net/minecraft/world/item/ItemStack");
@@ -444,73 +418,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             arr
         }
         ("net/minecraft/core/Direction$AxisDirection", "getStep") => V::I(if native(rt, a(0))[0] != 0 { 1 } else { -1 }),
-
-        // NBT
-        ("net/minecraft/nbt/CompoundTag", "<init>") => {
-            if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
-                o.data = Data::Map(HashMap::new());
-            }
-            V::Void
-        }
-        ("net/minecraft/nbt/CompoundTag", n) if n.starts_with("put") => {
-            let key = name_of(rt, a(1));
-            let kind = match n {
-                "putByte" | "putBoolean" => crate::nbt::BYTE,
-                "putShort" => crate::nbt::SHORT,
-                "putInt" => crate::nbt::INT,
-                "putLong" => crate::nbt::LONG,
-                "putFloat" => crate::nbt::FLOAT,
-                "putDouble" => crate::nbt::DOUBLE,
-                "putString" => crate::nbt::STRING,
-                _ => crate::nbt::TAG,
-            };
-            map_put(rt, a(0), crate::nbt::kind_key(&key), V::I(kind));
-            map_put(rt, a(0), key, a(2));
-            if n == "put" { a(2) } else { V::Void }
-        }
-        ("net/minecraft/nbt/CompoundTag", "isEmpty" | "size" | "getAllKeys") => {
-            let keys: Vec<String> = match rt.heap.get(a(0).r() as usize).map(|o| &o.data) {
-                Some(Data::Map(m)) => m.keys().filter(|k| !k.starts_with('\u{1}')).cloned().collect(),
-                _ => Vec::new(),
-            };
-            match name {
-                "isEmpty" => V::I(keys.is_empty() as i32),
-                "size" => V::I(keys.len() as i32),
-                _ => {
-                    let mut keys = keys;
-                    keys.sort();
-                    let items: Vec<V> = keys.iter().map(|k| rt.string(k)).collect();
-                    crate::jutil::new_set_of(rt, &items)
-                }
-            }
-        }
-        ("net/minecraft/nbt/CompoundTag", "copy") => copy_tag(rt, a(0)),
-        ("net/minecraft/nbt/CompoundTag", "contains") => {
-            let key = name_of(rt, a(1));
-            V::I(map_get(rt, a(0), &key).is_some() as i32)
-        }
-        ("net/minecraft/nbt/CompoundTag", "remove") => {
-            let key = name_of(rt, a(1));
-            if let Some(crate::Object { data: Data::Map(m), .. }) = rt.heap.get_mut(a(0).r() as usize) {
-                m.remove(&crate::nbt::kind_key(&key));
-                m.remove(&key);
-            }
-            V::Void
-        }
-        ("net/minecraft/nbt/CompoundTag", n) if n.starts_with("get") => {
-            let key = name_of(rt, a(1));
-            let found = map_get(rt, a(0), &key);
-            match (n, found) {
-                (_, Some(v)) => v,
-                ("getInt" | "getBoolean" | "getByte" | "getShort", None) => V::I(0),
-                ("getLong", None) => V::J(0),
-                ("getFloat", None) => V::F(0.0),
-                ("getDouble", None) => V::D(0.0),
-                ("getString", None) => rt.string(""),
-                ("getCompound", None) => compound(rt),
-                _ => V::NULL,
-            }
-        }
 
         // Players and interactions
         (o, n) if o.starts_with("net/minecraft/") && (o.ends_with("/Player") || o.ends_with("/ServerPlayer") || o.ends_with("/LivingEntity") || o.ends_with("/Entity")) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "level" | "isLocalPlayer") => {

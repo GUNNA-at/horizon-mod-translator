@@ -12,6 +12,7 @@ pub mod jlang;
 pub mod jutil;
 pub mod nbt;
 pub mod neo;
+pub mod tags;
 
 /// Makes this mapping the one engines that link `horizon-compat-core` alone call.
 pub fn install() {
