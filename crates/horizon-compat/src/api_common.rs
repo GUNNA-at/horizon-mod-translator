@@ -357,6 +357,37 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             };
             direction(rt, o)
         }
+        ("net/minecraft/core/Direction", "get") if desc.starts_with("(Lnet/minecraft/core/Direction$AxisDirection;Lnet/minecraft/core/Direction$Axis;") => {
+            let positive = native(rt, a(0))[0] != 0;
+            let o = match native(rt, a(1))[0] {
+                0 => if positive { 5 } else { 4 },
+                1 => if positive { 1 } else { 0 },
+                _ => if positive { 3 } else { 2 },
+            };
+            direction(rt, o)
+        }
+        ("net/minecraft/core/Direction$Axis", "choose") => args.get(1 + native(rt, a(0))[0].clamp(0, 2) as usize).copied().unwrap_or_default(),
+        ("net/minecraft/core/Direction$Axis", "getName" | "getSerializedName" | "toString") => {
+            let n = AXIS_NAMES[native(rt, a(0))[0].clamp(0, 2) as usize];
+            rt.string(n)
+        }
+        ("net/minecraft/core/Direction$Axis", "test") => {
+            let d = native(rt, a(1))[0];
+            V::I((a(1).r() != 0 && [1, 1, 2, 2, 0, 0][d.clamp(0, 5) as usize] == native(rt, a(0))[0]) as i32)
+        }
+        ("net/minecraft/core/Direction$AxisDirection", "opposite") => {
+            let positive = native(rt, a(0))[0] == 0;
+            rt.intern(format!("axisdir/{positive}"), |rt| {
+                let v = rt.alloc("net/minecraft/core/Direction$AxisDirection", Data::Native("AxisDirection", [positive as i64, 0, 0, 0]));
+                rt.put_field(v, "$ordinal", V::I(if positive { 0 } else { 1 }));
+                v
+            })
+        }
+        // Planes: the horizontal one holds the four sides, the vertical one up and down.
+        ("net/minecraft/core/Direction$Plane", "test") => {
+            let horizontal = native(rt, a(0))[0] == 0;
+            V::I((a(1).r() != 0 && (native(rt, a(1))[0] >= 2) == horizontal) as i32)
+        }
         ("net/minecraft/core/Direction$Axis", "isVertical") => V::I((native(rt, a(0))[0] == 1) as i32),
         ("net/minecraft/core/Direction$Axis", "isHorizontal") => V::I((native(rt, a(0))[0] != 1) as i32),
         ("net/minecraft/core/Direction$Axis", "ordinal") => V::I(native(rt, a(0))[0] as i32),
@@ -694,6 +725,22 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         }
         "java/lang/Boolean" if field == "TRUE" || field == "FALSE" => boolean(rt, field == "TRUE"),
         "net/minecraft/core/Direction$Axis" => axis(rt, AXIS_NAMES.iter().position(|a| a.eq_ignore_ascii_case(field))? as i64),
+        "net/minecraft/core/Direction$AxisDirection" if field == "POSITIVE" || field == "NEGATIVE" => {
+            let positive = field == "POSITIVE";
+            rt.intern(format!("axisdir/{positive}"), |rt| {
+                let v = rt.alloc("net/minecraft/core/Direction$AxisDirection", Data::Native("AxisDirection", [positive as i64, 0, 0, 0]));
+                rt.put_field(v, "$ordinal", V::I(if positive { 0 } else { 1 }));
+                v
+            })
+        }
+        "net/minecraft/core/Direction$Plane" if field == "HORIZONTAL" || field == "VERTICAL" => {
+            let vertical = field == "VERTICAL";
+            rt.intern(format!("plane/{vertical}"), |rt| {
+                let v = rt.alloc("net/minecraft/core/Direction$Plane", Data::Native("Plane", [vertical as i64, 0, 0, 0]));
+                rt.put_field(v, "$ordinal", V::I(vertical as i32));
+                v
+            })
+        }
         _ => return None,
     })
 }
@@ -704,6 +751,31 @@ mod tests {
 
     const GET: &str = "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;";
     const SET: &str = "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;";
+
+    #[test]
+    fn positions_pack_and_directions_turn_as_vanilla_does() {
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| api::call(rt, key, args);
+        let p = api::block_pos(&mut rt, 1, 2, 3);
+        // x << 38 | z << 12 | y, by vanilla's layout: 274877906944 + 12288 + 2.
+        assert_eq!(c(&mut rt, "net/minecraft/core/BlockPos.asLong.()J", &[p]), V::J(274_877_919_234));
+        let neg = api::block_pos(&mut rt, -1, -1, -1);
+        assert_eq!(c(&mut rt, "net/minecraft/core/BlockPos.asLong.()J", &[neg]), V::J(-1));
+        let back = c(&mut rt, "net/minecraft/core/BlockPos.of.(J)Lnet/minecraft/core/BlockPos;", &[V::J(-1)]);
+        assert_eq!(c(&mut rt, "net/minecraft/core/BlockPos.equals.(Ljava/lang/Object;)Z", &[back, neg]), V::I(1));
+        // Vec3i.hashCode of (1, 2, 3): (2 + 3 * 31) * 31 + 1.
+        assert_eq!(c(&mut rt, "net/minecraft/core/BlockPos.hashCode.()I", &[p]), V::I(2946));
+        let north = api::direction(&mut rt, 2);
+        let east = c(&mut rt, "net/minecraft/core/Direction.getClockWise.()Lnet/minecraft/core/Direction;", &[north]);
+        assert_eq!(east, api::direction(&mut rt, 5));
+        assert_eq!(c(&mut rt, "net/minecraft/core/Direction.get2DDataValue.()I", &[east]), V::I(3));
+        let west = c(&mut rt, "net/minecraft/core/Direction.getCounterClockWise.()Lnet/minecraft/core/Direction;", &[north]);
+        assert_eq!(west, api::direction(&mut rt, 4));
+        let horizontal = api::get_static(&mut rt, "net/minecraft/core/Direction$Plane.HORIZONTAL");
+        let up = api::direction(&mut rt, 1);
+        assert_eq!(c(&mut rt, "net/minecraft/core/Direction$Plane.test.(Lnet/minecraft/core/Direction;)Z", &[horizontal, east]), V::I(1));
+        assert_eq!(c(&mut rt, "net/minecraft/core/Direction$Plane.test.(Lnet/minecraft/core/Direction;)Z", &[horizontal, up]), V::I(0));
+    }
 
     #[test]
     fn state_properties_round_trip_with_java_identity() {

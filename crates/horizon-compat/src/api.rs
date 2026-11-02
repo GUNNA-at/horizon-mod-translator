@@ -147,8 +147,61 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         "net/minecraft/core/BlockPos.offset.(III)Lnet/minecraft/core/BlockPos;" => {
             offset(rt, a(0), [a(1).i() as i64, a(2).i() as i64, a(3).i() as i64], 1)
         }
-        "net/minecraft/core/BlockPos.equals.(Ljava/lang/Object;)Z" => {
-            V::I((native(rt, a(0))[..3] == native(rt, a(1))[..3]) as i32)
+        "net/minecraft/core/BlockPos.equals.(Ljava/lang/Object;)Z" | "net/minecraft/core/Vec3i.equals.(Ljava/lang/Object;)Z" => {
+            V::I((native(rt, a(1))[3] == 0 && native(rt, a(0))[..3] == native(rt, a(1))[..3] && rt.heap.get(a(1).r() as usize).is_some_and(|o| matches!(o.data, Data::Native("BlockPos", _)))) as i32)
+        }
+        // `Vec3i.hashCode`: `(y + z * 31) * 31 + x`.
+        "net/minecraft/core/BlockPos.hashCode.()I" | "net/minecraft/core/Vec3i.hashCode.()I" => {
+            let p = native(rt, a(0));
+            let (x, y, z) = (p[0] as i32, p[1] as i32, p[2] as i32);
+            V::I(y.wrapping_add(z.wrapping_mul(31)).wrapping_mul(31).wrapping_add(x))
+        }
+        // Packed positions: x in 26 bits from bit 38, z in 26 from bit 12, y in the low 12.
+        "net/minecraft/core/BlockPos.asLong.()J" => {
+            let p = native(rt, a(0));
+            V::J(pack_pos(p[0], p[1], p[2]))
+        }
+        "net/minecraft/core/BlockPos.asLong.(III)J" => V::J(pack_pos(a(0).i() as i64, a(1).i() as i64, a(2).i() as i64)),
+        "net/minecraft/core/BlockPos.of.(J)Lnet/minecraft/core/BlockPos;" => {
+            let l = a(0).j();
+            block_pos(rt, l >> 38, (l << 52) >> 52, (l << 26) >> 38)
+        }
+        "net/minecraft/core/BlockPos.getX.(J)I" => V::I((a(0).j() >> 38) as i32),
+        "net/minecraft/core/BlockPos.getY.(J)I" => V::I(((a(0).j() << 52) >> 52) as i32),
+        "net/minecraft/core/BlockPos.getZ.(J)I" => V::I(((a(0).j() << 26) >> 38) as i32),
+        "net/minecraft/core/BlockPos.immutable.()Lnet/minecraft/core/BlockPos;" => {
+            let p = native(rt, a(0));
+            block_pos(rt, p[0], p[1], p[2])
+        }
+        "net/minecraft/core/BlockPos.offset.(Lnet/minecraft/core/Vec3i;)Lnet/minecraft/core/BlockPos;" | "net/minecraft/core/BlockPos.subtract.(Lnet/minecraft/core/Vec3i;)Lnet/minecraft/core/BlockPos;" => {
+            let d = native(rt, a(1));
+            let n = if key.contains(".subtract.") { -1 } else { 1 };
+            offset(rt, a(0), [d[0], d[1], d[2]], n)
+        }
+        "net/minecraft/core/BlockPos.multiply.(I)Lnet/minecraft/core/BlockPos;" => {
+            let p = native(rt, a(0));
+            let k = a(1).i() as i64;
+            block_pos(rt, p[0] * k, p[1] * k, p[2] * k)
+        }
+        "net/minecraft/core/BlockPos.above.(I)Lnet/minecraft/core/BlockPos;" => offset(rt, a(0), [0, 1, 0], a(1).i() as i64),
+        "net/minecraft/core/BlockPos.below.(I)Lnet/minecraft/core/BlockPos;" => offset(rt, a(0), [0, -1, 0], a(1).i() as i64),
+        "net/minecraft/core/BlockPos.north.(I)Lnet/minecraft/core/BlockPos;" => offset(rt, a(0), [0, 0, -1], a(1).i() as i64),
+        "net/minecraft/core/BlockPos.south.(I)Lnet/minecraft/core/BlockPos;" => offset(rt, a(0), [0, 0, 1], a(1).i() as i64),
+        "net/minecraft/core/BlockPos.west.(I)Lnet/minecraft/core/BlockPos;" => offset(rt, a(0), [-1, 0, 0], a(1).i() as i64),
+        "net/minecraft/core/BlockPos.east.(I)Lnet/minecraft/core/BlockPos;" => offset(rt, a(0), [1, 0, 0], a(1).i() as i64),
+        "net/minecraft/core/BlockPos.relative.(Lnet/minecraft/core/Direction$Axis;I)Lnet/minecraft/core/BlockPos;" => {
+            let mut d = [0i64; 3];
+            d[native(rt, a(1))[0].clamp(0, 2) as usize] = 1;
+            offset(rt, a(0), d, a(2).i() as i64)
+        }
+        "net/minecraft/core/Vec3i.distManhattan.(Lnet/minecraft/core/Vec3i;)I" | "net/minecraft/core/BlockPos.distManhattan.(Lnet/minecraft/core/Vec3i;)I" => {
+            let (p, q) = (native(rt, a(0)), native(rt, a(1)));
+            V::I(((p[0] - q[0]).abs() + (p[1] - q[1]).abs() + (p[2] - q[2]).abs()) as i32)
+        }
+        "net/minecraft/core/Vec3i.distSqr.(Lnet/minecraft/core/Vec3i;)D" | "net/minecraft/core/BlockPos.distSqr.(Lnet/minecraft/core/Vec3i;)D" => {
+            let (p, q) = (native(rt, a(0)), native(rt, a(1)));
+            let d = |i: usize| (p[i] - q[i]) as f64;
+            V::D(d(0) * d(0) + d(1) * d(1) + d(2) * d(2))
         }
 
         // net.minecraft.core.Direction
@@ -158,6 +211,22 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         "net/minecraft/core/Direction.ordinal.()I" | "net/minecraft/core/Direction.get3DDataValue.()I" => {
             V::I(native(rt, a(0))[0] as i32)
+        }
+        // 2D values: SOUTH 0, WEST 1, NORTH 2, EAST 3; up and down -1.
+        "net/minecraft/core/Direction.get2DDataValue.()I" => V::I([-1, -1, 2, 0, 1, 3][native(rt, a(0))[0].clamp(0, 5) as usize]),
+        "net/minecraft/core/Direction.from3DDataValue.(I)Lnet/minecraft/core/Direction;" => direction(rt, (a(0).i() % 6).abs() as i64),
+        "net/minecraft/core/Direction.from2DDataValue.(I)Lnet/minecraft/core/Direction;" => direction(rt, [3, 4, 2, 5][(a(0).i() % 4).unsigned_abs() as usize]),
+        // Around the vertical axis: north, east, south, west.
+        "net/minecraft/core/Direction.getClockWise.()Lnet/minecraft/core/Direction;" | "net/minecraft/core/Direction.getCounterClockWise.()Lnet/minecraft/core/Direction;" => {
+            let o = native(rt, a(0))[0];
+            let ring = [2, 5, 3, 4];
+            match ring.iter().position(|&r| r == o) {
+                Some(i) => {
+                    let step = if key.contains("getClockWise") { 1 } else { 3 };
+                    direction(rt, ring[(i + step) % 4])
+                }
+                None => a(0),
+            }
         }
         "net/minecraft/core/Direction.getStepX.()I" => V::I(DIRECTIONS[native(rt, a(0))[0].clamp(0, 5) as usize][0] as i32),
         "net/minecraft/core/Direction.getStepY.()I" => V::I(DIRECTIONS[native(rt, a(0))[0].clamp(0, 5) as usize][1] as i32),
@@ -353,6 +422,11 @@ fn holder(rt: &mut Rt, id: &str) -> V {
     let s = rt.string(id);
     rt.put_field(h, "$id", s);
     h
+}
+
+/// `BlockPos.asLong(x, y, z)`.
+fn pack_pos(x: i64, y: i64, z: i64) -> i64 {
+    ((x & 0x3FF_FFFF) << 38) | ((z & 0x3FF_FFFF) << 12) | (y & 0xFFF)
 }
 
 fn offset(rt: &mut Rt, p: V, d: [i64; 3], n: i64) -> V {
