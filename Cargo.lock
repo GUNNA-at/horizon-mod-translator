@@ -1603,6 +1603,7 @@ dependencies = [
 name = "horizon-port-pack"
 version = "0.1.0"
 dependencies = [
+ "horizon-compat",
  "horizon-mod-translator",
  "horizon-mods",
  "serde",

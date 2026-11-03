@@ -1168,6 +1168,50 @@ pub fn carry(
             report.items += 1;
         }
     }
+    // NeoForge's own convention tags the recipes name: NeoForge, which defines them, isn't there.
+    // Its members join the file the mod (or the oracle) wrote for the tag, and the convention tags
+    // they name come along too (`c:nuggets` holds `#c:nuggets/iron`).
+    let mut todo: Vec<String> = convention
+        .iter()
+        .filter_map(|t| t.strip_prefix("c:"))
+        .map(str::to_owned)
+        .collect();
+    let mut seen = BTreeSet::new();
+    while let Some(path) = todo.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let Some(members) = horizon_compat::convention::members("item", &path) else {
+            continue;
+        };
+        let file = inside.join(format!("data/c/tags/item/{path}.json"));
+        let mut tag: Value = fs::read(&file)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .filter(|v: &Value| v["values"].is_array())
+            .unwrap_or_else(|| json!({"values": []}));
+        let values = tag["values"].as_array_mut().expect("checked above");
+        let before = values.len();
+        for m in members {
+            if let Some(sub) = m.id.strip_prefix("#c:") {
+                todo.push(sub.to_owned());
+            }
+            let has = values
+                .iter()
+                .any(|v| v.as_str() == Some(m.id) || v["id"].as_str() == Some(m.id));
+            if !has {
+                values.push(if m.required {
+                    json!(m.id)
+                } else {
+                    json!({"id": m.id, "required": false})
+                });
+            }
+        }
+        if values.len() > before || !file.exists() {
+            write(&file, &serde_json::to_vec_pretty(&tag).unwrap_or_default())?;
+            report.convention_tags += 1;
+        }
+    }
     let owned: Vec<String> = owned.iter().map(|n| n.to_string()).collect();
     let owned: Vec<&str> = owned.iter().map(String::as_str).collect();
     unregistered_recipes(&inside, &outside, id, &owned, &mut report)?;
@@ -1738,6 +1782,45 @@ mod tests {
         assert_eq!(blocks, ["gem:gem_block", "gem:gem_door"]);
         assert_eq!(content.items.len(), 1);
         assert_eq!(content.items[0].id, "gem:gem");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// NeoForge's convention tags, which NeoForge (not there) defines, come along for the recipes
+    /// that name them, into the mod's own addition to the tag and the tags it names.
+    #[test]
+    fn recipes_get_neoforge_convention_tags() {
+        let dir = std::env::temp_dir().join(format!("horizon-port-pack-conv-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("gem-1.0.jar");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&jar).unwrap());
+        let files: &[(&str, &str)] = &[
+            (
+                "META-INF/neoforge.mods.toml",
+                "modLoader=\"javafml\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"gem\"\nversion=\"1.0\"\n",
+            ),
+            (
+                "data/gem/recipe/alloy.json",
+                r##"{"type": "minecraft:crafting_shapeless", "ingredients": [{"tag": "c:nuggets"}, {"item": "minecraft:andesite"}],
+                    "result": {"id": "minecraft:stone", "count": 1}}"##,
+            ),
+            ("data/c/tags/item/nuggets.json", r#"{"values": ["gem:ruby_nugget"]}"#),
+        ];
+        for (name, text) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let info = crate::jar::read(&jar).unwrap();
+        let out = dir.join("work/mods/gem");
+        let pack = Pack { loaded: &|_| true, mods: &|_| false };
+        carry(&jar, &info, &out, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
+        let tag = |path: &str| -> Value {
+            serde_json::from_slice(&fs::read(out.join(format!("carry/data/c/tags/item/{path}.json"))).unwrap()).unwrap()
+        };
+        assert_eq!(tag("nuggets")["values"], json!(["gem:ruby_nugget", "#c:nuggets/gold", "#c:nuggets/iron"]));
+        assert_eq!(tag("nuggets/iron")["values"], json!(["minecraft:iron_nugget"]));
+        assert_eq!(tag("nuggets/gold")["values"], json!(["minecraft:gold_nugget"]));
         fs::remove_dir_all(&dir).unwrap();
     }
 

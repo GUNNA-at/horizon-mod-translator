@@ -352,6 +352,23 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     along the line (16, 16, 16 before): the network ends at the turned shaft. Create's ten wooden windows now
     place as `create:oak_window` ... `create:warped_window`. horizon-ctl's `interact` aims at three points of
     the face; on a thin shaft's top face all three rays hit its side first, so test a side face.
+  - [x] 2026-11-03 A dropped mod with machines keeps its translated blocks and gets its data
+    (`horizon-port-pack install`): before, the carry-over (Create: "Partly", 542 blocks from vanilla templates,
+    101 left out) replaced the translated content mod. Now a mod with block entity types keeps the content
+    mod its code declares (a template would turn Create's smart chute into a pressure plate), with the
+    carry-over's data merged in (`install::merge_data`: `data/<id>/` but `horizon/`, and additions to
+    vanilla's and `c` tags; the content mod's own files stay). Mods without machines keep the carry-over as
+    before. In the pack flow such a mod gets a carry-over of its own for the data. Create now installs with
+    1810 recipes, 640 loot tables, 181 tag files and 1150 advancements.
+    NeoForge's convention tags (`c:`), which Minecraft lacks and NeoForge's jar ships, are built in:
+    `horizon-compat/src/neoforge_tags.txt` (NeoForge 1.21.1's generated `data/c/tags` for items, blocks and
+    fluids, 370 tags, optional `forge:` entries left out; LGPL-2.1 data, check before upstreaming),
+    `horizon_compat::convention`. The carry-over fills each `c:` item tag a recipe names (and those it names)
+    into the mod's file for it. Create's andesite alloy names `#c:nuggets/iron`, which only NeoForge defines.
+    Seen in game (`scratchpad/craft.sh`, survival): andesite and iron nuggets in the inventory's 2x2 grid make
+    `create:andesite_alloy` (with the recipe-unlocked toast), and an andesite casing mined with an iron
+    pickaxe drops itself through Create's loot table (by hand it drops nothing: it copies andesite's
+    properties, as in Java).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

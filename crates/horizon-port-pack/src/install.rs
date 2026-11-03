@@ -6,8 +6,8 @@
 //! pack goes through the whole pipeline ([`pipeline::port`]). Either way the
 //! carried-over folder mods the game can load together are copied into
 //! `<game>/horizon-mods/`, and a pack's resource packs into
-//! `<game>/resourcepacks/`. Java code is never run or translated: what only
-//! code does is listed, per mod, in the result.
+//! `<game>/resourcepacks/`. Java code is never run: the translator turns it
+//! into native mods in `<game>/horizon-native-mods/` (docs/mod-translator.md).
 use crate::{
     check::{self, Verdict},
     pipeline::{self, Log},
@@ -91,10 +91,21 @@ fn mod_id(carry: &Path) -> String {
         })
 }
 
+/// What [`translate`] made of a jar.
+struct Translated {
+    /// The native mod bundle, in `<game>/horizon-native-mods/`.
+    native: PathBuf,
+    /// Where its content mod went when it stands over the carry-over's (a mod with machines).
+    content: Option<PathBuf>,
+}
+
 /// Translates the jar's code into a native mod bundle in `<game>/horizon-native-mods/<id>_translated/`
-/// (docs/mod-translator.md); its content mod for code-registered blocks goes to `horizon-mods/`
-/// unless the carry-over already made one.
-fn translate(jar: &Path, game: &Path, log: Log) -> Option<PathBuf> {
+/// (docs/mod-translator.md), with a content mod for the blocks its code registers. A mod with block
+/// entities (machines) needs its code's own blocks, which a vanilla template would replace (a chute
+/// would be a pressure plate): its content mod goes to `horizon-mods/` with the data of `carried`, the
+/// jar's carry-over ([`check::check`]'s, made here when not given), and stands over the carry-over's.
+/// Any other mod's content mod goes there only when nothing else is there.
+fn translate(jar: &Path, game: &Path, carried: Option<&Path>, log: Log) -> Option<Translated> {
     let classes = horizon_mod_translator::classes(jar).ok()?;
     if classes.is_empty() {
         return None;
@@ -109,15 +120,74 @@ fn translate(jar: &Path, game: &Path, log: Log) -> Option<PathBuf> {
             }
             let content = out.join("content");
             let mods = game.join("horizon-mods").join(&id);
-            if content.is_dir() && !mods.exists() {
-                let _ = copy_dir(&content, &mods);
+            let machines = horizon_mod_translator::registrations(&classes)
+                .iter()
+                .any(|r| r.registry == "block_entity_type");
+            let mut stands = None;
+            if content.is_dir() && (machines || !mods.exists()) {
+                let own = out.join("carry-over");
+                let carried = match carried {
+                    Some(c) => Some(c.to_path_buf()),
+                    None if machines => check::check(jar, &own).ok().map(|_| own.join("carry")),
+                    None => None,
+                };
+                if let Some(carry) = carried.filter(|c| c.is_dir()) {
+                    merge_data(&carry, &content, &id);
+                }
+                let _ = fs::remove_dir_all(&own);
+                if copy_dir(&content, &mods).is_ok() && machines {
+                    stands = Some(mods);
+                }
             }
             let _ = fs::remove_dir_all(&content);
-            Some(out)
+            Some(Translated { native: out, content: stands })
         }
         Err(e) => {
             log(format!("{id}: code not translated: {e}"));
             None
+        }
+    }
+}
+
+/// Every file under `dir`, as paths relative to it.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut todo = vec![PathBuf::new()];
+    while let Some(rel) = todo.pop() {
+        let Ok(rd) = fs::read_dir(dir.join(&rel)) else { continue };
+        for e in rd.flatten() {
+            let r = rel.join(e.file_name());
+            if e.path().is_dir() {
+                todo.push(r);
+            } else {
+                out.push(r);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Copies a carry-over's data into a translated content mod: the mod's own data (recipes, loot
+/// tables, tags, worldgen, advancements) but its block and item declarations (`data/<id>/horizon/`,
+/// which the translated code makes), and its additions to vanilla's and the convention (`c`) tags.
+/// A file the content mod has stays; other namespaces stay out (the translated manifest claims none).
+fn merge_data(carry: &Path, content: &Path, id: &str) {
+    for ns in [id, "minecraft", "c"] {
+        let from = carry.join("data").join(ns);
+        for rel in files_under(&from) {
+            let wanted = if ns == id { !rel.starts_with("horizon") } else { rel.starts_with("tags") };
+            if !wanted {
+                continue;
+            }
+            let target = content.join("data").join(ns).join(&rel);
+            if target.exists() {
+                continue;
+            }
+            if let Some(parent) = target.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::copy(from.join(&rel), &target);
         }
     }
 }
@@ -144,31 +214,39 @@ fn jars(jars: &[PathBuf], game: &Path, work: &Path, log: Log) -> Result<Outcome,
         let stem = jar.file_stem().unwrap_or_default().to_string_lossy().into_owned();
         let dir = work.join("mods").join(&stem);
         let _ = fs::remove_dir_all(&dir);
-        let native = translate(jar, game, log);
         match check::check(jar, &dir) {
             Ok(c) => {
                 log(format!("{}: {}. {}", c.mod_id, c.verdict.label(), c.summary));
                 let carry = dir.join("carry");
-                if c.verdict != Verdict::No && carry.join(horizon_mods::manifest::MANIFEST).is_file() {
+                let translated = translate(jar, game, Some(&carry), log);
+                // A translated content mod that stands keeps the carry-over's data, not its blocks.
+                let stands = translated.as_ref().is_some_and(|t| t.content.is_some());
+                if c.verdict != Verdict::No && !stands && carry.join(horizon_mods::manifest::MANIFEST).is_file() {
                     carries.push(carry.clone());
                 }
-                checked.push((c, carry, native));
+                checked.push((c, carry, translated));
             }
             Err(e) => {
                 log(format!("{}: {e}", jar.display()));
+                let translated = translate(jar, game, None, log);
                 out.mods.push(Installed {
                     mod_id: stem,
-                    native,
+                    path: translated.as_ref().and_then(|t| t.content.clone()),
+                    native: translated.map(|t| t.native),
                     verdict: Verdict::No,
                     summary: e,
-                    path: None,
                 });
             }
         }
     }
     let placed = place(&carries, game, &mut out)?;
-    for (c, carry, native) in checked {
-        let path = placed.iter().find(|(from, _)| *from == carry).map(|(_, to)| to.clone());
+    for (c, carry, translated) in checked {
+        let path = placed
+            .iter()
+            .find(|(from, _)| *from == carry)
+            .map(|(_, to)| to.clone())
+            .or_else(|| translated.as_ref().and_then(|t| t.content.clone()));
+        let native = translated.map(|t| t.native);
         out.mods.push(Installed {
             mod_id: c.mod_id,
             verdict: if path.is_none() && native.is_none() { Verdict::No } else { c.verdict },
@@ -234,16 +312,21 @@ fn pack(
         jars.sort();
         jars.dedup();
         for jar in jars {
-            let Some(native) = translate(&jar, game, log) else { continue };
+            let Some(t) = translate(&jar, game, None, log) else { continue };
             let id = horizon_mod_translator::bundle::mod_id(&jar).unwrap_or_default();
             match out.mods.iter_mut().find(|m| m.mod_id == id) {
-                Some(m) => m.native = Some(native),
+                Some(m) => {
+                    m.native = Some(t.native);
+                    if t.content.is_some() {
+                        m.path = t.content;
+                    }
+                }
                 None => out.mods.push(Installed {
                     mod_id: id,
-                    native: Some(native),
+                    native: Some(t.native),
                     verdict: Verdict::Partly,
                     summary: "code translated".into(),
-                    path: None,
+                    path: t.content,
                 }),
             }
         }
@@ -347,6 +430,43 @@ mod tests {
         assert!(dir.starts_with(root.join("game/horizon-mods")));
         assert!(dir.join("horizon-mod.toml").is_file());
         assert!(dir.join("data/rubies/recipe/ruby_block.json").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_translated_content_mod_takes_the_carried_data_but_keeps_its_own_blocks() {
+        let root = std::env::temp_dir().join(format!("port-install-merge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let put = |rel: &str, text: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        };
+        put("carry/data/rubies/recipe/ruby.json", "carried");
+        put("carry/data/rubies/recipe/deep/gem.json", "carried");
+        put("carry/data/rubies/loot_table/blocks/ruby_block.json", "carried");
+        put("carry/data/rubies/horizon/block/ruby_block.json", "template");
+        put("carry/data/rubies/horizon/block/ruby_ore.json", "template");
+        put("carry/data/minecraft/tags/item/gems.json", "carried");
+        put("carry/data/c/tags/item/gems/ruby.json", "carried");
+        put("carry/data/minecraft/recipe/stone.json", "carried");
+        put("carry/data/quark/tags/item/gems.json", "carried");
+        put("content/data/rubies/horizon/block/ruby_block.json", "code");
+        put("content/data/rubies/recipe/ruby.json", "own");
+        merge_data(&root.join("carry"), &root.join("content"), "rubies");
+        let read = |rel: &str| fs::read_to_string(root.join("content").join(rel)).ok();
+        // The carried data comes along...
+        assert_eq!(read("data/rubies/recipe/deep/gem.json").as_deref(), Some("carried"));
+        assert_eq!(read("data/rubies/loot_table/blocks/ruby_block.json").as_deref(), Some("carried"));
+        assert_eq!(read("data/minecraft/tags/item/gems.json").as_deref(), Some("carried"));
+        assert_eq!(read("data/c/tags/item/gems/ruby.json").as_deref(), Some("carried"));
+        // ...but the translated code's declarations and files stay, and no block comes from a template.
+        assert_eq!(read("data/rubies/recipe/ruby.json").as_deref(), Some("own"));
+        assert_eq!(read("data/rubies/horizon/block/ruby_block.json").as_deref(), Some("code"));
+        assert_eq!(read("data/rubies/horizon/block/ruby_ore.json"), None);
+        // Vanilla's files and other mods' namespaces stay out.
+        assert_eq!(read("data/minecraft/recipe/stone.json"), None);
+        assert_eq!(read("data/quark/tags/item/gems.json"), None);
         fs::remove_dir_all(&root).unwrap();
     }
 

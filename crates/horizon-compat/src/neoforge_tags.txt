@@ -1,0 +1,372 @@
+# NeoForge 1.21.1's convention tags: neoforged/NeoForge, src/generated/resources/data/c/tags (LGPL-2.1).
+# One per line: kind, path under c:, members (`?`: optional). Its optional legacy forge: entries are left out.
+block barrels #c:barrels/wooden
+block barrels/wooden minecraft:barrel
+block bookshelves minecraft:bookshelf
+block budding_blocks minecraft:budding_amethyst
+block buds minecraft:small_amethyst_bud minecraft:medium_amethyst_bud minecraft:large_amethyst_bud
+block chains minecraft:chain
+block chests #c:chests/ender #c:chests/trapped #c:chests/wooden
+block chests/ender minecraft:ender_chest
+block chests/trapped minecraft:trapped_chest
+block chests/wooden minecraft:chest minecraft:trapped_chest
+block clusters minecraft:amethyst_cluster
+block cobblestones #c:cobblestones/normal #c:cobblestones/infested #c:cobblestones/mossy #c:cobblestones/deepslate
+block cobblestones/deepslate minecraft:cobbled_deepslate
+block cobblestones/infested minecraft:infested_cobblestone
+block cobblestones/mossy minecraft:mossy_cobblestone
+block cobblestones/normal minecraft:cobblestone
+block concretes minecraft:white_concrete minecraft:orange_concrete minecraft:magenta_concrete minecraft:light_blue_concrete minecraft:yellow_concrete minecraft:lime_concrete minecraft:pink_concrete minecraft:gray_concrete minecraft:light_gray_concrete minecraft:cyan_concrete minecraft:purple_concrete minecraft:blue_concrete minecraft:brown_concrete minecraft:green_concrete minecraft:red_concrete minecraft:black_concrete
+block dyed #c:dyed/white #c:dyed/orange #c:dyed/magenta #c:dyed/light_blue #c:dyed/yellow #c:dyed/lime #c:dyed/pink #c:dyed/gray #c:dyed/light_gray #c:dyed/cyan #c:dyed/purple #c:dyed/blue #c:dyed/brown #c:dyed/green #c:dyed/red #c:dyed/black
+block dyed/black minecraft:black_banner minecraft:black_bed minecraft:black_candle minecraft:black_carpet minecraft:black_concrete minecraft:black_concrete_powder minecraft:black_glazed_terracotta minecraft:black_shulker_box minecraft:black_stained_glass minecraft:black_stained_glass_pane minecraft:black_terracotta minecraft:black_wall_banner minecraft:black_wool
+block dyed/blue minecraft:blue_banner minecraft:blue_bed minecraft:blue_candle minecraft:blue_carpet minecraft:blue_concrete minecraft:blue_concrete_powder minecraft:blue_glazed_terracotta minecraft:blue_shulker_box minecraft:blue_stained_glass minecraft:blue_stained_glass_pane minecraft:blue_terracotta minecraft:blue_wall_banner minecraft:blue_wool
+block dyed/brown minecraft:brown_banner minecraft:brown_bed minecraft:brown_candle minecraft:brown_carpet minecraft:brown_concrete minecraft:brown_concrete_powder minecraft:brown_glazed_terracotta minecraft:brown_shulker_box minecraft:brown_stained_glass minecraft:brown_stained_glass_pane minecraft:brown_terracotta minecraft:brown_wall_banner minecraft:brown_wool
+block dyed/cyan minecraft:cyan_banner minecraft:cyan_bed minecraft:cyan_candle minecraft:cyan_carpet minecraft:cyan_concrete minecraft:cyan_concrete_powder minecraft:cyan_glazed_terracotta minecraft:cyan_shulker_box minecraft:cyan_stained_glass minecraft:cyan_stained_glass_pane minecraft:cyan_terracotta minecraft:cyan_wall_banner minecraft:cyan_wool
+block dyed/gray minecraft:gray_banner minecraft:gray_bed minecraft:gray_candle minecraft:gray_carpet minecraft:gray_concrete minecraft:gray_concrete_powder minecraft:gray_glazed_terracotta minecraft:gray_shulker_box minecraft:gray_stained_glass minecraft:gray_stained_glass_pane minecraft:gray_terracotta minecraft:gray_wall_banner minecraft:gray_wool
+block dyed/green minecraft:green_banner minecraft:green_bed minecraft:green_candle minecraft:green_carpet minecraft:green_concrete minecraft:green_concrete_powder minecraft:green_glazed_terracotta minecraft:green_shulker_box minecraft:green_stained_glass minecraft:green_stained_glass_pane minecraft:green_terracotta minecraft:green_wall_banner minecraft:green_wool
+block dyed/light_blue minecraft:light_blue_banner minecraft:light_blue_bed minecraft:light_blue_candle minecraft:light_blue_carpet minecraft:light_blue_concrete minecraft:light_blue_concrete_powder minecraft:light_blue_glazed_terracotta minecraft:light_blue_shulker_box minecraft:light_blue_stained_glass minecraft:light_blue_stained_glass_pane minecraft:light_blue_terracotta minecraft:light_blue_wall_banner minecraft:light_blue_wool
+block dyed/light_gray minecraft:light_gray_banner minecraft:light_gray_bed minecraft:light_gray_candle minecraft:light_gray_carpet minecraft:light_gray_concrete minecraft:light_gray_concrete_powder minecraft:light_gray_glazed_terracotta minecraft:light_gray_shulker_box minecraft:light_gray_stained_glass minecraft:light_gray_stained_glass_pane minecraft:light_gray_terracotta minecraft:light_gray_wall_banner minecraft:light_gray_wool
+block dyed/lime minecraft:lime_banner minecraft:lime_bed minecraft:lime_candle minecraft:lime_carpet minecraft:lime_concrete minecraft:lime_concrete_powder minecraft:lime_glazed_terracotta minecraft:lime_shulker_box minecraft:lime_stained_glass minecraft:lime_stained_glass_pane minecraft:lime_terracotta minecraft:lime_wall_banner minecraft:lime_wool
+block dyed/magenta minecraft:magenta_banner minecraft:magenta_bed minecraft:magenta_candle minecraft:magenta_carpet minecraft:magenta_concrete minecraft:magenta_concrete_powder minecraft:magenta_glazed_terracotta minecraft:magenta_shulker_box minecraft:magenta_stained_glass minecraft:magenta_stained_glass_pane minecraft:magenta_terracotta minecraft:magenta_wall_banner minecraft:magenta_wool
+block dyed/orange minecraft:orange_banner minecraft:orange_bed minecraft:orange_candle minecraft:orange_carpet minecraft:orange_concrete minecraft:orange_concrete_powder minecraft:orange_glazed_terracotta minecraft:orange_shulker_box minecraft:orange_stained_glass minecraft:orange_stained_glass_pane minecraft:orange_terracotta minecraft:orange_wall_banner minecraft:orange_wool
+block dyed/pink minecraft:pink_banner minecraft:pink_bed minecraft:pink_candle minecraft:pink_carpet minecraft:pink_concrete minecraft:pink_concrete_powder minecraft:pink_glazed_terracotta minecraft:pink_shulker_box minecraft:pink_stained_glass minecraft:pink_stained_glass_pane minecraft:pink_terracotta minecraft:pink_wall_banner minecraft:pink_wool
+block dyed/purple minecraft:purple_banner minecraft:purple_bed minecraft:purple_candle minecraft:purple_carpet minecraft:purple_concrete minecraft:purple_concrete_powder minecraft:purple_glazed_terracotta minecraft:purple_shulker_box minecraft:purple_stained_glass minecraft:purple_stained_glass_pane minecraft:purple_terracotta minecraft:purple_wall_banner minecraft:purple_wool
+block dyed/red minecraft:red_banner minecraft:red_bed minecraft:red_candle minecraft:red_carpet minecraft:red_concrete minecraft:red_concrete_powder minecraft:red_glazed_terracotta minecraft:red_shulker_box minecraft:red_stained_glass minecraft:red_stained_glass_pane minecraft:red_terracotta minecraft:red_wall_banner minecraft:red_wool
+block dyed/white minecraft:white_banner minecraft:white_bed minecraft:white_candle minecraft:white_carpet minecraft:white_concrete minecraft:white_concrete_powder minecraft:white_glazed_terracotta minecraft:white_shulker_box minecraft:white_stained_glass minecraft:white_stained_glass_pane minecraft:white_terracotta minecraft:white_wall_banner minecraft:white_wool
+block dyed/yellow minecraft:yellow_banner minecraft:yellow_bed minecraft:yellow_candle minecraft:yellow_carpet minecraft:yellow_concrete minecraft:yellow_concrete_powder minecraft:yellow_glazed_terracotta minecraft:yellow_shulker_box minecraft:yellow_stained_glass minecraft:yellow_stained_glass_pane minecraft:yellow_terracotta minecraft:yellow_wall_banner minecraft:yellow_wool
+block end_stones minecraft:end_stone
+block fence_gates #c:fence_gates/wooden
+block fence_gates/wooden minecraft:oak_fence_gate minecraft:spruce_fence_gate minecraft:birch_fence_gate minecraft:jungle_fence_gate minecraft:acacia_fence_gate minecraft:dark_oak_fence_gate minecraft:crimson_fence_gate minecraft:warped_fence_gate minecraft:mangrove_fence_gate minecraft:bamboo_fence_gate minecraft:cherry_fence_gate
+block fences #c:fences/nether_brick #c:fences/wooden
+block fences/nether_brick minecraft:nether_brick_fence
+block fences/wooden #minecraft:wooden_fences
+block glass_blocks #c:glass_blocks/colorless #c:glass_blocks/cheap #c:glass_blocks/tinted
+block glass_blocks/cheap minecraft:glass minecraft:white_stained_glass minecraft:orange_stained_glass minecraft:magenta_stained_glass minecraft:light_blue_stained_glass minecraft:yellow_stained_glass minecraft:lime_stained_glass minecraft:pink_stained_glass minecraft:gray_stained_glass minecraft:light_gray_stained_glass minecraft:cyan_stained_glass minecraft:purple_stained_glass minecraft:blue_stained_glass minecraft:brown_stained_glass minecraft:green_stained_glass minecraft:red_stained_glass minecraft:black_stained_glass
+block glass_blocks/colorless minecraft:glass
+block glass_blocks/tinted minecraft:tinted_glass
+block glass_panes #c:glass_panes/colorless minecraft:white_stained_glass_pane minecraft:orange_stained_glass_pane minecraft:magenta_stained_glass_pane minecraft:light_blue_stained_glass_pane minecraft:yellow_stained_glass_pane minecraft:lime_stained_glass_pane minecraft:pink_stained_glass_pane minecraft:gray_stained_glass_pane minecraft:light_gray_stained_glass_pane minecraft:cyan_stained_glass_pane minecraft:purple_stained_glass_pane minecraft:blue_stained_glass_pane minecraft:brown_stained_glass_pane minecraft:green_stained_glass_pane minecraft:red_stained_glass_pane minecraft:black_stained_glass_pane
+block glass_panes/colorless minecraft:glass_pane
+block glazed_terracottas minecraft:white_glazed_terracotta minecraft:orange_glazed_terracotta minecraft:magenta_glazed_terracotta minecraft:light_blue_glazed_terracotta minecraft:yellow_glazed_terracotta minecraft:lime_glazed_terracotta minecraft:pink_glazed_terracotta minecraft:gray_glazed_terracotta minecraft:light_gray_glazed_terracotta minecraft:cyan_glazed_terracotta minecraft:purple_glazed_terracotta minecraft:blue_glazed_terracotta minecraft:brown_glazed_terracotta minecraft:green_glazed_terracotta minecraft:red_glazed_terracotta minecraft:black_glazed_terracotta
+block gravels minecraft:gravel
+block hidden_from_recipe_viewers
+block netherracks minecraft:netherrack
+block obsidians #c:obsidians/normal #c:obsidians/crying
+block obsidians/crying minecraft:crying_obsidian
+block obsidians/normal minecraft:obsidian
+block ore_bearing_ground/deepslate minecraft:deepslate
+block ore_bearing_ground/netherrack minecraft:netherrack
+block ore_bearing_ground/stone minecraft:stone
+block ore_rates/dense minecraft:copper_ore minecraft:deepslate_copper_ore minecraft:deepslate_lapis_ore minecraft:deepslate_redstone_ore minecraft:lapis_ore minecraft:redstone_ore
+block ore_rates/singular minecraft:ancient_debris minecraft:coal_ore minecraft:deepslate_coal_ore minecraft:deepslate_diamond_ore minecraft:deepslate_emerald_ore minecraft:deepslate_gold_ore minecraft:deepslate_iron_ore minecraft:diamond_ore minecraft:emerald_ore minecraft:gold_ore minecraft:iron_ore minecraft:nether_quartz_ore
+block ore_rates/sparse minecraft:nether_gold_ore
+block ores #c:ores/coal #c:ores/copper #c:ores/diamond #c:ores/emerald #c:ores/gold #c:ores/iron #c:ores/lapis #c:ores/netherite_scrap #c:ores/redstone #c:ores/quartz
+block ores/coal #minecraft:coal_ores
+block ores/copper #minecraft:copper_ores
+block ores/diamond #minecraft:diamond_ores
+block ores/emerald #minecraft:emerald_ores
+block ores/gold #minecraft:gold_ores
+block ores/iron #minecraft:iron_ores
+block ores/lapis #minecraft:lapis_ores
+block ores/netherite_scrap minecraft:ancient_debris
+block ores/quartz minecraft:nether_quartz_ore
+block ores/redstone #minecraft:redstone_ores
+block ores_in_ground/deepslate minecraft:deepslate_coal_ore minecraft:deepslate_copper_ore minecraft:deepslate_diamond_ore minecraft:deepslate_emerald_ore minecraft:deepslate_gold_ore minecraft:deepslate_iron_ore minecraft:deepslate_lapis_ore minecraft:deepslate_redstone_ore
+block ores_in_ground/netherrack minecraft:nether_gold_ore minecraft:nether_quartz_ore
+block ores_in_ground/stone minecraft:coal_ore minecraft:copper_ore minecraft:diamond_ore minecraft:emerald_ore minecraft:gold_ore minecraft:iron_ore minecraft:lapis_ore minecraft:redstone_ore
+block player_workstations/crafting_tables minecraft:crafting_table
+block player_workstations/furnaces minecraft:furnace
+block pumpkins #c:pumpkins/normal #c:pumpkins/carved #c:pumpkins/jack_o_lanterns
+block pumpkins/carved minecraft:carved_pumpkin
+block pumpkins/jack_o_lanterns minecraft:jack_o_lantern
+block pumpkins/normal minecraft:pumpkin
+block relocation_not_supported
+block ropes
+block sands #c:sands/colorless #c:sands/red
+block sands/colorless minecraft:sand
+block sands/red minecraft:red_sand
+block sandstone/blocks #c:sandstone/red_blocks #c:sandstone/uncolored_blocks
+block sandstone/red_blocks minecraft:red_sandstone minecraft:cut_red_sandstone minecraft:chiseled_red_sandstone minecraft:smooth_red_sandstone
+block sandstone/red_slabs minecraft:red_sandstone_slab minecraft:cut_red_sandstone_slab minecraft:smooth_red_sandstone_slab
+block sandstone/red_stairs minecraft:red_sandstone_stairs minecraft:smooth_red_sandstone_stairs
+block sandstone/slabs #c:sandstone/red_slabs #c:sandstone/uncolored_slabs
+block sandstone/stairs #c:sandstone/red_stairs #c:sandstone/uncolored_stairs
+block sandstone/uncolored_blocks minecraft:sandstone minecraft:cut_sandstone minecraft:chiseled_sandstone minecraft:smooth_sandstone
+block sandstone/uncolored_slabs minecraft:sandstone_slab minecraft:cut_sandstone_slab minecraft:smooth_sandstone_slab
+block sandstone/uncolored_stairs minecraft:sandstone_stairs minecraft:smooth_sandstone_stairs
+block skulls minecraft:skeleton_skull minecraft:skeleton_wall_skull minecraft:wither_skeleton_skull minecraft:wither_skeleton_wall_skull minecraft:player_head minecraft:player_wall_head minecraft:zombie_head minecraft:zombie_wall_head minecraft:creeper_head minecraft:creeper_wall_head minecraft:piglin_head minecraft:piglin_wall_head minecraft:dragon_head minecraft:dragon_wall_head
+block stones minecraft:andesite minecraft:diorite minecraft:granite minecraft:stone minecraft:deepslate minecraft:tuff
+block storage_blocks #c:storage_blocks/bone_meal #c:storage_blocks/coal #c:storage_blocks/copper #c:storage_blocks/diamond #c:storage_blocks/dried_kelp #c:storage_blocks/emerald #c:storage_blocks/gold #c:storage_blocks/iron #c:storage_blocks/lapis #c:storage_blocks/netherite #c:storage_blocks/raw_copper #c:storage_blocks/raw_gold #c:storage_blocks/raw_iron #c:storage_blocks/redstone #c:storage_blocks/slime #c:storage_blocks/wheat
+block storage_blocks/bone_meal minecraft:bone_block
+block storage_blocks/coal minecraft:coal_block
+block storage_blocks/copper minecraft:copper_block
+block storage_blocks/diamond minecraft:diamond_block
+block storage_blocks/dried_kelp minecraft:dried_kelp_block
+block storage_blocks/emerald minecraft:emerald_block
+block storage_blocks/gold minecraft:gold_block
+block storage_blocks/iron minecraft:iron_block
+block storage_blocks/lapis minecraft:lapis_block
+block storage_blocks/netherite minecraft:netherite_block
+block storage_blocks/raw_copper minecraft:raw_copper_block
+block storage_blocks/raw_gold minecraft:raw_gold_block
+block storage_blocks/raw_iron minecraft:raw_iron_block
+block storage_blocks/redstone minecraft:redstone_block
+block storage_blocks/slime minecraft:slime_block
+block storage_blocks/wheat minecraft:hay_block
+block stripped_logs minecraft:stripped_acacia_log minecraft:stripped_bamboo_block minecraft:stripped_birch_log minecraft:stripped_cherry_log minecraft:stripped_dark_oak_log minecraft:stripped_jungle_log minecraft:stripped_mangrove_log minecraft:stripped_oak_log minecraft:stripped_spruce_log minecraft:stripped_crimson_stem minecraft:stripped_warped_stem
+block stripped_woods minecraft:stripped_acacia_wood minecraft:stripped_birch_wood minecraft:stripped_cherry_wood minecraft:stripped_dark_oak_wood minecraft:stripped_jungle_wood minecraft:stripped_mangrove_wood minecraft:stripped_oak_wood minecraft:stripped_spruce_wood minecraft:stripped_crimson_hyphae minecraft:stripped_warped_hyphae
+block villager_job_sites minecraft:barrel minecraft:blast_furnace minecraft:brewing_stand minecraft:cartography_table minecraft:cauldron minecraft:water_cauldron minecraft:lava_cauldron minecraft:powder_snow_cauldron minecraft:composter minecraft:fletching_table minecraft:grindstone minecraft:lectern minecraft:loom minecraft:smithing_table minecraft:smoker minecraft:stonecutter
+fluid beetroot_soup
+fluid experience
+fluid gaseous
+fluid hidden_from_recipe_viewers
+fluid honey
+fluid lava minecraft:lava minecraft:flowing_lava
+fluid milk minecraft:milk? minecraft:flowing_milk?
+fluid mushroom_stew
+fluid potion
+fluid rabbit_stew
+fluid suspicious_stew
+fluid water minecraft:water minecraft:flowing_water
+item animal_foods #minecraft:armadillo_food #minecraft:axolotl_food #minecraft:bee_food #minecraft:camel_food #minecraft:cat_food #minecraft:chicken_food #minecraft:cow_food #minecraft:fox_food #minecraft:frog_food #minecraft:goat_food #minecraft:hoglin_food #minecraft:horse_food #minecraft:llama_food #minecraft:ocelot_food #minecraft:panda_food #minecraft:parrot_food #minecraft:pig_food #minecraft:piglin_food #minecraft:rabbit_food #minecraft:sheep_food #minecraft:sniffer_food #minecraft:strider_food #minecraft:turtle_food #minecraft:wolf_food
+item armors #minecraft:head_armor #minecraft:chest_armor #minecraft:leg_armor #minecraft:foot_armor
+item barrels #c:barrels/wooden
+item barrels/wooden minecraft:barrel
+item bones minecraft:bone
+item bookshelves minecraft:bookshelf
+item bricks #c:bricks/normal #c:bricks/nether
+item bricks/nether minecraft:nether_brick
+item bricks/normal minecraft:brick
+item buckets #c:buckets/empty #c:buckets/water #c:buckets/lava #c:buckets/milk #c:buckets/powder_snow #c:buckets/entity_water
+item buckets/empty minecraft:bucket
+item buckets/entity_water minecraft:axolotl_bucket minecraft:cod_bucket minecraft:pufferfish_bucket minecraft:tadpole_bucket minecraft:tropical_fish_bucket minecraft:salmon_bucket
+item buckets/lava minecraft:lava_bucket
+item buckets/milk minecraft:milk_bucket
+item buckets/powder_snow minecraft:powder_snow_bucket
+item buckets/water minecraft:water_bucket
+item budding_blocks minecraft:budding_amethyst
+item buds minecraft:small_amethyst_bud minecraft:medium_amethyst_bud minecraft:large_amethyst_bud
+item chains minecraft:chain
+item chests #c:chests/ender #c:chests/trapped #c:chests/wooden
+item chests/ender minecraft:ender_chest
+item chests/trapped minecraft:trapped_chest
+item chests/wooden minecraft:chest minecraft:trapped_chest
+item clusters minecraft:amethyst_cluster
+item cobblestones #c:cobblestones/normal #c:cobblestones/infested #c:cobblestones/mossy #c:cobblestones/deepslate
+item cobblestones/deepslate minecraft:cobbled_deepslate
+item cobblestones/infested minecraft:infested_cobblestone
+item cobblestones/mossy minecraft:mossy_cobblestone
+item cobblestones/normal minecraft:cobblestone
+item concrete_powders minecraft:white_concrete_powder minecraft:orange_concrete_powder minecraft:magenta_concrete_powder minecraft:light_blue_concrete_powder minecraft:yellow_concrete_powder minecraft:lime_concrete_powder minecraft:pink_concrete_powder minecraft:gray_concrete_powder minecraft:light_gray_concrete_powder minecraft:cyan_concrete_powder minecraft:purple_concrete_powder minecraft:blue_concrete_powder minecraft:brown_concrete_powder minecraft:green_concrete_powder minecraft:red_concrete_powder minecraft:black_concrete_powder
+item concretes minecraft:white_concrete minecraft:orange_concrete minecraft:magenta_concrete minecraft:light_blue_concrete minecraft:yellow_concrete minecraft:lime_concrete minecraft:pink_concrete minecraft:gray_concrete minecraft:light_gray_concrete minecraft:cyan_concrete minecraft:purple_concrete minecraft:blue_concrete minecraft:brown_concrete minecraft:green_concrete minecraft:red_concrete minecraft:black_concrete
+item crops #c:crops/beetroot #c:crops/cactus #c:crops/carrot #c:crops/cocoa_bean #c:crops/melon #c:crops/nether_wart #c:crops/potato #c:crops/pumpkin #c:crops/sugar_cane #c:crops/wheat
+item crops/beetroot minecraft:beetroot
+item crops/cactus minecraft:cactus
+item crops/carrot minecraft:carrot
+item crops/cocoa_bean minecraft:cocoa_beans
+item crops/melon minecraft:melon
+item crops/nether_wart minecraft:nether_wart
+item crops/potato minecraft:potato
+item crops/pumpkin minecraft:pumpkin
+item crops/sugar_cane minecraft:sugar_cane
+item crops/wheat minecraft:wheat
+item drinks #c:drinks/water #c:drinks/watery #c:drinks/milk #c:drinks/honey #c:drinks/magic #c:drinks/ominous #c:drinks/juice
+item drinks/honey minecraft:honey_bottle
+item drinks/juice
+item drinks/magic minecraft:potion #c:drinks/ominous
+item drinks/milk minecraft:milk_bucket
+item drinks/ominous minecraft:ominous_bottle
+item drinks/water
+item drinks/watery minecraft:potion #c:drinks/water
+item dusts #c:dusts/glowstone #c:dusts/redstone
+item dusts/glowstone minecraft:glowstone_dust
+item dusts/redstone minecraft:redstone
+item dyed #c:dyed/white #c:dyed/orange #c:dyed/magenta #c:dyed/light_blue #c:dyed/yellow #c:dyed/lime #c:dyed/pink #c:dyed/gray #c:dyed/light_gray #c:dyed/cyan #c:dyed/purple #c:dyed/blue #c:dyed/brown #c:dyed/green #c:dyed/red #c:dyed/black
+item dyed/black minecraft:black_banner minecraft:black_bed minecraft:black_candle minecraft:black_carpet minecraft:black_concrete minecraft:black_concrete_powder minecraft:black_glazed_terracotta minecraft:black_shulker_box minecraft:black_stained_glass minecraft:black_stained_glass_pane minecraft:black_terracotta minecraft:black_wool
+item dyed/blue minecraft:blue_banner minecraft:blue_bed minecraft:blue_candle minecraft:blue_carpet minecraft:blue_concrete minecraft:blue_concrete_powder minecraft:blue_glazed_terracotta minecraft:blue_shulker_box minecraft:blue_stained_glass minecraft:blue_stained_glass_pane minecraft:blue_terracotta minecraft:blue_wool
+item dyed/brown minecraft:brown_banner minecraft:brown_bed minecraft:brown_candle minecraft:brown_carpet minecraft:brown_concrete minecraft:brown_concrete_powder minecraft:brown_glazed_terracotta minecraft:brown_shulker_box minecraft:brown_stained_glass minecraft:brown_stained_glass_pane minecraft:brown_terracotta minecraft:brown_wool
+item dyed/cyan minecraft:cyan_banner minecraft:cyan_bed minecraft:cyan_candle minecraft:cyan_carpet minecraft:cyan_concrete minecraft:cyan_concrete_powder minecraft:cyan_glazed_terracotta minecraft:cyan_shulker_box minecraft:cyan_stained_glass minecraft:cyan_stained_glass_pane minecraft:cyan_terracotta minecraft:cyan_wool
+item dyed/gray minecraft:gray_banner minecraft:gray_bed minecraft:gray_candle minecraft:gray_carpet minecraft:gray_concrete minecraft:gray_concrete_powder minecraft:gray_glazed_terracotta minecraft:gray_shulker_box minecraft:gray_stained_glass minecraft:gray_stained_glass_pane minecraft:gray_terracotta minecraft:gray_wool
+item dyed/green minecraft:green_banner minecraft:green_bed minecraft:green_candle minecraft:green_carpet minecraft:green_concrete minecraft:green_concrete_powder minecraft:green_glazed_terracotta minecraft:green_shulker_box minecraft:green_stained_glass minecraft:green_stained_glass_pane minecraft:green_terracotta minecraft:green_wool
+item dyed/light_blue minecraft:light_blue_banner minecraft:light_blue_bed minecraft:light_blue_candle minecraft:light_blue_carpet minecraft:light_blue_concrete minecraft:light_blue_concrete_powder minecraft:light_blue_glazed_terracotta minecraft:light_blue_shulker_box minecraft:light_blue_stained_glass minecraft:light_blue_stained_glass_pane minecraft:light_blue_terracotta minecraft:light_blue_wool
+item dyed/light_gray minecraft:light_gray_banner minecraft:light_gray_bed minecraft:light_gray_candle minecraft:light_gray_carpet minecraft:light_gray_concrete minecraft:light_gray_concrete_powder minecraft:light_gray_glazed_terracotta minecraft:light_gray_shulker_box minecraft:light_gray_stained_glass minecraft:light_gray_stained_glass_pane minecraft:light_gray_terracotta minecraft:light_gray_wool
+item dyed/lime minecraft:lime_banner minecraft:lime_bed minecraft:lime_candle minecraft:lime_carpet minecraft:lime_concrete minecraft:lime_concrete_powder minecraft:lime_glazed_terracotta minecraft:lime_shulker_box minecraft:lime_stained_glass minecraft:lime_stained_glass_pane minecraft:lime_terracotta minecraft:lime_wool
+item dyed/magenta minecraft:magenta_banner minecraft:magenta_bed minecraft:magenta_candle minecraft:magenta_carpet minecraft:magenta_concrete minecraft:magenta_concrete_powder minecraft:magenta_glazed_terracotta minecraft:magenta_shulker_box minecraft:magenta_stained_glass minecraft:magenta_stained_glass_pane minecraft:magenta_terracotta minecraft:magenta_wool
+item dyed/orange minecraft:orange_banner minecraft:orange_bed minecraft:orange_candle minecraft:orange_carpet minecraft:orange_concrete minecraft:orange_concrete_powder minecraft:orange_glazed_terracotta minecraft:orange_shulker_box minecraft:orange_stained_glass minecraft:orange_stained_glass_pane minecraft:orange_terracotta minecraft:orange_wool
+item dyed/pink minecraft:pink_banner minecraft:pink_bed minecraft:pink_candle minecraft:pink_carpet minecraft:pink_concrete minecraft:pink_concrete_powder minecraft:pink_glazed_terracotta minecraft:pink_shulker_box minecraft:pink_stained_glass minecraft:pink_stained_glass_pane minecraft:pink_terracotta minecraft:pink_wool
+item dyed/purple minecraft:purple_banner minecraft:purple_bed minecraft:purple_candle minecraft:purple_carpet minecraft:purple_concrete minecraft:purple_concrete_powder minecraft:purple_glazed_terracotta minecraft:purple_shulker_box minecraft:purple_stained_glass minecraft:purple_stained_glass_pane minecraft:purple_terracotta minecraft:purple_wool
+item dyed/red minecraft:red_banner minecraft:red_bed minecraft:red_candle minecraft:red_carpet minecraft:red_concrete minecraft:red_concrete_powder minecraft:red_glazed_terracotta minecraft:red_shulker_box minecraft:red_stained_glass minecraft:red_stained_glass_pane minecraft:red_terracotta minecraft:red_wool
+item dyed/white minecraft:white_banner minecraft:white_bed minecraft:white_candle minecraft:white_carpet minecraft:white_concrete minecraft:white_concrete_powder minecraft:white_glazed_terracotta minecraft:white_shulker_box minecraft:white_stained_glass minecraft:white_stained_glass_pane minecraft:white_terracotta minecraft:white_wool
+item dyed/yellow minecraft:yellow_banner minecraft:yellow_bed minecraft:yellow_candle minecraft:yellow_carpet minecraft:yellow_concrete minecraft:yellow_concrete_powder minecraft:yellow_glazed_terracotta minecraft:yellow_shulker_box minecraft:yellow_stained_glass minecraft:yellow_stained_glass_pane minecraft:yellow_terracotta minecraft:yellow_wool
+item dyes #c:dyes/white #c:dyes/orange #c:dyes/magenta #c:dyes/light_blue #c:dyes/yellow #c:dyes/lime #c:dyes/pink #c:dyes/gray #c:dyes/light_gray #c:dyes/cyan #c:dyes/purple #c:dyes/blue #c:dyes/brown #c:dyes/green #c:dyes/red #c:dyes/black
+item dyes/black minecraft:black_dye
+item dyes/blue minecraft:blue_dye
+item dyes/brown minecraft:brown_dye
+item dyes/cyan minecraft:cyan_dye
+item dyes/gray minecraft:gray_dye
+item dyes/green minecraft:green_dye
+item dyes/light_blue minecraft:light_blue_dye
+item dyes/light_gray minecraft:light_gray_dye
+item dyes/lime minecraft:lime_dye
+item dyes/magenta minecraft:magenta_dye
+item dyes/orange minecraft:orange_dye
+item dyes/pink minecraft:pink_dye
+item dyes/purple minecraft:purple_dye
+item dyes/red minecraft:red_dye
+item dyes/white minecraft:white_dye
+item dyes/yellow minecraft:yellow_dye
+item eggs minecraft:egg
+item enchantables #minecraft:enchantable/armor #minecraft:enchantable/equippable #minecraft:enchantable/weapon #minecraft:enchantable/sword #minecraft:enchantable/mining #minecraft:enchantable/mining_loot #minecraft:enchantable/fishing #minecraft:enchantable/trident #minecraft:enchantable/bow #minecraft:enchantable/crossbow #minecraft:enchantable/mace #minecraft:enchantable/fire_aspect #minecraft:enchantable/durability #minecraft:enchantable/vanishing
+item end_stones minecraft:end_stone
+item ender_pearls minecraft:ender_pearl
+item feathers minecraft:feather
+item fence_gates #c:fence_gates/wooden
+item fence_gates/wooden minecraft:oak_fence_gate minecraft:spruce_fence_gate minecraft:birch_fence_gate minecraft:jungle_fence_gate minecraft:acacia_fence_gate minecraft:dark_oak_fence_gate minecraft:crimson_fence_gate minecraft:warped_fence_gate minecraft:mangrove_fence_gate minecraft:bamboo_fence_gate minecraft:cherry_fence_gate
+item fences #c:fences/nether_brick #c:fences/wooden
+item fences/nether_brick minecraft:nether_brick_fence
+item fences/wooden #minecraft:wooden_fences
+item fertilizers minecraft:bone_meal
+item foods minecraft:baked_potato minecraft:pumpkin_pie minecraft:honey_bottle minecraft:ominous_bottle minecraft:dried_kelp #c:foods/fruit #c:foods/vegetable #c:foods/berry #c:foods/bread #c:foods/cookie #c:foods/dough #c:foods/raw_meat #c:foods/raw_fish #c:foods/cooked_meat #c:foods/cooked_fish #c:foods/soup #c:foods/candy #c:foods/pie #c:foods/golden #c:foods/edible_when_placed #c:foods/food_poisoning
+item foods/berry minecraft:sweet_berries minecraft:glow_berries #c:foods/berries?
+item foods/bread minecraft:bread #c:foods/breads?
+item foods/candy #c:foods/candies?
+item foods/cooked_fish minecraft:cooked_cod minecraft:cooked_salmon #c:foods/cooked_fishes?
+item foods/cooked_meat minecraft:cooked_beef minecraft:cooked_porkchop minecraft:cooked_chicken minecraft:cooked_rabbit minecraft:cooked_mutton #c:foods/cooked_meats?
+item foods/cookie minecraft:cookie #c:foods/cookies?
+item foods/dough #c:foods/doughs?
+item foods/edible_when_placed minecraft:cake
+item foods/food_poisoning minecraft:poisonous_potato minecraft:pufferfish minecraft:spider_eye minecraft:chicken minecraft:rotten_flesh
+item foods/fruit minecraft:apple minecraft:golden_apple minecraft:enchanted_golden_apple minecraft:chorus_fruit minecraft:melon_slice #c:foods/fruits?
+item foods/golden minecraft:golden_apple minecraft:enchanted_golden_apple minecraft:golden_carrot
+item foods/pie minecraft:pumpkin_pie
+item foods/raw_fish minecraft:cod minecraft:salmon minecraft:tropical_fish minecraft:pufferfish #c:foods/raw_fishes?
+item foods/raw_meat minecraft:beef minecraft:porkchop minecraft:chicken minecraft:rabbit minecraft:mutton #c:foods/raw_meats?
+item foods/soup minecraft:beetroot_soup minecraft:mushroom_stew minecraft:rabbit_stew minecraft:suspicious_stew #c:foods/soups?
+item foods/vegetable minecraft:carrot minecraft:golden_carrot minecraft:potato minecraft:beetroot #c:foods/vegetables?
+item gems #c:gems/amethyst #c:gems/diamond #c:gems/emerald #c:gems/lapis #c:gems/prismarine #c:gems/quartz
+item gems/amethyst minecraft:amethyst_shard
+item gems/diamond minecraft:diamond
+item gems/emerald minecraft:emerald
+item gems/lapis minecraft:lapis_lazuli
+item gems/prismarine minecraft:prismarine_crystals
+item gems/quartz minecraft:quartz
+item glass_blocks #c:glass_blocks/colorless #c:glass_blocks/cheap #c:glass_blocks/tinted
+item glass_blocks/cheap minecraft:glass minecraft:white_stained_glass minecraft:orange_stained_glass minecraft:magenta_stained_glass minecraft:light_blue_stained_glass minecraft:yellow_stained_glass minecraft:lime_stained_glass minecraft:pink_stained_glass minecraft:gray_stained_glass minecraft:light_gray_stained_glass minecraft:cyan_stained_glass minecraft:purple_stained_glass minecraft:blue_stained_glass minecraft:brown_stained_glass minecraft:green_stained_glass minecraft:red_stained_glass minecraft:black_stained_glass
+item glass_blocks/colorless minecraft:glass
+item glass_blocks/tinted minecraft:tinted_glass
+item glass_panes #c:glass_panes/colorless minecraft:white_stained_glass_pane minecraft:orange_stained_glass_pane minecraft:magenta_stained_glass_pane minecraft:light_blue_stained_glass_pane minecraft:yellow_stained_glass_pane minecraft:lime_stained_glass_pane minecraft:pink_stained_glass_pane minecraft:gray_stained_glass_pane minecraft:light_gray_stained_glass_pane minecraft:cyan_stained_glass_pane minecraft:purple_stained_glass_pane minecraft:blue_stained_glass_pane minecraft:brown_stained_glass_pane minecraft:green_stained_glass_pane minecraft:red_stained_glass_pane minecraft:black_stained_glass_pane
+item glass_panes/colorless minecraft:glass_pane
+item glazed_terracottas minecraft:white_glazed_terracotta minecraft:orange_glazed_terracotta minecraft:magenta_glazed_terracotta minecraft:light_blue_glazed_terracotta minecraft:yellow_glazed_terracotta minecraft:lime_glazed_terracotta minecraft:pink_glazed_terracotta minecraft:gray_glazed_terracotta minecraft:light_gray_glazed_terracotta minecraft:cyan_glazed_terracotta minecraft:purple_glazed_terracotta minecraft:blue_glazed_terracotta minecraft:brown_glazed_terracotta minecraft:green_glazed_terracotta minecraft:red_glazed_terracotta minecraft:black_glazed_terracotta
+item gravels minecraft:gravel
+item gunpowders minecraft:gunpowder
+item hidden_from_recipe_viewers
+item ingots #c:ingots/copper #c:ingots/gold #c:ingots/iron #c:ingots/netherite
+item ingots/copper minecraft:copper_ingot
+item ingots/gold minecraft:gold_ingot
+item ingots/iron minecraft:iron_ingot
+item ingots/netherite minecraft:netherite_ingot
+item leathers minecraft:leather
+item loom_patterns minecraft:flower_banner_pattern minecraft:creeper_banner_pattern minecraft:skull_banner_pattern minecraft:mojang_banner_pattern minecraft:globe_banner_pattern minecraft:piglin_banner_pattern minecraft:flow_banner_pattern minecraft:guster_banner_pattern
+item mushrooms minecraft:brown_mushroom minecraft:red_mushroom
+item music_discs minecraft:music_disc_13 minecraft:music_disc_cat minecraft:music_disc_blocks minecraft:music_disc_chirp minecraft:music_disc_far minecraft:music_disc_mall minecraft:music_disc_mellohi minecraft:music_disc_stal minecraft:music_disc_strad minecraft:music_disc_ward minecraft:music_disc_11 minecraft:music_disc_wait minecraft:music_disc_otherside minecraft:music_disc_5 minecraft:music_disc_pigstep minecraft:music_disc_relic minecraft:music_disc_creator minecraft:music_disc_creator_music_box minecraft:music_disc_precipice
+item nether_stars minecraft:nether_star
+item netherracks minecraft:netherrack
+item nuggets #c:nuggets/gold #c:nuggets/iron
+item nuggets/gold minecraft:gold_nugget
+item nuggets/iron minecraft:iron_nugget
+item obsidians #c:obsidians/normal #c:obsidians/crying
+item obsidians/crying minecraft:crying_obsidian
+item obsidians/normal minecraft:obsidian
+item ore_bearing_ground/deepslate minecraft:deepslate
+item ore_bearing_ground/netherrack minecraft:netherrack
+item ore_bearing_ground/stone minecraft:stone
+item ore_rates/dense minecraft:copper_ore minecraft:deepslate_copper_ore minecraft:deepslate_lapis_ore minecraft:deepslate_redstone_ore minecraft:lapis_ore minecraft:redstone_ore
+item ore_rates/singular minecraft:ancient_debris minecraft:coal_ore minecraft:deepslate_coal_ore minecraft:deepslate_diamond_ore minecraft:deepslate_emerald_ore minecraft:deepslate_gold_ore minecraft:deepslate_iron_ore minecraft:diamond_ore minecraft:emerald_ore minecraft:gold_ore minecraft:iron_ore minecraft:nether_quartz_ore
+item ore_rates/sparse minecraft:nether_gold_ore
+item ores #c:ores/coal #c:ores/copper #c:ores/diamond #c:ores/emerald #c:ores/gold #c:ores/iron #c:ores/lapis #c:ores/netherite_scrap #c:ores/redstone #c:ores/quartz
+item ores/coal #minecraft:coal_ores
+item ores/copper #minecraft:copper_ores
+item ores/diamond #minecraft:diamond_ores
+item ores/emerald #minecraft:emerald_ores
+item ores/gold #minecraft:gold_ores
+item ores/iron #minecraft:iron_ores
+item ores/lapis #minecraft:lapis_ores
+item ores/netherite_scrap minecraft:ancient_debris
+item ores/quartz minecraft:nether_quartz_ore
+item ores/redstone #minecraft:redstone_ores
+item ores_in_ground/deepslate minecraft:deepslate_coal_ore minecraft:deepslate_copper_ore minecraft:deepslate_diamond_ore minecraft:deepslate_emerald_ore minecraft:deepslate_gold_ore minecraft:deepslate_iron_ore minecraft:deepslate_lapis_ore minecraft:deepslate_redstone_ore
+item ores_in_ground/netherrack minecraft:nether_gold_ore minecraft:nether_quartz_ore
+item ores_in_ground/stone minecraft:coal_ore minecraft:copper_ore minecraft:diamond_ore minecraft:emerald_ore minecraft:gold_ore minecraft:iron_ore minecraft:lapis_ore minecraft:redstone_ore
+item player_workstations/crafting_tables minecraft:crafting_table
+item player_workstations/furnaces minecraft:furnace
+item potions #c:potions/bottle
+item potions/bottle minecraft:potion minecraft:splash_potion minecraft:lingering_potion
+item pumpkins #c:pumpkins/normal #c:pumpkins/carved #c:pumpkins/jack_o_lanterns
+item pumpkins/carved minecraft:carved_pumpkin
+item pumpkins/jack_o_lanterns minecraft:jack_o_lantern
+item pumpkins/normal minecraft:pumpkin
+item raw_materials #c:raw_materials/copper #c:raw_materials/gold #c:raw_materials/iron
+item raw_materials/copper minecraft:raw_copper
+item raw_materials/gold minecraft:raw_gold
+item raw_materials/iron minecraft:raw_iron
+item rods #c:rods/wooden #c:rods/blaze #c:rods/breeze
+item rods/blaze minecraft:blaze_rod
+item rods/breeze minecraft:breeze_rod
+item rods/wooden minecraft:stick
+item ropes
+item sands #c:sands/colorless #c:sands/red
+item sands/colorless minecraft:sand
+item sands/red minecraft:red_sand
+item sandstone/blocks #c:sandstone/red_blocks #c:sandstone/uncolored_blocks
+item sandstone/red_blocks minecraft:red_sandstone minecraft:cut_red_sandstone minecraft:chiseled_red_sandstone minecraft:smooth_red_sandstone
+item sandstone/red_slabs minecraft:red_sandstone_slab minecraft:cut_red_sandstone_slab minecraft:smooth_red_sandstone_slab
+item sandstone/red_stairs minecraft:red_sandstone_stairs minecraft:smooth_red_sandstone_stairs
+item sandstone/slabs #c:sandstone/red_slabs #c:sandstone/uncolored_slabs
+item sandstone/stairs #c:sandstone/red_stairs #c:sandstone/uncolored_stairs
+item sandstone/uncolored_blocks minecraft:sandstone minecraft:cut_sandstone minecraft:chiseled_sandstone minecraft:smooth_sandstone
+item sandstone/uncolored_slabs minecraft:sandstone_slab minecraft:cut_sandstone_slab minecraft:smooth_sandstone_slab
+item sandstone/uncolored_stairs minecraft:sandstone_stairs minecraft:smooth_sandstone_stairs
+item seeds #c:seeds/beetroot #c:seeds/melon #c:seeds/pumpkin #c:seeds/torchflower #c:seeds/wheat
+item seeds/beetroot minecraft:beetroot_seeds
+item seeds/melon minecraft:melon_seeds
+item seeds/pumpkin minecraft:pumpkin_seeds
+item seeds/torchflower minecraft:torchflower_seeds
+item seeds/wheat minecraft:wheat_seeds
+item shulker_boxes minecraft:shulker_box minecraft:white_shulker_box minecraft:orange_shulker_box minecraft:magenta_shulker_box minecraft:light_blue_shulker_box minecraft:yellow_shulker_box minecraft:lime_shulker_box minecraft:pink_shulker_box minecraft:gray_shulker_box minecraft:light_gray_shulker_box minecraft:cyan_shulker_box minecraft:purple_shulker_box minecraft:blue_shulker_box minecraft:brown_shulker_box minecraft:green_shulker_box minecraft:red_shulker_box minecraft:black_shulker_box
+item slime_balls minecraft:slime_ball #c:slimeballs?
+item slimeballs minecraft:slime_ball
+item stones minecraft:andesite minecraft:diorite minecraft:granite minecraft:stone minecraft:deepslate minecraft:tuff
+item storage_blocks #c:storage_blocks/bone_meal #c:storage_blocks/coal #c:storage_blocks/copper #c:storage_blocks/diamond #c:storage_blocks/dried_kelp #c:storage_blocks/emerald #c:storage_blocks/gold #c:storage_blocks/iron #c:storage_blocks/lapis #c:storage_blocks/netherite #c:storage_blocks/raw_copper #c:storage_blocks/raw_gold #c:storage_blocks/raw_iron #c:storage_blocks/redstone #c:storage_blocks/slime #c:storage_blocks/wheat
+item storage_blocks/bone_meal minecraft:bone_block
+item storage_blocks/coal minecraft:coal_block
+item storage_blocks/copper minecraft:copper_block
+item storage_blocks/diamond minecraft:diamond_block
+item storage_blocks/dried_kelp minecraft:dried_kelp_block
+item storage_blocks/emerald minecraft:emerald_block
+item storage_blocks/gold minecraft:gold_block
+item storage_blocks/iron minecraft:iron_block
+item storage_blocks/lapis minecraft:lapis_block
+item storage_blocks/netherite minecraft:netherite_block
+item storage_blocks/raw_copper minecraft:raw_copper_block
+item storage_blocks/raw_gold minecraft:raw_gold_block
+item storage_blocks/raw_iron minecraft:raw_iron_block
+item storage_blocks/redstone minecraft:redstone_block
+item storage_blocks/slime minecraft:slime_block
+item storage_blocks/wheat minecraft:hay_block
+item strings minecraft:string
+item stripped_logs minecraft:stripped_acacia_log minecraft:stripped_bamboo_block minecraft:stripped_birch_log minecraft:stripped_cherry_log minecraft:stripped_dark_oak_log minecraft:stripped_jungle_log minecraft:stripped_mangrove_log minecraft:stripped_oak_log minecraft:stripped_spruce_log minecraft:stripped_crimson_stem minecraft:stripped_warped_stem
+item stripped_woods minecraft:stripped_acacia_wood minecraft:stripped_birch_wood minecraft:stripped_cherry_wood minecraft:stripped_dark_oak_wood minecraft:stripped_jungle_wood minecraft:stripped_mangrove_wood minecraft:stripped_oak_wood minecraft:stripped_spruce_wood minecraft:stripped_crimson_hyphae minecraft:stripped_warped_hyphae
+item tools #minecraft:axes #minecraft:hoes #minecraft:pickaxes #minecraft:shovels #minecraft:swords #c:tools/bow #c:tools/brush #c:tools/crossbow #c:tools/fishing_rod #c:tools/igniter #c:tools/shear #c:tools/shield #c:tools/spear #c:tools/mace #c:tools/wrench #c:tools/mining_tool #c:tools/melee_weapon #c:tools/ranged_weapon
+item tools/bow minecraft:bow #c:tools/bows?
+item tools/brush minecraft:brush #c:tools/brushes?
+item tools/crossbow minecraft:crossbow #c:tools/crossbows?
+item tools/fishing_rod minecraft:fishing_rod #c:tools/fishing_rods?
+item tools/igniter minecraft:flint_and_steel
+item tools/mace minecraft:mace
+item tools/melee_weapon minecraft:mace minecraft:trident minecraft:wooden_sword minecraft:stone_sword minecraft:golden_sword minecraft:iron_sword minecraft:diamond_sword minecraft:netherite_sword minecraft:wooden_axe minecraft:stone_axe minecraft:golden_axe minecraft:iron_axe minecraft:diamond_axe minecraft:netherite_axe
+item tools/mining_tool minecraft:wooden_pickaxe minecraft:stone_pickaxe minecraft:golden_pickaxe minecraft:iron_pickaxe minecraft:diamond_pickaxe minecraft:netherite_pickaxe
+item tools/ranged_weapon minecraft:bow minecraft:crossbow minecraft:trident
+item tools/shear minecraft:shears #c:tools/shears?
+item tools/shield minecraft:shield #c:tools/shields?
+item tools/spear minecraft:trident #c:tools/tridents?
+item tools/wrench
+item villager_job_sites minecraft:barrel minecraft:blast_furnace minecraft:brewing_stand minecraft:cartography_table minecraft:cauldron minecraft:composter minecraft:fletching_table minecraft:grindstone minecraft:lectern minecraft:loom minecraft:smithing_table minecraft:smoker minecraft:stonecutter
