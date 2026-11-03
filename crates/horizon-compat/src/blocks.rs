@@ -314,12 +314,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (o, "<init>") if o.starts_with("net/minecraft/world/level/block/") && desc.contains("Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;") => {
             let props = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == BLOCK_PROPERTIES).unwrap_or(V::NULL);
+            // `LiquidBlock(FlowingFluid, Properties)`: its fluid, the field vanilla names `fluid`.
+            if o == "net/minecraft/world/level/block/LiquidBlock" {
+                rt.put_field(a(0), "fluid", a(1));
+            }
             constructed(rt, a(0), o, props);
             Some(V::Void)
         }
         (o, "<init>") if o.starts_with("net/minecraft/world/item/") && desc.contains("Lnet/minecraft/world/item/Item$Properties;") => {
             if let Some(p) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == ITEM_PROPERTIES) {
                 rt.put_field(a(0), "$properties", p);
+            }
+            // `BucketItem(Fluid, Properties)`: the fluid it holds, vanilla's field `content`.
+            if o == "net/minecraft/world/item/BucketItem" {
+                rt.put_field(a(0), "content", a(1));
             }
             Some(V::Void)
         }
@@ -1022,7 +1030,7 @@ mod tests {
     #[test]
     fn vanilla_block_classes_hold_the_properties_vanilla_gives_them() {
         let mut rt = Rt::new();
-        let mut field = |rt: &mut Rt, key: &'static str| {
+        let field = |rt: &mut Rt, key: &'static str| {
             let p = api::get_static(rt, key);
             (api_common::prop_parts(rt, p).0, property_values(rt, p))
         };

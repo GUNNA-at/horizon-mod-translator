@@ -296,9 +296,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     (clicked face and position, look directions as vanilla's `Direction.orderedByNearest`, sneaking, item) and
     asks the block's own `getStateForPlacement`; `super` calls reaching vanilla get its rule (pillar axis,
     face-attached). Harness: shaft takes the clicked face's axis, motor faces a neighbouring shaft (else away
-    from the look), cogwheel follows a shaft's axis, press and fan face as in Create. Gaps: every answer is
-    `waterlogged=true` (no `getFluidState` yet), and blocks inheriting vanilla's rule without overriding it
-    (analog lever) aren't asked. New game helpers `native_state_id_text`, `native_state_from_text` (API 81).
+    from the look), cogwheel follows a shaft's axis, press and fan face as in Create. Gaps: every answer was
+    `waterlogged=true` (no `getFluidState` yet; fixed by fluids below), and blocks inheriting vanilla's rule
+    without overriding it (analog lever) aren't asked. New game helpers `native_state_id_text`,
+    `native_state_from_text` (API 81).
+  - [x] 2026-11-03 Fluids (`horizon-compat/src/fluids.rs`, 5 tests): vanilla's fluids (`Fluids.WATER`, one object
+    per name, also from registry lookups), NeoForge's `BaseFlowingFluid` built from its `Properties` (the
+    suppliers of source, flowing fluid, block, bucket and type; tick rate, slope, resistance), `FluidState` (one
+    object per fluid, level and falling flag; its calls reach the fluid's own method when the mod's class has
+    one, as `getType().isSource(state)` does in Java), `getFluidState` of a block state (the mod block's own
+    override, else its vanilla class: a `LiquidBlock`'s level, `waterlogged`, kelp and the other always-wet
+    plants; `Block` itself holds none) and of the level at a position, `LiquidBlock`/`BucketItem.getFluid`,
+    fluid `TagKey`s (`FluidTags`, `Tags.Fluids`, `TagKey.create`; water and lava hold vanilla's members).
+    Harness: `PLACE=1` now gives `waterlogged=false` in air; Create's common setup no longer stops on
+    `Tried to register duplicate values for object null` (Potion and Tea fluids' `getSource()` was null), and
+    kinetics still read 16 RPM. Gaps: fluid tags from data files, `FluidType` properties (density, viscosity),
+    `FluidStack`, tanks and pipes; `create:lectern` display target fails to register (seen since 2026-11-02).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

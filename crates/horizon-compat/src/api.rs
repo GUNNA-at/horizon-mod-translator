@@ -270,7 +270,8 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
                 _ => V::NULL,
             }
         }
-        _ => match crate::blocks::call(rt, key, args)
+        _ => match crate::fluids::call(rt, key, args)
+            .or_else(|| crate::blocks::call(rt, key, args))
             .or_else(|| crate::shapes::call(rt, key, args))
             .or_else(|| crate::neo::call(rt, key, args))
             .or_else(|| crate::jlang::call(rt, key, args))
@@ -334,11 +335,11 @@ pub fn block(rt: &mut Rt, name: &str) -> V {
 }
 
 /// The name of a block value (vanilla or the mod's).
-fn block_name(rt: &Rt, b: V) -> String {
+pub(crate) fn block_name(rt: &Rt, b: V) -> String {
     rt.str_of(b).map(str::to_owned).or_else(|| rt.registered_name(b, "block").map(str::to_owned)).unwrap_or_default()
 }
 
-fn pos_of(rt: &Rt, v: V) -> [i32; 3] {
+pub(crate) fn pos_of(rt: &Rt, v: V) -> [i32; 3] {
     let h = native(rt, v);
     [h[0] as i32, h[1] as i32, h[2] as i32]
 }
@@ -347,12 +348,19 @@ fn qualified(rt: &Rt, name: &str) -> String {
     if name.contains(':') { name.to_owned() } else { format!("{}:{name}", rt.namespace) }
 }
 
+/// Whether `owner` is one of the level's interfaces or classes (`Level`, `LevelAccessor`,
+/// `BlockGetter`...): what reads and writes the game's blocks.
+pub(crate) fn is_level(owner: &str) -> bool {
+    owner.starts_with("net/minecraft/")
+        && (owner.ends_with("Level") || owner.ends_with("LevelAccessor") || owner.ends_with("LevelReader") || owner.ends_with("BlockGetter") || owner.ends_with("LevelWriter"))
+}
+
 /// Registration, the level and block states: the API that reaches the game.
 fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let (owner, rest) = key.split_once('.')?;
     let (name, desc) = rest.split_once('.')?;
-    let level = owner.starts_with("net/minecraft/") && (owner.ends_with("Level") || owner.ends_with("LevelAccessor") || owner.ends_with("LevelReader") || owner.ends_with("BlockGetter") || owner.ends_with("LevelWriter"));
+    let level = is_level(owner);
     Some(match (owner, name) {
         // NeoForge registration
         ("net/neoforged/neoforge/registries/DeferredRegister", "create") => {
@@ -579,6 +587,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::render::get_static(rt, o, f))
             .or_else(|| crate::blocks::get_static(rt, o, f))
             .or_else(|| crate::shapes::get_static(rt, o, f))
+            .or_else(|| crate::fluids::get_static(rt, o, f))
     {
         return v;
     }

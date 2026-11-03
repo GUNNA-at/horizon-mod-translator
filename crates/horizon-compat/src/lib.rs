@@ -8,6 +8,7 @@ pub use horizon_compat_core::host;
 pub mod api;
 pub mod api_common;
 pub mod blocks;
+pub mod fluids;
 pub mod glue;
 pub mod jlang;
 pub mod jutil;

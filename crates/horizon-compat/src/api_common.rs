@@ -21,6 +21,15 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         "net/minecraft/world/level/block/EntityBlock" => c == "net/minecraft/world/level/block/BaseEntityBlock",
         "net/minecraft/world/phys/shapes/CollisionContext" => c == crate::shapes::ENTITY_COLLISION_CONTEXT,
         "net/minecraft/world/item/Item" => family("net/minecraft/world/item/", "Item"),
+        // Fluids: vanilla's (`WaterFluid$Source` is a `FlowingFluid` and a `WaterFluid`) and NeoForge's
+        // `BaseFlowingFluid` and its `Flowing` and `Source`.
+        "net/minecraft/world/level/material/Fluid" => crate::fluids::is_fluid_class(c),
+        "net/minecraft/world/level/material/FlowingFluid" => {
+            crate::fluids::is_fluid_class(c) && !matches!(c, "net/minecraft/world/level/material/EmptyFluid" | "net/minecraft/world/level/material/Fluid")
+        }
+        "net/minecraft/world/level/material/WaterFluid" | "net/minecraft/world/level/material/LavaFluid" | "net/neoforged/neoforge/fluids/BaseFlowingFluid" => {
+            c.starts_with(&format!("{class}$")) && !c.ends_with("$Properties")
+        }
         "net/minecraft/world/level/block/entity/BlockEntity" => family("net/minecraft/world/level/block/entity/", "BlockEntity"),
         "net/minecraft/world/entity/Entity" => c.starts_with("net/minecraft/world/entity/") && !c.contains('$'),
         "java/lang/Throwable" => c.starts_with("java/lang/") && (c.ends_with("Exception") || c.ends_with("Error")),

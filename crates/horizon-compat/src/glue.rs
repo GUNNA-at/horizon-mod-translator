@@ -10,7 +10,7 @@ const RANDOM_TICK: &str = "randomTick.(Lnet/minecraft/world/level/block/state/Bl
 const NEIGHBOR: &str = "neighborChanged.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;Lnet/minecraft/core/BlockPos;Z)V";
 
 /// The mod's Block object behind a state, and its class, when the mod registered it.
-fn mod_block(rt: &Rt, state: &str) -> Option<(V, &'static str)> {
+pub(crate) fn mod_block(rt: &Rt, state: &str) -> Option<(V, &'static str)> {
     let (name, _) = crate::host::split_state(state);
     let b = *rt.registered.get(&("block".to_owned(), name.to_owned()))?;
     let class = rt.class_of(b);

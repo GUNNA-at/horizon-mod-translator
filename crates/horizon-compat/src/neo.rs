@@ -149,6 +149,7 @@ fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
     match registry {
         "block" if id.starts_with("minecraft:") => crate::api::block(rt, id),
         "item" if id.starts_with("minecraft:") => crate::api_common::item(rt, id),
+        "fluid" if id.starts_with("minecraft:") => crate::fluids::fluid(rt, id),
         _ => V::NULL,
     }
 }
