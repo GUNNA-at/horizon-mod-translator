@@ -340,6 +340,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let reg = rt.get_field(a(0), "$registry");
             let id = rt.get_field(a(0), "$id");
             let k = (rt.str_of(reg).unwrap_or("").to_owned(), rt.str_of(id).unwrap_or("").to_owned());
+            if !rt.registered.contains_key(&k) && rt.suppliers.iter().any(|(r, n, _)| *r == k.0 && *n == k.1) {
+                rt.resolve_registrations();
+            }
             rt.registered.get(&k).copied().unwrap_or(V::NULL)
         }
         (o, "getId") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => rt.get_field(a(0), "$id"),

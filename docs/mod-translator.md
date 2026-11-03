@@ -404,6 +404,25 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Harness `PRESS=<content mod>` (motor, shaft, press two above a depot): the press turns at 16 rpm and a
     right click with an iron ingot puts it on the depot (the hand empties), but the press doesn't start:
     Create's `BeltProcessingBehaviour.isBlocked` asks the collision shape above the depot, unmapped.
+  - [x] 2026-11-04 Create's press makes an iron sheet (harness `PRESS=<content mod>`): a creative motor
+    turns a shaft and a mechanical press two above a depot (speed 16); a right click puts an iron ingot on
+    the depot; the press starts when the ingot reaches the depot's centre and runs 2 cycle ticks per game
+    tick, as Create computes for that speed. At half cycle (game tick 66) the depot holds
+    `create:iron_sheet x1`. What it took:
+    - Collisions: `BlockState.getCollisionShape/getShape(level, pos[, context])` answer from the game's
+      own collision boxes for the block there (`Host::collision_boxes`, the game's
+      `block_collision_boxes`), a mod block from its own `getShape`, air empty. Create's `isBlocked`
+      asks what is above the depot.
+    - Interface calls on API objects dispatch on the receiver's class, as on the JVM: a missed
+      `Supplier.get` on a DeferredHolder answers as `DeferredHolder.get`. This holds for any interface
+      and any API object: `api::call` tries the receiver's class and its supers after the named class.
+    - `DeferredRegister.register`'s holder now keeps its registry. `create:pressing` is both a recipe
+      type and a serializer, and `AllRecipeTypes.PRESSING.getType()` came back null because the holder
+      knew only its name.
+    - NeoForge's components fluid ingredient (`neoforge:components`): Create's 3 potion filling recipes
+      now read. They match no fluid stack until fluid stacks carry components.
+    Correction to the entry above: `isBlocked` was not the whole cause. Once it was answered, the press
+    still found no recipe, because the recipe type was null.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

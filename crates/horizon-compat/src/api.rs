@@ -46,31 +46,57 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     if rt.unmapped.get(key).copied().unwrap_or(0) == before {
         return r;
     }
-    let Some((mut owner, rest)) = key.split_once('.') else { return r };
-    while let Some(&sup) = rt.supers.get(owner) {
-        let up = rt.static_key(&format!("{sup}.{rest}"));
+    let Some((owner, rest)) = key.split_once('.') else { return r };
+    for class in retry_classes(rt, owner, args) {
+        let up = rt.static_key(&format!("{class}.{rest}"));
         let seen = rt.unmapped.get(up).copied().unwrap_or(0);
         let r2 = call_exact(rt, up, args);
         if rt.unmapped.get(up).copied().unwrap_or(0) == seen {
-            // Resolved: the miss on the mod's own name doesn't count.
-            if let Some(n) = rt.unmapped.get_mut(key) {
-                *n -= 1;
-                if *n == 0 {
-                    rt.unmapped.remove(key);
-                }
-            }
+            // Resolved: the miss on the name the class file used doesn't count.
+            uncount(rt, key);
             return r2;
         }
-        if let Some(n) = rt.unmapped.get_mut(up) {
-            *n -= 1;
-            if *n == 0 {
-                rt.unmapped.remove(up);
-            }
-        }
-        owner = sup;
+        uncount(rt, up);
     }
     trace_unmapped(rt, key, args);
     r
+}
+
+/// Where a missed call is asked next. First up from the named class, a translated subclass to its
+/// API superclass. Then from the receiver's own class up, the way the JVM dispatches an interface
+/// call: `Supplier.get` on a DeferredHolder answers as `DeferredHolder.get`, and
+/// `CharSequence.length` on a String as `String.length`.
+fn retry_classes(rt: &Rt, owner: &'static str, args: &[V]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    let climb = |out: &mut Vec<&'static str>, mut c: &'static str| {
+        while let Some(&sup) = rt.supers.get(c) {
+            if sup == owner || out.contains(&sup) {
+                break;
+            }
+            out.push(sup);
+            c = sup;
+        }
+    };
+    climb(&mut out, owner);
+    if let Some(&v @ V::R(n)) = args.first()
+        && n != 0
+    {
+        let class = rt.class_of(v);
+        if class != owner && !out.contains(&class) {
+            out.push(class);
+            climb(&mut out, class);
+        }
+    }
+    out
+}
+
+fn uncount(rt: &mut Rt, key: &'static str) {
+    if let Some(n) = rt.unmapped.get_mut(key) {
+        *n -= 1;
+        if *n == 0 {
+            rt.unmapped.remove(key);
+        }
+    }
 }
 
 /// With `HORIZON_COMPAT_TRACE` set, each API method the mod calls that isn't mapped is printed
@@ -344,6 +370,37 @@ pub fn api_enum(rt: &mut Rt, class: &'static str, name: &'static str, ordinal: i
     })
 }
 
+const GET_SHAPE: &str = "getShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+const GET_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.getShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+
+/// `state.getCollisionShape(level, pos)` and `state.getShape(level, pos)`, args [state, level, pos,
+/// context]: for a collision, the game's own boxes when `state` is the block at `pos` (vanilla's
+/// and the content mods' shapes); else the mod block's own `getShape`; else a full block (air, none).
+fn state_shape(rt: &mut Rt, text: &str, collision: bool, args: [V; 4]) -> V {
+    let at = pos_of(rt, args[2]);
+    if collision
+        && let Some(h) = rt.host()
+        && h.block_state(at) == text
+        && let Some(boxes) = h.collision_boxes(at)
+    {
+        return crate::shapes::shape(rt, &boxes);
+    }
+    let (b, _) = crate::host::split_state(text);
+    if matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") {
+        return crate::shapes::shape(rt, &[]);
+    }
+    if let Some((blk, _)) = crate::glue::mod_block(rt, text)
+        && let Some(vc) = rt.vcall
+    {
+        let shape = vc(rt, GET_SHAPE_KEY, GET_SHAPE, &[blk, args[0], args[1], args[2], args[3]]);
+        if rt.thrown.is_none() && crate::shapes::boxes(rt, shape).is_some() {
+            return shape;
+        }
+        rt.report_thrown("getShape");
+    }
+    crate::shapes::shape(rt, &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]])
+}
+
 /// A block value: the mod's own Block object when it registered one by that name.
 pub fn block(rt: &mut Rt, name: &str) -> V {
     if let Some(v) = rt.registered.get(&("block".to_owned(), name.to_owned())) {
@@ -422,8 +479,8 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") && desc.starts_with("(Ljava/lang/String;") => {
             let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("unknown").to_owned();
             let id = qualified(rt, rt.str_of(a(1)).unwrap_or(""));
-            rt.suppliers.push((registry, id.clone(), a(2)));
-            holder(rt, &id)
+            rt.suppliers.push((registry.clone(), id.clone(), a(2)));
+            holder(rt, &registry, &id)
         }
         (o, "registerBlock" | "registerItem") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
             let registry = if name == "registerBlock" { "block" } else { "item" };
@@ -431,7 +488,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let props = if desc.contains("Properties;)") || args.len() > 3 { a(3) } else { V::NULL };
             let apply = rt.lambda("compat:apply", vec![a(2), props]);
             rt.suppliers.push((registry.into(), id.clone(), apply));
-            holder(rt, &id)
+            holder(rt, registry, &id)
         }
         (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => V::Void, // (IEventBus)
         (o, "get" | "value") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
@@ -557,6 +614,10 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "is" if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") => V::I((block_name(rt, a(1)) == b) as i32),
                 "equals" => V::I((rt.str_of(a(1)) == Some(text.as_str())) as i32),
                 "updateShape" if desc.starts_with("(Lnet/minecraft/core/Direction;") => update_shape(rt, [a(0), a(1), a(2), a(3), a(4), a(5)]),
+                "getCollisionShape" | "getShape" if desc.starts_with("(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;") => {
+                    let ctx = if desc.contains("CollisionContext;)") { a(3) } else { crate::shapes::empty_context(rt) };
+                    state_shape(rt, &text, n == "getCollisionShape", [a(0), a(1), a(2), ctx])
+                }
                 // The mod block's own `canSurvive`; vanilla's default answers true.
                 "canSurvive" => match crate::glue::mod_block(rt, &text) {
                     Some((blk, class)) if rt.overrides.is_some_and(|o| o(class, CAN_SURVIVE)) => match rt.vcall {
@@ -622,9 +683,12 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     })
 }
 
-fn holder(rt: &mut Rt, id: &str) -> V {
+/// A DeferredRegister's holder: its registry and name, resolved when asked (`create:pressing` is
+/// both a recipe type and a recipe serializer).
+fn holder(rt: &mut Rt, registry: &str, id: &str) -> V {
     let h = rt.new_object("net/neoforged/neoforge/registries/DeferredHolder");
-    let s = rt.string(id);
+    let (r, s) = (rt.string(registry), rt.string(id));
+    rt.put_field(h, "$registry", r);
     rt.put_field(h, "$id", s);
     h
 }

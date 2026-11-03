@@ -37,6 +37,11 @@ pub trait Host {
     fn player_held(&self) -> Option<(String, u32)> {
         None
     }
+    /// The collision boxes of the block at `pos` as the game has them (`BlockState.getCollisionShape`
+    /// with the empty context), each relative to the block's corner; None when the game can't say.
+    fn collision_boxes(&self, _pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
+        None
+    }
     /// Takes up to `count` of `item` from the acting player, the main hand first; what it took
     /// (`Player.setItemInHand` replacing what the hand holds).
     fn take_player_items(&mut self, _item: &str, _count: u32) -> u32 {
@@ -116,6 +121,11 @@ impl Host for MemoryHost {
     }
     fn player_held(&self) -> Option<(String, u32)> {
         self.held.clone()
+    }
+    /// Air (and unset positions) has none; any other block is a full cube.
+    fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
+        let air = self.blocks.get(&pos).is_none_or(|b| b == "minecraft:air");
+        Some(if air { Vec::new() } else { vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]] })
     }
     fn take_player_items(&mut self, item: &str, count: u32) -> u32 {
         let Some((held, n)) = &mut self.held else { return 0 };

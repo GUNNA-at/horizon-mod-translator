@@ -196,6 +196,14 @@ fn {id}_block_entity_submit(
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
         }}
+        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
+            Some(boxes.iter().map(|b| {{
+                let (lo, hi) = (b.min_position(), b.max_position());
+                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
+            }}).collect())
+        }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false
         }}
@@ -364,6 +372,14 @@ fn {id}_tick(game: &mut crate::game::Game<'_>) {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
         }}
+        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
+            Some(boxes.iter().map(|b| {{
+                let (lo, hi) = (b.min_position(), b.max_position());
+                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
+            }}).collect())
+        }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false
         }}
@@ -451,6 +467,14 @@ fn {id}_block_entity_tick(
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
         }}
+        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
+            Some(boxes.iter().map(|b| {{
+                let (lo, hi) = (b.min_position(), b.max_position());
+                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
+            }}).collect())
+        }}
         fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
             self.game.native_set_state_text_at(pos, state, 3)
         }}
@@ -499,6 +523,14 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
     impl {c}::host::Host for Host<'_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
+        }}
+        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
+            Some(boxes.iter().map(|b| {{
+                let (lo, hi) = (b.min_position(), b.max_position());
+                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
+            }}).collect())
         }}
         fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
             self.game.native_set_state_text_at(pos, state, 3)
@@ -557,6 +589,14 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
     impl {c}::host::Host for Host<'_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
+        }}
+        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
+            Some(boxes.iter().map(|b| {{
+                let (lo, hi) = (b.min_position(), b.max_position());
+                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
+            }}).collect())
         }}
         fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
             self.game.native_set_state_text_at(pos, state, 3)

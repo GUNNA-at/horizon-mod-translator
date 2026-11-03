@@ -334,6 +334,26 @@ fn fluid_ingredient(rt: &mut Rt, entries: &[String]) -> V {
     o
 }
 
+/// The data components a fluid ingredient requires of a stack (`neoforge:components`), kept as
+/// `{"components": {...}, "strict": bool}`.
+fn requires(rt: &mut Rt, ingredient: V, needs: Option<Json>) {
+    if let Some(n) = needs {
+        let s = rt.string(&n.to_string());
+        rt.put_field(ingredient, "$requires", s);
+    }
+}
+
+/// Whether a fluid stack carries the components its ingredient requires: all of them (and, when
+/// strict, only them). Fluid stacks carry their components in `$components` (JSON), none so far.
+fn carries_required(rt: &Rt, ingredient: V, stack: V) -> bool {
+    let Some(needs) = rt.str_of(rt.get_field(ingredient, "$requires")) else { return true };
+    let needs: Json = serde_json::from_str(needs).unwrap_or_default();
+    let has: Json = rt.str_of(rt.get_field(stack, "$components")).and_then(|c| serde_json::from_str(c).ok()).unwrap_or_else(|| Json::Object(Map::new()));
+    let (Some(want), Some(have)) = (needs["components"].as_object(), has.as_object()) else { return false };
+    let all = want.iter().all(|(k, v)| have.get(k) == Some(v));
+    all && (!needs["strict"].as_bool().unwrap_or(false) || want.len() == have.len())
+}
+
 /// `SizedFluidIngredient`: an ingredient and an amount in millibuckets.
 fn sized_fluid(rt: &mut Rt, ingredient: V, amount: i32) -> V {
     let o = rt.new_object(SIZED_FLUID);
@@ -364,7 +384,7 @@ fn fluid_ingredient_fluids(rt: &mut Rt, ingredient: V) -> Vec<V> {
 }
 
 fn fluid_ingredient_test(rt: &mut Rt, ingredient: V, stack: V) -> bool {
-    if fluids::stack_empty(rt, stack) {
+    if fluids::stack_empty(rt, stack) || !carries_required(rt, ingredient, stack) {
         return false;
     }
     let f = rt.get_field(stack, "$fluid");
@@ -381,15 +401,42 @@ fn fluid_ingredient_test(rt: &mut Rt, ingredient: V, stack: V) -> bool {
 /// `FluidIngredient.MAP_CODEC_NONEMPTY`'s reading: `{"type": "neoforge:single", "fluid": id}`,
 /// `{"type": "neoforge:tag", "tag": tag}`, `neoforge:compound`'s children, or the untyped
 /// `{"fluid": id}` and `{"tag": tag}`.
-fn read_fluid_ingredient(rt: &mut Rt, o: &Map<String, Json>, out: &mut Vec<String>) -> Result<(), String> {
+/// `needs` takes the data components a `neoforge:components` ingredient requires of a stack.
+fn read_fluid_ingredient(rt: &mut Rt, o: &Map<String, Json>, out: &mut Vec<String>, needs: &mut Option<Json>) -> Result<(), String> {
     let ty = o.get("type").and_then(Json::as_str).map(qualified);
     match ty.as_deref() {
         Some("neoforge:compound") => {
             let Some(Json::Array(children)) = o.get("children").or_else(|| o.get("ingredients")) else { return Err("No key children in MapLike".into()) };
             for c in children {
                 let Json::Object(c) = c else { return Err(format!("Not a map: {c}")) };
-                read_fluid_ingredient(rt, c, out)?;
+                read_fluid_ingredient(rt, c, out, needs)?;
             }
+            return Ok(());
+        }
+        // `DataComponentFluidIngredient`: fluids (an id, a `#tag` or a list) whose stack carries
+        // the components given (all of them; `strict`, only them).
+        Some("neoforge:components") => {
+            let fluids = o.get("fluids").ok_or("No key fluids in MapLike")?;
+            let named: Vec<&Json> = match fluids {
+                Json::Array(a) => a.iter().collect(),
+                j => vec![j],
+            };
+            for f in named {
+                let Json::String(f) = f else { return Err(format!("fluids: Not a string: {f}")) };
+                match f.strip_prefix('#') {
+                    Some(tag) => out.push(format!("#{}", qualified(tag))),
+                    None => {
+                        let id = qualified(f);
+                        if fluids::fluid(rt, &id).r() == 0 {
+                            return Err(format!("Unknown registry key in fluid: {id}"));
+                        }
+                        out.push(id);
+                    }
+                }
+            }
+            let Some(Json::Object(components)) = o.get("components") else { return Err("No key components in MapLike".into()) };
+            let strict = o.get("strict").and_then(Json::as_bool).unwrap_or(false);
+            *needs = Some(serde_json::json!({"components": components, "strict": strict}));
             return Ok(());
         }
         Some("neoforge:single" | "neoforge:tag") | None => {}
@@ -827,37 +874,40 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             Ok(fluids::fluid_stack(rt, f, amount as i32))
         }
         "fluid_ingredient" | "fluid_ingredient_map" => {
-            let mut out = Vec::new();
+            let (mut out, mut needs) = (Vec::new(), None);
             match j {
                 Json::Array(items) => {
                     for i in items {
                         let Json::Object(i) = i else { return Err(format!("Not a map: {i}")) };
-                        read_fluid_ingredient(rt, i, &mut out)?;
+                        read_fluid_ingredient(rt, i, &mut out, &mut needs)?;
                     }
                 }
-                _ => read_fluid_ingredient(rt, object()?, &mut out)?,
+                _ => read_fluid_ingredient(rt, object()?, &mut out, &mut needs)?,
             }
-            Ok(fluid_ingredient(rt, &out))
+            let i = fluid_ingredient(rt, &out);
+            requires(rt, i, needs);
+            Ok(i)
         }
         "sized_fluid_ingredient" => {
             let o = object()?;
             // `NESTED_CODEC` holds the ingredient under `ingredient`; `FLAT_CODEC` beside `amount`.
-            let mut out = Vec::new();
+            let (mut out, mut needs) = (Vec::new(), None);
             match o.get("ingredient") {
-                Some(Json::Object(inner)) => read_fluid_ingredient(rt, inner, &mut out)?,
+                Some(Json::Object(inner)) => read_fluid_ingredient(rt, inner, &mut out, &mut needs)?,
                 Some(Json::Array(items)) => {
                     for i in items {
                         let Json::Object(i) = i else { return Err(format!("Not a map: {i}")) };
-                        read_fluid_ingredient(rt, i, &mut out)?;
+                        read_fluid_ingredient(rt, i, &mut out, &mut needs)?;
                     }
                 }
-                _ => read_fluid_ingredient(rt, o, &mut out)?,
+                _ => read_fluid_ingredient(rt, o, &mut out, &mut needs)?,
             }
             let amount = int_field(o, "amount", BUCKET)?;
             if amount <= 0 {
                 return Err(format!("amount: Value must be positive: {amount}"));
             }
             let i = fluid_ingredient(rt, &out);
+            requires(rt, i, needs);
             Ok(sized_fluid(rt, i, amount as i32))
         }
         "component_patch" => {
@@ -926,6 +976,22 @@ mod tests {
             assert!(ingredient_test(rt, empty, air));
             assert!(!ingredient_test(rt, empty, iron));
         });
+    }
+
+    #[test]
+    fn a_components_fluid_ingredient_takes_only_stacks_that_carry_the_components() {
+        let mut rt = Rt::new();
+        crate::install();
+        let j = serde_json::json!({"type": "neoforge:components", "amount": 25, "fluids": "minecraft:water", "components": {"minecraft:potion_contents": {"potion": "minecraft:night_vision"}}});
+        let sized = decode_native(&mut rt, "sized_fluid_ingredient", &j).unwrap();
+        let ing = rt.get_field(sized, "$ingredient");
+        let water = fluids::fluid(&mut rt, "minecraft:water");
+        let plain = fluids::fluid_stack(&mut rt, water, 1000);
+        assert!(!fluid_ingredient_test(&mut rt, ing, plain));
+        let carrying = fluids::fluid_stack(&mut rt, water, 1000);
+        let c = rt.string(r#"{"minecraft:potion_contents":{"potion":"minecraft:night_vision"}}"#);
+        rt.put_field(carrying, "$components", c);
+        assert!(fluid_ingredient_test(&mut rt, ing, carrying));
     }
 
     #[test]
