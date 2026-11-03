@@ -311,6 +311,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             .or_else(|| crate::codecs::call(rt, key, args))
             .or_else(|| crate::recipes::call(rt, key, args))
             .or_else(|| crate::handlers::call_key(rt, key, args))
+            .or_else(|| crate::components::call_key(rt, key, args))
             .or_else(|| crate::creative::call(rt, key, args))
             .or_else(|| crate::functions::call(rt, key, args))
             .or_else(|| crate::blocks::call(rt, key, args))
@@ -454,9 +455,11 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let level = is_level(owner);
     Some(match (owner, name) {
         // NeoForge registration
-        ("net/neoforged/neoforge/registries/DeferredRegister", "create") => {
-            let registry = rt.str_of(a(0)).unwrap_or("unknown").to_owned();
-            let ns = rt.str_of(a(1)).unwrap_or("").to_owned();
+        // `createDataComponents(registryKey, modid)`, or `(modid)` alone in older NeoForge.
+        ("net/neoforged/neoforge/registries/DeferredRegister", "create" | "createDataComponents") => {
+            let keyed = name == "create" || desc.starts_with("(Lnet/minecraft/resources/ResourceKey;");
+            let registry = if keyed { rt.str_of(a(0)).unwrap_or("unknown").to_owned() } else { "data_component_type".to_owned() };
+            let ns = rt.str_of(if keyed { a(1) } else { a(0) }).unwrap_or("").to_owned();
             if rt.namespace.is_empty() {
                 rt.namespace = ns;
             }
@@ -489,6 +492,15 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let apply = rt.lambda("compat:apply", vec![a(2), props]);
             rt.suppliers.push((registry.into(), id.clone(), apply));
             holder(rt, registry, &id)
+        }
+        // NeoForge's `DataComponents.registerComponentType(name, builder -> ...)`: built now, as the
+        // type is a plain object the mod configures, and registered under its name.
+        (o, "registerComponentType") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
+            let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("data_component_type").to_owned();
+            let id = qualified(rt, rt.str_of(a(1)).unwrap_or(""));
+            let ty = crate::components::build_with(rt, a(2));
+            rt.registered.insert((registry.clone(), id.clone()), ty);
+            holder(rt, &registry, &id)
         }
         (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => V::Void, // (IEventBus)
         (o, "get" | "value") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
@@ -714,6 +726,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::creative::get_static(rt, o, f))
             .or_else(|| crate::codecs::get_static(rt, o, f))
             .or_else(|| crate::recipes::get_static(rt, o, f))
+            .or_else(|| crate::components::get_static(rt, o, f))
     {
         return v;
     }

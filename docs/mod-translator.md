@@ -423,6 +423,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       now read. They match no fluid stack until fluid stacks carry components.
     Correction to the entry above: `isBlocked` was not the whole cause. Once it was answered, the press
     still found no recipe, because the recipe type was null.
+  - [x] 2026-11-04 Item data components, natively (`horizon-compat/src/components.rs`). A mod's
+    component types (`DataComponentType.builder().persistent(codec).build()`, registered through NeoForge's
+    `DeferredRegister.createDataComponents` or `registerComponentType`) and vanilla's `DataComponents`
+    (one object per type). A stack's `has/get/getOrDefault/set/remove/update`, in vanilla's forms and in
+    NeoForge's forms that take the type's holder. A stack keeps what was set on it, as vanilla's patch,
+    and `copy/copyWithCount/split` carry it. `isSameItemSameComponents` and `matches` compare it: strings
+    and boxed values by value, a mod's records by their own `equals`. Measured: all 57 of Create's types
+    register with their codecs; before this they were null. Not yet: an item's default components
+    (vanilla's prototype), and components in saved stacks or in stacks handed to the game (both need
+    encoding through the type's codec).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

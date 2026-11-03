@@ -897,14 +897,18 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
             let i = rt.get_field(a(0), "$item");
             let c = rt.get_field(a(0), "$count").i();
-            stack_of(rt, i, c)
+            let s = stack_of(rt, i, c);
+            crate::components::copy_patch(rt, a(0), s);
+            s
         }
         ("net/minecraft/world/item/ItemStack", "copyWithCount") => {
             if stack_empty(rt, a(0)) {
                 return get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY");
             }
             let i = rt.get_field(a(0), "$item");
-            stack_of(rt, i, a(1).i())
+            let s = stack_of(rt, i, a(1).i());
+            crate::components::copy_patch(rt, a(0), s);
+            s
         }
         // `split(n)`: a stack of up to n taken off this one.
         ("net/minecraft/world/item/ItemStack", "split") => {
@@ -912,6 +916,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let take = a(1).i().min(have).max(0);
             let i = rt.get_field(a(0), "$item");
             let out = if take == 0 { get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL) } else { stack_of(rt, i, take) };
+            if take != 0 {
+                crate::components::copy_patch(rt, a(0), out);
+            }
             rt.put_field(a(0), "$count", V::I(have - take));
             out
         }
@@ -923,7 +930,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 _ => false,
             };
             let counts = name != "matches" || rt.get_field(x, "$count").i() == rt.get_field(y, "$count").i() || stack_empty(rt, x);
-            V::I((same && counts) as i32)
+            let components = name == "isSameItem" || stack_empty(rt, x) || crate::components::same_patch(rt, x, y);
+            V::I((same && counts && components) as i32)
         }
         ("net/minecraft/world/item/ItemStack", "is") if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
             let item = item_like_name(rt, rt.get_field(a(0), "$item"));

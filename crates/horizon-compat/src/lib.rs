@@ -11,6 +11,7 @@ pub mod blocks;
 pub mod codecs;
 pub mod crafting;
 pub mod handlers;
+pub mod components;
 pub mod convention;
 pub mod creative;
 pub mod fluids;
