@@ -440,6 +440,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     register with their codecs; before this they were null. Not yet: an item's default components
     (vanilla's prototype), and components in saved stacks or in stacks handed to the game (both need
     encoding through the type's codec).
+  - [x] 2026-11-04 NeoForge's capabilities, natively (`horizon-compat/src/capabilities.rs`). The
+    constants (`Capabilities.ItemHandler/FluidHandler/EnergyStorage.BLOCK/ITEM/ENTITY`, a mod's own
+    `BlockCapability.create`). `RegisterCapabilitiesEvent`, fired once the registries are full, with
+    its `registerBlockEntity/registerBlock/registerItem/registerEntity`. The lookups
+    `Level.getCapability` (both forms), `BlockCapabilityCache` and `ItemStack.getCapability`: a block's
+    own providers first, then its block entity's, in NeoForge's order. Measured on Create: 31
+    registrations; `getCapability(ItemHandler.BLOCK, depot, UP)` is Create's `DepotItemHandler`, and an
+    iron ingot inserted through it (what a funnel or chute does) lands on the depot, and the press
+    above makes it a sheet. Not yet: vanilla containers (a chest or hopper as an `IItemHandler`, and the
+    game's hoppers into a mod's block), which need the game's container slots through the Host.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

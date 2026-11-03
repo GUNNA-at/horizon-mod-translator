@@ -107,9 +107,10 @@ pub fn fire_registrations(rt: &mut Rt) {
         rt.put_field(ev, "$registry", key);
         post(rt, REGISTER_EVENT, ev);
     }
-    // The registries are full: then common setup, as NeoForge's loading goes on.
+    // The registries are full: then common setup and capabilities, as NeoForge's loading goes on.
     rt.resolve_registrations();
     fire_common_setup(rt);
+    crate::capabilities::fire(rt);
 }
 
 fn is_registry(owner: &str) -> bool {

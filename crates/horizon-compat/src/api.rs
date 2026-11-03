@@ -312,6 +312,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             .or_else(|| crate::recipes::call(rt, key, args))
             .or_else(|| crate::handlers::call_key(rt, key, args))
             .or_else(|| crate::components::call_key(rt, key, args))
+            .or_else(|| crate::capabilities::call_key(rt, key, args))
             .or_else(|| crate::creative::call(rt, key, args))
             .or_else(|| crate::functions::call(rt, key, args))
             .or_else(|| crate::blocks::call(rt, key, args))
@@ -727,6 +728,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::codecs::get_static(rt, o, f))
             .or_else(|| crate::recipes::get_static(rt, o, f))
             .or_else(|| crate::components::get_static(rt, o, f))
+            .or_else(|| crate::capabilities::get_static(rt, o, f))
     {
         return v;
     }

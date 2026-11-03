@@ -316,7 +316,7 @@ pub(crate) fn parse_stack(rt: &mut Rt, tag: &std::collections::BTreeMap<String, 
     Some(stack_of(rt, i, count))
 }
 
-pub(crate) fn stack(rt: &mut Rt, item_name: &str, count: i32) -> V {
+pub fn stack(rt: &mut Rt, item_name: &str, count: i32) -> V {
     let s = rt.new_object("net/minecraft/world/item/ItemStack");
     let i = item(rt, item_name);
     rt.put_field(s, "$item", i);
