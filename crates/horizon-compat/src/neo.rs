@@ -426,6 +426,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     }
                 }
                 "key" => rt.string(&reg),
+                // A tag's members: tags from data files aren't read yet, so every tag of a registry
+                // is empty here (fluid tags hold vanilla's water and lava: `fluids.rs`).
+                "getTagOrEmpty" => crate::jutil::new_list(rt, Vec::new()),
+                "getTag" => optional(rt, V::NULL),
                 _ => return None,
             }
         }

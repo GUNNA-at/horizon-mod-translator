@@ -301,7 +301,10 @@ fn kind_of(class: &str) -> Option<&'static str> {
     let simple = class.rsplit('/').next().unwrap_or(class);
     Some(match simple {
         "ArrayList" | "LinkedList" | "ArrayDeque" | "Vector" | "Stack" | "CopyOnWriteArrayList" | "PriorityQueue"
-        | "ConcurrentLinkedQueue" | "ConcurrentLinkedDeque" | "LinkedBlockingQueue" | "ObjectArrayList" | "IntArrayList" => "list",
+        | "ConcurrentLinkedQueue" | "ConcurrentLinkedDeque" | "LinkedBlockingQueue" => "list",
+        // fastutil's lists and queues of each element type (`ReferenceArrayList`, `LongArrayList`,
+        // `IntArrayFIFOQueue`...).
+        s if class.starts_with("it/unimi/dsi/fastutil/") && (s.ends_with("ArrayList") || s.ends_with("FIFOQueue") || s.ends_with("BigArrayBigList")) => "list",
         "TreeMap" | "TreeSet" | "ConcurrentSkipListMap" | "ConcurrentSkipListSet" => "sorted",
         s if s.ends_with("Map") || s.ends_with("Set") => "table",
         _ => return None,

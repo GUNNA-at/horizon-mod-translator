@@ -312,6 +312,19 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `Tried to register duplicate values for object null` (Potion and Tea fluids' `getSource()` was null), and
     kinetics still read 16 RPM. Gaps: fluid tags from data files, `FluidType` properties (density, viscosity),
     `FluidStack`, tanks and pipes; `create:lectern` display target fails to register (seen since 2026-11-02).
+  - [x] 2026-11-03 Creative tabs (`horizon-compat/src/creative.rs`): `CreativeModeTab.builder()...build()` keeps the
+    title, icon supplier, `displayItems` generator and `withTabsBefore/After`; the content hook runs each
+    registered tab's generator into an `Output`, posts `BuildCreativeModeTabContentsEvent` for it, and declares
+    the result as the content mod's `creative_tab` entries (search-only items left out). `Block.asItem()` finds
+    the block item made for the block (`BlockItem` keeps `$block`), and `new ItemStack(itemLike)` now holds
+    `itemLike.asItem()` (it held the block's name). Needed on the way, for every mod: fastutil's
+    `ReferenceArrayList` and the other typed lists and queues are lists, `Predicate.or/and/negate/not`,
+    `Function.andThen/compose/identity`, `Consumer.andThen` and Guava's `Predicates`/`Suppliers.memoize` are
+    combinator objects (`functions.rs`), and a registry's `getTagOrEmpty` is empty (no data tags yet).
+    Harness `TABS=1`: Create's `create:base` (icon cogwheel, 201 items) then `create:palettes` (ornate iron
+    window, 308), with Create's own exclusions (incomplete items, placeable backtanks, contraption carts,
+    crushed ores of absent metals). Not yet: items a mod adds to vanilla's tabs (they stay in search).
+    The bundle now carries `fluids.rs`, `creative.rs` and `functions.rs` (the fluids commit left `fluids.rs` out).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

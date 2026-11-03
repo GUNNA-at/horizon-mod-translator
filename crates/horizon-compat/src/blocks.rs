@@ -7,7 +7,7 @@
 use crate::{api, api_common, jutil, Data, Rt, V};
 
 pub const BLOCK_PROPERTIES: &str = "net/minecraft/world/level/block/state/BlockBehaviour$Properties";
-const ITEM_PROPERTIES: &str = "net/minecraft/world/item/Item$Properties";
+pub const ITEM_PROPERTIES: &str = "net/minecraft/world/item/Item$Properties";
 const SOUND_TYPE: &str = "net/minecraft/world/level/block/SoundType";
 const MAP_COLOR: &str = "net/minecraft/world/level/material/MapColor";
 const DYE_COLOR: &str = "net/minecraft/world/item/DyeColor";
@@ -324,6 +324,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "<init>") if o.starts_with("net/minecraft/world/item/") && desc.contains("Lnet/minecraft/world/item/Item$Properties;") => {
             if let Some(p) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == ITEM_PROPERTIES) {
                 rt.put_field(a(0), "$properties", p);
+            }
+            // `BlockItem(Block, Properties)` and its kinds: the block it places (`Block.asItem()` finds it).
+            if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") {
+                rt.put_field(a(0), "$block", a(1));
             }
             // `BucketItem(Fluid, Properties)`: the fluid it holds, vanilla's field `content`.
             if o == "net/minecraft/world/item/BucketItem" {

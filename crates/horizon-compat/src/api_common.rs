@@ -787,8 +787,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
 
         // Items
+        // `new ItemStack(itemLike)` holds `itemLike.asItem()`: a block's item, not its name.
         ("net/minecraft/world/item/ItemStack", "<init>") => {
-            let n = item_like_name(rt, a(1));
+            let it = crate::creative::as_item(rt, a(1));
+            let n = item_like_name(rt, it);
             let count = if desc.starts_with("(Lnet/minecraft/world/level/ItemLike;I)") { a(2).i() } else { 1 };
             let i = item(rt, &n);
             rt.put_field(a(0), "$item", i);

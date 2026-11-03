@@ -271,6 +271,8 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             }
         }
         _ => match crate::fluids::call(rt, key, args)
+            .or_else(|| crate::creative::call(rt, key, args))
+            .or_else(|| crate::functions::call(rt, key, args))
             .or_else(|| crate::blocks::call(rt, key, args))
             .or_else(|| crate::shapes::call(rt, key, args))
             .or_else(|| crate::neo::call(rt, key, args))
@@ -588,6 +590,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::blocks::get_static(rt, o, f))
             .or_else(|| crate::shapes::get_static(rt, o, f))
             .or_else(|| crate::fluids::get_static(rt, o, f))
+            .or_else(|| crate::creative::get_static(rt, o, f))
     {
         return v;
     }
