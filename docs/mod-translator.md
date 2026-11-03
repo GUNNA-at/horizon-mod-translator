@@ -336,6 +336,17 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       `WoodType`'s twelve constants now answer their names (test `wood_types_answer_their_names`).
     Still to do here: Create's connected glass textures (its own CT system), the cogwheel's item icon drawn
     small, one icon-less slot in the building-blocks tab.
+  - [x] 2026-11-03 The wrench (`Item.useOn`), harness `WRENCH=1`: the bundle wires Horizon's `use_item_on`
+    hook (a right click with one of the mod's items, after the block let it through) to `glue::use_item_on`,
+    which builds a `UseOnContext` (class `UseOnContext`, `getClickedPos` = the block clicked) and runs the
+    item's own `useOn`; anything but `PASS` claims the click. On the way: `Player.mayBuild` (true),
+    `BlockState.canSurvive` and `updateShape` and `Block.updateFromNeighbourShapes` reach the mod block's own
+    overrides (vanilla's order: west, east, north, south, down, up), `Item.useOn` on vanilla's `Item` is
+    `PASS`, and `Direction.getClockWise/getCounterClockWise(Axis)` follow vanilla's X/Y/Z tables (the
+    one-argument form fell to the builder rule and returned the direction unchanged, so nothing turned;
+    test `directions_turn_about_each_axis`). Create's results: a shaft along x clicked on top turns to z, on
+    its north face to y; a cogwheel along y clicked east turns to z; a motor facing east clicked on top faces
+    south; a gearbox along y clicked north turns to x; stone passes.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -532,8 +532,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/core/Direction$AxisDirection", "getStep") => V::I(if native(rt, a(0))[0] != 0 { 1 } else { -1 }),
 
         // Players and interactions
-        (o, n) if o.starts_with("net/minecraft/") && (o.ends_with("/Player") || o.ends_with("/ServerPlayer") || o.ends_with("/LivingEntity") || o.ends_with("/Entity")) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "level" | "isLocalPlayer") => {
+        (o, n) if o.starts_with("net/minecraft/") && (o.ends_with("/Player") || o.ends_with("/ServerPlayer") || o.ends_with("/LivingEntity") || o.ends_with("/Entity")) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "level" | "isLocalPlayer" | "mayBuild") => {
             match n {
+                // Survival and creative players build; the hooks act for one of them.
+                "mayBuild" => V::I(1),
                 "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" => V::I(rt.host().is_some_and(|h| h.player_sneaking()) as i32),
                 "isCreative" => V::I(rt.host().is_some_and(|h| h.player_creative()) as i32),
                 "isSpectator" | "isLocalPlayer" => V::I(0),
@@ -548,6 +550,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 }
             }
         }
+        // An item's `useOn` that reaches vanilla's `Item`: nothing happens.
+        ("net/minecraft/world/item/Item", "useOn") => result(rt, "net/minecraft/world/InteractionResult", "PASS"),
         ("net/minecraft/world/InteractionResult" | "net/minecraft/world/ItemInteractionResult", "sidedSuccess") => {
             let client = a(0).i() != 0;
             result(rt, owner, if client { "SUCCESS" } else { "CONSUME" })
@@ -591,7 +595,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         // Placing a block: vanilla's `BlockPlaceContext` (`glue::state_for_placement` makes one from
         // the game's). `UseOnContext` calls on one reach it too: its class decides, as Java dispatches.
-        (o, n) if o.starts_with("net/minecraft/world/item/context/") && rt.class_of(a(0)) == PLACE_CONTEXT && n != "<init>" && n != "at" => {
+        (o, n) if o.starts_with("net/minecraft/world/item/context/") && matches!(rt.class_of(a(0)), PLACE_CONTEXT | USE_ON_CONTEXT) && n != "<init>" && n != "at" => {
             return place_context_call(rt, n, args);
         }
         ("net/minecraft/world/item/context/BlockPlaceContext", "at") => {
@@ -894,6 +898,7 @@ pub fn hit(rt: &mut Rt, pos: [i32; 3], face: i64) -> V {
 }
 
 const PLACE_CONTEXT: &str = "net/minecraft/world/item/context/BlockPlaceContext";
+const USE_ON_CONTEXT: &str = "net/minecraft/world/item/context/UseOnContext";
 /// `Direction.getNormal()` by ordinal (down, up, north, south, west, east).
 const DIRECTION_STEPS: [[i64; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
 
@@ -1008,7 +1013,18 @@ fn place_context_from_hit(rt: &mut Rt, ctx: V, h: V) {
 
 /// The context a placement hands `getStateForPlacement`, from the game's.
 pub fn place_context(rt: &mut Rt, p: &crate::glue::Placement) -> V {
-    let ctx = rt.new_object(PLACE_CONTEXT);
+    context(rt, p, PLACE_CONTEXT)
+}
+
+/// The context `Item.useOn` gets for a right click on a block: its `getClickedPos` is the block
+/// clicked, not the one next to it.
+pub fn use_on_context(rt: &mut Rt, p: &crate::glue::Placement) -> V {
+    let clicked = crate::glue::Placement { pos: p.hit_pos, replace_clicked: true, ..p.clone() };
+    context(rt, &clicked, USE_ON_CONTEXT)
+}
+
+fn context(rt: &mut Rt, p: &crate::glue::Placement, class: &'static str) -> V {
+    let ctx = rt.new_object(class);
     let level = crate::glue::level(rt);
     let player = rt.new_object("net/minecraft/server/level/ServerPlayer");
     rt.put_field(player, "$yaw", V::F(p.yaw));

@@ -235,6 +235,30 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
     })
 }
 
+const USE_ON: &str = "useOn.(Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;";
+const USE_ON_KEY: &str = "net/minecraft/world/item/Item.useOn.(Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;";
+
+/// `use_item_on`: the player right-clicks a block with one of the mod's items, once the block let
+/// the click through: the item's own `useOn` (Create's wrench turns the block). `click.item` is the
+/// held item, `click.hit_pos` the block clicked. Returns whether the item took the click (anything
+/// but `PASS`); an item that doesn't override `useOn` leaves it to the game.
+pub fn use_item_on(rt: &mut Rt, host: &mut dyn Host, click: &Placement) -> bool {
+    rt.safe_point();
+    let Some(&item) = rt.registered.get(&("item".to_owned(), click.item.clone())) else { return false };
+    let class = rt.class_of(item);
+    if !rt.overrides.is_some_and(|o| o(class, USE_ON)) {
+        return false;
+    }
+    rt.with_host(host, |rt| {
+        let Some(vc) = rt.vcall else { return false };
+        let ctx = crate::api_common::use_on_context(rt, click);
+        let r = vc(rt, USE_ON_KEY, USE_ON, &[item, ctx]);
+        let thrown = rt.thrown.is_some();
+        rt.report_thrown("useOn");
+        !thrown && rt.str_of(r).is_some_and(|name| name != "PASS")
+    })
+}
+
 const STATE_FOR_PLACEMENT: &str = "getStateForPlacement.(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;";
 const STATE_FOR_PLACEMENT_KEY: &str =
     "net/minecraft/world/level/block/Block.getStateForPlacement.(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;";

@@ -230,6 +230,17 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
                 None => a(0),
             }
         }
+        // About any axis (`getClockWise(Axis)`), as vanilla's tables: a direction along the axis stays.
+        "net/minecraft/core/Direction.getClockWise.(Lnet/minecraft/core/Direction$Axis;)Lnet/minecraft/core/Direction;"
+        | "net/minecraft/core/Direction.getCounterClockWise.(Lnet/minecraft/core/Direction$Axis;)Lnet/minecraft/core/Direction;" => {
+            // By ordinal (down, up, north, south, west, east), for X, Y and Z; -1 keeps the direction.
+            const CLOCKWISE: [[i64; 6]; 3] = [[3, 2, 0, 1, -1, -1], [-1, -1, 5, 4, 2, 3], [4, 5, -1, -1, 1, 0]];
+            const COUNTER: [[i64; 6]; 3] = [[2, 3, 1, 0, -1, -1], [-1, -1, 4, 5, 3, 2], [5, 4, -1, -1, 0, 1]];
+            let o = native(rt, a(0))[0].clamp(0, 5) as usize;
+            let ax = native(rt, a(1))[0].clamp(0, 2) as usize;
+            let to = if key.contains("getClockWise") { CLOCKWISE } else { COUNTER }[ax][o];
+            if to < 0 { a(0) } else { direction(rt, to) }
+        }
         "net/minecraft/core/Direction.getStepX.()I" => V::I(DIRECTIONS[native(rt, a(0))[0].clamp(0, 5) as usize][0] as i32),
         "net/minecraft/core/Direction.getStepY.()I" => V::I(DIRECTIONS[native(rt, a(0))[0].clamp(0, 5) as usize][1] as i32),
         "net/minecraft/core/Direction.getStepZ.()I" => V::I(DIRECTIONS[native(rt, a(0))[0].clamp(0, 5) as usize][2] as i32),
@@ -303,6 +314,11 @@ const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
 const BLOCK: &str = "net/minecraft/world/level/block/Block";
 const STATE_DEFINITION: &str = "net/minecraft/world/level/block/state/StateDefinition";
 const DATA_STORAGE: &str = "net/minecraft/world/level/storage/DimensionDataStorage";
+const UPDATE_SHAPE: &str = "updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
+const UPDATE_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
+const CAN_SURVIVE: &str = "canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
+const CAN_SURVIVE_KEY: &str =
+    "net/minecraft/world/level/block/state/BlockBehaviour.canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
 const SAVED_DATA: &str = "net/minecraft/world/level/saveddata/SavedData";
 const SAVED_DATA_FACTORY: &str = "net/minecraft/world/level/saveddata/SavedData$Factory";
 /// 1.21.1's `RenderShape`, in declaration order (ordinals).
@@ -339,6 +355,19 @@ pub fn block(rt: &mut Rt, name: &str) -> V {
 /// The name of a block value (vanilla or the mod's).
 pub(crate) fn block_name(rt: &Rt, b: V) -> String {
     rt.str_of(b).map(str::to_owned).or_else(|| rt.registered_name(b, "block").map(str::to_owned)).unwrap_or_default()
+}
+
+/// `BlockState.updateShape(direction, neighbour, level, pos, neighbourPos)` (`args`, the state
+/// first): the mod block's own `updateShape`; a block without one keeps its state.
+fn update_shape(rt: &mut Rt, args: [V; 6]) -> V {
+    let text = rt.str_of(args[0]).unwrap_or("").to_owned();
+    match crate::glue::mod_block(rt, &text) {
+        Some((b, class)) if rt.overrides.is_some_and(|o| o(class, UPDATE_SHAPE)) => match rt.vcall {
+            Some(vc) => vc(rt, UPDATE_SHAPE_KEY, UPDATE_SHAPE, &[b, args[0], args[1], args[2], args[3], args[4], args[5]]),
+            None => args[0],
+        },
+        _ => args[0],
+    }
 }
 
 pub(crate) fn pos_of(rt: &Rt, v: V) -> [i32; 3] {
@@ -524,8 +553,33 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "hasBlockEntity" => V::I(crate::glue::block_entity_id(rt, b).is_some() as i32),
                 "is" if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") => V::I((block_name(rt, a(1)) == b) as i32),
                 "equals" => V::I((rt.str_of(a(1)) == Some(text.as_str())) as i32),
+                "updateShape" if desc.starts_with("(Lnet/minecraft/core/Direction;") => update_shape(rt, [a(0), a(1), a(2), a(3), a(4), a(5)]),
+                // The mod block's own `canSurvive`; vanilla's default answers true.
+                "canSurvive" => match crate::glue::mod_block(rt, &text) {
+                    Some((blk, class)) if rt.overrides.is_some_and(|o| o(class, CAN_SURVIVE)) => match rt.vcall {
+                        Some(vc) => vc(rt, CAN_SURVIVE_KEY, CAN_SURVIVE, &[blk, a(0), a(1), a(2)]),
+                        None => V::I(1),
+                    },
+                    _ => V::I(1),
+                },
                 _ => return crate::api_common::call(rt, owner, name, desc, args),
             }
+        }
+        // Vanilla's order: west, east, north, south, down, up; each neighbour as the level has it.
+        (BLOCK, "updateFromNeighbourShapes") => {
+            let (mut state, level, pos) = (a(0), a(1), a(2));
+            let p = pos_of(rt, pos);
+            for d in [4, 5, 2, 3, 0, 1] {
+                if state.r() == 0 {
+                    break;
+                }
+                let step = DIRECTIONS[d];
+                let np = block_pos(rt, p[0] as i64 + step[0], p[1] as i64 + step[1], p[2] as i64 + step[2]);
+                let neighbour = call(rt, "net/minecraft/world/level/LevelAccessor.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;", &[level, np]);
+                let dir = direction(rt, d as i64);
+                state = update_shape(rt, [state, dir, neighbour, level, pos, np]);
+            }
+            state
         }
         (BLOCK, "defaultBlockState") | (_, "defaultBlockState") => {
             let n = block_name(rt, a(0));
@@ -672,6 +726,35 @@ mod tests {
         assert_eq!(call(&mut rt, "net/minecraft/core/BlockPos.getZ.()I", &[q]), V::I(-7));
         let south = call(&mut rt, "net/minecraft/core/Direction.getOpposite.()Lnet/minecraft/core/Direction;", &[north]);
         assert_eq!(call(&mut rt, "net/minecraft/core/Direction.getStepZ.()I", &[south]), V::I(1));
+    }
+
+    /// `Direction.getClockWise(Axis)` and its counter-clockwise twin, against vanilla 26.3's
+    /// `getClockWiseX/Z` tables (read from its bytecode). Create's wrench turns blocks with them.
+    #[test]
+    fn directions_turn_about_each_axis() {
+        let mut rt = Rt::new();
+        let names = ["DOWN", "UP", "NORTH", "SOUTH", "WEST", "EAST"];
+        let mut turn = |from: &str, axis: &str, clockwise: bool| -> &'static str {
+            let d = get_static(&mut rt, Box::leak(format!("net/minecraft/core/Direction.{from}").into_boxed_str()));
+            let ax = get_static(&mut rt, Box::leak(format!("net/minecraft/core/Direction$Axis.{axis}").into_boxed_str()));
+            let key = if clockwise {
+                "net/minecraft/core/Direction.getClockWise.(Lnet/minecraft/core/Direction$Axis;)Lnet/minecraft/core/Direction;"
+            } else {
+                "net/minecraft/core/Direction.getCounterClockWise.(Lnet/minecraft/core/Direction$Axis;)Lnet/minecraft/core/Direction;"
+            };
+            let r = call(&mut rt, key, &[d, ax]);
+            names[native(&rt, r)[0] as usize]
+        };
+        let got = [
+            turn("EAST", "Y", true),
+            turn("UP", "X", true),
+            turn("NORTH", "X", true),
+            turn("DOWN", "X", false),
+            turn("UP", "Z", true),
+            turn("EAST", "Z", false),
+            turn("WEST", "X", true),
+        ];
+        assert_eq!(got, ["SOUTH", "NORTH", "DOWN", "NORTH", "EAST", "UP", "WEST"]);
     }
 
     #[test]
