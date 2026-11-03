@@ -84,7 +84,7 @@ pub struct ClassFile {
     pub methods: Vec<Method>,
     /// `BootstrapMethods`: (method handle index, static argument indices).
     pub bootstrap: Vec<(u16, Vec<u16>)>,
-    /// Its runtime-visible annotations (`@Mod`, `@EventBusSubscriber`...).
+    /// Its annotations (`@Mod`, `@EventBusSubscriber`...), the class-file-only ones (`@Mixin`) too.
     pub annotations: Vec<Annotation>,
 }
 
@@ -214,8 +214,10 @@ impl ClassFile {
             let an = r.u2()?;
             let len = r.u4()? as usize;
             let body = r.take(len)?;
-            if cf.utf8(an)? == "RuntimeVisibleAnnotations" {
-                cf.annotations = cf.annotations(body)?;
+            // Invisible ones too: `@Mixin` (its target) is kept only in the class file.
+            if matches!(cf.utf8(an)?.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
+                let more = cf.annotations(body)?;
+                cf.annotations.extend(more);
             }
             if cf.utf8(an)? == "BootstrapMethods" {
                 let mut b = Reader { b: body, i: 0 };
@@ -270,6 +272,17 @@ impl ClassFile {
     /// The annotation of type `ty` (a descriptor), when the class has it.
     pub fn annotation_of(&self, ty: &str) -> Option<&Annotation> {
         self.annotations.iter().find(|a| a.ty == ty)
+    }
+
+    /// The game class a mixin targets (`@Mixin(ShapedRecipe.class)`, or `targets = "..."`), as
+    /// `net/minecraft/world/item/crafting/ShapedRecipe`; its first when it names several.
+    pub fn mixin_target(&self) -> Option<String> {
+        let m = self.annotation_of("Lorg/spongepowered/asm/mixin/Mixin;")?;
+        let first = |v: &str| v.split(',').next().filter(|t| !t.is_empty()).map(str::to_owned);
+        if let Some(t) = m.value("value").and_then(first) {
+            return Some(t.strip_prefix('L').and_then(|t| t.strip_suffix(';')).unwrap_or(&t).to_owned());
+        }
+        m.value("targets").and_then(first).map(|t| t.replace('.', "/"))
     }
 
     pub fn utf8(&self, i: u16) -> Result<String, String> {

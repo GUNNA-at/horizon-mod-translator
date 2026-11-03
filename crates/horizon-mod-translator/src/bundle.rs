@@ -24,16 +24,20 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 }
 
 /// The runtime's sources, carried in each bundle as the engine's own `compat` module: bundle
-/// crates may depend only on Horizon's Cargo.lock registry crates (horizon-mixins' rule). The
-/// core's root becomes `compat/mod.rs`; horizon-compat's root is left out (its modules are
-/// declared there instead).
+/// crates may depend only on Horizon's Cargo.lock registry crates (horizon-mixins' rule; the
+/// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
+/// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 16] = [
+const COMPAT: [(&str, &str); 20] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
     ("api_common.rs", include_str!("../../horizon-compat/src/api_common.rs")),
     ("blocks.rs", include_str!("../../horizon-compat/src/blocks.rs")),
+    ("codecs.rs", include_str!("../../horizon-compat/src/codecs.rs")),
+    ("recipes.rs", include_str!("../../horizon-compat/src/recipes.rs")),
+    ("crafting.rs", include_str!("../../horizon-compat/src/crafting.rs")),
+    ("handlers.rs", include_str!("../../horizon-compat/src/handlers.rs")),
     ("creative.rs", include_str!("../../horizon-compat/src/creative.rs")),
     ("fluids.rs", include_str!("../../horizon-compat/src/fluids.rs")),
     ("functions.rs", include_str!("../../horizon-compat/src/functions.rs")),
@@ -46,6 +50,14 @@ const COMPAT: [(&str, &str); 16] = [
     ("tags.rs", include_str!("../../horizon-compat/src/tags.rs")),
     ("render.rs", include_str!("../../horizon-compat/src/render.rs")),
 ];
+
+/// The registry crates the carried runtime uses, as the engine's `[dependencies]`: each must be
+/// in Horizon's Cargo.lock, at a version that lock holds.
+const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\n";
+
+/// horizon-compat's modules for tools only (the port pack's), not carried: nothing carried uses them.
+#[cfg(test)]
+const TOOL_ONLY: [&str; 1] = ["convention.rs"];
 
 /// The core's root inlined: without the installable entry points (inlined, `api` and `neo` are
 /// the mapping's own modules), and declaring the mapping's modules.
@@ -445,6 +457,12 @@ fn {id}_block_entity_tick(
         fn block_changed(&mut self, pos: [i32; 3]) {{
             self.game.native_block_entity_sync(pos);
         }}
+        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
+            self.game.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
+        }}
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
+        }}
     }}
     let state = game.native_state_text_at(pos);
     let mut nbt: BTreeMap<String, Nbt> = entity.nbt.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect();
@@ -491,8 +509,20 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
         fn player_held(&self) -> Option<(String, u32)> {{
             self.game.native_held().map(|(item, count, _)| (item, count))
         }}
+        fn take_player_items(&mut self, item: &str, count: u32) -> u32 {{
+            self.game.native_take_items(item, count)
+        }}
+        fn give_player_items(&mut self, item: &str, count: u32) -> u32 {{
+            self.game.native_give_items(item, count)
+        }}
         fn block_changed(&mut self, pos: [i32; 3]) {{
             self.game.native_block_entity_sync(pos);
+        }}
+        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
+            self.game.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
+        }}
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
         }}
     }}
     let mut host = Host {{ game }};
@@ -537,8 +567,20 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
         fn player_held(&self) -> Option<(String, u32)> {{
             self.game.native_held().map(|(item, count, _)| (item, count))
         }}
+        fn take_player_items(&mut self, item: &str, count: u32) -> u32 {{
+            self.game.native_take_items(item, count)
+        }}
+        fn give_player_items(&mut self, item: &str, count: u32) -> u32 {{
+            self.game.native_give_items(item, count)
+        }}
         fn block_changed(&mut self, pos: [i32; 3]) {{
             self.game.native_block_entity_sync(pos);
+        }}
+        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
+            self.game.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
+        }}
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
         }}
     }}
     // The click lands on the clicked face's centre.
@@ -679,7 +721,7 @@ pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option
     fs::create_dir_all(&src).map_err(|e| e.to_string())?;
     let deps = match runtime {
         Some(core) => format!("\n[dependencies]\nhorizon-compat-core = {{ path = {:?} }}\n", core.display().to_string()),
-        None => String::new(),
+        None => format!("\n[dependencies]\n{ENGINE_DEPENDENCIES}"),
     };
     put(
         out.join("engine/Cargo.toml"),
@@ -818,7 +860,7 @@ mod tests {
             .iter()
             .flat_map(|d| std::fs::read_dir(root.join(d)).unwrap().flatten())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".rs") && n != "lib.rs")
+            .filter(|n| n.ends_with(".rs") && n != "lib.rs" && !super::TOOL_ONLY.contains(&n.as_str()))
             .collect();
         on_disk.sort();
         let mut carried: Vec<String> = super::COMPAT.iter().map(|(n, _)| n.to_string()).collect();

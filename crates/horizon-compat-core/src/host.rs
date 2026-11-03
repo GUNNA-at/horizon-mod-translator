@@ -37,6 +37,16 @@ pub trait Host {
     fn player_held(&self) -> Option<(String, u32)> {
         None
     }
+    /// Takes up to `count` of `item` from the acting player, the main hand first; what it took
+    /// (`Player.setItemInHand` replacing what the hand holds).
+    fn take_player_items(&mut self, _item: &str, _count: u32) -> u32 {
+        0
+    }
+    /// Gives the acting player up to `count` of `item` where they fit, as `Inventory.add` places
+    /// them (`placeItemBackInInventory`); what it gave.
+    fn give_player_items(&mut self, _item: &str, _count: u32) -> u32 {
+        0
+    }
     /// Players are sent the block at `pos` and its block entity's update tag again
     /// (`ServerChunkCache.blockChanged`, `Level.sendBlockUpdated`).
     fn block_changed(&mut self, _pos: [i32; 3]) {}
@@ -51,6 +61,16 @@ pub trait Host {
     fn draw_model(&mut self, _model: &Model, _pose: &[f32; 16], _color: u32, _light: u32) -> bool {
         false
     }
+    /// The recipes of a type outside `minecraft` (`create:pressing`): each one's id and its file as
+    /// JSON text, the world's data packs merged and load conditions held. Empty outside a world.
+    fn recipes_of_type(&self, _kind: &str) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// The items an ingredient entry names, in order: an item id (none when the game doesn't know
+    /// it) or `#tag` (the tag's items, none for a tag the game doesn't have).
+    fn ingredient_items(&self, _entry: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A world in a map, for tests and tools. Unset positions are air.
@@ -61,12 +81,20 @@ pub struct MemoryHost {
     pub sneaking: bool,
     pub creative: bool,
     pub held: Option<(String, u32)>,
+    /// What the acting player was given that the main hand didn't take, in order.
+    pub given: Vec<(String, u32)>,
     /// Positions sent to players again (`block_changed`), in order.
     pub changed: Vec<[i32; 3]>,
     /// The partial tick drawing reads.
     pub partial: f32,
     /// What was drawn: model, pose, colour, light.
     pub drawn: Vec<(Model, [f32; 16], u32, u32)>,
+    /// Recipe files by type: id and JSON text.
+    pub recipes: HashMap<String, Vec<(String, String)>>,
+    /// Item tags (no `#`) and their items.
+    pub item_tags: HashMap<String, Vec<String>>,
+    /// The items the game knows; when empty, every id is one.
+    pub items: Vec<String>,
 }
 
 impl Host for MemoryHost {
@@ -89,6 +117,26 @@ impl Host for MemoryHost {
     fn player_held(&self) -> Option<(String, u32)> {
         self.held.clone()
     }
+    fn take_player_items(&mut self, item: &str, count: u32) -> u32 {
+        let Some((held, n)) = &mut self.held else { return 0 };
+        if held != item {
+            return 0;
+        }
+        let took = count.min(*n);
+        *n -= took;
+        if *n == 0 {
+            self.held = None;
+        }
+        took
+    }
+    fn give_player_items(&mut self, item: &str, count: u32) -> u32 {
+        match &mut self.held {
+            None => self.held = Some((item.to_owned(), count)),
+            Some((held, n)) if held == item => *n += count,
+            _ => self.given.push((item.to_owned(), count)),
+        }
+        count
+    }
     fn block_changed(&mut self, pos: [i32; 3]) {
         self.changed.push(pos);
     }
@@ -98,6 +146,16 @@ impl Host for MemoryHost {
     fn draw_model(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32) -> bool {
         self.drawn.push((model.clone(), *pose, color, light));
         true
+    }
+    fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {
+        self.recipes.get(kind).cloned().unwrap_or_default()
+    }
+    fn ingredient_items(&self, entry: &str) -> Vec<String> {
+        match entry.strip_prefix('#') {
+            Some(tag) => self.item_tags.get(tag).cloned().unwrap_or_default(),
+            None if self.items.is_empty() || self.items.iter().any(|i| i == entry) => vec![entry.to_owned()],
+            None => Vec::new(),
+        }
     }
 }
 

@@ -288,7 +288,35 @@ fn compound(rt: &mut Rt) -> V {
 }
 
 
-fn stack(rt: &mut Rt, item_name: &str, count: i32) -> V {
+/// Writes `stack` into the runtime compound `tag` as `ItemStack.CODEC` does: `id`, `count`.
+pub(crate) fn save_stack(rt: &mut Rt, stack: V, tag: V) {
+    let id = item_like_name(rt, rt.get_field(stack, "$item"));
+    let count = rt.get_field(stack, "$count").i();
+    let (ik, iv, ck) = (rt.string("id"), rt.string(&id), rt.string("count"));
+    crate::api::call(rt, "net/minecraft/nbt/CompoundTag.putString.(Ljava/lang/String;Ljava/lang/String;)V", &[tag, ik, iv]);
+    crate::api::call(rt, "net/minecraft/nbt/CompoundTag.putInt.(Ljava/lang/String;I)V", &[tag, ck, V::I(count)]);
+}
+
+/// A stack from its saved form (`{id, count}`); None for an empty or unknown item, as
+/// `ItemStack.parse` refuses it.
+pub(crate) fn parse_stack(rt: &mut Rt, tag: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Option<V> {
+    use crate::nbt::Nbt;
+    let Some(Nbt::String(id)) = tag.get("id") else { return None };
+    let id = if id.contains(':') { id.clone() } else { format!("minecraft:{id}") };
+    let count = match tag.get("count").or_else(|| tag.get("Count")) {
+        Some(Nbt::Int(n)) => *n,
+        Some(Nbt::Byte(n)) => i32::from(*n),
+        Some(Nbt::Short(n)) => i32::from(*n),
+        _ => 1,
+    };
+    if id == "minecraft:air" || count <= 0 || !crate::recipes::item_known(rt, &id) {
+        return None;
+    }
+    let i = item(rt, &id);
+    Some(stack_of(rt, i, count))
+}
+
+pub(crate) fn stack(rt: &mut Rt, item_name: &str, count: i32) -> V {
     let s = rt.new_object("net/minecraft/world/item/ItemStack");
     let i = item(rt, item_name);
     rt.put_field(s, "$item", i);
@@ -296,13 +324,25 @@ fn stack(rt: &mut Rt, item_name: &str, count: i32) -> V {
     s
 }
 
-fn stack_empty(rt: &Rt, s: V) -> bool {
+/// Whether a stack is empty: none, no count, or air. A mod's item is its registered object.
+pub(crate) fn stack_empty(rt: &Rt, s: V) -> bool {
+    if s.r() == 0 || rt.get_field(s, "$count").i() <= 0 {
+        return true;
+    }
     let i = rt.get_field(s, "$item");
-    s.r() == 0 || rt.get_field(s, "$count").i() <= 0 || rt.str_of(i).is_none_or(|n| n == "minecraft:air")
+    i.r() == 0 || item_like_name(rt, i) == "minecraft:air"
+}
+
+/// A stack of the item `$item` holds (a mod's registered object or a named item), `count` of it.
+fn stack_of(rt: &mut Rt, item: V, count: i32) -> V {
+    let s = rt.new_object("net/minecraft/world/item/ItemStack");
+    rt.put_field(s, "$item", item);
+    rt.put_field(s, "$count", V::I(count));
+    s
 }
 
 /// The name an `ItemLike` (an Item, a Block, a holder) stands for.
-fn item_like_name(rt: &Rt, v: V) -> String {
+pub(crate) fn item_like_name(rt: &Rt, v: V) -> String {
     rt.str_of(v)
         .map(str::to_owned)
         .or_else(|| rt.registered_name(v, "item").map(str::to_owned))
@@ -550,6 +590,33 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 }
             }
         }
+        // The main hand changes: what it held is taken, the new stack given (the off hand is
+        // empty here, and stays so).
+        (o, "setItemInHand") if is_player(o) => {
+            if rt.get_field(a(1), "$ordinal").i() != 1 {
+                if let Some((id, n)) = rt.host().and_then(|h| h.player_held())
+                    && let Some(h) = rt.host_mut()
+                {
+                    h.take_player_items(&id, n);
+                }
+                give_player(rt, a(2));
+            }
+            V::Void
+        }
+        (o, "getInventory") if is_player(o) => {
+            let inv = rt.new_object(INVENTORY);
+            rt.put_field(inv, "player", a(0));
+            inv
+        }
+        (INVENTORY, "player") => rt.get_field(a(0), "player"),
+        // Into the player's inventory, the stack shrunk by what went in. What doesn't fit stays
+        // in the stack (vanilla's `placeItemBackInInventory` would drop it at the player's feet).
+        (INVENTORY, "placeItemBackInInventory" | "add") => {
+            let stack = if desc.starts_with("(I") { a(2) } else { a(1) };
+            let all = give_player(rt, stack);
+            if name == "placeItemBackInInventory" { V::Void } else { V::I(all as i32) }
+        }
+        (o, "addItem") if is_player(o) => V::I(give_player(rt, a(1)) as i32),
         // An item's `useOn` that reaches vanilla's `Item`: nothing happens.
         ("net/minecraft/world/item/Item", "useOn") => result(rt, "net/minecraft/world/InteractionResult", "PASS"),
         ("net/minecraft/world/InteractionResult" | "net/minecraft/world/ItemInteractionResult", "sidedSuccess") => {
@@ -793,9 +860,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // Items
         // `new ItemStack(itemLike)` holds `itemLike.asItem()`: a block's item, not its name.
         ("net/minecraft/world/item/ItemStack", "<init>") => {
-            let it = crate::creative::as_item(rt, a(1));
+            // An `ItemLike` or a `Holder<Item>`, then the count when one is given.
+            let like = if desc.starts_with("(Lnet/minecraft/core/Holder;") { rt.get_field(a(1), "value") } else { V::NULL };
+            let like = if like.r() == 0 { a(1) } else { like };
+            let it = crate::creative::as_item(rt, like);
             let n = item_like_name(rt, it);
-            let count = if desc.starts_with("(Lnet/minecraft/world/level/ItemLike;I)") { a(2).i() } else { 1 };
+            let count = if desc.split(';').nth(1).is_some_and(|rest| rest.starts_with('I')) { a(2).i() } else { 1 };
             let i = item(rt, &n);
             rt.put_field(a(0), "$item", i);
             rt.put_field(a(0), "$count", V::I(count));
@@ -817,16 +887,78 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::Void
         }
         ("net/minecraft/world/item/ItemStack", "is") if desc == "(Lnet/minecraft/world/item/Item;)Z" => {
-            V::I((rt.get_field(a(0), "$item") == a(1) && !stack_empty(rt, a(0))) as i32)
+            let (held, other) = (rt.get_field(a(0), "$item"), a(1));
+            let same = held == other || item_like_name(rt, held) == item_like_name(rt, other);
+            V::I((same && !stack_empty(rt, a(0))) as i32)
         }
         ("net/minecraft/world/item/ItemStack", "copy") => {
-            let n = name_of(rt, rt.get_field(a(0), "$item"));
+            if stack_empty(rt, a(0)) {
+                return get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY");
+            }
+            let i = rt.get_field(a(0), "$item");
             let c = rt.get_field(a(0), "$count").i();
-            stack(rt, &n, c)
+            stack_of(rt, i, c)
         }
         ("net/minecraft/world/item/ItemStack", "copyWithCount") => {
-            let n = name_of(rt, rt.get_field(a(0), "$item"));
-            stack(rt, &n, a(1).i())
+            if stack_empty(rt, a(0)) {
+                return get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY");
+            }
+            let i = rt.get_field(a(0), "$item");
+            stack_of(rt, i, a(1).i())
+        }
+        // `split(n)`: a stack of up to n taken off this one.
+        ("net/minecraft/world/item/ItemStack", "split") => {
+            let have = if stack_empty(rt, a(0)) { 0 } else { rt.get_field(a(0), "$count").i() };
+            let take = a(1).i().min(have).max(0);
+            let i = rt.get_field(a(0), "$item");
+            let out = if take == 0 { get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL) } else { stack_of(rt, i, take) };
+            rt.put_field(a(0), "$count", V::I(have - take));
+            out
+        }
+        ("net/minecraft/world/item/ItemStack", "isSameItem" | "isSameItemSameComponents" | "matches") => {
+            let (x, y) = (a(0), a(1));
+            let same = match (stack_empty(rt, x), stack_empty(rt, y)) {
+                (true, true) => true,
+                (false, false) => item_like_name(rt, rt.get_field(x, "$item")) == item_like_name(rt, rt.get_field(y, "$item")),
+                _ => false,
+            };
+            let counts = name != "matches" || rt.get_field(x, "$count").i() == rt.get_field(y, "$count").i() || stack_empty(rt, x);
+            V::I((same && counts) as i32)
+        }
+        ("net/minecraft/world/item/ItemStack", "is") if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
+            let item = item_like_name(rt, rt.get_field(a(0), "$item"));
+            let tag = rt.str_of(rt.get_field(a(1), "$location")).unwrap_or("").to_owned();
+            V::I((!stack_empty(rt, a(0)) && crate::recipes::item_in_tag(rt, &item, &tag)) as i32)
+        }
+        ("net/minecraft/world/item/ItemStack", "isStackable") => V::I(1),
+        // NBT in `ItemStack.CODEC`'s form, `{id, count}` (components aren't kept yet).
+        ("net/minecraft/world/item/ItemStack", "save" | "saveOptional") => {
+            let into = desc.contains(";Lnet/minecraft/nbt/Tag;)");
+            let tag = if into { a(2) } else { crate::tags::new_compound(rt) };
+            if stack_empty(rt, a(0)) {
+                if name == "save" {
+                    let e = rt.new_object("java/lang/IllegalStateException");
+                    let m = rt.string("Cannot encode empty ItemStack");
+                    rt.put_field(e, "message", m);
+                    rt.thrown = Some(e);
+                }
+                return Some(tag);
+            }
+            save_stack(rt, a(0), tag);
+            tag
+        }
+        ("net/minecraft/world/item/ItemStack", "parseOptional" | "parse") => {
+            let map = if rt.class_of(a(1)) == "net/minecraft/nbt/CompoundTag" { crate::nbt::from_runtime(rt, a(1)) } else { crate::nbt::from_runtime(rt, a(2)) };
+            let parsed = parse_stack(rt, &map);
+            if name == "parse" {
+                let o = rt.new_object("java/util/Optional");
+                rt.put_field(o, "value", parsed.unwrap_or(V::NULL));
+                return Some(o);
+            }
+            match parsed {
+                Some(s) => s,
+                None => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
+            }
         }
         ("net/minecraft/world/item/ItemStack", "getMaxStackSize") => V::I(64),
 
@@ -874,6 +1006,26 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "getString") => rt.get_field(a(0), "$text"),
         _ => return None,
     })
+}
+
+const INVENTORY: &str = "net/minecraft/world/entity/player/Inventory";
+
+/// Whether `owner` is the player or one of the classes a player's methods are called through.
+fn is_player(owner: &str) -> bool {
+    owner.starts_with("net/minecraft/") && (owner.ends_with("/Player") || owner.ends_with("/ServerPlayer") || owner.ends_with("/LivingEntity") || owner.ends_with("/Entity"))
+}
+
+/// Gives the acting player `stack` (where it fits, as `Inventory.add` places it), shrinking it by
+/// what went in; whether all of it did.
+fn give_player(rt: &mut Rt, stack: V) -> bool {
+    if stack.r() == 0 || stack_empty(rt, stack) {
+        return true;
+    }
+    let item = item_like_name(rt, rt.get_field(stack, "$item"));
+    let count = rt.get_field(stack, "$count").i().max(0) as u32;
+    let gave = rt.host_mut().map_or(0, |h| h.give_player_items(&item, count));
+    rt.put_field(stack, "$count", V::I((count - gave.min(count)) as i32));
+    gave >= count
 }
 
 /// An `InteractionResult` / `ItemInteractionResult` constant, by name (interned: compared by identity).

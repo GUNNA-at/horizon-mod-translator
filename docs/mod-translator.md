@@ -369,6 +369,41 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `create:andesite_alloy` (with the recipe-unlocked toast), and an andesite casing mined with an iron
     pickaxe drops itself through Create's loot table (by hand it drops nothing: it copies andesite's
     properties, as in Java).
+  - [x] 2026-11-04 Recipes read by the mod's own codecs, natively (harness `RECIPES=<content mod>`): a
+    serializer's `codec()` is the mod's own DFU code, and `horizon-compat/src/codecs.rs` gives it native
+    codec objects that read JSON as DFU does (fields strict, `orElse`, `either`, `dispatch` handing the
+    whole object to a map codec, records built through the mod's own constructor lambdas, `DataResult`,
+    `Either`, `Pair`), with Minecraft's and NeoForge's codecs (`Ingredient`, `ItemStack`, `FluidStack`,
+    `SizedFluidIngredient`, `ResourceLocation`...) read by `recipes.rs`. The game hands over a type's files
+    (`Host::recipes_of_type`, load conditions held) and its tags (`Host::ingredient_items`); each recipe
+    is read once per runtime and kept per type; `RecipeManager.getRecipeFor/getAllRecipesFor/byKey` answer
+    from them, and an `Ingredient` tests a stack against the game's tags. Measured on Create: of its 879
+    files of its own 17 types, 488 are off by their `neoforge:conditions` (other mods' compat recipes),
+    and 387 of the other 391 read (all 8 pressing, 47 milling, 82 crushing, 167 deploying, 4 mechanical
+    crafting, 3 sequenced assembly...), in 0.3 s. `getRecipeFor(PRESSING, SingleRecipeInput(iron ingot))`
+    finds `create:pressing/iron_ingot` and Create's `rollResults` makes `create:iron_sheet x1` (gold ingot:
+    golden sheet, sugar cane: paper, stone: none). Left: 3 filling recipes with NeoForge's components
+    fluid ingredient (a potion fluid of given contents; fluid stacks have no components yet) and one
+    mixing recipe with a block-tag ingredient (`neoforge:block_tag`, needs the game's block tags).
+    Also new natively:
+    - Vanilla's `ShapedRecipe` and `ShapedRecipePattern` (`crafting.rs`): read by vanilla's codec (pattern
+      shrunk and checked as vanilla does, as large as NeoForge's `setCraftingSize` allows), matching a
+      `CraftingInput` as written or mirrored, a mod's subclass of it included (Create's mechanical
+      crafting); `SimpleCraftingRecipeSerializer` (special recipes: the mod's factory given the category);
+      `CraftingBookCategory`; `CraftingInput`.
+    - Mixin accessors and invokers, for any mod: the translator reads `@Mixin`'s target (kept only in the
+      class file) and each method's `@Accessor`/`@Invoker`, and the call site reads the game object's
+      field or calls the game's method directly (Create's `ShapedRecipeAccessor.create$getPattern`).
+    - NeoForge's `ItemStackHandler` (`handlers.rs`), a mod's subclass's own `onContentsChanged`,
+      `isItemValid` and `getSlotLimit` answering, `ItemHandlerHelper.insertItem/insertItemStacked`;
+      `ItemStack.save/saveOptional/parse/parseOptional` in `ItemStack.CODEC`'s form.
+    - NeoForge's `FluidStack`, `NonNullList`, and the ingredient kinds as the game reads them
+      (`children` or `ingredients`, intersection and difference computed).
+    - The player's hand: `Player.setItemInHand`, `getInventory().placeItemBackInInventory/add`, through
+      `Host::take_player_items` and `give_player_items` (the game's `native_take_items`/`native_give_items`).
+    Harness `PRESS=<content mod>` (motor, shaft, press two above a depot): the press turns at 16 rpm and a
+    right click with an iron ingot puts it on the depot (the hand empties), but the press doesn't start:
+    Create's `BeltProcessingBehaviour.isBlocked` asks the collision shape above the depot, unmapped.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

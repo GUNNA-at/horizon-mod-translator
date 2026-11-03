@@ -19,6 +19,7 @@ const BASE_SOURCE: &str = "net/neoforged/neoforge/fluids/BaseFlowingFluid$Source
 const PROPERTIES: &str = "net/neoforged/neoforge/fluids/BaseFlowingFluid$Properties";
 const FLUID_TYPE: &str = "net/neoforged/neoforge/fluids/FluidType";
 const TAG_KEY: &str = "net/minecraft/tags/TagKey";
+const FLUID_STACK: &str = "net/neoforged/neoforge/fluids/FluidStack";
 const LIQUID_BLOCK: &str = "net/minecraft/world/level/block/LiquidBlock";
 const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
 const STATE_BASE: &str = "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase";
@@ -443,7 +444,7 @@ pub fn tag_key(rt: &mut Rt, registry: &str, location: &str) -> V {
 /// Whether the fluid named `id` is in `tag`: the water and lava tags hold what vanilla's and
 /// NeoForge's own data put in them. Tags from a mod's data files aren't read yet, so other tags
 /// hold nothing.
-fn in_tag(rt: &Rt, tag: V, id: &str) -> bool {
+pub fn in_tag(rt: &Rt, tag: V, id: &str) -> bool {
     let registry = rt.str_of(rt.get_field(tag, "$registry")).unwrap_or("");
     let location = rt.str_of(rt.get_field(tag, "$location")).unwrap_or("");
     match (registry, location) {
@@ -453,9 +454,114 @@ fn in_tag(rt: &Rt, tag: V, id: &str) -> bool {
     }
 }
 
+/// NeoForge's `FluidStack`: a fluid and an amount in millibuckets (`$fluid`, `$amount`).
+pub fn fluid_stack(rt: &mut Rt, fluid: V, amount: i32) -> V {
+    let s = rt.new_object(FLUID_STACK);
+    rt.put_field(s, "$fluid", fluid);
+    rt.put_field(s, "$amount", V::I(amount));
+    s
+}
+
+/// `FluidStack.EMPTY`, one object as Java's.
+pub fn fluid_stack_empty(rt: &mut Rt) -> V {
+    rt.intern("compat:fluid-stack/empty".into(), |rt| {
+        let e = fluid(rt, "minecraft:empty");
+        fluid_stack(rt, e, 0)
+    })
+}
+
+/// Whether a fluid stack is empty: no amount, or the empty fluid.
+pub fn stack_empty(rt: &Rt, s: V) -> bool {
+    let f = rt.get_field(s, "$fluid");
+    s.r() == 0 || f.r() == 0 || rt.get_field(s, "$amount").i() <= 0 || name_of(rt, f) == "minecraft:empty"
+}
+
+/// A fluid stack's amount, 0 when empty.
+pub fn stack_amount(rt: &Rt, s: V) -> i32 {
+    if stack_empty(rt, s) { 0 } else { rt.get_field(s, "$amount").i() }
+}
+
+fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let s = a(0);
+    Some(match name {
+        // `new FluidStack(fluid, amount[, patch])`, or a holder of the fluid.
+        "<init>" => {
+            let f = if desc.starts_with("(Lnet/minecraft/core/Holder;") { rt.get_field(a(1), "value") } else { a(1) };
+            let f = if f.r() == 0 { a(1) } else { f };
+            rt.put_field(s, "$fluid", f);
+            rt.put_field(s, "$amount", a(2));
+            V::Void
+        }
+        "getFluid" => {
+            if stack_empty(rt, s) { fluid(rt, "minecraft:empty") } else { rt.get_field(s, "$fluid") }
+        }
+        "getAmount" => V::I(stack_amount(rt, s)),
+        "isEmpty" => V::I(stack_empty(rt, s) as i32),
+        "setAmount" => {
+            rt.put_field(s, "$amount", a(1));
+            V::Void
+        }
+        "grow" | "shrink" => {
+            let d = if name == "grow" { a(1).i() } else { -a(1).i() };
+            let n = rt.get_field(s, "$amount").i() + d;
+            rt.put_field(s, "$amount", V::I(n));
+            V::Void
+        }
+        "copy" => {
+            let (f, n) = (rt.get_field(s, "$fluid"), rt.get_field(s, "$amount").i());
+            if stack_empty(rt, s) { fluid_stack_empty(rt) } else { fluid_stack(rt, f, n) }
+        }
+        "copyWithAmount" => {
+            let f = rt.get_field(s, "$fluid");
+            if stack_empty(rt, s) { fluid_stack_empty(rt) } else { fluid_stack(rt, f, a(1).i()) }
+        }
+        "split" => {
+            let take = a(1).i().min(stack_amount(rt, s));
+            let f = rt.get_field(s, "$fluid");
+            let out = fluid_stack(rt, f, take);
+            let left = rt.get_field(s, "$amount").i() - take;
+            rt.put_field(s, "$amount", V::I(left));
+            out
+        }
+        "is" if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
+            let n = name_of(rt, rt.get_field(s, "$fluid"));
+            V::I((!stack_empty(rt, s) && in_tag(rt, a(1), &n)) as i32)
+        }
+        "is" if desc.starts_with("(Lnet/minecraft/world/level/material/Fluid;") => V::I((rt.get_field(s, "$fluid") == a(1)) as i32),
+        "is" if desc.starts_with("(Lnet/neoforged/neoforge/fluids/FluidType;") => {
+            let f = rt.get_field(s, "$fluid");
+            let t = on_fluid(rt, TYPE_OF, &[f]);
+            V::I((t == a(1)) as i32)
+        }
+        // Same fluid (components aren't kept yet, so same components too).
+        "isSameFluid" | "isSameFluidSameComponents" => {
+            let (x, y) = (a(0), a(1));
+            V::I((rt.get_field(x, "$fluid") == rt.get_field(y, "$fluid")) as i32)
+        }
+        "matches" => {
+            let (x, y) = (a(0), a(1));
+            V::I((rt.get_field(x, "$fluid") == rt.get_field(y, "$fluid") && stack_amount(rt, x) == stack_amount(rt, y)) as i32)
+        }
+        "getFluidType" => {
+            let f = rt.get_field(s, "$fluid");
+            on_fluid(rt, TYPE_OF, &[f])
+        }
+        "getFluidHolder" => {
+            let h = rt.new_object("net/minecraft/core/Holder");
+            let f = rt.get_field(s, "$fluid");
+            rt.put_field(h, "value", f);
+            h
+        }
+        "getComponentsPatch" => crate::recipes::get_static(rt, "net/minecraft/core/component/DataComponentPatch", "EMPTY").unwrap_or(V::NULL),
+        _ => return None,
+    })
+}
+
 /// Static fields this module owns: `Fluids`, `FluidTags` and NeoForge's `Tags.Fluids`.
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match owner {
+        FLUID_STACK if field == "EMPTY" => Some(fluid_stack_empty(rt)),
         "net/minecraft/world/level/material/Fluids" => {
             let f = fluid(rt, &format!("minecraft:{}", field.to_ascii_lowercase()));
             (f.r() != 0).then_some(f)
@@ -471,6 +577,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let (owner, rest) = key.split_once('.')?;
     let (name, desc) = rest.split_once('.')?;
+    if owner == FLUID_STACK {
+        return fluid_stack_call(rt, name, desc, args);
+    }
     Some(match (owner, name) {
         (FLUID_STATE, n) => {
             let s = a(0);

@@ -36,6 +36,19 @@ fn ident(name: &str) -> String {
 }
 
 /// The dispatcher of instance method `nd` (`name.desc`): `fn(rt, cid, owner_key, args) -> V`.
+/// The member a mixin accessor or invoker names when its annotation has no value: the method's name
+/// without its mod prefix (`create$`) and verb (`get`, `call`...), its first letter lowered.
+fn accessor_name(method: &str, verbs: &[&str]) -> String {
+    let bare = method.rsplit('$').next().unwrap_or(method);
+    let rest = verbs.iter().find_map(|v| bare.strip_prefix(v).filter(|r| r.starts_with(|c: char| c.is_ascii_uppercase()))).unwrap_or(bare);
+    let mut c = rest.chars();
+    match c.next() {
+        // All capitals is a constant's name, kept as it is (`getOPERATING_SYSTEM`).
+        Some(f) if rest.chars().any(|c| c.is_ascii_lowercase()) => f.to_ascii_lowercase().to_string() + c.as_str(),
+        _ => rest.to_owned(),
+    }
+}
+
 fn dispatcher(nd: &str) -> String {
     format!("d_{}_{:08x}", ident(nd.split('.').next().unwrap_or("")), hash(nd))
 }
@@ -1057,6 +1070,58 @@ impl<'a> Program<'a> {
         }
     }
 
+    /// A call to a mixin's accessor or invoker: `@Accessor("pattern")` or `@Invoker` in an interface
+    /// that is `@Mixin(ShapedRecipe.class)`. The mixin would add the method to the game's class; here
+    /// the call reads or writes the game object's field, or calls the game's method, directly.
+    fn mixin_call(&mut self, m: &Member, op: u8) -> Option<String> {
+        const ACCESSOR: &str = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
+        const INVOKER: &str = "Lorg/spongepowered/asm/mixin/gen/Invoker;";
+        let class: &ClassFile = self.classes.get(m.owner.as_str())?;
+        let target = class.mixin_target()?;
+        let method = class.methods.iter().find(|x| x.name == m.name && x.desc == m.desc && x.code.is_none())?;
+        let is_static = op == 0xb8;
+        // Without a value, the name follows the method's: `create$getPattern` is `pattern`.
+        let named = |a: &crate::class::Annotation, verbs: &[&str]| match a.value("value") {
+            Some(v) if !v.is_empty() => v.to_owned(),
+            _ => accessor_name(&m.name, verbs),
+        };
+        if let Some(a) = method.annotations.iter().find(|a| a.ty == ACCESSOR) {
+            let field = named(a, &["get", "is", "set"]);
+            let setter = m.desc.ends_with(")V");
+            return Some(match (is_static, setter) {
+                // The runtime keeps a game object's state in `$`-named fields, and a field a mod
+                // subclass wrote itself under its plain name.
+                (false, false) => format!("match rt.get_field(args[0], {:?}) {{ V::Void => rt.get_field(args[0], {field:?}), v => v }}", format!("${field}")),
+                (false, true) => format!(
+                    "{{ let own = !matches!(rt.get_field(args[0], {own:?}), V::Void) || matches!(rt.get_field(args[0], {field:?}), V::Void); rt.put_field(args[0], if own {{ {own:?} }} else {{ {field:?} }}, args[1]); V::Void }}",
+                    own = format!("${field}")
+                ),
+                (true, false) => format!("api::get_static(rt, {:?})", format!("{target}.{field}")),
+                (true, true) => format!("{{ rt.statics.insert({:?}, args[0]); V::Void }}", format!("{target}.{field}")),
+            });
+        }
+        let a = method.annotations.iter().find(|a| a.ty == INVOKER)?;
+        let name = named(a, &["call", "invoke", "new", "create"]);
+        if name == "<init>" {
+            // A constructor's invoker: static, returning the new object.
+            let init = format!("{target}.<init>.{}V", &m.desc[..=m.desc.find(')')?]);
+            return Some(format!(
+                "{{ let o = rt.new_object({target:?}); let mut a = vec![o]; a.extend_from_slice(&args); api::call(rt, {init:?}, &a); o }}"
+            ));
+        }
+        let key = self.key(&Member { owner: target, name: name.clone(), desc: m.desc.clone() });
+        if is_static {
+            return Some(format!("api::call(rt, {key:?}, &args)"));
+        }
+        // Virtual: a mod subclass's override of the game's method answers first.
+        let nd = format!("{name}.{}", m.desc);
+        Some(if self.vkeys.contains(&nd) {
+            format!("{{ let cid = rt.recv_cid(&args); {}(rt, cid, {key:?}, &args) }}", dispatcher(&nd))
+        } else {
+            format!("{{ let cid = rt.recv_cid(&args); vcall_miss(rt, cid, {key:?}, {nd:?}, &args) }}")
+        })
+    }
+
     fn invoke(&mut self, c: &ClassFile, op: u8, idx: u16, go: &str, at: usize) -> String {
         let Some(m) = c.member(idx) else { return go.to_owned() };
         let n = arg_kinds(&m.desc).len() + usize::from(op != 0xb8);
@@ -1075,7 +1140,9 @@ impl<'a> Program<'a> {
             Some(api) => this.key(&Member { owner: api, name: m.name.clone(), desc: m.desc.clone() }),
             None => key.clone(),
         };
+        let mixin = self.mixin_call(&m, op);
         let call = match op {
+            _ if mixin.is_some() => mixin.unwrap_or_default(),
             // static, or a direct (super/constructor/private) call
             0xb8 | 0xb7 => match self.resolve(&m.owner, &m.name, &m.desc) {
                 Some(imp) => format!("{}(rt, &args)", fn_name(&imp, &m.name, &m.desc)),
@@ -1106,5 +1173,19 @@ impl<'a> Program<'a> {
             collect
         };
         format!("{collect} let r = {call}; if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; }} else {{ {push} {go} }}")
+    }
+}
+
+#[cfg(test)]
+mod mixin_tests {
+    #[test]
+    fn an_accessor_without_a_value_names_the_member_after_its_method() {
+        let accessor = ["get", "is", "set"];
+        assert_eq!(super::accessor_name("create$getPattern", &accessor), "pattern");
+        assert_eq!(super::accessor_name("isPowered", &accessor), "powered");
+        // A constant's name stays as it is; a verb must start a word.
+        assert_eq!(super::accessor_name("getOPERATING_SYSTEM", &accessor), "OPERATING_SYSTEM");
+        assert_eq!(super::accessor_name("getter", &accessor), "getter");
+        assert_eq!(super::accessor_name("mod$callIsValid", &["call", "invoke"]), "isValid");
     }
 }

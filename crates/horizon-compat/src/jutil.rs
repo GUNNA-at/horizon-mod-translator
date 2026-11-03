@@ -147,6 +147,8 @@ pub fn compare(rt: &mut Rt, comparator: V, a: V, b: V) -> i32 {
     }
 }
 
+const NON_NULL_LIST: &str = "net/minecraft/core/NonNullList";
+
 fn list(rt: &Rt, v: V) -> Option<&Vec<V>> {
     match &rt.heap.get(v.r() as usize)?.data {
         Data::List(l) => Some(l),
@@ -313,6 +315,7 @@ fn kind_of(class: &str) -> Option<&'static str> {
 
 fn util_owner(owner: &str) -> bool {
     owner.starts_with("java/util/")
+        || owner == NON_NULL_LIST
         || owner == "java/lang/Iterable"
         || owner.starts_with("it/unimi/dsi/fastutil/")
         || owner.starts_with("com/google/common/collect/")
@@ -604,6 +607,17 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         if desc.starts_with("([") { elements(rt, a(0)) } else { args.to_vec() }
     };
     Some(match (owner, name) {
+        // Minecraft's `NonNullList`: a list (`withSize` holds its default `size` times).
+        (NON_NULL_LIST, "create" | "createWithCapacity") => rt.alloc(NON_NULL_LIST, Data::List(Vec::new())),
+        (NON_NULL_LIST, "withSize") => rt.alloc(NON_NULL_LIST, Data::List(vec![a(1); a(0).i().max(0) as usize])),
+        (NON_NULL_LIST, "of") => {
+            let items = elements(rt, a(1));
+            rt.alloc(NON_NULL_LIST, Data::List(items))
+        }
+        (NON_NULL_LIST, "copyOf") => {
+            let items = elements(rt, a(0));
+            rt.alloc(NON_NULL_LIST, Data::List(items))
+        }
         ("java/util/List" | "java/util/Arrays" | "com/google/common/collect/ImmutableList" | "com/google/common/collect/Lists", "of" | "asList" | "copyOf" | "newArrayList")
             if !desc.contains(")V") =>
         {
