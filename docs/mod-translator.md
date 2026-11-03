@@ -325,6 +325,17 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     window, 308), with Create's own exclusions (incomplete items, placeable backtanks, contraption carts,
     crushed ores of absent metals). Not yet: items a mod adds to vanilla's tabs (they stay in search).
     The bundle now carries `fluids.rs`, `creative.rs` and `functions.rs` (the fluids commit left `fluids.rs` out).
+  - [x] 2026-11-03 Seen in game (offscreen, 1600x900, `scratchpad/tabs.sh`): page 2 of the creative screen has
+    "Create" and "Create's Building Blocks", filled from Create's code; a cogwheel placed from the hotbar lands as
+    `create:cogwheel[axis=y,waterlogged=false]`; framed glass, tiled glass and the iron windows draw cut out (the
+    wall behind shows through), with no render-layer call needed. Two bugs found there and fixed:
+    - No Create item drew an icon: a 1.21.1 jar has no client item definitions (`assets/<ns>/items/`, 1.21.4+).
+      The bundle now writes `{"model": {"type": "minecraft:model", "model": "<ns>:item/<name>"}}` for each
+      `models/item/` model the jar lacks a definition for, as the port-pack's carry-over does (Create: 751).
+    - Create's wooden windows all registered as `create:null_window`: `WoodType.OAK.name()` was unmapped.
+      `WoodType`'s twelve constants now answer their names (test `wood_types_answer_their_names`).
+    Still to do here: Create's connected glass textures (its own CT system), the cogwheel's item icon drawn
+    small, one icon-less slot in the building-blocks tab.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

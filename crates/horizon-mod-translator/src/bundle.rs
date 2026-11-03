@@ -706,6 +706,7 @@ pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option
             && let Ok(mut zip) = zip::ZipArchive::new(f)
         {
             let prefix = format!("assets/{id}/");
+            let mut item_models = Vec::new();
             for i in 0..zip.len() {
                 let Ok(mut e) = zip.by_index(i) else { continue };
                 let Some(name) = e.enclosed_name() else { continue };
@@ -714,6 +715,9 @@ pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option
                 if !e.is_file() || !path.starts_with(&prefix) || !resource {
                     continue;
                 }
+                if let Some(model) = path.strip_prefix(&format!("{prefix}models/item/")).and_then(|m| m.strip_suffix(".json")) {
+                    item_models.push(model.to_owned());
+                }
                 let target = content.join(&name);
                 if let Some(parent) = target.parent() {
                     let _ = fs::create_dir_all(parent);
@@ -721,6 +725,19 @@ pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option
                 let mut bytes = Vec::new();
                 if e.read_to_end(&mut bytes).is_ok() {
                     let _ = put(target, bytes);
+                }
+            }
+            // A jar for 1.21.1 has no client item definitions (1.21.4 put item models behind
+            // `items/<name>.json`): without one an item draws no icon. Each item model gets the
+            // plain definition, as the port-pack's carry-over writes; the jar's own win.
+            for m in item_models {
+                let def = content.join(format!("assets/{id}/items/{m}.json"));
+                if !def.exists() {
+                    if let Some(parent) = def.parent() {
+                        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    let json = format!("{{\"model\": {{\"type\": \"minecraft:model\", \"model\": \"{id}:item/{m}\"}}}}\n");
+                    put(def, json).map_err(|e| e.to_string())?;
                 }
             }
         }

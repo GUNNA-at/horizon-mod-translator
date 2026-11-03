@@ -279,6 +279,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     match (owner, name) {
         (BLOCK_PROPERTIES, _) => block_properties(rt, name, desc, args),
         (ITEM_PROPERTIES, _) => item_properties(rt, name, args),
+        (WOOD_TYPE, "name") => Some(rt.get_field(a(0), "$name")),
         (BUILDER, "add") => {
             let list = rt.get_field(a(0), "$props");
             for p in jutil::elements(rt, a(1)) {
@@ -356,6 +357,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             let i = DYES.iter().position(|(d, _)| *d == field)?;
             Some(api::api_enum(rt, DYE_COLOR, DYES[i].0, i as i32))
         }
+        WOOD_TYPE => {
+            let (_, name) = WOOD_TYPES.iter().find(|(f, _)| *f == field)?;
+            Some(named(rt, WOOD_TYPE, name))
+        }
         RARITY => {
             const R: [&str; 4] = ["COMMON", "UNCOMMON", "RARE", "EPIC"];
             let i = R.iter().position(|r| *r == field)?;
@@ -364,6 +369,24 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         _ => None,
     }
 }
+
+const WOOD_TYPE: &str = "net/minecraft/world/level/block/state/properties/WoodType";
+/// Vanilla's wood types by field, with their `name()`: mods name blocks after them (Create's
+/// `oak_window` is `woodType.name() + "_window"`).
+const WOOD_TYPES: [(&str, &str); 12] = [
+    ("OAK", "oak"),
+    ("SPRUCE", "spruce"),
+    ("BIRCH", "birch"),
+    ("ACACIA", "acacia"),
+    ("CHERRY", "cherry"),
+    ("JUNGLE", "jungle"),
+    ("DARK_OAK", "dark_oak"),
+    ("PALE_OAK", "pale_oak"),
+    ("CRIMSON", "crimson"),
+    ("WARPED", "warped"),
+    ("MANGROVE", "mangrove"),
+    ("BAMBOO", "bamboo"),
+];
 
 /// One object per named constant of a class that isn't an enum (`SoundType.METAL`).
 fn named(rt: &mut Rt, class: &'static str, name: &'static str) -> V {
@@ -938,6 +961,22 @@ mod tests {
 
     fn props(rt: &mut Rt) -> V {
         api::call(rt, OF, &[])
+    }
+
+    /// Create names its windows `woodType.name() + "_window"`: each wood type keeps its own name,
+    /// so `oak_window` and `dark_oak_window` stay two blocks.
+    #[test]
+    fn wood_types_answer_their_names() {
+        let mut rt = Rt::new();
+        let names: Vec<String> = ["OAK", "DARK_OAK", "CRIMSON"]
+            .iter()
+            .map(|f| {
+                let w = api::get_static(&mut rt, Box::leak(format!("{WOOD_TYPE}.{f}").into_boxed_str()));
+                let n = api::call(&mut rt, "net/minecraft/world/level/block/state/properties/WoodType.name.()Ljava/lang/String;", &[w]);
+                rt.str_of(n).unwrap_or("null").to_owned()
+            })
+            .collect();
+        assert_eq!(names, ["oak", "dark_oak", "crimson"]);
     }
 
     #[test]
