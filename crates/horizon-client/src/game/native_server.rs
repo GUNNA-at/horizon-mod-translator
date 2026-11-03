@@ -678,6 +678,14 @@ impl Game<'_> {
             max.max(1),
         )
     }
+    /// What the game knows of `item`: whether it places a block, and how many
+    /// one stack holds (`max_stack_size`). None for an unknown item.
+    pub(super) fn native_item_facts(&self, item: &str) -> Option<(bool, u32)> {
+        self.res
+            .items()
+            .get(item)
+            .map(|i| (i.block.is_some(), i.max_stack))
+    }
     /// Gives up to `count` plain `item` where they fit, as `Inventory.add`
     /// places them; what it gave (nothing is dropped). 0 for an unknown item.
     pub(super) fn native_give_items(&mut self, item: &str, count: u32) -> u32 {

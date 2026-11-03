@@ -66,6 +66,21 @@ pub trait Host {
     fn draw_model(&mut self, _model: &Model, _pose: &[f32; 16], _color: u32, _light: u32) -> bool {
         false
     }
+    /// Drawing a block entity: adds item `item` under `pose` (as [`Host::draw_model`]) as the game
+    /// draws an item in display context `display` (`ItemDisplayContext`'s ordinal: 0 none, 6 gui,
+    /// 7 ground, 8 fixed...), lit by `light` (`LightTexture.pack`, 0 for the block's own); `seed`
+    /// picks among random models. False when the game has no such item.
+    fn draw_item(&mut self, _item: &str, _display: u8, _pose: &[f32; 16], _light: u32, _seed: i32) -> bool {
+        false
+    }
+    /// Whether `item` places a block, so its model is a block's (`BakedModel.isGui3d`).
+    fn item_is_block(&self, _item: &str) -> bool {
+        false
+    }
+    /// How many of `item` one stack holds (its `max_stack_size`); None when the game doesn't know it.
+    fn item_stack_limit(&self, _item: &str) -> Option<u32> {
+        None
+    }
     /// The recipes of a type outside `minecraft` (`create:pressing`): each one's id and its file as
     /// JSON text, the world's data packs merged and load conditions held. Empty outside a world.
     fn recipes_of_type(&self, _kind: &str) -> Vec<(String, String)> {
@@ -100,6 +115,12 @@ pub struct MemoryHost {
     pub item_tags: HashMap<String, Vec<String>>,
     /// The items the game knows; when empty, every id is one.
     pub items: Vec<String>,
+    /// Items drawn: item, display context, pose, light.
+    pub items_drawn: Vec<(String, u8, [f32; 16], u32)>,
+    /// Items that place blocks.
+    pub block_items: Vec<String>,
+    /// Stack limits other than 64.
+    pub stack_limits: HashMap<String, u32>,
 }
 
 impl Host for MemoryHost {
@@ -156,6 +177,16 @@ impl Host for MemoryHost {
     fn draw_model(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32) -> bool {
         self.drawn.push((model.clone(), *pose, color, light));
         true
+    }
+    fn draw_item(&mut self, item: &str, display: u8, pose: &[f32; 16], light: u32, _seed: i32) -> bool {
+        self.items_drawn.push((item.to_owned(), display, *pose, light));
+        true
+    }
+    fn item_is_block(&self, item: &str) -> bool {
+        self.block_items.iter().any(|b| b == item)
+    }
+    fn item_stack_limit(&self, item: &str) -> Option<u32> {
+        Some(self.stack_limits.get(item).copied().unwrap_or(64))
     }
     fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {
         self.recipes.get(kind).cloned().unwrap_or_default()

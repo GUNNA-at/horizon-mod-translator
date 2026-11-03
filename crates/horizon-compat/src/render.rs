@@ -307,6 +307,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/inventory/InventoryMenu", "BLOCK_ATLAS") | ("net/minecraft/client/renderer/texture/TextureAtlas", "LOCATION_BLOCKS") => {
             rt.string("minecraft:textures/atlas/blocks.png")
         }
+        ("net/minecraft/world/item/ItemDisplayContext", f) => {
+            let i = DISPLAY_CONTEXTS.iter().position(|n| *n == f)?;
+            crate::api::api_enum(rt, "net/minecraft/world/item/ItemDisplayContext", DISPLAY_CONTEXTS[i], i as i32)
+        }
         ("net/minecraft/client/renderer/texture/OverlayTexture", "NO_OVERLAY") => V::I(NO_OVERLAY),
         ("net/minecraft/client/renderer/texture/OverlayTexture", "NO_WHITE_U") => V::I(0),
         ("net/minecraft/client/renderer/texture/OverlayTexture", "RED_OVERLAY_V") => V::I(3),
@@ -941,6 +945,33 @@ fn axis(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 // ---- the client: Minecraft, its renderers, render types, buffers ----
 
+const ITEM_RENDERER: &str = "net/minecraft/client/renderer/entity/ItemRenderer";
+/// `ItemDisplayContext`'s constants, in their order.
+const DISPLAY_CONTEXTS: [&str; 9] = [
+    "NONE",
+    "THIRD_PERSON_LEFT_HAND",
+    "THIRD_PERSON_RIGHT_HAND",
+    "FIRST_PERSON_LEFT_HAND",
+    "FIRST_PERSON_RIGHT_HAND",
+    "HEAD",
+    "GUI",
+    "GROUND",
+    "FIXED",
+];
+
+/// An item a renderer draws: `stack` under `pose_stack`'s pose, in display context `context`.
+fn draw_item(rt: &mut Rt, stack: V, context: V, pose_stack: V, light: i32, seed: i32) {
+    if crate::api_common::stack_empty(rt, stack) {
+        return;
+    }
+    let item = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
+    let display = rt.get_field(context, "$ordinal").i().clamp(0, 8) as u8;
+    let m = last_pose(rt, pose_stack);
+    if let Some(h) = rt.host_mut() {
+        h.draw_item(&item, display, &m, light as u32, seed);
+    }
+}
+
 /// The interned object for a client singleton (`Minecraft`, its block renderer...).
 fn single(rt: &mut Rt, class: &'static str) -> V {
     rt.intern(format!("client/{class}"), |rt| rt.new_object(class))
@@ -990,6 +1021,34 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         ("net/minecraft/client/Minecraft", "getTimer") => single(rt, "net/minecraft/client/DeltaTracker"),
         ("net/minecraft/client/Minecraft", "getModelManager") => single(rt, "net/minecraft/client/resources/model/ModelManager"),
         ("net/minecraft/client/Minecraft", "getItemRenderer") => single(rt, "net/minecraft/client/renderer/entity/ItemRenderer"),
+        // Items a block entity's renderer draws (Create's depot, belt, funnel, deployer...): the game
+        // draws each one as it draws an item in that display context.
+        (ITEM_RENDERER, "render") if desc.starts_with("(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemDisplayContext;Z") => {
+            // (stack, context, leftHand, poseStack, buffers, light, overlay, model)
+            draw_item(rt, arg(args, 1), arg(args, 2), arg(args, 4), arg(args, 6).i(), 0);
+            V::Void
+        }
+        (ITEM_RENDERER, "renderStatic") => {
+            // (stack, context, light, overlay, poseStack, buffers, level, seed), or with the holding
+            // entity first: (entity, stack, context, leftHand, poseStack, buffers, level, light,
+            // overlay, seed).
+            let at = if desc.starts_with("(Lnet/minecraft/world/item/ItemStack;") { [1, 2, 5, 3, 8] } else { [2, 3, 5, 8, 10] };
+            let [stack, context, pose, light, seed] = at.map(|i| arg(args, i));
+            draw_item(rt, stack, context, pose, light.i(), seed.i());
+            V::Void
+        }
+        // The stack's item model, standing for it: what `isGui3d` asks about.
+        (ITEM_RENDERER, "getModel") => {
+            let m = rt.new_object("net/minecraft/client/resources/model/BakedModel");
+            let item = crate::api_common::item_like_name(rt, rt.get_field(arg(args, 1), "$item"));
+            let s = rt.string(&item);
+            rt.put_field(m, "$item", s);
+            m
+        }
+        ("net/minecraft/client/resources/model/BakedModel", "isGui3d") if rt.get_field(arg(args, 0), "$item").r() != 0 => {
+            let item = rt.str_of(rt.get_field(arg(args, 0), "$item")).unwrap_or("").to_owned();
+            V::I(rt.host().is_some_and(|h| h.item_is_block(&item)) as i32)
+        }
         ("net/minecraft/client/Minecraft", "getBlockEntityRenderDispatcher") => {
             single(rt, "net/minecraft/client/renderer/blockentity/BlockEntityRenderDispatcher")
         }

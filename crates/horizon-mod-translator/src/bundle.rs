@@ -28,7 +28,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
 /// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 20] = [
+const COMPAT: [(&str, &str); 22] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -38,6 +38,8 @@ const COMPAT: [(&str, &str); 20] = [
     ("recipes.rs", include_str!("../../horizon-compat/src/recipes.rs")),
     ("crafting.rs", include_str!("../../horizon-compat/src/crafting.rs")),
     ("handlers.rs", include_str!("../../horizon-compat/src/handlers.rs")),
+    ("components.rs", include_str!("../../horizon-compat/src/components.rs")),
+    ("capabilities.rs", include_str!("../../horizon-compat/src/capabilities.rs")),
     ("creative.rs", include_str!("../../horizon-compat/src/creative.rs")),
     ("fluids.rs", include_str!("../../horizon-compat/src/fluids.rs")),
     ("functions.rs", include_str!("../../horizon-compat/src/functions.rs")),
@@ -196,6 +198,12 @@ fn {id}_block_entity_submit(
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
         }}
+        fn item_is_block(&self, item: &str) -> bool {{
+            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
+        }}
+        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_facts(item).map(|(_, limit)| limit)
+        }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
             let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
@@ -215,6 +223,22 @@ fn {id}_block_entity_submit(
         }}
         fn partial_tick(&self) -> f32 {{
             self.draw.partial
+        }}
+        fn draw_item(&mut self, item: &str, display: u8, pose: &[f32; 16], light: u32, seed: i32) -> bool {{
+            use horizon_assets::item_model::DisplayContext;
+            let saved = self.draw.light;
+            if light != 0 {{
+                let (block, sky) = (light & 0xFFFF, light >> 16 & 0xFFFF);
+                self.draw.light = sky.min(0xF0) | block.min(0xF0) << 8;
+            }}
+            self.draw.push();
+            self.draw.transform(*pose);
+            let stack = horizon_client::items::ItemStack::new(item, 1);
+            let display = DisplayContext::ALL.get(usize::from(display)).copied().unwrap_or(DisplayContext::Fixed);
+            let drew = self.game.native_draw_item(self.draw, &stack, display, None, seed);
+            self.draw.pop();
+            self.draw.light = saved;
+            drew
         }}
         fn draw_model(&mut self, model: &{c}::host::Model, pose: &[f32; 16], color: u32, light: u32) -> bool {{
             let saved = self.draw.light;
@@ -372,6 +396,12 @@ fn {id}_tick(game: &mut crate::game::Game<'_>) {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
         }}
+        fn item_is_block(&self, item: &str) -> bool {{
+            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
+        }}
+        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_facts(item).map(|(_, limit)| limit)
+        }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
             let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
@@ -467,6 +497,12 @@ fn {id}_block_entity_tick(
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
         }}
+        fn item_is_block(&self, item: &str) -> bool {{
+            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
+        }}
+        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_facts(item).map(|(_, limit)| limit)
+        }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
             let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
@@ -523,6 +559,12 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
     impl {c}::host::Host for Host<'_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
+        }}
+        fn item_is_block(&self, item: &str) -> bool {{
+            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
+        }}
+        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_facts(item).map(|(_, limit)| limit)
         }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
@@ -589,6 +631,12 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
     impl {c}::host::Host for Host<'_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
+        }}
+        fn item_is_block(&self, item: &str) -> bool {{
+            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
+        }}
+        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_facts(item).map(|(_, limit)| limit)
         }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];

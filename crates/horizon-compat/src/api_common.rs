@@ -968,7 +968,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 None => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
             }
         }
-        ("net/minecraft/world/item/ItemStack", "getMaxStackSize") => V::I(64),
+        // The item's `max_stack_size`, as the game knows it.
+        ("net/minecraft/world/item/ItemStack", "getMaxStackSize") => {
+            let item = item_like_name(rt, rt.get_field(a(0), "$item"));
+            V::I(rt.host().and_then(|h| h.item_stack_limit(&item)).unwrap_or(64) as i32)
+        }
 
         // Maths, randomness, text
         ("net/minecraft/util/Mth", "clamp") => match desc {

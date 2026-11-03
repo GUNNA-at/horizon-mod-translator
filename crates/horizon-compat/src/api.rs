@@ -86,6 +86,10 @@ fn retry_classes(rt: &Rt, owner: &'static str, args: &[V]) -> Vec<&'static str> 
             out.push(class);
             climb(&mut out, class);
         }
+        // A vanilla enum constant (`DyeColor.ordinal()`): what every enum has.
+        if !matches!(rt.get_field(v, "$ordinal"), V::Void) && !out.contains(&"java/lang/Enum") {
+            out.push("java/lang/Enum");
+        }
     }
     out
 }

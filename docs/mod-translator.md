@@ -450,6 +450,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     iron ingot inserted through it (what a funnel or chute does) lands on the depot, and the press
     above makes it a sheet. Not yet: vanilla containers (a chest or hopper as an `IItemHandler`, and the
     game's hoppers into a mod's block), which need the game's container slots through the Host.
+  - [x] 2026-11-04 Items drawn by a mod's block entity renderer (harness `PRESS`, client step).
+    `ItemRenderer.render/renderStatic` (both forms) go to `Host::draw_item`: the item, the
+    `ItemDisplayContext` (its constants are mapped now), the pose stack's pose and the light. The game
+    draws the item with its own item renderer (`native_draw_item`), as it draws an item in that
+    context. `getModel(...).isGui3d()` asks `Host::item_is_block`, and `ItemStack.getMaxStackSize`
+    asks `Host::item_stack_limit`; both come from the game's item facts (`native_item_facts`), where
+    the stack limit was 64 for every item before. On the client runtime, Create's `DepotRenderer` draws
+    `create:iron_sheet` (FIXED) at the depot's centre shifted by the item's side offset, and
+    `MechanicalPressRenderer` draws the shaft and `create:block/mechanical_press/head`. Also: an API enum
+    constant answers `Enum`'s methods through the receiver retry (`DyeColor.ordinal()`).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
