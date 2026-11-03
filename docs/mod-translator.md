@@ -423,6 +423,13 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       now read. They match no fluid stack until fluid stacks carry components.
     Correction to the entry above: `isBlocked` was not the whole cause. Once it was answered, the press
     still found no recipe, because the recipe type was null.
+    Checked in game too (`scratchpad/press.sh`, survival, the content mod `horizon-port-pack install` made):
+    the press turns at 16 rpm; a right click with an iron ingot puts it on the depot (`HeldItem` in the
+    depot's data) and takes it from the hand; 130 ticks later the depot holds `create:iron_sheet` and the
+    press reports `Finished: 1b, Running: 0b` after its 240-tick cycle; an empty-handed right click puts
+    the sheet in the inventory. Not drawn yet: the item on the depot and the press head's stroke
+    (Create's block entity renderers, client side). Seen in the log: `MatchException` in two blocks'
+    `getShape` (a pattern switch on a value the runtime doesn't give), to look at.
   - [x] 2026-11-04 Item data components, natively (`horizon-compat/src/components.rs`). A mod's
     component types (`DataComponentType.builder().persistent(codec).build()`, registered through NeoForge's
     `DeferredRegister.createDataComponents` or `registerComponentType`) and vanilla's `DataComponents`
