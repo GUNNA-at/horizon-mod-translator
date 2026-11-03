@@ -347,6 +347,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     test `directions_turn_about_each_axis`). Create's results: a shaft along x clicked on top turns to z, on
     its north face to y; a cogwheel along y clicked east turns to z; a motor facing east clicked on top faces
     south; a gearbox along y clicked north turns to x; stone passes.
+  - [x] 2026-11-03 Both seen in game (offscreen, `scratchpad/wrench.sh`): a creative motor drives five shafts along x;
+    the wrench on the third shaft's north face stands it up (`axis=x` to `axis=y`), and `Speed` reads 16, 0, 0
+    along the line (16, 16, 16 before): the network ends at the turned shaft. Create's ten wooden windows now
+    place as `create:oak_window` ... `create:warped_window`. horizon-ctl's `interact` aims at three points of
+    the face; on a thin shaft's top face all three rays hit its side first, so test a side face.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
