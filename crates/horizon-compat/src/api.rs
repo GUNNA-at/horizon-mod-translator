@@ -175,6 +175,11 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         "net/minecraft/core/BlockPos.getX.()I" | "net/minecraft/core/Vec3i.getX.()I" => V::I(native(rt, a(0))[0] as i32),
         "net/minecraft/core/BlockPos.getY.()I" | "net/minecraft/core/Vec3i.getY.()I" => V::I(native(rt, a(0))[1] as i32),
         "net/minecraft/core/BlockPos.getZ.()I" | "net/minecraft/core/Vec3i.getZ.()I" => V::I(native(rt, a(0))[2] as i32),
+        // `Vec3i.get(Axis)`: `axis.choose(x, y, z)`.
+        "net/minecraft/core/BlockPos.get.(Lnet/minecraft/core/Direction$Axis;)I" | "net/minecraft/core/Vec3i.get.(Lnet/minecraft/core/Direction$Axis;)I" => {
+            let axis = native(rt, a(1))[0].clamp(0, 2) as usize;
+            V::I(native(rt, a(0))[axis] as i32)
+        }
         "net/minecraft/core/BlockPos.above.()Lnet/minecraft/core/BlockPos;" => offset(rt, a(0), [0, 1, 0], 1),
         "net/minecraft/core/BlockPos.below.()Lnet/minecraft/core/BlockPos;" => offset(rt, a(0), [0, -1, 0], 1),
         "net/minecraft/core/BlockPos.north.()Lnet/minecraft/core/BlockPos;" => offset(rt, a(0), [0, 0, -1], 1),
@@ -997,6 +1002,12 @@ mod tests {
         let next = block_pos(&mut rt, 8, 0, -8);
         let closer = |rt: &mut Rt, d: f64| call(rt, k("closerThan.(Lnet/minecraft/core/Vec3i;D)Z"), &[m, next, V::D(d)]);
         assert_eq!((closer(&mut rt, 1.5), closer(&mut rt, 1.0)), (V::I(1), V::I(0)));
+        let along = |rt: &mut Rt, axis: &'static str| {
+            let a = get_static(rt, axis);
+            call(rt, k("get.(Lnet/minecraft/core/Direction$Axis;)I"), &[m, a]).i()
+        };
+        let axes = ["net/minecraft/core/Direction$Axis.X", "net/minecraft/core/Direction$Axis.Y", "net/minecraft/core/Direction$Axis.Z"];
+        assert_eq!(axes.map(|a| along(&mut rt, a)), [7, 0, -8]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
