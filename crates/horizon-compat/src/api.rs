@@ -1122,16 +1122,64 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") && desc.starts_with("(Ljava/lang/String;") => {
             let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("unknown").to_owned();
             let id = qualified_in(rt, a(0), rt.str_of(a(1)).unwrap_or(""));
-            rt.suppliers.push((registry.clone(), id.clone(), a(2)));
-            holder(rt, &registry, &id)
+            let h = register_holder(rt, a(0), &registry, &id);
+            // `register(name, Function<ResourceLocation, I>)`: made of the entry's own name.
+            let make = if desc.starts_with("(Ljava/lang/String;Ljava/util/function/Function;") {
+                let location = rt.string(&id);
+                rt.lambda("compat:apply", vec![a(2), location])
+            } else {
+                a(2)
+            };
+            rt.suppliers.push((registry.clone(), id.clone(), make));
+            h
         }
         (o, "registerBlock" | "registerItem") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
             let registry = if name == "registerBlock" { "block" } else { "item" };
             let id = qualified_in(rt, a(0), rt.str_of(a(1)).unwrap_or(""));
-            let props = if desc.contains("Properties;)") || args.len() > 3 { a(3) } else { V::NULL };
+            // Without properties, NeoForge's own: `BlockBehaviour.Properties.of()`, `new Item.Properties()`.
+            let props = if desc.contains("Properties;)") || args.len() > 3 {
+                a(3)
+            } else {
+                rt.new_object(if registry == "block" { crate::blocks::BLOCK_PROPERTIES } else { crate::blocks::ITEM_PROPERTIES })
+            };
             let apply = rt.lambda("compat:apply", vec![a(2), props]);
+            let h = register_holder(rt, a(0), registry, &id);
             rt.suppliers.push((registry.into(), id.clone(), apply));
-            holder(rt, registry, &id)
+            h
+        }
+        // `registerSimpleItem(name[, properties])` is `registerItem(name, Item::new, properties)`,
+        // `registerSimpleBlock(name, properties)` `registerBlock(name, Block::new, properties)`.
+        (o, "registerSimpleItem" | "registerSimpleBlock") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
+            let (registry, class, props_class) = if name == "registerSimpleBlock" {
+                ("block", "net/minecraft/world/level/block/Block", crate::blocks::BLOCK_PROPERTIES)
+            } else {
+                ("item", "net/minecraft/world/item/Item", crate::blocks::ITEM_PROPERTIES)
+            };
+            let id = qualified_in(rt, a(0), rt.str_of(a(1)).unwrap_or(""));
+            let props = if args.len() > 2 { a(2) } else { rt.new_object(props_class) };
+            let make = crate::functions::constructor(rt, class, &format!("(L{props_class};)V"));
+            let apply = rt.lambda("compat:apply", vec![make, props]);
+            let h = register_holder(rt, a(0), registry, &id);
+            rt.suppliers.push((registry.into(), id.clone(), apply));
+            h
+        }
+        // `registerSimpleBlockItem(name, block[, properties])`, or `(blockHolder[, properties])`
+        // under the block's own name: a `BlockItem` of the block, asked for when items are made.
+        (o, "registerSimpleBlockItem") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
+            let named = desc.starts_with("(Ljava/lang/String;");
+            let (path, block, props) = if named {
+                (rt.str_of(a(1)).unwrap_or("").to_owned(), a(2), a(3))
+            } else {
+                let id = rt.str_of(rt.get_field(a(1), "$id")).unwrap_or("").to_owned();
+                (id.rsplit(':').next().unwrap_or("").to_owned(), a(1), a(2))
+            };
+            let given = if named { args.len() > 3 } else { args.len() > 2 };
+            let props = if given { props } else { rt.new_object(crate::blocks::ITEM_PROPERTIES) };
+            let id = qualified_in(rt, a(0), &path);
+            let make = crate::functions::block_item(rt, block, props);
+            let h = register_holder(rt, a(0), "item", &id);
+            rt.suppliers.push(("item".into(), id.clone(), make));
+            h
         }
         // NeoForge's `DataComponents.registerComponentType(name, builder -> ...)`: built now, as the
         // type is a plain object the mod configures, and registered under its name.
@@ -1140,10 +1188,22 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let id = qualified_in(rt, a(0), rt.str_of(a(1)).unwrap_or(""));
             let ty = crate::components::build_with(rt, a(2));
             rt.registered.insert((registry.clone(), id.clone()), ty);
-            holder(rt, &registry, &id)
+            register_holder(rt, a(0), &registry, &id)
         }
         (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => V::Void, // (IEventBus)
         (o, "getNamespace") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => rt.get_field(a(0), "$ns"),
+        // Every holder made through it, in order (NeoForge's is an unmodifiable view).
+        (o, "getEntries") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
+            let entries = rt.get_field(a(0), "$entries");
+            let items = if entries.r() == 0 { Vec::new() } else { crate::jutil::elements(rt, entries) };
+            crate::jutil::new_list(rt, items)
+        }
+        ("net/neoforged/neoforge/registries/DeferredRegister", "getRegistryKey") => rt.get_field(a(0), "$registry"),
+        ("net/neoforged/neoforge/registries/DeferredRegister", "getRegistryName") => {
+            let r = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned();
+            let s = if r.contains(':') { r } else { format!("minecraft:{r}") };
+            rt.string(&s)
+        }
         // `addAlias(from, to)`: an old name that reads as the new one, as the registry's own.
         (o, "addAlias") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
             let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("unknown").to_owned();
@@ -1530,6 +1590,37 @@ fn description_id(name: &str) -> String {
     format!("block.{ns}.{}", path.replace('/', "."))
 }
 
+/// The holder `register` (a DeferredRegister) makes for `id` in `registry`, as NeoForge's
+/// `register` does: through the register's `createHolder`, which a mod's own register class may
+/// override (Mekanism's makes its `TileEntityTypeRegistryObject`s), else the runtime's. Kept in
+/// the register's entries (`getEntries`).
+fn register_holder(rt: &mut Rt, register: V, registry: &str, id: &str) -> V {
+    const CREATE_HOLDER: &str = "createHolder.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/neoforged/neoforge/registries/DeferredHolder;";
+    const CREATE_HOLDER_KEY: &str =
+        "net/neoforged/neoforge/registries/DeferredRegister.createHolder.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/neoforged/neoforge/registries/DeferredHolder;";
+    let class = rt.class_of(register);
+    let mut h = V::NULL;
+    if rt.overrides.is_some_and(|o| o(class, CREATE_HOLDER))
+        && let Some(vc) = rt.vcall
+    {
+        let (r, l) = (rt.string(registry), rt.string(id));
+        h = vc(rt, CREATE_HOLDER_KEY, CREATE_HOLDER, &[register, r, l]);
+        if rt.thrown.is_some() {
+            return V::NULL;
+        }
+    }
+    if h.r() == 0 {
+        h = holder(rt, registry, id);
+    }
+    let mut entries = rt.get_field(register, "$entries");
+    if entries.r() == 0 {
+        entries = crate::jutil::new_list(rt, Vec::new());
+        rt.put_field(register, "$entries", entries);
+    }
+    crate::jutil::list_add(rt, entries, h);
+    h
+}
+
 /// A DeferredRegister's holder: its registry and name, resolved when asked (`create:pressing` is
 /// both a recipe type and a recipe serializer).
 fn holder(rt: &mut Rt, registry: &str, id: &str) -> V {
@@ -1766,6 +1857,75 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mod's own register class (Mekanism's `MekanismDeferredRegister`), made through NeoForge's
+    /// constructor: its `createHolder` override makes the holders (its own class, whose `super(key)`
+    /// names the entry). They are what `register` returns and `getEntries` lists, and they resolve to
+    /// what the supplier made, in the register's registry.
+    #[test]
+    fn a_mods_own_register_makes_its_own_holders() {
+        const REGISTER: &str = "test/MyRegister";
+        const MY_HOLDER: &str = "test/MyHolder";
+        fn overrides(class: &str, key: &str) -> bool {
+            class == REGISTER && key.starts_with("createHolder.")
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            if short.starts_with("createHolder.") {
+                let k = call(rt, "net/minecraft/resources/ResourceKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[args[1], args[2]]);
+                let h = rt.new_object(MY_HOLDER);
+                call(rt, "net/neoforged/neoforge/registries/DeferredHolder.<init>.(Lnet/minecraft/resources/ResourceKey;)V", &[h, k]);
+                return h;
+            }
+            call(rt, key, args)
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        let register = rt.new_object(REGISTER);
+        let registry = get_static(&mut rt, "net/minecraft/core/registries/Registries.BLOCK_ENTITY_TYPE");
+        let ns = rt.string("mek");
+        call(&mut rt, "net/neoforged/neoforge/registries/DeferredRegister.<init>.(Lnet/minecraft/resources/ResourceKey;Ljava/lang/String;)V", &[register, registry, ns]);
+        let (name, value) = (rt.string("chamber"), rt.new_object("test/ChamberType"));
+        let supplier = call(&mut rt, "com/google/common/base/Suppliers.ofInstance.(Ljava/lang/Object;)Lcom/google/common/base/Supplier;", &[value]);
+        let h = call(&mut rt, "net/neoforged/neoforge/registries/DeferredRegister.register.(Ljava/lang/String;Ljava/util/function/Supplier;)Lnet/neoforged/neoforge/registries/DeferredHolder;", &[register, name, supplier]);
+        assert_eq!(rt.class_of(h), MY_HOLDER);
+        let entries = call(&mut rt, "net/neoforged/neoforge/registries/DeferredRegister.getEntries.()Ljava/util/Collection;", &[register]);
+        assert_eq!(crate::jutil::elements(&rt, entries), vec![h]);
+        assert_eq!(call(&mut rt, "net/neoforged/neoforge/registries/DeferredHolder.get.()Ljava/lang/Object;", &[h]), value);
+        let reg = rt.str_of(registry).unwrap_or("").to_owned();
+        assert_eq!(rt.registered.get(&(reg, "mek:chamber".to_owned())), Some(&value));
+    }
+
+    /// NeoForge's shorthands, as `DeferredRegister.Blocks`/`Items` define them: `registerSimpleBlock`
+    /// is `registerBlock(name, Block::new, properties)`, `registerSimpleItem(name)` an `Item` with
+    /// new properties, `registerSimpleBlockItem(holder)` a `BlockItem` of the holder's block under
+    /// the block's name (SecurityCraft's), made when registries fire.
+    #[test]
+    fn neoforges_simple_registrations_make_what_neoforge_makes() {
+        fn vcall(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+            call(rt, key, args)
+        }
+        let mut rt = Rt::new();
+        rt.vcall = Some(vcall);
+        let ns = rt.string("sc");
+        let blocks = call(&mut rt, "net/neoforged/neoforge/registries/DeferredRegister.createBlocks.(Ljava/lang/String;)Lnet/neoforged/neoforge/registries/DeferredRegister$Blocks;", &[ns]);
+        let items = call(&mut rt, "net/neoforged/neoforge/registries/DeferredRegister.createItems.(Ljava/lang/String;)Lnet/neoforged/neoforge/registries/DeferredRegister$Items;", &[ns]);
+        let (plate, gem) = (rt.string("plate"), rt.string("gem"));
+        let props = rt.new_object(crate::blocks::BLOCK_PROPERTIES);
+        let block = call(&mut rt, "net/neoforged/neoforge/registries/DeferredRegister$Blocks.registerSimpleBlock.(Ljava/lang/String;Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)Lnet/neoforged/neoforge/registries/DeferredBlock;", &[blocks, plate, props]);
+        let item = call(&mut rt, "net/neoforged/neoforge/registries/DeferredRegister$Items.registerSimpleBlockItem.(Lnet/minecraft/core/Holder;)Lnet/neoforged/neoforge/registries/DeferredItem;", &[items, block]);
+        let gem = call(&mut rt, "net/neoforged/neoforge/registries/DeferredRegister$Items.registerSimpleItem.(Ljava/lang/String;)Lnet/neoforged/neoforge/registries/DeferredItem;", &[items, gem]);
+        crate::neo::resolve(&mut rt);
+        let got = |rt: &mut Rt, h: V| call(rt, "net/neoforged/neoforge/registries/DeferredHolder.get.()Ljava/lang/Object;", &[h]);
+        let (b, i, g) = (got(&mut rt, block), got(&mut rt, item), got(&mut rt, gem));
+        assert_eq!(rt.class_of(b), "net/minecraft/world/level/block/Block");
+        assert_eq!(rt.class_of(i), "net/minecraft/world/item/BlockItem");
+        assert_eq!(rt.get_field(i, "$block"), b);
+        assert_eq!(rt.class_of(g), "net/minecraft/world/item/Item");
+        assert_eq!(rt.registered.get(&("item".to_owned(), "sc:plate".to_owned())), Some(&i));
+        assert_eq!(rt.registered.get(&("item".to_owned(), "sc:gem".to_owned())), Some(&g));
+        assert!(rt.thrown.is_none());
+    }
 
     /// A function that maps an optional by mapping it again, forever: the JVM would end it with a
     /// `StackOverflowError` the code may catch; here too, past [`MAX_DEPTH`] nested API calls,

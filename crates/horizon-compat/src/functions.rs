@@ -17,10 +17,34 @@ pub(crate) fn record_constructor(rt: &mut Rt, class: &str) -> V {
     combinator(rt, "compat:fn/record", vec![c])
 }
 
+/// A constructor of the game's `class` (`Item::new`) as a function of its arguments: `desc` is
+/// the constructor's descriptor.
+pub(crate) fn constructor(rt: &mut Rt, class: &str, desc: &str) -> V {
+    let (c, d) = (rt.string(class), rt.string(desc));
+    combinator(rt, "compat:fn/new", vec![c, d])
+}
+
+/// `new BlockItem(block.get(), properties)` as a supplier: `block` a supplier of the block (a
+/// holder), asked only when the item is made, as NeoForge's `registerSimpleBlockItem` asks it.
+pub(crate) fn block_item(rt: &mut Rt, block: V, properties: V) -> V {
+    combinator(rt, "compat:fn/block_item", vec![block, properties])
+}
+
 /// A record component's accessor (`name`) as a function of the record.
 pub(crate) fn component(rt: &mut Rt, name: &str) -> V {
     let n = rt.string(name);
     combinator(rt, "compat:fn/component", vec![n])
+}
+
+/// A new object of the game's `class`, made by its constructor `desc` with `args`.
+fn make(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
+    let class: &'static str = rt.static_key(class);
+    let o = rt.new_object(class);
+    let mut with_this = vec![o];
+    with_this.extend_from_slice(args);
+    let init = rt.static_key(&format!("{class}.<init>.{desc}"));
+    crate::api::call(rt, init, &with_this);
+    o
 }
 
 /// A combinator's functional method (`test`, `apply`, `accept`, `get`), invoked by `key` with
@@ -60,6 +84,16 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
             rt.get_field(args.first().copied().unwrap_or_default(), name)
         }
         "compat:fn/constant" => part(0),
+        // A constructor as a function (`Item::new`): [class, descriptor].
+        "compat:fn/new" => {
+            let (class, desc) = (rt.str_of(part(0)).unwrap_or("").to_owned(), rt.str_of(part(1)).unwrap_or("").to_owned());
+            make(rt, &class, &desc, args)
+        }
+        // [block supplier, properties].
+        "compat:fn/block_item" => {
+            let block = rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", part(0), &[]);
+            make(rt, "net/minecraft/world/item/BlockItem", "(Lnet/minecraft/world/level/block/Block;Lnet/minecraft/world/item/Item$Properties;)V", &[block, part(1)])
+        }
         // `Suppliers.memoize`: the supplier runs once; [supplier, value, done].
         "compat:fn/memo" => {
             if part(2).i() != 0 {

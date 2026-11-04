@@ -38,7 +38,7 @@ fn made_here(rt: &Rt, v: V, class: &str) -> bool {
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     RECORDS.binary_search_by(|(c, _)| (*c).cmp(owner)).is_ok()
         || members(owner).is_some()
-        || (matches!(name, "equals" | "hashCode") && ENUMS.binary_search(&owner).is_ok())
+        || (matches!(name, "equals" | "hashCode" | "ordinal" | "name" | "compareTo") && ENUMS.binary_search(&owner).is_ok())
         || (matches!(name, "values" | "valueOf") && constants(owner).is_some())
         || FACTORIES.binary_search_by(|(c, _)| (*c).cmp(owner)).is_ok()
 }
@@ -182,6 +182,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return match (name, desc) {
             ("equals", "(Ljava/lang/Object;)Z") => Some(V::I((this == other) as i32)),
             ("hashCode", "()I") => Some(V::I(this.r() as i32)),
+            // `Enum`'s final methods, named through the enum's own class (`switch` on a vanilla
+            // enum reads `WallSide.ordinal()`).
+            ("ordinal", "()I") => Some(V::I(crate::api_common::enum_ordinal(rt, this))),
+            ("name", "()Ljava/lang/String;") => Some(crate::api_common::enum_name(rt, this, false)),
+            ("compareTo", _) if desc.ends_with(")I") => {
+                Some(V::I(crate::api_common::enum_ordinal(rt, this) - crate::api_common::enum_ordinal(rt, other)))
+            }
             // `values()`: a new array of the constants each time, as Java clones it.
             ("values", _) if desc.starts_with("()[") => {
                 let (class, names) = constants(owner)?;
@@ -402,6 +409,28 @@ mod tests {
         assert_eq!(rt.class_of(e), "java/lang/IllegalArgumentException");
         let m = rt.get_field(e, "message");
         assert_eq!(rt.str_of(m), Some(&*format!("No enum constant {}.TUBA", INSTRUMENT.replace('/', "."))));
+    }
+
+    /// A `switch` on a vanilla enum reads `ordinal()` through the enum's own class (javac's
+    /// `$SwitchMap$` arrays): FramedBlocks' on a wall's `WallSide`. `name()` and `compareTo` are
+    /// `Enum`'s final methods too.
+    #[test]
+    fn a_vanilla_enums_own_class_answers_enums_final_methods() {
+        let mut rt = Rt::new();
+        let wall_side = "net/minecraft/world/level/block/state/properties/WallSide";
+        let call = |rt: &mut Rt, key: String, args: &[V]| {
+            let key = rt.static_key(&key);
+            crate::api::call(rt, key, args)
+        };
+        let tall = crate::blocks::vanilla_enum_constant(&mut rt, wall_side, "tall").unwrap();
+        assert_eq!(call(&mut rt, format!("{wall_side}.ordinal.()I"), &[tall]), V::I(2));
+        let harp = crate::api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/NoteBlockInstrument.HARP");
+        let bass = crate::api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/NoteBlockInstrument.BASS");
+        assert_eq!(call(&mut rt, format!("{INSTRUMENT}.ordinal.()I"), &[bass]), V::I(4));
+        let name = call(&mut rt, format!("{INSTRUMENT}.name.()Ljava/lang/String;"), &[bass]);
+        assert_eq!(rt.str_of(name), Some("BASS"));
+        assert_eq!(call(&mut rt, format!("{INSTRUMENT}.compareTo.(Ljava/lang/Enum;)I"), &[harp, bass]), V::I(-4));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// The data-class table answers last, from fields named as vanilla names them; a class the

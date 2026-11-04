@@ -654,6 +654,25 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 k
             }
         }
+        // A mod's own register (Mekanism's `MekanismDeferredRegister`) made through NeoForge's
+        // constructors: what `DeferredRegister.create` keeps. `Blocks`, `Items` and
+        // `DataComponents` name their registry themselves.
+        (o, "<init>") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
+            let (registry, ns) = match (o, desc) {
+                ("net/neoforged/neoforge/registries/DeferredRegister$Blocks", "(Ljava/lang/String;)V") => ("block".to_owned(), a(1)),
+                ("net/neoforged/neoforge/registries/DeferredRegister$Items", "(Ljava/lang/String;)V") => ("item".to_owned(), a(1)),
+                ("net/neoforged/neoforge/registries/DeferredRegister$DataComponents", "(Ljava/lang/String;)V") => ("data_component_type".to_owned(), a(1)),
+                _ => (rt.str_of(a(1)).unwrap_or("unknown").to_owned(), a(2)),
+            };
+            let ns = rt.str_of(ns).unwrap_or("").to_owned();
+            if rt.namespace.is_empty() {
+                rt.namespace = ns.clone();
+            }
+            let (r, n) = (rt.string(&registry), rt.string(&ns));
+            rt.put_field(a(0), "$registry", r);
+            rt.put_field(a(0), "$ns", n);
+            V::Void
+        }
         // `super(key)` from a mod's own holder class (Registrate's `RegistryEntry`).
         (o, "<init>") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && desc.starts_with("(Lnet/minecraft/resources/ResourceKey;") => {
             let (registry, id) = split_key(rt, a(1));

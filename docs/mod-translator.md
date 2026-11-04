@@ -1755,6 +1755,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Test: the weave fixture's `Vec3Mixin`, a mixin into the game's `Vec3`. Each object gets its own
     counter (initialised to 10); `lengthSqr()` and `x` come through `@Shadow`s; each object keeps
     its own label next to the mixin's static; `instanceof Measured` holds.
+    Measured on FramedBlocks alone: its 38,128 `framedblocks$initCache` misses are gone, and
+    nothing else changed (the same 26 other misses, the same one uncaught exception).
+  - [x] 2026-11-05 Registration through a mod's own classes, and NeoForge's shorthands.
+    - A mod's register class (Mekanism's `MekanismDeferredRegister`, made with
+      `super(registryKey, modid)`) keeps its registry and namespace: NeoForge's constructors of
+      `DeferredRegister` and of its `Blocks`, `Items` and `DataComponents` set what `create` sets.
+      Before this, the holders' constructor arm read the registry's key as an entry's.
+    - `register` makes each holder through the register's `createHolder`, as NeoForge does. A mod
+      class overriding it gets its own holders (Mekanism's `TileEntityTypeRegistryObject`, whose
+      `capabilities`, `tickers`, `getName` were 154/154/87 misses on the runtime's holder).
+      `getEntries` lists them; `getRegistryKey`/`getRegistryName` answer.
+      `register(name, Function)` gets the entry's location, as NeoForge's supplier passes it.
+    - `registerSimpleItem`, `registerSimpleBlock`, all four `registerSimpleBlockItem`s (the
+      block's holder names the item), and NeoForge's default properties where none are given
+      (`registerBlock(name, func)` had passed null). SecurityCraft and elevatorid registered
+      nothing through them.
+    - A vanilla enum's `ordinal()`, `name()` and `compareTo` named through its own class
+      (`WallSide.ordinal()`, the read in every `switch` on a vanilla enum) are `Enum`'s.
+    Tests `api::tests::a_mods_own_register_makes_its_own_holders`,
+    `neoforges_simple_registrations_make_what_neoforge_makes`,
+    `records::tests::a_vanilla_enums_own_class_answers_enums_final_methods`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
