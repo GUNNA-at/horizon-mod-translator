@@ -5,6 +5,8 @@ import org.spongepowered.asm.mixin.injection.callback.LocalCapture;
 public @interface Inject {
     String[] method();
 
+    Slice[] slice() default {};
+
     At[] at();
 
     boolean cancellable() default false;

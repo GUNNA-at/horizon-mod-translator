@@ -1056,7 +1056,10 @@ impl<'a> Program<'a> {
         let _ = writeln!(s, "        match pc {{");
         for (n, i) in insns.iter().enumerate() {
             let next = insns.get(n + 1).map_or(usize::MAX, |x| x.at);
-            let mut body = self.insn(c, i, next);
+            // A constant or a `new` some mixin weaves at (calls and field accesses weave in
+            // `invoke` and `field`).
+            let plain = (i.op == 0xbb || weave::constant_of(c, i).is_some()) && self.cur.as_ref().is_some_and(|cur| cur.at_calls.contains_key(&i.at));
+            let mut body = if plain { self.woven_plain(c, i, next) } else { self.insn(c, i, next) };
             // `INVOKE_ASSIGN` injections after this store (the code above set `pc` to the next).
             let after: Vec<(usize, Weave)> = self
                 .cur
@@ -1114,6 +1117,81 @@ impl<'a> Program<'a> {
         s
     }
 
+    /// An instruction some mixin weaves at that is neither a call nor a field access: a constant
+    /// (which an `@ModifyExpressionValue` or a `@ModifyConstant` changes as it is pushed) or a
+    /// `new`; `@Inject`s and `@ModifyVariable`s go before it.
+    fn woven_plain(&mut self, c: &ClassFile, i: &Insn, next: usize) -> String {
+        let at = i.at;
+        let site: Vec<Weave> = self
+            .cur
+            .as_ref()
+            .and_then(|cur| cur.at_calls.get(&at).map(|ix| ix.iter().map(|&k| cur.weaves[k].clone()).collect()))
+            .unwrap_or_default();
+        let throw = format!("if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; continue; }}");
+        let (mut before, mut modify) = (String::new(), String::new());
+        let mut wrapped: Option<String> = None;
+        for w in &site {
+            let h = fn_name(&w.mixin, &w.handler, &w.handler_desc);
+            let this = if w.handler_static { "" } else { "l[0], " };
+            let (pre, locals, post) = self.local_args(w, at);
+            let more: String = locals.iter().map(|a| format!(", {a}")).collect();
+            match &w.kind {
+                Kind::Inject { .. } => before.push_str(&self.inject_code(w, None, at, true)),
+                Kind::ModifyVariable { .. } => before.push_str(&self.modify_var_code(w, at, true)),
+                Kind::ModifyExpressionValue | Kind::ModifyConstant if i.op <= 0x14 => {
+                    let Some(extra) = self.targs_after(w.handler_params(), 1) else {
+                        self.unsupported("mixin handler of a constant taking other parameters");
+                        continue;
+                    };
+                    let _ = write!(modify, "{pre}let v = {h}(rt, &[{this}v{extra}{more}]); {post}{throw} ");
+                    continue;
+                }
+                // An `instanceof` (MixinExtras' `@WrapOperation` of a `@Constant(classValue)`): the
+                // handler gets the object and the check as an `Operation`.
+                Kind::WrapOperation if i.op == 0xc1 && wrapped.is_none() => {
+                    let Some(extra) = self.targs_after(w.handler_params(), 2) else {
+                        self.unsupported("mixin @WrapOperation of an instanceof taking other parameters");
+                        continue;
+                    };
+                    let Some(cur) = self.cur.as_ref() else { continue };
+                    let class = match &i.arg {
+                        Operand::Int(v) => c.class_name(*v as u16).unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    let n = self.operations.len();
+                    let lkey = format!("{}.{}.{}@{at}#{n}", cur.class, cur.name, cur.desc);
+                    let op_fn = format!("{}__op{at}_{n}", cur.fn_name);
+                    let lid = self.lambda_id(&lkey);
+                    self.synthetic.push(format!(
+                        "pub fn {op_fn}(rt: &mut Rt, all: &[V]) -> V {{\n    let arr = all.last().copied().unwrap_or_default();\n    let o = rt.array_get(arr, 0);\n    let r = V::I(rt.instance_of_static(o, {class:?}) as i32);\n    {}\n}}\n",
+                        boxed('Z')
+                    ));
+                    self.operations.insert(lkey.clone(), op_fn);
+                    wrapped = Some(format!(
+                        "let a = s.pop().unwrap_or_default(); {pre}let op = rt.lambda_id({lkey:?}, {lid}, l.to_vec()); rt.lambda_info.insert(op.r(), ({:?}, \"call\")); let r = {h}(rt, &[{this}a, op{extra}{more}]); {post}{throw} s.push(r); pc = {next};",
+                        weave::OPERATION
+                    ));
+                    continue;
+                }
+                k => {
+                    let what = format!("mixin {} at this instruction", k.name());
+                    self.unsupported(&what);
+                    continue;
+                }
+            }
+            before.push(' ');
+        }
+        if let Some(w) = wrapped {
+            return format!("{before}{w}");
+        }
+        let body = self.insn(c, i, next);
+        if modify.is_empty() {
+            return format!("{before}{body}");
+        }
+        // Pushed as ever, then through the handlers.
+        format!("{before}{body} let v = s.pop().unwrap_or_default(); {modify}s.push(v);")
+    }
+
     /// What a handler's local parameters get at place `site` (`Weave::locals`): code that makes
     /// the refs before its call, the arguments, and code that puts what the refs hold back into
     /// the locals after it.
@@ -1142,7 +1220,7 @@ impl<'a> Program<'a> {
     fn modify_var_code(&self, w: &Weave, site: usize, in_loop: bool) -> String {
         let Some(slot) = w.var.get(&site) else { return String::new() };
         let this = if w.handler_static { "" } else { "l[0], " };
-        let targs: String = if w.handler_params() > 1 { self.target_args().iter().map(|a| format!(", {a}")).collect() } else { String::new() };
+        let targs: String = self.targs_after(w.handler_params(), 1).unwrap_or_default();
         let (pre, locals, post) = self.local_args(w, site);
         let locals: String = locals.iter().map(|a| format!(", {a}")).collect();
         let throw = if in_loop { format!("thrown_at = {site}; pc = {THROW}; continue;") } else { format!("thrown_at = usize::MAX; pc = {THROW};") };
@@ -1150,6 +1228,15 @@ impl<'a> Program<'a> {
             "{{ {pre}let v = {}(rt, &[{this}l[{slot}]{targs}{locals}]); {post}if rt.thrown.is_some() {{ {throw} }} l[{slot}] = v; }}",
             fn_name(&w.mixin, &w.handler, &w.handler_desc)
         )
+    }
+
+    /// The target method's first arguments a handler with `np` parameters takes after its `base`
+    /// own (Mixin's `captureTargetArgs`: as many as it has room for), joined each after a `, `; `None`
+    /// when it takes more than the method has.
+    fn targs_after(&self, np: usize, base: usize) -> Option<String> {
+        let targs = self.target_args();
+        let n = np.checked_sub(base)?;
+        (n <= targs.len()).then(|| targs[..n].iter().map(|a| format!(", {a}")).collect())
     }
 
     /// The target method's arguments where they are now: its local slots.
@@ -1225,13 +1312,12 @@ impl<'a> Program<'a> {
         if here.is_empty() {
             return None;
         }
-        let targs = self.target_args();
         let mut code = String::new();
         for w in &here {
             match w.kind {
                 Kind::ModifyReturnValue => {
                     let this = if w.handler_static { "" } else { "l[0], " };
-                    let extra = if w.handler_params() == 1 || targs.is_empty() { String::new() } else { format!(", {}", targs.join(", ")) };
+                    let extra = self.targs_after(w.handler_params(), 1).unwrap_or_default();
                     let (pre, locals, post) = self.local_args(w, at);
                     let locals: String = locals.iter().map(|a| format!(", {a}")).collect();
                     let _ = write!(
@@ -1800,7 +1886,6 @@ impl<'a> Program<'a> {
         let recv = usize::from(op != 0xb8);
         let params = crate::class::param_classes(&m.desc);
         let returns = returns_value(&m.desc);
-        let targs = self.target_args();
         let throw = format!("if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; continue; }}");
         let mut wrapped = false;
         for w in &site {
@@ -1819,8 +1904,8 @@ impl<'a> Program<'a> {
                     to.push(' ');
                 }
                 // The receiver through the handler, which also sees the arguments.
-                (Kind::ModifyReceiver, _) if recv == 1 && (np == 1 + params.len() || np == 1 + params.len() + targs.len()) => {
-                    let extra: String = if np > 1 + params.len() { targs.iter().map(|a| format!(", {a}")).collect() } else { String::new() };
+                (Kind::ModifyReceiver, _) if recv == 1 && self.targs_after(np, 1 + params.len()).is_some() => {
+                    let extra = self.targs_after(np, 1 + params.len()).unwrap_or_default();
                     out.mutable = true;
                     let _ = write!(out.before, "{{ {pre}let mut h: Vec<V> = vec![{this}]; h.extend_from_slice(&args); h.extend_from_slice(&[{}]);{more_vec} let v = {h}(rt, &h); {post}{throw} args[0] = v; }} ", extra.trim_start_matches(", "));
                 }
@@ -1833,14 +1918,11 @@ impl<'a> Program<'a> {
                 // The handler instead of the call: the receiver and arguments, then the target
                 // method's when it takes them.
                 (Kind::Redirect, _) => {
-                    let extra = if np == recv + params.len() {
-                        String::new()
-                    } else if np == recv + params.len() + targs.len() {
-                        targs.join(", ")
-                    } else {
+                    let Some(extra) = self.targs_after(np, recv + params.len()) else {
                         self.unsupported("mixin @Redirect taking other parameters");
                         continue;
                     };
+                    let extra = extra.trim_start_matches(", ");
                     out.call = format!("{{ {pre}let mut h: Vec<V> = vec![{this}]; h.extend_from_slice(&args); h.extend_from_slice(&[{extra}]);{more_vec} let r = {h}(rt, &h); {post}r }}");
                 }
                 // One argument through the handler: the one it is given (or, without an index,
@@ -1878,15 +1960,11 @@ impl<'a> Program<'a> {
                 // The handler instead of the call, given the call as an `Operation` that makes it
                 // (with the locals as they are, for what other weaves at the call read).
                 (Kind::WrapOperation, At::Invoke { .. } | At::Field { .. }) => {
-                    let base = recv + params.len() + 1;
-                    let extra = if np == base {
-                        String::new()
-                    } else if np == base + targs.len() {
-                        targs.join(", ")
-                    } else {
+                    let Some(extra) = self.targs_after(np, recv + params.len() + 1) else {
                         self.unsupported("mixin @WrapOperation taking other parameters");
                         continue;
                     };
+                    let extra = extra.trim_start_matches(", ").to_owned();
                     let Some(cur) = self.cur.as_ref() else { continue };
                     let n = self.operations.len();
                     let lkey = format!("{}.{}.{}@{at}#{n}", cur.class, cur.name, cur.desc);
@@ -1909,16 +1987,18 @@ impl<'a> Program<'a> {
                         weave::OPERATION
                     );
                 }
-                (Kind::ModifyExpressionValue, _) if returns && np == 1 => {
-                    let _ = write!(out.modify, "{pre}let r = {h}(rt, &[{this}r{more}]); {post}{throw} ");
+                (Kind::ModifyExpressionValue, _) if returns && self.targs_after(np, 1).is_some() => {
+                    let extra = self.targs_after(np, 1).unwrap_or_default();
+                    let _ = write!(out.modify, "{pre}let r = {h}(rt, &[{this}r{extra}{more}]); {post}{throw} ");
                 }
                 // The call only when the handler, given its receiver and arguments, says so.
-                (Kind::WrapWithCondition, _) if !returns && np == recv + params.len() => {
+                (Kind::WrapWithCondition, _) if !returns && self.targs_after(np, recv + params.len()).is_some() => {
                     if !wrapped {
                         out.before.push_str("let mut wrap_ok = true; ");
                         wrapped = true;
                     }
-                    let _ = write!(out.before, "if wrap_ok {{ {pre}let mut h: Vec<V> = vec![{this}]; h.extend_from_slice(&args);{more_vec} wrap_ok = {h}(rt, &h).i() != 0; {post}{throw} }} ");
+                    let extra = self.targs_after(np, recv + params.len()).unwrap_or_default();
+                    let _ = write!(out.before, "if wrap_ok {{ {pre}let mut h: Vec<V> = vec![{this}]; h.extend_from_slice(&args); h.extend_from_slice(&[{}]);{more_vec} wrap_ok = {h}(rt, &h).i() != 0; {post}{throw} }} ", extra.trim_start_matches(", "));
                 }
                 (kind, _) => {
                     let what = format!("mixin {kind:?} at this call");

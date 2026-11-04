@@ -106,7 +106,13 @@ fn main() -> ExitCode {
             }
         };
         let all: Vec<&horizon_mod_translator::class::ClassFile> = classes.iter().collect();
-        let plan = horizon_mod_translator::weave::plan_with(&all, &horizon_mod_translator::mixin_configs_of(&jars));
+        let configs = horizon_mod_translator::mixin_configs_of(&jars);
+        let plan = horizon_mod_translator::weave::plan_with(&all, &configs);
+        for c in &configs {
+            for m in &c.off {
+                println!("  off {m} (its plugin's, for the mods here)");
+            }
+        }
         let mut by: std::collections::BTreeMap<String, usize> = Default::default();
         for (target, ws) in &plan.weaves {
             for w in ws {

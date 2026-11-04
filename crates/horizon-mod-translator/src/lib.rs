@@ -220,6 +220,77 @@ pub struct MixinConfig {
     pub default_require: i64,
     /// Its plugin (`plugin`), which may turn mixins off as the game loads, as an internal name.
     pub plugin: Option<String>,
+    /// The mixins its plugin turns off for the mods there are (`plugin_turns_off`).
+    pub off: Vec<String>,
+}
+
+/// Whether a mixin config plugin of the kind Create's addons share turns mixin `mixin` off, the
+/// mods there being `mods`: an annotation on the mixin whose type has `applyIfPresent()Z` names
+/// mods (strings, or constants of an enum: the string its constructor is given, else the
+/// constant's name, lowercased, as their `Lang.asId`), and the mixin applies when any of them is
+/// there exactly when `applyIfPresent` (true unless given) is (Create: Connected's and Copycats+'
+/// `@ModMixin`, Railways' `@ConditionalMixin`); a `@DevEnvMixin` applies in a development
+/// environment only. `class` finds a class of the jars by internal name.
+pub fn plugin_turns_off(mixin: &ClassFile, class: &dyn Fn(&str) -> Option<ClassFile>, mods: &std::collections::BTreeSet<String>) -> bool {
+    for a in &mixin.annotations {
+        let ty = a.ty.strip_prefix('L').and_then(|t| t.strip_suffix(';')).unwrap_or(&a.ty);
+        if ty.rsplit('/').next() == Some("DevEnvMixin") {
+            return true;
+        }
+        let Some(annotation) = class(ty) else { continue };
+        if !annotation.methods.iter().any(|m| m.name == "applyIfPresent" && m.desc == "()Z") {
+            continue;
+        }
+        let Some(list) = annotation.methods.iter().find(|m| m.desc.starts_with("()[L")) else { continue };
+        let names: Vec<&str> = a.value(&list.name).unwrap_or("").split(',').filter(|n| !n.is_empty()).collect();
+        let element = &list.desc[4..list.desc.len() - 1];
+        let ids: Vec<String> = if element == "java/lang/String" {
+            names.iter().map(|n| n.to_string()).collect()
+        } else {
+            let constants = class(element).map(|e| enum_strings(&e)).unwrap_or_default();
+            names.iter().map(|n| constants.get(*n).cloned().unwrap_or_else(|| n.to_string()).to_lowercase()).collect()
+        };
+        let apply_if_present = a.value("applyIfPresent").is_none_or(|v| v == "1" || v == "true");
+        let any = ids.iter().any(|id| mods.contains(id));
+        if any != apply_if_present {
+            return true;
+        }
+    }
+    false
+}
+
+/// An enum's constants with the first string its static initialiser hands each one's constructor
+/// after the name (`EXTENDEDFLYWHEELS("extendedflywheels")`).
+fn enum_strings(e: &ClassFile) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Some(code) = e.methods.iter().find(|m| m.name == "<clinit>").and_then(|m| m.code.as_ref()) else { return out };
+    let Ok(insns) = insn::decode(&code.bytes) else { return out };
+    // `new E; dup; ldc "NAME"; <ordinal>; [ldc "id"; ...] invokespecial E.<init>; putstatic E.NAME`.
+    let mut strings: Vec<String> = Vec::new();
+    for i in &insns {
+        match (i.op, &i.arg) {
+            (0xbb, _) => strings.clear(),
+            (0x12 | 0x13, insn::Operand::Int(v)) => {
+                if let Some(class::Const::String(u)) = e.pool.get(*v as usize)
+                    && let Ok(text) = e.utf8(*u)
+                {
+                    strings.push(text);
+                }
+            }
+            (0xb3, insn::Operand::Int(v)) => {
+                if let Some(m) = e.member(*v as u16)
+                    && m.owner == e.name
+                    && strings.first() == Some(&m.name)
+                    && let Some(id) = strings.get(1)
+                {
+                    out.insert(m.name.clone(), id.clone());
+                }
+                strings.clear();
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The mixin configurations of `jars` and of the jars they bundle, as FML hands them to Mixin:
@@ -270,18 +341,51 @@ pub fn mixin_configs_of(jars: &[&Path]) -> Vec<MixinConfig> {
                 classes,
                 default_require: json["injectors"]["defaultRequire"].as_i64().unwrap_or(0),
                 plugin: json["plugin"].as_str().map(|p| p.replace('.', "/")),
+                off: Vec::new(),
             });
         }
     }
-    let mut out = Vec::new();
+    // Every jar and the jars they bundle, in memory: the plugins' mixins are read from them.
+    let mut zips: Vec<zip::ZipArchive<std::io::Cursor<Vec<u8>>>> = Vec::new();
     for jar in jars {
-        let Ok(mut zip) = std::fs::File::open(jar).map_err(|_| ()).and_then(|f| zip::ZipArchive::new(f).map_err(|_| ())) else { continue };
-        read(&mut zip, &mut out);
-        for b in nested_jars(&mut zip) {
-            if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) {
-                read(&mut inner, &mut out);
+        let Ok(bytes) = std::fs::read(jar) else { continue };
+        let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else { continue };
+        let nested = nested_jars(&mut zip);
+        zips.push(zip);
+        zips.extend(nested.into_iter().filter_map(|b| zip::ZipArchive::new(std::io::Cursor::new(b)).ok()));
+    }
+    let mut out = Vec::new();
+    let mut mods: std::collections::BTreeSet<String> = ["minecraft", "neoforge"].iter().map(|m| m.to_string()).collect();
+    for zip in &mut zips {
+        read(zip, &mut out);
+        for toml in ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"] {
+            let Some(text) = entry(zip, toml) else { continue };
+            let mut in_mod = false;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    in_mod = line == "[[mods]]";
+                } else if let (true, Some((k, v))) = (in_mod, line.split_once('='))
+                    && k.trim() == "modId"
+                {
+                    mods.insert(bundle::toml_string(v).to_owned());
+                }
             }
+            break;
         }
+    }
+    // What their plugins turn off.
+    let zips = std::cell::RefCell::new(zips);
+    let class = |name: &str| -> Option<ClassFile> {
+        let mut zips = zips.borrow_mut();
+        zips.iter_mut().find_map(|z| {
+            let mut bytes = Vec::new();
+            z.by_name(&format!("{name}.class")).ok()?.read_to_end(&mut bytes).ok()?;
+            ClassFile::parse(&bytes).ok()
+        })
+    };
+    for config in out.iter_mut().filter(|c| c.plugin.is_some()) {
+        config.off = config.classes.iter().filter(|m| class(m).is_some_and(|k| plugin_turns_off(&k, &class, &mods))).cloned().collect();
     }
     out
 }
@@ -684,8 +788,9 @@ mod mixin_census_tests {
                     classes: vec!["com/m/mixin/KineticMixin".into(), "com/m/mixin/compat/TrackMixin".into(), "com/m/mixin/ScreenMixin".into()],
                     default_require: 1,
                     plugin: Some("com/m/mixin/Plugin".into()),
+                    off: Vec::new(),
                 },
-                MixinConfig { file: "old.mixins.json".into(), classes: vec!["com/m/old/ServerMixin".into()], default_require: 0, plugin: None },
+                MixinConfig { file: "old.mixins.json".into(), classes: vec!["com/m/old/ServerMixin".into()], default_require: 0, plugin: None, off: Vec::new() },
             ]
         );
     }

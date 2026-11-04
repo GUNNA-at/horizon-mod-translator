@@ -82,11 +82,19 @@ pub struct Annotation {
     /// The type's descriptor, as `Lnet/neoforged/bus/api/SubscribeEvent;`.
     pub ty: String,
     pub values: Vec<(String, String)>,
+    /// The values that are annotations (one, or an array of them), as annotations: a mixin's
+    /// `at = @At(...)`, `slice = @Slice(from = @At(...))`.
+    pub nested: Vec<(String, Vec<Annotation>)>,
 }
 
 impl Annotation {
     pub fn value(&self, name: &str) -> Option<&str> {
         self.values.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+
+    /// The annotations value `name` holds (none when it holds none, or is not given).
+    pub fn nested(&self, name: &str) -> &[Annotation] {
+        self.nested.iter().find(|(n, _)| n == name).map_or(&[], |(_, v)| v.as_slice())
     }
 }
 
@@ -295,37 +303,50 @@ impl ClassFile {
     fn annotation(&self, r: &mut Reader) -> Result<Annotation, String> {
         let ty = self.utf8(r.u2()?)?;
         let mut values = Vec::new();
+        let mut nested = Vec::new();
         for _ in 0..r.u2()? {
             let name = self.utf8(r.u2()?)?;
-            values.push((name, self.element_value(r)?));
+            let (text, inner) = self.element_value(r)?;
+            if !inner.is_empty() {
+                nested.push((name.clone(), inner));
+            }
+            values.push((name, text));
         }
-        Ok(Annotation { ty, values })
+        Ok(Annotation { ty, values, nested })
     }
 
-    fn element_value(&self, r: &mut Reader) -> Result<String, String> {
+    /// An element value as text, and the annotations it holds.
+    fn element_value(&self, r: &mut Reader) -> Result<(String, Vec<Annotation>), String> {
         Ok(match r.u1()? {
-            b's' => self.utf8(r.u2()?)?,
+            b's' => (self.utf8(r.u2()?)?, Vec::new()),
             b'e' => {
                 r.u2()?; // the enum's type
-                self.utf8(r.u2()?)?
+                (self.utf8(r.u2()?)?, Vec::new())
             }
-            b'c' => self.utf8(r.u2()?)?,
+            b'c' => (self.utf8(r.u2()?)?, Vec::new()),
             // A nested one with its values, `|` between them (an array's are `,`, and a
             // descriptor has `;`): `Lorg/spongepowered/asm/mixin/injection/At;(value=INVOKE|target=...)`.
             b'@' => {
                 let a = self.annotation(r)?;
                 let values: Vec<String> = a.values.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                format!("{}({})", a.ty, values.join("|"))
+                (format!("{}({})", a.ty, values.join("|")), vec![a])
             }
-            b'[' => (0..r.u2()?).map(|_| self.element_value(r)).collect::<Result<Vec<_>, _>>()?.join(","),
-            _ => match self.pool.get(r.u2()? as usize) {
-                Some(Const::Int(i)) => i.to_string(),
-                Some(Const::Long(j)) => j.to_string(),
-                Some(Const::Float(f)) => f.to_string(),
-                Some(Const::Double(d)) => d.to_string(),
-                Some(Const::Utf8(s)) => s.clone(),
-                _ => String::new(),
-            },
+            b'[' => {
+                let items = (0..r.u2()?).map(|_| self.element_value(r)).collect::<Result<Vec<_>, _>>()?;
+                let text = items.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(",");
+                (text, items.into_iter().flat_map(|(_, a)| a).collect())
+            }
+            _ => (
+                match self.pool.get(r.u2()? as usize) {
+                    Some(Const::Int(i)) => i.to_string(),
+                    Some(Const::Long(j)) => j.to_string(),
+                    Some(Const::Float(f)) => f.to_string(),
+                    Some(Const::Double(d)) => d.to_string(),
+                    Some(Const::Utf8(s)) => s.clone(),
+                    _ => String::new(),
+                },
+                Vec::new(),
+            ),
         })
     }
 

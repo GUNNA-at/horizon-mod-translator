@@ -161,4 +161,47 @@ public class Probe {
     public static int nameLength() {
         return new Gauge().nameLength("abc");
     }
+
+    public static int sliced(int n) {
+        return new Dial().sliced(n);
+    }
+
+    public static int slicedSeen(int n) {
+        Dial d = new Dial();
+        d.sliced(n);
+        return d.seen;
+    }
+
+    public static int sevens(int n) {
+        return new Dial().sevens(n);
+    }
+
+    public static int half(int n) {
+        return (int) (new Dial().half(n) * 10);
+    }
+
+    public static String dialName() {
+        return new Dial().name();
+    }
+
+    public static int tens() {
+        return new Dial().tens();
+    }
+
+    public static int made(int n) {
+        return new Dial().made(n);
+    }
+
+    public static int counted(int n) {
+        return new Dial().counted(n);
+    }
+
+    public static int isText(int n) {
+        Object o = n > 0 ? new Dial() : n == 0 ? (Object) "s" : new Gauge();
+        return new Dial().isText(o) ? 1 : 0;
+    }
+
+    public static int first(int n) {
+        return new Dial().first(n, 5);
+    }
 }

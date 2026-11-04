@@ -5,8 +5,10 @@
 //! interface it adds), handlers taking the target's locals (`GaugeMixin`: MixinExtras' `@Local`
 //! by type, ordinal and name, its refs, `@Share`; Mixin's captured locals at one return;
 //! `INVOKE_ASSIGN`), weaves at field reads and writes (`@At("FIELD")`), `@ModifyVariable` (at the
-//! head, after a store, before a call), `@ModifyReceiver`, an enum constant added through a constructor invoker (`ModeMixin`), and a
-//! class calling the targets as other code would (`Probe`). They are compiled against stubs of Mixin's annotations,
+//! head, after a store, before a call), `@ModifyReceiver`, an enum constant added through a constructor invoker (`ModeMixin`),
+//! handlers at constants (`@ModifyConstant`, `@At("CONSTANT")`), before `new`s, round an
+//! `instanceof`, and in `@Slice`s of their methods (`DialMixin`), and a class calling the targets
+//! as other code would (`Probe`). They are compiled against stubs of Mixin's annotations,
 //! translated together and run; each answer is the one Mixin's weaving gives, worked out by hand
 //! from what the handlers do. Needs `javac`.
 use std::{fs, path::Path, process::Command};
@@ -79,6 +81,23 @@ const CASES: &[(&str, &str, i32, &str)] = &[
     ("spread", "(I)I", 2, "12"),
     // `@ModifyReceiver`: the length of "abc!!".
     ("nameLength", "()I", 0, "5"),
+    // Slices: the second `step` doubled (4 × 100 + 8), an injection before the first only.
+    ("sliced", "(I)I", 3, "408"),
+    ("slicedSeen", "(I)I", 3, "1"),
+    // Constants: 3 × 8; 2 × (2.5 + 2), × 10; "dial!"; 10 + (10 + 5).
+    ("sevens", "(I)I", 3, "24"),
+    ("half", "(I)I", 2, "90"),
+    ("dialName", "()Ljava/lang/String;", 0, "dial!"),
+    ("tens", "()I", 0, "25"),
+    // Before a `new`: 1 + 40; `count` tripled.
+    ("made", "(I)I", 5, "41"),
+    ("counted", "(I)I", 4, "12"),
+    // An `instanceof` wrapped: a `Dial` counts as text, a `String` still does, a `Gauge` not.
+    ("isText", "(I)I", 1, "1"),
+    ("isText", "(I)I", 0, "1"),
+    ("isText", "(I)I", -1, "0"),
+    // The method's first argument after the value: (2 + 1) + 2000, + 5.
+    ("first", "(I)I", 2, "2008"),
 ];
 
 #[test]
@@ -118,13 +137,24 @@ fn a_mixin_into_a_translated_class_is_woven_as_mixin_weaves_it() {
         file: "weave.mixins.json".into(),
         classes: classes.iter().map(|c| c.to_string()).collect(),
         default_require: 1,
-        plugin: None,
+        ..Default::default()
     };
-    let every = horizon_mod_translator::weave::plan_with(&all, &[config(&["weave/MachineMixin", "weave/GaugeMixin", "weave/ModeMixin"])]);
+    let every = horizon_mod_translator::weave::plan_with(&all, &[config(&["weave/MachineMixin", "weave/GaugeMixin", "weave/ModeMixin", "weave/DialMixin"])]);
     assert_eq!(every.weaves, horizon_mod_translator::weave::plan(&parsed).weaves);
     let one = horizon_mod_translator::weave::plan_with(&all, &[config(&["weave/MachineMixin"])]);
     assert!(!one.weaves.is_empty() && one.weaves.keys().all(|k| k.starts_with("weave/Machine.")));
     assert!(horizon_mod_translator::weave::plan_with(&all, &[config(&["weave/OtherMixin"])]).weaves.is_empty());
+
+    // A config plugin of the addons' kind turns mixins off by the mods there are: an enum constant
+    // names its mod by the string it is made with, else by its name.
+    let load = |name: &str| fs::read(classes.join(format!("{name}.class"))).ok().and_then(|b| horizon_mod_translator::class::ClassFile::parse(&b).ok());
+    let mods: std::collections::BTreeSet<String> = ["create", "extra_mod"].map(String::from).into();
+    let off = |m: &str| horizon_mod_translator::plugin_turns_off(&load(m).unwrap(), &load, &mods);
+    assert!(!off("weave/OnlyWithCreateMixin"));
+    assert!(off("weave/OnlyWithGoneMixin"));
+    assert!(!off("weave/WithoutGoneMixin"));
+    assert!(!off("weave/OnlyWithExtraMixin"));
+    assert!(!off("weave/GaugeMixin"));
 
     // One class a file, as a bundle splits a mod (`emit_files`): the woven code calls across them.
     let mut program = horizon_mod_translator::codegen::Program::new(&parsed);

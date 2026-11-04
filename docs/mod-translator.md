@@ -1479,6 +1479,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `@ModifyVariable`, `@ModifyReceiver`, an enum constant added by a constructor invoker; the
     fixture compiled with `-g` as Gradle compiles mods, and plans with and without a
     configuration), `mixin_census_tests::mixin_configs_are_found_as_fml_finds_them`.
+  - [x] 2026-11-04 Weaving: slices, constants, `new`s, `instanceof`s. Five mods as one engine
+    (Create, New Age, Create: Connected, Create: Vibrant Vaults, Create: Pattern Schematics; the
+    harness's `WITH=` all four): TABS lists Vibrant Vaults' tab (165 items) and Create's base tab
+    with 205 items, not 203, because Pattern Schematics' `@Redirect` into Create's
+    `RegistrateDisplayItemsGenerator.outputAll` puts its `empty_pattern_schematic` and
+    `pattern_schematic_and_quill` before Create's `empty_schematic` and `schematic_and_quill`, as
+    its handler does (it accepts the inserted item first, then the original); COIL and FILTER as
+    before. New: a mixin's nested annotations are kept as annotations (`Annotation::nested`), so
+    `@Slice` works (`from`/`to`, the first place each names or the last with `:LAST`; a `from` that
+    finds nothing starts at the method's start, a `to` that finds nothing ends at the slice's start,
+    as Mixin's `MethodSlice`; ordinals count inside the slice); `@At("CONSTANT")` (`args` with
+    `intValue`, `floatValue`, `longValue`, `doubleValue`, `stringValue`, `classValue`, `nullValue`)
+    and `@ModifyConstant` (its `@Constant`s, or every constant of its handler's type without one);
+    `@At("NEW")` (a class, or a constructor's descriptor) for `@Inject` and `@ModifyVariable`;
+    MixinExtras' `@WrapOperation` of an `instanceof` (`constant = @Constant(classValue = ...)`: the
+    handler gets the object and the check as an `Operation`); handlers that take the target
+    method's first arguments after their own, as many as they have room for (Mixin's
+    `captureTargetArgs`: Railways' `@ModifyExpressionValue` of a constant takes 5 of
+    `tryConnect`'s 7). Over the 20 addons: 983 of 990 woven (99.3%; was 969). Left: 3
+    `@WrapMethod`s with a `@Share` (Create Big Cannons), 2 `shift = BY` (counts ASM's label, line
+    and frame nodes, which the translator does not have), 1 `@Redirect` of a `new` (Sable), 1
+    `@Local` by a name the local variable table doesn't have there. Mixins into the game's own
+    classes (not translated) are still the hooks' (`horizon-compat`'s). Config plugins of the kind
+    Create's addons share are run as they decide (`plugin_turns_off`): a mixin annotated with mods
+    (strings, or an enum's constants: the string each is made with, else its lowercased name) and
+    `applyIfPresent` applies when any of those mods is among the jars translated together exactly
+    when `applyIfPresent` says (Create: Connected's and Copycats+' `@ModMixin`, Railways'
+    `@ConditionalMixin`; `@DevEnvMixin`s never). With Create alone, Copycats+ turns 6 of its
+    compat mixins off (Sodium's, Radium's, Diagonal Blocks'...) and Railways 5 (Simple Voice
+    Chat's, MaLiLib's); Create: Connected's 3 that apply without Railways stay on (its
+    `@ModMixin(mods = "railways", applyIfPresent = false)`). Other plugins (73 in the pack, most
+    deciding by mods or configs, some rewriting classes with ASM) apply every mixin still. Tests:
+    `tests/weave.rs` 56 answers (`DialMixin`: slices on both ends, a `@ModifyConstant` by value and
+    by type with the method's argument, a string constant, a constant in a slice, before `new`s, an
+    `instanceof`, an argument prefix) and a plugin's choices (`@ModMixin` with an enum's mods: one
+    there, one not, one by the string its constant is made with, `applyIfPresent = false`).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

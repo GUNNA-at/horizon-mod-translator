@@ -15,7 +15,7 @@
 //! `Operation` it may make) and `@WrapMethod` (the whole method so) too. What it doesn't weave
 //! (other `@At`s, captured locals...) is counted in the plan's `unsupported`, as the codegen counts
 //! what it can't translate.
-use crate::class::{ClassFile, Member, Method};
+use crate::class::{Annotation, ClassFile, Member, Method};
 use std::collections::BTreeMap;
 
 const MIXIN: &str = "Lorg/spongepowered/asm/mixin/";
@@ -50,6 +50,99 @@ pub enum Kind {
     /// MixinExtras' `@ModifyReceiver`: a call's receiver goes through the handler, which also
     /// gets the call's arguments.
     ModifyReceiver,
+    /// `@ModifyConstant`: a constant goes through the handler (with the method's arguments when
+    /// it takes them).
+    ModifyConstant,
+}
+
+/// A constant an `@At("CONSTANT")` (or a `@ModifyConstant`'s `@Constant`) names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Constant {
+    Null,
+    Int(i32),
+    /// Its bits, as Java's `Float.equals` compares.
+    Float(u32),
+    Long(i64),
+    Double(u64),
+    String(String),
+    /// A class literal, by internal name.
+    Class(String),
+    /// Any constant of this type (a descriptor): a `@ModifyConstant` without a value takes the
+    /// constants of its handler's type.
+    OfType(String),
+}
+
+impl Constant {
+    /// The type of the constant, as Mixin's `Bytecode.getConstantType` gives it.
+    fn type_desc(&self) -> &str {
+        match self {
+            Constant::Null => "Ljava/lang/Object;",
+            Constant::Int(_) => "I",
+            Constant::Float(_) => "F",
+            Constant::Long(_) => "J",
+            Constant::Double(_) => "D",
+            Constant::String(_) => "Ljava/lang/String;",
+            Constant::Class(_) => "Ljava/lang/Class;",
+            Constant::OfType(t) => t,
+        }
+    }
+
+    /// Whether the constant an instruction pushes (`found`) is one this names.
+    pub fn matches(&self, found: &Constant) -> bool {
+        match self {
+            Constant::OfType(t) => found.type_desc() == t,
+            _ => self == found,
+        }
+    }
+}
+
+/// The constant instruction `i` (of `c`) pushes: `aconst_null`, `iconst_*`... `bipush`, `sipush`,
+/// `ldc` of a number, string or class; and the class an `instanceof` or `checkcast` names, which
+/// Mixin's `classValue` matches too.
+pub fn constant_of(c: &ClassFile, i: &crate::insn::Insn) -> Option<Constant> {
+    use crate::class::Const;
+    let idx = match &i.arg {
+        crate::insn::Operand::Int(v) => *v,
+        _ => 0,
+    };
+    Some(match i.op {
+        0x01 => Constant::Null,
+        0x02..=0x08 => Constant::Int(i.op as i32 - 3),
+        0x09 | 0x0a => Constant::Long(i64::from(i.op - 0x09)),
+        0x0b..=0x0d => Constant::Float(f32::from(i.op - 0x0b).to_bits()),
+        0x0e | 0x0f => Constant::Double(f64::from(i.op - 0x0e).to_bits()),
+        0x10 | 0x11 => Constant::Int(idx),
+        0x12..=0x14 => match c.pool.get(idx as usize)? {
+            Const::Int(v) => Constant::Int(*v),
+            Const::Float(v) => Constant::Float(v.to_bits()),
+            Const::Long(v) => Constant::Long(*v),
+            Const::Double(v) => Constant::Double(v.to_bits()),
+            Const::String(u) => Constant::String(c.utf8(*u).ok()?),
+            Const::Class(n) => Constant::Class(c.utf8(*n).ok()?),
+            _ => return None,
+        },
+        0xc0 | 0xc1 => Constant::Class(c.class_name(idx as u16).ok()?),
+        _ => return None,
+    })
+}
+
+impl Kind {
+    /// Its annotation's name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Kind::Inject { .. } => "@Inject",
+            Kind::Redirect => "@Redirect",
+            Kind::ModifyArg { .. } => "@ModifyArg",
+            Kind::ModifyExpressionValue => "@ModifyExpressionValue",
+            Kind::WrapWithCondition => "@WrapWithCondition",
+            Kind::ModifyReturnValue => "@ModifyReturnValue",
+            Kind::WrapOperation => "@WrapOperation",
+            Kind::WrapMethod => "@WrapMethod",
+            Kind::ModifyVariable { .. } => "@ModifyVariable",
+            Kind::ModifyReceiver => "@ModifyReceiver",
+            Kind::ModifyConstant => "@ModifyConstant",
+        }
+    }
 }
 
 /// MixinExtras' `Operation`: what a wrapping handler calls to run what it wraps.
@@ -73,9 +166,29 @@ pub enum At {
     /// After a store into the local a `@ModifyVariable` modifies (the `n`th such store when
     /// `ordinal` says).
     Store { ordinal: Option<usize> },
+    /// A constant pushed (`ldc`, `iconst_1`, `bipush`...), the `n`th such when `ordinal` says.
+    Constant { value: Constant, ordinal: Option<usize> },
+    /// An object made: a `new` of `class` (whose constructor, called after it, is `desc` when
+    /// given), the `n`th `new` of the class when `ordinal` says.
+    New { class: String, desc: Option<String>, ordinal: Option<usize> },
 }
 
 impl At {
+    /// Its type, as `@At` names it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            At::Head => "HEAD",
+            At::Return { .. } => "RETURN",
+            At::Tail => "TAIL",
+            At::Invoke { assign: true, .. } => "INVOKE_ASSIGN",
+            At::Invoke { .. } => "INVOKE",
+            At::Field { .. } => "FIELD",
+            At::Store { .. } => "STORE",
+            At::Constant { .. } => "CONSTANT",
+            At::New { .. } => "NEW",
+        }
+    }
+
     /// Whether instruction `op` naming `m` (a call, or a field access) is one this `@At` names.
     /// Mixin compares the owner as the instruction writes it, not the class that declares it.
     pub fn names(&self, op: u8, m: &Member) -> bool {
@@ -88,9 +201,10 @@ impl At {
         }
     }
 
-    /// Whether it is at an instruction (a call or a field access) rather than the method's ends.
+    /// Whether it is at an instruction (a call, a field access, a constant, a `new`) rather than
+    /// the method's ends.
     pub fn at_instruction(&self) -> bool {
-        matches!(self, At::Invoke { .. } | At::Field { .. })
+        matches!(self, At::Invoke { .. } | At::Field { .. } | At::Constant { .. } | At::New { .. })
     }
 }
 
@@ -384,11 +498,14 @@ fn resolve_locals(sugar: &[Sugar], m: &Method, pc: usize) -> Result<Vec<LocalArg
 
 /// The stores in `m` into the local `local` picks (as it picks one just after each store), the
 /// `ordinal`th only when given: (the store's offset, the next instruction's).
-fn store_sites(m: &Method, local: &Sugar, ordinal: Option<usize>) -> Vec<(usize, usize)> {
+fn store_sites(m: &Method, local: &Sugar, ordinal: Option<usize>, range: Option<(usize, usize)>) -> Vec<(usize, usize)> {
     let Some(code) = &m.code else { return Vec::new() };
     let Ok(insns) = crate::insn::decode(&code.bytes) else { return Vec::new() };
     let mut out = Vec::new();
     for (k, i) in insns.iter().enumerate() {
+        if range.is_some_and(|(lo, hi)| !(lo..=hi).contains(&i.at)) {
+            continue;
+        }
         let slot = match (i.op, &i.arg) {
             (0x36..=0x3a, crate::insn::Operand::Int(v)) => *v as u16,
             (0x3b..=0x4e, _) => ((i.op - 0x3b) % 4) as u16,
@@ -414,55 +531,122 @@ pub fn is_store(op: u8) -> bool {
 
 /// The places in `m` (of `c`) an `@At` goes, as the offsets the codegen weaves at (the call, the
 /// return, 0 for the head), each with the offset whose locals the handler sees (after the call
-/// for `shift = AFTER`).
-fn places(c: &ClassFile, m: &Method, at: &At) -> Vec<(usize, usize)> {
+/// for `shift = AFTER`); within `range` (offsets, both in) only, for a `@Slice`'s, where an
+/// `ordinal` counts.
+fn places(c: &ClassFile, m: &Method, at: &At, range: Option<(usize, usize)>) -> Vec<(usize, usize)> {
     let Some(code) = &m.code else { return Vec::new() };
     let Ok(insns) = crate::insn::decode(&code.bytes) else { return Vec::new() };
+    let inside = |i: &crate::insn::Insn| range.is_none_or(|(lo, hi)| (lo..=hi).contains(&i.at));
+    let next = |k: usize| insns.get(k + 1).map_or(insns[k].at, |x| x.at);
+    let nth = |hits: Vec<usize>, ordinal: &Option<usize>| -> Vec<usize> {
+        match ordinal {
+            Some(o) => hits.get(*o).copied().into_iter().collect(),
+            None => hits,
+        }
+    };
+    let at_k = |ks: Vec<usize>| ks.into_iter().map(|k| (insns[k].at, insns[k].at)).collect::<Vec<_>>();
     match at {
         At::Head => vec![(0, 0)],
         // Found by the local it stores into (`store_sites`).
         At::Store { .. } => Vec::new(),
-        At::Return { ordinal } => insns
-            .iter()
-            .filter(|i| matches!(i.op, 0xac..=0xb1))
-            .enumerate()
-            .filter(|(n, _)| ordinal.is_none_or(|o| o == *n))
-            .map(|(_, i)| (i.at, i.at))
-            .collect(),
-        At::Tail => insns.iter().rev().find(|i| matches!(i.op, 0xac..=0xb1)).map(|i| vec![(i.at, i.at)]).unwrap_or_default(),
+        At::Constant { value, ordinal } => {
+            let hits = (0..insns.len()).filter(|&k| inside(&insns[k]) && constant_of(c, &insns[k]).is_some_and(|x| value.matches(&x))).collect();
+            at_k(nth(hits, ordinal))
+        }
+        At::New { class, desc, ordinal } => {
+            let hits = (0..insns.len())
+                .filter(|&k| inside(&insns[k]) && insns[k].op == 0xbb && matches!(&insns[k].arg, crate::insn::Operand::Int(v) if c.class_name(*v as u16).is_ok_and(|n| n == *class)))
+                .collect();
+            // With a constructor named, a `new` some call of it follows (Mixin's `findCtor`).
+            let made = |k: &usize| {
+                desc.as_ref().is_none_or(|d| {
+                    insns[*k..].iter().any(|x| {
+                        x.op == 0xb7 && matches!(&x.arg, crate::insn::Operand::Int(v) if c.member(*v as u16).is_some_and(|mm| mm.name == "<init>" && mm.owner == *class && mm.desc == *d))
+                    })
+                })
+            };
+            at_k(nth(hits, ordinal).into_iter().filter(made).collect())
+        }
+        At::Return { ordinal } => at_k(nth((0..insns.len()).filter(|&k| inside(&insns[k]) && matches!(insns[k].op, 0xac..=0xb1)).collect(), ordinal)),
+        At::Tail => at_k((0..insns.len()).rev().find(|&k| inside(&insns[k]) && matches!(insns[k].op, 0xac..=0xb1)).into_iter().collect()),
         At::Invoke { ordinal, after, .. } | At::Field { ordinal, after, .. } => {
             let assign = matches!(at, At::Invoke { assign: true, .. });
-            let mut n = 0;
-            let mut out = Vec::new();
-            for (k, i) in insns.iter().enumerate() {
-                if !matches!(i.op, 0xb2..=0xb5 | 0xb6..=0xb9) {
-                    continue;
-                }
-                let member = match &i.arg {
-                    crate::insn::Operand::Int(v) => c.member(*v as u16),
-                    crate::insn::Operand::IndexCount(v, _) => c.member(*v),
-                    _ => None,
-                };
-                if member.is_some_and(|mm| at.names(i.op, &mm)) {
-                    if ordinal.is_none_or(|o| o == n) {
-                        // The locals the handler sees: before the call, or before what follows it
-                        // (and the store of its result, for `INVOKE_ASSIGN`).
-                        let next = |k: usize| insns.get(k + 1).map_or(i.at, |x| x.at);
-                        let seen = if assign && insns.get(k + 1).is_some_and(|x| is_store(x.op)) {
-                            next(k + 1)
-                        } else if *after {
-                            next(k)
-                        } else {
-                            i.at
-                        };
-                        out.push((i.at, seen));
-                    }
-                    n += 1;
-                }
-            }
-            out
+            let hits = (0..insns.len())
+                .filter(|&k| {
+                    let i = &insns[k];
+                    let member = match &i.arg {
+                        crate::insn::Operand::Int(v) if matches!(i.op, 0xb2..=0xb8) => c.member(*v as u16),
+                        crate::insn::Operand::IndexCount(v, _) if i.op == 0xb9 => c.member(*v),
+                        _ => None,
+                    };
+                    inside(i) && member.is_some_and(|mm| at.names(i.op, &mm))
+                })
+                .collect();
+            nth(hits, ordinal)
+                .into_iter()
+                .map(|k| {
+                    // The locals the handler sees: before the call, or before what follows it (and
+                    // the store of its result, for `INVOKE_ASSIGN`).
+                    let seen = if assign && insns.get(k + 1).is_some_and(|x| is_store(x.op)) {
+                        next(k + 1)
+                    } else if *after {
+                        next(k)
+                    } else {
+                        insns[k].at
+                    };
+                    (insns[k].at, seen)
+                })
+                .collect()
         }
     }
+}
+
+/// A `@Slice`: the part of a method its `@At`s look in, from the place `from` names to the one
+/// `to` names (both in; the first such place, or the last for a `:LAST` selector), either end the
+/// method's when not given.
+#[derive(Debug, Clone)]
+struct Slice {
+    id: String,
+    from: Option<(At, bool)>,
+    to: Option<(At, bool)>,
+}
+
+fn parse_slice(a: &Annotation) -> Result<Slice, String> {
+    let bound = |k: &str| -> Result<Option<(At, bool)>, String> {
+        let Some(at) = a.nested(k).first() else { return Ok(None) };
+        let selector = at.value("value").and_then(|v| v.split_once(':')).map_or("FIRST", |(_, s)| s);
+        if selector == "ONE" {
+            return Err("@Slice bound with selector ONE".into());
+        }
+        Ok(Some((parse_at(at)?, selector == "LAST")))
+    };
+    Ok(Slice { id: a.value("id").unwrap_or("").to_owned(), from: bound("from")?, to: bound("to")? })
+}
+
+/// The offsets (first, last: both in) of `s` in `m`, as Mixin's `MethodSlice` finds them: a
+/// `from` that finds nothing starts at the method's start, a `to` that finds nothing ends where
+/// the slice starts.
+fn slice_range(c: &ClassFile, m: &Method, s: &Slice) -> Result<(usize, usize), String> {
+    let len = m.code.as_ref().map_or(0, |code| code.bytes.len());
+    let find = |b: &Option<(At, bool)>| -> Option<Option<usize>> {
+        let (at, last) = b.as_ref()?;
+        if *at == At::Head {
+            return Some(Some(0));
+        }
+        let found = places(c, m, at, None);
+        // A shifted place's node is the instruction after (Mixin's `nextNode`).
+        let node = |(site, seen): (usize, usize)| if matches!(at, At::Invoke { after: true, .. } | At::Field { after: true, .. }) { seen } else { site };
+        Some(if *last { found.last() } else { found.first() }.map(|p| node(*p)))
+    };
+    let start = find(&s.from).flatten().unwrap_or(0);
+    let end = match find(&s.to) {
+        None => len,
+        Some(found) => found.unwrap_or(start),
+    };
+    if start > end {
+        return Err("@Slice ending before it starts".into());
+    }
+    Ok((start, end))
 }
 
 #[derive(Debug, Default)]
@@ -478,10 +662,62 @@ pub struct Plan {
     pub skipped: BTreeMap<String, usize>,
 }
 
-/// An `@At` annotation's values, from its rendering (`L...At;(value=INVOKE|target=...|ordinal=1)`).
-fn at_values(v: &str) -> BTreeMap<String, String> {
-    let inner = v.split_once('(').map_or("", |(_, r)| r.strip_suffix(')').unwrap_or(r));
-    inner.split('|').filter_map(|p| p.split_once('=')).map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+/// An `@At`'s `args` (`["doubleValue=0.25d", "log=true"]`, joined by `,`) as pairs.
+fn at_args(v: &str) -> BTreeMap<String, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for part in v.split(',') {
+        match part.split_once('=') {
+            Some((k, val)) if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => out.push((k.to_owned(), val.to_owned())),
+            // A `,` in a value (a string's): it goes on.
+            _ => {
+                if let Some(last) = out.last_mut() {
+                    last.1.push(',');
+                    last.1.push_str(part);
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The constant `get` names (`intValue`, `doubleValue`... as an `@At("CONSTANT")`'s `args` or a
+/// `@Constant`'s values), or, naming none, any of type `by_type` when given (`@ModifyConstant`'s).
+fn constant_named(get: &dyn Fn(&str) -> Option<String>, by_type: Option<&str>) -> Result<Constant, String> {
+    // Java's own float syntax takes a type suffix: `64f`, `0.25d`.
+    let number = |v: &str| v.trim().trim_end_matches(['f', 'F', 'd', 'D']).to_owned();
+    let mut found = Vec::new();
+    if get("nullValue").is_some_and(|v| v == "true" || v == "1") {
+        found.push(Constant::Null);
+    }
+    if let Some(v) = get("intValue") {
+        found.push(Constant::Int(v.trim().parse().map_err(|_| format!("intValue {v}"))?));
+    }
+    if let Some(v) = get("floatValue") {
+        found.push(Constant::Float(number(&v).parse::<f32>().map_err(|_| format!("floatValue {v}"))?.to_bits()));
+    }
+    if let Some(v) = get("longValue") {
+        found.push(Constant::Long(v.trim().trim_end_matches(['l', 'L']).parse().map_err(|_| format!("longValue {v}"))?));
+    }
+    if let Some(v) = get("doubleValue") {
+        found.push(Constant::Double(number(&v).parse::<f64>().map_err(|_| format!("doubleValue {v}"))?.to_bits()));
+    }
+    if let Some(v) = get("stringValue") {
+        found.push(Constant::String(v));
+    }
+    if let Some(v) = get("classValue") {
+        // `com.a.B` in an `@At`'s args, `Lcom/a/B;` as a `@Constant`'s class.
+        let v = v.strip_prefix('L').and_then(|r| r.strip_suffix(';')).map(str::to_owned).unwrap_or(v);
+        found.push(Constant::Class(v.replace('.', "/")));
+    }
+    if get("expandZeroConditions").is_some_and(|v| !v.is_empty()) {
+        return Err("@At CONSTANT expandZeroConditions".into());
+    }
+    match (found.len(), by_type) {
+        (1, _) => Ok(found.remove(0)),
+        (0, Some(t)) => Ok(Constant::OfType(t.to_owned())),
+        (0, None) => Err("@At CONSTANT without a value".into()),
+        _ => Err("@At CONSTANT with several values".into()),
+    }
 }
 
 /// `Lnet/minecraft/world/level/Level;setBlock(Lnet/...;I)Z` (or `net/.../Level.setBlock(...)Z`,
@@ -499,28 +735,30 @@ pub fn member_of(target: &str) -> Option<(String, String, String)> {
     Some((owner, name, desc.to_owned()))
 }
 
-fn parse_at(v: &str) -> Result<At, String> {
-    let at = at_values(v);
-    let value = at.get("value").map(String::as_str).unwrap_or("");
-    let shift = at.get("shift").map(String::as_str).unwrap_or("");
+fn parse_at(a: &Annotation) -> Result<At, String> {
+    let raw = a.value("value").unwrap_or("");
+    // A selector after it (`INVOKE:LAST`) matters to a slice's bounds only.
+    let value = raw.split_once(':').map_or(raw, |(v, _)| v);
+    let shift = a.value("shift").unwrap_or("");
+    let ordinal = a.value("ordinal").and_then(|o| o.parse::<i64>().ok()).filter(|o| *o >= 0).map(|o| o as usize);
+    let args = at_args(a.value("args").unwrap_or(""));
+    let plain_shift = || if matches!(shift, "" | "BEFORE" | "AFTER") { Ok(()) } else { Err(format!("@At shift {shift}")) };
     Ok(match value {
         "HEAD" => At::Head,
-        "STORE" => At::Store { ordinal: at.get("ordinal").and_then(|o| o.parse::<i64>().ok()).filter(|o| *o >= 0).map(|o| o as usize) },
-        "RETURN" => At::Return { ordinal: at.get("ordinal").and_then(|o| o.parse::<i64>().ok()).filter(|o| *o >= 0).map(|o| o as usize) },
+        "STORE" => At::Store { ordinal },
+        "RETURN" => At::Return { ordinal },
         "TAIL" => At::Tail,
         "INVOKE" | "INVOKE_ASSIGN" => {
-            let target = at.get("target").ok_or("INVOKE without a target")?;
+            plain_shift()?;
+            let target = a.value("target").ok_or("INVOKE without a target")?;
             let (owner, name, desc) = member_of(target).ok_or_else(|| format!("target {target}"))?;
-            let ordinal = at.get("ordinal").and_then(|o| o.parse::<i64>().ok()).filter(|o| *o >= 0).map(|o| o as usize);
-            if !matches!(shift, "" | "BEFORE" | "AFTER") {
-                return Err(format!("@At shift {shift}"));
-            }
             At::Invoke { owner, name, desc, ordinal, after: shift == "AFTER" || value == "INVOKE_ASSIGN", assign: value == "INVOKE_ASSIGN" }
         }
         "FIELD" => {
-            let target = at.get("target").ok_or("FIELD without a target")?;
+            plain_shift()?;
+            let target = a.value("target").ok_or("FIELD without a target")?;
             // `Lowner;name:Ldesc;` (or `owner.name:desc`, or a bare `name:desc`).
-            let (head, desc) = target.split_once(':').unwrap_or((target.as_str(), ""));
+            let (head, desc) = target.split_once(':').unwrap_or((target, ""));
             let (owner, name) = if let Some((o, n)) = head.strip_prefix('L').and_then(|r| r.split_once(';')) {
                 (o.to_owned(), n.to_owned())
             } else if let Some((o, n)) = head.rsplit_once('.') {
@@ -528,12 +766,27 @@ fn parse_at(v: &str) -> Result<At, String> {
             } else {
                 (String::new(), head.to_owned())
             };
-            let ordinal = at.get("ordinal").and_then(|o| o.parse::<i64>().ok()).filter(|o| *o >= 0).map(|o| o as usize);
-            let opcode = at.get("opcode").and_then(|o| o.parse::<i64>().ok()).filter(|o| (0xb2..=0xb5).contains(o)).map(|o| o as u8);
-            if !matches!(shift, "" | "BEFORE" | "AFTER") {
-                return Err(format!("@At shift {shift}"));
-            }
+            let opcode = a.value("opcode").and_then(|o| o.parse::<i64>().ok()).filter(|o| (0xb2..=0xb5).contains(o)).map(|o| o as u8);
             At::Field { owner, name, desc: desc.to_owned(), opcode, ordinal, after: shift == "AFTER" }
+        }
+        "CONSTANT" => {
+            if !shift.is_empty() && shift != "BEFORE" {
+                return Err(format!("@At CONSTANT shift {shift}"));
+            }
+            At::Constant { value: constant_named(&|k| args.get(k).cloned(), None)?, ordinal }
+        }
+        "NEW" => {
+            if !shift.is_empty() && shift != "BEFORE" {
+                return Err(format!("@At NEW shift {shift}"));
+            }
+            // `com/a/B`, `Lcom/a/B;`, or a constructor's descriptor returning it: `(D)Lcom/a/B;`.
+            let target = a.value("target").filter(|t| !t.is_empty()).map(str::to_owned).or_else(|| args.get("class").cloned()).ok_or("NEW without a class")?;
+            let (class, desc) = match target.strip_prefix('(').and_then(|r| r.split_once(')')) {
+                Some((params, ret)) => (ret.to_owned(), Some(format!("({params})V"))),
+                None => (target.clone(), None),
+            };
+            let class = class.strip_prefix('L').and_then(|r| r.strip_suffix(';')).map(str::to_owned).unwrap_or(class).replace('.', "/");
+            At::New { class, desc, ordinal }
         }
         other => return Err(format!("@At {other}")),
     })
@@ -595,7 +848,11 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
     let mut order: Vec<(&ClassFile, i64)> = if configs.is_empty() {
         classes.iter().map(|c| (*c, 0)).collect()
     } else {
-        configs.iter().flat_map(|c| c.classes.iter().filter_map(|m| by_name.get(m.as_str()).map(|k| (*k, c.default_require)))).collect()
+        // Less those its plugin turns off.
+        configs
+            .iter()
+            .flat_map(|c| c.classes.iter().filter(|m| !c.off.contains(m)).filter_map(|m| by_name.get(m.as_str()).map(|k| (*k, c.default_require))))
+            .collect()
     };
     // Lower priorities first (`@Mixin(priority = ...)`, 1000 if not given).
     order.sort_by_key(|(m, _)| m.annotation_of("Lorg/spongepowered/asm/mixin/Mixin;").and_then(|a| a.value("priority")).and_then(|p| p.parse::<i64>().ok()).unwrap_or(1000));
@@ -612,13 +869,6 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                     if !injector || matches!(simple, "At" | "Slice" | "Coerce" | "Desc" | "Group") {
                         continue;
                     }
-                    // A slice narrows where the `@At` looks; without it the handler would go to
-                    // places Mixin leaves alone.
-                    if a.value("slice").is_some_and(|v| !v.is_empty()) {
-                        count(&mut plan, "mixin @Slice".into());
-                        continue;
-                    }
-                    let at_value = a.value("at").unwrap_or("");
                     let kind = match simple {
                         "Inject" => Kind::Inject { cancellable: a.value("cancellable") == Some("1") },
                         "Redirect" => Kind::Redirect,
@@ -629,6 +879,7 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                         "WrapOperation" => Kind::WrapOperation,
                         "WrapMethod" => Kind::WrapMethod,
                         "ModifyReceiver" => Kind::ModifyReceiver,
+                        "ModifyConstant" => Kind::ModifyConstant,
                         // The local of the handler's type, picked as `@Local` picks one.
                         "ModifyVariable" => Kind::ModifyVariable {
                             local: Sugar::Local {
@@ -645,21 +896,62 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                             continue;
                         }
                     };
-                    // `at = {@At(...), @At(...)}`: each place. A whole method's wrapper has none.
-                    let ats: Vec<&str> = if kind == Kind::WrapMethod {
-                        vec!["Lorg/spongepowered/asm/mixin/injection/At;(value=HEAD)"]
-                    } else {
-                        at_value.split(",Lorg/spongepowered/asm/mixin/injection/At;").collect()
+                    // Slices narrow where an `@At` looks: the one its `slice` id names.
+                    let slices: Vec<Slice> = match a.nested("slice").iter().map(parse_slice).collect::<Result<_, _>>() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            debug(|| format!("{e}: {}.{}{}", mixin.name, h.name, h.desc));
+                            count(&mut plan, format!("mixin {e}"));
+                            continue;
+                        }
                     };
-                    for (i, at_text) in ats.iter().enumerate() {
-                        let at_text = if i == 0 { at_text.to_string() } else { format!("Lorg/spongepowered/asm/mixin/injection/At;{at_text}") };
-                        let at = match parse_at(&at_text) {
+                    // `at = {@At(...), @At(...)}`: each place, with the id of its slice. A
+                    // `@ModifyConstant`'s are its `@Constant`s (any constant of its type without
+                    // one); a whole method's wrapper has none.
+                    let ats: Vec<(Result<At, String>, String)> = match &kind {
+                        Kind::WrapMethod => vec![(Ok(At::Head), String::new())],
+                        Kind::ModifyConstant => {
+                            let ty = h.desc.rsplit(')').next().unwrap_or("");
+                            let constants = a.nested("constant");
+                            if constants.is_empty() {
+                                vec![(Ok(At::Constant { value: Constant::OfType(ty.to_owned()), ordinal: None }), String::new())]
+                            } else {
+                                constants
+                                    .iter()
+                                    .map(|k| {
+                                        let ordinal = k.value("ordinal").and_then(|o| o.parse::<i64>().ok()).filter(|o| *o >= 0).map(|o| o as usize);
+                                        let value = constant_named(&|v| k.value(v).map(str::to_owned), Some(ty));
+                                        (value.map(|value| At::Constant { value, ordinal }), k.value("slice").unwrap_or("").to_owned())
+                                    })
+                                    .collect()
+                            }
+                        }
+                        // MixinExtras' take `@Constant`s too (`@WrapOperation` of an `instanceof`).
+                        _ => a
+                            .nested("at")
+                            .iter()
+                            .map(|x| (parse_at(x), x.value("slice").unwrap_or("").to_owned()))
+                            .chain(a.nested("constant").iter().map(|k| {
+                                let ordinal = k.value("ordinal").and_then(|o| o.parse::<i64>().ok()).filter(|o| *o >= 0).map(|o| o as usize);
+                                let value = constant_named(&|v| k.value(v).map(str::to_owned), None);
+                                (value.map(|value| At::Constant { value, ordinal }), k.value("slice").unwrap_or("").to_owned())
+                            }))
+                            .collect(),
+                    };
+                    if ats.is_empty() {
+                        debug(|| format!("no @At: {}.{}{} {:?}", mixin.name, h.name, h.desc, a.values));
+                        count(&mut plan, format!("mixin @{simple} without an @At"));
+                    }
+                    for (at, slice_id) in ats {
+                        let at = match at {
                             Ok(at) => at,
                             Err(e) => {
+                                debug(|| format!("{e}: {}.{}{}", mixin.name, h.name, h.desc));
                                 count(&mut plan, format!("mixin {e}"));
                                 continue;
                             }
                         };
+                        let slice = slices.iter().find(|s| s.id == slice_id);
                         // How many places it needs: its own `require`, else its config's.
                         let require = a.value("require").and_then(|r| r.parse::<i64>().ok()).filter(|r| *r >= 0).unwrap_or(default_require);
                         let missing = |plan: &mut Plan, what: &str| {
@@ -679,10 +971,23 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                         let mut placed = false;
                         let picked_any = !picked.is_empty();
                         for m in picked {
+                            let range = match slice.map(|s| slice_range(target, m, s)).transpose() {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    debug(|| format!("{e}: {}.{}{} -> {}.{}{}", mixin.name, h.name, h.desc, target.name, m.name, m.desc));
+                                    count(&mut plan, format!("mixin {e}"));
+                                    continue;
+                                }
+                            };
+                            // The head of a slice that starts later is its first instruction.
+                            if at == At::Head && range.is_some_and(|(lo, _)| lo > 0) {
+                                count(&mut plan, "mixin @At HEAD of a slice".into());
+                                continue;
+                            }
                             // A `@ModifyVariable` at `STORE`: the stores into the local it changes.
                             let sites = match (&kind, &at) {
-                                (Kind::ModifyVariable { local }, At::Store { ordinal }) => store_sites(m, local, *ordinal),
-                                _ => places(target, m, &at),
+                                (Kind::ModifyVariable { local }, At::Store { ordinal }) => store_sites(m, local, *ordinal, range),
+                                _ => places(target, m, &at, range),
                             };
                             if sites.is_empty() {
                                 continue;
@@ -760,6 +1065,9 @@ fn check(w: &Weave, m: &Method) -> Result<(), String> {
     }
     let target_args = crate::codegen::arg_kinds(&m.desc).len();
     let n = w.handler_params();
+    // After its own `base` parameters a handler may take the method's first arguments, as many as
+    // it has room for (Mixin's `captureTargetArgs`).
+    let takes = |base: usize| n >= base && n - base <= target_args;
     let call_args = |at: &At| match at {
         At::Invoke { desc, .. } => Some(crate::codegen::arg_kinds(desc).len()),
         _ => None,
@@ -780,7 +1088,7 @@ fn check(w: &Weave, m: &Method) -> Result<(), String> {
         // A whole method's wrapper shares nothing with what goes inside it yet.
         (Kind::WrapMethod, _) if !w.sugar.is_empty() => Err("@WrapMethod with sugar parameters".into()),
         (Kind::ModifyReturnValue, At::Return { .. } | At::Tail) => {
-            if n == 1 || n == target_args + 1 { Ok(()) } else { Err("@ModifyReturnValue with extra parameters".into()) }
+            if takes(1) { Ok(()) } else { Err("@ModifyReturnValue with extra parameters".into()) }
         }
         // The method's arguments and the `Operation`.
         (Kind::WrapMethod, _) => {
@@ -796,15 +1104,38 @@ fn check(w: &Weave, m: &Method) -> Result<(), String> {
         }
         (Kind::Redirect | Kind::WrapWithCondition | Kind::ModifyExpressionValue | Kind::WrapOperation, At::Field { .. }) => Ok(()),
         // The value, then the method's arguments when it takes them.
-        (Kind::ModifyVariable { .. }, At::Head | At::Return { .. } | At::Tail | At::Invoke { .. } | At::Field { .. } | At::Store { .. }) => {
-            if n == 1 || n == 1 + target_args {
+        (Kind::ModifyVariable { .. }, _) => {
+            if takes(1) {
                 Ok(())
             } else {
                 Err("@ModifyVariable with other parameters".into())
             }
         }
         (Kind::ModifyReceiver, At::Invoke { .. } | At::Field { .. }) => Ok(()),
-        (kind, at) => Err(format!("{kind:?} at {at:?}")),
+        // The constant, and the method's arguments when it takes them.
+        (Kind::ModifyConstant, At::Constant { .. }) => {
+            if takes(1) {
+                Ok(())
+            } else {
+                Err("@ModifyConstant with other parameters".into())
+            }
+        }
+        (Kind::ModifyExpressionValue, At::Constant { .. }) => {
+            if takes(1) {
+                Ok(())
+            } else {
+                Err("@ModifyExpressionValue of a constant with other parameters".into())
+            }
+        }
+        // An `instanceof`: the object and the check as an `Operation`.
+        (Kind::WrapOperation, At::Constant { value: Constant::Class(_), .. }) => {
+            if takes(2) {
+                Ok(())
+            } else {
+                Err("@WrapOperation of an instanceof with other parameters".into())
+            }
+        }
+        (kind, at) => Err(format!("{} at {}", kind.name(), at.name())),
     }
 }
 
@@ -829,7 +1160,11 @@ mod tests {
                 "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z".into()
             ))
         );
-        let at = parse_at("Lorg/spongepowered/asm/mixin/injection/At;(value=INVOKE|target=Lcom/a/B;go(I)V|ordinal=1|shift=AFTER)").unwrap();
+        let at = Annotation {
+            values: vec![("value".into(), "INVOKE".into()), ("target".into(), "Lcom/a/B;go(I)V".into()), ("ordinal".into(), "1".into()), ("shift".into(), "AFTER".into())],
+            ..Annotation::default()
+        };
+        let at = parse_at(&at).unwrap();
         assert_eq!(at, At::Invoke { owner: "com/a/B".into(), name: "go".into(), desc: "(I)V".into(), ordinal: Some(1), after: true, assign: false });
     }
 }
