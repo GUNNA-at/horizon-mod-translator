@@ -1151,6 +1151,11 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             "singleton" => new_set(rt, &[a(0)]),
             _ => new_list(rt, vec![a(0)]),
         },
+        ("java/util/Collections", "singletonMap") => {
+            let m = rt.alloc("java/util/HashMap", Data::Table(Table::default()));
+            table_put(rt, m, a(0), a(1));
+            m
+        }
         ("java/util/Collections", n) if n.starts_with("unmodifiable") || n.starts_with("synchronized") => a(0),
         // A set over a map (`newSetFromMap(new WeakHashMap<>())`): a set; weak keys make no
         // difference to what it holds while it is used.
@@ -1166,6 +1171,26 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         // fastutil's wrappers (`Object2ReferenceMaps.synchronize(map)`, `ObjectSets.unmodifiable(set)`):
         // one thread's view of the same collection.
         (o, "synchronize" | "unmodifiable") if o.starts_with("it/unimi/dsi/fastutil/") && args.len() == 1 => a(0),
+        // fastutil's `Int2ObjectMaps.fastIterator(map)`, `fastIterable(map)` and `fastForEach(map,
+        // action)`: the map's typed entry set, which its own `int2ObjectEntrySet()` gives.
+        (o, "fastIterator" | "fastIterable" | "fastForEach")
+            if o.starts_with("it/unimi/dsi/fastutil/")
+                && o.ends_with("Maps")
+                && is_map(rt.class_of(a(0)))
+                && matches!(rt.heap.get(a(0).r() as usize).map(|o| &o.data), Some(Data::Table(_))) =>
+        {
+            let es = map_call(rt, "entrySet", "()Lit/unimi/dsi/fastutil/objects/ObjectSet;", &[a(0)])?;
+            match name {
+                "fastIterable" => es,
+                "fastIterator" => set_call(rt, "iterator", &[es])?,
+                _ => {
+                    for e in elements(rt, es) {
+                        rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", a(1), &[e]);
+                    }
+                    V::Void
+                }
+            }
+        }
         // `Collections.binarySearch(list, key[, comparator])`: the index, else `-(insertion point) - 1`.
         ("java/util/Collections", "binarySearch") => {
             let items = elements(rt, a(0));
@@ -3115,6 +3140,14 @@ mod tests {
             seen.push((k, v));
         }
         assert_eq!(seen, [(V::I(4), x), (V::I(9), y)]);
+        // Mekanism's `Int2ObjectMaps.fastIterator(map)` walks the same entries.
+        let it = c(&mut rt, "it/unimi/dsi/fastutil/ints/Int2ObjectMaps.fastIterator.(Lit/unimi/dsi/fastutil/ints/Int2ObjectMap;)Lit/unimi/dsi/fastutil/objects/ObjectIterator;", &[m]);
+        let mut fast = Vec::new();
+        while c(&mut rt, "java/util/Iterator.hasNext.()Z", &[it]) == V::I(1) {
+            let e = c(&mut rt, "java/util/Iterator.next.()Ljava/lang/Object;", &[it]);
+            fast.push(c(&mut rt, "it/unimi/dsi/fastutil/ints/Int2ObjectMap$Entry.getIntKey.()I", &[e]));
+        }
+        assert_eq!(fast, [V::I(4), V::I(9)]);
         let set = rt.new_object("it/unimi/dsi/fastutil/ints/IntOpenHashSet");
         c(&mut rt, "it/unimi/dsi/fastutil/ints/IntOpenHashSet.<init>.()V", &[set]);
         c(&mut rt, "it/unimi/dsi/fastutil/ints/IntSet.add.(I)Z", &[set, V::I(7)]);

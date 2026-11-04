@@ -1493,6 +1493,9 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // `memoize(function)`: the function itself (same answers; vanilla only caches them).
         ("net/minecraft/Util", "memoize") => a(0),
+        // The data fixer's type for a block entity (`Builder.build(type)` takes it): none here, as
+        // vanilla answers when the fixer doesn't know the id.
+        ("net/minecraft/Util", "fetchChoiceType") => V::NULL,
         // `Util.makeDescriptionId("block", create:shaft)`: `block.create.shaft`, unregistered without an id.
         ("net/minecraft/Util", "makeDescriptionId") => {
             let kind = rt.str_of(a(0)).unwrap_or("").to_owned();

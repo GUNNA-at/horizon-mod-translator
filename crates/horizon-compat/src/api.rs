@@ -1483,8 +1483,11 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let n = block_name(rt, a(0));
             state(rt, &n)
         }
-        // A block's states, as far as the runtime knows them: its default one.
-        (_, "getStateDefinition") if desc == "()Lnet/minecraft/world/level/block/state/StateDefinition;" => {
+        // A block's states, as far as the runtime knows them: its default one. Its field
+        // (`this.stateDefinition.any()` in a mod block's constructor) is the same object.
+        (_, "getStateDefinition" | "$stateDefinition")
+            if desc == "()Lnet/minecraft/world/level/block/state/StateDefinition;" && (name == "getStateDefinition" || is_block_class(owner)) =>
+        {
             let b = a(0);
             rt.intern(format!("state-definition/{}", b.r()), |rt| {
                 let d = rt.new_object(STATE_DEFINITION);
@@ -1791,6 +1794,11 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             rt.string(n)
         }
         k if k.starts_with("java/util/Locale.") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
+        // The data fixer's type references (`References.BLOCK_ENTITY`), by their type names.
+        k if k.starts_with("net/minecraft/util/datafix/fixes/References.") => {
+            let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            rt.string(&n)
+        }
         // Vanilla enums the mod reads constants of: one object per constant, named and ordered as Java's.
         k if k.starts_with("net/minecraft/ChatFormatting.") => {
             const NAMES: [&str; 22] = [

@@ -1249,12 +1249,8 @@ fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
         }
         "sound" => set(rt, "$sound", a(1)),
         "lightLevel" => set(rt, "$light", a(1)),
-        // The field itself (`properties.lightEmission`, opened by an access transformer): what
-        // `lightLevel` set, else `Properties.of()`'s `state -> 0`.
-        "$lightEmission" => Some(match rt.get_field(this, "$light") {
-            V::Void | V::NULL => crate::functions::constant(rt, V::I(0)),
-            f => f,
-        }),
+        // The fields themselves (`properties.destroyTime`, opened by an access transformer).
+        f if f.starts_with('$') => properties_field(rt, this, &f[1..]),
         "noOcclusion" => set(rt, "$noOcclusion", V::I(1)),
         "noCollission" | "noCollision" => {
             rt.put_field(this, "$noOcclusion", V::I(1));
@@ -1289,6 +1285,58 @@ fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
         "instrument" => set(rt, "$instrument", a(1)),
         _ => None,
     }
+}
+
+/// The `BlockBehaviour.Properties` field `name` (1.21.1's) as the builder calls left it: what they
+/// stored, else what the vanilla block a copy came from has, else `Properties.of()`'s value.
+fn properties_field(rt: &mut Rt, p: V, name: &str) -> Option<V> {
+    let got = |rt: &Rt, k: &'static str| match rt.get_field(p, k) {
+        V::Void | V::NULL => None,
+        v => Some(v),
+    };
+    let flag = |rt: &Rt, k: &'static str| V::I(got(rt, k).map_or(0, |v| v.i()));
+    let unless = |rt: &Rt, k: &'static str| V::I((got(rt, k).map_or(0, |v| v.i()) == 0) as i32);
+    let copy = rt.str_of(rt.get_field(p, "$copy")).map(str::to_owned);
+    let copied = copy.as_deref().and_then(|c| COPIED.iter().find(|(n, ..)| *n == c));
+    Some(match name {
+        "destroyTime" => got(rt, "$destroy").unwrap_or_else(|| {
+            let game = copy.as_deref().and_then(|c| rt.host().and_then(|h| h.block_facts(c))).map(|f| f.hardness);
+            V::F(game.or(copied.map(|c| c.1)).unwrap_or(0.0))
+        }),
+        "explosionResistance" => got(rt, "$resist").unwrap_or(V::F(copied.map_or(0.0, |c| c.2))),
+        "requiresCorrectToolForDrops" => match got(rt, "$requiresTool") {
+            Some(v) => v,
+            None => V::I(copied.is_some_and(|c| c.3) as i32),
+        },
+        "friction" => got(rt, "$friction").unwrap_or(V::F(0.6)),
+        "speedFactor" => got(rt, "$speedFactor").unwrap_or(V::F(1.0)),
+        "jumpFactor" => got(rt, "$jumpFactor").unwrap_or(V::F(1.0)),
+        "hasCollision" => unless(rt, "$noCollision"),
+        "canOcclude" => unless(rt, "$noOcclusion"),
+        "spawnTerrainParticles" => unless(rt, "$noTerrainParticles"),
+        "isRandomlyTicking" => flag(rt, "$randomTicks"),
+        "replaceable" => flag(rt, "$replaceable"),
+        "dynamicShape" => flag(rt, "$dynamicShape"),
+        "ignitedByLava" => flag(rt, "$ignitedByLava"),
+        "liquid" => flag(rt, "$liquid"),
+        "forceSolidOn" => flag(rt, "$forceSolidOn"),
+        "forceSolidOff" => flag(rt, "$forceSolidOff"),
+        "isAir" => flag(rt, "$air"),
+        "soundType" => match got(rt, "$sound") {
+            Some(v) => v,
+            None => api::get_static(rt, "net/minecraft/world/level/block/SoundType.STONE"),
+        },
+        "pushReaction" => match got(rt, "$push") {
+            Some(v) => v,
+            None => push_reaction_named(rt, "normal"),
+        },
+        // What `lightLevel` set, else `state -> 0`.
+        "lightEmission" => match got(rt, "$light") {
+            Some(v) => v,
+            None => crate::functions::constant(rt, V::I(0)),
+        },
+        _ => return None,
+    })
 }
 
 /// `Item.Properties`: stack size, durability, rarity, food, what crafting with it leaves.
@@ -1897,6 +1945,28 @@ mod tests {
         let lit = rt.new_object("test/Lit");
         api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.lightLevel.(Ljava/util/function/ToIntFunction;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[p, lit]);
         assert_eq!(horizon_compat_core::api::game_field(&mut rt, p, "lightEmission", "$lightEmission", light), lit);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+
+        // SecurityCraft reads `destroyTime` off the properties it copied; mods read
+        // `hasCollision` and `friction` off their own.
+        let field = |rt: &mut Rt, p: V, f: &'static str, ty: &str| {
+            let key = Box::leak(format!("net/minecraft/world/level/block/state/BlockBehaviour$Properties.${f}.(){ty}").into_boxed_str());
+            let own = Box::leak(format!("${f}").into_boxed_str());
+            horizon_compat_core::api::game_field(rt, p, f, own, key)
+        };
+        let stone = rt.string("minecraft:stone");
+        let copy = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.ofFullCopy.(Lnet/minecraft/world/level/block/state/BlockBehaviour;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[stone]);
+        assert_eq!(field(&mut rt, copy, "destroyTime", "F"), V::F(1.5), "stone's");
+        assert_eq!(field(&mut rt, copy, "explosionResistance", "F"), V::F(6.0));
+        api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.destroyTime.(F)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[copy, V::F(-1.0)]);
+        assert_eq!(field(&mut rt, copy, "destroyTime", "F"), V::F(-1.0), "what the mod set over it");
+        let p = props(&mut rt);
+        assert_eq!(field(&mut rt, p, "destroyTime", "F"), V::F(0.0));
+        assert_eq!(field(&mut rt, p, "friction", "F"), V::F(0.6));
+        assert_eq!(field(&mut rt, p, "hasCollision", "Z"), V::I(1));
+        api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.noCollission.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[p]);
+        assert_eq!(field(&mut rt, p, "hasCollision", "Z"), V::I(0));
+        assert_eq!(field(&mut rt, p, "canOcclude", "Z"), V::I(0), "no collision takes occlusion with it");
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

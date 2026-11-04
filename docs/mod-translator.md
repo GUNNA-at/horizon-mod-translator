@@ -1849,6 +1849,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     trigger made by the mod itself (`new PlayerTrigger()`) is a plain object.
     Tests `ops::tests::a_mods_own_codec_reads_and_writes_through_the_combinators`,
     `nbt_ops_build_and_read_tags_as_minecrafts`.
+  - [x] 2026-11-05 Load round 8 (the 28 jars, snapshot `38040f6`): 28 load, exit 0. 180 distinct
+    misses (190), 312 kinds (337); calls 7,940 (5,740). The calls grew because reads of game
+    fields now count: `Block.stateDefinition` read in mods' constructors (`this.stateDefinition
+    .any()`: 2,731 in Macaw's furniture and roofs, Create Furnitures, Easy Villagers and others)
+    and `Properties.destroyTime` (644 in SecurityCraft) were silent nulls before. Down: Comforts
+    566 → 87, FarmersDelight 269 → 66, Mekanism 994 → 513 (kinds 129 → 103).
+  - [x] 2026-11-05 What round 8 showed:
+    - The field `stateDefinition` of a block is the object `getStateDefinition()` answers.
+    - `BlockBehaviour.Properties`' fields read directly (`destroyTime`, `explosionResistance`,
+      `requiresCorrectToolForDrops`, `friction`, `speedFactor`, `jumpFactor`, `hasCollision`,
+      `canOcclude`, `isRandomlyTicking`, `replaceable`, `soundType`, `pushReaction`,
+      `lightEmission` and the flags): what the builder calls stored, else what the vanilla block
+      a copy came from has, else `Properties.of()`'s value.
+    - `BlockEntityType(supplier, blocks, type)` built by a mod (Refined Storage) keeps its factory;
+      `DataComponentType.Builder()` (SophisticatedCore) is a plain constructor;
+      `Util.fetchChoiceType` answers null (no datafixer types), `References`' type names answer.
+    - `CropBlock.getAgeProperty()`/`getMaxAge()` reached from a mod crop: `AGE_7` and 7.
+    - fastutil's `Int2ObjectMaps.fastIterator(map)`, `fastIterable` and `fastForEach` (any
+      `X2YMaps`) walk the map's typed entry set; `Collections.singletonMap`.
+    Tests `blocks::tests::a_mod_blocks_reads_of_vanillas_answer_as_vanilla`,
+    `jutil::tests::fastutil_int_maps_and_sets_walk_as_in_java`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

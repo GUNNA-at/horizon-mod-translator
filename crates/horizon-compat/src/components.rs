@@ -356,6 +356,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     match (owner, name) {
         (TYPE, "builder") => Some(rt.new_object(BUILDER)),
+        // `new DataComponentType.Builder<>()` (SophisticatedCore's): what `builder()` makes.
+        (BUILDER, "<init>") => Some(V::Void),
         (BUILDER, "persistent") => {
             rt.put_field(a(0), "$codec", a(1));
             Some(a(0))

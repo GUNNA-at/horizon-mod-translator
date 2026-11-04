@@ -1024,6 +1024,14 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     {
         return Some(V::I(c));
     }
+    // `CropBlock`'s own age (a mod crop's `super.getAgeProperty()`): `AGE_7`, up to 7.
+    if owner == "net/minecraft/world/level/block/CropBlock" {
+        match name {
+            "getAgeProperty" => return vanilla_property_object(rt, "AGE_7"),
+            "getMaxAge" => return Some(V::I(7)),
+            _ => {}
+        }
+    }
     // `DyeItem.byColor(color)`: vanilla's dye of that colour.
     if owner == "net/minecraft/world/item/DyeItem" && name == "byColor" {
         let i = rt.get_field(args.first().copied().unwrap_or_default(), "$ordinal").i().clamp(0, 15) as usize;
@@ -1659,6 +1667,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let b = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType$Builder");
             rt.put_field(b, "$factory", a(0));
             b
+        }
+        // `new BlockEntityType(factory, validBlocks, dataType)` (Refined Storage makes its types
+        // so): what `Builder.of(factory, blocks).build(type)` makes.
+        ("net/minecraft/world/level/block/entity/BlockEntityType", "<init>") if desc.starts_with("(Lnet/minecraft/world/level/block/entity/BlockEntityType$BlockEntitySupplier;") => {
+            rt.put_field(a(0), "$factory", a(1));
+            V::Void
         }
         ("net/minecraft/world/level/block/entity/BlockEntityType$Builder", "build") => {
             let t = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType");
