@@ -508,6 +508,10 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - [x] 2026-11-04 `Direction.Plane` walks its faces (`for (Direction d : Plane.HORIZONTAL)`: north,
     east, south, west; `stream`, `forEach`, `getRandomDirection`, `shuffledCopy`); such loops did
     nothing before (`Iterable.iterator` on a plane was unmapped). `Vec3.equals/hashCode` as vanilla's.
+    fastutil's `synchronize/unmodifiable` wrappers hand back the collection: Create's
+    `SimpleRegistry` (stress values, display targets, spouting and movement behaviours) is built on
+    `Object2ReferenceMaps.synchronize(...)`, which came back void, so nothing registered in it.
+    `values()` of `DyeColor`, `WeatheringCopper.WeatherState`, `ArmorItem.Type`; `Direction.name()`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

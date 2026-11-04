@@ -236,6 +236,13 @@ fn vanilla_enum_values(rt: &mut Rt, class: &str) -> Option<Vec<V>> {
     Some(values.iter().filter_map(|v| vanilla_enum_constant(rt, class, v)).collect())
 }
 
+/// Whether `class` is a vanilla enum whose constants the runtime makes (`values()`, its statics).
+fn enum_class(class: &str) -> bool {
+    vanilla_enum(class).is_some()
+        && (class.starts_with("net/minecraft/world/level/block/state/properties/")
+            || matches!(class, DYE_COLOR | "net/minecraft/world/level/block/WeatheringCopper$WeatherState" | "net/minecraft/world/item/ArmorItem$Type"))
+}
+
 /// Values of vanilla enums a mod's own property may take (`EnumProperty.create(name, Half.class)`).
 fn vanilla_enum(class: &str) -> Option<&'static [&'static str]> {
     Some(match class.rsplit('/').next().unwrap_or(class) {
@@ -254,6 +261,8 @@ fn vanilla_enum(class: &str) -> Option<&'static [&'static str]> {
         "BellAttachType" => &["floor", "ceiling", "single_wall", "double_wall"],
         "Tilt" => &["none", "unstable", "partial", "full"],
         "RailShape" => &RAIL_SHAPES,
+        "WeatheringCopper$WeatherState" => &["unaffected", "exposed", "weathered", "oxidized"],
+        "ArmorItem$Type" => &["helmet", "chestplate", "leggings", "boots", "body"],
         "DyeColor" => &[
             "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown",
             "green", "red", "black",
@@ -319,7 +328,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (name, desc) = rest.split_once('.')?;
     match (owner, name) {
         // `BellAttachType.values()`: its constants, in order.
-        (o, "values") if desc.starts_with("()[") && o.starts_with("net/minecraft/world/level/block/state/properties/") && vanilla_enum(o).is_some() => {
+        (o, "values") if desc.starts_with("()[") && enum_class(o) => {
             let all = vanilla_enum_values(rt, o)?;
             let class: &'static str = rt.static_key(&format!("[L{o};"));
             Some(rt.alloc(class, Data::Array(all)))
@@ -414,7 +423,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             Some(api::api_enum(rt, RARITY, R[i], i as i32))
         }
         // The block-state enums' constants (`BellAttachType.FLOOR`), the objects a state's value is.
-        o if o.starts_with("net/minecraft/world/level/block/state/properties/") && vanilla_enum(o).is_some() => {
+        o if o != DYE_COLOR && enum_class(o) => {
             vanilla_enum_constant(rt, o, &field.to_ascii_lowercase())
         }
         _ => None,

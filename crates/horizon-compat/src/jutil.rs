@@ -695,6 +695,9 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             _ => new_list(rt, vec![a(0)]),
         },
         ("java/util/Collections", n) if n.starts_with("unmodifiable") || n.starts_with("synchronized") => a(0),
+        // fastutil's wrappers (`Object2ReferenceMaps.synchronize(map)`, `ObjectSets.unmodifiable(set)`):
+        // one thread's view of the same collection.
+        (o, "synchronize" | "unmodifiable") if o.starts_with("it/unimi/dsi/fastutil/") && args.len() == 1 => a(0),
         // `Collections.binarySearch(list, key[, comparator])`: the index, else `-(insertion point) - 1`.
         ("java/util/Collections", "binarySearch") => {
             let items = elements(rt, a(0));

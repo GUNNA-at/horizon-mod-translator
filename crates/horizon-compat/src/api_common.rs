@@ -626,6 +626,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let d = crate::api::DIRECTIONS[native(rt, a(0))[0].clamp(0, 5) as usize];
             crate::api::block_pos(rt, d[0], d[1], d[2])
         }
+        ("net/minecraft/core/Direction", "name") => {
+            let n = DIRECTION_NAMES[native(rt, a(0))[0].clamp(0, 5) as usize].to_ascii_uppercase();
+            rt.string(&n)
+        }
         ("net/minecraft/core/Direction", "getName" | "getSerializedName" | "toString") => {
             let n = DIRECTION_NAMES[native(rt, a(0))[0].clamp(0, 5) as usize];
             rt.string(n)
