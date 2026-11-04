@@ -603,6 +603,17 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     registry (`SimpleRegistryImpl.register`, `requireNonNull`) threw on `create:lectern`, which ended
     the whole `RegisterEvent` for display targets. Piston classes' property constants
     (`PistonHeadBlock.TYPE`, in `block/piston/`) resolve too.
+  - [x] 2026-11-04 In game the mixer's head now goes down into the basin, mixes and comes back up
+    (`mixgame.sh` shots at ticks 20, 60 and 200: down, down, up), and the setup runs with no
+    `NoSuchElementException`.
+  - [x] 2026-11-04 A mod block entity is made when something asks for it, as vanilla's
+    `LevelChunk.getBlockEntity` makes one for a block that has one (`glue::block_entity_at`, used by
+    `Level.getBlockEntity` and by capability lookups). They were made only at a block's first tick, so
+    Create's belt broke itself: the start segment's `BeltBlock.initBelt` walks the chain and destroys it
+    when one segment's `getBlockEntity` is not a `BeltBlockEntity`, and the later segments had not
+    ticked yet. A block entity made this way loads the block's saved data at its first tick.
+    Harness `BELT` (a creative motor and a three-block belt): the belt keeps its three segments,
+    each knows its index and its controller, and an ingot dropped on it is taken onto the belt.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

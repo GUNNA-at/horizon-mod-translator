@@ -124,6 +124,12 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
         // compound where the live one had saved data): then it is made again.
         let fresh = rt.block_entity_meta.get(&pos).is_some_and(|(b, saved)| b != block || (*saved && nbt.is_empty()));
         if !fresh {
+            // Made when something asked for it, before the game first ticked it: the game's saved
+            // data goes in now, as vanilla's chunk load would have put it in.
+            if rt.get_field(be, "$demand").i() != 0 {
+                rt.put_field(be, "$demand", V::I(0));
+                load_saved(rt, be, nbt);
+            }
             return Some(be);
         }
         rt.block_entities.remove(&pos);
@@ -137,17 +143,51 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
     if be.r() == 0 {
         return None;
     }
-    // Loaded only from saved data, as vanilla's: a block entity just placed keeps what its
-    // constructor set (an empty compound would read every field as absent: Create's creative motor
-    // would lose its default speed).
+    load_saved(rt, be, nbt);
+    rt.block_entities.insert(pos, be);
+    Some(be)
+}
+
+/// Loads the game's saved data into block entity `be`. Only saved data, as vanilla's: a block
+/// entity just placed keeps what its constructor set (an empty compound would read every field as
+/// absent: Create's creative motor would lose its default speed).
+fn load_saved(rt: &mut Rt, be: V, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) {
+    let Some(vc) = rt.vcall else { return };
     if !nbt.is_empty() {
         let tag = crate::nbt::to_runtime(rt, nbt);
         let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
         vc(rt, LOAD, LOAD, &[be, tag, provider]);
         rt.report_thrown("loadAdditional");
     }
+}
+
+/// The block entity at `pos` as `Level.getBlockEntity` finds it: the one this runtime holds, or,
+/// for a mod block that has one, made now. Vanilla makes it with its block; here one is otherwise
+/// made on its first tick or draw, and Create's belt asks for its segments' before they tick (and
+/// breaks itself when one is missing). It takes the game's saved data on its first tick.
+pub(crate) fn block_entity_at(rt: &mut Rt, pos: [i32; 3]) -> V {
+    if let Some(be) = rt.block_entities.get(&pos).copied() {
+        return be;
+    }
+    let Some(state) = rt.host().map(|h| h.block_state(pos)) else { return V::NULL };
+    if !implements(rt, &state, NEW_BLOCK_ENTITY) {
+        return V::NULL;
+    }
+    let (Some((b, _)), Some(vc)) = (mod_block(rt, &state), rt.vcall) else { return V::NULL };
+    let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+    let st = api::state(rt, &state);
+    let be = vc(rt, NEW_BLOCK_ENTITY, NEW_BLOCK_ENTITY, &[b, p, st]);
+    rt.report_thrown("newBlockEntity");
+    if be.r() == 0 {
+        return V::NULL;
+    }
+    let l = level(rt);
+    rt.put_field(be, "level", l);
+    rt.put_field(be, "$demand", V::I(1));
     rt.block_entities.insert(pos, be);
-    Some(be)
+    let (block, _) = crate::host::split_state(&state);
+    rt.block_entity_meta.insert(pos, (block.to_owned(), false));
+    be
 }
 
 /// `native_block_entity_tick`: one server tick of the mod's block entity at `pos`, whose saved

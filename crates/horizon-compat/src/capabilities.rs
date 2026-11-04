@@ -114,7 +114,7 @@ fn find_block(rt: &mut Rt, cap: V, level: V, pos: V, state: V, be: V, side: V) -
         let text = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(at));
         api::state(rt, &text)
     };
-    let be = if be.r() != 0 { be } else { rt.block_entities.get(&at).copied().unwrap_or(V::NULL) };
+    let be = if be.r() != 0 { be } else { crate::glue::block_entity_at(rt, at) };
     let block = crate::host::split_state(rt.str_of(state).unwrap_or("")).0.to_owned();
     for (kind, c, key, provider) in entries(rt) {
         if kind != Kind::Block || c != cap || api::block_name(rt, key) != block {

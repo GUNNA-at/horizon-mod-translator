@@ -1049,7 +1049,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (o, "getBlockEntity") if o.starts_with("net/minecraft/") && (o.ends_with("Level") || o.ends_with("LevelAccessor") || o.ends_with("BlockGetter") || o.ends_with("LevelReader")) => {
             let h = native(rt, a(1));
-            rt.block_entities.get(&[h[0] as i32, h[1] as i32, h[2] as i32]).copied().unwrap_or(V::NULL)
+            crate::glue::block_entity_at(rt, [h[0] as i32, h[1] as i32, h[2] as i32])
         }
         // Vec3
         ("net/minecraft/world/phys/Vec3", "<init>") if desc == "(DDD)V" => {
