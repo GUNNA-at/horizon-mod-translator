@@ -2632,6 +2632,8 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "limit" => stream(rt, items.into_iter().take(a(1).j().max(0) as usize).collect()),
         "skip" => stream(rt, items.into_iter().skip(a(1).j().max(0) as usize).collect()),
         "boxed" | "sequential" | "parallel" | "unordered" | "onClose" => this,
+        // A stream here holds its elements, nothing to release (`Files.list` in try-with-resources).
+        "close" => V::Void,
         "forEach" | "forEachOrdered" => {
             for e in items {
                 rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", a(1), &[e]);

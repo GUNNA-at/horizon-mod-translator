@@ -61,12 +61,120 @@ fn type_id(rt: &Rt, ty: V) -> Option<String> {
     rt.str_of(rt.get_field(ty, "$id")).map(str::to_owned).or_else(|| rt.registered_name(ty, "particle_type").map(str::to_owned))
 }
 
-/// What `options` (a type, or options of one) draws, at `at`.
-fn particles(rt: &Rt, options: V) -> Option<Particles> {
-    let ty = match rt.get_field(options, "$type") {
+/// The type of `options`: its own, or itself for a type that is its own options (`SimpleParticleType`).
+fn type_of(rt: &Rt, options: V) -> V {
+    match rt.get_field(options, "$type") {
         t if t.r() != 0 => t,
         _ => options,
+    }
+}
+
+const STREAM_CODEC: &str = "streamCodec.()Lnet/minecraft/network/codec/StreamCodec;";
+const STREAM_CODEC_KEY: &str = "net/minecraft/core/particles/ParticleType.streamCodec.()Lnet/minecraft/network/codec/StreamCodec;";
+
+/// A mod's own type's stream codec (its class's `streamCodec()`), if it declares one.
+fn own_codec(rt: &mut Rt, ty: V) -> Option<V> {
+    let class = rt.class_of(ty);
+    if !rt.overrides.is_some_and(|o| o(class, STREAM_CODEC)) {
+        return None;
+    }
+    let vc = rt.vcall?;
+    let codec = vc(rt, STREAM_CODEC_KEY, STREAM_CODEC, &[ty]);
+    (codec.r() != 0 && rt.thrown.is_none()).then_some(codec)
+}
+
+/// How [`write_options`] carries what options hold after their type's name, so the reader knows.
+const CARRIES_NOTHING: u8 = 0;
+const CARRIES_STATE: u8 = 1;
+const CARRIES_STACK: u8 = 2;
+const CARRIES_DUST: u8 = 3;
+const CARRIES_OWN: u8 = 4;
+
+/// `ParticleTypes.STREAM_CODEC` writing `options`: the type's name (both ends are this runtime, so
+/// it travels by name, as registry entries do here), then what the options hold: a block's state
+/// as text, an item's stack, a dust's colour and size, or what a mod's own type's `streamCodec()`
+/// writes. A type that is its own options holds nothing more.
+pub(crate) fn write_options(rt: &mut Rt, buf: V, options: V) -> Result<(), String> {
+    use crate::network::{put, put_stack, put_utf};
+    let ty = type_of(rt, options);
+    let id = type_id(rt, ty).ok_or("a particle type that isn't registered")?;
+    put_utf(rt, buf, &id);
+    match rt.class_of(options) {
+        BLOCK_OPTION => {
+            let state = rt.str_of(rt.get_field(options, "$state")).unwrap_or("minecraft:air").to_owned();
+            put(rt, buf, &[CARRIES_STATE]);
+            put_utf(rt, buf, &state);
+        }
+        ITEM_OPTION => {
+            put(rt, buf, &[CARRIES_STACK]);
+            let stack = rt.get_field(options, "$stack");
+            put_stack(rt, buf, stack);
+        }
+        DUST_OPTIONS => {
+            put(rt, buf, &[CARRIES_DUST]);
+            for f in ["$r", "$g", "$b", "$scale"] {
+                let c = rt.get_field(options, f).f();
+                put(rt, buf, &c.to_be_bytes());
+            }
+        }
+        _ if ty == options => put(rt, buf, &[CARRIES_NOTHING]),
+        _ => {
+            let codec = own_codec(rt, ty).ok_or_else(|| format!("{id}'s options have no stream codec"))?;
+            put(rt, buf, &[CARRIES_OWN]);
+            crate::network::encode(rt, codec, buf, options);
+        }
+    }
+    Ok(())
+}
+
+/// The options [`write_options`] wrote: a mod's type by its registered name, else vanilla's.
+pub(crate) fn read_options(rt: &mut Rt, buf: V) -> Option<V> {
+    use crate::network::{read_stack, read_utf, take_n};
+    let id = read_utf(rt, buf)?;
+    let ty = match crate::neo::registry_get(rt, "particle_type", &id) {
+        t if t.r() != 0 => t,
+        _ => vanilla_type(rt, &id),
     };
+    let carries = take_n::<1>(rt, buf)?[0];
+    Some(match carries {
+        CARRIES_STATE => {
+            let state = read_utf(rt, buf)?;
+            let o = rt.new_object(BLOCK_OPTION);
+            let state = crate::api::state(rt, &state);
+            rt.put_field(o, "$type", ty);
+            rt.put_field(o, "$state", state);
+            o
+        }
+        CARRIES_STACK => {
+            let stack = read_stack(rt, buf)?;
+            let o = rt.new_object(ITEM_OPTION);
+            rt.put_field(o, "$type", ty);
+            rt.put_field(o, "$stack", stack);
+            o
+        }
+        CARRIES_DUST => {
+            let mut c = [0f32; 4];
+            for x in &mut c {
+                *x = f32::from_be_bytes(take_n(rt, buf)?);
+            }
+            let d = dust(rt, [c[0], c[1], c[2]], c[3]);
+            rt.put_field(d, "$type", ty);
+            d
+        }
+        CARRIES_OWN => {
+            let Some(codec) = own_codec(rt, ty) else {
+                rt.throw_new("io/netty/handler/codec/DecoderException");
+                return None;
+            };
+            crate::network::decode(rt, codec, buf)
+        }
+        _ => ty,
+    })
+}
+
+/// What `options` (a type, or options of one) draws, at `at`.
+fn particles(rt: &Rt, options: V) -> Option<Particles> {
+    let ty = type_of(rt, options);
     let mut p = Particles { kind: type_id(rt, ty)?, ..Particles::default() };
     match rt.class_of(options) {
         BLOCK_OPTION => p.block = Some(rt.str_of(rt.get_field(options, "$state"))?.to_owned()),
@@ -160,10 +268,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (ITEM_OPTION, "getItem") => rt.get_field(a(0), "$stack"),
         (DUST_OPTIONS, "getScale") => rt.get_field(a(0), "$scale"),
         // A type is its own options (`SimpleParticleType`); options give their type.
-        (BLOCK_OPTION | ITEM_OPTION | DUST_OPTIONS | SIMPLE_TYPE | PARTICLE_TYPE | "net/minecraft/core/particles/ParticleOptions", "getType") => match rt.get_field(a(0), "$type") {
-            t if t.r() != 0 => t,
-            _ => a(0),
-        },
+        (BLOCK_OPTION | ITEM_OPTION | DUST_OPTIONS | SIMPLE_TYPE | PARTICLE_TYPE | "net/minecraft/core/particles/ParticleOptions", "getType") => type_of(rt, a(0)),
         // `new SimpleParticleType(overrideLimiter)`, or a mod's own `ParticleType` subclass calling
         // `super(overrideLimiter)`: named once registered.
         (SIMPLE_TYPE | PARTICLE_TYPE, "<init>") => {

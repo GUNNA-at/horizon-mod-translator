@@ -91,6 +91,8 @@ const HOLDER: &str = "compat:stream/holder";
 const FROM_CODEC: &str = "compat:stream/from_codec";
 /// `ResourceKey.streamCodec(registry)`: [the registry]; a key by its location.
 const RESOURCE_KEY: &str = "compat:stream/resource_key";
+/// `ParticleTypes.STREAM_CODEC`: particle options ([`crate::particles::write_options`]).
+const PARTICLE: &str = "compat:stream/particle";
 /// `ByteBufCodecs.list()`, a `CodecOperation` (`codec.apply(list())`).
 const LIST_OP: &str = "compat:stream-op/list";
 
@@ -166,6 +168,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/item/component/ItemContainerContents", "STREAM_CODEC") => CONTENTS,
         ("net/neoforged/neoforge/fluids/FluidStack", "STREAM_CODEC" | "OPTIONAL_STREAM_CODEC") => FLUID_STACK,
         ("net/minecraft/network/chat/ComponentSerialization", "STREAM_CODEC" | "TRUSTED_STREAM_CODEC") => COMPONENT,
+        ("net/minecraft/core/particles/ParticleTypes", "STREAM_CODEC") => PARTICLE,
         // The block states' id map: block states travel by their text.
         ("net/minecraft/world/level/block/Block", "BLOCK_STATE_REGISTRY") => {
             return Some(rt.intern("compat:block-state-ids".into(), |rt| rt.new_object("net/minecraft/core/IdMapper")));
@@ -896,6 +899,11 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
             let s = text(rt, rt.get_field(value, "$text"));
             put_utf(rt, buf, &s);
         }
+        PARTICLE => {
+            if let Err(e) = crate::particles::write_options(rt, buf, value) {
+                throw_with(rt, "io/netty/handler/codec/EncoderException", &format!("Failed to encode: {e}"));
+            }
+        }
         _ => {}
     }
 }
@@ -1068,6 +1076,7 @@ fn decode_native(rt: &mut Rt, c: V, buf: V) -> Option<V> {
             crate::handlers::contents(rt, items)
         }
         FLUID_STACK => read_fluid(rt, buf)?,
+        PARTICLE => crate::particles::read_options(rt, buf)?,
         COMPONENT => {
             let s = read_utf(rt, buf)?;
             let t = rt.new_object("net/minecraft/network/chat/MutableComponent");
@@ -1258,6 +1267,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         | "net/minecraft/network/codec/StreamDecoder"
         | "net/minecraft/network/codec/ByteBufCodecs"
         | "net/minecraft/network/codec/StreamCodec$CodecOperation" => codec_call(rt, owner, name, desc, args),
+        "net/minecraft/resources/ResourceKey" if name == "streamCodec" => codec_call(rt, owner, name, desc, args),
         REGISTER_PAYLOADS if name == "registrar" => {
             let r = rt.new_object(REGISTRAR);
             rt.put_field(r, "$version", a(1));
@@ -1703,6 +1713,59 @@ mod tests {
         let (bytes, back) = round_trip(&mut rt, s, text);
         assert_eq!(bytes, vec![3, b'h', 0xC3, 0xA9]);
         assert_eq!(rt.str_of(back), Some("hé"));
+    }
+
+    /// `ResourceKey.streamCodec(registry)` as a mod's class file calls it, through the dispatcher:
+    /// a key goes by its location and comes back a key of the same registry.
+    #[test]
+    fn a_resource_key_travels_by_its_location() {
+        let mut rt = Rt::new();
+        crate::install();
+        let dimension = rt.string("dimension");
+        let codec = crate::api::call(&mut rt, "net/minecraft/resources/ResourceKey.streamCodec.(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/network/codec/StreamCodec;", &[dimension]);
+        assert!(is_codec(&rt, codec), "the network module's codec, not a stand-in");
+        let id = rt.string("minecraft:the_nether");
+        let nether = crate::api::call(&mut rt, "net/minecraft/resources/ResourceKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[dimension, id]);
+        let (bytes, back) = round_trip(&mut rt, codec, nether);
+        assert_eq!(bytes, [&[20u8][..], b"minecraft:the_nether"].concat(), "a UTF-8 string after its length");
+        assert_eq!(rt.str_of(back), rt.str_of(nether));
+    }
+
+    /// Particles in a packet (`ParticleTypes.STREAM_CODEC`): a plain type, a block's and an item's
+    /// options and a dust's colour come back as they went.
+    #[test]
+    fn particle_options_come_back_as_they_went() {
+        let mut rt = Rt::new();
+        crate::install();
+        let codec = sv(&mut rt, "net/minecraft/core/particles/ParticleTypes.STREAM_CODEC");
+        let flame = sv(&mut rt, "net/minecraft/core/particles/ParticleTypes.FLAME");
+        let (_, back) = round_trip(&mut rt, codec, flame);
+        assert_eq!(back, flame, "vanilla's type, the one object");
+
+        let block_type = sv(&mut rt, "net/minecraft/core/particles/ParticleTypes.BLOCK");
+        let stone = crate::api::state(&mut rt, "minecraft:stone");
+        let block = rt.new_object("net/minecraft/core/particles/BlockParticleOption");
+        crate::api::call(&mut rt, "net/minecraft/core/particles/BlockParticleOption.<init>.(Lnet/minecraft/core/particles/ParticleType;Lnet/minecraft/world/level/block/state/BlockState;)V", &[block, block_type, stone]);
+        let (_, back) = round_trip(&mut rt, codec, block);
+        let ty = crate::api::call(&mut rt, "net/minecraft/core/particles/ParticleOptions.getType.()Lnet/minecraft/core/particles/ParticleType;", &[back]);
+        assert_eq!(ty, block_type);
+        let state = crate::api::call(&mut rt, "net/minecraft/core/particles/BlockParticleOption.getState.()Lnet/minecraft/world/level/block/state/BlockState;", &[back]);
+        assert_eq!(rt.str_of(state), Some("minecraft:stone"));
+
+        let item_type = sv(&mut rt, "net/minecraft/core/particles/ParticleTypes.ITEM");
+        let sheets = crate::api_common::stack(&mut rt, "create:iron_sheet", 3);
+        let item = rt.new_object("net/minecraft/core/particles/ItemParticleOption");
+        crate::api::call(&mut rt, "net/minecraft/core/particles/ItemParticleOption.<init>.(Lnet/minecraft/core/particles/ParticleType;Lnet/minecraft/world/item/ItemStack;)V", &[item, item_type, sheets]);
+        let (_, back) = round_trip(&mut rt, codec, item);
+        let stack = crate::api::call(&mut rt, "net/minecraft/core/particles/ItemParticleOption.getItem.()Lnet/minecraft/world/item/ItemStack;", &[back]);
+        assert_eq!(crate::api_common::item_like_name(&rt, rt.get_field(stack, "$item")), "create:iron_sheet");
+        assert_eq!(rt.get_field(stack, "$count"), V::I(3));
+
+        let redstone = sv(&mut rt, "net/minecraft/core/particles/DustParticleOptions.REDSTONE");
+        let (_, back) = round_trip(&mut rt, codec, redstone);
+        assert_eq!(["$r", "$g", "$b", "$scale"].map(|f| rt.get_field(back, f).f()), [1.0, 0.0, 0.0, 1.0]);
+        let dust = sv(&mut rt, "net/minecraft/core/particles/ParticleTypes.DUST");
+        assert_eq!(rt.get_field(back, "$type"), dust);
     }
 
     #[test]

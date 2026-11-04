@@ -1054,6 +1054,11 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             rt.interned.get(&format!("const/{BLOCK_SET_TYPE}.{field}")).copied()
         }
         DISPENSER if field == "DISPENSER_REGISTRY" => Some(dispenser_behaviours(rt)),
+        // Vanilla's behaviour that puts armour on whoever stands in front (`ArmorItem.dispenseArmor`):
+        // one object, its class vanilla's anonymous one, so the game can tell it from a mod's.
+        "net/minecraft/world/item/ArmorItem" if field == "DISPENSE_ITEM_BEHAVIOR" => {
+            Some(rt.intern("compat:dispense-armor".into(), |rt| rt.new_object("net/minecraft/world/item/ArmorItem$1")))
+        }
         TIERS => {
             let i = TIER_VALUES.iter().position(|(n, ..)| *n == field)?;
             Some(api::api_enum(rt, TIERS, TIER_VALUES[i].0, i as i32))

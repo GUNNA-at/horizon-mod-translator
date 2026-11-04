@@ -95,6 +95,9 @@ fn main() {
     let mut un: Vec<_> = rt.unmapped.keys().collect();
     un.sort();
     println!("unmapped: {un:?}");
+    // Loading's order: the main class is constructed, then the registers its constructor reaches.
+    let order = rt.statics.get("testmod/TestMod.order").copied().and_then(|v| rt.str_of(v)).map(str::to_owned);
+    println!("order: {order:?}");
 }
 "#,
     )
@@ -124,5 +127,6 @@ fn main() {
     assert_eq!(lines[12], "click: took=true now=testmod:switch[powered=true] above=minecraft:stone");
     assert_eq!(lines[13], "sneak click: took=false now=testmod:switch[powered=true]");
     assert_eq!(lines[14], "unmapped: []");
+    assert_eq!(lines[15], r#"order: Some("constructed registers ")"#);
     fs::remove_dir_all(&root).unwrap();
 }

@@ -32,9 +32,98 @@ const EATING_SOUND_KEY: &str = "net/minecraft/world/item/Item.getEatingSound.()L
 const DRINKING_SOUND: &str = "getDrinkingSound.()Lnet/minecraft/sounds/SoundEvent;";
 const DRINKING_SOUND_KEY: &str = "net/minecraft/world/item/Item.getDrinkingSound.()Lnet/minecraft/sounds/SoundEvent;";
 
+/// 1.21.1's `Foods`, as its static initialiser builds them: (field, nutrition, saturation modifier,
+/// always edible, fast, what eating leaves, effects as (`MobEffects` field, duration, amplifier,
+/// probability)).
+#[allow(clippy::type_complexity)]
+const FOODS: [(&str, i32, f32, bool, bool, Option<&str>, &[(&str, i32, i32, f32)]); 41] = [
+    ("APPLE", 4, 0.3, false, false, None, &[]),
+    ("BAKED_POTATO", 5, 0.6, false, false, None, &[]),
+    ("BEEF", 3, 0.3, false, false, None, &[]),
+    ("BEETROOT", 1, 0.6, false, false, None, &[]),
+    ("BEETROOT_SOUP", 6, 0.6, false, false, Some("minecraft:bowl"), &[]),
+    ("BREAD", 5, 0.6, false, false, None, &[]),
+    ("CARROT", 3, 0.6, false, false, None, &[]),
+    ("CHICKEN", 2, 0.3, false, false, None, &[("HUNGER", 600, 0, 0.3)]),
+    ("CHORUS_FRUIT", 4, 0.3, true, false, None, &[]),
+    ("COD", 2, 0.1, false, false, None, &[]),
+    ("COOKED_BEEF", 8, 0.8, false, false, None, &[]),
+    ("COOKED_CHICKEN", 6, 0.6, false, false, None, &[]),
+    ("COOKED_COD", 5, 0.6, false, false, None, &[]),
+    ("COOKED_MUTTON", 6, 0.8, false, false, None, &[]),
+    ("COOKED_PORKCHOP", 8, 0.8, false, false, None, &[]),
+    ("COOKED_RABBIT", 5, 0.6, false, false, None, &[]),
+    ("COOKED_SALMON", 6, 0.8, false, false, None, &[]),
+    ("COOKIE", 2, 0.1, false, false, None, &[]),
+    ("DRIED_KELP", 1, 0.3, false, true, None, &[]),
+    ("ENCHANTED_GOLDEN_APPLE", 4, 1.2, true, false, None, &[("REGENERATION", 400, 1, 1.0), ("DAMAGE_RESISTANCE", 6000, 0, 1.0), ("FIRE_RESISTANCE", 6000, 0, 1.0), ("ABSORPTION", 2400, 3, 1.0)]),
+    ("GOLDEN_APPLE", 4, 1.2, true, false, None, &[("REGENERATION", 100, 1, 1.0), ("ABSORPTION", 2400, 0, 1.0)]),
+    ("GOLDEN_CARROT", 6, 1.2, false, false, None, &[]),
+    ("HONEY_BOTTLE", 6, 0.1, false, false, None, &[]),
+    ("MELON_SLICE", 2, 0.3, false, false, None, &[]),
+    ("MUSHROOM_STEW", 6, 0.6, false, false, Some("minecraft:bowl"), &[]),
+    ("MUTTON", 2, 0.3, false, false, None, &[]),
+    ("POISONOUS_POTATO", 2, 0.3, false, false, None, &[("POISON", 100, 0, 0.6)]),
+    ("PORKCHOP", 3, 0.3, false, false, None, &[]),
+    ("POTATO", 1, 0.3, false, false, None, &[]),
+    ("PUFFERFISH", 1, 0.1, false, false, None, &[("POISON", 1200, 1, 1.0), ("HUNGER", 300, 2, 1.0), ("CONFUSION", 300, 0, 1.0)]),
+    ("PUMPKIN_PIE", 8, 0.3, false, false, None, &[]),
+    ("RABBIT", 3, 0.3, false, false, None, &[]),
+    ("RABBIT_STEW", 10, 0.6, false, false, Some("minecraft:bowl"), &[]),
+    ("ROTTEN_FLESH", 4, 0.1, false, false, None, &[("HUNGER", 600, 0, 0.8)]),
+    ("SALMON", 2, 0.1, false, false, None, &[]),
+    ("SPIDER_EYE", 2, 0.8, false, false, None, &[("POISON", 100, 0, 1.0)]),
+    ("SUSPICIOUS_STEW", 6, 0.6, true, false, Some("minecraft:bowl"), &[]),
+    ("SWEET_BERRIES", 2, 0.1, false, false, None, &[]),
+    ("GLOW_BERRIES", 2, 0.1, false, false, None, &[]),
+    ("TROPICAL_FISH", 1, 0.1, false, false, None, &[]),
+    ("OMINOUS_BOTTLE", 1, 0.1, false, false, None, &[]),
+];
+
+/// `Foods.FIELD`, built by the builder as vanilla's is: one object per field.
+fn vanilla_food(rt: &mut Rt, field: &str) -> Option<V> {
+    let &(name, nutrition, modifier, always, fast, converts, effects) = FOODS.iter().find(|f| f.0 == field)?;
+    Some(rt.intern(format!("food/{name}"), |rt| {
+        let b = rt.new_object(BUILDER);
+        call(rt, NEW_BUILDER, &[b]);
+        call(rt, NUTRITION, &[b, V::I(nutrition)]);
+        call(rt, MODIFIER, &[b, V::F(modifier)]);
+        if always {
+            call(rt, ALWAYS, &[b]);
+        }
+        if fast {
+            call(rt, FAST, &[b]);
+        }
+        if let Some(item) = converts {
+            let item = api_common::item(rt, item);
+            call(rt, CONVERTS, &[b, item]);
+        }
+        for &(effect, duration, amplifier, probability) in effects {
+            let holder = get_static(rt, EFFECTS, effect).unwrap_or(V::NULL);
+            let e = rt.new_object(INSTANCE);
+            call(rt, INSTANCE_3, &[e, holder, V::I(duration), V::I(amplifier)]);
+            call(rt, EFFECT_OF, &[b, e, V::F(probability)]);
+        }
+        call(rt, BUILD, &[b]).unwrap_or(V::NULL)
+    }))
+}
+
+const NEW_BUILDER: &str = "net/minecraft/world/food/FoodProperties$Builder.<init>.()V";
+const NUTRITION: &str = "net/minecraft/world/food/FoodProperties$Builder.nutrition.(I)Lnet/minecraft/world/food/FoodProperties$Builder;";
+const MODIFIER: &str = "net/minecraft/world/food/FoodProperties$Builder.saturationModifier.(F)Lnet/minecraft/world/food/FoodProperties$Builder;";
+const ALWAYS: &str = "net/minecraft/world/food/FoodProperties$Builder.alwaysEdible.()Lnet/minecraft/world/food/FoodProperties$Builder;";
+const FAST: &str = "net/minecraft/world/food/FoodProperties$Builder.fast.()Lnet/minecraft/world/food/FoodProperties$Builder;";
+const EFFECT_OF: &str = "net/minecraft/world/food/FoodProperties$Builder.effect.(Lnet/minecraft/world/effect/MobEffectInstance;F)Lnet/minecraft/world/food/FoodProperties$Builder;";
+const CONVERTS: &str = "net/minecraft/world/food/FoodProperties$Builder.usingConvertsTo.(Lnet/minecraft/world/level/ItemLike;)Lnet/minecraft/world/food/FoodProperties$Builder;";
+const BUILD: &str = "net/minecraft/world/food/FoodProperties$Builder.build.()Lnet/minecraft/world/food/FoodProperties;";
+const INSTANCE_3: &str = "net/minecraft/world/effect/MobEffectInstance.<init>.(Lnet/minecraft/core/Holder;II)V";
+
 /// `MobEffects.FIELD`: a holder of vanilla's effect with the id that field registers. One object per
-/// field: a mod may compare them. And `UseAnim`'s constants.
+/// field: a mod may compare them. `UseAnim`'s constants, and vanilla's foods (`Foods.GOLDEN_APPLE`).
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    if owner == "net/minecraft/world/food/Foods" {
+        return vanilla_food(rt, field);
+    }
     if owner == USE_ANIM {
         let i = USE_ANIMS.iter().position(|n| *n == field)?;
         return Some(api::api_enum(rt, USE_ANIM, USE_ANIMS[i], i as i32));
@@ -371,15 +460,7 @@ pub fn components(rt: &mut Rt, item: V, props: V) -> Vec<String> {
 mod tests {
     use super::*;
 
-    const NEW_BUILDER: &str = "net/minecraft/world/food/FoodProperties$Builder.<init>.()V";
-    const NUTRITION: &str = "net/minecraft/world/food/FoodProperties$Builder.nutrition.(I)Lnet/minecraft/world/food/FoodProperties$Builder;";
-    const MODIFIER: &str = "net/minecraft/world/food/FoodProperties$Builder.saturationModifier.(F)Lnet/minecraft/world/food/FoodProperties$Builder;";
-    const ALWAYS: &str = "net/minecraft/world/food/FoodProperties$Builder.alwaysEdible.()Lnet/minecraft/world/food/FoodProperties$Builder;";
-    const EFFECT_OF: &str = "net/minecraft/world/food/FoodProperties$Builder.effect.(Lnet/minecraft/world/effect/MobEffectInstance;F)Lnet/minecraft/world/food/FoodProperties$Builder;";
-    const CONVERTS: &str = "net/minecraft/world/food/FoodProperties$Builder.usingConvertsTo.(Lnet/minecraft/world/level/ItemLike;)Lnet/minecraft/world/food/FoodProperties$Builder;";
-    const BUILD: &str = "net/minecraft/world/food/FoodProperties$Builder.build.()Lnet/minecraft/world/food/FoodProperties;";
     const INSTANCE_6: &str = "net/minecraft/world/effect/MobEffectInstance.<init>.(Lnet/minecraft/core/Holder;IIZZZ)V";
-    const INSTANCE_3: &str = "net/minecraft/world/effect/MobEffectInstance.<init>.(Lnet/minecraft/core/Holder;II)V";
 
     fn builder(rt: &mut Rt, nutrition: i32, modifier: f32) -> V {
         let b = rt.new_object(BUILDER);
@@ -436,6 +517,28 @@ mod tests {
                 "minecraft:food": {"can_always_eat": true, "nutrition": 4, "saturation": 9.6}
             })
         );
+    }
+
+    /// Vanilla's own foods (`Foods.GOLDEN_APPLE`), one object each, declare what 26.3's items.json
+    /// has for them; dried kelp is eaten fast.
+    #[test]
+    fn vanillas_foods_are_its_own() {
+        let mut rt = Rt::new();
+        crate::install();
+        let apple = api::get_static(&mut rt, "net/minecraft/world/food/Foods.GOLDEN_APPLE");
+        assert_eq!(api::get_static(&mut rt, "net/minecraft/world/food/Foods.GOLDEN_APPLE"), apple);
+        assert_eq!(
+            declared(&mut rt, apple),
+            serde_json::json!({
+                "minecraft:consumable": {"on_consume_effects": [{"type": "minecraft:apply_effects", "effects": [
+                    {"amplifier": 1, "duration": 100, "id": "minecraft:regeneration", "show_icon": true},
+                    {"duration": 2400, "id": "minecraft:absorption", "show_icon": true}
+                ]}]},
+                "minecraft:food": {"can_always_eat": true, "nutrition": 4, "saturation": 9.6}
+            })
+        );
+        let kelp = api::get_static(&mut rt, "net/minecraft/world/food/Foods.DRIED_KELP");
+        assert_eq!(declared(&mut rt, kelp)["minecraft:consumable"], serde_json::json!({"consume_seconds": 0.8}));
     }
 
     /// A chance effect keeps its own roll (raw chicken's hunger: 30 %), and an instance that hides

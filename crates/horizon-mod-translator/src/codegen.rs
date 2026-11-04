@@ -639,15 +639,10 @@ impl<'a> Program<'a> {
             let _ = writeln!(out, "    rt.subscribers.insert({class:?}, vec![{}]);", list.join(", "));
         }
         out.push_str("}\n\n");
-        // Mod loading's registration phase: classes holding registers initialise, then suppliers resolve.
+        // Mod loading: FML constructs each `@Mod` class with the mod bus (its classes initialise as
+        // it reaches them, in Java's order), registers the `@EventBusSubscriber` classes, then fires
+        // the registration events; suppliers resolve last.
         out.push_str("/// Runs the mod's registrations, as NeoForge's loading does. Call after `init`.\npub fn start(rt: &mut Rt) {\n");
-        for c in classes {
-            if c.fields.iter().any(|f| f.access & 0x0008 != 0 && f.desc.contains("neoforged/neoforge/registries/DeferredRegister")) {
-                let _ = writeln!(out, "    {}", self.ensure(&c.name).replace("if rt.thrown.is_some() { return V::Void; }", &format!("rt.report_thrown({:?});", c.name)));
-            }
-        }
-        // FML constructs each `@Mod` class with the mod bus and registers its `@EventBusSubscriber`
-        // classes, then fires the registration events.
         let mains = self.mod_mains();
         let mut ids: Vec<String> = Vec::new();
         for id in mains.iter().filter_map(|(c, _)| c.annotation_of(MOD).and_then(|a| a.value("value"))) {
@@ -676,6 +671,13 @@ impl<'a> Program<'a> {
             }
             let _ = writeln!(out, "        {}", self.ensure(&main.name).replace("if rt.thrown.is_some() { return V::Void; }", &format!("rt.report_thrown({:?});", main.name)));
             let _ = writeln!(out, "        {}(rt, &args);\n        rt.report_thrown({:?});\n    }}", fn_name(&main.name, "<init>", &ctor.desc), format!("the constructor of {}", main.name));
+        }
+        // A class holding registers that no constructor reached initialises now, so its entries
+        // register still (the runtime registers every `DeferredRegister`'s entries).
+        for c in classes {
+            if c.fields.iter().any(|f| f.access & 0x0008 != 0 && f.desc.contains("neoforged/neoforge/registries/DeferredRegister")) {
+                let _ = writeln!(out, "    {}", self.ensure(&c.name).replace("if rt.thrown.is_some() { return V::Void; }", &format!("rt.report_thrown({:?});", c.name)));
+            }
         }
         for c in classes {
             if EVENT_BUS_SUBSCRIBER.iter().any(|t| c.annotation_of(t).is_some()) {
