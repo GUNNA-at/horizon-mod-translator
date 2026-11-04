@@ -1178,6 +1178,25 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (o, _) if o.starts_with("org/apache/commons/lang3/mutable/Mutable") => return mutable(rt, o, name, desc, args),
         ("java/lang/Record", "<init>") => V::Void,
+        // Vanilla's `Util`: `make(supplier)` is what the supplier gives; `make(object, consumer)`
+        // hands the object to the consumer and returns it (`Util.make(new HashMap<>(), m -> ...)`).
+        ("net/minecraft/Util", "make") if desc.starts_with("(Ljava/util/function/Supplier;") => {
+            rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", a(0), &[])
+        }
+        ("net/minecraft/Util", "make") => {
+            rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", a(1), &[a(0)]);
+            a(0)
+        }
+        // `memoize(function)`: the function itself (same answers; vanilla only caches them).
+        ("net/minecraft/Util", "memoize") => a(0),
+        ("net/minecraft/Util", "getMillis" | "getEpochMillis") => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+            V::J(now)
+        }
+        ("net/minecraft/Util", "getNanos") => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
+            V::J(now)
+        }
         _ => return None,
     })
 }

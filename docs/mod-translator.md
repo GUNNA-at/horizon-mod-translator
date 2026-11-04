@@ -523,6 +523,13 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     map colour, `byId/byName/byFireworkColor`), `ArmorItem.Type.getName/getDurability`.
     Mapping an enum's `values()` makes loops run that never ran: each such step needs the calls
     inside the loop mapped too, or the loop throws where it used to do nothing.
+    Vanilla's `Util.make(supplier)` / `make(object, consumer)` / `memoize` / `getMillis`: all of
+    `Util` was unmapped, so `Util.make(...)` came back void (Create builds `SimpleRegistry`s and
+    display sources this way).
+  - In game (2026-11-04 build): a dropper over a depot drops an iron ingot, the item entity lands on
+    the depot and the depot takes it (`HeldItem: {Item: iron_ingot}`, the server sends the update tag,
+    the client loads it). The client's depot renderer doesn't draw it yet (no `draw_item` call);
+    harness `DROP` repeats that path.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
