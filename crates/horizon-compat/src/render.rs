@@ -342,6 +342,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "org/joml/Quaternionf" | "org/joml/Quaternionfc" => quaternion(rt, name, desc, args),
         "org/joml/Vector3f" | "org/joml/Vector3fc" => vector3(rt, name, desc, args),
         "org/joml/Vector4f" | "org/joml/Vector4fc" => vector4(rt, name, desc, args),
+        "org/joml/Vector2i" | "org/joml/Vector2ic" => vector2i(rt, name, desc, args),
         "com/mojang/blaze3d/vertex/PoseStack" => pose_stack(rt, name, desc, args),
         "com/mojang/blaze3d/vertex/PoseStack$Pose" => pose(rt, name, desc, args),
         "com/mojang/math/Axis" => axis(rt, name, args),
@@ -795,6 +796,56 @@ fn vector3(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let o = vec3(rt, a(1));
             let t = f(2);
             set(rt, [v[0] + (o[0] - v[0]) * t, v[1] + (o[1] - v[1]) * t, v[2] + (o[2] - v[2]) * t])
+        }
+        _ => return None,
+    })
+}
+
+/// JOML's `Vector2i`: its public `x` and `y` (Copycats+ names a byte panel's parts with them).
+fn vector2i(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    let of = |rt: &Rt, o: V| [rt.get_field(o, "x").i(), rt.get_field(o, "y").i()];
+    let v = of(rt, this);
+    let set = |rt: &mut Rt, [x, y]: [i32; 2]| {
+        rt.put_field(this, "x", V::I(x));
+        rt.put_field(this, "y", V::I(y));
+        this
+    };
+    Some(match (name, desc) {
+        ("<init>", "()V") => {
+            set(rt, [0, 0]);
+            V::Void
+        }
+        ("<init>", "(I)V") => {
+            set(rt, [a(1).i(); 2]);
+            V::Void
+        }
+        ("<init>", "(II)V") => {
+            set(rt, [a(1).i(), a(2).i()]);
+            V::Void
+        }
+        ("<init>", "(Lorg/joml/Vector2ic;)V") => {
+            let o = of(rt, a(1));
+            set(rt, o);
+            V::Void
+        }
+        ("x", "()I") => V::I(v[0]),
+        ("y", "()I") => V::I(v[1]),
+        ("set", "(II)Lorg/joml/Vector2i;") => set(rt, [a(1).i(), a(2).i()]),
+        ("set", "(Lorg/joml/Vector2ic;)Lorg/joml/Vector2i;") => {
+            let o = of(rt, a(1));
+            set(rt, o)
+        }
+        ("add" | "sub", "(II)Lorg/joml/Vector2i;" | "(Lorg/joml/Vector2ic;)Lorg/joml/Vector2i;") => {
+            let o = if desc.starts_with("(II)") { [a(1).i(), a(2).i()] } else { of(rt, a(1)) };
+            let k = if name == "sub" { -1 } else { 1 };
+            set(rt, [v[0].wrapping_add(k * o[0]), v[1].wrapping_add(k * o[1])])
+        }
+        ("mul", "(I)Lorg/joml/Vector2i;") => set(rt, [v[0].wrapping_mul(a(1).i()), v[1].wrapping_mul(a(1).i())]),
+        ("equals", "(II)Z") => V::I((v == [a(1).i(), a(2).i()]) as i32),
+        ("equals" | "hashCode", _) => {
+            return Some(if name == "equals" { V::I(crate::jutil::equals_own(rt, this, a(1)) as i32) } else { V::I(crate::jutil::hash_own(rt, this)) });
         }
         _ => return None,
     })

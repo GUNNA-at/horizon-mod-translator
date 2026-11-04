@@ -1370,12 +1370,24 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     state(rt, &name)
                 }
                 "getPossibleStates" => {
-                    let name = block_name(rt, b);
-                    let s = state(rt, &name);
-                    crate::jutil::new_list(rt, vec![s])
+                    let states = possible_states(rt, b);
+                    crate::jutil::new_list(rt, states)
                 }
                 _ => return crate::api_common::call(rt, owner, name, desc, args),
             }
+        }
+        // `getShapeForEachState(shapeGetter)`: every state's shape, worked out once (the cache a
+        // block's `getShape` reads back).
+        (_, "getShapeForEachState") if is_block_class(owner) && desc == "(Ljava/util/function/Function;)Lcom/google/common/collect/ImmutableMap;" => {
+            let m = rt.alloc("com/google/common/collect/ImmutableMap", Data::Table(Default::default()));
+            for s in possible_states(rt, a(0)) {
+                let shape = rt.call_functional("java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", a(1), &[s]);
+                if rt.thrown.is_some() {
+                    return Some(V::NULL);
+                }
+                crate::jutil::table_put(rt, m, s, shape);
+            }
+            m
         }
         (_, "getDescriptionId") if is_block_class(owner) && desc == "()Ljava/lang/String;" => {
             let id = description_id(&block_name(rt, a(0)));
@@ -1408,6 +1420,47 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "<init>") if o.starts_with("net/minecraft/world/item/") && o.ends_with("Item") => V::Void,
         _ => return crate::api_common::call(rt, owner, name, desc, args),
     })
+}
+
+/// The most states [`possible_states`] spells out; a definition with more (vanilla's largest,
+/// redstone wire, has 1296) keeps its default state alone.
+const MAX_STATES: usize = 1 << 16;
+
+/// Block `b`'s states in `StateDefinition.getPossibleStates()`'s order: every combination of its
+/// properties' values, the property first by name varying slowest, each property's values in its
+/// own order. A vanilla block, whose definition the game keeps, answers its default state.
+pub(crate) fn possible_states(rt: &mut Rt, b: V) -> Vec<V> {
+    let name = block_name(rt, b);
+    let list = match rt.heap.get(b.r() as usize).map(|o| &o.data) {
+        Some(Data::Fields(_)) => rt.get_field(b, "$state-props"),
+        _ => V::NULL,
+    };
+    let mut props: Vec<(String, Vec<String>)> = Vec::new();
+    for p in crate::jutil::elements(rt, list) {
+        let (pname, _) = crate::api_common::prop_parts(rt, p);
+        let values = crate::blocks::property_values(rt, p);
+        if !values.is_empty() && !props.iter().any(|(n, _)| *n == pname) {
+            props.push((pname, values));
+        }
+    }
+    props.sort_by(|x, y| x.0.cmp(&y.0));
+    let count = props.iter().try_fold(1usize, |n, (_, v)| n.checked_mul(v.len()).filter(|&n| n <= MAX_STATES));
+    if props.is_empty() || count.is_none() {
+        let default = match rt.str_of(rt.get_field(b, "$default")).map(str::to_owned) {
+            Some(d) if !d.is_empty() && !props.is_empty() => format!("{name}[{d}]"),
+            _ => name.clone(),
+        };
+        return vec![state(rt, &default)];
+    }
+    let mut combos: Vec<Vec<(&str, &str)>> = vec![Vec::new()];
+    for (pname, values) in &props {
+        combos = combos
+            .into_iter()
+            .flat_map(|c| values.iter().map(move |v| c.iter().copied().chain([(pname.as_str(), v.as_str())]).collect()))
+            .collect();
+    }
+    let texts: Vec<String> = combos.into_iter().map(|c| crate::host::join_state(&name, c)).collect();
+    texts.iter().map(|t| state(rt, t)).collect()
 }
 
 /// Whether `owner` is vanilla's `Block` or one of its block classes (`RotatedPillarBlock`).

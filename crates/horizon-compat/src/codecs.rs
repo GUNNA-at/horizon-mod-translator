@@ -114,8 +114,9 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/nbt/CompoundTag", "CODEC") => native(rt, "compound_tag"),
         ("net/minecraft/world/item/DyeColor", "CODEC") => native(rt, "dye_color"),
         ("net/minecraft/world/level/block/state/BlockState", "CODEC") => native(rt, "block_state"),
-        // `NeoForgeRegistries.FLUID_INGREDIENT_TYPES` is registry `fluid_ingredient_type`.
-        ("net/neoforged/neoforge/registries/NeoForgeRegistries", f) => {
+        // `NeoForgeRegistries.FLUID_INGREDIENT_TYPES` is registry `fluid_ingredient_type`, and so is
+        // its key (`NeoForgeRegistries.Keys`): registries are their names here.
+        ("net/neoforged/neoforge/registries/NeoForgeRegistries" | "net/neoforged/neoforge/registries/NeoForgeRegistries$Keys", f) => {
             let n = f.to_ascii_lowercase();
             let n = n.strip_suffix("_types").map_or(n.clone(), |t| format!("{t}_type"));
             rt.string(&n)
@@ -838,6 +839,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || owner.starts_with("com/mojang/datafixers/")
         || matches!(owner, "net/minecraft/util/ExtraCodecs" | "net/minecraft/util/StringRepresentable" | "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs" | "net/minecraft/resources/RegistryOps")
         || matches!(name, "byNameCodec" | "holderByNameCodec" | "createSerializationContext")
+        || (name == "simpleCodec" && owner.starts_with("net/minecraft/world/level/block/"))
         || RECEIVER_METHODS.contains(&name)
 }
 
@@ -866,6 +868,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return Some(if method == "create" { codec(rt, "compat:codec/of_map", vec![built]) } else { built });
         }
         ("com/mojang/serialization/codecs/RecordCodecBuilder", "point") => return Some(codec(rt, "compat:codec/point", vec![a(0)])),
+        // `BlockBehaviour.simpleCodec(constructor)`: a block's codec, its properties alone, which
+        // only a block-type registry reads.
+        (o, "simpleCodec") if o.starts_with("net/minecraft/world/level/block/") && desc == "(Ljava/util/function/Function;)Lcom/mojang/serialization/MapCodec;" => {
+            return Some(codec(rt, "compat:codec/block", vec![a(0)]));
+        }
         // `RecordCodecBuilder.of(getter, mapCodec)`: a field.
         ("com/mojang/serialization/codecs/RecordCodecBuilder", "of") => return Some(codec(rt, "compat:codec/getter", vec![a(1), a(0)])),
         ("com/mojang/serialization/Codec", "either") if desc.starts_with("(Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;)") => {

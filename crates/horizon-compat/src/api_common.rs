@@ -57,10 +57,8 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         "net/minecraft/world/MenuProvider" | "net/minecraft/world/inventory/MenuConstructor" => c == "net/minecraft/world/SimpleMenuProvider",
         "net/minecraft/world/inventory/ContainerData" => c == "net/minecraft/world/inventory/SimpleContainerData",
         "net/minecraft/client/gui/screens/inventory/MenuAccess" => c == "net/minecraft/client/gui/screens/inventory/AbstractContainerScreen",
-        "java/lang/Throwable" => c.starts_with("java/lang/") && (c.ends_with("Exception") || c.ends_with("Error")),
         // A mod's container is FML's Java one (`neo::mod_container`).
         "net/neoforged/fml/ModContainer" => c == crate::neo::FML_CONTAINER,
-        "java/lang/Exception" => c.starts_with("java/lang/") && c.ends_with("Exception"),
         "java/lang/ReflectiveOperationException" => matches!(
             c,
             "java/lang/ClassNotFoundException"
@@ -72,9 +70,102 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         ),
         "java/lang/RuntimeException" => {
             matches!(c, "java/lang/IllegalArgumentException" | "java/lang/IllegalStateException" | "java/lang/NullPointerException" | "java/lang/UnsupportedOperationException" | "java/lang/ClassCastException" | "java/lang/ArithmeticException" | "java/lang/IndexOutOfBoundsException" | "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/NumberFormatException")
+                || java_is_a(c, class)
+        }
+        _ => java_is_a(c, class),
+    }
+}
+
+/// Java's own class families, for the runtime's objects (a `new HashMap<>()` is a `Map`, a
+/// `Collection` and `Iterable`): collections by kind, boxed numbers, strings, and the exceptions
+/// the runtime throws, each under its supertypes as the JDK declares them.
+fn java_is_a(c: &str, class: &str) -> bool {
+    match class {
+        "java/util/Map" => is_map_class(c),
+        "java/util/SortedMap" | "java/util/NavigableMap" => {
+            matches!(c, "java/util/TreeMap" | "java/util/concurrent/ConcurrentSkipListMap" | "com/google/common/collect/ImmutableSortedMap")
+        }
+        "java/util/concurrent/ConcurrentMap" => matches!(c, "java/util/concurrent/ConcurrentHashMap" | "java/util/concurrent/ConcurrentSkipListMap"),
+        "java/util/AbstractMap" => is_map_class(c) && c.starts_with("java/util/") && c != "java/util/Map",
+        "java/util/HashMap" => c == "java/util/LinkedHashMap",
+        "java/util/List" => is_list_class(c),
+        "java/util/RandomAccess" => is_list_class(c) && !c.ends_with("LinkedList"),
+        "java/util/Set" => is_set_class(c),
+        "java/util/SortedSet" | "java/util/NavigableSet" => {
+            matches!(c, "java/util/TreeSet" | "java/util/concurrent/ConcurrentSkipListSet" | "com/google/common/collect/ImmutableSortedSet")
+        }
+        "java/util/HashSet" => c == "java/util/LinkedHashSet",
+        "java/util/Queue" => is_queue_class(c),
+        "java/util/Deque" => matches!(c, "java/util/ArrayDeque" | "java/util/LinkedList" | "java/util/concurrent/ConcurrentLinkedDeque" | "java/util/concurrent/LinkedBlockingDeque"),
+        "java/util/Collection" | "java/lang/Iterable" | "java/util/SequencedCollection" => {
+            is_list_class(c) || is_set_class(c) || is_queue_class(c) || c.ends_with("Multiset") || c == "java/util/Collection"
+        }
+        "java/lang/Number" => matches!(
+            c,
+            "java/lang/Integer" | "java/lang/Long" | "java/lang/Float" | "java/lang/Double" | "java/lang/Short" | "java/lang/Byte"
+                | "java/util/concurrent/atomic/AtomicInteger" | "java/util/concurrent/atomic/AtomicLong" | "java/math/BigInteger" | "java/math/BigDecimal"
+        ),
+        "java/lang/CharSequence" => matches!(c, "java/lang/String" | "java/lang/StringBuilder" | "java/lang/StringBuffer"),
+        "java/lang/Comparable" => matches!(
+            c,
+            "java/lang/String" | "java/lang/Integer" | "java/lang/Long" | "java/lang/Float" | "java/lang/Double" | "java/lang/Short" | "java/lang/Byte"
+                | "java/lang/Character" | "java/lang/Boolean" | "java/lang/Enum" | "java/math/BigInteger" | "java/math/BigDecimal" | "java/util/UUID"
+        ),
+        "java/lang/Throwable" => library_class(c) && (c.ends_with("Exception") || c.ends_with("Error")),
+        "java/lang/Exception" => library_class(c) && c.ends_with("Exception"),
+        "java/lang/Error" => library_class(c) && c.ends_with("Error"),
+        "java/lang/RuntimeException" => matches!(
+            c,
+            "java/util/NoSuchElementException" | "java/util/ConcurrentModificationException" | "java/util/MissingResourceException"
+                | "java/lang/ArrayStoreException" | "java/lang/NegativeArraySizeException" | "java/lang/StringIndexOutOfBoundsException"
+                | "java/lang/IllegalMonitorStateException" | "java/io/UncheckedIOException" | "java/util/InputMismatchException"
+                | "java/util/concurrent/CompletionException" | "java/util/concurrent/RejectedExecutionException"
+                | "com/google/gson/JsonParseException" | "com/google/gson/JsonSyntaxException" | "com/google/gson/JsonIOException"
+                | "net/minecraft/ResourceLocationException" | "net/minecraft/ReportedException"
+        ),
+        "com/google/gson/JsonParseException" => matches!(c, "com/google/gson/JsonSyntaxException" | "com/google/gson/JsonIOException"),
+        "java/lang/IllegalArgumentException" => matches!(c, "java/lang/NumberFormatException" | "java/util/IllegalFormatException"),
+        "java/lang/IndexOutOfBoundsException" => matches!(c, "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/StringIndexOutOfBoundsException"),
+        "java/lang/IllegalStateException" => c == "java/util/concurrent/CancellationException",
+        "java/util/NoSuchElementException" => c == "java/util/InputMismatchException",
+        "java/io/IOException" => {
+            (c.starts_with("java/") && c.ends_with("IOException") && c != class)
+                || matches!(c, "java/io/FileNotFoundException" | "java/nio/file/NoSuchFileException" | "java/nio/file/FileAlreadyExistsException")
         }
         _ => false,
     }
+}
+
+/// A class of Java's or a library's the runtime throws (a mod's own classes answer through their
+/// hierarchy).
+fn library_class(c: &str) -> bool {
+    ["java/", "javax/", "com/google/", "com/mojang/", "net/minecraft/", "net/neoforged/", "io/netty/", "org/apache/"].iter().any(|p| c.starts_with(p))
+}
+
+/// The packages whose classes the runtime keeps as its own collections.
+fn collection_package(c: &str) -> bool {
+    c.starts_with("java/util/") || c.starts_with("com/google/common/collect/") || c.starts_with("it/unimi/dsi/fastutil/")
+}
+
+/// A map class (`HashMap`, `ImmutableMap`, fastutil's `Object2IntOpenHashMap`): Guava's multimaps and
+/// range maps aren't maps.
+fn is_map_class(c: &str) -> bool {
+    collection_package(c) && c.ends_with("Map") && !c.ends_with("Multimap") && !c.ends_with("RangeMap") && !c.contains('$')
+}
+
+/// A list class (`ArrayList`, `ImmutableList`, fastutil's `ObjectArrayList`, Minecraft's `NonNullList`).
+fn is_list_class(c: &str) -> bool {
+    (collection_package(c) && c.ends_with("List") && !c.contains('$')) || c == "net/minecraft/core/NonNullList" || c == "java/util/Arrays$ArrayList"
+}
+
+/// A set class (`HashSet`, `ImmutableSet`, `EnumSet`): `BitSet`, Guava's multisets and range sets aren't sets.
+fn is_set_class(c: &str) -> bool {
+    collection_package(c) && c.ends_with("Set") && !matches!(c, "java/util/BitSet") && !c.ends_with("Multiset") && !c.ends_with("RangeSet") && !c.contains('$')
+}
+
+/// A queue class of `java.util` (`ArrayDeque`, `PriorityQueue`, `LinkedList`); fastutil's queues aren't Java's.
+fn is_queue_class(c: &str) -> bool {
+    (c.starts_with("java/util/") && (c.ends_with("Queue") || c.ends_with("Deque"))) || c == "java/util/LinkedList"
 }
 
 /// Vanilla's player classes: a server's, the client's own and the others it sees.
@@ -895,6 +986,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     {
         return Some(v);
     }
+    if owner == "net/minecraft/util/FastColor$ARGB32"
+        && let Some(c) = argb32(name, desc, args)
+    {
+        return Some(V::I(c));
+    }
+    // `DyeItem.byColor(color)`: vanilla's dye of that colour.
+    if owner == "net/minecraft/world/item/DyeItem" && name == "byColor" {
+        let i = rt.get_field(args.first().copied().unwrap_or_default(), "$ordinal").i().clamp(0, 15) as usize;
+        let n = format!("minecraft:{}_dye", crate::blocks::DYES[i].0.to_ascii_lowercase());
+        return Some(item(rt, &n));
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
     const BASE: &str = "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase";
@@ -950,12 +1052,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                     state(rt, &t)
                 }
                 _ => {
-                    // cycle: booleans flip, ints and enums need their range, which only the game knows.
+                    // cycle: the property's next value, the first after the last.
                     let c = current.unwrap_or_default();
-                    let next = match c.as_str() {
-                        "true" => "false".to_owned(),
-                        "false" => "true".to_owned(),
-                        _ => return None,
+                    let values = crate::blocks::property_values(rt, a(1));
+                    let next = match values.iter().position(|v| *v == c) {
+                        Some(i) => values[(i + 1) % values.len()].clone(),
+                        None => return None,
                     };
                     let mut p: Vec<(&str, &str)> = props.iter().filter(|(k, _)| *k != pname).copied().collect();
                     p.push((&pname, &next));
@@ -2322,6 +2424,39 @@ fn mth_ceillog2(v: i32) -> i32 {
     DE_BRUIJN[(((i64::from(v) * 125_613_361) >> 27) as i32 & 31) as usize]
 }
 
+/// 1.21.1's `FastColor.ARGB32`: a colour's channels, and colours made of them.
+fn argb32(name: &str, desc: &str, args: &[V]) -> Option<i32> {
+    let i = |k: usize| args.get(k).copied().unwrap_or_default().i();
+    let (alpha, red, green, blue) = (|c: i32| ((c as u32) >> 24) as i32, |c: i32| (c >> 16) & 0xFF, |c: i32| (c >> 8) & 0xFF, |c: i32| c & 0xFF);
+    let color = |a: i32, r: i32, g: i32, b: i32| (a << 24) | (r << 16) | (g << 8) | b;
+    // `Mth.lerpInt`: `start + floor(delta * (end - start))`.
+    let lerp = |t: f32, x: i32, y: i32| x + (t * (y - x) as f32).floor() as i32;
+    let chan = |f: f32| (f * 255.0).floor() as i32;
+    Some(match (name, desc) {
+        ("alpha", "(I)I") => alpha(i(0)),
+        ("red", "(I)I") => red(i(0)),
+        ("green", "(I)I") => green(i(0)),
+        ("blue", "(I)I") => blue(i(0)),
+        ("color", "(IIII)I") => color(i(0), i(1), i(2), i(3)),
+        ("color", "(III)I") => color(255, i(0), i(1), i(2)),
+        ("color", "(II)I") => (i(0) << 24) | (i(1) & 0xFF_FFFF),
+        ("opaque", "(I)I") => i(0) | (0xFF00_0000_u32 as i32),
+        ("multiply", "(II)I") => {
+            let (x, y) = (i(0), i(1));
+            color(alpha(x) * alpha(y) / 255, red(x) * red(y) / 255, green(x) * green(y) / 255, blue(x) * blue(y) / 255)
+        }
+        ("lerp", "(FII)I") => {
+            let (t, x, y) = (args.first().copied().unwrap_or_default().f(), i(1), i(2));
+            color(lerp(t, alpha(x), alpha(y)), lerp(t, red(x), red(y)), lerp(t, green(x), green(y)), lerp(t, blue(x), blue(y)))
+        }
+        ("colorFromFloat", "(FFFF)I") => {
+            let f = |k: usize| args.get(k).copied().unwrap_or_default().f();
+            color(chan(f(0)), chan(f(1)), chan(f(2)), chan(f(3)))
+        }
+        _ => return None,
+    })
+}
+
 /// `Math.floorDiv`; None for a zero divisor (Java's ArithmeticException).
 fn floor_div(x: i64, y: i64) -> Option<i64> {
     if y == 0 {
@@ -2959,6 +3094,50 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn javas_own_classes_are_what_the_jdk_declares_them() {
+        // Copycats' shape tables test `instanceof Map` on the `HashMap` they made; mods catch
+        // `IllegalArgumentException` around `Integer.parseInt`.
+        for (c, class, is) in [
+            ("java/util/HashMap", "java/util/Map", true),
+            ("java/util/LinkedHashMap", "java/util/HashMap", true),
+            ("it/unimi/dsi/fastutil/objects/Object2ObjectOpenHashMap", "java/util/Map", true),
+            ("com/google/common/collect/ArrayListMultimap", "java/util/Map", false),
+            ("java/util/ArrayList", "java/util/Collection", true),
+            ("java/util/ArrayList", "java/lang/Iterable", true),
+            ("java/util/ArrayList", "java/util/Map", false),
+            ("net/minecraft/core/NonNullList", "java/util/List", true),
+            ("java/util/BitSet", "java/util/Set", false),
+            ("java/util/ArrayDeque", "java/util/Deque", true),
+            ("java/lang/Integer", "java/lang/Number", true),
+            ("java/lang/String", "java/lang/CharSequence", true),
+            ("java/lang/NumberFormatException", "java/lang/IllegalArgumentException", true),
+            ("java/util/NoSuchElementException", "java/lang/RuntimeException", true),
+            ("java/util/NoSuchElementException", "java/lang/Exception", true),
+            ("com/google/gson/JsonSyntaxException", "java/lang/RuntimeException", true),
+            ("com/example/RenderError", "java/lang/Throwable", false),
+        ] {
+            assert_eq!(super::api_is_a(c, class), is, "{c} instanceof {class}");
+        }
+    }
+
+    #[test]
+    fn colours_and_dyes_answer_as_1_21_1_does() {
+        let mut rt = Rt::new();
+        let k = |s: &str| -> &'static str { Box::leak(format!("net/minecraft/util/FastColor$ARGB32.{s}").into_boxed_str()) };
+        // Values by hand from 1.21.1's `FastColor.ARGB32`.
+        assert_eq!(crate::api::call(&mut rt, k("opaque.(I)I"), &[V::I(0x123456)]), V::I(0xFF12_3456_u32 as i32));
+        assert_eq!(crate::api::call(&mut rt, k("red.(I)I"), &[V::I(0x80FF_4020_u32 as i32)]), V::I(0xFF));
+        assert_eq!(crate::api::call(&mut rt, k("alpha.(I)I"), &[V::I(0x80FF_4020_u32 as i32)]), V::I(0x80));
+        assert_eq!(crate::api::call(&mut rt, k("multiply.(II)I"), &[V::I(0xFF80_8080_u32 as i32), V::I(0xFFFF_0000_u32 as i32)]), V::I(0xFF80_0000_u32 as i32));
+        assert_eq!(crate::api::call(&mut rt, k("lerp.(FII)I"), &[V::F(0.5), V::I(0xFF00_0000_u32 as i32), V::I(0xFFFF_FFFF_u32 as i32)]), V::I(0xFF7F_7F7F_u32 as i32));
+        let red = crate::api::get_static(&mut rt, "net/minecraft/world/item/DyeColor.RED");
+        let dye = crate::api::call(&mut rt, "net/minecraft/world/item/DyeItem.byColor.(Lnet/minecraft/world/item/DyeColor;)Lnet/minecraft/world/item/DyeItem;", &[red]);
+        assert_eq!(rt.str_of(dye), Some("minecraft:red_dye"));
+        assert_eq!(crate::api::call(&mut rt, "java/lang/Math.ceilDiv.(II)I", &[V::I(7), V::I(2)]), V::I(4));
+        assert_eq!(crate::api::call(&mut rt, "java/lang/Math.ceilDiv.(II)I", &[V::I(-7), V::I(2)]), V::I(-3));
+    }
 
     /// Reach as Create's packets check it (`canInteractWithBlock(pos, 20)`): a block's box from the
     /// player's eyes, within the player's reach plus the margin.

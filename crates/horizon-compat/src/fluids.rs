@@ -18,6 +18,8 @@ const BASE_FLOWING: &str = "net/neoforged/neoforge/fluids/BaseFlowingFluid$Flowi
 const BASE_SOURCE: &str = "net/neoforged/neoforge/fluids/BaseFlowingFluid$Source";
 const PROPERTIES: &str = "net/neoforged/neoforge/fluids/BaseFlowingFluid$Properties";
 const FLUID_TYPE: &str = "net/neoforged/neoforge/fluids/FluidType";
+const TYPE_PROPERTIES: &str = "net/neoforged/neoforge/fluids/FluidType$Properties";
+const SOUND_ACTION: &str = "net/neoforged/neoforge/common/SoundAction";
 const TAG_KEY: &str = "net/minecraft/tags/TagKey";
 const FLUID_STACK: &str = "net/neoforged/neoforge/fluids/FluidStack";
 const LIQUID_BLOCK: &str = "net/minecraft/world/level/block/LiquidBlock";
@@ -288,6 +290,114 @@ fn fluid_api(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// What a `FluidType` answers before its `Properties` say otherwise (NeoForge 1.21.1's defaults), and
+/// vanilla's water and lava (`NeoForgeMod.WATER_TYPE`, `LAVA_TYPE`): density, viscosity,
+/// temperature, light.
+fn type_defaults(name: Option<&str>) -> [i32; 4] {
+    match name {
+        Some("minecraft:water") => [1000, 1000, 300, 0],
+        Some("minecraft:lava") => [3000, 6000, 1300, 15],
+        Some("minecraft:empty") => [0, 0, 0, 0],
+        _ => [1000, 1000, 300, 0],
+    }
+}
+
+/// NeoForge's `FluidType.Properties` (each builder call kept as a `$` field, its sounds by action),
+/// a `FluidType` made from them (`new FluidType(properties)`, or a mod's subclass calling it) and
+/// what its getters answer; `SoundAction`s by name.
+fn fluid_type_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    Some(match (owner, name) {
+        (SOUND_ACTION, "get") => sound_action(rt, rt.str_of(a(0)).unwrap_or("").to_owned()),
+        (SOUND_ACTION, "name") => rt.get_field(this, "$name"),
+        (TYPE_PROPERTIES, "create") => {
+            let p = rt.new_object(TYPE_PROPERTIES);
+            let sounds = rt.alloc("java/util/HashMap", Data::Map(Default::default()));
+            rt.put_field(p, "$sounds", sounds);
+            p
+        }
+        (TYPE_PROPERTIES, "sound") => {
+            let action = rt.str_of(rt.get_field(a(1), "$name")).unwrap_or("").to_owned();
+            let sounds = rt.get_field(this, "$sounds").r() as usize;
+            if let Some(Data::Map(m)) = rt.heap.get_mut(sounds).map(|o| &mut o.data) {
+                m.insert(action, a(2));
+            }
+            this
+        }
+        (TYPE_PROPERTIES, n) if desc.ends_with(")Lnet/neoforged/neoforge/fluids/FluidType$Properties;") && args.len() >= 2 => {
+            let field: &'static str = rt.static_key(&format!("${n}"));
+            rt.put_field(this, field, a(1));
+            this
+        }
+        (FLUID_TYPE, "<init>") if desc == "(Lnet/neoforged/neoforge/fluids/FluidType$Properties;)V" => {
+            if let Some(Data::Fields(f)) = rt.heap.get(a(1).r() as usize).map(|o| o.data.clone()) {
+                for (k, v) in f {
+                    rt.put_field(this, k, v);
+                }
+            }
+            V::Void
+        }
+        (FLUID_TYPE, n) => {
+            let vanilla = rt.str_of(rt.get_field(this, "$name")).map(str::to_owned);
+            let [density, viscosity, temperature, light] = type_defaults(vanilla.as_deref());
+            let own = |rt: &Rt, f: &'static str, default: V| match rt.get_field(this, f) {
+                V::Void => default,
+                v => v,
+            };
+            match n {
+                "getDensity" if desc.starts_with("()") => own(rt, "$density", V::I(density)),
+                "getViscosity" if desc.starts_with("()") => own(rt, "$viscosity", V::I(viscosity)),
+                "getTemperature" if desc.starts_with("()") => own(rt, "$temperature", V::I(temperature)),
+                "getLightLevel" if desc.starts_with("()") => own(rt, "$lightLevel", V::I(light)),
+                "isLighterThanAir" => V::I((own(rt, "$density", V::I(density)).i() <= 0) as i32),
+                "getFallDistanceModifier" => own(rt, "$fallDistanceModifier", V::F(match vanilla.as_deref() { Some("minecraft:water") => 0.0, Some("minecraft:empty") => 1.0, _ => 0.5 })),
+                "motionScale" => own(rt, "$motionScale", V::D(match vanilla.as_deref() { Some("minecraft:lava") => 0.0023333333333333335, Some("minecraft:empty") => 1.0, _ => 0.014 })),
+                "canExtinguish" => own(rt, "$canExtinguish", V::I((vanilla.as_deref() == Some("minecraft:water")) as i32)),
+                "canSwim" | "canDrown" => {
+                    let f = if n == "canSwim" { "$canSwim" } else { "$canDrown" };
+                    own(rt, f, V::I(!matches!(vanilla.as_deref(), Some("minecraft:lava" | "minecraft:empty")) as i32))
+                }
+                "canPushEntity" => own(rt, "$canPushEntity", V::I((vanilla.as_deref() != Some("minecraft:empty")) as i32)),
+                "supportsBoating" => own(rt, "$supportsBoating", V::I((vanilla.as_deref() == Some("minecraft:water")) as i32)),
+                "canHydrate" => own(rt, "$canHydrate", V::I((vanilla.as_deref() == Some("minecraft:water")) as i32)),
+                "canConvertToSource" => own(rt, "$canConvertToSource", V::I((vanilla.as_deref() == Some("minecraft:water")) as i32)),
+                "getRarity" if desc.starts_with("()") => match rt.get_field(this, "$rarity") {
+                    V::Void => api::get_static(rt, "net/minecraft/world/item/Rarity.COMMON"),
+                    v => v,
+                },
+                // The translation key: the properties' own, else `fluid_type.<namespace>.<path>`.
+                "getDescriptionId" if desc.starts_with("()") => match rt.get_field(this, "$descriptionId") {
+                    V::Void => {
+                        let id = vanilla.or_else(|| rt.registered_name(this, "fluid_type").map(str::to_owned)).unwrap_or_default();
+                        rt.string(&format!("fluid_type.{}", id.replace(':', ".")))
+                    }
+                    v => v,
+                },
+                "getSound" if desc.starts_with("(Lnet/neoforged/neoforge/common/SoundAction;)") => {
+                    let action = rt.str_of(rt.get_field(a(1), "$name")).unwrap_or("").to_owned();
+                    match rt.heap.get(rt.get_field(this, "$sounds").r() as usize).map(|o| &o.data) {
+                        Some(Data::Map(m)) => m.get(&action).copied().unwrap_or(V::NULL),
+                        _ => V::NULL,
+                    }
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// NeoForge's `SoundAction`: one object per name (`SoundActions.BUCKET_FILL` is `bucket_fill`).
+pub(crate) fn sound_action(rt: &mut Rt, name: String) -> V {
+    rt.intern(format!("sound-action/{name}"), move |rt| {
+        let o = rt.new_object(SOUND_ACTION);
+        let n = rt.string(&name);
+        rt.put_field(o, "$name", n);
+        o
+    })
+}
+
 /// NeoForge's `FluidType` of a vanilla fluid: one per name.
 fn fluid_type(rt: &mut Rt, name: &str) -> V {
     rt.intern(format!("fluid-type/{name}"), |rt| {
@@ -555,6 +665,13 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             (f.r() != 0).then_some(f)
         }
         "net/minecraft/tags/FluidTags" if matches!(field, "WATER" | "LAVA") => Some(tag_key(rt, "fluid", &format!("minecraft:{}", field.to_ascii_lowercase()))),
+        "net/neoforged/neoforge/common/SoundActions" => Some(sound_action(rt, field.to_ascii_lowercase())),
+        // `NeoForgeMod.WATER_TYPE` and `LAVA_TYPE` (`EMPTY_TYPE`): holders of vanilla's fluid types.
+        "net/neoforged/neoforge/common/NeoForgeMod" if matches!(field, "WATER_TYPE" | "LAVA_TYPE" | "EMPTY_TYPE") => {
+            let n = format!("minecraft:{}", field.strip_suffix("_TYPE").unwrap_or(field).to_ascii_lowercase());
+            let t = fluid_type(rt, &n);
+            Some(crate::neo::registry_holder(rt, "fluid_type", &n, t))
+        }
         _ => None,
     }
 }
@@ -565,6 +682,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(
         owner,
         FLUID_STACK | FLUID_STATE | PROPERTIES | BASE | BASE_FLOWING | BASE_SOURCE | LIQUID_BLOCK | TAG_KEY | "net/minecraft/world/item/BucketItem" | "net/minecraft/tags/FluidTags"
+            | FLUID_TYPE | TYPE_PROPERTIES | SOUND_ACTION
     ) || is_fluid_class(owner)
         || name == "getFluidState"
 }
@@ -642,6 +760,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
+        (TYPE_PROPERTIES | FLUID_TYPE | SOUND_ACTION, _) => return fluid_type_call(rt, owner, name, desc, args),
         (o, _) if is_fluid_class(o) => return fluid_api(rt, name, desc, args),
         // NeoForge's `LiquidBlock.getFluid()` and `BucketItem.getFluid()`: what their constructors got.
         (LIQUID_BLOCK, "getFluid") => rt.get_field(a(0), "fluid"),
@@ -695,6 +814,38 @@ mod tests {
     use super::*;
     use crate::api::call as c;
     use crate::host::MemoryHost;
+
+    #[test]
+    fn a_fluid_type_answers_what_its_properties_say_and_neoforges_defaults() {
+        let mut rt = Rt::new();
+        let k = |s: &str| -> &'static str { Box::leak(format!("{TYPE_PROPERTIES}.{s}").into_boxed_str()) };
+        let p = c(&mut rt, k("create.()Lnet/neoforged/neoforge/fluids/FluidType$Properties;"), &[]);
+        let id = rt.string("fluid.t.goo");
+        c(&mut rt, k("descriptionId.(Ljava/lang/String;)Lnet/neoforged/neoforge/fluids/FluidType$Properties;"), &[p, id]);
+        c(&mut rt, k("density.(I)Lnet/neoforged/neoforge/fluids/FluidType$Properties;"), &[p, V::I(3000)]);
+        let fill = api::get_static(&mut rt, "net/neoforged/neoforge/common/SoundActions.BUCKET_FILL");
+        let empty = api::get_static(&mut rt, "net/neoforged/neoforge/common/SoundActions.BUCKET_EMPTY");
+        let sound = rt.string("t:goo_fill");
+        c(&mut rt, k("sound.(Lnet/neoforged/neoforge/common/SoundAction;Lnet/minecraft/sounds/SoundEvent;)Lnet/neoforged/neoforge/fluids/FluidType$Properties;"), &[p, fill, sound]);
+        let t = rt.new_object(FLUID_TYPE);
+        c(&mut rt, "net/neoforged/neoforge/fluids/FluidType.<init>.(Lnet/neoforged/neoforge/fluids/FluidType$Properties;)V", &[t, p]);
+        let get = |rt: &mut Rt, m: &str, args: &[V]| c(rt, Box::leak(format!("{FLUID_TYPE}.{m}").into_boxed_str()), args);
+        assert_eq!(get(&mut rt, "getDensity.()I", &[t]), V::I(3000));
+        assert_eq!(get(&mut rt, "getViscosity.()I", &[t]), V::I(1000));
+        assert_eq!(get(&mut rt, "canExtinguish.(Lnet/minecraft/world/entity/Entity;)Z", &[t, V::NULL]), V::I(0));
+        let d = get(&mut rt, "getDescriptionId.()Ljava/lang/String;", &[t]);
+        assert_eq!(rt.str_of(d), Some("fluid.t.goo"));
+        let s = "getSound.(Lnet/neoforged/neoforge/common/SoundAction;)Lnet/minecraft/sounds/SoundEvent;";
+        assert_eq!(get(&mut rt, s, &[t, fill]), sound);
+        assert_eq!(get(&mut rt, s, &[t, empty]), V::NULL);
+        // Vanilla's lava, through `NeoForgeMod.LAVA_TYPE.value()`.
+        let holder = api::get_static(&mut rt, "net/neoforged/neoforge/common/NeoForgeMod.LAVA_TYPE");
+        let lava = c(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]);
+        assert_eq!(get(&mut rt, "getTemperature.()I", &[lava]), V::I(1300));
+        assert_eq!(get(&mut rt, "getLightLevel.()I", &[lava]), V::I(15));
+        let fluid = api::get_static(&mut rt, "net/minecraft/world/level/material/Fluids.LAVA");
+        assert_eq!(lava, c(&mut rt, "net/minecraft/world/level/material/Fluid.getFluidType.()Lnet/neoforged/neoforge/fluids/FluidType;", &[fluid]));
+    }
 
     const GET_TYPE: &str = "net/minecraft/world/level/material/FluidState.getType.()Lnet/minecraft/world/level/material/Fluid;";
     const AMOUNT: &str = "net/minecraft/world/level/material/FluidState.getAmount.()I";

@@ -1572,7 +1572,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a number (`rawBoxes` against the JVM, with `IntStream.range`, which was unmapped).
   - 2026-11-04 Measured with the leaner engine (ten addons, Kotlin for Forge as a library):
     Enchantable Machinery's constructor runs through (its 12 blocks and 12 block entities), Dragons
-    Plus' tab lists its 18 items (fluid hatch, dye buckets): 12 tabs. New Age's coil (16 rpm, 72 su,
+    Plus' tab lists its 18 items (fluid hatch, dye buckets): 11 tabs. New Age's coil (16 rpm, 72 su,
     22 FE/t) and Create's filter as before.
   - 2026-11-04 Blocks before their names. Registrate makes a block, then registers it, and Copycats+'
     constructors cache their face shapes from `defaultBlockState()` meanwhile: a state is its
@@ -1593,6 +1593,28 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     one between each two coordinates) and `SliceShape` (a face's section). Copycats+ reads the
     cells through a mixin accessor of `VoxelShape.shape`; an accessor of a field the runtime doesn't
     keep as one now asks the runtime (`VoxelShape.$shape`) instead of reading nothing.
+  - 2026-11-04 Measured (the ten addons, Kotlin for Forge as a library): with the face shapes'
+    calls, misses at load 7 700 → 2 608, the four 1 542-count ones gone. Then:
+    `Block.getShapeForEachState` (Copycats+ caches every state's shape by state) over
+    `StateDefinition.getPossibleStates`, which now lists every combination of a mod block's
+    properties in vanilla's order (the property first by name varies slowest; past 65 536 states
+    the default alone), and `cycle` over any property's values. Filling the cache ran Copycats+'
+    `CCShapes`, which tests `instanceof Map` on a `HashMap` it made: the runtime's `instanceof`
+    knew Minecraft's families but not Java's, threw "Unsupported type", and Copycats+ registered 4
+    of its 46 blocks. `instanceof` and `catch` now know Java's own classes as the JDK declares them
+    (collections by kind, numbers, strings, the exceptions: `catch (IllegalArgumentException)`
+    takes `Integer.parseInt`'s `NumberFormatException`). Also mapped: cauldrons
+    (`CauldronInteraction.newInteractionMap`, `EMPTY`/`WATER`/`LAVA`/`POWDER_SNOW`, `INTERACTIONS`;
+    `AbstractCauldronBlock(Properties, map)` and its `useItemOn` through the map, so a mod's cauldron
+    that keeps vanilla's `useItemOn` answers clicks in game: Dragons Plus' dragon's breath
+    cauldron), NeoForge's `FluidType` (its `Properties`, NeoForge's defaults, `SoundActions`,
+    `NeoForgeMod.WATER_TYPE`...), `simpleCodec` on any block class, `defaultMapColor`,
+    `FastColor.ARGB32`, `DyeItem.byColor`, JOML's `Vector2i`, `Collectors.joining` and `toMap`
+    (a key twice without a merge throws, as Java's), `Math.ceilDiv`, `NeoForgeRegistries.Keys`.
+    Misses at load 2 608 → 418 (128 kinds), no uncaught exception, Copycats+' 46 blocks; tabs (11),
+    New Age's coil and Create's filter as before. Not yet: a mod's entries in vanilla's maps
+    (`CauldronInteraction.EMPTY.map().put(dragon breath bucket, ...)`) — the game's own cauldron
+    doesn't ask them.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

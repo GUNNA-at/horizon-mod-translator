@@ -1073,6 +1073,12 @@ fn math(name: &str, ks: &[char], args: &[V]) -> Option<V> {
             'F' => V::I((a(0).f() + 0.5).floor() as i32),
             _ => V::J((d(0) + 0.5).floor() as i64),
         },
+        // `ceilDiv`: the quotient rounded up.
+        "ceilDiv" => match (a(0), a(1)) {
+            (V::I(x), V::I(y)) if y != 0 => V::I(x.wrapping_div(y) + i32::from((x % y != 0) && ((x ^ y) >= 0))),
+            (V::J(x), V::J(y)) if y != 0 => V::J(x.wrapping_div(y) + i64::from((x % y != 0) && ((x ^ y) >= 0))),
+            _ => return None,
+        },
         "floorDiv" | "floorMod" => match (a(0), a(1)) {
             (V::I(x), V::I(y)) if y != 0 => V::I(if name == "floorDiv" { x.div_euclid(y) - if (x.rem_euclid(y) != 0) && y < 0 { 1 } else { 0 } } else { ((x % y) + y) % y }),
             (V::J(x), V::J(y)) if y != 0 => V::J(if name == "floorDiv" { (x as f64 / y as f64).floor() as i64 } else { ((x % y) + y) % y }),

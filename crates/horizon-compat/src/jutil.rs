@@ -62,6 +62,10 @@ pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
             return rt.get_field(a, "value") == rt.get_field(b, "value");
         }
     }
+    // JOML's vectors are values: their public fields.
+    if rt.class_of(a).starts_with("org/joml/Vector") && rt.class_of(a) == rt.class_of(b) {
+        return ["x", "y", "z", "w"].iter().all(|f| rt.get_field(a, f) == rt.get_field(b, f));
+    }
     // Pairs are values (Registrate keys its pending callbacks by `Pair.of(name, registry)`).
     if is_pair(rt.class_of(a)) && is_pair(rt.class_of(b)) {
         let (l1, l2, r1, r2) = (rt.get_field(a, "$left"), rt.get_field(b, "$left"), rt.get_field(a, "$right"), rt.get_field(b, "$right"));
@@ -104,6 +108,11 @@ pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
             }
             Some(Data::Fields(f)) if f.contains_key("value") && rt.class_of(v).starts_with("java/lang/") => {
                 return rt.java_hash(f["value"]);
+            }
+            // JOML's `Vector2i.hashCode`: `31 * (31 + x) + y`.
+            Some(Data::Fields(_)) if rt.class_of(v) == "org/joml/Vector2i" => {
+                let (x, y) = (rt.get_field(v, "x").i(), rt.get_field(v, "y").i());
+                return 31i32.wrapping_mul(31i32.wrapping_add(x)).wrapping_add(y);
             }
             // commons-lang's `Pair.hashCode`: the halves' hashes, xor'd.
             Some(Data::Fields(_)) if is_pair(rt.class_of(v)) => {
@@ -651,6 +660,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if let Some(v) = statics(rt, owner, name, desc, args) {
         return Some(v);
     }
+    // fastutil's `trim()`: the table's storage, which a runtime table sizes itself.
+    if owner.starts_with("it/unimi/dsi/fastutil/") && name == "trim" {
+        return Some(V::I(1));
+    }
     if owner == "java/util/Comparator"
         && let Some(v) = comparator_call(rt, name, desc, args)
     {
@@ -1008,7 +1021,7 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             };
             new_set(rt, &items)
         }
-        ("java/util/Map" | "com/google/common/collect/ImmutableMap" | "com/google/common/collect/Maps", "of" | "newHashMap" | "newLinkedHashMap") => {
+        ("java/util/Map" | "com/google/common/collect/ImmutableMap" | "com/google/common/collect/Maps", "of" | "newHashMap" | "newLinkedHashMap" | "newConcurrentMap") => {
             let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
             for kv in args.chunks(2) {
                 if let [k, v] = kv {
@@ -1173,6 +1186,16 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         }
         ("java/util/stream/Collectors", "toList" | "toSet" | "toUnmodifiableList" | "toUnmodifiableSet") => {
             rt.alloc(if name.contains("Set") { "compat:collect-set" } else { "compat:collect-list" }, Data::List(Vec::new()))
+        }
+        // `joining([separator[, prefix, suffix]])`, and `toMap(key, value[, merge])`: what `collect`
+        // does with them, kept on the collector.
+        ("java/util/stream/Collectors", "joining") => {
+            let parts = if args.len() == 3 { vec![a(0), a(1), a(2)] } else { vec![a(0)] };
+            rt.alloc("compat:collect-join", Data::List(parts))
+        }
+        ("java/util/stream/Collectors", "toMap" | "toUnmodifiableMap") if args.len() <= 3 => {
+            let parts = args.to_vec();
+            rt.alloc("compat:collect-map", Data::List(parts))
         }
         ("java/util/stream/Stream", "of") => {
             let items = varargs(rt);
@@ -2601,6 +2624,44 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "toArray" => rt.alloc("[Ljava/lang/Object;", Data::Array(items)),
         "collect" => match rt.class_of(a(1)) {
             "compat:collect-set" => new_set(rt, &items),
+            "compat:collect-join" => {
+                let parts = match rt.heap.get(a(1).r() as usize).map(|o| &o.data) {
+                    Some(Data::List(p)) => p.clone(),
+                    _ => Vec::new(),
+                };
+                let text = |rt: &Rt, v: Option<&V>| v.and_then(|v| rt.str_of(*v)).unwrap_or("").to_owned();
+                let joined: Vec<String> = items.iter().map(|e| rt.str_of(*e).unwrap_or("null").to_owned()).collect();
+                let s = format!("{}{}{}", text(rt, parts.get(1)), joined.join(&text(rt, parts.first())), text(rt, parts.get(2)));
+                rt.alloc("java/lang/String", Data::Str(s))
+            }
+            "compat:collect-map" => {
+                let parts = match rt.heap.get(a(1).r() as usize).map(|o| &o.data) {
+                    Some(Data::List(p)) => p.clone(),
+                    _ => Vec::new(),
+                };
+                let f = |k: usize| parts.get(k).copied().unwrap_or_default();
+                const APPLY: &str = "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
+                let m = rt.alloc("java/util/HashMap", Data::Table(Table::default()));
+                for e in items {
+                    let k = rt.call_functional(APPLY, f(0), &[e]);
+                    let v = rt.call_functional(APPLY, f(1), &[e]);
+                    if rt.thrown.is_some() {
+                        return Some(V::NULL);
+                    }
+                    let old = table_get(rt, m, k);
+                    let v = match old {
+                        Some(o) if parts.len() == 3 => rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", f(2), &[o, v]),
+                        // Java's `toMap` refuses a key twice without a merge.
+                        Some(_) => {
+                            rt.throw_new("java/lang/IllegalStateException");
+                            return Some(V::NULL);
+                        }
+                        None => v,
+                    };
+                    table_put(rt, m, k, v);
+                }
+                m
+            }
             _ => new_list(rt, items),
         },
         "count" => V::J(items.len() as i64),
@@ -2692,6 +2753,34 @@ mod tests {
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))
+    }
+
+    #[test]
+    fn streams_join_and_collect_to_maps_as_java_does() {
+        let mut rt = Rt::new();
+        let words: Vec<V> = ["a", "b", "c"].iter().map(|w| rt.string(w)).collect();
+        let stream = rt.alloc("java/util/stream/Stream", Data::Stream(words.clone()));
+        let (sep, pre, post) = (rt.string(", "), rt.string("["), rt.string("]"));
+        let joining = c(&mut rt, "java/util/stream/Collectors.joining.(Ljava/lang/CharSequence;Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/util/stream/Collector;", &[sep, pre, post]);
+        let out = c(&mut rt, "java/util/stream/Stream.collect.(Ljava/util/stream/Collector;)Ljava/lang/Object;", &[stream, joining]);
+        assert_eq!(rt.str_of(out), Some("[a, b, c]"));
+        // `toMap(identity, identity)`: each word to itself; a key twice without a merge throws. The
+        // engine's dispatch applies `identity` (a runtime function), as the mapping answers it.
+        rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
+        let id = crate::api::call(&mut rt, "java/util/function/Function.identity.()Ljava/util/function/Function;", &[]);
+        let to_map = c(&mut rt, "java/util/stream/Collectors.toMap.(Ljava/util/function/Function;Ljava/util/function/Function;)Ljava/util/stream/Collector;", &[id, id]);
+        let stream = rt.alloc("java/util/stream/Stream", Data::Stream(words.clone()));
+        let m = c(&mut rt, "java/util/stream/Stream.collect.(Ljava/util/stream/Collector;)Ljava/lang/Object;", &[stream, to_map]);
+        let b = rt.string("b");
+        assert_eq!(table_get(&mut rt, m, b).map(|v| rt.str_of(v).map(str::to_owned)), Some(Some("b".to_owned())));
+        let twice = rt.alloc("java/util/stream/Stream", Data::Stream(vec![words[0], words[0]]));
+        c(&mut rt, "java/util/stream/Stream.collect.(Ljava/util/stream/Collector;)Ljava/lang/Object;", &[twice, to_map]);
+        assert!(rt.thrown.take().is_some_and(|e| rt.class_of(e) == "java/lang/IllegalStateException"));
+        // Guava's concurrent map is a map; fastutil's `trim` answers true.
+        let cm = c(&mut rt, "com/google/common/collect/Maps.newConcurrentMap.()Ljava/util/concurrent/ConcurrentMap;", &[]);
+        table_put(&mut rt, cm, b, V::I(1));
+        assert_eq!(table_get(&mut rt, cm, b), Some(V::I(1)));
+        assert_eq!(c(&mut rt, "it/unimi/dsi/fastutil/objects/Object2ReferenceOpenHashMap.trim.()Z", &[cm]), V::I(1));
     }
 
     #[test]

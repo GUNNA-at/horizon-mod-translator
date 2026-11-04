@@ -271,7 +271,11 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
     let Some((b, class)) = mod_block(rt, state) else { return false };
     let Some(overrides) = rt.overrides else { return false };
     let (with_item, without) = (overrides(class, USE_ITEM_ON), overrides(class, USE_WITHOUT_ITEM));
-    if !with_item && !without {
+    // A mod's cauldron that keeps vanilla's `useItemOn`: its interaction map answers.
+    let cauldron = !with_item
+        && rt.get_field(b, "interactions").r() != 0
+        && rt.str_of(rt.get_field(b, "$vanilla")).is_some_and(crate::blocks::cauldron_class);
+    if !with_item && !without && !cauldron {
         return false;
     }
     rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| {
@@ -282,10 +286,11 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
         let player = crate::api_common::acting_player(rt);
         let hit = crate::api_common::hit(rt, pos, face);
         let mut took = None;
-        if with_item {
+        if with_item || cauldron {
             let stack = crate::hand::stack(rt, hand);
             let hand = crate::hand::constant(rt, hand);
-            let r = vc(rt, USE_ITEM_ON, USE_ITEM_ON, &[b, stack, st, l, p, player, hand, hit]);
+            let args = [b, stack, st, l, p, player, hand, hit];
+            let r = if with_item { vc(rt, USE_ITEM_ON, USE_ITEM_ON, &args) } else { crate::blocks::cauldron_use(rt, &args) };
             let name = rt.str_of(r).unwrap_or("PASS_TO_DEFAULT_BLOCK_INTERACTION").to_owned();
             if name != "PASS_TO_DEFAULT_BLOCK_INTERACTION" {
                 took = Some(true); // consumed, skipped or failed: the click is the block's

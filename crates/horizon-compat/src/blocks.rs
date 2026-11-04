@@ -39,7 +39,7 @@ const MAP_COLORS: [&str; 62] = [
 ];
 
 /// `DyeColor`'s constants in order, with the map colour each one's blocks take.
-const DYES: [(&str, u8); 16] = [
+pub(crate) const DYES: [(&str, u8); 16] = [
     ("WHITE", 8), ("ORANGE", 15), ("MAGENTA", 16), ("LIGHT_BLUE", 17), ("YELLOW", 18), ("LIME", 19), ("PINK", 20), ("GRAY", 21),
     ("LIGHT_GRAY", 22), ("CYAN", 23), ("PURPLE", 24), ("BLUE", 25), ("BROWN", 26), ("GREEN", 27), ("RED", 28), ("BLACK", 29),
 ];
@@ -459,11 +459,58 @@ fn vanilla_placement(rt: &mut Rt, class: &str, b: V, ctx: V) -> V {
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(owner, DYE_COLOR | "net/minecraft/world/item/ArmorItem$Type" | BLOCK_PROPERTIES | ITEM_PROPERTIES | WOOD_TYPE | BUILDER)
-        || matches!(name, "values" | "registerDefaultState" | "defaultBlockState")
+        || matches!(name, "values" | "registerDefaultState" | "defaultBlockState" | "defaultMapColor")
         || (name == "getSerializedName" && enum_class(owner))
         || (name == "toString" && enum_class(owner) && owner.starts_with("net/minecraft/world/level/block/state/properties/"))
         || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "createBlockStateDefinition" | "getStateForPlacement" | "<init>"))
         || (owner.starts_with("net/minecraft/world/item/") && name == "<init>")
+        || owner == CAULDRON_INTERACTION
+        || (name == "useItemOn" && cauldron_class(owner))
+}
+
+const CAULDRON_INTERACTION: &str = "net/minecraft/core/cauldron/CauldronInteraction";
+const INTERACTION_MAP: &str = "net/minecraft/core/cauldron/CauldronInteraction$InteractionMap";
+const INTERACT: &str = "net/minecraft/core/cauldron/CauldronInteraction.interact.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/ItemInteractionResult;";
+
+/// Vanilla's cauldron blocks (`AbstractCauldronBlock`, `LayeredCauldronBlock`...): the ones whose
+/// clicks their interaction map answers.
+pub(crate) fn cauldron_class(owner: &str) -> bool {
+    owner.starts_with("net/minecraft/world/level/block/") && owner.ends_with("CauldronBlock") && !owner[32..].contains('/')
+}
+
+/// `CauldronInteraction.INTERACTIONS`: the interaction maps by name.
+fn cauldron_maps(rt: &mut Rt) -> V {
+    rt.intern("compat:cauldron-interactions".into(), |rt| rt.alloc("java/util/HashMap", Data::Table(Default::default())))
+}
+
+/// The interaction map named `name` (vanilla's `empty`, `water`, `lava`, `powder_snow`, or a mod's),
+/// made by `CauldronInteraction.newInteractionMap` when `fresh` or none of that name exists yet: a
+/// record of its name and the items' interactions, kept in `INTERACTIONS`.
+fn interaction_map(rt: &mut Rt, name: &str, fresh: bool) -> V {
+    let all = cauldron_maps(rt);
+    let key = rt.string(name);
+    if !fresh && let Some(m) = jutil::table_get(rt, all, key).filter(|m| m.r() != 0) {
+        return m;
+    }
+    let m = rt.new_object(INTERACTION_MAP);
+    rt.put_field(m, "name", key);
+    let items = rt.alloc("it/unimi/dsi/fastutil/objects/Object2ObjectOpenHashMap", Data::Table(Default::default()));
+    rt.put_field(m, "map", items);
+    jutil::table_put(rt, all, key, m);
+    m
+}
+
+/// `AbstractCauldronBlock.useItemOn`: the interaction block `b`'s map holds for the held stack's item,
+/// else `PASS_TO_DEFAULT_BLOCK_INTERACTION` (the map's default). `args` are `useItemOn`'s.
+pub(crate) fn cauldron_use(rt: &mut Rt, args: &[V]) -> V {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let stack = a(1);
+    let item = api::call(rt, "net/minecraft/world/item/ItemStack.getItem.()Lnet/minecraft/world/item/Item;", &[stack]);
+    let map = rt.get_field(rt.get_field(a(0), "interactions"), "map");
+    match jutil::table_get(rt, map, item).filter(|f| f.r() != 0) {
+        Some(f) => rt.call_functional(INTERACT, f, &[a(2), a(3), a(4), a(5), a(6), stack]),
+        None => api_common::result(rt, "net/minecraft/world/ItemInteractionResult", "PASS_TO_DEFAULT_BLOCK_INTERACTION"),
+    }
 }
 
 /// given, block constructors collect their states.
@@ -478,6 +525,30 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(rt.alloc(class, Data::Array(all)))
         }
         (DYE_COLOR, _) => dye_call(rt, name, args),
+        (CAULDRON_INTERACTION, "newInteractionMap") if desc.starts_with("(Ljava/lang/String;)") => {
+            let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+            Some(interaction_map(rt, &n, true))
+        }
+        (o, "useItemOn") if cauldron_class(o) => Some(cauldron_use(rt, args)),
+        // `defaultMapColor()`: what the block's properties give its default state (a colour, a dye's,
+        // or a function of the state), else the vanilla block's they copy; vanilla's default is none.
+        (_, "defaultMapColor") if desc == "()Lnet/minecraft/world/level/material/MapColor;" => {
+            let b = a(0);
+            let (props, vanilla) = match rt.str_of(b) {
+                Some(n) => (V::NULL, Some(n.to_owned())),
+                None => {
+                    let p = rt.get_field(b, "$properties");
+                    (p, rt.str_of(rt.get_field(p, "$copy")).map(str::to_owned))
+                }
+            };
+            let d = api::call(rt, "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;", &[b]);
+            let default_state = rt.str_of(d).unwrap_or("").to_owned();
+            let own = if props.r() != 0 { map_color(rt, rt.get_field(props, "$mapColor"), &default_state) } else { None };
+            let id = own.or_else(|| vanilla.as_deref().and_then(|c| COPIED.iter().find(|(n, ..)| *n == c)).map(|c| c.4)).unwrap_or(0) as usize;
+            let o = named(rt, MAP_COLOR, MAP_COLORS[id.min(MAP_COLORS.len() - 1)]);
+            rt.put_field(o, "id", V::I(id as i32));
+            Some(o)
+        }
         // A block-state enum's name in states (`SlabType.DOUBLE` is `double`); the property enums
         // also give it as `toString`.
         (o, "getSerializedName" | "toString") if desc == "()Ljava/lang/String;" && enum_class(o) && (name == "getSerializedName" || o.starts_with("net/minecraft/world/level/block/state/properties/")) => {
@@ -536,6 +607,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if o == "net/minecraft/world/level/block/LiquidBlock" {
                 rt.put_field(a(0), "fluid", a(1));
             }
+            // A cauldron's interaction map (`AbstractCauldronBlock(Properties, InteractionMap)`),
+            // the field vanilla names `interactions`.
+            if let Some(m) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == INTERACTION_MAP) {
+                rt.put_field(a(0), "interactions", m);
+            }
             constructed(rt, a(0), o, props);
             Some(V::Void)
         }
@@ -564,6 +640,11 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             let (f, _) = SOUNDS.iter().find(|(f, _)| *f == field)?;
             Some(named(rt, SOUND_TYPE, f))
         }
+        CAULDRON_INTERACTION => match field {
+            "EMPTY" | "WATER" | "LAVA" | "POWDER_SNOW" => Some(interaction_map(rt, &field.to_ascii_lowercase(), false)),
+            "INTERACTIONS" => Some(cauldron_maps(rt)),
+            _ => None,
+        },
         MAP_COLOR => {
             let id = MAP_COLORS.iter().position(|c| *c == field)?;
             let o = named(rt, MAP_COLOR, MAP_COLORS[id]);
@@ -1402,6 +1483,92 @@ mod tests {
         let horizontal = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.HORIZONTAL_FACING");
         assert_eq!(property_values(&mut rt, facing).len(), 6);
         assert_eq!(property_values(&mut rt, horizontal), ["north", "east", "south", "west"]);
+    }
+
+    /// The tests' lambdas: `test/Shape` answers a state's text length; `test/Fill`, a cauldron
+    /// interaction, keeps the stack it was given and consumes the click.
+    fn lambdas(rt: &mut Rt, _key: &'static str, _: &'static str, args: &[V]) -> V {
+        match rt.class_of(args[0]) {
+            "test/Shape" => V::I(rt.str_of(args[1]).map_or(0, str::len) as i32),
+            "test/Fill" => {
+                rt.put_field(args[0], "stack", args[6]);
+                api_common::result(rt, "net/minecraft/world/ItemInteractionResult", "CONSUME")
+            }
+            _ => V::Void,
+        }
+    }
+
+    #[test]
+    fn a_blocks_states_are_every_combination_in_vanillas_order() {
+        let mut rt = Rt::new();
+        rt.vcall = Some(lambdas);
+        let p = props(&mut rt);
+        let slab = rt.new_object("net/minecraft/world/level/block/SlabBlock");
+        api::call(&mut rt, "net/minecraft/world/level/block/SlabBlock.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[slab, p]);
+        rt.registered.insert(("block".into(), "ruby:slab".into()), slab);
+        // `type` before `waterlogged`, the first varying slowest; each property's values in order.
+        let def = api::call(&mut rt, "net/minecraft/world/level/block/Block.getStateDefinition.()Lnet/minecraft/world/level/block/state/StateDefinition;", &[slab]);
+        let all = api::call(&mut rt, "net/minecraft/world/level/block/state/StateDefinition.getPossibleStates.()Lcom/google/common/collect/ImmutableList;", &[def]);
+        let texts: Vec<String> = jutil::elements(&rt, all).iter().map(|s| rt.str_of(*s).unwrap_or("").to_owned()).collect();
+        assert_eq!(
+            texts,
+            [
+                "ruby:slab[type=top,waterlogged=true]",
+                "ruby:slab[type=top,waterlogged=false]",
+                "ruby:slab[type=bottom,waterlogged=true]",
+                "ruby:slab[type=bottom,waterlogged=false]",
+                "ruby:slab[type=double,waterlogged=true]",
+                "ruby:slab[type=double,waterlogged=false]",
+            ]
+        );
+        // `getShapeForEachState`: each state's answer, read back by state (copycats' shape cache).
+        let f = rt.new_object("test/Shape");
+        let shapes = api::call(&mut rt, "net/minecraft/world/level/block/Block.getShapeForEachState.(Ljava/util/function/Function;)Lcom/google/common/collect/ImmutableMap;", &[slab, f]);
+        assert_eq!(jutil::table_pairs(&rt, shapes).len(), 6);
+        let bottom = api::state(&mut rt, "ruby:slab[type=bottom,waterlogged=false]");
+        let got = api::call(&mut rt, "com/google/common/collect/ImmutableMap.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[shapes, bottom]);
+        assert_eq!(got, V::I("ruby:slab[type=bottom,waterlogged=false]".len() as i32));
+        // `cycle` takes the property's next value, the first after the last.
+        let ty = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.SLAB_TYPE");
+        let cycle = "net/minecraft/world/level/block/state/BlockState.cycle.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Object;";
+        let next = api::call(&mut rt, cycle, &[bottom, ty]);
+        assert_eq!(rt.str_of(next), Some("ruby:slab[type=double,waterlogged=false]"));
+        let wrapped = api::call(&mut rt, cycle, &[next, ty]);
+        assert_eq!(rt.str_of(wrapped), Some("ruby:slab[type=top,waterlogged=false]"));
+    }
+
+    #[test]
+    fn a_mod_cauldron_answers_clicks_through_its_interaction_map() {
+        let mut rt = Rt::new();
+        rt.vcall = Some(lambdas);
+        let n = rt.string("ruby_breath");
+        let map = api::call(&mut rt, "net/minecraft/core/cauldron/CauldronInteraction.newInteractionMap.(Ljava/lang/String;)Lnet/minecraft/core/cauldron/CauldronInteraction$InteractionMap;", &[n]);
+        let name = api::call(&mut rt, "net/minecraft/core/cauldron/CauldronInteraction$InteractionMap.name.()Ljava/lang/String;", &[map]);
+        assert_eq!(rt.str_of(name), Some("ruby_breath"));
+        let items = api::call(&mut rt, "net/minecraft/core/cauldron/CauldronInteraction$InteractionMap.map.()Ljava/util/Map;", &[map]);
+        let bucket = api_common::item(&mut rt, "minecraft:bucket");
+        let fill = rt.new_object("test/Fill");
+        api::call(&mut rt, "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[items, bucket, fill]);
+        // Vanilla's maps are one object however a mod reads them; `INTERACTIONS` keeps each by name.
+        let empty = api::get_static(&mut rt, "net/minecraft/core/cauldron/CauldronInteraction.EMPTY");
+        assert_ne!(empty, V::NULL);
+        assert_eq!(api::get_static(&mut rt, "net/minecraft/core/cauldron/CauldronInteraction.EMPTY"), empty);
+        let all = api::get_static(&mut rt, "net/minecraft/core/cauldron/CauldronInteraction.INTERACTIONS");
+        let key = rt.string("ruby_breath");
+        assert_eq!(api::call(&mut rt, "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[all, key]), map);
+        // `super(properties, map)`: the block's item clicks go through the map.
+        let p = props(&mut rt);
+        let b = rt.new_object("net/minecraft/world/level/block/AbstractCauldronBlock");
+        api::call(&mut rt, "net/minecraft/world/level/block/AbstractCauldronBlock.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;Lnet/minecraft/core/cauldron/CauldronInteraction$InteractionMap;)V", &[b, p, map]);
+        let use_on = "net/minecraft/world/level/block/AbstractCauldronBlock.useItemOn.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/ItemInteractionResult;";
+        let held = api_common::stack(&mut rt, "minecraft:bucket", 1);
+        let r = api::call(&mut rt, use_on, &[b, held, V::NULL, V::NULL, V::NULL, V::NULL, V::NULL, V::NULL]);
+        assert_eq!(rt.str_of(r), Some("CONSUME"));
+        assert_eq!(rt.get_field(fill, "stack"), held);
+        // An item the map doesn't hold passes the click on to the block's own use.
+        let stick = api_common::stack(&mut rt, "minecraft:stick", 1);
+        let r = api::call(&mut rt, use_on, &[b, stick, V::NULL, V::NULL, V::NULL, V::NULL, V::NULL, V::NULL]);
+        assert_eq!(rt.str_of(r), Some("PASS_TO_DEFAULT_BLOCK_INTERACTION"));
     }
 
     /// `Integer::compareTo`, as the translator calls a method reference.
