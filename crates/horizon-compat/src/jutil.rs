@@ -5,7 +5,7 @@
 //! Keys compare as Java compares them: strings and boxed values by content, Horizon's native
 //! values (positions, states) by value, and a mod object through its own translated `equals`
 //! and `hashCode` when it overrides them, by identity otherwise.
-use crate::{Data, Rt, V};
+use crate::{Data, Object, Rt, V};
 
 pub use crate::Table;
 
@@ -603,6 +603,11 @@ fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    if owner == "java/util/Arrays"
+        && let Some(v) = arrays_call(rt, name, desc, args)
+    {
+        return Some(v);
+    }
     // The elements a variadic factory was given: `of(E...)` is one array; Guava's
     // `ImmutableList.of(e1, ..., e12, E... others)` is the fixed ones, then the array's.
     let varargs = |rt: &Rt| -> Vec<V> {
@@ -840,17 +845,199 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
 
 fn sort(rt: &mut Rt, l: V, comparator: V) {
     let mut items = list(rt, l).cloned().unwrap_or_default();
-    // Insertion sort through `compare` (which may call back into the mod): stable, as Java's.
-    for i in 1..items.len() {
-        let mut j = i;
-        while j > 0 && compare(rt, comparator, items[j - 1], items[j]) > 0 {
-            items.swap(j - 1, j);
-            j -= 1;
-        }
-    }
-    if let Some(dst) = list_mut(rt, l) {
+    if merge_sort(rt, &mut items, comparator)
+        && let Some(dst) = list_mut(rt, l)
+    {
         *dst = items;
     }
+}
+
+/// A stable merge sort through `compare` (which may call back into the mod). Stable, as Java's
+/// object sorts are; a comparator that isn't a total order gives some order (Rust's `sort_by` may
+/// panic on one). False, with `items` left unsorted, if the comparator threw.
+fn merge_sort(rt: &mut Rt, items: &mut Vec<V>, comparator: V) -> bool {
+    let n = items.len();
+    let mut buf = items.clone();
+    let mut width = 1;
+    while width < n {
+        let mut lo = 0;
+        while lo < n {
+            let (mid, hi) = ((lo + width).min(n), (lo + 2 * width).min(n));
+            let (mut l, mut r) = (lo, mid);
+            for slot in &mut buf[lo..hi] {
+                // The right run's element goes first only when strictly smaller: equal ones keep their order.
+                let right = l == mid || (r < hi && compare(rt, comparator, items[r], items[l]) < 0);
+                if rt.thrown.is_some() {
+                    return false;
+                }
+                *slot = if right { items[r] } else { items[l] };
+                if right { r += 1 } else { l += 1 }
+            }
+            lo = hi;
+        }
+        std::mem::swap(items, &mut buf);
+        width *= 2;
+    }
+    true
+}
+
+/// Java's total order on doubles (`Double.compare`): -0.0 before 0.0, NaN after everything.
+fn java_double_cmp(x: f64, y: f64) -> std::cmp::Ordering {
+    match (x.is_nan(), y.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        _ => x.total_cmp(&y),
+    }
+}
+
+/// `java.util.Arrays`' helpers on the runtime's arrays. The element type comes from the descriptor
+/// (`sort([I)V`): primitives sort by value, objects through `compare` (natural order or the
+/// comparator). `asList` and `stream` are the list arms'.
+fn arrays_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let elem = desc.strip_prefix("([").and_then(|d| d.chars().next())?;
+    let zero = match elem {
+        'J' => V::J(0),
+        'F' => V::F(0.0),
+        'D' => V::D(0.0),
+        'L' | '[' => V::NULL,
+        _ => V::I(0),
+    };
+    let items = |rt: &Rt, v: V| match rt.heap.get(v.r() as usize).map(|o| &o.data) {
+        Some(Data::Array(items)) => Some(items.clone()),
+        _ => None,
+    };
+    let store = |rt: &mut Rt, v: V, new: Vec<V>| {
+        if let Some(Object { data: Data::Array(items), .. }) = rt.heap.get_mut(v.r() as usize) {
+            *items = new;
+        }
+    };
+    // A range `[from, to)` of an array of `len`, checked as `Arrays.rangeCheck`.
+    let range = |rt: &mut Rt, from: i32, to: i32, len: usize| -> Option<(usize, usize)> {
+        if from > to {
+            rt.throw_new("java/lang/IllegalArgumentException");
+            None
+        } else if from < 0 || to as usize > len {
+            rt.throw_new("java/lang/ArrayIndexOutOfBoundsException");
+            None
+        } else {
+            Some((from as usize, to as usize))
+        }
+    };
+    let bits = |v: V| -> i64 {
+        match elem {
+            'F' => {
+                let f = v.f();
+                i64::from(if f.is_nan() { 0x7fc0_0000 } else { f.to_bits() as i32 })
+            }
+            'D' => {
+                let d = v.d();
+                if d.is_nan() { 0x7ff8_0000_0000_0000 } else { d.to_bits() as i64 }
+            }
+            'J' => v.j(),
+            _ => i64::from(v.i()),
+        }
+    };
+    Some(match name {
+        "sort" | "parallelSort" => {
+            if a(0).r() == 0 {
+                rt.throw_new("java/lang/NullPointerException");
+                return Some(V::Void);
+            }
+            let mut all = items(rt, a(0))?;
+            let (from, to, comparator) = match args.len() {
+                1 => (0, all.len() as i32, V::NULL),
+                2 => (0, all.len() as i32, a(1)),
+                3 => (a(1).i(), a(2).i(), V::NULL),
+                _ => (a(1).i(), a(2).i(), a(3)),
+            };
+            let Some((from, to)) = range(rt, from, to, all.len()) else { return Some(V::Void) };
+            let mut part = all[from..to].to_vec();
+            match elem {
+                'L' | '[' => {
+                    if !merge_sort(rt, &mut part, comparator) {
+                        return Some(V::Void);
+                    }
+                }
+                'F' => part.sort_by(|x, y| java_double_cmp(f64::from(x.f()), f64::from(y.f()))),
+                'D' => part.sort_by(|x, y| java_double_cmp(x.d(), y.d())),
+                'J' => part.sort_by_key(|x| x.j()),
+                _ => part.sort_by_key(|x| x.i()),
+            }
+            all.splice(from..to, part);
+            store(rt, a(0), all);
+            V::Void
+        }
+        "fill" => {
+            let mut all = items(rt, a(0))?;
+            let (from, to, value) = if args.len() >= 4 { (a(1).i(), a(2).i(), a(3)) } else { (0, all.len() as i32, a(1)) };
+            let Some((from, to)) = range(rt, from, to, all.len()) else { return Some(V::Void) };
+            all[from..to].fill(value);
+            store(rt, a(0), all);
+            V::Void
+        }
+        "copyOf" | "copyOfRange" => {
+            let all = items(rt, a(0))?;
+            let (from, to) = if name == "copyOf" { (0, a(1).i()) } else { (a(1).i(), a(2).i()) };
+            if name == "copyOf" && to < 0 {
+                rt.throw_new("java/lang/NegativeArraySizeException");
+                return Some(V::NULL);
+            }
+            if from > to {
+                rt.throw_new("java/lang/IllegalArgumentException");
+                return Some(V::NULL);
+            }
+            if from < 0 || from as usize > all.len() {
+                rt.throw_new("java/lang/ArrayIndexOutOfBoundsException");
+                return Some(V::NULL);
+            }
+            // The copy is `to - from` long: past the original's end it holds the type's zero.
+            let copy: Vec<V> = (from..to).map(|i| all.get(i as usize).copied().unwrap_or(zero)).collect();
+            let class = rt.class_of(a(0));
+            rt.alloc(class, Data::Array(copy))
+        }
+        "equals" if args.len() == 2 => {
+            let same = match (a(0).r() == 0, a(1).r() == 0) {
+                (true, true) => true,
+                (true, false) | (false, true) => false,
+                _ => {
+                    let (x, y) = (items(rt, a(0)).unwrap_or_default(), items(rt, a(1)).unwrap_or_default());
+                    x.len() == y.len()
+                        && match elem {
+                            'L' | '[' => x.iter().zip(&y).all(|(&p, &q)| (p.r() == 0 && q.r() == 0) || (p.r() != 0 && equals(rt, p, q))),
+                            _ => x.iter().zip(&y).all(|(&p, &q)| bits(p) == bits(q)),
+                        }
+                }
+            };
+            V::I(same as i32)
+        }
+        "hashCode" => {
+            if a(0).r() == 0 {
+                return Some(V::I(0));
+            }
+            let all = items(rt, a(0))?;
+            let mut h = 1i32;
+            for v in all {
+                let e = match elem {
+                    'L' | '[' => {
+                        if v.r() == 0 { 0 } else { hash(rt, v) }
+                    }
+                    'Z' => {
+                        if v.i() != 0 { 1231 } else { 1237 }
+                    }
+                    'J' | 'D' => {
+                        let b = bits(v);
+                        (b ^ ((b as u64) >> 32) as i64) as i32
+                    }
+                    _ => bits(v) as i32,
+                };
+                h = h.wrapping_mul(31).wrapping_add(e);
+            }
+            V::I(h)
+        }
+        _ => return None,
+    })
 }
 
 fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
@@ -1769,6 +1956,47 @@ mod tests {
         let key = "com/google/common/collect/ImmutableList.of.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;[Ljava/lang/Object;)Lcom/google/common/collect/ImmutableList;";
         let l = c(&mut rt, key, &args);
         assert_eq!(elements(&rt, l), xs);
+    }
+
+    #[test]
+    fn arrays_sort_fill_and_copy_work_on_the_array_itself() {
+        let mut rt = Rt::new();
+        let ints = |xs: &[i32]| xs.iter().map(|&x| V::I(x)).collect::<Vec<V>>();
+        let a = rt.alloc("[I", Data::Array(ints(&[5, -1, 3, 0, 3])));
+        c(&mut rt, "java/util/Arrays.sort.([I)V", &[a]);
+        assert_eq!(elements(&rt, a), ints(&[-1, 0, 3, 3, 5]));
+        // A range: only [1, 4) moves.
+        let b = rt.alloc("[I", Data::Array(ints(&[9, 8, 7, 6, 5])));
+        c(&mut rt, "java/util/Arrays.sort.([III)V", &[b, V::I(1), V::I(4)]);
+        assert_eq!(elements(&rt, b), ints(&[9, 6, 7, 8, 5]));
+        // Doubles in Double.compare's order: -0.0 before 0.0, NaN last.
+        let d = rt.alloc("[D", Data::Array(vec![V::D(f64::NAN), V::D(0.0), V::D(-0.0), V::D(-2.5)]));
+        c(&mut rt, "java/util/Arrays.sort.([D)V", &[d]);
+        let sorted: Vec<f64> = elements(&rt, d).iter().map(|v| v.d()).collect();
+        assert_eq!(sorted[..3].iter().map(|x| x.to_bits()).collect::<Vec<_>>(), [(-2.5f64).to_bits(), (-0.0f64).to_bits(), 0.0f64.to_bits()]);
+        assert!(sorted[3].is_nan());
+        // Strings in their natural order.
+        let words: Vec<V> = ["pear", "apple", "fig"].iter().map(|w| rt.string(w)).collect();
+        let w = rt.alloc("[Ljava/lang/Object;", Data::Array(words.clone()));
+        c(&mut rt, "java/util/Arrays.sort.([Ljava/lang/Object;)V", &[w]);
+        assert_eq!(elements(&rt, w), vec![words[1], words[2], words[0]]);
+        // A copy is an array of the asked length, padded with the type's zero.
+        let longer = c(&mut rt, "java/util/Arrays.copyOf.([II)[I", &[a, V::I(7)]);
+        assert_eq!(rt.class_of(longer), "[I");
+        assert_eq!(elements(&rt, longer), ints(&[-1, 0, 3, 3, 5, 0, 0]));
+        let mid = c(&mut rt, "java/util/Arrays.copyOfRange.([III)[I", &[a, V::I(3), V::I(6)]);
+        assert_eq!(elements(&rt, mid), ints(&[3, 5, 0]));
+        c(&mut rt, "java/util/Arrays.fill.([II)V", &[a, V::I(4)]);
+        assert_eq!(elements(&rt, a), ints(&[4; 5]));
+        // Java's values: Arrays.hashCode(new int[]{1, 2, 3}) == 30817; NaN equals NaN in Arrays.equals.
+        let h = rt.alloc("[I", Data::Array(ints(&[1, 2, 3])));
+        assert_eq!(c(&mut rt, "java/util/Arrays.hashCode.([I)I", &[h]), V::I(30817));
+        let n1 = rt.alloc("[D", Data::Array(vec![V::D(f64::NAN)]));
+        let n2 = rt.alloc("[D", Data::Array(vec![V::D(f64::NAN)]));
+        assert_eq!(c(&mut rt, "java/util/Arrays.equals.([D[D)Z", &[n1, n2]), V::I(1));
+        // A bad range throws as the JDK does.
+        c(&mut rt, "java/util/Arrays.sort.([III)V", &[b, V::I(3), V::I(1)]);
+        assert_eq!(rt.thrown.map(|e| rt.class_of(e)), Some("java/lang/IllegalArgumentException"));
     }
 
     #[test]

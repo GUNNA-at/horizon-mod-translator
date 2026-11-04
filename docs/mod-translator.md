@@ -537,6 +537,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     on an `int`, `long`, `float`, `double`, `boolean`... field), as the JVM's defaults. Before, they
     read as unset: `0` in arithmetic, but saved to NBT they vanished (`putInt("Angle", angle)` wrote
     nothing). Reference fields stay unset (null to the code).
+  - [x] 2026-11-04 `java.util.Arrays`: `sort/parallelSort` (whole or a range; primitives by value,
+    doubles and floats in `Double.compare`'s order, objects stable through `compareTo` or the
+    comparator), `fill`, `copyOf/copyOfRange` (padded with the type's zero), `equals`, `hashCode`
+    (Java's values). `Arrays.copyOf` gave a list before. `Collections.sort/List.sort` use the same
+    stable merge sort (was insertion sort). Found from the mixer: Create's recipe trie sorts each
+    recipe's ingredient ids (`Arrays.sort(int[])`) before it inserts them.
+    `Level.potionBrewing()`: a `PotionBrewing` that knows its containers (potion, splash, lingering);
+    its mixes aren't modelled (no mix matches; NeoForge's brewing recipes and Create's accessor
+    `create$getPotionMixes` give empty lists), so the mixer doesn't brew yet.
+    NeoForge's `CompoundIngredient.of(children)`: every child's items.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

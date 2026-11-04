@@ -18,6 +18,7 @@ const TAG_VALUE: &str = "net/minecraft/world/item/crafting/Ingredient$TagValue";
 const ITEM_VALUE: &str = "net/minecraft/world/item/crafting/Ingredient$ItemValue";
 const HOLDER: &str = "net/minecraft/world/item/crafting/RecipeHolder";
 const MANAGER: &str = "net/minecraft/world/item/crafting/RecipeManager";
+const BREWING: &str = "net/minecraft/world/item/alchemy/PotionBrewing";
 const RECIPE_TYPE: &str = "net/minecraft/world/item/crafting/RecipeType";
 const SINGLE_INPUT: &str = "net/minecraft/world/item/crafting/SingleRecipeInput";
 const RECIPE_INPUT: &str = "net/minecraft/world/item/crafting/RecipeInput";
@@ -660,6 +661,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let (owner, rest) = key.split_once('.')?;
     let (name, desc) = rest.split_once('.')?;
+    // NeoForge's `CompoundIngredient.of(children...)`: an ingredient of every child's entries.
+    if owner == "net/neoforged/neoforge/common/crafting/CompoundIngredient" && name == "of" {
+        let children = if desc.starts_with("([") || desc.starts_with("(Ljava/util/") { jutil::elements(rt, a(0)) } else { args.to_vec() };
+        let mut out: Vec<String> = Vec::new();
+        for c in children {
+            for e in entries(rt, c) {
+                if !out.contains(&e) {
+                    out.push(e);
+                }
+            }
+        }
+        return Some(ingredient(rt, &out));
+    }
     if owner.starts_with(INGREDIENT) {
         return ingredient_call(rt, owner, name, desc, args);
     }
@@ -674,6 +688,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.intern("compat:recipe-manager".into(), |rt| rt.new_object(MANAGER))
         }
         (MANAGER, n) => return manager_call(rt, n, desc, args),
+        // Vanilla brewing (`level.potionBrewing()`): which items are potion containers. Its mixes
+        // aren't modelled yet: no mix matches, and NeoForge's brewing recipe list is empty (Create's
+        // mixer asks both on every recipe search; its potion mixing reads the mixes through an
+        // accessor mixin, `create$getPotionMixes`, which gets the empty lists).
+        (_, "potionBrewing") if desc == "()Lnet/minecraft/world/item/alchemy/PotionBrewing;" => {
+            rt.intern("compat:potion-brewing".into(), |rt| rt.new_object(BREWING))
+        }
+        (BREWING, "isContainer") => {
+            let item = if desc.contains("ItemStack") { rt.get_field(a(1), "$item") } else { a(1) };
+            let id = crate::api_common::item_like_name(rt, item);
+            V::I(matches!(id.as_str(), "minecraft:potion" | "minecraft:splash_potion" | "minecraft:lingering_potion") as i32)
+        }
+        (BREWING, "isIngredient" | "hasMix" | "hasPotionMix" | "hasContainerMix" | "isBrewablePotion" | "isPotionIngredient" | "isContainerIngredient") => V::I(0),
+        (BREWING, n) if n == "getRecipes" || n.ends_with("PotionMixes") || n.ends_with("ContainerMixes") => jutil::new_list(rt, Vec::new()),
         (HOLDER, "<init>") => {
             rt.put_field(a(0), "$id", a(1));
             rt.put_field(a(0), "$value", a(2));
@@ -953,6 +981,30 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
 mod tests {
     use super::*;
     use crate::host::MemoryHost;
+
+    #[test]
+    fn a_compound_ingredient_takes_every_childs_items_and_potions_are_brewing_containers() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let nugget = ingredient(rt, &["minecraft:iron_nugget".into()]);
+            let both = ingredient(rt, &["minecraft:andesite".into(), "minecraft:iron_nugget".into()]);
+            let children = rt.alloc("[Lnet/minecraft/world/item/crafting/Ingredient;", Data::Array(vec![nugget, both]));
+            let compound = crate::api::call(rt, "net/neoforged/neoforge/common/crafting/CompoundIngredient.of.([Lnet/minecraft/world/item/crafting/Ingredient;)Lnet/minecraft/world/item/crafting/Ingredient;", &[children]);
+            assert_eq!(entries(rt, compound), ["minecraft:iron_nugget", "minecraft:andesite"]);
+            let andesite = api_common::stack(rt, "minecraft:andesite", 1);
+            assert!(ingredient_test(rt, compound, andesite));
+            // Vanilla's containers: the three potions, not the empty bottle.
+            let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+            let brewing = crate::api::call(rt, "net/minecraft/world/level/Level.potionBrewing.()Lnet/minecraft/world/item/alchemy/PotionBrewing;", &[level]);
+            for (item, container) in [("minecraft:splash_potion", 1), ("minecraft:glass_bottle", 0)] {
+                let s = api_common::stack(rt, item, 1);
+                let r = crate::api::call(rt, "net/minecraft/world/item/alchemy/PotionBrewing.isContainer.(Lnet/minecraft/world/item/ItemStack;)Z", &[brewing, s]);
+                assert_eq!(r, V::I(container), "{item}");
+            }
+        });
+    }
 
     #[test]
     fn an_ingredient_reads_items_tags_and_lists_and_tests_stacks_against_the_game_tags() {
