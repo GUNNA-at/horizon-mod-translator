@@ -107,6 +107,13 @@ impl V {
         }
     }
     pub const NULL: V = V::R(0);
+
+    /// Java's `null`: the null reference, or what a call the runtime doesn't map answers. A number
+    /// the runtime keeps unboxed where Java has an object (fastutil's maps, a primitive stream's
+    /// `boxed()`) is not null.
+    pub fn is_null(self) -> bool {
+        matches!(self, V::R(0) | V::Void)
+    }
 }
 
 /// What an object holds.
@@ -720,6 +727,26 @@ impl Rt {
         }
     }
 
+    /// A pattern `switch`'s case (`SwitchBootstraps.typeSwitch` and `enumSwitch`): the index of
+    /// the first of `labels` from `restart` on that `v` matches, -1 for null, `labels.len()` for
+    /// none. A label is a class (`v` an instance of it), a string (`v` that string, or for an
+    /// enum's switch the constant of that name) or an integer (`v` a box holding it).
+    pub fn type_switch(&self, v: V, restart: i32, labels: &[SwitchLabel]) -> i32 {
+        if v.r() == 0 || matches!(v, V::Void) {
+            return -1;
+        }
+        let from = usize::try_from(restart).unwrap_or(0);
+        let hit = labels.iter().enumerate().skip(from).find(|(_, l)| match l {
+            SwitchLabel::Class(c) => self.instance_of_static(v, c),
+            SwitchLabel::Str(s) => self.str_of(v) == Some(*s) || self.str_of(self.get_field(v, "$name")) == Some(*s),
+            SwitchLabel::Int(i) => {
+                matches!(self.class_of(v), "java/lang/Integer" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Character")
+                    && self.get_field(v, "value").i() == *i
+            }
+        });
+        hit.map_or(labels.len() as i32, |(n, _)| n as i32)
+    }
+
     /// A lambda object: its class is the implementing method's key, its data the captured values.
     pub fn lambda(&mut self, implementation: &'static str, captured: Vec<V>) -> V {
         self.alloc(implementation, Data::Array(captured))
@@ -902,9 +929,106 @@ pub mod neo {
 }
 // END ENGINE ENTRY POINTS
 
+/// One case label of a pattern `switch` ([`Rt::type_switch`]).
+#[derive(Debug, Clone, Copy)]
+pub enum SwitchLabel {
+    Class(&'static str),
+    Str(&'static str),
+    Int(i32),
+}
+
+/// A translated method's operand stack: room for the `N` values its `max_stack` allows, on the
+/// Rust stack, so a call neither allocates one nor its arguments. Verified bytecode never pops
+/// an empty stack or pushes past `max_stack`; if one did, a pop gives `V::Void` and a push past
+/// the end is dropped, as the generated code never panics.
+pub struct Stack<const N: usize> {
+    v: [V; N],
+    n: usize,
+}
+
+impl<const N: usize> Default for Stack<N> {
+    fn default() -> Self {
+        Stack { v: [V::Void; N], n: 0 }
+    }
+}
+
+impl<const N: usize> Stack<N> {
+    #[inline(always)]
+    pub fn push(&mut self, x: V) {
+        if let Some(slot) = self.v.get_mut(self.n) {
+            *slot = x;
+            self.n += 1;
+        }
+    }
+
+    /// The top value, taken off.
+    #[inline(always)]
+    pub fn p(&mut self) -> V {
+        match self.n.checked_sub(1) {
+            Some(n) => {
+                self.n = n;
+                self.v[n]
+            }
+            None => V::Void,
+        }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.n
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    /// The top value, left on.
+    #[inline(always)]
+    pub fn top(&self) -> V {
+        self.n.checked_sub(1).map_or(V::Void, |n| self.v[n])
+    }
+
+    #[inline(always)]
+    pub fn clear(&mut self) {
+        self.n = 0;
+    }
+
+    /// The top `K` values taken off, deepest first: a call's receiver and arguments.
+    #[inline(always)]
+    pub fn take<const K: usize>(&mut self) -> [V; K] {
+        let mut out = [V::Void; K];
+        let k = K.min(self.n);
+        self.n -= k;
+        out[K - k..].copy_from_slice(&self.v[self.n..self.n + k]);
+        out
+    }
+
+    /// Drops the top `k` values.
+    #[inline(always)]
+    pub fn drop_n(&mut self, k: usize) {
+        self.n -= k.min(self.n);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_operand_stack_takes_arguments_deepest_first() {
+        let mut s: Stack<4> = Stack::default();
+        for i in 1..=5 {
+            s.push(V::I(i));
+        }
+        // The fifth didn't fit; the top two come off in the order they were pushed.
+        assert_eq!(s.len(), 4);
+        assert_eq!(s.take::<2>(), [V::I(3), V::I(4)]);
+        assert_eq!(s.top(), V::I(2));
+        assert_eq!(s.p(), V::I(2));
+        assert_eq!(s.take::<3>(), [V::Void, V::Void, V::I(1)]);
+        assert_eq!(s.p(), V::Void);
+    }
 
     #[test]
     fn java_arithmetic_edges() {

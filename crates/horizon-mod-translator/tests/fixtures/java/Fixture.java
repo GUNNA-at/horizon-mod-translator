@@ -131,6 +131,35 @@ public class Fixture {
         return r + (o instanceof RuntimeException ? 1 : 0) + (o instanceof Boom ? 10 : 0);
     }
 
+    // Pattern switches (Java 21): by type with a guard, and over an enum with a pattern case.
+    static int kind(Object o) {
+        return switch (o) {
+            case null -> -1;
+            case BigGear g -> 1;
+            case Gear g -> 2;
+            case String s when s.length() > 3 -> 30 + s.length();
+            case String s -> 3;
+            case Point p -> 40 + p.x();
+            default -> 5;
+        };
+    }
+    static int form(Form f) {
+        return switch (f) {
+            case CUBE -> 1;
+            case Form x when x.ordinal() > 1 -> 10 + x.ordinal();
+            case SLAB -> 2;
+            default -> 9;
+        };
+    }
+    public static int patterns(int k) {
+        Object[] all = { null, new BigGear(), new Gear(), "ab", "abcdef", new Point(k, "p"), 7 };
+        int r = 0;
+        for (Object o : all) {
+            r = r * 7 + kind(o);
+        }
+        return r + form(Form.values()[Math.floorMod(k, 3)]) * 1000;
+    }
+
     record Point(int x, String label) {}
     public static int records(int k) {
         Point a = new Point(k, "p" + k), b = new Point(k, "p" + k), c = new Point(k + 1, "q");
@@ -186,6 +215,30 @@ public class Fixture {
         Runnable r = Sorted::bump;
         for (int i = 0; i < k; i++) r.run();
         return Sorted.calls;
+    }
+    // A library the mod bundles (`lib/`, packed jar-in-jar): only what the mod reaches is
+    // translated, and it runs as on the JVM.
+    static final class Greeter extends lib.Base { }
+    public static int library(int k) {
+        int a = lib.Lib.twice(k);
+        java.util.function.IntSupplier c = lib.Lib.counter(k);
+        int b = c.getAsInt() + c.getAsInt();
+        String s = "" + lib.Lib.shape(k);
+        int d = new Greeter().hello(k);
+        return a + b * 3 + s.length() * 5 + d * 7 + lib.Lib.plusOne(k) * 11;
+    }
+    // Numbers the runtime keeps unboxed (a primitive stream's, fastutil's maps) are still objects:
+    // not null.
+    public static int rawBoxes(int k) {
+        java.util.List<Integer> xs = java.util.stream.IntStream.range(0, 3 + k).boxed().toList();
+        int n = 0;
+        for (Object o : xs) {
+            if (o != null) n++;
+        }
+        java.util.Map<String, Double> m = new java.util.HashMap<>();
+        m.put("a", 2.5 * k);
+        Object v = m.get("a");
+        return n * 10 + xs.size() + (v == null ? 1000 : 2000);
     }
     public static int grid(int n) {
         int[][] g = new int[n][n + 1];

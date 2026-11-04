@@ -149,8 +149,11 @@ pub fn profile() -> Vec<(String, String, u32, std::time::Duration)> {
     out
 }
 
-/// Fires `RegisterEvent` once per registry, as NeoForge does after mod construction.
+/// Fires what NeoForge's loading fires once the mods are constructed: `FMLConstructModEvent`
+/// (Dragons Plus makes its content in it), then `RegisterEvent` once per registry, then setup.
 pub fn fire_registrations(rt: &mut Rt) {
+    let ev = rt.new_object(CONSTRUCT);
+    post(rt, CONSTRUCT, ev);
     let mut names: Vec<String> = REGISTRIES.iter().map(|s| s.to_string()).collect();
     for extra in rt.custom_registries.clone() {
         if !names.contains(&extra) {
@@ -326,6 +329,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         FML_CONTAINER => MOD_CONTAINER,
         "net/neoforged/neoforgespi/language/IModInfo" => MOD_INFO,
         "org/apache/maven/artifact/versioning/ArtifactVersion" => VERSION,
+        "net/neoforged/neoforgespi/language/IModFileInfo" => MOD_FILE_INFO,
+        "thedarkcolour/kotlinforforge/KotlinModLoadingContext$Companion" => KOTLIN_CONTEXT_COMPANION,
+        "thedarkcolour/kotlinforforge/KotlinModLoadingContext" => KOTLIN_CONTEXT,
         o => o,
     };
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -793,6 +799,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.get_field(c, "$modId")
         }
         (LOADING_CONTEXT, "registerExtensionPoint" | "registerConfig") => V::Void,
+        // Kotlin for Forge's loading context: a Kotlin mod's constructor asks it for the mod bus
+        // (`MOD_BUS`), as a Java mod's constructor takes the bus.
+        (KOTLIN_CONTEXT_COMPANION, "get") => rt.intern("compat:kotlin-loading-context".into(), |rt| rt.new_object(KOTLIN_CONTEXT)),
+        (KOTLIN_CONTEXT, "getKEventBus") => rt.new_object("net/neoforged/bus/api/IEventBus"),
         // The mods this engine carries, as FML lists them: the jar's own and those bundled in it.
         ("net/neoforged/fml/ModList", "get") => rt.intern("compat:mod-list".into(), |rt| rt.new_object("net/neoforged/fml/ModList")),
         ("net/neoforged/fml/ModList", "isLoaded") => {
@@ -805,6 +815,28 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             crate::api_common::optional(rt, c)
         }
         ("net/neoforged/fml/ModList", "size") => V::I(loaded_mods(rt).len() as i32),
+        // What FML found before loading: a mod's file, or null for one that isn't there (how mods
+        // check for an optional one early).
+        (LOADING_MOD_LIST, "get") => rt.intern("compat:loading-mod-list".into(), |rt| rt.new_object(LOADING_MOD_LIST)),
+        (LOADING_MOD_LIST, "getModFileById") => {
+            let id = rt.str_of(a(1)).unwrap_or("").to_owned();
+            if mod_loaded(rt, &id) {
+                rt.intern(format!("compat:mod-file/{id}"), |rt| {
+                    let f = rt.new_object(MOD_FILE_INFO);
+                    let s = rt.string(&id);
+                    rt.put_field(f, "$modId", s);
+                    f
+                })
+            } else {
+                V::NULL
+            }
+        }
+        (MOD_FILE_INFO, "getMods") => {
+            let id = rt.get_field(a(0), "$modId");
+            let id = rt.str_of(id).unwrap_or("").to_owned();
+            let info = mod_info(rt, &id);
+            crate::jutil::new_list(rt, vec![info])
+        }
         (MOD_CONTAINER, "getModId" | "getNamespace") => rt.get_field(a(0), "$modId"),
         // Events route by class, so every handle on the mod bus is the same bus.
         (MOD_CONTAINER, "getEventBus") => rt.new_object("net/neoforged/bus/api/IEventBus"),
@@ -823,6 +855,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 }
 
 const COMMON_SETUP: &str = "net/neoforged/fml/event/lifecycle/FMLCommonSetupEvent";
+const CONSTRUCT: &str = "net/neoforged/fml/event/lifecycle/FMLConstructModEvent";
 const CLIENT_SETUP: &str = "net/neoforged/fml/event/lifecycle/FMLClientSetupEvent";
 const REGISTER_RENDERERS: &str = "net/neoforged/neoforge/client/event/EntityRenderersEvent$RegisterRenderers";
 
@@ -912,8 +945,23 @@ const MOD_CONTAINER: &str = "net/neoforged/fml/ModContainer";
 const MOD_INFO: &str = "net/neoforged/fml/loading/moddiscovery/ModInfo";
 const VERSION: &str = "org/apache/maven/artifact/versioning/DefaultArtifactVersion";
 const LOADING_CONTEXT: &str = "net/neoforged/fml/ModLoadingContext";
+const LOADING_MOD_LIST: &str = "net/neoforged/fml/loading/LoadingModList";
+const MOD_FILE_INFO: &str = "net/neoforged/fml/loading/moddiscovery/ModFileInfo";
 /// The interned string naming the mod whose constructor runs (the generated `start` sets it).
 pub const ACTIVE_MOD: &str = "compat:active-mod";
+const KOTLIN_CONTEXT: &str = "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext";
+const KOTLIN_CONTEXT_COMPANION: &str = "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext$Companion";
+
+/// The loader's static fields: Kotlin for Forge's loading context's companion (`KotlinModLoadingContext.get()`
+/// in Kotlin is a call on it).
+pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    match (owner, field) {
+        (KOTLIN_CONTEXT | "thedarkcolour/kotlinforforge/KotlinModLoadingContext", "Companion") => {
+            Some(rt.intern("compat:kotlin-loading-context-companion".into(), |rt| rt.new_object(KOTLIN_CONTEXT_COMPANION)))
+        }
+        _ => None,
+    }
+}
 
 /// The mod's container, one per id.
 fn mod_container(rt: &mut Rt, id: &str) -> V {
@@ -1028,6 +1076,27 @@ mod tests {
         assert_eq!(rt.str_of(text), Some("1"));
     }
 
+    /// `LoadingModList.get().getModFileById(id) != null` is how mods look for another early: a
+    /// mod the engine carries has a file, with its metadata; one it doesn't is null.
+    #[test]
+    fn the_loading_mod_list_finds_the_mods_there_and_no_others() {
+        let mut rt = Rt::new();
+        rt.mods = vec!["create".into(), "copycats".into()];
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"));
+        let list = c(&mut rt, "net/neoforged/fml/loading/LoadingModList.get.()Lnet/neoforged/fml/loading/LoadingModList;", &[]);
+        let by_id = |rt: &mut Rt, id: &str| {
+            let id = rt.string(id);
+            c(rt, "net/neoforged/fml/loading/LoadingModList.getModFileById.(Ljava/lang/String;)Lnet/neoforged/fml/loading/moddiscovery/ModFileInfo;", &[list, id])
+        };
+        assert_eq!(by_id(&mut rt, "sodium"), V::NULL);
+        let file = by_id(&mut rt, "create");
+        assert_ne!(file, V::NULL);
+        let mods = c(&mut rt, "net/neoforged/neoforgespi/language/IModFileInfo.getMods.()Ljava/util/List;", &[file]);
+        let info = crate::jutil::elements(&rt, mods)[0];
+        let id = c(&mut rt, "net/neoforged/neoforgespi/language/IModInfo.getModId.()Ljava/lang/String;", &[info]);
+        assert_eq!(rt.str_of(id), Some("create"));
+    }
+
     #[test]
     fn config_values_are_their_defaults_boxed_as_java_boxes_them() {
         let mut rt = Rt::new();
@@ -1066,6 +1135,24 @@ mod tests {
             _ => list_mut(rt, seen).push(args[1]),
         }
         Some(V::Void)
+    }
+
+    /// NeoForge's loading order on the mod bus: construction (where Dragons Plus makes its blocks,
+    /// before its registrate hears `RegisterEvent`), the registries, then common setup.
+    #[test]
+    fn the_mod_bus_hears_construction_then_registration_then_setup() {
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(bake_into_list);
+        let seen = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        for event in [COMMON_SETUP, REGISTER_EVENT, CONSTRUCT] {
+            let listener = rt.lambda_id("java/util/function/Consumer", 2, vec![seen]);
+            rt.listeners.push((event.to_owned(), listener));
+        }
+        fire_registrations(&mut rt);
+        let heard: Vec<String> = list_mut(&mut rt, seen).clone().into_iter().map(|e| rt.class_of(e).to_owned()).collect();
+        assert_eq!(heard.first().map(String::as_str), Some(CONSTRUCT));
+        assert_eq!(heard.last().map(String::as_str), Some(COMMON_SETUP));
+        assert!(heard[1..heard.len() - 1].iter().all(|e| e == REGISTER_EVENT) && heard.len() > 2, "{heard:?}");
     }
 
     /// Create's `ContraptionType` makes its holder from the registry before it is registered

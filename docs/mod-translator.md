@@ -1536,6 +1536,40 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     disk down to 265 MB, then rustc was killed). Create with 4 addons (161 MB) still builds. Next:
     a leaner codegen (basic blocks instead of a `match` arm per instruction, no heap `Vec` per
     call's arguments), measured, then splitting a group's engine if that is not enough.
+  - 2026-11-04 A leaner codegen: the ten-addon engine builds. A `match` arm per basic block (an
+    instruction only the one before reaches runs in that one's arm), and the operand stack a fixed
+    array on the Rust stack (`Stack<max_stack>`; a call takes its arguments from it, no heap `Vec`).
+    The same ten addons: 2.35M → 1.32M lines, 1.22M → 194K arms, 218 → 173 MB; the harness built
+    it in 7 min 53 s with rustc at 10.1 GB at most (swap +1.7 GB). In the harness: 11 creative tabs
+    (Copycats+' two, Encased's 189 items, Electro Energetics' 81, Power Loader's 4...), New Age's
+    coil (16 rpm, 72 su, 22 FE/t stored to 440) and Create's filter (a diamond in `filter_items`)
+    as before. Java's pattern `switch` (`SwitchBootstraps.typeSwitch`/`enumSwitch`: Dragons Plus,
+    Electro Energetics, Create's clipboard) translated, checked against the JVM (`patterns`).
+  - 2026-11-04 Libraries as far as the mods reach them; Kotlin mods. Enchantable Machinery (Kotlin)
+    threw in its constructor: Kotlin's `Intrinsics.areEqual` wasn't there, an unmapped call answers
+    nothing, and its own config check failed. Kotlin's library comes with Kotlin for Forge, the jar
+    of its `modLoader` (`kotlinforforge`): the installer now gives a group the jar of each language
+    loader its mods name, and a library (that jar, or a jar-in-jar that declares no mod) is
+    translated only as far as the mods' code reaches it (`reach.rs`, rapid type analysis): a static
+    or `super` call runs its method; a virtual call runs that signature's method in the library
+    classes a created class has above it; a created class handed to code that isn't translated
+    keeps all its methods. Kotlin for Forge carries 4 757 classes; behind Enchantable Machinery 120
+    of them are kept (class-level reach kept 3 097: kotlin-reflect, which Kotlin's `Reflection`
+    looks up by name; a library's own lookups by name now stay out, and Kotlin falls back to its
+    basic reflection as without kotlin-reflect). Create with it: 115 MB of Rust (Create alone 110).
+    Kotlin for Forge's loading context (`KotlinModLoadingContext`, which a Kotlin mod asks for its
+    bus) is the runtime's. Checked against the JVM with a library inside the fixture's jar
+    (`library`): what is left out, and that what is kept runs the same.
+  - 2026-11-04 `FMLConstructModEvent`, which NeoForge fires once the mods are built and before the
+    registries: Dragons Plus makes all its blocks, fluids and items there, so it had registered
+    none (its tab was empty). `LoadingModList.getModFileById`: a mod's file, null for one that
+    isn't there. Measured in the harness (the ten addons with Kotlin for Forge as a library: 172
+    MB, 198 library classes kept of 4 771): Dragons Plus registers 19 blocks, 34 fluids, 21 items
+    and its block entity; Enchantable Machinery its 12 blocks and 12 block entities. Its
+    constructor then stopped on Kotlin's `component2(...) must not be null`: a destructured entry of
+    a fastutil `Object2DoubleMap`, whose numbers the runtime keeps unboxed, and `ifnull` tested
+    `.r() == 0`. Null is now the null reference or an unmapped call's nothing (`V::is_null`), never
+    a number (`rawBoxes` against the JVM, with `IntStream.range`, which was unmapped).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

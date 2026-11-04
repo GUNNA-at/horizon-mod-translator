@@ -29,10 +29,13 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("concat", "(I)I", &["0", "7", "123", "-4"]),
     ("exceptions", "(I)I", &["0", "1", "2", "3", "4"]),
     ("records", "(I)I", &["0", "5", "-12"]),
+    ("patterns", "(I)I", &["0", "1", "2"]),
     ("grid", "(I)I", &["0", "1", "6"]),
     ("reflection", "(I)I", &["3", "-12"]),
     ("staticFields", "(I)I", &["0", "5"]),
     ("staticRefs", "(I)I", &["3"]),
+    ("library", "(I)I", &["0", "3", "-7"]),
+    ("rawBoxes", "(I)I", &["0", "2"]),
 ];
 
 fn has(tool: &str) -> bool {
@@ -82,29 +85,48 @@ fn translated_fixture_matches_the_jvm() {
     }
     runner.push_str("}}\n");
     fs::write(root.join("Runner.java"), runner).unwrap();
-    let ok = Command::new("javac")
-        .args(["-d", classes.to_str().unwrap()])
-        .arg(&fixture)
-        .arg(root.join("Runner.java"))
-        .status()
-        .unwrap();
-    assert!(ok.success());
-    // A service the fixture loads, packed as a mod jar packs it.
+    let mut javac = Command::new("javac");
+    javac.args(["-d", classes.to_str().unwrap()]).arg(&fixture).arg(root.join("Runner.java"));
+    for e in fs::read_dir(fixture.with_file_name("lib")).unwrap().flatten() {
+        javac.arg(e.path());
+    }
+    assert!(javac.status().unwrap().success());
+    // A service the fixture loads, where `java -cp` finds it and in the mod's jar.
+    let service = "# providers\nFixture$Impl\n";
     fs::create_dir_all(classes.join("META-INF/services")).unwrap();
-    fs::write(classes.join("META-INF/services/Fixture$Spins"), "# providers\nFixture$Impl\n").unwrap();
-    let jar = root.join("fixture.jar");
-    assert!(Command::new("jar").arg("cf").arg(&jar).arg("-C").arg(&classes).arg(".").status().unwrap().success());
+    fs::write(classes.join("META-INF/services/Fixture$Spins"), service).unwrap();
     let java = Command::new("java").args(["-cp", classes.to_str().unwrap(), "Runner"]).output().unwrap();
     assert!(java.status.success(), "{}", String::from_utf8_lossy(&java.stderr));
     let expected = String::from_utf8(java.stdout).unwrap();
 
-    // Translate.
-    let parsed: Vec<_> = fs::read_dir(&classes)
-        .unwrap()
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("Fixture"))
-        .map(|e| horizon_mod_translator::class::ClassFile::parse(&fs::read(e.path()).unwrap()).unwrap())
-        .collect();
+    // The mod's jar: its classes, a service it loads, and the library inside (jar-in-jar).
+    let packed = root.join("packed");
+    fs::create_dir_all(packed.join("META-INF/services")).unwrap();
+    fs::create_dir_all(packed.join("META-INF/jarjar")).unwrap();
+    for e in fs::read_dir(&classes).unwrap().flatten() {
+        if e.file_name().to_string_lossy().starts_with("Fixture") {
+            fs::copy(e.path(), packed.join(e.file_name())).unwrap();
+        }
+    }
+    fs::write(packed.join("META-INF/services/Fixture$Spins"), service).unwrap();
+    let jar_of = |jar: &Path, dir: &Path, what: &str| {
+        assert!(Command::new("jar").arg("cf").arg(jar).arg("-C").arg(dir).arg(what).status().unwrap().success());
+    };
+    jar_of(&packed.join("META-INF/jarjar/lib.jar"), &classes, "lib");
+    let jar = root.join("fixture.jar");
+    jar_of(&jar, &packed, ".");
+
+    // Translate what the mod can run: the library as far as it reaches.
+    let parsed = horizon_mod_translator::classes(&jar).unwrap();
+    let methods = |class: &str| -> Option<Vec<String>> {
+        let c = parsed.iter().find(|c| c.name == class)?;
+        Some(c.methods.iter().filter(|m| m.code.is_some()).map(|m| m.name.clone()).collect())
+    };
+    assert_eq!(methods("lib/Unused"), None, "a class only unused code makes is left out");
+    assert!(!methods("lib/Lib").unwrap().contains(&"unused".to_owned()));
+    assert!(!methods("lib/Base").unwrap().contains(&"unusedHello".to_owned()));
+    assert!(methods("lib/Circle").unwrap().iter().all(|m| m == "<init>"), "never made, so none of its methods run");
+    assert!(methods("lib/Counter").unwrap().contains(&"peek".to_owned()), "handed out as a JDK interface: all of it stays");
     let mut program = horizon_mod_translator::codegen::Program::new(&parsed);
     program.services = horizon_mod_translator::services(&jar).unwrap();
     let module = program.emit();
@@ -154,7 +176,7 @@ fn translated_fixture_matches_the_jvm() {
     for (e, a) in expected.lines().zip(actual.lines()) {
         assert_eq!(a, e);
     }
-    assert_eq!(expected.lines().count(), 84, "{expected}");
+    assert_eq!(expected.lines().count(), CASES.iter().map(|c| c.2.len()).sum::<usize>(), "{expected}");
     assert_eq!(expected.lines().count(), actual.lines().count());
     eprintln!("{actual}");
     assert!(program.unsupported.is_empty(), "{:?}", program.unsupported);

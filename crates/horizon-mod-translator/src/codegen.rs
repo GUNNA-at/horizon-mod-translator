@@ -1,6 +1,7 @@
 //! Bytecode → Rust. Each Java method becomes `fn(rt: &mut Rt, args: &[V]) -> V`
-//! whose body is a `loop { match pc { ... } }` over its instructions, with
-//! the operand stack and locals as `V` values. Calls to the mod's own
+//! whose body is a `loop { match pc { ... } }` with an arm per basic block, the
+//! operand stack a fixed array on the Rust stack (`Stack`, its `max_stack` values:
+//! no allocation for it or a call's arguments) and the locals `V` values. Calls to the mod's own
 //! classes are direct Rust calls (virtual ones through a generated
 //! dispatch table); calls to Minecraft, NeoForge and the JDK go to
 //! `horizon_compat::api`. Everything is native code: no JVM at runtime.
@@ -57,6 +58,33 @@ fn dispatcher(nd: &str) -> String {
 /// Whether a class id implements `nd`: `fn(cid) -> bool`.
 fn overrider(nd: &str) -> String {
     format!("o_{}_{:08x}", ident(nd.split('.').next().unwrap_or("")), hash(nd))
+}
+
+/// The instructions of `code` that run in the arm of the one before them ([`Cur::joined`]): all
+/// but the first, those something jumps to (a branch, a switch, an exception handler) and those
+/// after an instruction that doesn't fall through to them (a branch, a switch, a return, a
+/// throw).
+fn joined(insns: &[Insn], code: &crate::class::Code) -> BTreeSet<usize> {
+    let mut starts: BTreeSet<usize> = code.handlers.iter().map(|h| usize::from(h.2)).collect();
+    for (n, i) in insns.iter().enumerate() {
+        match &i.arg {
+            Operand::Jump(t) => {
+                starts.insert(*t);
+            }
+            Operand::Switch(default, cases) => {
+                starts.insert(*default);
+                starts.extend(cases.iter().map(|(_, t)| *t));
+            }
+            _ => {}
+        }
+        // Branches, `goto`, `jsr`, `ret`, switches, returns and `athrow`.
+        if matches!(i.op, 0x99..=0xb1 | 0xbf | 0xc6..=0xc9)
+            && let Some(next) = insns.get(n + 1)
+        {
+            starts.insert(next.at);
+        }
+    }
+    insns.iter().skip(1).map(|i| i.at).filter(|at| !starts.contains(at)).collect()
 }
 
 /// A match pattern for a set of ids: runs of consecutive ids as ranges.
@@ -217,6 +245,10 @@ struct Cur {
     before_insn: BTreeMap<usize, Vec<(usize, usize)>>,
     /// The `@Share`d refs the method makes: (mixin, name, ref class), `share0`...
     shares: Vec<(String, String, String)>,
+    /// Instructions that only the one before reaches: each runs in that one's arm, after it (a
+    /// basic block is one arm). The others (where jumps, switches and handlers go, and those after
+    /// an instruction that doesn't fall through) start arms.
+    joined: BTreeSet<usize>,
     /// Whether a constructor's call of its superclass's has been written.
     super_done: bool,
 }
@@ -896,7 +928,7 @@ impl<'a> Program<'a> {
         let Some((handle, args)) = c.bootstrap.get(bsm as usize).cloned() else { return go.to_owned() };
         let Some((_, factory)) = c.handle(handle) else { return go.to_owned() };
         let n = arg_kinds(&desc).len();
-        let collect = format!("let at = s.len().saturating_sub({n}); let a: Vec<V> = s.split_off(at);");
+        let collect = format!("let a = s.take::<{n}>().to_vec();");
         let string = |i: u16| match c.pool.get(i as usize) {
             Some(Const::String(u)) => c.utf8(*u).ok(),
             _ => None,
@@ -949,6 +981,23 @@ impl<'a> Program<'a> {
                     fields.join(", ")
                 )
             }
+            // A pattern `switch` (Java 21): the case its object matches, from the restart index on.
+            ("java/lang/runtime/SwitchBootstraps", "typeSwitch" | "enumSwitch") => {
+                let mut labels = Vec::new();
+                for &i in &args {
+                    labels.push(match c.pool.get(i as usize) {
+                        Some(Const::Class(n)) => format!("horizon_compat::SwitchLabel::Class({:?})", c.utf8(*n).unwrap_or_default()),
+                        Some(Const::String(u)) => format!("horizon_compat::SwitchLabel::Str({:?})", c.utf8(*u).unwrap_or_default()),
+                        Some(Const::Int(v)) => format!("horizon_compat::SwitchLabel::Int({v})"),
+                        _ => {
+                            // An enum constant's description (a dynamic constant): matched by nothing.
+                            self.unsupported("pattern switch label of a dynamic constant");
+                            "horizon_compat::SwitchLabel::Class(\"\")".to_owned()
+                        }
+                    });
+                }
+                format!("let r = s.p().i(); let o = s.p(); let v = rt.type_switch(o, r, &[{}]); s.push(V::I(v)); {go}", labels.join(", "))
+            }
             (o, n) => {
                 self.unsupported(&format!("invokedynamic {o}.{n}"));
                 format!("{collect} s.push(V::NULL); {go}")
@@ -986,7 +1035,7 @@ impl<'a> Program<'a> {
             slot += if k == 'J' || k == 'D' { 2 } else { 1 };
             ai += 1;
         }
-        let _ = writeln!(s, "    let mut s: Vec<V> = Vec::with_capacity({});", code.max_stack.max(1));
+        let _ = writeln!(s, "    let mut s: horizon_compat::Stack<{}> = Default::default();", code.max_stack.max(1));
         let insns = match insn::decode(&code.bytes) {
             Ok(i) => i,
             Err(e) => {
@@ -1066,6 +1115,10 @@ impl<'a> Program<'a> {
         }
         let _ = writeln!(s, "    loop {{");
         let _ = writeln!(s, "        match pc {{");
+        let joined = joined(&insns, code);
+        if let Some(cur) = self.cur.as_mut() {
+            cur.joined = joined.clone();
+        }
         for (n, i) in insns.iter().enumerate() {
             let next = insns.get(n + 1).map_or(usize::MAX, |x| x.at);
             // A constant or a `new` some mixin weaves at (calls and field accesses weave in
@@ -1090,7 +1143,14 @@ impl<'a> Program<'a> {
                 body.push(' ');
                 body.push_str(&woven(self, a));
             }
-            let _ = writeln!(s, "            {} => {{ {body} }}", i.at);
+            // An arm per basic block: an instruction joined to the one before goes on in its arm.
+            if !joined.contains(&i.at) {
+                let _ = write!(s, "            {} => {{", i.at);
+            }
+            let _ = write!(s, " {body}");
+            if !joined.contains(&next) {
+                let _ = writeln!(s, " }}");
+            }
         }
         // Unwinding: the first handler covering the throwing instruction whose
         // class matches catches; otherwise the exception leaves the method.
@@ -1184,7 +1244,7 @@ impl<'a> Program<'a> {
                     ));
                     self.operations.insert(lkey.clone(), op_fn);
                     wrapped = Some(format!(
-                        "let a = s.pop().unwrap_or_default(); {pre}let op = rt.lambda_id({lkey:?}, {lid}, l.to_vec()); rt.lambda_info.insert(op.r(), ({:?}, \"call\")); let r = {h}(rt, &[{this}a, op{extra}{more}]); {post}{throw} s.push(r); pc = {next};",
+                        "let a = s.p(); {pre}let op = rt.lambda_id({lkey:?}, {lid}, l.to_vec()); rt.lambda_info.insert(op.r(), ({:?}, \"call\")); let r = {h}(rt, &[{this}a, op{extra}{more}]); {post}{throw} s.push(r); pc = {next};",
                         weave::OPERATION
                     ));
                     continue;
@@ -1205,7 +1265,7 @@ impl<'a> Program<'a> {
             return format!("{before}{body}");
         }
         // Pushed as ever, then through the handlers.
-        format!("{before}{body} let v = s.pop().unwrap_or_default(); {modify}s.push(v);")
+        format!("{before}{body} let v = s.p(); {modify}s.push(v);")
     }
 
     /// What a handler's local parameters get at place `site` (`Weave::locals`): code that makes
@@ -1364,18 +1424,19 @@ impl<'a> Program<'a> {
 
     /// One instruction's Rust; `next` is the following instruction's offset.
     fn insn(&mut self, c: &ClassFile, i: &Insn, next: usize) -> String {
-        let go = format!("pc = {next};");
+        // Into the next instruction: it follows in the same arm unless something jumps there.
+        let go = if self.cur.as_ref().is_some_and(|cur| cur.joined.contains(&next)) { String::new() } else { format!("pc = {next};") };
         let idx = match &i.arg {
             Operand::Int(v) => *v,
             Operand::IndexCount(v, _) => *v as i32,
             _ => 0,
         };
-        let pop = "s.pop().unwrap_or_default()";
+        let pop = "s.p()";
         let bin = |ty: &str, wrap: &str, expr: &str| {
             format!("let b = {pop}.{ty}(); let a = {pop}.{ty}(); s.push(V::{wrap}({expr})); {go}")
         };
         let cmp_jump = |cond: &str| match &i.arg {
-            Operand::Jump(t) => format!("if {cond} {{ pc = {t}; }} else {{ {go} }}"),
+            Operand::Jump(t) => format!("if {cond} {{ pc = {t}; continue; }} else {{ {go} }}"),
             _ => go.clone(),
         };
         match i.op {
@@ -1413,9 +1474,9 @@ impl<'a> Program<'a> {
             0x36..=0x3a => format!("l[{idx}] = {pop}; {go}"),
             0x3b..=0x4e => format!("l[{}] = {pop}; {go}", (i.op - 0x3b) % 4),
             0x4f..=0x56 => format!("let v = {pop}; let ix = {pop}.i(); let a = {pop}; rt.array_set(a, ix, v); {go}"),
-            0x57 => format!("s.pop(); {go}"),
-            0x58 => format!("if matches!(s.pop(), Some(V::J(_) | V::D(_))) {{}} else {{ s.pop(); }} {go}"),
-            0x59 => format!("let v = *s.last().unwrap(); s.push(v); {go}"),
+            0x57 => format!("s.p(); {go}"),
+            0x58 => format!("if matches!(s.p(), V::J(_) | V::D(_)) {{}} else {{ s.p(); }} {go}"),
+            0x59 => format!("let v = s.top(); s.push(v); {go}"),
             0x5a => format!("let a = {pop}; let b = {pop}; s.push(a); s.push(b); s.push(a); {go}"),
             0x5b => format!(
                 "let a = {pop}; let b = {pop}; if matches!(b, V::J(_) | V::D(_)) {{ s.push(a); s.push(b); s.push(a); }} else {{ let c = {pop}; s.push(a); s.push(c); s.push(b); s.push(a); }} {go}"
@@ -1443,12 +1504,12 @@ impl<'a> Program<'a> {
             0x69 => bin("j", "J", "a.wrapping_mul(b)"),
             0x6a => bin("f", "F", "a * b"),
             0x6b => bin("d", "D", "a * b"),
-            0x6c => format!("let b = {pop}.i(); let a = {pop}.i(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; }} else {{ s.push(V::I(horizon_compat::idiv(a, b))); {go} }}", at = i.at),
-            0x6d => format!("let b = {pop}.j(); let a = {pop}.j(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; }} else {{ s.push(V::J(horizon_compat::ldiv(a, b))); {go} }}", at = i.at),
+            0x6c => format!("let b = {pop}.i(); let a = {pop}.i(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; continue; }} else {{ s.push(V::I(horizon_compat::idiv(a, b))); {go} }}", at = i.at),
+            0x6d => format!("let b = {pop}.j(); let a = {pop}.j(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; continue; }} else {{ s.push(V::J(horizon_compat::ldiv(a, b))); {go} }}", at = i.at),
             0x6e => bin("f", "F", "a / b"),
             0x6f => bin("d", "D", "a / b"),
-            0x70 => format!("let b = {pop}.i(); let a = {pop}.i(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; }} else {{ s.push(V::I(horizon_compat::irem(a, b))); {go} }}", at = i.at),
-            0x71 => format!("let b = {pop}.j(); let a = {pop}.j(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; }} else {{ s.push(V::J(horizon_compat::lrem(a, b))); {go} }}", at = i.at),
+            0x70 => format!("let b = {pop}.i(); let a = {pop}.i(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; continue; }} else {{ s.push(V::I(horizon_compat::irem(a, b))); {go} }}", at = i.at),
+            0x71 => format!("let b = {pop}.j(); let a = {pop}.j(); if b == 0 {{ rt.throw_new(\"java/lang/ArithmeticException\"); thrown_at = {at}; pc = {THROW}; continue; }} else {{ s.push(V::J(horizon_compat::lrem(a, b))); {go} }}", at = i.at),
             0x72 => bin("f", "F", "a % b"),
             0x73 => bin("d", "D", "a % b"),
             0x74 => format!("let a = {pop}.i(); s.push(V::I(a.wrapping_neg())); {go}"),
@@ -1504,7 +1565,7 @@ impl<'a> Program<'a> {
             0xa5 => format!("let b = {pop}.r(); let a = {pop}.r(); {}", cmp_jump("a == b")),
             0xa6 => format!("let b = {pop}.r(); let a = {pop}.r(); {}", cmp_jump("a != b")),
             0xa7 | 0xc8 => match &i.arg {
-                Operand::Jump(t) => format!("pc = {t};"),
+                Operand::Jump(t) => format!("pc = {t}; continue;"),
                 _ => go,
             },
             0xaa | 0xab => match &i.arg {
@@ -1513,7 +1574,7 @@ impl<'a> Program<'a> {
                     for (k, t) in pairs {
                         let _ = write!(m, "{k} => {t}, ");
                     }
-                    let _ = write!(m, "_ => {default} }};");
+                    let _ = write!(m, "_ => {default} }}; continue;");
                     m
                 }
                 _ => go,
@@ -1545,13 +1606,13 @@ impl<'a> Program<'a> {
             }
             0xbd => format!("let n = {pop}.i(); let v = rt.new_array(n, V::NULL); s.push(v); {go}"),
             0xbe => format!("let a = {pop}; s.push(V::I(rt.array_len(a))); {go}"),
-            0xbf => format!("let e = {pop}; rt.thrown = Some(e); thrown_at = {}; pc = {THROW};", i.at),
+            0xbf => format!("let e = {pop}; rt.thrown = Some(e); thrown_at = {}; pc = {THROW}; continue;", i.at),
             0xc0 => go, // checkcast: translated code trusts the mod's types
             0xc1 => {
                 let class = c.class_name(idx as u16).unwrap_or_default();
                 format!("let a = {pop}; s.push(V::I(rt.instance_of_static(a, {class:?}) as i32)); {go}")
             }
-            0xc2 | 0xc3 => format!("s.pop(); {go}"),
+            0xc2 | 0xc3 => format!("s.p(); {go}"),
             0xc5 => match &i.arg {
                 Operand::IndexCount(t, dims) => {
                     let ty = c.class_name(*t).unwrap_or_default();
@@ -1563,12 +1624,12 @@ impl<'a> Program<'a> {
                         _ => "V::I(0)",
                     };
                     let zero = if ty.len() - ty.trim_start_matches('[').len() > *dims as usize { "V::NULL" } else { zero };
-                    format!("let at = s.len().saturating_sub({dims}); let d: Vec<i32> = s.split_off(at).iter().map(|v| v.i()).collect(); let v = rt.new_multi(&d, {zero}); s.push(v); {go}")
+                    format!("let d: Vec<i32> = s.take::<{dims}>().iter().map(|v| v.i()).collect(); let v = rt.new_multi(&d, {zero}); s.push(v); {go}")
                 }
                 _ => go,
             },
-            0xc6 => format!("let a = {pop}.r(); {}", cmp_jump("a == 0")),
-            0xc7 => format!("let a = {pop}.r(); {}", cmp_jump("a != 0")),
+            0xc6 => format!("let a = {pop}; {}", cmp_jump("a.is_null()")),
+            0xc7 => format!("let a = {pop}; {}", cmp_jump("!a.is_null()")),
             op => {
                 self.unsupported(&format!("opcode 0x{op:02x}"));
                 go
@@ -1660,7 +1721,7 @@ impl<'a> Program<'a> {
         let owner = if matches!(op, 0xb2 | 0xb3) { self.field_owner(&m.owner, &m.name) } else { m.owner.clone() };
         // The declaring class initialises, as the JVM does (not the subclass the reference names).
         let init = if matches!(op, 0xb2 | 0xb3) && owner != c.name { self.ensure(&owner) } else { String::new() };
-        let pop = "s.pop().unwrap_or_default()";
+        let pop = "s.p()";
         let skey = format!("{owner}.{}", m.name);
         // A primitive field nothing wrote reads as its type's zero, as the JVM's defaults (a `long`
         // counter, an `int` angle saved to NBT); a reference one stays unset (null to the code).
@@ -1716,7 +1777,7 @@ impl<'a> Program<'a> {
         let mutable = if woven.mutable { " let mut args = args;" } else { "" };
         let push = if read { "s.push(r);" } else { "" };
         format!(
-            "{init}let at = s.len().saturating_sub({n}); let args: Vec<V> = s.split_off(at);{mutable} {}let r = {}; if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; }} else {{ {}{push} {}{go} }}",
+            "{init}let args = s.take::<{n}>();{mutable} {}let r = {}; if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; continue; }} else {{ {}{push} {}{go} }}",
             woven.before, woven.call, woven.modify, woven.after
         )
     }
@@ -1817,7 +1878,7 @@ impl<'a> Program<'a> {
             cur.super_done = true;
         }
         if super_call && self.mixin_of.contains_key(&c.name) {
-            return format!("let at = s.len().saturating_sub({n}); s.truncate(at); {go}");
+            return format!("s.drop_n({n}); {go}");
         }
         let mut initialisers = String::new();
         if super_call {
@@ -1838,7 +1899,7 @@ impl<'a> Program<'a> {
         } else {
             String::new()
         };
-        let collect = format!("{init}{caller}let at = s.len().saturating_sub({n}); let args: Vec<V> = s.split_off(at);");
+        let collect = format!("{init}{caller}let args = s.take::<{n}>();");
         let push = if returns_value(&m.desc) { "s.push(r);" } else { "" };
         // A method no mod class implements, called through a mod class (`this.getLevel()` in a
         // mod block entity): the API class it is inherited from, found now rather than per call.
@@ -1880,7 +1941,7 @@ impl<'a> Program<'a> {
         let woven = self.call_weaves(&m, op, at, call);
         let collect = if woven.mutable { format!("{collect} let mut args = args;") } else { collect };
         format!(
-            "{collect} {}let r = {}; if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; }} else {{ {}{push} {initialisers}{}{go} }}",
+            "{collect} {}let r = {}; if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; continue; }} else {{ {}{push} {initialisers}{}{go} }}",
             woven.before, woven.call, woven.modify, woven.after
         )
     }

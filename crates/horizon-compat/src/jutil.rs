@@ -1158,13 +1158,19 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             if a(0).r() == 0 && name == "requireNonNullElse" { a(1) } else { a(0) }
         }
         ("java/util/Objects", "equals") => V::I(equals(rt, a(0), a(1)) as i32),
-        ("java/util/Objects", "hashCode") => V::I(if a(0).r() == 0 { 0 } else { hash(rt, a(0)) }),
+        ("java/util/Objects", "hashCode") => V::I(if a(0).is_null() { 0 } else { hash(rt, a(0)) }),
         ("java/util/Objects", "hash") => {
             let items = elements(rt, a(0));
-            V::I(items.into_iter().fold(1i32, |h, v| h.wrapping_mul(31).wrapping_add(if v.r() == 0 { 0 } else { hash(rt, v) })))
+            V::I(items.into_iter().fold(1i32, |h, v| h.wrapping_mul(31).wrapping_add(if v.is_null() { 0 } else { hash(rt, v) })))
         }
-        ("java/util/Objects", "isNull") => V::I((a(0).r() == 0) as i32),
-        ("java/util/Objects", "nonNull") => V::I((a(0).r() != 0) as i32),
+        ("java/util/Objects", "isNull") => V::I(a(0).is_null() as i32),
+        ("java/util/Objects", "nonNull") => V::I(!a(0).is_null() as i32),
+        // `IntStream.range(lo, hi)` / `rangeClosed(lo, hi)`: its ints, held unboxed.
+        ("java/util/stream/IntStream", "range" | "rangeClosed") => {
+            let (lo, hi) = (i64::from(a(0).i()), i64::from(a(1).i()) + i64::from(name == "rangeClosed"));
+            let items = (lo..hi).map(|i| V::I(i as i32)).collect();
+            rt.alloc("java/util/stream/IntStream", Data::Stream(items))
+        }
         ("java/util/stream/Collectors", "toList" | "toSet" | "toUnmodifiableList" | "toUnmodifiableSet") => {
             rt.alloc(if name.contains("Set") { "compat:collect-set" } else { "compat:collect-list" }, Data::List(Vec::new()))
         }

@@ -32,24 +32,29 @@ fn translate(jar: &Path, out: &Path) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // `bundle <jar> <out> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]`: `--with`
-    // translates mods built on the first with it, as one engine (see `bundle::write_group`);
-    // `--runtime`, a bundle for tools whose engine links the runtime core instead of carrying it.
+    // `bundle <jar> <out> [--with <addon jar>]... [--library <jar>]... [--runtime <horizon-compat-core
+    // dir>]`: `--with` translates mods built on the first with it, as one engine (see
+    // `bundle::write_group`); `--library`, a jar whose code they may call (a language loader's,
+    // Kotlin for Forge's), of which what they reach; `--runtime`, a bundle for tools whose engine
+    // links the runtime core instead of carrying it.
     if args.first().map(String::as_str) == Some("bundle") && args.len() >= 3 {
-        let (mut with, mut runtime, mut rest) = (Vec::new(), None, args[3..].iter());
+        let (mut with, mut libraries, mut runtime, mut rest) = (Vec::new(), Vec::new(), None, args[3..].iter());
         while let Some(a) = rest.next() {
             match (a.as_str(), rest.next()) {
                 ("--with", Some(j)) => with.push(Path::new(j)),
+                ("--library", Some(j)) => libraries.push(Path::new(j)),
                 ("--runtime", Some(dir)) => runtime = Some(Path::new(dir)),
                 _ => {
-                    eprintln!("bundle <jar> <out dir> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]");
+                    eprintln!("bundle <jar> <out dir> [--with <addon jar>]... [--library <jar>]... [--runtime <horizon-compat-core dir>]");
                     return ExitCode::FAILURE;
                 }
             }
         }
         let jars: Vec<&Path> = std::iter::once(Path::new(&args[1])).chain(with).collect();
-        let result = horizon_mod_translator::classes_of(&jars)
-            .and_then(|c| horizon_mod_translator::bundle::write_group(&jars, &c, Path::new(&args[2]), runtime));
+        let result = horizon_mod_translator::program_of(&jars, &libraries).and_then(|(c, library, kept)| {
+            println!("{} classes, {kept} of them of the {library} in the libraries the jars bundle", c.len());
+            horizon_mod_translator::bundle::write_group(&jars, &c, Path::new(&args[2]), runtime)
+        });
         return match result {
             Ok((id, left)) => {
                 println!("{id}: native mod bundle in {}", args[2]);

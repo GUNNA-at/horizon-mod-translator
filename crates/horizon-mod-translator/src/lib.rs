@@ -1,15 +1,62 @@
 //! Ahead-of-time translator from NeoForge mod bytecode to native Rust
 //! Horizon mods (`docs/mod-translator.md`).
 pub mod class;
+pub mod reach;
 
 use class::{ClassFile, Member};
 use std::{collections::BTreeMap, io::Read, path::Path};
 
-/// A game or loader API the mod reaches into: what horizon-compat must map.
+/// A game or loader API the mod reaches into: what horizon-compat must map. Kotlin for Forge's
+/// mod container and loading context are part of the loader (a Kotlin mod asks the context for its
+/// bus); the rest of it, and Kotlin's own library, are code the translator translates.
 pub fn is_api(owner: &str) -> bool {
-    ["net/minecraft/", "net/neoforged/", "com/mojang/"]
+    ["net/minecraft/", "net/neoforged/", "com/mojang/", "thedarkcolour/kotlinforforge/neoforge/KotlinMod", "thedarkcolour/kotlinforforge/KotlinMod"]
         .iter()
         .any(|p| owner.starts_with(p))
+}
+
+/// The language loader a jar's mods name (`modLoader`: `javafml`, `kotlinforforge`...).
+pub fn mod_loader(jar: &Path) -> Option<String> {
+    let text = mods_toml(jar)?;
+    text.lines().find_map(|l| {
+        let (k, v) = l.split_once('=')?;
+        (k.trim() == "modLoader").then(|| bundle::toml_string(v).to_owned())
+    })
+}
+
+/// Whether a jar, or a jar it bundles, declares mod `id`: the jar that provides a language loader
+/// (Kotlin for Forge's `kotlinforforge`) declares it from a jar inside.
+pub fn provides(jar: &Path, id: &str) -> bool {
+    fn declares<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, id: &str) -> bool {
+        ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"].iter().any(|name| {
+            let Ok(mut e) = zip.by_name(name) else { return false };
+            let mut text = String::new();
+            e.read_to_string(&mut text).is_ok()
+                && text.lines().any(|l| l.split_once('=').is_some_and(|(k, v)| k.trim() == "modId" && bundle::toml_string(v) == id))
+        })
+    }
+    let Ok(mut zip) = std::fs::File::open(jar).map_err(|_| ()).and_then(|f| zip::ZipArchive::new(f).map_err(|_| ())) else {
+        return false;
+    };
+    declares(&mut zip, id)
+        || nested_jars(&mut zip).into_iter().any(|b| zip::ZipArchive::new(std::io::Cursor::new(b)).is_ok_and(|mut z| declares(&mut z, id)))
+}
+
+/// The jars of `pack` that provide the language loaders `group`'s mods use other than Java's
+/// (Kotlin for Forge for a Kotlin mod): their code runs as the libraries of those mods.
+pub fn language_libraries(group: &[&Path], pack: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for loader in group.iter().filter_map(|j| mod_loader(j)) {
+        if matches!(loader.as_str(), "javafml" | "lowcodefml" | "minecraft") {
+            continue;
+        }
+        if let Some(j) = pack.iter().find(|j| !group.contains(&j.as_path()) && provides(j, &loader))
+            && !out.contains(j)
+        {
+            out.push(j.clone());
+        }
+    }
+    out
 }
 
 /// The jars a jar bundles for NeoForge's jar-in-jar, as bytes: each `.jar` under
@@ -104,8 +151,28 @@ pub fn classes(jar: &Path) -> Result<Vec<ClassFile>, String> {
 }
 
 /// Every class of `jars` as one program (a mod with the mods that build on it, each with the
-/// libraries it bundles). A class an earlier jar has wins.
+/// libraries it bundles) that it can run ([`program_of`]). A class an earlier jar has wins.
 pub fn classes_of(jars: &[&Path]) -> Result<Vec<ClassFile>, String> {
+    Ok(program_of(jars, &[])?.0)
+}
+
+/// Whether a jar declares a mod (`[[mods]]` in its `META-INF/neoforge.mods.toml`, or Forge's older
+/// `mods.toml`): a jar-in-jar jar that does is a mod FML loads too, one that doesn't is a library.
+fn declares_mod<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> bool {
+    ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"].iter().any(|name| {
+        let Ok(mut e) = zip.by_name(name) else { return false };
+        let mut text = String::new();
+        e.read_to_string(&mut text).is_ok() && text.lines().any(|l| l.trim() == "[[mods]]")
+    })
+}
+
+/// [`classes_of`], with how many classes the libraries have and how many of them the program
+/// keeps: every class of a mod (a jar's own, or a bundled jar's that declares a mod), and those of
+/// the libraries (the jars' bundled jars that declare none, and all of `libraries`, the jars of
+/// their language loaders) that the classes it keeps reach ([`ClassFile::named_classes`]), with
+/// the implementations a reached service interface lists. What the runtime provides
+/// ([`is_api`]) stays out.
+pub fn program_of(jars: &[&Path], libraries: &[&Path]) -> Result<(Vec<ClassFile>, usize, usize), String> {
     let mut out = Vec::new();
     let mut have = std::collections::HashSet::new();
     let mut nested = Vec::new();
@@ -115,12 +182,44 @@ pub fn classes_of(jars: &[&Path]) -> Result<Vec<ClassFile>, String> {
         zip_classes(&mut zip, &mut have, &mut out);
         nested.extend(nested_jars(&mut zip));
     }
+    let mut library = std::collections::HashSet::new();
     for b in nested {
         if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) {
+            let from = out.len();
             zip_classes(&mut inner, &mut have, &mut out);
+            if !declares_mod(&mut inner) {
+                library.extend(out[from..].iter().map(|c| c.name.clone()));
+            }
         }
     }
-    Ok(out)
+    for jar in libraries {
+        let f = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
+        let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", jar.display()))?;
+        let from = out.len();
+        zip_classes(&mut zip, &mut have, &mut out);
+        for b in nested_jars(&mut zip) {
+            if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) {
+                zip_classes(&mut inner, &mut have, &mut out);
+            }
+        }
+        library.extend(out[from..].iter().map(|c| c.name.clone()));
+    }
+    let all: Vec<&Path> = jars.iter().chain(libraries).copied().collect();
+    let services = services_of(&all)?;
+    let mut reached = reach::reach(&out, &library, &services, &is_api);
+    let kept = reached.len();
+    let program = out
+        .into_iter()
+        .filter_map(|mut c| {
+            if !library.contains(&c.name) {
+                return Some(c);
+            }
+            let run = reached.remove(&c.name)?;
+            c.methods.retain(|m| m.code.is_none() || run.contains(&(m.name.clone(), m.desc.clone())));
+            Some(c)
+        })
+        .collect();
+    Ok((program, library.len(), kept))
 }
 
 /// `META-INF/services` of a jar and the jars it bundles: interface → implementations, in

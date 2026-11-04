@@ -153,15 +153,22 @@ fn groups(jars: &[PathBuf]) -> Vec<Vec<PathBuf>> {
 /// plate): its content mod goes to `horizon-mods/` with the data of `carried(jar)`, the jar's
 /// carry-over ([`check::check`]'s, made here when not given), and stands over the carry-over's. Any
 /// other mod's content mod goes there only when nothing else is there. What each jar became, by jar.
-fn translate(group: &[PathBuf], game: &Path, carried: &dyn Fn(&Path) -> Option<PathBuf>, log: Log) -> Vec<(PathBuf, Translated)> {
+/// A mod in another language (Kotlin) runs with what its language loader's jar in `pack` carries
+/// (Kotlin's library, Kotlin for Forge's), as far as the group's code reaches into it.
+fn translate(group: &[PathBuf], pack: &[PathBuf], game: &Path, carried: &dyn Fn(&Path) -> Option<PathBuf>, log: Log) -> Vec<(PathBuf, Translated)> {
     let jars: Vec<&Path> = group.iter().map(PathBuf::as_path).collect();
     let Some(id) = jars.first().and_then(|j| horizon_mod_translator::bundle::mod_id(j)) else {
         return Vec::new();
     };
-    let classes = match horizon_mod_translator::classes_of(&jars) {
-        Ok(c) if !c.is_empty() => c,
+    let libraries = horizon_mod_translator::language_libraries(&jars, pack);
+    let libraries: Vec<&Path> = libraries.iter().map(PathBuf::as_path).collect();
+    let classes = match horizon_mod_translator::program_of(&jars, &libraries) {
+        Ok((c, _, _)) if !c.is_empty() => c,
         _ => return Vec::new(),
     };
+    for l in &libraries {
+        log(format!("{id}: with what its language loader carries, from {}", l.display()));
+    }
     let natives = game.join("horizon-native-mods");
     let out = natives.join(format!("{id}_translated"));
     let _ = fs::remove_dir_all(&out);
@@ -295,7 +302,7 @@ fn jars(jars: &[PathBuf], game: &Path, work: &Path, log: Log) -> Result<Outcome,
     let carried = |j: &Path| checks.iter().find(|(jar, _, _, c)| jar == j && c.is_ok()).map(|(_, _, carry, _)| carry.clone());
     let mut translated: Vec<(PathBuf, Translated)> = Vec::new();
     for group in groups(jars) {
-        translated.extend(translate(&group, game, &carried, log));
+        translated.extend(translate(&group, jars, game, &carried, log));
     }
     let mut carries = Vec::new();
     let mut checked = Vec::new();
@@ -391,7 +398,7 @@ fn pack(
             .collect();
         jars.sort();
         jars.dedup();
-        let translated: Vec<(PathBuf, Translated)> = groups(&jars).iter().flat_map(|g| translate(g, game, &|_| None, log)).collect();
+        let translated: Vec<(PathBuf, Translated)> = groups(&jars).iter().flat_map(|g| translate(g, &jars, game, &|_| None, log)).collect();
         for (jar, t) in translated {
             let id = horizon_mod_translator::bundle::mod_id(&jar).unwrap_or_default();
             match out.mods.iter_mut().find(|m| m.mod_id == id) {
