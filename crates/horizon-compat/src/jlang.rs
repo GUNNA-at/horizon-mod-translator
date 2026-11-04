@@ -200,6 +200,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             "compare" => V::I(a(0).i().cmp(&a(1).i()) as i32),
             "hashCode" if desc.starts_with("(Z)") => V::I(if a(0).i() != 0 { 1231 } else { 1237 }),
+            "hashCode" => V::I(if bool_value(rt, a(0)) == Some(1) { 1231 } else { 1237 }),
+            // Either side may be a boolean held raw (a method reference's result), as
+            // `booleanValue` takes it.
+            "equals" => {
+                let (x, y) = (bool_value(rt, a(0)), bool_value(rt, a(1)));
+                V::I((x.is_some() && x == y) as i32)
+            }
             "logicalAnd" => V::I(a(0).i() & a(1).i()),
             "logicalOr" => V::I(a(0).i() | a(1).i()),
             "logicalXor" => V::I(a(0).i() ^ a(1).i()),
@@ -1099,6 +1106,15 @@ fn mutable(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
     })
 }
 
+/// A `Boolean`'s value, boxed or held raw; None for anything else.
+fn bool_value(rt: &Rt, v: V) -> Option<i32> {
+    match v {
+        V::R(_) => (rt.class_of(v) == "java/lang/Boolean").then(|| (rt.get_field(v, "value").i() != 0) as i32),
+        V::I(i) => Some((i != 0) as i32),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,6 +1139,19 @@ mod tests {
         let dot = rt.string("\\.");
         let parts = c(&mut rt, "java/lang/String.split.(Ljava/lang/String;)[Ljava/lang/String;", &[s, dot]);
         assert_eq!(crate::jutil::elements(&rt, parts).len(), 4);
+    }
+
+    /// `Boolean.TRUE.equals(x)` where `x` came back raw from a method reference used as a
+    /// `Function` (Java would have boxed it).
+    #[test]
+    fn a_boolean_equals_its_value_boxed_or_raw() {
+        let mut rt = Rt::new();
+        let yes = crate::api_common::boolean(&mut rt, true);
+        let eq = |rt: &mut Rt, x: V, y: V| c(rt, "java/lang/Boolean.equals.(Ljava/lang/Object;)Z", &[x, y]);
+        assert_eq!((eq(&mut rt, yes, V::I(1)), eq(&mut rt, yes, V::I(0))), (V::I(1), V::I(0)));
+        let text = rt.string("true");
+        assert_eq!((eq(&mut rt, yes, text), eq(&mut rt, yes, V::NULL)), (V::I(0), V::I(0)));
+        assert_eq!(c(&mut rt, "java/lang/Boolean.hashCode.()I", &[yes]), V::I(1231));
     }
 
     #[test]
