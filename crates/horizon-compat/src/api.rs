@@ -423,7 +423,7 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 32] = [
+const CHAIN: [Module; 35] = [
     mutable_pos,
     crate::sounds::call,
     crate::particles::call,
@@ -445,6 +445,9 @@ const CHAIN: [Module; 32] = [
     crate::blocks::call,
     crate::shapes::call,
     crate::events::call,
+    crate::menus::call,
+    crate::container_screens::call,
+    crate::widgets::call,
     crate::screens::call,
     crate::gui::call,
     crate::neo::call,
@@ -461,7 +464,7 @@ const CHAIN: [Module; 32] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 32] = [
+const CLAIMS: [Claims; 35] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::sounds::claims,
     crate::particles::claims,
@@ -483,6 +486,9 @@ const CLAIMS: [Claims; 32] = [
     crate::blocks::claims,
     crate::shapes::claims,
     crate::events::claims,
+    crate::menus::claims,
+    crate::container_screens::claims,
+    crate::widgets::claims,
     crate::screens::claims,
     crate::gui::claims,
     crate::neo::claims,
@@ -497,7 +503,7 @@ const CLAIMS: [Claims; 32] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 32] = [
+const MODULE_NAMES: [&str; 35] = [
     "mutable_pos",
     "sounds",
     "particles",
@@ -519,6 +525,9 @@ const MODULE_NAMES: [&str; 32] = [
     "blocks",
     "shapes",
     "events",
+    "menus",
+    "container_screens",
+    "widgets",
     "screens",
     "gui",
     "neo",
@@ -534,19 +543,19 @@ const MODULE_NAMES: [&str; 32] = [
 
 thread_local! {
     /// By key (its address and length): the modules of [`CHAIN`] that claim it, as bits.
-    static CLAIMED: std::cell::RefCell<crate::HashMap<(usize, usize), u32>> = std::cell::RefCell::new(crate::HashMap::default());
+    static CLAIMED: std::cell::RefCell<crate::HashMap<(usize, usize), u64>> = std::cell::RefCell::new(crate::HashMap::default());
 }
 
 /// The modules of [`CHAIN`] that claim `key`, as bits (all of them for a key that isn't
 /// `owner.name.desc`).
-fn claimed(key: &'static str) -> u32 {
+fn claimed(key: &'static str) -> u64 {
     let id = (key.as_ptr() as usize, key.len());
     if let Some(bits) = CLAIMED.with(|c| c.borrow().get(&id).copied()) {
         return bits;
     }
     let bits = match crate::parts(key) {
-        Some((owner, name, desc)) => CLAIMS.iter().enumerate().filter(|(_, claims)| claims(owner, name, desc)).fold(0, |bits, (i, _)| bits | 1 << i),
-        None => u32::MAX,
+        Some((owner, name, desc)) => CLAIMS.iter().enumerate().filter(|(_, claims)| claims(owner, name, desc)).fold(0u64, |bits, (i, _)| bits | 1 << i),
+        None => u64::MAX,
     };
     CLAIMED.with(|c| c.borrow_mut().insert(id, bits));
     bits
@@ -579,10 +588,10 @@ fn chain(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 
 /// [`chain`] past every module, telling (or, in tests, failing) when one that answers doesn't
 /// claim the key: the claims would then have kept the call from it.
-fn checked_chain(rt: &mut Rt, key: &'static str, args: &[V], claimed: u32) -> Option<V> {
+fn checked_chain(rt: &mut Rt, key: &'static str, args: &[V], claimed: u64) -> Option<V> {
     for (i, module) in CHAIN.iter().enumerate() {
         if let Some(v) = module(rt, key, args) {
-            if claimed & (1 << i) == 0 {
+            if claimed & (1u64 << i) == 0 {
                 let message = format!("horizon-compat: {} answered {key} without claiming it", MODULE_NAMES[i]);
                 assert!(!cfg!(test), "{message}");
                 thread_local! {
@@ -1239,6 +1248,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::events::get_static(rt, o, f))
             .or_else(|| crate::gui::get_static(rt, o, f))
             .or_else(|| crate::screens::get_static(rt, o, f))
+            .or_else(|| crate::menus::get_static(rt, o, f))
     {
         return v;
     }

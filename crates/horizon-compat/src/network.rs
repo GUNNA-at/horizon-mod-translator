@@ -1099,7 +1099,11 @@ pub fn receive(rt: &mut Rt, channel: &str, data: &[u8], player: Option<u128>) ->
 
 /// The client's own player (`Minecraft.player`, `IPayloadContext.player()` on the client).
 pub fn local_player(rt: &mut Rt) -> V {
-    rt.intern("compat:local-player".into(), |rt| rt.new_object("net/minecraft/client/player/LocalPlayer"))
+    rt.intern("compat:local-player".into(), |rt| {
+        let p = rt.new_object("net/minecraft/client/player/LocalPlayer");
+        crate::menus::init_player(rt, p);
+        p
+    })
 }
 
 /// A payload handler's `IPayloadContext`: from `player` (a server's runtime), or from the server.
@@ -1107,9 +1111,8 @@ fn context(rt: &mut Rt, player: Option<u128>) -> V {
     let ctx = rt.new_object(CONTEXT);
     let p = match player {
         Some(uuid) => {
-            let p = rt.new_object("net/minecraft/server/level/ServerPlayer");
-            let u = crate::tags::uuid(rt, (uuid >> 64) as i64, uuid as i64);
-            rt.put_field(p, "$uuid", u);
+            // The same object in every hook, so what the menus keep on it (`containerMenu`) stays.
+            let p = crate::menus::server_player(rt, uuid);
             // Where the sender stands, when the server knows (a packet's reach checks:
             // `canInteractWithBlock`).
             if let Some((_, at)) = rt.host().and_then(|h| h.players().into_iter().find(|(id, _)| *id == uuid)) {
@@ -1129,7 +1132,7 @@ fn context(rt: &mut Rt, player: Option<u128>) -> V {
 }
 
 /// The player a `ServerPlayer` object stands for, when it says (a payload's sender does).
-fn player_uuid(rt: &Rt, p: V) -> Option<u128> {
+pub(crate) fn player_uuid(rt: &Rt, p: V) -> Option<u128> {
     let u = rt.get_field(p, "$uuid");
     (u.r() != 0).then(|| uuid_u128(rt, u))
 }

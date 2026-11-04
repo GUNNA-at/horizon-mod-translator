@@ -809,6 +809,8 @@ pub fn fire_client_setup(rt: &mut Rt) {
     post(rt, REGISTER_RENDERERS, ev);
     let ev = rt.new_object(CLIENT_SETUP);
     post(rt, CLIENT_SETUP, ev);
+    // The mods' menu types get their screens (`MenuScreens.register` through the event).
+    crate::menus::register_screens(rt);
     // The HUD's layers: vanilla's, and where each mod puts its own among them.
     let ev = rt.new_object(crate::gui::REGISTER_LAYERS);
     post(rt, crate::gui::REGISTER_LAYERS, ev);

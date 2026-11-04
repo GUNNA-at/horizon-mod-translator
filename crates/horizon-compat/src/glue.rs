@@ -857,13 +857,40 @@ pub fn payload_from_server(rt: &mut Rt, host: &mut dyn Host, channel: &str, data
         rt.with_host(host, |rt| crate::mod_entities::receive(rt, data));
         return true;
     }
+    if channel == crate::menus::CHANNEL {
+        rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| crate::menus::receive_client(rt, data)));
+        return true;
+    }
     rt.with_host(host, |rt| crate::network::receive(rt, channel, data, None))
 }
 
-/// A mod payload `player`'s client sent the server (`native_net_from_client`), to its handler.
+/// A mod payload `player`'s client sent the server (`native_net_from_client`), or a message about
+/// its menu. Once the game calls [`player_tick`], it waits for that player's tick, where the host
+/// acts for them (their inventory, where they stand); before, it runs now. False for a channel no
+/// mod registered.
 pub fn payload_from_client(rt: &mut Rt, host: &mut dyn Host, player: u128, channel: &str, data: &[u8]) -> bool {
     rt.safe_point();
-    rt.with_host(host, |rt| crate::network::receive(rt, channel, data, Some(player)))
+    if channel != crate::menus::CHANNEL && !rt.interned.contains_key(&format!("payload/{channel}")) {
+        return false;
+    }
+    if crate::menus::player_ticks_seen(rt) {
+        crate::menus::queue(rt, player, channel, data);
+        return true;
+    }
+    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| crate::menus::handle_from_client(rt, player, channel, data)))
+}
+
+/// A player's tick on the server (`ServerPlayer.tick`), `host` acting for them: what their client
+/// sent since runs, and the menu they have open keeps their client in step and closes when it
+/// may no longer stay open ([`crate::menus::player_tick`]).
+pub fn player_tick(rt: &mut Rt, host: &mut dyn Host) {
+    rt.safe_point();
+    crate::menus::seen_player_tick(rt);
+    let Some(uuid) = host.player_id() else { return };
+    if !crate::menus::has_work(rt, uuid) {
+        return;
+    }
+    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| crate::menus::player_tick(rt, uuid)));
 }
 
 /// The mods' HUD layers at the game's layer `layer` (`minecraft:hotbar`), drawn on `host`'s GUI

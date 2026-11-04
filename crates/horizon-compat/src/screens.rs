@@ -221,6 +221,9 @@ fn sync(rt: &mut Rt) {
         return;
     }
     if rt.host().is_some_and(|h| !h.screen_open()) {
+        // A menu open behind the screen closes with it; the server hears (Escape, the game's own
+        // screen over the mod's).
+        crate::menus::screen_gone(rt);
         set_screen(rt, V::NULL);
     }
 }
@@ -437,8 +440,20 @@ fn children(rt: &mut Rt, this: V) -> Vec<V> {
     crate::jutil::elements(rt, l)
 }
 
-/// Vanilla `Screen`'s own methods (and what it inherits from `AbstractContainerEventHandler`).
+/// A screen's method: a container screen's own first ([`crate::container_screens`]), then
+/// `Screen`'s.
 fn screen_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    if rt.instance_of(arg(args, 0), crate::container_screens::CONTAINER_SCREEN)
+        && let Some(v) = crate::container_screens::own(rt, name, desc, args)
+    {
+        return Some(v);
+    }
+    screen_base(rt, name, desc, args)
+}
+
+/// Vanilla `Screen`'s own methods (and what it inherits from `AbstractContainerEventHandler`): what
+/// a subclass's `super` reaches.
+pub(crate) fn screen_base(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     let this = a(0);
     Some(match (name, desc) {
@@ -699,6 +714,9 @@ fn child_at(rt: &mut Rt, this: V, x: V, y: V) -> V {
 /// `GuiEventListener`'s defaults, for a listener that is neither a screen nor a widget.
 fn listener_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let this = arg(args, 0);
+    if let Some(v) = crate::widgets::own(rt, name, desc, args) {
+        return Some(v);
+    }
     if rt.instance_of(this, SCREEN) {
         return screen_call(rt, name, desc, args);
     }
@@ -820,7 +838,7 @@ fn mouse_button(name: &str) -> Option<i32> {
     }
 }
 
-fn mouse_name(button: i32) -> String {
+pub(crate) fn mouse_name(button: i32) -> String {
     match button {
         0 => "key.mouse.left".into(),
         1 => "key.mouse.right".into(),
@@ -830,7 +848,7 @@ fn mouse_name(button: i32) -> String {
 }
 
 /// Whether the left or right `which` key (`shift`, `control`, `alt`, `win`) is held.
-fn held_either(rt: &Rt, which: &str) -> bool {
+pub(crate) fn held_either(rt: &Rt, which: &str) -> bool {
     rt.host().is_some_and(|h| h.key_held(&format!("key.keyboard.left.{which}")) || h.key_held(&format!("key.keyboard.right.{which}")))
 }
 
@@ -895,7 +913,7 @@ fn binding(rt: &Rt, k: V) -> (String, bool) {
 }
 
 /// The key bound to mapping `name` (`key.use`) and whether it is held, as the host says.
-fn mapping_binding(rt: &Rt, name: &str) -> (String, bool) {
+pub(crate) fn mapping_binding(rt: &Rt, name: &str) -> (String, bool) {
     rt.host().and_then(|h| h.mapping(name)).unwrap_or_else(|| ("key.keyboard.unknown".into(), false))
 }
 
@@ -955,6 +973,12 @@ fn key_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
             V::I((a(1).i() != -1 && key_name(a(1).i()).is_some_and(|n| n == bound)) as i32)
         }
         (KEY_MAPPING, "matchesMouse") => V::I((binding(rt, a(0)).0 == mouse_name(a(1).i())) as i32),
+        // NeoForge's: the key (an `InputConstants.Key`) is the one bound.
+        (KEY_MAPPING, "isActiveAndMatches") => {
+            let bound = binding(rt, a(0)).0;
+            let key = rt.str_of(rt.get_field(a(1), "$name")).unwrap_or("key.keyboard.unknown");
+            V::I((key != "key.keyboard.unknown" && key == bound) as i32)
+        }
         (KEY_MAPPING, "isUnbound") => V::I((binding(rt, a(0)).0 == "key.keyboard.unknown") as i32),
         (KEY_MAPPING, "getKey" | "getDefaultKey") => {
             let bound = binding(rt, a(0)).0;

@@ -1237,6 +1237,35 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `getSelected()` with the stack it opened on. What a mod does to it (count, components, damage) is
     written back after the hook. Stacks on the wire (`network::put_stack`/`read_stack`, shared by mod
     payloads and menus) carry their components and damage.
+  - [x] 2026-11-04 Container menus and their screens, natively (`menus.rs`, `container_screens.rs`,
+    `widgets.rs`). Server: `Player.openMenu` (vanilla's, NeoForge's with extra data or a `BlockPos`) closes
+    the old menu, makes the provider's (`createMenu`), sends OPEN (type, id, title JSON, extra data) and
+    then the contents over `horizon_compat:menu`, and keeps them in step as vanilla's synchronizer does
+    (`broadcastChanges`: listeners, then what the client doesn't have, one UPDATE message for all of it,
+    split above 24 000 bytes; data slots as shorts). Clicks are vanilla's `doClick`, ported whole:
+    pickup and place, right-click halves, shift with the mod's `quickMoveStack` and `moveItemStackTo`,
+    drags (quick craft), double-click gather, hotbar and off-hand swaps, clone, throw with drops from the
+    eyes. `Slot`, NeoForge's `SlotItemHandler`, the player's `Inventory` (each of the 41 slots through
+    `hand::slot_stack`, vanilla's `add` / `placeItemBackInInventory`), `SimpleContainer`, `DataSlot`,
+    `ContainerLevelAccess`, `MenuType` (NeoForge's `IMenuTypeExtension.create`), `SimpleMenuProvider`.
+    What a client sends waits for its player's tick (`glue::player_tick`, new binding), where the host
+    acts for that player: CLICK runs as `handleContainerClick` (stale state id: full state back),
+    BUTTON, CLOSED; then `broadcastChanges` and `stillValid` (closes for both when false). Before
+    anything runs, every inventory slot is reached, so `removed()`'s `saveData` into the held stack
+    reaches the game. Client: OPEN makes the menu with the type's factory and the screen the mod
+    registered (`RegisterMenuScreensEvent`, posted after client setup), clicks are predicted and sent
+    with the changed slots (`MultiPlayerGameMode.handleInventoryMouseClick`), UPDATE/CLOSE apply.
+    `AbstractContainerScreen` is vanilla's: layout, `renderBg`, slots, highlight, labels, the carried
+    stack, tooltips, mouse and keys (inventory key, hotbar keys, pick, drop). `AbstractWidget`,
+    `AbstractButton`, `Button` (+ builder), `Tooltip`. `ServerPlayer` objects are now one per player
+    (`menus::server_player`), also for payload contexts and `acting_player`. Dispatch chain: 35 modules,
+    claim bits u64. Tests: two runtimes (server and client hosts) open Create's filter shape (inventory
+    + 2 ghost slots over an `ItemStackHandler`), draw it, click, place, sync a server-side change,
+    close with Escape (saved into the hand), close when the stack leaves the hand; vanilla click counts
+    (right-click 10 → 5/5, drag 5 over 3 → 1 each + 2, gather, shift onto 60 → 64 + 6, throw 64, swap).
+    Gaps: vanilla's own menus (`ChestMenu`...) don't open yet (no menu type of a mod's); `Player.drop`
+    loses components; no `ItemStackedOnOtherEvent` / `PlayerContainerEvent`; touchscreen mode;
+    `Inventory.items` / `armor` lists aren't fields.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

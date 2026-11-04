@@ -49,6 +49,14 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
             is_widget_class(c)
         }
         "net/minecraft/client/gui/components/AbstractButton" => matches!(c, "net/minecraft/client/gui/components/Button" | "net/minecraft/client/gui/components/ImageButton" | "net/minecraft/client/gui/components/Checkbox" | "net/minecraft/client/gui/components/CycleButton" | "net/minecraft/client/gui/components/PlainTextButton"),
+        // Menus: NeoForge's slot of an item handler is a `Slot`, the inventory's menu a menu, the
+        // player's inventory and `SimpleContainer` containers.
+        "net/minecraft/world/inventory/Slot" => c == crate::menus::HANDLER_SLOT,
+        "net/minecraft/world/inventory/AbstractContainerMenu" => c == crate::menus::INVENTORY_MENU,
+        "net/minecraft/world/Container" | "net/minecraft/world/Clearable" => matches!(c, crate::menus::INVENTORY | crate::menus::SIMPLE_CONTAINER),
+        "net/minecraft/world/MenuProvider" | "net/minecraft/world/inventory/MenuConstructor" => c == "net/minecraft/world/SimpleMenuProvider",
+        "net/minecraft/world/inventory/ContainerData" => c == "net/minecraft/world/inventory/SimpleContainerData",
+        "net/minecraft/client/gui/screens/inventory/MenuAccess" => c == "net/minecraft/client/gui/screens/inventory/AbstractContainerScreen",
         "java/lang/Throwable" => c.starts_with("java/lang/") && (c.ends_with("Exception") || c.ends_with("Error")),
         "java/lang/Exception" => c.starts_with("java/lang/") && c.ends_with("Exception"),
         "java/lang/ReflectiveOperationException" => matches!(
@@ -102,8 +110,10 @@ fn player_eye_height(rt: &Rt) -> f64 {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 2] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 4] = [
     ("net/minecraft/world/phys/HitResult$Type", &["MISS", "BLOCK", "ENTITY"]),
+    (crate::menus::CLICK_TYPE, &crate::menus::CLICK_TYPES),
+    ("net/minecraft/world/inventory/ClickAction", &["PRIMARY", "SECONDARY"]),
     (
         POSE,
         &[
@@ -1147,27 +1157,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             crate::hand::replace(rt, hand, a(2));
             V::Void
         }
-        (o, "getInventory") if is_player(o) => {
-            let inv = rt.new_object(INVENTORY);
-            rt.put_field(inv, "player", a(0));
-            // The hooks know the hands, not the hotbar slot: the main hand's stack is slot 0's.
-            rt.put_field(inv, "selected", V::I(0));
-            inv
-        }
-        (INVENTORY, "player") => rt.get_field(a(0), "player"),
-        // `Inventory.getItem(slot)`: the hands and what the player wears, by vanilla's slot numbers
-        // (the selected hotbar slot, 36 to 39 the feet to the head, 40 the off hand); the other
-        // slots read as empty.
-        (INVENTORY, "getItem") if desc == "(I)Lnet/minecraft/world/item/ItemStack;" => {
-            let selected = rt.get_field(a(0), "selected").i();
-            match a(1).i() {
-                i if i == selected => crate::hand::stack(rt, crate::hand::MAIN),
-                40 => crate::hand::stack(rt, crate::hand::OFF),
-                i @ 36..=39 => crate::hand::worn(rt, (39 - i) as u8),
-                _ => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
-            }
-        }
-        (INVENTORY, "getSelected") => crate::hand::stack(rt, crate::hand::MAIN),
         // `ItemInHandRenderer`: the stacks the first person hands show (`mainHandItem`,
         // `offHandItem`: the hands' own; the game draws them itself).
         ("net/minecraft/client/renderer/entity/EntityRenderDispatcher", "getItemInHandRenderer") => {
@@ -1176,14 +1165,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.put_field(r, "mainHandItem", main);
             rt.put_field(r, "offHandItem", off);
             r
-        }
-        (INVENTORY, "getContainerSize") => V::I(41),
-        // Into the player's inventory, the stack shrunk by what went in. What doesn't fit stays
-        // in the stack (vanilla's `placeItemBackInInventory` would drop it at the player's feet).
-        (INVENTORY, "placeItemBackInInventory" | "add") => {
-            let stack = if desc.starts_with("(I") { a(2) } else { a(1) };
-            let all = give_player(rt, stack);
-            if name == "placeItemBackInInventory" { V::Void } else { V::I(all as i32) }
         }
         (o, "addItem") if is_player(o) => V::I(give_player(rt, a(1)) as i32),
         // An item's `useOn` that reaches vanilla's `Item`: nothing happens.
@@ -2120,8 +2101,6 @@ pub(crate) fn component_from_json(rt: &mut Rt, j: &serde_json::Value) -> V {
     }
 }
 
-const INVENTORY: &str = "net/minecraft/world/entity/player/Inventory";
-
 const LOCAL_PLAYER: &str = "net/minecraft/client/player/LocalPlayer";
 const FOOD_DATA: &str = "net/minecraft/world/food/FoodData";
 
@@ -2134,7 +2113,7 @@ pub(crate) fn is_player(owner: &str) -> bool {
 
 /// Gives the acting player `stack` (where it fits, as `Inventory.add` places it), shrinking it by
 /// what went in; whether all of it did.
-fn give_player(rt: &mut Rt, stack: V) -> bool {
+pub(crate) fn give_player(rt: &mut Rt, stack: V) -> bool {
     if stack.r() == 0 || stack_empty(rt, stack) {
         return true;
     }
@@ -2644,7 +2623,16 @@ pub fn use_on_context(rt: &mut Rt, p: &crate::glue::Placement) -> V {
 /// The player a server hook acts for (`ServerPlayer`), where the game says they stand and look
 /// (`Host::player_place`), so their position, eyes and look answer.
 pub(crate) fn acting_player(rt: &mut Rt) -> V {
-    let player = rt.new_object(SERVER_PLAYER);
+    // A server's player is one object for as long as the runtime runs (the menu it has open stays on
+    // it); a hook with no player to name gets one of its own.
+    let player = match rt.host().and_then(|h| h.player_id()) {
+        Some(uuid) if !crate::neo::is_client(rt) => crate::menus::server_player(rt, uuid),
+        _ => {
+            let p = rt.new_object(SERVER_PLAYER);
+            crate::menus::init_player(rt, p);
+            p
+        }
+    };
     if let Some(([x, y, z], yaw, pitch)) = rt.host().and_then(|h| h.player_place()) {
         rt.put_field(player, "$x", V::D(x));
         rt.put_field(player, "$y", V::D(y));
