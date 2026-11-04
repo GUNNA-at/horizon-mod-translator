@@ -1667,9 +1667,31 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     game does itself), Gson (`Create.GSON`), `Pattern.compile` (Flywheel's shader compiler),
     Copycats' cat variant (`Holder.Reference.createStandAlone`), `ItemStack.getComponentsPatch`,
     `FoodProperties.DIRECT_CODEC`, `OreConfiguration.TargetBlockState.CODEC`, Create Connected's
-    server config read on the client before it loads (Java throws and its `safeGetter` catches;
-    here a getfield on null gives null). Build note: the engine's rustc peaks at ~6.6 GB and macOS
+    server config read on the client before it loads (Java throws a `NullPointerException` and its
+    `safeGetter` catches it; the runtime throws none: reading a field of null gives no value).
+    Build note: the engine's rustc peaks at ~6.6 GB and macOS
     swap (on the disk) grows ~5 GB, so the watchdog killed one build at < 4 GB free: keep 15 GB.
+  - 2026-11-04 The pack's 28 mods again (`scratchpad/lt`, round 5, on a snapshot of the runtime
+    at f168990): all 28 load to the end; distinct misses 350 → 239, kinds summed per mod 757 →
+    454. Calls went up (10K → 158K) because FramedBlocks now gets as far as its state cache, run
+    once per block state: vanilla's `Tuple` (48K `getA`/`getB`) and `framedblocks$initCache`, a
+    method FramedBlocks' mixin adds to vanilla's `BlockStateBase` (38K). By breadth (mods hitting
+    it): `ItemProperties.register` 7, `LootItemConditionalFunction.commonFields` 5,
+    `GlobalPos.STREAM_CODEC` 4, `Minecraft.getResourceManager` 4, then at 3: NeoForge's 7-field
+    `composite`, `FMLConfig.defaultConfigPath`, `LevelResource`, `Ingredient.CONTENTS_STREAM_CODEC`,
+    `FeatureFlags.VANILLA_SET`, `BlockTags`/`ItemTags.create`, `GlobalPos.CODEC`,
+    `ModelLayerLocation`, `SimpleCriterionTrigger`'s constructor, `Path.resolve`,
+    `Class.getClassLoader`. Mapped now:
+    - NeoForge's stream codecs: `enumCodec` (the ordinal as a var int; an ordinal past the
+      constants throws `DecoderException` as NeoForge's does), `lazy` (the supplier asked once,
+      on first use), `registryKey`, `uncheckedUnit`, `connectionAware` (the codec itself: both
+      ends are the same runtime), `UNBOUNDED_BYTE_ARRAY`. Test
+      `network::tests::neoforges_codecs_write_what_neoforge_writes`.
+    - A mod class's `super()` into an API class's no-argument constructor that the runtime has
+      nothing to set up for (`SimpleCriterionTrigger`...) is done, not a miss; the object's later
+      API calls still count if unmapped.
+    - `DeferredRegister.getNamespace`, `addAlias` (kept as `alias/<registry>/<from>`),
+      `FMLConfig.defaultConfigPath` (`defaultconfigs`, FML's default).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

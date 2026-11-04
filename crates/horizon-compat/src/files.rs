@@ -15,6 +15,7 @@ const FILES: &str = "java/nio/file/Files";
 const FILE: &str = "java/io/File";
 const FILE_TIME: &str = "java/nio/file/attribute/FileTime";
 const FML_PATHS: &str = "net/neoforged/fml/loading/FMLPaths";
+const FML_CONFIG: &str = "net/neoforged/fml/loading/FMLConfig";
 /// FML's folders by constant, in its order: (name, path in the game's folder, a folder FML makes
 /// when it starts).
 const FML_FOLDERS: [(&str, &str, bool); 4] = [("GAMEDIR", "", true), ("MODSDIR", "mods", true), ("CONFIGDIR", "config", true), ("FMLCONFIG", "config/fml.toml", false)];
@@ -22,7 +23,7 @@ const FML_FOLDERS: [(&str, &str, bool); 4] = [("GAMEDIR", "", true), ("MODSDIR",
 pub const GAME_DIR: &str = "compat:game-dir";
 
 pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    matches!(owner, PATH | PATHS | FILES | FILE | FILE_TIME | FML_PATHS)
+    matches!(owner, PATH | PATHS | FILES | FILE | FILE_TIME | FML_PATHS | FML_CONFIG)
 }
 
 /// The game's folder.
@@ -625,6 +626,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             _ => None,
         },
+        // `fml.toml`'s `defaultConfigPath`, at FML's default: where a pack's default configs go.
+        FML_CONFIG if name == "defaultConfigPath" => Some(rt.string("defaultconfigs")),
         _ => None,
     }
 }

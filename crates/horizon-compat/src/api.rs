@@ -589,12 +589,25 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         _ => match chain(rt, key, args) {
             Some(v) => v,
+            None if plain_super_init(rt, key, args) => V::Void,
             None => {
                 crate::miss(rt, key);
                 V::Void
             }
         },
     }
+}
+
+/// A vanilla constructor without arguments that a mod class's constructor runs as its `super()`
+/// (`SimpleCriterionTrigger()`): what it would set is vanilla's own state, read only by vanilla's
+/// methods, which answer (or miss) on their own; nothing is lost by keeping none.
+fn plain_super_init(rt: &Rt, key: &str, args: &[V]) -> bool {
+    let Some(owner) = key.strip_suffix(".<init>.()V") else { return false };
+    (owner.starts_with("net/minecraft/") || owner.starts_with("net/neoforged/"))
+        && args.first().is_some_and(|&this| {
+            let class = rt.class_of(this);
+            class != owner && rt.supers.contains_key(class)
+        })
 }
 
 type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
@@ -1127,6 +1140,15 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             holder(rt, &registry, &id)
         }
         (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => V::Void, // (IEventBus)
+        (o, "getNamespace") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => rt.get_field(a(0), "$ns"),
+        // `addAlias(from, to)`: an old name that reads as the new one, as the registry's own.
+        (o, "addAlias") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
+            let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("unknown").to_owned();
+            let (from, to) = (crate::neo::location(rt, a(1)), crate::neo::location(rt, a(2)));
+            let to = rt.string(&to);
+            rt.interned.insert(format!("alias/{registry}/{from}"), to);
+            V::Void
+        }
         (o, "get" | "value") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
             let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned();
             if rt.registered.keys().all(|(_, n)| *n != id) {

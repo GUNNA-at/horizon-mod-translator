@@ -93,6 +93,13 @@ const FROM_CODEC: &str = "compat:stream/from_codec";
 const RESOURCE_KEY: &str = "compat:stream/resource_key";
 /// `ParticleTypes.STREAM_CODEC`: particle options ([`crate::particles::write_options`]).
 const PARTICLE: &str = "compat:stream/particle";
+/// NeoForge's `enumCodec(EnumClass)`: [the class]; a constant by its ordinal, a VarInt.
+const ENUM: &str = "compat:stream/enum";
+/// NeoForge's `lazy(supplier)`: [supplier]; the codec it gives, asked once, does the work.
+const LAZY: &str = "compat:stream/lazy";
+/// NeoForge's `registryKey()`: a registry's own key, by its location.
+const REGISTRY_KEY: &str = "compat:stream/registry_key";
+const NEO_CODECS: &str = "net/neoforged/neoforge/network/codec/NeoForgeStreamCodecs";
 /// `ByteBufCodecs.list()`, a `CodecOperation` (`codec.apply(list())`).
 const LIST_OP: &str = "compat:stream-op/list";
 
@@ -125,6 +132,22 @@ const COMPONENT: &str = "compat:stream/component";
 
 fn make(rt: &mut Rt, kind: &'static str, parts: Vec<V>) -> V {
     rt.alloc(kind, Data::Array(parts))
+}
+
+/// The codec a `lazy` one's supplier gives, asked the first time and kept in its parts.
+fn lazy_codec(rt: &mut Rt, lazy: V) -> V {
+    let parts = rt.captured(lazy);
+    if let Some(&made) = parts.get(1) {
+        return made;
+    }
+    let supplier = parts.first().copied().unwrap_or_default();
+    let made = rt.call_functional(SUPPLIER, supplier, &[]);
+    if rt.thrown.is_none()
+        && let Some(o) = rt.heap.get_mut(lazy.r() as usize)
+    {
+        o.data = Data::Array(vec![supplier, made]);
+    }
+    made
 }
 
 /// One object per codec constant, as Minecraft's are.
@@ -169,6 +192,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/neoforged/neoforge/fluids/FluidStack", "STREAM_CODEC" | "OPTIONAL_STREAM_CODEC") => FLUID_STACK,
         ("net/minecraft/network/chat/ComponentSerialization", "STREAM_CODEC" | "TRUSTED_STREAM_CODEC") => COMPONENT,
         ("net/minecraft/core/particles/ParticleTypes", "STREAM_CODEC") => PARTICLE,
+        // Its length a VarInt, as `BYTE_ARRAY`'s (only without the limit).
+        (NEO_CODECS, "UNBOUNDED_BYTE_ARRAY") => BYTES,
         // The block states' id map: block states travel by their text.
         ("net/minecraft/world/level/block/Block", "BLOCK_STATE_REGISTRY") => {
             return Some(rt.intern("compat:block-state-ids".into(), |rt| rt.new_object("net/minecraft/core/IdMapper")));
@@ -899,6 +924,19 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
             let s = text(rt, rt.get_field(value, "$text"));
             put_utf(rt, buf, &s);
         }
+        ENUM => {
+            let o = ordinal(rt, value);
+            put_var(rt, buf, o as u64);
+        }
+        LAZY => {
+            let c = lazy_codec(rt, c);
+            encode(rt, c, buf, value);
+        }
+        REGISTRY_KEY => {
+            let name = text(rt, value);
+            let location = if name.contains(':') { name } else { format!("minecraft:{name}") };
+            put_utf(rt, buf, &location);
+        }
         PARTICLE => {
             if let Err(e) = crate::particles::write_options(rt, buf, value) {
                 throw_with(rt, "io/netty/handler/codec/EncoderException", &format!("Failed to encode: {e}"));
@@ -1077,6 +1115,25 @@ fn decode_native(rt: &mut Rt, c: V, buf: V) -> Option<V> {
         }
         FLUID_STACK => read_fluid(rt, buf)?,
         PARTICLE => crate::particles::read_options(rt, buf)?,
+        ENUM => {
+            let o = read_var_int(rt, buf)?;
+            let class = text(rt, p(0));
+            let all = crate::jlang::enum_constants(rt, &class).unwrap_or(V::NULL);
+            if o < 0 || o >= rt.array_len(all) {
+                throw_with(rt, "io/netty/handler/codec/DecoderException", &format!("No {class} with ordinal {o}"));
+                return None;
+            }
+            rt.array_get(all, o)
+        }
+        LAZY => {
+            let c = lazy_codec(rt, c);
+            decode(rt, c, buf)
+        }
+        REGISTRY_KEY => {
+            let location = read_utf(rt, buf)?;
+            let name = location.strip_prefix("minecraft:").unwrap_or(&location).to_owned();
+            rt.string(&name)
+        }
         COMPONENT => {
             let s = read_utf(rt, buf)?;
             let t = rt.new_object("net/minecraft/network/chat/MutableComponent");
@@ -1225,6 +1282,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | "net/minecraft/network/codec/StreamDecoder"
             | "net/minecraft/network/codec/ByteBufCodecs"
             | "net/minecraft/network/codec/StreamCodec$CodecOperation"
+            | NEO_CODECS
             | REGISTRAR
             | PAYLOAD_TYPE
             | DISTRIBUTOR
@@ -1266,7 +1324,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         | "net/minecraft/network/codec/StreamEncoder"
         | "net/minecraft/network/codec/StreamDecoder"
         | "net/minecraft/network/codec/ByteBufCodecs"
-        | "net/minecraft/network/codec/StreamCodec$CodecOperation" => codec_call(rt, owner, name, desc, args),
+        | "net/minecraft/network/codec/StreamCodec$CodecOperation"
+        | NEO_CODECS => codec_call(rt, owner, name, desc, args),
         "net/minecraft/resources/ResourceKey" if name == "streamCodec" => codec_call(rt, owner, name, desc, args),
         REGISTER_PAYLOADS if name == "registrar" => {
             let r = rt.new_object(REGISTRAR);
@@ -1416,6 +1475,12 @@ fn codec_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
         "holderRegistry" if byte_buf_codecs => make(rt, HOLDER, vec![a(0)]),
         "fromCodec" | "fromCodecWithRegistries" | "fromCodecTrusted" | "fromCodecWithRegistriesTrusted" if byte_buf_codecs => make(rt, FROM_CODEC, vec![a(0)]),
         "streamCodec" if owner == "net/minecraft/resources/ResourceKey" => make(rt, RESOURCE_KEY, vec![a(0)]),
+        "enumCodec" if owner == NEO_CODECS => make(rt, ENUM, vec![a(0)]),
+        "lazy" if owner == NEO_CODECS => make(rt, LAZY, vec![a(0)]),
+        "registryKey" if owner == NEO_CODECS => constant(rt, REGISTRY_KEY),
+        "uncheckedUnit" if owner == NEO_CODECS => make(rt, UNIT, vec![a(0)]),
+        // `connectionAware(neoForgeCodec, otherCodec)`: both ends here are NeoForge's.
+        "connectionAware" if owner == NEO_CODECS => a(0),
         "byteArray" if byte_buf_codecs => constant(rt, BYTES),
         "stringUtf8" if byte_buf_codecs => constant(rt, STRING),
         _ => return None,
@@ -1766,6 +1831,31 @@ mod tests {
         assert_eq!(["$r", "$g", "$b", "$scale"].map(|f| rt.get_field(back, f).f()), [1.0, 0.0, 0.0, 1.0]);
         let dust = sv(&mut rt, "net/minecraft/core/particles/ParticleTypes.DUST");
         assert_eq!(rt.get_field(back, "$type"), dust);
+    }
+
+    /// NeoForge's own codecs (`NeoForgeStreamCodecs`): an enum by its ordinal, a lazy codec its
+    /// supplier gives once, a registry's key by its location, a unit that writes nothing.
+    #[test]
+    fn neoforges_codecs_write_what_neoforge_writes() {
+        let mut rt = Rt::new();
+        crate::install();
+        const NEO: &str = "net/neoforged/neoforge/network/codec/NeoForgeStreamCodecs";
+        let axis = crate::jlang::class_object(&mut rt, "net/minecraft/core/Direction$Axis");
+        let enums = crate::api::call(&mut rt, "net/neoforged/neoforge/network/codec/NeoForgeStreamCodecs.enumCodec.(Ljava/lang/Class;)Lnet/minecraft/network/codec/StreamCodec;", &[axis]);
+        assert!(is_codec(&rt, enums), "{NEO}'s, not a stand-in");
+        let z = sv(&mut rt, "net/minecraft/core/Direction$Axis.Z");
+        let (bytes, back) = round_trip(&mut rt, enums, z);
+        assert_eq!((bytes, back), (vec![2], z));
+        let keys = crate::api::call(&mut rt, "net/neoforged/neoforge/network/codec/NeoForgeStreamCodecs.registryKey.()Lnet/minecraft/network/codec/StreamCodec;", &[]);
+        let blocks = sv(&mut rt, "net/minecraft/core/registries/Registries.BLOCK");
+        let (bytes, back) = round_trip(&mut rt, keys, blocks);
+        assert_eq!(bytes, [&[15u8][..], b"minecraft:block"].concat());
+        assert_eq!(rt.str_of(back), Some("block"));
+        let one = rt.string("only");
+        let unit = crate::api::call(&mut rt, "net/neoforged/neoforge/network/codec/NeoForgeStreamCodecs.uncheckedUnit.(Ljava/lang/Object;)Lnet/minecraft/network/codec/StreamCodec;", &[one]);
+        let other = rt.string("other");
+        let (bytes, back) = round_trip(&mut rt, unit, other);
+        assert_eq!((bytes, back), (vec![], one));
     }
 
     #[test]
