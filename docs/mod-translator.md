@@ -1198,7 +1198,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     use key; shared for the screen hooks), new helpers for `screen_render_post`, the 7 screen input
     hooks and `interaction_key`; Horizon natives `native_mapping_binding`, `native_key_held`,
     `native_gui_size`, `native_set_cursor`, `native_local_player` (fragment `mod_screen_input`).
-    - [ ] In game: hold right-click on a creative motor, release over another value, the speed changes.
+    - [x] 2026-11-04 In game (offscreen, a 960 x 540 window: GUI 480 x 270 at the automatic scale 4, the
+      harness's layout): holding right-click on a creative motor's value box opens Create's
+      `ValueSettingsScreen` with the pointer on 16; a drag of 48 GUI pixels and the release set the
+      motor's `ScrollValue` to 60, as in the harness. On the way: bundles now carry the dispatcher's
+      helpers from `horizon-compat`'s root (`parts`, the miss counters), which their engine lacked.
     - Not yet: a mod's own looping, ticking sound instances (Create's `SoundScape` machine hum),
       `AbstractWidget`/`Button`/`EditBox` natives, container screens, `ScreenEvent`s, mods' own key
       mappings and `consumeClick`.
