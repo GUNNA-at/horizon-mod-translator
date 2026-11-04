@@ -863,6 +863,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     table (float arithmetic). Checked against a JDK running the merged jar's own `Vec3`, `Mth` and
     `EnumSet` (`scratchpad/jdkcheck/vec`, with stand-ins for the two authlib classes whose shape
     changed after 1.21.1).
+  - [x] 2026-11-04 Every `BlockBehaviour.Properties` call (1.21.1 has 41) is kept on the object as a
+    `$` field instead of falling to the counted builder rule; the predicates (`isRedstoneConductor`,
+    `isSuffocating`, `isViewBlocking`...) and flags the game doesn't read yet are listed in
+    `blocks.rs`. `SoundSource` constants. Found on the way: a level's `playSound`, `addParticle` and
+    `levelEvent` are no-ops for mods (no host hook yet): Create's sounds and particles are silent.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
