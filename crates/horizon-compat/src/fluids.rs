@@ -441,17 +441,21 @@ pub fn tag_key(rt: &mut Rt, registry: &str, location: &str) -> V {
     })
 }
 
-/// Whether the fluid named `id` is in `tag`: the water and lava tags hold what vanilla's and
-/// NeoForge's own data put in them. Tags from a mod's data files aren't read yet, so other tags
-/// hold nothing.
+/// Whether the fluid named `id` is in `tag`, as the game's loaded tags hold it (vanilla's, the
+/// mods' data files', the packs'); the water and lava tags hold what vanilla's and NeoForge's own
+/// data put in them even where no game answers (tests).
 pub fn in_tag(rt: &Rt, tag: V, id: &str) -> bool {
     let registry = rt.str_of(rt.get_field(tag, "$registry")).unwrap_or("");
     let location = rt.str_of(rt.get_field(tag, "$location")).unwrap_or("");
-    match (registry, location) {
-        ("fluid", "minecraft:water" | "c:water") => matches!(id, "minecraft:water" | "minecraft:flowing_water"),
-        ("fluid", "minecraft:lava" | "c:lava") => matches!(id, "minecraft:lava" | "minecraft:flowing_lava"),
-        _ => false,
+    if registry.trim_start_matches("minecraft:") != "fluid" {
+        return false;
     }
+    let built_in = match location {
+        "minecraft:water" | "c:water" => matches!(id, "minecraft:water" | "minecraft:flowing_water"),
+        "minecraft:lava" | "c:lava" => matches!(id, "minecraft:lava" | "minecraft:flowing_lava"),
+        _ => false,
+    };
+    built_in || rt.host().is_some_and(|h| h.fluid_in_tag(id, location))
 }
 
 /// NeoForge's `FluidStack`: a fluid and an amount in millibuckets (`$fluid`, `$amount`).
@@ -850,5 +854,27 @@ mod tests {
         assert_eq!(c(&mut rt, "net/minecraft/world/level/material/Fluid.is.(Lnet/minecraft/tags/TagKey;)Z", &[lava, lava_common]), V::I(1));
         let milk = api::get_static(&mut rt, "net/neoforged/neoforge/common/Tags$Fluids.MILK");
         assert_eq!(c(&mut rt, "net/minecraft/world/level/material/Fluid.is.(Lnet/minecraft/tags/TagKey;)Z", &[lava, milk]), V::I(0));
+    }
+
+    #[test]
+    fn a_mods_fluid_tag_holds_what_the_games_tags_hold() {
+        let mut rt = Rt::new();
+        let mut host = MemoryHost::default();
+        let splashing = "create:fan_processing_catalysts/splashing";
+        host.fluid_tags.insert(splashing.into(), vec!["minecraft:water".into(), "minecraft:flowing_water".into()]);
+        let fluid_registry = api::get_static(&mut rt, "net/minecraft/core/registries/Registries.FLUID");
+        let make = |rt: &mut Rt, name: &str| {
+            let loc = rt.string(name);
+            c(rt, "net/minecraft/tags/TagKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/tags/TagKey;", &[fluid_registry, loc])
+        };
+        let (tag, blasting) = (make(&mut rt, splashing), make(&mut rt, "create:fan_processing_catalysts/blasting"));
+        let is_tag = "net/minecraft/world/level/material/FluidState.is.(Lnet/minecraft/tags/TagKey;)Z";
+        let (flowing, lava) = (fluid_in(&mut rt, "minecraft:water[level=3]"), fluid_in(&mut rt, "minecraft:lava[level=0]"));
+        let asked = rt.with_host(&mut host, |rt| {
+            [c(rt, is_tag, &[flowing, tag]), c(rt, is_tag, &[lava, tag]), c(rt, is_tag, &[flowing, blasting])]
+        });
+        assert_eq!(asked, [V::I(1), V::I(0), V::I(0)]);
+        // No game to ask: a mod's tag holds nothing.
+        assert_eq!(c(&mut rt, is_tag, &[flowing, tag]), V::I(0));
     }
 }

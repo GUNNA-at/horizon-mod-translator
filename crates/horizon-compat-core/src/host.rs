@@ -156,6 +156,12 @@ pub trait Host {
     fn block_in_tag(&self, _block: &str, _tag: &str) -> bool {
         false
     }
+    /// Whether fluid `fluid` (`minecraft:flowing_water`) is in fluid tag `tag`
+    /// (`create:fan_processing_catalysts/splashing`, no `#`), as the game's loaded tags hold it
+    /// (`FluidState.is(TagKey)`). False for a tag the game doesn't have.
+    fn fluid_in_tag(&self, _fluid: &str, _tag: &str) -> bool {
+        false
+    }
     /// The server level's item entities whose box meets `bounds` (min x, y, z, max x, y, z), in
     /// the level's order (`Level.getEntitiesOfClass(ItemEntity.class, box)`). None on a client.
     fn item_entities(&self, _bounds: [f64; 6]) -> Vec<ItemEntity> {
@@ -202,6 +208,8 @@ pub struct MemoryHost {
     pub item_tags: HashMap<String, Vec<String>>,
     /// Block tags (no `#`) and their blocks.
     pub block_tags: HashMap<String, Vec<String>>,
+    /// Fluid tags (no `#`) and their fluids.
+    pub fluid_tags: HashMap<String, Vec<String>>,
     /// The items the game knows; when empty, every id is one.
     pub items: Vec<String>,
     /// Items drawn: item, display context, pose, light.
@@ -295,6 +303,9 @@ impl Host for MemoryHost {
     }
     fn block_in_tag(&self, block: &str, tag: &str) -> bool {
         self.block_tags.get(tag).is_some_and(|b| b.iter().any(|x| x == block))
+    }
+    fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {
+        self.fluid_tags.get(tag).is_some_and(|f| f.iter().any(|x| x == fluid))
     }
     fn item_entities(&self, bounds: [f64; 6]) -> Vec<ItemEntity> {
         self.item_entities.iter().filter(|e| e.count > 0 && boxes_meet(&e.bounds(), &bounds)).cloned().collect()

@@ -111,6 +111,9 @@ fn {id}_{hook}(
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.level.native_block_name_in_tag(block, tag)
         }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.level.native_fluid_name_in_tag(fluid, tag)
+        }}
         fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
             self.level.native_set_state_text(self.ticks, pos, state, 3)
         }}
@@ -206,6 +209,9 @@ fn {id}_block_entity_submit(
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.game.native_block_name_in_tag(block, tag)
+        }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.game.native_fluid_name_in_tag(fluid, tag)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -429,6 +435,9 @@ fn {id}_tick(game: &mut crate::game::Game<'_>) {{
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.game.native_block_name_in_tag(block, tag)
         }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.game.native_fluid_name_in_tag(fluid, tag)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -536,6 +545,9 @@ fn {id}_block_entity_tick(
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.game.native_block_name_in_tag(block, tag)
         }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.game.native_fluid_name_in_tag(fluid, tag)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -632,6 +644,9 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.game.native_block_name_in_tag(block, tag)
         }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.game.native_fluid_name_in_tag(fluid, tag)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -706,6 +721,9 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.game.native_block_name_in_tag(block, tag)
+        }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.game.native_fluid_name_in_tag(fluid, tag)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -789,6 +807,9 @@ fn {id}_state_for_placement(
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.level.native_block_name_in_tag(block, tag)
+        }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.level.native_fluid_name_in_tag(fluid, tag)
         }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false // choosing a state changes nothing

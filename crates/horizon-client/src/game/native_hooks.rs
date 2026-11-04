@@ -3648,6 +3648,13 @@ impl GameLevel<'_> {
             .get(tag)
             .is_some_and(|s| s.contains(block))
     }
+    /// Whether fluid `fluid` (`minecraft:flowing_water`) is in fluid tag
+    /// `tag` (`create:fan_processing_catalysts/splashing`, no `#`), as the
+    /// loaded tags hold it: translated Java mods' `FluidState.is(TagKey)`.
+    /// False for an unknown tag.
+    pub(super) fn native_fluid_name_in_tag(&self, fluid: &str, tag: &str) -> bool {
+        self.items.fluid_in_tag(tag, fluid)
+    }
     /// A block state as text, as [`Self::native_state_text`] gives a
     /// position's: the state a hook is handed (`native_state_for_placement`'s
     /// `state`) in the form translated Java mods read. Air for an id past the
@@ -3768,6 +3775,11 @@ impl Game<'_> {
     /// API 81.
     pub(super) fn native_block_name_in_tag(&self, block: &str, tag: &str) -> bool {
         self.block_in_tag(tag, block)
+    }
+    /// Whether fluid `fluid` is in fluid tag `tag` (no `#`), as
+    /// `GameLevel::native_fluid_name_in_tag` answers, for hooks on `Game`.
+    pub(super) fn native_fluid_name_in_tag(&self, fluid: &str, tag: &str) -> bool {
+        self.items().fluid_in_tag(tag, fluid)
     }
     /// The block state at `pos` in the current level as text, as
     /// `GameLevel::native_state_text` gives it: for hooks on `Game` (block

@@ -374,6 +374,10 @@ pub struct Items {
     /// Item tags in vanilla's order (`TagLoader`: file order, nested tags in
     /// place, first occurrence kept), the order `TagSlotDisplay` resolves.
     pub item_tag_order: HashMap<String, Vec<String>>,
+    /// Fluid tag name (without '#') -> member fluid names
+    /// (`minecraft:water` -> `minecraft:water`, `minecraft:flowing_water`):
+    /// vanilla's, the content mods' and the packs'.
+    pub fluid_tags: HashMap<String, HashSet<String>>,
     loot: Arc<horizon_world::loot::LootTables>,
     /// The `jukebox_song` registry.
     pub songs: HashMap<String, Song>,
@@ -912,6 +916,7 @@ impl Items {
             block_tags: load_tags(root, "block", overlay)?,
             item_tags: load_tags(root, "item", overlay)?,
             item_tag_order: load_tag_lists(root, "item", overlay)?,
+            fluid_tags: load_tags(root, "fluid", overlay)?,
             loot,
             songs: load_songs(root),
             instruments: load_instruments(root),
@@ -942,6 +947,7 @@ impl Items {
             block_tags: load_tags(root, "block", overlay)?,
             item_tags: load_tags(root, "item", overlay)?,
             item_tag_order: load_tag_lists(root, "item", overlay)?,
+            fluid_tags: load_tags(root, "fluid", overlay)?,
             loot: Default::default(),
             songs: HashMap::new(),
             instruments: HashMap::new(),
@@ -961,6 +967,7 @@ impl Items {
                 .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
                 .collect(),
             item_tags,
+            fluid_tags: HashMap::new(),
             loot: Default::default(),
             songs: HashMap::new(),
             instruments: HashMap::new(),
@@ -974,6 +981,11 @@ impl Items {
     /// Whether an item belongs to a loaded item tag.
     pub fn item_in_tag(&self, tag: &str, item: &str) -> bool {
         self.item_tags.get(tag).is_some_and(|s| s.contains(item))
+    }
+    /// Whether `fluid` (`minecraft:flowing_water`) is in the fluid tag `tag`
+    /// (`minecraft:water`, no `#`).
+    pub fn fluid_in_tag(&self, tag: &str, fluid: &str) -> bool {
+        self.fluid_tags.get(tag).is_some_and(|s| s.contains(fluid))
     }
     fn block_matches(&self, spec: &str, block: &str) -> bool {
         match spec.strip_prefix('#') {
