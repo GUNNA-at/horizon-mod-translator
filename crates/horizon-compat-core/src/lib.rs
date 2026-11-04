@@ -74,6 +74,8 @@ pub enum Data {
     Iter(Vec<V>, usize),
     /// A stream's elements (streams here are eager).
     Stream(Vec<V>),
+    /// A byte buffer (`FriendlyByteBuf`, netty's `ByteBuf`): its bytes and where reading is.
+    Bytes(Vec<u8>, usize),
 }
 
 #[derive(Debug, Clone)]

@@ -212,7 +212,7 @@ pub fn uuid(rt: &mut Rt, msb: i64, lsb: i64) -> V {
     rt.alloc(UUID, Data::Native("uuid", [msb, lsb, 0, 0]))
 }
 
-fn uuid_bits(rt: &Rt, v: V) -> (i64, i64) {
+pub(crate) fn uuid_bits(rt: &Rt, v: V) -> (i64, i64) {
     match data(rt, v) {
         Some(Data::Native("uuid", h)) => (h[0], h[1]),
         _ => (0, 0),

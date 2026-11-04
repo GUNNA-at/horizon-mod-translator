@@ -104,7 +104,7 @@ impl Rt {
                     }
                     refs(&t.comparator, todo);
                 }
-                Data::Str(_) | Data::Native(..) => {}
+                Data::Str(_) | Data::Native(..) | Data::Bytes(..) => {}
             }
         }
     }

@@ -128,6 +128,8 @@ pub fn fire_registrations(rt: &mut Rt) {
     }
     // Then common setup and capabilities, as NeoForge's loading goes on.
     fire_common_setup(rt);
+    // NeoForge's network registry: the mods register their payload types.
+    crate::network::fire_registration(rt);
     crate::capabilities::fire(rt);
 }
 
@@ -161,7 +163,7 @@ fn name_in(rt: &Rt, v: V) -> String {
 }
 
 /// What `registry` holds under `id`: the mod's registrations, vanilla's blocks and items.
-fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
+pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
     if let Some(v) = rt.registered.get(&(registry.to_owned(), id.to_owned())) {
         return *v;
     }
@@ -174,7 +176,7 @@ fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
 }
 
 /// A registry entry's `Holder`: its key and value.
-fn registry_holder(rt: &mut Rt, registry: &str, id: &str, value: V) -> V {
+pub(crate) fn registry_holder(rt: &mut Rt, registry: &str, id: &str, value: V) -> V {
     let h = rt.new_object("net/minecraft/core/Holder$Reference");
     let (r, i) = (rt.string(registry), rt.string(id));
     rt.put_field(h, "$registry", r);
@@ -280,6 +282,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // Level events: the level they're about.
         (o, "getLevel") if o.starts_with("net/neoforged/neoforge/event/level/LevelEvent") => rt.get_field(a(0), "$level"),
+        // The server's tick: the one server, with time to spare (`hasTime`).
+        (o, "getServer") if o.starts_with("net/neoforged/neoforge/event/tick/ServerTickEvent") => {
+            rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
+        }
+        (o, "hasTime") if o.starts_with("net/neoforged/neoforge/event/tick/ServerTickEvent") => V::I(1),
         ("net/neoforged/bus/api/IEventBus", "post") => {
             let class = rt.class_of(a(1));
             post(rt, class, a(1));

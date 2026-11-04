@@ -28,7 +28,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
 /// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 25] = [
+const COMPAT: [(&str, &str); 26] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -50,6 +50,7 @@ const COMPAT: [(&str, &str); 25] = [
     ("glue.rs", include_str!("../../horizon-compat/src/glue.rs")),
     ("jutil.rs", include_str!("../../horizon-compat/src/jutil.rs")),
     ("neo.rs", include_str!("../../horizon-compat/src/neo.rs")),
+    ("network.rs", include_str!("../../horizon-compat/src/network.rs")),
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
     ("tags.rs", include_str!("../../horizon-compat/src/tags.rs")),
     ("render.rs", include_str!("../../horizon-compat/src/render.rs")),
@@ -182,11 +183,86 @@ fn nbt_conversions(c: &str) -> String {
     )
 }
 
+/// A server-side host's `send_payload`: a mod payload to the players `to` names, each through the
+/// game's mod message channel.
+fn server_send(c: &str) -> String {
+    format!(r#"        fn send_payload(&mut self, to: {c}::host::PayloadTarget, channel: &str, data: &[u8]) -> bool {{
+            let players: Vec<u128> = self
+                .game
+                .native_server_players()
+                .into_iter()
+                .filter(|p| match to {{
+                    {c}::host::PayloadTarget::Server => false,
+                    {c}::host::PayloadTarget::Player(uuid) => p.uuid == uuid,
+                    {c}::host::PayloadTarget::All => true,
+                    {c}::host::PayloadTarget::Near {{ x, y, z, radius }} => {{
+                        let d = [p.position[0] - x, p.position[1] - y, p.position[2] - z];
+                        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= radius * radius
+                    }}
+                }})
+                .map(|p| p.uuid)
+                .collect();
+            let mut sent = false;
+            for p in players {{
+                sent |= self.game.native_net_send_to_player(p, channel, data).is_ok();
+            }}
+            sent
+        }}
+"#)
+}
+
+/// The window's host (the client tick, payloads from the server): the client's world, and payloads
+/// to the server.
+fn client_host(c: &str) -> String {
+    format!(r#"    struct Host<'a, 'b> {{
+        game: &'a mut crate::game::Game<'b>,
+    }}
+    impl {c}::host::Host for Host<'_, '_> {{
+        fn block_state(&self, pos: [i32; 3]) -> String {{
+            self.game.native_state_text_at(pos)
+        }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.game.native_block_name_in_tag(block, tag)
+        }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.game.native_fluid_name_in_tag(fluid, tag)
+        }}
+        fn item_is_block(&self, item: &str) -> bool {{
+            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
+        }}
+        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_facts(item).map(|(_, limit)| limit)
+        }}
+        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
+            Some(boxes.iter().map(|b| {{
+                let (lo, hi) = (b.min_position(), b.max_position());
+                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
+            }}).collect())
+        }}
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
+            false
+        }}
+        fn is_server(&self) -> bool {{
+            false
+        }}
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
+        }}
+        fn send_payload(&mut self, to: {c}::host::PayloadTarget, channel: &str, data: &[u8]) -> bool {{
+            to == {c}::host::PayloadTarget::Server && self.game.native_net_send_to_server(channel, data).is_ok()
+        }}
+    }}
+"#)
+}
+
 /// The client's hooks: drawing the mod's block entities with its renderers, the update tags the
-/// server sends for them, and the client tick (animation clocks).
+/// server sends for them, the client tick (animation clocks) and the payloads the server sends.
 fn client_helpers(id: &str, ns: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
     let conversions = nbt_conversions(&c);
+    let client_host = client_host(&c);
     vec![
         ("block_entity_submit", format!(r#"// Generated by horizon-mod-translator: the translated mod's block entity renderer, once a frame.
 fn {id}_block_entity_submit(
@@ -425,54 +501,71 @@ fn {id}_tick(game: &mut crate::game::Game<'_>) {{
     if !game.native_window() {{
         return;
     }}
-    struct Host<'a, 'b> {{
-        game: &'a crate::game::Game<'b>,
-    }}
-    impl {c}::host::Host for Host<'_, '_> {{
-        fn block_state(&self, pos: [i32; 3]) -> String {{
-            self.game.native_state_text_at(pos)
-        }}
-        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_name_in_tag(block, tag)
-        }}
-        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
-            self.game.native_fluid_name_in_tag(fluid, tag)
-        }}
-        fn item_is_block(&self, item: &str) -> bool {{
-            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
-        }}
-        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
-            self.game.native_item_facts(item).map(|(_, limit)| limit)
-        }}
-        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
-            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
-            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
-            Some(boxes.iter().map(|b| {{
-                let (lo, hi) = (b.min_position(), b.max_position());
-                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
-            }}).collect())
-        }}
-        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
-            false
-        }}
-        fn is_server(&self) -> bool {{
-            false
-        }}
-        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
-            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
-        }}
-    }}
-    let mut host = Host {{ game }};
+{client_host}    let mut host = Host {{ game }};
     {krate}::with_runtime(|rt| {c}::glue::client_tick(rt, &mut host));
+}}
+"#)),
+        ("net_from_server", format!(r#"// Generated by horizon-mod-translator: a mod payload the server sent (`native_net_from_server`), to
+// the translated mod's handler for its type.
+fn {id}_net_from_server(game: &mut crate::game::Game<'_>, channel: &str, data: &[u8]) {{
+{client_host}
+    let mut host = Host {{ game }};
+    {krate}::with_runtime(|rt| {c}::glue::payload_from_server(rt, &mut host, channel, data));
 }}
 "#)),
     ]
 }
 
-/// The block-entity hooks (on `Game`): creating, whether it ticks, and each tick.
+/// The server's hooks (on `Game`): the block entities (creating, whether they tick, each tick), the
+/// server's tick, and the payloads clients send.
 fn block_entity_helpers(id: &str, ns: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
+    let server_send = server_send(&c);
     vec![
+        ("server_tick", format!(r#"// Generated by horizon-mod-translator: the server's tick (`ServerTickEvent.Pre` and `.Post`), on
+// the server's game.
+fn {id}_server_tick(game: &mut crate::game::Game<'_>, phase: crate::game::native_lifecycle::ServerTickPhase) {{
+    let post = matches!(phase, crate::game::native_lifecycle::ServerTickPhase::ServerTickEnd {{ .. }});
+    struct Host<'a, 'b> {{
+        game: &'a mut crate::game::Game<'b>,
+    }}
+    impl {c}::host::Host for Host<'_, '_> {{
+        // Which level the server's game holds between levels is not defined: no blocks here.
+        fn block_state(&self, _pos: [i32; 3]) -> String {{
+            "minecraft:air".into()
+        }}
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
+            false
+        }}
+        fn game_time(&self) -> i64 {{
+            self.game.native_game_time()
+        }}
+{server_send}    }}
+    let mut host = Host {{ game }};
+    {krate}::with_runtime(|rt| {c}::glue::server_tick(rt, &mut host, post));
+}}
+"#)),
+        ("net_from_client", format!(r#"// Generated by horizon-mod-translator: a mod payload a player's client sent
+// (`native_net_from_client`), to the translated mod's handler for its type.
+fn {id}_net_from_client(game: &mut crate::game::Game<'_>, player: u128, channel: &str, data: &[u8]) {{
+    struct Host<'a, 'b> {{
+        game: &'a mut crate::game::Game<'b>,
+    }}
+    impl {c}::host::Host for Host<'_, '_> {{
+        fn block_state(&self, pos: [i32; 3]) -> String {{
+            self.game.native_state_text_at(pos)
+        }}
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
+            false
+        }}
+        fn game_time(&self) -> i64 {{
+            self.game.native_game_time()
+        }}
+{server_send}    }}
+    let mut host = Host {{ game }};
+    {krate}::with_runtime(|rt| {c}::glue::payload_from_client(rt, &mut host, player, channel, data));
+}}
+"#)),
         ("block_entity", format!(r#"// Generated by horizon-mod-translator: `EntityBlock.newBlockEntity` of the translated mod.
 fn {id}_block_entity(block: &str, entity: &mut Option<(String, horizon_world::nbt::Compound)>) {{
     if entity.is_some() || !block.starts_with("{ns}:") {{
@@ -604,7 +697,7 @@ fn {id}_block_entity_tick(
             let stack = horizon_client::items::ItemStack::new(item, count);
             self.game.native_spawn_item_entity(dim, stack, pos, motion, pickup_delay)
         }}
-    }}
+{server_send}    }}
     let state = game.native_state_text_at(pos);
     let mut nbt: BTreeMap<String, Nbt> = entity.nbt.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect();
     let mut host = Host {{ game }};
@@ -847,15 +940,18 @@ fn {id}_state_for_placement(
     ]
 }
 
-const CLIENT_BINDINGS: [(&str, &str); 5] = [
+const CLIENT_BINDINGS: [(&str, &str); 6] = [
     ("content", "    { name = \"content\", ty = \"&mut horizon_mods::Content\", value = \"&mut *content\" },\n"),
     ("content_block", "    { name = \"block\", ty = \"&mut horizon_mods::content::Block\", value = \"&mut *block\" },\n"),
     ("block_entity_submit", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"entity\", ty = \"&horizon_client::containers::ModBlockEntity\", value = \"entity\" },\n    { name = \"draw\", ty = \"&mut crate::game::native_block_entity_draw::BlockEntityDraw\", value = \"&mut *draw\" },\n"),
     ("block_entity_update_tag", "    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"entity\", ty = \"&horizon_client::containers::ModBlockEntity\", value = \"entity\" },\n    { name = \"tag\", ty = \"&mut Option<horizon_world::nbt::Compound>\", value = \"&mut *tag\" },\n"),
     ("tick", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n"),
+    ("net_from_server", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"channel\", ty = \"&str\", value = \"channel\" },\n    { name = \"data\", ty = \"&[u8]\", value = \"data\" },\n"),
 ];
 
-const BLOCK_ENTITY_BINDINGS: [(&str, &str); 6] = [
+const BLOCK_ENTITY_BINDINGS: [(&str, &str); 8] = [
+    ("server_tick", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"phase\", ty = \"crate::game::native_lifecycle::ServerTickPhase\", value = \"phase\" },\n"),
+    ("net_from_client", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"channel\", ty = \"&str\", value = \"channel\" },\n    { name = \"data\", ty = \"&[u8]\", value = \"data\" },\n"),
     ("state_for_placement", "    { name = \"level\", ty = \"&crate::game::GameLevel<'_>\", value = \"self\" },\n    { name = \"state\", ty = \"horizon_world::registry::BlockStateId\", value = \"state\" },\n    { name = \"context\", ty = \"&horizon_world::level::PlacementContext\", value = \"context\" },\n    { name = \"answer\", ty = \"&mut Option<Option<horizon_world::registry::BlockStateId>>\", value = \"&mut *answer\" },\n"),
     ("block_entity", "    { name = \"block\", ty = \"&str\", value = \"block\" },\n    { name = \"entity\", ty = \"&mut Option<(String, horizon_world::nbt::Compound)>\", value = \"&mut *entity\" },\n"),
     ("block_entity_ticks", "    { name = \"block\", ty = \"&str\", value = \"block\" },\n    { name = \"ticks\", ty = \"&mut bool\", value = \"&mut *ticks\" },\n"),

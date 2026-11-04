@@ -60,7 +60,7 @@ pub fn to_runtime(rt: &mut Rt, tag: &BTreeMap<String, Nbt>) -> V {
 }
 
 /// A tag object for a list element or an array (lists hold tag objects, as Java's `ListTag` does).
-fn element_to_runtime(rt: &mut Rt, n: &Nbt) -> Option<V> {
+pub(crate) fn element_to_runtime(rt: &mut Rt, n: &Nbt) -> Option<V> {
     let numeric = |rt: &mut Rt, kind: i32, class: &'static str, bits: i64| rt.alloc(class, Data::Native("nbt", [kind as i64, bits, 0, 0]));
     Some(match n {
         Nbt::Byte(b) => numeric(rt, BYTE, "net/minecraft/nbt/ByteTag", *b as i64),
@@ -82,7 +82,7 @@ fn element_to_runtime(rt: &mut Rt, n: &Nbt) -> Option<V> {
 }
 
 /// Game NBT from a tag object (a list element, an array, a compound).
-fn element_from_runtime(rt: &Rt, v: V) -> Option<Nbt> {
+pub(crate) fn element_from_runtime(rt: &Rt, v: V) -> Option<Nbt> {
     let o = rt.heap.get(v.r() as usize)?;
     Some(match (&o.data, o.class) {
         (Data::Map(_), _) => Nbt::Compound(from_runtime(rt, v)),

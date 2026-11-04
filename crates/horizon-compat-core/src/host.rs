@@ -35,6 +35,20 @@ pub enum UvShiftKind {
     Sheet { u: f32, v: f32, size: f32 },
 }
 
+/// Where [`Host::send_payload`] sends a mod's payload (NeoForge's `PacketDistributor`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PayloadTarget {
+    /// From a client to its server (`sendToServer`).
+    Server,
+    /// To one player, by UUID (`sendToPlayer`).
+    Player(u128),
+    /// To every player on the server (`sendToAllPlayers`).
+    All,
+    /// To the players near a point of a dimension (`sendToPlayersNear`, and those tracking a chunk or
+    /// an entity, which this treats as everyone within the radius): x, y, z, radius in blocks.
+    Near { x: f64, y: f64, z: f64, radius: f64 },
+}
+
 /// An item entity of the server level (`ItemEntity`), as translated code reads it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ItemEntity {
@@ -162,6 +176,12 @@ pub trait Host {
     fn fluid_in_tag(&self, _fluid: &str, _tag: &str) -> bool {
         false
     }
+    /// Sends a mod's payload on the game's mod message channel: `channel` is the payload type's id
+    /// (`create:server_speed`), `data` what its `StreamCodec` wrote. False when it can't go (no
+    /// such player, a server that carries no mod messages, past the game's caps).
+    fn send_payload(&mut self, _to: PayloadTarget, _channel: &str, _data: &[u8]) -> bool {
+        false
+    }
     /// The server level's item entities whose box meets `bounds` (min x, y, z, max x, y, z), in
     /// the level's order (`Level.getEntitiesOfClass(ItemEntity.class, box)`). None on a client.
     fn item_entities(&self, _bounds: [f64; 6]) -> Vec<ItemEntity> {
@@ -210,6 +230,8 @@ pub struct MemoryHost {
     pub block_tags: HashMap<String, Vec<String>>,
     /// Fluid tags (no `#`) and their fluids.
     pub fluid_tags: HashMap<String, Vec<String>>,
+    /// Mod payloads sent, in order: where to, channel, bytes.
+    pub payloads: Vec<(PayloadTarget, String, Vec<u8>)>,
     /// The items the game knows; when empty, every id is one.
     pub items: Vec<String>,
     /// Items drawn: item, display context, pose, light.
@@ -306,6 +328,10 @@ impl Host for MemoryHost {
     }
     fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {
         self.fluid_tags.get(tag).is_some_and(|f| f.iter().any(|x| x == fluid))
+    }
+    fn send_payload(&mut self, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
+        self.payloads.push((to, channel.to_owned(), data.to_vec()));
+        true
     }
     fn item_entities(&self, bounds: [f64; 6]) -> Vec<ItemEntity> {
         self.item_entities.iter().filter(|e| e.count > 0 && boxes_meet(&e.bounds(), &bounds)).cloned().collect()

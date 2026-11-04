@@ -377,6 +377,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             }
         }
         _ => match mutable_pos(rt, key, args)
+            .or_else(|| crate::network::call(rt, key, args))
             .or_else(|| crate::fluids::call(rt, key, args))
             .or_else(|| crate::tanks::call_key(rt, key, args))
             .or_else(|| crate::codecs::call(rt, key, args))
@@ -855,7 +856,8 @@ fn offset(rt: &mut Rt, p: V, d: [i64; 3], n: i64) -> V {
 /// Static fields of API classes (`Direction.UP`...).
 pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
     if let Some((o, f)) = key.split_once('.')
-        && let Some(v) = crate::api_common::get_static(rt, o, f)
+        && let Some(v) = crate::network::get_static(rt, o, f)
+            .or_else(|| crate::api_common::get_static(rt, o, f))
             .or_else(|| crate::render::get_static(rt, o, f))
             .or_else(|| crate::blocks::get_static(rt, o, f))
             .or_else(|| crate::shapes::get_static(rt, o, f))

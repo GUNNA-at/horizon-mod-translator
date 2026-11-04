@@ -633,6 +633,37 @@ pub fn render_block_entity(
     })
 }
 
+const SERVER_TICK_PRE: &str = "net/neoforged/neoforge/event/tick/ServerTickEvent$Pre";
+const SERVER_TICK_POST: &str = "net/neoforged/neoforge/event/tick/ServerTickEvent$Post";
+
+/// The server's tick (`MinecraftServer.tickServer`): `ServerTickEvent.Pre` before the levels tick,
+/// `.Post` after them. Create sends its clients the server's tick rate there
+/// (`ServerSpeedProvider`), which is what moves the items on their belts.
+pub fn server_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let class = if post { SERVER_TICK_POST } else { SERVER_TICK_PRE };
+        let ev = rt.new_object(class);
+        crate::neo::post(rt, class, ev);
+    });
+}
+
+/// A mod payload the server sent the window's game (`native_net_from_server`), to its handler.
+/// False when no payload type of this mod has that id.
+pub fn payload_from_server(rt: &mut Rt, host: &mut dyn Host, channel: &str, data: &[u8]) -> bool {
+    rt.safe_point();
+    // This runtime is the client's, also when a payload comes before its first tick.
+    crate::neo::fire_client_setup(rt);
+    rt.with_host(host, |rt| crate::network::receive(rt, channel, data, None))
+}
+
+/// A mod payload `player`'s client sent the server (`native_net_from_client`), to its handler.
+pub fn payload_from_client(rt: &mut Rt, host: &mut dyn Host, player: u128, channel: &str, data: &[u8]) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::network::receive(rt, channel, data, Some(player)))
+}
+
 /// The client's tick, in `Minecraft.tick`'s order: `ClientTickEvent.Pre` (animation clocks advance
 /// here: catnip's `AnimationTickHolder`), the level's block entities, then `ClientTickEvent.Post`.
 pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
