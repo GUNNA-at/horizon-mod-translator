@@ -94,7 +94,7 @@ fn vanilla_definition(class: &str) -> &'static [&'static str] {
     match class.rsplit('/').next().unwrap_or(class) {
         "RotatedPillarBlock" => &["AXIS"],
         "SlabBlock" => &["SLAB_TYPE", "WATERLOGGED"],
-        "StairBlock" => &["HORIZONTAL_FACING", "HALF", "STAIRS_SHAPE", "WATERLOGGED"],
+        "StairBlock" | "WeatheringCopperStairBlock" => &["HORIZONTAL_FACING", "HALF", "STAIRS_SHAPE", "WATERLOGGED"],
         "DoorBlock" => &["HORIZONTAL_FACING", "OPEN", "DOOR_HINGE", "POWERED", "DOUBLE_BLOCK_HALF"],
         "TrapDoorBlock" => &["HORIZONTAL_FACING", "OPEN", "HALF", "POWERED", "WATERLOGGED"],
         "LadderBlock" => &["HORIZONTAL_FACING", "WATERLOGGED"],
@@ -108,6 +108,28 @@ fn vanilla_definition(class: &str) -> &'static [&'static str] {
         "ChainBlock" => &["WATERLOGGED", "AXIS"],
         "LanternBlock" => &["HANGING", "WATERLOGGED"],
         "WallTorchBlock" => &["HORIZONTAL_FACING"],
+        // Each class's `createBlockStateDefinition` as 1.21.1 writes it (only classes whose
+        // constructor defaults are `vanilla_default`'s: a campfire starts lit, an end rod faces up).
+        "BellBlock" => &["HORIZONTAL_FACING", "BELL_ATTACHMENT", "POWERED"],
+        "LecternBlock" => &["HORIZONTAL_FACING", "POWERED", "HAS_BOOK"],
+        "ScaffoldingBlock" => &["STABILITY_DISTANCE", "WATERLOGGED", "BOTTOM"],
+        "ChestBlock" | "TrappedChestBlock" => &["HORIZONTAL_FACING", "CHEST_TYPE", "WATERLOGGED"],
+        "BarrelBlock" => &["FACING", "OPEN"],
+        "HopperBlock" => &["FACING_HOPPER", "ENABLED"],
+        "AbstractFurnaceBlock" | "FurnaceBlock" | "SmokerBlock" | "BlastFurnaceBlock" => &["HORIZONTAL_FACING", "LIT"],
+        "AnvilBlock" | "StonecutterBlock" | "LoomBlock" | "CarvedPumpkinBlock" => &["HORIZONTAL_FACING"],
+        "GrindstoneBlock" => &["HORIZONTAL_FACING", "ATTACH_FACE"],
+        "StainedGlassPaneBlock" => &["NORTH", "EAST", "WEST", "SOUTH", "WATERLOGGED"],
+        "DispenserBlock" | "DropperBlock" => &["FACING", "TRIGGERED"],
+        "RepeaterBlock" => &["HORIZONTAL_FACING", "DELAY", "LOCKED", "POWERED"],
+        "ComparatorBlock" => &["HORIZONTAL_FACING", "MODE_COMPARATOR", "POWERED"],
+        "SnowLayerBlock" => &["LAYERS"],
+        "LeavesBlock" => &["DISTANCE", "PERSISTENT", "WATERLOGGED"],
+        "CropBlock" => &["AGE_7"],
+        "SaplingBlock" => &["STAGE"],
+        "BedBlock" => &["HORIZONTAL_FACING", "BED_PART", "OCCUPIED"],
+        "CakeBlock" => &["BITES"],
+        "CandleBlock" => &["CANDLES", "LIT", "WATERLOGGED"],
         _ => &[],
     }
 }
@@ -185,6 +207,9 @@ fn vanilla_default(field: &str) -> Option<&'static str> {
         "STAIRS_SHAPE" => "straight",
         "DOOR_HINGE" => "left",
         "ATTACH_FACE" => "wall",
+        "STABILITY_DISTANCE" | "DISTANCE" => "7",
+        "ENABLED" => "true",
+        "BED_PART" => "foot",
         "AXIS" => "y",
         "HORIZONTAL_FACING" | "FACING" => "north",
         "POWER" => "0",
@@ -193,6 +218,22 @@ fn vanilla_default(field: &str) -> Option<&'static str> {
             _ => return None,
         },
     })
+}
+
+/// Vanilla enum `class`'s constant whose serialized name is `text` (`floor` is
+/// `BellAttachType.FLOOR`): one object per constant, as `values()` and the static fields give them.
+pub(crate) fn vanilla_enum_constant(rt: &mut Rt, class: &str, text: &str) -> Option<V> {
+    let values = vanilla_enum(class)?;
+    let i = values.iter().position(|v| *v == text)?;
+    let class: &'static str = rt.static_key(class);
+    let name: &'static str = rt.static_key(&values[i].to_ascii_uppercase());
+    Some(api::api_enum(rt, class, name, i as i32))
+}
+
+/// Vanilla enum `class`'s constants, in order (`values()`); None for one the runtime doesn't know.
+fn vanilla_enum_values(rt: &mut Rt, class: &str) -> Option<Vec<V>> {
+    let values = vanilla_enum(class)?;
+    Some(values.iter().filter_map(|v| vanilla_enum_constant(rt, class, v)).collect())
 }
 
 /// Values of vanilla enums a mod's own property may take (`EnumProperty.create(name, Half.class)`).
@@ -277,6 +318,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, rest) = key.split_once('.')?;
     let (name, desc) = rest.split_once('.')?;
     match (owner, name) {
+        // `BellAttachType.values()`: its constants, in order.
+        (o, "values") if desc.starts_with("()[") && o.starts_with("net/minecraft/world/level/block/state/properties/") && vanilla_enum(o).is_some() => {
+            let all = vanilla_enum_values(rt, o)?;
+            let class: &'static str = rt.static_key(&format!("[L{o};"));
+            Some(rt.alloc(class, Data::Array(all)))
+        }
         (BLOCK_PROPERTIES, _) => block_properties(rt, name, desc, args),
         (ITEM_PROPERTIES, _) => item_properties(rt, name, args),
         (WOOD_TYPE, "name") => Some(rt.get_field(a(0), "$name")),
@@ -365,6 +412,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             const R: [&str; 4] = ["COMMON", "UNCOMMON", "RARE", "EPIC"];
             let i = R.iter().position(|r| *r == field)?;
             Some(api::api_enum(rt, RARITY, R[i], i as i32))
+        }
+        // The block-state enums' constants (`BellAttachType.FLOOR`), the objects a state's value is.
+        o if o.starts_with("net/minecraft/world/level/block/state/properties/") && vanilla_enum(o).is_some() => {
+            vanilla_enum_constant(rt, o, &field.to_ascii_lowercase())
         }
         _ => None,
     }
@@ -977,6 +1028,29 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["oak", "dark_oak", "crimson"]);
+    }
+
+    #[test]
+    fn a_vanilla_enum_property_reads_as_the_enum_constant_a_switch_compares() {
+        let mut rt = Rt::new();
+        crate::install();
+        const BELL: &str = "net/minecraft/world/level/block/state/properties/BellAttachType";
+        let prop = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.BELL_ATTACHMENT");
+        let get = "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;";
+        let set = "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;";
+        let state = api::state(&mut rt, "create:haunted_bell[attachment=ceiling,facing=north,powered=false]");
+        let value = api::call(&mut rt, get, &[state, prop]);
+        let ceiling = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BellAttachType.CEILING");
+        assert_eq!(value, ceiling, "the state's value is the constant itself");
+        let ordinal = api::call(&mut rt, "net/minecraft/world/level/block/state/properties/BellAttachType.ordinal.()I", &[value]);
+        assert_eq!(ordinal, V::I(1), "FLOOR, CEILING, SINGLE_WALL, DOUBLE_WALL");
+        let all = api::call(&mut rt, "net/minecraft/world/level/block/state/properties/BellAttachType.values.()[Lnet/minecraft/world/level/block/state/properties/BellAttachType;", &[]);
+        let names: Vec<String> = jutil::elements(&rt, all).iter().map(|v| rt.str_of(rt.get_field(*v, "$name")).unwrap_or("").to_owned()).collect();
+        assert_eq!(names, ["FLOOR", "CEILING", "SINGLE_WALL", "DOUBLE_WALL"]);
+        let wall = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BellAttachType.DOUBLE_WALL");
+        let moved = api::call(&mut rt, set, &[state, prop, wall]);
+        assert_eq!(rt.str_of(moved), Some("create:haunted_bell[attachment=double_wall,facing=north,powered=false]"));
+        assert_eq!(rt.class_of(wall), BELL);
     }
 
     #[test]

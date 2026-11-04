@@ -157,6 +157,11 @@ fn block_class_property<'a>(class: &str, field: &'a str) -> &'a str {
         ("RedStoneWireBlock", "SOUTH") => "SOUTH_REDSTONE",
         ("RedStoneWireBlock", "WEST") => "WEST_REDSTONE",
         ("ComparatorBlock", "MODE") => "MODE_COMPARATOR",
+        ("BellBlock", "ATTACHMENT") => "BELL_ATTACHMENT",
+        ("BedBlock", "PART") => "BED_PART",
+        ("PistonBaseBlock" | "PistonHeadBlock" | "MovingPistonBlock", "TYPE") => "PISTON_TYPE",
+        ("WallBlock", "NORTH_WALL" | "EAST_WALL" | "SOUTH_WALL" | "WEST_WALL") => field,
+        ("BigDripleafBlock", "TILT") => "TILT",
         (s, "FACING") if HORIZONTAL.contains(&s) => "HORIZONTAL_FACING",
         _ => field,
     }
@@ -176,9 +181,34 @@ fn state_property_field(f: &str) -> bool {
         )
 }
 
-/// Vanilla's `BlockStateProperties` fields: (field, property name, kind).
+/// The vanilla enum whose constants a `BlockStateProperties` field's values are (`BELL_ATTACHMENT`:
+/// `BellAttachType`), for the enums the runtime knows the values of.
+fn vanilla_property_enum(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "HALF" => "net/minecraft/world/level/block/state/properties/Half",
+        "DOUBLE_BLOCK_HALF" => "net/minecraft/world/level/block/state/properties/DoubleBlockHalf",
+        "DOOR_HINGE" => "net/minecraft/world/level/block/state/properties/DoorHingeSide",
+        "SLAB_TYPE" => "net/minecraft/world/level/block/state/properties/SlabType",
+        "CHEST_TYPE" => "net/minecraft/world/level/block/state/properties/ChestType",
+        "PISTON_TYPE" => "net/minecraft/world/level/block/state/properties/PistonType",
+        "STAIRS_SHAPE" => "net/minecraft/world/level/block/state/properties/StairsShape",
+        "RAIL_SHAPE" | "RAIL_SHAPE_STRAIGHT" => "net/minecraft/world/level/block/state/properties/RailShape",
+        "ATTACH_FACE" => "net/minecraft/world/level/block/state/properties/AttachFace",
+        "BED_PART" => "net/minecraft/world/level/block/state/properties/BedPart",
+        "MODE_COMPARATOR" => "net/minecraft/world/level/block/state/properties/ComparatorMode",
+        "BELL_ATTACHMENT" => "net/minecraft/world/level/block/state/properties/BellAttachType",
+        "TILT" => "net/minecraft/world/level/block/state/properties/Tilt",
+        "NORTH_WALL" | "EAST_WALL" | "SOUTH_WALL" | "WEST_WALL" => "net/minecraft/world/level/block/state/properties/WallSide",
+        "NORTH_REDSTONE" | "EAST_REDSTONE" | "SOUTH_REDSTONE" | "WEST_REDSTONE" => "net/minecraft/world/level/block/state/properties/RedstoneSide",
+        _ => return None,
+    })
+}
+
+/// Vanilla's `BlockStateProperties` fields: (field, property name, kind). An enum-valued property's
+/// kind is its enum's class.
 pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
     let kind = match field {
+        f if vanilla_property_enum(f).is_some() => vanilla_property_enum(f).unwrap_or("string"),
         "FACING" | "HORIZONTAL_FACING" | "FACING_HOPPER" | "VERTICAL_DIRECTION" => "direction",
         "AXIS" | "HORIZONTAL_AXIS" => "axis",
         "AGE_1" | "AGE_2" | "AGE_3" | "AGE_4" | "AGE_5" | "AGE_7" | "AGE_15" | "AGE_25" | "POWER" | "LEVEL"
@@ -237,6 +267,10 @@ fn value_of(rt: &mut Rt, kind: &str, text: &str) -> V {
             None => V::NULL,
         },
         class => {
+            // A vanilla enum's constant (`BellAttachType.FLOOR` for `floor`), one object each.
+            if let Some(v) = crate::blocks::vanilla_enum_constant(rt, class, text) {
+                return v;
+            }
             // A mod enum: the constant whose name, lower-cased, is the text.
             let prefix = format!("{class}.");
             let found = rt

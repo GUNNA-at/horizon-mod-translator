@@ -460,6 +460,18 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `create:iron_sheet` (FIXED) at the depot's centre shifted by the item's side offset, and
     `MechanicalPressRenderer` draws the shaft and `create:block/mechanical_press/head`. Also: an API enum
     constant answers `Enum`'s methods through the receiver retry (`DyeColor.ordinal()`).
+  - [x] 2026-11-04 Vanilla enum properties as enum constants, and vanilla state definitions for more
+    classes (harness `DECLARE`, `blocks::tests`). A vanilla enum property's value (`BellBlock.ATTACHMENT`,
+    `SlabType`, `ChestType`, `AttachFace`...) is now the interned enum constant of its class, the one its
+    static field reads, with `name()`, `ordinal()` in vanilla's order and `values()`; it was the value's
+    text, so a `switch` over it (`AbstractBellBlock.getShape` through `$SwitchMap$...BellAttachType`)
+    threw `MatchException` and the bell had no shape. A mod class extending a vanilla block that doesn't
+    write its own `createBlockStateDefinition` gets that class's properties: bells, lecterns,
+    scaffolding, chests, barrels, hoppers, furnaces, anvils, grindstones, panes, dispensers, repeaters,
+    comparators, snow, leaves, crops, saplings, beds, cakes, candles (classes whose constructor
+    defaults aren't the property's first value, a campfire's `lit=true`, are left out until defaults
+    are read from the constructor). Create's haunted and peculiar bells now declare
+    `facing/attachment/powered` with `facing=north,attachment=floor,powered=false`, as vanilla's.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
