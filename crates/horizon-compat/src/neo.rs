@@ -347,6 +347,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.registered.get(&k).copied().unwrap_or(V::NULL)
         }
         (o, "getId") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => rt.get_field(a(0), "$id"),
+        // `DeferredItem.toStack([count])`, and Registrate's `asStack` reaching the holder: a stack of
+        // the item (a block's holder: its item, which has the block's name).
+        (o, "toStack" | "asStack") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && rt.get_field(a(0), "$id").r() != 0 => {
+            let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned();
+            let count = if desc.starts_with("(I)") { a(1).i() } else { 1 };
+            crate::api_common::stack(rt, &id, count)
+        }
         (o, "getKey" | "unwrapKey") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && rt.get_field(a(0), "$id").r() != 0 => {
             let reg = rt.get_field(a(0), "$registry");
             let id = rt.get_field(a(0), "$id");
