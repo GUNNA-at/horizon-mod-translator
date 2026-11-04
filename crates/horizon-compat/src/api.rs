@@ -317,6 +317,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             .or_else(|| crate::handlers::call_key(rt, key, args))
             .or_else(|| crate::components::call_key(rt, key, args))
             .or_else(|| crate::capabilities::call_key(rt, key, args))
+            .or_else(|| crate::entities::call_key(rt, key, args))
             .or_else(|| crate::creative::call(rt, key, args))
             .or_else(|| crate::functions::call(rt, key, args))
             .or_else(|| crate::blocks::call(rt, key, args))

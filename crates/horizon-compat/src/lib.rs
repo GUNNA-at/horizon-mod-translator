@@ -13,6 +13,7 @@ pub mod crafting;
 pub mod handlers;
 pub mod components;
 pub mod capabilities;
+pub mod entities;
 pub mod convention;
 pub mod creative;
 pub mod fluids;

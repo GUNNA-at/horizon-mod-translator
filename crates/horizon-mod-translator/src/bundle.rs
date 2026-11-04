@@ -28,7 +28,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
 /// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 22] = [
+const COMPAT: [(&str, &str); 23] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -40,6 +40,7 @@ const COMPAT: [(&str, &str); 22] = [
     ("handlers.rs", include_str!("../../horizon-compat/src/handlers.rs")),
     ("components.rs", include_str!("../../horizon-compat/src/components.rs")),
     ("capabilities.rs", include_str!("../../horizon-compat/src/capabilities.rs")),
+    ("entities.rs", include_str!("../../horizon-compat/src/entities.rs")),
     ("creative.rs", include_str!("../../horizon-compat/src/creative.rs")),
     ("fluids.rs", include_str!("../../horizon-compat/src/fluids.rs")),
     ("functions.rs", include_str!("../../horizon-compat/src/functions.rs")),
@@ -522,6 +523,36 @@ fn {id}_block_entity_tick(
         }}
         fn ingredient_items(&self, entry: &str) -> Vec<String> {{
             self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
+        }}
+        fn game_time(&self) -> i64 {{
+            self.game.native_game_time()
+        }}
+        fn item_entities(&self, b: [f64; 6]) -> Vec<{c}::host::ItemEntity> {{
+            let dim = self.game.native_dimension();
+            self.game.native_item_entities(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().map(|e| {c}::host::ItemEntity {{
+                id: e.id,
+                pos: e.position,
+                motion: e.motion,
+                on_ground: e.on_ground,
+                item: e.stack.item.to_string(),
+                count: e.stack.count,
+                pickup_delay: e.pickup_delay,
+                age: e.age,
+            }}).collect()
+        }}
+        fn set_item_entity(&mut self, id: u32, item: &str, count: u32) -> bool {{
+            let dim = self.game.native_dimension();
+            let stack = horizon_client::items::ItemStack::new(item, count);
+            self.game.native_set_item_entity(dim, id, stack)
+        }}
+        fn move_item_entity(&mut self, id: u32, pos: Option<[f64; 3]>, motion: Option<[f64; 3]>) -> bool {{
+            let dim = self.game.native_dimension();
+            self.game.native_move_item_entity(dim, id, pos, motion)
+        }}
+        fn spawn_item_entity(&mut self, item: &str, count: u32, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {{
+            let dim = self.game.native_dimension();
+            let stack = horizon_client::items::ItemStack::new(item, count);
+            self.game.native_spawn_item_entity(dim, stack, pos, motion, pickup_delay)
         }}
     }}
     let state = game.native_state_text_at(pos);

@@ -3934,6 +3934,9 @@ impl Game<'_> {
                 position: [e.position.x, e.position.y, e.position.z],
                 stack: e.stack.clone(),
                 pickup_delay: e.pickup_delay,
+                motion: [e.velocity.x, e.velocity.y, e.velocity.z],
+                on_ground: e.on_ground,
+                age: e.age,
             })
             .collect()
     }
@@ -3962,6 +3965,69 @@ impl Game<'_> {
             self.dropped[i].stack = stack;
         }
         true
+    }
+    /// Moves item entity `id` in the server level `dimension` to `position`
+    /// (`Entity.setPos`) and sets its motion (`setDeltaMovement`); `None`
+    /// keeps either. Players see it on their next tracker update, at once
+    /// for a new motion, as vanilla's `hurtMarked`. False when the level in
+    /// place has no such item entity, or on a client. API
+    /// @API:native_item_entity_motion@.
+    pub(super) fn native_move_item_entity(
+        &mut self,
+        dimension: &str,
+        id: u32,
+        position: Option<[f64; 3]>,
+        motion: Option<[f64; 3]>,
+    ) -> bool {
+        if (self.serving.is_none() && self.options.dedicated.is_none())
+            || dimension != self.dim.id()
+        {
+            return false;
+        }
+        let Some(e) = self.dropped.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        if let Some([x, y, z]) = position {
+            e.position = horizon_core::geometry::Vec3::new(x, y, z);
+        }
+        if let Some([x, y, z]) = motion {
+            e.velocity = horizon_core::geometry::Vec3::new(x, y, z);
+            e.needs_sync = true;
+        }
+        true
+    }
+    /// Adds an item entity of `stack` to the server level `dimension` at
+    /// `position` with motion `motion` and `pickup_delay`
+    /// (`level.addFreshEntity(new ItemEntity(...))`): its ID, or none when
+    /// the stack is empty, a native mod kept it out
+    /// (`native_entity_join_level`), the level isn't in place, or on a
+    /// client. API @API:native_item_entity_motion@.
+    pub(super) fn native_spawn_item_entity(
+        &mut self,
+        dimension: &str,
+        stack: ItemStack,
+        position: [f64; 3],
+        motion: [f64; 3],
+        pickup_delay: u32,
+    ) -> Option<u32> {
+        if (self.serving.is_none() && self.options.dedicated.is_none())
+            || dimension != self.dim.id()
+            || stack.count == 0
+        {
+            return None;
+        }
+        self.spawn_item(stack, position, motion, pickup_delay);
+        self.just_spawned_item().map(|e| e.id)
+    }
+    /// The game time of the world in place, in ticks (`Level.getGameTime`).
+    /// API @API:native_item_entity_motion@.
+    pub(super) fn native_game_time(&self) -> i64 {
+        self.world.game_time
+    }
+    /// The id of the level in place (`minecraft:overworld`), as the entity
+    /// hooks name it. API @API:native_item_entity_motion@.
+    pub(super) fn native_dimension(&self) -> &'static str {
+        self.dim.id()
     }
     /// Sets property `key` of the block at `pos` to `value`, as a furnace's
     /// tick sets its `lit` (`Level.setBlock` with `UPDATE_ALL`: neighbours
@@ -5569,6 +5635,12 @@ pub(super) struct NativeItemEntity {
     /// Ticks before a player may pick it up (`ItemEntity.pickupDelay`);
     /// hoppers take it whatever this is.
     pub pickup_delay: u32,
+    /// Blocks a tick (`getDeltaMovement`). API @API:native_item_entity_motion@.
+    pub motion: [f64; 3],
+    /// Resting on a block (`onGround`). API @API:native_item_entity_motion@.
+    pub on_ground: bool,
+    /// Ticks lived (`ItemEntity.age`). API @API:native_item_entity_motion@.
+    pub age: u32,
 }
 
 /// `AABB.intersects`: the boxes overlap, touching faces excluded.

@@ -385,7 +385,7 @@ pub(crate) fn item_like_name(rt: &Rt, v: V) -> String {
 }
 
 /// The next value of the runtime's random stream (xorshift64*).
-fn next_random(rt: &mut Rt) -> u64 {
+pub(crate) fn next_random(rt: &mut Rt) -> u64 {
     let mut x = rt.random_state.max(1);
     x ^= x >> 12;
     x ^= x << 25;

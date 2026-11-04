@@ -12,6 +12,37 @@ pub enum Model {
     Named(String),
 }
 
+/// An item entity of the server level (`ItemEntity`), as translated code reads it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemEntity {
+    /// The entity's id, for [`Host::set_item_entity`].
+    pub id: u32,
+    /// Its feet: the bottom centre of its box (0.25 wide and tall).
+    pub pos: [f64; 3],
+    /// Blocks a tick (`getDeltaMovement`).
+    pub motion: [f64; 3],
+    pub on_ground: bool,
+    pub item: String,
+    pub count: u32,
+    /// Ticks before a player may pick it up.
+    pub pickup_delay: u32,
+    /// Ticks lived (`ItemEntity.age`).
+    pub age: u32,
+}
+
+impl ItemEntity {
+    /// Its box (`getBoundingBox`): min x, y, z, then max.
+    pub fn bounds(&self) -> [f64; 6] {
+        let [x, y, z] = self.pos;
+        [x - 0.125, y, z - 0.125, x + 0.125, y + 0.25, z + 0.125]
+    }
+}
+
+/// `AABB.intersects`: boxes (min x, y, z, max x, y, z) overlap, touching faces excluded.
+pub fn boxes_meet(a: &[f64; 6], b: &[f64; 6]) -> bool {
+    (0..3).all(|i| a[i] < b[i + 3] && b[i] < a[i + 3])
+}
+
 pub trait Host {
     /// The block state at a position, as `minecraft:stone` or `create:shaft[axis=y]`.
     fn block_state(&self, pos: [i32; 3]) -> String;
@@ -91,6 +122,26 @@ pub trait Host {
     fn ingredient_items(&self, _entry: &str) -> Vec<String> {
         Vec::new()
     }
+    /// The server level's item entities whose box meets `bounds` (min x, y, z, max x, y, z), in
+    /// the level's order (`Level.getEntitiesOfClass(ItemEntity.class, box)`). None on a client.
+    fn item_entities(&self, _bounds: [f64; 6]) -> Vec<ItemEntity> {
+        Vec::new()
+    }
+    /// Sets item entity `id`'s stack (`ItemEntity.setItem`); a count of 0 removes the entity
+    /// (`discard`). False when the level has no such item entity.
+    fn set_item_entity(&mut self, _id: u32, _item: &str, _count: u32) -> bool {
+        false
+    }
+    /// Moves item entity `id` (`setPos`) and sets its motion (`setDeltaMovement`); `None` keeps
+    /// either. False when the level has no such item entity.
+    fn move_item_entity(&mut self, _id: u32, _pos: Option<[f64; 3]>, _motion: Option<[f64; 3]>) -> bool {
+        false
+    }
+    /// Adds an item entity to the server level (`addFreshEntity(new ItemEntity(...))`): its id,
+    /// or none when the level takes none (a client).
+    fn spawn_item_entity(&mut self, _item: &str, _count: u32, _pos: [f64; 3], _motion: [f64; 3], _pickup_delay: u32) -> Option<u32> {
+        None
+    }
 }
 
 /// A world in a map, for tests and tools. Unset positions are air.
@@ -121,6 +172,8 @@ pub struct MemoryHost {
     pub block_items: Vec<String>,
     /// Stack limits other than 64.
     pub stack_limits: HashMap<String, u32>,
+    /// The level's item entities, in order.
+    pub item_entities: Vec<ItemEntity>,
 }
 
 impl Host for MemoryHost {
@@ -197,6 +250,35 @@ impl Host for MemoryHost {
             None if self.items.is_empty() || self.items.iter().any(|i| i == entry) => vec![entry.to_owned()],
             None => Vec::new(),
         }
+    }
+    fn item_entities(&self, bounds: [f64; 6]) -> Vec<ItemEntity> {
+        self.item_entities.iter().filter(|e| e.count > 0 && boxes_meet(&e.bounds(), &bounds)).cloned().collect()
+    }
+    fn set_item_entity(&mut self, id: u32, item: &str, count: u32) -> bool {
+        let Some(i) = self.item_entities.iter().position(|e| e.id == id) else { return false };
+        if count == 0 {
+            self.item_entities.remove(i);
+        } else {
+            let e = &mut self.item_entities[i];
+            e.item = item.to_owned();
+            e.count = count;
+        }
+        true
+    }
+    fn move_item_entity(&mut self, id: u32, pos: Option<[f64; 3]>, motion: Option<[f64; 3]>) -> bool {
+        let Some(e) = self.item_entities.iter_mut().find(|e| e.id == id) else { return false };
+        if let Some(p) = pos {
+            e.pos = p;
+        }
+        if let Some(m) = motion {
+            e.motion = m;
+        }
+        true
+    }
+    fn spawn_item_entity(&mut self, item: &str, count: u32, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {
+        let id = self.item_entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+        self.item_entities.push(ItemEntity { id, pos, motion, on_ground: false, item: item.to_owned(), count, pickup_delay, age: 0 });
+        Some(id)
     }
 }
 

@@ -472,6 +472,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     defaults aren't the property's first value, a campfire's `lit=true`, are left out until defaults
     are read from the constructor). Create's haunted and peculiar bells now declare
     `facing/attachment/powered` with `facing=north,attachment=floor,powered=false`, as vanilla's.
+  - [x] 2026-11-04 Item entities (`entities.rs`; tests `entities::tests`; in-game check pending).
+    The server level's item entities are objects for translated code: `Level.getEntitiesOfClass` /
+    `getEntities` over a box (one object per entity while queries keep returning it, with its
+    NeoForge persistent data), `getItem/setItem`, `discard/kill/remove`, motion and position,
+    `new ItemEntity(...)` + `addFreshEntity`, `Block.popResource`, `Containers.dropItemStack`. The
+    Host gained `item_entities`, `set_item_entity`, `move_item_entity`, `spawn_item_entity`; the game
+    gained `native_move_item_entity`, `native_spawn_item_entity`, `native_game_time`,
+    `native_dimension`, and `NativeItemEntity` carries motion, `on_ground` and age. Contacts: a mod
+    block with a block entity that overrides `updateEntityAfterFallOn` or `entityInside` is told
+    of item entities resting on it or in its cell from its block entity's tick (vanilla's
+    `Entity.move` reports them to the block; Create's basin, belt, depot, chute, saw, millstone,
+    crushing wheel and funnel take items this way). An item resting in the cell counts as on the
+    block, since the game holds it on the general collision box where Create's item-only shape
+    (a basin's raised floor) would put it on the block itself.
+    Also traced (with `HORIZON_COMPAT_TRACE`): the first update tags the server sends and the
+    client loads for each block entity, with the items they hold.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

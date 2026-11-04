@@ -141,9 +141,6 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
     // constructor set (an empty compound would read every field as absent: Create's creative motor
     // would lose its default speed).
     if !nbt.is_empty() {
-        let keys: Vec<&str> = nbt.keys().map(String::as_str).collect();
-        let keys = keys.join(",");
-        trace_once(rt, &format!("tag/{pos:?}/{keys}"), |_| format!("client: {block} at {pos:?} loads an update tag with {keys}"));
         let tag = crate::nbt::to_runtime(rt, nbt);
         let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
         vc(rt, LOAD, LOAD, &[be, tag, provider]);
@@ -177,6 +174,10 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
             rt.call_functional(TICKER_TICK, ticker, &[level, p, st, be]);
         }
         rt.report_thrown("the block entity's tick");
+        // Item entities on or in the block, as their moves report them to it.
+        if rt.host().is_some_and(|h| h.is_server()) {
+            crate::entities::item_contacts(rt, pos, b, st);
+        }
         let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
         api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
         let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
@@ -446,24 +447,57 @@ pub fn block_entity_update_tag(rt: &mut Rt, pos: [i32; 3]) -> Option<std::collec
     let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
     let tag = vc(rt, GET_UPDATE_TAG_KEY, GET_UPDATE_TAG, &[be, provider]);
     rt.report_thrown("getUpdateTag");
-    (tag.r() != 0).then(|| crate::nbt::from_runtime(rt, tag))
+    let nbt = (tag.r() != 0).then(|| crate::nbt::from_runtime(rt, tag))?;
+    let brief = nbt_brief(&nbt);
+    trace_some(rt, &format!("server-tag/{pos:?}"), &brief, 8, |_| format!("server: update tag sent for {pos:?}: {brief}"));
+    Some(nbt)
 }
 
-/// The client's copy of the mod block entity at `pos`: made the first time, and loaded from `nbt`
-/// (the update tag the server sent) whenever that changes, as `handleUpdateTag` does in vanilla.
 /// With `HORIZON_COMPAT_TRACE` set, prints `msg` the first time `key` comes up on this runtime.
 pub(crate) fn trace_once(rt: &mut Rt, key: &str, msg: impl FnOnce(&Rt) -> String) {
+    trace_some(rt, "once", key, i32::MAX, msg);
+}
+
+/// [`trace_once`] for at most `limit` keys of `group` (a block entity's first update tags).
+pub(crate) fn trace_some(rt: &mut Rt, group: &str, key: &str, limit: i32, msg: impl FnOnce(&Rt) -> String) {
     if !Rt::tracing() {
         return;
     }
-    let key = format!("trace/{key}");
-    if rt.interned.contains_key(&key) {
+    let key = format!("trace/{group}/{key}");
+    let count_key = format!("trace-count/{group}");
+    let n = rt.interned.get(&count_key).map_or(0, |v| v.i());
+    if n >= limit || rt.interned.contains_key(&key) {
         return;
     }
+    rt.interned.insert(count_key, V::I(n + 1));
     rt.interned.insert(key, V::I(1));
     eprintln!("horizon-compat: {}", msg(rt));
 }
 
+/// A compound's keys, and the `id`s anywhere in it (the items a block entity holds), for traces.
+fn nbt_brief(nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> String {
+    fn ids(n: &crate::nbt::Nbt, out: &mut Vec<String>) {
+        match n {
+            crate::nbt::Nbt::Compound(c) => {
+                for (k, v) in c {
+                    match v {
+                        crate::nbt::Nbt::String(s) if k == "id" => out.push(s.clone()),
+                        _ => ids(v, out),
+                    }
+                }
+            }
+            crate::nbt::Nbt::List(l) => l.iter().for_each(|v| ids(v, out)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    ids(&crate::nbt::Nbt::Compound(nbt.clone()), &mut found);
+    let keys: Vec<&str> = nbt.keys().map(String::as_str).collect();
+    format!("{} holding {:?}", keys.join(","), found)
+}
+
+/// The client's copy of the mod block entity at `pos`: made the first time, and loaded from `nbt`
+/// (the update tag the server sent) whenever that changes, as `handleUpdateTag` does in vanilla.
 fn client_block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Option<V> {
     let (block, _) = crate::host::split_state(state);
     let synced = crate::nbt::hash(nbt) as i64;
@@ -493,6 +527,8 @@ fn client_block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::colle
     };
     // An empty update tag isn't sent (vanilla's chunk data carries none), so nothing is loaded.
     if !nbt.is_empty() {
+        let brief = nbt_brief(nbt);
+        trace_some(rt, &format!("client-tag/{pos:?}"), &brief, 8, |_| format!("client: {block} at {pos:?} loads an update tag: {brief}"));
         let tag = crate::nbt::to_runtime(rt, nbt);
         let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
         vc(rt, HANDLE_UPDATE_TAG_KEY, HANDLE_UPDATE_TAG, &[be, tag, provider]);
