@@ -649,6 +649,23 @@ pub fn server_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
     });
 }
 
+const LEVEL_TICK_PRE: &str = "net/neoforged/neoforge/event/tick/LevelTickEvent$Pre";
+const LEVEL_TICK_POST: &str = "net/neoforged/neoforge/event/tick/LevelTickEvent$Post";
+
+/// A server level's tick (`ServerLevel.tick`): `LevelTickEvent.Pre` before it, `.Post` after it, on
+/// the server's level. Create ticks its contraptions, couplings, trains and logistics there.
+pub fn level_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let class = if post { LEVEL_TICK_POST } else { LEVEL_TICK_PRE };
+        let ev = rt.new_object(class);
+        let l = level(rt);
+        rt.put_field(ev, "$level", l);
+        crate::neo::post(rt, class, ev);
+    });
+}
+
 /// A mod payload the server sent the window's game (`native_net_from_server`), to its handler.
 /// False when no payload type of this mod has that id.
 pub fn payload_from_server(rt: &mut Rt, host: &mut dyn Host, channel: &str, data: &[u8]) -> bool {

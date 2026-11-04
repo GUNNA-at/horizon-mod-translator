@@ -280,8 +280,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
-        // Level events: the level they're about.
-        (o, "getLevel") if o.starts_with("net/neoforged/neoforge/event/level/LevelEvent") => rt.get_field(a(0), "$level"),
+        // Level events and a level's tick: the level they're about, with time to spare (`hasTime`).
+        (o, "getLevel") if o.starts_with("net/neoforged/neoforge/event/level/LevelEvent") || o.starts_with("net/neoforged/neoforge/event/tick/LevelTickEvent") => {
+            rt.get_field(a(0), "$level")
+        }
+        (o, "hasTime") if o.starts_with("net/neoforged/neoforge/event/tick/LevelTickEvent") => V::I(1),
         // The server's tick: the one server, with time to spare (`hasTime`).
         (o, "getServer") if o.starts_with("net/neoforged/neoforge/event/tick/ServerTickEvent") => {
             rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
