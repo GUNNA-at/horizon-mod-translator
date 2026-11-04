@@ -1156,6 +1156,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     draws nothing (a shaft adds no stress, so Create shows nothing either), and so does the motor
     without goggles. Bundle: `gui_layer_pre`/`gui_layer_post` helpers, whose host draws with
     `native_quad`, `native_sprite`, `native_text` and `native_item` into the frame's `HudBatch`.
+    Checked in game (offscreen, survival, goggles put on with `item replace ... armor.head`): at the
+    creative motor the HUD shows the same tooltip beside the crosshair (the goggles' icon, the box
+    and its border, "Generator Stats:", "Kinetic Stress Capacity:", "262,144su at current speed" in
+    their colours); at the shaft nothing, and at the motor bare-headed nothing; no exception in the
+    log.
   - [x] 2026-11-04 An `Equipable` mod item is declared with 26.3's `equippable` component, its slot
     from its own `getEquipmentSlot` (`blocks::equippable`): Create's goggles are
     `{"minecraft:equippable": {"slot": "head"}}` (harness `DECLARE`, `SHOW=` lists every item: the
