@@ -700,6 +700,36 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let horizontal = native(rt, a(0))[0] == 0;
             V::I((a(1).r() != 0 && (native(rt, a(1))[0] >= 2) == horizontal) as i32)
         }
+        // Walked in vanilla's order: north, east, south, west; up, down.
+        ("net/minecraft/core/Direction$Plane", "iterator" | "stream" | "forEach" | "shuffledCopy" | "length" | "getRandomDirection") => {
+            let faces: &[i64] = if native(rt, a(0))[0] == 0 { &[2, 5, 3, 4] } else { &[1, 0] };
+            let mut ds: Vec<V> = faces.iter().map(|&o| direction(rt, o)).collect();
+            match name {
+                "iterator" => crate::jutil::new_iter(rt, ds),
+                "stream" => rt.alloc("java/util/stream/Stream", Data::Stream(ds)),
+                "length" => V::I(ds.len() as i32),
+                "getRandomDirection" => {
+                    let i = (next_random(rt) >> 33) as usize % ds.len();
+                    ds[i]
+                }
+                "shuffledCopy" => {
+                    for i in (1..ds.len()).rev() {
+                        let j = (next_random(rt) >> 33) as usize % (i + 1);
+                        ds.swap(i, j);
+                    }
+                    crate::jutil::new_list(rt, ds)
+                }
+                _ => {
+                    for d in ds {
+                        rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", a(1), &[d]);
+                        if rt.thrown.is_some() {
+                            break;
+                        }
+                    }
+                    V::Void
+                }
+            }
+        }
         ("net/minecraft/core/Direction$Axis", "isVertical") => V::I((native(rt, a(0))[0] == 1) as i32),
         ("net/minecraft/core/Direction$Axis", "isHorizontal") => V::I((native(rt, a(0))[0] != 1) as i32),
         ("net/minecraft/core/Direction$Axis", "ordinal") => V::I(native(rt, a(0))[0] as i32),
@@ -994,6 +1024,21 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 ("dot", _) => {
                     let q = xyz(rt, a(1));
                     V::D(p[0] * q[0] + p[1] * q[1] + p[2] * q[2])
+                }
+                // `Double.compare(...) == 0` per axis: NaN equals NaN, 0.0 doesn't equal -0.0.
+                ("equals", _) => {
+                    let q = xyz(rt, a(1));
+                    let same = |x: f64, y: f64| x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan());
+                    V::I((rt.class_of(a(1)) == "net/minecraft/world/phys/Vec3" && (0..3).all(|i| same(p[i], q[i]))) as i32)
+                }
+                ("hashCode", _) => {
+                    // `Double.doubleToLongBits` folded as vanilla's `Vec3.hashCode`.
+                    let bits = |d: f64| {
+                        let l = if d.is_nan() { 0x7ff8_0000_0000_0000u64 } else { d.to_bits() };
+                        (l ^ (l >> 32)) as i32
+                    };
+                    let h = bits(p[0]).wrapping_mul(31).wrapping_add(bits(p[1])).wrapping_mul(31).wrapping_add(bits(p[2]));
+                    V::I(h)
                 }
                 _ => return None,
             }
@@ -1495,6 +1540,14 @@ mod tests {
         let up = api::direction(&mut rt, 1);
         assert_eq!(c(&mut rt, "net/minecraft/core/Direction$Plane.test.(Lnet/minecraft/core/Direction;)Z", &[horizontal, east]), V::I(1));
         assert_eq!(c(&mut rt, "net/minecraft/core/Direction$Plane.test.(Lnet/minecraft/core/Direction;)Z", &[horizontal, up]), V::I(0));
+        // `for (Direction d : Plane.HORIZONTAL)`, through `Iterable`: north, east, south, west.
+        let it = c(&mut rt, "java/lang/Iterable.iterator.()Ljava/util/Iterator;", &[horizontal]);
+        let mut walked = Vec::new();
+        while c(&mut rt, "java/util/Iterator.hasNext.()Z", &[it]).i() != 0 {
+            let d = c(&mut rt, "java/util/Iterator.next.()Ljava/lang/Object;", &[it]);
+            walked.push(super::native(&rt, d)[0]);
+        }
+        assert_eq!(walked, [2, 5, 3, 4]);
         // Nearest: (1, 0, 0) is east; (0, 0, 0) falls back to north; a tie goes to the first (down before up).
         let nearest = "net/minecraft/core/Direction.getNearest.(FFF)Lnet/minecraft/core/Direction;";
         assert_eq!(c(&mut rt, nearest, &[V::F(1.0), V::F(0.0), V::F(0.0)]), api::direction(&mut rt, 5));
