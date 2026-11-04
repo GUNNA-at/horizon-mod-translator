@@ -15,6 +15,12 @@ use std::collections::BTreeMap;
 pub const MAIN: u8 = 0;
 pub const OFF: u8 = 1;
 
+/// `hand` as an `InteractionHand` constant.
+pub fn constant(rt: &mut Rt, hand: u8) -> V {
+    let field = if hand == OFF { "OFF_HAND" } else { "MAIN_HAND" };
+    api_common::get_static(rt, "net/minecraft/world/InteractionHand", field).unwrap_or(V::NULL)
+}
+
 fn record(rt: &mut Rt, hand: u8) -> V {
     let key = if hand == OFF { "compat:hand/off" } else { "compat:hand/main" };
     rt.intern(key.into(), |rt| rt.new_object("compat:Hand"))

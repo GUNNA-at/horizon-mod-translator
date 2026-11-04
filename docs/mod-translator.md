@@ -1061,6 +1061,19 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `COMPONENTS`, `HOLD`, `USE` print the same as before. Gaps: a mod item's hooks run from the
     main hand only (an item used from the off hand is the game's); a mod's `Consumer` passed to
     `hurtAndBreak` isn't called on a break. In-game check pending.
+  - [x] 2026-11-04 A mod item's hooks from either hand. The game asks its hooks once per hand, as
+    vanilla does (`ServerPlayerGameMode.useItemOn` and `useItem` per `InteractionHand`); the bundle
+    now passes the acting hand (`game.hand`) instead of skipping the off hand: a block's
+    `useItemOn` gets that hand's stack and constant (`useWithoutItem` stays the main hand's),
+    `useOn`'s context (`Placement.hand`: `getHand`, `getItemInHand`) and `use` act for it, a use
+    over time's `onUseTick`, `finishUsingItem` and `releaseUsing` get the hand that used it
+    (`getUsedItemHand`), and what they do reaches that hand. `glue::use_block`, `glue::use_item`,
+    `item_use::{finish_using_item, release_using, use_tick}` take the hand; `hand::constant`.
+    Harness `SANDPAPER=1` round 2: the paper in the off hand, 3 rose quartz in the main hand:
+    `use` takes one from the main hand (2 left), the component goes on the off-hand paper, and
+    the finish gives polished rose quartz and wears the off-hand paper to 1. Rounds 0 and 1,
+    `COMPONENTS`, `HOLD`, `USE`, and the `regress.sh` set print as before (object ids and hash
+    order aside; FAN, PRESS and MIX reach one unmapped call fewer: `hasCraftingRemainingItem`).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

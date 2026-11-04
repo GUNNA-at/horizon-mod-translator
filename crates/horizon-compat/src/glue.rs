@@ -253,8 +253,10 @@ const USE_WITHOUT_ITEM: &str = "useWithoutItem.(Lnet/minecraft/world/level/block
 /// `right_click_block`: the acting player right clicks the mod block at `pos` on face `face` (a
 /// direction ordinal), as `ServerPlayerGameMode.useItemOn` asks the block: `useItemOn` with the held
 /// stack first, then, when it passes to the default, `useWithoutItem`. True when the block took the
-/// click (the game's own handling then stops).
-pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, face: i64) -> bool {
+/// click (the game's own handling then stops). The game asks once per hand, as vanilla's
+/// `ServerPlayerGameMode.useItemOn`: `hand` is the one acting, and only the main hand's click
+/// reaches `useWithoutItem`.
+pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, face: i64, hand: u8) -> bool {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
     let Some((b, class)) = mod_block(rt, state) else { return false };
@@ -272,15 +274,15 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
         let hit = crate::api_common::hit(rt, pos, face);
         let mut took = None;
         if with_item {
-            let hand = api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
-            let stack = api::call(rt, "net/minecraft/world/entity/player/Player.getItemInHand.(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;", &[player, hand]);
+            let stack = crate::hand::stack(rt, hand);
+            let hand = crate::hand::constant(rt, hand);
             let r = vc(rt, USE_ITEM_ON, USE_ITEM_ON, &[b, stack, st, l, p, player, hand, hit]);
             let name = rt.str_of(r).unwrap_or("PASS_TO_DEFAULT_BLOCK_INTERACTION").to_owned();
             if name != "PASS_TO_DEFAULT_BLOCK_INTERACTION" {
                 took = Some(true); // consumed, skipped or failed: the click is the block's
             }
         }
-        if took.is_none() && without {
+        if took.is_none() && without && hand == crate::hand::MAIN {
             let r = vc(rt, USE_WITHOUT_ITEM, USE_WITHOUT_ITEM, &[b, st, l, p, player, hit]);
             let name = rt.str_of(r).unwrap_or("PASS").to_owned();
             took = Some(name != "PASS");
@@ -317,12 +319,12 @@ pub fn use_item_on(rt: &mut Rt, host: &mut dyn Host, click: &Placement) -> bool 
 const USE: &str = "use.(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResultHolder;";
 const USE_KEY: &str = "net/minecraft/world/item/Item.use.(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResultHolder;";
 
-/// `native_use_item` (server): a right click with one of the mod's items in the main hand, in the
-/// air or on a block that let it through: its class's own `Item.use` (Create's goggles, filters,
-/// experience nuggets). True when the use takes the click (its result consumes the action, so the
-/// game's own use of the item doesn't run). What the use did to the stack in hand reaches the
-/// game's; a stack it answered instead goes in the hand (`ServerPlayerGameMode.useItem`).
-pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
+/// `native_use_item` (server): a right click with one of the mod's items in `hand`, in the air or on
+/// a block that let it through: its class's own `Item.use` (Create's goggles, filters, experience
+/// nuggets). True when the use takes the click (its result consumes the action, so the game's own
+/// use of the item doesn't run). What the use did to the stack in hand reaches the game's; a stack
+/// it answered instead goes in that hand (`ServerPlayerGameMode.useItem`).
+pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str, hand: u8) -> bool {
     rt.safe_point();
     let Some(&it) = rt.registered.get(&("item".to_owned(), item.to_owned())) else { return false };
     let class = rt.class_of(it);
@@ -331,12 +333,12 @@ pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
     }
     rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| {
         let Some(vc) = rt.vcall else { return false };
-        let held = crate::hand::stack(rt, crate::hand::MAIN);
+        let held = crate::hand::stack(rt, hand);
         let l = level(rt);
         let player = crate::api_common::acting_player(rt);
-        let hand = api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
+        let constant = crate::hand::constant(rt, hand);
         crate::item_use::use_begins(rt, item);
-        let r = vc(rt, USE_KEY, USE, &[it, l, player, hand]);
+        let r = vc(rt, USE_KEY, USE, &[it, l, player, constant]);
         let thrown = rt.thrown.is_some();
         rt.report_thrown("use");
         if thrown || r.r() == 0 {
@@ -349,7 +351,7 @@ pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
         let started = crate::item_use::use_started(rt);
         let answered = rt.get_field(r, "$object");
         if (took || started) && answered.r() != 0 && answered != held {
-            crate::hand::replace(rt, crate::hand::MAIN, answered);
+            crate::hand::replace(rt, hand, answered);
         }
         took && !started
     }))
@@ -377,6 +379,8 @@ pub struct Placement {
     pub pitch: f32,
     /// The item in hand (`create:shaft`); empty for none.
     pub item: String,
+    /// The hand that holds it, as `InteractionHand`'s ordinal ([`crate::hand::MAIN`] or `OFF`).
+    pub hand: u8,
     /// The block goes into the clicked position (`replacingClickedOnBlock`).
     pub replace_clicked: bool,
 }

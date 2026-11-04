@@ -108,10 +108,10 @@ pub fn use_may_start(rt: &mut Rt, item: &str) -> Option<bool> {
     (!has_food(rt, it)).then_some(false)
 }
 
-/// The player a use's hook acts for, using the main hand with `left` ticks left.
-fn user(rt: &mut Rt, left: i32) -> V {
+/// The player a use's hook acts for, using `hand` with `left` ticks left.
+fn user(rt: &mut Rt, left: i32, hand: u8) -> V {
     let p = api_common::acting_player(rt);
-    let hand = api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
+    let hand = hand::constant(rt, hand);
     rt.put_field(p, "$usingHand", hand);
     rt.put_field(p, "$useLeft", V::I(left));
     p
@@ -129,18 +129,19 @@ fn contents(rt: &Rt, stack: V) -> Option<(String, u32)> {
 /// the game's own finish (a food eaten, its remainder given). The mod gets the stack in hand when
 /// the hand still holds the item, else an emptied stack of it (the game ate the last one). What it
 /// did to the hand reaches the game's; a stack it answered goes in the hand, as `completeUsingItem`
-/// puts it there (an empty answer leaves what the game left). False when its class has none.
-pub fn finish_using_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
+/// puts it there (an empty answer leaves what the game left). `hand` is the hand that used it. False
+/// when its class has none.
+pub fn finish_using_item(rt: &mut Rt, host: &mut dyn Host, item: &str, hand: u8) -> bool {
     rt.safe_point();
     let Some(it) = own(rt, item, FINISH) else { return false };
     rt.with_host(host, |rt| {
         hand::with_hand(rt, |rt| {
             let Some(vc) = rt.vcall else { return false };
-            let held = hand::stack(rt, hand::MAIN);
+            let held = hand::stack(rt, hand);
             let in_hand = contents(rt, held).is_some_and(|(h, _)| h == item);
             let stack = if in_hand { held } else { api_common::stack(rt, item, 0) };
             let level = glue::level(rt);
-            let player = user(rt, 0);
+            let player = user(rt, 0, hand);
             let r = vc(rt, FINISH_KEY, FINISH, &[it, stack, level, player]);
             let thrown = rt.thrown.is_some();
             rt.report_thrown("finishUsingItem");
@@ -148,7 +149,7 @@ pub fn finish_using_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
                 return true;
             }
             if r.r() != 0 && r != held && (in_hand || !api_common::stack_empty(rt, r)) {
-                hand::replace(rt, hand::MAIN, r);
+                hand::replace(rt, hand, r);
             }
             true
         })
@@ -157,15 +158,16 @@ pub fn finish_using_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
 
 /// `Item.releaseUsing(stack, level, entity, timeLeft)` of the mod's `item`: the button let go with
 /// `time_left` ticks of its use left. What it does to the stack in hand (a thrown package leaves it)
-/// reaches the hand. False when its class has none, or the hand doesn't hold the item.
-pub fn release_using(rt: &mut Rt, host: &mut dyn Host, item: &str, time_left: i32) -> bool {
+/// reaches the hand. `hand` is the hand that used it. False when its class has none, or that hand
+/// doesn't hold the item.
+pub fn release_using(rt: &mut Rt, host: &mut dyn Host, item: &str, time_left: i32, hand: u8) -> bool {
     rt.safe_point();
     let Some(it) = own(rt, item, RELEASE) else { return false };
     rt.with_host(host, |rt| {
         hand::with_hand(rt, |rt| {
             let Some(vc) = rt.vcall else { return false };
-            let player = user(rt, time_left);
-            let Some(stack) = held_stack(rt, item) else { return false };
+            let player = user(rt, time_left, hand);
+            let Some(stack) = held_stack(rt, item, hand) else { return false };
             let level = glue::level(rt);
             vc(rt, RELEASE_KEY, RELEASE, &[it, stack, level, player, V::I(time_left)]);
             rt.report_thrown("releaseUsing");
@@ -176,14 +178,14 @@ pub fn release_using(rt: &mut Rt, host: &mut dyn Host, item: &str, time_left: i3
 
 /// `Item.onUseTick(level, entity, stack, remaining)` of the mod's `item`, each tick it is used with
 /// `remaining` ticks left. As [`release_using`].
-pub fn use_tick(rt: &mut Rt, host: &mut dyn Host, item: &str, remaining: i32) -> bool {
+pub fn use_tick(rt: &mut Rt, host: &mut dyn Host, item: &str, remaining: i32, hand: u8) -> bool {
     rt.safe_point();
     let Some(it) = own(rt, item, USE_TICK) else { return false };
     rt.with_host(host, |rt| {
         hand::with_hand(rt, |rt| {
             let Some(vc) = rt.vcall else { return false };
-            let player = user(rt, remaining);
-            let Some(stack) = held_stack(rt, item) else { return false };
+            let player = user(rt, remaining, hand);
+            let Some(stack) = held_stack(rt, item, hand) else { return false };
             let level = glue::level(rt);
             vc(rt, USE_TICK_KEY, USE_TICK, &[it, level, player, stack, V::I(remaining)]);
             rt.report_thrown("onUseTick");
@@ -192,9 +194,9 @@ pub fn use_tick(rt: &mut Rt, host: &mut dyn Host, item: &str, remaining: i32) ->
     })
 }
 
-/// The stack in the main hand, when it is `item`: the one object the hook's player answers.
-fn held_stack(rt: &mut Rt, item: &str) -> Option<V> {
-    let stack = hand::stack(rt, hand::MAIN);
+/// The stack in `hand`, when it is `item`: the one object the hook's player answers.
+fn held_stack(rt: &mut Rt, item: &str, hand: u8) -> Option<V> {
+    let stack = hand::stack(rt, hand);
     contents(rt, stack).filter(|(h, _)| h == item).map(|_| stack)
 }
 

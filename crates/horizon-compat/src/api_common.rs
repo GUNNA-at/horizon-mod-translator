@@ -2430,12 +2430,12 @@ fn context(rt: &mut Rt, p: &crate::glue::Placement, class: &'static str) -> V {
     let player = acting_player(rt);
     rt.put_field(player, "$yaw", V::F(p.yaw));
     rt.put_field(player, "$pitch", V::F(p.pitch));
-    let hand = get_static(rt, "net/minecraft/world/InteractionHand", "MAIN_HAND").unwrap_or(V::NULL);
+    let hand = crate::hand::constant(rt, p.hand);
     // The stack in hand, as the player's own (`getItemInHand`), when it holds the item.
     let item = if p.item.is_empty() {
         get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL)
-    } else if rt.host().and_then(|h| h.player_held()).is_some_and(|(id, _)| id == p.item) {
-        crate::hand::stack(rt, crate::hand::MAIN)
+    } else if rt.host().and_then(|h| h.player_hand(p.hand)).is_some_and(|s| s.item == p.item) {
+        crate::hand::stack(rt, p.hand)
     } else {
         stack(rt, &p.item, 1)
     };
