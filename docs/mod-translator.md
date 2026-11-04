@@ -512,6 +512,8 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `SimpleRegistry` (stress values, display targets, spouting and movement behaviours) is built on
     `Object2ReferenceMaps.synchronize(...)`, which came back void, so nothing registered in it.
     `values()` of `DyeColor`, `WeatheringCopper.WeatherState`, `ArmorItem.Type`; `Direction.name()`.
+    Guava's `ImmutableList.of(e1, ..., e12, E... others)` takes the rest from its array (the array
+    was one element: Create's package styles, 14 of them, iterated an array as a style).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

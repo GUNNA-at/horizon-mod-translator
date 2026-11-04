@@ -603,8 +603,21 @@ fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // The elements a variadic factory was given: `of(E...)` is one array; Guava's
+    // `ImmutableList.of(e1, ..., e12, E... others)` is the fixed ones, then the array's.
     let varargs = |rt: &Rt| -> Vec<V> {
-        if desc.starts_with("([") { elements(rt, a(0)) } else { args.to_vec() }
+        if desc.starts_with("([") {
+            return elements(rt, a(0));
+        }
+        let params = desc.split(')').next().unwrap_or("");
+        match args.split_last() {
+            Some((&last, fixed)) if params.ends_with("[Ljava/lang/Object;") => {
+                let mut v = fixed.to_vec();
+                v.extend(elements(rt, last));
+                v
+            }
+            _ => args.to_vec(),
+        }
     };
     Some(match (owner, name) {
         // Minecraft's `NonNullList`: a list (`withSize` holds its default `size` times).
@@ -1719,6 +1732,18 @@ mod tests {
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))
+    }
+
+    #[test]
+    fn guava_of_past_twelve_elements_takes_the_rest_from_its_array() {
+        let mut rt = Rt::new();
+        let xs: Vec<V> = (0..14).map(|i| int_box(&mut rt, i)).collect();
+        let rest = rt.alloc("[Ljava/lang/Object;", Data::Array(xs[12..].to_vec()));
+        let mut args = xs[..12].to_vec();
+        args.push(rest);
+        let key = "com/google/common/collect/ImmutableList.of.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;[Ljava/lang/Object;)Lcom/google/common/collect/ImmutableList;";
+        let l = c(&mut rt, key, &args);
+        assert_eq!(elements(&rt, l), xs);
     }
 
     #[test]
