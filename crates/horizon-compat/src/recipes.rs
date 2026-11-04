@@ -656,11 +656,31 @@ fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
+    owner.starts_with(INGREDIENT)
+        || matches!(
+            owner,
+            "net/neoforged/neoforge/common/crafting/CompoundIngredient"
+                | FLUID_INGREDIENT
+                | SIZED_FLUID
+                | MANAGER
+                | BREWING
+                | HOLDER
+                | RECIPE_TYPE
+                | SINGLE_INPUT
+                | RECIPE_INPUT
+                | COMPONENT_PATCH
+        )
+        || matches!(name, "getRecipeManager" | "potionBrewing")
+        || crate::crafting::claims(owner, name, desc)
+}
+
 /// Calls on recipes and their pieces; None for what this module doesn't model.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     // NeoForge's `CompoundIngredient.of(children...)`: an ingredient of every child's entries.
     if owner == "net/neoforged/neoforge/common/crafting/CompoundIngredient" && name == "of" {
         let children = if desc.starts_with("([") || desc.starts_with("(Ljava/util/") { jutil::elements(rt, a(0)) } else { args.to_vec() };

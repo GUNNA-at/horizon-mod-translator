@@ -322,10 +322,20 @@ fn set_vec4(rt: &mut Rt, v: V, [x, y, z, w]: [f32; 4]) {
     rt.put_field(v, "w", V::F(w));
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+    owner.starts_with("org/joml/")
+        || owner.starts_with("com/mojang/blaze3d/")
+        || owner == "com/mojang/math/Axis"
+        || owner.starts_with("net/minecraft/client/")
+        || owner.starts_with("net/neoforged/")
+        || INTRINSICS.iter().any(|k| k.split_once('.').is_some_and(|(o, _)| o == owner))
+}
+
 /// The client's calls this module models (`owner.name.desc`), or None.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     match owner {
         "org/joml/Matrix4f" | "org/joml/Matrix4fc" => matrix4(rt, name, desc, args),
         "org/joml/Matrix3f" | "org/joml/Matrix3fc" => matrix3(rt, name, desc, args),

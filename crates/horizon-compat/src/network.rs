@@ -1114,10 +1114,33 @@ fn player_uuid(rt: &Rt, p: V) -> Option<u128> {
     (u.r() != 0).then(|| uuid_u128(rt, u))
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(
+        owner,
+        "io/netty/buffer/ByteBuf"
+            | "net/minecraft/network/FriendlyByteBuf"
+            | "net/minecraft/network/RegistryFriendlyByteBuf"
+            | "net/minecraft/network/VarInt"
+            | "net/minecraft/network/VarLong"
+            | "io/netty/buffer/Unpooled"
+            | "net/minecraft/network/codec/StreamCodec"
+            | "net/minecraft/network/codec/StreamEncoder"
+            | "net/minecraft/network/codec/StreamDecoder"
+            | "net/minecraft/network/codec/ByteBufCodecs"
+            | "net/minecraft/network/codec/StreamCodec$CodecOperation"
+            | REGISTRAR
+            | PAYLOAD_TYPE
+            | DISTRIBUTOR
+            | CONTEXT
+    ) || (owner == REGISTER_PAYLOADS && name == "registrar")
+        || (owner == "net/minecraft/network/protocol/common/custom/CustomPacketPayload" && name == "createType")
+}
+
 /// A networking call, or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     match owner {
         "io/netty/buffer/ByteBuf" | "net/minecraft/network/FriendlyByteBuf" | "net/minecraft/network/RegistryFriendlyByteBuf" => buffer_call(rt, name, desc, args),

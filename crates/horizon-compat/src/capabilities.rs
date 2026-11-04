@@ -164,9 +164,14 @@ fn find_item(rt: &mut Rt, cap: V, stack: V, context: V) -> V {
     V::NULL
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(owner, BLOCK_CAP | ITEM_CAP | ENTITY_CAP | EVENT | CACHE) || matches!(name, "getCapability" | "invalidateCapabilities")
+}
+
 pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     call(rt, owner, name, desc, args)
 }
 

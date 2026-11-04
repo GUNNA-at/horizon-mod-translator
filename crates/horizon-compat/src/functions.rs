@@ -52,11 +52,18 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
     }
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(name, "test" | "apply" | "accept" | "get")
+        || owner.starts_with("java/util/function/")
+        || matches!(owner, "com/google/common/base/Predicates" | "com/google/common/base/Suppliers")
+}
+
 /// A combinator call, or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let receiver = rt.class_of(a(0));
     if receiver.starts_with("compat:fn/") && matches!(name, "test" | "apply" | "accept" | "get") {
         return Some(run(rt, receiver, a(0), key, args.get(1..).unwrap_or_default()));

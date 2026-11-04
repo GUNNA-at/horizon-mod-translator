@@ -354,9 +354,28 @@ fn entities_of(rt: &mut Rt, class: Option<V>, area: V, predicate: Option<V>) -> 
     crate::jutil::new_list(rt, out)
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    let block = matches!(owner, "net/minecraft/world/level/block/Block" | "net/minecraft/world/level/block/state/BlockBehaviour");
+    matches!(name, "getEntitiesOfClass" | "getEntities" | "addFreshEntity")
+        || matches!(owner, EXPERIENCE_ORB | ITEM_ENTITY)
+        || (block && matches!(name, "updateEntityAfterFallOn" | "entityInside" | "stepOn" | "popResource"))
+        || (owner == "net/minecraft/world/Containers" && name == "dropItemStack")
+        || ITEM_ENTITY_METHODS.contains(&name)
+}
+
+/// An item entity's own methods, which it answers whichever class names them.
+const ITEM_ENTITY_METHODS: [&str; 49] = [
+    "absMoveTo", "addDeltaMovement", "blockPosition", "discard", "fireImmune", "getAge", "getBbHeight", "getBbWidth", "getBoundingBox", "getCommandSenderWorld",
+    "getControllingPassenger", "getDeltaMovement", "getId", "getItem", "getOnPos", "getOnPosLegacy", "getOwner", "getPersistentData", "getTarget", "getVehicle",
+    "getX", "getY", "getZ", "hasPickUpDelay", "isAlive", "isInLava", "isInWater", "isOnFire", "isPassenger", "isRemoved", "isShiftKeyDown", "isSpectator",
+    "isVehicle", "kill", "level", "moveTo", "onClientRemoval", "onGround", "position", "push", "remove", "setDefaultPickUpDelay", "setDeltaMovement", "setItem",
+    "setNoPickUpDelay", "setPickUpDelay", "setPos", "setRemoved", "teleportTo",
+];
+
 pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     call(rt, owner, name, desc, args)
 }
 

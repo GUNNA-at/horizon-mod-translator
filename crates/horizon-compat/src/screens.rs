@@ -1234,10 +1234,32 @@ fn geometry_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) 
 
 // ---- the API ----
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(
+        owner,
+        SCREEN
+            | CONTAINER
+            | ABSTRACT_CONTAINER
+            | LISTENER
+            | KEY_MAPPING
+            | INPUT
+            | INPUT_KEY
+            | INPUT_TYPE
+            | GLFW
+            | TESSELATOR
+            | BUFFER_BUILDER
+            | MESH
+            | UPLOADER
+            | "com/mojang/blaze3d/vertex/VertexConsumer"
+            | "com/mojang/blaze3d/systems/RenderSystem"
+    ) || (owner == MINECRAFT && matches!(name, "setScreen" | "pushGuiLayer" | "popGuiLayer" | "tell" | "execute" | "submit" | "isSameThread"))
+}
+
 /// The calls this module models (`owner.name.desc`), or None.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     match owner {
         SCREEN => screen_call(rt, name, desc, args),
         CONTAINER | ABSTRACT_CONTAINER => {

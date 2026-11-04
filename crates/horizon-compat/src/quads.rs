@@ -56,9 +56,14 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     }))
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+    matches!(owner, VERTEX_FORMAT | BAKED_QUAD | SIMPLE_MODEL | SIMPLE_BUILDER)
+}
+
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         (VERTEX_FORMAT, "getVertexSize") => rt.get_field(a(0), "$size"),

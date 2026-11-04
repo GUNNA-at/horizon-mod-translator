@@ -216,11 +216,20 @@ fn stack_food(rt: &Rt, stack: V) -> Option<V> {
     (food.r() != 0).then_some(food)
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    let using = matches!(
+        name,
+        "startUsingItem" | "isUsingItem" | "getUsedItemHand" | "getUseItem" | "getUseItemRemainingTicks" | "getTicksUsingItem" | "stopUsingItem" | "releaseUsingItem" | "getSlotForHand"
+    );
+    (using && api_common::is_player(owner)) || matches!(owner, "net/minecraft/world/item/ItemUtils" | ITEM)
+}
+
 /// Using items over time: a player's use (`startUsingItem` and what tells of it), `ItemUtils`'
 /// instant start, and vanilla `Item`'s own parts a mod's override calls (`super`).
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, _desc) = rest.split_once('.')?;
+    let (owner, name, _desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let player = api_common::is_player(owner);
     Some(match (owner, name) {

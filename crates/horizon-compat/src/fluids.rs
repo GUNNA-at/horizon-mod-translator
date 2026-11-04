@@ -559,11 +559,20 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     }
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(
+        owner,
+        FLUID_STACK | FLUID_STATE | PROPERTIES | BASE | BASE_FLOWING | BASE_SOURCE | LIQUID_BLOCK | TAG_KEY | "net/minecraft/world/item/BucketItem" | "net/minecraft/tags/FluidTags"
+    ) || is_fluid_class(owner)
+        || name == "getFluidState"
+}
+
 /// A fluid call, or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     if owner == FLUID_STACK {
         return fluid_stack_call(rt, name, desc, args);
     }

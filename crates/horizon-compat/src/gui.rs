@@ -1994,10 +1994,52 @@ pub fn draw_layers(rt: &mut Rt, layer: &str, pre: bool) -> bool {
 /// `RegisterGuiLayersEvent`, posted with the client's setup.
 pub const REGISTER_LAYERS: &str = LAYERS_EVENT;
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(
+        owner,
+        GRAPHICS
+            | LAYERS_EVENT
+            | FONT
+            | SPLITTER
+            | SEQUENCE
+            | FORMATTED
+            | COMPONENT
+            | MUTABLE
+            | STYLE
+            | TEXT_COLOR
+            | FORMATTING
+            | TOOLTIP
+            | TEXT_TOOLTIP
+            | TOOLTIP_PRE
+            | TOOLTIP_COLOR
+            | WINDOW
+            | GAME_MODE
+            | GAME_TYPE
+            | "net/minecraft/locale/Language"
+            | "net/minecraft/client/resources/language/I18n"
+            | "net/minecraft/network/chat/ComponentUtils"
+            | "net/minecraft/network/chat/CommonComponents"
+            | "net/neoforged/neoforge/client/ClientHooks"
+            | "net/minecraft/client/gui/screens/inventory/tooltip/TooltipRenderUtil"
+            | "net/neoforged/bus/api/ICancellableEvent"
+            | "net/minecraft/client/renderer/RenderBuffers"
+            | "net/minecraft/client/renderer/MultiBufferSource$BufferSource"
+            | "net/minecraft/client/renderer/texture/TextureManager"
+            | "net/minecraft/client/renderer/texture/AbstractTexture"
+            | "net/minecraft/client/MouseHandler"
+            | "net/minecraft/client/Options"
+            | "net/minecraft/client/CameraType"
+            | "com/mojang/blaze3d/systems/RenderSystem"
+            | "com/mojang/blaze3d/platform/Lighting"
+    ) || owner.starts_with(TOOLTIP_EVENT)
+        || (owner == MINECRAFT && matches!(name, "getWindow" | "renderBuffers"))
+}
+
 /// The calls this module models (`owner.name.desc`), or None.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     match owner {
         GRAPHICS => graphics_call(rt, name, desc, args),
         LAYERS_EVENT => layers_event(rt, name, args),

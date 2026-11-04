@@ -179,15 +179,19 @@ pub fn right_click_item(rt: &mut Rt, host: &mut dyn Host, hand: u8) -> Option<bo
 /// nothing).
 fn listened(rt: &mut Rt, class: &str) -> bool {
     know_classes(rt);
-    let wanted: Vec<String> = rt.listeners.iter().map(|(w, _)| w.clone()).collect();
-    wanted.iter().any(|w| crate::neo::reaches(rt, class, w))
+    !crate::neo::hearing(rt, class).is_empty()
+}
+
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+    owner == TRI_STATE || owner.starts_with(INTERACT) || matches!(owner, PLAYER_EVENT | LIVING_EVENT | ENTITY_EVENT | EVENT | CANCELLABLE)
 }
 
 /// The events' own calls, on the event or on its classes above (`event.getLevel()` compiles to
 /// `PlayerInteractEvent$RightClickBlock.getLevel`, `PlayerEvent.getEntity`...); `TriState`'s.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, _desc) = rest.split_once('.')?;
+    let (owner, name, _desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     if owner == TRI_STATE {
         let n = tri_state_name(rt, a(0));

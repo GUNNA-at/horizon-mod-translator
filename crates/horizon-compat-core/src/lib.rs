@@ -4,7 +4,61 @@
 //! API go to `horizon-compat`, which maps them onto Horizon: directly when the
 //! runtime is inlined into a mod (the game), or through [`Fns`] when the engine
 //! links this crate alone, so the mapping builds as its own small crate.
-use std::collections::HashMap;
+/// The runtime's maps hash with FxHash (rustc's) instead of SipHash: their keys are the field,
+/// class and method names translated code looks up on every access (an object's fields, statics,
+/// interned values), never input from outside, and SipHash was the hottest part of a mod's tick.
+pub type HashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
+
+/// FxHash: a word at a time, rotate, xor, multiply.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            self.add(u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]));
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut word = [0u8; 8];
+            word[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(word));
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(u64::from(i));
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(u64::from(i));
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
 
 pub mod gc;
 pub mod host;
@@ -63,7 +117,7 @@ pub enum Data {
     Str(String),
     Array(Vec<V>),
     /// A string-keyed map (`CompoundTag`).
-    Map(HashMap<String, V>),
+    Map(std::collections::HashMap<String, V>),
     /// An API object Horizon owns, by kind and handle (a block state id, a position...).
     Native(&'static str, [i64; 4]),
     /// A `java.util` list (also deques and queues, and a map entry's key and value).
@@ -159,6 +213,12 @@ pub struct Rt {
     pub side_fields: HashMap<u32, HashMap<&'static str, V>>,
     /// The mod event bus's listeners: the event class each takes, and the listener.
     pub listeners: Vec<(String, V)>,
+    /// [`Rt::listeners`] that hear each event class posted so far (the class's own and its
+    /// superclasses' listeners, in the order they listen): what posting an event walks instead of
+    /// every listener. Made again once a listener is added or the class tree grows.
+    pub listeners_by_event: HashMap<String, Vec<V>>,
+    /// The listener and superclass counts [`Rt::listeners_by_event`] was made with.
+    pub listeners_indexed: (usize, usize),
     /// `@SubscribeEvent` methods by class (registered by generated code): (event class, method
     /// key, static). [`Rt::subscribe_class`] and [`Rt::subscribe_object`] listen with them.
     pub subscribers: HashMap<&'static str, Vec<(&'static str, &'static str, bool, u32)>>,
@@ -182,18 +242,18 @@ impl Default for Rt {
     fn default() -> Rt {
         Rt {
             heap: Vec::new(),
-            statics: HashMap::new(),
-            strings: HashMap::new(),
-            unmapped: HashMap::new(),
+            statics: HashMap::default(),
+            strings: HashMap::default(),
+            unmapped: HashMap::default(),
             thrown: None,
-            supers: HashMap::new(),
-            interfaces: HashMap::new(),
-            subscribers: HashMap::new(),
+            supers: HashMap::default(),
+            interfaces: HashMap::default(),
+            subscribers: HashMap::default(),
             host: None,
             vcall: None,
             lambda_call: None,
-            class_ids: HashMap::new(),
-            vkeys: HashMap::new(),
+            class_ids: HashMap::default(),
+            vkeys: HashMap::default(),
             is_a_cache: Default::default(),
             unwinding: Vec::new(),
             registered_index: Default::default(),
@@ -202,21 +262,23 @@ impl Default for Rt {
             pinned: Vec::new(),
             overrides: None,
             reflect: None,
-            registered: HashMap::new(),
+            registered: HashMap::default(),
             suppliers: Vec::new(),
             namespace: String::new(),
             mods: Vec::new(),
             initialized: Default::default(),
-            interned: HashMap::new(),
-            iter_sources: HashMap::new(),
-            side_fields: HashMap::new(),
+            interned: HashMap::default(),
+            iter_sources: HashMap::default(),
+            side_fields: HashMap::default(),
             listeners: Vec::new(),
-            lambda_info: HashMap::new(),
+            listeners_by_event: HashMap::default(),
+            listeners_indexed: (0, 0),
+            lambda_info: HashMap::default(),
             caller_class: "java/lang/Object",
             custom_registries: Vec::new(),
-            block_entities: HashMap::new(),
-            block_entity_meta: HashMap::new(),
-            keys: HashMap::new(),
+            block_entities: HashMap::default(),
+            block_entity_meta: HashMap::default(),
+            keys: HashMap::default(),
             random_state: 0x9E37_79B9_7F4A_7C15,
         }
     }
@@ -344,12 +406,12 @@ impl Rt {
     /// A new object of `class`, a mod class's carrying its id (looked up by name).
     pub fn new_object(&mut self, class: &'static str) -> V {
         let cid = self.class_ids.get(class).copied().unwrap_or(0);
-        self.alloc_cid(class, cid, Data::Fields(HashMap::new()))
+        self.alloc_cid(class, cid, Data::Fields(HashMap::default()))
     }
 
     /// A new object of `class` whose id generated code knows.
     pub fn new_object_id(&mut self, class: &'static str, cid: u32) -> V {
-        self.alloc_cid(class, cid, Data::Fields(HashMap::new()))
+        self.alloc_cid(class, cid, Data::Fields(HashMap::default()))
     }
 
     /// An object's class id ([`Object::cid`]); 0 for null and non-objects.

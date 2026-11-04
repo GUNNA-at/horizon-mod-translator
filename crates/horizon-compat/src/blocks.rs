@@ -455,11 +455,19 @@ fn vanilla_placement(rt: &mut Rt, class: &str, b: V, ctx: V) -> V {
     api::state(rt, &out)
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(owner, DYE_COLOR | "net/minecraft/world/item/ArmorItem$Type" | BLOCK_PROPERTIES | ITEM_PROPERTIES | WOOD_TYPE | BUILDER)
+        || matches!(name, "values" | "registerDefaultState" | "defaultBlockState")
+        || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "createBlockStateDefinition" | "getStateForPlacement" | "<init>"))
+        || (owner.starts_with("net/minecraft/world/item/") && name == "<init>")
+}
+
 /// given, block constructors collect their states.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     match (owner, name) {
         // `BellAttachType.values()`: its constants, in order.
         (o, "values") if desc.starts_with("()[") && enum_class(o) => {

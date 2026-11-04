@@ -294,11 +294,17 @@ pub fn empty_context(rt: &mut Rt) -> V {
     rt.intern("collision-context/empty".into(), |rt| rt.new_object(ENTITY_COLLISION_CONTEXT))
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(owner, SHAPES | VOXEL_SHAPE | COLLISION_CONTEXT | ENTITY_COLLISION_CONTEXT | BOOLEAN_OP | AABB)
+        || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "box" | "isFaceFull" | "isShapeFullBlock"))
+}
+
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let d = |i: usize| args.get(i).copied().unwrap_or_default().d();
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let shape_of = |rt: &Rt, v: V| boxes(rt, v).unwrap_or_default();
     Some(match (owner, name) {
         // `Block.box`, in pixels; reached through any block class.

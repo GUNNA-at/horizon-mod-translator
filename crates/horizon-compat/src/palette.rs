@@ -45,9 +45,14 @@ fn by_id(rt: &Rt, map: V, i: i32) -> V {
     usize::try_from(i).ok().and_then(|i| items(rt, map).get(i).copied()).unwrap_or(V::NULL)
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+    matches!(owner, "net/neoforged/neoforge/registries/GameData" | HASH_MAP_PALETTE | BI_MAP)
+}
+
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, _desc) = rest.split_once('.')?;
+    let (owner, name, _desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         // The ids of every block state: the palette's fallback, which nothing here reads.

@@ -28,9 +28,14 @@ fn made_here(rt: &Rt, v: V, class: &str) -> bool {
     v.r() != 0 && rt.class_of(v) == class && matches!(rt.heap.get(v.r() as usize).map(|o| &o.data), Some(Data::Fields(_)))
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+    RECORDS.binary_search_by(|(c, _)| (*c).cmp(owner)).is_ok()
+}
+
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let comps = components(owner)?;
     let this = args.first().copied().unwrap_or_default();
     match name {

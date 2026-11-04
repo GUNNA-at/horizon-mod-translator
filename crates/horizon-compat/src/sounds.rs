@@ -184,10 +184,15 @@ pub fn level_sound(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> V {
     V::Void
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(owner, SOUND_EVENT | SIMPLE_SOUND | SOUND_MANAGER) || matches!(name, "getSoundManager" | "playSound")
+}
+
 /// `SoundEvent`'s own calls and `Entity.playSound`; None for anything else.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     if let Some(v) = manager_call(rt, owner, name, desc, args) {
         return Some(v);
     }

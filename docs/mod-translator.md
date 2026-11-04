@@ -1202,6 +1202,28 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     - Not yet: a mod's own looping, ticking sound instances (Create's `SoundScape` machine hum),
       `AbstractWidget`/`Button`/`EditBox` natives, container screens, `ScreenEvent`s, mods' own key
       mappings and `consumeClick`.
+  - [x] 2026-11-04 The runtime's costs, measured (harness `NET=1 NET_TICKS=20000`, Create's client tick
+    at the harness's opt-level 1). Once the client tick ran Create's and Ponder's handlers for real it
+    took 991 µs; `HORIZON_COMPAT_PROFILE=1` (new) times each listener of each event
+    (`neo::profile()`, printed by the harness) and showed `ClientEvents.onTickPost` and Ponder's
+    `onTickPre`, and macOS `sample` where inside them: SipHash, a block's item found by walking every
+    registered item (`asItem`, which Create's placement helpers ask each tick), and the API key split
+    again by each of the ~30 modules a call is offered to (a third of the tick in `memchr`). Now: the
+    runtime's maps hash with FxHash (`horizon_compat_core::FxHasher`, inline: no new dependency;
+    `Data::Map`, a Java map's iteration order, keeps std's), a block's item comes from an index made
+    once per registry size (`creative::block_item`), a call's key is split once (`crate::parts`),
+    a call that missed is told by a miss counter instead of two lookups of the key, and an event goes
+    to the listeners indexed for its class (`Rt::listeners_by_event`) instead of a copy of every
+    listener checked against it. A call no literal arm of `api::call` takes was then offered to each of
+    the 32 modules of its chain in turn, and the hot ones (`Iterator.hasNext`, `ItemStack.getItem`,
+    `Minecraft.getInstance`) are answered by the 26th to the 30th. Each module now says which keys it may
+    answer from the key alone (`claims(owner, name, desc)` beside its `call`: every arm, guards aside; a
+    module that answers by the receiver's class lists the method names it answers that way), and a key
+    is offered only to the modules that claim it, worked out once per key (`api::claimed`).
+    `HORIZON_COMPAT_CHECK_DISPATCH=1` (always on in the unit tests) offers every call to every module and
+    says when one answers a key it doesn't claim: none in the harness's checks (belt, fan, press, mixer,
+    drop, wheel, crank, recipes, network, value settings) or in 20 000 client ticks. 991 → 514 (hash,
+    index) → 320 (split once) → 302 (listener index) → 174 µs a tick (298 with the check on).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

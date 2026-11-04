@@ -117,10 +117,15 @@ pub fn send_particles(rt: &mut Rt, desc: &str, args: &[V]) -> V {
     if to_one { V::I((near > 0) as i32) } else { V::I(near as i32) }
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+    matches!(owner, BLOCK_OPTION | ITEM_OPTION | DUST_OPTIONS | SIMPLE_TYPE | PARTICLE_TYPE | "net/minecraft/core/particles/ParticleOptions")
+}
+
 /// The option classes' own calls; None for anything else.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         // `new BlockParticleOption(type, state)`, `new ItemParticleOption(type, stack|item)`.

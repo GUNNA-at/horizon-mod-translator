@@ -553,10 +553,15 @@ fn util_owner(owner: &str) -> bool {
         || owner.starts_with("com/google/common/collect/")
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+    util_owner(owner) || owner.starts_with("com/google/common/") || owner == "org/apache/commons/lang3/ArrayUtils"
+}
+
 /// A `java.util` call (`owner.name.desc`), or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     // Statics first.
     if let Some(v) = statics(rt, owner, name, desc, args) {

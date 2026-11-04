@@ -310,6 +310,12 @@ fn pattern_of(rt: &Rt, recipe: V) -> V {
 
 // ---- Calls ----
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone (every arm, guards aside): part of
+/// [`crate::recipes::claims`], whose `call` asks this one.
+pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+    matches!(owner, SERIALIZER | SIMPLE | CATEGORY | SHAPED | PATTERN | INPUT)
+}
+
 /// Calls on vanilla's crafting pieces; None for what this module doesn't model.
 pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();

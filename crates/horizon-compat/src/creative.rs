@@ -3,7 +3,7 @@
 //! `displayItems` generator runs into an `Output` that keeps what it accepts, then NeoForge's
 //! `BuildCreativeModeTabContentsEvent` lets the mod's listeners add more, as NeoForge builds a
 //! tab's contents. The game shows them as a content mod's `creative_tab` files ([`tabs`]).
-use crate::{api, Rt, V};
+use crate::{api, Data, Rt, V};
 
 const TAB: &str = "net/minecraft/world/item/CreativeModeTab";
 const BUILDER: &str = "net/minecraft/world/item/CreativeModeTab$Builder";
@@ -106,6 +106,43 @@ pub fn as_item(rt: &mut Rt, v: V) -> V {
     api_as_item(rt, v)
 }
 
+const BLOCK_ITEMS: &str = "compat:block-items";
+const BLOCK_ITEMS_COUNT: &str = "compat:block-items-count";
+
+/// The block item registered for block object `block` (`new BlockItem(block, properties)`): the one
+/// named as the block when there are several, else the first by name. The registered items are
+/// indexed by their block once, and again after more are registered: `asItem` runs for every
+/// `ItemStack.is(block)` a mod's tick asks (Create's placement helpers, each tick).
+fn block_item(rt: &mut Rt, block: V) -> Option<V> {
+    if block.r() == 0 {
+        return None;
+    }
+    let count = rt.registered.len() as i32;
+    if rt.interned.get(BLOCK_ITEMS_COUNT).is_none_or(|c| c.i() != count) {
+        let items: Vec<(String, V)> = rt.registered.iter().filter(|((r, _), _)| r == "item").map(|((_, n), i)| (n.clone(), *i)).collect();
+        let mut best: std::collections::HashMap<u32, ((bool, String), V)> = Default::default();
+        for (name, item) in items {
+            let b = rt.get_field(item, "$block");
+            if b.r() == 0 {
+                continue;
+            }
+            let rank = (rt.registered_name(b, "block") != Some(name.as_str()), name);
+            if best.get(&b.r()).is_none_or(|(r, _)| rank < *r) {
+                best.insert(b.r(), (rank, item));
+            }
+        }
+        let map = best.into_iter().map(|(b, (_, item))| (b.to_string(), item)).collect();
+        let index = rt.alloc("compat:BlockItems", Data::Map(map));
+        rt.interned.insert(BLOCK_ITEMS.into(), index);
+        rt.interned.insert(BLOCK_ITEMS_COUNT.into(), V::I(count));
+    }
+    let index = rt.interned.get(BLOCK_ITEMS).copied()?;
+    match rt.heap.get(index.r() as usize).map(|o| &o.data) {
+        Some(Data::Map(m)) => m.get(&block.r().to_string()).copied(),
+        _ => None,
+    }
+}
+
 /// The API's `asItem()`: an item is its own; a block's is the block item registered for it
 /// (`Item.BY_BLOCK`), else one of its name, else air; a registry holder's (NeoForge's
 /// `DeferredHolder` and the mod's subclasses of it) is its value's.
@@ -126,13 +163,7 @@ pub fn api_as_item(rt: &mut Rt, v: V) -> V {
         return crate::api_common::item(rt, "minecraft:air");
     }
     // The block item made for this block (`new BlockItem(block, properties)`), by any name.
-    let made = rt
-        .registered
-        .iter()
-        .filter(|((r, _), i)| r == "item" && rt.get_field(**i, "$block") == v)
-        .map(|((_, n), i)| (n.clone(), *i))
-        .min_by(|a, b| (a.0 != block).cmp(&(b.0 != block)).then(a.0.cmp(&b.0)));
-    if let Some((_, i)) = made {
+    if let Some(i) = block_item(rt, v) {
         return i;
     }
     match rt.registered.get(&("item".to_owned(), block.clone())) {
@@ -142,11 +173,16 @@ pub fn api_as_item(rt: &mut Rt, v: V) -> V {
     }
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(owner, TAB | BUILDER | OUTPUT | CONTENTS_EVENT | PARAMETERS | "net/minecraft/world/flag/FeatureFlagSet" | "net/minecraft/world/item/BlockItem") || name == "asItem"
+}
+
 /// A creative tab call, or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     Some(match (owner, name) {
         (TAB, "builder") => {
             let b = rt.new_object(BUILDER);

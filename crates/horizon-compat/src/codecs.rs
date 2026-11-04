@@ -819,11 +819,30 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
     })
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    owner.starts_with("com/mojang/serialization/")
+        || owner.starts_with("com/mojang/datafixers/")
+        || matches!(owner, "net/minecraft/util/ExtraCodecs" | "net/minecraft/util/StringRepresentable" | "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs" | "net/minecraft/resources/RegistryOps")
+        || matches!(name, "byNameCodec" | "holderByNameCodec" | "createSerializationContext")
+        || RECEIVER_METHODS.contains(&name)
+}
+
+/// What a codec, `DataResult`, `Either` or `Pair` answers whichever class names the call.
+const RECEIVER_METHODS: [&str; 66] = [
+    "apply", "codec", "comapFlatMap", "decode", "deprecated", "dispatch", "dispatchMap", "dispatchStable", "encode", "encodeStart", "fieldOf", "flatComapMap",
+    "flatXmap", "forGetter", "group", "keys", "lenientOptionalFieldOf", "listOf", "mapResult", "optionalFieldOf", "orElse", "orElseGet", "parse",
+    "partialDispatch", "point", "promotePartial", "sizeLimitedListOf", "stable", "toString", "validate", "withAlternative", "withLifecycle", "xmap",
+    "addLifecycle", "error", "flatMap", "getOrThrow", "getPartialOrThrow", "ifError", "ifSuccess", "isError", "isSuccess", "lifecycle", "map",
+    "mapError", "mapOrElse", "orThrow", "partialOrThrow", "result", "resultOrPartial", "setLifecycle", "setPartial", "getFirst", "getLeft",
+    "getRight", "getSecond", "ifLeft", "ifRight", "left", "mapBoth", "mapFirst", "mapLeft", "mapRight", "mapSecond", "right", "swap",
+];
+
 /// Calls on codecs, `DataResult`s, `Either`s and `Pair`s; None for what this module doesn't model.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, rest) = key.split_once('.')?;
-    let (method, desc) = rest.split_once('.')?;
+    let (owner, method, desc) = crate::parts(key)?;
     // Static factories.
     match (owner, method) {
         ("com/mojang/serialization/codecs/RecordCodecBuilder", "create" | "mapCodec") => {

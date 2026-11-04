@@ -52,9 +52,9 @@ fn native(rt: &Rt, v: V) -> [i64; 4] {
 /// member it inherits from the API, as `javac` writes inherited calls) is
 /// resolved up the class's superclasses, as the JVM resolves it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
-    let before = rt.unmapped.get(key).copied().unwrap_or(0);
+    let since = crate::misses();
     let r = call_exact(rt, key, args);
-    if rt.unmapped.get(key).copied().unwrap_or(0) == before {
+    if crate::misses() == since || !crate::missed_since(key, since) {
         return r;
     }
     let Some((owner, rest)) = key.split_once('.') else { return r };
@@ -131,8 +131,11 @@ fn uncount(rt: &mut Rt, key: &'static str) {
 /// once, the first time it runs: what a mod needs next, from a real game.
 /// A key on a JDK exception class (`java/lang/IllegalStateException.<init>...`).
 fn exception_class(key: &str) -> bool {
+    if !key.starts_with("java/") {
+        return false;
+    }
     let owner = key.split('.').next().unwrap_or("");
-    owner.starts_with("java/") && (owner.ends_with("Exception") || owner.ends_with("Error") || owner.ends_with("Throwable"))
+    owner.ends_with("Exception") || owner.ends_with("Error") || owner.ends_with("Throwable")
 }
 
 fn trace_unmapped(rt: &Rt, key: &'static str, args: &[V]) {
@@ -289,7 +292,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
                     b.map(|c| c.floor() as i32)
                 }
                 _ => {
-                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    crate::miss(rt, key);
                     return V::NULL;
                 }
             };
@@ -406,46 +409,193 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
                 _ => V::NULL,
             }
         }
-        _ => match mutable_pos(rt, key, args)
-            .or_else(|| crate::sounds::call(rt, key, args))
-            .or_else(|| crate::particles::call(rt, key, args))
-            .or_else(|| crate::food::call(rt, key, args))
-            .or_else(|| crate::item_use::call(rt, key, args))
-            .or_else(|| crate::network::call(rt, key, args))
-            .or_else(|| crate::fluids::call(rt, key, args))
-            .or_else(|| crate::tanks::call_key(rt, key, args))
-            .or_else(|| crate::codecs::call(rt, key, args))
-            .or_else(|| crate::recipes::call(rt, key, args))
-            .or_else(|| crate::handlers::call_key(rt, key, args))
-            .or_else(|| crate::components::call_key(rt, key, args))
-            .or_else(|| crate::capabilities::call_key(rt, key, args))
-            .or_else(|| crate::mod_entities::call_key(rt, key, args))
-            .or_else(|| crate::entities::call_key(rt, key, args))
-            .or_else(|| crate::creative::call(rt, key, args))
-            .or_else(|| crate::functions::call(rt, key, args))
-            .or_else(|| crate::rotation::call(rt, key, args))
-            .or_else(|| crate::blocks::call(rt, key, args))
-            .or_else(|| crate::shapes::call(rt, key, args))
-            .or_else(|| crate::events::call(rt, key, args))
-            .or_else(|| crate::screens::call(rt, key, args))
-            .or_else(|| crate::gui::call(rt, key, args))
-            .or_else(|| crate::neo::call(rt, key, args))
-            .or_else(|| crate::jlang::call(rt, key, args))
-            .or_else(|| crate::jutil::call(rt, key, args))
-            .or_else(|| crate::tags::call(rt, key, args))
-            .or_else(|| crate::quads::call(rt, key, args))
-            .or_else(|| crate::render::call(rt, key, args))
-            .or_else(|| world(rt, key, args))
-            .or_else(|| crate::palette::call(rt, key, args))
-            .or_else(|| crate::records::call(rt, key, args))
-        {
+        _ => match chain(rt, key, args) {
             Some(v) => v,
             None => {
-                *rt.unmapped.entry(key).or_insert(0) += 1;
+                crate::miss(rt, key);
                 V::Void
             }
         },
     }
+}
+
+type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
+
+/// The modules a call is offered to, in order, when no arm above takes its key: the first that
+/// answers does.
+const CHAIN: [Module; 32] = [
+    mutable_pos,
+    crate::sounds::call,
+    crate::particles::call,
+    crate::food::call,
+    crate::item_use::call,
+    crate::network::call,
+    crate::fluids::call,
+    crate::tanks::call_key,
+    crate::codecs::call,
+    crate::recipes::call,
+    crate::handlers::call_key,
+    crate::components::call_key,
+    crate::capabilities::call_key,
+    crate::mod_entities::call_key,
+    crate::entities::call_key,
+    crate::creative::call,
+    crate::functions::call,
+    crate::rotation::call,
+    crate::blocks::call,
+    crate::shapes::call,
+    crate::events::call,
+    crate::screens::call,
+    crate::gui::call,
+    crate::neo::call,
+    crate::jlang::call,
+    crate::jutil::call,
+    crate::tags::call,
+    crate::quads::call,
+    crate::render::call,
+    world,
+    crate::palette::call,
+    crate::records::call,
+];
+
+/// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
+/// a pure function of the key, so its answer is kept per key.
+type Claims = fn(&str, &str, &str) -> bool;
+const CLAIMS: [Claims; 32] = [
+    |owner, _, _| owner == MUTABLE_POS,
+    crate::sounds::claims,
+    crate::particles::claims,
+    crate::food::claims,
+    crate::item_use::claims,
+    crate::network::claims,
+    crate::fluids::claims,
+    crate::tanks::claims,
+    crate::codecs::claims,
+    crate::recipes::claims,
+    crate::handlers::claims,
+    crate::components::claims,
+    crate::capabilities::claims,
+    crate::mod_entities::claims,
+    crate::entities::claims,
+    crate::creative::claims,
+    crate::functions::claims,
+    crate::rotation::claims,
+    crate::blocks::claims,
+    crate::shapes::claims,
+    crate::events::claims,
+    crate::screens::claims,
+    crate::gui::claims,
+    crate::neo::claims,
+    crate::jlang::claims,
+    crate::jutil::claims,
+    crate::tags::claims,
+    crate::quads::claims,
+    crate::render::claims,
+    // The world's calls end in `api_common`'s, which take most of vanilla's classes.
+    |_, _, _| true,
+    crate::palette::claims,
+    crate::records::claims,
+];
+
+const MODULE_NAMES: [&str; 32] = [
+    "mutable_pos",
+    "sounds",
+    "particles",
+    "food",
+    "item_use",
+    "network",
+    "fluids",
+    "tanks",
+    "codecs",
+    "recipes",
+    "handlers",
+    "components",
+    "capabilities",
+    "mod_entities",
+    "entities",
+    "creative",
+    "functions",
+    "rotation",
+    "blocks",
+    "shapes",
+    "events",
+    "screens",
+    "gui",
+    "neo",
+    "jlang",
+    "jutil",
+    "tags",
+    "quads",
+    "render",
+    "world",
+    "palette",
+    "records",
+];
+
+thread_local! {
+    /// By key (its address and length): the modules of [`CHAIN`] that claim it, as bits.
+    static CLAIMED: std::cell::RefCell<crate::HashMap<(usize, usize), u32>> = std::cell::RefCell::new(crate::HashMap::default());
+}
+
+/// The modules of [`CHAIN`] that claim `key`, as bits (all of them for a key that isn't
+/// `owner.name.desc`).
+fn claimed(key: &'static str) -> u32 {
+    let id = (key.as_ptr() as usize, key.len());
+    if let Some(bits) = CLAIMED.with(|c| c.borrow().get(&id).copied()) {
+        return bits;
+    }
+    let bits = match crate::parts(key) {
+        Some((owner, name, desc)) => CLAIMS.iter().enumerate().filter(|(_, claims)| claims(owner, name, desc)).fold(0, |bits, (i, _)| bits | 1 << i),
+        None => u32::MAX,
+    };
+    CLAIMED.with(|c| c.borrow_mut().insert(id, bits));
+    bits
+}
+
+/// Whether every call checks that the module answering it claims its key
+/// (`HORIZON_COMPAT_CHECK_DISPATCH=1`; always in tests): it is then offered to every module.
+fn checking() -> bool {
+    static CHECK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cfg!(test) || *CHECK.get_or_init(|| std::env::var_os("HORIZON_COMPAT_CHECK_DISPATCH").is_some_and(|v| v == "1"))
+}
+
+/// Offers the call to each module of [`CHAIN`] that claims its key, in order: the first that
+/// answers does.
+fn chain(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let claimed = claimed(key);
+    if checking() {
+        return checked_chain(rt, key, args, claimed);
+    }
+    let mut left = claimed;
+    while left != 0 {
+        let i = left.trailing_zeros() as usize;
+        left &= left - 1;
+        if let Some(v) = CHAIN[i](rt, key, args) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// [`chain`] past every module, telling (or, in tests, failing) when one that answers doesn't
+/// claim the key: the claims would then have kept the call from it.
+fn checked_chain(rt: &mut Rt, key: &'static str, args: &[V], claimed: u32) -> Option<V> {
+    for (i, module) in CHAIN.iter().enumerate() {
+        if let Some(v) = module(rt, key, args) {
+            if claimed & (1 << i) == 0 {
+                let message = format!("horizon-compat: {} answered {key} without claiming it", MODULE_NAMES[i]);
+                assert!(!cfg!(test), "{message}");
+                thread_local! {
+                    static TOLD: std::cell::RefCell<crate::HashMap<(usize, usize), ()>> = std::cell::RefCell::new(crate::HashMap::default());
+                }
+                if TOLD.with(|t| t.borrow_mut().insert((key.as_ptr() as usize, i), ()).is_none()) {
+                    eprintln!("{message}");
+                }
+            }
+            return Some(v);
+        }
+    }
+    None
 }
 
 const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
@@ -628,8 +778,7 @@ pub(crate) fn is_level(owner: &str) -> bool {
 /// Registration, the level and block states: the API that reaches the game.
 fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let level = is_level(owner);
     Some(match (owner, name) {
         // NeoForge registration
@@ -1003,7 +1152,7 @@ fn holder(rt: &mut Rt, registry: &str, id: &str) -> V {
 /// one each step. It holds its place as a `BlockPos` does; `set`, `move` and `clamp` change it and
 /// hand it back. What vanilla makes immutable (`offset`, `relative(d, n)`, `immutable()`) and what it
 /// only reads (`getX`, `above()`) answer as `BlockPos`'s, through [`api_super`].
-fn mutable_pos(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
+fn mutable_pos(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (name, desc) = key.strip_prefix(MUTABLE_POS)?.strip_prefix('.')?.split_once('.')?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let ints = |s: usize| [a(s).i() as i64, a(s + 1).i() as i64, a(s + 2).i() as i64];
@@ -1132,7 +1281,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             match NAMES.iter().position(|n| *n == f) {
                 Some(i) => api_enum(rt, "net/minecraft/ChatFormatting", NAMES[i], i as i32),
                 None => {
-                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    crate::miss(rt, key);
                     V::NULL
                 }
             }
@@ -1146,7 +1295,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             match names.iter().position(|n| *n == f) {
                 Some(i) => api_enum(rt, class, names[i], i as i32),
                 None => {
-                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    crate::miss(rt, key);
                     V::NULL
                 }
             }
@@ -1158,7 +1307,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             match NAMES.iter().position(|n| *n == f) {
                 Some(i) => api_enum(rt, "net/minecraft/sounds/SoundSource", NAMES[i], i as i32),
                 None => {
-                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    crate::miss(rt, key);
                     V::NULL
                 }
             }
@@ -1172,7 +1321,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             match RENDER_SHAPES.iter().position(|n| *n == f) {
                 Some(i) => api_enum(rt, "net/minecraft/world/level/block/RenderShape", RENDER_SHAPES[i], i as i32),
                 None => {
-                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    crate::miss(rt, key);
                     V::NULL
                 }
             }
@@ -1182,7 +1331,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             block(rt, &n)
         }
         _ => {
-            *rt.unmapped.entry(key).or_insert(0) += 1;
+            crate::miss(rt, key);
             V::NULL
         }
     }

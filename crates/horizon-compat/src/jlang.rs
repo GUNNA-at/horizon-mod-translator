@@ -195,13 +195,35 @@ fn string_hash(s: &str) -> i32 {
     s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+    owner.starts_with("java/lang/")
+        || owner.starts_with("java/text/")
+        || owner.starts_with("org/apache/commons/lang3/")
+        || owner.ends_with("Pair")
+        || owner.ends_with("Triple")
+        || matches!(
+            owner,
+            "java/util/ServiceLoader"
+                | "org/apache/logging/log4j/Logger"
+                | "org/slf4j/Logger"
+                | "java/util/logging/Logger"
+                | "com/mojang/logging/LogUtils"
+                | "joptsimple/internal/Strings"
+                | "net/minecraft/Util"
+                | "org/apache/logging/log4j/LogManager"
+                | "org/apache/logging/log4j/MarkerManager"
+                | "org/slf4j/LoggerFactory"
+        )
+}
+
 /// A `java.lang` call (`owner.name.desc`), or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if let Some(v) = libs(rt, key, args) {
         return Some(v);
     }
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     if owner == "java/util/ServiceLoader" {
         return service_loader(rt, name, args);
     }
@@ -1337,8 +1359,7 @@ mod tests {
 
 /// Small libraries mods lean on: loggers (dropped), commons-lang `Pair`, `Record`'s constructor.
 fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let logger = matches!(owner, "org/apache/logging/log4j/Logger" | "org/slf4j/Logger" | "java/util/logging/Logger");
     Some(match (owner, name) {

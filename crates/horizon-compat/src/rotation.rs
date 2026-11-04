@@ -176,10 +176,15 @@ pub(crate) fn turn_state(rt: &mut Rt, state: V, how: V, mirror: bool) -> V {
     crate::api::state(rt, &t)
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(owner, ROTATION | MIRROR) || (matches!(name, "rotate" | "mirror") && owner.starts_with("net/minecraft/world/level/block/"))
+}
+
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     Some(match (owner, name) {
         (ROTATION, "rotate") if desc.starts_with("(Lnet/minecraft/core/Direction;)") => {
             let d = rotate_dir(direction_ordinal(rt, a(1)), ordinal(rt, a(0)));

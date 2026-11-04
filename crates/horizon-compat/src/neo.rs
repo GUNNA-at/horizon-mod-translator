@@ -88,16 +88,65 @@ pub(crate) fn reaches(rt: &Rt, event: &str, wanted: &str) -> bool {
 /// Posts `event` (an object of class `class`) to the mod bus's listeners. Once one cancels it
 /// (`setCanceled(true)` on a cancellable event), the listeners after it don't hear it.
 pub fn post(rt: &mut Rt, class: &str, event: V) {
-    let listeners: Vec<(String, V)> = rt.listeners.clone();
-    for (wanted, l) in listeners {
-        if reaches(rt, class, &wanted) {
-            rt.call_functional(ACCEPT, l, &[event]);
-            rt.report_thrown(class);
-            if rt.get_field(event, "$canceled").i() != 0 {
-                break;
-            }
+    let profile = profiling();
+    for l in hearing(rt, class) {
+        let started = profile.then(std::time::Instant::now);
+        rt.call_functional(ACCEPT, l, &[event]);
+        if let Some(t) = started {
+            record(rt, class, l, t.elapsed());
+        }
+        rt.report_thrown(class);
+        if rt.get_field(event, "$canceled").i() != 0 {
+            break;
         }
     }
+}
+
+/// The listeners an event of class `class` reaches, in the order they listen (as they were when
+/// it was posted: one a listener adds hears the next post). Kept per class
+/// ([`Rt::listeners_by_event`]): a tick's events don't walk the mod's hundreds of listeners.
+pub(crate) fn hearing(rt: &mut Rt, class: &str) -> Vec<V> {
+    let now = (rt.listeners.len(), rt.supers.len());
+    if rt.listeners_indexed != now {
+        rt.listeners_by_event.clear();
+        rt.listeners_indexed = now;
+    }
+    if let Some(l) = rt.listeners_by_event.get(class) {
+        return l.clone();
+    }
+    let l: Vec<V> = rt.listeners.iter().filter(|(wanted, _)| reaches(rt, class, wanted)).map(|(_, l)| *l).collect();
+    rt.listeners_by_event.insert(class.to_owned(), l.clone());
+    l
+}
+
+/// With `HORIZON_COMPAT_PROFILE` set, what each event's listeners cost is kept ([`profile`]): which
+/// of a mod's handlers make a hook slow, measured.
+fn profiling() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HORIZON_COMPAT_PROFILE").is_some())
+}
+
+thread_local! {
+    static COSTS: std::cell::RefCell<std::collections::HashMap<(String, String), (u32, std::time::Duration)>> = Default::default();
+}
+
+fn record(rt: &Rt, class: &str, listener: V, took: std::time::Duration) {
+    // A listener is a lambda over the mod's handler method: its class names that method.
+    let name = rt.class_of(listener).to_owned();
+    COSTS.with(|c| {
+        let mut c = c.borrow_mut();
+        let e = c.entry((class.rsplit('/').next().unwrap_or(class).to_owned(), name)).or_default();
+        e.0 += 1;
+        e.1 += took;
+    });
+}
+
+/// The listeners' costs measured on this thread so far (with `HORIZON_COMPAT_PROFILE`), the
+/// costliest first: event, listener, calls, total time.
+pub fn profile() -> Vec<(String, String, u32, std::time::Duration)> {
+    let mut out: Vec<_> = COSTS.with(|c| c.borrow().iter().map(|((e, l), (n, t))| (e.clone(), l.clone(), *n, *t)).collect());
+    out.sort_by(|a, b| b.3.cmp(&a.3));
+    out
 }
 
 /// Fires `RegisterEvent` once per registry, as NeoForge does after mod construction.
@@ -257,10 +306,19 @@ fn name_of(rt: &Rt, v: V) -> String {
     if s.contains(':') { s.to_owned() } else { format!("{}:{s}", rt.namespace) }
 }
 
+/// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
+/// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    owner.starts_with("net/neoforged/")
+        || owner.starts_with("net/minecraft/resources/")
+        || is_registry(owner)
+        || matches!(owner, "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference")
+        || (owner.starts_with("net/minecraft/") && matches!(name, "registryAccess" | "holderLookup" | "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup"))
+}
+
 /// A NeoForge loading call, or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let (owner, rest) = key.split_once('.')?;
-    let (name, desc) = rest.split_once('.')?;
+    let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         ("net/neoforged/bus/api/IEventBus", "addListener") => {
