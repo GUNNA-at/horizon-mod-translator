@@ -678,11 +678,36 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     without an `.mcmeta` to its top square as if it were an animation strip, so Create's 16x32
     `belt_scroll` was half there and the scroll read past it. Vanilla keeps such a texture whole
     (`SpriteLoader.loadSprite`), and vanilla 26.3 has none.
-  - [ ] The ingot on a belt stays where the server's update tag put it on the client: Create moves
-    belt items on the client by `speed * ServerSpeedProvider.get()`, which starts at 0 and rises
-    only as the server's `ServerSpeedProvider$Packet`s arrive. Mod payloads (NeoForge
-    `RegisterPayloadHandlersEvent`, `PacketDistributor`, `StreamCodec`) aren't carried yet, and
-    `ServerTickEvent` (which sends them) isn't posted.
+  - [x] 2026-11-04 **Mod networking** (`network.rs`): a mod's payloads go over the game's mod message
+    channel (`native_net_send_to_player`, `native_net_send_to_server`). `RegisterPayloadHandlersEvent`
+    is posted after common setup, and each `PayloadRegistrar.playToClient` (`playToServer`,
+    `playBidirectional`, `common*`, `configuration*`) keeps its type's codec and handler under the
+    type's id. `PacketDistributor.sendToPlayer`, `sendToAllPlayers`, `sendToPlayersNear` and
+    `sendToServer` encode the payload with its `StreamCodec` and hand the bytes to the host
+    (`Host::send_payload`, a `PayloadTarget`); the other side's runtime decodes them with the same
+    codec and runs the handler with an `IPayloadContext` (`player`, `enqueueWork` run at once,
+    `reply`, `flow`). Codecs are compat objects: `ByteBufCodecs`' constants and builders
+    (`collection`, `map`, `optional`, `idMapper`, `registry`, `holder`), `StreamCodec.composite`,
+    `unit`, `of`, `ofMember`, `.map`, `.apply`, `.dispatch`, and the stream codecs of item and fluid
+    stacks, positions, UUIDs, components and NBT. Buffers write as Minecraft's (`FriendlyByteBuf`:
+    varints, a `BlockPos` packed in a long, network NBT); a short buffer throws, as netty's does.
+    `ServerTickEvent.Pre`/`.Post` are posted from the game's `server_tick` hook, and the bundle wires
+    `net_from_server` (the window) and `net_from_client` (the server) to the runtime. Harness `NET`:
+    Create registers 117 payload types; its server tick sends `create:server_speed` every 21 ticks,
+    and the client's runtime takes it.
+  - [x] 2026-11-04 The client has a local player: `Minecraft.getInstance().player`, a `LocalPlayer` in
+    the client's level that maps as a player does. Without it Create's whole client tick
+    (`ClientEvents.onTick`, which first checks `isGameActive`) returned early,
+    `ServerSpeedProvider.clientTick` among it. Harness `NET`, the client ticking once a server tick:
+    the speed the client moves belt items at is 0 until the second speed packet (Create's first only
+    starts the count), 0.88 ten ticks later and 1.000 from tick 80, as in Java. A client tick of
+    Create's costs 0.24 ms.
+  - [x] 2026-11-04 **In game the ingot rides the belt on the client too** (`beltgame.sh`, shots at
+    ticks 10, 13 and 25: it moves toward the belt's start each frame, the other lane's into the
+    depot). Create moves belt items on the client by `speed * ServerSpeedProvider.get()`, which
+    starts at 0 and rises as the server's speed packets arrive: the integrated server's tick sends
+    `create:server_speed` to the window's player over the mod message channel, and the window's
+    runtime takes it. Before, the client showed the ingot where the last update tag put it.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
