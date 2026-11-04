@@ -3,7 +3,12 @@
 //! accessors, compares it (`equals`, `hashCode`) and prints it. The components come from
 //! [`crate::vanilla_records`], as each record's class file declares them. This is the last mapping a
 //! call reaches: the records the runtime models natively (`TagKey`, `DimensionType`) answer first.
-use crate::vanilla_records::RECORDS;
+//!
+//! The same for vanilla's plain data classes (`Tuple`, `LevelResource`, `ModelLayerLocation`): the
+//! constructors that only store their arguments, the getters and setters that only read and write a
+//! field, and `equals`/`hashCode` as the class has them (`Object`'s, or field by field), all read
+//! from their bytecode. And an enum constant's `equals` and `hashCode`, `Enum`'s: identity.
+use crate::vanilla_records::{DATA_CLASSES, ENUMS, RECORDS};
 use crate::{Data, Rt, V};
 
 /// The record `class`'s components (`name`, descriptor), in declaration order.
@@ -30,12 +35,110 @@ fn made_here(rt: &Rt, v: V, class: &str) -> bool {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     RECORDS.binary_search_by(|(c, _)| (*c).cmp(owner)).is_ok()
+        || members(owner).is_some()
+        || (matches!(name, "equals" | "hashCode") && ENUMS.binary_search(&owner).is_ok())
+}
+
+/// A plain data class's members, as [`DATA_CLASSES`] lists them.
+fn members(class: &str) -> Option<&'static str> {
+    let i = DATA_CLASSES.binary_search_by(|(c, _)| (*c).cmp(class)).ok()?;
+    Some(DATA_CLASSES[i].1)
+}
+
+/// The fields of the member of `kind` whose signature is `sig` (a constructor's descriptor, a
+/// getter's or setter's name and descriptor).
+fn member(members: &'static str, kind: char, sig: &str) -> Option<&'static str> {
+    members.split('|').find_map(|m| m.strip_prefix(kind)?.strip_prefix(sig)?.strip_prefix('='))
+}
+
+/// Whether `v` is an object of the data class `class` (or a mod class extending it) built here.
+fn data_object(rt: &Rt, v: V, class: &str) -> bool {
+    v.r() != 0 && matches!(rt.heap.get(v.r() as usize).map(|o| &o.data), Some(Data::Fields(_))) && rt.is_a(rt.class_of(v), class)
+}
+
+/// A call on a plain data class: its pure constructors, getters and setters, its equality.
+fn data_call(rt: &mut Rt, owner: &str, members: &'static str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let this = args.first().copied().unwrap_or_default();
+    if !data_object(rt, this, owner) {
+        return None;
+    }
+    let other = args.get(1).copied().unwrap_or_default();
+    let fieldwise = members.split('|').find_map(|m| m.strip_prefix("e="));
+    let identity = members.split('|').any(|m| m == "o");
+    match (name, desc) {
+        ("<init>", _) => {
+            let fields = member(members, 'i', desc)?;
+            for (i, f) in fields.split(',').filter(|f| !f.is_empty()).enumerate() {
+                rt.put_field(this, f, args.get(i + 1).copied().unwrap_or_default());
+            }
+            Some(V::Void)
+        }
+        ("equals", "(Ljava/lang/Object;)Z") if identity => Some(V::I((this == other) as i32)),
+        ("hashCode", "()I") if identity => Some(V::I(this.r() as i32)),
+        ("equals", "(Ljava/lang/Object;)Z") => {
+            let fields = fieldwise?;
+            let same = this == other
+                || (data_object(rt, other, owner)
+                    && fields.split(',').all(|n| {
+                        let (x, y) = (rt.get_field(this, n), rt.get_field(other, n));
+                        x == y || (matches!(x, V::R(r) if r != 0) && crate::jutil::equals(rt, x, y))
+                    }));
+            Some(V::I(same as i32))
+        }
+        ("hashCode", "()I") => {
+            let mut h = 0i32;
+            for n in fieldwise?.split(',') {
+                let v = rt.get_field(this, n);
+                h = h.wrapping_mul(31).wrapping_add(hash_of(rt, v));
+            }
+            Some(V::I(h))
+        }
+        _ => {
+            let sig = format!("{name}{desc}");
+            if let Some(field) = member(members, 'g', &sig) {
+                let ret = desc.strip_prefix("()")?;
+                return Some(match rt.get_field(this, field) {
+                    V::Void => zero(ret),
+                    v => v,
+                });
+            }
+            let field = member(members, 's', &sig)?;
+            rt.put_field(this, field, other);
+            Some(V::Void)
+        }
+    }
+}
+
+/// A component's or field's share of a hash, as `Objects.hashCode` and the boxes' `hashCode` give it.
+fn hash_of(rt: &mut Rt, v: V) -> i32 {
+    match v {
+        V::R(0) | V::Void => 0,
+        V::R(_) => crate::jutil::hash(rt, v),
+        V::I(i) => i,
+        V::J(j) => (j ^ (j >> 32)) as i32,
+        V::F(f) => f.to_bits() as i32,
+        V::D(d) => {
+            let b = d.to_bits() as i64;
+            (b ^ (b >> 32)) as i32
+        }
+    }
 }
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
+    if let Some(m) = members(owner) {
+        return data_call(rt, owner, m, name, desc, args);
+    }
+    if ENUMS.binary_search(&owner).is_ok() {
+        let (this, other) = (args.first().copied().unwrap_or_default(), args.get(1).copied().unwrap_or_default());
+        return match (name, desc) {
+            ("equals", "(Ljava/lang/Object;)Z") => Some(V::I((this == other) as i32)),
+            ("hashCode", "()I") => Some(V::I(this.r() as i32)),
+            _ => None,
+        };
+    }
     let comps = components(owner)?;
     let this = args.first().copied().unwrap_or_default();
     match name {
@@ -64,18 +167,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let mut h = 0i32;
             for (n, _) in &comps {
                 let v = rt.get_field(this, n);
-                let c = match v {
-                    V::R(0) | V::Void => 0,
-                    V::R(_) => crate::jutil::hash(rt, v),
-                    V::I(i) => i,
-                    V::J(j) => (j ^ (j >> 32)) as i32,
-                    V::F(f) => f.to_bits() as i32,
-                    V::D(d) => {
-                        let b = d.to_bits() as i64;
-                        (b ^ (b >> 32)) as i32
-                    }
-                };
-                h = h.wrapping_mul(31).wrapping_add(c);
+                h = h.wrapping_mul(31).wrapping_add(hash_of(rt, v));
             }
             Some(V::I(h))
         }
@@ -148,5 +240,98 @@ mod tests {
         let elsewhere = crate::api::block_pos(&mut rt, 0, 0, 0);
         crate::api::call(&mut rt, init, &[other, elsewhere, state, V::NULL]);
         assert_eq!(crate::api::call(&mut rt, equals, &[info, other]), V::I(0));
+    }
+
+    const TUPLE: &str = "net/minecraft/util/Tuple";
+
+    /// FramedBlocks keeps pairs in vanilla's `Tuple` (its state cache) and Mekanism and others name
+    /// world folders with `new LevelResource(id)`: built, read back, set, and compared as their
+    /// classes do (`Tuple` keeps `Object`'s `equals`: two pairs of the same things differ).
+    #[test]
+    fn a_plain_vanilla_data_class_keeps_what_it_was_given() {
+        let mut rt = Rt::new();
+        let (a, b, c) = (rt.string("a"), rt.string("b"), rt.string("c"));
+        let t = rt.new_object(TUPLE);
+        crate::api::call(&mut rt, "net/minecraft/util/Tuple.<init>.(Ljava/lang/Object;Ljava/lang/Object;)V", &[t, a, b]);
+        let get_a = "net/minecraft/util/Tuple.getA.()Ljava/lang/Object;";
+        assert_eq!(crate::api::call(&mut rt, get_a, &[t]), a);
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/util/Tuple.getB.()Ljava/lang/Object;", &[t]), b);
+        crate::api::call(&mut rt, "net/minecraft/util/Tuple.setA.(Ljava/lang/Object;)V", &[t, c]);
+        assert_eq!(crate::api::call(&mut rt, get_a, &[t]), c);
+
+        let twin = rt.new_object(TUPLE);
+        crate::api::call(&mut rt, "net/minecraft/util/Tuple.<init>.(Ljava/lang/Object;Ljava/lang/Object;)V", &[twin, c, b]);
+        let equals = "net/minecraft/util/Tuple.equals.(Ljava/lang/Object;)Z";
+        assert_eq!(crate::api::call(&mut rt, equals, &[t, twin]), V::I(0));
+        assert_eq!(crate::api::call(&mut rt, equals, &[t, t]), V::I(1));
+
+        let folder = rt.new_object("net/minecraft/world/level/storage/LevelResource");
+        let id = rt.string("serverconfig");
+        crate::api::call(&mut rt, "net/minecraft/world/level/storage/LevelResource.<init>.(Ljava/lang/String;)V", &[folder, id]);
+        let got = crate::api::call(&mut rt, "net/minecraft/world/level/storage/LevelResource.getId.()Ljava/lang/String;", &[folder]);
+        assert_eq!(rt.str_of(got), Some("serverconfig"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `ModelLayerLocation` overrides `equals` and `hashCode` over both its fields: a renderer's layer
+    /// looked up with a location built again is the same layer.
+    #[test]
+    fn a_data_class_that_compares_its_fields_is_equal_to_its_twin() {
+        let mut rt = Rt::new();
+        let init = "net/minecraft/client/model/geom/ModelLayerLocation.<init>.(Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;)V";
+        let layer = |rt: &mut Rt, path: &str, part: &str| {
+            let l = rt.new_object("net/minecraft/client/model/geom/ModelLayerLocation");
+            let rl = rt.string(&format!("farmersdelight:{path}"));
+            let part = rt.string(part);
+            crate::api::call(rt, init, &[l, rl, part]);
+            l
+        };
+        let (x, twin, other) = (layer(&mut rt, "canvas_sign", "main"), layer(&mut rt, "canvas_sign", "main"), layer(&mut rt, "canvas_sign", "outer"));
+        let equals = "net/minecraft/client/model/geom/ModelLayerLocation.equals.(Ljava/lang/Object;)Z";
+        let hash = "net/minecraft/client/model/geom/ModelLayerLocation.hashCode.()I";
+        assert_eq!(crate::api::call(&mut rt, equals, &[x, twin]), V::I(1));
+        assert_eq!(crate::api::call(&mut rt, hash, &[x]), crate::api::call(&mut rt, hash, &[twin]));
+        assert_eq!(crate::api::call(&mut rt, equals, &[x, other]), V::I(0));
+        let model = crate::api::call(&mut rt, "net/minecraft/client/model/geom/ModelLayerLocation.getModel.()Lnet/minecraft/resources/ResourceLocation;", &[x]);
+        assert_eq!(rt.str_of(model), Some("farmersdelight:canvas_sign"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// An enum's `equals` is `Enum`'s (final): the same constant or not. FarmersDelight compares
+    /// axes so.
+    #[test]
+    fn enum_constants_are_equal_only_to_themselves() {
+        let mut rt = Rt::new();
+        let x = crate::api::get_static(&mut rt, "net/minecraft/core/Direction$Axis.X");
+        let z = crate::api::get_static(&mut rt, "net/minecraft/core/Direction$Axis.Z");
+        let equals = "net/minecraft/core/Direction$Axis.equals.(Ljava/lang/Object;)Z";
+        let x_again = crate::api::get_static(&mut rt, "net/minecraft/core/Direction$Axis.X");
+        assert_eq!(crate::api::call(&mut rt, equals, &[x, x_again]), V::I(1));
+        assert_eq!(crate::api::call(&mut rt, equals, &[x, z]), V::I(0));
+        let hash = "net/minecraft/core/Direction$Axis.hashCode.()I";
+        assert_eq!(crate::api::call(&mut rt, hash, &[x]), crate::api::call(&mut rt, hash, &[x_again]));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The data-class table answers last, from fields named as vanilla names them; a class the
+    /// runtime models by hand keeps its own representation, so the table must leave it out
+    /// (`tools/vanilla_records.py` does; rerun it after modelling one).
+    #[test]
+    fn the_data_class_table_leaves_out_what_the_runtime_models_by_hand() {
+        let mut text = String::new();
+        for dir in [concat!(env!("CARGO_MANIFEST_DIR"), "/src"), concat!(env!("CARGO_MANIFEST_DIR"), "/../horizon-compat-core/src")] {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let path = e.unwrap().path();
+                if path.extension().is_some_and(|x| x == "rs") && !path.ends_with("vanilla_records.rs") && !path.ends_with("records.rs") {
+                    text += &std::fs::read_to_string(&path).unwrap();
+                }
+            }
+        }
+        let shadowed: Vec<&str> = DATA_CLASSES
+            .iter()
+            .map(|(c, _)| *c)
+            .filter(|c| text.contains(&format!("\"{c}\"")) || text.contains(&format!("\"{c}.")) || text.contains(&format!("{c}\"")))
+            .collect();
+        assert!(shadowed.is_empty(), "modelled by hand and in DATA_CLASSES: {shadowed:?}");
     }
 }

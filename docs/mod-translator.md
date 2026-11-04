@@ -1692,6 +1692,18 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       API calls still count if unmapped.
     - `DeferredRegister.getNamespace`, `addAlias` (kept as `alias/<registry>/<from>`),
       `FMLConfig.defaultConfigPath` (`defaultconfigs`, FML's default).
+    - Vanilla's plain data classes, read from their bytecode (`tools/vanilla_records.py`, now also
+      writing `DATA_CLASSES` and `ENUMS` beside `RECORDS`): 682 classes extending `Object` whose
+      constructor only stores its arguments in fields, with the getters and setters that only read
+      or write one (`Tuple`, `LevelResource`, `ModelLayerLocation`...). Their `equals`/`hashCode`
+      are `Object`'s when not overridden, field by field (in the constructor's order) when both
+      overrides read exactly the fields one constructor sets (31 classes), else unanswered. The 51
+      classes the runtime models by hand are left out (a test checks the table never shadows one).
+      An enum constant's `equals`/`hashCode` are `Enum`'s: identity (FarmersDelight's 36
+      `Direction.Axis.equals`). Tests `records::tests::a_plain_vanilla_data_class_keeps_what_it_was_given`,
+      `a_data_class_that_compares_its_fields_is_equal_to_its_twin`,
+      `enum_constants_are_equal_only_to_themselves`,
+      `the_data_class_table_leaves_out_what_the_runtime_models_by_hand`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
