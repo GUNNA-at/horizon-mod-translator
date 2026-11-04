@@ -45,7 +45,7 @@ impl ParsedModels {
         }
         let parsed = crate::par::par_map(&files, |(_, path)| {
             let text = fs::read_to_string(path).ok()?;
-            CuboidModel::from_json(&text).ok().map(Arc::new)
+            CuboidModel::from_json(&text).ok().map(|model| Arc::new(with_mesh(model, root)))
         });
         let models = files
             .into_iter()
@@ -92,7 +92,7 @@ impl ParsedModels {
                         let text = fs::read_to_string(
                             root.join(format!("assets/{namespace}/models/{path}.json")),
                         )?;
-                        Ok(CuboidModel::from_json(&text)?)
+                        Ok(with_mesh(CuboidModel::from_json(&text)?, root))
                     };
                     match read() {
                         Ok(model) => Arc::new(model),
@@ -117,6 +117,26 @@ impl ParsedModels {
             .map(Arc::new)
             .map_err(|e| format!("item models: {e:?}"))
     }
+}
+
+/// A NeoForge OBJ model with its mesh, read beside it from the same resources
+/// ([`horizon_assets::obj::load`]). One that does not read is logged and draws nothing.
+fn with_mesh(mut model: CuboidModel, root: &Path) -> CuboidModel {
+    if let Some(geometry) = model.obj.as_mut() {
+        let read = |id: &str| {
+            let (namespace, path) = id.split_once(':')?;
+            // An identifier's path stays inside its namespace, as a pack's resources do.
+            if namespace.contains(['/', '\\']) || path.split(['/', '\\']).any(|s| s == "..") {
+                return None;
+            }
+            fs::read_to_string(root.join(format!("assets/{namespace}/{path}"))).ok()
+        };
+        match horizon_assets::obj::load(geometry, read) {
+            Ok(mesh) => geometry.mesh = Some(Arc::new(mesh)),
+            Err(e) => log::warn!("Horizon: OBJ model {}: {e}", geometry.model),
+        }
+    }
+    model
 }
 
 #[cfg(test)]
@@ -233,6 +253,38 @@ mod tests {
                 .is_ok()
         );
         assert!(parsed.into_item_library().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn obj_models_read_their_mesh_beside_them_in_both_loads() -> Result<()> {
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("horizon-obj-models-{}", std::process::id())),
+        );
+        let file = |path: &str, text: &str| {
+            let path = fixture.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        file("assets/mod/models/block/wheel/wheel.obj", "mtllib wheel.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nusemtl plank\nf 1 2 3\n");
+        file("assets/mod/models/block/wheel/wheel.mtl", "newmtl plank\nmap_Kd #planks\n");
+        fixture.write("mod:block/wheel", r#"{"loader":"neoforge:obj","model":"mod:models/block/wheel/wheel.obj","textures":{"planks":"block/oak_planks"}}"#);
+        // Its library is not there: read, but drawing nothing.
+        fixture.write("mod:block/bare", r#"{"loader":"neoforge:obj","model":"mod:models/block/wheel/wheel.obj","mtl_override":"gone.mtl"}"#);
+        // A path out of its namespace is not read.
+        fixture.write("mod:block/escape", r#"{"loader":"neoforge:obj","model":"mod:../../outside.obj"}"#);
+        file("outside.obj", "v 0 0 0\n");
+        let faces = |library: &ModelLibrary, name: &str| -> Result<Option<usize>> {
+            let resolved = library.resolve(name)?;
+            Ok(resolved.obj().and_then(|o| o.mesh.as_ref()).map(|m| m.faces.len()))
+        };
+        let names = vec!["mod:block/wheel".into(), "mod:block/bare".into(), "mod:block/escape".into()];
+        for models in [ParsedModels::load(&fixture.0), ParsedModels::default()] {
+            let library = models.block_library(&fixture.0, names.clone())?;
+            assert_eq!(faces(&library, "mod:block/wheel")?, Some(1));
+            assert_eq!(faces(&library, "mod:block/bare")?, None);
+            assert_eq!(faces(&library, "mod:block/escape")?, None);
+        }
         Ok(())
     }
 }

@@ -207,6 +207,13 @@ impl BlockModelTransform {
             .position(v.map(|c| c - 0.5))
             .map(|c| c + 0.5)
     }
+    /// A direction vector (a normal) turned as positions are, about no point.
+    pub(super) fn normal(self, v: [f32; 3]) -> [f32; 3] {
+        if self.orientation.matrix.identity {
+            return v;
+        }
+        self.orientation.matrix.position(v)
+    }
     pub(super) fn uv(self, direction: Direction, uv: [f32; 2]) -> [f32; 2] {
         let matrix = self.uv_matrix(direction);
         // MatrixUtil re-determines properties when the identity bit is absent.

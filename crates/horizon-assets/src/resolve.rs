@@ -31,6 +31,10 @@ impl ResolvedCuboidModel {
     pub fn uses_item_generator(&self) -> bool {
         self.generated
     }
+    /// The OBJ geometry the model draws (NeoForge's OBJ loader), when that is its geometry.
+    pub fn obj(&self) -> Option<&ObjGeometry> {
+        self.geometry.as_ref().and_then(|m| m.obj.as_ref())
+    }
     pub fn elements(&self) -> &[Option<Element>] {
         self.geometry
             .as_ref()
@@ -74,6 +78,7 @@ impl ModelLibrary {
             )]),
             elements: None,
             display: None,
+            obj: None,
         }
     }
     pub fn new(models: BTreeMap<String, CuboidModel>) -> Result<Self> {
@@ -132,12 +137,12 @@ impl ModelLibrary {
             .unwrap_or(GuiLight::Side);
         let geometry = chain
             .iter()
-            .find(|m| m.elements.is_some())
+            .find(|m| m.elements.is_some() || m.obj.is_some())
             .map(|m| Arc::clone(m));
         let generated = chain
             .iter()
             .zip(&names)
-            .find(|(m, name)| m.elements.is_some() || *name == GENERATED_MODEL)
+            .find(|(m, name)| m.elements.is_some() || m.obj.is_some() || *name == GENERATED_MODEL)
             .is_some_and(|(_, name)| name == GENERATED_MODEL);
         let display = ItemTransforms {
             contexts: std::array::from_fn(|index| {
@@ -248,6 +253,7 @@ pub fn missing_model() -> CuboidModel {
                 }),
             ),
         ]),
+        obj: None,
     }
 }
 

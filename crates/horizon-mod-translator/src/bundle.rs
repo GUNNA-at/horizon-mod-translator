@@ -1121,7 +1121,7 @@ pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option
                 let Ok(mut e) = zip.by_index(i) else { continue };
                 let Some(name) = e.enclosed_name() else { continue };
                 let path = name.to_string_lossy().into_owned();
-                let resource = [".json", ".png", ".mcmeta", ".ogg"].iter().any(|x| path.ends_with(x));
+                let resource = [".json", ".png", ".mcmeta", ".ogg", ".obj", ".mtl"].iter().any(|x| path.ends_with(x));
                 if !e.is_file() || !path.starts_with(&prefix) || !resource {
                     continue;
                 }

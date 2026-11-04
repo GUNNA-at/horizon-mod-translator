@@ -64,6 +64,25 @@ pub struct CuboidModel {
     pub textures: BTreeMap<String, TextureSlot>,
     pub elements: Option<Vec<Option<Element>>>,
     pub display: Option<ItemTransforms>,
+    /// The geometry NeoForge's OBJ loader reads instead of elements.
+    pub obj: Option<ObjGeometry>,
+}
+/// A model NeoForge's OBJ loader reads (`"loader": "neoforge:obj"`, `forge:obj` before NeoForge):
+/// the mesh's location and the loader's options. The mesh is read beside the model; whoever loads
+/// models attaches it ([`crate::obj`]), and a model without one draws nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjGeometry {
+    /// `create:models/block/water_wheel/water_wheel.obj`.
+    pub model: String,
+    /// `flip_v`: texture v counts from the top, as Blender writes it.
+    pub flip_v: bool,
+    /// `automatic_culling` (on unless off): a face flat on a side of the block is culled there.
+    pub automatic_culling: bool,
+    /// `emissive_ambient` (on unless off): a material's `Ka` lights its faces.
+    pub emissive_ambient: bool,
+    /// `mtl_override`: the material library to use instead of the file's `mtllib`.
+    pub mtl_override: Option<String>,
+    pub mesh: Option<std::sync::Arc<crate::obj::ObjMesh>>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Element {
@@ -185,6 +204,19 @@ impl CuboidModel {
             .get("display")
             .map(|r| ItemTransforms::decode(r))
             .transpose()?;
+        let loader = obj.get("loader").map(|r| primitive_string(r)).transpose()?;
+        let option = |key: &str, default: bool| obj.get(key).map(|r| boolean(r)).transpose().map(|v| v.unwrap_or(default));
+        let obj_geometry = match loader.as_deref() {
+            Some("neoforge:obj" | "forge:obj") => Some(ObjGeometry {
+                model: identifier(&string(required(&obj, "model")?)?)?,
+                flip_v: option("flip_v", false)?,
+                automatic_culling: option("automatic_culling", true)?,
+                emissive_ambient: option("emissive_ambient", true)?,
+                mtl_override: obj.get("mtl_override").map(|r| string(r)).transpose()?,
+                mesh: None,
+            }),
+            _ => None,
+        };
         Ok(Self {
             parent,
             ambient_occlusion,
@@ -192,6 +224,7 @@ impl CuboidModel {
             textures,
             elements,
             display,
+            obj: obj_geometry,
         })
     }
 }

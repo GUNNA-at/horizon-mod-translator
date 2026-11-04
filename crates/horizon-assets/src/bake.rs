@@ -211,7 +211,84 @@ fn bake_elements(
             )?);
         }
     }
+    if let Some(obj) = model.obj()
+        && let Some(mesh) = &obj.mesh
+    {
+        for face in &mesh.faces {
+            output.push(bake_obj_face(model, obj, face, transform)?);
+        }
+    }
     Ok(output)
+}
+/// `ObjModel.makeQuad`: a mesh face turned by the block state's rotation (about the block's
+/// centre), its texture from the model's slots (`#planks`) or a sprite, the direction its first
+/// corner's normal points nearest to, and, with `automatic_culling`, culled by the side it lies
+/// flat on (all four corners there, the normal outward).
+fn bake_obj_face(
+    model: &ResolvedCuboidModel,
+    obj: &ObjGeometry,
+    face: &crate::obj::ObjFace,
+    transform: BlockModelTransform,
+) -> Result<ModelQuad> {
+    let missing = || Material {
+        sprite: "minecraft:missingno".to_owned(),
+        force_translucent: false,
+    };
+    let material = match face.texture.strip_prefix('#') {
+        Some(slot) if !slot.is_empty() => model.material(slot)?.cloned().unwrap_or_else(missing),
+        Some(_) => missing(),
+        None => identifier(&face.texture).map_or_else(
+            |_| missing(),
+            |sprite| Material {
+                sprite,
+                force_translucent: false,
+            },
+        ),
+    };
+    let positions = face.positions.map(|v| transform.position(v));
+    let normal = transform.normal(face.normal);
+    let facing = nearest_direction(normal);
+    let near = |a: f32, b: f32| (a - b).abs() < 1.0e-5;
+    let cull = obj
+        .automatic_culling
+        .then(|| {
+            let flat = |axis: usize, value: f32| positions.iter().all(|p| near(p[axis], value));
+            [
+                (0, 0.0, normal[0] < 0.0, Direction::West),
+                (0, 1.0, normal[0] > 0.0, Direction::East),
+                (2, 0.0, normal[2] < 0.0, Direction::North),
+                (2, 1.0, normal[2] > 0.0, Direction::South),
+                (1, 0.0, normal[1] < 0.0, Direction::Down),
+                (1, 1.0, normal[1] > 0.0, Direction::Up),
+            ]
+            .into_iter()
+            .find(|(axis, value, outward, _)| *outward && flat(*axis, *value))
+            .map(|(.., d)| d)
+        })
+        .flatten();
+    Ok(ModelQuad {
+        positions,
+        uv: face.uv,
+        facing,
+        cull,
+        material,
+        tint_index: face.tint_index,
+        shade_direction_override: None,
+        light_emission: face.light,
+    })
+}
+/// `Direction.getNearest(x, y, z)`: the direction with the largest dot product, north when none
+/// is positive.
+fn nearest_direction([x, y, z]: [f32; 3]) -> Direction {
+    let mut best = f32::MIN;
+    let mut direction = Direction::North;
+    for (candidate, dot) in Direction::ALL.into_iter().zip([-y, y, -z, z, -x, x]) {
+        if dot > best {
+            best = dot;
+            direction = candidate;
+        }
+    }
+    direction
 }
 /// `FaceBakery.bakeQuad` for a quad with explicit corners and unit-atlas UVs
 /// (`uv` in 0..16 texels), as `ItemModelGenerator` builds its layers.
