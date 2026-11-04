@@ -37,6 +37,9 @@ pub const REGISTRIES: [&str; 22] = [
 
 const REGISTER_EVENT: &str = "net/neoforged/neoforge/registries/RegisterEvent";
 const ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
+const REGISTRY_BUILDER: &str = "net/neoforged/neoforge/registries/RegistryBuilder";
+const NEW_REGISTRY_EVENT: &str = "net/neoforged/neoforge/registries/NewRegistryEvent";
+const BAKE: &str = "net/neoforged/neoforge/registries/callback/BakeCallback.onBake.(Lnet/minecraft/core/Registry;)V";
 
 /// The last parameter type of a method descriptor (`(La;Lnet/x/Event;)V` → `net/x/Event`).
 fn last_param(desc: &str) -> Option<&str> {
@@ -101,14 +104,29 @@ pub fn fire_registrations(rt: &mut Rt) {
             names.push(extra);
         }
     }
+    // NeoForge asks for new registries first (`event.create(builder)`, `event.register(registry)`).
+    let ev = rt.new_object(NEW_REGISTRY_EVENT);
+    post(rt, NEW_REGISTRY_EVENT, ev);
     for registry in names {
         let ev = rt.new_object(REGISTER_EVENT);
         let key = rt.string(&registry);
         rt.put_field(ev, "$registry", key);
         post(rt, REGISTER_EVENT, ev);
     }
-    // The registries are full: then common setup and capabilities, as NeoForge's loading goes on.
     rt.resolve_registrations();
+    // The registries are frozen: each mod registry's bake callbacks run, once, on the full registry
+    // (Create sorts its fan processing types and arm interaction points here).
+    let all = bake_callbacks(rt);
+    let bakes = std::mem::take(list_mut(rt, all));
+    for pair in bakes {
+        let (registry, callback) = match rt.heap.get(pair.r() as usize).map(|o| &o.data) {
+            Some(Data::List(v)) if v.len() == 2 => (v[0], v[1]),
+            _ => continue,
+        };
+        rt.call_functional(BAKE, callback, &[registry]);
+        rt.report_thrown("BakeCallback.onBake");
+    }
+    // Then common setup and capabilities, as NeoForge's loading goes on.
     fire_common_setup(rt);
     crate::capabilities::fire(rt);
 }
@@ -185,6 +203,41 @@ pub fn split_key(rt: &Rt, key: V) -> (String, String) {
     }
 }
 
+/// The bake callbacks of the mod registries made so far, as `[registry, callback]` pairs.
+fn bake_callbacks(rt: &mut Rt) -> V {
+    rt.intern("compat:bake-callbacks".into(), |rt| rt.alloc("java/util/ArrayList", Data::List(Vec::new())))
+}
+
+fn list_mut(rt: &mut Rt, list: V) -> &mut Vec<V> {
+    match rt.heap.get_mut(list.r() as usize).map(|o| &mut o.data) {
+        Some(Data::List(v)) => v,
+        _ => unreachable!("compat's own lists are lists"),
+    }
+}
+
+/// `RegistryBuilder.create()`: a mod's registry is its name, as vanilla's are here. What the mod
+/// registers to it lands in `rt.registered` under that name; its bake callbacks wait for the freeze.
+fn make_registry(rt: &mut Rt, builder: V) -> V {
+    let registry = rt.get_field(builder, "$key");
+    if let Some(name) = rt.str_of(registry).map(str::to_owned)
+        && !name.is_empty()
+        && !rt.custom_registries.contains(&name)
+        && !REGISTRIES.contains(&name.as_str())
+    {
+        rt.custom_registries.push(name);
+    }
+    let callbacks = match rt.heap.get(rt.get_field(builder, "$bake").r() as usize).map(|o| &o.data) {
+        Some(Data::List(v)) => v.clone(),
+        _ => Vec::new(),
+    };
+    let all = bake_callbacks(rt);
+    for callback in callbacks {
+        let pair = rt.alloc("java/util/List", Data::List(vec![registry, callback]));
+        list_mut(rt, all).push(pair);
+    }
+    registry
+}
+
 fn register(rt: &mut Rt, registry: &str, name: &str, obj: V) {
     if obj.r() != 0 {
         rt.registered.insert((registry.to_owned(), name.to_owned()), obj);
@@ -232,7 +285,44 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             post(rt, class, a(1));
             a(1)
         }
-        (REGISTER_EVENT, "getRegistryKey") => rt.get_field(a(0), "$registry"),
+        // The registry an event fires for is its name, so `event.getRegistry() ==
+        // BuiltInRegistries.TRIGGER_TYPES` holds for the same interned string.
+        (REGISTER_EVENT, "getRegistryKey" | "getRegistry") => rt.get_field(a(0), "$registry"),
+        // A mod's own registry: `new RegistryBuilder<>(KEY).sync(true).onBake(cb).create()`, or made
+        // through `NewRegistryEvent.create(builder)` or `DeferredRegister.makeRegistry(builder -> ..)`.
+        // Its other settings (`sync`, `maxId`, `defaultKey`...) return the builder.
+        (REGISTRY_BUILDER, "<init>") => {
+            rt.put_field(a(0), "$key", a(1));
+            V::Void
+        }
+        (REGISTRY_BUILDER, "onBake") => {
+            let mut list = rt.get_field(a(0), "$bake");
+            if list.r() == 0 {
+                list = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+                rt.put_field(a(0), "$bake", list);
+            }
+            list_mut(rt, list).push(a(1));
+            a(0)
+        }
+        (REGISTRY_BUILDER, "create") => make_registry(rt, a(0)),
+        (NEW_REGISTRY_EVENT, "create") => make_registry(rt, a(1)),
+        (NEW_REGISTRY_EVENT, "register") => V::Void,
+        (o, "makeRegistry") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
+            let builder = rt.new_object(REGISTRY_BUILDER);
+            let key = rt.get_field(a(0), "$registry");
+            rt.put_field(builder, "$key", key);
+            rt.call_functional(ACCEPT, a(1), &[builder]);
+            make_registry(rt, builder)
+        }
+        // `WritableRegistry.register(key, value, info)`: Create adds its registries to the registry
+        // of registries so; a value registered by key, handed back as its holder.
+        ("net/minecraft/core/WritableRegistry" | "net/minecraft/core/MappedRegistry", "register") if rt.str_of(a(0)).is_some() => {
+            let reg = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let (_, loc) = split_key(rt, a(1));
+            let n = if loc.contains(':') { loc } else { format!("minecraft:{loc}") };
+            register(rt, &reg, &n, a(2));
+            registry_holder(rt, &reg, &n, a(2))
+        }
         (REGISTER_EVENT, "register") => {
             let this = a(0);
             let registry = rt.get_field(this, "$registry");
@@ -405,7 +495,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                         _ => v,
                     }
                 }
-                "keySet" | "entrySet" | "stream" | "iterator" | "size" | "holders" | "listElements" => {
+                "keySet" | "entrySet" | "stream" | "iterator" | "size" | "holders" | "listElements" | "forEach" => {
                     let mut entries: Vec<(String, V)> = rt.registered.iter().filter(|((r, _), _)| *r == reg).map(|((_, k), v)| (k.clone(), *v)).collect();
                     entries.sort_by(|x, y| x.0.cmp(&y.0));
                     match n {
@@ -429,6 +519,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                         "stream" => {
                             let vs: Vec<V> = entries.iter().map(|(_, v)| *v).collect();
                             rt.alloc("java/util/stream/Stream", Data::Stream(vs))
+                        }
+                        "forEach" => {
+                            for (_, v) in entries {
+                                rt.call_functional(ACCEPT, a(1), &[v]);
+                            }
+                            V::Void
                         }
                         _ => {
                             let vs: Vec<V> = entries.iter().map(|(_, v)| *v).collect();
@@ -732,6 +828,53 @@ mod tests {
         assert_eq!(last_param("(Lcom/x/A;Lnet/neoforged/neoforge/registries/RegisterEvent;)V"), Some("net/neoforged/neoforge/registries/RegisterEvent"));
         assert_eq!(last_param("(IJ[Ljava/lang/String;)V"), Some("[Ljava/lang/String;"));
         assert_eq!(last_param("()V"), None);
+    }
+
+    /// Create's `FanProcessingTypeRegistry.init` as a bake callback: it reads the registry with
+    /// `forEach` into a list (id 1), whose `Consumer` adds each value (id 2).
+    fn bake_into_list(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+        let seen = rt.captured(args[0])[0];
+        match id {
+            1 => {
+                let add = rt.lambda_id("java/util/function/Consumer", 2, vec![seen]);
+                call(rt, "net/minecraft/core/Registry.forEach.(Ljava/util/function/Consumer;)V", &[args[1], add]);
+            }
+            _ => list_mut(rt, seen).push(args[1]),
+        }
+        Some(V::Void)
+    }
+
+    /// `CreateBuiltInRegistries`: a registry of the mod's own, made by `RegistryBuilder` with a bake
+    /// callback, filled by `Registry.register` while registries fire, and read whole by the callback
+    /// once they are frozen.
+    #[test]
+    fn a_mods_own_registry_holds_its_entries_and_bakes_once_they_are_in() {
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(bake_into_list);
+        let loc = rt.string("t:widget_type");
+        let key = call(&mut rt, "net/minecraft/resources/ResourceKey.createRegistryKey.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[loc]).unwrap();
+        let builder = rt.new_object(REGISTRY_BUILDER);
+        call(&mut rt, "net/neoforged/neoforge/registries/RegistryBuilder.<init>.(Lnet/minecraft/resources/ResourceKey;)V", &[builder, key]);
+        let seen = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        let callback = rt.lambda_id("net/neoforged/neoforge/registries/callback/BakeCallback", 1, vec![seen]);
+        call(&mut rt, "net/neoforged/neoforge/registries/RegistryBuilder.onBake.(Lnet/neoforged/neoforge/registries/callback/BakeCallback;)Lnet/neoforged/neoforge/registries/RegistryBuilder;", &[builder, callback]);
+        let registry = call(&mut rt, "net/neoforged/neoforge/registries/RegistryBuilder.create.()Lnet/minecraft/core/Registry;", &[builder]).unwrap();
+        let (splashing, blasting) = (rt.new_object("t/Splashing"), rt.new_object("t/Blasting"));
+        for (name, v) in [("t:splashing", splashing), ("t:blasting", blasting)] {
+            let id = rt.string(name);
+            call(&mut rt, "net/minecraft/core/Registry.register.(Lnet/minecraft/core/Registry;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Object;)Ljava/lang/Object;", &[registry, id, v]);
+        }
+        let id = rt.string("t:blasting");
+        assert_eq!(call(&mut rt, "net/minecraft/core/Registry.get.(Lnet/minecraft/resources/ResourceLocation;)Ljava/lang/Object;", &[registry, id]), Some(blasting));
+        assert!(list_mut(&mut rt, seen).is_empty(), "baked before the registries froze");
+        fire_registrations(&mut rt);
+        let mut baked = list_mut(&mut rt, seen).clone();
+        baked.sort_by_key(|v| v.r());
+        assert_eq!(baked, [splashing, blasting]);
+        // An event for that registry is about the registry the mod holds.
+        let ev = rt.new_object(REGISTER_EVENT);
+        rt.put_field(ev, "$registry", key);
+        assert_eq!(call(&mut rt, "net/neoforged/neoforge/registries/RegisterEvent.getRegistry.()Lnet/minecraft/core/Registry;", &[ev]), Some(registry));
     }
 
     #[test]

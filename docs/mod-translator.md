@@ -649,6 +649,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `BlockPos` and `Vec3i` as a mod's own classes climb (`api_super`); before, `set` and `move` fell
     into the builder fallback and handed back the receiver unmoved. `closerThan` and
     `BlockPos.mutable()` are mapped too.
+  - [x] 2026-11-04 A mod's own registries. Create makes twelve (`CreateBuiltInRegistries`: fan
+    processing types, arm interaction points, display sources, contraption types...) with
+    `new RegistryBuilder<>(KEY).sync(true).onBake(cb).create()`, and `create()` was unmapped, so each
+    was null and what `AllFanProcessingTypes` registered to it went nowhere. A mod registry is now its
+    name, as vanilla's are in compat; `NewRegistryEvent.create(builder)` and
+    `DeferredRegister.makeRegistry(..)` make one too, `NewRegistryEvent` is posted before the
+    `RegisterEvent`s, and the bake callbacks run once registration is done, on the full registry
+    (`FanProcessingTypeRegistry.init` reads it with `Registry.forEach`, now mapped). Also
+    `RegisterEvent.getRegistry()` (Create registers its advancement triggers when it is
+    `BuiltInRegistries.TRIGGER_TYPES`) and `WritableRegistry.register(key, value, info)`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
