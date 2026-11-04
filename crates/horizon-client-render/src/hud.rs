@@ -183,14 +183,17 @@ fn animation_of(mcmeta: Option<&str>) -> Option<AnimationMetadata> {
 }
 /// An animated strip's first frame: the region the mcmeta's frame size picks
 /// (`AnimationMetadataSection.frameSize`), which is the top-left square unless
-/// it names other dimensions or the frames run along a row.
+/// it names other dimensions or the frames run along a row. A texture with no
+/// animation is one frame, the whole image (`SpriteLoader.loadSprite`): Create's
+/// 16x32 `belt_scroll`, which its belt scrolls through.
 fn first_frame(
     (w, h, pixels): (u32, u32, Vec<u8>),
     animation: Option<&AnimationMetadata>,
 ) -> (u32, u32, Vec<u8>) {
-    let [fw, fh] = animation.map_or([w.min(h) as i32; 2], |meta| {
-        meta.frame_size(w as i32, h as i32)
-    });
+    let Some(meta) = animation else {
+        return (w, h, pixels);
+    };
+    let [fw, fh] = meta.frame_size(w as i32, h as i32);
     match (u32::try_from(fw), u32::try_from(fh)) {
         (Ok(fw), Ok(fh))
             if fw > 0 && fh > 0 && w % fw == 0 && h % fh == 0 && (fw, fh) != (w, h) =>
@@ -639,7 +642,7 @@ impl HudAtlas {
                 .and_then(|d| png_size(&d.join(format!("{name}.png"))))
                 .map(|(dw, dh)| {
                     let side = dw.min(dh);
-                    if frames { (side, side) } else { (dw, dh) }
+                    if frames && animation.is_some() { (side, side) } else { (dw, dh) }
                 })
                 .filter(|&size| size != (w, h));
             let flags = mcmeta.as_deref().and_then(TextureFlags::from_mcmeta);
@@ -2405,6 +2408,18 @@ mod tests {
         assert_eq!(texel_at(&atlas, rect, 0, 0), [0, 255, 0, 255]);
     }
     #[test]
+    fn a_tall_texture_with_no_animation_packs_whole() {
+        let root = animated_root();
+        let block = root.join("assets/minecraft/textures/block");
+        // As Create's `belt_scroll`: 16x32, no mcmeta, red over blue.
+        write_strip(&block.join("test_tall.png"), 16, 32, &[[255, 0, 0, 255], [0, 0, 255, 255]], None);
+        let atlas = HudAtlas::build(&root).unwrap();
+        let rect = atlas.sprites["block/test_tall"];
+        assert_eq!(rect.texels((atlas.width, atlas.height)), (16, 32));
+        assert_eq!((texel_at(&atlas, rect, 0, 0), texel_at(&atlas, rect, 0, 31)), ([255, 0, 0, 255], [0, 0, 255, 255]));
+        assert!(atlas.sprite_animations.iter().all(|(r, _)| (r.u0, r.v0) != (rect.u0, rect.v0)));
+    }
+    #[test]
     fn a_pack_directory_outside_the_walked_folders_still_packs() {
         let root =
             std::env::temp_dir().join(format!("horizon-atlas-custom-{}", std::process::id()));
@@ -2505,6 +2520,10 @@ mod tests {
         write_png(&pack, "gui/sprites/widget/button", 400, 40);
         write_png(&pack, "block/stone", 32, 32);
         write_png(&pack, "item/compass", 32, 1024);
+        // The compass animates in both (vanilla's own has an mcmeta).
+        for root in [&defaults, &pack] {
+            fs::write(root.join("assets/minecraft/textures/item/compass.png.mcmeta"), r#"{"animation": {}}"#).unwrap();
+        }
         write_png(&pack, "gui/sprites/pack_only", 30, 10);
         let atlas = HudAtlas::build_over(&pack, &defaults).unwrap();
         let _ = fs::remove_dir_all(&temp);
