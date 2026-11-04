@@ -603,10 +603,16 @@ fn named(rt: &mut Rt, class: &'static str, name: &'static str) -> V {
     })
 }
 
-/// `BlockBehaviour.Properties`: the calls a declaration needs are kept on the object; the others
-/// return the receiver through the general mapping's builder rule.
+/// `BlockBehaviour.Properties` (1.21.1's builder, every method): each call is kept on the object as
+/// a `$` field. The game reads destroy time, resistance, sound, light, occlusion, collision, tool,
+/// friction, random ticks, map colour, push reaction and replaceable; the predicates
+/// (`isRedstoneConductor`, `isSuffocating`, `isViewBlocking`, `isValidSpawn`, `hasPostProcess`,
+/// `emissiveRendering`) and the other flags are kept for it but not read yet.
 fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    if name == "of" {
+        return Some(rt.new_object(BLOCK_PROPERTIES));
+    }
     let this = a(0);
     let set = |rt: &mut Rt, f: &'static str, v: V| {
         rt.put_field(this, f, v);
@@ -661,6 +667,27 @@ fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
         "mapColor" => set(rt, "$mapColor", a(1)),
         "pushReaction" => set(rt, "$push", a(1)),
         "replaceable" => set(rt, "$replaceable", V::I(1)),
+        "speedFactor" => set(rt, "$speedFactor", a(1)),
+        "jumpFactor" => set(rt, "$jumpFactor", a(1)),
+        "dynamicShape" => set(rt, "$dynamicShape", V::I(1)),
+        "noLootTable" => set(rt, "$noLootTable", V::I(1)),
+        "dropsLike" => set(rt, "$dropsLike", a(1)),
+        "lootFrom" => set(rt, "$lootFrom", a(1)),
+        "ignitedByLava" => set(rt, "$ignitedByLava", V::I(1)),
+        "liquid" => set(rt, "$liquid", V::I(1)),
+        "forceSolidOn" => set(rt, "$forceSolidOn", V::I(1)),
+        "forceSolidOff" => set(rt, "$forceSolidOff", V::I(1)),
+        "air" => set(rt, "$air", V::I(1)),
+        "isValidSpawn" => set(rt, "$isValidSpawn", a(1)),
+        "isRedstoneConductor" => set(rt, "$isRedstoneConductor", a(1)),
+        "isSuffocating" => set(rt, "$isSuffocating", a(1)),
+        "isViewBlocking" => set(rt, "$isViewBlocking", a(1)),
+        "hasPostProcess" => set(rt, "$hasPostProcess", a(1)),
+        "emissiveRendering" => set(rt, "$emissiveRendering", a(1)),
+        "offsetType" => set(rt, "$offsetType", a(1)),
+        "noTerrainParticles" => set(rt, "$noTerrainParticles", V::I(1)),
+        "requiredFeatures" => set(rt, "$requiredFeatures", a(1)),
+        "instrument" => set(rt, "$instrument", a(1)),
         _ => None,
     }
 }

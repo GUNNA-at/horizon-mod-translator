@@ -1069,6 +1069,18 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
                 }
             }
         }
+        // `SoundSource`, 1.21.1's constants in order (what a sound is played under).
+        k if k.starts_with("net/minecraft/sounds/SoundSource.") => {
+            const NAMES: [&str; 10] = ["MASTER", "MUSIC", "RECORDS", "WEATHER", "BLOCKS", "HOSTILE", "NEUTRAL", "PLAYERS", "AMBIENT", "VOICE"];
+            let f = k.rsplit('.').next().unwrap_or("");
+            match NAMES.iter().position(|n| *n == f) {
+                Some(i) => api_enum(rt, "net/minecraft/sounds/SoundSource", NAMES[i], i as i32),
+                None => {
+                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    V::NULL
+                }
+            }
+        }
         k if k.starts_with("net/minecraft/core/registries/Registries.") => {
             let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
             rt.string(&n)
