@@ -1805,7 +1805,13 @@ impl<'a> Program<'a> {
             return Some(match (is_static, setter) {
                 // The runtime keeps a game object's state in `$`-named fields, and a field a mod
                 // subclass wrote itself under its plain name.
-                (false, false) => format!("match rt.get_field(args[0], {:?}) {{ V::Void => rt.get_field(args[0], {field:?}), v => v }}", format!("${field}")),
+                // Neither (the runtime models the object otherwise: a `VoxelShape`'s boxes): the
+                // runtime answers it as an API call named after the field, `VoxelShape.$shape`.
+                (false, false) => format!(
+                    "match rt.get_field(args[0], {own:?}) {{ V::Void => match rt.get_field(args[0], {field:?}) {{ V::Void => api::call(rt, {key:?}, &[args[0]]), v => v }}, v => v }}",
+                    own = format!("${field}"),
+                    key = format!("{target}.${field}.{}", m.desc)
+                ),
                 (false, true) => format!(
                     "{{ let own = !matches!(rt.get_field(args[0], {own:?}), V::Void) || matches!(rt.get_field(args[0], {field:?}), V::Void); rt.put_field(args[0], if own {{ {own:?} }} else {{ {field:?} }}, args[1]); V::Void }}",
                     own = format!("${field}")

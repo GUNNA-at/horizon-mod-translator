@@ -331,12 +331,14 @@ const ITEM: &[(&str, &str)] = &[
 /// The tag `BlockTags.<field>` (`kind` `block`) or `ItemTags.<field>` (`item`) names, as
 /// `minecraft:leaves`; None for a field 26.3 doesn't have.
 pub fn named(kind: &str, field: &str) -> Option<String> {
-    let table = match kind {
-        "block" => BLOCK,
-        "item" => ITEM,
-        _ => return None,
-    };
-    table.iter().find(|(f, _)| *f == field).map(|(_, t)| format!("minecraft:{t}"))
+    let find = |table: &[(&str, &str)]| table.iter().find(|(f, _)| *f == field).map(|(_, t)| format!("minecraft:{t}"));
+    match kind {
+        "block" => find(BLOCK),
+        // A mod built for 1.21.1 names `ItemTags.STAIRS`; 26.3 keeps the tags blocks and items share
+        // in `BlockItemTags`, one id for both halves, and its `ItemTags` no longer has them all.
+        "item" => find(ITEM).or_else(|| find(BLOCK)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -356,6 +358,9 @@ mod tests {
         assert_eq!(named("item", "BEE_FOOD").as_deref(), Some("minecraft:bee_food"));
         assert_eq!(named("block", "BEE_ATTRACTIVE").as_deref(), Some("minecraft:bee_attractive"));
         assert_eq!(named("item", "PIGLIN_LOVED").as_deref(), Some("minecraft:piglin_loved"));
+        // 1.21.1's `ItemTags.STAIRS` and `SLABS`: the item half of the shared id.
+        assert_eq!(named("item", "STAIRS").as_deref(), Some("minecraft:stairs"));
+        assert_eq!(named("item", "SLABS").as_deref(), Some("minecraft:slabs"));
         assert_eq!(named("block", "NOT_A_TAG"), None);
     }
 }

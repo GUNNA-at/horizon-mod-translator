@@ -169,7 +169,7 @@ pub fn fire_registrations(rt: &mut Rt) {
         rt.put_field(ev, "$registry", key);
         post(rt, REGISTER_EVENT, ev);
     }
-    rt.resolve_registrations();
+    resolve(rt);
     // The registries are frozen: each mod registry's bake callbacks run, once, on the full registry
     // (Create sorts its fan processing types and arm interaction points here).
     let all = bake_callbacks(rt);
@@ -223,6 +223,16 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
     if let Some(v) = rt.registered.get(&(registry.to_owned(), id.to_owned())) {
         return *v;
     }
+    // Through its aliases (`addAlias`), a few at most: a cycle names nothing.
+    let mut name = id.to_owned();
+    for _ in 0..8 {
+        let Some(to) = rt.interned.get(&format!("alias/{registry}/{name}")).and_then(|t| rt.str_of(*t)).map(str::to_owned) else { break };
+        if let Some(v) = rt.registered.get(&(registry.to_owned(), to.clone())) {
+            return *v;
+        }
+        name = to;
+    }
+    let id = name.as_str();
     match registry {
         "block" if id.starts_with("minecraft:") => crate::api::block(rt, id),
         "item" if id.starts_with("minecraft:") => crate::api_common::item(rt, id),
@@ -300,7 +310,16 @@ fn make_registry(rt: &mut Rt, builder: V) -> V {
 fn register(rt: &mut Rt, registry: &str, name: &str, obj: V) {
     if obj.r() != 0 {
         rt.registered.insert((registry.to_owned(), name.to_owned()), obj);
+        if registry == "block" {
+            crate::api::adopt_names(rt);
+        }
     }
+}
+
+/// Runs the registered suppliers (`DeferredRegister`'s), then names the states their blocks made.
+pub(crate) fn resolve(rt: &mut Rt) {
+    rt.resolve_registrations();
+    crate::api::adopt_names(rt);
 }
 
 fn name_of(rt: &Rt, v: V) -> String {
@@ -447,6 +466,59 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let s = format!("minecraft:{}", rt.str_of(a(0)).unwrap_or(""));
             rt.string(&s)
         }
+        // `ObfuscationReflectionHelper.setPrivateValue(class, instance, value, name)` and
+        // `getPrivateValue(class, instance, name)`: a field by its name (NeoForge runs on Mojang's
+        // names): a translated class's own field; a game class's as a mixin accessor reaches it (the
+        // `$` field the runtime keeps its state in, unless a mod wrote the plain one); a static
+        // without an instance. Registrate clears
+        // `Properties.drops` (what the block it copies drops) so a block drops its own loot: the
+        // runtime's record of `noLootTable` and `dropsLike`.
+        ("net/neoforged/fml/util/ObfuscationReflectionHelper", "setPrivateValue" | "getPrivateValue") => {
+            let set = name == "setPrivateValue";
+            let class = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let field = rt.str_of(if set { a(3) } else { a(2) }).unwrap_or("").to_owned();
+            let (instance, value) = (a(1), a(2));
+            if instance.is_null() {
+                let key = rt.static_key(&format!("{class}.{field}"));
+                if !set {
+                    return Some(rt.statics.get(key).copied().unwrap_or(V::NULL));
+                }
+                rt.statics.insert(key, value);
+            } else if set && field == "drops" && rt.class_of(instance) == crate::blocks::BLOCK_PROPERTIES {
+                rt.put_field(instance, "$noLootTable", V::I(0));
+                rt.put_field(instance, "$dropsLike", V::NULL);
+                rt.put_field(instance, "$drops", value);
+            } else if rt.is_mod_class(&class) {
+                let plain: &'static str = rt.static_key(&field);
+                if !set {
+                    return Some(rt.get_field(instance, plain));
+                }
+                rt.put_field(instance, plain, value);
+            } else {
+                let own = format!("${field}");
+                let own: &'static str = rt.static_key(&own);
+                let plain: &'static str = rt.static_key(&field);
+                if !set {
+                    return Some(match rt.get_field(instance, own) {
+                        V::Void => rt.get_field(instance, plain),
+                        v => v,
+                    });
+                }
+                let to_own = !matches!(rt.get_field(instance, own), V::Void) || matches!(rt.get_field(instance, plain), V::Void);
+                rt.put_field(instance, if to_own { own } else { plain }, value);
+            }
+            V::Void
+        }
+        // `tryBuild(namespace, path)`: null unless both are valid (lowercase letters, digits, `_-.`,
+        // and `/` in the path), as vanilla checks them.
+        ("net/minecraft/resources/ResourceLocation", "tryBuild") => {
+            let (ns, path) = (rt.str_of(a(0)).unwrap_or("").to_owned(), rt.str_of(a(1)).unwrap_or("").to_owned());
+            let ok = |s: &str, slash: bool| s.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-' | '.') || (slash && c == '/'));
+            if a(0).is_null() || a(1).is_null() || !ok(&ns, false) || !ok(&path, true) {
+                return Some(V::NULL);
+            }
+            rt.string(&format!("{ns}:{path}"))
+        }
         ("net/minecraft/resources/ResourceLocation", "parse" | "tryParse" | "bySeparator") => {
             let s = location(rt, a(0));
             rt.string(&s)
@@ -522,11 +594,25 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let id = rt.get_field(a(0), "$id");
             let k = (rt.str_of(reg).unwrap_or("").to_owned(), rt.str_of(id).unwrap_or("").to_owned());
             if !rt.registered.contains_key(&k) && rt.suppliers.iter().any(|(r, n, _)| *r == k.0 && *n == k.1) {
-                rt.resolve_registrations();
+                resolve(rt);
             }
             rt.registered.get(&k).copied().unwrap_or(V::NULL)
         }
         (o, "getId") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => rt.get_field(a(0), "$id"),
+        // `DeferredHolder.equals`: a holder of the same key (registry and name), its own or the
+        // registry's; `hashCode` is the key's.
+        (o, "equals") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && desc == "(Ljava/lang/Object;)Z" => {
+            let key = |rt: &Rt, h: V| {
+                let (r, i) = (rt.str_of(rt.get_field(h, "$registry"))?, rt.str_of(rt.get_field(h, "$id"))?);
+                Some((r.strip_prefix("minecraft:").unwrap_or(r).to_owned(), i.to_owned()))
+            };
+            let same = a(0) == a(1) || (!a(1).is_null() && key(rt, a(0)).is_some() && key(rt, a(0)) == key(rt, a(1)));
+            V::I(same as i32)
+        }
+        (o, "hashCode") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && desc == "()I" => {
+            let id = rt.get_field(a(0), "$id");
+            V::I(rt.java_hash(id))
+        }
         // `DeferredItem.toStack([count])`, and Registrate's `asStack` reaching the holder: a stack of
         // the item (a block's holder: its item, which has the block's name).
         (o, "toStack" | "asStack") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && rt.get_field(a(0), "$id").r() != 0 => {
@@ -623,6 +709,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     }
                 }
                 "key" => rt.string(&reg),
+                // `addAlias(from, to)`: an old name that reads as the new one (a renamed block).
+                "addAlias" => {
+                    let (from, to) = (name_in(rt, a(1)), name_in(rt, a(2)));
+                    let t = rt.string(&to);
+                    rt.interned.insert(format!("alias/{reg}/{from}"), t);
+                    V::Void
+                }
                 // An intrusive holder (Create's `ContraptionType.holder`): made with its value before
                 // the value is registered; its key is the name the value is registered under then.
                 "createIntrusiveHolder" => registry_holder(rt, &reg, "", a(1)),
@@ -1236,5 +1329,53 @@ mod tests {
         let k = call(&mut rt, "net/minecraft/resources/ResourceKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[block, id]).unwrap();
         let loc = call(&mut rt, "net/minecraft/resources/ResourceKey.location.()Lnet/minecraft/resources/ResourceLocation;", &[k]).unwrap();
         assert_eq!(rt.str_of(loc), Some("t:thing"));
+    }
+
+    #[test]
+    fn holders_aliases_locations_and_private_fields_answer_as_neoforge_does() {
+        let mut rt = Rt::new();
+        let block = crate::api::get_static(&mut rt, "net/minecraft/core/registries/Registries.BLOCK");
+        let (id, other_id) = (rt.string("t:thing"), rt.string("t:other"));
+        let create = "net/neoforged/neoforge/registries/DeferredHolder.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/neoforged/neoforge/registries/DeferredHolder;";
+        let (h, same, other) = (call(&mut rt, create, &[block, id]).unwrap(), call(&mut rt, create, &[block, id]).unwrap(), call(&mut rt, create, &[block, other_id]).unwrap());
+        // Two holders of one key are equal (and hash alike); another key's, null, are not.
+        let equals = "net/neoforged/neoforge/registries/DeferredHolder.equals.(Ljava/lang/Object;)Z";
+        let hash = "net/neoforged/neoforge/registries/DeferredHolder.hashCode.()I";
+        assert_ne!(h, same);
+        assert_eq!(call(&mut rt, equals, &[h, same]), Some(V::I(1)));
+        assert_eq!(call(&mut rt, hash, &[h]), call(&mut rt, hash, &[same]));
+        assert_eq!(call(&mut rt, equals, &[h, other]), Some(V::I(0)));
+        assert_eq!(call(&mut rt, equals, &[h, V::NULL]), Some(V::I(0)));
+        // An alias reads as the name it points to.
+        let thing = rt.new_object("t/ThingBlock");
+        rt.registered.insert(("block".into(), "t:thing".into()), thing);
+        let old = rt.string("t:old_thing");
+        call(&mut rt, "net/minecraft/core/Registry.addAlias.(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/resources/ResourceLocation;)V", &[block, old, id]);
+        assert_eq!(call(&mut rt, "net/minecraft/core/Registry.get.(Lnet/minecraft/resources/ResourceLocation;)Ljava/lang/Object;", &[block, old]), Some(thing));
+        // `tryBuild`: null for a name vanilla refuses.
+        let try_build = "net/minecraft/resources/ResourceLocation.tryBuild.(Ljava/lang/String;Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;";
+        let (ns, path, bad) = (rt.string("t"), rt.string("a/b_c.d"), rt.string("Bad Path"));
+        let ok = call(&mut rt, try_build, &[ns, path]).unwrap();
+        assert_eq!(rt.str_of(ok), Some("t:a/b_c.d"));
+        assert_eq!(call(&mut rt, try_build, &[ns, bad]), Some(V::NULL));
+        assert_eq!(call(&mut rt, try_build, &[path, ns]), Some(V::NULL));
+        // Private fields by name: a translated object's own; a static without an instance.
+        rt.supers.insert("t/Thing", "java/lang/Object");
+        let class = crate::jlang::class_object(&mut rt, "t/Thing");
+        let (field, value) = (rt.string("count"), V::I(7));
+        let set = "net/neoforged/fml/util/ObfuscationReflectionHelper.setPrivateValue.(Ljava/lang/Class;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/String;)V";
+        let get = "net/neoforged/fml/util/ObfuscationReflectionHelper.getPrivateValue.(Ljava/lang/Class;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;";
+        call(&mut rt, set, &[class, thing, value, field]);
+        assert_eq!(rt.get_field(thing, "count"), V::I(7));
+        assert_eq!(call(&mut rt, get, &[class, thing, field]), Some(V::I(7)));
+        call(&mut rt, set, &[class, V::NULL, V::I(3), field]);
+        assert_eq!(rt.statics.get("t/Thing.count"), Some(&V::I(3)));
+        // Registrate's: a copied block's drops cleared.
+        let andesite = crate::api::get_static(&mut rt, "net/minecraft/world/level/block/Blocks.ANDESITE");
+        let p = crate::api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.ofFullCopy.(Lnet/minecraft/world/level/block/state/BlockBehaviour;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[andesite]);
+        crate::api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.noLootTable.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[p]);
+        let (pc, drops) = (crate::jlang::class_object(&mut rt, crate::blocks::BLOCK_PROPERTIES), rt.string("drops"));
+        call(&mut rt, set, &[pc, p, V::NULL, drops]);
+        assert_eq!(rt.get_field(p, "$noLootTable"), V::I(0));
     }
 }

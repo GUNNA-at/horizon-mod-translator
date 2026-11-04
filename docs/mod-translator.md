@@ -1570,6 +1570,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a fastutil `Object2DoubleMap`, whose numbers the runtime keeps unboxed, and `ifnull` tested
     `.r() == 0`. Null is now the null reference or an unmapped call's nothing (`V::is_null`), never
     a number (`rawBoxes` against the JVM, with `IntStream.range`, which was unmapped).
+  - 2026-11-04 Measured with the leaner engine (ten addons, Kotlin for Forge as a library):
+    Enchantable Machinery's constructor runs through (its 12 blocks and 12 block entities), Dragons
+    Plus' tab lists its 18 items (fluid hatch, dye buckets): 12 tabs. New Age's coil (16 rpm, 72 su,
+    22 FE/t) and Create's filter as before.
+  - 2026-11-04 Blocks before their names. Registrate makes a block, then registers it, and Copycats+'
+    constructors cache their face shapes from `defaultBlockState()` meanwhile: a state is its
+    block's name and properties here, and the name was empty, so `state.getBlock()` gave a stand-in
+    (`registered "" block 1`) and the copycat's own methods weren't there (1 542 misses each). A mod
+    block not registered yet now has a name of its own (`horizon_unregistered:block_<n>`), and
+    registering it renames the states made under that name in place: the same objects, so what
+    kept them sees the registered name, and the game asking by name gets them. Also mapped, by
+    count at load: `ObfuscationReflectionHelper` field access (1 578: Registrate clears each
+    block's copied `Properties.drops`), `DeferredHolder.equals`/`hashCode` (636), `Registry.addAlias`
+    (622; lookups follow it), `ResourceLocation.tryBuild` (351), 1.21.1's `ItemTags.STAIRS`, `SLABS`,
+    `DOORS`... (112; 26.3 keeps them in `BlockItemTags`, the block tag's id), `Vec3i`'s own
+    arithmetic (432), a block-state enum's `getSerializedName`. In the harness: misses at load
+    193 → 187 kinds, the stand-in gone, Copycats+' parts found. What the face shapes need next is in
+    the runtime and tested, measured next: `BlockState.getOcclusionShape`, Guava's
+    `DoubleMath.fuzzyCompare`, a `VoxelShape`'s cells (`DiscreteVoxelShape.getSize`, `isFull`: a
+    shape on power-of-two grids has `2^bits` cells an axis, as `Shapes.box` finds them; any other
+    one between each two coordinates) and `SliceShape` (a face's section). Copycats+ reads the
+    cells through a mixin accessor of `VoxelShape.shape`; an accessor of a field the runtime doesn't
+    keep as one now asks the runtime (`VoxelShape.$shape`) instead of reading nothing.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -227,10 +227,16 @@ pub fn integer(rt: &mut Rt, i: i32) -> V {
 }
 
 pub fn state(rt: &mut Rt, text: &str) -> V {
-    let text = text.to_owned();
-    rt.intern(format!("state/{text}"), move |rt| {
-        rt.alloc("net/minecraft/world/level/block/state/BlockState", Data::Str(text))
-    })
+    let key = format!("state/{text}");
+    if let Some(v) = rt.interned.get(&key) {
+        return *v;
+    }
+    let v = rt.alloc("net/minecraft/world/level/block/state/BlockState", Data::Str(text.to_owned()));
+    rt.interned.insert(key, v);
+    if text.starts_with(crate::api::UNREGISTERED) {
+        crate::api::note_unregistered(rt, text, v);
+    }
+    v
 }
 
 pub fn item(rt: &mut Rt, name: &str) -> V {

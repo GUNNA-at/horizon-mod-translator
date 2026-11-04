@@ -44,7 +44,7 @@ fn codec_of(rt: &Rt, ty: V) -> Option<V> {
 /// them as native components, so its stacks can carry their values. Only namespaced names outside
 /// `minecraft` that a resource location allows (the game refuses to start on any other).
 pub fn persistent_types(rt: &mut Rt) -> Vec<String> {
-    rt.resolve_registrations();
+    crate::neo::resolve(rt);
     let mut names: Vec<String> = rt
         .registered
         .iter()

@@ -460,6 +460,8 @@ fn vanilla_placement(rt: &mut Rt, class: &str, b: V, ctx: V) -> V {
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(owner, DYE_COLOR | "net/minecraft/world/item/ArmorItem$Type" | BLOCK_PROPERTIES | ITEM_PROPERTIES | WOOD_TYPE | BUILDER)
         || matches!(name, "values" | "registerDefaultState" | "defaultBlockState")
+        || (name == "getSerializedName" && enum_class(owner))
+        || (name == "toString" && enum_class(owner) && owner.starts_with("net/minecraft/world/level/block/state/properties/"))
         || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "createBlockStateDefinition" | "getStateForPlacement" | "<init>"))
         || (owner.starts_with("net/minecraft/world/item/") && name == "<init>")
 }
@@ -476,6 +478,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(rt.alloc(class, Data::Array(all)))
         }
         (DYE_COLOR, _) => dye_call(rt, name, args),
+        // A block-state enum's name in states (`SlabType.DOUBLE` is `double`); the property enums
+        // also give it as `toString`.
+        (o, "getSerializedName" | "toString") if desc == "()Ljava/lang/String;" && enum_class(o) && (name == "getSerializedName" || o.starts_with("net/minecraft/world/level/block/state/properties/")) => {
+            let text = vanilla_enum(o)?.get(rt.get_field(a(0), "$ordinal").i().max(0) as usize)?;
+            Some(rt.string(text))
+        }
         // `ArmorItem.Type`: its name and vanilla's durability per material multiplier.
         ("net/minecraft/world/item/ArmorItem$Type", "getName" | "getSerializedName") => {
             let n = rt.str_of(rt.get_field(a(0), "$name")).unwrap_or("").to_ascii_lowercase();
@@ -513,7 +521,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "defaultBlockState") if desc == "()Lnet/minecraft/world/level/block/state/BlockState;" => {
             let d = rt.get_field(a(0), "$default");
             let props = rt.str_of(d)?.to_owned();
-            let block = rt.registered_name(a(0), "block").unwrap_or("").to_owned();
+            let block = api::block_name(rt, a(0));
             let text = if props.is_empty() { block } else { format!("{block}[{props}]") };
             Some(api::state(rt, &text))
         }
@@ -1327,9 +1335,11 @@ mod tests {
         let p = props(&mut rt);
         let b = rt.new_object("net/minecraft/world/level/block/RotatedPillarBlock");
         api::call(&mut rt, "net/minecraft/world/level/block/RotatedPillarBlock.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[b, p]);
-        // As vanilla's `RotatedPillarBlock` constructor leaves it: along y.
+        // As vanilla's `RotatedPillarBlock` constructor leaves it: along y; not registered yet, the
+        // block's state all the same.
         let d = api::call(&mut rt, "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;", &[b]);
-        assert_eq!(rt.str_of(d), Some("[axis=y]"));
+        assert!(rt.str_of(d).is_some_and(|t| t.ends_with("[axis=y]")), "{:?}", rt.str_of(d));
+        assert_eq!(api::call(&mut rt, GET_BLOCK, &[d]), b);
         // Its own constructor: `registerDefaultState(defaultBlockState().setValue(AXIS, Z))`.
         let axis = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.AXIS");
         let z = api::get_static(&mut rt, "net/minecraft/core/Direction$Axis.Z");
@@ -1342,6 +1352,39 @@ mod tests {
         assert!(json.contains("\"template\": \"minecraft:quartz_pillar\""), "{json}");
         assert!(json.contains("\"state_properties\": {}"), "{json}");
         assert!(json.contains("\"default_state\": {\"axis\": \"z\"}"), "{json}");
+    }
+
+    const GET_BLOCK: &str = "net/minecraft/world/level/block/state/BlockState.getBlock.()Lnet/minecraft/world/level/block/Block;";
+    const DEFAULT_STATE: &str = "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;";
+
+    #[test]
+    fn states_made_before_registration_take_the_registered_name() {
+        // Registrate's order: the block is made (its constructor keeps `defaultBlockState()`), then
+        // registered (`RegisterEvent.register(key, helper -> helper.register(id, block))`).
+        let mut rt = Rt::new();
+        let p = props(&mut rt);
+        let (b, other) = (rt.new_object("net/minecraft/world/level/block/RotatedPillarBlock"), rt.new_object("net/minecraft/world/level/block/RotatedPillarBlock"));
+        for x in [b, other] {
+            api::call(&mut rt, "net/minecraft/world/level/block/RotatedPillarBlock.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[x, p]);
+        }
+        let early = api::call(&mut rt, DEFAULT_STATE, &[b]);
+        let theirs = api::call(&mut rt, DEFAULT_STATE, &[other]);
+        // Two blocks without names are two blocks.
+        assert_ne!(early, theirs);
+        assert_eq!(api::call(&mut rt, GET_BLOCK, &[theirs]), other);
+        let helper = rt.new_object("net/neoforged/neoforge/registries/RegisterEvent$RegisterHelper");
+        let registry = rt.string("block");
+        rt.put_field(helper, "$registry", registry);
+        let id = rt.string("ruby:log");
+        api::call(&mut rt, "net/neoforged/neoforge/registries/RegisterEvent$RegisterHelper.register.(Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Object;)V", &[helper, id, b]);
+        // The same object, named: what kept it, and the game asking by name, see one state.
+        assert_eq!(rt.str_of(early), Some("ruby:log[axis=y]"));
+        assert_eq!(api::state(&mut rt, "ruby:log[axis=y]"), early);
+        assert_eq!(api::call(&mut rt, DEFAULT_STATE, &[b]), early);
+        assert_eq!(api::call(&mut rt, GET_BLOCK, &[early]), b);
+        // The other one waits for its own name.
+        assert_eq!(api::call(&mut rt, GET_BLOCK, &[theirs]), other);
+        assert!(!rt.str_of(theirs).unwrap_or("").starts_with("ruby:"));
     }
 
     #[test]

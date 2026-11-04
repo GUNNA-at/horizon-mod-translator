@@ -11,6 +11,8 @@ const BOOLEAN_OP: &str = "net/minecraft/world/phys/shapes/BooleanOp";
 const COLLISION_CONTEXT: &str = "net/minecraft/world/phys/shapes/CollisionContext";
 pub const ENTITY_COLLISION_CONTEXT: &str = "net/minecraft/world/phys/shapes/EntityCollisionContext";
 const VEC3: &str = "net/minecraft/world/phys/Vec3";
+const DISCRETE: &str = "net/minecraft/world/phys/shapes/DiscreteVoxelShape";
+const SLICE: &str = "net/minecraft/world/phys/shapes/SliceShape";
 const CONSUME: &str = "net/minecraft/world/phys/shapes/Shapes$DoubleLineConsumer.consume.(DDDDDD)V";
 const APPLY_OP: &str = "net/minecraft/world/phys/shapes/BooleanOp.apply.(ZZ)Z";
 
@@ -61,6 +63,64 @@ fn grid(boxes: &[&[Box3]]) -> [Vec<f64>; 3] {
         axis.dedup_by(|b, a| *b - *a < EPSILON);
     }
     axes
+}
+
+/// Vanilla's `Shapes.findBits`: the fewest bits (0 to 3) that put both ends on the grid of
+/// `2^bits` cells, -1 when none does.
+fn find_bits(min: f64, max: f64) -> i32 {
+    if min < -EPSILON || max > 1.0 + EPSILON {
+        return -1;
+    }
+    (0..=3)
+        .find(|&i| {
+            let j = f64::from(1 << i);
+            let on = |d: f64| (d * j - (d * j).round()).abs() < EPSILON * j;
+            on(min) && on(max)
+        })
+        .unwrap_or(-1)
+}
+
+/// The grid lines of a shape's cells on each axis, as vanilla's `DiscreteVoxelShape` has them
+/// (`getSize` counts its cells): a shape whose boxes all sit on power-of-two grids is a cube shape
+/// (`Shapes.box` gives one, joins keep it), `2^bits` even cells on an axis, the finest grid a box
+/// needs there; any other has a cell between each two of its coordinates; the empty shape none.
+fn cell_lines(s: &[Box3]) -> [Vec<f64>; 3] {
+    if s.is_empty() {
+        return [vec![0.0], vec![0.0], vec![0.0]];
+    }
+    if !s.iter().all(|b| (0..3).all(|i| find_bits(b[i], b[i + 3]) >= 0)) {
+        return grid(&[s]);
+    }
+    std::array::from_fn(|i| {
+        let n = 1 << s.iter().map(|b| find_bits(b[i], b[i + 3])).max().unwrap_or(0);
+        (0..=n).map(|k| f64::from(k) / f64::from(n)).collect()
+    })
+}
+
+/// `new SliceShape(shape, axis, index)`: the shape's section through cell `index` on `axis`,
+/// through the whole block along it (vanilla's face shapes, `Shapes.getFaceShape`).
+pub fn slice(s: &[Box3], axis: usize, index: i32) -> Vec<Box3> {
+    let lines = &cell_lines(s)[axis];
+    let Some((lo, hi)) = usize::try_from(index).ok().and_then(|i| Some((*lines.get(i)?, *lines.get(i + 1)?))) else {
+        return Vec::new();
+    };
+    s.iter()
+        .filter(|b| b[axis] <= lo + EPSILON && b[axis + 3] >= hi - EPSILON)
+        .map(|b| {
+            let mut c = *b;
+            c[axis] = 0.0;
+            c[axis + 3] = 1.0;
+            c
+        })
+        .collect()
+}
+
+/// A shape's `DiscreteVoxelShape` (its cells, a mixin accessor reads `VoxelShape.shape`): a view of
+/// the shape's boxes on its [`cell_lines`].
+fn discrete(rt: &mut Rt, shape: V) -> V {
+    let d = rt.new_object(DISCRETE);
+    rt.put_field(d, "$shape", shape);
+    d
 }
 
 /// Marks the cells of `axes` that `boxes` cover.
@@ -297,7 +357,7 @@ pub fn empty_context(rt: &mut Rt) -> V {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, SHAPES | VOXEL_SHAPE | COLLISION_CONTEXT | ENTITY_COLLISION_CONTEXT | BOOLEAN_OP | AABB)
+    matches!(owner, SHAPES | VOXEL_SHAPE | COLLISION_CONTEXT | ENTITY_COLLISION_CONTEXT | BOOLEAN_OP | AABB | DISCRETE | SLICE)
         || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "box" | "isFaceFull" | "isShapeFullBlock"))
 }
 
@@ -369,6 +429,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let s = shape_of(rt, a(0));
             match n {
                 "isEmpty" => V::I(s.is_empty() as i32),
+                "$shape" => discrete(rt, a(0)),
                 "optimize" => shape(rt, &optimized(&s)),
                 "move" => {
                     let o = match desc {
@@ -428,6 +489,41 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 }
                 _ => return None,
             }
+        }
+        (DISCRETE, n) => {
+            let s = shape_of(rt, rt.get_field(a(0), "$shape"));
+            let lines = cell_lines(&s);
+            let size = |i: usize| (lines[i].len() - 1) as i32;
+            match n {
+                "getSize" => V::I(size(axis_of(rt, a(1)))),
+                "getXSize" => V::I(size(0)),
+                "getYSize" => V::I(size(1)),
+                "getZSize" => V::I(size(2)),
+                "isEmpty" => V::I(s.is_empty() as i32),
+                // A cell is full when a box covers its middle.
+                "isFull" | "isFullWide" => {
+                    let c = [a(1).i(), a(2).i(), a(3).i()];
+                    let mid: Option<Vec<f64>> = (0..3)
+                        .map(|i| {
+                            let k = usize::try_from(c[i]).ok()?;
+                            Some((*lines[i].get(k)? + *lines[i].get(k + 1)?) / 2.0)
+                        })
+                        .collect();
+                    let full = mid.is_some_and(|m| s.iter().any(|b| (0..3).all(|i| b[i] < m[i] && m[i] < b[i + 3])));
+                    V::I(full as i32)
+                }
+                _ => return None,
+            }
+        }
+        // `new SliceShape(shape, axis, index)`: the object `new` made becomes that section.
+        (SLICE, "<init>") => {
+            let s = shape_of(rt, a(1));
+            let cut = slice(&s, axis_of(rt, a(2)), a(3).i());
+            if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
+                o.class = VOXEL_SHAPE;
+                o.data = Data::Array(cut.iter().flat_map(|b| b.iter().map(|&d| V::D(d))).collect());
+            }
+            V::Void
         }
         (COLLISION_CONTEXT | ENTITY_COLLISION_CONTEXT, n) => match n {
             "empty" => empty_context(rt),
@@ -640,6 +736,38 @@ mod tests {
         let ring = join(&[x], &[z], 0b0110);
         let v2: f64 = ring.iter().map(|b| (b[3] - b[0]) * (b[4] - b[1]) * (b[5] - b[2])).sum();
         assert!((v2 - (2. * arm - 2. * 4. * 4. * 4. / 4096.)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cells_and_sections_are_vanillas() {
+        // Values by hand from 1.21.1's `Shapes.create` (`findBits`), `joinUnoptimized` and
+        // `SliceShape`: a bottom slab has 2 cells up y, 1 across; a third of a block isn't on a
+        // power-of-two grid, so its cells are its own coordinates'.
+        let slab = [px([0., 0., 0., 16., 8., 16.])];
+        assert_eq!(cell_lines(&slab)[1], vec![0.0, 0.5, 1.0]);
+        assert_eq!(cell_lines(&slab)[0], vec![0.0, 1.0]);
+        let third = [[0.0, 0.0, 0.0, 1.0, 1.0 / 3.0, 1.0]];
+        assert_eq!(cell_lines(&third)[1], vec![0.0, 1.0 / 3.0]);
+        assert_eq!(cell_lines(&[px([2., 0., 0., 4., 16., 16.])])[0].len(), 9);
+        // A stair (slab and the north half above): its sections up y are the slab's square, then
+        // the north half; along z, the north end is full, the south one the slab's side.
+        let stair = [px([0., 0., 0., 16., 8., 16.]), px([0., 8., 0., 16., 16., 8.])];
+        assert_eq!(slice(&stair, 1, 0), vec![FULL]);
+        assert_eq!(slice(&stair, 1, 1), vec![px([0., 0., 0., 16., 16., 8.])]);
+        assert_eq!(join(&slice(&stair, 2, 0), &[], OR), vec![FULL]);
+        assert_eq!(join(&slice(&stair, 2, 1), &[], OR), vec![px([0., 0., 0., 16., 8., 16.])]);
+        // Out of the cells: nothing.
+        assert!(slice(&stair, 1, 2).is_empty() && slice(&stair, 1, -1).is_empty());
+        // Through the runtime: a mixin accessor's `VoxelShape.shape`, its size, and a section.
+        let mut rt = Rt::new();
+        let v = shape(&mut rt, &stair);
+        let d = call(&mut rt, "net/minecraft/world/phys/shapes/VoxelShape.$shape.()Lnet/minecraft/world/phys/shapes/DiscreteVoxelShape;", &[v]).unwrap();
+        let y = api::get_static(&mut rt, "net/minecraft/core/Direction$Axis.Y");
+        assert_eq!(call(&mut rt, "net/minecraft/world/phys/shapes/DiscreteVoxelShape.getSize.(Lnet/minecraft/core/Direction$Axis;)I", &[d, y]), Some(V::I(2)));
+        assert_eq!(call(&mut rt, "net/minecraft/world/phys/shapes/DiscreteVoxelShape.isFull.(III)Z", &[d, V::I(0), V::I(1), V::I(0)]), Some(V::I(1)));
+        let cut = rt.new_object(SLICE);
+        call(&mut rt, "net/minecraft/world/phys/shapes/SliceShape.<init>.(Lnet/minecraft/world/phys/shapes/VoxelShape;Lnet/minecraft/core/Direction$Axis;I)V", &[cut, v, y, V::I(1)]);
+        assert_eq!(boxes(&rt, cut), Some(vec![px([0., 0., 0., 16., 16., 8.])]));
     }
 
     #[test]

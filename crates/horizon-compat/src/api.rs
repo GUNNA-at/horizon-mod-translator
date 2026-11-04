@@ -215,6 +215,21 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         "java/lang/Math.sqrt.(D)D" => V::D(a(0).d().sqrt()),
         "java/lang/Math.floor.(D)D" => V::D(a(0).d().floor()),
         "java/lang/Math.ceil.(D)D" => V::D(a(0).d().ceil()),
+        // Guava's `DoubleMath.fuzzyEquals` and `fuzzyCompare`: within the tolerance (or both NaN) is
+        // equal; otherwise by value, NaN last.
+        "com/google/common/math/DoubleMath.fuzzyEquals.(DDD)Z" => V::I(fuzzy_equals(a(0).d(), a(1).d(), a(2).d()) as i32),
+        "com/google/common/math/DoubleMath.fuzzyCompare.(DDD)I" => {
+            let (x, y) = (a(0).d(), a(1).d());
+            V::I(if fuzzy_equals(x, y, a(2).d()) {
+                0
+            } else if x < y {
+                -1
+            } else if x > y {
+                1
+            } else {
+                i32::from(x.is_nan()) - i32::from(y.is_nan())
+            })
+        }
         "java/lang/String.equals.(Ljava/lang/Object;)Z" => {
             V::I((rt.str_of(a(0)).is_some() && rt.str_of(a(0)) == rt.str_of(a(1))) as i32)
         }
@@ -334,6 +349,60 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             let mut d = [0i64; 3];
             d[native(rt, a(1))[0].clamp(0, 2) as usize] = 1;
             offset(rt, a(0), d, a(2).i() as i64)
+        }
+        // `Vec3i`'s own arithmetic (Copycats+ walks its parts so): a `Vec3i`, or a `BlockPos` when
+        // that is what it was called on, as `BlockPos` overrides each; `relative(axis, 0)` is itself.
+        k if k.starts_with("net/minecraft/core/Vec3i.") && k.ends_with(")Lnet/minecraft/core/Vec3i;") => {
+            let (_, name, desc) = crate::parts(key).unwrap_or_default();
+            let p = native(rt, a(0));
+            let unit = |rt: &Rt, v: V| -> [i64; 3] {
+                let d = DIRECTIONS[native(rt, v)[0].clamp(0, 5) as usize];
+                [d[0], d[1], d[2]]
+            };
+            let (d, n): ([i64; 3], i64) = match (name, desc) {
+                ("relative", "(Lnet/minecraft/core/Direction$Axis;I)Lnet/minecraft/core/Vec3i;") => {
+                    let mut d = [0; 3];
+                    d[native(rt, a(1))[0].clamp(0, 2) as usize] = 1;
+                    (d, a(2).i() as i64)
+                }
+                ("relative", "(Lnet/minecraft/core/Direction;I)Lnet/minecraft/core/Vec3i;") => (unit(rt, a(1)), a(2).i() as i64),
+                ("relative", "(Lnet/minecraft/core/Direction;)Lnet/minecraft/core/Vec3i;") => (unit(rt, a(1)), 1),
+                ("offset", "(III)Lnet/minecraft/core/Vec3i;") => ([a(1).i() as i64, a(2).i() as i64, a(3).i() as i64], 1),
+                ("offset" | "subtract", "(Lnet/minecraft/core/Vec3i;)Lnet/minecraft/core/Vec3i;") => {
+                    let q = native(rt, a(1));
+                    ([q[0], q[1], q[2]], if name == "subtract" { -1 } else { 1 })
+                }
+                ("above" | "below" | "north" | "south" | "west" | "east", _) => {
+                    let d = match name {
+                        "above" => [0, 1, 0],
+                        "below" => [0, -1, 0],
+                        "north" => [0, 0, -1],
+                        "south" => [0, 0, 1],
+                        "west" => [-1, 0, 0],
+                        _ => [1, 0, 0],
+                    };
+                    (d, if desc.starts_with("(I)") { a(1).i() as i64 } else { 1 })
+                }
+                ("multiply", "(I)Lnet/minecraft/core/Vec3i;") => {
+                    let k = a(1).i() as i64;
+                    ([p[0] * (k - 1), p[1] * (k - 1), p[2] * (k - 1)], 1)
+                }
+                ("cross", _) => {
+                    let q = native(rt, a(1));
+                    let c = [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
+                    ([c[0] - p[0], c[1] - p[1], c[2] - p[2]], 1)
+                }
+                _ => {
+                    crate::miss(rt, key);
+                    return V::NULL;
+                }
+            };
+            if n == 0 || d == [0; 3] {
+                return a(0);
+            }
+            let q = [p[0] + d[0] * n, p[1] + d[1] * n, p[2] + d[2] * n].map(|c| c as i32 as i64);
+            let class = if rt.instance_of(a(0), BLOCK_POS) { BLOCK_POS } else { "net/minecraft/core/Vec3i" };
+            rt.alloc(class, Data::Native("BlockPos", [q[0], q[1], q[2], 0]))
         }
         // Every position in a box, x fastest, then y, then z, as vanilla's iterator walks it: an
         // `Iterable` (a list) or a `Stream`. Vanilla hands out one mutable cursor; these are
@@ -797,6 +866,8 @@ pub fn api_enum(rt: &mut Rt, class: &'static str, name: &'static str, ordinal: i
     })
 }
 
+const GET_OCCLUSION: &str = "getOcclusionShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+const GET_OCCLUSION_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.getOcclusionShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
 const GET_SHAPE: &str = "getShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
 const GET_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.getShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
 
@@ -828,10 +899,18 @@ fn state_shape(rt: &mut Rt, text: &str, collision: bool, args: [V; 4]) -> V {
     crate::shapes::shape(rt, &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]])
 }
 
+/// Guava's `DoubleMath.fuzzyEquals`.
+fn fuzzy_equals(x: f64, y: f64, tolerance: f64) -> bool {
+    (x - y).abs() <= tolerance || x == y || (x.is_nan() && y.is_nan())
+}
+
 /// A block value: the mod's own Block object when it registered one by that name.
 pub fn block(rt: &mut Rt, name: &str) -> V {
     if let Some(v) = rt.registered.get(&("block".to_owned(), name.to_owned())) {
         return *v;
+    }
+    if let Some(b) = unregistered_block(rt, name) {
+        return b;
     }
     // Interned, so `state.getBlock() == Blocks.STONE` holds as in Java.
     let v = rt.alloc(BLOCK, Data::Str(name.to_owned()));
@@ -839,9 +918,73 @@ pub fn block(rt: &mut Rt, name: &str) -> V {
     v
 }
 
-/// The name of a block value (vanilla or the mod's).
+/// The name of a block value (vanilla or the mod's): a mod block not registered yet has a name of its
+/// own until it is ([`UNREGISTERED`]).
 pub(crate) fn block_name(rt: &Rt, b: V) -> String {
-    rt.str_of(b).map(str::to_owned).or_else(|| rt.registered_name(b, "block").map(str::to_owned)).unwrap_or_default()
+    match rt.str_of(b).map(str::to_owned).or_else(|| rt.registered_name(b, "block").map(str::to_owned)) {
+        Some(n) => n,
+        None if b.r() != 0 => format!("{UNREGISTERED}{}", b.r()),
+        None => String::new(),
+    }
+}
+
+/// The name a mod block has before it is registered, its object's number after it. A block's states
+/// are its name and properties, and a block exists before its name does: Registrate makes the block,
+/// then registers it, and constructors take `defaultBlockState()` (Copycats+ keeps them). In Java a
+/// state points at its block, so `state.getBlock()` finds the block either way; here the name does,
+/// and registering renames those states in place ([`adopt_names`]): the same objects, so what kept
+/// them sees the registered name.
+pub(crate) const UNREGISTERED: &str = "horizon_unregistered:block_";
+
+/// The mod block an [`UNREGISTERED`] name stands for.
+pub(crate) fn unregistered_block(rt: &Rt, name: &str) -> Option<V> {
+    let r: u32 = name.strip_prefix(UNREGISTERED)?.parse().ok()?;
+    (r != 0 && rt.heap.get(r as usize).is_some_and(|o| matches!(o.data, Data::Fields(_)))).then_some(V::R(r))
+}
+
+/// Keeps a new state of a block not registered yet, for [`adopt_names`] (and the block alive with it).
+pub(crate) fn note_unregistered(rt: &mut Rt, text: &str, state: V) {
+    let (name, _) = crate::host::split_state(text);
+    let Some(b) = unregistered_block(rt, name) else { return };
+    let all = rt.intern("compat:unregistered-states".into(), |rt| rt.alloc("java/util/ArrayList", Data::List(Vec::new())));
+    let pair = rt.alloc("java/util/List", Data::List(vec![b, state]));
+    if let Some(Data::List(v)) = rt.heap.get_mut(all.r() as usize).map(|o| &mut o.data) {
+        v.push(pair);
+    }
+}
+
+/// Renames the states kept under an [`UNREGISTERED`] name to their block's registered name, for
+/// every block registered since. A state with that name already made keeps its place in the table.
+pub(crate) fn adopt_names(rt: &mut Rt) {
+    let Some(&all) = rt.interned.get("compat:unregistered-states") else { return };
+    let pairs = match rt.heap.get(all.r() as usize).map(|o| &o.data) {
+        Some(Data::List(v)) if !v.is_empty() => v.clone(),
+        _ => return,
+    };
+    let mut waiting = Vec::new();
+    for pair in pairs {
+        let (b, state) = match rt.heap.get(pair.r() as usize).map(|o| &o.data) {
+            Some(Data::List(v)) if v.len() == 2 => (v[0], v[1]),
+            _ => continue,
+        };
+        let Some(name) = rt.registered_name(b, "block").map(str::to_owned) else {
+            waiting.push(pair);
+            continue;
+        };
+        let Some(old) = rt.str_of(state).map(str::to_owned) else { continue };
+        let Some(rest) = old.strip_prefix(&format!("{UNREGISTERED}{}", b.r())) else { continue };
+        let new = format!("{name}{rest}");
+        if rt.interned.get(&format!("state/{old}")) == Some(&state) {
+            rt.interned.remove(&format!("state/{old}"));
+        }
+        rt.interned.entry(format!("state/{new}")).or_insert(state);
+        if let Some(o) = rt.heap.get_mut(state.r() as usize) {
+            o.data = Data::Str(new);
+        }
+    }
+    if let Some(Data::List(v)) = rt.heap.get_mut(all.r() as usize).map(|o| &mut o.data) {
+        *v = waiting;
+    }
 }
 
 /// `BlockState.updateShape(direction, neighbour, level, pos, neighbourPos)` (`args`, the state
@@ -958,7 +1101,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "get" | "value") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
             let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned();
             if rt.registered.keys().all(|(_, n)| *n != id) {
-                rt.resolve_registrations();
+                crate::neo::resolve(rt);
             }
             rt.registered.iter().find(|((_, n), _)| *n == id).map(|(_, v)| *v).unwrap_or(V::NULL)
         }
@@ -1161,6 +1304,22 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "getCollisionShape" | "getShape" if desc.starts_with("(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;") => {
                     let ctx = if desc.contains("CollisionContext;)") { a(3) } else { crate::shapes::empty_context(rt) };
                     state_shape(rt, &text, n == "getCollisionShape", [a(0), a(1), a(2), ctx])
+                }
+                // `getOcclusionShape(level, pos)`: the mod block's own, else its shape, as
+                // `BlockBehaviour`'s default gives it.
+                "getOcclusionShape" if desc == "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;" => {
+                    if let Some((blk, class)) = crate::glue::mod_block(rt, &text)
+                        && rt.overrides.is_some_and(|o| o(class, GET_OCCLUSION))
+                        && let Some(vc) = rt.vcall
+                    {
+                        let s = vc(rt, GET_OCCLUSION_KEY, GET_OCCLUSION, &[blk, a(0), a(1), a(2)]);
+                        if rt.thrown.is_none() && crate::shapes::boxes(rt, s).is_some() {
+                            return Some(s);
+                        }
+                        rt.report_thrown("getOcclusionShape");
+                    }
+                    let ctx = crate::shapes::empty_context(rt);
+                    state_shape(rt, &text, false, [a(0), a(1), a(2), ctx])
                 }
                 // The mod block's own `canSurvive`; vanilla's default answers true.
                 "canSurvive" => match crate::glue::mod_block(rt, &text) {
@@ -1542,6 +1701,30 @@ mod tests {
         assert_eq!(call(&mut rt, "net/minecraft/core/BlockPos.getZ.()I", &[q]), V::I(-7));
         let south = call(&mut rt, "net/minecraft/core/Direction.getOpposite.()Lnet/minecraft/core/Direction;", &[north]);
         assert_eq!(call(&mut rt, "net/minecraft/core/Direction.getStepZ.()I", &[south]), V::I(1));
+    }
+
+    #[test]
+    fn a_vec3i_moves_as_vec3i_and_a_block_pos_as_itself() {
+        let mut rt = Rt::new();
+        let v = rt.new_object("net/minecraft/core/Vec3i");
+        call(&mut rt, "net/minecraft/core/Vec3i.<init>.(III)V", &[v, V::I(1), V::I(2), V::I(3)]);
+        let y = get_static(&mut rt, "net/minecraft/core/Direction$Axis.Y");
+        let up = call(&mut rt, "net/minecraft/core/Vec3i.relative.(Lnet/minecraft/core/Direction$Axis;I)Lnet/minecraft/core/Vec3i;", &[v, y, V::I(2)]);
+        assert_eq!((rt.class_of(up), native(&rt, up)[..3].to_vec()), ("net/minecraft/core/Vec3i", vec![1, 4, 3]));
+        // `relative(axis, 0)` is the same object, as vanilla returns `this`.
+        assert_eq!(call(&mut rt, "net/minecraft/core/Vec3i.relative.(Lnet/minecraft/core/Direction$Axis;I)Lnet/minecraft/core/Vec3i;", &[v, y, V::I(0)]), v);
+        let w = rt.new_object("net/minecraft/core/Vec3i");
+        call(&mut rt, "net/minecraft/core/Vec3i.<init>.(III)V", &[w, V::I(0), V::I(0), V::I(1)]);
+        let cross = call(&mut rt, "net/minecraft/core/Vec3i.cross.(Lnet/minecraft/core/Vec3i;)Lnet/minecraft/core/Vec3i;", &[v, w]);
+        assert_eq!(native(&rt, cross)[..3], [2, -1, 0]);
+        // Called as `Vec3i`'s on a position, the answer is a position (`BlockPos` overrides it).
+        let p = block_pos(&mut rt, 5, 5, 5);
+        let q = call(&mut rt, "net/minecraft/core/Vec3i.offset.(III)Lnet/minecraft/core/Vec3i;", &[p, V::I(1), V::I(0), V::I(-1)]);
+        assert_eq!((rt.class_of(q), native(&rt, q)[..3].to_vec()), (BLOCK_POS, vec![6, 5, 4]));
+        // A block-state enum gives its state name.
+        let double = get_static(&mut rt, "net/minecraft/world/level/block/state/properties/SlabType.DOUBLE");
+        let n = call(&mut rt, "net/minecraft/world/level/block/state/properties/SlabType.getSerializedName.()Ljava/lang/String;", &[double]);
+        assert_eq!(rt.str_of(n), Some("double"));
     }
 
     /// An engine holding a mod and an addon of it: each `DeferredRegister` names what it registers

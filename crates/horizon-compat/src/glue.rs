@@ -12,7 +12,7 @@ const NEIGHBOR: &str = "neighborChanged.(Lnet/minecraft/world/level/block/state/
 /// The mod's Block object behind a state, and its class, when the mod registered it.
 pub(crate) fn mod_block(rt: &Rt, state: &str) -> Option<(V, &'static str)> {
     let (name, _) = crate::host::split_state(state);
-    let b = *rt.registered.get(&("block".to_owned(), name.to_owned()))?;
+    let b = rt.registered.get(&("block".to_owned(), name.to_owned())).copied().or_else(|| api::unregistered_block(rt, name))?;
     let class = rt.class_of(b);
     (class != "net/minecraft/world/level/block/Block").then_some((b, class))
 }
