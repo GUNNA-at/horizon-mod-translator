@@ -28,6 +28,7 @@ pub mod render;
 pub mod shapes;
 pub mod tags;
 pub mod tanks;
+pub mod vanilla_tags;
 
 /// Makes this mapping the one engines that link `horizon-compat-core` alone call.
 pub fn install() {

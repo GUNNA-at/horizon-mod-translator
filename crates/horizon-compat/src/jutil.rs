@@ -1162,6 +1162,21 @@ fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             *list_mut(rt, this)? = keep;
             V::I(removed as i32)
         }
+        // Every element the other collection holds (`equals`), each occurrence; or all the others.
+        "removeAll" | "retainAll" => {
+            let items = list(rt, this)?.clone();
+            let other = elements(rt, a(1));
+            let mut keep = Vec::new();
+            for e in &items {
+                let in_other = other.iter().any(|&o| equals(rt, o, *e));
+                if in_other != (name == "removeAll") {
+                    keep.push(*e);
+                }
+            }
+            let changed = keep.len() != items.len();
+            *list_mut(rt, this)? = keep;
+            V::I(changed as i32)
+        }
         "sort" => {
             sort(rt, this, a(1));
             V::Void
@@ -2302,6 +2317,30 @@ mod tests {
         assert_eq!(seen, [0, 1, 2, 3, 4]);
         assert_eq!(elements(&rt, l), [V::I(1), V::I(3)]);
         assert_eq!(c(&mut rt, "java/util/List.getFirst.()Ljava/lang/Object;", &[l]), V::I(1));
+    }
+
+    #[test]
+    fn a_list_removes_or_keeps_all_another_collection_holds() {
+        let mut rt = Rt::new();
+        let list_of = |rt: &mut Rt, items: &[&str]| {
+            let l = rt.new_object("java/util/ArrayList");
+            c(rt, "java/util/ArrayList.<init>.()V", &[l]);
+            for i in items {
+                let s = rt.string(i);
+                c(rt, "java/util/List.add.(Ljava/lang/Object;)Z", &[l, s]);
+            }
+            l
+        };
+        let texts = |rt: &Rt, l: V| elements(rt, l).iter().map(|v| rt.str_of(*v).unwrap_or("?").to_owned()).collect::<Vec<_>>();
+        // Equal strings, not the same objects; every occurrence goes.
+        let l = list_of(&mut rt, &["a", "b", "a", "c"]);
+        let gone = list_of(&mut rt, &["a", "x"]);
+        assert_eq!(c(&mut rt, "java/util/List.removeAll.(Ljava/util/Collection;)Z", &[l, gone]), V::I(1));
+        assert_eq!(texts(&rt, l), ["b", "c"]);
+        assert_eq!(c(&mut rt, "java/util/List.removeAll.(Ljava/util/Collection;)Z", &[l, gone]), V::I(0));
+        let l = list_of(&mut rt, &["a", "b", "a", "c"]);
+        assert_eq!(c(&mut rt, "java/util/List.retainAll.(Ljava/util/Collection;)Z", &[l, gone]), V::I(1));
+        assert_eq!(texts(&rt, l), ["a", "a"]);
     }
 
     #[test]

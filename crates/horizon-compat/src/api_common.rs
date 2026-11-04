@@ -1936,6 +1936,12 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             vanilla_block_entity_type(rt, field)
         }
         "net/minecraft/world/item/Items" => item(rt, &field.to_ascii_lowercase()),
+        // Vanilla's tag constants: the key of the tag each names in 26.3.
+        "net/minecraft/tags/BlockTags" | "net/minecraft/tags/ItemTags" => {
+            let kind = if owner == "net/minecraft/tags/BlockTags" { "block" } else { "item" };
+            let tag = crate::vanilla_tags::named(kind, field)?;
+            crate::fluids::tag_key(rt, kind, &tag)
+        }
         "net/minecraft/world/InteractionResult" | "net/minecraft/world/ItemInteractionResult" => result(rt, owner, field),
         "net/minecraft/world/InteractionHand" => {
             let ordinal = if field == "OFF_HAND" { 1 } else { 0 };
@@ -2005,6 +2011,26 @@ mod tests {
         let mapped = api::call(&mut rt, MAP, &[empty, has_pulley]);
         let got = api::call(&mut rt, OR_ELSE, &[mapped, no]);
         assert_eq!(api::call(&mut rt, UNBOX, &[got]), V::I(0));
+    }
+
+    #[test]
+    fn a_block_state_is_in_the_block_tags_the_game_holds() {
+        // Create's `BlockHelper.hasBlockSolidSide`: `!state.is(BlockTags.LEAVES) && ...`.
+        const IS: &str = "net/minecraft/world/level/block/state/BlockState.is.(Lnet/minecraft/tags/TagKey;)Z";
+        let mut rt = Rt::new();
+        let mut host = crate::host::MemoryHost::default();
+        host.block_tags.insert("minecraft:leaves".into(), vec!["minecraft:oak_leaves".into()]);
+        let leaves = api::get_static(&mut rt, "net/minecraft/tags/BlockTags.LEAVES");
+        let item_leaves = api::get_static(&mut rt, "net/minecraft/tags/ItemTags.LEAVES");
+        assert_ne!(leaves, item_leaves);
+        let oak = api::state(&mut rt, "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]");
+        let stone = api::state(&mut rt, "minecraft:stone");
+        rt.with_host(&mut host, |rt| {
+            assert_eq!(api::call(rt, IS, &[oak, leaves]), V::I(1));
+            assert_eq!(api::call(rt, IS, &[stone, leaves]), V::I(0));
+            // An item tag of the same name holds no block.
+            assert_eq!(api::call(rt, IS, &[oak, item_leaves]), V::I(0));
+        });
     }
 
     #[test]

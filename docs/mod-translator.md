@@ -623,6 +623,14 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     (Java boxes it). `Optional` dropped a value that was not a reference, and `Boolean.booleanValue()`
     read nothing from a raw boolean. Both now take a raw primitive as its own value, as collections
     already hold numbers raw.
+  - [x] 2026-11-04 Block tags: `BlockState.is(TagKey)` asks the game's loaded tags through a new host
+    call, `Host::block_in_tag` (`native_block_in_tag` on `Game` and `GameLevel`, API 81), and
+    vanilla's tag constants resolve: `vanilla_tags.rs` holds 26.3's 284 `BlockTags` and 219
+    `ItemTags` fields with the tags they name, read from the jar (`BlockTags.STANDING_SIGNS` is
+    `standing_signs`, `ItemTags.SIGNS` `signs`: 26.3 shares them through `BlockItemTags`).
+    `Block.isFaceFull(shape, direction)` and `isShapeFullBlock` work on the shape's boxes as
+    `getFaceShape` slices them. Create's belt asks all three before it lets an item off its end
+    (`BlockHelper.hasBlockSolidSide`). `List.removeAll/retainAll` are mapped too.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

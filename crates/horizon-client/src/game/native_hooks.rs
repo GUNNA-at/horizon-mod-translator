@@ -3639,6 +3639,15 @@ impl GameLevel<'_> {
     pub(super) fn native_state_text(&self, pos: [i32; 3]) -> String {
         self.native_state_id_text(self.block_state(BlockPos::new(pos[0], pos[1], pos[2])))
     }
+    /// Whether block `block` (`minecraft:oak_leaves`) is in block tag `tag`
+    /// (`minecraft:leaves`, no `#`), as the loaded tags hold it: translated
+    /// Java mods' `BlockState.is(TagKey)`. False for an unknown tag. API 81.
+    pub(super) fn native_block_in_tag(&self, block: &str, tag: &str) -> bool {
+        self.items
+            .block_tags
+            .get(tag)
+            .is_some_and(|s| s.contains(block))
+    }
     /// A block state as text, as [`Self::native_state_text`] gives a
     /// position's: the state a hook is handed (`native_state_for_placement`'s
     /// `state`) in the form translated Java mods read. Air for an id past the
@@ -3752,6 +3761,11 @@ impl Game<'_> {
     /// launcher's next build leaves it out.
     pub(super) fn native_on(&self, mod_id: &str) -> bool {
         !self.settings.mods.disabled.contains(mod_id)
+    }
+    /// Whether block `block` is in block tag `tag` (no `#`), as
+    /// `GameLevel::native_block_in_tag` answers, for hooks on `Game`. API 81.
+    pub(super) fn native_block_in_tag(&self, block: &str, tag: &str) -> bool {
+        self.block_in_tag(tag, block)
     }
     /// The block state at `pos` in the current level as text, as
     /// `GameLevel::native_state_text` gives it: for hooks on `Game` (block

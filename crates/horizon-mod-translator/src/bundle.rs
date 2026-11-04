@@ -28,7 +28,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
 /// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 24] = [
+const COMPAT: [(&str, &str); 25] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -53,6 +53,7 @@ const COMPAT: [(&str, &str); 24] = [
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
     ("tags.rs", include_str!("../../horizon-compat/src/tags.rs")),
     ("render.rs", include_str!("../../horizon-compat/src/render.rs")),
+    ("vanilla_tags.rs", include_str!("../../horizon-compat/src/vanilla_tags.rs")),
 ];
 
 /// The registry crates the carried runtime uses, as the engine's `[dependencies]`: each must be
@@ -106,6 +107,9 @@ fn {id}_{hook}(
     impl {krate}::compat::host::Host for Host<'_, '_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.level.native_state_text(pos)
+        }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.level.native_block_in_tag(block, tag)
         }}
         fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
             self.level.native_set_state_text(self.ticks, pos, state, 3)
@@ -199,6 +203,9 @@ fn {id}_block_entity_submit(
     impl {c}::host::Host for Host<'_, '_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
+        }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.game.native_block_in_tag(block, tag)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -403,6 +410,9 @@ fn {id}_tick(game: &mut crate::game::Game<'_>) {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
         }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.game.native_block_in_tag(block, tag)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -507,6 +517,9 @@ fn {id}_block_entity_tick(
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
         }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.game.native_block_in_tag(block, tag)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -600,6 +613,9 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
         }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.game.native_block_in_tag(block, tag)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -671,6 +687,9 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
     impl {c}::host::Host for Host<'_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.game.native_state_text_at(pos)
+        }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.game.native_block_in_tag(block, tag)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -751,6 +770,9 @@ fn {id}_state_for_placement(
     impl {c}::host::Host for Host<'_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.level.native_state_text(pos)
+        }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.level.native_block_in_tag(block, tag)
         }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false // choosing a state changes nothing

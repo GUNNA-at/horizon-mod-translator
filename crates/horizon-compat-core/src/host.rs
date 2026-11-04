@@ -122,6 +122,12 @@ pub trait Host {
     fn ingredient_items(&self, _entry: &str) -> Vec<String> {
         Vec::new()
     }
+    /// Whether block `block` (`minecraft:oak_leaves`) is in block tag `tag` (`minecraft:leaves`, no
+    /// `#`), as the game's loaded tags hold it (`BlockState.is(TagKey)`). False for a tag the game
+    /// doesn't have.
+    fn block_in_tag(&self, _block: &str, _tag: &str) -> bool {
+        false
+    }
     /// The server level's item entities whose box meets `bounds` (min x, y, z, max x, y, z), in
     /// the level's order (`Level.getEntitiesOfClass(ItemEntity.class, box)`). None on a client.
     fn item_entities(&self, _bounds: [f64; 6]) -> Vec<ItemEntity> {
@@ -164,6 +170,8 @@ pub struct MemoryHost {
     pub recipes: HashMap<String, Vec<(String, String)>>,
     /// Item tags (no `#`) and their items.
     pub item_tags: HashMap<String, Vec<String>>,
+    /// Block tags (no `#`) and their blocks.
+    pub block_tags: HashMap<String, Vec<String>>,
     /// The items the game knows; when empty, every id is one.
     pub items: Vec<String>,
     /// Items drawn: item, display context, pose, light.
@@ -250,6 +258,9 @@ impl Host for MemoryHost {
             None if self.items.is_empty() || self.items.iter().any(|i| i == entry) => vec![entry.to_owned()],
             None => Vec::new(),
         }
+    }
+    fn block_in_tag(&self, block: &str, tag: &str) -> bool {
+        self.block_tags.get(tag).is_some_and(|b| b.iter().any(|x| x == block))
     }
     fn item_entities(&self, bounds: [f64; 6]) -> Vec<ItemEntity> {
         self.item_entities.iter().filter(|e| e.count > 0 && boxes_meet(&e.bounds(), &bounds)).cloned().collect()

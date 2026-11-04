@@ -670,6 +670,13 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "isAir" => V::I(matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") as i32),
                 "hasBlockEntity" => V::I(crate::glue::block_entity_id(rt, b).is_some() as i32),
                 "is" if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") => V::I((block_name(rt, a(1)) == b) as i32),
+                // A block tag, as the game's loaded tags hold it (`BlockTags.LEAVES`, a mod's own).
+                "is" if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
+                    let registry = rt.str_of(rt.get_field(a(1), "$registry")).unwrap_or("").to_owned();
+                    let tag = rt.str_of(rt.get_field(a(1), "$location")).unwrap_or("").to_owned();
+                    let b = b.to_owned();
+                    V::I((registry.trim_start_matches("minecraft:") == "block" && rt.host().is_some_and(|h| h.block_in_tag(&b, &tag))) as i32)
+                }
                 "equals" => V::I((rt.str_of(a(1)) == Some(text.as_str())) as i32),
                 "updateShape" if desc.starts_with("(Lnet/minecraft/core/Direction;") => update_shape(rt, [a(0), a(1), a(2), a(3), a(4), a(5)]),
                 "getCollisionShape" | "getShape" if desc.starts_with("(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;") => {

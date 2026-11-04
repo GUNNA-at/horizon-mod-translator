@@ -138,6 +138,31 @@ pub fn optimized(boxes: &[Box3]) -> Vec<Box3> {
 
 /// `BooleanOp`s by truth table: bit `a << 1 | b` is `op(a, b)`.
 const OR: u8 = 0b1110;
+const NOT_SAME: u8 = 0b0110;
+
+/// `Block.isShapeFullBlock`: the shape is the whole block, nothing missing and nothing past it.
+pub fn full_block(boxes: &[Box3]) -> bool {
+    join(&[FULL], boxes, NOT_SAME).is_empty()
+}
+
+/// `Block.isFaceFull(shape, direction)` (`direction` by ordinal): the shape's slice just inside
+/// that face (`VoxelShape.getFaceShape`: the cells at 1e-7, or 0.9999999 on a positive face, along
+/// its axis, made as deep as the block) is a full block, so it covers the whole face and nothing
+/// past it.
+pub fn face_full(boxes: &[Box3], direction: usize) -> bool {
+    let axis = [1, 1, 2, 2, 0, 0][direction.min(5)];
+    let at = if direction % 2 == 1 { 0.9999999 } else { 1.0e-7 };
+    let slice: Vec<Box3> = boxes
+        .iter()
+        .filter(|b| b[axis] <= at && at < b[axis + 3])
+        .map(|b| {
+            let mut s = *b;
+            (s[axis], s[axis + 3]) = (0.0, 1.0);
+            s
+        })
+        .collect();
+    !slice.is_empty() && full_block(&slice)
+}
 const OPS: [(&str, u8); 16] = [
     ("FALSE", 0b0000),
     ("NOT_OR", 0b0001),
@@ -286,6 +311,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             boxed_shape(rt, b)
         }
         (SHAPES, "block") => boxed_shape(rt, FULL),
+        // On any block class, as `javac` names the class a call was written on.
+        (o, "isFaceFull") if o.starts_with("net/minecraft/world/level/block/") => {
+            let s = shape_of(rt, a(0));
+            let direction = rt.get_field(a(1), "$ordinal").i();
+            V::I(face_full(&s, direction.clamp(0, 5) as usize) as i32)
+        }
+        (o, "isShapeFullBlock") if o.starts_with("net/minecraft/world/level/block/") => {
+            let s = shape_of(rt, a(0));
+            V::I(full_block(&s) as i32)
+        }
         (SHAPES, "empty") => shape(rt, &[]),
         (SHAPES, "box") => {
             let b = [d(0), d(1), d(2), d(3), d(4), d(5)];
@@ -599,6 +634,28 @@ mod tests {
         let ring = join(&[x], &[z], 0b0110);
         let v2: f64 = ring.iter().map(|b| (b[3] - b[0]) * (b[4] - b[1]) * (b[5] - b[2])).sum();
         assert!((v2 - (2. * arm - 2. * 4. * 4. * 4. / 4096.)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_face_is_full_where_the_shape_covers_all_of_it() {
+        // Directions by ordinal: down, up, north, south, west, east.
+        let faces = |b: &[Box3]| (0..6).map(|d| face_full(b, d)).collect::<Vec<bool>>();
+        assert_eq!(faces(&[FULL]), [true; 6]);
+        // A bottom slab: a mob stands on its top, which isn't full; its bottom is.
+        assert_eq!(faces(&[px([0., 0., 0., 16., 8., 16.])]), [true, false, false, false, false, false]);
+        // A stair facing east (bottom slab, the east half above): full below, east and nowhere else.
+        let stair = [px([0., 0., 0., 16., 8., 16.]), px([8., 8., 0., 16., 16., 16.])];
+        assert_eq!(faces(&stair), [true, false, false, false, false, true]);
+        // Two halves side by side make a full bottom; a hopper's top rim with its hole doesn't.
+        assert!(face_full(&[px([0., 0., 0., 8., 4., 16.]), px([8., 0., 0., 16., 4., 16.])], 0));
+        let rim = [px([0., 10., 0., 2., 16., 16.]), px([14., 10., 0., 16., 16., 16.]), px([2., 10., 0., 14., 16., 2.]), px([2., 10., 14., 14., 16., 16.])];
+        assert!(!face_full(&rim, 1));
+        // A carpet's bottom is full; a shape past the block on that face isn't one block's face.
+        assert!(face_full(&[px([0., 0., 0., 16., 1., 16.])], 0));
+        assert!(!face_full(&[px([-8., 0., 0., 16., 16., 16.])], 2));
+        assert!(!face_full(&[], 0));
+        assert!(full_block(&[px([0., 0., 0., 16., 8., 16.]), px([0., 8., 0., 16., 16., 16.])]));
+        assert!(!full_block(&[px([0., 0., 0., 16., 8., 16.])]));
     }
 
     #[test]
