@@ -1871,6 +1871,28 @@ fn place_context_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 }
 
 /// Static fields this module owns: `BlockStateProperties.*`, `ItemStack.EMPTY`, `Items.*`.
+/// 26.3's block entity types; each one's id is its field's name, lower-cased.
+const VANILLA_BLOCK_ENTITY_TYPES: [&str; 49] = [
+    "FURNACE", "CHEST", "TRAPPED_CHEST", "ENDER_CHEST", "JUKEBOX", "DISPENSER", "DROPPER", "SIGN", "HANGING_SIGN", "MOB_SPAWNER",
+    "CREAKING_HEART", "PISTON", "BREWING_STAND", "ENCHANTING_TABLE", "END_PORTAL", "BEACON", "SKULL", "DAYLIGHT_DETECTOR", "HOPPER",
+    "COMPARATOR", "BANNER", "STRUCTURE_BLOCK", "END_GATEWAY", "COMMAND_BLOCK", "SHULKER_BOX", "CONDUIT", "BARREL", "SMOKER",
+    "BLAST_FURNACE", "LECTERN", "BELL", "JIGSAW", "CAMPFIRE", "BEEHIVE", "SCULK_SENSOR", "CALIBRATED_SCULK_SENSOR", "SCULK_CATALYST",
+    "SCULK_SHRIEKER", "CHISELED_BOOKSHELF", "SHELF", "BRUSHABLE_BLOCK", "DECORATED_POT", "CRAFTER", "TRIAL_SPAWNER", "VAULT",
+    "TEST_BLOCK", "TEST_INSTANCE_BLOCK", "COPPER_GOLEM_STATUE", "POTENT_SULFUR",
+];
+
+/// Vanilla block entity type `field` (`LECTERN`): registered as `minecraft:lectern`, so the same
+/// object every time and its id found from it.
+fn vanilla_block_entity_type(rt: &mut Rt, field: &str) -> V {
+    let id = format!("minecraft:{}", field.to_ascii_lowercase());
+    if let Some(v) = rt.registered.get(&("block_entity_type".to_owned(), id.clone())) {
+        return *v;
+    }
+    let v = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType");
+    rt.registered.insert(("block_entity_type".to_owned(), id), v);
+    v
+}
+
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match owner {
         "net/minecraft/world/level/block/state/properties/BlockStateProperties" => vanilla_property_object(rt, field)?,
@@ -1888,11 +1910,21 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         }
         // A vanilla block class's own property field (`SlabBlock.TYPE`, `DoorBlock.OPEN`): the
         // `BlockStateProperties` field it holds.
-        o if o.starts_with("net/minecraft/world/level/block/") && !o[32..].contains('/') && state_property_field(block_class_property(o, field)) => {
+        o if o.starts_with("net/minecraft/world/level/block/")
+            && (!o[32..].contains('/') || o[32..].starts_with("piston/"))
+            && state_property_field(block_class_property(o, field)) =>
+        {
             vanilla_property_object(rt, block_class_property(o, field))?
         }
         "net/minecraft/world/item/ItemStack" if field == "EMPTY" => {
             rt.intern("stack/empty".into(), |rt| stack(rt, "minecraft:air", 0))
+        }
+        // Vanilla's block entity types (`BlockEntityType.LECTERN`; 26.3 keeps them in
+        // `BlockEntityTypes`), one object each under its id: Create keys display targets by them.
+        "net/minecraft/world/level/block/entity/BlockEntityType" | "net/minecraft/world/level/block/entity/BlockEntityTypes"
+            if VANILLA_BLOCK_ENTITY_TYPES.contains(&field) =>
+        {
+            vanilla_block_entity_type(rt, field)
         }
         "net/minecraft/world/item/Items" => item(rt, &field.to_ascii_lowercase()),
         "net/minecraft/world/InteractionResult" | "net/minecraft/world/ItemInteractionResult" => result(rt, owner, field),
@@ -1935,6 +1967,18 @@ mod tests {
 
     const GET: &str = "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;";
     const SET: &str = "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;";
+
+    #[test]
+    fn vanilla_block_entity_types_are_one_object_each_with_their_id() {
+        let mut rt = Rt::new();
+        let lectern = api::get_static(&mut rt, "net/minecraft/world/level/block/entity/BlockEntityType.LECTERN");
+        let sign = api::get_static(&mut rt, "net/minecraft/world/level/block/entity/BlockEntityType.SIGN");
+        assert_ne!(lectern, V::NULL);
+        assert_ne!(lectern, sign);
+        assert_eq!(api::get_static(&mut rt, "net/minecraft/world/level/block/entity/BlockEntityTypes.LECTERN"), lectern);
+        assert_eq!(rt.registered_name(lectern, "block_entity_type"), Some("minecraft:lectern"));
+        assert_eq!(rt.registered_name(sign, "block_entity_type"), Some("minecraft:sign"));
+    }
 
     #[test]
     fn mth_answers_as_vanilla_26_3() {

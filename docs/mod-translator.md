@@ -597,6 +597,12 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     and when the recipe is done, and the client counts the head's way down and up itself. Harness
     `MIX` now replays the server's update tags on a client runtime: the head goes from 7/16 down to
     1 7/16 by tick 21, waits for the recipe, and is back at 7/16 on tick 88.
+  - [x] 2026-11-04 Vanilla's block entity types (`BlockEntityType.LECTERN`, `SIGN`... and 26.3's
+    `BlockEntityTypes`) are one object each, registered under their ids (26.3's 49, each its field's
+    name lower-cased, read from `BlockEntityTypeIds`). They were null: Create's display-target
+    registry (`SimpleRegistryImpl.register`, `requireNonNull`) threw on `create:lectern`, which ended
+    the whole `RegisterEvent` for display targets. Piston classes' property constants
+    (`PistonHeadBlock.TYPE`, in `block/piston/`) resolve too.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
