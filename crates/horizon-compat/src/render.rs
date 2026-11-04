@@ -1068,6 +1068,12 @@ pub fn block_atlas(rt: &mut Rt) -> V {
 /// its own: the game places it in its atlas when it draws.
 fn sprite(rt: &mut Rt, location: V) -> V {
     let name = rt.str_of(location).unwrap_or("minecraft:missingno").to_owned();
+    sprite_named(rt, &name)
+}
+
+/// [`sprite`] by name: one object a sprite, as Java's atlas holds them (mods key maps by them).
+pub fn sprite_named(rt: &mut Rt, name: &str) -> V {
+    let name = if name.contains(':') { name.to_owned() } else { format!("minecraft:{name}") };
     rt.intern(format!("compat:sprite/{name}"), |rt| {
         let s = rt.new_object(SPRITE);
         let n = rt.string(&name);
@@ -1167,17 +1173,37 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             rt.put_field(m, "$state", a(1));
             m
         }
+        // A model a mod built of faces answers from them (`SimpleBakedModel`).
+        ("net/minecraft/client/resources/model/BakedModel", n) if !matches!(rt.get_field(a(0), "$unculled"), V::Void) => {
+            return crate::quads::model_call(rt, n, args).or_else(|| match n {
+                "getRenderTypes" => Some(single(rt, "net/neoforged/neoforge/client/ChunkRenderTypeSet")),
+                "getModelData" => Some(a(4)),
+                _ => None,
+            });
+        }
         ("net/minecraft/client/resources/model/BakedModel", n) => match n {
             "getRenderTypes" => single(rt, "net/neoforged/neoforge/client/ChunkRenderTypeSet"),
             "useAmbientOcclusion" | "isGui3d" | "usesBlockLight" => V::I(1),
             "isCustomRenderer" => V::I(0),
             // A probe model (`glue::render_shape`) has a quad on every side, so a wrapper passing
-            // them through is told apart from one that draws nothing.
+            // them through is told apart from one that draws nothing. Otherwise the game's faces of
+            // the model, which the mod may read, change and build models from.
             "getQuads" => {
                 let probing = rt.get_field(a(0), "$probe").i() != 0 || rt.interned.contains_key("compat:probing");
-                let quads = if probing { vec![a(0)] } else { Vec::new() };
-                crate::jutil::new_list(rt, quads)
+                match crate::quads::handle(rt, a(0)) {
+                    _ if probing => {
+                        let this = a(0);
+                        crate::jutil::new_list(rt, vec![this])
+                    }
+                    Some(model) => crate::quads::handle_quads(rt, &model, a(2)),
+                    None => crate::jutil::new_list(rt, Vec::new()),
+                }
             }
+            "getParticleIcon" => match crate::quads::handle(rt, a(0)) {
+                Some(model) => crate::quads::handle_particle(rt, &model),
+                None => sprite_named(rt, "minecraft:missingno"),
+            },
+            "getTransforms" => crate::quads::transforms(rt),
             "getModelData" => a(4),
             _ => return None,
         },
@@ -1364,7 +1390,9 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
             let swap = rt.alloc("[I", Data::Array(Vec::new()));
             rt.put_field(sbb, "shadeSwapVertices", swap);
             rt.put_field(sbb, "invertFakeDiffuseNormal", V::I(0));
-            rt.put_field(sbb, "$model", a(1));
+            // A model the mod built of faces is read now, as catnip buffers its vertices now.
+            let model = crate::quads::drawable(rt, a(1), a(2));
+            rt.put_field(sbb, "$model", model);
             let base = new_mat4(rt, base);
             rt.put_field(sbb, "$base", base);
             if let Some(vc) = rt.vcall {
@@ -1400,6 +1428,7 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
                 // The first draws, each model under each pose once: what a renderer asked for.
                 let name = match model_of(rt, model) {
                     Some(crate::host::Model::Named(n) | crate::host::Model::State(n)) => n,
+                    Some(crate::host::Model::Quads(q)) => format!("{} faces", q.len()),
                     None => "-".to_owned(),
                 };
                 let r = |i: usize| (m[i] * 100.0).round() / 100.0;
@@ -1460,12 +1489,10 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
     })
 }
 
-/// What a `BakedModel` object draws: a block state's model or a model by location.
+/// What a `BakedModel` object draws: a block state's model, a model by location, or faces read
+/// from a model the mod built ([`crate::quads::handle`]).
 fn model_of(rt: &Rt, model: V) -> Option<Model> {
-    if let Some(s) = rt.str_of(rt.get_field(model, "$state")) {
-        return Some(Model::State(s.to_owned()));
-    }
-    rt.str_of(rt.get_field(model, "$name")).map(|n| Model::Named(n.to_owned()))
+    crate::quads::handle(rt, model)
 }
 
 #[cfg(test)]

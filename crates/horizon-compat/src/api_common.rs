@@ -59,6 +59,14 @@ pub fn direction(rt: &mut Rt, ordinal: i64) -> V {
     })
 }
 
+/// A `Direction` object's data value (0 down, 1 up, 2 north, 3 south, 4 west, 5 east).
+pub fn direction_ordinal(rt: &Rt, d: V) -> u8 {
+    match rt.heap.get(d.r() as usize).map(|o| &o.data) {
+        Some(Data::Native("Direction", h)) => h[0].clamp(0, 5) as u8,
+        _ => 0,
+    }
+}
+
 pub fn axis(rt: &mut Rt, ordinal: i64) -> V {
     let o = ordinal.clamp(0, 2);
     rt.intern(format!("axis/{o}"), |rt| {

@@ -5,11 +5,37 @@
 use std::collections::HashMap;
 
 /// A model a block entity draws (`BakedModel`): a block state's, or one named by its location (a
-/// mod's part model, `create:block/shaft_half`, never placed as a block).
+/// mod's part model, `create:block/shaft_half`, never placed as a block), or faces a mod put
+/// together itself (a `SimpleBakedModel` of `BakedQuad`s: Create's water wheel, its template's
+/// faces retextured with the wheel's wood).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Model {
     State(String),
     Named(String),
+    Quads(std::sync::Arc<[Quad]>),
+}
+
+/// One face of a model (`BakedQuad`): as the game bakes it, or as a mod made or changed it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Quad {
+    /// Corners, in blocks from the block's lower north-west corner.
+    pub positions: [[f32; 3]; 4],
+    /// Each corner's place in the sprite, 0 to 1 across it.
+    pub uv: [[f32; 2]; 4],
+    /// The sprite (`minecraft:block/oak_planks`).
+    pub sprite: String,
+    /// The side it faces, as `Direction`'s data value: 0 down, 1 up, 2 north, 3 south, 4 west, 5 east.
+    pub facing: u8,
+    /// The side whose neighbour hides it (the side `getQuads` lists it under), as `facing`.
+    pub cull: Option<u8>,
+    /// `getTintIndex`: -1 for an untinted face.
+    pub tint_index: i32,
+    /// `isShade`: the side's shade darkens it.
+    pub shade: bool,
+    /// Light the face gives itself, 0 to 15 (an emissive face's).
+    pub light_emission: u8,
+    /// Each corner's colour, 0xAARRGGBB: white unless the mod tinted it.
+    pub colors: [u32; 4],
 }
 
 /// How [`Host::draw_model_shifted`] moves the faces of a model on one sprite to another sprite, as
@@ -141,6 +167,19 @@ pub trait Host {
     fn draw_model(&mut self, _model: &Model, _pose: &[f32; 16], _color: u32, _light: u32) -> bool {
         false
     }
+    /// The faces of `model` as the game bakes it, every side's (`BakedModel.getQuads`): a state's
+    /// model picked with seed 42, as vanilla draws a block in an entity's place. None when the game
+    /// has no such model.
+    fn model_quads(&self, model: &Model) -> Option<std::sync::Arc<[Quad]>> {
+        match model {
+            Model::Quads(quads) => Some(quads.clone()),
+            _ => None,
+        }
+    }
+    /// The sprite `model` breaks into (`BakedModel.getParticleIcon`): its `particle` texture.
+    fn model_particle(&self, _model: &Model) -> Option<String> {
+        None
+    }
     /// Drawing a block entity: as [`Host::draw_model`], with the faces on sprite `shift.from`
     /// textured from `shift.to`. A host that can't move textures draws the model as it is.
     fn draw_model_shifted(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32, _shift: &UvShift) -> bool {
@@ -234,6 +273,8 @@ pub struct MemoryHost {
     pub drawn: Vec<(Model, [f32; 16], u32, u32)>,
     /// The texture moves drawn models were given: the index in `drawn`, and the move.
     pub shifts: Vec<(usize, UvShift)>,
+    /// Models' faces ([`Host::model_quads`]) by state text or location, and their particle sprites.
+    pub models: HashMap<String, (Vec<Quad>, String)>,
     /// Recipe files by type: id and JSON text.
     pub recipes: HashMap<String, Vec<(String, String)>>,
     /// Item tags (no `#`) and their items.
@@ -314,6 +355,18 @@ impl Host for MemoryHost {
     fn draw_model(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32) -> bool {
         self.drawn.push((model.clone(), *pose, color, light));
         true
+    }
+    fn model_quads(&self, model: &Model) -> Option<std::sync::Arc<[Quad]>> {
+        match model {
+            Model::State(key) | Model::Named(key) => self.models.get(key).map(|(q, _)| q.as_slice().into()),
+            Model::Quads(quads) => Some(quads.clone()),
+        }
+    }
+    fn model_particle(&self, model: &Model) -> Option<String> {
+        match model {
+            Model::State(key) | Model::Named(key) => self.models.get(key).map(|(_, p)| p.clone()),
+            Model::Quads(_) => None,
+        }
     }
     fn draw_model_shifted(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32, shift: &UvShift) -> bool {
         self.shifts.push((self.drawn.len(), shift.clone()));

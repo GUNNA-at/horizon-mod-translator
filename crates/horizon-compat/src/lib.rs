@@ -24,6 +24,7 @@ pub mod jutil;
 pub mod nbt;
 pub mod neo;
 pub mod network;
+pub mod quads;
 pub mod recipes;
 pub mod render;
 pub mod shapes;
