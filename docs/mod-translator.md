@@ -854,6 +854,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `getEntitiesOfClass` (contraption collisions ask it each frame), fastutil's
     `toIntArray`/`toLongArray`..., and fastutil's `add(int)` on a primitive list, which was taken
     for `add(index, element)` and kept a null (any `IntArrayList` a mod filled was empty values).
+  - [x] 2026-11-04 What the counted builder rule showed at load (harness `RECIPES`, the unmapped
+    list): `new BlockPos(vec3i)` (42656 calls left at the origin), `Vec3.ZERO` (2677), `EnumSet`
+    (`noneOf`, `of`, `copyOf`, `range`, `complementOf`, `allOf`: a set in its enum's order that knows
+    its type; 930 `Set.contains` on a stand-in object followed), `Vec3`'s whole 1.21.1 API
+    (`reverse`, `cross`, `xRot`/`yRot`/`zRot`, `lerp`, `align`, `relative`, `closerThan`,
+    `directionFromRotation`, `toString`...) and `Mth.sin`/`cos` of a float as 1.21.1 indexes its
+    table (float arithmetic). Checked against a JDK running the merged jar's own `Vec3`, `Mth` and
+    `EnumSet` (`scratchpad/jdkcheck/vec`, with stand-ins for the two authlib classes whose shape
+    changed after 1.21.1).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

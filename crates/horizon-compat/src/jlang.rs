@@ -25,7 +25,7 @@ pub fn class_object(rt: &mut Rt, name: &str) -> V {
 
 /// An enum class's constants (`Class.getEnumConstants`): a mod enum's `values()`, or a vanilla
 /// enum's as the API answers it (`Direction.Axis.values()`). None for a class that isn't one.
-fn enum_constants(rt: &mut Rt, class: &str) -> Option<V> {
+pub(crate) fn enum_constants(rt: &mut Rt, class: &str) -> Option<V> {
     if let Some(v) = rt.reflect(class, "values", &[]) {
         return Some(v);
     }

@@ -145,8 +145,8 @@ pub fn compare(rt: &mut Rt, comparator: V, a: V, b: V) -> i32 {
             Some(vc) => vc(rt, "java/lang/Comparable.compareTo.(Ljava/lang/Object;)I", COMPARE_TO, &[a, b]).i(),
             None => 0,
         },
-        // Enums: by ordinal.
-        _ => (rt.get_field(a, "$ordinal").i()).cmp(&rt.get_field(b, "$ordinal").i()) as i32,
+        // Enums: by ordinal (a direction's or an axis's too).
+        _ => crate::api_common::enum_ordinal(rt, a).cmp(&crate::api_common::enum_ordinal(rt, b)) as i32,
     }
 }
 
@@ -872,6 +872,11 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             _ => args.to_vec(),
         }
     };
+    if owner == "java/util/EnumSet"
+        && let Some(v) = enum_set_call(rt, name, desc, args)
+    {
+        return Some(v);
+    }
     Some(match (owner, name) {
         // Minecraft's `NonNullList`: a list (`withSize` holds its default `size` times).
         (NON_NULL_LIST, "create" | "createWithCapacity") => rt.alloc(NON_NULL_LIST, Data::List(Vec::new())),
@@ -1486,6 +1491,95 @@ fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             new_list(rt, items)
         }
         "trimToSize" | "ensureCapacity" => V::Void,
+        _ => return None,
+    })
+}
+
+const ENUM_SET: &str = "java/util/EnumSet";
+
+/// A `java.util.EnumSet` of `class`'s constants: a set kept in their order (by ordinal), which
+/// remembers its element type (`$type`) for `complementOf`.
+fn new_enum_set(rt: &mut Rt, class: &str, items: Vec<V>) -> V {
+    let s = rt.alloc(ENUM_SET, Data::Table(Table { sorted: true, ..Table::default() }));
+    if !class.is_empty() {
+        let c = rt.string(class);
+        rt.put_field(s, "$type", c);
+    }
+    for e in items {
+        table_put(rt, s, e, V::I(1));
+    }
+    s
+}
+
+/// The enum class an `EnumSet` holds: its `$type`, else its first element's class.
+fn enum_set_type(rt: &Rt, set: V) -> String {
+    if let Some(t) = rt.str_of(rt.get_field(set, "$type")) {
+        return t.to_owned();
+    }
+    elements(rt, set).first().map(|&e| rt.class_of(e).to_owned()).unwrap_or_default()
+}
+
+/// Every constant of enum `class`, in order.
+fn all_constants(rt: &mut Rt, class: &str) -> Vec<V> {
+    crate::jlang::enum_constants(rt, class).map(|v| elements(rt, v)).unwrap_or_default()
+}
+
+/// `EnumSet`'s factories (`noneOf`, `allOf`, `of`, `copyOf`, `range`, `complementOf`) and `clone`;
+/// None for its other methods, which a set answers.
+fn enum_set_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let class_arg = |rt: &Rt, c: V| rt.str_of(c).unwrap_or("").replace('.', "/");
+    Some(match name {
+        "noneOf" => {
+            let class = class_arg(rt, a(0));
+            new_enum_set(rt, &class, Vec::new())
+        }
+        "allOf" => {
+            let class = class_arg(rt, a(0));
+            let all = all_constants(rt, &class);
+            new_enum_set(rt, &class, all)
+        }
+        // `of(e1, ..., e5)` and `of(E first, E... rest)`.
+        "of" => {
+            let mut items: Vec<V> = args.to_vec();
+            if desc.contains("[L")
+                && let Some(rest) = items.pop()
+            {
+                items.extend(elements(rt, rest));
+            }
+            let class = items.first().map(|&e| rt.class_of(e).to_owned()).unwrap_or_default();
+            new_enum_set(rt, &class, items)
+        }
+        // A collection that isn't an `EnumSet` must hold something to give the type.
+        "copyOf" => {
+            let src = a(0);
+            let items = elements(rt, src);
+            if rt.class_of(src) != ENUM_SET && items.is_empty() {
+                rt.throw_new("java/lang/IllegalArgumentException");
+                return Some(V::NULL);
+            }
+            let class = if rt.class_of(src) == ENUM_SET { enum_set_type(rt, src) } else { rt.class_of(items[0]).to_owned() };
+            new_enum_set(rt, &class, items)
+        }
+        "clone" => {
+            let class = enum_set_type(rt, a(0));
+            let items = elements(rt, a(0));
+            new_enum_set(rt, &class, items)
+        }
+        "range" => {
+            let class = rt.class_of(a(0)).to_owned();
+            let (lo, hi) = (crate::api_common::enum_ordinal(rt, a(0)), crate::api_common::enum_ordinal(rt, a(1)));
+            let all = all_constants(rt, &class);
+            let within: Vec<V> = all.into_iter().filter(|&e| (lo..=hi).contains(&crate::api_common::enum_ordinal(rt, e))).collect();
+            new_enum_set(rt, &class, within)
+        }
+        "complementOf" => {
+            let class = enum_set_type(rt, a(0));
+            let have: Vec<i32> = elements(rt, a(0)).into_iter().map(|e| crate::api_common::enum_ordinal(rt, e)).collect();
+            let all = all_constants(rt, &class);
+            let rest: Vec<V> = all.into_iter().filter(|&e| !have.contains(&crate::api_common::enum_ordinal(rt, e))).collect();
+            new_enum_set(rt, &class, rest)
+        }
         _ => return None,
     })
 }

@@ -179,9 +179,17 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         "java/lang/Enum.ordinal.()I" => V::I(rt.get_field(a(0), "$ordinal").i()),
 
         // net.minecraft.core.BlockPos
-        "net/minecraft/core/BlockPos.<init>.(III)V" => {
+        "net/minecraft/core/BlockPos.<init>.(III)V" | "net/minecraft/core/Vec3i.<init>.(III)V" => {
             if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
                 o.data = Data::Native("BlockPos", [a(1).i() as i64, a(2).i() as i64, a(3).i() as i64, 0]);
+            }
+            V::Void
+        }
+        // `new BlockPos(vec3i)`: the same place.
+        "net/minecraft/core/BlockPos.<init>.(Lnet/minecraft/core/Vec3i;)V" => {
+            let h = native(rt, a(1));
+            if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
+                o.data = Data::Native("BlockPos", [h[0], h[1], h[2], 0]);
             }
             V::Void
         }

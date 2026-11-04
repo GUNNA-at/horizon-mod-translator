@@ -404,6 +404,17 @@ pub(crate) fn prop_parts(rt: &Rt, p: V) -> (String, String) {
     (name_of(rt, rt.get_field(p, "$name")), name_of(rt, rt.get_field(p, "$kind")))
 }
 
+/// `Vec3.ZERO`: one object, as vanilla's (`normalize()` of a tiny vector gives it back).
+fn vec3_zero(rt: &mut Rt) -> V {
+    rt.intern("compat:vec3-zero".into(), |rt| vec3(rt, 0.0, 0.0, 0.0))
+}
+
+/// Vanilla's `Mth.floor(double)`: the int below, saturating as Java's `(int)` cast.
+fn mth_floor(d: f64) -> i32 {
+    let i = d as i32;
+    if d < i as f64 { i.wrapping_sub(1) } else { i }
+}
+
 fn vec3(rt: &mut Rt, x: f64, y: f64, z: f64) -> V {
     let v = rt.new_object("net/minecraft/world/phys/Vec3");
     rt.put_field(v, "x", V::D(x));
@@ -1165,7 +1176,125 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 }
                 ("normalize", _) => {
                     let l = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-                    if l < 1.0e-4 { vec3(rt, 0.0, 0.0, 0.0) } else { vec3(rt, p[0] / l, p[1] / l, p[2] / l) }
+                    if l < 1.0e-4 { vec3_zero(rt) } else { vec3(rt, p[0] / l, p[1] / l, p[2] / l) }
+                }
+                ("<init>", "(Lorg/joml/Vector3f;)V") => {
+                    for f in ["x", "y", "z"] {
+                        let c = rt.get_field(a(1), f).f() as f64;
+                        rt.put_field(a(0), f, V::D(c));
+                    }
+                    V::Void
+                }
+                ("fromRGB24", _) => {
+                    let c = a(0).i();
+                    vec3(rt, ((c >> 16) & 255) as f64 / 255.0, ((c >> 8) & 255) as f64 / 255.0, (c & 255) as f64 / 255.0)
+                }
+                ("atLowerCornerWithOffset", _) => {
+                    let h = native(rt, a(0));
+                    vec3(rt, h[0] as f64 + a(1).d(), h[1] as f64 + a(2).d(), h[2] as f64 + a(3).d())
+                }
+                ("atBottomCenterOf", _) => {
+                    let h = native(rt, a(0));
+                    vec3(rt, h[0] as f64 + 0.5, h[1] as f64, h[2] as f64 + 0.5)
+                }
+                ("upFromBottomCenterOf", _) => {
+                    let h = native(rt, a(0));
+                    vec3(rt, h[0] as f64 + 0.5, h[1] as f64 + a(1).d(), h[2] as f64 + 0.5)
+                }
+                ("vectorTo", _) => {
+                    let q = xyz(rt, a(1));
+                    vec3(rt, q[0] - p[0], q[1] - p[1], q[2] - p[2])
+                }
+                ("cross", _) => {
+                    let q = xyz(rt, a(1));
+                    vec3(rt, p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0])
+                }
+                ("distanceToSqr", "(DDD)D") => {
+                    let (dx, dy, dz) = (a(1).d() - p[0], a(2).d() - p[1], a(3).d() - p[2]);
+                    V::D(dx * dx + dy * dy + dz * dz)
+                }
+                ("closerThan", "(Lnet/minecraft/core/Position;D)Z") => {
+                    let q = xyz(rt, a(1));
+                    let (dx, dy, dz) = (q[0] - p[0], q[1] - p[1], q[2] - p[2]);
+                    V::I((dx * dx + dy * dy + dz * dz < a(2).d() * a(2).d()) as i32)
+                }
+                // Within `h` horizontally and `v` vertically.
+                ("closerThan", "(Lnet/minecraft/world/phys/Vec3;DD)Z") => {
+                    let q = xyz(rt, a(1));
+                    let (dx, dy, dz) = (q[0] - p[0], q[1] - p[1], q[2] - p[2]);
+                    let h = a(2).d();
+                    V::I((dx * dx + dz * dz < h * h && dy.abs() < a(3).d()) as i32)
+                }
+                ("reverse", _) => vec3(rt, p[0] * -1.0, p[1] * -1.0, p[2] * -1.0),
+                ("multiply", "(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;") => {
+                    let q = xyz(rt, a(1));
+                    vec3(rt, p[0] * q[0], p[1] * q[1], p[2] * q[2])
+                }
+                // Three `nextFloat`s, x first.
+                ("offsetRandom", _) => {
+                    let spread = a(2).f();
+                    let mut o = [0.0f64; 3];
+                    for c in &mut o {
+                        let r = crate::api::call(rt, "net/minecraft/util/RandomSource.nextFloat.()F", &[a(1)]).f();
+                        *c = ((r - 0.5) * spread) as f64;
+                    }
+                    vec3(rt, p[0] + o[0], p[1] + o[1], p[2] + o[2])
+                }
+                ("horizontalDistance", _) => V::D((p[0] * p[0] + p[2] * p[2]).sqrt()),
+                ("horizontalDistanceSqr", _) => V::D(p[0] * p[0] + p[2] * p[2]),
+                ("toString", _) => {
+                    let text = format!("({}, {}, {})", crate::java_double(p[0], false), crate::java_double(p[1], false), crate::java_double(p[2], false));
+                    rt.string(&text)
+                }
+                // `Mth.lerp(delta, start, end)` per axis.
+                ("lerp", _) => {
+                    let (q, t) = (xyz(rt, a(1)), a(2).d());
+                    vec3(rt, p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]), p[2] + t * (q[2] - p[2]))
+                }
+                ("xRot" | "yRot" | "zRot", _) => {
+                    let (c, s) = (mth_cos(a(1)) as f64, mth_sin(a(1)) as f64);
+                    let [x, y, z] = p;
+                    match n {
+                        "xRot" => vec3(rt, x, y * c + z * s, z * c - y * s),
+                        "yRot" => vec3(rt, x * c + z * s, y, z * c - x * s),
+                        _ => vec3(rt, x * c + y * s, y * c - x * s, z),
+                    }
+                }
+                ("directionFromRotation", _) => {
+                    let (x_rot, y_rot) = if desc.starts_with("(Lnet/minecraft/world/phys/Vec2;") {
+                        (rt.get_field(a(0), "x").f(), rt.get_field(a(0), "y").f())
+                    } else {
+                        (a(0).f(), a(1).f())
+                    };
+                    let c = mth_cos(V::F(-y_rot * 0.017453292 - std::f32::consts::PI));
+                    let s = mth_sin(V::F(-y_rot * 0.017453292 - std::f32::consts::PI));
+                    let c2 = -mth_cos(V::F(-x_rot * 0.017453292));
+                    let s2 = mth_sin(V::F(-x_rot * 0.017453292));
+                    vec3(rt, (s * c2) as f64, s2 as f64, (c * c2) as f64)
+                }
+                // The axes in the set floored.
+                ("align", _) => {
+                    let axes: Vec<i32> = crate::jutil::elements(rt, a(1)).into_iter().map(|e| enum_ordinal(rt, e)).collect();
+                    let f = |i: usize| if axes.contains(&(i as i32)) { mth_floor(p[i]) as f64 } else { p[i] };
+                    vec3(rt, f(0), f(1), f(2))
+                }
+                ("get", "(Lnet/minecraft/core/Direction$Axis;)D") => V::D(p[native(rt, a(1))[0].clamp(0, 2) as usize]),
+                ("with", _) => {
+                    let mut q = p;
+                    q[native(rt, a(1))[0].clamp(0, 2) as usize] = a(2).d();
+                    vec3(rt, q[0], q[1], q[2])
+                }
+                ("relative", _) => {
+                    let d = DIRECTION_STEPS[native(rt, a(1))[0].clamp(0, 5) as usize];
+                    let t = a(2).d();
+                    vec3(rt, p[0] + t * d[0] as f64, p[1] + t * d[1] as f64, p[2] + t * d[2] as f64)
+                }
+                ("toVector3f", _) => {
+                    let v = rt.new_object("org/joml/Vector3f");
+                    for (f, c) in ["x", "y", "z"].into_iter().zip(p) {
+                        rt.put_field(v, f, V::F(c as f32));
+                    }
+                    v
                 }
                 ("dot", _) => {
                     let q = xyz(rt, a(1));
@@ -1520,7 +1649,6 @@ const USE_ON_CONTEXT: &str = "net/minecraft/world/item/context/UseOnContext";
 /// `Direction.getNormal()` by ordinal (down, up, north, south, west, east).
 const DIRECTION_STEPS: [[i64; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
 
-/// Vanilla's `Mth.sin`: a 65536-entry table of `Math.sin`, so angles round as the game rounds them.
 /// Java's `Math.min` on floating point: NaN if either is, -0.0 below 0.0.
 fn java_min(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
@@ -1867,22 +1995,26 @@ fn mth_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// Vanilla's `Mth.sin`: a 65536-entry table of `Math.sin`, so angles round as the game rounds them.
+/// A float angle indexes it as 1.21.1's `sin(float)` (`(int)(a * 10430.378F) & 65535`, in float);
+/// a double one as the later `sin(double)`.
 fn mth_sin(v: V) -> f32 {
-    let x = match v {
-        V::D(d) => d,
-        other => other.f() as f64,
-    };
-    let i = ((x * 10430.378350470453) as i64 & 65535) as f64;
-    (i * std::f64::consts::PI * 2.0 / 65536.0).sin() as f32
+    sin_table(match v {
+        V::D(d) => (d * 10430.378350470453) as i64 & 65535,
+        other => ((other.f() * 10430.378f32) as i32 & 65535) as i64,
+    })
 }
 
 fn mth_cos(v: V) -> f32 {
-    let x = match v {
-        V::D(d) => d,
-        other => other.f() as f64,
-    };
-    let i = ((x * 10430.378350470453 + 16384.0) as i64 & 65535) as f64;
-    (i * std::f64::consts::PI * 2.0 / 65536.0).sin() as f32
+    sin_table(match v {
+        V::D(d) => (d * 10430.378350470453 + 16384.0) as i64 & 65535,
+        other => ((other.f() * 10430.378f32 + 16384.0f32) as i32 & 65535) as i64,
+    })
+}
+
+/// `Mth.SIN[i]`: `(float) Math.sin(i * PI * 2 / 65536)`.
+fn sin_table(i: i64) -> f32 {
+    (i as f64 * std::f64::consts::PI * 2.0 / 65536.0).sin() as f32
 }
 
 /// `Direction.fromYRot`: the horizontal direction a yaw faces, as an ordinal.
@@ -2087,6 +2219,7 @@ fn vanilla_block_entity_type(rt: &mut Rt, field: &str) -> V {
 
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match owner {
+        "net/minecraft/world/phys/Vec3" if field == "ZERO" => vec3_zero(rt),
         "net/minecraft/world/level/block/state/properties/BlockStateProperties" => vanilla_property_object(rt, field)?,
         "net/minecraft/world/level/block/PipeBlock" if field == "PROPERTY_BY_DIRECTION" => {
             rt.intern("prop/pipe-by-direction".into(), |rt| {
@@ -2170,6 +2303,95 @@ mod tests {
     /// would box.
     fn raw_true(_rt: &mut Rt, _id: u32, _args: &[V]) -> Option<V> {
         Some(V::I(1))
+    }
+
+    /// Vanilla 1.21.1's `Vec3` and `Mth.sin`/`cos`, against values a JDK printed running the merged
+    /// jar's own classes (`scratchpad/jdkcheck/vec/Vec3Check.java`).
+    #[test]
+    fn vec3_turns_crosses_and_aligns_as_vanilla_does() {
+        let mut rt = Rt::new();
+        crate::install();
+        const VEC3: &str = "net/minecraft/world/phys/Vec3";
+        let new = |rt: &mut Rt, [x, y, z]: [f64; 3]| {
+            let v = rt.new_object(VEC3);
+            api::call(rt, "net/minecraft/world/phys/Vec3.<init>.(DDD)V", &[v, V::D(x), V::D(y), V::D(z)]);
+            v
+        };
+        let xyz = |rt: &Rt, v: V| [rt.get_field(v, "x").d(), rt.get_field(v, "y").d(), rt.get_field(v, "z").d()];
+        let k = |s: &str| -> &'static str { Box::leak(format!("{VEC3}.{s}").into_boxed_str()) };
+        let v = new(&mut rt, [1.5, -2.25, 3.0]);
+        let turned = |rt: &mut Rt, m: &str, a: f32| {
+            let r = api::call(rt, k(&format!("{m}.(F)Lnet/minecraft/world/phys/Vec3;")), &[v, V::F(a)]);
+            xyz(rt, r)
+        };
+        assert_eq!(turned(&mut rt, "yRot", 0.7), [3.0798825323581696, -2.25, 1.32827827334404]);
+        assert_eq!(turned(&mut rt, "xRot", -1.3), [1.5, -3.492403417825699, -1.3656218647956848]);
+        assert_eq!(turned(&mut rt, "zRot", 2.9), [-1.9947652146220207, 1.82576322555542, 3.0]);
+        let dir = api::call(&mut rt, k("directionFromRotation.(FF)Lnet/minecraft/world/phys/Vec3;"), &[V::F(30.5), V::F(-45.25)]);
+        assert_eq!(xyz(&rt, dir), [0.611922562122345, -0.5075089931488037, 0.6065488457679749]);
+        let (a, b) = (new(&mut rt, [0.3, 0.4, 0.5]), new(&mut rt, [-1.25, 2.0, 0.75]));
+        let cross = api::call(&mut rt, k("cross.(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;"), &[a, b]);
+        assert_eq!(xyz(&rt, cross), [-0.7, -0.85, 1.1]);
+        let to = new(&mut rt, [-4.0, 0.1, 9.5]);
+        let lerp = api::call(&mut rt, k("lerp.(Lnet/minecraft/world/phys/Vec3;D)Lnet/minecraft/world/phys/Vec3;"), &[v, to, V::D(0.35)]);
+        assert_eq!(xyz(&rt, lerp), [-0.4249999999999998, -1.4275, 5.275]);
+        // A vector too short to normalize is `Vec3.ZERO` itself.
+        let tiny = new(&mut rt, [1e-5, 0.0, 0.0]);
+        let n = api::call(&mut rt, k("normalize.()Lnet/minecraft/world/phys/Vec3;"), &[tiny]);
+        assert_eq!(n, api::get_static(&mut rt, "net/minecraft/world/phys/Vec3.ZERO"));
+        // `align(EnumSet.of(Z, X))`: those axes floored.
+        let (z, x) = (api::get_static(&mut rt, "net/minecraft/core/Direction$Axis.Z"), api::get_static(&mut rt, "net/minecraft/core/Direction$Axis.X"));
+        let axes = api::call(&mut rt, "java/util/EnumSet.of.(Ljava/lang/Enum;Ljava/lang/Enum;)Ljava/util/EnumSet;", &[z, x]);
+        let p = new(&mut rt, [-1.5, 2.7, 3.2]);
+        let aligned = api::call(&mut rt, k("align.(Ljava/util/EnumSet;)Lnet/minecraft/world/phys/Vec3;"), &[p, axes]);
+        assert_eq!(xyz(&rt, aligned), [-2.0, 2.7, 3.0]);
+        let shown = new(&mut rt, [1.0e-5, -0.0, 123456789.125]);
+        let text = api::call(&mut rt, k("toString.()Ljava/lang/String;"), &[shown]);
+        assert_eq!(rt.str_of(text), Some("(1.0E-5, -0.0, 1.23456789125E8)"));
+        let near = new(&mut rt, [2.0, 5.0, 3.5]);
+        let closer = |rt: &mut Rt, v_range: f64| api::call(rt, k("closerThan.(Lnet/minecraft/world/phys/Vec3;DD)Z"), &[v, near, V::D(0.8), V::D(v_range)]);
+        assert_eq!((closer(&mut rt, 7.3), closer(&mut rt, 7.2)), (V::I(1), V::I(0)));
+        let rgb = api::call(&mut rt, k("fromRGB24.(I)Lnet/minecraft/world/phys/Vec3;"), &[V::I(0x7F3A10)]);
+        assert_eq!(xyz(&rt, rgb), [0.4980392156862745, 0.22745098039215686, 0.06274509803921569]);
+        let west = api::get_static(&mut rt, "net/minecraft/core/Direction.WEST");
+        let rel = api::call(&mut rt, k("relative.(Lnet/minecraft/core/Direction;D)Lnet/minecraft/world/phys/Vec3;"), &[v, west, V::D(2.5)]);
+        assert_eq!(xyz(&rt, rel), [-1.0, -2.25, 3.0]);
+        assert_eq!(api::call(&mut rt, "net/minecraft/util/Mth.sin.(F)F", &[V::F(1234.567)]), V::F(0.078822285));
+        assert_eq!(api::call(&mut rt, "net/minecraft/util/Mth.cos.(F)F", &[V::F(-0.001)]), V::F(0.99999946));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `EnumSet` keeps its enum's order and knows its type: `range` and `complementOf` as a JDK gives
+    /// them for `Direction` (`range(NORTH, WEST)` = north, south, west; the complement of {up, east}
+    /// = down, north, south, west).
+    #[test]
+    fn an_enum_set_ranges_and_complements_in_its_enums_order() {
+        let mut rt = Rt::new();
+        crate::install();
+        let d = |rt: &mut Rt, n: &str| api::get_static(rt, Box::leak(format!("net/minecraft/core/Direction.{n}").into_boxed_str()));
+        let names = |rt: &mut Rt, set: V| -> Vec<String> {
+            crate::jutil::elements(rt, set).into_iter().map(|e| {
+                let n = crate::api_common::enum_name(rt, e, true);
+                rt.str_of(n).unwrap_or("").to_owned()
+            }).collect()
+        };
+        let (north, west) = (d(&mut rt, "NORTH"), d(&mut rt, "WEST"));
+        let range = api::call(&mut rt, "java/util/EnumSet.range.(Ljava/lang/Enum;Ljava/lang/Enum;)Ljava/util/EnumSet;", &[north, west]);
+        assert_eq!(names(&mut rt, range), ["north", "south", "west"]);
+        let (east, up) = (d(&mut rt, "EAST"), d(&mut rt, "UP"));
+        let some = api::call(&mut rt, "java/util/EnumSet.of.(Ljava/lang/Enum;Ljava/lang/Enum;)Ljava/util/EnumSet;", &[east, up]);
+        // Added east first, kept in order: up, east.
+        assert_eq!(names(&mut rt, some), ["up", "east"]);
+        let rest = api::call(&mut rt, "java/util/EnumSet.complementOf.(Ljava/util/EnumSet;)Ljava/util/EnumSet;", &[some]);
+        assert_eq!(names(&mut rt, rest), ["down", "north", "south", "west"]);
+        assert_eq!(api::call(&mut rt, "java/util/Set.contains.(Ljava/lang/Object;)Z", &[rest, north]), V::I(1));
+        assert_eq!(api::call(&mut rt, "java/util/Set.contains.(Ljava/lang/Object;)Z", &[rest, up]), V::I(0));
+        // An empty set still knows its type.
+        let class = rt.string("net.minecraft.core.Direction");
+        let none = api::call(&mut rt, "java/util/EnumSet.noneOf.(Ljava/lang/Class;)Ljava/util/EnumSet;", &[class]);
+        let all = api::call(&mut rt, "java/util/EnumSet.complementOf.(Ljava/util/EnumSet;)Ljava/util/EnumSet;", &[none]);
+        assert_eq!(names(&mut rt, all).len(), 6);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]
