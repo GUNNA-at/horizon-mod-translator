@@ -312,7 +312,7 @@ fn pop_resource(rt: &mut Rt, pos: [i32; 3], stack: V) {
 }
 
 /// The entity's NeoForge persistent data (`getPersistentData`): kept with its object.
-fn persistent_data(rt: &mut Rt, e: V) -> V {
+pub(crate) fn persistent_data(rt: &mut Rt, e: V) -> V {
     let d = rt.get_field(e, "$data");
     if d.r() != 0 {
         return d;

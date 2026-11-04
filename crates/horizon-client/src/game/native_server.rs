@@ -632,8 +632,8 @@ fn add_to(
 /// The acting player's items, for server mods (API 9): the player whose
 /// action or command a hook hears (`native_perform_command`), as their
 /// state is swapped in. Only plain stacks count; the inventory's 36 slots
-/// and the off hand, never the armour. Each change reaches the player's
-/// screen as any change to their inventory does.
+/// and the off hand, and the armour only to read. Each change reaches the
+/// player's screen as any change to their inventory does.
 #[allow(dead_code)]
 impl Game<'_> {
     /// The main hand's stack: its item, count, and whether it is plain. On a
@@ -650,6 +650,13 @@ impl Game<'_> {
         hand: horizon_client::first_person::Hand,
     ) -> Option<&ItemStack> {
         self.stack_in(hand_slot(self.selected, hand))
+    }
+    /// What the player wears in armour slot `slot` (0 the head, 1 the chest,
+    /// 2 the legs, 3 the feet: `Player.getItemBySlot`), with all its data;
+    /// None for an empty slot or past 3. On a client, the player's own (a
+    /// mod's overlay shown while a helmet is worn). API @API:player_worn@.
+    pub(super) fn native_worn(&self, slot: usize) -> Option<&ItemStack> {
+        self.armor.get(slot)?.as_ref()
     }
     /// Puts `stack` in the player's `hand` (`Player.setItemInHand`), replacing
     /// what it held; None, a count of 0 or an item the game doesn't know

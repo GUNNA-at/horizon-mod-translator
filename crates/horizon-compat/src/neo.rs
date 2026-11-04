@@ -751,6 +751,9 @@ pub fn fire_client_setup(rt: &mut Rt) {
     post(rt, REGISTER_RENDERERS, ev);
     let ev = rt.new_object(CLIENT_SETUP);
     post(rt, CLIENT_SETUP, ev);
+    // The HUD's layers: vanilla's, and where each mod puts its own among them.
+    let ev = rt.new_object(crate::gui::REGISTER_LAYERS);
+    post(rt, crate::gui::REGISTER_LAYERS, ev);
     // The block atlas is stitched (catnip's `StitchedSprite`s take their sprites from it: Create's
     // scrolling belts).
     let atlas = crate::render::block_atlas(rt);

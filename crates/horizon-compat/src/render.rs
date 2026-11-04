@@ -464,6 +464,8 @@ fn matrix4(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         ("translateLocal", "(FFF)Lorg/joml/Matrix4f;") => set(rt, mul4(&translation(a(1).f(), a(2).f(), a(3).f()), &m)),
         ("translation", "(FFF)Lorg/joml/Matrix4f;") => set(rt, translation(a(1).f(), a(2).f(), a(3).f())),
+        ("scaling", "(FFF)Lorg/joml/Matrix4f;") => set(rt, scaling(a(1).f(), a(2).f(), a(3).f())),
+        ("scaling", "(F)Lorg/joml/Matrix4f;") => set(rt, scaling(a(1).f(), a(1).f(), a(1).f())),
         // The translation column replaced, the rest kept (Create's `translateToEntity`).
         ("setTranslation", "(FFF)Lorg/joml/Matrix4f;") => {
             let mut t = m;
@@ -1023,6 +1025,11 @@ fn draw_item(rt: &mut Rt, stack: V, context: V, pose_stack: V, light: i32, seed:
     let item = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
     let display = rt.get_field(context, "$ordinal").i().clamp(0, 8) as u8;
     let m = last_pose(rt, pose_stack);
+    // An item drawn as in a slot while a mod draws on the GUI (catnip's `GuiGameElement`): its icon.
+    if crate::gui::drawing(rt) && DISPLAY_CONTEXTS[usize::from(display)] == "GUI" {
+        crate::gui::gui_item(rt, &item, &m);
+        return;
+    }
     let drew = rt.host_mut().is_some_and(|h| h.draw_item(&item, display, &m, light as u32, seed));
     crate::glue::trace_once(rt, &format!("draw-item/{item}/{display}"), |_| {
         format!("client: item {item} (display {display}) at {:.3} {:.3} {:.3}, light {light:#x}: drawn {drew}", m[12], m[13], m[14])
@@ -1180,6 +1187,7 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             let mc = single(rt, "net/minecraft/client/Minecraft");
             // Its public fields: the level this client draws, and its player (mods' client ticks
             // run only with both: Create's `ClientEvents.isGameActive`).
+            crate::gui::fill_minecraft(rt, mc);
             if rt.get_field(mc, "level").r() == 0 && crate::neo::is_client(rt) {
                 let level = crate::glue::level(rt);
                 rt.put_field(mc, "level", level);

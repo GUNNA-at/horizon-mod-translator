@@ -408,6 +408,49 @@ fn value_of(rt: &mut Rt, kind: &str, text: &str) -> V {
     }
 }
 
+/// What the acting player looks at, as `Item.getPlayerPOVHitResult` finds it (`fluids` 1: sources
+/// too, 2: any fluid): the block within reach, else a miss where their reach ends
+/// (`BlockHitResult.miss`). The client's `Minecraft.hitResult` for a block.
+pub(crate) fn pov_hit_result(rt: &mut Rt, fluids: u8) -> V {
+    let hit = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+    match rt.host().and_then(|h| h.player_pov_hit(fluids)) {
+        Some((pos, face, at)) => {
+            let loc = vec3(rt, at[0], at[1], at[2]);
+            let dir = direction(rt, i64::from(face));
+            let p = crate::api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+            rt.put_field(hit, "$loc", loc);
+            rt.put_field(hit, "$dir", dir);
+            rt.put_field(hit, "$pos", p);
+            rt.put_field(hit, "$inside", V::I(0));
+        }
+        None => {
+            // From the eyes along the look, 4.5 blocks (`blockInteractionRange`).
+            let ([x, y, z], yaw, pitch) = rt.host().and_then(|h| h.player_place()).unwrap_or(([0.0; 3], 0.0, 0.0));
+            let eye = if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 };
+            let (yr, pr) = (f64::from(-yaw).to_radians(), f64::from(-pitch).to_radians());
+            let look = [yr.sin() * pr.cos(), pr.sin(), yr.cos() * pr.cos()];
+            let end = [x + look[0] * 4.5, y + eye + look[1] * 4.5, z + look[2] * 4.5];
+            let loc = vec3(rt, end[0], end[1], end[2]);
+            // `Direction.getNearest` of the way back: the first of the largest dot product.
+            let normals = [[0.0, -1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+            let (mut face, mut best) = (2, f64::from(f32::from_bits(1)));
+            for (i, n) in normals.iter().enumerate() {
+                let d = -look[0] * n[0] - look[1] * n[1] - look[2] * n[2];
+                if d > best {
+                    (face, best) = (i as i64, d);
+                }
+            }
+            let dir = direction(rt, face);
+            let p = crate::api::block_pos(rt, end[0].floor() as i64, end[1].floor() as i64, end[2].floor() as i64);
+            rt.put_field(hit, "$loc", loc);
+            rt.put_field(hit, "$dir", dir);
+            rt.put_field(hit, "$pos", p);
+            rt.put_field(hit, "$miss", V::I(1));
+        }
+    }
+    hit
+}
+
 /// A Java property value's text in a state.
 pub(crate) fn text_of(rt: &Rt, v: V) -> String {
     match rt.class_of(v) {
@@ -939,6 +982,18 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/core/Direction$AxisDirection", "getStep") => V::I(if native(rt, a(0))[0] != 0 { 1 } else { -1 }),
 
         // Players and interactions
+        // What the player holds or wears in a slot: the hands' stacks as `getItemInHand`'s, the
+        // armor's read from the game.
+        // NeoForge's data a mod keeps with the player, on its object.
+        (o, "getPersistentData") if is_player(o) && is_player_class(rt.class_of(a(0))) => crate::entities::persistent_data(rt, a(0)),
+        (o, "getItemBySlot") if is_player(o) => match constant(rt, a(1)).as_str() {
+            "MAINHAND" => crate::hand::stack(rt, crate::hand::MAIN),
+            "OFFHAND" => crate::hand::stack(rt, crate::hand::OFF),
+            slot => {
+                let i = ["HEAD", "CHEST", "LEGS", "FEET"].iter().position(|s| *s == slot).unwrap_or(4) as u8;
+                crate::hand::worn(rt, i)
+            }
+        },
         (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "level" | "isLocalPlayer" | "mayBuild") => {
             match n {
                 // Survival and creative players build; the hooks act for one of them.
@@ -976,43 +1031,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "ANY" | "WATER" => 2,
                 _ => 0,
             };
-            let hit = rt.new_object("net/minecraft/world/phys/BlockHitResult");
-            match rt.host().and_then(|h| h.player_pov_hit(fluids)) {
-                Some((pos, face, at)) => {
-                    let loc = vec3(rt, at[0], at[1], at[2]);
-                    let dir = direction(rt, i64::from(face));
-                    let p = crate::api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
-                    rt.put_field(hit, "$loc", loc);
-                    rt.put_field(hit, "$dir", dir);
-                    rt.put_field(hit, "$pos", p);
-                    rt.put_field(hit, "$inside", V::I(0));
-                }
-                None => {
-                    // From the eyes along the look, 4.5 blocks (`blockInteractionRange`).
-                    let ([x, y, z], yaw, pitch) = rt.host().and_then(|h| h.player_place()).unwrap_or(([0.0; 3], 0.0, 0.0));
-                    let eye = if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 };
-                    let (yr, pr) = (f64::from(-yaw).to_radians(), f64::from(-pitch).to_radians());
-                    let look = [yr.sin() * pr.cos(), pr.sin(), yr.cos() * pr.cos()];
-                    let end = [x + look[0] * 4.5, y + eye + look[1] * 4.5, z + look[2] * 4.5];
-                    let loc = vec3(rt, end[0], end[1], end[2]);
-                    // `Direction.getNearest` of the way back: the first of the largest dot product.
-                    let normals = [[0.0, -1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
-                    let (mut face, mut best) = (2, f64::from(f32::from_bits(1)));
-                    for (i, n) in normals.iter().enumerate() {
-                        let d = -look[0] * n[0] - look[1] * n[1] - look[2] * n[2];
-                        if d > best {
-                            (face, best) = (i as i64, d);
-                        }
-                    }
-                    let dir = direction(rt, face);
-                    let p = crate::api::block_pos(rt, end[0].floor() as i64, end[1].floor() as i64, end[2].floor() as i64);
-                    rt.put_field(hit, "$loc", loc);
-                    rt.put_field(hit, "$dir", dir);
-                    rt.put_field(hit, "$pos", p);
-                    rt.put_field(hit, "$miss", V::I(1));
-                }
-            }
-            hit
+            pov_hit_result(rt, fluids)
         }
         // Food: the acting player's, through the host (work by hand, as Create's hand crank, tires
         // the player).
@@ -1508,6 +1527,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::Void
         }
         ("net/minecraft/world/item/ItemStack", "isEmpty") => V::I(stack_empty(rt, a(0)) as i32),
+        // A tooltip's picture (a bundle's contents): none, as for most items.
+        ("net/minecraft/world/item/ItemStack", "getTooltipImage") => optional(rt, V::NULL),
         ("net/minecraft/world/item/ItemStack", "getItem") => {
             if stack_empty(rt, a(0)) { item(rt, "minecraft:air") } else { rt.get_field(a(0), "$item") }
         }
@@ -1684,12 +1705,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let with = if desc.contains("[Ljava/lang/Object;") { a(1) } else { V::NULL };
             component(rt, a(0), name == "translatable", with)
         }
-        ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "getString") => {
-            // The text and its siblings' (a translation's key stands for it).
-            let mut text = rt.str_of(rt.get_field(a(0), "$text")).unwrap_or("").to_owned();
-            for sibling in crate::jutil::elements(rt, rt.get_field(a(0), "$extra")) {
-                text.push_str(rt.str_of(rt.get_field(sibling, "$text")).unwrap_or(""));
-            }
+        ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "getString") if desc == "()Ljava/lang/String;" => {
+            // The text and its siblings', translated where the game has the player's language (a
+            // translation's key stands for it elsewhere).
+            let text = crate::gui::plain(rt, a(0));
             rt.string(&text)
         }
         ("net/minecraft/network/chat/Component", "empty") => {
@@ -1698,7 +1717,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         // Styles (`withStyle` of `ChatFormatting`s: colours and formats) and siblings (`append`);
         // `plainCopy` keeps neither, `copy` both.
-        ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "withStyle") => {
+        ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "withStyle") if desc.contains("ChatFormatting;") => {
             let formats: Vec<V> = match desc {
                 "(Lnet/minecraft/ChatFormatting;)Lnet/minecraft/network/chat/MutableComponent;" => vec![a(1)],
                 "([Lnet/minecraft/ChatFormatting;)Lnet/minecraft/network/chat/MutableComponent;" => crate::jutil::elements(rt, a(1)),
@@ -1771,19 +1790,29 @@ pub(crate) fn component(rt: &mut Rt, text: V, translatable: bool, with: V) -> V 
 fn component_json(rt: &Rt, c: V) -> serde_json::Value {
     let mut j = component_core_json(rt, c);
     if let serde_json::Value::Object(o) = &mut j {
+        // The style's tokens in order (`gui`'s: `RED`, `#RRGGBB`, `#` for no colour, `!BOLD` off).
         for f in rt.str_of(rt.get_field(c, "$style")).unwrap_or("").split(',').filter(|f| !f.is_empty()) {
-            let format = match f {
+            let (on, name) = f.strip_prefix('!').map_or((true, f), |n| (false, n));
+            let format = match name {
                 "OBFUSCATED" => "obfuscated",
                 "BOLD" => "bold",
                 "STRIKETHROUGH" => "strikethrough",
                 "UNDERLINE" => "underlined",
                 "ITALIC" => "italic",
+                "RESET" => {
+                    o.retain(|k, _| !matches!(k.as_str(), "color" | "bold" | "italic" | "underlined" | "strikethrough" | "obfuscated"));
+                    continue;
+                }
+                "#" => {
+                    o.remove("color");
+                    continue;
+                }
                 colour => {
                     o.insert("color".into(), colour.to_ascii_lowercase().into());
                     continue;
                 }
             };
-            o.insert(format.into(), true.into());
+            o.insert(format.into(), on.into());
         }
         let extra: Vec<serde_json::Value> = crate::jutil::elements(rt, rt.get_field(c, "$extra")).into_iter().map(|s| component_json(rt, s)).collect();
         if !extra.is_empty() {
@@ -2581,6 +2610,12 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
                 rt.put_field(o, "$name", n);
                 o
             })
+        }
+        // What an entity wears or holds, in `EquipmentSlot`'s order (`getItemBySlot` reads it).
+        "net/minecraft/world/entity/EquipmentSlot" => {
+            const SLOTS: [&str; 7] = ["MAINHAND", "OFFHAND", "FEET", "LEGS", "CHEST", "HEAD", "BODY"];
+            let i = SLOTS.iter().position(|s| *s == field)?;
+            crate::api::api_enum(rt, "net/minecraft/world/entity/EquipmentSlot", SLOTS[i], i as i32)
         }
         "java/lang/Boolean" if field == "TRUE" || field == "FALSE" => boolean(rt, field == "TRUE"),
         "net/minecraft/core/Direction$Axis" => axis(rt, AXIS_NAMES.iter().position(|a| a.eq_ignore_ascii_case(field))? as i64),

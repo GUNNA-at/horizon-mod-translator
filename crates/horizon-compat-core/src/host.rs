@@ -189,6 +189,11 @@ pub trait Host {
     fn hurt_player_hand(&mut self, _hand: u8, _amount: u32) -> bool {
         false
     }
+    /// What the acting player wears in armor slot `slot` (0 head, 1 chest, 2 legs, 3 feet:
+    /// `Player.getItemBySlot`), None when nothing.
+    fn player_worn(&self, _slot: u8) -> Option<HandStack> {
+        None
+    }
     /// Where the acting player stands (their feet), and their look (yaw, pitch in degrees); None
     /// when the game can't say.
     fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
@@ -347,6 +352,67 @@ pub trait Host {
     /// Particles a mod makes: a client's game draws them (`Level.addParticle`), a server's sends
     /// them to the players near them (`ServerLevel.sendParticles`).
     fn particles(&mut self, _particles: &Particles) {}
+
+    // ---- A client's GUI: what a mod's `GuiGraphics` draws in a frame (a HUD layer, a screen) ----
+
+    /// The GUI's size in GUI pixels (`GuiGraphics.guiWidth`/`guiHeight`, the window's scaled
+    /// size); zero where nothing is drawn.
+    fn gui_size(&self) -> [i32; 2] {
+        [0, 0]
+    }
+    /// GUI pixels per window pixel (`Window.getGuiScale`).
+    fn gui_scale(&self) -> f64 {
+        1.0
+    }
+    /// A quad of GUI pixels (its corners in drawing order) filled with `argb`.
+    fn gui_fill(&mut self, _quad: [[f32; 2]; 4], _argb: u32) {}
+    /// Part `uv` (`[u0, v0, u1, v1]`, 0 to 1 across it) of texture `texture`
+    /// (`create:textures/gui/value_settings.png`) drawn into `rect` (`[x0, y0, x1, y1]` in GUI
+    /// pixels), its colours times `tint` (`0xAARRGGBB`, white for none: `RenderSystem.setShaderColor`).
+    /// False when the game has no such texture.
+    fn gui_blit(&mut self, _texture: &str, _uv: [f32; 4], _rect: [f32; 4], _tint: u32) -> bool {
+        false
+    }
+    /// A line of text at `at` (its top left), `scale` times its size: `runs` are its pieces in
+    /// order, each with its own colour (`0xRRGGBB`, None for `argb`'s) and boldness, as a text
+    /// component's are once translated. With vanilla's drop shadow or not.
+    fn gui_text(&mut self, _runs: &[TextRun], _at: [f32; 2], _scale: f32, _argb: u32, _shadow: bool) {}
+    /// How far character `c` advances in GUI pixels (the font's glyph advance; a bold one is one
+    /// more).
+    fn gui_char_width(&self, _c: char, _bold: bool) -> f32 {
+        6.0
+    }
+    /// The icon of item `item` at `at` (its top left), `size` GUI pixels wide (16 is vanilla's).
+    /// False when the game has no such item.
+    fn gui_item(&mut self, _item: &str, _at: [f32; 2], _size: f32) -> bool {
+        false
+    }
+    /// The game's text for translation key `key` in the player's language (`I18n.get`), None
+    /// when it has none.
+    fn translate(&self, _key: &str) -> Option<String> {
+        None
+    }
+}
+
+/// A piece of a line of text with one style ([`Host::gui_text`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextRun {
+    pub text: String,
+    /// `0xRRGGBB`; None takes the colour the text is drawn with.
+    pub color: Option<u32>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underlined: bool,
+    pub strikethrough: bool,
+}
+
+/// What a mod's `GuiGraphics` drew on a [`MemoryHost`], in order.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GuiDraw {
+    Fill([[f32; 2]; 4], u32),
+    Blit(String, [f32; 4], [f32; 4], u32),
+    Text(Vec<TextRun>, [f32; 2], f32, u32, bool),
+    Item(String, [f32; 2], f32),
 }
 
 /// Particles a mod makes ([`Host::particles`]).
@@ -414,6 +480,8 @@ pub struct MemoryHost {
     pub held_damage: u32,
     /// The off hand's stack.
     pub offhand: Option<HandStack>,
+    /// What the acting player wears: head, chest, legs, feet.
+    pub worn: [Option<HandStack>; 4],
     /// Items' durability (`max_damage`); unset ones have none.
     pub max_damage: HashMap<String, u32>,
     /// Where the acting player stands and looks (yaw, pitch).
@@ -470,6 +538,11 @@ pub struct MemoryHost {
     pub sounds: Vec<Sound>,
     /// Particles made, in order.
     pub particles: Vec<Particles>,
+    /// The GUI's size while a mod draws on it ([`Host::gui_size`]), and what it drew, in order.
+    pub gui: [i32; 2],
+    pub drawn_gui: Vec<GuiDraw>,
+    /// The player's language: translation key to text.
+    pub lang: HashMap<String, String>,
 }
 
 impl Host for MemoryHost {
@@ -579,6 +652,9 @@ impl Host for MemoryHost {
     fn player_pov_hit(&self, _fluids: u8) -> Option<([i32; 3], u8, [f64; 3])> {
         self.pov
     }
+    fn player_worn(&self, slot: u8) -> Option<HandStack> {
+        self.worn.get(usize::from(slot)).cloned().flatten()
+    }
     fn block_changed(&mut self, pos: [i32; 3]) {
         self.changed.push(pos);
     }
@@ -681,6 +757,26 @@ impl Host for MemoryHost {
     }
     fn particles(&mut self, particles: &Particles) {
         self.particles.push(particles.clone());
+    }
+    fn gui_size(&self) -> [i32; 2] {
+        self.gui
+    }
+    fn gui_fill(&mut self, quad: [[f32; 2]; 4], argb: u32) {
+        self.drawn_gui.push(GuiDraw::Fill(quad, argb));
+    }
+    fn gui_blit(&mut self, texture: &str, uv: [f32; 4], rect: [f32; 4], tint: u32) -> bool {
+        self.drawn_gui.push(GuiDraw::Blit(texture.to_owned(), uv, rect, tint));
+        true
+    }
+    fn gui_text(&mut self, runs: &[TextRun], at: [f32; 2], scale: f32, argb: u32, shadow: bool) {
+        self.drawn_gui.push(GuiDraw::Text(runs.to_vec(), at, scale, argb, shadow));
+    }
+    fn gui_item(&mut self, item: &str, at: [f32; 2], size: f32) -> bool {
+        self.drawn_gui.push(GuiDraw::Item(item.to_owned(), at, size));
+        true
+    }
+    fn translate(&self, key: &str) -> Option<String> {
+        self.lang.get(key).cloned()
     }
 }
 

@@ -866,6 +866,16 @@ pub fn payload_from_client(rt: &mut Rt, host: &mut dyn Host, player: u128, chann
     rt.with_host(host, |rt| crate::network::receive(rt, channel, data, Some(player)))
 }
 
+/// The mods' HUD layers at the game's layer `layer` (`minecraft:hotbar`), drawn on `host`'s GUI
+/// before it (`pre`) or after it ([`crate::gui::draw_layers`]). True when one stands in for the
+/// layer: the game skips its own.
+pub fn gui_layer(rt: &mut Rt, host: &mut dyn Host, layer: &str, pre: bool) -> bool {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    crate::neo::fire_client_setup(rt);
+    rt.with_host(host, |rt| crate::gui::draw_layers(rt, layer, pre))
+}
+
 /// The client's tick, in `Minecraft.tick`'s order: `ClientTickEvent.Pre` (animation clocks advance
 /// here: catnip's `AnimationTickHolder`), the level's block entities, then `ClientTickEvent.Post`.
 pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {

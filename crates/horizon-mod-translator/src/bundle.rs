@@ -28,7 +28,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
 /// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 42] = [
+const COMPAT: [(&str, &str); 43] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -61,6 +61,7 @@ const COMPAT: [(&str, &str); 42] = [
     ("item_use.rs", include_str!("../../horizon-compat/src/item_use.rs")),
     ("nbt.rs", include_str!("../../horizon-compat/src/nbt.rs")),
     ("glue.rs", include_str!("../../horizon-compat/src/glue.rs")),
+    ("gui.rs", include_str!("../../horizon-compat/src/gui.rs")),
     ("hand.rs", include_str!("../../horizon-compat/src/hand.rs")),
     ("events.rs", include_str!("../../horizon-compat/src/events.rs")),
     ("jutil.rs", include_str!("../../horizon-compat/src/jutil.rs")),
@@ -316,12 +317,187 @@ fn client_host(c: &str) -> String {
 "#)
 }
 
+/// The host a HUD layer's drawing gets (`native_gui_layer_pre` and `_post`): the window's world,
+/// its player (hands, what it wears, the block it looks at) and language, and the frame's GUI batch
+/// to draw into. Needs the helper's NBT conversions (`to_nbt`).
+fn gui_host(c: &str) -> String {
+    format!(r#"    struct Host<'a, 'b, 'c> {{
+        game: &'a mut crate::game::Game<'b>,
+        batch: &'c mut horizon_client::hud::HudBatch,
+    }}
+    impl {c}::host::Host for Host<'_, '_, '_> {{
+        fn block_state(&self, pos: [i32; 3]) -> String {{
+            self.game.native_state_text_at(pos)
+        }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.game.native_block_name_in_tag(block, tag)
+        }}
+        fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
+            self.game.native_state_facts(state).map(|(hardness, push, replaceable)| {c}::host::BlockFacts {{ hardness, push, replaceable }})
+        }}
+        fn dimension(&self) -> String {{
+            self.game.native_dimension().to_owned()
+        }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.game.native_fluid_name_in_tag(fluid, tag)
+        }}
+        fn item_is_block(&self, item: &str) -> bool {{
+            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
+        }}
+        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_facts(item).map(|(_, limit)| limit)
+        }}
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
+            false
+        }}
+        fn is_server(&self) -> bool {{
+            false
+        }}
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
+        }}
+        fn player_sneaking(&self) -> bool {{
+            self.game.has_shift_down()
+        }}
+        fn player_pov_hit(&self, fluids: u8) -> Option<([i32; 3], u8, [f64; 3])> {{
+            // A face's step as a direction ordinal: down, up, north, south, west, east.
+            let face = |f: [i32; 3]| match f {{
+                [0, -1, 0] => 0,
+                [0, 1, 0] => 1,
+                [0, 0, -1] => 2,
+                [0, 0, 1] => 3,
+                [-1, 0, 0] => 4,
+                _ => 5,
+            }};
+            self.game.native_player_pov_hit(fluids).map(|(pos, f, at)| (pos, face(f), at))
+        }}
+        fn player_hand(&self, hand: u8) -> Option<{c}::host::HandStack> {{
+            let hand = if hand == 1 {{ horizon_client::first_person::Hand::Off }} else {{ horizon_client::first_person::Hand::Main }};
+            Some(self.held(self.game.native_hand_stack(hand)?))
+        }}
+        fn player_worn(&self, slot: u8) -> Option<{c}::host::HandStack> {{
+            Some(self.held(self.game.native_worn(usize::from(slot))?))
+        }}
+        fn translate(&self, key: &str) -> Option<String> {{
+            horizon_client::lang::has(key).then(|| horizon_client::lang::get(key))
+        }}
+        fn gui_size(&self) -> [i32; 2] {{
+            [self.batch.width as i32, self.batch.height as i32]
+        }}
+        fn gui_scale(&self) -> f64 {{
+            f64::from(self.batch.scale)
+        }}
+        fn gui_fill(&mut self, quad: [[f32; 2]; 4], argb: u32) {{
+            self.game.native_quad(self.batch, quad, argb);
+        }}
+        fn gui_blit(&mut self, texture: &str, uv: [f32; 4], rect: [f32; 4], tint: u32) -> bool {{
+            // `ns:textures/<path>.png`, or an atlas sprite `sprite:ns:<path>`, as the GUI atlas
+            // names it: `<path>` for vanilla's, `ns:<path>` for a mod's.
+            let name = match texture.strip_prefix("sprite:") {{
+                Some(sprite) => sprite.to_owned(),
+                None => {{
+                    let (ns, path) = texture.split_once(':').unwrap_or(("minecraft", texture));
+                    let path = path.strip_prefix("textures/").unwrap_or(path);
+                    format!("{{ns}}:{{}}", path.strip_suffix(".png").unwrap_or(path))
+                }}
+            }};
+            let name = name.strip_prefix("minecraft:").unwrap_or(&name).to_owned();
+            let Some([w, h]) = self.game.native_sprite_size(&name) else {{
+                return false;
+            }};
+            let start = self.batch.vertices.len();
+            let src = [uv[0] * w, uv[1] * h, (uv[2] - uv[0]) * w, (uv[3] - uv[1]) * h];
+            let dst = [rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]];
+            let drew = self.game.native_sprite(self.batch, &name, src, dst);
+            if drew && tint != u32::MAX {{
+                self.tint_since(start, tint);
+            }}
+            drew
+        }}
+        fn gui_text(&mut self, runs: &[{c}::host::TextRun], at: [f32; 2], scale: f32, argb: u32, shadow: bool) {{
+            let start = self.batch.vertices.len();
+            let mut x = at[0];
+            for run in runs {{
+                let rgb = run.color.unwrap_or(argb & 0xFF_FFFF);
+                let width = if run.bold {{
+                    // Vanilla's bold: each glyph drawn again a pixel to the right, a pixel wider.
+                    let mut w = 0.0;
+                    for ch in run.text.chars() {{
+                        let one = ch.to_string();
+                        self.game.native_text(self.batch, &one, [x + w, at[1]], rgb, shadow);
+                        self.game.native_text(self.batch, &one, [x + w + 1.0, at[1]], rgb, shadow);
+                        w += self.game.native_text_width(&one) + 1.0;
+                    }}
+                    w
+                }} else {{
+                    self.game.native_text(self.batch, &run.text, [x, at[1]], rgb, shadow);
+                    self.game.native_text_width(&run.text)
+                }};
+                // Vanilla's line effects: a pixel high, under the glyphs or through them.
+                if run.underlined {{
+                    self.game.native_fill(self.batch, [x - 1.0, at[1] + 8.0, width + 1.0, 1.0], 0xFF00_0000 | rgb);
+                }}
+                if run.strikethrough {{
+                    self.game.native_fill(self.batch, [x - 1.0, at[1] + 3.5, width + 1.0, 1.0], 0xFF00_0000 | rgb);
+                }}
+                x += width;
+            }}
+            // `Font.adjustColor`: an alpha below 4 is opaque.
+            let alpha = argb >> 24;
+            if (4..0xFF).contains(&alpha) {{
+                self.tint_since(start, alpha << 24 | 0xFF_FFFF);
+            }}
+            if scale != 1.0 {{
+                self.batch.scale_since(start, at[0], at[1], scale, scale);
+            }}
+        }}
+        fn gui_char_width(&self, c: char, bold: bool) -> f32 {{
+            self.game.native_text_width(&c.to_string()) + if bold {{ 1.0 }} else {{ 0.0 }}
+        }}
+        fn gui_item(&mut self, item: &str, at: [f32; 2], size: f32) -> bool {{
+            self.game.native_item(self.batch, item, at, size)
+        }}
+    }}
+    impl Host<'_, '_, '_> {{
+        /// A stack of the player's with its mod data, as the runtime holds a hand's.
+        fn held(&self, stack: &horizon_client::items::ItemStack) -> {c}::host::HandStack {{
+            let components = self
+                .game
+                .native_registered_components()
+                .into_iter()
+                .filter_map(|name| {{
+                    let tag = self.game.native_component(stack, name).ok()??;
+                    Some((name.to_owned(), to_nbt(tag)?))
+                }})
+                .collect();
+            {c}::host::HandStack {{
+                item: stack.item.to_string(),
+                count: stack.count,
+                damage: stack.damage,
+                max_damage: self.game.native_item_max_damage(&stack.item),
+                components,
+            }}
+        }}
+        /// The colours drawn since vertex `start` times `tint` (`0xAARRGGBB`); a vertex's colour is
+        /// `rgba`'s, alpha in the top byte, then blue, green and red.
+        fn tint_since(&mut self, start: usize, tint: u32) {{
+            let [ta, tr, tg, tb] = tint.to_be_bytes();
+            let times = |c: u32, shift: u32, t: u8| ((c >> shift & 0xFF) * u32::from(t) / 255) << shift;
+            for v in &mut self.batch.vertices[start..] {{
+                v.color = times(v.color, 24, ta) | times(v.color, 16, tb) | times(v.color, 8, tg) | times(v.color, 0, tr);
+            }}
+        }}
+    }}
+"#)
+}
+
 /// The client's hooks: drawing the mod's block entities with its renderers, the update tags the
 /// server sends for them, the client tick (animation clocks) and the payloads the server sends.
 fn client_helpers(id: &str, ns: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
     let conversions = nbt_conversions(&c);
     let client_host = client_host(&c);
+    let gui_host = gui_host(&c);
     // The host a client's draws get: the game, and the frame's pose stack and geometry.
     let draw_host = format!(r#"    struct Host<'a, 'b, 'c> {{
         game: &'a crate::game::Game<'b>,
@@ -681,6 +857,29 @@ fn {id}_use_animation(stack: &horizon_client::items::ItemStack, animation: &mut 
             _ => UseAnimation::None,
         }};
     }}
+}}
+"#)),
+        ("gui_layer_pre", format!(r#"// Generated by horizon-mod-translator: the translated mod's HUD layers drawn below vanilla's layer
+// `layer` (where `RegisterGuiLayersEvent` put them), in the window's game; a vanilla layer one of
+// them replaced is hidden.
+fn {id}_gui_layer_pre(game: &mut crate::game::Game<'_>, layer: &str, batch: &mut horizon_client::hud::HudBatch, canceled: &mut bool) {{
+    if !game.native_window() {{
+        return;
+    }}
+{conversions}{gui_host}    let mut host = Host {{ game, batch }};
+    if {krate}::hook_runtime("gui_layer_pre", |rt| {c}::glue::gui_layer(rt, &mut host, layer, true)) {{
+        *canceled = true;
+    }}
+}}
+"#)),
+        ("gui_layer_post", format!(r#"// Generated by horizon-mod-translator: the translated mod's HUD layers drawn above vanilla's layer
+// `layer` (where `RegisterGuiLayersEvent` put them), in the window's game.
+fn {id}_gui_layer_post(game: &mut crate::game::Game<'_>, layer: &str, batch: &mut horizon_client::hud::HudBatch) {{
+    if !game.native_window() {{
+        return;
+    }}
+{conversions}{gui_host}    let mut host = Host {{ game, batch }};
+    {krate}::hook_runtime("gui_layer_post", |rt| {c}::glue::gui_layer(rt, &mut host, layer, false));
 }}
 "#)),
         ("net_from_server", format!(r#"// Generated by horizon-mod-translator: a mod payload the server sent (`native_net_from_server`), to
@@ -1373,7 +1572,7 @@ fn {id}_state_for_placement(
     ]
 }
 
-const CLIENT_BINDINGS: [(&str, &str); 10] = [
+const CLIENT_BINDINGS: [(&str, &str); 12] = [
     ("component_types", "    { name = \"types\", ty = \"&mut Vec<String>\", value = \"&mut *types\" },\n"),
     ("level_submit", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"camera\", ty = \"[f64; 3]\", value = \"camera\" },\n    { name = \"draw\", ty = \"&mut crate::game::native_block_entity_draw::BlockEntityDraw\", value = \"&mut *draw\" },\n"),
     ("content", "    { name = \"content\", ty = \"&mut horizon_mods::Content\", value = \"&mut *content\" },\n"),
@@ -1384,6 +1583,8 @@ const CLIENT_BINDINGS: [(&str, &str); 10] = [
     ("block_entity_data", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"entity\", ty = \"&horizon_client::containers::ModBlockEntity\", value = \"entity\" },\n    { name = \"tag\", ty = \"&horizon_world::nbt::Compound\", value = \"tag\" },\n"),
     ("net_from_server", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"channel\", ty = \"&str\", value = \"channel\" },\n    { name = \"data\", ty = \"&[u8]\", value = \"data\" },\n"),
     ("use_animation", "    { name = \"stack\", ty = \"&horizon_client::items::ItemStack\", value = \"stack\" },\n    { name = \"animation\", ty = \"&mut horizon_world::consumable::UseAnimation\", value = \"&mut *animation\" },\n"),
+    ("gui_layer_pre", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"layer\", ty = \"&str\", value = \"layer\" },\n    { name = \"batch\", ty = \"&mut horizon_client::hud::HudBatch\", value = \"&mut *batch\" },\n    { name = \"canceled\", ty = \"&mut bool\", value = \"&mut *canceled\" },\n"),
+    ("gui_layer_post", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"layer\", ty = \"&str\", value = \"layer\" },\n    { name = \"batch\", ty = \"&mut horizon_client::hud::HudBatch\", value = \"&mut *batch\" },\n"),
 ];
 
 const BLOCK_ENTITY_BINDINGS: [(&str, &str); 16] = [

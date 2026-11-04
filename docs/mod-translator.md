@@ -1133,6 +1133,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a creative motor on the first pulley, and an iron ingot summoned over it is taken off the
     ground into the belt (`BeltBlock.entityInside`: no item entity left, as in Java) and drawn
     riding it, from the motor's end to the far end within 120 ticks (`shots-belt/carry-1..6.png`).
+  - [x] 2026-11-04 Mods' HUD layers (`gui.rs`, new). `RegisterGuiLayersEvent` is posted with the
+    client's setup and keeps NeoForge's ordered list: vanilla's 25 layers (`VanillaGuiLayers.*` are
+    their ids), `registerAbove/Below/AboveAll/BelowAll`, `replaceLayer` (`wrapLayer` is traced and
+    drawn unwrapped). Each mod layer is drawn at the Horizon hook matching its place in that list
+    (`native_gui_layer_pre`/`_post`, API gui_layers; layers Horizon draws in one pass, such as the
+    health, armour, food and air rows, share one hook), by its own `render(GuiGraphics,
+    DeltaTracker)`. `GuiGraphics` draws through new `Host` methods (`gui_fill`, `gui_blit`,
+    `gui_text` with styled runs, `gui_item`, `gui_size`, `gui_char_width`, `translate`): the pose
+    stack, fills and gradients, blits and GUI sprites, strings with their styles (section codes,
+    translations with their arguments, vanilla's line breaking for `Font.split`), items, and
+    tooltips as vanilla lays them out (`ClientTooltipComponent`, `RenderTooltipEvent.Pre`/`Color`,
+    `GatherComponents`). Also `NumberFormat`/`DecimalFormat` (root locale, half even on the exact
+    value, tested against the JDK's answers), `EquipmentSlot`, `Player.getItemBySlot` (armour
+    through the new `native_worn`, API player_worn), `Player.getPersistentData`, the texture
+    manager and blend factors as no-ops. Harness `GOGGLES=<dir>` (new; `GOGGLES_AT=motor`,
+    `NO_GOGGLES=1`): a creative motor turns a shaft on the server; on the client the player wears
+    goggles and looks at the motor, and Create's `goggle_info` layer draws as in Java: the goggles'
+    icon at (270, 119) over the corner of a tooltip box (background, gradient border) beside the
+    crosshair, with "   Generator Stats:", "   Kinetic Stress Capacity:" (grey) and
+    "    262,144su " (aqua) "at current speed" (dark grey), 0 unmapped calls. Looking at the shaft
+    draws nothing (a shaft adds no stress, so Create shows nothing either), and so does the motor
+    without goggles. Bundle: `gui_layer_pre`/`gui_layer_post` helpers, whose host draws with
+    `native_quad`, `native_sprite`, `native_text` and `native_item` into the frame's `HudBatch`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "what the player wears (`native_worn`).",
+  "doc_summary": "`native_worn(slot)` answers the stack the player wears in an armour slot (0 the head to 3 the feet, `Player.getItemBySlot`), with all its data; on a client, the player's own, for an overlay shown while a helmet is worn: @API:player_worn@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_server.rs"
+  ]
+}

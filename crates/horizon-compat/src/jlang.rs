@@ -1304,6 +1304,35 @@ mod tests {
         let out = c(&mut rt, "java/lang/String.format.(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;", &[f, arr]);
         assert_eq!(rt.str_of(out), Some("shaft has 007 rpm (0.13)"));
     }
+
+    #[test]
+    fn number_formats_print_as_the_jdk_does_in_the_root_locale() {
+        let mut rt = Rt::new();
+        let fmt = |rt: &mut Rt, f: V, x: f64| {
+            let s = c(rt, "java/text/NumberFormat.format.(D)Ljava/lang/String;", &[f, V::D(x)]);
+            rt.str_of(s).unwrap_or("?").to_owned()
+        };
+        let f = c(&mut rt, "java/text/NumberFormat.getNumberInstance.(Ljava/util/Locale;)Ljava/text/NumberFormat;", &[V::NULL]);
+        assert_eq!(fmt(&mut rt, f, 16384.0), "16,384");
+        assert_eq!(fmt(&mut rt, f, 1234567.891), "1,234,567.891");
+        assert_eq!(fmt(&mut rt, f, -0.0), "-0");
+        // Create's `LangNumberFormat.update`: at most two decimals, half even on the exact value.
+        c(&mut rt, "java/text/NumberFormat.setMaximumFractionDigits.(I)V", &[f, V::I(2)]);
+        assert_eq!(fmt(&mut rt, f, 0.125), "0.12");
+        assert_eq!(fmt(&mut rt, f, 1.005), "1");
+        assert_eq!(fmt(&mut rt, f, 2.675), "2.67");
+        let i = c(&mut rt, "java/text/NumberFormat.getIntegerInstance.()Ljava/text/NumberFormat;", &[]);
+        assert_eq!(fmt(&mut rt, i, 2.5), "2");
+        assert_eq!(fmt(&mut rt, i, 3.5), "4");
+        let pct = c(&mut rt, "java/text/NumberFormat.getPercentInstance.()Ljava/text/NumberFormat;", &[]);
+        assert_eq!(fmt(&mut rt, pct, 0.256), "26%");
+        for (pattern, x, want) in [("#.##", 0.456, ".46"), ("#.##", 0.0, "0"), ("0.00", 3.14159, "3.14"), ("#,##0.0", 1234.56, "1,234.6"), ("00", 7.0, "07")] {
+            let d = rt.new_object("java/text/DecimalFormat");
+            let p = rt.string(pattern);
+            c(&mut rt, "java/text/DecimalFormat.<init>.(Ljava/lang/String;)V", &[d, p]);
+            assert_eq!(fmt(&mut rt, d, x), want, "{pattern}");
+        }
+    }
 }
 
 /// Small libraries mods lean on: loggers (dropped), commons-lang `Pair`, `Record`'s constructor.
@@ -1357,6 +1386,25 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if name == "setValue" { old } else { V::Void }
         }
         (o, _) if o.starts_with("org/apache/commons/lang3/mutable/Mutable") => return mutable(rt, o, name, desc, args),
+        ("java/text/NumberFormat" | "java/text/DecimalFormat" | "java/text/Format", _) => return number_format(rt, name, desc, args),
+        // A character or a string repeated (jopt-simple's and commons-lang's helpers: an indent).
+        ("joptsimple/internal/Strings" | "org/apache/commons/lang3/StringUtils", "repeat") => {
+            let unit = if desc.starts_with("(C") { char::from_u32(a(0).i() as u32).unwrap_or(' ').to_string() } else { text(rt, a(0)) };
+            new_str(rt, unit.repeat(a(1).i().max(0) as usize))
+        }
+        ("org/apache/commons/lang3/StringUtils", "capitalize" | "uncapitalize") => {
+            if a(0).r() == 0 {
+                return Some(V::NULL);
+            }
+            let t = text(rt, a(0));
+            let mut chars = t.chars();
+            let out = match chars.next() {
+                Some(c) if name == "capitalize" => c.to_uppercase().chain(chars).collect(),
+                Some(c) => c.to_lowercase().chain(chars).collect(),
+                None => String::new(),
+            };
+            new_str(rt, out)
+        }
         ("java/lang/Record", "<init>") => V::Void,
         // Vanilla's `Util`: `make(supplier)` is what the supplier gives; `make(object, consumer)`
         // hands the object to the consumer and returns it (`Util.make(new HashMap<>(), m -> ...)`).
@@ -1376,6 +1424,172 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("net/minecraft/Util", "getNanos") => {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
             V::J(now)
+        }
+        _ => return None,
+    })
+}
+
+/// How a `NumberFormat` prints: `DecimalFormat`'s digit counts, grouping, and the text around.
+struct Digits {
+    min_int: usize,
+    min_frac: usize,
+    max_frac: usize,
+    grouping: bool,
+    prefix: String,
+    suffix: String,
+    /// 100 for a percent pattern.
+    multiplier: f64,
+}
+
+impl Digits {
+    fn read(rt: &Rt, f: V) -> Digits {
+        let n = |k: &'static str, d: i32| match rt.get_field(f, k) {
+            V::I(i) => i,
+            _ => d,
+        };
+        Digits {
+            min_int: n("$minInt", 1).max(0) as usize,
+            min_frac: n("$minFrac", 0).max(0) as usize,
+            max_frac: n("$maxFrac", 3).max(0) as usize,
+            grouping: n("$grouping", 1) != 0,
+            prefix: rt.str_of(rt.get_field(f, "$prefix")).unwrap_or("").to_owned(),
+            suffix: rt.str_of(rt.get_field(f, "$suffix")).unwrap_or("").to_owned(),
+            multiplier: f64::from(n("$multiplier", 1)),
+        }
+    }
+
+    /// `DecimalFormat`'s pattern (`#,##0.00`, `0.#%`): the positive part's digits and text.
+    fn pattern(p: &str) -> Digits {
+        let positive = p.split(';').next().unwrap_or("");
+        let is_digit = |c: char| matches!(c, '#' | '0' | ',' | '.');
+        let start = positive.find(is_digit).unwrap_or(positive.len());
+        let end = positive.rfind(is_digit).map_or(start, |i| i + 1);
+        let unquote = |t: &str| t.replace('\'', "");
+        let (body, prefix, suffix) = (&positive[start..end], unquote(&positive[..start]), unquote(&positive[end..]));
+        let (int, frac) = body.split_once('.').unwrap_or((body, ""));
+        let percent = prefix.contains('%') || suffix.contains('%');
+        Digits {
+            min_int: int.chars().filter(|&c| c == '0').count(),
+            min_frac: frac.chars().filter(|&c| c == '0').count(),
+            max_frac: frac.chars().filter(|&c| c == '0' || c == '#').count(),
+            grouping: int.contains(','),
+            prefix,
+            suffix,
+            multiplier: if percent { 100.0 } else { 1.0 },
+        }
+    }
+
+    fn store(&self, rt: &mut Rt, f: V) {
+        rt.put_field(f, "$minInt", V::I(self.min_int as i32));
+        rt.put_field(f, "$minFrac", V::I(self.min_frac as i32));
+        rt.put_field(f, "$maxFrac", V::I(self.max_frac as i32));
+        rt.put_field(f, "$grouping", V::I(self.grouping as i32));
+        let (p, s) = (rt.string(&self.prefix), rt.string(&self.suffix));
+        rt.put_field(f, "$prefix", p);
+        rt.put_field(f, "$suffix", s);
+        rt.put_field(f, "$multiplier", V::I(self.multiplier as i32));
+    }
+
+    /// `x` as `DecimalFormat.format` prints it in the root locale: rounded half to even on its
+    /// exact value, trailing zeros past the minimum dropped, thousands grouped with `,`.
+    fn format(&self, x: f64) -> String {
+        let x = x * self.multiplier;
+        if x.is_nan() {
+            return "NaN".into();
+        }
+        let sign = if x.is_sign_negative() { "-" } else { "" };
+        if x.is_infinite() {
+            return format!("{}{sign}\u{221E}{}", self.prefix, self.suffix);
+        }
+        let fixed = format!("{:.*}", self.max_frac, x.abs());
+        let (int, frac) = fixed.split_once('.').unwrap_or((&fixed, ""));
+        let mut frac = frac.to_owned();
+        while frac.len() > self.min_frac && frac.ends_with('0') {
+            frac.pop();
+        }
+        let int = int.trim_start_matches('0');
+        let mut int = format!("{}{int}", "0".repeat(self.min_int.saturating_sub(int.len())));
+        if int.is_empty() && frac.is_empty() {
+            int.push('0');
+        }
+        if self.grouping {
+            let digits: Vec<char> = int.chars().collect();
+            int = digits
+                .iter()
+                .enumerate()
+                .flat_map(|(i, c)| ((i > 0 && (digits.len() - i) % 3 == 0).then_some(',')).into_iter().chain(std::iter::once(*c)))
+                .collect();
+        }
+        let point = if frac.is_empty() { "" } else { "." };
+        format!("{}{sign}{int}{point}{frac}{}", self.prefix, self.suffix)
+    }
+}
+
+/// `java.text.NumberFormat` and `DecimalFormat`, in the root locale's symbols (`.` and `,`): how
+/// mods print quantities (Create's `LangNumberFormat`, `16,384`).
+fn number_format(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let made = |rt: &mut Rt, d: Digits| {
+        let f = rt.new_object("java/text/DecimalFormat");
+        d.store(rt, f);
+        f
+    };
+    let number = Digits { min_int: 1, min_frac: 0, max_frac: 3, grouping: true, prefix: String::new(), suffix: String::new(), multiplier: 1.0 };
+    let set = |rt: &mut Rt, key: &'static str, v: V| {
+        rt.put_field(a(0), key, v);
+        V::Void
+    };
+    Some(match name {
+        "getInstance" | "getNumberInstance" => made(rt, number),
+        "getIntegerInstance" => made(rt, Digits { max_frac: 0, ..number }),
+        "getPercentInstance" => made(rt, Digits { max_frac: 0, suffix: "%".into(), multiplier: 100.0, ..number }),
+        "<init>" => {
+            let d = if desc.starts_with("(Ljava/lang/String;") { Digits::pattern(&text(rt, a(1))) } else { number };
+            d.store(rt, a(0));
+            V::Void
+        }
+        "applyPattern" => {
+            Digits::pattern(&text(rt, a(1))).store(rt, a(0));
+            V::Void
+        }
+        "setMaximumFractionDigits" => {
+            let n = a(1).i().max(0);
+            if rt.get_field(a(0), "$minFrac").i() > n {
+                rt.put_field(a(0), "$minFrac", V::I(n));
+            }
+            set(rt, "$maxFrac", V::I(n))
+        }
+        "setMinimumFractionDigits" => {
+            let n = a(1).i().max(0);
+            if Digits::read(rt, a(0)).max_frac < n as usize {
+                rt.put_field(a(0), "$maxFrac", V::I(n));
+            }
+            set(rt, "$minFrac", V::I(n))
+        }
+        "setMinimumIntegerDigits" => set(rt, "$minInt", V::I(a(1).i().max(0))),
+        "setGroupingUsed" => set(rt, "$grouping", V::I(i32::from(a(1).i() != 0))),
+        "getMaximumFractionDigits" => V::I(Digits::read(rt, a(0)).max_frac as i32),
+        "getMinimumFractionDigits" => V::I(Digits::read(rt, a(0)).min_frac as i32),
+        "isGroupingUsed" => V::I(Digits::read(rt, a(0)).grouping as i32),
+        // Rounding is always half even here, as `DecimalFormat`'s default.
+        "setRoundingMode" | "setMaximumIntegerDigits" | "setParseIntegerOnly" | "setDecimalFormatSymbols" => V::Void,
+        "format" => {
+            let x = match a(1) {
+                V::I(i) => f64::from(i),
+                V::J(j) => j as f64,
+                V::F(f) => f64::from(f),
+                V::D(d) => d,
+                v @ V::R(_) if v.r() != 0 => match rt.get_field(v, "value") {
+                    V::I(i) => f64::from(i),
+                    V::J(j) => j as f64,
+                    V::F(f) => f64::from(f),
+                    V::D(d) => d,
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            let s = Digits::read(rt, a(0)).format(x);
+            new_str(rt, s)
         }
         _ => return None,
     })

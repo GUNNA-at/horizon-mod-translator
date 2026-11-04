@@ -102,6 +102,19 @@ fn load(rt: &mut Rt, hand: u8) -> V {
     s
 }
 
+/// What the acting player wears in armor slot `slot` (0 head, 1 chest, 2 legs, 3 feet), as a stack
+/// read from the game: a copy, which the game doesn't take back.
+pub fn worn(rt: &mut Rt, slot: u8) -> V {
+    let Some(held) = rt.host().and_then(|h| h.player_worn(slot)) else { return empty(rt) };
+    let s = api_common::stack(rt, &held.item, held.count as i32);
+    rt.put_field(s, "$damage", V::I(held.damage as i32));
+    if held.max_damage > 0 {
+        rt.put_field(s, "$maxDamage", V::I(held.max_damage as i32));
+    }
+    components::load(rt, s, &held.components);
+    s
+}
+
 /// What `s` holds (item, count, damage; None when empty) and its components as the game keeps
 /// them.
 fn state(rt: &mut Rt, s: V) -> (Option<(String, u32, u32)>, BTreeMap<String, Nbt>) {
