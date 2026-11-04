@@ -394,6 +394,119 @@ pub(crate) fn next_random(rt: &mut Rt) -> u64 {
     x.wrapping_mul(0x2545_F491_4F6C_DD1D)
 }
 
+/// A `java.util.Optional` holding `v` (null: empty), in the JDK's own field.
+pub fn optional(rt: &mut Rt, v: V) -> V {
+    let o = rt.new_object("java/util/Optional");
+    rt.put_field(o, "value", if v.r() != 0 { v } else { V::NULL });
+    o
+}
+
+/// `java.util.Optional`, whole: the factories, the tests and the lambda forms (`ifPresent`, `map`,
+/// `filter`...), which run the mod's lambdas the way the JDK does.
+fn optional_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    const ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
+    const RUN: &str = "java/lang/Runnable.run.()V";
+    const SUPPLY: &str = "java/util/function/Supplier.get.()Ljava/lang/Object;";
+    const APPLY: &str = "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
+    const TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // Static factories have no receiver; everything else reads the receiver's value.
+    match name {
+        "of" | "ofNullable" => return Some(optional(rt, a(0))),
+        "empty" => return Some(rt.intern("compat:optional-empty".into(), |rt| optional(rt, V::NULL))),
+        _ => {}
+    }
+    let v = match rt.get_field(a(0), "value") {
+        r @ V::R(n) if n != 0 => r,
+        _ => V::NULL,
+    };
+    let present = v.r() != 0;
+    Some(match name {
+        "isPresent" => V::I(present as i32),
+        "isEmpty" => V::I(!present as i32),
+        "get" | "orElseThrow" => {
+            if !present {
+                // `orElseThrow(Supplier)` throws what the mod's supplier makes.
+                if desc.starts_with("(Ljava/util/function/Supplier;") {
+                    let e = rt.call_functional(SUPPLY, a(1), &[]);
+                    if rt.thrown.is_none() {
+                        rt.thrown = Some(e);
+                    }
+                } else {
+                    rt.throw_new("java/util/NoSuchElementException");
+                }
+                return Some(V::NULL);
+            }
+            v
+        }
+        "orElse" => {
+            if present {
+                v
+            } else {
+                a(1)
+            }
+        }
+        "orElseGet" => {
+            if present {
+                v
+            } else {
+                rt.call_functional(SUPPLY, a(1), &[])
+            }
+        }
+        "ifPresent" => {
+            if present {
+                rt.call_functional(ACCEPT, a(1), &[v]);
+            }
+            V::Void
+        }
+        "ifPresentOrElse" => {
+            if present {
+                rt.call_functional(ACCEPT, a(1), &[v]);
+            } else {
+                rt.call_functional(RUN, a(2), &[]);
+            }
+            V::Void
+        }
+        "map" => {
+            if !present {
+                return Some(a(0));
+            }
+            let r = rt.call_functional(APPLY, a(1), &[v]);
+            optional(rt, r)
+        }
+        "flatMap" => {
+            if !present {
+                return Some(a(0));
+            }
+            rt.call_functional(APPLY, a(1), &[v])
+        }
+        "filter" => {
+            if present && rt.call_functional(TEST, a(1), &[v]).i() != 0 {
+                a(0)
+            } else {
+                optional(rt, V::NULL)
+            }
+        }
+        "or" => {
+            if present {
+                a(0)
+            } else {
+                rt.call_functional(SUPPLY, a(1), &[])
+            }
+        }
+        "stream" => rt.alloc("java/util/stream/Stream", Data::Stream(if present { vec![v] } else { Vec::new() })),
+        "equals" => {
+            let other = match rt.get_field(a(1), "value") {
+                r @ V::R(n) if n != 0 => r,
+                _ => V::NULL,
+            };
+            V::I((rt.class_of(a(1)) == "java/util/Optional" && (v == other || (present && crate::jutil::equals(rt, v, other)))) as i32)
+        }
+        "hashCode" => V::I(if present { crate::jutil::hash(rt, v) } else { 0 }),
+        _ => return None,
+    })
+}
+
 pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
@@ -497,12 +610,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         ("java/lang/Enum", "name" | "toString") => rt.get_field(a(0), "$name"),
         ("java/lang/Enum", "ordinal") => V::I(rt.get_field(a(0), "$ordinal").i()),
-        ("java/util/Optional", "isPresent") => V::I((rt.get_field(a(0), "value").r() != 0) as i32),
-        ("java/util/Optional", "get" | "orElseThrow") => rt.get_field(a(0), "value"),
-        ("java/util/Optional", "orElse") => {
-            let v = rt.get_field(a(0), "value");
-            if v.r() != 0 { v } else { a(1) }
-        }
+        ("java/util/Optional", _) => return optional_call(rt, name, desc, args),
 
         // Directions and axes
         ("net/minecraft/core/Direction", "getAxisDirection") => {
@@ -1031,6 +1139,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             "(DD)D" => V::D(a(0).d().rem_euclid(a(1).d())),
             _ => return None,
         },
+        // `Math.abs(b - a) < 1.0E-5F`, for floats and doubles alike.
+        ("net/minecraft/util/Mth", "equal") => V::I(if desc == "(FF)Z" { (a(1).f() - a(0).f()).abs() < 1.0e-5 } else { (a(1).d() - a(0).d()).abs() < f64::from(1.0e-5f32) } as i32),
         ("net/minecraft/util/Mth", "sign") => V::I(if a(0).d() > 0.0 { 1 } else if a(0).d() < 0.0 { -1 } else { 0 }),
         ("net/minecraft/util/RandomSource", n) => {
             let r = next_random(rt);

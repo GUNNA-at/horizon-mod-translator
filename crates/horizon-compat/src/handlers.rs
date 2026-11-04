@@ -12,6 +12,7 @@ const ITEM_HANDLER: &str = "net/neoforged/neoforge/items/IItemHandler";
 const MODIFIABLE: &str = "net/neoforged/neoforge/items/IItemHandlerModifiable";
 const SERIALIZABLE: &str = "net/neoforged/neoforge/common/util/INBTSerializable";
 const HELPER: &str = "net/neoforged/neoforge/items/ItemHandlerHelper";
+const COMBINED: &str = "net/neoforged/neoforge/items/wrapper/CombinedInvWrapper";
 const NON_NULL_LIST: &str = "net/minecraft/core/NonNullList";
 /// `Item.ABSOLUTE_MAX_STACK_SIZE`.
 const ABSOLUTE_MAX: i32 = 99;
@@ -34,6 +35,20 @@ const GET: (&str, &str) = ("net/neoforged/neoforge/items/IItemHandler.getStackIn
 const INSERT: (&str, &str) = (
     "net/neoforged/neoforge/items/IItemHandler.insertItem.(ILnet/minecraft/world/item/ItemStack;Z)Lnet/minecraft/world/item/ItemStack;",
     "insertItem.(ILnet/minecraft/world/item/ItemStack;Z)Lnet/minecraft/world/item/ItemStack;",
+);
+
+const EXTRACT: (&str, &str) = (
+    "net/neoforged/neoforge/items/IItemHandler.extractItem.(IIZ)Lnet/minecraft/world/item/ItemStack;",
+    "extractItem.(IIZ)Lnet/minecraft/world/item/ItemStack;",
+);
+const ANY_SLOT_LIMIT: (&str, &str) = ("net/neoforged/neoforge/items/IItemHandler.getSlotLimit.(I)I", "getSlotLimit.(I)I");
+const ANY_IS_VALID: (&str, &str) = (
+    "net/neoforged/neoforge/items/IItemHandler.isItemValid.(ILnet/minecraft/world/item/ItemStack;)Z",
+    "isItemValid.(ILnet/minecraft/world/item/ItemStack;)Z",
+);
+const ANY_SET: (&str, &str) = (
+    "net/neoforged/neoforge/items/IItemHandlerModifiable.setStackInSlot.(ILnet/minecraft/world/item/ItemStack;)V",
+    "setStackInSlot.(ILnet/minecraft/world/item/ItemStack;)V",
 );
 
 /// A method that may be the mod's own: its override, else the API's.
@@ -305,6 +320,56 @@ fn insert_stacked(rt: &mut Rt, dest: V, mut stack: V, simulate: bool) -> V {
     stack
 }
 
+/// `CombinedInvWrapper`: several handlers seen as one, their slots one after another. Its fields
+/// are NeoForge's (`itemHandler`, `baseIndex`: where each handler's slots end, `slotCount`), counted
+/// once when it's made, as NeoForge counts them.
+fn combined_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let w = a(0);
+    if name == "<init>" {
+        let handlers = jutil::elements(rt, a(1));
+        let mut ends = Vec::with_capacity(handlers.len());
+        let mut index = 0;
+        for &h in &handlers {
+            index += virt(rt, SLOTS, &[h]).i();
+            ends.push(V::I(index));
+        }
+        let base = rt.alloc("[I", Data::Array(ends));
+        rt.put_field(w, "itemHandler", a(1));
+        rt.put_field(w, "baseIndex", base);
+        rt.put_field(w, "slotCount", V::I(index));
+        return Some(V::Void);
+    }
+    if name == "getSlots" {
+        return Some(V::I(rt.get_field(w, "slotCount").i()));
+    }
+    // `getIndexForSlot`, `getHandlerFromIndex`, `getSlotFromIndex`: the handler and its own slot;
+    // none for a slot outside them all (NeoForge's empty handler answers then).
+    let slot = a(1).i();
+    let ends: Vec<i32> = jutil::elements(rt, rt.get_field(w, "baseIndex")).iter().map(|e| e.i()).collect();
+    let handlers = jutil::elements(rt, rt.get_field(w, "itemHandler"));
+    let index = if slot < 0 { None } else { ends.iter().position(|&end| slot < end) };
+    let target = index.and_then(|i| handlers.get(i).copied().map(|h| (h, if i == 0 { slot } else { slot - ends[i - 1] })));
+    Some(match (name, target) {
+        ("getStackInSlot", Some((h, s))) => virt(rt, GET, &[h, V::I(s)]),
+        ("getStackInSlot", None) => empty(rt),
+        ("setStackInSlot", Some((h, s))) => {
+            virt(rt, ANY_SET, &[h, V::I(s), a(2)]);
+            V::Void
+        }
+        ("setStackInSlot", None) => V::Void,
+        ("insertItem", Some((h, s))) => virt(rt, INSERT, &[h, V::I(s), a(2), a(3)]),
+        ("insertItem", None) => a(2),
+        ("extractItem", Some((h, s))) => virt(rt, EXTRACT, &[h, V::I(s), a(2), a(3)]),
+        ("extractItem", None) => empty(rt),
+        ("getSlotLimit", Some((h, s))) => virt(rt, ANY_SLOT_LIMIT, &[h, V::I(s)]),
+        ("getSlotLimit", None) => V::I(0),
+        ("isItemValid", Some((h, s))) => virt(rt, ANY_IS_VALID, &[h, V::I(s), a(2)]),
+        ("isItemValid", None) => V::I(0),
+        _ => return None,
+    })
+}
+
 /// [`call`] by the call's key (`owner.name.desc`).
 pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, rest) = key.split_once('.')?;
@@ -329,6 +394,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             _ => return None,
         }),
         HANDLER => handler_call(rt, name, desc, args),
+        COMBINED => combined_call(rt, name, args),
+        ITEM_HANDLER | MODIFIABLE if !args.is_empty() && rt.instance_of(a(0), COMBINED) => combined_call(rt, name, args),
         ITEM_HANDLER | MODIFIABLE | SERIALIZABLE if !args.is_empty() && rt.instance_of(a(0), HANDLER) => handler_call(rt, name, desc, args),
         _ => None,
     }

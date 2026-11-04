@@ -224,6 +224,41 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             d[native(rt, a(1))[0].clamp(0, 2) as usize] = 1;
             offset(rt, a(0), d, a(2).i() as i64)
         }
+        // Every position in a box, x fastest, then y, then z, as vanilla's iterator walks it: an
+        // `Iterable` (a list) or a `Stream`. Vanilla hands out one mutable cursor; these are
+        // separate positions, which a mod that calls `immutable()` can't tell apart.
+        k if k.starts_with("net/minecraft/core/BlockPos.betweenClosed") => {
+            let corners = match &k[k.find(".(").map_or(0, |i| i + 1)..] {
+                d if d.starts_with("(IIIIII)") => [a(0).i(), a(1).i(), a(2).i(), a(3).i(), a(4).i(), a(5).i()],
+                d if d.starts_with("(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)") => {
+                    let (p, q) = (native(rt, a(0)), native(rt, a(1)));
+                    [p[0].min(q[0]), p[1].min(q[1]), p[2].min(q[2]), p[0].max(q[0]), p[1].max(q[1]), p[2].max(q[2])].map(|c| c as i32)
+                }
+                d if d.starts_with("(Lnet/minecraft/world/phys/AABB;)") => {
+                    let b = crate::shapes::aabb_of(rt, a(0));
+                    b.map(|c| c.floor() as i32)
+                }
+                _ => {
+                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    return V::NULL;
+                }
+            };
+            let [x0, y0, z0, x1, y1, z1] = corners;
+            let (w, h, d) = ((x1 - x0 + 1).max(0) as i64, (y1 - y0 + 1).max(0) as i64, (z1 - z0 + 1).max(0) as i64);
+            // A box bigger than a few chunks is a mod's mistake or a scan the game can't afford here.
+            let n = (w * h * d).min(1 << 20);
+            let mut out = Vec::with_capacity(n as usize);
+            for i in 0..n {
+                let (x, rest) = (i % w, i / w);
+                let (y, z) = (rest % h, rest / h);
+                out.push(block_pos(rt, x0 as i64 + x, y0 as i64 + y, z0 as i64 + z));
+            }
+            if k.contains("Stream") {
+                rt.alloc("java/util/stream/Stream", Data::Stream(out))
+            } else {
+                crate::jutil::new_list(rt, out)
+            }
+        }
         "net/minecraft/core/Vec3i.distManhattan.(Lnet/minecraft/core/Vec3i;)I" | "net/minecraft/core/BlockPos.distManhattan.(Lnet/minecraft/core/Vec3i;)I" => {
             let (p, q) = (native(rt, a(0)), native(rt, a(1)));
             V::I(((p[0] - q[0]).abs() + (p[1] - q[1]).abs() + (p[2] - q[2]).abs()) as i32)
@@ -312,6 +347,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             }
         }
         _ => match crate::fluids::call(rt, key, args)
+            .or_else(|| crate::tanks::call_key(rt, key, args))
             .or_else(|| crate::codecs::call(rt, key, args))
             .or_else(|| crate::recipes::call(rt, key, args))
             .or_else(|| crate::handlers::call_key(rt, key, args))
@@ -729,6 +765,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::blocks::get_static(rt, o, f))
             .or_else(|| crate::shapes::get_static(rt, o, f))
             .or_else(|| crate::fluids::get_static(rt, o, f))
+            .or_else(|| crate::tanks::get_static(rt, o, f))
             .or_else(|| crate::creative::get_static(rt, o, f))
             .or_else(|| crate::codecs::get_static(rt, o, f))
             .or_else(|| crate::recipes::get_static(rt, o, f))

@@ -142,6 +142,9 @@ pub struct Rt {
     pub suppliers: Vec<(String, String, V)>,
     /// The mod's namespace (its mod id), for names registered without one.
     pub namespace: String,
+    /// The mods FML would list (`ModList.isLoaded`): the `@Mod`s this engine carries, the jar's
+    /// own and those bundled in it. Set by generated code before the mods are constructed.
+    pub mods: Vec<String>,
     /// Classes whose static initialiser ran.
     pub initialized: std::collections::HashSet<&'static str>,
     /// Values Java compares by identity, one object each (see `api_common`).
@@ -196,6 +199,7 @@ impl Default for Rt {
             registered: HashMap::new(),
             suppliers: Vec::new(),
             namespace: String::new(),
+            mods: Vec::new(),
             initialized: Default::default(),
             interned: HashMap::new(),
             iter_sources: HashMap::new(),

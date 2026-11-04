@@ -478,8 +478,9 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     NeoForge persistent data), `getItem/setItem`, `discard/kill/remove`, motion and position,
     `new ItemEntity(...)` + `addFreshEntity`, `Block.popResource`, `Containers.dropItemStack`. The
     Host gained `item_entities`, `set_item_entity`, `move_item_entity`, `spawn_item_entity`; the game
-    gained `native_move_item_entity`, `native_spawn_item_entity`, `native_game_time`,
-    `native_dimension`, and `NativeItemEntity` carries motion, `on_ground` and age. Contacts: a mod
+    gained `native_move_item_entity`, `native_spawn_item_entity` and `native_game_time` (the hooks
+    name the level with the existing `native_dimension`), and `NativeItemEntity` carries motion,
+    `on_ground` and age. Contacts: a mod
     block with a block entity that overrides `updateEntityAfterFallOn` or `entityInside` is told
     of item entities resting on it or in its cell from its block entity's tick (vanilla's
     `Entity.move` reports them to the block; Create's basin, belt, depot, chute, saw, millstone,
@@ -488,6 +489,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     (a basin's raised floor) would put it on the block itself.
     Also traced (with `HORIZON_COMPAT_TRACE`): the first update tags the server sends and the
     client loads for each block entity, with the items they hold.
+  - [x] 2026-11-04 Fluid tanks, whole `Optional`, combined item handlers, the mod list (`tanks.rs`;
+    tests `tanks::tests`). `FluidTank` natively as NeoForge writes it (`fluid`, `capacity`,
+    `validator` fields; `fill/drain` both forms with `FluidAction.EXECUTE/SIMULATE`,
+    `getFluidInTank/getTankCapacity/getTanks/isFluidValid`, `getSpace`, `readFromNBT/writeToNBT` as
+    `{Fluid: {id, amount}}`), a mod's subclass's `onContentsChanged/isFluidValid` called through its
+    code; calls through `IFluidHandler`/`IFluidTank` on a tank answer too. `java.util.Optional` is
+    whole: `of/ofNullable/empty` made one (they fell to the builder-chain fallback and came back
+    empty), `ifPresent/ifPresentOrElse/map/flatMap/filter/or/orElseGet/stream`, and `get/orElseThrow`
+    on an empty one throw as the JDK does. That strictness showed an unmapped `ModList`: the
+    translator now lists the engine's `@Mod` ids (`Rt::mods`), and `ModList.isLoaded`,
+    `getModContainerById` (catnip's packet registration takes the mod bus from it) and
+    `ModContainer.getModId/getEventBus` answer from it. Also `CombinedInvWrapper` (a basin's input and
+    output as one handler), `Mth.equal`, `ItemStack.isComponentsPatchEmpty`,
+    `BlockPos.betweenClosed/betweenClosedStream` (x fastest, as vanilla walks it). Found from the
+    mixer harness (`MIX`): Create's basin takes items through `withBlockEntityDo` →
+    `getBlockEntityOptional(...).ifPresent(...)`, which did nothing.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -416,6 +416,10 @@ impl<'a> Program<'a> {
         // FML constructs each `@Mod` class with the mod bus and registers its `@EventBusSubscriber`
         // classes, then fires the registration events.
         let mains = self.mod_mains();
+        let ids: Vec<String> = mains.iter().filter_map(|(c, _)| c.annotation_of(MOD).and_then(|a| a.value("value")).map(str::to_owned)).collect();
+        if !ids.is_empty() {
+            let _ = writeln!(out, "    rt.mods = vec![{}];", ids.iter().map(|i| format!("{i:?}.into()")).collect::<Vec<_>>().join(", "));
+        }
         for (main, ctor) in &mains {
             let params = crate::class::param_classes(&ctor.desc);
             let _ = writeln!(out, "    {{\n        let this = rt.new_object_id({:?}, {});", main.name, self.cid(&main.name));

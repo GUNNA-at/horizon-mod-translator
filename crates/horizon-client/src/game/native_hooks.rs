@@ -4024,11 +4024,6 @@ impl Game<'_> {
     pub(super) fn native_game_time(&self) -> i64 {
         self.world.game_time
     }
-    /// The id of the level in place (`minecraft:overworld`), as the entity
-    /// hooks name it. API @API:native_item_entity_motion@.
-    pub(super) fn native_dimension(&self) -> &'static str {
-        self.dim.id()
-    }
     /// Sets property `key` of the block at `pos` to `value`, as a furnace's
     /// tick sets its `lit` (`Level.setBlock` with `UPDATE_ALL`: neighbours
     /// and clients are told); true when the block changed, false when the

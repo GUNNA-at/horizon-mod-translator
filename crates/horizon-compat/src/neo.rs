@@ -554,6 +554,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
         }
         ("net/neoforged/fml/ModContainer", "registerConfig" | "registerExtensionPoint") => V::Void,
+        // The mods this engine carries, as FML lists them: the jar's own and those bundled in it.
+        ("net/neoforged/fml/ModList", "get") => rt.intern("compat:mod-list".into(), |rt| rt.new_object("net/neoforged/fml/ModList")),
+        ("net/neoforged/fml/ModList", "isLoaded") => {
+            let id = rt.str_of(a(1)).unwrap_or("").to_owned();
+            V::I(mod_loaded(rt, &id) as i32)
+        }
+        ("net/neoforged/fml/ModList", "getModContainerById") => {
+            let id = rt.str_of(a(1)).unwrap_or("").to_owned();
+            let c = if mod_loaded(rt, &id) { mod_container(rt, &id) } else { V::NULL };
+            crate::api_common::optional(rt, c)
+        }
+        ("net/neoforged/fml/ModList", "size") => V::I(loaded_mods(rt).len() as i32),
+        ("net/neoforged/fml/ModContainer", "getModId" | "getNamespace") => rt.get_field(a(0), "$modId"),
+        // Events route by class, so every handle on the mod bus is the same bus.
+        ("net/neoforged/fml/ModContainer", "getEventBus") => rt.new_object("net/neoforged/bus/api/IEventBus"),
         // A setup event's deferred work runs at once (one thread here), and its future is done.
         (o, "enqueueWork") if o.starts_with("net/neoforged/fml/event/lifecycle/") => {
             let value = if desc.starts_with("(Ljava/lang/Runnable;") {
@@ -628,6 +643,26 @@ fn desc_params(desc: &str) -> Vec<String> {
         out.push(std::mem::take(&mut cur));
     }
     out
+}
+
+/// The mod ids FML would list for this engine: its `@Mod`s (or, from an engine translated before
+/// they were listed, the jar's own namespace).
+fn loaded_mods(rt: &Rt) -> Vec<String> {
+    if rt.mods.is_empty() && !rt.namespace.is_empty() { vec![rt.namespace.clone()] } else { rt.mods.clone() }
+}
+
+fn mod_loaded(rt: &Rt, id: &str) -> bool {
+    !id.is_empty() && loaded_mods(rt).iter().any(|m| m == id)
+}
+
+/// The mod's container, one per id.
+fn mod_container(rt: &mut Rt, id: &str) -> V {
+    rt.intern(format!("compat:mod-container/{id}"), |rt| {
+        let c = rt.new_object("net/neoforged/fml/ModContainer");
+        let s = rt.string(id);
+        rt.put_field(c, "$modId", s);
+        c
+    })
 }
 
 /// Loading objects a mod's constructor takes: the event bus, its container, the side.
