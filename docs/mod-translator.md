@@ -1729,6 +1729,10 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     - NeoForge's public `BlockTags.create`/`ItemTags.create` (FarmersDelight's 48 calls),
       `FMLEnvironment.production` (FramedBlocks' 527: a player's game is FML's production),
       `FeatureFlags.VANILLA_SET`/`DEFAULT_FLAGS`.
+    - Loot codecs' shared starts: `LootItemConditionalFunction.commonFields(instance)` (5 of the
+      28 mods) is the group of an optional `conditions` list (empty by default), NeoForge's
+      `LootModifier.codecStart` a required one. Loot conditions themselves aren't modelled: a list
+      of them fails to read. Test `codecs::tests::a_loot_functions_shared_fields_read_as_vanillas`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

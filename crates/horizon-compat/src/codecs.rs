@@ -921,6 +921,8 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || matches!(name, "byNameCodec" | "holderByNameCodec" | "createSerializationContext")
         || (matches!(name, "simpleCodec" | "propertiesCodec") && owner.starts_with("net/minecraft/world/level/block/"))
         || (matches!(owner, "net/minecraft/tags/TagKey" | "net/minecraft/resources/ResourceKey") && matches!(name, "codec" | "hashedCodec"))
+        || (name == "commonFields" && owner.starts_with("net/minecraft/world/level/storage/loot/functions/"))
+        || (name == "codecStart" && owner.starts_with("net/neoforged/neoforge/common/loot/"))
         || RECEIVER_METHODS.contains(&name)
 }
 
@@ -973,6 +975,29 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // only a block-type registry reads.
         (o, "simpleCodec") if o.starts_with("net/minecraft/world/level/block/") && desc == "(Ljava/util/function/Function;)Lcom/mojang/serialization/MapCodec;" => {
             return Some(codec(rt, "compat:codec/block", vec![a(0)]));
+        }
+        // A loot function's shared fields (`LootItemConditionalFunction.commonFields(instance)`): the
+        // group of `conditions`, an optional list of loot conditions (none by default), read from
+        // the function's `predicates`. NeoForge's loot modifiers start with a required `conditions`
+        // (`LootModifier.codecStart`). Loot conditions themselves aren't modelled: a list of them
+        // fails to read, an absent or empty one reads.
+        (o, "commonFields") if o.starts_with("net/minecraft/world/level/storage/loot/functions/") && desc.starts_with("(Lcom/mojang/serialization/codecs/RecordCodecBuilder$Instance;)") => {
+            let condition = native(rt, "unmodelled/net/minecraft/world/level/storage/loot/predicates/LootItemCondition.DIRECT_CODEC");
+            let list = codec(rt, "compat:codec/list", vec![condition]);
+            let (name, none) = (rt.string("conditions"), jutil::new_list(rt, Vec::new()));
+            let field = codec(rt, "compat:codec/optional", vec![name, list, none, V::I(1), V::I(0)]);
+            let getter = crate::functions::component(rt, "predicates");
+            let app = codec(rt, "compat:codec/getter", vec![field, getter]);
+            return Some(codec(rt, "compat:codec/products", vec![app]));
+        }
+        (o, "codecStart") if o.starts_with("net/neoforged/neoforge/common/loot/") && desc.starts_with("(Lcom/mojang/serialization/codecs/RecordCodecBuilder$Instance;)") => {
+            let condition = native(rt, "unmodelled/net/minecraft/world/level/storage/loot/predicates/LootItemCondition.DIRECT_CODEC");
+            let list = codec(rt, "compat:codec/list", vec![condition]);
+            let name = rt.string("conditions");
+            let field = codec(rt, "compat:codec/field", vec![name, list]);
+            let getter = crate::functions::component(rt, "conditions");
+            let app = codec(rt, "compat:codec/getter", vec![field, getter]);
+            return Some(codec(rt, "compat:codec/products", vec![app]));
         }
         // `RecordCodecBuilder.of(getter, mapCodec)`: a field.
         ("com/mojang/serialization/codecs/RecordCodecBuilder", "of") => return Some(codec(rt, "compat:codec/getter", vec![a(1), a(0)])),
@@ -1311,6 +1336,36 @@ mod tests {
 
     /// Vanilla's value codecs write what 1.21.1 writes (`Vec3` three doubles, a UUID four ints, a
     /// rotation its serialized name) and read it back.
+    /// A mod's loot function codec: `RecordCodecBuilder.mapCodec(i -> commonFields(i).and(INT.fieldOf("count")
+    /// ...).apply(i, ctor))`. Its `conditions` are optional: a function written without them reads,
+    /// with an empty list for the constructor, as vanilla's does.
+    #[test]
+    fn a_loot_functions_shared_fields_read_as_vanillas() {
+        let mut rt = Rt::new();
+        crate::install();
+        let instance = rt.intern("compat:codec/instance".into(), |rt| codec(rt, "compat:codec/instance", vec![]));
+        let common = crate::api::call(
+            &mut rt,
+            "net/minecraft/world/level/storage/loot/functions/LootItemConditionalFunction.commonFields.(Lcom/mojang/serialization/codecs/RecordCodecBuilder$Instance;)Lcom/mojang/datafixers/Products$P1;",
+            &[instance],
+        );
+        assert!(is_codec(&rt, common) && kind(&rt, common) == "products");
+        let int = crate::api::get_static(&mut rt, "com/mojang/serialization/Codec.INT");
+        let count = rt.string("count");
+        let count = crate::api::call(&mut rt, "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[int, count]);
+        let count = crate::api::call(&mut rt, "com/mojang/serialization/MapCodec.forGetter.(Ljava/util/function/Function;)Lcom/mojang/serialization/codecs/RecordCodecBuilder;", &[count, V::NULL]);
+        let both = crate::api::call(&mut rt, "com/mojang/datafixers/Products$P1.and.(Lcom/mojang/datafixers/kinds/App;)Lcom/mojang/datafixers/Products$P2;", &[common, count]);
+        assert_eq!(rt.captured(both).len(), 2, "conditions, then count");
+        let fields = rt.captured(both);
+        let j: Json = serde_json::from_str(r#"{"count": 3}"#).unwrap();
+        let Json::Object(o) = &j else { unreachable!() };
+        let conditions = app_value(&mut rt, fields[0], o).unwrap();
+        assert_eq!(jutil::elements(&rt, conditions).len(), 0, "no conditions: the empty list");
+        let n = app_value(&mut rt, fields[1], o).unwrap();
+        assert_eq!(rt.get_field(n, "value"), V::I(3));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `GlobalPos.CODEC` reads and writes `{dimension, pos}`, the position as three ints, as vanilla's
     /// record codec does.
     #[test]
