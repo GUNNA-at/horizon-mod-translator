@@ -127,42 +127,92 @@ fn vanilla_property_object(rt: &mut Rt, field: &str) -> Option<V> {
     }))
 }
 
-/// The `BlockStateProperties` field that vanilla block class `class`'s property field `field` holds:
-/// most keep the name (`DoorBlock.OPEN` is `OPEN`); these don't.
+/// The `BlockStateProperties` field that vanilla block class `class`'s property field `field` holds,
+/// its own or inherited: most keep the name (`DoorBlock.OPEN` is `OPEN`); these don't. Read from
+/// 26.3's block classes (`LayeredCauldronBlock.LEVEL` is `LEVEL_CAULDRON`, 1 to 3).
 fn block_class_property<'a>(class: &str, field: &'a str) -> &'a str {
     let simple = class.rsplit('/').next().unwrap_or(class);
     // Classes whose `FACING` is `HORIZONTAL_FACING` (`DirectionalBlock`'s and the rest are `FACING`).
-    const HORIZONTAL: [&str; 33] = [
-        "HorizontalDirectionalBlock", "FaceAttachedHorizontalDirectionalBlock", "LeverBlock", "ButtonBlock",
-        "GrindstoneBlock", "BellBlock", "ChestBlock", "EnderChestBlock", "TrappedChestBlock", "LadderBlock",
-        "TrapDoorBlock", "DoorBlock", "StairBlock", "FenceGateBlock", "AbstractFurnaceBlock", "FurnaceBlock",
-        "BlastFurnaceBlock", "SmokerBlock", "CampfireBlock", "LecternBlock", "BedBlock", "AnvilBlock",
-        "WallSignBlock", "WallBannerBlock", "StonecutterBlock", "LoomBlock", "BeehiveBlock", "DiodeBlock",
-        "RepeaterBlock", "ComparatorBlock", "CocoaBlock", "CarvedPumpkinBlock", "WallTorchBlock",
+    const HORIZONTAL: [&str; 65] = [
+        "AbstractBedBlock", "AbstractFurnaceBlock", "AnvilBlock", "AttachedStemBlock", "BaseCoralWallFanBlock", "BedBlock",
+        "BeehiveBlock", "BellBlock", "BigDripleafBlock", "BigDripleafStemBlock", "BlastFurnaceBlock", "ButtonBlock",
+        "CalibratedSculkSensorBlock", "CampfireBlock", "CarvedPumpkinBlock", "ChestBlock", "ChiseledBookShelfBlock", "CocoaBlock",
+        "ComparatorBlock", "CopperChestBlock", "CopperGolemStatueBlock", "CoralWallFanBlock", "DiodeBlock", "DoorBlock",
+        "DriedGhastBlock", "EndPortalFrameBlock", "EnderChestBlock", "FaceAttachedHorizontalDirectionalBlock", "FenceGateBlock",
+        "FlowerBedBlock", "FurnaceBlock", "GlazedTerracottaBlock", "GrindstoneBlock", "HorizontalDirectionalBlock", "LadderBlock",
+        "LeafLitterBlock", "LecternBlock", "LeverBlock", "LoomBlock", "PiglinWallSkullBlock", "PlayerWallHeadBlock",
+        "RedstoneWallTorchBlock", "RepeaterBlock", "ShelfBlock", "ShelfMushroomBlock", "SmallDripleafBlock", "SmokerBlock",
+        "StairBlock", "StonecutterBlock", "StrawBedBlock", "TrapDoorBlock", "TrappedChestBlock", "TripWireHookBlock",
+        "VaultBlock", "WallBannerBlock", "WallHangingSignBlock", "WallSignBlock", "WallSkullBlock", "WallTorchBlock",
+        "WeatheringCopperChestBlock", "WeatheringCopperDoorBlock", "WeatheringCopperGolemStatueBlock",
+        "WeatheringCopperStairBlock", "WeatheringCopperTrapDoorBlock", "WitherWallSkullBlock",
     ];
+    const DRIPSTONE: [&str; 3] = ["PointedDripstoneBlock", "SpeleothemBlock", "SulfurSpikeBlock"];
     match (simple, field) {
-        ("SlabBlock", "TYPE") => "SLAB_TYPE",
-        ("ChestBlock" | "TrappedChestBlock", "TYPE") => "CHEST_TYPE",
-        ("DoorBlock" | "DoublePlantBlock" | "TallFlowerBlock" | "SmallDripleafBlock", "HALF") => "DOUBLE_BLOCK_HALF",
-        ("DoorBlock", "HINGE") => "DOOR_HINGE",
-        ("StairBlock", "SHAPE") => "STAIRS_SHAPE",
-        ("FaceAttachedHorizontalDirectionalBlock" | "LeverBlock" | "ButtonBlock" | "GrindstoneBlock", "FACE") => "ATTACH_FACE",
-        ("CropBlock" | "StemBlock", "AGE") => "AGE_7",
-        ("BeetrootBlock" | "NetherWartBlock" | "SweetBerryBushBlock", "AGE") => "AGE_3",
+        ("BambooStalkBlock" | "ShelfMushroomBlock" | "TorchflowerCropBlock", "AGE") => "AGE_1",
         ("CocoaBlock", "AGE") => "AGE_2",
-        ("CactusBlock" | "SugarCaneBlock" | "FireBlock", "AGE") => "AGE_15",
-        ("BeehiveBlock", "HONEY_LEVEL") => "LEVEL_HONEY",
-        ("RedStoneWireBlock", "NORTH") => "NORTH_REDSTONE",
-        ("RedStoneWireBlock", "EAST") => "EAST_REDSTONE",
-        ("RedStoneWireBlock", "SOUTH") => "SOUTH_REDSTONE",
-        ("RedStoneWireBlock", "WEST") => "WEST_REDSTONE",
-        ("ComparatorBlock", "MODE") => "MODE_COMPARATOR",
+        ("BeetrootBlock" | "FrostedIceBlock" | "NetherWartBlock" | "SweetBerryBushBlock", "AGE") => "AGE_3",
+        ("MangrovePropaguleBlock" | "PitcherCropBlock", "AGE") => "AGE_4",
+        ("ChorusFlowerBlock", "AGE") => "AGE_5",
+        ("CarrotBlock" | "CropBlock" | "PotatoBlock" | "StemBlock", "AGE") => "AGE_7",
+        ("CactusBlock" | "FireBlock" | "SugarCaneBlock", "AGE") => "AGE_15",
+        ("CaveVinesBlock" | "GrowingPlantHeadBlock" | "KelpBlock" | "TwistingVinesBlock" | "WeepingVinesBlock", "AGE") => "AGE_25",
+        ("FlowerBedBlock", "AMOUNT") => "FLOWER_AMOUNT",
+        ("SegmentableBlock", "AMOUNT") => "SEGMENT_AMOUNT",
         ("BellBlock", "ATTACHMENT") => "BELL_ATTACHMENT",
-        ("BedBlock", "PART") => "BED_PART",
-        ("PistonBaseBlock" | "PistonHeadBlock" | "MovingPistonBlock", "TYPE") => "PISTON_TYPE",
-        ("WallBlock", "NORTH_WALL" | "EAST_WALL" | "SOUTH_WALL" | "WEST_WALL") => field,
-        ("BigDripleafBlock", "TILT") => "TILT",
+        ("NetherPortalBlock", "AXIS") => "HORIZONTAL_AXIS",
+        ("MossyCarpetBlock", "BASE") => "BOTTOM",
+        ("RespawnAnchorBlock", "CHARGE") => "RESPAWN_ANCHOR_CHARGES",
+        ("ScaffoldingBlock", "DISTANCE") => "STABILITY_DISTANCE",
+        ("BubbleColumnBlock", "DRAG_DOWN") => "DRAG",
+        ("RedstoneWireBlock", "NORTH") => "NORTH_REDSTONE",
+        ("RedstoneWireBlock", "EAST") => "EAST_REDSTONE",
+        ("RedstoneWireBlock", "SOUTH") => "SOUTH_REDSTONE",
+        ("RedstoneWireBlock", "WEST") => "WEST_REDSTONE",
+        ("MossyCarpetBlock" | "WallBlock", "NORTH") => "NORTH_WALL",
+        ("MossyCarpetBlock" | "WallBlock", "EAST") => "EAST_WALL",
+        ("MossyCarpetBlock" | "WallBlock", "SOUTH") => "SOUTH_WALL",
+        ("MossyCarpetBlock" | "WallBlock", "WEST") => "WEST_WALL",
+        ("ButtonBlock" | "FaceAttachedHorizontalDirectionalBlock" | "GrindstoneBlock" | "LeverBlock", "FACE") => "ATTACH_FACE",
+        ("HopperBlock", "FACING") => "FACING_HOPPER",
         (s, "FACING") if HORIZONTAL.contains(&s) => "HORIZONTAL_FACING",
+        (
+            "DoorBlock" | "DoublePlantBlock" | "PitcherCropBlock" | "SmallDripleafBlock" | "TallFlowerBlock" | "TallSeagrassBlock"
+            | "WeatheringCopperDoorBlock",
+            "HALF",
+        ) => "DOUBLE_BLOCK_HALF",
+        ("EndPortalFrameBlock", "HAS_EYE") => "EYE",
+        ("DoorBlock" | "WeatheringCopperDoorBlock", "HINGE") => "DOOR_HINGE",
+        ("BeehiveBlock", "HONEY_LEVEL") => "LEVEL_HONEY",
+        ("DriedGhastBlock", "HYDRATION_LEVEL") => "DRIED_GHAST_HYDRATION_LEVELS",
+        ("NoteBlock", "INSTRUMENT") => "NOTEBLOCK_INSTRUMENT",
+        ("BambooStalkBlock", "LEAVES") => "BAMBOO_LEAVES",
+        ("LayeredCauldronBlock", "LEVEL") => "LEVEL_CAULDRON",
+        ("ComposterBlock", "LEVEL") => "LEVEL_COMPOSTER",
+        ("ComparatorBlock", "MODE") => "MODE_COMPARATOR",
+        ("StructureBlock", "MODE") => "STRUCTUREBLOCK_MODE",
+        ("TestBlock", "MODE") => "TEST_BLOCK_MODE",
+        ("TargetBlock", "OUTPUT_POWER") => "POWER",
+        ("AbstractBedBlock" | "BedBlock" | "StrawBedBlock", "PART") => "BED_PART",
+        ("CalibratedSculkSensorBlock" | "SculkSensorBlock", "PHASE") => "SCULK_SENSOR_PHASE",
+        ("CopperGolemStatueBlock" | "WeatheringCopperGolemStatueBlock", "POSE") => "COPPER_GOLEM_POSE",
+        ("SculkCatalystBlock", "PULSE") => "BLOOM",
+        (
+            "BannerBlock" | "CeilingHangingSignBlock" | "PlayerHeadBlock" | "SkullBlock" | "StandingSignBlock" | "WitherSkullBlock",
+            "ROTATION",
+        ) => "ROTATION_16",
+        ("RailBlock", "SHAPE") => "RAIL_SHAPE",
+        ("DetectorRailBlock" | "PoweredRailBlock", "SHAPE") => "RAIL_SHAPE_STRAIGHT",
+        ("StairBlock" | "WeatheringCopperStairBlock", "SHAPE") => "STAIRS_SHAPE",
+        ("CreakingHeartBlock", "STATE") => "CREAKING_HEART_STATE",
+        ("PotentSulfurBlock", "STATE") => "POTENT_SULFUR_STATE",
+        ("TrialSpawnerBlock", "STATE") => "TRIAL_SPAWNER_STATE",
+        ("VaultBlock", "STATE") => "VAULT_STATE",
+        (s, "THICKNESS") if DRIPSTONE.contains(&s) => "SPELEOTHEM_THICKNESS",
+        (s, "TIP_DIRECTION") if DRIPSTONE.contains(&s) => "VERTICAL_DIRECTION",
+        ("ChestBlock" | "CopperChestBlock" | "TrappedChestBlock" | "WeatheringCopperChestBlock", "TYPE") => "CHEST_TYPE",
+        ("MovingPistonBlock" | "PistonHeadBlock", "TYPE") => "PISTON_TYPE",
+        ("SlabBlock" | "WeatheringCopperSlabBlock", "TYPE") => "SLAB_TYPE",
         _ => field,
     }
 }
@@ -175,9 +225,11 @@ fn state_property_field(f: &str) -> bool {
             f,
             "HALF" | "DOUBLE_BLOCK_HALF" | "DOOR_HINGE" | "SLAB_TYPE" | "CHEST_TYPE" | "PISTON_TYPE" | "STAIRS_SHAPE"
                 | "RAIL_SHAPE" | "RAIL_SHAPE_STRAIGHT" | "ATTACH_FACE" | "BED_PART" | "MODE_COMPARATOR"
-                | "STRUCTUREBLOCK_MODE" | "BELL_ATTACHMENT" | "NOTEBLOCK_INSTRUMENT" | "DRIPSTONE_THICKNESS"
+                | "STRUCTUREBLOCK_MODE" | "BELL_ATTACHMENT" | "NOTEBLOCK_INSTRUMENT" | "SPELEOTHEM_THICKNESS"
                 | "BAMBOO_LEAVES" | "NORTH_WALL" | "EAST_WALL" | "SOUTH_WALL" | "WEST_WALL" | "NORTH_REDSTONE"
                 | "EAST_REDSTONE" | "SOUTH_REDSTONE" | "WEST_REDSTONE" | "SCULK_SENSOR_PHASE" | "TILT" | "ORIENTATION"
+                | "SIDE_CHAIN_PART" | "TRIAL_SPAWNER_STATE" | "VAULT_STATE" | "CREAKING_HEART_STATE" | "TEST_BLOCK_MODE"
+                | "COPPER_GOLEM_POSE" | "POTENT_SULFUR_STATE"
         )
 }
 
@@ -215,12 +267,14 @@ pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
         | "LEVEL_CAULDRON" | "LEVEL_COMPOSTER" | "LEVEL_FLOWING" | "LEVEL_HONEY" | "DISTANCE" | "MOISTURE"
         | "ROTATION_16" | "STAGE" | "DELAY" | "NOTE" | "LAYERS" | "BITES" | "PICKLES" | "EGGS" | "HATCH"
         | "CANDLES" | "RESPAWN_ANCHOR_CHARGES" | "STABILITY_DISTANCE" | "DUSTED" | "FLOWER_AMOUNT"
-        | "SEGMENT_AMOUNT" => "int",
+        | "SEGMENT_AMOUNT" | "DRIED_GHAST_HYDRATION_LEVELS" => "int",
         "WATERLOGGED" | "POWERED" | "LIT" | "OPEN" | "OCCUPIED" | "ATTACHED" | "DISARMED" | "EXTENDED"
         | "ENABLED" | "HANGING" | "PERSISTENT" | "SNOWY" | "TRIGGERED" | "UNSTABLE" | "UP" | "DOWN" | "NORTH"
         | "SOUTH" | "EAST" | "WEST" | "BOTTOM" | "CONDITIONAL" | "DRAG" | "HAS_BOOK" | "IN_WALL" | "LOCKED"
         | "SHORT" | "SIGNAL_FIRE" | "INVERTED" | "BERRIES" | "BLOOM" | "SHRIEKING" | "CAN_SUMMON" | "CRACKED"
-        | "NATURAL" | "OMINOUS" | "TIP" | "EYE" | "HAS_RECORD" | "IN_WATER" | "ENABLED_POWER" => "bool",
+        | "NATURAL" | "OMINOUS" | "TIP" | "EYE" | "HAS_RECORD" | "IN_WATER" | "ENABLED_POWER" | "FALLING" | "HAS_BOTTLE_0"
+        | "HAS_BOTTLE_1" | "HAS_BOTTLE_2" | "SLOT_0_OCCUPIED" | "SLOT_1_OCCUPIED" | "SLOT_2_OCCUPIED" | "SLOT_3_OCCUPIED"
+        | "SLOT_4_OCCUPIED" | "SLOT_5_OCCUPIED" | "CRAFTING" | "MAP" => "bool",
         _ => "string",
     };
     // The property's own name where it isn't the field's (`DOOR_HINGE` is `hinge`).
@@ -231,10 +285,13 @@ pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
         "STAIRS_SHAPE" | "RAIL_SHAPE" | "RAIL_SHAPE_STRAIGHT" => "shape".to_owned(),
         "ATTACH_FACE" => "face".to_owned(),
         "BED_PART" => "part".to_owned(),
-        "MODE_COMPARATOR" | "STRUCTUREBLOCK_MODE" => "mode".to_owned(),
+        "MODE_COMPARATOR" | "STRUCTUREBLOCK_MODE" | "TEST_BLOCK_MODE" => "mode".to_owned(),
         "BELL_ATTACHMENT" => "attachment".to_owned(),
         "NOTEBLOCK_INSTRUMENT" => "instrument".to_owned(),
-        "DRIPSTONE_THICKNESS" => "thickness".to_owned(),
+        "SPELEOTHEM_THICKNESS" => "thickness".to_owned(),
+        "SIDE_CHAIN_PART" => "side_chain".to_owned(),
+        "DRIED_GHAST_HYDRATION_LEVELS" => "hydration".to_owned(),
+        "LEVEL_HONEY" => "honey_level".to_owned(),
         "BAMBOO_LEAVES" => "leaves".to_owned(),
         "NORTH_WALL" | "NORTH_REDSTONE" => "north".to_owned(),
         "EAST_WALL" | "EAST_REDSTONE" => "east".to_owned(),
@@ -244,7 +301,7 @@ pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
         "HORIZONTAL_AXIS" => "axis".to_owned(),
         "VERTICAL_DIRECTION" => "vertical_direction".to_owned(),
         f if f.starts_with("AGE_") => "age".to_owned(),
-        "LEVEL_CAULDRON" | "LEVEL_COMPOSTER" | "LEVEL_FLOWING" | "LEVEL_HONEY" => "level".to_owned(),
+        "LEVEL_CAULDRON" | "LEVEL_COMPOSTER" | "LEVEL_FLOWING" => "level".to_owned(),
         "ROTATION_16" => "rotation".to_owned(),
         "RESPAWN_ANCHOR_CHARGES" => "charges".to_owned(),
         "STABILITY_DISTANCE" => "distance".to_owned(),
@@ -604,6 +661,13 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             p
         }
         (_, "getName") if owner.starts_with("net/minecraft/world/level/block/state/properties/") => rt.get_field(a(0), "$name"),
+        // The values in Java's order, as Java holds them: `Integer`s, `Boolean`s, constants.
+        (_, "getPossibleValues") if owner.starts_with("net/minecraft/world/level/block/state/properties/") => {
+            let (_, kind) = prop_parts(rt, a(0));
+            let texts = crate::blocks::property_values(rt, a(0));
+            let values: Vec<V> = texts.iter().map(|t| value_of(rt, &kind, t)).collect();
+            crate::jutil::new_list(rt, values)
+        }
         ("java/lang/Boolean", "valueOf") if desc == "(Z)Ljava/lang/Boolean;" => boolean(rt, a(0).i() != 0),
         ("java/lang/Boolean", "booleanValue") => rt.get_field(a(0), "value"),
         ("java/lang/Integer", "valueOf") if desc == "(I)Ljava/lang/Integer;" => integer(rt, a(0).i()),

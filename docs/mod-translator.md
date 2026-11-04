@@ -572,6 +572,18 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     itself), so the trie's walk looked every ingredient up as id 0; and fastutil's typed entry sets
     (`int2ObjectEntrySet`, `object2IntEntrySet`...) and entry accessors (`getIntKey`...) were
     unmapped.
+  - [x] 2026-11-04 Block properties as 26.3 has them, for Create's common setup (it threw
+    `NoSuchElementException`: its spout behaviours take the top of `LayeredCauldronBlock.LEVEL` and
+    `FarmBlock.MOISTURE` with `getPossibleValues().stream().max(Integer::compareTo).orElseThrow()`).
+    `Property.getPossibleValues()` lists the values as Java holds them, `Stream.max/min(Comparator)`
+    keep the first of equal ones (`BinaryOperator.maxBy`), and `Integer.compareTo` reads an int a
+    collection holds raw. The table of which `BlockStateProperties` field a vanilla class's constant
+    holds is now read from the 26.3 jar, own fields and inherited: `LayeredCauldronBlock.LEVEL` is
+    `LEVEL_CAULDRON` (1 to 3, was 0 to 15), `ComposterBlock.LEVEL` `LEVEL_COMPOSTER`, `HopperBlock.FACING`
+    `FACING_HOPPER` (no `up`), `WallBlock.NORTH` `NORTH_WALL` (low/tall, was a boolean), the rails, banners,
+    skulls and signs' `ROTATION`, `NoteBlock.INSTRUMENT` and 30 more; `LEVEL_HONEY` is named
+    `honey_level`, and 26.3's new fields (`SPELEOTHEM_THICKNESS`, `SIDE_CHAIN_PART`, the shelf's
+    `SLOT_n_OCCUPIED`...) are known.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

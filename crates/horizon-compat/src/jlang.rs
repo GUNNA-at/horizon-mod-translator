@@ -844,7 +844,12 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
         "hashCode" => V::I(rt.java_hash(a(0))),
         "equals" => V::I(crate::jutil::equals(rt, a(0), a(1)) as i32),
         "compare" | "compareTo" => {
-            let (x, y) = if name == "compareTo" { (rt.get_field(a(0), "value"), rt.get_field(a(1), "value")) } else { (a(0), a(1)) };
+            // A number a collection holds raw (`Integer::compareTo` over fastutil's) is its own value.
+            let unbox = |rt: &Rt, v: V| match v {
+                V::R(_) => rt.get_field(v, "value"),
+                raw => raw,
+            };
+            let (x, y) = if name == "compareTo" { (unbox(rt, a(0)), unbox(rt, a(1))) } else { (a(0), a(1)) };
             V::I(match (x, y) {
                 (V::I(p), V::I(q)) => p.cmp(&q) as i32,
                 (V::J(p), V::J(q)) => p.cmp(&q) as i32,

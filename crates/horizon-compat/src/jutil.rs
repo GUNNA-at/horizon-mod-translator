@@ -2071,6 +2071,25 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             rt.put_field(o, "value", items.first().copied().unwrap_or(V::NULL));
             o
         }
+        // `reduce(BinaryOperator.maxBy(c))`: of equal ones, the first.
+        "max" | "min" if args.len() > 1 => {
+            let mut best: Option<V> = None;
+            for e in items {
+                best = Some(match best {
+                    None => e,
+                    Some(b) => {
+                        let c = compare(rt, a(1), b, e);
+                        if rt.thrown.is_some() {
+                            return Some(V::NULL);
+                        }
+                        if (name == "max" && c >= 0) || (name == "min" && c <= 0) { b } else { e }
+                    }
+                });
+            }
+            let o = rt.new_object("java/util/Optional");
+            rt.put_field(o, "value", best.unwrap_or(V::NULL));
+            o
+        }
         "iterator" => new_iter(rt, items),
         "sum" => items.iter().fold(V::I(0), |acc, v| match (acc, *v) {
             (V::I(x), V::I(y)) => V::I(x.wrapping_add(y)),

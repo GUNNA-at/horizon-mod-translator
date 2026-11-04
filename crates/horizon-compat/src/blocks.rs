@@ -184,7 +184,7 @@ fn vanilla_values(field: &str) -> Option<Vec<String>> {
         "PICKLES" | "EGGS" | "CANDLES" | "FLOWER_AMOUNT" | "SEGMENT_AMOUNT" => range(1, 4),
         "HATCH" => range(0, 2),
         "RESPAWN_ANCHOR_CHARGES" => range(0, 4),
-        "DUSTED" => range(0, 3),
+        "DUSTED" | "DRIED_GHAST_HYDRATION_LEVELS" => range(0, 3),
         _ => match api_common::vanilla_property(field) {
             Some((_, "bool")) => list(&["true", "false"]),
             _ => None,
@@ -1225,6 +1225,44 @@ mod tests {
         let horizontal = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.HORIZONTAL_FACING");
         assert_eq!(property_values(&mut rt, facing).len(), 6);
         assert_eq!(property_values(&mut rt, horizontal), ["north", "east", "south", "west"]);
+    }
+
+    /// `Integer::compareTo`, as the translator calls a method reference.
+    fn integer_compare_to(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+        Some(api::call(rt, "java/lang/Integer.compareTo.(Ljava/lang/Integer;)I", &[args[1], args[2]]))
+    }
+
+    #[test]
+    fn vanilla_class_properties_list_the_values_26_3_gives_them() {
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(integer_compare_to);
+        const POSSIBLE: &str = "net/minecraft/world/level/block/state/properties/IntegerProperty.getPossibleValues.()Ljava/util/Collection;";
+        let ints = |rt: &mut Rt, key: &'static str| {
+            let p = api::get_static(rt, key);
+            let values = api::call(rt, POSSIBLE, &[p]);
+            let name = api_common::prop_parts(rt, p).0;
+            (name, jutil::elements(rt, values).iter().map(|v| rt.get_field(*v, "value").i()).collect::<Vec<_>>())
+        };
+        // Values read from 26.3's BlockStateProperties and block classes.
+        assert_eq!(ints(&mut rt, "net/minecraft/world/level/block/LayeredCauldronBlock.LEVEL"), ("level".into(), vec![1, 2, 3]));
+        assert_eq!(ints(&mut rt, "net/minecraft/world/level/block/ComposterBlock.LEVEL").1, (0..=8).collect::<Vec<_>>());
+        assert_eq!(ints(&mut rt, "net/minecraft/world/level/block/FarmBlock.MOISTURE").1, (0..=7).collect::<Vec<_>>());
+        assert_eq!(ints(&mut rt, "net/minecraft/world/level/block/BeehiveBlock.HONEY_LEVEL"), ("honey_level".into(), (0..=5).collect()));
+        assert_eq!(ints(&mut rt, "net/minecraft/world/level/block/RespawnAnchorBlock.CHARGE"), ("charges".into(), (0..=4).collect()));
+        // Create's spout: `LEVEL.getPossibleValues().stream().max(Integer::compareTo).orElseThrow()`.
+        let level = api::get_static(&mut rt, "net/minecraft/world/level/block/LayeredCauldronBlock.LEVEL");
+        let values = api::call(&mut rt, POSSIBLE, &[level]);
+        let stream = api::call(&mut rt, "java/util/Collection.stream.()Ljava/util/stream/Stream;", &[values]);
+        let cmp = rt.lambda_id("java/util/Comparator", 1, Vec::new());
+        let max = api::call(&mut rt, "java/util/stream/Stream.max.(Ljava/util/Comparator;)Ljava/util/Optional;", &[stream, cmp]);
+        let top = api::call(&mut rt, "java/util/Optional.orElseThrow.()Ljava/lang/Object;", &[max]);
+        assert!(rt.thrown.is_none());
+        assert_eq!(api::call(&mut rt, "java/lang/Integer.intValue.()I", &[top]), V::I(3));
+        // The hopper's facing has no `up`; a wall's sides are low or tall, not booleans.
+        let hopper = api::get_static(&mut rt, "net/minecraft/world/level/block/HopperBlock.FACING");
+        assert_eq!(property_values(&mut rt, hopper), ["down", "north", "south", "west", "east"]);
+        let wall = api::get_static(&mut rt, "net/minecraft/world/level/block/WallBlock.NORTH");
+        assert_eq!(property_values(&mut rt, wall), ["none", "low", "tall"]);
     }
 
     #[test]
