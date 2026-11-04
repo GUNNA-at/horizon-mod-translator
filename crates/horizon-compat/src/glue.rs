@@ -141,6 +141,9 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
     // constructor set (an empty compound would read every field as absent: Create's creative motor
     // would lose its default speed).
     if !nbt.is_empty() {
+        let keys: Vec<&str> = nbt.keys().map(String::as_str).collect();
+        let keys = keys.join(",");
+        trace_once(rt, &format!("tag/{pos:?}/{keys}"), |_| format!("client: {block} at {pos:?} loads an update tag with {keys}"));
         let tag = crate::nbt::to_runtime(rt, nbt);
         let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
         vc(rt, LOAD, LOAD, &[be, tag, provider]);
@@ -448,6 +451,19 @@ pub fn block_entity_update_tag(rt: &mut Rt, pos: [i32; 3]) -> Option<std::collec
 
 /// The client's copy of the mod block entity at `pos`: made the first time, and loaded from `nbt`
 /// (the update tag the server sent) whenever that changes, as `handleUpdateTag` does in vanilla.
+/// With `HORIZON_COMPAT_TRACE` set, prints `msg` the first time `key` comes up on this runtime.
+pub(crate) fn trace_once(rt: &mut Rt, key: &str, msg: impl FnOnce(&Rt) -> String) {
+    if !Rt::tracing() {
+        return;
+    }
+    let key = format!("trace/{key}");
+    if rt.interned.contains_key(&key) {
+        return;
+    }
+    rt.interned.insert(key, V::I(1));
+    eprintln!("horizon-compat: {}", msg(rt));
+}
+
 fn client_block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Option<V> {
     let (block, _) = crate::host::split_state(state);
     let synced = crate::nbt::hash(nbt) as i64;
@@ -509,7 +525,11 @@ pub fn render_block_entity(
         let Some(be) = client_block_entity(rt, pos, state, nbt) else { return false };
         let ty = rt.get_field(be, "$type");
         let Some(id) = rt.registered_name(ty, "block_entity_type").map(str::to_owned) else { return false };
-        let Some(provider) = rt.interned.get(&format!("ber/{id}")).copied() else { return false };
+        let Some(provider) = rt.interned.get(&format!("ber/{id}")).copied() else {
+            trace_once(rt, &format!("no-ber/{id}"), |_| format!("client: {id} has no block entity renderer"));
+            return false;
+        };
+        trace_once(rt, &format!("ber-used/{id}"), |_| format!("client: {id} drawn by its block entity renderer"));
         let renderer = match rt.interned.get(&format!("ber-made/{id}")).copied() {
             Some(r) => r,
             None => {

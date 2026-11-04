@@ -967,9 +967,10 @@ fn draw_item(rt: &mut Rt, stack: V, context: V, pose_stack: V, light: i32, seed:
     let item = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
     let display = rt.get_field(context, "$ordinal").i().clamp(0, 8) as u8;
     let m = last_pose(rt, pose_stack);
-    if let Some(h) = rt.host_mut() {
-        h.draw_item(&item, display, &m, light as u32, seed);
-    }
+    let drew = rt.host_mut().is_some_and(|h| h.draw_item(&item, display, &m, light as u32, seed));
+    crate::glue::trace_once(rt, &format!("draw-item/{item}/{display}"), |_| {
+        format!("client: item {item} (display {display}) at {:.3} {:.3} {:.3}, light {light:#x}: drawn {drew}", m[12], m[13], m[14])
+    });
 }
 
 /// The interned object for a client singleton (`Minecraft`, its block renderer...).
