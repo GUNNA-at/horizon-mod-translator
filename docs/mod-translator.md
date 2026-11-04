@@ -1156,6 +1156,13 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     draws nothing (a shaft adds no stress, so Create shows nothing either), and so does the motor
     without goggles. Bundle: `gui_layer_pre`/`gui_layer_post` helpers, whose host draws with
     `native_quad`, `native_sprite`, `native_text` and `native_item` into the frame's `HudBatch`.
+  - [x] 2026-11-04 An `Equipable` mod item is declared with 26.3's `equippable` component, its slot
+    from its own `getEquipmentSlot` (`blocks::equippable`): Create's goggles are
+    `{"minecraft:equippable": {"slot": "head"}}` (harness `DECLARE`, `SHOW=` lists every item: the
+    goggles are the only one; Create's armour extends vanilla's `ArmorItem`, which the API table
+    doesn't know as `Equipable` yet), so the game puts them on by use and in the head slot. Their
+    `Item.use` (`swapWithEquipmentSlot`, unmapped) answers nothing, which leaves the click to the
+    game's own use of an equippable item.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -1155,6 +1155,24 @@ fn map_color(rt: &mut Rt, v: V, default_state: &str) -> Option<u8> {
 }
 
 /// Every item the mod registered that isn't a block's own item, as `(id, declaration)`.
+/// An `Equipable` item (Create's goggles; an `ArmorItem`) as 26.3 has it: an `equippable`
+/// component with the slot its `getEquipmentSlot` names, so the game puts it on by use, in the
+/// armour slots and from dispensers. None for other items, or a slot that isn't one.
+fn equippable(rt: &mut Rt, item: V) -> Option<String> {
+    if !rt.instance_of(item, "net/minecraft/world/item/Equipable") {
+        return None;
+    }
+    let slot = rt.call_functional("net/minecraft/world/item/Equipable.getEquipmentSlot.()Lnet/minecraft/world/entity/EquipmentSlot;", item, &[]);
+    rt.thrown = None;
+    if slot.r() == 0 || matches!(slot, V::Void) {
+        return None;
+    }
+    let name = rt.str_of(rt.get_field(slot, "$name")).unwrap_or("").to_ascii_lowercase();
+    ["head", "chest", "legs", "feet", "body", "mainhand", "offhand"]
+        .contains(&name.as_str())
+        .then(|| format!("\"minecraft:equippable\": {{\"slot\": \"{name}\"}}"))
+}
+
 pub fn item_declarations(rt: &mut Rt) -> Vec<(String, String)> {
     let blocks: std::collections::HashSet<String> = rt.registered.keys().filter(|(r, _)| r == "block").map(|(_, n)| n.clone()).collect();
     let mut items: Vec<(String, V)> = rt
@@ -1186,6 +1204,7 @@ pub fn item_declarations(rt: &mut Rt) -> Vec<(String, String)> {
                 components.push(format!("\"minecraft:max_damage\": {durability}, \"minecraft:damage\": 0"));
             }
             components.extend(crate::food::components(rt, i, props));
+            components.extend(equippable(rt, i));
             if !components.is_empty() {
                 fields.push(format!("\"components\": {{{}}}", components.join(", ")));
             }
