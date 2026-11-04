@@ -12,6 +12,29 @@ pub enum Model {
     Named(String),
 }
 
+/// How [`Host::draw_model_shifted`] moves the faces of a model on one sprite to another sprite, as
+/// catnip's `SuperByteBuffer.shiftUV*` do each vertex (Create's belts, its animated sheets).
+#[derive(Clone, Debug, PartialEq)]
+pub struct UvShift {
+    /// The sprite whose faces move (`create:block/belt`).
+    pub from: String,
+    /// The sprite they take their texture from (`create:block/belt_scroll`).
+    pub to: String,
+    pub kind: UvShiftKind,
+}
+
+/// Where a moved face lands in the target sprite; `u` and `v` are fractions of the target.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UvShiftKind {
+    /// `shiftUV`: the same place, each a fraction of its own sprite.
+    Retarget,
+    /// `shiftUVScrolling`: the same texel offset from the target's corner as from the source's,
+    /// then `(u, v)` further.
+    Scroll { u: f32, v: f32 },
+    /// `shiftUVtoSheet`: the source shrunk to `1 / size` of the target, at `(u, v)`.
+    Sheet { u: f32, v: f32, size: f32 },
+}
+
 /// An item entity of the server level (`ItemEntity`), as translated code reads it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ItemEntity {
@@ -97,6 +120,11 @@ pub trait Host {
     fn draw_model(&mut self, _model: &Model, _pose: &[f32; 16], _color: u32, _light: u32) -> bool {
         false
     }
+    /// Drawing a block entity: as [`Host::draw_model`], with the faces on sprite `shift.from`
+    /// textured from `shift.to`. A host that can't move textures draws the model as it is.
+    fn draw_model_shifted(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32, _shift: &UvShift) -> bool {
+        self.draw_model(model, pose, color, light)
+    }
     /// Drawing a block entity: adds item `item` under `pose` (as [`Host::draw_model`]) as the game
     /// draws an item in display context `display` (`ItemDisplayContext`'s ordinal: 0 none, 6 gui,
     /// 7 ground, 8 fixed...), lit by `light` (`LightTexture.pack`, 0 for the block's own); `seed`
@@ -166,6 +194,8 @@ pub struct MemoryHost {
     pub partial: f32,
     /// What was drawn: model, pose, colour, light.
     pub drawn: Vec<(Model, [f32; 16], u32, u32)>,
+    /// The texture moves drawn models were given: the index in `drawn`, and the move.
+    pub shifts: Vec<(usize, UvShift)>,
     /// Recipe files by type: id and JSON text.
     pub recipes: HashMap<String, Vec<(String, String)>>,
     /// Item tags (no `#`) and their items.
@@ -238,6 +268,10 @@ impl Host for MemoryHost {
     fn draw_model(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32) -> bool {
         self.drawn.push((model.clone(), *pose, color, light));
         true
+    }
+    fn draw_model_shifted(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32, shift: &UvShift) -> bool {
+        self.shifts.push((self.drawn.len(), shift.clone()));
+        self.draw_model(model, pose, color, light)
     }
     fn draw_item(&mut self, item: &str, display: u8, pose: &[f32; 16], light: u32, _seed: i32) -> bool {
         self.items_drawn.push((item.to_owned(), display, *pose, light));

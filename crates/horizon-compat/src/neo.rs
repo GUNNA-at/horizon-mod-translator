@@ -612,6 +612,12 @@ pub fn fire_client_setup(rt: &mut Rt) {
     post(rt, REGISTER_RENDERERS, ev);
     let ev = rt.new_object(CLIENT_SETUP);
     post(rt, CLIENT_SETUP, ev);
+    // The block atlas is stitched (catnip's `StitchedSprite`s take their sprites from it: Create's
+    // scrolling belts).
+    let atlas = crate::render::block_atlas(rt);
+    let ev = rt.new_object(crate::render::ATLAS_STITCHED);
+    rt.put_field(ev, "$atlas", atlas);
+    post(rt, crate::render::ATLAS_STITCHED, ev);
 }
 
 /// Whether this runtime is the client's (its setup has fired): its level is a client level.

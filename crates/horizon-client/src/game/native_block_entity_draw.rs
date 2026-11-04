@@ -573,6 +573,26 @@ impl Game<'_> {
         model: &str,
         tint: u32,
     ) -> bool {
+        self.native_draw_model_shifted(draw, model, tint, None)
+    }
+
+    /// Draws block model `model` as [`Self::native_draw_model`] does, with
+    /// the faces on sprite `from` textured from sprite `to` as `shift` says
+    /// (`shift`: `(from, to, shift)`): Create's belt scrolling its texture,
+    /// a machine's animated sheet. A sprite the atlas lacks draws unshifted.
+    /// API 81.
+    pub(super) fn native_draw_model_shifted(
+        &self,
+        draw: &mut BlockEntityDraw,
+        model: &str,
+        tint: u32,
+        shift: Option<(&str, &str, SpriteShift)>,
+    ) -> bool {
+        let sprites = &self.gui.atlas.sprites;
+        let shift = shift.and_then(|(from, to, how)| {
+            let to = sprites.get(to.trim_start_matches("minecraft:")).copied()?;
+            Some((from.trim_start_matches("minecraft:"), to, how))
+        });
         let Ok(library) = self.pack.render.model_library.as_ref() else {
             return false;
         };
@@ -595,14 +615,19 @@ impl Game<'_> {
             let n = n.to_array().map(|v| (v.clamp(-1.0, 1.0) * 127.0) as i8);
             let emission = u32::from(quad.light_emission) * 16;
             let light = (draw.light & 0xFF) | (draw.light >> 8 & 0xFF).max(emission) << 8;
+            let moved = shift.filter(|(from, _, _)| *from == name);
             for k in 0..4 {
                 let uv = quad.uv[k];
+                let uv = match moved {
+                    Some((_, to, how)) => how.place(uv, &s, &to),
+                    None => [s.u0 + uv[0] * (s.u1 - s.u0), s.v0 + uv[1] * (s.v1 - s.v0)],
+                };
                 draw.vertices.push(Vertex {
                     normal: [n[0], n[1], n[2], 127],
                     pos: pose
                         .transform_point3(Vec3::from_array(quad.positions[k]))
                         .to_array(),
-                    uv: [s.u0 + uv[0] * (s.u1 - s.u0), s.v0 + uv[1] * (s.v1 - s.v0)],
+                    uv,
                     layer: 0,
                     color,
                     light,
@@ -631,9 +656,61 @@ impl Game<'_> {
     }
 }
 
+/// How [`Game::native_draw_model_shifted`] moves a face's texture from its
+/// sprite to another one, as catnip's `SuperByteBuffer.shiftUV*` do each
+/// vertex. `u` and `v` are fractions of the target sprite.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SpriteShift {
+    /// The same place in the target, each a fraction of its own sprite
+    /// (`shiftUV`).
+    Retarget,
+    /// The same texel offset from the target's corner as from the source's,
+    /// then `(u, v)` further (`shiftUVScrolling`: a belt's moving surface).
+    Scroll { u: f32, v: f32 },
+    /// The source shrunk to `1 / size` of the target, at `(u, v)`
+    /// (`shiftUVtoSheet`: one frame of a sheet).
+    Sheet { u: f32, v: f32, size: f32 },
+}
+
+impl SpriteShift {
+    /// The atlas coordinates of `uv` (a fraction of sprite `from`) moved to
+    /// sprite `to`.
+    fn place(self, uv: [f32; 2], from: &Rect, to: &Rect) -> [f32; 2] {
+        let (tw, th) = (to.u1 - to.u0, to.v1 - to.v0);
+        match self {
+            SpriteShift::Retarget => [to.u0 + uv[0] * tw, to.v0 + uv[1] * th],
+            SpriteShift::Scroll { u, v } => [
+                to.u0 + uv[0] * (from.u1 - from.u0) + u * tw,
+                to.v0 + uv[1] * (from.v1 - from.v0) + v * th,
+            ],
+            SpriteShift::Sheet { u, v, size } => {
+                let size = if size == 0.0 { 1.0 } else { size };
+                [to.u0 + (uv[0] / size + u) * tw, to.v0 + (uv[1] / size + v) * th]
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shifted_face_lands_where_catnip_puts_it() {
+        // A 16x16 sprite and a 16x32 one beside it (Create's belt and belt_scroll), in atlas units.
+        let rect = |u0, v0, u1, v1| Rect { u0, v0, u1, v1, w: 16, h: 16 };
+        let (belt, scroll) = (rect(0.0, 0.0, 0.25, 0.25), rect(0.5, 0.0, 0.75, 0.5));
+        // shiftUVScrolling: the same texels from the corner (a quarter of the atlas), then a
+        // quarter of the target further down.
+        let s = SpriteShift::Scroll { u: 0.0, v: 0.25 };
+        assert_eq!(s.place([1.0, 1.0], &belt, &scroll), [0.75, 0.375]);
+        assert_eq!(s.place([0.0, 0.0], &belt, &scroll), [0.5, 0.125]);
+        // shiftUV: the same fraction of the target.
+        assert_eq!(SpriteShift::Retarget.place([0.5, 0.5], &belt, &scroll), [0.625, 0.25]);
+        // shiftUVtoSheet: half the target per frame, the second frame across.
+        let sheet = SpriteShift::Sheet { u: 0.5, v: 0.0, size: 2.0 };
+        assert_eq!(sheet.place([1.0, 1.0], &belt, &scroll), [0.75, 0.25]);
+    }
 
     fn draw() -> BlockEntityDraw {
         BlockEntityDraw {

@@ -32,7 +32,49 @@ pub const INTRINSICS: &[&str] = &[
     DEFAULT_IS_EMPTY,
     PARTIAL_GET,
     SUPPORTS_VISUALIZATION,
+    SHIFTS[0],
+    SHIFTS[1],
+    SHIFTS[2],
+    SHIFTS[3],
+    SHIFTS[4],
+    SHIFTS[5],
+    SHIFTS[6],
+    SHIFTS[7],
+    SHIFTS[8],
+    SHIFTS[9],
 ];
+
+/// catnip's texture moves (`shiftUV`, `shiftUVScrolling`, `shiftUVtoSheet`), which set a function
+/// run on each vertex: kept on the buffer as what they ask instead, for `renderInto`'s one draw.
+const SHIFTS: [&str; 10] = [
+    "net/createmod/catnip/render/ShadeSeparatingSuperByteBuffer.shiftUV.(Lnet/createmod/catnip/render/SpriteShiftEntry;)Lnet/createmod/catnip/render/SuperByteBuffer;",
+    "net/createmod/catnip/render/ShadeSeparatingSuperByteBuffer.shiftUVScrolling.(Lnet/createmod/catnip/render/SpriteShiftEntry;F)Lnet/createmod/catnip/render/SuperByteBuffer;",
+    "net/createmod/catnip/render/ShadeSeparatingSuperByteBuffer.shiftUVScrolling.(Lnet/createmod/catnip/render/SpriteShiftEntry;FF)Lnet/createmod/catnip/render/SuperByteBuffer;",
+    "net/createmod/catnip/render/ShadeSeparatingSuperByteBuffer.shiftUVtoSheet.(Lnet/createmod/catnip/render/SpriteShiftEntry;FFI)Lnet/createmod/catnip/render/SuperByteBuffer;",
+    "net/createmod/catnip/render/DefaultSuperByteBuffer.shiftUV.(Lnet/createmod/catnip/render/SpriteShiftEntry;)Lnet/createmod/catnip/render/SuperByteBuffer;",
+    "net/createmod/catnip/render/DefaultSuperByteBuffer.shiftUV.(Lnet/createmod/catnip/render/SpriteShiftEntry;)Lnet/createmod/catnip/render/DefaultSuperByteBuffer;",
+    "net/createmod/catnip/render/DefaultSuperByteBuffer.shiftUVScrolling.(Lnet/createmod/catnip/render/SpriteShiftEntry;FF)Lnet/createmod/catnip/render/SuperByteBuffer;",
+    "net/createmod/catnip/render/DefaultSuperByteBuffer.shiftUVScrolling.(Lnet/createmod/catnip/render/SpriteShiftEntry;FF)Lnet/createmod/catnip/render/DefaultSuperByteBuffer;",
+    "net/createmod/catnip/render/DefaultSuperByteBuffer.shiftUVtoSheet.(Lnet/createmod/catnip/render/SpriteShiftEntry;FFI)Lnet/createmod/catnip/render/SuperByteBuffer;",
+    "net/createmod/catnip/render/DefaultSuperByteBuffer.shiftUVtoSheet.(Lnet/createmod/catnip/render/SpriteShiftEntry;FFI)Lnet/createmod/catnip/render/DefaultSuperByteBuffer;",
+];
+const ORIGINAL_LOCATION: &str = "net/createmod/catnip/render/SpriteShiftEntry.getOriginalResourceLocation.()Lnet/minecraft/resources/ResourceLocation;";
+const TARGET_LOCATION: &str = "net/createmod/catnip/render/SpriteShiftEntry.getTargetResourceLocation.()Lnet/minecraft/resources/ResourceLocation;";
+
+/// The texture move a buffer was asked for since it last drew.
+fn shift_of(rt: &Rt, sbb: V) -> Option<crate::host::UvShift> {
+    use crate::host::UvShiftKind;
+    let f = |k| rt.get_field(sbb, k).f();
+    let kind = match rt.get_field(sbb, "$shiftKind").i() {
+        1 => UvShiftKind::Retarget,
+        2 => UvShiftKind::Scroll { u: f("$shiftU"), v: f("$shiftV") },
+        3 => UvShiftKind::Sheet { u: f("$shiftU"), v: f("$shiftV"), size: f("$shiftSize") },
+        _ => return None,
+    };
+    let from = rt.str_of(rt.get_field(sbb, "$shiftFrom"))?.to_owned();
+    let to = rt.str_of(rt.get_field(sbb, "$shiftTo"))?.to_owned();
+    Some(crate::host::UvShift { from, to, kind })
+}
 const CREATE_FOR_BLOCK: &str = "net/createmod/catnip/render/SuperBufferFactory.createForBlock.(Lnet/minecraft/client/resources/model/BakedModel;Lnet/minecraft/world/level/block/state/BlockState;Lcom/mojang/blaze3d/vertex/PoseStack;)Lnet/createmod/catnip/render/SuperByteBuffer;";
 /// catnip's buffer of a baked model (what `createForBlock` makes).
 const RENDER_INTO: &str = "net/createmod/catnip/render/ShadeSeparatingSuperByteBuffer.renderInto.(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;)V";
@@ -1006,9 +1048,58 @@ fn snake(name: &str) -> String {
     out
 }
 
+const TEXTURE_ATLAS: &str = "net/minecraft/client/renderer/texture/TextureAtlas";
+const SPRITE: &str = "net/minecraft/client/renderer/texture/TextureAtlasSprite";
+const SPRITE_CONTENTS: &str = "net/minecraft/client/renderer/texture/SpriteContents";
+pub const ATLAS_STITCHED: &str = "net/neoforged/neoforge/client/event/TextureAtlasStitchedEvent";
+
+/// The block atlas, as `TextureAtlasStitchedEvent.getAtlas()` hands it to mods (catnip's
+/// `StitchedSprite`s look their sprites up in it).
+pub fn block_atlas(rt: &mut Rt) -> V {
+    rt.intern("compat:block-atlas".into(), |rt| {
+        let atlas = rt.new_object(TEXTURE_ATLAS);
+        let location = rt.string("minecraft:textures/atlas/blocks.png");
+        rt.put_field(atlas, "$location", location);
+        atlas
+    })
+}
+
+/// The block atlas's sprite `location` (`create:block/belt_scroll`). Here each spans 0 to 1 of
+/// its own: the game places it in its atlas when it draws.
+fn sprite(rt: &mut Rt, location: V) -> V {
+    let name = rt.str_of(location).unwrap_or("minecraft:missingno").to_owned();
+    rt.intern(format!("compat:sprite/{name}"), |rt| {
+        let s = rt.new_object(SPRITE);
+        let n = rt.string(&name);
+        rt.put_field(s, "$name", n);
+        s
+    })
+}
+
 fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     Some(match (owner, name) {
+        (ATLAS_STITCHED, "getAtlas") => rt.get_field(a(0), "$atlas"),
+        (TEXTURE_ATLAS, "location") => rt.get_field(a(0), "$location"),
+        (TEXTURE_ATLAS, "getSprite") => sprite(rt, a(1)),
+        (SPRITE, n) => match n {
+            "getU0" | "getV0" => V::F(0.0),
+            "getU1" | "getV1" => V::F(1.0),
+            // `getU(0.5f)` is halfway across; `getUOffset` the way back.
+            "getU" | "getV" | "getUOffset" | "getVOffset" => V::F(a(1).f()),
+            "atlasLocation" => {
+                let atlas = block_atlas(rt);
+                rt.get_field(atlas, "$location")
+            }
+            "contents" => {
+                let c = rt.new_object(SPRITE_CONTENTS);
+                let n = rt.get_field(a(0), "$name");
+                rt.put_field(c, "$name", n);
+                c
+            }
+            _ => return None,
+        },
+        (SPRITE_CONTENTS, "name") => rt.get_field(a(0), "$name"),
         ("net/minecraft/client/Minecraft", "getInstance") => {
             let mc = single(rt, "net/minecraft/client/Minecraft");
             // Its public fields: the level this client draws.
@@ -1297,10 +1388,15 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
             let light_field = if modern { "packedLight" } else { "packedLightCoordinates" };
             let light = if rt.get_field(this, "hasCustomLight").i() != 0 { rt.get_field(this, light_field).i() } else { 0 };
             let model = rt.get_field(this, "$model");
+            let shift = shift_of(rt, this);
+            rt.put_field(this, "$shiftKind", V::I(0));
             if let Some(model) = model_of(rt, model)
                 && let Some(h) = rt.host_mut()
             {
-                h.draw_model(&model, &m, color, light as u32);
+                match &shift {
+                    Some(shift) => h.draw_model_shifted(&model, &m, color, light as u32, shift),
+                    None => h.draw_model(&model, &m, color, light as u32),
+                };
             }
             if let Some(vc) = rt.vcall {
                 let (k, short) = if modern { (SBB_RESET_KEY, SBB_RESET) } else { (DEFAULT_RESET_KEY, DEFAULT_RESET) };
@@ -1309,6 +1405,31 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
             V::Void
         }
         SBB_IS_EMPTY | DEFAULT_IS_EMPTY => V::I(model_of(rt, rt.get_field(a(0), "$model")).is_none() as i32),
+        // `shiftUV(entry)`, `shiftUVScrolling(entry, [u,] v)`, `shiftUVtoSheet(entry, u, v, size)`:
+        // the entry's two sprites and the offsets (fractions of the target: this runtime's sprites
+        // are each 0 to 1, so what the mod works out from their bounds comes out in fractions).
+        k if SHIFTS.contains(&k) => {
+            let (this, entry) = (a(0), a(1));
+            let Some(vc) = rt.vcall else { return Some(this) };
+            let from = vc(rt, ORIGINAL_LOCATION, "getOriginalResourceLocation.()Lnet/minecraft/resources/ResourceLocation;", &[entry]);
+            let to = vc(rt, TARGET_LOCATION, "getTargetResourceLocation.()Lnet/minecraft/resources/ResourceLocation;", &[entry]);
+            let (kind, u, v, size) = if k.contains(".shiftUV.(") {
+                (1, 0.0, 0.0, 1.0)
+            } else if k.contains(".shiftUVtoSheet.(") {
+                (3, a(2).f(), a(3).f(), a(4).i() as f32)
+            } else if k.contains(";F)") {
+                (2, 0.0, a(2).f(), 1.0)
+            } else {
+                (2, a(2).f(), a(3).f(), 1.0)
+            };
+            rt.put_field(this, "$shiftFrom", from);
+            rt.put_field(this, "$shiftTo", to);
+            rt.put_field(this, "$shiftKind", V::I(kind));
+            rt.put_field(this, "$shiftU", V::F(u));
+            rt.put_field(this, "$shiftV", V::F(v));
+            rt.put_field(this, "$shiftSize", V::F(size));
+            this
+        }
         // `PartialModel.get()`: the model at its location, baked by the host on first draw.
         PARTIAL_GET => {
             let location = rt.get_field(a(0), "modelLocation");
@@ -1335,6 +1456,64 @@ mod tests {
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    /// The translated catnip a buffer calls back: an entry's sprite locations, and `reset()`.
+    fn catnip(rt: &mut Rt, key: &'static str, _: &'static str, args: &[V]) -> V {
+        match key {
+            ORIGINAL_LOCATION => rt.string("create:block/belt"),
+            TARGET_LOCATION => rt.string("create:block/belt_scroll"),
+            _ => args.first().copied().unwrap_or_default(),
+        }
+    }
+
+    #[test]
+    fn a_buffer_draws_once_with_the_texture_move_it_was_asked_for() {
+        use crate::host::{UvShift, UvShiftKind};
+        let mut rt = Rt::new();
+        rt.vcall = Some(catnip);
+        let mut host = crate::host::MemoryHost::default();
+        let model = rt.new_object("net/minecraft/client/resources/model/BakedModel");
+        let name = rt.string("create:block/belt/start");
+        rt.put_field(model, "$name", name);
+        let stack = new_pose_stack(&mut rt, IDENTITY);
+        let sbb = intrinsic(&mut rt, CREATE_FOR_BLOCK, &[V::NULL, model, V::NULL, stack]).unwrap();
+        let entry = rt.new_object("net/createmod/catnip/render/SpriteShiftEntry");
+        // Create's belt: `shiftUVScrolling(entry, scroll)`, which returns the buffer.
+        assert_eq!(intrinsic(&mut rt, SHIFTS[1], &[sbb, entry, V::F(0.25)]), Some(sbb));
+        rt.with_host(&mut host, |rt| {
+            intrinsic(rt, RENDER_INTO, &[sbb, stack, V::NULL]);
+            // Drawn again with no new move: catnip's `reset()` after a draw drops it.
+            intrinsic(rt, RENDER_INTO, &[sbb, stack, V::NULL]);
+        });
+        assert_eq!(host.drawn.len(), 2);
+        let scroll = UvShift { from: "create:block/belt".into(), to: "create:block/belt_scroll".into(), kind: UvShiftKind::Scroll { u: 0.0, v: 0.25 } };
+        assert_eq!(host.shifts, vec![(0, scroll)]);
+        // A sheet's frame and a plain move keep what they were given.
+        intrinsic(&mut rt, SHIFTS[3], &[sbb, entry, V::F(0.5), V::F(0.25), V::I(4)]);
+        assert_eq!(shift_of(&rt, sbb).map(|s| s.kind), Some(UvShiftKind::Sheet { u: 0.5, v: 0.25, size: 4.0 }));
+        intrinsic(&mut rt, SHIFTS[0], &[sbb, entry]);
+        assert_eq!(shift_of(&rt, sbb).map(|s| s.kind), Some(UvShiftKind::Retarget));
+    }
+
+    #[test]
+    fn the_stitched_block_atlas_hands_out_sprites_spanning_0_to_1() {
+        const GET_SPRITE: &str = "net/minecraft/client/renderer/texture/TextureAtlas.getSprite.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
+        let mut rt = Rt::new();
+        let atlas = block_atlas(&mut rt);
+        let location = call(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlas.location.()Lnet/minecraft/resources/ResourceLocation;", &[atlas]).unwrap();
+        assert_eq!(rt.str_of(location), Some("minecraft:textures/atlas/blocks.png"));
+        let name = rt.string("create:block/belt_scroll");
+        let sprite = call(&mut rt, GET_SPRITE, &[atlas, name]).unwrap();
+        let again = rt.string("create:block/belt_scroll");
+        assert_eq!(call(&mut rt, GET_SPRITE, &[atlas, again]), Some(sprite));
+        let f = |rt: &mut Rt, m: &'static str, args: &[V]| call(rt, m, args).unwrap().f();
+        let size = f(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV1.()F", &[sprite]) - f(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV0.()F", &[sprite]);
+        assert_eq!(size, 1.0);
+        assert_eq!(f(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getU.(F)F", &[sprite, V::F(0.5)]), 0.5);
+        let contents = call(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.contents.()Lnet/minecraft/client/renderer/texture/SpriteContents;", &[sprite]).unwrap();
+        let named = call(&mut rt, "net/minecraft/client/renderer/texture/SpriteContents.name.()Lnet/minecraft/resources/ResourceLocation;", &[contents]).unwrap();
+        assert_eq!(rt.str_of(named), Some("create:block/belt_scroll"));
     }
 
     #[test]

@@ -255,6 +255,22 @@ fn {id}_block_entity_submit(
             drew
         }}
         fn draw_model(&mut self, model: &{c}::host::Model, pose: &[f32; 16], color: u32, light: u32) -> bool {{
+            self.model(model, pose, color, light, None)
+        }}
+        fn draw_model_shifted(&mut self, model: &{c}::host::Model, pose: &[f32; 16], color: u32, light: u32, shift: &{c}::host::UvShift) -> bool {{
+            use crate::game::native_block_entity_draw::SpriteShift;
+            let how = match shift.kind {{
+                {c}::host::UvShiftKind::Retarget => SpriteShift::Retarget,
+                {c}::host::UvShiftKind::Scroll {{ u, v }} => SpriteShift::Scroll {{ u, v }},
+                {c}::host::UvShiftKind::Sheet {{ u, v, size }} => SpriteShift::Sheet {{ u, v, size }},
+            }};
+            self.model(model, pose, color, light, Some((&shift.from, &shift.to, how)))
+        }}
+    }}
+    impl Host<'_, '_, '_> {{
+        /// `model` under `pose`, lit by `light` (`LightTexture.pack`; 0 for the block's own), its
+        /// faces on one sprite textured from another as `shift` says.
+        fn model(&mut self, model: &{c}::host::Model, pose: &[f32; 16], color: u32, light: u32, shift: Option<(&str, &str, crate::game::native_block_entity_draw::SpriteShift)>) -> bool {{
             let saved = self.draw.light;
             if light != 0 {{
                 // LightTexture.pack (block << 4 | sky << 20) as Horizon's (sky * 16 | block * 16 << 8).
@@ -268,7 +284,7 @@ fn {id}_block_entity_submit(
                     let (block, props) = {c}::host::split_state(text);
                     self.game.native_draw_block(self.draw, block, &props)
                 }}
-                {c}::host::Model::Named(name) => self.game.native_draw_model(self.draw, name, color & 0xFF_FFFF),
+                {c}::host::Model::Named(name) => self.game.native_draw_model_shifted(self.draw, name, color & 0xFF_FFFF, shift),
             }};
             self.draw.pop();
             self.draw.light = saved;
