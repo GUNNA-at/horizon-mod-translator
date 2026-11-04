@@ -115,6 +115,13 @@ pub trait Host {
     fn take_player_items(&mut self, _item: &str, _count: u32) -> u32 {
         0
     }
+    /// The acting player's food level, 0 to 20 (`FoodData.getFoodLevel`).
+    fn player_food(&self) -> i32 {
+        20
+    }
+    /// Tires the acting player by `amount` (`Player.causeFoodExhaustion`); the game keeps it off in
+    /// creative.
+    fn exhaust_player(&mut self, _amount: f32) {}
     /// Gives the acting player up to `count` of `item` where they fit, as `Inventory.add` places
     /// them (`placeItemBackInInventory`); what it gave.
     fn give_player_items(&mut self, _item: &str, _count: u32) -> u32 {
@@ -176,6 +183,11 @@ pub trait Host {
     fn fluid_in_tag(&self, _fluid: &str, _tag: &str) -> bool {
         false
     }
+    /// The way the fluid at `pos` flows (`FluidState.getFlow(level, pos)`, vanilla's
+    /// `FlowingFluid.getFlow`): x, y, z, zero for still fluid or none.
+    fn fluid_flow(&self, _pos: [i32; 3]) -> [f64; 3] {
+        [0.0; 3]
+    }
     /// Sends a mod's payload on the game's mod message channel: `channel` is the payload type's id
     /// (`create:server_speed`), `data` what its `StreamCodec` wrote. False when it can't go (no
     /// such player, a server that carries no mod messages, past the game's caps).
@@ -230,6 +242,10 @@ pub struct MemoryHost {
     pub block_tags: HashMap<String, Vec<String>>,
     /// Fluid tags (no `#`) and their fluids.
     pub fluid_tags: HashMap<String, Vec<String>>,
+    /// Fluid currents by position (`fluid_flow`); unset positions have none.
+    pub flows: HashMap<[i32; 3], [f64; 3]>,
+    /// The exhaustion the acting player was given (`exhaust_player`), in all.
+    pub exhaustion: f32,
     /// Mod payloads sent, in order: where to, channel, bytes.
     pub payloads: Vec<(PayloadTarget, String, Vec<u8>)>,
     /// The items the game knows; when empty, every id is one.
@@ -328,6 +344,12 @@ impl Host for MemoryHost {
     }
     fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {
         self.fluid_tags.get(tag).is_some_and(|f| f.iter().any(|x| x == fluid))
+    }
+    fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {
+        self.flows.get(&pos).copied().unwrap_or_default()
+    }
+    fn exhaust_player(&mut self, amount: f32) {
+        self.exhaustion += amount;
     }
     fn send_payload(&mut self, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
         self.payloads.push((to, channel.to_owned(), data.to_vec()));

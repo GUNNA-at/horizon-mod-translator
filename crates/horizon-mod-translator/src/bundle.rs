@@ -227,6 +227,9 @@ fn client_host(c: &str) -> String {
         fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.game.native_fluid_name_in_tag(fluid, tag)
         }}
+        fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
+            self.game.native_fluid_flow_at(pos)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -288,6 +291,9 @@ fn {id}_block_entity_submit(
         }}
         fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.game.native_fluid_name_in_tag(fluid, tag)
+        }}
+        fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
+            self.game.native_fluid_flow_at(pos)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -641,6 +647,9 @@ fn {id}_block_entity_tick(
         fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.game.native_fluid_name_in_tag(fluid, tag)
         }}
+        fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
+            self.game.native_fluid_flow_at(pos)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -740,6 +749,9 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
         fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.game.native_fluid_name_in_tag(fluid, tag)
         }}
+        fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
+            self.game.native_fluid_flow_at(pos)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -768,6 +780,12 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
         }}
         fn give_player_items(&mut self, item: &str, count: u32) -> u32 {{
             self.game.native_give_items(item, count)
+        }}
+        fn player_food(&self) -> i32 {{
+            self.game.native_food_level()
+        }}
+        fn exhaust_player(&mut self, amount: f32) {{
+            self.game.native_exhaust(amount)
         }}
         fn block_changed(&mut self, pos: [i32; 3]) {{
             self.game.native_block_entity_sync(pos);
@@ -818,6 +836,9 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
         fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.game.native_fluid_name_in_tag(fluid, tag)
         }}
+        fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
+            self.game.native_fluid_flow_at(pos)
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}
@@ -846,6 +867,12 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
         }}
         fn give_player_items(&mut self, item: &str, count: u32) -> u32 {{
             self.game.native_give_items(item, count)
+        }}
+        fn player_food(&self) -> i32 {{
+            self.game.native_food_level()
+        }}
+        fn exhaust_player(&mut self, amount: f32) {{
+            self.game.native_exhaust(amount)
         }}
         fn block_changed(&mut self, pos: [i32; 3]) {{
             self.game.native_block_entity_sync(pos);

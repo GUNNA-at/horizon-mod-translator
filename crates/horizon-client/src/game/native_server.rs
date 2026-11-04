@@ -704,6 +704,21 @@ impl Game<'_> {
             count,
         )
     }
+    /// The player's food level, 0 to 20 (`FoodData.getFoodLevel`); 20 with
+    /// no player.
+    pub(super) fn native_food_level(&self) -> i32 {
+        self.player.as_ref().map_or(20, |p| p.health.food.food)
+    }
+    /// Tires the player by `amount` (`Player.causeFoodExhaustion`): none in
+    /// creative, as vanilla's abilities keep it off. Translated Java mods'
+    /// work by hand (Create's hand crank) costs food this way.
+    pub(super) fn native_exhaust(&mut self, amount: f32) {
+        if let Some(p) = self.player.as_mut()
+            && !self.creative
+        {
+            p.cause_food_exhaustion(amount);
+        }
+    }
     /// Gives `stack` whole (its damage, name, enchantments... kept) to the
     /// player `uuid`, as `Inventory.add` places it: onto equal stacks first,
     /// then into empty inventory slots, never the armour or an empty off

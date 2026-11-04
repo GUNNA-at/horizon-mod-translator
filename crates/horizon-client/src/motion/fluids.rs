@@ -70,6 +70,43 @@ impl FluidResources {
     pub fn ice(&self, state: BlockStateId) -> bool {
         self.ice.get(state.0 as usize).copied().unwrap_or(false)
     }
+    /// `FluidState.getFlow(level, pos)` for the fluid at `pos` in `world`
+    /// (vanilla's `FlowingFluid.getFlow`): the way its current pushes, zero
+    /// for still or no fluid. Translated Java mods read it (Create's water
+    /// wheel scores the current around it).
+    pub fn flow_in(&self, world: &World, pos: [i32; 3]) -> Vec3 {
+        struct At<'a> {
+            world: &'a World,
+            fluids: &'a FluidResources,
+        }
+        impl FluidFlowWorld for At<'_> {
+            type Error = std::convert::Infallible;
+            type Block = BlockStateId;
+            fn fluid(&mut self, p: BlockPos) -> std::result::Result<FluidState, Self::Error> {
+                Ok(self.fluids.fluid(self.world.block(p.x, p.y, p.z)))
+            }
+            fn block(&mut self, p: BlockPos) -> std::result::Result<BlockStateId, Self::Error> {
+                Ok(self.world.block(p.x, p.y, p.z))
+            }
+            fn blocks_fluid_flow(&self, s: BlockStateId) -> bool {
+                self.fluids.blocks_flow(s)
+            }
+            fn is_ice_class(&self, s: BlockStateId) -> bool {
+                self.fluids.ice(s)
+            }
+            fn is_face_sturdy(
+                &mut self,
+                s: BlockStateId,
+                _: BlockPos,
+                d: Direction,
+            ) -> std::result::Result<bool, Self::Error> {
+                Ok(self.fluids.sturdy(s, d))
+            }
+        }
+        let state = self.fluid(world.block(pos[0], pos[1], pos[2]));
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        flow_at(&mut At { world, fluids: self }, state, at).unwrap_or(Vec3::ZERO)
+    }
 }
 /// The player's `EntityFluidInteraction` and the water flags around it.
 #[derive(Clone)]

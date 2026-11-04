@@ -708,6 +708,24 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     starts at 0 and rises as the server's speed packets arrive: the integrated server's tick sends
     `create:server_speed` to the window's player over the mod message channel, and the window's
     runtime takes it. Before, the client showed the ingot where the last update tag put it.
+  - [x] 2026-11-04 **Create's water wheel turns in flowing water** (harness `WHEEL`: a small wheel along
+    x, water above it flowing south and below it flowing north, a shaft on its east side): flow score
+    2, the wheel and the shaft at 8 RPM from the first tick; in still water it stays still.
+    `FluidState.getFlow(level, pos)` asks the game through a new host call, `Host::fluid_flow`
+    (`native_fluid_flow_at` on `Game`: vanilla's `FlowingFluid.getFlow` over the current level,
+    `FluidResources::flow_in`, the flow the game already pushes entities with).
+  - [x] 2026-11-04 Food: `Player.getFoodData()` (`getFoodLevel`, `needsFood`, `addExhaustion`) and
+    `Player.causeFoodExhaustion` reach the acting player through `Host::player_food` and
+    `Host::exhaust_player` (`native_food_level`, `native_exhaust` on `Game`; none in creative, as
+    vanilla's abilities keep it off). **Create's hand crank turns** (harness `CRANK`, a crank facing
+    up on a shaft): a right click (`useItemOn`, empty hand) drives it and the shaft at 32 RPM for 10
+    ticks, then they stop; sneaking, at -32. It tires the player by 0.32 (32 RPM times the config's
+    `crankHungerMultiplier`, 0.01), and read a null `FoodData` before.
+  - [ ] Models with NeoForge's OBJ loader (`"loader": "neoforge:obj"`, 43 of Create's: the water
+    wheels, crushing wheels, blaze burner...): the content mod doesn't carry the `.obj` meshes (the
+    jar has 39), and the game's model library doesn't read them. And Create's water wheel swaps the
+    model's planks and logs for the wheel's material (`BakedModelHelper.generateModel`, quad by
+    quad), which compat's models (a state or a location, no quads) can't follow yet.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

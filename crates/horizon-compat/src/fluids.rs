@@ -598,6 +598,17 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "getHeight" => on_fluid(rt, HEIGHT, &[f, s, a(1), a(2)]),
                 "createLegacyBlock" => on_fluid(rt, LEGACY_BLOCK, &[f, s]),
                 "getFluidType" => on_fluid(rt, TYPE_OF, &[f]),
+                // `FlowingFluid.getFlow(level, pos)`: the game's current at the position (a mod
+                // asks about the state that is there).
+                "getFlow" => {
+                    let p = api::pos_of(rt, a(2));
+                    let flow = if on_fluid(rt, IS_EMPTY, &[f]).i() != 0 { [0.0; 3] } else { rt.host().map_or([0.0; 3], |h| h.fluid_flow(p)) };
+                    let v = rt.new_object("net/minecraft/world/phys/Vec3");
+                    for (k, x) in ["x", "y", "z"].into_iter().zip(flow) {
+                        rt.put_field(v, k, V::D(x));
+                    }
+                    v
+                }
                 "getExplosionResistance" => on_fluid(rt, RESISTANCE, &[f]),
                 "is" if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
                     let n = name_of(rt, f);

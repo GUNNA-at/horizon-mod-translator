@@ -849,6 +849,25 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 }
             }
         }
+        // Food: the acting player's, through the host (work by hand, as Create's hand crank, tires
+        // the player).
+        (o, "getFoodData") if is_player(o) => rt.intern("compat:food-data".into(), |rt| rt.new_object(FOOD_DATA)),
+        (o, "causeFoodExhaustion") if is_player(o) => {
+            let amount = a(1).f();
+            if let Some(h) = rt.host_mut() {
+                h.exhaust_player(amount);
+            }
+            V::Void
+        }
+        (FOOD_DATA, "addExhaustion") => {
+            let amount = a(1).f();
+            if let Some(h) = rt.host_mut() {
+                h.exhaust_player(amount);
+            }
+            V::Void
+        }
+        (FOOD_DATA, "getFoodLevel") => V::I(rt.host().map_or(20, |h| h.player_food())),
+        (FOOD_DATA, "needsFood") => V::I(i32::from(rt.host().map_or(20, |h| h.player_food()) < 20)),
         // The main hand changes: what it held is taken, the new stack given (the off hand is
         // empty here, and stays so).
         (o, "setItemInHand") if is_player(o) => {
@@ -1299,6 +1318,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 const INVENTORY: &str = "net/minecraft/world/entity/player/Inventory";
 
 const LOCAL_PLAYER: &str = "net/minecraft/client/player/LocalPlayer";
+const FOOD_DATA: &str = "net/minecraft/world/food/FoodData";
 
 /// Whether `owner` is the player or one of the classes a player's methods are called through (the
 /// client's own: `LocalPlayer`, `AbstractClientPlayer`).

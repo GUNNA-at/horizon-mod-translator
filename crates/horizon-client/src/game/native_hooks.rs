@@ -3781,6 +3781,13 @@ impl Game<'_> {
     pub(super) fn native_fluid_name_in_tag(&self, fluid: &str, tag: &str) -> bool {
         self.items().fluid_in_tag(tag, fluid)
     }
+    /// The way the fluid at `pos` in the current level flows
+    /// (`FluidState.getFlow`, vanilla's `FlowingFluid.getFlow`): x, y, z,
+    /// zero for still water or none. For hooks on `Game` (block entity ticks).
+    pub(super) fn native_fluid_flow_at(&self, pos: [i32; 3]) -> [f64; 3] {
+        let v = self.motion.fluids.flow_in(&self.world, pos);
+        [v.x, v.y, v.z]
+    }
     /// The block state at `pos` in the current level as text, as
     /// `GameLevel::native_state_text` gives it: for hooks on `Game` (block
     /// entity ticks). API 81.
