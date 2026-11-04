@@ -12,9 +12,13 @@ pub const CALLBACK_INFO: &str = "org/spongepowered/asm/mixin/injection/callback/
 pub const RETURNABLE: &str = "org/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable";
 const CANCELLATION: &str = "org/spongepowered/asm/mixin/injection/callback/CancellationException";
 
+/// MixinExtras' refs to a target method's local (`@Local LocalIntRef`, `@Share`): the woven code
+/// makes one holding the local in `$value` and puts what it holds back into the local after.
+const REFS: &str = "com/llamalad7/mixinextras/sugar/ref/Local";
+
 /// Whether this module answers `owner.name desc`.
 pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    owner == CALLBACK_INFO || owner == RETURNABLE
+    owner == CALLBACK_INFO || owner == RETURNABLE || owner.starts_with(REFS)
 }
 
 /// The box Java's autoboxing makes for a value of descriptor kind `kind` (`Z`, `I`, `F`...); an
@@ -66,6 +70,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
+    if owner.starts_with(REFS) {
+        return Some(match name {
+            "get" => rt.get_field(this, "$value"),
+            "set" => {
+                rt.put_field(this, "$value", a(1));
+                V::Void
+            }
+            _ => return None,
+        });
+    }
     Some(match name {
         // `(String id, boolean cancellable)`, and for a returnable `(id, cancellable, value)`
         // with the value boxed or primitive (`(Ljava/lang/String;ZI)V`...).

@@ -2045,6 +2045,7 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     program.addons = members[1..].iter().map(|(_, n)| n.clone()).collect();
     program.services = crate::services_of(jars)?;
     program.metadata = jars.iter().flat_map(|j| crate::mod_metadata(j)).collect();
+    program.use_mixin_configs(&crate::mixin_configs_of(jars));
     let files = program.emit_files(40);
     let src = out.join("engine/src");
     fs::create_dir_all(&src).map_err(|e| e.to_string())?;

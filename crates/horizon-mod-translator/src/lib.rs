@@ -207,6 +207,85 @@ pub fn mod_metadata(jar: &Path) -> Vec<(String, String, String)> {
     out
 }
 
+/// A mixin configuration a jar declares: the mixin classes it applies and how many places each
+/// of their injectors needs by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MixinConfig {
+    /// Its file in the jar (`create_connected.mixins.json`).
+    pub file: String,
+    /// The mixins it lists (`mixins`, `client`, `server`), as internal names (`a/b/C`).
+    pub classes: Vec<String>,
+    /// `injectors.defaultRequire`: an injector without its own `require` needs this many places,
+    /// else Mixin stops the game; 0 (Mixin's default) lets it find none.
+    pub default_require: i64,
+    /// Its plugin (`plugin`), which may turn mixins off as the game loads, as an internal name.
+    pub plugin: Option<String>,
+}
+
+/// The mixin configurations of `jars` and of the jars they bundle, as FML hands them to Mixin:
+/// each `[[mixins]] config = "..."` of a jar's mods.toml, and the manifest's `MixinConfigs`.
+pub fn mixin_configs_of(jars: &[&Path]) -> Vec<MixinConfig> {
+    fn entry<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
+        let mut text = String::new();
+        zip.by_name(name).ok()?.read_to_string(&mut text).ok()?;
+        Some(text)
+    }
+    fn read<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, out: &mut Vec<MixinConfig>) {
+        let mut files: Vec<String> = Vec::new();
+        for toml in ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"] {
+            let Some(text) = entry(zip, toml) else { continue };
+            let mut in_mixins = false;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    in_mixins = line == "[[mixins]]";
+                    continue;
+                }
+                if let (true, Some((k, v))) = (in_mixins, line.split_once('='))
+                    && k.trim() == "config"
+                {
+                    files.push(bundle::toml_string(v).to_owned());
+                }
+            }
+            break;
+        }
+        if let Some(manifest) = entry(zip, "META-INF/MANIFEST.MF")
+            && let Some(list) = manifest.lines().find_map(|l| l.strip_prefix("MixinConfigs:"))
+        {
+            files.extend(list.split(',').map(|f| f.trim().to_owned()).filter(|f| !f.is_empty()));
+        }
+        for file in files {
+            if out.iter().any(|c| c.file == file) {
+                continue;
+            }
+            let Some(json) = entry(zip, &file).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { continue };
+            let package = json["package"].as_str().unwrap_or("").to_owned();
+            let classes = ["mixins", "client", "server"]
+                .iter()
+                .flat_map(|k| json[*k].as_array().cloned().unwrap_or_default())
+                .filter_map(|v| v.as_str().map(|n| format!("{package}.{n}").trim_start_matches('.').replace('.', "/")))
+                .collect();
+            out.push(MixinConfig {
+                file,
+                classes,
+                default_require: json["injectors"]["defaultRequire"].as_i64().unwrap_or(0),
+                plugin: json["plugin"].as_str().map(|p| p.replace('.', "/")),
+            });
+        }
+    }
+    let mut out = Vec::new();
+    for jar in jars {
+        let Ok(mut zip) = std::fs::File::open(jar).map_err(|_| ()).and_then(|f| zip::ZipArchive::new(f).map_err(|_| ())) else { continue };
+        read(&mut zip, &mut out);
+        for b in nested_jars(&mut zip) {
+            if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) {
+                read(&mut inner, &mut out);
+            }
+        }
+    }
+    out
+}
+
 /// The `Implementation-Version` in a jar's `META-INF/MANIFEST.MF`.
 fn jar_manifest_version(jar: &Path) -> Option<String> {
     let mut zip = zip::ZipArchive::new(std::fs::File::open(jar).ok()?).ok()?;
@@ -564,6 +643,49 @@ mod mixin_census_tests {
             vec![
                 ("guardvillagers".to_owned(), "2.4.12".to_owned(), "Guard Villagers".to_owned()),
                 ("extra".to_owned(), String::new(), String::new()),
+            ]
+        );
+    }
+
+    /// The mixin configurations FML hands Mixin: a mods.toml's `[[mixins]]` tables and the
+    /// manifest's `MixinConfigs`, each config's listed classes (common, client, server) under its
+    /// package, its `defaultRequire` (Mixin's 0 when absent) and plugin.
+    #[test]
+    fn mixin_configs_are_found_as_fml_finds_them() {
+        let dir = std::env::temp_dir().join(format!("hz-mixcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("m.jar");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        let mut put = |name: &str, text: &str| {
+            zip.start_file(name, opts).unwrap();
+            std::io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
+        };
+        put("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\r\nMixinConfigs: old.mixins.json\r\n");
+        put(
+            "META-INF/neoforge.mods.toml",
+            "modLoader=\"javafml\"\n[[mods]]\nmodId=\"m\"\n[[mixins]]\nconfig=\"m.mixins.json\" # common\n[[dependencies.m]]\nmodId=\"create\"\n",
+        );
+        put(
+            "m.mixins.json",
+            r#"{"package": "com.m.mixin", "plugin": "com.m.mixin.Plugin", "mixins": ["KineticMixin", "compat.TrackMixin"],
+                "client": ["ScreenMixin"], "injectors": {"defaultRequire": 1}}"#,
+        );
+        put("old.mixins.json", r#"{"package": "com.m.old", "server": ["ServerMixin"]}"#);
+        put("unlisted.mixins.json", r#"{"package": "com.m.unused", "mixins": ["NeverMixin"]}"#);
+        zip.finish().unwrap();
+        let found = mixin_configs_of(&[jar.as_path()]);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            found,
+            vec![
+                MixinConfig {
+                    file: "m.mixins.json".into(),
+                    classes: vec!["com/m/mixin/KineticMixin".into(), "com/m/mixin/compat/TrackMixin".into(), "com/m/mixin/ScreenMixin".into()],
+                    default_require: 1,
+                    plugin: Some("com/m/mixin/Plugin".into()),
+                },
+                MixinConfig { file: "old.mixins.json".into(), classes: vec!["com/m/old/ServerMixin".into()], default_require: 0, plugin: None },
             ]
         );
     }

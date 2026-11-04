@@ -105,7 +105,8 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let plan = horizon_mod_translator::weave::plan(&classes);
+        let all: Vec<&horizon_mod_translator::class::ClassFile> = classes.iter().collect();
+        let plan = horizon_mod_translator::weave::plan_with(&all, &horizon_mod_translator::mixin_configs_of(&jars));
         let mut by: std::collections::BTreeMap<String, usize> = Default::default();
         for (target, ws) in &plan.weaves {
             for w in ws {
@@ -126,6 +127,9 @@ fn main() -> ExitCode {
         }
         for (k, n) in &plan.unsupported {
             println!("  left  {n:5} {k}");
+        }
+        for (k, n) in &plan.skipped {
+            println!("  skipped {n:5} {k} (may find none: Mixin skips them too)");
         }
         return ExitCode::SUCCESS;
     }

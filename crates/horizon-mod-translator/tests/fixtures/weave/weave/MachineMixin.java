@@ -92,6 +92,7 @@ public abstract class MachineMixin implements Boosted {
     // Negative: 0; else the method on one more, doubled.
     @WrapMethod(method = "heavy")
     private long wrapHeavy(long x, Operation<Long> original) {
+        ticks++;
         if (x < 0) {
             return 0;
         }

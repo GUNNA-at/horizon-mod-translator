@@ -1447,6 +1447,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     FILTER unchanged. Test `tests/weave.rs`: `tests/fixtures/weave` (a `Machine`, an addon's
     `MachineMixin` using every kind, stubs of Mixin's and MixinExtras' annotations) compiled with
     javac, translated and run; 21 answers worked out by hand from what Mixin's weaving does.
+  - [x] 2026-11-04 Weaving, continued: a real addon woven into Create and run, and most of what
+    was left. Create + New Age + Create: Connected as one engine (`WITH=` both): the harness's
+    TABS lists Connected's tab (47 items) beside Create's (203, 377) and New Age's (48); COIL and
+    FILTER as before. Its first run found two bugs the one-file test could not: the generated
+    `Operation` functions were private to their part of the engine (the lambda table calls them
+    from `lib.rs`; the test now emits one class per file, as a bundle does), and a static
+    `@Invoker` (Connected adds `SequencerInstructions` constants through the enum's constructor:
+    `@Invoker("<init>")` from its mixin's static initialiser) ran its own body, javac's `throw
+    new AssertionError()`, which stopped Create's constructor: an accessor or invoker is now one
+    by its annotation, body or not, and a constructor invoker of a translated class makes the
+    object with its own constructor. A `@WrapMethod` handler also ran a second time as an
+    injection at its method's head (now in the test: a wrapper with a side effect, run once).
+    New: mixin configurations (`mixin_configs_of`: the mods.toml's `[[mixins]]`, the manifest's
+    `MixinConfigs`): only the mixins they list are applied, in their order (then by priority),
+    and an injector that finds no place but may (`require`, else the config's
+    `defaultRequire`, 0 by default) is skipped as Mixin skips it. The class parser keeps the local
+    variable tables, parameter annotations and generic signatures, so a handler gets the target's
+    locals: MixinExtras' `@Local` (by type, `ordinal` counting the arguments, `index`, `name`, with
+    Mixin's `argN` names for arguments), its `Local*Ref`s (written back into the local after the
+    handler), `@Share` (a ref per run of the method), and `@Inject(locals = ...)`'s captured
+    locals; `@At("RETURN", ordinal)` (was every return), `INVOKE_ASSIGN` after the store of the
+    call's result, `@At("FIELD")` (a read or write woven as a call `()T`/`(T)V`: `@Redirect`,
+    `@ModifyExpressionValue`, `@WrapOperation`, `@Inject`), `@ModifyVariable` (head, `STORE`,
+    calls, returns), `@ModifyReceiver`. Over the 20 addons: 969 of 990 handlers woven (97.9%; 12
+    more skipped as Mixin skips them); left 6 `@Slice`, 4 `@At(NEW)`, 3 `@WrapMethod`s with
+    `@Share`, 3 `@At(CONSTANT)`, 2 `shift = BY`, 1 `@ModifyConstant`, 2 others. Plugins
+    (`IMixinConfigPlugin.shouldApplyMixin`, which may turn a listed mixin off by the mods present)
+    are not run yet: every listed mixin applies. Tests: `tests/weave.rs` now 43 answers (locals,
+    refs, shares, a captured local at the third return, `INVOKE_ASSIGN`, field reads and writes,
+    `@ModifyVariable`, `@ModifyReceiver`, an enum constant added by a constructor invoker; the
+    fixture compiled with `-g` as Gradle compiles mods, and plans with and without a
+    configuration), `mixin_census_tests::mixin_configs_are_found_as_fml_finds_them`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

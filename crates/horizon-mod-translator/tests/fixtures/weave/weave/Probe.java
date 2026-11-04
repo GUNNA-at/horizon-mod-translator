@@ -66,4 +66,99 @@ public class Probe {
         Machine.built = 0;
         return ticked(n).describe();
     }
+
+    public static int reading(int n) {
+        return new Gauge().reading(n, n + 1);
+    }
+
+    public static int readingSeen(int n) {
+        Gauge g = new Gauge();
+        g.reading(n, n + 1);
+        return g.seen;
+    }
+
+    public static String readingNote(int n) {
+        Gauge g = new Gauge();
+        g.reading(n, n + 1);
+        return g.note;
+    }
+
+    public static int pick(int n) {
+        return new Gauge().pick(n);
+    }
+
+    public static int stored(int n) {
+        return new Gauge().stored(n);
+    }
+
+    public static int sharedTwice(int n) {
+        Gauge g = new Gauge();
+        g.shared(n);
+        return g.shared(n);
+    }
+
+    public static String label(int n) {
+        return new Gauge().label(n);
+    }
+
+    public static int labelLast(int n) {
+        Gauge g = new Gauge();
+        g.label(n);
+        return g.last;
+    }
+
+    public static int modes() {
+        return Mode.values().length;
+    }
+
+    public static int turbo() {
+        return Mode.values()[2].speed;
+    }
+
+    public static String turboName() {
+        return Mode.values()[2].name();
+    }
+
+    public static int doubledLevel() {
+        return new Gauge().doubledLevel();
+    }
+
+    public static int setLevel(int n) {
+        Gauge g = new Gauge();
+        g.setLevel(n);
+        return g.level;
+    }
+
+    public static int limit() {
+        return new Gauge().limit();
+    }
+
+    public static int bumpSeen() {
+        Gauge g = new Gauge();
+        g.bump();
+        return g.seen;
+    }
+
+    // How many times the wrapper ran for one call.
+    public static int heavyWraps(int n) {
+        Machine m = new Machine("h");
+        m.heavy(n);
+        return m.ticks;
+    }
+
+    public static int offset(int n) {
+        return new Gauge().offset(n);
+    }
+
+    public static int accumulate(int n) {
+        return new Gauge().accumulate(n);
+    }
+
+    public static int spread(int n) {
+        return new Gauge().spread(n);
+    }
+
+    public static int nameLength() {
+        return new Gauge().nameLength("abc");
+    }
 }

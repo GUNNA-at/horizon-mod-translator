@@ -10,4 +10,6 @@ public @interface At {
     Shift shift() default Shift.NONE;
 
     int ordinal() default -1;
+
+    int opcode() default -1;
 }

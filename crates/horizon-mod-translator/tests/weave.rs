@@ -2,8 +2,11 @@
 //! into it (`MachineMixin`: `@Inject` at the head, at a return and after a call, `@ModifyArg`,
 //! `@WrapWithCondition`, `@ModifyExpressionValue`, `@ModifyReturnValue`, `@Redirect`,
 //! `@WrapOperation`, `@WrapMethod`, an `@Overwrite`, `@Shadow`s, field initialisers and an
-//! interface it adds) and a class calling the
-//! target as other code would (`Probe`). They are compiled against stubs of Mixin's annotations,
+//! interface it adds), handlers taking the target's locals (`GaugeMixin`: MixinExtras' `@Local`
+//! by type, ordinal and name, its refs, `@Share`; Mixin's captured locals at one return;
+//! `INVOKE_ASSIGN`), weaves at field reads and writes (`@At("FIELD")`), `@ModifyVariable` (at the
+//! head, after a store, before a call), `@ModifyReceiver`, an enum constant added through a constructor invoker (`ModeMixin`), and a
+//! class calling the targets as other code would (`Probe`). They are compiled against stubs of Mixin's annotations,
 //! translated together and run; each answer is the one Mixin's weaving gives, worked out by hand
 //! from what the handlers do. Needs `javac`.
 use std::{fs, path::Path, process::Command};
@@ -38,11 +41,44 @@ const CASES: &[(&str, &str, i32, &str)] = &[
     // The wrapped method: (5 + 1) × 3, doubled; a negative never runs it.
     ("heavy", "(I)I", 5, "36"),
     ("heavy", "(I)I", -1, "0"),
+    // Once per call: the wrapper is not also an injection into the method's head.
+    ("heavyWraps", "(I)I", 5, "1"),
     ("twice", "(I)I", -3, "0"),
     ("twice", "(I)I", 4, "8"),
     ("name", "()Ljava/lang/String;", 0, "m1!"),
     // The redirected `name()` reads the target's static through its `@Shadow`.
     ("describe", "(I)Ljava/lang/String;", 2, "mixed1:6"),
+    // `reading(2, 3)`: sum 5, scaled 50 (then 57 through its ref), tag "g50"; returns 57 + 1.
+    ("reading", "(I)I", 2, "58"),
+    // sum × 100 + the second argument (`arg1`).
+    ("readingSeen", "(I)I", 2, "503"),
+    ("readingNote", "(I)Ljava/lang/String;", 2, "g50"),
+    // The third return only: 5 doubled + 1000; the first two untouched.
+    ("pick", "(I)I", 5, "1010"),
+    ("pick", "(I)I", -1, "-1"),
+    ("pick", "(I)I", 0, "0"),
+    // `v = twice(3)` is 6, ten times that after the store, + 1.
+    ("stored", "(I)I", 3, "61"),
+    // 4 × 3 + 1 on each call: the shared count starts again at 0.
+    ("sharedTwice", "(I)I", 4, "13"),
+    // The local changed after `record` was given "n4".
+    ("label", "(I)Ljava/lang/String;", 4, "n4?"),
+    ("labelLast", "(I)I", 4, "2"),
+    // The enum's constant made by the mixin's static initialiser, with its constructor.
+    ("modes", "()I", 0, "3"),
+    ("turbo", "()I", 0, "9"),
+    ("turboName", "()Ljava/lang/String;", 0, "TURBO"),
+    // Field accesses: (4 + 1) × 2; 2 stored as 2 × 3; 100 + 5; after `level` became 5.
+    ("doubledLevel", "()I", 0, "10"),
+    ("setLevel", "(I)I", 2, "6"),
+    ("limit", "()I", 0, "105"),
+    ("bumpSeen", "()I", 0, "50"),
+    // `@ModifyVariable`: (3 + 100) × 2; (2 × 3) × 10 + 1, the second store untouched; (2 + 1) × 4.
+    ("offset", "(I)I", 3, "206"),
+    ("accumulate", "(I)I", 2, "61"),
+    ("spread", "(I)I", 2, "12"),
+    // `@ModifyReceiver`: the length of "abc!!".
+    ("nameLength", "()I", 0, "5"),
 ];
 
 #[test]
@@ -56,8 +92,9 @@ fn a_mixin_into_a_translated_class_is_woven_as_mixin_weaves_it() {
     let _ = fs::remove_dir_all(&root);
     let classes = root.join("classes");
     fs::create_dir_all(&classes).unwrap();
+    // With the local variable tables, as Gradle compiles mods (`-g`): handlers find locals by them.
     let mut javac = Command::new("javac");
-    javac.args(["-d", classes.to_str().unwrap()]);
+    javac.args(["-g", "-d", classes.to_str().unwrap()]);
     let mut stack = vec![here.join("tests/fixtures/weave")];
     while let Some(d) = stack.pop() {
         for e in fs::read_dir(d).unwrap().flatten() {
@@ -75,21 +112,39 @@ fn a_mixin_into_a_translated_class_is_woven_as_mixin_weaves_it() {
         .flatten()
         .map(|e| horizon_mod_translator::class::ClassFile::parse(&fs::read(e.path()).unwrap()).unwrap())
         .collect();
+    // Mixin applies the mixins a configuration lists, and only those.
+    let all: Vec<&horizon_mod_translator::class::ClassFile> = parsed.iter().collect();
+    let config = |classes: &[&str]| horizon_mod_translator::MixinConfig {
+        file: "weave.mixins.json".into(),
+        classes: classes.iter().map(|c| c.to_string()).collect(),
+        default_require: 1,
+        plugin: None,
+    };
+    let every = horizon_mod_translator::weave::plan_with(&all, &[config(&["weave/MachineMixin", "weave/GaugeMixin", "weave/ModeMixin"])]);
+    assert_eq!(every.weaves, horizon_mod_translator::weave::plan(&parsed).weaves);
+    let one = horizon_mod_translator::weave::plan_with(&all, &[config(&["weave/MachineMixin"])]);
+    assert!(!one.weaves.is_empty() && one.weaves.keys().all(|k| k.starts_with("weave/Machine.")));
+    assert!(horizon_mod_translator::weave::plan_with(&all, &[config(&["weave/OtherMixin"])]).weaves.is_empty());
+
+    // One class a file, as a bundle splits a mod (`emit_files`): the woven code calls across them.
     let mut program = horizon_mod_translator::codegen::Program::new(&parsed);
-    let module = program.emit();
+    let files = program.emit_files(1);
     assert!(program.unsupported.is_empty(), "{:?}", program.unsupported);
 
-    let krate = root.join("gen");
+    let krate = root.join("woven");
     fs::create_dir_all(krate.join("src")).unwrap();
     fs::write(
         krate.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"gen\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nhorizon-compat = {{ path = {:?} }}\n",
+            "[package]\nname = \"woven\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nhorizon-compat = {{ path = {:?} }}\n",
             here.join("../horizon-compat").canonicalize().unwrap()
         ),
     )
     .unwrap();
-    let mut main = String::from("mod woven;\nuse woven::*;\nuse horizon_compat::{Rt, V};\nfn main() {\n    horizon_compat::install();\n    let mut rt = Rt::new();\n    init(&mut rt);\n");
+    for (name, text) in &files {
+        fs::write(krate.join("src").join(name), text).unwrap();
+    }
+    let mut main = String::from("use woven::*;\nuse horizon_compat::{Rt, V};\nfn main() {\n    horizon_compat::install();\n    let mut rt = Rt::new();\n    init(&mut rt);\n");
     for (name, desc, arg, _) in CASES {
         let f = horizon_mod_translator::codegen::fn_name("weave/Probe", name, desc);
         let args = if desc.starts_with("()") { String::new() } else { format!("V::I({arg})") };
@@ -99,7 +154,6 @@ fn a_mixin_into_a_translated_class_is_woven_as_mixin_weaves_it() {
     }
     main.push_str("}\n");
     fs::write(krate.join("src/main.rs"), main).unwrap();
-    fs::write(krate.join("src/woven.rs"), &module).unwrap();
     let out = Command::new(env!("CARGO"))
         .args(["run", "-q", "--manifest-path"])
         .arg(krate.join("Cargo.toml"))

@@ -39,6 +39,25 @@ pub struct Code {
     pub bytes: Vec<u8>,
     /// (start, end, handler, catch class or "" for any).
     pub handlers: Vec<(u16, u16, u16, String)>,
+    /// Its local variables, as javac's `-g` records them (`LocalVariableTable`): empty without.
+    pub locals: Vec<LocalVar>,
+}
+
+/// A local variable while it is in scope: from offset `start` for `length` bytes, in `slot`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalVar {
+    pub start: u16,
+    pub length: u16,
+    pub name: String,
+    pub desc: String,
+    pub slot: u16,
+}
+
+impl LocalVar {
+    /// Whether it holds a value at the instruction at offset `pc`.
+    pub fn in_scope(&self, pc: usize) -> bool {
+        pc >= self.start as usize && pc < self.start as usize + self.length as usize
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +68,11 @@ pub struct Method {
     pub code: Option<Code>,
     /// Its annotations (`@SubscribeEvent`...), the class-file-only ones (a mixin's `@Inject`) too.
     pub annotations: Vec<Annotation>,
+    /// Each parameter's annotations (a handler's `@Local`), class-file-only ones too; empty when
+    /// none has any.
+    pub param_annotations: Vec<Vec<Annotation>>,
+    /// Its generic signature (`Signature`: `(Lcom/.../LocalRef<Ljava/lang/String;>;)V`), if any.
+    pub signature: Option<String>,
 }
 
 /// A runtime-visible annotation: its type and element values, each as text (a constant, an enum
@@ -187,6 +211,8 @@ impl ClassFile {
             let (access, name, desc) = (r.u2()?, r.u2()?, r.u2()?);
             let mut code = None;
             let mut annotations = Vec::new();
+            let mut param_annotations: Vec<Vec<Annotation>> = Vec::new();
+            let mut signature = None;
             for _ in 0..r.u2()? {
                 let an = r.u2()?;
                 let len = r.u4()? as usize;
@@ -195,6 +221,19 @@ impl ClassFile {
                 if matches!(cf.utf8(an)?.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
                     let more = cf.annotations(body)?;
                     annotations.extend(more);
+                }
+                if matches!(cf.utf8(an)?.as_str(), "RuntimeVisibleParameterAnnotations" | "RuntimeInvisibleParameterAnnotations") {
+                    let mut p = Reader { b: body, i: 0 };
+                    let n = p.u1()? as usize;
+                    param_annotations.resize(param_annotations.len().max(n), Vec::new());
+                    for each in param_annotations.iter_mut().take(n) {
+                        for _ in 0..p.u2()? {
+                            each.push(cf.annotation(&mut p)?);
+                        }
+                    }
+                }
+                if cf.utf8(an)? == "Signature" && body.len() == 2 {
+                    signature = Some(cf.utf8(u16::from_be_bytes([body[0], body[1]]))?);
                 }
                 if cf.utf8(an)? == "Code" {
                     let mut c = Reader { b: body, i: 0 };
@@ -207,10 +246,23 @@ impl ClassFile {
                         let class = if ty == 0 { String::new() } else { cf.class_name(ty)? };
                         handlers.push((start, end, handler, class));
                     }
-                    code = Some(Code { max_stack, max_locals, bytes, handlers });
+                    let mut locals = Vec::new();
+                    for _ in 0..c.u2()? {
+                        let can = c.u2()?;
+                        let clen = c.u4()? as usize;
+                        let cbody = c.take(clen)?;
+                        if cf.utf8(can)? == "LocalVariableTable" {
+                            let mut t = Reader { b: cbody, i: 0 };
+                            for _ in 0..t.u2()? {
+                                let (start, length, name, desc, slot) = (t.u2()?, t.u2()?, t.u2()?, t.u2()?, t.u2()?);
+                                locals.push(LocalVar { start, length, name: cf.utf8(name)?, desc: cf.utf8(desc)?, slot });
+                            }
+                        }
+                    }
+                    code = Some(Code { max_stack, max_locals, bytes, handlers, locals });
                 }
             }
-            cf.methods.push(Method { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, code, annotations });
+            cf.methods.push(Method { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, code, annotations, param_annotations, signature });
         }
         for _ in 0..r.u2()? {
             let an = r.u2()?;
