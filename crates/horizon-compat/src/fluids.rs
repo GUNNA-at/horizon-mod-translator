@@ -693,6 +693,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | FLUID_TYPE | TYPE_PROPERTIES | SOUND_ACTION | FLUID_INTERACTIONS | INTERACTION_INFO
     ) || is_fluid_class(owner)
         || name == "getFluidState"
+        || (matches!(owner, "net/minecraft/tags/BlockTags" | "net/minecraft/tags/ItemTags") && name == "create")
 }
 
 /// A fluid call, or None when this module doesn't model it.
@@ -813,6 +814,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("net/minecraft/tags/FluidTags", "create") => {
             let location = rt.str_of(a(0)).unwrap_or("").to_owned();
             tag_key(rt, "fluid", &location)
+        }
+        // NeoForge's public `BlockTags.create(location)` and `ItemTags.create(location)`: the same
+        // keys `TagKey.create(Registries.BLOCK / ITEM, location)` gives.
+        ("net/minecraft/tags/BlockTags" | "net/minecraft/tags/ItemTags", "create") if desc == "(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/tags/TagKey;" => {
+            let location = crate::neo::location(rt, a(0));
+            tag_key(rt, if owner == "net/minecraft/tags/BlockTags" { "block" } else { "item" }, &location)
         }
         (TAG_KEY, "location") => rt.get_field(a(0), "$location"),
         (TAG_KEY, "registry") => rt.get_field(a(0), "$registry"),

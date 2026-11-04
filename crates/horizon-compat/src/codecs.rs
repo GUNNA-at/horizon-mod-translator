@@ -98,6 +98,21 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("com/mojang/serialization/JsonOps", "INSTANCE" | "COMPRESSED") => rt.intern("compat:json-ops".into(), |rt| rt.new_object("com/mojang/serialization/JsonOps")),
         ("net/minecraft/resources/ResourceLocation", "CODEC") => native(rt, "resource_location"),
         ("net/minecraft/core/BlockPos", "CODEC") => native(rt, "block_pos"),
+        // `{dimension, pos}`, as vanilla's record codec reads and writes it.
+        ("net/minecraft/core/GlobalPos", "CODEC") => rt.intern("compat:codec/global_pos".into(), |rt| {
+            let ctor = crate::functions::record_constructor(rt, "net/minecraft/core/GlobalPos");
+            let dimension = native(rt, "resource_key/dimension");
+            let pos = native(rt, "block_pos");
+            let mut parts = vec![ctor];
+            for (name, c) in [("dimension", dimension), ("pos", pos)] {
+                let n = rt.string(name);
+                let field = codec(rt, "compat:codec/field", vec![n, c]);
+                let getter = crate::functions::component(rt, name);
+                parts.push(codec(rt, "compat:codec/getter", vec![field, getter]));
+            }
+            let record = codec(rt, "compat:codec/record", parts);
+            codec(rt, "compat:codec/of_map", vec![record])
+        }),
         ("net/minecraft/core/Vec3i", "CODEC") => native(rt, "vec3i"),
         ("net/minecraft/world/phys/Vec3", "CODEC") => native(rt, "vec3"),
         ("net/minecraft/core/UUIDUtil", "CODEC") => native(rt, "uuid"),
@@ -1296,6 +1311,32 @@ mod tests {
 
     /// Vanilla's value codecs write what 1.21.1 writes (`Vec3` three doubles, a UUID four ints, a
     /// rotation its serialized name) and read it back.
+    /// `GlobalPos.CODEC` reads and writes `{dimension, pos}`, the position as three ints, as vanilla's
+    /// record codec does.
+    #[test]
+    fn a_global_position_reads_and_writes_as_vanillas_codec() {
+        let mut rt = Rt::new();
+        crate::install();
+        // What generated code does for an object no mod class is: the API call by the method's key.
+        fn vcall(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+            crate::api::call(rt, key, args)
+        }
+        rt.vcall = Some(vcall);
+        let codec = crate::api::get_static(&mut rt, "net/minecraft/core/GlobalPos.CODEC");
+        let j: Json = serde_json::from_str(r#"{"dimension": "minecraft:the_end", "pos": [4, 64, -7]}"#).unwrap();
+        let at = decode(&mut rt, codec, &j).unwrap();
+        let dimension = crate::api::call(&mut rt, "net/minecraft/core/GlobalPos.dimension.()Lnet/minecraft/resources/ResourceKey;", &[at]);
+        assert_eq!(rt.str_of(dimension), Some("dimension#minecraft:the_end"));
+        let pos = crate::api::call(&mut rt, "net/minecraft/core/GlobalPos.pos.()Lnet/minecraft/core/BlockPos;", &[at]);
+        assert_eq!(crate::api::pos_of(&rt, pos), [4, 64, -7]);
+        let written = encode(&mut rt, codec, at).unwrap();
+        let mut want = BTreeMap::new();
+        want.insert("dimension".to_owned(), Nbt::String("minecraft:the_end".into()));
+        want.insert("pos".to_owned(), Nbt::IntArray(vec![4, 64, -7]));
+        assert_eq!(written, Nbt::Compound(want));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     #[test]
     fn vanilla_value_codecs_write_and_read_as_vanillas() {
         let mut rt = Rt::new();

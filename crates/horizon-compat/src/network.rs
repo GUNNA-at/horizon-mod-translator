@@ -194,6 +194,17 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/core/particles/ParticleTypes", "STREAM_CODEC") => PARTICLE,
         // Its length a VarInt, as `BYTE_ARRAY`'s (only without the limit).
         (NEO_CODECS, "UNBOUNDED_BYTE_ARRAY") => BYTES,
+        // A dimension's key, then a position (vanilla's `composite`).
+        ("net/minecraft/core/GlobalPos", "STREAM_CODEC") => {
+            return Some(rt.intern("compat:stream/global_pos".into(), |rt| {
+                let ctor = crate::functions::record_constructor(rt, "net/minecraft/core/GlobalPos");
+                let registry = rt.string("dimension");
+                let dimension = make(rt, RESOURCE_KEY, vec![registry]);
+                let (of_dimension, of_pos) = (crate::functions::component(rt, "dimension"), crate::functions::component(rt, "pos"));
+                let pos = constant(rt, BLOCK_POS);
+                make(rt, COMPOSITE, vec![ctor, dimension, of_dimension, pos, of_pos])
+            }));
+        }
         // The block states' id map: block states travel by their text.
         ("net/minecraft/world/level/block/Block", "BLOCK_STATE_REGISTRY") => {
             return Some(rt.intern("compat:block-state-ids".into(), |rt| rt.new_object("net/minecraft/core/IdMapper")));
@@ -1794,6 +1805,33 @@ mod tests {
         let (bytes, back) = round_trip(&mut rt, codec, nether);
         assert_eq!(bytes, [&[20u8][..], b"minecraft:the_nether"].concat(), "a UTF-8 string after its length");
         assert_eq!(rt.str_of(back), rt.str_of(nether));
+    }
+
+    /// A `GlobalPos` (Lodestone-like trackers, Max Henkel's mods): the dimension's location, then the
+    /// position as a long (vanilla's `composite` of `ResourceKey.streamCodec` and `BlockPos`'s);
+    /// `GlobalPos.of` builds it as its constructor does.
+    #[test]
+    fn a_global_position_travels_as_vanillas_does() {
+        let mut rt = Rt::new();
+        crate::install();
+        // What generated code does for an object no mod class is: the API call by the method's key.
+        fn vcall(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+            crate::api::call(rt, key, args)
+        }
+        rt.vcall = Some(vcall);
+        let codec = sv(&mut rt, "net/minecraft/core/GlobalPos.STREAM_CODEC");
+        let nether = crate::api::get_static(&mut rt, "net/minecraft/world/level/Level.NETHER");
+        let pos = crate::api::block_pos(&mut rt, 1, 2, 3);
+        let at = crate::api::call(&mut rt, "net/minecraft/core/GlobalPos.of.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/GlobalPos;", &[nether, pos]);
+        let (bytes, back) = round_trip(&mut rt, codec, at);
+        // BlockPos.asLong(1, 2, 3): x << 38 | z << 12 | y, as 8 bytes.
+        let long: i64 = (1i64 << 38) | (3i64 << 12) | 2;
+        assert_eq!(bytes, [&[20u8][..], b"minecraft:the_nether", &long.to_be_bytes()].concat());
+        let dimension = crate::api::call(&mut rt, "net/minecraft/core/GlobalPos.dimension.()Lnet/minecraft/resources/ResourceKey;", &[back]);
+        assert_eq!(rt.str_of(dimension), Some("dimension#minecraft:the_nether"));
+        let p = crate::api::call(&mut rt, "net/minecraft/core/GlobalPos.pos.()Lnet/minecraft/core/BlockPos;", &[back]);
+        assert_eq!(crate::api::pos_of(&rt, p), [1, 2, 3]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Particles in a packet (`ParticleTypes.STREAM_CODEC`): a plain type, a block's and an item's

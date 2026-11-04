@@ -11,6 +11,18 @@ fn combinator(rt: &mut Rt, kind: &'static str, parts: Vec<V>) -> V {
     rt.alloc(kind, Data::Array(parts))
 }
 
+/// Vanilla record `class`'s constructor as a function of its components.
+pub(crate) fn record_constructor(rt: &mut Rt, class: &str) -> V {
+    let c = rt.string(class);
+    combinator(rt, "compat:fn/record", vec![c])
+}
+
+/// A record component's accessor (`name`) as a function of the record.
+pub(crate) fn component(rt: &mut Rt, name: &str) -> V {
+    let n = rt.string(name);
+    combinator(rt, "compat:fn/component", vec![n])
+}
+
 /// A combinator's functional method (`test`, `apply`, `accept`, `get`), invoked by `key` with
 /// `args` after the receiver.
 fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
@@ -36,6 +48,17 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
             V::Void
         }
         "compat:fn/identity" => args.first().copied().unwrap_or_default(),
+        // A vanilla record's constructor as a function (`GlobalPos::of`): [class].
+        "compat:fn/record" => {
+            let class = rt.str_of(part(0)).unwrap_or("").to_owned();
+            crate::records::make(rt, &class, args)
+        }
+        // A component's accessor as a function (`GlobalPos::pos`): [name].
+        "compat:fn/component" => {
+            let name = rt.str_of(part(0)).unwrap_or("").to_owned();
+            let name: &'static str = rt.static_key(&name);
+            rt.get_field(args.first().copied().unwrap_or_default(), name)
+        }
         "compat:fn/constant" => part(0),
         // `Suppliers.memoize`: the supplier runs once; [supplier, value, done].
         "compat:fn/memo" => {

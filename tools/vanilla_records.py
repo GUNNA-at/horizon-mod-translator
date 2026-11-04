@@ -5,6 +5,8 @@ A translated mod builds vanilla records (`StructureTemplate.StructureBlockInfo`)
 constructor and reads them back through their accessors; the runtime answers both from the components
 each record declares (its class file's `Record` attribute).
 
+Their static factories that only call a constructor with their own arguments (`GlobalPos.of`) too.
+
 The same for vanilla's plain data classes (`Tuple`, `LevelResource`, `ModelLayerLocation`): a class
 extending `Object` whose constructor does nothing but store its arguments in its fields, read back by
 getters that only return a field and written by setters that only set one, as their bytecode shows.
@@ -188,7 +190,7 @@ def parse_class(data):
 
     pos, fields = members(pos)
     pos, methods = members(pos)
-    return {"access": access, "name": cls(this), "super": cls(sup) if sup else None, "fields": fields, "methods": methods, "ref": ref}
+    return {"access": access, "name": cls(this), "super": cls(sup) if sup else None, "fields": fields, "methods": methods, "ref": ref, "cls_ref": cls}
 
 
 def params(desc):
@@ -301,6 +303,41 @@ def instructions(code):
             p += 1
 
 
+NEW, DUP, ARETURN = 0xBB, 0x59, 0xB0
+
+
+def factory(c, desc, code):
+    """The constructor descriptor a static method only calls with its own arguments, in order, and
+    returns (`GlobalPos.of(dimension, pos)` is `new GlobalPos(dimension, pos)`), or None."""
+    if code is None or len(code) < 8 or code[0] != NEW or code[3] != DUP:
+        return None
+    if c["cls_ref"](struct.unpack_from(">H", code, 1)[0]) != c["name"] or not desc.endswith(")L" + c["name"] + ";"):
+        return None
+    ps = params(desc)
+    p, slot = 4, 0
+    for d in ps:
+        r = load(code, p)
+        if r is None or r[0] != slot:
+            return None
+        p = r[1]
+        slot += 2 if d in ("J", "D") else 1
+    if p + 4 != len(code) or code[p] != INVOKESPECIAL or code[p + 3] != ARETURN:
+        return None
+    owner, name, init = c["ref"](struct.unpack_from(">H", code, p + 1)[0])
+    if owner != c["name"] or name != "<init>" or params(init) != ps:
+        return None
+    return init
+
+
+def factories(c):
+    """`<name><desc>=<constructor desc>` for each of a class's static factories."""
+    out = []
+    for acc, name, desc, code in c["methods"]:
+        if acc & ACC_STATIC and name != "<clinit>" and (init := factory(c, desc, code)) is not None:
+            out.append(f"{name}{desc}={init}")
+    return out
+
+
 def own_fields_read(c, code):
     return {c["ref"](struct.unpack_from(">H", code, p + 1)[0])[1] for p, op in instructions(code) if op == GETFIELD and c["ref"](struct.unpack_from(">H", code, p + 1)[0])[0] == c["name"]}
 
@@ -343,28 +380,30 @@ def data_class(c):
 
 
 def modelled_by_hand(classes):
-    """The classes horizon-compat's own modules name (its sources, past the generated tables and
-    `records.rs`, which answers from them)."""
+    """The classes horizon-compat's own modules name (their code, not their tests; past the
+    generated tables and `records.rs`, which answers from them)."""
     text = ""
     for path in glob.glob("crates/horizon-compat/src/*.rs") + glob.glob("crates/horizon-compat-core/src/*.rs"):
         if os.path.basename(path) not in (os.path.basename(OUT), "records.rs"):
-            text += open(path, encoding="utf-8").read()
+            text += open(path, encoding="utf-8").read().split("#[cfg(test)]")[0]
     return {c for c in classes if f'"{c}"' in text or f'"{c}.' in text or f"{c}\"" in text}
 
 
 def main():
     jar = sys.argv[1]
-    found, data, enums, constants = [], {}, [], {}
+    found, data, enums, constants, made_by = [], {}, [], {}, {}
     with zipfile.ZipFile(jar) as z:
         for name in z.namelist():
             if not (name.endswith(".class") and name.startswith(PREFIXES)):
                 continue
             raw = z.read(name)
             r = parse(raw)
+            c = parse_class(raw)
             if r:
                 found.append(r)
+                if c is not None and (f := factories(c)):
+                    made_by[c["name"]] = f
                 continue
-            c = parse_class(raw)
             if c is None:
                 continue
             if c["access"] & ACC_ENUM:
@@ -373,10 +412,15 @@ def main():
                 constants[c["name"]] = [n for acc, n, _, _ in c["fields"] if acc & ACC_ENUM]
             elif (m := data_class(c)) is not None:
                 data[c["name"]] = m
+                if f := factories(c):
+                    made_by[c["name"]] = f
     found.sort()
     enums.sort()
     for c in modelled_by_hand(data):
         del data[c]
+    # Factories of the records and data classes answered here (a record the runtime models by hand
+    # answers its own: it comes first).
+    made_by = {c: f for c, f in made_by.items() if c in data or c not in modelled_by_hand(made_by)}
     # An enum the runtime models by hand keeps its own constants (directions are natives).
     for c in modelled_by_hand(constants):
         del constants[c]
@@ -404,6 +448,13 @@ def main():
         lines.append(f'    "{c}",')
     lines.append("];")
     lines.append("")
+    lines.append("/// (class, factories): the static methods of the records and data classes above that only build")
+    lines.append("/// one from their arguments (`<name><desc>=<constructor desc>`, `|` between them).")
+    lines.append(f"pub(crate) const FACTORIES: [(&str, &str); {len(made_by)}] = [")
+    for c in sorted(made_by):
+        lines.append(f'    ("{c}", "' + "|".join(made_by[c]) + '"),')
+    lines.append("];")
+    lines.append("")
     lines.append("/// The constants of the enums the runtime doesn't model by hand, in ordinal order.")
     kept = sorted(c for c in constants if constants[c])
     lines.append(f"pub(crate) const ENUM_CONSTANTS: [(&str, &str); {len(kept)}] = [")
@@ -412,7 +463,7 @@ def main():
     lines.append("];")
     with open(OUT, "w") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"{len(found)} records, {len(data)} data classes, {len(enums)} enums ({len(kept)} with their constants) -> {OUT}")
+    print(f"{len(found)} records, {len(data)} data classes, {len(made_by)} with factories, {len(enums)} enums ({len(kept)} with their constants) -> {OUT}")
 
 
 main()

@@ -614,13 +614,14 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 38] = [
+const CHAIN: [Module; 39] = [
     mutable_pos,
     crate::mixin::call,
     crate::attachments::call,
     crate::sounds::call,
     crate::particles::call,
     crate::food::call,
+    crate::attributes::call,
     crate::item_use::call,
     crate::network::call,
     crate::fluids::call,
@@ -658,13 +659,14 @@ const CHAIN: [Module; 38] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 38] = [
+const CLAIMS: [Claims; 39] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::mixin::claims,
     crate::attachments::claims,
     crate::sounds::claims,
     crate::particles::claims,
     crate::food::claims,
+    crate::attributes::claims,
     crate::item_use::claims,
     crate::network::claims,
     crate::fluids::claims,
@@ -700,13 +702,14 @@ const CLAIMS: [Claims; 38] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 38] = [
+const MODULE_NAMES: [&str; 39] = [
     "mutable_pos",
     "mixin",
     "attachments",
     "sounds",
     "particles",
     "food",
+    "attributes",
     "item_use",
     "network",
     "fluids",
@@ -1623,6 +1626,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::sounds::get_static(rt, o, f))
             .or_else(|| crate::particles::get_static(rt, o, f))
             .or_else(|| crate::food::get_static(rt, o, f))
+            .or_else(|| crate::attributes::get_static(rt, o, f))
             .or_else(|| crate::events::get_static(rt, o, f))
             .or_else(|| crate::gui::get_static(rt, o, f))
             .or_else(|| crate::screens::get_static(rt, o, f))
@@ -1656,6 +1660,8 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         "net/neoforged/neoforge/common/NeoForge.EVENT_BUS" => rt.intern("compat:game-bus".into(), |rt| rt.new_object("net/neoforged/bus/api/IEventBus")),
         // The side, one object per constant: catnip compares `FMLLoader.getDist() == Dist.CLIENT`.
         "net/neoforged/api/distmarker/Dist.CLIENT" | "net/neoforged/fml/loading/FMLEnvironment.dist" => api_enum(rt, "net/neoforged/api/distmarker/Dist", "CLIENT", 0),
+        // A player's game is FML's production (as `FMLLoader.isProduction()` answers): no dev tools.
+        "net/neoforged/fml/loading/FMLEnvironment.production" => V::I(1),
         "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER" => api_enum(rt, "net/neoforged/api/distmarker/Dist", "DEDICATED_SERVER", 1),
         // Which way a packet goes (vanilla's order).
         "net/minecraft/network/protocol/PacketFlow.SERVERBOUND" => api_enum(rt, PACKET_FLOW, "SERVERBOUND", 0),

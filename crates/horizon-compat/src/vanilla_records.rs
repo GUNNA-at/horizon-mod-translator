@@ -2197,6 +2197,47 @@ pub(crate) const ENUMS: [&str; 488] = [
     "net/neoforged/neoforge/server/command/ConfigCommand$ServerModConfigType",
 ];
 
+/// (class, factories): the static methods of the records and data classes above that only build
+/// one from their arguments (`<name><desc>=<constructor desc>`, `|` between them).
+pub(crate) const FACTORIES: [(&str, &str); 36] = [
+    ("com/mojang/realmsclient/util/TextRenderingUtils$LineSegment", "text(Ljava/lang/String;)Lcom/mojang/realmsclient/util/TextRenderingUtils$LineSegment;=(Ljava/lang/String;)V"),
+    ("net/minecraft/advancements/Criterion", "lambda$criterionCodec$0(Lnet/minecraft/advancements/CriterionTrigger;Lnet/minecraft/advancements/CriterionTriggerInstance;)Lnet/minecraft/advancements/Criterion;=(Lnet/minecraft/advancements/CriterionTrigger;Lnet/minecraft/advancements/CriterionTriggerInstance;)V"),
+    ("net/minecraft/advancements/critereon/ItemCustomDataPredicate", "customData(Lnet/minecraft/advancements/critereon/NbtPredicate;)Lnet/minecraft/advancements/critereon/ItemCustomDataPredicate;=(Lnet/minecraft/advancements/critereon/NbtPredicate;)V"),
+    ("net/minecraft/advancements/critereon/PlayerPredicate$StatMatcher", "lambda$createTypedCodec$1(Lnet/minecraft/stats/StatType;Lnet/minecraft/core/Holder;Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)Lnet/minecraft/advancements/critereon/PlayerPredicate$StatMatcher;=(Lnet/minecraft/stats/StatType;Lnet/minecraft/core/Holder;Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)V"),
+    ("net/minecraft/advancements/critereon/SlimePredicate", "sized(Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)Lnet/minecraft/advancements/critereon/SlimePredicate;=(Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)V"),
+    ("net/minecraft/client/model/geom/PartPose", "offsetAndRotation(FFFFFF)Lnet/minecraft/client/model/geom/PartPose;=(FFFFFF)V"),
+    ("net/minecraft/client/telemetry/TelemetryProperty", "create(Ljava/lang/String;Ljava/lang/String;Lcom/mojang/serialization/Codec;Lnet/minecraft/client/telemetry/TelemetryProperty$Exporter;)Lnet/minecraft/client/telemetry/TelemetryProperty;=(Ljava/lang/String;Ljava/lang/String;Lcom/mojang/serialization/Codec;Lnet/minecraft/client/telemetry/TelemetryProperty$Exporter;)V"),
+    ("net/minecraft/commands/arguments/ResourceKeyArgument", "key(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/commands/arguments/ResourceKeyArgument;=(Lnet/minecraft/resources/ResourceKey;)V"),
+    ("net/minecraft/commands/arguments/ResourceOrTagKeyArgument", "resourceOrTagKey(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/commands/arguments/ResourceOrTagKeyArgument;=(Lnet/minecraft/resources/ResourceKey;)V"),
+    ("net/minecraft/commands/arguments/TimeArgument", "time(I)Lnet/minecraft/commands/arguments/TimeArgument;=(I)V"),
+    ("net/minecraft/commands/arguments/coordinates/Vec2Argument", "vec2(Z)Lnet/minecraft/commands/arguments/coordinates/Vec2Argument;=(Z)V"),
+    ("net/minecraft/commands/arguments/coordinates/Vec3Argument", "vec3(Z)Lnet/minecraft/commands/arguments/coordinates/Vec3Argument;=(Z)V"),
+    ("net/minecraft/core/BlockBox", "of(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockBox;=(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)V"),
+    ("net/minecraft/core/GlobalPos", "of(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/GlobalPos;=(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/BlockPos;)V"),
+    ("net/minecraft/core/RegistryAccess$RegistryEntry", "fromUntyped(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/Registry;)Lnet/minecraft/core/RegistryAccess$RegistryEntry;=(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/Registry;)V"),
+    ("net/minecraft/core/component/TypedDataComponent", "createUnchecked(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Lnet/minecraft/core/component/TypedDataComponent;=(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)V"),
+    ("net/minecraft/core/particles/ColorParticleOption", "create(Lnet/minecraft/core/particles/ParticleType;I)Lnet/minecraft/core/particles/ColorParticleOption;=(Lnet/minecraft/core/particles/ParticleType;I)V"),
+    ("net/minecraft/data/models/model/TextureSlot", "create(Ljava/lang/String;Lnet/minecraft/data/models/model/TextureSlot;)Lnet/minecraft/data/models/model/TextureSlot;=(Ljava/lang/String;Lnet/minecraft/data/models/model/TextureSlot;)V"),
+    ("net/minecraft/data/recipes/SpecialRecipeBuilder", "special(Ljava/util/function/Function;)Lnet/minecraft/data/recipes/SpecialRecipeBuilder;=(Ljava/util/function/Function;)V"),
+    ("net/minecraft/network/chat/HoverEvent$EntityTooltipInfo", "lambda$legacyCreate$4(Lnet/minecraft/world/entity/EntityType;Ljava/util/UUID;Lnet/minecraft/network/chat/Component;)Lnet/minecraft/network/chat/HoverEvent$EntityTooltipInfo;=(Lnet/minecraft/world/entity/EntityType;Ljava/util/UUID;Lnet/minecraft/network/chat/Component;)V"),
+    ("net/minecraft/resources/RegistryFileCodec", "create(Lnet/minecraft/resources/ResourceKey;Lcom/mojang/serialization/Codec;Z)Lnet/minecraft/resources/RegistryFileCodec;=(Lnet/minecraft/resources/ResourceKey;Lcom/mojang/serialization/Codec;Z)V"),
+    ("net/minecraft/resources/RegistryFixedCodec", "create(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/resources/RegistryFixedCodec;=(Lnet/minecraft/resources/ResourceKey;)V"),
+    ("net/minecraft/util/KeyDispatchDataCodec", "of(Lcom/mojang/serialization/MapCodec;)Lnet/minecraft/util/KeyDispatchDataCodec;=(Lcom/mojang/serialization/MapCodec;)V"),
+    ("net/minecraft/util/parsing/packrat/Atom", "of(Ljava/lang/String;)Lnet/minecraft/util/parsing/packrat/Atom;=(Ljava/lang/String;)V"),
+    ("net/minecraft/world/entity/ai/Brain$MemoryValue", "createUnchecked(Lnet/minecraft/world/entity/ai/memory/MemoryModuleType;Ljava/util/Optional;)Lnet/minecraft/world/entity/ai/Brain$MemoryValue;=(Lnet/minecraft/world/entity/ai/memory/MemoryModuleType;Ljava/util/Optional;)V"),
+    ("net/minecraft/world/entity/ai/behavior/declarative/BehaviorBuilder", "create(Lnet/minecraft/world/entity/ai/behavior/declarative/BehaviorBuilder$TriggerWithResult;)Lnet/minecraft/world/entity/ai/behavior/declarative/BehaviorBuilder;=(Lnet/minecraft/world/entity/ai/behavior/declarative/BehaviorBuilder$TriggerWithResult;)V"),
+    ("net/minecraft/world/entity/ai/memory/ExpirableValue", "of(Ljava/lang/Object;J)Lnet/minecraft/world/entity/ai/memory/ExpirableValue;=(Ljava/lang/Object;J)V"),
+    ("net/minecraft/world/level/block/state/predicate/BlockPredicate", "forBlock(Lnet/minecraft/world/level/block/Block;)Lnet/minecraft/world/level/block/state/predicate/BlockPredicate;=(Lnet/minecraft/world/level/block/Block;)V"),
+    ("net/minecraft/world/level/gameevent/GameEvent$Context", "of(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/gameevent/GameEvent$Context;=(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/level/block/state/BlockState;)V"),
+    ("net/minecraft/world/level/levelgen/carver/CarverDebugSettings", "of(ZLnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/levelgen/carver/CarverDebugSettings;=(ZLnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/state/BlockState;)V"),
+    ("net/minecraft/world/level/storage/loot/providers/number/ConstantValue", "exactly(F)Lnet/minecraft/world/level/storage/loot/providers/number/ConstantValue;=(F)V"),
+    ("net/minecraft/world/level/storage/loot/providers/number/EnchantmentLevelProvider", "forEnchantmentLevel(Lnet/minecraft/world/item/enchantment/LevelBasedValue;)Lnet/minecraft/world/level/storage/loot/providers/number/EnchantmentLevelProvider;=(Lnet/minecraft/world/item/enchantment/LevelBasedValue;)V"),
+    ("net/neoforged/neoforge/client/model/renderable/BakedModelRenderable", "of(Lnet/minecraft/client/resources/model/BakedModel;)Lnet/neoforged/neoforge/client/model/renderable/BakedModelRenderable;=(Lnet/minecraft/client/resources/model/BakedModel;)V"),
+    ("net/neoforged/neoforge/client/model/renderable/CompositeRenderable$Transforms", "of(Lcom/google/common/collect/ImmutableMap;)Lnet/neoforged/neoforge/client/model/renderable/CompositeRenderable$Transforms;=(Lcom/google/common/collect/ImmutableMap;)V"),
+    ("net/neoforged/neoforge/common/world/ClimateSettingsBuilder", "create(ZFLnet/minecraft/world/level/biome/Biome$TemperatureModifier;F)Lnet/neoforged/neoforge/common/world/ClimateSettingsBuilder;=(ZFLnet/minecraft/world/level/biome/Biome$TemperatureModifier;F)V"),
+    ("net/neoforged/neoforge/server/command/EnumArgument", "enumArgument(Ljava/lang/Class;)Lnet/neoforged/neoforge/server/command/EnumArgument;=(Ljava/lang/Class;)V"),
+];
+
 /// The constants of the enums the runtime doesn't model by hand, in ordinal order.
 pub(crate) const ENUM_CONSTANTS: [(&str, &str); 365] = [
     ("com/mojang/blaze3d/audio/Library$Pool", "STATIC,STREAMING"),

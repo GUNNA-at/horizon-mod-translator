@@ -8,6 +8,7 @@ pub use horizon_compat_core::host;
 pub mod api;
 pub mod api_common;
 pub mod attachments;
+pub mod attributes;
 pub mod blocks;
 pub mod codecs;
 pub mod crafting;

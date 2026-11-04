@@ -58,6 +58,11 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match owner {
         VISIBILITY => VISIBILITIES.iter().position(|n| *n == field).map(|i| visibility(rt, i)),
         "net/minecraft/world/item/CreativeModeTabs" if VANILLA_TABS.contains(&field) => Some(rt.string(&format!("creative_mode_tab#minecraft:{}", field.to_ascii_lowercase()))),
+        // The feature flags a vanilla world has on: the one set this runtime keeps (everything the
+        // game has is enabled; `contains` answers yes).
+        "net/minecraft/world/flag/FeatureFlags" if matches!(field, "VANILLA_SET" | "DEFAULT_FLAGS") => {
+            Some(rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet")))
+        }
         _ => None,
     }
 }

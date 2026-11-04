@@ -1710,6 +1710,25 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       `values()` (a new array each call) and `valueOf` (or `IllegalArgumentException` with Java's
       text). The 66 enums modelled by hand (directions are natives) keep their own. Test
       `records::tests::a_vanilla_enums_constants_come_from_its_class`.
+    - Static factories that only call a constructor with their own arguments, read from the
+      bytecode too (36 classes: `GlobalPos.of`...), make the object as that constructor does. The
+      table generator now reads the runtime's code without its tests (a test naming a class made it
+      look modelled by hand).
+    - `GlobalPos.CODEC` (`{dimension, pos}`) and `STREAM_CODEC` (the dimension's location, then the
+      position as a long), built from a record constructor and component accessors as function
+      objects (`compat:fn/record`, `compat:fn/component`). Tests
+      `codecs::tests::a_global_position_reads_and_writes_as_vanillas_codec`,
+      `network::tests::a_global_position_travels_as_vanillas_does` (bytes written out by hand).
+    - New module `attributes.rs`: vanilla's 31 `Attributes` holders under the ids 1.21.1's
+      initialiser registers (`minecraft:generic.attack_damage`), the 42 `Enchantments` keys,
+      `Item.BASE_ATTACK_DAMAGE_ID`/`BASE_ATTACK_SPEED_ID`, `ItemAttributeModifiers.builder()`,
+      `add`, `build`, `withModifierAdded`, `EMPTY` (vanilla's record; the main hand's attack damage
+      and speed kept beside it as `SwordItem.createAttributes` keeps them). Tests
+      `attributes::tests::a_weapons_modifiers_read_back_as_built`,
+      `enchantment_constants_are_the_keys_of_vanillas_enchantments`.
+    - NeoForge's public `BlockTags.create`/`ItemTags.create` (FarmersDelight's 48 calls),
+      `FMLEnvironment.production` (FramedBlocks' 527: a player's game is FML's production),
+      `FeatureFlags.VANILLA_SET`/`DEFAULT_FLAGS`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

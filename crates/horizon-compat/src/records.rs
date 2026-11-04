@@ -8,7 +8,7 @@
 //! constructors that only store their arguments, the getters and setters that only read and write a
 //! field, and `equals`/`hashCode` as the class has them (`Object`'s, or field by field), all read
 //! from their bytecode. And an enum constant's `equals` and `hashCode`, `Enum`'s: identity.
-use crate::vanilla_records::{DATA_CLASSES, ENUMS, ENUM_CONSTANTS, RECORDS};
+use crate::vanilla_records::{DATA_CLASSES, ENUMS, ENUM_CONSTANTS, FACTORIES, RECORDS};
 use crate::{Data, Rt, V};
 
 /// The record `class`'s components (`name`, descriptor), in declaration order.
@@ -40,6 +40,26 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || members(owner).is_some()
         || (matches!(name, "equals" | "hashCode") && ENUMS.binary_search(&owner).is_ok())
         || (matches!(name, "values" | "valueOf") && constants(owner).is_some())
+        || FACTORIES.binary_search_by(|(c, _)| (*c).cmp(owner)).is_ok()
+}
+
+/// The constructor a static factory of `class` (a record's or data class's: `GlobalPos.of`) only
+/// calls with its own arguments, by the factory's name and descriptor.
+fn factory(class: &str, name: &str, desc: &str) -> Option<(&'static str, &'static str)> {
+    let i = FACTORIES.binary_search_by(|(c, _)| (*c).cmp(class)).ok()?;
+    let (c, list) = FACTORIES[i];
+    list.split('|').find_map(|f| f.strip_prefix(name)?.strip_prefix(desc)?.strip_prefix('=')).map(|init| (c, init))
+}
+
+/// A record of `class` made from its components, in order (`GlobalPos::of` as a function).
+pub(crate) fn make(rt: &mut Rt, class: &str, args: &[V]) -> V {
+    let Ok(i) = RECORDS.binary_search_by(|(c, _)| (*c).cmp(class)) else { return V::NULL };
+    let class = RECORDS[i].0;
+    let o = rt.new_object(class);
+    for (i, (n, _)) in components(class).unwrap_or_default().iter().enumerate() {
+        rt.put_field(o, n, args.get(i).copied().unwrap_or_default());
+    }
+    o
 }
 
 /// The constants of a vanilla enum the runtime doesn't model by hand, in ordinal order.
@@ -144,6 +164,16 @@ fn hash_of(rt: &mut Rt, v: V) -> i32 {
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
+    // A static factory: the object its constructor makes of the same arguments.
+    if let Some((class, init)) = factory(owner, name, desc) {
+        let o = rt.new_object(class);
+        let mut with_this = Vec::with_capacity(args.len() + 1);
+        with_this.push(o);
+        with_this.extend_from_slice(args);
+        let init_key = rt.static_key(&format!("{class}.<init>.{init}"));
+        crate::api::call(rt, init_key, &with_this);
+        return Some(o);
+    }
     if let Some(m) = members(owner) {
         return data_call(rt, owner, m, name, desc, args);
     }
@@ -156,7 +186,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             ("values", _) if desc.starts_with("()[") => {
                 let (class, names) = constants(owner)?;
                 let all: Vec<V> = names.split(',').enumerate().map(|(i, n)| crate::api::api_enum(rt, class, n, i as i32)).collect();
-                Some(rt.alloc("[", Data::Array(all)))
+                let array: &'static str = rt.static_key(&format!("[L{class};"));
+                Some(rt.alloc(array, Data::Array(all)))
             }
             // `valueOf(name)`: the constant, or `IllegalArgumentException` as `Enum.valueOf` throws.
             ("valueOf", _) if desc.starts_with("(Ljava/lang/String;)") => {
@@ -383,7 +414,9 @@ mod tests {
             for e in std::fs::read_dir(dir).unwrap() {
                 let path = e.unwrap().path();
                 if path.extension().is_some_and(|x| x == "rs") && !path.ends_with("vanilla_records.rs") && !path.ends_with("records.rs") {
-                    text += &std::fs::read_to_string(&path).unwrap();
+                    // The module's code, not its tests.
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    text += source.split("#[cfg(test)]").next().unwrap_or("");
                 }
             }
         }
