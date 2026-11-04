@@ -105,9 +105,8 @@ impl ParsedModels {
                     }
                 }
             };
-            if let Some(parent) = &model.parent {
-                pending.push(parent.clone());
-            }
+            // Its parent, and its composite children's: each resolves through its own.
+            pending.extend(model.parents().into_iter().map(str::to_owned));
             models.insert(name, model);
         }
         Ok(ModelLibrary::from_shared(models)?)
@@ -120,8 +119,14 @@ impl ParsedModels {
 }
 
 /// A NeoForge OBJ model with its mesh, read beside it from the same resources
-/// ([`horizon_assets::obj::load`]). One that does not read is logged and draws nothing.
+/// ([`horizon_assets::obj::load`]), and so a composite's OBJ children. One that does not read is
+/// logged and draws nothing.
 fn with_mesh(mut model: CuboidModel, root: &Path) -> CuboidModel {
+    for (_, child) in model.children.iter_mut().flatten() {
+        if child.obj.is_some() || child.children.is_some() {
+            *child = Arc::new(with_mesh((**child).clone(), root));
+        }
+    }
     if let Some(geometry) = model.obj.as_mut() {
         let read = |id: &str| {
             let (namespace, path) = id.split_once(':')?;

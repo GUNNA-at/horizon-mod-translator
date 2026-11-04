@@ -66,6 +66,9 @@ pub struct CuboidModel {
     pub display: Option<ItemTransforms>,
     /// The geometry NeoForge's OBJ loader reads instead of elements.
     pub obj: Option<ObjGeometry>,
+    /// NeoForge's composite loader (`"loader": "neoforge:composite"`): named child models, each with
+    /// its own textures and parents, drawn together; a child its `visibility` hides is left out.
+    pub children: Option<Vec<(String, std::sync::Arc<CuboidModel>)>>,
 }
 /// A model NeoForge's OBJ loader reads (`"loader": "neoforge:obj"`, `forge:obj` before NeoForge):
 /// the mesh's location and the loader's options. The mesh is read beside the model; whoever loads
@@ -149,6 +152,14 @@ pub struct ItemTransforms {
 }
 
 impl CuboidModel {
+    /// The models this one needs besides itself: its parent, and its composite children's parents.
+    pub fn parents(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self.parent.as_deref().into_iter().collect();
+        for (_, child) in self.children.iter().flatten() {
+            out.extend(child.parents());
+        }
+        out
+    }
     /// Decode strict JSON, preserving the native parser's primitive coercions,
     /// optional inheritance fields, nullable children and f32 conversion.
     /// Like the native stream entry point, this reads one value and leaves
@@ -217,6 +228,24 @@ impl CuboidModel {
             }),
             _ => None,
         };
+        let children = match loader.as_deref() {
+            Some("neoforge:composite" | "forge:composite") => {
+                let mut hidden = BTreeMap::new();
+                if let Some(raw) = obj.get("visibility") {
+                    for (name, raw) in object(raw)? {
+                        hidden.insert(name, !boolean(raw)?);
+                    }
+                }
+                let mut children = Vec::new();
+                for (name, raw) in object(required(&obj, "children")?)? {
+                    if hidden.get(&name) != Some(&true) {
+                        children.push((name, std::sync::Arc::new(Self::decode(raw)?)));
+                    }
+                }
+                Some(children)
+            }
+            _ => None,
+        };
         Ok(Self {
             parent,
             ambient_occlusion,
@@ -225,6 +254,7 @@ impl CuboidModel {
             elements,
             display,
             obj: obj_geometry,
+            children,
         })
     }
 }

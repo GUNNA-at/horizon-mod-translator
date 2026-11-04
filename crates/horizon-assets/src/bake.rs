@@ -218,6 +218,10 @@ fn bake_elements(
             output.push(bake_obj_face(model, obj, face, transform)?);
         }
     }
+    // A composite's children, each with its own textures, under the same rotation.
+    for child in model.children() {
+        output.extend(bake_elements(child, transform, skip_flat)?);
+    }
     Ok(output)
 }
 /// `ObjModel.makeQuad`: a mesh face turned by the block state's rotation (about the block's

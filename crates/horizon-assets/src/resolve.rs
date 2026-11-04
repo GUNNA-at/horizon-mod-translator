@@ -24,6 +24,8 @@ pub struct ResolvedCuboidModel {
     pub unresolved_textures: BTreeSet<String>,
     geometry: Option<Arc<CuboidModel>>,
     generated: bool,
+    /// A composite geometry's children, each resolved through its own parents.
+    children: Vec<ResolvedCuboidModel>,
 }
 impl ResolvedCuboidModel {
     /// Whether the top geometry is `builtin/generated`'s layer extrusion
@@ -34,6 +36,10 @@ impl ResolvedCuboidModel {
     /// The OBJ geometry the model draws (NeoForge's OBJ loader), when that is its geometry.
     pub fn obj(&self) -> Option<&ObjGeometry> {
         self.geometry.as_ref().and_then(|m| m.obj.as_ref())
+    }
+    /// The child models a composite geometry draws together (NeoForge's composite loader).
+    pub fn children(&self) -> &[ResolvedCuboidModel] {
+        &self.children
     }
     pub fn elements(&self) -> &[Option<Element>] {
         self.geometry
@@ -79,6 +85,7 @@ impl ModelLibrary {
             elements: None,
             display: None,
             obj: None,
+            children: None,
         }
     }
     pub fn new(models: BTreeMap<String, CuboidModel>) -> Result<Self> {
@@ -111,21 +118,26 @@ impl ModelLibrary {
     /// model; a cyclic chain is rejected, as native discovery excludes it.
     /// The returned model can outlive this library without copying its elements.
     pub fn resolve(&self, name: &str) -> Result<ResolvedCuboidModel> {
-        let mut name = identifier(name)?;
+        let name = identifier(name)?;
+        let model = self.models.get(&name).unwrap_or(&self.missing);
+        self.resolve_from(model, name, 0)
+    }
+    /// [`Self::resolve`] from `first`, a model in the library or a composite's child (named after
+    /// its model, `#` and its name); `depth` counts the composites around it.
+    fn resolve_from(&self, first: &Arc<CuboidModel>, first_name: String, depth: usize) -> Result<ResolvedCuboidModel> {
         let mut visited = BTreeSet::new();
-        let mut chain = Vec::new();
-        let mut names = Vec::new();
-        loop {
+        let mut chain = vec![first];
+        let mut names = vec![first_name.clone()];
+        visited.insert(first_name);
+        let mut parent = first.parent.clone();
+        while let Some(name) = parent {
             if !visited.insert(name.clone()) {
                 return Err(error("cyclic model parent"));
             }
             let model = self.models.get(&name).unwrap_or(&self.missing);
             chain.push(model);
-            names.push(name.clone());
-            match &model.parent {
-                Some(parent) => name = parent.clone(),
-                None => break,
-            }
+            names.push(name);
+            parent = model.parent.clone();
         }
         let ambient_occlusion = chain
             .iter()
@@ -135,14 +147,24 @@ impl ModelLibrary {
             .iter()
             .find_map(|m| m.gui_light)
             .unwrap_or(GuiLight::Side);
-        let geometry = chain
-            .iter()
-            .find(|m| m.elements.is_some() || m.obj.is_some())
-            .map(|m| Arc::clone(m));
+        let has_geometry = |m: &CuboidModel| m.elements.is_some() || m.obj.is_some() || m.children.is_some();
+        let found = chain.iter().zip(&names).find(|(m, _)| has_geometry(m));
+        let geometry = found.map(|(m, _)| Arc::clone(m));
+        let mut children = Vec::new();
+        if let Some((m, name)) = found
+            && let Some(list) = &m.children
+        {
+            if depth > 16 {
+                return Err(error("composite models nested too deep"));
+            }
+            for (child, model) in list {
+                children.push(self.resolve_from(model, format!("{name}#{child}"), depth + 1)?);
+            }
+        }
         let generated = chain
             .iter()
             .zip(&names)
-            .find(|(m, name)| m.elements.is_some() || m.obj.is_some() || *name == GENERATED_MODEL)
+            .find(|(m, name)| has_geometry(m) || *name == GENERATED_MODEL)
             .is_some_and(|(_, name)| name == GENERATED_MODEL);
         let display = ItemTransforms {
             contexts: std::array::from_fn(|index| {
@@ -204,6 +226,7 @@ impl ModelLibrary {
             unresolved_textures,
             geometry,
             generated,
+            children,
         })
     }
 }
@@ -254,12 +277,46 @@ pub fn missing_model() -> CuboidModel {
             ),
         ]),
         obj: None,
+        children: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NeoForge's composite loader, as Create's display link uses it: each child takes its own
+    /// textures and parents, the block state's turn applies to all, a hidden child draws nothing.
+    #[test]
+    fn a_composites_children_resolve_on_their_own_and_bake_together() {
+        use crate::bake::{BlockModelTransform, bake_block_model};
+        let link = CuboidModel::from_json(
+            r##"{"loader":"neoforge:composite","parent":"block/block","textures":{"particle":"block/stone"},
+                "visibility":{"hidden":false},
+                "children":{
+                    "base":{"textures":{"0":"block/stone"},"elements":[{"from":[0,0,0],"to":[16,2,16],"faces":{"north":{"texture":"#0"}}}]},
+                    "lamp":{"parent":"mod:block/lamp"},
+                    "hidden":{"textures":{"0":"block/dirt"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#0"}}}]}}}"##,
+        )
+        .unwrap();
+        let lamp = CuboidModel::from_json(r##"{"textures":{"glow":"block/glowstone"},"elements":[{"from":[4,2,4],"to":[12,6,12],"faces":{"up":{"texture":"#glow"}}}]}"##).unwrap();
+        let block = CuboidModel::from_json(r#"{"ambientocclusion":true}"#).unwrap();
+        assert_eq!(link.parents(), ["minecraft:block/block", "mod:block/lamp"]);
+        let library = ModelLibrary::new(BTreeMap::from([
+            ("mod:block/link".into(), link),
+            ("mod:block/lamp".into(), lamp),
+            ("minecraft:block/block".into(), block),
+        ]))
+        .unwrap();
+        let model = library.resolve("mod:block/link").unwrap();
+        assert_eq!(model.children().len(), 2);
+        assert_eq!(model.material("particle").unwrap().unwrap().sprite, "minecraft:block/stone");
+        // A quarter turn about y: the base's north face turns east.
+        let quads = bake_block_model(&model, BlockModelTransform::new([0, 1, 0], false)).unwrap();
+        let faces: Vec<_> = quads.iter().map(|q| (q.material.sprite.as_str(), q.facing)).collect();
+        assert_eq!(faces, [("minecraft:block/stone", Direction::East), ("minecraft:block/glowstone", Direction::Up)]);
+    }
+
     #[test]
     fn inherited_alias_uses_child_material_and_geometry_outlives_library() {
         let parent = CuboidModel::from_json(r##"{"textures":{"side":"#all","all":"block/stone"},"elements":[{"from":[0,0,0],"to":[16,8,16],"faces":{"up":{"texture":"#side"}}}]}"##).unwrap();
