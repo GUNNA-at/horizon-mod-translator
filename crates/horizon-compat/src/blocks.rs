@@ -236,6 +236,69 @@ fn vanilla_enum_values(rt: &mut Rt, class: &str) -> Option<Vec<V>> {
     Some(values.iter().filter_map(|v| vanilla_enum_constant(rt, class, v)).collect())
 }
 
+/// `DyeColor`'s colours by id: texture diffuse (opaque ARGB), firework, text; the game's own tables
+/// (`block_entity_render::DYES`, `firework::DYE_FIREWORK_COLORS`, `signs::DYE_TEXT`) hold the same.
+const DYE_COLORS: [(u32, u32, u32); 16] = [
+    (0xF9FFFE, 0xF0F0F0, 0xFFFFFF),
+    (0xF9801D, 0xEB8844, 0xFF681F),
+    (0xC74EBD, 0xC354CD, 0xFF00FF),
+    (0x3AB3DA, 0x6689D3, 0x9AC0CD),
+    (0xFED83D, 0xDECF2A, 0xFFFF00),
+    (0x80C71F, 0x41CD34, 0xBFFF00),
+    (0xF38BAA, 0xD88198, 0xFF69B4),
+    (0x474F52, 0x434343, 0x808080),
+    (0x9D9D97, 0xABABAB, 0xD3D3D3),
+    (0x169C9C, 0x287697, 0x00FFFF),
+    (0x8932B8, 0x7B2FBE, 0xA020F0),
+    (0x3C44AA, 0x253192, 0x0000FF),
+    (0x835432, 0x51301A, 0x8B4513),
+    (0x5E7C16, 0x3B511A, 0x00FF00),
+    (0xB02E26, 0xB3312C, 0xFF0000),
+    (0x1D1D21, 0x1E1B1B, 0x000000),
+];
+
+/// `DyeColor`'s methods: its name and id, its colours, and the lookups by id and name.
+fn dye_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let dye = |rt: &mut Rt, i: usize| api::api_enum(rt, DYE_COLOR, DYES[i.min(15)].0, i.min(15) as i32);
+    let id = |rt: &Rt| rt.get_field(a(0), "$ordinal").i().clamp(0, 15) as usize;
+    Some(match name {
+        "getId" => V::I(id(rt) as i32),
+        "getName" | "getSerializedName" | "toString" => {
+            let n = DYES[id(rt)].0.to_ascii_lowercase();
+            rt.string(&n)
+        }
+        "getTextureDiffuseColor" => V::I((0xFF00_0000 | DYE_COLORS[id(rt)].0) as i32),
+        "getFireworkColor" => V::I(DYE_COLORS[id(rt)].1 as i32),
+        "getTextColor" => V::I(DYE_COLORS[id(rt)].2 as i32),
+        "getMapColor" => {
+            let c = DYES[id(rt)].1 as usize;
+            let o = named(rt, MAP_COLOR, MAP_COLORS[c]);
+            rt.put_field(o, "id", V::I(c as i32));
+            o
+        }
+        // `byId`: out of range gives white, as vanilla's `ByIdMap.OutOfBoundsStrategy.ZERO`.
+        "byId" => {
+            let i = a(0).i();
+            dye(rt, if (0..16).contains(&i) { i as usize } else { 0 })
+        }
+        "byName" | "byFireworkColor" => {
+            let found = if name == "byName" {
+                let n = rt.str_of(a(0)).unwrap_or("").to_ascii_uppercase();
+                DYES.iter().position(|(d, _)| *d == n)
+            } else {
+                DYE_COLORS.iter().position(|c| c.1 as i32 == a(0).i())
+            };
+            match found {
+                Some(i) => dye(rt, i),
+                None if name == "byName" => a(1),
+                None => V::NULL,
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// Whether `class` is a vanilla enum whose constants the runtime makes (`values()`, its statics).
 fn enum_class(class: &str) -> bool {
     vanilla_enum(class).is_some()
@@ -332,6 +395,17 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let all = vanilla_enum_values(rt, o)?;
             let class: &'static str = rt.static_key(&format!("[L{o};"));
             Some(rt.alloc(class, Data::Array(all)))
+        }
+        (DYE_COLOR, _) => dye_call(rt, name, args),
+        // `ArmorItem.Type`: its name and vanilla's durability per material multiplier.
+        ("net/minecraft/world/item/ArmorItem$Type", "getName" | "getSerializedName") => {
+            let n = rt.str_of(rt.get_field(a(0), "$name")).unwrap_or("").to_ascii_lowercase();
+            Some(rt.string(&n))
+        }
+        ("net/minecraft/world/item/ArmorItem$Type", "getDurability") => {
+            const HEALTH: [i32; 5] = [11, 16, 15, 13, 16];
+            let i = rt.get_field(a(0), "$ordinal").i().clamp(0, 4) as usize;
+            Some(V::I(HEALTH[i] * a(1).i()))
         }
         (BLOCK_PROPERTIES, _) => block_properties(rt, name, desc, args),
         (ITEM_PROPERTIES, _) => item_properties(rt, name, args),

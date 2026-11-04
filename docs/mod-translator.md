@@ -514,6 +514,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `values()` of `DyeColor`, `WeatheringCopper.WeatherState`, `ArmorItem.Type`; `Direction.name()`.
     Guava's `ImmutableList.of(e1, ..., e12, E... others)` takes the rest from its array (the array
     was one element: Create's package styles, 14 of them, iterated an array as a style).
+  - [x] 2026-11-04 The collector's iterator pass ends (`gc::tests`): a live iterator's source was
+    pushed again on every round even when already marked, so a collection with one live iterator
+    never finished (the mixer harness hung in `Rt::collect` once `Plane` loops ran). Also
+    `ArrayUtils.contains/indexOf/isEmpty` (Create's `CopperBlockSet.hasVariant`: the copper sets
+    threw once `WeatherState.values()` answered, and `AllBlocks` stopped there), Guava's
+    `HashBiMap.create` and `inverse`, `DyeColor`'s methods (name, id, texture/firework/text colours,
+    map colour, `byId/byName/byFireworkColor`), `ArmorItem.Type.getName/getDurability`.
+    Mapping an enum's `values()` makes loops run that never ran: each such step needs the calls
+    inside the loop mapped too, or the loop throws where it used to do nothing.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

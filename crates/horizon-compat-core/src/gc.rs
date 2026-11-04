@@ -49,14 +49,18 @@ impl Rt {
         }
         self.mark(&mut marked, &mut todo);
         // An iterator's source stays while the iterator does (weak keys, as an ephemeron).
+        // Only sources not marked yet: pushing marked ones again would never settle.
         loop {
-            let before = todo.len();
             for (&it, &src) in &self.iter_sources {
-                if marked.get(it as usize).copied().unwrap_or(false) {
-                    push(src, &mut todo);
+                if marked.get(it as usize).copied().unwrap_or(false)
+                    && let V::R(s) = src
+                    && s != 0
+                    && !marked.get(s as usize).copied().unwrap_or(true)
+                {
+                    todo.push(s);
                 }
             }
-            if todo.len() == before {
+            if todo.is_empty() {
                 break;
             }
             self.mark(&mut marked, &mut todo);
@@ -147,5 +151,22 @@ mod tests {
         let fresh: Vec<V> = (0..4).map(|_| rt.new_object("t/Fresh")).collect();
         assert_eq!(rt.heap.len(), before);
         assert!(fresh.iter().all(|v| [a, b, junk, list].contains(v)));
+    }
+
+    #[test]
+    fn a_live_iterator_keeps_its_source_and_the_collection_ends() {
+        let mut rt = Rt::new();
+        let item = rt.new_object("t/Item");
+        let source = rt.alloc("java/util/ArrayList", Data::List(vec![item]));
+        let it = rt.new_object("java/util/Iterator");
+        rt.iter_sources.insert(it.r(), source);
+        // The iterator is held, its source is reachable only through it; a second iterator over
+        // the same source (marked already) must not keep the collector going.
+        let it2 = rt.new_object("java/util/Iterator");
+        rt.iter_sources.insert(it2.r(), source);
+        rt.pinned.extend([it, it2]);
+        rt.collect();
+        assert_eq!(rt.class_of(source), "java/util/ArrayList");
+        assert_eq!(rt.class_of(item), "t/Item");
     }
 }

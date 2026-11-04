@@ -729,6 +729,22 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             }
             V::I(-(lo + 1))
         }
+        // Commons Lang's array lookups: `contains`/`indexOf` by `equals` (an object array), or by
+        // value (a primitive one).
+        ("org/apache/commons/lang3/ArrayUtils", "contains" | "indexOf") if args.len() == 2 => {
+            let items = elements(rt, a(0));
+            let mut at = -1;
+            for (i, &e) in items.iter().enumerate() {
+                if e == a(1) || (matches!(e, V::R(_)) && equals(rt, e, a(1))) {
+                    at = i as i32;
+                    break;
+                }
+            }
+            if name == "contains" { V::I((at >= 0) as i32) } else { V::I(at) }
+        }
+        ("org/apache/commons/lang3/ArrayUtils", "isEmpty") => V::I(elements(rt, a(0)).is_empty() as i32),
+        // Guava's `HashBiMap.create()`: a map (its `inverse()` is a copy, read after it's filled).
+        ("com/google/common/collect/HashBiMap", "create") => rt.alloc("com/google/common/collect/HashBiMap", Data::Table(Table::default())),
         // Commons Lang's in-place reversal of an array.
         ("org/apache/commons/lang3/ArrayUtils", "reverse") => {
             if let Some(Data::Array(items)) = rt.heap.get_mut(a(0).r() as usize).map(|o| &mut o.data) {
@@ -1225,6 +1241,15 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             old
         }
         "getOrDefault" => table_get(rt, this, a(1)).unwrap_or(a(2)),
+        // A `BiMap`'s other way round: a copy with keys and values swapped.
+        "inverse" if args.len() == 1 => {
+            let class = rt.class_of(this);
+            let inv = rt.alloc(class, Data::Table(Table::default()));
+            for (k, v) in table_entries(rt, this) {
+                table_put(rt, inv, v, k);
+            }
+            inv
+        }
         "containsKey" => V::I(table_get(rt, this, a(1)).is_some() as i32),
         "containsValue" => {
             let vals: Vec<V> = table_entries(rt, this).into_iter().map(|(_, v)| v).collect();
