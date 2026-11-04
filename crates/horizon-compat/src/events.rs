@@ -127,6 +127,34 @@ pub fn right_click_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: 
     })
 }
 
+/// `PlayerInteractEvent.RightClickBlock` on a client (`MultiPlayerGameMode.performUseItemOn`):
+/// the client's own player uses `hand` on the block at `pos` its crosshair is on, before the use
+/// goes to the server, which posts its own. Create starts holding a value setting here. Some(used)
+/// when a listener canceled it.
+pub fn client_right_click_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: i64, hit: [f64; 3], hand: u8) -> Option<bool> {
+    rt.safe_point();
+    if !listened(rt, RIGHT_CLICK_BLOCK) {
+        return None;
+    }
+    rt.with_host(host, |rt| {
+        hand::with_hand(rt, |rt| {
+            let ev = interaction(rt, RIGHT_CLICK_BLOCK, hand);
+            let player = crate::network::local_player(rt);
+            rt.put_field(ev, "$player", player);
+            rt.put_field(ev, "$client", V::I(1));
+            let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+            let direction = api_common::direction(rt, face);
+            let hit_result = api_common::hit(rt, pos, face);
+            let at = api_common::vec3(rt, hit[0], hit[1], hit[2]);
+            rt.put_field(hit_result, "$loc", at);
+            rt.put_field(ev, "$pos", p);
+            rt.put_field(ev, "$face", direction);
+            rt.put_field(ev, "$hit", hit_result);
+            post(rt, RIGHT_CLICK_BLOCK, ev)
+        })
+    })
+}
+
 /// `PlayerInteractEvent.RightClickItem`: the acting player uses the item in `hand` (in the air, or
 /// on a block that let the click through). As [`right_click_block`].
 pub fn right_click_item(rt: &mut Rt, host: &mut dyn Host, hand: u8) -> Option<bool> {
@@ -187,7 +215,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let h = rt.get_field(ev, "$handOrdinal").i() as u8;
             hand::stack(rt, h)
         }
-        "getSide" => api::api_enum(rt, LOGICAL_SIDE, "SERVER", 1),
+        "getSide" => match rt.get_field(ev, "$client").i() {
+            0 => api::api_enum(rt, LOGICAL_SIDE, "SERVER", 1),
+            _ => api::api_enum(rt, LOGICAL_SIDE, "CLIENT", 0),
+        },
         "setCanceled" => {
             rt.put_field(ev, "$canceled", V::I(a(1).i()));
             V::Void

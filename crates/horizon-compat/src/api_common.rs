@@ -37,6 +37,18 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         // Players: the one a hook acts for (`ServerPlayer`), the client's own and the others it sees.
         "net/minecraft/world/entity/LivingEntity" | "net/minecraft/world/entity/player/Player" => is_player_class(c),
         "net/minecraft/client/player/AbstractClientPlayer" => matches!(c, "net/minecraft/client/player/LocalPlayer" | "net/minecraft/client/player/RemotePlayer"),
+        // The GUI: vanilla's screens are containers of listeners and draw; its widgets
+        // (`AbstractWidget` and the buttons, boxes and sliders under it) are listeners that draw.
+        "net/minecraft/client/gui/screens/Screen"
+        | "net/minecraft/client/gui/components/events/ContainerEventHandler"
+        | "net/minecraft/client/gui/components/events/AbstractContainerEventHandler" => is_screen_class(c),
+        "net/minecraft/client/gui/components/events/GuiEventListener" | "net/minecraft/client/gui/components/Renderable" => {
+            is_screen_class(c) || is_widget_class(c)
+        }
+        "net/minecraft/client/gui/components/AbstractWidget" | "net/minecraft/client/gui/narration/NarratableEntry" | "net/minecraft/client/gui/layouts/LayoutElement" => {
+            is_widget_class(c)
+        }
+        "net/minecraft/client/gui/components/AbstractButton" => matches!(c, "net/minecraft/client/gui/components/Button" | "net/minecraft/client/gui/components/ImageButton" | "net/minecraft/client/gui/components/Checkbox" | "net/minecraft/client/gui/components/CycleButton" | "net/minecraft/client/gui/components/PlainTextButton"),
         "java/lang/Throwable" => c.starts_with("java/lang/") && (c.ends_with("Exception") || c.ends_with("Error")),
         "java/lang/Exception" => c.starts_with("java/lang/") && c.ends_with("Exception"),
         "java/lang/ReflectiveOperationException" => matches!(
@@ -56,6 +68,74 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
 }
 
 /// Vanilla's player classes: a server's, the client's own and the others it sees.
+/// Vanilla's screens (`TitleScreen`, `ConfirmScreen`, `Screen` itself).
+fn is_screen_class(c: &str) -> bool {
+    c.starts_with("net/minecraft/client/gui/screens/") && c.ends_with("Screen")
+}
+
+/// Vanilla's widgets: `AbstractWidget` and the buttons, boxes and sliders under it.
+fn is_widget_class(c: &str) -> bool {
+    let Some(name) = c.strip_prefix("net/minecraft/client/gui/components/") else { return false };
+    !name.contains('/') && (name.ends_with("Widget") || name.ends_with("Button") || matches!(name, "EditBox" | "Checkbox" | "MultiLineEditBox"))
+}
+
+/// Where player object `p` stands and looks (feet, yaw, pitch in degrees): the client's own player
+/// as the host places it, a server player as the hook that made it said (`$x`, `$yaw`); None when
+/// it isn't known.
+fn player_place(rt: &Rt, p: V) -> Option<([f64; 3], f32, f32)> {
+    match rt.class_of(p) {
+        LOCAL_PLAYER => rt.host()?.player_place(),
+        SERVER_PLAYER if matches!(rt.get_field(p, "$x"), V::D(_)) => Some((
+            [rt.get_field(p, "$x").d(), rt.get_field(p, "$y").d(), rt.get_field(p, "$z").d()],
+            rt.get_field(p, "$yaw").f(),
+            rt.get_field(p, "$pitch").f(),
+        )),
+        _ => None,
+    }
+}
+
+/// A player's eyes above their feet: standing 1.62, crouching 1.27 (`Player.getStandingEyeHeight`).
+fn player_eye_height(rt: &Rt) -> f64 {
+    if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 }
+}
+
+/// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
+/// `values()` and `valueOf`.
+const POSE: &str = "net/minecraft/world/entity/Pose";
+const PLAIN_ENUMS: [(&str, &[&str]); 2] = [
+    ("net/minecraft/world/phys/HitResult$Type", &["MISS", "BLOCK", "ENTITY"]),
+    (
+        POSE,
+        &[
+            "STANDING", "FALL_FLYING", "SLEEPING", "SWIMMING", "SPIN_ATTACK", "CROUCHING", "LONG_JUMPING", "DYING", "CROAKING", "USING_TONGUE",
+            "SITTING", "ROARING", "SNIFFING", "EMERGING", "DIGGING", "SLIDING", "SHOOTING", "INHALING",
+        ],
+    ),
+];
+
+/// Plain vanilla enum `class`'s constant `name`; None for another class or name.
+pub(crate) fn plain_enum(rt: &mut Rt, class: &str, name: &str) -> Option<V> {
+    let (class, names) = PLAIN_ENUMS.iter().find(|(c, _)| *c == class)?;
+    let i = names.iter().position(|n| *n == name)?;
+    Some(crate::api::api_enum(rt, class, names[i], i as i32))
+}
+
+/// `values()` of a plain vanilla enum, or of `InteractionHand` (its constants are the ones its
+/// statics give).
+fn plain_enum_values(rt: &mut Rt, class: &str) -> Option<V> {
+    let names: Vec<&'static str> = match PLAIN_ENUMS.iter().find(|(c, _)| *c == class) {
+        Some((_, names)) => names.to_vec(),
+        None if class == "net/minecraft/world/InteractionHand" => vec!["MAIN_HAND", "OFF_HAND"],
+        None => return None,
+    };
+    let values: Vec<V> = names.iter().filter_map(|n| get_static(rt, class, n)).collect();
+    let arr = rt.new_array(values.len() as i32, V::NULL);
+    for (i, v) in values.into_iter().enumerate() {
+        rt.array_set(arr, i as i32, v);
+    }
+    Some(arr)
+}
+
 fn is_player_class(c: &str) -> bool {
     matches!(
         c,
@@ -478,6 +558,15 @@ fn vec3_zero(rt: &mut Rt) -> V {
 fn mth_floor(d: f64) -> i32 {
     let i = d as i32;
     if d < i as f64 { i.wrapping_sub(1) } else { i }
+}
+
+const VEC2: &str = "net/minecraft/world/phys/Vec2";
+
+fn vec2(rt: &mut Rt, x: f32, y: f32) -> V {
+    let v = rt.new_object(VEC2);
+    rt.put_field(v, "x", V::F(x));
+    rt.put_field(v, "y", V::F(y));
+    v
 }
 
 pub(crate) fn vec3(rt: &mut Rt, x: f64, y: f64, z: f64) -> V {
@@ -1061,9 +1150,34 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (o, "getInventory") if is_player(o) => {
             let inv = rt.new_object(INVENTORY);
             rt.put_field(inv, "player", a(0));
+            // The hooks know the hands, not the hotbar slot: the main hand's stack is slot 0's.
+            rt.put_field(inv, "selected", V::I(0));
             inv
         }
         (INVENTORY, "player") => rt.get_field(a(0), "player"),
+        // `Inventory.getItem(slot)`: the hands and what the player wears, by vanilla's slot numbers
+        // (the selected hotbar slot, 36 to 39 the feet to the head, 40 the off hand); the other
+        // slots read as empty.
+        (INVENTORY, "getItem") if desc == "(I)Lnet/minecraft/world/item/ItemStack;" => {
+            let selected = rt.get_field(a(0), "selected").i();
+            match a(1).i() {
+                i if i == selected => crate::hand::stack(rt, crate::hand::MAIN),
+                40 => crate::hand::stack(rt, crate::hand::OFF),
+                i @ 36..=39 => crate::hand::worn(rt, (39 - i) as u8),
+                _ => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
+            }
+        }
+        (INVENTORY, "getSelected") => crate::hand::stack(rt, crate::hand::MAIN),
+        // `ItemInHandRenderer`: the stacks the first person hands show (`mainHandItem`,
+        // `offHandItem`: the hands' own; the game draws them itself).
+        ("net/minecraft/client/renderer/entity/EntityRenderDispatcher", "getItemInHandRenderer") => {
+            let r = rt.new_object("net/minecraft/client/renderer/ItemInHandRenderer");
+            let (main, off) = (crate::hand::stack(rt, crate::hand::MAIN), crate::hand::stack(rt, crate::hand::OFF));
+            rt.put_field(r, "mainHandItem", main);
+            rt.put_field(r, "offHandItem", off);
+            r
+        }
+        (INVENTORY, "getContainerSize") => V::I(41),
         // Into the player's inventory, the stack shrunk by what went in. What doesn't fit stays
         // in the stack (vanilla's `placeItemBackInInventory` would drop it at the player's feet).
         (INVENTORY, "placeItemBackInInventory" | "add") => {
@@ -1201,14 +1315,14 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             directions(rt, &ordered_by_nearest(yaw, pitch))
         }
         ("net/minecraft/core/Direction", "fromYRot") => direction(rt, horizontal_facing(a(0).d() as f32)),
-        // The acting player's place, when the game told it (`acting_player`).
+        // The player's place: the acting server player's when the game told it (`acting_player`),
+        // the client's own as the host places it.
         (o, n) if is_player(o)
-            && rt.class_of(a(0)) == SERVER_PLAYER
-            && matches!(rt.get_field(a(0), "$x"), V::D(_))
-            && matches!(n, "getX" | "getY" | "getZ" | "position" | "getPosition" | "blockPosition" | "getEyeY" | "getEyePosition" | "getLookAngle" | "getViewVector") =>
+            && matches!(n, "getX" | "getY" | "getZ" | "position" | "getPosition" | "blockPosition" | "getEyeY" | "getEyePosition" | "getLookAngle" | "getViewVector" | "getXRot" | "getYRot" | "getYHeadRot")
+            && player_place(rt, a(0)).is_some() =>
         {
-            let p = [rt.get_field(a(0), "$x").d(), rt.get_field(a(0), "$y").d(), rt.get_field(a(0), "$z").d()];
-            let eye = p[1] + if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 };
+            let (p, yaw, pitch) = player_place(rt, a(0)).unwrap_or_default();
+            let eye = p[1] + player_eye_height(rt);
             match n {
                 "getX" => V::D(p[0]),
                 "getY" => V::D(p[1]),
@@ -1217,15 +1331,70 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "blockPosition" => crate::api::block_pos(rt, p[0].floor() as i64, p[1].floor() as i64, p[2].floor() as i64),
                 "getEyeY" => V::D(eye),
                 "getEyePosition" => vec3(rt, p[0], eye, p[2]),
+                "getXRot" => V::F(pitch),
+                "getYRot" | "getYHeadRot" => V::F(yaw),
                 // `Entity.calculateViewVector(xRot, yRot)`, with `Mth`'s table.
                 _ => {
-                    let (yaw, pitch) = (rt.get_field(a(0), "$yaw").f(), rt.get_field(a(0), "$pitch").f());
                     let (x_rot, y_rot) = (V::F(pitch * (std::f32::consts::PI / 180.0)), V::F(-yaw * (std::f32::consts::PI / 180.0)));
                     let (c1, s1, c, s) = (mth_cos(y_rot), mth_sin(y_rot), mth_cos(x_rot), mth_sin(x_rot));
                     vec3(rt, f64::from(s1 * c), f64::from(-s), f64::from(c1 * c))
                 }
             }
         }
+        // Reach (`Player.blockInteractionRange`, `entityInteractionRange`: the attributes' bases,
+        // creative's modifiers added), and whether a block is in it with `margin` more
+        // (`canInteractWithBlock`: the block's box from the eyes; a server checks a mod's packet
+        // with it). A player whose place isn't known reaches it.
+        (o, "blockInteractionRange" | "entityInteractionRange") if is_player(o) => {
+            let creative = rt.host().is_some_and(|h| h.player_creative());
+            V::D(match (name, creative) {
+                ("blockInteractionRange", false) => 4.5,
+                ("blockInteractionRange", true) => 5.0,
+                (_, false) => 3.0,
+                (_, true) => 5.0,
+            })
+        }
+        (o, "canInteractWithBlock") if is_player(o) => {
+            let Some((p, _, _)) = player_place(rt, a(0)) else { return Some(V::I(1)) };
+            let creative = rt.host().is_some_and(|h| h.player_creative());
+            let range = if creative { 5.0 } else { 4.5 } + a(2).d();
+            let eye = [p[0], p[1] + player_eye_height(rt), p[2]];
+            let b = native(rt, a(1));
+            // `AABB.distanceToSqr(Vec3)`: per axis, how far outside the box.
+            let d2: f64 = (0..3)
+                .map(|i| {
+                    let (lo, hi) = (b[i] as f64, b[i] as f64 + 1.0);
+                    let d = (lo - eye[i]).max(eye[i] - hi).max(0.0);
+                    d * d
+                })
+                .sum();
+            V::I(i32::from(d2 < range * range))
+        }
+        // `Player.isHolding(Predicate<ItemStack>)` (either hand's stack passes) and `isHolding(Item)`.
+        (o, "isHolding") if is_player(o) => {
+            let by_item = desc.starts_with("(Lnet/minecraft/world/item/Item;");
+            let mut holding = false;
+            for hand in [crate::hand::MAIN, crate::hand::OFF] {
+                let stack = crate::hand::stack(rt, hand);
+                holding = if by_item {
+                    let item = call(rt, "net/minecraft/world/item/ItemStack", "getItem", "()Lnet/minecraft/world/item/Item;", &[stack]).unwrap_or(V::NULL);
+                    item == a(1)
+                } else {
+                    rt.call_functional("java/util/function/Predicate.test.(Ljava/lang/Object;)Z", a(1), &[stack]).i() != 0
+                };
+                if holding {
+                    break;
+                }
+            }
+            V::I(i32::from(holding))
+        }
+        // Players ride nothing here, and stand or crouch (`Entity.getPose`).
+        (o, "isPassenger") if is_player(o) => V::I(0),
+        (o, "getPose") if is_player(o) => {
+            let crouching = rt.host().is_some_and(|h| h.player_sneaking());
+            plain_enum(rt, POSE, if crouching { "CROUCHING" } else { "STANDING" }).unwrap_or(V::NULL)
+        }
+        ("net/minecraft/world/entity/player/Inventory", "getSelectionSize") => V::I(9),
         // Item cooldowns aren't kept for a mod's uses yet: none is ever cooling down.
         (o, "getCooldowns") if is_player(o) => rt.intern("compat:cooldowns".into(), |rt| rt.new_object("net/minecraft/world/item/ItemCooldowns")),
         ("net/minecraft/world/item/ItemCooldowns", "addCooldown" | "removeCooldown") => V::Void,
@@ -1327,6 +1496,51 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (o, "getBlockEntity") if o.starts_with("net/minecraft/") && (o.ends_with("Level") || o.ends_with("LevelAccessor") || o.ends_with("BlockGetter") || o.ends_with("LevelReader")) => {
             let h = native(rt, a(1));
             crate::glue::block_entity_at(rt, [h[0] as i32, h[1] as i32, h[2] as i32])
+        }
+        // Vec2: two floats (`x`, `y`), as Create's value settings lay their board out with.
+        (VEC2, "<init>") if desc == "(FF)V" => {
+            rt.put_field(a(0), "x", V::F(a(1).f()));
+            rt.put_field(a(0), "y", V::F(a(2).f()));
+            V::Void
+        }
+        (VEC2, n) => {
+            let xy = |rt: &Rt, v: V| [rt.get_field(v, "x").f(), rt.get_field(v, "y").f()];
+            let [x, y] = xy(rt, a(0));
+            match (n, desc) {
+                ("scale", _) => vec2(rt, x * a(1).f(), y * a(1).f()),
+                ("dot", _) => {
+                    let [ox, oy] = xy(rt, a(1));
+                    V::F(x * ox + y * oy)
+                }
+                ("add", "(Lnet/minecraft/world/phys/Vec2;)Lnet/minecraft/world/phys/Vec2;") => {
+                    let [ox, oy] = xy(rt, a(1));
+                    vec2(rt, x + ox, y + oy)
+                }
+                ("add", _) => vec2(rt, x + a(1).f(), y + a(1).f()),
+                ("equals", _) => {
+                    let [ox, oy] = xy(rt, a(1));
+                    V::I(i32::from(rt.class_of(a(1)) == VEC2 && x == ox && y == oy))
+                }
+                // `normalized`: `Mth.sqrt`'s float root; a zero vector stays zero.
+                ("normalized", _) => {
+                    let l = (x * x + y * y).sqrt();
+                    if l < 1.0e-4 { vec2(rt, 0.0, 0.0) } else { vec2(rt, x / l, y / l) }
+                }
+                ("length", _) => V::F((x * x + y * y).sqrt()),
+                ("lengthSquared", _) => V::F(x * x + y * y),
+                ("distanceToSqr", _) => {
+                    let [ox, oy] = xy(rt, a(1));
+                    V::F((ox - x) * (ox - x) + (oy - y) * (oy - y))
+                }
+                ("negated", _) => vec2(rt, -x, -y),
+                _ => return None,
+            }
+        }
+        // Plain vanilla enums' `values()` and `valueOf(String)`.
+        (o, "values") if desc.starts_with("()[") => return plain_enum_values(rt, o),
+        (o, "valueOf") if desc.starts_with("(Ljava/lang/String;)") && PLAIN_ENUMS.iter().any(|(c, _)| *c == o) => {
+            let n = rt.str_of(a(0)).unwrap_or_default().to_owned();
+            return plain_enum(rt, o, &n);
         }
         // Vec3
         ("net/minecraft/world/phys/Vec3", "<init>") if desc == "(DDD)V" => {
@@ -2561,6 +2775,22 @@ fn vanilla_block_entity_type(rt: &mut Rt, field: &str) -> V {
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match owner {
         "net/minecraft/world/phys/Vec3" if field == "ZERO" => vec3_zero(rt),
+        o if PLAIN_ENUMS.iter().any(|(c, _)| *c == o) => plain_enum(rt, o, field)?,
+        VEC2 => {
+            let (x, y) = match field {
+                "ZERO" => (0.0, 0.0),
+                "ONE" => (1.0, 1.0),
+                "UNIT_X" => (1.0, 0.0),
+                "NEG_UNIT_X" => (-1.0, 0.0),
+                "UNIT_Y" => (0.0, 1.0),
+                "NEG_UNIT_Y" => (0.0, -1.0),
+                "MAX" => (f32::MAX, f32::MAX),
+                "MIN" => (f32::MIN, f32::MIN),
+                _ => return None,
+            };
+            let f = field.to_owned();
+            rt.intern(format!("vec2/{f}"), move |rt| vec2(rt, x, y))
+        }
         "net/minecraft/world/level/block/state/properties/BlockStateProperties" => vanilla_property_object(rt, field)?,
         "net/minecraft/world/level/block/PipeBlock" if field == "PROPERTY_BY_DIRECTION" => {
             rt.intern("prop/pipe-by-direction".into(), |rt| {
@@ -2641,6 +2871,30 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Reach as Create's packets check it (`canInteractWithBlock(pos, 20)`): a block's box from the
+    /// player's eyes, within the player's reach plus the margin.
+    #[test]
+    fn a_block_is_within_reach_by_its_box_from_the_eyes_plus_the_margin() {
+        crate::install();
+        let mut rt = Rt::new();
+        let mut h = crate::host::MemoryHost { client: true, place: Some(([0.5, 64.0, 0.5], 0.0, 0.0)), ..Default::default() };
+        let key = "net/minecraft/client/player/LocalPlayer.canInteractWithBlock.(Lnet/minecraft/core/BlockPos;D)Z";
+        let reach = |rt: &mut Rt, z: i64, margin: f64| {
+            let player = crate::network::local_player(rt);
+            let pos = crate::api::block_pos(rt, 0, 64, z);
+            crate::api::call(rt, key, &[player, pos, V::D(margin)]).i() != 0
+        };
+        rt.with_host(&mut h, |rt| {
+            // Ten blocks south: 9.5 out along z, the eyes 0.62 above the box.
+            assert!(!reach(rt, 10, 1.0));
+            assert!(reach(rt, 10, 20.0));
+            assert!(!reach(rt, 30, 20.0));
+            // Four blocks: within survival's 4.5 with no margin.
+            assert!(reach(rt, 4, 0.0));
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
     use crate::{Rt, V, api};
 
     const GET: &str = "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;";

@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "mod screens' input: key mappings and held keys (`native_mapping_binding`, `native_key_held`), the GUI's size (`native_gui_size`), moving the pointer (`native_set_cursor`), the window's own player (`native_local_player`).",
+  "doc_summary": "`native_mapping_binding(name)` answers the key bound to a vanilla mapping (`key.use` is `key.mouse.right` by default) and whether it is held, `native_key_held(key)` whether a key or mouse button is held (the modifiers from the window's live state), `native_gui_size()` the GUI's size and scale, `native_set_cursor(at)` moves the pointer in GUI pixels, and `native_local_player()` gives the window's own player's feet, yaw, pitch and whether they play in creative, for a mod's own screen laid out and read from its hooks and the client handlers around it: @API:mod_screen_input@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_hooks.rs"
+  ]
+}

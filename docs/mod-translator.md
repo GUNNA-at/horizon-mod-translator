@@ -1168,6 +1168,40 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     doesn't know as `Equipable` yet), so the game puts them on by use and in the head slot. Their
     `Item.use` (`swapWithEquipmentSlot`, unmapped) answers nothing, which leaves the click to the
     game's own use of an equippable item.
+  - [x] 2026-11-04 Mods' own screens (`crates/horizon-compat/src/screens.rs`): `Minecraft.setScreen`
+    with a mod's `Screen` opens it on the game (`Host::open_screen`, the game's `native_mod_screen_open`),
+    freeing the pointer before the screen's `init` as vanilla does, so a screen that moves the pointer
+    there (`GLFW.glfwSetCursorPos`) moves a free one. The screen ticks with the client; it draws in the
+    game's `screen_render_post` (vanilla `Screen.render`: the in-world menu background tiled,
+    renderables, the tesselator's quads as blits of the shader texture) and hears the pointer, the
+    wheel, keys and characters through the screen input hooks (`Screen`/`ContainerEventHandler`
+    defaults: focus, dragging, children). Those hooks only read the game (`Host::read_only`), so what
+    a screen does there (payloads, opening, closing, the pointer, sounds) waits in an outbox for the
+    next client tick (`screens::flush`); Escape closes it through its own `keyPressed`, and a screen the
+    game closed itself is let go at the next hook. Key mappings (`Options.keyUse` and 25 others,
+    `KeyMapping.isDown`/`matchesMouse`/`getTranslatedKeyMessage`, `InputConstants`) read the game's
+    bindings (`Host::mapping`, `key_held`); `Component.keybind` shows the bound key as the Controls
+    screen names it ("Right Button", "E"). The client's use key posts `RightClickBlock` on the client
+    (`glue::client_use`, from the `interaction_key` hook) as `MultiPlayerGameMode.useItemOn` does,
+    the use itself still going to the server. Also: `Vec2`, `Pose`, `HitResult.Type` (plain vanilla
+    enums: statics, `values`, `valueOf`), the local player's place, look and reach
+    (`blockInteractionRange`, `canInteractWithBlock`, which Create's packets check on the server, so
+    a payload's sender now carries its position), `isHolding`, `getPose`, `Inventory.getItem` for the
+    hands and armour, `ItemInHandRenderer`'s hand stacks, the client's `SoundManager.play` of vanilla
+    instances (`SimpleSoundInstance.forUI`, one at a place). Harness `VSETTINGS=<dir>`
+    (`VSETTINGS_DX`): a creative motor turns a shaft at 16 rpm; on the client the player holds the
+    use key on the motor's value box: `ValueSettingsScreen` opens after 5 held ticks with the pointer
+    on 16 (row ⟲), draws "Generated Speed in RPM", both rows' milestones and the value tag; releasing
+    48 GUI pixels to the right picks 60, plays `create:scroll_value`, and sends `create:value_settings`
+    (15 bytes) at the next tick; the server takes it and the motor and the shaft turn at 60 rpm.
+    Bundle: one client host for every client hook (`GameRef`: mutable for the tick, payloads and the
+    use key; shared for the screen hooks), new helpers for `screen_render_post`, the 7 screen input
+    hooks and `interaction_key`; Horizon natives `native_mapping_binding`, `native_key_held`,
+    `native_gui_size`, `native_set_cursor`, `native_local_player` (fragment `mod_screen_input`).
+    - [ ] In game: hold right-click on a creative motor, release over another value, the speed changes.
+    - Not yet: a mod's own looping, ticking sound instances (Create's `SoundScape` machine hum),
+      `AbstractWidget`/`Button`/`EditBox` natives, container screens, `ScreenEvent`s, mods' own key
+      mappings and `consumeClick`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

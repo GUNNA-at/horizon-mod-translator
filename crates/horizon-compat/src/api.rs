@@ -427,6 +427,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             .or_else(|| crate::blocks::call(rt, key, args))
             .or_else(|| crate::shapes::call(rt, key, args))
             .or_else(|| crate::events::call(rt, key, args))
+            .or_else(|| crate::screens::call(rt, key, args))
             .or_else(|| crate::gui::call(rt, key, args))
             .or_else(|| crate::neo::call(rt, key, args))
             .or_else(|| crate::jlang::call(rt, key, args))
@@ -1088,6 +1089,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::food::get_static(rt, o, f))
             .or_else(|| crate::events::get_static(rt, o, f))
             .or_else(|| crate::gui::get_static(rt, o, f))
+            .or_else(|| crate::screens::get_static(rt, o, f))
     {
         return v;
     }

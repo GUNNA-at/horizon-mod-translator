@@ -57,9 +57,93 @@ pub(crate) fn sound_id(rt: &Rt, v: V) -> Option<String> {
 /// Plays `sound` (an event or a holder of one) under `source` (a `SoundSource`, or its ordinal).
 fn play(rt: &mut Rt, sound: V, at: [f64; 3], source: usize, volume: f32, pitch: f32) {
     let Some(event) = sound_id(rt, sound) else { return };
-    if let Some(h) = rt.host_mut() {
-        h.play_sound(&Sound { event, at, source, volume, pitch });
+    play_id(rt, Sound { event, at, source, volume, pitch });
+}
+
+/// Plays `sound` on the host; a host that only reads (a screen's drawing and input) has it played
+/// at the client's next tick.
+pub(crate) fn play_id(rt: &mut Rt, sound: Sound) {
+    if crate::screens::defer_sound(rt, &sound) {
+        return;
     }
+    if let Some(h) = rt.host_mut() {
+        h.play_sound(&sound);
+    }
+}
+
+const SIMPLE_SOUND: &str = "net/minecraft/client/resources/sounds/SimpleSoundInstance";
+const SOUND_MANAGER: &str = "net/minecraft/client/sounds/SoundManager";
+/// `SoundSource.MASTER`'s ordinal: a UI sound's.
+const MASTER: usize = 0;
+
+/// A `SimpleSoundInstance` of `sound` (an event or a holder): where it plays (None: relative to the
+/// listener, a UI sound), its source, volume and pitch.
+fn instance(rt: &mut Rt, sound: V, at: Option<[f64; 3]>, source: usize, volume: f32, pitch: f32) -> V {
+    let i = rt.new_object(SIMPLE_SOUND);
+    let id = sound_id(rt, sound).unwrap_or_default();
+    let id = rt.string(&id);
+    rt.put_field(i, "$event", id);
+    if let Some([x, y, z]) = at {
+        for (f, v) in ["$x", "$y", "$z"].into_iter().zip([x, y, z]) {
+            rt.put_field(i, f, V::D(v));
+        }
+    }
+    rt.put_field(i, "$source", V::I(source as i32));
+    rt.put_field(i, "$volume", V::F(volume));
+    rt.put_field(i, "$pitch", V::F(pitch));
+    i
+}
+
+/// The client's sounds a mod plays itself (`Minecraft.getSoundManager().play(instance)`): the
+/// game's own instances (`SimpleSoundInstance.forUI`, one at a place), played once. A mod's own
+/// instance class (a looping, ticking one) isn't played yet.
+fn manager_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match (owner, name) {
+        ("net/minecraft/client/Minecraft", "getSoundManager") => rt.intern("compat:sound-manager".into(), |rt| rt.new_object(SOUND_MANAGER)),
+        // `forUI(sound, pitch[, volume])`: volume 0.25 unless given; relative, so at the listener.
+        (SIMPLE_SOUND, "forUI") => {
+            let volume = if desc.contains("FF)") { a(2).f() } else { 0.25 };
+            instance(rt, a(0), None, MASTER, volume, a(1).f())
+        }
+        // `new SimpleSoundInstance(event, source, volume, pitch, random, pos)` and the one at x, y, z.
+        (SIMPLE_SOUND, "<init>") if desc.starts_with("(Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundSource;FFLnet/minecraft/util/RandomSource;") => {
+            let at = if desc.contains("BlockPos") {
+                crate::api::pos_of(rt, a(6)).map(|c| f64::from(c) + 0.5)
+            } else {
+                [a(6).d(), a(7).d(), a(8).d()]
+            };
+            let made = instance(rt, a(1), Some(at), ordinal(rt, a(2)), a(3).f(), a(4).f());
+            for f in ["$event", "$x", "$y", "$z", "$source", "$volume", "$pitch"] {
+                let v = rt.get_field(made, f);
+                rt.put_field(a(0), f, v);
+            }
+            V::Void
+        }
+        (SOUND_MANAGER, "play" | "playDelayed") => {
+            let i = a(1);
+            let Some(event) = rt.str_of(rt.get_field(i, "$event")).map(str::to_owned) else {
+                let class = rt.class_of(i);
+                crate::glue::trace_once(rt, "sound-instance", |_| format!("client: a mod's own sound instance ({class}) isn't played"));
+                return Some(V::Void);
+            };
+            let at = match rt.get_field(i, "$x") {
+                V::D(x) => [x, rt.get_field(i, "$y").d(), rt.get_field(i, "$z").d()],
+                // Relative to the listener: at the player's eyes.
+                _ => match rt.host().and_then(|h| h.player_place()) {
+                    Some(([x, y, z], _, _)) => [x, y + 1.62, z],
+                    None => [0.0; 3],
+                },
+            };
+            let source = rt.get_field(i, "$source").i().max(0) as usize;
+            let (volume, pitch) = (rt.get_field(i, "$volume").f(), rt.get_field(i, "$pitch").f());
+            play_id(rt, Sound { event, at, source, volume, pitch });
+            V::Void
+        }
+        (SOUND_MANAGER, "stop" | "pause" | "resume" | "tick" | "destroy" | "reload") => V::Void,
+        (SOUND_MANAGER, "isActive") => V::I(0),
+        _ => return None,
+    })
 }
 
 fn ordinal(rt: &Rt, source: V) -> usize {
@@ -104,6 +188,9 @@ pub fn level_sound(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> V {
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, rest) = key.split_once('.')?;
     let (name, desc) = rest.split_once('.')?;
+    if let Some(v) = manager_call(rt, owner, name, desc, args) {
+        return Some(v);
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         (SOUND_EVENT, "createVariableRangeEvent") => {

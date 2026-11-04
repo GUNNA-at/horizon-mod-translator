@@ -876,15 +876,45 @@ pub fn gui_layer(rt: &mut Rt, host: &mut dyn Host, layer: &str, pre: bool) -> bo
     rt.with_host(host, |rt| crate::gui::draw_layers(rt, layer, pre))
 }
 
+/// The mods' screen drawn over the game's (`native_screen_render_post` while it is open), the
+/// pointer at `mouse` in GUI pixels ([`crate::screens::render`]). `host` only reads and draws.
+pub fn screen_render(rt: &mut Rt, host: &mut dyn Host, mouse: [f32; 2], partial: f32) {
+    rt.safe_point();
+    crate::neo::fire_client_setup(rt);
+    rt.with_host(host, |rt| crate::screens::render(rt, mouse, partial));
+}
+
+/// The pointer, the wheel or a key over the mods' screen ([`crate::screens::input`]): true when
+/// the screen took it. `host` only reads.
+pub fn screen_input(rt: &mut Rt, host: &mut dyn Host, mouse: [f32; 2], input: crate::screens::Input<'_>, modifiers: u32) -> bool {
+    rt.safe_point();
+    crate::neo::fire_client_setup(rt);
+    rt.with_host(host, |rt| crate::screens::input(rt, mouse, input, modifiers))
+}
+
+/// The client's use key acting with `hand` (`InputEvent.InteractionKeyMappingTriggered`): on the
+/// block under the crosshair, `RightClickBlock` is posted on the client as
+/// `MultiPlayerGameMode.performUseItemOn` does before the use goes to the server. The use itself
+/// goes on either way: the server's own event decides it there.
+pub fn client_use(rt: &mut Rt, host: &mut dyn Host, hand: u8) {
+    rt.safe_point();
+    crate::neo::fire_client_setup(rt);
+    let Some((pos, face, hit)) = host.player_pov_hit(0) else { return };
+    let _ = crate::events::client_right_click_block(rt, host, pos, i64::from(face), hit, hand);
+}
+
 /// The client's tick, in `Minecraft.tick`'s order: `ClientTickEvent.Pre` (animation clocks advance
-/// here: catnip's `AnimationTickHolder`), the level's block entities, then `ClientTickEvent.Post`.
+/// here: catnip's `AnimationTickHolder`), the open screen's tick (and what screens left for it:
+/// payloads, opening and closing), the level's block entities, then `ClientTickEvent.Post`.
 pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
     crate::neo::fire_client_setup(rt);
     rt.with_host(host, |rt| {
+        crate::gui::frame(rt);
         let ev = rt.new_object(CLIENT_TICK_PRE);
         crate::neo::post(rt, CLIENT_TICK_PRE, ev);
+        crate::screens::tick(rt);
         // `ClientLevel.tickEntities`: the entities, then the block entities.
         let dimension = rt.host().map(|h| h.dimension()).unwrap_or_default();
         crate::mod_entities::tick_all(rt, &dimension);

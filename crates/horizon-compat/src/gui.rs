@@ -399,8 +399,12 @@ fn push(rt: &mut Rt, v: V, st: St, out: &mut Vec<TextRun>, depth: u32) {
             None => legacy(&format, st, out),
         }
     } else if let Some(key) = rt.str_of(rt.get_field(v, "$keybind")).map(str::to_owned) {
-        // A key's name: the mapping's own name stands for the key bound to it.
-        let t = translate(rt, &key).unwrap_or(key);
+        // `Component.keybind("key.use")`: the key bound to the mapping, as the Controls screen
+        // names it ("Right Button"); a mapping the game doesn't know shows its own name translated.
+        let t = match rt.host().and_then(|h| h.mapping(&key)) {
+            Some(_) => crate::screens::mapping_display(rt, &key),
+            None => translate(rt, &key).unwrap_or(key),
+        };
         legacy(&t, st, out);
     } else {
         legacy(&text, st, out);
@@ -1033,15 +1037,88 @@ fn tint(rt: &Rt) -> u32 {
     rt.interned.get(TINT).map_or(u32::MAX, |v| v.i() as u32)
 }
 
-/// `innerBlit`: part `uv` of `texture` into the rectangle `x0..x1, y0..y1` under `m`.
+/// `innerBlit`: part `uv` of `texture` into the rectangle `x0..x1, y0..y1` under `m`. Texture
+/// coordinates past 0..1 repeat the texture (GL's wrap, as vanilla's 32 x 32 menu background
+/// tiles over a screen): such a blit is drawn a tile at a time, up to 4096 tiles.
 fn blit(rt: &mut Rt, m: &M4, texture: &str, [x0, x1, y0, y1]: [f32; 4], uv: [f32; 4]) {
+    let [u0, v0, u1, v1] = uv;
+    let span = |a: f32, b: f32| (b.ceil() - a.floor()).max(1.0);
+    let repeats = u1 > u0 && v1 > v0 && (u0 < 0.0 || v0 < 0.0 || u1 > 1.0 || v1 > 1.0);
+    if repeats && uv.iter().all(|c| c.is_finite()) && span(u0, u1) * span(v0, v1) <= 4096.0 {
+        // The pieces of `a..b` between whole numbers.
+        let cuts = |a: f32, b: f32| {
+            let mut out = Vec::new();
+            let mut s = a;
+            while s < b {
+                let e = (s.floor() + 1.0).min(b);
+                out.push((s, e));
+                s = e;
+            }
+            out
+        };
+        let x_at = |u: f32| x0 + (x1 - x0) * (u - u0) / (u1 - u0);
+        let y_at = |v: f32| y0 + (y1 - y0) * (v - v0) / (v1 - v0);
+        for (ua, ub) in cuts(u0, u1) {
+            let bu = ua.floor();
+            for (va, vb) in cuts(v0, v1) {
+                let bv = va.floor();
+                blit_one(rt, m, texture, [x_at(ua), x_at(ub), y_at(va), y_at(vb)], [ua - bu, va - bv, ub - bu, vb - bv]);
+            }
+        }
+        return;
+    }
+    blit_one(rt, m, texture, [x0, x1, y0, y1], uv);
+}
+
+fn blit_one(rt: &mut Rt, m: &M4, texture: &str, [x0, x1, y0, y1]: [f32; 4], uv: [f32; 4]) {
     let (a, b) = (at(m, x0, y0), at(m, x1, y1));
     let rect = [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])];
     let tint = tint(rt);
+    blit_rect(rt, texture, rect, uv, tint);
+}
+
+fn blit_rect(rt: &mut Rt, texture: &str, rect: [f32; 4], uv: [f32; 4], tint: u32) {
     let drew = rt.host_mut().is_some_and(|h| h.gui_blit(texture, uv, rect, tint));
     if !drew {
         crate::glue::trace_once(rt, &format!("gui-blit/{texture}"), |_| format!("client: no GUI texture {texture}"));
     }
+}
+
+// ---- for screens (`screens.rs`) ----
+
+/// A mod starts drawing on the GUI (a screen): text and items drawn through a pose go to the GUI.
+pub(crate) fn begin_drawing(rt: &mut Rt) {
+    rt.interned.insert(DRAWING.into(), V::I(1));
+}
+
+/// The drawing is over: the flag and the tint go.
+pub(crate) fn end_drawing(rt: &mut Rt) {
+    rt.interned.remove(DRAWING);
+    rt.interned.remove(TINT);
+}
+
+/// The pose a `GuiGraphics` draws under now.
+pub(crate) fn pose(rt: &Rt, graphics: V) -> M4 {
+    pose_of(rt, graphics)
+}
+
+/// `fillGradient(x0, y0, x1, y1, from, to)` under `m`.
+pub(crate) fn gradient(rt: &mut Rt, m: &M4, [x0, y0, x1, y1]: [i32; 4], from: i32, to: i32) {
+    fill_gradient(rt, m, x0, y0, x1, y1, from, to);
+}
+
+/// A blit under `m` (`x0..x1, y0..y1`), its texture repeating past 0..1 ([`blit`]).
+pub(crate) fn blit_at(rt: &mut Rt, m: &M4, texture: &str, rect: [f32; 4], uv: [f32; 4]) {
+    blit(rt, m, texture, rect, uv);
+}
+
+/// A blit into GUI rectangle `rect` (`[x0, y0, x1, y1]`, already through the pose), its colour
+/// `argb` (a vertex's) times the shader colour.
+pub(crate) fn blit_tinted(rt: &mut Rt, texture: &str, rect: [f32; 4], uv: [f32; 4], argb: u32) {
+    let shader = tint(rt);
+    let times = |shift: u32| ((argb >> shift & 0xFF) * (shader >> shift & 0xFF) / 255) << shift;
+    let tint = times(24) | times(16) | times(8) | times(0);
+    blit_rect(rt, texture, rect, uv, tint);
 }
 
 fn texture_name(rt: &Rt, v: V) -> String {
@@ -1613,6 +1690,7 @@ pub fn fill_minecraft(rt: &mut Rt, mc: V) {
     let options = single(rt, "net/minecraft/client/Options");
     rt.put_field(options, "hideGui", V::I(0));
     rt.put_field(options, "advancedItemTooltips", V::I(0));
+    crate::screens::fill_options(rt, options);
     rt.put_field(mc, "options", options);
     let mode = single(rt, GAME_MODE);
     rt.put_field(mc, "gameMode", mode);
@@ -1664,7 +1742,11 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
         }
         ("net/minecraft/client/renderer/texture/AbstractTexture", "setFilter" | "bind" | "close" | "releaseId") => V::Void,
         ("net/minecraft/client/renderer/texture/AbstractTexture", "getId") => V::I(0),
-        ("net/minecraft/client/MouseHandler", "xpos" | "ypos") => V::D(0.0),
+        // The pointer in the window's pixels.
+        ("net/minecraft/client/MouseHandler", "xpos" | "ypos") => {
+            let c = rt.host().map_or([0.0, 0.0], |h| h.cursor());
+            V::D(f64::from(c[usize::from(name == "ypos")]) * scale(rt))
+        }
         ("net/minecraft/client/MouseHandler", "isMouseGrabbed") => V::I(1),
         ("net/minecraft/client/Options", "getCameraType") => crate::api::api_enum(rt, "net/minecraft/client/CameraType", "FIRST_PERSON", 0),
         ("net/minecraft/client/CameraType", "isFirstPerson") => V::I((rt.get_field(a(0), "$ordinal").i() == 0) as i32),
@@ -1879,7 +1961,7 @@ pub fn graphics(rt: &mut Rt) -> V {
 
 /// What the mods' GUI code reads of the client this frame: the block under the crosshair
 /// (`Minecraft.hitResult`) and the fields [`fill_minecraft`] sets.
-fn frame(rt: &mut Rt) {
+pub(crate) fn frame(rt: &mut Rt) {
     let mc = crate::api::call(rt, "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;", &[]);
     fill_minecraft(rt, mc);
     let hit = crate::api_common::pov_hit_result(rt, 0);

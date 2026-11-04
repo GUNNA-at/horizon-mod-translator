@@ -392,6 +392,44 @@ pub trait Host {
     fn translate(&self, _key: &str) -> Option<String> {
         None
     }
+
+    // ---- A client's screen and input: a mod's own screen over the world, the keys it reads ----
+
+    /// Opens the mods' screen over the world (`Minecraft.setScreen` with a mod's screen): the game
+    /// frees the pointer and hands the screen's drawing and input to the runtime. False when it
+    /// can't now (another screen is open, the world is loading, a server's game).
+    fn open_screen(&mut self) -> bool {
+        false
+    }
+    /// Closes the mods' screen, if it is open.
+    fn close_screen(&mut self) {}
+    /// Whether the mods' screen is open: the player closes it with Escape without the mod.
+    fn screen_open(&self) -> bool {
+        false
+    }
+    /// Vanilla key mapping `name` (`key.use`, `key.inventory`): the key bound to it as
+    /// `options.txt` names keys (`key.mouse.right`, `key.keyboard.e`), and whether it is held.
+    /// None for a mapping the game doesn't have.
+    fn mapping(&self, _name: &str) -> Option<(String, bool)> {
+        None
+    }
+    /// Whether key `key` (`key.keyboard.left.shift`, `key.mouse.left`) is held now
+    /// (`InputConstants.isKeyDown`).
+    fn key_held(&self, _key: &str) -> bool {
+        false
+    }
+    /// The pointer, in GUI pixels from the window's top left.
+    fn cursor(&self) -> [f32; 2] {
+        [0.0, 0.0]
+    }
+    /// Moves the pointer to `at` in GUI pixels (`GLFW.glfwSetCursorPos`).
+    fn set_cursor(&mut self, _at: [f32; 2]) {}
+    /// True for a host lent only to read and draw (a screen's drawing and input, a HUD layer):
+    /// what would change the game (a payload, a screen opening or closing, the pointer moving)
+    /// waits for the client's next tick.
+    fn read_only(&self) -> bool {
+        false
+    }
 }
 
 /// A piece of a line of text with one style ([`Host::gui_text`]).
@@ -543,6 +581,17 @@ pub struct MemoryHost {
     pub drawn_gui: Vec<GuiDraw>,
     /// The player's language: translation key to text.
     pub lang: HashMap<String, String>,
+    /// Whether the mods' screen is open, and how often it was opened.
+    pub screen: bool,
+    pub screens_opened: u32,
+    /// Key mappings: the key bound and whether it is held.
+    pub mappings: HashMap<String, (String, bool)>,
+    /// Keys held, by name.
+    pub keys_held: Vec<String>,
+    /// The pointer in GUI pixels.
+    pub cursor: [f32; 2],
+    /// A host lent only to read and draw ([`Host::read_only`]).
+    pub read_only: bool,
 }
 
 impl Host for MemoryHost {
@@ -717,6 +766,9 @@ impl Host for MemoryHost {
         self.exhaustion += amount;
     }
     fn send_payload(&mut self, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
+        if self.read_only {
+            return false;
+        }
         self.payloads.push((to, channel.to_owned(), data.to_vec()));
         true
     }
@@ -753,7 +805,9 @@ impl Host for MemoryHost {
         Some(id)
     }
     fn play_sound(&mut self, sound: &Sound) {
-        self.sounds.push(sound.clone());
+        if !self.read_only {
+            self.sounds.push(sound.clone());
+        }
     }
     fn particles(&mut self, particles: &Particles) {
         self.particles.push(particles.clone());
@@ -777,6 +831,39 @@ impl Host for MemoryHost {
     }
     fn translate(&self, key: &str) -> Option<String> {
         self.lang.get(key).cloned()
+    }
+    fn open_screen(&mut self) -> bool {
+        if self.read_only {
+            return false;
+        }
+        self.screen = true;
+        self.screens_opened += 1;
+        true
+    }
+    fn close_screen(&mut self) {
+        if !self.read_only {
+            self.screen = false;
+        }
+    }
+    fn screen_open(&self) -> bool {
+        self.screen
+    }
+    fn mapping(&self, name: &str) -> Option<(String, bool)> {
+        self.mappings.get(name).cloned()
+    }
+    fn key_held(&self, key: &str) -> bool {
+        self.keys_held.iter().any(|k| k == key)
+    }
+    fn cursor(&self) -> [f32; 2] {
+        self.cursor
+    }
+    fn set_cursor(&mut self, at: [f32; 2]) {
+        if !self.read_only {
+            self.cursor = at;
+        }
+    }
+    fn read_only(&self) -> bool {
+        self.read_only
     }
 }
 

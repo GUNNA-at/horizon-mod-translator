@@ -4545,6 +4545,83 @@ impl Game<'_> {
             .as_deref()
             .filter(|_| self.screen == Screen::Mod)
     }
+    /// A vanilla key mapping (`key.use`, `key.inventory`, any the Controls
+    /// screen lists): the key bound to it, as options.txt names keys
+    /// (`key.mouse.right`, `key.keyboard.e`), and whether it is held now
+    /// (attack and use as the game reads them, a toggled one included).
+    /// `&self`: a mod screen's hooks read it (`KeyMapping.isDown`,
+    /// `matchesMouse`). API @API:mod_screen_input@.
+    pub(super) fn native_mapping_binding(&self, name: &str) -> (String, bool) {
+        let key = self.settings.keys.get(name).to_owned();
+        let held = match name {
+            "key.attack" => self.left,
+            "key.use" => self.right,
+            _ => self.native_key_held(&key),
+        };
+        (key, held)
+    }
+    /// Whether key `key` (`key.keyboard.left.shift`, `key.mouse.right`) is
+    /// held now (`InputConstants.isKeyDown`): the modifiers from the window's
+    /// live modifier state (either side), other keys and buttons as their
+    /// last events left them. API @API:mod_screen_input@.
+    pub(super) fn native_key_held(&self, key: &str) -> bool {
+        if let Some(button) = keybinds::mouse_button(key) {
+            return self.physical_buttons.contains(&button);
+        }
+        match key {
+            "key.keyboard.left.shift" | "key.keyboard.right.shift" => self.modifiers.shift_key(),
+            "key.keyboard.left.control" | "key.keyboard.right.control" => self.modifiers.control_key(),
+            "key.keyboard.left.alt" | "key.keyboard.right.alt" => self.modifiers.alt_key(),
+            "key.keyboard.left.win" | "key.keyboard.right.win" => self.modifiers.super_key(),
+            _ => keybinds::key_code(key).is_some_and(|k| self.physical_keys.contains(&k)),
+        }
+    }
+    /// The window's own player (`Minecraft.player`): where their feet are,
+    /// their yaw and pitch in degrees, and whether they play in creative. None
+    /// with no player (the title screen, a world loading). For a client mod's
+    /// hooks: what its screens and handlers read of the local player (reach,
+    /// look, crosshair checks). API @API:mod_screen_input@.
+    pub(super) fn native_local_player(&self) -> Option<([f64; 3], f32, f32, bool)> {
+        let p = self.player.as_ref()?;
+        let at = [p.position.x, p.position.y, p.position.z];
+        Some((at, p.yaw, p.pitch, self.mode_id() == 1))
+    }
+    /// The GUI's size in GUI pixels and its scale (window pixels a GUI pixel
+    /// spans): vanilla's `Window.getGuiScaledWidth`, `getGuiScaledHeight` and
+    /// `getGuiScale`, for a mod screen laid out before it draws.
+    /// API @API:mod_screen_input@.
+    pub(super) fn native_gui_size(&self) -> ([f32; 2], f32) {
+        let size = self
+            .renderer
+            .as_ref()
+            .map_or([1280, 720], |r| [r.config.width, r.config.height]);
+        let b = HudBatch::new(size);
+        ([b.width, b.height], b.scale)
+    }
+    /// Moves the pointer to `at` in GUI pixels (`GLFW.glfwSetCursorPos`): a
+    /// mod screen putting it on the value it opens at. The window's pointer
+    /// moves when the window has the focus and shows; the game's own reading
+    /// (`native_cursor`, a screen's `mouse`) moves either way. Ignored while
+    /// the pointer is captured for playing. API @API:mod_screen_input@.
+    pub(super) fn native_set_cursor(&mut self, at: [f32; 2]) {
+        if self.captured || !at.iter().all(|v| v.is_finite()) {
+            return;
+        }
+        let ([w, h], scale) = self.native_gui_size();
+        let at = [at[0].clamp(0.0, w), at[1].clamp(0.0, h)];
+        self.cursor = (at[0], at[1]);
+        if self.options.offscreen || !self.focused {
+            return;
+        }
+        if let Some(window) = &self.window {
+            let [vx, vy] = self.view_at.map(f64::from);
+            let to = winit::dpi::PhysicalPosition::new(
+                vx + f64::from(at[0] * scale),
+                vy + f64::from(at[1] * scale),
+            );
+            let _ = window.set_cursor_position(to);
+        }
+    }
     /// A mod's own screen closes (Escape, or `native_mod_screen_close`).
     pub(super) fn close_mod_screen(&mut self) {
         self.native_mod_screen = None;

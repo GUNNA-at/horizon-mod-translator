@@ -50,6 +50,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(rt.intern(format!("compat:vertex-format/{field}"), |rt| {
         let f = rt.new_object(VERTEX_FORMAT);
         rt.put_field(f, "$size", V::I(size));
+        let name = rt.string(field);
+        rt.put_field(f, "$name", name);
         f
     }))
 }

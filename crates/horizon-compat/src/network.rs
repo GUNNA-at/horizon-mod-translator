@@ -1039,8 +1039,17 @@ pub fn encode_payload(rt: &mut Rt, payload: V) -> Option<(String, Vec<u8>)> {
 /// Sends `payload` to `to` through the game.
 fn send(rt: &mut Rt, to: PayloadTarget, payload: V) -> bool {
     let Some((channel, data)) = encode_payload(rt, payload) else { return false };
-    let sent = rt.host_mut().is_some_and(|h| h.send_payload(to, &channel, &data));
-    crate::glue::trace_some(rt, "payload-sent", &channel, 40, |_| {
+    send_raw(rt, to, &channel, &data)
+}
+
+/// Sends a payload already encoded (`data` on channel `channel`) to `to`. One a screen's input
+/// sends (its host only reads) goes with the client's next tick ([`crate::screens::flush`]).
+pub fn send_raw(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
+    if crate::screens::defer_payload(rt, to, channel, data) {
+        return true;
+    }
+    let sent = rt.host_mut().is_some_and(|h| h.send_payload(to, channel, data));
+    crate::glue::trace_some(rt, "payload-sent", channel, 40, |_| {
         format!("payload {channel} ({} bytes) to {to:?}: {}", data.len(), if sent { "sent" } else { "not sent" })
     });
     sent
@@ -1081,6 +1090,15 @@ fn context(rt: &mut Rt, player: Option<u128>) -> V {
             let p = rt.new_object("net/minecraft/server/level/ServerPlayer");
             let u = crate::tags::uuid(rt, (uuid >> 64) as i64, uuid as i64);
             rt.put_field(p, "$uuid", u);
+            // Where the sender stands, when the server knows (a packet's reach checks:
+            // `canInteractWithBlock`).
+            if let Some((_, at)) = rt.host().and_then(|h| h.players().into_iter().find(|(id, _)| *id == uuid)) {
+                for (f, v) in ["$x", "$y", "$z"].into_iter().zip(at) {
+                    rt.put_field(p, f, V::D(v));
+                }
+                rt.put_field(p, "$yaw", V::F(0.0));
+                rt.put_field(p, "$pitch", V::F(0.0));
+            }
             p
         }
         None => local_player(rt),
