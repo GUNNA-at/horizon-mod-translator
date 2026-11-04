@@ -1109,6 +1109,26 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `regress.sh` set prints the same (hash order aside). Gaps: `LeftClickBlock`, `EntityInteract`
     and the client's own posting (Create's client listeners: its value boxes, the wrench's
     preview) aren't posted yet; listeners' priorities aren't kept (the order they were added).
+  - [x] 2026-11-04 Checked in game (build of 4ec8610; the game build of 184baf2 had stopped at the
+    generated placement hook, whose `Placement` lacked the new `hand`: 4ec8610 gives it the main
+    hand's). `casegame.sh` (new): a survival player's andesite alloy on a stripped oak log makes
+    andesite casing (alloy 3 → 2); on stone nothing happens (2 stay); an empty hand on a stripped
+    birch log leaves it. `sandgame.sh` round 3 (new): the paper in the off hand, 3 rose quartz in
+    the main hand: holding use leaves 2 rose quartz and gives polished rose quartz, and the
+    off-hand paper shows its wear bar. `beltgame.sh`: the second click no longer stops the server
+    thread; the hand holds 4 of 5 and the belt is laid, but its start and end (where the shafts
+    were) turned to air and the item on it stayed put.
+  - [x] 2026-11-04 A block entity goes with its block (`glue::block_entity_at`). The belt's ends
+    were lost because the runtime kept the shafts' block entities (made when the game ticked them)
+    after the belt replaced the shafts: `getBlockEntity` on the new belt start answered the old
+    shaft's, so the belt's first tick (`BeltBlock.initBelt`, `beltLength == 0`) found no
+    `BeltBlockEntity` there and broke the start, and the end's tick then broke the end. Now the
+    runtime's block entity at a position stands only while the block it was made for is there; a
+    changed block lets it go (as vanilla's chunk removes it) and a new one is made for the new
+    block. Harness `COMPONENTS=1` with `TICKED=1` (new: the shafts' block entities tick before the
+    clicks, and the belt's three times after, each with its saved compound, as the game does):
+    before the fix the ticks leave air, middle, middle, middle, air (the game's result); after it
+    start, middle × 3, end, each with `Length` 5.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

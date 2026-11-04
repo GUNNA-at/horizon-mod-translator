@@ -176,10 +176,19 @@ fn load_saved(rt: &mut Rt, be: V, nbt: &std::collections::BTreeMap<String, crate
 /// made on its first tick or draw, and Create's belt asks for its segments' before they tick (and
 /// breaks itself when one is missing). It takes the game's saved data on its first tick.
 pub(crate) fn block_entity_at(rt: &mut Rt, pos: [i32; 3]) -> V {
+    let state = rt.host().map(|h| h.block_state(pos));
     if let Some(be) = rt.block_entities.get(&pos).copied() {
-        return be;
+        // Only while its block is there: a block replaced since (Create's belt connector breaks
+        // the shafts it lays its ends on, then sets the belt there) took its block entity with it,
+        // as vanilla's chunk removes it when the block changes.
+        let block = state.as_deref().map(|s| crate::host::split_state(s).0);
+        let gone = matches!((rt.block_entity_meta.get(&pos), block), (Some((b, _)), Some(now)) if b != now);
+        if !gone {
+            return be;
+        }
+        block_entity_removed(rt, pos);
     }
-    let Some(state) = rt.host().map(|h| h.block_state(pos)) else { return V::NULL };
+    let Some(state) = state else { return V::NULL };
     if !implements(rt, &state, NEW_BLOCK_ENTITY) {
         return V::NULL;
     }
