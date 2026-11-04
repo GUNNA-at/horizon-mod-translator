@@ -177,6 +177,11 @@ pub(crate) fn count(rt: &Rt, s: V) -> i32 {
     if is_empty(rt, s) { 0 } else { rt.get_field(s, "$count").i() }
 }
 
+/// A stack as tools show it: its item and count, None when empty.
+pub fn stack_view(rt: &Rt, s: V) -> Option<(String, i32)> {
+    (!is_empty(rt, s)).then(|| (crate::api_common::item_like_name(rt, rt.get_field(s, "$item")), count(rt, s)))
+}
+
 fn set_count(rt: &mut Rt, s: V, n: i32) {
     if s.r() != 0 {
         rt.put_field(s, "$count", V::I(n));
@@ -2834,10 +2839,6 @@ mod tests {
     /// What the game holds in `slot`: item and count.
     fn game_slot(h: &MemoryHost, slot: u8) -> Option<(String, u32)> {
         h.player_slot(slot).map(|s| (s.item, s.count))
-    }
-
-    fn stack_view(rt: &Rt, s: V) -> Option<(String, i32)> {
-        (!is_empty(rt, s)).then(|| (crate::api_common::item_like_name(rt, rt.get_field(s, "$item")), count(rt, s)))
     }
 
     fn to_client(server: &mut MemoryHost, rt: &mut Rt, client: &mut MemoryHost) -> usize {

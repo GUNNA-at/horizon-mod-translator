@@ -1266,6 +1266,28 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Gaps: vanilla's own menus (`ChestMenu`...) don't open yet (no menu type of a mod's); `Player.drop`
     loses components; no `ItemStackedOnOtherEvent` / `PlayerContainerEvent`; touchscreen mode;
     `Inventory.items` / `armor` lists aren't fields.
+  - [x] 2026-11-04 Create's own filter, both sides, with the real classes (harness `FILTER=<content mod>`,
+    `scratchpad/harness/src/filter.rs`; server and client each on their own runtime and thread, as in the
+    game). The server's player holds `create:filter` (5 diamonds in slot 1) and uses it:
+    `FilterItem.use` → `openMenu` → OPEN + UPDATE (45 + 171 bytes); the client makes `FilterMenu` (54
+    slots: 36 of the inventory, 18 ghost `SlotItemHandler`s) and opens `FilterScreen` (214 x 211 at
+    122, 34 in a 480 x 270 GUI), which draws the inventory's stacks and labels. Clicks on the diamonds
+    (carried 5), on the first filter slot (a ghost copy, the 5 still carried), back on the diamonds'
+    slot, then Escape: each CLICK reaches the server and runs in the player's tick (the diamonds leave
+    and come back to slot 1 there too), CLOSED runs `removed()` → `saveData`, and the filter in the
+    server's hand then holds `create:filter_items: [{slot: 0, item: {id: "minecraft:diamond", count:
+    1}}]` with `filter_items_blacklist` and `filter_items_respect_nbt` 0, vanilla's own form.
+    New: `ItemContainerContents` (`handlers.rs`: `fromItems`, `copyInto`, `copyOne`, `stream`,
+    `nonEmptyStream`, `nonEmptyItems(Copy)`, NeoForge's `getSlots` / `getStackInSlot`, `equals`,
+    `hashCode`, `EMPTY`; `CODEC` as `[{slot, item}]` in NBT and JSON, slots 0..255; `STREAM_CODEC` as a
+    list of optional stacks; test `container_contents_keep_their_slots_through_the_codec`). Game side:
+    natives `native_slot_stack` / `native_set_slot_stack` / `native_selected_slot` (fragment
+    `slot_stack.json`: every slot by vanilla's numbering, the armour feet up, 40 the off hand; a client
+    reads its own and changes none), the bundle's player host answers every slot (`player_id`,
+    `player_selected`, `player_inventory`, `player_slot`, `set_player_slot`, `update_player_slot`) and
+    now sends payloads (a menu opened from `use_item` reaches the client), the client host reads every
+    slot, and a new `player_tick` helper (binding 17) calls `glue::player_tick` from the game's
+    `native_player_tick`, inside `as_guest`. `coverage` takes `MISSING=all`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -101,6 +101,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/util/Unit", "CODEC") => native(rt, "unit"),
         ("net/minecraft/world/item/ItemStack", "CODEC" | "STRICT_CODEC" | "SINGLE_ITEM_CODEC") => native(rt, "item_stack"),
         ("net/minecraft/world/item/ItemStack", "OPTIONAL_CODEC") => native(rt, "optional_item_stack"),
+        ("net/minecraft/world/item/component/ItemContainerContents", "CODEC") => native(rt, "container_contents"),
         ("net/minecraft/world/item/crafting/Ingredient", "CODEC") => native(rt, "ingredient"),
         ("net/minecraft/world/item/crafting/Ingredient", "CODEC_NONEMPTY") => native(rt, "ingredient_nonempty"),
         ("net/minecraft/world/item/crafting/Recipe", "CODEC" | "CONDITIONAL_CODEC") => native(rt, "recipe"),
@@ -790,6 +791,17 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
                 }
                 Nbt::Compound(m)
             }
+        }
+        // `[{slot, item}]`, the slots that aren't empty (`ItemContainerContents.CODEC`).
+        "container_contents" => {
+            let mut out = Vec::new();
+            for (i, s) in crate::handlers::contents_items(rt, v).into_iter().enumerate() {
+                if !crate::api_common::stack_empty(rt, s) {
+                    let item = write_native(rt, "item_stack", s)?;
+                    out.push(Nbt::Compound(BTreeMap::from([("slot".to_owned(), Nbt::Int(i as i32)), ("item".to_owned(), item)])));
+                }
+            }
+            Nbt::List(out)
         }
         "fluid_stack" | "optional_fluid_stack" => Nbt::Compound(crate::tanks::save_stack(rt, v)),
         "compound_tag" => Nbt::Compound(crate::nbt::from_runtime(rt, v)),

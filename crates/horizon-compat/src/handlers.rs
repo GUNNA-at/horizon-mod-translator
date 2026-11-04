@@ -14,6 +14,7 @@ const SERIALIZABLE: &str = "net/neoforged/neoforge/common/util/INBTSerializable"
 const HELPER: &str = "net/neoforged/neoforge/items/ItemHandlerHelper";
 const COMBINED: &str = "net/neoforged/neoforge/items/wrapper/CombinedInvWrapper";
 const NON_NULL_LIST: &str = "net/minecraft/core/NonNullList";
+const CONTENTS: &str = "net/minecraft/world/item/component/ItemContainerContents";
 /// `Item.ABSOLUTE_MAX_STACK_SIZE`.
 const ABSOLUTE_MAX: i32 = 99;
 
@@ -373,7 +374,160 @@ fn combined_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    matches!(owner, HELPER | HANDLER | COMBINED | ITEM_HANDLER | MODIFIABLE | SERIALIZABLE)
+    matches!(owner, HELPER | HANDLER | COMBINED | ITEM_HANDLER | MODIFIABLE | SERIALIZABLE | CONTENTS)
+}
+
+// ---- `ItemContainerContents`: the stacks a container item holds (a shulker box's, a filter's) ----
+
+/// `ItemContainerContents` holding `items` as given (the caller copies), in slot order.
+pub(crate) fn contents(rt: &mut Rt, items: Vec<V>) -> V {
+    let c = rt.new_object(CONTENTS);
+    let list = rt.alloc(NON_NULL_LIST, Data::List(items));
+    rt.put_field(c, "$items", list);
+    c
+}
+
+/// The stacks `ItemContainerContents` holds, in slot order, empty ones too.
+pub(crate) fn contents_items(rt: &Rt, c: V) -> Vec<V> {
+    if c.r() == 0 { Vec::new() } else { jutil::elements(rt, rt.get_field(c, "$items")) }
+}
+
+/// `ItemContainerContents.EMPTY`.
+fn no_contents(rt: &mut Rt) -> V {
+    rt.intern("compat:contents-empty".into(), |rt| contents(rt, Vec::new()))
+}
+
+fn copy(rt: &mut Rt, stack: V) -> V {
+    api::call(rt, "net/minecraft/world/item/ItemStack.copy.()Lnet/minecraft/world/item/ItemStack;", &[stack])
+}
+
+/// `ItemContainerContents.fromItems(list)`: copies up to the last stack that isn't empty; EMPTY when
+/// all are.
+pub(crate) fn contents_from_items(rt: &mut Rt, items: &[V]) -> V {
+    let Some(last) = items.iter().rposition(|&s| !api_common::stack_empty(rt, s)) else {
+        return no_contents(rt);
+    };
+    let mut out = Vec::with_capacity(last + 1);
+    for &s in &items[..=last] {
+        out.push(copy(rt, s));
+    }
+    contents(rt, out)
+}
+
+/// `ItemContainerContents` from slots as its codec reads them (index, stack): as many slots as the
+/// highest index needs, the rest empty; EMPTY for none.
+pub(crate) fn contents_from_slots(rt: &mut Rt, slots: Vec<(usize, V)>) -> V {
+    let Some(n) = slots.iter().map(|(i, _)| i + 1).max() else {
+        return no_contents(rt);
+    };
+    let e = empty(rt);
+    let mut items = vec![e; n];
+    for (i, s) in slots {
+        items[i] = s;
+    }
+    contents(rt, items)
+}
+
+fn contents_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match name {
+        "fromItems" => {
+            let items = jutil::elements(rt, a(0));
+            contents_from_items(rt, &items)
+        }
+        // NeoForge's: how many slots it holds, and a copy of one (past them, as NeoForge's
+        // `validateSlotIndex`, an UnsupportedOperationException).
+        "getSlots" => V::I(contents_items(rt, a(0)).len() as i32),
+        "getStackInSlot" => {
+            let items = contents_items(rt, a(0));
+            match usize::try_from(a(1).i()).ok().and_then(|i| items.get(i)) {
+                Some(&s) => copy(rt, s),
+                None => {
+                    rt.throw_new("java/lang/UnsupportedOperationException");
+                    V::NULL
+                }
+            }
+        }
+        "copyInto" => {
+            let items = contents_items(rt, a(0));
+            let n = jutil::elements(rt, a(1)).len();
+            for i in 0..n {
+                let s = match items.get(i) {
+                    Some(&s) => copy(rt, s),
+                    None => empty(rt),
+                };
+                if let Some(crate::Object { data: Data::List(l), .. }) = rt.heap.get_mut(a(1).r() as usize) {
+                    l[i] = s;
+                }
+            }
+            V::Void
+        }
+        "copyOne" => match contents_items(rt, a(0)).first() {
+            Some(&s) => copy(rt, s),
+            None => empty(rt),
+        },
+        "stream" | "nonEmptyStream" => {
+            let mut out = Vec::new();
+            for s in contents_items(rt, a(0)) {
+                if name == "stream" || !api_common::stack_empty(rt, s) {
+                    out.push(copy(rt, s));
+                }
+            }
+            rt.alloc("java/util/stream/Stream", Data::Stream(out))
+        }
+        // The stacks themselves (Guava's filtered view), or copies of them.
+        "nonEmptyItems" | "nonEmptyItemsCopy" => {
+            let mut out = Vec::new();
+            for s in contents_items(rt, a(0)) {
+                if !api_common::stack_empty(rt, s) {
+                    out.push(if name == "nonEmptyItems" { s } else { copy(rt, s) });
+                }
+            }
+            jutil::new_list(rt, out)
+        }
+        // `ItemStack.listMatches`: the same stacks in the same slots, components and all.
+        "equals" => {
+            let other = a(1);
+            if other == a(0) {
+                return Some(V::I(1));
+            }
+            if other.r() == 0 || !rt.instance_of(other, CONTENTS) {
+                return Some(V::I(0));
+            }
+            let (x, y) = (contents_items(rt, a(0)), contents_items(rt, other));
+            let mut same = x.len() == y.len();
+            for (&p, &q) in x.iter().zip(&y) {
+                if !same {
+                    break;
+                }
+                same = count(rt, p) == count(rt, q) && same_item(rt, p, q);
+            }
+            V::I(same as i32)
+        }
+        "hashCode" => {
+            let mut h: i32 = 0;
+            for s in contents_items(rt, a(0)) {
+                let one = if api_common::stack_empty(rt, s) {
+                    0
+                } else {
+                    let id = api_common::item_like_name(rt, rt.get_field(s, "$item"));
+                    let id_hash = id.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c)));
+                    id_hash.wrapping_mul(31).wrapping_add(count(rt, s))
+                };
+                h = h.wrapping_mul(31).wrapping_add(one);
+            }
+            V::I(h)
+        }
+        _ => return None,
+    })
+}
+
+/// `ItemContainerContents.EMPTY`.
+pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    match (owner, field) {
+        (CONTENTS, "EMPTY") => Some(no_contents(rt)),
+        _ => None,
+    }
 }
 
 /// [`call`] by the call's key (`owner.name.desc`).
@@ -399,6 +553,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             _ => return None,
         }),
         HANDLER => handler_call(rt, name, desc, args),
+        CONTENTS => contents_call(rt, name, args),
         COMBINED => combined_call(rt, name, args),
         ITEM_HANDLER | MODIFIABLE if !args.is_empty() && rt.instance_of(a(0), COMBINED) => combined_call(rt, name, args),
         ITEM_HANDLER | MODIFIABLE | SERIALIZABLE if !args.is_empty() && rt.instance_of(a(0), HANDLER) => handler_call(rt, name, desc, args),
@@ -409,6 +564,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nbt::Nbt;
 
     fn key(name: &str) -> &'static str {
         Box::leak(format!("{HANDLER}.{name}").into_boxed_str())
@@ -448,5 +604,45 @@ mod tests {
             .map(|s| (api_common::item_like_name(&rt, rt.get_field(s, "$item")), count(&rt, s)))
             .collect();
         assert_eq!(slots, [("minecraft:iron_ingot".to_owned(), 54), ("minecraft:gold_ingot".to_owned(), 1)]);
+    }
+
+    /// A filter's contents as Create saves them: `ItemContainerContents.fromItems` over a handler's
+    /// 18 slots, written by `CODEC` the way vanilla's `ItemContainerContents.Slot` codec writes
+    /// (`[{slot, item: {id, count}}]`, empty slots left out) and read back.
+    #[test]
+    fn container_contents_keep_their_slots_through_the_codec() {
+        let mut rt = Rt::new();
+        crate::install();
+        let e = empty(&mut rt);
+        let mut items = vec![e; 18];
+        items[0] = api_common::stack(&mut rt, "minecraft:diamond", 1);
+        items[3] = api_common::stack(&mut rt, "minecraft:iron_ingot", 5);
+        let list = rt.alloc(NON_NULL_LIST, Data::List(items.clone()));
+        let from = "net/minecraft/world/item/component/ItemContainerContents.fromItems.(Ljava/util/List;)Lnet/minecraft/world/item/component/ItemContainerContents;";
+        let c = api::call(&mut rt, from, &[list]);
+        // Up to the last stack that isn't empty, each a copy.
+        let held = contents_items(&rt, c);
+        assert_eq!(held.len(), 4);
+        assert_ne!(held[0], items[0]);
+        assert_eq!(count(&rt, held[3]), 5);
+        let codec = api::get_static(&mut rt, "net/minecraft/world/item/component/ItemContainerContents.CODEC");
+        let nbt = crate::codecs::encode(&mut rt, codec, c).unwrap();
+        let item = |id: &str, n: i32| Nbt::Compound([("id".to_owned(), Nbt::String(id.into())), ("count".to_owned(), Nbt::Int(n))].into());
+        let slot = |i: i32, it: Nbt| Nbt::Compound([("slot".to_owned(), Nbt::Int(i)), ("item".to_owned(), it)].into());
+        assert_eq!(nbt, Nbt::List(vec![slot(0, item("minecraft:diamond", 1)), slot(3, item("minecraft:iron_ingot", 5))]));
+        let json = serde_json::json!([{"slot": 3, "item": {"id": "minecraft:iron_ingot", "count": 5}}, {"slot": 0, "item": {"id": "minecraft:diamond"}}]);
+        let back = crate::codecs::decode(&mut rt, codec, &json).unwrap();
+        let equals = "net/minecraft/world/item/component/ItemContainerContents.equals.(Ljava/lang/Object;)Z";
+        assert_eq!(api::call(&mut rt, equals, &[back, c]), V::I(1));
+        // NeoForge's slot view, and copying into a list of the handler's size.
+        let slots = "net/minecraft/world/item/component/ItemContainerContents.getSlots.()I";
+        assert_eq!(api::call(&mut rt, slots, &[back]), V::I(4));
+        let into = rt.alloc(NON_NULL_LIST, Data::List(vec![e; 18]));
+        api::call(&mut rt, "net/minecraft/world/item/component/ItemContainerContents.copyInto.(Lnet/minecraft/core/NonNullList;)V", &[back, into]);
+        let got: Vec<i32> = jutil::elements(&rt, into).into_iter().map(|s| count(&rt, s)).collect();
+        assert_eq!(got, [1, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // A slot past 255 is refused, as `Codec.intRange(0, 255)` refuses it.
+        let bad = serde_json::json!([{"slot": 256, "item": {"id": "minecraft:diamond"}}]);
+        assert!(crate::codecs::decode(&mut rt, codec, &bad).is_err());
     }
 }

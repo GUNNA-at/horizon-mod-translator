@@ -101,8 +101,10 @@ fn main() -> ExitCode {
             100.0 * mapped as f64 / calls.len().max(1) as f64,
             100.0 * mapped_sites as f64 / sites.max(1) as f64
         );
-        if std::env::var_os("MISSING").is_some() {
-            for (n, k) in missing.iter().take(60) {
+        // MISSING=1 lists the 60 most called gaps; MISSING=all every one.
+        if let Some(m) = std::env::var_os("MISSING") {
+            let limit = if m == "all" { usize::MAX } else { 60 };
+            for (n, k) in missing.iter().take(limit) {
                 println!("  missing {n:5} {k}");
             }
         }

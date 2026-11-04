@@ -378,6 +378,22 @@ fn client_host(c: &str, id: &str) -> String {
         fn player_worn(&self, slot: u8) -> Option<{c}::host::HandStack> {{
             Some(self.held(self.game.get().native_worn(usize::from(slot))?))
         }}
+        // Every slot reads (a mod's menu shows them); none changes here: the server's sync does.
+        fn player_selected(&self) -> u8 {{
+            self.game.get().native_selected_slot() as u8
+        }}
+        fn player_inventory(&self) -> bool {{
+            true
+        }}
+        fn player_slot(&self, slot: u8) -> Option<{c}::host::HandStack> {{
+            Some(self.held(self.game.get().native_slot_stack(usize::from(slot))?))
+        }}
+        fn set_player_slot(&mut self, _slot: u8, _stack: Option<&{c}::host::HandStack>) -> bool {{
+            false
+        }}
+        fn update_player_slot(&mut self, _slot: u8, _count: u32, _damage: u32, _components: &[(String, Option<{c}::nbt::Nbt>)]) -> bool {{
+            false
+        }}
         fn translate(&self, key: &str) -> Option<String> {{
             horizon_client::lang::has(key).then(|| horizon_client::lang::get(key))
         }}
@@ -1329,23 +1345,39 @@ fn player_host(c: &str, server_effects: &str) -> String {
             self.game.native_player_pov_hit(fluids).map(|(pos, f, at)| (pos, face(f), at))
         }}
         fn player_hand(&self, hand: u8) -> Option<{c}::host::HandStack> {{
-            let stack = self.game.native_hand_stack(Self::hand(hand))?;
-            let components = self
-                .game
-                .native_registered_components()
-                .into_iter()
-                .filter_map(|name| {{
-                    let tag = self.game.native_component(stack, name).ok()??;
-                    Some((name.to_owned(), Self::nbt_of(tag)?))
-                }})
-                .collect();
-            Some({c}::host::HandStack {{
-                item: stack.item.to_string(),
-                count: stack.count,
-                damage: stack.damage,
-                max_damage: self.game.native_item_max_damage(&stack.item),
-                components,
-            }})
+            Some(self.held_of(self.game.native_hand_stack(Self::hand(hand))?))
+        }}
+        fn player_id(&self) -> Option<u128> {{
+            self.game.native_acting_player().map(|p| p.uuid)
+        }}
+        fn player_selected(&self) -> u8 {{
+            self.game.native_selected_slot() as u8
+        }}
+        fn player_inventory(&self) -> bool {{
+            true
+        }}
+        fn player_slot(&self, slot: u8) -> Option<{c}::host::HandStack> {{
+            Some(self.held_of(self.game.native_slot_stack(usize::from(slot))?))
+        }}
+        fn set_player_slot(&mut self, slot: u8, held: Option<&{c}::host::HandStack>) -> bool {{
+            let stack = held.filter(|h| !h.item.is_empty() && h.count > 0).map(|h| self.stack_of(h));
+            self.game.native_set_slot_stack(usize::from(slot), stack)
+        }}
+        fn update_player_slot(&mut self, slot: u8, count: u32, damage: u32, components: &[(String, Option<{c}::nbt::Nbt>)]) -> bool {{
+            let Some(mut stack) = self.game.native_slot_stack(usize::from(slot)).cloned() else {{
+                return false;
+            }};
+            let mut all = true;
+            for (name, value) in components {{
+                all &= match value.as_ref().map(Self::tag_of) {{
+                    Some(Some(tag)) => self.game.native_set_component(&mut stack, name, tag).is_ok(),
+                    Some(None) => false,
+                    None => self.game.native_remove_component(&mut stack, name).is_ok(),
+                }};
+            }}
+            stack.count = count;
+            stack.damage = damage;
+            self.game.native_set_slot_stack(usize::from(slot), Some(stack)) && all
         }}
         fn update_player_hand(&mut self, hand: u8, count: u32, damage: u32, components: &[(String, Option<{c}::nbt::Nbt>)]) -> bool {{
             let hand = Self::hand(hand);
@@ -1367,17 +1399,8 @@ fn player_host(c: &str, server_effects: &str) -> String {
         }}
         fn set_player_hand(&mut self, hand: u8, held: Option<&{c}::host::HandStack>) {{
             let hand = Self::hand(hand);
-            let Some(held) = held.filter(|h| !h.item.is_empty() && h.count > 0) else {{
-                self.game.native_set_hand_stack(hand, None);
-                return;
-            }};
-            let mut stack = horizon_client::items::ItemStack {{ item: held.item.as_str().into(), count: held.count, damage: held.damage, extra: None }};
-            for (name, value) in &held.components {{
-                if let Some(tag) = Self::tag_of(value) {{
-                    let _ = self.game.native_set_component(&mut stack, name, tag);
-                }}
-            }}
-            self.game.native_set_hand_stack(hand, Some(stack));
+            let stack = held.filter(|h| !h.item.is_empty() && h.count > 0).map(|h| self.stack_of(h));
+            self.game.native_set_hand_stack(hand, stack);
         }}
         fn hurt_player_hand(&mut self, hand: u8, amount: u32) -> bool {{
             self.game.native_hurt_hand_stack(Self::hand(hand), amount);
@@ -1388,6 +1411,35 @@ fn player_host(c: &str, server_effects: &str) -> String {
     impl Host<'_, '_> {{
         fn hand(ordinal: u8) -> horizon_client::first_person::Hand {{
             if ordinal == 1 {{ horizon_client::first_person::Hand::Off }} else {{ horizon_client::first_person::Hand::Main }}
+        }}
+        /// The game's stack as the runtime's: its mod data by the registered component types.
+        fn held_of(&self, stack: &horizon_client::items::ItemStack) -> {c}::host::HandStack {{
+            let components = self
+                .game
+                .native_registered_components()
+                .into_iter()
+                .filter_map(|name| {{
+                    let tag = self.game.native_component(stack, name).ok()??;
+                    Some((name.to_owned(), Self::nbt_of(tag)?))
+                }})
+                .collect();
+            {c}::host::HandStack {{
+                item: stack.item.to_string(),
+                count: stack.count,
+                damage: stack.damage,
+                max_damage: self.game.native_item_max_damage(&stack.item),
+                components,
+            }}
+        }}
+        /// The runtime's stack as the game's, its mod data set by type.
+        fn stack_of(&self, held: &{c}::host::HandStack) -> horizon_client::items::ItemStack {{
+            let mut stack = horizon_client::items::ItemStack {{ item: held.item.as_str().into(), count: held.count, damage: held.damage, extra: None }};
+            for (name, value) in &held.components {{
+                if let Some(tag) = Self::tag_of(value) {{
+                    let _ = self.game.native_set_component(&mut stack, name, tag);
+                }}
+            }}
+            stack
         }}
         fn nbt_of(tag: &horizon_world::nbt::Tag) -> Option<{c}::nbt::Nbt> {{
             use horizon_world::nbt::Tag;
@@ -1434,7 +1486,8 @@ fn block_entity_helpers(id: &str, ns: &str, krate: &str) -> Vec<(&'static str, S
     let c = format!("{krate}::compat");
     let server_send = server_send(&c);
     let server_effects = server_effects(&c);
-    let player_host = player_host(&c, &server_effects);
+    // A player's hooks reach their client too: a menu the mod opens, a payload it sends.
+    let player_host = player_host(&c, &format!("{server_effects}{server_send}"));
     let host = game_host(&c, &server_send);
     vec![
         ("level_tick_pre", level_tick(id, krate, &c, &host, false)),
@@ -1460,6 +1513,14 @@ fn {id}_server_tick(game: &mut crate::game::Game<'_>, phase: crate::game::native
 {server_send}    }}
     let mut host = Host {{ game }};
     {krate}::hook_runtime("server_tick", |rt| {c}::glue::server_tick(rt, &mut host, post));
+}}
+"#)),
+        ("player_tick", format!(r#"// Generated by horizon-mod-translator: the end of a player's server tick (`ServerPlayer.tick`),
+// their state swapped in: what their client sent the mod's menus runs, and the menu they have open
+// keeps their client in step and closes when it may no longer stay open.
+fn {id}_player_tick(game: &mut crate::game::Game<'_>) {{
+{player_host}    let mut host = Host {{ game }};
+    {krate}::hook_runtime("player_tick", |rt| {c}::glue::player_tick(rt, &mut host));
 }}
 "#)),
         ("net_from_client", format!(r#"// Generated by horizon-mod-translator: a mod payload a player's client sent
@@ -1813,10 +1874,11 @@ const CLIENT_BINDINGS: [(&str, &str); 21] = [
     ("interaction_key", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"button\", ty = \"i32\", value = \"button\" },\n    { name = \"key_mapping\", ty = \"&str\", value = \"key_mapping\" },\n    { name = \"hand\", ty = \"horizon_client::first_person::Hand\", value = \"hand\" },\n    { name = \"swing_hand\", ty = \"&mut bool\", value = \"&mut *swing_hand\" },\n    { name = \"canceled\", ty = \"&mut bool\", value = \"&mut *canceled\" },\n"),
 ];
 
-const BLOCK_ENTITY_BINDINGS: [(&str, &str); 16] = [
+const BLOCK_ENTITY_BINDINGS: [(&str, &str); 17] = [
     ("level_tick_pre", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n"),
     ("level_tick_post", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n"),
     ("server_tick", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"phase\", ty = \"crate::game::native_lifecycle::ServerTickPhase\", value = \"phase\" },\n"),
+    ("player_tick", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n"),
     ("net_from_client", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"channel\", ty = \"&str\", value = \"channel\" },\n    { name = \"data\", ty = \"&[u8]\", value = \"data\" },\n"),
     ("state_for_placement", "    { name = \"level\", ty = \"&crate::game::GameLevel<'_>\", value = \"self\" },\n    { name = \"state\", ty = \"horizon_world::registry::BlockStateId\", value = \"state\" },\n    { name = \"context\", ty = \"&horizon_world::level::PlacementContext\", value = \"context\" },\n    { name = \"answer\", ty = \"&mut Option<Option<horizon_world::registry::BlockStateId>>\", value = \"&mut *answer\" },\n"),
     ("block_entity", "    { name = \"block\", ty = \"&str\", value = \"block\" },\n    { name = \"entity\", ty = \"&mut Option<(String, horizon_world::nbt::Compound)>\", value = \"&mut *entity\" },\n"),

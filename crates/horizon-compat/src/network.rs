@@ -112,6 +112,7 @@ const DIRECTION: &str = "compat:stream/direction";
 const VEC3: &str = "compat:stream/vec3";
 const STACK: &str = "compat:stream/stack";
 const STACKS: &str = "compat:stream/stacks";
+const CONTENTS: &str = "compat:stream/container-contents";
 const FLUID_STACK: &str = "compat:stream/fluid_stack";
 const COMPONENT: &str = "compat:stream/component";
 
@@ -157,6 +158,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/phys/Vec3", "STREAM_CODEC") => VEC3,
         ("net/minecraft/world/item/ItemStack", "STREAM_CODEC" | "OPTIONAL_STREAM_CODEC") => STACK,
         ("net/minecraft/world/item/ItemStack", "LIST_STREAM_CODEC" | "OPTIONAL_LIST_STREAM_CODEC") => STACKS,
+        ("net/minecraft/world/item/component/ItemContainerContents", "STREAM_CODEC") => CONTENTS,
         ("net/neoforged/neoforge/fluids/FluidStack", "STREAM_CODEC" | "OPTIONAL_STREAM_CODEC") => FLUID_STACK,
         ("net/minecraft/network/chat/ComponentSerialization", "STREAM_CODEC" | "TRUSTED_STREAM_CODEC") => COMPONENT,
         // The block states' id map: block states travel by their text.
@@ -858,6 +860,14 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
                 put_stack(rt, buf, s);
             }
         }
+        // Every slot, empty ones too, as optional stacks.
+        CONTENTS => {
+            let items = crate::handlers::contents_items(rt, value);
+            put_var(rt, buf, items.len() as u64);
+            for s in items {
+                put_stack(rt, buf, s);
+            }
+        }
         FLUID_STACK => put_fluid(rt, buf, value),
         COMPONENT => {
             let s = text(rt, rt.get_field(value, "$text"));
@@ -1003,6 +1013,18 @@ fn decode_native(rt: &mut Rt, c: V, buf: V) -> Option<V> {
                 items.push(read_stack(rt, buf)?);
             }
             crate::jutil::new_list(rt, items)
+        }
+        CONTENTS => {
+            let n = read_count(rt, buf)?;
+            if n > 256 {
+                rt.throw_new("io/netty/handler/codec/DecoderException");
+                return None;
+            }
+            let mut items = Vec::with_capacity(n);
+            for _ in 0..n {
+                items.push(read_stack(rt, buf)?);
+            }
+            crate::handlers::contents(rt, items)
         }
         FLUID_STACK => read_fluid(rt, buf)?,
         COMPONENT => {

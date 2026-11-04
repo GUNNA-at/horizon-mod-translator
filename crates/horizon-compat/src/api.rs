@@ -1249,6 +1249,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::gui::get_static(rt, o, f))
             .or_else(|| crate::screens::get_static(rt, o, f))
             .or_else(|| crate::menus::get_static(rt, o, f))
+            .or_else(|| crate::handlers::get_static(rt, o, f))
     {
         return v;
     }

@@ -658,6 +658,42 @@ impl Game<'_> {
     pub(super) fn native_worn(&self, slot: usize) -> Option<&ItemStack> {
         self.armor.get(slot)?.as_ref()
     }
+    /// The stack in the player's inventory slot `slot` by vanilla's numbering
+    /// (`Inventory.getItem`): 0 to 8 the hotbar, 9 to 35 the rest, 36 to 39
+    /// the armour from the feet up, 40 the off hand; with all its data. None
+    /// for an empty slot or past 40. On a client, the player's own (a mod's
+    /// menu shows it). API @API:slot_stack@.
+    pub(super) fn native_slot_stack(&self, slot: usize) -> Option<&ItemStack> {
+        match slot {
+            0..36 => self.inventory.get(slot)?.as_ref(),
+            36..40 => self.armor[39 - slot].as_ref(),
+            super::shield::OFFHAND_SLOT => self.offhand.as_ref(),
+            _ => None,
+        }
+    }
+    /// Puts `stack` in inventory slot `slot` (`Inventory.setItem`, numbered
+    /// as [`Self::native_slot_stack`]), replacing what it held; None, a count
+    /// of 0 or an item the game doesn't know empties it. The player's screen
+    /// gets the change as any change to their inventory. False past slot 40,
+    /// and on a client of a server, whose inventory the server's sync
+    /// changes. API @API:slot_stack@.
+    pub(super) fn native_set_slot_stack(&mut self, slot: usize, stack: Option<ItemStack>) -> bool {
+        if self.remote.is_some() || self.player.is_none() || slot > super::shield::OFFHAND_SLOT {
+            return false;
+        }
+        let stack = stack.filter(|s| s.count > 0 && self.res.items().get(&s.item).is_some());
+        match slot {
+            0..36 => self.inventory[slot] = stack,
+            36..40 => self.armor[39 - slot] = stack,
+            _ => self.offhand = stack,
+        }
+        true
+    }
+    /// The hotbar slot the player's main hand holds (`Inventory.selected`),
+    /// 0 to 8. On a client, the player's own. API @API:slot_stack@.
+    pub(super) fn native_selected_slot(&self) -> usize {
+        self.selected
+    }
     /// Puts `stack` in the player's `hand` (`Player.setItemInHand`), replacing
     /// what it held; None, a count of 0 or an item the game doesn't know
     /// empties it. The player's screen gets the change as any change to their

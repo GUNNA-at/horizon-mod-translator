@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "every slot of the acting player's inventory, read and replaced whole by vanilla's numbering (`native_slot_stack`, `native_set_slot_stack`), and the selected hotbar slot (`native_selected_slot`).",
+  "doc_summary": "`native_slot_stack(slot)` is the stack in the acting player's inventory slot `slot` with all its data, numbered as `Inventory.getItem` (0 to 8 the hotbar, 9 to 35 the rest, 36 to 39 the armour from the feet up, 40 the off hand; on a client, the player's own); `native_set_slot_stack(slot, stack)` puts a stack there as `Inventory.setItem`, None or a count of 0 emptying it (false past 40 and on a client of a server); `native_selected_slot()` is the hotbar slot the main hand holds. Bundles need \"hooks\": @API:slot_stack@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_server.rs"
+  ]
+}

@@ -907,6 +907,27 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             }
             Ok(s)
         }
+        // `[{slot, item}]` (`ItemContainerContents.CODEC`): slots 0 to 255, at most 256 of them.
+        "container_contents" => {
+            let Json::Array(entries) = j else { return Err(format!("Not a list: {j}")) };
+            if entries.len() > 256 {
+                return Err(format!("List too long: {} > 256", entries.len()));
+            }
+            let mut slots = Vec::with_capacity(entries.len());
+            for e in entries {
+                let Some(o) = e.as_object() else { return Err(format!("Not a map: {e}")) };
+                if !o.contains_key("slot") {
+                    return Err("No key slot in MapLike".into());
+                }
+                let slot = int_field(o, "slot", -1)?;
+                if !(0..=255).contains(&slot) {
+                    return Err(format!("Value {slot} outside of range [0:255]"));
+                }
+                let item = decode_native(rt, "item_stack", o.get("item").ok_or("No key item in MapLike")?)?;
+                slots.push((slot as usize, item));
+            }
+            Ok(crate::handlers::contents_from_slots(rt, slots))
+        }
         "ingredient" | "ingredient_nonempty" => {
             let mut out = Vec::new();
             read_ingredient(rt, j, &mut out)?;
