@@ -334,3 +334,193 @@ pub fn registrations(classes: &[ClassFile]) -> Vec<Registration> {
     out.dedup();
     out
 }
+
+/// One thing a mixin does to another class: an injector (`@Inject`, `@Redirect`, MixinExtras'
+/// `@WrapOperation`...) with the methods it selects and where (`@At`), an `@Overwrite`, an
+/// `@Accessor` or `@Invoker`, or a method it adds (`Added`: an interface the target gains).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Injection {
+    /// The annotation's simple name (`Inject`, `WrapOperation`...), `Overwrite`, or `Added`.
+    pub kind: String,
+    /// The class it changes: `net/minecraft/world/level/block/Block`.
+    pub target: String,
+    /// The methods it selects (`tick`, `render(Lnet/...;F)V`), `,` between them; for an
+    /// accessor or invoker, the member it opens; for `Overwrite` or `Added`, the mixin's own method.
+    pub method: String,
+    /// Where: `HEAD`, `RETURN`, `INVOKE Lnet/minecraft/world/level/Level;setBlock(...)Z`; empty
+    /// when the kind has no `@At`.
+    pub at: String,
+    /// The mixin class.
+    pub mixin: String,
+}
+
+/// What every mixin among `classes` does (`@Mixin` classes: the class-file-only annotations are
+/// read). The translator applies accessors and invokers; this tells what the others need from
+/// the game: which of its methods mods hook, and where.
+pub fn mixin_injections(classes: &[ClassFile]) -> Vec<Injection> {
+    const SPONGE: &str = "Lorg/spongepowered/asm/mixin/";
+    const EXTRAS: &str = "Lcom/llamalad7/mixinextras/";
+    let simple = |ty: &str| ty.trim_end_matches(';').rsplit('/').next().unwrap_or("").to_owned();
+    // `Lorg/.../At;(value=INVOKE|target=Lnet/...;foo()V)` -> `INVOKE Lnet/...;foo()V`.
+    let at_of = |v: &str| -> String {
+        let inner = v.split_once('(').map_or("", |(_, r)| r.strip_suffix(')').unwrap_or(r));
+        let part = |k: &str| inner.split('|').find_map(|p| p.strip_prefix(k)).unwrap_or("");
+        let (value, target) = (part("value="), part("target="));
+        if target.is_empty() { value.to_owned() } else { format!("{value} {target}") }
+    };
+    let mut out = Vec::new();
+    for c in classes {
+        let Some(target) = c.mixin_target() else { continue };
+        for m in &c.methods {
+            let mut injected = false;
+            for a in &m.annotations {
+                let kind = simple(&a.ty);
+                let injector = (a.ty.starts_with(SPONGE) && a.ty.contains("/injection/") && kind != "At" && kind != "Slice" && kind != "Coerce")
+                    || a.ty.starts_with(EXTRAS) && a.ty.contains("/injector/");
+                let member = matches!(kind.as_str(), "Accessor" | "Invoker" | "Overwrite") && a.ty.starts_with(SPONGE);
+                if kind == "Shadow" || kind == "Unique" || kind == "Final" || kind == "Mutable" {
+                    injected = true;
+                }
+                if !injector && !member {
+                    continue;
+                }
+                injected = true;
+                let method = match kind.as_str() {
+                    "Accessor" | "Invoker" => a.value("value").map(str::to_owned).unwrap_or_else(|| m.name.clone()),
+                    "Overwrite" => m.name.clone(),
+                    _ => a.value("method").unwrap_or("").to_owned(),
+                };
+                let at = a.value("at").map(at_of).unwrap_or_default();
+                out.push(Injection { kind, target: target.clone(), method, at, mixin: c.name.clone() });
+            }
+            // A method of its own the mixin adds (an interface it makes the target implement).
+            let synthetic = m.access & 0x1000 != 0;
+            if !injected && !synthetic && !m.name.starts_with('<') && !m.name.starts_with("lambda$") {
+                out.push(Injection {
+                    kind: "Added".into(),
+                    target: target.clone(),
+                    method: format!("{}{}", m.name, m.desc),
+                    at: String::new(),
+                    mixin: c.name.clone(),
+                });
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[cfg(test)]
+mod mixin_census_tests {
+    use super::*;
+
+    /// A class file as javac writes a mixin: `@Mixin(Block.class)` on the class and, on one method,
+    /// `@Inject(method = "tick", at = @At(value = "INVOKE", target = "...Level;setBlock(...)Z"))`,
+    /// both class-file-only (`RuntimeInvisibleAnnotations`); a second method has none.
+    fn mixin_class() -> Vec<u8> {
+        let mut pool: Vec<Vec<u8>> = Vec::new();
+        let mut utf8 = |pool: &mut Vec<Vec<u8>>, s: &str| -> u16 {
+            let mut e = vec![1];
+            e.extend((s.len() as u16).to_be_bytes());
+            e.extend(s.as_bytes());
+            pool.push(e);
+            pool.len() as u16
+        };
+        let this_name = utf8(&mut pool, "example/mixin/BlockMixin");
+        pool.push([vec![7], this_name.to_be_bytes().to_vec()].concat());
+        let this = pool.len() as u16;
+        let object = utf8(&mut pool, "java/lang/Object");
+        pool.push([vec![7], object.to_be_bytes().to_vec()].concat());
+        let sup = pool.len() as u16;
+        let invisible = utf8(&mut pool, "RuntimeInvisibleAnnotations");
+        let mixin = utf8(&mut pool, "Lorg/spongepowered/asm/mixin/Mixin;");
+        let value = utf8(&mut pool, "value");
+        let block = utf8(&mut pool, "Lnet/minecraft/world/level/block/Block;");
+        let inject = utf8(&mut pool, "Lorg/spongepowered/asm/mixin/injection/Inject;");
+        let method = utf8(&mut pool, "method");
+        let tick = utf8(&mut pool, "tick");
+        let at_name = utf8(&mut pool, "at");
+        let at = utf8(&mut pool, "Lorg/spongepowered/asm/mixin/injection/At;");
+        let invoke = utf8(&mut pool, "INVOKE");
+        let target = utf8(&mut pool, "target");
+        let set_block = utf8(&mut pool, "Lnet/minecraft/world/level/Level;setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z");
+        let on_tick = utf8(&mut pool, "onTick");
+        let added = utf8(&mut pool, "mod$extra");
+        let desc = utf8(&mut pool, "()V");
+        let u2 = |v: u16| v.to_be_bytes().to_vec();
+        let mut b = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 65];
+        b.extend(u2(pool.len() as u16 + 1));
+        for e in &pool {
+            b.extend(e);
+        }
+        b.extend(u2(0x0001));
+        b.extend(u2(this));
+        b.extend(u2(sup));
+        b.extend(u2(0)); // interfaces
+        b.extend(u2(0)); // fields
+        b.extend(u2(2)); // methods
+        // onTick: @Inject(method = "tick", at = @At(value = "INVOKE", target = ...)).
+        let mut ann = u2(1);
+        ann.extend(u2(inject));
+        ann.extend(u2(2));
+        ann.extend(u2(method));
+        ann.push(b's');
+        ann.extend(u2(tick));
+        ann.extend(u2(at_name));
+        ann.push(b'@');
+        ann.extend(u2(at));
+        ann.extend(u2(2));
+        ann.extend(u2(value));
+        ann.push(b's');
+        ann.extend(u2(invoke));
+        ann.extend(u2(target));
+        ann.push(b's');
+        ann.extend(u2(set_block));
+        b.extend(u2(0x0002));
+        b.extend(u2(on_tick));
+        b.extend(u2(desc));
+        b.extend(u2(1));
+        b.extend(u2(invisible));
+        b.extend((ann.len() as u32).to_be_bytes());
+        b.extend(ann);
+        // mod$extra: no annotation, a method the mixin adds.
+        b.extend(u2(0x0001));
+        b.extend(u2(added));
+        b.extend(u2(desc));
+        b.extend(u2(0));
+        // The class: @Mixin({Block.class}).
+        let mut ann = u2(1);
+        ann.extend(u2(mixin));
+        ann.extend(u2(1));
+        ann.extend(u2(value));
+        ann.push(b'[');
+        ann.extend(u2(1));
+        ann.push(b'c');
+        ann.extend(u2(block));
+        b.extend(u2(1));
+        b.extend(u2(invisible));
+        b.extend((ann.len() as u32).to_be_bytes());
+        b.extend(ann);
+        b
+    }
+
+    #[test]
+    fn a_mixins_injection_and_added_method_are_read_from_its_class_file() {
+        let class = ClassFile::parse(&mixin_class()).expect("parse");
+        let found = mixin_injections(&[class]);
+        let block = "net/minecraft/world/level/block/Block";
+        assert_eq!(
+            found,
+            vec![
+                Injection { kind: "Added".into(), target: block.into(), method: "mod$extra()V".into(), at: String::new(), mixin: "example/mixin/BlockMixin".into() },
+                Injection {
+                    kind: "Inject".into(),
+                    target: block.into(),
+                    method: "tick".into(),
+                    at: "INVOKE Lnet/minecraft/world/level/Level;setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z".into(),
+                    mixin: "example/mixin/BlockMixin".into(),
+                },
+            ]
+        );
+    }
+}

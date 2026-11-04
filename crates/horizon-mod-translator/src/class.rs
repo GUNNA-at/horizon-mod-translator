@@ -47,7 +47,7 @@ pub struct Method {
     pub name: String,
     pub desc: String,
     pub code: Option<Code>,
-    /// Its runtime-visible annotations (`@SubscribeEvent`...).
+    /// Its annotations (`@SubscribeEvent`...), the class-file-only ones (a mixin's `@Inject`) too.
     pub annotations: Vec<Annotation>,
 }
 
@@ -191,8 +191,10 @@ impl ClassFile {
                 let an = r.u2()?;
                 let len = r.u4()? as usize;
                 let body = r.take(len)?;
-                if cf.utf8(an)? == "RuntimeVisibleAnnotations" {
-                    annotations = cf.annotations(body)?;
+                // Class-file-only ones too: what a mixin injects where (`@Inject`, `@At`).
+                if matches!(cf.utf8(an)?.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
+                    let more = cf.annotations(body)?;
+                    annotations.extend(more);
                 }
                 if cf.utf8(an)? == "Code" {
                     let mut c = Reader { b: body, i: 0 };
@@ -256,7 +258,13 @@ impl ClassFile {
                 self.utf8(r.u2()?)?
             }
             b'c' => self.utf8(r.u2()?)?,
-            b'@' => self.annotation(r)?.ty,
+            // A nested one with its values, `|` between them (an array's are `,`, and a
+            // descriptor has `;`): `Lorg/spongepowered/asm/mixin/injection/At;(value=INVOKE|target=...)`.
+            b'@' => {
+                let a = self.annotation(r)?;
+                let values: Vec<String> = a.values.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                format!("{}({})", a.ty, values.join("|"))
+            }
             b'[' => (0..r.u2()?).map(|_| self.element_value(r)).collect::<Result<Vec<_>, _>>()?.join(","),
             _ => match self.pool.get(r.u2()? as usize) {
                 Some(Const::Int(i)) => i.to_string(),

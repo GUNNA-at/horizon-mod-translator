@@ -1364,6 +1364,30 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     applies 72 stress (its own 24 and the magnets' 48) and makes 22 energy a tick (48 × 16 ×
     0.029296875, the config's `suToEnergy`, cut to an int); `COIL_MAGNETS=0`: stress 24, energy 0.
     `FILTER=` on the same engine: Create's filter test unchanged.
+  - [x] 2026-11-04 In game, Create + New Age as one engine (`scratchpad/cnagame.sh`, build with
+    `WITH=` New Age's jar; the stage copies the bundle without its content folders only): New Age's
+    32 blocks placed in two rows draw with their models, its tab "Create: New Age" lists its items
+    with their icons, Create's two tabs still there. The game's log showed New Age's carbon brushes
+    throwing on every tick: ESL's transactions (`NeoForgeTransaction`) keep the `Thread` they were
+    opened on and check `this.thread != Thread.currentThread()`, and the runtime made a new
+    `Thread` on each call, so the first commit threw and left its transaction open for good.
+    `Thread.currentThread()` is now one object per runtime (one runtime is one game thread; the
+    client's is the render thread). Harness `COIL` has the brushes beside the coil: with the
+    trace on, no exception; they take the coil's 22 a tick and store up to 440 (their capacity,
+    20 ticks of output), as New Age's code says. Test `jlang::tests::a_runtime_is_one_thread`.
+  - [x] 2026-11-04 Measured over a real pack (CurseForge "Create Ultimate Selection 2", 367 jars,
+    read-only). `coverage` over every jar, summed (datagen-only APIs left out): 53.5% of the API
+    methods each jar calls answer a probe, 68.7% of the call sites; a lower bound, as the probe
+    calls with null or bare receivers. 200 of the jars require another mod of the pack (61 require
+    Create). New `mixins <jar>...` (`mixin_injections`; the class parser now keeps class-file-only
+    method annotations and a nested annotation's values): 248 jars have mixins, 9595 members:
+    4001 `@Inject`, 2060 methods added to a target, 1053 accessors and 249 invokers (applied),
+    650 `@Redirect`, 504 `@WrapOperation`, 172 `@Overwrite`, the rest smaller injectors. By
+    target: client rendering first (`LevelRenderer`, `GameRenderer`, `Minecraft`), then entities
+    (`LivingEntity`, `Entity`, `Player`), and ~950 injections into Create's own classes (by its
+    addons): those targets are translated too, so their mixins can be woven by the translator
+    itself. Test `mixin_census_tests` (a class file built by hand: `@Mixin`, `@Inject` with
+    `@At(INVOKE, target)`, an added method).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

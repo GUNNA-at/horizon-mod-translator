@@ -73,8 +73,29 @@ fn main() -> ExitCode {
             }
         };
     }
+    // `mixins <jar>...`: what each jar's mixins do to the game (the injections the translator
+    // doesn't apply), one line each, then the totals by kind.
+    if args.first().map(String::as_str) == Some("mixins") && args.len() >= 2 {
+        for jar in &args[1..] {
+            let classes = match horizon_mod_translator::classes(Path::new(jar)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{jar}: {e}");
+                    continue;
+                }
+            };
+            let all = horizon_mod_translator::mixin_injections(&classes);
+            let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+            for i in &all {
+                *by.entry(i.kind.as_str()).or_default() += 1;
+                println!("  {} {} {} @ {} ({})", i.kind, i.target, i.method, i.at, i.mixin);
+            }
+            println!("{jar}: {} mixin members {by:?}", all.len());
+        }
+        return ExitCode::SUCCESS;
+    }
     if args.first().map(String::as_str) != Some("coverage") || args.len() < 2 {
-        eprintln!("usage: horizon-mod-translator coverage <jar>... | translate <jar> <out dir> | bundle <jar> <out dir> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]");
+        eprintln!("usage: horizon-mod-translator coverage <jar>... | mixins <jar>... | translate <jar> <out dir> | bundle <jar> <out dir> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]");
         return ExitCode::FAILURE;
     }
     // The mapping answers the core's questions (`Rt::is_a` of Minecraft's class families): without

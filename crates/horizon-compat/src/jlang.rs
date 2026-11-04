@@ -461,10 +461,17 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => return None,
         }),
 
+        // One runtime runs on one game thread, so it is the same `Thread` each time it asks: ESL's
+        // transactions (Create: New Age's energy) check `this.thread != Thread.currentThread()`.
         "java/lang/Thread" => Some(match name {
-            "currentThread" => rt.new_object("java/lang/Thread"),
-            "getName" => rt.string("Server thread"),
-            "sleep" | "yield" | "onSpinWait" => V::Void,
+            "currentThread" => rt.intern("compat:thread".into(), |rt| rt.new_object("java/lang/Thread")),
+            "getName" => {
+                let name = if crate::neo::is_client(rt) { "Render thread" } else { "Server thread" };
+                rt.string(name)
+            }
+            "isAlive" => V::I(1),
+            "isInterrupted" | "isDaemon" | "interrupted" => V::I(0),
+            "sleep" | "yield" | "onSpinWait" | "interrupt" => V::Void,
             _ => return None,
         }),
         "java/lang/Runtime" => Some(match name {
@@ -1213,6 +1220,26 @@ mod tests {
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))
+    }
+
+    /// A runtime is one game thread: `Thread.currentThread()` is the same object each time it
+    /// asks (ESL's transactions compare it by reference), and the client's runtime is the render
+    /// thread.
+    #[test]
+    fn a_runtime_is_one_thread() {
+        let current = "java/lang/Thread.currentThread.()Ljava/lang/Thread;";
+        let name = "java/lang/Thread.getName.()Ljava/lang/String;";
+        let mut server = Rt::new();
+        let first = c(&mut server, current, &[]);
+        assert_eq!(c(&mut server, current, &[]), first);
+        let n = c(&mut server, name, &[first]);
+        assert_eq!(server.str_of(n), Some("Server thread"));
+        let mut client = Rt::new();
+        let marker = client.new_object("java/lang/Object");
+        client.interned.insert("compat:client".into(), marker);
+        let t = c(&mut client, current, &[]);
+        let n = c(&mut client, name, &[t]);
+        assert_eq!(client.str_of(n), Some("Render thread"));
     }
 
     /// Ponder keeps its scratch objects in `ThreadLocal.withInitial(...)`: made once, on the first
