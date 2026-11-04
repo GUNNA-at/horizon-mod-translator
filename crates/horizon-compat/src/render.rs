@@ -1105,10 +1105,13 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         ("net/minecraft/client/renderer/culling/Frustum", "isVisible" | "pointInFrustum") => V::I(1),
         ("net/minecraft/client/Minecraft", "getInstance") => {
             let mc = single(rt, "net/minecraft/client/Minecraft");
-            // Its public fields: the level this client draws.
+            // Its public fields: the level this client draws, and its player (mods' client ticks
+            // run only with both: Create's `ClientEvents.isGameActive`).
             if rt.get_field(mc, "level").r() == 0 && crate::neo::is_client(rt) {
                 let level = crate::glue::level(rt);
                 rt.put_field(mc, "level", level);
+                let player = crate::network::local_player(rt);
+                rt.put_field(mc, "player", player);
             }
             mc
         }

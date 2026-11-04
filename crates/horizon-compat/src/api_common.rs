@@ -828,13 +828,16 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/core/Direction$AxisDirection", "getStep") => V::I(if native(rt, a(0))[0] != 0 { 1 } else { -1 }),
 
         // Players and interactions
-        (o, n) if o.starts_with("net/minecraft/") && (o.ends_with("/Player") || o.ends_with("/ServerPlayer") || o.ends_with("/LivingEntity") || o.ends_with("/Entity")) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "level" | "isLocalPlayer" | "mayBuild") => {
+        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "level" | "isLocalPlayer" | "mayBuild") => {
             match n {
                 // Survival and creative players build; the hooks act for one of them.
                 "mayBuild" => V::I(1),
                 "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" => V::I(rt.host().is_some_and(|h| h.player_sneaking()) as i32),
                 "isCreative" => V::I(rt.host().is_some_and(|h| h.player_creative()) as i32),
-                "isSpectator" | "isLocalPlayer" => V::I(0),
+                "isSpectator" => V::I(0),
+                // The client's own player (`Minecraft.player`) is in the client's level.
+                "isLocalPlayer" => V::I(i32::from(rt.class_of(a(0)) == LOCAL_PLAYER)),
+                "level" if rt.class_of(a(0)) == LOCAL_PLAYER => crate::glue::level(rt),
                 "level" => rt.new_object("net/minecraft/server/level/ServerLevel"),
                 _ => {
                     // The main hand (the hook's hand); the off hand is empty here.
@@ -979,7 +982,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         ("net/minecraft/core/Direction", "fromYRot") => direction(rt, horizontal_facing(a(0).d() as f32)),
         // The acting player's look (an object `glue` made carries it; others look south, level).
-        (o, n) if o.starts_with("net/minecraft/") && (o.ends_with("/Player") || o.ends_with("/ServerPlayer") || o.ends_with("/LivingEntity") || o.ends_with("/Entity")) && matches!(n, "getYRot" | "getXRot" | "getViewYRot" | "getViewXRot" | "getYHeadRot" | "getVisualRotationYInDegrees" | "getDirection" | "getMotionDirection") => {
+        (o, n) if is_player(o) && matches!(n, "getYRot" | "getXRot" | "getViewYRot" | "getViewXRot" | "getYHeadRot" | "getVisualRotationYInDegrees" | "getDirection" | "getMotionDirection") => {
             let (yaw, pitch) = (rt.get_field(a(0), "$yaw").f(), rt.get_field(a(0), "$pitch").f());
             match n {
                 "getXRot" | "getViewXRot" => V::F(pitch),
@@ -1295,9 +1298,13 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 
 const INVENTORY: &str = "net/minecraft/world/entity/player/Inventory";
 
-/// Whether `owner` is the player or one of the classes a player's methods are called through.
+const LOCAL_PLAYER: &str = "net/minecraft/client/player/LocalPlayer";
+
+/// Whether `owner` is the player or one of the classes a player's methods are called through (the
+/// client's own: `LocalPlayer`, `AbstractClientPlayer`).
 fn is_player(owner: &str) -> bool {
-    owner.starts_with("net/minecraft/") && (owner.ends_with("/Player") || owner.ends_with("/ServerPlayer") || owner.ends_with("/LivingEntity") || owner.ends_with("/Entity"))
+    owner.starts_with("net/minecraft/")
+        && [ "/Player", "/ServerPlayer", "/LocalPlayer", "/AbstractClientPlayer", "/LivingEntity", "/Entity"].iter().any(|s| owner.ends_with(s))
 }
 
 /// Gives the acting player `stack` (where it fits, as `Inventory.add` places it), shrinking it by
