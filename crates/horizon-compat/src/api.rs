@@ -462,8 +462,45 @@ pub fn state(rt: &mut Rt, text: &str) -> V {
     crate::api_common::state(rt, text)
 }
 
-/// A vanilla enum constant: one object per constant (Java compares them by identity), with the
-/// `$name` and `$ordinal` that `name()`, `ordinal()` and `compareTo` read.
+const IS_STICKY: &str = "isStickyBlock.(Lnet/minecraft/world/level/block/state/BlockState;)Z";
+const IS_STICKY_KEY: &str = "net/neoforged/neoforge/common/extensions/IBlockExtension.isStickyBlock.(Lnet/minecraft/world/level/block/state/BlockState;)Z";
+const IS_SLIME: &str = "isSlimeBlock.(Lnet/minecraft/world/level/block/state/BlockState;)Z";
+const IS_SLIME_KEY: &str = "net/neoforged/neoforge/common/extensions/IBlockExtension.isSlimeBlock.(Lnet/minecraft/world/level/block/state/BlockState;)Z";
+const CAN_STICK_TO: &str = "canStickTo.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/state/BlockState;)Z";
+const CAN_STICK_TO_KEY: &str = "net/neoforged/neoforge/common/extensions/IBlockExtension.canStickTo.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/state/BlockState;)Z";
+
+/// NeoForge's sticky blocks (`IBlockExtension`): a mod block's own `isSlimeBlock`/`isStickyBlock`/
+/// `canStickTo` when it overrides them; otherwise slime and honey stick, but not to each other.
+/// Create's contraptions take what sticks to their blocks along.
+fn sticky(rt: &mut Rt, how: &str, state: V, other: V) -> bool {
+    let text = rt.str_of(state).unwrap_or("minecraft:air").to_owned();
+    let (short, key) = match how {
+        "isSlimeBlock" => (IS_SLIME, IS_SLIME_KEY),
+        "isStickyBlock" => (IS_STICKY, IS_STICKY_KEY),
+        _ => (CAN_STICK_TO, CAN_STICK_TO_KEY),
+    };
+    if let Some((b, class)) = crate::glue::mod_block(rt, &text)
+        && rt.overrides.is_some_and(|o| o(class, short))
+        && let Some(vc) = rt.vcall
+    {
+        let args: &[V] = if how == "canStickTo" { &[b, state, other] } else { &[b, state] };
+        return vc(rt, key, short, args).i() != 0;
+    }
+    let name = |rt: &Rt, s: V| crate::host::split_state(rt.str_of(s).unwrap_or("minecraft:air")).0.to_owned();
+    let mine = name(rt, state);
+    match how {
+        "isSlimeBlock" => mine == "minecraft:slime_block",
+        "isStickyBlock" => matches!(mine.as_str(), "minecraft:slime_block" | "minecraft:honey_block"),
+        _ => {
+            let theirs = name(rt, other);
+            match (mine.as_str(), theirs.as_str()) {
+                ("minecraft:honey_block", "minecraft:slime_block") | ("minecraft:slime_block", "minecraft:honey_block") => false,
+                _ => sticky(rt, "isStickyBlock", state, V::NULL) || sticky(rt, "isStickyBlock", other, V::NULL),
+            }
+        }
+    }
+}
+
 const GET_RENDER_SHAPE: &str = "getRenderShape.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/RenderShape;";
 const GET_RENDER_SHAPE_KEY: &str =
     "net/minecraft/world/level/block/state/BlockBehaviour.getRenderShape.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/RenderShape;";
@@ -493,6 +530,8 @@ fn render_shape(rt: &mut Rt, state: V, text: &str) -> V {
     api_enum(rt, "net/minecraft/world/level/block/RenderShape", RENDER_SHAPES[ordinal], ordinal as i32)
 }
 
+/// A vanilla enum constant: one object per constant (Java compares them by identity), with the
+/// `$name` and `$ordinal` that `name()`, `ordinal()` and `compareTo` read.
 pub fn api_enum(rt: &mut Rt, class: &'static str, name: &'static str, ordinal: i32) -> V {
     rt.intern(format!("enum/{class}.{name}"), |rt| {
         let o = rt.new_object(class);
@@ -820,6 +859,8 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 // The game updates the shapes around a block it sets.
                 "updateIndirectNeighbourShapes" | "updateNeighbourShapes" => V::Void,
                 "getRenderShape" if desc == "()Lnet/minecraft/world/level/block/RenderShape;" => render_shape(rt, a(0), &text),
+                "isSlimeBlock" | "isStickyBlock" if desc == "()Z" => V::I(sticky(rt, n, a(0), V::NULL) as i32),
+                "canStickTo" if desc == "(Lnet/minecraft/world/level/block/state/BlockState;)Z" => V::I(sticky(rt, n, a(0), a(1)) as i32),
                 "getDestroySpeed" => V::F(crate::blocks::state_facts(rt, &text).hardness),
                 "canBeReplaced" if desc == "()Z" => V::I(crate::blocks::state_facts(rt, &text).replaceable as i32),
                 "updateShape" if desc.starts_with("(Lnet/minecraft/core/Direction;") => update_shape(rt, [a(0), a(1), a(2), a(3), a(4), a(5)]),
@@ -1124,6 +1165,26 @@ mod tests {
     /// Create tesselates the blocks of a contraption whose `getRenderShape()` is `MODEL`, compared
     /// with `==`: a plank is one; in 1.21.1 a chest is drawn by its block entity (animated), a sign
     /// and air not at all.
+    /// NeoForge's `canStickTo` (what Create's assembly asks of neighbours): slime and honey stick to
+    /// anything but each other; two plain blocks don't.
+    #[test]
+    fn slime_and_honey_stick_but_not_to_each_other() {
+        let mut rt = Rt::new();
+        crate::install();
+        let s = |rt: &mut Rt, t: &str| state(rt, t);
+        let (slime, honey, stone, planks) = (s(&mut rt, "minecraft:slime_block"), s(&mut rt, "minecraft:honey_block"), s(&mut rt, "minecraft:stone"), s(&mut rt, "minecraft:oak_planks"));
+        let stick = |rt: &mut Rt, a: V, b: V| call(rt, "net/minecraft/world/level/block/state/BlockState.canStickTo.(Lnet/minecraft/world/level/block/state/BlockState;)Z", &[a, b]);
+        assert_eq!(stick(&mut rt, slime, stone), V::I(1));
+        assert_eq!(stick(&mut rt, stone, honey), V::I(1));
+        assert_eq!(stick(&mut rt, slime, honey), V::I(0));
+        assert_eq!(stick(&mut rt, honey, slime), V::I(0));
+        assert_eq!(stick(&mut rt, slime, slime), V::I(1));
+        assert_eq!(stick(&mut rt, stone, planks), V::I(0));
+        let slimy = |rt: &mut Rt, a: V| call(rt, "net/minecraft/world/level/block/state/BlockState.isSlimeBlock.()Z", &[a]);
+        assert_eq!((slimy(&mut rt, slime), slimy(&mut rt, honey)), (V::I(1), V::I(0)));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     #[test]
     fn a_states_render_shape_is_the_one_its_vanilla_class_gives() {
         let mut rt = Rt::new();

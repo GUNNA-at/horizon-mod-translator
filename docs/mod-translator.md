@@ -860,6 +860,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     gets the entity and Create's `ContraptionEntityRenderer` draws the stair turning on the bearing's
     rotating top (screenshots t10/t20/t30 show the step on the left, side-on, then on the right).
     Lit by the entity's light. No uncaught throws in the log.
+  - [x] 2026-11-04 Sticky blocks (NeoForge's `isSlimeBlock`, `isStickyBlock`, `canStickTo`: a mod
+    block's override, else slime and honey stick to anything but each other, as `IBlockExtension`'s
+    bytecode says). Harness `BEARING` with `BEARING_SLIME=1` (a slime block on the bearing, planks
+    on its four sides): a contraption of 5 blocks, put back and lifted again by the clicks, and the
+    client draws the 5 under the turned pose.
   - [x] 2026-11-04 What the counted builder rule showed at load (harness `RECIPES`, the unmapped
     list): `new BlockPos(vec3i)` (42656 calls left at the origin), `Vec3.ZERO` (2677), `EnumSet`
     (`noneOf`, `of`, `copyOf`, `range`, `complementOf`, `allOf`: a set in its enum's order that knows
