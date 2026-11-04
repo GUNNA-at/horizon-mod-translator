@@ -1355,6 +1355,8 @@ fn {id}_state_for_placement(
         pitch: context.pitch,
         item: context.item.clone(),
         replace_clicked: context.replace_clicked,
+        // The level's placement context names the placed item, not the hand holding it.
+        hand: 0,
     }};
     let mut host = Host {{ level, sneaking: context.sneaking, item: context.item.clone() }};
     match {krate}::with_registrations(|rt| {c}::glue::state_for_placement(rt, &mut host, &text, &placement)) {{
