@@ -1309,6 +1309,21 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     host can paste) and `native_set_clipboard` (fragment `native_clipboard.json`), the client host
     answers both, `Minecraft.keyboardHandler` (`KeyboardHandler.getClipboard`/`setClipboard`), and a
     write from a screen's input waits for the next client tick (defer kind 5).
+  - [x] 2026-11-04 Text fields: `EditBox` natively (`horizon-compat/src/edit_box.rs`), with 1.21.1's
+    API and behaviour, for vanilla fields and mods' subclasses (Create's `HintableTextFieldWidget`,
+    station and schedule names, `AddressEditBox`): the value with cursor and selection in UTF-16
+    units, the filter, the responder (told of every change and cursor move, twice for `setValue`, as
+    1.21.1 does), the formatter, typing (`StringUtil.filterText`, the maximum length, a surrogate pair
+    kept whole), backspace/delete by character or word, the arrows, home/end, shift extending,
+    select-all/copy/paste/cut through the clipboard, a click placing the cursor (no click sound), and
+    `renderWidget` line by line (sprite, text scrolled to the cursor, blinking `_` or bar, suggestion,
+    hint, selection). The widget dispatcher routes `EditBox` instances there first, so inherited
+    `AbstractWidget` calls still work. 4 tests. Item names: `Item.getDescriptionId` (a block item's is
+    its block's unless it is an `ItemNameBlockItem`; vanilla's by the language, as the game does),
+    `getDescription`, `getName(stack)`, `ItemStack.getHoverName` (custom name, item name, then the
+    item's), `getDescriptionId`, `getDisplayName` (brackets, italic for a custom name; no rarity
+    colour or hover yet), each step a virtual call so a mod's override answers. Create's filter screen
+    had an empty title for want of `Item.getDescription`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

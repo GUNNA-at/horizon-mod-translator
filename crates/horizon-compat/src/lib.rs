@@ -29,6 +29,7 @@ pub mod jlang;
 pub mod jutil;
 pub mod menus;
 pub mod widgets;
+pub mod edit_box;
 pub mod mod_entities;
 pub mod nbt;
 pub mod neo;

@@ -688,6 +688,64 @@ pub(crate) fn crafting_remainder(rt: &Rt, item: V) -> Option<String> {
     VANILLA_CRAFT_REMAINDERS.iter().find(|(i, _)| *i == name).map(|(_, r)| (*r).to_owned())
 }
 
+const ITEM_DESCRIPTION_ID: &str = "net/minecraft/world/item/Item.getDescriptionId.()Ljava/lang/String;";
+const ITEM_STACK_DESCRIPTION_ID: &str = "net/minecraft/world/item/Item.getDescriptionId.(Lnet/minecraft/world/item/ItemStack;)Ljava/lang/String;";
+const ITEM_GET_NAME: &str = "net/minecraft/world/item/Item.getName.(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/network/chat/Component;";
+const STACK_GET: &str = "net/minecraft/world/item/ItemStack.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+
+/// Vanilla's item classes (`Item`, `BlockItem`, `SwordItem`...), the owner a mod item's inherited
+/// calls carry.
+fn is_item_class(owner: &str) -> bool {
+    owner.strip_prefix("net/minecraft/world/item/").is_some_and(|n| n.ends_with("Item") && !n.contains('/'))
+}
+
+/// `ItemStack.getItem`: air for an empty stack.
+fn stack_item(rt: &mut Rt, stack: V) -> V {
+    if stack_empty(rt, stack) { item(rt, "minecraft:air") } else { rt.get_field(stack, "$item") }
+}
+
+/// The stack's component of vanilla type `key` (`DataComponents.CUSTOM_NAME`), or null.
+fn stack_component(rt: &mut Rt, stack: V, key: &'static str) -> V {
+    let ty = crate::api::get_static(rt, key);
+    crate::api::call(rt, STACK_GET, &[stack, ty])
+}
+
+/// `ItemStack.getHoverName`: its custom name, else its item name, else `Item.getName(stack)`.
+fn hover_name(rt: &mut Rt, stack: V) -> V {
+    for ty in ["net/minecraft/core/component/DataComponents.CUSTOM_NAME", "net/minecraft/core/component/DataComponents.ITEM_NAME"] {
+        let name = stack_component(rt, stack, ty);
+        if name.r() != 0 {
+            return name;
+        }
+    }
+    let item = stack_item(rt, stack);
+    crate::menus::virt(rt, ITEM_GET_NAME, item, &[stack])
+}
+
+/// `Item.getDescriptionId`: `item.<namespace>.<path>` (`Util.makeDescriptionId`), or for a block
+/// item its block's `block.<namespace>.<path>`. A mod's block item names itself after its block
+/// unless it is an `ItemNameBlockItem`; vanilla's own block items that keep the item's name (seeds,
+/// redstone, string) are told by the language having the item's key, as the game's names are.
+pub(crate) fn item_description_id(rt: &Rt, item: V) -> String {
+    let key = |kind: &str, name: &str| {
+        let (ns, path) = name.split_once(':').unwrap_or(("minecraft", name));
+        format!("{kind}.{ns}.{}", path.replace('/', "."))
+    };
+    let name = item_like_name(rt, item);
+    if rt.str_of(item).is_none() {
+        let block = rt.get_field(item, "$block");
+        if block.r() != 0 && !rt.is_a(rt.class_of(item), "net/minecraft/world/item/ItemNameBlockItem") {
+            let placed = rt.str_of(block).map(str::to_owned).or_else(|| rt.registered_name(block, "block").map(str::to_owned));
+            if let Some(b) = placed {
+                return key("block", &b);
+            }
+        }
+        return key("item", &name);
+    }
+    let own = key("item", &name);
+    if rt.host().is_some_and(|h| h.item_is_block(&name) && h.translate(&own).is_none()) { key("block", &name) } else { own }
+}
+
 pub(crate) fn item_like_name(rt: &Rt, v: V) -> String {
     rt.str_of(v)
         .map(str::to_owned)
@@ -1851,6 +1909,40 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let item = item_like_name(rt, rt.get_field(a(0), "$item"));
             V::I(rt.host().and_then(|h| h.item_stack_limit(&item)).unwrap_or(64) as i32)
         }
+        // Names, as 1.21.1's `Item` and `ItemStack` give them: the description id, its translatable
+        // text (`getDescription`, `getName(stack)`), and a stack's name (its custom name, else its
+        // item name, else the item's). Each step is a virtual call, so a mod's override is the one
+        // that answers.
+        (o, "getDescriptionId" | "getOrCreateDescriptionId") if is_item_class(o) && desc == "()Ljava/lang/String;" => {
+            let id = item_description_id(rt, a(0));
+            rt.string(&id)
+        }
+        (o, "getDescriptionId") if is_item_class(o) && desc == "(Lnet/minecraft/world/item/ItemStack;)Ljava/lang/String;" => crate::menus::virt(rt, ITEM_DESCRIPTION_ID, a(0), &[]),
+        (o, "getDescription") if is_item_class(o) && desc == "()Lnet/minecraft/network/chat/Component;" => {
+            let id = crate::menus::virt(rt, ITEM_DESCRIPTION_ID, a(0), &[]);
+            component(rt, id, true, V::NULL)
+        }
+        (o, "getName") if is_item_class(o) && desc == "(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/network/chat/Component;" => {
+            let id = crate::menus::virt(rt, ITEM_STACK_DESCRIPTION_ID, a(0), &[a(1)]);
+            component(rt, id, true, V::NULL)
+        }
+        ("net/minecraft/world/item/ItemStack", "getDescriptionId") => {
+            let item = stack_item(rt, a(0));
+            crate::menus::virt(rt, ITEM_STACK_DESCRIPTION_ID, item, &[a(0)])
+        }
+        ("net/minecraft/world/item/ItemStack", "getHoverName") => hover_name(rt, a(0)),
+        // `Component.empty().append(getHoverName())`, italic for a custom name, in square brackets.
+        // (Vanilla also colours it by rarity and shows the stack on hover.)
+        ("net/minecraft/world/item/ItemStack", "getDisplayName") => {
+            let name = hover_name(rt, a(0));
+            let empty = crate::api::call(rt, "net/minecraft/network/chat/Component.empty.()Lnet/minecraft/network/chat/MutableComponent;", &[]);
+            let mut c = crate::api::call(rt, "net/minecraft/network/chat/MutableComponent.append.(Lnet/minecraft/network/chat/Component;)Lnet/minecraft/network/chat/MutableComponent;", &[empty, name]);
+            if stack_component(rt, a(0), "net/minecraft/core/component/DataComponents.CUSTOM_NAME").r() != 0 {
+                let italic = crate::api::get_static(rt, "net/minecraft/ChatFormatting.ITALIC");
+                c = crate::api::call(rt, "net/minecraft/network/chat/MutableComponent.withStyle.(Lnet/minecraft/ChatFormatting;)Lnet/minecraft/network/chat/MutableComponent;", &[c, italic]);
+            }
+            crate::api::call(rt, "net/minecraft/network/chat/ComponentUtils.wrapInSquareBrackets.(Lnet/minecraft/network/chat/Component;)Lnet/minecraft/network/chat/MutableComponent;", &[c])
+        }
 
         // Maths, randomness, text
         ("net/minecraft/util/Mth", "clamp") => match desc {
@@ -2880,6 +2972,67 @@ mod tests {
             assert!(!reach(rt, 30, 20.0));
             // Four blocks: within survival's 4.5 with no margin.
             assert!(reach(rt, 4, 0.0));
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Item names as 1.21.1 gives them: `item.<id>` for an item, its block's `block.<id>` for a
+    /// block item (a mod's, and vanilla's unless the language names the item itself, as redstone's),
+    /// translatable text of it, and a stack's hover name: its custom name first. The display name
+    /// is that in square brackets, italic for a custom name.
+    #[test]
+    fn items_and_stacks_are_named_by_their_description_ids() {
+        crate::install();
+        let mut rt = Rt::new();
+        let mut h = crate::host::MemoryHost { client: true, ..Default::default() };
+        h.block_items = vec!["minecraft:stone".into(), "minecraft:redstone".into()];
+        h.lang.insert("item.minecraft.redstone".into(), "Redstone Dust".into());
+        let filter = rt.new_object("net/minecraft/world/item/Item");
+        rt.registered.insert(("item".into(), "create:filter".into()), filter);
+        let shaft_block = rt.new_object("net/minecraft/world/level/block/Block");
+        rt.registered.insert(("block".into(), "create:shaft".into()), shaft_block);
+        let shaft = rt.new_object("net/minecraft/world/item/BlockItem");
+        rt.put_field(shaft, "$block", shaft_block);
+        rt.registered.insert(("item".into(), "create:shaft_item".into()), shaft);
+        const ID: &str = "net/minecraft/world/item/Item.getDescriptionId.()Ljava/lang/String;";
+        const DESCRIPTION: &str = "net/minecraft/world/item/Item.getDescription.()Lnet/minecraft/network/chat/Component;";
+        const HOVER: &str = "net/minecraft/world/item/ItemStack.getHoverName.()Lnet/minecraft/network/chat/Component;";
+        const DISPLAY: &str = "net/minecraft/world/item/ItemStack.getDisplayName.()Lnet/minecraft/network/chat/Component;";
+        const SET: &str = "net/minecraft/world/item/ItemStack.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";
+        rt.with_host(&mut h, |rt| {
+            let id = |rt: &mut Rt, item: V| {
+                let v = api::call(rt, ID, &[item]);
+                rt.str_of(v).unwrap_or("").to_owned()
+            };
+            let diamond = super::item(rt, "minecraft:diamond");
+            let stone = super::item(rt, "minecraft:stone");
+            let redstone = super::item(rt, "minecraft:redstone");
+            assert_eq!(id(rt, diamond), "item.minecraft.diamond");
+            assert_eq!(id(rt, stone), "block.minecraft.stone");
+            assert_eq!(id(rt, redstone), "item.minecraft.redstone");
+            assert_eq!(id(rt, filter), "item.create.filter");
+            assert_eq!(id(rt, shaft), "block.create.shaft");
+            let d = api::call(rt, DESCRIPTION, &[filter]);
+            assert_eq!(super::component_json(rt, d), serde_json::json!({"translate": "item.create.filter"}));
+            let s = super::stack(rt, "create:filter", 1);
+            let hover = api::call(rt, HOVER, &[s]);
+            assert_eq!(super::component_json(rt, hover), serde_json::json!({"translate": "item.create.filter"}));
+            let display = api::call(rt, DISPLAY, &[s]);
+            assert_eq!(
+                super::component_json(rt, display),
+                serde_json::json!({"translate": "chat.square_brackets", "with": [{"text": "", "extra": [{"translate": "item.create.filter"}]}]})
+            );
+            let custom = api::get_static(rt, "net/minecraft/core/component/DataComponents.CUSTOM_NAME");
+            let text = rt.string("Sorter");
+            let name = super::component(rt, text, false, V::NULL);
+            api::call(rt, SET, &[s, custom, name]);
+            let hover = api::call(rt, HOVER, &[s]);
+            assert_eq!(super::component_json(rt, hover), serde_json::json!({"text": "Sorter"}));
+            let display = api::call(rt, DISPLAY, &[s]);
+            assert_eq!(
+                super::component_json(rt, display),
+                serde_json::json!({"translate": "chat.square_brackets", "with": [{"text": "", "italic": true, "extra": [{"text": "Sorter"}]}]})
+            );
         });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }

@@ -55,7 +55,7 @@ fn int(rt: &Rt, o: V, f: &'static str) -> i32 {
 }
 
 /// `AbstractWidget`'s constructor: place, size and message; visible, active, opaque.
-fn init_widget(rt: &mut Rt, w: V, [x, y, width, height]: [i32; 4], message: V) {
+pub(crate) fn init_widget(rt: &mut Rt, w: V, [x, y, width, height]: [i32; 4], message: V) {
     for (f, v) in [("x", x), ("y", y), ("width", width), ("height", height), ("visible", 1), ("active", 1), ("packedFGColor", UNSET_FG_COLOR)] {
         rt.put_field(w, f, V::I(v));
     }
@@ -358,12 +358,17 @@ fn widget_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     })
 }
 
-/// The methods a widget answers natively, `AbstractButton`'s first for a button: None for a
+/// The methods a widget answers natively, `EditBox`'s or `AbstractButton`'s first: None for a
 /// receiver that is no widget or a method that isn't modelled.
 pub(crate) fn own(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let this = arg(args, 0);
     if !rt.instance_of(this, WIDGET) {
         return None;
+    }
+    if rt.instance_of(this, crate::edit_box::EDIT_BOX)
+        && let Some(v) = crate::edit_box::own(rt, name, desc, args)
+    {
+        return Some(v);
     }
     if rt.instance_of(this, ABSTRACT_BUTTON)
         && let Some(v) = button_call(rt, name, desc, args)
@@ -420,7 +425,7 @@ fn builder_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone.
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    matches!(owner, WIDGET | ABSTRACT_BUTTON | BUTTON | BUILDER | TOOLTIP | RENDERABLE | LAYOUT_ELEMENT | NARRATABLE)
+    matches!(owner, WIDGET | ABSTRACT_BUTTON | BUTTON | BUILDER | TOOLTIP | RENDERABLE | LAYOUT_ELEMENT | NARRATABLE | crate::edit_box::EDIT_BOX)
 }
 
 /// The calls this module models (`owner.name.desc`), or None.
