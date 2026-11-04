@@ -1006,6 +1006,30 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     bottle in the hand, food up and haste on; one of two drunk leaves one tea in the hand and the
     bottle in the inventory (`clear` finds 1); the worldshaper says "Shift-Right-Click to Select a
     Shape" in red over the hotbar. No panic, nothing uncaught.
+  - [x] 2026-11-04 Item data on the game's stacks (`horizon-compat/src/hand.rs`, `components.rs`;
+    tests `hand::tests`, `components::tests`). A mod's persistent component types (built with a
+    codec) are registered with the game as native components (`native_component_types`, answered
+    by the probe runtime: `components::persistent_types`, names a resource location allows, never
+    `minecraft:`), so a game stack carries their values as NBT, each written and read by its
+    type's own codec. The hand: a hook acting for a player (`use`, `useOn`, a block's
+    `useItemOn`, a use over time's tick, finish and release) has one main-hand stack for the whole
+    hook (`hand::with_hand`), loaded from the game with its components the first time the mod
+    reaches it (`getItemInHand`, a use context's `getItemInHand`), and what the mod did to it
+    reaches the game's stack when the hook ends: its count and components changed in place
+    (vanilla's own data on it stays), or the stack the mod put there instead (`setItemInHand`, a
+    `use` answering another stack, `finishUsingItem`'s answer). The runtime's `Nbt` moved into the
+    host's module; new Host methods `player_held_components`, `update_player_held`,
+    `set_player_held` (`MemoryHost` keeps them), new game helpers `native_held_stack`,
+    `native_set_held_stack`, `native_registered_components`. A saved stack (`ItemStack.save`,
+    `parseOptional`, `ItemStack.CODEC`: what a block entity keeps, a recipe's result) carries them
+    as vanilla's `components` map. Harness `COMPONENTS=1`: Create registers 50 persistent types
+    (`belt_first_shaft`, `clipboard_pages`, `package_address`, `shaper_*`, `train_schedule`...);
+    its belt connector clicked on a shaft keeps `create:belt_first_shaft` = [0, 64, 0] on the
+    stack in hand, clicked on a second shaft 4 blocks along lays a belt (start, three middles,
+    end, facing south) and the hand holds 4 of 5, the component gone. `HOLD=1` and `USE=1` as
+    before. Gaps: payloads a client sends (`ConfigureWorldshaperPacket`...) run without the
+    sender's hand; vanilla's own components (damage, a name) aren't read from the game's stack;
+    the off hand is empty to mods; stacks given to the player lose their components. In-game check pending.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

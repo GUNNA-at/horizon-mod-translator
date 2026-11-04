@@ -634,6 +634,25 @@ impl Game<'_> {
         let s = self.inventory.get(self.selected)?.as_ref()?;
         Some((s.item.to_string(), s.count, plain(s)))
     }
+    /// The main hand's stack with all its data (a mod's item data through
+    /// `native_component`), None for an empty hand. On a client, the player's
+    /// own. API @API:held_stack@.
+    pub(super) fn native_held_stack(&self) -> Option<&ItemStack> {
+        self.inventory.get(self.selected)?.as_ref()
+    }
+    /// Puts `stack` in the player's main hand (`Player.setItemInHand`),
+    /// replacing what it held; None, a count of 0 or an item the game doesn't
+    /// know empties it. The player's screen gets the change as any change to
+    /// their inventory. Nothing on a client of a server. API @API:set_held_stack@.
+    pub(super) fn native_set_held_stack(&mut self, stack: Option<ItemStack>) {
+        if self.remote || self.player.is_none() {
+            return;
+        }
+        let stack = stack.filter(|s| s.count > 0 && self.res.items().get(&s.item).is_some());
+        if let Some(slot) = self.inventory.get_mut(self.selected) {
+            *slot = stack;
+        }
+    }
     /// How many of plain `item` (`minecraft:diamond`) the player carries.
     pub(super) fn native_count_items(&mut self, item: &str) -> u32 {
         count_in(&slots(&mut self.inventory, &mut self.offhand), item)

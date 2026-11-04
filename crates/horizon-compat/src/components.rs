@@ -4,9 +4,14 @@
 //! `has/get/getOrDefault/set/remove/update`, including NeoForge's forms that take the type's holder.
 //!
 //! A stack keeps what was set on it (vanilla's component patch) in `$patch`, as (type, value)
-//! pairs, and its copies keep them too. Not modelled yet: an item's default components (vanilla's
-//! prototype: `get(MAX_STACK_SIZE)` is null), and components in a saved stack (that needs encoding
-//! through the type's codec).
+//! pairs, and its copies keep them too. The game's stacks carry the mod's persistent types (those
+//! built with a codec) as native components: [`persistent_types`] names them for the game to
+//! register, [`load`] reads a game stack's into a stack here and [`saved`] writes them back, each
+//! value through its type's codec (`encodeStart(NbtOps.INSTANCE, value)` and `parse`). A saved
+//! stack (`ItemStack.save`, `ItemStack.CODEC`: what a block entity keeps) carries them as vanilla's
+//! `components` map. Not modelled yet: an item's default components (vanilla's prototype:
+//! `get(MAX_STACK_SIZE)` is null), and vanilla's own types on a game stack.
+use crate::nbt::Nbt;
 use crate::{Data, Rt, V};
 
 pub(crate) const TYPE: &str = "net/minecraft/core/component/DataComponentType";
@@ -23,6 +28,87 @@ const HOLDERS: [&str; 4] = [
 ];
 /// `DataComponents` statics that aren't component types.
 const NOT_TYPES: [&str; 2] = ["COMMON_ITEM_COMPONENTS", "ITEM_STACK_CODEC"];
+
+/// The registry a mod's component types are registered in (`Registries.DATA_COMPONENT_TYPE`).
+const REGISTRY: &str = "data_component_type";
+
+/// A component type's codec, when it persists (`DataComponentType.Builder.persistent`).
+fn codec_of(rt: &Rt, ty: V) -> Option<V> {
+    match rt.get_field(ty, "$codec") {
+        V::R(r) if r != 0 => Some(V::R(r)),
+        _ => None,
+    }
+}
+
+/// The mod's component types that persist (built with a codec), by name, sorted: the game registers
+/// them as native components, so its stacks can carry their values. Only namespaced names outside
+/// `minecraft` that a resource location allows (the game refuses to start on any other).
+pub fn persistent_types(rt: &mut Rt) -> Vec<String> {
+    rt.resolve_registrations();
+    let mut names: Vec<String> = rt
+        .registered
+        .iter()
+        .filter(|((r, n), v)| {
+            r == REGISTRY
+                && n.contains(':')
+                && !n.starts_with("minecraft:")
+                && crate::recipes::valid_location(n)
+                && rt.class_of(**v) == TYPE
+                && codec_of(rt, **v).is_some()
+        })
+        .map(|((_, n), _)| n.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Puts components a game stack carries on `stack`: (type name, value as NBT), each read with its
+/// type's codec. One the mod didn't register, or whose value its codec refuses, is left out (and told
+/// once).
+pub(crate) fn load(rt: &mut Rt, stack: V, carried: &[(String, Nbt)]) {
+    for (name, value) in carried {
+        load_one(rt, stack, name, &crate::recipes::nbt_json(value));
+    }
+}
+
+/// [`load`] from a saved stack's `components` (vanilla's patch, as `ItemStack.CODEC` writes it):
+/// the mod's own types; a removal (`!name`) and vanilla's types are left out.
+pub(crate) fn load_saved(rt: &mut Rt, stack: V, patch: &serde_json::Map<String, serde_json::Value>) {
+    for (name, value) in patch {
+        if !name.starts_with('!') {
+            load_one(rt, stack, name, value);
+        }
+    }
+}
+
+fn load_one(rt: &mut Rt, stack: V, name: &str, value: &serde_json::Value) {
+    let Some(&ty) = rt.registered.get(&(REGISTRY.to_owned(), name.to_owned())) else { return };
+    let Some(codec) = codec_of(rt, ty) else { return };
+    match crate::codecs::decode(rt, codec, value) {
+        Ok(v) => {
+            put(rt, stack, ty, v);
+        }
+        Err(e) => crate::glue::trace_once(rt, &format!("component-read:{name}"), |_| format!("component {name} not read: {e}")),
+    }
+}
+
+/// `stack`'s components a game stack can carry, by type name (sorted), each written with its type's
+/// codec. Vanilla's types, types without a codec and values the codec can't write are left out (the
+/// last told once).
+pub(crate) fn saved(rt: &mut Rt, stack: V) -> Vec<(String, Nbt)> {
+    let mut out = Vec::new();
+    for p in pairs(rt, stack).chunks(2) {
+        let (ty, value) = (p[0], p[1]);
+        let Some(name) = rt.registered_name(ty, REGISTRY).map(str::to_owned) else { continue };
+        let Some(codec) = codec_of(rt, ty) else { continue };
+        match crate::codecs::encode(rt, codec, value) {
+            Ok(n) => out.push((name, n)),
+            Err(e) => crate::glue::trace_once(rt, &format!("component-write:{name}"), |_| format!("component {name} not written: {e}")),
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
 
 /// Vanilla's component type `id` (`minecraft:damage`), one object per name, as vanilla's are.
 pub fn vanilla_type(rt: &mut Rt, id: &str) -> V {
@@ -280,5 +366,41 @@ mod tests {
         let empty = api::get_static(&mut rt, "net/minecraft/world/item/ItemStack.EMPTY");
         api::call(&mut rt, set, &[empty, progress, two]);
         assert_eq!(api::call(&mut rt, has, &[empty, progress]), V::I(0), "the shared empty stack takes nothing");
+    }
+
+    /// A stack saved as a block entity keeps one (`ItemStack.save`) and read back (`parseOptional`)
+    /// keeps the mod's component, under vanilla's `components`; `ItemStack.CODEC` writes and reads it
+    /// the same way.
+    #[test]
+    fn a_saved_stack_keeps_the_mods_components() {
+        let mut rt = Rt::new();
+        crate::install();
+        let b = api::call(&mut rt, "net/minecraft/core/component/DataComponentType.builder.()Lnet/minecraft/core/component/DataComponentType$Builder;", &[]);
+        let codec = api::get_static(&mut rt, "com/mojang/serialization/Codec.STRING");
+        let b = api::call(&mut rt, "net/minecraft/core/component/DataComponentType$Builder.persistent.(Lcom/mojang/serialization/Codec;)Lnet/minecraft/core/component/DataComponentType$Builder;", &[b, codec]);
+        let address = api::call(&mut rt, "net/minecraft/core/component/DataComponentType$Builder.build.()Lnet/minecraft/core/component/DataComponentType;", &[b]);
+        rt.registered.insert((REGISTRY.into(), "test:address".into()), address);
+        let set = "net/minecraft/world/item/ItemStack.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";
+        let get = "net/minecraft/core/component/DataComponentHolder.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+
+        let s = api_common::stack(&mut rt, "minecraft:paper", 2);
+        let mill = rt.string("Mill");
+        api::call(&mut rt, set, &[s, address, mill]);
+        let tag = api::call(&mut rt, "net/minecraft/world/item/ItemStack.save.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/Tag;", &[s, V::NULL]);
+        let saved = crate::nbt::from_runtime(&rt, tag);
+        assert_eq!(
+            saved.get("components"),
+            Some(&Nbt::Compound([("test:address".to_owned(), Nbt::String("Mill".into()))].into_iter().collect()))
+        );
+        let back = api::call(&mut rt, "net/minecraft/world/item/ItemStack.parseOptional.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/CompoundTag;)Lnet/minecraft/world/item/ItemStack;", &[V::NULL, tag]);
+        let read = api::call(&mut rt, get, &[back, address]);
+        assert_eq!(rt.str_of(read), Some("Mill"));
+        assert_eq!(rt.get_field(back, "$count").i(), 2);
+
+        let stack_codec = api::get_static(&mut rt, "net/minecraft/world/item/ItemStack.CODEC");
+        let written = crate::codecs::encode(&mut rt, stack_codec, s).unwrap();
+        let again = crate::codecs::decode(&mut rt, stack_codec, &crate::recipes::nbt_json(&written)).unwrap();
+        let read = api::call(&mut rt, get, &[again, address]);
+        assert_eq!(rt.str_of(read), Some("Mill"));
     }
 }

@@ -263,7 +263,7 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
     if !with_item && !without {
         return false;
     }
-    rt.with_host(host, |rt| {
+    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| {
         let Some(vc) = rt.vcall else { return false };
         let st = api::state(rt, state);
         let l = level(rt);
@@ -287,7 +287,7 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
         }
         rt.report_thrown("a right click");
         took.unwrap_or(false)
-    })
+    }))
 }
 
 const USE_ON: &str = "useOn.(Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;";
@@ -304,14 +304,14 @@ pub fn use_item_on(rt: &mut Rt, host: &mut dyn Host, click: &Placement) -> bool 
     if !rt.overrides.is_some_and(|o| o(class, USE_ON)) {
         return false;
     }
-    rt.with_host(host, |rt| {
+    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| {
         let Some(vc) = rt.vcall else { return false };
         let ctx = crate::api_common::use_on_context(rt, click);
         let r = vc(rt, USE_ON_KEY, USE_ON, &[item, ctx]);
         let thrown = rt.thrown.is_some();
         rt.report_thrown("useOn");
         !thrown && rt.str_of(r).is_some_and(|name| name != "PASS")
-    })
+    }))
 }
 
 const USE: &str = "use.(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResultHolder;";
@@ -320,8 +320,8 @@ const USE_KEY: &str = "net/minecraft/world/item/Item.use.(Lnet/minecraft/world/l
 /// `native_use_item` (server): a right click with one of the mod's items in the main hand, in the
 /// air or on a block that let it through: its class's own `Item.use` (Create's goggles, filters,
 /// experience nuggets). True when the use takes the click (its result consumes the action, so the
-/// game's own use of the item doesn't run); the hand then holds the stack the use answered, unless
-/// the use set the hand itself (`setItemInHand`).
+/// game's own use of the item doesn't run). What the use did to the stack in hand reaches the
+/// game's; a stack it answered instead goes in the hand (`ServerPlayerGameMode.useItem`).
 pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
     rt.safe_point();
     let Some(&it) = rt.registered.get(&("item".to_owned(), item.to_owned())) else { return false };
@@ -329,9 +329,9 @@ pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
     if !rt.overrides.is_some_and(|o| o(class, USE)) {
         return false;
     }
-    rt.with_host(host, |rt| {
+    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| {
         let Some(vc) = rt.vcall else { return false };
-        let before = rt.host().and_then(|h| h.player_held());
+        let held = crate::hand::stack(rt);
         let l = level(rt);
         let player = crate::api_common::acting_player(rt);
         let hand = api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
@@ -347,43 +347,12 @@ pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
         // A use over time it started (`startUsingItem`) is the game's to run: the click goes on to
         // it, whatever the result.
         let started = crate::item_use::use_started(rt);
-        if (took || started) && rt.host().and_then(|h| h.player_held()) == before {
-            // The stack it answered, shrunk or swapped in place, is what the hand holds now.
-            let stack = rt.get_field(r, "$object");
-            let answered = (!crate::api_common::stack_empty(rt, stack)).then(|| {
-                let id = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
-                (id, rt.get_field(stack, "$count").i().max(0) as u32)
-            });
-            follow_hand(rt, &before, &answered);
+        let answered = rt.get_field(r, "$object");
+        if (took || started) && answered.r() != 0 && answered != held {
+            crate::hand::replace(rt, answered);
         }
         took && !started
-    })
-}
-
-/// The acting player's hand held `before` and now holds `after`: the game's hand follows. The same
-/// item, more or fewer: only the difference moves, so its data stays.
-pub(crate) fn follow_hand(rt: &mut Rt, before: &Option<(String, u32)>, after: &Option<(String, u32)>) {
-    if after == before {
-        return;
-    }
-    let Some(h) = rt.host_mut() else { return };
-    match (before, after) {
-        (Some((id, n)), Some((same, m))) if id == same => {
-            if m < n {
-                h.take_player_items(id, n - m);
-            } else {
-                h.give_player_items(id, m - n);
-            }
-        }
-        _ => {
-            if let Some((id, n)) = before {
-                h.take_player_items(id, *n);
-            }
-            if let Some((id, n)) = after {
-                h.give_player_items(id, *n);
-            }
-        }
-    }
+    }))
 }
 
 const STATE_FOR_PLACEMENT: &str = "getStateForPlacement.(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;";

@@ -454,16 +454,23 @@ fn compound(rt: &mut Rt) -> V {
 }
 
 
-/// Writes `stack` into the runtime compound `tag` as `ItemStack.CODEC` does: `id`, `count`.
+/// Writes `stack` into the runtime compound `tag` as `ItemStack.CODEC` does: `id`, `count`, and its
+/// mod components (`components`, when it has any).
 pub(crate) fn save_stack(rt: &mut Rt, stack: V, tag: V) {
     let id = item_like_name(rt, rt.get_field(stack, "$item"));
     let count = rt.get_field(stack, "$count").i();
     let (ik, iv, ck) = (rt.string("id"), rt.string(&id), rt.string("count"));
     crate::api::call(rt, "net/minecraft/nbt/CompoundTag.putString.(Ljava/lang/String;Ljava/lang/String;)V", &[tag, ik, iv]);
     crate::api::call(rt, "net/minecraft/nbt/CompoundTag.putInt.(Ljava/lang/String;I)V", &[tag, ck, V::I(count)]);
+    let carried: std::collections::BTreeMap<String, crate::nbt::Nbt> = crate::components::saved(rt, stack).into_iter().collect();
+    if !carried.is_empty() {
+        let c = crate::nbt::to_runtime(rt, &carried);
+        let k = rt.string("components");
+        crate::api::call(rt, "net/minecraft/nbt/CompoundTag.put.(Ljava/lang/String;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;", &[tag, k, c]);
+    }
 }
 
-/// A stack from its saved form (`{id, count}`); None for an empty or unknown item, as
+/// A stack from its saved form (`{id, count, components}`); None for an empty or unknown item, as
 /// `ItemStack.parse` refuses it.
 pub(crate) fn parse_stack(rt: &mut Rt, tag: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Option<V> {
     use crate::nbt::Nbt;
@@ -479,7 +486,13 @@ pub(crate) fn parse_stack(rt: &mut Rt, tag: &std::collections::BTreeMap<String, 
         return None;
     }
     let i = item(rt, &id);
-    Some(stack_of(rt, i, count))
+    let s = stack_of(rt, i, count);
+    if let Some(patch @ Nbt::Compound(_)) = tag.get("components")
+        && let serde_json::Value::Object(patch) = crate::recipes::nbt_json(patch)
+    {
+        crate::components::load_saved(rt, s, &patch);
+    }
+    Some(s)
 }
 
 pub fn stack(rt: &mut Rt, item_name: &str, count: i32) -> V {
@@ -918,19 +931,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                     if off {
                         return Some(get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL));
                     }
-                    // One stack object for the player's hand, as vanilla's: what a mod changes in
-                    // it, it finds there again.
-                    if let V::R(r) = rt.get_field(a(0), "$held")
-                        && r != 0
-                    {
-                        return Some(V::R(r));
-                    }
-                    let held = match rt.host().and_then(|h| h.player_held()) {
-                        Some((id, count)) => stack(rt, &id, count as i32),
-                        None => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
-                    };
-                    rt.put_field(a(0), "$held", held);
-                    held
+                    // One stack object for the player's hand through the hook, as vanilla's: what
+                    // a mod changes in it, it finds there again, and the game's stack gets it.
+                    crate::hand::stack(rt)
                 }
             }
         }
@@ -1008,17 +1011,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (FOOD_DATA, "getFoodLevel") => V::I(rt.host().map_or(20, |h| h.player_food())),
         (FOOD_DATA, "needsFood") => V::I(i32::from(rt.host().map_or(20, |h| h.player_food()) < 20)),
-        // The main hand changes: what it held is taken, the new stack given (the off hand is
-        // empty here, and stays so).
+        // The main hand holds the new stack (the off hand is empty here, and stays so).
         (o, "setItemInHand") if is_player(o) => {
             if rt.get_field(a(1), "$ordinal").i() != 1 {
-                if let Some((id, n)) = rt.host().and_then(|h| h.player_held())
-                    && let Some(h) = rt.host_mut()
-                {
-                    h.take_player_items(&id, n);
-                }
-                give_player(rt, a(2));
-                rt.put_field(a(0), "$held", V::NULL);
+                crate::hand::replace(rt, a(2));
             }
             V::Void
         }
@@ -1558,7 +1554,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::I((!stack_empty(rt, a(0)) && crate::recipes::item_in_tag(rt, &item, &tag)) as i32)
         }
         ("net/minecraft/world/item/ItemStack", "isStackable") => V::I(1),
-        // NBT in `ItemStack.CODEC`'s form, `{id, count}` (components aren't kept yet).
+        // NBT in `ItemStack.CODEC`'s form, `{id, count, components}`.
         ("net/minecraft/world/item/ItemStack", "save" | "saveOptional") => {
             let into = desc.contains(";Lnet/minecraft/nbt/Tag;)");
             let tag = if into { a(2) } else { crate::tags::new_compound(rt) };
@@ -2388,7 +2384,14 @@ fn context(rt: &mut Rt, p: &crate::glue::Placement, class: &'static str) -> V {
     rt.put_field(player, "$yaw", V::F(p.yaw));
     rt.put_field(player, "$pitch", V::F(p.pitch));
     let hand = get_static(rt, "net/minecraft/world/InteractionHand", "MAIN_HAND").unwrap_or(V::NULL);
-    let item = if p.item.is_empty() { get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL) } else { stack(rt, &p.item, 1) };
+    // The stack in hand, as the player's own (`getItemInHand`), when it holds the item.
+    let item = if p.item.is_empty() {
+        get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL)
+    } else if rt.host().and_then(|h| h.player_held()).is_some_and(|(id, _)| id == p.item) {
+        crate::hand::stack(rt)
+    } else {
+        stack(rt, &p.item, 1)
+    };
     let pos = crate::api::block_pos(rt, p.pos[0] as i64, p.pos[1] as i64, p.pos[2] as i64);
     let hit_pos = crate::api::block_pos(rt, p.hit_pos[0] as i64, p.hit_pos[1] as i64, p.hit_pos[2] as i64);
     let face = direction(rt, p.face);

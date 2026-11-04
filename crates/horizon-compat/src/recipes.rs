@@ -38,7 +38,7 @@ fn qualified(id: &str) -> String {
 }
 
 /// Whether `id` is a valid resource location (`ResourceLocation.isValidNamespace`/`isValidPath`).
-fn valid_location(id: &str) -> bool {
+pub(crate) fn valid_location(id: &str) -> bool {
     let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
     !path.is_empty()
         && ns.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.'))
@@ -806,7 +806,7 @@ pub(crate) fn json_nbt(j: &Json) -> Option<crate::nbt::Nbt> {
     })
 }
 
-fn nbt_json(n: &crate::nbt::Nbt) -> Json {
+pub(crate) fn nbt_json(n: &crate::nbt::Nbt) -> Json {
     use crate::nbt::Nbt;
     match n {
         Nbt::Byte(b) => Json::from(*b),
@@ -881,7 +881,11 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             if !(1..=99).contains(&count) {
                 return Err(format!("Value {count} outside of range [1:99]"));
             }
-            Ok(api_common::stack(rt, &id, count as i32))
+            let s = api_common::stack(rt, &id, count as i32);
+            if let Some(Json::Object(patch)) = j.get("components") {
+                crate::components::load_saved(rt, s, patch);
+            }
+            Ok(s)
         }
         "ingredient" | "ingredient_nonempty" => {
             let mut out = Vec::new();

@@ -4,6 +4,24 @@
 //! strings' interned ids, so the runtime never depends on Horizon's tables.
 use std::collections::HashMap;
 
+/// NBT as the glue hands it over: the game converts it to and from its own tags, the runtime to and
+/// from its `CompoundTag`s (`horizon_compat::nbt`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Nbt {
+    Byte(i8),
+    Short(i16),
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    String(String),
+    List(Vec<Nbt>),
+    Compound(std::collections::BTreeMap<String, Nbt>),
+    ByteArray(Vec<i8>),
+    IntArray(Vec<i32>),
+    LongArray(Vec<i64>),
+}
+
 /// A model a block entity draws (`BakedModel`): a block state's, or one named by its location (a
 /// mod's part model, `create:block/shaft_half`, never placed as a block), or faces a mod put
 /// together itself (a `SimpleBakedModel` of `BakedQuad`s: Create's water wheel, its template's
@@ -135,6 +153,20 @@ pub trait Host {
     fn player_held(&self) -> Option<(String, u32)> {
         None
     }
+    /// The mod components on the acting player's main-hand stack: each type's name
+    /// (`create:belt_first_shaft`) with its value as NBT, as the type's codec writes it.
+    fn player_held_components(&self) -> Vec<(String, Nbt)> {
+        Vec::new()
+    }
+    /// Changes the acting player's main-hand stack in place: `count` of it (0 empties the hand), mod
+    /// components set (Some) or removed (None) by type name. Vanilla's own data on it stays. False
+    /// when the game refused a change (an unregistered type, a value too big to send).
+    fn update_player_held(&mut self, _count: u32, _components: &[(String, Option<Nbt>)]) -> bool {
+        false
+    }
+    /// Puts a new stack in the acting player's main hand (`Player.setItemInHand`): `count` of `item`
+    /// with mod components `components`; an empty `item` or a count of 0 empties the hand.
+    fn set_player_held(&mut self, _item: &str, _count: u32, _components: &[(String, Nbt)]) {}
     /// Where the acting player stands (their feet), and their look (yaw, pitch in degrees); None
     /// when the game can't say.
     fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
@@ -354,6 +386,8 @@ pub struct MemoryHost {
     pub sneaking: bool,
     pub creative: bool,
     pub held: Option<(String, u32)>,
+    /// The mod components of the main-hand stack, by type name.
+    pub held_components: std::collections::BTreeMap<String, Nbt>,
     /// Where the acting player stands and looks (yaw, pitch).
     pub place: Option<([f64; 3], f32, f32)>,
     /// What the acting player was given that the main hand didn't take, in order.
@@ -433,6 +467,28 @@ impl Host for MemoryHost {
     fn player_held(&self) -> Option<(String, u32)> {
         self.held.clone()
     }
+    fn player_held_components(&self) -> Vec<(String, Nbt)> {
+        self.held_components.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+    fn update_player_held(&mut self, count: u32, components: &[(String, Option<Nbt>)]) -> bool {
+        let Some((_, n)) = &mut self.held else { return false };
+        *n = count;
+        for (name, value) in components {
+            match value {
+                Some(v) => self.held_components.insert(name.clone(), v.clone()),
+                None => self.held_components.remove(name),
+            };
+        }
+        if count == 0 {
+            self.held = None;
+            self.held_components.clear();
+        }
+        true
+    }
+    fn set_player_held(&mut self, item: &str, count: u32, components: &[(String, Nbt)]) {
+        self.held = (!item.is_empty() && count > 0).then(|| (item.to_owned(), count));
+        self.held_components = if self.held.is_some() { components.iter().cloned().collect() } else { Default::default() };
+    }
     fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
         self.place
     }
@@ -450,6 +506,7 @@ impl Host for MemoryHost {
         *n -= took;
         if *n == 0 {
             self.held = None;
+            self.held_components.clear();
         }
         took
     }

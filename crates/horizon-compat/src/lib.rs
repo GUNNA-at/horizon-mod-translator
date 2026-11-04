@@ -21,6 +21,7 @@ pub mod food;
 pub mod item_use;
 pub mod functions;
 pub mod glue;
+pub mod hand;
 pub mod jlang;
 pub mod jutil;
 pub mod mod_entities;

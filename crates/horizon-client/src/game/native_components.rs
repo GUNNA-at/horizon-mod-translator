@@ -22,6 +22,14 @@ impl std::error::Error for NativeComponentError {}
 // Native mods use these helpers.
 #[allow(dead_code)]
 impl Game<'_> {
+    /// The native component types registered at start (every mod's
+    /// `native_component_types`), by name. API @API:registered_components@.
+    pub(super) fn native_registered_components(&self) -> Vec<&'static str> {
+        horizon_protocol::item::custom::entries()
+            .map(|(_, name)| name)
+            .collect()
+    }
+
     /// Read a native component, including the item's default when not patched.
     pub(super) fn native_component<'a>(
         &'a self,

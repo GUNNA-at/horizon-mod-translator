@@ -4,21 +4,7 @@
 use crate::{Data, Rt, V};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Nbt {
-    Byte(i8),
-    Short(i16),
-    Int(i32),
-    Long(i64),
-    Float(f32),
-    Double(f64),
-    String(String),
-    List(Vec<Nbt>),
-    Compound(BTreeMap<String, Nbt>),
-    ByteArray(Vec<i8>),
-    IntArray(Vec<i32>),
-    LongArray(Vec<i64>),
-}
+pub use crate::host::Nbt;
 
 /// The hidden entry beside `key` that says what it was put as.
 pub fn kind_key(key: &str) -> String {

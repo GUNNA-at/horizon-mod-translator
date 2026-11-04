@@ -10,7 +10,7 @@
 //! part of `Item.finishUsingItem`, eating a food, is the game's: a mod's override that calls it gets
 //! the stack the game left.
 use crate::host::Host;
-use crate::{api, api_common, glue, Rt, V};
+use crate::{api, api_common, glue, hand, Rt, V};
 
 const ITEM: &str = "net/minecraft/world/item/Item";
 pub(crate) const USE_DURATION: &str = "getUseDuration.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/LivingEntity;)I";
@@ -126,28 +126,32 @@ fn contents(rt: &Rt, stack: V) -> Option<(String, u32)> {
 }
 
 /// `Item.finishUsingItem(stack, level, entity)` of the mod's `item` once its use ran its time, after
-/// the game's own finish (a food eaten, its remainder given): `held` is what the hand holds now, and
-/// the stack the mod gets is what that left of the item (none: an emptied stack of it). What the
-/// hand holds after the mod's part, None when it left the hand as it was (or has no part).
-pub fn finish_using_item(rt: &mut Rt, host: &mut dyn Host, item: &str, held: Option<(String, u32)>) -> Option<Option<(String, u32)>> {
+/// the game's own finish (a food eaten, its remainder given). The mod gets the stack in hand when
+/// the hand still holds the item, else an emptied stack of it (the game ate the last one). What it
+/// did to the hand reaches the game's; a stack it answered goes in the hand, as `completeUsingItem`
+/// puts it there (an empty answer leaves what the game left). False when its class has none.
+pub fn finish_using_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
     rt.safe_point();
-    let it = own(rt, item, FINISH)?;
+    let Some(it) = own(rt, item, FINISH) else { return false };
     rt.with_host(host, |rt| {
-        let vc = rt.vcall?;
-        let count = held.as_ref().filter(|(h, _)| h == item).map_or(0, |(_, n)| *n);
-        let stack = api_common::stack(rt, item, count as i32);
-        let level = glue::level(rt);
-        let player = user(rt, 0);
-        rt.put_field(player, "$held", stack);
-        let r = vc(rt, FINISH_KEY, FINISH, &[it, stack, level, player]);
-        let thrown = rt.thrown.is_some();
-        rt.report_thrown("finishUsingItem");
-        if thrown {
-            return None;
-        }
-        let after = contents(rt, r);
-        let before = (count > 0).then(|| (item.to_owned(), count));
-        (r.r() != stack.r() || after != before).then_some(after)
+        hand::with_hand(rt, |rt| {
+            let Some(vc) = rt.vcall else { return false };
+            let held = hand::stack(rt);
+            let in_hand = contents(rt, held).is_some_and(|(h, _)| h == item);
+            let stack = if in_hand { held } else { api_common::stack(rt, item, 0) };
+            let level = glue::level(rt);
+            let player = user(rt, 0);
+            let r = vc(rt, FINISH_KEY, FINISH, &[it, stack, level, player]);
+            let thrown = rt.thrown.is_some();
+            rt.report_thrown("finishUsingItem");
+            if thrown {
+                return true;
+            }
+            if r.r() != 0 && r != held && (in_hand || !api_common::stack_empty(rt, r)) {
+                hand::replace(rt, r);
+            }
+            true
+        })
     })
 }
 
@@ -158,15 +162,15 @@ pub fn release_using(rt: &mut Rt, host: &mut dyn Host, item: &str, time_left: i3
     rt.safe_point();
     let Some(it) = own(rt, item, RELEASE) else { return false };
     rt.with_host(host, |rt| {
-        let Some(vc) = rt.vcall else { return false };
-        let player = user(rt, time_left);
-        let Some((stack, before)) = held_stack(rt, player, item) else { return false };
-        let level = glue::level(rt);
-        vc(rt, RELEASE_KEY, RELEASE, &[it, stack, level, player, V::I(time_left)]);
-        rt.report_thrown("releaseUsing");
-        let after = contents(rt, stack);
-        glue::follow_hand(rt, &Some(before), &after);
-        true
+        hand::with_hand(rt, |rt| {
+            let Some(vc) = rt.vcall else { return false };
+            let player = user(rt, time_left);
+            let Some(stack) = held_stack(rt, item) else { return false };
+            let level = glue::level(rt);
+            vc(rt, RELEASE_KEY, RELEASE, &[it, stack, level, player, V::I(time_left)]);
+            rt.report_thrown("releaseUsing");
+            true
+        })
     })
 }
 
@@ -176,25 +180,22 @@ pub fn use_tick(rt: &mut Rt, host: &mut dyn Host, item: &str, remaining: i32) ->
     rt.safe_point();
     let Some(it) = own(rt, item, USE_TICK) else { return false };
     rt.with_host(host, |rt| {
-        let Some(vc) = rt.vcall else { return false };
-        let player = user(rt, remaining);
-        let Some((stack, before)) = held_stack(rt, player, item) else { return false };
-        let level = glue::level(rt);
-        vc(rt, USE_TICK_KEY, USE_TICK, &[it, level, player, stack, V::I(remaining)]);
-        rt.report_thrown("onUseTick");
-        let after = contents(rt, stack);
-        glue::follow_hand(rt, &Some(before), &after);
-        true
+        hand::with_hand(rt, |rt| {
+            let Some(vc) = rt.vcall else { return false };
+            let player = user(rt, remaining);
+            let Some(stack) = held_stack(rt, item) else { return false };
+            let level = glue::level(rt);
+            vc(rt, USE_TICK_KEY, USE_TICK, &[it, level, player, stack, V::I(remaining)]);
+            rt.report_thrown("onUseTick");
+            true
+        })
     })
 }
 
-/// The stack `player`'s main hand holds, when it is `item`: the one object their `getItemInHand`
-/// answers, and what it holds.
-fn held_stack(rt: &mut Rt, player: V, item: &str) -> Option<(V, (String, u32))> {
-    let hand = api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
-    let stack = api::call(rt, GET_ITEM_IN_HAND, &[player, hand]);
-    let held = contents(rt, stack).filter(|(h, _)| h == item)?;
-    Some((stack, held))
+/// The stack in the main hand, when it is `item`: the one object the hook's player answers.
+fn held_stack(rt: &mut Rt, item: &str) -> Option<V> {
+    let stack = hand::stack(rt);
+    contents(rt, stack).filter(|(h, _)| h == item).map(|_| stack)
 }
 
 /// The hand a player object uses, when it was told one (`startUsingItem`, a use's hook).

@@ -773,7 +773,7 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
         "resource_location" => Nbt::String(rt.str_of(v).ok_or("Not a resource location")?.to_owned()),
         "block_pos" => Nbt::IntArray(crate::api::pos_of(rt, v).to_vec()),
         "unit" => Nbt::Compound(BTreeMap::new()),
-        // `{id, count}` (components aren't kept on stacks yet); nothing for an empty optional one.
+        // `{id, count, components}` (the mod's components); nothing for an empty optional one.
         "item_stack" | "optional_item_stack" => {
             if crate::api_common::stack_empty(rt, v) {
                 if name == "item_stack" {
@@ -783,7 +783,12 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
             } else {
                 let id = crate::api_common::item_like_name(rt, rt.get_field(v, "$item"));
                 let count = rt.get_field(v, "$count").i();
-                Nbt::Compound(BTreeMap::from([("id".to_owned(), Nbt::String(id)), ("count".to_owned(), Nbt::Int(count))]))
+                let mut m = BTreeMap::from([("id".to_owned(), Nbt::String(id)), ("count".to_owned(), Nbt::Int(count))]);
+                let carried: BTreeMap<String, Nbt> = crate::components::saved(rt, v).into_iter().collect();
+                if !carried.is_empty() {
+                    m.insert("components".to_owned(), Nbt::Compound(carried));
+                }
+                Nbt::Compound(m)
             }
         }
         "fluid_stack" | "optional_fluid_stack" => Nbt::Compound(crate::tanks::save_stack(rt, v)),

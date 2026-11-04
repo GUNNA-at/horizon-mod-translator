@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the native component types registered at start (`native_registered_components`).",
+  "doc_summary": "`native_registered_components()` names the native component types every mod registered with `native_component_types`, so a mod can read all of a stack's (`native_component`). Bundles need \"hooks\": @API:registered_components@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_components.rs"
+  ]
+}
