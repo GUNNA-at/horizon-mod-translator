@@ -336,6 +336,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner.starts_with("com/google/common/cache/") {
         return cache_call(rt, owner, name, args);
     }
+    if matches!(owner, "java/util/Random" | "java/util/concurrent/ThreadLocalRandom") {
+        return random_call(rt, name, desc, args);
+    }
     // Guava's immutable collection builders: filled in place, `build` copies.
     if owner.starts_with("com/google/common/collect/Immutable") && owner.ends_with("$Builder") {
         return immutable_builder_call(rt, owner, name, desc, args);
@@ -1389,6 +1392,146 @@ fn missing(rt: &Rt, m: V, desc: &str) -> V {
     }
 }
 
+const RANDOM_MULTIPLIER: i64 = 0x5_DEEC_E66D;
+const RANDOM_MASK: i64 = (1 << 48) - 1;
+
+/// `java.util.Random`: the JDK's documented 48-bit linear congruential generator, so a seeded one
+/// gives the numbers it gives in Java (`new Random(0)` in Create's depot renderer). Its state is
+/// `$seed`; `$gaussian` holds `nextGaussian`'s second value while there is one.
+/// `ThreadLocalRandom.current()` is one such generator, seeded from the runtime's stream.
+fn random_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let scramble = |seed: i64| (seed ^ RANDOM_MULTIPLIER) & RANDOM_MASK;
+    let this = a(0);
+    match name {
+        "current" => {
+            let seed = crate::api_common::next_random(rt) as i64;
+            return Some(rt.intern("compat:thread-local-random".into(), |rt| {
+                let r = rt.new_object("java/util/Random");
+                rt.put_field(r, "$seed", V::J(scramble(seed)));
+                r
+            }));
+        }
+        // `new Random()` takes a seed nobody can predict; `new Random(seed)` that seed.
+        "<init>" | "setSeed" => {
+            let seed = if desc.starts_with("(J)") { a(1).j() } else { crate::api_common::next_random(rt) as i64 };
+            rt.put_field(this, "$seed", V::J(scramble(seed)));
+            rt.put_field(this, "$gaussian", V::Void);
+            return Some(V::Void);
+        }
+        _ => {}
+    }
+    let mut state = match rt.get_field(this, "$seed") {
+        V::J(s) => s,
+        _ => scramble(crate::api_common::next_random(rt) as i64),
+    };
+    let mut next = |bits: u32| -> i32 {
+        state = state.wrapping_mul(RANDOM_MULTIPLIER).wrapping_add(0xB) & RANDOM_MASK;
+        (state >> (48 - bits)) as i32
+    };
+    let next_double = |next: &mut dyn FnMut(u32) -> i32| ((i64::from(next(26)) << 27) + i64::from(next(27))) as f64 * (1.0 / (1i64 << 53) as f64);
+    let v = match (name, desc) {
+        ("nextInt", "()I") => V::I(next(32)),
+        ("nextInt", "(I)I") => {
+            let bound = a(1).i();
+            if bound <= 0 {
+                rt.throw_new("java/lang/IllegalArgumentException");
+                return Some(V::I(0));
+            }
+            if bound & (bound - 1) == 0 {
+                V::I(((i64::from(bound) * i64::from(next(31))) >> 31) as i32)
+            } else {
+                loop {
+                    let bits = next(31);
+                    let v = bits % bound;
+                    // Java's int overflow is the rejection rule.
+                    if bits.wrapping_sub(v).wrapping_add(bound - 1) >= 0 {
+                        break V::I(v);
+                    }
+                }
+            }
+        }
+        // Java 17's `RandomGenerator.nextInt(origin, bound)` (`RandomSupport.boundedNextInt`).
+        ("nextInt", "(II)I") => {
+            let (origin, bound) = (a(1).i(), a(2).i());
+            if origin >= bound {
+                rt.throw_new("java/lang/IllegalArgumentException");
+                return Some(V::I(0));
+            }
+            let mut r = next(32);
+            let n = bound.wrapping_sub(origin);
+            let m = n.wrapping_sub(1);
+            if n & m == 0 {
+                r = (r & m).wrapping_add(origin);
+            } else if n > 0 {
+                let mut u = ((r as u32) >> 1) as i32;
+                loop {
+                    r = u % n;
+                    if u.wrapping_add(m).wrapping_sub(r) >= 0 {
+                        break;
+                    }
+                    u = ((next(32) as u32) >> 1) as i32;
+                }
+                r = r.wrapping_add(origin);
+            } else {
+                while r < origin || r >= bound {
+                    r = next(32);
+                }
+            }
+            V::I(r)
+        }
+        ("nextLong", "()J") => {
+            let high = i64::from(next(32)) << 32;
+            V::J(high.wrapping_add(i64::from(next(32))))
+        }
+        ("nextBoolean", _) => V::I((next(1) != 0) as i32),
+        ("nextFloat", "()F") => V::F(next(24) as f32 / (1 << 24) as f32),
+        ("nextDouble", "()D") => V::D(next_double(&mut next)),
+        ("nextGaussian", "()D") => match rt.get_field(this, "$gaussian") {
+            V::D(g) => {
+                rt.put_field(this, "$gaussian", V::Void);
+                V::D(g)
+            }
+            _ => {
+                // The polar method, as `Random.nextGaussian` (StrictMath's log and sqrt).
+                let (v1, v2, s) = loop {
+                    let v1 = 2.0 * next_double(&mut next) - 1.0;
+                    let v2 = 2.0 * next_double(&mut next) - 1.0;
+                    let s = v1 * v1 + v2 * v2;
+                    if s < 1.0 && s != 0.0 {
+                        break (v1, v2, s);
+                    }
+                };
+                let multiplier = (-2.0 * s.ln() / s).sqrt();
+                rt.put_field(this, "$gaussian", V::D(v2 * multiplier));
+                V::D(v1 * multiplier)
+            }
+        },
+        ("nextBytes", _) => {
+            let len = rt.array_len(a(1));
+            let mut i = 0;
+            while i < len {
+                let mut rnd = next(32);
+                for _ in 0..(len - i).min(4) {
+                    rt.array_set(a(1), i, V::I(i32::from(rnd as i8)));
+                    rnd >>= 8;
+                    i += 1;
+                }
+            }
+            V::Void
+        }
+        _ => return None,
+    };
+    rt.put_field(this, "$seed", V::J(state));
+    Some(v)
+}
+
+/// Java's null: a null reference, or nothing at all (a call that returned no value). A primitive
+/// (a fastutil map's `int` value) never is.
+fn is_null(v: V) -> bool {
+    matches!(v, V::R(0) | V::Void)
+}
+
 fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -1448,7 +1591,7 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             found(rt, had)
         }
         "putIfAbsent" => match table_get(rt, this, a(1)) {
-            Some(v) if v.r() != 0 || !matches!(v, V::R(_)) => v,
+            Some(v) if !is_null(v) => v,
             _ => {
                 table_put(rt, this, a(1), a(2));
                 missing(rt, this, desc)
@@ -1472,11 +1615,13 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             put_table(rt, this, Table { sorted, comparator, ..Table::default() });
             V::Void
         }
+        // A key mapped to null counts as absent; a primitive map's value (fastutil's
+        // `Object2IntMap.computeIfAbsent`) is never null, so it is kept and found again.
         "computeIfAbsent" => match table_get(rt, this, a(1)) {
-            Some(v) if v.r() != 0 => v,
+            Some(v) if !is_null(v) => v,
             _ => {
                 let v = rt.call_functional("java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", a(2), &[a(1)]);
-                if v.r() != 0 {
+                if !is_null(v) {
                     table_put(rt, this, a(1), v);
                 }
                 v
@@ -1486,16 +1631,16 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let old = table_get(rt, this, a(1));
             let v = match name {
                 "computeIfPresent" => match old {
-                    Some(o) if o.r() != 0 => rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", a(2), &[a(1), o]),
+                    Some(o) if !is_null(o) => rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", a(2), &[a(1), o]),
                     _ => return Some(V::NULL),
                 },
                 "compute" => rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", a(2), &[a(1), old.unwrap_or(V::NULL)]),
                 _ => match old {
-                    Some(o) if o.r() != 0 => rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", a(3), &[o, a(2)]),
+                    Some(o) if !is_null(o) => rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", a(3), &[o, a(2)]),
                     _ => a(2),
                 },
             };
-            if v.r() == 0 && matches!(v, V::R(_)) {
+            if is_null(v) {
                 table_remove(rt, this, a(1));
             } else {
                 table_put(rt, this, a(1), v);
@@ -1997,6 +2142,67 @@ mod tests {
         // A bad range throws as the JDK does.
         c(&mut rt, "java/util/Arrays.sort.([III)V", &[b, V::I(3), V::I(1)]);
         assert_eq!(rt.thrown.map(|e| rt.class_of(e)), Some("java/lang/IllegalArgumentException"));
+    }
+
+    #[test]
+    fn a_primitive_maps_computed_value_is_kept() {
+        // A counter, as Create's recipe trie numbers its variants: `computeIfAbsent(v, k -> next++)`.
+        fn next_id(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+            let counter = rt.captured(args[0])[0];
+            let n = rt.get_field(counter, "n").i();
+            rt.put_field(counter, "n", V::I(n + 1));
+            Some(V::I(n))
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(next_id);
+        let counter = rt.new_object("t/Counter");
+        rt.put_field(counter, "n", V::I(0));
+        let f = rt.lambda_id("it/unimi/dsi/fastutil/objects/Object2IntFunction", 1, vec![counter]);
+        let m = rt.new_object("it/unimi/dsi/fastutil/objects/Object2IntOpenHashMap");
+        c(&mut rt, "it/unimi/dsi/fastutil/objects/Object2IntOpenHashMap.<init>.()V", &[m]);
+        let key = "it/unimi/dsi/fastutil/objects/Object2IntOpenHashMap.computeIfAbsent.(Ljava/lang/Object;Lit/unimi/dsi/fastutil/objects/Object2IntFunction;)I";
+        let (andesite, nugget) = (rt.string("andesite"), rt.string("nugget"));
+        let ids: Vec<V> = [andesite, nugget, andesite, nugget].iter().map(|&k| c(&mut rt, key, &[m, k, f])).collect();
+        assert_eq!(ids, [V::I(0), V::I(1), V::I(0), V::I(1)]);
+        assert_eq!(c(&mut rt, "it/unimi/dsi/fastutil/objects/Object2IntMap.size.()I", &[m]), V::I(2));
+        // putIfAbsent keeps a stored 0 (an int is never null).
+        let put = "it/unimi/dsi/fastutil/objects/Object2IntMap.putIfAbsent.(Ljava/lang/Object;I)I";
+        assert_eq!(c(&mut rt, put, &[m, andesite, V::I(9)]), V::I(0));
+    }
+
+    #[test]
+    fn java_random_gives_the_jdks_numbers() {
+        // Expected values printed by the JDK (java.util.Random, same calls in the same order).
+        let mut rt = Rt::new();
+        let r = rt.new_object("java/util/Random");
+        c(&mut rt, "java/util/Random.<init>.(J)V", &[r, V::J(0)]);
+        let mut call = |key: &'static str, extra: &[V]| {
+            let mut args = vec![r];
+            args.extend_from_slice(extra);
+            c(&mut rt, key, &args)
+        };
+        assert_eq!(call("java/util/Random.nextInt.()I", &[]), V::I(-1155484576));
+        assert_eq!(call("java/util/Random.nextInt.(I)I", &[V::I(10)]), V::I(8));
+        assert_eq!(call("java/util/Random.nextInt.(I)I", &[V::I(7)]), V::I(4));
+        assert_eq!(call("java/util/Random.nextInt.(II)I", &[V::I(5), V::I(105)]), V::I(52));
+        assert_eq!(call("java/util/Random.nextInt.(II)I", &[V::I(-3), V::I(1 << 30)]), V::I(663681050));
+        assert_eq!(call("java/util/Random.nextLong.()J", &[]), V::J(-8292973307042192125));
+        assert_eq!(call("java/util/Random.nextBoolean.()Z", &[]), V::I(1));
+        assert_eq!(call("java/util/Random.nextFloat.()F", &[]), V::F(0.7815346));
+        assert_eq!(call("java/util/Random.nextDouble.()D", &[]), V::D(0.3332183994766498));
+        for want in [-0.027290262907887285, 0.11524570286202315, -0.39016704137993785] {
+            let got = call("java/util/Random.nextGaussian.()D", &[]).d();
+            assert!((got - want).abs() <= 1e-15, "{got} vs {want}");
+        }
+        let seven = rt.new_object("java/util/Random");
+        c(&mut rt, "java/util/Random.<init>.(J)V", &[seven, V::J(7)]);
+        let bytes = rt.alloc("[B", Data::Array(vec![V::I(0); 6]));
+        c(&mut rt, "java/util/Random.nextBytes.([B)V", &[seven, bytes]);
+        assert_eq!(elements(&rt, bytes), [-103, 23, 15, -69, 24, 52].map(V::I));
+        let d = rt.alloc("[D", Data::Array(vec![V::D(0.5), V::D(-0.0)]));
+        assert_eq!(c(&mut rt, "java/util/Arrays.hashCode.([D)I", &[d]), V::I(1008731073));
+        let l = rt.alloc("[J", Data::Array(vec![V::J(1 << 40), V::J(-7)]));
+        assert_eq!(c(&mut rt, "java/util/Arrays.hashCode.([J)I", &[l]), V::I(8903));
     }
 
     #[test]

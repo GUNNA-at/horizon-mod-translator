@@ -547,6 +547,23 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     its mixes aren't modelled (no mix matches; NeoForge's brewing recipes and Create's accessor
     `create$getPotionMixes` give empty lists), so the mixer doesn't brew yet.
     NeoForge's `CompoundIngredient.of(children)`: every child's items.
+  - [x] 2026-11-04 A map's computed primitive value is kept: `computeIfAbsent` (and `putIfAbsent`,
+    `computeIfPresent`, `merge`) took a fastutil map's `int` value for null, so it never stored it and
+    computed it again on every call. Create's recipe trie numbers ingredient variants with
+    `Object2IntOpenHashMap.computeIfAbsent(v, k -> next++)`: its variant map stayed empty, so the
+    trie found no recipe for the basin's items and the mixer never started (`MIX` probes:
+    `matchBasinRecipe` of `mixing/andesite_alloy` was already true).
+    `java.util.Random` natively: the JDK's 48-bit LCG (`nextInt/(bound)/(origin, bound)`, `nextLong`,
+    `nextBoolean`, `nextFloat`, `nextDouble`, `nextGaussian`, `nextBytes`, `setSeed`;
+    `ThreadLocalRandom.current()`), checked against the JDK's numbers. Vanilla's `Mth` pure
+    functions (`log2`, `ceillog2`, `wrapDegrees*`, `rotLerp*`, `approach*`, `atan2` with its table,
+    `fastInvSqrt`, `hsvToRgb/Argb`, `getSeed`, `murmurHash3Mixer`, `frac`, `floorDiv`,
+    `positiveCeilDiv`, `lerpInt/Discrete`, `inverseLerp`, `map/clampedMap/clampedLerp`, `smoothstep`,
+    `triangleWave`, `catmullrom`, `length*`, `square/cube`...), checked against the 26.3 jar's own
+    `Mth`; `clamp` of ints and longs as vanilla's `min(max(value, min), max)`.
+    The game's client hosts (block entity drawing, client tick) answer `ingredient_items`: without it
+    every item read from an update tag was unknown (`ItemStack.parseOptional` gave EMPTY), so the
+    depot held nothing on the client and drew nothing (the harness host knew the items).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

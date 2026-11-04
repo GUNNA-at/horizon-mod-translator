@@ -220,6 +220,11 @@ fn {id}_block_entity_submit(
         fn is_server(&self) -> bool {{
             false
         }}
+        // Which items exist (an update tag's stacks are read through it: an item the client
+        // didn't know would read as an empty stack) and what a tag holds.
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
+        }}
         fn game_time(&self) -> i64 {{
             self.draw.game_time
         }}
@@ -417,6 +422,9 @@ fn {id}_tick(game: &mut crate::game::Game<'_>) {{
         }}
         fn is_server(&self) -> bool {{
             false
+        }}
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
         }}
     }}
     let mut host = Host {{ game }};

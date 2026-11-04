@@ -508,6 +508,11 @@ fn optional_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
 }
 
 pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    if owner == "net/minecraft/util/Mth"
+        && let Some(v) = mth_call(rt, name, desc, args)
+    {
+        return Some(v);
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
     const BASE: &str = "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase";
@@ -1167,10 +1172,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 
         // Maths, randomness, text
         ("net/minecraft/util/Mth", "clamp") => match desc {
-            "(III)I" => V::I(a(0).i().clamp(a(1).i(), a(2).i().max(a(1).i()))),
-            "(FFF)F" => V::F(if a(0).f() < a(1).f() { a(1).f() } else { a(0).f().min(a(2).f()) }),
-            "(DDD)D" => V::D(if a(0).d() < a(1).d() { a(1).d() } else { a(0).d().min(a(2).d()) }),
-            "(JJJ)J" => V::J(a(0).j().clamp(a(1).j(), a(2).j().max(a(1).j()))),
+            "(III)I" => V::I(a(0).i().max(a(1).i()).min(a(2).i())),
+            "(FFF)F" => V::F(if a(0).f() < a(1).f() { a(1).f() } else { java_min(f64::from(a(0).f()), f64::from(a(2).f())) as f32 }),
+            "(DDD)D" => V::D(if a(0).d() < a(1).d() { a(1).d() } else { java_min(a(0).d(), a(2).d()) }),
+            "(JJJ)J" => V::J(a(0).j().max(a(1).j()).min(a(2).j())),
             _ => return None,
         },
         ("net/minecraft/util/Mth", "floor") => V::I(if desc.starts_with("(D") { a(0).d().floor() as i32 } else { a(0).f().floor() as i32 }),
@@ -1260,6 +1265,352 @@ const USE_ON_CONTEXT: &str = "net/minecraft/world/item/context/UseOnContext";
 const DIRECTION_STEPS: [[i64; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
 
 /// Vanilla's `Mth.sin`: a 65536-entry table of `Math.sin`, so angles round as the game rounds them.
+/// Java's `Math.min` on floating point: NaN if either is, -0.0 below 0.0.
+fn java_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == 0.0 && b == 0.0 {
+        if b.is_sign_negative() { b } else { a }
+    } else if a <= b {
+        a
+    } else {
+        b
+    }
+}
+
+/// Java's `Math.max` on floating point: NaN if either is, 0.0 above -0.0.
+fn java_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == 0.0 && b == 0.0 {
+        if a.is_sign_negative() { b } else { a }
+    } else if a >= b {
+        a
+    } else {
+        b
+    }
+}
+
+fn mth_floor_f(x: f32) -> i32 {
+    f64::from(x).floor() as i32
+}
+
+fn mth_wrap_f(v: f32) -> f32 {
+    let mut f = v % 360.0;
+    if f >= 180.0 {
+        f -= 360.0;
+    }
+    if f < -180.0 {
+        f += 360.0;
+    }
+    f
+}
+
+fn mth_wrap_d(v: f64) -> f64 {
+    let mut f = v % 360.0;
+    if f >= 180.0 {
+        f -= 360.0;
+    }
+    if f < -180.0 {
+        f += 360.0;
+    }
+    f
+}
+
+fn mth_is_pow2(v: i32) -> bool {
+    v != 0 && v & v.wrapping_sub(1) == 0
+}
+
+fn mth_smallest_pow2(v: i32) -> i32 {
+    let mut i = v.wrapping_sub(1);
+    i |= i >> 1;
+    i |= i >> 2;
+    i |= i >> 4;
+    i |= i >> 8;
+    i |= i >> 16;
+    i.wrapping_add(1)
+}
+
+fn mth_ceillog2(v: i32) -> i32 {
+    const DE_BRUIJN: [i32; 32] = [0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8, 31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9];
+    let v = if mth_is_pow2(v) { v } else { mth_smallest_pow2(v) };
+    DE_BRUIJN[(((i64::from(v) * 125_613_361) >> 27) as i32 & 31) as usize]
+}
+
+/// `Math.floorDiv`; None for a zero divisor (Java's ArithmeticException).
+fn floor_div(x: i64, y: i64) -> Option<i64> {
+    if y == 0 {
+        return None;
+    }
+    let q = x.wrapping_div(y);
+    Some(if (x ^ y) < 0 && q.wrapping_mul(y) != x { q - 1 } else { q })
+}
+
+/// `Mth.fastInvSqrt`: the bit trick and one Newton step, as vanilla does it.
+fn mth_fast_inv_sqrt(x: f64) -> f64 {
+    let half = 0.5 * x;
+    let i = 6_910_469_410_427_058_090_i64.wrapping_sub((x.to_bits() as i64) >> 1);
+    let y = f64::from_bits(i as u64);
+    y * (1.5 - half * y * y)
+}
+
+/// `Mth.atan2`: vanilla's table approximation (its `ASIN_TAB`/`COS_TAB` of 257 entries).
+fn mth_atan2(mut y: f64, mut x: f64) -> f64 {
+    use std::sync::OnceLock;
+    static TABLES: OnceLock<(Vec<f64>, Vec<f64>)> = OnceLock::new();
+    let (asin_tab, cos_tab) = TABLES.get_or_init(|| {
+        let (mut asin, mut cos) = (vec![0.0; 257], vec![0.0; 257]);
+        for i in 0..257 {
+            let v = (f64::from(i) / 256.0).asin();
+            cos[i as usize] = v.cos();
+            asin[i as usize] = v;
+        }
+        (asin, cos)
+    });
+    let frac_bias = f64::from_bits(4_805_340_802_404_319_232);
+    let d = x * x + y * y;
+    if d.is_nan() {
+        return f64::NAN;
+    }
+    let neg_y = y < 0.0;
+    if neg_y {
+        y = -y;
+    }
+    let neg_x = x < 0.0;
+    if neg_x {
+        x = -x;
+    }
+    let steep = y > x;
+    if steep {
+        std::mem::swap(&mut x, &mut y);
+    }
+    let inv = mth_fast_inv_sqrt(d);
+    x *= inv;
+    y *= inv;
+    let biased = frac_bias + y;
+    let i = biased.to_bits() as i32;
+    let at = |t: &Vec<f64>| t.get(i as usize).copied().unwrap_or(0.0);
+    let (asin, cos) = (at(asin_tab), at(cos_tab));
+    let delta = biased - frac_bias;
+    let e = y * cos - x * delta;
+    let t = (6.0 + e * e) * e * 0.16666666666666666;
+    let mut angle = asin + t;
+    if steep {
+        angle = std::f64::consts::FRAC_PI_2 - angle;
+    }
+    if neg_x {
+        angle = std::f64::consts::PI - angle;
+    }
+    if neg_y {
+        angle = -angle;
+    }
+    angle
+}
+
+/// Vanilla's `Mth` (26.3), ported from its bytecode: the pure functions mods call (Create's
+/// depot renderer takes `log2` of a stack's count). None for what isn't here (the arms in
+/// [`call`] answer `sin`, `cos`, `floor`, `clamp`, `lerp`...).
+fn mth_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |k: usize| args.get(k).copied().unwrap_or_default();
+    let (i, f, d, j) = (|k: usize| a(k).i(), |k: usize| a(k).f(), |k: usize| a(k).d(), |k: usize| a(k).j());
+    let arithmetic = |rt: &mut Rt| {
+        rt.throw_new("java/lang/ArithmeticException");
+        V::I(0)
+    };
+    let clamp_f = |v: f32, lo: f32, hi: f32| if v < lo { lo } else { java_min(f64::from(v), f64::from(hi)) as f32 };
+    let approach = |from: f32, to: f32, step: f32| {
+        let step = step.abs();
+        if from < to { clamp_f(from + step, from, to) } else { clamp_f(from - step, to, from) }
+    };
+    let lerp_f = |t: f32, a: f32, b: f32| a + t * (b - a);
+    let lerp_d = |t: f64, a: f64, b: f64| a + t * (b - a);
+    Some(match (name, desc) {
+        ("isPowerOfTwo", "(I)Z") => V::I(mth_is_pow2(i(0)) as i32),
+        ("isPowerOfTwo", "(J)Z") => V::I((j(0) != 0 && j(0) & j(0).wrapping_sub(1) == 0) as i32),
+        ("smallestEncompassingPowerOfTwo", "(I)I") => V::I(mth_smallest_pow2(i(0))),
+        ("ceillog2", "(I)I") => V::I(mth_ceillog2(i(0))),
+        ("log2", "(I)I") => V::I(mth_ceillog2(i(0)) - if mth_is_pow2(i(0)) { 0 } else { 1 }),
+        ("frac", "(F)F") => V::F(f(0) - mth_floor_f(f(0)) as f32),
+        ("frac", "(D)D") => V::D(d(0) - d(0).floor() as i64 as f64),
+        ("lfloor", "(D)J") => V::J(d(0).floor() as i64),
+        ("ceilLong", "(D)J") => V::J(d(0).ceil() as i64),
+        ("floorDiv", "(II)I") => match floor_div(i64::from(i(0)), i64::from(i(1))) {
+            Some(q) => V::I(q as i32),
+            None => arithmetic(rt),
+        },
+        ("positiveCeilDiv", "(II)I") => match floor_div(i64::from(i(0).wrapping_neg()), i64::from(i(1))) {
+            Some(q) => V::I((q as i32).wrapping_neg()),
+            None => arithmetic(rt),
+        },
+        ("positiveCeilDiv", "(JJ)J") => match floor_div(j(0).wrapping_neg(), j(1)) {
+            Some(q) => V::J(q.wrapping_neg()),
+            None => {
+                arithmetic(rt);
+                V::J(0)
+            }
+        },
+        ("roundToward", "(II)I") => match floor_div(i64::from(i(0).wrapping_neg()), i64::from(i(1))) {
+            Some(q) => V::I((q as i32).wrapping_neg().wrapping_mul(i(1))),
+            None => arithmetic(rt),
+        },
+        ("roundToward", "(JJ)J") => match floor_div(j(0).wrapping_neg(), j(1)) {
+            Some(q) => V::J(q.wrapping_neg().wrapping_mul(j(1))),
+            None => {
+                arithmetic(rt);
+                V::J(0)
+            }
+        },
+        ("isMultipleOf", "(II)Z") => match i(1) {
+            0 => arithmetic(rt),
+            m => V::I((i(0).wrapping_rem(m) == 0) as i32),
+        },
+        ("quantize", "(DI)I") => V::I(((d(0) / f64::from(i(1))).floor() as i32).wrapping_mul(i(1))),
+        ("wrapDegrees", "(I)I") => {
+            let mut w = i(0) % 360;
+            if w >= 180 {
+                w -= 360;
+            }
+            if w < -180 {
+                w += 360;
+            }
+            V::I(w)
+        }
+        ("wrapDegrees", "(J)F") => {
+            let mut w = (j(0) % 360) as f32;
+            if w >= 180.0 {
+                w -= 360.0;
+            }
+            if w < -180.0 {
+                w += 360.0;
+            }
+            V::F(w)
+        }
+        ("wrapDegrees", "(F)F") => V::F(mth_wrap_f(f(0))),
+        ("wrapDegrees", "(D)D") => V::D(mth_wrap_d(d(0))),
+        ("wrapDegrees90", "(F)F") => {
+            let mut w = f(0) % 90.0;
+            if w >= 45.0 {
+                w -= 90.0;
+            }
+            if w < -45.0 {
+                w += 90.0;
+            }
+            V::F(w)
+        }
+        ("degreesDifference", "(FF)F") => V::F(mth_wrap_f(f(1) - f(0))),
+        ("degreesDifferenceAbs", "(FF)F") => V::F(mth_wrap_f(f(1) - f(0)).abs()),
+        ("rotateIfNecessary", "(FFF)F") => {
+            let diff = mth_wrap_f(f(1) - f(0));
+            V::F(f(1) - clamp_f(diff, -f(2), f(2)))
+        }
+        ("approach", "(FFF)F") => V::F(approach(f(0), f(1), f(2))),
+        ("approachDegrees", "(FFF)F") => {
+            let diff = mth_wrap_f(f(1) - f(0));
+            V::F(approach(f(0), f(0) + diff, f(2)))
+        }
+        ("rotLerp", "(FFF)F") => V::F(f(1) + f(0) * mth_wrap_f(f(2) - f(1))),
+        ("rotLerp", "(DDD)D") => V::D(d(1) + d(0) * mth_wrap_d(d(2) - d(1))),
+        ("rotLerpRad", "(FFF)F") => {
+            let mut diff = f(2) - f(1);
+            while diff < -std::f32::consts::PI {
+                diff += std::f32::consts::TAU;
+            }
+            while diff >= std::f32::consts::PI {
+                diff -= std::f32::consts::TAU;
+            }
+            V::F(f(1) + f(0) * diff)
+        }
+        ("packDegrees", "(F)B") => V::I(i32::from(mth_floor_f(f(0) * 256.0 / 360.0) as i8)),
+        ("unpackDegrees", "(B)F") => V::F(i(0).wrapping_mul(360) as f32 / 256.0),
+        ("square", "(F)F") => V::F(f(0) * f(0)),
+        ("square", "(D)D") => V::D(d(0) * d(0)),
+        ("square", "(I)I") => V::I(i(0).wrapping_mul(i(0))),
+        ("square", "(J)J") => V::J(j(0).wrapping_mul(j(0))),
+        ("cube", "(F)F") => V::F(f(0) * f(0) * f(0)),
+        ("lerpInt", "(FII)I") => V::I(i(1).wrapping_add(mth_floor_f(f(0) * i(2).wrapping_sub(i(1)) as f32))),
+        ("lerpDiscrete", "(FII)I") => {
+            let delta = i(2).wrapping_sub(i(1));
+            V::I(i(1).wrapping_add(mth_floor_f(f(0) * delta.wrapping_sub(1) as f32)).wrapping_add((f(0) > 0.0) as i32))
+        }
+        ("inverseLerp", "(FFF)F") => V::F((f(0) - f(1)) / (f(2) - f(1))),
+        ("inverseLerp", "(DDD)D") => V::D((d(0) - d(1)) / (d(2) - d(1))),
+        ("clampedLerp", "(FFF)F") => V::F(if f(0) < 0.0 { f(1) } else if f(0) > 1.0 { f(2) } else { lerp_f(f(0), f(1), f(2)) }),
+        ("clampedLerp", "(DDD)D") => V::D(if d(0) < 0.0 { d(1) } else if d(0) > 1.0 { d(2) } else { lerp_d(d(0), d(1), d(2)) }),
+        ("map", "(FFFFF)F") => V::F(lerp_f((f(0) - f(1)) / (f(2) - f(1)), f(3), f(4))),
+        ("map", "(DDDDD)D") => V::D(lerp_d((d(0) - d(1)) / (d(2) - d(1)), d(3), d(4))),
+        ("clampedMap", "(FFFFF)F") => {
+            let t = (f(0) - f(1)) / (f(2) - f(1));
+            V::F(if t < 0.0 { f(3) } else if t > 1.0 { f(4) } else { lerp_f(t, f(3), f(4)) })
+        }
+        ("clampedMap", "(DDDDD)D") => {
+            let t = (d(0) - d(1)) / (d(2) - d(1));
+            V::D(if t < 0.0 { d(3) } else if t > 1.0 { d(4) } else { lerp_d(t, d(3), d(4)) })
+        }
+        ("smoothstep", "(F)F") => V::F(f(0) * f(0) * f(0) * (f(0) * (f(0) * 6.0 - 15.0) + 10.0)),
+        ("smoothstepDerivative", "(F)F") => V::F(30.0 * f(0) * f(0) * (f(0) - 1.0) * (f(0) - 1.0)),
+        ("triangleWave", "(FF)F") => V::F((((f(0) % f(1)) - f(1) * 0.5).abs() - f(1) * 0.25) / (f(1) * 0.25)),
+        ("catmullrom", "(FFFFF)F") => {
+            let (t, p0, p1, p2, p3) = (f(0), f(1), f(2), f(3), f(4));
+            V::F(0.5 * (2.0 * p1 + (p2 - p0) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t * t + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t * t * t))
+        }
+        ("murmurHash3Mixer", "(I)I") => {
+            let mut x = i(0);
+            x ^= ((x as u32) >> 16) as i32;
+            x = x.wrapping_mul(-2_048_144_789);
+            x ^= ((x as u32) >> 13) as i32;
+            x = x.wrapping_mul(-1_028_477_387);
+            x ^= ((x as u32) >> 16) as i32;
+            V::I(x)
+        }
+        ("getSeed", "(III)J") => {
+            let mut seed = i64::from(i(0).wrapping_mul(3_129_871)) ^ i64::from(i(2)).wrapping_mul(116_129_781) ^ i64::from(i(1));
+            seed = seed.wrapping_mul(seed).wrapping_mul(42_317_861).wrapping_add(seed.wrapping_mul(11));
+            V::J(seed >> 16)
+        }
+        ("absMax", "(II)I") => V::I(i(0).wrapping_abs().max(i(1).wrapping_abs())),
+        ("absMax", "(FF)F") => V::F(java_max(f64::from(f(0).abs()), f64::from(f(1).abs())) as f32),
+        ("absMax", "(DD)D") => V::D(java_max(d(0).abs(), d(1).abs())),
+        ("chessboardDistance", "(IIII)I") => V::I(i(2).wrapping_sub(i(0)).wrapping_abs().max(i(3).wrapping_sub(i(1)).wrapping_abs())),
+        ("lengthSquared", "(DD)D") => V::D(d(0) * d(0) + d(1) * d(1)),
+        ("lengthSquared", "(FF)F") => V::F(f(0) * f(0) + f(1) * f(1)),
+        ("lengthSquared", "(DDD)D") => V::D(d(0) * d(0) + d(1) * d(1) + d(2) * d(2)),
+        ("lengthSquared", "(FFF)F") => V::F(f(0) * f(0) + f(1) * f(1) + f(2) * f(2)),
+        ("length", "(DD)D") => V::D((d(0) * d(0) + d(1) * d(1)).sqrt()),
+        ("length", "(FF)F") => V::F((f(0) * f(0) + f(1) * f(1)).sqrt()),
+        ("length", "(DDD)D") => V::D((d(0) * d(0) + d(1) * d(1) + d(2) * d(2)).sqrt()),
+        ("length", "(FFF)F") => V::F((f(0) * f(0) + f(1) * f(1) + f(2) * f(2)).sqrt()),
+        // joml's `Math.invsqrt`: 1 / sqrt.
+        ("invSqrt", "(F)F") => V::F(1.0 / f(0).sqrt()),
+        ("invSqrt", "(D)D") => V::D(1.0 / d(0).sqrt()),
+        ("fastInvSqrt", "(D)D") => V::D(mth_fast_inv_sqrt(d(0))),
+        ("atan2", "(DD)D") => V::D(mth_atan2(d(0), d(1))),
+        ("hsvToRgb", "(FFF)I") | ("hsvToArgb", "(FFFI)I") => {
+            let (h, sat, val) = (f(0), f(1), f(2));
+            let alpha = if args.len() > 3 { i(3) } else { 0 };
+            let sector = ((h * 6.0) as i32) % 6;
+            let frac = h * 6.0 - sector as f32;
+            let p = val * (1.0 - sat);
+            let q = val * (1.0 - frac * sat);
+            let t = val * (1.0 - (1.0 - frac) * sat);
+            let (r, g, b) = match sector {
+                0 => (val, t, p),
+                1 => (q, val, p),
+                2 => (p, val, t),
+                3 => (p, q, val),
+                4 => (t, p, val),
+                5 => (val, p, q),
+                _ => {
+                    rt.throw_new("java/lang/RuntimeException");
+                    return Some(V::I(0));
+                }
+            };
+            let c = |x: f32| ((x * 255.0) as i32).max(0).min(255);
+            V::I((alpha & 0xFF) << 24 | (c(r) & 0xFF) << 16 | (c(g) & 0xFF) << 8 | (c(b) & 0xFF))
+        }
+        _ => return None,
+    })
+}
+
 fn mth_sin(v: V) -> f32 {
     let x = match v {
         V::D(d) => d,
@@ -1520,6 +1871,58 @@ mod tests {
 
     const GET: &str = "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;";
     const SET: &str = "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;";
+
+    #[test]
+    fn mth_answers_as_vanilla_26_3() {
+        // Expected values printed by vanilla's own `Mth` (the 26.3 jar, run on the JDK).
+        crate::install();
+        let mut rt = Rt::new();
+        let mut m = |name: &'static str, args: &[V]| -> V {
+            let key: &'static str = Box::leak(name.to_owned().into_boxed_str());
+            crate::api::call(&mut rt, key, args)
+        };
+        let logs: Vec<(i32, i32, i32)> = [0, 1, 2, 3, 64, 65, 1000, -5, i32::MIN]
+            .iter()
+            .map(|&v| {
+                let a = [V::I(v)];
+                (m("net/minecraft/util/Mth.log2.(I)I", &a).i(), m("net/minecraft/util/Mth.ceillog2.(I)I", &a).i(), m("net/minecraft/util/Mth.smallestEncompassingPowerOfTwo.(I)I", &a).i())
+            })
+            .collect();
+        assert_eq!(logs, [(-1, 0, 0), (0, 0, 1), (1, 1, 2), (1, 2, 4), (6, 6, 64), (6, 7, 128), (9, 10, 1024), (-1, 0, 0), (31, 31, i32::MIN)]);
+        assert_eq!(m("net/minecraft/util/Mth.wrapDegrees.(F)F", &[V::F(370.5)]), V::F(10.5));
+        assert_eq!(m("net/minecraft/util/Mth.wrapDegrees.(D)D", &[V::D(-190.0)]), V::D(170.0));
+        assert_eq!(m("net/minecraft/util/Mth.wrapDegrees.(I)I", &[V::I(540)]), V::I(-180));
+        assert_eq!(m("net/minecraft/util/Mth.wrapDegrees.(J)F", &[V::J(725)]), V::F(5.0));
+        assert_eq!(m("net/minecraft/util/Mth.wrapDegrees90.(F)F", &[V::F(100.0)]), V::F(10.0));
+        assert_eq!(m("net/minecraft/util/Mth.degreesDifference.(FF)F", &[V::F(350.0), V::F(10.0)]), V::F(20.0));
+        assert_eq!(m("net/minecraft/util/Mth.rotLerp.(FFF)F", &[V::F(0.25), V::F(350.0), V::F(10.0)]), V::F(355.0));
+        assert_eq!(m("net/minecraft/util/Mth.approachDegrees.(FFF)F", &[V::F(350.0), V::F(10.0), V::F(5.0)]), V::F(355.0));
+        assert_eq!(m("net/minecraft/util/Mth.rotateIfNecessary.(FFF)F", &[V::F(10.0), V::F(100.0), V::F(30.0)]), V::F(70.0));
+        assert_eq!(m("net/minecraft/util/Mth.atan2.(DD)D", &[V::D(1.0), V::D(2.0)]), V::D(0.4636472634610012));
+        assert_eq!(m("net/minecraft/util/Mth.atan2.(DD)D", &[V::D(-3.0), V::D(-0.5)]), V::D(-1.735944546704755));
+        assert_eq!(m("net/minecraft/util/Mth.atan2.(DD)D", &[V::D(0.0), V::D(-1.0)]), V::D(std::f64::consts::PI));
+        assert_eq!(m("net/minecraft/util/Mth.fastInvSqrt.(D)D", &[V::D(2.0)]), V::D(0.7069296507954639));
+        assert_eq!(m("net/minecraft/util/Mth.hsvToRgb.(FFF)I", &[V::F(0.3), V::F(0.5), V::F(0.8)]), V::I(8047718));
+        assert_eq!(m("net/minecraft/util/Mth.hsvToArgb.(FFFI)I", &[V::F(0.95), V::F(1.0), V::F(1.0), V::I(255)]), V::I(-65460));
+        assert_eq!(m("net/minecraft/util/Mth.murmurHash3Mixer.(I)I", &[V::I(12345)]), V::I(1011272156));
+        assert_eq!(m("net/minecraft/util/Mth.getSeed.(III)J", &[V::I(10), V::I(64), V::I(-20)]), V::J(-62212282568415));
+        assert_eq!(m("net/minecraft/util/Mth.frac.(F)F", &[V::F(-1.25)]), V::F(0.75));
+        assert_eq!(m("net/minecraft/util/Mth.frac.(D)D", &[V::D(2.75)]), V::D(0.75));
+        assert_eq!(m("net/minecraft/util/Mth.positiveCeilDiv.(II)I", &[V::I(7), V::I(2)]), V::I(4));
+        assert_eq!(m("net/minecraft/util/Mth.roundToward.(II)I", &[V::I(7), V::I(4)]), V::I(8));
+        assert_eq!(m("net/minecraft/util/Mth.floorDiv.(II)I", &[V::I(-7), V::I(2)]), V::I(-4));
+        assert_eq!(m("net/minecraft/util/Mth.lerpInt.(FII)I", &[V::F(0.5), V::I(2), V::I(9)]), V::I(5));
+        assert_eq!(m("net/minecraft/util/Mth.lerpDiscrete.(FII)I", &[V::F(0.5), V::I(2), V::I(9)]), V::I(6));
+        assert_eq!(m("net/minecraft/util/Mth.packDegrees.(F)B", &[V::F(200.0)]), V::I(-114));
+        assert_eq!(m("net/minecraft/util/Mth.unpackDegrees.(B)F", &[V::I(-100)]), V::F(-140.625));
+        assert_eq!(m("net/minecraft/util/Mth.triangleWave.(FF)F", &[V::F(7.5), V::F(4.0)]), V::F(0.5));
+        assert_eq!(m("net/minecraft/util/Mth.catmullrom.(FFFFF)F", &[V::F(0.3), V::F(1.0), V::F(2.0), V::F(4.0), V::F(3.0)]), V::F(2.621));
+        assert_eq!(m("net/minecraft/util/Mth.clampedMap.(DDDDD)D", &[V::D(5.0), V::D(0.0), V::D(10.0), V::D(100.0), V::D(200.0)]), V::D(150.0));
+        assert_eq!(m("net/minecraft/util/Mth.smoothstep.(F)F", &[V::F(0.3)]), V::F(0.16308002));
+        assert_eq!(m("net/minecraft/util/Mth.quantize.(DI)I", &[V::D(17.9), V::I(4)]), V::I(16));
+        assert_eq!(m("net/minecraft/util/Mth.absMax.(FF)F", &[V::F(-3.5), V::F(2.0)]), V::F(3.5));
+        assert_eq!(m("net/minecraft/util/Mth.length.(FF)F", &[V::F(3.0), V::F(4.0)]), V::F(5.0));
+    }
 
     #[test]
     fn positions_pack_and_directions_turn_as_vanilla_does() {
