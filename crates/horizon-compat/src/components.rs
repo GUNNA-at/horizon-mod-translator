@@ -72,13 +72,25 @@ pub(crate) fn load(rt: &mut Rt, stack: V, carried: &[(String, Nbt)]) {
 }
 
 /// [`load`] from a saved stack's `components` (vanilla's patch, as `ItemStack.CODEC` writes it):
-/// the mod's own types; a removal (`!name`) and vanilla's types are left out.
+/// the mod's own types and the damage; a removal (`!name`) and vanilla's other types are left out.
 pub(crate) fn load_saved(rt: &mut Rt, stack: V, patch: &serde_json::Map<String, serde_json::Value>) {
     for (name, value) in patch {
-        if !name.starts_with('!') {
+        if name == "minecraft:damage" {
+            set_damage(rt, stack, value.as_i64().unwrap_or(0) as i32);
+        } else if !name.starts_with('!') {
             load_one(rt, stack, name, value);
         }
     }
+}
+
+/// `stack`'s patch as `ItemStack.CODEC` writes it: [`saved`] and its damage, when it has some.
+pub(crate) fn patch(rt: &mut Rt, stack: V) -> std::collections::BTreeMap<String, Nbt> {
+    let mut out: std::collections::BTreeMap<String, Nbt> = saved(rt, stack).into_iter().collect();
+    let n = damage(rt, stack);
+    if n > 0 {
+        out.insert("minecraft:damage".into(), Nbt::Int(n));
+    }
+    out
 }
 
 fn load_one(rt: &mut Rt, stack: V, name: &str, value: &serde_json::Value) {
@@ -108,6 +120,77 @@ pub(crate) fn saved(rt: &mut Rt, stack: V) -> Vec<(String, Nbt)> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+/// A stack's damage (`minecraft:damage`), 0 for none.
+pub(crate) fn damage(rt: &Rt, stack: V) -> i32 {
+    if stack.r() == 0 {
+        return 0;
+    }
+    rt.get_field(stack, "$damage").i()
+}
+
+/// The damage at which `stack` breaks (`minecraft:max_damage`): the game's word for a stack from a
+/// hand, else its mod item's `durability`; 0 for none.
+pub(crate) fn max_damage(rt: &Rt, stack: V) -> i32 {
+    if stack.r() == 0 {
+        return 0;
+    }
+    if let V::I(n) = rt.get_field(stack, "$maxDamage") {
+        return n;
+    }
+    let item = rt.get_field(stack, "$item");
+    let props = if item.r() != 0 { rt.get_field(item, "$properties") } else { V::NULL };
+    if props.r() == 0 { 0 } else { rt.get_field(props, "$durability").i() }
+}
+
+fn set_damage(rt: &mut Rt, stack: V, n: i32) {
+    let empty = crate::api_common::get_static(rt, ITEM_STACK, "EMPTY").unwrap_or(V::NULL);
+    if stack.r() != 0 && stack != empty {
+        rt.put_field(stack, "$damage", V::I(n.max(0)));
+    }
+}
+
+/// Vanilla's damage components, read from the stack's damage: `minecraft:damage` (present on what
+/// can take damage, or took some) and `minecraft:max_damage`.
+fn damage_component(rt: &mut Rt, name: &str, stack: V, ty: V, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let id = rt.str_of(rt.get_field(ty, "$id"))?.to_owned();
+    let boxed = crate::api_common::integer;
+    Some(match id.as_str() {
+        "minecraft:damage" => {
+            let present = max_damage(rt, stack) > 0 || damage(rt, stack) > 0;
+            let now = damage(rt, stack);
+            match name {
+                "has" => V::I(present as i32),
+                "get" | "getOrDefault" if present => boxed(rt, now),
+                "get" => V::NULL,
+                "getOrDefault" => a(2),
+                "set" | "remove" => {
+                    let next = if name == "set" { rt.get_field(a(2), "value").i() } else { 0 };
+                    set_damage(rt, stack, next);
+                    if present { boxed(rt, now) } else { V::NULL }
+                }
+                _ => return None,
+            }
+        }
+        "minecraft:max_damage" => {
+            let max = max_damage(rt, stack);
+            match name {
+                "has" => V::I((max > 0) as i32),
+                "get" | "getOrDefault" if max > 0 => boxed(rt, max),
+                "get" => V::NULL,
+                "getOrDefault" => a(2),
+                "set" | "remove" => {
+                    let next = if name == "set" { rt.get_field(a(2), "value").i() } else { 0 };
+                    rt.put_field(stack, "$maxDamage", V::I(next.max(0)));
+                    if max > 0 { boxed(rt, max) } else { V::NULL }
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    })
 }
 
 /// Vanilla's component type `id` (`minecraft:damage`), one object per name, as vanilla's are.
@@ -196,11 +279,16 @@ fn put(rt: &mut Rt, stack: V, ty: V, value: V) -> V {
     before
 }
 
-/// `to` gets `from`'s components (a copy of the stack keeps them).
+/// `to` gets `from`'s components and damage (a copy of the stack keeps them).
 pub(crate) fn copy_patch(rt: &mut Rt, from: V, to: V) {
     let l = pairs(rt, from);
     if !l.is_empty() {
         store(rt, to, l);
+    }
+    for field in ["$damage", "$maxDamage"] {
+        if let n @ V::I(_) = rt.get_field(from, field) {
+            rt.put_field(to, field, n);
+        }
     }
 }
 
@@ -226,7 +314,7 @@ fn same_value(rt: &mut Rt, x: V, y: V) -> bool {
 /// Whether two stacks carry the same components (`isSameItemSameComponents`).
 pub(crate) fn same_patch(rt: &mut Rt, a: V, b: V) -> bool {
     let (pa, pb) = (pairs(rt, a), pairs(rt, b));
-    if pa.len() != pb.len() {
+    if pa.len() != pb.len() || damage(rt, a) != damage(rt, b) {
         return false;
     }
     for p in pa.chunks(2) {
@@ -281,12 +369,36 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             Some(c)
         }
         (ITEM_STACK, "isComponentsPatchEmpty") => Some(V::I(pairs(rt, a(0)).is_empty() as i32)),
+        // Durability: `ItemStack`'s own damage, worn by the game's rules on a stack in hand.
+        (ITEM_STACK, "getDamageValue") => Some(V::I(damage(rt, a(0)).clamp(0, max_damage(rt, a(0)).max(0)))),
+        (ITEM_STACK, "setDamageValue") => {
+            set_damage(rt, a(0), a(1).i());
+            Some(V::Void)
+        }
+        (ITEM_STACK, "getMaxDamage") => Some(V::I(max_damage(rt, a(0)))),
+        (ITEM_STACK, "isDamageableItem") => Some(V::I((max_damage(rt, a(0)) > 0) as i32)),
+        (ITEM_STACK, "isDamaged") => Some(V::I((max_damage(rt, a(0)) > 0 && damage(rt, a(0)) > 0) as i32)),
+        (ITEM_STACK, "hurtAndBreak") => {
+            crate::hand::hurt(rt, a(0), a(1).i());
+            Some(V::Void)
+        }
+        (ITEM_STACK, "hurtWithoutBreaking") => {
+            let max = max_damage(rt, a(0));
+            if max > 0 && !rt.host().is_some_and(|h| h.player_creative()) {
+                let worn = (damage(rt, a(0)) + a(1).i()).min(max - 1);
+                set_damage(rt, a(0), worn);
+            }
+            Some(V::Void)
+        }
         (o, _) if (o == ITEM_STACK || HOLDERS.contains(&o)) && rt.class_of(a(0)) == ITEM_STACK => {
             let typed = desc.starts_with("(Lnet/minecraft/core/component/DataComponentType;") || desc.starts_with("(Ljava/util/function/Supplier;");
             if !typed {
                 return None;
             }
             let (stack, ty) = (a(0), type_of(rt, a(1)));
+            if let Some(v) = damage_component(rt, name, stack, ty, args) {
+                return Some(v);
+            }
             Some(match name {
                 "has" => V::I(get(rt, stack, ty).is_some() as i32),
                 "get" => get(rt, stack, ty).unwrap_or(V::NULL),

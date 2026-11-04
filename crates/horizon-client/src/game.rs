@@ -12701,11 +12701,13 @@ impl Game<'_> {
                 let gone = stack.clone();
                 *cell = None;
                 self.stats.add("broken", &broken, 1);
-                // LivingEntity.onEquippedItemBroken: the sound and the crumbs.
-                self.player_equipment_broke(
-                    horizon_world::player_inventory::EquipmentSlot::MainHand,
-                    &gone,
-                );
+                // LivingEntity.onEquippedItemBroken: the sound and the crumbs,
+                // told for the hand that held it.
+                let slot = match self.hand {
+                    Hand::Main => horizon_world::player_inventory::EquipmentSlot::MainHand,
+                    Hand::Off => horizon_world::player_inventory::EquipmentSlot::OffHand,
+                };
+                self.player_equipment_broke(slot, &gone);
             }
         }
     }

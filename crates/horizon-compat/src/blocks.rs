@@ -692,7 +692,7 @@ fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
     }
 }
 
-/// `Item.Properties`: stack size, durability, rarity, food.
+/// `Item.Properties`: stack size, durability, rarity, food, what crafting with it leaves.
 fn item_properties(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -700,6 +700,7 @@ fn item_properties(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "<init>" => return Some(V::Void),
         "stacksTo" => "$stacksTo",
         "durability" => "$durability",
+        "craftRemainder" => "$craftRemainder",
         "rarity" => "$rarity",
         "food" => "$food",
         "fireResistant" => {

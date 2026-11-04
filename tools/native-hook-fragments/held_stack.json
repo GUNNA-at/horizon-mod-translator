@@ -1,8 +1,0 @@
-{
-  "hooks": [],
-  "rust_summary": "the acting player's main-hand stack, read and replaced whole (`native_held_stack`, `native_set_held_stack`).",
-  "doc_summary": "`native_held_stack()` is the acting player's main-hand stack with all its data (read a mod's item data on it with `native_component`); `native_set_held_stack(stack)` puts a stack in that hand, as `Player.setItemInHand`, None or a count of 0 emptying it. Bundles need \"hooks\": @API:held_stack@.",
-  "comments": [
-    "crates/horizon-client/src/game/native_server.rs"
-  ]
-}

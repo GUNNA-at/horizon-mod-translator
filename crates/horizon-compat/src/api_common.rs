@@ -462,7 +462,7 @@ pub(crate) fn save_stack(rt: &mut Rt, stack: V, tag: V) {
     let (ik, iv, ck) = (rt.string("id"), rt.string(&id), rt.string("count"));
     crate::api::call(rt, "net/minecraft/nbt/CompoundTag.putString.(Ljava/lang/String;Ljava/lang/String;)V", &[tag, ik, iv]);
     crate::api::call(rt, "net/minecraft/nbt/CompoundTag.putInt.(Ljava/lang/String;I)V", &[tag, ck, V::I(count)]);
-    let carried: std::collections::BTreeMap<String, crate::nbt::Nbt> = crate::components::saved(rt, stack).into_iter().collect();
+    let carried = crate::components::patch(rt, stack);
     if !carried.is_empty() {
         let c = crate::nbt::to_runtime(rt, &carried);
         let k = rt.string("components");
@@ -521,6 +521,31 @@ fn stack_of(rt: &mut Rt, item: V, count: i32) -> V {
 }
 
 /// The name an `ItemLike` (an Item, a Block, a holder) stands for.
+/// Vanilla's `Item.Properties.craftRemainder`s (`Items`): a bucket of anything leaves the bucket,
+/// honey and dragon's breath the bottle.
+const VANILLA_CRAFT_REMAINDERS: [(&str, &str); 5] = [
+    ("minecraft:water_bucket", "minecraft:bucket"),
+    ("minecraft:lava_bucket", "minecraft:bucket"),
+    ("minecraft:milk_bucket", "minecraft:bucket"),
+    ("minecraft:dragon_breath", "minecraft:glass_bottle"),
+    ("minecraft:honey_bottle", "minecraft:glass_bottle"),
+];
+
+/// What crafting with `item` leaves in the grid (`Item.getCraftingRemainingItem`): the mod item's
+/// own `craftRemainder`, else vanilla's; None for nothing.
+pub(crate) fn crafting_remainder(rt: &Rt, item: V) -> Option<String> {
+    if item.r() == 0 {
+        return None;
+    }
+    let props = rt.get_field(item, "$properties");
+    let own = if props.r() != 0 { rt.get_field(props, "$craftRemainder") } else { V::NULL };
+    if own.r() != 0 {
+        return Some(item_like_name(rt, own));
+    }
+    let name = item_like_name(rt, item);
+    VANILLA_CRAFT_REMAINDERS.iter().find(|(i, _)| *i == name).map(|(_, r)| (*r).to_owned())
+}
+
 pub(crate) fn item_like_name(rt: &Rt, v: V) -> String {
     rt.str_of(v)
         .map(str::to_owned)
@@ -914,7 +939,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/core/Direction$AxisDirection", "getStep") => V::I(if native(rt, a(0))[0] != 0 { 1 } else { -1 }),
 
         // Players and interactions
-        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "level" | "isLocalPlayer" | "mayBuild") => {
+        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "level" | "isLocalPlayer" | "mayBuild") => {
             match n {
                 // Survival and creative players build; the hooks act for one of them.
                 "mayBuild" => V::I(1),
@@ -926,14 +951,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "level" if rt.class_of(a(0)) == LOCAL_PLAYER => crate::glue::level(rt),
                 "level" => rt.new_object("net/minecraft/server/level/ServerLevel"),
                 _ => {
-                    // The main hand (the hook's hand); the off hand is empty here.
-                    let off = name == "getItemInHand" && rt.get_field(a(1), "$ordinal").i() == 1;
-                    if off {
-                        return Some(get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL));
-                    }
-                    // One stack object for the player's hand through the hook, as vanilla's: what
-                    // a mod changes in it, it finds there again, and the game's stack gets it.
-                    crate::hand::stack(rt)
+                    // One stack object for each of the player's hands through the hook, as
+                    // vanilla's: what a mod changes in it, it finds there again, and the game's
+                    // stack gets it.
+                    let off = name == "getOffhandItem" || (name == "getItemInHand" && rt.get_field(a(1), "$ordinal").i() == 1);
+                    crate::hand::stack(rt, if off { crate::hand::OFF } else { crate::hand::MAIN })
                 }
             }
         }
@@ -1011,11 +1033,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (FOOD_DATA, "getFoodLevel") => V::I(rt.host().map_or(20, |h| h.player_food())),
         (FOOD_DATA, "needsFood") => V::I(i32::from(rt.host().map_or(20, |h| h.player_food()) < 20)),
-        // The main hand holds the new stack (the off hand is empty here, and stays so).
+        // The hand holds the new stack.
         (o, "setItemInHand") if is_player(o) => {
-            if rt.get_field(a(1), "$ordinal").i() != 1 {
-                crate::hand::replace(rt, a(2));
-            }
+            let hand = if rt.get_field(a(1), "$ordinal").i() == 1 { crate::hand::OFF } else { crate::hand::MAIN };
+            crate::hand::replace(rt, hand, a(2));
             V::Void
         }
         (o, "getInventory") if is_player(o) => {
@@ -1553,7 +1574,33 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let tag = rt.str_of(rt.get_field(a(1), "$location")).unwrap_or("").to_owned();
             V::I((!stack_empty(rt, a(0)) && crate::recipes::item_in_tag(rt, &item, &tag)) as i32)
         }
-        ("net/minecraft/world/item/ItemStack", "isStackable") => V::I(1),
+        // `getMaxStackSize() > 1`, and not a damaged one.
+        ("net/minecraft/world/item/ItemStack", "isStackable") => {
+            let item = item_like_name(rt, rt.get_field(a(0), "$item"));
+            let limit = rt.host().and_then(|h| h.item_stack_limit(&item)).unwrap_or(64);
+            let damaged = crate::components::max_damage(rt, a(0)) > 0 && crate::components::damage(rt, a(0)) > 0;
+            V::I((limit > 1 && !damaged) as i32)
+        }
+        // What crafting with the stack's item leaves in the grid (NeoForge's stack-aware forms ask
+        // the item the same).
+        ("net/minecraft/world/item/ItemStack", "hasCraftingRemainingItem") => {
+            let left = !stack_empty(rt, a(0)) && crafting_remainder(rt, rt.get_field(a(0), "$item")).is_some();
+            V::I(left as i32)
+        }
+        ("net/minecraft/world/item/ItemStack", "getCraftingRemainingItem") => {
+            let left = if stack_empty(rt, a(0)) { None } else { crafting_remainder(rt, rt.get_field(a(0), "$item")) };
+            match left {
+                Some(r) => stack(rt, &r, 1),
+                None => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
+            }
+        }
+        ("net/minecraft/world/item/Item", "hasCraftingRemainingItem") => V::I(crafting_remainder(rt, a(0)).is_some() as i32),
+        ("net/minecraft/world/item/Item", "getCraftingRemainingItem") => match (crafting_remainder(rt, a(0)), desc.ends_with(")Lnet/minecraft/world/item/Item;")) {
+            (Some(r), true) => item(rt, &r),
+            (Some(r), false) => stack(rt, &r, 1),
+            (None, true) => V::NULL,
+            (None, false) => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
+        },
         // NBT in `ItemStack.CODEC`'s form, `{id, count, components}`.
         ("net/minecraft/world/item/ItemStack", "save" | "saveOptional") => {
             let into = desc.contains(";Lnet/minecraft/nbt/Tag;)");
@@ -2388,7 +2435,7 @@ fn context(rt: &mut Rt, p: &crate::glue::Placement, class: &'static str) -> V {
     let item = if p.item.is_empty() {
         get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL)
     } else if rt.host().and_then(|h| h.player_held()).is_some_and(|(id, _)| id == p.item) {
-        crate::hand::stack(rt)
+        crate::hand::stack(rt, crate::hand::MAIN)
     } else {
         stack(rt, &p.item, 1)
     };
@@ -2861,6 +2908,34 @@ mod tests {
         assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ItemStack.isEmpty.()Z", &[s]), V::I(1));
         let empty = api::get_static(&mut rt, "net/minecraft/world/item/ItemStack.EMPTY");
         assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ItemStack.isEmpty.()Z", &[empty]), V::I(1));
+    }
+
+    /// What crafting with an item leaves: vanilla's water bucket the bucket, stone nothing, a mod's
+    /// item the remainder its properties name (`craftRemainder`).
+    #[test]
+    fn crafting_with_an_item_leaves_its_remainder() {
+        let mut rt = Rt::new();
+        crate::install();
+        let has = "net/minecraft/world/item/ItemStack.hasCraftingRemainingItem.()Z";
+        let get = "net/minecraft/world/item/ItemStack.getCraftingRemainingItem.()Lnet/minecraft/world/item/ItemStack;";
+        let left = |rt: &mut Rt, s: V| {
+            let r = api::call(rt, get, &[s]);
+            (api::call(rt, has, &[s]).i(), super::stack_empty(rt, r), super::item_like_name(rt, rt.get_field(r, "$item")))
+        };
+        let water = super::stack(&mut rt, "minecraft:water_bucket", 1);
+        assert_eq!(left(&mut rt, water), (1, false, "minecraft:bucket".to_owned()));
+        let stone = super::stack(&mut rt, "minecraft:stone", 1);
+        assert_eq!(left(&mut rt, stone).0, 0);
+        assert!(left(&mut rt, stone).1);
+
+        let props = rt.new_object("net/minecraft/world/item/Item$Properties");
+        api::call(&mut rt, "net/minecraft/world/item/Item$Properties.<init>.()V", &[props]);
+        let bowl = api::get_static(&mut rt, "net/minecraft/world/item/Items.BOWL");
+        api::call(&mut rt, "net/minecraft/world/item/Item$Properties.craftRemainder.(Lnet/minecraft/world/item/Item;)Lnet/minecraft/world/item/Item$Properties;", &[props, bowl]);
+        let it = rt.new_object("net/minecraft/world/item/Item");
+        api::call(&mut rt, "net/minecraft/world/item/Item.<init>.(Lnet/minecraft/world/item/Item$Properties;)V", &[it, props]);
+        let item_left = api::call(&mut rt, "net/minecraft/world/item/Item.getCraftingRemainingItem.()Lnet/minecraft/world/item/Item;", &[it]);
+        assert_eq!(super::item_like_name(&rt, item_left), "minecraft:bowl");
     }
 
     /// A block entity saves a component as JSON text and loads it back (Create's assembly errors):

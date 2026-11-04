@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the stacks in the acting player's hands, read, replaced and worn whole (`native_hand_stack`, `native_set_hand_stack`, `native_hurt_hand_stack`), and an item's durability (`native_item_max_damage`).",
+  "doc_summary": "`native_hand_stack(hand)` is the stack in the acting player's main or off hand with all its data (read a mod's item data on it with `native_component`); `native_set_hand_stack(hand, stack)` puts a stack in that hand, as `Player.setItemInHand`, None or a count of 0 emptying it; `native_hurt_hand_stack(hand, amount)` wears it as `ItemStack.hurtAndBreak` (Unbreaking, breaking with its sound, none in creative); `native_item_max_damage(item)` is the damage at which an item breaks, 0 for none. Bundles need \"hooks\": @API:hand_stack@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_server.rs"
+  ]
+}

@@ -136,7 +136,7 @@ pub fn finish_using_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
     rt.with_host(host, |rt| {
         hand::with_hand(rt, |rt| {
             let Some(vc) = rt.vcall else { return false };
-            let held = hand::stack(rt);
+            let held = hand::stack(rt, hand::MAIN);
             let in_hand = contents(rt, held).is_some_and(|(h, _)| h == item);
             let stack = if in_hand { held } else { api_common::stack(rt, item, 0) };
             let level = glue::level(rt);
@@ -148,7 +148,7 @@ pub fn finish_using_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
                 return true;
             }
             if r.r() != 0 && r != held && (in_hand || !api_common::stack_empty(rt, r)) {
-                hand::replace(rt, r);
+                hand::replace(rt, hand::MAIN, r);
             }
             true
         })
@@ -194,7 +194,7 @@ pub fn use_tick(rt: &mut Rt, host: &mut dyn Host, item: &str, remaining: i32) ->
 
 /// The stack in the main hand, when it is `item`: the one object the hook's player answers.
 fn held_stack(rt: &mut Rt, item: &str) -> Option<V> {
-    let stack = hand::stack(rt);
+    let stack = hand::stack(rt, hand::MAIN);
     contents(rt, stack).filter(|(h, _)| h == item).map(|_| stack)
 }
 

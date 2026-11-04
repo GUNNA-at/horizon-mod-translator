@@ -784,7 +784,7 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
                 let id = crate::api_common::item_like_name(rt, rt.get_field(v, "$item"));
                 let count = rt.get_field(v, "$count").i();
                 let mut m = BTreeMap::from([("id".to_owned(), Nbt::String(id)), ("count".to_owned(), Nbt::Int(count))]);
-                let carried: BTreeMap<String, Nbt> = crate::components::saved(rt, v).into_iter().collect();
+                let carried = crate::components::patch(rt, v);
                 if !carried.is_empty() {
                     m.insert("components".to_owned(), Nbt::Compound(carried));
                 }

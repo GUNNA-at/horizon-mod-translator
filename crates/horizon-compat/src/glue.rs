@@ -331,7 +331,7 @@ pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
     }
     rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| {
         let Some(vc) = rt.vcall else { return false };
-        let held = crate::hand::stack(rt);
+        let held = crate::hand::stack(rt, crate::hand::MAIN);
         let l = level(rt);
         let player = crate::api_common::acting_player(rt);
         let hand = api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
@@ -349,7 +349,7 @@ pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
         let started = crate::item_use::use_started(rt);
         let answered = rt.get_field(r, "$object");
         if (took || started) && answered.r() != 0 && answered != held {
-            crate::hand::replace(rt, answered);
+            crate::hand::replace(rt, crate::hand::MAIN, answered);
         }
         took && !started
     }))

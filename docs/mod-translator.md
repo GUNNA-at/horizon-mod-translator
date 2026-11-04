@@ -1030,6 +1030,37 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     before. Gaps: payloads a client sends (`ConfigureWorldshaperPacket`...) run without the
     sender's hand; vanilla's own components (damage, a name) aren't read from the game's stack;
     the off hand is empty to mods; stacks given to the player lose their components. In-game check pending.
+  - [x] 2026-11-04 Both hands, and wear by the game's rules (`horizon-compat/src/hand.rs`,
+    `components.rs`; tests `hand::tests`). A hook's player holds one stack object per hand: the
+    off hand too now (`getOffhandItem`, `getItemInHand(OFF_HAND)`, `setItemInHand` by its hand),
+    each loaded from the game the first time the mod reaches it, and each flushed when the hook
+    ends. A stack carries its damage (`minecraft:damage`) and the damage it breaks at (the game's
+    `max_damage` for a stack from a hand, else the mod item's `durability`): `getDamageValue`,
+    `setDamageValue`, `isDamaged`, `getMaxDamage`, `isDamageableItem`, the `DAMAGE` and
+    `MAX_DAMAGE` component types, a copy, `split` and `isSameItemSameComponents` keep or compare
+    it, and a saved stack writes it in `components`. `hurtAndBreak` on a stack in hand is the
+    game's own wear (`Host::hurt_player_hand` → new helper `native_hurt_hand_stack`: none in
+    creative, Unbreaking, breaking with its sound, told for the hand that held it), and the mod's
+    stack then holds what the game left; on any other stack it wears where it is.
+    `hurtWithoutBreaking` stops one short of breaking. Host methods `player_hand`,
+    `update_player_hand`, `set_player_hand`, `hurt_player_hand` take a hand (`HandStack`: item,
+    count, damage, max damage, components) and replace last step's held ones; game helpers
+    `native_hand_stack`, `native_set_hand_stack`, `native_hurt_hand_stack`,
+    `native_item_max_damage` replace `native_held_stack`/`native_set_held_stack` (whose
+    `remote` check didn't compile: `remote` is an `Option`). The game's own `damage_held` now
+    tells a broken off-hand item as the off hand's (entity event 48, vanilla's
+    `onEquippedItemBroken` slot), not the main hand's.
+    Crafting remainders: `Item.Properties.craftRemainder` is kept, and `hasCraftingRemainingItem`/
+    `getCraftingRemainingItem` (stack and item forms) answer it, else vanilla's five (buckets, honey,
+    dragon's breath); `isStackable` is `getMaxStackSize() > 1` and not damaged. Harness
+    `SANDPAPER=1` (new): a survival player holds Create's sandpaper (durability 8) with 3 rose
+    quartz in the off hand; the click's `use` takes one from the off hand (2 left) and keeps it on
+    the paper as `create:sand_paper_polishing` = `{item: {id: create:rose_quartz, count: 1}}`,
+    starting a 32-tick use; its `finishUsingItem` gives polished rose quartz, removes the
+    component and wears the paper to 1; a paper at 7 breaks (the hand empties). No unmapped calls.
+    `COMPONENTS`, `HOLD`, `USE` print the same as before. Gaps: a mod item's hooks run from the
+    main hand only (an item used from the off hand is the game's); a mod's `Consumer` passed to
+    `hurtAndBreak` isn't called on a break. In-game check pending.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

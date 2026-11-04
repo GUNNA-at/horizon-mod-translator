@@ -505,6 +505,14 @@ fn plain(stack: &ItemStack) -> bool {
     stack.damage == 0 && stack.extra.is_none()
 }
 
+/// The slot `hand` holds: the selected one, or the off hand's.
+fn hand_slot(selected: usize, hand: horizon_client::first_person::Hand) -> usize {
+    match hand {
+        horizon_client::first_person::Hand::Main => selected,
+        horizon_client::first_person::Hand::Off => super::shield::OFFHAND_SLOT,
+    }
+}
+
 /// The slots the item helpers look at, in `Inventory.add`'s order: the
 /// selected slot, the off hand, then the hotbar and the main inventory.
 fn order(selected: usize) -> impl Iterator<Item = usize> {
@@ -634,24 +642,50 @@ impl Game<'_> {
         let s = self.inventory.get(self.selected)?.as_ref()?;
         Some((s.item.to_string(), s.count, plain(s)))
     }
-    /// The main hand's stack with all its data (a mod's item data through
-    /// `native_component`), None for an empty hand. On a client, the player's
-    /// own. API @API:held_stack@.
-    pub(super) fn native_held_stack(&self) -> Option<&ItemStack> {
-        self.inventory.get(self.selected)?.as_ref()
+    /// The stack in the player's `hand` with all its data (a mod's item data
+    /// through `native_component`), None for an empty hand. On a client, the
+    /// player's own. API @API:hand_stack@.
+    pub(super) fn native_hand_stack(
+        &self,
+        hand: horizon_client::first_person::Hand,
+    ) -> Option<&ItemStack> {
+        self.stack_in(hand_slot(self.selected, hand))
     }
-    /// Puts `stack` in the player's main hand (`Player.setItemInHand`),
-    /// replacing what it held; None, a count of 0 or an item the game doesn't
-    /// know empties it. The player's screen gets the change as any change to
-    /// their inventory. Nothing on a client of a server. API @API:set_held_stack@.
-    pub(super) fn native_set_held_stack(&mut self, stack: Option<ItemStack>) {
-        if self.remote || self.player.is_none() {
+    /// Puts `stack` in the player's `hand` (`Player.setItemInHand`), replacing
+    /// what it held; None, a count of 0 or an item the game doesn't know
+    /// empties it. The player's screen gets the change as any change to their
+    /// inventory. Nothing on a client of a server. API @API:hand_stack@.
+    pub(super) fn native_set_hand_stack(
+        &mut self,
+        hand: horizon_client::first_person::Hand,
+        stack: Option<ItemStack>,
+    ) {
+        if self.remote.is_some() || self.player.is_none() {
             return;
         }
         let stack = stack.filter(|s| s.count > 0 && self.res.items().get(&s.item).is_some());
-        if let Some(slot) = self.inventory.get_mut(self.selected) {
-            *slot = stack;
+        *self.stack_in_mut(hand_slot(self.selected, hand)) = stack;
+    }
+    /// Wears the stack in the player's `hand` by `amount`, as
+    /// `ItemStack.hurtAndBreak` does: none in creative, Unbreaking may spare
+    /// it, and one worn out breaks with its sound and crumbs. Nothing for an
+    /// item without durability, or on a client of a server. API @API:hand_stack@.
+    pub(super) fn native_hurt_hand_stack(
+        &mut self,
+        hand: horizon_client::first_person::Hand,
+        amount: u32,
+    ) {
+        if self.remote.is_some() || self.player.is_none() || amount == 0 {
+            return;
         }
+        let acting = std::mem::replace(&mut self.hand, hand);
+        self.damage_held(amount);
+        self.hand = acting;
+    }
+    /// The damage at which `item` breaks (its `max_damage`), 0 for an item
+    /// without durability or one the game doesn't know. API @API:hand_stack@.
+    pub(super) fn native_item_max_damage(&self, item: &str) -> u32 {
+        self.res.items().get(item).map_or(0, |i| i.max_damage)
     }
     /// How many of plain `item` (`minecraft:diamond`) the player carries.
     pub(super) fn native_count_items(&mut self, item: &str) -> u32 {

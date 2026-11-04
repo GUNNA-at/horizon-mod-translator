@@ -22,6 +22,20 @@ pub enum Nbt {
     LongArray(Vec<i64>),
 }
 
+/// A stack in one of the acting player's hands, as the game holds it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HandStack {
+    pub item: String,
+    pub count: u32,
+    /// Damage taken (`minecraft:damage`).
+    pub damage: u32,
+    /// The damage at which it breaks (`minecraft:max_damage`), 0 for an item without durability.
+    pub max_damage: u32,
+    /// Its mod components: each type's name (`create:belt_first_shaft`) with its value as NBT, as
+    /// the type's codec writes it.
+    pub components: Vec<(String, Nbt)>,
+}
+
 /// A model a block entity draws (`BakedModel`): a block state's, or one named by its location (a
 /// mod's part model, `create:block/shaft_half`, never placed as a block), or faces a mod put
 /// together itself (a `SimpleBakedModel` of `BakedQuad`s: Create's water wheel, its template's
@@ -153,20 +167,28 @@ pub trait Host {
     fn player_held(&self) -> Option<(String, u32)> {
         None
     }
-    /// The mod components on the acting player's main-hand stack: each type's name
-    /// (`create:belt_first_shaft`) with its value as NBT, as the type's codec writes it.
-    fn player_held_components(&self) -> Vec<(String, Nbt)> {
-        Vec::new()
+    /// The stack in the acting player's `hand` (0 main, 1 off: `InteractionHand`'s ordinal), None
+    /// when empty. A host that knows only the main hand's item answers that.
+    fn player_hand(&self, hand: u8) -> Option<HandStack> {
+        if hand != 0 {
+            return None;
+        }
+        self.player_held().map(|(item, count)| HandStack { item, count, ..Default::default() })
     }
-    /// Changes the acting player's main-hand stack in place: `count` of it (0 empties the hand), mod
-    /// components set (Some) or removed (None) by type name. Vanilla's own data on it stays. False
+    /// Changes the stack in `hand` in place: `count` of it (0 empties the hand), `damage`, and mod
+    /// components set (Some) or removed (None) by type name; vanilla's other data on it stays. False
     /// when the game refused a change (an unregistered type, a value too big to send).
-    fn update_player_held(&mut self, _count: u32, _components: &[(String, Option<Nbt>)]) -> bool {
+    fn update_player_hand(&mut self, _hand: u8, _count: u32, _damage: u32, _components: &[(String, Option<Nbt>)]) -> bool {
         false
     }
-    /// Puts a new stack in the acting player's main hand (`Player.setItemInHand`): `count` of `item`
-    /// with mod components `components`; an empty `item` or a count of 0 empties the hand.
-    fn set_player_held(&mut self, _item: &str, _count: u32, _components: &[(String, Nbt)]) {}
+    /// Puts `stack` in `hand` (`Player.setItemInHand`), its `max_damage` aside; None empties it.
+    fn set_player_hand(&mut self, _hand: u8, _stack: Option<&HandStack>) {}
+    /// Wears the stack in `hand` by `amount` by the game's rules (`ItemStack.hurtAndBreak`: none in
+    /// creative, Unbreaking, one worn out breaks with its sound). False when the host can't: the
+    /// runtime wears it itself.
+    fn hurt_player_hand(&mut self, _hand: u8, _amount: u32) -> bool {
+        false
+    }
     /// Where the acting player stands (their feet), and their look (yaw, pitch in degrees); None
     /// when the game can't say.
     fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
@@ -388,6 +410,12 @@ pub struct MemoryHost {
     pub held: Option<(String, u32)>,
     /// The mod components of the main-hand stack, by type name.
     pub held_components: std::collections::BTreeMap<String, Nbt>,
+    /// The main-hand stack's damage.
+    pub held_damage: u32,
+    /// The off hand's stack.
+    pub offhand: Option<HandStack>,
+    /// Items' durability (`max_damage`); unset ones have none.
+    pub max_damage: HashMap<String, u32>,
     /// Where the acting player stands and looks (yaw, pitch).
     pub place: Option<([f64; 3], f32, f32)>,
     /// What the acting player was given that the main hand didn't take, in order.
@@ -467,27 +495,49 @@ impl Host for MemoryHost {
     fn player_held(&self) -> Option<(String, u32)> {
         self.held.clone()
     }
-    fn player_held_components(&self) -> Vec<(String, Nbt)> {
-        self.held_components.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    fn player_hand(&self, hand: u8) -> Option<HandStack> {
+        if hand == 1 {
+            return self.offhand.clone();
+        }
+        let (item, count) = self.held.clone()?;
+        let max_damage = self.max_damage.get(&item).copied().unwrap_or(0);
+        let components = self.held_components.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        Some(HandStack { item, count, damage: self.held_damage, max_damage, components })
     }
-    fn update_player_held(&mut self, count: u32, components: &[(String, Option<Nbt>)]) -> bool {
-        let Some((_, n)) = &mut self.held else { return false };
-        *n = count;
+    fn update_player_hand(&mut self, hand: u8, count: u32, damage: u32, components: &[(String, Option<Nbt>)]) -> bool {
+        let Some(mut s) = self.player_hand(hand) else { return false };
+        s.count = count;
+        s.damage = damage;
         for (name, value) in components {
-            match value {
-                Some(v) => self.held_components.insert(name.clone(), v.clone()),
-                None => self.held_components.remove(name),
-            };
+            s.components.retain(|(k, _)| k != name);
+            if let Some(v) = value {
+                s.components.push((name.clone(), v.clone()));
+            }
         }
-        if count == 0 {
-            self.held = None;
-            self.held_components.clear();
-        }
+        self.set_player_hand(hand, Some(&s));
         true
     }
-    fn set_player_held(&mut self, item: &str, count: u32, components: &[(String, Nbt)]) {
-        self.held = (!item.is_empty() && count > 0).then(|| (item.to_owned(), count));
-        self.held_components = if self.held.is_some() { components.iter().cloned().collect() } else { Default::default() };
+    /// As the game wears a stack in hand: none in creative or for an item without durability; one
+    /// worn out breaks.
+    fn hurt_player_hand(&mut self, hand: u8, amount: u32) -> bool {
+        let Some(mut s) = self.player_hand(hand) else { return true };
+        if self.creative || s.max_damage == 0 {
+            return true;
+        }
+        s.damage += amount;
+        let worn = s.damage >= s.max_damage;
+        self.set_player_hand(hand, (!worn).then_some(&s));
+        true
+    }
+    fn set_player_hand(&mut self, hand: u8, stack: Option<&HandStack>) {
+        let stack = stack.filter(|s| !s.item.is_empty() && s.count > 0);
+        if hand == 1 {
+            self.offhand = stack.cloned();
+            return;
+        }
+        self.held = stack.map(|s| (s.item.clone(), s.count));
+        self.held_damage = stack.map_or(0, |s| s.damage);
+        self.held_components = stack.map(|s| s.components.iter().cloned().collect()).unwrap_or_default();
     }
     fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
         self.place
@@ -507,6 +557,7 @@ impl Host for MemoryHost {
         if *n == 0 {
             self.held = None;
             self.held_components.clear();
+            self.held_damage = 0;
         }
         took
     }

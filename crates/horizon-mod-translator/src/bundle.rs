@@ -910,21 +910,28 @@ fn player_host(c: &str, server_effects: &str) -> String {
             }};
             self.game.native_player_pov_hit(fluids).map(|(pos, f, at)| (pos, face(f), at))
         }}
-        fn player_held_components(&self) -> Vec<(String, {c}::nbt::Nbt)> {{
-            let Some(stack) = self.game.native_held_stack() else {{
-                return Vec::new();
-            }};
-            self.game
+        fn player_hand(&self, hand: u8) -> Option<{c}::host::HandStack> {{
+            let stack = self.game.native_hand_stack(Self::hand(hand))?;
+            let components = self
+                .game
                 .native_registered_components()
                 .into_iter()
                 .filter_map(|name| {{
                     let tag = self.game.native_component(stack, name).ok()??;
                     Some((name.to_owned(), Self::nbt_of(tag)?))
                 }})
-                .collect()
+                .collect();
+            Some({c}::host::HandStack {{
+                item: stack.item.to_string(),
+                count: stack.count,
+                damage: stack.damage,
+                max_damage: self.game.native_item_max_damage(&stack.item),
+                components,
+            }})
         }}
-        fn update_player_held(&mut self, count: u32, components: &[(String, Option<{c}::nbt::Nbt>)]) -> bool {{
-            let Some(mut stack) = self.game.native_held_stack().cloned() else {{
+        fn update_player_hand(&mut self, hand: u8, count: u32, damage: u32, components: &[(String, Option<{c}::nbt::Nbt>)]) -> bool {{
+            let hand = Self::hand(hand);
+            let Some(mut stack) = self.game.native_hand_stack(hand).cloned() else {{
                 return false;
             }};
             let mut all = true;
@@ -936,25 +943,34 @@ fn player_host(c: &str, server_effects: &str) -> String {
                 }};
             }}
             stack.count = count;
-            self.game.native_set_held_stack(Some(stack));
+            stack.damage = damage;
+            self.game.native_set_hand_stack(hand, Some(stack));
             all
         }}
-        fn set_player_held(&mut self, item: &str, count: u32, components: &[(String, {c}::nbt::Nbt)]) {{
-            if item.is_empty() || count == 0 {{
-                self.game.native_set_held_stack(None);
+        fn set_player_hand(&mut self, hand: u8, held: Option<&{c}::host::HandStack>) {{
+            let hand = Self::hand(hand);
+            let Some(held) = held.filter(|h| !h.item.is_empty() && h.count > 0) else {{
+                self.game.native_set_hand_stack(hand, None);
                 return;
-            }}
-            let mut stack = horizon_client::items::ItemStack {{ item: item.into(), count, damage: 0, extra: None }};
-            for (name, value) in components {{
+            }};
+            let mut stack = horizon_client::items::ItemStack {{ item: held.item.as_str().into(), count: held.count, damage: held.damage, extra: None }};
+            for (name, value) in &held.components {{
                 if let Some(tag) = Self::tag_of(value) {{
                     let _ = self.game.native_set_component(&mut stack, name, tag);
                 }}
             }}
-            self.game.native_set_held_stack(Some(stack));
+            self.game.native_set_hand_stack(hand, Some(stack));
+        }}
+        fn hurt_player_hand(&mut self, hand: u8, amount: u32) -> bool {{
+            self.game.native_hurt_hand_stack(Self::hand(hand), amount);
+            true
         }}
 {server_effects}    }}
-    // A stack's mod data crosses as the runtime's NBT.
+    // A stack's mod data crosses as the runtime's NBT; a hand as `InteractionHand`'s ordinal.
     impl Host<'_, '_> {{
+        fn hand(ordinal: u8) -> horizon_client::first_person::Hand {{
+            if ordinal == 1 {{ horizon_client::first_person::Hand::Off }} else {{ horizon_client::first_person::Hand::Main }}
+        }}
         fn nbt_of(tag: &horizon_world::nbt::Tag) -> Option<{c}::nbt::Nbt> {{
             use horizon_world::nbt::Tag;
             use {c}::nbt::Nbt;
