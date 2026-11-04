@@ -623,6 +623,7 @@ pub fn render_block_entity(
         let st = api::state(rt, state);
         rt.put_field(be, "$state", st);
         rt.put_field(be, "blockState", st);
+        trace_some(rt, "drawn-states", &format!("{pos:?}"), 40, |_| format!("client: {pos:?} drawn as {state}"));
         let stack = crate::render::new_pose_stack(rt, crate::render::IDENTITY);
         let buffers = rt.intern("compat:buffers".into(), |rt| rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource"));
         let partial = rt.host().map_or(0.0, |h| h.partial_tick());

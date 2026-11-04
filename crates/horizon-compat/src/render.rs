@@ -1393,6 +1393,18 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
             let model = rt.get_field(this, "$model");
             let shift = shift_of(rt, this);
             rt.put_field(this, "$shiftKind", V::I(0));
+            if Rt::tracing() {
+                // The first draws, each model under each pose once: what a renderer asked for.
+                let name = match model_of(rt, model) {
+                    Some(crate::host::Model::Named(n) | crate::host::Model::State(n)) => n,
+                    None => "-".to_owned(),
+                };
+                let r = |i: usize| (m[i] * 100.0).round() / 100.0;
+                let cols = [[r(0), r(1), r(2)], [r(4), r(5), r(6)], [r(8), r(9), r(10)], [r(12), r(13), r(14)]];
+                crate::glue::trace_some(rt, "draws", &format!("{name}/{cols:?}"), 60, |_| {
+                    format!("client: draw {name}: x {:?} y {:?} z {:?} t {:?}", cols[0], cols[1], cols[2], cols[3])
+                });
+            }
             if let Some(model) = model_of(rt, model)
                 && let Some(h) = rt.host_mut()
             {
