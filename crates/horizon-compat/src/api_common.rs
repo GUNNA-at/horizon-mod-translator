@@ -454,8 +454,18 @@ pub(crate) fn next_random(rt: &mut Rt) -> u64 {
 /// A `java.util.Optional` holding `v` (null: empty), in the JDK's own field.
 pub fn optional(rt: &mut Rt, v: V) -> V {
     let o = rt.new_object("java/util/Optional");
-    rt.put_field(o, "value", if v.r() != 0 { v } else { V::NULL });
+    rt.put_field(o, "value", held(v));
     o
+}
+
+/// What an `Optional` holds of `v`: null for nothing, else `v`, also when it is a primitive that
+/// Java would have boxed (`Optional.map(BeltBlockEntity::hasPulley)` gets the method's raw
+/// boolean back, as collections hold their numbers raw).
+fn held(v: V) -> V {
+    match v {
+        V::Void => V::NULL,
+        other => other,
+    }
 }
 
 /// `java.util.Optional`, whole: the factories, the tests and the lambda forms (`ifPresent`, `map`,
@@ -473,11 +483,8 @@ fn optional_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "empty" => return Some(rt.intern("compat:optional-empty".into(), |rt| optional(rt, V::NULL))),
         _ => {}
     }
-    let v = match rt.get_field(a(0), "value") {
-        r @ V::R(n) if n != 0 => r,
-        _ => V::NULL,
-    };
-    let present = v.r() != 0;
+    let v = held(rt.get_field(a(0), "value"));
+    let present = v != V::NULL;
     Some(match name {
         "isPresent" => V::I(present as i32),
         "isEmpty" => V::I(!present as i32),
@@ -553,10 +560,7 @@ fn optional_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         "stream" => rt.alloc("java/util/stream/Stream", Data::Stream(if present { vec![v] } else { Vec::new() })),
         "equals" => {
-            let other = match rt.get_field(a(1), "value") {
-                r @ V::R(n) if n != 0 => r,
-                _ => V::NULL,
-            };
+            let other = held(rt.get_field(a(1), "value"));
             V::I((rt.class_of(a(1)) == "java/util/Optional" && (v == other || (present && crate::jutil::equals(rt, v, other)))) as i32)
         }
         "hashCode" => V::I(if present { crate::jutil::hash(rt, v) } else { 0 }),
@@ -669,7 +673,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             crate::jutil::new_list(rt, values)
         }
         ("java/lang/Boolean", "valueOf") if desc == "(Z)Ljava/lang/Boolean;" => boolean(rt, a(0).i() != 0),
-        ("java/lang/Boolean", "booleanValue") => rt.get_field(a(0), "value"),
+        // A boolean a method reference gave back raw (`Optional.map(BeltBlockEntity::hasPulley)`,
+        // where Java boxes it) is its own value, as raw ints are in `number`.
+        ("java/lang/Boolean", "booleanValue") => match a(0) {
+            V::R(_) => rt.get_field(a(0), "value"),
+            raw => raw,
+        },
         ("java/lang/Integer", "valueOf") if desc == "(I)Ljava/lang/Integer;" => integer(rt, a(0).i()),
         ("java/lang/Enum", "<init>") => {
             let n = a(1);
@@ -1967,6 +1976,36 @@ mod tests {
 
     const GET: &str = "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;";
     const SET: &str = "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;";
+
+    /// `BeltBlockEntity::hasPulley` run as a `Function`: the method's own raw `true`, which Java
+    /// would box.
+    fn raw_true(_rt: &mut Rt, _id: u32, _args: &[V]) -> Option<V> {
+        Some(V::I(1))
+    }
+
+    #[test]
+    fn an_optional_mapped_to_a_raw_boolean_holds_it() {
+        // Create's `BeltBlock.hasShaftTowards`:
+        // `getBlockEntityOptional(...).map(BeltBlockEntity::hasPulley).orElse(false)`, unboxed.
+        const MAP: &str = "java/util/Optional.map.(Ljava/util/function/Function;)Ljava/util/Optional;";
+        const OR_ELSE: &str = "java/util/Optional.orElse.(Ljava/lang/Object;)Ljava/lang/Object;";
+        const UNBOX: &str = "java/lang/Boolean.booleanValue.()Z";
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(raw_true);
+        let has_pulley = rt.lambda_id("java/util/function/Function", 1, Vec::new());
+        let no = api::call(&mut rt, "java/lang/Boolean.valueOf.(Z)Ljava/lang/Boolean;", &[V::I(0)]);
+        let be = rt.new_object("test/BeltBlockEntity");
+        let found = api::call(&mut rt, "java/util/Optional.of.(Ljava/lang/Object;)Ljava/util/Optional;", &[be]);
+        let mapped = api::call(&mut rt, MAP, &[found, has_pulley]);
+        assert_eq!(api::call(&mut rt, "java/util/Optional.isPresent.()Z", &[mapped]), V::I(1));
+        let got = api::call(&mut rt, OR_ELSE, &[mapped, no]);
+        assert_eq!(api::call(&mut rt, UNBOX, &[got]), V::I(1));
+        // No block entity: the fallback.
+        let empty = api::call(&mut rt, "java/util/Optional.empty.()Ljava/util/Optional;", &[]);
+        let mapped = api::call(&mut rt, MAP, &[empty, has_pulley]);
+        let got = api::call(&mut rt, OR_ELSE, &[mapped, no]);
+        assert_eq!(api::call(&mut rt, UNBOX, &[got]), V::I(0));
+    }
 
     #[test]
     fn vanilla_block_entity_types_are_one_object_each_with_their_id() {

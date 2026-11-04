@@ -614,6 +614,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     ticked yet. A block entity made this way loads the block's saved data at its first tick.
     Harness `BELT` (a creative motor and a three-block belt): the belt keeps its three segments,
     each knows its index and its controller, and an ingot dropped on it is taken onto the belt.
+  - [x] 2026-11-04 **Create's belt runs** (harness `BELT`): the motor turns it, and the ingot rides it
+    at 16 RPM / 480 = 1/30 block a tick, to the end it moves toward (west: a belt along x turns the
+    other way to its speed's sign), and goes off it as an item entity on tick 30. What held it: the
+    belt never took the motor's rotation. Its start answered "no shaft" to the motor:
+    `BeltBlock.hasShaftTowards` is `getBlockEntityOptional(..).map(BeltBlockEntity::hasPulley)
+    .orElse(false)`, and a method reference used as a `Function` gives the method's raw boolean back
+    (Java boxes it). `Optional` dropped a value that was not a reference, and `Boolean.booleanValue()`
+    read nothing from a raw boolean. Both now take a raw primitive as its own value, as collections
+    already hold numbers raw.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
