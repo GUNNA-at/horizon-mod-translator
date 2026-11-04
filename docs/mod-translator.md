@@ -854,6 +854,12 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `getEntitiesOfClass` (contraption collisions ask it each frame), fastutil's
     `toIntArray`/`toLongArray`..., and fastutil's `add(int)` on a primitive list, which was taken
     for `add(index, element)` and kept a null (any `IntArrayList` a mod filled was empty values).
+  - [x] 2026-11-04 **In game: a mechanical bearing turns its contraption** (`scratchpad/bearinggame.sh`,
+    build of 785a983): a creative motor under a bearing under an oak stair; the server assembles the
+    stair (the block above reads air, the bearing `Running: 1b`, angle 62.4° at tick 10), the client
+    gets the entity and Create's `ContraptionEntityRenderer` draws the stair turning on the bearing's
+    rotating top (screenshots t10/t20/t30 show the step on the left, side-on, then on the right).
+    Lit by the entity's light. No uncaught throws in the log.
   - [x] 2026-11-04 What the counted builder rule showed at load (harness `RECIPES`, the unmapped
     list): `new BlockPos(vec3i)` (42656 calls left at the origin), `Vec3.ZERO` (2677), `EnumSet`
     (`noneOf`, `of`, `copyOf`, `range`, `complementOf`, `allOf`: a set in its enum's order that knows
