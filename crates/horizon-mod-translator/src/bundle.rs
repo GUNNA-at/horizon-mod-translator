@@ -31,7 +31,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 48] = [
+const COMPAT: [(&str, &str); 49] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -73,6 +73,7 @@ const COMPAT: [(&str, &str); 48] = [
     ("menus.rs", include_str!("../../horizon-compat/src/menus.rs")),
     ("widgets.rs", include_str!("../../horizon-compat/src/widgets.rs")),
     ("edit_box.rs", include_str!("../../horizon-compat/src/edit_box.rs")),
+    ("level_env.rs", include_str!("../../horizon-compat/src/level_env.rs")),
     ("neo.rs", include_str!("../../horizon-compat/src/neo.rs")),
     ("network.rs", include_str!("../../horizon-compat/src/network.rs")),
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
@@ -146,6 +147,15 @@ fn {id}_{hook}(
         fn dimension(&self) -> String {{
             self.level.native_dimension_name().to_owned()
         }}
+        fn light(&self, pos: [i32; 3]) -> (u8, u8) {{
+            self.level.native_light_here(pos)
+        }}
+        fn neighbor_signal(&mut self, pos: [i32; 3]) -> i32 {{
+            self.level.native_neighbor_signal_here(self.ticks, pos)
+        }}
+        fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {{
+            self.level.native_schedule_block_tick(self.ticks, pos, block, delay)
+        }}
         fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.level.native_fluid_name_in_tag(fluid, tag)
         }}
@@ -161,7 +171,7 @@ fn {id}_{hook}(
     }}
     let p = [pos.x, pos.y, pos.z];
     let state = level.native_state_text(p);
-    if !state.starts_with("{id}:") {{
+    if !{krate}::ours(&state) {{
         return; // only the mod's own blocks
     }}
     let mut host = Host {{ level, ticks }};
@@ -279,6 +289,7 @@ fn server_send(c: &str) -> String {
 /// they would change waits for the next tick ([`Host::read_only`]). Needs the helper's NBT
 /// conversions (`to_nbt`).
 fn client_host(c: &str, id: &str) -> String {
+    let reads = world_reads("self.game.get()");
     format!(r#"    enum GameRef<'a, 'b> {{
         Mut(&'a mut crate::game::Game<'b>),
         Shared(&'a crate::game::Game<'b>),
@@ -314,7 +325,7 @@ fn client_host(c: &str, id: &str) -> String {
         fn dimension(&self) -> String {{
             self.game.get().native_dimension().to_owned()
         }}
-        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+{reads}        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.game.get().native_fluid_name_in_tag(fluid, tag)
         }}
         fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
@@ -583,11 +594,12 @@ fn client_host(c: &str, id: &str) -> String {
 
 /// The client's hooks: drawing the mod's block entities with its renderers, the update tags the
 /// server sends for them, the client tick (animation clocks) and the payloads the server sends.
-fn client_helpers(id: &str, ns: &str, krate: &str) -> Vec<(&'static str, String)> {
+fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
     let conversions = nbt_conversions(&c);
     let client_host = client_host(&c, id);
     // The host a client's draws get: the game, and the frame's pose stack and geometry.
+    let reads = world_reads("self.game");
     let draw_host = format!(r#"    struct Host<'a, 'b, 'c> {{
         game: &'a crate::game::Game<'b>,
         draw: &'c mut crate::game::native_block_entity_draw::BlockEntityDraw,
@@ -639,7 +651,7 @@ fn client_helpers(id: &str, ns: &str, krate: &str) -> Vec<(&'static str, String)
         fn game_time(&self) -> i64 {{
             self.draw.game_time
         }}
-        fn partial_tick(&self) -> f32 {{
+{reads}        fn partial_tick(&self) -> f32 {{
             self.draw.partial
         }}
         fn draw_item(&mut self, item: &str, display: u8, pose: &[f32; 16], light: u32, seed: i32) -> bool {{
@@ -749,7 +761,7 @@ fn {id}_block_entity_submit(
     draw: &mut crate::game::native_block_entity_draw::BlockEntityDraw,
 ) {{
 {conversions}    use std::collections::BTreeMap;
-    if !entity.id.starts_with("{ns}:") {{
+    if !{krate}::ours(&entity.id) {{
         return;
     }}
 {draw_host}    let state = game.native_state_text_at(pos);
@@ -778,7 +790,7 @@ fn {id}_block_entity_update_tag(
     entity: &horizon_client::containers::ModBlockEntity,
     tag: &mut Option<horizon_world::nbt::Compound>,
 ) {{
-{conversions}    if tag.is_some() || !entity.id.starts_with("{ns}:") {{
+{conversions}    if tag.is_some() || !{krate}::ours(&entity.id) {{
         return;
     }}
     let live = {krate}::hook_runtime("block_entity_update_tag", |rt| {c}::glue::block_entity_update_tag(rt, pos));
@@ -802,30 +814,34 @@ fn {id}_component_types(types: &mut Vec<String>) {{
 // makes, declared as content files would (states, default state, strength, sounds, light, map
 // colour), replacing what the bundle could read from bytecode alone.
 fn {id}_content(content: &mut horizon_mods::Content) {{
-    if content.namespaces.first().map(String::as_str) != Some("{ns}") {{
+    // The content mod of one of the engine's mods (a mod and the addons translated with it): what
+    // that mod registers, its namespace's.
+    let Some(ns) = content.namespaces.first().cloned().filter(|n| {krate}::NAMESPACES.contains(&n.as_str())) else {{
         return;
-    }}
+    }};
+    let mine = |id: &str| id.split_once(':').is_some_and(|(n, _)| n == ns);
     let (blocks, items, tabs) = {krate}::with_probe_runtime(|rt| ({c}::blocks::block_declarations(rt), {c}::blocks::item_declarations(rt), {c}::creative::tabs(rt)));
     let (mut declared, mut refused) = (0usize, 0usize);
-    for (id, json) in blocks.iter() {{
+    for (id, json) in blocks.iter().filter(|(id, _)| mine(id)) {{
         match content.declare_block(id, json) {{
             Ok(()) => declared += 1,
             Err(e) => {{
                 refused += 1;
-                log::warn!("{ns} (translated): block not declared: {{e}}");
+                log::warn!("{{ns}} (translated): block not declared: {{e}}");
             }}
         }}
     }}
-    for (id, json) in items.iter() {{
+    for (id, json) in items.iter().filter(|(id, _)| mine(id)) {{
         match content.declare_item(id, json) {{
             Ok(()) => declared += 1,
             Err(e) => {{
                 refused += 1;
-                log::warn!("{ns} (translated): item not declared: {{e}}");
+                log::warn!("{{ns}} (translated): item not declared: {{e}}");
             }}
         }}
     }}
     // Its creative tabs, as its own `displayItems` code fills them.
+    let tabs: Vec<_> = tabs.into_iter().filter(|t| mine(&t.id)).collect();
     let tab_count = tabs.len();
     for tab in tabs {{
         let tab = horizon_mods::content::CreativeTab {{ id: tab.id, title: tab.title, icon: tab.icon, items: tab.items }};
@@ -834,7 +850,7 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
             None => content.creative_tabs.push(tab),
         }}
     }}
-    log::info!("{ns} (translated): {{declared}} blocks and items declared from its registration, {{refused}} refused, {{tab_count}} creative tabs");
+    log::info!("{{ns}} (translated): {{declared}} blocks and items declared from its registration, {{refused}} refused, {{tab_count}} creative tabs");
 }}
 "#)),
         ("content_block", format!(r#"// Generated by horizon-mod-translator: what draws the translated mod's blocks, by its own code
@@ -843,7 +859,7 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
 // by its renderer only while open).
 fn {id}_content_block(block: &mut horizon_mods::content::Block) {{
     use horizon_mods::content::RenderShapes;
-    if !block.id.starts_with("{ns}:") || block.properties.render_shape.is_some() {{
+    if !{krate}::ours(&block.id) || block.properties.render_shape.is_some() {{
         return;
     }}
     let own: Vec<(String, Vec<String>)> =
@@ -915,7 +931,7 @@ fn {id}_block_entity_data(
     tag: &horizon_world::nbt::Compound,
 ) {{
 {conversions}    use std::collections::BTreeMap;
-    if !entity.id.starts_with("{ns}:") {{
+    if !{krate}::ours(&entity.id) {{
         return;
     }}
 {client_host}    let state = game.native_state_text_at(pos);
@@ -929,7 +945,7 @@ fn {id}_block_entity_data(
 // use (`Item.getUseAnimation`: a package drawn back as a bow, a drink).
 fn {id}_use_animation(stack: &horizon_client::items::ItemStack, animation: &mut horizon_world::consumable::UseAnimation) {{
     use horizon_world::consumable::UseAnimation;
-    if !stack.item.starts_with("{ns}:") {{
+    if !{krate}::ours(&stack.item) {{
         return;
     }}
     if let Some(pose) = {krate}::with_registrations(|rt| {c}::item_use::use_animation(rt, &stack.item)) {{
@@ -1150,6 +1166,7 @@ fn {id}_screen_char_typed_pre(
 /// to players.
 fn game_host(c: &str, server_send: &str) -> String {
     let server_effects = server_effects(c);
+    let (reads, writes) = (world_reads("self.game"), WORLD_WRITES);
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
     }}
@@ -1208,7 +1225,7 @@ fn game_host(c: &str, server_send: &str) -> String {
         fn game_time(&self) -> i64 {{
             self.game.native_game_time()
         }}
-        fn item_entities(&self, b: [f64; 6]) -> Vec<{c}::host::ItemEntity> {{
+{reads}{writes}        fn item_entities(&self, b: [f64; 6]) -> Vec<{c}::host::ItemEntity> {{
             let dim = self.game.native_dimension();
             self.game.native_item_entities(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().map(|e| {c}::host::ItemEntity {{
                 id: e.id,
@@ -1258,7 +1275,38 @@ fn {id}_level_tick_{phase}(game: &mut crate::game::Game<'_>, dimension: &str) {{
 /// The host a server hook for one player's click gets (`native_right_click_block`,
 /// `native_use_item_on`, `native_use_item`): the game with that player's state swapped in (hand,
 /// sneaking, food, mode, place), its blocks, items and recipes, and the effects it makes.
+/// A host's reads of the world around a block (light, time of day, weather, height), for a host
+/// whose game `get` gives (`self.game`, `self.game.get()`).
+fn world_reads(get: &str) -> String {
+    format!(
+        r#"        fn day_time(&self) -> i64 {{
+            {get}.native_day_time()
+        }}
+        fn light(&self, pos: [i32; 3]) -> (u8, u8) {{
+            {get}.native_light(pos)
+        }}
+        fn weather(&self) -> (f32, f32) {{
+            {get}.native_weather()
+        }}
+        fn world_height(&self) -> (i32, i32) {{
+            {get}.native_world_height()
+        }}
+"#
+    )
+}
+
+/// A server host's redstone and block ticks (`self.game` a `&mut Game`).
+const WORLD_WRITES: &str = r#"        fn neighbor_signal(&mut self, pos: [i32; 3]) -> i32 {
+            let dimension = self.game.native_dimension().to_owned();
+            self.game.native_neighbor_signal(&dimension, pos)
+        }
+        fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {
+            self.game.native_schedule_block_tick_at(pos, block, delay)
+        }
+"#;
+
 fn player_host(c: &str, server_effects: &str) -> String {
+    let (reads, writes) = (world_reads("self.game"), WORLD_WRITES);
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
     }}
@@ -1434,7 +1482,7 @@ fn player_host(c: &str, server_effects: &str) -> String {
             self.game.native_hurt_hand_stack(Self::hand(hand), amount);
             true
         }}
-{server_effects}    }}
+{reads}{writes}{server_effects}    }}
     // A stack's mod data crosses as the runtime's NBT; a hand as `InteractionHand`'s ordinal.
     impl Host<'_, '_> {{
         fn hand(ordinal: u8) -> horizon_client::first_person::Hand {{
@@ -1510,8 +1558,9 @@ fn player_host(c: &str, server_effects: &str) -> String {
 "#)
 }
 
-fn block_entity_helpers(id: &str, ns: &str, krate: &str) -> Vec<(&'static str, String)> {
+fn block_entity_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
+    let (reads, writes) = (world_reads("self.game"), WORLD_WRITES);
     let server_send = server_send(&c);
     let server_effects = server_effects(&c);
     // A player's hooks reach their client too: a menu the mod opens, a payload it sends.
@@ -1538,7 +1587,7 @@ fn {id}_server_tick(game: &mut crate::game::Game<'_>, phase: crate::game::native
         fn game_time(&self) -> i64 {{
             self.game.native_game_time()
         }}
-{server_send}    }}
+{reads}{writes}{server_send}    }}
     let mut host = Host {{ game }};
     {krate}::hook_runtime("server_tick", |rt| {c}::glue::server_tick(rt, &mut host, post));
 }}
@@ -1567,14 +1616,14 @@ fn {id}_net_from_client(game: &mut crate::game::Game<'_>, player: u128, channel:
         fn game_time(&self) -> i64 {{
             self.game.native_game_time()
         }}
-{server_effects}{server_send}    }}
+{reads}{writes}{server_effects}{server_send}    }}
     let mut host = Host {{ game }};
     {krate}::hook_runtime("net_from_client", |rt| {c}::glue::payload_from_client(rt, &mut host, player, channel, data));
 }}
 "#)),
         ("block_entity", format!(r#"// Generated by horizon-mod-translator: `EntityBlock.newBlockEntity` of the translated mod.
 fn {id}_block_entity(block: &str, entity: &mut Option<(String, horizon_world::nbt::Compound)>) {{
-    if entity.is_some() || !block.starts_with("{ns}:") {{
+    if entity.is_some() || !{krate}::ours(&block) {{
         return;
     }}
     if let Some(be) = {krate}::with_registrations(|rt| {c}::glue::block_entity_id(rt, block)) {{
@@ -1584,7 +1633,7 @@ fn {id}_block_entity(block: &str, entity: &mut Option<(String, horizon_world::nb
 "#)),
         ("block_entity_ticks", format!(r#"// Generated by horizon-mod-translator: `EntityBlock.getTicker` of the translated mod.
 fn {id}_block_entity_ticks(block: &str, ticks: &mut bool) {{
-    if block.starts_with("{ns}:") && {krate}::with_registrations(|rt| {c}::glue::block_entity_ticks(rt, block)) {{
+    if {krate}::ours(&block) && {krate}::with_registrations(|rt| {c}::glue::block_entity_ticks(rt, block)) {{
         *ticks = true;
     }}
 }}
@@ -1598,7 +1647,7 @@ fn {id}_block_entity_tick(
     use horizon_world::nbt::{{Compound, JavaString, Tag}};
     use {c}::nbt::Nbt;
     use std::collections::BTreeMap;
-    if !entity.id.starts_with("{ns}:") {{
+    if !{krate}::ours(&entity.id) {{
         return;
     }}
     fn to_nbt(tag: &Tag) -> Option<Nbt> {{
@@ -1673,7 +1722,7 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
         return;
     }}
     let state = host.game.native_state_text_at(pos);
-    if !state.starts_with("{ns}:") {{
+    if !{krate}::ours(&state) {{
         return;
     }}
     if {krate}::hook_runtime("right_click_block", |rt| {c}::glue::use_block(rt, &mut host, pos, &state, face, hand)) {{
@@ -1690,7 +1739,7 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
     }}
     let hand = u8::from(game.hand == horizon_client::first_person::Hand::Off);
     let item = stack.item.to_string();
-    if !item.starts_with("{ns}:") {{
+    if !{krate}::ours(&item) {{
         return;
     }}
     // Direction's 3D data value: down, up, north, south, west, east.
@@ -1736,7 +1785,7 @@ fn {id}_use_item(game: &mut crate::game::Game<'_>, stack: &horizon_client::items
         *claimed = true;
         return;
     }}
-    if !item.starts_with("{ns}:") {{
+    if !{krate}::ours(&item) {{
         return;
     }}
     if {krate}::hook_runtime("use_item", |rt| {c}::glue::use_item(rt, &mut host, &item, hand)) {{
@@ -1748,7 +1797,7 @@ fn {id}_use_item(game: &mut crate::game::Game<'_>, stack: &horizon_client::items
 // (`Item.getUseDuration`), on both sides: an item its `use` starts using counts that down to its
 // `finishUsingItem`, unless let go before (`releaseUsing`).
 fn {id}_use_duration(stack: &horizon_client::items::ItemStack, duration: &mut i32) {{
-    if !stack.item.starts_with("{ns}:") {{
+    if !{krate}::ours(&stack.item) {{
         return;
     }}
     if let Some(ticks) = {krate}::with_registrations(|rt| {c}::item_use::use_duration(rt, &stack.item)) {{
@@ -1760,7 +1809,7 @@ fn {id}_use_duration(stack: &horizon_client::items::ItemStack, duration: &mut i3
 // the server. The use goes on only when the click's own `use` started it (`startUsingItem`), as in
 // NeoForge; a food's eating is the game's.
 fn {id}_living_entity_use_item_start(game: &mut crate::game::Game<'_>, stack: &horizon_client::items::ItemStack, entity: Option<i32>, canceled: &mut bool) {{
-    if entity.is_some() || game.native_window() || !stack.item.starts_with("{ns}:") {{
+    if entity.is_some() || game.native_window() || !{krate}::ours(&stack.item) {{
         return;
     }}
     if {krate}::hook_runtime("living_entity_use_item_start", |rt| {c}::item_use::use_may_start(rt, &stack.item)) == Some(false) {{
@@ -1771,7 +1820,7 @@ fn {id}_living_entity_use_item_start(game: &mut crate::game::Game<'_>, stack: &h
         ("on_use_tick", format!(r#"// Generated by horizon-mod-translator: each tick a player uses one of the translated mod's items,
 // on the server: its own `onUseTick`.
 fn {id}_on_use_tick(game: &mut crate::game::Game<'_>, stack: &horizon_client::items::ItemStack, entity: Option<i32>, remaining: i32) {{
-    if entity.is_some() || game.native_window() || !stack.item.starts_with("{ns}:") {{
+    if entity.is_some() || game.native_window() || !{krate}::ours(&stack.item) {{
         return;
     }}
     let hand = u8::from(game.hand == horizon_client::first_person::Hand::Off);
@@ -1785,7 +1834,7 @@ fn {id}_on_use_tick(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
 // that used it (the stack it answers goes there) reaches that hand itself, so `result` stays as it
 // was.
 fn {id}_living_entity_use_item_finish(game: &mut crate::game::Game<'_>, stack: &horizon_client::items::ItemStack, entity: Option<i32>, result: &mut Option<horizon_client::items::ItemStack>) {{
-    if entity.is_some() || game.native_window() || !stack.item.starts_with("{ns}:") {{
+    if entity.is_some() || game.native_window() || !{krate}::ours(&stack.item) {{
         return;
     }}
     let _ = result;
@@ -1797,7 +1846,7 @@ fn {id}_living_entity_use_item_finish(game: &mut crate::game::Game<'_>, stack: &
         ("release_using", format!(r#"// Generated by horizon-mod-translator: a player lets go of one of the translated mod's items before
 // its use ran its time, on the server: its own `releaseUsing` (Create's packages are thrown).
 fn {id}_release_using(game: &mut crate::game::Game<'_>, stack: &horizon_client::items::ItemStack, entity: Option<i32>, time_left: i32) {{
-    if entity.is_some() || game.native_window() || !stack.item.starts_with("{ns}:") {{
+    if entity.is_some() || game.native_window() || !{krate}::ours(&stack.item) {{
         return;
     }}
     let hand = u8::from(game.hand == horizon_client::first_person::Hand::Off);
@@ -1817,7 +1866,7 @@ fn {id}_state_for_placement(
         return;
     }}
     let text = level.native_state_id_text(state);
-    if !text.starts_with("{ns}:") {{
+    if !{krate}::ours(&text) {{
         return;
     }}
     struct Host<'a, 'b> {{
@@ -1837,6 +1886,9 @@ fn {id}_state_for_placement(
         }}
         fn dimension(&self) -> String {{
             self.level.native_dimension_name().to_owned()
+        }}
+        fn light(&self, pos: [i32; 3]) -> (u8, u8) {{
+            self.level.native_light_here(pos)
         }}
         fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.level.native_fluid_name_in_tag(fluid, tag)
@@ -1955,12 +2007,32 @@ pub fn write(jar: &Path, classes: &[ClassFile], out: &Path) -> Result<(String, V
 /// rebuild only that crate when the mapping changes. Such a bundle is for tools (harnesses), not
 /// for horizon-mixins, which allows no path dependencies.
 pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option<&Path>) -> Result<(String, Vec<String>), String> {
+    write_group(&[jar], classes, out, runtime)
+}
+
+/// [`write_with`] for a mod and the mods built on it (its addons), translated as one engine:
+/// `jars[0]` is the mod the others need, `classes` all of theirs ([`crate::classes_of`]). One
+/// runtime holds them all, so an addon's classes extend the mod's and call into it natively, as on
+/// the JVM. The engine's hooks answer for every one of their namespaces (`NAMESPACES` in the
+/// engine), and each mod keeps a content mod of its own: the first's in `content/`, each other's
+/// assets and manifest in `content-<id>/` (the engine declares their blocks and items).
+pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: Option<&Path>) -> Result<(String, Vec<String>), String> {
+    let jar = *jars.first().ok_or("no jar to translate")?;
     let id = mod_id(jar).ok_or_else(|| format!("{}: no NeoForge mod id", jar.display()))?;
+    let mut members: Vec<(&Path, String)> = vec![(jar, id.clone())];
+    for j in &jars[1..] {
+        let n = mod_id(j).ok_or_else(|| format!("{}: no NeoForge mod id", j.display()))?;
+        if members.iter().all(|(_, m)| *m != n) {
+            members.push((j, n));
+        }
+    }
+    let namespaces: Vec<&str> = members.iter().map(|(_, n)| n.as_str()).collect();
     let bundle_id = format!("{id}_translated");
     let krate = format!("{}_translated_engine", id.replace('-', "_"));
     let mut program = Program::new(classes);
     program.mod_id = Some(id.clone());
-    program.services = crate::services(jar)?;
+    program.addons = members[1..].iter().map(|(_, n)| n.clone()).collect();
+    program.services = crate::services_of(jars)?;
     let files = program.emit_files(40);
     let src = out.join("engine/src");
     fs::create_dir_all(&src).map_err(|e| e.to_string())?;
@@ -2014,27 +2086,46 @@ pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option
                  pub fn with_probe_runtime<R>(f: impl FnOnce(&mut Rt) -> R) -> R {{\n    PROBE.with(|cell| {{\n        let mut slot = cell.borrow_mut();\n        let rt = slot.get_or_insert_with(|| {{\n            let mut rt = Rt::new();\n            rt.namespace = {id:?}.into();\n            init(&mut rt);\n            start(&mut rt);\n            rt\n        }});\n        f(rt)\n    }})\n}}\n"
             ));
         }
+        if name == "lib.rs" {
+            text.push_str(&format!(
+                "\n/// The mods this engine's code is: a mod and the mods built on it, translated together.\n\
+                 pub const NAMESPACES: &[&str] = &{namespaces:?};\n\n\
+                 /// Whether `id` (`create:shaft`, a block state's text) is one of this engine's mods'.\n\
+                 pub fn ours(id: &str) -> bool {{\n    id.split_once(':').is_some_and(|(ns, _)| NAMESPACES.contains(&ns))\n}}\n"
+            ));
+        }
         put(src.join(&name), text).map_err(|e| e.to_string())?;
     }
     put(out.join("horizon-mixin.toml"), mixin_toml(&bundle_id, "0.1.0")).map_err(|e| e.to_string())?;
-    for (hook, text) in block_entity_helpers(&bundle_id, &id, &krate).into_iter().chain(client_helpers(&bundle_id, &id, &krate)) {
+    for (hook, text) in block_entity_helpers(&bundle_id, &krate).into_iter().chain(client_helpers(&bundle_id, &krate)) {
         put(out.join(format!("{hook}.rs")), text).map_err(|e| e.to_string())?;
     }
     for (hook, glue) in BLOCK_HOOKS {
-        put(out.join(format!("{hook}.rs")), helper(&bundle_id, &krate, hook, glue).replace(&format!("\"{bundle_id}:\""), &format!("\"{id}:\""))).map_err(|e| e.to_string())?;
+        put(out.join(format!("{hook}.rs")), helper(&bundle_id, &krate, hook, glue)).map_err(|e| e.to_string())?;
     }
-    // The blocks the code registers, as a content mod (a folder mod for `horizon-mods/`): the game
-    // knows them, and their random ticks reach the translated `randomTick`.
-    let content = out.join("content");
-    let blocks: Vec<String> = crate::registrations(classes)
-        .into_iter()
-        .filter(|r| r.registry == "block")
-        .map(|r| r.name.rsplit(':').next().unwrap_or(&r.name).to_owned())
-        .collect();
-    if !blocks.is_empty() {
-        let dir = content.join("data").join(&id).join("horizon/block");
+    // The blocks the code registers, as a content mod per mod (a folder mod for `horizon-mods/`):
+    // the game knows them, and their random ticks reach the translated `randomTick`. A block is the
+    // mod's whose classes register it (the first mod's, for its bundled libraries'); the content
+    // hook replaces these first declarations with what the registration makes.
+    let registered = crate::registrations(classes);
+    let props = crate::props::block_properties(classes);
+    let owners: Vec<std::collections::HashSet<String>> = members[1..].iter().map(|(j, _)| crate::class_names(j)).collect();
+    for (n, (j, ns)) in members.iter().enumerate() {
+        let blocks: Vec<String> = registered
+            .iter()
+            .filter(|r| r.registry == "block")
+            .filter(|r| match n {
+                0 => owners.iter().all(|o| !o.contains(&r.class)),
+                _ => owners[n - 1].contains(&r.class),
+            })
+            .map(|r| r.name.rsplit(':').next().unwrap_or(&r.name).to_owned())
+            .collect();
+        if blocks.is_empty() {
+            continue;
+        }
+        let content = if n == 0 { out.join("content") } else { out.join(format!("content-{ns}")) };
+        let dir = content.join("data").join(ns).join("horizon/block");
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let props = crate::props::block_properties(classes);
         for b in &blocks {
             // Stone has no state properties and no behaviour of its own; `random_ticks` keeps the
             // mod's `randomTick` reachable.
@@ -2058,54 +2149,62 @@ pub fn write_with(jar: &Path, classes: &[ClassFile], out: &Path, runtime: Option
             json.push_str(" }\n");
             put(dir.join(format!("{b}.json")), json).map_err(|e| e.to_string())?;
         }
-        // The mod's own look: its assets (blockstates, models, textures, lang) from the jar.
-        if let Ok(f) = fs::File::open(jar)
-            && let Ok(mut zip) = zip::ZipArchive::new(f)
-        {
-            let prefix = format!("assets/{id}/");
-            let mut item_models = Vec::new();
-            for i in 0..zip.len() {
-                let Ok(mut e) = zip.by_index(i) else { continue };
-                let Some(name) = e.enclosed_name() else { continue };
-                let path = name.to_string_lossy().into_owned();
-                let resource = [".json", ".png", ".mcmeta", ".ogg", ".obj", ".mtl"].iter().any(|x| path.ends_with(x));
-                if !e.is_file() || !path.starts_with(&prefix) || !resource {
-                    continue;
-                }
-                if let Some(model) = path.strip_prefix(&format!("{prefix}models/item/")).and_then(|m| m.strip_suffix(".json")) {
-                    item_models.push(model.to_owned());
-                }
-                let target = content.join(&name);
-                if let Some(parent) = target.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let mut bytes = Vec::new();
-                if e.read_to_end(&mut bytes).is_ok() {
-                    let _ = put(target, bytes);
-                }
-            }
-            // A jar for 1.21.1 has no client item definitions (1.21.4 put item models behind
-            // `items/<name>.json`): without one an item draws no icon. Each item model gets the
-            // plain definition, as the port-pack's carry-over writes; the jar's own win.
-            for m in item_models {
-                let def = content.join(format!("assets/{id}/items/{m}.json"));
-                if !def.exists() {
-                    if let Some(parent) = def.parent() {
-                        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                    }
-                    let json = format!("{{\"model\": {{\"type\": \"minecraft:model\", \"model\": \"{id}:item/{m}\"}}}}\n");
-                    put(def, json).map_err(|e| e.to_string())?;
-                }
-            }
-        }
-        put(
-            content.join("horizon-mod.toml"),
-            format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"0.1.0\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\n"),
-        )
-        .map_err(|e| e.to_string())?;
+        copy_assets(j, ns, &content)?;
+        put(content.join("horizon-mod.toml"), manifest(ns)).map_err(|e| e.to_string())?;
     }
     let left: Vec<String> = program.unsupported.iter().map(|(k, n)| format!("{k} ({n})")).collect();
     Ok((id, left))
+}
+
+/// A translated mod's content manifest: it declares registries (the engine's blocks and items).
+fn manifest(id: &str) -> String {
+    format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"0.1.0\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\n")
+}
+
+/// Mod `id`'s own look into content mod `content`: its assets (blockstates, models, textures, lang)
+/// from `jar`, with a plain item definition for each item model a 1.21.1 jar leaves without one.
+fn copy_assets(jar: &Path, id: &str, content: &Path) -> Result<(), String> {
+    // The mod's own look: its assets (blockstates, models, textures, lang) from the jar.
+    if let Ok(f) = fs::File::open(jar)
+        && let Ok(mut zip) = zip::ZipArchive::new(f)
+    {
+        let prefix = format!("assets/{id}/");
+        let mut item_models = Vec::new();
+        for i in 0..zip.len() {
+            let Ok(mut e) = zip.by_index(i) else { continue };
+            let Some(name) = e.enclosed_name() else { continue };
+            let path = name.to_string_lossy().into_owned();
+            let resource = [".json", ".png", ".mcmeta", ".ogg", ".obj", ".mtl"].iter().any(|x| path.ends_with(x));
+            if !e.is_file() || !path.starts_with(&prefix) || !resource {
+                continue;
+            }
+            if let Some(model) = path.strip_prefix(&format!("{prefix}models/item/")).and_then(|m| m.strip_suffix(".json")) {
+                item_models.push(model.to_owned());
+            }
+            let target = content.join(&name);
+            if let Some(parent) = target.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let mut bytes = Vec::new();
+            if e.read_to_end(&mut bytes).is_ok() {
+                let _ = put(target, bytes);
+            }
+        }
+        // A jar for 1.21.1 has no client item definitions (1.21.4 put item models behind
+        // `items/<name>.json`): without one an item draws no icon. Each item model gets the
+        // plain definition, as the port-pack's carry-over writes; the jar's own win.
+        for m in item_models {
+            let def = content.join(format!("assets/{id}/items/{m}.json"));
+            if !def.exists() {
+                if let Some(parent) = def.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let json = format!("{{\"model\": {{\"type\": \"minecraft:model\", \"model\": \"{id}:item/{m}\"}}}}\n");
+                put(def, json).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

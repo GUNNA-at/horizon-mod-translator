@@ -89,6 +89,9 @@ fn accept(rt: &mut Rt, out: V, thing: V, shown: V) {
     }
 }
 
+/// `Output.accept(stack, visibility)`, the one method an `Output` implements itself.
+const OUTPUT_ACCEPT: &str = "net/minecraft/world/item/CreativeModeTab$Output.accept.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/CreativeModeTab$TabVisibility;)V";
+
 fn item_name(rt: &Rt, item: V) -> String {
     rt.str_of(item).map(str::to_owned).or_else(|| rt.registered_name(item, "item").map(str::to_owned)).unwrap_or_default()
 }
@@ -225,6 +228,23 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let icon = rt.get_field(a(0), "$icon");
             rt.call_functional(SUPPLY, icon, &[])
         }
+        // A mod's own `Output` (Registrate's `CreativeModeTabModifier`): the interface's default
+        // methods, each a stack and a visibility for its own `accept(stack, visibility)`.
+        (OUTPUT, "accept" | "acceptAll") if rt.is_mod_class(rt.class_of(a(0))) && !OUTPUT_ACCEPT.ends_with(desc) => {
+            let shown = if desc.contains("TabVisibility;") { a(2) } else { visibility(rt, 0) };
+            let things = if name == "acceptAll" { crate::jutil::elements(rt, a(1)) } else { vec![a(1)] };
+            for thing in things {
+                let stack = if rt.class_of(thing) == "net/minecraft/world/item/ItemStack" {
+                    thing
+                } else {
+                    let s = rt.new_object("net/minecraft/world/item/ItemStack");
+                    crate::api::call(rt, "net/minecraft/world/item/ItemStack.<init>.(Lnet/minecraft/world/level/ItemLike;)V", &[s, thing]);
+                    s
+                };
+                crate::menus::virt(rt, OUTPUT_ACCEPT, a(0), &[stack, shown]);
+            }
+            V::Void
+        }
         (OUTPUT | CONTENTS_EVENT, "accept") => {
             let shown = if desc.contains("TabVisibility;") { a(2) } else { visibility(rt, 0) };
             accept(rt, a(0), a(1), shown);
@@ -336,6 +356,47 @@ fn ordered(rt: &Rt, made: &[(String, V)]) -> Vec<(String, V)> {
 mod tests {
     use super::*;
     use crate::api::call as c;
+
+    #[test]
+    fn a_mods_own_output_takes_the_interfaces_default_methods() {
+        // Registrate's `CreativeModeTabModifier` implements `Output` itself: `accept(item)`, called
+        // on its own class, and `acceptAll(stacks)` reach its `accept(stack, visibility)` with a
+        // stack of the item and vanilla's default visibility, as Java's default methods do.
+        fn vcall(rt: &mut Rt, _key: &'static str, short: &'static str, args: &[V]) -> V {
+            if short == "accept.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/CreativeModeTab$TabVisibility;)V" {
+                let item = rt.get_field(args[1], "$item");
+                let shown = rt.get_field(args[2], "$name");
+                let line = format!("{} {}", item_name(rt, item), rt.str_of(shown).unwrap_or("?"));
+                let list = rt.get_field(args[0], "$got");
+                let mut got = crate::jutil::elements(rt, list);
+                got.push(rt.string(&line));
+                if let Some(o) = rt.heap.get_mut(list.r() as usize) {
+                    o.data = crate::Data::List(got);
+                }
+            }
+            V::Void
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.vcall = Some(vcall);
+        rt.supers.insert("t/Modifier", "java/lang/Object");
+        rt.interfaces.insert("t/Modifier", &["net/minecraft/world/item/CreativeModeTab$Output"]);
+        let gear = rt.new_object("net/minecraft/world/item/Item");
+        rt.registered.insert(("item".into(), "t:gear".into()), gear);
+        let modifier = rt.new_object("t/Modifier");
+        let list = crate::jutil::new_list(&mut rt, Vec::new());
+        rt.put_field(modifier, "$got", list);
+        c(&mut rt, "t/Modifier.accept.(Lnet/minecraft/world/level/ItemLike;)V", &[modifier, gear]);
+        let only_search = api::get_static(&mut rt, "net/minecraft/world/item/CreativeModeTab$TabVisibility.SEARCH_TAB_ONLY");
+        c(&mut rt, "net/minecraft/world/item/CreativeModeTab$Output.accept.(Lnet/minecraft/world/level/ItemLike;Lnet/minecraft/world/item/CreativeModeTab$TabVisibility;)V", &[modifier, gear, only_search]);
+        let stack = rt.new_object("net/minecraft/world/item/ItemStack");
+        c(&mut rt, "net/minecraft/world/item/ItemStack.<init>.(Lnet/minecraft/world/level/ItemLike;)V", &[stack, gear]);
+        let stacks = crate::jutil::new_list(&mut rt, vec![stack]);
+        c(&mut rt, "net/minecraft/world/item/CreativeModeTab$Output.acceptAll.(Ljava/util/Collection;)V", &[modifier, stacks]);
+        let got: Vec<String> = crate::jutil::elements(&rt, list).into_iter().filter_map(|v| rt.str_of(v).map(str::to_owned)).collect();
+        assert_eq!(got, ["t:gear PARENT_AND_SEARCH_TABS", "t:gear SEARCH_TAB_ONLY", "t:gear PARENT_AND_SEARCH_TABS"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     #[test]
     fn a_tab_holds_what_its_generator_and_the_contents_event_accept() {

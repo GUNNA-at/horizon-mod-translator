@@ -158,6 +158,35 @@ pub trait Host {
     fn game_time(&self) -> i64 {
         0
     }
+    /// The world's time of day in ticks (`Level.getDayTime`); it counts past 24000.
+    fn day_time(&self) -> i64 {
+        self.game_time()
+    }
+    /// The light at `pos` as `(block, sky)`, each 0 to 15 (`Level.getBrightness` of
+    /// `LightLayer.BLOCK` and `SKY`): open daylight where the host keeps none.
+    fn light(&self, _pos: [i32; 3]) -> (u8, u8) {
+        (0, 15)
+    }
+    /// The rain and thunder levels, each 0.0 to 1.0 (`Level.getRainLevel`, `getThunderLevel`).
+    fn weather(&self) -> (f32, f32) {
+        (0.0, 0.0)
+    }
+    /// The lowest block y and the height of the world (`getMinBuildHeight`, `getHeight`).
+    fn world_height(&self) -> (i32, i32) {
+        (-64, 384)
+    }
+    /// The strongest redstone signal reaching the block at `pos` from its six neighbours, 0 to 15
+    /// (`SignalGetter.getBestNeighborSignal`, what `hasNeighborSignal` asks): 0 where the world
+    /// isn't the authoritative server's.
+    fn neighbor_signal(&mut self, _pos: [i32; 3]) -> i32 {
+        0
+    }
+    /// Schedules a tick of `block` (a block name) at `pos` in `delay` game ticks
+    /// (`Level.scheduleTick`); one already queued there stays. False where nothing ticks blocks
+    /// (a client, an unknown block, a position not loaded).
+    fn schedule_block_tick(&mut self, _pos: [i32; 3], _block: &str, _delay: i32) -> bool {
+        false
+    }
     /// The acting player (the one whose click or action runs the mod): sneaking.
     fn player_sneaking(&self) -> bool {
         false
@@ -665,6 +694,16 @@ pub struct MemoryHost {
     pub cursor: [f32; 2],
     /// A host lent only to read and draw ([`Host::read_only`]).
     pub read_only: bool,
+    /// The time of day ([`Host::day_time`]).
+    pub day_time: i64,
+    /// Light by position, `(block, sky)`; unset positions are in open daylight.
+    pub light: HashMap<[i32; 3], (u8, u8)>,
+    /// The rain and thunder levels.
+    pub weather: (f32, f32),
+    /// The redstone signal reaching each position from its neighbours; unset ones get none.
+    pub signals: HashMap<[i32; 3], i32>,
+    /// Block ticks scheduled, in order: where, which block, in how many ticks.
+    pub scheduled: Vec<([i32; 3], String, i32)>,
 }
 
 impl Host for MemoryHost {
@@ -680,6 +719,25 @@ impl Host for MemoryHost {
     }
     fn game_time(&self) -> i64 {
         self.time
+    }
+    fn day_time(&self) -> i64 {
+        self.day_time
+    }
+    fn light(&self, pos: [i32; 3]) -> (u8, u8) {
+        self.light.get(&pos).copied().unwrap_or((0, 15))
+    }
+    fn weather(&self) -> (f32, f32) {
+        self.weather
+    }
+    fn neighbor_signal(&mut self, pos: [i32; 3]) -> i32 {
+        if self.client { 0 } else { self.signals.get(&pos).copied().unwrap_or(0) }
+    }
+    fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {
+        if self.client {
+            return false;
+        }
+        self.scheduled.push((pos, block.to_owned(), delay));
+        true
     }
     fn player_sneaking(&self) -> bool {
         self.sneaking

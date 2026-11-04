@@ -12,48 +12,112 @@ pub fn is_api(owner: &str) -> bool {
         .any(|p| owner.starts_with(p))
 }
 
-/// Every class in a jar (nested jars in `META-INF/jarjar` left out).
-pub fn classes(jar: &Path) -> Result<Vec<ClassFile>, String> {
-    let f = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
-    let mut zip = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
+/// The jars a jar bundles for NeoForge's jar-in-jar, as bytes: each `.jar` under
+/// `META-INF/jarjar/` and each path `META-INF/jarjar/metadata.json` lists (often
+/// `META-INF/jars/...`). Mixin's helper library (MixinExtras) is left out: only mixins use it.
+fn nested_jars<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<Vec<u8>> {
+    let mut paths: Vec<String> = Vec::new();
     for i in 0..zip.len() {
-        let mut e = zip.by_index(i).map_err(|e| e.to_string())?;
-        let name = e.name().map_err(|e| e.to_string())?.into_owned();
+        let Ok(e) = zip.by_index(i) else { continue };
+        let Ok(name) = e.name().map(|n| n.into_owned()) else { continue };
+        if name.starts_with("META-INF/jarjar/") && name.ends_with(".jar") {
+            paths.push(name);
+        }
+    }
+    let mut skipped: Vec<String> = Vec::new();
+    if let Ok(mut e) = zip.by_name("META-INF/jarjar/metadata.json") {
+        let mut text = String::new();
+        if e.read_to_string(&mut text).is_ok()
+            && let Ok(meta) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            for jar in meta["jars"].as_array().into_iter().flatten() {
+                let Some(path) = jar["path"].as_str() else { continue };
+                if jar["identifier"]["artifact"].as_str().is_some_and(|a| a.starts_with("mixinextras")) {
+                    skipped.push(path.to_owned());
+                } else if !paths.iter().any(|p| p == path) {
+                    paths.push(path.to_owned());
+                }
+            }
+        }
+    }
+    paths.retain(|p| !skipped.contains(p) && !p.rsplit('/').next().is_some_and(|f| f.starts_with("mixinextras")));
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let mut e = zip.by_name(&p).ok()?;
+            let mut b = Vec::new();
+            e.read_to_end(&mut b).ok()?;
+            Some(b)
+        })
+        .collect()
+}
+
+/// The classes in a zip, `META-INF` left out, those `have` names already left out too.
+fn zip_classes<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, have: &mut std::collections::HashSet<String>, out: &mut Vec<ClassFile>) {
+    for i in 0..zip.len() {
+        let Ok(mut e) = zip.by_index(i) else { continue };
+        let Ok(name) = e.name().map(|n| n.into_owned()) else { continue };
         if !name.ends_with(".class") || name.starts_with("META-INF/") {
             continue;
         }
         let mut b = Vec::new();
-        e.read_to_end(&mut b).map_err(|e| e.to_string())?;
-        if let Ok(c) = ClassFile::parse(&b) {
+        if e.read_to_end(&mut b).is_ok()
+            && let Ok(c) = ClassFile::parse(&b)
+            && have.insert(c.name.clone())
+        {
             out.push(c);
         }
     }
-    // Libraries the mod bundles (`META-INF/jarjar/*.jar`, NeoForge's jar-in-jar) run inside it:
-    // translate them with it. A class the mod itself has wins.
-    let have: std::collections::HashSet<String> = out.iter().map(|c| c.name.clone()).collect();
-    for i in 0..zip.len() {
-        let mut e = zip.by_index(i).map_err(|e| e.to_string())?;
-        let name = e.name().map_err(|e| e.to_string())?.into_owned();
-        if !(name.starts_with("META-INF/jarjar/") && name.ends_with(".jar")) {
-            continue;
-        }
-        let mut b = Vec::new();
-        e.read_to_end(&mut b).map_err(|e| e.to_string())?;
-        let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) else { continue };
-        for j in 0..inner.len() {
-            let Ok(mut f) = inner.by_index(j) else { continue };
-            let Ok(n) = f.name().map(|n| n.into_owned()) else { continue };
-            if !n.ends_with(".class") || n.starts_with("META-INF/") {
-                continue;
-            }
-            let mut cb = Vec::new();
-            if f.read_to_end(&mut cb).is_ok()
-                && let Ok(c) = ClassFile::parse(&cb)
-                && !have.contains(&c.name)
+}
+
+/// The names of the classes in a jar and in the libraries it bundles, from their paths (nothing
+/// parsed): which mod of several translated together a class is.
+pub fn class_names(jar: &Path) -> std::collections::HashSet<String> {
+    fn names<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, out: &mut std::collections::HashSet<String>) {
+        for i in 0..zip.len() {
+            let Ok(e) = zip.by_index(i) else { continue };
+            if let Ok(name) = e.name()
+                && !name.starts_with("META-INF/")
+                && let Some(class) = name.strip_suffix(".class")
             {
-                out.push(c);
+                out.insert(class.to_owned());
             }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    let Ok(mut zip) = std::fs::File::open(jar).map_err(|_| ()).and_then(|f| zip::ZipArchive::new(f).map_err(|_| ())) else {
+        return out;
+    };
+    names(&mut zip, &mut out);
+    for b in nested_jars(&mut zip) {
+        if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) {
+            names(&mut inner, &mut out);
+        }
+    }
+    out
+}
+
+/// Every class in a jar and in the libraries it bundles (NeoForge's jar-in-jar), which run inside
+/// it: translated with it. A class the mod itself has wins.
+pub fn classes(jar: &Path) -> Result<Vec<ClassFile>, String> {
+    classes_of(&[jar])
+}
+
+/// Every class of `jars` as one program (a mod with the mods that build on it, each with the
+/// libraries it bundles). A class an earlier jar has wins.
+pub fn classes_of(jars: &[&Path]) -> Result<Vec<ClassFile>, String> {
+    let mut out = Vec::new();
+    let mut have = std::collections::HashSet::new();
+    let mut nested = Vec::new();
+    for jar in jars {
+        let f = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
+        let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", jar.display()))?;
+        zip_classes(&mut zip, &mut have, &mut out);
+        nested.extend(nested_jars(&mut zip));
+    }
+    for b in nested {
+        if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) {
+            zip_classes(&mut inner, &mut have, &mut out);
         }
     }
     Ok(out)
@@ -62,18 +126,17 @@ pub fn classes(jar: &Path) -> Result<Vec<ClassFile>, String> {
 /// `META-INF/services` of a jar and the jars it bundles: interface → implementations, in
 /// internal names (`a/b/C`), as `ServiceLoader` finds them. The jar's own entries come first.
 pub fn services(jar: &Path) -> Result<BTreeMap<String, Vec<String>>, String> {
-    fn read(zip: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>, out: &mut BTreeMap<String, Vec<String>>, nested: &mut Vec<Vec<u8>>) {
+    services_of(&[jar])
+}
+
+/// [`services`] of several jars, in order.
+pub fn services_of(jars: &[&Path]) -> Result<BTreeMap<String, Vec<String>>, String> {
+    fn read<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, out: &mut BTreeMap<String, Vec<String>>) {
         for i in 0..zip.len() {
             let Ok(mut e) = zip.by_index(i) else { continue };
             let Ok(name) = e.name().map(|n| n.into_owned()) else { continue };
-            let mut b = Vec::new();
-            if name.starts_with("META-INF/jarjar/") && name.ends_with(".jar") {
-                if e.read_to_end(&mut b).is_ok() {
-                    nested.push(b);
-                }
-                continue;
-            }
             let Some(iface) = name.strip_prefix("META-INF/services/").filter(|n| !n.is_empty() && !n.contains('/')) else { continue };
+            let mut b = Vec::new();
             if e.read_to_end(&mut b).is_err() {
                 continue;
             }
@@ -86,16 +149,73 @@ pub fn services(jar: &Path) -> Result<BTreeMap<String, Vec<String>>, String> {
             }
         }
     }
-    let f = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
-    let mut zip = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
-    let (mut out, mut nested) = (BTreeMap::new(), Vec::new());
-    read(&mut zip, &mut out, &mut nested);
+    let mut out = BTreeMap::new();
+    let mut nested = Vec::new();
+    for jar in jars {
+        let f = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
+        let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", jar.display()))?;
+        read(&mut zip, &mut out);
+        nested.extend(nested_jars(&mut zip));
+    }
     for b in nested {
         if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(b)) {
-            read(&mut inner, &mut out, &mut Vec::new());
+            read(&mut inner, &mut out);
         }
     }
     Ok(out)
+}
+
+/// A jar's mod metadata (`META-INF/neoforge.mods.toml`, or Forge's older `mods.toml`) as text.
+fn mods_toml(jar: &Path) -> Option<String> {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(jar).ok()?).ok()?;
+    for name in ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"] {
+        let Ok(mut e) = zip.by_name(name) else { continue };
+        let mut text = String::new();
+        if e.read_to_string(&mut text).is_ok() {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// The mods a jar needs (its `[[dependencies.<id>]]` of type `required`, or `mandatory = true` in
+/// the older form), the loader and the game left out.
+pub fn dependencies(jar: &Path) -> Vec<String> {
+    let Some(text) = mods_toml(jar) else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut current: Option<(String, bool)> = None;
+    let mut in_dependency = false;
+    let finish = |current: &mut Option<(String, bool)>, out: &mut Vec<String>| {
+        if let Some((id, true)) = current.take()
+            && !matches!(id.as_str(), "neoforge" | "forge" | "minecraft" | "java")
+            && !out.contains(&id)
+        {
+            out.push(id);
+        }
+    };
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            finish(&mut current, &mut out);
+            in_dependency = line.starts_with("[[dependencies.");
+            if in_dependency {
+                current = Some((String::new(), false));
+            }
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let (k, v) = (k.trim(), v.trim().trim_matches('"').trim_matches('\''));
+        if let (true, Some((id, required))) = (in_dependency, current.as_mut()) {
+            match k {
+                "modId" => *id = v.to_owned(),
+                "type" => *required = v.eq_ignore_ascii_case("required"),
+                "mandatory" => *required = v == "true",
+                _ => {}
+            }
+        }
+    }
+    finish(&mut current, &mut out);
+    out
 }
 
 /// API methods the mod calls, with the number of its classes calling each.

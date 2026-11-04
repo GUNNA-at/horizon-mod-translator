@@ -99,54 +99,124 @@ struct Translated {
     content: Option<PathBuf>,
 }
 
-/// Translates the jar's code into a native mod bundle in `<game>/horizon-native-mods/<id>_translated/`
-/// (docs/mod-translator.md), with a content mod for the blocks its code registers. A mod with block
-/// entities (machines) needs its code's own blocks, which a vanilla template would replace (a chute
-/// would be a pressure plate): its content mod goes to `horizon-mods/` with the data of `carried`, the
-/// jar's carry-over ([`check::check`]'s, made here when not given), and stands over the carry-over's.
-/// Any other mod's content mod goes there only when nothing else is there.
-fn translate(jar: &Path, game: &Path, carried: Option<&Path>, log: Log) -> Option<Translated> {
-    let classes = horizon_mod_translator::classes(jar).ok()?;
-    if classes.is_empty() {
-        return None;
-    }
-    let id = horizon_mod_translator::bundle::mod_id(jar)?;
-    let out = game.join("horizon-native-mods").join(format!("{id}_translated"));
-    let _ = fs::remove_dir_all(&out);
-    match horizon_mod_translator::bundle::write(jar, &classes, &out) {
-        Ok((_, left)) => {
-            for l in left {
-                log(format!("{id}: not translated: {l}"));
-            }
-            let content = out.join("content");
-            let mods = game.join("horizon-mods").join(&id);
-            let machines = horizon_mod_translator::registrations(&classes)
+/// The jars in translation groups: a mod with the mods built on it (the jars that need it, by their
+/// manifests' required dependencies), each group in loading order (a mod before the mods that need
+/// it). Mods that reach into each other's classes share one engine, as they share one JVM; a mod
+/// nothing else in the pack needs and that needs nothing in it stands alone.
+fn groups(jars: &[PathBuf]) -> Vec<Vec<PathBuf>> {
+    let ids: Vec<Option<String>> = jars.iter().map(|j| horizon_mod_translator::bundle::mod_id(j)).collect();
+    let needs: Vec<Vec<usize>> = jars
+        .iter()
+        .enumerate()
+        .map(|(n, j)| {
+            horizon_mod_translator::dependencies(j)
                 .iter()
-                .any(|r| r.registry == "block_entity_type");
-            let mut stands = None;
-            if content.is_dir() && (machines || !mods.exists()) {
-                let own = out.join("carry-over");
-                let carried = match carried {
-                    Some(c) => Some(c.to_path_buf()),
-                    None if machines => check::check(jar, &own).ok().map(|_| own.join("carry")),
-                    None => None,
-                };
-                if let Some(carry) = carried.filter(|c| c.is_dir()) {
-                    merge_data(&carry, &content, &id);
-                }
-                let _ = fs::remove_dir_all(&own);
-                if copy_dir(&content, &mods).is_ok() && machines {
-                    stands = Some(mods);
+                .filter_map(|d| ids.iter().position(|i| i.as_deref() == Some(d.as_str())))
+                .filter(|&d| d != n)
+                .collect()
+        })
+        .collect();
+    // Connected by needs: each jar's group is the lowest index it reaches.
+    let mut group: Vec<usize> = (0..jars.len()).collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (n, ds) in needs.iter().enumerate() {
+            for &d in ds {
+                let low = group[n].min(group[d]);
+                if group[n] != low || group[d] != low {
+                    (group[n], group[d], changed) = (low, low, true);
                 }
             }
-            let _ = fs::remove_dir_all(&content);
-            Some(Translated { native: out, content: stands })
         }
+    }
+    let mut out = Vec::new();
+    for g in 0..jars.len() {
+        let mut members: Vec<usize> = (0..jars.len()).filter(|&m| group[m] == g).collect();
+        let mut order: Vec<usize> = Vec::new();
+        while !members.is_empty() {
+            // The next mod whose needs are in (a cycle takes the first left).
+            let next = members.iter().position(|m| needs[*m].iter().all(|d| order.contains(d))).unwrap_or(0);
+            order.push(members.remove(next));
+        }
+        if !order.is_empty() {
+            out.push(order.into_iter().map(|m| jars[m].clone()).collect());
+        }
+    }
+    out
+}
+
+/// Translates a group's code ([`groups`]) into one native mod bundle in
+/// `<game>/horizon-native-mods/<id>_translated/` for the first mod's id (docs/mod-translator.md),
+/// with a content mod for the blocks each of them registers. A mod with block entities (machines)
+/// needs its code's own blocks, which a vanilla template would replace (a chute would be a pressure
+/// plate): its content mod goes to `horizon-mods/` with the data of `carried(jar)`, the jar's
+/// carry-over ([`check::check`]'s, made here when not given), and stands over the carry-over's. Any
+/// other mod's content mod goes there only when nothing else is there. What each jar became, by jar.
+fn translate(group: &[PathBuf], game: &Path, carried: &dyn Fn(&Path) -> Option<PathBuf>, log: Log) -> Vec<(PathBuf, Translated)> {
+    let jars: Vec<&Path> = group.iter().map(PathBuf::as_path).collect();
+    let Some(id) = jars.first().and_then(|j| horizon_mod_translator::bundle::mod_id(j)) else {
+        return Vec::new();
+    };
+    let classes = match horizon_mod_translator::classes_of(&jars) {
+        Ok(c) if !c.is_empty() => c,
+        _ => return Vec::new(),
+    };
+    let natives = game.join("horizon-native-mods");
+    let out = natives.join(format!("{id}_translated"));
+    let _ = fs::remove_dir_all(&out);
+    let left = match horizon_mod_translator::bundle::write_group(&jars, &classes, &out, None) {
+        Ok((_, left)) => left,
         Err(e) => {
             log(format!("{id}: code not translated: {e}"));
-            None
+            return Vec::new();
         }
+    };
+    if jars.len() > 1 {
+        let with: Vec<String> = jars[1..].iter().filter_map(|j| horizon_mod_translator::bundle::mod_id(j)).collect();
+        log(format!("{id}: translated with the mods built on it: {}", with.join(", ")));
     }
+    for l in left {
+        log(format!("{id}: not translated: {l}"));
+    }
+    let mut done = Vec::new();
+    for (n, jar) in jars.iter().enumerate() {
+        let Some(ns) = horizon_mod_translator::bundle::mod_id(jar) else { continue };
+        let content = if n == 0 { out.join("content") } else { out.join(format!("content-{ns}")) };
+        if n > 0 {
+            // Its code is in the group's engine: a bundle of its own from an earlier install would
+            // declare its blocks twice.
+            let _ = fs::remove_dir_all(natives.join(format!("{ns}_translated")));
+        }
+        let mods = game.join("horizon-mods").join(&ns);
+        let machines = |classes: &[horizon_mod_translator::class::ClassFile]| {
+            horizon_mod_translator::registrations(classes).iter().any(|r| r.registry == "block_entity_type")
+        };
+        let machines = if jars.len() == 1 {
+            machines(&classes)
+        } else {
+            horizon_mod_translator::classes(jar).is_ok_and(|c| machines(&c))
+        };
+        let mut stands = None;
+        if content.is_dir() && (machines || !mods.exists()) {
+            let own = out.join(format!("carry-over-{ns}"));
+            let carried = match carried(jar) {
+                Some(c) => Some(c),
+                None if machines => check::check(jar, &own).ok().map(|_| own.join("carry")),
+                None => None,
+            };
+            if let Some(carry) = carried.filter(|c| c.is_dir()) {
+                merge_data(&carry, &content, &ns);
+            }
+            let _ = fs::remove_dir_all(&own);
+            if copy_dir(&content, &mods).is_ok() && machines {
+                stands = Some(mods);
+            }
+        }
+        let _ = fs::remove_dir_all(&content);
+        done.push((jar.to_path_buf(), Translated { native: out.clone(), content: stands }));
+    }
+    done
 }
 
 /// Every file under `dir`, as paths relative to it.
@@ -208,17 +278,31 @@ fn place(carries: &[PathBuf], game: &Path, out: &mut Outcome) -> Result<Vec<(Pat
 
 fn jars(jars: &[PathBuf], game: &Path, work: &Path, log: Log) -> Result<Outcome, String> {
     let mut out = Outcome::default();
-    let mut carries = Vec::new();
-    let mut checked = Vec::new();
+    // Each jar checked: its verdict and carry-over.
+    let mut checks = Vec::new();
     for jar in jars {
         let stem = jar.file_stem().unwrap_or_default().to_string_lossy().into_owned();
         let dir = work.join("mods").join(&stem);
         let _ = fs::remove_dir_all(&dir);
-        match check::check(jar, &dir) {
+        let c = check::check(jar, &dir);
+        match &c {
+            Ok(c) => log(format!("{}: {}. {}", c.mod_id, c.verdict.label(), c.summary)),
+            Err(e) => log(format!("{}: {e}", jar.display())),
+        }
+        checks.push((jar.clone(), stem, dir.join("carry"), c));
+    }
+    // Their code, a mod with the mods built on it as one engine.
+    let carried = |j: &Path| checks.iter().find(|(jar, _, _, c)| jar == j && c.is_ok()).map(|(_, _, carry, _)| carry.clone());
+    let mut translated: Vec<(PathBuf, Translated)> = Vec::new();
+    for group in groups(jars) {
+        translated.extend(translate(&group, game, &carried, log));
+    }
+    let mut carries = Vec::new();
+    let mut checked = Vec::new();
+    for (jar, stem, carry, c) in checks {
+        let translated = translated.iter().position(|(j, _)| *j == jar).map(|i| translated.swap_remove(i).1);
+        match c {
             Ok(c) => {
-                log(format!("{}: {}. {}", c.mod_id, c.verdict.label(), c.summary));
-                let carry = dir.join("carry");
-                let translated = translate(jar, game, Some(&carry), log);
                 // A translated content mod that stands keeps the carry-over's data, not its blocks.
                 let stands = translated.as_ref().is_some_and(|t| t.content.is_some());
                 if c.verdict != Verdict::No && !stands && carry.join(horizon_mods::manifest::MANIFEST).is_file() {
@@ -226,17 +310,13 @@ fn jars(jars: &[PathBuf], game: &Path, work: &Path, log: Log) -> Result<Outcome,
                 }
                 checked.push((c, carry, translated));
             }
-            Err(e) => {
-                log(format!("{}: {e}", jar.display()));
-                let translated = translate(jar, game, None, log);
-                out.mods.push(Installed {
-                    mod_id: stem,
-                    path: translated.as_ref().and_then(|t| t.content.clone()),
-                    native: translated.map(|t| t.native),
-                    verdict: Verdict::No,
-                    summary: e,
-                });
-            }
+            Err(e) => out.mods.push(Installed {
+                mod_id: stem,
+                path: translated.as_ref().and_then(|t| t.content.clone()),
+                native: translated.map(|t| t.native),
+                verdict: Verdict::No,
+                summary: e,
+            }),
         }
     }
     let placed = place(&carries, game, &mut out)?;
@@ -311,8 +391,8 @@ fn pack(
             .collect();
         jars.sort();
         jars.dedup();
-        for jar in jars {
-            let Some(t) = translate(&jar, game, None, log) else { continue };
+        let translated: Vec<(PathBuf, Translated)> = groups(&jars).iter().flat_map(|g| translate(g, game, &|_| None, log)).collect();
+        for (jar, t) in translated {
             let id = horizon_mod_translator::bundle::mod_id(&jar).unwrap_or_default();
             match out.mods.iter_mut().find(|m| m.mod_id == id) {
                 Some(m) => {
@@ -467,6 +547,35 @@ mod tests {
         // Vanilla's files and other mods' namespaces stay out.
         assert_eq!(read("data/minecraft/recipe/stone.json"), None);
         assert_eq!(read("data/quark/tags/item/gems.json"), None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_addon_is_translated_with_the_mod_it_needs_and_after_it() {
+        let root = std::env::temp_dir().join(format!("port-install-groups-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let toml = |id: &str, needs: &[(&str, &str)]| {
+            let mut t = format!("modLoader=\"javafml\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"{id}\"\nversion=\"1\"\n");
+            for (dep, kind) in needs {
+                t.push_str(&format!("[[dependencies.{id}]]\n    modId=\"{dep}\"\n    type=\"{kind}\"\n    versionRange=\"*\"\n"));
+            }
+            t
+        };
+        let make = |file: &str, id: &str, needs: &[(&str, &str)]| {
+            let path = root.join(file);
+            jar(&path, &[("META-INF/neoforge.mods.toml", &toml(id, needs))]);
+            path
+        };
+        // The addon sorts first and needs a library its own jar carries (not in the pack); a mod
+        // that only might use the base, and one on its own, stand alone.
+        let addon = make("a-gears-addon.jar", "gears_addon", &[("neoforge", "required"), ("gears", "required"), ("esl", "required")]);
+        let deeper = make("b-gears-more.jar", "gears_more", &[("gears_addon", "required")]);
+        let maybe = make("c-maybe.jar", "maybe", &[("gears", "optional")]);
+        let alone = make("d-alone.jar", "alone", &[]);
+        let base = make("z-gears.jar", "gears", &[("minecraft", "required")]);
+        let jars = vec![addon.clone(), deeper.clone(), maybe.clone(), alone.clone(), base.clone()];
+        assert_eq!(groups(&jars), vec![vec![base, addon, deeper], vec![maybe], vec![alone]]);
         fs::remove_dir_all(&root).unwrap();
     }
 

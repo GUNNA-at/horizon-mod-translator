@@ -32,16 +32,24 @@ fn translate(jar: &Path, out: &Path) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // `bundle <jar> <out> [--runtime <horizon-compat-core dir>]`: with `--runtime`, a bundle for
-    // tools whose engine links the runtime core instead of carrying it (see `bundle::write_with`).
-    let runtime = match (args.get(3).map(String::as_str), args.get(4)) {
-        (Some("--runtime"), Some(dir)) => Some(Path::new(dir).to_path_buf()),
-        _ => None,
-    };
-    if args.first().map(String::as_str) == Some("bundle") && (args.len() == 3 || (args.len() == 5 && runtime.is_some())) {
-        let jar = Path::new(&args[1]);
-        let result = horizon_mod_translator::classes(jar)
-            .and_then(|c| horizon_mod_translator::bundle::write_with(jar, &c, Path::new(&args[2]), runtime.as_deref()));
+    // `bundle <jar> <out> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]`: `--with`
+    // translates mods built on the first with it, as one engine (see `bundle::write_group`);
+    // `--runtime`, a bundle for tools whose engine links the runtime core instead of carrying it.
+    if args.first().map(String::as_str) == Some("bundle") && args.len() >= 3 {
+        let (mut with, mut runtime, mut rest) = (Vec::new(), None, args[3..].iter());
+        while let Some(a) = rest.next() {
+            match (a.as_str(), rest.next()) {
+                ("--with", Some(j)) => with.push(Path::new(j)),
+                ("--runtime", Some(dir)) => runtime = Some(Path::new(dir)),
+                _ => {
+                    eprintln!("bundle <jar> <out dir> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        let jars: Vec<&Path> = std::iter::once(Path::new(&args[1])).chain(with).collect();
+        let result = horizon_mod_translator::classes_of(&jars)
+            .and_then(|c| horizon_mod_translator::bundle::write_group(&jars, &c, Path::new(&args[2]), runtime));
         return match result {
             Ok((id, left)) => {
                 println!("{id}: native mod bundle in {}", args[2]);
@@ -66,9 +74,12 @@ fn main() -> ExitCode {
         };
     }
     if args.first().map(String::as_str) != Some("coverage") || args.len() < 2 {
-        eprintln!("usage: horizon-mod-translator coverage <jar>... | translate <jar> <out dir> | bundle <jar> <out dir> [--runtime <horizon-compat-core dir>]");
+        eprintln!("usage: horizon-mod-translator coverage <jar>... | translate <jar> <out dir> | bundle <jar> <out dir> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]");
         return ExitCode::FAILURE;
     }
+    // The mapping answers the core's questions (`Rt::is_a` of Minecraft's class families): without
+    // it, a handler that checks its receiver's class finds no widget, block or entity.
+    horizon_compat::install();
     for jar in &args[1..] {
         let classes = match horizon_mod_translator::classes(Path::new(jar)) {
             Ok(c) => c,

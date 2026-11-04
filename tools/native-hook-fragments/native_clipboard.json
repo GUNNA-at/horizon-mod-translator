@@ -2,7 +2,5 @@
   "hooks": [],
   "rust_summary": "the clipboard for a mod's text fields (`native_clipboard`, `native_set_clipboard`).",
   "doc_summary": "`native_clipboard()` is the text on the clipboard (`KeyboardHandler.getClipboard`), empty when it holds none; `native_set_clipboard(text)` copies text to it (`KeyboardHandler.setClipboard`), empty text not copied. Client-side. Bundles need \"hooks\": @API:native_clipboard@.",
-  "comments": [
-    "crates/horizon-client/src/game/native_hooks.rs"
-  ]
+  "comments": []
 }

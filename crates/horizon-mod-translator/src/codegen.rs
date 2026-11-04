@@ -173,6 +173,9 @@ pub struct Program<'a> {
     lambda_ids: BTreeMap<String, u32>,
     /// The mod's id: picks its `@Mod` class among several (libraries bundled in its jar have theirs).
     pub mod_id: Option<String>,
+    /// The mods built on it translated with it (its addons), in loading order: FML constructs a
+    /// mod after the mods it needs, so theirs come after its own.
+    pub addons: Vec<String>,
     /// Methods (`name.desc`) that ask who called them (`StackWalker.getCallerClass`): calls to
     /// them record the calling class first. Everything else keeps no call stack.
     caller_sensitive: BTreeSet<String>,
@@ -200,6 +203,7 @@ impl<'a> Program<'a> {
                 .collect(),
             lambda_ids: BTreeMap::new(),
             mod_id: None,
+            addons: Vec::new(),
             caller_sensitive: classes
                 .iter()
                 .flat_map(|c| c.methods.iter().map(move |m| (c, m)))
@@ -215,10 +219,9 @@ impl<'a> Program<'a> {
         }
     }
 
-    /// The `@Mod` class FML would construct, and the constructor it would call (one taking the
-    /// event bus): the class whose annotation names the mod id, or the only candidate.
     /// The `@Mod` classes FML constructs, each with the constructor it would pick (the one taking
-    /// the mod bus): mods bundled in the jar first, the jar's own mod (`mod_id`) last.
+    /// the mod bus), in FML's order (a mod after the ones it needs): mods bundled in the jar first,
+    /// then the jar's own mod (`mod_id`), then its addons translated with it.
     fn mod_mains(&self) -> Vec<(&'a ClassFile, &'a crate::class::Method)> {
         let mut found: Vec<(&'a ClassFile, &'a crate::class::Method)> = Vec::new();
         for c in self.classes.values() {
@@ -234,8 +237,15 @@ impl<'a> Program<'a> {
                 found.push((c, m));
             }
         }
-        let own = |c: &ClassFile| c.annotation_of(MOD).and_then(|a| a.value("value")) == self.mod_id.as_deref();
-        found.sort_by_key(|(c, _)| (own(c), c.name.clone()));
+        let rank = |c: &ClassFile| {
+            let id = c.annotation_of(MOD).and_then(|a| a.value("value"));
+            if id.is_some() && id == self.mod_id.as_deref() {
+                1
+            } else {
+                self.addons.iter().position(|a| Some(a.as_str()) == id).map_or(0, |i| i + 2)
+            }
+        };
+        found.sort_by_key(|(c, _)| (rank(c), c.name.clone()));
         found
     }
 

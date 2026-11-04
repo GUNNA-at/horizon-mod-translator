@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "light and redstone inside a level hook, and a block tick scheduled from anywhere (`GameLevel::native_light_here`, `GameLevel::native_neighbor_signal_here`, `Game::native_schedule_block_tick_at`).",
+  "doc_summary": "`native_light_here(pos)` and `native_neighbor_signal_here(ticks, pos)` give a level hook (`tick_block`, `random_tick`) what `native_light` and `native_neighbor_signal` give elsewhere, so a mod's crop or redstone-driven block reads them in its own tick. `native_schedule_block_tick_at(pos, block, delay)` schedules a block tick (`Level.scheduleTick`) from code outside a level hook, a block entity's tick or an item's use, as `native_schedule_block_tick` does inside one; false off an authoritative server. Bundles that use them need \"hooks\": @API:native_level_reads@.",
+  "comments": []
+}

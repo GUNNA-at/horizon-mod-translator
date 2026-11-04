@@ -1324,6 +1324,46 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     item's), `getDescriptionId`, `getDisplayName` (brackets, italic for a custom name; no rarity
     colour or hover yet), each step a virtual call so a mod's override answers. Create's filter screen
     had an empty title for want of `Item.getDescription`.
+  - [x] 2026-11-04 Addons with the mod they build on: a mod group is one engine. Create: New Age
+    extends Create's classes (`GeneratorCoilBlockEntity extends KineticBlockEntity`) and registers
+    through Create's `CreateRegistrate`, so it must share Create's runtime, as both share one JVM.
+    The installer (`horizon-port-pack/src/install.rs`, `groups`) puts each jar with the jars that
+    require it (manifests' required dependencies within the pack; a library a jar carries in
+    jar-in-jar is its own), in loading order, and translates each group once
+    (`bundle::write_group`, CLI `bundle <jar> <out> --with <addon jar>...`): the classes of all of
+    them (`classes_of`, the first jar's class winning), their services, one engine
+    `<first id>_translated`; FML's order for the `@Mod` constructors (bundled libraries, the mod,
+    then its addons, `Program::addons`). Every hook asks `<engine>::ours(id)` (the engine's
+    `NAMESPACES`) instead of one namespace; the `content` hook declares, for each content mod, its
+    own namespace's blocks, items and tabs; each mod keeps a content mod of its own (`content/` for
+    the first, `content-<id>/` for each addon, with the blocks its own classes register,
+    `class_names`), and the installer removes an addon's old standalone bundle. Each
+    `DeferredRegister` names in the mod id it was made with (`$ns`). NeoForge's jar-in-jar is read
+    from `META-INF/jarjar/metadata.json` (New Age keeps its jars in `META-INF/jars/`; MixinExtras is
+    left out). Measured: Create + New Age install as one bundle; the harness on that engine declares
+    New Age's 34 blocks and 18 items under `create_new_age` and Create's filter test still passes.
+    New Age's tab was empty: Registrate's `CreativeModeTabModifier` implements `CreativeModeTab.Output`
+    and gets `accept(ItemLike)` from the interface; a missed call now retries on the interfaces
+    the receiver's classes implement (`retry_classes`), and a mod's own `Output` takes the default
+    methods (a stack and the default visibility to its own `accept(stack, visibility)`). The world
+    around a block, for any mod (`horizon-compat/src/level_env.rs`, Host `light`, `day_time`,
+    `weather`, `world_height`, `neighbor_signal`, `schedule_block_tick`, from the game's natives
+    `native_light`, `native_weather`, `native_day_time`, `native_world_height`,
+    `native_neighbor_signal`, and new ones for level hooks and for code outside them, fragment
+    `native_level_reads.json`): `getBrightness` (`LightLayer`), `getRawBrightness`,
+    `getMaxLocalRawBrightness`, `canSeeSky`, `getSkyDarken`/`isDay`/`isNight` (1.21.1's formula:
+    beds work from 12542 to 23459, 12010 to 23991 in rain, as the wiki says), `getTimeOfDay`,
+    `getMoonPhase`, rain and thunder, `hasNeighborSignal`/`getBestNeighborSignal` (Create's clutch
+    and gearshift), `scheduleTick` (to the mod block's `tick` through the `tick_block` hook),
+    `getBlockTicks`, `getRandom`, the world's height. 3 tests.
+    Measured on the group's engine (harness built `WITH=` New Age's jar): `TABS=1` gives Create's
+    203 + 377 items and New Age's tab `create_new_age:tab` 48 items, generator coil first;
+    `COIL=<New Age's content mod>` (`scratchpad/harness/src/coil.rs`): Create's creative motor
+    (facing east, 16 rpm) beside New Age's generator coil (axis x), twelve layered magnets round it:
+    the coil (`GeneratorCoilBlockEntity`, a subclass of Create's `KineticBlockEntity`) turns at 16,
+    applies 72 stress (its own 24 and the magnets' 48) and makes 22 energy a tick (48 × 16 ×
+    0.029296875, the config's `suToEnergy`, cut to an int); `COIL_MAGNETS=0`: stress 24, energy 0.
+    `FILTER=` on the same engine: Create's filter test unchanged.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

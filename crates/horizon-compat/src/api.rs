@@ -115,6 +115,20 @@ fn retry_classes(rt: &Rt, owner: &'static str, args: &[V]) -> Vec<&'static str> 
             out.push("java/lang/Enum");
         }
     }
+    // Then the interfaces those classes implement, as the JVM finds a default method after the
+    // superclasses': a mod's `CreativeModeTab.Output` takes `accept(ItemLike)` from the interface.
+    let mut next = 0;
+    let mut classes: Vec<&'static str> = std::iter::once(owner).chain(out.iter().copied()).collect();
+    while next < classes.len() {
+        let c = classes[next];
+        next += 1;
+        for &i in rt.interfaces.get(c).copied().unwrap_or_default() {
+            if i != owner && !classes.contains(&i) {
+                classes.push(i);
+                out.push(i);
+            }
+        }
+    }
     out
 }
 
@@ -777,11 +791,27 @@ fn qualified(rt: &Rt, name: &str) -> String {
     if name.contains(':') { name.to_owned() } else { format!("{}:{name}", rt.namespace) }
 }
 
+/// A name registered through `register`, a `DeferredRegister`: in the register's own namespace (the
+/// mod id it was created with; an engine holding several mods has several).
+fn qualified_in(rt: &Rt, register: V, name: &str) -> String {
+    match rt.str_of(rt.get_field(register, "$ns")).filter(|ns| !ns.is_empty()) {
+        Some(ns) if !name.contains(':') => format!("{ns}:{name}"),
+        _ => qualified(rt, name),
+    }
+}
+
 /// Whether `owner` is one of the level's interfaces or classes (`Level`, `LevelAccessor`,
 /// `BlockGetter`...): what reads and writes the game's blocks.
 pub(crate) fn is_level(owner: &str) -> bool {
     owner.starts_with("net/minecraft/")
-        && (owner.ends_with("Level") || owner.ends_with("LevelAccessor") || owner.ends_with("LevelReader") || owner.ends_with("BlockGetter") || owner.ends_with("LevelWriter"))
+        && (owner.ends_with("Level")
+            || owner.ends_with("LevelAccessor")
+            || owner.ends_with("LevelReader")
+            || owner.ends_with("BlockGetter")
+            || owner.ends_with("LevelWriter")
+            || owner.ends_with("BlockAndTintGetter")
+            || owner.ends_with("SignalGetter")
+            || owner.ends_with("LevelTimeAccess"))
 }
 
 /// Registration, the level and block states: the API that reaches the game.
@@ -789,6 +819,13 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let (owner, name, desc) = crate::parts(key)?;
     let level = is_level(owner);
+    // Light, the sky, weather, redstone and scheduled ticks, from the host's world.
+    if level && let Some(v) = crate::level_env::call(rt, name, desc, args) {
+        return Some(v);
+    }
+    if crate::level_env::is_ticks(owner) {
+        return crate::level_env::ticks_call(rt, name);
+    }
     Some(match (owner, name) {
         // NeoForge registration
         // `createDataComponents(registryKey, modid)`, or `(modid)` alone in older NeoForge.
@@ -797,33 +834,37 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let registry = if keyed { rt.str_of(a(0)).unwrap_or("unknown").to_owned() } else { "data_component_type".to_owned() };
             let ns = rt.str_of(if keyed { a(1) } else { a(0) }).unwrap_or("").to_owned();
             if rt.namespace.is_empty() {
-                rt.namespace = ns;
+                rt.namespace = ns.clone();
             }
             let r = rt.new_object(owner);
             let reg = rt.string(&registry);
             rt.put_field(r, "$registry", reg);
+            let ns = rt.string(&ns);
+            rt.put_field(r, "$ns", ns);
             r
         }
         ("net/neoforged/neoforge/registries/DeferredRegister", "createBlocks" | "createItems") => {
             let ns = rt.str_of(a(0)).unwrap_or("").to_owned();
             if rt.namespace.is_empty() {
-                rt.namespace = ns;
+                rt.namespace = ns.clone();
             }
             let kind = if name == "createBlocks" { "block" } else { "item" };
             let r = rt.new_object(owner);
             let reg = rt.string(kind);
             rt.put_field(r, "$registry", reg);
+            let ns = rt.string(&ns);
+            rt.put_field(r, "$ns", ns);
             r
         }
         (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") && desc.starts_with("(Ljava/lang/String;") => {
             let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("unknown").to_owned();
-            let id = qualified(rt, rt.str_of(a(1)).unwrap_or(""));
+            let id = qualified_in(rt, a(0), rt.str_of(a(1)).unwrap_or(""));
             rt.suppliers.push((registry.clone(), id.clone(), a(2)));
             holder(rt, &registry, &id)
         }
         (o, "registerBlock" | "registerItem") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
             let registry = if name == "registerBlock" { "block" } else { "item" };
-            let id = qualified(rt, rt.str_of(a(1)).unwrap_or(""));
+            let id = qualified_in(rt, a(0), rt.str_of(a(1)).unwrap_or(""));
             let props = if desc.contains("Properties;)") || args.len() > 3 { a(3) } else { V::NULL };
             let apply = rt.lambda("compat:apply", vec![a(2), props]);
             rt.suppliers.push((registry.into(), id.clone(), apply));
@@ -833,7 +874,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // type is a plain object the mod configures, and registered under its name.
         (o, "registerComponentType") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
             let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("data_component_type").to_owned();
-            let id = qualified(rt, rt.str_of(a(1)).unwrap_or(""));
+            let id = qualified_in(rt, a(0), rt.str_of(a(1)).unwrap_or(""));
             let ty = crate::components::build_with(rt, a(2));
             rt.registered.insert((registry.clone(), id.clone()), ty);
             holder(rt, &registry, &id)
@@ -919,8 +960,11 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "isDebug") if level => V::I(0),
         (_, "getLevelData") if level => rt.intern("compat:level-data".into(), |rt| rt.new_object(LEVEL_DATA)),
         (LEVEL_DATA, n) => match n {
-            "getGameTime" | "getDayTime" => V::J(rt.host().map_or(0, |h| h.game_time())),
-            "isRaining" | "isThundering" | "isHardcore" => V::I(0),
+            "getGameTime" => V::J(rt.host().map_or(0, |h| h.game_time())),
+            "getDayTime" => V::J(rt.host().map_or(0, |h| h.day_time())),
+            "isRaining" => V::I(rt.host().is_some_and(|h| f64::from(h.weather().0) > 0.2) as i32),
+            "isThundering" => V::I(rt.host().is_some_and(|h| f64::from(h.weather().1) > 0.9) as i32),
+            "isHardcore" => V::I(0),
             _ => return None,
         },
         // The chunk holding a position: its level answers for it.
@@ -963,10 +1007,6 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "ambientLight" => V::F(0.0),
             _ => return None,
         },
-        (_, "getMinY" | "getMinBuildHeight") if level => V::I(-64),
-        (_, "getMaxY") if level => V::I(319),
-        (_, "getMaxBuildHeight") if level => V::I(320),
-        (_, "getHeight") if level && desc == "()I" => V::I(384),
         (_, "getSeaLevel") if level => V::I(63),
         (_, "isOutsideBuildHeight") if level => {
             let y = if desc.starts_with("(I)") { a(1).i() } else { pos_of(rt, a(1))[1] };
@@ -1297,6 +1337,9 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
                 }
             }
         }
+        // `LightLayer`: the sky's light, then the blocks'.
+        "net/minecraft/world/level/LightLayer.SKY" => api_enum(rt, crate::level_env::LIGHT_LAYER, "SKY", 0),
+        "net/minecraft/world/level/LightLayer.BLOCK" => api_enum(rt, crate::level_env::LIGHT_LAYER, "BLOCK", 1),
         // `ClipContext`'s modes, what a ray stops at (`getPlayerPOVHitResult`, `Level.clip`).
         k if k.starts_with("net/minecraft/world/level/ClipContext$Fluid.") || k.starts_with("net/minecraft/world/level/ClipContext$Block.") => {
             let fluid = k.contains("$Fluid.");
@@ -1361,6 +1404,27 @@ mod tests {
         assert_eq!(call(&mut rt, "net/minecraft/core/BlockPos.getZ.()I", &[q]), V::I(-7));
         let south = call(&mut rt, "net/minecraft/core/Direction.getOpposite.()Lnet/minecraft/core/Direction;", &[north]);
         assert_eq!(call(&mut rt, "net/minecraft/core/Direction.getStepZ.()I", &[south]), V::I(1));
+    }
+
+    /// An engine holding a mod and an addon of it: each `DeferredRegister` names what it registers
+    /// in the mod id it was created with, whichever registered first.
+    #[test]
+    fn each_deferred_register_names_in_its_own_mod_id() {
+        let mut rt = Rt::new();
+        crate::install();
+        const CREATE: &str = "net/neoforged/neoforge/registries/DeferredRegister.create.(Lnet/minecraft/resources/ResourceKey;Ljava/lang/String;)Lnet/neoforged/neoforge/registries/DeferredRegister;";
+        const REGISTER: &str = "net/neoforged/neoforge/registries/DeferredRegister.register.(Ljava/lang/String;Ljava/util/function/Supplier;)Lnet/neoforged/neoforge/registries/DeferredHolder;";
+        let blocks = get_static(&mut rt, "net/minecraft/core/registries/Registries.BLOCK");
+        let register = |rt: &mut Rt, ns: &str, name: &str| {
+            let ns = rt.string(ns);
+            let r = call(rt, CREATE, &[blocks, ns]);
+            let name = rt.string(name);
+            let h = call(rt, REGISTER, &[r, name, V::NULL]);
+            rt.str_of(rt.get_field(h, "$id")).unwrap_or("").to_owned()
+        };
+        assert_eq!(register(&mut rt, "create", "shaft"), "create:shaft");
+        assert_eq!(register(&mut rt, "create_new_age", "generator_coil"), "create_new_age:generator_coil");
+        assert_eq!(register(&mut rt, "create_new_age", "create:named"), "create:named");
     }
 
     /// Create tesselates the blocks of a contraption whose `getRenderShape()` is `MODEL`, compared

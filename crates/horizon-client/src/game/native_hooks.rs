@@ -3683,6 +3683,29 @@ impl GameLevel<'_> {
     pub(super) fn native_state_text(&self, pos: [i32; 3]) -> String {
         self.native_state_id_text(self.block_state(BlockPos::new(pos[0], pos[1], pos[2])))
     }
+    /// The light at `pos` in this level, `(block, sky)`, each 0 to 15, as
+    /// `Game::native_light` reads it elsewhere: a mod's crop checks it in its
+    /// random tick. `(0, 0)` in a chunk that isn't loaded.
+    /// API @API:native_level_reads@.
+    pub(super) fn native_light_here(&self, pos: [i32; 3]) -> (u8, u8) {
+        if !self.world.loaded(pos[0], pos[2]) {
+            return (0, 0);
+        }
+        let light = self.world.light(pos[0], pos[1], pos[2]);
+        (light & 15, light >> 4)
+    }
+    /// The strongest redstone signal reaching the block at `pos` from its six
+    /// neighbours, 0 to 15 (`SignalGetter.getBestNeighborSignal`), as
+    /// `Game::native_neighbor_signal` reads it elsewhere: a mod block's
+    /// scheduled tick switches on it. `ticks` is the hook's. 0 where this level
+    /// isn't the server's. API @API:native_level_reads@.
+    pub(super) fn native_neighbor_signal_here(&mut self, ticks: &mut Ticks, pos: [i32; 3]) -> i32 {
+        if !self.native_authoritative {
+            return 0;
+        }
+        let b = self.behaviours;
+        b.best_neighbor_signal(self, ticks, BlockPos::new(pos[0], pos[1], pos[2]))
+    }
     /// Whether block `block` (`minecraft:oak_leaves`) is in block tag `tag`
     /// (`minecraft:leaves`, no `#`), as the loaded tags hold it: translated
     /// Java mods' `BlockState.is(TagKey)`. False for an unknown tag. API 81.
@@ -3923,6 +3946,18 @@ impl Game<'_> {
         }
         let at = BlockPos::new(pos[0], pos[1], pos[2]);
         self.with_level(|b, level, ticks| b.best_neighbor_signal(level, ticks, at))
+    }
+    /// Schedules a tick of `block` (a block name) at `pos` in the level in
+    /// place in `delay` game ticks (`Level.scheduleTick(pos, block, delay)`,
+    /// normal priority), from code outside a level hook: a block entity's tick,
+    /// an item's use. A tick of that block already queued there is kept. False
+    /// for an unknown block, a position that isn't loaded, or a window that
+    /// isn't a server. API @API:native_level_reads@.
+    pub(super) fn native_schedule_block_tick_at(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {
+        if self.serving.is_none() && self.options.dedicated.is_none() {
+            return false;
+        }
+        self.with_level(|_, level, ticks| level.native_schedule_block_tick(ticks, pos, block, delay))
     }
     /// The light at `pos` in the world in place, as `(block, sky)`, each 0 to
     /// 15 (`Level.getBrightness` for `LightLayer.BLOCK` and `LightLayer.SKY`).
