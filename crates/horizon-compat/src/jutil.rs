@@ -363,7 +363,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => Data::Table(Table { sorted: kind == "sorted", ..Table::default() }),
         };
         if let Some(o) = rt.heap.get_mut(this.r() as usize) {
-            o.data = data;
+            // A mod's subclass keeps the fields it already set beside the collection it now is.
+            if let Data::Fields(f) = std::mem::replace(&mut o.data, data)
+                && !f.is_empty()
+            {
+                rt.side_fields.entry(this.r()).or_default().extend(f);
+            }
             o.class = class;
         }
         // A copy constructor, or a sorted collection's comparator.

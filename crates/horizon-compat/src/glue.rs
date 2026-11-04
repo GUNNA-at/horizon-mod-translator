@@ -133,8 +133,12 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
                 && written != crate::nbt::data_hash(nbt) as i64
             {
                 // The game changed its data since it last saved (`/data merge block`): it loads
-                // that, as vanilla's `BlockDataAccessor.setData` has it do.
+                // that and players are sent it, as vanilla's `BlockDataAccessor.setData` does
+                // (`sendBlockUpdated`).
                 load_saved(rt, be, nbt);
+                if let Some(h) = rt.host_mut() {
+                    h.block_changed(pos);
+                }
             }
             return Some(be);
         }

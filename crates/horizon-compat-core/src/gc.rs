@@ -66,6 +66,7 @@ impl Rt {
             self.mark(&mut marked, &mut todo);
         }
         self.iter_sources.retain(|it, _| marked.get(*it as usize).copied().unwrap_or(false));
+        self.side_fields.retain(|o, _| marked.get(*o as usize).copied().unwrap_or(false));
         self.lambda_info.retain(|l, _| marked.get(*l as usize).copied().unwrap_or(false));
         let mut survivors = 1;
         for (r, live) in marked.iter().enumerate().skip(1) {
@@ -106,6 +107,9 @@ impl Rt {
                 }
                 Data::Str(_) | Data::Native(..) | Data::Bytes(..) => {}
             }
+            if let Some(f) = self.side_fields.get(&r) {
+                f.values().for_each(|v| refs(v, todo));
+            }
         }
     }
 }
@@ -121,6 +125,25 @@ pub fn is_lambda(cid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::{Data, Rt, V};
+
+    /// A mod's `LinkedList` subclass is the list and keeps its own field beside it, which holds
+    /// what it refers to as long as the list stays, and goes with it.
+    #[test]
+    fn a_collection_keeps_fields_of_its_own_while_it_lives() {
+        let mut rt = Rt::new();
+        let list = rt.alloc("mod/UniqueLinkedList", Data::List(Vec::new()));
+        let seen = rt.alloc("java/util/HashSet", Data::Table(Default::default()));
+        rt.put_field(list, "contained", seen);
+        assert_eq!(rt.get_field(list, "contained"), seen);
+        rt.statics.insert("mod/Search.FRONTIER", list);
+        rt.collect();
+        assert_eq!(rt.get_field(list, "contained"), seen);
+        assert_eq!(rt.class_of(seen), "java/util/HashSet");
+        rt.statics.clear();
+        rt.collect();
+        assert!(rt.side_fields.is_empty());
+        assert_eq!(rt.class_of(seen), super::FREE);
+    }
 
     #[test]
     fn unreachable_objects_are_freed_and_their_slots_reused() {

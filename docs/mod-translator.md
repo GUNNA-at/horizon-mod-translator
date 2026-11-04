@@ -771,7 +771,14 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     saved over the game's data, so a change the game made was lost (the water wheel stayed spruce
     after `{Material:{Name:"minecraft:birch_planks"}}`). The glue keeps the hash of what it last
     wrote (`nbt::data_hash`, without `x`/`y`/`z`/`id`) and loads the game's data when it differs,
-    as vanilla's `BlockDataAccessor.setData` does (`hook.rs`: count 10 merged in, 11 a tick later).
+    as vanilla's `BlockDataAccessor.setData` does (`hook.rs`: count 10 merged in, 11 a tick later),
+    and players are sent it (`sendBlockUpdated`: the client drew the old wood until then).
+  - [x] 2026-11-04 A mod class extending a JDK collection keeps its own fields (compat-core
+    `Rt::side_fields`, kept and freed with the object by the collector): its constructor turns the
+    object into the list or table, which wiped them, and fields set after `super()` went nowhere.
+    Create's `UniqueLinkedList` (a `LinkedList` with a `HashSet` of what it holds) is the frontier of
+    every contraption's block search: `contained.add` on nothing answered false, so nothing was
+    queued and a bearing assembled no blocks (harness `BEARING`).
   - [x] 2026-11-04 In game (`objgame.sh`) Create's OBJ and composite models draw: crushing wheel,
     flywheel, valve handle, display link, nixie tube, water wheel and large water wheel (spruce, as
     their default material: the draw trace lists `spruce_planks x1024, waterwheel_metal x224,

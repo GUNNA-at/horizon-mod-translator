@@ -153,6 +153,10 @@ pub struct Rt {
     pub interned: HashMap<String, V>,
     /// The collection an iterator, key set or map entry came from, for `remove()` and `setValue`.
     pub iter_sources: HashMap<u32, V>,
+    /// Fields of objects whose data is not [`Data::Fields`]: a mod class extending a JDK collection
+    /// is the collection, and keeps its own fields here (Create's `UniqueLinkedList`, a
+    /// `LinkedList` with a `HashSet` of what it holds).
+    pub side_fields: HashMap<u32, HashMap<&'static str, V>>,
     /// The mod event bus's listeners: the event class each takes, and the listener.
     pub listeners: Vec<(String, V)>,
     /// `@SubscribeEvent` methods by class (registered by generated code): (event class, method
@@ -205,6 +209,7 @@ impl Default for Rt {
             initialized: Default::default(),
             interned: HashMap::new(),
             iter_sources: HashMap::new(),
+            side_fields: HashMap::new(),
             listeners: Vec::new(),
             lambda_info: HashMap::new(),
             caller_class: "java/lang/Object",
@@ -383,13 +388,20 @@ impl Rt {
     pub fn get_field(&self, obj: V, name: &'static str) -> V {
         match self.heap.get(obj.r() as usize).map(|o| &o.data) {
             Some(Data::Fields(f)) => f.get(name).copied().unwrap_or_default(),
+            Some(_) if obj.r() != 0 => self.side_fields.get(&obj.r()).and_then(|f| f.get(name)).copied().unwrap_or_default(),
             _ => V::Void,
         }
     }
 
     pub fn put_field(&mut self, obj: V, name: &'static str, v: V) {
-        if let Some(Object { data: Data::Fields(f), .. }) = self.heap.get_mut(obj.r() as usize) {
-            f.insert(name, v);
+        match self.heap.get_mut(obj.r() as usize) {
+            Some(Object { data: Data::Fields(f), .. }) => {
+                f.insert(name, v);
+            }
+            Some(o) if obj.r() != 0 && o.class != crate::gc::FREE => {
+                self.side_fields.entry(obj.r()).or_default().insert(name, v);
+            }
+            _ => {}
         }
     }
 
