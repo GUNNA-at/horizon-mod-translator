@@ -999,7 +999,13 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     reach ends; `ClipContext`'s modes. Harness `USE=1`: three experience nuggets throw orbs worth
     9 points; the worldshaper with nothing set says `create.terrainzapper.shiftRightClickToSet`
     in red over the hotbar; the sandpaper asks what the player looks at (a miss: nothing to
-    polish). In-game check pending.
+    polish).
+  - [x] 2026-11-04 In game (offscreen, seed 12345, survival on a platform, `usegame.sh`), the two
+    entries above: a right click with 4 experience nuggets uses all 4 and the player ends with 12
+    points (level 1), orbs flying; hungry, the last builder's tea drunk (held 3 s) leaves a glass
+    bottle in the hand, food up and haste on; one of two drunk leaves one tea in the hand and the
+    bottle in the inventory (`clear` finds 1); the worldshaper says "Shift-Right-Click to Select a
+    Shape" in red over the hotbar. No panic, nothing uncaught.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
