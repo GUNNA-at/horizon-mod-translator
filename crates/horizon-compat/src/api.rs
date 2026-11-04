@@ -1747,10 +1747,11 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             crate::miss(rt, key);
             crate::codecs::native(rt, &format!("unmodelled/{k}"))
         }
-        _ => {
+        // A constant of a vanilla enum no module models (`NoteBlockInstrument.BASS`), from its class.
+        _ => crate::records::enum_constant(rt, key).unwrap_or_else(|| {
             crate::miss(rt, key);
             V::NULL
-        }
+        }),
     }
 }
 

@@ -8,7 +8,7 @@
 //! constructors that only store their arguments, the getters and setters that only read and write a
 //! field, and `equals`/`hashCode` as the class has them (`Object`'s, or field by field), all read
 //! from their bytecode. And an enum constant's `equals` and `hashCode`, `Enum`'s: identity.
-use crate::vanilla_records::{DATA_CLASSES, ENUMS, RECORDS};
+use crate::vanilla_records::{DATA_CLASSES, ENUMS, ENUM_CONSTANTS, RECORDS};
 use crate::{Data, Rt, V};
 
 /// The record `class`'s components (`name`, descriptor), in declaration order.
@@ -39,6 +39,22 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     RECORDS.binary_search_by(|(c, _)| (*c).cmp(owner)).is_ok()
         || members(owner).is_some()
         || (matches!(name, "equals" | "hashCode") && ENUMS.binary_search(&owner).is_ok())
+        || (matches!(name, "values" | "valueOf") && constants(owner).is_some())
+}
+
+/// The constants of a vanilla enum the runtime doesn't model by hand, in ordinal order.
+fn constants(class: &str) -> Option<(&'static str, &'static str)> {
+    let i = ENUM_CONSTANTS.binary_search_by(|(c, _)| (*c).cmp(class)).ok()?;
+    Some(ENUM_CONSTANTS[i])
+}
+
+/// `Enum.FIELD` of a vanilla enum the runtime doesn't model by hand (`NoteBlockInstrument.BASS`):
+/// one object per constant, with its name and ordinal ([`crate::api::api_enum`]).
+pub(crate) fn enum_constant(rt: &mut Rt, key: &str) -> Option<V> {
+    let (owner, field) = key.rsplit_once('.')?;
+    let (class, names) = constants(owner)?;
+    let (ordinal, name) = names.split(',').enumerate().find(|(_, n)| *n == field)?;
+    Some(crate::api::api_enum(rt, class, name, ordinal as i32))
 }
 
 /// A plain data class's members, as [`DATA_CLASSES`] lists them.
@@ -136,6 +152,24 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return match (name, desc) {
             ("equals", "(Ljava/lang/Object;)Z") => Some(V::I((this == other) as i32)),
             ("hashCode", "()I") => Some(V::I(this.r() as i32)),
+            // `values()`: a new array of the constants each time, as Java clones it.
+            ("values", _) if desc.starts_with("()[") => {
+                let (class, names) = constants(owner)?;
+                let all: Vec<V> = names.split(',').enumerate().map(|(i, n)| crate::api::api_enum(rt, class, n, i as i32)).collect();
+                Some(rt.alloc("[", Data::Array(all)))
+            }
+            // `valueOf(name)`: the constant, or `IllegalArgumentException` as `Enum.valueOf` throws.
+            ("valueOf", _) if desc.starts_with("(Ljava/lang/String;)") => {
+                let (class, names) = constants(owner)?;
+                let wanted = rt.str_of(this).map(str::to_owned);
+                match names.split(',').enumerate().find(|(_, n)| Some(*n) == wanted.as_deref()) {
+                    Some((i, n)) => Some(crate::api::api_enum(rt, class, n, i as i32)),
+                    None => {
+                        let text = format!("No enum constant {}.{}", class.replace(['/', '$'], "."), wanted.unwrap_or_else(|| "null".into()));
+                        Some(crate::jlang::throw_with(rt, "java/lang/IllegalArgumentException", &text))
+                    }
+                }
+            }
             _ => None,
         };
     }
@@ -311,6 +345,32 @@ mod tests {
         let hash = "net/minecraft/core/Direction$Axis.hashCode.()I";
         assert_eq!(crate::api::call(&mut rt, hash, &[x]), crate::api::call(&mut rt, hash, &[x_again]));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const INSTRUMENT: &str = "net/minecraft/world/level/block/state/properties/NoteBlockInstrument";
+
+    /// A vanilla enum the runtime doesn't model by hand still has its constants, named and ordered
+    /// as 1.21.1's class declares them (`NoteBlockInstrument.BASS` is the fifth), one object each:
+    /// what `values()` and `valueOf` give is the same constant.
+    #[test]
+    fn a_vanilla_enums_constants_come_from_its_class() {
+        let mut rt = Rt::new();
+        let bass = crate::api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/NoteBlockInstrument.BASS");
+        assert_eq!(crate::api::call(&mut rt, "java/lang/Enum.ordinal.()I", &[bass]), V::I(4));
+        let all = crate::api::call(&mut rt, "net/minecraft/world/level/block/state/properties/NoteBlockInstrument.values.()[Lnet/minecraft/world/level/block/state/properties/NoteBlockInstrument;", &[]);
+        assert_eq!(rt.array_len(all), 23);
+        assert_eq!(rt.array_get(all, 4), bass);
+        let name = rt.string("BASS");
+        let value_of = "net/minecraft/world/level/block/state/properties/NoteBlockInstrument.valueOf.(Ljava/lang/String;)Lnet/minecraft/world/level/block/state/properties/NoteBlockInstrument;";
+        assert_eq!(crate::api::call(&mut rt, value_of, &[name]), bass);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        assert!(rt.thrown.is_none());
+        let wrong = rt.string("TUBA");
+        crate::api::call(&mut rt, value_of, &[wrong]);
+        let e = rt.thrown.take().expect("valueOf of no constant throws");
+        assert_eq!(rt.class_of(e), "java/lang/IllegalArgumentException");
+        let m = rt.get_field(e, "message");
+        assert_eq!(rt.str_of(m), Some(&*format!("No enum constant {}.TUBA", INSTRUMENT.replace('/', "."))));
     }
 
     /// The data-class table answers last, from fields named as vanilla names them; a class the

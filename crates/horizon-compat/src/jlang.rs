@@ -57,7 +57,7 @@ fn platform_class(name: &str) -> bool {
 }
 
 /// Throws a new `class` with `msg`; the value a throwing call leaves (null).
-fn throw_with(rt: &mut Rt, class: &'static str, msg: &str) -> V {
+pub(crate) fn throw_with(rt: &mut Rt, class: &'static str, msg: &str) -> V {
     let e = rt.new_object(class);
     let m = rt.string(msg);
     rt.put_field(e, "message", m);

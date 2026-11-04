@@ -1704,6 +1704,12 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       `a_data_class_that_compares_its_fields_is_equal_to_its_twin`,
       `enum_constants_are_equal_only_to_themselves`,
       `the_data_class_table_leaves_out_what_the_runtime_models_by_hand`.
+    - Vanilla enums' constants from their classes (`ENUM_CONSTANTS`, the fields flagged as enum
+      constants in declaration order): 365 enums the runtime doesn't model by hand get one object
+      per constant with its name and ordinal (`NoteBlockInstrument.BASS`, `EquipmentSlotGroup.MAINHAND`),
+      `values()` (a new array each call) and `valueOf` (or `IllegalArgumentException` with Java's
+      text). The 66 enums modelled by hand (directions are natives) keep their own. Test
+      `records::tests::a_vanilla_enums_constants_come_from_its_class`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
