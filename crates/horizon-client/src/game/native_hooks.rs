@@ -3642,7 +3642,7 @@ impl GameLevel<'_> {
     /// Whether block `block` (`minecraft:oak_leaves`) is in block tag `tag`
     /// (`minecraft:leaves`, no `#`), as the loaded tags hold it: translated
     /// Java mods' `BlockState.is(TagKey)`. False for an unknown tag. API 81.
-    pub(super) fn native_block_in_tag(&self, block: &str, tag: &str) -> bool {
+    pub(super) fn native_block_name_in_tag(&self, block: &str, tag: &str) -> bool {
         self.items
             .block_tags
             .get(tag)
@@ -3763,8 +3763,10 @@ impl Game<'_> {
         !self.settings.mods.disabled.contains(mod_id)
     }
     /// Whether block `block` is in block tag `tag` (no `#`), as
-    /// `GameLevel::native_block_in_tag` answers, for hooks on `Game`. API 81.
-    pub(super) fn native_block_in_tag(&self, block: &str, tag: &str) -> bool {
+    /// `GameLevel::native_block_name_in_tag` answers, for hooks on `Game`
+    /// (any side, no lifecycle context: the translated mods' runtime asks).
+    /// API 81.
+    pub(super) fn native_block_name_in_tag(&self, block: &str, tag: &str) -> bool {
         self.block_in_tag(tag, block)
     }
     /// The block state at `pos` in the current level as text, as

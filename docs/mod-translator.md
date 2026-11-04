@@ -629,7 +629,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     read nothing from a raw boolean. Both now take a raw primitive as its own value, as collections
     already hold numbers raw.
   - [x] 2026-11-04 Block tags: `BlockState.is(TagKey)` asks the game's loaded tags through a new host
-    call, `Host::block_in_tag` (`native_block_in_tag` on `Game` and `GameLevel`, API 81), and
+    call, `Host::block_in_tag` (`native_block_name_in_tag` on `Game` and `GameLevel`, API 81), and
     vanilla's tag constants resolve: `vanilla_tags.rs` holds 26.3's 284 `BlockTags` and 219
     `ItemTags` fields with the tags they name, read from the jar (`BlockTags.STANDING_SIGNS` is
     `standing_signs`, `ItemTags.SIGNS` `signs`: 26.3 shares them through `BlockItemTags`).

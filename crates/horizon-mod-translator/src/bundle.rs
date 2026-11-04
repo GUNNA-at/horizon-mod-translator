@@ -109,7 +109,7 @@ fn {id}_{hook}(
             self.level.native_state_text(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.level.native_block_in_tag(block, tag)
+            self.level.native_block_name_in_tag(block, tag)
         }}
         fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
             self.level.native_set_state_text(self.ticks, pos, state, 3)
@@ -205,7 +205,7 @@ fn {id}_block_entity_submit(
             self.game.native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_in_tag(block, tag)
+            self.game.native_block_name_in_tag(block, tag)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -411,7 +411,7 @@ fn {id}_tick(game: &mut crate::game::Game<'_>) {{
             self.game.native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_in_tag(block, tag)
+            self.game.native_block_name_in_tag(block, tag)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -518,7 +518,7 @@ fn {id}_block_entity_tick(
             self.game.native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_in_tag(block, tag)
+            self.game.native_block_name_in_tag(block, tag)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -614,7 +614,7 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
             self.game.native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_in_tag(block, tag)
+            self.game.native_block_name_in_tag(block, tag)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -689,7 +689,7 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
             self.game.native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_in_tag(block, tag)
+            self.game.native_block_name_in_tag(block, tag)
         }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
@@ -772,7 +772,7 @@ fn {id}_state_for_placement(
             self.level.native_state_text(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.level.native_block_in_tag(block, tag)
+            self.level.native_block_name_in_tag(block, tag)
         }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false // choosing a state changes nothing
