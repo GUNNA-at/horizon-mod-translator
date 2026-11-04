@@ -204,4 +204,16 @@ public class Probe {
     public static int first(int n) {
         return new Dial().first(n, 5);
     }
+
+    public static int shiftedTwo(int n) {
+        return new Dial().shiftedTwo(n);
+    }
+
+    public static int assigned(int n) {
+        return new Dial().assigned(n);
+    }
+
+    public static int branched(int n) {
+        return new Dial().branched(n);
+    }
 }

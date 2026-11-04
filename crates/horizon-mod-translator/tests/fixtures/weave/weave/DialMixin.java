@@ -3,6 +3,7 @@ package weave;
 import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.llamalad7.mixinextras.sugar.Local;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
@@ -73,5 +74,22 @@ public abstract class DialMixin {
     @ModifyExpressionValue(method = "first", at = @At(value = "INVOKE", target = "Lweave/Dial;step(I)I"))
     private int plusFirst(int v, int a) {
         return v + a * 1000;
+    }
+
+    // `shift = BY`: after the store (the local holds the call's result), only as the code falls
+    // through there, not where a jump lands.
+    @Inject(method = "shiftedTwo", at = @At(value = "INVOKE", target = "Lweave/Dial;step(I)I", shift = At.Shift.BY, by = 2))
+    private void afterStore(int n, CallbackInfoReturnable<Integer> cir, @Local(ordinal = 1) int a) {
+        seen += a * 10;
+    }
+
+    @Inject(method = "assigned", at = @At(value = "INVOKE_ASSIGN", target = "Ljava/util/List;get(I)Ljava/lang/Object;", shift = At.Shift.BY, by = 2))
+    private void afterGet(int n, CallbackInfoReturnable<Integer> cir, @Local(name = "v") Integer v) {
+        seen += v * 10;
+    }
+
+    @Inject(method = "branched", at = @At(value = "INVOKE", target = "Lweave/Dial;step(I)I", shift = At.Shift.BY, by = 2))
+    private void stepped(int n, CallbackInfoReturnable<Integer> cir) {
+        seen += 100;
     }
 }

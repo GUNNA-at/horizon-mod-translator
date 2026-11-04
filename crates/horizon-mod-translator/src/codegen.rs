@@ -208,8 +208,13 @@ struct Cur {
     weaves: Vec<Weave>,
     /// Weaves (indices into `weaves`) at each call instruction, by its offset.
     at_calls: BTreeMap<usize, Vec<usize>>,
-    /// `INVOKE_ASSIGN` `@Inject`s after a store, by its offset: (the call's offset, the weave).
+    /// Weaves after an instruction, by its offset: (their place, the weave). `INVOKE_ASSIGN`
+    /// `@Inject`s after the store of the call's result, `@ModifyVariable`s after the store
+    /// they're at, a `shift = BY` that lands on the label after the instruction.
     after_store: BTreeMap<usize, Vec<(usize, usize)>>,
+    /// A `shift = BY`'s weaves before the instruction it lands on, by its offset, as
+    /// `after_store`.
+    before_insn: BTreeMap<usize, Vec<(usize, usize)>>,
     /// The `@Share`d refs the method makes: (mixin, name, ref class), `share0`...
     shares: Vec<(String, String, String)>,
     /// Whether a constructor's call of its superclass's has been written.
@@ -1006,6 +1011,13 @@ impl<'a> Program<'a> {
                 }
                 continue;
             }
+            if let At::Shifted { .. } = w.at {
+                for &site in w.locals.keys() {
+                    let to = if w.after.contains(&site) { &mut cur.after_store } else { &mut cur.before_insn };
+                    to.entry(site).or_default().push((site, wi));
+                }
+                continue;
+            }
             if !w.at.at_instruction() {
                 continue;
             }
@@ -1060,19 +1072,23 @@ impl<'a> Program<'a> {
             // `invoke` and `field`).
             let plain = (i.op == 0xbb || weave::constant_of(c, i).is_some()) && self.cur.as_ref().is_some_and(|cur| cur.at_calls.contains_key(&i.at));
             let mut body = if plain { self.woven_plain(c, i, next) } else { self.insn(c, i, next) };
-            // `INVOKE_ASSIGN` injections after this store (the code above set `pc` to the next).
-            let after: Vec<(usize, Weave)> = self
-                .cur
-                .as_ref()
-                .and_then(|cur| cur.after_store.get(&i.at).map(|v| v.iter().map(|&(site, wi)| (site, cur.weaves[wi].clone())).collect()))
-                .unwrap_or_default();
-            for (site, w) in &after {
+            let weaves_at = |map: fn(&Cur) -> &BTreeMap<usize, Vec<(usize, usize)>>, cur: Option<&Cur>| -> Vec<(usize, Weave)> {
+                cur.and_then(|cur| map(cur).get(&i.at).map(|v| v.iter().map(|&(site, wi)| (site, cur.weaves[wi].clone())).collect())).unwrap_or_default()
+            };
+            // Those before it, then those after it (the code above set `pc` to the next, or left).
+            let before = weaves_at(|cur| &cur.before_insn, self.cur.as_ref());
+            let after = weaves_at(|cur| &cur.after_store, self.cur.as_ref());
+            let woven = |this: &Self, (site, w): &(usize, Weave)| match w.kind {
+                Kind::ModifyVariable { .. } => this.modify_var_code(w, *site, true),
+                _ => this.inject_code(w, None, *site, true),
+            };
+            if !before.is_empty() {
+                let code: Vec<String> = before.iter().map(|b| woven(self, b)).collect();
+                body = format!("{} {body}", code.join(" "));
+            }
+            for a in &after {
                 body.push(' ');
-                let code = match w.kind {
-                    Kind::ModifyVariable { .. } => self.modify_var_code(w, *site, true),
-                    _ => self.inject_code(w, None, *site, true),
-                };
-                body.push_str(&code);
+                body.push_str(&woven(self, a));
             }
             let _ = writeln!(s, "            {} => {{ {body} }}", i.at);
         }

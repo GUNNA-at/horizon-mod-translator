@@ -98,6 +98,12 @@ const CASES: &[(&str, &str, i32, &str)] = &[
     ("isText", "(I)I", -1, "0"),
     // The method's first argument after the value: (2 + 1) + 2000, + 5.
     ("first", "(I)I", 2, "2008"),
+    // `shift = BY 2`: after the store (5 + 50 + 3), after a cast and store (3 + 30 + 1), and on a
+    // jump's label: run as the code falls through (3 + 100), not as the `if` jumps there.
+    ("shiftedTwo", "(I)I", 4, "58"),
+    ("assigned", "(I)I", 3, "34"),
+    ("branched", "(I)I", 2, "103"),
+    ("branched", "(I)I", -1, "0"),
 ];
 
 #[test]

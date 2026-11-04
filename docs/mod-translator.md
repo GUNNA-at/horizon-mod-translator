@@ -1515,6 +1515,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     by type with the method's argument, a string constant, a constant in a slice, before `new`s, an
     `instanceof`, an argument prefix) and a plugin's choices (`@ModMixin` with an enum's mods: one
     there, one not, one by the string its constant is made with, `applyIfPresent = false`).
+  - 2026-11-04 Weaving: `shift = BY`. The translator now has ASM's node list as Mixin sees it
+    (`weave::nodes`): at each instruction's offset a label when anything points there (jumps,
+    switches, the exception table, where lines and local variables start and variables end,
+    frames, and the `new`s ASM's frame scan finds), its line numbers, its frame, then the
+    instruction; the class reader keeps `LineNumberTable` and `StackMapTable` offsets for it. A
+    place `by` nodes on lands on an instruction (or the line number or frame before one): the
+    handler goes before that instruction. One that lands on a label goes after the instruction
+    before it, so it runs only as the code falls through there, not when a jump lands on the
+    label (Mixin inserts before the label). `INVOKE_ASSIGN`'s own node is Mixin's `AfterInvoke`'s:
+    after the call, its result's cast and store. Both in the pack weave now: Create: Connected's
+    `SequencedGearshiftScreen.updateParamsOfRow` (`by = 2` from `standardStep()`) and Railways'
+    `ScheduleRuntime.estimateStayDuration` (`INVOKE_ASSIGN` of `List.get`, `by = 2`, with a
+    `@Local` by name). Tests: `tests/weave.rs` 60 answers (after a store, after a cast and store,
+    and on a label an `if` jumps to: the handler runs on the fall-through only).
+  - 2026-11-04 Ten addons as one engine: too big for one crate. Create with New Age, Connected,
+    Vibrant Vaults, Pattern Schematics, Copycats+, Power Loader, Encased, Dragons Plus,
+    Enchantable Machinery and Electro Energetics translated (all their mixins woven) into 218 MB of
+    Rust (2.35M lines, 73.7K functions); rustc ran out of memory on the 24 GB Mac (swap took the
+    disk down to 265 MB, then rustc was killed). Create with 4 addons (161 MB) still builds. Next:
+    a leaner codegen (basic blocks instead of a `match` arm per instruction, no heap `Vec` per
+    call's arguments), measured, then splitting a group's engine if that is not enough.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

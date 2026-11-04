@@ -62,4 +62,29 @@ public class Dial {
     public int first(int a, int b) {
         return step(a) + b;
     }
+
+    // Two nodes on from `step` is the label after the store of its result.
+    public int shiftedTwo(int n) {
+        int a = step(n);
+        seen += 3;
+        return a + seen;
+    }
+
+    // Railways' shape: two nodes on from the cast and store of `get`'s result.
+    public int assigned(int n) {
+        List<Object> list = new ArrayList<>();
+        list.add(n);
+        Integer v = (Integer) list.get(0);
+        seen += 1;
+        return v + seen;
+    }
+
+    // The label two nodes on is also where the `if` jumps.
+    public int branched(int n) {
+        int r = 0;
+        if (n > 0) {
+            r = step(n);
+        }
+        return r + seen;
+    }
 }

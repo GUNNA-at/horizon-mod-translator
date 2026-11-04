@@ -5,8 +5,9 @@
 //! adds, `@Overwrite`s: `Program::resolve`), its field initialisers run in the target's
 //! constructors, and each injector becomes a call to its handler at the place its `@At` names:
 //!
-//! - `@Inject` at `HEAD`, `RETURN`, `TAIL` or a call (`INVOKE`, before or `shift = AFTER` it), with a
-//!   `CallbackInfo` (`CallbackInfoReturnable` for a value) that may end the method early;
+//! - `@Inject` at `HEAD`, `RETURN`, `TAIL` or a call (`INVOKE`, before or `shift = AFTER` it, or
+//!   `shift = BY` some of ASM's nodes on), with a `CallbackInfo` (`CallbackInfoReturnable` for a
+//!   value) that may end the method early;
 //! - `@Redirect` of a call (the handler instead of it), `@ModifyArg` (one argument through the
 //!   handler), MixinExtras' `@ModifyExpressionValue` (the call's result through it),
 //!   `@WrapWithCondition` (the call only if the handler says so) and `@ModifyReturnValue`.
@@ -16,7 +17,7 @@
 //! (other `@At`s, captured locals...) is counted in the plan's `unsupported`, as the codegen counts
 //! what it can't translate.
 use crate::class::{Annotation, ClassFile, Member, Method};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MIXIN: &str = "Lorg/spongepowered/asm/mixin/";
 const EXTRAS: &str = "Lcom/llamalad7/mixinextras/";
@@ -171,6 +172,9 @@ pub enum At {
     /// An object made: a `new` of `class` (whose constructor, called after it, is `desc` when
     /// given), the `n`th `new` of the class when `ordinal` says.
     New { class: String, desc: Option<String>, ordinal: Option<usize> },
+    /// `by` nodes on from where `at` is (`shift = BY`), counting ASM's nodes as Mixin does: the
+    /// instructions, and the labels, line numbers and frames between them ([`nodes`]).
+    Shifted { at: Box<At>, by: i32 },
 }
 
 impl At {
@@ -186,6 +190,7 @@ impl At {
             At::Store { .. } => "STORE",
             At::Constant { .. } => "CONSTANT",
             At::New { .. } => "NEW",
+            At::Shifted { at, .. } => at.name(),
         }
     }
 
@@ -204,7 +209,7 @@ impl At {
     /// Whether it is at an instruction (a call, a field access, a constant, a `new`) rather than
     /// the method's ends.
     pub fn at_instruction(&self) -> bool {
-        matches!(self, At::Invoke { .. } | At::Field { .. } | At::Constant { .. } | At::New { .. })
+        matches!(self, At::Invoke { .. } | At::Field { .. } | At::Constant { .. } | At::New { .. } | At::Shifted { .. })
     }
 }
 
@@ -225,6 +230,9 @@ pub struct Weave {
     pub locals: BTreeMap<usize, Vec<LocalArg>>,
     /// A `@ModifyVariable`'s local at each place: the slot it changes.
     pub var: BTreeMap<usize, u16>,
+    /// The places of a `shift = BY` it goes after the instruction at rather than before: those
+    /// that land on the label after it (a jump there skips the handler).
+    pub after: BTreeSet<usize>,
 }
 
 impl Weave {
@@ -529,11 +537,117 @@ pub fn is_store(op: u8) -> bool {
     matches!(op, 0x36..=0x3a | 0x3b..=0x4e)
 }
 
+/// One of the nodes of a method's instruction list as Mixin sees it (ASM's `ClassReader`, with
+/// debug information and frames): at an instruction's offset, a label when anything points
+/// there, its line numbers, its frame, then the instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Node {
+    Label(usize),
+    Line(usize),
+    Frame(usize),
+    Insn(usize),
+}
+
+/// `m`'s nodes in order, the label at the end last when something points there. ASM labels
+/// the offsets jumps and switches go to, the exception table's, those where lines and local
+/// variables start (and variables end), the frames', and the `new`s its frame scan finds.
+fn nodes(m: &Method) -> Vec<Node> {
+    let Some(code) = &m.code else { return Vec::new() };
+    let Ok(insns) = crate::insn::decode(&code.bytes) else { return Vec::new() };
+    let mut labels: BTreeSet<usize> = BTreeSet::new();
+    for i in &insns {
+        match &i.arg {
+            crate::insn::Operand::Jump(to) => {
+                labels.insert(*to);
+            }
+            crate::insn::Operand::Switch(default, cases) => {
+                labels.insert(*default);
+                labels.extend(cases.iter().map(|(_, to)| *to));
+            }
+            _ => {}
+        }
+    }
+    for (start, end, handler, _) in &code.handlers {
+        labels.extend([*start, *end, *handler].map(usize::from));
+    }
+    labels.extend(code.lines.iter().map(|(at, _)| usize::from(*at)));
+    for l in &code.locals {
+        labels.extend([usize::from(l.start), usize::from(l.start) + usize::from(l.length)]);
+    }
+    labels.extend(code.frames.iter().chain(&code.frame_news).map(|&at| usize::from(at)));
+    let mut out = Vec::new();
+    for i in &insns {
+        if labels.contains(&i.at) {
+            out.push(Node::Label(i.at));
+        }
+        out.extend(code.lines.iter().filter(|(at, _)| usize::from(*at) == i.at).map(|_| Node::Line(i.at)));
+        if code.frames.iter().any(|&f| usize::from(f) == i.at) {
+            out.push(Node::Frame(i.at));
+        }
+        out.push(Node::Insn(i.at));
+    }
+    if labels.contains(&code.bytes.len()) {
+        out.push(Node::Label(code.bytes.len()));
+    }
+    out
+}
+
+/// The places of a `shift = BY` (`at` shifted `by` nodes): the node each of `at`'s places is
+/// (for `INVOKE_ASSIGN`, the one after the call and the cast and store of its result that
+/// follow it, as Mixin's `AfterInvoke` finds), `by` nodes on. One that lands on an instruction,
+/// or on the line number or frame before one, goes before that instruction: (it, it). One that
+/// lands on a label goes after the instruction before it (only what falls through from that
+/// runs the handler): (that instruction, the label's), and `true`.
+fn shifted_places(c: &ClassFile, m: &Method, at: &At, by: i32, range: Option<(usize, usize)>) -> Vec<(usize, usize, bool)> {
+    let list = nodes(m);
+    let Some(code) = &m.code else { return Vec::new() };
+    let Ok(insns) = crate::insn::decode(&code.bytes) else { return Vec::new() };
+    let op_at = |at: usize| insns.iter().find(|i| i.at == at).map(|i| i.op);
+    let mut out = Vec::new();
+    for (site, _) in places(c, m, at, range) {
+        // The head is the list's first node (Mixin's `MethodHead`), a label when one is there.
+        let first = if *at == At::Head { Some(0) } else { None };
+        let Some(mut k) = first.or_else(|| list.iter().position(|n| *n == Node::Insn(site))) else { continue };
+        if matches!(at, At::Invoke { assign: true, .. }) {
+            // The next node; past a store of the result, or a cast and the store after it.
+            let next = |k: usize| if k + 1 < list.len() { k + 1 } else { k };
+            k = next(k);
+            match list[k] {
+                Node::Insn(a) if op_at(a).is_some_and(is_store) => k = next(k),
+                Node::Insn(a) if op_at(a) == Some(0xc0) => {
+                    k = next(k);
+                    if let Node::Insn(b) = list[k]
+                        && op_at(b).is_some_and(is_store)
+                    {
+                        k = next(k);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(node) = usize::try_from(k as i64 + i64::from(by)).ok().and_then(|k| list.get(k).map(|n| (k, *n))) else { continue };
+        match node {
+            (_, Node::Insn(a) | Node::Line(a) | Node::Frame(a)) => out.push((a, a, false)),
+            (k, Node::Label(a)) => {
+                // The instruction before the label (none before the method's first: nothing
+                // falls through to it).
+                if let Some(&Node::Insn(p)) = list[..k].iter().rev().find(|n| matches!(n, Node::Insn(_))) {
+                    out.push((p, a, true));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The places in `m` (of `c`) an `@At` goes, as the offsets the codegen weaves at (the call, the
 /// return, 0 for the head), each with the offset whose locals the handler sees (after the call
 /// for `shift = AFTER`); within `range` (offsets, both in) only, for a `@Slice`'s, where an
 /// `ordinal` counts.
 fn places(c: &ClassFile, m: &Method, at: &At, range: Option<(usize, usize)>) -> Vec<(usize, usize)> {
+    if let At::Shifted { at, by } = at {
+        return shifted_places(c, m, at, *by, range).into_iter().map(|(site, seen, _)| (site, seen)).collect();
+    }
     let Some(code) = &m.code else { return Vec::new() };
     let Ok(insns) = crate::insn::decode(&code.bytes) else { return Vec::new() };
     let inside = |i: &crate::insn::Insn| range.is_none_or(|(lo, hi)| (lo..=hi).contains(&i.at));
@@ -547,8 +661,8 @@ fn places(c: &ClassFile, m: &Method, at: &At, range: Option<(usize, usize)>) -> 
     let at_k = |ks: Vec<usize>| ks.into_iter().map(|k| (insns[k].at, insns[k].at)).collect::<Vec<_>>();
     match at {
         At::Head => vec![(0, 0)],
-        // Found by the local it stores into (`store_sites`).
-        At::Store { .. } => Vec::new(),
+        // Found by the local it stores into (`store_sites`); a shifted one, above.
+        At::Store { .. } | At::Shifted { .. } => Vec::new(),
         At::Constant { value, ordinal } => {
             let hits = (0..insns.len()).filter(|&k| inside(&insns[k]) && constant_of(c, &insns[k]).is_some_and(|x| value.matches(&x))).collect();
             at_k(nth(hits, ordinal))
@@ -635,7 +749,7 @@ fn slice_range(c: &ClassFile, m: &Method, s: &Slice) -> Result<(usize, usize), S
         }
         let found = places(c, m, at, None);
         // A shifted place's node is the instruction after (Mixin's `nextNode`).
-        let node = |(site, seen): (usize, usize)| if matches!(at, At::Invoke { after: true, .. } | At::Field { after: true, .. }) { seen } else { site };
+        let node = |(site, seen): (usize, usize)| if matches!(at, At::Invoke { after: true, .. } | At::Field { after: true, .. } | At::Shifted { .. }) { seen } else { site };
         Some(if *last { found.last() } else { found.first() }.map(|p| node(*p)))
     };
     let start = find(&s.from).flatten().unwrap_or(0);
@@ -736,10 +850,27 @@ pub fn member_of(target: &str) -> Option<(String, String, String)> {
 }
 
 fn parse_at(a: &Annotation) -> Result<At, String> {
+    let shift = a.value("shift").unwrap_or("");
+    if shift != "BY" {
+        return parse_unshifted(a, shift);
+    }
+    // `by` nodes on from the place itself; Mixin refuses more than 5
+    // (`InjectionPoint.MAX_ALLOWED_SHIFT_BY`).
+    let by = match a.value("by") {
+        None => 0,
+        Some(b) => b.trim().parse::<i32>().map_err(|_| format!("@At by {b}"))?,
+    };
+    if by > 5 {
+        return Err("@At shift BY over 5".into());
+    }
+    Ok(At::Shifted { at: Box::new(parse_unshifted(a, "")?), by })
+}
+
+/// An `@At`, shifted `BEFORE` or `AFTER` as `shift` says.
+fn parse_unshifted(a: &Annotation, shift: &str) -> Result<At, String> {
     let raw = a.value("value").unwrap_or("");
     // A selector after it (`INVOKE:LAST`) matters to a slice's bounds only.
     let value = raw.split_once(':').map_or(raw, |(v, _)| v);
-    let shift = a.value("shift").unwrap_or("");
     let ordinal = a.value("ordinal").and_then(|o| o.parse::<i64>().ok()).filter(|o| *o >= 0).map(|o| o as usize);
     let args = at_args(a.value("args").unwrap_or(""));
     let plain_shift = || if matches!(shift, "" | "BEFORE" | "AFTER") { Ok(()) } else { Err(format!("@At shift {shift}")) };
@@ -992,6 +1123,11 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                             if sites.is_empty() {
                                 continue;
                             }
+                            // A `shift = BY` that lands on a label goes after the instruction before it.
+                            let after: BTreeSet<usize> = match &at {
+                                At::Shifted { at: base, by } => shifted_places(target, m, base, *by, range).into_iter().filter(|p| p.2).map(|p| p.0).collect(),
+                                _ => BTreeSet::new(),
+                            };
                             placed = true;
                             let mut w = Weave {
                                 mixin: mixin.name.clone(),
@@ -1003,6 +1139,7 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                                 sugar: Vec::new(),
                                 locals: BTreeMap::new(),
                                 var: BTreeMap::new(),
+                                after,
                             };
                             // An `@Inject` capturing locals takes them after the callback.
                             let n = crate::codegen::arg_kinds(&h.desc).len();
@@ -1135,6 +1272,7 @@ fn check(w: &Weave, m: &Method) -> Result<(), String> {
                 Err("@WrapOperation of an instanceof with other parameters".into())
             }
         }
+        (kind, At::Shifted { at, .. }) => Err(format!("{} at {} shift BY", kind.name(), at.name())),
         (kind, at) => Err(format!("{} at {}", kind.name(), at.name())),
     }
 }

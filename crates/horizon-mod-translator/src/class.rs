@@ -41,6 +41,13 @@ pub struct Code {
     pub handlers: Vec<(u16, u16, u16, String)>,
     /// Its local variables, as javac's `-g` records them (`LocalVariableTable`): empty without.
     pub locals: Vec<LocalVar>,
+    /// Where its source lines start (`LineNumberTable`): (offset, line), in the table's order.
+    pub lines: Vec<(u16, u16)>,
+    /// The offsets of its stack map frames (`StackMapTable`), in order.
+    pub frames: Vec<u16>,
+    /// The `new`s ASM labels for its frames: those a frame's bytes seem to name as an
+    /// uninitialized object's (ASM's `ClassReader` scans the table's bytes for them).
+    pub frame_news: Vec<u16>,
 }
 
 /// A local variable while it is in scope: from offset `start` for `length` bytes, in `slot`.
@@ -142,6 +149,58 @@ impl Reader<'_> {
         let s = self.take(4)?;
         Ok(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
     }
+}
+
+/// The offsets of a `StackMapTable`'s frames: the first at its delta, each next one its delta
+/// plus one after the last.
+fn stack_map_offsets(body: &[u8]) -> Result<Vec<u16>, String> {
+    let mut r = Reader { b: body, i: 0 };
+    // A `verification_type_info`: `Object` and `Uninitialized` carry two bytes more.
+    let skip_type = |r: &mut Reader| -> Result<(), String> {
+        if matches!(r.u1()?, 7 | 8) {
+            r.u2()?;
+        }
+        Ok(())
+    };
+    let mut out = Vec::new();
+    let mut last: Option<u16> = None;
+    for _ in 0..r.u2()? {
+        let kind = r.u1()?;
+        let delta = match kind {
+            0..=63 => u16::from(kind),
+            64..=127 => {
+                skip_type(&mut r)?;
+                u16::from(kind - 64)
+            }
+            247 => {
+                let d = r.u2()?;
+                skip_type(&mut r)?;
+                d
+            }
+            248..=251 => r.u2()?,
+            252..=254 => {
+                let d = r.u2()?;
+                for _ in 0..kind - 251 {
+                    skip_type(&mut r)?;
+                }
+                d
+            }
+            255 => {
+                let d = r.u2()?;
+                for _ in 0..2 {
+                    for _ in 0..r.u2()? {
+                        skip_type(&mut r)?;
+                    }
+                }
+                d
+            }
+            _ => return Err(format!("stack map frame type {kind}")),
+        };
+        let at = last.map_or(delta, |l| l.wrapping_add(delta).wrapping_add(1));
+        out.push(at);
+        last = Some(at);
+    }
+    Ok(out)
 }
 
 /// Java's "modified UTF-8": close enough to UTF-8 for names; nulls and
@@ -254,20 +313,42 @@ impl ClassFile {
                         let class = if ty == 0 { String::new() } else { cf.class_name(ty)? };
                         handlers.push((start, end, handler, class));
                     }
-                    let mut locals = Vec::new();
+                    let (mut locals, mut lines, mut frames, mut frame_news) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
                     for _ in 0..c.u2()? {
                         let can = c.u2()?;
                         let clen = c.u4()? as usize;
                         let cbody = c.take(clen)?;
-                        if cf.utf8(can)? == "LocalVariableTable" {
-                            let mut t = Reader { b: cbody, i: 0 };
-                            for _ in 0..t.u2()? {
-                                let (start, length, name, desc, slot) = (t.u2()?, t.u2()?, t.u2()?, t.u2()?, t.u2()?);
-                                locals.push(LocalVar { start, length, name: cf.utf8(name)?, desc: cf.utf8(desc)?, slot });
+                        match cf.utf8(can)?.as_str() {
+                            "LocalVariableTable" => {
+                                let mut t = Reader { b: cbody, i: 0 };
+                                for _ in 0..t.u2()? {
+                                    let (start, length, name, desc, slot) = (t.u2()?, t.u2()?, t.u2()?, t.u2()?, t.u2()?);
+                                    locals.push(LocalVar { start, length, name: cf.utf8(name)?, desc: cf.utf8(desc)?, slot });
+                                }
                             }
+                            "LineNumberTable" => {
+                                let mut t = Reader { b: cbody, i: 0 };
+                                for _ in 0..t.u2()? {
+                                    lines.push((t.u2()?, t.u2()?));
+                                }
+                            }
+                            "StackMapTable" => {
+                                // Only weaving's `shift = BY` reads them: a table it can't read
+                                // costs that alone.
+                                frames = stack_map_offsets(cbody).unwrap_or_default();
+                                // ASM's scan: any byte 8 (`ITEM_Uninitialized`) whose next two
+                                // name an offset holding a `new`.
+                                for i in 2..cbody.len().saturating_sub(2) {
+                                    let at = u16::from_be_bytes([cbody[i + 1], cbody[i + 2]]);
+                                    if cbody[i] == 8 && bytes.get(at as usize) == Some(&0xbb) && !frame_news.contains(&at) {
+                                        frame_news.push(at);
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    code = Some(Code { max_stack, max_locals, bytes, handlers, locals });
+                    code = Some(Code { max_stack, max_locals, bytes, handlers, locals, lines, frames, frame_news });
                 }
             }
             cf.methods.push(Method { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, code, annotations, param_annotations, signature });
