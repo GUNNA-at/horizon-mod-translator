@@ -1128,7 +1128,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     block. Harness `COMPONENTS=1` with `TICKED=1` (new: the shafts' block entities tick before the
     clicks, and the belt's three times after, each with its saved compound, as the game does):
     before the fix the ticks leave air, middle, middle, middle, air (the game's result); after it
-    start, middle × 3, end, each with `Length` 5.
+    start, middle × 3, end, each with `Length` 5. In game (build of 68d5473, `scratchpad/beltgame.sh`):
+    the two clicks leave `create:belt` start, middle × 3, end between the shafts, the hand 5 → 4;
+    a creative motor on the first pulley, and an iron ingot summoned over it is taken off the
+    ground into the belt (`BeltBlock.entityInside`: no item entity left, as in Java) and drawn
+    riding it, from the motor's end to the far end within 120 ticks (`shots-belt/carry-1..6.png`).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
