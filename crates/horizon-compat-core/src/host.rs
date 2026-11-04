@@ -22,6 +22,9 @@ pub enum Nbt {
     LongArray(Vec<i64>),
 }
 
+/// The off hand's slot in vanilla's `Inventory` numbering ([`Host::player_slot`]).
+pub const OFF_HAND_SLOT: u8 = 40;
+
 /// A stack in one of the acting player's hands, as the game holds it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HandStack {
@@ -193,6 +196,53 @@ pub trait Host {
     /// `Player.getItemBySlot`), None when nothing.
     fn player_worn(&self, _slot: u8) -> Option<HandStack> {
         None
+    }
+    /// The acting player's UUID: whose inventory the slot methods reach. None when no player acts
+    /// or the game can't say.
+    fn player_id(&self) -> Option<u128> {
+        None
+    }
+    /// The hotbar slot the acting player's main hand holds (`Inventory.selected`), 0 to 8.
+    fn player_selected(&self) -> u8 {
+        0
+    }
+    /// Whether the slot methods reach the whole inventory (every slot 0 to 40), not only the hands
+    /// and the armour: what `Inventory.add` needs to place a stack where vanilla would.
+    fn player_inventory(&self) -> bool {
+        false
+    }
+    /// The stack in slot `slot` of the acting player's inventory (`Inventory.getItem`), by
+    /// vanilla's numbering: 0 to 8 the hotbar, 9 to 35 the rest, 36 to 39 the armour from the feet
+    /// up, 40 the off hand; None when empty. A host that knows only the hands and the armour
+    /// answers those, and None for the rest.
+    fn player_slot(&self, slot: u8) -> Option<HandStack> {
+        match slot {
+            OFF_HAND_SLOT => self.player_hand(1),
+            36..=39 => self.player_worn(39 - slot),
+            s if s == self.player_selected() => self.player_hand(0),
+            _ => None,
+        }
+    }
+    /// Puts `stack` in slot `slot` (`Inventory.setItem`), its `max_damage` aside; None empties it.
+    /// False when the game can't (a slot past 40; a host that knows only the hands, for another).
+    fn set_player_slot(&mut self, slot: u8, stack: Option<&HandStack>) -> bool {
+        let hand = match slot {
+            OFF_HAND_SLOT => 1,
+            s if s == self.player_selected() => 0,
+            _ => return false,
+        };
+        self.set_player_hand(hand, stack);
+        true
+    }
+    /// Changes slot `slot`'s stack in place, as [`Host::update_player_hand`] does a hand's: its
+    /// count (0 empties it), damage, and mod components set or removed; vanilla's other data on it
+    /// stays. False when the game refused or can't.
+    fn update_player_slot(&mut self, slot: u8, count: u32, damage: u32, components: &[(String, Option<Nbt>)]) -> bool {
+        match slot {
+            OFF_HAND_SLOT => self.update_player_hand(1, count, damage, components),
+            s if s == self.player_selected() => self.update_player_hand(0, count, damage, components),
+            _ => false,
+        }
     }
     /// Where the acting player stands (their feet), and their look (yaw, pitch in degrees); None
     /// when the game can't say.
@@ -520,6 +570,14 @@ pub struct MemoryHost {
     pub offhand: Option<HandStack>,
     /// What the acting player wears: head, chest, legs, feet.
     pub worn: [Option<HandStack>; 4],
+    /// The acting player's UUID ([`Host::player_id`]).
+    pub player_id: Option<u128>,
+    /// The hotbar slot the main hand holds: `held` is that slot's stack.
+    pub selected: u8,
+    /// The inventory's other slots (neither a hand nor the armour), by vanilla's numbering.
+    pub slots: HashMap<u8, HandStack>,
+    /// Whether the slots stand for the whole inventory ([`Host::player_inventory`]).
+    pub inventory: bool,
     /// Items' durability (`max_damage`); unset ones have none.
     pub max_damage: HashMap<String, u32>,
     /// Where the acting player stands and looks (yaw, pitch).
@@ -703,6 +761,57 @@ impl Host for MemoryHost {
     }
     fn player_worn(&self, slot: u8) -> Option<HandStack> {
         self.worn.get(usize::from(slot)).cloned().flatten()
+    }
+    fn player_id(&self) -> Option<u128> {
+        self.player_id
+    }
+    fn player_selected(&self) -> u8 {
+        self.selected
+    }
+    fn player_inventory(&self) -> bool {
+        self.inventory
+    }
+    fn player_slot(&self, slot: u8) -> Option<HandStack> {
+        match slot {
+            OFF_HAND_SLOT => self.player_hand(1),
+            36..=39 => self.player_worn(39 - slot),
+            s if s == self.selected => self.player_hand(0),
+            s => {
+                let mut stack = self.slots.get(&s).cloned()?;
+                stack.max_damage = self.max_damage.get(&stack.item).copied().unwrap_or(0);
+                Some(stack)
+            }
+        }
+    }
+    fn set_player_slot(&mut self, slot: u8, stack: Option<&HandStack>) -> bool {
+        let stack = stack.filter(|s| !s.item.is_empty() && s.count > 0);
+        match slot {
+            OFF_HAND_SLOT => self.set_player_hand(1, stack),
+            36..=39 => self.worn[usize::from(39 - slot)] = stack.cloned(),
+            s if s == self.selected => self.set_player_hand(0, stack),
+            s if s < 36 => match stack {
+                Some(st) => {
+                    self.slots.insert(s, HandStack { max_damage: 0, ..st.clone() });
+                }
+                None => {
+                    self.slots.remove(&s);
+                }
+            },
+            _ => return false,
+        }
+        true
+    }
+    fn update_player_slot(&mut self, slot: u8, count: u32, damage: u32, components: &[(String, Option<Nbt>)]) -> bool {
+        let Some(mut s) = self.player_slot(slot) else { return false };
+        s.count = count;
+        s.damage = damage;
+        for (name, value) in components {
+            s.components.retain(|(k, _)| k != name);
+            if let Some(v) = value {
+                s.components.push((name.clone(), v.clone()));
+            }
+        }
+        self.set_player_slot(slot, Some(&s))
     }
     fn block_changed(&mut self, pos: [i32; 3]) {
         self.changed.push(pos);

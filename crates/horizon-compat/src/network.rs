@@ -619,9 +619,14 @@ fn nbt_tag(rt: &mut Rt, n: &Nbt) -> V {
     }
 }
 
-// Item and fluid stacks: the item (fluid) by name and the count (amount); 0 for an empty one.
+// Item and fluid stacks: the count (amount), 0 for an empty one, then the item (fluid) by name.
+// An item stack's mod components and damage follow, as a compound by type name (`TAG_End` for
+// none): the stack a filter's menu opens with carries its items to the client.
 
-fn put_stack(rt: &mut Rt, buf: V, s: V) {
+/// The key of a stack's damage in the compound after its item.
+const STACK_DAMAGE: &str = "minecraft:damage";
+
+pub(crate) fn put_stack(rt: &mut Rt, buf: V, s: V) {
     if crate::api_common::stack_empty(rt, s) {
         put_var(rt, buf, 0);
         return;
@@ -630,15 +635,30 @@ fn put_stack(rt: &mut Rt, buf: V, s: V) {
     let item = crate::api_common::item_like_name(rt, rt.get_field(s, "$item"));
     put_var(rt, buf, u64::from(count as u32));
     put_utf(rt, buf, &item);
+    let mut patch: std::collections::BTreeMap<String, Nbt> = crate::components::saved(rt, s).into_iter().collect();
+    let damage = crate::components::damage(rt, s);
+    if damage > 0 {
+        patch.insert(STACK_DAMAGE.into(), Nbt::Int(damage));
+    }
+    let patch = (!patch.is_empty()).then_some(Nbt::Compound(patch));
+    put_nbt(rt, buf, patch.as_ref());
 }
 
-fn read_stack(rt: &mut Rt, buf: V) -> Option<V> {
+pub(crate) fn read_stack(rt: &mut Rt, buf: V) -> Option<V> {
     let count = read_var_int(rt, buf)?;
     if count <= 0 {
         return Some(crate::api::get_static(rt, "net/minecraft/world/item/ItemStack.EMPTY"));
     }
     let item = read_utf(rt, buf)?;
-    Some(crate::api_common::stack(rt, &item, count))
+    let s = crate::api_common::stack(rt, &item, count);
+    if let Some(Nbt::Compound(mut patch)) = read_nbt(rt, buf)? {
+        if let Some(Nbt::Int(damage)) = patch.remove(STACK_DAMAGE) {
+            rt.put_field(s, "$damage", V::I(damage));
+        }
+        let carried: Vec<(String, Nbt)> = patch.into_iter().collect();
+        crate::components::load(rt, s, &carried);
+    }
+    Some(s)
 }
 
 fn put_fluid(rt: &mut Rt, buf: V, s: V) {

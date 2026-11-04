@@ -2001,7 +2001,7 @@ pub(crate) fn component(rt: &mut Rt, text: V, translatable: bool, with: V) -> V 
 
 /// A component as vanilla's serializer writes it: `{"text": ...}` or `{"translate": ..., "with": [...]}`,
 /// with its style (a colour, `bold`...) and siblings (`extra`).
-fn component_json(rt: &Rt, c: V) -> serde_json::Value {
+pub(crate) fn component_json(rt: &Rt, c: V) -> serde_json::Value {
     let mut j = component_core_json(rt, c);
     if let serde_json::Value::Object(o) = &mut j {
         // The style's tokens in order (`gui`'s: `RED`, `#RRGGBB`, `#` for no colour, `!BOLD` off).
@@ -2075,7 +2075,7 @@ fn component_core_json(rt: &Rt, c: V) -> serde_json::Value {
 
 /// A component vanilla's serializer reads from `j`: a string is literal text, an array its first
 /// part (its siblings left out), an object its `translate` (with `with`) or `text`.
-fn component_from_json(rt: &mut Rt, j: &serde_json::Value) -> V {
+pub(crate) fn component_from_json(rt: &mut Rt, j: &serde_json::Value) -> V {
     use serde_json::Value;
     match j {
         Value::Object(o) => match o.get("translate").and_then(Value::as_str) {

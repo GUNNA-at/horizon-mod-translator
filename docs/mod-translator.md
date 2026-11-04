@@ -1228,6 +1228,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     says when one answers a key it doesn't claim: none in the harness's checks (belt, fan, press, mixer,
     drop, wheel, crank, recipes, network, value settings) or in 20 000 client ticks. 991 → 514 (hash,
     index) → 320 (split once) → 302 (listener index) → 174 µs a tick (298 with the check on).
+  - [x] 2026-11-04 Every inventory slot through the Host (the base for menus): `Host::player_slot`,
+    `set_player_slot` and `update_player_slot` reach slots 0 to 40 (hotbar 0-8, inventory 9-35, armour
+    36-39 feet to head, off hand 40) when the host says `player_inventory()`, and the hands and armour
+    otherwise (the default methods); `player_selected`, `player_id`. A slot's `ItemStack` object stays the
+    same object while the game keeps that slot's stack (`hand::slot_stack`, interned per player and
+    slot), as a Java inventory's would: Create's `HeldItemGhostItemMenu.stillValid` compares
+    `getSelected()` with the stack it opened on. What a mod does to it (count, components, damage) is
+    written back after the hook. Stacks on the wire (`network::put_stack`/`read_stack`, shared by mod
+    payloads and menus) carry their components and damage.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -1,12 +1,15 @@
-//! The acting player's hands while a hook runs. Vanilla's player holds one stack object in each
-//! hand: what a mod changes in it (`shrink`, a component `set`, wear), it finds there again, through
-//! the player (`getItemInHand`, `getMainHandItem`, `getOffhandItem`) or a use's context
-//! (`UseOnContext.getItemInHand`). Here each hand is one stack object for a whole hook
-//! ([`with_hand`]), loaded from the game when the mod first reaches it (its damage, and its mod
-//! components read with their types' codecs), and what the mod did to it reaches the game's stack
-//! when the hook ends: its count, damage and components in place (vanilla's own other data on it
-//! stays), or the stack the mod put in that hand instead (`setItemInHand`, a use's answer). Wear
-//! (`hurtAndBreak`) on a stack in hand is the game's own, as it happens.
+//! The acting player's inventory while hooks run. Vanilla's player holds one stack object in each
+//! inventory slot: what a mod changes in it (`shrink`, a component `set`, wear), it finds there
+//! again, through the player (`getItemInHand`, `getMainHandItem`, `getInventory().getItem(i)`) or a
+//! use's context (`UseOnContext.getItemInHand`), and a menu that keeps the stack it opened for
+//! (`HeldItemGhostItemMenu.stillValid`: `getSelected() == contentHolder`) finds that very object
+//! in the hand while it stays there. Here each slot's stack is one object for each player for as
+//! long as the game's stack doesn't change ([`slot_stack`]), loaded from the game when the mod
+//! first reaches it (its damage, and its mod components read with their types' codecs). What the
+//! mod did to it reaches the game's stack when the hook ([`with_hand`]) ends: its count, damage and
+//! components in place (vanilla's own other data on it stays), or the stack the mod put in that
+//! slot instead (`setItemInHand`, `Inventory.setItem`, a use's answer). Wear (`hurtAndBreak`) on a
+//! stack in hand is the game's own, as it happens.
 use crate::nbt::Nbt;
 use crate::{api_common, components, Rt, V};
 use std::collections::BTreeMap;
@@ -14,6 +17,8 @@ use std::collections::BTreeMap;
 /// The main hand and the off hand, as `InteractionHand`'s ordinals.
 pub const MAIN: u8 = 0;
 pub const OFF: u8 = 1;
+/// The off hand's slot in vanilla's `Inventory` numbering.
+pub const OFF_SLOT: u8 = crate::host::OFF_HAND_SLOT;
 
 /// `hand` as an `InteractionHand` constant.
 pub fn constant(rt: &mut Rt, hand: u8) -> V {
@@ -21,12 +26,23 @@ pub fn constant(rt: &mut Rt, hand: u8) -> V {
     api_common::get_static(rt, "net/minecraft/world/InteractionHand", field).unwrap_or(V::NULL)
 }
 
-fn record(rt: &mut Rt, hand: u8) -> V {
-    let key = if hand == OFF { "compat:hand/off" } else { "compat:hand/main" };
-    rt.intern(key.into(), |rt| rt.new_object("compat:Hand"))
+/// The inventory slot `hand` holds: the selected hotbar slot for the main hand, 40 for the off hand.
+pub fn slot_of_hand(rt: &Rt, hand: u8) -> u8 {
+    if hand == OFF { OFF_SLOT } else { rt.host().map_or(0, |h| h.player_selected().min(8)) }
 }
 
-/// How deep in hooks acting for a player this thread is.
+/// The record of the acting player's slot `slot`: the stack object there, and what the game held
+/// when it was last read or written.
+fn record(rt: &mut Rt, slot: u8) -> V {
+    let player = rt.host().and_then(|h| h.player_id()).unwrap_or(0);
+    rt.intern(format!("compat:slot/{player:x}/{slot}"), |rt| {
+        let r = rt.new_object("compat:InventorySlot");
+        rt.put_field(r, "$slot", V::I(i32::from(slot)));
+        r
+    })
+}
+
+/// How deep in hooks acting for a player this thread is, which hook it is, and the slots it reached.
 fn depth_record(rt: &mut Rt) -> V {
     rt.intern("compat:hand/depth".into(), |rt| rt.new_object("compat:HandDepth"))
 }
@@ -36,63 +52,147 @@ fn in_hook(rt: &mut Rt) -> bool {
     rt.get_field(d, "$depth").i() > 0
 }
 
-/// Runs `f`, a hook acting for a player, with one stack per hand for all of it; what the mod did to
+/// Runs `f`, a hook acting for a player, with one stack per slot for all of it; what the mod did to
 /// them reaches the game when the outermost such hook ends. Call inside `with_host`.
 pub fn with_hand<R>(rt: &mut Rt, f: impl FnOnce(&mut Rt) -> R) -> R {
     let d = depth_record(rt);
     let depth = rt.get_field(d, "$depth").i();
+    if depth == 0 {
+        let serial = rt.get_field(d, "$serial").i().wrapping_add(1);
+        rt.put_field(d, "$serial", V::I(serial));
+        let touched = crate::jutil::new_list(rt, Vec::new());
+        rt.put_field(d, "$touched", touched);
+    }
     rt.put_field(d, "$depth", V::I(depth + 1));
     let out = f(rt);
     let d = depth_record(rt);
     rt.put_field(d, "$depth", V::I(depth));
     if depth == 0 {
-        for hand in [MAIN, OFF] {
-            flush(rt, hand);
-            let r = record(rt, hand);
-            rt.put_field(r, "$stack", V::NULL);
-            rt.put_field(r, "$saved", V::NULL);
+        let touched = rt.get_field(d, "$touched");
+        rt.put_field(d, "$touched", V::NULL);
+        for r in crate::jutil::elements(rt, touched) {
+            flush(rt, r);
         }
     }
     out
+}
+
+/// Marks `r` as reached in this hook, so its stack reaches the game when the hook ends.
+fn touch(rt: &mut Rt, r: V) {
+    let d = depth_record(rt);
+    let serial = rt.get_field(d, "$serial");
+    if rt.get_field(r, "$hook") == serial {
+        return;
+    }
+    rt.put_field(r, "$hook", serial);
+    let touched = rt.get_field(d, "$touched");
+    if let Some(crate::Data::List(l)) = rt.heap.get_mut(touched.r() as usize).map(|o| &mut o.data) {
+        l.push(r);
+    }
 }
 
 fn empty(rt: &mut Rt) -> V {
     api_common::get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL)
 }
 
-/// The stack in `hand`: within a hook the same object each time (`ItemStack.EMPTY` for an empty
-/// hand); outside one, a new one each time.
-pub fn stack(rt: &mut Rt, hand: u8) -> V {
-    let r = record(rt, hand);
-    if let V::R(s) = rt.get_field(r, "$stack")
-        && s != 0
-    {
-        return V::R(s);
+/// What the game holds in a slot, reduced to a number that changes when it does.
+fn mark(held: Option<&crate::host::HandStack>) -> i64 {
+    use std::hash::{Hash, Hasher};
+    fn nbt(h: &mut std::collections::hash_map::DefaultHasher, v: &Nbt) {
+        std::mem::discriminant(v).hash(h);
+        match v {
+            Nbt::Byte(x) => x.hash(h),
+            Nbt::Short(x) => x.hash(h),
+            Nbt::Int(x) => x.hash(h),
+            Nbt::Long(x) => x.hash(h),
+            Nbt::Float(x) => x.to_bits().hash(h),
+            Nbt::Double(x) => x.to_bits().hash(h),
+            Nbt::String(x) => x.hash(h),
+            Nbt::List(l) => {
+                l.len().hash(h);
+                l.iter().for_each(|e| nbt(h, e));
+            }
+            Nbt::Compound(m) => {
+                m.len().hash(h);
+                for (k, e) in m {
+                    k.hash(h);
+                    nbt(h, e);
+                }
+            }
+            Nbt::ByteArray(a) => a.hash(h),
+            Nbt::IntArray(a) => a.hash(h),
+            Nbt::LongArray(a) => a.hash(h),
+        }
     }
-    let s = load(rt, hand);
-    if in_hook(rt) {
-        let r = record(rt, hand);
-        rt.put_field(r, "$stack", s);
-        rt.put_field(r, "$replaced", V::I(0));
-        snapshot(rt, hand, s);
+    let Some(s) = held else { return 0 };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (&s.item, s.count, s.damage).hash(&mut h);
+    let mut components: Vec<&(String, Nbt)> = s.components.iter().collect();
+    components.sort_by(|a, b| a.0.cmp(&b.0));
+    for (k, v) in components {
+        k.hash(&mut h);
+        nbt(&mut h, v);
     }
-    s
+    (h.finish() as i64) | 1
 }
 
-/// The hand `stack` is in during this hook, if it is one of them.
-pub(crate) fn hand_of(rt: &mut Rt, stack: V) -> Option<u8> {
+/// The stack in the acting player's `hand` ([`slot_stack`] of the slot it holds).
+pub fn stack(rt: &mut Rt, hand: u8) -> V {
+    let slot = slot_of_hand(rt, hand);
+    slot_stack(rt, slot)
+}
+
+/// The stack in the acting player's inventory slot `slot` (vanilla's numbering: 0 to 8 the hotbar,
+/// 9 to 35 the rest, 36 to 39 the armour from the feet up, 40 the off hand): the same object each
+/// time while the game's stack there doesn't change (`ItemStack.EMPTY` for an empty slot), a new
+/// one read from the game once it has.
+pub fn slot_stack(rt: &mut Rt, slot: u8) -> V {
+    let r = record(rt, slot);
+    let s = rt.get_field(r, "$stack");
+    let hooked = in_hook(rt);
+    if s.r() != 0 && hooked {
+        let d = depth_record(rt);
+        if rt.get_field(r, "$hook") == rt.get_field(d, "$serial") {
+            return s;
+        }
+    }
+    let held = rt.host().and_then(|h| h.player_slot(slot));
+    let m = mark(held.as_ref());
+    if s.r() == 0 || rt.get_field(r, "$mark").j() != m {
+        let s = load(rt, held);
+        rt.put_field(r, "$stack", s);
+        rt.put_field(r, "$mark", V::J(m));
+        rt.put_field(r, "$replaced", V::I(0));
+        snapshot(rt, r, s);
+    }
+    if hooked {
+        touch(rt, r);
+    }
+    rt.get_field(r, "$stack")
+}
+
+/// The slot `stack` is in during this hook, if it is in one this hook reached.
+pub(crate) fn slot_of(rt: &mut Rt, stack: V) -> Option<u8> {
     if stack.r() == 0 || !in_hook(rt) {
         return None;
     }
-    [MAIN, OFF].into_iter().find(|&h| {
-        let r = record(rt, h);
-        rt.get_field(r, "$stack") == stack
-    })
+    let d = depth_record(rt);
+    let touched = rt.get_field(d, "$touched");
+    crate::jutil::elements(rt, touched)
+        .into_iter()
+        .find(|&r| rt.get_field(r, "$stack") == stack)
+        .map(|r| rt.get_field(r, "$slot").i() as u8)
 }
 
-/// The game's stack in `hand` as a stack here: its count, damage, and mod components.
-fn load(rt: &mut Rt, hand: u8) -> V {
-    let Some(held) = rt.host().and_then(|h| h.player_hand(hand)) else { return empty(rt) };
+/// The hand `stack` is in during this hook, if it is in one of them.
+pub(crate) fn hand_of(rt: &mut Rt, stack: V) -> Option<u8> {
+    let slot = slot_of(rt, stack)?;
+    [MAIN, OFF].into_iter().find(|&h| slot_of_hand(rt, h) == slot)
+}
+
+/// The game's stack `held` as a stack here: its count, damage, and mod components.
+fn load(rt: &mut Rt, held: Option<crate::host::HandStack>) -> V {
+    let Some(held) = held else { return empty(rt) };
     let s = api_common::stack(rt, &held.item, held.count as i32);
     rt.put_field(s, "$damage", V::I(held.damage as i32));
     if held.max_damage > 0 {
@@ -102,17 +202,10 @@ fn load(rt: &mut Rt, hand: u8) -> V {
     s
 }
 
-/// What the acting player wears in armor slot `slot` (0 head, 1 chest, 2 legs, 3 feet), as a stack
-/// read from the game: a copy, which the game doesn't take back.
+/// What the acting player wears in armor slot `slot` (0 head, 1 chest, 2 legs, 3 feet): the stack
+/// in inventory slot `39 - slot`.
 pub fn worn(rt: &mut Rt, slot: u8) -> V {
-    let Some(held) = rt.host().and_then(|h| h.player_worn(slot)) else { return empty(rt) };
-    let s = api_common::stack(rt, &held.item, held.count as i32);
-    rt.put_field(s, "$damage", V::I(held.damage as i32));
-    if held.max_damage > 0 {
-        rt.put_field(s, "$maxDamage", V::I(held.max_damage as i32));
-    }
-    components::load(rt, s, &held.components);
-    s
+    slot_stack(rt, 39 - slot.min(3))
 }
 
 /// What `s` holds (item, count, damage; None when empty) and its components as the game keeps
@@ -127,39 +220,43 @@ fn state(rt: &mut Rt, s: V) -> (Option<(String, u32, u32)>, BTreeMap<String, Nbt
     (Some((id, count, damage)), components::saved(rt, s).into_iter().collect())
 }
 
-/// Records what `hand` holds now as what the game holds: a codec that doesn't round-trip exactly
-/// doesn't count as a change.
-fn snapshot(rt: &mut Rt, hand: u8, s: V) {
+/// Records what record `r`'s stack `s` holds now as what the game holds: a codec that doesn't
+/// round-trip exactly doesn't count as a change.
+fn snapshot(rt: &mut Rt, r: V, s: V) {
     let (held, carried) = state(rt, s);
     let id = match &held {
         Some((id, ..)) => rt.string(id),
         None => V::NULL,
     };
     let saved = crate::nbt::to_runtime(rt, &carried);
-    let r = record(rt, hand);
     rt.put_field(r, "$id", id);
     rt.put_field(r, "$count", V::I(held.as_ref().map_or(0, |h| h.1 as i32)));
     rt.put_field(r, "$damage", V::I(held.as_ref().map_or(0, |h| h.2 as i32)));
     rt.put_field(r, "$saved", saved);
 }
 
-/// The mod put `stack` in `hand` (`Player.setItemInHand`, a use answering another stack): within
-/// a hook, the hand is that object from now on and the game gets it when the hook ends; outside
-/// one, the game gets it now.
+/// The mod put `stack` in `hand` (`Player.setItemInHand`, a use answering another stack).
 pub fn replace(rt: &mut Rt, hand: u8, stack: V) {
-    if !in_hook(rt) {
-        put(rt, hand, stack);
-        return;
-    }
-    // What the hand held first stays the baseline.
-    self::stack(rt, hand);
-    let r = record(rt, hand);
-    rt.put_field(r, "$stack", stack);
-    rt.put_field(r, "$replaced", V::I(1));
+    let slot = slot_of_hand(rt, hand);
+    replace_slot(rt, slot, stack);
 }
 
-/// The game's `hand` holds what `stack` holds now.
-fn put(rt: &mut Rt, hand: u8, stack: V) {
+/// The mod put `stack` in inventory slot `slot` (`Inventory.setItem`): within a hook, the slot is
+/// that object from now on and the game gets it when the hook ends; outside one, the game gets it
+/// now.
+pub fn replace_slot(rt: &mut Rt, slot: u8, stack: V) {
+    // What the slot held first stays the baseline.
+    slot_stack(rt, slot);
+    let r = record(rt, slot);
+    rt.put_field(r, "$stack", stack);
+    rt.put_field(r, "$replaced", V::I(1));
+    if !in_hook(rt) {
+        flush(rt, r);
+    }
+}
+
+/// The game's slot `slot` holds what `stack` holds now.
+fn put(rt: &mut Rt, slot: u8, stack: V) {
     let (held, carried) = state(rt, stack);
     let held = held.map(|(item, count, damage)| crate::host::HandStack {
         item,
@@ -169,48 +266,54 @@ fn put(rt: &mut Rt, hand: u8, stack: V) {
         components: carried.into_iter().collect(),
     });
     if let Some(h) = rt.host_mut() {
-        h.set_player_hand(hand, held.as_ref());
+        h.set_player_slot(slot, held.as_ref());
     }
 }
 
-/// What the mod did to `hand` so far reaches the game.
-fn flush(rt: &mut Rt, hand: u8) {
-    let r = record(rt, hand);
+/// What the mod did to record `r`'s slot so far reaches the game; the stack then stands for what
+/// the game holds there (also when the game refused it: a client's host doesn't change its
+/// inventory, the server's sync does).
+fn flush(rt: &mut Rt, r: V) {
     let s = rt.get_field(r, "$stack");
     if s.r() == 0 {
         return; // never reached
     }
+    let slot = rt.get_field(r, "$slot").i() as u8;
     if rt.get_field(r, "$replaced").i() != 0 {
-        put(rt, hand, s);
-        return;
-    }
-    let before_id = rt.str_of(rt.get_field(r, "$id")).map(str::to_owned);
-    let before_count = rt.get_field(r, "$count").i().max(0) as u32;
-    let before_damage = rt.get_field(r, "$damage").i().max(0) as u32;
-    let saved = rt.get_field(r, "$saved");
-    let before = if saved.r() == 0 { BTreeMap::new() } else { crate::nbt::from_runtime(rt, saved) };
-    let (held, now) = state(rt, s);
-    match (before_id, held) {
-        (None, None) => {}
-        // Used up: the hand is empty.
-        (Some(_), None) => {
-            if let Some(h) = rt.host_mut() {
-                h.update_player_hand(hand, 0, 0, &[]);
+        put(rt, slot, s);
+    } else {
+        let before_id = rt.str_of(rt.get_field(r, "$id")).map(str::to_owned);
+        let before_count = rt.get_field(r, "$count").i().max(0) as u32;
+        let before_damage = rt.get_field(r, "$damage").i().max(0) as u32;
+        let saved = rt.get_field(r, "$saved");
+        let before = if saved.r() == 0 { BTreeMap::new() } else { crate::nbt::from_runtime(rt, saved) };
+        let (held, now) = state(rt, s);
+        match (before_id, held) {
+            (None, None) => {}
+            // Used up: the slot is empty.
+            (Some(_), None) => {
+                if let Some(h) = rt.host_mut() {
+                    h.update_player_slot(slot, 0, 0, &[]);
+                }
             }
-        }
-        (Some(was), Some((id, n, damage))) if was == id => {
-            let mut changes: Vec<(String, Option<Nbt>)> =
-                before.keys().filter(|k| !now.contains_key(*k)).map(|k| (k.clone(), None)).collect();
-            changes.extend(now.iter().filter(|(k, v)| before.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), Some(v.clone()))));
-            if (n != before_count || damage != before_damage || !changes.is_empty())
-                && let Some(h) = rt.host_mut()
-            {
-                h.update_player_hand(hand, n, damage, &changes);
+            (Some(was), Some((id, n, damage))) if was == id => {
+                let mut changes: Vec<(String, Option<Nbt>)> =
+                    before.keys().filter(|k| !now.contains_key(*k)).map(|k| (k.clone(), None)).collect();
+                changes.extend(now.iter().filter(|(k, v)| before.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), Some(v.clone()))));
+                if (n != before_count || damage != before_damage || !changes.is_empty())
+                    && let Some(h) = rt.host_mut()
+                {
+                    h.update_player_slot(slot, n, damage, &changes);
+                }
             }
+            // The slot's stack holds something else now.
+            (_, Some(_)) => put(rt, slot, s),
         }
-        // The hand's stack holds something else now.
-        (_, Some(_)) => put(rt, hand, s),
     }
+    let m = mark(rt.host().and_then(|h| h.player_slot(slot)).as_ref());
+    rt.put_field(r, "$mark", V::J(m));
+    rt.put_field(r, "$replaced", V::I(0));
+    snapshot(rt, r, s);
 }
 
 /// `stack.hurtAndBreak(amount, ...)`: a stack in hand is worn by the game's own rules (creative,
@@ -222,16 +325,16 @@ pub(crate) fn hurt(rt: &mut Rt, stack: V, amount: i32) {
     }
     if let Some(hand) = hand_of(rt, stack) {
         // The game wears what the mod left so far.
-        flush(rt, hand);
-        let r = record(rt, hand);
-        rt.put_field(r, "$replaced", V::I(0));
-        snapshot(rt, hand, stack);
+        let slot = slot_of_hand(rt, hand);
+        let r = record(rt, slot);
+        flush(rt, r);
         if rt.host_mut().is_some_and(|h| h.hurt_player_hand(hand, amount as u32)) {
-            let now = rt.host().and_then(|h| h.player_hand(hand));
-            let (count, damage) = now.map_or((0, 0), |s| (s.count as i32, s.damage as i32));
+            let now = rt.host().and_then(|h| h.player_slot(slot));
+            let (count, damage) = now.as_ref().map_or((0, 0), |s| (s.count as i32, s.damage as i32));
             rt.put_field(stack, "$count", V::I(count));
             rt.put_field(stack, "$damage", V::I(damage));
-            snapshot(rt, hand, stack);
+            rt.put_field(r, "$mark", V::J(mark(now.as_ref())));
+            snapshot(rt, r, stack);
             return;
         }
     }
@@ -439,6 +542,46 @@ mod tests {
             })
         });
         assert_eq!((host.held.clone(), host.held_damage), (Some(("minecraft:shears".into(), 1)), 0), "none in creative");
+    }
+
+    /// A slot's stack is one object across hooks while the game's stack there stays the same (a
+    /// menu that keeps the stack in hand finds it there again, `HeldItemGhostItemMenu.stillValid`),
+    /// and a new one once the game's changed. A stack put in any inventory slot, and what a mod
+    /// did to another slot's stack, reach the game when the hook ends.
+    #[test]
+    fn a_slot_keeps_its_stack_object_while_the_game_keeps_its_stack() {
+        let mut rt = Rt::new();
+        crate::install();
+        let ty = position_type(&mut rt, "test:target");
+        let mut host = MemoryHost::default();
+        host.selected = 2;
+        host.held = Some(("minecraft:stick".into(), 3));
+        host.slots.insert(7, HandStack { item: "minecraft:diamond".into(), count: 5, ..Default::default() });
+        let (held, seven) = rt.with_host(&mut host, |rt| with_hand(rt, |rt| (stack(rt, MAIN), slot_stack(rt, 7))));
+        let (again, seven_again) = rt.with_host(&mut host, |rt| with_hand(rt, |rt| (slot_stack(rt, 2), slot_stack(rt, 7))));
+        assert_eq!(held, again, "the main hand holds slot 2's stack, the same object in the next hook");
+        assert_eq!(seven, seven_again);
+        assert_eq!(rt.with_host(&mut host, |rt| stack(rt, MAIN)), held, "and between hooks");
+
+        host.held = Some(("minecraft:stick".into(), 1));
+        let changed = rt.with_host(&mut host, |rt| with_hand(rt, |rt| stack(rt, MAIN)));
+        assert_ne!(changed, held, "the game's stack changed: a new object");
+        assert_eq!(api::call(&mut rt, COUNT, &[changed]).i(), 1);
+
+        rt.with_host(&mut host, |rt| {
+            with_hand(rt, |rt| {
+                let apple = api_common::stack(rt, "minecraft:apple", 2);
+                replace_slot(rt, 8, apple);
+                let s = slot_stack(rt, 7);
+                let pos = api::block_pos(rt, 1, 2, 3);
+                api::call(rt, SET, &[s, ty, pos]);
+                api::call(rt, SHRINK, &[s, V::I(1)]);
+            })
+        });
+        assert_eq!(host.slots.get(&8).map(|s| (s.item.as_str(), s.count)), Some(("minecraft:apple", 2)));
+        let seven = host.slots.get(&7).cloned().unwrap_or_default();
+        assert_eq!((seven.item.as_str(), seven.count), ("minecraft:diamond", 4));
+        assert_eq!(seven.components, vec![("test:target".to_owned(), Nbt::IntArray(vec![1, 2, 3]))]);
     }
 
     /// A stack in no hand wears where it is: its damage grows, a copy keeps it, and one worn out
