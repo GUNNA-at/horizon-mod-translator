@@ -408,6 +408,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         _ => match mutable_pos(rt, key, args)
             .or_else(|| crate::sounds::call(rt, key, args))
+            .or_else(|| crate::particles::call(rt, key, args))
             .or_else(|| crate::network::call(rt, key, args))
             .or_else(|| crate::fluids::call(rt, key, args))
             .or_else(|| crate::tanks::call_key(rt, key, args))
@@ -729,10 +730,10 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::Void
         }
         (_, "blockUpdated" | "updateNeighbourForOutputSignal" | "updateNeighborsAt" | "blockEntityChanged") if level => V::Void,
-        // Particles are the client's: the server sends none to the game yet.
-        (_, "sendParticles") if level => V::I(0),
+        (_, "sendParticles") if level => crate::particles::send_particles(rt, desc, args),
+        (_, "addParticle" | "addAlwaysVisibleParticle") if level => crate::particles::level_particle(rt, name, desc, args),
         (_, "playSound" | "playSeededSound" | "playLocalSound") if level => crate::sounds::level_sound(rt, name, desc, args),
-        (_, "addParticle" | "addAlwaysVisibleParticle" | "levelEvent" | "gameEvent") if level => V::Void,
+        (_, "levelEvent" | "gameEvent") if level => V::Void,
         (_, "dimensionType") if level => rt.intern("compat:dimension-type".into(), |rt| rt.new_object("net/minecraft/world/level/dimension/DimensionType")),
         // Its dimension type's holder: vanilla's three dimensions have types of their own names.
         (_, "dimensionTypeRegistration") if level => {
@@ -1079,6 +1080,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::components::get_static(rt, o, f))
             .or_else(|| crate::capabilities::get_static(rt, o, f))
             .or_else(|| crate::sounds::get_static(rt, o, f))
+            .or_else(|| crate::particles::get_static(rt, o, f))
     {
         return v;
     }

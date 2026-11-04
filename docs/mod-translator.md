@@ -905,6 +905,24 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     their item and fluid positions; its iterator was a stand-in, so nothing was written); `Level`'s
     constructor for a mod's own level (Create's `ContraptionWorld` keeps its side) and
     `dimensionTypeRegistration`. The bearing's click leaves nothing unmapped now.
+  - [x] 2026-11-04 Mod particles (`horizon-compat/src/particles.rs`, the host's `particles` with a
+    `host::Particles`). Vanilla's `ParticleTypes` fields (the name lowercased is the id but for
+    the trial spawner's two, checked against the 1.21.1 jar's 109 fields), `BlockParticleOption`,
+    `ItemParticleOption`, `DustParticleOptions` (and `REDSTONE`), a mod's own types by the id they
+    are registered under; a level's `addParticle` and `addAlwaysVisibleParticle` (with or without
+    `force`) and `ServerLevel.sendParticles` (to all near, or to one player). As in vanilla, a
+    client's level draws `addParticle` (the game's `native_add_particle`, the options from
+    `native_particle_options`: a block's particle sprite and tint, an item's model layer sprites)
+    and a server's sends `sendParticles` (`native_level_particles`, as `native_send_particles` does:
+    item particles don't go over the network yet); `addParticle` on a server is nothing. API
+    fragment `native_level_particles`. What Create draws, measured over its jar: `ITEM` and
+    `BLOCK` options most (15 and 14 call sites), dust, end rods, smoke, flames; 68 classes add
+    particles on the client, 6 send them from the server. Harness `PRESS` (the press's syncs replayed
+    on a client): the sync made as it presses carries the ingot, and the client makes 15
+    `minecraft:item` particles of `minecraft:iron_ingot` at the depot (0.5, 64.75, 0.5), each moving
+    up 0.125 and out up to 0.125 (the press's `getParticleAmount` is 15). Create's own particle
+    classes (air flow, steam jets, rotation indicators) aren't drawn yet: their options carry no
+    registered type.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

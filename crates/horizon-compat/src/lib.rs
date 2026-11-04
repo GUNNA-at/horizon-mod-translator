@@ -29,6 +29,7 @@ pub mod network;
 pub mod quads;
 pub mod recipes;
 pub mod palette;
+pub mod particles;
 pub mod records;
 pub mod render;
 pub mod rotation;

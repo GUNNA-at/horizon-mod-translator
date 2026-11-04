@@ -3471,6 +3471,43 @@ fn native_sound(
     })
 }
 
+/// Whether the network carries `p` and its values are in range
+/// ([`GameLevel::native_send_particles`]).
+fn particle_ok(registry: &BlockRegistry, p: &super::lan_particles::QueuedParticle) -> bool {
+    use ParticleType as T;
+    let options = &p.options;
+    // A native mod's own type: the name has to be namespaced, and a client
+    // draws it only when its pack has the sprite set.
+    if let Some(name) = &options.mod_particle {
+        let namespaced = name
+            .split_once(':')
+            .is_some_and(|(ns, path)| !ns.is_empty() && !path.is_empty());
+        if !namespaced {
+            return false;
+        }
+    }
+    let supported = match options.ty {
+        T::Block | T::BlockMarker | T::FallingDust | T::DustPillar | T::BlockCrumble => p
+            .state
+            .is_some_and(|id| registry.state(id).is_some()),
+        T::Item | T::Trail | T::Vibration => false,
+        T::Geyser | T::GeyserPlume | T::GeyserBase | T::GeyserPoof => options
+            .geyser
+            .is_some_and(|(_, impulse)| impulse.is_finite()),
+        _ => true,
+    };
+    supported
+        && p.at.into_iter().all(f64::is_finite)
+        && p.spread
+            .into_iter()
+            .all(|v| v.is_finite() && v.abs() <= f32::MAX as f64)
+        && p.speed.is_finite()
+        && p.speed.abs() <= f32::MAX as f64
+        && options.color.into_iter().all(f32::is_finite)
+        && options.to_color.into_iter().all(f32::is_finite)
+        && options.scale.is_finite()
+}
+
 /// Server-level helpers for native mods.
 #[allow(dead_code)]
 impl GameLevel<'_> {
@@ -3517,52 +3554,20 @@ impl GameLevel<'_> {
         speed: f64,
         count: i32,
     ) -> bool {
-        use ParticleType as T;
-        // A native mod's own type: the name has to be namespaced, and a client
-        // draws it only when its pack has the sprite set.
-        if let Some(name) = &options.mod_particle {
-            let namespaced = name
-                .split_once(':')
-                .is_some_and(|(ns, path)| !ns.is_empty() && !path.is_empty());
-            if !self.native_authoritative || !namespaced {
-                return false;
-            }
-        }
-        let supported = match options.ty {
-            T::Block | T::BlockMarker | T::FallingDust | T::DustPillar | T::BlockCrumble => {
-                state.is_some_and(|id| self.registry.state(id).is_some())
-            }
-            T::Item | T::Trail | T::Vibration => false,
-            T::Geyser | T::GeyserPlume | T::GeyserBase | T::GeyserPoof => options
-                .geyser
-                .is_some_and(|(_, impulse)| impulse.is_finite()),
-            _ => true,
+        let particle = super::lan_particles::QueuedParticle {
+            dimension: dimension_id(self.dimension),
+            options: options.clone(),
+            state,
+            at,
+            spread,
+            speed,
+            count,
+            randomization: 0,
         };
-        if !self.native_authoritative
-            || !supported
-            || !at.into_iter().all(f64::is_finite)
-            || !spread
-                .into_iter()
-                .all(|v| v.is_finite() && v.abs() <= f32::MAX as f64)
-            || !speed.is_finite()
-            || speed.abs() > f32::MAX as f64
-            || !options.color.into_iter().all(f32::is_finite)
-            || !options.to_color.into_iter().all(f32::is_finite)
-            || !options.scale.is_finite()
-        {
+        if !self.native_authoritative || !particle_ok(self.registry, &particle) {
             return false;
         }
-        self.native_particles
-            .push(super::lan_particles::QueuedParticle {
-                dimension: dimension_id(self.dimension),
-                options: options.clone(),
-                state,
-                at,
-                spread,
-                speed,
-                count,
-                randomization: 0,
-            });
+        self.native_particles.push(particle);
         true
     }
     /// Sets property `key` of the block at `pos` to `value` with
@@ -4240,6 +4245,101 @@ impl Game<'_> {
             return false;
         };
         self.creatures.lan_sounds.push(sound);
+        true
+    }
+    /// [`GameLevel::native_send_particles`] from a hook on the server's game
+    /// that isn't handed a level (a block entity's tick, a click on a block, a
+    /// payload from a client): for the players near `at` in the level in
+    /// place. False on a client, or as `native_send_particles` refuses.
+    /// API @API:native_level_particles@.
+    pub(super) fn native_level_particles(
+        &mut self,
+        options: &ParticleOptions,
+        state: Option<BlockStateId>,
+        at: [f64; 3],
+        spread: [f64; 3],
+        speed: f64,
+        count: i32,
+    ) -> bool {
+        if self.serving.is_none() && self.options.dedicated.is_none() {
+            return false;
+        }
+        let particle = super::lan_particles::QueuedParticle {
+            dimension: self.dim.id(),
+            options: options.clone(),
+            state,
+            at,
+            spread,
+            speed,
+            count,
+            randomization: 0,
+        };
+        if !particle_ok(self.pack.assets.registry, &particle) {
+            return false;
+        }
+        self.creatures.lan_particles.push(particle);
+        true
+    }
+    /// The options for particles of type `kind` (`minecraft:smoke`; another
+    /// namespace's is a mod's own, drawn from its sprite set as
+    /// [`ParticleOptions::named`]), with what the type's options carry:
+    /// `block` a block state's text for the block types, `item` an item's id
+    /// for `minecraft:item`, `dust` a colour and scale. The block types also
+    /// give their state, which a server sends; on a client the options carry
+    /// the block's particle sprite and tint at `at`. None for an unknown type
+    /// or block, or a type missing what it carries. API
+    /// @API:native_level_particles@.
+    pub(super) fn native_particle_options(
+        &self,
+        kind: &str,
+        block: Option<&str>,
+        item: Option<&str>,
+        dust: Option<([f32; 3], f32)>,
+        at: [f64; 3],
+    ) -> Option<(ParticleOptions, Option<BlockStateId>)> {
+        use ParticleType as T;
+        if !kind.starts_with("minecraft:") {
+            let namespaced = kind
+                .split_once(':')
+                .is_some_and(|(ns, path)| !ns.is_empty() && !path.is_empty());
+            return namespaced.then(|| (ParticleOptions::named(kind), None));
+        }
+        let ty = ParticleType::from_name(kind)?;
+        Some(match ty {
+            T::Block | T::BlockMarker | T::FallingDust | T::DustPillar | T::BlockCrumble => {
+                let state = state_from_text(self.pack.assets.registry, block?)?;
+                if !self.native_window() {
+                    return Some((ParticleOptions::simple(ty), Some(state)));
+                }
+                let pos = at.map(|v| v.floor() as i32);
+                let (sprite, tint) = self.particle_sprite(state, pos)?;
+                (ParticleOptions::block(ty, sprite, tint), Some(state))
+            }
+            T::Item => (self.item_particle(&ItemStack::new(item?, 1)), None),
+            T::Dust => {
+                let (rgb, scale) = dust?;
+                (ParticleOptions::dust(rgb, scale), None)
+            }
+            _ => (ParticleOptions::simple(ty), None),
+        })
+    }
+    /// A client mod's particle at `at` moving along `velocity`
+    /// (`ClientLevel.addParticle`): `force` draws it however far away
+    /// (`addParticle(options, true, ...)`), `always` at the lowest particle
+    /// setting too (`addAlwaysVisibleParticle`). False on a server or for a
+    /// value out of range. API @API:native_level_particles@.
+    pub(super) fn native_add_particle(
+        &mut self,
+        options: &ParticleOptions,
+        at: [f64; 3],
+        velocity: [f64; 3],
+        force: bool,
+        always: bool,
+    ) -> bool {
+        if !self.native_window() || !at.iter().chain(&velocity).all(|v| v.is_finite()) {
+            return false;
+        }
+        self.particles.add_with(options, at, velocity, force, always);
         true
     }
     /// Playing, with nothing over the world: keys and zoom apply.

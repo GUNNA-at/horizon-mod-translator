@@ -270,6 +270,33 @@ pub trait Host {
     /// A sound a mod plays (`Level.playSound`, `playLocalSound`, `Entity.playSound`). A server's
     /// game sends it to the players near it; a client's plays it for its player.
     fn play_sound(&mut self, _sound: &Sound) {}
+    /// Particles a mod makes: a client's game draws them (`Level.addParticle`), a server's sends
+    /// them to the players near them (`ServerLevel.sendParticles`).
+    fn particles(&mut self, _particles: &Particles) {}
+}
+
+/// Particles a mod makes ([`Host::particles`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Particles {
+    /// The type's id: `minecraft:smoke`, `minecraft:block`, a mod's own `create:air_flow`.
+    pub kind: String,
+    /// `BlockParticleOption`'s block state, as text (`minecraft:stone`).
+    pub block: Option<String>,
+    /// `ItemParticleOption`'s item id.
+    pub item: Option<String>,
+    /// `DustParticleOptions`' colour and scale.
+    pub dust: Option<([f32; 3], f32)>,
+    pub at: [f64; 3],
+    /// One particle's velocity (`addParticle`), or how far `count` of them spread
+    /// (`sendParticles`; with a count of 0, one moves along it at `speed`).
+    pub delta: [f64; 3],
+    pub speed: f64,
+    /// `sendParticles`' count; None for `addParticle`.
+    pub count: Option<i32>,
+    /// Drawn however far away (`addParticle(options, true, ...)`, `sendParticles(player, options, true, ...)`).
+    pub force: bool,
+    /// `addAlwaysVisibleParticle`: drawn at the lowest particle setting too.
+    pub always: bool,
 }
 
 /// A sound a mod plays ([`Host::play_sound`]).
@@ -351,6 +378,8 @@ pub struct MemoryHost {
     pub client: bool,
     /// Sounds played, in order.
     pub sounds: Vec<Sound>,
+    /// Particles made, in order.
+    pub particles: Vec<Particles>,
 }
 
 impl Host for MemoryHost {
@@ -500,6 +529,9 @@ impl Host for MemoryHost {
     }
     fn play_sound(&mut self, sound: &Sound) {
         self.sounds.push(sound.clone());
+    }
+    fn particles(&mut self, particles: &Particles) {
+        self.particles.push(particles.clone());
     }
 }
 

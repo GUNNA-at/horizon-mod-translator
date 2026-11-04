@@ -28,7 +28,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
 /// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 36] = [
+const COMPAT: [(&str, &str); 37] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -47,6 +47,7 @@ const COMPAT: [(&str, &str); 36] = [
     ("neo_tags.rs", include_str!("../../horizon-compat/src/neo_tags.rs")),
     ("mod_entities.rs", include_str!("../../horizon-compat/src/mod_entities.rs")),
     ("palette.rs", include_str!("../../horizon-compat/src/palette.rs")),
+    ("particles.rs", include_str!("../../horizon-compat/src/particles.rs")),
     ("records.rs", include_str!("../../horizon-compat/src/records.rs")),
     ("rotation.rs", include_str!("../../horizon-compat/src/rotation.rs")),
     ("vanilla_records.rs", include_str!("../../horizon-compat/src/vanilla_records.rs")),
@@ -204,10 +205,16 @@ fn nbt_conversions(c: &str) -> String {
 
 /// A server-side host's `send_payload`: a mod payload to the players `to` names, each through the
 /// game's mod message channel.
-/// A server host's sounds: for the players near them in the level the game holds.
-fn server_sound(c: &str) -> String {
+/// A server host's sounds and particles: for the players near them in the level the game holds.
+fn server_effects(c: &str) -> String {
     format!(r#"        fn play_sound(&mut self, s: &{c}::host::Sound) {{
             self.game.native_level_sound(&s.event, s.at, s.source, s.volume, s.pitch);
+        }}
+        fn particles(&mut self, p: &{c}::host::Particles) {{
+            let Some(count) = p.count else {{ return }};
+            if let Some((options, state)) = self.game.native_particle_options(&p.kind, p.block.as_deref(), p.item.as_deref(), p.dust, p.at) {{
+                self.game.native_level_particles(&options, state, p.at, p.delta, p.speed, count);
+            }}
         }}
 "#)
 }
@@ -291,6 +298,14 @@ fn client_host(c: &str) -> String {
         }}
         fn play_sound(&mut self, s: &{c}::host::Sound) {{
             self.game.native_play_local_sound(&s.event, s.at, s.volume, s.pitch, 0);
+        }}
+        fn particles(&mut self, p: &{c}::host::Particles) {{
+            if p.count.is_some() {{
+                return;
+            }}
+            if let Some((options, _)) = self.game.native_particle_options(&p.kind, p.block.as_deref(), p.item.as_deref(), p.dust, p.at) {{
+                self.game.native_add_particle(&options, p.at, p.delta, p.force, p.always);
+            }}
         }}
     }}
 "#)
@@ -625,7 +640,7 @@ fn {id}_net_from_server(game: &mut crate::game::Game<'_>, channel: &str, data: &
 /// (a block entity's tick, a level's): its blocks, items, recipes and item entities, and payloads
 /// to players.
 fn game_host(c: &str, server_send: &str) -> String {
-    let server_sound = server_sound(c);
+    let server_effects = server_effects(c);
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
     }}
@@ -708,7 +723,7 @@ fn game_host(c: &str, server_send: &str) -> String {
             let stack = horizon_client::items::ItemStack::new(item, count);
             self.game.native_spawn_item_entity(dim, stack, pos, motion, pickup_delay)
         }}
-{server_sound}{server_send}    }}
+{server_effects}{server_send}    }}
 "#)
 }
 
@@ -731,7 +746,7 @@ fn {id}_level_tick_{phase}(game: &mut crate::game::Game<'_>, dimension: &str) {{
 fn block_entity_helpers(id: &str, ns: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
     let server_send = server_send(&c);
-    let server_sound = server_sound(&c);
+    let server_effects = server_effects(&c);
     let host = game_host(&c, &server_send);
     vec![
         ("level_tick_pre", level_tick(id, krate, &c, &host, false)),
@@ -775,7 +790,7 @@ fn {id}_net_from_client(game: &mut crate::game::Game<'_>, player: u128, channel:
         fn game_time(&self) -> i64 {{
             self.game.native_game_time()
         }}
-{server_sound}{server_send}    }}
+{server_effects}{server_send}    }}
     let mut host = Host {{ game }};
     {krate}::with_runtime(|rt| {c}::glue::payload_from_client(rt, &mut host, player, channel, data));
 }}
@@ -941,7 +956,7 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
         fn ingredient_items(&self, entry: &str) -> Vec<String> {{
             self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
         }}
-{server_sound}    }}
+{server_effects}    }}
     let mut host = Host {{ game }};
     if {krate}::with_runtime(|rt| {c}::glue::use_block(rt, &mut host, pos, &state, face)) {{
         *canceled = true;
@@ -1038,7 +1053,7 @@ fn {id}_use_item_on(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
         fn ingredient_items(&self, entry: &str) -> Vec<String> {{
             self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
         }}
-{server_sound}    }}
+{server_effects}    }}
     // The click lands on the clicked face's centre.
     let at = |i: usize| pos[i] as f64 + 0.5 + face[i] as f64 * 0.5;
     let click = {c}::glue::Placement {{

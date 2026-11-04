@@ -1,0 +1,5 @@
+{
+  "hooks": [],
+  "rust_summary": "particles from hooks with no level in hand, and a client's own (`native_level_particles`, `native_particle_options`, `native_add_particle`).",
+  "doc_summary": "particles from hooks with no level in hand: `native_particle_options(kind, block, item, dust, at)` builds a type's\noptions from its id and what it carries, `native_level_particles(options, state, at, spread, speed, count)` sends them\nto the players near `at` from a block entity's tick, a click or a client's payload, as `native_send_particles` does from\na block's hook, and `native_add_particle(options, at, velocity, force, always)` draws one on a client. Bundles that use\nthem need `\"hooks\": @API:native_level_particles@`."
+}
