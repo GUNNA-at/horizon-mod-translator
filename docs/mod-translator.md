@@ -1634,6 +1634,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     exception; tabs (11), New Age's coil (16 rpm, 72 su, 22 FE/t) and Create's filter as before.
     Kept but not yet asked by the game: the dispenser behaviours, the fluid interactions, armour
     materials' stats.
+  - 2026-11-04 Load order, and the rest of what loading missed (Create + 10 addons, harness).
+    A lambda is an instance of its functional interface, so its default methods run (`Function`'s
+    `andThen` on a method reference...): `Function.apply` (23) and Registrate's `asProvider` (5)
+    went. Mapped (cd88f31): java.nio's `Path`, `Paths`, `Files` and java.io's `File` over the game
+    folder, FML's `FMLPaths` (`GAMEDIR`, `MODSDIR`, `CONFIGDIR`, `FMLCONFIG`, folders made as FML
+    makes them), Java's `IOException` family; NeoForge's data attachments (`AttachmentType`
+    builders, a holder's `getData`/`setData`/`hasData`/`removeData`; the default made once per
+    holder), so Create's minecart controller registers; `Tiers` and `SimpleTier` with vanilla's
+    numbers, `SwordItem`/`DiggerItem.createAttributes`, more of `Item.Properties`, `MobEffect`'s
+    methods, `ItemAbilities`; codecs of components, tag and resource keys and vanilla enums, `and`
+    on record products; stream codecs from codecs. An unknown vanilla `CODEC` is a counted miss
+    with a codec that fails when used, instead of null. Misses at load 134 → 27 (25 kinds).
+    The rest (f168990):
+    - FML constructs each `@Mod` class first; a class holding registers initialises when the
+      constructor reaches it (or after, if none does). `start` used to initialise every such class
+      before the constructors, so Create's `AllArmorMaterials` read its sound entries before
+      `AllSoundEvents.prepare()` filled them (`Record.event` on null: the armour's equip sound).
+      The hook test's mod has a main class now; the order test fails on the old `start`.
+    - Bundles carry `attachments.rs` and `files.rs` (the bundle test caught them missing: the
+      game's build would not have compiled).
+    - `ParticleTypes.STREAM_CODEC` (New Age's wire particle packets): the type by name, then a
+      block's state, an item's stack, a dust's colour, or what a mod's own type's `streamCodec()`
+      writes. `ResourceKey.streamCodec` was claimed but never routed to the codec functions; a
+      test now goes through the dispatcher.
+    - Vanilla's 41 `Foods` from 1.21.1's initialiser, built by the builder (`GOLDEN_APPLE`...);
+      `Stream.close`; `ArmorItem.DISPENSE_ITEM_BEHAVIOR`.
+    Misses at load 27 → 19 (19 kinds), registrations as before plus Create's attachment type, no
+    uncaught exception; tabs (11), New Age's coil (16 rpm, 72 su, 22 FE/t, brushes to 440) and
+    Create's filter as before. Left: milk (the game has no milk fluid), item property overrides
+    (`ItemProperties.register`, client models), recipe stream codecs (recipe sync, which the
+    game does itself), Gson (`Create.GSON`), `Pattern.compile` (Flywheel's shader compiler),
+    Copycats' cat variant (`Holder.Reference.createStandAlone`), `ItemStack.getComponentsPatch`,
+    `FoodProperties.DIRECT_CODEC`, `OreConfiguration.TargetBlockState.CODEC`, Create Connected's
+    server config read on the client before it loads (Java throws and its `safeGetter` catches;
+    here a getfield on null gives null). Build note: the engine's rustc peaks at ~6.6 GB and macOS
+    swap (on the disk) grows ~5 GB, so the watchdog killed one build at < 4 GB free: keep 15 GB.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
