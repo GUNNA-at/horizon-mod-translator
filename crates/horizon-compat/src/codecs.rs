@@ -7,9 +7,13 @@
 //! codecs are read natively ([`crate::recipes::decode_native`]). Also here: DFU's `DataResult`,
 //! `Either` and `Pair`, which codecs and the functions they call hand around.
 //!
-//! Encoding is not modelled: a codec only reads.
+//! [`encode`] walks a codec the other way, into NBT (`encodeStart(NbtOps.INSTANCE, value)`): what a
+//! block entity saves with a codec (Create's display links, chain conveyors, packagers), calling the
+//! mod's getters and inverse mappings where DFU would.
+use crate::nbt::Nbt;
 use crate::{Data, Rt, Table, V, jutil};
 use serde_json::{Map, Value as Json};
+use std::collections::BTreeMap;
 
 const DATA_RESULT: &str = "com/mojang/serialization/DataResult";
 const DATA_ERROR: &str = "com/mojang/serialization/DataResult$Error";
@@ -90,6 +94,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             "NON_EMPTY_STRING" => prim(rt, "string"),
             _ => return None,
         },
+        ("net/minecraft/nbt/NbtOps", "INSTANCE") => rt.intern("compat:nbt-ops".into(), |rt| rt.new_object("net/minecraft/nbt/NbtOps")),
+        ("com/mojang/serialization/JsonOps", "INSTANCE" | "COMPRESSED") => rt.intern("compat:json-ops".into(), |rt| rt.new_object("com/mojang/serialization/JsonOps")),
         ("net/minecraft/resources/ResourceLocation", "CODEC") => native(rt, "resource_location"),
         ("net/minecraft/core/BlockPos", "CODEC") => native(rt, "block_pos"),
         ("net/minecraft/util/Unit", "CODEC") => native(rt, "unit"),
@@ -536,6 +542,278 @@ fn registry_value(rt: &mut Rt, registry: &str, id: &str) -> Result<V, String> {
     }
 }
 
+// ---- Writing ----
+
+/// Writes `value` with codec `c`, as `c.encodeStart(NbtOps.INSTANCE, value)` would: the tag, or why
+/// not.
+pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
+    let parts = rt.captured(c);
+    let part = |i: usize| parts.get(i).copied().unwrap_or_default();
+    match kind(rt, c) {
+        "prim" => {
+            let name = rt.str_of(part(0)).unwrap_or("").to_owned();
+            write_primitive(rt, &name, value)
+        }
+        "range" => encode(rt, part(0), value),
+        "list" => {
+            let mut out = Vec::new();
+            for v in jutil::elements(rt, value) {
+                out.push(encode(rt, part(0), v)?);
+            }
+            Ok(Nbt::List(out))
+        }
+        "map" => {
+            let mut out = BTreeMap::new();
+            for (k, v) in jutil::table_pairs(rt, value) {
+                let Nbt::String(key) = encode(rt, part(0), k)? else { return Err("Not a string key".into()) };
+                let v = encode(rt, part(1), v)?;
+                out.insert(key, v);
+            }
+            Ok(Nbt::Compound(out))
+        }
+        "xmap" => {
+            let v = map_back(rt, &parts, value)?;
+            encode(rt, part(0), v)
+        }
+        "validate" => {
+            let r = run(rt, FUNCTION, part(1), &[value])?;
+            let v = result_of(rt, r)?;
+            encode(rt, part(0), v)
+        }
+        "either" => {
+            let left = rt.get_field(value, "$isLeft").i() != 0;
+            let v = rt.get_field(value, if left { "$left" } else { "$right" });
+            encode(rt, if left { part(0) } else { part(1) }, v)
+        }
+        // `withAlternative`: written with the first.
+        "alt" => encode(rt, part(0), value),
+        "unit" => Ok(Nbt::Compound(BTreeMap::new())),
+        "lazy" => {
+            let inner = lazy(rt, c)?;
+            encode(rt, inner, value)
+        }
+        "registry" => {
+            let registry = rt.str_of(part(0)).unwrap_or("").to_owned();
+            registry_key(rt, &registry, value).map(Nbt::String)
+        }
+        "enum" => serialized_name(rt, value).map(Nbt::String),
+        "native" => {
+            let name = rt.str_of(part(0)).unwrap_or("").to_owned();
+            write_native(rt, &name, value)
+        }
+        // `Codec.pair`: both halves into one map.
+        "pair" => {
+            let mut out = BTreeMap::new();
+            for (half, field) in [(part(0), "$first"), (part(1), "$second")] {
+                let v = rt.get_field(value, field);
+                match encode(rt, half, v)? {
+                    Nbt::Compound(m) => out.extend(m),
+                    _ => return Err("a pair's half that is not a map".into()),
+                }
+            }
+            Ok(Nbt::Compound(out))
+        }
+        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" => {
+            let mut out = BTreeMap::new();
+            encode_map(rt, c, value, &mut out)?;
+            Ok(Nbt::Compound(out))
+        }
+        other => Err(format!("codec {other} can't write")),
+    }
+}
+
+/// Writes `value`'s fields into `out` with map codec `c` (`MapCodec.encode`).
+fn encode_map(rt: &mut Rt, c: V, value: V, out: &mut BTreeMap<String, Nbt>) -> Result<(), String> {
+    let parts = rt.captured(c);
+    let part = |i: usize| parts.get(i).copied().unwrap_or_default();
+    match kind(rt, c) {
+        "field" => {
+            let name = rt.str_of(part(0)).unwrap_or("").to_owned();
+            let v = encode(rt, part(1), value).map_err(|e| format!("{name}: {e}"))?;
+            out.insert(name, v);
+        }
+        // `optionalFieldOf(name[, default])`: an empty Optional, or the default, is left out
+        // (NeoForge's `optionalFieldAlwaysWrite` writes the default too).
+        "optional" => {
+            let name = rt.str_of(part(0)).unwrap_or("").to_owned();
+            let (has_default, always) = (part(3).i() != 0, part(5).i() != 0);
+            let present = if has_default {
+                (always || !jutil::equals(rt, value, part(2))).then_some(value)
+            } else {
+                let held = rt.get_field(value, "value");
+                (held.r() != 0).then_some(held)
+            };
+            if let Some(v) = present {
+                let v = encode(rt, part(1), v).map_err(|e| format!("{name}: {e}"))?;
+                out.insert(name, v);
+            }
+        }
+        // Each field from the mod's getter (`forGetter`).
+        "record" => {
+            for &g in parts.iter().skip(1) {
+                if kind(rt, g) == "getter" {
+                    let field = rt.captured(g);
+                    let (codec, getter) = (field.first().copied().unwrap_or_default(), field.get(1).copied().unwrap_or_default());
+                    let v = run(rt, FUNCTION, getter, &[value])?;
+                    encode_map(rt, codec, v, out)?;
+                }
+            }
+        }
+        "point" | "unit" => {}
+        "of_map" => encode_map(rt, part(0), value, out)?,
+        "xmap" => {
+            let v = map_back(rt, &parts, value)?;
+            encode_map(rt, part(0), v, out)?;
+        }
+        "validate" => {
+            let r = run(rt, FUNCTION, part(1), &[value])?;
+            let v = result_of(rt, r)?;
+            encode_map(rt, part(0), v, out)?;
+        }
+        // The type under its key, then the type's codec: a map codec beside it, another under `value`.
+        "dispatch" => {
+            let key = rt.str_of(part(0)).unwrap_or("type").to_owned();
+            let ty = run(rt, FUNCTION, part(2), &[value])?;
+            let mut typed = run(rt, FUNCTION, part(3), &[ty])?;
+            if rt.class_of(typed) == DATA_RESULT {
+                typed = result_of(rt, typed)?;
+            }
+            if !is_codec(rt, typed) {
+                return Err("no codec this runtime writes for its type".into());
+            }
+            let t = encode(rt, part(1), ty)?;
+            out.insert(key, t);
+            if reads_object(rt, typed) {
+                encode_map(rt, typed, value, out)?;
+            } else {
+                let v = encode(rt, typed, value)?;
+                out.insert("value".into(), v);
+            }
+        }
+        "alt" => encode_map(rt, part(0), value, out)?,
+        "either" => {
+            let left = rt.get_field(value, "$isLeft").i() != 0;
+            let v = rt.get_field(value, if left { "$left" } else { "$right" });
+            encode_map(rt, if left { part(0) } else { part(1) }, v, out)?;
+        }
+        "lazy" => {
+            let inner = lazy(rt, c)?;
+            encode_map(rt, inner, value, out)?;
+        }
+        // A codec over the whole object.
+        _ => match encode(rt, c, value)? {
+            Nbt::Compound(m) => out.extend(m),
+            _ => return Err("not a map".into()),
+        },
+    }
+    Ok(())
+}
+
+/// `xmap`'s way back (`from`), answering a value or a `DataResult`.
+fn map_back(rt: &mut Rt, parts: &[V], value: V) -> Result<V, String> {
+    let from = parts.get(3).copied().unwrap_or_default();
+    if from.r() == 0 {
+        return Err("a mapped codec with no way back".into());
+    }
+    let r = run(rt, FUNCTION, from, &[value])?;
+    if parts.get(4).is_some_and(|f| f.i() != 0) { result_of(rt, r) } else { Ok(r) }
+}
+
+/// A registry entry's id (`byNameCodec`): what the mod registered, a vanilla entry's own name.
+fn registry_key(rt: &mut Rt, registry: &str, v: V) -> Result<String, String> {
+    if let Some(n) = rt.registered_name(v, registry) {
+        return Ok(n.to_owned());
+    }
+    if registry == "item" {
+        let n = crate::api_common::item_like_name(rt, v);
+        if !n.is_empty() {
+            return Ok(n);
+        }
+    }
+    rt.str_of(v).map(str::to_owned).ok_or_else(|| format!("Unknown registry element in {registry}"))
+}
+
+fn serialized_name(rt: &mut Rt, v: V) -> Result<String, String> {
+    let n = run(rt, SERIALIZED_NAME, v, &[])?;
+    rt.str_of(n).map(str::to_owned).ok_or_else(|| "an enum value with no name".to_owned())
+}
+
+/// A primitive codec's tag of a value (Java's box of it, or the raw value a primitive collection
+/// holds).
+fn write_primitive(rt: &Rt, name: &str, v: V) -> Result<Nbt, String> {
+    if name == "string" {
+        return rt.str_of(v).map(|s| Nbt::String(s.to_owned())).ok_or_else(|| "Not a string".to_owned());
+    }
+    let raw = match v {
+        V::R(_) => rt.get_field(v, "value"),
+        raw => raw,
+    };
+    let (i, f) = match raw {
+        V::I(i) => (i64::from(i), f64::from(i)),
+        V::J(j) => (j, j as f64),
+        V::F(x) => (x as i64, f64::from(x)),
+        V::D(x) => (x as i64, x),
+        _ => return Err(format!("Not a number: {name}")),
+    };
+    Ok(match name {
+        "int" => Nbt::Int(i as i32),
+        "short" => Nbt::Short(i as i16),
+        "byte" => Nbt::Byte(i as i8),
+        "long" => Nbt::Long(i),
+        "float" => Nbt::Float(f as f32),
+        "double" => Nbt::Double(f),
+        "bool" => Nbt::Byte((i != 0) as i8),
+        _ => return Err(format!("no primitive {name}")),
+    })
+}
+
+/// Minecraft's and NeoForge's own codecs, as vanilla writes them.
+fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
+    Ok(match name {
+        "resource_location" => Nbt::String(rt.str_of(v).ok_or("Not a resource location")?.to_owned()),
+        "block_pos" => Nbt::IntArray(crate::api::pos_of(rt, v).to_vec()),
+        "unit" => Nbt::Compound(BTreeMap::new()),
+        // `{id, count}` (components aren't kept on stacks yet); nothing for an empty optional one.
+        "item_stack" | "optional_item_stack" => {
+            if crate::api_common::stack_empty(rt, v) {
+                if name == "item_stack" {
+                    return Err("Item must not be minecraft:air".into());
+                }
+                Nbt::Compound(BTreeMap::new())
+            } else {
+                let id = crate::api_common::item_like_name(rt, rt.get_field(v, "$item"));
+                let count = rt.get_field(v, "$count").i();
+                Nbt::Compound(BTreeMap::from([("id".to_owned(), Nbt::String(id)), ("count".to_owned(), Nbt::Int(count))]))
+            }
+        }
+        "fluid_stack" | "optional_fluid_stack" => Nbt::Compound(crate::tanks::save_stack(rt, v)),
+        "compound_tag" => Nbt::Compound(crate::nbt::from_runtime(rt, v)),
+        // `{Name, Properties}`, as `BlockState.CODEC` writes a state.
+        "block_state" => {
+            let text = rt.str_of(v).unwrap_or("minecraft:air");
+            let (block, props) = match text.split_once('[') {
+                Some((b, rest)) => (b, rest.trim_end_matches(']')),
+                None => (text, ""),
+            };
+            let mut m = BTreeMap::from([("Name".to_owned(), Nbt::String(block.to_owned()))]);
+            let properties: BTreeMap<String, Nbt> = props.split(',').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_owned(), Nbt::String(v.to_owned()))).collect();
+            if !properties.is_empty() {
+                m.insert("Properties".to_owned(), Nbt::Compound(properties));
+            }
+            Nbt::Compound(m)
+        }
+        "dye_color" => Nbt::String(serialized_name(rt, v)?),
+        "component_patch" => {
+            let json = rt.get_field(v, "$json");
+            match rt.str_of(json).and_then(|t| serde_json::from_str::<Json>(t).ok()) {
+                Some(j) => crate::recipes::json_nbt(&j).unwrap_or(Nbt::Compound(BTreeMap::new())),
+                None => Nbt::Compound(BTreeMap::new()),
+            }
+        }
+        other => return Err(format!("codec {other} can't write")),
+    })
+}
+
 /// Calls on codecs, `DataResult`s, `Either`s and `Pair`s; None for what this module doesn't model.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -582,7 +860,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return Some(codec(rt, "compat:codec/enum", vec![a(0)]));
         }
         ("net/neoforged/neoforge/common/util/NeoForgeExtraCodecs", "optionalFieldAlwaysWrite") => {
-            return Some(codec(rt, "compat:codec/optional", vec![a(1), a(0), a(2), V::I(1), V::I(0)]));
+            return Some(codec(rt, "compat:codec/optional", vec![a(1), a(0), a(2), V::I(1), V::I(0), V::I(1)]));
         }
         ("net/minecraft/util/ExtraCodecs", "nonEmptyList") => return Some(a(0)),
         // Registries are their names here: `BuiltInRegistries.ITEM.byNameCodec()`.
@@ -609,6 +887,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return Some(rt.get_field(a(0), side));
         }
         (PAIR, "of") => return Some(pair(rt, a(0), a(1))),
+        // Registry-aware ops write as the ops they wrap (registries are names here).
+        ("net/minecraft/resources/RegistryOps", "create") => return Some(a(0)),
+        (_, "createSerializationContext") if desc.starts_with("(Lcom/mojang/serialization/DynamicOps;)") => return Some(a(1)),
         _ => {}
     }
     let receiver = a(0);
@@ -705,9 +986,13 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
             }
         }
         "listOf" | "sizeLimitedListOf" => codec(rt, "compat:codec/list", vec![c]),
-        "xmap" => codec(rt, "compat:codec/xmap", vec![c, a(1), V::I(0)]),
+        // Parts: [codec, to, to answers a DataResult, from, from answers one].
+        "xmap" => codec(rt, "compat:codec/xmap", vec![c, a(1), V::I(0), a(2), V::I(0)]),
         // `flatComapMap(to, from)`'s `to` maps plainly; the others' `to` answers a DataResult.
-        "comapFlatMap" | "flatXmap" | "flatComapMap" => codec(rt, "compat:codec/xmap", vec![c, a(1), V::I((method != "flatComapMap") as i32)]),
+        // `comapFlatMap`'s `from` maps plainly.
+        "comapFlatMap" | "flatXmap" | "flatComapMap" => {
+            codec(rt, "compat:codec/xmap", vec![c, a(1), V::I((method != "flatComapMap") as i32), a(2), V::I((method != "comapFlatMap") as i32)])
+        }
         "validate" => codec(rt, "compat:codec/validate", vec![c, a(1)]),
         "codec" => codec(rt, "compat:codec/of_map", vec![c]),
         "forGetter" => codec(rt, "compat:codec/getter", vec![c, a(1)]),
@@ -742,7 +1027,29 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
                 Err(e) => error(rt, &e),
             }
         }
-        "encodeStart" | "encode" => error(rt, "encoding is not modelled"),
+        // `encodeStart(ops, value)`, `encode(value, ops, prefix)`: NBT (`NbtOps`, or `RegistryOps`
+        // over it, which is the same here).
+        "encodeStart" | "encode" => {
+            let (ops, value, prefix) = if method == "encodeStart" { (a(1), a(2), V::NULL) } else { (a(2), a(1), a(3)) };
+            if rt.class_of(ops).contains("JsonOps") {
+                return Some(error(rt, "writing JSON is not modelled"));
+            }
+            match encode(rt, c, value) {
+                Ok(n) => {
+                    let n = match (n, rt.class_of(prefix)) {
+                        (Nbt::Compound(m), "net/minecraft/nbt/CompoundTag") => {
+                            let mut merged = crate::nbt::from_runtime(rt, prefix);
+                            merged.extend(m);
+                            Nbt::Compound(merged)
+                        }
+                        (n, _) => n,
+                    };
+                    let tag = crate::nbt::element_to_runtime(rt, &n).unwrap_or(V::NULL);
+                    success(rt, tag)
+                }
+                Err(e) => error(rt, &e),
+            }
+        }
         "keys" => jutil::new_list(rt, Vec::new()),
         "toString" => {
             let text = format!("Codec[{k}]");
@@ -889,6 +1196,101 @@ mod tests {
         assert_eq!(rt.get_field(items[1], "$isLeft"), V::I(0));
         assert_eq!(rt.str_of(rt.get_field(items[1], "$right")), Some("three"));
         assert!(decode(&mut rt, list, &serde_json::json!([true])).is_err());
+    }
+
+    /// The mod's side of a record codec as Create's `FactoryPanelPosition.CODEC` is built: the
+    /// function `RecordCodecBuilder.create` calls, the fields' getters, the constructor; and an
+    /// `xmap`'s two ways.
+    fn panel(rt: &mut Rt, _key: &'static str, _: &'static str, args: &[V]) -> V {
+        let field = |rt: &mut Rt, codec: V, name: &str, getter: &'static str| {
+            let n = rt.string(name);
+            let f = c(rt, "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[codec, n]);
+            let g = rt.new_object(getter);
+            c(rt, "com/mojang/serialization/MapCodec.forGetter.(Ljava/util/function/Function;)Lcom/mojang/serialization/codecs/RecordCodecBuilder;", &[f, g])
+        };
+        match rt.class_of(args[0]) {
+            "test/Build" => {
+                let (pos, slot) = (st(rt, "net/minecraft/core/BlockPos.CODEC"), st(rt, "com/mojang/serialization/Codec.STRING"));
+                let (p, s) = (field(rt, pos, "pos", "test/PosOf"), field(rt, slot, "slot", "test/SlotOf"));
+                let group = c(rt, "com/mojang/serialization/codecs/RecordCodecBuilder$Instance.group.(Lcom/mojang/datafixers/kinds/App;Lcom/mojang/datafixers/kinds/App;)Lcom/mojang/datafixers/Products$P2;", &[args[1], p, s]);
+                let new = rt.new_object("test/New");
+                c(rt, "com/mojang/datafixers/Products$P2.apply.(Lcom/mojang/datafixers/kinds/Applicative;Ljava/util/function/BiFunction;)Lcom/mojang/datafixers/kinds/App;", &[group, args[1], new])
+            }
+            "test/PosOf" => rt.get_field(args[1], "pos"),
+            "test/SlotOf" => rt.get_field(args[1], "slot"),
+            "test/New" => {
+                let o = rt.new_object("test/Panel");
+                rt.put_field(o, "pos", args[1]);
+                rt.put_field(o, "slot", args[2]);
+                o
+            }
+            "test/Wrap" => {
+                let o = rt.new_object("test/Ticks");
+                let n = rt.get_field(args[1], "value");
+                rt.put_field(o, "n", n);
+                o
+            }
+            "test/Unwrap" => {
+                let n = rt.get_field(args[1], "n");
+                c(rt, "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;", &[n])
+            }
+            _ => V::Void,
+        }
+    }
+
+    #[test]
+    fn a_record_writes_each_field_its_getter_gives_and_reads_back_the_same() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(panel);
+        let build = rt.new_object("test/Build");
+        let record = c(&mut rt, "com/mojang/serialization/codecs/RecordCodecBuilder.create.(Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;", &[build]);
+        let list = c(&mut rt, "com/mojang/serialization/Codec.list.(Lcom/mojang/serialization/Codec;)Lcom/mojang/serialization/Codec;", &[record]);
+        // No linked panels: an empty list (Create's `FactoryPanelSupportBehaviour.write`).
+        let none = jutil::new_list(&mut rt, Vec::new());
+        assert_eq!(encode(&mut rt, list, none), Ok(Nbt::List(Vec::new())));
+        let new = rt.new_object("test/New");
+        let pos = crate::api::block_pos(&mut rt, 1, -2, 3);
+        let slot = rt.string("TOP_LEFT");
+        let one = rt.call_functional(BI_FUNCTION, new, &[pos, slot]);
+        let panels = jutil::new_list(&mut rt, vec![one]);
+        let written = Nbt::List(vec![Nbt::Compound(BTreeMap::from([
+            ("pos".to_owned(), Nbt::IntArray(vec![1, -2, 3])),
+            ("slot".to_owned(), Nbt::String("TOP_LEFT".to_owned())),
+        ]))]);
+        assert_eq!(encode(&mut rt, list, panels), Ok(written));
+        // `encodeStart(NbtOps.INSTANCE, ...)` hands the tag over; parsing it reads the panel again.
+        let ops = st(&mut rt, "net/minecraft/nbt/NbtOps.INSTANCE");
+        let r = c(&mut rt, "com/mojang/serialization/Codec.encodeStart.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;", &[list, ops, panels]);
+        let tag = result_of(&mut rt, r).unwrap();
+        assert_eq!(rt.class_of(tag), "net/minecraft/nbt/ListTag");
+        let json = crate::recipes::to_json(&mut rt, tag);
+        let read = decode(&mut rt, list, &json).unwrap();
+        let back = jutil::elements(&rt, read);
+        assert_eq!(back.len(), 1);
+        assert_eq!(crate::api::pos_of(&rt, rt.get_field(back[0], "pos")), [1, -2, 3]);
+        assert_eq!(rt.str_of(rt.get_field(back[0], "slot")), Some("TOP_LEFT"));
+    }
+
+    #[test]
+    fn a_mapped_codec_writes_through_its_way_back_and_an_optional_field_leaves_out_its_default() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(panel);
+        let int = st(&mut rt, "com/mojang/serialization/Codec.INT");
+        let (wrap, unwrap) = (rt.new_object("test/Wrap"), rt.new_object("test/Unwrap"));
+        let ticks = c(&mut rt, "com/mojang/serialization/Codec.xmap.(Ljava/util/function/Function;Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;", &[int, wrap, unwrap]);
+        let five = rt.new_object("test/Ticks");
+        rt.put_field(five, "n", V::I(5));
+        assert_eq!(encode(&mut rt, ticks, five), Ok(Nbt::Int(5)));
+        let name = rt.string("count");
+        let zero = c(&mut rt, "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;", &[V::I(0)]);
+        let opt = c(&mut rt, "com/mojang/serialization/codecs/PrimitiveCodec.optionalFieldOf.(Ljava/lang/String;Ljava/lang/Object;)Lcom/mojang/serialization/MapCodec;", &[int, name, zero]);
+        let as_codec = c(&mut rt, "com/mojang/serialization/MapCodec.codec.()Lcom/mojang/serialization/Codec;", &[opt]);
+        let again = c(&mut rt, "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;", &[V::I(0)]);
+        assert_eq!(encode(&mut rt, as_codec, again), Ok(Nbt::Compound(BTreeMap::new())));
+        let three = c(&mut rt, "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;", &[V::I(3)]);
+        assert_eq!(encode(&mut rt, as_codec, three), Ok(Nbt::Compound(BTreeMap::from([("count".to_owned(), Nbt::Int(3))]))));
     }
 
     #[test]

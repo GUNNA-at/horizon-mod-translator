@@ -757,6 +757,25 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     (`render::locate`: its own sprite while they stay in its cell), with UVs 0 to 1 across that
     sprite again for the game. catnip's scroll offsets come in atlas units and are divided by a
     cell. The draw trace lists the sprites a mod-built model shows.
+  - [x] 2026-11-04 **Codecs write** (compat `codecs.rs`, `encode`): `encodeStart(NbtOps, value)`
+    and `encode(value, ops, prefix)` walk a codec into NBT as DFU does: a record's fields from the
+    mod's getters (`forGetter`), `xmap`'s way back (`from`, kept with the codec now), optional
+    fields left out at their default, dispatch's type key then the type's codec, lists, maps,
+    either, pairs, enums by serialized name, registries by id, and Minecraft's own (positions as
+    int arrays, stacks `{id, count}`, fluid stacks, block states `{Name, Properties}`, compounds).
+    In game the display link and nixie tube threw `NoSuchElementException` in every save
+    (`FactoryPanelSupportBehaviour.write`: `CatnipCodecUtils.encode(...).orElseThrow()`); Create
+    writes 24 things this way (chain conveyors, packagers, clipboards, contraptions' storage).
+    Reading takes any tag now (a list, a number), not only compounds and strings.
+  - [x] 2026-11-04 `/data merge block` reaches a mod's block entity: each tick its live object
+    saved over the game's data, so a change the game made was lost (the water wheel stayed spruce
+    after `{Material:{Name:"minecraft:birch_planks"}}`). The glue keeps the hash of what it last
+    wrote (`nbt::data_hash`, without `x`/`y`/`z`/`id`) and loads the game's data when it differs,
+    as vanilla's `BlockDataAccessor.setData` does (`hook.rs`: count 10 merged in, 11 a tick later).
+  - [x] 2026-11-04 In game (`objgame.sh`) Create's OBJ and composite models draw: crushing wheel,
+    flywheel, valve handle, display link, nixie tube, water wheel and large water wheel (spruce, as
+    their default material: the draw trace lists `spruce_planks x1024, waterwheel_metal x224,
+    spruce_log x16`), track, chain conveyor. The blaze burner draws its cage but no blaze.
   - [x] 2026-11-04 `LevelTickEvent.Pre` and `.Post` around each server level's tick: the translator
     hooks the game's `native_level_tick_pre`/`_post` (the server's game holding that level, with
     the host block entity ticks get, now one generator: `game_host`), and `glue::level_tick` posts

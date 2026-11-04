@@ -79,6 +79,10 @@ fn main() {
         glue::block_entity_tick(&mut rt, &mut host, [8, 64, 8], "testmod:counter", &mut nbt);
         println!("be tick {step}: nbt={nbt:?} above={}", host.block_state([8, 65, 8]));
     }
+    // `/data merge block`: the game changes the saved data, and the block entity loads it.
+    nbt.insert("count".into(), horizon_compat::nbt::Nbt::Int(10));
+    glue::block_entity_tick(&mut rt, &mut host, [8, 64, 8], "testmod:counter", &mut nbt);
+    println!("after a merge: nbt={nbt:?}");
     // The level loaded (once) for those ticks: the `@EventBusSubscriber` and the registered object heard it.
     println!("level loads: static={:?} object={:?}", rt.statics.get("testmod/ModEvents.loads"), rt.statics.get("testmod/ModEvents.objectLoads"));
     // Right clicks: toggles, and passes while sneaking.
@@ -115,9 +119,10 @@ fn main() {
     assert_eq!(lines[7], r#"be tick 2: nbt={"count": Int(2)} above=minecraft:air"#);
     assert_eq!(lines[8], r#"be tick 3: nbt={"count": Int(3)} above=minecraft:stone"#);
     assert_eq!(lines[9], r#"be tick 4: nbt={"count": Int(4)} above=minecraft:stone"#);
-    assert_eq!(lines[10], "level loads: static=Some(I(11)) object=Some(I(1))");
-    assert_eq!(lines[11], "click: took=true now=testmod:switch[powered=true] above=minecraft:stone");
-    assert_eq!(lines[12], "sneak click: took=false now=testmod:switch[powered=true]");
-    assert_eq!(lines[13], "unmapped: []");
+    assert_eq!(lines[10], r#"after a merge: nbt={"count": Int(11)}"#);
+    assert_eq!(lines[11], "level loads: static=Some(I(11)) object=Some(I(1))");
+    assert_eq!(lines[12], "click: took=true now=testmod:switch[powered=true] above=minecraft:stone");
+    assert_eq!(lines[13], "sneak click: took=false now=testmod:switch[powered=true]");
+    assert_eq!(lines[14], "unmapped: []");
     fs::remove_dir_all(&root).unwrap();
 }

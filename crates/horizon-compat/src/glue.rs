@@ -129,6 +129,12 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
             if rt.get_field(be, "$demand").i() != 0 {
                 rt.put_field(be, "$demand", V::I(0));
                 load_saved(rt, be, nbt);
+            } else if let V::J(written) = rt.get_field(be, "$written")
+                && written != crate::nbt::data_hash(nbt) as i64
+            {
+                // The game changed its data since it last saved (`/data merge block`): it loads
+                // that, as vanilla's `BlockDataAccessor.setData` has it do.
+                load_saved(rt, be, nbt);
             }
             return Some(be);
         }
@@ -224,6 +230,7 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
         vc(rt, SAVE, SAVE, &[be, tag, provider]);
         rt.report_thrown("saveAdditional");
         *nbt = crate::nbt::from_runtime(rt, tag);
+        rt.put_field(be, "$written", V::J(crate::nbt::data_hash(nbt) as i64));
         let (block, _) = crate::host::split_state(state);
         rt.block_entity_meta.insert(pos, (block.to_owned(), !nbt.is_empty()));
         true

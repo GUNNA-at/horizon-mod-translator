@@ -141,6 +141,16 @@ pub fn from_runtime(rt: &Rt, v: V) -> BTreeMap<String, Nbt> {
 
 /// A hash of a compound's contents (keys, kinds and values), to tell when data changed.
 pub fn hash(tag: &BTreeMap<String, Nbt>) -> u64 {
+    hash_entries(tag.iter())
+}
+
+/// [`hash`] of what a block entity saves itself: without the position and id the game keeps beside
+/// it (vanilla's `saveWithFullMetadata`).
+pub fn data_hash(tag: &BTreeMap<String, Nbt>) -> u64 {
+    hash_entries(tag.iter().filter(|(k, _)| !matches!(k.as_str(), "x" | "y" | "z" | "id")))
+}
+
+fn hash_entries<'a>(entries: impl Iterator<Item = (&'a String, &'a Nbt)> + Clone) -> u64 {
     use std::hash::{Hash, Hasher};
     fn walk(n: &Nbt, h: &mut std::collections::hash_map::DefaultHasher) {
         std::mem::discriminant(n).hash(h);
@@ -169,8 +179,8 @@ pub fn hash(tag: &BTreeMap<String, Nbt>) -> u64 {
         }
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    tag.len().hash(&mut h);
-    for (k, v) in tag {
+    entries.clone().count().hash(&mut h);
+    for (k, v) in entries {
         k.hash(&mut h);
         walk(v, &mut h);
     }

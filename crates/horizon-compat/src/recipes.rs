@@ -790,7 +790,7 @@ fn component_patch(rt: &mut Rt, j: Option<&Json>) -> V {
 }
 
 /// JSON as NBT, as `JsonOps` converts to `NbtOps` (whole numbers as ints, the rest as doubles).
-fn json_nbt(j: &Json) -> Option<crate::nbt::Nbt> {
+pub(crate) fn json_nbt(j: &Json) -> Option<crate::nbt::Nbt> {
     use crate::nbt::Nbt;
     Some(match j {
         Json::Null => return None,
@@ -824,17 +824,22 @@ fn nbt_json(n: &crate::nbt::Nbt) -> Json {
     }
 }
 
-/// A value a mod hands a codec to read (`codec.parse(NbtOps.INSTANCE, tag)`), as JSON: a compound
-/// tag, a string; anything else reads as null.
+/// A value a mod hands a codec to read (`codec.parse(NbtOps.INSTANCE, tag)`), as JSON: any tag (a
+/// compound, a list, a number...), a string; anything else reads as null.
 pub fn to_json(rt: &mut Rt, v: V) -> Json {
     if rt.class_of(v) == "net/minecraft/nbt/CompoundTag" {
         let map = crate::nbt::from_runtime(rt, v);
         return Json::Object(map.iter().map(|(k, n)| (k.clone(), nbt_json(n))).collect());
     }
-    match rt.str_of(v) {
-        Some(s) => Json::String(s.to_owned()),
-        None => Json::Null,
+    if let Some(s) = rt.str_of(v) {
+        return Json::String(s.to_owned());
     }
+    if rt.class_of(v).starts_with("net/minecraft/nbt/") {
+        if let Some(n) = crate::nbt::element_from_runtime(rt, v) {
+            return nbt_json(&n);
+        }
+    }
+    Json::Null
 }
 
 /// Reads `j` with Minecraft's or NeoForge's codec `name` (see [`codecs::native`]).
