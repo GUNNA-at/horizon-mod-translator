@@ -839,6 +839,13 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `shouldRender` and `render` with a pose stack at the entity's lerped place. Create draws a
     contraption by tesselating its blocks into catnip's `ShadedBlockSbbBuilder`: each block kept as
     a part (its model's quads and the pose it was drawn at), drawn in one `SuperByteBuffer`.
+  - [x] 2026-11-04 What the contraption renderer asks (harness `BEARING`, client frames): its client
+    side is made lazily behind `AtomicReference.compareAndExchangeRelease` (mapped, with the weak
+    compare-and-sets), `state.getRenderShape()` answers as 1.21.1 does (a mod block's own, else its
+    vanilla class's: `vanilla_shapes.rs`, written by `tools/vanilla_render_shapes.py` from the merged
+    jar's `Blocks` and block classes: 140 blocks and 34 classes aren't models, chests and beds
+    animated, signs, banners, heads and air invisible), `java.util.BitSet` (which block entities to
+    draw; hash checked against the JDK) and `Matrix4f.setTranslation`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

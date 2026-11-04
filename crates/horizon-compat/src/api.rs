@@ -456,6 +456,35 @@ pub fn state(rt: &mut Rt, text: &str) -> V {
 
 /// A vanilla enum constant: one object per constant (Java compares them by identity), with the
 /// `$name` and `$ordinal` that `name()`, `ordinal()` and `compareTo` read.
+const GET_RENDER_SHAPE: &str = "getRenderShape.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/RenderShape;";
+const GET_RENDER_SHAPE_KEY: &str =
+    "net/minecraft/world/level/block/state/BlockBehaviour.getRenderShape.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/RenderShape;";
+
+/// `state.getRenderShape()`, as the version the mod was built against answers it: a mod block's own
+/// `getRenderShape`, or the vanilla class it extends (`BaseEntityBlock`: invisible); a vanilla
+/// block's by its class (`vanilla_shapes.rs`: chests and beds animated, signs and air invisible).
+/// Everything else is a model.
+fn render_shape(rt: &mut Rt, state: V, text: &str) -> V {
+    let (name, _) = crate::host::split_state(text);
+    let ordinal = match crate::glue::mod_block(rt, text) {
+        Some((b, class)) => {
+            if rt.overrides.is_some_and(|o| o(class, GET_RENDER_SHAPE))
+                && let Some(vc) = rt.vcall
+            {
+                return vc(rt, GET_RENDER_SHAPE_KEY, GET_RENDER_SHAPE, &[b, state]);
+            }
+            let base = crate::rotation::vanilla_base(rt, class);
+            crate::vanilla_shapes::CLASSES.binary_search_by(|(c, _)| (*c).cmp(base)).map_or(2, |i| crate::vanilla_shapes::CLASSES[i].1)
+        }
+        None => {
+            let path = name.strip_prefix("minecraft:").unwrap_or(name);
+            crate::vanilla_shapes::BLOCKS.binary_search_by(|(n, _)| (*n).cmp(path)).map_or(2, |i| crate::vanilla_shapes::BLOCKS[i].1)
+        }
+    };
+    let ordinal = usize::from(ordinal).min(2);
+    api_enum(rt, "net/minecraft/world/level/block/RenderShape", RENDER_SHAPES[ordinal], ordinal as i32)
+}
+
 pub fn api_enum(rt: &mut Rt, class: &'static str, name: &'static str, ordinal: i32) -> V {
     rt.intern(format!("enum/{class}.{name}"), |rt| {
         let o = rt.new_object(class);
@@ -782,6 +811,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "mirror" if desc == "(Lnet/minecraft/world/level/block/Mirror;)Lnet/minecraft/world/level/block/state/BlockState;" => crate::rotation::turn_state(rt, a(0), a(1), true),
                 // The game updates the shapes around a block it sets.
                 "updateIndirectNeighbourShapes" | "updateNeighbourShapes" => V::Void,
+                "getRenderShape" if desc == "()Lnet/minecraft/world/level/block/RenderShape;" => render_shape(rt, a(0), &text),
                 "getDestroySpeed" => V::F(crate::blocks::state_facts(rt, &text).hardness),
                 "canBeReplaced" if desc == "()Z" => V::I(crate::blocks::state_facts(rt, &text).replaceable as i32),
                 "updateShape" if desc.starts_with("(Lnet/minecraft/core/Direction;") => update_shape(rt, [a(0), a(1), a(2), a(3), a(4), a(5)]),
@@ -1069,6 +1099,28 @@ mod tests {
         assert_eq!(call(&mut rt, "net/minecraft/core/BlockPos.getZ.()I", &[q]), V::I(-7));
         let south = call(&mut rt, "net/minecraft/core/Direction.getOpposite.()Lnet/minecraft/core/Direction;", &[north]);
         assert_eq!(call(&mut rt, "net/minecraft/core/Direction.getStepZ.()I", &[south]), V::I(1));
+    }
+
+    /// Create tesselates the blocks of a contraption whose `getRenderShape()` is `MODEL`, compared
+    /// with `==`: a plank is one; in 1.21.1 a chest is drawn by its block entity (animated), a sign
+    /// and air not at all.
+    #[test]
+    fn a_states_render_shape_is_the_one_its_vanilla_class_gives() {
+        let mut rt = Rt::new();
+        let shape = |rt: &mut Rt, s: &str| {
+            let st = state(rt, s);
+            call(rt, "net/minecraft/world/level/block/state/BlockState.getRenderShape.()Lnet/minecraft/world/level/block/RenderShape;", &[st])
+        };
+        let name = |rt: &Rt, v: V| rt.str_of(rt.get_field(v, "$name")).unwrap_or("").to_owned();
+        let model = get_static(&mut rt, "net/minecraft/world/level/block/RenderShape.MODEL");
+        assert_eq!(shape(&mut rt, "minecraft:oak_planks"), model);
+        let chest = shape(&mut rt, "minecraft:chest[facing=north,type=single,waterlogged=false]");
+        assert_eq!(name(&rt, chest), "ENTITYBLOCK_ANIMATED");
+        let sign = shape(&mut rt, "minecraft:oak_sign[rotation=0,waterlogged=false]");
+        assert_eq!(name(&rt, sign), "INVISIBLE");
+        let air = shape(&mut rt, "minecraft:air");
+        assert_eq!(name(&rt, air), "INVISIBLE");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Create puts a contraption's blocks back at `BlockPos.containing(anchor + 0.5)`: the block the

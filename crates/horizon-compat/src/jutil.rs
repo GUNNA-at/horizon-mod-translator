@@ -150,6 +150,151 @@ pub fn compare(rt: &mut Rt, comparator: V, a: V, b: V) -> i32 {
     }
 }
 
+/// A `BitSet`'s words, low bits first.
+fn bit_words(rt: &Rt, v: V) -> Vec<u64> {
+    match rt.heap.get(v.r() as usize).map(|o| &o.data) {
+        Some(Data::Array(w)) => w.iter().map(|x| x.j() as u64).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn set_bit_words(rt: &mut Rt, v: V, mut words: Vec<u64>) {
+    while words.last() == Some(&0) {
+        words.pop();
+    }
+    if let Some(o) = rt.heap.get_mut(v.r() as usize) {
+        o.data = Data::Array(words.into_iter().map(|w| V::J(w as i64)).collect());
+    }
+}
+
+fn new_bitset(rt: &mut Rt, words: Vec<u64>) -> V {
+    let b = rt.new_object("java/util/BitSet");
+    set_bit_words(rt, b, words);
+    b
+}
+
+/// `java.util.BitSet`, as the JDK's: bits by index in 64-bit words (Create keeps which of a
+/// contraption's block entities to draw in one).
+fn bitset_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let mut w = bit_words(rt, a(0));
+    let get = |w: &[u64], i: usize| w.get(i / 64).is_some_and(|x| x >> (i % 64) & 1 != 0);
+    let put = |w: &mut Vec<u64>, i: usize, on: bool| {
+        if w.len() <= i / 64 {
+            w.resize(i / 64 + 1, 0);
+        }
+        if on { w[i / 64] |= 1 << (i % 64) } else { w[i / 64] &= !(1 << (i % 64)) }
+    };
+    let index = |v: V| -> Option<usize> { usize::try_from(v.i()).ok() };
+    // A negative index throws, as the JDK's.
+    let bad = |rt: &mut Rt| {
+        rt.throw_new("java/lang/IndexOutOfBoundsException");
+        V::Void
+    };
+    let len = |w: &[u64]| w.iter().rposition(|&x| x != 0).map_or(0, |i| i * 64 + 64 - w[i].leading_zeros() as usize);
+    Some(match name {
+        "<init>" => {
+            set_bit_words(rt, a(0), Vec::new());
+            V::Void
+        }
+        "valueOf" if desc.starts_with("([J)") => {
+            let words = elements(rt, a(0)).into_iter().map(|x| x.j() as u64).collect();
+            new_bitset(rt, words)
+        }
+        "set" | "clear" | "flip" => {
+            let all = name == "clear" && desc == "()V";
+            let (from, to, on) = match desc {
+                "()V" => (0, 0, false),
+                "(I)V" => (a(1).i(), a(1).i().saturating_add(1), name == "set"),
+                "(IZ)V" => (a(1).i(), a(1).i().saturating_add(1), a(2).i() != 0),
+                "(II)V" => (a(1).i(), a(2).i(), name == "set"),
+                "(IIZ)V" => (a(1).i(), a(2).i(), a(3).i() != 0),
+                _ => return None,
+            };
+            if all {
+                w.clear();
+            } else if from < 0 || to < from {
+                return Some(bad(rt));
+            } else {
+                for i in from as usize..to as usize {
+                    let now = if name == "flip" { !get(&w, i) } else { on };
+                    put(&mut w, i, now);
+                }
+            }
+            set_bit_words(rt, a(0), w);
+            V::Void
+        }
+        "get" if desc == "(I)Z" => match index(a(1)) {
+            Some(i) => V::I(get(&w, i) as i32),
+            None => bad(rt),
+        },
+        "nextSetBit" | "nextClearBit" => {
+            let Some(from) = index(a(1)) else { return Some(bad(rt)) };
+            let want = name == "nextSetBit";
+            let end = w.len() * 64;
+            let found = (from..end).find(|&i| get(&w, i) == want);
+            V::I(match found {
+                Some(i) => i as i32,
+                None if want => -1,
+                None => from.max(end) as i32,
+            })
+        }
+        "previousSetBit" => {
+            let from = a(1).i();
+            V::I((0..=from.max(-1)).rev().find(|&i| i >= 0 && get(&w, i as usize)).unwrap_or(-1))
+        }
+        "cardinality" => V::I(w.iter().map(|x| x.count_ones() as i32).sum()),
+        "isEmpty" => V::I(w.iter().all(|&x| x == 0) as i32),
+        "length" => V::I(len(&w) as i32),
+        "size" => V::I((w.len() * 64) as i32),
+        "and" | "or" | "xor" | "andNot" => {
+            let o = bit_words(rt, a(1));
+            let n = w.len().max(o.len());
+            w.resize(n, 0);
+            for (i, x) in w.iter_mut().enumerate() {
+                let y = o.get(i).copied().unwrap_or(0);
+                *x = match name {
+                    "and" => *x & y,
+                    "or" => *x | y,
+                    "xor" => *x ^ y,
+                    _ => *x & !y,
+                };
+            }
+            set_bit_words(rt, a(0), w);
+            V::Void
+        }
+        "intersects" => {
+            let o = bit_words(rt, a(1));
+            V::I(w.iter().zip(&o).any(|(x, y)| x & y != 0) as i32)
+        }
+        "clone" => new_bitset(rt, w),
+        "equals" => V::I((rt.class_of(a(1)) == "java/util/BitSet" && {
+            let mut o = bit_words(rt, a(1));
+            while o.last() == Some(&0) {
+                o.pop();
+            }
+            o == w
+        }) as i32),
+        // The JDK's: the words folded into a long, then its halves xor'd.
+        "hashCode" => {
+            let mut h: i64 = 1234;
+            for (i, &x) in w.iter().enumerate().rev() {
+                h ^= (x as i64).wrapping_mul(i as i64 + 1);
+            }
+            V::I(((h >> 32) ^ h) as i32)
+        }
+        "toLongArray" => {
+            let items = w.iter().map(|&x| V::J(x as i64)).collect();
+            rt.alloc("[J", Data::Array(items))
+        }
+        "stream" => {
+            let items = (0..w.len() * 64).filter(|&i| get(&w, i)).map(|i| V::I(i as i32)).collect();
+            rt.alloc("java/util/stream/IntStream", Data::Stream(items))
+        }
+        _ => return None,
+    })
+}
+
 /// `Comparator`'s own combinators (`comparing`, `thenComparing`, `reversed`, `nullsFirst`...): each
 /// makes a comparator whose `$how` says how it compares, on what (`$x`, `$y`); `compare` reads it
 /// back. Their receiver can be any comparator, a lambda's included.
@@ -421,6 +566,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         && let Some(v) = comparator_call(rt, name, desc, args)
     {
         return Some(v);
+    }
+    if owner == "java/util/BitSet" {
+        return bitset_call(rt, name, desc, args);
     }
     if matches!(owner, "java/util/concurrent/CompletableFuture" | "java/util/concurrent/Future" | "java/util/concurrent/CompletionStage") {
         return future_call(rt, name, args);
@@ -931,8 +1079,8 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
                     rt.put_field(this, "value", args.get(1).copied().unwrap_or(zero));
                     V::Void
                 }
-                "get" | "intValue" | "longValue" | "getPlain" | "getAcquire" => cur,
-                "set" | "lazySet" | "setPlain" | "setRelease" => {
+                "get" | "intValue" | "longValue" | "getPlain" | "getAcquire" | "getOpaque" => cur,
+                "set" | "lazySet" | "setPlain" | "setRelease" | "setOpaque" => {
                     rt.put_field(this, "value", a(1));
                     V::Void
                 }
@@ -940,12 +1088,21 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
                     rt.put_field(this, "value", a(1));
                     cur
                 }
-                "compareAndSet" => {
+                "compareAndSet" | "weakCompareAndSet" | "weakCompareAndSetPlain" | "weakCompareAndSetVolatile" | "weakCompareAndSetAcquire" | "weakCompareAndSetRelease" => {
                     let same = cur == a(1) || (owner.ends_with("Reference") && equals(rt, cur, a(1)));
                     if same {
                         rt.put_field(this, "value", a(2));
                     }
                     V::I(same as i32)
+                }
+                // The value before, set when it was the one expected (Create makes a contraption's
+                // client side lazily: `compareAndExchangeRelease(null, made)`).
+                "compareAndExchange" | "compareAndExchangeAcquire" | "compareAndExchangeRelease" => {
+                    let same = cur == a(1) || (owner.ends_with("Reference") && equals(rt, cur, a(1)));
+                    if same {
+                        rt.put_field(this, "value", a(2));
+                    }
+                    cur
                 }
                 "incrementAndGet" | "getAndIncrement" | "decrementAndGet" | "getAndDecrement" | "addAndGet" | "getAndAdd" => {
                     let delta = match n {
@@ -2335,6 +2492,43 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
+    /// Create keeps which of a contraption's block entities to draw in a `BitSet`: set by range,
+    /// walked with `nextSetBit`, trimmed with `andNot`; the hash is the JDK's.
+    #[test]
+    fn a_bitset_sets_walks_and_combines_as_the_jdks() {
+        let mut rt = Rt::new();
+        let b = rt.new_object("java/util/BitSet");
+        c(&mut rt, "java/util/BitSet.<init>.()V", &[b]);
+        c(&mut rt, "java/util/BitSet.set.(II)V", &[b, V::I(2), V::I(5)]);
+        c(&mut rt, "java/util/BitSet.set.(I)V", &[b, V::I(70)]);
+        let walk = |rt: &mut Rt, b: V| {
+            let mut out = Vec::new();
+            let mut i = c(rt, "java/util/BitSet.nextSetBit.(I)I", &[b, V::I(0)]).i();
+            while i >= 0 {
+                out.push(i);
+                i = c(rt, "java/util/BitSet.nextSetBit.(I)I", &[b, V::I(i + 1)]).i();
+            }
+            out
+        };
+        assert_eq!(walk(&mut rt, b), [2, 3, 4, 70]);
+        // The JDK's `hashCode` of {2, 3, 4, 70}, and of {63, 127} (its words' top bits set).
+        assert_eq!(c(&mut rt, "java/util/BitSet.hashCode.()I", &[b]), V::I(1102));
+        let big = rt.new_object("java/util/BitSet");
+        c(&mut rt, "java/util/BitSet.<init>.()V", &[big]);
+        c(&mut rt, "java/util/BitSet.set.(I)V", &[big, V::I(63)]);
+        c(&mut rt, "java/util/BitSet.set.(I)V", &[big, V::I(127)]);
+        assert_eq!(c(&mut rt, "java/util/BitSet.hashCode.()I", &[big]), V::I(-2147482414));
+        let other = rt.new_object("java/util/BitSet");
+        c(&mut rt, "java/util/BitSet.<init>.()V", &[other]);
+        c(&mut rt, "java/util/BitSet.set.(I)V", &[other, V::I(3)]);
+        c(&mut rt, "java/util/BitSet.set.(I)V", &[other, V::I(70)]);
+        c(&mut rt, "java/util/BitSet.andNot.(Ljava/util/BitSet;)V", &[b, other]);
+        assert_eq!(walk(&mut rt, b), [2, 4]);
+        assert_eq!(c(&mut rt, "java/util/BitSet.length.()I", &[b]), V::I(5));
+        c(&mut rt, "java/util/BitSet.clear.()V", &[b]);
+        assert_eq!(c(&mut rt, "java/util/BitSet.isEmpty.()Z", &[b]), V::I(1));
+    }
+
     #[test]
     fn a_primitive_maps_computed_value_is_kept() {
         // A counter, as Create's recipe trie numbers its variants: `computeIfAbsent(v, k -> next++)`.
@@ -2608,5 +2802,14 @@ mod tests {
         assert_eq!(c(&mut rt, "java/util/concurrent/atomic/AtomicInteger.get.()I", &[n]), V::I(2));
         let s = rt.string("a");
         assert_eq!(c(&mut rt, "java/util/Objects.requireNonNull.(Ljava/lang/Object;)Ljava/lang/Object;", &[s]), s);
+        // `compareAndExchange*` answers the value it found, and sets the new one only over the expected.
+        let r = rt.new_object("java/util/concurrent/atomic/AtomicReference");
+        c(&mut rt, "java/util/concurrent/atomic/AtomicReference.<init>.()V", &[r]);
+        let made = rt.new_object("t/Made");
+        let cas = "java/util/concurrent/atomic/AtomicReference.compareAndExchangeRelease.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        assert_eq!(c(&mut rt, cas, &[r, V::NULL, made]), V::NULL);
+        let other = rt.new_object("t/Made");
+        assert_eq!(c(&mut rt, cas, &[r, V::NULL, other]), made);
+        assert_eq!(c(&mut rt, "java/util/concurrent/atomic/AtomicReference.getAcquire.()Ljava/lang/Object;", &[r]), made);
     }
 }

@@ -140,7 +140,7 @@ fn vanilla_turns(class: &str) -> bool {
 }
 
 /// The first vanilla class above the mod's own `class`.
-fn vanilla_base(rt: &Rt, mut class: &'static str) -> &'static str {
+pub(crate) fn vanilla_base(rt: &Rt, mut class: &'static str) -> &'static str {
     for _ in 0..64 {
         match rt.supers.get(class).copied() {
             Some(up) if !up.starts_with("net/minecraft/") => class = up,

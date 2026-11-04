@@ -36,6 +36,7 @@ pub mod shapes;
 pub mod tags;
 pub mod tanks;
 pub mod vanilla_records;
+pub mod vanilla_shapes;
 pub mod vanilla_tags;
 
 /// Makes this mapping the one engines that link `horizon-compat-core` alone call.

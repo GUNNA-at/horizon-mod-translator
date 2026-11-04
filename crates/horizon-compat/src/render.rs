@@ -464,6 +464,14 @@ fn matrix4(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         ("translateLocal", "(FFF)Lorg/joml/Matrix4f;") => set(rt, mul4(&translation(a(1).f(), a(2).f(), a(3).f()), &m)),
         ("translation", "(FFF)Lorg/joml/Matrix4f;") => set(rt, translation(a(1).f(), a(2).f(), a(3).f())),
+        // The translation column replaced, the rest kept (Create's `translateToEntity`).
+        ("setTranslation", "(FFF)Lorg/joml/Matrix4f;") => {
+            let mut t = m;
+            t[12] = a(1).f();
+            t[13] = a(2).f();
+            t[14] = a(3).f();
+            set(rt, t)
+        }
         ("scale", "(FFF)Lorg/joml/Matrix4f;") => set(rt, mul4(&m, &scaling(a(1).f(), a(2).f(), a(3).f()))),
         ("scale", "(F)Lorg/joml/Matrix4f;") => set(rt, mul4(&m, &scaling(a(1).f(), a(1).f(), a(1).f()))),
         ("rotate", "(Lorg/joml/Quaternionfc;)Lorg/joml/Matrix4f;") => {

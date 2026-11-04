@@ -28,7 +28,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
 /// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 33] = [
+const COMPAT: [(&str, &str); 34] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -50,6 +50,7 @@ const COMPAT: [(&str, &str); 33] = [
     ("records.rs", include_str!("../../horizon-compat/src/records.rs")),
     ("rotation.rs", include_str!("../../horizon-compat/src/rotation.rs")),
     ("vanilla_records.rs", include_str!("../../horizon-compat/src/vanilla_records.rs")),
+    ("vanilla_shapes.rs", include_str!("../../horizon-compat/src/vanilla_shapes.rs")),
     ("functions.rs", include_str!("../../horizon-compat/src/functions.rs")),
     ("shapes.rs", include_str!("../../horizon-compat/src/shapes.rs")),
     ("nbt.rs", include_str!("../../horizon-compat/src/nbt.rs")),
