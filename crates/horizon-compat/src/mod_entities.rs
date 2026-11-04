@@ -1299,6 +1299,10 @@ mod tests {
             let class = rt.string(CART);
             let found = api::call(rt, "net/minecraft/world/level/Level.getEntitiesOfClass.(Ljava/lang/Class;Lnet/minecraft/world/phys/AABB;)Ljava/util/List;", &[level, class, area]);
             let found = jutil::elements(rt, found);
+            // A client's level answers the same (Create's contraption collisions ask it each frame).
+            let client_level = rt.new_object("net/minecraft/client/multiplayer/ClientLevel");
+            let seen = api::call(rt, "net/minecraft/client/multiplayer/ClientLevel.getEntitiesOfClass.(Ljava/lang/Class;Lnet/minecraft/world/phys/AABB;)Ljava/util/List;", &[client_level, class, area]);
+            assert_eq!(jutil::elements(rt, seen), found);
             let mut ids = Vec::new();
             for _ in 0..5 {
                 tick_all(rt, "minecraft:overworld");

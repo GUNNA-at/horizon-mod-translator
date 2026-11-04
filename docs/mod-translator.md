@@ -846,6 +846,14 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     jar's `Blocks` and block classes: 140 blocks and 34 classes aren't models, chests and beds
     animated, signs, banners, heads and air invisible), `java.util.BitSet` (which block entities to
     draw; hash checked against the JDK) and `Matrix4f.setTranslation`.
+  - [x] 2026-11-04 **The client draws the contraption** (harness `BEARING`, client frames 0 and 1):
+    Create's renderer, translated again with the `ShadedBlockSbbBuilder` intrinsics, tesselates the
+    plank and the game is asked for `minecraft:oak_planks` under the turned pose (the corner at
+    -0.54, -1.62, -3.46 from the camera: 4.8° about the block's centre). Lit by the entity's own
+    light for now (catnip's `useLevelLight` per vertex isn't read). Also: a client level's
+    `getEntitiesOfClass` (contraption collisions ask it each frame), fastutil's
+    `toIntArray`/`toLongArray`..., and fastutil's `add(int)` on a primitive list, which was taken
+    for `add(index, element)` and kept a null (any `IntArrayList` a mod filled was empty values).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

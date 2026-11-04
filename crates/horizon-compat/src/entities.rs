@@ -295,7 +295,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     // The level's entity queries.
     if matches!(name, "getEntitiesOfClass" | "getEntities")
-        && (owner.ends_with("/Level") || owner.ends_with("/ServerLevel") || owner.ends_with("/EntityGetter") || owner.ends_with("/LevelAccessor") || owner.ends_with("/WorldGenLevel"))
+        && (owner.ends_with("/Level") || owner.ends_with("/ServerLevel") || owner.ends_with("/ClientLevel") || owner.ends_with("/EntityGetter") || owner.ends_with("/LevelAccessor") || owner.ends_with("/WorldGenLevel"))
         && desc.starts_with("(Ljava/lang/Class;Lnet/minecraft/world/phys/AABB;")
     {
         let predicate = desc.contains("Predicate").then(|| a(3));

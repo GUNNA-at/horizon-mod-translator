@@ -158,7 +158,7 @@ fn service_providers(rt: &mut Rt, loader: V) -> Vec<V> {
 }
 
 /// The JVM's kind letter of each parameter in `desc`.
-fn kinds(desc: &str) -> Vec<char> {
+pub(crate) fn kinds(desc: &str) -> Vec<char> {
     let mut out = Vec::new();
     let params = desc.strip_prefix('(').and_then(|d| d.split(')').next()).unwrap_or("");
     let mut it = params.chars().peekable();

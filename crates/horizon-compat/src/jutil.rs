@@ -1333,7 +1333,8 @@ fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "get" | "elementAt" => list(rt, this)?.get(at(a(1))).copied().unwrap_or(V::NULL),
         "getFirst" | "peek" | "peekFirst" | "element" | "first" => list(rt, this)?.first().copied().unwrap_or(V::NULL),
         "getLast" | "peekLast" | "last" => list(rt, this)?.last().copied().unwrap_or(V::NULL),
-        "add" | "addLast" | "offer" | "offerLast" | "push" | "addFirst" | "offerFirst" if desc.starts_with("(Ljava/lang/Object;)") => {
+        // One element (`add(E)`, or fastutil's `add(int)`, `add(long)`...); `add(int index, E)` inserts.
+        "add" | "addLast" | "offer" | "offerLast" | "push" | "addFirst" | "offerFirst" if crate::jlang::kinds(desc).len() == 1 => {
             let v = a(1);
             let front = matches!(name, "push" | "addFirst" | "offerFirst") && rt.class_of(this) != "java/util/Stack";
             let l = list_mut(rt, this)?;
@@ -1470,6 +1471,10 @@ fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let items = list(rt, this)?.clone();
             rt.alloc("[Ljava/lang/Object;", Data::Array(items))
         }
+        n if typed_array(n).is_some() => {
+            let items = list(rt, this)?.clone();
+            to_typed_array(rt, n, items, a(1))
+        }
         "equals" => V::I(equals(rt, this, a(1)) as i32),
         "hashCode" => {
             let items = list(rt, this)?.clone();
@@ -1483,6 +1488,35 @@ fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "trimToSize" | "ensureCapacity" => V::Void,
         _ => return None,
     })
+}
+
+/// The array class a fastutil collection's `toIntArray`, `toLongArray`... gives.
+fn typed_array(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "toIntArray" => "[I",
+        "toLongArray" => "[J",
+        "toDoubleArray" => "[D",
+        "toFloatArray" => "[F",
+        "toShortArray" => "[S",
+        "toByteArray" => "[B",
+        "toCharArray" => "[C",
+        "toBooleanArray" => "[Z",
+        _ => return None,
+    })
+}
+
+/// fastutil's `toIntArray()` (a new array of the elements) and `toIntArray(int[] a)`, which fills `a`
+/// when it is long enough and otherwise makes a new one.
+fn to_typed_array(rt: &mut Rt, name: &str, items: Vec<V>, into: V) -> V {
+    let class = typed_array(name).unwrap_or("[I");
+    if into.r() != 0
+        && let Some(Data::Array(dst)) = rt.heap.get_mut(into.r() as usize).map(|o| &mut o.data)
+        && dst.len() >= items.len()
+    {
+        dst[..items.len()].copy_from_slice(&items);
+        return into;
+    }
+    rt.alloc(class, Data::Array(items))
 }
 
 /// An iterator over a snapshot of `items`, removing from `source` on `remove()`.
@@ -1653,6 +1687,10 @@ fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "toArray" => {
             let items = elements(rt, this);
             rt.alloc("[Ljava/lang/Object;", Data::Array(items))
+        }
+        n if typed_array(n).is_some() => {
+            let items = elements(rt, this);
+            to_typed_array(rt, n, items, a(1))
         }
         "equals" => {
             let (mine, theirs) = (elements(rt, this), elements(rt, a(1)));
@@ -2619,6 +2657,33 @@ mod tests {
         crate::install();
         assert_eq!(crate::api::call(&mut rt, "java/lang/Integer.intValue.()I", &[n]), V::I(7));
         assert_eq!(crate::api::call(&mut rt, "java/lang/Number.longValue.()J", &[n]), V::J(7));
+    }
+
+    /// fastutil's `toIntArray()` copies the elements into a new `int[]`; `toIntArray(int[])` fills the
+    /// given one when it is long enough (Create reads a contraption's block-entity ids this way).
+    #[test]
+    fn a_fastutil_int_list_gives_its_ints_as_an_array() {
+        let mut rt = Rt::new();
+        let l = rt.new_object("it/unimi/dsi/fastutil/ints/IntArrayList");
+        c(&mut rt, "it/unimi/dsi/fastutil/ints/IntArrayList.<init>.()V", &[l]);
+        for i in [5, -2, 9] {
+            c(&mut rt, "it/unimi/dsi/fastutil/ints/IntList.add.(I)Z", &[l, V::I(i)]);
+        }
+        let arr = c(&mut rt, "it/unimi/dsi/fastutil/ints/IntList.toIntArray.()[I", &[l]);
+        assert_eq!(rt.class_of(arr), "[I");
+        let values = |rt: &Rt, v: V| match rt.heap.get(v.r() as usize).map(|o| &o.data) {
+            Some(Data::Array(items)) => items.clone(),
+            _ => Vec::new(),
+        };
+        assert_eq!(values(&rt, arr), [V::I(5), V::I(-2), V::I(9)]);
+        let big = rt.alloc("[I", Data::Array(vec![V::I(0); 4]));
+        let same = c(&mut rt, "it/unimi/dsi/fastutil/ints/IntList.toIntArray.([I)[I", &[l, big]);
+        assert_eq!(same, big);
+        assert_eq!(values(&rt, big), [V::I(5), V::I(-2), V::I(9), V::I(0)]);
+        let small = rt.alloc("[I", Data::Array(vec![V::I(0); 1]));
+        let fresh = c(&mut rt, "it/unimi/dsi/fastutil/ints/IntList.toIntArray.([I)[I", &[l, small]);
+        assert_ne!(fresh, small);
+        assert_eq!(values(&rt, fresh).len(), 3);
     }
 
     #[test]
