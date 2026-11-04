@@ -774,6 +774,9 @@ pub struct Plan {
     /// Injectors that find no place but may (`require = 0`, or their config's `defaultRequire`):
     /// Mixin applies them nowhere either, counted by why.
     pub skipped: BTreeMap<String, usize>,
+    /// Mixins into classes that are not translated (the game's), with those targets: the methods
+    /// and fields they add are the game objects' own, as Mixin merges them.
+    pub vanilla: BTreeMap<String, Vec<String>>,
 }
 
 /// An `@At`'s `args` (`["doubleValue=0.25d", "log=true"]`, joined by `,`) as pairs.
@@ -991,7 +994,13 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
     let count = |plan: &mut Plan, what: String| *plan.unsupported.entry(what).or_default() += 1;
     for (mixin, default_require) in order {
         for target_name in mixin.mixin_targets() {
-            let Some(target) = by_name.get(target_name.as_str()) else { continue };
+            let Some(target) = by_name.get(target_name.as_str()) else {
+                let targets = plan.vanilla.entry(mixin.name.clone()).or_default();
+                if !targets.contains(&target_name) {
+                    targets.push(target_name.clone());
+                }
+                continue;
+            };
             plan.mixins.entry(target_name.clone()).or_default().push(mixin.name.clone());
             for h in &mixin.methods {
                 for a in &h.annotations {

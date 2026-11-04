@@ -110,6 +110,8 @@ pub struct Field {
     pub access: u16,
     pub name: String,
     pub desc: String,
+    /// Its annotations, the class-file-only ones (a mixin's `@Shadow`, `@Unique`) too.
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Debug, Clone)]
@@ -271,8 +273,16 @@ impl ClassFile {
         }
         for _ in 0..r.u2()? {
             let (access, name, desc) = (r.u2()?, r.u2()?, r.u2()?);
-            cf.fields.push(Field { access, name: cf.utf8(name)?, desc: cf.utf8(desc)? });
-            skip_attributes(&mut r)?;
+            let mut annotations = Vec::new();
+            for _ in 0..r.u2()? {
+                let an = r.u2()?;
+                let len = r.u4()? as usize;
+                let body = r.take(len)?;
+                if matches!(cf.utf8(an)?.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
+                    annotations.extend(cf.annotations(body)?);
+                }
+            }
+            cf.fields.push(Field { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, annotations });
         }
         for _ in 0..r.u2()? {
             let (access, name, desc) = (r.u2()?, r.u2()?, r.u2()?);
@@ -535,15 +545,6 @@ impl ClassFile {
             })
             .collect()
     }
-}
-
-fn skip_attributes(r: &mut Reader) -> Result<(), String> {
-    for _ in 0..r.u2()? {
-        r.u2()?;
-        let n = r.u4()? as usize;
-        r.take(n)?;
-    }
-    Ok(())
 }
 
 /// A method descriptor's parameter types, as class names (`I` for an int, `[Lx;` for arrays).

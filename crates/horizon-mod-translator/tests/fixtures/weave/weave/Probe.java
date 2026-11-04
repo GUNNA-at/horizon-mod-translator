@@ -216,4 +216,31 @@ public class Probe {
     public static int branched(int n) {
         return new Dial().branched(n);
     }
+
+    // `Vec3Mixin`'s methods on the game's `Vec3`s, each with its own fields.
+    public static int vecReads(int n) {
+        net.minecraft.world.phys.Vec3 v = new net.minecraft.world.phys.Vec3(1, 2, 3);
+        int r = 0;
+        for (int i = 0; i < n; i++) {
+            r = ((Measured) (Object) v).weave$reads();
+        }
+        return r;
+    }
+
+    public static int vecSize(int n) {
+        return (int) (((Measured) (Object) new net.minecraft.world.phys.Vec3(n, 0, 0)).weave$size() * 2);
+    }
+
+    public static String vecLabels(int n) {
+        Measured a = (Measured) (Object) new net.minecraft.world.phys.Vec3(1, 1, 1);
+        Measured b = (Measured) (Object) new net.minecraft.world.phys.Vec3(2, 2, 2);
+        a.weave$label("a" + n);
+        b.weave$label("b");
+        return a.weave$label() + "/" + b.weave$label();
+    }
+
+    public static int vecMeasured(int n) {
+        Object v = n > 0 ? new net.minecraft.world.phys.Vec3(n, 0, 0) : (Object) "s";
+        return v instanceof Measured ? 1 : 0;
+    }
 }

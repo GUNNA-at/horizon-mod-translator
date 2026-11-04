@@ -7,8 +7,9 @@
 //! `INVOKE_ASSIGN`), weaves at field reads and writes (`@At("FIELD")`), `@ModifyVariable` (at the
 //! head, after a store, before a call), `@ModifyReceiver`, an enum constant added through a constructor invoker (`ModeMixin`),
 //! handlers at constants (`@ModifyConstant`, `@At("CONSTANT")`), before `new`s, round an
-//! `instanceof`, and in `@Slice`s of their methods (`DialMixin`), and a class calling the targets
-//! as other code would (`Probe`). They are compiled against stubs of Mixin's annotations,
+//! `instanceof`, and in `@Slice`s of their methods (`DialMixin`), a mixin into the game's `Vec3`
+//! adding an interface, methods and fields to its objects (`Vec3Mixin`), and a class calling the
+//! targets as other code would (`Probe`). They are compiled against stubs of Mixin's annotations,
 //! translated together and run; each answer is the one Mixin's weaving gives, worked out by hand
 //! from what the handlers do. Needs `javac`.
 use std::{fs, path::Path, process::Command};
@@ -104,6 +105,14 @@ const CASES: &[(&str, &str, i32, &str)] = &[
     ("assigned", "(I)I", 3, "34"),
     ("branched", "(I)I", 2, "103"),
     ("branched", "(I)I", -1, "0"),
+    // A mixin into the game's `Vec3`: a field initialised once per object (10, then counted up);
+    // `lengthSqr()` (its `@Shadow`, the game's) + `x` (a `@Shadow` field) + 0.5, doubled; each
+    // object's own label, with the mixin's static (40); the interface it adds.
+    ("vecReads", "(I)I", 3, "13"),
+    ("vecSize", "(I)I", 3, "25"),
+    ("vecLabels", "(I)Ljava/lang/String;", 4, "a440/b40"),
+    ("vecMeasured", "(I)I", 1, "1"),
+    ("vecMeasured", "(I)I", 0, "0"),
 ];
 
 #[test]

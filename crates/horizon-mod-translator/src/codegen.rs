@@ -218,7 +218,8 @@ pub struct Program<'a> {
     caller_sensitive: BTreeSet<String>,
     /// Mixins whose targets are among these classes, woven into them ([`crate::weave`]).
     weave: weave::Plan,
-    /// Each such mixin's target (its first, for a mixin of several).
+    /// Each mixin's target (its first translated one, for a mixin of several), or the game's class
+    /// a mixin goes into ([`weave::Plan::vanilla`]).
     mixin_of: BTreeMap<String, String>,
     /// The method being written, for weaving.
     cur: Option<Cur>,
@@ -308,7 +309,7 @@ fn return_kind(desc: &str) -> char {
     }
 }
 
-/// Each mixin's (first) translated target.
+/// Each mixin's target: its first translated one, else the first of the game's it goes into.
 fn mixin_targets_of(plan: &weave::Plan) -> BTreeMap<String, String> {
     let mut mixin_of = BTreeMap::new();
     for (target, mixins) in &plan.mixins {
@@ -316,7 +317,38 @@ fn mixin_targets_of(plan: &weave::Plan) -> BTreeMap<String, String> {
             mixin_of.entry(m.clone()).or_insert_with(|| target.clone());
         }
     }
+    for (m, targets) in &plan.vanilla {
+        if let Some(t) = targets.first() {
+            mixin_of.entry(m.clone()).or_insert_with(|| t.clone());
+        }
+    }
     mixin_of
+}
+
+/// Whether a mixin's method is an injector's handler (Mixin's `@Inject`..., MixinExtras'), which
+/// runs where it is woven rather than as a method of the target.
+fn is_injector(m: &crate::class::Method) -> bool {
+    m.annotations.iter().any(|a| {
+        (a.ty.starts_with("Lorg/spongepowered/asm/mixin/") && (a.ty.contains("/injection/") || a.ty.contains("/gen/")))
+            || a.ty.starts_with("Lcom/llamalad7/mixinextras/injector/")
+    })
+}
+
+/// Whether a mixin's field only stands for its target's (`@Shadow`).
+fn is_shadow_field(f: &crate::class::Field) -> bool {
+    f.annotations.iter().any(|a| a.ty == "Lorg/spongepowered/asm/mixin/Shadow;")
+}
+
+/// A method a mixin adds to the game's classes (or overwrites there), as the dispatcher of its
+/// `name.desc` finds it for a game object: through the mixin, its target or an interface it adds.
+struct Added {
+    mixin: String,
+    targets: Vec<String>,
+    /// Owner keys whose calls are this method's whatever the receiver.
+    owners: Vec<String>,
+    /// Owner keys whose calls are its on an object of one of `targets` (the game's own interfaces
+    /// the mixin adds; the target itself, for an `@Overwrite`).
+    checked: Vec<String>,
 }
 
 impl<'a> Program<'a> {
@@ -405,6 +437,69 @@ impl<'a> Program<'a> {
                     .is_some_and(|k| k.methods.iter().any(|x| x.name == name && x.desc == desc && x.code.is_some() && !is_shadow(x)))
             })
             .cloned()
+    }
+
+    /// What mixins add to the game's classes ([`weave::Plan::vanilla`]), by `name.desc`: their
+    /// instance methods with code, less `@Shadow`s and injectors' handlers.
+    fn vanilla_methods(&self) -> BTreeMap<String, Vec<Added>> {
+        let mut out: BTreeMap<String, Vec<Added>> = BTreeMap::new();
+        for (mixin, targets) in &self.weave.vanilla {
+            let Some(k) = self.classes.get(mixin.as_str()) else { continue };
+            // The interfaces the mixin adds, with theirs: the mod's (its duck interfaces) and the game's.
+            let (mut mods, mut game): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+            let mut queue = k.interfaces.clone();
+            while let Some(i) = queue.pop() {
+                if mods.contains(&i) || game.contains(&i) {
+                    continue;
+                }
+                match self.classes.get(i.as_str()) {
+                    Some(ik) => {
+                        queue.extend(ik.interfaces.iter().cloned());
+                        mods.push(i);
+                    }
+                    None => game.push(i),
+                }
+            }
+            for m in &k.methods {
+                if m.code.is_none() || m.access & 0x0008 != 0 || m.name.starts_with('<') || is_shadow(m) || is_injector(m) {
+                    continue;
+                }
+                let nd = format!("{}.{}", m.name, m.desc);
+                let key = |c: &str| format!("{c}.{nd}");
+                let overwrite = m.annotations.iter().any(|a| a.ty == "Lorg/spongepowered/asm/mixin/Overwrite;");
+                let mut owners: Vec<String> = std::iter::once(mixin).chain(&mods).map(|c| key(c)).collect();
+                let mut checked: Vec<String> = game.iter().map(|c| key(c)).collect();
+                for t in targets {
+                    if overwrite { checked.push(key(t)) } else { owners.push(key(t)) }
+                }
+                out.entry(nd).or_default().push(Added { mixin: mixin.clone(), targets: targets.clone(), owners, checked });
+            }
+        }
+        out
+    }
+
+    /// The field initialisers of a mixin into the game's class (its constructor, whose call of
+    /// its superclass's is left out), as a function that runs them once on each game object the
+    /// mixin's methods run on: Mixin runs them in the target's constructors, the game's own. None
+    /// for a mixin without fields of its own.
+    fn mixin_init(&self, mixin: &str) -> Option<(String, String)> {
+        let k = self.classes.get(mixin)?;
+        if !k.fields.iter().any(|f| f.access & 0x0008 == 0 && !is_shadow_field(f)) {
+            return None;
+        }
+        let ctor = k.methods.iter().find(|m| m.name == "<init>" && m.code.is_some())?;
+        let name = fn_name(mixin, "<mixin-init>", "");
+        let flag = format!("$mixin {mixin}");
+        let code = format!(
+            "/// `{mixin}`'s field initialisers, run once on each game object its methods run on.\n\
+             fn {name}(rt: &mut Rt, this: V) {{\n\
+             \x20   if matches!(rt.get_field(this, {flag:?}), V::I(1)) {{ return; }}\n\
+             \x20   rt.put_field(this, {flag:?}, V::I(1));\n\
+             \x20   {}(rt, &[this]);\n\
+             }}\n\n",
+            fn_name(mixin, "<init>", &ctor.desc)
+        );
+        Some((name, code))
     }
 
     /// A class's interfaces, with those its mixins add.
@@ -541,7 +636,7 @@ impl<'a> Program<'a> {
     /// None when `owner` is not the mod's (the key is already the API's) or it is ambiguous.
     fn api_owner(&self, owner: &str) -> Option<String> {
         if let Some(target) = self.mixin_of.get(owner) {
-            return self.api_owner(target);
+            return if self.classes.contains_key(target.as_str()) { self.api_owner(target) } else { Some(target.clone()) };
         }
         let start = self.classes.get(owner)?;
         if start.access & 0x0200 == 0 {
@@ -627,6 +722,22 @@ impl<'a> Program<'a> {
             if !interfaces.is_empty() {
                 let _ = writeln!(out, "    rt.interfaces.insert({:?}, &{:?});", c.name, interfaces);
             }
+        }
+        // The game's classes with the interfaces their mixins add (`instanceof` a duck interface).
+        let mut joined: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (mixin, targets) in &self.weave.vanilla {
+            let Some(k) = self.classes.get(mixin.as_str()) else { continue };
+            for t in targets {
+                let list = joined.entry(t.as_str()).or_default();
+                for i in &k.interfaces {
+                    if !list.contains(&i.as_str()) {
+                        list.push(i);
+                    }
+                }
+            }
+        }
+        for (target, interfaces) in joined.iter().filter(|(_, l)| !l.is_empty()) {
+            let _ = writeln!(out, "    rt.interfaces.insert({target:?}, &{interfaces:?});");
         }
         // `@SubscribeEvent` methods by class: what `bus.register(...)` and `@EventBusSubscriber` listen with.
         let mut subs: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -843,6 +954,18 @@ impl<'a> Program<'a> {
             "    (VKEYS[k].2)(CLASS_IDS[c].1)\n",
             "}\n\n",
         ));
+        // What mixins add to the game's classes: their field initialisers, then each method's
+        // place in its dispatcher.
+        let added = self.vanilla_methods();
+        let mut inits: BTreeMap<&str, String> = BTreeMap::new();
+        for a in added.values().flatten() {
+            if !inits.contains_key(a.mixin.as_str())
+                && let Some((name, code)) = self.mixin_init(&a.mixin)
+            {
+                s.push_str(&code);
+                inits.insert(&a.mixin, name);
+            }
+        }
         for nd in &self.vkeys {
             let Some((name, desc)) = nd.split_once('.') else { continue };
             let mut by_imp: BTreeMap<String, Vec<u32>> = BTreeMap::new();
@@ -857,7 +980,30 @@ impl<'a> Program<'a> {
                 let _ = writeln!(s, "        {} => {}(rt, args),", ids_pattern(ids), fn_name(imp, name, desc));
                 all.extend_from_slice(ids);
             }
-            let _ = writeln!(s, "        _ => vcall_miss(rt, cid, owner_key, {nd:?}, args),\n    }}\n}}");
+            match added.get(nd) {
+                None => {
+                    let _ = writeln!(s, "        _ => vcall_miss(rt, cid, owner_key, {nd:?}, args),\n    }}\n}}");
+                }
+                // A game object (not a lambda, not null) takes a mixin's method through the
+                // mixin, an interface it adds or its target; through the game's own interfaces (or
+                // the target, for an `@Overwrite`) only an object of its target does.
+                Some(list) => {
+                    s.push_str("        _ => {\n            if cid & horizon_compat::LAMBDA == 0 && matches!(args.first(), Some(V::R(r)) if *r != 0) {\n");
+                    for a in list {
+                        let init = inits.get(a.mixin.as_str()).map(|f| format!("{f}(rt, args[0]); if rt.thrown.is_some() {{ return V::Void; }} ")).unwrap_or_default();
+                        let run = format!("{}{init}return {}(rt, args);", self.ensure(&a.mixin), fn_name(&a.mixin, name, desc));
+                        let pattern = |keys: &[String]| keys.iter().map(|k| format!("{k:?}")).collect::<Vec<_>>().join(" | ");
+                        if !a.owners.is_empty() {
+                            let _ = writeln!(s, "                if matches!(owner_key, {}) {{ {run} }}", pattern(&a.owners));
+                        }
+                        if !a.checked.is_empty() {
+                            let of_target = a.targets.iter().map(|t| format!("rt.instance_of(args[0], {t:?})")).collect::<Vec<_>>().join(" || ");
+                            let _ = writeln!(s, "                if matches!(owner_key, {}) && ({of_target}) {{ {run} }}", pattern(&a.checked));
+                        }
+                    }
+                    let _ = writeln!(s, "            }}\n            vcall_miss(rt, cid, owner_key, {nd:?}, args)\n        }}\n    }}\n}}");
+                }
+            }
             let _ = writeln!(s, "pub fn {}(cid: u32) -> bool {{\n    matches!(cid, {})\n}}\n", overrider(nd), ids_pattern(&all));
         }
         s
@@ -1686,7 +1832,7 @@ impl<'a> Program<'a> {
         if let Some(target) = self.mixin_of.get(owner) {
             let found = self.field_owner(target, name);
             let target_has = self.classes.get(found.as_str()).is_some_and(|k| k.fields.iter().any(|f| f.name == name));
-            let mixin_has = self.classes.get(owner).is_some_and(|k| k.fields.iter().any(|f| f.name == name));
+            let mixin_has = self.classes.get(owner).is_some_and(|k| k.fields.iter().any(|f| f.name == name && !is_shadow_field(f)));
             return if mixin_has && !target_has { owner.to_owned() } else { found };
         }
         let mut c = owner;

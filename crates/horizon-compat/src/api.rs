@@ -1329,6 +1329,8 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let (b, _) = crate::host::split_state(&text);
             match n {
                 "getBlock" => block(rt, &b.to_owned()),
+                // `BlockStateBase`'s own view of itself as a `BlockState` (a mixin's `@Shadow`).
+                "asState" => a(0),
                 "isAir" => V::I(matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") as i32),
                 "hasBlockEntity" => V::I(crate::glue::block_entity_id(rt, b).is_some() as i32),
                 "is" if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") => V::I((block_name(rt, a(1)) == b) as i32),

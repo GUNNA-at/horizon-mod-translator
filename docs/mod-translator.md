@@ -1733,6 +1733,28 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       28 mods) is the group of an optional `conditions` list (empty by default), NeoForge's
       `LootModifier.codecStart` a required one. Loot conditions themselves aren't modelled: a list
       of them fails to read. Test `codecs::tests::a_loot_functions_shared_fields_read_as_vanillas`.
+  - [x] 2026-11-05 The pack's 28 mods, round 6 (snapshot at e88c88b): all 28 load to the end;
+    distinct misses 239 → 207, kinds summed per mod 454 → 344, unmapped calls 158K → 44K
+    (`Tuple`'s getters are a vanilla data class now). Widest: `MapCodec.forGetter` 8 and
+    `Codec.fieldOf` 5 (each left by a miss before it: a mod's own `Codec` class,
+    `Codec.stringResolver`, `xmap` on nothing), `ItemProperties.register` 7,
+    `Minecraft.getResourceManager` 4, `Ingredient.CONTENTS_STREAM_CODEC` 3, `Class.getClassLoader` 3.
+  - [x] 2026-11-05 Mixins into the game's classes (`weave::Plan::vanilla`; the dispatchers in
+    `codegen.rs`). Mixin merges such a mixin into a class the translator leaves to the runtime, so
+    what it adds now joins the game's objects. A call through the mixin, through an interface it
+    adds (a duck interface: FramedBlocks' `IStateCacheAccessor.framedblocks$initCache`, called on
+    every block state) or through its target runs the mixin's method on a game object. A call
+    through the game's own interfaces, or through the target for an `@Overwrite`, runs it only on
+    an object of the target. Its `@Shadow`s are the game's: calls become API calls on the target,
+    and a `@Shadow` static is the target's static. Its own fields are stored beside the game
+    object. Its field initialisers run once on each object before the first method call (Mixin
+    runs them in the target's constructors), and its static initialiser before the first call
+    too. The target is an instance of the interfaces the mixin adds (`instanceof`). The runtime
+    answers `BlockStateBase.asState()` (the state itself). Class files' field annotations are read
+    now. Injectors into the game's own code are still not woven: they need hooks in the game.
+    Test: the weave fixture's `Vec3Mixin`, a mixin into the game's `Vec3`. Each object gets its own
+    counter (initialised to 10); `lengthSqr()` and `x` come through `@Shadow`s; each object keeps
+    its own label next to the mixin's static; `instanceof Measured` holds.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
