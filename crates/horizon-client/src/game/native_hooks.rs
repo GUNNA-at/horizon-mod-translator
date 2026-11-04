@@ -3446,6 +3446,31 @@ fn dimension_id(dimension: LevelDimension) -> &'static str {
     }
 }
 
+/// A native mod's sound for the players near `at` in `dimension`
+/// ([`GameLevel::native_play_sound`]); None for a value out of range.
+fn native_sound(
+    dimension: &'static str,
+    sound: &str,
+    at: [f64; 3],
+    source: usize,
+    volume: f32,
+    pitch: f32,
+) -> Option<super::creatures::NativeSound> {
+    let position_ok = at
+        .into_iter()
+        .all(|v| v.is_finite() && v.abs() <= f64::from(i32::MAX) / 8.0);
+    let gain_ok = volume.is_finite() && volume >= 0.0 && pitch.is_finite() && pitch >= 0.0;
+    let source_ok = source < horizon_client::settings::SOUND_SOURCES.len();
+    (sound_id(sound) && source_ok && position_ok && gain_ok).then(|| super::creatures::NativeSound {
+        dimension,
+        sound: sound.to_owned(),
+        at,
+        source: source as i32,
+        volume,
+        pitch,
+    })
+}
+
 /// Server-level helpers for native mods.
 #[allow(dead_code)]
 impl GameLevel<'_> {
@@ -3464,27 +3489,14 @@ impl GameLevel<'_> {
         volume: f32,
         pitch: f32,
     ) -> bool {
-        if !self.native_authoritative || !sound_id(sound) {
+        if !self.native_authoritative {
             return false;
         }
-        if source >= horizon_client::settings::SOUND_SOURCES.len() {
+        let dimension = dimension_id(self.dimension);
+        let Some(sound) = native_sound(dimension, sound, at, source, volume, pitch) else {
             return false;
-        }
-        let position_ok = at
-            .into_iter()
-            .all(|v| v.is_finite() && v.abs() <= f64::from(i32::MAX) / 8.0);
-        let gain_ok = volume.is_finite() && volume >= 0.0 && pitch.is_finite() && pitch >= 0.0;
-        if !position_ok || !gain_ok {
-            return false;
-        }
-        self.native_sounds.push(super::creatures::NativeSound {
-            dimension: dimension_id(self.dimension),
-            sound: sound.to_owned(),
-            at,
-            source: source as i32,
-            volume,
-            pitch,
-        });
+        };
+        self.native_sounds.push(sound);
         true
     }
 
@@ -4207,6 +4219,28 @@ impl Game<'_> {
         if let Some(log) = self.world.block_log.as_mut() {
             log.push((pos[0], pos[1], pos[2]));
         }
+    }
+    /// [`GameLevel::native_play_sound`] from a hook on the server's game that
+    /// isn't handed a level (a block entity's tick, a click on a block, a
+    /// payload from a client): for the players near `at` in the level in
+    /// place. The return value means queued, not heard; false on a client or
+    /// for a value out of range. API @API:native_level_sound@.
+    pub(super) fn native_level_sound(
+        &mut self,
+        sound: &str,
+        at: [f64; 3],
+        source: usize,
+        volume: f32,
+        pitch: f32,
+    ) -> bool {
+        if self.serving.is_none() && self.options.dedicated.is_none() {
+            return false;
+        }
+        let Some(sound) = native_sound(self.dim.id(), sound, at, source, volume, pitch) else {
+            return false;
+        };
+        self.creatures.lan_sounds.push(sound);
+        true
     }
     /// Playing, with nothing over the world: keys and zoom apply.
     pub(super) fn native_playing(&self) -> bool {

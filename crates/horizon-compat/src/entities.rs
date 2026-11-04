@@ -107,6 +107,12 @@ fn pos(rt: &Rt, e: V) -> [f64; 3] {
     [rt.get_field(e, "$x").d(), rt.get_field(e, "$y").d(), rt.get_field(e, "$z").d()]
 }
 
+/// Where an entity the game or a mod placed is; None for one with no place here (the player a
+/// hook acts for).
+pub(crate) fn position(rt: &Rt, e: V) -> Option<[f64; 3]> {
+    matches!(rt.get_field(e, "$x"), V::D(_)).then(|| pos(rt, e))
+}
+
 fn motion(rt: &Rt, e: V) -> [f64; 3] {
     [rt.get_field(e, "$mx").d(), rt.get_field(e, "$my").d(), rt.get_field(e, "$mz").d()]
 }

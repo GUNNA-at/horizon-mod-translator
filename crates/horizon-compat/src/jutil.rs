@@ -899,6 +899,23 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             let items = if name == "copyOf" || desc.starts_with("(Ljava/lang/Iterable") { elements(rt, a(0)) } else { varargs(rt) };
             new_set(rt, &items)
         }
+        // Guava's set views (`Sets.union(a, b)`): a copy in the view's order, the first set's
+        // elements before the second's.
+        ("com/google/common/collect/Sets", "union" | "intersection" | "difference" | "symmetricDifference") => {
+            let (x, y) = (elements(rt, a(0)), elements(rt, a(1)));
+            // Whether each of `from` is in `of`.
+            let within = |rt: &mut Rt, from: &[V], of: &[V]| -> Vec<bool> { from.iter().map(|&e| of.iter().any(|&o| equals(rt, o, e))).collect() };
+            let (x_in_y, y_in_x) = (within(rt, &x, &y), within(rt, &y, &x));
+            let pick = |from: &[V], is_in: &[bool], keep: bool| -> Vec<V> { from.iter().zip(is_in).filter(|(_, i)| **i == keep).map(|(e, _)| *e).collect() };
+            let items = match name {
+                // A set keeps the first of equal elements: the first set's, then the second's new ones.
+                "union" => [x.clone(), y.clone()].concat(),
+                "intersection" => pick(&x, &x_in_y, true),
+                "difference" => pick(&x, &x_in_y, false),
+                _ => [pick(&x, &x_in_y, false), pick(&y, &y_in_x, false)].concat(),
+            };
+            new_set(rt, &items)
+        }
         ("java/util/Map" | "com/google/common/collect/ImmutableMap" | "com/google/common/collect/Maps", "of" | "newHashMap" | "newLinkedHashMap") => {
             let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
             for kv in args.chunks(2) {
@@ -1778,6 +1795,17 @@ fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         }
         "first" | "getFirst" => elements(rt, this).first().copied().unwrap_or(V::NULL),
         "last" | "getLast" => elements(rt, this).last().copied().unwrap_or(V::NULL),
+        // A Guava set view's copies.
+        "immutableCopy" => {
+            let items = elements(rt, this);
+            new_set(rt, &items)
+        }
+        "copyInto" => {
+            for e in elements(rt, this) {
+                crate::api::call(rt, "java/util/Set.add.(Ljava/lang/Object;)Z", &[a(1), e]);
+            }
+            a(1)
+        }
         "toArray" => {
             let items = elements(rt, this);
             rt.alloc("[Ljava/lang/Object;", Data::Array(items))
@@ -2778,6 +2806,36 @@ mod tests {
         let fresh = c(&mut rt, "it/unimi/dsi/fastutil/ints/IntList.toIntArray.([I)[I", &[l, small]);
         assert_ne!(fresh, small);
         assert_eq!(values(&rt, fresh).len(), 3);
+    }
+
+    /// Guava's set views iterate as Guava 33's do (measured with the JDK): the first set's order,
+    /// then the second's new elements.
+    #[test]
+    fn guava_set_views_keep_guavas_orders() {
+        let mut rt = Rt::new();
+        let set = |rt: &mut Rt, items: &[&str]| {
+            let v: Vec<V> = items.iter().map(|s| rt.string(s)).collect();
+            new_set(rt, &v)
+        };
+        let x = set(&mut rt, &["5", "1", "3", "2"]);
+        let y = set(&mut rt, &["3", "7", "1", "9"]);
+        let views: [(&str, &[&str]); 4] = [
+            ("union", &["5", "1", "3", "2", "7", "9"]),
+            ("intersection", &["1", "3"]),
+            ("difference", &["5", "2"]),
+            ("symmetricDifference", &["5", "2", "7", "9"]),
+        ];
+        for (view, want) in views {
+            let key = rt.static_key(&format!("com/google/common/collect/Sets.{view}.(Ljava/util/Set;Ljava/util/Set;)Lcom/google/common/collect/Sets$SetView;"));
+            let v = c(&mut rt, key, &[x, y]);
+            let it = c(&mut rt, "com/google/common/collect/Sets$SetView.iterator.()Lcom/google/common/collect/UnmodifiableIterator;", &[v]);
+            let mut got = Vec::new();
+            while c(&mut rt, "java/util/Iterator.hasNext.()Z", &[it]).i() != 0 {
+                let e = c(&mut rt, "java/util/Iterator.next.()Ljava/lang/Object;", &[it]);
+                got.push(rt.str_of(e).unwrap_or("?").to_owned());
+            }
+            assert_eq!(got, want, "{view}");
+        }
     }
 
     #[test]

@@ -191,7 +191,8 @@ fn optional(rt: &mut Rt, v: V) -> V {
     o
 }
 
-fn location(rt: &Rt, v: V) -> String {
+/// A `ResourceLocation`'s `namespace:path` (`minecraft` when it names none).
+pub(crate) fn location(rt: &Rt, v: V) -> String {
     let s = rt.str_of(v).unwrap_or("");
     if s.contains(':') { s.to_owned() } else { format!("minecraft:{s}") }
 }

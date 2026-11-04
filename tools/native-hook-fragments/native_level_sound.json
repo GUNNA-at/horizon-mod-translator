@@ -1,0 +1,5 @@
+{
+  "hooks": [],
+  "rust_summary": "server sounds from a hook with no level in hand (`native_level_sound`).",
+  "doc_summary": "server sounds from a hook with no level in hand: `native_level_sound(sound, at, source, volume, pitch)` plays a sound\nevent for the players near `at` in the level in place, as `native_play_sound` does from a block's hook, from a block\nentity's tick, a click on a block or a client's payload. Bundles that use it need `\"hooks\": @API:native_level_sound@`."
+}

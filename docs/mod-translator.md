@@ -879,6 +879,32 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `isSuffocating`, `isViewBlocking`...) and flags the game doesn't read yet are listed in
     `blocks.rs`. `SoundSource` constants. Found on the way: a level's `playSound`, `addParticle` and
     `levelEvent` are no-ops for mods (no host hook yet): Create's sounds and particles are silent.
+  - [x] 2026-11-04 In game, the slime cross (sticky blocks above) assembles and turns on the bearing
+    (`scratchpad/bearinggif.sh` with `SCENE=slime`, 40 frames).
+  - [x] 2026-11-04 Mod sounds (`horizon-compat/src/sounds.rs`, the host's `play_sound` with a
+    `host::Sound`). The `SoundEvent`s a mod makes (`createVariableRangeEvent`,
+    `createFixedRangeEvent`, `getLocation`, `getRange`); vanilla's `SoundEvents` fields as the ids
+    they register (a field's name isn't its id: `WOODEN_TRAPDOOR_OPEN` is
+    `block.wooden_trapdoor.open`), 1603 of them, 22 as holders, in `vanilla_sounds.rs`, which
+    `tools/vanilla_sound_events.py` writes from the merged jar's `SoundEvents` initialiser; a level's
+    `playSound`, `playSeededSound` and `playLocalSound` and `Entity.playSound`, every 1.21.1
+    overload. As in vanilla, a server's level plays `playSound` for the players near it and a
+    client's plays `playLocalSound` and its own player's `playSound`. The server's sounds go to the
+    game through `native_play_sound` (a block's hook) or the new `native_level_sound` (a block
+    entity's tick, a click, a payload: API fragment `native_level_sound`), queued as native mods'
+    sounds are and sent by name, so clients play Create's own events from its `sounds.json` in the
+    content root; a client's through `native_play_local_sound`. One difference from vanilla: the
+    player named in `playSound` hears it too, because only the server runs a mod's interactions here.
+    Harness `BEARING`: the click plays `create:contraption_assemble` at the bearing (volume 0.5, pitch
+    0.5) and `contraption_assemble_compounded_1` (0.045, 0.74) under blocks, as Create's
+    `playExisting` sets them; the next click plays `contraption_disassemble` at the bearing and at the
+    contraption. A sound at the player a hook acts for plays nothing yet (that player has no
+    position in hooks).
+  - [x] 2026-11-04 Guava's `Sets.union`, `intersection`, `difference` and `symmetricDifference` in
+    Guava 33's iteration order, checked with the JDK (Create's mounted storages write a union of
+    their item and fluid positions; its iterator was a stand-in, so nothing was written); `Level`'s
+    constructor for a mod's own level (Create's `ContraptionWorld` keeps its side) and
+    `dimensionTypeRegistration`. The bearing's click leaves nothing unmapped now.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

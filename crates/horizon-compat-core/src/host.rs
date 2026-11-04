@@ -111,11 +111,11 @@ pub trait Host {
     fn block_state(&self, pos: [i32; 3]) -> String;
     /// Sets a block state; false when the game refused it (unknown block, unloaded).
     fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool;
-    /// Whether the world is the authoritative server (`Level.isClientSide()` is the negation).
     /// The dimension the hook's level is (`minecraft:overworld`): a mod entity ticks in its own.
     fn dimension(&self) -> String {
         "minecraft:overworld".into()
     }
+    /// Whether the world is the authoritative server (`Level.isClientSide()` is the negation).
     fn is_server(&self) -> bool {
         true
     }
@@ -267,6 +267,23 @@ pub trait Host {
     fn spawn_item_entity(&mut self, _item: &str, _count: u32, _pos: [f64; 3], _motion: [f64; 3], _pickup_delay: u32) -> Option<u32> {
         None
     }
+    /// A sound a mod plays (`Level.playSound`, `playLocalSound`, `Entity.playSound`). A server's
+    /// game sends it to the players near it; a client's plays it for its player.
+    fn play_sound(&mut self, _sound: &Sound) {}
+}
+
+/// A sound a mod plays ([`Host::play_sound`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sound {
+    /// The sound event's id: `create:contraption_assemble`, `minecraft:block.wooden_trapdoor.open`.
+    pub event: String,
+    pub at: [f64; 3],
+    /// Its `SoundSource`'s ordinal, the volume slider it plays under: master 0, music, record,
+    /// weather, block 4, hostile, neutral 6, player 7, ambient, voice 9 (1.21.1's order, which
+    /// 26.3's `SoundSource` keeps).
+    pub source: usize,
+    pub volume: f32,
+    pub pitch: f32,
 }
 
 /// What vanilla's block state accessors read from a block's properties: what the game knows of a
@@ -332,6 +349,8 @@ pub struct MemoryHost {
     pub players: Vec<(u128, [f64; 3])>,
     /// A client's world: its runtime's hooks are a client's (`is_server` false).
     pub client: bool,
+    /// Sounds played, in order.
+    pub sounds: Vec<Sound>,
 }
 
 impl Host for MemoryHost {
@@ -478,6 +497,9 @@ impl Host for MemoryHost {
         let id = self.item_entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
         self.item_entities.push(ItemEntity { id, pos, motion, on_ground: false, item: item.to_owned(), count, pickup_delay, age: 0 });
         Some(id)
+    }
+    fn play_sound(&mut self, sound: &Sound) {
+        self.sounds.push(sound.clone());
     }
 }
 
