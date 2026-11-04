@@ -175,6 +175,18 @@ public class Fixture {
         SubHolder.count += k;
         return SubHolder.count * 100 + (SubHolder.KEY == Holder.KEY && SubHolder.KEY != null ? 1 : 0) + Limited.LIMIT * 10000;
     }
+    // A static method reference to another class (Create hands `FanProcessingTypeRegistry::init`
+    // to a registry's bake callback): calling it initialises that class first, as invokestatic does.
+    static class Sorted {
+        static final int[] VALUES = new int[] { 4, 2 };
+        static int calls;
+        static void bump() { calls += VALUES[0] + VALUES.length; }
+    }
+    public static int staticRefs(int k) {
+        Runnable r = Sorted::bump;
+        for (int i = 0; i < k; i++) r.run();
+        return Sorted.calls;
+    }
     public static int grid(int n) {
         int[][] g = new int[n][n + 1];
         for (int i = 0; i < n; i++) for (int j = 0; j <= n; j++) g[i][j] = i * j;

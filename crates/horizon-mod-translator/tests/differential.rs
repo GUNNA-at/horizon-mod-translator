@@ -32,6 +32,7 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("grid", "(I)I", &["0", "1", "6"]),
     ("reflection", "(I)I", &["3", "-12"]),
     ("staticFields", "(I)I", &["0", "5"]),
+    ("staticRefs", "(I)I", &["3"]),
 ];
 
 fn has(tool: &str) -> bool {
@@ -153,7 +154,7 @@ fn translated_fixture_matches_the_jvm() {
     for (e, a) in expected.lines().zip(actual.lines()) {
         assert_eq!(a, e);
     }
-    assert_eq!(expected.lines().count(), 83, "{expected}");
+    assert_eq!(expected.lines().count(), 84, "{expected}");
     assert_eq!(expected.lines().count(), actual.lines().count());
     eprintln!("{actual}");
     assert!(program.unsupported.is_empty(), "{:?}", program.unsupported);

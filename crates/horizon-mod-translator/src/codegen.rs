@@ -649,6 +649,13 @@ impl<'a> Program<'a> {
                         format!("{{ let cid = rt.recv_cid(&full); vcall_miss(rt, cid, {owner_key:?}, {nd:?}, &full) }}")
                     }
                 }
+                // A static method reference to another class (`FanProcessingTypeRegistry::init`)
+                // initialises the class that declares it, as `invokestatic` does. A lambda's own
+                // body (`lambda$...`) lives in the class that made it, which is initialised already.
+                (6, Some(imp)) if !m.name.starts_with("lambda$") => {
+                    let ensure = self.ensure(&imp).replace("return V::Void;", "return Some(V::Void);");
+                    format!("{{ {ensure}{}(rt, &full) }}", fn_name(&imp, &m.name, &m.desc))
+                }
                 (_, Some(imp)) => format!("{}(rt, &full)", fn_name(&imp, &m.name, &m.desc)),
                 (_, None) => format!("api::call(rt, {key:?}, &full)"),
             };
