@@ -584,6 +584,19 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     skulls and signs' `ROTATION`, `NoteBlock.INSTRUMENT` and 30 more; `LEVEL_HONEY` is named
     `honey_level`, and 26.3's new fields (`SPELEOTHEM_THICKNESS`, `SIDE_CHAIN_PART`, the shelf's
     `SLOT_n_OCCUPIED`...) are known.
+  - [x] 2026-11-04 **Create's mixer mixes in game** (`scratchpad/mixgame.sh`: creative motor at 64
+    RPM, cogwheel, mechanical mixer two above a basin; a dropper over a depot beside it). Andesite and
+    an iron nugget thrown into the basin go in on the first second; the basin's output then holds
+    `create:andesite_alloy`, its inputs are gone and the client draws the alloy in the basin. The
+    dropper's iron ingot lands on the depot, which holds it and draws it. (The first run threw the
+    items beside the basin: the script's `$X.5` is X - 0.5 for a negative X.)
+  - [x] 2026-11-04 Mod block entities tick on the client too, as vanilla's `ClientLevel` ticks a block
+    entity whose block gives a ticker there: `glue::client_tick` runs `ClientTickEvent.Pre`, then
+    every block entity the client holds (one whose block is gone is let go), then `.Post`. Without
+    it the mixer's head stayed down after mixing: the server sends `Running`/`Ticks` when it starts
+    and when the recipe is done, and the client counts the head's way down and up itself. Harness
+    `MIX` now replays the server's update tags on a client runtime: the head goes from 7/16 down to
+    1 7/16 by tick 21, waits for the recipe, and is back at 7/16 on tick 88.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

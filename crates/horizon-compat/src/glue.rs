@@ -592,16 +592,91 @@ pub fn render_block_entity(
     })
 }
 
-/// The client's tick (`ClientTickEvent.Pre`, then `.Post`): animation clocks advance here (catnip's
-/// `AnimationTickHolder`).
+/// The client's tick, in `Minecraft.tick`'s order: `ClientTickEvent.Pre` (animation clocks advance
+/// here: catnip's `AnimationTickHolder`), the level's block entities, then `ClientTickEvent.Post`.
 pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
     crate::neo::fire_client_setup(rt);
     rt.with_host(host, |rt| {
-        for class in [CLIENT_TICK_PRE, CLIENT_TICK_POST] {
-            let ev = rt.new_object(class);
-            crate::neo::post(rt, class, ev);
-        }
+        let ev = rt.new_object(CLIENT_TICK_PRE);
+        crate::neo::post(rt, CLIENT_TICK_PRE, ev);
+        tick_client_block_entities(rt);
+        let ev = rt.new_object(CLIENT_TICK_POST);
+        crate::neo::post(rt, CLIENT_TICK_POST, ev);
     });
+}
+
+/// The client level's `tickBlockEntities`: every mod block entity the client holds whose block
+/// gives it a ticker there. Between the server's updates this is what moves Create's mixer and
+/// press heads and the items on belts and depots. One whose block is gone from the client's
+/// world is let go, as vanilla removes it with its block.
+fn tick_client_block_entities(rt: &mut Rt) {
+    let Some(vc) = rt.vcall else { return };
+    if rt.block_entities.is_empty() {
+        return;
+    }
+    let mut held: Vec<([i32; 3], V)> = rt.block_entities.iter().map(|(p, be)| (*p, *be)).collect();
+    held.sort_unstable_by_key(|(p, _)| *p);
+    let level = level(rt);
+    for (pos, be) in held {
+        let Some(state) = rt.host().map(|h| h.block_state(pos)) else { return };
+        let (block, _) = crate::host::split_state(&state);
+        if rt.block_entity_meta.get(&pos).is_none_or(|(b, _)| b != block) {
+            block_entity_removed(rt, pos);
+            continue;
+        }
+        let Some((b, _)) = mod_block(rt, &state) else { continue };
+        let st = api::state(rt, &state);
+        rt.put_field(be, "$state", st);
+        rt.put_field(be, "blockState", st);
+        let ty = rt.get_field(be, "$type");
+        let ticker = vc(rt, GET_TICKER, GET_TICKER, &[b, level, st, ty]);
+        if ticker.r() != 0 {
+            let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+            rt.call_functional(TICKER_TICK, ticker, &[level, p, st, be]);
+        }
+        rt.report_thrown("the block entity's client tick");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::MemoryHost;
+
+    /// The test block's `getTicker` gives a ticker (lambda 1) that counts its block entity's ticks.
+    fn vcall(rt: &mut Rt, _owner_key: &'static str, key: &'static str, _args: &[V]) -> V {
+        if key == GET_TICKER { rt.lambda_id("test/Ticker", 1, Vec::new()) } else { V::Void }
+    }
+
+    fn count_tick(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+        let be = args[4];
+        let n = rt.get_field(be, "ticks").i();
+        rt.put_field(be, "ticks", V::I(n + 1));
+        Some(V::Void)
+    }
+
+    #[test]
+    fn the_client_ticks_the_block_entities_it_holds_and_lets_go_of_those_whose_block_is_gone() {
+        let mut rt = Rt::new();
+        rt.vcall = Some(vcall);
+        rt.lambda_call = Some(count_tick);
+        let block = rt.new_object("test/MixerBlock");
+        rt.registered.insert(("block".into(), "t:mixer".into()), block);
+        let mut host = MemoryHost::default();
+        let (here, gone) = ([0, 64, 0], [5, 64, 0]);
+        host.blocks.insert(here, "t:mixer".into());
+        for pos in [here, gone] {
+            let be = rt.new_object("test/MixerBlockEntity");
+            rt.block_entities.insert(pos, be);
+            rt.block_entity_meta.insert(pos, ("t:mixer".into(), true));
+        }
+        let be = rt.block_entities[&here];
+        for _ in 0..3 {
+            client_tick(&mut rt, &mut host);
+        }
+        assert_eq!(rt.get_field(be, "ticks"), V::I(3));
+        assert!(!rt.block_entities.contains_key(&gone));
+    }
 }
