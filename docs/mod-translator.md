@@ -105,6 +105,11 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
 
 `git checkout mod-translator`, read this file, take the first unchecked item.
 
+Before a PR: `tools/check_public_tree.py` rejects every tracked `.java` outside `mods/horizon/src/`,
+and the translator's test fixtures (`crates/horizon-mod-translator/tests/fixtures/`: original test
+sources and NeoForge API stubs the tests compile) are `.java`. The maintainer decides how to allow
+them (a path in the checker's allowlist, or the fixtures built from another form).
+
 ## Fast loop: the harness (use this first)
 
 The runtime is two crates: `horizon-compat-core` (the object model: `Rt`, values, heap, dispatch
