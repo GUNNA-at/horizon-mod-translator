@@ -636,6 +636,19 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `Block.isFaceFull(shape, direction)` and `isShapeFullBlock` work on the shape's boxes as
     `getFaceShape` slices them. Create's belt asks all three before it lets an item off its end
     (`BlockHelper.hasBlockSolidSide`). `List.removeAll/retainAll` are mapped too.
+  - [x] 2026-11-04 What Create's belt draws besides its model. The moving surface: catnip shifts a
+    buffer's texture (`SuperByteBuffer.shiftUVScrolling`, `shiftUVtoSheet`, `shiftUV`) between two
+    sprites it loads when the block atlas is stitched (`StitchedSprite`, on
+    `TextureAtlasStitchedEvent`, which `fire_client_setup` now posts). Compat's sprites span 0..1, so
+    the mod's own math leaves a fraction of the target sprite, and the game redraws the model with
+    that move through a new host call, `Host::draw_model_shifted` (`SpriteShift` in
+    `native_block_entity_draw.rs`). The items on it: the renderer culls each one with
+    `Frustum.isVisible`, which was unmapped and said "not visible"; the game culls the block entity
+    before it asks, so it now says yes. And `BlockPos$MutableBlockPos` is a position moved in place
+    (`set`, `move`, `setWithOffset`, `clamp`, its constructors), whose inherited calls climb to
+    `BlockPos` and `Vec3i` as a mod's own classes climb (`api_super`); before, `set` and `move` fell
+    into the builder fallback and handed back the receiver unmoved. `closerThan` and
+    `BlockPos.mutable()` are mapped too.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

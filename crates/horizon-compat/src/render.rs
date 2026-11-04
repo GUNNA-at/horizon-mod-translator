@@ -1100,6 +1100,9 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             _ => return None,
         },
         (SPRITE_CONTENTS, "name") => rt.get_field(a(0), "$name"),
+        // The game culls a block entity before asking its renderer to draw it, so what the renderer
+        // checks again (Create's belt, each item it carries) is in view.
+        ("net/minecraft/client/renderer/culling/Frustum", "isVisible" | "pointInFrustum") => V::I(1),
         ("net/minecraft/client/Minecraft", "getInstance") => {
             let mc = single(rt, "net/minecraft/client/Minecraft");
             // Its public fields: the level this client draws.

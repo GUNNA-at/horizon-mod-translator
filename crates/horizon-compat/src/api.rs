@@ -20,6 +20,17 @@ const OPPOSITE: [i64; 6] = [1, 0, 3, 2, 5, 4];
 const AXIS: [i32; 6] = [1, 1, 2, 2, 0, 0];
 
 const BLOCK_POS: &str = "net/minecraft/core/BlockPos";
+const MUTABLE_POS: &str = "net/minecraft/core/BlockPos$MutableBlockPos";
+
+/// Minecraft's superclasses a missed call climbs past the mod's own (the API's classes aren't in
+/// `rt.supers`): what a `MutableBlockPos` inherits answers as `BlockPos`'s, then `Vec3i`'s.
+fn api_super(class: &str) -> Option<&'static str> {
+    match class {
+        MUTABLE_POS => Some(BLOCK_POS),
+        BLOCK_POS => Some("net/minecraft/core/Vec3i"),
+        _ => None,
+    }
+}
 
 pub fn block_pos(rt: &mut Rt, x: i64, y: i64, z: i64) -> V {
     rt.alloc(BLOCK_POS, Data::Native("BlockPos", [x, y, z, 0]))
@@ -69,7 +80,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
 fn retry_classes(rt: &Rt, owner: &'static str, args: &[V]) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     let climb = |out: &mut Vec<&'static str>, mut c: &'static str| {
-        while let Some(&sup) = rt.supers.get(c) {
+        while let Some(sup) = rt.supers.get(c).copied().or_else(|| api_super(c)) {
             if sup == owner || out.contains(&sup) {
                 break;
             }
@@ -272,6 +283,16 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             let d = |i: usize| (p[i] - q[i]) as f64;
             V::D(d(0) * d(0) + d(1) * d(1) + d(2) * d(2))
         }
+        // `distSqr(pos) < distance²`.
+        "net/minecraft/core/Vec3i.closerThan.(Lnet/minecraft/core/Vec3i;D)Z" | "net/minecraft/core/BlockPos.closerThan.(Lnet/minecraft/core/Vec3i;D)Z" => {
+            let (p, q) = (native(rt, a(0)), native(rt, a(1)));
+            let d = |i: usize| (p[i] - q[i]) as f64;
+            V::I((d(0) * d(0) + d(1) * d(1) + d(2) * d(2) < a(2).d() * a(2).d()) as i32)
+        }
+        "net/minecraft/core/BlockPos.mutable.()Lnet/minecraft/core/BlockPos$MutableBlockPos;" => {
+            let p = native(rt, a(0));
+            rt.alloc(MUTABLE_POS, Data::Native("BlockPos", [p[0], p[1], p[2], 0]))
+        }
 
         // net.minecraft.core.Direction
         "net/minecraft/core/Direction.getOpposite.()Lnet/minecraft/core/Direction;" => {
@@ -350,7 +371,8 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
                 _ => V::NULL,
             }
         }
-        _ => match crate::fluids::call(rt, key, args)
+        _ => match mutable_pos(rt, key, args)
+            .or_else(|| crate::fluids::call(rt, key, args))
             .or_else(|| crate::tanks::call_key(rt, key, args))
             .or_else(|| crate::codecs::call(rt, key, args))
             .or_else(|| crate::recipes::call(rt, key, args))
@@ -758,6 +780,63 @@ fn holder(rt: &mut Rt, registry: &str, id: &str) -> V {
     h
 }
 
+/// `BlockPos$MutableBlockPos`, the position a renderer or a scan moves along instead of making a new
+/// one each step. It holds its place as a `BlockPos` does; `set`, `move` and `clamp` change it and
+/// hand it back. What vanilla makes immutable (`offset`, `relative(d, n)`, `immutable()`) and what it
+/// only reads (`getX`, `above()`) answer as `BlockPos`'s, through [`api_super`].
+fn mutable_pos(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
+    let (name, desc) = key.strip_prefix(MUTABLE_POS)?.strip_prefix('.')?.split_once('.')?;
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let ints = |s: usize| [a(s).i() as i64, a(s + 1).i() as i64, a(s + 2).i() as i64];
+    // `Mth.floor`: Java's `(int)` saturates as Rust's `as i32` does.
+    let floors = |s: usize| [s, s + 1, s + 2].map(|i| a(i).d().floor() as i32 as i64);
+    let at = native(rt, a(0));
+    let step = |rt: &Rt, d: V, n: i64| DIRECTIONS[native(rt, d)[0].clamp(0, 5) as usize].map(|c| c * n);
+    let plus = |p: [i64; 4], d: [i64; 3]| [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+    let args_of = &desc[..desc.find(')').map_or(desc.len(), |i| i + 1)];
+    let to = match (name, args_of) {
+        ("<init>", "()") => [0; 3],
+        ("<init>" | "set", "(III)") => ints(1),
+        ("<init>" | "set", "(DDD)") => floors(1),
+        ("set", "(Lnet/minecraft/core/Vec3i;)") => plus(native(rt, a(1)), [0; 3]),
+        ("set", "(J)") => {
+            let l = a(1).j();
+            [l >> 38, (l << 52) >> 52, (l << 26) >> 38]
+        }
+        ("setX", "(I)") => [a(1).i() as i64, at[1], at[2]],
+        ("setY", "(I)") => [at[0], a(1).i() as i64, at[2]],
+        ("setZ", "(I)") => [at[0], at[1], a(1).i() as i64],
+        ("setWithOffset", "(Lnet/minecraft/core/Vec3i;Lnet/minecraft/core/Direction;)") => plus(native(rt, a(1)), step(rt, a(2), 1)),
+        ("setWithOffset", "(Lnet/minecraft/core/Vec3i;III)") => plus(native(rt, a(1)), ints(2)),
+        ("setWithOffset", "(Lnet/minecraft/core/Vec3i;Lnet/minecraft/core/Vec3i;)") => {
+            let d = native(rt, a(2));
+            plus(native(rt, a(1)), [d[0], d[1], d[2]])
+        }
+        ("move", "(Lnet/minecraft/core/Direction;)") => plus(at, step(rt, a(1), 1)),
+        ("move", "(Lnet/minecraft/core/Direction;I)") => plus(at, step(rt, a(1), a(2).i() as i64)),
+        ("move", "(III)") => plus(at, ints(1)),
+        ("move", "(Lnet/minecraft/core/Vec3i;)") => {
+            let d = native(rt, a(1));
+            plus(at, [d[0], d[1], d[2]])
+        }
+        // `Mth.clamp(coordinate, min, max)` on one axis (X 0, Y 1, Z 2).
+        ("clamp", "(Lnet/minecraft/core/Direction$Axis;II)") => {
+            let mut p = [at[0], at[1], at[2]];
+            let i = native(rt, a(1))[0].clamp(0, 2) as usize;
+            let (lo, hi) = (a(2).i() as i64, a(3).i() as i64);
+            p[i] = if p[i] < lo { lo } else { p[i].min(hi) };
+            p
+        }
+        _ => return None,
+    };
+    // Coordinates are Java ints: a step past the edge wraps as the JVM's does.
+    let to = to.map(|c| c as i32 as i64);
+    if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
+        o.data = Data::Native("BlockPos", [to[0], to[1], to[2], 0]);
+    }
+    Some(if name == "<init>" { V::Void } else { a(0) })
+}
+
 /// `BlockPos.asLong(x, y, z)`.
 fn pack_pos(x: i64, y: i64, z: i64) -> i64 {
     ((x & 0x3FF_FFFF) << 38) | ((z & 0x3FF_FFFF) << 12) | (y & 0xFFF)
@@ -892,6 +971,33 @@ mod tests {
             turn("WEST", "X", true),
         ];
         assert_eq!(got, ["SOUTH", "NORTH", "DOWN", "NORTH", "EAST", "UP", "WEST"]);
+    }
+
+    /// `MutableBlockPos` as Create's belt renderer uses it: one object moved in place, read and
+    /// compared as the `BlockPos` it stands at, while `immutable()` keeps where it was.
+    #[test]
+    fn a_mutable_position_moves_in_place_and_reads_as_a_block_pos() {
+        let mut rt = Rt::new();
+        let k = |s: &str| -> &'static str { Box::leak(format!("net/minecraft/core/BlockPos$MutableBlockPos.{s}").into_boxed_str()) };
+        let xyz = |rt: &mut Rt, v: V| ["getX", "getY", "getZ"].map(|n| call(rt, k(&format!("{n}.()I")), &[v]).i());
+        let m = rt.new_object(MUTABLE_POS);
+        call(&mut rt, k("<init>.()V"), &[m]);
+        let p = block_pos(&mut rt, 4, 70, -9);
+        let east = get_static(&mut rt, "net/minecraft/core/Direction.EAST");
+        let back = call(&mut rt, k("set.(Lnet/minecraft/core/Vec3i;)Lnet/minecraft/core/BlockPos$MutableBlockPos;"), &[m, p]);
+        assert_eq!(back, m);
+        call(&mut rt, k("move.(Lnet/minecraft/core/Direction;I)Lnet/minecraft/core/BlockPos$MutableBlockPos;"), &[m, east, V::I(3)]);
+        call(&mut rt, k("move.(III)Lnet/minecraft/core/BlockPos$MutableBlockPos;"), &[m, V::I(0), V::I(-2), V::I(1)]);
+        assert_eq!(xyz(&mut rt, m), [7, 68, -8]);
+        let kept = call(&mut rt, k("immutable.()Lnet/minecraft/core/BlockPos;"), &[m]);
+        call(&mut rt, k("setY.(I)Lnet/minecraft/core/BlockPos$MutableBlockPos;"), &[m, V::I(0)]);
+        assert_eq!((xyz(&mut rt, kept), xyz(&mut rt, m)), ([7, 68, -8], [7, 0, -8]));
+        let here = block_pos(&mut rt, 7, 0, -8);
+        assert_eq!(call(&mut rt, "net/minecraft/core/BlockPos.equals.(Ljava/lang/Object;)Z", &[here, m]), V::I(1));
+        let next = block_pos(&mut rt, 8, 0, -8);
+        let closer = |rt: &mut Rt, d: f64| call(rt, k("closerThan.(Lnet/minecraft/core/Vec3i;D)Z"), &[m, next, V::D(d)]);
+        assert_eq!((closer(&mut rt, 1.5), closer(&mut rt, 1.0)), (V::I(1), V::I(0)));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

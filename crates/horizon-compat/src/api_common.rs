@@ -19,6 +19,8 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
             family("net/minecraft/world/level/block/", "Block") && !c.contains("/entity/")
         }
         "net/minecraft/world/level/block/EntityBlock" => c == "net/minecraft/world/level/block/BaseEntityBlock",
+        "net/minecraft/core/BlockPos" => c == "net/minecraft/core/BlockPos$MutableBlockPos",
+        "net/minecraft/core/Vec3i" => matches!(c, "net/minecraft/core/BlockPos" | "net/minecraft/core/BlockPos$MutableBlockPos"),
         "net/minecraft/world/phys/shapes/CollisionContext" => c == crate::shapes::ENTITY_COLLISION_CONTEXT,
         "net/minecraft/world/item/Item" => family("net/minecraft/world/item/", "Item"),
         // Fluids: vanilla's (`WaterFluid$Source` is a `FlowingFluid` and a `WaterFluid`) and NeoForge's
