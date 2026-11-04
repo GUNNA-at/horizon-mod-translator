@@ -122,6 +122,14 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/nbt/CompoundTag", "CODEC") => native(rt, "compound_tag"),
         ("net/minecraft/world/item/DyeColor", "CODEC") => native(rt, "dye_color"),
         ("net/minecraft/world/level/block/state/BlockState", "CODEC") => native(rt, "block_state"),
+        ("net/minecraft/network/chat/ComponentSerialization", "CODEC" | "FLAT_CODEC") => native(rt, "component"),
+        // A fluid by name (`Holder<Fluid>`; registries are their names here, holders their entries).
+        ("net/neoforged/neoforge/fluids/FluidStack", "FLUID_NON_EMPTY_CODEC") => rt.intern("compat:codec/fluid-non-empty".into(), |rt| {
+            let r = rt.string("fluid");
+            codec(rt, "compat:codec/registry", vec![r])
+        }),
+        // A block-state enum's codec (`WeatheringCopper.WeatherState.CODEC`): by serialized name.
+        (o, "CODEC") if crate::blocks::is_vanilla_enum(o) => native(rt, &format!("vanilla_enum/{o}")),
         // `NeoForgeRegistries.FLUID_INGREDIENT_TYPES` is registry `fluid_ingredient_type`, and so is
         // its key (`NeoForgeRegistries.Keys`): registries are their names here.
         ("net/neoforged/neoforge/registries/NeoForgeRegistries" | "net/neoforged/neoforge/registries/NeoForgeRegistries$Keys", f) => {
@@ -872,6 +880,19 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
                 None => Nbt::Compound(BTreeMap::new()),
             }
         }
+        "component" => crate::recipes::json_nbt(&crate::api_common::component_json(rt, v)).ok_or("Not a component")?,
+        n if n.starts_with("tag_key/") || n.starts_with("hashed_tag_key/") => {
+            let location = rt.str_of(rt.get_field(v, "$location")).ok_or("Not a tag key")?.to_owned();
+            Nbt::String(if n.starts_with("hashed") { format!("#{location}") } else { location })
+        }
+        n if n.starts_with("resource_key/") => {
+            let key = rt.str_of(v).ok_or("Not a resource key")?;
+            Nbt::String(key.rsplit_once('#').map_or(key, |(_, l)| l).to_owned())
+        }
+        n if n.starts_with("vanilla_enum/") => {
+            let class = &n["vanilla_enum/".len()..];
+            Nbt::String(crate::blocks::enum_serialized(rt, class, v).ok_or("Not an enum constant")?)
+        }
         other => return Err(format!("codec {other} can't write")),
     })
 }
@@ -883,7 +904,8 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || owner.starts_with("com/mojang/datafixers/")
         || matches!(owner, "net/minecraft/util/ExtraCodecs" | "net/minecraft/util/StringRepresentable" | "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs" | "net/minecraft/resources/RegistryOps")
         || matches!(name, "byNameCodec" | "holderByNameCodec" | "createSerializationContext")
-        || (name == "simpleCodec" && owner.starts_with("net/minecraft/world/level/block/"))
+        || (matches!(name, "simpleCodec" | "propertiesCodec") && owner.starts_with("net/minecraft/world/level/block/"))
+        || (matches!(owner, "net/minecraft/tags/TagKey" | "net/minecraft/resources/ResourceKey") && matches!(name, "codec" | "hashedCodec"))
         || RECEIVER_METHODS.contains(&name)
 }
 
@@ -912,6 +934,26 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return Some(if method == "create" { codec(rt, "compat:codec/of_map", vec![built]) } else { built });
         }
         ("com/mojang/serialization/codecs/RecordCodecBuilder", "point") => return Some(codec(rt, "compat:codec/point", vec![a(0)])),
+        // `TagKey.codec(registry)` reads `ns:path`, `hashedCodec` `#ns:path`; `ResourceKey.codec`
+        // an entry's key.
+        ("net/minecraft/tags/TagKey", "codec" | "hashedCodec") if rt.str_of(a(0)).is_some() => {
+            let registry = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let kind = if method == "codec" { "tag_key" } else { "hashed_tag_key" };
+            return Some(native(rt, &format!("{kind}/{registry}")));
+        }
+        ("net/minecraft/resources/ResourceKey", "codec") if rt.str_of(a(0)).is_some() => {
+            let registry = rt.str_of(a(0)).unwrap_or("").to_owned();
+            return Some(native(rt, &format!("resource_key/{registry}")));
+        }
+        // `BlockBehaviour.propertiesCodec()`: the field `properties`, which reads as a new
+        // `Properties.of()` (vanilla's `Properties.CODEC` is `Codec.unit(Properties::of)`).
+        (o, "propertiesCodec") if o.starts_with("net/minecraft/world/level/block/") => {
+            let props = crate::api::call(rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.of.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[]);
+            let unit = codec(rt, "compat:codec/unit", vec![props]);
+            let name = rt.string("properties");
+            let field = codec(rt, "compat:codec/field", vec![name, unit]);
+            return Some(codec(rt, "compat:codec/getter", vec![field, V::NULL]));
+        }
         // `BlockBehaviour.simpleCodec(constructor)`: a block's codec, its properties alone, which
         // only a block-type registry reads.
         (o, "simpleCodec") if o.starts_with("net/minecraft/world/level/block/") && desc == "(Ljava/util/function/Function;)Lcom/mojang/serialization/MapCodec;" => {
@@ -1054,6 +1096,17 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
     }
     if k == "products" {
         return Some(match method {
+            // `group(a, b).and(c)`, or `.and(otherGroup)`: the fields in order.
+            "and" => {
+                let mut parts = rt.captured(c);
+                let other = a(1);
+                if is_codec(rt, other) && kind(rt, other) == "products" {
+                    parts.extend(rt.captured(other));
+                } else {
+                    parts.push(other);
+                }
+                codec(rt, "compat:codec/products", parts)
+            }
             "apply" => {
                 let mut parts = vec![a(2)];
                 parts.extend(rt.captured(c));
@@ -1331,6 +1384,24 @@ mod tests {
                 let new = rt.new_object("test/New");
                 c(rt, "com/mojang/datafixers/Products$P2.apply.(Lcom/mojang/datafixers/kinds/Applicative;Ljava/util/function/BiFunction;)Lcom/mojang/datafixers/kinds/App;", &[group, args[1], new])
             }
+            // `group(pos).and(slot).and(count)`: a group grown one field at a time, then a `Function3`.
+            "test/Build3" => {
+                let (pos, slot, int) = (st(rt, "net/minecraft/core/BlockPos.CODEC"), st(rt, "com/mojang/serialization/Codec.STRING"), st(rt, "com/mojang/serialization/Codec.INT"));
+                let (p, s, n) = (field(rt, pos, "pos", "test/PosOf"), field(rt, slot, "slot", "test/SlotOf"), field(rt, int, "count", "test/CountOf"));
+                let one = c(rt, "com/mojang/serialization/codecs/RecordCodecBuilder$Instance.group.(Lcom/mojang/datafixers/kinds/App;)Lcom/mojang/datafixers/Products$P1;", &[args[1], p]);
+                let two = c(rt, "com/mojang/datafixers/Products$P1.and.(Lcom/mojang/datafixers/kinds/App;)Lcom/mojang/datafixers/Products$P2;", &[one, s]);
+                let three = c(rt, "com/mojang/datafixers/Products$P2.and.(Lcom/mojang/datafixers/kinds/App;)Lcom/mojang/datafixers/Products$P3;", &[two, n]);
+                let new = rt.new_object("test/New3");
+                c(rt, "com/mojang/datafixers/Products$P3.apply.(Lcom/mojang/datafixers/kinds/Applicative;Lcom/mojang/datafixers/util/Function3;)Lcom/mojang/datafixers/kinds/App;", &[three, args[1], new])
+            }
+            "test/New3" => {
+                let o = rt.new_object("test/Panel");
+                rt.put_field(o, "pos", args[1]);
+                rt.put_field(o, "slot", args[2]);
+                rt.put_field(o, "count", args[3]);
+                o
+            }
+            "test/CountOf" => rt.get_field(args[1], "count"),
             "test/PosOf" => rt.get_field(args[1], "pos"),
             "test/SlotOf" => rt.get_field(args[1], "slot"),
             "test/New" => {
@@ -1385,6 +1456,63 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(crate::api::pos_of(&rt, rt.get_field(back[0], "pos")), [1, -2, 3]);
         assert_eq!(rt.str_of(rt.get_field(back[0], "slot")), Some("TOP_LEFT"));
+    }
+
+    #[test]
+    fn a_group_grown_with_and_reads_and_writes_every_field() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(panel);
+        let build = rt.new_object("test/Build3");
+        let record = c(&mut rt, "com/mojang/serialization/codecs/RecordCodecBuilder.create.(Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;", &[build]);
+        let read = decode(&mut rt, record, &serde_json::json!({"pos": [4, 5, 6], "slot": "BOTTOM", "count": 7})).unwrap();
+        assert_eq!(crate::api::pos_of(&rt, rt.get_field(read, "pos")), [4, 5, 6]);
+        assert_eq!(rt.str_of(rt.get_field(read, "slot")), Some("BOTTOM"));
+        let written = Nbt::Compound(BTreeMap::from([
+            ("count".to_owned(), Nbt::Int(7)),
+            ("pos".to_owned(), Nbt::IntArray(vec![4, 5, 6])),
+            ("slot".to_owned(), Nbt::String("BOTTOM".to_owned())),
+        ]));
+        assert_eq!(encode(&mut rt, record, read), Ok(written));
+    }
+
+    #[test]
+    fn keys_enums_and_text_read_and_write_as_vanillas() {
+        let mut rt = Rt::new();
+        crate::install();
+        let fluid = rt.string("fluid");
+        let tags = c(&mut rt, "net/minecraft/tags/TagKey.codec.(Lnet/minecraft/resources/ResourceKey;)Lcom/mojang/serialization/Codec;", &[fluid]);
+        let water = decode(&mut rt, tags, &serde_json::json!("c:water")).unwrap();
+        assert_eq!(water, crate::fluids::tag_key(&mut rt, "fluid", "c:water"), "the same key `TagKey.create` gives");
+        assert_eq!(encode(&mut rt, tags, water), Ok(Nbt::String("c:water".to_owned())));
+        let hashed = c(&mut rt, "net/minecraft/tags/TagKey.hashedCodec.(Lnet/minecraft/resources/ResourceKey;)Lcom/mojang/serialization/Codec;", &[fluid]);
+        assert!(decode(&mut rt, hashed, &serde_json::json!("c:water")).is_err());
+        assert_eq!(decode(&mut rt, hashed, &serde_json::json!("#c:water")), Ok(water));
+        assert_eq!(encode(&mut rt, hashed, water), Ok(Nbt::String("#c:water".to_owned())));
+        let dimension = rt.string("dimension");
+        let keys = c(&mut rt, "net/minecraft/resources/ResourceKey.codec.(Lnet/minecraft/resources/ResourceKey;)Lcom/mojang/serialization/Codec;", &[dimension]);
+        let nether = decode(&mut rt, keys, &serde_json::json!("the_nether")).unwrap();
+        let id = rt.string("minecraft:the_nether");
+        let made = c(&mut rt, "net/minecraft/resources/ResourceKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[dimension, id]);
+        assert_eq!(rt.str_of(nether), rt.str_of(made));
+        assert_eq!(encode(&mut rt, keys, nether), Ok(Nbt::String("minecraft:the_nether".to_owned())));
+        // A block-state enum's codec, by serialized name; `PistonType.DEFAULT` is `normal`.
+        let weather = st(&mut rt, "net/minecraft/world/level/block/WeatheringCopper$WeatherState.CODEC");
+        let exposed = st(&mut rt, "net/minecraft/world/level/block/WeatheringCopper$WeatherState.EXPOSED");
+        assert_eq!(decode(&mut rt, weather, &serde_json::json!("exposed")), Ok(exposed));
+        assert_eq!(encode(&mut rt, weather, exposed), Ok(Nbt::String("exposed".to_owned())));
+        let piston = st(&mut rt, "net/minecraft/world/level/block/state/properties/PistonType.DEFAULT");
+        assert_eq!(rt.str_of(rt.get_field(piston, "$name")), Some("DEFAULT"));
+        let shown = c(&mut rt, "net/minecraft/world/level/block/state/properties/PistonType.getSerializedName.()Ljava/lang/String;", &[piston]);
+        assert_eq!(rt.str_of(shown), Some("normal"));
+        let text = st(&mut rt, "net/minecraft/network/chat/ComponentSerialization.CODEC");
+        let hi = decode(&mut rt, text, &serde_json::json!({"text": "Hi"})).unwrap();
+        assert_eq!(rt.str_of(rt.get_field(hi, "$text")), Some("Hi"));
+        // A codec the runtime doesn't model yet is still a codec (a record built on it stays
+        // whole); reading with it fails.
+        let food = st(&mut rt, "net/minecraft/world/food/FoodProperties.DIRECT_CODEC");
+        assert!(is_codec(&rt, food));
+        assert!(decode(&mut rt, food, &serde_json::json!({"nutrition": 4})).is_err());
     }
 
     #[test]

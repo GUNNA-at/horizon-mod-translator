@@ -87,9 +87,28 @@ fn copy_instance(rt: &mut Rt, from: V) -> V {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    matches!(owner, BUILDER | POSSIBLE | INSTANCE)
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(owner, BUILDER | POSSIBLE | INSTANCE) || (owner == EFFECT && EFFECT_METHODS.contains(&name))
 }
+
+/// What a mod's own effect (a `MobEffect` subclass) takes from vanilla's class.
+const EFFECT_METHODS: [&str; 15] = [
+    "<init>",
+    "getCategory",
+    "getColor",
+    "isBeneficial",
+    "isInstantenous",
+    "addAttributeModifier",
+    "applyEffectTick",
+    "shouldApplyEffectTickThisTick",
+    "onEffectStarted",
+    "onEffectAdded",
+    "onMobRemoved",
+    "onMobHurt",
+    "getDescriptionId",
+    "getDisplayName",
+    "withSoundOnAdded",
+];
 
 /// `FoodProperties.Builder`, `PossibleEffect.effect()` and `MobEffectInstance`; None for anything else.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -175,6 +194,45 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.put_field(this, "$visible", V::I(visible));
             rt.put_field(this, "$showIcon", V::I(if n >= 6 { a(6).i() } else { visible }));
             V::Void
+        }
+        // `MobEffect(category, color[, particle])`, as a mod's effect calls `super`.
+        (EFFECT, "<init>") => {
+            rt.put_field(this, "$category", a(1));
+            rt.put_field(this, "$color", V::I(a(2).i()));
+            if desc.contains("ParticleOptions;") || desc.contains("Ljava/util/function/Function;") {
+                rt.put_field(this, "$particle", a(3));
+            }
+            V::Void
+        }
+        (EFFECT, "getCategory") => rt.get_field(this, "$category"),
+        (EFFECT, "getColor") => V::I(rt.get_field(this, "$color").i()),
+        (EFFECT, "isBeneficial") => {
+            let category = rt.get_field(this, "$category");
+            V::I((rt.str_of(rt.get_field(category, "$name")) == Some("BENEFICIAL")) as i32)
+        }
+        (EFFECT, "isInstantenous" | "shouldApplyEffectTickThisTick") => V::I(0),
+        // Vanilla's own tick: nothing happens, and the effect stays.
+        (EFFECT, "applyEffectTick") => V::I(1),
+        (EFFECT, "onEffectStarted" | "onEffectAdded" | "onMobRemoved" | "onMobHurt") => V::Void,
+        // `addAttributeModifier(attribute, id, amount, operation)`: kept in order; the effect again.
+        (EFFECT, "addAttributeModifier") => {
+            let mut list = rt.get_field(this, "$modifiers");
+            if list.r() == 0 {
+                list = jutil::new_list(rt, Vec::new());
+                rt.put_field(this, "$modifiers", list);
+            }
+            let entry = jutil::new_list(rt, args[1..].to_vec());
+            jutil::list_add(rt, list, entry);
+            this
+        }
+        (EFFECT, "withSoundOnAdded") => set(rt, "$soundOnAdded", a(1)),
+        // `effect.<namespace>.<path>`, from the name it was registered under.
+        (EFFECT, "getDescriptionId" | "getDisplayName") => {
+            let id = effect_id(rt, this).unwrap_or_default();
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id.as_str()));
+            let key = format!("effect.{ns}.{}", path.replace('/', "."));
+            let key = rt.string(&key);
+            if name == "getDescriptionId" { key } else { crate::api_common::component(rt, key, true, V::NULL) }
         }
         (INSTANCE, "getEffect") => rt.get_field(this, "$effect"),
         (INSTANCE, "getDuration") => V::I(rt.get_field(this, "$duration").i()),

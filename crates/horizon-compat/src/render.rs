@@ -341,6 +341,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "org/joml/Matrix3f" | "org/joml/Matrix3fc" => matrix3(rt, name, desc, args),
         "org/joml/Quaternionf" | "org/joml/Quaternionfc" => quaternion(rt, name, desc, args),
         "org/joml/Vector3f" | "org/joml/Vector3fc" => vector3(rt, name, desc, args),
+        "org/joml/Vector3d" | "org/joml/Vector3dc" => vector3d(rt, name, desc, args),
         "org/joml/Vector4f" | "org/joml/Vector4fc" => vector4(rt, name, desc, args),
         "org/joml/Vector2i" | "org/joml/Vector2ic" => vector2i(rt, name, desc, args),
         "com/mojang/blaze3d/vertex/PoseStack" => pose_stack(rt, name, desc, args),
@@ -709,6 +710,78 @@ fn quaternion(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         ("y", "()F") => V::F(q[1]),
         ("z", "()F") => V::F(q[2]),
         ("w", "()F") => V::F(q[3]),
+        _ => return None,
+    })
+}
+
+/// JOML's `Vector3d`: its public `x`, `y`, `z` as doubles (a mod may read them as fields).
+fn vector3d(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    let get = |rt: &Rt, v: V| [rt.get_field(v, "x").d(), rt.get_field(v, "y").d(), rt.get_field(v, "z").d()];
+    let v = get(rt, this);
+    let set = |rt: &mut Rt, [x, y, z]: [f64; 3]| {
+        rt.put_field(this, "x", V::D(x));
+        rt.put_field(this, "y", V::D(y));
+        rt.put_field(this, "z", V::D(z));
+        this
+    };
+    // Another vector's components, a `Vector3d` or a `Vector3f`.
+    let other = |rt: &Rt, o: V| -> [f64; 3] {
+        if rt.class_of(o).starts_with("org/joml/Vector3f") { vec3(rt, o).map(f64::from) } else { get(rt, o) }
+    };
+    let d = |i| a(i).d();
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    Some(match (name, desc) {
+        ("<init>", "()V") => {
+            set(rt, [0.0; 3]);
+            V::Void
+        }
+        ("<init>", "(DDD)V") => {
+            set(rt, [d(1), d(2), d(3)]);
+            V::Void
+        }
+        ("<init>", "(D)V") => {
+            set(rt, [d(1); 3]);
+            V::Void
+        }
+        ("<init>", "(Lorg/joml/Vector3dc;)V" | "(Lorg/joml/Vector3fc;)V") => {
+            let src = other(rt, a(1));
+            set(rt, src);
+            V::Void
+        }
+        ("x", "()D") => V::D(v[0]),
+        ("y", "()D") => V::D(v[1]),
+        ("z", "()D") => V::D(v[2]),
+        ("set", "(DDD)Lorg/joml/Vector3d;") => set(rt, [d(1), d(2), d(3)]),
+        ("set", "(Lorg/joml/Vector3dc;)Lorg/joml/Vector3d;") => {
+            let src = other(rt, a(1));
+            set(rt, src)
+        }
+        ("add", "(DDD)Lorg/joml/Vector3d;") => set(rt, [v[0] + d(1), v[1] + d(2), v[2] + d(3)]),
+        ("add", "(Lorg/joml/Vector3dc;)Lorg/joml/Vector3d;") => {
+            let o = other(rt, a(1));
+            set(rt, [v[0] + o[0], v[1] + o[1], v[2] + o[2]])
+        }
+        ("sub", "(DDD)Lorg/joml/Vector3d;") => set(rt, [v[0] - d(1), v[1] - d(2), v[2] - d(3)]),
+        ("sub", "(Lorg/joml/Vector3dc;)Lorg/joml/Vector3d;") => {
+            let o = other(rt, a(1));
+            set(rt, [v[0] - o[0], v[1] - o[1], v[2] - o[2]])
+        }
+        ("mul", "(D)Lorg/joml/Vector3d;") => set(rt, v.map(|c| c * d(1))),
+        ("mul", "(DDD)Lorg/joml/Vector3d;") => set(rt, [v[0] * d(1), v[1] * d(2), v[2] * d(3)]),
+        ("negate", "()Lorg/joml/Vector3d;") => set(rt, v.map(|c| -c)),
+        ("length", "()D") => V::D(length),
+        ("lengthSquared", "()D") => V::D(length * length),
+        ("normalize", "()Lorg/joml/Vector3d;") => set(rt, v.map(|c| c / length)),
+        ("dot", "(Lorg/joml/Vector3dc;)D") => {
+            let o = other(rt, a(1));
+            V::D(v[0] * o[0] + v[1] * o[1] + v[2] * o[2])
+        }
+        ("distance", "(Lorg/joml/Vector3dc;)D") => {
+            let o = other(rt, a(1));
+            V::D(((v[0] - o[0]).powi(2) + (v[1] - o[1]).powi(2) + (v[2] - o[2]).powi(2)).sqrt())
+        }
         _ => return None,
     })
 }

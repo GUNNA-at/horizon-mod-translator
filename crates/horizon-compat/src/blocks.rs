@@ -405,8 +405,23 @@ pub(crate) fn vanilla_enum_constant(rt: &mut Rt, class: &str, text: &str) -> Opt
     let values = vanilla_enum(class)?;
     let i = values.iter().position(|v| *v == text)?;
     let class: &'static str = rt.static_key(class);
-    let name: &'static str = rt.static_key(&values[i].to_ascii_uppercase());
+    let name: &'static str = match ENUM_NAMES.iter().find(|(c, t, _)| class.ends_with(c) && *t == text) {
+        Some(&(_, _, n)) => n,
+        None => rt.static_key(&values[i].to_ascii_uppercase()),
+    };
     Some(api::api_enum(rt, class, name, i as i32))
+}
+
+/// Property enum constants whose Java name isn't their serialized one upper-cased:
+/// (class, serialized name, constant).
+const ENUM_NAMES: [(&str, &str, &str); 1] = [("/PistonType", "normal", "DEFAULT")];
+
+/// The serialized name of vanilla enum `class`'s constant `field` (`PistonType.DEFAULT` is `normal`).
+fn enum_text(class: &str, field: &str) -> String {
+    match ENUM_NAMES.iter().find(|(c, _, n)| class.ends_with(c) && *n == field) {
+        Some(&(_, t, _)) => t.to_owned(),
+        None => field.to_ascii_lowercase(),
+    }
 }
 
 /// Vanilla enum `class`'s constants, in order (`values()`); None for one the runtime doesn't know.
@@ -479,6 +494,17 @@ fn dye_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 }
 
 /// Whether `class` is a vanilla enum whose constants the runtime makes (`values()`, its statics).
+/// Whether `class` is one of the vanilla enums a block state's value may be.
+pub(crate) fn is_vanilla_enum(class: &str) -> bool {
+    vanilla_enum(class).is_some()
+}
+
+/// A vanilla enum constant's serialized name (`PistonType.DEFAULT` is `normal`).
+pub(crate) fn enum_serialized(rt: &Rt, class: &str, v: V) -> Option<String> {
+    let i = rt.get_field(v, "$ordinal").i();
+    vanilla_enum(class)?.get(usize::try_from(i).ok()?).map(|s| (*s).to_owned())
+}
+
 fn enum_class(class: &str) -> bool {
     vanilla_enum(class).is_some()
         && (class.starts_with("net/minecraft/world/level/block/state/properties/")
@@ -590,6 +616,64 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner == BLOCK_SET_TYPE && matches!(name, "<init>" | "register" | "values"))
         || (matches!(owner, SOUND_TYPE | DEFERRED_SOUND_TYPE) && (name == "<init>" || SOUND_GETTERS.iter().any(|(g, ..)| *g == name) || matches!(name, "getVolume" | "getPitch")))
         || (name == "useItemOn" && cauldron_class(owner))
+        || (matches!(owner, "net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem") && name == "createAttributes")
+        || matches!(owner, TIERS | SIMPLE_TIER)
+        || (owner == "net/minecraft/world/item/Tier" && name.starts_with("get"))
+}
+
+const TIERS: &str = "net/minecraft/world/item/Tiers";
+const SIMPLE_TIER: &str = "net/neoforged/neoforge/common/SimpleTier";
+/// Vanilla's tool tiers as 1.21.1 declares them: (constant, blocks they can't drop, uses, speed,
+/// attack damage bonus, enchantment value).
+const TIER_VALUES: [(&str, &str, i32, f32, f32, i32); 6] = [
+    ("WOOD", "minecraft:incorrect_for_wooden_tool", 59, 2.0, 0.0, 15),
+    ("STONE", "minecraft:incorrect_for_stone_tool", 131, 4.0, 1.0, 5),
+    ("IRON", "minecraft:incorrect_for_iron_tool", 250, 6.0, 2.0, 14),
+    ("DIAMOND", "minecraft:incorrect_for_diamond_tool", 1561, 8.0, 3.0, 10),
+    ("GOLD", "minecraft:incorrect_for_gold_tool", 32, 12.0, 0.0, 22),
+    ("NETHERITE", "minecraft:incorrect_for_netherite_tool", 2031, 9.0, 4.0, 15),
+];
+
+/// A tier's own answers: vanilla's `Tiers` from the table, NeoForge's `SimpleTier` from what its
+/// constructor got.
+fn tier_method(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let t = a(0);
+    // A `SimpleTier`, or a mod's class extending it.
+    if owner == SIMPLE_TIER || rt.class_of(t) == SIMPLE_TIER || !matches!(rt.get_field(t, "$uses"), V::Void) {
+        if name == "<init>" {
+            // `SimpleTier(incorrectBlocksForDrops, uses, speed, attackDamageBonus, enchantmentValue, repairIngredient)`.
+            if !desc.starts_with("(Lnet/minecraft/tags/TagKey;IFFI") {
+                return None;
+            }
+            for (i, f) in ["$incorrect", "$uses", "$speed", "$damage", "$enchantment", "$repair"].into_iter().enumerate() {
+                rt.put_field(t, f, a(i + 1));
+            }
+            return Some(V::Void);
+        }
+        return Some(match name {
+            "getUses" => rt.get_field(t, "$uses"),
+            "getSpeed" => rt.get_field(t, "$speed"),
+            "getAttackDamageBonus" => rt.get_field(t, "$damage"),
+            "getEnchantmentValue" => rt.get_field(t, "$enchantment"),
+            "getIncorrectBlocksForDrops" => rt.get_field(t, "$incorrect"),
+            "getRepairIngredient" => {
+                let supplier = rt.get_field(t, "$repair");
+                rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", supplier, &[])
+            }
+            _ => return None,
+        });
+    }
+    let i = rt.get_field(t, "$ordinal").i();
+    let &(_, incorrect, uses, speed, damage, enchantment) = TIER_VALUES.get(usize::try_from(i).ok()?)?;
+    Some(match name {
+        "getUses" => V::I(uses),
+        "getSpeed" => V::F(speed),
+        "getAttackDamageBonus" => V::F(damage),
+        "getEnchantmentValue" => V::I(enchantment),
+        "getIncorrectBlocksForDrops" => crate::fluids::tag_key(rt, "block", incorrect),
+        _ => return None,
+    })
 }
 
 const DISPENSER: &str = "net/minecraft/world/level/block/DispenserBlock";
@@ -876,6 +960,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (BLOCK_PROPERTIES, _) => block_properties(rt, name, desc, args),
         (ITEM_PROPERTIES, _) => item_properties(rt, name, args),
+        (TIERS | SIMPLE_TIER | "net/minecraft/world/item/Tier", _) => tier_method(rt, owner, name, desc, args),
+        // `SwordItem.createAttributes(tier, damage, speed)` (and `DiggerItem`'s, the damage a float):
+        // the main hand's attack damage and speed modifiers, the tier's bonus added to the damage.
+        ("net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem", "createAttributes") => {
+            let bonus = rt.call_functional("net/minecraft/world/item/Tier.getAttackDamageBonus.()F", a(0), &[]);
+            let bonus = if let V::F(f) = bonus { f } else { 0.0 };
+            let damage = match a(1) {
+                V::I(i) => i as f32,
+                V::F(f) => f,
+                _ => 0.0,
+            };
+            let m = rt.new_object("net/minecraft/world/item/component/ItemAttributeModifiers");
+            rt.put_field(m, "$attackDamage", V::D(f64::from(damage + bonus)));
+            rt.put_field(m, "$attackSpeed", V::D(f64::from(a(2).f())));
+            Some(m)
+        }
         (WOOD_TYPE, "name") => Some(rt.get_field(a(0), "$name")),
         (BUILDER, "add") => {
             let list = rt.get_field(a(0), "$props");
@@ -954,6 +1054,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             rt.interned.get(&format!("const/{BLOCK_SET_TYPE}.{field}")).copied()
         }
         DISPENSER if field == "DISPENSER_REGISTRY" => Some(dispenser_behaviours(rt)),
+        TIERS => {
+            let i = TIER_VALUES.iter().position(|(n, ..)| *n == field)?;
+            Some(api::api_enum(rt, TIERS, TIER_VALUES[i].0, i as i32))
+        }
         // Vanilla's armour materials, as the registry's holders of them.
         "net/minecraft/world/item/ArmorMaterials" if matches!(field, "LEATHER" | "CHAIN" | "IRON" | "GOLD" | "DIAMOND" | "TURTLE" | "NETHERITE" | "ARMADILLO") => {
             let id = format!("minecraft:{}", field.to_ascii_lowercase());
@@ -988,7 +1092,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         }
         // The block-state enums' constants (`BellAttachType.FLOOR`), the objects a state's value is.
         o if o != DYE_COLOR && enum_class(o) => {
-            vanilla_enum_constant(rt, o, &field.to_ascii_lowercase())
+            vanilla_enum_constant(rt, o, &enum_text(o, field))
         }
         _ => None,
     }
@@ -1122,8 +1226,22 @@ fn item_properties(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "craftRemainder" => "$craftRemainder",
         "rarity" => "$rarity",
         "food" => "$food",
-        "fireResistant" => {
-            rt.put_field(this, "$fireResistant", V::I(1));
+        "attributes" => "$attributes",
+        "jukeboxPlayable" => "$jukeboxPlayable",
+        "requiredFeatures" => "$requiredFeatures",
+        "fireResistant" | "setNoRepair" => {
+            let f = if name == "fireResistant" { "$fireResistant" } else { "$noRepair" };
+            rt.put_field(this, f, V::I(1));
+            return Some(this);
+        }
+        // `component(type, value)`: the item's default components, by type.
+        "component" => {
+            let mut m = rt.get_field(this, "$components");
+            if m.r() == 0 {
+                m = rt.alloc("java/util/LinkedHashMap", crate::Data::Table(Default::default()));
+                rt.put_field(this, "$components", m);
+            }
+            crate::jutil::table_put(rt, m, a(1), a(2));
             return Some(this);
         }
         _ => return None,

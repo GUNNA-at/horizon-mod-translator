@@ -86,6 +86,11 @@ const ID_FN: &str = "compat:stream/id_fn";
 const REGISTRY: &str = "compat:stream/registry";
 /// `ByteBufCodecs.holderRegistry(key)`: [the registry]; a holder by its entry's name.
 const HOLDER: &str = "compat:stream/holder";
+/// `ByteBufCodecs.fromCodec(codec)` (and `fromCodecWithRegistries`, `fromCodecTrusted`): [codec];
+/// the value as the codec writes it, in NBT.
+const FROM_CODEC: &str = "compat:stream/from_codec";
+/// `ResourceKey.streamCodec(registry)`: [the registry]; a key by its location.
+const RESOURCE_KEY: &str = "compat:stream/resource_key";
 /// `ByteBufCodecs.list()`, a `CodecOperation` (`codec.apply(list())`).
 const LIST_OP: &str = "compat:stream-op/list";
 
@@ -172,6 +177,14 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 // ---------------------------------------------------------------------------------------------
 // Buffers.
+
+/// Throws `class` with `message`, as netty's codec exceptions carry one.
+fn throw_with(rt: &mut Rt, class: &'static str, message: &str) {
+    let e = rt.new_object(class);
+    let m = rt.string(message);
+    rt.put_field(e, "message", m);
+    rt.thrown = Some(e);
+}
 
 /// A new empty buffer (`Unpooled.buffer()`).
 pub fn new_buffer(rt: &mut Rt) -> V {
@@ -805,6 +818,11 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
             let name = entry_name(rt, &registry, value);
             put_utf(rt, buf, &name);
         }
+        RESOURCE_KEY => {
+            let key = text(rt, value);
+            let location = key.rsplit_once('#').map_or(key.as_str(), |(_, l)| l).to_owned();
+            put_utf(rt, buf, &location);
+        }
         HOLDER => {
             let registry = text(rt, p(0));
             let id = rt.get_field(value, "$id");
@@ -841,6 +859,11 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
             let n = tag_nbt(rt, value);
             put_nbt(rt, buf, n.as_ref());
         }
+        // `codec.encodeStart(NbtOps.INSTANCE, value).getOrThrow(...)`, then `writeNbt`.
+        FROM_CODEC => match crate::codecs::encode(rt, p(0), value) {
+            Ok(n) => put_nbt(rt, buf, Some(&n)),
+            Err(e) => throw_with(rt, "io/netty/handler/codec/EncoderException", &format!("Failed to encode: {e}")),
+        },
         OPTIONAL_TAG => {
             let n = optional_held(rt, value).and_then(|v| tag_nbt(rt, v));
             put_nbt(rt, buf, n.as_ref());
@@ -991,6 +1014,24 @@ fn decode_native(rt: &mut Rt, c: V, buf: V) -> Option<V> {
             Some(n) => nbt_tag(rt, &n),
             None => V::NULL,
         },
+        RESOURCE_KEY => {
+            let registry = text(rt, p(0));
+            let location = read_utf(rt, buf)?;
+            rt.string(&format!("{registry}#{location}"))
+        }
+        FROM_CODEC => {
+            let decoded = match read_nbt(rt, buf)? {
+                Some(n) => crate::codecs::decode(rt, p(0), &crate::recipes::nbt_json(&n)),
+                None => Err("no tag".to_owned()),
+            };
+            match decoded {
+                Ok(v) => v,
+                Err(e) => {
+                    throw_with(rt, "io/netty/handler/codec/DecoderException", &format!("Failed to decode: {e}"));
+                    V::NULL
+                }
+            }
+        }
         OPTIONAL_TAG => {
             let v = match read_nbt(rt, buf)? {
                 Some(n) => nbt_tag(rt, &n),
@@ -1181,6 +1222,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | CONTEXT
     ) || (owner == REGISTER_PAYLOADS && name == "registrar")
         || (owner == "net/minecraft/network/protocol/common/custom/CustomPacketPayload" && name == "createType")
+        || (owner == "net/minecraft/resources/ResourceKey" && name == "streamCodec")
 }
 
 /// A networking call, or None when this module doesn't model it.
@@ -1362,6 +1404,8 @@ fn codec_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
         "idMapper" => make(rt, ID_FN, vec![a(0), a(1)]),
         "registry" if byte_buf_codecs => make(rt, REGISTRY, vec![a(0)]),
         "holderRegistry" if byte_buf_codecs => make(rt, HOLDER, vec![a(0)]),
+        "fromCodec" | "fromCodecWithRegistries" | "fromCodecTrusted" | "fromCodecWithRegistriesTrusted" if byte_buf_codecs => make(rt, FROM_CODEC, vec![a(0)]),
+        "streamCodec" if owner == "net/minecraft/resources/ResourceKey" => make(rt, RESOURCE_KEY, vec![a(0)]),
         "byteArray" if byte_buf_codecs => constant(rt, BYTES),
         "stringUtf8" if byte_buf_codecs => constant(rt, STRING),
         _ => return None,

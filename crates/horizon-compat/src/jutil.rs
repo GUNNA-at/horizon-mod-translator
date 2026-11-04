@@ -460,7 +460,7 @@ pub fn table_get(rt: &mut Rt, m: V, k: V) -> Option<V> {
     r
 }
 
-fn table_remove(rt: &mut Rt, m: V, k: V) -> Option<V> {
+pub fn table_remove(rt: &mut Rt, m: V, k: V) -> Option<V> {
     let mut t = take_table(rt, m)?;
     let r = find(rt, &t, k).map(|i| t.entries.remove(i).1);
     if r.is_some() {
@@ -1120,6 +1120,17 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             _ => new_list(rt, vec![a(0)]),
         },
         ("java/util/Collections", n) if n.starts_with("unmodifiable") || n.starts_with("synchronized") => a(0),
+        // A set over a map (`newSetFromMap(new WeakHashMap<>())`): a set; weak keys make no
+        // difference to what it holds while it is used.
+        ("java/util/Collections", "newSetFromMap") => rt.alloc("java/util/HashSet", Data::Table(Table::default())),
+        // Guava's `Tables.newCustomTable(backingMap, factory)`: a table of rows.
+        ("com/google/common/collect/Tables", "newCustomTable") => rt.alloc("com/google/common/collect/HashBasedTable", Data::Table(Table::default())),
+        // fastutil's `ObjectArrayList.of(items...)`.
+        (o, "of") if o.starts_with("it/unimi/dsi/fastutil/") && o.ends_with("ArrayList") => {
+            let items = if desc.starts_with("([") { elements(rt, a(0)) } else { args.to_vec() };
+            let class: &'static str = rt.static_key(o);
+            rt.alloc(class, Data::List(items))
+        }
         // fastutil's wrappers (`Object2ReferenceMaps.synchronize(map)`, `ObjectSets.unmodifiable(set)`):
         // one thread's view of the same collection.
         (o, "synchronize" | "unmodifiable") if o.starts_with("it/unimi/dsi/fastutil/") && args.len() == 1 => a(0),

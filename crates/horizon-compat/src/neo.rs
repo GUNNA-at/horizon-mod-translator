@@ -342,6 +342,16 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner.starts_with("net/minecraft/") && matches!(name, "registryAccess" | "holderLookup" | "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup"))
 }
 
+/// NeoForge's `ItemAbility` named `name` (`axe_strip`): one object per name.
+fn item_ability(rt: &mut Rt, name: &str) -> V {
+    rt.intern(format!("item-ability/{name}"), |rt| {
+        let o = rt.new_object("net/neoforged/neoforge/common/ItemAbility");
+        let n = rt.string(name);
+        rt.put_field(o, "name", n);
+        o
+    })
+}
+
 /// A NeoForge loading call, or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
@@ -358,6 +368,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     };
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
+        // What a crash report would list: there are no Java crash reports here.
+        ("net/neoforged/fml/CrashReportCallables", "registerCrashCallable" | "registerHeader") => V::Void,
+        // `ItemAbility.get(name)`: one object per name, as NeoForge interns them.
+        ("net/neoforged/neoforge/common/ItemAbility", "get") => {
+            let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+            item_ability(rt, &n)
+        }
+        ("net/neoforged/neoforge/common/ItemAbility", "name") => rt.get_field(a(0), "name"),
         ("net/neoforged/bus/api/IEventBus", "addListener") => {
             let listener = *args.last()?;
             // A class argument names the event; otherwise the lambda's parameter does.
@@ -1133,6 +1151,11 @@ const KOTLIN_CONTEXT_COMPANION: &str = "thedarkcolour/kotlinforforge/neoforge/Ko
 /// in Kotlin is a call on it).
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match (owner, field) {
+        // NeoForge's abilities: each constant's name lower-cased, but `HOE_TILL`'s is `till`.
+        ("net/neoforged/neoforge/common/ItemAbilities", f) if !f.starts_with("DEFAULT_") => {
+            let name = if f == "HOE_TILL" { "till".to_owned() } else { f.to_ascii_lowercase() };
+            Some(item_ability(rt, &name))
+        }
         (KOTLIN_CONTEXT | "thedarkcolour/kotlinforforge/KotlinModLoadingContext", "Companion") => {
             Some(rt.intern("compat:kotlin-loading-context-companion".into(), |rt| rt.new_object(KOTLIN_CONTEXT_COMPANION)))
         }

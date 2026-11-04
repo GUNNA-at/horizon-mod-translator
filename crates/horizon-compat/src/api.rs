@@ -201,12 +201,12 @@ fn trace_unmapped(rt: &Rt, key: &'static str, args: &[V]) {
         };
         eprintln!("horizon-compat: unmapped {key}{on}");
     }
-    // `HORIZON_COMPAT_BACKTRACE=<part of a key>`: who makes the first few such calls, by the
-    // translated functions on the stack.
+    // `HORIZON_COMPAT_BACKTRACE=<part of a key>[,<another>...]`: who makes the first few such
+    // calls, by the translated functions on the stack.
     static PART: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     if let Some(part) = PART.get_or_init(|| std::env::var("HORIZON_COMPAT_BACKTRACE").ok())
         && n <= 3
-        && key.contains(part.as_str())
+        && part.split(',').any(|p| !p.is_empty() && key.contains(p))
     {
         let bt = std::backtrace::Backtrace::force_capture().to_string();
         let frames: Vec<&str> = bt
@@ -601,9 +601,10 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 36] = [
+const CHAIN: [Module; 38] = [
     mutable_pos,
     crate::mixin::call,
+    crate::attachments::call,
     crate::sounds::call,
     crate::particles::call,
     crate::food::call,
@@ -630,6 +631,7 @@ const CHAIN: [Module; 36] = [
     crate::screens::call,
     crate::gui::call,
     crate::neo::call,
+    crate::files::call,
     crate::jlang::call,
     crate::jutil::call,
     crate::tags::call,
@@ -643,9 +645,10 @@ const CHAIN: [Module; 36] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 36] = [
+const CLAIMS: [Claims; 38] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::mixin::claims,
+    crate::attachments::claims,
     crate::sounds::claims,
     crate::particles::claims,
     crate::food::claims,
@@ -672,6 +675,7 @@ const CLAIMS: [Claims; 36] = [
     crate::screens::claims,
     crate::gui::claims,
     crate::neo::claims,
+    crate::files::claims,
     crate::jlang::claims,
     crate::jutil::claims,
     crate::tags::claims,
@@ -683,9 +687,10 @@ const CLAIMS: [Claims; 36] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 36] = [
+const MODULE_NAMES: [&str; 38] = [
     "mutable_pos",
     "mixin",
+    "attachments",
     "sounds",
     "particles",
     "food",
@@ -712,6 +717,7 @@ const MODULE_NAMES: [&str; 36] = [
     "screens",
     "gui",
     "neo",
+    "files",
     "jlang",
     "jutil",
     "tags",
@@ -1601,6 +1607,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::menus::get_static(rt, o, f))
             .or_else(|| crate::handlers::get_static(rt, o, f))
             .or_else(|| crate::neo::get_static(rt, o, f))
+            .or_else(|| crate::files::get_static(rt, o, f))
     {
         return v;
     }
@@ -1709,6 +1716,14 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         k if k.starts_with("net/minecraft/world/level/block/Blocks.") => {
             let n = format!("minecraft:{}", k.rsplit('.').next().unwrap_or("").to_ascii_lowercase());
             block(rt, &n)
+        }
+        // A codec of the game's this runtime doesn't model yet (`FoodProperties.DIRECT_CODEC`): still
+        // a miss, but a codec, so what a mod builds on it stays whole; reading with it fails.
+        k if (k.starts_with("net/minecraft/") || k.starts_with("net/neoforged/"))
+            && k.rsplit('.').next().is_some_and(|f| (f == "CODEC" || f.ends_with("_CODEC")) && !f.ends_with("STREAM_CODEC")) =>
+        {
+            crate::miss(rt, key);
+            crate::codecs::native(rt, &format!("unmodelled/{k}"))
         }
         _ => {
             crate::miss(rt, key);

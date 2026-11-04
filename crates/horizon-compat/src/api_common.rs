@@ -130,8 +130,20 @@ fn java_is_a(c: &str, class: &str) -> bool {
         "java/util/NoSuchElementException" => c == "java/util/InputMismatchException",
         "java/io/IOException" => {
             (c.starts_with("java/") && c.ends_with("IOException") && c != class)
-                || matches!(c, "java/io/FileNotFoundException" | "java/nio/file/NoSuchFileException" | "java/nio/file/FileAlreadyExistsException")
+                || matches!(c, "java/io/FileNotFoundException" | "java/io/EOFException" | "java/nio/file/FileSystemException")
+                || api_is_a(c, "java/nio/file/FileSystemException")
         }
+        "java/nio/file/FileSystemException" => matches!(
+            c,
+            "java/nio/file/NoSuchFileException"
+                | "java/nio/file/FileAlreadyExistsException"
+                | "java/nio/file/DirectoryNotEmptyException"
+                | "java/nio/file/NotDirectoryException"
+                | "java/nio/file/AccessDeniedException"
+                | "java/nio/file/AtomicMoveNotSupportedException"
+                | "java/nio/file/FileSystemLoopException"
+                | "java/nio/file/NotLinkException"
+        ),
         _ => false,
     }
 }
@@ -203,8 +215,21 @@ fn player_eye_height(rt: &Rt) -> f64 {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 9] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 15] = [
     ("net/minecraft/world/phys/HitResult$Type", &["MISS", "BLOCK", "ENTITY"]),
+    ("net/minecraft/world/entity/vehicle/AbstractMinecart$Type", &["RIDEABLE", "CHEST", "FURNACE", "TNT", "SPAWNER", "HOPPER", "COMMAND_BLOCK"]),
+    ("net/minecraft/world/level/pathfinder/PathComputationType", &["LAND", "WATER", "AIR"]),
+    (
+        "net/minecraft/world/level/pathfinder/PathType",
+        &[
+            "BLOCKED", "OPEN", "WALKABLE", "WALKABLE_DOOR", "TRAPDOOR", "POWDER_SNOW", "DANGER_POWDER_SNOW", "FENCE", "LAVA", "WATER", "WATER_BORDER", "RAIL",
+            "UNPASSABLE_RAIL", "DANGER_FIRE", "DAMAGE_FIRE", "DANGER_OTHER", "DAMAGE_OTHER", "DOOR_OPEN", "DOOR_WOOD_CLOSED", "DOOR_IRON_CLOSED", "BREACH",
+            "LEAVES", "STICKY_HONEY", "COCOA", "DAMAGE_CAUTIOUS", "DANGER_TRAPDOOR",
+        ],
+    ),
+    ("net/minecraft/util/ByIdMap$OutOfBoundsStrategy", &["ZERO", "WRAP", "CLAMP"]),
+    ("java/util/concurrent/TimeUnit", &["NANOSECONDS", "MICROSECONDS", "MILLISECONDS", "SECONDS", "MINUTES", "HOURS", "DAYS"]),
+    ("java/lang/StackWalker$Option", &["RETAIN_CLASS_REFERENCE", "SHOW_REFLECT_FRAMES", "SHOW_HIDDEN_FRAMES"]),
     ("net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation", &["ADD_VALUE", "ADD_MULTIPLIED_BASE", "ADD_MULTIPLIED_TOTAL"]),
     ("net/minecraft/world/effect/MobEffectCategory", &["BENEFICIAL", "HARMFUL", "NEUTRAL"]),
     (
@@ -1142,6 +1167,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/core/Direction", "getName" | "getSerializedName" | "toString") => {
             let n = DIRECTION_NAMES[native(rt, a(0))[0].clamp(0, 5) as usize];
             rt.string(n)
+        }
+        ("net/minecraft/core/Direction", "stream") => {
+            let all: Vec<V> = (0..6).map(|i| direction(rt, i)).collect();
+            rt.alloc("java/util/stream/Stream", Data::Stream(all))
         }
         ("net/minecraft/core/Direction", "values") => {
             let arr = rt.new_array(6, V::NULL);
@@ -2109,6 +2138,52 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/network/chat/Component", "literal" | "translatable") => {
             let with = if desc.contains("[Ljava/lang/Object;") { a(1) } else { V::NULL };
             component(rt, a(0), name == "translatable", with)
+        }
+        // Brigadier's exception types: what a command throws, its message made when it is.
+        ("com/mojang/brigadier/exceptions/SimpleCommandExceptionType", "<init>") => {
+            rt.put_field(a(0), "$message", a(1));
+            V::Void
+        }
+        (o, "<init>") if o.starts_with("com/mojang/brigadier/exceptions/Dynamic") && o.ends_with("CommandExceptionType") => {
+            rt.put_field(a(0), "$function", a(1));
+            V::Void
+        }
+        ("com/mojang/brigadier/exceptions/SimpleCommandExceptionType", "create" | "createWithContext") => {
+            let message = rt.get_field(a(0), "$message");
+            let e = rt.new_object("com/mojang/brigadier/exceptions/CommandSyntaxException");
+            rt.put_field(e, "$type", a(0));
+            rt.put_field(e, "$rawMessage", message);
+            e
+        }
+        ("com/mojang/brigadier/exceptions/DynamicCommandExceptionType", "create" | "createWithContext") => {
+            let function = rt.get_field(a(0), "$function");
+            let arg = if name == "create" { a(1) } else { a(2) };
+            let message = rt.call_functional("java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", function, &[arg]);
+            let e = rt.new_object("com/mojang/brigadier/exceptions/CommandSyntaxException");
+            rt.put_field(e, "$type", a(0));
+            rt.put_field(e, "$rawMessage", message);
+            e
+        }
+        ("com/mojang/brigadier/exceptions/CommandSyntaxException", "getRawMessage") => rt.get_field(a(0), "$rawMessage"),
+        ("com/mojang/brigadier/exceptions/CommandSyntaxException", "getType") => rt.get_field(a(0), "$type"),
+        // A player's profile: its id and name.
+        ("com/mojang/authlib/GameProfile", "<init>") if desc == "(Ljava/util/UUID;Ljava/lang/String;)V" => {
+            rt.put_field(a(0), "$id", a(1));
+            rt.put_field(a(0), "$name", a(2));
+            V::Void
+        }
+        ("com/mojang/authlib/GameProfile", "getId") => rt.get_field(a(0), "$id"),
+        ("com/mojang/authlib/GameProfile", "getName") => rt.get_field(a(0), "$name"),
+        // A mod's worldgen feature (`Feature<C>` subclass): its configuration's codec.
+        ("net/minecraft/world/level/levelgen/feature/Feature", "<init>") if desc == "(Lcom/mojang/serialization/Codec;)V" => {
+            rt.put_field(a(0), "$configuredCodec", a(1));
+            V::Void
+        }
+        // A command argument over a `StringRepresentable` enum (`StringRepresentableArgument(codec, values)`).
+        ("net/minecraft/commands/arguments/StringRepresentableArgument", "<init>") => {
+            rt.put_field(a(0), "$codec", a(1));
+            rt.put_field(a(0), "$values", a(2));
+            V::Void
         }
         ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "getString") if desc == "()Ljava/lang/String;" => {
             // The text and its siblings', translated where the game has the player's language (a

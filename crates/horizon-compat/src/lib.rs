@@ -7,6 +7,7 @@ pub use horizon_compat_core::host;
 
 pub mod api;
 pub mod api_common;
+pub mod attachments;
 pub mod blocks;
 pub mod codecs;
 pub mod crafting;
@@ -16,6 +17,7 @@ pub mod container_screens;
 pub mod capabilities;
 pub mod entities;
 pub mod events;
+pub mod files;
 pub mod convention;
 pub mod creative;
 pub mod fluids;

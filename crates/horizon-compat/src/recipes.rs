@@ -1080,6 +1080,32 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             Ok(api_common::state(rt, &text))
         }
         "recipe" => decode_recipe(rt, j),
+        "component" => Ok(crate::api_common::component_from_json(rt, j)),
+        n if n.starts_with("tag_key/") || n.starts_with("hashed_tag_key/") => {
+            let (kind, registry) = n.split_once('/').unwrap_or((n, ""));
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            let s = match kind {
+                "hashed_tag_key" => s.strip_prefix('#').ok_or_else(|| format!("Not a tag id: {s}"))?,
+                _ => s,
+            };
+            if !valid_location(s) {
+                return Err(format!("Not a valid resource location: {s}"));
+            }
+            Ok(crate::fluids::tag_key(rt, registry, &qualified(s)))
+        }
+        n if n.starts_with("resource_key/") => {
+            let registry = &n["resource_key/".len()..];
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            if !valid_location(s) {
+                return Err(format!("Not a valid resource location: {s}"));
+            }
+            Ok(rt.string(&format!("{registry}#{}", qualified(s))))
+        }
+        n if n.starts_with("vanilla_enum/") => {
+            let class = &n["vanilla_enum/".len()..];
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            crate::blocks::vanilla_enum_constant(rt, class, s).ok_or_else(|| format!("Unknown element name: {s}"))
+        }
         other => Err(format!("{other} is not read yet")),
     }
 }
