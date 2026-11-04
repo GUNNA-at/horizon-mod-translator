@@ -396,6 +396,11 @@ pub trait Host {
     fn spawn_item_entity(&mut self, _item: &str, _count: u32, _pos: [f64; 3], _motion: [f64; 3], _pickup_delay: u32) -> Option<u32> {
         None
     }
+    /// [`Host::spawn_item_entity`] for a whole stack, its damage and mod components with it (a filter
+    /// thrown out of a menu keeps its filter). A host that can't carry them spawns the item and count.
+    fn spawn_stack_entity(&mut self, stack: &HandStack, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {
+        self.spawn_item_entity(&stack.item, stack.count, pos, motion, pickup_delay)
+    }
     /// A sound a mod plays (`Level.playSound`, `playLocalSound`, `Entity.playSound`). A server's
     /// game sends it to the players near it; a client's plays it for its player.
     fn play_sound(&mut self, _sound: &Sound) {}
@@ -624,6 +629,8 @@ pub struct MemoryHost {
     pub stack_limits: HashMap<String, u32>,
     /// The level's item entities, in order.
     pub item_entities: Vec<ItemEntity>,
+    /// The whole stacks of the item entities spawned with their data ([`Host::spawn_stack_entity`]), by id.
+    pub item_entity_stacks: HashMap<u32, HandStack>,
     /// Block facts by block (`minecraft:oak_planks`, any of its states).
     pub facts: HashMap<String, BlockFacts>,
     /// The server's players and where they are.
@@ -911,6 +918,11 @@ impl Host for MemoryHost {
     fn spawn_item_entity(&mut self, item: &str, count: u32, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {
         let id = self.item_entities.iter().map(|e| e.id).max().unwrap_or(0) + 1;
         self.item_entities.push(ItemEntity { id, pos, motion, on_ground: false, item: item.to_owned(), count, pickup_delay, age: 0 });
+        Some(id)
+    }
+    fn spawn_stack_entity(&mut self, stack: &HandStack, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {
+        let id = self.spawn_item_entity(&stack.item, stack.count, pos, motion, pickup_delay)?;
+        self.item_entity_stacks.insert(id, stack.clone());
         Some(id)
     }
     fn play_sound(&mut self, sound: &Sound) {

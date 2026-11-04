@@ -220,6 +220,12 @@ fn state(rt: &mut Rt, s: V) -> (Option<(String, u32, u32)>, BTreeMap<String, Nbt
     (Some((id, count, damage)), components::saved(rt, s).into_iter().collect())
 }
 
+/// Stack `s` as the game takes one: item, count, damage and mod components; None when empty.
+pub(crate) fn hand_stack_of(rt: &mut Rt, s: V) -> Option<crate::host::HandStack> {
+    let (held, carried) = state(rt, s);
+    held.map(|(item, count, damage)| crate::host::HandStack { item, count, damage, max_damage: 0, components: carried.into_iter().collect() })
+}
+
 /// Records what record `r`'s stack `s` holds now as what the game holds: a codec that doesn't
 /// round-trip exactly doesn't count as a change.
 fn snapshot(rt: &mut Rt, r: V, s: V) {

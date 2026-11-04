@@ -1379,6 +1379,16 @@ fn player_host(c: &str, server_effects: &str) -> String {
             stack.damage = damage;
             self.game.native_set_slot_stack(usize::from(slot), Some(stack)) && all
         }}
+        // What the player drops (a menu's throw, a stack carried out of it): the whole stack.
+        fn spawn_item_entity(&mut self, item: &str, count: u32, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {{
+            let dim = self.game.native_dimension();
+            self.game.native_spawn_item_entity(dim, horizon_client::items::ItemStack::new(item, count), pos, motion, pickup_delay)
+        }}
+        fn spawn_stack_entity(&mut self, held: &{c}::host::HandStack, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {{
+            let dim = self.game.native_dimension();
+            let stack = self.stack_of(held);
+            self.game.native_spawn_item_entity(dim, stack, pos, motion, pickup_delay)
+        }}
         fn update_player_hand(&mut self, hand: u8, count: u32, damage: u32, components: &[(String, Option<{c}::nbt::Nbt>)]) -> bool {{
             let hand = Self::hand(hand);
             let Some(mut stack) = self.game.native_hand_stack(hand).cloned() else {{

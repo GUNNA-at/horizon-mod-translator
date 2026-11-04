@@ -78,16 +78,26 @@ fn main() -> ExitCode {
             }
         };
         let calls = horizon_mod_translator::api_calls(&classes);
-        // Which of them the runtime maps: call each once and see whether it counts as unmapped.
+        // Which of them the runtime maps: call each and see whether it counts as unmapped. Null
+        // arguments first; then, as a handler may answer only for an object of its class, with an
+        // object of the owner's class as the receiver (or first argument of a static call).
         let (mut mapped, mut sites, mut mapped_sites) = (0usize, 0usize, 0usize);
         let mut missing: Vec<(usize, String)> = Vec::new();
+        let answers = |key: &'static str, owner: &'static str, n: usize, receiver: bool| {
+            let mut rt = horizon_compat::Rt::new();
+            let mut args = vec![horizon_compat::V::NULL; n];
+            if receiver {
+                args[0] = rt.new_object(owner);
+            }
+            horizon_compat::api::call(&mut rt, key, &args);
+            rt.unmapped.is_empty()
+        };
         for (m, n) in &calls {
             let key: &'static str = Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
-            let mut rt = horizon_compat::Rt::new();
-            let args = vec![horizon_compat::V::NULL; horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + 1];
-            horizon_compat::api::call(&mut rt, key, &args);
+            let arity = horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + 1;
             sites += n;
-            if rt.unmapped.is_empty() {
+            let owner: &'static str = Box::leak(m.owner.clone().into_boxed_str());
+            if answers(key, owner, arity, false) || answers(key, owner, arity, true) {
                 mapped += 1;
                 mapped_sites += n;
             } else {

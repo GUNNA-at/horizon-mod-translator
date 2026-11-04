@@ -1288,6 +1288,14 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     now sends payloads (a menu opened from `use_item` reaches the client), the client host reads every
     slot, and a new `player_tick` helper (binding 17) calls `glue::player_tick` from the game's
     `native_player_tick`, inside `as_guest`. `coverage` takes `MISSING=all`.
+  - [x] 2026-11-04 Drops keep their data: `Host::spawn_stack_entity` (whole stack: damage, mod components;
+    default falls back to item and count), used by `Player.drop` (a menu's throw, a stack carried out
+    of it) and `addFreshEntity` of a new `ItemEntity`. The bundle's player host had no item spawning at
+    all, so a throw from a mod's menu lost the stack in game: it now spawns both forms. Coverage
+    probes each method again with an object of its owner's class as the receiver when null arguments
+    find no answer (a handler that checks its receiver answered nothing before): Create 1770 of 4244
+    API methods (41.7%), 19 844 of 25 840 class uses (76.8%); still a lower bound (codecs, lists and
+    handlers answer only for their own runtime objects).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

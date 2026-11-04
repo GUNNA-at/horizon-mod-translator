@@ -265,12 +265,10 @@ fn add(rt: &mut Rt, e: V) -> bool {
     if spawned(rt, e) || rt.get_field(e, "$removed").i() != 0 {
         return false;
     }
-    let (item, count) = stack_parts(rt, rt.get_field(e, "$item"));
-    if count == 0 {
-        return false;
-    }
+    let stack = rt.get_field(e, "$item");
+    let Some(whole) = crate::hand::hand_stack_of(rt, stack).filter(|w| w.count > 0) else { return false };
     let (p, m, delay) = (pos(rt, e), motion(rt, e), rt.get_field(e, "$pickupDelay").i().max(0) as u32);
-    let Some(new) = rt.host_mut().and_then(|h| h.spawn_item_entity(&item, count, p, m, delay)) else { return false };
+    let Some(new) = rt.host_mut().and_then(|h| h.spawn_stack_entity(&whole, p, m, delay)) else { return false };
     rt.put_field(e, "$id", V::I(new as i32));
     rt.put_field(e, "$seen", V::J(game_time(rt)));
     let list = proxies(rt);

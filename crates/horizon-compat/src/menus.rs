@@ -339,21 +339,20 @@ fn infinite(rt: &Rt) -> bool {
 }
 
 /// `Player.drop(stack, includeThrowerName)` on a server: an item entity from the player's eyes less
-/// 0.3, thrown the way they look, picked up after 40 ticks (its components stay behind: the game
-/// spawns the item and count). A client's drops are the server's to make.
+/// 0.3, thrown the way they look, picked up after 40 ticks, the whole stack (damage and components
+/// too). A client's drops are the server's to make.
 fn drop(rt: &mut Rt, stack: V) {
     if is_empty(rt, stack) || crate::neo::is_client(rt) {
         return;
     }
-    let item = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
-    let n = count(rt, stack) as u32;
+    let Some(whole) = crate::hand::hand_stack_of(rt, stack) else { return };
     let Some(([x, y, z], yaw, pitch)) = rt.host().and_then(|h| h.player_place()) else { return };
     let eye = if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 };
     let (sy, cy) = (f64::from(yaw.to_radians().sin()), f64::from(yaw.to_radians().cos()));
     let (sp, cp) = (f64::from(pitch.to_radians().sin()), f64::from(pitch.to_radians().cos()));
     let motion = [-sy * cp * 0.3, -sp * 0.3 + 0.1, cy * cp * 0.3];
     if let Some(h) = rt.host_mut() {
-        h.spawn_item_entity(&item, n, [x, y + eye - 0.3, z], motion, 40);
+        h.spawn_stack_entity(&whole, [x, y + eye - 0.3, z], motion, 40);
     }
     set_count(rt, stack, 0);
 }
@@ -3069,5 +3068,8 @@ mod tests {
         assert_eq!(thrown, vec![("minecraft:stone", 64, 40)]);
         let e = &host.item_entities[0];
         assert!((e.pos[1] - (64.0 + 1.62 - 0.3)).abs() < 1e-9, "{:?}", e.pos);
+        // Thrown as a whole stack (its data with it), not as an item and a count.
+        let whole = &host.item_entity_stacks[&e.id];
+        assert_eq!((whole.item.as_str(), whole.count), ("minecraft:stone", 64));
     }
 }
