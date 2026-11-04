@@ -437,7 +437,7 @@ fn mth_floor(d: f64) -> i32 {
     if d < i as f64 { i.wrapping_sub(1) } else { i }
 }
 
-fn vec3(rt: &mut Rt, x: f64, y: f64, z: f64) -> V {
+pub(crate) fn vec3(rt: &mut Rt, x: f64, y: f64, z: f64) -> V {
     let v = rt.new_object("net/minecraft/world/phys/Vec3");
     rt.put_field(v, "x", V::D(x));
     rt.put_field(v, "y", V::D(y));

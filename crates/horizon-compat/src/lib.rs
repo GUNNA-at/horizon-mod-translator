@@ -14,6 +14,7 @@ pub mod handlers;
 pub mod components;
 pub mod capabilities;
 pub mod entities;
+pub mod events;
 pub mod convention;
 pub mod creative;
 pub mod fluids;

@@ -72,7 +72,7 @@ fn listener_event(rt: &Rt, listener: V) -> String {
 }
 
 /// Whether an event of class `event` reaches a listener for `wanted` (its own class or a superclass).
-fn reaches(rt: &Rt, event: &str, wanted: &str) -> bool {
+pub(crate) fn reaches(rt: &Rt, event: &str, wanted: &str) -> bool {
     let mut c = event;
     loop {
         if c == wanted {
@@ -85,13 +85,17 @@ fn reaches(rt: &Rt, event: &str, wanted: &str) -> bool {
     }
 }
 
-/// Posts `event` (an object of class `class`) to the mod bus's listeners.
+/// Posts `event` (an object of class `class`) to the mod bus's listeners. Once one cancels it
+/// (`setCanceled(true)` on a cancellable event), the listeners after it don't hear it.
 pub fn post(rt: &mut Rt, class: &str, event: V) {
     let listeners: Vec<(String, V)> = rt.listeners.clone();
     for (wanted, l) in listeners {
         if reaches(rt, class, &wanted) {
             rt.call_functional(ACCEPT, l, &[event]);
             rt.report_thrown(class);
+            if rt.get_field(event, "$canceled").i() != 0 {
+                break;
+            }
         }
     }
 }

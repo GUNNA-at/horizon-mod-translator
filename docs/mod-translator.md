@@ -1029,7 +1029,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     end, facing south) and the hand holds 4 of 5, the component gone. `HOLD=1` and `USE=1` as
     before. Gaps: payloads a client sends (`ConfigureWorldshaperPacket`...) run without the
     sender's hand; vanilla's own components (damage, a name) aren't read from the game's stack;
-    the off hand is empty to mods; stacks given to the player lose their components. In-game check pending.
+    the off hand is empty to mods; stacks given to the player lose their components. In game
+    (build of 129aba2, `beltgame.sh`): the connector's first click on a shaft keeps
+    `create:belt_first_shaft` = `[I; 98, 184, -23]` on the game's stack (`data get entity @s
+    Inventory`); the second click stopped the server thread (the runtime entered twice, see
+    "Interaction events" below).
   - [x] 2026-11-04 Both hands, and wear by the game's rules (`horizon-compat/src/hand.rs`,
     `components.rs`; tests `hand::tests`). A hook's player holds one stack object per hand: the
     off hand too now (`getOffhandItem`, `getItemInHand(OFF_HAND)`, `setItemInHand` by its hand),
@@ -1060,7 +1064,9 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     component and wears the paper to 1; a paper at 7 breaks (the hand empties). No unmapped calls.
     `COMPONENTS`, `HOLD`, `USE` print the same as before. Gaps: a mod item's hooks run from the
     main hand only (an item used from the off hand is the game's); a mod's `Consumer` passed to
-    `hurtAndBreak` isn't called on a break. In-game check pending.
+    `hurtAndBreak` isn't called on a break. In game (build of 129aba2, `sandgame.sh`): a survival
+    player with the sandpaper and rose quartz in the off hand polishes one (2 left in the off hand),
+    the paper wears to 1, and a worn paper breaks.
   - [x] 2026-11-04 A mod item's hooks from either hand. The game asks its hooks once per hand, as
     vanilla does (`ServerPlayerGameMode.useItemOn` and `useItem` per `InteractionHand`); the bundle
     now passes the acting hand (`game.hand`) instead of skipping the off hand: a block's
@@ -1074,6 +1080,35 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the finish gives polished rose quartz and wears the off-hand paper to 1. Rounds 0 and 1,
     `COMPONENTS`, `HOLD`, `USE`, and the `regress.sh` set print as before (object ids and hash
     order aside; FAN, PRESS and MIX reach one unmapped call fewer: `hasCraftingRemainingItem`).
+  - [x] 2026-11-04 Interaction events, and hooks that don't enter the runtime twice
+    (`horizon-compat/src/events.rs`, tests `events::tests`). A right click on any block posts
+    NeoForge's `PlayerInteractEvent.RightClickBlock` to the mod's listeners before the block's own
+    use and the item's (as `CommonHooks.onRightClickBlock` in `ServerPlayerGameMode.useItemOn`), and
+    a right click with any item posts `RightClickItem` before its `use`. Listeners of the classes
+    above (`PlayerInteractEvent`, `PlayerEvent`, ... `Event`) hear them too, in the order they were
+    added, until one cancels (`setCanceled`): the game's own handling then stops, and the click was
+    used when the result set (`setCancellationResult`, `PASS` unless set) consumes it.
+    `setUseBlock` and `setUseItem` both `FALSE` refuse the click. The event answers `getEntity`,
+    `getLevel`, `getPos`, `getHand`, `getFace`, `getHitVec` (where the look hits the block,
+    `native_player_pov_hit`), `getItemStack` (the hand's one stack: what a listener does to it
+    reaches the game), `getSide` (`SERVER`), and `TriState`'s calls. A click nobody listens to makes
+    no event. Create applies its manual recipes this way (`ManualApplicationRecipe`), and sets
+    values and filters on its blocks. Entering twice: the runtime is one per thread, and the game
+    may run a hook while a mod's call runs (a block the mod places asks for its block entity), which
+    panicked the server thread ("RefCell already borrowed", the belt connector's second click in
+    game). The bundle's hooks now look first (`runtime_busy`): the questions about registrations
+    alone (a block's block entity type and ticker, an item's use animation and duration, a block's
+    state for a placement) are answered by the probe runtime then, and any other hook leaves the
+    work to the game and says so once (`hook_runtime`). `events.rs` joins the bundle's runtime
+    files (the test `bundles_carry_every_runtime_source_file` caught it missing). Harness
+    `CASING=1` (new): Create's item application recipes and the `c:stripped_logs`/`c:stripped_woods`
+    tags as the mod carries them, 16 `RightClickBlock` listeners; andesite alloy on a stripped oak
+    log: the event is canceled as used, the log becomes `create:andesite_casing`, one sound, the hand
+    3 → 2; on stone, or with an empty hand, nothing happens. The casing reaches Create's
+    `AllAdvancements` (its advancement builder is unmapped: no advancement is awarded). The
+    `regress.sh` set prints the same (hash order aside). Gaps: `LeftClickBlock`, `EntityInteract`
+    and the client's own posting (Create's client listeners: its value boxes, the wrench's
+    preview) aren't posted yet; listeners' priorities aren't kept (the order they were added).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
