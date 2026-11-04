@@ -530,6 +530,13 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the depot and the depot takes it (`HeldItem: {Item: iron_ingot}`, the server sends the update tag,
     the client loads it). The client's depot renderer doesn't draw it yet (no `draw_item` call);
     harness `DROP` repeats that path.
+    Harness `DROP` (a depot with an ingot resting on it, 30 server ticks, then the client renders from
+    the update tag): the depot holds the ingot and the client draws it at the depot's top
+    (`items drawn [iron_ingot at 0.5, 0.84, 0.5]`), so the game-side gap is in the game's path.
+  - [x] 2026-11-04 Primitive fields nothing wrote read as their type's zero (`getfield`/`getstatic`
+    on an `int`, `long`, `float`, `double`, `boolean`... field), as the JVM's defaults. Before, they
+    read as unset: `0` in arithmetic, but saved to NBT they vanished (`putInt("Angle", angle)` wrote
+    nothing). Reference fields stay unset (null to the code).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

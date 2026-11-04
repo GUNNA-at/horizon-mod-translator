@@ -1070,11 +1070,26 @@ impl<'a> Program<'a> {
         let init = if matches!(op, 0xb2 | 0xb3) && owner != c.name { self.ensure(&owner) } else { String::new() };
         let pop = "s.pop().unwrap_or_default()";
         let skey = format!("{owner}.{}", m.name);
+        // A primitive field nothing wrote reads as its type's zero, as the JVM's defaults (a `long`
+        // counter, an `int` angle saved to NBT); a reference one stays unset (null to the code).
+        let zero = match m.desc.as_str() {
+            "I" | "Z" | "B" | "S" | "C" => Some("V::I(0)"),
+            "J" => Some("V::J(0)"),
+            "F" => Some("V::F(0.0)"),
+            "D" => Some("V::D(0.0)"),
+            _ => None,
+        };
         match op {
-            0xb2 if self.own(&owner) => format!("{init}let v = rt.statics.get({skey:?}).copied().unwrap_or_default(); s.push(v); {go}"),
+            0xb2 if self.own(&owner) => match zero {
+                Some(z) => format!("{init}let v = match rt.statics.get({skey:?}).copied() {{ None | Some(V::Void) => {z}, Some(v) => v }}; s.push(v); {go}"),
+                None => format!("{init}let v = rt.statics.get({skey:?}).copied().unwrap_or_default(); s.push(v); {go}"),
+            },
             0xb2 => format!("let v = api::get_static(rt, {skey:?}); s.push(v); {go}"),
             0xb3 => format!("{init}let v = {pop}; rt.statics.insert({skey:?}, v); {go}"),
-            0xb4 => format!("let o = {pop}; s.push(rt.get_field(o, {:?})); {go}", m.name),
+            0xb4 => match zero {
+                Some(z) => format!("let o = {pop}; s.push(match rt.get_field(o, {:?}) {{ V::Void => {z}, v => v }}); {go}", m.name),
+                None => format!("let o = {pop}; s.push(rt.get_field(o, {:?})); {go}", m.name),
+            },
             _ => format!("let v = {pop}; let o = {pop}; rt.put_field(o, {:?}, v); {go}", m.name),
         }
     }
