@@ -21,15 +21,21 @@ pub mod functions;
 pub mod glue;
 pub mod jlang;
 pub mod jutil;
+pub mod mod_entities;
 pub mod nbt;
 pub mod neo;
+pub mod neo_tags;
 pub mod network;
 pub mod quads;
 pub mod recipes;
+pub mod palette;
+pub mod records;
 pub mod render;
+pub mod rotation;
 pub mod shapes;
 pub mod tags;
 pub mod tanks;
+pub mod vanilla_records;
 pub mod vanilla_tags;
 
 /// Makes this mapping the one engines that link `horizon-compat-core` alone call.

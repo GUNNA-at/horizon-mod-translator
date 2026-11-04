@@ -74,6 +74,38 @@ pub fn axis(rt: &mut Rt, ordinal: i64) -> V {
     })
 }
 
+/// `Enum.name()` (or `toString()`, `to_string`) of a constant: a mod's own and the ones made by
+/// their constructor keep their name; vanilla's directions, axes and planes, kept as natives,
+/// answer vanilla's: `NORTH`, `X`, and as `toString` the name each was built with (`north`, `x`,
+/// `Towards positive`), as 26.3's classes override it.
+pub(crate) fn enum_name(rt: &mut Rt, v: V, to_string: bool) -> V {
+    let named = rt.get_field(v, "$name");
+    if !matches!(named, V::Void) {
+        return named;
+    }
+    let o = native(rt, v)[0].max(0) as usize;
+    let text = match (rt.class_of(v), to_string) {
+        ("net/minecraft/core/Direction", false) => DIRECTION_NAMES[o.min(5)].to_ascii_uppercase(),
+        ("net/minecraft/core/Direction", true) => DIRECTION_NAMES[o.min(5)].to_owned(),
+        ("net/minecraft/core/Direction$Axis", false) => AXIS_NAMES[o.min(2)].to_ascii_uppercase(),
+        ("net/minecraft/core/Direction$Axis", true) => AXIS_NAMES[o.min(2)].to_owned(),
+        // Kept as 1 for positive, 0 for negative.
+        ("net/minecraft/core/Direction$AxisDirection", false) => ["NEGATIVE", "POSITIVE"][o.min(1)].to_owned(),
+        ("net/minecraft/core/Direction$AxisDirection", true) => ["Towards negative", "Towards positive"][o.min(1)].to_owned(),
+        ("net/minecraft/core/Direction$Plane", _) => ["HORIZONTAL", "VERTICAL"][o.min(1)].to_owned(),
+        _ => return named,
+    };
+    rt.string(&text)
+}
+
+/// `Enum.ordinal()`: a direction's is its data value (`DOWN` 0 ... `EAST` 5), an axis's `X` 0 to `Z` 2.
+pub(crate) fn enum_ordinal(rt: &Rt, v: V) -> i32 {
+    match rt.get_field(v, "$ordinal") {
+        V::Void if matches!(rt.class_of(v), "net/minecraft/core/Direction" | "net/minecraft/core/Direction$Axis") => native(rt, v)[0] as i32,
+        o => o.i(),
+    }
+}
+
 pub fn boolean(rt: &mut Rt, b: bool) -> V {
     rt.intern(format!("bool/{b}"), |rt| {
         let o = rt.new_object("java/lang/Boolean");
@@ -696,8 +728,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.put_field(a(0), "$ordinal", a(2));
             V::Void
         }
-        ("java/lang/Enum", "name" | "toString") => rt.get_field(a(0), "$name"),
-        ("java/lang/Enum", "ordinal") => V::I(rt.get_field(a(0), "$ordinal").i()),
+        ("java/lang/Enum", "name" | "toString") => enum_name(rt, a(0), name == "toString"),
+        ("java/lang/Enum", "ordinal") => V::I(enum_ordinal(rt, a(0))),
         ("java/util/Optional", _) => return optional_call(rt, name, desc, args),
 
         // Directions and axes
@@ -1301,6 +1333,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // `Math.abs(b - a) < 1.0E-5F`, for floats and doubles alike.
         ("net/minecraft/util/Mth", "equal") => V::I(if desc == "(FF)Z" { (a(1).f() - a(0).f()).abs() < 1.0e-5 } else { (a(1).d() - a(0).d()).abs() < f64::from(1.0e-5f32) } as i32),
         ("net/minecraft/util/Mth", "sign") => V::I(if a(0).d() > 0.0 { 1 } else if a(0).d() < 0.0 { -1 } else { 0 }),
+        // A new source (seeded or not), or one forked from another: all draw from the runtime's.
+        ("net/minecraft/util/RandomSource", "create" | "createNewThreadLocalInstance" | "createThreadSafe" | "fork" | "forkPositional") => rt.new_object("net/minecraft/util/RandomSource"),
+        ("net/minecraft/util/RandomSource", "setSeed" | "consumeCount") => V::Void,
+        // Nothing here caps how much NBT a read may take.
+        ("net/minecraft/nbt/NbtAccounter", "unlimitedHeap" | "create" | "defaultQuota") => rt.intern("compat:nbt-accounter".into(), |rt| rt.new_object("net/minecraft/nbt/NbtAccounter")),
+        ("net/minecraft/nbt/NbtAccounter", "accountBytes" | "pushDepth" | "popDepth") => V::Void,
         ("net/minecraft/util/RandomSource", n) => {
             let r = next_random(rt);
             match (n, desc) {
@@ -1314,13 +1352,121 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
         }
         ("net/minecraft/network/chat/Component", "literal" | "translatable") => {
-            let t = rt.new_object("net/minecraft/network/chat/MutableComponent");
-            rt.put_field(t, "$text", a(0));
-            t
+            let with = if desc.contains("[Ljava/lang/Object;") { a(1) } else { V::NULL };
+            component(rt, a(0), name == "translatable", with)
         }
         ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "getString") => rt.get_field(a(0), "$text"),
+        // A component as JSON text and back (`Component.Serializer`), as a block entity saves one.
+        ("net/minecraft/network/chat/Component$Serializer", "toJson") => {
+            let j = component_json(rt, a(0)).to_string();
+            rt.string(&j)
+        }
+        ("net/minecraft/network/chat/Component$Serializer", "fromJson" | "fromJsonLenient") if desc.starts_with("(Ljava/lang/String;") => {
+            match rt.str_of(a(0)).and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok()) {
+                Some(j) => component_from_json(rt, &j),
+                None => V::NULL,
+            }
+        }
         _ => return None,
     })
+}
+
+const MUTABLE_COMPONENT: &str = "net/minecraft/network/chat/MutableComponent";
+
+/// A text component: `text` itself (`Component.literal`) or the translation key it is
+/// (`Component.translatable`, with the arguments `with`, an `Object[]` or null).
+pub(crate) fn component(rt: &mut Rt, text: V, translatable: bool, with: V) -> V {
+    let t = rt.new_object(MUTABLE_COMPONENT);
+    rt.put_field(t, "$text", text);
+    if translatable {
+        rt.put_field(t, "$translate", V::I(1));
+        rt.put_field(t, "$with", with);
+    }
+    t
+}
+
+/// A component as vanilla's serializer writes it: `{"text": ...}` or `{"translate": ..., "with": [...]}`.
+fn component_json(rt: &Rt, c: V) -> serde_json::Value {
+    use serde_json::{json, Value};
+    let text = rt.str_of(rt.get_field(c, "$text")).unwrap_or("").to_owned();
+    if rt.get_field(c, "$translate").i() == 0 {
+        return json!({ "text": text });
+    }
+    let with: Vec<Value> = match rt.heap.get(rt.get_field(c, "$with").r() as usize).map(|o| &o.data) {
+        Some(Data::Array(items)) if rt.get_field(c, "$with").r() != 0 => items
+            .iter()
+            .map(|&v| {
+                let number = |n: V| match n {
+                    V::I(i) => json!(i),
+                    V::J(l) => json!(l),
+                    V::F(f) => json!(f),
+                    V::D(d) => json!(d),
+                    _ => Value::Null,
+                };
+                match (v, rt.class_of(v)) {
+                    (V::R(_), MUTABLE_COMPONENT) => component_json(rt, v),
+                    (V::R(_), "java/lang/Boolean") => json!(rt.get_field(v, "value").i() != 0),
+                    (V::R(_), c) if c.starts_with("java/lang/") && c != "java/lang/String" && rt.str_of(v).is_none() => number(rt.get_field(v, "value")),
+                    (V::R(_), _) => json!(rt.str_of(v).unwrap_or("null")),
+                    _ => number(v),
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut o = serde_json::Map::new();
+    o.insert("translate".into(), Value::String(text));
+    if !with.is_empty() {
+        o.insert("with".into(), Value::Array(with));
+    }
+    Value::Object(o)
+}
+
+/// A component vanilla's serializer reads from `j`: a string is literal text, an array its first
+/// part (its siblings left out), an object its `translate` (with `with`) or `text`.
+fn component_from_json(rt: &mut Rt, j: &serde_json::Value) -> V {
+    use serde_json::Value;
+    match j {
+        Value::Object(o) => match o.get("translate").and_then(Value::as_str) {
+            Some(key) => {
+                let key = rt.string(key);
+                let args: Vec<V> = match o.get("with") {
+                    Some(Value::Array(a)) => a
+                        .iter()
+                        .map(|v| match v {
+                            Value::String(s) => rt.string(s),
+                            Value::Number(n) if n.is_i64() => integer(rt, n.as_i64().unwrap_or(0) as i32),
+                            Value::Bool(b) => boolean(rt, *b),
+                            other => component_from_json(rt, other),
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let with = if args.is_empty() { V::NULL } else { rt.alloc("[Ljava/lang/Object;", Data::Array(args)) };
+                component(rt, key, true, with)
+            }
+            None => {
+                let text = o.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
+                let t = rt.string(&text);
+                component(rt, t, false, V::NULL)
+            }
+        },
+        Value::Array(a) => match a.first() {
+            Some(first) => component_from_json(rt, first),
+            None => {
+                let t = rt.string("");
+                component(rt, t, false, V::NULL)
+            }
+        },
+        Value::String(s) => {
+            let t = rt.string(s);
+            component(rt, t, false, V::NULL)
+        }
+        other => {
+            let t = rt.string(&other.to_string());
+            component(rt, t, false, V::NULL)
+        }
+    }
 }
 
 const INVENTORY: &str = "net/minecraft/world/entity/player/Inventory";
@@ -2228,5 +2374,28 @@ mod tests {
         assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ItemStack.isEmpty.()Z", &[s]), V::I(1));
         let empty = api::get_static(&mut rt, "net/minecraft/world/item/ItemStack.EMPTY");
         assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ItemStack.isEmpty.()Z", &[empty]), V::I(1));
+    }
+
+    /// A block entity saves a component as JSON text and loads it back (Create's assembly errors):
+    /// the translation key and its arguments, a literal's text.
+    #[test]
+    fn a_component_written_as_json_reads_back_as_the_same_text() {
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, k: &str, args: &[V]| crate::api::call(rt, Box::leak(k.to_owned().into_boxed_str()), args);
+        let key = rt.string("create.gui.assembly.exception.too_many_pistons");
+        let five = super::integer(&mut rt, 5);
+        let name = rt.string("Piston");
+        let args = rt.alloc("[Ljava/lang/Object;", crate::Data::Array(vec![five, name]));
+        let t = c(&mut rt, "net/minecraft/network/chat/Component.translatable.(Ljava/lang/String;[Ljava/lang/Object;)Lnet/minecraft/network/chat/MutableComponent;", &[key, args]);
+        let json = c(&mut rt, "net/minecraft/network/chat/Component$Serializer.toJson.(Lnet/minecraft/network/chat/Component;Lnet/minecraft/core/HolderLookup$Provider;)Ljava/lang/String;", &[t, V::NULL]);
+        let text = rt.str_of(json).unwrap().to_owned();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap(), serde_json::json!({"translate": "create.gui.assembly.exception.too_many_pistons", "with": [5, "Piston"]}));
+        let back = c(&mut rt, "net/minecraft/network/chat/Component$Serializer.fromJson.(Ljava/lang/String;Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/network/chat/MutableComponent;", &[json, V::NULL]);
+        let again = c(&mut rt, "net/minecraft/network/chat/Component$Serializer.toJson.(Lnet/minecraft/network/chat/Component;Lnet/minecraft/core/HolderLookup$Provider;)Ljava/lang/String;", &[back, V::NULL]);
+        assert_eq!(rt.str_of(again), Some(text.as_str()));
+        let hello = rt.string("hello");
+        let lit = c(&mut rt, "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;", &[hello]);
+        let j = c(&mut rt, "net/minecraft/network/chat/Component$Serializer.toJson.(Lnet/minecraft/network/chat/Component;Lnet/minecraft/core/HolderLookup$Provider;)Ljava/lang/String;", &[lit, V::NULL]);
+        assert_eq!(rt.str_of(j), Some(r#"{"text":"hello"}"#));
     }
 }

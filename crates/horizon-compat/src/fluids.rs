@@ -33,22 +33,6 @@ const VANILLA: [(&str, &str); 5] = [
     ("minecraft:lava", "net/minecraft/world/level/material/LavaFluid$Source"),
 ];
 
-/// NeoForge's common fluid tags (`Tags.Fluids`): each field is `c:` and its name in lower case.
-const COMMON_TAGS: [&str; 12] = [
-    "WATER",
-    "LAVA",
-    "MILK",
-    "GASEOUS",
-    "HONEY",
-    "EXPERIENCE",
-    "POTION",
-    "SUSPICIOUS_STEW",
-    "MUSHROOM_STEW",
-    "RABBIT_STEW",
-    "BEETROOT_SOUP",
-    "HIDDEN_FROM_RECIPE_VIEWERS",
-];
-
 /// What `BaseFlowingFluid.Properties` holds, copied onto each fluid made from it.
 const PROPERTY_FIELDS: [&str; 9] = ["$type", "$still", "$flowing", "$bucket", "$block", "$slope", "$drop", "$resistance", "$tickRate"];
 
@@ -562,7 +546,7 @@ fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
     })
 }
 
-/// Static fields this module owns: `Fluids`, `FluidTags` and NeoForge's `Tags.Fluids`.
+/// Static fields this module owns: `Fluids` and `FluidTags` (NeoForge's `Tags.Fluids` are `neo_tags`').
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match owner {
         FLUID_STACK if field == "EMPTY" => Some(fluid_stack_empty(rt)),
@@ -571,7 +555,6 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             (f.r() != 0).then_some(f)
         }
         "net/minecraft/tags/FluidTags" if matches!(field, "WATER" | "LAVA") => Some(tag_key(rt, "fluid", &format!("minecraft:{}", field.to_ascii_lowercase()))),
-        "net/neoforged/neoforge/common/Tags$Fluids" if COMMON_TAGS.contains(&field) => Some(tag_key(rt, "fluid", &format!("c:{}", field.to_ascii_lowercase()))),
         _ => None,
     }
 }

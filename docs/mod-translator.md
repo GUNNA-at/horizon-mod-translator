@@ -788,6 +788,57 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the host block entity ticks get, now one generator: `game_host`), and `glue::level_tick` posts
     the event with the level. Create's `onServerWorldTick` ticks contraptions, minecart couplings,
     linked controllers, train controls, railways and logistics there.
+  - [x] 2026-11-04 A state's destroy time, push reaction and replaceability (`getDestroySpeed`,
+    `getPistonPushReaction`, `canBeReplaced`): a vanilla block's from the game (`Host::block_facts`,
+    `native_state_facts` over horizon-world's `StateFacts`), a mod block's from its `Properties`
+    (`strength`, `pushReaction`, `replaceable`, or the block it copied); a mod block overriding
+    NeoForge's `getPistonPushReaction(state)` answers itself. Create's `BlockMovementChecks` read
+    all three before a block may move: every block answered "unbreakable" and nothing moved.
+  - [x] 2026-11-04 NeoForge's tag constants (`Tags.Blocks`, `.Items`, `.Fluids`, `.EntityTypes`: 382,
+    `neo_tags.rs`, read from NeoForge's jar) name the tags its jar gives them (`c:relocation_not_supported`).
+  - [x] 2026-11-04 Components as JSON (`Component.Serializer.toJson`/`fromJson`, text, translation
+    and its arguments) and blocks' names (`getName`, `getDescriptionId`).
+  - [x] 2026-11-04 Mod entities (`mod_entities.rs`): vanilla's `Entity` modelled in the runtime (id,
+    UUID, position and its old values, rotation, motion, bounding box from the type's size,
+    `SynchedEntityData` with ids per class as vanilla counts them, removal), `EntityType.Builder`
+    and `EntityType.create`. A level's mod entities tick with it (`LevelTickEvent.Pre`, then each
+    `tick()`), `getEntitiesOfClass` finds them, and a server sends each to the players in its
+    tracking range on channel `horizon_compat:entity` (spawn with NeoForge's
+    `IEntityWithComplexSpawn` data, moves batched, dirty synched data, gone; a message over 29 KB
+    goes in parts). Unit tests; harness `BEARING`: the bearing's `ControlledContraptionEntity` is
+    made, joins the level and turns 4.8° a tick.
+  - [x] 2026-11-04 Vanilla's records (`records.rs`): 1013 records and their components
+    (`vanilla_records.rs`, written by `tools/vanilla_records.py` from NeoForge's merged jar); a mod
+    builds one with its canonical constructor and reads it back by accessor, `equals`, `hashCode`.
+    Create keeps a contraption's blocks as `StructureTemplate.StructureBlockInfo`, which came back
+    empty, so a disassembled bearing put nothing back. `ImmutableMap.copyOf` copies (the builder
+    rule had answered with an empty object of the return type, uncounted). `Rotation`/`Mirror` and
+    `BlockState.rotate`/`mirror`: the mod block's own, else its vanilla base's rule on `facing`,
+    `axis`, `rotation`, the side arms and rail shapes (`Block` itself leaves the state). The level's
+    `getChunkAt`, `markAndNotifyBlock`, `removeBlockEntity`, `dimension()`, `Level.OVERWORLD`...
+  - [x] 2026-11-04 **A bearing assembles, turns, disassembles and assembles again** (harness
+    `BEARING`, server side): the click at tick 5 puts the plank back at (0, 65, 0), the one at tick
+    10 lifts it into a new contraption. The plank had landed at (0, 0, 0): `BlockPos.containing`
+    wasn't mapped and the builder rule (an unmapped method returning its own class hands back the
+    receiver, or a new object for a static) answered with a zero position, uncounted. That rule now
+    runs only once every class up the receiver's has missed, and counts as a miss: the reports show
+    what it stood in for (Guava's `Sets.union`, `Comparator.comparing`, advancements' builders...).
+  - [x] 2026-11-04 **The client gets the contraption** (harness `BEARING`, client step: the spawn
+    message read by a client runtime on its own thread): a `ControlledContraptionEntity` with its
+    `BearingContraption` of 1 block at the server's angle, alive after a client tick. It needed
+    `Class.getEnumConstants` for vanilla enums (`NBTHelper.readEnum(.., Direction.Axis.class)`),
+    `Enum.name()`/`ordinal()` of the natives (directions, axes, planes; `toString` as 26.3's
+    overrides), `WeakReference`, `VarInt`/`VarLong`, intrusive holders (`createIntrusiveHolder`: the
+    contraption type's key was `minecraft:`), `Registry.registerForHolder` giving a holder, and
+    `HashMapPalette` with its `CrudeIncrementalIntIdentityHashBiMap` (`palette.rs`: the palette of
+    states was empty). Also `Comparator`'s combinators (`comparing`, `thenComparing`, `reversed`,
+    `nullsFirst`...), `ThreadLocal`, `Triple`, `RandomSource.create`, `NbtAccounter`.
+  - [x] 2026-11-04 Drawing mod entities (step C, built, not yet seen in game): the game's new hook
+    `native_level_submit` (once a frame, camera and partial tick) runs `glue::render_mod_entities`,
+    which makes each entity type's renderer once (`EntityRendererProvider.Context`) and calls its
+    `shouldRender` and `render` with a pose stack at the entity's lerped place. Create draws a
+    contraption by tesselating its blocks into catnip's `ShadedBlockSbbBuilder`: each block kept as
+    a part (its model's quads and the pose it was drawn at), drawn in one `SuperByteBuffer`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

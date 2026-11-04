@@ -644,6 +644,79 @@ pub fn render_block_entity(
     })
 }
 
+const ER_PROVIDER_CREATE: &str =
+    "net/minecraft/client/renderer/entity/EntityRendererProvider.create.(Lnet/minecraft/client/renderer/entity/EntityRendererProvider$Context;)Lnet/minecraft/client/renderer/entity/EntityRenderer;";
+const ER_RENDER: &str = "render.(Lnet/minecraft/world/entity/Entity;FFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V";
+const ER_RENDER_KEY: &str =
+    "net/minecraft/client/renderer/entity/EntityRenderer.render.(Lnet/minecraft/world/entity/Entity;FFLcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;I)V";
+const ER_SHOULD_RENDER: &str = "shouldRender.(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/client/renderer/culling/Frustum;DDD)Z";
+const ER_SHOULD_RENDER_KEY: &str =
+    "net/minecraft/client/renderer/entity/EntityRenderer.shouldRender.(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/client/renderer/culling/Frustum;DDD)Z";
+
+/// `native_level_submit` (a client): the client's mod entities, each drawn by the renderer its mod
+/// registered for its type (`EntityRenderersEvent.RegisterRenderers`), as vanilla's
+/// `EntityRenderDispatcher.render` draws one: when the renderer's `shouldRender` agrees, under a
+/// pose stack at its place this frame (between its last two ticks') relative to `camera`, with its
+/// turn this frame. The number drawn.
+pub fn render_mod_entities(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3]) -> usize {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    crate::neo::fire_client_setup(rt);
+    rt.with_host(host, |rt| {
+        let Some(vc) = rt.vcall else { return 0 };
+        let partial = rt.host().map_or(0.0, |h| h.partial_tick());
+        let mut drawn = 0;
+        for e in crate::mod_entities::live(rt) {
+            if rt.get_field(e, "removalReason").r() != 0 {
+                continue;
+            }
+            let ty = rt.get_field(e, "$type");
+            let Some(id) = rt.registered_name(ty, "entity_type").map(str::to_owned) else { continue };
+            let Some(provider) = rt.interned.get(&format!("er/{id}")).copied() else {
+                trace_once(rt, &format!("no-er/{id}"), |_| format!("client: {id} has no entity renderer"));
+                continue;
+            };
+            let renderer = match rt.interned.get(&format!("er-made/{id}")).copied() {
+                Some(r) => r,
+                None => {
+                    let ctx = rt.new_object("net/minecraft/client/renderer/entity/EntityRendererProvider$Context");
+                    let r = rt.call_functional(ER_PROVIDER_CREATE, provider, &[ctx]);
+                    rt.report_thrown("an entity renderer's constructor");
+                    rt.interned.insert(format!("er-made/{id}"), r);
+                    r
+                }
+            };
+            if renderer.r() == 0 {
+                continue;
+            }
+            let frustum = rt.intern("compat:frustum".into(), |rt| rt.new_object("net/minecraft/client/renderer/culling/Frustum"));
+            let shows = vc(rt, ER_SHOULD_RENDER_KEY, ER_SHOULD_RENDER, &[renderer, e, frustum, V::D(camera[0]), V::D(camera[1]), V::D(camera[2])]);
+            rt.report_thrown("an entity renderer's shouldRender");
+            if shows.i() == 0 {
+                continue;
+            }
+            let lerp = |rt: &Rt, old: &'static str, now: &'static str| {
+                let (o, n) = (rt.get_field(e, old).d(), rt.get_field(e, now).d());
+                o + (n - o) * f64::from(partial)
+            };
+            let at = [lerp(rt, "xOld", "$x") - camera[0], lerp(rt, "yOld", "$y") - camera[1], lerp(rt, "zOld", "$z") - camera[2]];
+            let mut pose = crate::render::IDENTITY;
+            pose[12] = at[0] as f32;
+            pose[13] = at[1] as f32;
+            pose[14] = at[2] as f32;
+            let stack = crate::render::new_pose_stack(rt, pose);
+            let (yaw_old, yaw) = (rt.get_field(e, "yRotO").f(), rt.get_field(e, "$yRot").f());
+            let yaw = yaw_old + (yaw - yaw_old) * partial;
+            let buffers = rt.intern("compat:buffers".into(), |rt| rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource"));
+            trace_once(rt, &format!("er-used/{id}"), |_| format!("client: {id} drawn by its entity renderer"));
+            vc(rt, ER_RENDER_KEY, ER_RENDER, &[renderer, e, V::F(yaw), V::F(partial), stack, buffers, V::I(crate::render::FULL_BRIGHT)]);
+            rt.report_thrown("an entity renderer");
+            drawn += 1;
+        }
+        drawn
+    })
+}
+
 const SERVER_TICK_PRE: &str = "net/neoforged/neoforge/event/tick/ServerTickEvent$Pre";
 const SERVER_TICK_POST: &str = "net/neoforged/neoforge/event/tick/ServerTickEvent$Post";
 
@@ -674,6 +747,12 @@ pub fn level_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
         let l = level(rt);
         rt.put_field(ev, "$level", l);
         crate::neo::post(rt, class, ev);
+        // The level's entities tick after the event before the level's own (`ServerLevel.tick`):
+        // a mod's own among them.
+        if !post {
+            let dimension = rt.host().map(|h| h.dimension()).unwrap_or_default();
+            crate::mod_entities::tick_all(rt, &dimension);
+        }
     });
 }
 
@@ -683,6 +762,10 @@ pub fn payload_from_server(rt: &mut Rt, host: &mut dyn Host, channel: &str, data
     rt.safe_point();
     // This runtime is the client's, also when a payload comes before its first tick.
     crate::neo::fire_client_setup(rt);
+    if channel == crate::mod_entities::CHANNEL {
+        rt.with_host(host, |rt| crate::mod_entities::receive(rt, data));
+        return true;
+    }
     rt.with_host(host, |rt| crate::network::receive(rt, channel, data, None))
 }
 
@@ -701,6 +784,9 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     rt.with_host(host, |rt| {
         let ev = rt.new_object(CLIENT_TICK_PRE);
         crate::neo::post(rt, CLIENT_TICK_PRE, ev);
+        // `ClientLevel.tickEntities`: the entities, then the block entities.
+        let dimension = rt.host().map(|h| h.dimension()).unwrap_or_default();
+        crate::mod_entities::tick_all(rt, &dimension);
         tick_client_block_entities(rt);
         let ev = rt.new_object(CLIENT_TICK_POST);
         crate::neo::post(rt, CLIENT_TICK_POST, ev);

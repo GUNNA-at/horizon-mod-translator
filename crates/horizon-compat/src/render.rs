@@ -30,6 +30,8 @@ pub const INTRINSICS: &[&str] = &[
     SBB_IS_EMPTY,
     DEFAULT_RENDER_INTO,
     DEFAULT_IS_EMPTY,
+    SBB_BUILDER_BEGIN,
+    SBB_BUILDER_END,
     PARTIAL_GET,
     SUPPORTS_VISUALIZATION,
     SHIFTS[0],
@@ -82,6 +84,10 @@ const SBB_IS_EMPTY: &str = "net/createmod/catnip/render/ShadeSeparatingSuperByte
 /// catnip's older buffer of mesh data.
 const DEFAULT_RENDER_INTO: &str = "net/createmod/catnip/render/DefaultSuperByteBuffer.renderInto.(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;)V";
 const DEFAULT_IS_EMPTY: &str = "net/createmod/catnip/render/DefaultSuperByteBuffer.isEmpty.()Z";
+/// catnip's buffer of the blocks a renderer tesselates into it (Create's contraptions): it keeps
+/// each block's model and pose (`$parts`) instead of their vertices.
+const SBB_BUILDER_BEGIN: &str = "net/createmod/catnip/render/ShadedBlockSbbBuilder.begin.()V";
+const SBB_BUILDER_END: &str = "net/createmod/catnip/render/ShadedBlockSbbBuilder.end.()Lnet/createmod/catnip/render/SuperByteBuffer;";
 const PARTIAL_GET: &str = "dev/engine_room/flywheel/lib/model/baked/PartialModel.get.()Lnet/minecraft/client/resources/model/BakedModel;";
 /// Flywheel's instancing needs its GPU backend: off, so mods draw with their block entity renderers.
 const SUPPORTS_VISUALIZATION: &str = "dev/engine_room/flywheel/api/visualization/VisualizationManager.supportsVisualization.(Lnet/minecraft/world/level/LevelAccessor;)Z";
@@ -1220,6 +1226,21 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             "getGameTimeDeltaTicks" | "getRealtimeDeltaTicks" => V::F(1.0),
             _ => return None,
         },
+        // A block tesselated into a buffer being built (Create's contraption, `ShadedBlockSbbBuilder`):
+        // its model under the stack's pose, one of the buffer's parts; nothing for another consumer.
+        ("net/minecraft/client/renderer/block/ModelBlockRenderer", "tesselateBlock" | "tesselateWithAO" | "tesselateWithoutAO") => {
+            keep_block(rt, a(6), a(2), a(3), a(5));
+            V::Void
+        }
+        ("net/minecraft/client/renderer/block/BlockRenderDispatcher", "renderBatched") => {
+            let m = rt.new_object("net/minecraft/client/resources/model/BakedModel");
+            rt.put_field(m, "$state", a(1));
+            keep_block(rt, a(5), m, a(1), a(4));
+            V::Void
+        }
+        ("net/minecraft/client/renderer/block/BlockRenderDispatcher", "getModelRenderer") => single(rt, "net/minecraft/client/renderer/block/ModelBlockRenderer"),
+        // Its cache of neighbours' light and shade: the host lights what it draws.
+        ("net/minecraft/client/renderer/block/ModelBlockRenderer", "enableCaching" | "clearCache") => V::Void,
         // A block state's model: drawn by the host when a buffer made from it is.
         ("net/minecraft/client/renderer/block/BlockRenderDispatcher", "getBlockModel") => {
             let m = rt.new_object("net/minecraft/client/resources/model/BakedModel");
@@ -1410,11 +1431,78 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             "bakeLayer" => rt.new_object("net/minecraft/client/model/geom/ModelPart"),
             _ => return None,
         },
+        ("net/minecraft/client/renderer/entity/EntityRendererProvider$Context", n) => match n {
+            "getBlockRenderDispatcher" => single(rt, "net/minecraft/client/renderer/block/BlockRenderDispatcher"),
+            "getItemRenderer" => single(rt, "net/minecraft/client/renderer/entity/ItemRenderer"),
+            "getEntityRenderDispatcher" => single(rt, "net/minecraft/client/renderer/entity/EntityRenderDispatcher"),
+            "getModelSet" => single(rt, "net/minecraft/client/model/geom/EntityModelSet"),
+            "getFont" => single(rt, "net/minecraft/client/gui/Font"),
+            "getItemInHandRenderer" => single(rt, "net/minecraft/client/renderer/ItemInHandRenderer"),
+            "bakeLayer" => rt.new_object("net/minecraft/client/model/geom/ModelPart"),
+            _ => return None,
+        },
+        // Vanilla's base entity renderer, as a mod's renderer reaches it with `super`: its name tag
+        // and leash aren't drawn here, and the host culls what is drawn, so it is always in view.
+        ("net/minecraft/client/renderer/entity/EntityRenderer", n) => match n {
+            "<init>" | "render" => V::Void,
+            "shouldRender" => V::I(1),
+            "getPackedLightCoords" => V::I(FULL_BRIGHT),
+            _ => return None,
+        },
         _ => return None,
     })
 }
 
 // ---- intrinsics ----
+
+/// catnip's `ShadeSeparatingSuperByteBuffer` drawing `model` (a [`crate::quads::drawable`]) under
+/// `base`: its fields as its constructor sets them; the caller runs its `reset()` (white, no
+/// overlay, a fresh transform).
+fn new_sbb(rt: &mut Rt, model: V, base: M4) -> V {
+    let sbb = rt.new_object(SBB);
+    let transforms = new_pose_stack(rt, IDENTITY);
+    rt.put_field(sbb, "transforms", transforms);
+    let model_mat = new_mat4(rt, IDENTITY);
+    rt.put_field(sbb, "modelMat", model_mat);
+    let normal_mat = rt.alloc("org/joml/Matrix3f", Data::Array(IDENTITY3.iter().map(|&f| V::F(f)).collect()));
+    rt.put_field(sbb, "normalMat", normal_mat);
+    for (field, class) in [("pos", "org/joml/Vector4f"), ("lightPos", "org/joml/Vector4f"), ("normal", "org/joml/Vector3f"), ("lightDir0", "org/joml/Vector3f"), ("lightDir1", "org/joml/Vector3f")] {
+        let v = rt.new_object(class);
+        for c in ["x", "y", "z", "w"].iter().take(if class.ends_with("4f") { 4 } else { 3 }) {
+            rt.put_field(v, c, V::F(0.0));
+        }
+        rt.put_field(sbb, field, v);
+    }
+    let shift = rt.new_object("net/createmod/catnip/render/SuperByteBuffer$ShiftOutput");
+    rt.put_field(sbb, "shiftOutput", shift);
+    let swap = rt.alloc("[I", Data::Array(Vec::new()));
+    rt.put_field(sbb, "shadeSwapVertices", swap);
+    rt.put_field(sbb, "invertFakeDiffuseNormal", V::I(0));
+    rt.put_field(sbb, "$model", model);
+    let base = new_mat4(rt, base);
+    rt.put_field(sbb, "$base", base);
+    sbb
+}
+
+/// A block a renderer tesselates into a builder of [`SBB_BUILDER_BEGIN`] (`consumer`): its model
+/// (`model` of `state`) under `stack`'s pose, kept as one of the buffer's parts. False for any
+/// other consumer.
+fn keep_block(rt: &mut Rt, consumer: V, model: V, state: V, stack: V) -> bool {
+    let parts = rt.get_field(consumer, "$parts");
+    if parts.r() == 0 || consumer.r() == 0 {
+        return false;
+    }
+    let drawable = crate::quads::drawable(rt, model, state);
+    let pose = last_pose(rt, stack);
+    let pose = new_mat4(rt, pose);
+    let part = rt.new_object("compat/SbbPart");
+    rt.put_field(part, "$model", drawable);
+    rt.put_field(part, "$pose", pose);
+    if let Some(Data::List(l)) = rt.heap.get_mut(parts.r() as usize).map(|o| &mut o.data) {
+        l.push(part);
+    }
+    true
+}
 
 fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
@@ -1424,30 +1512,27 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
         // constructor sets them, then its own `reset()` (white, no overlay, a fresh transform).
         CREATE_FOR_BLOCK => {
             let base = last_pose(rt, a(3));
-            let sbb = rt.new_object(SBB);
-            let transforms = new_pose_stack(rt, IDENTITY);
-            rt.put_field(sbb, "transforms", transforms);
-            let model_mat = new_mat4(rt, IDENTITY);
-            rt.put_field(sbb, "modelMat", model_mat);
-            let normal_mat = rt.alloc("org/joml/Matrix3f", Data::Array(IDENTITY3.iter().map(|&f| V::F(f)).collect()));
-            rt.put_field(sbb, "normalMat", normal_mat);
-            for (field, class) in [("pos", "org/joml/Vector4f"), ("lightPos", "org/joml/Vector4f"), ("normal", "org/joml/Vector3f"), ("lightDir0", "org/joml/Vector3f"), ("lightDir1", "org/joml/Vector3f")] {
-                let v = rt.new_object(class);
-                for c in ["x", "y", "z", "w"].iter().take(if class.ends_with('4') || class.ends_with("4f") { 4 } else { 3 }) {
-                    rt.put_field(v, c, V::F(0.0));
-                }
-                rt.put_field(sbb, field, v);
-            }
-            let shift = rt.new_object("net/createmod/catnip/render/SuperByteBuffer$ShiftOutput");
-            rt.put_field(sbb, "shiftOutput", shift);
-            let swap = rt.alloc("[I", Data::Array(Vec::new()));
-            rt.put_field(sbb, "shadeSwapVertices", swap);
-            rt.put_field(sbb, "invertFakeDiffuseNormal", V::I(0));
             // A model the mod built of faces is read now, as catnip buffers its vertices now.
             let model = crate::quads::drawable(rt, a(1), a(2));
-            rt.put_field(sbb, "$model", model);
-            let base = new_mat4(rt, base);
-            rt.put_field(sbb, "$base", base);
+            let sbb = new_sbb(rt, model, base);
+            if let Some(vc) = rt.vcall {
+                vc(rt, SBB_RESET_KEY, SBB_RESET, &[sbb]);
+            }
+            sbb
+        }
+        // The builder's start: no blocks yet.
+        SBB_BUILDER_BEGIN => {
+            let parts = crate::jutil::new_list(rt, Vec::new());
+            rt.put_field(a(0), "$parts", parts);
+            V::Void
+        }
+        // Its buffer: the blocks tesselated into it since `begin`, each with its model and pose.
+        SBB_BUILDER_END => {
+            let parts = rt.get_field(a(0), "$parts");
+            rt.put_field(a(0), "$parts", V::NULL);
+            let sbb = new_sbb(rt, V::NULL, IDENTITY);
+            let parts = if parts.r() == 0 { crate::jutil::new_list(rt, Vec::new()) } else { parts };
+            rt.put_field(sbb, "$parts", parts);
             if let Some(vc) = rt.vcall {
                 vc(rt, SBB_RESET_KEY, SBB_RESET, &[sbb]);
             }
@@ -1510,13 +1595,29 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
                     None => h.draw_model(&model, &m, color, light as u32),
                 };
             }
+            // A buffer of blocks: each block's model under its own pose, inside the buffer's.
+            let parts = rt.get_field(this, "$parts");
+            if parts.r() != 0 {
+                for part in crate::jutil::elements(rt, parts) {
+                    let pose = mat4(rt, rt.get_field(part, "$pose"));
+                    let Some(model) = model_of(rt, rt.get_field(part, "$model")) else { continue };
+                    let pm = mul4(&m, &pose);
+                    if let Some(h) = rt.host_mut() {
+                        h.draw_model(&model, &pm, color, light as u32);
+                    }
+                }
+            }
             if let Some(vc) = rt.vcall {
                 let (k, short) = if modern { (SBB_RESET_KEY, SBB_RESET) } else { (DEFAULT_RESET_KEY, DEFAULT_RESET) };
                 vc(rt, k, short, &[this]);
             }
             V::Void
         }
-        SBB_IS_EMPTY | DEFAULT_IS_EMPTY => V::I(model_of(rt, rt.get_field(a(0), "$model")).is_none() as i32),
+        SBB_IS_EMPTY | DEFAULT_IS_EMPTY => {
+            let parts = rt.get_field(a(0), "$parts");
+            let blocks = parts.r() != 0 && !crate::jutil::elements(rt, parts).is_empty();
+            V::I((!blocks && model_of(rt, rt.get_field(a(0), "$model")).is_none()) as i32)
+        }
         // `shiftUV(entry)`, `shiftUVScrolling(entry, [u,] v)`, `shiftUVtoSheet(entry, u, v, size)`:
         // the entry's two sprites and the offsets, as fractions of the target (a scroll comes in
         // atlas units, which a cell's width turns into fractions; a sheet's frame is one already).
@@ -1575,6 +1676,49 @@ mod tests {
             TARGET_LOCATION => rt.string("create:block/belt_scroll"),
             _ => args.first().copied().unwrap_or_default(),
         }
+    }
+
+    /// Create's contraption buffer: each block tesselated into catnip's builder (moved to its place
+    /// in the structure) is drawn by its state's model under that place, inside the buffer's pose.
+    #[test]
+    fn a_buffer_of_tesselated_blocks_draws_each_block_where_it_was_put() {
+        let mut rt = Rt::new();
+        rt.vcall = Some(catnip);
+        let mut host = crate::host::MemoryHost::default();
+        let builder = rt.new_object("net/createmod/catnip/render/ShadedBlockSbbBuilder");
+        intrinsic(&mut rt, SBB_BUILDER_BEGIN, &[builder]);
+        let stack = new_pose_stack(&mut rt, IDENTITY);
+        let tesselate = "net/minecraft/client/renderer/block/ModelBlockRenderer.tesselateBlock.(Lnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/client/resources/model/BakedModel;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;ZLnet/minecraft/util/RandomSource;JILnet/neoforged/neoforge/client/model/data/ModelData;Lnet/minecraft/client/renderer/RenderType;)V";
+        let model_of_state = "net/minecraft/client/renderer/block/BlockRenderDispatcher.getBlockModel.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/client/resources/model/BakedModel;";
+        for (state, y) in [("minecraft:oak_planks", 1.0), ("minecraft:stone", 2.0)] {
+            let st = crate::api::state(&mut rt, state);
+            let model = crate::api::call(&mut rt, model_of_state, &[V::NULL, st]);
+            crate::api::call(&mut rt, "com/mojang/blaze3d/vertex/PoseStack.pushPose.()V", &[stack]);
+            crate::api::call(&mut rt, "com/mojang/blaze3d/vertex/PoseStack.translate.(FFF)V", &[stack, V::F(0.0), V::F(y), V::F(0.0)]);
+            crate::api::call(&mut rt, tesselate, &[V::NULL, V::NULL, model, st, V::NULL, stack, builder, V::I(1), V::NULL, V::J(0), V::I(NO_OVERLAY), V::NULL, V::NULL]);
+            crate::api::call(&mut rt, "com/mojang/blaze3d/vertex/PoseStack.popPose.()V", &[stack]);
+        }
+        let sbb = intrinsic(&mut rt, SBB_BUILDER_END, &[builder]).unwrap();
+        assert_eq!(intrinsic(&mut rt, SBB_IS_EMPTY, &[sbb]), Some(V::I(0)));
+        // Drawn ten blocks east of the camera.
+        let view = new_pose_stack(&mut rt, IDENTITY);
+        crate::api::call(&mut rt, "com/mojang/blaze3d/vertex/PoseStack.translate.(FFF)V", &[view, V::F(10.0), V::F(0.0), V::F(0.0)]);
+        rt.with_host(&mut host, |rt| {
+            intrinsic(rt, RENDER_INTO, &[sbb, view, V::NULL]);
+        });
+        let drawn: Vec<(String, [f32; 3])> = host
+            .drawn
+            .iter()
+            .map(|(m, pose, _, _)| {
+                let name = match m {
+                    Model::State(s) | Model::Named(s) => s.clone(),
+                    Model::Quads(_) => "quads".into(),
+                };
+                (name, [pose[12], pose[13], pose[14]])
+            })
+            .collect();
+        assert_eq!(drawn, vec![("minecraft:oak_planks".to_owned(), [10.0, 1.0, 0.0]), ("minecraft:stone".to_owned(), [10.0, 2.0, 0.0])]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

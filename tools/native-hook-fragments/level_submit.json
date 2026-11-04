@@ -1,0 +1,11 @@
+{
+  "hooks": [
+    {
+      "name": "level_submit",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_level_submit",
+      "side": "client"
+    }
+  ],
+  "rust_summary": "a client draw hook for what a mod keeps in the level besides blocks, block entities and mobs (`native_level_submit`): a translated mod's own entities.",
+  "doc_summary": "`native_level_submit(camera, draw)` lets a client mod draw what it keeps in the level besides blocks, block entities and mobs (a translated NeoForge mod's entities, drawn by their renderers), once a frame. `draw`'s pose stack starts at `camera` (the camera's position, in blocks); add geometry with `native_draw_quad`, `native_draw_cube`, `native_draw_block` and `native_draw_item`, as `native_block_entity_submit` does. Bundles need \"hooks\": @API:level_submit@."
+}

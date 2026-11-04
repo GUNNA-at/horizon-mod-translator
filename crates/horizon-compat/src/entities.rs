@@ -266,17 +266,19 @@ fn wants_items(rt: &Rt, class: V) -> bool {
 /// `getEntitiesOfClass(class, box[, predicate])` and `getEntities(except, box[, predicate])`.
 fn entities_of(rt: &mut Rt, class: Option<V>, area: V, predicate: Option<V>) -> V {
     let items = class.is_none_or(|c| wants_items(rt, c));
+    let b = crate::shapes::aabb_of(rt, area);
+    let mut found = if items { item_entities_in(rt, b) } else { Vec::new() };
+    // A mod's own entities (Create's contraptions), of the class asked for.
+    let wanted = class.map(|c| rt.str_of(c).unwrap_or("").replace('.', "/"));
+    found.extend(crate::mod_entities::in_box(rt, b).into_iter().filter(|&e| wanted.as_deref().is_none_or(|w| w.is_empty() || rt.instance_of(e, w))));
     let mut out = Vec::new();
-    if items {
-        let b = crate::shapes::aabb_of(rt, area);
-        for e in item_entities_in(rt, b) {
-            let keep = match predicate {
-                Some(p) if p.r() != 0 => rt.call_functional(PREDICATE_TEST, p, &[e]).i() != 0,
-                _ => true,
-            };
-            if keep {
-                out.push(e);
-            }
+    for e in found {
+        let keep = match predicate {
+            Some(p) if p.r() != 0 => rt.call_functional(PREDICATE_TEST, p, &[e]).i() != 0,
+            _ => true,
+        };
+        if keep {
+            out.push(e);
         }
     }
     crate::jutil::new_list(rt, out)

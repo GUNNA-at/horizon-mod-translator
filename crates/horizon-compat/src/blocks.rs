@@ -4,6 +4,7 @@
 //! state properties its `createBlockStateDefinition` declares and its default state (each
 //! property's first value, then what `registerDefaultState` sets). An item's constructor records its
 //! `Item.Properties`.
+use crate::host::BlockFacts;
 use crate::{api, api_common, jutil, Data, Rt, V};
 
 pub const BLOCK_PROPERTIES: &str = "net/minecraft/world/level/block/state/BlockBehaviour$Properties";
@@ -220,6 +221,65 @@ fn vanilla_default(field: &str) -> Option<&'static str> {
     })
 }
 
+const PUSH_REACTION: &str = "net/minecraft/world/level/material/PushReaction";
+/// `PushReaction`'s constants in order: their ordinals are [`BlockFacts::push`].
+const PUSH_REACTIONS: [&str; 5] = ["normal", "destroy", "block", "ignore", "push_only"];
+/// NeoForge's `IBlockExtension.getPistonPushReaction(state)`: a block's answer for the state, or
+/// null for what its properties say.
+const GET_PUSH_REACTION: &str = "getPistonPushReaction.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/material/PushReaction;";
+const GET_PUSH_REACTION_KEY: &str =
+    "net/minecraft/world/level/block/Block.getPistonPushReaction.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/material/PushReaction;";
+
+/// What vanilla's `BlockStateBase` keeps of a block's properties, for state `text`: a mod block's
+/// from what its `Properties` recorded, over the vanilla block they copy (`ofFullCopy`); a vanilla
+/// block's from the game. Where neither says, `Properties.of()`'s: breaks at once, pistons push
+/// and pull it, placing doesn't replace it.
+pub(crate) fn state_facts(rt: &Rt, text: &str) -> BlockFacts {
+    let (name, _) = crate::host::split_state(text);
+    let java = BlockFacts { hardness: 0.0, push: 0, replaceable: false };
+    let from_game = |text: &str| rt.host().and_then(|h| h.block_facts(text));
+    // A vanilla block's object is its name; a mod's holds fields.
+    let Some(b) = rt.registered.get(&("block".to_owned(), name.to_owned())).copied().filter(|b| rt.str_of(*b).is_none()) else {
+        return from_game(text).unwrap_or(java);
+    };
+    let props = rt.get_field(b, "$properties");
+    let mut facts = rt.str_of(rt.get_field(props, "$copy")).and_then(from_game).unwrap_or(java);
+    let set = |k: &'static str| props.r() != 0 && !matches!(rt.get_field(props, k), V::NULL | V::Void);
+    if set("$destroy") {
+        facts.hardness = rt.get_field(props, "$destroy").f();
+    }
+    if set("$push") {
+        facts.push = rt.get_field(rt.get_field(props, "$push"), "$ordinal").i().clamp(0, 4) as u8;
+    }
+    if rt.get_field(props, "$replaceable").i() != 0 {
+        facts.replaceable = true;
+    }
+    facts
+}
+
+/// `PushReaction`'s constant by its serialized name (`normal`).
+pub(crate) fn push_reaction_named(rt: &mut Rt, name: &str) -> V {
+    vanilla_enum_constant(rt, PUSH_REACTION, name).unwrap_or(V::NULL)
+}
+
+/// `BlockState.getPistonPushReaction()`, as NeoForge's: the block's own answer for the state when it
+/// gives one, else its properties'.
+pub(crate) fn push_reaction(rt: &mut Rt, text: &str) -> V {
+    if let Some((b, class)) = crate::glue::mod_block(rt, text)
+        && rt.overrides.is_some_and(|o| o(class, GET_PUSH_REACTION))
+        && let Some(vc) = rt.vcall
+    {
+        let st = api::state(rt, text);
+        let own = vc(rt, GET_PUSH_REACTION_KEY, GET_PUSH_REACTION, &[b, st]);
+        rt.report_thrown("getPistonPushReaction");
+        if own.r() != 0 {
+            return own;
+        }
+    }
+    let i = state_facts(rt, text).push as usize;
+    vanilla_enum_constant(rt, PUSH_REACTION, PUSH_REACTIONS[i.min(4)]).unwrap_or(V::NULL)
+}
+
 /// Vanilla enum `class`'s constant whose serialized name is `text` (`floor` is
 /// `BellAttachType.FLOOR`): one object per constant, as `values()` and the static fields give them.
 pub(crate) fn vanilla_enum_constant(rt: &mut Rt, class: &str, text: &str) -> Option<V> {
@@ -303,7 +363,15 @@ fn dye_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 fn enum_class(class: &str) -> bool {
     vanilla_enum(class).is_some()
         && (class.starts_with("net/minecraft/world/level/block/state/properties/")
-            || matches!(class, DYE_COLOR | "net/minecraft/world/level/block/WeatheringCopper$WeatherState" | "net/minecraft/world/item/ArmorItem$Type"))
+            || matches!(
+                class,
+                DYE_COLOR
+                    | PUSH_REACTION
+                    | crate::rotation::ROTATION
+                    | crate::rotation::MIRROR
+                    | "net/minecraft/world/level/block/WeatheringCopper$WeatherState"
+                    | "net/minecraft/world/item/ArmorItem$Type"
+            ))
 }
 
 /// Values of vanilla enums a mod's own property may take (`EnumProperty.create(name, Half.class)`).
@@ -325,6 +393,9 @@ fn vanilla_enum(class: &str) -> Option<&'static [&'static str]> {
         "Tilt" => &["none", "unstable", "partial", "full"],
         "RailShape" => &RAIL_SHAPES,
         "WeatheringCopper$WeatherState" => &["unaffected", "exposed", "weathered", "oxidized"],
+        "PushReaction" => &PUSH_REACTIONS,
+        "Rotation" if class == crate::rotation::ROTATION => &crate::rotation::ROTATIONS,
+        "Mirror" if class == crate::rotation::MIRROR => &crate::rotation::MIRRORS,
         "ArmorItem$Type" => &["helmet", "chestplate", "leggings", "boots", "body"],
         "DyeColor" => &[
             "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown",
@@ -588,6 +659,8 @@ fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
         "friction" => set(rt, "$friction", a(1)),
         "randomTicks" => set(rt, "$randomTicks", V::I(1)),
         "mapColor" => set(rt, "$mapColor", a(1)),
+        "pushReaction" => set(rt, "$push", a(1)),
+        "replaceable" => set(rt, "$replaceable", V::I(1)),
         _ => None,
     }
 }
@@ -1284,5 +1357,60 @@ mod tests {
         let up = api_common::direction(&mut rt, 1);
         let p = jutil::table_get(&mut rt, by, up).unwrap();
         assert_eq!(api_common::prop_parts(&rt, p).0, "up");
+    }
+
+    /// What Create's movement checks ask of a block before a contraption takes it: a vanilla block's
+    /// answers are the game's, a mod block's what its properties set (over the vanilla block they
+    /// copy), and the push reaction is the constant a `!=` compares.
+    #[test]
+    fn a_states_destroy_time_push_reaction_and_replaceability_come_from_its_properties() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = crate::host::MemoryHost::default();
+        host.facts.insert("minecraft:oak_planks".into(), BlockFacts { hardness: 2.0, push: 0, replaceable: false });
+        host.facts.insert("minecraft:obsidian".into(), BlockFacts { hardness: 50.0, push: 2, replaceable: false });
+        host.facts.insert("minecraft:short_grass".into(), BlockFacts { hardness: 0.0, push: 1, replaceable: true });
+        let k = |s: &str| -> &'static str { Box::leak(format!("{BLOCK_PROPERTIES}.{s}").into_boxed_str()) };
+        // A mod block pistons can't move, which nothing breaks.
+        let p = props(&mut rt);
+        let blocked = api::get_static(&mut rt, "net/minecraft/world/level/material/PushReaction.BLOCK");
+        api::call(&mut rt, k("pushReaction.(Lnet/minecraft/world/level/material/PushReaction;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[p, blocked]);
+        api::call(&mut rt, k("strength.(F)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[p, V::F(-1.0)]);
+        let b = rt.new_object("net/minecraft/world/level/block/Block");
+        api::call(&mut rt, "net/minecraft/world/level/block/Block.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[b, p]);
+        rt.registered.insert(("block".into(), "ruby:anchor".into()), b);
+        // A mod block copying obsidian, made replaceable.
+        let obsidian = api::get_static(&mut rt, "net/minecraft/world/level/block/Blocks.OBSIDIAN");
+        let q = api::call(&mut rt, k("ofFullCopy.(Lnet/minecraft/world/level/block/state/BlockBehaviour;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[obsidian]);
+        api::call(&mut rt, k("replaceable.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[q]);
+        let c = rt.new_object("net/minecraft/world/level/block/Block");
+        api::call(&mut rt, "net/minecraft/world/level/block/Block.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[c, q]);
+        rt.registered.insert(("block".into(), "ruby:dark_glass".into()), c);
+
+        const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
+        let ask = |rt: &mut Rt, state: &str| {
+            let st = api::state(rt, state);
+            let push = api::call(rt, Box::leak(format!("{STATE}.getPistonPushReaction.()Lnet/minecraft/world/level/material/PushReaction;").into_boxed_str()), &[st]);
+            let speed = api::call(rt, Box::leak(format!("{STATE}.getDestroySpeed.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)F").into_boxed_str()), &[st, V::NULL, V::NULL]);
+            let replace = api::call(rt, Box::leak(format!("{STATE}.canBeReplaced.()Z").into_boxed_str()), &[st]);
+            let name = rt.str_of(rt.get_field(push, "$name")).unwrap_or("null").to_owned();
+            (name, speed.f(), replace.i())
+        };
+        let answers = rt.with_host(&mut host, |rt| {
+            ["minecraft:oak_planks", "minecraft:obsidian", "minecraft:short_grass", "ruby:anchor", "ruby:dark_glass"].map(|s| ask(rt, s))
+        });
+        assert_eq!(
+            answers,
+            [
+                ("NORMAL".to_owned(), 2.0, 0),
+                ("BLOCK".to_owned(), 50.0, 0),
+                ("DESTROY".to_owned(), 0.0, 1),
+                ("BLOCK".to_owned(), -1.0, 0),
+                ("BLOCK".to_owned(), 50.0, 1),
+            ]
+        );
+        // The constant a state gives is the one the static field holds (`!= PushReaction.BLOCK`).
+        let push = rt.with_host(&mut host, |rt| push_reaction(rt, "ruby:anchor"));
+        assert_eq!(push, blocked);
     }
 }

@@ -425,6 +425,27 @@ impl Game<'_> {
         }
         *out = draw.vertices;
     }
+
+    /// What mods keep in the level besides blocks, block entities and mobs
+    /// (`native_level_submit`: a translated mod's entities), drawn relative to
+    /// `camera` and culled as entities are. Lit at full brightness until the
+    /// hook can light each thing at its own place.
+    pub(super) fn mod_level_geometry(&self, camera: DVec3, partial: f32, out: &mut Vec<Vertex>) {
+        let mut draw = BlockEntityDraw {
+            partial,
+            game_time: self.world.game_time,
+            light: 0xF0F0,
+            block: camera.floor().as_ivec3().to_array(),
+            poses: vec![Mat4::IDENTITY],
+            lights: diffuse_lights(self.dim == Dim::Nether),
+            vertices: std::mem::take(out),
+            kept: false,
+        };
+        let start = draw.vertices.len();
+        self.native_level_submit(camera.to_array(), &mut draw);
+        self.cull_entity_vertices(&mut draw.vertices, start);
+        *out = draw.vertices;
+    }
 }
 
 /// Helpers for drawing mod block entities, kept as stable as the hook points.

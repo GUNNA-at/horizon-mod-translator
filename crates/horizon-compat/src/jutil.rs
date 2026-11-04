@@ -120,6 +120,9 @@ pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
 /// `a.compareTo(b)` (or `comparator.compare(a, b)`), for sorting.
 pub fn compare(rt: &mut Rt, comparator: V, a: V, b: V) -> i32 {
     if comparator.r() != 0 {
+        if rt.class_of(comparator) == "java/util/Comparator" && !matches!(rt.get_field(comparator, "$how"), V::Void) {
+            return compare_built(rt, comparator, a, b);
+        }
         return rt.call_functional("java/util/Comparator.compare.(Ljava/lang/Object;Ljava/lang/Object;)I", comparator, &[a, b]).i();
     }
     match (rt.str_of(a), rt.str_of(b)) {
@@ -144,6 +147,90 @@ pub fn compare(rt: &mut Rt, comparator: V, a: V, b: V) -> i32 {
         },
         // Enums: by ordinal.
         _ => (rt.get_field(a, "$ordinal").i()).cmp(&rt.get_field(b, "$ordinal").i()) as i32,
+    }
+}
+
+/// `Comparator`'s own combinators (`comparing`, `thenComparing`, `reversed`, `nullsFirst`...): each
+/// makes a comparator whose `$how` says how it compares, on what (`$x`, `$y`); `compare` reads it
+/// back. Their receiver can be any comparator, a lambda's included.
+fn comparator_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    fn made(rt: &mut Rt, how: &str, x: V, y: V) -> V {
+        let c = rt.new_object("java/util/Comparator");
+        let h = rt.string(how);
+        rt.put_field(c, "$how", h);
+        rt.put_field(c, "$x", x);
+        rt.put_field(c, "$y", y);
+        c
+    }
+    // `thenComparing(...)`'s second comparator, from what follows the receiver.
+    let key_of = |rt: &mut Rt, at: usize| -> V {
+        match desc {
+            d if d.starts_with("(Ljava/util/function/Function;Ljava/util/Comparator;)") => made(rt, "key", a(at), a(at + 1)),
+            d if d.starts_with("(Ljava/util/function/Function;)") => made(rt, "key", a(at), V::NULL),
+            d if d.starts_with("(Ljava/util/function/ToIntFunction;)") => made(rt, "int", a(at), V::NULL),
+            d if d.starts_with("(Ljava/util/function/ToLongFunction;)") => made(rt, "long", a(at), V::NULL),
+            d if d.starts_with("(Ljava/util/function/ToDoubleFunction;)") => made(rt, "double", a(at), V::NULL),
+            _ => a(at),
+        }
+    };
+    Some(match name {
+        "comparing" | "comparingInt" | "comparingLong" | "comparingDouble" => key_of(rt, 0),
+        "naturalOrder" => made(rt, "natural", V::NULL, V::NULL),
+        "reverseOrder" => made(rt, "reversed", V::NULL, V::NULL),
+        "nullsFirst" => made(rt, "nulls-first", a(0), V::NULL),
+        "nullsLast" => made(rt, "nulls-last", a(0), V::NULL),
+        "reversed" => made(rt, "reversed", a(0), V::NULL),
+        "thenComparing" | "thenComparingInt" | "thenComparingLong" | "thenComparingDouble" => {
+            let second = key_of(rt, 1);
+            made(rt, "then", a(0), second)
+        }
+        "compare" if !matches!(rt.get_field(a(0), "$how"), V::Void) => V::I(compare_built(rt, a(0), a(1), a(2))),
+        _ => return None,
+    })
+}
+
+/// What a comparator made by [`comparator_call`] answers for `(x, y)`.
+fn compare_built(rt: &mut Rt, c: V, x: V, y: V) -> i32 {
+    let how = rt.str_of(rt.get_field(c, "$how")).unwrap_or("").to_owned();
+    let (f, g) = (rt.get_field(c, "$x"), rt.get_field(c, "$y"));
+    match how.as_str() {
+        "key" => {
+            let (kx, ky) = (rt.call_functional(APPLY, f, &[x]), rt.call_functional(APPLY, f, &[y]));
+            compare(rt, g, kx, ky)
+        }
+        "int" => {
+            let k = "java/util/function/ToIntFunction.applyAsInt.(Ljava/lang/Object;)I";
+            let (kx, ky) = (rt.call_functional(k, f, &[x]).i(), rt.call_functional(k, f, &[y]).i());
+            kx.cmp(&ky) as i32
+        }
+        "long" => {
+            let k = "java/util/function/ToLongFunction.applyAsLong.(Ljava/lang/Object;)J";
+            let (kx, ky) = (rt.call_functional(k, f, &[x]).j(), rt.call_functional(k, f, &[y]).j());
+            kx.cmp(&ky) as i32
+        }
+        "double" => {
+            let k = "java/util/function/ToDoubleFunction.applyAsDouble.(Ljava/lang/Object;)D";
+            let (kx, ky) = (rt.call_functional(k, f, &[x]).d(), rt.call_functional(k, f, &[y]).d());
+            kx.total_cmp(&ky) as i32
+        }
+        "natural" => compare(rt, V::NULL, x, y),
+        "reversed" => compare(rt, f, y, x),
+        "then" => match compare(rt, f, x, y) {
+            0 => compare(rt, g, x, y),
+            r => r,
+        },
+        "nulls-first" | "nulls-last" => {
+            let first = if how == "nulls-first" { -1 } else { 1 };
+            match (x.r() == 0, y.r() == 0) {
+                (true, true) => 0,
+                (true, false) => first,
+                (false, true) => -first,
+                _ if f.r() == 0 => 0,
+                _ => compare(rt, f, x, y),
+            }
+        }
+        _ => 0,
     }
 }
 
@@ -328,6 +415,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     // Statics first.
     if let Some(v) = statics(rt, owner, name, desc, args) {
+        return Some(v);
+    }
+    if owner == "java/util/Comparator"
+        && let Some(v) = comparator_call(rt, name, desc, args)
+    {
         return Some(v);
     }
     if matches!(owner, "java/util/concurrent/CompletableFuture" | "java/util/concurrent/Future" | "java/util/concurrent/CompletionStage") {
@@ -660,6 +752,31 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
                 if let [k, v] = kv {
                     table_put(rt, m, *k, *v);
                 }
+            }
+            m
+        }
+        // `ImmutableMap.copyOf(map)` (or of entries) and `Map.copyOf`: a map of its own, in the
+        // source's order; a sorted one's keys in their natural order.
+        (
+            "java/util/Map" | "com/google/common/collect/ImmutableMap" | "com/google/common/collect/ImmutableSortedMap" | "com/google/common/collect/ImmutableBiMap",
+            "copyOf",
+        ) => {
+            let sorted = owner.ends_with("SortedMap");
+            let class = if sorted { "java/util/TreeMap" } else { "java/util/LinkedHashMap" };
+            let m = rt.alloc(class, Data::Table(Table { sorted, ..Table::default() }));
+            let pairs: Vec<(V, V)> = if desc.starts_with("(Ljava/lang/Iterable;") {
+                elements(rt, a(0))
+                    .into_iter()
+                    .map(|e| {
+                        let kv = elements(rt, e);
+                        (kv.first().copied().unwrap_or_default(), kv.get(1).copied().unwrap_or_default())
+                    })
+                    .collect()
+            } else {
+                table_entries(rt, a(0))
+            };
+            for (k, v) in pairs {
+                table_put(rt, m, k, v);
             }
             m
         }
@@ -2187,6 +2304,37 @@ mod tests {
         assert_eq!(rt.thrown.map(|e| rt.class_of(e)), Some("java/lang/IllegalArgumentException"));
     }
 
+    /// Create sorts with `Comparator.comparing(key)`, `thenComparing(next)` and `reversed()`: by the
+    /// key first, ties by the next, and the whole order turned around; `nullsFirst` puts nulls ahead.
+    #[test]
+    fn comparators_compose_as_javas_do() {
+        // Lambda 1: a word's length, boxed (natural order); lambda 2: the word itself.
+        fn keys(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let w = rt.str_of(args[1]).unwrap_or("").to_owned();
+            Some(if id == 1 { crate::api_common::integer(rt, w.len() as i32) } else { args[1] })
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(keys);
+        let (by_len, by_word) = (rt.lambda_id("java/util/function/Function", 1, vec![]), rt.lambda_id("java/util/function/Function", 2, vec![]));
+        let cmp = c(&mut rt, "java/util/Comparator.comparing.(Ljava/util/function/Function;)Ljava/util/Comparator;", &[by_len]);
+        let cmp = c(&mut rt, "java/util/Comparator.thenComparing.(Ljava/util/function/Function;)Ljava/util/Comparator;", &[cmp, by_word]);
+        let words: Vec<V> = ["pear", "fig", "apple", "kiwi"].iter().map(|w| rt.string(w)).collect();
+        let list = new_list(&mut rt, words);
+        let texts = |rt: &Rt, l: V| -> Vec<String> { elements(rt, l).iter().map(|&v| rt.str_of(v).unwrap_or("null").to_owned()).collect() };
+        c(&mut rt, "java/util/List.sort.(Ljava/util/Comparator;)V", &[list, cmp]);
+        assert_eq!(texts(&rt, list), ["fig", "kiwi", "pear", "apple"]);
+        let back = c(&mut rt, "java/util/Comparator.reversed.()Ljava/util/Comparator;", &[cmp]);
+        c(&mut rt, "java/util/List.sort.(Ljava/util/Comparator;)V", &[list, back]);
+        assert_eq!(texts(&rt, list), ["apple", "pear", "kiwi", "fig"]);
+        let natural = c(&mut rt, "java/util/Comparator.naturalOrder.()Ljava/util/Comparator;", &[]);
+        let nulls = c(&mut rt, "java/util/Comparator.nullsFirst.(Ljava/util/Comparator;)Ljava/util/Comparator;", &[natural]);
+        let (b, a) = (rt.string("b"), rt.string("a"));
+        let mixed = new_list(&mut rt, vec![b, V::NULL, a]);
+        c(&mut rt, "java/util/List.sort.(Ljava/util/Comparator;)V", &[mixed, nulls]);
+        assert_eq!(texts(&rt, mixed), ["null", "a", "b"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     #[test]
     fn a_primitive_maps_computed_value_is_kept() {
         // A counter, as Create's recipe trie numbers its variants: `computeIfAbsent(v, k -> next++)`.
@@ -2442,6 +2590,12 @@ mod tests {
         c(&mut rt, put, &[m, k, V::I(16)]);
         let map = c(&mut rt, "com/google/common/collect/ImmutableMap$Builder.buildKeepingLast.()Lcom/google/common/collect/ImmutableMap;", &[m]);
         assert_eq!(c(&mut rt, "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[map, k]), V::I(16));
+        // `ImmutableMap.copyOf(map)` (Create's contraption storage): the same entries, kept when the
+        // source changes after.
+        let copy = c(&mut rt, "com/google/common/collect/ImmutableMap.copyOf.(Ljava/util/Map;)Lcom/google/common/collect/ImmutableMap;", &[map]);
+        c(&mut rt, "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[map, k, V::I(32)]);
+        assert_eq!(c(&mut rt, "com/google/common/collect/ImmutableMap.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[copy, k]), V::I(16));
+        assert_eq!(c(&mut rt, "com/google/common/collect/ImmutableMap.size.()I", &[copy]), V::I(1));
     }
 
     #[test]

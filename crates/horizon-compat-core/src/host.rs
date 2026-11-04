@@ -112,6 +112,10 @@ pub trait Host {
     /// Sets a block state; false when the game refused it (unknown block, unloaded).
     fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool;
     /// Whether the world is the authoritative server (`Level.isClientSide()` is the negation).
+    /// The dimension the hook's level is (`minecraft:overworld`): a mod entity ticks in its own.
+    fn dimension(&self) -> String {
+        "minecraft:overworld".into()
+    }
     fn is_server(&self) -> bool {
         true
     }
@@ -210,6 +214,11 @@ pub trait Host {
     fn ingredient_items(&self, _entry: &str) -> Vec<String> {
         Vec::new()
     }
+    /// What the game knows of block state `state` (`minecraft:oak_planks`, as
+    /// [`Host::block_state`] gives them). None for a state the game doesn't know.
+    fn block_facts(&self, _state: &str) -> Option<BlockFacts> {
+        None
+    }
     /// Whether block `block` (`minecraft:oak_leaves`) is in block tag `tag` (`minecraft:leaves`, no
     /// `#`), as the game's loaded tags hold it (`BlockState.is(TagKey)`). False for a tag the game
     /// doesn't have.
@@ -226,6 +235,11 @@ pub trait Host {
     /// `FlowingFluid.getFlow`): x, y, z, zero for still fluid or none.
     fn fluid_flow(&self, _pos: [i32; 3]) -> [f64; 3] {
         [0.0; 3]
+    }
+    /// The server's players: UUID and where each is (in the hook's dimension or not). None on a
+    /// client.
+    fn players(&self) -> Vec<(u128, [f64; 3])> {
+        Vec::new()
     }
     /// Sends a mod's payload on the game's mod message channel: `channel` is the payload type's id
     /// (`create:server_speed`), `data` what its `StreamCodec` wrote. False when it can't go (no
@@ -253,6 +267,19 @@ pub trait Host {
     fn spawn_item_entity(&mut self, _item: &str, _count: u32, _pos: [f64; 3], _motion: [f64; 3], _pickup_delay: u32) -> Option<u32> {
         None
     }
+}
+
+/// What vanilla's block state accessors read from a block's properties: what the game knows of a
+/// state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockFacts {
+    /// Destroy time (`getDestroySpeed`), -1 for a block nothing breaks.
+    pub hardness: f32,
+    /// How pistons move it (`getPistonPushReaction`), as `PushReaction`'s ordinal: 0 normal,
+    /// 1 destroy, 2 block, 3 ignore, 4 push only.
+    pub push: u8,
+    /// Whether placing a block where it is replaces it (`canBeReplaced()`).
+    pub replaceable: bool,
 }
 
 /// A world in a map, for tests and tools. Unset positions are air.
@@ -299,6 +326,12 @@ pub struct MemoryHost {
     pub stack_limits: HashMap<String, u32>,
     /// The level's item entities, in order.
     pub item_entities: Vec<ItemEntity>,
+    /// Block facts by block (`minecraft:oak_planks`, any of its states).
+    pub facts: HashMap<String, BlockFacts>,
+    /// The server's players and where they are.
+    pub players: Vec<(u128, [f64; 3])>,
+    /// A client's world: its runtime's hooks are a client's (`is_server` false).
+    pub client: bool,
 }
 
 impl Host for MemoryHost {
@@ -308,6 +341,9 @@ impl Host for MemoryHost {
     fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {
         self.blocks.insert(pos, state.to_owned());
         true
+    }
+    fn is_server(&self) -> bool {
+        !self.client
     }
     fn game_time(&self) -> i64 {
         self.time
@@ -392,6 +428,9 @@ impl Host for MemoryHost {
             None => Vec::new(),
         }
     }
+    fn block_facts(&self, state: &str) -> Option<BlockFacts> {
+        self.facts.get(state.split('[').next().unwrap_or(state)).copied()
+    }
     fn block_in_tag(&self, block: &str, tag: &str) -> bool {
         self.block_tags.get(tag).is_some_and(|b| b.iter().any(|x| x == block))
     }
@@ -407,6 +446,9 @@ impl Host for MemoryHost {
     fn send_payload(&mut self, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
         self.payloads.push((to, channel.to_owned(), data.to_vec()));
         true
+    }
+    fn players(&self) -> Vec<(u128, [f64; 3])> {
+        self.players.clone()
     }
     fn item_entities(&self, bounds: [f64; 6]) -> Vec<ItemEntity> {
         self.item_entities.iter().filter(|e| e.count > 0 && boxes_meet(&e.bounds(), &bounds)).cloned().collect()

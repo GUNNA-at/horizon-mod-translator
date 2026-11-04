@@ -1821,6 +1821,16 @@ impl Game<'_> {
     ) {
         let _ = (pos, block, state, entity, bounds);
     }
+    /// Draw what your mod keeps in the level besides blocks, block entities
+    /// and mobs (a translated mod's own entities, by their renderers) on this
+    /// client, once a frame. Add geometry with `native_draw_quad`,
+    /// `native_draw_cube`, `native_draw_block` and `native_draw_item` under
+    /// `draw`'s pose stack, which starts at `camera` (the camera's position),
+    /// in blocks; `draw` also has the partial tick and the game time. API
+    /// @API:level_submit@.
+    pub(super) fn native_level_submit(&self, camera: [f64; 3], draw: &mut BlockEntityDraw) {
+        let _ = (camera, draw);
+    }
     /// Draw the mob `mob` (its id, kind, custom name and the frame's body
     /// and head turns and walk cycle, `LivingEntityRenderState`) on this
     /// client with a model of your own, once a frame while it is in view
@@ -3676,15 +3686,26 @@ impl GameLevel<'_> {
     /// with an id (`native_state_for_placement`). None for an unknown block,
     /// property or value. API 81.
     pub(super) fn native_state_from_text(&self, text: &str) -> Option<BlockStateId> {
-        let (name, props) = match text.split_once('[') {
-            Some((n, rest)) => (n, rest.trim_end_matches(']')),
-            None => (text, ""),
-        };
-        let mut id = self.registry.default_state(name)?;
-        for (k, v) in props.split(',').filter_map(|p| p.split_once('=')) {
-            id = with_property(self.registry, id, k, v)?;
+        state_from_text(self.registry, text)
+    }
+    /// What vanilla's state accessors give for the state `text` names (as
+    /// [`Self::native_state_text`] writes it): its destroy time
+    /// (`getDestroySpeed`, -1 for a block nothing breaks), how pistons move
+    /// it (`getPistonPushReaction`, as `PushReaction`'s ordinal: normal,
+    /// destroy, block, ignore, push only) and whether a block placed there
+    /// replaces it (`canBeReplaced`). None for an unknown block, property or
+    /// value.
+    pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool)> {
+        Some(state_facts(self.behaviours, self.native_state_from_text(text)?))
+    }
+    /// The dimension this level is (`minecraft:the_nether`), as
+    /// `Game::native_dimension` names the current one.
+    pub(super) fn native_dimension_name(&self) -> &'static str {
+        match self.dimension {
+            LevelDimension::Overworld => "minecraft:overworld",
+            LevelDimension::Nether => "minecraft:the_nether",
+            LevelDimension::End => "minecraft:the_end",
         }
-        Some(id)
     }
     /// Sets the block at `pos` from text as [`Self::native_state_text`] gives it
     /// (properties not named keep the block's defaults), through
@@ -3807,22 +3828,16 @@ impl Game<'_> {
     /// Sets the block at `pos` in the current authoritative level from text
     /// (`GameLevel::native_set_state_text` for hooks on `Game`). API 81.
     pub(super) fn native_set_state_text_at(&mut self, pos: [i32; 3], text: &str, flags: i32) -> bool {
-        let (name, props) = match text.split_once('[') {
-            Some((n, rest)) => (n, rest.trim_end_matches(']')),
-            None => (text, ""),
-        };
-        let registry = self.pack.assets.registry;
-        let Some(mut id) = registry.default_state(name) else {
+        let Some(id) = state_from_text(self.pack.assets.registry, text) else {
             return false;
         };
-        for (k, v) in props.split(',').filter_map(|p| p.split_once('=')) {
-            match with_property(registry, id, k, v) {
-                Some(next) => id = next,
-                None => return false,
-            }
-        }
         let dimension = self.dim.id().to_owned();
         self.native_set_block(&dimension, pos, id, flags)
+    }
+    /// What vanilla's state accessors give for the state `text` names, as
+    /// `GameLevel::native_state_facts` answers, for hooks on `Game`.
+    pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool)> {
+        Some(state_facts(self.res.behaviours(), state_from_text(self.pack.assets.registry, text)?))
     }
     /// Sets a block in the current authoritative level through `Level.setBlock`.
     /// Returns false for another dimension, an invalid state, or no change.
@@ -5589,6 +5604,35 @@ fn mod_menu(name: &str) -> Option<(&'static str, usize)> {
         .into_iter()
         .find(|(menu, _)| *menu == name)
         .or_else(|| horizon_client::containers::mod_menu_type(name).map(|m| (m.id, m.slots)))
+}
+
+/// The state `text` names (`create:shaft[axis=y]`; properties not named keep
+/// the block's defaults); none for an unknown block, property or value.
+fn state_from_text(registry: &BlockRegistry, text: &str) -> Option<BlockStateId> {
+    let (name, props) = match text.split_once('[') {
+        Some((n, rest)) => (n, rest.trim_end_matches(']')),
+        None => (text, ""),
+    };
+    let mut id = registry.default_state(name)?;
+    for (k, v) in props.split(',').filter_map(|p| p.split_once('=')) {
+        id = with_property(registry, id, k, v)?;
+    }
+    Some(id)
+}
+
+/// A state's destroy time, push reaction (`PushReaction`'s ordinal) and
+/// replaceability, as vanilla's `BlockStateBase` keeps them.
+fn state_facts(behaviours: &horizon_world::level::Behaviours, state: BlockStateId) -> (f32, u8, bool) {
+    use horizon_world::level::PushReaction;
+    let f = behaviours.facts(state);
+    let push = match f.push {
+        PushReaction::PushPull => 0,
+        PushReaction::Popped => 1,
+        PushReaction::Immoveable => 2,
+        PushReaction::IgnoreEntity => 3,
+        PushReaction::Push => 4,
+    };
+    (f.hardness, push, behaviours.is_replaceable(state))
 }
 
 /// `state` with its property `key` set to `value`; none when the block has

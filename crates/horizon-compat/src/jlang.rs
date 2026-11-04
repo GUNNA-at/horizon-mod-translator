@@ -23,6 +23,28 @@ pub fn class_object(rt: &mut Rt, name: &str) -> V {
     rt.alloc("java/lang/Class", Data::Str(name.into()))
 }
 
+/// An enum class's constants (`Class.getEnumConstants`): a mod enum's `values()`, or a vanilla
+/// enum's as the API answers it (`Direction.Axis.values()`). None for a class that isn't one.
+fn enum_constants(rt: &mut Rt, class: &str) -> Option<V> {
+    if let Some(v) = rt.reflect(class, "values", &[]) {
+        return Some(v);
+    }
+    let key = rt.static_key(&format!("{class}.values.()[L{class};"));
+    let before = rt.unmapped.get(key).copied().unwrap_or(0);
+    let v = crate::api::call(rt, key, &[]);
+    if rt.unmapped.get(key).copied().unwrap_or(0) != before {
+        // Not an enum the API knows: the miss isn't the mod's.
+        match rt.unmapped.get_mut(key) {
+            Some(n) if *n > 1 => *n -= 1,
+            _ => {
+                rt.unmapped.remove(key);
+            }
+        }
+        return None;
+    }
+    (v.r() != 0).then_some(v)
+}
+
 /// Whether `Class.forName` finds `name` (internal form) outside the mod: the JDK's, the game's and
 /// the loader's classes, and the libraries the game ships.
 fn platform_class(name: &str) -> bool {
@@ -192,6 +214,54 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "java/lang/String" | "java/lang/CharSequence" => string(rt, name, desc, &ks, args),
         "java/lang/StringBuilder" | "java/lang/StringBuffer" | "java/lang/AbstractStringBuilder" => builder(rt, name, &ks, args),
         "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Double" | "java/lang/Float" | "java/lang/Number" => number(rt, owner, name, desc, &ks, args),
+        // One runtime runs on one thread, so a thread-local is one value, made by its supplier on
+        // the first `get` (`ThreadLocal.withInitial(ArrayList::new)`).
+        "java/lang/ThreadLocal" | "java/lang/InheritableThreadLocal" => Some(match name {
+            "withInitial" => {
+                let t = rt.new_object("java/lang/ThreadLocal");
+                rt.put_field(t, "$supplier", a(0));
+                t
+            }
+            "<init>" => V::Void,
+            "get" => {
+                if rt.get_field(a(0), "$set").i() == 0 {
+                    let supplier = rt.get_field(a(0), "$supplier");
+                    let v = if supplier.r() != 0 { rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", supplier, &[]) } else { V::NULL };
+                    rt.put_field(a(0), "$value", v);
+                    rt.put_field(a(0), "$set", V::I(1));
+                }
+                rt.get_field(a(0), "$value")
+            }
+            "set" => {
+                rt.put_field(a(0), "$value", a(1));
+                rt.put_field(a(0), "$set", V::I(1));
+                V::Void
+            }
+            "remove" => {
+                rt.put_field(a(0), "$set", V::I(0));
+                V::Void
+            }
+            _ => return None,
+        }),
+        // Nothing here is collected while a reference is held, so a weak or soft reference keeps
+        // what it was given until cleared.
+        "java/lang/ref/WeakReference" | "java/lang/ref/SoftReference" | "java/lang/ref/Reference" => Some(match name {
+            "<init>" => {
+                rt.put_field(a(0), "$referent", a(1));
+                V::Void
+            }
+            "get" => match rt.get_field(a(0), "$referent") {
+                V::Void => V::NULL,
+                v => v,
+            },
+            "clear" => {
+                rt.put_field(a(0), "$referent", V::NULL);
+                V::Void
+            }
+            "refersTo" => V::I((rt.get_field(a(0), "$referent") == a(1) || (a(1) == V::NULL && rt.get_field(a(0), "$referent") == V::Void)) as i32),
+            "enqueue" | "isEnqueued" => V::I(0),
+            _ => return None,
+        }),
         "java/lang/Boolean" => Some(match name {
             "parseBoolean" => V::I(rt.str_of(a(0)).is_some_and(|s| s.eq_ignore_ascii_case("true")) as i32),
             "toString" if desc.starts_with("(Z)") => {
@@ -279,8 +349,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => return None,
         }),
         "java/lang/Enum" => Some(match name {
-            "name" | "toString" => rt.get_field(a(0), "$name"),
-            "compareTo" => V::I(rt.get_field(a(0), "$ordinal").i() - rt.get_field(a(1), "$ordinal").i()),
+            "name" | "toString" => crate::api_common::enum_name(rt, a(0), name == "toString"),
+            "compareTo" => V::I(crate::api_common::enum_ordinal(rt, a(0)) - crate::api_common::enum_ordinal(rt, a(1))),
             "hashCode" => V::I(a(0).r() as i32),
             "equals" => V::I((a(0) == a(1)) as i32),
             "getDeclaringClass" => {
@@ -325,12 +395,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 c
             }
             "getEnumConstants" => {
-                let n = rt.str_of(a(0)).unwrap_or("").to_owned();
-                rt.reflect(&n, "values", &[]).unwrap_or(V::NULL)
+                let n = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                enum_constants(rt, &n).unwrap_or(V::NULL)
             }
             "isEnum" => {
-                let n = rt.str_of(a(0)).unwrap_or("").to_owned();
-                V::I(rt.reflect(&n, "values", &[]).is_some() as i32)
+                let n = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                V::I(enum_constants(rt, &n).is_some() as i32)
             }
             "getSuperclass" => {
                 let n = rt.str_of(a(0)).unwrap_or("").to_owned();
@@ -1123,6 +1193,57 @@ mod tests {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))
     }
 
+    /// Ponder keeps its scratch objects in `ThreadLocal.withInitial(...)`: made once, on the first
+    /// `get`, then the same object each time. Create's event registrations pass `Triple.of(...)`.
+    #[test]
+    fn a_thread_local_makes_its_value_once_and_a_triple_keeps_three() {
+        fn fresh(rt: &mut Rt, _id: u32, _args: &[V]) -> Option<V> {
+            Some(rt.new_object("t/Scratch"))
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(fresh);
+        let supplier = rt.lambda_id("java/util/function/Supplier", 1, vec![]);
+        let local = c(&mut rt, "java/lang/ThreadLocal.withInitial.(Ljava/util/function/Supplier;)Ljava/lang/ThreadLocal;", &[supplier]);
+        let first = c(&mut rt, "java/lang/ThreadLocal.get.()Ljava/lang/Object;", &[local]);
+        assert_eq!(rt.class_of(first), "t/Scratch");
+        assert_eq!(c(&mut rt, "java/lang/ThreadLocal.get.()Ljava/lang/Object;", &[local]), first);
+        let (x, y, z) = (rt.string("x"), rt.string("y"), rt.string("z"));
+        let t = c(&mut rt, "org/apache/commons/lang3/tuple/Triple.of.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Lorg/apache/commons/lang3/tuple/Triple;", &[x, y, z]);
+        assert_eq!(c(&mut rt, "org/apache/commons/lang3/tuple/Triple.getMiddle.()Ljava/lang/Object;", &[t]), y);
+        assert_eq!(c(&mut rt, "org/apache/commons/lang3/tuple/Triple.getRight.()Ljava/lang/Object;", &[t]), z);
+    }
+
+    /// Create's contraption keeps its level behind a `WeakReference`; nothing collects it here.
+    #[test]
+    fn a_weak_reference_gives_back_what_it_holds_until_cleared() {
+        let mut rt = Rt::new();
+        let r = rt.new_object("java/lang/ref/WeakReference");
+        let level = rt.new_object("net/minecraft/world/level/Level");
+        c(&mut rt, "java/lang/ref/WeakReference.<init>.(Ljava/lang/Object;)V", &[r, level]);
+        assert_eq!(c(&mut rt, "java/lang/ref/WeakReference.get.()Ljava/lang/Object;", &[r]), level);
+        c(&mut rt, "java/lang/ref/Reference.clear.()V", &[r]);
+        assert_eq!(c(&mut rt, "java/lang/ref/WeakReference.get.()Ljava/lang/Object;", &[r]), V::NULL);
+    }
+
+    /// Create's `NBTHelper.readEnum(tag, key, Direction.Axis.class)` asks the class for its
+    /// constants: a vanilla enum answers with the API's own, a class that isn't an enum with null.
+    #[test]
+    fn a_vanilla_enum_class_lists_its_constants() {
+        let mut rt = Rt::new();
+        let axis = class_object(&mut rt, "net/minecraft/core/Direction$Axis");
+        let all = c(&mut rt, "java/lang/Class.getEnumConstants.()[Ljava/lang/Object;", &[axis]);
+        let mut names = Vec::new();
+        for v in crate::jutil::elements(&rt, all) {
+            let s = c(&mut rt, "java/lang/Enum.name.()Ljava/lang/String;", &[v]);
+            names.push(rt.str_of(s).unwrap_or("").to_owned());
+        }
+        assert_eq!(names, ["X", "Y", "Z"]);
+        assert_eq!(c(&mut rt, "java/lang/Class.isEnum.()Z", &[axis]), V::I(1));
+        let pos = class_object(&mut rt, "net/minecraft/core/BlockPos");
+        assert_eq!(c(&mut rt, "java/lang/Class.isEnum.()Z", &[pos]), V::I(0));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     #[test]
     fn strings_count_utf16_and_hash_as_java() {
         let mut rt = Rt::new();
@@ -1209,6 +1330,27 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (o, "getLeft" | "getKey" | "getFirst" | "left") if o.ends_with("Pair") => rt.get_field(a(0), "$left"),
         (o, "getRight" | "getValue" | "getSecond" | "right") if o.ends_with("Pair") => rt.get_field(a(0), "$right"),
+        // commons-lang's `Triple` (`ImmutableTriple`, `MutableTriple`): three values, as a pair's two.
+        ("org/apache/commons/lang3/tuple/Triple" | "org/apache/commons/lang3/tuple/ImmutableTriple" | "org/apache/commons/lang3/tuple/MutableTriple", "of" | "<init>") => {
+            let made = if owner.ends_with("MutableTriple") { "org/apache/commons/lang3/tuple/MutableTriple" } else { "org/apache/commons/lang3/tuple/Triple" };
+            let (t, at) = if name == "<init>" { (a(0), 1) } else { (rt.new_object(made), 0) };
+            for (i, f) in ["$left", "$middle", "$right"].into_iter().enumerate() {
+                rt.put_field(t, f, a(at + i));
+            }
+            if name == "<init>" { V::Void } else { t }
+        }
+        (o, "getLeft" | "left") if o.ends_with("Triple") => rt.get_field(a(0), "$left"),
+        (o, "getMiddle" | "middle") if o.ends_with("Triple") => rt.get_field(a(0), "$middle"),
+        (o, "getRight" | "right") if o.ends_with("Triple") => rt.get_field(a(0), "$right"),
+        ("org/apache/commons/lang3/tuple/MutableTriple", "setLeft" | "setMiddle" | "setRight") => {
+            let f = match name {
+                "setLeft" => "$left",
+                "setMiddle" => "$middle",
+                _ => "$right",
+            };
+            rt.put_field(a(0), f, a(1));
+            V::Void
+        }
         ("org/apache/commons/lang3/tuple/MutablePair", "setLeft" | "setRight" | "setValue") => {
             let old = rt.get_field(a(0), if name == "setLeft" { "$left" } else { "$right" });
             rt.put_field(a(0), if name == "setLeft" { "$left" } else { "$right" }, a(1));

@@ -300,7 +300,6 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (REGISTER_EVENT, "getRegistryKey" | "getRegistry") => rt.get_field(a(0), "$registry"),
         // A mod's own registry: `new RegistryBuilder<>(KEY).sync(true).onBake(cb).create()`, or made
         // through `NewRegistryEvent.create(builder)` or `DeferredRegister.makeRegistry(builder -> ..)`.
-        // Its other settings (`sync`, `maxId`, `defaultKey`...) return the builder.
         (REGISTRY_BUILDER, "<init>") => {
             rt.put_field(a(0), "$key", a(1));
             V::Void
@@ -315,6 +314,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             a(0)
         }
         (REGISTRY_BUILDER, "create") => make_registry(rt, a(0)),
+        // Its other settings (`sync`, `withIntrusiveHolders`, `maxId`, `defaultKey`...): nothing here
+        // syncs registries or caps their ids.
+        (REGISTRY_BUILDER, _) if desc.ends_with(")Lnet/neoforged/neoforge/registries/RegistryBuilder;") => a(0),
         (NEW_REGISTRY_EVENT, "create") => make_registry(rt, a(1)),
         (NEW_REGISTRY_EVENT, "register") => V::Void,
         (o, "makeRegistry") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
@@ -543,6 +545,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     }
                 }
                 "key" => rt.string(&reg),
+                // An intrusive holder (Create's `ContraptionType.holder`): made with its value before
+                // the value is registered; its key is the name the value is registered under then.
+                "createIntrusiveHolder" => registry_holder(rt, &reg, "", a(1)),
                 // A tag's members: tags from data files aren't read yet, so every tag of a registry
                 // is empty here (fluid tags hold vanilla's water and lava: `fluids.rs`).
                 "getTagOrEmpty" => crate::jutil::new_list(rt, Vec::new()),
@@ -554,6 +559,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "registryAccess") if o.starts_with("net/minecraft/") && (o.ends_with("Level") || o.ends_with("LevelAccessor") || o.ends_with("LevelReader") || o.ends_with("MinecraftServer")) => {
             rt.intern("compat:registry-access".into(), |rt| rt.new_object("net/minecraft/core/RegistryAccess"))
         }
+        // `level.holderLookup(Registries.BLOCK)`: the registry, as the level's registries give it.
+        (o, "holderLookup") if o.starts_with("net/minecraft/") && (o.ends_with("Level") || o.ends_with("LevelAccessor") || o.ends_with("LevelReader")) => a(1),
         (o, "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup") if o.starts_with("net/minecraft/core/") && (o.contains("RegistryAccess") || o.contains("HolderLookup") || o.contains("HolderGetter")) => {
             let key = a(1);
             if matches!(name, "registry" | "lookup") { optional(rt, key) } else { key }
@@ -561,19 +568,40 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("net/neoforged/bus/api/Event", "<init>") => V::Void,
         // A registry entry's `Holder` made above: its value, key and name.
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference", n) if rt.get_field(a(0), "$registry").r() != 0 => {
-            let (reg, id) = (rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned(), rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned());
+            let (reg, mut id) = (rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned(), rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned());
+            // An intrusive holder learns its name when its value is registered.
+            if id.is_empty()
+                && let Some(named) = registry_name_of(rt, &reg, rt.get_field(a(0), "$value"))
+            {
+                let s = rt.string(&named);
+                rt.put_field(a(0), "$id", s);
+                id = named;
+            }
             match n {
                 "value" | "get" => {
                     let v = rt.get_field(a(0), "$value");
                     if v.r() != 0 { v } else { registry_get(rt, &reg, &id) }
                 }
-                "isBound" => V::I(1),
+                "isBound" => V::I(!id.is_empty() as i32),
                 "key" => rt.string(&format!("{reg}#{id}")),
                 "unwrapKey" => {
                     let k = rt.string(&format!("{reg}#{id}"));
                     optional(rt, k)
                 }
                 "getRegisteredName" => rt.string(&id),
+                // In a tag of its registry, as the game's loaded tags hold them.
+                "is" if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
+                    let tag_registry = rt.str_of(rt.get_field(a(1), "$registry")).unwrap_or("").trim_start_matches("minecraft:").to_owned();
+                    let tag = rt.str_of(rt.get_field(a(1), "$location")).unwrap_or("").to_owned();
+                    let inside = tag_registry == reg.trim_start_matches("minecraft:")
+                        && match tag_registry.as_str() {
+                            "block" => rt.host().is_some_and(|h| h.block_in_tag(&id, &tag)),
+                            "fluid" => rt.host().is_some_and(|h| h.fluid_in_tag(&id, &tag)),
+                            "item" => crate::recipes::item_in_tag(rt, &id, &tag),
+                            _ => false,
+                        };
+                    V::I(inside as i32)
+                }
                 "is" => V::I((name_in(rt, a(1)) == id) as i32),
                 _ => return None,
             }
@@ -587,7 +615,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 location(rt, a(1))
             };
             register(rt, &reg, &n, a(2));
-            a(2)
+            if name == "registerForHolder" { registry_holder(rt, &reg, &n, a(2)) } else { a(2) }
         }
         // NeoForge's `Lazy`: a supplier run once.
         ("net/neoforged/neoforge/common/util/Lazy", "of" | "concurrentOf") => {
@@ -852,6 +880,29 @@ mod tests {
             _ => list_mut(rt, seen).push(args[1]),
         }
         Some(V::Void)
+    }
+
+    /// Create's `ContraptionType` makes its holder from the registry before it is registered
+    /// (`createIntrusiveHolder`), and a contraption is saved and sent under that holder's key.
+    #[test]
+    fn an_intrusive_holder_takes_the_name_its_value_is_registered_under() {
+        let mut rt = Rt::new();
+        let loc = rt.string("t:widget_type");
+        let key = call(&mut rt, "net/minecraft/resources/ResourceKey.createRegistryKey.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[loc]).unwrap();
+        let builder = rt.new_object(REGISTRY_BUILDER);
+        call(&mut rt, "net/neoforged/neoforge/registries/RegistryBuilder.<init>.(Lnet/minecraft/resources/ResourceKey;)V", &[builder, key]);
+        let b = crate::api::call(&mut rt, "net/neoforged/neoforge/registries/RegistryBuilder.withIntrusiveHolders.()Lnet/neoforged/neoforge/registries/RegistryBuilder;", &[builder]);
+        let registry = call(&mut rt, "net/neoforged/neoforge/registries/RegistryBuilder.create.()Lnet/minecraft/core/Registry;", &[b]).unwrap();
+        let widget = rt.new_object("t/Widget");
+        let own = call(&mut rt, "net/minecraft/core/Registry.createIntrusiveHolder.(Ljava/lang/Object;)Lnet/minecraft/core/Holder$Reference;", &[registry, widget]).unwrap();
+        assert_eq!(call(&mut rt, "net/minecraft/core/Holder$Reference.isBound.()Z", &[own]), Some(V::I(0)));
+        let id = rt.string("t:spinner");
+        let held = call(&mut rt, "net/minecraft/core/Registry.registerForHolder.(Lnet/minecraft/core/Registry;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Object;)Lnet/minecraft/core/Holder$Reference;", &[registry, id, widget]).unwrap();
+        assert_eq!(call(&mut rt, "net/minecraft/core/Holder$Reference.value.()Ljava/lang/Object;", &[held]), Some(widget));
+        let k = call(&mut rt, "net/minecraft/core/Holder$Reference.key.()Lnet/minecraft/resources/ResourceKey;", &[own]).unwrap();
+        let at = crate::api::call(&mut rt, "net/minecraft/resources/ResourceKey.location.()Lnet/minecraft/resources/ResourceLocation;", &[k]);
+        assert_eq!(rt.str_of(at), Some("t:spinner"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `CreateBuiltInRegistries`: a registry of the mod's own, made by `RegistryBuilder` with a bake

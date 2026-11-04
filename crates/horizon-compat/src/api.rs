@@ -70,7 +70,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         uncount(rt, up);
     }
     trace_unmapped(rt, key, args);
-    r
+    chained(rt, key, args).unwrap_or(r)
+}
+
+/// What an unmapped method returning its own class gives back, so a builder chain
+/// (`Properties.of().strength(1f).noOcclusion()`) goes on past the link nothing maps: the receiver,
+/// or a new object for a static factory. It stays a miss: the value is a stand-in, not vanilla's
+/// answer (an unmapped `BlockPos.containing` read as a new, zero position).
+fn chained(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let (owner, rest) = key.split_once('.')?;
+    if !rest.ends_with(&format!(")L{owner};")) {
+        return None;
+    }
+    let this = args.first().copied().unwrap_or_default();
+    Some(if this.r() != 0 && rt.class_of(this) == owner { this } else { rt.new_object(owner) })
 }
 
 /// Where a missed call is asked next. First up from the named class, a translated subclass to its
@@ -196,6 +209,15 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         "net/minecraft/core/BlockPos.offset.(III)Lnet/minecraft/core/BlockPos;" => {
             offset(rt, a(0), [a(1).i() as i64, a(2).i() as i64, a(3).i() as i64], 1)
+        }
+        // The block a point is in: `Mth.floor` of each coordinate (a `Position` is a `Vec3` here).
+        "net/minecraft/core/BlockPos.containing.(DDD)Lnet/minecraft/core/BlockPos;" => {
+            let [x, y, z] = [a(0), a(1), a(2)].map(|c| c.d().floor() as i32 as i64);
+            block_pos(rt, x, y, z)
+        }
+        "net/minecraft/core/BlockPos.containing.(Lnet/minecraft/core/Position;)Lnet/minecraft/core/BlockPos;" => {
+            let [x, y, z] = ["x", "y", "z"].map(|c| rt.get_field(a(0), c).d().floor() as i32 as i64);
+            block_pos(rt, x, y, z)
         }
         "net/minecraft/core/BlockPos.equals.(Ljava/lang/Object;)Z" | "net/minecraft/core/Vec3i.equals.(Ljava/lang/Object;)Z" => {
             V::I((native(rt, a(1))[3] == 0 && native(rt, a(0))[..3] == native(rt, a(1))[..3] && rt.heap.get(a(1).r() as usize).is_some_and(|o| matches!(o.data, Data::Native("BlockPos", _)))) as i32)
@@ -385,9 +407,11 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             .or_else(|| crate::handlers::call_key(rt, key, args))
             .or_else(|| crate::components::call_key(rt, key, args))
             .or_else(|| crate::capabilities::call_key(rt, key, args))
+            .or_else(|| crate::mod_entities::call_key(rt, key, args))
             .or_else(|| crate::entities::call_key(rt, key, args))
             .or_else(|| crate::creative::call(rt, key, args))
             .or_else(|| crate::functions::call(rt, key, args))
+            .or_else(|| crate::rotation::call(rt, key, args))
             .or_else(|| crate::blocks::call(rt, key, args))
             .or_else(|| crate::shapes::call(rt, key, args))
             .or_else(|| crate::neo::call(rt, key, args))
@@ -397,17 +421,11 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             .or_else(|| crate::quads::call(rt, key, args))
             .or_else(|| crate::render::call(rt, key, args))
             .or_else(|| world(rt, key, args))
+            .or_else(|| crate::palette::call(rt, key, args))
+            .or_else(|| crate::records::call(rt, key, args))
         {
             Some(v) => v,
             None => {
-                // Builder chains (`Properties.of().strength(1f).noOcclusion()`): a method
-                // returning its own class hands back the receiver.
-                if let Some((owner, rest)) = key.split_once('.')
-                    && rest.ends_with(&format!(")L{owner};"))
-                {
-                    // A static factory (`Properties.of()`) makes one; a chained call returns its receiver.
-                    return if a(0).r() != 0 && rt.class_of(a(0)) == owner { a(0) } else { rt.new_object(owner) };
-                }
                 *rt.unmapped.entry(key).or_insert(0) += 1;
                 V::Void
             }
@@ -425,6 +443,8 @@ const CAN_SURVIVE: &str = "canSurvive.(Lnet/minecraft/world/level/block/state/Bl
 const CAN_SURVIVE_KEY: &str =
     "net/minecraft/world/level/block/state/BlockBehaviour.canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
 const SAVED_DATA: &str = "net/minecraft/world/level/saveddata/SavedData";
+const LEVEL_DATA: &str = "net/minecraft/world/level/storage/LevelData";
+const LEVEL_CHUNK: &str = "net/minecraft/world/level/chunk/LevelChunk";
 const SAVED_DATA_FACTORY: &str = "net/minecraft/world/level/saveddata/SavedData$Factory";
 /// 1.21.1's `RenderShape`, in declaration order (ordinals).
 pub const RENDER_SHAPES: [&str; 3] = ["INVISIBLE", "ENTITYBLOCK_ANIMATED", "MODEL"];
@@ -636,6 +656,48 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "sendParticles") if level => V::I(0),
         (_, "addParticle" | "addAlwaysVisibleParticle" | "playSound" | "playLocalSound" | "levelEvent" | "gameEvent") if level => V::Void,
         (_, "dimensionType") if level => rt.intern("compat:dimension-type".into(), |rt| rt.new_object("net/minecraft/world/level/dimension/DimensionType")),
+        // The level's key (`Level.OVERWORLD`): `dimension#minecraft:overworld`.
+        (_, "dimension") if level && desc == "()Lnet/minecraft/resources/ResourceKey;" => {
+            let d = rt.host().map(|h| h.dimension()).unwrap_or_else(|| "minecraft:overworld".to_owned());
+            rt.string(&format!("dimension#{d}"))
+        }
+        (_, "isDebug") if level => V::I(0),
+        (_, "getLevelData") if level => rt.intern("compat:level-data".into(), |rt| rt.new_object(LEVEL_DATA)),
+        (LEVEL_DATA, n) => match n {
+            "getGameTime" | "getDayTime" => V::J(rt.host().map_or(0, |h| h.game_time())),
+            "isRaining" | "isThundering" | "isHardcore" => V::I(0),
+            _ => return None,
+        },
+        // The chunk holding a position: its level answers for it.
+        (_, "getChunkAt") if level => {
+            let p = pos_of(rt, a(1));
+            let c = rt.new_object(LEVEL_CHUNK);
+            rt.put_field(c, "$level", a(0));
+            rt.put_field(c, "$x", V::I(p[0] >> 4));
+            rt.put_field(c, "$z", V::I(p[2] >> 4));
+            c
+        }
+        (LEVEL_CHUNK, "getLevel") => rt.get_field(a(0), "$level"),
+        (LEVEL_CHUNK, "getBlockState") => {
+            let level = rt.get_field(a(0), "$level");
+            call(rt, "net/minecraft/world/level/Level.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;", &[level, a(1)])
+        }
+        // What `setBlock` would have done after the change (Create sets blocks quietly, then calls it):
+        // the game already updated the neighbours; clients are told when the flags say so.
+        (_, "markAndNotifyBlock") if level => {
+            if a(5).i() & 2 != 0 {
+                let p = pos_of(rt, a(1));
+                if let Some(h) = rt.host_mut() {
+                    h.block_changed(p);
+                }
+            }
+            V::Void
+        }
+        (_, "removeBlockEntity") if level => {
+            let p = pos_of(rt, a(1));
+            crate::glue::block_entity_removed(rt, p);
+            V::Void
+        }
         // The overworld's type (`DimensionTypes.OVERWORLD`).
         ("net/minecraft/world/level/dimension/DimensionType", n) => match n {
             "minY" => V::I(-64),
@@ -651,6 +713,10 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "getMaxBuildHeight") if level => V::I(320),
         (_, "getHeight") if level && desc == "()I" => V::I(384),
         (_, "getSeaLevel") if level => V::I(63),
+        (_, "isOutsideBuildHeight") if level => {
+            let y = if desc.starts_with("(I)") { a(1).i() } else { pos_of(rt, a(1))[1] };
+            V::I(!(-64..320).contains(&y) as i32)
+        }
         // A client level has no server (`ClientLevel.getServer` is null).
         (_, "getServer") if level && rt.get_field(a(0), "isClientSide").i() != 0 => V::NULL,
         (_, "getServer") if level => rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer")),
@@ -707,6 +773,17 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     V::I((registry.trim_start_matches("minecraft:") == "block" && rt.host().is_some_and(|h| h.block_in_tag(&b, &tag))) as i32)
                 }
                 "equals" => V::I((rt.str_of(a(1)) == Some(text.as_str())) as i32),
+                // What the block's properties say for the state (`BlockStateBase` keeps them).
+                "getPistonPushReaction" => crate::blocks::push_reaction(rt, &text),
+                // Turned or mirrored as the block turns its states (NeoForge's `rotate(level, pos, rotation)` too).
+                "rotate" if desc.ends_with("Lnet/minecraft/world/level/block/Rotation;)Lnet/minecraft/world/level/block/state/BlockState;") => {
+                    crate::rotation::turn_state(rt, a(0), args.last().copied().unwrap_or_default(), false)
+                }
+                "mirror" if desc == "(Lnet/minecraft/world/level/block/Mirror;)Lnet/minecraft/world/level/block/state/BlockState;" => crate::rotation::turn_state(rt, a(0), a(1), true),
+                // The game updates the shapes around a block it sets.
+                "updateIndirectNeighbourShapes" | "updateNeighbourShapes" => V::Void,
+                "getDestroySpeed" => V::F(crate::blocks::state_facts(rt, &text).hardness),
+                "canBeReplaced" if desc == "()Z" => V::I(crate::blocks::state_facts(rt, &text).replaceable as i32),
                 "updateShape" if desc.starts_with("(Lnet/minecraft/core/Direction;") => update_shape(rt, [a(0), a(1), a(2), a(3), a(4), a(5)]),
                 "getCollisionShape" | "getShape" if desc.starts_with("(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;") => {
                     let ctx = if desc.contains("CollisionContext;)") { a(3) } else { crate::shapes::empty_context(rt) };
@@ -768,6 +845,30 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 _ => return crate::api_common::call(rt, owner, name, desc, args),
             }
         }
+        (_, "getDescriptionId") if is_block_class(owner) && desc == "()Ljava/lang/String;" => {
+            let id = description_id(&block_name(rt, a(0)));
+            rt.string(&id)
+        }
+        (_, "getName") if is_block_class(owner) && desc == "()Lnet/minecraft/network/chat/MutableComponent;" => {
+            let id = description_id(&block_name(rt, a(0)));
+            let key = rt.string(&id);
+            crate::api_common::component(rt, key, true, V::NULL)
+        }
+        // The registry entry a block or item is (`builtInRegistryHolder().is(tag)`).
+        (_, "builtInRegistryHolder") if is_block_class(owner) => {
+            let n = block_name(rt, a(0));
+            crate::neo::registry_holder(rt, "block", &n, a(0))
+        }
+        (o, "builtInRegistryHolder") if o.starts_with("net/minecraft/world/item/") && o.ends_with("Item") => {
+            let n = crate::api_common::item_like_name(rt, a(0));
+            crate::neo::registry_holder(rt, "item", &n, a(0))
+        }
+        // Points of interest (a bed's, a bell's) are the game's; a mod's moved block has none here.
+        ("net/minecraft/world/entity/ai/village/poi/PoiTypes", "forState") => {
+            let o = rt.new_object("java/util/Optional");
+            rt.put_field(o, "value", V::NULL);
+            o
+        }
         (BLOCK, "<init>") => V::Void,
         // The API's base constructors a mod's own classes call (`super(properties)`): their state
         // lives in the runtime's fields, so nothing more to do.
@@ -775,6 +876,17 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "<init>") if o.starts_with("net/minecraft/world/item/") && o.ends_with("Item") => V::Void,
         _ => return crate::api_common::call(rt, owner, name, desc, args),
     })
+}
+
+/// Whether `owner` is vanilla's `Block` or one of its block classes (`RotatedPillarBlock`).
+fn is_block_class(owner: &str) -> bool {
+    owner.starts_with("net/minecraft/world/level/block/") && owner.ends_with("Block") && !owner[32..].contains('/')
+}
+
+/// A block's translation key (`Block.getDescriptionId`): `block.create.shaft` for `create:shaft`.
+fn description_id(name: &str) -> String {
+    let (ns, path) = name.split_once(':').unwrap_or(("minecraft", name));
+    format!("block.{ns}.{}", path.replace('/', "."))
 }
 
 /// A DeferredRegister's holder: its registry and name, resolved when asked (`create:pressing` is
@@ -864,6 +976,8 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::blocks::get_static(rt, o, f))
             .or_else(|| crate::shapes::get_static(rt, o, f))
             .or_else(|| crate::fluids::get_static(rt, o, f))
+            .or_else(|| crate::neo_tags::get_static(rt, o, f))
+            .or_else(|| crate::mod_entities::get_static(rt, o, f))
             .or_else(|| crate::tanks::get_static(rt, o, f))
             .or_else(|| crate::creative::get_static(rt, o, f))
             .or_else(|| crate::codecs::get_static(rt, o, f))
@@ -882,6 +996,10 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         "net/minecraft/core/Direction.WEST" => dir(rt, 4),
         "net/minecraft/core/Direction.EAST" => dir(rt, 5),
         "net/minecraft/core/BlockPos.ZERO" | "net/minecraft/core/Vec3i.ZERO" => block_pos(rt, 0, 0, 0),
+        // The dimensions' keys, as `Level.dimension()` gives them.
+        "net/minecraft/world/level/Level.OVERWORLD" => rt.string("dimension#minecraft:overworld"),
+        "net/minecraft/world/level/Level.NETHER" => rt.string("dimension#minecraft:the_nether"),
+        "net/minecraft/world/level/Level.END" => rt.string("dimension#minecraft:the_end"),
         // `BuiltInRegistries.TRIGGER_TYPES` is registry `trigger_type`, as its key says.
         k if k.starts_with("net/minecraft/core/registries/BuiltInRegistries.") => {
             let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
@@ -951,6 +1069,24 @@ mod tests {
         assert_eq!(call(&mut rt, "net/minecraft/core/BlockPos.getZ.()I", &[q]), V::I(-7));
         let south = call(&mut rt, "net/minecraft/core/Direction.getOpposite.()Lnet/minecraft/core/Direction;", &[north]);
         assert_eq!(call(&mut rt, "net/minecraft/core/Direction.getStepZ.()I", &[south]), V::I(1));
+    }
+
+    /// Create puts a contraption's blocks back at `BlockPos.containing(anchor + 0.5)`: the block the
+    /// point is in, flooring negative coordinates down. A factory nothing maps still counts as a
+    /// miss, though its chain goes on with a stand-in.
+    #[test]
+    fn the_block_a_point_is_in() {
+        let mut rt = Rt::new();
+        let v = rt.new_object("net/minecraft/world/phys/Vec3");
+        call(&mut rt, "net/minecraft/world/phys/Vec3.<init>.(DDD)V", &[v, V::D(0.5), V::D(65.5), V::D(-0.5)]);
+        let p = call(&mut rt, "net/minecraft/core/BlockPos.containing.(Lnet/minecraft/core/Position;)Lnet/minecraft/core/BlockPos;", &[v]);
+        assert_eq!(pos_of(&rt, p), [0, 65, -1]);
+        let q = call(&mut rt, "net/minecraft/core/BlockPos.containing.(DDD)Lnet/minecraft/core/BlockPos;", &[V::D(-3.2), V::D(1.0), V::D(7.9)]);
+        assert_eq!(pos_of(&rt, q), [-4, 1, 7]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        let made = call(&mut rt, "net/minecraft/core/BlockPos.notAFactory.()Lnet/minecraft/core/BlockPos;", &[]);
+        assert_eq!(rt.class_of(made), BLOCK_POS);
+        assert_eq!(rt.unmapped.get("net/minecraft/core/BlockPos.notAFactory.()Lnet/minecraft/core/BlockPos;"), Some(&1));
     }
 
     /// `Direction.getClockWise(Axis)` and its counter-clockwise twin, against vanilla 26.3's

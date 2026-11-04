@@ -212,14 +212,14 @@ fn bytes_mut(rt: &mut Rt, buf: V) -> Option<(&mut Vec<u8>, &mut usize)> {
     }
 }
 
-fn put(rt: &mut Rt, buf: V, data: &[u8]) {
+pub(crate) fn put(rt: &mut Rt, buf: V, data: &[u8]) {
     if let Some((v, _)) = bytes_mut(rt, buf) {
         v.extend_from_slice(data);
     }
 }
 
 /// The next `n` bytes. Past the end: None, with Java's `IndexOutOfBoundsException` thrown.
-fn take(rt: &mut Rt, buf: V, n: usize) -> Option<Vec<u8>> {
+pub(crate) fn take(rt: &mut Rt, buf: V, n: usize) -> Option<Vec<u8>> {
     let got = bytes_mut(rt, buf).and_then(|(v, at)| {
         let end = at.checked_add(n).filter(|&e| e <= v.len())?;
         let out = v[*at..end].to_vec();
@@ -232,7 +232,7 @@ fn take(rt: &mut Rt, buf: V, n: usize) -> Option<Vec<u8>> {
     got
 }
 
-fn take_n<const N: usize>(rt: &mut Rt, buf: V) -> Option<[u8; N]> {
+pub(crate) fn take_n<const N: usize>(rt: &mut Rt, buf: V) -> Option<[u8; N]> {
     take(rt, buf, N).and_then(|v| v.try_into().ok())
 }
 
@@ -249,7 +249,7 @@ fn var_bytes(mut u: u64) -> Vec<u8> {
 }
 
 /// A VarInt (`v as u32`) or a VarLong.
-fn put_var(rt: &mut Rt, buf: V, u: u64) {
+pub(crate) fn put_var(rt: &mut Rt, buf: V, u: u64) {
     put(rt, buf, &var_bytes(u));
 }
 
@@ -266,7 +266,7 @@ fn read_var(rt: &mut Rt, buf: V, max_bytes: u32) -> Option<u64> {
     None
 }
 
-fn read_var_int(rt: &mut Rt, buf: V) -> Option<i32> {
+pub(crate) fn read_var_int(rt: &mut Rt, buf: V) -> Option<i32> {
     read_var(rt, buf, 5).map(|v| v as u32 as i32)
 }
 
@@ -284,13 +284,13 @@ fn read_count(rt: &mut Rt, buf: V) -> Option<usize> {
     }
 }
 
-fn put_utf(rt: &mut Rt, buf: V, s: &str) {
+pub(crate) fn put_utf(rt: &mut Rt, buf: V, s: &str) {
     let mut out = var_bytes(s.len() as u64);
     out.extend_from_slice(s.as_bytes());
     put(rt, buf, &out);
 }
 
-fn read_utf(rt: &mut Rt, buf: V) -> Option<String> {
+pub(crate) fn read_utf(rt: &mut Rt, buf: V) -> Option<String> {
     let n = read_count(rt, buf)?;
     let b = take(rt, buf, n)?;
     Some(String::from_utf8_lossy(&b).into_owned())
@@ -1103,6 +1103,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     match owner {
         "io/netty/buffer/ByteBuf" | "net/minecraft/network/FriendlyByteBuf" | "net/minecraft/network/RegistryFriendlyByteBuf" => buffer_call(rt, name, desc, args),
+        // `VarInt.write(buf, v)`: what `FriendlyByteBuf.writeVarInt` calls, used directly by codecs.
+        "net/minecraft/network/VarInt" | "net/minecraft/network/VarLong" => Some(match name {
+            "write" => {
+                let u = if owner.ends_with("VarInt") { u64::from(a(1).i() as u32) } else { a(1).j() as u64 };
+                put_var(rt, a(0), u);
+                a(0)
+            }
+            "read" if owner.ends_with("VarInt") => V::I(read_var_int(rt, a(0)).unwrap_or(0)),
+            "read" => V::J(read_var(rt, a(0), 10).unwrap_or(0) as i64),
+            "getByteSize" if owner.ends_with("VarInt") => V::I(var_bytes(u64::from(a(0).i() as u32)).len() as i32),
+            "getByteSize" => V::I(var_bytes(a(0).j() as u64).len() as i32),
+            "hasContinuationBit" => V::I((a(0).i() & 0x80 != 0) as i32),
+            _ => return None,
+        }),
         "io/netty/buffer/Unpooled" => Some(match name {
             "buffer" | "directBuffer" => new_buffer(rt),
             "wrappedBuffer" | "copiedBuffer" if desc.starts_with("([B") => {
@@ -1518,6 +1532,19 @@ mod tests {
         let v = decode(rt, codec, back);
         assert!(rt.thrown.is_none());
         (bytes, v)
+    }
+
+    /// Create's packets write lengths with `VarInt.write(buf, n)` itself, not through a codec.
+    #[test]
+    fn var_int_helpers_write_and_read_as_friendly_byte_buf_does() {
+        let mut rt = Rt::new();
+        let b = new_buffer(&mut rt);
+        call(&mut rt, "net/minecraft/network/VarInt.write.(Lio/netty/buffer/ByteBuf;I)Lio/netty/buffer/ByteBuf;", &[b, V::I(300)]);
+        call(&mut rt, "net/minecraft/network/VarLong.write.(Lio/netty/buffer/ByteBuf;J)Lio/netty/buffer/ByteBuf;", &[b, V::J(-1)]);
+        assert_eq!(call(&mut rt, "net/minecraft/network/VarInt.read.(Lio/netty/buffer/ByteBuf;)I", &[b]), Some(V::I(300)));
+        assert_eq!(call(&mut rt, "net/minecraft/network/VarLong.read.(Lio/netty/buffer/ByteBuf;)J", &[b]), Some(V::J(-1)));
+        assert_eq!(call(&mut rt, "net/minecraft/network/VarInt.getByteSize.(I)I", &[V::I(-1)]), Some(V::I(5)));
+        assert_eq!(call(&mut rt, "net/minecraft/network/VarLong.getByteSize.(J)I", &[V::J(-1)]), Some(V::I(10)));
     }
 
     #[test]
