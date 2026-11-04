@@ -410,6 +410,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             .or_else(|| crate::sounds::call(rt, key, args))
             .or_else(|| crate::particles::call(rt, key, args))
             .or_else(|| crate::food::call(rt, key, args))
+            .or_else(|| crate::item_use::call(rt, key, args))
             .or_else(|| crate::network::call(rt, key, args))
             .or_else(|| crate::fluids::call(rt, key, args))
             .or_else(|| crate::tanks::call_key(rt, key, args))
@@ -1124,6 +1125,20 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             let f = k.rsplit('.').next().unwrap_or("");
             match NAMES.iter().position(|n| *n == f) {
                 Some(i) => api_enum(rt, "net/minecraft/ChatFormatting", NAMES[i], i as i32),
+                None => {
+                    *rt.unmapped.entry(key).or_insert(0) += 1;
+                    V::NULL
+                }
+            }
+        }
+        // `ClipContext`'s modes, what a ray stops at (`getPlayerPOVHitResult`, `Level.clip`).
+        k if k.starts_with("net/minecraft/world/level/ClipContext$Fluid.") || k.starts_with("net/minecraft/world/level/ClipContext$Block.") => {
+            let fluid = k.contains("$Fluid.");
+            let names: &[&'static str] = if fluid { &["NONE", "SOURCE_ONLY", "ANY", "WATER"] } else { &["COLLIDER", "OUTLINE", "VISUAL", "FALLDAMAGE_RESETTING"] };
+            let class = if fluid { "net/minecraft/world/level/ClipContext$Fluid" } else { "net/minecraft/world/level/ClipContext$Block" };
+            let f = k.rsplit('.').next().unwrap_or("");
+            match names.iter().position(|n| *n == f) {
+                Some(i) => api_enum(rt, class, names[i], i as i32),
                 None => {
                     *rt.unmapped.entry(key).or_insert(0) += 1;
                     V::NULL

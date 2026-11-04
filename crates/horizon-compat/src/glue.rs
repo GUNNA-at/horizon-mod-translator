@@ -335,6 +335,7 @@ pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
         let l = level(rt);
         let player = crate::api_common::acting_player(rt);
         let hand = api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
+        crate::item_use::use_begins(rt, item);
         let r = vc(rt, USE_KEY, USE, &[it, l, player, hand]);
         let thrown = rt.thrown.is_some();
         rt.report_thrown("use");
@@ -343,38 +344,46 @@ pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
         }
         let result = rt.get_field(r, "$result");
         let took = rt.str_of(result).is_some_and(|n| matches!(n, "SUCCESS" | "CONSUME" | "SUCCESS_NO_ITEM_USED" | "CONSUME_PARTIAL"));
-        if took && rt.host().and_then(|h| h.player_held()) == before {
+        // A use over time it started (`startUsingItem`) is the game's to run: the click goes on to
+        // it, whatever the result.
+        let started = crate::item_use::use_started(rt);
+        if (took || started) && rt.host().and_then(|h| h.player_held()) == before {
             // The stack it answered, shrunk or swapped in place, is what the hand holds now.
             let stack = rt.get_field(r, "$object");
             let answered = (!crate::api_common::stack_empty(rt, stack)).then(|| {
                 let id = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
                 (id, rt.get_field(stack, "$count").i().max(0) as u32)
             });
-            if answered != before
-                && let Some(h) = rt.host_mut()
-            {
-                match (&before, &answered) {
-                    // The same item, more or fewer: only the difference moves, so its data stays.
-                    (Some((id, n)), Some((same, m))) if id == same => {
-                        if m < n {
-                            h.take_player_items(id, n - m);
-                        } else {
-                            h.give_player_items(id, m - n);
-                        }
-                    }
-                    _ => {
-                        if let Some((id, n)) = &before {
-                            h.take_player_items(id, *n);
-                        }
-                        if let Some((id, n)) = &answered {
-                            h.give_player_items(id, *n);
-                        }
-                    }
-                }
+            follow_hand(rt, &before, &answered);
+        }
+        took && !started
+    })
+}
+
+/// The acting player's hand held `before` and now holds `after`: the game's hand follows. The same
+/// item, more or fewer: only the difference moves, so its data stays.
+pub(crate) fn follow_hand(rt: &mut Rt, before: &Option<(String, u32)>, after: &Option<(String, u32)>) {
+    if after == before {
+        return;
+    }
+    let Some(h) = rt.host_mut() else { return };
+    match (before, after) {
+        (Some((id, n)), Some((same, m))) if id == same => {
+            if m < n {
+                h.take_player_items(id, n - m);
+            } else {
+                h.give_player_items(id, m - n);
             }
         }
-        took
-    })
+        _ => {
+            if let Some((id, n)) = before {
+                h.take_player_items(id, *n);
+            }
+            if let Some((id, n)) = after {
+                h.give_player_items(id, *n);
+            }
+        }
+    }
 }
 
 const STATE_FOR_PLACEMENT: &str = "getStateForPlacement.(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;";

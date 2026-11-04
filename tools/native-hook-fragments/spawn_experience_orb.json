@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "an experience orb a server mod spawns (`native_spawn_experience_orb`).",
+  "doc_summary": "`native_spawn_experience_orb(at, value, motion)` spawns an experience orb worth `value` points in the acting level, as a mod's `new ExperienceOrb(...)` added with `Level.addFreshEntity`: with vanilla's random motion, or `motion`. Bundles need \"hooks\": @API:spawn_experience_orb@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_server.rs"
+  ]
+}

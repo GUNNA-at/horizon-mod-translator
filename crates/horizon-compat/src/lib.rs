@@ -18,6 +18,7 @@ pub mod convention;
 pub mod creative;
 pub mod fluids;
 pub mod food;
+pub mod item_use;
 pub mod functions;
 pub mod glue;
 pub mod jlang;

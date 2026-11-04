@@ -969,6 +969,37 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     clipboard take it with nothing unmapped; goggles want `Item.swapWithEquipmentSlot`, the
     sandpaper `getPlayerPOVHitResult`, the potato cannon and worldshaper `startUsingItem` (use
     over time). In-game check pending.
+  - [x] 2026-11-04 Items used over time (`horizon-compat/src/item_use.rs`, tests `item_use::tests`).
+    1.21.1's way: the item's `use` calls `startUsingItem`, the use counts `getUseDuration` down
+    with `onUseTick` each tick, and ends in `finishUsingItem` or, let go, `releaseUsing`. The game
+    counts every use itself (`game/item_use.rs`); the bundle now answers its hooks with the mod's
+    parts: `native_use_duration` (both sides) and `native_use_animation` (the client's pose) from
+    the class's overrides, `native_living_entity_use_item_start` lets a use go on on the server
+    only when the click's `use` called `startUsingItem` (a food's eating stays the game's), and
+    `native_on_use_tick`, `native_living_entity_use_item_finish` and `native_release_using` run
+    the overrides on the server. `glue::use_item` no longer takes a click whose `use` started a
+    use, so the game starts it. Vanilla's own part of `finishUsingItem` (eating) is the game's: an
+    override calling `super` gets the stack the game left. A hook's player keeps one stack object
+    for its hand (`getItemInHand` answers the same one, as vanilla's), `instanceof Player` and
+    `LivingEntity` know the hook's `ServerPlayer`. Harness `HOLD=1`: builder's tea (42 ticks,
+    `drink`) leaves a glass bottle in the inventory, and the last one leaves it in the hand; a
+    cardboard package (72000, `bow`) starts on its `use` and leaves the hand on release.
+    Gaps: a client predicts a mod item's use whenever its duration is above 0, so where the
+    server refuses it (a sandpaper with nothing to polish) the client holds the pose until let
+    go; the thrown package is a mod `LivingEntity` (`PackageEntity`), not made yet, so it is lost.
+  - [x] 2026-11-04 Messages, experience orbs, what the player looks at. `Player.displayClientMessage`
+    and `sendSystemMessage` reach the acting player (`Host::player_message`: vanilla's JSON text,
+    chat or over the hotbar, through `native_tell`/`native_action_bar`); components keep styles
+    (`withStyle` of `ChatFormatting`s) and siblings (`append`), `plainCopy`, `copy`, `empty`.
+    `new ExperienceOrb(level, x, y, z, value)` with `setDeltaMovement`, added by
+    `Level.addFreshEntity`, and `ExperienceOrb.award` (vanilla's orb sizes) spawn orbs
+    (`Host::spawn_experience_orb`, new game helper `native_spawn_experience_orb`).
+    `Item.getPlayerPOVHitResult` asks the block the player looks at (`Host::player_pov_hit`, new
+    helper `native_player_pov_hit`, the game's own ray within block reach), else a miss where the
+    reach ends; `ClipContext`'s modes. Harness `USE=1`: three experience nuggets throw orbs worth
+    9 points; the worldshaper with nothing set says `create.terrainzapper.shiftRightClickToSet`
+    in red over the hotbar; the sandpaper asks what the player looks at (a miss: nothing to
+    polish). In-game check pending.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

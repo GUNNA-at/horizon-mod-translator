@@ -113,6 +113,70 @@ pub(crate) fn position(rt: &Rt, e: V) -> Option<[f64; 3]> {
     matches!(rt.get_field(e, "$x"), V::D(_)).then(|| pos(rt, e))
 }
 
+const EXPERIENCE_ORB: &str = "net/minecraft/world/entity/ExperienceOrb";
+
+/// Experience orbs a mod spawns: `new ExperienceOrb(level, x, y, z, value)` with its motion
+/// (`setDeltaMovement`), added to the level by `addFreshEntity` (the host spawns it), and vanilla's
+/// `ExperienceOrb.award`, orbs of the largest sizes.
+fn experience_orb(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    if owner != EXPERIENCE_ORB {
+        return None;
+    }
+    let o = a(0);
+    Some(match (name, desc) {
+        ("<init>", "(Lnet/minecraft/world/level/Level;DDDI)V") => {
+            for (i, k) in ["$x", "$y", "$z"].into_iter().enumerate() {
+                rt.put_field(o, k, V::D(a(2 + i).d()));
+            }
+            rt.put_field(o, "$value", V::I(a(5).i()));
+            V::Void
+        }
+        ("setDeltaMovement", "(Lnet/minecraft/world/phys/Vec3;)V") => {
+            let m = xyz(rt, a(1));
+            set_orb_motion(rt, o, m);
+            V::Void
+        }
+        ("setDeltaMovement", "(DDD)V") => {
+            let m = [a(1).d(), a(2).d(), a(3).d()];
+            set_orb_motion(rt, o, m);
+            V::Void
+        }
+        ("getDeltaMovement", _) => {
+            let m = motion(rt, o);
+            vec3(rt, m)
+        }
+        ("getValue", _) => V::I(rt.get_field(o, "$value").i()),
+        // `award(ServerLevel, Vec3, int)`: vanilla's `getExperienceValue` sizes.
+        ("award", "(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/phys/Vec3;I)V") => {
+            let at = xyz(rt, a(1));
+            let mut left = a(2).i().max(0) as u32;
+            while left > 0 {
+                let value = orb_value(left);
+                left -= value;
+                if let Some(h) = rt.host_mut() {
+                    h.spawn_experience_orb(at, value, None);
+                }
+            }
+            V::Void
+        }
+        ("getExperienceValue", "(I)I") => V::I(orb_value(a(0).i().max(0) as u32) as i32),
+        _ => return None,
+    })
+}
+
+fn set_orb_motion(rt: &mut Rt, o: V, m: [f64; 3]) {
+    for (k, x) in ["$mx", "$my", "$mz"].into_iter().zip(m) {
+        rt.put_field(o, k, V::D(x));
+    }
+    rt.put_field(o, "$moved", V::I(1));
+}
+
+/// `ExperienceOrb.getExperienceValue`: the largest orb size not above `points`.
+fn orb_value(points: u32) -> u32 {
+    [2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3].into_iter().find(|&v| points >= v).unwrap_or(1)
+}
+
 fn motion(rt: &Rt, e: V) -> [f64; 3] {
     [rt.get_field(e, "$mx").d(), rt.get_field(e, "$my").d(), rt.get_field(e, "$mz").d()]
 }
@@ -319,6 +383,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     }
     if name == "addFreshEntity" && is_item_entity(rt, a(1)) {
         return Some(V::I(add(rt, a(1)) as i32));
+    }
+    if name == "addFreshEntity" && rt.class_of(a(1)) == EXPERIENCE_ORB {
+        let o = a(1);
+        let at = [rt.get_field(o, "$x").d(), rt.get_field(o, "$y").d(), rt.get_field(o, "$z").d()];
+        let value = rt.get_field(o, "$value").i().max(0) as u32;
+        let moved = (rt.get_field(o, "$moved").i() != 0).then(|| motion(rt, o));
+        let spawned = rt.host_mut().is_some_and(|h| h.spawn_experience_orb(at, value, moved));
+        return Some(V::I(spawned as i32));
+    }
+    if let Some(v) = experience_orb(rt, owner, name, desc, args) {
+        return Some(v);
     }
     match (owner, name) {
         // Vanilla's own: the game's physics stops the fall; nothing is inside a plain block.

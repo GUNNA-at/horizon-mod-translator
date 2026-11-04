@@ -886,6 +886,49 @@ impl Game<'_> {
             }
         })
     }
+    /// Spawns an experience orb worth `value` points at `at` in the acting
+    /// level, as a mod's `new ExperienceOrb(level, x, y, z, value)` added
+    /// with `Level.addFreshEntity`: it flies off with vanilla's random
+    /// motion, or with `motion` when given (`setDeltaMovement`), and any
+    /// player picks it up. It isn't merged into an orb nearby (that is
+    /// `ExperienceOrb.award`'s). False, and none spawned, on a client of a
+    /// server, for a `value` of 0, a place or motion that isn't finite, or
+    /// when `native_entity_join_level` canceled it. API @API:spawn_experience_orb@.
+    pub(super) fn native_spawn_experience_orb(
+        &mut self,
+        at: [f64; 3],
+        value: u32,
+        motion: Option<[f64; 3]>,
+    ) -> bool {
+        let finite = |v: &[f64; 3]| v.iter().all(|x| x.is_finite());
+        if self.remote.is_some() || value == 0 || !finite(&at) || !motion.as_ref().is_none_or(finite) {
+            return false;
+        }
+        let before = self.orbs.len();
+        self.add_orb(at, value);
+        if self.orbs.len() == before {
+            return false;
+        }
+        if let (Some(m), Some(orb)) = (motion, self.orbs.last_mut()) {
+            orb.velocity = horizon_core::geometry::Vec3::new(m[0], m[1], m[2]);
+        }
+        true
+    }
+    /// The block the acting player looks at, as `Item.getPlayerPOVHitResult`
+    /// finds it: from their eyes along their look, within their block reach
+    /// (`blockInteractionRange`), stopping at blocks' outlines; `fluids` 1
+    /// also at a fluid's source and 2 at any fluid, as a bucket does. The
+    /// block, the face hit (a unit step: up is `[0, 1, 0]`) and the point
+    /// hit; None when nothing is in reach. API @API:player_pov_hit@.
+    pub(super) fn native_player_pov_hit(&self, fluids: u8) -> Option<([i32; 3], [i32; 3], [f64; 3])> {
+        let (origin, dir) = self.aim()?;
+        let hit = if fluids == 0 {
+            self.clip_ray(origin, dir, self.block_reach)
+        } else {
+            self.bucket_hit()
+        }?;
+        Some((hit.pos, hit.face, hit.point))
+    }
     /// Adds `levels` to the player `uuid`'s level, or takes them off when
     /// negative (`Player.giveExperienceLevels`): what the anvil and the
     /// enchanting table charge with, and a mod can charge or reward with.

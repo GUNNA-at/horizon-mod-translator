@@ -26,10 +26,7 @@ const LIST_ADD: &str = "java/util/List.add.(Ljava/lang/Object;)Z";
 /// `FoodProperties.DEFAULT_EAT_SECONDS`, and what `fast()` sets.
 const EAT_SECONDS: f32 = 1.6;
 const FAST_SECONDS: f32 = 0.8;
-const USE_DURATION: &str = "getUseDuration.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/LivingEntity;)I";
-const USE_DURATION_KEY: &str = "net/minecraft/world/item/Item.getUseDuration.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/LivingEntity;)I";
-const USE_ANIMATION: &str = "getUseAnimation.(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/UseAnim;";
-const USE_ANIMATION_KEY: &str = "net/minecraft/world/item/Item.getUseAnimation.(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/UseAnim;";
+use crate::item_use::{USE_ANIMATION, USE_ANIMATION_KEY, USE_DURATION, USE_DURATION_KEY};
 const EATING_SOUND: &str = "getEatingSound.()Lnet/minecraft/sounds/SoundEvent;";
 const EATING_SOUND_KEY: &str = "net/minecraft/world/item/Item.getEatingSound.()Lnet/minecraft/sounds/SoundEvent;";
 const DRINKING_SOUND: &str = "getDrinkingSound.()Lnet/minecraft/sounds/SoundEvent;";

@@ -165,6 +165,21 @@ pub trait Host {
     /// Players are sent the block at `pos` and its block entity's update tag again
     /// (`ServerChunkCache.blockChanged`, `Level.sendBlockUpdated`).
     fn block_changed(&mut self, _pos: [i32; 3]) {}
+    /// A message for the acting player (`Player.displayClientMessage`, `sendSystemMessage`):
+    /// `component` is vanilla's JSON text, shown over the hotbar when `overlay`.
+    fn player_message(&mut self, _component: &str, _overlay: bool) {}
+    /// Spawns an experience orb worth `value` points at `at` (`new ExperienceOrb` added with
+    /// `Level.addFreshEntity`), moving by `motion` when given, else with vanilla's random motion.
+    /// False when none spawned.
+    fn spawn_experience_orb(&mut self, _at: [f64; 3], _value: u32, _motion: Option<[f64; 3]>) -> bool {
+        false
+    }
+    /// The block the acting player looks at within reach, as `Item.getPlayerPOVHitResult` finds it
+    /// from their eyes: its position, the face hit (a direction ordinal: down, up, north, south,
+    /// west, east) and the point hit. `fluids`: 0 none, 1 source fluids, 2 any fluid.
+    fn player_pov_hit(&self, _fluids: u8) -> Option<([i32; 3], u8, [f64; 3])> {
+        None
+    }
     /// Drawing a block entity: the frame's partial tick, 0 to 1.
     fn partial_tick(&self) -> f32 {
         0.0
@@ -345,6 +360,12 @@ pub struct MemoryHost {
     pub given: Vec<(String, u32)>,
     /// Positions sent to players again (`block_changed`), in order.
     pub changed: Vec<[i32; 3]>,
+    /// Messages the acting player was sent (`player_message`): JSON text, and whether over the hotbar.
+    pub messages: Vec<(String, bool)>,
+    /// Experience orbs spawned: where, worth, and the motion given.
+    pub orbs: Vec<([f64; 3], u32, Option<[f64; 3]>)>,
+    /// What the acting player looks at (`player_pov_hit`).
+    pub pov: Option<([i32; 3], u8, [f64; 3])>,
     /// The partial tick drawing reads.
     pub partial: f32,
     /// What was drawn: model, pose, colour, light.
@@ -439,6 +460,16 @@ impl Host for MemoryHost {
             _ => self.given.push((item.to_owned(), count)),
         }
         count
+    }
+    fn player_message(&mut self, component: &str, overlay: bool) {
+        self.messages.push((component.to_owned(), overlay));
+    }
+    fn spawn_experience_orb(&mut self, at: [f64; 3], value: u32, motion: Option<[f64; 3]>) -> bool {
+        self.orbs.push((at, value, motion));
+        true
+    }
+    fn player_pov_hit(&self, _fluids: u8) -> Option<([i32; 3], u8, [f64; 3])> {
+        self.pov
     }
     fn block_changed(&mut self, pos: [i32; 3]) {
         self.changed.push(pos);

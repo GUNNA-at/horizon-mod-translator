@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the block the acting player looks at (`native_player_pov_hit`).",
+  "doc_summary": "`native_player_pov_hit(fluids)` answers the block the acting player looks at within reach, as `Item.getPlayerPOVHitResult` finds it from their eyes (`fluids` 1 stops at a fluid's source, 2 at any fluid): the block, the face hit and the point hit. Bundles need \"hooks\": @API:player_pov_hit@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_server.rs"
+  ]
+}

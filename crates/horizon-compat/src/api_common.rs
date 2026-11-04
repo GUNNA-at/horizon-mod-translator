@@ -33,7 +33,10 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
             c.starts_with(&format!("{class}$")) && !c.ends_with("$Properties")
         }
         "net/minecraft/world/level/block/entity/BlockEntity" => family("net/minecraft/world/level/block/entity/", "BlockEntity"),
-        "net/minecraft/world/entity/Entity" => c.starts_with("net/minecraft/world/entity/") && !c.contains('$'),
+        "net/minecraft/world/entity/Entity" => (c.starts_with("net/minecraft/world/entity/") && !c.contains('$')) || is_player_class(c),
+        // Players: the one a hook acts for (`ServerPlayer`), the client's own and the others it sees.
+        "net/minecraft/world/entity/LivingEntity" | "net/minecraft/world/entity/player/Player" => is_player_class(c),
+        "net/minecraft/client/player/AbstractClientPlayer" => matches!(c, "net/minecraft/client/player/LocalPlayer" | "net/minecraft/client/player/RemotePlayer"),
         "java/lang/Throwable" => c.starts_with("java/lang/") && (c.ends_with("Exception") || c.ends_with("Error")),
         "java/lang/Exception" => c.starts_with("java/lang/") && c.ends_with("Exception"),
         "java/lang/ReflectiveOperationException" => matches!(
@@ -50,6 +53,17 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Vanilla's player classes: a server's, the client's own and the others it sees.
+fn is_player_class(c: &str) -> bool {
+    matches!(
+        c,
+        "net/minecraft/server/level/ServerPlayer"
+            | "net/minecraft/client/player/LocalPlayer"
+            | "net/minecraft/client/player/AbstractClientPlayer"
+            | "net/minecraft/client/player/RemotePlayer"
+    )
 }
 
 pub fn direction(rt: &mut Rt, ordinal: i64) -> V {
@@ -144,6 +158,14 @@ fn native(rt: &Rt, v: V) -> [i64; 4] {
 
 pub(crate) fn name_of(rt: &Rt, v: V) -> String {
     rt.str_of(v).map(str::to_owned).unwrap_or_default()
+}
+
+/// The name of an API enum's constant (`ChatFormatting.RED` is `RED`), empty for anything else.
+fn constant(rt: &Rt, v: V) -> String {
+    if v.r() == 0 {
+        return String::new();
+    }
+    rt.str_of(rt.get_field(v, "$name")).map(str::to_owned).unwrap_or_default()
 }
 
 /// A block-state property: its name and kind (`bool`, `int`, `direction`, `axis`, or an enum's class).
@@ -893,12 +915,79 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 _ => {
                     // The main hand (the hook's hand); the off hand is empty here.
                     let off = name == "getItemInHand" && rt.get_field(a(1), "$ordinal").i() == 1;
-                    match rt.host().and_then(|h| h.player_held()).filter(|_| !off) {
+                    if off {
+                        return Some(get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL));
+                    }
+                    // One stack object for the player's hand, as vanilla's: what a mod changes in
+                    // it, it finds there again.
+                    if let V::R(r) = rt.get_field(a(0), "$held")
+                        && r != 0
+                    {
+                        return Some(V::R(r));
+                    }
+                    let held = match rt.host().and_then(|h| h.player_held()) {
                         Some((id, count)) => stack(rt, &id, count as i32),
                         None => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
-                    }
+                    };
+                    rt.put_field(a(0), "$held", held);
+                    held
                 }
             }
+        }
+        // Messages for the acting player: in their chat, or over the hotbar.
+        (o, "displayClientMessage" | "sendSystemMessage") if is_player(o) => {
+            let json = component_json(rt, a(1)).to_string();
+            let overlay = name == "displayClientMessage" && a(2).i() != 0;
+            if let Some(h) = rt.host_mut() {
+                h.player_message(&json, overlay);
+            }
+            V::Void
+        }
+        // `Item.getPlayerPOVHitResult(level, player, fluid)`: the block the player looks at within
+        // reach, else a miss where their reach ends (`BlockHitResult.miss`).
+        ("net/minecraft/world/item/Item", "getPlayerPOVHitResult") => {
+            let fluids = match constant(rt, a(2)).as_str() {
+                "SOURCE_ONLY" => 1,
+                "ANY" | "WATER" => 2,
+                _ => 0,
+            };
+            let hit = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+            match rt.host().and_then(|h| h.player_pov_hit(fluids)) {
+                Some((pos, face, at)) => {
+                    let loc = vec3(rt, at[0], at[1], at[2]);
+                    let dir = direction(rt, i64::from(face));
+                    let p = crate::api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+                    rt.put_field(hit, "$loc", loc);
+                    rt.put_field(hit, "$dir", dir);
+                    rt.put_field(hit, "$pos", p);
+                    rt.put_field(hit, "$inside", V::I(0));
+                }
+                None => {
+                    // From the eyes along the look, 4.5 blocks (`blockInteractionRange`).
+                    let ([x, y, z], yaw, pitch) = rt.host().and_then(|h| h.player_place()).unwrap_or(([0.0; 3], 0.0, 0.0));
+                    let eye = if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 };
+                    let (yr, pr) = (f64::from(-yaw).to_radians(), f64::from(-pitch).to_radians());
+                    let look = [yr.sin() * pr.cos(), pr.sin(), yr.cos() * pr.cos()];
+                    let end = [x + look[0] * 4.5, y + eye + look[1] * 4.5, z + look[2] * 4.5];
+                    let loc = vec3(rt, end[0], end[1], end[2]);
+                    // `Direction.getNearest` of the way back: the first of the largest dot product.
+                    let normals = [[0.0, -1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+                    let (mut face, mut best) = (2, f64::from(f32::from_bits(1)));
+                    for (i, n) in normals.iter().enumerate() {
+                        let d = -look[0] * n[0] - look[1] * n[1] - look[2] * n[2];
+                        if d > best {
+                            (face, best) = (i as i64, d);
+                        }
+                    }
+                    let dir = direction(rt, face);
+                    let p = crate::api::block_pos(rt, end[0].floor() as i64, end[1].floor() as i64, end[2].floor() as i64);
+                    rt.put_field(hit, "$loc", loc);
+                    rt.put_field(hit, "$dir", dir);
+                    rt.put_field(hit, "$pos", p);
+                    rt.put_field(hit, "$miss", V::I(1));
+                }
+            }
+            hit
         }
         // Food: the acting player's, through the host (work by hand, as Create's hand crank, tires
         // the player).
@@ -929,6 +1018,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                     h.take_player_items(&id, n);
                 }
                 give_player(rt, a(2));
+                rt.put_field(a(0), "$held", V::NULL);
             }
             V::Void
         }
@@ -1551,7 +1641,59 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let with = if desc.contains("[Ljava/lang/Object;") { a(1) } else { V::NULL };
             component(rt, a(0), name == "translatable", with)
         }
-        ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "getString") => rt.get_field(a(0), "$text"),
+        ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "getString") => {
+            // The text and its siblings' (a translation's key stands for it).
+            let mut text = rt.str_of(rt.get_field(a(0), "$text")).unwrap_or("").to_owned();
+            for sibling in crate::jutil::elements(rt, rt.get_field(a(0), "$extra")) {
+                text.push_str(rt.str_of(rt.get_field(sibling, "$text")).unwrap_or(""));
+            }
+            rt.string(&text)
+        }
+        ("net/minecraft/network/chat/Component", "empty") => {
+            let t = rt.string("");
+            component(rt, t, false, V::NULL)
+        }
+        // Styles (`withStyle` of `ChatFormatting`s: colours and formats) and siblings (`append`);
+        // `plainCopy` keeps neither, `copy` both.
+        ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "withStyle") => {
+            let formats: Vec<V> = match desc {
+                "(Lnet/minecraft/ChatFormatting;)Lnet/minecraft/network/chat/MutableComponent;" => vec![a(1)],
+                "([Lnet/minecraft/ChatFormatting;)Lnet/minecraft/network/chat/MutableComponent;" => crate::jutil::elements(rt, a(1)),
+                _ => Vec::new(),
+            };
+            let mut style = rt.str_of(rt.get_field(a(0), "$style")).unwrap_or("").to_owned();
+            for f in formats {
+                match constant(rt, f).as_str() {
+                    "RESET" => style.clear(),
+                    n => {
+                        style.push_str(n);
+                        style.push(',');
+                    }
+                }
+            }
+            let style = rt.string(&style);
+            rt.put_field(a(0), "$style", style);
+            a(0)
+        }
+        ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "append") => {
+            let sibling = if desc.starts_with("(Ljava/lang/String;)") { component(rt, a(1), false, V::NULL) } else { a(1) };
+            let mut extra = crate::jutil::elements(rt, rt.get_field(a(0), "$extra"));
+            extra.push(sibling);
+            let list = crate::jutil::new_list(rt, extra);
+            rt.put_field(a(0), "$extra", list);
+            a(0)
+        }
+        ("net/minecraft/network/chat/Component" | "net/minecraft/network/chat/MutableComponent", "plainCopy" | "copy") => {
+            let (text, translatable, with) = (rt.get_field(a(0), "$text"), rt.get_field(a(0), "$translate").i() != 0, rt.get_field(a(0), "$with"));
+            let c = component(rt, text, translatable, with);
+            if name == "copy" {
+                for k in ["$style", "$extra"] {
+                    let v = rt.get_field(a(0), k);
+                    rt.put_field(c, k, v);
+                }
+            }
+            c
+        }
         // A component as JSON text and back (`Component.Serializer`), as a block entity saves one.
         ("net/minecraft/network/chat/Component$Serializer", "toJson") => {
             let j = component_json(rt, a(0)).to_string();
@@ -1581,8 +1723,35 @@ pub(crate) fn component(rt: &mut Rt, text: V, translatable: bool, with: V) -> V 
     t
 }
 
-/// A component as vanilla's serializer writes it: `{"text": ...}` or `{"translate": ..., "with": [...]}`.
+/// A component as vanilla's serializer writes it: `{"text": ...}` or `{"translate": ..., "with": [...]}`,
+/// with its style (a colour, `bold`...) and siblings (`extra`).
 fn component_json(rt: &Rt, c: V) -> serde_json::Value {
+    let mut j = component_core_json(rt, c);
+    if let serde_json::Value::Object(o) = &mut j {
+        for f in rt.str_of(rt.get_field(c, "$style")).unwrap_or("").split(',').filter(|f| !f.is_empty()) {
+            let format = match f {
+                "OBFUSCATED" => "obfuscated",
+                "BOLD" => "bold",
+                "STRIKETHROUGH" => "strikethrough",
+                "UNDERLINE" => "underlined",
+                "ITALIC" => "italic",
+                colour => {
+                    o.insert("color".into(), colour.to_ascii_lowercase().into());
+                    continue;
+                }
+            };
+            o.insert(format.into(), true.into());
+        }
+        let extra: Vec<serde_json::Value> = crate::jutil::elements(rt, rt.get_field(c, "$extra")).into_iter().map(|s| component_json(rt, s)).collect();
+        if !extra.is_empty() {
+            o.insert("extra".into(), extra.into());
+        }
+    }
+    j
+}
+
+/// [`component_json`] without style and siblings.
+fn component_core_json(rt: &Rt, c: V) -> serde_json::Value {
     use serde_json::{json, Value};
     let text = rt.str_of(rt.get_field(c, "$text")).unwrap_or("").to_owned();
     if rt.get_field(c, "$translate").i() == 0 {
@@ -1672,7 +1841,7 @@ const FOOD_DATA: &str = "net/minecraft/world/food/FoodData";
 
 /// Whether `owner` is the player or one of the classes a player's methods are called through (the
 /// client's own: `LocalPlayer`, `AbstractClientPlayer`).
-fn is_player(owner: &str) -> bool {
+pub(crate) fn is_player(owner: &str) -> bool {
     owner.starts_with("net/minecraft/")
         && [ "/Player", "/ServerPlayer", "/LocalPlayer", "/AbstractClientPlayer", "/LivingEntity", "/Entity"].iter().any(|s| owner.ends_with(s))
 }
