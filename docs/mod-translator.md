@@ -1388,6 +1388,41 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     addons): those targets are translated too, so their mixins can be woven by the translator
     itself. Test `mixin_census_tests` (a class file built by hand: `@Mixin`, `@Inject` with
     `@At(INVOKE, target)`, an added method).
+  - [x] 2026-11-04 Loading the pack's own mods (`scratchpad/lt`: `one.sh <jar> <name>` bundles a
+    jar on the runtime core, builds a load harness against its engine (debug, no debug info: a
+    1M-line engine builds in ~70 s) and runs the mod's loading with `HORIZON_COMPAT_TRACE=1`:
+    registrations, `@Mod` constructors, common and client setup; `round.sh <list>`, `summary.py`
+    tabulates). 28 jars picked by size and kind: FarmersDelight, Storage Drawers, Refined Storage,
+    Mekanism, SecurityCraft, JEI, Jade, FramedBlocks, Macaw's, Curios, GeckoLib, Lootr, Comforts,
+    Max Henkel's mods... First round: 21 got through loading; now all 28 do. Every fix is general:
+    - mods.toml values with a comment after them (`modId="torchmaster" #mandatory`) read as the value
+      (`bundle::toml_string`; 4 jars didn't build).
+    - API calls nested past 512 throw `StackOverflowError` (`api::MAX_DEPTH`) as the JVM would,
+      instead of overflowing the game's stack; a codec operation on an API object (`apply_op`) is a
+      miss instead of a loop (Mekanism and SecurityCraft crashed).
+    - Exceptions made from a cause (`new RuntimeException(e)`) carry its text; `getCause`, `initCause`.
+    - FML: a mod's container is FML's Java one (`FMLModContainer`, Comforts threw "not a FML one"),
+      its own while its constructor runs (the generated `start` names the active mod), the same
+      through `ModList` and `ModLoadingContext.get().getActiveContainer()`. `getModInfo()` has the
+      version and name the translator reads from each `[[mods]]` table (`mod_metadata`,
+      `${file.jarVersion}` from the manifest, else FML's `1`). `ModConfig.Type` constants.
+    - Reflection: every constructor of a mod class answers `getConstructor(Class...)`/`newInstance`
+      (the table had the no-argument ones only), primitives unboxed (Max Henkel's configs: Corpse,
+      Easy Villagers, Pipez).
+    - `ServiceLoader.stream()` and its `Provider`: Storage Drawers' Chameleon finds its NeoForge
+      services, 0 → 152 blocks and 159 items registered.
+    - `PacketFlow`'s constants, `getOpposite`, `id` (Max Henkel's messages); Guava's `Splitter`,
+      `Joiner`, `ObjectArrays.concat` (SpectreLib's configs).
+    Left: FramedBlocks' state cache ("Invalid shape"), Mekanism's own registry objects and its saved
+    data asking for the server, SecurityCraft's tab (an empty optional). Groundwork for weaving
+    mixins into translated classes: Mixin's callback objects (`horizon-compat/src/mixin.rs`), the
+    weaving plan (`weave.rs`, not yet used by the codegen). Tests:
+    `neo::tests::a_mod_gets_its_own_fml_container_with_its_version`,
+    `mixin_census_tests::mod_metadata_is_read_as_fml_reads_it`,
+    `jutil::tests::guava_splits_joins_and_concatenates_as_guava_does`,
+    `mixin::tests::a_handler_cancels_with_a_value_the_method_then_returns`,
+    `weave::tests::selectors_pick_methods_as_mixin_does`, api's recursion and cause tests, bundle's
+    toml test.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

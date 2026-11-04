@@ -58,6 +58,8 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         "net/minecraft/world/inventory/ContainerData" => c == "net/minecraft/world/inventory/SimpleContainerData",
         "net/minecraft/client/gui/screens/inventory/MenuAccess" => c == "net/minecraft/client/gui/screens/inventory/AbstractContainerScreen",
         "java/lang/Throwable" => c.starts_with("java/lang/") && (c.ends_with("Exception") || c.ends_with("Error")),
+        // A mod's container is FML's Java one (`neo::mod_container`).
+        "net/neoforged/fml/ModContainer" => c == crate::neo::FML_CONTAINER,
         "java/lang/Exception" => c.starts_with("java/lang/") && c.ends_with("Exception"),
         "java/lang/ReflectiveOperationException" => matches!(
             c,

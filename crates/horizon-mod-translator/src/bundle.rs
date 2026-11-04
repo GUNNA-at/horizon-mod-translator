@@ -16,11 +16,21 @@ pub fn mod_id(jar: &Path) -> Option<String> {
         for line in text.lines() {
             let line = line.trim();
             if let Some(v) = line.strip_prefix("modId").map(str::trim).and_then(|v| v.strip_prefix('=')) {
-                return Some(v.trim().trim_matches('"').to_owned());
+                return Some(toml_string(v).to_owned());
             }
         }
     }
     None
+}
+
+/// A TOML value as written on its line: a quoted string's content, or a bare word, without what
+/// follows it (`modId="torchmaster" #mandatory` is `torchmaster`).
+pub(crate) fn toml_string(v: &str) -> &str {
+    let v = v.trim();
+    match v.chars().next() {
+        Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or(""),
+        _ => v.split(|c: char| c == '#' || c.is_whitespace()).next().unwrap_or(""),
+    }
 }
 
 /// The runtime's sources, carried in each bundle as the engine's own `compat` module: bundle
@@ -31,7 +41,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 49] = [
+const COMPAT: [(&str, &str); 50] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -74,6 +84,7 @@ const COMPAT: [(&str, &str); 49] = [
     ("widgets.rs", include_str!("../../horizon-compat/src/widgets.rs")),
     ("edit_box.rs", include_str!("../../horizon-compat/src/edit_box.rs")),
     ("level_env.rs", include_str!("../../horizon-compat/src/level_env.rs")),
+    ("mixin.rs", include_str!("../../horizon-compat/src/mixin.rs")),
     ("neo.rs", include_str!("../../horizon-compat/src/neo.rs")),
     ("network.rs", include_str!("../../horizon-compat/src/network.rs")),
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
@@ -2033,6 +2044,7 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     program.mod_id = Some(id.clone());
     program.addons = members[1..].iter().map(|(_, n)| n.clone()).collect();
     program.services = crate::services_of(jars)?;
+    program.metadata = jars.iter().flat_map(|j| crate::mod_metadata(j)).collect();
     let files = program.emit_files(40);
     let src = out.join("engine/src");
     fs::create_dir_all(&src).map_err(|e| e.to_string())?;
@@ -2209,6 +2221,16 @@ fn copy_assets(jar: &Path, id: &str, content: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// mods.toml values as jars write them: quoted, single-quoted, bare, and with a comment after
+    /// (Torchmaster's, JEI's, Guard Villagers' `modId="..." #mandatory`).
+    #[test]
+    fn a_toml_value_ends_where_its_string_does() {
+        assert_eq!(super::toml_string(r#""torchmaster" #mandatory"#), "torchmaster");
+        assert_eq!(super::toml_string(" 'jei' "), "jei");
+        assert_eq!(super::toml_string("create # the id"), "create");
+        assert_eq!(super::toml_string(r#""a#b""#), "a#b");
+    }
+
     #[test]
     fn bundles_carry_every_runtime_source_file() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");

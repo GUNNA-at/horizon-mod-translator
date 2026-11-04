@@ -282,6 +282,20 @@ impl ClassFile {
         self.annotations.iter().find(|a| a.ty == ty)
     }
 
+    /// Every class a mixin targets (`@Mixin({A.class, B.class})`, `targets = {"a.B", ...}`), as
+    /// internal names; empty for a class that is no mixin.
+    pub fn mixin_targets(&self) -> Vec<String> {
+        let Some(m) = self.annotation_of("Lorg/spongepowered/asm/mixin/Mixin;") else { return Vec::new() };
+        let mut out: Vec<String> = Vec::new();
+        for t in m.value("value").unwrap_or("").split(',').filter(|t| !t.is_empty()) {
+            out.push(t.strip_prefix('L').and_then(|t| t.strip_suffix(';')).unwrap_or(t).to_owned());
+        }
+        for t in m.value("targets").unwrap_or("").split(',').filter(|t| !t.is_empty()) {
+            out.push(t.replace('.', "/"));
+        }
+        out
+    }
+
     /// The game class a mixin targets (`@Mixin(ShapedRecipe.class)`, or `targets = "..."`), as
     /// `net/minecraft/world/item/crafting/ShapedRecipe`; its first when it names several.
     pub fn mixin_target(&self) -> Option<String> {

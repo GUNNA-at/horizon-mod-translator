@@ -176,6 +176,9 @@ pub struct Program<'a> {
     /// The mods built on it translated with it (its addons), in loading order: FML constructs a
     /// mod after the mods it needs, so theirs come after its own.
     pub addons: Vec<String>,
+    /// Each mod's id, version and display name from its jar ([`crate::mod_metadata`]): what its
+    /// `IModInfo` answers.
+    pub metadata: Vec<(String, String, String)>,
     /// Methods (`name.desc`) that ask who called them (`StackWalker.getCallerClass`): calls to
     /// them record the calling class first. Everything else keeps no call stack.
     caller_sensitive: BTreeSet<String>,
@@ -204,6 +207,7 @@ impl<'a> Program<'a> {
             lambda_ids: BTreeMap::new(),
             mod_id: None,
             addons: Vec::new(),
+            metadata: Vec::new(),
             caller_sensitive: classes
                 .iter()
                 .flat_map(|c| c.methods.iter().map(move |m| (c, m)))
@@ -435,9 +439,18 @@ impl<'a> Program<'a> {
         if !ids.is_empty() {
             let _ = writeln!(out, "    rt.mods = vec![{}];", ids.iter().map(|i| format!("{i:?}.into()")).collect::<Vec<_>>().join(", "));
         }
+        for (id, version, name) in &self.metadata {
+            for (what, value) in [("version", version), ("name", name)].into_iter().filter(|(_, v)| !v.is_empty()) {
+                let _ = writeln!(out, "    {{ let v = rt.string({value:?}); rt.interned.insert({:?}.into(), v); }}", format!("compat:mod-{what}/{id}"));
+            }
+        }
         for (main, ctor) in &mains {
             let params = crate::class::param_classes(&ctor.desc);
             let _ = writeln!(out, "    {{\n        let this = rt.new_object_id({:?}, {});", main.name, self.cid(&main.name));
+            // FML makes the mod's container the active one while its constructor runs.
+            if let Some(id) = main.annotation_of(MOD).and_then(|a| a.value("value")) {
+                let _ = writeln!(out, "        {{ let id = rt.string({id:?}); rt.interned.insert({:?}.into(), id); }}", "compat:active-mod");
+            }
             let _ = writeln!(out, "        let mut args = vec![this];");
             for p in &params {
                 let _ = writeln!(out, "        let v = horizon_compat::neo::constructor_arg(rt, {p:?}); args.push(v);");
@@ -484,15 +497,19 @@ impl<'a> Program<'a> {
             if !ensure.is_empty() {
                 let _ = writeln!(s, "        ({:?}, \"<clinit>\") => {{ {ensure}V::Void }}", c.name);
             }
-            let concrete = c.access & 0x0600 == 0;
-            if concrete && c.methods.iter().any(|m| m.name == "<init>" && m.desc == "()V" && m.code.is_some()) {
+            // Every constructor of a class that can be made (`getConstructor(Builder.class)
+            // .newInstance(builder)` as Max Henkel's configs are made): the runtime hands it the
+            // arguments, primitives unboxed.
+            let concrete = c.access & 0x0600 == 0 && c.mixin_targets().is_empty();
+            for m in c.methods.iter().filter(|m| concrete && m.name == "<init>" && m.code.is_some()) {
                 let _ = writeln!(
                     s,
-                    "        ({:?}, \"<init>.()V\") => {{ {ensure}let o = rt.new_object_id({:?}, {}); {}(rt, &[o]); o }}",
+                    "        ({:?}, {:?}) => {{ {ensure}let o = rt.new_object_id({:?}, {}); let mut a = vec![o]; a.extend_from_slice(args); {}(rt, &a); o }}",
                     c.name,
+                    format!("<init>.{}", m.desc),
                     c.name,
                     self.cid(&c.name),
-                    fn_name(&c.name, "<init>", "()V")
+                    fn_name(&c.name, "<init>", &m.desc)
                 );
             }
             if c.access & 0x4000 != 0

@@ -93,6 +93,8 @@ fn construct(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
 
 // `ServiceLoader`: the implementations `META-INF/services` names (translated with the
 // mod), each made once with its no-argument constructor, in the file's order.
+const PROVIDER: &str = "java/util/ServiceLoader$Provider";
+
 fn service_loader(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match name {
@@ -110,7 +112,10 @@ fn service_loader(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             rt.put_field(a(0), "$providers", V::NULL);
             V::Void
         }
-        "findFirst" | "iterator" | "forEach" => {
+        // A provider of `stream()`: its class, and the instance (made with the loader's others).
+        "get" => rt.get_field(a(0), "$value"),
+        "type" => rt.get_field(a(0), "$type"),
+        "findFirst" | "iterator" | "forEach" | "stream" => {
             let providers = service_providers(rt, a(0));
             if rt.thrown.is_some() {
                 return Some(V::NULL);
@@ -122,6 +127,18 @@ fn service_loader(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
                     o
                 }
                 "iterator" => crate::jutil::new_iter(rt, providers),
+                "stream" => {
+                    let mut wrapped = Vec::with_capacity(providers.len());
+                    for p in providers {
+                        let w = rt.new_object(PROVIDER);
+                        rt.put_field(w, "$value", p);
+                        let class = rt.class_of(p).to_owned();
+                        let class = class_object(rt, &class);
+                        rt.put_field(w, "$type", class);
+                        wrapped.push(w);
+                    }
+                    rt.alloc("java/util/stream/Stream", Data::Stream(wrapped))
+                }
                 _ => {
                     for p in providers {
                         rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", a(1), &[p]);
@@ -206,6 +223,7 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
         || matches!(
             owner,
             "java/util/ServiceLoader"
+                | PROVIDER
                 | "org/apache/logging/log4j/Logger"
                 | "org/slf4j/Logger"
                 | "java/util/logging/Logger"
@@ -224,7 +242,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return Some(v);
     }
     let (owner, name, desc) = crate::parts(key)?;
-    if owner == "java/util/ServiceLoader" {
+    if owner == "java/util/ServiceLoader" || owner == PROVIDER {
         return service_loader(rt, name, args);
     }
     if !owner.starts_with("java/lang/") {
@@ -452,7 +470,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let class = rt.get_field(a(0), "$class");
                 let n = rt.str_of(class).unwrap_or("").to_owned();
                 let d = text(rt, rt.get_field(a(0), "$desc"));
-                let vals = crate::jutil::elements(rt, a(1));
+                // Reflection unboxes what a primitive parameter is given, as Java's does.
+                let mut vals = crate::jutil::elements(rt, a(1));
+                for (v, k) in vals.iter_mut().zip(kinds(&d)) {
+                    *v = crate::mixin::unbox(rt, *v, k);
+                }
                 construct(rt, &n, &d, &vals)
             }
             "getDeclaringClass" => rt.get_field(a(0), "$class"),

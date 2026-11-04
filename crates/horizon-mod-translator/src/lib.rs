@@ -178,6 +178,43 @@ fn mods_toml(jar: &Path) -> Option<String> {
     None
 }
 
+/// What FML reads of each mod a jar declares (`[[mods]]`): id, version and display name, with
+/// `${file.jarVersion}` as the jar's manifest gives it (`Implementation-Version`).
+pub fn mod_metadata(jar: &Path) -> Vec<(String, String, String)> {
+    let Some(text) = mods_toml(jar) else { return Vec::new() };
+    let jar_version = jar_manifest_version(jar).unwrap_or_default();
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    let mut in_mod = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_mod = line == "[[mods]]";
+            if in_mod {
+                out.push(Default::default());
+            }
+            continue;
+        }
+        let (Some((k, v)), true, Some(m)) = (line.split_once('='), in_mod, out.last_mut()) else { continue };
+        let v = bundle::toml_string(v).replace("${file.jarVersion}", &jar_version);
+        match k.trim() {
+            "modId" => m.0 = v,
+            "version" => m.1 = v,
+            "displayName" => m.2 = v,
+            _ => {}
+        }
+    }
+    out.retain(|m| !m.0.is_empty());
+    out
+}
+
+/// The `Implementation-Version` in a jar's `META-INF/MANIFEST.MF`.
+fn jar_manifest_version(jar: &Path) -> Option<String> {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(jar).ok()?).ok()?;
+    let mut text = String::new();
+    zip.by_name("META-INF/MANIFEST.MF").ok()?.read_to_string(&mut text).ok()?;
+    text.lines().find_map(|l| l.strip_prefix("Implementation-Version:")).map(|v| v.trim().to_owned())
+}
+
 /// The mods a jar needs (its `[[dependencies.<id>]]` of type `required`, or `mandatory = true` in
 /// the older form), the loader and the game left out.
 pub fn dependencies(jar: &Path) -> Vec<String> {
@@ -236,6 +273,7 @@ pub mod bundle;
 pub mod codegen;
 pub mod insn;
 pub mod props;
+pub mod weave;
 
 /// A registration the mod's code makes: registry and name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -419,7 +457,7 @@ mod mixin_census_tests {
     /// both class-file-only (`RuntimeInvisibleAnnotations`); a second method has none.
     fn mixin_class() -> Vec<u8> {
         let mut pool: Vec<Vec<u8>> = Vec::new();
-        let mut utf8 = |pool: &mut Vec<Vec<u8>>, s: &str| -> u16 {
+        let utf8 = |pool: &mut Vec<Vec<u8>>, s: &str| -> u16 {
             let mut e = vec![1];
             e.extend((s.len() as u16).to_be_bytes());
             e.extend(s.as_bytes());
@@ -502,6 +540,32 @@ mod mixin_census_tests {
         b.extend((ann.len() as u32).to_be_bytes());
         b.extend(ann);
         b
+    }
+
+    /// FML's view of a jar's mods: each `[[mods]]` table's id, version and name, a version of
+    /// `${file.jarVersion}` read from the manifest, and dependency tables' `modId`s left out.
+    #[test]
+    fn mod_metadata_is_read_as_fml_reads_it() {
+        let dir = std::env::temp_dir().join(format!("hz-meta-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("m.jar");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("META-INF/MANIFEST.MF", opts).unwrap();
+        std::io::Write::write_all(&mut zip, b"Manifest-Version: 1.0\r\nImplementation-Version: 2.4.12\r\n").unwrap();
+        zip.start_file("META-INF/neoforge.mods.toml", opts).unwrap();
+        let toml = "modLoader=\"javafml\"\n[[mods]]\nmodId=\"guardvillagers\" #mandatory\nversion=\"${file.jarVersion}\"\ndisplayName='Guard Villagers'\n\n[[mods]]\nmodId = \"extra\"\n[[dependencies.guardvillagers]]\nmodId=\"neoforge\"\nversion=\"[21,)\"\n";
+        std::io::Write::write_all(&mut zip, toml.as_bytes()).unwrap();
+        zip.finish().unwrap();
+        let found = mod_metadata(&jar);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            found,
+            vec![
+                ("guardvillagers".to_owned(), "2.4.12".to_owned(), "Guard Villagers".to_owned()),
+                ("extra".to_owned(), String::new(), String::new()),
+            ]
+        );
     }
 
     #[test]

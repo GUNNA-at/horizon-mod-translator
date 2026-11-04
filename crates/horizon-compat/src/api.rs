@@ -20,6 +20,7 @@ const OPPOSITE: [i64; 6] = [1, 0, 3, 2, 5, 4];
 const AXIS: [i32; 6] = [1, 1, 2, 2, 0, 0];
 
 const BLOCK_POS: &str = "net/minecraft/core/BlockPos";
+const PACKET_FLOW: &str = "net/minecraft/network/protocol/PacketFlow";
 const MUTABLE_POS: &str = "net/minecraft/core/BlockPos$MutableBlockPos";
 
 /// Minecraft's superclasses a missed call climbs past the mod's own (the API's classes aren't in
@@ -47,11 +48,36 @@ fn native(rt: &Rt, v: V) -> [i64; 4] {
     }
 }
 
+thread_local! {
+    /// How many API calls are running on this thread, one inside another.
+    static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// API calls nested deeper than this are a loop (a handler calling a functional object that
+/// leads back to the same handler): the call throws `StackOverflowError`, as the JVM would at its
+/// stack's end, instead of overflowing the game's.
+const MAX_DEPTH: u32 = 512;
+
 /// Calls the API method `key` (`owner.name.desc`). For instance methods
 /// `args[0]` is the receiver. A key naming one of the mod's own classes (a
 /// member it inherits from the API, as `javac` writes inherited calls) is
 /// resolved up the class's superclasses, as the JVM resolves it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
+    let depth = DEPTH.with(|d| {
+        d.set(d.get() + 1);
+        d.get()
+    });
+    let r = if depth > MAX_DEPTH {
+        rt.throw_new("java/lang/StackOverflowError");
+        V::Void
+    } else {
+        call_nested(rt, key, args)
+    };
+    DEPTH.with(|d| d.set(d.get() - 1));
+    r
+}
+
+fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     let since = crate::misses();
     let r = call_exact(rt, key, args);
     if crate::misses() == since || !crate::missed_since(key, since) {
@@ -144,6 +170,16 @@ fn uncount(rt: &mut Rt, key: &'static str) {
 /// With `HORIZON_COMPAT_TRACE` set, each API method the mod calls that isn't mapped is printed
 /// once, the first time it runs: what a mod needs next, from a real game.
 /// A key on a JDK exception class (`java/lang/IllegalStateException.<init>...`).
+/// `Throwable.toString()`: the class's binary name, then `: message` when it has one.
+fn throwable_string(rt: &Rt, e: V) -> String {
+    let class = rt.class_of(e).replace('/', ".");
+    let m = rt.get_field(e, "message");
+    match rt.str_of(m) {
+        Some(m) => format!("{class}: {m}"),
+        None => class,
+    }
+}
+
 fn exception_class(key: &str) -> bool {
     if !key.starts_with("java/") {
         return false;
@@ -194,6 +230,14 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             raw => V::I(raw.i()),
         },
         "java/lang/Enum.ordinal.()I" => V::I(rt.get_field(a(0), "$ordinal").i()),
+        "net/minecraft/network/protocol/PacketFlow.getOpposite.()Lnet/minecraft/network/protocol/PacketFlow;" => {
+            let key = if rt.get_field(a(0), "$ordinal").i() == 0 { "net/minecraft/network/protocol/PacketFlow.CLIENTBOUND" } else { "net/minecraft/network/protocol/PacketFlow.SERVERBOUND" };
+            get_static(rt, key)
+        }
+        "net/minecraft/network/protocol/PacketFlow.id.()Ljava/lang/String;" => {
+            let id = if rt.get_field(a(0), "$ordinal").i() == 0 { "serverbound" } else { "clientbound" };
+            rt.string(id)
+        }
 
         // net.minecraft.core.BlockPos
         "net/minecraft/core/BlockPos.<init>.(III)V" | "net/minecraft/core/Vec3i.<init>.(III)V" => {
@@ -409,12 +453,40 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             };
             rt.string(&out)
         }
-        k if exception_class(k) && k.contains(".<init>.(Ljava/lang/String;") => {
-            rt.put_field(a(0), "message", a(1));
+        // Java's constructors: `(String)`, `(String, Throwable)`, `(Throwable)` (whose message is
+        // the cause's `toString()`, as `Throwable(Throwable)` sets it) and `()`.
+        k if exception_class(k) && k.contains(".<init>.") => {
+            let desc = k.rsplit('.').next().unwrap_or("");
+            if desc.starts_with("(Ljava/lang/String;") {
+                rt.put_field(a(0), "message", a(1));
+            }
+            if desc.starts_with("(Ljava/lang/String;Ljava/lang/Throwable;") {
+                rt.put_field(a(0), "cause", a(2));
+            }
+            if desc.starts_with("(Ljava/lang/Throwable;)") {
+                let cause = a(1);
+                rt.put_field(a(0), "cause", cause);
+                if cause.r() != 0 {
+                    let text = throwable_string(rt, cause);
+                    let m = rt.string(&text);
+                    rt.put_field(a(0), "message", m);
+                }
+            }
             V::Void
         }
-        k if exception_class(k) && k.contains(".<init>.") => V::Void,
         k if exception_class(k) && (k.contains(".getMessage.") || k.contains(".getLocalizedMessage.")) => rt.get_field(a(0), "message"),
+        k if exception_class(k) && k.contains(".getCause.") => match rt.get_field(a(0), "cause") {
+            V::Void => V::NULL,
+            c => c,
+        },
+        k if exception_class(k) && k.contains(".initCause.") => {
+            rt.put_field(a(0), "cause", a(1));
+            a(0)
+        }
+        k if exception_class(k) && k.contains(".toString.()") => {
+            let text = throwable_string(rt, a(0));
+            rt.string(&text)
+        }
         // `array.clone()` (an enum's `values()`): a shallow copy.
         k if k.starts_with('[') && k.contains(".clone.") => {
             let this = a(0);
@@ -437,8 +509,9 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 35] = [
+const CHAIN: [Module; 36] = [
     mutable_pos,
+    crate::mixin::call,
     crate::sounds::call,
     crate::particles::call,
     crate::food::call,
@@ -478,8 +551,9 @@ const CHAIN: [Module; 35] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 35] = [
+const CLAIMS: [Claims; 36] = [
     |owner, _, _| owner == MUTABLE_POS,
+    crate::mixin::claims,
     crate::sounds::claims,
     crate::particles::claims,
     crate::food::claims,
@@ -517,8 +591,9 @@ const CLAIMS: [Claims; 35] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 35] = [
+const MODULE_NAMES: [&str; 36] = [
     "mutable_pos",
+    "mixin",
     "sounds",
     "particles",
     "food",
@@ -1317,6 +1392,21 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         // The side, one object per constant: catnip compares `FMLLoader.getDist() == Dist.CLIENT`.
         "net/neoforged/api/distmarker/Dist.CLIENT" | "net/neoforged/fml/loading/FMLEnvironment.dist" => api_enum(rt, "net/neoforged/api/distmarker/Dist", "CLIENT", 0),
         "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER" => api_enum(rt, "net/neoforged/api/distmarker/Dist", "DEDICATED_SERVER", 1),
+        // Which way a packet goes (vanilla's order).
+        "net/minecraft/network/protocol/PacketFlow.SERVERBOUND" => api_enum(rt, PACKET_FLOW, "SERVERBOUND", 0),
+        "net/minecraft/network/protocol/PacketFlow.CLIENTBOUND" => api_enum(rt, PACKET_FLOW, "CLIENTBOUND", 1),
+        // Which file a config goes to (FML's order).
+        k if k.starts_with("net/neoforged/fml/config/ModConfig$Type.") => {
+            const TYPES: [&str; 4] = ["COMMON", "CLIENT", "SERVER", "STARTUP"];
+            let f = k.rsplit('.').next().unwrap_or("");
+            match TYPES.iter().position(|t| *t == f) {
+                Some(i) => api_enum(rt, "net/neoforged/fml/config/ModConfig$Type", TYPES[i], i as i32),
+                None => {
+                    crate::miss(rt, key);
+                    V::NULL
+                }
+            }
+        }
         k if k.starts_with("net/neoforged/bus/api/EventPriority.") => {
             let n = k.rsplit('.').next().unwrap_or("");
             rt.string(n)
@@ -1394,6 +1484,53 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A function that maps an optional by mapping it again, forever: the JVM would end it with a
+    /// `StackOverflowError` the code may catch; here too, past [`MAX_DEPTH`] nested API calls,
+    /// and the calls unwind instead of overflowing the thread's stack.
+    #[test]
+    fn an_api_call_looping_back_into_itself_throws_stack_overflow_error() {
+        const MAP: &str = "java/util/Optional.map.(Ljava/util/function/Function;)Ljava/util/Optional;";
+        thread_local! {
+            static AGAIN: std::cell::Cell<(V, V)> = const { std::cell::Cell::new((V::Void, V::Void)) };
+        }
+        fn again(rt: &mut Rt, _id: u32, _args: &[V]) -> Option<V> {
+            let (optional, f) = AGAIN.with(|a| a.get());
+            Some(call(rt, MAP, &[optional, f]))
+        }
+        let run = || {
+            let mut rt = Rt::new();
+            rt.lambda_call = Some(again);
+            let f = rt.lambda_id("java/util/function/Function", 1, Vec::new());
+            let x = rt.string("x");
+            let optional = call(&mut rt, "java/util/Optional.of.(Ljava/lang/Object;)Ljava/util/Optional;", &[x]);
+            AGAIN.with(|a| a.set((optional, f)));
+            call(&mut rt, MAP, &[optional, f]);
+            let e = rt.thrown.take().expect("thrown");
+            // Every level came back out: the next call starts at the top again.
+            (rt.class_of(e).to_owned(), DEPTH.with(|d| d.get()))
+        };
+        // Each level is a few frames; a debug build's are large.
+        let (thrown, depth) = std::thread::Builder::new().stack_size(256 << 20).spawn(run).unwrap().join().unwrap();
+        assert_eq!(thrown, "java/lang/StackOverflowError");
+        assert_eq!(depth, 0);
+    }
+
+    /// `new RuntimeException(cause)` as Java makes it (Max Henkel's corelib wraps every
+    /// reflection failure so): its message is the cause's `toString()`, and the cause is kept.
+    #[test]
+    fn an_exception_made_from_a_cause_says_what_the_cause_was() {
+        let mut rt = Rt::new();
+        let inner = rt.new_object("java/lang/IllegalStateException");
+        let boom = rt.string("boom");
+        call(&mut rt, "java/lang/IllegalStateException.<init>.(Ljava/lang/String;)V", &[inner, boom]);
+        let outer = rt.new_object("java/lang/RuntimeException");
+        call(&mut rt, "java/lang/RuntimeException.<init>.(Ljava/lang/Throwable;)V", &[outer, inner]);
+        let m = call(&mut rt, "java/lang/RuntimeException.getMessage.()Ljava/lang/String;", &[outer]);
+        assert_eq!(rt.str_of(m), Some("java.lang.IllegalStateException: boom"));
+        assert_eq!(call(&mut rt, "java/lang/RuntimeException.getCause.()Ljava/lang/Throwable;", &[outer]), inner);
+        assert_eq!(call(&mut rt, "java/lang/IllegalStateException.getCause.()Ljava/lang/Throwable;", &[inner]), V::NULL);
+    }
 
     #[test]
     fn block_pos_relative_and_opposite() {

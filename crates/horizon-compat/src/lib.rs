@@ -31,6 +31,7 @@ pub mod menus;
 pub mod widgets;
 pub mod edit_box;
 pub mod level_env;
+pub mod mixin;
 pub mod mod_entities;
 pub mod nbt;
 pub mod neo;

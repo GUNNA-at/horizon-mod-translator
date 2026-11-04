@@ -490,6 +490,90 @@ pub fn elements(rt: &Rt, v: V) -> Vec<V> {
     }
 }
 
+const SPLITTER: &str = "com/google/common/base/Splitter";
+const JOINER: &str = "com/google/common/base/Joiner";
+const OBJECT_ARRAYS: &str = "com/google/common/collect/ObjectArrays";
+
+/// Guava's `Splitter` and `Joiner`, immutable as Guava's are (each setting gives a new one), and
+/// `ObjectArrays.concat`.
+fn guava_strings(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let with = |rt: &mut Rt, from: V, field: &'static str, v: V| {
+        let class = if owner == SPLITTER { SPLITTER } else { JOINER };
+        let o = rt.new_object(class);
+        for f in ["$sep", "$trim", "$omit", "$skip", "$null"] {
+            let old = rt.get_field(from, f);
+            rt.put_field(o, f, old);
+        }
+        rt.put_field(o, field, v);
+        o
+    };
+    Some(match (owner, name) {
+        (SPLITTER | JOINER, "on") => {
+            let sep = if desc.starts_with("(C)") { char::from_u32(a(0).i() as u32 & 0xffff).map(String::from).unwrap_or_default() } else { rt.to_java_string(a(0), 'L') };
+            let sep = rt.string(&sep);
+            with(rt, V::NULL, "$sep", sep)
+        }
+        (SPLITTER, "trimResults") => with(rt, a(0), "$trim", V::I(1)),
+        (SPLITTER, "omitEmptyStrings") => with(rt, a(0), "$omit", V::I(1)),
+        (SPLITTER, "split" | "splitToList") => {
+            let this = a(0);
+            let text = rt.to_java_string(a(1), 'L');
+            let sep = rt.to_java_string(rt.get_field(this, "$sep"), 'L');
+            let (trim, omit) = (rt.get_field(this, "$trim").i() != 0, rt.get_field(this, "$omit").i() != 0);
+            let pieces: Vec<String> = if sep.is_empty() { text.chars().map(String::from).collect() } else { text.split(sep.as_str()).map(str::to_owned).collect() };
+            let mut out = Vec::new();
+            for p in pieces {
+                let p = if trim { p.trim().to_owned() } else { p };
+                if !(omit && p.is_empty()) {
+                    out.push(rt.string(&p));
+                }
+            }
+            new_list(rt, out)
+        }
+        (JOINER, "skipNulls") => with(rt, a(0), "$skip", V::I(1)),
+        (JOINER, "useForNull") => with(rt, a(0), "$null", a(1)),
+        (JOINER, "join") => {
+            let this = a(0);
+            let items = if desc.starts_with("(Ljava/lang/Object;Ljava/lang/Object;[") {
+                let mut v = vec![a(1), a(2)];
+                v.extend(elements(rt, a(3)));
+                v
+            } else {
+                elements(rt, a(1))
+            };
+            let sep = rt.to_java_string(rt.get_field(this, "$sep"), 'L');
+            let (skip, for_null) = (rt.get_field(this, "$skip").i() != 0, rt.get_field(this, "$null"));
+            let mut parts = Vec::new();
+            for v in items {
+                match v {
+                    V::R(0) | V::Void if skip => continue,
+                    V::R(0) | V::Void if for_null.r() != 0 => parts.push(rt.to_java_string(for_null, 'L')),
+                    V::R(0) | V::Void => {
+                        rt.throw_new("java/lang/NullPointerException");
+                        return Some(V::NULL);
+                    }
+                    v => parts.push(rt.to_java_string(v, 'L')),
+                }
+            }
+            rt.string(&parts.join(&sep))
+        }
+        (OBJECT_ARRAYS, "concat") => {
+            let items: Vec<V> = match desc {
+                "([Ljava/lang/Object;Ljava/lang/Object;)[Ljava/lang/Object;" => elements(rt, a(0)).into_iter().chain([a(1)]).collect(),
+                "(Ljava/lang/Object;[Ljava/lang/Object;)[Ljava/lang/Object;" => std::iter::once(a(0)).chain(elements(rt, a(1))).collect(),
+                _ => elements(rt, a(0)).into_iter().chain(elements(rt, a(1))).collect(),
+            };
+            let arr = rt.new_array(items.len() as i32, V::NULL);
+            for (i, v) in items.into_iter().enumerate() {
+                rt.array_set(arr, i as i32, v);
+            }
+            arr
+        }
+        _ => return None,
+    })
+}
+
 fn is_map(class: &str) -> bool {
     class.ends_with("Map") || class.ends_with("Map$Values")
 }
@@ -595,6 +679,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "makeMap" => rt.alloc("java/util/concurrent/ConcurrentHashMap", Data::Table(Table::default())),
             _ => a(0),
         });
+    }
+    if matches!(owner, SPLITTER | JOINER | OBJECT_ARRAYS) {
+        return guava_strings(rt, owner, name, desc, args);
     }
     if !util_owner(owner) {
         return None;
@@ -2567,6 +2654,34 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+    /// Guava's strings as SpectreLib's configs use them: a comment array grown by
+    /// `ObjectArrays.concat`, a path split and joined again.
+    #[test]
+    fn guava_splits_joins_and_concatenates_as_guava_does() {
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"));
+        let first = rt.string("a comment");
+        let arr = rt.new_array(1, V::NULL);
+        rt.array_set(arr, 0, first);
+        let more = rt.string("more");
+        let grown = c(&mut rt, "com/google/common/collect/ObjectArrays.concat.([Ljava/lang/Object;Ljava/lang/Object;)[Ljava/lang/Object;", &[arr, more]);
+        assert_eq!(rt.array_len(grown), 2);
+        assert_eq!(rt.str_of(rt.array_get(grown, 1)), Some("more"));
+        let dot = rt.string(".");
+        let splitter = c(&mut rt, "com/google/common/base/Splitter.on.(Ljava/lang/String;)Lcom/google/common/base/Splitter;", &[dot]);
+        let omit = c(&mut rt, "com/google/common/base/Splitter.omitEmptyStrings.()Lcom/google/common/base/Splitter;", &[splitter]);
+        let path = rt.string("server..beds. sleep");
+        let parts = c(&mut rt, "com/google/common/base/Splitter.split.(Ljava/lang/CharSequence;)Ljava/lang/Iterable;", &[omit, path]);
+        let texts: Vec<String> = elements(&rt, parts).iter().map(|&p| rt.str_of(p).unwrap_or("").to_owned()).collect();
+        assert_eq!(texts, ["server", "beds", " sleep"]);
+        // The first splitter is unchanged by the second's setting.
+        let all = c(&mut rt, "com/google/common/base/Splitter.split.(Ljava/lang/CharSequence;)Ljava/lang/Iterable;", &[splitter, path]);
+        assert_eq!(elements(&rt, all).len(), 4);
+        let joiner = c(&mut rt, "com/google/common/base/Joiner.on.(C)Lcom/google/common/base/Joiner;", &[V::I('/' as i32)]);
+        let joined = c(&mut rt, "com/google/common/base/Joiner.join.(Ljava/lang/Iterable;)Ljava/lang/String;", &[joiner, parts]);
+        assert_eq!(rt.str_of(joined), Some("server/beds/ sleep"));
+    }
+
     use super::*;
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {

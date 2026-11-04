@@ -312,6 +312,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     owner.starts_with("net/neoforged/")
         || owner.starts_with("net/minecraft/resources/")
         || is_registry(owner)
+        || owner.starts_with("org/apache/maven/artifact/versioning/")
         || matches!(owner, "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference")
         || (owner.starts_with("net/minecraft/") && matches!(name, "registryAccess" | "holderLookup" | "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup"))
 }
@@ -319,6 +320,14 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 /// A NeoForge loading call, or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
+    // A call through the class a mod checked for, or through the interface it holds, is the
+    // container's or the metadata's own.
+    let owner = match owner {
+        FML_CONTAINER => MOD_CONTAINER,
+        "net/neoforged/neoforgespi/language/IModInfo" => MOD_INFO,
+        "org/apache/maven/artifact/versioning/ArtifactVersion" => VERSION,
+        o => o,
+    };
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         ("net/neoforged/bus/api/IEventBus", "addListener") => {
@@ -757,7 +766,33 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 _ => return None,
             }
         }
-        ("net/neoforged/fml/ModContainer", "registerConfig" | "registerExtensionPoint") => V::Void,
+        (MOD_CONTAINER, "registerConfig" | "registerExtensionPoint") => V::Void,
+        (MOD_CONTAINER, "getCustomExtension") => crate::api_common::optional(rt, V::NULL),
+        (MOD_CONTAINER, "getModInfo") => {
+            let id = rt.get_field(a(0), "$modId");
+            let id = rt.str_of(id).unwrap_or("").to_owned();
+            mod_info(rt, &id)
+        }
+        // A mod's metadata, from its `neoforge.mods.toml` (the translator records each mod's
+        // version and name); FML's defaults where the file has none: version `1`, the id as name.
+        (MOD_INFO, "getModId" | "getNamespace") => rt.get_field(a(0), "$modId"),
+        (MOD_INFO, "getDisplayName") => rt.get_field(a(0), "$displayName"),
+        (MOD_INFO, "getVersion") => rt.get_field(a(0), "$version"),
+        (VERSION, "toString") => rt.get_field(a(0), "$version"),
+        (VERSION, "getMajorVersion" | "getMinorVersion" | "getIncrementalVersion") => {
+            let text = rt.get_field(a(0), "$version");
+            let i = ["getMajorVersion", "getMinorVersion", "getIncrementalVersion"].iter().position(|n| *n == name).unwrap_or(0);
+            V::I(version_part(rt.str_of(text).unwrap_or(""), i))
+        }
+        // The loading context: during a mod's construction (and after it, the last one built) its
+        // container is the active one.
+        (LOADING_CONTEXT, "get") => rt.intern("compat:loading-context".into(), |rt| rt.new_object(LOADING_CONTEXT)),
+        (LOADING_CONTEXT, "getActiveContainer") => active_container(rt),
+        (LOADING_CONTEXT, "getActiveNamespace") => {
+            let c = active_container(rt);
+            rt.get_field(c, "$modId")
+        }
+        (LOADING_CONTEXT, "registerExtensionPoint" | "registerConfig") => V::Void,
         // The mods this engine carries, as FML lists them: the jar's own and those bundled in it.
         ("net/neoforged/fml/ModList", "get") => rt.intern("compat:mod-list".into(), |rt| rt.new_object("net/neoforged/fml/ModList")),
         ("net/neoforged/fml/ModList", "isLoaded") => {
@@ -770,9 +805,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             crate::api_common::optional(rt, c)
         }
         ("net/neoforged/fml/ModList", "size") => V::I(loaded_mods(rt).len() as i32),
-        ("net/neoforged/fml/ModContainer", "getModId" | "getNamespace") => rt.get_field(a(0), "$modId"),
+        (MOD_CONTAINER, "getModId" | "getNamespace") => rt.get_field(a(0), "$modId"),
         // Events route by class, so every handle on the mod bus is the same bus.
-        ("net/neoforged/fml/ModContainer", "getEventBus") => rt.new_object("net/neoforged/bus/api/IEventBus"),
+        (MOD_CONTAINER, "getEventBus") => rt.new_object("net/neoforged/bus/api/IEventBus"),
         // A setup event's deferred work runs at once (one thread here), and its future is done.
         (o, "enqueueWork") if o.starts_with("net/neoforged/fml/event/lifecycle/") => {
             let value = if desc.starts_with("(Ljava/lang/Runnable;") {
@@ -870,21 +905,64 @@ fn mod_loaded(rt: &Rt, id: &str) -> bool {
     !id.is_empty() && loaded_mods(rt).iter().any(|m| m == id)
 }
 
+/// NeoForge's container of a Java mod: what a mod's constructor, `ModList` and `ModLoadingContext`
+/// hand out (mods check `instanceof FMLModContainer` before asking it for their bus).
+pub const FML_CONTAINER: &str = "net/neoforged/fml/javafmlmod/FMLModContainer";
+const MOD_CONTAINER: &str = "net/neoforged/fml/ModContainer";
+const MOD_INFO: &str = "net/neoforged/fml/loading/moddiscovery/ModInfo";
+const VERSION: &str = "org/apache/maven/artifact/versioning/DefaultArtifactVersion";
+const LOADING_CONTEXT: &str = "net/neoforged/fml/ModLoadingContext";
+/// The interned string naming the mod whose constructor runs (the generated `start` sets it).
+pub const ACTIVE_MOD: &str = "compat:active-mod";
+
 /// The mod's container, one per id.
 fn mod_container(rt: &mut Rt, id: &str) -> V {
     rt.intern(format!("compat:mod-container/{id}"), |rt| {
-        let c = rt.new_object("net/neoforged/fml/ModContainer");
+        let c = rt.new_object(FML_CONTAINER);
         let s = rt.string(id);
         rt.put_field(c, "$modId", s);
         c
     })
 }
 
+/// The container of the mod being constructed: the one `start` named, else the engine's first.
+fn active_container(rt: &mut Rt) -> V {
+    let named = rt.interned.get(ACTIVE_MOD).copied().and_then(|v| rt.str_of(v).map(str::to_owned));
+    let id = named.or_else(|| loaded_mods(rt).into_iter().next()).unwrap_or_default();
+    mod_container(rt, &id)
+}
+
+/// A mod's `IModInfo`, one per id, with the version and name the translator found for it.
+fn mod_info(rt: &mut Rt, id: &str) -> V {
+    rt.intern(format!("compat:mod-info/{id}"), |rt| {
+        let info = rt.new_object(MOD_INFO);
+        let s = rt.string(id);
+        rt.put_field(info, "$modId", s);
+        let name = rt.interned.get(&format!("compat:mod-name/{id}")).copied().unwrap_or(s);
+        rt.put_field(info, "$displayName", name);
+        let text = match rt.interned.get(&format!("compat:mod-version/{id}")).copied() {
+            Some(v) => v,
+            None => rt.string("1"),
+        };
+        let version = rt.new_object(VERSION);
+        rt.put_field(version, "$version", text);
+        rt.put_field(info, "$version", version);
+        info
+    })
+}
+
+/// Part `i` (major, minor, incremental) of a version as Maven reads it: the leading digits of each
+/// dot-separated piece, 0 where there are none.
+fn version_part(text: &str, i: usize) -> i32 {
+    let piece = text.split(['-', '+']).next().unwrap_or("").split('.').nth(i).unwrap_or("");
+    piece.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0)
+}
+
 /// Loading objects a mod's constructor takes: the event bus, its container, the side.
 pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
     match class {
         "net/neoforged/bus/api/IEventBus" => rt.new_object("net/neoforged/bus/api/IEventBus"),
-        "net/neoforged/fml/ModContainer" => rt.new_object("net/neoforged/fml/ModContainer"),
+        MOD_CONTAINER | FML_CONTAINER => active_container(rt),
         "net/neoforged/api/distmarker/Dist" => crate::api::get_static(rt, "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER"),
         _ => V::NULL,
     }
@@ -908,6 +986,46 @@ mod tests {
         let is_client = "net/neoforged/api/distmarker/Dist.isClient.()Z";
         assert_eq!(call(&mut rt, is_client, &[client]), Some(V::I(1)));
         assert_eq!(call(&mut rt, is_client, &[server]), Some(V::I(0)));
+    }
+
+    /// FML hands a mod its own container while constructing it: a Java mod's (Comforts checks
+    /// `instanceof FMLModContainer` before using its bus), the one `ModList` and the loading
+    /// context give for that id, whose metadata has the version the mod's file declares, or FML's
+    /// `1` where it declares none.
+    #[test]
+    fn a_mod_gets_its_own_fml_container_with_its_version() {
+        crate::install();
+        let mut rt = Rt::new();
+        rt.mods = vec!["lib".into(), "comforts".into()];
+        let v = rt.string("9.0.5+1.21.1");
+        rt.interned.insert("compat:mod-version/comforts".into(), v);
+        let id = rt.string("comforts");
+        rt.interned.insert(ACTIVE_MOD.into(), id);
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"));
+        let container = constructor_arg(&mut rt, "net/neoforged/fml/ModContainer");
+        assert!(rt.instance_of(container, "net/neoforged/fml/javafmlmod/FMLModContainer"));
+        assert!(rt.instance_of(container, "net/neoforged/fml/ModContainer"));
+        let ctx = c(&mut rt, "net/neoforged/fml/ModLoadingContext.get.()Lnet/neoforged/fml/ModLoadingContext;", &[]);
+        assert_eq!(c(&mut rt, "net/neoforged/fml/ModLoadingContext.getActiveContainer.()Lnet/neoforged/fml/ModContainer;", &[ctx]), container);
+        let list = c(&mut rt, "net/neoforged/fml/ModList.get.()Lnet/neoforged/fml/ModList;", &[]);
+        let by_id = |rt: &mut Rt, id: &str| {
+            let id = rt.string(id);
+            let found = c(rt, "net/neoforged/fml/ModList.getModContainerById.(Ljava/lang/String;)Ljava/util/Optional;", &[list, id]);
+            crate::api::call(rt, "java/util/Optional.get.()Ljava/lang/Object;", &[found])
+        };
+        assert_eq!(by_id(&mut rt, "comforts"), container);
+        let info = c(&mut rt, "net/neoforged/fml/javafmlmod/FMLModContainer.getModInfo.()Lnet/neoforged/neoforgespi/language/IModInfo;", &[container]);
+        let version = c(&mut rt, "net/neoforged/neoforgespi/language/IModInfo.getVersion.()Lorg/apache/maven/artifact/versioning/ArtifactVersion;", &[info]);
+        let text = c(&mut rt, "org/apache/maven/artifact/versioning/ArtifactVersion.toString.()Ljava/lang/String;", &[version]);
+        assert_eq!(rt.str_of(text), Some("9.0.5+1.21.1"));
+        assert_eq!(c(&mut rt, "org/apache/maven/artifact/versioning/ArtifactVersion.getMinorVersion.()I", &[version]), V::I(0));
+        assert_eq!(c(&mut rt, "org/apache/maven/artifact/versioning/ArtifactVersion.getIncrementalVersion.()I", &[version]), V::I(5));
+        let lib = by_id(&mut rt, "lib");
+        assert_ne!(lib, container);
+        let info = c(&mut rt, "net/neoforged/fml/ModContainer.getModInfo.()Lnet/neoforged/neoforgespi/language/IModInfo;", &[lib]);
+        let version = c(&mut rt, "net/neoforged/neoforgespi/language/IModInfo.getVersion.()Lorg/apache/maven/artifact/versioning/ArtifactVersion;", &[info]);
+        let text = c(&mut rt, "org/apache/maven/artifact/versioning/ArtifactVersion.toString.()Ljava/lang/String;", &[version]);
+        assert_eq!(rt.str_of(text), Some("1"));
     }
 
     #[test]

@@ -1372,6 +1372,11 @@ fn codec_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
 fn apply_op(rt: &mut Rt, op: V, codec: V) -> V {
     if rt.class_of(op) == LIST_OP {
         make(rt, COLLECTION, vec![V::NULL, codec])
+    } else if rt.cid(op) == 0 {
+        // An operation of the API's this module doesn't make (`ByteBufCodecs.optional()`...):
+        // asking it to run would come back here. Counted as unmapped; the codec stays as it is.
+        crate::miss(rt, OPERATION);
+        codec
     } else {
         rt.call_functional(OPERATION, op, &[codec])
     }
