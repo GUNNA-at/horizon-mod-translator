@@ -1776,6 +1776,18 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Tests `api::tests::a_mods_own_register_makes_its_own_holders`,
     `neoforges_simple_registrations_make_what_neoforge_makes`,
     `records::tests::a_vanilla_enums_own_class_answers_enums_final_methods`.
+  - [x] 2026-11-05 Smaller general misses from round 6:
+    - `Stream.reduce` in its three forms (`reduce(op)` an `Optional`, an `OptionalInt` for an
+      `IntStream`; `reduce(identity, op)`; `reduce(identity, accumulator, combiner)`), left to
+      right (SecurityCraft, FarmersDelight; Mekanism's `IntStream.reduce`).
+    - Guava's other collection factories: `Sets.newLinkedHashSet` (FarmersDelight's 184 `add`s
+      went to nothing), `newTreeSet`, the `WithExpectedSize`/`WithCapacity` ones (empty, where the
+      list factory had taken the size for an element), `Maps.newHashMap(map)` a copy (it was
+      empty).
+    - `SignBlock.getWoodType(block)` (a sign keeps the wood it was made with, vanilla's `type`;
+      other blocks oak) and `sign.type()`; `BedBlock.getConnectedDirection(state)` (Comforts' 512).
+    Tests `jutil::tests::streams_reduce_and_guavas_factories_make_their_collections`,
+    `blocks::tests::signs_keep_their_wood_and_beds_find_their_other_half`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

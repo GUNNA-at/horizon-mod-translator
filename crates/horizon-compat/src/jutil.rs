@@ -1028,6 +1028,38 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             };
             new_set(rt, &items)
         }
+        // Guava's other factories (`Sets.newLinkedHashSet()`, `Lists.newArrayListWithCapacity(n)`,
+        // `Maps.newHashMap(map)`...): empty for a size hint, else a copy of what they're given (an
+        // `Iterable`, an `Iterator`, an array, a map). The runtime's sets and maps keep insertion
+        // order, as the linked ones do.
+        ("com/google/common/collect/Sets" | "com/google/common/collect/Lists" | "com/google/common/collect/Maps", n)
+            if n.starts_with("new") =>
+        {
+            let given = a(0);
+            let items = if desc.starts_with("()") || desc.starts_with("(I)") || desc.starts_with("(Ljava/lang/Class;)") || desc.starts_with("(Ljava/util/Comparator;)") {
+                Vec::new()
+            } else if desc.starts_with("(Ljava/util/Map;)") || desc.starts_with("(Ljava/util/SortedMap;)") {
+                table_pairs(rt, given).into_iter().flat_map(|(k, v)| [k, v]).collect()
+            } else if desc.starts_with("([") {
+                varargs(rt)
+            } else {
+                elements(rt, given)
+            };
+            match owner {
+                "com/google/common/collect/Lists" => new_list(rt, items),
+                "com/google/common/collect/Sets" => new_set(rt, &items),
+                _ => {
+                    let sorted = n.contains("Tree");
+                    let m = rt.alloc(if sorted { "java/util/TreeMap" } else { "java/util/LinkedHashMap" }, Data::Table(Table { sorted, ..Table::default() }));
+                    for kv in items.chunks(2) {
+                        if let [k, v] = kv {
+                            table_put(rt, m, *k, *v);
+                        }
+                    }
+                    m
+                }
+            }
+        }
         ("java/util/Map" | "com/google/common/collect/ImmutableMap" | "com/google/common/collect/Maps", "of" | "newHashMap" | "newLinkedHashMap" | "newConcurrentMap") => {
             let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
             for kv in args.chunks(2) {
@@ -2724,6 +2756,38 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             o
         }
         "iterator" => new_iter(rt, items),
+        // `reduce(op)` (an optional of the fold), `reduce(identity, op)` and
+        // `reduce(identity, accumulator, combiner)` (the fold from the identity), left to right.
+        "reduce" => {
+            let class = rt.class_of(this);
+            let op_key = match class {
+                "java/util/stream/IntStream" => "java/util/function/IntBinaryOperator.applyAsInt.(II)I",
+                "java/util/stream/LongStream" => "java/util/function/LongBinaryOperator.applyAsLong.(JJ)J",
+                "java/util/stream/DoubleStream" => "java/util/function/DoubleBinaryOperator.applyAsDouble.(DD)D",
+                _ => "java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            };
+            let (mut acc, op, mut rest) = if args.len() > 2 { (Some(a(1)), a(2), items.into_iter()) } else { (None, a(1), items.into_iter()) };
+            if acc.is_none() {
+                acc = rest.next();
+            }
+            let mut acc_v = acc;
+            for e in rest {
+                let prev = acc_v.unwrap_or_default();
+                acc_v = Some(rt.call_functional(op_key, op, &[prev, e]));
+                if rt.thrown.is_some() {
+                    return Some(V::NULL);
+                }
+            }
+            if args.len() > 2 {
+                acc_v.unwrap_or_default()
+            } else if class == "java/util/stream/IntStream" {
+                crate::menus::optional_int(rt, acc_v.map(|v| v.i()))
+            } else {
+                let o = rt.new_object("java/util/Optional");
+                rt.put_field(o, "value", acc_v.unwrap_or(V::NULL));
+                o
+            }
+        }
         "sum" => items.iter().fold(V::I(0), |acc, v| match (acc, *v) {
             (V::I(x), V::I(y)) => V::I(x.wrapping_add(y)),
             (V::I(x), V::J(y)) | (V::J(y), V::I(x)) => V::J(y.wrapping_add(x as i64)),
@@ -2741,6 +2805,51 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+    /// `Stream.reduce` in its three forms, left to right (`(a - b)` shows the order); an empty
+    /// stream's `reduce(op)` is empty. Guava's factories: `Sets.newLinkedHashSet()` empty, then
+    /// growing in order (FarmersDelight's), `Maps.newHashMap(map)` a copy, `Lists.newArrayList`
+    /// sized empty.
+    #[test]
+    fn streams_reduce_and_guavas_factories_make_their_collections() {
+        fn vcall(rt: &mut Rt, _key: &'static str, _short: &'static str, args: &[V]) -> V {
+            // The operator `(a, b) -> a - b`, a mod's own object here.
+            let (x, y) = (args[1], args[2]);
+            match (x, y) {
+                (V::I(x), V::I(y)) => V::I(x - y),
+                _ => {
+                    let (x, y) = (rt.get_field(x, "value").i(), rt.get_field(y, "value").i());
+                    crate::api_common::integer(rt, x - y)
+                }
+            }
+        }
+        let mut rt = Rt::new();
+        rt.vcall = Some(vcall);
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"));
+        let minus = rt.new_object("test/Minus");
+        let ints: Vec<V> = [10, 3, 2].iter().map(|&i| crate::api_common::integer(&mut rt, i)).collect();
+        let s = rt.alloc("java/util/stream/Stream", Data::Stream(ints.clone()));
+        let r = c(&mut rt, "java/util/stream/Stream.reduce.(Ljava/util/function/BinaryOperator;)Ljava/util/Optional;", &[s, minus]);
+        assert_eq!(rt.get_field(rt.get_field(r, "value"), "value"), V::I(5));
+        let s = rt.alloc("java/util/stream/IntStream", Data::Stream(vec![V::I(10), V::I(3), V::I(2)]));
+        assert_eq!(c(&mut rt, "java/util/stream/IntStream.reduce.(ILjava/util/function/IntBinaryOperator;)I", &[s, V::I(100), minus]), V::I(85));
+        let empty = rt.alloc("java/util/stream/Stream", Data::Stream(Vec::new()));
+        let r = c(&mut rt, "java/util/stream/Stream.reduce.(Ljava/util/function/BinaryOperator;)Ljava/util/Optional;", &[empty, minus]);
+        assert_eq!(rt.get_field(r, "value"), V::NULL);
+
+        let set = c(&mut rt, "com/google/common/collect/Sets.newLinkedHashSet.()Ljava/util/LinkedHashSet;", &[]);
+        for &i in ints.iter().rev() {
+            c(&mut rt, "java/util/LinkedHashSet.add.(Ljava/lang/Object;)Z", &[set, i]);
+        }
+        let rev: Vec<V> = ints.iter().rev().copied().collect();
+        assert_eq!(elements(&rt, set), rev);
+        let m = c(&mut rt, "com/google/common/collect/Maps.newHashMap.()Ljava/util/HashMap;", &[]);
+        table_put(&mut rt, m, ints[0], ints[1]);
+        let copy = c(&mut rt, "com/google/common/collect/Maps.newHashMap.(Ljava/util/Map;)Ljava/util/HashMap;", &[m]);
+        assert_ne!(copy, m);
+        assert_eq!(table_get(&mut rt, copy, ints[0]), Some(ints[1]));
+        let sized = c(&mut rt, "com/google/common/collect/Lists.newArrayListWithCapacity.(I)Ljava/util/ArrayList;", &[V::I(8)]);
+        assert!(elements(&rt, sized).is_empty());
+    }
     /// Guava's strings as SpectreLib's configs use them: a comment array grown by
     /// `ObjectArrays.concat`, a path split and joined again.
     #[test]

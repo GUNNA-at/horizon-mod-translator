@@ -604,6 +604,11 @@ fn vanilla_placement(rt: &mut Rt, class: &str, b: V, ctx: V) -> V {
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(owner, DYE_COLOR | "net/minecraft/world/item/ArmorItem$Type" | BLOCK_PROPERTIES | ITEM_PROPERTIES | WOOD_TYPE | BUILDER)
+        || matches!(
+            (owner, name),
+            ("net/minecraft/world/level/block/SignBlock", "getWoodType") | ("net/minecraft/world/level/block/BedBlock", "getConnectedDirection")
+        )
+        || (name == "type" && owner.ends_with("SignBlock") && owner.starts_with("net/minecraft/world/level/block/"))
         || matches!(name, "values" | "registerDefaultState" | "defaultBlockState" | "defaultMapColor")
         || (name == "getSerializedName" && enum_class(owner))
         || (name == "toString" && enum_class(owner) && owner.starts_with("net/minecraft/world/level/block/state/properties/"))
@@ -977,6 +982,24 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(m)
         }
         (WOOD_TYPE, "name") => Some(rt.get_field(a(0), "$name")),
+        // `SignBlock.getWoodType(block)`: a sign's own wood, else oak; `sign.type()`.
+        ("net/minecraft/world/level/block/SignBlock", "getWoodType") => {
+            let w = rt.get_field(a(0), "type");
+            Some(if w.r() != 0 { w } else { api::get_static(rt, "net/minecraft/world/level/block/state/properties/WoodType.OAK") })
+        }
+        (o, "type") if o.ends_with("SignBlock") && o.starts_with("net/minecraft/world/level/block/") && desc == "()Lnet/minecraft/world/level/block/state/properties/WoodType;" => {
+            Some(rt.get_field(a(0), "type"))
+        }
+        // `BedBlock.getConnectedDirection(state)`: where the other half is, from the foot its
+        // facing, from the head the opposite.
+        ("net/minecraft/world/level/block/BedBlock", "getConnectedDirection") => {
+            let text = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let (_, props) = crate::host::split_state(&text);
+            let facing = props.iter().find(|(k, _)| *k == "facing").map_or("north", |(_, v)| *v);
+            let head = props.iter().any(|(k, v)| *k == "part" && *v == "head");
+            let o = crate::api_common::DIRECTION_NAMES.iter().position(|d| *d == facing).unwrap_or(2) as i64;
+            Some(api::direction(rt, if head { o ^ 1 } else { o }))
+        }
         (BUILDER, "add") => {
             let list = rt.get_field(a(0), "$props");
             for p in jutil::elements(rt, a(1)) {
@@ -1015,6 +1038,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             // `LiquidBlock(FlowingFluid, Properties)`: its fluid, the field vanilla names `fluid`.
             if o == "net/minecraft/world/level/block/LiquidBlock" {
                 rt.put_field(a(0), "fluid", a(1));
+            }
+            // A sign's or hanging sign's wood (`StandingSignBlock(WoodType, Properties)`), the field
+            // vanilla names `type`.
+            if let Some(w) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == WOOD_TYPE) {
+                rt.put_field(a(0), "type", w);
             }
             // A cauldron's interaction map (`AbstractCauldronBlock(Properties, InteractionMap)`),
             // the field vanilla names `interactions`.
@@ -1763,6 +1791,30 @@ mod tests {
 
     fn props(rt: &mut Rt) -> V {
         api::call(rt, OF, &[])
+    }
+
+    /// A mod's sign made with a wood type (SecurityCraft's secret signs) answers it through
+    /// `SignBlock.getWoodType`, any other block oak, as vanilla's does. A bed's other half: from the
+    /// foot where it faces, from the head the opposite way (Comforts' sleeping bags).
+    #[test]
+    fn signs_keep_their_wood_and_beds_find_their_other_half() {
+        let mut rt = Rt::new();
+        let spruce = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/WoodType.SPRUCE");
+        let oak = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/WoodType.OAK");
+        let sign = rt.new_object("test/SecretSign");
+        let p = props(&mut rt);
+        api::call(&mut rt, "net/minecraft/world/level/block/StandingSignBlock.<init>.(Lnet/minecraft/world/level/block/state/properties/WoodType;Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[sign, spruce, p]);
+        let wood_of = "net/minecraft/world/level/block/SignBlock.getWoodType.(Lnet/minecraft/world/level/block/Block;)Lnet/minecraft/world/level/block/state/properties/WoodType;";
+        assert_eq!(api::call(&mut rt, wood_of, &[sign]), spruce);
+        let plain = rt.new_object("test/Plain");
+        assert_eq!(api::call(&mut rt, wood_of, &[plain]), oak);
+        let connected = "net/minecraft/world/level/block/BedBlock.getConnectedDirection.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/core/Direction;";
+        let foot = api::state(&mut rt, "comforts:sleeping_bag_red[facing=east,occupied=false,part=foot]");
+        let head = api::state(&mut rt, "comforts:sleeping_bag_red[facing=east,occupied=false,part=head]");
+        let (east, west) = (api::direction(&mut rt, 5), api::direction(&mut rt, 4));
+        assert_eq!(api::call(&mut rt, connected, &[foot]), east);
+        assert_eq!(api::call(&mut rt, connected, &[head]), west);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Create names its windows `woodType.name() + "_window"`: each wood type keeps its own name,
