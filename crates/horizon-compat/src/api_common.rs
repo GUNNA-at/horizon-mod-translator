@@ -203,8 +203,16 @@ fn player_eye_height(rt: &Rt) -> f64 {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 4] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 9] = [
     ("net/minecraft/world/phys/HitResult$Type", &["MISS", "BLOCK", "ENTITY"]),
+    ("net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation", &["ADD_VALUE", "ADD_MULTIPLIED_BASE", "ADD_MULTIPLIED_TOTAL"]),
+    ("net/minecraft/world/effect/MobEffectCategory", &["BENEFICIAL", "HARMFUL", "NEUTRAL"]),
+    (
+        "net/minecraft/world/entity/MobCategory",
+        &["MONSTER", "CREATURE", "AMBIENT", "AXOLOTLS", "UNDERGROUND_WATER_CREATURE", "WATER_CREATURE", "WATER_AMBIENT", "MISC"],
+    ),
+    ("net/minecraft/util/Unit", &["INSTANCE"]),
+    ("net/minecraft/world/level/block/state/properties/BlockSetType$PressurePlateSensitivity", &["EVERYTHING", "MOBS"]),
     (crate::menus::CLICK_TYPE, &crate::menus::CLICK_TYPES),
     ("net/minecraft/world/inventory/ClickAction", &["PRIMARY", "SECONDARY"]),
     (

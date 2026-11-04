@@ -231,12 +231,12 @@ fn uuid_from_ints(ints: &[V]) -> Option<(i64, i64)> {
     Some((msb, lsb))
 }
 
-fn uuid_text(msb: i64, lsb: i64) -> String {
+pub(crate) fn uuid_text(msb: i64, lsb: i64) -> String {
     let (m, l) = (msb as u64, lsb as u64);
     format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", m >> 32, (m >> 16) & 0xffff, m & 0xffff, l >> 48, l & 0xffff_ffff_ffff)
 }
 
-fn uuid_parse(s: &str) -> Option<(i64, i64)> {
+pub(crate) fn uuid_parse(s: &str) -> Option<(i64, i64)> {
     let parts: Vec<&str> = s.split('-').collect();
     let [a, b, c, d, e] = parts.as_slice() else { return None };
     let p = |x: &str| u64::from_str_radix(x, 16).ok();

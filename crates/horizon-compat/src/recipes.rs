@@ -880,6 +880,63 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
                 _ => Err(format!("Not a block position: {j}")),
             }
         }
+        "vec3i" => {
+            let xyz: Vec<i64> = j.as_array().map(|a| a.iter().filter_map(Json::as_i64).collect()).unwrap_or_default();
+            match xyz[..] {
+                [x, y, z] => {
+                    let v = rt.new_object("net/minecraft/core/Vec3i");
+                    if let Some(o) = rt.heap.get_mut(v.r() as usize) {
+                        o.data = crate::Data::Native("BlockPos", [x, y, z, 0]);
+                    }
+                    Ok(v)
+                }
+                _ => Err(format!("Input is not a list of 3 ints: {j}")),
+            }
+        }
+        "vec3" => {
+            let xyz: Vec<f64> = j.as_array().map(|a| a.iter().filter_map(Json::as_f64).collect()).unwrap_or_default();
+            match xyz[..] {
+                [x, y, z] => Ok(api_common::vec3(rt, x, y, z)),
+                _ => Err(format!("Input is not a list of 3 elements: {j}")),
+            }
+        }
+        "uuid" => {
+            let ints: Vec<i64> = j.as_array().map(|a| a.iter().filter_map(Json::as_i64).collect()).unwrap_or_default();
+            match ints[..] {
+                [a, b, c, d] => {
+                    let msb = (a << 32) | (b as i32 as u32 as i64);
+                    let lsb = (c << 32) | (d as i32 as u32 as i64);
+                    Ok(crate::tags::uuid(rt, msb, lsb))
+                }
+                _ => Err(format!("Input is not a list of 4 elements: {j}")),
+            }
+        }
+        "uuid_string" => {
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            let (msb, lsb) = crate::tags::uuid_parse(s).ok_or_else(|| format!("Invalid UUID {s}"))?;
+            Ok(crate::tags::uuid(rt, msb, lsb))
+        }
+        "direction" => {
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            let i = api_common::DIRECTION_NAMES.iter().position(|d| *d == s).ok_or_else(|| format!("Unknown element name: {s}"))?;
+            Ok(api_common::direction(rt, i as i64))
+        }
+        "axis" => {
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            let i = api_common::AXIS_NAMES.iter().position(|d| *d == s).ok_or_else(|| format!("Unknown element name: {s}"))?;
+            Ok(api_common::axis(rt, i as i64))
+        }
+        // By serialized name: `Rotation.CLOCKWISE_180` is `180`.
+        "mirror" | "rotation" => {
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            let (class, names, serialized): (&str, &[&str], &[&str]) = if name == "mirror" {
+                (crate::rotation::MIRROR, &crate::rotation::MIRRORS, &crate::rotation::MIRRORS)
+            } else {
+                (crate::rotation::ROTATION, &crate::rotation::ROTATIONS, &crate::rotation::ROTATION_NAMES)
+            };
+            let i = serialized.iter().position(|n| *n == s).ok_or_else(|| format!("Unknown element name: {s}"))?;
+            crate::blocks::vanilla_enum_constant(rt, class, names[i]).ok_or_else(|| format!("Unknown element name: {s}"))
+        }
         "unit" => Ok(V::NULL),
         "crafting_book_category" => crate::crafting::decode_category(rt, j),
         "item_stack" | "optional_item_stack" => {

@@ -332,10 +332,13 @@ fn name_of(rt: &Rt, v: V) -> String {
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     owner.starts_with("net/neoforged/")
+        || owner.starts_with("thedarkcolour/kotlinforforge/")
+        || owner == REGISTRY_SET_BUILDER
+        || matches!(owner, ARGUMENT_TYPE_INFOS | SINGLETON_ARGUMENT_INFO)
         || owner.starts_with("net/minecraft/resources/")
         || is_registry(owner)
         || owner.starts_with("org/apache/maven/artifact/versioning/")
-        || matches!(owner, "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference")
+        || matches!(owner, "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference" | "net/minecraft/core/Holder$Direct")
         || (owner.starts_with("net/minecraft/") && matches!(name, "registryAccess" | "holderLookup" | "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup"))
 }
 
@@ -777,6 +780,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 _ => return None,
             }
         }
+        // `Holder.direct(value)`: a holder of a value outside any registry.
+        ("net/minecraft/core/Holder", "direct") => {
+            let h = rt.new_object("net/minecraft/core/Holder$Direct");
+            rt.put_field(h, "value", a(0));
+            h
+        }
+        ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "value" | "get") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => rt.get_field(a(0), "value"),
+        ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "isBound") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => V::I(1),
         // Vanilla's static registration (`Registry.register(BuiltInRegistries.X, id, value)`).
         ("net/minecraft/core/Registry", "register" | "registerForHolder") => {
             let reg = rt.str_of(a(0)).unwrap_or("").to_owned();
@@ -877,6 +888,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (MOD_INFO, "getModId" | "getNamespace") => rt.get_field(a(0), "$modId"),
         (MOD_INFO, "getDisplayName") => rt.get_field(a(0), "$displayName"),
         (MOD_INFO, "getVersion") => rt.get_field(a(0), "$version"),
+        // What a mod's `mods.toml` adds past its id, name and version, which the engine doesn't
+        // carry: no properties, no description, no update URL.
+        (MOD_INFO, "getModProperties") => rt.alloc("java/util/HashMap", crate::Data::Table(Default::default())),
+        (MOD_INFO, "getDescription") => rt.string(""),
+        (MOD_INFO, "getUpdateURL" | "getLogoFile" | "getModURL") => crate::api_common::optional(rt, V::NULL),
+        (MOD_INFO, "getDependencies") => crate::jutil::new_list(rt, Vec::new()),
         (VERSION, "toString") => rt.get_field(a(0), "$version"),
         (VERSION, "getMajorVersion" | "getMinorVersion" | "getIncrementalVersion") => {
             let text = rt.get_field(a(0), "$version");
@@ -908,6 +925,55 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             crate::api_common::optional(rt, c)
         }
         ("net/neoforged/fml/ModList", "size") => V::I(loaded_mods(rt).len() as i32),
+        // `getMods()`: each loaded mod's metadata, in FML's order.
+        ("net/neoforged/fml/ModList", "getMods") => {
+            let infos: Vec<V> = loaded_mods(rt).iter().map(|id| mod_info(rt, id)).collect();
+            crate::jutil::new_list(rt, infos)
+        }
+        // The game runs, it isn't generating data: data generators stay unregistered.
+        ("net/neoforged/neoforge/data/loading/DatagenModLoader", "isRunningDataGen") => V::I(0),
+        // A data generator's registry set (datapack entries a mod's datagen writes): built up, never run.
+        (REGISTRY_SET_BUILDER, "<init>") => V::Void,
+        // Data map types (`DataMapType.builder(id, registry, codec).synced(...).build()`): an id, its
+        // registry and its codec, as NeoForge's own (`NeoForgeDataMaps.FURNACE_FUELS`) are.
+        (DATA_MAP_TYPE | ADVANCED_DATA_MAP_TYPE, "builder") => {
+            let b = rt.new_object(DATA_MAP_BUILDER);
+            rt.put_field(b, "$id", a(0));
+            rt.put_field(b, "$registry", a(1));
+            rt.put_field(b, "$codec", a(2));
+            b
+        }
+        (DATA_MAP_BUILDER | ADVANCED_DATA_MAP_BUILDER, "synced") => {
+            rt.put_field(a(0), "$networkCodec", a(1));
+            rt.put_field(a(0), "$mandatory", a(2));
+            a(0)
+        }
+        (DATA_MAP_BUILDER | ADVANCED_DATA_MAP_BUILDER, "build") => {
+            let t = rt.new_object(DATA_MAP_TYPE);
+            for f in ["$id", "$registry", "$codec", "$networkCodec", "$mandatory"] {
+                let v = rt.get_field(a(0), f);
+                rt.put_field(t, f, v);
+            }
+            t
+        }
+        (DATA_MAP_BUILDER | ADVANCED_DATA_MAP_BUILDER, _) if desc.ends_with(")Lnet/neoforged/neoforge/registries/datamaps/DataMapType$Builder;") || desc.ends_with(")Lnet/neoforged/neoforge/registries/datamaps/AdvancedDataMapType$Builder;") => a(0),
+        (DATA_MAP_TYPE | ADVANCED_DATA_MAP_TYPE, "id") => rt.get_field(a(0), "$id"),
+        (DATA_MAP_TYPE | ADVANCED_DATA_MAP_TYPE, "registryKey") => rt.get_field(a(0), "$registry"),
+        (DATA_MAP_TYPE | ADVANCED_DATA_MAP_TYPE, "codec") => rt.get_field(a(0), "$codec"),
+        (DATA_MAP_TYPE | ADVANCED_DATA_MAP_TYPE, "mandatorySync") => V::I((rt.get_field(a(0), "$mandatory").i() != 0) as i32),
+        // Command argument types a mod adds: registered by their class, answered by the info.
+        (ARGUMENT_TYPE_INFOS, "registerByClass") => {
+            let all = rt.intern("compat:argument-type-infos".into(), |rt| rt.alloc("java/util/HashMap", crate::Data::Table(Default::default())));
+            crate::jutil::table_put(rt, all, a(0), a(1));
+            a(1)
+        }
+        (SINGLETON_ARGUMENT_INFO, "contextFree" | "contextAware") => {
+            let info = rt.new_object(SINGLETON_ARGUMENT_INFO);
+            rt.put_field(info, "$constructor", a(0));
+            rt.put_field(info, "$contextAware", V::I((name == "contextAware") as i32));
+            info
+        }
+        (REGISTRY_SET_BUILDER, "add") => a(0),
         // What FML found before loading: a mod's file, or null for one that isn't there (how mods
         // check for an optional one early).
         (LOADING_MOD_LIST, "get") => rt.intern("compat:loading-mod-list".into(), |rt| rt.new_object(LOADING_MOD_LIST)),
@@ -1042,6 +1108,24 @@ const LOADING_MOD_LIST: &str = "net/neoforged/fml/loading/LoadingModList";
 const MOD_FILE_INFO: &str = "net/neoforged/fml/loading/moddiscovery/ModFileInfo";
 /// The interned string naming the mod whose constructor runs (the generated `start` sets it).
 pub const ACTIVE_MOD: &str = "compat:active-mod";
+const REGISTRY_SET_BUILDER: &str = "net/minecraft/core/RegistrySetBuilder";
+const DATA_MAP_TYPE: &str = "net/neoforged/neoforge/registries/datamaps/DataMapType";
+const DATA_MAP_BUILDER: &str = "net/neoforged/neoforge/registries/datamaps/DataMapType$Builder";
+const ADVANCED_DATA_MAP_TYPE: &str = "net/neoforged/neoforge/registries/datamaps/AdvancedDataMapType";
+const ADVANCED_DATA_MAP_BUILDER: &str = "net/neoforged/neoforge/registries/datamaps/AdvancedDataMapType$Builder";
+const ARGUMENT_TYPE_INFOS: &str = "net/minecraft/commands/synchronization/ArgumentTypeInfos";
+const SINGLETON_ARGUMENT_INFO: &str = "net/minecraft/commands/synchronization/SingletonArgumentInfo";
+/// NeoForge's own data maps (`NeoForgeDataMaps`), by field: their ids and registries.
+const NEOFORGE_DATA_MAPS: [(&str, &str); 8] = [
+    ("COMPOSTABLES", "item"),
+    ("FURNACE_FUELS", "item"),
+    ("MONSTER_ROOM_MOBS", "entity_type"),
+    ("OXIDIZABLES", "block"),
+    ("PARROT_IMITATIONS", "entity_type"),
+    ("RAID_HERO_GIFTS", "villager_profession"),
+    ("VIBRATION_FREQUENCIES", "game_event"),
+    ("WAXABLES", "block"),
+];
 const KOTLIN_CONTEXT: &str = "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext";
 const KOTLIN_CONTEXT_COMPANION: &str = "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext$Companion";
 
@@ -1052,6 +1136,27 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         (KOTLIN_CONTEXT | "thedarkcolour/kotlinforforge/KotlinModLoadingContext", "Companion") => {
             Some(rt.intern("compat:kotlin-loading-context-companion".into(), |rt| rt.new_object(KOTLIN_CONTEXT_COMPANION)))
         }
+        ("net/neoforged/neoforge/registries/datamaps/builtin/NeoForgeDataMaps", f) => {
+            let &(_, registry) = NEOFORGE_DATA_MAPS.iter().find(|(n, _)| *n == f)?;
+            let id = format!("neoforge:{}", f.to_ascii_lowercase());
+            Some(rt.intern(format!("compat:data-map/{id}"), |rt| {
+                let t = rt.new_object(DATA_MAP_TYPE);
+                let i = rt.string(&id);
+                rt.put_field(t, "$id", i);
+                let r = rt.string(registry);
+                rt.put_field(t, "$registry", r);
+                t
+            }))
+        }
+        // `RegistrationInfo.BUILT_IN`: a built-in entry's (no known pack, stable).
+        ("net/minecraft/core/RegistrationInfo", "BUILT_IN") => Some(rt.intern("compat:registration-info/built-in".into(), |rt| {
+            let info = rt.new_object("net/minecraft/core/RegistrationInfo");
+            let none = crate::api_common::optional(rt, V::NULL);
+            rt.put_field(info, "knownPackInfo", none);
+            let stable = rt.new_object("com/mojang/serialization/Lifecycle");
+            rt.put_field(info, "lifecycle", stable);
+            info
+        })),
         _ => None,
     }
 }
@@ -1127,6 +1232,55 @@ mod tests {
         let is_client = "net/neoforged/api/distmarker/Dist.isClient.()Z";
         assert_eq!(call(&mut rt, is_client, &[client]), Some(V::I(1)));
         assert_eq!(call(&mut rt, is_client, &[server]), Some(V::I(0)));
+    }
+
+    /// Through the dispatcher, as a translated mod calls: a Kotlin mod asks Kotlin for Forge's
+    /// loading context for its bus and listens on it; `ModList.getMods()` lists every mod; the game
+    /// isn't generating data; NeoForge's data maps are its own ids.
+    #[test]
+    fn kotlin_mods_reach_their_bus_and_the_loading_calls_answer() {
+        let mut rt = Rt::new();
+        rt.mods = vec!["lib".into(), "kmod".into()];
+        let companion = crate::api::get_static(&mut rt, "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext.Companion");
+        let ctx = crate::api::call(&mut rt, "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext$Companion.get.()Lthedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext;", &[companion]);
+        assert_ne!(ctx, V::NULL);
+        let bus = crate::api::call(&mut rt, "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext.getKEventBus.()Lnet/neoforged/bus/api/IEventBus;", &[ctx]);
+        assert!(rt.instance_of(bus, "net/neoforged/bus/api/IEventBus"));
+        let event = rt.alloc("java/lang/Class", Data::Str("net/neoforged/fml/event/lifecycle/FMLCommonSetupEvent".into()));
+        let listener = rt.new_object("test/Listener");
+        let before = rt.listeners.len();
+        crate::api::call(&mut rt, "net/neoforged/bus/api/IEventBus.addListener.(Ljava/lang/Class;Ljava/util/function/Consumer;)V", &[bus, event, listener]);
+        assert_eq!(rt.listeners.len(), before + 1);
+        let list = crate::api::call(&mut rt, "net/neoforged/fml/ModList.get.()Lnet/neoforged/fml/ModList;", &[]);
+        let mods = crate::api::call(&mut rt, "net/neoforged/fml/ModList.getMods.()Ljava/util/List;", &[list]);
+        let ids: Vec<String> = crate::jutil::elements(&rt, mods)
+            .into_iter()
+            .map(|info| {
+                let id = crate::api::call(&mut rt, "net/neoforged/neoforgespi/language/IModInfo.getModId.()Ljava/lang/String;", &[info]);
+                rt.str_of(id).unwrap_or("").to_owned()
+            })
+            .collect();
+        assert_eq!(ids, ["lib", "kmod"]);
+        let first = crate::jutil::elements(&rt, mods)[0];
+        let props = crate::api::call(&mut rt, "net/neoforged/neoforgespi/language/IModInfo.getModProperties.()Ljava/util/Map;", &[first]);
+        assert!(rt.instance_of(props, "java/util/Map"));
+        assert!(crate::jutil::table_pairs(&rt, props).is_empty());
+        // `Holder.direct(value)` holds the value itself.
+        let v = rt.string("anything");
+        let h = crate::api::call(&mut rt, "net/minecraft/core/Holder.direct.(Ljava/lang/Object;)Lnet/minecraft/core/Holder;", &[v]);
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[h]), v);
+        assert_eq!(crate::api::call(&mut rt, "net/neoforged/neoforge/data/loading/DatagenModLoader.isRunningDataGen.()Z", &[]), V::I(0));
+        let fuels = crate::api::get_static(&mut rt, "net/neoforged/neoforge/registries/datamaps/builtin/NeoForgeDataMaps.FURNACE_FUELS");
+        let id = crate::api::call(&mut rt, "net/neoforged/neoforge/registries/datamaps/DataMapType.id.()Lnet/minecraft/resources/ResourceLocation;", &[fuels]);
+        assert_eq!(rt.str_of(id), Some("neoforge:furnace_fuels"));
+        assert_eq!(crate::api::get_static(&mut rt, "net/neoforged/neoforge/registries/datamaps/builtin/NeoForgeDataMaps.FURNACE_FUELS"), fuels);
+        // A mod's own: the builder's id survives `synced(...)` and `build()`.
+        let mine = rt.string("kmod:heat");
+        let b = crate::api::call(&mut rt, "net/neoforged/neoforge/registries/datamaps/DataMapType.builder.(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/resources/ResourceKey;Lcom/mojang/serialization/Codec;)Lnet/neoforged/neoforge/registries/datamaps/DataMapType$Builder;", &[mine, V::NULL, V::NULL]);
+        let b = crate::api::call(&mut rt, "net/neoforged/neoforge/registries/datamaps/DataMapType$Builder.synced.(Lcom/mojang/serialization/Codec;Z)Lnet/neoforged/neoforge/registries/datamaps/DataMapType$Builder;", &[b, V::NULL, V::I(1)]);
+        let t = crate::api::call(&mut rt, "net/neoforged/neoforge/registries/datamaps/DataMapType$Builder.build.()Lnet/neoforged/neoforge/registries/datamaps/DataMapType;", &[b]);
+        let id = crate::api::call(&mut rt, "net/neoforged/neoforge/registries/datamaps/DataMapType.id.()Lnet/minecraft/resources/ResourceLocation;", &[t]);
+        assert_eq!(rt.str_of(id), Some("kmod:heat"));
     }
 
     /// FML hands a mod its own container while constructing it: a Java mod's (Comforts checks

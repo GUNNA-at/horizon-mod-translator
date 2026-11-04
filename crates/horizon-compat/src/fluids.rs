@@ -19,6 +19,14 @@ const BASE_SOURCE: &str = "net/neoforged/neoforge/fluids/BaseFlowingFluid$Source
 const PROPERTIES: &str = "net/neoforged/neoforge/fluids/BaseFlowingFluid$Properties";
 const FLUID_TYPE: &str = "net/neoforged/neoforge/fluids/FluidType";
 const TYPE_PROPERTIES: &str = "net/neoforged/neoforge/fluids/FluidType$Properties";
+const FLUID_INTERACTIONS: &str = "net/neoforged/neoforge/fluids/FluidInteractionRegistry";
+const INTERACTION_INFO: &str = "net/neoforged/neoforge/fluids/FluidInteractionRegistry$InteractionInformation";
+
+/// `FluidInteractionRegistry`'s interactions: for each fluid type, what it does next to others
+/// (lava beside water makes cobblestone), in the order mods added them.
+pub(crate) fn fluid_interactions(rt: &mut Rt) -> V {
+    rt.intern("compat:fluid-interactions".into(), |rt| rt.alloc("java/util/IdentityHashMap", Data::Table(Default::default())))
+}
 const SOUND_ACTION: &str = "net/neoforged/neoforge/common/SoundAction";
 const TAG_KEY: &str = "net/minecraft/tags/TagKey";
 const FLUID_STACK: &str = "net/neoforged/neoforge/fluids/FluidStack";
@@ -682,7 +690,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(
         owner,
         FLUID_STACK | FLUID_STATE | PROPERTIES | BASE | BASE_FLOWING | BASE_SOURCE | LIQUID_BLOCK | TAG_KEY | "net/minecraft/world/item/BucketItem" | "net/minecraft/tags/FluidTags"
-            | FLUID_TYPE | TYPE_PROPERTIES | SOUND_ACTION
+            | FLUID_TYPE | TYPE_PROPERTIES | SOUND_ACTION | FLUID_INTERACTIONS | INTERACTION_INFO
     ) || is_fluid_class(owner)
         || name == "getFluidState"
 }
@@ -761,6 +769,35 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::Void
         }
         (TYPE_PROPERTIES | FLUID_TYPE | SOUND_ACTION, _) => return fluid_type_call(rt, owner, name, desc, args),
+        // `addInteraction(source, information)`: kept under the source fluid's type.
+        (FLUID_INTERACTIONS, "addInteraction") => {
+            let all = fluid_interactions(rt);
+            let list = match crate::jutil::table_get(rt, all, a(0)).filter(|l| l.r() != 0) {
+                Some(l) => l,
+                None => {
+                    let l = crate::jutil::new_list(rt, Vec::new());
+                    crate::jutil::table_put(rt, all, a(0), l);
+                    l
+                }
+            };
+            crate::jutil::list_add(rt, list, a(1));
+            return Some(V::Void);
+        }
+        // `InteractionInformation`'s shorthands: the other fluid's type (or a predicate) and the
+        // block it makes (or a function of the fluid's state giving it); the record's own
+        // constructor takes the predicate and the interaction.
+        (INTERACTION_INFO, "<init>") => {
+            let (when, then) = (a(1), a(2));
+            let what = if desc.starts_with("(Lnet/neoforged/neoforge/fluids/FluidType;") { "$adjacent" } else { "predicate" };
+            rt.put_field(a(0), what, when);
+            let how = match desc.split_once(';').map(|(_, rest)| rest) {
+                Some(r) if r.starts_with("Lnet/minecraft/world/level/block/state/BlockState;") => "$state",
+                Some(r) if r.starts_with("Ljava/util/function/Function;") => "$function",
+                _ => "interaction",
+            };
+            rt.put_field(a(0), how, then);
+            return Some(V::Void);
+        }
         (o, _) if is_fluid_class(o) => return fluid_api(rt, name, desc, args),
         // NeoForge's `LiquidBlock.getFluid()` and `BucketItem.getFluid()`: what their constructors got.
         (LIQUID_BLOCK, "getFluid") => rt.get_field(a(0), "fluid"),

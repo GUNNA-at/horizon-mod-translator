@@ -45,7 +45,7 @@ pub(crate) const DYES: [(&str, u8); 16] = [
 ];
 
 /// `SoundType` constants and a vanilla block that sounds the same, for a declaration's `sounds`.
-const SOUNDS: [(&str, &str); 30] = [
+const SOUNDS: [(&str, &str); 33] = [
     ("WOOD", "minecraft:oak_planks"), ("STONE", "minecraft:stone"), ("METAL", "minecraft:iron_block"), ("GLASS", "minecraft:glass"),
     ("WOOL", "minecraft:white_wool"), ("SAND", "minecraft:sand"), ("GRAVEL", "minecraft:gravel"), ("GRASS", "minecraft:grass_block"),
     ("SNOW", "minecraft:snow_block"), ("LADDER", "minecraft:ladder"), ("ANVIL", "minecraft:anvil"), ("SLIME_BLOCK", "minecraft:slime_block"),
@@ -55,7 +55,126 @@ const SOUNDS: [(&str, &str); 30] = [
     ("DEEPSLATE_TILES", "minecraft:deepslate_tiles"), ("TUFF", "minecraft:tuff"), ("CALCITE", "minecraft:calcite"),
     ("AMETHYST", "minecraft:amethyst_block"), ("BASALT", "minecraft:basalt"), ("BONE_BLOCK", "minecraft:bone_block"),
     ("SCAFFOLDING", "minecraft:scaffolding"), ("NETHERRACK", "minecraft:netherrack"), ("SOUL_SAND", "minecraft:soul_sand"),
-    ("MUD_BRICKS", "minecraft:mud_bricks"),
+    ("MUD_BRICKS", "minecraft:mud_bricks"), ("CHERRY_WOOD", "minecraft:cherry_planks"), ("NETHER_WOOD", "minecraft:crimson_planks"),
+    ("BAMBOO_WOOD", "minecraft:bamboo_planks"),
+];
+
+/// Vanilla 1.21.1's `SoundType` constants (from its class file): volume, pitch, and the
+/// `SoundEvents` it breaks, steps, is placed, hit and fallen on with.
+const VANILLA_SOUND_TYPES: [(&str, f32, f32, [&str; 5]); 113] = [
+    ("EMPTY", 1.0, 1.0, ["EMPTY", "EMPTY", "EMPTY", "EMPTY", "EMPTY"]),
+    ("WOOD", 1.0, 1.0, ["WOOD_BREAK", "WOOD_STEP", "WOOD_PLACE", "WOOD_HIT", "WOOD_FALL"]),
+    ("GRAVEL", 1.0, 1.0, ["GRAVEL_BREAK", "GRAVEL_STEP", "GRAVEL_PLACE", "GRAVEL_HIT", "GRAVEL_FALL"]),
+    ("GRASS", 1.0, 1.0, ["GRASS_BREAK", "GRASS_STEP", "GRASS_PLACE", "GRASS_HIT", "GRASS_FALL"]),
+    ("LILY_PAD", 1.0, 1.0, ["BIG_DRIPLEAF_BREAK", "BIG_DRIPLEAF_STEP", "LILY_PAD_PLACE", "BIG_DRIPLEAF_HIT", "BIG_DRIPLEAF_FALL"]),
+    ("STONE", 1.0, 1.0, ["STONE_BREAK", "STONE_STEP", "STONE_PLACE", "STONE_HIT", "STONE_FALL"]),
+    ("METAL", 1.0, 1.5, ["METAL_BREAK", "METAL_STEP", "METAL_PLACE", "METAL_HIT", "METAL_FALL"]),
+    ("GLASS", 1.0, 1.0, ["GLASS_BREAK", "GLASS_STEP", "GLASS_PLACE", "GLASS_HIT", "GLASS_FALL"]),
+    ("WOOL", 1.0, 1.0, ["WOOL_BREAK", "WOOL_STEP", "WOOL_PLACE", "WOOL_HIT", "WOOL_FALL"]),
+    ("SAND", 1.0, 1.0, ["SAND_BREAK", "SAND_STEP", "SAND_PLACE", "SAND_HIT", "SAND_FALL"]),
+    ("SNOW", 1.0, 1.0, ["SNOW_BREAK", "SNOW_STEP", "SNOW_PLACE", "SNOW_HIT", "SNOW_FALL"]),
+    ("POWDER_SNOW", 1.0, 1.0, ["POWDER_SNOW_BREAK", "POWDER_SNOW_STEP", "POWDER_SNOW_PLACE", "POWDER_SNOW_HIT", "POWDER_SNOW_FALL"]),
+    ("LADDER", 1.0, 1.0, ["LADDER_BREAK", "LADDER_STEP", "LADDER_PLACE", "LADDER_HIT", "LADDER_FALL"]),
+    ("ANVIL", 0.3, 1.0, ["ANVIL_BREAK", "ANVIL_STEP", "ANVIL_PLACE", "ANVIL_HIT", "ANVIL_FALL"]),
+    ("SLIME_BLOCK", 1.0, 1.0, ["SLIME_BLOCK_BREAK", "SLIME_BLOCK_STEP", "SLIME_BLOCK_PLACE", "SLIME_BLOCK_HIT", "SLIME_BLOCK_FALL"]),
+    ("HONEY_BLOCK", 1.0, 1.0, ["HONEY_BLOCK_BREAK", "HONEY_BLOCK_STEP", "HONEY_BLOCK_PLACE", "HONEY_BLOCK_HIT", "HONEY_BLOCK_FALL"]),
+    ("WET_GRASS", 1.0, 1.0, ["WET_GRASS_BREAK", "WET_GRASS_STEP", "WET_GRASS_PLACE", "WET_GRASS_HIT", "WET_GRASS_FALL"]),
+    ("CORAL_BLOCK", 1.0, 1.0, ["CORAL_BLOCK_BREAK", "CORAL_BLOCK_STEP", "CORAL_BLOCK_PLACE", "CORAL_BLOCK_HIT", "CORAL_BLOCK_FALL"]),
+    ("BAMBOO", 1.0, 1.0, ["BAMBOO_BREAK", "BAMBOO_STEP", "BAMBOO_PLACE", "BAMBOO_HIT", "BAMBOO_FALL"]),
+    ("BAMBOO_SAPLING", 1.0, 1.0, ["BAMBOO_SAPLING_BREAK", "BAMBOO_STEP", "BAMBOO_SAPLING_PLACE", "BAMBOO_SAPLING_HIT", "BAMBOO_FALL"]),
+    ("SCAFFOLDING", 1.0, 1.0, ["SCAFFOLDING_BREAK", "SCAFFOLDING_STEP", "SCAFFOLDING_PLACE", "SCAFFOLDING_HIT", "SCAFFOLDING_FALL"]),
+    ("SWEET_BERRY_BUSH", 1.0, 1.0, ["SWEET_BERRY_BUSH_BREAK", "GRASS_STEP", "SWEET_BERRY_BUSH_PLACE", "GRASS_HIT", "GRASS_FALL"]),
+    ("CROP", 1.0, 1.0, ["CROP_BREAK", "GRASS_STEP", "CROP_PLANTED", "GRASS_HIT", "GRASS_FALL"]),
+    ("HARD_CROP", 1.0, 1.0, ["WOOD_BREAK", "WOOD_STEP", "CROP_PLANTED", "WOOD_HIT", "WOOD_FALL"]),
+    ("VINE", 1.0, 1.0, ["VINE_BREAK", "VINE_STEP", "VINE_PLACE", "VINE_HIT", "VINE_FALL"]),
+    ("NETHER_WART", 1.0, 1.0, ["NETHER_WART_BREAK", "STONE_STEP", "NETHER_WART_PLANTED", "STONE_HIT", "STONE_FALL"]),
+    ("LANTERN", 1.0, 1.0, ["LANTERN_BREAK", "LANTERN_STEP", "LANTERN_PLACE", "LANTERN_HIT", "LANTERN_FALL"]),
+    ("STEM", 1.0, 1.0, ["STEM_BREAK", "STEM_STEP", "STEM_PLACE", "STEM_HIT", "STEM_FALL"]),
+    ("NYLIUM", 1.0, 1.0, ["NYLIUM_BREAK", "NYLIUM_STEP", "NYLIUM_PLACE", "NYLIUM_HIT", "NYLIUM_FALL"]),
+    ("FUNGUS", 1.0, 1.0, ["FUNGUS_BREAK", "FUNGUS_STEP", "FUNGUS_PLACE", "FUNGUS_HIT", "FUNGUS_FALL"]),
+    ("ROOTS", 1.0, 1.0, ["ROOTS_BREAK", "ROOTS_STEP", "ROOTS_PLACE", "ROOTS_HIT", "ROOTS_FALL"]),
+    ("SHROOMLIGHT", 1.0, 1.0, ["SHROOMLIGHT_BREAK", "SHROOMLIGHT_STEP", "SHROOMLIGHT_PLACE", "SHROOMLIGHT_HIT", "SHROOMLIGHT_FALL"]),
+    ("WEEPING_VINES", 1.0, 1.0, ["WEEPING_VINES_BREAK", "WEEPING_VINES_STEP", "WEEPING_VINES_PLACE", "WEEPING_VINES_HIT", "WEEPING_VINES_FALL"]),
+    ("TWISTING_VINES", 1.0, 0.5, ["WEEPING_VINES_BREAK", "WEEPING_VINES_STEP", "WEEPING_VINES_PLACE", "WEEPING_VINES_HIT", "WEEPING_VINES_FALL"]),
+    ("SOUL_SAND", 1.0, 1.0, ["SOUL_SAND_BREAK", "SOUL_SAND_STEP", "SOUL_SAND_PLACE", "SOUL_SAND_HIT", "SOUL_SAND_FALL"]),
+    ("SOUL_SOIL", 1.0, 1.0, ["SOUL_SOIL_BREAK", "SOUL_SOIL_STEP", "SOUL_SOIL_PLACE", "SOUL_SOIL_HIT", "SOUL_SOIL_FALL"]),
+    ("BASALT", 1.0, 1.0, ["BASALT_BREAK", "BASALT_STEP", "BASALT_PLACE", "BASALT_HIT", "BASALT_FALL"]),
+    ("WART_BLOCK", 1.0, 1.0, ["WART_BLOCK_BREAK", "WART_BLOCK_STEP", "WART_BLOCK_PLACE", "WART_BLOCK_HIT", "WART_BLOCK_FALL"]),
+    ("NETHERRACK", 1.0, 1.0, ["NETHERRACK_BREAK", "NETHERRACK_STEP", "NETHERRACK_PLACE", "NETHERRACK_HIT", "NETHERRACK_FALL"]),
+    ("NETHER_BRICKS", 1.0, 1.0, ["NETHER_BRICKS_BREAK", "NETHER_BRICKS_STEP", "NETHER_BRICKS_PLACE", "NETHER_BRICKS_HIT", "NETHER_BRICKS_FALL"]),
+    ("NETHER_SPROUTS", 1.0, 1.0, ["NETHER_SPROUTS_BREAK", "NETHER_SPROUTS_STEP", "NETHER_SPROUTS_PLACE", "NETHER_SPROUTS_HIT", "NETHER_SPROUTS_FALL"]),
+    ("NETHER_ORE", 1.0, 1.0, ["NETHER_ORE_BREAK", "NETHER_ORE_STEP", "NETHER_ORE_PLACE", "NETHER_ORE_HIT", "NETHER_ORE_FALL"]),
+    ("BONE_BLOCK", 1.0, 1.0, ["BONE_BLOCK_BREAK", "BONE_BLOCK_STEP", "BONE_BLOCK_PLACE", "BONE_BLOCK_HIT", "BONE_BLOCK_FALL"]),
+    ("NETHERITE_BLOCK", 1.0, 1.0, ["NETHERITE_BLOCK_BREAK", "NETHERITE_BLOCK_STEP", "NETHERITE_BLOCK_PLACE", "NETHERITE_BLOCK_HIT", "NETHERITE_BLOCK_FALL"]),
+    ("ANCIENT_DEBRIS", 1.0, 1.0, ["ANCIENT_DEBRIS_BREAK", "ANCIENT_DEBRIS_STEP", "ANCIENT_DEBRIS_PLACE", "ANCIENT_DEBRIS_HIT", "ANCIENT_DEBRIS_FALL"]),
+    ("LODESTONE", 1.0, 1.0, ["LODESTONE_BREAK", "LODESTONE_STEP", "LODESTONE_PLACE", "LODESTONE_HIT", "LODESTONE_FALL"]),
+    ("CHAIN", 1.0, 1.0, ["CHAIN_BREAK", "CHAIN_STEP", "CHAIN_PLACE", "CHAIN_HIT", "CHAIN_FALL"]),
+    ("NETHER_GOLD_ORE", 1.0, 1.0, ["NETHER_GOLD_ORE_BREAK", "NETHER_GOLD_ORE_STEP", "NETHER_GOLD_ORE_PLACE", "NETHER_GOLD_ORE_HIT", "NETHER_GOLD_ORE_FALL"]),
+    ("GILDED_BLACKSTONE", 1.0, 1.0, ["GILDED_BLACKSTONE_BREAK", "GILDED_BLACKSTONE_STEP", "GILDED_BLACKSTONE_PLACE", "GILDED_BLACKSTONE_HIT", "GILDED_BLACKSTONE_FALL"]),
+    ("CANDLE", 1.0, 1.0, ["CANDLE_BREAK", "CANDLE_STEP", "CANDLE_PLACE", "CANDLE_HIT", "CANDLE_FALL"]),
+    ("AMETHYST", 1.0, 1.0, ["AMETHYST_BLOCK_BREAK", "AMETHYST_BLOCK_STEP", "AMETHYST_BLOCK_PLACE", "AMETHYST_BLOCK_HIT", "AMETHYST_BLOCK_FALL"]),
+    ("AMETHYST_CLUSTER", 1.0, 1.0, ["AMETHYST_CLUSTER_BREAK", "AMETHYST_CLUSTER_STEP", "AMETHYST_CLUSTER_PLACE", "AMETHYST_CLUSTER_HIT", "AMETHYST_CLUSTER_FALL"]),
+    ("SMALL_AMETHYST_BUD", 1.0, 1.0, ["SMALL_AMETHYST_BUD_BREAK", "AMETHYST_CLUSTER_STEP", "SMALL_AMETHYST_BUD_PLACE", "AMETHYST_CLUSTER_HIT", "AMETHYST_CLUSTER_FALL"]),
+    ("MEDIUM_AMETHYST_BUD", 1.0, 1.0, ["MEDIUM_AMETHYST_BUD_BREAK", "AMETHYST_CLUSTER_STEP", "MEDIUM_AMETHYST_BUD_PLACE", "AMETHYST_CLUSTER_HIT", "AMETHYST_CLUSTER_FALL"]),
+    ("LARGE_AMETHYST_BUD", 1.0, 1.0, ["LARGE_AMETHYST_BUD_BREAK", "AMETHYST_CLUSTER_STEP", "LARGE_AMETHYST_BUD_PLACE", "AMETHYST_CLUSTER_HIT", "AMETHYST_CLUSTER_FALL"]),
+    ("TUFF", 1.0, 1.0, ["TUFF_BREAK", "TUFF_STEP", "TUFF_PLACE", "TUFF_HIT", "TUFF_FALL"]),
+    ("TUFF_BRICKS", 1.0, 1.0, ["TUFF_BRICKS_BREAK", "TUFF_BRICKS_STEP", "TUFF_BRICKS_PLACE", "TUFF_BRICKS_HIT", "TUFF_BRICKS_FALL"]),
+    ("POLISHED_TUFF", 1.0, 1.0, ["POLISHED_TUFF_BREAK", "POLISHED_TUFF_STEP", "POLISHED_TUFF_PLACE", "POLISHED_TUFF_HIT", "POLISHED_TUFF_FALL"]),
+    ("CALCITE", 1.0, 1.0, ["CALCITE_BREAK", "CALCITE_STEP", "CALCITE_PLACE", "CALCITE_HIT", "CALCITE_FALL"]),
+    ("DRIPSTONE_BLOCK", 1.0, 1.0, ["DRIPSTONE_BLOCK_BREAK", "DRIPSTONE_BLOCK_STEP", "DRIPSTONE_BLOCK_PLACE", "DRIPSTONE_BLOCK_HIT", "DRIPSTONE_BLOCK_FALL"]),
+    ("POINTED_DRIPSTONE", 1.0, 1.0, ["POINTED_DRIPSTONE_BREAK", "POINTED_DRIPSTONE_STEP", "POINTED_DRIPSTONE_PLACE", "POINTED_DRIPSTONE_HIT", "POINTED_DRIPSTONE_FALL"]),
+    ("COPPER", 1.0, 1.0, ["COPPER_BREAK", "COPPER_STEP", "COPPER_PLACE", "COPPER_HIT", "COPPER_FALL"]),
+    ("COPPER_BULB", 1.0, 1.0, ["COPPER_BULB_BREAK", "COPPER_BULB_STEP", "COPPER_BULB_PLACE", "COPPER_BULB_HIT", "COPPER_BULB_FALL"]),
+    ("COPPER_GRATE", 1.0, 1.0, ["COPPER_GRATE_BREAK", "COPPER_GRATE_STEP", "COPPER_GRATE_PLACE", "COPPER_GRATE_HIT", "COPPER_GRATE_FALL"]),
+    ("CAVE_VINES", 1.0, 1.0, ["CAVE_VINES_BREAK", "CAVE_VINES_STEP", "CAVE_VINES_PLACE", "CAVE_VINES_HIT", "CAVE_VINES_FALL"]),
+    ("SPORE_BLOSSOM", 1.0, 1.0, ["SPORE_BLOSSOM_BREAK", "SPORE_BLOSSOM_STEP", "SPORE_BLOSSOM_PLACE", "SPORE_BLOSSOM_HIT", "SPORE_BLOSSOM_FALL"]),
+    ("AZALEA", 1.0, 1.0, ["AZALEA_BREAK", "AZALEA_STEP", "AZALEA_PLACE", "AZALEA_HIT", "AZALEA_FALL"]),
+    ("FLOWERING_AZALEA", 1.0, 1.0, ["FLOWERING_AZALEA_BREAK", "FLOWERING_AZALEA_STEP", "FLOWERING_AZALEA_PLACE", "FLOWERING_AZALEA_HIT", "FLOWERING_AZALEA_FALL"]),
+    ("MOSS_CARPET", 1.0, 1.0, ["MOSS_CARPET_BREAK", "MOSS_CARPET_STEP", "MOSS_CARPET_PLACE", "MOSS_CARPET_HIT", "MOSS_CARPET_FALL"]),
+    ("PINK_PETALS", 1.0, 1.0, ["PINK_PETALS_BREAK", "PINK_PETALS_STEP", "PINK_PETALS_PLACE", "PINK_PETALS_HIT", "PINK_PETALS_FALL"]),
+    ("MOSS", 1.0, 1.0, ["MOSS_BREAK", "MOSS_STEP", "MOSS_PLACE", "MOSS_HIT", "MOSS_FALL"]),
+    ("BIG_DRIPLEAF", 1.0, 1.0, ["BIG_DRIPLEAF_BREAK", "BIG_DRIPLEAF_STEP", "BIG_DRIPLEAF_PLACE", "BIG_DRIPLEAF_HIT", "BIG_DRIPLEAF_FALL"]),
+    ("SMALL_DRIPLEAF", 1.0, 1.0, ["SMALL_DRIPLEAF_BREAK", "SMALL_DRIPLEAF_STEP", "SMALL_DRIPLEAF_PLACE", "SMALL_DRIPLEAF_HIT", "SMALL_DRIPLEAF_FALL"]),
+    ("ROOTED_DIRT", 1.0, 1.0, ["ROOTED_DIRT_BREAK", "ROOTED_DIRT_STEP", "ROOTED_DIRT_PLACE", "ROOTED_DIRT_HIT", "ROOTED_DIRT_FALL"]),
+    ("HANGING_ROOTS", 1.0, 1.0, ["HANGING_ROOTS_BREAK", "HANGING_ROOTS_STEP", "HANGING_ROOTS_PLACE", "HANGING_ROOTS_HIT", "HANGING_ROOTS_FALL"]),
+    ("AZALEA_LEAVES", 1.0, 1.0, ["AZALEA_LEAVES_BREAK", "AZALEA_LEAVES_STEP", "AZALEA_LEAVES_PLACE", "AZALEA_LEAVES_HIT", "AZALEA_LEAVES_FALL"]),
+    ("SCULK_SENSOR", 1.0, 1.0, ["SCULK_SENSOR_BREAK", "SCULK_SENSOR_STEP", "SCULK_SENSOR_PLACE", "SCULK_SENSOR_HIT", "SCULK_SENSOR_FALL"]),
+    ("SCULK_CATALYST", 1.0, 1.0, ["SCULK_CATALYST_BREAK", "SCULK_CATALYST_STEP", "SCULK_CATALYST_PLACE", "SCULK_CATALYST_HIT", "SCULK_CATALYST_FALL"]),
+    ("SCULK", 1.0, 1.0, ["SCULK_BLOCK_BREAK", "SCULK_BLOCK_STEP", "SCULK_BLOCK_PLACE", "SCULK_BLOCK_HIT", "SCULK_BLOCK_FALL"]),
+    ("SCULK_VEIN", 1.0, 1.0, ["SCULK_VEIN_BREAK", "SCULK_VEIN_STEP", "SCULK_VEIN_PLACE", "SCULK_VEIN_HIT", "SCULK_VEIN_FALL"]),
+    ("SCULK_SHRIEKER", 1.0, 1.0, ["SCULK_SHRIEKER_BREAK", "SCULK_SHRIEKER_STEP", "SCULK_SHRIEKER_PLACE", "SCULK_SHRIEKER_HIT", "SCULK_SHRIEKER_FALL"]),
+    ("GLOW_LICHEN", 1.0, 1.0, ["GRASS_BREAK", "VINE_STEP", "GRASS_PLACE", "GRASS_HIT", "GRASS_FALL"]),
+    ("DEEPSLATE", 1.0, 1.0, ["DEEPSLATE_BREAK", "DEEPSLATE_STEP", "DEEPSLATE_PLACE", "DEEPSLATE_HIT", "DEEPSLATE_FALL"]),
+    ("DEEPSLATE_BRICKS", 1.0, 1.0, ["DEEPSLATE_BRICKS_BREAK", "DEEPSLATE_BRICKS_STEP", "DEEPSLATE_BRICKS_PLACE", "DEEPSLATE_BRICKS_HIT", "DEEPSLATE_BRICKS_FALL"]),
+    ("DEEPSLATE_TILES", 1.0, 1.0, ["DEEPSLATE_TILES_BREAK", "DEEPSLATE_TILES_STEP", "DEEPSLATE_TILES_PLACE", "DEEPSLATE_TILES_HIT", "DEEPSLATE_TILES_FALL"]),
+    ("POLISHED_DEEPSLATE", 1.0, 1.0, ["POLISHED_DEEPSLATE_BREAK", "POLISHED_DEEPSLATE_STEP", "POLISHED_DEEPSLATE_PLACE", "POLISHED_DEEPSLATE_HIT", "POLISHED_DEEPSLATE_FALL"]),
+    ("FROGLIGHT", 1.0, 1.0, ["FROGLIGHT_BREAK", "FROGLIGHT_STEP", "FROGLIGHT_PLACE", "FROGLIGHT_HIT", "FROGLIGHT_FALL"]),
+    ("FROGSPAWN", 1.0, 1.0, ["FROGSPAWN_BREAK", "FROGSPAWNSTEP", "FROGSPAWN_PLACE", "FROGSPAWN_HIT", "FROGSPAWN_FALL"]),
+    ("MANGROVE_ROOTS", 1.0, 1.0, ["MANGROVE_ROOTS_BREAK", "MANGROVE_ROOTS_STEP", "MANGROVE_ROOTS_PLACE", "MANGROVE_ROOTS_HIT", "MANGROVE_ROOTS_FALL"]),
+    ("MUDDY_MANGROVE_ROOTS", 1.0, 1.0, ["MUDDY_MANGROVE_ROOTS_BREAK", "MUDDY_MANGROVE_ROOTS_STEP", "MUDDY_MANGROVE_ROOTS_PLACE", "MUDDY_MANGROVE_ROOTS_HIT", "MUDDY_MANGROVE_ROOTS_FALL"]),
+    ("MUD", 1.0, 1.0, ["MUD_BREAK", "MUD_STEP", "MUD_PLACE", "MUD_HIT", "MUD_FALL"]),
+    ("MUD_BRICKS", 1.0, 1.0, ["MUD_BRICKS_BREAK", "MUD_BRICKS_STEP", "MUD_BRICKS_PLACE", "MUD_BRICKS_HIT", "MUD_BRICKS_FALL"]),
+    ("PACKED_MUD", 1.0, 1.0, ["PACKED_MUD_BREAK", "PACKED_MUD_STEP", "PACKED_MUD_PLACE", "PACKED_MUD_HIT", "PACKED_MUD_FALL"]),
+    ("HANGING_SIGN", 1.0, 1.0, ["HANGING_SIGN_BREAK", "HANGING_SIGN_STEP", "HANGING_SIGN_PLACE", "HANGING_SIGN_HIT", "HANGING_SIGN_FALL"]),
+    ("NETHER_WOOD_HANGING_SIGN", 1.0, 1.0, ["NETHER_WOOD_HANGING_SIGN_BREAK", "NETHER_WOOD_HANGING_SIGN_STEP", "NETHER_WOOD_HANGING_SIGN_PLACE", "NETHER_WOOD_HANGING_SIGN_HIT", "NETHER_WOOD_HANGING_SIGN_FALL"]),
+    ("BAMBOO_WOOD_HANGING_SIGN", 1.0, 1.0, ["BAMBOO_WOOD_HANGING_SIGN_BREAK", "BAMBOO_WOOD_HANGING_SIGN_STEP", "BAMBOO_WOOD_HANGING_SIGN_PLACE", "BAMBOO_WOOD_HANGING_SIGN_HIT", "BAMBOO_WOOD_HANGING_SIGN_FALL"]),
+    ("BAMBOO_WOOD", 1.0, 1.0, ["BAMBOO_WOOD_BREAK", "BAMBOO_WOOD_STEP", "BAMBOO_WOOD_PLACE", "BAMBOO_WOOD_HIT", "BAMBOO_WOOD_FALL"]),
+    ("NETHER_WOOD", 1.0, 1.0, ["NETHER_WOOD_BREAK", "NETHER_WOOD_STEP", "NETHER_WOOD_PLACE", "NETHER_WOOD_HIT", "NETHER_WOOD_FALL"]),
+    ("CHERRY_WOOD", 1.0, 1.0, ["CHERRY_WOOD_BREAK", "CHERRY_WOOD_STEP", "CHERRY_WOOD_PLACE", "CHERRY_WOOD_HIT", "CHERRY_WOOD_FALL"]),
+    ("CHERRY_SAPLING", 1.0, 1.0, ["CHERRY_SAPLING_BREAK", "CHERRY_SAPLING_STEP", "CHERRY_SAPLING_PLACE", "CHERRY_SAPLING_HIT", "CHERRY_SAPLING_FALL"]),
+    ("CHERRY_LEAVES", 1.0, 1.0, ["CHERRY_LEAVES_BREAK", "CHERRY_LEAVES_STEP", "CHERRY_LEAVES_PLACE", "CHERRY_LEAVES_HIT", "CHERRY_LEAVES_FALL"]),
+    ("CHERRY_WOOD_HANGING_SIGN", 1.0, 1.0, ["CHERRY_WOOD_HANGING_SIGN_BREAK", "CHERRY_WOOD_HANGING_SIGN_STEP", "CHERRY_WOOD_HANGING_SIGN_PLACE", "CHERRY_WOOD_HANGING_SIGN_HIT", "CHERRY_WOOD_HANGING_SIGN_FALL"]),
+    ("CHISELED_BOOKSHELF", 1.0, 1.0, ["CHISELED_BOOKSHELF_BREAK", "CHISELED_BOOKSHELF_STEP", "CHISELED_BOOKSHELF_PLACE", "CHISELED_BOOKSHELF_HIT", "CHISELED_BOOKSHELF_FALL"]),
+    ("SUSPICIOUS_SAND", 1.0, 1.0, ["SUSPICIOUS_SAND_BREAK", "SUSPICIOUS_SAND_STEP", "SUSPICIOUS_SAND_PLACE", "SUSPICIOUS_SAND_HIT", "SUSPICIOUS_SAND_FALL"]),
+    ("SUSPICIOUS_GRAVEL", 1.0, 1.0, ["SUSPICIOUS_GRAVEL_BREAK", "SUSPICIOUS_GRAVEL_STEP", "SUSPICIOUS_GRAVEL_PLACE", "SUSPICIOUS_GRAVEL_HIT", "SUSPICIOUS_GRAVEL_FALL"]),
+    ("DECORATED_POT", 1.0, 1.0, ["DECORATED_POT_BREAK", "DECORATED_POT_STEP", "DECORATED_POT_PLACE", "DECORATED_POT_HIT", "DECORATED_POT_FALL"]),
+    ("DECORATED_POT_CRACKED", 1.0, 1.0, ["DECORATED_POT_SHATTER", "DECORATED_POT_STEP", "DECORATED_POT_PLACE", "DECORATED_POT_HIT", "DECORATED_POT_FALL"]),
+    ("TRIAL_SPAWNER", 1.0, 1.0, ["TRIAL_SPAWNER_BREAK", "TRIAL_SPAWNER_STEP", "TRIAL_SPAWNER_PLACE", "TRIAL_SPAWNER_HIT", "TRIAL_SPAWNER_FALL"]),
+    ("SPONGE", 1.0, 1.0, ["SPONGE_BREAK", "SPONGE_STEP", "SPONGE_PLACE", "SPONGE_HIT", "SPONGE_FALL"]),
+    ("WET_SPONGE", 1.0, 1.0, ["WET_SPONGE_BREAK", "WET_SPONGE_STEP", "WET_SPONGE_PLACE", "WET_SPONGE_HIT", "WET_SPONGE_FALL"]),
+    ("VAULT", 1.0, 1.0, ["VAULT_BREAK", "VAULT_STEP", "VAULT_PLACE", "VAULT_HIT", "VAULT_FALL"]),
+    ("HEAVY_CORE", 1.0, 1.0, ["HEAVY_CORE_BREAK", "HEAVY_CORE_STEP", "HEAVY_CORE_PLACE", "HEAVY_CORE_HIT", "HEAVY_CORE_FALL"]),
+    ("COBWEB", 1.0, 1.0, ["COBWEB_BREAK", "COBWEB_STEP", "COBWEB_PLACE", "COBWEB_HIT", "COBWEB_FALL"]),
 ];
 
 /// Vanilla blocks mods copy properties from (`Properties.ofFullCopy`): destroy time, explosion
@@ -465,7 +584,20 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "createBlockStateDefinition" | "getStateForPlacement" | "<init>"))
         || (owner.starts_with("net/minecraft/world/item/") && name == "<init>")
         || owner == CAULDRON_INTERACTION
+        || owner == ARMOR_LAYER
+        || (owner == DISPENSER && matches!(name, "registerBehavior" | "registerProjectileBehavior"))
+        || (owner.starts_with("net/minecraft/core/dispenser/") && name == "<init>")
+        || (owner == BLOCK_SET_TYPE && matches!(name, "<init>" | "register" | "values"))
+        || (matches!(owner, SOUND_TYPE | DEFERRED_SOUND_TYPE) && (name == "<init>" || SOUND_GETTERS.iter().any(|(g, ..)| *g == name) || matches!(name, "getVolume" | "getPitch")))
         || (name == "useItemOn" && cauldron_class(owner))
+}
+
+const DISPENSER: &str = "net/minecraft/world/level/block/DispenserBlock";
+const ARMOR_LAYER: &str = "net/minecraft/world/item/ArmorMaterial$Layer";
+
+/// `DispenserBlock.DISPENSER_REGISTRY`: the behaviours mods registered, by item.
+pub(crate) fn dispenser_behaviours(rt: &mut Rt) -> V {
+    rt.intern("compat:dispenser-behaviours".into(), |rt| rt.alloc("java/util/IdentityHashMap", Data::Table(Default::default())))
 }
 
 const CAULDRON_INTERACTION: &str = "net/minecraft/core/cauldron/CauldronInteraction";
@@ -500,6 +632,95 @@ fn interaction_map(rt: &mut Rt, name: &str, fresh: bool) -> V {
     m
 }
 
+const BLOCK_SET_TYPE: &str = "net/minecraft/world/level/block/state/properties/BlockSetType";
+const DEFERRED_SOUND_TYPE: &str = "net/neoforged/neoforge/common/util/DeferredSoundType";
+
+/// The vanilla `SoundType` constant `t` is (`SoundType.METAL`), by its row of [`VANILLA_SOUND_TYPES`].
+fn vanilla_sound_type(rt: &Rt, t: V) -> Option<&'static (&'static str, f32, f32, [&'static str; 5])> {
+    let n = rt.str_of(rt.get_field(t, "$name"))?;
+    VANILLA_SOUND_TYPES.iter().find(|(f, ..)| *f == n)
+}
+/// `SoundType`'s sound getters, the fields vanilla keeps them in (in its constructor's order) and
+/// those a `DeferredSoundType` keeps its suppliers in.
+const SOUND_GETTERS: [(&str, &str, &str); 5] = [
+    ("getBreakSound", "breakSound", "$breakSound"),
+    ("getStepSound", "stepSound", "$stepSound"),
+    ("getPlaceSound", "placeSound", "$placeSound"),
+    ("getHitSound", "hitSound", "$hitSound"),
+    ("getFallSound", "fallSound", "$fallSound"),
+];
+
+/// What a block set type is made of past its name: opens by hand, by wind charge, buttons take
+/// arrows, plates sense mobs alone, its `SoundType`, and its sounds' prefixes in `SoundEvents`
+/// (doors and trapdoors, pressure plates, buttons).
+type BlockSet = (bool, bool, bool, bool, &'static str, [&'static str; 3]);
+const WOODEN_SET: BlockSet = (true, true, true, false, "WOOD", ["WOODEN", "WOODEN", "WOODEN"]);
+const STONE_SET: BlockSet = (true, true, false, true, "STONE", ["IRON", "STONE", "STONE"]);
+/// Vanilla's block set types, in 1.21.1's order (`BlockSetType`'s static fields).
+const BLOCK_SET_TYPES: [(&str, &str, BlockSet); 16] = [
+    ("IRON", "iron", (false, false, false, false, "METAL", ["IRON", "METAL", "STONE"])),
+    ("COPPER", "copper", (true, true, false, false, "COPPER", ["COPPER", "METAL", "STONE"])),
+    ("GOLD", "gold", (false, true, false, false, "METAL", ["IRON", "METAL", "STONE"])),
+    ("STONE", "stone", STONE_SET),
+    ("POLISHED_BLACKSTONE", "polished_blackstone", STONE_SET),
+    ("OAK", "oak", WOODEN_SET),
+    ("SPRUCE", "spruce", WOODEN_SET),
+    ("BIRCH", "birch", WOODEN_SET),
+    ("ACACIA", "acacia", WOODEN_SET),
+    ("CHERRY", "cherry", (true, true, true, false, "CHERRY_WOOD", ["CHERRY_WOOD", "CHERRY_WOOD", "CHERRY_WOOD"])),
+    ("JUNGLE", "jungle", WOODEN_SET),
+    ("DARK_OAK", "dark_oak", WOODEN_SET),
+    ("CRIMSON", "crimson", (true, true, true, false, "NETHER_WOOD", ["NETHER_WOOD", "NETHER_WOOD", "NETHER_WOOD"])),
+    ("WARPED", "warped", (true, true, true, false, "NETHER_WOOD", ["NETHER_WOOD", "NETHER_WOOD", "NETHER_WOOD"])),
+    ("MANGROVE", "mangrove", WOODEN_SET),
+    ("BAMBOO", "bamboo", (true, true, true, false, "BAMBOO_WOOD", ["BAMBOO_WOOD", "BAMBOO_WOOD", "BAMBOO_WOOD"])),
+];
+
+/// Sets record `t`'s components (as `BlockSetType`'s canonical constructor would) from `set`.
+fn fill_block_set_type(rt: &mut Rt, t: V, name: V, set: BlockSet) {
+    let (hand, wind, arrows, mobs, sound, [door, plate, button]) = set;
+    rt.put_field(t, "name", name);
+    rt.put_field(t, "canOpenByHand", V::I(hand as i32));
+    rt.put_field(t, "canOpenByWindCharge", V::I(wind as i32));
+    rt.put_field(t, "canButtonBeActivatedByArrows", V::I(arrows as i32));
+    let sensitivity = api_common::get_static(rt, "net/minecraft/world/level/block/state/properties/BlockSetType$PressurePlateSensitivity", if mobs { "MOBS" } else { "EVERYTHING" }).unwrap_or(V::NULL);
+    rt.put_field(t, "pressurePlateSensitivity", sensitivity);
+    let sound_type = get_static(rt, SOUND_TYPE, sound).unwrap_or(V::NULL);
+    rt.put_field(t, "soundType", sound_type);
+    let sounds = [
+        ("doorClose", format!("{door}_DOOR_CLOSE")),
+        ("doorOpen", format!("{door}_DOOR_OPEN")),
+        ("trapdoorClose", format!("{door}_TRAPDOOR_CLOSE")),
+        ("trapdoorOpen", format!("{door}_TRAPDOOR_OPEN")),
+        ("pressurePlateClickOff", format!("{plate}_PRESSURE_PLATE_CLICK_OFF")),
+        ("pressurePlateClickOn", format!("{plate}_PRESSURE_PLATE_CLICK_ON")),
+        ("buttonClickOff", format!("{button}_BUTTON_CLICK_OFF")),
+        ("buttonClickOn", format!("{button}_BUTTON_CLICK_ON")),
+    ];
+    for (field, event) in sounds {
+        let v = crate::sounds::get_static(rt, "net/minecraft/sounds/SoundEvents", &event).unwrap_or(V::NULL);
+        rt.put_field(t, field, v);
+    }
+}
+
+/// `BlockSetType.TYPES`' values: vanilla's, made once in their order, then those mods registered.
+/// Each vanilla one is also interned as its static field's value.
+fn block_set_types(rt: &mut Rt) -> V {
+    if let Some(&all) = rt.interned.get("compat:block-set-types") {
+        return all;
+    }
+    let all = jutil::new_list(rt, Vec::new());
+    rt.interned.insert("compat:block-set-types".into(), all);
+    for (field, name, set) in BLOCK_SET_TYPES {
+        let t = rt.new_object(BLOCK_SET_TYPE);
+        let n = rt.string(name);
+        fill_block_set_type(rt, t, n, set);
+        rt.interned.insert(format!("const/{BLOCK_SET_TYPE}.{field}"), t);
+        jutil::list_add(rt, all, t);
+    }
+    all
+}
+
 /// `AbstractCauldronBlock.useItemOn`: the interaction block `b`'s map holds for the held stack's item,
 /// else `PASS_TO_DEFAULT_BLOCK_INTERACTION` (the map's default). `args` are `useItemOn`'s.
 pub(crate) fn cauldron_use(rt: &mut Rt, args: &[V]) -> V {
@@ -525,6 +746,76 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(rt.alloc(class, Data::Array(all)))
         }
         (DYE_COLOR, _) => dye_call(rt, name, args),
+        // `new SoundType(volume, pitch, break, step, place, hit, fall)` and NeoForge's
+        // `DeferredSoundType`, whose sounds are suppliers (of a mod's registered sound events).
+        (SOUND_TYPE | DEFERRED_SOUND_TYPE, "<init>") if desc.starts_with("(FF") => {
+            rt.put_field(a(0), "volume", a(1));
+            rt.put_field(a(0), "pitch", a(2));
+            for (i, &(_, field, supplier)) in SOUND_GETTERS.iter().enumerate() {
+                rt.put_field(a(0), if owner == DEFERRED_SOUND_TYPE { supplier } else { field }, a(3 + i));
+            }
+            Some(V::Void)
+        }
+        (SOUND_TYPE | DEFERRED_SOUND_TYPE, "getVolume" | "getPitch") => {
+            let field = if name == "getVolume" { "volume" } else { "pitch" };
+            Some(match rt.get_field(a(0), field) {
+                V::F(f) => V::F(f),
+                _ => {
+                    let vanilla = vanilla_sound_type(rt, a(0));
+                    V::F(vanilla.map_or(1.0, |t| if field == "volume" { t.1 } else { t.2 }))
+                }
+            })
+        }
+        (SOUND_TYPE | DEFERRED_SOUND_TYPE, getter) if SOUND_GETTERS.iter().any(|(g, ..)| *g == getter) => {
+            let &(_, field, supplier) = SOUND_GETTERS.iter().find(|(g, ..)| *g == getter)?;
+            let own = rt.get_field(a(0), field);
+            if own.r() != 0 {
+                return Some(own);
+            }
+            let deferred = rt.get_field(a(0), supplier);
+            if deferred.r() != 0 {
+                return Some(rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", deferred, &[]));
+            }
+            // A vanilla constant: the sound its table row names.
+            let i = SOUND_GETTERS.iter().position(|(g, ..)| *g == getter)?;
+            let Some(event) = vanilla_sound_type(rt, a(0)).map(|t| t.3[i]) else { return Some(V::NULL) };
+            Some(crate::sounds::get_static(rt, "net/minecraft/sounds/SoundEvents", event).unwrap_or(V::NULL))
+        }
+        // `new BlockSetType(name)`: a wooden set's (opens by hand, buttons take arrows, plates sense
+        // everything, wood's sounds); the canonical constructor is the record's.
+        (BLOCK_SET_TYPE, "<init>") if desc == "(Ljava/lang/String;)V" => {
+            fill_block_set_type(rt, a(0), a(1), WOODEN_SET);
+            Some(V::Void)
+        }
+        // `register(type)`: kept for `values()`, which lists vanilla's first.
+        (BLOCK_SET_TYPE, "register") => {
+            let all = block_set_types(rt);
+            jutil::list_add(rt, all, a(0));
+            Some(a(0))
+        }
+        (BLOCK_SET_TYPE, "values") if desc == "()Ljava/util/stream/Stream;" => {
+            let all = block_set_types(rt);
+            let items = jutil::elements(rt, all);
+            Some(rt.alloc("java/util/stream/Stream", Data::Stream(items)))
+        }
+        // `DispenserBlock.registerBehavior(item, behavior)`: what a dispenser does with the item,
+        // kept by item (`DISPENSER_REGISTRY`); a projectile's is vanilla's projectile behaviour.
+        (DISPENSER, "registerBehavior" | "registerProjectileBehavior") => {
+            let item = crate::creative::as_item(rt, a(0));
+            let behavior = if name == "registerBehavior" {
+                a(1)
+            } else {
+                let b = rt.new_object("net/minecraft/core/dispenser/ProjectileDispenseBehavior");
+                rt.put_field(b, "$item", item);
+                b
+            };
+            let all = dispenser_behaviours(rt);
+            jutil::table_put(rt, all, item, behavior);
+            Some(V::Void)
+        }
+        // A mod's behaviour built on vanilla's (`DefaultDispenseItemBehavior`, `OptionalDispense...`):
+        // their state is the runtime's fields.
+        (o, "<init>") if o.starts_with("net/minecraft/core/dispenser/") => Some(V::Void),
         (CAULDRON_INTERACTION, "newInteractionMap") if desc.starts_with("(Ljava/lang/String;)") => {
             let n = rt.str_of(a(0)).unwrap_or("").to_owned();
             Some(interaction_map(rt, &n, true))
@@ -555,6 +846,24 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let text = vanilla_enum(o)?.get(rt.get_field(a(0), "$ordinal").i().max(0) as usize)?;
             Some(rt.string(text))
         }
+        // `ArmorMaterial.Layer(assetName[, suffix, dyeable])`, and its texture's location as
+        // vanilla's (`ns:textures/models/armor/<path>_layer_<1|2><suffix>.png`).
+        (ARMOR_LAYER, "<init>") => {
+            let full = desc.starts_with("(Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;Z)");
+            rt.put_field(a(0), "assetName", a(1));
+            let suffix = if full { a(2) } else { rt.string("") };
+            rt.put_field(a(0), "suffix", suffix);
+            rt.put_field(a(0), "dyeable", if full { a(3) } else { V::I(0) });
+            Some(V::Void)
+        }
+        (ARMOR_LAYER, "texture") => {
+            let id = crate::neo::location(rt, rt.get_field(a(0), "assetName"));
+            let suffix = rt.str_of(rt.get_field(a(0), "suffix")).unwrap_or("").to_owned();
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", &id));
+            let text = format!("{ns}:textures/models/armor/{path}_layer_{}{suffix}.png", if a(1).i() != 0 { 2 } else { 1 });
+            Some(rt.string(&text))
+        }
+        (ARMOR_LAYER, "dyeable") => Some(V::I((rt.get_field(a(0), "dyeable").i() != 0) as i32)),
         // `ArmorItem.Type`: its name and vanilla's durability per material multiplier.
         ("net/minecraft/world/item/ArmorItem$Type", "getName" | "getSerializedName") => {
             let n = rt.str_of(rt.get_field(a(0), "$name")).unwrap_or("").to_ascii_lowercase();
@@ -637,8 +946,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match owner {
         SOUND_TYPE => {
-            let (f, _) = SOUNDS.iter().find(|(f, _)| *f == field)?;
+            let &(f, ..) = VANILLA_SOUND_TYPES.iter().find(|(f, ..)| *f == field)?;
             Some(named(rt, SOUND_TYPE, f))
+        }
+        BLOCK_SET_TYPE => {
+            block_set_types(rt);
+            rt.interned.get(&format!("const/{BLOCK_SET_TYPE}.{field}")).copied()
+        }
+        DISPENSER if field == "DISPENSER_REGISTRY" => Some(dispenser_behaviours(rt)),
+        // Vanilla's armour materials, as the registry's holders of them.
+        "net/minecraft/world/item/ArmorMaterials" if matches!(field, "LEATHER" | "CHAIN" | "IRON" | "GOLD" | "DIAMOND" | "TURTLE" | "NETHERITE" | "ARMADILLO") => {
+            let id = format!("minecraft:{}", field.to_ascii_lowercase());
+            Some(rt.intern(format!("compat:armor-material/{id}"), |rt| {
+                let m = rt.alloc("net/minecraft/world/item/ArmorMaterial", Data::Str(id.clone()));
+                crate::neo::registry_holder(rt, "armor_material", &id, m)
+            }))
         }
         CAULDRON_INTERACTION => match field {
             "EMPTY" | "WATER" | "LAVA" | "POWDER_SNOW" => Some(interaction_map(rt, &field.to_ascii_lowercase(), false)),
@@ -1535,6 +1857,92 @@ mod tests {
         assert_eq!(rt.str_of(next), Some("ruby:slab[type=double,waterlogged=false]"));
         let wrapped = api::call(&mut rt, cycle, &[next, ty]);
         assert_eq!(rt.str_of(wrapped), Some("ruby:slab[type=top,waterlogged=false]"));
+    }
+
+    /// Vanilla 1.21.1's `BlockSetType` and `SoundType` constants (from its class file): iron doors
+    /// don't open by hand, stone plates sense mobs alone, metal sounds at pitch 1.5, the anvil at
+    /// volume 0.3; a mod's `new BlockSetType(name)` is a wooden set.
+    #[test]
+    fn block_set_and_sound_types_answer_as_vanilla_does() {
+        let mut rt = Rt::new();
+        let set = |rt: &mut Rt, f: &str| get_static(rt, BLOCK_SET_TYPE, f).unwrap();
+        let ask = |rt: &mut Rt, t: V, m: &str, d: &str| {
+            let k = rt.static_key(&format!("{BLOCK_SET_TYPE}.{m}.(){d}"));
+            api::call(rt, k, &[t])
+        };
+        let iron = set(&mut rt, "IRON");
+        assert_eq!(ask(&mut rt, iron, "canOpenByHand", "Z"), V::I(0));
+        let oak = set(&mut rt, "OAK");
+        assert_eq!(ask(&mut rt, oak, "canOpenByHand", "Z"), V::I(1));
+        let name = ask(&mut rt, oak, "name", "Ljava/lang/String;");
+        assert_eq!(rt.str_of(name), Some("oak"));
+        let stone = set(&mut rt, "STONE");
+        let mobs = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockSetType$PressurePlateSensitivity.MOBS");
+        assert_eq!(ask(&mut rt, stone, "pressurePlateSensitivity", "Lnet/minecraft/world/level/block/state/properties/BlockSetType$PressurePlateSensitivity;"), mobs);
+        assert_eq!(set(&mut rt, "OAK"), oak);
+        let ruby = rt.new_object(BLOCK_SET_TYPE);
+        let n = rt.string("ruby");
+        api::call(&mut rt, "net/minecraft/world/level/block/state/properties/BlockSetType.<init>.(Ljava/lang/String;)V", &[ruby, n]);
+        let wood = get_static(&mut rt, SOUND_TYPE, "WOOD").unwrap();
+        assert_eq!(ask(&mut rt, ruby, "soundType", "Lnet/minecraft/world/level/block/SoundType;"), wood);
+        api::call(&mut rt, "net/minecraft/world/level/block/state/properties/BlockSetType.register.(Lnet/minecraft/world/level/block/state/properties/BlockSetType;)Lnet/minecraft/world/level/block/state/properties/BlockSetType;", &[ruby]);
+        let all = api::call(&mut rt, "net/minecraft/world/level/block/state/properties/BlockSetType.values.()Ljava/util/stream/Stream;", &[]);
+        let listed = match rt.heap.get(all.r() as usize).map(|o| &o.data) { Some(Data::Stream(v)) => v.clone(), _ => Vec::new() };
+        assert_eq!(listed.len(), 17);
+        assert_eq!(listed.last(), Some(&ruby));
+        // Sound types.
+        let sound = |rt: &mut Rt, t: V, m: &str, d: &str| {
+            let k = rt.static_key(&format!("{SOUND_TYPE}.{m}.(){d}"));
+            api::call(rt, k, &[t])
+        };
+        let metal = get_static(&mut rt, SOUND_TYPE, "METAL").unwrap();
+        assert_eq!(sound(&mut rt, metal, "getPitch", "F"), V::F(1.5));
+        let anvil = get_static(&mut rt, SOUND_TYPE, "ANVIL").unwrap();
+        assert_eq!(sound(&mut rt, anvil, "getVolume", "F"), V::F(0.3));
+        let broke = sound(&mut rt, wood, "getBreakSound", "Lnet/minecraft/sounds/SoundEvent;");
+        assert_eq!(broke, api::get_static(&mut rt, "net/minecraft/sounds/SoundEvents.WOOD_BREAK"));
+        assert_ne!(broke, V::NULL);
+        // A mod's own: what it was made with.
+        let own = rt.new_object(SOUND_TYPE);
+        let events: Vec<V> = ["a", "b", "c", "d", "e"].iter().map(|e| rt.string(e)).collect();
+        let mut args = vec![own, V::F(0.5), V::F(2.0)];
+        args.extend(events.iter().copied());
+        api::call(&mut rt, "net/minecraft/world/level/block/SoundType.<init>.(FFLnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundEvent;)V", &args);
+        assert_eq!(sound(&mut rt, own, "getPlaceSound", "Lnet/minecraft/sounds/SoundEvent;"), events[2]);
+        assert_eq!(sound(&mut rt, own, "getPitch", "F"), V::F(2.0));
+        // Constants whose sounds aren't their own name's: a crop is planted, twisting vines sound
+        // like weeping ones at half pitch.
+        let crop = get_static(&mut rt, SOUND_TYPE, "CROP").unwrap();
+        let planted = api::get_static(&mut rt, "net/minecraft/sounds/SoundEvents.CROP_PLANTED");
+        assert_eq!(sound(&mut rt, crop, "getPlaceSound", "Lnet/minecraft/sounds/SoundEvent;"), planted);
+        let vines = get_static(&mut rt, SOUND_TYPE, "TWISTING_VINES").unwrap();
+        assert_eq!(sound(&mut rt, vines, "getPitch", "F"), V::F(0.5));
+    }
+
+    #[test]
+    fn an_armour_layer_names_its_texture_as_vanilla_does() {
+        let mut rt = Rt::new();
+        let layer = rt.new_object(ARMOR_LAYER);
+        let id = rt.string("create:copper_diving");
+        api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial$Layer.<init>.(Lnet/minecraft/resources/ResourceLocation;)V", &[layer, id]);
+        let outer = api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial$Layer.texture.(Z)Lnet/minecraft/resources/ResourceLocation;", &[layer, V::I(0)]);
+        assert_eq!(rt.str_of(outer), Some("create:textures/models/armor/copper_diving_layer_1.png"));
+        let dyed = rt.new_object(ARMOR_LAYER);
+        let (leather, overlay) = (rt.string("leather"), rt.string("_overlay"));
+        api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial$Layer.<init>.(Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;Z)V", &[dyed, leather, overlay, V::I(1)]);
+        let inner = api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial$Layer.texture.(Z)Lnet/minecraft/resources/ResourceLocation;", &[dyed, V::I(1)]);
+        assert_eq!(rt.str_of(inner), Some("minecraft:textures/models/armor/leather_layer_2_overlay.png"));
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial$Layer.dyeable.()Z", &[dyed]), V::I(1));
+    }
+
+    #[test]
+    fn a_dispenser_behaviour_is_kept_by_its_item() {
+        let mut rt = Rt::new();
+        let goggles = api_common::item(&mut rt, "create:goggles");
+        let behavior = rt.new_object("test/Behavior");
+        api::call(&mut rt, "net/minecraft/world/level/block/DispenserBlock.registerBehavior.(Lnet/minecraft/world/level/ItemLike;Lnet/minecraft/core/dispenser/DispenseItemBehavior;)V", &[goggles, behavior]);
+        let all = api::get_static(&mut rt, "net/minecraft/world/level/block/DispenserBlock.DISPENSER_REGISTRY");
+        assert_eq!(jutil::table_get(&mut rt, all, goggles), Some(behavior));
     }
 
     #[test]

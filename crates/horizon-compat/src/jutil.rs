@@ -587,6 +587,13 @@ fn is_map(class: &str) -> bool {
     class.ends_with("Map") || class.ends_with("Map$Values")
 }
 
+/// Appends `v` to the list at `l` (`List.add`); nothing for what isn't a list.
+pub fn list_add(rt: &mut Rt, l: V, v: V) {
+    if let Some(items) = list_mut(rt, l) {
+        items.push(v);
+    }
+}
+
 pub fn new_list(rt: &mut Rt, items: Vec<V>) -> V {
     rt.alloc("java/util/ArrayList", Data::List(items))
 }

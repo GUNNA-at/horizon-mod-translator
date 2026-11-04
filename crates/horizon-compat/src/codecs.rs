@@ -82,7 +82,7 @@ fn range(rt: &mut Rt, prim_name: &str, min: f64, max: f64) -> V {
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match (owner, field) {
         ("com/mojang/serialization/Codec", f) => match f {
-            "INT" | "LONG" | "FLOAT" | "DOUBLE" | "BOOL" | "STRING" | "BYTE" | "SHORT" => prim(rt, &f.to_ascii_lowercase()),
+            "INT" | "LONG" | "FLOAT" | "DOUBLE" | "BOOL" | "STRING" | "BYTE" | "SHORT" | "INT_STREAM" => prim(rt, &f.to_ascii_lowercase()),
             "PASSTHROUGH" => native(rt, "passthrough"),
             _ => return None,
         },
@@ -98,6 +98,14 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("com/mojang/serialization/JsonOps", "INSTANCE" | "COMPRESSED") => rt.intern("compat:json-ops".into(), |rt| rt.new_object("com/mojang/serialization/JsonOps")),
         ("net/minecraft/resources/ResourceLocation", "CODEC") => native(rt, "resource_location"),
         ("net/minecraft/core/BlockPos", "CODEC") => native(rt, "block_pos"),
+        ("net/minecraft/core/Vec3i", "CODEC") => native(rt, "vec3i"),
+        ("net/minecraft/world/phys/Vec3", "CODEC") => native(rt, "vec3"),
+        ("net/minecraft/core/UUIDUtil", "CODEC") => native(rt, "uuid"),
+        ("net/minecraft/core/UUIDUtil", "STRING_CODEC" | "LENIENT_CODEC") => native(rt, "uuid_string"),
+        ("net/minecraft/core/Direction", "CODEC") => native(rt, "direction"),
+        ("net/minecraft/core/Direction$Axis", "CODEC") => native(rt, "axis"),
+        (crate::rotation::MIRROR, "CODEC") => native(rt, "mirror"),
+        (crate::rotation::ROTATION, "CODEC") => native(rt, "rotation"),
         ("net/minecraft/util/Unit", "CODEC") => native(rt, "unit"),
         ("net/minecraft/world/item/ItemStack", "CODEC" | "STRICT_CODEC" | "SINGLE_ITEM_CODEC") => native(rt, "item_stack"),
         ("net/minecraft/world/item/ItemStack", "OPTIONAL_CODEC") => native(rt, "optional_item_stack"),
@@ -514,6 +522,15 @@ fn primitive(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             Json::String(s) => rt.string(s),
             _ => return Err(format!("Not a string: {j}")),
         },
+        // `Codec.INT_STREAM`: a list of ints, read as an `IntStream`.
+        "int_stream" => match j {
+            Json::Array(items) => {
+                let ints: Option<Vec<V>> = items.iter().map(|x| x.as_i64().map(|i| V::I(i as i32))).collect();
+                let ints = ints.ok_or_else(|| format!("Not a list of ints: {j}"))?;
+                rt.alloc("java/util/stream/IntStream", Data::Stream(ints))
+            }
+            _ => return Err(format!("Not a list: {j}")),
+        },
         _ => return Err(format!("no primitive {name}")),
     })
 }
@@ -746,6 +763,12 @@ fn write_primitive(rt: &Rt, name: &str, v: V) -> Result<Nbt, String> {
     if name == "string" {
         return rt.str_of(v).map(|s| Nbt::String(s.to_owned())).ok_or_else(|| "Not a string".to_owned());
     }
+    if name == "int_stream" {
+        return match rt.heap.get(v.r() as usize).map(|o| &o.data) {
+            Some(Data::Stream(items)) => Ok(Nbt::IntArray(items.iter().map(|x| x.i()).collect())),
+            _ => Err("Not an int stream".to_owned()),
+        };
+    }
     let raw = match v {
         V::R(_) => rt.get_field(v, "value"),
         raw => raw,
@@ -773,7 +796,28 @@ fn write_primitive(rt: &Rt, name: &str, v: V) -> Result<Nbt, String> {
 fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
     Ok(match name {
         "resource_location" => Nbt::String(rt.str_of(v).ok_or("Not a resource location")?.to_owned()),
-        "block_pos" => Nbt::IntArray(crate::api::pos_of(rt, v).to_vec()),
+        "block_pos" | "vec3i" => Nbt::IntArray(crate::api::pos_of(rt, v).to_vec()),
+        // `[x, y, z]` as doubles (`Vec3.CODEC` is `DOUBLE.listOf()` of three).
+        "vec3" => {
+            let xyz = ["x", "y", "z"].map(|f| Nbt::Double(rt.get_field(v, f).d()));
+            Nbt::List(xyz.to_vec())
+        }
+        // Four ints, most significant first (`UUIDUtil.CODEC`), or the dashed text.
+        "uuid" => {
+            let (msb, lsb) = crate::tags::uuid_bits(rt, v);
+            Nbt::IntArray(vec![(msb >> 32) as i32, msb as i32, (lsb >> 32) as i32, lsb as i32])
+        }
+        "uuid_string" => {
+            let (msb, lsb) = crate::tags::uuid_bits(rt, v);
+            Nbt::String(crate::tags::uuid_text(msb, lsb))
+        }
+        "direction" | "axis" => Nbt::String(crate::api_common::text_of(rt, v)),
+        // By serialized name, from the constant's ordinal (`Rotation.CLOCKWISE_180` is `180`).
+        "mirror" | "rotation" => {
+            let names: &[&str] = if name == "mirror" { &crate::rotation::MIRRORS } else { &crate::rotation::ROTATION_NAMES };
+            let i = rt.get_field(v, "$ordinal").i();
+            Nbt::String(names.get(i as usize).ok_or("an enum value with no name")?.to_string())
+        }
         "unit" => Nbt::Compound(BTreeMap::new()),
         // `{id, count, components}` (the mod's components); nothing for an empty optional one.
         "item_stack" | "optional_item_stack" => {
@@ -1195,6 +1239,34 @@ mod tests {
     fn st(rt: &mut Rt, key: &str) -> V {
         let k = rt.static_key(key);
         api::get_static(rt, k)
+    }
+
+    /// Vanilla's value codecs write what 1.21.1 writes (`Vec3` three doubles, a UUID four ints, a
+    /// rotation its serialized name) and read it back.
+    #[test]
+    fn vanilla_value_codecs_write_and_read_as_vanillas() {
+        let mut rt = Rt::new();
+        let vec3 = st(&mut rt, "net/minecraft/world/phys/Vec3.CODEC");
+        let v = crate::api_common::vec3(&mut rt, 1.5, -2.0, 0.25);
+        assert_eq!(encode(&mut rt, vec3, v), Ok(Nbt::List(vec![Nbt::Double(1.5), Nbt::Double(-2.0), Nbt::Double(0.25)])));
+        let back = decode(&mut rt, vec3, &serde_json::json!([1.5, -2.0, 0.25])).unwrap();
+        assert_eq!(rt.get_field(back, "y"), V::D(-2.0));
+        let uuid = st(&mut rt, "net/minecraft/core/UUIDUtil.CODEC");
+        let u = crate::tags::uuid(&mut rt, 0x0123_4567_89ab_cdef, -2);
+        assert_eq!(encode(&mut rt, uuid, u), Ok(Nbt::IntArray(vec![0x0123_4567, 0x89ab_cdef_u32 as i32, -1, -2])));
+        let back = decode(&mut rt, uuid, &serde_json::json!([0x0123_4567, 0x89ab_cdef_u32 as i32, -1, -2])).unwrap();
+        assert_eq!(crate::tags::uuid_bits(&rt, back), (0x0123_4567_89ab_cdef, -2));
+        let dir = st(&mut rt, "net/minecraft/core/Direction.CODEC");
+        let north = st(&mut rt, "net/minecraft/core/Direction.NORTH");
+        assert_eq!(encode(&mut rt, dir, north), Ok(Nbt::String("north".into())));
+        assert_eq!(decode(&mut rt, dir, &serde_json::json!("north")), Ok(north));
+        let rot = st(&mut rt, "net/minecraft/world/level/block/Rotation.CODEC");
+        let half = st(&mut rt, "net/minecraft/world/level/block/Rotation.CLOCKWISE_180");
+        assert_eq!(encode(&mut rt, rot, half), Ok(Nbt::String("180".into())));
+        assert_eq!(decode(&mut rt, rot, &serde_json::json!("180")), Ok(half));
+        let ints = st(&mut rt, "com/mojang/serialization/Codec.INT_STREAM");
+        let read = decode(&mut rt, ints, &serde_json::json!([4, -5, 6])).unwrap();
+        assert_eq!(encode(&mut rt, ints, read), Ok(Nbt::IntArray(vec![4, -5, 6])));
     }
 
     #[test]

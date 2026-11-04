@@ -1615,6 +1615,25 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     New Age's coil and Create's filter as before. Not yet: a mod's entries in vanilla's maps
     (`CauldronInteraction.EMPTY.map().put(dragon breath bucket, ...)`) — the game's own cauldron
     doesn't ask them.
+  - 2026-11-04 Next by count at load. Kotlin for Forge's bus calls were mapped but never claimed
+    (a module answers only what it claims), so a Kotlin mod's listeners didn't subscribe; they do
+    now. `ModList.getMods` answers each loaded mod's info, and with it a mod went on to ask every
+    mod's `getModProperties` (misses 418 → 511 at 93 kinds), now mapped with the rest of the mod
+    info. Also mapped: `Util.makeDescriptionId`; vanilla's value codecs (`Vec3i`, `Vec3`,
+    `UUIDUtil`'s two, `Direction`, `Direction.Axis`, `Mirror`, `Rotation`, `Codec.INT_STREAM`),
+    written and read in vanilla's forms; `SoundType`'s 113 constants and `BlockSetType`'s 16 as
+    1.21.1's classes declare them (`METAL` at pitch 1.5, `CROP` sounds planted, twisting vines like
+    weeping ones at half pitch), a mod's own sound types and NeoForge's `DeferredSoundType` (sounds
+    through suppliers); `DispenserBlock.registerBehavior` and `registerProjectileBehavior`, kept by
+    item; `ArmorMaterial.Layer` (its texture path as vanilla builds it) and `ArmorMaterials`;
+    `FluidInteractionRegistry.addInteraction`; NeoForge's data maps (`NeoForgeDataMaps`, the
+    `DataMapType` builders), `RegistrationInfo.BUILT_IN`, `RegistrySetBuilder`, command argument
+    types by class (Ponder's), `Holder.direct`, the data generator check, more of vanilla's plain
+    enums (`AttributeModifier.Operation`, `MobCategory`, `MobEffectCategory`...). Misses at load
+    418 → 134 (83 kinds), the same registrations plus Ponder's argument type, no uncaught
+    exception; tabs (11), New Age's coil (16 rpm, 72 su, 22 FE/t) and Create's filter as before.
+    Kept but not yet asked by the game: the dispenser behaviours, the fluid interactions, armour
+    materials' stats.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

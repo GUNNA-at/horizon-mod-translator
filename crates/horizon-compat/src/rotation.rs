@@ -12,7 +12,7 @@ pub const MIRROR: &str = "net/minecraft/world/level/block/Mirror";
 pub const ROTATIONS: [&str; 4] = ["none", "clockwise_90", "clockwise_180", "counterclockwise_90"];
 pub const MIRRORS: [&str; 3] = ["none", "left_right", "front_back"];
 /// `Rotation.getSerializedName()`.
-const ROTATION_NAMES: [&str; 4] = ["none", "clockwise_90", "180", "counterclockwise_90"];
+pub(crate) const ROTATION_NAMES: [&str; 4] = ["none", "clockwise_90", "180", "counterclockwise_90"];
 
 const DIRECTIONS: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
 /// North, east, south, west: a quarter turn clockwise is one step along.

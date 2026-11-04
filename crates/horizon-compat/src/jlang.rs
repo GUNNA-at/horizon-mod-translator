@@ -1493,6 +1493,17 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // `memoize(function)`: the function itself (same answers; vanilla only caches them).
         ("net/minecraft/Util", "memoize") => a(0),
+        // `Util.makeDescriptionId("block", create:shaft)`: `block.create.shaft`, unregistered without an id.
+        ("net/minecraft/Util", "makeDescriptionId") => {
+            let kind = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let id = crate::api_common::text_of(rt, a(1));
+            let text = match id.split_once(':') {
+                _ if a(1).is_null() => format!("{kind}.unregistered_sadface"),
+                Some((ns, path)) => format!("{kind}.{ns}.{}", path.replace('/', ".")),
+                None => format!("{kind}.minecraft.{}", id.replace('/', ".")),
+            };
+            rt.string(&text)
+        }
         ("net/minecraft/Util", "getMillis" | "getEpochMillis") => {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
             V::J(now)
