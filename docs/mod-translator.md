@@ -659,6 +659,30 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     (`FanProcessingTypeRegistry.init` reads it with `Registry.forEach`, now mapped). Also
     `RegisterEvent.getRegistry()` (Create registers its advancement triggers when it is
     `BuiltInRegistries.TRIGGER_TYPES`) and `WritableRegistry.register(key, value, info)`.
+  - [x] 2026-11-04 **Create's encased fan washes** (harness `FAN`: a creative motor, a fan facing
+    east, a water source in front, a block of ice 3.5 blocks out): the current covers the water and
+    on (`create:splashing` from offset 0 to 5), catches the ice, and on tick 160 it is packed ice
+    (`create:splashing/ice`, 150 ticks). Three things held it. Fluid tags: the game loads them as it
+    loads block and item tags (`Items::fluid_tags`, vanilla's and the content mods' data, the packs'),
+    and `FluidState.is(TagKey)` asks through a new host call, `Host::fluid_in_tag`
+    (`native_fluid_name_in_tag` on `Game` and `GameLevel`); Create finds its catalysts by the tag
+    `create:fan_processing_catalysts/splashing`. Class initialisation: a static method reference
+    (`FanProcessingTypeRegistry::init`, which Create hands to its registry's bake callback) now
+    initialises the class that declares it, as `invokestatic` does; through the lambda table it ran
+    on the uninitialised class, so the sorted processing types stayed empty (differential case
+    `staticRefs` pins it against the JVM). And `Vec3i.get(Axis)`. The harness host now loads the
+    mod's block and fluid tags too.
+  - [x] 2026-11-04 In game the belt's segments are drawn turned as in the harness (a trace of every
+    model draw's pose, `HORIZON_COMPAT_TRACE`, shows the same matrices), and its moving surface no
+    longer shows other sprites at the seams: the GUI atlas cut every non-square block or item texture
+    without an `.mcmeta` to its top square as if it were an animation strip, so Create's 16x32
+    `belt_scroll` was half there and the scroll read past it. Vanilla keeps such a texture whole
+    (`SpriteLoader.loadSprite`), and vanilla 26.3 has none.
+  - [ ] The ingot on a belt stays where the server's update tag put it on the client: Create moves
+    belt items on the client by `speed * ServerSpeedProvider.get()`, which starts at 0 and rises
+    only as the server's `ServerSpeedProvider$Packet`s arrive. Mod payloads (NeoForge
+    `RegisterPayloadHandlersEvent`, `PacketDistributor`, `StreamCodec`) aren't carried yet, and
+    `ServerTickEvent` (which sends them) isn't posted.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
