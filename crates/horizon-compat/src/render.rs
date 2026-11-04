@@ -1357,6 +1357,10 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             let location = model_location(&name, &text);
             rt.string(&location)
         }
+        // A block's or fluid's chunk layer (`ItemBlockRenderTypes.setRenderLayer`, Registrate's
+        // `addLayer`): the host picks each quad's pass from its sprite's alpha (cut out where its
+        // texels are clear, translucent where they are partly), so there is nothing to keep.
+        ("net/minecraft/client/renderer/ItemBlockRenderTypes", "setRenderLayer") => V::Void,
         // Blocks draw in the solid layer here (the host picks its own passes).
         ("net/neoforged/neoforge/client/ChunkRenderTypeSet", n) => match n {
             "contains" => V::I((rt.str_of(rt.get_field(a(1), "$name")) == Some("solid")) as i32),

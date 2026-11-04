@@ -135,6 +135,11 @@ pub trait Host {
     fn player_held(&self) -> Option<(String, u32)> {
         None
     }
+    /// Where the acting player stands (their feet), and their look (yaw, pitch in degrees); None
+    /// when the game can't say.
+    fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
+        None
+    }
     /// The collision boxes of the block at `pos` as the game has them (`BlockState.getCollisionShape`
     /// with the empty context), each relative to the block's corner; None when the game can't say.
     fn collision_boxes(&self, _pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
@@ -334,6 +339,8 @@ pub struct MemoryHost {
     pub sneaking: bool,
     pub creative: bool,
     pub held: Option<(String, u32)>,
+    /// Where the acting player stands and looks (yaw, pitch).
+    pub place: Option<([f64; 3], f32, f32)>,
     /// What the acting player was given that the main hand didn't take, in order.
     pub given: Vec<(String, u32)>,
     /// Positions sent to players again (`block_changed`), in order.
@@ -404,6 +411,9 @@ impl Host for MemoryHost {
     }
     fn player_held(&self) -> Option<(String, u32)> {
         self.held.clone()
+    }
+    fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
+        self.place
     }
     /// Air (and unset positions) has none; any other block is a full cube.
     fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {

@@ -2169,13 +2169,16 @@ impl Game<'_> {
             return;
         };
         // A mod block entity's type is named after its block (`mod_content`):
-        // its update tag merges into what the client keeps of it (`handleUpdateTag`).
-        // Nothing is drawn from it yet, so its section stays as it is.
+        // its update tag merges into what the client keeps of it, and its mod
+        // loads this packet's own tag now (`handleUpdateTag`), as vanilla
+        // has each one loaded. Its section stays as it is.
         let block = self.world.block(pos[0], pos[1], pos[2]);
         if let Some(BlockEntity::Mod(m)) = self.world.block_entities.get_mut(&key) {
             if *self.res.facts().get(block).name == *name {
                 m.nbt
                     .extend(fields.iter().map(|(k, v)| (k.clone(), v.clone())));
+                let entity = m.clone();
+                self.native_block_entity_data(pos, &entity, fields);
             }
             return;
         }

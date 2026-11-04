@@ -1,0 +1,407 @@
+//! Food a mod's items give. In 1.21.1 a mod builds `FoodProperties` with its builder (`nutrition`,
+//! `saturationModifier`, `alwaysEdible`, `fast`, `effect`, `usingConvertsTo`) and hands it to
+//! `Item.Properties.food`; `build()` makes the record vanilla's way (saturation is nutrition ×
+//! modifier × 2). The effects are `MobEffectInstance`s (an effect's holder, duration, amplifier and
+//! flags) of a mod's own effects or vanilla's `MobEffects` (each field's id from `vanilla_effects.rs`).
+//!
+//! 26.3 splits that one component in three, as its own items have them (items.json): `food`
+//! (nutrition, saturation, whether it can always be eaten), `consumable` (seconds to eat, animation,
+//! sound, particles, the effects it applies) and `use_remainder` (what eating leaves).
+//! [`components`] writes them for a mod's item. Its class may change how it's eaten by overriding
+//! `Item`'s `getUseDuration`, `getUseAnimation` (a drink), `getEatingSound` or `getDrinkingSound`:
+//! those are asked once, with a stack of the item, as they answer the same for any.
+use crate::{api, api_common, jutil, Rt, V};
+
+const BUILDER: &str = "net/minecraft/world/food/FoodProperties$Builder";
+const FOOD: &str = "net/minecraft/world/food/FoodProperties";
+const POSSIBLE: &str = "net/minecraft/world/food/FoodProperties$PossibleEffect";
+const INSTANCE: &str = "net/minecraft/world/effect/MobEffectInstance";
+const EFFECT: &str = "net/minecraft/world/effect/MobEffect";
+const EFFECTS: &str = "net/minecraft/world/effect/MobEffects";
+const USE_ANIM: &str = "net/minecraft/world/item/UseAnim";
+/// `UseAnim`'s constants in 1.21.1's order (NeoForge adds `CUSTOM`).
+const USE_ANIMS: [&str; 11] = ["NONE", "EAT", "DRINK", "BLOCK", "BOW", "SPEAR", "CROSSBOW", "SPYGLASS", "TOOT_HORN", "BRUSH", "CUSTOM"];
+const SUPPLY: &str = "java/util/function/Supplier.get.()Ljava/lang/Object;";
+const LIST_ADD: &str = "java/util/List.add.(Ljava/lang/Object;)Z";
+/// `FoodProperties.DEFAULT_EAT_SECONDS`, and what `fast()` sets.
+const EAT_SECONDS: f32 = 1.6;
+const FAST_SECONDS: f32 = 0.8;
+const USE_DURATION: &str = "getUseDuration.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/LivingEntity;)I";
+const USE_DURATION_KEY: &str = "net/minecraft/world/item/Item.getUseDuration.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/LivingEntity;)I";
+const USE_ANIMATION: &str = "getUseAnimation.(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/UseAnim;";
+const USE_ANIMATION_KEY: &str = "net/minecraft/world/item/Item.getUseAnimation.(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/UseAnim;";
+const EATING_SOUND: &str = "getEatingSound.()Lnet/minecraft/sounds/SoundEvent;";
+const EATING_SOUND_KEY: &str = "net/minecraft/world/item/Item.getEatingSound.()Lnet/minecraft/sounds/SoundEvent;";
+const DRINKING_SOUND: &str = "getDrinkingSound.()Lnet/minecraft/sounds/SoundEvent;";
+const DRINKING_SOUND_KEY: &str = "net/minecraft/world/item/Item.getDrinkingSound.()Lnet/minecraft/sounds/SoundEvent;";
+
+/// `MobEffects.FIELD`: a holder of vanilla's effect with the id that field registers. One object per
+/// field: a mod may compare them. And `UseAnim`'s constants.
+pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    if owner == USE_ANIM {
+        let i = USE_ANIMS.iter().position(|n| *n == field)?;
+        return Some(api::api_enum(rt, USE_ANIM, USE_ANIMS[i], i as i32));
+    }
+    if owner != EFFECTS {
+        return None;
+    }
+    let i = crate::vanilla_effects::MOB_EFFECTS.binary_search_by(|(f, _)| (*f).cmp(field)).ok()?;
+    let id = format!("minecraft:{}", crate::vanilla_effects::MOB_EFFECTS[i].1);
+    Some(rt.intern(format!("effect-holder/{id}"), |rt| {
+        let effect = rt.new_object(EFFECT);
+        let s = rt.string(&id);
+        rt.put_field(effect, "$id", s);
+        crate::neo::registry_holder(rt, "mob_effect", &id, effect)
+    }))
+}
+
+/// The id of an effect: a holder's (vanilla's, or a mod's `DeferredHolder`), or a registered one's.
+fn effect_id(rt: &Rt, v: V) -> Option<String> {
+    if let Some(id) = rt.str_of(rt.get_field(v, "$id")).filter(|s| !s.is_empty()) {
+        return Some(id.to_owned());
+    }
+    rt.registered_name(v, "mob_effect").map(str::to_owned)
+}
+
+/// The instance a `PossibleEffect` applies: the one it was given, else what its supplier makes.
+fn possible_instance(rt: &mut Rt, e: V) -> V {
+    let given = rt.get_field(e, "$instance");
+    if given.r() != 0 {
+        return given;
+    }
+    let supplier = rt.get_field(e, "effectSupplier");
+    if supplier.r() == 0 {
+        return V::NULL;
+    }
+    let made = rt.call_functional(SUPPLY, supplier, &[]);
+    rt.report_thrown("FoodProperties$PossibleEffect.effect");
+    made
+}
+
+/// A copy of the instance `from` (`new MobEffectInstance(other)`).
+fn copy_instance(rt: &mut Rt, from: V) -> V {
+    let e = rt.new_object(INSTANCE);
+    for f in ["$effect", "$duration", "$amplifier", "$ambient", "$visible", "$showIcon"] {
+        let v = rt.get_field(from, f);
+        rt.put_field(e, f, v);
+    }
+    e
+}
+
+/// `FoodProperties.Builder`, `PossibleEffect.effect()` and `MobEffectInstance`; None for anything else.
+pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let (owner, rest) = key.split_once('.')?;
+    let (name, desc) = rest.split_once('.')?;
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let set = |rt: &mut Rt, field: &'static str, v: V| {
+        rt.put_field(this, field, v);
+        this
+    };
+    Some(match (owner, name) {
+        (BUILDER, "<init>") => {
+            let list = jutil::new_list(rt, Vec::new());
+            rt.put_field(this, "$effects", list);
+            rt.put_field(this, "$eatSeconds", V::F(EAT_SECONDS));
+            V::Void
+        }
+        (BUILDER, "nutrition") => set(rt, "$nutrition", V::I(a(1).i())),
+        (BUILDER, "saturationModifier") => set(rt, "$saturationModifier", V::F(a(1).f())),
+        (BUILDER, "alwaysEdible") => set(rt, "$canAlwaysEat", V::I(1)),
+        (BUILDER, "fast") => set(rt, "$eatSeconds", V::F(FAST_SECONDS)),
+        // `effect(instance, probability)`, or NeoForge's `effect(supplier, probability)`: asked
+        // each time the food is eaten, so a mod's own effect may be registered after the food.
+        (BUILDER, "effect") => {
+            let e = rt.new_object(POSSIBLE);
+            let field = if desc.starts_with("(Lnet/minecraft/world/effect/MobEffectInstance;") { "$instance" } else { "effectSupplier" };
+            rt.put_field(e, field, a(1));
+            rt.put_field(e, "probability", V::F(a(2).f()));
+            let list = rt.get_field(this, "$effects");
+            api::call(rt, LIST_ADD, &[list, e]);
+            this
+        }
+        (BUILDER, "usingConvertsTo") => {
+            let item = api_common::item_like_name(rt, a(1));
+            let s = api_common::stack(rt, &item, 1);
+            set(rt, "$usingConvertsTo", s)
+        }
+        // The record, as vanilla's `build()` makes it: `FoodConstants.saturationByModifier`.
+        (BUILDER, "build") => {
+            let nutrition = rt.get_field(this, "$nutrition").i();
+            let modifier = rt.get_field(this, "$saturationModifier").f();
+            let seconds = match rt.get_field(this, "$eatSeconds") {
+                V::F(s) => s,
+                _ => EAT_SECONDS,
+            };
+            let converts = rt.get_field(this, "$usingConvertsTo");
+            let converts = api_common::optional(rt, converts);
+            let effects = jutil::elements(rt, rt.get_field(this, "$effects"));
+            let effects = jutil::new_list(rt, effects);
+            let f = rt.new_object(FOOD);
+            rt.put_field(f, "nutrition", V::I(nutrition));
+            rt.put_field(f, "saturation", V::F(nutrition as f32 * modifier * 2.0));
+            rt.put_field(f, "canAlwaysEat", V::I(rt.get_field(this, "$canAlwaysEat").i()));
+            rt.put_field(f, "eatSeconds", V::F(seconds));
+            rt.put_field(f, "usingConvertsTo", converts);
+            rt.put_field(f, "effects", effects);
+            f
+        }
+        (POSSIBLE, "effect") => {
+            let made = possible_instance(rt, this);
+            if made.r() == 0 {
+                return Some(V::NULL);
+            }
+            copy_instance(rt, made)
+        }
+        // `(effect[, duration[, amplifier[, ambient, visible[, showIcon[, hiddenEffect]]]]])`: an
+        // instance shows its icon when it shows its particles, unless told; or a copy of another.
+        (INSTANCE, "<init>") if desc.starts_with("(Lnet/minecraft/world/effect/MobEffectInstance;)") => {
+            let from = a(1);
+            for f in ["$effect", "$duration", "$amplifier", "$ambient", "$visible", "$showIcon"] {
+                let v = rt.get_field(from, f);
+                rt.put_field(this, f, v);
+            }
+            V::Void
+        }
+        (INSTANCE, "<init>") => {
+            let n = crate::jlang::kinds(desc).len();
+            let visible = if n >= 5 { a(5).i() } else { 1 };
+            rt.put_field(this, "$effect", a(1));
+            rt.put_field(this, "$duration", V::I(if n >= 2 { a(2).i() } else { 0 }));
+            rt.put_field(this, "$amplifier", V::I(if n >= 3 { a(3).i() } else { 0 }));
+            rt.put_field(this, "$ambient", V::I(if n >= 4 { a(4).i() } else { 0 }));
+            rt.put_field(this, "$visible", V::I(visible));
+            rt.put_field(this, "$showIcon", V::I(if n >= 6 { a(6).i() } else { visible }));
+            V::Void
+        }
+        (INSTANCE, "getEffect") => rt.get_field(this, "$effect"),
+        (INSTANCE, "getDuration") => V::I(rt.get_field(this, "$duration").i()),
+        (INSTANCE, "getAmplifier") => V::I(rt.get_field(this, "$amplifier").i()),
+        (INSTANCE, "isAmbient") => V::I(rt.get_field(this, "$ambient").i()),
+        (INSTANCE, "isVisible") => V::I(rt.get_field(this, "$visible").i()),
+        (INSTANCE, "showIcon") => V::I(rt.get_field(this, "$showIcon").i()),
+        (INSTANCE, "isInfiniteDuration") => V::I((rt.get_field(this, "$duration").i() == -1) as i32),
+        (INSTANCE, "is") => {
+            let mine = effect_id(rt, rt.get_field(this, "$effect"));
+            V::I((mine.is_some() && mine == effect_id(rt, a(1))) as i32)
+        }
+        _ => return None,
+    })
+}
+
+/// A float as JSON writes it: Java's shortest form (`7.2000003`), `6.0` for a whole one.
+fn number(f: f32) -> String {
+    let s = format!("{f}");
+    if s.contains(['.', 'e', 'E']) || !f.is_finite() { s } else { format!("{s}.0") }
+}
+
+/// One effect as `MobEffectInstance.CODEC` writes it, as vanilla's items have them.
+fn effect_json(rt: &Rt, instance: V) -> Option<String> {
+    let id = effect_id(rt, rt.get_field(instance, "$effect"))?;
+    let mut parts = vec![format!("\"id\": \"{id}\"")];
+    let int = |f: &'static str| rt.get_field(instance, f).i();
+    if int("$duration") != 0 {
+        parts.push(format!("\"duration\": {}", int("$duration")));
+    }
+    if int("$amplifier") != 0 {
+        parts.push(format!("\"amplifier\": {}", int("$amplifier")));
+    }
+    if int("$ambient") != 0 {
+        parts.push("\"ambient\": true".into());
+    }
+    if int("$visible") == 0 {
+        parts.push("\"show_particles\": false".into());
+    }
+    parts.push(format!("\"show_icon\": {}", int("$showIcon") != 0));
+    Some(format!("{{{}}}", parts.join(", ")))
+}
+
+/// What a mod class of `item` answers to `Item`'s `nd`, when it overrides it.
+fn ask(rt: &mut Rt, item: V, key: &'static str, nd: &'static str, args: &[V]) -> Option<V> {
+    let class = rt.class_of(item);
+    if !rt.overrides.is_some_and(|o| o(class, nd)) {
+        return None;
+    }
+    let vc = rt.vcall?;
+    let mut all = vec![item];
+    all.extend_from_slice(args);
+    let r = vc(rt, key, nd, &all);
+    rt.report_thrown(nd);
+    Some(r)
+}
+
+/// What an edible item declares, in 26.3's components (`"key": value` JSON entries): `food`,
+/// `consumable` and, when eating leaves something, `use_remainder`. Empty for an item with no food.
+/// `item` is the item, `props` the `Item.Properties` it was made with.
+pub fn components(rt: &mut Rt, item: V, props: V) -> Vec<String> {
+    let food = if props.r() != 0 { rt.get_field(props, "$food") } else { V::NULL };
+    if food.r() == 0 {
+        return Vec::new();
+    }
+    let field = |rt: &Rt, n: &'static str| rt.get_field(food, n);
+    let mut f = format!("\"nutrition\": {}, \"saturation\": {}", field(rt, "nutrition").i(), number(field(rt, "saturation").f()));
+    if field(rt, "canAlwaysEat").i() != 0 {
+        f.push_str(", \"can_always_eat\": true");
+    }
+    let mut out = vec![format!("\"minecraft:food\": {{{f}}}")];
+
+    let name = rt.registered_name(item, "item").unwrap_or("minecraft:air").to_owned();
+    let stack = api_common::stack(rt, &name, 1);
+    let ticks = ask(rt, item, USE_DURATION_KEY, USE_DURATION, &[stack, V::NULL]).map(|v| v.i()).filter(|t| *t > 0);
+    let seconds = match ticks {
+        Some(t) => t as f32 / 20.0,
+        None => field(rt, "eatSeconds").f(),
+    };
+    // 26.3's names: 1.21.1's `SPEAR` (the trident's) is `trident`; NeoForge's `CUSTOM` has none.
+    let animation = match ask(rt, item, USE_ANIMATION_KEY, USE_ANIMATION, &[stack]).and_then(|v| rt.str_of(rt.get_field(v, "$name")).map(str::to_ascii_lowercase)) {
+        Some(a) if a == "spear" => "trident".to_owned(),
+        Some(a) if a == "custom" => "none".to_owned(),
+        Some(a) => a,
+        None => "eat".to_owned(),
+    };
+    // As `Consumables.defaultFood()` and `defaultDrink()`: a drink's sound, and no crumbs (1.21.1
+    // shows an item's particles only while it's eaten).
+    let drink = animation == "drink";
+    let sound = if drink { ask(rt, item, DRINKING_SOUND_KEY, DRINKING_SOUND, &[]) } else { ask(rt, item, EATING_SOUND_KEY, EATING_SOUND, &[]) };
+    let sound = sound.and_then(|s| crate::sounds::sound_id(rt, s));
+    let mut c = Vec::new();
+    if seconds != EAT_SECONDS {
+        c.push(format!("\"consume_seconds\": {}", number(seconds)));
+    }
+    if animation != "eat" {
+        c.push(format!("\"animation\": \"{animation}\""));
+    }
+    match sound {
+        Some(s) => c.push(format!("\"sound\": \"{s}\"")),
+        None if drink => c.push("\"sound\": \"minecraft:entity.generic.drink\"".into()),
+        None => {}
+    }
+    if animation != "eat" {
+        c.push("\"has_consume_particles\": false".into());
+    }
+    // Each effect rolls its own chance in 1.21.1: the sure ones apply together, the others alone.
+    let (mut sure, mut chance) = (Vec::new(), Vec::new());
+    for e in jutil::elements(rt, field(rt, "effects")) {
+        let p = rt.get_field(e, "probability").f();
+        let instance = possible_instance(rt, e);
+        let Some(json) = (instance.r() != 0).then(|| effect_json(rt, instance)).flatten() else { continue };
+        if p >= 1.0 { sure.push(json) } else { chance.push((json, p)) }
+    }
+    let mut applied = Vec::new();
+    if !sure.is_empty() {
+        applied.push(format!("{{\"type\": \"minecraft:apply_effects\", \"effects\": [{}]}}", sure.join(", ")));
+    }
+    for (json, p) in chance {
+        applied.push(format!("{{\"type\": \"minecraft:apply_effects\", \"effects\": [{json}], \"probability\": {}}}", number(p)));
+    }
+    if !applied.is_empty() {
+        c.push(format!("\"on_consume_effects\": [{}]", applied.join(", ")));
+    }
+    out.push(format!("\"minecraft:consumable\": {{{}}}", c.join(", ")));
+
+    let converts = rt.get_field(field(rt, "usingConvertsTo"), "value");
+    if converts.r() != 0 && !api_common::stack_empty(rt, converts) {
+        let rest = api_common::item_like_name(rt, rt.get_field(converts, "$item"));
+        out.push(format!("\"minecraft:use_remainder\": {{\"id\": \"{rest}\"}}"));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NEW_BUILDER: &str = "net/minecraft/world/food/FoodProperties$Builder.<init>.()V";
+    const NUTRITION: &str = "net/minecraft/world/food/FoodProperties$Builder.nutrition.(I)Lnet/minecraft/world/food/FoodProperties$Builder;";
+    const MODIFIER: &str = "net/minecraft/world/food/FoodProperties$Builder.saturationModifier.(F)Lnet/minecraft/world/food/FoodProperties$Builder;";
+    const ALWAYS: &str = "net/minecraft/world/food/FoodProperties$Builder.alwaysEdible.()Lnet/minecraft/world/food/FoodProperties$Builder;";
+    const EFFECT_OF: &str = "net/minecraft/world/food/FoodProperties$Builder.effect.(Lnet/minecraft/world/effect/MobEffectInstance;F)Lnet/minecraft/world/food/FoodProperties$Builder;";
+    const CONVERTS: &str = "net/minecraft/world/food/FoodProperties$Builder.usingConvertsTo.(Lnet/minecraft/world/level/ItemLike;)Lnet/minecraft/world/food/FoodProperties$Builder;";
+    const BUILD: &str = "net/minecraft/world/food/FoodProperties$Builder.build.()Lnet/minecraft/world/food/FoodProperties;";
+    const INSTANCE_6: &str = "net/minecraft/world/effect/MobEffectInstance.<init>.(Lnet/minecraft/core/Holder;IIZZZ)V";
+    const INSTANCE_3: &str = "net/minecraft/world/effect/MobEffectInstance.<init>.(Lnet/minecraft/core/Holder;II)V";
+
+    fn builder(rt: &mut Rt, nutrition: i32, modifier: f32) -> V {
+        let b = rt.new_object(BUILDER);
+        api::call(rt, NEW_BUILDER, &[b]);
+        api::call(rt, NUTRITION, &[b, V::I(nutrition)]);
+        api::call(rt, MODIFIER, &[b, V::F(modifier)]);
+        b
+    }
+
+    fn declared(rt: &mut Rt, food: V) -> serde_json::Value {
+        let props = rt.new_object(crate::blocks::ITEM_PROPERTIES);
+        rt.put_field(props, "$food", food);
+        let item = rt.new_object("net/minecraft/world/item/Item");
+        let json = format!("{{{}}}", components(rt, item, props).join(", "));
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// Vanilla's own foods, built as 1.21.1's `Foods` builds them, declare what 26.3's items.json
+    /// has for them: mushroom stew (6, 0.6; Java's float product 7.2000003, and a bowl back) and
+    /// the golden apple (4, 1.2, always edible; regeneration II for 5 s and absorption for 2 min).
+    #[test]
+    fn vanilla_foods_built_by_the_builder_declare_what_vanilla_items_have() {
+        let mut rt = Rt::new();
+        crate::install();
+        let stew = builder(&mut rt, 6, 0.6);
+        let bowl = crate::api_common::item(&mut rt, "minecraft:bowl");
+        api::call(&mut rt, CONVERTS, &[stew, bowl]);
+        let stew = api::call(&mut rt, BUILD, &[stew]);
+        assert_eq!(
+            declared(&mut rt, stew),
+            serde_json::json!({
+                "minecraft:consumable": {},
+                "minecraft:food": {"nutrition": 6, "saturation": 7.2000003},
+                "minecraft:use_remainder": {"id": "minecraft:bowl"}
+            })
+        );
+
+        let apple = builder(&mut rt, 4, 1.2);
+        api::call(&mut rt, ALWAYS, &[apple]);
+        for (field, duration, amplifier) in [("REGENERATION", 100, 1), ("ABSORPTION", 2400, 0)] {
+            let effect = api::get_static(&mut rt, Box::leak(format!("{EFFECTS}.{field}").into_boxed_str()));
+            let e = rt.new_object(INSTANCE);
+            api::call(&mut rt, INSTANCE_3, &[e, effect, V::I(duration), V::I(amplifier)]);
+            api::call(&mut rt, EFFECT_OF, &[apple, e, V::F(1.0)]);
+        }
+        let apple = api::call(&mut rt, BUILD, &[apple]);
+        assert_eq!(
+            declared(&mut rt, apple),
+            serde_json::json!({
+                "minecraft:consumable": {"on_consume_effects": [{"type": "minecraft:apply_effects", "effects": [
+                    {"amplifier": 1, "duration": 100, "id": "minecraft:regeneration", "show_icon": true},
+                    {"duration": 2400, "id": "minecraft:absorption", "show_icon": true}
+                ]}]},
+                "minecraft:food": {"can_always_eat": true, "nutrition": 4, "saturation": 9.6}
+            })
+        );
+    }
+
+    /// A chance effect keeps its own roll (raw chicken's hunger: 30 %), and an instance that hides
+    /// its particles and icon says so (Create's builder's tea: haste for 3 minutes, unseen).
+    #[test]
+    fn chance_effects_roll_alone_and_hidden_effects_stay_hidden() {
+        let mut rt = Rt::new();
+        crate::install();
+        let chicken = builder(&mut rt, 2, 0.3);
+        let hunger = api::get_static(&mut rt, "net/minecraft/world/effect/MobEffects.HUNGER");
+        let e = rt.new_object(INSTANCE);
+        api::call(&mut rt, INSTANCE_3, &[e, hunger, V::I(600), V::I(0)]);
+        api::call(&mut rt, EFFECT_OF, &[chicken, e, V::F(0.3)]);
+        let haste = api::get_static(&mut rt, "net/minecraft/world/effect/MobEffects.DIG_SPEED");
+        let h = rt.new_object(INSTANCE);
+        api::call(&mut rt, INSTANCE_6, &[h, haste, V::I(3600), V::I(0), V::I(0), V::I(0), V::I(0)]);
+        api::call(&mut rt, EFFECT_OF, &[chicken, h, V::F(1.0)]);
+        let food = api::call(&mut rt, BUILD, &[chicken]);
+        let declared = declared(&mut rt, food);
+        assert_eq!(
+            declared["minecraft:consumable"]["on_consume_effects"],
+            serde_json::json!([
+                {"type": "minecraft:apply_effects", "effects": [{"duration": 3600, "id": "minecraft:haste", "show_icon": false, "show_particles": false}]},
+                {"type": "minecraft:apply_effects", "effects": [{"duration": 600, "id": "minecraft:hunger", "show_icon": true}], "probability": 0.3}
+            ])
+        );
+        assert_eq!(declared["minecraft:food"], serde_json::json!({"nutrition": 2, "saturation": 1.2}));
+    }
+}

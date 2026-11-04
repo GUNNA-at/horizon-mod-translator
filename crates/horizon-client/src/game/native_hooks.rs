@@ -1762,6 +1762,23 @@ impl Game<'_> {
     ) {
         let _ = (pos, entity, tag);
     }
+    /// An update tag the server sent for the mod block entity at `pos`
+    /// reaching this client, when its `id` is yours: `tag` is this packet's,
+    /// `entity` what the client keeps of the block entity, `tag` merged into
+    /// its `nbt` already. Asked as each packet arrives
+    /// (`ClientPacketListener.handleBlockEntityData`, which has the block
+    /// entity load each one: `onDataPacket`, `handleUpdateTag`), in view or
+    /// not, so what a block entity does once with its data (particles,
+    /// sounds) is done once per packet; drawing
+    /// (`native_block_entity_submit`) sees the merged `nbt` later. API @API:block_entity_data@.
+    pub(super) fn native_block_entity_data(
+        &mut self,
+        pos: [i32; 3],
+        entity: &ModBlockEntity,
+        tag: &Compound,
+    ) {
+        let _ = (pos, entity, tag);
+    }
     /// A content mod's content as its files declare it, before its blocks
     /// one by one (`native_content_block`) and before the game builds its
     /// resources: a mod whose code registers its blocks and items declares

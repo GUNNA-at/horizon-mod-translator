@@ -1,0 +1,11 @@
+{
+  "hooks": [
+    {
+      "name": "block_entity_data",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_data",
+      "side": "client"
+    }
+  ],
+  "rust_summary": "each update tag the server sends for a mod block entity, as it reaches the client (`native_block_entity_data`).",
+  "doc_summary": "`native_block_entity_data(pos, entity, tag)` gets each update tag the server sends for a mod block entity as it reaches the client (vanilla's `handleBlockEntityData` has the block entity load each packet), with the client's copy (`entity.nbt`, the tag merged in): what a block entity does once with its data, such as particles, happens once per packet, in view or not. Bundles need \"hooks\": @API:block_entity_data@."
+}

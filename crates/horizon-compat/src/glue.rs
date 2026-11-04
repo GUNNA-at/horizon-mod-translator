@@ -268,7 +268,7 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
         let st = api::state(rt, state);
         let l = level(rt);
         let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
-        let player = rt.new_object("net/minecraft/server/level/ServerPlayer");
+        let player = crate::api_common::acting_player(rt);
         let hit = crate::api_common::hit(rt, pos, face);
         let mut took = None;
         if with_item {
@@ -311,6 +311,69 @@ pub fn use_item_on(rt: &mut Rt, host: &mut dyn Host, click: &Placement) -> bool 
         let thrown = rt.thrown.is_some();
         rt.report_thrown("useOn");
         !thrown && rt.str_of(r).is_some_and(|name| name != "PASS")
+    })
+}
+
+const USE: &str = "use.(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResultHolder;";
+const USE_KEY: &str = "net/minecraft/world/item/Item.use.(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResultHolder;";
+
+/// `native_use_item` (server): a right click with one of the mod's items in the main hand, in the
+/// air or on a block that let it through: its class's own `Item.use` (Create's goggles, filters,
+/// experience nuggets). True when the use takes the click (its result consumes the action, so the
+/// game's own use of the item doesn't run); the hand then holds the stack the use answered, unless
+/// the use set the hand itself (`setItemInHand`).
+pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str) -> bool {
+    rt.safe_point();
+    let Some(&it) = rt.registered.get(&("item".to_owned(), item.to_owned())) else { return false };
+    let class = rt.class_of(it);
+    if !rt.overrides.is_some_and(|o| o(class, USE)) {
+        return false;
+    }
+    rt.with_host(host, |rt| {
+        let Some(vc) = rt.vcall else { return false };
+        let before = rt.host().and_then(|h| h.player_held());
+        let l = level(rt);
+        let player = crate::api_common::acting_player(rt);
+        let hand = api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
+        let r = vc(rt, USE_KEY, USE, &[it, l, player, hand]);
+        let thrown = rt.thrown.is_some();
+        rt.report_thrown("use");
+        if thrown || r.r() == 0 {
+            return false;
+        }
+        let result = rt.get_field(r, "$result");
+        let took = rt.str_of(result).is_some_and(|n| matches!(n, "SUCCESS" | "CONSUME" | "SUCCESS_NO_ITEM_USED" | "CONSUME_PARTIAL"));
+        if took && rt.host().and_then(|h| h.player_held()) == before {
+            // The stack it answered, shrunk or swapped in place, is what the hand holds now.
+            let stack = rt.get_field(r, "$object");
+            let answered = (!crate::api_common::stack_empty(rt, stack)).then(|| {
+                let id = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
+                (id, rt.get_field(stack, "$count").i().max(0) as u32)
+            });
+            if answered != before
+                && let Some(h) = rt.host_mut()
+            {
+                match (&before, &answered) {
+                    // The same item, more or fewer: only the difference moves, so its data stays.
+                    (Some((id, n)), Some((same, m))) if id == same => {
+                        if m < n {
+                            h.take_player_items(id, n - m);
+                        } else {
+                            h.give_player_items(id, m - n);
+                        }
+                    }
+                    _ => {
+                        if let Some((id, n)) = &before {
+                            h.take_player_items(id, *n);
+                        }
+                        if let Some((id, n)) = &answered {
+                            h.give_player_items(id, *n);
+                        }
+                    }
+                }
+            }
+        }
+        took
     })
 }
 
@@ -548,18 +611,52 @@ fn nbt_brief(nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Strin
 }
 
 /// The client's copy of the mod block entity at `pos`: made the first time, and loaded from `nbt`
-/// (the update tag the server sent) whenever that changes, as `handleUpdateTag` does in vanilla.
+/// (what the client keeps of the update tags the server sent) whenever that changes and no packet
+/// loaded it as it came ([`block_entity_data`]).
 fn client_block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Option<V> {
-    let (block, _) = crate::host::split_state(state);
     let synced = crate::nbt::hash(nbt) as i64;
+    let (be, _) = client_block_entity_object(rt, pos, state)?;
+    if rt.get_field(be, "$synced").j() == synced && rt.get_field(be, "$loaded").i() != 0 {
+        return Some(be);
+    }
+    load_update_tag(rt, be, pos, state, nbt);
+    rt.put_field(be, "$synced", V::J(synced));
+    rt.put_field(be, "$loaded", V::I(1));
+    Some(be)
+}
+
+/// `native_block_entity_data` (client): the client's copy of the block entity at `pos` loads the
+/// update tag the server just sent (`packet`) as it arrives, as vanilla's `handleBlockEntityData`
+/// does each one, so what the block entity does with it once (Create's press: the particles of what
+/// it pressed) is done once per packet, also out of view. `merged` is what the client keeps of the
+/// block entity now, so drawing doesn't load it again; a copy made just now loads that instead.
+pub fn block_entity_data(
+    rt: &mut Rt,
+    host: &mut dyn Host,
+    pos: [i32; 3],
+    state: &str,
+    packet: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
+    merged: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
+) {
+    rt.safe_point();
+    crate::neo::fire_client_setup(rt);
+    if mod_block(rt, state).is_none() {
+        return;
+    }
+    rt.with_host(host, |rt| {
+        let Some((be, fresh)) = client_block_entity_object(rt, pos, state) else { return };
+        load_update_tag(rt, be, pos, state, if fresh { merged } else { packet });
+        rt.put_field(be, "$synced", V::J(crate::nbt::hash(merged) as i64));
+        rt.put_field(be, "$loaded", V::I(1));
+    });
+}
+
+/// The client's copy of the mod block entity at `pos`, and whether it was made just now.
+fn client_block_entity_object(rt: &mut Rt, pos: [i32; 3], state: &str) -> Option<(V, bool)> {
+    let (block, _) = crate::host::split_state(state);
     let vc = rt.vcall?;
-    let be = match rt.block_entities.get(&pos).copied() {
-        Some(be) if rt.block_entity_meta.get(&pos).is_some_and(|(b, _)| b == block) => {
-            if rt.get_field(be, "$synced").j() == synced && rt.get_field(be, "$loaded").i() != 0 {
-                return Some(be);
-            }
-            be
-        }
+    Some(match rt.block_entities.get(&pos).copied() {
+        Some(be) if rt.block_entity_meta.get(&pos).is_some_and(|(b, _)| b == block) => (be, false),
         _ => {
             let (b, _) = mod_block(rt, state)?;
             let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
@@ -573,9 +670,15 @@ fn client_block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::colle
             rt.put_field(be, "level", l);
             rt.block_entities.insert(pos, be);
             rt.block_entity_meta.insert(pos, (block.to_owned(), true));
-            be
+            (be, true)
         }
-    };
+    })
+}
+
+/// The client's block entity `be` loads `nbt`, an update tag (`handleUpdateTag`).
+fn load_update_tag(rt: &mut Rt, be: V, pos: [i32; 3], state: &str, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) {
+    let (block, _) = crate::host::split_state(state);
+    let Some(vc) = rt.vcall else { return };
     // An empty update tag isn't sent (vanilla's chunk data carries none), so nothing is loaded.
     if !nbt.is_empty() {
         let brief = nbt_brief(nbt);
@@ -585,9 +688,6 @@ fn client_block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::colle
         vc(rt, HANDLE_UPDATE_TAG_KEY, HANDLE_UPDATE_TAG, &[be, tag, provider]);
         rt.report_thrown("handleUpdateTag");
     }
-    rt.put_field(be, "$synced", V::J(synced));
-    rt.put_field(be, "$loaded", V::I(1));
-    Some(be)
 }
 
 /// `native_block_entity_submit` (client): draws the mod block entity at `pos` with the renderer its

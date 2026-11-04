@@ -692,7 +692,7 @@ fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
     }
 }
 
-/// `Item.Properties`: stack size, durability, rarity.
+/// `Item.Properties`: stack size, durability, rarity, food.
 fn item_properties(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -701,6 +701,7 @@ fn item_properties(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "stacksTo" => "$stacksTo",
         "durability" => "$durability",
         "rarity" => "$rarity",
+        "food" => "$food",
         "fireResistant" => {
             rt.put_field(this, "$fireResistant", V::I(1));
             return Some(this);
@@ -1179,8 +1180,13 @@ pub fn item_declarations(rt: &mut Rt) -> Vec<(String, String)> {
                     fields.push(format!("\"rarity\": \"{r}\""));
                 }
             }
+            let mut components = Vec::new();
             if durability > 0 {
-                fields.push(format!("\"components\": {{\"minecraft:max_damage\": {durability}, \"minecraft:damage\": 0}}"));
+                components.push(format!("\"minecraft:max_damage\": {durability}, \"minecraft:damage\": 0"));
+            }
+            components.extend(crate::food::components(rt, i, props));
+            if !components.is_empty() {
+                fields.push(format!("\"components\": {{{}}}", components.join(", ")));
             }
             (name, format!("{{{}}}", fields.join(", ")))
         })

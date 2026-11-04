@@ -44,7 +44,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 }
 
 /// The id a `SoundEvent`, or a holder of one, plays.
-fn sound_id(rt: &Rt, v: V) -> Option<String> {
+pub(crate) fn sound_id(rt: &Rt, v: V) -> Option<String> {
     let held = rt.get_field(v, "$value");
     let event = if rt.class_of(v) != SOUND_EVENT && held.r() != 0 { held } else { v };
     if let Some(id) = rt.str_of(rt.get_field(event, "$location")) {

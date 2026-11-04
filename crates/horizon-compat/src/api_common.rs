@@ -948,6 +948,30 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (o, "addItem") if is_player(o) => V::I(give_player(rt, a(1)) as i32),
         // An item's `useOn` that reaches vanilla's `Item`: nothing happens.
         ("net/minecraft/world/item/Item", "useOn") => result(rt, "net/minecraft/world/InteractionResult", "PASS"),
+        // `Item.use` reaching vanilla's: the game's own use of the stack goes on (eating a food,
+        // placing a block item's block).
+        ("net/minecraft/world/item/Item" | "net/minecraft/world/item/BlockItem", "use") => {
+            let stack = call(rt, "net/minecraft/world/entity/player/Player", "getItemInHand", "(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;", &[a(2), a(3)]).unwrap_or(V::NULL);
+            result_holder(rt, "PASS", stack)
+        }
+        // `InteractionResultHolder`: what `Item.use` answers, a result and the stack the hand keeps.
+        (RESULT_HOLDER, "<init>") => {
+            rt.put_field(a(0), "$result", a(1));
+            rt.put_field(a(0), "$object", a(2));
+            V::Void
+        }
+        (RESULT_HOLDER, "success" | "consume" | "pass" | "fail") => {
+            let r = match name {
+                "success" => "SUCCESS",
+                "consume" => "CONSUME",
+                "pass" => "PASS",
+                _ => "FAIL",
+            };
+            result_holder(rt, r, a(0))
+        }
+        (RESULT_HOLDER, "sidedSuccess") => result_holder(rt, if a(1).i() != 0 { "SUCCESS" } else { "CONSUME" }, a(0)),
+        (RESULT_HOLDER, "getResult") => rt.get_field(a(0), "$result"),
+        (RESULT_HOLDER, "getObject") => rt.get_field(a(0), "$object"),
         ("net/minecraft/world/InteractionResult" | "net/minecraft/world/ItemInteractionResult", "sidedSuccess") => {
             let client = a(0).i() != 0;
             result(rt, owner, if client { "SUCCESS" } else { "CONSUME" })
@@ -1051,6 +1075,49 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             directions(rt, &ordered_by_nearest(yaw, pitch))
         }
         ("net/minecraft/core/Direction", "fromYRot") => direction(rt, horizontal_facing(a(0).d() as f32)),
+        // The acting player's place, when the game told it (`acting_player`).
+        (o, n) if is_player(o)
+            && rt.class_of(a(0)) == SERVER_PLAYER
+            && matches!(rt.get_field(a(0), "$x"), V::D(_))
+            && matches!(n, "getX" | "getY" | "getZ" | "position" | "getPosition" | "blockPosition" | "getEyeY" | "getEyePosition" | "getLookAngle" | "getViewVector") =>
+        {
+            let p = [rt.get_field(a(0), "$x").d(), rt.get_field(a(0), "$y").d(), rt.get_field(a(0), "$z").d()];
+            let eye = p[1] + if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 };
+            match n {
+                "getX" => V::D(p[0]),
+                "getY" => V::D(p[1]),
+                "getZ" => V::D(p[2]),
+                "position" | "getPosition" => vec3(rt, p[0], p[1], p[2]),
+                "blockPosition" => crate::api::block_pos(rt, p[0].floor() as i64, p[1].floor() as i64, p[2].floor() as i64),
+                "getEyeY" => V::D(eye),
+                "getEyePosition" => vec3(rt, p[0], eye, p[2]),
+                // `Entity.calculateViewVector(xRot, yRot)`, with `Mth`'s table.
+                _ => {
+                    let (yaw, pitch) = (rt.get_field(a(0), "$yaw").f(), rt.get_field(a(0), "$pitch").f());
+                    let (x_rot, y_rot) = (V::F(pitch * (std::f32::consts::PI / 180.0)), V::F(-yaw * (std::f32::consts::PI / 180.0)));
+                    let (c1, s1, c, s) = (mth_cos(y_rot), mth_sin(y_rot), mth_cos(x_rot), mth_sin(x_rot));
+                    vec3(rt, f64::from(s1 * c), f64::from(-s), f64::from(c1 * c))
+                }
+            }
+        }
+        // Item cooldowns aren't kept for a mod's uses yet: none is ever cooling down.
+        (o, "getCooldowns") if is_player(o) => rt.intern("compat:cooldowns".into(), |rt| rt.new_object("net/minecraft/world/item/ItemCooldowns")),
+        ("net/minecraft/world/item/ItemCooldowns", "addCooldown" | "removeCooldown") => V::Void,
+        ("net/minecraft/world/item/ItemCooldowns", "isOnCooldown") => V::I(0),
+        ("net/minecraft/world/item/ItemCooldowns", "getCooldownPercent") => V::F(0.0),
+        // What the acting player may do: in creative they build at once, may fly and take no harm.
+        (o, "getAbilities") if is_player(o) => {
+            let creative = rt.host().is_some_and(|h| h.player_creative());
+            let abilities = rt.new_object("net/minecraft/world/entity/player/Abilities");
+            for f in ["instabuild", "mayfly", "invulnerable"] {
+                rt.put_field(abilities, f, V::I(creative as i32));
+            }
+            rt.put_field(abilities, "mayBuild", V::I(1));
+            rt.put_field(abilities, "flying", V::I(0));
+            rt.put_field(abilities, "flyingSpeed", V::F(0.05));
+            rt.put_field(abilities, "walkingSpeed", V::F(0.1));
+            abilities
+        }
         // The acting player's look (an object `glue` made carries it; others look south, level).
         (o, n) if is_player(o) && matches!(n, "getYRot" | "getXRot" | "getViewYRot" | "getViewXRot" | "getYHeadRot" | "getVisualRotationYInDegrees" | "getDirection" | "getMotionDirection") => {
             let (yaw, pitch) = (rt.get_field(a(0), "$yaw").f(), rt.get_field(a(0), "$pitch").f());
@@ -2119,10 +2186,36 @@ pub fn use_on_context(rt: &mut Rt, p: &crate::glue::Placement) -> V {
     context(rt, &clicked, USE_ON_CONTEXT)
 }
 
+/// The player a server hook acts for (`ServerPlayer`), where the game says they stand and look
+/// (`Host::player_place`), so their position, eyes and look answer.
+pub(crate) fn acting_player(rt: &mut Rt) -> V {
+    let player = rt.new_object(SERVER_PLAYER);
+    if let Some(([x, y, z], yaw, pitch)) = rt.host().and_then(|h| h.player_place()) {
+        rt.put_field(player, "$x", V::D(x));
+        rt.put_field(player, "$y", V::D(y));
+        rt.put_field(player, "$z", V::D(z));
+        rt.put_field(player, "$yaw", V::F(yaw));
+        rt.put_field(player, "$pitch", V::F(pitch));
+    }
+    player
+}
+
+const SERVER_PLAYER: &str = "net/minecraft/server/level/ServerPlayer";
+const RESULT_HOLDER: &str = "net/minecraft/world/InteractionResultHolder";
+
+/// An `InteractionResultHolder` of the result named `result` and `object`.
+fn result_holder(rt: &mut Rt, result: &str, object: V) -> V {
+    let h = rt.new_object(RESULT_HOLDER);
+    let r = self::result(rt, "net/minecraft/world/InteractionResult", result);
+    rt.put_field(h, "$result", r);
+    rt.put_field(h, "$object", object);
+    h
+}
+
 fn context(rt: &mut Rt, p: &crate::glue::Placement, class: &'static str) -> V {
     let ctx = rt.new_object(class);
     let level = crate::glue::level(rt);
-    let player = rt.new_object("net/minecraft/server/level/ServerPlayer");
+    let player = acting_player(rt);
     rt.put_field(player, "$yaw", V::F(p.yaw));
     rt.put_field(player, "$pitch", V::F(p.pitch));
     let hand = get_static(rt, "net/minecraft/world/InteractionHand", "MAIN_HAND").unwrap_or(V::NULL);

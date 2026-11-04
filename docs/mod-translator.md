@@ -923,6 +923,52 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     up 0.125 and out up to 0.125 (the press's `getParticleAmount` is 15). Create's own particle
     classes (air flow, steam jets, rotation indicators) aren't drawn yet: their options carry no
     registered type.
+  - [x] 2026-11-04 In game (`scratchpad/fxgame.sh`, `foodgame.sh`: offscreen, on a platform in the
+    sky): the press over a depot presses the player's iron ingot into a sheet, and the window
+    hears Create's own sounds: `create:depot_slide`, `create:mechanical_press_activation` and its
+    `_compounded_1`, the bearing's `create:contraption_assemble` (and `_compounded_1`). The
+    press's item particles first weren't made: a client loaded a mod block entity's update tags
+    only when drawing it, from what it keeps of all of them, and the press sends the pressed items
+    in one tag and clears them in the next, so two packets between frames left none. Now the
+    client has the block entity load each packet's own tag as it arrives (hook
+    `native_block_entity_data`, as vanilla's `handleBlockEntityData`), in view or not; drawing
+    loads only what no packet did. Measured after: the window makes 15 `item` particles as the
+    press comes down (`status.particles`), as the harness said.
+  - [x] 2026-11-04 Food (`horizon-compat/src/food.rs`, tests `food::tests`). `FoodProperties.Builder`
+    (`nutrition`, `saturationModifier`, `alwaysEdible`, `fast`, `effect` with an instance or
+    NeoForge's supplier, `usingConvertsTo`, `build` as vanilla's: saturation is nutrition ×
+    modifier × 2 in floats), `Item.Properties.food`, `MobEffectInstance` (its constructors,
+    copies, getters), `MobEffects` (each field's id from the 1.21.1 jar's static initialiser,
+    `tools/vanilla_mob_effects.py`: 39, `DIG_SPEED` is `haste`) and `UseAnim`'s constants. An
+    edible item declares 26.3's three components as vanilla's own items have them: `food`,
+    `consumable` (seconds, animation, sound, particles, `apply_effects`: the sure effects
+    together, each chance one alone, as 1.21.1 rolls them) and `use_remainder`. Its class's
+    overrides of `getUseDuration`, `getUseAnimation` (1.21.1's `SPEAR` is 26.3's `trident`),
+    `getEatingSound`/`getDrinkingSound` are asked once. Checked against items.json: the builder
+    makes mushroom stew (7.2000003, a bowl back), the golden apple and raw chicken (hunger at
+    30 %) as vanilla declares them. Create's foods (harness `DECLARE`): bar of chocolate
+    6/3.6000001, sweet roll 6/9.6, chocolate glazed berries 7/11.2, honeyed apple 8/12.8,
+    builder's tea 1/1.2 always edible, drunk in 2.1 s (its 42 ticks), `drink`, the generic drink
+    sound, no crumbs, haste for 3 minutes without particles or icon. In game: a hungry survival
+    player (food 6) eats a bar of chocolate (food 12, saturation 3.6000001), then drinks
+    builder's tea (food 13, saturation 4.8, haste with 3571 ticks left). Gap: the tea's glass
+    bottle comes from its `finishUsingItem` override, which nothing runs yet (the game's
+    `living_entity_use_item_finish` hook can).
+  - [x] 2026-11-04 A mod item's own `use` (hook `native_use_item`, `glue::use_item`): a right
+    click in the air (or on a block that let it through) runs the item class's `Item.use`; a
+    result that consumes the action takes the click, and the hand holds the stack it answered
+    (only the difference of the same item moves, so its data stays). `InteractionResultHolder`,
+    `Player.getAbilities` (creative builds at once), cooldowns (none kept yet), and the acting
+    player's place: the server hooks for a player's click share one host
+    (`bundle::player_host`), which now says where that player stands and looks
+    (`Host::player_place`, from `native_acting_player`), so `getX`, `position`, `blockPosition`,
+    `getEyePosition`, `getLookAngle` (vanilla's `calculateViewVector` with `Mth`'s table) answer.
+    Harness `USE=1` over Create's 18 items with a `use` (survival, 3 in hand): the experience
+    nugget uses the whole stack (orbs not made yet: `ExperienceOrb`, `addFreshEntity`), filters
+    and the schedule take the click (no menu yet: `Player.openMenu`), the wand of symmetry and the
+    clipboard take it with nothing unmapped; goggles want `Item.swapWithEquipmentSlot`, the
+    sandpaper `getPlayerPOVHitResult`, the potato cannon and worldshaper `startUsingItem` (use
+    over time). In-game check pending.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

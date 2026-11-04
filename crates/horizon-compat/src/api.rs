@@ -409,6 +409,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         _ => match mutable_pos(rt, key, args)
             .or_else(|| crate::sounds::call(rt, key, args))
             .or_else(|| crate::particles::call(rt, key, args))
+            .or_else(|| crate::food::call(rt, key, args))
             .or_else(|| crate::network::call(rt, key, args))
             .or_else(|| crate::fluids::call(rt, key, args))
             .or_else(|| crate::tanks::call_key(rt, key, args))
@@ -1081,6 +1082,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::capabilities::get_static(rt, o, f))
             .or_else(|| crate::sounds::get_static(rt, o, f))
             .or_else(|| crate::particles::get_static(rt, o, f))
+            .or_else(|| crate::food::get_static(rt, o, f))
     {
         return v;
     }
