@@ -7,6 +7,7 @@
 use crate::{
     class::{ClassFile, Const, Member},
     insn::{self, Insn, Operand},
+    weave::{self, At, Kind, Weave},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -163,6 +164,11 @@ pub struct Program<'a> {
     pub unsupported: BTreeMap<String, usize>,
     /// Lambda implementations seen: key → (handle kind, member).
     lambdas: BTreeMap<String, (u8, Member)>,
+    /// What wrapping handlers' `Operation`s run (`@WrapOperation`, `@WrapMethod`): functions the
+    /// codegen writes beside the method, by lambda key, with their names.
+    operations: BTreeMap<String, String>,
+    /// Those functions' code, written out with the method's part.
+    synthetic: Vec<String>,
     /// `META-INF/services`: interface → implementations (internal names), for `ServiceLoader`.
     pub services: BTreeMap<String, Vec<String>>,
     /// Each mod class's id (1.., in name order): objects carry it, and virtual calls jump on it.
@@ -182,15 +188,113 @@ pub struct Program<'a> {
     /// Methods (`name.desc`) that ask who called them (`StackWalker.getCallerClass`): calls to
     /// them record the calling class first. Everything else keeps no call stack.
     caller_sensitive: BTreeSet<String>,
+    /// Mixins whose targets are among these classes, woven into them ([`crate::weave`]).
+    weave: weave::Plan,
+    /// Each such mixin's target (its first, for a mixin of several).
+    mixin_of: BTreeMap<String, String>,
+    /// The method being written, for weaving.
+    cur: Option<Cur>,
+}
+
+/// The method [`Program::method`] is writing, as weaving needs it.
+#[derive(Default)]
+struct Cur {
+    class: String,
+    fn_name: String,
+    name: String,
+    desc: String,
+    is_static: bool,
+    /// The mixins' handlers woven into it.
+    weaves: Vec<Weave>,
+    /// Weaves (indices into `weaves`) at each call instruction, by its offset.
+    at_calls: BTreeMap<usize, Vec<usize>>,
+    /// The offset of its last return instruction (`@At("TAIL")`).
+    tail: usize,
+    /// Whether a constructor's call of its superclass's has been written.
+    super_done: bool,
+}
+
+/// A call with the weaves at it ([`Program::call_weaves`]).
+#[derive(Default)]
+struct Woven {
+    before: String,
+    call: String,
+    modify: String,
+    after: String,
+    /// Whether `before` changes the call's arguments.
+    mutable: bool,
+}
+
+/// An `Operation`'s arguments (an `Object[]`, `arr`) as the code it runs takes them: each of kind
+/// `kinds[i]`, a primitive out of its box.
+fn unboxed_items(kinds: &[char]) -> String {
+    kinds
+        .iter()
+        .enumerate()
+        .map(|(i, k)| match k {
+            'L' => format!("rt.array_get(arr, {i})"),
+            _ => format!("{{ let v = rt.array_get(arr, {i}); match v {{ V::R(r) if r != 0 => rt.get_field(v, \"value\"), v => v }} }}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What an `Operation` hands back for a value `r` of kind `k`: a primitive boxed, nothing for void.
+fn boxed(k: char) -> String {
+    let class = match k {
+        'V' => return "V::NULL".into(),
+        'Z' => "java/lang/Boolean",
+        'B' => "java/lang/Byte",
+        'C' => "java/lang/Character",
+        'S' => "java/lang/Short",
+        'I' => "java/lang/Integer",
+        'J' => "java/lang/Long",
+        'F' => "java/lang/Float",
+        'D' => "java/lang/Double",
+        _ => return "r".into(),
+    };
+    format!("{{ let b = rt.new_object({class:?}); rt.put_field(b, \"value\", r); b }}")
+}
+
+/// The member a call or field instruction names.
+fn insn_member(c: &ClassFile, i: &Insn) -> Option<Member> {
+    let idx = match &i.arg {
+        Operand::Int(v) => *v,
+        Operand::IndexCount(v, _) => *v as i32,
+        _ => return None,
+    };
+    c.member(idx as u16)
+}
+
+/// Whether a mixin's method only stands for its target's (`@Shadow`).
+fn is_shadow(m: &crate::class::Method) -> bool {
+    m.annotations.iter().any(|a| a.ty == "Lorg/spongepowered/asm/mixin/Shadow;")
+}
+
+/// The kind letter of what a descriptor returns (`V`, `I`..., `L` for any reference).
+fn return_kind(desc: &str) -> char {
+    match desc.rsplit(')').next().and_then(|r| r.chars().next()) {
+        Some('[') | Some('L') | None => 'L',
+        Some(k) => k,
+    }
 }
 
 impl<'a> Program<'a> {
     pub fn new(classes: &'a [ClassFile]) -> Program<'a> {
+        let weave = weave::plan(classes);
+        let mut mixin_of = BTreeMap::new();
+        for (target, mixins) in &weave.mixins {
+            for m in mixins {
+                mixin_of.entry(m.clone()).or_insert_with(|| target.clone());
+            }
+        }
         Program {
             classes: classes.iter().map(|c| (c.name.as_str(), c)).collect(),
             keys: BTreeSet::new(),
-            unsupported: BTreeMap::new(),
+            unsupported: weave.unsupported.clone(),
             lambdas: BTreeMap::new(),
+            operations: BTreeMap::new(),
+            synthetic: Vec::new(),
             services: BTreeMap::new(),
             class_ids: {
                 let mut names: Vec<&str> = classes.iter().map(|c| c.name.as_str()).collect();
@@ -220,7 +324,55 @@ impl<'a> Program<'a> {
                 })
                 .map(|(_, m)| format!("{}.{}", m.name, m.desc))
                 .collect(),
+            weave,
+            mixin_of,
+            cur: None,
         }
+    }
+
+    /// The mixins woven into `class`.
+    fn mixins_of(&self, class: &str) -> &[String] {
+        self.weave.mixins.get(class).map_or(&[], Vec::as_slice)
+    }
+
+    /// The mixin whose method `name desc` joins `target` (one it adds, or an `@Overwrite`): a method
+    /// with code that doesn't only stand for the target's own (`@Shadow`).
+    fn mixin_method(&self, target: &str, name: &str, desc: &str) -> Option<String> {
+        if name.starts_with('<') {
+            return None;
+        }
+        self.mixins_of(target)
+            .iter()
+            .find(|m| {
+                self.classes
+                    .get(m.as_str())
+                    .is_some_and(|k| k.methods.iter().any(|x| x.name == name && x.desc == desc && x.code.is_some() && !is_shadow(x)))
+            })
+            .cloned()
+    }
+
+    /// A class's interfaces, with those its mixins add.
+    fn interfaces_of(&self, k: &ClassFile) -> Vec<String> {
+        let mut out = k.interfaces.clone();
+        for m in self.mixins_of(&k.name) {
+            for i in self.classes.get(m.as_str()).map(|mk| mk.interfaces.as_slice()).unwrap_or_default() {
+                if !out.contains(i) {
+                    out.push(i.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// A call through a mixin class reaches its target, as Mixin merges the class into it: its
+    /// `@Shadow`s and what the target inherits. The mixin's own methods keep their owner.
+    fn through_mixin(&self, m: Member) -> Member {
+        let Some(target) = self.mixin_of.get(&m.owner) else { return m };
+        let own = self
+            .classes
+            .get(m.owner.as_str())
+            .is_some_and(|k| k.methods.iter().any(|x| x.name == m.name && x.desc == m.desc && x.code.is_some() && !is_shadow(x)));
+        if own { m } else { Member { owner: target.clone(), name: m.name, desc: m.desc } }
     }
 
     /// The `@Mod` classes FML constructs, each with the constructor it would pick (the one taking
@@ -299,6 +451,10 @@ impl<'a> Program<'a> {
         let mut chain = Vec::new();
         let mut c = Some(*start);
         while let Some(k) = c {
+            // What a mixin adds to the class, or overwrites in it, is the class's own.
+            if let Some(m) = self.mixin_method(&k.name, name, desc) {
+                return Some(m);
+            }
             if k.methods.iter().any(|m| m.name == name && m.desc == desc && m.code.is_some()) {
                 return Some(k.name.clone());
             }
@@ -309,17 +465,17 @@ impl<'a> Program<'a> {
             return None;
         }
         // Superinterfaces, breadth first: an inherited default method (never a static or private one).
-        let mut queue: std::collections::VecDeque<&str> = chain.iter().flat_map(|k| k.interfaces.iter().map(String::as_str)).collect();
+        let mut queue: std::collections::VecDeque<String> = chain.iter().flat_map(|k| self.interfaces_of(k)).collect();
         let mut seen = BTreeSet::new();
         while let Some(i) = queue.pop_front() {
-            if !seen.insert(i) {
+            if !seen.insert(i.clone()) {
                 continue;
             }
-            let Some(k) = self.classes.get(i) else { continue };
+            let Some(k) = self.classes.get(i.as_str()) else { continue };
             if k.methods.iter().any(|m| m.name == name && m.desc == desc && m.code.is_some() && m.access & 0x000a == 0) {
                 return Some(k.name.clone());
             }
-            queue.extend(k.interfaces.iter().map(String::as_str));
+            queue.extend(self.interfaces_of(k));
         }
         None
     }
@@ -328,6 +484,9 @@ impl<'a> Program<'a> {
     /// a class's first superclass outside the mod, or a mod interface's only API superinterface.
     /// None when `owner` is not the mod's (the key is already the API's) or it is ambiguous.
     fn api_owner(&self, owner: &str) -> Option<String> {
+        if let Some(target) = self.mixin_of.get(owner) {
+            return self.api_owner(target);
+        }
         let start = self.classes.get(owner)?;
         if start.access & 0x0200 == 0 {
             let mut k = *start;
@@ -379,6 +538,9 @@ impl<'a> Program<'a> {
                 for m in &c.methods {
                     if let Some(code) = &m.code {
                         part.push_str(&self.method(c, &m.name, &m.desc, m.access & 0x0008 != 0, code));
+                        for f in std::mem::take(&mut self.synthetic) {
+                            part.push_str(&f);
+                        }
                     }
                 }
             }
@@ -405,8 +567,9 @@ impl<'a> Program<'a> {
             if let Some(sup) = &c.superclass {
                 let _ = writeln!(out, "    rt.supers.insert({:?}, {sup:?});", c.name);
             }
-            if !c.interfaces.is_empty() {
-                let _ = writeln!(out, "    rt.interfaces.insert({:?}, &{:?});", c.name, c.interfaces);
+            let interfaces = self.interfaces_of(c);
+            if !interfaces.is_empty() {
+                let _ = writeln!(out, "    rt.interfaces.insert({:?}, &{:?});", c.name, interfaces);
             }
         }
         // `@SubscribeEvent` methods by class: what `bus.register(...)` and `@EventBusSubscriber` listen with.
@@ -540,6 +703,9 @@ impl<'a> Program<'a> {
                 if let Some(code) = &m.code {
                     let body = self.method(c, &m.name, &m.desc, m.access & 0x0008 != 0, code);
                     out.push_str(&body);
+                    for f in std::mem::take(&mut self.synthetic) {
+                        out.push_str(&f);
+                    }
                 }
             }
         }
@@ -688,6 +854,11 @@ impl<'a> Program<'a> {
             };
             rows.push((lid, format!("        {lid} => {call}, // {key}")));
         }
+        for (key, f) in &self.operations {
+            if let Some(&lid) = self.lambda_ids.get(key) {
+                rows.push((lid, format!("        {lid} => {f}(rt, &full), // {key}")));
+            }
+        }
         rows.sort();
         for (_, row) in rows {
             let _ = writeln!(s, "{row}");
@@ -764,11 +935,15 @@ impl<'a> Program<'a> {
     fn method(&mut self, c: &ClassFile, name: &str, desc: &str, is_static: bool, code: &crate::class::Code) -> String {
         let mut s = String::new();
         let f = fn_name(&c.name, name, desc);
+        let key = format!("{}.{}.{}", c.name, name, desc);
+        // A `@WrapMethod` handler takes the method's name; its body becomes the `Operation` the
+        // handler may call.
+        let wrap = self.weave.weaves.get(&key).and_then(|ws| ws.iter().find(|w| w.kind == Kind::WrapMethod).cloned());
+        let body_name = if wrap.is_some() { format!("{f}__body") } else { f.clone() };
         let _ = writeln!(s, "/// `{}.{}{}`", c.name, name, desc);
-        let _ = writeln!(s, "pub fn {f}(rt: &mut Rt, args: &[V]) -> V {{");
+        let _ = writeln!(s, "pub fn {body_name}(rt: &mut Rt, args: &[V]) -> V {{");
         // An intrinsic: the runtime does this method's work natively (a whole buffer drawn in one
         // call, say, instead of its translated per-vertex loop).
-        let key = format!("{}.{}.{}", c.name, name, desc);
         if horizon_compat::render::INTRINSICS.contains(&key.as_str()) {
             let _ = writeln!(s, "    api::call(rt, {key:?}, args)\n}}\n");
             return s;
@@ -798,6 +973,37 @@ impl<'a> Program<'a> {
         };
         let _ = writeln!(s, "    let mut pc: usize = 0;");
         let _ = writeln!(s, "    let mut thrown_at: usize = 0;");
+        // Weaving: the mixins' handlers for this method, and the calls they go at (Mixin counts a
+        // call's `ordinal` among the method's calls of the same target, in order).
+        let mut cur = Cur { class: c.name.clone(), fn_name: f.clone(), name: name.to_owned(), desc: desc.to_owned(), is_static, ..Cur::default() };
+        cur.weaves = self.weave.weaves.get(&key).cloned().unwrap_or_default();
+        let mut matched = vec![0usize; cur.weaves.len()];
+        for i in &insns {
+            if matches!(i.op, 0xac..=0xb1) {
+                cur.tail = i.at;
+            }
+            let Some(m) = (!cur.weaves.is_empty() && matches!(i.op, 0xb6..=0xb9)).then(|| insn_member(c, i)).flatten() else { continue };
+            for (wi, w) in cur.weaves.iter().enumerate() {
+                if let At::Invoke { ordinal, .. } = &w.at
+                    && w.at.names_call(&m)
+                {
+                    if ordinal.is_none_or(|o| o == matched[wi]) {
+                        cur.at_calls.entry(i.at).or_default().push(wi);
+                    }
+                    matched[wi] += 1;
+                }
+            }
+        }
+        let missing = cur.weaves.iter().zip(&matched).filter(|(w, n)| matches!(w.at, At::Invoke { .. }) && **n == 0).count();
+        for _ in 0..missing {
+            self.unsupported("mixin @At(INVOKE) call not in the method");
+        }
+        let head: Vec<Weave> = cur.weaves.iter().filter(|w| w.at == At::Head).cloned().collect();
+        self.cur = Some(cur);
+        for w in &head {
+            let code = self.inject_code(w, None, 0, false);
+            let _ = writeln!(s, "    if pc != {THROW} {{ {code} }}");
+        }
         let _ = writeln!(s, "    loop {{");
         let _ = writeln!(s, "        match pc {{");
         for (n, i) in insns.iter().enumerate() {
@@ -822,7 +1028,122 @@ impl<'a> Program<'a> {
         let _ = writeln!(s, "            }}");
         let _ = writeln!(s, "            _ => return V::Void,");
         let _ = writeln!(s, "        }}\n    }}\n}}\n");
+        self.cur = None;
+        if let Some(w) = wrap {
+            let lkey = format!("{key}#wrap");
+            let lid = self.lambda_id(&lkey);
+            let recv = usize::from(!is_static);
+            let this = if w.handler_static { "" } else { "args[0], " };
+            let _ = writeln!(
+                s,
+                "pub fn {f}(rt: &mut Rt, args: &[V]) -> V {{\n    let op = rt.lambda_id({lkey:?}, {lid}, args.get(..{recv}).unwrap_or_default().to_vec());\n    rt.lambda_info.insert(op.r(), ({:?}, \"call\"));\n    let mut h: Vec<V> = vec![{this}];\n    h.extend_from_slice(args.get({recv}..).unwrap_or_default());\n    h.push(op);\n    {}(rt, &h)\n}}\n",
+                weave::OPERATION,
+                fn_name(&w.mixin, &w.handler, &w.handler_desc)
+            );
+            let op_fn = format!("{f}__op");
+            let _ = writeln!(
+                s,
+                "fn {op_fn}(rt: &mut Rt, all: &[V]) -> V {{\n    let arr = all.last().copied().unwrap_or_default();\n    let mut a: Vec<V> = all.get(..{recv}).unwrap_or_default().to_vec();\n    a.extend([{}]);\n    let r = {body_name}(rt, &a);\n    {}\n}}\n",
+                unboxed_items(&arg_kinds(desc)),
+                boxed(return_kind(desc))
+            );
+            self.operations.insert(lkey, op_fn);
+        }
         s
+    }
+
+    /// The target method's arguments where they are now: its local slots.
+    fn target_args(&self) -> Vec<String> {
+        let Some(cur) = self.cur.as_ref() else { return Vec::new() };
+        let mut slot = usize::from(!cur.is_static);
+        arg_kinds(&cur.desc)
+            .into_iter()
+            .map(|k| {
+                let e = format!("l[{slot}]");
+                slot += if matches!(k, 'J' | 'D') { 2 } else { 1 };
+                e
+            })
+            .collect()
+    }
+
+    /// An `@Inject` handler's call as Mixin weaves it: a callback (a `CallbackInfoReturnable` for a
+    /// method with a value, holding `value` at a return), the handler with the target object, the
+    /// target's arguments when it takes them, and the callback; then the method returns early
+    /// when the handler cancelled. A throw unwinds from offset `at` (from none at the head).
+    fn inject_code(&self, w: &Weave, value: Option<&str>, at: usize, in_loop: bool) -> String {
+        let Some(cur) = self.cur.as_ref() else { return String::new() };
+        let ret = return_kind(&cur.desc);
+        let cancellable = matches!(w.kind, Kind::Inject { cancellable: true });
+        let class = if ret == 'V' { weave::CALLBACK_INFO } else { weave::RETURNABLE };
+        let held = match (ret, value) {
+            ('V', _) | (_, None) => String::new(),
+            ('L', Some(_)) => "Ljava/lang/Object;".to_owned(),
+            (k, Some(_)) => k.to_string(),
+        };
+        let init = format!("{class}.<init>.(Ljava/lang/String;Z{held})V");
+        let value_arg = match value {
+            Some(v) if !held.is_empty() => format!(", {v}"),
+            _ => String::new(),
+        };
+        let targs = self.target_args();
+        let mut list: Vec<String> = Vec::new();
+        if !w.handler_static {
+            list.push("l[0]".into());
+        }
+        if !targs.is_empty() && w.handler_params() == targs.len() + 1 {
+            list.extend(targs);
+        }
+        list.push("ci".into());
+        let back = match ret {
+            'V' => "V::Void".to_owned(),
+            'L' => format!("api::call(rt, {:?}, &[ci])", format!("{}.getReturnValue.()Ljava/lang/Object;", weave::RETURNABLE)),
+            k => format!("api::call(rt, {:?}, &[ci])", format!("{}.getReturnValue{k}.(){k}", weave::RETURNABLE)),
+        };
+        let throw = if in_loop { format!("thrown_at = {at}; pc = {THROW}; continue;") } else { format!("thrown_at = usize::MAX; pc = {THROW};") };
+        let cancel = if cancellable {
+            format!(" else if api::call(rt, {:?}, &[ci]).i() != 0 {{ return {back}; }}", format!("{class}.isCancelled.()Z"))
+        } else {
+            String::new()
+        };
+        format!(
+            "{{ let ci = rt.new_object({class:?}); let id = rt.string({:?}); api::call(rt, {init:?}, &[ci, id, V::I({}){value_arg}]); {}(rt, &[{}]); if rt.thrown.is_some() {{ {throw} }}{cancel} }}",
+            cur.name,
+            cancellable as i32,
+            fn_name(&w.mixin, &w.handler, &w.handler_desc),
+            list.join(", ")
+        )
+    }
+
+    /// What the weaves at a return instruction (offset `at`) do before it returns `ret`: a
+    /// `@ModifyReturnValue` replaces it, an `@Inject` sees it (and may return another); `TAIL`
+    /// is the method's last return only.
+    fn return_weaves(&mut self, at: usize) -> Option<String> {
+        let cur = self.cur.as_ref()?;
+        let here: Vec<Weave> = cur.weaves.iter().filter(|w| w.at == At::Return || (w.at == At::Tail && at == cur.tail)).cloned().collect();
+        if here.is_empty() {
+            return None;
+        }
+        let targs = self.target_args();
+        let mut code = String::new();
+        for w in &here {
+            match w.kind {
+                Kind::ModifyReturnValue => {
+                    let this = if w.handler_static { "" } else { "l[0], " };
+                    let extra = if w.handler_params() == 1 || targs.is_empty() { String::new() } else { format!(", {}", targs.join(", ")) };
+                    let _ = write!(
+                        code,
+                        "ret = {}(rt, &[{this}ret{extra}]); if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; continue; }} ",
+                        fn_name(&w.mixin, &w.handler, &w.handler_desc)
+                    );
+                }
+                Kind::Inject { .. } => {
+                    code.push_str(&self.inject_code(w, Some("ret"), at, true));
+                    code.push(' ');
+                }
+                _ => {}
+            }
+        }
+        Some(code)
     }
 
     fn key(&mut self, m: &Member) -> String {
@@ -987,8 +1308,14 @@ impl<'a> Program<'a> {
                 }
                 _ => go,
             },
-            0xac..=0xb0 => format!("return {pop};"),
-            0xb1 => "return V::Void;".into(),
+            0xac..=0xb0 => match self.return_weaves(i.at) {
+                Some(code) => format!("let mut ret = {pop}; {code}return ret;"),
+                None => format!("return {pop};"),
+            },
+            0xb1 => match self.return_weaves(i.at) {
+                Some(code) => format!("let mut ret = V::Void; {code}return V::Void;"),
+                None => "return V::Void;".into(),
+            },
             0xb2..=0xb5 => self.field(c, i.op, idx as u16, &go),
             0xb6..=0xb9 => self.invoke(c, i.op, idx as u16, &go, i.at),
             0xba => self.indy(c, idx as u16, &go),
@@ -1043,18 +1370,28 @@ impl<'a> Program<'a> {
     /// Initialises `class` before its use, as the JVM does (JVMS 5.5): its mod superclasses first,
     /// from the top, then the class; each static initialiser runs once.
     fn ensure(&self, class: &str) -> String {
-        let mut chain = Vec::new();
+        let has_init = |k: &ClassFile| k.methods.iter().any(|m| m.name == "<clinit>");
+        let mut chain: Vec<Vec<String>> = Vec::new();
         let mut c = Some(class);
         while let Some(name) = c {
             let Some(k) = self.classes.get(name) else { break };
-            if k.methods.iter().any(|m| m.name == "<clinit>") {
-                chain.push(k.name.clone());
+            // The class's initialiser, then its mixins' (Mixin merges theirs into it).
+            let mut level = Vec::new();
+            if has_init(k) {
+                level.push(k.name.clone());
             }
+            for m in self.mixins_of(&k.name) {
+                if self.classes.get(m.as_str()).is_some_and(|mk| has_init(mk)) {
+                    level.push(m.clone());
+                }
+            }
+            chain.push(level);
             c = k.superclass.as_deref();
         }
         chain
             .iter()
             .rev()
+            .flatten()
             .map(|k| {
                 format!(
                     "if rt.initialized.insert({k:?}) {{ {}(rt, &[]); if rt.thrown.is_some() {{ return V::Void; }} }} ",
@@ -1068,6 +1405,14 @@ impl<'a> Program<'a> {
     /// (JVMS 5.4.3.2): `owner`, its superinterfaces, then its superclass, recursively. Past the
     /// mod's classes, the API class the chain reaches (`MyBlock.FACING` → vanilla's own class).
     fn field_owner(&self, owner: &str, name: &str) -> String {
+        // A mixin's static is its target's (a `@Shadow`, or one the target inherits), unless only
+        // the mixin declares it.
+        if let Some(target) = self.mixin_of.get(owner) {
+            let found = self.field_owner(target, name);
+            let target_has = self.classes.get(found.as_str()).is_some_and(|k| k.fields.iter().any(|f| f.name == name));
+            let mixin_has = self.classes.get(owner).is_some_and(|k| k.fields.iter().any(|f| f.name == name));
+            return if mixin_has && !target_has { owner.to_owned() } else { found };
+        }
         let mut c = owner;
         loop {
             let Some(k) = self.classes.get(c) else { return c.to_owned() };
@@ -1154,6 +1499,15 @@ impl<'a> Program<'a> {
                     "{{ let own = !matches!(rt.get_field(args[0], {own:?}), V::Void) || matches!(rt.get_field(args[0], {field:?}), V::Void); rt.put_field(args[0], if own {{ {own:?} }} else {{ {field:?} }}, args[1]); V::Void }}",
                     own = format!("${field}")
                 ),
+                // A static of a translated class is the runtime's own, under its declaring class.
+                (true, false) if self.own(&target) => {
+                    let owner = self.field_owner(&target, &field);
+                    format!("{{ {}rt.statics.get({:?}).copied().unwrap_or_default() }}", self.ensure(&owner), format!("{owner}.{field}"))
+                }
+                (true, true) if self.own(&target) => {
+                    let owner = self.field_owner(&target, &field);
+                    format!("{{ {}rt.statics.insert({:?}, args[0]); V::Void }}", self.ensure(&owner), format!("{owner}.{field}"))
+                }
                 (true, false) => format!("api::get_static(rt, {:?})", format!("{target}.{field}")),
                 (true, true) => format!("{{ rt.statics.insert({:?}, args[0]); V::Void }}", format!("{target}.{field}")),
             });
@@ -1167,7 +1521,12 @@ impl<'a> Program<'a> {
                 "{{ let o = rt.new_object({target:?}); let mut a = vec![o]; a.extend_from_slice(&args); api::call(rt, {init:?}, &a); o }}"
             ));
         }
-        let key = self.key(&Member { owner: target, name: name.clone(), desc: m.desc.clone() });
+        // A translated class's method is called as its own code.
+        if is_static && let Some(imp) = self.resolve(&target, &name, &m.desc) {
+            return Some(format!("{{ {}{}(rt, &args) }}", self.ensure(&imp), fn_name(&imp, &name, &m.desc)));
+        }
+        let owner = if self.own(&target) { self.api_owner(&target).unwrap_or(target) } else { target };
+        let key = self.key(&Member { owner, name: name.clone(), desc: m.desc.clone() });
         if is_static {
             return Some(format!("api::call(rt, {key:?}, &args)"));
         }
@@ -1182,7 +1541,34 @@ impl<'a> Program<'a> {
 
     fn invoke(&mut self, c: &ClassFile, op: u8, idx: u16, go: &str, at: usize) -> String {
         let Some(m) = c.member(idx) else { return go.to_owned() };
+        // A mixin's accessors and invokers first; any other call through a mixin reaches its target.
+        let mixin = self.mixin_call(&m, op);
+        let m = if mixin.is_some() { m } else { self.through_mixin(m) };
         let n = arg_kinds(&m.desc).len() + usize::from(op != 0xb8);
+        // A constructor's call of its superclass's: skipped in a mixin's (the target's constructor
+        // made it), followed in a target's by its mixins' field initialisers, as Mixin merges them.
+        let super_call = op == 0xb7
+            && m.name == "<init>"
+            && c.superclass.as_deref() == Some(m.owner.as_str())
+            && self.cur.as_ref().is_some_and(|cur| cur.name == "<init>" && !cur.super_done);
+        if super_call && let Some(cur) = self.cur.as_mut() {
+            cur.super_done = true;
+        }
+        if super_call && self.mixin_of.contains_key(&c.name) {
+            return format!("let at = s.len().saturating_sub({n}); s.truncate(at); {go}");
+        }
+        let mut initialisers = String::new();
+        if super_call {
+            for mx in self.mixins_of(&c.name).to_vec() {
+                if let Some(ctor) = self.classes.get(mx.as_str()).and_then(|k| k.methods.iter().find(|x| x.name == "<init>" && x.code.is_some())) {
+                    let _ = write!(
+                        initialisers,
+                        "{}(rt, &[l[0]]); if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; continue; }} ",
+                        fn_name(&mx, "<init>", &ctor.desc)
+                    );
+                }
+            }
+        }
         let key = self.key(&m);
         let init = if op == 0xb8 && m.owner != c.name { self.ensure(&m.owner) } else { String::new() };
         let caller = if self.caller_sensitive.contains(&format!("{}.{}", m.name, m.desc)) {
@@ -1198,7 +1584,6 @@ impl<'a> Program<'a> {
             Some(api) => this.key(&Member { owner: api, name: m.name.clone(), desc: m.desc.clone() }),
             None => key.clone(),
         };
-        let mixin = self.mixin_call(&m, op);
         let call = match op {
             _ if mixin.is_some() => mixin.unwrap_or_default(),
             // static, or a direct (super/constructor/private) call
@@ -1230,7 +1615,145 @@ impl<'a> Program<'a> {
         } else {
             collect
         };
-        format!("{collect} let r = {call}; if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; }} else {{ {push} {go} }}")
+        let woven = self.call_weaves(&m, op, at, call);
+        let collect = if woven.mutable { format!("{collect} let mut args = args;") } else { collect };
+        format!(
+            "{collect} {}let r = {}; if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; }} else {{ {}{push} {initialisers}{}{go} }}",
+            woven.before, woven.call, woven.modify, woven.after
+        )
+    }
+
+    /// The weaves at the call at offset `at` (`m`, made with opcode `op`) around its Rust `call`:
+    /// what runs before it (`@Inject`, `@ModifyArg`, `@WrapWithCondition`'s condition), the call
+    /// itself or a `@Redirect`'s handler instead, what its result goes through
+    /// (`@ModifyExpressionValue`), and what runs after it (`@Inject` with `shift = AFTER`).
+    fn call_weaves(&mut self, m: &Member, op: u8, at: usize, call: String) -> Woven {
+        let mut out = Woven { call, ..Woven::default() };
+        let site: Vec<Weave> = self
+            .cur
+            .as_ref()
+            .and_then(|cur| cur.at_calls.get(&at).map(|ix| ix.iter().map(|&i| cur.weaves[i].clone()).collect()))
+            .unwrap_or_default();
+        if site.is_empty() {
+            return out;
+        }
+        let recv = usize::from(op != 0xb8);
+        let params = crate::class::param_classes(&m.desc);
+        let returns = returns_value(&m.desc);
+        let targs = self.target_args();
+        let throw = format!("if rt.thrown.is_some() {{ thrown_at = {at}; pc = {THROW}; continue; }}");
+        let mut wrapped = false;
+        for w in &site {
+            let h = fn_name(&w.mixin, &w.handler, &w.handler_desc);
+            let this = if w.handler_static { "" } else { "l[0], " };
+            let np = w.handler_params();
+            match (&w.kind, &w.at) {
+                (Kind::Inject { .. }, At::Invoke { after, .. }) => {
+                    let code = self.inject_code(w, None, at, true);
+                    let to = if *after { &mut out.after } else { &mut out.before };
+                    to.push_str(&code);
+                    to.push(' ');
+                }
+                // The handler instead of the call: the receiver and arguments, then the target
+                // method's when it takes them.
+                (Kind::Redirect, _) => {
+                    let extra = if np == recv + params.len() {
+                        String::new()
+                    } else if np == recv + params.len() + targs.len() {
+                        targs.join(", ")
+                    } else {
+                        self.unsupported("mixin @Redirect taking other parameters");
+                        continue;
+                    };
+                    out.call = format!("{{ let mut h: Vec<V> = vec![{this}]; h.extend_from_slice(&args); h.extend_from_slice(&[{extra}]); {h}(rt, &h) }}");
+                }
+                // One argument through the handler: the one it is given (or, without an index,
+                // the only one of the type it returns), or all of them for it to pick.
+                (Kind::ModifyArg { index }, _) => {
+                    let ret = w.handler_desc.rsplit(')').next().unwrap_or("");
+                    let ret = ret.strip_prefix('L').and_then(|r| r.strip_suffix(';')).unwrap_or(ret);
+                    let index = match *index {
+                        usize::MAX => {
+                            let same: Vec<usize> = params.iter().enumerate().filter(|(_, p)| p.as_str() == ret).map(|(i, _)| i).collect();
+                            match same.as_slice() {
+                                [only] => *only,
+                                _ => {
+                                    self.unsupported("mixin @ModifyArg without an index");
+                                    continue;
+                                }
+                            }
+                        }
+                        i => i,
+                    };
+                    if index >= params.len() {
+                        self.unsupported("mixin @ModifyArg index past the call's arguments");
+                        continue;
+                    }
+                    let i = recv + index;
+                    out.mutable = true;
+                    if np == 1 {
+                        let _ = write!(out.before, "{{ let v = {h}(rt, &[{this}args[{i}]]); {throw} args[{i}] = v; }} ");
+                    } else if np == params.len() {
+                        let _ = write!(out.before, "{{ let mut h: Vec<V> = vec![{this}]; h.extend_from_slice(&args[{recv}..]); let v = {h}(rt, &h); {throw} args[{i}] = v; }} ");
+                    } else {
+                        self.unsupported("mixin @ModifyArg taking other parameters");
+                    }
+                }
+                // The handler instead of the call, given the call as an `Operation` that makes it
+                // (with the locals as they are, for what other weaves at the call read).
+                (Kind::WrapOperation, At::Invoke { .. }) => {
+                    let base = recv + params.len() + 1;
+                    let extra = if np == base {
+                        String::new()
+                    } else if np == base + targs.len() {
+                        targs.join(", ")
+                    } else {
+                        self.unsupported("mixin @WrapOperation taking other parameters");
+                        continue;
+                    };
+                    let Some(cur) = self.cur.as_ref() else { continue };
+                    let n = self.operations.len();
+                    let lkey = format!("{}.{}.{}@{at}#{n}", cur.class, cur.name, cur.desc);
+                    let op_fn = format!("{}__op{at}_{n}", cur.fn_name);
+                    let lid = self.lambda_id(&lkey);
+                    let mut kinds: Vec<char> = Vec::new();
+                    if recv == 1 {
+                        kinds.push('L');
+                    }
+                    kinds.extend(arg_kinds(&m.desc));
+                    self.synthetic.push(format!(
+                        "fn {op_fn}(rt: &mut Rt, all: &[V]) -> V {{\n    let (l, rest) = all.split_at(all.len().saturating_sub(1));\n    let arr = rest.first().copied().unwrap_or_default();\n    let args: Vec<V> = vec![{}];\n    let r = {};\n    {}\n}}\n",
+                        unboxed_items(&kinds),
+                        out.call,
+                        boxed(return_kind(&m.desc))
+                    ));
+                    self.operations.insert(lkey.clone(), op_fn);
+                    out.call = format!(
+                        "{{ let op = rt.lambda_id({lkey:?}, {lid}, l.to_vec()); rt.lambda_info.insert(op.r(), ({:?}, \"call\")); let mut h: Vec<V> = vec![{this}]; h.extend_from_slice(&args); h.push(op); h.extend_from_slice(&[{extra}]); {h}(rt, &h) }}",
+                        weave::OPERATION
+                    );
+                }
+                (Kind::ModifyExpressionValue, _) if returns && np == 1 => {
+                    let _ = write!(out.modify, "let r = {h}(rt, &[{this}r]); {throw} ");
+                }
+                // The call only when the handler, given its receiver and arguments, says so.
+                (Kind::WrapWithCondition, _) if !returns && np == recv + params.len() => {
+                    if !wrapped {
+                        out.before.push_str("let mut wrap_ok = true; ");
+                        wrapped = true;
+                    }
+                    let _ = write!(out.before, "if wrap_ok {{ let mut h: Vec<V> = vec![{this}]; h.extend_from_slice(&args); wrap_ok = {h}(rt, &h).i() != 0; {throw} }} ");
+                }
+                (kind, _) => {
+                    let what = format!("mixin {kind:?} at this call");
+                    self.unsupported(&what);
+                }
+            }
+        }
+        if wrapped {
+            out.call = format!("if wrap_ok {{ {} }} else {{ V::Void }}", out.call);
+        }
+        out
     }
 }
 

@@ -11,9 +11,11 @@
 //!   handler), MixinExtras' `@ModifyExpressionValue` (the call's result through it),
 //!   `@WrapWithCondition` (the call only if the handler says so) and `@ModifyReturnValue`.
 //!
-//! What it doesn't weave (other `@At`s, captured locals, `@WrapOperation`...) is counted in the
-//! plan's `unsupported`, as the codegen counts what it can't translate.
-use crate::class::{ClassFile, Method};
+//! MixinExtras' `@WrapOperation` (a call through the handler, which gets the call as an
+//! `Operation` it may make) and `@WrapMethod` (the whole method so) too. What it doesn't weave
+//! (other `@At`s, captured locals...) is counted in the plan's `unsupported`, as the codegen counts
+//! what it can't translate.
+use crate::class::{ClassFile, Member, Method};
 use std::collections::BTreeMap;
 
 const MIXIN: &str = "Lorg/spongepowered/asm/mixin/";
@@ -36,7 +38,16 @@ pub enum Kind {
     WrapWithCondition,
     /// `@ModifyReturnValue`: the value the method returns goes through it.
     ModifyReturnValue,
+    /// `@WrapOperation`: called instead of the call, with its receiver, arguments and the call as
+    /// an `Operation`.
+    WrapOperation,
+    /// `@WrapMethod`: called instead of the method, with its arguments and the method as an
+    /// `Operation`.
+    WrapMethod,
 }
+
+/// MixinExtras' `Operation`: what a wrapping handler calls to run what it wraps.
+pub const OPERATION: &str = "com/llamalad7/mixinextras/injector/wrapoperation/Operation";
 
 /// Where in the target method.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,8 +57,35 @@ pub enum At {
     Return,
     /// Before the last return.
     Tail,
-    /// A call to `owner.name desc` (the `n`th such call when `ordinal` says), before it or after.
+    /// A call to `owner.name desc` (the `n`th such call when `ordinal` says), before it or after;
+    /// an empty owner is any owner (a target written without one).
     Invoke { owner: String, name: String, desc: String, ordinal: Option<usize>, after: bool },
+}
+
+impl At {
+    /// Whether a call to `m` is one this `@At` names. Mixin compares the call instruction's
+    /// owner as written, not the class that declares the method.
+    pub fn names_call(&self, m: &Member) -> bool {
+        match self {
+            At::Invoke { owner, name, desc, .. } => (owner.is_empty() || *owner == m.owner) && *name == m.name && *desc == m.desc,
+            _ => false,
+        }
+    }
+}
+
+/// The methods `m` (of `c`) calls, in the order of its code.
+fn calls(c: &ClassFile, m: &Method) -> Vec<Member> {
+    let Some(code) = &m.code else { return Vec::new() };
+    let Ok(insns) = crate::insn::decode(&code.bytes) else { return Vec::new() };
+    insns
+        .iter()
+        .filter(|i| matches!(i.op, 0xb6..=0xb9))
+        .filter_map(|i| match &i.arg {
+            crate::insn::Operand::Int(v) => c.member(*v as u16),
+            crate::insn::Operand::IndexCount(v, _) => c.member(*v),
+            _ => None,
+        })
+        .collect()
 }
 
 /// One handler woven into one target method.
@@ -84,17 +122,17 @@ fn at_values(v: &str) -> BTreeMap<String, String> {
     inner.split('|').filter_map(|p| p.split_once('=')).map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
 }
 
-/// `Lnet/minecraft/world/level/Level;setBlock(Lnet/...;I)Z` (or `net/.../Level.setBlock(...)Z`)
-/// as (owner, name, desc).
+/// `Lnet/minecraft/world/level/Level;setBlock(Lnet/...;I)Z` (or `net/.../Level.setBlock(...)Z`,
+/// or `setBlock(...)Z` for any owner) as (owner, name, desc).
 pub fn member_of(target: &str) -> Option<(String, String, String)> {
     let paren = target.find('(')?;
     let (head, desc) = target.split_at(paren);
-    let (owner, name) = if let Some(rest) = head.strip_prefix('L') {
-        let (o, n) = rest.split_once(';')?;
+    let (owner, name) = if let Some((o, n)) = head.strip_prefix('L').and_then(|r| r.split_once(';')) {
         (o.to_owned(), n.to_owned())
-    } else {
-        let (o, n) = head.rsplit_once('.')?;
+    } else if let Some((o, n)) = head.rsplit_once('.') {
         (o.replace('.', "/"), n.to_owned())
+    } else {
+        (String::new(), head.to_owned())
     };
     Some((owner, name, desc.to_owned()))
 }
@@ -177,6 +215,12 @@ pub fn plan(classes: &[ClassFile]) -> Plan {
                     if !injector || matches!(simple, "At" | "Slice" | "Coerce" | "Desc" | "Group") {
                         continue;
                     }
+                    // A slice narrows where the `@At` looks; without it the handler would go to
+                    // places Mixin leaves alone.
+                    if a.value("slice").is_some_and(|v| !v.is_empty()) {
+                        count(&mut plan, "mixin @Slice".into());
+                        continue;
+                    }
                     let at_value = a.value("at").unwrap_or("");
                     let kind = match simple {
                         "Inject" => Kind::Inject { cancellable: a.value("cancellable") == Some("1") },
@@ -185,13 +229,19 @@ pub fn plan(classes: &[ClassFile]) -> Plan {
                         "ModifyExpressionValue" => Kind::ModifyExpressionValue,
                         "WrapWithCondition" => Kind::WrapWithCondition,
                         "ModifyReturnValue" => Kind::ModifyReturnValue,
+                        "WrapOperation" => Kind::WrapOperation,
+                        "WrapMethod" => Kind::WrapMethod,
                         other => {
                             count(&mut plan, format!("mixin @{other}"));
                             continue;
                         }
                     };
-                    // `at = {@At(...), @At(...)}`: each place.
-                    let ats: Vec<&str> = at_value.split(",Lorg/spongepowered/asm/mixin/injection/At;").collect();
+                    // `at = {@At(...), @At(...)}`: each place. A whole method's wrapper has none.
+                    let ats: Vec<&str> = if kind == Kind::WrapMethod {
+                        vec!["Lorg/spongepowered/asm/mixin/injection/At;(value=HEAD)"]
+                    } else {
+                        at_value.split(",Lorg/spongepowered/asm/mixin/injection/At;").collect()
+                    };
                     for (i, at_text) in ats.iter().enumerate() {
                         let at_text = if i == 0 { at_text.to_string() } else { format!("Lorg/spongepowered/asm/mixin/injection/At;{at_text}") };
                         let at = match parse_at(&at_text) {
@@ -203,9 +253,21 @@ pub fn plan(classes: &[ClassFile]) -> Plan {
                         };
                         let picked = targets(target, a.value("method").unwrap_or(""));
                         if picked.is_empty() {
+                            debug(|| format!("not found: {}.{} {:?} in {}", mixin.name, h.name, a.value("method"), target.name));
                             count(&mut plan, "mixin target method not found".into());
                         }
+                        // A call the `@At` names, in each method it picks: Mixin injects nothing
+                        // into a method without one (a wildcard's), and needs one somewhere.
+                        let mut placed = false;
+                        let picked_any = !picked.is_empty();
                         for m in picked {
+                            if let At::Invoke { ordinal, .. } = &at {
+                                let n = calls(target, m).iter().filter(|c| at.names_call(c)).count();
+                                if n == 0 || ordinal.is_some_and(|o| o >= n) {
+                                    continue;
+                                }
+                            }
+                            placed = true;
                             let w = Weave {
                                 mixin: mixin.name.clone(),
                                 handler: h.name.clone(),
@@ -216,8 +278,15 @@ pub fn plan(classes: &[ClassFile]) -> Plan {
                             };
                             match check(&w, m) {
                                 Ok(()) => plan.weaves.entry(format!("{}.{}.{}", target.name, m.name, m.desc)).or_default().push(w),
-                                Err(e) => count(&mut plan, format!("mixin {e}")),
+                                Err(e) => {
+                                    debug(|| format!("{e}: {}.{}{} -> {}.{}{}", mixin.name, h.name, h.desc, target.name, m.name, m.desc));
+                                    count(&mut plan, format!("mixin {e}"))
+                                }
                             }
+                        }
+                        if picked_any && !placed {
+                            debug(|| format!("no call: {}.{} {at:?} in {}", mixin.name, h.name, target.name));
+                            count(&mut plan, "mixin @At(INVOKE) names no call in its methods".into());
                         }
                     }
                 }
@@ -227,9 +296,19 @@ pub fn plan(classes: &[ClassFile]) -> Plan {
     plan
 }
 
+/// `HORIZON_WEAVE_DEBUG=1`: what is not woven, handler by handler, on stderr.
+fn debug(line: impl FnOnce() -> String) {
+    if std::env::var_os("HORIZON_WEAVE_DEBUG").is_some() {
+        eprintln!("{}", line());
+    }
+}
+
 /// Whether the codegen can weave `w` into `m`: the place fits the kind, and the handler takes
 /// what it will be given.
 fn check(w: &Weave, m: &Method) -> Result<(), String> {
+    if m.access & 0x0008 != 0 && !w.handler_static {
+        return Err("instance handler for a static method".into());
+    }
     let target_args = crate::codegen::arg_kinds(&m.desc).len();
     let n = w.handler_params();
     let call_args = |at: &At| match at {
@@ -248,7 +327,15 @@ fn check(w: &Weave, m: &Method) -> Result<(), String> {
         (Kind::ModifyReturnValue, At::Return | At::Tail) => {
             if n == 1 || n == target_args + 1 { Ok(()) } else { Err("@ModifyReturnValue with extra parameters".into()) }
         }
-        (Kind::Redirect | Kind::WrapWithCondition | Kind::ModifyArg { .. } | Kind::ModifyExpressionValue, At::Invoke { .. }) => {
+        // The method's arguments and the `Operation`.
+        (Kind::WrapMethod, _) => {
+            if n == target_args + 1 {
+                Ok(())
+            } else {
+                Err("@WrapMethod with other parameters".into())
+            }
+        }
+        (Kind::Redirect | Kind::WrapWithCondition | Kind::ModifyArg { .. } | Kind::ModifyExpressionValue | Kind::WrapOperation, At::Invoke { .. }) => {
             let _ = call_args(&w.at);
             Ok(())
         }

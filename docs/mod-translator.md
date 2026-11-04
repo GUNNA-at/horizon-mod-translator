@@ -1416,13 +1416,37 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Left: FramedBlocks' state cache ("Invalid shape"), Mekanism's own registry objects and its saved
     data asking for the server, SecurityCraft's tab (an empty optional). Groundwork for weaving
     mixins into translated classes: Mixin's callback objects (`horizon-compat/src/mixin.rs`), the
-    weaving plan (`weave.rs`, not yet used by the codegen). Tests:
+    weaving plan (`weave.rs`, used by the codegen since the next entry). Tests:
     `neo::tests::a_mod_gets_its_own_fml_container_with_its_version`,
     `mixin_census_tests::mod_metadata_is_read_as_fml_reads_it`,
     `jutil::tests::guava_splits_joins_and_concatenates_as_guava_does`,
     `mixin::tests::a_handler_cancels_with_a_value_the_method_then_returns`,
     `weave::tests::selectors_pick_methods_as_mixin_does`, api's recursion and cause tests, bundle's
     toml test.
+  - [x] 2026-11-04 Mixins into translated classes, woven by the translator. An addon's mixin whose
+    target is a class being translated (Create's) is applied as the target's Rust is written, as
+    Mixin applies it at class load: its methods join the target (added ones, `@Overwrite`s), calls
+    and field reads through the mixin go to the target, its interfaces become the target's, its
+    static initialiser runs after the target's and its field initialisers in the target's
+    constructors, right after their super call. Each injector is a direct call to its handler at
+    its place, nothing looked up at run time: `@Inject` at HEAD, RETURN, TAIL or a call (INVOKE,
+    before or `shift = AFTER`, `ordinal`), cancellable, with a `CallbackInfoReturnable` for a value;
+    `@Redirect`, `@ModifyArg`, MixinExtras' `@ModifyExpressionValue`, `@WrapWithCondition`,
+    `@ModifyReturnValue`, and `@WrapOperation`/`@WrapMethod`, which get the wrapped call or method
+    as an `Operation` (a generated lambda) they may call. The plan checks that an `@At(INVOKE)` names
+    a call the method makes (its owner as the call instruction writes it, as Mixin compares), so a
+    wildcard (`method = "*"`, Sable's basin mixin) goes only where the call is.
+    `weaves <mod jar> <addon jar>...` prints the plan (`HORIZON_WEAVE_DEBUG=1`: each handler left
+    and why). Over the pack's 20 largest Create addons (`scratchpad/weaves.sh`): 820 handlers
+    woven, 178 left (82.2%; 645 before the two wrappers). Left: 88 `@Inject`s capturing locals,
+    37 `@At(FIELD)`, 17 `@ModifyVariable`, 10 methods not found (Railways' common mixins written for
+    other Create versions; their config's `defaultRequire: 0` makes Mixin skip them too), 6
+    `@Slice`, 5 `@ModifyReceiver`, 3 `@At(NEW)`, 3 `@At(CONSTANT)`, 3 `@WrapMethod`s with `@Share`d
+    locals, 2 `shift = BY`, 2 calls not in their methods, 1 `@ModifyConstant`. Create + New Age:
+    no mixins between them, the generated engine is byte for byte the same; harness TABS, COIL,
+    FILTER unchanged. Test `tests/weave.rs`: `tests/fixtures/weave` (a `Machine`, an addon's
+    `MachineMixin` using every kind, stubs of Mixin's and MixinExtras' annotations) compiled with
+    javac, translated and run; 21 answers worked out by hand from what Mixin's weaving does.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

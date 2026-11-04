@@ -94,8 +94,43 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+    // What the translator weaves of the mixins among these jars' classes into each other (a mod
+    // and its addons, as `bundle --with` translates them), and what it leaves.
+    if args.first().map(String::as_str) == Some("weaves") && args.len() >= 2 {
+        let jars: Vec<&Path> = args[1..].iter().map(Path::new).collect();
+        let classes = match horizon_mod_translator::classes_of(&jars) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let plan = horizon_mod_translator::weave::plan(&classes);
+        let mut by: std::collections::BTreeMap<String, usize> = Default::default();
+        for (target, ws) in &plan.weaves {
+            for w in ws {
+                let kind = format!("{:?}", w.kind);
+                let kind = kind.split([' ', '{']).next().unwrap_or("").to_owned();
+                let at = format!("{:?}", w.at);
+                let at = at.split([' ', '{']).next().unwrap_or("").to_owned();
+                *by.entry(format!("{kind} at {at}")).or_default() += 1;
+                println!("  {target} <- {}.{} ({kind} at {at})", w.mixin, w.handler);
+            }
+        }
+        let mixins: usize = plan.mixins.values().map(Vec::len).sum();
+        let woven: usize = plan.weaves.values().map(Vec::len).sum();
+        let left: usize = plan.unsupported.values().sum();
+        println!("{} targets, {mixins} mixins, {woven} handlers woven, {left} left", plan.mixins.len());
+        for (k, n) in &by {
+            println!("  woven {n:5} {k}");
+        }
+        for (k, n) in &plan.unsupported {
+            println!("  left  {n:5} {k}");
+        }
+        return ExitCode::SUCCESS;
+    }
     if args.first().map(String::as_str) != Some("coverage") || args.len() < 2 {
-        eprintln!("usage: horizon-mod-translator coverage <jar>... | mixins <jar>... | translate <jar> <out dir> | bundle <jar> <out dir> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]");
+        eprintln!("usage: horizon-mod-translator coverage <jar>... | mixins <jar>... | weaves <mod jar> <addon jar>... | translate <jar> <out dir> | bundle <jar> <out dir> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]");
         return ExitCode::FAILURE;
     }
     // The mapping answers the core's questions (`Rt::is_a` of Minecraft's class families): without
