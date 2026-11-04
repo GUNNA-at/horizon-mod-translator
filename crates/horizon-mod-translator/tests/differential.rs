@@ -21,6 +21,7 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("nested", "(I)I", &["0", "5", "40"]),
     ("lambdas", "(I)I", &["0", "5", "-9"]),
     ("defaults", "(I)I", &["0", "3", "-7"]),
+    ("overloads", "(I)I", &["0", "4", "-6"]),
     ("chained", "(I)I", &["0", "5", "-3"]),
     ("caller", "(I)I", &["0", "1"]),
     ("inherited", "(I)I", &["0", "2"]),
@@ -127,6 +128,7 @@ fn translated_fixture_matches_the_jvm() {
     assert!(!methods("lib/Base").unwrap().contains(&"unusedHello".to_owned()));
     assert!(methods("lib/Circle").unwrap().iter().all(|m| m == "<init>"), "never made, so none of its methods run");
     assert!(methods("lib/Counter").unwrap().contains(&"peek".to_owned()), "handed out as a JDK interface: all of it stays");
+    assert_eq!(methods("lib/Callback").unwrap(), ["accept"], "a lambda is of its interface: the default method called on it runs");
     let mut program = horizon_mod_translator::codegen::Program::new(&parsed);
     program.services = horizon_mod_translator::services(&jar).unwrap();
     let module = program.emit();

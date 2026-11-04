@@ -31,6 +31,12 @@ public final class Lib {
         return op.applyAsInt(x);
     }
 
+    /** A lambda the library makes, called through its interface's default overload. */
+    public static int callback(int x) {
+        Callback c = (a, b) -> a * 3 + b;
+        return c.accept(x);
+    }
+
     /** Never called: left out, with the class only it uses. */
     public static int unused(int x) {
         return new Unused().value(x);

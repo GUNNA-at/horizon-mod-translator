@@ -189,12 +189,35 @@ fn exception_class(key: &str) -> bool {
 }
 
 fn trace_unmapped(rt: &Rt, key: &'static str, args: &[V]) {
-    if Rt::tracing() && rt.unmapped.get(key) == Some(&1) {
+    if !Rt::tracing() {
+        return;
+    }
+    let n = rt.unmapped.get(key).copied().unwrap_or(0);
+    if n == 1 {
         let on = match args.first() {
             Some(&v @ V::R(_)) => format!(" (on {})", rt.class_of(v)),
-            _ => String::new(),
+            Some(v) => format!(" (on {v:?})"),
+            None => String::new(),
         };
         eprintln!("horizon-compat: unmapped {key}{on}");
+    }
+    // `HORIZON_COMPAT_BACKTRACE=<part of a key>`: who makes the first few such calls, by the
+    // translated functions on the stack.
+    static PART: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if let Some(part) = PART.get_or_init(|| std::env::var("HORIZON_COMPAT_BACKTRACE").ok())
+        && n <= 3
+        && key.contains(part.as_str())
+    {
+        let bt = std::backtrace::Backtrace::force_capture().to_string();
+        let frames: Vec<&str> = bt
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains(": ") && !l.starts_with("at "))
+            .filter_map(|l| l.split_once(": ").map(|(_, f)| f))
+            .filter(|f| !f.starts_with("std::") && !f.starts_with("core::") && !f.contains("trace_unmapped") && !f.contains("backtrace"))
+            .take(14)
+            .collect();
+        eprintln!("horizon-compat: backtrace of {key} #{n}:\n    {}", frames.join("\n    "));
     }
 }
 

@@ -9,7 +9,8 @@
 //! (`<clinit>`, its superclasses' too). Method handles (lambdas, method references) run their
 //! method. A created library class whose supertypes leave the library (other than for `Object`)
 //! may be called from code that isn't translated (the runtime, Java's own classes): all its
-//! instance methods run; any runs `toString`, `equals` and `hashCode`. A string naming a library
+//! instance methods run; any runs `toString`, `equals` and `hashCode`. A lambda counts as an
+//! instance of its functional interface, so the default methods called on it run. A string naming a library
 //! class in a mod's code (reflection) creates it with any constructor; a library's own such
 //! strings name its optional parts, left out (`Class.forName` then fails, as when they are
 //! absent). A reached service interface creates the implementations its jars list.
@@ -285,8 +286,16 @@ impl<'a> Walk<'a> {
                     _ => {}
                 },
                 0xba => {
-                    let Some((bsm, _, _)) = c.indy(idx) else { continue };
+                    let Some((bsm, _, desc)) = c.indy(idx) else { continue };
                     let Some((h, args)) = c.bootstrap.get(usize::from(bsm)).cloned() else { continue };
+                    // A lambda is an instance of its functional interface (what the call site
+                    // returns): the interface's default methods run when called on it, as a
+                    // class implementing it would have them.
+                    if c.handle(h).is_some_and(|(_, m)| m.owner == "java/lang/invoke/LambdaMetafactory")
+                        && let Some(iface) = desc.rsplit_once(')').and_then(|(_, r)| r.strip_prefix('L')).and_then(|r| r.strip_suffix(';'))
+                    {
+                        self.create(iface);
+                    }
                     self.handle(c, h);
                     for a in args {
                         match c.pool.get(usize::from(a)) {

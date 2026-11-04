@@ -75,6 +75,13 @@ public class Fixture {
         // Default methods called on lambdas, chained.
         return inc.then(dbl).run(k) * 1000 + dbl.twiceRun(k) + inc.then(dbl).then(inc).twiceRun(k);
     }
+    // Registrate's `BuilderCallback.accept`: a default method with the lambda's own method's
+    // name and another descriptor.
+    interface Sink { int put(int a, int b); default int put(int a) { return put(a, 7); } }
+    public static int overloads(int k) {
+        Sink s = (a, b) -> a * 10 + b;
+        return s.put(k) * 1000 + s.put(k, 3) + lib.Lib.callback(k) * 100000;
+    }
     static int callerName() { return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).getCallerClass().getSimpleName().hashCode(); }
     public static int caller(int k) { return callerName() + k; }
     interface Named { String name(); default int score() { return name().length() * 10; } }
