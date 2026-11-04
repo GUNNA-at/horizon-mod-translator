@@ -1883,6 +1883,7 @@ impl<'a> Program<'a> {
             "D" => Some("V::D(0.0)"),
             _ => None,
         };
+        let game_read = if op == 0xb4 { self.game_field_read(&m, "o") } else { None };
         match op {
             0xb2 if self.own(&owner) => match zero {
                 Some(z) => format!("{init}let v = match rt.statics.get({skey:?}).copied() {{ None | Some(V::Void) => {z}, Some(v) => v }}; s.push(v); {go}"),
@@ -1890,12 +1891,34 @@ impl<'a> Program<'a> {
             },
             0xb2 => format!("let v = api::get_static(rt, {skey:?}); s.push(v); {go}"),
             0xb3 => format!("{init}let v = {pop}; rt.statics.insert({skey:?}, v); {go}"),
+            // A field a game class declares (an access transformer opens it): the runtime keeps
+            // its state, or answers for it.
+            0xb4 if game_read.is_some() => format!("let o = {pop}; s.push({}); {go}", game_read.unwrap_or_default()),
             0xb4 => match zero {
                 Some(z) => format!("let o = {pop}; s.push(match rt.get_field(o, {:?}) {{ V::Void => {z}, v => v }}); {go}", m.name),
                 None => format!("let o = {pop}; s.push(rt.get_field(o, {:?})); {go}", m.name),
             },
             _ => format!("let v = {pop}; let o = {pop}; rt.put_field(o, {:?}, v); {go}", m.name),
         }
+    }
+
+    /// Reading instance field `m` of object `o` when a game class declares it (no translated class
+    /// on the way up does): `api::game_field`, the runtime's state or answer for it, then the
+    /// type's zero for a primitive nothing answers. None for a field of the mod's own.
+    fn game_field_read(&self, m: &Member, o: &str) -> Option<String> {
+        let owner = self.field_owner(&m.owner, &m.name);
+        if self.own(&owner) {
+            return None;
+        }
+        let zero = match m.desc.as_str() {
+            "I" | "Z" | "B" | "S" | "C" => "V::I(0)",
+            "J" => "V::J(0)",
+            "F" => "V::F(0.0)",
+            "D" => "V::D(0.0)",
+            _ => "V::Void",
+        };
+        let (name, own, key) = (&m.name, format!("${}", m.name), format!("{owner}.${}.(){}", m.name, m.desc));
+        Some(format!("match api::game_field(rt, {o}, {name:?}, {own:?}, {key:?}) {{ V::Void => {zero}, v => v }}"))
     }
 
     /// A field access some mixin weaves at (`@At("FIELD")`): made as a call would be, of a method

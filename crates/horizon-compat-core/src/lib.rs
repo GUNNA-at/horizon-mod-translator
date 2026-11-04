@@ -915,6 +915,20 @@ pub mod api {
     pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         (fns().get_static)(rt, key)
     }
+    /// A game class's field the code reads itself (one an access transformer opens:
+    /// `properties.lightEmission`): what was written under its name; else the state the runtime
+    /// keeps for it (`own`, the `$`-named field, as a mixin's accessor reads it); else the
+    /// runtime's answer to `key` (`Owner.$name.()T`), counted as a miss when there is none. Void
+    /// when nothing answers, as reading a field nothing wrote.
+    pub fn game_field(rt: &mut Rt, o: V, name: &'static str, own: &'static str, key: &'static str) -> V {
+        match rt.get_field(o, name) {
+            V::Void if o.r() != 0 => match rt.get_field(o, own) {
+                V::Void => call(rt, key, &[o]),
+                v => v,
+            },
+            v => v,
+        }
+    }
 }
 
 /// Mod loading, through the installed mapping.

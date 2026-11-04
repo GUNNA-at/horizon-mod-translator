@@ -1788,6 +1788,48 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       other blocks oak) and `sign.type()`; `BedBlock.getConnectedDirection(state)` (Comforts' 512).
     Tests `jutil::tests::streams_reduce_and_guavas_factories_make_their_collections`,
     `blocks::tests::signs_keep_their_wood_and_beds_find_their_other_half`.
+  - [x] 2026-11-05 The pack's 28 mods, round 7 (snapshot at 0c931d6, before the round-6 small
+    fixes): all 28 load to the end; distinct misses 207 → 190, kinds summed per mod 344 → 337,
+    unmapped calls 43,758 → 5,740. FramedBlocks 38,202 → 61 (mixins into the game's classes).
+    Mekanism's `capabilities`/`tickers` (154 each), `getName` (87), `getItemHolder`,
+    `addAttachedContainerCapabilities` and `getEntries` are gone (its own holders). It now gets
+    further into its blocks: 846 → 994 calls. A run with `HORIZON_COMPAT_BACKTRACE` named the new
+    ones: `BlockStateHelper.getDefaultState` asks `state.getBlockHolder().value()` (170 each), and
+    `applyLightLevelAdjustments` reads the properties' `lightEmission` field (an access
+    transformer opens it), which no one wrote (182 `applyAsInt` on null). `BlockBase.getShape`
+    calls `super.getShape` (46). SecurityCraft 100 → 91, elevatorid 32 → 16 (the simple
+    registrations).
+  - [x] 2026-11-05 A game class's fields read by a mod itself (`codegen::game_field_read`,
+    `horizon_compat_core::api::game_field`). Reading a field that a game class declares (no
+    translated class on the way up does) looks first for what was written under its name, then
+    for the state the runtime keeps for it (`$name`, as a mixin's accessor reads it), then for the
+    runtime's answer to `Owner.$name.()T`. Such a read went to nothing before, and nothing counted
+    it; now it is a miss by that key when nothing answers. The runtime answers
+    `BlockBehaviour$Properties.$lightEmission`: what `lightLevel` set, else `Properties.of()`'s
+    `state -> 0` (a `compat:fn/constant`; function objects now also answer `applyAsInt`, `getAsInt`
+    and the other primitive forms). `BlockState.getBlockHolder()` is the block's registry entry
+    (a block not registered yet learns its name when it is). `super.getShape(state, level, pos,
+    context)` to a block class with vanilla's default is a full block. Those classes are the 99
+    whose 1.21.1 class files override `getShape` nowhere above them, read from NeoForge's merged
+    1.21.1 jar. `SlabBlock` and the other classes with shapes of their own stay misses.
+    Test `blocks::tests::a_mod_blocks_reads_of_vanillas_answer_as_vanilla`.
+  - [x] 2026-11-05 Codec factories that round 6 left as the roots of codec misses:
+    - `Codec.stringResolver(toString, fromString)` (Mekanism's `FrequencyType`, StorageDrawers'
+      `KeyType`): the string codec mapped by the mod's functions. A name they answer null for is
+      an error both ways, as DFU's.
+    - `ExtraCodecs.optionalEmptyMap(codec)`: `{}` is an empty Optional, written back as `{}`.
+    - `Codec.checkRange(min, max)`: a function answering a `DataResult`, an error with the value
+      as its partial outside the range. Whole numbers compare exactly (`Long.MAX_VALUE`).
+    - The static `Codec.optionalField(name, codec, lenient)`, as `optionalFieldOf`.
+    - NeoForge's `aliasedFieldOf(codec, names...)` (the first name present, written under the
+      first) and `xor(first, second)` of map codecs (exactly one reads; an `Either`).
+    Tests `codecs::tests::a_string_resolver_reads_only_the_names_its_functions_know`,
+    `an_empty_map_is_an_empty_optional_and_a_checked_range_refuses_outside`,
+    `optional_aliased_and_exclusive_fields_read_as_neoforge_builds_them`.
+  - [x] 2026-11-05 Small ones from round 7: NeoForge's `DeferredSpawnEggItem(type, background,
+    highlight, properties)` is made as the game's items are, keeping its type supplier and colours
+    under `SpawnEggItem`'s names. `Integer.TYPE` and the other primitives' classes (`int.class`)
+    and `StandardCharsets`' charsets are answered.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

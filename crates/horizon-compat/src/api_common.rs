@@ -3081,6 +3081,36 @@ fn vanilla_block_entity_type(rt: &mut Rt, field: &str) -> V {
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match owner {
         "net/minecraft/world/phys/Vec3" if field == "ZERO" => vec3_zero(rt),
+        // `Integer.TYPE`: the primitive's own class (`int.class`), as reflection names it.
+        "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" | "java/lang/Boolean"
+        | "java/lang/Character" | "java/lang/Void"
+            if field == "TYPE" =>
+        {
+            let primitive = match owner.trim_start_matches("java/lang/") {
+                "Integer" => "int".to_owned(),
+                "Character" => "char".to_owned(),
+                other => other.to_ascii_lowercase(),
+            };
+            crate::jlang::class_object(rt, &primitive)
+        }
+        // `StandardCharsets.UTF_8` and the others: one object each, named as Java names them.
+        "java/nio/charset/StandardCharsets" => {
+            let name = match field {
+                "UTF_8" => "UTF-8",
+                "US_ASCII" => "US-ASCII",
+                "ISO_8859_1" => "ISO-8859-1",
+                "UTF_16" => "UTF-16",
+                "UTF_16BE" => "UTF-16BE",
+                "UTF_16LE" => "UTF-16LE",
+                _ => return None,
+            };
+            rt.intern(format!("compat:charset/{name}"), |rt| {
+                let c = rt.new_object("java/nio/charset/Charset");
+                let n = rt.string(name);
+                rt.put_field(c, "$name", n);
+                c
+            })
+        }
         o if PLAIN_ENUMS.iter().any(|(c, _)| *c == o) => plain_enum(rt, o, field)?,
         VEC2 => {
             let (x, y) = match field {

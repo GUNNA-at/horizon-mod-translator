@@ -11,6 +11,36 @@ fn combinator(rt: &mut Rt, kind: &'static str, parts: Vec<V>) -> V {
     rt.alloc(kind, Data::Array(parts))
 }
 
+/// A function of any arguments answering `v` (`state -> 0`, Guava's `Suppliers.ofInstance`).
+pub(crate) fn constant(rt: &mut Rt, v: V) -> V {
+    combinator(rt, "compat:fn/constant", vec![v])
+}
+
+/// DFU's `Codec.checkRange(min, max)`: a function answering a `DataResult` of its (boxed) number,
+/// an error with the number as its partial value outside `[min, max]`.
+pub(crate) fn check_range(rt: &mut Rt, min: V, max: V) -> V {
+    combinator(rt, "compat:fn/check_range", vec![min, max])
+}
+
+/// A boxed number's value (`Long.valueOf(5)`), or the raw one a primitive collection holds.
+fn number(rt: &Rt, v: V) -> V {
+    match v {
+        V::R(_) => rt.get_field(v, "value"),
+        raw => raw,
+    }
+}
+
+/// Java's `toString` of a number.
+fn number_text(v: V) -> String {
+    match v {
+        V::I(i) => i.to_string(),
+        V::J(j) => j.to_string(),
+        V::F(f) => crate::java_double(f64::from(f), true),
+        V::D(d) => crate::java_double(d, false),
+        _ => "null".into(),
+    }
+}
+
 /// Vanilla record `class`'s constructor as a function of its components.
 pub(crate) fn record_constructor(rt: &mut Rt, class: &str) -> V {
     let c = rt.string(class);
@@ -84,6 +114,35 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
             rt.get_field(args.first().copied().unwrap_or_default(), name)
         }
         "compat:fn/constant" => part(0),
+        // [min, max]; `compareTo` as the boxes compare: whole numbers exactly, others as doubles.
+        "compat:fn/check_range" => {
+            let value = args.first().copied().unwrap_or_default();
+            let (v, lo, hi) = (number(rt, value), number(rt, part(0)), number(rt, part(1)));
+            let whole = |x: V| match x {
+                V::I(i) => Some(i64::from(i)),
+                V::J(j) => Some(j),
+                _ => None,
+            };
+            let real = |x: V| match x {
+                V::I(i) => f64::from(i),
+                V::J(j) => j as f64,
+                V::F(f) => f64::from(f),
+                V::D(d) => d,
+                _ => f64::NAN,
+            };
+            let inside = match (whole(v), whole(lo), whole(hi)) {
+                (Some(v), Some(lo), Some(hi)) => lo <= v && v <= hi,
+                _ => real(lo) <= real(v) && real(v) <= real(hi),
+            };
+            if inside {
+                crate::codecs::success(rt, value)
+            } else {
+                let message = format!("Value {} outside of range [{}:{}]", number_text(v), number_text(lo), number_text(hi));
+                let r = crate::codecs::error(rt, &message);
+                rt.put_field(r, "$partial", value);
+                r
+            }
+        }
         // A constructor as a function (`Item::new`): [class, descriptor].
         "compat:fn/new" => {
             let (class, desc) = (rt.str_of(part(0)).unwrap_or("").to_owned(), rt.str_of(part(1)).unwrap_or("").to_owned());
@@ -122,7 +181,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let (owner, name, desc) = crate::parts(key)?;
     let receiver = rt.class_of(a(0));
-    if receiver.starts_with("compat:fn/") && matches!(name, "test" | "apply" | "accept" | "get") {
+    if receiver.starts_with("compat:fn/") && matches!(name, "test" | "apply" | "accept" | "get" | "applyAsInt" | "applyAsLong" | "applyAsDouble" | "getAsInt" | "getAsLong" | "getAsDouble" | "getAsBoolean") {
         return Some(run(rt, receiver, a(0), key, args.get(1..).unwrap_or_default()));
     }
     const PREDICATES: &str = "com/google/common/base/Predicates";
@@ -157,7 +216,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             combinator(rt, if n == "and" { "compat:fn/and" } else { "compat:fn/or" }, parts)
         }
         ("com/google/common/base/Suppliers", "memoize") => combinator(rt, "compat:fn/memo", vec![a(0), V::NULL, V::I(0)]),
-        ("com/google/common/base/Suppliers", "ofInstance") => combinator(rt, "compat:fn/constant", vec![a(0)]),
+        ("com/google/common/base/Suppliers", "ofInstance") => constant(rt, a(0)),
         _ => return None,
     })
 }

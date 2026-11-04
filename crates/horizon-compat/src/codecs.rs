@@ -285,8 +285,21 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
         }
         "xmap" => {
             let v = decode(rt, part(0), j)?;
-            map_value(rt, part(1), part(2).i() != 0, v)
+            let r = map_value(rt, part(1), part(2).i() != 0, v)?;
+            // `stringResolver`'s: a name its function doesn't know.
+            if part(5).i() != 0 && r.r() == 0 {
+                return Err(format!("Unknown element name:{}", j.as_str().unwrap_or_default()));
+            }
+            Ok(r)
         }
+        // `ExtraCodecs.optionalEmptyMap(codec)`: `{}` is an empty Optional, anything else the codec's.
+        "optional_empty_map" => match j {
+            Json::Object(o) if o.is_empty() => Ok(optional(rt, None)),
+            _ => {
+                let v = decode(rt, part(0), j)?;
+                Ok(optional(rt, Some(v)))
+            }
+        },
         "validate" => {
             let v = decode(rt, part(0), j)?;
             let r = run(rt, FUNCTION, part(1), &[v])?;
@@ -338,7 +351,7 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
         }
         // A map codec read as a codec (`MapCodec.codec()`, a record, a dispatch): the value is an
         // object of its fields.
-        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" => {
+        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" => {
             let Json::Object(o) = j else { return Err(format!("Not a map: {j}")) };
             decode_map(rt, c, o)
         }
@@ -409,6 +422,13 @@ pub fn decode_map(rt: &mut Rt, c: V, o: &Map<String, Json>) -> Result<V, String>
             Ok(v) => Ok(either(rt, true, v)),
             Err(_) => decode_map(rt, part(1), o).map(|v| either(rt, false, v)),
         },
+        // NeoForge's `xor(first, second)`: exactly one of them reads.
+        "xor" => match (decode_map(rt, part(0), o), decode_map(rt, part(1), o)) {
+            (Ok(_), Ok(_)) => Err("Both alternatives read successfully, can not pick the correct one".into()),
+            (Ok(v), Err(_)) => Ok(either(rt, true, v)),
+            (Err(_), Ok(v)) => Ok(either(rt, false, v)),
+            (Err(first), Err(second)) => Err(format!("Neither alternative read successfully! first: {first}; second: {second}")),
+        },
         "lazy" => {
             let inner = lazy(rt, c)?;
             decode_map(rt, inner, o)
@@ -464,7 +484,7 @@ fn lazy(rt: &mut Rt, c: V) -> Result<V, String> {
 /// one): what a dispatch hands the rest of its object to, as DFU's `KeyDispatchCodec` does.
 fn reads_object(rt: &mut Rt, c: V) -> bool {
     match kind(rt, c) {
-        "field" | "optional" | "record" | "point" | "dispatch" | "of_map" | "unit" | "native_map" => true,
+        "field" | "optional" | "record" | "point" | "dispatch" | "of_map" | "unit" | "native_map" | "xor" => true,
         "xmap" | "validate" | "alt" => {
             let inner = rt.captured(c).first().copied().unwrap_or_default();
             reads_object(rt, inner)
@@ -629,6 +649,10 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
         }
         // `withAlternative`: written with the first.
         "alt" => encode(rt, part(0), value),
+        "optional_empty_map" => {
+            let held = rt.get_field(value, "value");
+            if held.r() == 0 { Ok(Nbt::Compound(BTreeMap::new())) } else { encode(rt, part(0), held) }
+        }
         "unit" => Ok(Nbt::Compound(BTreeMap::new())),
         "lazy" => {
             let inner = lazy(rt, c)?;
@@ -655,7 +679,7 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
             }
             Ok(Nbt::Compound(out))
         }
-        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" => {
+        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" => {
             let mut out = BTreeMap::new();
             encode_map(rt, c, value, &mut out)?;
             Ok(Nbt::Compound(out))
@@ -733,7 +757,7 @@ fn encode_map(rt: &mut Rt, c: V, value: V, out: &mut BTreeMap<String, Nbt>) -> R
             }
         }
         "alt" => encode_map(rt, part(0), value, out)?,
-        "either" => {
+        "either" | "xor" => {
             let left = rt.get_field(value, "$isLeft").i() != 0;
             let v = rt.get_field(value, if left { "$left" } else { "$right" });
             encode_map(rt, if left { part(0) } else { part(1) }, v, out)?;
@@ -758,7 +782,12 @@ fn map_back(rt: &mut Rt, parts: &[V], value: V) -> Result<V, String> {
         return Err("a mapped codec with no way back".into());
     }
     let r = run(rt, FUNCTION, from, &[value])?;
-    if parts.get(4).is_some_and(|f| f.i() != 0) { result_of(rt, r) } else { Ok(r) }
+    let r = if parts.get(4).is_some_and(|f| f.i() != 0) { result_of(rt, r)? } else { r };
+    // `stringResolver`'s: a value its function names nothing.
+    if parts.get(5).is_some_and(|f| f.i() != 0) && r.r() == 0 {
+        return Err("Element with unknown name".into());
+    }
+    Ok(r)
 }
 
 /// A registry entry's id (`byNameCodec`): what the mod registered, a vanilla entry's own name.
@@ -1020,6 +1049,31 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return Some(codec(rt, "compat:codec/unit", vec![v]));
         }
         ("com/mojang/serialization/Codec", "lazyInitialized") => return Some(codec(rt, "compat:codec/lazy", vec![a(0), V::NULL])),
+        // `Codec.stringResolver(toString, fromString)`: a string the mod's functions turn into the
+        // value and back; one they answer null for is an error. Parts as `xmap`'s, and that check.
+        ("com/mojang/serialization/Codec", "stringResolver") => {
+            let s = prim(rt, "string");
+            return Some(codec(rt, "compat:codec/xmap", vec![s, a(1), V::I(0), a(0), V::I(0), V::I(1)]));
+        }
+        ("net/minecraft/util/ExtraCodecs", "optionalEmptyMap") => return Some(codec(rt, "compat:codec/optional_empty_map", vec![a(0)])),
+        // `Codec.checkRange(min, max)`: a function answering a `DataResult` (for `validate`,
+        // `flatXmap`).
+        ("com/mojang/serialization/Codec", "checkRange") => return Some(crate::functions::check_range(rt, a(0), a(1))),
+        // The static `Codec.optionalField(name, codec, lenient)`: `optionalFieldOf`'s.
+        ("com/mojang/serialization/Codec", "optionalField") => {
+            return Some(codec(rt, "compat:codec/optional", vec![a(0), a(1), V::NULL, V::I(0), V::I((a(2).i() != 0) as i32)]));
+        }
+        // NeoForge's `aliasedFieldOf(codec, names...)`: the field under the first name present,
+        // written under the first (fields with alternatives, as NeoForge builds it).
+        ("net/neoforged/neoforge/common/util/NeoForgeExtraCodecs", "aliasedFieldOf") => {
+            let names = jutil::elements(rt, a(1));
+            let mut fields = names.into_iter().map(|n| codec(rt, "compat:codec/field", vec![n, a(0)])).collect::<Vec<_>>().into_iter();
+            let first = fields.next()?;
+            return Some(fields.fold(first, |c, alt| codec(rt, "compat:codec/alt", vec![c, alt, V::NULL])));
+        }
+        ("net/neoforged/neoforge/common/util/NeoForgeExtraCodecs", "xor") if desc.starts_with("(Lcom/mojang/serialization/MapCodec;") => {
+            return Some(codec(rt, "compat:codec/xor", vec![a(0), a(1)]));
+        }
         ("com/mojang/serialization/Codec", "intRange") | ("net/minecraft/util/ExtraCodecs", "intRange") => {
             return Some(range(rt, "int", a(0).i() as f64, a(1).i() as f64));
         }
@@ -1639,5 +1693,120 @@ mod tests {
         let positive = st(&mut rt, "net/minecraft/util/ExtraCodecs.POSITIVE_INT");
         assert!(decode(&mut rt, positive, &serde_json::json!(4)).is_ok());
         assert!(decode(&mut rt, positive, &serde_json::json!(0)).is_err());
+    }
+
+    /// A mod's `fromString` (the frequency types Mekanism names, StorageDrawers' key types): known
+    /// names only, `toString` back. What `Codec.stringResolver` is made of.
+    fn names(rt: &mut Rt, key: &'static str, _: &'static str, args: &[V]) -> V {
+        let arg = rt.str_of(args[1]).map(str::to_owned);
+        match rt.class_of(args[0]) {
+            "test/FromName" => match arg.as_deref() {
+                Some("public") => rt.string("PUBLIC"),
+                Some("private") => rt.string("PRIVATE"),
+                _ => V::NULL,
+            },
+            "test/ToName" => match arg.as_deref() {
+                Some("PUBLIC") => rt.string("public"),
+                _ => V::NULL,
+            },
+            _ => crate::api::call(rt, key, args),
+        }
+    }
+
+    /// DFU's `stringResolver`: a name its function knows reads, one it doesn't is an error both
+    /// ways, as DFU's `Optional.ofNullable(...).orElseGet(error)`.
+    #[test]
+    fn a_string_resolver_reads_only_the_names_its_functions_know() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(names);
+        let (to, from) = (rt.new_object("test/ToName"), rt.new_object("test/FromName"));
+        let resolver = c(&mut rt, "com/mojang/serialization/Codec.stringResolver.(Ljava/util/function/Function;Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;", &[to, from]);
+        let v = decode(&mut rt, resolver, &serde_json::json!("public")).unwrap();
+        assert_eq!(rt.str_of(v), Some("PUBLIC"));
+        assert_eq!(decode(&mut rt, resolver, &serde_json::json!("trusted")), Err("Unknown element name:trusted".to_owned()));
+        assert_eq!(encode(&mut rt, resolver, v), Ok(Nbt::String("public".into())));
+        let private = rt.string("PRIVATE");
+        assert!(encode(&mut rt, resolver, private).is_err(), "a value toString names nothing");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `ExtraCodecs.optionalEmptyMap`: `{}` is an empty Optional, written back as `{}`; anything
+    /// else is the codec's. `Codec.checkRange` refuses what lies outside, as `validate` asks it.
+    #[test]
+    fn an_empty_map_is_an_empty_optional_and_a_checked_range_refuses_outside() {
+        let mut rt = Rt::new();
+        crate::install();
+        // What generated code does for an object no mod class is: the API call by the method's key.
+        fn vcall(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+            crate::api::call(rt, key, args)
+        }
+        rt.vcall = Some(vcall);
+        let int = st(&mut rt, "com/mojang/serialization/Codec.INT");
+        let opt = c(&mut rt, "net/minecraft/util/ExtraCodecs.optionalEmptyMap.(Lcom/mojang/serialization/Codec;)Lcom/mojang/serialization/Codec;", &[int]);
+        let none = decode(&mut rt, opt, &serde_json::json!({})).unwrap();
+        assert_eq!(rt.get_field(none, "value"), V::NULL);
+        let some = decode(&mut rt, opt, &serde_json::json!(7)).unwrap();
+        assert_eq!(rt.get_field(rt.get_field(some, "value"), "value"), V::I(7));
+        assert_eq!(encode(&mut rt, opt, none), Ok(Nbt::Compound(BTreeMap::new())));
+        assert_eq!(encode(&mut rt, opt, some), Ok(Nbt::Int(7)));
+        assert!(decode(&mut rt, opt, &serde_json::json!("seven")).is_err());
+
+        let long = st(&mut rt, "com/mojang/serialization/Codec.LONG");
+        let (lo, hi) = (boxed(&mut rt, "java/lang/Long", V::J(0)), boxed(&mut rt, "java/lang/Long", V::J(i64::MAX)));
+        let check = c(&mut rt, "com/mojang/serialization/Codec.checkRange.(Ljava/lang/Number;Ljava/lang/Number;)Ljava/util/function/Function;", &[lo, hi]);
+        let checked = c(&mut rt, "com/mojang/serialization/Codec.validate.(Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;", &[long, check]);
+        let big = decode(&mut rt, checked, &serde_json::json!(9_000_000_000_i64)).unwrap();
+        assert_eq!(rt.get_field(big, "value"), V::J(9_000_000_000));
+        assert_eq!(decode(&mut rt, checked, &serde_json::json!(-1)), Err("Value -1 outside of range [0:9223372036854775807]".to_owned()));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The static `Codec.optionalField(name, codec, lenient)` reads as `optionalFieldOf`; NeoForge's
+    /// `aliasedFieldOf` reads the first of its names present and writes the first; its `xor` reads
+    /// exactly one of two.
+    #[test]
+    fn optional_aliased_and_exclusive_fields_read_as_neoforge_builds_them() {
+        let mut rt = Rt::new();
+        crate::install();
+        let (int, string) = (st(&mut rt, "com/mojang/serialization/Codec.INT"), st(&mut rt, "com/mojang/serialization/Codec.STRING"));
+        let obj = |j: serde_json::Value| match j {
+            Json::Object(o) => o,
+            _ => unreachable!(),
+        };
+        let n = rt.string("n");
+        let optional = c(&mut rt, "com/mojang/serialization/Codec.optionalField.(Ljava/lang/String;Lcom/mojang/serialization/Codec;Z)Lcom/mojang/serialization/MapCodec;", &[n, int, V::I(0)]);
+        let absent = decode_map(&mut rt, optional, &obj(serde_json::json!({}))).unwrap();
+        assert_eq!(rt.get_field(absent, "value"), V::NULL);
+        let two = decode_map(&mut rt, optional, &obj(serde_json::json!({"n": 2}))).unwrap();
+        assert_eq!(rt.get_field(rt.get_field(two, "value"), "value"), V::I(2));
+        assert!(decode_map(&mut rt, optional, &obj(serde_json::json!({"n": "two"}))).is_err(), "not lenient");
+
+        let (count, amount) = (rt.string("count"), rt.string("amount"));
+        let aliases = rt.alloc("[Ljava/lang/String;", Data::Array(vec![count, amount]));
+        let aliased = c(&mut rt, "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs.aliasedFieldOf.(Lcom/mojang/serialization/Codec;[Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[int, aliases]);
+        let three = decode_map(&mut rt, aliased, &obj(serde_json::json!({"amount": 3}))).unwrap();
+        assert_eq!(rt.get_field(three, "value"), V::I(3));
+        let four = decode_map(&mut rt, aliased, &obj(serde_json::json!({"count": 4, "amount": 3}))).unwrap();
+        assert_eq!(rt.get_field(four, "value"), V::I(4));
+        assert!(decode_map(&mut rt, aliased, &obj(serde_json::json!({}))).is_err());
+        let mut out = BTreeMap::new();
+        encode_map(&mut rt, aliased, three, &mut out).unwrap();
+        assert_eq!(out, BTreeMap::from([("count".to_owned(), Nbt::Int(3))]));
+
+        let (a, b) = (rt.string("a"), rt.string("b"));
+        let fa = c(&mut rt, "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[int, a]);
+        let fb = c(&mut rt, "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[string, b]);
+        let xor = c(&mut rt, "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs.xor.(Lcom/mojang/serialization/MapCodec;Lcom/mojang/serialization/MapCodec;)Lcom/mojang/serialization/MapCodec;", &[fa, fb]);
+        let left = decode_map(&mut rt, xor, &obj(serde_json::json!({"a": 1}))).unwrap();
+        assert_eq!(rt.get_field(left, "$isLeft"), V::I(1));
+        let right = decode_map(&mut rt, xor, &obj(serde_json::json!({"b": "x"}))).unwrap();
+        assert_eq!(rt.str_of(rt.get_field(right, "$right")), Some("x"));
+        assert!(decode_map(&mut rt, xor, &obj(serde_json::json!({"a": 1, "b": "x"}))).unwrap_err().starts_with("Both alternatives"));
+        assert!(decode_map(&mut rt, xor, &obj(serde_json::json!({}))).unwrap_err().starts_with("Neither alternative"));
+        let mut out = BTreeMap::new();
+        encode_map(&mut rt, xor, right, &mut out).unwrap();
+        assert_eq!(out, BTreeMap::from([("b".to_owned(), Nbt::String("x".into()))]));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

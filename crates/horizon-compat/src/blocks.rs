@@ -600,6 +600,32 @@ fn vanilla_placement(rt: &mut Rt, class: &str, b: V, ctx: V) -> V {
     api::state(rt, &out)
 }
 
+/// The block classes of 1.21.1 whose `getShape(state, level, pos, context)` is `BlockBehaviour`'s
+/// (a full block): neither they nor a class above them overrides it, as Minecraft 1.21.1's class
+/// files say. A mod block's `super.getShape(...)` to one of them answers that.
+const DEFAULT_SHAPE_BLOCKS: [&str; 99] = [
+    "AbstractBannerBlock", "AbstractCandleBlock", "AbstractChestBlock", "AbstractFurnaceBlock", "AbstractSkullBlock", "AmethystBlock", "BarrelBlock",
+    "BarrierBlock", "BaseEntityBlock", "BeaconBlock", "BeehiveBlock", "BlastFurnaceBlock", "Block", "BrushableBlock", "BuddingAmethystBlock",
+    "BushBlock", "CartographyTableBlock", "CarvedPumpkinBlock", "CherryLeavesBlock", "ChiseledBookShelfBlock", "ChorusFlowerBlock",
+    "ColoredFallingBlock", "CommandBlock", "ConcretePowderBlock", "CopperBulbBlock", "CoralBlock", "CrafterBlock", "CraftingTableBlock",
+    "CryingObsidianBlock", "DirectionalBlock", "DispenserBlock", "DoublePlantBlock", "DropExperienceBlock", "DropperBlock", "EndGatewayBlock",
+    "EquipableCarvedPumpkinBlock", "FaceAttachedHorizontalDirectionalBlock", "FallingBlock", "FletchingTableBlock", "FrostedIceBlock", "FurnaceBlock",
+    "GlazedTerracottaBlock", "GrassBlock", "HalfTransparentBlock", "HayBlock", "HoneyBlock", "HorizontalDirectionalBlock", "HugeMushroomBlock",
+    "IceBlock", "InfestedBlock", "InfestedRotatedPillarBlock", "JigsawBlock", "JukeboxBlock", "LeavesBlock", "LoomBlock", "MagmaBlock",
+    "MangroveLeavesBlock", "MangroveRootsBlock", "MossBlock", "MudBlock", "MyceliumBlock", "NetherrackBlock", "NoteBlock", "NyliumBlock",
+    "ObserverBlock", "PowderSnowBlock", "PoweredBlock", "PumpkinBlock", "RedStoneOreBlock", "RedstoneLampBlock", "RespawnAnchorBlock",
+    "RootedDirtBlock", "RotatedPillarBlock", "SculkBlock", "SculkCatalystBlock", "SculkShriekerBlock", "SlimeBlock", "SmithingTableBlock",
+    "SmokerBlock", "SnowyDirtBlock", "SoulSandBlock", "SpawnerBlock", "SpongeBlock", "SpreadingSnowyDirtBlock", "StainedGlassBlock", "StructureBlock",
+    "TallFlowerBlock", "TargetBlock", "TintedGlassBlock", "TntBlock", "TransparentBlock", "TrialSpawnerBlock", "VaultBlock",
+    "WaterloggedTransparentBlock", "WeatheringCopperBulbBlock", "WeatheringCopperFullBlock", "WeatheringCopperGrateBlock", "WebBlock",
+    "WetSpongeBlock",
+];
+
+fn default_shape_class(owner: &str) -> bool {
+    owner == "net/minecraft/world/level/block/state/BlockBehaviour"
+        || owner.strip_prefix("net/minecraft/world/level/block/").is_some_and(|c| DEFAULT_SHAPE_BLOCKS.binary_search(&c).is_ok())
+}
+
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
@@ -609,11 +635,12 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             ("net/minecraft/world/level/block/SignBlock", "getWoodType") | ("net/minecraft/world/level/block/BedBlock", "getConnectedDirection")
         )
         || (name == "type" && owner.ends_with("SignBlock") && owner.starts_with("net/minecraft/world/level/block/"))
+        || (name == "getShape" && default_shape_class(owner))
         || matches!(name, "values" | "registerDefaultState" | "defaultBlockState" | "defaultMapColor")
         || (name == "getSerializedName" && enum_class(owner))
         || (name == "toString" && enum_class(owner) && owner.starts_with("net/minecraft/world/level/block/state/properties/"))
         || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "createBlockStateDefinition" | "getStateForPlacement" | "<init>"))
-        || (owner.starts_with("net/minecraft/world/item/") && name == "<init>")
+        || ((owner.starts_with("net/minecraft/world/item/") || owner == DEFERRED_SPAWN_EGG) && name == "<init>")
         || owner == CAULDRON_INTERACTION
         || owner == ARMOR_LAYER
         || (owner == DISPENSER && matches!(name, "registerBehavior" | "registerProjectileBehavior"))
@@ -627,6 +654,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 }
 
 const TIERS: &str = "net/minecraft/world/item/Tiers";
+const DEFERRED_SPAWN_EGG: &str = "net/neoforged/neoforge/common/DeferredSpawnEggItem";
 const SIMPLE_TIER: &str = "net/neoforged/neoforge/common/SimpleTier";
 /// Vanilla's tool tiers as 1.21.1 declares them: (constant, blocks they can't drop, uses, speed,
 /// attack damage bonus, enchantment value).
@@ -835,6 +863,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(rt.alloc(class, Data::Array(all)))
         }
         (DYE_COLOR, _) => dye_call(rt, name, args),
+        // `super.getShape(state, level, pos, context)` to a class with vanilla's default.
+        (o, "getShape") if desc == GET_SHAPE.trim_start_matches("getShape.") && default_shape_class(o) => Some(crate::shapes::shape(rt, &[FULL_BOX])),
         // `new SoundType(volume, pitch, break, step, place, hit, fall)` and NeoForge's
         // `DeferredSoundType`, whose sounds are suppliers (of a mod's registered sound events).
         (SOUND_TYPE | DEFERRED_SOUND_TYPE, "<init>") if desc.starts_with("(FF") => {
@@ -1052,9 +1082,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             constructed(rt, a(0), o, props);
             Some(V::Void)
         }
-        (o, "<init>") if o.starts_with("net/minecraft/world/item/") && desc.contains("Lnet/minecraft/world/item/Item$Properties;") => {
+        (o, "<init>") if (o.starts_with("net/minecraft/world/item/") || o == DEFERRED_SPAWN_EGG) && desc.contains("Lnet/minecraft/world/item/Item$Properties;") => {
             if let Some(p) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == ITEM_PROPERTIES) {
                 rt.put_field(a(0), "$properties", p);
+            }
+            // NeoForge's `DeferredSpawnEggItem(type, background, highlight, properties)`: the entity
+            // type's supplier and the egg's two colours, under vanilla's `SpawnEggItem` names.
+            if o == DEFERRED_SPAWN_EGG && desc.starts_with("(Ljava/util/function/Supplier;II") {
+                rt.put_field(a(0), "typeSupplier", a(1));
+                rt.put_field(a(0), "backgroundColor", a(2));
+                rt.put_field(a(0), "highlightColor", a(3));
             }
             // `BlockItem(Block, Properties)` and its kinds: the block it places (`Block.asItem()` finds it).
             if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") {
@@ -1212,6 +1249,12 @@ fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
         }
         "sound" => set(rt, "$sound", a(1)),
         "lightLevel" => set(rt, "$light", a(1)),
+        // The field itself (`properties.lightEmission`, opened by an access transformer): what
+        // `lightLevel` set, else `Properties.of()`'s `state -> 0`.
+        "$lightEmission" => Some(match rt.get_field(this, "$light") {
+            V::Void | V::NULL => crate::functions::constant(rt, V::I(0)),
+            f => f,
+        }),
         "noOcclusion" => set(rt, "$noOcclusion", V::I(1)),
         "noCollission" | "noCollision" => {
             rt.put_field(this, "$noOcclusion", V::I(1));
@@ -1814,6 +1857,46 @@ mod tests {
         let (east, west) = (api::direction(&mut rt, 5), api::direction(&mut rt, 4));
         assert_eq!(api::call(&mut rt, connected, &[foot]), east);
         assert_eq!(api::call(&mut rt, connected, &[head]), west);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// What a mod block reads of vanilla's while it is made (Mekanism's machines): `super.getShape`
+    /// to a class with vanilla's default is a full block, and to one with shapes of its own
+    /// (`SlabBlock`) isn't answered as one; a state's block holder holds the block, by its name; the
+    /// properties' `lightEmission` field is what `lightLevel` set, else `state -> 0`.
+    #[test]
+    fn a_mod_blocks_reads_of_vanillas_answer_as_vanilla() {
+        let mut rt = Rt::new();
+        crate::install();
+        let get_shape = |owner: &str| {
+            Box::leak(format!("net/minecraft/world/level/block/{owner}.getShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;").into_boxed_str()) as &'static str
+        };
+        let machine = rt.new_object("test/Machine");
+        let st = api::state(&mut rt, "minecraft:stone");
+        for owner in ["Block", "BaseEntityBlock", "HorizontalDirectionalBlock", "state/BlockBehaviour"] {
+            let shape = api::call(&mut rt, get_shape(owner), &[machine, st, V::NULL, V::NULL, V::NULL]);
+            assert_eq!(crate::shapes::boxes(&rt, shape), Some(vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]), "{owner}");
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        api::call(&mut rt, get_shape("SlabBlock"), &[machine, st, V::NULL, V::NULL, V::NULL]);
+        assert_eq!(rt.unmapped.len(), 1, "a slab's shape is its own: {:?}", rt.unmapped);
+        rt.unmapped.clear();
+
+        let holder = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockState.getBlockHolder.()Lnet/minecraft/core/Holder;", &[st]);
+        let held = api::call(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]);
+        let stone = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockState.getBlock.()Lnet/minecraft/world/level/block/Block;", &[st]);
+        assert_eq!(held, stone);
+        let name = api::call(&mut rt, "net/minecraft/core/Holder.getRegisteredName.()Ljava/lang/String;", &[holder]);
+        assert_eq!(rt.str_of(name), Some("minecraft:stone"));
+
+        let light = "net/minecraft/world/level/block/state/BlockBehaviour$Properties.$lightEmission.()Ljava/util/function/ToIntFunction;";
+        let to_int = "java/util/function/ToIntFunction.applyAsInt.(Ljava/lang/Object;)I";
+        let p = props(&mut rt);
+        let f = horizon_compat_core::api::game_field(&mut rt, p, "lightEmission", "$lightEmission", light);
+        assert_eq!(api::call(&mut rt, to_int, &[f, st]), V::I(0), "Properties.of()'s state -> 0");
+        let lit = rt.new_object("test/Lit");
+        api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.lightLevel.(Ljava/util/function/ToIntFunction;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[p, lit]);
+        assert_eq!(horizon_compat_core::api::game_field(&mut rt, p, "lightEmission", "$lightEmission", light), lit);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

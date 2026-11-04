@@ -58,6 +58,12 @@ thread_local! {
 /// stack's end, instead of overflowing the game's.
 const MAX_DEPTH: u32 = 512;
 
+/// A game class's field read by the mod's code ([`horizon_compat_core::api::game_field`]), for
+/// code linked against this crate: generated code names `api::game_field` either way.
+pub fn game_field(rt: &mut Rt, o: V, name: &'static str, own: &'static str, key: &'static str) -> V {
+    horizon_compat_core::api::game_field(rt, o, name, own, key)
+}
+
 /// Calls the API method `key` (`owner.name.desc`). For instance methods
 /// `args[0]` is the receiver. A key naming one of the mod's own classes (a
 /// member it inherits from the API, as `javac` writes inherited calls) is
@@ -1389,6 +1395,13 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let (b, _) = crate::host::split_state(&text);
             match n {
                 "getBlock" => block(rt, &b.to_owned()),
+                // The block's registry entry; a mod block not registered yet learns its name when
+                // it is.
+                "getBlockHolder" => {
+                    let blk = block(rt, &b.to_owned());
+                    let id = if b.starts_with(UNREGISTERED) { "" } else { b };
+                    crate::neo::registry_holder(rt, "block", &id.to_owned(), blk)
+                }
                 // `BlockStateBase`'s own view of itself as a `BlockState` (a mixin's `@Shadow`).
                 "asState" => a(0),
                 "isAir" => V::I(matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") as i32),
