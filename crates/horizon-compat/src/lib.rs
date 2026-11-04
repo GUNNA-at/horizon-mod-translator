@@ -49,6 +49,8 @@ pub mod vanilla_shapes;
 pub mod vanilla_sounds;
 pub mod vanilla_tags;
 
+// BEGIN RUNTIME HELPERS: bundles inline this part of the root into their `compat` module too.
+
 /// An API key's owner, name and descriptor (`owner.name.desc`). The modules [`api::call`] asks in
 /// turn each want them for the same key, so the last key's parts are kept: one split per call,
 /// not one per module (a third of a client tick went to splitting before).
@@ -93,6 +95,8 @@ pub(crate) fn misses() -> u64 {
 pub(crate) fn missed_since(key: &'static str, since: u64) -> bool {
     LAST_MISS.with(|l| l.borrow().get(key).is_some_and(|&n| n > since))
 }
+
+// END RUNTIME HELPERS
 
 /// Makes this mapping the one engines that link `horizon-compat-core` alone call.
 pub fn install() {

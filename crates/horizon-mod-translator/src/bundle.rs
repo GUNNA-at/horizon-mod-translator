@@ -28,6 +28,9 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
 /// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
+/// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
+/// inlined `compat` module beside the core's.
+const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
 const COMPAT: [(&str, &str); 44] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
@@ -93,8 +96,11 @@ fn inlined_core() -> String {
         .filter(|(n, _)| !matches!(*n, "host.rs" | "gc.rs"))
         .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
         .collect();
+    let (_, helpers) = COMPAT_ROOT.split_once("// BEGIN RUNTIME HELPERS").expect("compat runtime helper markers");
+    let (helpers, _) = helpers.split_once("// END RUNTIME HELPERS").expect("compat runtime helper markers");
+    let helpers = helpers.split_once('\n').map_or("", |(_, rest)| rest);
     // `Rt::is_a` asks the mapping's table of Minecraft's class families.
-    format!("{head}{tail}\n{mods}pub use api_common::api_is_a;\n")
+    format!("{head}{tail}\n{mods}pub use api_common::api_is_a;\n{helpers}")
 }
 
 /// Writes `contents` unless the file already holds exactly that, so an unchanged engine keeps its
