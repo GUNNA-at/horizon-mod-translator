@@ -772,9 +772,13 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
             _ => V::I(t.parse().unwrap_or(0)),
         }
     };
-    // `xValue()` on any boxed number, with Java's narrowing.
+    // `xValue()` on any boxed number, with Java's narrowing; a number a collection holds raw
+    // (fastutil's primitive collections) is its own value.
     if let Some(kind) = name.strip_suffix("Value") {
-        let v = rt.get_field(a(0), "value");
+        let v = match a(0) {
+            V::R(_) => rt.get_field(a(0), "value"),
+            raw => raw,
+        };
         let as_f64 = match v {
             V::I(i) => i as f64,
             V::J(j) => j as f64,

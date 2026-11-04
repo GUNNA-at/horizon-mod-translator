@@ -147,7 +147,11 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             rt.put_field(o, "value", a(0));
             o
         }
-        "java/lang/Integer.intValue.()I" => rt.get_field(a(0), "value"),
+        // A collection's int is held raw (fastutil's `IntIterator.next()` boxes it in Java).
+        "java/lang/Integer.intValue.()I" => match a(0) {
+            V::R(_) => rt.get_field(a(0), "value"),
+            raw => V::I(raw.i()),
+        },
         "java/lang/Enum.ordinal.()I" => V::I(rt.get_field(a(0), "$ordinal").i()),
 
         // net.minecraft.core.BlockPos

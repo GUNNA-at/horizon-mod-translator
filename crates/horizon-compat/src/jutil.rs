@@ -1266,6 +1266,9 @@ fn entry_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     Some(match name {
         "getKey" => kv[0],
         "getValue" => kv[1],
+        // fastutil's typed accessors (`getIntKey`, `getIntValue`, `getLongKey`...).
+        n if n.starts_with("get") && n.ends_with("Key") => kv[0],
+        n if n.starts_with("get") && n.ends_with("Value") => kv[1],
         "setValue" => {
             let v = args.get(1).copied().unwrap_or_default();
             let old = std::mem::replace(&mut list_mut(rt, this)?[1], v);
@@ -1327,7 +1330,7 @@ fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             put_table(rt, this, Table { sorted: matches!(rt.heap.get(this.r() as usize).map(|o| &o.data), Some(Data::Table(t)) if t.sorted), ..Table::default() });
             V::Void
         }
-        "iterator" => {
+        "iterator" | "fastIterator" => {
             let items = elements(rt, this);
             iter_over(rt, this, items)
         }
@@ -1657,7 +1660,8 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let vals: Vec<V> = table_entries(rt, this).into_iter().map(|(_, v)| v).collect();
             new_list(rt, vals)
         }
-        "entrySet" => {
+        // fastutil's typed entry sets (`int2ObjectEntrySet`, `object2IntEntrySet`...) are its entry set.
+        n if n == "entrySet" || (n.ends_with("EntrySet") && n.contains('2')) => {
             let es: Vec<(V, V)> = table_entries(rt, this);
             let mut items = Vec::with_capacity(es.len());
             for (k, v) in es {
@@ -2203,6 +2207,37 @@ mod tests {
         assert_eq!(c(&mut rt, "java/util/Arrays.hashCode.([D)I", &[d]), V::I(1008731073));
         let l = rt.alloc("[J", Data::Array(vec![V::J(1 << 40), V::J(-7)]));
         assert_eq!(c(&mut rt, "java/util/Arrays.hashCode.([J)I", &[l]), V::I(8903));
+    }
+
+    #[test]
+    fn fastutil_int_maps_and_sets_walk_as_in_java() {
+        // Create's recipe trie walks `Int2ObjectMap.int2ObjectEntrySet()` and an `IntSet`'s
+        // iterator, unboxing each `Integer` it gives.
+        let mut rt = Rt::new();
+        let m = rt.new_object("it/unimi/dsi/fastutil/ints/Int2ObjectOpenHashMap");
+        c(&mut rt, "it/unimi/dsi/fastutil/ints/Int2ObjectOpenHashMap.<init>.()V", &[m]);
+        let (x, y) = (rt.string("x"), rt.string("y"));
+        for (k, v) in [(4, x), (9, y)] {
+            c(&mut rt, "it/unimi/dsi/fastutil/ints/Int2ObjectMap.put.(ILjava/lang/Object;)Ljava/lang/Object;", &[m, V::I(k), v]);
+        }
+        let es = c(&mut rt, "it/unimi/dsi/fastutil/ints/Int2ObjectMap.int2ObjectEntrySet.()Lit/unimi/dsi/fastutil/objects/ObjectSet;", &[m]);
+        let it = c(&mut rt, "it/unimi/dsi/fastutil/objects/ObjectSet.iterator.()Lit/unimi/dsi/fastutil/objects/ObjectIterator;", &[es]);
+        let mut seen = Vec::new();
+        while c(&mut rt, "java/util/Iterator.hasNext.()Z", &[it]) == V::I(1) {
+            let e = c(&mut rt, "java/util/Iterator.next.()Ljava/lang/Object;", &[it]);
+            let k = c(&mut rt, "it/unimi/dsi/fastutil/ints/Int2ObjectMap$Entry.getIntKey.()I", &[e]);
+            let v = c(&mut rt, "it/unimi/dsi/fastutil/ints/Int2ObjectMap$Entry.getValue.()Ljava/lang/Object;", &[e]);
+            seen.push((k, v));
+        }
+        assert_eq!(seen, [(V::I(4), x), (V::I(9), y)]);
+        let set = rt.new_object("it/unimi/dsi/fastutil/ints/IntOpenHashSet");
+        c(&mut rt, "it/unimi/dsi/fastutil/ints/IntOpenHashSet.<init>.()V", &[set]);
+        c(&mut rt, "it/unimi/dsi/fastutil/ints/IntSet.add.(I)Z", &[set, V::I(7)]);
+        let it = c(&mut rt, "it/unimi/dsi/fastutil/ints/IntSet.iterator.()Lit/unimi/dsi/fastutil/ints/IntIterator;", &[set]);
+        let n = c(&mut rt, "java/util/Iterator.next.()Ljava/lang/Object;", &[it]);
+        crate::install();
+        assert_eq!(crate::api::call(&mut rt, "java/lang/Integer.intValue.()I", &[n]), V::I(7));
+        assert_eq!(crate::api::call(&mut rt, "java/lang/Number.longValue.()J", &[n]), V::J(7));
     }
 
     #[test]
