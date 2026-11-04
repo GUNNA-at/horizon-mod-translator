@@ -37,6 +37,7 @@ pub mod level_env;
 pub mod mixin;
 pub mod mod_entities;
 pub mod nbt;
+pub mod ops;
 pub mod neo;
 pub mod neo_tags;
 pub mod network;

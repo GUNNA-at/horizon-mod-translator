@@ -94,7 +94,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             "NON_EMPTY_STRING" => prim(rt, "string"),
             _ => return None,
         },
-        ("net/minecraft/nbt/NbtOps", "INSTANCE") => rt.intern("compat:nbt-ops".into(), |rt| rt.new_object("net/minecraft/nbt/NbtOps")),
+        ("net/minecraft/nbt/NbtOps", "INSTANCE") => crate::ops::nbt_ops(rt),
         ("com/mojang/serialization/JsonOps", "INSTANCE" | "COMPRESSED") => rt.intern("compat:json-ops".into(), |rt| rt.new_object("com/mojang/serialization/JsonOps")),
         ("net/minecraft/resources/ResourceLocation", "CODEC") => native(rt, "resource_location"),
         ("net/minecraft/core/BlockPos", "CODEC") => native(rt, "block_pos"),
@@ -324,6 +324,7 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
             let inner = lazy(rt, c)?;
             decode(rt, inner, j)
         }
+        "java" => java_decode(rt, part(0), j),
         "registry" => {
             let Json::String(id) = j else { return Err(format!("Not a string: {j}")) };
             let registry = rt.str_of(part(0)).unwrap_or("").to_owned();
@@ -351,7 +352,7 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
         }
         // A map codec read as a codec (`MapCodec.codec()`, a record, a dispatch): the value is an
         // object of its fields.
-        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" => {
+        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" | "java_map" => {
             let Json::Object(o) = j else { return Err(format!("Not a map: {j}")) };
             decode_map(rt, c, o)
         }
@@ -437,6 +438,7 @@ pub fn decode_map(rt: &mut Rt, c: V, o: &Map<String, Json>) -> Result<V, String>
             let name = rt.str_of(part(0)).unwrap_or("").to_owned();
             crate::crafting::decode_map(rt, &name, parts.get(1..).unwrap_or_default(), o)
         }
+        "java_map" => java_decode_map(rt, part(0), o),
         // A codec over the whole object.
         _ => decode(rt, c, &Json::Object(o.clone())),
     }
@@ -484,7 +486,7 @@ fn lazy(rt: &mut Rt, c: V) -> Result<V, String> {
 /// one): what a dispatch hands the rest of its object to, as DFU's `KeyDispatchCodec` does.
 fn reads_object(rt: &mut Rt, c: V) -> bool {
     match kind(rt, c) {
-        "field" | "optional" | "record" | "point" | "dispatch" | "of_map" | "unit" | "native_map" | "xor" => true,
+        "field" | "optional" | "record" | "point" | "dispatch" | "of_map" | "unit" | "native_map" | "xor" | "java_map" => true,
         "xmap" | "validate" | "alt" => {
             let inner = rt.captured(c).first().copied().unwrap_or_default();
             reads_object(rt, inner)
@@ -658,6 +660,7 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
             let inner = lazy(rt, c)?;
             encode(rt, inner, value)
         }
+        "java" => java_encode(rt, part(0), value),
         "registry" => {
             let registry = rt.str_of(part(0)).unwrap_or("").to_owned();
             registry_key(rt, &registry, value).map(Nbt::String)
@@ -679,7 +682,7 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
             }
             Ok(Nbt::Compound(out))
         }
-        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" => {
+        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" | "java_map" => {
             let mut out = BTreeMap::new();
             encode_map(rt, c, value, &mut out)?;
             Ok(Nbt::Compound(out))
@@ -766,6 +769,7 @@ fn encode_map(rt: &mut Rt, c: V, value: V, out: &mut BTreeMap<String, Nbt>) -> R
             let inner = lazy(rt, c)?;
             encode_map(rt, inner, value, out)?;
         }
+        "java_map" => java_encode_map(rt, part(0), value, out)?,
         // A codec over the whole object.
         _ => match encode(rt, c, value)? {
             Nbt::Compound(m) => out.extend(m),
@@ -947,6 +951,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     owner.starts_with("com/mojang/serialization/")
         || owner.starts_with("com/mojang/datafixers/")
         || matches!(owner, "net/minecraft/util/ExtraCodecs" | "net/minecraft/util/StringRepresentable" | "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs" | "net/minecraft/resources/RegistryOps")
+        || owner == crate::ops::NBT_OPS
         || matches!(name, "byNameCodec" | "holderByNameCodec" | "createSerializationContext")
         || (matches!(name, "simpleCodec" | "propertiesCodec") && owner.starts_with("net/minecraft/world/level/block/"))
         || (matches!(owner, "net/minecraft/tags/TagKey" | "net/minecraft/resources/ResourceKey") && matches!(name, "codec" | "hashedCodec"))
@@ -1119,6 +1124,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if is_codec(rt, receiver) {
         return codec_method(rt, method, desc, args);
     }
+    if crate::ops::takes(rt, owner, receiver) {
+        return crate::ops::call(rt, method, desc, args);
+    }
+    // A codec class of the mod's own (SophisticatedCore's `SetCodec`, Mekanism's
+    // `SequencedCollectionCodec`): a combinator or a default method of DFU's interfaces wraps it,
+    // and reading or writing runs its own `decode`/`encode`.
+    if MOD_CODEC_METHODS.contains(&method)
+        && let Some(kind) = mod_codec_kind(rt, receiver)
+    {
+        let wrapped = codec(rt, kind, vec![receiver]);
+        let mut with = args.to_vec();
+        with[0] = wrapped;
+        return codec_method(rt, method, desc, &with);
+    }
     match rt.class_of(receiver) {
         DATA_RESULT => data_result_method(rt, method, desc, args),
         EITHER => {
@@ -1172,6 +1191,70 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }),
         _ => None,
     }
+}
+
+/// What a mod's own codec class gets from DFU's interfaces (their default methods) and wraps for.
+const MOD_CODEC_METHODS: [&str; 26] = [
+    "fieldOf", "optionalFieldOf", "lenientOptionalFieldOf", "listOf", "sizeLimitedListOf", "xmap", "comapFlatMap", "flatXmap", "flatComapMap",
+    "validate", "codec", "forGetter", "dispatch", "partialDispatch", "dispatchStable", "dispatchMap", "orElse", "orElseGet", "withAlternative",
+    "promotePartial", "withLifecycle", "stable", "deprecated", "mapResult", "parse", "encodeStart",
+];
+
+/// The kind wrapping `v`, an object of a mod class that is a codec: `java_map` for a map codec
+/// (`MapCodec`, `MapDecoder`, `MapEncoder`), `java` for another (`Codec`, `Decoder`, `Encoder`).
+fn mod_codec_kind(rt: &Rt, v: V) -> Option<&'static str> {
+    let class = rt.class_of(v);
+    if v.r() == 0 || !rt.is_mod_class(class) {
+        return None;
+    }
+    let is = |c: &str| rt.is_a(class, c);
+    if is("com/mojang/serialization/MapCodec") || is("com/mojang/serialization/MapDecoder") || is("com/mojang/serialization/MapEncoder") {
+        Some("compat:codec/java_map")
+    } else if is("com/mojang/serialization/Codec") || is("com/mojang/serialization/Decoder") || is("com/mojang/serialization/Encoder") {
+        Some("compat:codec/java")
+    } else {
+        None
+    }
+}
+
+const DECODE: &str = "com/mojang/serialization/Decoder.decode.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+const ENCODE: &str = "com/mojang/serialization/Encoder.encode.(Ljava/lang/Object;Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+const MAP_DECODE: &str = "com/mojang/serialization/MapDecoder.decode.(Lcom/mojang/serialization/DynamicOps;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;";
+const MAP_ENCODE: &str =
+    "com/mojang/serialization/MapEncoder.encode.(Ljava/lang/Object;Lcom/mojang/serialization/DynamicOps;Lcom/mojang/serialization/RecordBuilder;)Lcom/mojang/serialization/RecordBuilder;";
+
+/// A mod codec's own `decode(NbtOps, tag)` of `j`: the value of the pair it answers.
+fn java_decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
+    let (ops, input) = (crate::ops::nbt_ops(rt), crate::ops::json_tag(rt, j));
+    let r = run(rt, DECODE, c, &[ops, input])?;
+    let p = result_of(rt, r)?;
+    Ok(rt.get_field(p, "$first"))
+}
+
+/// A mod map codec's own `decode(NbtOps, MapLike)` of object `o`.
+fn java_decode_map(rt: &mut Rt, c: V, o: &Map<String, Json>) -> Result<V, String> {
+    let ops = crate::ops::nbt_ops(rt);
+    let tag = crate::ops::json_tag(rt, &Json::Object(o.clone()));
+    let m = crate::ops::map_like(rt, tag);
+    let r = run(rt, MAP_DECODE, c, &[ops, m])?;
+    result_of(rt, r)
+}
+
+/// A mod codec's own `encode(value, NbtOps, EndTag)`.
+fn java_encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
+    let (ops, empty) = (crate::ops::nbt_ops(rt), crate::ops::end(rt));
+    let r = run(rt, ENCODE, c, &[value, ops, empty])?;
+    let tag = result_of(rt, r)?;
+    crate::nbt::element_from_runtime(rt, tag).ok_or_else(|| format!("a mod codec wrote {}", rt.class_of(tag)))
+}
+
+/// A mod map codec's own `encode(value, NbtOps, builder)`, its fields into `out`.
+fn java_encode_map(rt: &mut Rt, c: V, value: V, out: &mut BTreeMap<String, Nbt>) -> Result<(), String> {
+    let ops = crate::ops::nbt_ops(rt);
+    let builder = crate::ops::map_builder(rt);
+    let b = run(rt, MAP_ENCODE, c, &[value, ops, builder])?;
+    out.extend(crate::ops::built(rt, b)?);
+    Ok(())
 }
 
 /// A method on a codec object: `RecordCodecBuilder.Instance`'s `group`, a group's `apply`, the
@@ -1250,6 +1333,18 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
                 Err(e) => error(rt, &e),
             }
         }
+        // `MapCodec.decode(ops, mapLike)`: the fields of the map, a `DataResult` of the value.
+        "decode" if crate::ops::map_like_tag(rt, a(2)).is_some() => {
+            let tag = crate::ops::map_like_tag(rt, a(2)).unwrap_or_default();
+            let o = match crate::recipes::to_json(rt, tag) {
+                Json::Object(o) => o,
+                _ => Map::new(),
+            };
+            match decode_map(rt, c, &o) {
+                Ok(v) => success(rt, v),
+                Err(e) => error(rt, &e),
+            }
+        }
         "decode" => {
             let input = crate::recipes::to_json(rt, a(2));
             match decode(rt, c, &input) {
@@ -1260,6 +1355,15 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
                 }
                 Err(e) => error(rt, &e),
             }
+        }
+        // `MapCodec.encode(value, ops, builder)`: the fields into the builder.
+        "encode" if desc.ends_with("Lcom/mojang/serialization/RecordBuilder;)Lcom/mojang/serialization/RecordBuilder;") => {
+            let mut out = BTreeMap::new();
+            match encode_map(rt, c, a(1), &mut out) {
+                Ok(()) => crate::ops::builder_add_all(rt, a(3), &out),
+                Err(e) => crate::ops::fail(rt, a(3), &e),
+            }
+            a(3)
         }
         // `encodeStart(ops, value)`, `encode(value, ops, prefix)`: NBT (`NbtOps`, or `RegistryOps`
         // over it, which is the same here).
@@ -1284,7 +1388,7 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
                 Err(e) => error(rt, &e),
             }
         }
-        "keys" => jutil::new_list(rt, Vec::new()),
+        "keys" => rt.alloc("java/util/stream/Stream", Data::Stream(Vec::new())),
         "toString" => {
             let text = format!("Codec[{k}]");
             rt.string(&text)

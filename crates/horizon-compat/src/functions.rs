@@ -16,6 +16,12 @@ pub(crate) fn constant(rt: &mut Rt, v: V) -> V {
     combinator(rt, "compat:fn/constant", vec![v])
 }
 
+/// What DFU's `getList`/`getMapEntries` answer: a consumer of a consumer, which hands it each of
+/// `items` (a list): each element, or each pair's two halves to a `BiConsumer`.
+pub(crate) fn feed(rt: &mut Rt, items: V, pairs: bool) -> V {
+    combinator(rt, "compat:fn/feed", vec![items, V::I(pairs as i32)])
+}
+
 /// DFU's `Codec.checkRange(min, max)`: a function answering a `DataResult` of its (boxed) number,
 /// an error with the number as its partial value outside `[min, max]`.
 pub(crate) fn check_range(rt: &mut Rt, min: V, max: V) -> V {
@@ -114,6 +120,22 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
             rt.get_field(args.first().copied().unwrap_or_default(), name)
         }
         "compat:fn/constant" => part(0),
+        // [items, pairs]: `accept(consumer)`.
+        "compat:fn/feed" => {
+            let consumer = args.first().copied().unwrap_or_default();
+            for item in crate::jutil::elements(rt, part(0)) {
+                if part(1).i() != 0 {
+                    let (k, v) = (rt.get_field(item, "$first"), rt.get_field(item, "$second"));
+                    rt.call_functional("java/util/function/BiConsumer.accept.(Ljava/lang/Object;Ljava/lang/Object;)V", consumer, &[k, v]);
+                } else {
+                    rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", consumer, &[item]);
+                }
+                if rt.thrown.is_some() {
+                    break;
+                }
+            }
+            V::Void
+        }
         // [min, max]; `compareTo` as the boxes compare: whole numbers exactly, others as doubles.
         "compat:fn/check_range" => {
             let value = args.first().copied().unwrap_or_default();

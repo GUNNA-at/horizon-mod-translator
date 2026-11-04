@@ -605,15 +605,17 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
 }
 
 /// A vanilla constructor without arguments that a mod class's constructor runs as its `super()`
-/// (`SimpleCriterionTrigger()`): what it would set is vanilla's own state, read only by vanilla's
-/// methods, which answer (or miss) on their own; nothing is lost by keeping none.
+/// (`SimpleCriterionTrigger()`, DFU's `MapCodec()` and `MapDecoder.Implementation()`): what it
+/// would set is vanilla's own state, read only by vanilla's methods, which answer (or miss) on
+/// their own; nothing is lost by keeping none. So is a criterion trigger the mod makes itself
+/// (`new PlayerTrigger()`, registered): its listeners are the advancements' state.
 fn plain_super_init(rt: &Rt, key: &str, args: &[V]) -> bool {
     let Some(owner) = key.strip_suffix(".<init>.()V") else { return false };
-    (owner.starts_with("net/minecraft/") || owner.starts_with("net/neoforged/"))
-        && args.first().is_some_and(|&this| {
-            let class = rt.class_of(this);
-            class != owner && rt.supers.contains_key(class)
-        })
+    let Some(&this) = args.first() else { return false };
+    let class = rt.class_of(this);
+    let game = owner.starts_with("net/minecraft/") || owner.starts_with("net/neoforged/") || owner.starts_with("com/mojang/serialization/");
+    (game && class != owner && rt.supers.contains_key(class))
+        || (class == owner && owner.starts_with("net/minecraft/advancements/critereon/") && owner.ends_with("Trigger"))
 }
 
 type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;

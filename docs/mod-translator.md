@@ -1830,6 +1830,25 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     highlight, properties)` is made as the game's items are, keeping its type supplier and colours
     under `SpawnEggItem`'s names. `Integer.TYPE` and the other primitives' classes (`int.class`)
     and `StandardCharsets`' charsets are answered.
+  - [x] 2026-11-05 Codec classes of a mod's own, and `DynamicOps` over NBT (`ops.rs`). A mod's
+    class that is a codec (SophisticatedCore's `SetCodec`, Mekanism's `SequencedCollectionCodec`
+    and `SerializerHelper`'s anonymous ones, SecurityCraft's `NullableListCodec`, Curios'
+    modifier codec) gets DFU's combinators: `fieldOf`, `listOf`, `xmap`, `validate`,
+    `optionalFieldOf`, `orElse`, `parse`, `encodeStart` and the rest wrap it
+    (`compat:codec/java`, `java_map` for a map codec). Reading runs its own
+    `decode(NbtOps, tag)` (a map codec's `decode(NbtOps, MapLike)`); writing runs its
+    `encode(value, NbtOps, EndTag)` (a map codec's into a `RecordBuilder`). `NbtOps` is modelled
+    over the runtime's tags as Minecraft's is: `empty` (`EndTag`), the `create*`, `get*Value`,
+    `getList` (a consumer of consumers), `getStream`, `createList` (bytes, ints or longs alone an
+    array tag), `getMap` (a `MapLike`: `get`, `entries`), `getMapValues`/`getMapEntries`,
+    `createMap`, `mergeToList`/`mergeToMap`/`mergeToPrimitive`, `get`/`set`/`remove`,
+    `listBuilder` and `mapBuilder` (their `add` forms, with an encoder too, `withErrorsFrom`,
+    `build`). The runtime's own map codecs read a `MapLike` and write into a `RecordBuilder`, so a
+    mod's codec can hold them. `Lifecycle`'s constants answer. DFU's abstract classes'
+    constructors (`MapCodec()`, `MapDecoder.Implementation()`) are plain supers, and a criterion
+    trigger made by the mod itself (`new PlayerTrigger()`) is a plain object.
+    Tests `ops::tests::a_mods_own_codec_reads_and_writes_through_the_combinators`,
+    `nbt_ops_build_and_read_tags_as_minecrafts`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
