@@ -4679,6 +4679,18 @@ impl Game<'_> {
     pub(super) fn native_cursor(&self) -> [f32; 2] {
         [self.cursor.0, self.cursor.1]
     }
+    /// The text on the clipboard (`KeyboardHandler.getClipboard`), empty
+    /// when it holds none: a mod's text field pastes it. Client-side.
+    /// API @API:native_clipboard@.
+    pub(super) fn native_clipboard(&self) -> String {
+        self.clipboard.peek()
+    }
+    /// Copies `text` to the clipboard (`KeyboardHandler.setClipboard`);
+    /// empty text is not copied. Client-side. API @API:native_clipboard@.
+    pub(super) fn native_set_clipboard(&mut self, text: &str) {
+        use horizon_client::clipboard::Clipboard;
+        self.clipboard.set(text);
+    }
     /// The size of sprite `name` in its own pixels, if there is one. API 19.
     pub(super) fn native_sprite_size(&self, name: &str) -> Option<[f32; 2]> {
         let r = self.gui.atlas.sprites.get(name)?;

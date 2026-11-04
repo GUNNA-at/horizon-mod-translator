@@ -237,20 +237,29 @@ fn server_effects(c: &str) -> String {
 
 fn server_send(c: &str) -> String {
     format!(r#"        fn send_payload(&mut self, to: {c}::host::PayloadTarget, channel: &str, data: &[u8]) -> bool {{
-            let players: Vec<u128> = self
-                .game
-                .native_server_players()
+            // A player by id goes straight out: inside a player's hook (`as_guest`) the server's
+            // list of players is out of reach, and the message leaves at the tick's end anyway.
+            if let {c}::host::PayloadTarget::Player(uuid) = to {{
+                return self.game.native_net_send_to_player(uuid, channel, data).is_ok();
+            }}
+            let mut all: Vec<(u128, [f64; 3])> = self.game.native_server_players().into_iter().map(|p| (p.uuid, p.position)).collect();
+            // Inside a player's hook only the acting player is in reach.
+            if let Some(p) = self.game.native_acting_player()
+                && !all.iter().any(|q| q.0 == p.uuid)
+            {{
+                all.push((p.uuid, p.position));
+            }}
+            let players: Vec<u128> = all
                 .into_iter()
-                .filter(|p| match to {{
-                    {c}::host::PayloadTarget::Server => false,
-                    {c}::host::PayloadTarget::Player(uuid) => p.uuid == uuid,
+                .filter(|&(_, at)| match to {{
+                    {c}::host::PayloadTarget::Server | {c}::host::PayloadTarget::Player(_) => false,
                     {c}::host::PayloadTarget::All => true,
                     {c}::host::PayloadTarget::Near {{ x, y, z, radius }} => {{
-                        let d = [p.position[0] - x, p.position[1] - y, p.position[2] - z];
+                        let d = [at[0] - x, at[1] - y, at[2] - z];
                         d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= radius * radius
                     }}
                 }})
-                .map(|p| p.uuid)
+                .map(|(uuid, _)| uuid)
                 .collect();
             let mut sent = false;
             for p in players {{
@@ -390,6 +399,14 @@ fn client_host(c: &str, id: &str) -> String {
         }}
         fn set_player_slot(&mut self, _slot: u8, _stack: Option<&{c}::host::HandStack>) -> bool {{
             false
+        }}
+        fn clipboard(&self) -> String {{
+            self.game.get().native_clipboard()
+        }}
+        fn set_clipboard(&mut self, text: &str) {{
+            if let Some(g) = self.game.get_mut() {{
+                g.native_set_clipboard(text);
+            }}
         }}
         fn update_player_slot(&mut self, _slot: u8, _count: u32, _damage: u32, _components: &[(String, Option<{c}::nbt::Nbt>)]) -> bool {{
             false

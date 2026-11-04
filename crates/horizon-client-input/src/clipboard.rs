@@ -141,6 +141,15 @@ impl SystemClipboard {
         }
         self.system.as_mut()
     }
+    /// [`Clipboard::get`] for a caller that only reads (a mod's screen
+    /// taking a key): a connection of its own for this one read, or the text
+    /// the game last copied when no system clipboard can be reached.
+    pub fn peek(&self) -> String {
+        match arboard::Clipboard::new() {
+            Ok(mut system) => system.get_text().unwrap_or_default(),
+            Err(_) => self.copied.clone().unwrap_or_default(),
+        }
+    }
 }
 
 impl Clipboard for SystemClipboard {

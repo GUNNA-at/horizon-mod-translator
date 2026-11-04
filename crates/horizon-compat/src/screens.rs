@@ -312,6 +312,12 @@ pub fn flush(rt: &mut Rt) {
                     h.set_cursor(at);
                 }
             }
+            5 => {
+                let text = rt.str_of(rt.get_field(e, "$text")).unwrap_or("").to_owned();
+                if let Some(h) = rt.host_mut() {
+                    h.set_clipboard(&text);
+                }
+            }
             _ => {
                 let sound = Sound {
                     event: rt.str_of(rt.get_field(e, "$event")).unwrap_or("").to_owned(),
@@ -325,6 +331,25 @@ pub fn flush(rt: &mut Rt) {
                 }
             }
         }
+    }
+}
+
+/// `KeyboardHandler.getClipboard()`: the clipboard's text, empty when none.
+pub(crate) fn clipboard(rt: &Rt) -> String {
+    rt.host().map(|h| h.clipboard()).unwrap_or_default()
+}
+
+/// `KeyboardHandler.setClipboard(text)`: now, or at the next tick when the host only reads (a
+/// field's copy as a key goes down).
+pub(crate) fn set_clipboard(rt: &mut Rt, text: &str) {
+    if read_only(rt) {
+        let text = text.to_owned();
+        defer(rt, 5, move |rt, e| {
+            let s = rt.string(&text);
+            rt.put_field(e, "$text", s);
+        });
+    } else if let Some(h) = rt.host_mut() {
+        h.set_clipboard(text);
     }
 }
 
@@ -1428,6 +1453,38 @@ mod tests {
         assert_eq!(h.sounds, vec![click]);
         assert!(!h.screen);
         assert_eq!(current(&rt), V::NULL);
+    }
+
+    /// `Minecraft.keyboardHandler`'s clipboard: read at once, written at once from the tick, and
+    /// at the next tick when a screen's input writes it (the game then only lends itself to read).
+    #[test]
+    fn the_keyboard_handler_reads_the_clipboard_and_writes_it_when_the_game_can() {
+        const GET: &str = "net/minecraft/client/KeyboardHandler.getClipboard.()Ljava/lang/String;";
+        const SET: &str = "net/minecraft/client/KeyboardHandler.setClipboard.(Ljava/lang/String;)V";
+        let (mut rt, _) = rt_with_screen();
+        let mut h = host();
+        h.clipboard = "from the system".into();
+        let set = |rt: &mut Rt, text: &str| {
+            let mc = minecraft(rt);
+            let keyboard = rt.get_field(mc, "keyboardHandler");
+            let s = rt.string(text);
+            crate::api::call(rt, SET, &[keyboard, s]);
+        };
+        let read = rt.with_host(&mut h, |rt| {
+            let mc = minecraft(rt);
+            let keyboard = rt.get_field(mc, "keyboardHandler");
+            let v = crate::api::call(rt, GET, &[keyboard]);
+            rt.str_of(v).unwrap_or("").to_owned()
+        });
+        assert_eq!(read, "from the system");
+        h.read_only = true;
+        rt.with_host(&mut h, |rt| set(rt, "copied in a screen"));
+        assert_eq!(h.clipboard, "from the system", "not while the game only reads");
+        h.read_only = false;
+        rt.with_host(&mut h, |rt| tick(rt));
+        assert_eq!(h.clipboard, "copied in a screen");
+        rt.with_host(&mut h, |rt| set(rt, "copied in a tick"));
+        assert_eq!(h.clipboard, "copied in a tick");
     }
 
     /// Keys show as vanilla's Controls screen names them: a mapping by the key bound to it, a

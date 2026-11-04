@@ -1296,6 +1296,19 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     find no answer (a handler that checks its receiver answered nothing before): Create 1770 of 4244
     API methods (41.7%), 19 844 of 25 840 class uses (76.8%); still a lower bound (codecs, lists and
     handlers answer only for their own runtime objects).
+  - [x] 2026-11-04 Create's filter works in game, end to end (`scratchpad/filtergame.sh`: survival, a
+    filter and 5 diamonds, `use-item`, three clicks, Escape): FilterScreen opens on the client, the
+    diamonds go on the cursor, a click on the first filter slot sets a ghost diamond, the stack goes
+    back to its slot, and after Escape the held filter reads `create:filter_items: [{item: {count: 1,
+    id: "minecraft:diamond"}, slot: 0}]` (vanilla's form) with the 5 diamonds still in slot 1. The
+    fault was the bundle's server `send_payload`: inside a player hook (`as_guest`) `self.lan` is
+    None, so `native_server_players()` is empty and a payload to that player was "not sent". It now
+    sends `PayloadTarget::Player(uuid)` straight to `native_net_send_to_player`, and `All`/`Near`
+    count the acting player too. Clipboard: `Host::clipboard`/`set_clipboard`, natives
+    `native_clipboard` (reads the system clipboard through a fresh connection, so a read-only screen
+    host can paste) and `native_set_clipboard` (fragment `native_clipboard.json`), the client host
+    answers both, `Minecraft.keyboardHandler` (`KeyboardHandler.getClipboard`/`setClipboard`), and a
+    write from a screen's input waits for the next client tick (defer kind 5).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

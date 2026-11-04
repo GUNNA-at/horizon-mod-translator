@@ -1696,6 +1696,8 @@ pub fn fill_minecraft(rt: &mut Rt, mc: V) {
     rt.put_field(mc, "gameMode", mode);
     let mouse = single(rt, "net/minecraft/client/MouseHandler");
     rt.put_field(mc, "mouseHandler", mouse);
+    let keyboard = single(rt, "net/minecraft/client/KeyboardHandler");
+    rt.put_field(mc, "keyboardHandler", keyboard);
 }
 
 /// The game type the client's player plays in.
@@ -1748,6 +1750,15 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
             V::D(f64::from(c[usize::from(name == "ypos")]) * scale(rt))
         }
         ("net/minecraft/client/MouseHandler", "isMouseGrabbed") => V::I(1),
+        ("net/minecraft/client/KeyboardHandler", "getClipboard") => {
+            let text = crate::screens::clipboard(rt);
+            rt.string(&text)
+        }
+        ("net/minecraft/client/KeyboardHandler", "setClipboard") => {
+            let text = rt.str_of(a(1)).unwrap_or("").to_owned();
+            crate::screens::set_clipboard(rt, &text);
+            V::Void
+        }
         ("net/minecraft/client/Options", "getCameraType") => crate::api::api_enum(rt, "net/minecraft/client/CameraType", "FIRST_PERSON", 0),
         ("net/minecraft/client/CameraType", "isFirstPerson") => V::I((rt.get_field(a(0), "$ordinal").i() == 0) as i32),
         // GL state for what it draws next: the host keeps its own; only the tint reaches blits.
@@ -2029,6 +2040,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | "net/minecraft/client/renderer/texture/TextureManager"
             | "net/minecraft/client/renderer/texture/AbstractTexture"
             | "net/minecraft/client/MouseHandler"
+            | "net/minecraft/client/KeyboardHandler"
             | "net/minecraft/client/Options"
             | "net/minecraft/client/CameraType"
             | "com/mojang/blaze3d/systems/RenderSystem"
