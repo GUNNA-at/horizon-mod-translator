@@ -503,21 +503,7 @@ impl Game<'_> {
         block: &str,
         properties: &[(&str, &str)],
     ) -> bool {
-        let registry = &self.pack.assets.registry;
-        let Some(mut state) = registry
-            .default_state(block)
-            .and_then(|id| registry.state(id))
-            .cloned()
-        else {
-            return false;
-        };
-        for (key, value) in properties {
-            match state.properties.get_mut(*key) {
-                Some(v) => *v = (*value).to_owned(),
-                None => return false,
-            }
-        }
-        let Some(id) = registry.id(&state) else {
+        let Some(id) = self.native_state_id(block, properties) else {
             return false;
         };
         let pose = draw.pose();
@@ -588,17 +574,39 @@ impl Game<'_> {
         tint: u32,
         shift: Option<(&str, &str, SpriteShift)>,
     ) -> bool {
-        let sprites = &self.gui.atlas.sprites;
-        let shift = shift.and_then(|(from, to, how)| {
-            let to = sprites.get(to.trim_start_matches("minecraft:")).copied()?;
-            Some((from.trim_start_matches("minecraft:"), to, how))
-        });
         let Ok(library) = self.pack.render.model_library.as_ref() else {
             return false;
         };
         let Some(quads) = named_model(library, model) else {
             return false;
         };
+        let faces = quads.iter().map(|quad| NativeFace {
+            positions: quad.positions,
+            uv: quad.uv,
+            sprite: &quad.material.sprite,
+            facing: quad.facing,
+            light_emission: quad.light_emission,
+            colors: [u32::MAX; 4],
+        });
+        self.native_draw_faces(draw, faces, tint, shift)
+    }
+
+    /// Draws `faces` under `draw`'s pose as [`Self::native_draw_model_shifted`]
+    /// draws a model's: faces a mod put together itself (a model built of
+    /// `BakedQuad`s, Create's water wheel in its wood). A face whose sprite the
+    /// atlas lacks is left out. API 82.
+    pub(super) fn native_draw_faces<'f>(
+        &self,
+        draw: &mut BlockEntityDraw,
+        faces: impl Iterator<Item = NativeFace<'f>>,
+        tint: u32,
+        shift: Option<(&str, &str, SpriteShift)>,
+    ) -> bool {
+        let sprites = &self.gui.atlas.sprites;
+        let shift = shift.and_then(|(from, to, how)| {
+            let to = sprites.get(to.trim_start_matches("minecraft:")).copied()?;
+            Some((from.trim_start_matches("minecraft:"), to, how))
+        });
         use horizon_client::item_render::{direction_vector, transform_normal};
         let pose = draw.pose();
         let color = if tint & 0xFF_FFFF == 0xFF_FFFF {
@@ -606,26 +614,34 @@ impl Game<'_> {
         } else {
             shaded(tint, 1.0)
         };
-        for quad in quads.iter() {
-            let name = quad.material.sprite.trim_start_matches("minecraft:");
-            let Some(s) = self.gui.atlas.sprites.get(name).copied() else {
+        for face in faces {
+            let name = face.sprite.trim_start_matches("minecraft:");
+            let Some(s) = sprites.get(name).copied() else {
                 continue;
             };
-            let n = transform_normal(pose, direction_vector(quad.facing));
+            let n = transform_normal(pose, direction_vector(face.facing));
             let n = n.to_array().map(|v| (v.clamp(-1.0, 1.0) * 127.0) as i8);
-            let emission = u32::from(quad.light_emission) * 16;
+            let emission = u32::from(face.light_emission) * 16;
             let light = (draw.light & 0xFF) | (draw.light >> 8 & 0xFF).max(emission) << 8;
             let moved = shift.filter(|(from, _, _)| *from == name);
             for k in 0..4 {
-                let uv = quad.uv[k];
+                let uv = face.uv[k];
                 let uv = match moved {
                     Some((_, to, how)) => how.place(uv, &s, &to),
                     None => [s.u0 + uv[0] * (s.u1 - s.u0), s.v0 + uv[1] * (s.v1 - s.v0)],
                 };
+                // The face's own colour (0xAARRGGBB) as the vertex's (red lowest).
+                let color = match face.colors[k] {
+                    u32::MAX => color,
+                    own => horizon_client::hud_layout::multiply(
+                        color,
+                        own & 0xFF00_FF00 | (own >> 16 & 0xFF) | (own & 0xFF) << 16,
+                    ),
+                };
                 draw.vertices.push(Vertex {
                     normal: [n[0], n[1], n[2], 127],
                     pos: pose
-                        .transform_point3(Vec3::from_array(quad.positions[k]))
+                        .transform_point3(Vec3::from_array(face.positions[k]))
                         .to_array(),
                     uv,
                     layer: 0,
@@ -636,6 +652,68 @@ impl Game<'_> {
             }
         }
         true
+    }
+
+    /// Block model `model`'s faces (`mymod:block/cog_half`), baked as
+    /// [`Self::native_draw_model`] bakes it, each with the sprite it is drawn
+    /// with (`minecraft:block/oak_planks`): what a mod reads of a model to
+    /// change it or build its own from (`BakedModel.getQuads`). None for a
+    /// model the packs don't have. API 82.
+    pub(super) fn native_named_model_faces(
+        &self,
+        model: &str,
+    ) -> Option<Vec<(horizon_assets::bake::ModelQuad, String)>> {
+        let library = self.pack.render.model_library.as_ref().ok()?;
+        let quads = named_model(library, model)?;
+        Some(
+            quads
+                .iter()
+                .map(|q| (q.clone(), namespaced(&q.material.sprite)))
+                .collect(),
+        )
+    }
+
+    /// The sprite block model `model` breaks into (its `particle` texture).
+    /// API 82.
+    pub(super) fn native_named_model_particle(&self, model: &str) -> Option<String> {
+        let library = self.pack.render.model_library.as_ref().ok()?;
+        let resolved = library.resolve(model).ok()?;
+        let material = resolved.material("particle").ok()??;
+        Some(namespaced(&material.sprite))
+    }
+
+    /// Block `block`'s faces in the state with `properties`, as
+    /// [`Self::native_draw_block`] draws it (seed 42), each with its sprite:
+    /// what a mod reads of a block's model (a water wheel takes its planks'
+    /// sprite from the top face). None for an unknown block or property.
+    /// API 82.
+    pub(super) fn native_block_model_faces(
+        &self,
+        block: &str,
+        properties: &[(&str, &str)],
+    ) -> Option<Vec<(horizon_assets::bake::ModelQuad, String)>> {
+        let id = self.native_state_id(block, properties)?;
+        let models = self.pack.render.model_catalog.collect_seeded(id, 42).ok()?;
+        let mut out = Vec::new();
+        for (_, model) in &models {
+            for face in &model.faces {
+                if let Some(name) = self.pack.layer_names.get(&face.layer) {
+                    out.push((face.quad.clone(), namespaced(name)));
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// The state of `block` with `properties` (the rest default); None for
+    /// an unknown block or property.
+    fn native_state_id(&self, block: &str, properties: &[(&str, &str)]) -> Option<BlockStateId> {
+        let registry = &self.pack.assets.registry;
+        let mut state = registry.state(registry.default_state(block)?)?.clone();
+        for (key, value) in properties {
+            *state.properties.get_mut(*key)? = (*value).to_owned();
+        }
+        registry.id(&state)
     }
 
     /// Property `key` of block state `state` (a machine's `facing`, from the
@@ -653,6 +731,28 @@ impl Game<'_> {
             .properties
             .get(key)
             .map(String::as_str)
+    }
+}
+
+/// A face [`Game::native_draw_faces`] draws: its corners (in blocks), their
+/// places in its sprite (0 to 1 across), the sprite, the side it faces (its
+/// light), the light it gives itself (0 to 15) and its corners' colours
+/// (0xAARRGGBB, white for none).
+pub(crate) struct NativeFace<'a> {
+    pub positions: [[f32; 3]; 4],
+    pub uv: [[f32; 2]; 4],
+    pub sprite: &'a str,
+    pub facing: Direction,
+    pub light_emission: u8,
+    pub colors: [u32; 4],
+}
+
+/// A sprite's name with its namespace (`minecraft:` when it has none).
+fn namespaced(name: &str) -> String {
+    if name.contains(':') {
+        name.to_owned()
+    } else {
+        format!("minecraft:{name}")
     }
 }
 

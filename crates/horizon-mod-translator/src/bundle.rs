@@ -28,7 +28,7 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
 /// horizon-compat's root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
-const COMPAT: [(&str, &str); 26] = [
+const COMPAT: [(&str, &str); 27] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -54,6 +54,7 @@ const COMPAT: [(&str, &str); 26] = [
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
     ("tags.rs", include_str!("../../horizon-compat/src/tags.rs")),
     ("render.rs", include_str!("../../horizon-compat/src/render.rs")),
+    ("quads.rs", include_str!("../../horizon-compat/src/quads.rs")),
     ("vanilla_tags.rs", include_str!("../../horizon-compat/src/vanilla_tags.rs")),
 ];
 
@@ -345,6 +346,37 @@ fn {id}_block_entity_submit(
         fn draw_model(&mut self, model: &{c}::host::Model, pose: &[f32; 16], color: u32, light: u32) -> bool {{
             self.model(model, pose, color, light, None)
         }}
+        // A model's faces as the game bakes them, for the mod to read, change and build its own
+        // models from (`BakedModel.getQuads`).
+        fn model_quads(&self, model: &{c}::host::Model) -> Option<std::sync::Arc<[{c}::host::Quad]>> {{
+            let faces = match model {{
+                {c}::host::Model::State(text) => {{
+                    let (block, props) = {c}::host::split_state(text);
+                    self.game.native_block_model_faces(block, &props)?
+                }}
+                {c}::host::Model::Named(name) => self.game.native_named_model_faces(name)?,
+                {c}::host::Model::Quads(quads) => return Some(quads.clone()),
+            }};
+            use horizon_assets::model::Direction as D;
+            let side = |d: D| match d {{ D::Down => 0u8, D::Up => 1, D::North => 2, D::South => 3, D::West => 4, D::East => 5 }};
+            Some(faces.into_iter().map(|(q, sprite)| {c}::host::Quad {{
+                positions: q.positions,
+                uv: q.uv,
+                sprite,
+                facing: side(q.facing),
+                cull: q.cull.map(side),
+                tint_index: q.tint_index,
+                shade: true,
+                light_emission: q.light_emission,
+                colors: [u32::MAX; 4],
+            }}).collect())
+        }}
+        fn model_particle(&self, model: &{c}::host::Model) -> Option<String> {{
+            match model {{
+                {c}::host::Model::Named(name) => self.game.native_named_model_particle(name),
+                _ => None,
+            }}
+        }}
         fn draw_model_shifted(&mut self, model: &{c}::host::Model, pose: &[f32; 16], color: u32, light: u32, shift: &{c}::host::UvShift) -> bool {{
             use crate::game::native_block_entity_draw::SpriteShift;
             let how = match shift.kind {{
@@ -373,6 +405,19 @@ fn {id}_block_entity_submit(
                     self.game.native_draw_block(self.draw, block, &props)
                 }}
                 {c}::host::Model::Named(name) => self.game.native_draw_model_shifted(self.draw, name, color & 0xFF_FFFF, shift),
+                {c}::host::Model::Quads(quads) => {{
+                    use horizon_assets::model::Direction as D;
+                    const SIDES: [D; 6] = [D::Down, D::Up, D::North, D::South, D::West, D::East];
+                    let faces = quads.iter().map(|q| crate::game::native_block_entity_draw::NativeFace {{
+                        positions: q.positions,
+                        uv: q.uv,
+                        sprite: &q.sprite,
+                        facing: SIDES[usize::from(q.facing.min(5))],
+                        light_emission: q.light_emission,
+                        colors: q.colors,
+                    }});
+                    self.game.native_draw_faces(self.draw, faces, color & 0xFF_FFFF, shift)
+                }}
             }};
             self.draw.pop();
             self.draw.light = saved;
@@ -522,12 +567,109 @@ fn {id}_net_from_server(game: &mut crate::game::Game<'_>, channel: &str, data: &
     ]
 }
 
+/// The host translated code gets on the server's game while a hook runs there with a level held
+/// (a block entity's tick, a level's): its blocks, items, recipes and item entities, and payloads
+/// to players.
+fn game_host(c: &str, server_send: &str) -> String {
+    format!(r#"    struct Host<'a, 'b> {{
+        game: &'a mut crate::game::Game<'b>,
+    }}
+    impl {c}::host::Host for Host<'_, '_> {{
+        fn block_state(&self, pos: [i32; 3]) -> String {{
+            self.game.native_state_text_at(pos)
+        }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.game.native_block_name_in_tag(block, tag)
+        }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.game.native_fluid_name_in_tag(fluid, tag)
+        }}
+        fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
+            self.game.native_fluid_flow_at(pos)
+        }}
+        fn item_is_block(&self, item: &str) -> bool {{
+            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
+        }}
+        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_facts(item).map(|(_, limit)| limit)
+        }}
+        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
+            Some(boxes.iter().map(|b| {{
+                let (lo, hi) = (b.min_position(), b.max_position());
+                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
+            }}).collect())
+        }}
+        fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
+            self.game.native_set_state_text_at(pos, state, 3)
+        }}
+        fn block_changed(&mut self, pos: [i32; 3]) {{
+            self.game.native_block_entity_sync(pos);
+        }}
+        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
+            self.game.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
+        }}
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
+        }}
+        fn game_time(&self) -> i64 {{
+            self.game.native_game_time()
+        }}
+        fn item_entities(&self, b: [f64; 6]) -> Vec<{c}::host::ItemEntity> {{
+            let dim = self.game.native_dimension();
+            self.game.native_item_entities(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().map(|e| {c}::host::ItemEntity {{
+                id: e.id,
+                pos: e.position,
+                motion: e.motion,
+                on_ground: e.on_ground,
+                item: e.stack.item.to_string(),
+                count: e.stack.count,
+                pickup_delay: e.pickup_delay,
+                age: e.age,
+            }}).collect()
+        }}
+        fn set_item_entity(&mut self, id: u32, item: &str, count: u32) -> bool {{
+            let dim = self.game.native_dimension();
+            let stack = horizon_client::items::ItemStack::new(item, count);
+            self.game.native_set_item_entity(dim, id, stack)
+        }}
+        fn move_item_entity(&mut self, id: u32, pos: Option<[f64; 3]>, motion: Option<[f64; 3]>) -> bool {{
+            let dim = self.game.native_dimension();
+            self.game.native_move_item_entity(dim, id, pos, motion)
+        }}
+        fn spawn_item_entity(&mut self, item: &str, count: u32, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {{
+            let dim = self.game.native_dimension();
+            let stack = horizon_client::items::ItemStack::new(item, count);
+            self.game.native_spawn_item_entity(dim, stack, pos, motion, pickup_delay)
+        }}
+{server_send}    }}
+"#)
+}
+
+/// A server level's tick (`LevelTickEvent.Pre` before it, `.Post` after), on the server's game
+/// holding that level.
+fn level_tick(id: &str, krate: &str, c: &str, host: &str, post: bool) -> String {
+    let (phase, event, when) = if post { ("post", "Post", "after") } else { ("pre", "Pre", "before") };
+    format!(r#"// Generated by horizon-mod-translator: a server level's tick (`LevelTickEvent.{event}`), {when} the
+// level ticks, on the server's game holding that level.
+fn {id}_level_tick_{phase}(game: &mut crate::game::Game<'_>, dimension: &str) {{
+    let _ = dimension;
+{host}    let mut host = Host {{ game }};
+    {krate}::with_runtime(|rt| {c}::glue::level_tick(rt, &mut host, {post}));
+}}
+"#)
+}
+
 /// The server's hooks (on `Game`): the block entities (creating, whether they tick, each tick), the
 /// server's tick, and the payloads clients send.
 fn block_entity_helpers(id: &str, ns: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
     let server_send = server_send(&c);
+    let host = game_host(&c, &server_send);
     vec![
+        ("level_tick_pre", level_tick(id, krate, &c, &host, false)),
+        ("level_tick_post", level_tick(id, krate, &c, &host, true)),
         ("server_tick", format!(r#"// Generated by horizon-mod-translator: the server's tick (`ServerTickEvent.Pre` and `.Post`), on
 // the server's game.
 fn {id}_server_tick(game: &mut crate::game::Game<'_>, phase: crate::game::native_lifecycle::ServerTickPhase) {{
@@ -634,80 +776,7 @@ fn {id}_block_entity_tick(
             Nbt::LongArray(a) => Tag::LongArray(a.clone()),
         }})
     }}
-    struct Host<'a, 'b> {{
-        game: &'a mut crate::game::Game<'b>,
-    }}
-    impl {c}::host::Host for Host<'_, '_> {{
-        fn block_state(&self, pos: [i32; 3]) -> String {{
-            self.game.native_state_text_at(pos)
-        }}
-        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_name_in_tag(block, tag)
-        }}
-        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
-            self.game.native_fluid_name_in_tag(fluid, tag)
-        }}
-        fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
-            self.game.native_fluid_flow_at(pos)
-        }}
-        fn item_is_block(&self, item: &str) -> bool {{
-            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
-        }}
-        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
-            self.game.native_item_facts(item).map(|(_, limit)| limit)
-        }}
-        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
-            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
-            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
-            Some(boxes.iter().map(|b| {{
-                let (lo, hi) = (b.min_position(), b.max_position());
-                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
-            }}).collect())
-        }}
-        fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
-            self.game.native_set_state_text_at(pos, state, 3)
-        }}
-        fn block_changed(&mut self, pos: [i32; 3]) {{
-            self.game.native_block_entity_sync(pos);
-        }}
-        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
-            self.game.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
-        }}
-        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
-            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
-        }}
-        fn game_time(&self) -> i64 {{
-            self.game.native_game_time()
-        }}
-        fn item_entities(&self, b: [f64; 6]) -> Vec<{c}::host::ItemEntity> {{
-            let dim = self.game.native_dimension();
-            self.game.native_item_entities(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().map(|e| {c}::host::ItemEntity {{
-                id: e.id,
-                pos: e.position,
-                motion: e.motion,
-                on_ground: e.on_ground,
-                item: e.stack.item.to_string(),
-                count: e.stack.count,
-                pickup_delay: e.pickup_delay,
-                age: e.age,
-            }}).collect()
-        }}
-        fn set_item_entity(&mut self, id: u32, item: &str, count: u32) -> bool {{
-            let dim = self.game.native_dimension();
-            let stack = horizon_client::items::ItemStack::new(item, count);
-            self.game.native_set_item_entity(dim, id, stack)
-        }}
-        fn move_item_entity(&mut self, id: u32, pos: Option<[f64; 3]>, motion: Option<[f64; 3]>) -> bool {{
-            let dim = self.game.native_dimension();
-            self.game.native_move_item_entity(dim, id, pos, motion)
-        }}
-        fn spawn_item_entity(&mut self, item: &str, count: u32, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {{
-            let dim = self.game.native_dimension();
-            let stack = horizon_client::items::ItemStack::new(item, count);
-            self.game.native_spawn_item_entity(dim, stack, pos, motion, pickup_delay)
-        }}
-{server_send}    }}
-    let state = game.native_state_text_at(pos);
+{host}    let state = game.native_state_text_at(pos);
     let mut nbt: BTreeMap<String, Nbt> = entity.nbt.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect();
     let mut host = Host {{ game }};
     if {krate}::with_runtime(|rt| {c}::glue::block_entity_tick(rt, &mut host, pos, &state, &mut nbt)) {{
@@ -976,7 +1045,9 @@ const CLIENT_BINDINGS: [(&str, &str); 6] = [
     ("net_from_server", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"channel\", ty = \"&str\", value = \"channel\" },\n    { name = \"data\", ty = \"&[u8]\", value = \"data\" },\n"),
 ];
 
-const BLOCK_ENTITY_BINDINGS: [(&str, &str); 8] = [
+const BLOCK_ENTITY_BINDINGS: [(&str, &str); 10] = [
+    ("level_tick_pre", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n"),
+    ("level_tick_post", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n"),
     ("server_tick", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"phase\", ty = \"crate::game::native_lifecycle::ServerTickPhase\", value = \"phase\" },\n"),
     ("net_from_client", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"channel\", ty = \"&str\", value = \"channel\" },\n    { name = \"data\", ty = \"&[u8]\", value = \"data\" },\n"),
     ("state_for_placement", "    { name = \"level\", ty = \"&crate::game::GameLevel<'_>\", value = \"self\" },\n    { name = \"state\", ty = \"horizon_world::registry::BlockStateId\", value = \"state\" },\n    { name = \"context\", ty = \"&horizon_world::level::PlacementContext\", value = \"context\" },\n    { name = \"answer\", ty = \"&mut Option<Option<horizon_world::registry::BlockStateId>>\", value = \"&mut *answer\" },\n"),
