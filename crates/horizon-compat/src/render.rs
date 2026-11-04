@@ -1064,22 +1064,64 @@ pub fn block_atlas(rt: &mut Rt) -> V {
     })
 }
 
-/// The block atlas's sprite `location` (`create:block/belt_scroll`). Here each spans 0 to 1 of
-/// its own: the game places it in its atlas when it draws.
+/// Sprites across (and down) this runtime's block atlas. Each sprite has a cell of its own, so a UV
+/// names its sprite as it does in vanilla's stitched atlas: mods retexture a face by moving its UVs
+/// into another sprite's cell (Create's water wheels and their wood), and the face drawn shows the
+/// sprite its UVs are in. The game draws each sprite from its own texture, 0 to 1 across.
+pub const CELLS: u32 = 256;
+/// How wide (and high) a cell is.
+pub const CELL: f32 = 1.0 / CELLS as f32;
+
+/// The block atlas's sprite `location` (`create:block/belt_scroll`).
 fn sprite(rt: &mut Rt, location: V) -> V {
     let name = rt.str_of(location).unwrap_or("minecraft:missingno").to_owned();
     sprite_named(rt, &name)
 }
 
-/// [`sprite`] by name: one object a sprite, as Java's atlas holds them (mods key maps by them).
+/// [`sprite`] by name: one object a sprite, as Java's atlas holds them (mods key maps by them),
+/// in the next free cell.
 pub fn sprite_named(rt: &mut Rt, name: &str) -> V {
     let name = if name.contains(':') { name.to_owned() } else { format!("minecraft:{name}") };
     rt.intern(format!("compat:sprite/{name}"), |rt| {
         let s = rt.new_object(SPRITE);
         let n = rt.string(&name);
         rt.put_field(s, "$name", n);
+        let atlas = block_atlas(rt);
+        let cell = rt.get_field(atlas, "$cells").i();
+        rt.put_field(atlas, "$cells", V::I(cell + 1));
+        rt.put_field(s, "$cell", V::I(cell));
+        rt.interned.insert(format!("compat:cell/{}", cell as u32 % (CELLS * CELLS)), s);
         s
     })
+}
+
+/// Where `sprite`'s cell starts in the atlas (`getU0`, `getV0`); None for what is not a sprite.
+pub fn sprite_origin(rt: &Rt, sprite: V) -> Option<(f32, f32)> {
+    let V::I(cell) = rt.get_field(sprite, "$cell") else { return None };
+    let cell = cell as u32 % (CELLS * CELLS);
+    Some(((cell % CELLS) as f32 * CELL, (cell / CELLS) as f32 * CELL))
+}
+
+/// The sprite whose cell holds atlas coordinates `(u, v)`, if one does.
+fn sprite_at(rt: &Rt, u: f32, v: f32) -> Option<V> {
+    if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+        return None;
+    }
+    let (col, row) = ((u * CELLS as f32) as u32, (v * CELLS as f32) as u32);
+    rt.interned.get(&format!("compat:cell/{}", row * CELLS + col)).copied()
+}
+
+/// The sprite a face's atlas coordinates are in, and where in it each corner is (0 to 1 across):
+/// the face's own sprite while they stay in its cell, else whichever sprite's cell holds them (a mod
+/// moved them there to retexture the face, keeping the sprite it was baked with, as Create's
+/// `BakedModelHelper.swapSprites` does).
+pub fn locate(rt: &Rt, own: V, uv: &[[f32; 2]; 4]) -> (V, [[f32; 2]; 4]) {
+    const EDGE: f32 = CELL / 4096.0;
+    let centre = [uv.iter().map(|c| c[0]).sum::<f32>() / 4.0, uv.iter().map(|c| c[1]).sum::<f32>() / 4.0];
+    let holds = |(u0, v0): (f32, f32)| (u0 - EDGE..=u0 + CELL + EDGE).contains(&centre[0]) && (v0 - EDGE..=v0 + CELL + EDGE).contains(&centre[1]);
+    let sprite = if sprite_origin(rt, own).is_some_and(holds) { own } else { sprite_at(rt, centre[0], centre[1]).unwrap_or(own) };
+    let Some((u0, v0)) = sprite_origin(rt, sprite) else { return (sprite, *uv) };
+    (sprite, uv.map(|[u, v]| [(u - u0) / CELL, (v - v0) / CELL]))
 }
 
 fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
@@ -1088,11 +1130,22 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         (ATLAS_STITCHED, "getAtlas") => rt.get_field(a(0), "$atlas"),
         (TEXTURE_ATLAS, "location") => rt.get_field(a(0), "$location"),
         (TEXTURE_ATLAS, "getSprite") => sprite(rt, a(1)),
+        (SPRITE, n) if !matches!(n, "atlasLocation" | "contents") => {
+            let (u0, v0) = sprite_origin(rt, a(0)).unwrap_or_default();
+            V::F(match n {
+                "getU0" => u0,
+                "getV0" => v0,
+                "getU1" => u0 + CELL,
+                "getV1" => v0 + CELL,
+                // `getU(0.5f)` is halfway across; `getUOffset` the way back.
+                "getU" => u0 + a(1).f() * CELL,
+                "getV" => v0 + a(1).f() * CELL,
+                "getUOffset" => (a(1).f() - u0) / CELL,
+                "getVOffset" => (a(1).f() - v0) / CELL,
+                _ => return None,
+            })
+        }
         (SPRITE, n) => match n {
-            "getU0" | "getV0" => V::F(0.0),
-            "getU1" | "getV1" => V::F(1.0),
-            // `getU(0.5f)` is halfway across; `getUOffset` the way back.
-            "getU" | "getV" | "getUOffset" | "getVOffset" => V::F(a(1).f()),
             "atlasLocation" => {
                 let atlas = block_atlas(rt);
                 rt.get_field(atlas, "$location")
@@ -1428,7 +1481,19 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
                 // The first draws, each model under each pose once: what a renderer asked for.
                 let name = match model_of(rt, model) {
                     Some(crate::host::Model::Named(n) | crate::host::Model::State(n)) => n,
-                    Some(crate::host::Model::Quads(q)) => format!("{} faces", q.len()),
+                    Some(crate::host::Model::Quads(q)) => {
+                        // The sprites they show, the most used first.
+                        let mut used: Vec<(&str, usize)> = Vec::new();
+                        for f in q.iter() {
+                            match used.iter_mut().find(|(s, _)| *s == f.sprite) {
+                                Some((_, n)) => *n += 1,
+                                None => used.push((&f.sprite, 1)),
+                            }
+                        }
+                        used.sort_by(|a, b| b.1.cmp(&a.1));
+                        let top: Vec<String> = used.iter().take(4).map(|(s, n)| format!("{s} x{n}")).collect();
+                        format!("{} faces ({})", q.len(), top.join(", "))
+                    }
                     None => "-".to_owned(),
                 };
                 let r = |i: usize| (m[i] * 100.0).round() / 100.0;
@@ -1453,8 +1518,8 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
         }
         SBB_IS_EMPTY | DEFAULT_IS_EMPTY => V::I(model_of(rt, rt.get_field(a(0), "$model")).is_none() as i32),
         // `shiftUV(entry)`, `shiftUVScrolling(entry, [u,] v)`, `shiftUVtoSheet(entry, u, v, size)`:
-        // the entry's two sprites and the offsets (fractions of the target: this runtime's sprites
-        // are each 0 to 1, so what the mod works out from their bounds comes out in fractions).
+        // the entry's two sprites and the offsets, as fractions of the target (a scroll comes in
+        // atlas units, which a cell's width turns into fractions; a sheet's frame is one already).
         k if SHIFTS.contains(&k) => {
             let (this, entry) = (a(0), a(1));
             let Some(vc) = rt.vcall else { return Some(this) };
@@ -1465,9 +1530,9 @@ fn intrinsic(rt: &mut Rt, key: &str, args: &[V]) -> Option<V> {
             } else if k.contains(".shiftUVtoSheet.(") {
                 (3, a(2).f(), a(3).f(), a(4).i() as f32)
             } else if k.contains(";F)") {
-                (2, 0.0, a(2).f(), 1.0)
+                (2, 0.0, a(2).f() / CELL, 1.0)
             } else {
-                (2, a(2).f(), a(3).f(), 1.0)
+                (2, a(2).f() / CELL, a(3).f() / CELL, 1.0)
             };
             rt.put_field(this, "$shiftFrom", from);
             rt.put_field(this, "$shiftTo", to);
@@ -1524,8 +1589,9 @@ mod tests {
         let stack = new_pose_stack(&mut rt, IDENTITY);
         let sbb = intrinsic(&mut rt, CREATE_FOR_BLOCK, &[V::NULL, model, V::NULL, stack]).unwrap();
         let entry = rt.new_object("net/createmod/catnip/render/SpriteShiftEntry");
-        // Create's belt: `shiftUVScrolling(entry, scroll)`, which returns the buffer.
-        assert_eq!(intrinsic(&mut rt, SHIFTS[1], &[sbb, entry, V::F(0.25)]), Some(sbb));
+        // Create's belt: `shiftUVScrolling(entry, scroll)` a quarter of the way down the target
+        // (`scroll * spriteSize`, in the atlas), which returns the buffer.
+        assert_eq!(intrinsic(&mut rt, SHIFTS[1], &[sbb, entry, V::F(0.25 * CELL)]), Some(sbb));
         rt.with_host(&mut host, |rt| {
             intrinsic(rt, RENDER_INTO, &[sbb, stack, V::NULL]);
             // Drawn again with no new move: catnip's `reset()` after a draw drops it.
@@ -1542,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stitched_block_atlas_hands_out_sprites_spanning_0_to_1() {
+    fn the_stitched_block_atlas_gives_each_sprite_a_part_of_its_own() {
         const GET_SPRITE: &str = "net/minecraft/client/renderer/texture/TextureAtlas.getSprite.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
         let mut rt = Rt::new();
         let atlas = block_atlas(&mut rt);
@@ -1553,9 +1619,27 @@ mod tests {
         let again = rt.string("create:block/belt_scroll");
         assert_eq!(call(&mut rt, GET_SPRITE, &[atlas, again]), Some(sprite));
         let f = |rt: &mut Rt, m: &'static str, args: &[V]| call(rt, m, args).unwrap().f();
-        let size = f(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV1.()F", &[sprite]) - f(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV0.()F", &[sprite]);
-        assert_eq!(size, 1.0);
-        assert_eq!(f(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getU.(F)F", &[sprite, V::F(0.5)]), 0.5);
+        let bounds = |rt: &mut Rt, s: V| {
+            [
+                f(rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getU0.()F", &[s]),
+                f(rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV0.()F", &[s]),
+                f(rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getU1.()F", &[s]),
+                f(rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV1.()F", &[s]),
+            ]
+        };
+        let [u0, v0, u1, v1] = bounds(&mut rt, sprite);
+        assert!(u0 >= 0.0 && v0 >= 0.0 && u1 <= 1.0 && v1 <= 1.0 && u1 > u0 && v1 > v0);
+        // Halfway across, and back.
+        let half = f(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getU.(F)F", &[sprite, V::F(0.5)]);
+        assert_eq!(half, (u0 + u1) / 2.0);
+        assert_eq!(f(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.getUOffset.(F)F", &[sprite, V::F(half)]), 0.5);
+        // Another sprite's part overlaps none of it, and a corner placed in it reads back as that
+        // sprite's, wherever the face was baked.
+        let other = sprite_named(&mut rt, "minecraft:block/stone");
+        let [a0, b0, a1, b1] = bounds(&mut rt, other);
+        assert!(a1 <= u0 || a0 >= u1 || b1 <= v0 || b0 >= v1);
+        let corners = [[a0, b0], [a0, b1], [a1, b1], [a1, b0]];
+        assert_eq!(locate(&rt, sprite, &corners), (other, [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]));
         let contents = call(&mut rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.contents.()Lnet/minecraft/client/renderer/texture/SpriteContents;", &[sprite]).unwrap();
         let named = call(&mut rt, "net/minecraft/client/renderer/texture/SpriteContents.name.()Lnet/minecraft/resources/ResourceLocation;", &[contents]).unwrap();
         assert_eq!(rt.str_of(named), Some("create:block/belt_scroll"));

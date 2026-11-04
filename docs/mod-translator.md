@@ -721,11 +721,47 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     up on a shaft): a right click (`useItemOn`, empty hand) drives it and the shaft at 32 RPM for 10
     ticks, then they stop; sneaking, at -32. It tires the player by 0.32 (32 RPM times the config's
     `crankHungerMultiplier`, 0.01), and read a null `FoodData` before.
-  - [ ] Models with NeoForge's OBJ loader (`"loader": "neoforge:obj"`, 43 of Create's: the water
-    wheels, crushing wheels, blaze burner...): the content mod doesn't carry the `.obj` meshes (the
-    jar has 39), and the game's model library doesn't read them. And Create's water wheel swaps the
-    model's planks and logs for the wheel's material (`BakedModelHelper.generateModel`, quad by
-    quad), which compat's models (a state or a location, no quads) can't follow yet.
+  - [x] 2026-11-04 **In game the water wheel turns** (`wheelgame.sh`: a glass channel with a source at
+    its north end, the wheel under it): `FlowScore: 1`, `Speed: 8.0f`, `AddedCapacity: 32.0f`, the
+    shaft beside it `Speed: 8.0f` with `Source` the wheel; dry, 0. It drew nothing: its wheel is an
+    OBJ model, retextured in code.
+  - [x] 2026-11-04 Models with NeoForge's OBJ loader (`"loader": "neoforge:obj"`, 43 of Create's: the
+    water wheels, crushing wheels, blaze burner...) load: `horizon_assets::obj` reads the mesh and its
+    `.mtl` libraries as NeoForge's `ObjLoader` does (libraries beside the mesh or by namespace,
+    `mtl_override`, triangles repeating their last corner, `flip_v`, `emissive_ambient` light from
+    `Ka`, tint indices, faces flat on a side culled there), the model resolves its texture slots
+    through its parents and bakes with the block state's rotation like elements. The game's model
+    library reads the mesh beside each such model (both its loads); translated mods carry `.obj` and
+    `.mtl` (the jar has 39 meshes).
+  - [x] 2026-11-04 NeoForge's composite models (`"loader": "neoforge:composite"`, 7 of Create's: the
+    display link, stock links, nixie tube): each child resolves through its own textures and
+    parents (`ResolvedCuboidModel::children`) and they bake together under the block state's
+    rotation; `visibility` hides a child. The game's model library loads the children's parents
+    (`CuboidModel::parents`) and their OBJ meshes.
+  - [x] 2026-11-04 **Baked quads are real** (compat `quads.rs`): `BakedModel.getQuads` on a model the
+    game has (a block state's, a partial model) gives the game's faces as `BakedQuad`s, their
+    vertices in `DefaultVertexFormat.BLOCK` (32 bytes: position, colour, uv in the atlas, light,
+    NeoForge's filled normal), their sprite the atlas's one object per sprite (mods key maps by
+    them). A mod reads, copies and changes them and builds `SimpleBakedModel`s (and
+    NeoForge's `SimpleBakedModel.Builder`) of them; catnip's `createForBlock` reads such a model's
+    faces once (`getQuads` per side, as `ModelBlockRenderer` asks) and the game draws them
+    (`Host::model_quads`, `Model::Quads`, `native_draw_faces`). Create's water wheel: its template's
+    faces on oak planks and logs copied onto the wheel's wood (`BakedModelHelper.swapSprites`).
+  - [x] 2026-11-04 **Sprites have places in an atlas** (compat `render.rs`, `CELLS`): the wheel drew
+    oak (pixels measured at (153,125,75), oak planks average (162,130,78), spruce (114,84,48)).
+    Create's `swapSprites` keeps the quad's sprite (`BakedQuadHelper.clone`) and moves only its UVs
+    into the new sprite's part of the atlas (`getU(getUnInterpolatedU(old, u))`), and every sprite
+    spanned 0 to 1, so the move did nothing. Now each sprite gets a cell 1/256 of the atlas wide
+    (`getU0`..`getV1`, `getU`, `getUOffset` in it), quads the game hands over are encoded into
+    their sprite's cell, and a quad read back shows the sprite whose cell its UVs are in
+    (`render::locate`: its own sprite while they stay in its cell), with UVs 0 to 1 across that
+    sprite again for the game. catnip's scroll offsets come in atlas units and are divided by a
+    cell. The draw trace lists the sprites a mod-built model shows.
+  - [x] 2026-11-04 `LevelTickEvent.Pre` and `.Post` around each server level's tick: the translator
+    hooks the game's `native_level_tick_pre`/`_post` (the server's game holding that level, with
+    the host block entity ticks get, now one generator: `game_host`), and `glue::level_tick` posts
+    the event with the level. Create's `onServerWorldTick` ticks contraptions, minecart couplings,
+    linked controllers, train controls, railways and logistics there.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

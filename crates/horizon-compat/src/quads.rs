@@ -231,14 +231,17 @@ pub fn baked_quad(rt: &mut Rt, q: &Quad) -> V {
     let e = i32::from(q.light_emission.min(15));
     let light = e << 4 | e << 20;
     let bits = |f: f32| V::I(f.to_bits() as i32);
+    // Its UVs in the atlas: across its sprite's cell.
+    let sprite = crate::render::sprite_named(rt, &q.sprite);
+    let (u0, v0) = crate::render::sprite_origin(rt, sprite).unwrap_or_default();
+    let cell = crate::render::CELL;
     let mut ints = Vec::with_capacity(4 * STRIDE);
     for k in 0..4 {
         let [x, y, z] = q.positions[k];
         let [u, v] = q.uv[k];
-        ints.extend([bits(x), bits(y), bits(z), V::I(abgr(q.colors[k]) as i32), bits(u), bits(v), V::I(light), V::I(normal)]);
+        ints.extend([bits(x), bits(y), bits(z), V::I(abgr(q.colors[k]) as i32), bits(u0 + u * cell), bits(v0 + v * cell), V::I(light), V::I(normal)]);
     }
     let vertices = rt.alloc("[I", Data::Array(ints));
-    let sprite = crate::render::sprite_named(rt, &q.sprite);
     let direction = crate::api_common::direction(rt, i64::from(q.facing));
     let o = rt.new_object(BAKED_QUAD);
     for (field, v) in [
@@ -254,7 +257,8 @@ pub fn baked_quad(rt: &mut Rt, q: &Quad) -> V {
     o
 }
 
-/// A `BakedQuad` as the face it draws, listed under `cull`; None when it has no four vertices.
+/// A `BakedQuad` as the face it draws, listed under `cull`: the sprite its UVs are in, which a mod
+/// may have moved them to ([`crate::render::locate`]). None when it has no four vertices.
 pub fn read_quad(rt: &Rt, quad: V, cull: Option<u8>) -> Option<Quad> {
     let vertices = rt.get_field(quad, "vertices");
     let Some(Data::Array(ints)) = rt.heap.get(vertices.r() as usize).map(|o| &o.data) else {
@@ -265,11 +269,12 @@ pub fn read_quad(rt: &Rt, quad: V, cull: Option<u8>) -> Option<Quad> {
     }
     let int = |k: usize, i: usize| ints[k * STRIDE + i].i();
     let float = |k: usize, i: usize| f32::from_bits(int(k, i) as u32);
-    let sprite = rt.get_field(quad, "sprite");
+    let atlas_uv = std::array::from_fn(|k| [float(k, 4), float(k, 5)]);
+    let (sprite, uv) = crate::render::locate(rt, rt.get_field(quad, "sprite"), &atlas_uv);
     let direction = rt.get_field(quad, "direction");
     Some(Quad {
         positions: std::array::from_fn(|k| [float(k, 0), float(k, 1), float(k, 2)]),
-        uv: std::array::from_fn(|k| [float(k, 4), float(k, 5)]),
+        uv,
         sprite: rt.str_of(rt.get_field(sprite, "$name")).unwrap_or("minecraft:missingno").to_owned(),
         facing: if direction.r() == 0 { 1 } else { crate::api_common::direction_ordinal(rt, direction) },
         cull,
@@ -353,6 +358,16 @@ mod tests {
     use crate::render::{GET_QUADS_KEY, sprite_named};
 
     const GET_SPRITE: &str = "net/minecraft/client/renderer/block/model/BakedQuad.getSprite.()Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
+    const SPRITE_U: [&str; 3] = [
+        "net/minecraft/client/renderer/texture/TextureAtlasSprite.getU0.()F",
+        "net/minecraft/client/renderer/texture/TextureAtlasSprite.getU1.()F",
+        "net/minecraft/client/renderer/texture/TextureAtlasSprite.getU.(F)F",
+    ];
+    const SPRITE_V: [&str; 3] = [
+        "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV0.()F",
+        "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV1.()F",
+        "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV.(F)F",
+    ];
     const QUAD_INIT: &str = "net/minecraft/client/renderer/block/model/BakedQuad.<init>.([IILnet/minecraft/core/Direction;Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;Z)V";
     const SIMPLE_INIT: &str = "net/minecraft/client/resources/model/SimpleBakedModel.<init>.(Ljava/util/List;Ljava/util/Map;ZZZLnet/minecraft/client/renderer/texture/TextureAtlasSprite;Lnet/minecraft/client/renderer/block/model/ItemTransforms;Lnet/minecraft/client/renderer/block/model/ItemOverrides;)V";
 
@@ -406,12 +421,28 @@ mod tests {
             assert_eq!(faces.len(), 1);
             let q = faces[0];
             assert_eq!(read_quad(rt, q, None), Some(template.clone()));
-            // `BakedQuadHelper.clone`, then the new sprite: the vertices' places in it kept.
+            // `BakedQuadHelper.clone`: the same sprite, the vertices copied. Then each corner goes to
+            // the same place in the new sprite's part of the atlas (`SpriteShiftEntry
+            // .getUnInterpolatedU` in the old one, `getU` in the new), the quad's sprite left as it was.
+            let oak = rt.get_field(q, "sprite");
             let vertices = rt.get_field(q, "vertices");
             let copy = crate::api::call(rt, "java/util/Arrays.copyOf.([II)[I", &[vertices, V::I(32)]);
             let swapped = rt.new_object(BAKED_QUAD);
             let (tint, dir) = (rt.get_field(q, "tintIndex"), rt.get_field(q, "direction"));
-            crate::api::call(rt, QUAD_INIT, &[swapped, copy, tint, dir, spruce, V::I(1)]);
+            crate::api::call(rt, QUAD_INIT, &[swapped, copy, tint, dir, oak, V::I(1)]);
+            let f = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args).f();
+            for k in 0..4 {
+                for (at, [lo, hi, to]) in [(4, SPRITE_U), (5, SPRITE_V)] {
+                    let i = k * STRIDE + at;
+                    let Data::Array(ints) = &rt.heap[copy.r() as usize].data else { panic!("no vertices") };
+                    let was = f32::from_bits(ints[i].i() as u32);
+                    let (lo, hi) = (f(rt, lo, &[oak]), f(rt, hi, &[oak]));
+                    let moved = f(rt, to, &[spruce, V::F((was - lo) / (hi - lo))]);
+                    let Data::Array(ints) = &mut rt.heap[copy.r() as usize].data else { panic!("no vertices") };
+                    ints[i] = V::I(moved.to_bits() as i32);
+                }
+            }
+            assert_ne!(rt.get_field(swapped, "sprite"), spruce);
             let unculled = crate::jutil::new_list(rt, vec![swapped]);
             let culled = rt.alloc("java/util/EnumMap", Data::Table(Default::default()));
             let built = rt.new_object(SIMPLE_MODEL);
