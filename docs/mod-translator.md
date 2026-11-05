@@ -1942,6 +1942,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     from the mod (`ItemEnv::item_property`). Next: the runtime keeps `ItemProperties.register` (7 of
     the 28 mods) and the game asks it through a client hook; the translator writes the
     definitions. Test `item_model::tests::translated_overrides_pick_as_item_overrides_resolve`.
+  - [x] 2026-11-05 Item model overrides, steps 2 and 3. The runtime keeps `ItemProperties.register`
+    and `registerGeneric` (by item and property, a generic one first, as `getProperty` looks) and
+    calls a function as `ItemOverrides.resolve` does: a `ClampedItemPropertyFunction`'s
+    `unclampedCall` held to 0..1 (`Mth.clamp`, NaN kept), a plain one as it answers. A new client
+    hook, `native_item_property(stack, property, owner, seed, value)` (fragment
+    `item_property.json`), asks the translated mods for each property vanilla's generic ones
+    don't answer; the glue gives the function the client's level and the local player when they
+    hold the stack, and the stack they use is their hand's own object, so a bow's
+    `entity.getUseItem() == stack` holds (its use ticks and hand set on the player). The
+    translator writes `horizon:overrides` for each item model with `overrides` of its own (bare
+    model locations are vanilla's); the rest keep the plain definition. Create has five: the
+    clipboard (`create:clipboard_type`, the ordinal of its content's type) and its armour
+    (`trim_type`). Tests `glue::tests::item_properties_the_mods_register_answer_for_the_stack_in_use`
+    (vanilla's bow `pull`: drawn half a second, held to 1 past a second, 0 not in use or not held),
+    `bundle::tests::item_models_with_overrides_get_an_overrides_definition`. In game (Create and its
+    ten addons as one engine, `scratchpad/clipgame.sh`): a clipboard in the hotbar and in hand
+    draws `create:item/empty_clipboard` (its base model has no texture of its own, so a property
+    left unknown would draw the missing texture). The build (177 MB engine) needed the watchdog's
+    limits raised: macOS compresses rustc's pages and then moves the compressor to swap in
+    seconds, so swap rose 15 GB above its base and fell back (peak footprint ~44 GB); the
+    watchdog now reads `SWAP_LIMIT` and `FREE_MIN`, and the build ran with 6 jobs.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

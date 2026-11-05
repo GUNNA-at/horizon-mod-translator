@@ -347,9 +347,90 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "com/mojang/blaze3d/vertex/PoseStack" => pose_stack(rt, name, desc, args),
         "com/mojang/blaze3d/vertex/PoseStack$Pose" => pose(rt, name, desc, args),
         "com/mojang/math/Axis" => axis(rt, name, args),
+        ITEM_PROPERTIES => item_properties(rt, name, args),
         _ if INTRINSICS.contains(&key) => intrinsic(rt, key, args),
         _ => client(rt, owner, name, desc, args),
     }
+}
+
+const ITEM_PROPERTIES: &str = "net/minecraft/client/renderer/item/ItemProperties";
+const CLAMPED_PROPERTY: &str = "net/minecraft/client/renderer/item/ClampedItemPropertyFunction";
+const PROPERTY_CALL: &str = "net/minecraft/client/renderer/item/ItemPropertyFunction.call.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/client/multiplayer/ClientLevel;Lnet/minecraft/world/entity/LivingEntity;I)F";
+const UNCLAMPED_CALL: &str = "net/minecraft/client/renderer/item/ClampedItemPropertyFunction.unclampedCall.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/client/multiplayer/ClientLevel;Lnet/minecraft/world/entity/LivingEntity;I)F";
+
+/// `ItemProperties`' functions the mods registered, by `"<item> <property>"`: `register`'s for one
+/// item, `registerGeneric`'s (an empty item) for every item.
+fn property_functions(rt: &mut Rt) -> V {
+    rt.intern("compat:item-properties".into(), |rt| rt.alloc("java/util/HashMap", Data::Table(Default::default())))
+}
+
+fn property_key(rt: &mut Rt, item: &str, property: &str) -> V {
+    rt.string(&format!("{item} {property}"))
+}
+
+/// `ItemProperties`: the functions an item model's `overrides` ask (1.21.1). Vanilla's own
+/// (`damage`, `lefthanded`, a bow's `pull`...) are the game's; the table holds the mods'.
+fn item_properties(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let functions = property_functions(rt);
+    Some(match name {
+        // (item, name, function)
+        "register" => {
+            let item = crate::api_common::item_like_name(rt, arg(args, 0));
+            let property = crate::neo::location(rt, arg(args, 1));
+            let key = property_key(rt, &item, &property);
+            crate::jutil::table_put(rt, functions, key, arg(args, 2));
+            V::Void
+        }
+        // (name, function), answering the function
+        "registerGeneric" => {
+            let property = crate::neo::location(rt, arg(args, 0));
+            let key = property_key(rt, "", &property);
+            crate::jutil::table_put(rt, functions, key, arg(args, 1));
+            arg(args, 1)
+        }
+        // (stack, name): a mod's function, else null (vanilla's own aren't objects here).
+        "getProperty" => {
+            let item = crate::api_common::item_like_name(rt, rt.get_field(arg(args, 0), "$item"));
+            let property = crate::neo::location(rt, arg(args, 1));
+            property_function(rt, &item, &property).unwrap_or(V::NULL)
+        }
+        _ => return None,
+    })
+}
+
+/// The function a mod registered for `item`'s property `property` (`create:charge`): a generic one
+/// first, as `ItemProperties.getProperty` looks.
+pub(crate) fn property_function(rt: &mut Rt, item: &str, property: &str) -> Option<V> {
+    let functions = property_functions(rt);
+    for owner in ["", item] {
+        let key = property_key(rt, owner, property);
+        if let Some(f) = crate::jutil::table_get(rt, functions, key).filter(|f| f.r() != 0) {
+            return Some(f);
+        }
+    }
+    None
+}
+
+/// `f.call(stack, level, entity, seed)`, as `ItemOverrides.resolve` asks a property: a
+/// `ClampedItemPropertyFunction`'s `unclampedCall` held to 0..1 (`Mth.clamp`, which keeps NaN).
+/// None when it threw.
+pub(crate) fn call_property(rt: &mut Rt, f: V, stack: V, level: V, entity: V, seed: i32) -> Option<f32> {
+    let clamped = match rt.lambda_info.get(&f.r()) {
+        Some(&(iface, _)) => iface == CLAMPED_PROPERTY,
+        None => rt.instance_of(f, CLAMPED_PROPERTY),
+    };
+    let key = if clamped { UNCLAMPED_CALL } else { PROPERTY_CALL };
+    let v = rt.call_functional(key, f, &[stack, level, entity, V::I(seed)]);
+    if rt.thrown.is_some() {
+        rt.report_thrown("an item property");
+        return None;
+    }
+    let v = v.f();
+    Some(match clamped {
+        true if v < 0.0 => 0.0,
+        true if v > 1.0 => 1.0,
+        _ => v,
+    })
 }
 
 /// Static fields this module owns.

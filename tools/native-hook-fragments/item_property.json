@@ -1,0 +1,11 @@
+{
+  "hooks": [
+    {
+      "name": "item_property",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_item_property",
+      "side": "client"
+    }
+  ],
+  "rust_summary": "item properties for 1.21.1 item model overrides (`native_item_property`).",
+  "doc_summary": "`native_item_property(stack, property, owner, seed, value)` answers an item property that a 1.21.1 item model's `overrides` ask (`ItemProperties.getProperty(stack, property).call(stack, level, entity, seed)`). A translated mod's model keeps them as Horizon's `horizon:overrides` item model: its last override whose properties are all at least their thresholds applies. The game answers vanilla's generic properties itself (`damage` and `damaged` on a stack that can break, `lefthanded`, `cooldown`, `custom_model_data`, `trim_type`) and asks the hook for the rest: a mod's own, or a vanilla name registered for a mod's item (a bow's `minecraft:pull`). `owner` holds or wears the stack when anyone does (the local player for its hands and inventory slots), `seed` is the draw's. Left `None`, the property is unknown (-inf, as an unregistered property in 1.21.1). Asked each frame such a model is drawn. Bundles need \"hooks\": @API:item_property@."
+}

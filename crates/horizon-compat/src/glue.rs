@@ -924,6 +924,70 @@ pub fn screen_input(rt: &mut Rt, host: &mut dyn Host, mouse: [f32; 2], input: cr
     rt.with_host(host, |rt| crate::screens::input(rt, mouse, input, modifiers))
 }
 
+/// The local player holding an item drawn for them (their hands, their inventory's slots), as an
+/// item property asks them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Holder {
+    pub at: [f64; 3],
+    pub yaw: f32,
+    /// The hand that uses the drawn stack, when it is the stack in use (`getUseItem() == stack`),
+    /// with `remaining` of the use's `duration` ticks left.
+    pub hand: Option<u8>,
+    pub remaining: i32,
+    pub duration: i32,
+}
+
+/// `native_item_property` (client): the mods' function for property `property` of a stack (`count`
+/// of `item`, with the components `patch`: each set, or removed when None), asked as 1.21.1's
+/// `ItemOverrides.resolve` asks it: with the client's level, the local player when `holder` says
+/// they hold the stack, and `seed`. The stack in use is the hand's own stack object, so a bow's
+/// `entity.getUseItem() == stack` holds as in vanilla. None when no mod registered the property
+/// for the item (`ItemProperties.register`, or `registerGeneric` for every item), or it threw.
+pub fn item_property(
+    rt: &mut Rt,
+    host: &mut dyn Host,
+    item: &str,
+    count: i32,
+    patch: &std::collections::BTreeMap<String, Option<serde_json::Value>>,
+    property: &str,
+    holder: Option<&Holder>,
+    seed: i32,
+) -> Option<f32> {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    crate::neo::fire_client_setup(rt);
+    let f = crate::render::property_function(rt, item, property)?;
+    rt.with_host(host, |rt| {
+        let (entity, held) = match holder {
+            Some(h) => {
+                let p = crate::network::local_player(rt);
+                for (field, v) in ["$x", "$y", "$z"].into_iter().zip(h.at) {
+                    rt.put_field(p, field, V::D(v));
+                }
+                rt.put_field(p, "$yaw", V::F(h.yaw));
+                // The use `LivingEntity.getUseItem` and its ticks answer: this stack's, or none.
+                let hand = h.hand.map_or(V::NULL, |hand| crate::hand::constant(rt, hand));
+                rt.put_field(p, "$usingHand", hand);
+                rt.put_field(p, "$useLeft", V::I(h.remaining));
+                rt.put_field(p, "$useTicks", V::I(if h.hand.is_some() { h.duration - h.remaining } else { 0 }));
+                (p, h.hand.map(|hand| crate::hand::stack(rt, hand)))
+            }
+            None => (V::NULL, None),
+        };
+        let stack = match held {
+            Some(s) if crate::api_common::item_like_name(rt, rt.get_field(s, "$item")) == item => s,
+            _ => {
+                let s = crate::api_common::stack(rt, item, count);
+                let set = patch.iter().filter_map(|(k, v)| Some((k.clone(), v.clone()?))).collect();
+                crate::components::load_saved(rt, s, &set);
+                s
+            }
+        };
+        let level = level(rt);
+        crate::render::call_property(rt, f, stack, level, entity, seed)
+    })
+}
+
 /// The client's use key acting with `hand` (`InputEvent.InteractionKeyMappingTriggered`): on the
 /// block under the crosshair, `RightClickBlock` is posted on the client as
 /// `MultiPlayerGameMode.performUseItemOn` does before the use goes to the server. The use itself
@@ -1027,5 +1091,63 @@ mod tests {
         }
         assert_eq!(rt.get_field(be, "ticks"), V::I(3));
         assert!(!rt.block_entities.contains_key(&gone));
+    }
+
+    /// Lambda 1 is vanilla 1.21.1's bow `pull`: how far the stack in use is drawn, in seconds of
+    /// its 72000-tick use, nothing for a stack not in use. Lambda 2 answers -5 for any stack.
+    fn properties(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+        const USE_ITEM: &str = "net/minecraft/world/entity/LivingEntity.getUseItem.()Lnet/minecraft/world/item/ItemStack;";
+        const LEFT: &str = "net/minecraft/world/entity/LivingEntity.getUseItemRemainingTicks.()I";
+        let (stack, entity) = (args[1], args[3]);
+        if id == 2 {
+            return Some(V::F(-5.0));
+        }
+        if entity.r() == 0 || api::call(rt, USE_ITEM, &[entity]) != stack {
+            return Some(V::F(0.0));
+        }
+        let left = api::call(rt, LEFT, &[entity]).i();
+        Some(V::F((72000 - left) as f32 / 20.0))
+    }
+
+    #[test]
+    fn item_properties_the_mods_register_answer_for_the_stack_in_use() {
+        const REGISTER: &str = "net/minecraft/client/renderer/item/ItemProperties.register.(Lnet/minecraft/world/item/Item;Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/client/renderer/item/ItemPropertyFunction;)V";
+        const GENERIC: &str = "net/minecraft/client/renderer/item/ItemProperties.registerGeneric.(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/client/renderer/item/ItemPropertyFunction;)Lnet/minecraft/client/renderer/item/ItemPropertyFunction;";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.lambda_call = Some(properties);
+        let bow = rt.new_object("test/ModBow");
+        rt.registered.insert(("item".into(), "t:bow".into()), bow);
+        // The mod's `(stack, level, entity, seed) -> ...`, typed as the clamped kind; then a
+        // generic one as a plain `ItemPropertyFunction`.
+        let pull = rt.lambda_id("test/ModBow.pull", 1, Vec::new());
+        rt.lambda_info.insert(pull.r(), ("net/minecraft/client/renderer/item/ClampedItemPropertyFunction", "unclampedCall"));
+        let name = rt.string("pull");
+        api::call(&mut rt, REGISTER, &[bow, name, pull]);
+        let low = rt.lambda_id("test/Low.call", 2, Vec::new());
+        rt.lambda_info.insert(low.r(), ("net/minecraft/client/renderer/item/ItemPropertyFunction", "call"));
+        let name = rt.string("t:low");
+        assert_eq!(api::call(&mut rt, GENERIC, &[name, low]), low);
+
+        let mut host = MemoryHost { held: Some(("t:bow".into(), 1)), ..MemoryHost::default() };
+        let patch = std::collections::BTreeMap::new();
+        let mut ask = |rt: &mut Rt, item: &str, property: &str, holder: Option<&Holder>| {
+            item_property(rt, &mut host, item, 1, &patch, property, holder, 0)
+        };
+        let drawing = |left: i32| Holder { hand: Some(crate::hand::MAIN), remaining: left, duration: 72000, ..Holder::default() };
+        // Drawn back 10 ticks: half a second.
+        assert_eq!(ask(&mut rt, "t:bow", "minecraft:pull", Some(&drawing(71990))), Some(0.5));
+        // 100 ticks: 5, held to 1 (`ClampedItemPropertyFunction.call`).
+        assert_eq!(ask(&mut rt, "t:bow", "minecraft:pull", Some(&drawing(71900))), Some(1.0));
+        // A stack not in use, and one nobody holds (an item frame's): 0.
+        let idle = Holder { hand: None, ..drawing(71990) };
+        assert_eq!(ask(&mut rt, "t:bow", "minecraft:pull", Some(&idle)), Some(0.0));
+        assert_eq!(ask(&mut rt, "t:bow", "minecraft:pull", None), Some(0.0));
+        // Not registered for that item, or at all: the game's -inf.
+        assert_eq!(ask(&mut rt, "t:arrow", "minecraft:pull", None), None);
+        assert_eq!(ask(&mut rt, "t:bow", "minecraft:pulling", None), None);
+        // A generic property answers for every item, unclamped.
+        assert_eq!(ask(&mut rt, "t:arrow", "t:low", None), Some(-5.0));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

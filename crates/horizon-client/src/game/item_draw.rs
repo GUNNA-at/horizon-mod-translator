@@ -5,7 +5,7 @@
 //! (`ItemEnv`) and the special renderers' registries to the game.
 use super::{Dim, Game};
 use horizon_assets::item_model::{
-    Components, DisplayContext, GlobalPos, ItemEnv, LevelState, OwnerState, StackView,
+    Components, Context, DisplayContext, GlobalPos, ItemEnv, LevelState, OwnerState, StackView,
 };
 use horizon_client::{
     block_entity_render::{diffuse_lights, vertex_light},
@@ -70,6 +70,18 @@ impl ItemEnv for Env<'_, '_> {
     fn random_float(&self) -> f32 {
         let nanos = self.game.started.elapsed().subsec_nanos();
         (nanos % 1_000_000) as f32 / 1_000_000.0
+    }
+    fn item_property(
+        &self,
+        stack: &StackView,
+        _components: &Components,
+        id: &str,
+        ctx: &Context<'_>,
+    ) -> Option<f32> {
+        let mut value = None;
+        self.game
+            .native_item_property(stack, id, ctx.owner, ctx.seed, &mut value);
+        value
     }
 }
 /// The days since 1970-01-01 as a civil (year, month, day) date.

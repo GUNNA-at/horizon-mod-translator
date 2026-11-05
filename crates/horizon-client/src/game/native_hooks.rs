@@ -283,6 +283,7 @@ use super::{
     native_panel_recipes::RecipePage,
     native_server::{NativeCommand, NativeServerPlayer},
 };
+use horizon_assets::item_model::{OwnerState, StackView};
 use horizon_client::{
     atlas_sources::qualified,
     biome::BiomeColors,
@@ -2461,6 +2462,30 @@ impl Game<'_> {
         batch: &mut HudBatch,
     ) {
         let _ = (stack, x, y, batch);
+    }
+    /// An item property a 1.21.1 item model's `overrides` ask
+    /// (`ItemProperties.getProperty(stack, property).call(stack, level,
+    /// entity, seed)`): a translated mod's model keeps them as Horizon's
+    /// `horizon:overrides` item model, whose override applies when each
+    /// property it names is at least its threshold. `property` is one
+    /// vanilla's generic properties don't answer (they are `damage`,
+    /// `damaged`, `lefthanded`, `cooldown`, `custom_model_data`,
+    /// `trim_type`): a mod's own, or one of vanilla's names a mod
+    /// registered for its item (a bow's `minecraft:pull`). `owner` holds or
+    /// wears the stack, when anyone does (the local player for its hands and
+    /// inventory), `seed` is the draw's. Set `value` to answer; left `None`,
+    /// the property is unknown (`-inf`, as an unregistered one in vanilla).
+    /// Asked each frame such a model is drawn, once per property.
+    /// Client-side. API @API:item_property@.
+    pub(super) fn native_item_property(
+        &self,
+        stack: &StackView,
+        property: &str,
+        owner: Option<&OwnerState>,
+        seed: i32,
+        value: &mut Option<f32>,
+    ) {
+        let _ = (stack, property, owner, seed, value);
     }
     /// A player uses `stack` (right click) with `self.hand` on the block at
     /// `pos`, `face` the face clicked (`[0, 1, 0]` is the top), once the
