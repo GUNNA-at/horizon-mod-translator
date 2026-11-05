@@ -1053,6 +1053,7 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             Some(crate::nbt::Nbt::Compound(c)) => Ok(crate::nbt::to_runtime(rt, &c)),
             _ => Err(format!("Not a compound tag: {j}")),
         },
+        "item_enchantments" => crate::enchantments::decode(rt, j),
         "dye_color" => {
             const DYES: [&str; 16] = [
                 "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black",

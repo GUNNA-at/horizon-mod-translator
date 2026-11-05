@@ -198,6 +198,7 @@ fn is_registry(owner: &str) -> bool {
             | "net/minecraft/core/MappedRegistry"
             | "net/minecraft/core/DefaultedMappedRegistry"
             | "net/minecraft/core/IdMap"
+            | "net/minecraft/core/HolderLookup"
             | "net/minecraft/core/HolderLookup$RegistryLookup"
             | "net/minecraft/core/HolderGetter"
     )
@@ -237,17 +238,33 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         "block" if id.starts_with("minecraft:") => crate::api::block(rt, id),
         "item" if id.starts_with("minecraft:") => crate::api_common::item(rt, id),
         "fluid" if id.starts_with("minecraft:") => crate::fluids::fluid(rt, id),
+        // Enchantments are data the runtime doesn't list: a name is taken to be one, as the
+        // game's data has it (`enchantments.rs`).
+        "enchantment" if crate::recipes::valid_location(id) => crate::enchantments::value(rt, id),
         _ => V::NULL,
     }
 }
 
-/// A registry entry's `Holder`: its key and value.
+/// A registry entry's `Holder`: its key and value. One per named entry, as vanilla's
+/// `Holder.Reference`s are (they compare by identity); an intrusive holder, made before its value
+/// has a name, is its own.
 pub(crate) fn registry_holder(rt: &mut Rt, registry: &str, id: &str, value: V) -> V {
-    let h = rt.new_object("net/minecraft/core/Holder$Reference");
-    let (r, i) = (rt.string(registry), rt.string(id));
-    rt.put_field(h, "$registry", r);
-    rt.put_field(h, "$id", i);
-    rt.put_field(h, "$value", value);
+    let made = |rt: &mut Rt, value: V| {
+        let h = rt.new_object("net/minecraft/core/Holder$Reference");
+        let (r, i) = (rt.string(registry), rt.string(id));
+        rt.put_field(h, "$registry", r);
+        rt.put_field(h, "$id", i);
+        rt.put_field(h, "$value", value);
+        h
+    };
+    if id.is_empty() {
+        return made(rt, value);
+    }
+    let h = rt.intern(format!("compat:holder/{registry}/{id}"), |rt| made(rt, V::NULL));
+    // A holder asked for before its entry was registered learns the value when one comes.
+    if value.r() != 0 && rt.get_field(h, "$value").r() == 0 {
+        rt.put_field(h, "$value", value);
+    }
     h
 }
 
@@ -704,14 +721,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "get" | "getValue" | "getOptional" | "getOrThrow" | "containsKey" | "getHolder" | "getHolderOrThrow" | "wrapAsHolder" => {
                     let id = if n == "wrapAsHolder" { registry_name_of(rt, &reg, a(1)).unwrap_or_default() } else { name_in(rt, a(1)) };
                     let v = registry_get(rt, &reg, &id);
+                    // A `HolderGetter`'s `getOrThrow(key)` and `get(key)` give the entry's holder
+                    // (in an optional), as `Registry.getHolderOrThrow` and `getHolder` do;
+                    // `Registry.get` and `getOrThrow` give its value.
+                    let holder = desc.ends_with(")Lnet/minecraft/core/Holder$Reference;");
+                    let holder_in_optional = n == "getHolder" || (n == "get" && desc.ends_with(")Ljava/util/Optional;"));
                     match n {
                         "containsKey" => V::I((v.r() != 0) as i32),
-                        "getOptional" => optional(rt, v),
-                        "getHolder" => {
+                        _ if holder || n == "wrapAsHolder" => registry_holder(rt, &reg, &id, v),
+                        _ if holder_in_optional => {
                             let h = if v.r() != 0 { registry_holder(rt, &reg, &id, v) } else { V::NULL };
                             optional(rt, h)
                         }
-                        "getHolderOrThrow" | "wrapAsHolder" => registry_holder(rt, &reg, &id, v),
+                        "getOptional" => optional(rt, v),
                         _ => v,
                     }
                 }

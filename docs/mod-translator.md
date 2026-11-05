@@ -1988,6 +1988,24 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `split::tests::calls_between_crates_go_through_links_and_calls_within_stay_direct`. The
     launcher builds with horizon-mixins at `MIXINS_REV` from horizon-rust/horizon-mixins, so a
     split bundle needs the sibling change upstream and the pin moved.
+  - [x] 2026-11-05 Enchantments (`horizon-compat/src/enchantments.rs`). Create Enchantable
+    Machinery's machines read `ItemEnchantments.EMPTY` in their block entities' constructors, and it
+    was null: 32,490 `NullPointerException`s (`EMPTY must not be null`) in one load round, and none
+    of its machines got a block entity. `ItemEnchantments` is native now: one object per content
+    (levels by name, sorted; equal ones are the same object, as `equals` has them), `EMPTY`,
+    `getLevel`, `keySet`, `entrySet` (fastutil's entries), `Mutable` (`set`, `upgrade`, `removeIf`,
+    `toImmutable`), `CODEC` (`{levels, show_in_tooltip}` or the levels alone, 1.21.1's
+    `withAlternative`), the stack's (`enchant`, `isEnchanted`, `getEnchantmentLevel`,
+    `getTagEnchantments`), `EnchantmentHelper`'s (`getEnchantmentsForCrafting`,
+    `set/updateEnchantments`, `getItemEnchantmentLevel`...) and `Enchantment.getFullname` (1.21.1's
+    descriptions and maximum levels, read from its data: the level unless the enchantment has one,
+    red for a curse). Every item carries `enchantments`, `EMPTY` by default (1.21.1's common
+    components), an enchanted book `stored_enchantments`. Holders: `HolderLookup.getOrThrow(key)`
+    (34 calls in the eleven mods) missed, and `HolderLookup$RegistryLookup`'s and `HolderGetter`'s
+    gave the value; they give the entry's holder now, `get(key)` it in an optional, and a
+    registry's holders are one per entry (vanilla's compare by identity). Tests
+    `enchantments::tests` (3). Next: the game's stacks carry their enchantments to the runtime and
+    back.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

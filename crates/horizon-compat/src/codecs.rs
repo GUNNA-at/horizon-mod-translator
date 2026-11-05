@@ -921,6 +921,7 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
             Nbt::Compound(m)
         }
         "dye_color" => Nbt::String(serialized_name(rt, v)?),
+        "item_enchantments" => crate::enchantments::encode(rt, v)?,
         "component_patch" => {
             let json = rt.get_field(v, "$json");
             match rt.str_of(json).and_then(|t| serde_json::from_str::<Json>(t).ok()) {

@@ -16,6 +16,7 @@ pub mod handlers;
 pub mod components;
 pub mod container_screens;
 pub mod capabilities;
+pub mod enchantments;
 pub mod entities;
 pub mod events;
 pub mod files;

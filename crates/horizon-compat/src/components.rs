@@ -9,8 +9,9 @@
 //! register, [`load`] reads a game stack's into a stack here and [`saved`] writes them back, each
 //! value through its type's codec (`encodeStart(NbtOps.INSTANCE, value)` and `parse`). A saved
 //! stack (`ItemStack.save`, `ItemStack.CODEC`: what a block entity keeps) carries them as vanilla's
-//! `components` map. Not modelled yet: an item's default components (vanilla's prototype:
-//! `get(MAX_STACK_SIZE)` is null), and vanilla's own types on a game stack.
+//! `components` map. Of an item's default components (vanilla's prototype) only `enchantments` is
+//! modelled (`ItemEnchantments.EMPTY`: `get(MAX_STACK_SIZE)` is null), and vanilla's own types on a
+//! game stack aren't carried yet.
 use crate::nbt::Nbt;
 use crate::{Data, Rt, V};
 
@@ -201,6 +202,36 @@ pub fn vanilla_type(rt: &mut Rt, id: &str) -> V {
         rt.put_field(t, "$id", s);
         t
     })
+}
+
+/// What `stack` holds of vanilla's type `id` (`minecraft:enchantments`): what was set on it, else
+/// the item's default ([`current`]).
+pub(crate) fn vanilla(rt: &mut Rt, stack: V, id: &str) -> Option<V> {
+    let ty = vanilla_type(rt, id);
+    current(rt, stack, ty)
+}
+
+/// Sets vanilla's type `id` on `stack` (null removes it); the value it had set before, or null.
+pub(crate) fn set_vanilla(rt: &mut Rt, stack: V, id: &str, value: V) -> V {
+    let ty = vanilla_type(rt, id);
+    put(rt, stack, ty, value)
+}
+
+/// What `stack` holds of type `ty`: what was set on it, else the item's default where this runtime
+/// knows one. Every 1.21.1 item carries `enchantments` (`ItemEnchantments.EMPTY`, one of
+/// `DataComponents.COMMON_ITEM_COMPONENTS`), an enchanted book `stored_enchantments` too. A
+/// removed one reads as its default here, not as null.
+fn current(rt: &mut Rt, stack: V, ty: V) -> Option<V> {
+    if let Some(v) = get(rt, stack, ty) {
+        return Some(v);
+    }
+    let id = rt.str_of(rt.get_field(ty, "$id")).unwrap_or("").to_owned();
+    let defaulted = match id.as_str() {
+        "minecraft:enchantments" => true,
+        "minecraft:stored_enchantments" => crate::api_common::item_like_name(rt, rt.get_field(stack, "$item")) == "minecraft:enchanted_book",
+        _ => false,
+    };
+    (defaulted && stack.r() != 0 && !crate::api_common::stack_empty(rt, stack)).then(|| crate::enchantments::empty(rt))
 }
 
 /// A component type built from a builder the mod configured: its codec is kept.
@@ -412,19 +443,19 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 return Some(v);
             }
             Some(match name {
-                "has" => V::I(get(rt, stack, ty).is_some() as i32),
-                "get" => get(rt, stack, ty).unwrap_or(V::NULL),
-                "getOrDefault" => get(rt, stack, ty).unwrap_or(a(2)),
+                "has" => V::I(current(rt, stack, ty).is_some() as i32),
+                "get" => current(rt, stack, ty).unwrap_or(V::NULL),
+                "getOrDefault" => current(rt, stack, ty).unwrap_or(a(2)),
                 "set" => put(rt, stack, ty, a(2)),
                 "remove" => put(rt, stack, ty, V::NULL),
                 // (type, default, UnaryOperator) or (type, default, argument, BiFunction): the
                 // operator's result is set, and the value before it returned, as vanilla does.
                 "update" => {
-                    let current = get(rt, stack, ty).unwrap_or(a(2));
+                    let held = current(rt, stack, ty).unwrap_or(a(2));
                     let next = if desc.contains("Ljava/util/function/UnaryOperator;") {
-                        rt.call_functional("java/util/function/UnaryOperator.apply.(Ljava/lang/Object;)Ljava/lang/Object;", a(3), &[current])
+                        rt.call_functional("java/util/function/UnaryOperator.apply.(Ljava/lang/Object;)Ljava/lang/Object;", a(3), &[held])
                     } else {
-                        rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", a(4), &[current, a(3)])
+                        rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", a(4), &[held, a(3)])
                     };
                     put(rt, stack, ty, next)
                 }
