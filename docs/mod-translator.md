@@ -2317,6 +2317,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `codecs::tests::a_vanilla_enums_codec_goes_by_its_serialized_name`,
     `api_common::tests::times_of_day_durations_and_executors_are_javas`, chests and hoppers in
     `blocks::tests::super_get_shape_to_a_vanilla_kind_follows_the_state`; 262 compat tests pass.
+  - [x] 2026-11-05 Game rules as mods read them (`level.getGameRules().getBoolean(GameRules.RULE_MOBGRIEFING)`;
+    SecurityCraft, Create's contraptions and many mobs' griefing checks ask). `gamerules.rs` answers
+    1.21.1's 51 `GameRules.RULE_*` keys, each the game's own rule of its 26.3 name through the new
+    `Host::game_rule` (the engine's `native_game_rule` reads the world's rules; the bundle bridges
+    it): 1.21.11 renamed them and turned some around, so `disableRaids` reads `raids` negated,
+    `disableElytraMovementCheck` `elytra_movement_check` negated, `doFireTick` whether
+    `fire_spread_radius_around_player` isn't 0, `doDaylightCycle` `advance_time`; the two portal
+    delays and `spawnChunkRadius`, which 26.3 doesn't have, read their 1.21.1 defaults. A rule a mod
+    registers (`GameRules.register(id, category, BooleanValue.create(default))`) reads its default,
+    then what the mod sets it to (`getRule(key).set(value, server)`); keys answer `getId`,
+    `getCategory`, `getDescriptionId`, `equals` and `hashCode` by id. Also `OptionalLong` and
+    `OptionalDouble` as `OptionalInt` (with `orElseGet`, `ifPresentOrElse`), and vanilla's
+    `Util.toMap()` (entries back into a map, through a new method-as-function combinator).
+    Tests `gamerules::tests::a_mod_reads_the_games_rules_by_their_old_keys` (a host with
+    `mob_griefing` off, `raids` off, fire spread 0, `random_tick_speed` 7),
+    `menus::tests::optional_doubles_and_longs_hold_their_kind`, `Util.toMap` in
+    `jutil::tests::streams_join_and_collect_to_maps_as_java_does`; 264 compat and 14 translator
+    tests pass. In game (the build of the step before, e41df47, `cemgame.sh`): 14 kinds of unmapped
+    calls, from 28; door, ladder and lever shapes, `BlockState.getProperties`, the local player's eye
+    position and look angle and Flywheel's GL capability reads no longer show. Left: Flywheel's
+    shader compiler (its GL backend, which Horizon's renderer replaces) and 3 `Object.get` on null.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -43,7 +43,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 59] = [
+const COMPAT: [(&str, &str); 60] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -69,6 +69,7 @@ const COMPAT: [(&str, &str); 59] = [
     ("vanilla_records.rs", include_str!("../../horizon-compat/src/vanilla_records.rs")),
     ("vanilla_shapes.rs", include_str!("../../horizon-compat/src/vanilla_shapes.rs")),
     ("functions.rs", include_str!("../../horizon-compat/src/functions.rs")),
+    ("gamerules.rs", include_str!("../../horizon-compat/src/gamerules.rs")),
     ("shapes.rs", include_str!("../../horizon-compat/src/shapes.rs")),
     ("sounds.rs", include_str!("../../horizon-compat/src/sounds.rs")),
     ("vanilla_sounds.rs", include_str!("../../horizon-compat/src/vanilla_sounds.rs")),
@@ -1388,6 +1389,9 @@ fn world_reads(get: &str) -> String {
         }}
         fn world_height(&self) -> (i32, i32) {{
             {get}.native_world_height()
+        }}
+        fn game_rule(&self, name: &str) -> Option<i32> {{
+            {get}.native_game_rule(name)
         }}
         fn resource(&self, path: &str) -> Option<Vec<u8>> {{
             {get}.native_resource(path)

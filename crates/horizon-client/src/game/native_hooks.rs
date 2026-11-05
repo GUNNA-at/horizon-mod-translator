@@ -4019,6 +4019,16 @@ impl Game<'_> {
     pub(super) fn native_world_height(&self) -> (i32, i32) {
         (self.world.shape.min_y, self.world.shape.height)
     }
+    /// Game rule `name` (`mob_griefing`, `random_tick_speed`) as the world has it,
+    /// a boolean as 0 or 1 (`GameRules.getBoolean`, `getInt`): whether a mod's
+    /// machine may grief, how often its crops grow. None for a rule the game
+    /// doesn't have. API @API:native_world_state@.
+    pub(super) fn native_game_rule(&self, name: &str) -> Option<i32> {
+        self.ui.rules.get(name).map(|v| match v {
+            horizon_client::gamerules::Value::Bool(b) => i32::from(b),
+            horizon_client::gamerules::Value::Int(i) => i,
+        })
+    }
     /// The bytes of resource file `path` (`assets/create/models/block/shaft.json`,
     /// `data/create/recipe/…`) as the game loaded its resources: the resource
     /// packs', the mods' and vanilla's files layered, the top one's. None for a

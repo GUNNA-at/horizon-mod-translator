@@ -3003,6 +3003,16 @@ mod tests {
         let twice = rt.alloc("java/util/stream/Stream", Data::Stream(vec![words[0], words[0]]));
         c(&mut rt, "java/util/stream/Stream.collect.(Ljava/util/stream/Collector;)Ljava/lang/Object;", &[twice, to_map]);
         assert!(rt.thrown.take().is_some_and(|e| rt.class_of(e) == "java/lang/IllegalStateException"));
+        // Vanilla's `Util.toMap()`: a map's entries back into a map, each key to its value.
+        let entries = c(&mut rt, "java/util/Map.entrySet.()Ljava/util/Set;", &[m]);
+        let stream = c(&mut rt, "java/util/Set.stream.()Ljava/util/stream/Stream;", &[entries]);
+        let util_to_map = crate::api::call(&mut rt, "net/minecraft/Util.toMap.()Ljava/util/stream/Collector;", &[]);
+        let copy = c(&mut rt, "java/util/stream/Stream.collect.(Ljava/util/stream/Collector;)Ljava/lang/Object;", &[stream, util_to_map]);
+        assert_ne!(copy, m);
+        for w in ["a", "b", "c"] {
+            let k = rt.string(w);
+            assert_eq!(table_get(&mut rt, copy, k).map(|v| rt.str_of(v).map(str::to_owned)), Some(Some(w.to_owned())));
+        }
         // Guava's concurrent map is a map; fastutil's `trim` answers true.
         let cm = c(&mut rt, "com/google/common/collect/Maps.newConcurrentMap.()Ljava/util/concurrent/ConcurrentMap;", &[]);
         table_put(&mut rt, cm, b, V::I(1));

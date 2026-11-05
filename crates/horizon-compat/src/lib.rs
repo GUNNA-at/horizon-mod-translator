@@ -26,6 +26,7 @@ pub mod fluids;
 pub mod food;
 pub mod item_use;
 pub mod functions;
+pub mod gamerules;
 pub mod glue;
 pub mod gui;
 pub mod gson;

@@ -175,6 +175,11 @@ pub trait Host {
     fn world_height(&self) -> (i32, i32) {
         (-64, 384)
     }
+    /// Game rule `name` as the game has it (26.3's name: `mob_griefing`), a boolean as 0 or 1;
+    /// None for a rule the game doesn't have, or a host that keeps no rules.
+    fn game_rule(&self, _name: &str) -> Option<i32> {
+        None
+    }
     /// The strongest redstone signal reaching the block at `pos` from its six neighbours, 0 to 15
     /// (`SignalGetter.getBestNeighborSignal`, what `hasNeighborSignal` asks): 0 where the world
     /// isn't the authoritative server's.

@@ -38,6 +38,8 @@ const CONTAINER_DATA: &str = "net/minecraft/world/inventory/ContainerData";
 const SIMPLE_CONTAINER_DATA: &str = "net/minecraft/world/inventory/SimpleContainerData";
 const LEVEL_ACCESS: &str = "net/minecraft/world/inventory/ContainerLevelAccess";
 const OPTIONAL_INT: &str = "java/util/OptionalInt";
+const OPTIONAL_LONG: &str = "java/util/OptionalLong";
+const OPTIONAL_DOUBLE: &str = "java/util/OptionalDouble";
 pub(crate) const CLICK_TYPE: &str = "net/minecraft/world/inventory/ClickType";
 const MENU_SCREENS: &str = "net/minecraft/client/gui/screens/MenuScreens";
 const REGISTER_SCREENS: &str = "net/neoforged/neoforge/client/event/RegisterMenuScreensEvent";
@@ -1936,25 +1938,41 @@ fn data_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
-// ---- OptionalInt ----
+// ---- OptionalInt, OptionalLong, OptionalDouble ----
 
 pub(crate) fn optional_int(rt: &mut Rt, v: Option<i32>) -> V {
-    let o = rt.new_object(OPTIONAL_INT);
+    optional_number(rt, OPTIONAL_INT, v.map(V::I))
+}
+
+/// An `OptionalInt`, `OptionalLong` or `OptionalDouble` (`class`) of `v`, of the class's kind.
+fn optional_number(rt: &mut Rt, class: &'static str, v: Option<V>) -> V {
+    let o = rt.new_object(class);
     rt.put_field(o, "$present", V::I(v.is_some() as i32));
-    rt.put_field(o, "$value", V::I(v.unwrap_or(0)));
+    let zero = match class {
+        OPTIONAL_LONG => V::J(0),
+        OPTIONAL_DOUBLE => V::D(0.0),
+        _ => V::I(0),
+    };
+    rt.put_field(o, "$value", v.unwrap_or(zero));
     o
 }
 
-fn optional_int_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+fn optional_number_call(rt: &mut Rt, class: &'static str, name: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     let o = a(0);
     let present = truthy(rt.get_field(o, "$present"));
+    // The consumer `ifPresent` hands the value to, and the supplier `orElseGet` asks.
+    let (consumer, supplier) = match class {
+        OPTIONAL_LONG => ("java/util/function/LongConsumer.accept.(J)V", "java/util/function/LongSupplier.getAsLong.()J"),
+        OPTIONAL_DOUBLE => ("java/util/function/DoubleConsumer.accept.(D)V", "java/util/function/DoubleSupplier.getAsDouble.()D"),
+        _ => (INT_CONSUMER, "java/util/function/IntSupplier.getAsInt.()I"),
+    };
     Some(match name {
-        "of" => optional_int(rt, Some(a(0).i())),
-        "empty" => optional_int(rt, None),
+        "of" => optional_number(rt, class, Some(a(0))),
+        "empty" => optional_number(rt, class, None),
         "isPresent" => V::I(present as i32),
         "isEmpty" => V::I(!present as i32),
-        "getAsInt" | "orElseThrow" => {
+        "getAsInt" | "getAsLong" | "getAsDouble" | "orElseThrow" => {
             if !present {
                 rt.throw_new("java/util/NoSuchElementException");
             }
@@ -1967,10 +1985,26 @@ fn optional_int_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
                 a(1)
             }
         }
+        "orElseGet" => {
+            if present {
+                rt.get_field(o, "$value")
+            } else {
+                rt.call_functional(supplier, a(1), &[])
+            }
+        }
         "ifPresent" => {
             if present {
                 let v = rt.get_field(o, "$value");
-                rt.call_functional(INT_CONSUMER, a(1), &[v]);
+                rt.call_functional(consumer, a(1), &[v]);
+            }
+            V::Void
+        }
+        "ifPresentOrElse" => {
+            if present {
+                let v = rt.get_field(o, "$value");
+                rt.call_functional(consumer, a(1), &[v]);
+            } else {
+                rt.call_functional("java/lang/Runnable.run.()V", a(2), &[]);
             }
             V::Void
         }
@@ -2566,6 +2600,8 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | SIMPLE_CONTAINER_DATA
             | LEVEL_ACCESS
             | OPTIONAL_INT
+            | OPTIONAL_LONG
+            | OPTIONAL_DOUBLE
             | REGISTER_SCREENS
             | MENU_SCREENS
     ) || (owner == GAME_MODE && matches!(name, "handleInventoryMouseClick" | "handleInventoryButtonClick"))
@@ -2584,7 +2620,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         MENU_PROVIDER | MENU_CONSTRUCTOR | MENU_PROVIDER_EXTENSION | SIMPLE_MENU_PROVIDER => provider_call(rt, owner, name, args),
         DATA_SLOT | CONTAINER_DATA | SIMPLE_CONTAINER_DATA => data_call(rt, owner, name, args),
         LEVEL_ACCESS => level_access_call(rt, name, desc, args),
-        OPTIONAL_INT => optional_int_call(rt, name, args),
+        OPTIONAL_INT | OPTIONAL_LONG | OPTIONAL_DOUBLE => optional_number_call(rt, owner, name, args),
         REGISTER_SCREENS if name == "register" => {
             rt.put_field(arg(args, 1), "$screen", arg(args, 2));
             Some(V::Void)
@@ -3071,5 +3107,24 @@ mod tests {
         // Thrown as a whole stack (its data with it), not as an item and a count.
         let whole = &host.item_entity_stacks[&e.id];
         assert_eq!((whole.item.as_str(), whole.count), ("minecraft:stone", 64));
+    }
+
+    /// `OptionalDouble` and `OptionalLong` as `OptionalInt`: a value of their kind, or none, which
+    /// `orElse` replaces and `getAsDouble` refuses with Java's exception.
+    #[test]
+    fn optional_doubles_and_longs_hold_their_kind() {
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        let some = c(&mut rt, "java/util/OptionalDouble.of.(D)Ljava/util/OptionalDouble;", &[V::D(1.5)]);
+        assert_eq!(c(&mut rt, "java/util/OptionalDouble.getAsDouble.()D", &[some]), V::D(1.5));
+        let none = c(&mut rt, "java/util/OptionalDouble.empty.()Ljava/util/OptionalDouble;", &[]);
+        assert_eq!(c(&mut rt, "java/util/OptionalDouble.isPresent.()Z", &[none]), V::I(0));
+        assert_eq!(c(&mut rt, "java/util/OptionalDouble.orElse.(D)D", &[none, V::D(2.5)]), V::D(2.5));
+        c(&mut rt, "java/util/OptionalDouble.getAsDouble.()D", &[none]);
+        assert!(rt.thrown.take().is_some_and(|e| rt.class_of(e) == "java/util/NoSuchElementException"));
+        let long = c(&mut rt, "java/util/OptionalLong.of.(J)Ljava/util/OptionalLong;", &[V::J(7)]);
+        assert_eq!(c(&mut rt, "java/util/OptionalLong.orElse.(J)J", &[long, V::J(0)]), V::J(7));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

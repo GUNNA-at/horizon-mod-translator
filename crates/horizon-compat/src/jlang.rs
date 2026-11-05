@@ -1918,6 +1918,12 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // `memoize(function)`: the function itself (same answers; vanilla only caches them).
         ("net/minecraft/Util", "memoize") => a(0),
+        // `toMap()`: map entries collected into a map, `Collectors.toMap(Entry::getKey, Entry::getValue)`.
+        ("net/minecraft/Util", "toMap") => {
+            let k = crate::functions::method(rt, "java/util/Map$Entry.getKey.()Ljava/lang/Object;");
+            let v = crate::functions::method(rt, "java/util/Map$Entry.getValue.()Ljava/lang/Object;");
+            rt.alloc("compat:collect-map", Data::List(vec![k, v]))
+        }
         // The data fixer's type for a block entity (`Builder.build(type)` takes it): none here, as
         // vanilla answers when the fixer doesn't know the id.
         ("net/minecraft/Util", "fetchChoiceType") => V::NULL,

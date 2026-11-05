@@ -72,6 +72,13 @@ pub(crate) fn component(rt: &mut Rt, name: &str) -> V {
     combinator(rt, "compat:fn/component", vec![n])
 }
 
+/// A method of the game's or Java's as a function of its receiver and arguments
+/// (`Map.Entry::getKey`): `key` is the method's.
+pub(crate) fn method(rt: &mut Rt, key: &str) -> V {
+    let k = rt.string(key);
+    combinator(rt, "compat:fn/method", vec![k])
+}
+
 /// A new object of the game's `class`, made by its constructor `desc` with `args`.
 fn make(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
     let class: &'static str = rt.static_key(class);
@@ -120,6 +127,12 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
             rt.get_field(args.first().copied().unwrap_or_default(), name)
         }
         "compat:fn/constant" => part(0),
+        // A method as a function (`Map.Entry::getKey`): [key], on the first argument with the rest.
+        "compat:fn/method" => {
+            let k = rt.str_of(part(0)).unwrap_or("").to_owned();
+            let k: &'static str = rt.static_key(&k);
+            crate::api::call(rt, k, args)
+        }
         // [items, pairs]: `accept(consumer)`.
         "compat:fn/feed" => {
             let consumer = args.first().copied().unwrap_or_default();
