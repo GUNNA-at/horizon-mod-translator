@@ -2672,6 +2672,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Test: `codecs::tests::item_abilities_and_direct_sound_events_read_and_write_as_vanillas`
     (301 compat tests pass). `EnchantmentValueEffect.CODEC` (FD's backstabbing enchantment effect
     component) is still unanswered: it needs the game to read a mod's enchantment effect component.
+  - [x] 2026-11-05 1.21.1's vanilla tags that 26.3 renamed, in a mod's code and in its data.
+    Farmer's Delight's wild crops never generated. A trace of each placed feature FD's code hands
+    over showed why: its patches put a crop where `matching_block_tag minecraft:dirt` holds below,
+    and that was false on every grass block. 26.3 narrowed `#minecraft:dirt` to dirt, coarse dirt and
+    rooted dirt; the set 1.21.1 called `dirt` (grass, podzol, mycelium, moss, mud too) is
+    `substrate_overworld`, which takes `dirt` in. The same rename kept every mod plant that keeps
+    `BushBlock.mayPlaceOn` (`BlockTags.DIRT` or farmland) off grass.
+    Compared the two versions' vanilla tag data, each tag resolved to the blocks or items 1.21.1 has
+    (1.21.1's from the CurseForge install's jar, 26.3's from the prepared resources). 10 block tags
+    and `enchantable/sword` hold under another 26.3 name the set they held: `bamboo_plantable_on` is
+    `supports_bamboo`, `mushroom_grow_block` `overrides_mushroom_light_requirement`,
+    `dead_bush_may_place_on` `supports_dry_vegetation` (which lets farmland in too). `tall_flowers` is
+    gone with nothing holding its set. `horizon_compat::vanilla_tags::CHANGED` lists them, each with
+    where a mod's addition goes: there, the 26.3 tags that take the entry in are the ones that took
+    it in under 1.21.1, renamed. So `dirt` additions stay in `dirt` and join `supports_big_dripleaf`
+    (it lists its blocks where 1.21.1's `big_dripleaf_placeable` took `dirt` in); `enchantable/sword`'s
+    go to `melee_weapon` (knockback, looting, sharpness' primary items) and `sweeping`;
+    `tall_flowers`' stay and join `flowers` (and `bee_food`, for items).
+    - Runtime: every `TagKey` the mod's code makes is the 26.3 tag (`fluids::tag_key`: `BlockTags`
+      and `ItemTags` constants, `TagKey.create`, keys its codecs read), and so are
+      `BushBlock.mayPlaceOn`'s dirt and the item tags ingredients name.
+    - Installer: the mod's data names the 26.3 tags (`carry::renamed_tags`: `#` strings and `tag`
+      fields in tag files, worldgen and recipes, and under `blocks` and `items` fields anywhere),
+      and its additions to a renamed tag are written where 26.3 takes them in, merged where two meet
+      (`carry::write_tag`). FD: `bamboo_plantable_on` to `supports_bamboo`, `mushroom_grow_block`
+      to `overrides_mushroom_light_requirement`, `enchantable/sword` to `melee_weapon` and
+      `sweeping`, `#minecraft:dirt` in `farmersdelight:terrain` and its wild crop patches to
+      `substrate_overworld`.
+    - Left: `dyeable`. 1.21.1 dyed any `#dyeable` item in the crafting grid; 26.3 dyes by one
+      `crafting_dye` recipe per item and washes `cauldron_can_remove_dye` in a cauldron, so a mod's
+      dyeable items need recipes written. Item `dirt`, `trim_templates` and the carver tags have no
+      26.3 tag of their set.
+    Tests: `vanilla_tags::tests::a_1_21_1_mods_vanilla_tags_hold_their_1_21_1_blocks`,
+    `additions_to_renamed_tags_go_where_26_3_takes_them_in`,
+    `blocks::tests::a_mod_plants_super_survival_is_vanillas` (now against 26.3's tags; 303 compat
+    tests pass), `carry::tests::a_mods_vanilla_tags_are_26_3s` (113 port-pack tests pass).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

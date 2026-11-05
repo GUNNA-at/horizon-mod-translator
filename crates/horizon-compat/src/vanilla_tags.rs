@@ -328,6 +328,52 @@ const ITEM: &[(&str, &str)] = &[
     ("GAZE_DISGUISE_EQUIPMENT", "gaze_disguise_equipment"),
 ];
 
+/// 1.21.1's vanilla tags that 26.3 renamed, split, narrowed or dropped: (registry, 1.21.1 tag, the
+/// 26.3 tag a reference to it means, "" where it keeps its name, the 26.3 tags what a mod adds to
+/// it goes to). Found by comparing the two versions' vanilla tag data, each tag resolved to the
+/// blocks or items 1.21.1 has: a reference means the 26.3 tag holding the 1.21.1 set; an addition
+/// goes where the 26.3 tags that take it in are the ones that took it in under 1.21.1, renamed.
+/// 26.3 narrowed `dirt` to dirt, coarse dirt and rooted dirt and named the 1.21.1 set
+/// `substrate_overworld`, which takes `dirt` in; its `supports_big_dripleaf` lists blocks where
+/// 1.21.1's `big_dripleaf_placeable` took `dirt` in. `enchantable/sword` became `melee_weapon`
+/// (knockback, looting; sharpness' primary items) and `sweeping` (sweeping edge). `tall_flowers`
+/// is gone with nothing holding its set; its entries were flowers (and bee food).
+const CHANGED: &[(&str, &str, &str, &[&str])] = &[
+    ("block", "dirt", "substrate_overworld", &["dirt", "supports_big_dripleaf"]),
+    ("block", "bamboo_plantable_on", "supports_bamboo", &["supports_bamboo"]),
+    ("block", "big_dripleaf_placeable", "supports_big_dripleaf", &["supports_big_dripleaf"]),
+    ("block", "small_dripleaf_placeable", "supports_small_dripleaf", &["supports_small_dripleaf"]),
+    ("block", "concrete_powder", "concrete_powders", &["concrete_powders"]),
+    ("block", "convertable_to_mud", "convertible_to_mud", &["convertible_to_mud"]),
+    ("block", "mushroom_grow_block", "overrides_mushroom_light_requirement", &["overrides_mushroom_light_requirement"]),
+    ("block", "snow_layer_can_survive_on", "support_override_snow_layer", &["support_override_snow_layer"]),
+    ("block", "snow_layer_cannot_survive_on", "cannot_support_snow_layer", &["cannot_support_snow_layer"]),
+    ("block", "dead_bush_may_place_on", "supports_dry_vegetation", &["supports_dry_vegetation"]),
+    ("block", "tall_flowers", "", &["tall_flowers", "flowers"]),
+    ("item", "enchantable/sword", "enchantable/melee_weapon", &["enchantable/melee_weapon", "enchantable/sweeping"]),
+    ("item", "tall_flowers", "", &["tall_flowers", "bee_food", "flowers"]),
+];
+
+fn changed(registry: &str, tag: &str) -> Option<&'static (&'static str, &'static str, &'static str, &'static [&'static str])> {
+    let registry = registry.trim_start_matches("minecraft:");
+    let path = tag.strip_prefix("minecraft:").unwrap_or(tag);
+    CHANGED.iter().find(|(r, old, _, _)| *r == registry && *old == path)
+}
+
+/// The vanilla tag 26.3 gives what 1.21.1 meant by `tag` (`minecraft:dirt`, or `dirt`) of
+/// `registry` (`block`, `minecraft:item`), as `minecraft:substrate_overworld`; None where the name
+/// means in 26.3 what it meant.
+pub fn current(registry: &str, tag: &str) -> Option<String> {
+    let (_, _, now, _) = changed(registry, tag)?;
+    (!now.is_empty()).then(|| format!("minecraft:{now}"))
+}
+
+/// The vanilla tags of `registry` a mod's addition to 1.21.1's `minecraft:<path>` goes to in 26.3
+/// (paths: `dirt` gives `dirt` and `supports_big_dripleaf`); None for a tag 26.3 kept as it was.
+pub fn added_to(registry: &str, path: &str) -> Option<&'static [&'static str]> {
+    changed(registry, path).map(|(_, _, _, to)| *to)
+}
+
 /// The tag `BlockTags.<field>` (`kind` `block`) or `ItemTags.<field>` (`item`) names, as
 /// `minecraft:leaves`; None for a field 26.3 doesn't have.
 pub fn named(kind: &str, field: &str) -> Option<String> {
@@ -343,7 +389,8 @@ pub fn named(kind: &str, field: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::named;
+    use super::{added_to, named};
+    use crate::{api, Rt, V};
 
     #[test]
     fn constants_name_the_tags_26_3_gives_them() {
@@ -362,5 +409,76 @@ mod tests {
         assert_eq!(named("item", "STAIRS").as_deref(), Some("minecraft:stairs"));
         assert_eq!(named("item", "SLABS").as_deref(), Some("minecraft:slabs"));
         assert_eq!(named("block", "NOT_A_TAG"), None);
+    }
+
+    /// 26.3's block tags, as its data gives them: `dirt` is dirt, coarse and rooted dirt; the set
+    /// 1.21.1 called `dirt` (grass, podzol, mycelium, moss, mud too) is `substrate_overworld`.
+    struct Tags26;
+    impl crate::host::Host for Tags26 {
+        fn block_state(&self, _: [i32; 3]) -> String {
+            "minecraft:air".into()
+        }
+        fn set_block_state(&mut self, _: [i32; 3], _: &str) -> bool {
+            false
+        }
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {
+            let narrow = ["minecraft:dirt", "minecraft:coarse_dirt", "minecraft:rooted_dirt"];
+            let more = ["minecraft:grass_block", "minecraft:podzol", "minecraft:mycelium", "minecraft:moss_block", "minecraft:mud"];
+            match tag {
+                "minecraft:dirt" => narrow.contains(&block),
+                "minecraft:substrate_overworld" => narrow.contains(&block) || more.contains(&block),
+                "minecraft:supports_bamboo" => block == "minecraft:sand" || narrow.contains(&block) || more.contains(&block),
+                _ => false,
+            }
+        }
+    }
+
+    /// A 1.21.1 mod's vanilla tags hold in 26.3 the blocks they held: its `BlockTags.DIRT` takes
+    /// grass in, as 1.21.1's did and 26.3's `dirt` doesn't; constants 26.3 dropped
+    /// (`BAMBOO_PLANTABLE_ON`) and keys the mod makes itself name the tag 26.3 renamed them to.
+    #[test]
+    fn a_1_21_1_mods_vanilla_tags_hold_their_1_21_1_blocks() {
+        let mut rt = Rt::new();
+        let location = |rt: &mut Rt, key: V| rt.str_of(rt.get_field(key, "$location")).unwrap().to_owned();
+        let dirt = api::get_static(&mut rt, "net/minecraft/tags/BlockTags.DIRT");
+        let bamboo = api::get_static(&mut rt, "net/minecraft/tags/BlockTags.BAMBOO_PLANTABLE_ON");
+        let leaves = api::get_static(&mut rt, "net/minecraft/tags/BlockTags.LEAVES");
+        let sword = api::get_static(&mut rt, "net/minecraft/tags/ItemTags.SWORD_ENCHANTABLE");
+        let item_dirt = api::get_static(&mut rt, "net/minecraft/tags/ItemTags.DIRT");
+        assert_eq!(location(&mut rt, dirt), "minecraft:substrate_overworld");
+        assert_eq!(location(&mut rt, bamboo), "minecraft:supports_bamboo");
+        assert_eq!(location(&mut rt, sword), "minecraft:enchantable/melee_weapon");
+        assert_eq!(location(&mut rt, leaves), "minecraft:leaves");
+        // 26.3 has no item tag of 1.21.1's item `dirt` set: the name stays.
+        assert_eq!(location(&mut rt, item_dirt), "minecraft:dirt");
+        // `TagKey.create(Registries.BLOCK, "minecraft:dirt")`: the constant's key.
+        let registry = api::get_static(&mut rt, "net/minecraft/core/registries/Registries.BLOCK");
+        let name = rt.string("minecraft:dirt");
+        let parse = "net/minecraft/resources/ResourceLocation.parse.(Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;";
+        let name = api::call(&mut rt, parse, &[name]);
+        let create = "net/minecraft/tags/TagKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/tags/TagKey;";
+        let made = api::call(&mut rt, create, &[registry, name]);
+        assert_eq!(location(&mut rt, made), "minecraft:substrate_overworld");
+        // `state.is(BlockTags.DIRT)` on grass, coarse dirt and sand, against 26.3's tags.
+        let is = "net/minecraft/world/level/block/state/BlockState.is.(Lnet/minecraft/tags/TagKey;)Z";
+        let mut tags = Tags26;
+        for (block, inside) in [("minecraft:grass_block", true), ("minecraft:coarse_dirt", true), ("minecraft:sand", false)] {
+            let state = api::state(&mut rt, block);
+            let got = rt.with_host(&mut tags, |rt| api::call(rt, is, &[state, dirt]));
+            assert_eq!(got, V::I(inside as i32), "{block} in BlockTags.DIRT");
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// What a mod adds to a 1.21.1 tag 26.3 renamed goes where 26.3's tags take it in as 1.21.1's
+    /// did: to the renamed tag; `dirt`'s stays in `dirt`, which `substrate_overworld` takes in,
+    /// and joins `supports_big_dripleaf`, which lists its blocks where 1.21.1 took `dirt` in.
+    #[test]
+    fn additions_to_renamed_tags_go_where_26_3_takes_them_in() {
+        assert_eq!(added_to("block", "dirt"), Some(&["dirt", "supports_big_dripleaf"][..]));
+        assert_eq!(added_to("block", "bamboo_plantable_on"), Some(&["supports_bamboo"][..]));
+        assert_eq!(added_to("minecraft:item", "enchantable/sword"), Some(&["enchantable/melee_weapon", "enchantable/sweeping"][..]));
+        assert_eq!(added_to("block", "leaves"), None);
+        assert_eq!(added_to("item", "dirt"), None);
     }
 }

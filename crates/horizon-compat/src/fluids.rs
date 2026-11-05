@@ -532,9 +532,11 @@ pub fn of_block_state(rt: &mut Rt, text: &str) -> V {
 
 /// A tag key, one per registry and location (Java interns them): `$registry` is the registry as
 /// this runtime names registries (`fluid`, which is what `Registries.FLUID` is here), `$location`
-/// the tag (`minecraft:water`).
+/// the tag (`minecraft:water`). A vanilla tag 26.3 renamed is the 26.3 one: the mod's 1.21.1
+/// `BlockTags.DIRT` is `minecraft:substrate_overworld` ([`crate::vanilla_tags::current`]).
 pub fn tag_key(rt: &mut Rt, registry: &str, location: &str) -> V {
     let location = if location.contains(':') { location.to_owned() } else { format!("minecraft:{location}") };
+    let location = crate::vanilla_tags::current(registry, &location).unwrap_or(location);
     rt.intern(format!("tag-key/{registry}/{location}"), |rt| {
         let t = rt.new_object(TAG_KEY);
         let (r, l) = (rt.string(registry), rt.string(&location));

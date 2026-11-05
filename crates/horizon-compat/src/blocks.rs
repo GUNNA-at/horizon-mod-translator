@@ -1233,10 +1233,12 @@ fn plant_class(owner: &str) -> Option<&str> {
 }
 
 /// `BushBlock.mayPlaceOn` (dirt or farmland) for a plant class whose own it is; None for another's.
+/// 1.21.1's `BlockTags.DIRT` holds grass and podzol, which 26.3's `dirt` doesn't.
 fn bush_soil(rt: &Rt, class: &str, soil: &str) -> Option<bool> {
     BUSH_SOIL.contains(&class).then(|| {
         let (block, _) = crate::host::split_state(soil);
-        block == "minecraft:farmland" || rt.host().is_some_and(|h| h.block_in_tag(block, "minecraft:dirt"))
+        let dirt = crate::vanilla_tags::current("block", "minecraft:dirt").unwrap_or_else(|| "minecraft:dirt".into());
+        block == "minecraft:farmland" || rt.host().is_some_and(|h| h.block_in_tag(block, &dirt))
     })
 }
 
@@ -2999,7 +3001,7 @@ mod tests {
 
     /// A mod plant's `super.canSurvive` to `DoublePlantBlock` or `FlowerBlock` answers as NeoForge
     /// 1.21.1's does. A lower half asks a mod soil's `canSustainPlant` first, then the plant's own
-    /// `mayPlaceOn`, else the bush's (dirt or farmland). An upper half needs the plant's lower half
+    /// `mayPlaceOn`, else the bush's (1.21.1's dirt, grass and podzol too, or farmland). An upper half needs the plant's lower half
     /// below, except in the check made before the block is set. `DoublePlantBlock.placeAt` sets
     /// both halves, the lower waterlogged where there is water.
     #[test]
@@ -3027,8 +3029,14 @@ mod tests {
                 self.0.insert(pos, state.into());
                 true
             }
+            // 26.3's tags: `dirt` is dirt, coarse and rooted dirt; 1.21.1's (grass too) is
+            // `substrate_overworld`.
             fn block_in_tag(&self, block: &str, tag: &str) -> bool {
-                tag == "minecraft:dirt" && matches!(block, "minecraft:dirt" | "minecraft:grass_block")
+                match tag {
+                    "minecraft:dirt" => matches!(block, "minecraft:dirt" | "minecraft:coarse_dirt" | "minecraft:rooted_dirt"),
+                    "minecraft:substrate_overworld" => matches!(block, "minecraft:dirt" | "minecraft:coarse_dirt" | "minecraft:rooted_dirt" | "minecraft:grass_block" | "minecraft:podzol"),
+                    _ => false,
+                }
             }
         }
         let mut rt = Rt::new();
@@ -3058,6 +3066,7 @@ mod tests {
         assert!(survives(&mut rt, DOUBLE, rice, "minecraft:tall_grass[half=upper]", "minecraft:sand"));
         // A flower that keeps the bush's soil: dirt, farmland.
         assert!(survives(&mut rt, FLOWER_SURVIVES, flower, "test:flower", "minecraft:grass_block"));
+        assert!(survives(&mut rt, FLOWER_SURVIVES, flower, "test:flower", "minecraft:podzol"));
         assert!(survives(&mut rt, FLOWER_SURVIVES, flower, "test:flower", "minecraft:farmland[moisture=7]"));
         assert!(!survives(&mut rt, FLOWER_SURVIVES, flower, "test:flower", "minecraft:sand"));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);

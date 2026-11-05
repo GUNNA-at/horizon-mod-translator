@@ -63,6 +63,12 @@ pub struct Report {
     pub worldgen_types: crate::worldgen::Upgrade,
     /// The loader's convention biome tags the structures name, carried.
     pub convention_biome_tags: usize,
+    /// Data files that named a 1.21.1 vanilla tag 26.3 renamed, now naming 26.3's
+    /// ([`renamed_tags`]).
+    pub vanilla_tags_renamed: usize,
+    /// The mod's additions to 1.21.1 vanilla tags 26.3 renamed or dropped, and the 26.3 tags
+    /// they went to (`horizon_compat::vanilla_tags::added_to`).
+    pub vanilla_tag_additions: BTreeMap<String, Vec<String>>,
 }
 
 /// The pack around a mod being carried.
@@ -291,6 +297,89 @@ pub fn renamed_ids(v: &mut Value) -> bool {
         Value::Object(o) => o.values_mut().fold(false, |c, x| renamed_ids(x) | c),
         _ => false,
     }
+}
+
+/// The registry whose tags a data file at `rest` (the path after `data/<namespace>/`) names in
+/// its `#` strings and `tag` fields: a tag file's own, worldgen's blocks, recipes' items; None
+/// where only `blocks` and `items` fields say.
+fn tag_registry(rest: &str) -> Option<&'static str> {
+    if rest.starts_with("tags/block/") || rest.starts_with("worldgen/") {
+        Some("block")
+    } else if rest.starts_with("tags/item/") || rest.starts_with("recipe/") {
+        Some("item")
+    } else {
+        None
+    }
+}
+
+/// Every 1.21.1 vanilla tag a data file names that 26.3 renamed, as 26.3 names it, in place: its
+/// `#minecraft:dirt` strings and `"tag": "minecraft:dirt"` fields (block predicates, rule tests,
+/// ingredients) of `registry`, and those under `blocks` and `items` fields of theirs
+/// (`horizon_compat::vanilla_tags::current`). Whether any was.
+pub fn renamed_tags(v: &mut Value, registry: Option<&str>) -> bool {
+    use horizon_compat::vanilla_tags::current;
+    match v {
+        Value::String(s) => {
+            let now = registry.zip(s.strip_prefix('#')).and_then(|(r, tag)| current(r, tag));
+            now.map(|t| *s = format!("#{t}")).is_some()
+        }
+        Value::Array(a) => a.iter_mut().fold(false, |c, x| renamed_tags(x, registry) | c),
+        Value::Object(o) => o.iter_mut().fold(false, |c, (k, x)| {
+            let changed = match (k.as_str(), &mut *x) {
+                ("blocks", x) => renamed_tags(x, Some("block")),
+                ("items", x) => renamed_tags(x, Some("item")),
+                ("tag", Value::String(t)) => match registry.and_then(|r| current(r, t)) {
+                    Some(now) => {
+                        *t = now;
+                        true
+                    }
+                    None => false,
+                },
+                (_, x) => renamed_tags(x, registry),
+            };
+            changed | c
+        }),
+        _ => false,
+    }
+}
+
+/// A tag file's entries written to `path`, after those of a file already there (two 1.21.1 tags
+/// 26.3 renamed into one); its `replace` only where it is `own`, the tag it was (not one more it
+/// goes to as well).
+fn write_tag(path: &Path, bytes: &[u8], own: bool) -> Result<(), String> {
+    if own && !path.exists() {
+        return write(path, bytes);
+    }
+    let Ok(Value::Object(mut add)) = serde_json::from_slice::<Value>(bytes) else {
+        return write(path, bytes);
+    };
+    if !own {
+        add.remove("replace");
+    }
+    let have = fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let merged = match have {
+        Some(Value::Object(mut have)) => {
+            let more = add.remove("values").unwrap_or_default();
+            if let Some(Value::Array(values)) = have.get_mut("values") {
+                for x in more.as_array().into_iter().flatten() {
+                    if !values.contains(x) {
+                        values.push(x.clone());
+                    }
+                }
+            }
+            if add.get("replace") == Some(&Value::Bool(true)) {
+                have.insert("replace".into(), Value::Bool(true));
+            }
+            have
+        }
+        _ => add,
+    };
+    write(
+        path,
+        &serde_json::to_vec_pretty(&Value::Object(merged)).unwrap_or_default(),
+    )
 }
 
 /// A 1.21.1 advancement in 26.3's shape, in place: an `enter_block`
@@ -952,6 +1041,36 @@ pub fn carry(
                             .insert(v.to_owned());
                     }
                 }
+            }
+        }
+        if let Some(("data", ns, rest)) = split(&name).filter(|_| keep && name.ends_with(".json"))
+        {
+            if let Ok(mut v) = serde_json::from_slice::<Value>(&bytes)
+                && renamed_tags(&mut v, tag_registry(rest))
+            {
+                report.vanilla_tags_renamed += 1;
+                bytes = serde_json::to_vec_pretty(&v).unwrap_or(bytes);
+            }
+            if let Some((registry, path)) = rest
+                .strip_prefix("tags/")
+                .and_then(|r| r.strip_suffix(".json"))
+                .and_then(|r| r.split_once('/'))
+            {
+                // A mod's addition to a vanilla tag 26.3 renamed: where 26.3 takes it in.
+                let to = horizon_compat::vanilla_tags::added_to(registry, path)
+                    .filter(|_| ns == "minecraft");
+                match to {
+                    Some(to) => {
+                        for (i, t) in to.iter().enumerate() {
+                            let file = format!("data/minecraft/tags/{registry}/{t}.json");
+                            write_tag(&inside.join(file), &bytes, i == 0)?;
+                        }
+                        let to = to.iter().map(|t| format!("minecraft:{t}")).collect();
+                        report.vanilla_tag_additions.insert(name.clone(), to);
+                    }
+                    None => write_tag(&dest, &bytes, true)?,
+                }
+                continue;
             }
         }
         write(&dest, &bytes)?;
@@ -2097,6 +2216,113 @@ mod tests {
         assert_eq!(report.copied, 0);
         assert!(report.outside.is_empty());
         assert!(!dir.join("evil.json").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A 1.21.1 mod's data in 26.3's vanilla tags: what it adds to a tag 26.3 renamed goes to the
+    /// renamed one (`bamboo_plantable_on` is `supports_bamboo`, `enchantable/sword` both
+    /// `melee_weapon` and `sweeping`), merged where two meet; its `dirt` additions stay and join
+    /// `supports_big_dripleaf`; its references to 1.21.1's `dirt` name `substrate_overworld`, in
+    /// its own tags and its worldgen, while an item `dirt` keeps its name.
+    #[test]
+    fn a_mods_vanilla_tags_are_26_3s() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-port-pack-vtags-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("soil-1.0.jar");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&jar).unwrap());
+        for (name, text) in [
+            (
+                "META-INF/neoforge.mods.toml",
+                "license = \"MIT\"\n[[mods]]\nmodId = \"soil\"\nversion = \"1.0\"\n",
+            ),
+            ("data/minecraft/tags/block/dirt.json", r#"{"values": ["soil:rich_soil"]}"#),
+            (
+                "data/minecraft/tags/block/bamboo_plantable_on.json",
+                r#"{"replace": false, "values": ["soil:rich_soil"]}"#,
+            ),
+            (
+                "data/minecraft/tags/block/big_dripleaf_placeable.json",
+                r#"{"values": ["soil:mossy_soil", "soil:rich_soil"]}"#,
+            ),
+            ("data/minecraft/tags/item/enchantable/sword.json", r##"{"values": ["#soil:knives"]}"##),
+            ("data/minecraft/tags/item/dirt.json", r#"{"values": ["soil:rich_soil"]}"#),
+            (
+                "data/soil/tags/block/terrain.json",
+                r##"{"values": ["#minecraft:dirt", "#minecraft:sand", {"id": "#minecraft:mushroom_grow_block", "required": false}]}"##,
+            ),
+            (
+                "data/soil/worldgen/placed_feature/patch.json",
+                r##"{"feature": "soil:patch", "placement": [{"type": "minecraft:block_predicate_filter",
+                    "predicate": {"type": "minecraft:all_of", "predicates": [
+                        {"type": "minecraft:matching_block_tag", "offset": [0, -1, 0], "tag": "minecraft:dirt"},
+                        {"type": "minecraft:matching_blocks", "blocks": "#minecraft:bamboo_plantable_on"}]}}]}"##,
+            ),
+            (
+                "data/soil/recipe/bowl.json",
+                r#"{"type": "minecraft:crafting_shapeless", "ingredients": [{"tag": "minecraft:dirt"}],
+                    "result": {"id": "minecraft:bowl"}}"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let info = crate::jar::read(&jar).unwrap();
+        let out = dir.join("work/mods/soil");
+        let pack = Pack {
+            loaded: &|_| true,
+            mods: &|_| false,
+        };
+        let report = carry(&jar, &info, &out, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
+        let read = |file: &str| -> Option<Value> {
+            let bytes = fs::read(out.join("carry").join(file)).ok()?;
+            Some(serde_json::from_slice(&bytes).unwrap())
+        };
+        let values = |file: &str| read(file).map(|v| v["values"].clone());
+        let tags = "data/minecraft/tags";
+        assert_eq!(values(&format!("{tags}/block/dirt.json")), Some(json!(["soil:rich_soil"])));
+        assert_eq!(
+            values(&format!("{tags}/block/supports_big_dripleaf.json")),
+            Some(json!(["soil:rich_soil", "soil:mossy_soil"]))
+        );
+        assert_eq!(
+            read(&format!("{tags}/block/supports_bamboo.json")),
+            Some(json!({"replace": false, "values": ["soil:rich_soil"]}))
+        );
+        assert_eq!(read(&format!("{tags}/block/bamboo_plantable_on.json")), None);
+        assert_eq!(read(&format!("{tags}/block/big_dripleaf_placeable.json")), None);
+        for to in ["melee_weapon", "sweeping"] {
+            assert_eq!(
+                values(&format!("{tags}/item/enchantable/{to}.json")),
+                Some(json!(["#soil:knives"])),
+                "{to}"
+            );
+        }
+        assert_eq!(read(&format!("{tags}/item/enchantable/sword.json")), None);
+        assert_eq!(values(&format!("{tags}/item/dirt.json")), Some(json!(["soil:rich_soil"])));
+        assert_eq!(
+            values("data/soil/tags/block/terrain.json"),
+            Some(json!([
+                "#minecraft:substrate_overworld",
+                "#minecraft:sand",
+                {"id": "#minecraft:overrides_mushroom_light_requirement", "required": false}
+            ]))
+        );
+        let patch = read("data/soil/worldgen/placed_feature/patch.json").unwrap();
+        let predicates = &patch["placement"][0]["predicate"]["predicates"];
+        assert_eq!(predicates[0]["tag"], "minecraft:substrate_overworld");
+        assert_eq!(predicates[1]["blocks"], "#minecraft:supports_bamboo");
+        let bowl = read("data/soil/recipe/bowl.json").unwrap();
+        // 26.3's ingredient form; an item tag `dirt` keeps its name.
+        assert_eq!(bowl["ingredients"][0], "#minecraft:dirt");
+        assert_eq!(report.vanilla_tags_renamed, 2);
+        assert_eq!(
+            report.vanilla_tag_additions.get("data/minecraft/tags/block/dirt.json"),
+            Some(&vec!["minecraft:dirt".to_owned(), "minecraft:supports_big_dripleaf".to_owned()])
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

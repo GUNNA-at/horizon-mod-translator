@@ -73,6 +73,9 @@ pub(crate) fn item_known(rt: &mut Rt, id: &str) -> bool {
 /// The items of tag `#tag`, as the game's tags hold them; kept once known (a tag the game doesn't
 /// have yet is asked again).
 fn tag_items(rt: &mut Rt, tag: &str) -> Vec<String> {
+    // A 1.21.1 vanilla tag 26.3 renamed (`#minecraft:enchantable/sword`): the 26.3 one.
+    let renamed = crate::vanilla_tags::current("item", tag.trim_start_matches('#')).map(|t| format!("#{t}"));
+    let tag = renamed.as_deref().unwrap_or(tag);
     let key = format!("compat:tag-items/{tag}");
     if let Some(&list) = rt.interned.get(&key) {
         return jutil::elements(rt, list).into_iter().map(|v| text(rt, v)).collect();
