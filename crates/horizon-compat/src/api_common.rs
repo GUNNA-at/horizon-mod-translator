@@ -471,9 +471,12 @@ fn constant(rt: &Rt, v: V) -> String {
     rt.str_of(rt.get_field(v, "$name")).map(str::to_owned).unwrap_or_default()
 }
 
+const PROPERTIES: &str = "net/minecraft/world/level/block/state/properties/";
+const PROPERTY: &str = "net/minecraft/world/level/block/state/properties/Property";
+
 /// A block-state property: its name and kind (`bool`, `int`, `direction`, `axis`, or an enum's class).
 fn new_property(rt: &mut Rt, name: &str, kind: &str) -> V {
-    let p = rt.new_object("net/minecraft/world/level/block/state/properties/Property");
+    let p = rt.new_object(PROPERTY);
     let n = rt.string(name);
     let k = rt.string(kind);
     rt.put_field(p, "$name", n);
@@ -675,6 +678,15 @@ pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
         f => f.to_ascii_lowercase(),
     };
     Some((name, kind))
+}
+
+/// The value of property `p` (of `kind`) that a state spelling `text` holds: by the property's own
+/// `getValue` when a mod's class has one.
+fn prop_value(rt: &mut Rt, p: V, kind: &str, text: &str) -> V {
+    match crate::blocks::parsed_value(rt, p, text) {
+        Some(v) => v,
+        None => value_of(rt, kind, text),
+    }
 }
 
 /// A property value as Java sees it, from its text in a state.
@@ -1440,10 +1452,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                     if current.is_none() {
                         rt.interned.insert("compat:missing-property".into(), V::I(1));
                     }
-                    value_of(rt, &kind, current.as_deref().unwrap_or(""))
+                    prop_value(rt, a(1), &kind, current.as_deref().unwrap_or(""))
                 }
                 "getOptionalValue" => {
-                    let v = current.map(|c| value_of(rt, &kind, &c)).unwrap_or(V::NULL);
+                    let v = current.map(|c| prop_value(rt, a(1), &kind, &c)).unwrap_or(V::NULL);
                     let o = rt.new_object("java/util/Optional");
                     rt.put_field(o, "value", v);
                     o
@@ -1452,7 +1464,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                     if current.is_none() && name == "trySetValue" {
                         return Some(a(0));
                     }
-                    let new = text_of(rt, a(2));
+                    let new = crate::blocks::property_text(rt, a(1), a(2));
                     let mut p: Vec<(&str, &str)> = props.iter().filter(|(k, _)| *k != pname).copied().collect();
                     p.push((&pname, &new));
                     let t = crate::host::join_state(block, p);
@@ -1494,7 +1506,54 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             crate::blocks::created_property(rt, p, o, desc, args);
             p
         }
-        (_, "getName") if owner.starts_with("net/minecraft/world/level/block/state/properties/") => rt.get_field(a(0), "$name"),
+        // A mod's own property class (`extends Property<T>`, or one of vanilla's kinds): its name
+        // and kind as `create` gives them. Its values are its `getPossibleValues`, spelled by its
+        // `getName` (`blocks::property_values`).
+        (o, "<init>") if o.starts_with(PROPERTIES) && o.ends_with("Property") && args.len() >= 2 => {
+            let this = a(0);
+            let kind = match o.rsplit('/').next().unwrap_or("") {
+                "BooleanProperty" => "bool".to_owned(),
+                "IntegerProperty" => "int".to_owned(),
+                "DirectionProperty" => "direction".to_owned(),
+                // `Property(name, Class)`, `EnumProperty(name, Class, values)`.
+                _ => match name_of(rt, a(2)).as_str() {
+                    "java/lang/Boolean" => "bool".to_owned(),
+                    "java/lang/Integer" => "int".to_owned(),
+                    "net/minecraft/core/Direction" => "direction".to_owned(),
+                    "net/minecraft/core/Direction$Axis" => "axis".to_owned(),
+                    class => class.to_owned(),
+                },
+            };
+            rt.put_field(this, "$name", a(1));
+            let k = rt.string(&kind);
+            rt.put_field(this, "$kind", k);
+            crate::blocks::created_property(rt, this, o, desc, &args[1..]);
+            V::Void
+        }
+        (_, "getName") if owner.starts_with(PROPERTIES) && desc.starts_with("()") => rt.get_field(a(0), "$name"),
+        // `getName(value)`: the value as a state spells it.
+        (_, "getName") if owner.starts_with(PROPERTIES) && owner.ends_with("Property") => {
+            let t = text_of(rt, a(1));
+            rt.string(&t)
+        }
+        // `getValue(text)`: the value a state spelling `text` holds, if the property takes it.
+        (_, "getValue") if owner.starts_with(PROPERTIES) && owner.ends_with("Property") && desc == "(Ljava/lang/String;)Ljava/util/Optional;" => {
+            let text = name_of(rt, a(1));
+            let v = if crate::blocks::property_values(rt, a(0)).contains(&text) {
+                let (_, kind) = prop_parts(rt, a(0));
+                value_of(rt, &kind, &text)
+            } else {
+                V::NULL
+            };
+            optional(rt, v)
+        }
+        // `Property.equals`: the same name and value class (what a mod's override calls first).
+        (PROPERTY, "equals") => V::I((a(0) == a(1) || (a(1).r() != 0 && prop_parts(rt, a(0)) == prop_parts(rt, a(1)))) as i32),
+        (PROPERTY, "generateHashCode" | "hashCode") => {
+            let (n, k) = prop_parts(rt, a(0));
+            let h = |s: &str| s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32));
+            V::I(h(&k).wrapping_mul(31).wrapping_add(h(&n)))
+        }
         // The values in Java's order, as Java holds them: `Integer`s, `Boolean`s, constants.
         (_, "getPossibleValues") if owner.starts_with("net/minecraft/world/level/block/state/properties/") => {
             let (_, kind) = prop_parts(rt, a(0));

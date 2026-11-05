@@ -679,6 +679,154 @@ const DEFAULT_SHAPE_BLOCKS: [&str; 99] = [
     "WetSpongeBlock",
 ];
 
+/// Vanilla 1.21.1's `getShape` of block class `class` (its simple name: the class a mod's
+/// `super.getShape(...)` names, which may inherit it) for a state with properties `props`, in
+/// pixels as `Block.box` takes them; several boxes for a shape vanilla joins. Read from 1.21.1's
+/// classes. None for a class not kept here.
+fn vanilla_state_shape(class: &str, props: &[(&str, &str)]) -> Option<Vec<[f64; 6]>> {
+    let get = |k: &str| props.iter().find(|(n, _)| *n == k).map_or("", |(_, v)| *v);
+    let on = |k: &str| get(k) == "true";
+    let x_axis = matches!(get("facing"), "east" | "west");
+    // The thin boxes along one side (doors, ladders, open trapdoors), named as vanilla names
+    // them: `SOUTH_AABB` lies along the north edge, as a closed door facing south does.
+    const SOUTH: [f64; 6] = [0.0, 0.0, 0.0, 16.0, 16.0, 3.0];
+    const NORTH: [f64; 6] = [0.0, 0.0, 13.0, 16.0, 16.0, 16.0];
+    const WEST: [f64; 6] = [13.0, 0.0, 0.0, 16.0, 16.0, 16.0];
+    const EAST: [f64; 6] = [0.0, 0.0, 0.0, 3.0, 16.0, 16.0];
+    let one = |b: [f64; 6]| Some(vec![b]);
+    match class {
+        "DoorBlock" => {
+            let (closed, right) = (!on("open"), get("hinge") == "right");
+            one(match get("facing") {
+                "south" => if closed { SOUTH } else if right { EAST } else { WEST },
+                "west" => if closed { WEST } else if right { SOUTH } else { NORTH },
+                "north" => if closed { NORTH } else if right { WEST } else { EAST },
+                _ => if closed { EAST } else if right { NORTH } else { SOUTH },
+            })
+        }
+        "TrapDoorBlock" if !on("open") => one(if get("half") == "top" { [0.0, 13.0, 0.0, 16.0, 16.0, 16.0] } else { [0.0, 0.0, 0.0, 16.0, 3.0, 16.0] }),
+        "TrapDoorBlock" => one(match get("facing") {
+            "south" => SOUTH,
+            "west" => WEST,
+            "east" => EAST,
+            _ => NORTH,
+        }),
+        "LadderBlock" => one(match get("facing") {
+            "north" => NORTH,
+            "south" => SOUTH,
+            "west" => WEST,
+            _ => EAST,
+        }),
+        "LeverBlock" => one(match (get("face"), get("facing")) {
+            ("floor", _) if x_axis => [4.0, 0.0, 5.0, 12.0, 6.0, 11.0],
+            ("floor", _) => [5.0, 0.0, 4.0, 11.0, 6.0, 12.0],
+            ("wall", "east") => [0.0, 4.0, 5.0, 6.0, 12.0, 11.0],
+            ("wall", "west") => [10.0, 4.0, 5.0, 16.0, 12.0, 11.0],
+            ("wall", "south") => [5.0, 4.0, 0.0, 11.0, 12.0, 6.0],
+            ("wall", _) => [5.0, 4.0, 10.0, 11.0, 12.0, 16.0],
+            _ if x_axis => [4.0, 10.0, 5.0, 12.0, 16.0, 11.0],
+            _ => [5.0, 10.0, 4.0, 11.0, 16.0, 12.0],
+        }),
+        "ButtonBlock" => {
+            // Pressed, a button sinks to half its depth.
+            let d = if on("powered") { 1.0 } else { 2.0 };
+            one(match (get("face"), get("facing")) {
+                ("floor", _) if x_axis => [6.0, 0.0, 5.0, 10.0, d, 11.0],
+                ("floor", _) => [5.0, 0.0, 6.0, 11.0, d, 10.0],
+                ("wall", "east") => [0.0, 6.0, 5.0, d, 10.0, 11.0],
+                ("wall", "west") => [16.0 - d, 6.0, 5.0, 16.0, 10.0, 11.0],
+                ("wall", "south") => [5.0, 6.0, 0.0, 11.0, 10.0, d],
+                ("wall", _) => [5.0, 6.0, 16.0 - d, 11.0, 10.0, 16.0],
+                _ if x_axis => [6.0, 16.0 - d, 5.0, 10.0, 16.0, 11.0],
+                _ => [5.0, 16.0 - d, 6.0, 11.0, 16.0, 10.0],
+            })
+        }
+        // `getSignalForState(state) > 0`: powered, or a weight on it.
+        "PressurePlateBlock" | "WeightedPressurePlateBlock" => {
+            let pressed = on("powered") || get("power").parse::<i32>().is_ok_and(|p| p > 0);
+            one([1.0, 0.0, 1.0, 15.0, if pressed { 0.5 } else { 1.0 }, 15.0])
+        }
+        "SlabBlock" => one(match get("type") {
+            "double" => [0.0, 0.0, 0.0, 16.0, 16.0, 16.0],
+            "top" => [0.0, 8.0, 0.0, 16.0, 16.0, 16.0],
+            _ => [0.0, 0.0, 0.0, 16.0, 8.0, 16.0],
+        }),
+        "StairBlock" => {
+            // `SHAPE_BY_STATE[shape.ordinal() * 4 + facing.get2DDataValue()]`: which quarters of the
+            // other half the slab carries (1 north-west, 2 north-east, 4 south-west, 8 south-east).
+            const SHAPE_BY_STATE: [u8; 20] = [12, 5, 3, 10, 14, 13, 7, 11, 13, 7, 11, 14, 8, 4, 1, 2, 4, 1, 2, 8];
+            const SHAPES: [&str; 5] = ["straight", "inner_left", "inner_right", "outer_left", "outer_right"];
+            let shape = SHAPES.iter().position(|s| *s == get("shape")).unwrap_or(0);
+            let facing = ["south", "west", "north", "east"].iter().position(|f| *f == get("facing")).unwrap_or(2);
+            let bits = SHAPE_BY_STATE[shape * 4 + facing];
+            let top = get("half") == "top";
+            let (y0, y1) = if top { (0.0, 8.0) } else { (8.0, 16.0) };
+            let mut boxes = vec![if top { [0.0, 8.0, 0.0, 16.0, 16.0, 16.0] } else { [0.0, 0.0, 0.0, 16.0, 8.0, 16.0] }];
+            for (bit, x, z) in [(1, 0.0, 0.0), (2, 8.0, 0.0), (4, 0.0, 8.0), (8, 8.0, 8.0)] {
+                if bits & bit != 0 {
+                    boxes.push([x, y0, z, x + 8.0, y1, z + 8.0]);
+                }
+            }
+            Some(boxes)
+        }
+        // `CrossCollisionBlock`: a post, and an arm to each side it connects to.
+        "IronBarsBlock" | "StainedGlassPaneBlock" | "FenceBlock" => {
+            let (node, arm) = if class == "FenceBlock" { (2.0, 2.0) } else { (1.0, 1.0) };
+            let (a0, a1) = (8.0 - arm, 8.0 + arm);
+            let mut boxes = vec![[8.0 - node, 0.0, 8.0 - node, 8.0 + node, 16.0, 8.0 + node]];
+            for (side, b) in [
+                ("north", [a0, 0.0, 0.0, a1, 16.0, a1]),
+                ("south", [a0, 0.0, a0, a1, 16.0, 16.0]),
+                ("west", [0.0, 0.0, a0, a1, 16.0, a1]),
+                ("east", [a0, 0.0, a0, 16.0, 16.0, a1]),
+            ] {
+                if on(side) {
+                    boxes.push(b);
+                }
+            }
+            Some(boxes)
+        }
+        "FenceGateBlock" => {
+            let h = if on("in_wall") { 13.0 } else { 16.0 };
+            one(if x_axis { [6.0, 0.0, 0.0, 10.0, h, 16.0] } else { [0.0, 0.0, 6.0, 16.0, h, 10.0] })
+        }
+        "BaseTorchBlock" | "TorchBlock" | "RedstoneTorchBlock" => one([6.0, 0.0, 6.0, 10.0, 10.0, 10.0]),
+        "WallTorchBlock" | "RedstoneWallTorchBlock" => match get("facing") {
+            "north" => one([5.5, 3.0, 11.0, 10.5, 13.0, 16.0]),
+            "south" => one([5.5, 3.0, 0.0, 10.5, 13.0, 5.0]),
+            "west" => one([11.0, 3.0, 5.5, 16.0, 13.0, 10.5]),
+            "east" => one([0.0, 3.0, 5.5, 5.0, 13.0, 10.5]),
+            _ => None,
+        },
+        "LanternBlock" => {
+            let y = if on("hanging") { 1.0 } else { 0.0 };
+            Some(vec![[5.0, y, 5.0, 11.0, y + 7.0, 11.0], [6.0, y + 7.0, 6.0, 10.0, y + 9.0, 10.0]])
+        }
+        "ChainBlock" => one(match get("axis") {
+            "x" => [0.0, 6.5, 6.5, 16.0, 9.5, 9.5],
+            "z" => [6.5, 6.5, 0.0, 9.5, 9.5, 16.0],
+            _ => [6.5, 0.0, 6.5, 9.5, 16.0, 9.5],
+        }),
+        "CakeBlock" => {
+            let bites = get("bites").parse::<i32>().unwrap_or(0).clamp(0, 6) as f64;
+            one([1.0 + 2.0 * bites, 0.0, 1.0, 15.0, 8.0, 15.0])
+        }
+        "FarmBlock" => one([0.0, 0.0, 0.0, 16.0, 15.0, 16.0]),
+        _ => None,
+    }
+}
+
+/// The block classes [`vanilla_state_shape`] keeps.
+const STATE_SHAPED: [&str; 22] = [
+    "BaseTorchBlock", "ButtonBlock", "CakeBlock", "ChainBlock", "DoorBlock", "FarmBlock", "FenceBlock", "FenceGateBlock", "IronBarsBlock",
+    "LadderBlock", "LanternBlock", "LeverBlock", "PressurePlateBlock", "RedstoneTorchBlock", "RedstoneWallTorchBlock", "SlabBlock",
+    "StainedGlassPaneBlock", "StairBlock", "TorchBlock", "TrapDoorBlock", "WallTorchBlock", "WeightedPressurePlateBlock",
+];
+
+fn state_shape_class(owner: &str) -> bool {
+    owner.strip_prefix("net/minecraft/world/level/block/").is_some_and(|c| STATE_SHAPED.contains(&c))
+}
+
 fn default_shape_class(owner: &str) -> bool {
     owner == "net/minecraft/world/level/block/state/BlockBehaviour"
         || owner.strip_prefix("net/minecraft/world/level/block/").is_some_and(|c| DEFAULT_SHAPE_BLOCKS.binary_search(&c).is_ok())
@@ -696,7 +844,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
                 | ("net/minecraft/world/level/block/FaceAttachedHorizontalDirectionalBlock", "getConnectedDirection")
         )
         || (name == "type" && owner.ends_with("SignBlock") && owner.starts_with("net/minecraft/world/level/block/"))
-        || (name == "getShape" && default_shape_class(owner))
+        || (name == "getShape" && (default_shape_class(owner) || state_shape_class(owner)))
         || matches!(name, "values" | "registerDefaultState" | "defaultBlockState" | "defaultMapColor")
         || (name == "getSerializedName" && enum_class(owner))
         || (name == "toString" && enum_class(owner) && owner.starts_with("net/minecraft/world/level/block/state/properties/"))
@@ -971,6 +1119,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (DYE_COLOR, _) => dye_call(rt, name, args),
         // `super.getShape(state, level, pos, context)` to a class with vanilla's default.
         (o, "getShape") if desc == GET_SHAPE.trim_start_matches("getShape.") && default_shape_class(o) => Some(crate::shapes::shape(rt, &[FULL_BOX])),
+        // ... and to a vanilla kind whose shape follows its state (a door's facing, hinge, openness).
+        (o, "getShape") if desc == GET_SHAPE.trim_start_matches("getShape.") && state_shape_class(o) => {
+            let class = o.rsplit('/').next().unwrap_or(o);
+            let text = rt.str_of(a(1)).unwrap_or("").to_owned();
+            let (_, props) = crate::host::split_state(&text);
+            let pixels = vanilla_state_shape(class, &props)?;
+            let boxes: Vec<crate::shapes::Box3> = pixels.iter().map(|b| b.map(|v| v / 16.0)).collect();
+            let joined = crate::shapes::optimized(&boxes);
+            Some(rt.intern(format!("vanilla-shape/{joined:?}"), move |rt| crate::shapes::shape(rt, &joined)))
+        }
         // `new SoundType(volume, pitch, break, step, place, hit, fall)` and NeoForge's
         // `DeferredSoundType`, whose sounds are suppliers (of a mod's registered sound events).
         (SOUND_TYPE | DEFERRED_SOUND_TYPE, "<init>") if desc.starts_with("(FF") => {
@@ -1674,11 +1832,62 @@ pub fn created_property(rt: &mut Rt, p: V, owner: &str, desc: &str, args: &[V]) 
     rt.put_field(p, "$values", l);
 }
 
-/// A mod enum's constants, in order (`values()`).
+/// An enum's constants, in order (`values()`): vanilla's (`EnumProperty.create("shape",
+/// RailShape.class, RailShape::isAscending)` filters them) or a mod's.
 fn enum_constants(rt: &mut Rt, class: &str) -> Vec<V> {
+    if let Some(values) = vanilla_enum_values(rt, class) {
+        return values;
+    }
     match rt.reflect(class, "values", &[]) {
         Some(arr) if arr.r() != 0 => (0..rt.array_len(arr)).map(|i| rt.array_get(arr, i)).collect(),
         _ => Vec::new(),
+    }
+}
+
+const POSSIBLE_VALUES: &str = "getPossibleValues.()Ljava/util/Collection;";
+const POSSIBLE_VALUES_KEY: &str = "net/minecraft/world/level/block/state/properties/Property.getPossibleValues.()Ljava/util/Collection;";
+const VALUE_NAME: &str = "getName.(Ljava/lang/Comparable;)Ljava/lang/String;";
+const VALUE_NAME_KEY: &str = "net/minecraft/world/level/block/state/properties/Property.getName.(Ljava/lang/Comparable;)Ljava/lang/String;";
+const PARSE_VALUE: &str = "getValue.(Ljava/lang/String;)Ljava/util/Optional;";
+const PARSE_VALUE_KEY: &str = "net/minecraft/world/level/block/state/properties/Property.getValue.(Ljava/lang/String;)Ljava/util/Optional;";
+
+/// `p.<short>(args)` when `p` is a mod's own property class that has that method itself.
+fn own_property_call(rt: &mut Rt, p: V, key: &'static str, short: &'static str, args: &[V]) -> Option<V> {
+    let class = rt.class_of(p);
+    if !rt.is_mod_class(class) || !rt.overrides.is_some_and(|o| o(class, short)) {
+        return None;
+    }
+    let vc = rt.vcall?;
+    let v = vc(rt, key, short, args);
+    if rt.thrown.is_some() {
+        rt.report_thrown(short);
+        return None;
+    }
+    Some(v)
+}
+
+/// Value `v` of property `p` as a state spells it: by the property's own `getName` when a mod's
+/// class has one (`IntegerSetProperty`), else as vanilla's kinds do.
+pub fn property_text(rt: &mut Rt, p: V, v: V) -> String {
+    if let Some(s) = own_property_call(rt, p, VALUE_NAME_KEY, VALUE_NAME, &[p, v]) {
+        return rt.str_of(s).unwrap_or("").to_owned();
+    }
+    match v {
+        V::R(_) => api_common::text_of(rt, v),
+        // A value a method reference gave back unboxed.
+        raw if api_common::prop_parts(rt, p).1 == "bool" => (raw.i() != 0).to_string(),
+        raw => raw.i().to_string(),
+    }
+}
+
+/// The value of property `p` that a state spelling `text` holds, by the property's own `getValue`
+/// when a mod's class has one; None to read it as vanilla's kinds do.
+pub fn parsed_value(rt: &mut Rt, p: V, text: &str) -> Option<V> {
+    let s = rt.string(text);
+    let o = own_property_call(rt, p, PARSE_VALUE_KEY, PARSE_VALUE, &[p, s])?;
+    match rt.get_field(o, "value") {
+        V::Void => Some(V::NULL),
+        v => Some(v),
     }
 }
 
@@ -1687,6 +1896,17 @@ pub fn property_values(rt: &mut Rt, p: V) -> Vec<String> {
     let listed = rt.get_field(p, "$values");
     if listed.r() != 0 {
         return jutil::elements(rt, listed).iter().map(|v| rt.str_of(*v).unwrap_or("").to_owned()).collect();
+    }
+    // A mod's own property class: the values its `getPossibleValues` gives, as its `getName`
+    // spells them; kept, as a property's values are fixed once it is made.
+    if let Some(values) = own_property_call(rt, p, POSSIBLE_VALUES_KEY, POSSIBLE_VALUES, &[p]) {
+        let texts: Vec<String> = jutil::elements(rt, values).into_iter().map(|v| property_text(rt, p, v)).collect();
+        if !texts.is_empty() {
+            let strings: Vec<V> = texts.iter().map(|t| rt.string(t)).collect();
+            let l = jutil::new_list(rt, strings);
+            rt.put_field(p, "$values", l);
+        }
+        return texts;
     }
     let field = rt.str_of(rt.get_field(p, "$field")).map(str::to_owned);
     if let Some(v) = field.as_deref().and_then(vanilla_values) {
@@ -2097,7 +2317,7 @@ mod tests {
 
     /// What a mod block reads of vanilla's while it is made (Mekanism's machines): `super.getShape`
     /// to a class with vanilla's default is a full block, and to one with shapes of its own
-    /// (`SlabBlock`) isn't answered as one; a state's block holder holds the block, by its name; the
+    /// (`SlabBlock`) its state's; a state's block holder holds the block, by its name; the
     /// properties' `lightEmission` field is what `lightLevel` set, else `state -> 0`.
     #[test]
     fn a_mod_blocks_reads_of_vanillas_answer_as_vanilla() {
@@ -2113,9 +2333,10 @@ mod tests {
             assert_eq!(crate::shapes::boxes(&rt, shape), Some(vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]), "{owner}");
         }
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
-        api::call(&mut rt, get_shape("SlabBlock"), &[machine, st, V::NULL, V::NULL, V::NULL]);
-        assert_eq!(rt.unmapped.len(), 1, "a slab's shape is its own: {:?}", rt.unmapped);
-        rt.unmapped.clear();
+        // A slab's shape is its own: the half its state says.
+        let top = api::state(&mut rt, "ruby:slab[type=top,waterlogged=false]");
+        let shape = api::call(&mut rt, get_shape("SlabBlock"), &[machine, top, V::NULL, V::NULL, V::NULL]);
+        assert_eq!(crate::shapes::boxes(&rt, shape), Some(vec![[0.0, 0.5, 0.0, 1.0, 1.0, 1.0]]));
 
         let holder = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockState.getBlockHolder.()Lnet/minecraft/core/Holder;", &[st]);
         let held = api::call(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]);
@@ -2403,6 +2624,126 @@ mod tests {
         let horizontal = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.HORIZONTAL_FACING");
         assert_eq!(property_values(&mut rt, facing).len(), 6);
         assert_eq!(property_values(&mut rt, horizontal), ["north", "east", "south", "west"]);
+    }
+
+    /// A mod block's `super.getShape(...)` to a vanilla kind whose shape follows its state answers
+    /// vanilla 1.21.1's boxes for that state (from its classes): a door by its facing, hinge and
+    /// openness, a pressed button sunk in, a stair's slab and the quarters above it, a pane's post
+    /// and the arms to the sides it joins.
+    #[test]
+    fn super_get_shape_to_a_vanilla_kind_follows_the_state() {
+        let mut rt = Rt::new();
+        let shape = |rt: &mut Rt, class: &str, state: &str| -> Vec<[f64; 6]> {
+            let key = rt.static_key(&format!("net/minecraft/world/level/block/{class}.{GET_SHAPE}"));
+            let s = api::state(rt, state);
+            let v = api::call(rt, key, &[V::NULL, s, V::NULL, V::NULL, V::NULL]);
+            crate::shapes::boxes(rt, v).unwrap().iter().map(|b| b.map(|x| x * 16.0)).collect()
+        };
+        let inside = |boxes: &[[f64; 6]], p: [f64; 3]| boxes.iter().any(|b| (0..3).all(|i| b[i] < p[i] && p[i] < b[i + 3]));
+        let door = shape(&mut rt, "DoorBlock", "ruby:door[facing=north,half=lower,hinge=right,open=true,powered=false]");
+        assert_eq!(door, [[13.0, 0.0, 0.0, 16.0, 16.0, 16.0]]);
+        let closed = shape(&mut rt, "DoorBlock", "ruby:door[facing=north,half=lower,hinge=right,open=false,powered=false]");
+        assert_eq!(closed, [[0.0, 0.0, 13.0, 16.0, 16.0, 16.0]]);
+        let button = shape(&mut rt, "ButtonBlock", "ruby:button[face=wall,facing=east,powered=true]");
+        assert_eq!(button, [[0.0, 6.0, 5.0, 1.0, 10.0, 11.0]]);
+        // Facing east, the step rises on the east half.
+        let stair = shape(&mut rt, "StairBlock", "ruby:stairs[facing=east,half=bottom,shape=straight,waterlogged=false]");
+        for (p, filled) in [([4.0, 4.0, 4.0], true), ([12.0, 4.0, 12.0], true), ([12.0, 12.0, 4.0], true), ([12.0, 12.0, 12.0], true), ([4.0, 12.0, 4.0], false), ([4.0, 12.0, 12.0], false)] {
+            assert_eq!(inside(&stair, p), filled, "{p:?} in {stair:?}");
+        }
+        let pane = shape(&mut rt, "StainedGlassPaneBlock", "ruby:pane[east=false,north=true,south=false,waterlogged=false,west=true]");
+        for (p, filled) in [([8.0, 8.0, 8.0], true), ([8.0, 8.0, 2.0], true), ([2.0, 8.0, 8.0], true), ([14.0, 8.0, 8.0], false), ([8.0, 8.0, 14.0], false), ([3.0, 8.0, 3.0], false)] {
+            assert_eq!(inside(&pane, p), filled, "{p:?} in {pane:?}");
+        }
+    }
+
+    /// `EnumProperty.create(name, RailShape.class, RailShape::isAscending)` (FramedBlocks' rail
+    /// slopes): the vanilla enum's constants the predicate keeps, in order.
+    #[test]
+    fn an_enum_property_filters_a_vanilla_enums_constants() {
+        fn vcall(rt: &mut Rt, _key: &'static str, _short: &'static str, args: &[V]) -> V {
+            let name = api_common::text_of(rt, args[1]);
+            V::I(name.starts_with("ascending_") as i32)
+        }
+        let mut rt = Rt::new();
+        rt.vcall = Some(vcall);
+        let (name, class) = (rt.string("shape"), rt.string("net/minecraft/world/level/block/state/properties/RailShape"));
+        let ascending = rt.new_object("test/IsAscending");
+        let p = api::call(&mut rt, "net/minecraft/world/level/block/state/properties/EnumProperty.create.(Ljava/lang/String;Ljava/lang/Class;Ljava/util/function/Predicate;)Lnet/minecraft/world/level/block/state/properties/EnumProperty;", &[name, class, ascending]);
+        assert_eq!(property_values(&mut rt, p), ["ascending_east", "ascending_west", "ascending_north", "ascending_south"]);
+    }
+
+    /// A mod's own property class (StorageDrawers' `IntegerSetProperty`: `super(name,
+    /// Integer.class)`, values `1,2,4` it keeps itself): a block that adds it has the states its
+    /// `getPossibleValues` gives, as its `getName` spells them; a state's value is read back
+    /// through its own `getValue` and written with its `getName`.
+    #[test]
+    fn a_mods_own_property_class_gives_a_block_its_states() {
+        const SET: &str = "test/IntegerSetProperty";
+        const DRAWER: &str = "test/Drawer";
+        const INTEGER: &str = "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;";
+        fn overrides(class: &str, short: &str) -> bool {
+            match class {
+                SET => [POSSIBLE_VALUES, VALUE_NAME, PARSE_VALUE].contains(&short),
+                DRAWER => short == DEFINE,
+                _ => false,
+            }
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match short {
+                POSSIBLE_VALUES => rt.get_field(args[0], "values"),
+                VALUE_NAME => {
+                    let n = rt.get_field(args[1], "value").i().to_string();
+                    rt.string(&n)
+                }
+                PARSE_VALUE => {
+                    let n: Option<i32> = rt.str_of(args[1]).and_then(|t| t.parse().ok());
+                    let held = jutil::elements(rt, rt.get_field(args[0], "values"));
+                    let found = held.into_iter().find(|v| Some(rt.get_field(*v, "value").i()) == n).unwrap_or(V::NULL);
+                    api_common::optional(rt, found)
+                }
+                DEFINE => {
+                    let slots = rt.statics["test/Drawer.SLOTS"];
+                    let arr = rt.new_array(1, V::NULL);
+                    rt.array_set(arr, 0, slots);
+                    api::call(rt, "net/minecraft/world/level/block/state/StateDefinition$Builder.add.([Lnet/minecraft/world/level/block/state/properties/Property;)Lnet/minecraft/world/level/block/state/StateDefinition$Builder;", &[args[1], arr])
+                }
+                _ => api::call(rt, key, args),
+            }
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        rt.supers.insert(SET, "net/minecraft/world/level/block/state/properties/Property");
+        rt.supers.insert(DRAWER, "net/minecraft/world/level/block/Block");
+        let slots = rt.new_object(SET);
+        let (name, class) = (rt.string("slots"), rt.string("java/lang/Integer"));
+        api::call(&mut rt, "net/minecraft/world/level/block/state/properties/Property.<init>.(Ljava/lang/String;Ljava/lang/Class;)V", &[slots, name, class]);
+        let values: Vec<V> = [1, 2, 4].iter().map(|n| api::call(&mut rt, INTEGER, &[V::I(*n)])).collect();
+        let values = jutil::new_list(&mut rt, values);
+        rt.put_field(slots, "values", values);
+        rt.statics.insert("test/Drawer.SLOTS", slots);
+        assert_eq!(api_common::prop_parts(&rt, slots), ("slots".to_owned(), "int".to_owned()));
+
+        let p = props(&mut rt);
+        let drawer = rt.new_object(DRAWER);
+        api::call(&mut rt, "net/minecraft/world/level/block/Block.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[drawer, p]);
+        rt.registered.insert(("block".into(), "ruby:drawer".into()), drawer);
+        let json = block_declaration(&mut rt, "ruby:drawer", drawer, false);
+        assert!(json.contains("\"slots\": {\"type\": \"enum\", \"values\": [\"1\", \"2\", \"4\"]}"), "{json}");
+        assert!(json.contains("\"default_state\": {\"slots\": \"1\"}"), "{json}");
+
+        let two = api::state(&mut rt, "ruby:drawer[slots=2]");
+        let got = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;", &[two, slots]);
+        assert_eq!((rt.class_of(got), rt.get_field(got, "value")), ("java/lang/Integer", V::I(2)));
+        let four = api::call(&mut rt, INTEGER, &[V::I(4)]);
+        let set = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;", &[two, slots, four]);
+        assert_eq!(rt.str_of(set), Some("ruby:drawer[slots=4]"));
+        // Vanilla's kinds spell a value as states do: `FACING.getName(EAST)` is `east`.
+        let facing = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.FACING");
+        let east = api::get_static(&mut rt, "net/minecraft/core/Direction.EAST");
+        let n = api::call(&mut rt, "net/minecraft/world/level/block/state/properties/DirectionProperty.getName.(Ljava/lang/Comparable;)Ljava/lang/String;", &[facing, east]);
+        assert_eq!(rt.str_of(n), Some("east"));
     }
 
     /// The tests' lambdas: `test/Shape` answers a state's text length; `test/Fill`, a cauldron

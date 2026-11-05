@@ -429,6 +429,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
         }
         (o, "hasTime") if o.starts_with("net/neoforged/neoforge/event/tick/ServerTickEvent") => V::I(1),
+        // `ServerLifecycleHooks.getCurrentServer()`: the server once its world is open (its level
+        // made, as `LevelEvent.Load` hears it), in the server's runtime; null before, and in the
+        // client's (a client's world can be another machine's).
+        ("net/neoforged/neoforge/server/ServerLifecycleHooks", "getCurrentServer") => {
+            if is_client(rt) || !rt.interned.contains_key("compat:level") {
+                V::NULL
+            } else {
+                rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
+            }
+        }
         // `ModLoader.postEvent(event)` (or in mod order, `postEventWrapContainerInModOrder`): a mod
         // posting its own event to every mod's bus (FramedBlocks', Curios' registration events).
         ("net/neoforged/fml/ModLoader", "postEvent" | "postEventWrapContainerInModOrder" | "postEventWithReturn") => {
@@ -1351,6 +1361,25 @@ pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
 mod tests {
     use super::*;
     use crate::Data;
+
+    /// `ServerLifecycleHooks.getCurrentServer()` is null until the world's level is open (Mekanism's
+    /// saved data asks for it from `LevelEvent.Load`), then the one server, whose overworld is that
+    /// level; a client's runtime has none.
+    #[test]
+    fn the_current_server_is_there_once_the_world_is() {
+        const CURRENT: &str = "net/neoforged/neoforge/server/ServerLifecycleHooks.getCurrentServer.()Lnet/minecraft/server/MinecraftServer;";
+        let mut rt = Rt::new();
+        assert_eq!(crate::api::call(&mut rt, CURRENT, &[]), V::NULL);
+        let level = crate::glue::level(&mut rt);
+        let server = crate::api::call(&mut rt, CURRENT, &[]);
+        assert_eq!(rt.class_of(server), "net/minecraft/server/MinecraftServer");
+        let overworld = crate::api::call(&mut rt, "net/minecraft/server/MinecraftServer.overworld.()Lnet/minecraft/server/level/ServerLevel;", &[server]);
+        assert_eq!(overworld, level);
+        let mut client = Rt::new();
+        client.interned.insert("compat:client".into(), V::I(1));
+        crate::glue::level(&mut client);
+        assert_eq!(crate::api::call(&mut client, CURRENT, &[]), V::NULL);
+    }
 
     /// The logical side code runs on is its runtime's: the server thread's until a client's setup
     /// has fired in it. A holder made for a key apart from registering (`createStandAlone`, its

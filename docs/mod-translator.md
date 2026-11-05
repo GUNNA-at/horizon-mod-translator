@@ -2238,6 +2238,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `tags::tests::a_name_uuid_is_javas`, `api_common::tests::{bounds_match_as_vanillas_records_do,
     dates_and_time_units_are_javas}`, `codegen::field_tests::an_inherited_constant_is_the_api_interfaces_the_chain_implements`;
     252 compat tests and 14 translator tests pass.
+  - [x] 2026-11-05 In game with 05a5b75 and 295bf8a (Create with the ten addons): kinds of
+    unmapped call 32 to 28, none new; the rest are Flywheel probing OpenGL (its backend stays
+    off), two `super.getShape` to vanilla kinds, `BlockState.getProperties` and the local
+    player's look before the world. Enchantable machinery keeps its enchantments through
+    `/data get block` (a drill with efficiency 5 and fortune 3, a millstone with efficiency 2).
+    Then round 11's roots: a mod's own property class (StorageDrawers' `IntegerSetProperty extends
+    Property<Integer>`: `super(name, Integer.class)` was unmapped, so its drawers lost their
+    `slots` states and the mod read 1568 elements of nothing) now takes the values its
+    `getPossibleValues` gives, spelled by its `getName` and read back by its `getValue`; vanilla's
+    kinds subclassed by a mod (`EnumProperty(name, class, values)`, `IntegerProperty(name, min,
+    max)`) take theirs as `create` does, and `Property.getName(value)` spells a value (it gave
+    the property's name). An `EnumProperty` of a vanilla enum filtered by a predicate
+    (FramedBlocks' rail slopes: `RailShape::isAscending`) has the constants it keeps (it had
+    none, and FramedBlocks threw "Invalid shape" in common setup). `super.getShape(...)` to a
+    vanilla kind whose shape follows its state answers vanilla 1.21.1's boxes for the state, read
+    from its classes: doors, trapdoors, ladders, levers, buttons, pressure plates, slabs, stairs,
+    panes and iron bars, fences, fence gates, torches and wall torches, lanterns, chains, cakes,
+    farmland. `ServerLifecycleHooks.getCurrentServer()` is the server once the world's level is
+    open, in the server's runtime (Mekanism's saved data threw "Current server is null" from
+    `LevelEvent.Load`). Tests `blocks::tests::{a_mods_own_property_class_gives_a_block_its_states,
+    an_enum_property_filters_a_vanilla_enums_constants,
+    super_get_shape_to_a_vanilla_kind_follows_the_state}`,
+    `neo::tests::the_current_server_is_there_once_the_world_is`; 256 compat tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
