@@ -2405,6 +2405,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `new SizedIngredient(ingredient, count)`, `of(item or tag, count)`, `test` (as many of its items
     or more), `getItems` (stacks of that many), `equals`, `hashCode`, `toString`. Test
     `recipes::tests::a_sized_ingredient_wants_as_many_of_its_items`; 278 compat tests pass.
+  - [x] 2026-11-05 Round 15 (snapshot fdc19df): 79 calls unanswered across the 28 mods (74 in round
+    14). FarmersDelight 9 to 7, comforts 5 to 0, immersive_aircraft 1 to 0. Mekanism went from 35 to 48
+    because its field reflection now works and its `SyncMapper` gets further: it now asks
+    `Field.isAnnotationPresent` 2607 times and builds getters through `LambdaMetafactory` and
+    `MethodHandle`s. No uncaught exceptions, same blocks and items. Also in this batch:
+    `StringRepresentable.EnumCodec` (vanilla's `fromEnum` makes one: reads a constant by its serialized
+    name, `byName` with or without a default) and `createNameLookup`. `Codec.LONG_STREAM` beside
+    `INT_STREAM` (a `long[]` in NBT), and `IntStream`/`LongStream`/`DoubleStream.of` and `toArray`
+    with primitive arrays. NeoForge's `NeoForgeExtraCodecs.dispatchMapOrElse`: dispatched by `type`
+    when the object has one, else the fallback map codec. The load harness no longer fires
+    `FMLCommonSetupEvent` a second time (the bundle's init already does). The second run caused
+    StorageDrawers' `List.iterator` on null. Tests
+    `codecs::tests::an_enum_codec_reads_and_finds_constants_by_serialized_name`,
+    `codecs::tests::dispatch_or_else_reads_by_type_and_falls_back_without_one`, and
+    `codecs::tests::vanilla_value_codecs_write_and_read_as_vanillas` (now with `LONG_STREAM`). 280 compat
+    and 14 translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

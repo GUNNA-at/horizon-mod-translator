@@ -72,6 +72,12 @@ pub(crate) fn component(rt: &mut Rt, name: &str) -> V {
     combinator(rt, "compat:fn/component", vec![n])
 }
 
+/// `StringRepresentable.createNameLookup(values, keyFunction)`: a function from a name to the
+/// constant of `values` whose serialized name, through `key_fn`, is that name (null for none).
+pub(crate) fn name_lookup(rt: &mut Rt, values: V, key_fn: V) -> V {
+    combinator(rt, "compat:fn/name_lookup", vec![values, key_fn])
+}
+
 /// A method of the game's or Java's as a function of its receiver and arguments
 /// (`Map.Entry::getKey`): `key` is the method's.
 pub(crate) fn method(rt: &mut Rt, key: &str) -> V {
@@ -139,6 +145,18 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
             rt.get_field(args.first().copied().unwrap_or_default(), name)
         }
         "compat:fn/constant" => part(0),
+        // [values, keyFunction]: `apply(name)`.
+        "compat:fn/name_lookup" => {
+            let Some(wanted) = args.first().and_then(|&n| rt.str_of(n)).map(str::to_owned) else { return V::NULL };
+            for v in crate::jutil::elements(rt, part(0)) {
+                let n = rt.call_functional("net/minecraft/util/StringRepresentable.getSerializedName.()Ljava/lang/String;", v, &[]);
+                let k = rt.call_functional(APPLY, part(1), &[n]);
+                if rt.str_of(k) == Some(wanted.as_str()) {
+                    return v;
+                }
+            }
+            V::NULL
+        }
         // A method as a function (`Map.Entry::getKey`): [key], on the first argument with the rest.
         "compat:fn/method" => {
             let k = rt.str_of(part(0)).unwrap_or("").to_owned();

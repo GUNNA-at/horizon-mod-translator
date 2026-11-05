@@ -1335,6 +1335,13 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         }
         ("java/util/Objects", "isNull") => V::I(a(0).is_null() as i32),
         ("java/util/Objects", "nonNull") => V::I(!a(0).is_null() as i32),
+        // `IntStream.of(...)`, `LongStream.of(...)`, `DoubleStream.of(...)`: an array's values, or the
+        // one given, held unboxed.
+        ("java/util/stream/IntStream" | "java/util/stream/LongStream" | "java/util/stream/DoubleStream", "of") => {
+            let items = if desc.starts_with("([") { elements(rt, a(0)) } else { vec![a(0)] };
+            let class: &'static str = rt.static_key(owner);
+            rt.alloc(class, Data::Stream(items))
+        }
         // `IntStream.range(lo, hi)` / `rangeClosed(lo, hi)`: its ints, held unboxed.
         ("java/util/stream/IntStream", "range" | "rangeClosed") => {
             let (lo, hi) = (i64::from(a(0).i()), i64::from(a(1).i()) + i64::from(name == "rangeClosed"));
@@ -2771,7 +2778,16 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             V::Void
         }
         "toList" => new_list(rt, items),
-        "toArray" => rt.alloc("[Ljava/lang/Object;", Data::Array(items)),
+        // A primitive stream's array is of its primitive (`LongStream.toArray()` is a `long[]`).
+        "toArray" => {
+            let class = match rt.class_of(this) {
+                "java/util/stream/IntStream" => "[I",
+                "java/util/stream/LongStream" => "[J",
+                "java/util/stream/DoubleStream" => "[D",
+                _ => "[Ljava/lang/Object;",
+            };
+            rt.alloc(class, Data::Array(items))
+        }
         "collect" => match rt.class_of(a(1)) {
             "compat:collect-set" => new_set(rt, &items),
             "compat:collect-join" => {

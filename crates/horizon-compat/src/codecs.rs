@@ -36,7 +36,31 @@ pub fn is_codec(rt: &Rt, v: V) -> bool {
 }
 
 fn kind(rt: &Rt, c: V) -> &'static str {
-    rt.class_of(c).strip_prefix("compat:codec/").unwrap_or("")
+    match rt.class_of(c) {
+        // A mod's `new StringRepresentable.EnumCodec(values, resolver)`.
+        ENUM_CODEC => "enum_codec",
+        class => class.strip_prefix("compat:codec/").unwrap_or(""),
+    }
+}
+
+const ENUM_CODEC: &str = "net/minecraft/util/StringRepresentable$EnumCodec";
+
+/// The constant enum codec `c` names `name` (a string): through its resolver (a mod's
+/// `EnumCodec`), or by serialized name (`StringRepresentable.fromEnum`'s); null for none.
+fn enum_by_name(rt: &mut Rt, c: V, name: V) -> Result<V, String> {
+    if kind(rt, c) == "enum_codec" {
+        let resolver = rt.get_field(c, "$resolver");
+        return run(rt, FUNCTION, resolver, &[name]);
+    }
+    let Some(wanted) = rt.str_of(name).map(str::to_owned) else { return Ok(V::NULL) };
+    let values = run(rt, SUPPLIER, rt.captured(c).first().copied().unwrap_or_default(), &[])?;
+    for v in jutil::elements(rt, values) {
+        let n = run(rt, SERIALIZED_NAME, v, &[])?;
+        if rt.str_of(n) == Some(wanted.as_str()) {
+            return Ok(v);
+        }
+    }
+    Ok(V::NULL)
 }
 
 /// A codec of Minecraft's own, read natively (`Ingredient.CODEC` is `native` + `ingredient`).
@@ -83,7 +107,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match (owner, field) {
         // `PrimitiveCodec.INT` is `Codec.INT`, the interface's constant reached through its own.
         ("com/mojang/serialization/Codec" | "com/mojang/serialization/codecs/PrimitiveCodec", f) => match f {
-            "INT" | "LONG" | "FLOAT" | "DOUBLE" | "BOOL" | "STRING" | "BYTE" | "SHORT" | "INT_STREAM" => prim(rt, &f.to_ascii_lowercase()),
+            "INT" | "LONG" | "FLOAT" | "DOUBLE" | "BOOL" | "STRING" | "BYTE" | "SHORT" | "INT_STREAM" | "LONG_STREAM" => prim(rt, &f.to_ascii_lowercase()),
             "PASSTHROUGH" => native(rt, "passthrough"),
             _ => return None,
         },
@@ -349,16 +373,13 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
             let registry = rt.str_of(part(0)).unwrap_or("").to_owned();
             registry_value(rt, &registry, id)
         }
-        "enum" => {
+        "enum" | "enum_codec" => {
             let Json::String(name) = j else { return Err(format!("Not a string: {j}")) };
-            let values = run(rt, SUPPLIER, part(0), &[])?;
-            for v in jutil::elements(rt, values) {
-                let n = run(rt, SERIALIZED_NAME, v, &[])?;
-                if rt.str_of(n) == Some(name.as_str()) {
-                    return Ok(v);
-                }
+            let n = rt.string(name);
+            match enum_by_name(rt, c, n)? {
+                v if v.r() != 0 => Ok(v),
+                _ => Err(format!("Unknown element name: {name}")),
             }
-            Err(format!("Unknown element name: {name}"))
         }
         "native" => {
             let name = rt.str_of(part(0)).unwrap_or("").to_owned();
@@ -371,7 +392,7 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
         }
         // A map codec read as a codec (`MapCodec.codec()`, a record, a dispatch): the value is an
         // object of its fields.
-        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" | "java_map" => {
+        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" | "dispatch_or_else" | "java_map" => {
             let Json::Object(o) = j else { return Err(format!("Not a map: {j}")) };
             decode_map(rt, c, o)
         }
@@ -442,6 +463,15 @@ pub fn decode_map(rt: &mut Rt, c: V, o: &Map<String, Json>) -> Result<V, String>
             Ok(v) => Ok(either(rt, true, v)),
             Err(_) => decode_map(rt, part(1), o).map(|v| either(rt, false, v)),
         },
+        // NeoForge's `dispatchMapOrElse(typeCodec, type, codec, fallback)`: by `type` when the map
+        // has one (left), else the fallback's (right).
+        "dispatch_or_else" => {
+            if o.contains_key("type") {
+                decode_map(rt, part(0), o).map(|v| either(rt, true, v))
+            } else {
+                decode_map(rt, part(1), o).map(|v| either(rt, false, v))
+            }
+        }
         // NeoForge's `xor(first, second)`: exactly one of them reads.
         "xor" => match (decode_map(rt, part(0), o), decode_map(rt, part(1), o)) {
             (Ok(_), Ok(_)) => Err("Both alternatives read successfully, can not pick the correct one".into()),
@@ -505,7 +535,7 @@ fn lazy(rt: &mut Rt, c: V) -> Result<V, String> {
 /// one): what a dispatch hands the rest of its object to, as DFU's `KeyDispatchCodec` does.
 fn reads_object(rt: &mut Rt, c: V) -> bool {
     match kind(rt, c) {
-        "field" | "optional" | "record" | "point" | "dispatch" | "of_map" | "unit" | "native_map" | "xor" | "java_map" => true,
+        "field" | "optional" | "record" | "point" | "dispatch" | "of_map" | "unit" | "native_map" | "xor" | "dispatch_or_else" | "java_map" => true,
         "xmap" | "validate" | "alt" => {
             let inner = rt.captured(c).first().copied().unwrap_or_default();
             reads_object(rt, inner)
@@ -586,12 +616,14 @@ fn primitive(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             Json::String(s) => rt.string(s),
             _ => return Err(format!("Not a string: {j}")),
         },
-        // `Codec.INT_STREAM`: a list of ints, read as an `IntStream`.
-        "int_stream" => match j {
+        // `Codec.INT_STREAM` and `LONG_STREAM`: a list of numbers, read as an `IntStream` or a
+        // `LongStream` (Mekanism's QIO drives keep their items' counts in one).
+        "int_stream" | "long_stream" => match j {
             Json::Array(items) => {
-                let ints: Option<Vec<V>> = items.iter().map(|x| x.as_i64().map(|i| V::I(i as i32))).collect();
-                let ints = ints.ok_or_else(|| format!("Not a list of ints: {j}"))?;
-                rt.alloc("java/util/stream/IntStream", Data::Stream(ints))
+                let long = name == "long_stream";
+                let ns: Option<Vec<V>> = items.iter().map(|x| x.as_i64().map(|i| if long { V::J(i) } else { V::I(i as i32) })).collect();
+                let ns = ns.ok_or_else(|| format!("Not a list of numbers: {j}"))?;
+                rt.alloc(if long { "java/util/stream/LongStream" } else { "java/util/stream/IntStream" }, Data::Stream(ns))
             }
             _ => return Err(format!("Not a list: {j}")),
         },
@@ -684,7 +716,7 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
             let registry = rt.str_of(part(0)).unwrap_or("").to_owned();
             registry_key(rt, &registry, value).map(Nbt::String)
         }
-        "enum" => serialized_name(rt, value).map(Nbt::String),
+        "enum" | "enum_codec" => serialized_name(rt, value).map(Nbt::String),
         "native" => {
             let name = rt.str_of(part(0)).unwrap_or("").to_owned();
             write_native(rt, &name, value)
@@ -701,7 +733,7 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
             }
             Ok(Nbt::Compound(out))
         }
-        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" | "java_map" => {
+        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" | "dispatch_or_else" | "java_map" => {
             let mut out = BTreeMap::new();
             encode_map(rt, c, value, &mut out)?;
             Ok(Nbt::Compound(out))
@@ -779,7 +811,7 @@ fn encode_map(rt: &mut Rt, c: V, value: V, out: &mut BTreeMap<String, Nbt>) -> R
             }
         }
         "alt" => encode_map(rt, part(0), value, out)?,
-        "either" | "xor" => {
+        "either" | "xor" | "dispatch_or_else" => {
             let left = rt.get_field(value, "$isLeft").i() != 0;
             let v = rt.get_field(value, if left { "$left" } else { "$right" });
             encode_map(rt, if left { part(0) } else { part(1) }, v, out)?;
@@ -838,10 +870,11 @@ fn write_primitive(rt: &Rt, name: &str, v: V) -> Result<Nbt, String> {
     if name == "string" {
         return rt.str_of(v).map(|s| Nbt::String(s.to_owned())).ok_or_else(|| "Not a string".to_owned());
     }
-    if name == "int_stream" {
+    if name == "int_stream" || name == "long_stream" {
         return match rt.heap.get(v.r() as usize).map(|o| &o.data) {
+            Some(Data::Stream(items)) if name == "long_stream" => Ok(Nbt::LongArray(items.iter().map(|x| x.j()).collect())),
             Some(Data::Stream(items)) => Ok(Nbt::IntArray(items.iter().map(|x| x.i()).collect())),
-            _ => Err("Not an int stream".to_owned()),
+            _ => Err(format!("Not a stream: {name}")),
         };
     }
     let raw = match v {
@@ -978,6 +1011,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             owner,
             "net/minecraft/util/ExtraCodecs"
                 | "net/minecraft/util/StringRepresentable"
+                | ENUM_CODEC
                 | "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs"
                 | "net/minecraft/resources/RegistryOps"
                 | "net/minecraft/resources/RegistryFileCodec"
@@ -1120,6 +1154,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("net/neoforged/neoforge/common/util/NeoForgeExtraCodecs", "xor") if desc.starts_with("(Lcom/mojang/serialization/MapCodec;") => {
             return Some(codec(rt, "compat:codec/xor", vec![a(0), a(1)]));
         }
+        // `dispatchMapOrElse(typeCodec, type, codec, fallback)`: `typeCodec.dispatchMap(type, codec)`,
+        // or the fallback for a map without `type` (Mekanism's chemical ingredients).
+        ("net/neoforged/neoforge/common/util/NeoForgeExtraCodecs", "dispatchMapOrElse") => {
+            let key = rt.string("type");
+            let dispatched = codec(rt, "compat:codec/dispatch", vec![key, a(0), a(1), a(2)]);
+            return Some(codec(rt, "compat:codec/dispatch_or_else", vec![dispatched, a(3)]));
+        }
         ("com/mojang/serialization/Codec", "intRange") | ("net/minecraft/util/ExtraCodecs", "intRange") => {
             return Some(range(rt, "int", a(0).i() as f64, a(1).i() as f64));
         }
@@ -1127,6 +1168,18 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("com/mojang/serialization/Codec", "doubleRange") => return Some(range(rt, "double", a(0).d(), a(1).d())),
         ("net/minecraft/util/StringRepresentable", "fromEnum" | "fromValues" | "fromEnumWithMapping") => {
             return Some(codec(rt, "compat:codec/enum", vec![a(0)]));
+        }
+        ("net/minecraft/util/StringRepresentable", "createNameLookup") => return Some(crate::functions::name_lookup(rt, a(0), a(1))),
+        // A mod's own `new StringRepresentable.EnumCodec(values, resolver)`: by name through it.
+        (ENUM_CODEC, "<init>") => {
+            rt.put_field(a(0), "$values", a(1));
+            rt.put_field(a(0), "$resolver", a(2));
+            return Some(V::Void);
+        }
+        // `byName(name)` and `byName(name, default)`, on that or on `fromEnum`'s codec.
+        (ENUM_CODEC, "byName") => {
+            let found = enum_by_name(rt, a(0), a(1)).unwrap_or(V::NULL);
+            return Some(if found.r() == 0 && desc.contains(";Ljava/lang/Enum;)") { a(2) } else { found });
         }
         ("net/neoforged/neoforge/common/util/NeoForgeExtraCodecs", "optionalFieldAlwaysWrite") => {
             return Some(codec(rt, "compat:codec/optional", vec![a(1), a(0), a(2), V::I(1), V::I(0), V::I(1)]));
@@ -1594,6 +1647,76 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
+    /// NeoForge's `dispatchMapOrElse(typeCodec, type, codec, fallback)`, as Mekanism reads its
+    /// chemical ingredients: a map with `type` goes by its type's codec (left), one without by the
+    /// fallback (right); each writes back the way it was read.
+    #[test]
+    fn dispatch_or_else_reads_by_type_and_falls_back_without_one() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
+        let string = st(&mut rt, "com/mojang/serialization/Codec.STRING");
+        let int = st(&mut rt, "com/mojang/serialization/Codec.INT");
+        let field_of = "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;";
+        let count = rt.string("count");
+        let counted = c(&mut rt, field_of, &[int, count]);
+        let chemical = rt.string("chemical");
+        let fallback = c(&mut rt, field_of, &[string, chemical]);
+        let kind = rt.string("test:compound");
+        let type_of = crate::functions::constant(&mut rt, kind);
+        let codec_of = crate::functions::constant(&mut rt, counted);
+        let c4 = c(
+            &mut rt,
+            "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs.dispatchMapOrElse.(Lcom/mojang/serialization/Codec;Ljava/util/function/Function;Ljava/util/function/Function;Lcom/mojang/serialization/MapCodec;)Lcom/mojang/serialization/MapCodec;",
+            &[string, type_of, codec_of, fallback],
+        );
+        let typed = decode(&mut rt, c4, &serde_json::json!({"type": "test:compound", "count": 3})).unwrap();
+        assert_eq!(rt.get_field(typed, "$isLeft"), V::I(1));
+        assert_eq!(rt.get_field(rt.get_field(typed, "$left"), "value"), V::I(3));
+        let plain = decode(&mut rt, c4, &serde_json::json!({"chemical": "mekanism:hydrogen"})).unwrap();
+        assert_eq!(rt.get_field(plain, "$isLeft"), V::I(0));
+        assert_eq!(rt.str_of(rt.get_field(plain, "$right")), Some("mekanism:hydrogen"));
+        let written = encode(&mut rt, c4, typed).unwrap();
+        assert_eq!(crate::recipes::nbt_json(&written), serde_json::json!({"type": "test:compound", "count": 3}));
+        let written = encode(&mut rt, c4, plain).unwrap();
+        assert_eq!(crate::recipes::nbt_json(&written), serde_json::json!({"chemical": "mekanism:hydrogen"}));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's own `new StringRepresentable.EnumCodec(values, createNameLookup(values, identity()))`
+    /// (Mekanism's) reads and writes a constant by its serialized name, and `byName` finds one, or
+    /// gives the default; `fromEnum`'s codec answers `byName` the same.
+    #[test]
+    fn an_enum_codec_reads_and_finds_constants_by_serialized_name() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
+        let values = crate::api::call(&mut rt, "net/minecraft/world/item/DyeColor.values.()[Lnet/minecraft/world/item/DyeColor;", &[]);
+        let identity = crate::api::call(&mut rt, "java/util/function/Function.identity.()Ljava/util/function/Function;", &[]);
+        let lookup = crate::api::call(
+            &mut rt,
+            "net/minecraft/util/StringRepresentable.createNameLookup.([Lnet/minecraft/util/StringRepresentable;Ljava/util/function/Function;)Ljava/util/function/Function;",
+            &[values, identity],
+        );
+        let c = rt.new_object("net/minecraft/util/StringRepresentable$EnumCodec");
+        crate::api::call(&mut rt, "net/minecraft/util/StringRepresentable$EnumCodec.<init>.([Ljava/lang/Enum;Ljava/util/function/Function;)V", &[c, values, lookup]);
+        let lime = decode(&mut rt, c, &Json::String("lime".into())).unwrap();
+        assert_eq!(lime, st(&mut rt, "net/minecraft/world/item/DyeColor.LIME"));
+        assert!(decode(&mut rt, c, &Json::String("chartreuse".into())).is_err());
+        assert_eq!(encode(&mut rt, c, lime), Ok(Nbt::String("lime".into())));
+        const BY_NAME: &str = "net/minecraft/util/StringRepresentable$EnumCodec.byName.(Ljava/lang/String;)Ljava/lang/Enum;";
+        let red = st(&mut rt, "net/minecraft/world/item/DyeColor.RED");
+        let n = rt.string("red");
+        assert_eq!(crate::api::call(&mut rt, BY_NAME, &[c, n]), red);
+        let (none, white) = (rt.string("none"), st(&mut rt, "net/minecraft/world/item/DyeColor.WHITE"));
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/util/StringRepresentable$EnumCodec.byName.(Ljava/lang/String;Ljava/lang/Enum;)Ljava/lang/Enum;", &[c, none, white]), white);
+        assert_eq!(crate::api::call(&mut rt, BY_NAME, &[c, none]), V::NULL);
+        let supplier = crate::functions::constant(&mut rt, values);
+        let from = crate::api::call(&mut rt, "net/minecraft/util/StringRepresentable.fromEnum.(Ljava/util/function/Supplier;)Lnet/minecraft/util/StringRepresentable$EnumCodec;", &[supplier]);
+        assert_eq!(crate::api::call(&mut rt, BY_NAME, &[from, n]), red);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// Vanilla's value codecs write what 1.21.1 writes (`Vec3` three doubles, a UUID four ints, a
     /// rotation its serialized name) and read it back.
     /// A mod's loot function codec: `RecordCodecBuilder.mapCodec(i -> commonFields(i).and(INT.fieldOf("count")
@@ -1676,6 +1799,16 @@ mod tests {
         let ints = st(&mut rt, "com/mojang/serialization/Codec.INT_STREAM");
         let read = decode(&mut rt, ints, &serde_json::json!([4, -5, 6])).unwrap();
         assert_eq!(encode(&mut rt, ints, read), Ok(Nbt::IntArray(vec![4, -5, 6])));
+        // `LONG_STREAM`, as Mekanism's QIO drive keeps its counts: `LongStream.of(long[])` written as
+        // a long array, read back to a `long[]` by `toArray()`.
+        let longs = st(&mut rt, "com/mojang/serialization/Codec.LONG_STREAM");
+        let counts = rt.alloc("[J", Data::Array(vec![V::J(1 << 40), V::J(-3)]));
+        let stream = c(&mut rt, "java/util/stream/LongStream.of.([J)Ljava/util/stream/LongStream;", &[counts]);
+        let written = encode(&mut rt, longs, stream).unwrap();
+        assert_eq!(written, Nbt::LongArray(vec![1 << 40, -3]));
+        let back = decode(&mut rt, longs, &crate::recipes::nbt_json(&written)).unwrap();
+        let array = c(&mut rt, "java/util/stream/LongStream.toArray.()[J", &[back]);
+        assert_eq!((rt.class_of(array), jutil::elements(&rt, array)), ("[J", vec![V::J(1 << 40), V::J(-3)]));
     }
 
     #[test]
