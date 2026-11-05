@@ -2653,6 +2653,17 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `install::tests::a_dropped_jar_gets_the_loaders_biome_tags` (112 port-pack tests pass).
     Still unanswered at FD's load: `ItemAbility.CODEC`, `EnchantmentValueEffect.CODEC`,
     `SoundEvent.DIRECT_CODEC`.
+  - [x] 2026-11-05 A mod adds to another mod's tags without taking its namespace. FD ships
+    `data/create/tags/{item/upright_on_belt,block/brittle,block/fan_transparent,block/passive_boiler_heaters}.json`
+    and names `create:` ids, so its single-jar install claimed `namespaces = ["create"]`, and the game
+    would then refuse FD next to Create ("both use the namespace create"). NeoForge lets any data pack
+    add to any tag, so the content fence now takes tag additions in every namespace
+    (`data/<any>/tags/`), not only `minecraft` and `c`; the game's tag merge already joins them across
+    mods in load order (a replace that drops another mod's entries warns). The installer carries them as
+    shared tags (`carry::shared_tag`), leaves a namespace the jar only has tags in out of the claim
+    candidates, and keeps `replace` in another mod's tag (only the mod's own tags lose it).
+    Tests: `content_only_mod_round_trips`, `refuses_content_outside_its_fence` (31 horizon-mods tests
+    pass), `claims_the_namespaces_its_files_name` (112 port-pack tests pass).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

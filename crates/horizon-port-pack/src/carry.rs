@@ -502,17 +502,18 @@ fn split(name: &str) -> Option<(&str, &str, &str)> {
     carried.then_some((root, ns, rest))
 }
 
-/// Additions to vanilla and convention tags, which every mod may hold.
-fn shared_tag(root: &str, ns: &str, rest: &str) -> bool {
-    root == "data" && (ns == "minecraft" || ns == "c") && rest.starts_with("tags/")
+/// Additions to tags, vanilla's, the convention ones and other mods', which
+/// every mod may hold (Farmer's Delight's pies in Create's `upright_on_belt`).
+fn shared_tag(root: &str, rest: &str) -> bool {
+    root == "data" && rest.starts_with("tags/")
 }
 
 /// Where a jar entry goes: `Some(true)` inside the content mod (its own
-/// namespaces, additions to vanilla and convention tags), `Some(false)`
-/// to `outside/`, `None` not carried (code, metadata).
+/// namespaces, additions to tags), `Some(false)` to `outside/`, `None` not
+/// carried (code, metadata).
 fn place(name: &str, owned: &[&str]) -> Option<bool> {
     let (root, ns, rest) = split(name)?;
-    Some(owned.contains(&ns) || shared_tag(root, ns, rest))
+    Some(owned.contains(&ns) || shared_tag(root, rest))
 }
 
 /// Namespaces no carried mod claims: vanilla's, the convention tags', the
@@ -525,7 +526,9 @@ const NOT_CLAIMED: [&str; 6] = ["minecraft", "c", "horizon", "forge", "neoforge"
 /// support (`wares`, `morevillagers`) or configure (`cristellib`). A
 /// namespace is the mod's when its own files (its id's, its tag additions
 /// and the namespaces already claimed) name ids in it, and no mod of the
-/// pack (`pack_mod`) has it as its id.
+/// pack (`pack_mod`) has it as its id. A namespace it only has tags in is
+/// another mod's, which it adds to: never claimed, or that mod and this one
+/// would clash (Farmer's Delight's tags in `create`).
 fn extra_namespaces(
     zip: &mut zip::ZipArchive<fs::File>,
     id: &str,
@@ -533,10 +536,11 @@ fn extra_namespaces(
 ) -> Vec<String> {
     let mut candidates = BTreeSet::new();
     for name in zip.file_names().filter_map(Result::ok) {
-        if let Some((_, ns, _)) = split(&name)
+        if let Some((root, ns, rest)) = split(&name)
             && ns != id
             && !NOT_CLAIMED.contains(&ns)
             && !pack_mod(ns)
+            && !shared_tag(root, rest)
         {
             candidates.insert(ns.to_owned());
         }
@@ -557,8 +561,8 @@ fn extra_namespaces(
             continue;
         };
         let ns = match () {
-            _ if shared_tag(root, ns, rest) => String::new(),
             _ if ns == id || candidates.contains(ns) => ns.to_owned(),
+            _ if shared_tag(root, rest) => String::new(),
             _ => continue,
         };
         let mut bytes = Vec::new();
@@ -607,7 +611,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// Vanilla skips such files one by one (an invalid resource path, a data
 /// file that does not parse); Horizon's content loader refuses the whole
 /// set, so they stay out of the carry.
-fn unreadable(name: &str, bytes: &mut Vec<u8>) -> Option<String> {
+fn unreadable(name: &str, owned: &[&str], bytes: &mut Vec<u8>) -> Option<String> {
     if let Err(e) = horizon_mods::content::check_path(name) {
         return Some(e);
     }
@@ -630,12 +634,12 @@ fn unreadable(name: &str, bytes: &mut Vec<u8>) -> Option<String> {
             Err(_) => return Some(format!("does not parse as JSON: {e}")),
         },
     };
-    // A vanilla or convention tag that replaces is kept: the game honours it
-    // as a data pack's, with a warning (docs/mods.md). A tag of the mod's own
-    // that replaces: no pack before it defines the tag, so it is the same tag
+    // A tag that replaces in a namespace not the mod's (vanilla's, the
+    // convention one, another mod's) is kept: the game honours it as a data
+    // pack's, with a warning (docs/mods.md). A tag of the mod's own that
+    // replaces: no pack before it defines the tag, so it is the same tag
     // added to (Towns and Towers' biome tags).
-    let shared_tag = name.starts_with("data/minecraft/tags/") || name.starts_with("data/c/tags/");
-    let own_tag = !shared_tag && name.starts_with("data/") && name.contains("/tags/");
+    let own_tag = matches!(split(name), Some(("data", ns, rest)) if owned.contains(&ns) && rest.starts_with("tags/"));
     if own_tag && let Some(o) = value.as_object_mut().filter(|o| o.contains_key("replace")) {
         o.remove("replace");
         *bytes = serde_json::to_vec_pretty(&value).expect("a parsed value serializes");
@@ -767,7 +771,7 @@ pub fn carry(
             .read_to_end(&mut bytes)
             .map_err(|e| format!("{name}: {e}"))?;
         let unreadable = if keep {
-            unreadable(&name, &mut bytes)
+            unreadable(&name, &owned, &mut bytes)
         } else {
             None
         };
@@ -1378,7 +1382,7 @@ mod tests {
   "fallback": "minecraft:empty"
 }"#
         .to_vec();
-        assert_eq!(unreadable(name, &mut bytes), None);
+        assert_eq!(unreadable(name, &["m"], &mut bytes), None);
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             v,
@@ -1386,11 +1390,11 @@ mod tests {
                 "fallback": "minecraft:empty"})
         );
         let mut plain = br#"{"a": "b\"//"}"#.to_vec();
-        assert_eq!(unreadable(name, &mut plain), None);
+        assert_eq!(unreadable(name, &["m"], &mut plain), None);
         assert_eq!(plain, br#"{"a": "b\"//"}"#.to_vec());
         let mut broken = b"{\"a\": 1} trailing".to_vec();
         assert!(
-            unreadable(name, &mut broken)
+            unreadable(name, &["m"], &mut broken)
                 .unwrap()
                 .starts_with("does not parse")
         );
@@ -1876,7 +1880,8 @@ mod tests {
 
     /// A mod shipping its files under other names than its id: the
     /// namespaces its own files name are its, compat files for other mods
-    /// and a pack mod's namespace stay outside.
+    /// and a pack mod's namespace stay outside, and its additions to another
+    /// mod's tags are carried without that mod's namespace becoming its.
     #[test]
     fn claims_the_namespaces_its_files_name() {
         let dir = std::env::temp_dir().join(format!("horizon-port-pack-ns-{}", std::process::id()));
@@ -1909,6 +1914,15 @@ mod tests {
             ),
             // Compat for a mod outside the pack, named by nothing of its own.
             ("data/wares/loot_table/crate.json", r#"{"pools": []}"#),
+            // An addition to another mod's tag, which its own files name.
+            (
+                "data/create/tags/item/upright_on_belt.json",
+                r#"{"replace": true, "values": ["towers:pie"]}"#,
+            ),
+            (
+                "data/towers/loot_table/pie.json",
+                r#"{"pools": [{"entries": [{"type": "minecraft:item", "name": "create:dough"}]}]}"#,
+            ),
             // A pack mod's config naming the mod's sets, and a loader's file.
             (
                 "data/cristel/config/towers.json",
@@ -1960,6 +1974,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tag, json!({"values": ["minecraft:plains"]}));
+        // Another mod's tag that replaces is kept as it is: the game honours it.
+        let theirs: Value = serde_json::from_slice(
+            &fs::read(carried.join("data/create/tags/item/upright_on_belt.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(theirs, json!({"replace": true, "values": ["towers:pie"]}));
         fs::remove_dir_all(&dir).unwrap();
     }
 

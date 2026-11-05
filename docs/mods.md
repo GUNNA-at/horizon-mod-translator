@@ -268,9 +268,10 @@ data, and client prediction of its clicks.
 #### Namespaces and limits
 
 The fence: files go in the mod's own namespaces (`assets/<id>/`,
-`data/<id>/`, and those its manifest lists), plus additions to vanilla tags
-(`data/minecraft/tags/`) and to the convention tags NeoForge and Fabric mods
-share (`data/c/tags/`).
+`data/<id>/`, and those its manifest lists), plus additions to tags: vanilla's
+(`data/minecraft/tags/`), the convention tags NeoForge and Fabric mods share
+(`data/c/tags/`), and other mods' (`data/create/tags/`: Farmer's Delight puts its
+pies in Create's `upright_on_belt`), as a data pack adds to them.
 Templates and `sounds` name vanilla blocks; unknown keys are refused.
 
 Some Java mods ship their files under other names than their mod id (Towns and Towers, mod id `t_and_t`, under
@@ -299,8 +300,8 @@ Tags merge as a data pack's do. Every mod's file for one tag (vanilla's `data/mi
 `"replace": true` first drops what came before it, vanilla's entries and the earlier mods', and the mods after it
 still add theirs, as a higher data pack does. Since the result depends on load order, the game says so in the log:
 "mod towns replaces data/minecraft/tags/worldgen/biome/has_structure/village_plains.json: vanilla's entries and those
-of adds are left out, ...". Tags are the only `minecraft` files a mod may hold: its other content stays in its own
-namespaces.
+of adds are left out, ...". Tags are the only `minecraft` files, and the only files of another mod's namespace, a mod
+may hold: its other content stays in its own namespaces.
 
 A mod adds to structure sets, template pools and processor lists that are not its own (vanilla's villages, another
 mod's houses) with a set, pool or processor list file in its own namespace holding `horizon:add_to`, a key vanilla data

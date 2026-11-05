@@ -5,10 +5,10 @@
 //!
 //! Content is data, not code: nothing here runs in the sandbox. What a mod
 //! may add is fenced instead. Its own namespaces (its id and the ones its
-//! manifest lists), plus additions to vanilla tags and to the convention
-//! tags (`c`, which NeoForge and Fabric mods share). Paths are plain, files
-//! and totals are capped, vanilla ids cannot be redefined, and no two mods
-//! share a namespace ([`clash`]).
+//! manifest lists), plus additions to tags: vanilla's, the convention tags
+//! (`c`, which NeoForge and Fabric mods share) and other mods', as a data
+//! pack adds to them. Paths are plain, files and totals are capped, vanilla
+//! ids cannot be redefined, and no two mods share a namespace ([`clash`]).
 use crate::manifest::{Capability, MANIFEST, Manifest};
 use serde::Deserialize;
 use std::{
@@ -677,13 +677,13 @@ impl Content {
             );
             let own = namespace == id;
             let owned = own || manifest.namespaces.iter().any(|n| n == namespace);
-            // Vanilla's own files stay vanilla's; a mod may only add to its
-            // tags, and to the convention tags mods share.
-            let shared = matches!(namespace, "minecraft" | "c");
-            let allowed = owned || (top == "data" && shared && rest.starts_with("tags/"));
+            // Vanilla's own files stay vanilla's and another mod's its own; a
+            // mod may only add to their tags (Farmer's Delight's foods in
+            // Create's `upright_on_belt`), and to the convention tags mods share.
+            let allowed = owned || (top == "data" && rest.starts_with("tags/"));
             if !allowed {
                 return Err(format!(
-                    "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces) or to vanilla and convention (c) tags"
+                    "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces) or to tags"
                 ));
             }
             if !own && top == "data" && rest.starts_with("horizon/") {
@@ -1143,10 +1143,12 @@ capabilities = ["registries"]
             ("data/ruby/recipe/ruby_block.json", b"{}"),
             ("data/minecraft/tags/block/mineable/pickaxe.json", b"{}"),
             ("data/c/tags/item/gems/ruby.json", b"{}"),
+            // An addition to another mod's tag.
+            ("data/create/tags/item/upright_on_belt.json", b"{}"),
             ("assets/ruby/textures/block/ruby_block.png", b"png"),
         ];
         let content = hmod("ok", MANIFEST_TEXT, files).unwrap();
-        assert_eq!(content.files.len(), 6);
+        assert_eq!(content.files.len(), 7);
         assert_eq!(
             content.blocks,
             [Block {
@@ -1652,6 +1654,7 @@ capabilities = ["registries"]
             &[("data/minecraft/recipe/stone.json", b"{}")],
         );
         refused("convention-recipe", &[("data/c/recipe/stone.json", b"{}")]);
+        refused("other-mods-recipe", &[("data/create/recipe/mixing/a.json", b"{}")]);
         refused("convention-asset", &[("assets/c/lang/en_us.json", b"{}")]);
         let e = refused(
             "modded-template",
