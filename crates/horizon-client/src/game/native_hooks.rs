@@ -4517,6 +4517,11 @@ impl Game<'_> {
             && self.sign_edit.is_none()
             && self.book.is_none()
     }
+    /// Whether the player turned advanced tooltips on (F3 + H,
+    /// `advancedItemTooltips`: item ids, durability), as tooltips are built.
+    pub(super) fn native_advanced_tooltips(&self) -> bool {
+        self.settings.file.bool("advancedItemTooltips")
+    }
     /// This `Game` is the window's, not a server's.
     pub(super) fn native_window(&self) -> bool {
         self.options.execution_role == ExecutionRole::Client

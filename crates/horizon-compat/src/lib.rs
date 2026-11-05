@@ -33,6 +33,7 @@ pub mod food;
 pub mod item_use;
 pub mod invoke;
 pub mod input;
+pub mod tooltips;
 pub mod functions;
 pub mod gamerules;
 pub mod glue;

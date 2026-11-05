@@ -191,7 +191,7 @@ pub(crate) fn hand_of(rt: &mut Rt, stack: V) -> Option<u8> {
 }
 
 /// The game's stack `held` as a stack here: its count, damage, and mod components.
-fn load(rt: &mut Rt, held: Option<crate::host::HandStack>) -> V {
+pub(crate) fn load(rt: &mut Rt, held: Option<crate::host::HandStack>) -> V {
     let Some(held) = held else { return empty(rt) };
     let s = api_common::stack(rt, &held.item, held.count as i32);
     rt.put_field(s, "$damage", V::I(held.damage as i32));

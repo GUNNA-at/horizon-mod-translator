@@ -3187,6 +3187,32 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - 343 compat, 17 translator (`a_mods_look_and_the_mods_it_bundles_become_content_mods` reads
     the manifests back with `horizon_mods::Manifest::parse`, a dev-dependency), 5 port-pack
     install, 40 game hook and control tests pass.
+- [x] 2026-11-05 Item tooltips, as 1.21.1's `ItemStack.getTooltipLines` builds them for mods
+  (new `horizon-compat/src/tooltips.rs`). Measured in the pack: 95 jars override `appendHoverText`
+  (872 classes), 35 listen to `ItemTooltipEvent` (50 classes); Create 10 and 6. The game's
+  `native_tooltip` hook (each frame a tooltip shows, its lines built) gives the bundle the stack and
+  the lines; the mods see each line as a literal of its text: a mod item's own `appendHoverText`
+  (or, for a block item, its block's: `BlockItem.appendHoverText` asks `Block.appendHoverText`)
+  adds lines right after the name, then `ItemTooltipEvent` (stack, the list, the flags, the
+  context, the local player) lets mods add, change or take out lines. The game keeps its own
+  styled line where a mod left it, takes a mod's new one as a component
+  (`component::to_text`), and is told nothing when no mod changed a line. The flags are NeoForge's
+  `ClientTooltipFlag` (advanced from F3 + H through the new `native_advanced_tooltips`, creative,
+  Shift, Control, Alt held); `Item.TooltipContext` (`of`, `EMPTY`, `registries`, `tickRate`),
+  `TooltipFlag.NORMAL`/`ADVANCED`, `asCreative` are mapped. Test
+  `tooltips::tests::a_tooltip_gets_the_mods_lines_as_get_tooltip_lines_builds_it` (a mod item whose
+  override calls its super, a mod block through its block item, a listener putting a Shift hint
+  after the name and taking out a line, a vanilla item nobody changes). In game (`fdcmd.sh`,
+  `scroll-at X Y 0` to hover a slot): Create's wrench in the creative inventory shows "Hold [Shift]
+  for Summary" under its name; with Shift held, Create's own summary in its palette ("Multi-purpose
+  tool for working with your kinetic contraptions.", "When used on Blocks: Rotates components
+  around the clicked face...", "When used on Contraptions..."), wrapped at Create's 200 pixels
+  (`Font.width`, `BreakIterator`); the goggles the same. That run also showed Ponder's listener
+  (`PonderTooltipHandler.updateHovered`, `RegisteredObjectsHelper.getKeyOrThrow(item)`) throwing
+  for every vanilla item hovered (72 × "Could not get key for value minecraft:spruce_door!"):
+  `Registry.getKey` knew mods' registrations only. Vanilla's items and blocks now answer their
+  names (test `neo::tests::vanilla_blocks_and_items_have_their_keys`); `Minecraft.getLocale` is
+  mapped. 345 compat, 17 translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

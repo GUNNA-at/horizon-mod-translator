@@ -262,9 +262,14 @@ fn registry_name_of(rt: &Rt, registry: &str, obj: V) -> Option<String> {
     if registry == "entity_type" {
         return crate::mod_entities::type_id(rt, obj).map(str::to_owned);
     }
-    // Vanilla's potions and effects know their own ids; a mod's are registrations.
+    // Vanilla's potions and effects know their own ids, and its blocks and items are their names
+    // (`api::block`, `api_common::item`); a mod's are registrations.
     rt.registered_name(obj, registry)
         .or_else(|| matches!(registry, "potion" | "mob_effect").then(|| rt.str_of(rt.get_field(obj, "$id"))).flatten())
+        .or_else(|| {
+            let named = matches!(registry, "block" | "item") && rt.class_of(obj) != "java/lang/String";
+            named.then(|| rt.str_of(obj)).flatten().filter(|n| n.contains(':') && !n.starts_with(crate::api::UNREGISTERED))
+        })
         .map(str::to_owned)
 }
 
@@ -2555,6 +2560,26 @@ mod tests {
     /// `CreateBuiltInRegistries`: a registry of the mod's own, made by `RegistryBuilder` with a bake
     /// callback, filled by `Registry.register` while registries fire, and read whole by the callback
     /// once they are frozen.
+    /// Vanilla's blocks and items have their keys in the built-in registries, as a mod reading one
+    /// back gets (catnip's `RegisteredObjectsHelper.getKeyOrThrow(item)`, from every tooltip).
+    #[test]
+    fn vanilla_blocks_and_items_have_their_keys() {
+        let mut rt = Rt::new();
+        let key = |rt: &mut Rt, registry: &str, v: V| {
+            let field = rt.static_key(&format!("net/minecraft/core/registries/BuiltInRegistries.{registry}"));
+            let r = crate::api::get_static(rt, field);
+            let k = crate::api::call(rt, "net/minecraft/core/Registry.getKey.(Ljava/lang/Object;)Lnet/minecraft/resources/ResourceLocation;", &[r, v]);
+            rt.str_of(k).map(str::to_owned)
+        };
+        let door = crate::api_common::item(&mut rt, "minecraft:spruce_door");
+        assert_eq!(key(&mut rt, "ITEM", door).as_deref(), Some("minecraft:spruce_door"));
+        let stone = crate::api::block(&mut rt, "minecraft:stone");
+        assert_eq!(key(&mut rt, "BLOCK", stone).as_deref(), Some("minecraft:stone"));
+        // Not an item: no key.
+        let other = rt.string("minecraft:stone");
+        assert_eq!(key(&mut rt, "ITEM", other), None);
+    }
+
     #[test]
     fn a_mods_own_registry_holds_its_entries_and_bakes_once_they_are_in() {
         let mut rt = Rt::new();

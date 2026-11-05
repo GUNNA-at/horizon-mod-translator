@@ -1722,7 +1722,7 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
         // The client's language: the game's (English until it says otherwise), `Locale`'s one object.
         (MINECRAFT, "getLanguageManager") => single(rt, LANGUAGE_MANAGER),
         (LANGUAGE_MANAGER, "getSelected") => rt.string("en_us"),
-        (LANGUAGE_MANAGER, "getJavaLocale") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
+        (LANGUAGE_MANAGER, "getJavaLocale") | (MINECRAFT, "getLocale") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
         // The client's runtime holds no server object, even in single player (the game's server
         // thread runs its own): a mod syncs over the network, as to a remote server.
         (MINECRAFT, "hasSingleplayerServer") => V::I(0),
@@ -2077,7 +2077,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner == MINECRAFT
             && matches!(
                 name,
-                "getWindow" | "renderBuffers" | "getLanguageManager" | "hasSingleplayerServer" | "$screen" | "$particleEngine" | "getEntityModels" | "getBlockEntityRenderDispatcher"
+                "getWindow" | "renderBuffers" | "getLanguageManager" | "getLocale" | "hasSingleplayerServer" | "$screen" | "$particleEngine" | "getEntityModels" | "getBlockEntityRenderDispatcher"
             ))
         || owner == LANGUAGE_MANAGER
         || (owner == PARTICLE_ENGINE && name == "$providers")

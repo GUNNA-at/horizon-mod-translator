@@ -1039,6 +1039,15 @@ pub fn key_input(rt: &mut Rt, host: &mut dyn Host, key: &str, pressed: bool) {
     rt.with_host(host, |rt| crate::keys::key_input(rt, key, pressed));
 }
 
+/// `native_tooltip` (client): stack `held`'s tooltip lines `lines` (their text, the name first) as
+/// the mods leave them ([`crate::tooltips::tooltip`]: their item's own lines, `ItemTooltipEvent`);
+/// None when they changed none.
+pub fn tooltip(rt: &mut Rt, host: &mut dyn Host, held: crate::host::HandStack, lines: &[String], advanced: bool) -> Option<Vec<crate::tooltips::Line>> {
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| crate::tooltips::tooltip(rt, held, lines, advanced))
+}
+
 /// `native_input_key` (client): `InputEvent.Key` for a key the window handled (`key.keyboard.g`, on
 /// any screen), with GLFW's action (release, press, repeat) and modifier bits
 /// ([`crate::input::key`]).
