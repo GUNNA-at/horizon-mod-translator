@@ -213,6 +213,9 @@ pub struct Program<'a> {
     /// Each mod's id, version and display name from its jar ([`crate::mod_metadata`]): what its
     /// `IModInfo` answers.
     pub metadata: Vec<(String, String, String)>,
+    /// Each jar translated: the ids of the mods it declares and the classes it has
+    /// ([`crate::class_names`]), for FML's scan of it. Empty: one jar of every class.
+    pub scan_files: Vec<(Vec<String>, std::collections::HashSet<String>)>,
     /// Methods (`name.desc`) that ask who called them (`StackWalker.getCallerClass`): calls to
     /// them record the calling class first. Everything else keeps no call stack.
     caller_sensitive: BTreeSet<String>,
@@ -400,6 +403,7 @@ impl<'a> Program<'a> {
             mod_id: None,
             addons: Vec::new(),
             metadata: Vec::new(),
+            scan_files: Vec::new(),
             caller_sensitive: classes
                 .iter()
                 .flat_map(|c| c.methods.iter().map(move |m| (c, m)))
@@ -703,6 +707,63 @@ impl<'a> Program<'a> {
         files
     }
 
+    /// FML's scan of each jar ([`Program::scan_files`]): its mods' ids (`,` between them), and a
+    /// line per annotation on a class, field or method, its fields split by tabs: the
+    /// annotation's descriptor, `TYPE`, `FIELD` or `METHOD`, the class, the member as FML names
+    /// it (the class's dotted name, the field's name, the method's name and descriptor), and its
+    /// values ([`crate::class::Annotation::data`]). Annotations only the compiler and tools read
+    /// (nullability, Kotlin's metadata, mixins) are left out: no mod looks them up at run time.
+    fn scan_texts(&self, classes: &[&ClassFile]) -> Vec<(String, String)> {
+        const TOOLS_ONLY: [&str; 11] = [
+            "Lorg/jetbrains/annotations/",
+            "Ljavax/annotation/",
+            "Lorg/jspecify/",
+            "Lorg/checkerframework/",
+            "Ledu/umd/cs/findbugs/",
+            "Lcom/google/errorprone/",
+            "Lkotlin/Metadata;",
+            "Lkotlin/jvm/",
+            "Lorg/spongepowered/asm/",
+            "Lcom/llamalad7/mixinextras/",
+            "Lnet/minecraft/MethodsReturnNonnullByDefault;",
+        ];
+        let kept = |a: &crate::class::Annotation| !TOOLS_ONLY.iter().any(|t| a.ty.starts_with(t)) && a.ty != "Lnet/minecraft/FieldsAreNonnullByDefault;";
+        let files: Vec<(String, Option<&std::collections::HashSet<String>>)> = if self.scan_files.is_empty() {
+            let mut ids: Vec<String> = self.metadata.iter().map(|m| m.0.clone()).collect();
+            if ids.is_empty() {
+                ids.extend(self.mod_id.clone());
+            }
+            vec![(ids.join(","), None)]
+        } else {
+            self.scan_files.iter().map(|(ids, names)| (ids.join(","), Some(names))).collect()
+        };
+        let mut out = Vec::new();
+        for (ids, names) in files {
+            let mut text = String::new();
+            for c in classes.iter().filter(|c| names.is_none_or(|n| n.contains(&c.name))) {
+                let mut line = |a: &crate::class::Annotation, target: &str, member: &str| {
+                    let data = serde_json::Value::Object(a.data.clone());
+                    let _ = writeln!(text, "{}\t{target}\t{}\t{member}\t{data}", a.ty, c.name);
+                };
+                for a in c.annotations.iter().filter(|a| kept(a)) {
+                    line(a, "TYPE", &c.name.replace('/', "."));
+                }
+                for f in &c.fields {
+                    for a in f.annotations.iter().filter(|a| kept(a)) {
+                        line(a, "FIELD", &f.name);
+                    }
+                }
+                for m in &c.methods {
+                    for a in m.annotations.iter().filter(|a| kept(a)) {
+                        line(a, "METHOD", &format!("{}{}", m.name, m.desc));
+                    }
+                }
+            }
+            out.push((ids, text));
+        }
+        out
+    }
+
     fn tables(&mut self, classes: &[&ClassFile]) -> String {
         // Listeners made from `@SubscribeEvent` methods dispatch through `lambda_call` too.
         for (key, _, _) in self.subscriber_methods() {
@@ -749,7 +810,15 @@ impl<'a> Program<'a> {
         for (class, list) in subs {
             let _ = writeln!(out, "    rt.subscribers.insert({class:?}, vec![{}]);", list.join(", "));
         }
+        // What FML's scan of each jar finds (`ModList.getAllScanData`).
+        let scans = self.scan_texts(classes);
+        for (i, (mods, _)) in scans.iter().enumerate() {
+            let _ = writeln!(out, "    rt.scan_data.push(({mods:?}, SCAN_{i}));");
+        }
         out.push_str("}\n\n");
+        for (i, (_, text)) in scans.iter().enumerate() {
+            let _ = writeln!(out, "const SCAN_{i}: &str = {text:?};\n");
+        }
         // Mod loading: FML constructs each `@Mod` class with the mod bus (its classes initialise as
         // it reaches them, in Java's order), registers the `@EventBusSubscriber` classes, then fires
         // the registration events; suppliers resolve last.
@@ -2281,5 +2350,55 @@ mod mixin_tests {
         assert_eq!(super::accessor_name("getOPERATING_SYSTEM", &accessor), "OPERATING_SYSTEM");
         assert_eq!(super::accessor_name("getter", &accessor), "getter");
         assert_eq!(super::accessor_name("mod$callIsValid", &["call", "invoke"]), "isValid");
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use crate::class::ClassFile;
+    use std::process::Command;
+
+    /// FML's scan as the translator writes it: a line per annotation javac kept (visible and
+    /// class-file-only), each value with its type.
+    #[test]
+    fn the_scan_keeps_what_fml_would_find() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("mod-translator-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = r#"
+package scan;
+import java.lang.annotation.*;
+@Retention(RetentionPolicy.RUNTIME) @interface Plugin { String value(); }
+@Retention(RetentionPolicy.CLASS) @interface Sync { String tag() default ""; ElementType kind(); Class<?> type(); int size(); String[] names(); }
+@Plugin("mymod")
+public class Scanned {
+    @Sync(tag = "e", kind = ElementType.FIELD, type = Long.class, size = 3, names = {"a", "b"}) long energy;
+    @Deprecated public void old(int x) {}
+}
+"#;
+        std::fs::write(root.join("Scanned.java"), src).unwrap();
+        assert!(Command::new("javac").args(["-d", root.to_str().unwrap()]).arg(root.join("Scanned.java")).status().unwrap().success());
+        let class = ClassFile::parse(&std::fs::read(root.join("scan/Scanned.class")).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let classes = vec![class];
+        let mut p = super::Program::new(&classes);
+        p.mod_id = Some("mymod".into());
+        let refs: Vec<&ClassFile> = classes.iter().collect();
+        let scans = p.scan_texts(&refs);
+        assert_eq!(scans.len(), 1);
+        assert_eq!(scans[0].0, "mymod");
+        let lines: Vec<&str> = scans[0].1.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "Lscan/Plugin;\tTYPE\tscan/Scanned\tscan.Scanned\t{\"value\":\"mymod\"}",
+                "Lscan/Sync;\tFIELD\tscan/Scanned\tenergy\t{\"kind\":{\"e\":\"Ljava/lang/annotation/ElementType;\",\"v\":\"FIELD\"},\"names\":[\"a\",\"b\"],\"size\":{\"I\":3},\"tag\":\"e\",\"type\":{\"c\":\"Ljava/lang/Long;\"}}",
+                "Ljava/lang/Deprecated;\tMETHOD\tscan/Scanned\told(I)V\t{}",
+            ]
+        );
     }
 }

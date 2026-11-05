@@ -603,6 +603,19 @@ pub fn new_set_of(rt: &mut Rt, items: &[V]) -> V {
     new_set(rt, items)
 }
 
+/// A `LinkedHashSet` of distinct objects (a map's entries, FML's scan results): identity keys,
+/// no `hashCode` or `equals` callbacks.
+pub(crate) fn identity_set(rt: &mut Rt, items: &[V]) -> V {
+    let s = rt.alloc("java/util/LinkedHashSet", Data::Table(Table::default()));
+    if let Some(Data::Table(t)) = rt.heap.get_mut(s.r() as usize).map(|o| &mut o.data) {
+        for (i, e) in items.iter().enumerate() {
+            t.entries.push((*e, V::I(1)));
+            t.index.entry(e.r() as i32).or_default().push(i);
+        }
+    }
+    s
+}
+
 fn new_set(rt: &mut Rt, items: &[V]) -> V {
     let s = rt.alloc("java/util/LinkedHashSet", Data::Table(Table::default()));
     for &i in items {
@@ -2319,14 +2332,7 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
                 rt.iter_sources.insert(e.r(), this);
                 items.push(e);
             }
-            let s = rt.alloc("java/util/LinkedHashSet", Data::Table(Table::default()));
-            if let Some(Data::Table(t)) = rt.heap.get_mut(s.r() as usize).map(|o| &mut o.data) {
-                // Entries are distinct objects: identity keys, no hashing callbacks needed.
-                for (i, e) in items.iter().enumerate() {
-                    t.entries.push((*e, V::I(1)));
-                    t.index.entry(e.r() as i32).or_default().push(i);
-                }
-            }
+            let s = identity_set(rt, &items);
             rt.iter_sources.insert(s.r(), this);
             s
         }

@@ -48,6 +48,7 @@ pub mod particles;
 pub mod records;
 pub mod render;
 pub mod rotation;
+pub mod scan;
 pub mod screens;
 pub mod shapes;
 pub mod sounds;

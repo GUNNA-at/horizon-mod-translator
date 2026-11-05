@@ -41,7 +41,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 53] = [
+const COMPAT: [(&str, &str); 55] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -74,6 +74,8 @@ const COMPAT: [(&str, &str); 53] = [
     ("food.rs", include_str!("../../horizon-compat/src/food.rs")),
     ("item_use.rs", include_str!("../../horizon-compat/src/item_use.rs")),
     ("nbt.rs", include_str!("../../horizon-compat/src/nbt.rs")),
+    ("ops.rs", include_str!("../../horizon-compat/src/ops.rs")),
+    ("scan.rs", include_str!("../../horizon-compat/src/scan.rs")),
     ("glue.rs", include_str!("../../horizon-compat/src/glue.rs")),
     ("gui.rs", include_str!("../../horizon-compat/src/gui.rs")),
     ("screens.rs", include_str!("../../horizon-compat/src/screens.rs")),
@@ -2048,6 +2050,7 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     program.addons = members[1..].iter().map(|(_, n)| n.clone()).collect();
     program.services = crate::services_of(jars)?;
     program.metadata = jars.iter().flat_map(|j| crate::mod_metadata(j)).collect();
+    program.scan_files = jars.iter().map(|j| (crate::mod_metadata(j).into_iter().map(|m| m.0).collect(), crate::class_names(j))).collect();
     program.use_mixin_configs(&crate::mixin_configs_of(jars));
     let files = program.emit_files(40);
     let src = out.join("engine/src");

@@ -208,7 +208,7 @@ pub(crate) fn kinds(desc: &str) -> Vec<char> {
     out
 }
 
-fn string_hash(s: &str) -> i32 {
+pub(crate) fn string_hash(s: &str) -> i32 {
     s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
 }
 
@@ -459,6 +459,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 V::I(rt.is_a(&other, &this) as i32)
             }
             "cast" => a(1),
+            // `asSubclass(type)`: the class itself when it is one, as JEI checks its plugins.
+            "asSubclass" => {
+                let (this, other) = (rt.str_of(a(0)).unwrap_or("").to_owned(), rt.str_of(a(1)).unwrap_or("").to_owned());
+                if rt.is_a(&this, &other) {
+                    a(0)
+                } else {
+                    throw_with(rt, "java/lang/ClassCastException", &format!("class {} cannot be cast to {}", this.replace('/', "."), other.replace('/', ".")))
+                }
+            }
             "desiredAssertionStatus" => V::I(0),
             "hashCode" => V::I(string_hash(rt.str_of(a(0)).unwrap_or(""))),
             "equals" => V::I((rt.str_of(a(0)) == rt.str_of(a(1))) as i32),

@@ -1883,6 +1883,26 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `RegisterCapabilitiesEvent.setProxyable` (queries always reach the block's own provider).
     Tests `network::tests::a_classs_stream_codec_falls_back_to_its_codec`,
     `blocks::tests::properties_keep_what_a_declaration_needs`.
+  - [x] 2026-11-05 FML's scan data (`ModList.getAllScanData()`), which 16 of the pack's 367 mods
+    read: JEI and Jade find their plugins with it (`@JeiPlugin`, `@WailaPlugin`), Framework and
+    SuperMartijn642's core library what they register, Mekanism the fields its menus sync,
+    JourneyMap, Iron's Spellbooks and others their own annotations. The translator writes, per
+    jar, a line per annotation on a class, field or method (type, `TYPE`/`FIELD`/`METHOD`, class,
+    member as FML names it, values as JSON with their types: string, enum constant, class,
+    primitive, array, annotation); annotations only compilers and tools read (nullability,
+    Kotlin's metadata, mixins) are left out. The engine registers the text
+    (`Rt::scan_data`); `getAnnotations()` reads it the first time it is asked. Answered:
+    `ModFileScanData.getAnnotations`, `getAnnotatedBy(type, elementType)`, `getIModInfoData`
+    (the jar's mods); `AnnotationData`'s accessors; values as FML holds them (`EnumHolder`,
+    ASM `Type`, boxes, lists, `ModAnnotation`); ASM's `Type` (`getType`, `getObjectType`,
+    `getClassName`, `getInternalName`, `getDescriptor`, `equals`); `ElementType`.
+    `Class.asSubclass` (JEI checks its plugins so). Nobody in the pack asks for
+    `getClasses()`, so the class lines aren't written (it stays a miss).
+    Tests `codegen::scan_tests::the_scan_keeps_what_fml_would_find` (javac),
+    `scan::tests::a_scan_lists_annotations_as_fml_finds_them`.
+    The runtime a bundle carries (built without `--runtime`, as the game's are) missed `ops.rs`
+    since the `DynamicOps` step; `bundle::tests::bundles_carry_every_runtime_source_file`
+    caught it, and it carries `ops.rs` and `scan.rs` now.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

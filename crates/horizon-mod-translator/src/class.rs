@@ -92,6 +92,11 @@ pub struct Annotation {
     /// The values that are annotations (one, or an array of them), as annotations: a mixin's
     /// `at = @At(...)`, `slice = @Slice(from = @At(...))`.
     pub nested: Vec<(String, Vec<Annotation>)>,
+    /// The element values with their types, as FML's scan keeps them: a string as a string,
+    /// `{"e": desc, "v": name}` an enum constant, `{"c": desc}` a class, `{"I": 1}` a primitive
+    /// by its descriptor letter (`B`, `C`, `D`, `F`, `I`, `J`, `S`, `Z`), an array as an array,
+    /// `{"@": desc, "v": {...}}` an annotation.
+    pub data: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Annotation {
@@ -395,49 +400,63 @@ impl ClassFile {
         let ty = self.utf8(r.u2()?)?;
         let mut values = Vec::new();
         let mut nested = Vec::new();
+        let mut data = serde_json::Map::new();
         for _ in 0..r.u2()? {
             let name = self.utf8(r.u2()?)?;
-            let (text, inner) = self.element_value(r)?;
+            let (text, inner, typed) = self.element_value(r)?;
             if !inner.is_empty() {
                 nested.push((name.clone(), inner));
             }
+            data.insert(name.clone(), typed);
             values.push((name, text));
         }
-        Ok(Annotation { ty, values, nested })
+        Ok(Annotation { ty, values, nested, data })
     }
 
-    /// An element value as text, and the annotations it holds.
-    fn element_value(&self, r: &mut Reader) -> Result<(String, Vec<Annotation>), String> {
+    /// An element value as text, the annotations it holds, and its typed form ([`Annotation::data`]).
+    fn element_value(&self, r: &mut Reader) -> Result<(String, Vec<Annotation>, serde_json::Value), String> {
+        use serde_json::{Value, json};
         Ok(match r.u1()? {
-            b's' => (self.utf8(r.u2()?)?, Vec::new()),
-            b'e' => {
-                r.u2()?; // the enum's type
-                (self.utf8(r.u2()?)?, Vec::new())
+            b's' => {
+                let s = self.utf8(r.u2()?)?;
+                (s.clone(), Vec::new(), Value::String(s))
             }
-            b'c' => (self.utf8(r.u2()?)?, Vec::new()),
+            b'e' => {
+                let ty = self.utf8(r.u2()?)?;
+                let name = self.utf8(r.u2()?)?;
+                (name.clone(), Vec::new(), json!({ "e": ty, "v": name }))
+            }
+            b'c' => {
+                let d = self.utf8(r.u2()?)?;
+                (d.clone(), Vec::new(), json!({ "c": d }))
+            }
             // A nested one with its values, `|` between them (an array's are `,`, and a
             // descriptor has `;`): `Lorg/spongepowered/asm/mixin/injection/At;(value=INVOKE|target=...)`.
             b'@' => {
                 let a = self.annotation(r)?;
                 let values: Vec<String> = a.values.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                (format!("{}({})", a.ty, values.join("|")), vec![a])
+                let typed = json!({ "@": a.ty, "v": Value::Object(a.data.clone()) });
+                (format!("{}({})", a.ty, values.join("|")), vec![a], typed)
             }
             b'[' => {
                 let items = (0..r.u2()?).map(|_| self.element_value(r)).collect::<Result<Vec<_>, _>>()?;
-                let text = items.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(",");
-                (text, items.into_iter().flat_map(|(_, a)| a).collect())
+                let text = items.iter().map(|(t, ..)| t.as_str()).collect::<Vec<_>>().join(",");
+                let typed = Value::Array(items.iter().map(|(_, _, j)| j.clone()).collect());
+                (text, items.into_iter().flat_map(|(_, a, _)| a).collect(), typed)
             }
-            _ => (
-                match self.pool.get(r.u2()? as usize) {
-                    Some(Const::Int(i)) => i.to_string(),
-                    Some(Const::Long(j)) => j.to_string(),
-                    Some(Const::Float(f)) => f.to_string(),
-                    Some(Const::Double(d)) => d.to_string(),
-                    Some(Const::Utf8(s)) => s.clone(),
-                    _ => String::new(),
-                },
-                Vec::new(),
-            ),
+            tag => {
+                let (text, n) = match self.pool.get(r.u2()? as usize) {
+                    Some(Const::Int(i)) => (i.to_string(), json!(i)),
+                    Some(Const::Long(j)) => (j.to_string(), json!(j)),
+                    Some(Const::Float(f)) => (f.to_string(), json!(f)),
+                    Some(Const::Double(d)) => (d.to_string(), json!(d)),
+                    Some(Const::Utf8(s)) => (s.clone(), Value::String(s.clone())),
+                    _ => (String::new(), Value::Null),
+                };
+                let mut m = serde_json::Map::new();
+                m.insert((tag as char).to_string(), n);
+                (text, Vec::new(), Value::Object(m))
+            }
         })
     }
 

@@ -235,6 +235,9 @@ pub struct Rt {
     pub caller_class: &'static str,
     /// Registries the mod makes (`ResourceKey.createRegistryKey`), fired after vanilla's.
     pub custom_registries: Vec<String>,
+    /// FML's scan of each jar (`ModList.getAllScanData`), registered by generated code: the ids
+    /// of the jar's mods (`,` between them) and a line per annotation the translator found.
+    pub scan_data: Vec<(&'static str, &'static str)>,
     /// The mod's live block entities, by position.
     pub block_entities: HashMap<[i32; 3], V>,
     /// For each live block entity: its block, and whether its last save wrote anything.
@@ -283,6 +286,7 @@ impl Default for Rt {
             lambda_info: HashMap::default(),
             caller_class: "java/lang/Object",
             custom_registries: Vec::new(),
+            scan_data: Vec::new(),
             block_entities: HashMap::default(),
             block_entity_meta: HashMap::default(),
             keys: HashMap::default(),

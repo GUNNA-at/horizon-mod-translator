@@ -332,6 +332,7 @@ fn name_of(rt: &Rt, v: V) -> String {
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     owner.starts_with("net/neoforged/")
+        || crate::scan::claims(owner)
         || owner.starts_with("thedarkcolour/kotlinforforge/")
         || owner == REGISTRY_SET_BUILDER
         || matches!(owner, ARGUMENT_TYPE_INFOS | SINGLETON_ARGUMENT_INFO)
@@ -366,6 +367,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "thedarkcolour/kotlinforforge/KotlinModLoadingContext" => KOTLIN_CONTEXT,
         o => o,
     };
+    if crate::scan::claims(owner) {
+        return crate::scan::call(rt, owner, name, desc, args);
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         // What a crash report would list: there are no Java crash reports here.
@@ -962,6 +966,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             crate::api_common::optional(rt, c)
         }
         ("net/neoforged/fml/ModList", "size") => V::I(loaded_mods(rt).len() as i32),
+        // What FML's scan of each jar found: its annotations ([`crate::scan`]).
+        ("net/neoforged/fml/ModList", "getAllScanData") => crate::scan::all(rt),
         // `getMods()`: each loaded mod's metadata, in FML's order.
         ("net/neoforged/fml/ModList", "getMods") => {
             let infos: Vec<V> = loaded_mods(rt).iter().map(|id| mod_info(rt, id)).collect();
@@ -1027,11 +1033,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 V::NULL
             }
         }
+        // A jar's mods: the one asked for by id, or all a scanned jar declares (`$modIds`).
         (MOD_FILE_INFO, "getMods") => {
-            let id = rt.get_field(a(0), "$modId");
-            let id = rt.str_of(id).unwrap_or("").to_owned();
-            let info = mod_info(rt, &id);
-            crate::jutil::new_list(rt, vec![info])
+            let ids = match rt.str_of(rt.get_field(a(0), "$modIds")) {
+                Some(all) => all.to_owned(),
+                None => rt.str_of(rt.get_field(a(0), "$modId")).unwrap_or("").to_owned(),
+            };
+            let infos: Vec<V> = ids.split(',').filter(|i| !i.is_empty()).map(|id| mod_info(rt, id)).collect();
+            crate::jutil::new_list(rt, infos)
         }
         (MOD_CONTAINER, "getModId" | "getNamespace") => rt.get_field(a(0), "$modId"),
         // Events route by class, so every handle on the mod bus is the same bus.
@@ -1169,6 +1178,9 @@ const KOTLIN_CONTEXT_COMPANION: &str = "thedarkcolour/kotlinforforge/neoforge/Ko
 /// The loader's static fields: Kotlin for Forge's loading context's companion (`KotlinModLoadingContext.get()`
 /// in Kotlin is a call on it).
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    if let Some(v) = crate::scan::get_static(rt, owner, field) {
+        return Some(v);
+    }
     match (owner, field) {
         // NeoForge's abilities: each constant's name lower-cased, but `HOE_TILL`'s is `till`.
         ("net/neoforged/neoforge/common/ItemAbilities", f) if !f.starts_with("DEFAULT_") => {
