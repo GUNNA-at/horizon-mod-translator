@@ -1214,6 +1214,23 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             _ => Err(format!("Not a compound tag: {j}")),
         },
         "item_enchantments" => crate::enchantments::decode(rt, j),
+        // `ItemAbility.CODEC`: the ability by name (`Codec.STRING.xmap(ItemAbility::get, ...)`).
+        "item_ability" => {
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            Ok(crate::neo::item_ability(rt, s))
+        }
+        // `SoundEvent.DIRECT_CODEC`: `{sound_id, range}`; the range is lenient (one that isn't a
+        // number is none: a variable range).
+        "sound_event_direct" => {
+            let o = object()?;
+            let id = o.get("sound_id").ok_or("No key sound_id in MapLike")?;
+            let id = id.as_str().ok_or_else(|| format!("sound_id: Not a string: {id}"))?;
+            if !valid_location(id) {
+                return Err(format!("sound_id: Not a valid resource location: {id}"));
+            }
+            let range = o.get("range").and_then(Json::as_f64).map(|r| r as f32);
+            Ok(crate::sounds::sound_event(rt, &qualified(id), range))
+        }
         "dye_color" => {
             const DYES: [&str; 16] = [
                 "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray", "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black",

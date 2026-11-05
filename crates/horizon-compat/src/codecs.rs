@@ -179,6 +179,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/core/component/DataComponentPatch" | "net/minecraft/core/component/DataComponentMap", "CODEC") => native(rt, "component_patch"),
         ("net/minecraft/nbt/CompoundTag", "CODEC") => native(rt, "compound_tag"),
         ("net/minecraft/world/item/DyeColor", "CODEC") => native(rt, "dye_color"),
+        ("net/neoforged/neoforge/common/ItemAbility", "CODEC") => native(rt, "item_ability"),
+        ("net/minecraft/sounds/SoundEvent", "DIRECT_CODEC") => native(rt, "sound_event_direct"),
         ("net/minecraft/world/level/block/state/BlockState", "CODEC") => native(rt, "block_state"),
         // Ore targets and the rule tests they're made of (`OreConfiguration.TargetBlockState.CODEC`,
         // `RuleTest.CODEC`: by `predicate_type`).
@@ -1008,6 +1010,16 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
             Nbt::Compound(m)
         }
         "dye_color" => Nbt::String(serialized_name(rt, v)?),
+        "item_ability" => Nbt::String(rt.str_of(rt.get_field(v, "name")).ok_or("Not an item ability")?.to_owned()),
+        // `{sound_id, range}`, the range only when fixed.
+        "sound_event_direct" => {
+            let id = crate::sounds::sound_id(rt, v).ok_or("Not a sound event")?;
+            let mut m = BTreeMap::from([("sound_id".to_owned(), Nbt::String(id))]);
+            if let V::F(r) = rt.get_field(v, "$range") {
+                m.insert("range".to_owned(), Nbt::Float(r));
+            }
+            Nbt::Compound(m)
+        }
         "item_enchantments" => crate::enchantments::encode(rt, v)?,
         // Ingredients, sized ones and fluid ones as their codecs write them (a stream codec built
         // on one sends this).
@@ -1866,6 +1878,37 @@ mod tests {
         let back = decode(&mut rt, longs, &crate::recipes::nbt_json(&written)).unwrap();
         let array = c(&mut rt, "java/util/stream/LongStream.toArray.()[J", &[back]);
         assert_eq!((rt.class_of(array), jutil::elements(&rt, array)), ("[J", vec![V::J(1 << 40), V::J(-3)]));
+    }
+
+    /// Farmer's Delight's cutting recipes: the tool as an `ItemAbility` by name, the sound as
+    /// `SoundEvent.DIRECT_CODEC`'s `{sound_id, range}`.
+    #[test]
+    fn item_abilities_and_direct_sound_events_read_and_write_as_vanillas() {
+        let mut rt = Rt::new();
+        let ability = st(&mut rt, "net/neoforged/neoforge/common/ItemAbility.CODEC");
+        let read = decode(&mut rt, ability, &serde_json::json!("axe_strip")).unwrap();
+        let name = rt.string("axe_strip");
+        let got = c(&mut rt, "net/neoforged/neoforge/common/ItemAbility.get.(Ljava/lang/String;)Lnet/neoforged/neoforge/common/ItemAbility;", &[name]);
+        assert_eq!(read, got, "one ability per name");
+        assert_eq!(encode(&mut rt, ability, read), Ok(Nbt::String("axe_strip".into())));
+        assert!(decode(&mut rt, ability, &serde_json::json!(3)).is_err());
+
+        let sound = st(&mut rt, "net/minecraft/sounds/SoundEvent.DIRECT_CODEC");
+        let range = |rt: &mut Rt, e: V| c(rt, "net/minecraft/sounds/SoundEvent.getRange.(F)F", &[e, V::F(1.0)]);
+        let strip = decode(&mut rt, sound, &serde_json::json!({"sound_id": "item.axe.strip"})).unwrap();
+        assert_eq!(crate::sounds::sound_id(&rt, strip).as_deref(), Some("minecraft:item.axe.strip"));
+        assert_eq!(range(&mut rt, strip), V::F(16.0));
+        let written = encode(&mut rt, sound, strip).unwrap();
+        assert_eq!(written, Nbt::Compound(BTreeMap::from([("sound_id".to_owned(), Nbt::String("minecraft:item.axe.strip".into()))])));
+        let far = decode(&mut rt, sound, &serde_json::json!({"sound_id": "m:chop", "range": 32.0})).unwrap();
+        assert_eq!(range(&mut rt, far), V::F(32.0));
+        let written = crate::recipes::nbt_json(&encode(&mut rt, sound, far).unwrap());
+        let back = decode(&mut rt, sound, &written).unwrap();
+        assert_eq!(range(&mut rt, back), V::F(32.0));
+        // The range is lenient: one that isn't a number is no fixed range.
+        let lenient = decode(&mut rt, sound, &serde_json::json!({"sound_id": "m:chop", "range": "far"})).unwrap();
+        assert_eq!(range(&mut rt, lenient), V::F(16.0));
+        assert!(decode(&mut rt, sound, &serde_json::json!({"range": 3.0})).is_err());
     }
 
     #[test]

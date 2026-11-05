@@ -2664,6 +2664,14 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     candidates, and keeps `replace` in another mod's tag (only the mod's own tags lose it).
     Tests: `content_only_mod_round_trips`, `refuses_content_outside_its_fence` (31 horizon-mods tests
     pass), `claims_the_namespaces_its_files_name` (112 port-pack tests pass).
+  - [x] 2026-11-05 Two codecs Farmer's Delight's cutting board recipes are read with, natively:
+    `ItemAbility.CODEC` (`ItemAbilityIngredient`'s `action`: the ability by name, one object per
+    name as `ItemAbility.get` gives) and `SoundEvent.DIRECT_CODEC` (`{sound_id, range}`, the range
+    lenient, written back only when fixed). All 72 of FD's cutting recipes name an item ability and
+    21 a sound, so without them the `farmersdelight:cutting` serializer's codec had nulls in it.
+    Test: `codecs::tests::item_abilities_and_direct_sound_events_read_and_write_as_vanillas`
+    (301 compat tests pass). `EnchantmentValueEffect.CODEC` (FD's backstabbing enchantment effect
+    component) is still unanswered: it needs the game to read a mod's enchantment effect component.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

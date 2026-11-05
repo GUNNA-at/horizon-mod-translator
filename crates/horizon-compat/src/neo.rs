@@ -373,7 +373,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 }
 
 /// NeoForge's `ItemAbility` named `name` (`axe_strip`): one object per name.
-fn item_ability(rt: &mut Rt, name: &str) -> V {
+pub(crate) fn item_ability(rt: &mut Rt, name: &str) -> V {
     rt.intern(format!("item-ability/{name}"), |rt| {
         let o = rt.new_object("net/neoforged/neoforge/common/ItemAbility");
         let n = rt.string(name);

@@ -20,7 +20,7 @@ const NEUTRAL: usize = 6;
 const PLAYERS: usize = 7;
 
 /// A `SoundEvent` for `id`, with a fixed range when given (`createFixedRangeEvent`).
-fn sound_event(rt: &mut Rt, id: &str, range: Option<f32>) -> V {
+pub(crate) fn sound_event(rt: &mut Rt, id: &str, range: Option<f32>) -> V {
     let e = rt.new_object(SOUND_EVENT);
     let location = rt.string(id);
     rt.put_field(e, "$location", location);
