@@ -1903,6 +1903,17 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     The runtime a bundle carries (built without `--runtime`, as the game's are) missed `ops.rs`
     since the `DynamicOps` step; `bundle::tests::bundles_carry_every_runtime_source_file`
     caught it, and it carries `ops.rs` and `scan.rs` now.
+  - [x] 2026-11-05 fastutil's custom-hash collections (`ObjectOpenCustomHashSet(strategy)`, the
+    linked ones and maps): keys hash and compare by the strategy's `hashCode`/`equals` (`Table`'s
+    `strategy`). Vanilla's `ItemStackLinkedSet.TYPE_AND_TAG` (`TYPE_AND_COMPONENTS`) and NeoForge's
+    `FluidStackLinkedSet.TYPE_AND_COMPONENTS` are answered natively (same item or fluid, same
+    components), with `createTypeAndComponentsSet()` and the `hashStackAndComponents`/
+    `hashItemAndComponents`/`hashFluidAndComponents` helpers; a mod's own strategy runs as
+    translated code. `clear()` keeps how a collection orders and compares its keys: a tree's
+    comparator was dropped by a set's `clear()`, and now the strategy is kept too.
+    `Class.getClassLoader()` answers one loader object (`ServiceLoader.load` ignores it).
+    Tests `api_common::tests::a_custom_hash_set_keeps_stacks_by_their_type`,
+    `jutil::tests::tree_map_sorts_keys_and_sets_ignore_duplicates`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

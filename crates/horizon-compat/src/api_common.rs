@@ -778,6 +778,61 @@ pub fn stack(rt: &mut Rt, item_name: &str, count: i32) -> V {
 }
 
 /// Whether a stack is empty: none, no count, or air. A mod's item is its registered object.
+/// Vanilla's hash strategy for item stacks (`ItemStackLinkedSet.TYPE_AND_TAG`: same item, same
+/// components, the count aside) and NeoForge's for fluid stacks
+/// (`FluidStackLinkedSet.TYPE_AND_COMPONENTS`), as the anonymous classes they are.
+const ITEM_STRATEGY: &str = "net/minecraft/world/item/ItemStackLinkedSet$1";
+const FLUID_STRATEGY: &str = "net/neoforged/neoforge/fluids/FluidStackLinkedSet$1";
+
+/// A stack strategy's `hashCode(stack)` and `equals(a, b)`; None for a strategy that isn't one.
+pub(crate) fn stack_strategy(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let fluid = match rt.class_of(a(0)) {
+        ITEM_STRATEGY => false,
+        FLUID_STRATEGY => true,
+        _ => return None,
+    };
+    Some(match name {
+        "hashCode" => V::I(stack_hash(rt, a(1), fluid)),
+        "equals" => {
+            let (x, y) = (a(1), a(2));
+            if x == y || x.r() == 0 || y.r() == 0 {
+                return Some(V::I((x == y) as i32));
+            }
+            let same = if fluid {
+                crate::api::call(rt, "net/neoforged/neoforge/fluids/FluidStack.isSameFluidSameComponents.(Lnet/neoforged/neoforge/fluids/FluidStack;Lnet/neoforged/neoforge/fluids/FluidStack;)Z", &[x, y]).i() != 0
+            } else {
+                stack_empty(rt, x) == stack_empty(rt, y)
+                    && crate::api::call(rt, "net/minecraft/world/item/ItemStack.isSameItemSameComponents.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;)Z", &[x, y]).i() != 0
+            };
+            V::I(same as i32)
+        }
+        _ => return None,
+    })
+}
+
+/// A stack's hash as far as stacks a strategy calls equal go (`ItemStack.hashItemAndComponents`):
+/// its item's name, or its fluid's identity; 0 for null. Components only make equal ones rarer.
+fn stack_hash(rt: &Rt, s: V, fluid: bool) -> i32 {
+    if s.r() == 0 {
+        0
+    } else if fluid {
+        rt.get_field(s, "$fluid").r() as i32
+    } else {
+        crate::jlang::string_hash(&item_like_name(rt, rt.get_field(s, "$item")))
+    }
+}
+
+/// A linked set keyed by `strategy` (`ItemStackLinkedSet.createTypeAndComponentsSet()`).
+fn strategy_set(rt: &mut Rt, strategy: &'static str) -> V {
+    let s = intern_strategy(rt, strategy);
+    rt.alloc("it/unimi/dsi/fastutil/objects/ObjectLinkedOpenCustomHashSet", Data::Table(crate::Table { strategy: s, ..Default::default() }))
+}
+
+fn intern_strategy(rt: &mut Rt, class: &'static str) -> V {
+    rt.intern(format!("compat:strategy/{class}"), |rt| rt.new_object(class))
+}
+
 pub(crate) fn stack_empty(rt: &Rt, s: V) -> bool {
     if s.r() == 0 || rt.get_field(s, "$count").i() <= 0 {
         return true;
@@ -1058,6 +1113,13 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             );
             V::I((number || matches!(c, "java/lang/Boolean" | "java/lang/String")) as i32)
         }
+        // Sets of stacks by type and components, and the hash they keep them by.
+        ("net/minecraft/world/item/ItemStackLinkedSet", "createTypeAndComponentsSet") => strategy_set(rt, ITEM_STRATEGY),
+        ("net/neoforged/neoforge/fluids/FluidStackLinkedSet", "createTypeAndComponentsSet") => strategy_set(rt, FLUID_STRATEGY),
+        ("net/minecraft/world/item/ItemStackLinkedSet", "hashStackAndComponents") | ("net/minecraft/world/item/ItemStack", "hashItemAndComponents") => {
+            V::I(stack_hash(rt, a(0), false))
+        }
+        ("net/neoforged/neoforge/fluids/FluidStack", "hashFluidAndComponents") => V::I(stack_hash(rt, a(0), true)),
         // NeoForge's `ModelResourceLocation.standalone(id)`: the model at `id` itself.
         ("net/minecraft/client/resources/model/ModelResourceLocation", "standalone") => {
             let variant = rt.string("standalone");
@@ -3132,6 +3194,8 @@ fn vanilla_block_entity_type(rt: &mut Rt, field: &str) -> V {
 
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match owner {
+        "net/minecraft/world/item/ItemStackLinkedSet" if field == "TYPE_AND_TAG" => intern_strategy(rt, ITEM_STRATEGY),
+        "net/neoforged/neoforge/fluids/FluidStackLinkedSet" if field == "TYPE_AND_COMPONENTS" => intern_strategy(rt, FLUID_STRATEGY),
         "net/minecraft/world/phys/Vec3" if field == "ZERO" => vec3_zero(rt),
         // `Integer.TYPE`: the primitive's own class (`int.class`), as reflection names it.
         "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" | "java/lang/Boolean"
@@ -3259,6 +3323,35 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Mekanism counts stacks in `new ObjectOpenCustomHashSet<>(ItemStackLinkedSet.TYPE_AND_TAG)`:
+    /// stacks of one item are one entry whatever their counts; another item is another.
+    #[test]
+    fn a_custom_hash_set_keeps_stacks_by_their_type() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        fn vcall(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+            crate::api::call(rt, key, args)
+        }
+        rt.vcall = Some(vcall);
+        let strategy = crate::api::get_static(&mut rt, "net/minecraft/world/item/ItemStackLinkedSet.TYPE_AND_TAG");
+        let set = rt.new_object("it/unimi/dsi/fastutil/objects/ObjectOpenCustomHashSet");
+        crate::api::call(&mut rt, "it/unimi/dsi/fastutil/objects/ObjectOpenCustomHashSet.<init>.(Lit/unimi/dsi/fastutil/Hash$Strategy;)V", &[set, strategy]);
+        let (stone, dirt) = (item(&mut rt, "minecraft:stone"), item(&mut rt, "minecraft:dirt"));
+        let (one, five, other) = (stack_of(&mut rt, stone, 1), stack_of(&mut rt, stone, 5), stack_of(&mut rt, dirt, 1));
+        let add = "it/unimi/dsi/fastutil/objects/ObjectOpenCustomHashSet.add.(Ljava/lang/Object;)Z";
+        assert_eq!(crate::api::call(&mut rt, add, &[set, one]), V::I(1));
+        assert_eq!(crate::api::call(&mut rt, add, &[set, five]), V::I(0), "the same item is in already");
+        assert_eq!(crate::api::call(&mut rt, add, &[set, other]), V::I(1));
+        assert_eq!(crate::api::call(&mut rt, "java/util/Set.size.()I", &[set]), V::I(2));
+        // Cleared, the set still compares by the strategy.
+        crate::api::call(&mut rt, "java/util/Set.clear.()V", &[set]);
+        let again = stack_of(&mut rt, stone, 3);
+        assert_eq!(crate::api::call(&mut rt, add, &[set, again]), V::I(1));
+        assert_eq!(crate::api::call(&mut rt, add, &[set, one]), V::I(0), "the strategy outlives clear()");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     #[test]
     fn javas_own_classes_are_what_the_jdk_declares_them() {

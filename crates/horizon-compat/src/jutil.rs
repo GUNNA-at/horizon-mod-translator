@@ -13,9 +13,24 @@ pub use crate::Table;
 fn reindex(t: &mut Table, rt: &mut Rt) {
     t.index.clear();
     for i in 0..t.entries.len() {
-        let h = hash(rt, t.entries[i].0);
+        let h = key_hash(rt, t.strategy, t.entries[i].0);
         t.index.entry(h).or_default().push(i);
     }
+}
+
+const STRATEGY: &str = "it/unimi/dsi/fastutil/Hash$Strategy";
+const STRATEGY_HASH: &str = "it/unimi/dsi/fastutil/Hash$Strategy.hashCode.(Ljava/lang/Object;)I";
+const STRATEGY_EQUALS: &str = "it/unimi/dsi/fastutil/Hash$Strategy.equals.(Ljava/lang/Object;Ljava/lang/Object;)Z";
+
+/// A key's hash in a table with `strategy` (fastutil's custom-hash collections): the strategy's,
+/// else the key's own `hashCode`.
+fn key_hash(rt: &mut Rt, strategy: V, k: V) -> i32 {
+    if strategy.r() != 0 { rt.call_functional(STRATEGY_HASH, strategy, &[k]).i() } else { hash(rt, k) }
+}
+
+/// Whether two keys are one in a table with `strategy`: the strategy's `equals`, else the key's.
+fn key_equals(rt: &mut Rt, strategy: V, a: V, b: V) -> bool {
+    if strategy.r() != 0 { rt.call_functional(STRATEGY_EQUALS, strategy, &[a, b]).i() != 0 } else { equals(rt, a, b) }
 }
 
 const EQUALS: &str = "equals.(Ljava/lang/Object;)Z";
@@ -411,6 +426,15 @@ fn take_table(rt: &mut Rt, v: V) -> Option<Table> {
     }
 }
 
+/// An empty table that orders and compares its keys as `this` does: `clear()` keeps a
+/// `TreeMap`'s comparator and a custom-hash set's strategy.
+fn emptied(rt: &Rt, this: V) -> Table {
+    match rt.heap.get(this.r() as usize).map(|o| &o.data) {
+        Some(Data::Table(t)) => Table { sorted: t.sorted, comparator: t.comparator, strategy: t.strategy, ..Table::default() },
+        _ => Table::default(),
+    }
+}
+
 fn put_table(rt: &mut Rt, v: V, t: Table) {
     if let Some(o) = rt.heap.get_mut(v.r() as usize) {
         o.data = Data::Table(t);
@@ -418,9 +442,9 @@ fn put_table(rt: &mut Rt, v: V, t: Table) {
 }
 
 fn find(rt: &mut Rt, t: &Table, k: V) -> Option<usize> {
-    let h = hash(rt, k);
+    let h = key_hash(rt, t.strategy, k);
     let slots = t.index.get(&h)?.clone();
-    slots.into_iter().find(|&i| equals(rt, t.entries[i].0, k))
+    slots.into_iter().find(|&i| key_equals(rt, t.strategy, t.entries[i].0, k))
 }
 
 /// Puts `k → v` in the table at `m`; the previous value, or null.
@@ -442,7 +466,7 @@ pub fn table_put(rt: &mut Rt, m: V, k: V, v: V) -> V {
                 t.entries.insert(at, (k, v));
                 reindex(&mut t, rt);
             } else {
-                let h = hash(rt, k);
+                let h = key_hash(rt, t.strategy, k);
                 t.entries.push((k, v));
                 t.index.entry(h).or_default().push(t.entries.len() - 1);
             }
@@ -716,6 +740,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if matches!(owner, SPLITTER | JOINER | OBJECT_ARRAYS) {
         return guava_strings(rt, owner, name, desc, args);
     }
+    // Vanilla's strategies for stacks (`ItemStackLinkedSet.TYPE_AND_TAG`); a mod's own runs its code.
+    if owner == STRATEGY {
+        return crate::api_common::stack_strategy(rt, name, args);
+    }
     if !util_owner(owner) {
         return None;
     }
@@ -735,6 +763,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 rt.side_fields.entry(this.r()).or_default().extend(f);
             }
             o.class = class;
+        }
+        // A custom-hash one's strategy, its last argument: set before what it copies goes in.
+        if desc.ends_with("Lit/unimi/dsi/fastutil/Hash$Strategy;)V")
+            && let Some(&s) = args.last()
+            && let Some(Data::Table(t)) = rt.heap.get_mut(this.r() as usize).map(|o| &mut o.data)
+        {
+            t.strategy = s;
         }
         // A copy constructor, or a sorted collection's comparator.
         if let Some(&arg) = args.get(1)
@@ -1975,7 +2010,8 @@ fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             V::I(changed as i32)
         }
         "clear" => {
-            put_table(rt, this, Table { sorted: matches!(rt.heap.get(this.r() as usize).map(|o| &o.data), Some(Data::Table(t)) if t.sorted), ..Table::default() });
+            let empty = emptied(rt, this);
+            put_table(rt, this, empty);
             V::Void
         }
         "iterator" | "fastIterator" => {
@@ -2274,11 +2310,8 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             found(rt, v)
         }
         "clear" => {
-            let (sorted, comparator) = match rt.heap.get(this.r() as usize).map(|o| &o.data) {
-                Some(Data::Table(t)) => (t.sorted, t.comparator),
-                _ => (false, V::NULL),
-            };
-            put_table(rt, this, Table { sorted, comparator, ..Table::default() });
+            let empty = emptied(rt, this);
+            put_table(rt, this, empty);
             V::Void
         }
         // A key mapped to null counts as absent; a primitive map's value (fastutil's
@@ -3309,6 +3342,22 @@ mod tests {
         let x2 = rt.alloc("java/lang/String", Data::Str("x".into()));
         assert_eq!(c(&mut rt, "java/util/Set.add.(Ljava/lang/Object;)Z", &[s, x2]), V::I(0));
         assert_eq!(c(&mut rt, "java/util/Set.size.()I", &[s]), V::I(1));
+        // A tree set keeps its comparator through clear().
+        let rev = c(&mut rt, "java/util/Comparator.reverseOrder.()Ljava/util/Comparator;", &[]);
+        let t = rt.new_object("java/util/TreeSet");
+        c(&mut rt, "java/util/TreeSet.<init>.(Ljava/util/Comparator;)V", &[t, rev]);
+        let add = "java/util/Set.add.(Ljava/lang/Object;)Z";
+        for k in ["a", "c"] {
+            let k = rt.string(k);
+            c(&mut rt, add, &[t, k]);
+        }
+        c(&mut rt, "java/util/Set.clear.()V", &[t]);
+        for k in ["x", "z", "y"] {
+            let k = rt.string(k);
+            c(&mut rt, add, &[t, k]);
+        }
+        let names: Vec<String> = elements(&rt, t).iter().map(|&k| rt.str_of(k).unwrap().to_owned()).collect();
+        assert_eq!(names, ["z", "y", "x"], "the comparator outlives clear()");
     }
 
     #[test]

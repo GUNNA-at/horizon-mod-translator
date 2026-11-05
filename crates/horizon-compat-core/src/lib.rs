@@ -876,6 +876,9 @@ pub struct Table {
     /// A `TreeMap`/`TreeSet`: entries kept sorted, by `comparator` when it isn't null.
     pub sorted: bool,
     pub comparator: V,
+    /// fastutil's custom-hash collections (`ObjectOpenCustomHashSet(strategy)`): keys hash and
+    /// compare by the strategy's `hashCode` and `equals` when it is an object.
+    pub strategy: V,
 }
 
 // BEGIN ENGINE ENTRY POINTS

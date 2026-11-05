@@ -459,6 +459,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 V::I(rt.is_a(&other, &this) as i32)
             }
             "cast" => a(1),
+            // The loader a class came from: one for the mod's classes, which `ServiceLoader.load`
+            // and `Class.forName(name, init, loader)` take.
+            "getClassLoader" => rt.intern("compat:class-loader".into(), |rt| rt.new_object("java/lang/ClassLoader")),
             // `asSubclass(type)`: the class itself when it is one, as JEI checks its plugins.
             "asSubclass" => {
                 let (this, other) = (rt.str_of(a(0)).unwrap_or("").to_owned(), rt.str_of(a(1)).unwrap_or("").to_owned());
