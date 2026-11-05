@@ -686,6 +686,42 @@ fn load_update_tag(rt: &mut Rt, be: V, pos: [i32; 3], state: &str, nbt: &std::co
     }
 }
 
+/// `native_server_data_loaded` (server): the server's data loaded, on a world's first open
+/// (`reload` false) and after each `/reload`: the mods' data reload listeners gather
+/// (`AddReloadListenerEvent`) and reload from the server's resources ([`crate::resources::server_reload`]).
+pub fn server_data_loaded(rt: &mut Rt, host: &mut dyn Host, reload: bool) {
+    rt.safe_point();
+    if Rt::tracing() {
+        eprintln!("horizon-compat: the server's data {}", if reload { "reloaded" } else { "loaded" });
+    }
+    rt.with_host(host, |rt| {
+        crate::resources::server_reload(rt);
+        // After `/reload` the new data goes to every player (`PlayerList.reloadResources`); on
+        // a world's first open nobody has joined yet, and each gets it as they join.
+        if reload {
+            crate::events::datapack_sync(rt, None);
+        }
+    });
+}
+
+/// `native_player_logged_in` (server): `player` joined ([`crate::events::logged_in`]).
+pub fn player_logged_in(rt: &mut Rt, host: &mut dyn Host, player: u128) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::events::logged_in(rt, player));
+}
+
+/// `native_player_logged_out` (server): `player` left ([`crate::events::logged_out`]).
+pub fn player_logged_out(rt: &mut Rt, host: &mut dyn Host, player: u128) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::events::logged_out(rt, player));
+}
+
+/// `native_player_respawned` (server): `player` respawned after dying ([`crate::events::respawned`]).
+pub fn player_respawned(rt: &mut Rt, host: &mut dyn Host, player: u128) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::events::respawned(rt, player));
+}
+
 /// The client's setup, once, on its first hook ([`crate::neo::fire_client_setup`]), then its first
 /// resource load with the game as host: the reload listeners the mods registered read the game's
 /// resources ([`crate::resources::reload`]).

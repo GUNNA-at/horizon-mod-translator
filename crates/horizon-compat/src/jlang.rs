@@ -1424,13 +1424,48 @@ mod tests {
     }
 }
 
-/// Small libraries mods lean on: loggers (dropped), commons-lang `Pair`, `Record`'s constructor.
+/// What a mod logs at `info`, `warn` or `error`, printed when tracing (`HORIZON_COMPAT_TRACE`): the
+/// message with each `{}` filled from the arguments after it, in turn, as SLF4J and Log4j fill
+/// them (a last `Object...` spread). A marker before the message is left out.
+fn mod_log(rt: &Rt, level: &str, desc: &str, args: &[V]) {
+    let marker = desc.starts_with("(Lorg/apache/logging/log4j/Marker;") || desc.starts_with("(Lorg/slf4j/Marker;");
+    let args = args.get(usize::from(marker)..).unwrap_or_default();
+    let Some((&message, rest)) = args.split_first() else { return };
+    let Some(message) = rt.str_of(message) else { return };
+    let spread = desc.contains("[Ljava/lang/Object;)");
+    let mut values = Vec::new();
+    for (i, &v) in rest.iter().enumerate() {
+        if spread && i + 1 == rest.len() {
+            values.extend(rt.captured(v));
+        } else {
+            values.push(v);
+        }
+    }
+    let mut values = values.into_iter();
+    let mut parts = message.split("{}");
+    let mut out = parts.next().unwrap_or_default().to_owned();
+    for part in parts {
+        match values.next() {
+            Some(v) => out.push_str(&rt.to_java_string(v, 'L')),
+            None => out.push_str("{}"),
+        }
+        out.push_str(part);
+    }
+    eprintln!("horizon-compat: mod {level}: {out}");
+}
+
+/// Small libraries mods lean on: loggers (printed only when tracing), commons-lang `Pair`,
+/// `Record`'s constructor.
 fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let logger = matches!(owner, "org/apache/logging/log4j/Logger" | "org/slf4j/Logger" | "java/util/logging/Logger");
     Some(match (owner, name) {
         (_, n) if logger && n.starts_with("is") && n.ends_with("Enabled") => V::I(0),
+        (_, "info" | "warn" | "error") if logger && Rt::tracing() => {
+            mod_log(rt, name, desc, args.get(1..).unwrap_or_default());
+            if desc.ends_with(")V") { V::Void } else { V::NULL }
+        }
         (_, _) if logger => {
             if desc.ends_with(")V") { V::Void } else { V::NULL }
         }

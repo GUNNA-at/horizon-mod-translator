@@ -28,6 +28,11 @@ const SIMPLE_JSON: &str = "net/minecraft/server/packs/resources/SimpleJsonResour
 const FILE_TO_ID: &str = "net/minecraft/resources/FileToIdConverter";
 const MANAGER_LISTENER: &str = "net/minecraft/server/packs/resources/ResourceManagerReloadListener";
 pub(crate) const CLIENT_LISTENERS_EVENT: &str = "net/neoforged/neoforge/client/event/RegisterClientReloadListenersEvent";
+pub(crate) const SERVER_LISTENERS_EVENT: &str = "net/neoforged/neoforge/event/AddReloadListenerEvent";
+const SERVER_RESOURCES: &str = "net/minecraft/server/ReloadableServerResources";
+const TAGS_UPDATED_EVENT: &str = "net/neoforged/neoforge/event/TagsUpdatedEvent";
+const UPDATE_CAUSE: &str = "net/neoforged/neoforge/event/TagsUpdatedEvent$UpdateCause";
+const UPDATE_CAUSES: [&str; 2] = ["SERVER_DATA_LOAD", "CLIENT_PACKET_RECEIVED"];
 const PROFILER: &str = "net/minecraft/util/profiling/ProfilerFiller";
 const INACTIVE_PROFILER: &str = "net/minecraft/util/profiling/InactiveProfiler";
 const EXECUTOR: &str = "java/util/concurrent/Executor";
@@ -81,6 +86,9 @@ pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | FILE_TO_ID
             | MANAGER_LISTENER
             | CLIENT_LISTENERS_EVENT
+            | SERVER_LISTENERS_EVENT
+            | TAGS_UPDATED_EVENT
+            | UPDATE_CAUSE
             | PROFILER
             | INACTIVE_PROFILER
             | BLOCK_MODEL
@@ -90,6 +98,7 @@ pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     ) || stream_class(owner)
         || reader_class(owner)
         || (matches!(owner, MINECRAFT | SERVER) && name == "getResourceManager")
+        || (owner == SERVER_RESOURCES && name == "getRegistryLookup")
         || (owner == EXECUTOR && name == "execute")
         || (matches!(owner, "java/io/Closeable" | "java/lang/AutoCloseable") && name == "close")
 }
@@ -347,6 +356,41 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             register(rt, "assets", a(1));
             V::Void
         }
+        // The server's: this load's listeners, after vanilla's.
+        (SERVER_LISTENERS_EVENT, "addListener") => {
+            register(rt, "data", a(1));
+            V::Void
+        }
+        (SERVER_LISTENERS_EVENT, "getListeners") => {
+            let all = listeners(rt, "data");
+            let items = crate::jutil::elements(rt, all);
+            crate::jutil::new_list(rt, items)
+        }
+        (SERVER_LISTENERS_EVENT, "getServerResources") => rt.intern("compat:server-resources".into(), |rt| rt.new_object(SERVER_RESOURCES)),
+        (SERVER_LISTENERS_EVENT, "getRegistryAccess") | (TAGS_UPDATED_EVENT, "getRegistryAccess") | (SERVER_RESOURCES, "getRegistryLookup") => registry_access(rt),
+        // The tags bound (`ReloadableServerResources.updateRegistryTags`): the server's own load,
+        // after its listeners; one from a server's packet is a client's.
+        (TAGS_UPDATED_EVENT, "getUpdateCause") => {
+            let i = rt.get_field(a(0), "$cause").i().clamp(0, 1) as usize;
+            update_cause(rt, i)
+        }
+        (TAGS_UPDATED_EVENT, "shouldUpdateStaticData") => {
+            let server = rt.get_field(a(0), "$cause").i() == 0;
+            V::I(i32::from(server || rt.get_field(a(0), "$integrated").i() == 0))
+        }
+        (UPDATE_CAUSE, "values") => {
+            let all = (0..UPDATE_CAUSES.len()).map(|i| update_cause(rt, i)).collect();
+            rt.alloc("[Lnet/neoforged/neoforge/event/TagsUpdatedEvent$UpdateCause;", Data::Array(all))
+        }
+        (UPDATE_CAUSE, "valueOf") => {
+            let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+            match UPDATE_CAUSES.iter().position(|c| *c == n) {
+                Some(i) => update_cause(rt, i),
+                None => return None,
+            }
+        }
+        (UPDATE_CAUSE, "ordinal") => V::I(crate::api_common::enum_ordinal(rt, a(0))),
+        (UPDATE_CAUSE, "name" | "toString") => rt.get_field(a(0), "$name"),
         (PROFILER | INACTIVE_PROFILER, _) => profiler_call(rt, name, desc),
         (BLOCK_MODEL, _) => return block_model_call(rt, name, args),
         (NATIVE_IMAGE, _) => return image_call(rt, name, desc, args),
@@ -373,6 +417,7 @@ fn resource_stream(rt: &mut Rt, r: V) -> V {
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match (owner, field) {
         (INACTIVE_PROFILER, "INSTANCE") => Some(profiler(rt)),
+        (UPDATE_CAUSE, f) => UPDATE_CAUSES.iter().position(|c| *c == f).map(|i| update_cause(rt, i)),
         _ => None,
     }
 }
@@ -648,6 +693,33 @@ pub fn reload(rt: &mut Rt, root: &'static str) {
         }
         rt.report_thrown("resource reload listener");
     }
+}
+
+/// The server's data loaded (a world's first open, `/reload`): NeoForge's `AddReloadListenerEvent`
+/// gathers this load's listeners anew, as each `ReloadableServerResources` load asks for them, and
+/// each reloads from the server's resources (`data/`) in the order they were added.
+pub fn server_reload(rt: &mut Rt) {
+    let list = listeners(rt, "data");
+    if let Some(Data::List(l)) = rt.heap.get_mut(list.r() as usize).map(|o| &mut o.data) {
+        l.clear();
+    }
+    let ev = rt.new_object(SERVER_LISTENERS_EVENT);
+    crate::neo::post(rt, SERVER_LISTENERS_EVENT, ev);
+    reload(rt, "data");
+    // Then the loaded tags bind to the registries, and NeoForge says so: what a mod derives from
+    // tags it derives again.
+    let tags = rt.new_object(TAGS_UPDATED_EVENT);
+    rt.put_field(tags, "$cause", V::I(0));
+    crate::neo::post(rt, TAGS_UPDATED_EVENT, tags);
+}
+
+fn registry_access(rt: &mut Rt) -> V {
+    crate::api::call(rt, "net/minecraft/server/MinecraftServer.registryAccess.()Lnet/minecraft/core/RegistryAccess;", &[V::NULL])
+}
+
+/// `TagsUpdatedEvent.UpdateCause`'s constant `i` (`SERVER_DATA_LOAD`, `CLIENT_PACKET_RECEIVED`).
+fn update_cause(rt: &mut Rt, i: usize) -> V {
+    crate::api::api_enum(rt, UPDATE_CAUSE, UPDATE_CAUSES[i], i as i32)
 }
 
 /// NeoForge's `RegisterClientReloadListenersEvent`, posted before the client's setup: the
@@ -1219,5 +1291,50 @@ mod tests {
             assert!(rt.thrown.is_none());
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
+    }
+
+    /// The server's data: each load (a world's open, then `/reload`) gathers its listeners anew
+    /// through NeoForge's `AddReloadListenerEvent`, where the mod adds a new one, and that one reads
+    /// the server's files (`data/`, not the client's `assets/`). Two loads run it twice, not three
+    /// times.
+    #[test]
+    fn data_listeners_gather_anew_on_each_server_load() {
+        // The mod's handler, a lambda: `event.addListener(new Spouts())`.
+        fn run(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            (id == 1).then(|| {
+                let l = rt.new_object_id("test/Spouts", 7);
+                crate::api::call(rt, "net/neoforged/neoforge/event/AddReloadListenerEvent.addListener.(Lnet/minecraft/server/packs/resources/PreparableReloadListener;)V", &[args[1], l])
+            })
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(run);
+        rt.supers.insert("test/Spouts", SIMPLE);
+        rt.vcall = Some(|rt, key, short, all| match short {
+            "prepare.(Lnet/minecraft/server/packs/resources/ResourceManager;Lnet/minecraft/util/profiling/ProfilerFiller;)Ljava/lang/Object;" => {
+                let loc = rt.string("create:fluids/honey.json");
+                let reader = crate::api::call(rt, "net/minecraft/server/packs/resources/ResourceManager.openAsReader.(Lnet/minecraft/resources/ResourceLocation;)Ljava/io/BufferedReader;", &[all[1], loc]);
+                crate::api::call(rt, "java/io/BufferedReader.readLine.()Ljava/lang/String;", &[reader])
+            }
+            "apply.(Ljava/lang/Object;Lnet/minecraft/server/packs/resources/ResourceManager;Lnet/minecraft/util/profiling/ProfilerFiller;)V" => {
+                let runs = rt.statics.get("test/Spouts.runs").map_or(0, |v| v.i());
+                rt.statics.insert("test/Spouts.runs", V::I(runs + 1));
+                rt.statics.insert("test/Spouts.applied", all[1]);
+                V::Void
+            }
+            _ => crate::api::call(rt, key, all),
+        });
+        let handler = rt.lambda_id("test/Mod.lambda$onReload$0.(Lnet/neoforged/neoforge/event/AddReloadListenerEvent;)V", 1, Vec::new());
+        rt.listeners.push((SERVER_LISTENERS_EVENT.to_owned(), handler));
+        let mut h = host();
+        h.resources.insert("data/create/fluids/honey.json".into(), br#"{"thick": true}"#.to_vec());
+        h.resources.insert("assets/create/fluids/honey.json".into(), br#"{"client": true}"#.to_vec());
+        rt.with_host(&mut h, server_reload);
+        let applied = rt.statics.get("test/Spouts.applied").copied().expect("apply ran");
+        assert_eq!(rt.str_of(applied), Some(r#"{"thick": true}"#));
+        rt.with_host(&mut h, server_reload);
+        assert_eq!(rt.statics.get("test/Spouts.runs").map(|v| v.i()), Some(2));
+        assert!(rt.thrown.is_none());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

@@ -1405,6 +1405,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "overworld" | "getLevel" => crate::glue::level(rt),
             "isDedicatedServer" | "isPublished" | "isHardcore" => V::I(0),
             "isSameThread" => V::I(1),
+            "getPlayerList" => crate::events::player_list(rt),
             _ => return None,
         },
 

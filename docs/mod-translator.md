@@ -2103,6 +2103,41 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `gson::tests::{a_parsed_file_reads_as_gsons_tree, a_built_tree_is_written_as_gson_writes_it,
     gson_helper_reads_and_complains_as_vanillas, the_parser_is_lenient_as_gsons}`,
     `resources::tests::json_files_list_by_id_and_reach_a_json_listener`; 237 compat tests pass.
+  - [x] 2026-11-05 The server's data reload listeners (45 of 367 jars use `AddReloadListenerEvent`). On
+    `native_server_data_loaded` (a world's first open, each `/reload`) the engine's new
+    `server_data_loaded` hook gathers the listeners anew as each `ReloadableServerResources` load does:
+    the list is cleared, `AddReloadListenerEvent` posted (`addListener`, `getListeners`,
+    `getServerResources`, `getRegistryAccess`), and each listener reloads from the `data/` manager in
+    the order added (`resources::server_reload`, `glue::server_data_loaded`; bundle helper and binding
+    `server_data_loaded`). The game's resources root (`options.resources`) is the layered one the mods'
+    content joined (`mods::content_root`), so `data/create/...` reads as vanilla's. Not yet: the
+    world's own data packs (`datapacks/`). After the listeners `TagsUpdatedEvent` is posted
+    (`SERVER_DATA_LOAD`, as `updateRegistryTags` does; `getUpdateCause`, `shouldUpdateStaticData`,
+    `UpdateCause`'s constants, `values`, `ordinal` for a switch), and after `/reload`
+    `OnDatapackSyncEvent` to every player. `ReloadableServerResources.getRegistryLookup` answers.
+    Also: with `HORIZON_COMPAT_TRACE` a mod's `info`/`warn`/`error` log lines print, `{}` filled as
+    SLF4J and Log4j fill them (`jlang::mod_log`): what a mod reports (Create's `Loaded N train hat
+    configurations.`) shows in the game's log. Test
+    `resources::tests::data_listeners_gather_anew_on_each_server_load` (two loads run the listener
+    twice, not three times, and it reads `data/`, not `assets/`).
+    In game (the build before this step, `cemgame.sh`): the client's reload listeners run at the
+    first client hook; Create's raise nothing, Flywheel's shader compiler throws
+    `"flywheel:internal/components_header.frag" was not found` (its GL backend, which Horizon's
+    renderer replaces; reported, the next listener goes on). CEM's machines read back as before.
+  - [x] 2026-11-05 A server player's own events (49 of 367 jars listen for `PlayerLoggedInEvent`, 28
+    for `PlayerLoggedOutEvent`, 14 for `PlayerRespawnEvent`, 15 for `Clone`, 15 for
+    `OnDatapackSyncEvent`). The engine's `player_logged_in`, `player_logged_out` and
+    `player_respawned` hooks (bundle helpers and bindings, on the server's game with its writes and
+    payload sends) post them as a server does (`events::{logged_in, logged_out, respawned,
+    datapack_sync}`): a join sends the server's data to the new player alone (`OnDatapackSyncEvent`,
+    `PlayerList.placeNewPlayer`), then `PlayerLoggedInEvent`; a respawn after a death is
+    `PlayerEvent.Clone` (`isWasDeath`, `getOriginal` the same player object, so what a mod keeps on
+    it stays) then `PlayerRespawnEvent` (`isEndConquered` false); `/reload` syncs every player.
+    `getEntity`/`getPlayer` give the player's one object (`menus::server_player`); the server's
+    `PlayerList` (`MinecraftServer.getPlayerList`, `getPlayers`, `getPlayerCount`, `getPlayer(UUID)`)
+    lists the host's players, and `getRelevantPlayers` streams them. Test
+    `events::tests::a_players_join_respawn_and_leave_reach_listeners_in_a_servers_order`; 239
+    compat tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
