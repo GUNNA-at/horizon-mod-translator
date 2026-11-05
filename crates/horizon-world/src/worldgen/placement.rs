@@ -57,6 +57,8 @@ pub enum PlacementModifier {
     RandomChance(f32),
     Fixed(Vec<[i32; 3]>),
     RandomlySelected(Vec<Self>),
+    /// A mod's own modifier type, which its code places ([`super::foreign`]).
+    Foreign(super::foreign::ForeignPlacement),
 }
 #[derive(Debug)]
 pub enum PlacementError<E> {
@@ -273,7 +275,15 @@ impl PlacementModifier {
                         .collect::<Result<_, _>>()?,
                 ))
             }
-            _ => Err(DecodeError::Field("placement modifier type")),
+            // A type a mod defines in code: what the mod's handler makes of it.
+            other => match super::foreign::placement(other, json) {
+                Some(Ok(inner)) => Ok(Self::Foreign(super::foreign::ForeignPlacement {
+                    kind: other.to_owned(),
+                    inner,
+                })),
+                Some(Err(e)) => Err(DecodeError::Registry(format!("placement modifier {other}: {e}"))),
+                None => Err(DecodeError::Field("placement modifier type")),
+            },
         }
     }
     /// Return the count for repeating modifiers without allocating or emitting
@@ -498,6 +508,11 @@ impl PlacementModifier {
                 }
                 let index = random.next_int_bound(placements.len() as i32)? as usize;
                 placements[index].modify_inner(context, random, position, emit, remaining)?;
+            }
+            Self::Foreign(foreign) => {
+                for p in foreign.positions(context, random, position)? {
+                    emit(random, p).map_err(PlacementError::Output)?;
+                }
             }
         }
         Ok(())

@@ -43,7 +43,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 64] = [
+const COMPAT: [(&str, &str); 65] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -64,6 +64,7 @@ const COMPAT: [(&str, &str); 64] = [
     ("nightconfig.rs", include_str!("../../horizon-compat/src/nightconfig.rs")),
     ("annotations.rs", include_str!("../../horizon-compat/src/annotations.rs")),
     ("invoke.rs", include_str!("../../horizon-compat/src/invoke.rs")),
+    ("worldgen.rs", include_str!("../../horizon-compat/src/worldgen.rs")),
     ("mod_entities.rs", include_str!("../../horizon-compat/src/mod_entities.rs")),
     ("palette.rs", include_str!("../../horizon-compat/src/palette.rs")),
     ("particles.rs", include_str!("../../horizon-compat/src/particles.rs")),
@@ -887,6 +888,73 @@ fn {id}_component_types(types: &mut Vec<String>) {{
 // makes, declared as content files would (states, default state, strength, sounds, light, map
 // colour), replacing what the bundle could read from bytecode alone.
 fn {id}_content(content: &mut horizon_mods::Content) {{
+    // The mod's own worldgen types (its placement modifiers), which the world generator asks for
+    // by id when a placed feature names one: read with the mod's codec and placed by its code, on
+    // the generator's region and random stream.
+    {{
+        use horizon_world::worldgen::foreign::{{Handler, Placement, Random, World}};
+        struct Draws<'a>(&'a mut dyn Random);
+        impl {krate}::compat::host::HostRandom for Draws<'_> {{
+            fn next_int(&mut self) -> i32 {{ self.0.next_int() }}
+            fn next_int_bound(&mut self, bound: i32) -> i32 {{ self.0.next_int_bound(bound) }}
+            fn next_long(&mut self) -> i64 {{ self.0.next_long() }}
+            fn next_boolean(&mut self) -> bool {{ self.0.next_boolean() }}
+            fn next_float(&mut self) -> f32 {{ self.0.next_float() }}
+            fn next_double(&mut self) -> f64 {{ self.0.next_double() }}
+            fn next_gaussian(&mut self) -> f64 {{ self.0.next_gaussian() }}
+        }}
+        // The generator's region as the host the mod's code reads.
+        struct Region<'a> {{
+            world: std::cell::RefCell<&'a mut dyn World>,
+            random: Draws<'a>,
+        }}
+        impl {krate}::compat::host::Host for Region<'_> {{
+            fn block_state(&self, pos: [i32; 3]) -> String {{
+                self.world.borrow_mut().block(pos).unwrap_or_else(|| "minecraft:air".to_owned())
+            }}
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
+                false
+            }}
+            fn world_height(&self) -> (i32, i32) {{
+                self.world.borrow_mut().y_range().map_or((-64, 384), |(low, high)| (low, high - low + 1))
+            }}
+            fn random(&mut self) -> Option<&mut dyn {krate}::compat::host::HostRandom> {{
+                Some(&mut self.random)
+            }}
+            fn height(&mut self, heightmap: &str, x: i32, z: i32) -> Option<i32> {{
+                self.world.get_mut().height(heightmap, x, z)
+            }}
+            fn world_seed(&self) -> Option<i64> {{
+                self.world.borrow_mut().seed()
+            }}
+            fn biome(&self, pos: [i32; 3]) -> Option<String> {{
+                self.world.borrow_mut().biome(pos)
+            }}
+            fn biome_in_tag(&self, biome: &str, tag: &str) -> bool {{
+                self.world.borrow_mut().biome_in_tag(biome, tag)
+            }}
+        }}
+        struct ModPlacement({krate}::compat::V);
+        impl Placement for ModPlacement {{
+            fn positions(&self, world: &mut dyn World, random: &mut dyn Random, origin: [i32; 3]) -> Result<Vec<[i32; 3]>, String> {{
+                let mut region = Region {{ world: std::cell::RefCell::new(world), random: Draws(random) }};
+                {krate}::with_worldgen_runtime(|rt| rt.with_host(&mut region, |rt| {c}::worldgen::positions(rt, self.0, origin)))
+                    .unwrap_or_else(|| Err("the mod's worldgen code is already running on this thread".to_owned()))
+            }}
+        }}
+        struct Worldgen;
+        impl Handler for Worldgen {{
+            fn placement(&self, kind: &str, json: &str) -> Option<Result<std::sync::Arc<dyn Placement>, String>> {{
+                // Only the engine's own namespaces: a type of another mod's isn't this one's to read.
+                if !{krate}::ours(kind) {{
+                    return None;
+                }}
+                let read = {krate}::with_worldgen_runtime(|rt| {c}::worldgen::placement(rt, kind, json)).flatten()?;
+                Some(read.map(|v| std::sync::Arc::new(ModPlacement(v)) as std::sync::Arc<dyn Placement>))
+            }}
+        }}
+        horizon_world::worldgen::foreign::register({id:?}, std::sync::Arc::new(Worldgen));
+    }}
     // The content mod of one of the engine's mods (a mod and the addons translated with it): what
     // that mod registers, its namespace's.
     let Some(ns) = content.namespaces.first().cloned().filter(|n| {krate}::NAMESPACES.contains(&n.as_str())) else {{
@@ -2307,7 +2375,10 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
                  thread_local! {{\n    static PROBE: std::cell::RefCell<Option<Rt>> = const {{ std::cell::RefCell::new(None) }};\n}}\n\n\
                  /// A runtime of its own on this thread, for questions asked before a game runs (`native_content_block`):\n\
                  /// it may fire the client's setup without changing the side [`with_runtime`]'s plays.\n\
-                 pub fn with_probe_runtime<R>(f: impl FnOnce(&mut Rt) -> R) -> R {{\n    PROBE.with(|cell| {{\n        let mut slot = cell.borrow_mut();\n        let rt = slot.get_or_insert_with(|| {{\n            let mut rt = Rt::new();\n            rt.namespace = {id:?}.into();\n            init(&mut rt);\n            start(&mut rt);\n            rt\n        }});\n        f(rt)\n    }})\n}}\n"
+                 pub fn with_probe_runtime<R>(f: impl FnOnce(&mut Rt) -> R) -> R {{\n    PROBE.with(|cell| {{\n        let mut slot = cell.borrow_mut();\n        let rt = slot.get_or_insert_with(|| {{\n            let mut rt = Rt::new();\n            rt.namespace = {id:?}.into();\n            init(&mut rt);\n            start(&mut rt);\n            rt\n        }});\n        f(rt)\n    }})\n}}\n\n\
+                 /// The runtime the world generator runs the mod's worldgen code on (its placement modifiers):\n\
+                 /// one for every generating thread, taken in turn. None on a thread already inside it.\n\
+                 pub fn with_worldgen_runtime<R>(f: impl FnOnce(&mut Rt) -> R) -> Option<R> {{\n    struct Worldgen(Rt);\n    // SAFETY: the runtime is reached only through the mutex below, and holds no host between calls\n    // (`Rt::with_host` clears it); the runtime's thread-local caches are keyed by static keys.\n    unsafe impl Send for Worldgen {{}}\n    static WORLDGEN: std::sync::Mutex<Option<Worldgen>> = std::sync::Mutex::new(None);\n    thread_local! {{\n        static INSIDE: std::cell::Cell<bool> = const {{ std::cell::Cell::new(false) }};\n    }}\n    struct Leave;\n    impl Drop for Leave {{\n        fn drop(&mut self) {{\n            INSIDE.with(|i| i.set(false));\n        }}\n    }}\n    if INSIDE.with(|i| i.replace(true)) {{\n        return None;\n    }}\n    let _leave = Leave;\n    let mut slot = WORLDGEN.lock().unwrap_or_else(|e| e.into_inner());\n    let w = slot.get_or_insert_with(|| {{\n        let mut rt = Rt::new();\n        rt.namespace = {id:?}.into();\n        init(&mut rt);\n        start(&mut rt);\n        Worldgen(rt)\n    }});\n    Some(f(&mut w.0))\n}}\n"
             ));
         }
         if name == "lib.rs" {

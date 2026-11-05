@@ -633,8 +633,9 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 45] = [
+const CHAIN: [Module; 46] = [
     mutable_pos,
+    crate::worldgen::call,
     crate::mixin::call,
     crate::attachments::call,
     crate::sounds::call,
@@ -684,8 +685,9 @@ const CHAIN: [Module; 45] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 45] = [
+const CLAIMS: [Claims; 46] = [
     |owner, _, _| owner == MUTABLE_POS,
+    crate::worldgen::claims,
     crate::mixin::claims,
     crate::attachments::claims,
     crate::sounds::claims,
@@ -733,8 +735,9 @@ const CLAIMS: [Claims; 45] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 45] = [
+const MODULE_NAMES: [&str; 46] = [
     "mutable_pos",
+    "worldgen",
     "mixin",
     "attachments",
     "sounds",

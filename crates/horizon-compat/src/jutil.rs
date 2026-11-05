@@ -526,6 +526,7 @@ pub fn elements(rt: &Rt, v: V) -> Vec<V> {
         Some((Data::Table(t), _)) => t.entries.iter().map(|(k, _)| *k).collect(),
         Some((Data::Array(a), c)) if c.starts_with('[') => a.clone(),
         Some((Data::Iter(items, at), _)) => items[(*at).min(items.len())..].to_vec(),
+        Some((Data::Stream(items), _)) => items.clone(),
         _ => Vec::new(),
     }
 }

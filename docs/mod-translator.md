@@ -2473,6 +2473,44 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `recipes::tests::a_sized_fluid_ingredient_written_back_takes_the_same_stacks`, and
     `recipes::tests::a_sized_ingredient_wants_as_many_of_its_items` (now through `STREAM_CODEC` and
     back). 289 compat and 15 translator tests pass.
+  - [x] 2026-11-05 Round 17 (snapshot 71ef340): 42 calls unanswered across the 28 mods (48 in round
+    16), no uncaught exceptions. Mekanism went from 20 to 16, FramedBlocks from 5 to 3. What's left
+    at load is mostly codecs of vanilla's data types (worldgen's `PlacedFeature.CODEC`,
+    `Biome.LIST_CODEC`, `OreConfiguration$TargetBlockState.CODEC`; `MinMaxBounds$Doubles.CODEC`,
+    `IntProvider.CODEC`, `ICondition.CODEC`), NeoForge's client model builders, and calls into other
+    mods' APIs (AE2's, FramedBlocks').
+  - [x] 2026-11-05 Mods' worldgen code in Horizon's generator, stage 1: placement modifiers. The
+    generator refused a whole placed feature whose chain names a mod's modifier type, so the feature
+    never generated: Create's zinc ore and striated ores (`create:config_filter`), Mekanism's ores
+    (`DisableableFeaturePlacement`), Farmer's Delight's wild crops (`BiomeTagFilter`). Now:
+    - `horizon-world` `worldgen/foreign.rs` (new): a translated mod registers a `Handler`; the
+      placement decoder asks the handlers for a type vanilla doesn't have
+      (`PlacementModifier::Foreign`), and the chain runs what it returns on the region and the
+      feature's own random stream, so the mod's code draws in vanilla's order. The mod's code sees
+      the world through `World`: blocks as text, block tags, heightmaps by vanilla's name, the
+      height range, the seed, sea level, the biome at a position and the biome tags (the
+      generator's, vanilla's and the packs').
+    - `horizon-compat` `worldgen.rs` (new): reads a modifier with the codec its type was registered
+      with (`PlacementModifierType.codec()`), and answers `getPositions` as vanilla does around the
+      mod's `shouldPlace` (`PlacementFilter`) or `count` (`RepeatingPlacement`). It also answers
+      `PlacementContext` (`getLevel`, `getHeight`, `getMinBuildHeight`, `getBlockState`), the
+      level's `getHeight(Heightmap.Types, x, z)`, `getSeed` and `getBiome` (a holder whose tags the
+      host answers), and a `WorldgenRandom` that draws from the stream the host lends
+      (`Host::random`).
+    - The bundle's content hook registers the handler. The mod's code runs on a runtime of its own
+      for worldgen (`with_worldgen_runtime`, behind a mutex because the generator's workers are
+      threads of their own; a call from inside it is refused rather than deadlocking).
+    Harness (`WORLDGEN=1`, Create's real bytecode): `create:config_filter` reads as
+    `ConfigPlacementFilter`, the same object both times, and keeps its position (Create's config
+    `worldgen.disable` is false by default). Another mod's type isn't Create's to read. The
+    worldgen runtime starts in 0.19 s and 144 MB. Tests:
+    `foreign::tests::a_mods_modifier_places_through_its_handler_with_the_features_random`,
+    `worldgen::tests::a_mods_filter_keeps_the_positions_its_should_place_takes_from_the_hosts_random`
+    (a `java.util.Random` oracle), `worldgen::tests::a_mods_repeating_modifier_gives_its_position_count_times`,
+    `worldgen::tests::a_mods_filter_reads_the_biome_and_its_tags_from_the_host`. 292 compat tests pass.
+    Next: zinc ore in new chunks in game; then stage 2, mods' feature types (`create:layered_ore`,
+    Mekanism's `ResizableOreFeature`, Farmer's Delight's `WildCropFeature`): the mod's
+    `Feature.place` on a `WorldGenLevel` that writes blocks.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

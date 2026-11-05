@@ -364,6 +364,8 @@ impl GeneratorData {
         registry: &'static BlockRegistry,
         ov: &WorldgenOverrides,
     ) -> Result<Arc<Self>, GeneratorError> {
+        // Mods' own worldgen code reads blocks named from this registry.
+        super::foreign::set_blocks(registry);
         let mut warnings = Vec::new();
         let flags: Vec<(bool, bool)> =
             serde_json::from_str(&fs::read_to_string(dir.join("block_flags.json"))?)?;
@@ -505,6 +507,7 @@ impl GeneratorData {
             biome_carvers.push(carvers.decode_set(&value["carvers"].to_string())?);
             biome_json.push(json.clone());
         }
+        super::foreign::set_biomes(biome_names.clone(), biome_tags.clone());
         let carving_blocks = CarvingBlocks::from_registry(
             registry,
             &tag_set("minecraft:uncarvable")?

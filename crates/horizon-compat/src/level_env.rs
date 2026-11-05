@@ -125,6 +125,16 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
         ("getMaxBuildHeight", "()I") => V::I(rt.host().map_or(320, |h| h.world_height().0 + h.world_height().1)),
         ("getMaxY", "()I") => V::I(rt.host().map_or(319, |h| h.world_height().0 + h.world_height().1 - 1)),
         ("getHeight", "()I") => V::I(rt.host().map_or(384, |h| h.world_height().1)),
+        // A column's top by heightmap, and the world's seed: what worldgen code reads of its region.
+        ("getHeight", "(Lnet/minecraft/world/level/levelgen/Heightmap$Types;II)I") => crate::worldgen::height(rt, a(1), a(2).i(), a(3).i()),
+        ("getSeed", "()J") => V::J(rt.host().and_then(|h| h.world_seed()).unwrap_or(0)),
+        // The biome at a position: its registry holder, whose tags the host answers (plains where
+        // the host keeps no biomes, as vanilla's own fallback biome).
+        ("getBiome", "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/Holder;") => {
+            let p = pos(rt, 1);
+            let name = rt.host().and_then(|h| h.biome(p)).unwrap_or_else(|| "minecraft:plains".to_owned());
+            crate::neo::registry_holder(rt, "biome", &name, V::NULL)
+        }
         _ => return None,
     })
 }

@@ -141,6 +141,19 @@ pub fn boxes_meet(a: &[f64; 6], b: &[f64; 6]) -> bool {
     (0..3).all(|i| a[i] < b[i + 3] && b[i] < a[i + 3])
 }
 
+/// A random stream a host lends translated code for one call: the world generator's feature
+/// random, which a mod's placement modifier or feature draws from as vanilla's code would.
+pub trait HostRandom {
+    fn next_int(&mut self) -> i32;
+    /// `nextInt(bound)`; 0 for a bound below 1.
+    fn next_int_bound(&mut self, bound: i32) -> i32;
+    fn next_long(&mut self) -> i64;
+    fn next_boolean(&mut self) -> bool;
+    fn next_float(&mut self) -> f32;
+    fn next_double(&mut self) -> f64;
+    fn next_gaussian(&mut self) -> f64;
+}
+
 pub trait Host {
     /// The block state at a position, as `minecraft:stone` or `create:shaft[axis=y]`.
     fn block_state(&self, pos: [i32; 3]) -> String;
@@ -174,6 +187,29 @@ pub trait Host {
     /// The lowest block y and the height of the world (`getMinBuildHeight`, `getHeight`).
     fn world_height(&self) -> (i32, i32) {
         (-64, 384)
+    }
+    /// The random stream the host lends the call (the world generator's: the feature's own), which
+    /// `RandomSource` objects of the call draw from; None where the host lends none.
+    fn random(&mut self) -> Option<&mut dyn HostRandom> {
+        None
+    }
+    /// `getHeight(heightmap, x, z)`: the column's top by heightmap (vanilla's name:
+    /// `WORLD_SURFACE_WG`); None where the host keeps no heightmaps.
+    fn height(&mut self, _heightmap: &str, _x: i32, _z: i32) -> Option<i32> {
+        None
+    }
+    /// The world's seed (`WorldGenLevel.getSeed()`), where the host has one.
+    fn world_seed(&self) -> Option<i64> {
+        None
+    }
+    /// The biome at `pos` (`minecraft:plains`), where the host knows it (the world generator does).
+    fn biome(&self, _pos: [i32; 3]) -> Option<String> {
+        None
+    }
+    /// Whether biome `biome` is in biome tag `tag` (`minecraft:is_overworld`), as the game's tags
+    /// hold it.
+    fn biome_in_tag(&self, _biome: &str, _tag: &str) -> bool {
+        false
     }
     /// Game rule `name` as the game has it (26.3's name: `mob_griefing`), a boolean as 0 or 1;
     /// None for a rule the game doesn't have, or a host that keeps no rules.

@@ -38,6 +38,7 @@ pub mod feature_graph;
 pub mod feature_region;
 pub mod feature_sort;
 pub mod fluid_predicate;
+pub mod foreign;
 pub mod fungus;
 pub mod generator;
 mod generator_blocks;

@@ -899,6 +899,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                             "block" => rt.host().is_some_and(|h| h.block_in_tag(&id, &tag)),
                             "fluid" => rt.host().is_some_and(|h| h.fluid_in_tag(&id, &tag)),
                             "item" => crate::recipes::item_in_tag(rt, &id, &tag),
+                            "biome" => rt.host().is_some_and(|h| h.biome_in_tag(&id, &tag)),
                             _ => false,
                         };
                     V::I(inside as i32)
