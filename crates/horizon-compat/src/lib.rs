@@ -63,6 +63,7 @@ pub mod vanilla_effects;
 pub mod vanilla_records;
 pub mod vanilla_shapes;
 pub mod vanilla_sounds;
+pub mod vanilla_tag_keys;
 pub mod vanilla_tags;
 
 // BEGIN RUNTIME HELPERS: bundles inline this part of the root into their `compat` module too.

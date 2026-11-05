@@ -266,8 +266,29 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
                 s
             }))
         }
+        // Vanilla's entity types (`EntityType.ILLUSIONER`): one object each, by its id.
+        ENTITY_TYPE if !field.is_empty() && field.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') => {
+            Some(vanilla_type(rt, &format!("minecraft:{}", field.to_ascii_lowercase())))
+        }
         _ => None,
     }
+}
+
+/// Vanilla's entity type `id` (`minecraft:zombie`): one object per id, as `EntityType.ZOMBIE` and
+/// the registry's entry are the same object; it knows its id (`$id`), not being a registration.
+pub(crate) fn vanilla_type(rt: &mut Rt, id: &str) -> V {
+    let name = id.to_owned();
+    rt.intern(format!("compat:entity-type/{id}"), move |rt| {
+        let t = rt.new_object(ENTITY_TYPE);
+        let n = rt.string(&name);
+        rt.put_field(t, "$id", n);
+        t
+    })
+}
+
+/// The id of entity type `ty`: the name a mod registered it under, or vanilla's own.
+pub(crate) fn type_id(rt: &Rt, ty: V) -> Option<&str> {
+    rt.registered_name(ty, "entity_type").or_else(|| rt.str_of(rt.get_field(ty, "$id")))
 }
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
@@ -446,7 +467,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 }
 
 fn description_id(rt: &Rt, ty: V) -> String {
-    let name = rt.registered_name(ty, "entity_type").unwrap_or("minecraft:pig");
+    let name = type_id(rt, ty).unwrap_or("minecraft:pig");
     let (ns, path) = name.split_once(':').unwrap_or(("minecraft", name));
     format!("entity.{ns}.{}", path.replace('/', "."))
 }
@@ -1326,5 +1347,24 @@ mod tests {
         assert!(rt.get_field(e, "$id").i() >= FIRST_ID);
         let bb = api::call(&mut rt, "net/minecraft/world/entity/Entity.getBoundingBox.()Lnet/minecraft/world/phys/AABB;", &[e]);
         assert_eq!(crate::shapes::aabb_of(&rt, bb), [0.0, 64.0, 0.0, 1.0, 65.0, 1.0]);
+    }
+
+    /// Vanilla's entity types: `EntityType.ILLUSIONER` is the registry's `minecraft:illusioner`, the
+    /// same object (mods compare types by identity), named by its id (`getKey`, its description).
+    #[test]
+    fn vanilla_entity_types_are_one_object_by_id() {
+        let mut rt = Rt::new();
+        crate::install();
+        let illusioner = api::get_static(&mut rt, "net/minecraft/world/entity/EntityType.ILLUSIONER");
+        let registry = api::get_static(&mut rt, "net/minecraft/core/registries/BuiltInRegistries.ENTITY_TYPE");
+        let id = rt.string("minecraft:illusioner");
+        let got = api::call(&mut rt, "net/minecraft/core/Registry.get.(Lnet/minecraft/resources/ResourceLocation;)Ljava/lang/Object;", &[registry, id]);
+        assert_eq!(got, illusioner);
+        assert_ne!(api::get_static(&mut rt, "net/minecraft/world/entity/EntityType.ZOMBIE"), illusioner);
+        let key = api::call(&mut rt, "net/minecraft/core/Registry.getKey.(Ljava/lang/Object;)Lnet/minecraft/resources/ResourceLocation;", &[registry, illusioner]);
+        assert_eq!(rt.str_of(key), Some("minecraft:illusioner"));
+        let description = api::call(&mut rt, "net/minecraft/world/entity/EntityType.getDescriptionId.()Ljava/lang/String;", &[illusioner]);
+        assert_eq!(rt.str_of(description), Some("entity.minecraft.illusioner"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

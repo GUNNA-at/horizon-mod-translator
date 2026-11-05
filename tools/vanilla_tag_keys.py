@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Generate crates/horizon-compat/src/vanilla_tag_keys.rs from NeoForge's merged jar: the tag each
+`TagKey` constant of 1.21.1's tag classes names (`BiomeTags.IS_END` is biome tag `minecraft:is_end`,
+`Tags.Biomes.IS_VOID` `c:is_void`), read from the classes' bytecode with `javap -c`.
+
+`BlockTags` and `ItemTags` are left out (`vanilla_tags.rs` has 26.3's), and so are the NeoForge
+classes `neo_tags.rs` already has. Usage: tools/vanilla_tag_keys.py <neoforge-merged.jar>
+"""
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+OUT = "crates/horizon-compat/src/vanilla_tag_keys.rs"
+SKIP = {
+    "net/minecraft/tags/BlockTags",
+    "net/minecraft/tags/ItemTags",
+    "net/neoforged/neoforge/common/Tags$Blocks",
+    "net/neoforged/neoforge/common/Tags$Items",
+    "net/neoforged/neoforge/common/Tags$Fluids",
+    "net/neoforged/neoforge/common/Tags$EntityTypes",
+}
+
+REGISTRY = re.compile(r"Field net/minecraft/core/registries/Registries\.([A-Z_]+):")
+STRING = re.compile(r"\bldc(?:_w)?\s+#\d+\s+// String (.*)$", re.M)
+INVOKE = re.compile(r"invokestatic\s+#\d+\s+// (?:Interface)?Method (?:([\w/$]+)\.)?(\w+):\(([^)]*)\)")
+PUT = re.compile(r"putstatic\s+#\d+\s+// Field (\w+):Lnet/minecraft/tags/TagKey;")
+METHOD = re.compile(r"^  (?:private |public |protected )?static .*? (\w+)\(java\.lang\.String\);$")
+
+
+def tag_classes(jar):
+    with zipfile.ZipFile(jar) as z:
+        for name in sorted(z.namelist()):
+            c = name[: -len(".class")]
+            if not name.endswith(".class") or c in SKIP:
+                continue
+            if (c.startswith("net/minecraft/tags/") and c.endswith("Tags") and "/" not in c[len("net/minecraft/tags/"):]) or (
+                c.startswith("net/neoforged/neoforge/common/Tags$") and "$" not in c[len("net/neoforged/neoforge/common/Tags$"):]
+            ):
+                yield c, z.read(name)
+
+
+def factories(lines):
+    """The class's `name(String)` factories: name -> (registry, namespace or None for the string's own)."""
+    out, current, body = {}, None, []
+    for line in lines + [""]:
+        m = METHOD.match(line)
+        if m or (current and not line.strip()):
+            if current:
+                text = "\n".join(body)
+                reg = REGISTRY.search(text)
+                strings = STRING.findall(text)
+                if reg and "TagKey.create" in text:
+                    if "withDefaultNamespace" in text:
+                        ns = "minecraft"
+                    elif "fromNamespaceAndPath" in text and strings:
+                        ns = strings[0]
+                    else:
+                        ns = None
+                    out[current] = (reg.group(1).lower(), ns)
+            current, body = (m.group(1), []) if m else (None, [])
+            continue
+        if current:
+            body.append(line)
+    return out
+
+
+def constants(lines, made_by):
+    """(field, registry, tag) of each constant the static initializer stores."""
+    out, in_init = [], False
+    strings, registry, pending = [], None, None
+    for line in lines:
+        if line.startswith("  static {}"):
+            in_init = True
+            continue
+        if not in_init:
+            continue
+        if (m := STRING.search(line)):
+            strings.append(m.group(1))
+        elif (m := REGISTRY.search(line)):
+            registry = m.group(1).lower()
+        elif (m := INVOKE.search(line)):
+            owner, name, params = m.groups()
+            if owner is None and name in made_by and params == "Ljava/lang/String;" and strings:
+                reg, ns = made_by[name]
+                path = strings[-1]
+                pending = (reg, path if ns is None else f"{ns}:{path}")
+            elif owner == "net/minecraft/tags/TagKey" and name == "create" and registry and strings:
+                pending = (registry, strings[-1] if ":" in strings[-1] else f"minecraft:{strings[-1]}")
+            elif owner == "net/minecraft/resources/ResourceLocation" and name == "fromNamespaceAndPath" and len(strings) >= 2:
+                strings.append(f"{strings[-2]}:{strings[-1]}")
+        elif (m := PUT.search(line)):
+            if pending:
+                out.append((m.group(1), *pending))
+            strings, registry, pending = [], None, None
+    return out
+
+
+def main():
+    jar = sys.argv[1]
+    rows = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for c, raw in tag_classes(jar):
+            path = os.path.join(tmp, c.replace("/", "_").replace("$", "_") + ".class")
+            with open(path, "wb") as f:
+                f.write(raw)
+            text = subprocess.run(["javap", "-c", "-p", "-constants", path], capture_output=True, text=True, check=True).stdout
+            lines = text.splitlines()
+            for field, registry, tag in constants(lines, factories(lines)):
+                rows.append((c, field, registry, tag))
+    rows.sort()
+    lines = [
+        "//! Generated by `tools/vanilla_tag_keys.py` from NeoForge's merged jar: the tag each `TagKey`",
+        "//! constant of 1.21.1's tag classes names (`BiomeTags.IS_END`, `Tags.Biomes.IS_VOID`), with its",
+        "//! registry as this runtime names registries (`Registries.BIOME` is `biome`). `BlockTags` and",
+        "//! `ItemTags` are `vanilla_tags`', NeoForge's block, item, fluid and entity type tags `neo_tags`'.",
+        "",
+        f"const KEYS: [(&str, &str, &str, &str); {len(rows)}] = [",
+    ]
+    for c, field, registry, tag in rows:
+        lines.append(f'    ("{c}", "{field}", "{registry}", "{tag}"),')
+    lines += [
+        "];",
+        "",
+        "/// The tag `owner`'s constant `field` names: its registry and the tag's id.",
+        "pub fn named(owner: &str, field: &str) -> Option<(&'static str, &'static str)> {",
+        "    let i = KEYS.binary_search_by(|k| (k.0, k.1).cmp(&(owner, field))).ok()?;",
+        "    Some((KEYS[i].2, KEYS[i].3))",
+        "}",
+        "",
+    ]
+    with open(OUT, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print(f"{len(rows)} tag constants -> {OUT}")
+
+
+if __name__ == "__main__":
+    main()

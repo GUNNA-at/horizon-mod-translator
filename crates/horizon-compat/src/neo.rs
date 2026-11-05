@@ -209,6 +209,9 @@ fn registry_name_of(rt: &Rt, registry: &str, obj: V) -> Option<String> {
     if obj.r() == 0 {
         return None;
     }
+    if registry == "entity_type" {
+        return crate::mod_entities::type_id(rt, obj).map(str::to_owned);
+    }
     rt.registered_name(obj, registry).map(str::to_owned)
 }
 
@@ -238,6 +241,7 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         "block" if id.starts_with("minecraft:") => crate::api::block(rt, id),
         "item" if id.starts_with("minecraft:") => crate::api_common::item(rt, id),
         "fluid" if id.starts_with("minecraft:") => crate::fluids::fluid(rt, id),
+        "entity_type" if id.starts_with("minecraft:") => crate::mod_entities::vanilla_type(rt, id),
         // Enchantments are data the runtime doesn't list: a name is taken to be one, as the
         // game's data has it (`enchantments.rs`).
         "enchantment" if crate::recipes::valid_location(id) => crate::enchantments::value(rt, id),

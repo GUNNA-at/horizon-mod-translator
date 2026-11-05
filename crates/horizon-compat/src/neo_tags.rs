@@ -214,9 +214,11 @@ pub fn named(owner: &str, field: &str) -> Option<(&'static str, &'static str)> {
     table.iter().find(|(f, _)| *f == field).map(|(_, t)| (registry, *t))
 }
 
-/// `Tags.Blocks.RELOCATION_NOT_SUPPORTED` and the rest: the key of the tag each names.
+/// `Tags.Blocks.RELOCATION_NOT_SUPPORTED` and the rest: the key of the tag each names. Also the
+/// other tag classes' constants (`BiomeTags.IS_END`, `EntityTypeTags.UNDEAD`, `Tags.Biomes.IS_VOID`,
+/// `DamageTypeTags.IS_FIRE`), from [`crate::vanilla_tag_keys`].
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
-    let (registry, tag) = named(owner, field)?;
+    let (registry, tag) = named(owner, field).or_else(|| crate::vanilla_tag_keys::named(owner, field))?;
     Some(crate::fluids::tag_key(rt, registry, tag))
 }
 
@@ -234,5 +236,24 @@ mod tests {
         assert_eq!(named(i, "DYES_LIGHT_BLUE"), Some(("item", "c:dyes/light_blue")));
         assert_eq!(named("net/neoforged/neoforge/common/Tags$Fluids", "MILK"), Some(("fluid", "c:milk")));
         assert_eq!(named(b, "NOT_A_TAG"), None);
+    }
+
+    /// The other tag classes' constants: biome tags (`BiomeTags.IS_END`, one under
+    /// `has_structure/`, NeoForge's `Tags.Biomes.IS_VOID` under `c:`), a damage type's and an
+    /// entity type's, each key in its registry.
+    #[test]
+    fn other_tag_classes_name_their_registrys_tags() {
+        let mut rt = Rt::new();
+        let key = |rt: &mut Rt, o: &str, f: &str| {
+            let k = get_static(rt, o, f).unwrap();
+            let (r, l) = (rt.get_field(k, "$registry"), rt.get_field(k, "$location"));
+            format!("{} {}", rt.str_of(r).unwrap(), rt.str_of(l).unwrap())
+        };
+        assert_eq!(key(&mut rt, "net/minecraft/tags/BiomeTags", "IS_END"), "biome minecraft:is_end");
+        assert_eq!(key(&mut rt, "net/minecraft/tags/BiomeTags", "HAS_ANCIENT_CITY"), "biome minecraft:has_structure/ancient_city");
+        assert_eq!(key(&mut rt, "net/neoforged/neoforge/common/Tags$Biomes", "IS_VOID"), "biome c:is_void");
+        assert_eq!(key(&mut rt, "net/minecraft/tags/DamageTypeTags", "IS_FIRE"), "damage_type minecraft:is_fire");
+        assert_eq!(key(&mut rt, "net/minecraft/tags/EntityTypeTags", "UNDEAD"), "entity_type minecraft:undead");
+        assert!(get_static(&mut rt, "net/minecraft/tags/BiomeTags", "NOT_A_TAG").is_none());
     }
 }

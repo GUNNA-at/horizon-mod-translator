@@ -2338,6 +2338,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     calls, from 28; door, ladder and lever shapes, `BlockState.getProperties`, the local player's eye
     position and look angle and Flywheel's GL capability reads no longer show. Left: Flywheel's
     shader compiler (its GL backend, which Horizon's renderer replaces) and 3 `Object.get` on null.
+  - [x] 2026-11-05 Tag constants of every tag class, vanilla entity types, and collection
+    operations on stream codecs. `tools/vanilla_tag_keys.py` reads 1.21.1's tag classes from
+    NeoForge's merged jar with `javap -c` (each constant's factory, its registry and namespace) into
+    `vanilla_tag_keys.rs`: 316 constants of `BiomeTags`, `EntityTypeTags`, `DamageTypeTags`,
+    `EnchantmentTags`, `StructureTags`, `PoiTypeTags`, `GameEventTags` and the rest, and NeoForge's
+    `Tags.Biomes`, `Tags.DamageTypes`, `Tags.Enchantments`, `Tags.Structures` (`BiomeTags.IS_END` is
+    biome tag `minecraft:is_end`, `HAS_ANCIENT_CITY` `minecraft:has_structure/ancient_city`,
+    `Tags.Biomes.IS_VOID` `c:is_void`); `neo_tags` answers them after its own. Vanilla's
+    `EntityType.<NAME>` are one object per id (`minecraft:illusioner`), the same the entity type
+    registry gives for that id, named by it (`getKey`, `getDescriptionId`): guardvillagers' illusioner
+    spawn egg. `ByteBufCodecs.collection(factory)` alone is a `CodecOperation` (Mekanism's
+    attachments, SecurityCraft's components apply it to a codec), reading into what the factory
+    makes. Tests `neo_tags::tests::other_tag_classes_name_their_registrys_tags`,
+    `mod_entities::tests::vanilla_entity_types_are_one_object_by_id`,
+    `network::tests::a_collection_operation_reads_into_the_factorys_collection`; 267 compat and 14
+    translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

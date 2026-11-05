@@ -102,6 +102,9 @@ const REGISTRY_KEY: &str = "compat:stream/registry_key";
 const NEO_CODECS: &str = "net/neoforged/neoforge/network/codec/NeoForgeStreamCodecs";
 /// `ByteBufCodecs.list()`, a `CodecOperation` (`codec.apply(list())`).
 const LIST_OP: &str = "compat:stream-op/list";
+/// `ByteBufCodecs.collection(factory)`, a `CodecOperation` (`codec.apply(collection(HashSet::new))`):
+/// [factory].
+const COLLECTION_OP: &str = "compat:stream-op/collection";
 
 // Codecs of one kind of value.
 const BOOL: &str = "compat:stream/bool";
@@ -1505,6 +1508,8 @@ fn codec_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
             make(rt, COMPOSITE, parts)
         }
         "optional" if byte_buf_codecs => make(rt, OPTIONAL, vec![a(0)]),
+        // `collection(factory)` alone is an operation on a codec; with the codec, the codec.
+        "collection" if byte_buf_codecs && args.len() == 1 => make(rt, COLLECTION_OP, vec![a(0)]),
         "collection" if byte_buf_codecs => make(rt, COLLECTION, vec![a(0), a(1)]),
         "list" if byte_buf_codecs => constant(rt, LIST_OP),
         "idMapper" if desc.starts_with("(Lnet/minecraft/core/IdMap;") => make(rt, ID_MAP, vec![a(0)]),
@@ -1529,6 +1534,9 @@ fn codec_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
 fn apply_op(rt: &mut Rt, op: V, codec: V) -> V {
     if rt.class_of(op) == LIST_OP {
         make(rt, COLLECTION, vec![V::NULL, codec])
+    } else if rt.class_of(op) == COLLECTION_OP {
+        let factory = rt.captured(op).first().copied().unwrap_or(V::NULL);
+        make(rt, COLLECTION, vec![factory, codec])
     } else if rt.cid(op) == 0 {
         // An operation of the API's this module doesn't make (`ByteBufCodecs.optional()`...):
         // asking it to run would come back here. Counted as unmapped; the codec stays as it is.
@@ -1995,8 +2003,29 @@ mod tests {
                 rt.put_field(p, "speed", args[2]);
                 p
             }
+            // `HashSet::new` as an `IntFunction`.
+            4 => crate::jutil::new_set_of(rt, &[]),
             _ => return None,
         })
+    }
+
+    /// `codec.apply(ByteBufCodecs.collection(HashSet::new))` (Mekanism's attachments,
+    /// SecurityCraft's components): a count, then each element; read back into what the factory
+    /// makes.
+    #[test]
+    fn a_collection_operation_reads_into_the_factorys_collection() {
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(lambdas);
+        let int = sv(&mut rt, "net/minecraft/network/codec/ByteBufCodecs.VAR_INT");
+        let factory = rt.lambda_id("test/Sets", 4, Vec::new());
+        let op = call(&mut rt, "net/minecraft/network/codec/ByteBufCodecs.collection.(Ljava/util/function/IntFunction;)Lnet/minecraft/network/codec/StreamCodec$CodecOperation;", &[factory]).unwrap();
+        let codec = call(&mut rt, "net/minecraft/network/codec/StreamCodec.apply.(Lnet/minecraft/network/codec/StreamCodec$CodecOperation;)Lnet/minecraft/network/codec/StreamCodec;", &[int, op]).unwrap();
+        let set = crate::jutil::new_set_of(&mut rt, &[V::I(5), V::I(300)]);
+        let (bytes, back) = round_trip(&mut rt, codec, set);
+        assert_eq!(bytes, [2, 5, 0xac, 0x02]);
+        assert_eq!(rt.class_of(back), rt.class_of(set));
+        assert_eq!(crate::jutil::elements(&rt, back), [V::I(5), V::I(300)]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

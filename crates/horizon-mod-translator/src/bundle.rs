@@ -43,7 +43,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 60] = [
+const COMPAT: [(&str, &str); 61] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -104,6 +104,7 @@ const COMPAT: [(&str, &str); 60] = [
     ("render.rs", include_str!("../../horizon-compat/src/render.rs")),
     ("quads.rs", include_str!("../../horizon-compat/src/quads.rs")),
     ("vanilla_tags.rs", include_str!("../../horizon-compat/src/vanilla_tags.rs")),
+    ("vanilla_tag_keys.rs", include_str!("../../horizon-compat/src/vanilla_tag_keys.rs")),
 ];
 
 /// The registry crates the carried runtime uses, as the engine's `[dependencies]`: each must be
