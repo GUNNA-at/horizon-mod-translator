@@ -3100,6 +3100,32 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   `api::tests::a_hook_looping_on_an_unmapped_call_is_stopped`. 339 compat, 15 translator tests
   pass. Still unmapped on that screen: `ModConfigs.getModConfigs`, `ModConfigSpec.getValues` (its
   list of settings).
+- [x] 2026-11-05 Client commands, as NeoForge's `ClientCommandHandler` runs them
+  (`RegisterClientCommandsEvent`, 19 mods: Flywheel's `/flywheel`, JEI, Xaero's, catnip...). The
+  window's game asks the bundle through its existing hooks (API 35): `native_commands` (when a
+  connection starts and when the server sends its tree) posts the event on a new tree of the
+  client's own, apart from the server's (`commands::register_client`), and gives back its roots so
+  the chat box colours and completes them; `native_command` (a typed or clicked line, before the
+  server sees it) runs a line one of those roots begins on that tree (`commands::perform_client`).
+  Brigadier's unknown command or unknown argument goes on to the server, as NeoForge's does (so
+  `/create trains` still reaches the server's `/create`); any other syntax error is answered in the
+  window's chat (red message, then the context line, which puts the line back without its slash
+  when clicked), another exception as `command.failed`. The source is
+  `ClientCommandSourceStack`'s: the local player's name, operator level and place, its entity the
+  local player (no server's player); `getServer`/`getLevel` throw vanilla's
+  `UnsupportedOperationException` ("Attempted to get server in client command").
+  `ClientCommandHandler.getDispatcher`, `getSource`, `runCommand` are mapped too. New:
+  `Host::client_player`, the game's `native_client_player` (API fragment `client_player`: name and
+  `LocalPlayer.getPermissionLevel` as the server last said it), and the client host's
+  `command_feedback` (a line in the window's chat). Also fixed: five lines in hook points of
+  `native_hooks.rs` (`native_state_id_text`, `native_state_text_at`, `native_resource_paths`, from
+  earlier commits on this branch) used `format!`/`vec!`, which horizon-mixins refuses in a hook
+  point's body; `hook_points_stay_hookable` passes again. Test:
+  `commands::tests::client_commands_run_on_the_clients_tree_and_leave_the_rest_to_the_server`
+  (a `/glass` mod: its root only on the client's tree, `who` sees the local player as the source,
+  an unknown subcommand and other roots left to the server, an out-of-range argument answered
+  with its context, `getServer` → `command.failed`). 340 compat, 15 translator, 36 game hook tests
+  pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

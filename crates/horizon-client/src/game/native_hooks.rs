@@ -3770,8 +3770,19 @@ impl GameLevel<'_> {
         if props.is_empty() {
             return info.name.to_string();
         }
-        let inner: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        format!("{}[{}]", info.name, inner.join(","))
+        // No macro here: horizon-mixins refuses a hook point's body with one.
+        let mut out = info.name.to_string();
+        out.push('[');
+        for (i, (k, v)) in props.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(k);
+            out.push('=');
+            out.push_str(v);
+        }
+        out.push(']');
+        out
     }
     /// The block state text names, as [`Self::native_state_text`] writes it
     /// (properties not named keep the block's defaults): what a hook answers
@@ -3914,8 +3925,19 @@ impl Game<'_> {
         if props.is_empty() {
             return info.name.to_string();
         }
-        let inner: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        format!("{}[{}]", info.name, inner.join(","))
+        // No macro here: horizon-mixins refuses a hook point's body with one.
+        let mut out = info.name.to_string();
+        out.push('[');
+        for (i, (k, v)) in props.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(k);
+            out.push('=');
+            out.push_str(v);
+        }
+        out.push(']');
+        out
     }
     /// Sets the block at `pos` in the current authoritative level from text
     /// (`GameLevel::native_set_state_text` for hooks on `Game`). API 81.
@@ -4055,7 +4077,7 @@ impl Game<'_> {
             return Vec::new();
         };
         let mut out = Vec::new();
-        let mut todo = vec![self.options.resources.join(folder)];
+        let mut todo = Vec::from([self.options.resources.join(folder)]);
         while let Some(dir) = todo.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
@@ -4850,6 +4872,14 @@ impl Game<'_> {
             pitch: self.pitch,
             dimension: self.dim.id(),
         })
+    }
+    /// The window's player as a client command's source has them: their
+    /// name and operator level (0 to 4, as the server last said it:
+    /// `LocalPlayer.getPermissionLevel`). None outside a world. API
+    /// @API:client_player@.
+    pub(super) fn native_client_player(&self) -> Option<(String, u8)> {
+        self.player.as_ref()?;
+        Some((self.options.player_name(), self.ui.registries.permission))
     }
     /// The clock of the world this window shows, for client mods: its game
     /// time and time of day as the server last sent them

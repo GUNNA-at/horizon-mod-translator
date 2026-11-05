@@ -352,6 +352,12 @@ pub trait Host {
     fn player_permission(&self, _uuid: u128) -> Option<u8> {
         None
     }
+    /// On a client, the local player as a client command's source has them: their name and
+    /// operator level (`LocalPlayer.getPermissionLevel`, as the server last said it). None
+    /// elsewhere.
+    fn client_player(&self) -> Option<(String, u8)> {
+        None
+    }
     /// The collision boxes of the block at `pos` as the game has them (`BlockState.getCollisionShape`
     /// with the empty context), each relative to the block's corner; None when the game can't say.
     fn collision_boxes(&self, _pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {

@@ -1017,6 +1017,20 @@ pub fn perform_command(rt: &mut Rt, host: &mut dyn Host, player: Option<(u128, &
     rt.with_host(host, |rt| crate::commands::perform(rt, player, permission, at, rot, line))
 }
 
+/// `native_commands` (client): the mods hear `RegisterClientCommandsEvent`, and the roots of their
+/// client tree come back ([`crate::commands::register_client`]).
+pub fn client_commands(rt: &mut Rt, host: &mut dyn Host) -> Vec<String> {
+    rt.safe_point();
+    rt.with_host(host, crate::commands::register_client)
+}
+
+/// `native_command` (client): a line typed or clicked in chat, without its slash: whether the mods'
+/// client tree ran it ([`crate::commands::perform_client`]); false leaves it to the server.
+pub fn client_command(rt: &mut Rt, host: &mut dyn Host, line: &str) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::commands::perform_client(rt, line))
+}
+
 const LEVEL_TICK_PRE: &str = "net/neoforged/neoforge/event/tick/LevelTickEvent$Pre";
 const LEVEL_TICK_POST: &str = "net/neoforged/neoforge/event/tick/LevelTickEvent$Post";
 

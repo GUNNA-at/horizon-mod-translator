@@ -45,6 +45,11 @@ const COORDINATES: &str = "net/minecraft/commands/arguments/coordinates/Coordina
 const SUGGESTIONS: &str = "net/minecraft/commands/SharedSuggestionProvider";
 const SELECTOR_PARSER: &str = "net/minecraft/commands/arguments/selector/EntitySelectorParser";
 const SERVER: &str = "net/minecraft/server/MinecraftServer";
+const CLIENT_EVENT: &str = "net/neoforged/neoforge/client/event/RegisterClientCommandsEvent";
+const CLIENT_HANDLER: &str = "net/neoforged/neoforge/client/ClientCommandHandler";
+const CLIENT_SOURCE: &str = "net/neoforged/neoforge/client/ClientCommandSourceStack";
+/// The client's own tree (`ClientCommandHandler.getDispatcher`), apart from the server's.
+const CLIENT_DISPATCHER_KEY: &str = "compat:client-command-dispatcher";
 const SERVER_PLAYER: &str = "net/minecraft/server/level/ServerPlayer";
 const RUN: &str = "com/mojang/brigadier/Command.run.(Lcom/mojang/brigadier/context/CommandContext;)I";
 const TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
@@ -77,6 +82,9 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
                 | COORDINATES
                 | SUGGESTIONS
                 | SELECTOR_PARSER
+                | CLIENT_EVENT
+                | CLIENT_HANDLER
+                | CLIENT_SOURCE
         )
         || is_read_value(owner)
         || (owner == COMMANDS && matches!(name, "literal" | "argument" | "getDispatcher" | "performPrefixedCommand" | "performCommand"))
@@ -180,12 +188,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (EVENT, "getDispatcher") => rt.get_field(a(0), "$dispatcher"),
         (EVENT, "getBuildContext") => rt.intern("compat:command-build-context".into(), |rt| rt.new_object(BUILD_CONTEXT)),
         (EVENT, "getCommandSelection") => api::api_enum(rt, SELECTION, "ALL", 0),
+        // The client's: its own tree, the local player's source, a line run on it.
+        (CLIENT_EVENT, "getDispatcher") => rt.get_field(a(0), "$dispatcher"),
+        (CLIENT_EVENT, "getBuildContext") => rt.intern("compat:command-build-context".into(), |rt| rt.new_object(BUILD_CONTEXT)),
+        (CLIENT_HANDLER, "getDispatcher") => rt.interned.get(CLIENT_DISPATCHER_KEY).copied().unwrap_or(V::NULL),
+        (CLIENT_HANDLER, "getSource") => client_source(rt),
+        (CLIENT_HANDLER, "runCommand") => {
+            let line = rt.str_of(a(0)).unwrap_or("").to_owned();
+            V::I(i32::from(perform_client(rt, &line)))
+        }
         // What a parse read, as Brigadier's objects.
         (CONTEXT, n) => context_call(rt, n, args)?,
         (CONTEXT_BUILDER, n) => builder_context_call(rt, n, args)?,
         (PARSE_RESULTS | PARSED_NODE | PARSED_ARGUMENT | STRING_RANGE, n) => parse_object_call(rt, owner, n, desc, args)?,
         (COMMAND_EVENT, n) => command_event_call(rt, n, args)?,
-        (SOURCE, _) => source_call(rt, name, args)?,
+        (SOURCE | CLIENT_SOURCE, _) => source_call(rt, name, args)?,
         // The argument types: one object per use, its kind and bounds; their getters, and a mod's
         // parser reading with a vanilla one.
         (o, n) if is_argument_type(o) => {
@@ -501,7 +518,7 @@ fn probe_source(rt: &mut Rt, level: u8) -> V {
 
 fn copy_source(rt: &mut Rt, s: V) -> V {
     let c = rt.new_object(SOURCE);
-    for field in ["$player", "$name", "$display", "$output", "$permission", "$x", "$y", "$z", "$yaw", "$pitch", "$silent", "$console"] {
+    for field in ["$player", "$name", "$display", "$output", "$permission", "$x", "$y", "$z", "$yaw", "$pitch", "$silent", "$console", "$client", "$entity"] {
         let v = rt.get_field(s, field);
         if !matches!(v, V::Void) {
             rt.put_field(c, field, v);
@@ -514,6 +531,20 @@ fn source_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let s = a(0);
     let player = rt.get_field(s, "$player");
+    if rt.get_field(s, "$client").i() != 0 {
+        match name {
+            // `ClientCommandSourceStack`: no server here.
+            "getServer" | "getLevel" => {
+                let what = if name == "getServer" { "server" } else { "server level" };
+                let message = format!("Attempted to get {what} in client command");
+                return Some(crate::jlang::throw_with(rt, "java/lang/UnsupportedOperationException", &message));
+            }
+            // The local player is its entity, not a server's player.
+            "getEntity" => return Some(rt.get_field(s, "$entity")),
+            "getEntityOrException" => return Some(rt.get_field(s, "$entity")),
+            _ => {}
+        }
+    }
     Some(match name {
         // `new CommandSourceStack(output, position, rotation, level, permission, textName,
         // displayName, server, entity)`: a mod's own source (to run a command as the server). What
@@ -925,6 +956,77 @@ pub fn perform(rt: &mut Rt, player: Option<(u128, &str)>, permission: u8, at: [f
     let results = results_object(rt, dispatcher, &parse);
     perform_results(rt, results, line);
     true
+}
+
+/// `native_commands` (client): NeoForge's `RegisterClientCommandsEvent` on a new tree of the
+/// client's own, as `ClientCommandHandler.mergeServerCommands` posts it when a connection starts and
+/// whenever the server sends its tree; the names of its roots come back.
+pub fn register_client(rt: &mut Rt) -> Vec<String> {
+    let dispatcher = new_dispatcher(rt);
+    rt.interned.insert(CLIENT_DISPATCHER_KEY.into(), dispatcher);
+    let ev = rt.new_object(CLIENT_EVENT);
+    rt.put_field(ev, "$dispatcher", dispatcher);
+    crate::neo::post(rt, CLIENT_EVENT, ev);
+    let root = root_of(rt, dispatcher);
+    let mut names = Vec::new();
+    for child in children(rt, root) {
+        if is_literal(rt, child) {
+            names.push(name_of(rt, child));
+        }
+    }
+    names
+}
+
+/// `ClientCommandHandler.runCommand(line)`: `line` (without its slash) on the mods' client tree as
+/// the local player, as Brigadier's `execute` runs it. False leaves it to the server: no root of the
+/// tree begins it, or Brigadier's unknown command or unknown argument. Any other syntax error is
+/// answered here, its message in red then the line's context (clicking it puts the line back
+/// without its slash, as NeoForge's does), and another exception as `command.failed`.
+pub fn perform_client(rt: &mut Rt, line: &str) -> bool {
+    let Some(dispatcher) = rt.interned.get(CLIENT_DISPATCHER_KEY).copied() else { return false };
+    if !owns(rt, dispatcher, line) {
+        return false;
+    }
+    let source = client_source(rt);
+    let root = root_of(rt, dispatcher);
+    let parse = parse(rt, root, source, Reader::new(line));
+    let results = results_object(rt, dispatcher, &parse);
+    let e = match finished(rt, results, line) {
+        Ok((_, contexts)) => {
+            if run_brigadier(rt, &contexts, source).is_ok() {
+                return true;
+            }
+            rt.unwinding.clear();
+            rt.thrown.take().unwrap_or(V::NULL)
+        }
+        Err(e) => e,
+    };
+    if e.r() != 0 && rt.instance_of(e, brigadier::SYNTAX) {
+        let ty = rt.get_field(e, "$type");
+        let unknown = ["command.unknown.command", "command.unknown.argument"];
+        if unknown.iter().any(|k| brigadier::type_of(rt, k, 0) == ty) {
+            return false;
+        }
+        report(rt, source, line, e);
+    } else if e.r() != 0 {
+        command_failed(rt, source, e);
+    }
+    true
+}
+
+/// `ClientCommandHandler.getSource()`: the local player's source on the client, where they stand and
+/// look, with their name and operator level; its entity is the local player (no server's player);
+/// what it is told goes to the window's chat.
+fn client_source(rt: &mut Rt) -> V {
+    let (at, rot) = rt.host().and_then(|h| h.player_place()).map_or(([0.0; 3], [0.0; 2]), |(at, yaw, pitch)| (at, [yaw, pitch]));
+    let (name, permission) = rt.host().and_then(|h| h.client_player()).unwrap_or_default();
+    let s = new_source(rt, None, permission, at, rot);
+    let n = rt.string(&name);
+    rt.put_field(s, "$name", n);
+    let me = crate::network::local_player(rt);
+    rt.put_field(s, "$entity", me);
+    rt.put_field(s, "$client", V::I(1));
+    s
 }
 
 /// `Commands.performPrefixedCommand(source, line)` for a mod: a line one of the mods' roots begins
@@ -1402,7 +1504,7 @@ fn perform_results(rt: &mut Rt, results: V, command: &str) {
     };
     match finished(rt, results, command) {
         Ok((_, contexts)) => run_vanilla(rt, &contexts, source),
-        Err(e) => report(rt, source, command, e),
+        Err(e) => report(rt, source, &format!("/{command}"), e),
     }
 }
 
@@ -1424,7 +1526,7 @@ fn describe_error(rt: &Rt, mut e: V) -> String {
 /// `finishParsing`'s answer to a parse error: the message in red, then, where it knows the place,
 /// the line's last ten characters before it in grey, the rest red and underlined, and `<--[HERE]`;
 /// clicking it puts the command back in the chat box.
-fn report(rt: &mut Rt, source: V, command: &str, e: V) {
+fn report(rt: &mut Rt, source: V, click: &str, e: V) {
     let raw = rt.get_field(e, "$rawMessage");
     feedback(rt, source, raw, true);
     let Some(input) = rt.str_of(rt.get_field(e, "$input")).map(str::to_owned) else { return };
@@ -1433,13 +1535,14 @@ fn report(rt: &mut Rt, source: V, command: &str, e: V) {
         _ => -1,
     };
     if cursor >= 0 {
-        let line = context_line(command, &input, cursor);
+        let line = context_line(click, &input, cursor);
         feedback_json(rt, source, line);
     }
 }
 
-/// The context line of a parse error at `cursor` (UTF-16 units) of `input`.
-fn context_line(command: &str, input: &str, cursor: i32) -> serde_json::Value {
+/// The context line of a parse error at `cursor` (UTF-16 units) of `input`, which puts `click` in
+/// the chat box when clicked.
+fn context_line(click: &str, input: &str, cursor: i32) -> serde_json::Value {
     use serde_json::json;
     let units: Vec<u16> = input.encode_utf16().collect();
     let i = (cursor.max(0) as usize).min(units.len());
@@ -1452,7 +1555,7 @@ fn context_line(command: &str, input: &str, cursor: i32) -> serde_json::Value {
         extra.push(json!({ "text": String::from_utf16_lossy(&units[i..]), "color": "red", "underlined": true }));
     }
     extra.push(json!({ "translate": "command.context.here", "color": "red", "italic": true }));
-    json!({ "text": "", "color": "gray", "click_event": { "action": "suggest_command", "command": format!("/{command}") }, "extra": extra })
+    json!({ "text": "", "color": "gray", "click_event": { "action": "suggest_command", "command": click }, "extra": extra })
 }
 
 /// [`feedback`] of a failure given as JSON: red where it names no colour; a mod's own output hears
@@ -2363,6 +2466,69 @@ mod tests {
                 }
                 crate::jutil::new_list(rt, each)
             }
+            // The client mod: `/glass who`, `/glass shade <n 1..5>`, `/glass server` on the client's
+            // own tree.
+            12 => {
+                let get = "net/neoforged/neoforge/client/event/RegisterClientCommandsEvent.getDispatcher.()Lcom/mojang/brigadier/CommandDispatcher;";
+                let dispatcher = c(rt, get, &[args[1]]);
+                let lit = |rt: &mut Rt, t: &str| {
+                    let n = rt.string(t);
+                    c(rt, LITERAL, &[n])
+                };
+                let run = |rt: &mut Rt, id: u32| rt.lambda_id("com/mojang/brigadier/Command", id, vec![]);
+                let who = lit(rt, "who");
+                let r = run(rt, 13);
+                let who = c(rt, EXECUTES, &[who, r]);
+                let n = rt.string("n");
+                let int = c(rt, INTEGER, &[V::I(1), V::I(5)]);
+                let shade_n = c(rt, ARGUMENT, &[n, int]);
+                let r = run(rt, 14);
+                let shade_n = c(rt, EXECUTES_ARG, &[shade_n, r]);
+                let shade = lit(rt, "shade");
+                let shade = c(rt, THEN, &[shade, shade_n]);
+                let server = lit(rt, "server");
+                let r = run(rt, 15);
+                let server = c(rt, EXECUTES, &[server, r]);
+                let root = lit(rt, "glass");
+                for child in [who, shade, server] {
+                    c(rt, THEN, &[root, child]);
+                }
+                c(rt, REGISTER, &[dispatcher, root]);
+                V::Void
+            }
+            // Who runs it: the source's name, level, place and entity.
+            13 => {
+                let source = c(rt, GET_SOURCE, &[args[1]]);
+                let name = c(rt, "net/minecraft/commands/CommandSourceStack.getTextName.()Ljava/lang/String;", &[source]);
+                let name = rt.str_of(name).unwrap_or("").to_owned();
+                let level = (0..=4).rev().find(|&l| c(rt, HAS_PERMISSION, &[source, V::I(l)]).i() != 0).unwrap_or(0);
+                let pos = c(rt, "net/minecraft/commands/CommandSourceStack.getPosition.()Lnet/minecraft/world/phys/Vec3;", &[source]);
+                let [x, y, z] = ["x", "y", "z"].map(|f| rt.get_field(pos, f).d());
+                let entity = c(rt, "net/minecraft/commands/CommandSourceStack.getEntity.()Lnet/minecraft/world/entity/Entity;", &[source]);
+                let entity = rt.class_of(entity).rsplit('/').next().unwrap_or("").to_owned();
+                let player = c(rt, "net/minecraft/commands/CommandSourceStack.getPlayer.()Lnet/minecraft/server/level/ServerPlayer;", &[source]);
+                let player = if player.r() == 0 { "no player" } else { "a player" };
+                let said = format!("{name} {level} at {x:?} {y:?} {z:?}, entity {entity}, {player}");
+                let text = s(rt, &said);
+                let supplier = rt.lambda_id("java/util/function/Supplier", 8, vec![text]);
+                c(rt, SEND_SUCCESS, &[source, supplier, V::I(0)]);
+                V::I(1)
+            }
+            14 => {
+                let source = c(rt, GET_SOURCE, &[args[1]]);
+                let n = s(rt, "n");
+                let shade = c(rt, GET_INTEGER, &[args[1], n]).i();
+                let text = s(rt, &format!("shade {shade}"));
+                let supplier = rt.lambda_id("java/util/function/Supplier", 8, vec![text]);
+                c(rt, SEND_SUCCESS, &[source, supplier, V::I(0)]);
+                V::I(1)
+            }
+            // A client command asking for the server: NeoForge's source throws.
+            15 => {
+                let source = c(rt, GET_SOURCE, &[args[1]]);
+                c(rt, "net/minecraft/commands/CommandSourceStack.getServer.()Lnet/minecraft/server/MinecraftServer;", &[source]);
+                V::I(1)
+            }
             _ => V::Void,
         })
     }
@@ -2767,5 +2933,71 @@ mod tests {
         assert_eq!(name_of(&rt, found), "y");
         let usages: Vec<String> = usages(&mut rt, dispatcher).into_iter().map(|(u, _)| u).collect();
         assert_eq!(usages, ["tool", "tool a", "tool a x", "tool a y", "tool b"]);
+    }
+
+    /// The window's host for client commands: the local player's place, name and level, and the
+    /// window's chat.
+    #[derive(Default)]
+    struct Window {
+        lines: Vec<String>,
+    }
+    impl crate::host::Host for Window {
+        fn block_state(&self, _pos: [i32; 3]) -> String {
+            "minecraft:air".into()
+        }
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+            false
+        }
+        fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
+            Some(([1.5, 70.0, -2.5], 90.0, 0.0))
+        }
+        fn client_player(&self) -> Option<(String, u8)> {
+            Some(("Alex".into(), 2))
+        }
+        fn command_feedback(&mut self, component: &str) {
+            self.lines.push(component.to_owned());
+        }
+    }
+
+    /// Client commands as NeoForge runs them: `RegisterClientCommandsEvent` on a tree of the
+    /// client's own (apart from the server's), whose roots the chat box takes; a typed line one of
+    /// them begins runs there as the local player (their name, level and place; their entity is the
+    /// local player, no server's player, and no server: `getServer` throws). Brigadier's unknown
+    /// command or argument is left to the server; another parse error is answered on the client,
+    /// its context line putting the line back without a slash, and an exception is
+    /// `command.failed`.
+    #[test]
+    fn client_commands_run_on_the_clients_tree_and_leave_the_rest_to_the_server() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.lambda_call = Some(lambdas);
+        let listener = rt.lambda_id("java/util/function/Consumer", 12, vec![]);
+        rt.listeners.push((CLIENT_EVENT.to_owned(), listener));
+        let mut window = Window::default();
+        let roots = rt.with_host(&mut window, register_client);
+        assert_eq!(roots, ["glass"]);
+        assert!(rt.interned.get(DISPATCHER_KEY).is_none(), "the server's tree is apart");
+        let run = |rt: &mut Rt, window: &mut Window, line: &str| {
+            let ran = rt.with_host(window, |rt| perform_client(rt, line));
+            let lines: Vec<serde_json::Value> = window.lines.drain(..).map(|l| serde_json::from_str(&l).unwrap()).collect();
+            (ran, lines)
+        };
+        let (ran, lines) = run(&mut rt, &mut window, "glass who");
+        assert!(ran);
+        assert_eq!(said(&lines), ["Alex 2 at 1.5 70.0 -2.5, entity LocalPlayer, no player"]);
+        for line in ["glass trains", "glass", "stone"] {
+            assert_eq!(run(&mut rt, &mut window, line), (false, vec![]), "`{line}` is left to the server");
+        }
+        let (ran, lines) = run(&mut rt, &mut window, "glass shade 9");
+        assert!(ran);
+        assert_eq!(said(&lines), ["argument.integer.big", ""], "the error, then its context");
+        assert_eq!(lines[1]["click_event"]["command"], "glass shade 9");
+        let (ran, lines) = run(&mut rt, &mut window, "glass shade 3");
+        assert!(ran);
+        assert_eq!(said(&lines), ["shade 3"]);
+        let (ran, lines) = run(&mut rt, &mut window, "glass server");
+        assert!(ran);
+        assert_eq!(said(&lines), ["command.failed"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }
