@@ -2848,6 +2848,28 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Tests: `crops::tests::a_mod_crop_without_a_random_tick_grows_as_vanillas`,
     `the_growth_speed_counts_the_soil_and_the_rows`,
     `a_mods_own_growth_asks_neoforges_hooks_and_the_soil`. 312 compat, 206 client tests pass.
+    In game (Farmer's Delight alone, wet farmland, 200 ticks at random tick speed 300): cabbages
+    and onions 0 to 3, budding tomatoes 0 to 1 (their own slower draw), wheat and carrots beside
+    them 0 to 4. `/recipe give` unlocks the cooking pot, skillet, rope and tatami; a player walks
+    through wild cabbages and is stopped by stone.
+  - [x] 2026-11-05 Bone meal on a translated mod's blocks. The game had three bone meal hooks for
+    mod blocks (API 72) that the bundle didn't wire; it does now (`is_valid_bonemeal_target`,
+    `is_bonemeal_success`, `perform_bonemeal`, through `glue`'s functions of those names). A
+    block takes bone meal by its own `BonemealableBlock` methods, or, for a crop that inherits
+    them, `CropBlock`'s (`crops.rs`): while short of its last age, growing 2 to 5 ages
+    (`getBonemealAgeIncrease`, the crop's own where it has one: the rice panicles' third of it),
+    up to its last. Vanilla asks the first question on both sides, so the level is only read
+    there. The block hooks' hosts are one text each now (`level_host` and `level_read_host` in
+    `bundle.rs`). Test: `crops::tests::bone_meal_grows_a_mod_crop_as_vanillas`.
+  - [x] 2026-11-05 Rice grows its panicles. In the same run the rice reached age 3 and stopped:
+    its random tick grows the panicles above only into an empty block, and
+    `LevelReader.isEmptyBlock` had no answer (false). It is the block there being air of any kind
+    now. The tick's first line, `super.tick(...)` to `BushBlock`, was unmapped too: vanilla's
+    scheduled tick there does nothing, and so does a `super.tick` to any of the 189 block classes
+    of 1.21.1 whose class files declare no tick down to `BlockBehaviour` (`DEFAULT_TICK_BLOCKS`
+    in `blocks.rs`, read from the 1.21.1 classes); one to a class with its own (a falling
+    block's) stays unanswered. Test: `blocks::tests::a_rices_tick_and_its_empty_block_test_are_vanillas`.
+    314 compat, 15 translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

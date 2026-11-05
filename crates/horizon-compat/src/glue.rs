@@ -94,6 +94,65 @@ pub fn random_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str)
     true
 }
 
+const VALID_BONEMEAL: &str = "isValidBonemealTarget.(Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)Z";
+const BONEMEAL_SUCCESS: &str = "isBonemealSuccess.(Lnet/minecraft/world/level/Level;Lnet/minecraft/util/RandomSource;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)Z";
+const PERFORM_BONEMEAL: &str = "performBonemeal.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/util/RandomSource;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V";
+
+/// The key a bone meal call on the mod block of class `class` falls back to where the class has no
+/// method of its own: its crop base's ([`crate::crops`]); None for a block whose code takes no bone
+/// meal.
+fn bonemeal_key(rt: &mut Rt, class: &'static str, short: &'static str) -> Option<&'static str> {
+    if crate::crops::grows_as_crop(rt, class) {
+        return Some(rt.static_key(&format!("net/minecraft/world/level/block/CropBlock.{short}")));
+    }
+    rt.overrides.is_some_and(|o| o(class, short)).then(|| rt.static_key(&format!("net/minecraft/world/level/block/BonemealableBlock.{short}")))
+}
+
+/// Runs the bone meal method `short` of the mod block `state` at `pos` (its own, or its crop
+/// base's), with the level, a random source where `random` is set, the position and the state.
+/// None where the block takes no bone meal by its code, or its code threw.
+fn bonemeal(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, short: &'static str, random: bool) -> Option<V> {
+    let (b, class) = mod_block(rt, state)?;
+    let key = bonemeal_key(rt, class, short)?;
+    let vc = rt.vcall?;
+    rt.with_host(host, |rt| {
+        let l = level(rt);
+        let p = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+        let st = api::state(rt, state);
+        let mut args = vec![b, l];
+        if random {
+            args.push(rt.new_object("net/minecraft/util/RandomSource"));
+        }
+        args.extend([p, st]);
+        let r = vc(rt, key, short, &args);
+        if rt.thrown.is_some() {
+            rt.report_thrown(short);
+            return None;
+        }
+        Some(r)
+    })
+}
+
+/// `native_is_valid_bonemeal_target`: whether bone meal works on the mod block `state` at `pos`
+/// (`BonemealableBlock.isValidBonemealTarget`): its own code's answer, or its crop base's (short of
+/// its last age). None for a block that takes no bone meal by its code.
+pub fn is_valid_bonemeal_target(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> Option<bool> {
+    bonemeal(rt, host, pos, state, VALID_BONEMEAL, false).map(|v| v.i() != 0)
+}
+
+/// `native_is_bonemeal_success`: whether this use of bone meal grows the block
+/// (`isBonemealSuccess`, which a sapling, say, draws for; always for a crop).
+pub fn is_bonemeal_success(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {
+    bonemeal(rt, host, pos, state, BONEMEAL_SUCCESS, true).is_some_and(|v| v.i() != 0)
+}
+
+/// `native_perform_bonemeal`: the block grows (`performBonemeal`: a crop by 2 to 5 ages, up to its
+/// last).
+pub fn perform_bonemeal(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) {
+    rt.safe_point();
+    bonemeal(rt, host, pos, state, PERFORM_BONEMEAL, true);
+}
+
 /// `neighbor_changed`: `BlockBehaviour.neighborChanged`.
 pub fn neighbor_changed(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, from: [i32; 3], changed_block: &str, moved: bool) -> bool {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.

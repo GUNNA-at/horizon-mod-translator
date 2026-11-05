@@ -680,6 +680,40 @@ const DEFAULT_SHAPE_BLOCKS: [&str; 99] = [
     "WetSpongeBlock",
 ];
 
+/// The block classes of 1.21.1 whose scheduled `tick(state, level, pos, random)` is `BlockBehaviour`'s,
+/// which does nothing: neither they nor a class above them declares one, as Minecraft 1.21.1's class
+/// files say. A mod block's `super.tick(...)` to one of them (Farmer's Delight's rice calls
+/// `BushBlock.tick` from its random tick) does nothing either.
+const DEFAULT_TICK_BLOCKS: [&str; 189] = [
+    "AbstractBannerBlock", "AbstractCandleBlock", "AbstractChestBlock", "AbstractFurnaceBlock", "AbstractSkullBlock", "AirBlock", "AmethystBlock",
+    "AmethystClusterBlock", "AttachedStemBlock", "AzaleaBlock", "BambooSaplingBlock", "BannerBlock", "BarrierBlock", "BaseCoralFanBlock",
+    "BaseCoralPlantBlock", "BaseCoralPlantTypeBlock", "BaseCoralWallFanBlock", "BaseEntityBlock", "BaseFireBlock", "BaseRailBlock",
+    "BaseTorchBlock", "BeaconBlock", "BedBlock", "BeehiveBlock", "BeetrootBlock", "BellBlock", "BlastFurnaceBlock", "Block", "BrewingStandBlock",
+    "BuddingAmethystBlock", "BushBlock", "CakeBlock", "CampfireBlock", "CandleBlock", "CandleCakeBlock", "CarpetBlock", "CarrotBlock",
+    "CartographyTableBlock", "CarvedPumpkinBlock", "CeilingHangingSignBlock", "ChainBlock", "ChiseledBookShelfBlock", "CocoaBlock",
+    "ConduitBlock", "CopperBulbBlock", "CraftingTableBlock", "CropBlock", "CrossCollisionBlock", "CryingObsidianBlock", "DaylightDetectorBlock",
+    "DeadBushBlock", "DecoratedPotBlock", "DirectionalBlock", "DoorBlock", "DoublePlantBlock", "DropExperienceBlock", "EnchantingTableBlock",
+    "EndGatewayBlock", "EndPortalBlock", "EndPortalFrameBlock", "EndRodBlock", "EquipableCarvedPumpkinBlock",
+    "FaceAttachedHorizontalDirectionalBlock", "FenceBlock", "FenceGateBlock", "FletchingTableBlock", "FlowerBlock", "FlowerPotBlock",
+    "FungusBlock", "FurnaceBlock", "GlazedTerracottaBlock", "GlowLichenBlock", "GrassBlock", "GrindstoneBlock", "HalfTransparentBlock",
+    "HangingRootsBlock", "HayBlock", "HeavyCoreBlock", "HoneyBlock", "HopperBlock", "HorizontalDirectionalBlock", "HugeMushroomBlock", "IceBlock",
+    "InfestedBlock", "InfestedRotatedPillarBlock", "IronBarsBlock", "JigsawBlock", "JukeboxBlock", "LadderBlock", "LanternBlock", "LeverBlock",
+    "LightBlock", "LiquidBlock", "LoomBlock", "MangrovePropaguleBlock", "MangroveRootsBlock", "MossBlock", "MudBlock", "MultifaceBlock",
+    "MushroomBlock", "MyceliumBlock", "NetherPortalBlock", "NetherSproutsBlock", "NetherWartBlock", "NetherrackBlock", "NoteBlock", "NyliumBlock",
+    "PiglinWallSkullBlock", "PinkPetalsBlock", "PipeBlock", "PitcherCropBlock", "PlayerHeadBlock", "PlayerWallHeadBlock", "PotatoBlock",
+    "PowderSnowBlock", "PoweredBlock", "PoweredRailBlock", "PumpkinBlock", "RailBlock", "RedStoneOreBlock", "RedStoneWireBlock",
+    "RespawnAnchorBlock", "RodBlock", "RootedDirtBlock", "RootsBlock", "RotatedPillarBlock", "SaplingBlock", "SculkBlock", "SculkVeinBlock",
+    "SeaPickleBlock", "SeagrassBlock", "ShulkerBoxBlock", "SignBlock", "SkullBlock", "SlabBlock", "SlimeBlock", "SmallDripleafBlock",
+    "SmithingTableBlock", "SmokerBlock", "SnowLayerBlock", "SnowyDirtBlock", "SoulFireBlock", "SpawnerBlock", "SpongeBlock", "SporeBlossomBlock",
+    "SpreadingSnowyDirtBlock", "StainedGlassBlock", "StainedGlassPaneBlock", "StairBlock", "StandingSignBlock", "StemBlock", "StonecutterBlock",
+    "StructureBlock", "StructureVoidBlock", "SweetBerryBushBlock", "TallFlowerBlock", "TallGrassBlock", "TallSeagrassBlock", "TintedGlassBlock",
+    "TntBlock", "TorchBlock", "TorchflowerCropBlock", "TransparentBlock", "TrapDoorBlock", "TrialSpawnerBlock", "TurtleEggBlock", "VaultBlock",
+    "VineBlock", "WallBannerBlock", "WallBlock", "WallHangingSignBlock", "WallSignBlock", "WallSkullBlock", "WallTorchBlock", "WaterlilyBlock",
+    "WaterloggedTransparentBlock", "WeatheringCopperBulbBlock", "WeatheringCopperDoorBlock", "WeatheringCopperFullBlock",
+    "WeatheringCopperGrateBlock", "WeatheringCopperSlabBlock", "WeatheringCopperStairBlock", "WeatheringCopperTrapDoorBlock", "WebBlock",
+    "WetSpongeBlock", "WitherRoseBlock", "WitherSkullBlock", "WitherWallSkullBlock", "WoolCarpetBlock",
+];
+
 /// Vanilla 1.21.1's `getShape` of block class `class` (its simple name: the class a mod's
 /// `super.getShape(...)` names, which may inherit it) for a state with properties `props`, in
 /// pixels as `Block.box` takes them; several boxes for a shape vanilla joins. Read from 1.21.1's
@@ -875,6 +909,14 @@ fn state_shape_class(owner: &str) -> bool {
     owner.strip_prefix("net/minecraft/world/level/block/").is_some_and(|c| STATE_SHAPED.contains(&c))
 }
 
+/// `tick`'s descriptor: `BlockBehaviour.tick(BlockState, ServerLevel, BlockPos, RandomSource)`.
+const TICK_DESC: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/util/RandomSource;)V";
+
+fn default_tick_class(owner: &str) -> bool {
+    owner == "net/minecraft/world/level/block/state/BlockBehaviour"
+        || owner.strip_prefix("net/minecraft/world/level/block/").is_some_and(|c| DEFAULT_TICK_BLOCKS.binary_search(&c).is_ok())
+}
+
 fn default_shape_class(owner: &str) -> bool {
     owner == "net/minecraft/world/level/block/state/BlockBehaviour"
         || owner.strip_prefix("net/minecraft/world/level/block/").is_some_and(|c| DEFAULT_SHAPE_BLOCKS.binary_search(&c).is_ok())
@@ -882,7 +924,7 @@ fn default_shape_class(owner: &str) -> bool {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     matches!(owner, DYE_COLOR | "net/minecraft/world/item/ArmorItem$Type" | BLOCK_PROPERTIES | ITEM_PROPERTIES | WOOD_TYPE | BUILDER)
         || (owner == ARMOR_MATERIAL && matches!(name, "defense" | "enchantmentValue" | "toughness" | "knockbackResistance" | "equipSound"))
         || matches!(
@@ -893,6 +935,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         )
         || (name == "type" && owner.ends_with("SignBlock") && owner.starts_with("net/minecraft/world/level/block/"))
         || (name == "getShape" && (default_shape_class(owner) || state_shape_class(owner)))
+        || (name == "tick" && desc == TICK_DESC && default_tick_class(owner))
         || (name == "canSurvive" && plant_class(owner).is_some_and(|c| BUSH_SURVIVAL.contains(&c) || DOUBLE_PLANT_SURVIVAL.contains(&c)))
         || (name == "mayPlaceOn" && plant_class(owner).is_some_and(|c| BUSH_SOIL.contains(&c)))
         || (owner == "net/minecraft/world/level/block/DoublePlantBlock" && name == "placeAt")
@@ -1405,6 +1448,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (DYE_COLOR, _) => dye_call(rt, name, args),
         // `RailShape.isAscending()`: the four that climb.
         (RAIL_SHAPE, "isAscending") => Some(V::I(api_common::text_of(rt, a(0)).starts_with("ascending_") as i32)),
+        // `super.tick(state, level, pos, random)` to a class whose scheduled tick does nothing.
+        (o, "tick") if desc == TICK_DESC && default_tick_class(o) => Some(V::Void),
         // `super.getShape(state, level, pos, context)` to a class with vanilla's default.
         (o, "getShape") if desc == GET_SHAPE.trim_start_matches("getShape.") && default_shape_class(o) => Some(crate::shapes::shape(rt, &[FULL_BOX])),
         // ... and to a vanilla kind whose shape follows its state (a door's facing, hinge, openness).
@@ -3183,6 +3228,42 @@ mod tests {
         });
         assert_eq!(asked, V::I(1));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Farmer's Delight's rice calls `BushBlock.tick` from its random tick (vanilla's scheduled tick
+    /// there does nothing) and grows its panicles only into an empty block, as
+    /// `LevelReader.isEmptyBlock` says: air of any kind is empty, stone or water is not. A
+    /// `super.tick` to a class with a tick of its own (a falling block's) is not answered as empty.
+    #[test]
+    fn a_rices_tick_and_its_empty_block_test_are_vanillas() {
+        let mut rt = Rt::new();
+        let mut host = crate::host::MemoryHost::default();
+        host.blocks.insert([0, 64, 0], "test:rice[age=3,supporting=false]".into());
+        host.blocks.insert([1, 65, 0], "minecraft:cave_air".into());
+        host.blocks.insert([2, 65, 0], "minecraft:stone".into());
+        host.blocks.insert([3, 65, 0], "minecraft:water[level=0]".into());
+        let before = host.blocks.clone();
+        let tick = |rt: &mut Rt, class: &str| rt.static_key(&format!("net/minecraft/world/level/block/{class}.tick.{TICK_DESC}"));
+        const EMPTY: &str = "net/minecraft/server/level/ServerLevel.isEmptyBlock.(Lnet/minecraft/core/BlockPos;)Z";
+        let (bush, falling) = (tick(&mut rt, "BushBlock"), tick(&mut rt, "FallingBlock"));
+        let empty = rt.with_host(&mut host, |rt| {
+            let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+            let rice = rt.new_object("test/RiceBlock");
+            let state = api::state(rt, "test:rice[age=3,supporting=false]");
+            let (pos, random) = (api::block_pos(rt, 0, 64, 0), rt.new_object("net/minecraft/util/RandomSource"));
+            assert_eq!(api::call(rt, bush, &[rice, state, level, pos, random]), V::Void);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+            api::call(rt, falling, &[rice, state, level, pos, random]);
+            assert!(rt.unmapped.contains_key(falling), "a falling block's own tick isn't the empty one");
+            (0..4)
+                .map(|x| {
+                    let above = api::block_pos(rt, x, 65, 0);
+                    api::call(rt, EMPTY, &[level, above]) == V::I(1)
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(empty, [true, true, false, false]);
+        assert_eq!(host.blocks, before, "the empty tick changes nothing");
     }
 
     #[test]

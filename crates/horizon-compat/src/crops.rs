@@ -493,6 +493,34 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
+    /// Bone meal on a mod crop that inherits `CropBlock`'s: it takes it short of its last age, and
+    /// grows 2 to 5 ages, up to its last (the panicles' own, 3). A mod block that is no crop and
+    /// has no bone meal code of its own is left to its template.
+    #[test]
+    fn bone_meal_grows_a_mod_crop_as_vanillas() {
+        let mut rt = runtime();
+        let soil = "minecraft:farmland[moisture=7]";
+        let valid = |rt: &mut Rt, crop: &str| crate::glue::is_valid_bonemeal_target(rt, &mut field(crop, soil), [0, 1, 0], crop);
+        assert_eq!(valid(&mut rt, "test:cabbages[age=0]"), Some(true));
+        assert_eq!(valid(&mut rt, "test:cabbages[age=7]"), Some(false));
+        assert_eq!(valid(&mut rt, "test:rice_panicles[age=3]"), Some(false));
+        assert_eq!(valid(&mut rt, "test:rich_soil_farmland[moisture=0]"), None);
+        assert_eq!(valid(&mut rt, "minecraft:wheat[age=0]"), None);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            let mut host = field("test:cabbages[age=0]", soil);
+            assert!(crate::glue::is_bonemeal_success(&mut rt, &mut host, [0, 1, 0], "test:cabbages[age=0]"));
+            crate::glue::perform_bonemeal(&mut rt, &mut host, [0, 1, 0], "test:cabbages[age=0]");
+            seen.insert(host.blocks[&[0, 1, 0]].clone());
+        }
+        let ages: Vec<&str> = seen.iter().map(String::as_str).collect();
+        assert_eq!(ages, ["test:cabbages[age=2]", "test:cabbages[age=3]", "test:cabbages[age=4]", "test:cabbages[age=5]"]);
+        let mut host = field("test:rice_panicles[age=1]", soil);
+        crate::glue::perform_bonemeal(&mut rt, &mut host, [0, 1, 0], "test:rice_panicles[age=1]");
+        assert_eq!(host.blocks[&[0, 1, 0]], "test:rice_panicles[age=3]");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// The growth speed, as NeoForge's `CropBlock.getGrowthSpeed` adds it up: 1, then 3 for the wet
     /// farmland right below (1 when dry), a quarter of 1 or 3 for each farmland around it; a mod
     /// soil that sustains the crop and is fertile counts 3 though it isn't wet; halved in rows on

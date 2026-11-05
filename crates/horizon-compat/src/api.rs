@@ -1304,6 +1304,14 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let text = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
             state(rt, &text)
         }
+        // `LevelReader.isEmptyBlock(pos)`: the block there is air (Farmer's Delight's rice grows its
+        // panicles only into an empty block).
+        (_, "isEmptyBlock") if level => {
+            let p = pos_of(rt, a(1));
+            let text = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
+            let b = text.split('[').next().unwrap_or("");
+            V::I(matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") as i32)
+        }
         (_, "setBlock" | "setBlockAndUpdate") if level => {
             let p = pos_of(rt, a(1));
             let text = rt.str_of(a(2)).unwrap_or("minecraft:air").to_owned();
