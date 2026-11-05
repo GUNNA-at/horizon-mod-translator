@@ -2391,6 +2391,14 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `api_common::tests::villager_food_is_vanillas_until_a_mod_replaces_it`,
     `blocks::tests::vanillas_dyed_item_interaction_washes_a_dyed_stack`; 276 compat and 14
     translator tests pass.
+  - [x] 2026-11-05 Class objects are one per class (`rt.class_literal`: a class literal, `getClass`,
+    `Integer.TYPE` and the other primitives' `TYPE`), so `type == int.class` holds as in Java
+    (Mekanism's `PropertyType.getFromType` compares by identity). The translator writes each class's
+    declared fields into the bundle's reflection table (`access name descriptor`), and the runtime
+    answers `Field.getType`, `getModifiers`, `Class.getDeclaredFields`, `getFields` (public ones,
+    superclasses' too), `isArray`, `getComponentType` and `isPrimitive` for the mod's classes:
+    Mekanism's `SyncMapper` reads its synced fields' types (70 `Field.getType` misses in round 14).
+    Test `jlang::tests::a_mod_classs_fields_tell_their_types`; 277 compat and 14 translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

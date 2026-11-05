@@ -524,6 +524,18 @@ const JDK_SUPERS: [(&str, &str); 12] = [
 impl Rt {
     /// Whether `v` is an instance of `class` (walking known superclasses).
     /// The one object for `key`, made by `make` the first time.
+    /// The `Class` object of class `name` (internal form; `int`, `[I` as `Class.getName` has
+    /// them): one per class, as Java's, so class objects compare by identity (`type == int.class`).
+    pub fn class_literal(&mut self, name: &str) -> V {
+        let key = format!("class/{name}");
+        if let Some(&v) = self.interned.get(&key) {
+            return v;
+        }
+        let v = self.alloc("java/lang/Class", Data::Str(name.to_owned()));
+        self.interned.insert(key, v);
+        v
+    }
+
     pub fn intern(&mut self, key: String, make: impl FnOnce(&mut Rt) -> V) -> V {
         if let Some(v) = self.interned.get(&key) {
             return *v;

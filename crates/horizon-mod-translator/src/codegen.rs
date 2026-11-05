@@ -951,7 +951,22 @@ impl<'a> Program<'a> {
                 "        ({iface:?}, \"services\") => {{ let names: &[&str] = &{impls:?}; let a = rt.new_array(names.len() as i32, V::NULL); for (i, n) in names.iter().enumerate() {{ let v = rt.string(n); rt.array_set(a, i as i32, v); }} a }}"
             );
         }
-        s.push_str("        _ => return None,\n    })\n}\n");
+        // A class's declared fields (`getDeclaredFields`, `Field.getType`): one line of
+        // `access name descriptor` per field, from the table below.
+        s.push_str("        (c, \"fields\") => match FIELDS.binary_search_by(|(n, _)| (*n).cmp(c)) { Ok(i) => rt.string(FIELDS[i].1), Err(_) => return None },\n");
+        s.push_str("        _ => return None,\n    })\n}\n\n");
+        let mut fields: Vec<(&str, String)> = self
+            .classes
+            .values()
+            .filter(|c| !c.fields.is_empty())
+            .map(|c| (c.name.as_str(), c.fields.iter().map(|f| format!("{} {} {}", f.access, f.name, f.desc)).collect::<Vec<_>>().join("\n")))
+            .collect();
+        fields.sort();
+        let _ = writeln!(s, "/// Each class's declared fields, by class name: `access name descriptor` lines.\nstatic FIELDS: [(&str, &str); {}] = [", fields.len());
+        for (c, f) in &fields {
+            let _ = writeln!(s, "    ({c:?}, {f:?}),");
+        }
+        s.push_str("];\n");
         s
     }
 
@@ -1704,7 +1719,7 @@ impl<'a> Program<'a> {
                 }
                 Some(Const::Class(n)) => {
                     let name = c.utf8(*n).unwrap_or_default();
-                    format!("let v = rt.alloc(\"java/lang/Class\", horizon_compat::Data::Str({name:?}.into())); s.push(v); {go}")
+                    format!("let v = rt.class_literal({name:?}); s.push(v); {go}")
                 }
                 _ => {
                     self.unsupported("ldc of a dynamic constant");

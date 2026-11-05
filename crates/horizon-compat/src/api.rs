@@ -546,7 +546,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         "java/lang/StackWalker.getCallerClass.()Ljava/lang/Class;" => {
             let c = rt.caller_class;
-            rt.alloc("java/lang/Class", Data::Str(c.into()))
+            rt.class_literal(c)
         }
         "java/lang/Class.getName.()Ljava/lang/String;" | "java/lang/Class.getTypeName.()Ljava/lang/String;" | "java/lang/Class.getPackageName.()Ljava/lang/String;" | "java/lang/Class.getSimpleName.()Ljava/lang/String;" => {
             let n = rt.str_of(a(0)).unwrap_or("").replace('/', ".");

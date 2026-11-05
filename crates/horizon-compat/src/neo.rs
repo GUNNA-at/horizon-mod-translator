@@ -1465,7 +1465,7 @@ mod tests {
         assert_ne!(ctx, V::NULL);
         let bus = crate::api::call(&mut rt, "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext.getKEventBus.()Lnet/neoforged/bus/api/IEventBus;", &[ctx]);
         assert!(rt.instance_of(bus, "net/neoforged/bus/api/IEventBus"));
-        let event = rt.alloc("java/lang/Class", Data::Str("net/neoforged/fml/event/lifecycle/FMLCommonSetupEvent".into()));
+        let event = rt.class_literal("net/neoforged/fml/event/lifecycle/FMLCommonSetupEvent");
         let listener = rt.new_object("test/Listener");
         let before = rt.listeners.len();
         crate::api::call(&mut rt, "net/neoforged/bus/api/IEventBus.addListener.(Ljava/lang/Class;Ljava/util/function/Consumer;)V", &[bus, event, listener]);

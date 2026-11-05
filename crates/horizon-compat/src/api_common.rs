@@ -4209,6 +4209,17 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             })
         }
         "java/lang/Boolean" if field == "TRUE" || field == "FALSE" => boolean(rt, field == "TRUE"),
+        // The primitives' classes (`int.class` is `Integer.TYPE`), one object each.
+        "java/lang/Integer" | "java/lang/Long" | "java/lang/Boolean" | "java/lang/Byte" | "java/lang/Character" | "java/lang/Short" | "java/lang/Float" | "java/lang/Double" | "java/lang/Void"
+            if field == "TYPE" =>
+        {
+            let primitive = match owner {
+                "java/lang/Integer" => "int",
+                "java/lang/Character" => "char",
+                o => &o["java/lang/".len()..],
+            };
+            rt.class_literal(&primitive.to_ascii_lowercase())
+        }
         "net/minecraft/core/Direction$Axis" => axis(rt, AXIS_NAMES.iter().position(|a| a.eq_ignore_ascii_case(field))? as i64),
         "net/minecraft/core/Direction$AxisDirection" if field == "POSITIVE" || field == "NEGATIVE" => {
             let positive = field == "POSITIVE";

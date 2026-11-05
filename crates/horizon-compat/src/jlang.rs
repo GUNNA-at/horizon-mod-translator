@@ -40,7 +40,7 @@ fn new_str(rt: &mut Rt, s: String) -> V {
 
 /// A `Class` object for `name` (internal form, `a/b/C`).
 pub fn class_object(rt: &mut Rt, name: &str) -> V {
-    rt.alloc("java/lang/Class", Data::Str(name.into()))
+    rt.class_literal(name)
 }
 
 /// An enum class's constants (`Class.getEnumConstants`): a mod enum's `values()`, or a vanilla
@@ -100,6 +100,77 @@ fn descriptor_of(name: &str) -> String {
         n if n.starts_with('[') => n.replace('.', "/"),
         n => format!("L{};", n.replace('.', "/")),
     }
+}
+
+/// The fields class `class` declares, as the mod's table lists them: (access, name, descriptor).
+/// None for a class that isn't the mod's.
+fn declared_fields(rt: &mut Rt, class: &str) -> Option<Vec<(u16, String, String)>> {
+    if !rt.is_mod_class(class) {
+        return None;
+    }
+    let Some(v) = rt.reflect(class, "fields", &[]) else { return Some(Vec::new()) };
+    let lines = rt.str_of(v).unwrap_or("").to_owned();
+    Some(
+        lines
+            .lines()
+            .filter_map(|l| {
+                let mut p = l.splitn(3, ' ');
+                Some((p.next()?.parse().ok()?, p.next()?.to_owned(), p.next()?.to_owned()))
+            })
+            .collect(),
+    )
+}
+
+/// The class a field descriptor names, as `Class.getName` has it (`I` is `int`, `Lfoo/Bar;`
+/// `foo/Bar`, an array its descriptor).
+fn descriptor_class(desc: &str) -> &str {
+    match desc {
+        "I" => "int",
+        "J" => "long",
+        "Z" => "boolean",
+        "B" => "byte",
+        "C" => "char",
+        "S" => "short",
+        "F" => "float",
+        "D" => "double",
+        "V" => "void",
+        d if d.starts_with('L') && d.ends_with(';') => &d[1..d.len() - 1],
+        d => d,
+    }
+}
+
+/// Field `name`'s access and descriptor, from class `class` or the nearest superclass declaring it.
+fn find_field(rt: &mut Rt, class: &str, name: &str) -> Option<(u16, String)> {
+    let mut c = class.to_owned();
+    loop {
+        if let Some((access, _, desc)) = declared_fields(rt, &c)?.into_iter().find(|f| f.1 == name) {
+            return Some((access, desc));
+        }
+        c = rt.supers.get(c.as_str())?.to_string();
+    }
+}
+
+/// `Class.getDeclaredFields` (`all` false) or `getFields` (the public ones of the class and its
+/// superclasses): `Field`s of each, declared by the class that declares it. None for a class that
+/// isn't the mod's.
+fn fields_array(rt: &mut Rt, class: &str, all: bool) -> Option<V> {
+    let mut out = Vec::new();
+    let mut c = class.to_owned();
+    loop {
+        let declared = declared_fields(rt, &c)?;
+        let owner = rt.class_literal(&c);
+        for (access, name, _) in declared {
+            if !all || access & 0x0001 != 0 {
+                let n = rt.string(&name);
+                out.push(field_object(rt, owner, n));
+            }
+        }
+        match rt.supers.get(c.as_str()) {
+            Some(&sup) if all && rt.is_mod_class(sup) => c = sup.to_owned(),
+            _ => break,
+        }
+    }
+    Some(rt.alloc("[Ljava/lang/reflect/Field;", Data::Array(out)))
 }
 
 /// A `Field` for field `name` (a string) of class object `class`.
@@ -500,7 +571,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "java/lang/Object" => Some(match name {
             "getClass" => {
                 let c = rt.class_of(a(0));
-                rt.alloc("java/lang/Class", Data::Str(c.into()))
+                rt.class_literal(c)
             }
             // Object's own: `super.hashCode()` from an override must not come back to it.
             "hashCode" => V::I(crate::jutil::hash_own(rt, a(0))),
@@ -550,7 +621,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "equals" => V::I((a(0) == a(1)) as i32),
             "getDeclaringClass" => {
                 let c = rt.class_of(a(0));
-                rt.alloc("java/lang/Class", Data::Str(c.into()))
+                rt.class_literal(c)
             }
             _ => return None,
         }),
@@ -591,6 +662,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             // A field or method by name: what it reaches is looked for when it is used.
             "getDeclaredField" | "getField" => field_object(rt, a(0), a(1)),
+            "getDeclaredFields" | "getFields" => {
+                let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+                fields_array(rt, &n, name == "getFields")?
+            }
+            // An array class (`int[].class`, `[I`) and what it holds; the primitives' own.
+            "isArray" => V::I(rt.str_of(a(0)).is_some_and(|n| n.starts_with('[')) as i32),
+            "getComponentType" => match rt.str_of(a(0)).and_then(|n| n.strip_prefix('[')).map(|d| descriptor_class(d).to_owned()) {
+                Some(c) => rt.class_literal(&c),
+                None => V::NULL,
+            },
+            "isPrimitive" => {
+                let n = rt.str_of(a(0)).unwrap_or("");
+                V::I(matches!(n, "int" | "long" | "boolean" | "byte" | "char" | "short" | "float" | "double" | "void") as i32)
+            }
             "getDeclaredMethod" | "getMethod" => {
                 let m = rt.new_object("java/lang/reflect/Method");
                 rt.put_field(m, "$class", a(0));
@@ -638,7 +723,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "desiredAssertionStatus" => V::I(0),
             "hashCode" => V::I(string_hash(rt.str_of(a(0)).unwrap_or(""))),
             "equals" => V::I((rt.str_of(a(0)) == rt.str_of(a(1))) as i32),
-            "isInterface" | "isArray" | "isRecord" => V::I(0),
+            "isInterface" | "isRecord" => V::I(0),
             _ => return None,
         }),
         "java/lang/reflect/Constructor" => Some(match name {
@@ -663,6 +748,17 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // into a field that holds one, as Java's do.
         "java/lang/reflect/Field" => Some(match name {
             "getName" => rt.get_field(a(0), "$name"),
+            // What a mod class's field holds and its modifiers, as the class declares it.
+            "getType" => {
+                let (class, name, _) = field_parts(rt, a(0));
+                let (_, desc) = find_field(rt, &class, name)?;
+                rt.class_literal(descriptor_class(&desc))
+            }
+            "getModifiers" => {
+                let (class, name, _) = field_parts(rt, a(0));
+                let (access, _) = find_field(rt, &class, name)?;
+                V::I(i32::from(access & 0x00df))
+            }
             "getDeclaringClass" => rt.get_field(a(0), "$class"),
             "setAccessible" => V::Void,
             "trySetAccessible" | "canAccess" => V::I(1),
@@ -1667,6 +1763,53 @@ mod tests {
         let no_args = rt.new_array(0, V::NULL);
         let boxed = c(&mut rt, "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", &[method, machine, no_args]);
         assert_eq!((rt.class_of(boxed), rt.get_field(boxed, "value")), ("java/lang/Long", V::J(7)));
+    }
+
+    /// A mod class's fields as its table declares them (Mekanism's `SyncMapper` picks how to sync a
+    /// field by its `getType()`): class objects are one per class, so `type == long.class` holds as
+    /// in Java; an array field's class tells what it holds; a superclass declares what it inherits.
+    #[test]
+    fn a_mod_classs_fields_tell_their_types() {
+        fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
+            let fields = match (class, what) {
+                ("t/Base", "fields") => "1 owner Ljava/util/UUID;",
+                ("t/Tank", "fields") => "2 stored J\n1 levels [I\n25 MAX I",
+                _ => return None,
+            };
+            Some(rt.string(fields))
+        }
+        const GET_TYPE: &str = "java/lang/reflect/Field.getType.()Ljava/lang/Class;";
+        let mut rt = Rt::new();
+        rt.supers.insert("t/Tank", "t/Base");
+        rt.supers.insert("t/Base", "java/lang/Object");
+        rt.reflect = Some(reflect);
+        let tank = class_object(&mut rt, "t/Tank");
+        assert_eq!(class_object(&mut rt, "t/Tank"), tank, "one class object per class");
+        let field = |rt: &mut Rt, name: &str| {
+            let n = rt.string(name);
+            c(rt, "java/lang/Class.getField.(Ljava/lang/String;)Ljava/lang/reflect/Field;", &[tank, n])
+        };
+        let stored = field(&mut rt, "stored");
+        let long = crate::api::get_static(&mut rt, "java/lang/Long.TYPE");
+        assert_eq!(c(&mut rt, GET_TYPE, &[stored]), long);
+        assert_eq!(c(&mut rt, "java/lang/reflect/Field.getModifiers.()I", &[stored]), V::I(2), "private");
+        let levels = field(&mut rt, "levels");
+        let ints = c(&mut rt, GET_TYPE, &[levels]);
+        assert_eq!(c(&mut rt, "java/lang/Class.isArray.()Z", &[ints]), V::I(1));
+        let int = c(&mut rt, "java/lang/Class.getComponentType.()Ljava/lang/Class;", &[ints]);
+        assert_eq!(int, crate::api::get_static(&mut rt, "java/lang/Integer.TYPE"));
+        assert_eq!(c(&mut rt, "java/lang/Class.isPrimitive.()Z", &[int]), V::I(1));
+        assert_eq!(c(&mut rt, "java/lang/Class.isArray.()Z", &[int]), V::I(0));
+        let owner = field(&mut rt, "owner");
+        let uuid = c(&mut rt, GET_TYPE, &[owner]);
+        assert_eq!(rt.str_of(uuid), Some("java/util/UUID"));
+        let names = |rt: &mut Rt, key: &'static str| {
+            let all = c(rt, key, &[tank]);
+            crate::jutil::elements(rt, all).into_iter().map(|f| text(rt, rt.get_field(f, "$name"))).collect::<Vec<_>>()
+        };
+        assert_eq!(names(&mut rt, "java/lang/Class.getDeclaredFields.()[Ljava/lang/reflect/Field;"), ["stored", "levels", "MAX"]);
+        assert_eq!(names(&mut rt, "java/lang/Class.getFields.()[Ljava/lang/reflect/Field;"), ["levels", "MAX", "owner"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Create's contraption keeps its level behind a `WeakReference`; nothing collects it here.
