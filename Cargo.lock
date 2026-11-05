@@ -1493,6 +1493,7 @@ name = "horizon-compat"
 version = "0.1.0"
 dependencies = [
  "horizon-compat-core",
+ "png",
  "serde_json",
 ]
 

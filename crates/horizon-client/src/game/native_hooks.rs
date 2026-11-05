@@ -4019,6 +4019,55 @@ impl Game<'_> {
     pub(super) fn native_world_height(&self) -> (i32, i32) {
         (self.world.shape.min_y, self.world.shape.height)
     }
+    /// The bytes of resource file `path` (`assets/create/models/block/shaft.json`,
+    /// `data/create/recipe/…`) as the game loaded its resources: the resource
+    /// packs', the mods' and vanilla's files layered, the top one's. None for a
+    /// file none has, or a path that leaves the resources (`..`, absolute).
+    /// API @API:native_resources@.
+    pub(super) fn native_resource(&self, path: &str) -> Option<Vec<u8>> {
+        resource_path(path).and_then(|p| std::fs::read(self.options.resources.join(p)).ok())
+    }
+    /// The resource files under folder `prefix` (`assets/create/models`), as
+    /// paths from the resources' root (`assets/create/models/block/shaft.json`),
+    /// sorted. API @API:native_resources@.
+    pub(super) fn native_resource_paths(&self, prefix: &str) -> Vec<String> {
+        let Some(folder) = resource_path(prefix.trim_end_matches('/')) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut todo = vec![self.options.resources.join(folder)];
+        while let Some(dir) = todo.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    todo.push(path);
+                } else if let Ok(rel) = path.strip_prefix(&self.options.resources) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+    /// The namespaces under `root` (`assets` or `data`) that have resources:
+    /// `minecraft` and each mod's and pack's own, sorted. API @API:native_resources@.
+    pub(super) fn native_resource_namespaces(&self, root: &str) -> Vec<String> {
+        let Some(root) = resource_path(root) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = std::fs::read_dir(self.options.resources.join(root))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .collect();
+        out.sort();
+        out
+    }
     /// The most of the item `item` one slot holds (`Item.getDefaultMaxStackSize`),
     /// or `None` for an unknown item: for a mod's container that fills or
     /// merges stacks itself. API @API:native_world_state@.
@@ -6045,6 +6094,15 @@ fn mod_screen_opens(
         return Some(false);
     }
     None
+}
+
+/// A resource path a mod may read, relative to the resources' root: no empty, `.` or `..` part,
+/// no backslash, not absolute.
+fn resource_path(path: &str) -> Option<&str> {
+    let ok = !path.is_empty()
+        && !path.contains('\\')
+        && path.split('/').all(|p| !p.is_empty() && p != "." && p != "..");
+    ok.then_some(path)
 }
 
 #[cfg(test)]

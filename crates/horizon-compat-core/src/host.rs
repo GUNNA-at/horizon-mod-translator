@@ -520,6 +520,20 @@ pub trait Host {
     fn read_only(&self) -> bool {
         false
     }
+    /// The bytes of resource file `path` under the game's resources (`assets/create/lang/en_us.json`,
+    /// `data/create/recipe/...`): what the resource packs, the mods and vanilla give for it, the
+    /// first that has it. None for a file nothing has.
+    fn resource(&self, _path: &str) -> Option<Vec<u8>> {
+        None
+    }
+    /// The resource files under folder `prefix` (`assets/create/models`), as paths from the root.
+    fn resource_paths(&self, _prefix: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// The namespaces with resources under `root` (`assets`, `data`).
+    fn resource_namespaces(&self, _root: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A piece of a line of text with one style ([`Host::gui_text`]).
@@ -704,6 +718,8 @@ pub struct MemoryHost {
     pub signals: HashMap<[i32; 3], i32>,
     /// Block ticks scheduled, in order: where, which block, in how many ticks.
     pub scheduled: Vec<([i32; 3], String, i32)>,
+    /// Resource files by path ([`Host::resource`]).
+    pub resources: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 impl Host for MemoryHost {
@@ -1059,6 +1075,19 @@ impl Host for MemoryHost {
     }
     fn read_only(&self) -> bool {
         self.read_only
+    }
+    fn resource(&self, path: &str) -> Option<Vec<u8>> {
+        self.resources.get(path).cloned()
+    }
+    fn resource_paths(&self, prefix: &str) -> Vec<String> {
+        let folder = format!("{}/", prefix.trim_end_matches('/'));
+        self.resources.keys().filter(|p| p.starts_with(&folder)).cloned().collect()
+    }
+    fn resource_namespaces(&self, root: &str) -> Vec<String> {
+        let folder = format!("{root}/");
+        let mut out: Vec<String> = self.resources.keys().filter_map(|p| p.strip_prefix(&folder)?.split_once('/').map(|(ns, _)| ns.to_owned())).collect();
+        out.dedup();
+        out
     }
 }
 

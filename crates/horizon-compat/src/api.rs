@@ -630,7 +630,7 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 40] = [
+const CHAIN: [Module; 41] = [
     mutable_pos,
     crate::mixin::call,
     crate::attachments::call,
@@ -663,6 +663,7 @@ const CHAIN: [Module; 40] = [
     crate::gui::call,
     crate::neo::call,
     crate::files::call,
+    crate::resources::call,
     crate::jlang::call,
     crate::jutil::call,
     crate::tags::call,
@@ -676,7 +677,7 @@ const CHAIN: [Module; 40] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 40] = [
+const CLAIMS: [Claims; 41] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::mixin::claims,
     crate::attachments::claims,
@@ -709,6 +710,7 @@ const CLAIMS: [Claims; 40] = [
     crate::gui::claims,
     crate::neo::claims,
     crate::files::claims,
+    crate::resources::claims,
     crate::jlang::claims,
     crate::jutil::claims,
     crate::tags::claims,
@@ -720,7 +722,7 @@ const CLAIMS: [Claims; 40] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 40] = [
+const MODULE_NAMES: [&str; 41] = [
     "mutable_pos",
     "mixin",
     "attachments",
@@ -753,6 +755,7 @@ const MODULE_NAMES: [&str; 40] = [
     "gui",
     "neo",
     "files",
+    "resources",
     "jlang",
     "jutil",
     "tags",
@@ -1757,6 +1760,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::handlers::get_static(rt, o, f))
             .or_else(|| crate::neo::get_static(rt, o, f))
             .or_else(|| crate::files::get_static(rt, o, f))
+            .or_else(|| crate::resources::get_static(rt, o, f))
     {
         return v;
     }

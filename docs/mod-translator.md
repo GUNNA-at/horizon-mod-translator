@@ -2041,6 +2041,36 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     codec roots (`MapCodec.forGetter` 3, `StreamCodec$CodecOperation.apply`, `Biome.LIST_CODEC`,
     `Codec.fieldOf`, `MapCodec.xmap`, `SimpleFluidContent.CODEC` 2 each). Results in
     `scratchpad/lt/r` (round 9's in `r9-all`).
+  - [x] 2026-11-05 The game's resources, read as a mod reads them (`resources.rs`). Of 367 jars in
+    the pack, 57 call `getResourceManager`, 48 `registerReloadListener`, 45 `NativeImage.read`,
+    39 `listResources`, 34 handle `RegisterClientReloadListenersEvent` (Gson: 122 use `JsonObject`,
+    103 `Gson`, 47 `GsonHelper`, 43 `JsonParser`: next). `Minecraft.getResourceManager()` is the
+    client's manager (`ReloadableResourceManager`), `MinecraftServer.getResourceManager()` the
+    server's (`data/`): `getResource` (an `Optional`), `getResourceOrThrow` and `open` (a missing file
+    throws `FileNotFoundException`), `openAsReader`, `getResourceStack`, `listResources` and
+    `listResourceStacks` per namespace with the mod's filter (sorted by location, as vanilla's
+    `TreeMap`), `getNamespaces`. A `Resource` opens its file, or the supplier a mod made it with.
+    `java.io`'s streams and readers over the bytes (`InputStream.read` in its forms, `readAllBytes`,
+    `readNBytes`, `skip`, `available`; `InputStreamReader`, `BufferedReader.readLine` and `lines`,
+    `StringReader`, `ByteArrayInputStream`), commons-io's `IOUtils.toString`/`toByteArray`/
+    `readLines`. `BlockModel.fromStream`/`fromString` parse a model's own elements (`from`, `to`,
+    faces by direction with `cullface`, `tintindex`, `texture` and `uv`, `rotation`, `shade`) and its
+    parent's location (StorageDrawers' drawer geometry). `NativeImage.read` decodes a PNG with the
+    game's decoder and answers `getWidth`, `getHeight`, `getPixelRGBA` (1.21.1's ABGR; out of bounds
+    throws), `setPixelRGBA`, `getPixelsRGBA` (Mekanism's texture colours). Reload listeners: NeoForge's
+    `RegisterClientReloadListenersEvent` is posted before the client's setup and the manager's own
+    `registerReloadListener` adds to the same list; after the setup each listener reloads in order,
+    once, with the game as host: its own `reload` (a lambda's: GeckoLib's), else
+    `SimplePreparableReloadListener`'s `prepare` then `apply`, or `onResourceManagerReload`
+    (Create's two). The files come from the host: `native_resource(path)`,
+    `native_resource_paths(prefix)` and `native_resource_namespaces(root)` (fragment
+    `native_resources`) read the game's resource root as it loaded it (packs, the mods' content and
+    vanilla layered); without a host, from the folders in `HORIZON_COMPAT_RESOURCES`. `Resource`
+    and `BlockFaceUV` left the data-class table (modelled here now; only those two lines, since the
+    tool would also drop `GlobalPos.of`'s factory, which `codecs.rs` names). Tests
+    `resources::tests::{a_mod_reads_the_games_resources_through_the_manager,
+    readers_and_listing_read_as_javas_do, a_registered_reload_listener_prepares_then_applies}`;
+    233 compat tests pass. Not yet in game (next build, with Gson).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

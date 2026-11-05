@@ -1,0 +1,5 @@
+{
+  "hooks": [],
+  "rust_summary": "the game's resource files for a mod's own readers (`native_resource`, `native_resource_paths`, `native_resource_namespaces`).",
+  "doc_summary": "`native_resource(path)` is the bytes of a resource file as the game loaded its resources (`assets/<namespace>/…` for the client's, `data/<namespace>/…` for the server's): the resource packs', the mods' and vanilla's files layered, the top one's (`ResourceManager.getResource`), None for a file none has or a path with `..`, a backslash or an empty part. `native_resource_paths(prefix)` lists the files under a folder (`assets/mymod/models`) as paths from the root, sorted (`ResourceManager.listResources` per namespace); `native_resource_namespaces(root)` names the namespaces under `assets` or `data` (`getNamespaces`). Both sides. Bundles need \"hooks\": @API:native_resources@."
+}

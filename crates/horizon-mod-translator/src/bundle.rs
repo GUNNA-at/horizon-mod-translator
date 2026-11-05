@@ -43,7 +43,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 56] = [
+const COMPAT: [(&str, &str); 57] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -94,6 +94,7 @@ const COMPAT: [(&str, &str); 56] = [
     ("attributes.rs", include_str!("../../horizon-compat/src/attributes.rs")),
     ("enchantments.rs", include_str!("../../horizon-compat/src/enchantments.rs")),
     ("files.rs", include_str!("../../horizon-compat/src/files.rs")),
+    ("resources.rs", include_str!("../../horizon-compat/src/resources.rs")),
     ("network.rs", include_str!("../../horizon-compat/src/network.rs")),
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
     ("tags.rs", include_str!("../../horizon-compat/src/tags.rs")),
@@ -104,7 +105,7 @@ const COMPAT: [(&str, &str); 56] = [
 
 /// The registry crates the carried runtime uses, as the engine's `[dependencies]`: each must be
 /// in Horizon's Cargo.lock, at a version that lock holds.
-const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\n";
+const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\npng = \"0.18\"\n";
 
 /// horizon-compat's modules for tools only (the port pack's), not carried: nothing carried uses them.
 #[cfg(test)]
@@ -1385,6 +1386,15 @@ fn world_reads(get: &str) -> String {
         }}
         fn world_height(&self) -> (i32, i32) {{
             {get}.native_world_height()
+        }}
+        fn resource(&self, path: &str) -> Option<Vec<u8>> {{
+            {get}.native_resource(path)
+        }}
+        fn resource_paths(&self, prefix: &str) -> Vec<String> {{
+            {get}.native_resource_paths(prefix)
+        }}
+        fn resource_namespaces(&self, root: &str) -> Vec<String> {{
+            {get}.native_resource_namespaces(root)
         }}
 "#
     )

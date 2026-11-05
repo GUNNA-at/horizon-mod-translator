@@ -1100,6 +1100,9 @@ pub fn fire_client_setup(rt: &mut Rt) {
         return;
     }
     rt.interned.insert("compat:client".into(), V::I(1));
+    // The mods' reload listeners, as the client's resource manager is made.
+    let ev = crate::resources::client_listeners_event(rt);
+    post(rt, crate::resources::CLIENT_LISTENERS_EVENT, ev);
     let ev = rt.new_object(REGISTER_RENDERERS);
     post(rt, REGISTER_RENDERERS, ev);
     let ev = rt.new_object(CLIENT_SETUP);

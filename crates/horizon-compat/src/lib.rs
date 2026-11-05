@@ -48,6 +48,7 @@ pub mod palette;
 pub mod particles;
 pub mod records;
 pub mod render;
+pub mod resources;
 pub mod rotation;
 pub mod scan;
 pub mod screens;

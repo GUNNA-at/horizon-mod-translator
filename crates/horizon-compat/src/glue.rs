@@ -635,7 +635,7 @@ pub fn block_entity_data(
     merged: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
 ) {
     rt.safe_point();
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     if mod_block(rt, state).is_none() {
         return;
     }
@@ -686,6 +686,17 @@ fn load_update_tag(rt: &mut Rt, be: V, pos: [i32; 3], state: &str, nbt: &std::co
     }
 }
 
+/// The client's setup, once, on its first hook ([`crate::neo::fire_client_setup`]), then its first
+/// resource load with the game as host: the reload listeners the mods registered read the game's
+/// resources ([`crate::resources::reload`]).
+fn client_setup(rt: &mut Rt, host: &mut dyn Host) {
+    if crate::neo::is_client(rt) {
+        return;
+    }
+    crate::neo::fire_client_setup(rt);
+    rt.with_host(host, |rt| crate::resources::reload(rt, "assets"));
+}
+
 /// `native_block_entity_submit` (client): draws the mod block entity at `pos` with the renderer its
 /// mod registered for its type (`BlockEntityRenderers.register`), under a pose stack at the block's
 /// corner. `nbt` is the update tag the server sent; `light` is the block's, packed as
@@ -700,7 +711,7 @@ pub fn render_block_entity(
 ) -> bool {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     if mod_block(rt, state).is_none() {
         return false;
     }
@@ -757,7 +768,7 @@ const ER_SHOULD_RENDER_KEY: &str =
 pub fn render_mod_entities(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3]) -> usize {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     rt.with_host(host, |rt| {
         let Some(vc) = rt.vcall else { return 0 };
         let partial = rt.host().map_or(0.0, |h| h.partial_tick());
@@ -857,7 +868,7 @@ pub fn level_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
 pub fn payload_from_server(rt: &mut Rt, host: &mut dyn Host, channel: &str, data: &[u8]) -> bool {
     rt.safe_point();
     // This runtime is the client's, also when a payload comes before its first tick.
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     if channel == crate::mod_entities::CHANNEL {
         rt.with_host(host, |rt| crate::mod_entities::receive(rt, data));
         return true;
@@ -904,7 +915,7 @@ pub fn player_tick(rt: &mut Rt, host: &mut dyn Host) {
 pub fn gui_layer(rt: &mut Rt, host: &mut dyn Host, layer: &str, pre: bool) -> bool {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     rt.with_host(host, |rt| crate::gui::draw_layers(rt, layer, pre))
 }
 
@@ -912,7 +923,7 @@ pub fn gui_layer(rt: &mut Rt, host: &mut dyn Host, layer: &str, pre: bool) -> bo
 /// pointer at `mouse` in GUI pixels ([`crate::screens::render`]). `host` only reads and draws.
 pub fn screen_render(rt: &mut Rt, host: &mut dyn Host, mouse: [f32; 2], partial: f32) {
     rt.safe_point();
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     rt.with_host(host, |rt| crate::screens::render(rt, mouse, partial));
 }
 
@@ -920,7 +931,7 @@ pub fn screen_render(rt: &mut Rt, host: &mut dyn Host, mouse: [f32; 2], partial:
 /// the screen took it. `host` only reads.
 pub fn screen_input(rt: &mut Rt, host: &mut dyn Host, mouse: [f32; 2], input: crate::screens::Input<'_>, modifiers: u32) -> bool {
     rt.safe_point();
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     rt.with_host(host, |rt| crate::screens::input(rt, mouse, input, modifiers))
 }
 
@@ -955,7 +966,7 @@ pub fn item_property(
 ) -> Option<f32> {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     let f = crate::render::property_function(rt, item, property)?;
     rt.with_host(host, |rt| {
         let (entity, held) = match holder {
@@ -994,7 +1005,7 @@ pub fn item_property(
 /// goes on either way: the server's own event decides it there.
 pub fn client_use(rt: &mut Rt, host: &mut dyn Host, hand: u8) {
     rt.safe_point();
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     let Some((pos, face, hit)) = host.player_pov_hit(0) else { return };
     let _ = crate::events::client_right_click_block(rt, host, pos, i64::from(face), hit, hand);
 }
@@ -1005,7 +1016,7 @@ pub fn client_use(rt: &mut Rt, host: &mut dyn Host, hand: u8) {
 pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
-    crate::neo::fire_client_setup(rt);
+    client_setup(rt, host);
     rt.with_host(host, |rt| {
         crate::gui::frame(rt);
         let ev = rt.new_object(CLIENT_TICK_PRE);

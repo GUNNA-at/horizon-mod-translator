@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 682] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 680] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1181,7 +1181,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 682] = [
     ("net/minecraft/client/renderer/Rect2i", "i(IIII)V=xPos,yPos,width,height|ggetX()I=xPos|ggetY()I=yPos|ssetX(I)V=xPos|ssetY(I)V=yPos|ggetWidth()I=width|ggetHeight()I=height|ssetWidth(I)V=width|ssetHeight(I)V=height|o"),
     ("net/minecraft/client/renderer/RenderStateShard", "i(Ljava/lang/String;Ljava/lang/Runnable;Ljava/lang/Runnable;)V=name,setupState,clearState|gtoString()Ljava/lang/String;=name|o"),
     ("net/minecraft/client/renderer/SpriteCoordinateExpander", "i(Lcom/mojang/blaze3d/vertex/VertexConsumer;Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;)V=delegate,sprite|o"),
-    ("net/minecraft/client/renderer/block/model/BlockFaceUV", "i([FI)V=uvs,rotation|o"),
     ("net/minecraft/client/renderer/block/model/ItemOverride$Predicate", "i(Lnet/minecraft/resources/ResourceLocation;F)V=property,value|ggetProperty()Lnet/minecraft/resources/ResourceLocation;=property|ggetValue()F=value|o"),
     ("net/minecraft/client/renderer/block/model/ItemOverrides$BakedOverride", "i([Lnet/minecraft/client/renderer/block/model/ItemOverrides$PropertyMatcher;Lnet/minecraft/client/resources/model/BakedModel;)V=matchers,model|o"),
     ("net/minecraft/client/renderer/block/model/ItemOverrides$PropertyMatcher", "i(IF)V=index,value|o"),
@@ -1423,7 +1422,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 682] = [
     ("net/minecraft/server/packs/repository/FolderRepositorySource", "i(Ljava/nio/file/Path;Lnet/minecraft/server/packs/PackType;Lnet/minecraft/server/packs/repository/PackSource;Lnet/minecraft/world/level/validation/DirectoryValidator;)V=folder,packType,packSource,validator|o"),
     ("net/minecraft/server/packs/repository/PackDetector", "i(Lnet/minecraft/world/level/validation/DirectoryValidator;)V=validator|o"),
     ("net/minecraft/server/packs/resources/ProfiledReloadInstance$State", "i(Ljava/lang/String;Lnet/minecraft/util/profiling/ProfileResults;Lnet/minecraft/util/profiling/ProfileResults;Ljava/util/concurrent/atomic/AtomicLong;Ljava/util/concurrent/atomic/AtomicLong;)V=name,preparationResult,reloadResult,preparationNanos,reloadNanos|o"),
-    ("net/minecraft/server/packs/resources/Resource", "i(Lnet/minecraft/server/packs/PackResources;Lnet/minecraft/server/packs/resources/IoSupplier;Lnet/minecraft/server/packs/resources/IoSupplier;)V=source,streamSupplier,metadataSupplier|gsource()Lnet/minecraft/server/packs/PackResources;=source|o"),
     ("net/minecraft/server/players/GameProfileCache$GameProfileInfo", "i(Lcom/mojang/authlib/GameProfile;Ljava/util/Date;)V=profile,expirationDate|ggetProfile()Lcom/mojang/authlib/GameProfile;=profile|ggetExpirationDate()Ljava/util/Date;=expirationDate|ssetLastAccess(J)V=lastAccess|ggetLastAccess()J=lastAccess|o"),
     ("net/minecraft/server/players/StoredUserEntry", "i(Ljava/lang/Object;)V=user|ggetUser()Ljava/lang/Object;=user|o"),
     ("net/minecraft/server/rcon/thread/GenericThread", "i(Ljava/lang/String;)V=name|gisRunning()Z=running|o"),
