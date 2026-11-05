@@ -3261,6 +3261,47 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   `a_client_is_sent_the_entities_in_its_range_and_follows_them_until_they_go`. Not yet checked in
   game (it needs a contraption assembled); vanilla entities (Create's minecart controllers) aren't
   posted yet. 349 compat, 17 translator tests pass.
+- [x] 2026-11-05 The game's own entities for mods, and a player attacking or right-clicking one
+  (new `horizon-compat/src/vanilla_entities.rs`; `events.rs`). Measured in the pack (369 jars,
+  methods taking the event): `AttackEntityEvent` 16 methods, `PlayerInteractEvent.EntityInteract`
+  23, `.EntityInteractSpecific` 10, in 23 jars; Create 11 of them (the wrench breaking minecarts,
+  the cardboard sword sparing arthropods, minecart coupling, a schedule handed to a train's
+  conductor, the stock ticker's keeper, the extendo grip's reach). The runtime posted none, and a
+  mod had no object for a cow, a minecart or any entity the game itself runs.
+  - An entity object for each of the game's entities, by id (`vanilla_entities::of`): a player is
+    the runtime's server player standing there, an item entity `entities.rs`' own, the rest one
+    object each, kept while the entity lasts and brought up to date from the game (new `Host::entity`:
+    type, place, facing, a mob's health and max health). Its class is 1.21.1's (`Cow` an `Animal`, a
+    `PathfinderMob`, a `LivingEntity`; a minecart an `AbstractMinecart`), from generated tables of the
+    130 vanilla entity types (class, width, height, eye height) and the 218 classes' supertypes
+    (`TYPES`, `CLASSES`), so `instanceof` and `getType() == EntityType.COW` answer as in Java.
+    It reads its id, type, place, block position, rotation, bounding box, size, eye height, level,
+    whether it's alive, health, name (translated through the game's language, now on the server's
+    hosts too), UUID and persistent data; `hurt`, `kill`, `discard`, `setHealth`, `heal`, `push`,
+    `setDeltaMovement` and `teleportTo` go to the game (new host methods, bound to the native mob
+    helpers: `native_set_mob_health`, `native_kill_mob`, `native_remove_mob`, `native_push_mob`,
+    `native_teleport_mob`, and `kill_target`).
+  - `AttackEntityEvent` where `Player.attack` starts (the game's `native_attack_entity`, bundle
+    binding `attack_entity`): the player and the target; a listener that cancels it stops the blow.
+    `EntityInteractSpecific`, then `EntityInteract`, where `Player.interactOn` starts, once per hand
+    (`native_interact_entity`, binding `interact_entity`): target, hand, held stack, position; one
+    that cancels it takes the click.
+  - Small ones the checks met: `EntityType.is(TagKey)` through the game's entity type tags (new
+    `Host::entity_type_in_tag`; Create's cardboard sword asks `EntityTypeTags.ARTHROPOD`), and a
+    player's `distanceTo` / `distanceToSqr` of an entity, a point or a `Vec3` (the extendo grip).
+  Tests `vanilla_entities::tests::{the_tables_are_sorted_for_their_searches,
+  vanilla_entities_are_their_1_21_1_classes, a_mod_reads_and_hurts_the_games_entity}`. In game
+  (`fdcmd.sh` with `hzcheck.jar`, whose new `Entities` listeners describe what was hit, cancel a
+  pig's blow and set a right-clicked cow's health to 4): `c attack` on a cow: "hzcheck: attacked
+  minecraft:cow (Cow, an animal, health 10.0/10.0)", the cow then at 9; on a pig: "..., kept",
+  the pig still at 10; `c interact-entity` on the cow: "hzcheck: interact minecraft:cow (Cow, an
+  animal, health 4.0/10.0) with the main hand", and the game's cow at 4. The earlier checks
+  (commands, keys, raw input, world events, tooltips) still pass. 352 compat, 17 translator tests
+  pass.
+  - Gaps: a mod's `hurt` takes the health off (no armour, knockback or attacker credit), and only a
+    mob's (Create's wrench can't break a minecart yet); an entity's UUID is a stable stand-in, its
+    motion, pitch, equipment and effects aren't read; a player is found by place; the
+    `EntityInteractSpecific` click point is the entity's feet.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

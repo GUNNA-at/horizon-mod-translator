@@ -128,6 +128,22 @@ pub struct ItemEntity {
     pub age: u32,
 }
 
+/// An entity of the server level in place, as translated code reads it (`Level.getEntity(id)`):
+/// a mob, a minecart, a boat, an armour stand, an item...
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EntityView {
+    /// The entity's id (`Entity.getId`).
+    pub id: i32,
+    /// Its type (`minecraft:cow`).
+    pub kind: String,
+    /// Its feet: the bottom centre of its box.
+    pub pos: [f64; 3],
+    /// Where it faces, in degrees (`getYRot`): 0 is south.
+    pub yaw: f32,
+    /// A living mob's health and maximum health; none for the rest.
+    pub health: Option<(f32, f32)>,
+}
+
 impl ItemEntity {
     /// Its box (`getBoundingBox`): min x, y, z, then max.
     pub fn bounds(&self) -> [f64; 6] {
@@ -482,6 +498,12 @@ pub trait Host {
     fn fluid_in_tag(&self, _fluid: &str, _tag: &str) -> bool {
         false
     }
+    /// Whether entity type `kind` (`minecraft:spider`) is in entity type tag `tag`
+    /// (`minecraft:arthropod`, no `#`), as the game's loaded tags hold it (`EntityType.is(TagKey)`).
+    /// False for a tag the game doesn't have.
+    fn entity_type_in_tag(&self, _kind: &str, _tag: &str) -> bool {
+        false
+    }
     /// The way the fluid at `pos` flows (`FluidState.getFlow(level, pos)`, vanilla's
     /// `FlowingFluid.getFlow`): x, y, z, zero for still fluid or none.
     fn fluid_flow(&self, _pos: [i32; 3]) -> [f64; 3] {
@@ -517,6 +539,37 @@ pub trait Host {
     /// or none when the level takes none (a client).
     fn spawn_item_entity(&mut self, _item: &str, _count: u32, _pos: [f64; 3], _motion: [f64; 3], _pickup_delay: u32) -> Option<u32> {
         None
+    }
+    /// The server level's entity `id` (`Level.getEntity`): none on a client, for a player, or
+    /// when the level holds no such entity.
+    fn entity(&self, _id: i32) -> Option<EntityView> {
+        None
+    }
+    /// Hurts the living mob `id` by `amount` (`LivingEntity.hurt`): whether it lost health. A blow
+    /// that takes the last of it kills the mob, with its loot.
+    fn hurt_entity(&mut self, _id: i32, _amount: f32) -> bool {
+        false
+    }
+    /// Kills entity `id` as `/kill` does (`Entity.kill`): a mob dies with its loot, a vehicle
+    /// breaks. False when the level holds no such entity.
+    fn kill_entity(&mut self, _id: i32) -> bool {
+        false
+    }
+    /// Takes the mob `id` out of the level with no death and no loot (`Entity.discard`).
+    fn remove_entity(&mut self, _id: i32) -> bool {
+        false
+    }
+    /// Sets the living mob `id`'s health (`LivingEntity.setHealth`), above 0.
+    fn set_entity_health(&mut self, _id: i32, _health: f32) -> bool {
+        false
+    }
+    /// Adds `velocity` (blocks a tick) to the mob `id`'s motion (`Entity.push`).
+    fn push_entity(&mut self, _id: i32, _velocity: [f64; 3]) -> bool {
+        false
+    }
+    /// Moves the mob `id` to `pos` at once (`Entity.teleportTo`).
+    fn teleport_entity(&mut self, _id: i32, _pos: [f64; 3]) -> bool {
+        false
     }
     /// The text on the clipboard (`KeyboardHandler.getClipboard`), empty when none: a client's.
     fn clipboard(&self) -> String {
@@ -796,6 +849,10 @@ pub struct MemoryHost {
     pub stack_limits: HashMap<String, u32>,
     /// The level's item entities, in order.
     pub item_entities: Vec<ItemEntity>,
+    /// The level's other entities ([`Host::entity`]); one killed or removed leaves the list.
+    pub entities: Vec<EntityView>,
+    /// Entity type tags: tag → entity types.
+    pub entity_tags: HashMap<String, Vec<String>>,
     /// The whole stacks of the item entities spawned with their data ([`Host::spawn_stack_entity`]), by id.
     pub item_entity_stacks: HashMap<u32, HandStack>,
     /// The clipboard's text ([`Host::clipboard`]).
@@ -1080,6 +1137,9 @@ impl Host for MemoryHost {
     fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {
         self.fluid_tags.get(tag).is_some_and(|f| f.iter().any(|x| x == fluid))
     }
+    fn entity_type_in_tag(&self, kind: &str, tag: &str) -> bool {
+        self.entity_tags.get(tag).is_some_and(|k| k.iter().any(|x| x == kind))
+    }
     fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {
         self.flows.get(&pos).copied().unwrap_or_default()
     }
@@ -1098,6 +1158,53 @@ impl Host for MemoryHost {
     }
     fn item_entities(&self, bounds: [f64; 6]) -> Vec<ItemEntity> {
         self.item_entities.iter().filter(|e| e.count > 0 && boxes_meet(&e.bounds(), &bounds)).cloned().collect()
+    }
+    fn entity(&self, id: i32) -> Option<EntityView> {
+        self.entities.iter().find(|e| e.id == id).cloned()
+    }
+    fn hurt_entity(&mut self, id: i32, amount: f32) -> bool {
+        let Some(e) = self.entities.iter_mut().find(|e| e.id == id && e.health.is_some()) else {
+            return false;
+        };
+        let (health, max) = e.health.unwrap_or_default();
+        if amount <= 0.0 {
+            return false;
+        }
+        if health - amount > 0.0 {
+            e.health = Some((health - amount, max));
+        } else {
+            self.entities.retain(|e| e.id != id);
+        }
+        true
+    }
+    fn kill_entity(&mut self, id: i32) -> bool {
+        let had = self.entities.len();
+        self.entities.retain(|e| e.id != id);
+        self.entities.len() != had
+    }
+    fn remove_entity(&mut self, id: i32) -> bool {
+        self.kill_entity(id)
+    }
+    fn set_entity_health(&mut self, id: i32, health: f32) -> bool {
+        match self.entities.iter_mut().find(|e| e.id == id) {
+            Some(EntityView { health: Some((h, max)), .. }) if health > 0.0 => {
+                *h = health.min(*max);
+                true
+            }
+            _ => false,
+        }
+    }
+    fn push_entity(&mut self, id: i32, _velocity: [f64; 3]) -> bool {
+        self.entities.iter().any(|e| e.id == id && e.health.is_some())
+    }
+    fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {
+        match self.entities.iter_mut().find(|e| e.id == id && e.health.is_some()) {
+            Some(e) => {
+                e.pos = pos;
+                true
+            }
+            None => false,
+        }
     }
     fn set_item_entity(&mut self, id: u32, item: &str, count: u32) -> bool {
         let Some(i) = self.item_entities.iter().position(|e| e.id == id) else { return false };

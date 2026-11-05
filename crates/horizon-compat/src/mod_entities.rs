@@ -381,6 +381,15 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.put_field(d, "height", V::F(h as f32));
             Some(d)
         }
+        // An entity type tag, as the game's loaded tags hold it (`EntityTypeTags.ARTHROPOD`, a mod's
+        // own).
+        (ENTITY_TYPE, "is") if desc == "(Lnet/minecraft/tags/TagKey;)Z" => {
+            let registry = rt.str_of(rt.get_field(a(1), "$registry")).unwrap_or("");
+            let tag = rt.str_of(rt.get_field(a(1), "$location")).unwrap_or("").to_owned();
+            let kind = type_id(rt, a(0)).unwrap_or("").to_owned();
+            let entity_types = registry.trim_start_matches("minecraft:") == "entity_type";
+            Some(V::I((entity_types && rt.host().is_some_and(|h| h.entity_type_in_tag(&kind, &tag))) as i32))
+        }
         (ENTITY_TYPE, "getDescriptionId") => {
             let id = description_id(rt, a(0));
             Some(rt.string(&id))

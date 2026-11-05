@@ -35,6 +35,7 @@ pub mod invoke;
 pub mod input;
 pub mod tooltips;
 pub mod world_events;
+pub mod vanilla_entities;
 pub mod functions;
 pub mod gamerules;
 pub mod glue;

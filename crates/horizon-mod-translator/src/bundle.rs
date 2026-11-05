@@ -69,7 +69,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 75] = [
+const COMPAT: [(&str, &str); 76] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -124,6 +124,7 @@ const COMPAT: [(&str, &str); 75] = [
     ("input.rs", include_str!("../../horizon-compat/src/input.rs")),
     ("tooltips.rs", include_str!("../../horizon-compat/src/tooltips.rs")),
     ("world_events.rs", include_str!("../../horizon-compat/src/world_events.rs")),
+    ("vanilla_entities.rs", include_str!("../../horizon-compat/src/vanilla_entities.rs")),
     ("menus.rs", include_str!("../../horizon-compat/src/menus.rs")),
     ("widgets.rs", include_str!("../../horizon-compat/src/widgets.rs")),
     ("edit_box.rs", include_str!("../../horizon-compat/src/edit_box.rs")),
@@ -1724,7 +1725,7 @@ fn {id}_screen_char_typed_pre(
 /// to players.
 fn game_host(c: &str, server_send: &str) -> String {
     let server_effects = server_effects(c);
-    let (reads, writes) = (world_reads("self.game"), WORLD_WRITES);
+    let (reads, writes) = (world_reads("self.game"), world_writes(c));
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
     }}
@@ -1865,18 +1866,76 @@ fn world_reads(get: &str) -> String {
     )
 }
 
-/// A server host's redstone and block ticks (`self.game` a `&mut Game`).
-const WORLD_WRITES: &str = r#"        fn neighbor_signal(&mut self, pos: [i32; 3]) -> i32 {
+/// A server host's redstone and block ticks, and the level's entities (`self.game` a `&mut Game`):
+/// any entity by its id (its type and place as the commands read them, a mob's facing and health),
+/// and a mob hurt, killed, removed, healed, pushed or moved through the native mob helpers. Its
+/// text for a translation key is the game's language, as a vanilla server's `Language` (an
+/// entity's name, `Component.getString`).
+fn world_writes(c: &str) -> String {
+    format!(
+        r#"        fn translate(&self, key: &str) -> Option<String> {{
+            horizon_client::lang::has(key).then(|| horizon_client::lang::get(key))
+        }}
+        fn entity_type_in_tag(&self, kind: &str, tag: &str) -> bool {{
+            self.game.res.mob_data().entity_has(tag, kind)
+        }}
+        fn neighbor_signal(&mut self, pos: [i32; 3]) -> i32 {{
             let dimension = self.game.native_dimension().to_owned();
             self.game.native_neighbor_signal(&dimension, pos)
-        }
-        fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {
+        }}
+        fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {{
             self.game.native_schedule_block_tick_at(pos, block, delay)
-        }
-"#;
+        }}
+        fn entity(&self, id: i32) -> Option<{c}::host::EntityView> {{
+            let t = self.game.level_entity(id)?;
+            let pos = self.game.target_position(t)?;
+            let kind = self.game.target_type(t);
+            let mob = u32::try_from(id).ok().and_then(|i| self.game.native_mob(self.game.native_dimension(), i));
+            Some({c}::host::EntityView {{ id, kind, pos, yaw: mob.as_ref().map_or(0.0, |m| m.yaw), health: mob.map(|m| (m.health, m.max_health)) }})
+        }}
+        fn hurt_entity(&mut self, id: i32, amount: f32) -> bool {{
+            let dimension = self.game.native_dimension().to_owned();
+            let Some(mob) = u32::try_from(id).ok().and_then(|i| self.game.native_mob(&dimension, i)) else {{
+                return false;
+            }};
+            if !(amount > 0.0) {{
+                return false;
+            }}
+            if mob.health - amount > 0.0 {{
+                self.game.native_set_mob_health(&dimension, mob.id, mob.health - amount)
+            }} else {{
+                self.game.native_kill_mob(&dimension, mob.id)
+            }}
+        }}
+        fn kill_entity(&mut self, id: i32) -> bool {{
+            let Some(t) = self.game.level_entity(id) else {{
+                return false;
+            }};
+            self.game.kill_target(t);
+            true
+        }}
+        fn remove_entity(&mut self, id: i32) -> bool {{
+            let dimension = self.game.native_dimension().to_owned();
+            u32::try_from(id).is_ok_and(|i| self.game.native_remove_mob(&dimension, i))
+        }}
+        fn set_entity_health(&mut self, id: i32, health: f32) -> bool {{
+            let dimension = self.game.native_dimension().to_owned();
+            u32::try_from(id).is_ok_and(|i| self.game.native_set_mob_health(&dimension, i, health))
+        }}
+        fn push_entity(&mut self, id: i32, velocity: [f64; 3]) -> bool {{
+            let dimension = self.game.native_dimension().to_owned();
+            u32::try_from(id).is_ok_and(|i| self.game.native_push_mob(&dimension, i, velocity))
+        }}
+        fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {{
+            let dimension = self.game.native_dimension().to_owned();
+            u32::try_from(id).is_ok_and(|i| self.game.native_teleport_mob(&dimension, i, pos))
+        }}
+"#
+    )
+}
 
 fn player_host(c: &str, server_effects: &str) -> String {
-    let (reads, writes) = (world_reads("self.game"), WORLD_WRITES);
+    let (reads, writes) = (world_reads("self.game"), world_writes(c));
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
     }}
@@ -2139,7 +2198,7 @@ fn player_host(c: &str, server_effects: &str) -> String {
 
 fn block_entity_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
-    let (reads, writes) = (world_reads("self.game"), WORLD_WRITES);
+    let (reads, writes) = (world_reads("self.game"), world_writes(&c));
     let server_send = server_send(&c);
     let server_effects = server_effects(&c);
     // A player's hooks reach their client too: a menu the mod opens, a payload it sends.
@@ -2346,6 +2405,35 @@ fn {id}_place_block(game: &mut crate::game::Game<'_>, stack: &horizon_client::it
     let state = game.native_state_text_at(pos);
 {player_host}    let mut host = Host {{ game }};
     {krate}::hook_runtime("place_block", |rt| {c}::glue::place_block(rt, &mut host, pos, &state));
+}}
+"#)),
+        ("attack_entity", format!(r#"// Generated by horizon-mod-translator: a player attacks an entity (`native_attack_entity`: where
+// `Player.attack` starts), their state swapped in. The mods hear it as NeoForge's
+// `AttackEntityEvent`; one that cancels it stops the blow.
+fn {id}_attack_entity(game: &mut crate::game::Game<'_>, entity: i32, kind: &str, pos: [f64; 3], canceled: &mut bool) {{
+    if *canceled {{
+        return;
+    }}
+{player_host}    let mut host = Host {{ game }};
+    if {krate}::hook_runtime("attack_entity", |rt| {c}::events::attack_entity(rt, &mut host, entity, kind, pos)) {{
+        *canceled = true;
+    }}
+}}
+"#)),
+        ("interact_entity", format!(r#"// Generated by horizon-mod-translator: a player right-clicks an entity (`native_interact_entity`:
+// where `Player.interactOn` starts, once per hand), their state swapped in. The mods hear it as
+// NeoForge's `PlayerInteractEvent.EntityInteractSpecific`, then `.EntityInteract`; one that cancels
+// it takes the click.
+fn {id}_interact_entity(game: &mut crate::game::Game<'_>, entity: i32, kind: &str, stack: Option<&horizon_client::items::ItemStack>, claimed: &mut bool) {{
+    if *claimed {{
+        return;
+    }}
+    let _ = stack;
+    let hand = u8::from(game.hand == horizon_client::first_person::Hand::Off);
+{player_host}    let mut host = Host {{ game }};
+    if {krate}::hook_runtime("interact_entity", |rt| {c}::events::interact_entity(rt, &mut host, entity, kind, hand)).is_some() {{
+        *claimed = true;
+    }}
 }}
 "#)),
         ("net_from_client", format!(r#"// Generated by horizon-mod-translator: a mod payload a player's client sent
@@ -2806,7 +2894,7 @@ const CLIENT_BINDINGS: [(&str, &str); 33] = [
     ("interaction_key", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"button\", ty = \"i32\", value = \"button\" },\n    { name = \"key_mapping\", ty = \"&str\", value = \"key_mapping\" },\n    { name = \"hand\", ty = \"horizon_client::first_person::Hand\", value = \"hand\" },\n    { name = \"swing_hand\", ty = \"&mut bool\", value = \"&mut *swing_hand\" },\n    { name = \"canceled\", ty = \"&mut bool\", value = \"&mut *canceled\" },\n"),
 ];
 
-const BLOCK_ENTITY_BINDINGS: [(&str, &str); 34] = [
+const BLOCK_ENTITY_BINDINGS: [(&str, &str); 36] = [
     ("register_commands", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"commands\", ty = \"&mut Vec<crate::game::native_server::NativeCommand>\", value = \"&mut *commands\" },\n"),
     ("perform_command", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"&crate::game::native_server::NativeServerPlayer\", value = \"player\" },\n    { name = \"command\", ty = \"&str\", value = \"command\" },\n    { name = \"ran\", ty = \"&mut bool\", value = \"&mut *ran\" },\n"),
     ("perform_console_command", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"command\", ty = \"&str\", value = \"command\" },\n    { name = \"ran\", ty = \"&mut bool\", value = \"&mut *ran\" },\n"),
@@ -2823,6 +2911,8 @@ const BLOCK_ENTITY_BINDINGS: [(&str, &str); 34] = [
     ("player_tick", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n"),
     ("destroy_block", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"state\", ty = \"horizon_world::registry::BlockStateId\", value = \"state\" },\n    { name = \"canceled\", ty = \"&mut bool\", value = \"&mut *canceled\" },\n"),
     ("place_block", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"stack\", ty = \"&horizon_client::items::ItemStack\", value = \"stack\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"state\", ty = \"horizon_world::registry::BlockStateId\", value = \"state\" },\n"),
+    ("attack_entity", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"entity\", ty = \"i32\", value = \"entity\" },\n    { name = \"kind\", ty = \"&str\", value = \"kind\" },\n    { name = \"pos\", ty = \"[f64; 3]\", value = \"pos\" },\n    { name = \"canceled\", ty = \"&mut bool\", value = \"&mut *canceled\" },\n"),
+    ("interact_entity", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"entity\", ty = \"i32\", value = \"entity\" },\n    { name = \"kind\", ty = \"&str\", value = \"kind\" },\n    { name = \"stack\", ty = \"Option<&horizon_client::items::ItemStack>\", value = \"stack\" },\n    { name = \"claimed\", ty = \"&mut bool\", value = \"&mut *claimed\" },\n"),
     ("net_from_client", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"channel\", ty = \"&str\", value = \"channel\" },\n    { name = \"data\", ty = \"&[u8]\", value = \"data\" },\n"),
     ("is_valid_bonemeal_target", "    { name = \"level\", ty = \"&crate::game::GameLevel<'_>\", value = \"self\" },\n    { name = \"pos\", ty = \"horizon_core::position::BlockPos\", value = \"pos\" },\n    { name = \"state\", ty = \"horizon_world::registry::BlockStateId\", value = \"state\" },\n    { name = \"valid\", ty = \"&mut Option<bool>\", value = \"&mut *valid\" },\n"),
     ("is_bonemeal_success", "    { name = \"level\", ty = \"&mut crate::game::GameLevel<'_>\", value = \"&mut *self\" },\n    { name = \"pos\", ty = \"horizon_core::position::BlockPos\", value = \"pos\" },\n    { name = \"state\", ty = \"horizon_world::registry::BlockStateId\", value = \"state\" },\n    { name = \"success\", ty = \"&mut bool\", value = \"&mut *success\" },\n"),

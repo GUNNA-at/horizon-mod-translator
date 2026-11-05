@@ -16,6 +16,11 @@
 //! ([`logged_out`]), respawning after a death ([`respawned`]: `Clone`, then `PlayerRespawnEvent`),
 //! and the server's data going to every player after `/reload` ([`datapack_sync`]). A mod sends its
 //! players what it keeps for them here (Create its train maps, a mod its loaded data).
+//!
+//! And a player's blows and clicks on the game's entities ([`attack_entity`]: `AttackEntityEvent`;
+//! [`interact_entity`]: `PlayerInteractEvent.EntityInteractSpecific`, then `.EntityInteract`), the
+//! entity one of [`crate::vanilla_entities`]' objects. Create's wrench breaks minecarts this way, and
+//! its coupling joins them.
 use crate::host::Host;
 use crate::{api, api_common, hand, Rt, V};
 
@@ -36,15 +41,19 @@ pub(crate) const RESPAWN: &str = "net/neoforged/neoforge/event/entity/player/Pla
 pub(crate) const CLONE: &str = "net/neoforged/neoforge/event/entity/player/PlayerEvent$Clone";
 pub(crate) const DATAPACK_SYNC: &str = "net/neoforged/neoforge/event/OnDatapackSyncEvent";
 const PLAYER_LIST: &str = "net/minecraft/server/players/PlayerList";
+pub(crate) const ENTITY_INTERACT: &str = "net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$EntityInteract";
+pub(crate) const ENTITY_INTERACT_SPECIFIC: &str = "net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$EntityInteractSpecific";
+pub(crate) const ATTACK: &str = "net/neoforged/neoforge/event/entity/player/AttackEntityEvent";
 
 /// The events' classes above them, so a listener for `PlayerInteractEvent` (or `PlayerEvent`, or
 /// any event) hears them.
-const SUPERS: [(&str, &str); 16] = [
+const SUPERS: [(&str, &str); 17] = [
     (RIGHT_CLICK_BLOCK, INTERACT),
     (RIGHT_CLICK_ITEM, INTERACT),
     ("net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$LeftClickBlock", INTERACT),
-    ("net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$EntityInteract", INTERACT),
-    ("net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$EntityInteractSpecific", INTERACT),
+    (ENTITY_INTERACT, INTERACT),
+    (ENTITY_INTERACT_SPECIFIC, INTERACT),
+    (ATTACK, PLAYER_EVENT),
     ("net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$RightClickEmpty", INTERACT),
     ("net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$LeftClickEmpty", INTERACT),
     (INTERACT, PLAYER_EVENT),
@@ -196,6 +205,64 @@ pub fn right_click_item(rt: &mut Rt, host: &mut dyn Host, hand: u8) -> Option<bo
     })
 }
 
+/// `AttackEntityEvent`: the acting player attacks the game's entity `entity` of type `kind` at
+/// `pos` (`Player.attack` starts, NeoForge's `CommonHooks.onPlayerAttackTarget`). Whether a
+/// listener canceled it: the blow then does nothing.
+pub fn attack_entity(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, pos: [f64; 3]) -> bool {
+    rt.safe_point();
+    if !listened(rt, ATTACK) {
+        return false;
+    }
+    rt.with_host(host, |rt| {
+        hand::with_hand(rt, |rt| {
+            let target = crate::vanilla_entities::of(rt, entity, kind, Some(pos));
+            if target.r() == 0 {
+                return false;
+            }
+            let ev = rt.new_object(ATTACK);
+            let player = api_common::acting_player(rt);
+            for (field, v) in [("$player", player), ("$target", target), ("$canceled", V::I(0))] {
+                rt.put_field(ev, field, v);
+            }
+            crate::neo::post(rt, ATTACK, ev);
+            rt.get_field(ev, "$canceled").i() != 0
+        })
+    })
+}
+
+/// The acting player right-clicks the game's entity `entity` of type `kind` with `hand`
+/// (`Player.interactOn` starts): `PlayerInteractEvent.EntityInteractSpecific` (NeoForge's
+/// `onInteractEntityAt`; its `localPos`, where the click met the entity's box, is its feet here:
+/// the game doesn't say), then `.EntityInteract`. Some(used) when a listener canceled one: neither
+/// the entity's own `interact` nor the item's `interactLivingEntity` runs.
+pub fn interact_entity(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, hand: u8) -> Option<bool> {
+    rt.safe_point();
+    if !listened(rt, ENTITY_INTERACT_SPECIFIC) && !listened(rt, ENTITY_INTERACT) {
+        return None;
+    }
+    rt.with_host(host, |rt| {
+        hand::with_hand(rt, |rt| {
+            let target = crate::vanilla_entities::of(rt, entity, kind, None);
+            let p = crate::vanilla_entities::position(rt, target)?;
+            for class in [ENTITY_INTERACT_SPECIFIC, ENTITY_INTERACT] {
+                if !listened(rt, class) {
+                    continue;
+                }
+                let ev = interaction(rt, class, hand);
+                let at = api::block_pos(rt, p[0].floor() as i64, p[1].floor() as i64, p[2].floor() as i64);
+                let local = api_common::vec3(rt, 0.0, 0.0, 0.0);
+                for (field, v) in [("$target", target), ("$pos", at), ("$face", V::NULL), ("$localPos", local)] {
+                    rt.put_field(ev, field, v);
+                }
+                if let Some(used) = post(rt, class, ev) {
+                    return Some(used);
+                }
+            }
+            None
+        })
+    })
+}
+
 /// `player` (a server's player, by UUID) joined (`PlayerList.placeNewPlayer`): the server's data
 /// goes to them first (`OnDatapackSyncEvent` for them alone), then `PlayerLoggedInEvent`.
 pub fn logged_in(rt: &mut Rt, player: u128, name: &str) {
@@ -293,6 +360,7 @@ fn listened(rt: &mut Rt, class: &str) -> bool {
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
     owner == TRI_STATE
+        || owner == ATTACK
         || owner.starts_with(INTERACT)
         || owner.starts_with(PLAYER_EVENT)
         || matches!(owner, LIVING_EVENT | ENTITY_EVENT | EVENT | CANCELLABLE | DATAPACK_SYNC | PLAYER_LIST)
@@ -346,6 +414,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => return None,
         });
     }
+    if rt.class_of(a(0)) == ATTACK && (owner == ATTACK || matches!(owner, PLAYER_EVENT | LIVING_EVENT | ENTITY_EVENT | EVENT | CANCELLABLE)) {
+        let ev = a(0);
+        return Some(match name {
+            "getEntity" => rt.get_field(ev, "$player"),
+            "getTarget" => rt.get_field(ev, "$target"),
+            "isCanceled" => rt.get_field(ev, "$canceled"),
+            "setCanceled" => {
+                rt.put_field(ev, "$canceled", V::I(a(1).i()));
+                V::Void
+            }
+            _ => return None,
+        });
+    }
     let ours = owner.starts_with(INTERACT) || matches!(owner, PLAYER_EVENT | LIVING_EVENT | ENTITY_EVENT | EVENT | CANCELLABLE);
     if !ours || !rt.class_of(a(0)).starts_with(INTERACT) {
         return None;
@@ -383,6 +464,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         "getUseBlock" => rt.get_field(ev, "$useBlock"),
         "getUseItem" => rt.get_field(ev, "$useItem"),
+        "getTarget" => rt.get_field(ev, "$target"),
+        "getLocalPos" => rt.get_field(ev, "$localPos"),
         _ => return None,
     })
 }

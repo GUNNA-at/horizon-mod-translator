@@ -35,7 +35,9 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         "net/minecraft/world/level/block/entity/BlockEntity" => family("net/minecraft/world/level/block/entity/", "BlockEntity"),
         "net/minecraft/world/entity/Entity" => (c.starts_with("net/minecraft/world/entity/") && !c.contains('$')) || is_player_class(c),
         // Players: the one a hook acts for (`ServerPlayer`), the client's own and the others it sees.
-        "net/minecraft/world/entity/LivingEntity" | "net/minecraft/world/entity/player/Player" => is_player_class(c),
+        "net/minecraft/world/entity/LivingEntity" | "net/minecraft/world/entity/player/Player" => {
+            is_player_class(c) || crate::vanilla_entities::is_a(c, class)
+        }
         "net/minecraft/client/player/AbstractClientPlayer" => matches!(c, "net/minecraft/client/player/LocalPlayer" | "net/minecraft/client/player/RemotePlayer"),
         // The GUI: vanilla's screens are containers of listeners and draw; its widgets
         // (`AbstractWidget` and the buttons, boxes and sliders under it) are listeners that draw.
@@ -78,7 +80,7 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
             matches!(c, "java/lang/IllegalArgumentException" | "java/lang/IllegalStateException" | "java/lang/NullPointerException" | "java/lang/UnsupportedOperationException" | "java/lang/ClassCastException" | "java/lang/ArithmeticException" | "java/lang/IndexOutOfBoundsException" | "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/NumberFormatException")
                 || java_is_a(c, class)
         }
-        _ => crate::resources::is_a(c, class) || crate::gson::is_a(c, class) || java_is_a(c, class),
+        _ => crate::resources::is_a(c, class) || crate::gson::is_a(c, class) || java_is_a(c, class) || crate::vanilla_entities::is_a(c, class),
     }
 }
 
@@ -211,6 +213,12 @@ fn player_place(rt: &Rt, p: V) -> Option<([f64; 3], f32, f32)> {
         )),
         _ => None,
     }
+}
+
+/// Where entity `e` is: a player's place, the game's entity's, a mod entity's or an item's; None
+/// when it isn't known.
+pub(crate) fn entity_place(rt: &Rt, e: V) -> Option<[f64; 3]> {
+    player_place(rt, e).map(|(p, _, _)| p).or_else(|| crate::vanilla_entities::position(rt, e))
 }
 
 /// A player's eyes above their feet: standing 1.62, crouching 1.27 (`Player.getStandingEyeHeight`).
@@ -2384,6 +2392,18 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                     vec3(rt, f64::from(s1 * c), f64::from(-s), f64::from(c1 * c))
                 }
             }
+        }
+        // How far the player is from another entity (`Entity.distanceTo`, a float, and
+        // `distanceToSqr`), a point or a `Vec3`; an entity whose place isn't known is where they are.
+        (o, n @ ("distanceTo" | "distanceToSqr")) if is_player(o) && player_place(rt, a(0)).is_some() => {
+            let (p, _, _) = player_place(rt, a(0)).unwrap_or_default();
+            let q = match desc {
+                "(DDD)D" => [a(1).d(), a(2).d(), a(3).d()],
+                "(Lnet/minecraft/world/phys/Vec3;)D" => xyz(rt, a(1)),
+                _ => entity_place(rt, a(1)).unwrap_or(p),
+            };
+            let d2 = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2);
+            if n == "distanceTo" { V::F(d2.sqrt() as f32) } else { V::D(d2) }
         }
         // The client's player before its world has placed it (a resource reload at start): where a
         // new entity is, at the origin with no rotation, so looking south.
