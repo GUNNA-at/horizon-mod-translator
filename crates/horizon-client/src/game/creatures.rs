@@ -1144,6 +1144,11 @@ impl Game<'_> {
     }
     /// LivingEntity.die / dropAllDeathLoot.
     fn mob_died(&mut self, m: &Mob) {
+        // LivingEntity.die starts with NeoForge's LivingDeathEvent: a native mod may keep the
+        // mob from dying.
+        if self.living_death_canceled(m) {
+            return;
+        }
         // LivingEntity.die: a sleeper gets up, and its bed is free again.
         if let Some(bed) = horizon_client::mobs::villager::sleeping_pos(m) {
             self.wake_villager(m.id);

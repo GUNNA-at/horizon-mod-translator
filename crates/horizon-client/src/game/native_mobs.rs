@@ -172,18 +172,15 @@ impl Game<'_> {
         m.needs_sync = true;
         true
     }
-    /// Sets the living mob `id`'s health, cut to its maximum: false for no such
-    /// mob, another dimension or a health that isn't above 0 (`native_kill_mob`
-    /// kills). API 37.
+    /// Sets mob `id`'s health, cut to its maximum: false for no such mob,
+    /// another dimension or a health that isn't above 0 (`native_kill_mob`
+    /// kills). A dying mob's too, as `LivingEntity.setHealth` sets it: one a
+    /// mod keeps from dying (`native_living_death`) lives on with it. API 37.
     pub(super) fn native_set_mob_health(&mut self, dimension: &str, id: u32, health: f32) -> bool {
         if !self.native_mob_level(dimension) || !health.is_finite() || health <= 0.0 {
             return false;
         }
-        let Some(m) = self
-            .mobs
-            .iter_mut()
-            .find(|m| m.id == id && !m.removed && m.alive())
-        else {
+        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id && !m.removed) else {
             return false;
         };
         m.health = health.min(m.attrs.max_health);

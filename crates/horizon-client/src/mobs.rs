@@ -2650,6 +2650,18 @@ impl Mob {
     pub fn damage(&mut self, amount: f32, source: Damage) -> bool {
         self.damage_with(amount, source, None)
     }
+    /// `LivingEntity.actuallyHurt` from the reductions on: a native mod's hook may change
+    /// `amount` (`health::damage_pre`), absorption takes its share, the health the rest, and the
+    /// hook hears what reached it (`health::damage_post`). The amount after the hook, which the
+    /// caller records.
+    fn reach_health(&mut self, amount: f32, source: &Damage) -> f32 {
+        let mut amount = amount;
+        crate::health::damage_pre(crate::health::Hurting::Mob(self, source), &mut amount);
+        let through = self.soak_absorption(amount);
+        self.health -= through;
+        crate::health::damage_post(crate::health::Hurting::Mob(self, source), through);
+        amount
+    }
     /// `damage` by a source with a weapon: `armor_effectiveness` runs the
     /// weapon's armor-effectiveness enchantments (breach) over the armor fraction.
     pub fn damage_with(
@@ -2788,12 +2800,11 @@ impl Mob {
             if amount <= self.last_hurt {
                 return false;
             }
-            let dealt = amount - self.last_hurt;
+            let mut dealt = amount - self.last_hurt;
             if absorbed {
                 self.hurt_wolf_armor(dealt);
             } else {
-                let dealt = self.soak_absorption(dealt);
-                self.health -= dealt;
+                dealt = self.reach_health(dealt, &source);
             }
             self.last_hurt = amount;
             knock = false;
@@ -2801,14 +2812,14 @@ impl Mob {
         } else {
             self.last_hurt = amount;
             self.invulnerable = 20;
+            let mut dealt = amount;
             if absorbed {
-                self.hurt_wolf_armor(amount);
+                self.hurt_wolf_armor(dealt);
             } else {
-                let through = self.soak_absorption(amount);
-                self.health -= through;
+                dealt = self.reach_health(dealt, &source);
             }
             self.hurt_time = 10;
-            amount
+            dealt
         };
         // LivingEntity.actuallyHurt: a hit that reaches the health is
         // recorded (`CombatTracker.recordDamage`), with the fall it ends;
@@ -3645,6 +3656,68 @@ mod spear_knockback_tests {
         let mut m = Mob::new(1, kind(), Vec3::ZERO, 0.0);
         assert!(m.damage(1.0, Damage::player([2.0, 0.0, 0.0])));
         assert!(m.velocity.x < 0.0, "velocity {:?}", m.velocity);
+    }
+}
+#[cfg(test)]
+mod native_damage_tests {
+    use super::sensor_scan_tests::kind;
+    use super::*;
+    use crate::health::{DAMAGE_POST, DAMAGE_PRE, Hurting};
+    use horizon_core::geometry::Vec3;
+
+    static HEARD: std::sync::Mutex<Vec<(u32, &'static str, f32)>> = std::sync::Mutex::new(Vec::new());
+    fn heard(mob: u32) -> Vec<(&'static str, f32)> {
+        HEARD.lock().unwrap().iter().filter(|h| h.0 == mob).map(|h| (h.1, h.2)).collect()
+    }
+    /// Sets the native hooks of these tests around a hit reaching the health: both hear mobs 9101
+    /// to 9103; the first halves 9101's damage, makes 9102's NaN and 9103's -4. They are global,
+    /// so they stay set for every test of the process; the other tests' mobs have other ids.
+    fn set_hooks() {
+        fn pre(h: Hurting<'_>, amount: &mut f32) {
+            let Hurting::Mob(m, _) = h else {
+                return;
+            };
+            if !(9101..=9103).contains(&m.id) {
+                return;
+            }
+            HEARD.lock().unwrap().push((m.id, "pre", *amount));
+            match m.id {
+                9101 => *amount /= 2.0,
+                9102 => *amount = f32::NAN,
+                _ => *amount = -4.0,
+            }
+        }
+        fn post(h: Hurting<'_>, amount: f32) {
+            if let Hurting::Mob(m, _) = h
+                && (9101..=9103).contains(&m.id)
+            {
+                HEARD.lock().unwrap().push((m.id, "post", amount));
+            }
+        }
+        let ours: fn(Hurting<'_>, &mut f32) = pre;
+        assert!(std::ptr::fn_addr_eq(*DAMAGE_PRE.get_or_init(|| pre), ours), "another damage hook is set");
+        let ours: fn(Hurting<'_>, f32) = post;
+        assert!(std::ptr::fn_addr_eq(*DAMAGE_POST.get_or_init(|| post), ours), "another damage hook is set");
+    }
+
+    /// `LivingDamageEvent.Pre` changes what reaches the health, `.Post` hears it: a halved hit takes
+    /// half; one left not a number is put back, one below 0 takes nothing.
+    #[test]
+    fn a_native_hook_changes_the_damage_that_reaches_a_mobs_health() {
+        set_hooks();
+        let hit = Damage::player([2.0, 0.0, 0.0]);
+        let mut m = Mob::new(9101, kind(), Vec3::ZERO, 0.0);
+        assert!(m.damage(4.0, hit));
+        assert_eq!(m.health, 8.0);
+        assert_eq!(heard(9101), [("pre", 4.0), ("post", 2.0)]);
+        let mut m = Mob::new(9102, kind(), Vec3::ZERO, 0.0);
+        assert!(m.damage(4.0, hit));
+        assert_eq!(m.health, 6.0);
+        assert_eq!(heard(9102), [("pre", 4.0), ("post", 4.0)]);
+        let mut m = Mob::new(9103, kind(), Vec3::ZERO, 0.0);
+        assert!(m.damage(4.0, hit));
+        assert_eq!(m.health, 10.0);
+        assert_eq!(heard(9103), [("pre", 4.0), ("post", 0.0)]);
     }
 }
 #[cfg(test)]

@@ -86,6 +86,69 @@ pub fn knockback_canceled(pushed: Hurting<'_>, knock: &mut Knock) -> bool {
     }
     canceled
 }
+/// The game's native hooks around a hit reaching the health (`LivingEntity.actuallyHurt`), set
+/// once by the game: [`DAMAGE_PRE`] once armour and magic took their share, before absorption (it
+/// may change the amount: NeoForge's `LivingDamageEvent.Pre`), [`DAMAGE_POST`] at the end, with
+/// what reached the health (`LivingDamageEvent.Post`).
+pub static DAMAGE_PRE: OnceLock<fn(Hurting<'_>, &mut f32)> = OnceLock::new();
+pub static DAMAGE_POST: OnceLock<fn(Hurting<'_>, f32)> = OnceLock::new();
+/// [`DAMAGE_PRE`] on `amount` (nothing while it is unset). An amount it leaves that is not a
+/// finite number is put back as it was, and one below 0 is 0.
+pub fn damage_pre(hurting: Hurting<'_>, amount: &mut f32) {
+    let Some(hook) = DAMAGE_PRE.get() else {
+        return;
+    };
+    let before = *amount;
+    hook(hurting, amount);
+    if !amount.is_finite() {
+        *amount = before;
+    }
+    *amount = amount.max(0.0);
+}
+/// [`DAMAGE_POST`] with what reached the health (nothing while it is unset).
+pub fn damage_post(hurting: Hurting<'_>, amount: f32) {
+    if let Some(hook) = DAMAGE_POST.get() {
+        hook(hurting, amount);
+    }
+}
+thread_local! {
+    /// The entity id of the player whose turn it is on this thread (a server's
+    /// player acting), 0 for none: the causing entity of the hits the player
+    /// (`Who::Player`) deals.
+    static ACTING_PLAYER: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    /// The mob the running hit hook is about ([`hit_entity`]).
+    static HIT_ENTITY: std::cell::Cell<Option<HitEntity>> = const { std::cell::Cell::new(None) };
+}
+/// Sets the entity id of the player whose turn it is on this thread, giving
+/// back the one before.
+pub fn set_acting_player(entity: i32) -> i32 {
+    ACTING_PLAYER.with(|c| c.replace(entity))
+}
+/// The entity id of the player whose turn it is on this thread, 0 for none.
+pub fn acting_player() -> i32 {
+    ACTING_PLAYER.with(std::cell::Cell::get)
+}
+/// A mob as the game holds it while a hit's hooks run: its health, place and
+/// facing, for the hooks that have no world to ask.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HitEntity {
+    pub entity: i32,
+    pub health: f32,
+    pub max_health: f32,
+    pub position: [f64; 3],
+    pub yaw: f32,
+}
+/// The mob the running hit hook is about, if [`with_hit_entity`] named one.
+pub fn hit_entity() -> Option<HitEntity> {
+    HIT_ENTITY.with(std::cell::Cell::get)
+}
+/// Runs `f` (a hit hook) with [`hit_entity`] telling of `entity`.
+pub fn with_hit_entity<R>(entity: Option<HitEntity>, f: impl FnOnce() -> R) -> R {
+    let before = HIT_ENTITY.with(|c| c.replace(entity));
+    let result = f();
+    HIT_ENTITY.with(|c| c.set(before));
+    result
+}
 pub struct HealthResources {
     pub damage: Catalog,
     pub ids: PlayerFloatIds,
@@ -702,6 +765,25 @@ impl ServerDamageEnvironment<Attributes> for Environment<'_> {
     }
     fn damage_event(&mut self) -> io::Result<()> {
         self.phase("entity-damage")
+    }
+    fn damage_pre(&mut self, damage: f32) -> io::Result<f32> {
+        let mut damage = damage;
+        let source = HurtSource {
+            damage_type: &self.source.definition().name,
+            causing: self.causing,
+            direct: 0,
+        };
+        damage_pre(Hurting::Player(self.entity, source), &mut damage);
+        Ok(damage)
+    }
+    fn damage_post(&mut self, damage: f32) -> io::Result<()> {
+        let source = HurtSource {
+            damage_type: &self.source.definition().name,
+            causing: self.causing,
+            direct: 0,
+        };
+        damage_post(Hurting::Player(self.entity, source), damage);
+        Ok(())
     }
 }
 impl CombatEnvironment<Attributes> for Environment<'_> {

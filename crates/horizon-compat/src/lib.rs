@@ -34,6 +34,7 @@ pub mod item_use;
 pub mod invoke;
 pub mod input;
 pub mod tooltips;
+pub mod damage;
 pub mod world_events;
 pub mod vanilla_entities;
 pub mod functions;

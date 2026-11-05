@@ -144,6 +144,20 @@ pub struct EntityView {
     pub health: Option<(f32, f32)>,
 }
 
+/// A damage type of the game's data (`minecraft:in_fire`), as translated code reads it through a
+/// `DamageSource` (`type()`, `getMsgId`, `is(TagKey)`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DamageTypeView {
+    /// Its id (`minecraft:in_fire`).
+    pub id: String,
+    /// Its death message's id (`inFire`: `death.attack.inFire`).
+    pub msg_id: String,
+    /// The hunger a hit of it costs (`DamageType.exhaustion`).
+    pub exhaustion: f32,
+    /// The damage type tags it is in (`minecraft:is_fire`, no `#`).
+    pub tags: Vec<String>,
+}
+
 impl ItemEntity {
     /// Its box (`getBoundingBox`): min x, y, z, then max.
     pub fn bounds(&self) -> [f64; 6] {
@@ -514,6 +528,15 @@ pub trait Host {
     fn players(&self) -> Vec<(u128, [f64; 3])> {
         Vec::new()
     }
+    /// The server's players by entity id (`Entity.getId`): each one's id, UUID and place. None on
+    /// a client.
+    fn player_entities(&self) -> Vec<(i32, u128, [f64; 3])> {
+        Vec::new()
+    }
+    /// The damage types of the game's data, with their tags. None where the game gives no data.
+    fn damage_types(&self) -> Vec<DamageTypeView> {
+        Vec::new()
+    }
     /// Sends a mod's payload on the game's mod message channel: `channel` is the payload type's id
     /// (`create:server_speed`), `data` what its `StreamCodec` wrote. False when it can't go (no
     /// such player, a server that carries no mod messages, past the game's caps).
@@ -861,6 +884,10 @@ pub struct MemoryHost {
     pub facts: HashMap<String, BlockFacts>,
     /// The server's players and where they are.
     pub players: Vec<(u128, [f64; 3])>,
+    /// The server's players' entity ids ([`Host::player_entities`]), by UUID.
+    pub player_entity_ids: HashMap<u128, i32>,
+    /// The game's damage types ([`Host::damage_types`]).
+    pub damage_types: Vec<DamageTypeView>,
     /// A client's world: its runtime's hooks are a client's (`is_server` false).
     pub client: bool,
     /// Sounds played, in order.
@@ -1155,6 +1182,12 @@ impl Host for MemoryHost {
     }
     fn players(&self) -> Vec<(u128, [f64; 3])> {
         self.players.clone()
+    }
+    fn player_entities(&self) -> Vec<(i32, u128, [f64; 3])> {
+        self.players.iter().filter_map(|&(u, p)| Some((*self.player_entity_ids.get(&u)?, u, p))).collect()
+    }
+    fn damage_types(&self) -> Vec<DamageTypeView> {
+        self.damage_types.clone()
     }
     fn item_entities(&self, bounds: [f64; 6]) -> Vec<ItemEntity> {
         self.item_entities.iter().filter(|e| e.count > 0 && boxes_meet(&e.bounds(), &bounds)).cloned().collect()

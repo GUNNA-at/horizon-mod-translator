@@ -1002,6 +1002,9 @@ pub fn server_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
     rt.with_host(host, |rt| {
+        if !post {
+            crate::damage::server_tick(rt);
+        }
         let class = if post { SERVER_TICK_POST } else { SERVER_TICK_PRE };
         let ev = rt.new_object(class);
         crate::neo::post(rt, class, ev);

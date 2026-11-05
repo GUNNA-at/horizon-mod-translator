@@ -2059,6 +2059,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // NeoForge's data a mod keeps with the player, on its object.
         // A player's identity: their UUID (a server's player's own, else the one the host acts
         // for), their name as the game gave it at their login, and their profile of both.
+        // A server's player's entity id, as the game last told it (`damage.rs`); 0 before.
+        (o, "getId") if desc == "()I" && is_player(o) && rt.class_of(a(0)) == SERVER_PLAYER => V::I(rt.get_field(a(0), "$entityId").i()),
+        // A player's type is `EntityType.PLAYER` (`BuiltInRegistries.ENTITY_TYPE.getKey` names it).
+        (o, "getType") if desc == "()Lnet/minecraft/world/entity/EntityType;" && is_player(o) && is_player_class(rt.class_of(a(0))) => {
+            crate::mod_entities::vanilla_type(rt, "minecraft:player")
+        }
         (o, "getUUID" | "getStringUUID" | "getGameProfile" | "getScoreboardName") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
             let (uuid, player_name) = player_identity(rt, a(0));
             match name {

@@ -304,7 +304,11 @@ impl Game<'_> {
         });
         let dimension =
             (self.serving.is_some() || self.options.dedicated.is_some()).then_some(self.dim.id());
+        // The hits the guest deals in its turn name it (`native_living_*`).
+        let entity = self.player.as_ref().map_or(0, |p| p.entity_id);
+        let acting = horizon_client::health::set_acting_player(entity);
         let result = horizon_client::block_contact::in_level(dimension, || f(self));
+        horizon_client::health::set_acting_player(acting);
         self.leave_guest(host, swap);
         Some(result)
     }

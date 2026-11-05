@@ -21,6 +21,7 @@ use crate::host::{EntityView, Host};
 use crate::{Rt, V, api};
 
 const ENTITY: &str = "net/minecraft/world/entity/Entity";
+const LIVING: &str = "net/minecraft/world/entity/LivingEntity";
 const PATHFINDER: &str = "net/minecraft/world/entity/PathfinderMob";
 const BOAT: &str = "net/minecraft/world/entity/vehicle/Boat";
 const CHEST_BOAT: &str = "net/minecraft/world/entity/vehicle/ChestBoat";
@@ -493,11 +494,41 @@ pub fn of(rt: &mut Rt, id: i32, kind: &str, pos: Option<[f64; 3]>) -> V {
         _ => {}
     }
     let view = rt.host().and_then(|h| h.entity(id));
+    proxy(rt, id, kind, view.as_ref(), pos, false)
+}
+
+/// The object for the game's living entity `id` of type `kind` (not a player) where the game gives
+/// no world to read (a hit's hooks): brought up to date from `view` when the game told it, else as
+/// last seen. Of a living class whatever its type.
+pub fn living(rt: &mut Rt, id: i32, kind: &str, view: Option<&EntityView>) -> V {
+    proxy(rt, id, kind, view, None, true)
+}
+
+/// The object the runtime holds for the game's entity `id`, if any.
+pub fn known(rt: &mut Rt, id: i32) -> Option<V> {
+    let list = proxies(rt);
+    crate::jutil::elements(rt, list).into_iter().find(|&e| self::id(rt, e) == id && rt.get_field(e, "$alive").i() != 0)
+}
+
+/// An object standing for the game's entity `id` that the runtime hasn't seen and can't ask the
+/// game about (a hit's attacker, where the game gives no world): of no type, a `LivingEntity` when
+/// `living`, else an `Entity`. Not kept: the entity's own object comes once the game tells of it.
+pub fn unseen(rt: &mut Rt, id: i32, living: bool) -> V {
+    let e = rt.new_object(if living { LIVING } else { ENTITY });
+    rt.put_field(e, "$vanilla", V::I(1));
+    rt.put_field(e, "$vid", V::I(id));
+    let k = rt.string("");
+    rt.put_field(e, "$kind", k);
+    rt.put_field(e, "$alive", V::I(1));
+    e
+}
+
+fn proxy(rt: &mut Rt, id: i32, kind: &str, view: Option<&EntityView>, pos: Option<[f64; 3]>, living: bool) -> V {
     let now = game_time(rt);
     let list = proxies(rt);
     forget(rt, list, now);
     let known = crate::jutil::elements(rt, list).into_iter().find(|&e| self::id(rt, e) == id);
-    let living = view.as_ref().is_some_and(|v| v.health.is_some());
+    let living = living || view.is_some_and(|v| v.health.is_some());
     let e = match known {
         Some(e) if rt.str_of(rt.get_field(e, "$kind")) == Some(kind) => e,
         _ => {
@@ -516,8 +547,11 @@ pub fn of(rt: &mut Rt, id: i32, kind: &str, pos: Option<[f64; 3]>) -> V {
             e
         }
     };
-    refresh(rt, e, view.as_ref(), pos);
-    rt.put_field(e, "$seen", V::J(now));
+    refresh(rt, e, view, pos);
+    // Where the game gives no time (a hit's hooks), it was seen when it was last.
+    if now != 0 || rt.get_field(e, "$seen").j() == 0 {
+        rt.put_field(e, "$seen", V::J(now));
+    }
     e
 }
 

@@ -3241,6 +3241,96 @@ impl Game<'_> {
             canceled,
         );
     }
+    /// A hit is about to reach entity `entity` of type `kind` (`minecraft:zombie`,
+    /// `minecraft:player`): in `LivingEntity.actuallyHurt`, once the armour, the enchantments
+    /// and Resistance took their share of `amount` and before absorption takes its own (NeoForge's
+    /// `LivingDamageEvent.Pre`). `damage_type`, `causing` and `direct` are the hit's
+    /// `DamageSource`, named as `native_living_incoming_damage` names it. Change `amount` and the
+    /// hit goes on with it: absorption, then the health, take it, and 0 hurts nothing. A value a
+    /// mod leaves that is not a finite number is put back as it was, and one below 0 is 0. Not
+    /// told of a hit the game stopped before: one `native_living_incoming_damage` canceled, one
+    /// inside the invulnerable time no stronger than the last, a mob's that Resistance took
+    /// whole; nor of what a wolf's armour takes. It runs on the thread that ticks the world (the
+    /// server thread), so state shared with render thread hooks needs synchronising. No `self`:
+    /// the game is in the middle of the hit. API @API:living_damage@.
+    pub(super) fn native_living_damage_pre(
+        entity: i32,
+        kind: &str,
+        damage_type: &str,
+        causing: i32,
+        direct: i32,
+        amount: &mut f32,
+    ) {
+        let _ = (entity, kind, damage_type, causing, direct, amount);
+    }
+    /// What of a hit reached the health of entity `entity` of type `kind`, `amount` (0 when
+    /// absorption took it all), at the end of `LivingEntity.actuallyHurt` (NeoForge's
+    /// `LivingDamageEvent.Post`): after the health was set, before a death the hit caused is
+    /// handled. Told for each hit `native_living_damage_pre` was, with its source named the same
+    /// way. It only hears. It runs on the thread that ticks the world; no `self`: the game is in
+    /// the middle of the hit. API @API:living_damage@.
+    pub(super) fn native_living_damage_post(
+        entity: i32,
+        kind: &str,
+        damage_type: &str,
+        causing: i32,
+        direct: i32,
+        amount: f32,
+    ) {
+        let _ = (entity, kind, damage_type, causing, direct, amount);
+    }
+    /// The mob `entity` of type `kind` dies: where `LivingEntity.die` starts (NeoForge's
+    /// `LivingDeathEvent`), its health gone, before its drops, its experience and the rest of the
+    /// game's death handling. `damage_type`, `causing` and `direct` are what killed it, the last
+    /// hit's `DamageSource` named as `native_living_incoming_damage` names it
+    /// (`minecraft:generic_kill` for `/kill`; `minecraft:generic` and 0 when no hit is known). Set
+    /// `canceled` and it does not die here: no drops, experience or death message. Give it health
+    /// back (`native_set_mob_health`) and it lives on, and may die again later; left without, it
+    /// goes as a dead mob goes, without its drops. Once for each death, in the tick after the
+    /// blow (where the game handles deaths). A player's death isn't told here
+    /// (`native_player_died` hears it). Server-side. API @API:living_death@.
+    pub(super) fn native_living_death(
+        &mut self,
+        entity: i32,
+        kind: &str,
+        damage_type: &str,
+        causing: i32,
+        direct: i32,
+        canceled: &mut bool,
+    ) {
+        let _ = (entity, kind, damage_type, causing, direct, canceled);
+    }
+    /// `native_living_death` for mob `m` about to die (`LivingEntity.die`): whether a mod kept it
+    /// from dying. One given health back lives on, and its next death is told again.
+    pub(super) fn living_death_canceled(&mut self, m: &horizon_client::mobs::Mob) -> bool {
+        // A player's blow names that player, whose turn is over by the death.
+        let killer = self.player_killer_id(m);
+        let source = m.last_damage.map(|(d, _)| mob_source_by(&d, killer));
+        let (damage_type, causing, direct) = source.map_or(("minecraft:generic", 0, 0), |s| (s.damage_type, s.causing, s.direct));
+        let mut canceled = false;
+        self.native_living_death(m.id as i32, &m.kind.id, damage_type, causing, direct, &mut canceled);
+        if canceled
+            && let Some(o) = self.mobs.iter_mut().find(|o| o.id == m.id && o.alive())
+        {
+            o.death_time = 0;
+            self.died.remove(&m.id);
+        }
+        canceled
+    }
+    /// The entity id of the player who last hurt mob `m` (`last_hurt_by_player`):
+    /// a guest's, or the player whose turn it is; 0 for none.
+    fn player_killer_id(&self, m: &horizon_client::mobs::Mob) -> i32 {
+        let acting = self.player.as_ref().map_or(0, |p| p.entity_id);
+        match self.last_hurt_by_player.get(&m.id) {
+            // During that guest's own turn, the hub is out of `lan`.
+            Some(Some(conn)) if self.lan_acting != Some(*conn) => {
+                self.lan.as_ref().and_then(|l| l.hub.guest(*conn)).map_or(0, |g| g.entity_id)
+            }
+            Some(Some(_)) => acting,
+            Some(None) if self.lan_acting.is_none() => acting,
+            _ => 0,
+        }
+    }
     /// Whether a mod hears projectiles' impacts (`native_projectile_impact`):
     /// set `hears`. Asked once a server tick before the projectiles fly; only
     /// then does the tick keep the copy of each flying projectile that a
@@ -3335,10 +3425,43 @@ impl Game<'_> {
     }
 }
 
+/// The mob a hit's hooks run for, as the game holds it then
+/// (`horizon_client::health::HitEntity`): what a mod's handler reads of the
+/// hurt mob there, the hooks having no `self` to ask.
+#[allow(dead_code)]
+pub(crate) type NativeHitEntity = horizon_client::health::HitEntity;
+
+/// The mob the running hit hook (`native_living_incoming_damage`,
+/// `native_living_knockback`, `native_living_damage_pre`,
+/// `native_living_damage_post`) is about: its health, place and facing as the
+/// hit finds them. None for a player or the ender dragon, and outside those
+/// hooks.
+#[allow(dead_code)]
+pub(crate) fn native_hit_entity() -> Option<NativeHitEntity> {
+    horizon_client::health::hit_entity()
+}
+
+/// The hurt mob of a hit, as [`native_hit_entity`] tells of it.
+fn hit_entity(hurting: &Hurting<'_>) -> Option<NativeHitEntity> {
+    match hurting {
+        Hurting::Mob(m, _) => Some(NativeHitEntity {
+            entity: m.id as i32,
+            health: m.health,
+            max_health: horizon_client::mobs::finalize::max_health(m),
+            position: [m.position.x, m.position.y, m.position.z],
+            yaw: m.yaw,
+        }),
+        Hurting::Player(..) | Hurting::Dragon(..) => None,
+    }
+}
+
 /// `native_living_knockback` for the knockback code (`health::KNOCKBACK`): whether it
 /// canceled the push. Its one caller. The pushed entity and the source are named as the
 /// damage hook names them.
 pub(super) fn knockback(pushed: Hurting<'_>, knock: &mut Knock) -> bool {
+    horizon_client::health::with_hit_entity(hit_entity(&pushed), || knockback_hook(pushed, knock))
+}
+fn knockback_hook(pushed: Hurting<'_>, knock: &mut Knock) -> bool {
     let (entity, kind, source) = hurt_server_args(pushed);
     let HurtSource {
         damage_type,
@@ -3396,6 +3519,9 @@ pub(super) fn block_contact(
 /// `native_living_incoming_damage` for the damage code (`health::HURT_SERVER`): whether
 /// it canceled the hit. Its one caller.
 pub(super) fn hurt_server(hurting: Hurting<'_>, amount: &mut f32) -> bool {
+    horizon_client::health::with_hit_entity(hit_entity(&hurting), || hurt_server_hook(hurting, amount))
+}
+fn hurt_server_hook(hurting: Hurting<'_>, amount: &mut f32) -> bool {
     let (entity, kind, source) = hurt_server_args(hurting);
     let HurtSource {
         damage_type,
@@ -3414,6 +3540,20 @@ pub(super) fn hurt_server(hurting: Hurting<'_>, amount: &mut f32) -> bool {
     );
     canceled
 }
+/// `native_living_damage_pre` for the damage code (`health::DAMAGE_PRE`). Its one caller.
+pub(super) fn damage_pre(hurting: Hurting<'_>, amount: &mut f32) {
+    horizon_client::health::with_hit_entity(hit_entity(&hurting), || {
+        let (entity, kind, source) = hurt_server_args(hurting);
+        Game::native_living_damage_pre(entity, kind, source.damage_type, source.causing, source.direct, amount);
+    });
+}
+/// `native_living_damage_post` for the damage code (`health::DAMAGE_POST`). Its one caller.
+pub(super) fn damage_post(hurting: Hurting<'_>, amount: f32) {
+    horizon_client::health::with_hit_entity(hit_entity(&hurting), || {
+        let (entity, kind, source) = hurt_server_args(hurting);
+        Game::native_living_damage_post(entity, kind, source.damage_type, source.causing, source.direct, amount);
+    });
+}
 /// `native_living_incoming_damage`'s entity, entity type and source for a hit.
 fn hurt_server_args(hurting: Hurting<'_>) -> (i32, &str, HurtSource<'_>) {
     match hurting {
@@ -3423,11 +3563,18 @@ fn hurt_server_args(hurting: Hurting<'_>) -> (i32, &str, HurtSource<'_>) {
     }
 }
 /// A mob's damage as its `DamageSource`: the causing entity is known when it
-/// is a mob, and is the direct one too when it deals the damage itself.
+/// is a mob, or the player whose turn it is (`as_guest`), and is the direct
+/// one too when it deals the damage itself.
 fn mob_source(damage: &Damage) -> HurtSource<'static> {
+    mob_source_by(damage, horizon_client::health::acting_player())
+}
+/// [`mob_source`] with `player` as the entity id of the player behind a
+/// player's damage (0 for none known).
+fn mob_source_by(damage: &Damage, player: i32) -> HurtSource<'static> {
     let causing = match damage.attacker {
         Some(Who::Mob(id)) => id as i32,
-        _ => 0,
+        Some(Who::Player) => player,
+        None => 0,
     };
     let melee = super::creatures::melee(damage.kind);
     HurtSource {
@@ -6632,9 +6779,16 @@ mod tests {
         assert_eq!(source(K::Arrow, zombie), ("minecraft:arrow", 3, 0));
         let blast = source(K::Explosion, zombie);
         assert_eq!(blast, ("minecraft:player_explosion", 3, 0));
-        // A player behind a mob's hit isn't known yet, nor is a fall's source.
+        // A player's hit is the player's whose turn it is; with none acting,
+        // and for a fall, no entity is known.
         let hit = source(K::PlayerAttack, Some(Who::Player));
         assert_eq!(hit, ("minecraft:player_attack", 0, 0));
+        let before = horizon_client::health::set_acting_player(12);
+        let hit = source(K::PlayerAttack, Some(Who::Player));
+        assert_eq!(hit, ("minecraft:player_attack", 12, 12));
+        let shot = source(K::Arrow, Some(Who::Player));
+        assert_eq!(shot, ("minecraft:arrow", 12, 0));
+        horizon_client::health::set_acting_player(before);
         assert_eq!(source(K::Fall, None), ("minecraft:fall", 0, 0));
         let arrow = HurtSource {
             damage_type: "minecraft:arrow",

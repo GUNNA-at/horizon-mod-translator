@@ -63,6 +63,15 @@ pub trait ServerDamageEnvironment<A: HealthAttributes = EntityAttributes>:
     fn level_is_client(&mut self) -> Result<bool, EnvError<Self>>;
     fn record_damage(&mut self, amount: f32) -> Result<(), EnvError<Self>>;
     fn damage_event(&mut self) -> Result<(), EnvError<Self>>;
+    /// [`DamageWorld::damage_pre`]: the damage on its way past absorption; vanilla leaves it.
+    fn damage_pre(&mut self, damage: f32) -> Result<f32, EnvError<Self>> {
+        Ok(damage)
+    }
+    /// [`DamageWorld::damage_post`]: what reached the health.
+    fn damage_post(&mut self, damage: f32) -> Result<(), EnvError<Self>> {
+        let _ = damage;
+        Ok(())
+    }
 }
 pub struct ServerPlayerDamage<'a, E, A: HealthAttributes = EntityAttributes> {
     attributes: &'a mut A,
@@ -280,6 +289,16 @@ impl<A: HealthAttributes, E: ServerDamageEnvironment<A>> DamageWorld
     fn damage_event(&mut self) -> Result<(), Self::Error> {
         self.environment
             .damage_event()
+            .map_err(ServerDamageError::Environment)
+    }
+    fn damage_pre(&mut self, damage: f32) -> Result<f32, Self::Error> {
+        self.environment
+            .damage_pre(damage)
+            .map_err(ServerDamageError::Environment)
+    }
+    fn damage_post(&mut self, damage: f32) -> Result<(), Self::Error> {
+        self.environment
+            .damage_post(damage)
             .map_err(ServerDamageError::Environment)
     }
 }

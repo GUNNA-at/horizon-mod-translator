@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "name": "living_death",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_living_death"
+    }
+  ],
+  "rust_summary": "a mob's death a mod can cancel (`native_living_death`).",
+  "doc_summary": "a mob's death a mod can cancel (`native_living_death`, NeoForge's `LivingDeathEvent`): where\n`LivingEntity.die` starts, the mob's health gone, before its drops, its experience and the rest of the game's death\nhandling, with the mob's id and type and what killed it, the last hit's damage source named as\n`native_living_incoming_damage` names it (`minecraft:generic_kill` for `/kill`; `minecraft:generic` and 0 when no hit is\nknown). A mod that sets `canceled` keeps the mob from dying there: no drops, experience or death message. Given health back\n(`native_set_mob_health`), the mob lives on and its next death is told again; left without, it goes as a dead mob goes,\nwithout its drops. Once for each death, in the tick after the blow, where the game handles deaths. A player's death isn't\ntold here (`native_player_died` hears it). Server-side.\n\nBundles that use it need `\"hooks\": @API:living_death@`."
+}

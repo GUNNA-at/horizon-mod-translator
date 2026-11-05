@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 657] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 656] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1444,7 +1444,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 657] = [
     ("net/minecraft/util/valueproviders/MultipliedFloats", "i([Lnet/minecraft/util/valueproviders/SampledFloat;)V=values|o"),
     ("net/minecraft/world/CompoundContainer", "i(Lnet/minecraft/world/Container;Lnet/minecraft/world/Container;)V=container1,container2|o"),
     ("net/minecraft/world/RandomSequence", "i(Lnet/minecraft/world/level/levelgen/XoroshiroRandomSource;)V=source|o"),
-    ("net/minecraft/world/damagesource/DamageSource", "i(Lnet/minecraft/core/Holder;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/Vec3;)V=type,directEntity,causingEntity,damageSourcePosition|ggetDirectEntity()Lnet/minecraft/world/entity/Entity;=directEntity|ggetEntity()Lnet/minecraft/world/entity/Entity;=causingEntity|gsourcePositionRaw()Lnet/minecraft/world/phys/Vec3;=damageSourcePosition|gtypeHolder()Lnet/minecraft/core/Holder;=type|o"),
     ("net/minecraft/world/entity/AgeableMob$AgeableMobGroupData", "i(ZF)V=shouldSpawnBaby,babySpawnChance|ggetGroupSize()I=groupSize|gisShouldSpawnBaby()Z=shouldSpawnBaby|ggetBabySpawnChance()F=babySpawnChance|o"),
     ("net/minecraft/world/entity/Crackiness", "i(FFF)V=fractionLow,fractionMedium,fractionHigh|o"),
     ("net/minecraft/world/entity/Display$PosRotInterpolationTarget", "i(IDDDDD)V=steps,targetX,targetY,targetZ,targetYRot,targetXRot|o"),

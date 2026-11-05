@@ -307,6 +307,8 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         // Enchantments are data the runtime doesn't list: a name is taken to be one, as the
         // game's data has it (`enchantments.rs`).
         "enchantment" if crate::recipes::valid_location(id) => crate::enchantments::value(rt, id),
+        // Damage types are data: the game's, and the mods' own (`damage.rs`).
+        "damage_type" if crate::recipes::valid_location(id) => crate::damage::damage_type(rt, id),
         _ => V::NULL,
     }
 }
@@ -1150,6 +1152,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                             "fluid" => rt.host().is_some_and(|h| h.fluid_in_tag(&id, &tag)),
                             "item" => crate::recipes::item_in_tag(rt, &id, &tag),
                             "biome" => rt.host().is_some_and(|h| h.biome_in_tag(&id, &tag)),
+                            "damage_type" => crate::damage::in_tag(rt, &id, &tag),
                             _ => false,
                         };
                     V::I(inside as i32)

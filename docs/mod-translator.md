@@ -3302,6 +3302,86 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     mob's (Create's wrench can't break a minecart yet); an entity's UUID is a stable stand-in, its
     motion, pitch, equipment and effects aren't read; a player is found by place; the
     `EntityInteractSpecific` click point is the entity's feet.
+- [x] 2026-11-05 Damage for mods: the game's damage types and sources, and NeoForge's events of a
+  hit (new `horizon-compat/src/damage.rs`; new hooks `native_living_damage_pre`,
+  `native_living_damage_post`, `native_living_death`). Measured in the pack (367 jars, methods
+  taking the event): `LivingDeathEvent` 24 jars (36 methods), `LivingIncomingDamageEvent` 16 (29,
+  Create 1: the extendo grip notes a blow its reach dealt), `LivingDamageEvent.Pre` 14 (23), `.Post`
+  7 (11), `LivingKnockBackEvent` 5 (5, Create 1: the extendo grip's stronger knockback), 38 jars in
+  all; and `DamageSource`'s own API: `getEntity` in 42 jars, `is(TagKey)` 25, `new
+  DamageSource(holder)` 22, `is(ResourceKey)` 17, `DamageSources.playerAttack` 13, `.fall` 13,
+  `.mobAttack` 12. The runtime posted none of the events, and a mod could neither make nor read a
+  damage source (Create hurts with its own nine types from its data: `create:crush` for the
+  crushing wheels, `mechanical_saw`, `mechanical_drill`, `mechanical_roller`, `fan_fire`,
+  `fan_lava`, `run_over`, `potato_cannon`, `cuckoo_surprise`).
+  - Damage types are data: the game's (new `Host::damage_types`: id, message id, exhaustion and
+    tags, from the game's damage catalog) and the mods' own (`data/<ns>/damage_type/*.json` of the
+    bundled jars, with their `tags/damage_type` files, whose `#` references resolve through both).
+    `DamageTypes.IN_FIRE` and the rest of 1.21.1's 47 fields are their keys;
+    `registryAccess().registryOrThrow(Registries.DAMAGE_TYPE).getHolderOrThrow(key)` gives the
+    type's holder and `Holder.is(TagKey)` reads its tags.
+  - `DamageSource`s a mod makes (`new DamageSource(holder[, entity[, entity]][, pos])`) or asks
+    `level.damageSources()` for (`fall()`, `inFire()`, `playerAttack(player)`, `mobAttack(mob)`,
+    `arrow(arrow, owner)`, `explosion(...)`, `source(key, ...)`...), with 1.21.1's rules (one entity
+    is both the direct and the causing one; an explosion of two entities is `player_explosion`; a
+    fireball of nobody `unattributed_fireball`). They read `getEntity`, `getDirectEntity`,
+    `isDirect`, `type()`, `typeHolder()`, `getMsgId`, `getFoodExhaustion`, `is(TagKey)`,
+    `is(ResourceKey)`, `getSourcePosition`, `getWeaponItem` and `isCreativePlayer`.
+  - The events, posted from the game's damage hooks where NeoForge posts them:
+    `LivingIncomingDamageEvent` once `LivingEntity.hurt` is past its guards (the game's
+    `native_living_incoming_damage`: a listener changes the amount or cancels the hit);
+    `LivingDamageEvent.Pre` in `actuallyHurt` after armour, enchantments and Resistance, before
+    absorption (new `native_living_damage_pre`, from horizon-world's `DamageWorld::damage_pre` for
+    players and the mobs' `Mob::reach_health`: a listener sets what goes on), and `.Post` once the
+    health took it (`native_living_damage_post`); `LivingKnockBackEvent` (`native_living_knockback`:
+    strength and direction changed, or the push canceled); a mob's `LivingDeathEvent` where
+    `LivingEntity.die` starts (new `native_living_death`, asked by `creatures::mob_died`): a
+    listener that cancels it keeps the mob, which lives on if given health back. A player's death
+    is heard (`native_player_died`), not cancelable. One `DamageContainer` follows a hit from its
+    incoming event to its `Post`, as NeoForge's stack of them on the entity does
+    (`getOriginalDamage`, `getNewDamage`, `setNewDamage`, `getReduction`, `getBlockedDamage`...).
+  - Who is hit, and by whom: the hurt entity is the runtime's object for it
+    (`vanilla_entities::living`), brought up to date from the game's mob as the hit finds it (new
+    `health::hit_entity`: health, max health, place, facing; the hit's hooks have no world to ask);
+    a player is the server's player of that entity id (new `Host::player_entities`, read each
+    server tick); a player's blow or arrow now names that player (new `health::acting_player`, set
+    by `as_guest`), where its source had no entity before.
+  Tests `damage::tests::{a_mods_damage_sources_read_as_vanillas,
+  a_hit_reaches_the_mods_and_their_changes_come_back, a_death_the_mods_cancel_keeps_the_mob_alive,
+  a_mods_own_damage_events_and_containers}`, `living_damage::tests::the_damage_goes_on_as_the_pre_step_leaves_it`,
+  `mobs::native_damage_tests::a_native_hook_changes_the_damage_that_reaches_a_mobs_health`,
+  `native_hooks::tests::the_damage_hook_names_the_source`. In game (`fdcmd.sh` with `hzcheck.jar`,
+  whose new `Damage` listeners halve fire on a cow, triple a player's blow on one, log the rest and
+  keep a cow's first death, its health set back to 6): the player's blow on a cow at 10 leaves it
+  at 7 ("hzcheck: incoming player 1.0 on minecraft:cow (health 10.0) ..., tripled", "pre 3.0 of 1.0",
+  "post 3.0 of 1.0 ... (player)", "knockback 0.4"); `/damage` with `minecraft:in_fire` 4 on it at 4
+  leaves it at 2 ("incoming inFire 4.0 ... by none, fire halved", "pre 2.0 of 4.0"); the next blow
+  kills it and "death of minecraft:cow (player) ..., kept with health 6" is heard; the wolves'
+  bites on the sheep nearby come through the same way ("incoming mob 4.0 on minecraft:sheep ... by
+  minecraft:wolf", "death of minecraft:sheep (mob) by minecraft:wolf"). The earlier checks
+  (commands, keys, raw input, world events, entities, tooltips) still pass. That round found three
+  faults, fixed since: the game refused a dying mob's health (`native_set_mob_health` took living
+  mobs only), so the kept cow died anyway; a death named no player, the player's turn being over by
+  then (`player_killer_id` now reads the game's `last_hurt_by_player`); and a player's `getType`
+  was nobody's (now `EntityType.PLAYER`). 356 compat, 17 translator tests pass.
+  - Gaps: what a listener asks of the world in the hit's own hooks (incoming, pre, post, knockback)
+    doesn't reach the game, which is in the middle of the hit: a message to the player, healing the
+    attacker; a container's reduction functions (`addModifier`) and the invulnerable time a listener
+    sets aren't applied (the game computes its own); a player's death can't be canceled; a hit a
+    mod's own code deals (`entity.hurt` from a listener or a block entity) posts no events, the
+    runtime being busy in that call; a player's held item isn't known in the hit's hooks (Create's
+    extendo grip and Farmer's Delight's backstabbing ask `getMainHandItem`); Horizon pushes after
+    Resistance where NeoForge's knockback event comes before; `LivingDropsEvent` (13 jars, Create 2:
+    the deployer and the crushing wheels collect a kill's drops) isn't posted yet.
+  - Measured again over the pack (367 jars, `coverage` with this step's translator, datagen-only
+    APIs left out): 63.8% of the API methods the jars call answer a probe (83313 of 130683; 63.3%
+    before this step, 60.2% this morning, 53.5% on Nov 4), 75.2% of the call sites (277698 of
+    369268); Create 57.8% of its methods (2308 of 3994), 84.2% of its call sites (21366 of 25380);
+    14188 distinct methods missing across the pack (14291 before, 16305 on Nov 4). Still a lower
+    bound: the probe calls each method with null arguments, or with a bare object of its class as
+    the receiver, and the most-missed ones answer only an object the runtime made: `Holder.value`
+    (136 jars) a registry's holder, `Codec.fieldOf` (113) and `MapCodec.forGetter` (120) a codec,
+    `NonNullList.get` (102) a list, `Level.addFreshEntity` (85) an entity.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

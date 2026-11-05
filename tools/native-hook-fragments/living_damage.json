@@ -1,0 +1,14 @@
+{
+  "hooks": [
+    {
+      "name": "living_damage_pre",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_living_damage_pre"
+    },
+    {
+      "name": "living_damage_post",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_living_damage_post"
+    }
+  ],
+  "rust_summary": "damage a mod can change once armour took its share, and hear once it reached the health (`native_living_damage_pre`, `native_living_damage_post`).",
+  "doc_summary": "damage a mod can change once the reductions took their share (`native_living_damage_pre`, NeoForge's\n`LivingDamageEvent.Pre`) and hear once it reached the health (`native_living_damage_post`, `LivingDamageEvent.Post`): in\n`LivingEntity.actuallyHurt`, the first after the armour, the enchantments and Resistance and before absorption, the second at\nthe end, after the health was set and before a death the hit caused is handled. Both name the hurt entity (its id and type,\n`minecraft:player` for a player) and the hit's damage source as `native_living_incoming_damage` does. A mod may change\n`amount` in the first: absorption, then the health, take what it leaves, and 0 hurts nothing; a value that is not a finite\nnumber is put back as it was and one below 0 is 0. The second hears what reached the health (0 when absorption took it\nall), once for each hit the first was told of. Neither is told of a hit the game stopped before (canceled by\n`native_living_incoming_damage`, inside the invulnerable time and no stronger than the last, a mob's that Resistance took\nwhole), nor of what a wolf's armour takes. They have no `self`: the game is in the middle of the hit. They run on the\nthread that ticks the world, so state a mod shares with its render thread hooks needs synchronising.\n\nBundles that use them need `\"hooks\": @API:living_damage@`."
+}

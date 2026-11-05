@@ -27,6 +27,18 @@ pub trait DamageWorld {
     fn health(&mut self) -> Result<f32, Self::Error>;
     fn set_health(&mut self, value: f32) -> Result<(), Self::Error>;
     fn damage_event(&mut self) -> Result<(), Self::Error>;
+    /// The damage once armour and magic took their share, before absorption (where NeoForge's
+    /// `LivingEntity.actuallyHurt` posts `LivingDamageEvent.Pre`): what it gives back goes on.
+    /// Vanilla has nothing here, so by default it is the damage as it came.
+    fn damage_pre(&mut self, damage: f32) -> Result<f32, Self::Error> {
+        Ok(damage)
+    }
+    /// What reached the health, at the end of the inner damage (`LivingDamageEvent.Post`); 0 when
+    /// absorption took it all. Nothing by default.
+    fn damage_post(&mut self, damage: f32) -> Result<(), Self::Error> {
+        let _ = damage;
+        Ok(())
+    }
 }
 pub(crate) fn positive(value: f32) -> f32 {
     if value.is_nan() {
@@ -71,6 +83,7 @@ pub(crate) fn actually_hurt_after_immunity_check<W: DamageWorld>(
 ) -> Result<(), W::Error> {
     let damage = world.after_armor(damage)?;
     let damage = world.after_magic(damage)?;
+    let damage = world.damage_pre(damage)?;
     let remaining = positive(damage - world.absorption()?);
     let absorption = world.absorption()? - (damage - remaining);
     world.set_absorption(absorption)?;
@@ -83,7 +96,7 @@ pub(crate) fn actually_hurt_after_immunity_check<W: DamageWorld>(
         }
     }
     if remaining == 0.0 {
-        return Ok(());
+        return world.damage_post(0.0);
     }
     if player {
         let exhaustion = world.source_food_exhaustion()?;
@@ -100,5 +113,90 @@ pub(crate) fn actually_hurt_after_immunity_check<W: DamageWorld>(
         let absorption = world.absorption()?;
         world.set_absorption(absorption - remaining)?;
     }
-    world.damage_event()
+    world.damage_event()?;
+    world.damage_post(remaining)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mob-like world: no armour or magic, `absorption` to start with, and a log of what the
+    /// pre and post steps saw.
+    struct World {
+        health: f32,
+        absorption: f32,
+        pre: Option<f32>,
+        seen: Vec<(&'static str, f32)>,
+    }
+    impl DamageWorld for World {
+        type Error = ();
+        type Attacker = ();
+        fn invulnerable(&mut self) -> Result<bool, ()> {
+            Ok(false)
+        }
+        fn after_armor(&mut self, damage: f32) -> Result<f32, ()> {
+            Ok(damage)
+        }
+        fn after_magic(&mut self, damage: f32) -> Result<f32, ()> {
+            Ok(damage)
+        }
+        fn absorption(&mut self) -> Result<f32, ()> {
+            Ok(self.absorption)
+        }
+        fn set_absorption(&mut self, value: f32) -> Result<(), ()> {
+            self.absorption = value.max(0.0);
+            Ok(())
+        }
+        fn server_player_attacker(&mut self) -> Result<Option<()>, ()> {
+            Ok(None)
+        }
+        fn award_attacker(&mut self, _: (), _: DamageStat, _: i32) -> Result<(), ()> {
+            Ok(())
+        }
+        fn award_self(&mut self, _: DamageStat, _: i32) -> Result<(), ()> {
+            Ok(())
+        }
+        fn source_food_exhaustion(&mut self) -> Result<f32, ()> {
+            Ok(0.0)
+        }
+        fn cause_food_exhaustion(&mut self, _: f32) -> Result<(), ()> {
+            Ok(())
+        }
+        fn record_damage(&mut self, _: f32) -> Result<(), ()> {
+            Ok(())
+        }
+        fn health(&mut self) -> Result<f32, ()> {
+            Ok(self.health)
+        }
+        fn set_health(&mut self, value: f32) -> Result<(), ()> {
+            self.health = value;
+            Ok(())
+        }
+        fn damage_event(&mut self) -> Result<(), ()> {
+            Ok(())
+        }
+        fn damage_pre(&mut self, damage: f32) -> Result<f32, ()> {
+            self.seen.push(("pre", damage));
+            Ok(self.pre.unwrap_or(damage))
+        }
+        fn damage_post(&mut self, damage: f32) -> Result<(), ()> {
+            self.seen.push(("post", damage));
+            Ok(())
+        }
+    }
+
+    /// The pre step's amount is what absorption and the health take; the post step hears what
+    /// reached the health, 0 when absorption took it all.
+    #[test]
+    fn the_damage_goes_on_as_the_pre_step_leaves_it() {
+        let mut w = World { health: 20.0, absorption: 0.0, pre: Some(3.0), seen: Vec::new() };
+        actually_hurt(&mut w, 8.0, false).unwrap();
+        assert_eq!(w.health, 17.0);
+        assert_eq!(w.seen, [("pre", 8.0), ("post", 3.0)]);
+        let mut w = World { health: 20.0, absorption: 4.0, pre: None, seen: Vec::new() };
+        actually_hurt(&mut w, 3.0, false).unwrap();
+        assert_eq!((w.health, w.absorption), (20.0, 1.0));
+        assert_eq!(w.seen, [("pre", 3.0), ("post", 0.0)]);
+    }
 }

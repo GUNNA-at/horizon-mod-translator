@@ -678,7 +678,7 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 53] = [
+const CHAIN: [Module; 54] = [
     mutable_pos,
     crate::worldgen::call,
     crate::mixin::call,
@@ -701,6 +701,7 @@ const CHAIN: [Module; 53] = [
     crate::entities::call_key,
     crate::creative::call,
     crate::tooltips::call,
+    crate::damage::call,
     crate::world_events::call,
     crate::vanilla_entities::call,
     crate::commands::call,
@@ -737,7 +738,7 @@ const CHAIN: [Module; 53] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 53] = [
+const CLAIMS: [Claims; 54] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::worldgen::claims,
     crate::mixin::claims,
@@ -760,6 +761,7 @@ const CLAIMS: [Claims; 53] = [
     crate::entities::claims,
     crate::creative::claims,
     crate::tooltips::claims,
+    crate::damage::claims,
     crate::world_events::claims,
     crate::vanilla_entities::claims,
     crate::commands::claims,
@@ -794,7 +796,7 @@ const CLAIMS: [Claims; 53] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 53] = [
+const MODULE_NAMES: [&str; 54] = [
     "mutable_pos",
     "worldgen",
     "mixin",
@@ -817,6 +819,7 @@ const MODULE_NAMES: [&str; 53] = [
     "entities",
     "creative",
     "tooltips",
+    "damage",
     "world_events",
     "vanilla_entities",
     "commands",
@@ -1904,6 +1907,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::attributes::get_static(rt, o, f))
             .or_else(|| crate::enchantments::get_static(rt, o, f))
             .or_else(|| crate::events::get_static(rt, o, f))
+            .or_else(|| crate::damage::get_static(rt, o, f))
             .or_else(|| crate::gui::get_static(rt, o, f))
             .or_else(|| crate::screens::get_static(rt, o, f))
             .or_else(|| crate::menus::get_static(rt, o, f))
