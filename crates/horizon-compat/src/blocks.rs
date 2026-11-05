@@ -648,7 +648,9 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner == ARMOR_MATERIAL && matches!(name, "defense" | "enchantmentValue" | "toughness" | "knockbackResistance" | "equipSound"))
         || matches!(
             (owner, name),
-            ("net/minecraft/world/level/block/SignBlock", "getWoodType") | ("net/minecraft/world/level/block/BedBlock", "getConnectedDirection")
+            ("net/minecraft/world/level/block/SignBlock", "getWoodType")
+                | ("net/minecraft/world/level/block/BedBlock", "getConnectedDirection")
+                | ("net/minecraft/world/level/block/FaceAttachedHorizontalDirectionalBlock", "getConnectedDirection")
         )
         || (name == "type" && owner.ends_with("SignBlock") && owner.starts_with("net/minecraft/world/level/block/"))
         || (name == "getShape" && default_shape_class(owner))
@@ -1088,6 +1090,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let head = props.iter().any(|(k, v)| *k == "part" && *v == "head");
             let o = crate::api_common::DIRECTION_NAMES.iter().position(|d| *d == facing).unwrap_or(2) as i64;
             Some(api::direction(rt, if head { o ^ 1 } else { o }))
+        }
+        // `FaceAttachedHorizontalDirectionalBlock.getConnectedDirection(state)` (a lever's, a
+        // button's): the side it hangs from, down from a ceiling, up from a floor, else its facing.
+        ("net/minecraft/world/level/block/FaceAttachedHorizontalDirectionalBlock", "getConnectedDirection") => {
+            let text = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let (_, props) = crate::host::split_state(&text);
+            let prop = |key: &str| props.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+            let o = match prop("face") {
+                Some("ceiling") => 0,
+                Some("floor") => 1,
+                _ => crate::api_common::DIRECTION_NAMES.iter().position(|d| Some(*d) == prop("facing")).unwrap_or(2) as i64,
+            };
+            Some(api::direction(rt, o))
         }
         (BUILDER, "add") => {
             let list = rt.get_field(a(0), "$props");

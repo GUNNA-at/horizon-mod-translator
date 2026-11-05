@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 679] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 678] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1505,7 +1505,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 679] = [
     ("net/minecraft/world/item/crafting/SmithingTransformRecipe", "i(Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/ItemStack;)V=template,base,addition,result|o"),
     ("net/minecraft/world/item/crafting/SmithingTrimRecipe", "i(Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/crafting/Ingredient;)V=template,base,addition|o"),
     ("net/minecraft/world/item/trading/MerchantOffer", "i(Lnet/minecraft/world/item/trading/ItemCost;Ljava/util/Optional;Lnet/minecraft/world/item/ItemStack;IIZIIFI)V=baseCostA,costB,result,uses,maxUses,rewardExp,specialPriceDiff,demand,priceMultiplier,xp|ggetItemCostA()Lnet/minecraft/world/item/trading/ItemCost;=baseCostA|ggetItemCostB()Ljava/util/Optional;=costB|ggetResult()Lnet/minecraft/world/item/ItemStack;=result|ggetUses()I=uses|ggetMaxUses()I=maxUses|ggetDemand()I=demand|ggetSpecialPriceDiff()I=specialPriceDiff|ssetSpecialPriceDiff(I)V=specialPriceDiff|ggetPriceMultiplier()F=priceMultiplier|ggetXp()I=xp|gshouldRewardExp()Z=rewardExp|o"),
-    ("net/minecraft/world/level/ChunkPos", "i(II)V=x,z|e=x,z"),
     ("net/minecraft/world/level/ClipBlockStateContext", "i(Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/Vec3;Ljava/util/function/Predicate;)V=from,to,block|ggetTo()Lnet/minecraft/world/phys/Vec3;=to|ggetFrom()Lnet/minecraft/world/phys/Vec3;=from|gisTargetBlock()Ljava/util/function/Predicate;=block|o"),
     ("net/minecraft/world/level/ClipContext", "i(Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/level/ClipContext$Block;Lnet/minecraft/world/level/ClipContext$Fluid;Lnet/minecraft/world/phys/shapes/CollisionContext;)V=from,to,block,fluid,collisionContext|ggetTo()Lnet/minecraft/world/phys/Vec3;=to|ggetFrom()Lnet/minecraft/world/phys/Vec3;=from|o"),
     ("net/minecraft/world/level/GameRules", "i(Ljava/util/Map;)V=rules|o"),
@@ -2196,12 +2195,13 @@ pub(crate) const ENUMS: [&str; 488] = [
 
 /// (class, factories): the static methods of the records and data classes above that only build
 /// one from their arguments (`<name><desc>=<constructor desc>`, `|` between them).
-pub(crate) const FACTORIES: [(&str, &str); 36] = [
+pub(crate) const FACTORIES: [(&str, &str); 39] = [
     ("com/mojang/realmsclient/util/TextRenderingUtils$LineSegment", "text(Ljava/lang/String;)Lcom/mojang/realmsclient/util/TextRenderingUtils$LineSegment;=(Ljava/lang/String;)V"),
     ("net/minecraft/advancements/Criterion", "lambda$criterionCodec$0(Lnet/minecraft/advancements/CriterionTrigger;Lnet/minecraft/advancements/CriterionTriggerInstance;)Lnet/minecraft/advancements/Criterion;=(Lnet/minecraft/advancements/CriterionTrigger;Lnet/minecraft/advancements/CriterionTriggerInstance;)V"),
     ("net/minecraft/advancements/critereon/ItemCustomDataPredicate", "customData(Lnet/minecraft/advancements/critereon/NbtPredicate;)Lnet/minecraft/advancements/critereon/ItemCustomDataPredicate;=(Lnet/minecraft/advancements/critereon/NbtPredicate;)V"),
     ("net/minecraft/advancements/critereon/PlayerPredicate$StatMatcher", "lambda$createTypedCodec$1(Lnet/minecraft/stats/StatType;Lnet/minecraft/core/Holder;Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)Lnet/minecraft/advancements/critereon/PlayerPredicate$StatMatcher;=(Lnet/minecraft/stats/StatType;Lnet/minecraft/core/Holder;Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)V"),
     ("net/minecraft/advancements/critereon/SlimePredicate", "sized(Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)Lnet/minecraft/advancements/critereon/SlimePredicate;=(Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)V"),
+    ("net/minecraft/client/gui/components/Tooltip", "create(Lnet/minecraft/network/chat/Component;Lnet/minecraft/network/chat/Component;)Lnet/minecraft/client/gui/components/Tooltip;=(Lnet/minecraft/network/chat/Component;Lnet/minecraft/network/chat/Component;)V"),
     ("net/minecraft/client/model/geom/PartPose", "offsetAndRotation(FFFFFF)Lnet/minecraft/client/model/geom/PartPose;=(FFFFFF)V"),
     ("net/minecraft/client/telemetry/TelemetryProperty", "create(Ljava/lang/String;Ljava/lang/String;Lcom/mojang/serialization/Codec;Lnet/minecraft/client/telemetry/TelemetryProperty$Exporter;)Lnet/minecraft/client/telemetry/TelemetryProperty;=(Ljava/lang/String;Ljava/lang/String;Lcom/mojang/serialization/Codec;Lnet/minecraft/client/telemetry/TelemetryProperty$Exporter;)V"),
     ("net/minecraft/commands/arguments/ResourceKeyArgument", "key(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/commands/arguments/ResourceKeyArgument;=(Lnet/minecraft/resources/ResourceKey;)V"),
@@ -2213,6 +2213,7 @@ pub(crate) const FACTORIES: [(&str, &str); 36] = [
     ("net/minecraft/core/GlobalPos", "of(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/GlobalPos;=(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/BlockPos;)V"),
     ("net/minecraft/core/RegistryAccess$RegistryEntry", "fromUntyped(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/Registry;)Lnet/minecraft/core/RegistryAccess$RegistryEntry;=(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/Registry;)V"),
     ("net/minecraft/core/component/TypedDataComponent", "createUnchecked(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Lnet/minecraft/core/component/TypedDataComponent;=(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)V"),
+    ("net/minecraft/core/particles/BlockParticleOption", "lambda$streamCodec$2(Lnet/minecraft/core/particles/ParticleType;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/core/particles/BlockParticleOption;=(Lnet/minecraft/core/particles/ParticleType;Lnet/minecraft/world/level/block/state/BlockState;)V|lambda$codec$0(Lnet/minecraft/core/particles/ParticleType;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/core/particles/BlockParticleOption;=(Lnet/minecraft/core/particles/ParticleType;Lnet/minecraft/world/level/block/state/BlockState;)V"),
     ("net/minecraft/core/particles/ColorParticleOption", "create(Lnet/minecraft/core/particles/ParticleType;I)Lnet/minecraft/core/particles/ColorParticleOption;=(Lnet/minecraft/core/particles/ParticleType;I)V"),
     ("net/minecraft/data/models/model/TextureSlot", "create(Ljava/lang/String;Lnet/minecraft/data/models/model/TextureSlot;)Lnet/minecraft/data/models/model/TextureSlot;=(Ljava/lang/String;Lnet/minecraft/data/models/model/TextureSlot;)V"),
     ("net/minecraft/data/recipes/SpecialRecipeBuilder", "special(Ljava/util/function/Function;)Lnet/minecraft/data/recipes/SpecialRecipeBuilder;=(Ljava/util/function/Function;)V"),
@@ -2231,12 +2232,13 @@ pub(crate) const FACTORIES: [(&str, &str); 36] = [
     ("net/minecraft/world/level/storage/loot/providers/number/EnchantmentLevelProvider", "forEnchantmentLevel(Lnet/minecraft/world/item/enchantment/LevelBasedValue;)Lnet/minecraft/world/level/storage/loot/providers/number/EnchantmentLevelProvider;=(Lnet/minecraft/world/item/enchantment/LevelBasedValue;)V"),
     ("net/neoforged/neoforge/client/model/renderable/BakedModelRenderable", "of(Lnet/minecraft/client/resources/model/BakedModel;)Lnet/neoforged/neoforge/client/model/renderable/BakedModelRenderable;=(Lnet/minecraft/client/resources/model/BakedModel;)V"),
     ("net/neoforged/neoforge/client/model/renderable/CompositeRenderable$Transforms", "of(Lcom/google/common/collect/ImmutableMap;)Lnet/neoforged/neoforge/client/model/renderable/CompositeRenderable$Transforms;=(Lcom/google/common/collect/ImmutableMap;)V"),
+    ("net/neoforged/neoforge/common/util/Lazy", "of(Ljava/util/function/Supplier;)Lnet/neoforged/neoforge/common/util/Lazy;=(Ljava/util/function/Supplier;)V"),
     ("net/neoforged/neoforge/common/world/ClimateSettingsBuilder", "create(ZFLnet/minecraft/world/level/biome/Biome$TemperatureModifier;F)Lnet/neoforged/neoforge/common/world/ClimateSettingsBuilder;=(ZFLnet/minecraft/world/level/biome/Biome$TemperatureModifier;F)V"),
     ("net/neoforged/neoforge/server/command/EnumArgument", "enumArgument(Ljava/lang/Class;)Lnet/neoforged/neoforge/server/command/EnumArgument;=(Ljava/lang/Class;)V"),
 ];
 
 /// The constants of the enums the runtime doesn't model by hand, in ordinal order.
-pub(crate) const ENUM_CONSTANTS: [(&str, &str); 365] = [
+pub(crate) const ENUM_CONSTANTS: [(&str, &str); 363] = [
     ("com/mojang/blaze3d/audio/Library$Pool", "STATIC,STREAMING"),
     ("com/mojang/blaze3d/pipeline/MainTarget$AttachmentState", "NONE,COLOR,DEPTH,COLOR_DEPTH"),
     ("com/mojang/blaze3d/platform/GlStateManager$LogicOp", "AND,AND_INVERTED,AND_REVERSE,CLEAR,COPY,COPY_INVERTED,EQUIV,INVERT,NAND,NOOP,NOR,OR,OR_INVERTED,OR_REVERSE,SET,XOR"),
@@ -2465,7 +2467,6 @@ pub(crate) const ENUM_CONSTANTS: [(&str, &str); 365] = [
     ("net/minecraft/world/inventory/RecipeBookType", "CRAFTING,FURNACE,BLAST_FURNACE,SMOKER"),
     ("net/minecraft/world/item/AnimalArmorItem$BodyType", "EQUESTRIAN,CANINE"),
     ("net/minecraft/world/item/CreativeModeTab$Row", "TOP,BOTTOM"),
-    ("net/minecraft/world/item/CreativeModeTab$Type", "CATEGORY,INVENTORY,HOTBAR,SEARCH"),
     ("net/minecraft/world/item/component/FireworkExplosion$Shape", "SMALL_BALL,LARGE_BALL,STAR,CREEPER,BURST"),
     ("net/minecraft/world/item/component/MapPostProcessing", "LOCK,SCALE"),
     ("net/minecraft/world/item/crafting/CookingBookCategory", "FOOD,BLOCKS,MISC"),
@@ -2580,7 +2581,6 @@ pub(crate) const ENUM_CONSTANTS: [(&str, &str); 365] = [
     ("net/neoforged/neoforge/common/util/TransformationHelper$TransformOrigin", "CENTER,CORNER,OPPOSING_CORNER"),
     ("net/neoforged/neoforge/common/world/BiomeModifier$Phase", "BEFORE_EVERYTHING,ADD,REMOVE,MODIFY,AFTER_EVERYTHING"),
     ("net/neoforged/neoforge/common/world/StructureModifier$Phase", "BEFORE_EVERYTHING,ADD,REMOVE,MODIFY,AFTER_EVERYTHING"),
-    ("net/neoforged/neoforge/event/TagsUpdatedEvent$UpdateCause", "SERVER_DATA_LOAD,CLIENT_PACKET_RECEIVED"),
     ("net/neoforged/neoforge/event/entity/RegisterSpawnPlacementsEvent$Operation", "AND,OR,REPLACE"),
     ("net/neoforged/neoforge/event/entity/living/LivingChangeTargetEvent$LivingTargetType", "MOB_TARGET,BEHAVIOR_TARGET"),
     ("net/neoforged/neoforge/event/entity/living/MobDespawnEvent$Result", "ALLOW,DEFAULT,DENY"),

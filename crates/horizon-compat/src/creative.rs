@@ -262,6 +262,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
+        // The stacks the tab holds so far, in order (NeoForge's ordered sets): the tab's own and
+        // the search tab's, which holds the same here.
+        (CONTENTS_EVENT, "getParentEntries" | "getSearchEntries") => {
+            let list = rt.get_field(a(0), "$items");
+            let names: Vec<String> = crate::jutil::elements(rt, list).into_iter().filter_map(|v| rt.str_of(v).map(str::to_owned)).collect();
+            let mut stacks = Vec::with_capacity(names.len());
+            for n in names {
+                let item = crate::api_common::item(rt, &n);
+                let s = rt.new_object("net/minecraft/world/item/ItemStack");
+                crate::api::call(rt, "net/minecraft/world/item/ItemStack.<init>.(Lnet/minecraft/world/level/ItemLike;)V", &[s, item]);
+                stacks.push(s);
+            }
+            rt.alloc("it/unimi/dsi/fastutil/objects/ObjectLinkedOpenCustomHashSet", crate::Data::List(stacks))
+        }
+        // A mod's tab is a category of items (not the hotbar's, the search's or the inventory's).
+        (TAB, "getType") => crate::api_common::plain_enum(rt, "net/minecraft/world/item/CreativeModeTab$Type", "CATEGORY")?,
         (CONTENTS_EVENT, "getTabKey") => rt.get_field(a(0), "$key"),
         (CONTENTS_EVENT, "getTab") => rt.get_field(a(0), "$tab"),
         (CONTENTS_EVENT, "getParameters") => rt.get_field(a(0), "$parameters"),

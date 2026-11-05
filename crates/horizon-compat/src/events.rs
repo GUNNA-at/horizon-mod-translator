@@ -194,20 +194,23 @@ pub fn right_click_item(rt: &mut Rt, host: &mut dyn Host, hand: u8) -> Option<bo
 
 /// `player` (a server's player, by UUID) joined (`PlayerList.placeNewPlayer`): the server's data
 /// goes to them first (`OnDatapackSyncEvent` for them alone), then `PlayerLoggedInEvent`.
-pub fn logged_in(rt: &mut Rt, player: u128) {
+pub fn logged_in(rt: &mut Rt, player: u128, name: &str) {
+    named(rt, player, name);
     datapack_sync(rt, Some(player));
     player_event(rt, LOGGED_IN, player, |_, _| {});
 }
 
 /// `player` left, by any path (`PlayerLoggedOutEvent`).
-pub fn logged_out(rt: &mut Rt, player: u128) {
+pub fn logged_out(rt: &mut Rt, player: u128, name: &str) {
+    named(rt, player, name);
     player_event(rt, LOGGED_OUT, player, |_, _| {});
 }
 
 /// `player` respawned after dying (`PlayerList.respawn`): `PlayerEvent.Clone` (`ServerPlayer.restoreFrom`),
 /// where a mod copies what it keeps on the old player to the new one, here one object, so what it
 /// kept stays; then `PlayerRespawnEvent`, not from the End's exit.
-pub fn respawned(rt: &mut Rt, player: u128) {
+pub fn respawned(rt: &mut Rt, player: u128, name: &str) {
+    named(rt, player, name);
     player_event(rt, CLONE, player, |rt, ev| {
         let p = rt.get_field(ev, "$player");
         rt.put_field(ev, "$original", p);
@@ -223,7 +226,7 @@ pub fn datapack_sync(rt: &mut Rt, player: Option<u128>) {
         return;
     }
     let ev = rt.new_object(DATAPACK_SYNC);
-    let p = player.map_or(V::NULL, |u| crate::menus::server_player(rt, u));
+    let p = player.map_or(V::NULL, |u| known_player(rt, u));
     rt.put_field(ev, "$player", p);
     crate::neo::post(rt, DATAPACK_SYNC, ev);
 }
@@ -235,7 +238,7 @@ fn player_event(rt: &mut Rt, class: &'static str, player: u128, fill: impl FnOnc
         return;
     }
     let ev = rt.new_object(class);
-    let p = crate::menus::server_player(rt, player);
+    let p = known_player(rt, player);
     rt.put_field(ev, "$player", p);
     fill(rt, ev);
     crate::neo::post(rt, class, ev);
@@ -253,7 +256,26 @@ pub(crate) fn player_list(rt: &mut Rt) -> V {
 /// The server's players, as their objects (`PlayerList.getPlayers`).
 fn players(rt: &mut Rt) -> Vec<V> {
     let ids: Vec<u128> = rt.host().map(|h| h.players().into_iter().map(|(id, _)| id).collect()).unwrap_or_default();
-    ids.into_iter().map(|id| crate::menus::server_player(rt, id)).collect()
+    ids.into_iter().map(|id| known_player(rt, id)).collect()
+}
+
+/// The server's player `uuid` as its object, standing where the host says it stands (so
+/// `blockPosition` and the like answer for it).
+fn known_player(rt: &mut Rt, uuid: u128) -> V {
+    let p = crate::menus::server_player(rt, uuid);
+    if let Some((_, at)) = rt.host().and_then(|h| h.players().into_iter().find(|(id, _)| *id == uuid)) {
+        for (field, v) in ["$x", "$y", "$z"].into_iter().zip(at) {
+            rt.put_field(p, field, V::D(v));
+        }
+    }
+    p
+}
+
+/// The name the game gave `uuid`'s player, kept on their object (`getName`, `getGameProfile`).
+fn named(rt: &mut Rt, uuid: u128, name: &str) {
+    let p = crate::menus::server_player(rt, uuid);
+    let n = rt.string(name);
+    rt.put_field(p, "$name", n);
 }
 
 /// Whether any listener would hear an event of `class` (so a click nobody listens to costs
@@ -485,9 +507,16 @@ mod tests {
                 format!("respawn {} end {end}", uuid(rt, p))
             }
             _ => {
-                // `getEntity` as `PlayerEvent` compiles it for a listener of the class above.
+                // `getEntity` as `PlayerEvent` compiles it for a listener of the class above; who
+                // they are and where they stand, as a mod greeting them reads it.
                 let p = api::call(rt, "net/neoforged/neoforge/event/entity/player/PlayerEvent.getEntity.()Lnet/minecraft/world/entity/player/Player;", &[ev]);
-                format!("{class} {}", uuid(rt, p))
+                let profile = api::call(rt, "net/minecraft/server/level/ServerPlayer.getGameProfile.()Lcom/mojang/authlib/GameProfile;", &[p]);
+                let name = api::call(rt, "com/mojang/authlib/GameProfile.getName.()Ljava/lang/String;", &[profile]);
+                let name = rt.str_of(name).unwrap_or("null").to_owned();
+                let id = api::call(rt, "net/minecraft/server/level/ServerPlayer.getStringUUID.()Ljava/lang/String;", &[p]);
+                let id = rt.str_of(id).unwrap_or("null").to_owned();
+                let at = api::call(rt, "net/minecraft/server/level/ServerPlayer.blockPosition.()Lnet/minecraft/core/BlockPos;", &[p]);
+                format!("{class} {name} {id} at {:?}", api::pos_of(rt, at))
             }
         };
         HEARD.with(|h| h.borrow_mut().push(line));
@@ -509,12 +538,12 @@ mod tests {
             rt.listeners.push((class.to_owned(), l));
         }
         let mut host = MemoryHost::default();
-        host.players = vec![(0xa, [0.0; 3]), (0xb, [1.0; 3])];
+        host.players = vec![(0xa, [10.5, 64.0, -3.2]), (0xb, [1.0; 3])];
         rt.with_host(&mut host, |rt| {
-            logged_in(rt, 0xa);
-            respawned(rt, 0xa);
+            logged_in(rt, 0xa, "Alex");
+            respawned(rt, 0xa, "Alex");
             datapack_sync(rt, None);
-            logged_out(rt, 0xb);
+            logged_out(rt, 0xb, "Steve");
             let list = api::call(rt, "net/minecraft/server/MinecraftServer.getPlayerList.()Lnet/minecraft/server/players/PlayerList;", &[V::NULL]);
             let players = api::call(rt, "net/minecraft/server/players/PlayerList.getPlayers.()Ljava/util/List;", &[list]);
             assert_eq!(crate::jutil::elements(rt, players).len(), 2);
@@ -526,11 +555,11 @@ mod tests {
             heard(),
             [
                 "sync a to a",
-                "PlayerLoggedInEvent a",
+                "PlayerLoggedInEvent Alex 00000000-0000-0000-0000-00000000000a at [10, 64, -4]",
                 "clone a from a death 1",
                 "respawn a end 0",
                 "sync null to a,b",
-                "PlayerLoggedOutEvent b",
+                "PlayerLoggedOutEvent Steve 00000000-0000-0000-0000-00000000000b at [1, 1, 1]",
             ]
         );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);

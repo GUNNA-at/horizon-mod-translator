@@ -418,9 +418,9 @@ def main():
     enums.sort()
     for c in modelled_by_hand(data):
         del data[c]
-    # Factories of the records and data classes answered here (a record the runtime models by hand
-    # answers its own: it comes first).
-    made_by = {c: f for c, f in made_by.items() if c in data or c not in modelled_by_hand(made_by)}
+    # Factories of the records and data classes, all of them: a factory only calls its class's
+    # constructor, through the runtime, so it holds whoever models the class (a class modelled by
+    # hand for its codec still gets `of`), and one the runtime answers by hand answers first.
     # An enum the runtime models by hand keeps its own constants (directions are natives).
     for c in modelled_by_hand(constants):
         del constants[c]

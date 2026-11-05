@@ -803,6 +803,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if matches!(name, "registry" | "lookup") { optional(rt, key) } else { key }
         }
         ("net/neoforged/bus/api/Event", "<init>") => V::Void,
+        // A registry as the owner of its holders, and a holder made for a key apart from
+        // registering (`Holder.Reference.createStandAlone`): the registry's own holder for the key,
+        // whose value is the entry once it is registered.
+        (o, "holderOwner") if is_registry(o) => a(0),
+        ("net/minecraft/core/Holder$Reference", "createStandAlone") => {
+            let (registry, id) = split_key(rt, a(1));
+            registry_holder(rt, &registry, &id, V::NULL)
+        }
         // A registry entry's `Holder` made above: its value, key and name.
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference", n) if rt.get_field(a(0), "$registry").r() != 0 => {
             let (reg, mut id) = (rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned(), rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned());
@@ -887,6 +895,18 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("net/neoforged/fml/loading/FMLLoader" | "net/neoforged/fml/loading/FMLEnvironment", "getDist") => {
             crate::api::get_static(rt, "net/neoforged/api/distmarker/Dist.CLIENT")
         }
+        // The logical side the code runs on: the client's runtime or the server thread's.
+        ("net/neoforged/fml/util/thread/EffectiveSide", "get") => {
+            let side = if is_client(rt) { "net/neoforged/fml/LogicalSide.CLIENT" } else { "net/neoforged/fml/LogicalSide.SERVER" };
+            crate::api::get_static(rt, side)
+        }
+        ("net/neoforged/fml/LogicalSide", "isClient" | "isServer") => {
+            let side = rt.get_field(a(0), "$name");
+            let want = if name == "isClient" { "CLIENT" } else { "SERVER" };
+            V::I((rt.str_of(side) == Some(want)) as i32)
+        }
+        // NeoForge's milk fluid, asked for: vanilla's milk bucket stays as it is.
+        ("net/neoforged/neoforge/common/NeoForgeMod", "enableMilkFluid") => V::Void,
         ("net/neoforged/api/distmarker/Dist", "isClient" | "isDedicatedServer") => {
             let side = rt.get_field(a(0), "$name");
             let want = if name == "isClient" { "CLIENT" } else { "DEDICATED_SERVER" };
@@ -1297,6 +1317,32 @@ pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
 mod tests {
     use super::*;
     use crate::Data;
+
+    /// The logical side code runs on is its runtime's: the server thread's until a client's setup
+    /// has fired in it. A holder made for a key apart from registering (`createStandAlone`, its
+    /// registry as owner) gives the entry once it is registered.
+    #[test]
+    fn effective_side_and_stand_alone_holders() {
+        crate::install();
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        const GET: &str = "net/neoforged/fml/util/thread/EffectiveSide.get.()Lnet/neoforged/fml/LogicalSide;";
+        const IS_SERVER: &str = "net/neoforged/fml/LogicalSide.isServer.()Z";
+        let side = c(&mut rt, GET, &[]);
+        assert_eq!(c(&mut rt, IS_SERVER, &[side]).i(), 1);
+        rt.interned.insert("compat:client".into(), V::I(1));
+        let side = c(&mut rt, GET, &[]);
+        assert_eq!(c(&mut rt, IS_SERVER, &[side]).i(), 0);
+        assert_eq!(c(&mut rt, "net/neoforged/fml/LogicalSide.isClient.()Z", &[side]).i(), 1);
+
+        let registry = c(&mut rt, "net/minecraft/core/Registry.holderOwner.()Lnet/minecraft/core/HolderOwner;", &[V::NULL]);
+        let key = rt.string("block#t:machine");
+        let holder = c(&mut rt, "net/minecraft/core/Holder$Reference.createStandAlone.(Lnet/minecraft/core/HolderOwner;Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/Holder$Reference;", &[registry, key]);
+        let machine = rt.new_object("t/Machine");
+        rt.registered.insert(("block".into(), "t:machine".into()), machine);
+        assert_eq!(c(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]), machine);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     #[test]
     fn the_side_is_one_constant_however_it_is_asked() {

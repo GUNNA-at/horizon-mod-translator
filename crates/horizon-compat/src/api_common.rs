@@ -221,7 +221,11 @@ fn player_eye_height(rt: &Rt) -> f64 {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 15] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 17] = [
+    // FML's config files, in its order: what `ModConfig.Type.values()` and an enum codec give.
+    ("net/neoforged/fml/config/ModConfig$Type", &["COMMON", "CLIENT", "SERVER", "STARTUP"]),
+    // A creative tab's kind (a mod's tab is a `CATEGORY`).
+    ("net/minecraft/world/item/CreativeModeTab$Type", &["CATEGORY", "INVENTORY", "HOTBAR", "SEARCH"]),
     ("net/minecraft/world/phys/HitResult$Type", &["MISS", "BLOCK", "ENTITY"]),
     ("net/minecraft/world/entity/vehicle/AbstractMinecart$Type", &["RIDEABLE", "CHEST", "FURNACE", "TNT", "SPAWNER", "HOPPER", "COMMAND_BLOCK"]),
     ("net/minecraft/world/level/pathfinder/PathComputationType", &["LAND", "WATER", "AIR"]),
@@ -1403,6 +1407,104 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // What the player holds or wears in a slot: the hands' stacks as `getItemInHand`'s, the
         // armor's read from the game.
         // NeoForge's data a mod keeps with the player, on its object.
+        // A player's identity: their UUID (a server's player's own, else the one the host acts
+        // for), their name as the game gave it at their login, and their profile of both.
+        (o, "getUUID" | "getStringUUID" | "getGameProfile" | "getScoreboardName") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
+            let (uuid, player_name) = player_identity(rt, a(0));
+            match name {
+                "getUUID" => uuid,
+                "getStringUUID" => {
+                    let (msb, lsb) = crate::tags::uuid_bits(rt, uuid);
+                    rt.string(&crate::tags::uuid_text(msb, lsb))
+                }
+                "getScoreboardName" => player_name,
+                _ => {
+                    let g = rt.new_object("com/mojang/authlib/GameProfile");
+                    rt.put_field(g, "$id", uuid);
+                    rt.put_field(g, "$name", player_name);
+                    g
+                }
+            }
+        }
+        (o, "getName" | "getDisplayName") if is_player(o) && is_player_class(rt.class_of(a(0))) && desc == "()Lnet/minecraft/network/chat/Component;" => {
+            let (_, player_name) = player_identity(rt, a(0));
+            crate::api::call(rt, "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;", &[player_name])
+        }
+        // The server a server's player plays on (a client's player has none).
+        (o, "getServer") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
+            if crate::neo::is_client(rt) {
+                V::NULL
+            } else {
+                rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
+            }
+        }
+        // `ChunkPos`: a chunk's x and z in its public fields, packed into a long as vanilla packs
+        // them; its blocks span 16 from x * 16.
+        (CHUNK_POS, "asLong") if desc == "(II)J" => V::J(chunk_long(a(0).i(), a(1).i())),
+        (CHUNK_POS, "asLong") if desc == "(Lnet/minecraft/core/BlockPos;)J" => {
+            let [x, _, z] = crate::api::pos_of(rt, a(0));
+            V::J(chunk_long(x >> 4, z >> 4))
+        }
+        (CHUNK_POS, "getX") if desc == "(J)I" => V::I(a(0).j() as i32),
+        (CHUNK_POS, "getZ") if desc == "(J)I" => V::I((a(0).j() >> 32) as i32),
+        (CHUNK_POS, "hash") => V::I(chunk_hash(a(0).i(), a(1).i())),
+        (CHUNK_POS, "minFromRegion" | "maxFromRegion") => {
+            let edge = if name == "minFromRegion" { 0 } else { 31 };
+            chunk_pos(rt, (a(0).i() << 5) + edge, (a(1).i() << 5) + edge)
+        }
+        (CHUNK_POS, "<init>") => {
+            let (x, z) = match desc {
+                "(II)V" => (a(1).i(), a(2).i()),
+                "(J)V" => (a(1).j() as i32, (a(1).j() >> 32) as i32),
+                _ => {
+                    let [x, _, z] = crate::api::pos_of(rt, a(1));
+                    (x >> 4, z >> 4)
+                }
+            };
+            rt.put_field(a(0), "x", V::I(x));
+            rt.put_field(a(0), "z", V::I(z));
+            V::Void
+        }
+        (CHUNK_POS, n) => {
+            let (x, z) = (rt.get_field(a(0), "x").i(), rt.get_field(a(0), "z").i());
+            let block = |at: i32, local: i32| (at << 4) + local;
+            let other = |rt: &Rt, v: V| (rt.get_field(v, "x").i(), rt.get_field(v, "z").i());
+            match n {
+                "toLong" => V::J(chunk_long(x, z)),
+                "hashCode" => V::I(chunk_hash(x, z)),
+                "equals" => V::I(i32::from(rt.class_of(a(1)) == CHUNK_POS && other(rt, a(1)) == (x, z))),
+                "toString" => rt.string(&format!("[{x}, {z}]")),
+                "getMinBlockX" => V::I(block(x, 0)),
+                "getMinBlockZ" => V::I(block(z, 0)),
+                "getMaxBlockX" => V::I(block(x, 15)),
+                "getMaxBlockZ" => V::I(block(z, 15)),
+                "getMiddleBlockX" => V::I(block(x, 8)),
+                "getMiddleBlockZ" => V::I(block(z, 8)),
+                "getBlockX" => V::I(block(x, a(1).i())),
+                "getBlockZ" => V::I(block(z, a(1).i())),
+                "getRegionX" => V::I(x >> 5),
+                "getRegionZ" => V::I(z >> 5),
+                "getRegionLocalX" => V::I(x & 31),
+                "getRegionLocalZ" => V::I(z & 31),
+                "getWorldPosition" => crate::api::block_pos(rt, i64::from(block(x, 0)), 0, i64::from(block(z, 0))),
+                "getMiddleBlockPosition" => crate::api::block_pos(rt, i64::from(block(x, 8)), i64::from(a(1).i()), i64::from(block(z, 8))),
+                "getBlockAt" => crate::api::block_pos(rt, i64::from(block(x, a(1).i())), i64::from(a(2).i()), i64::from(block(z, a(3).i()))),
+                "getChessboardDistance" | "distanceSquared" => {
+                    let (ox, oz) = match desc {
+                        "(II)I" => (a(1).i(), a(2).i()),
+                        "(J)I" => (a(1).j() as i32, (a(1).j() >> 32) as i32),
+                        _ => other(rt, a(1)),
+                    };
+                    let (dx, dz) = (ox.wrapping_sub(x), oz.wrapping_sub(z));
+                    if n == "distanceSquared" {
+                        V::I(dx.wrapping_mul(dx).wrapping_add(dz.wrapping_mul(dz)))
+                    } else {
+                        V::I(dx.wrapping_abs().max(dz.wrapping_abs()))
+                    }
+                }
+                _ => return None,
+            }
+        }
         (o, "getPersistentData") if is_player(o) && is_player_class(rt.class_of(a(0))) => crate::entities::persistent_data(rt, a(0)),
         (o, "getItemBySlot") if is_player(o) => match constant(rt, a(1)).as_str() {
             "MAINHAND" => crate::hand::stack(rt, crate::hand::MAIN),
@@ -2516,6 +2618,49 @@ pub(crate) fn is_player(owner: &str) -> bool {
         && [ "/Player", "/ServerPlayer", "/LocalPlayer", "/AbstractClientPlayer", "/LivingEntity", "/Entity"].iter().any(|s| owner.ends_with(s))
 }
 
+/// A player object's UUID and name: a server's player's own (set when the game told of them),
+/// else the acting player's UUID and the name "Player".
+fn player_identity(rt: &mut Rt, p: V) -> (V, V) {
+    let uuid = match rt.get_field(p, "$uuid") {
+        u if u.r() != 0 => u,
+        _ => {
+            let id = rt.host().and_then(|h| h.player_id()).unwrap_or(0);
+            let u = crate::tags::uuid(rt, (id >> 64) as i64, id as i64);
+            if p.r() != 0 {
+                rt.put_field(p, "$uuid", u);
+            }
+            u
+        }
+    };
+    let name = match rt.get_field(p, "$name") {
+        n if n.r() != 0 => n,
+        _ => rt.string("Player"),
+    };
+    (uuid, name)
+}
+
+const CHUNK_POS: &str = "net/minecraft/world/level/ChunkPos";
+
+/// `ChunkPos.asLong(x, z)`: x in the low 32 bits, z in the high.
+fn chunk_long(x: i32, z: i32) -> i64 {
+    (i64::from(x) & 0xffff_ffff) | ((i64::from(z) & 0xffff_ffff) << 32)
+}
+
+/// `ChunkPos.hash(x, z)`, its `hashCode`.
+fn chunk_hash(x: i32, z: i32) -> i32 {
+    let i = 1_664_525i32.wrapping_mul(x).wrapping_add(1_013_904_223);
+    let j = 1_664_525i32.wrapping_mul(z ^ -559_038_737).wrapping_add(1_013_904_223);
+    i ^ j
+}
+
+/// A new `ChunkPos` of chunk `x`, `z`.
+pub(crate) fn chunk_pos(rt: &mut Rt, x: i32, z: i32) -> V {
+    let c = rt.new_object(CHUNK_POS);
+    rt.put_field(c, "x", V::I(x));
+    rt.put_field(c, "z", V::I(z));
+    c
+}
+
 /// Gives the acting player `stack` (where it fits, as `Inventory.add` places it), shrinking it by
 /// what went in; whether all of it did.
 pub(crate) fn give_player(rt: &mut Rt, stack: V) -> bool {
@@ -3203,6 +3348,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         "net/minecraft/world/item/ItemStackLinkedSet" if field == "TYPE_AND_TAG" => intern_strategy(rt, ITEM_STRATEGY),
         "net/neoforged/neoforge/fluids/FluidStackLinkedSet" if field == "TYPE_AND_COMPONENTS" => intern_strategy(rt, FLUID_STRATEGY),
         "net/minecraft/world/phys/Vec3" if field == "ZERO" => vec3_zero(rt),
+        CHUNK_POS if field == "ZERO" => rt.intern("compat:chunk-pos-zero".into(), |rt| chunk_pos(rt, 0, 0)),
+        CHUNK_POS if field == "INVALID_CHUNK_POS" => V::J(chunk_long(1_875_066, 1_875_066)),
         // `Integer.TYPE`: the primitive's own class (`int.class`), as reflection names it.
         "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" | "java/lang/Boolean"
         | "java/lang/Character" | "java/lang/Void"
@@ -3329,6 +3476,62 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+
+    /// `ChunkPos` as vanilla packs it: x in a long's low half, z in its high; a block's chunk is its
+    /// coordinates shifted by 4 (floor), and a chunk spans 16 blocks from x * 16.
+    #[test]
+    fn a_chunk_pos_packs_and_spans_as_vanillas() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        let pos = crate::api::block_pos(&mut rt, -5, 70, 33);
+        let packed = crate::api::call(&mut rt, "net/minecraft/world/level/ChunkPos.asLong.(Lnet/minecraft/core/BlockPos;)J", &[pos]);
+        // Chunk (-1, 2): 0x0000_0002_ffff_ffff.
+        assert_eq!(packed, V::J(12_884_901_887));
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/world/level/ChunkPos.asLong.(II)J", &[V::I(-1), V::I(2)]), packed);
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/world/level/ChunkPos.getX.(J)I", &[packed]), V::I(-1));
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/world/level/ChunkPos.getZ.(J)I", &[packed]), V::I(2));
+        let chunk = rt.new_object(CHUNK_POS);
+        crate::api::call(&mut rt, "net/minecraft/world/level/ChunkPos.<init>.(Lnet/minecraft/core/BlockPos;)V", &[chunk, pos]);
+        let get = |rt: &mut Rt, key: &'static str| crate::api::call(rt, key, &[chunk]);
+        assert_eq!(get(&mut rt, "net/minecraft/world/level/ChunkPos.toLong.()J"), packed);
+        assert_eq!(get(&mut rt, "net/minecraft/world/level/ChunkPos.getMinBlockX.()I"), V::I(-16));
+        assert_eq!(get(&mut rt, "net/minecraft/world/level/ChunkPos.getMaxBlockX.()I"), V::I(-1));
+        assert_eq!(get(&mut rt, "net/minecraft/world/level/ChunkPos.getMiddleBlockX.()I"), V::I(-8));
+        assert_eq!(get(&mut rt, "net/minecraft/world/level/ChunkPos.getMinBlockZ.()I"), V::I(32));
+        assert_eq!(get(&mut rt, "net/minecraft/world/level/ChunkPos.getMaxBlockZ.()I"), V::I(47));
+        let from_long = rt.new_object(CHUNK_POS);
+        crate::api::call(&mut rt, "net/minecraft/world/level/ChunkPos.<init>.(J)V", &[from_long, packed]);
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/world/level/ChunkPos.equals.(Ljava/lang/Object;)Z", &[from_long, chunk]), V::I(1));
+        // `hash(-1, 2)`: (1664525 * -1 + 1013904223) ^ (1664525 * (2 ^ 0xdeadbeef) + 1013904223), in ints.
+        assert_eq!(get(&mut rt, "net/minecraft/world/level/ChunkPos.hashCode.()I"), V::I(1_445_764_666));
+        let text = get(&mut rt, "net/minecraft/world/level/ChunkPos.toString.()Ljava/lang/String;");
+        assert_eq!(rt.str_of(text), Some("[-1, 2]"));
+        let zero = crate::api::get_static(&mut rt, "net/minecraft/world/level/ChunkPos.ZERO");
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/world/level/ChunkPos.distanceSquared.(Lnet/minecraft/world/level/ChunkPos;)I", &[chunk, zero]), V::I(5));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `ModConfig.Type.values()`, as a config library's enum codec reads it (Copycats' config sync):
+    /// FML's four types in order, the same objects as the statics.
+    #[test]
+    fn config_types_are_listed_as_flms() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        let values = crate::api::call(&mut rt, "net/neoforged/fml/config/ModConfig$Type.values.()[Lnet/neoforged/fml/config/ModConfig$Type;", &[]);
+        let names: Vec<String> = (0..4)
+            .map(|i| {
+                let v = rt.array_get(values, i);
+                let n = crate::api::call(&mut rt, "java/lang/Enum.name.()Ljava/lang/String;", &[v]);
+                rt.str_of(n).unwrap_or_default().to_owned()
+            })
+            .collect();
+        assert_eq!(names, ["COMMON", "CLIENT", "SERVER", "STARTUP"]);
+        let server = crate::api::get_static(&mut rt, "net/neoforged/fml/config/ModConfig$Type.SERVER");
+        assert_eq!(rt.array_get(values, 2), server);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     /// Mekanism counts stacks in `new ObjectOpenCustomHashSet<>(ItemStackLinkedSet.TYPE_AND_TAG)`:
     /// stacks of one item are one entry whatever their counts; another item is another.

@@ -2138,6 +2138,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     lists the host's players, and `getRelevantPlayers` streams them. Test
     `events::tests::a_players_join_respawn_and_leave_reach_listeners_in_a_servers_order`; 239
     compat tests pass.
+  - [x] 2026-11-05 `java.util.regex`, a player's identity, `ChunkPos`, and the gaps the last game run
+    listed. `jregex` (new module, on the `regex` crate Horizon's OptiFine reader already locks):
+    `Pattern` (`compile` with `CASE_INSENSITIVE`, `COMMENTS`, `MULTILINE`, `LITERAL`, `DOTALL`,
+    `matcher`, `matches`, `split` with Java's own rules for limits and leading empty strings,
+    `splitAsStream`, `quote`, `flags`, `pattern`), `Matcher` (`matches`, `lookingAt`, `find` and
+    `find(int)`, groups by number and name with UTF-16 offsets, `replaceAll`/`replaceFirst` with
+    Java's `$n`/`${name}`/`\x` replacement and its errors, `appendReplacement`/`appendTail`, `reset`,
+    `results`, `toMatchResult`, `quoteReplacement`, `hitEnd`) and `PatternSyntaxException`. Java's
+    syntax is rewritten to the crate's: `\Q…\E`, `\w \d \s` as ASCII (Java's default), `\h \v \R
+    \Z`, `\uXXXX`, octal, POSIX `\p{Alpha}`, atomic groups and possessive quantifiers as plain ones;
+    back references and lookaround (which the crate lacks) throw `PatternSyntaxException`, so the
+    mod's own handling runs. `String.split`, `replaceAll`, `replaceFirst` and `matches` take the same
+    path (a literal pattern stays a plain replace). 64 of the 367 jars (with what they bundle) use
+    `Pattern`/`Matcher`, 154 the `String` forms. A player's identity: `getUUID`, `getStringUUID`,
+    `getGameProfile`, `getScoreboardName`, `getName`/`getDisplayName` (the name the game gave at
+    login, passed through the player hooks: `native_player_logged_in(player, name)`), `getServer`;
+    their place (`blockPosition`, `position`) from the host's players for the server's players in
+    events (the player hooks' host lists every player; `server_data_loaded`'s too, for `/reload`'s
+    sync). 59 jars read a player's profile. `ChunkPos` modelled by hand from vanilla's source (87
+    jars): `asLong` both ways, `getX`/`getZ` of a long, the three constructors, `toLong`,
+    `hashCode` (`hash`), `equals`, `toString`, block bounds (`getMiddleBlockX` is `+ 8`), regions,
+    `getBlockAt`, distances, `ZERO`, `INVALID_CHUNK_POS`; it left the data-class table, and
+    `tools/vanilla_records.py` now keeps every factory (one only calls its class's constructor
+    through the runtime, so `GlobalPos.of` stays though its codec is modelled by hand).
+    `ModConfig.Type.values()` and `CreativeModeTab.Type` as plain enums: catnip's enum codec reads
+    the config type by its constants, so Copycats' config sync no longer reads `null` ("Received data
+    for non-synchronized config, ignoring null"). Also: `EffectiveSide.get`, `LogicalSide.isClient`/
+    `isServer`, `NeoForgeMod.enableMilkFluid`, a registry's `holderOwner`,
+    `Holder.Reference.createStandAlone`, `java.lang.ref.Cleaner` (`register`, `clean` once),
+    `FaceAttachedHorizontalDirectionalBlock.getConnectedDirection`, `CreativeModeTab.getType`,
+    `BuildCreativeModeTabContentsEvent.getParentEntries`/`getSearchEntries`. Tests
+    `jregex::tests::{split_is_javas, a_matcher_walks_and_replaces_as_javas,
+    javas_syntax_compiles_or_throws_as_javas}`, `neo::tests::effective_side_and_stand_alone_holders`,
+    `api_common::tests::{a_chunk_pos_packs_and_spans_as_vanillas, config_types_are_listed_as_flms}`,
+    the player events test now reads each player's name, UUID text and block; 245 compat tests and
+    13 translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -11,6 +11,8 @@ horizon-compat-core = { path = "../horizon-compat-core" }
 serde_json = "1.0.151"
 # The textures mods read (`NativeImage.read`); Horizon's own decoder, in its lock too.
 png = "0.18"
+# `java.util.regex` (`jregex`): the engine Horizon's OptiFine reader uses, with its features.
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 
 [lints]
 workspace = true

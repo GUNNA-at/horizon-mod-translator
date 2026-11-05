@@ -705,21 +705,21 @@ pub fn server_data_loaded(rt: &mut Rt, host: &mut dyn Host, reload: bool) {
 }
 
 /// `native_player_logged_in` (server): `player` joined ([`crate::events::logged_in`]).
-pub fn player_logged_in(rt: &mut Rt, host: &mut dyn Host, player: u128) {
+pub fn player_logged_in(rt: &mut Rt, host: &mut dyn Host, player: u128, name: &str) {
     rt.safe_point();
-    rt.with_host(host, |rt| crate::events::logged_in(rt, player));
+    rt.with_host(host, |rt| crate::events::logged_in(rt, player, name));
 }
 
 /// `native_player_logged_out` (server): `player` left ([`crate::events::logged_out`]).
-pub fn player_logged_out(rt: &mut Rt, host: &mut dyn Host, player: u128) {
+pub fn player_logged_out(rt: &mut Rt, host: &mut dyn Host, player: u128, name: &str) {
     rt.safe_point();
-    rt.with_host(host, |rt| crate::events::logged_out(rt, player));
+    rt.with_host(host, |rt| crate::events::logged_out(rt, player, name));
 }
 
 /// `native_player_respawned` (server): `player` respawned after dying ([`crate::events::respawned`]).
-pub fn player_respawned(rt: &mut Rt, host: &mut dyn Host, player: u128) {
+pub fn player_respawned(rt: &mut Rt, host: &mut dyn Host, player: u128, name: &str) {
     rt.safe_point();
-    rt.with_host(host, |rt| crate::events::respawned(rt, player));
+    rt.with_host(host, |rt| crate::events::respawned(rt, player, name));
 }
 
 /// The client's setup, once, on its first hook ([`crate::neo::fire_client_setup`]), then its first

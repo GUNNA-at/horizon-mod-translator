@@ -31,6 +31,7 @@ pub mod gui;
 pub mod gson;
 pub mod hand;
 pub mod jlang;
+pub mod jregex;
 pub mod jutil;
 pub mod menus;
 pub mod widgets;

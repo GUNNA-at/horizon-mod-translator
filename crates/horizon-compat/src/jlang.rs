@@ -283,6 +283,28 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             _ => return None,
         }),
+        // A `Cleaner`'s action runs when its `Cleanable` is cleaned, once: what a cleaner watches
+        // stays while the runtime holds it, so it is never found unreachable first.
+        "java/lang/ref/Cleaner" => Some(match name {
+            "create" => rt.new_object("java/lang/ref/Cleaner"),
+            "register" => {
+                let c = rt.new_object("java/lang/ref/Cleaner$Cleanable");
+                rt.put_field(c, "$action", a(2));
+                c
+            }
+            _ => return None,
+        }),
+        "java/lang/ref/Cleaner$Cleanable" => Some(match name {
+            "clean" => {
+                let action = rt.get_field(a(0), "$action");
+                if action.r() != 0 {
+                    rt.put_field(a(0), "$action", V::NULL);
+                    rt.call_functional("java/lang/Runnable.run.()V", action, &[]);
+                }
+                V::Void
+            }
+            _ => return None,
+        }),
         // Nothing here is collected while a reference is held, so a weak or soft reference keeps
         // what it was given until cleared.
         "java/lang/ref/WeakReference" | "java/lang/ref/SoftReference" | "java/lang/ref/Reference" => Some(match name {
@@ -623,27 +645,24 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
             };
             new_str(rt, if from.is_empty() { s } else { s.replace(&from, &to) })
         }
+        // Java's regexes ([`crate::jregex`]); a literal pattern and a plain replacement skip the
+        // engine.
         "replaceAll" | "replaceFirst" => {
-            // Literal patterns only (what mods pass in practice: `_`, ` `, `\\.`).
-            let pat = unescape_regex(&arg_s(rt, 1))?;
-            let to = arg_s(rt, 2);
-            new_str(rt, if name == "replaceAll" { s.replace(&pat, &to) } else { s.replacen(&pat, &to, 1) })
+            let (pat, to) = (arg_s(rt, 1), arg_s(rt, 2));
+            match unescape_regex(&pat) {
+                Some(lit) if !lit.is_empty() && !to.contains(['$', '\\']) => {
+                    new_str(rt, if name == "replaceAll" { s.replace(&lit, &to) } else { s.replacen(&lit, &to, 1) })
+                }
+                _ => crate::jregex::replace(rt, &s, &pat, &to, name == "replaceFirst"),
+            }
         }
         "split" => {
-            let pat = unescape_regex(&arg_s(rt, 1))?;
-            let mut parts: Vec<String> = if pat.is_empty() { s.chars().map(String::from).collect() } else { s.split(pat.as_str()).map(str::to_owned).collect() };
-            // Java drops trailing empty strings (limit 0).
-            if ks.len() < 2 || a(2).i() == 0 {
-                while parts.last().is_some_and(String::is_empty) && parts.len() > 1 {
-                    parts.pop();
-                }
-            }
-            let items: Vec<V> = parts.into_iter().map(|p| new_str(rt, p)).collect();
-            rt.alloc("[Ljava/lang/String;", Data::Array(items))
+            let limit = if ks.len() < 2 { 0 } else { a(2).i() };
+            crate::jregex::split(rt, &s, &arg_s(rt, 1), limit)
         }
         "toCharArray" => rt.alloc("[C", Data::Array(u.iter().map(|&c| V::I(c as i32)).collect())),
         "chars" => rt.alloc("java/util/stream/Stream", Data::Stream(u.iter().map(|&c| V::I(c as i32)).collect())),
-        "matches" => V::I((unescape_regex(&arg_s(rt, 1)).as_deref() == Some(s.as_str())) as i32),
+        "matches" => crate::jregex::matches(rt, &s, &arg_s(rt, 1)),
         _ => return None,
     })
 }
