@@ -934,7 +934,15 @@ pub fn fill_options(rt: &mut Rt, options: V) {
 /// The key bound to mapping `k` and whether it is held.
 fn binding(rt: &Rt, k: V) -> (String, bool) {
     let name = rt.str_of(rt.get_field(k, "$name")).unwrap_or("");
-    mapping_binding(rt, name)
+    if let Some(b) = rt.host().and_then(|h| h.mapping(name)) {
+        return b;
+    }
+    // A mod's own mapping, which the game's controls don't list: its default key, held as the game
+    // holds keys.
+    match rt.str_of(rt.get_field(k, "$default")) {
+        Some(key) if key != "key.keyboard.unknown" => (key.to_owned(), rt.host().is_some_and(|h| h.key_held(key))),
+        _ => ("key.keyboard.unknown".into(), false),
+    }
 }
 
 /// The key bound to mapping `name` (`key.use`) and whether it is held, as the host says.
@@ -991,6 +999,31 @@ fn input_type(rt: &mut Rt, ordinal: i32) -> V {
 fn key_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     Some(match (owner, name) {
+        // `new KeyMapping(name, ..., category)` in each of its forms: vanilla's `(name, [type,]
+        // code, category)`, NeoForge's with a conflict context, a modifier or an
+        // `InputConstants.Key`. It keeps its name, the key it starts on and its category.
+        (KEY_MAPPING, "<init>") => {
+            let params = crate::neo::desc_params(desc);
+            let (mut key, mut mouse) = ("key.keyboard.unknown".to_owned(), false);
+            for (i, p) in params.iter().enumerate() {
+                let v = a(i + 1);
+                match p.as_str() {
+                    "Lcom/mojang/blaze3d/platform/InputConstants$Type;" => mouse = rt.get_field(v, "$ordinal").i() == 2,
+                    "I" => key = if mouse { mouse_name(v.i()) } else { key_name(v.i()).unwrap_or_else(|| "key.keyboard.unknown".into()) },
+                    "Lcom/mojang/blaze3d/platform/InputConstants$Key;" => key = rt.str_of(rt.get_field(v, "$name")).unwrap_or("key.keyboard.unknown").to_owned(),
+                    _ => {}
+                }
+            }
+            let category = match params.iter().rposition(|p| p == "Ljava/lang/String;") {
+                Some(i) if i > 0 => a(i + 1),
+                _ => V::NULL,
+            };
+            let k = rt.string(&key);
+            rt.put_field(a(0), "$name", a(1));
+            rt.put_field(a(0), "$default", k);
+            rt.put_field(a(0), "$category", category);
+            V::Void
+        }
         (KEY_MAPPING, "getName") => rt.get_field(a(0), "$name"),
         (KEY_MAPPING, "isDown") => V::I(binding(rt, a(0)).1 as i32),
         (KEY_MAPPING, "matches") => {
@@ -1018,7 +1051,10 @@ fn key_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
         // A click counted while the key went down: not counted here yet.
         (KEY_MAPPING, "consumeClick") => V::I(0),
         (KEY_MAPPING, "setDown" | "setKey" | "release") => V::Void,
-        (KEY_MAPPING, "getCategory") => rt.string("key.categories.gameplay"),
+        (KEY_MAPPING, "getCategory") => match rt.get_field(a(0), "$category") {
+            c if c.r() != 0 => c,
+            _ => rt.string("key.categories.gameplay"),
+        },
         (INPUT, "isKeyDown") if desc == "(JI)Z" => {
             let code = a(1).i();
             let held = key_name(code).is_some_and(|n| rt.host().is_some_and(|h| h.key_held(&n)));
@@ -1505,6 +1541,48 @@ mod tests {
             let keybind = crate::api::call(rt, "net/minecraft/network/chat/Component.keybind.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;", &[key]);
             let runs = crate::gui::runs(rt, keybind);
             assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "Right Button");
+        });
+    }
+
+    /// A mod's own mapping, which the game's controls don't list, answers on the key it was made
+    /// with: Create's tool menu on Left Alt (NeoForge's constructor with a conflict context), a
+    /// mouse button's by vanilla's, an unbound one on none.
+    #[test]
+    fn a_mods_own_key_mapping_answers_on_the_key_it_was_made_with() {
+        let (mut rt, _) = rt_with_screen();
+        let mut h = host();
+        h.keys_held.push("key.keyboard.left.alt".into());
+        rt.with_host(&mut h, |rt| {
+            let made = |rt: &mut Rt, desc: &str, args: &[V]| {
+                let k = rt.new_object(KEY_MAPPING);
+                let key = Box::leak(format!("net/minecraft/client/KeyMapping.<init>.{desc}").into_boxed_str());
+                crate::api::call(rt, key, &[&[k], args].concat());
+                k
+            };
+            let call = |rt: &mut Rt, k: V, key: &'static str| crate::api::call(rt, key, &[k]);
+            let (name, category) = (rt.string("key.create.toolmenu"), rt.string("Create"));
+            let keysym = input_type(rt, 0);
+            let tool_menu = made(
+                rt,
+                "(Ljava/lang/String;Lnet/neoforged/neoforge/client/settings/IKeyConflictContext;Lcom/mojang/blaze3d/platform/InputConstants$Type;ILjava/lang/String;)V",
+                &[name, V::NULL, keysym, V::I(342), category],
+            );
+            assert_eq!(call(rt, tool_menu, "net/minecraft/client/KeyMapping.isDown.()Z"), V::I(1));
+            let shown = call(rt, tool_menu, "net/minecraft/client/KeyMapping.getCategory.()Ljava/lang/String;");
+            assert_eq!(rt.str_of(shown), Some("Create"));
+            let key = call(rt, tool_menu, "net/minecraft/client/KeyMapping.getKey.()Lcom/mojang/blaze3d/platform/InputConstants$Key;");
+            assert_eq!(rt.str_of(rt.get_field(key, "$name")), Some("key.keyboard.left.alt"));
+
+            let (name, mouse) = (rt.string("key.mod.zoom"), input_type(rt, 2));
+            let zoom = made(rt, "(Ljava/lang/String;Lcom/mojang/blaze3d/platform/InputConstants$Type;ILjava/lang/String;)V", &[name, mouse, V::I(4), category]);
+            let key = call(rt, zoom, "net/minecraft/client/KeyMapping.getKey.()Lcom/mojang/blaze3d/platform/InputConstants$Key;");
+            assert_eq!(rt.str_of(rt.get_field(key, "$name")), Some("key.mouse.5"));
+            assert_eq!(call(rt, zoom, "net/minecraft/client/KeyMapping.isDown.()Z"), V::I(0));
+
+            let name = rt.string("key.mod.unbound");
+            let unbound = made(rt, "(Ljava/lang/String;ILjava/lang/String;)V", &[name, V::I(-1), category]);
+            assert_eq!(call(rt, unbound, "net/minecraft/client/KeyMapping.isUnbound.()Z"), V::I(1));
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
     }
 

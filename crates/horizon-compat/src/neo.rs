@@ -1132,7 +1132,7 @@ fn boxed(rt: &mut Rt, class: &'static str, v: V) -> V {
 }
 
 /// A method descriptor's parameter types, as written (`I`, `Ljava/lang/String;`, `[I`...).
-fn desc_params(desc: &str) -> Vec<String> {
+pub(crate) fn desc_params(desc: &str) -> Vec<String> {
     let inner = desc.trim_start_matches('(').split(')').next().unwrap_or("");
     let (mut out, mut cur) = (Vec::new(), String::new());
     let mut chars = inner.chars();

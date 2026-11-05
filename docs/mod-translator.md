@@ -2022,6 +2022,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `hand::tests::a_stack_in_hand_carries_its_enchantments_both_ways`. CEM's own mechanic (a machine
     item takes its enchantments into the placed block) needs its mixins into `BlockItem` and `Item`
     (`getPlacementState`, `isEnchantable`), the vanilla hook points still to come.
+  - [x] 2026-11-05 Small ones from round 9. Vanilla's armour materials answer their values
+    (`ArmorMaterial.defense()` by `ArmorItem.Type`, `enchantmentValue`, `toughness`,
+    `knockbackResistance`, `equipSound`; 1.21.1's `ArmorMaterials`): Mekanism copies netherite's for
+    its own armour. `new KeyMapping(...)` in each of its forms (vanilla's, NeoForge's with a conflict
+    context, a modifier or an `InputConstants.Key`) keeps its name, its default key and its category:
+    a mod's own mapping, which the game's controls don't list, answers `isDown`, `getKey` and
+    `isUnbound` on that key as the game holds it (Create's tool menu on Left Alt). Tests
+    `blocks::tests::a_vanilla_armour_material_answers_its_values`,
+    `screens::tests::a_mods_own_key_mapping_answers_on_the_key_it_was_made_with`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

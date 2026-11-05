@@ -645,6 +645,7 @@ fn default_shape_class(owner: &str) -> bool {
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(owner, DYE_COLOR | "net/minecraft/world/item/ArmorItem$Type" | BLOCK_PROPERTIES | ITEM_PROPERTIES | WOOD_TYPE | BUILDER)
+        || (owner == ARMOR_MATERIAL && matches!(name, "defense" | "enchantmentValue" | "toughness" | "knockbackResistance" | "equipSound"))
         || matches!(
             (owner, name),
             ("net/minecraft/world/level/block/SignBlock", "getWoodType") | ("net/minecraft/world/level/block/BedBlock", "getConnectedDirection")
@@ -726,6 +727,49 @@ fn tier_method(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
 
 const DISPENSER: &str = "net/minecraft/world/level/block/DispenserBlock";
 const ARMOR_LAYER: &str = "net/minecraft/world/item/ArmorMaterial$Layer";
+const ARMOR_MATERIAL: &str = "net/minecraft/world/item/ArmorMaterial";
+const ARMOR_TYPE: &str = "net/minecraft/world/item/ArmorItem$Type";
+
+/// 1.21.1's armour materials (`ArmorMaterials`): defense by `ArmorItem.Type` (helmet, chestplate,
+/// leggings, boots, body), enchantment value, equip sound, toughness, knockback resistance.
+const ARMOR_MATERIALS: [(&str, [i32; 5], i32, &str, f32, f32); 8] = [
+    ("minecraft:leather", [1, 3, 2, 1, 3], 15, "item.armor.equip_leather", 0.0, 0.0),
+    ("minecraft:chainmail", [2, 5, 4, 1, 4], 12, "item.armor.equip_chain", 0.0, 0.0),
+    ("minecraft:iron", [2, 6, 5, 2, 5], 9, "item.armor.equip_iron", 0.0, 0.0),
+    ("minecraft:gold", [2, 5, 3, 1, 7], 25, "item.armor.equip_gold", 0.0, 0.0),
+    ("minecraft:diamond", [3, 8, 6, 3, 11], 10, "item.armor.equip_diamond", 2.0, 0.0),
+    ("minecraft:turtle", [2, 6, 5, 2, 5], 9, "item.armor.equip_turtle", 0.0, 0.0),
+    ("minecraft:netherite", [3, 8, 6, 3, 11], 15, "item.armor.equip_netherite", 3.0, 0.1),
+    ("minecraft:armadillo", [3, 8, 6, 3, 11], 10, "item.armor.equip_wolf", 0.0, 0.0),
+];
+
+/// A vanilla armour material's record component `name` (`defense()`, `toughness()`...).
+fn vanilla_armor_material(rt: &mut Rt, name: &str, material: V) -> Option<V> {
+    let id = rt.str_of(material).unwrap_or("").to_owned();
+    let &(_, defense, enchantment, sound, toughness, knockback) = ARMOR_MATERIALS.iter().find(|m| m.0 == id)?;
+    Some(match name {
+        "defense" => {
+            const TYPES: [&str; 5] = ["HELMET", "CHESTPLATE", "LEGGINGS", "BOOTS", "BODY"];
+            let m = rt.alloc("java/util/EnumMap", Data::Table(Default::default()));
+            for (i, (ty, d)) in TYPES.into_iter().zip(defense).enumerate() {
+                let k = api::api_enum(rt, ARMOR_TYPE, ty, i as i32);
+                let v = crate::api_common::integer(rt, d);
+                crate::jutil::table_put(rt, m, k, v);
+            }
+            m
+        }
+        "enchantmentValue" => V::I(enchantment),
+        "toughness" => V::F(toughness),
+        "knockbackResistance" => V::F(knockback),
+        "equipSound" => crate::sounds::get_static(rt, "net/minecraft/sounds/SoundEvents", &sound_field(sound)).unwrap_or(V::NULL),
+        _ => return None,
+    })
+}
+
+/// `SoundEvents`' field for sound `id` (`item.armor.equip_iron` is `ARMOR_EQUIP_IRON`).
+fn sound_field(id: &str) -> String {
+    id.trim_start_matches("item.").replace('.', "_").to_ascii_uppercase()
+}
 
 /// `DispenserBlock.DISPENSER_REGISTRY`: the behaviours mods registered, by item.
 pub(crate) fn dispenser_behaviours(rt: &mut Rt) -> V {
@@ -996,6 +1040,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(rt.string(&text))
         }
         (ARMOR_LAYER, "dyeable") => Some(V::I((rt.get_field(a(0), "dyeable").i() != 0) as i32)),
+        // A vanilla material's values (Mekanism copies netherite's); a mod's own is its record.
+        (ARMOR_MATERIAL, _) if rt.str_of(a(0)).is_some() => vanilla_armor_material(rt, name, a(0)),
         // `ArmorItem.Type`: its name and vanilla's durability per material multiplier.
         ("net/minecraft/world/item/ArmorItem$Type", "getName" | "getSerializedName") => {
             let n = rt.str_of(rt.get_field(a(0), "$name")).unwrap_or("").to_ascii_lowercase();
@@ -1143,7 +1189,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         }
         // Vanilla's armour materials, as the registry's holders of them.
         "net/minecraft/world/item/ArmorMaterials" if matches!(field, "LEATHER" | "CHAIN" | "IRON" | "GOLD" | "DIAMOND" | "TURTLE" | "NETHERITE" | "ARMADILLO") => {
-            let id = format!("minecraft:{}", field.to_ascii_lowercase());
+            // `CHAIN` is registered as `chainmail`.
+            let id = format!("minecraft:{}", if field == "CHAIN" { "chainmail".to_owned() } else { field.to_ascii_lowercase() });
             Some(rt.intern(format!("compat:armor-material/{id}"), |rt| {
                 let m = rt.alloc("net/minecraft/world/item/ArmorMaterial", Data::Str(id.clone()));
                 crate::neo::registry_holder(rt, "armor_material", &id, m)
@@ -2287,6 +2334,34 @@ mod tests {
         let inner = api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial$Layer.texture.(Z)Lnet/minecraft/resources/ResourceLocation;", &[dyed, V::I(1)]);
         assert_eq!(rt.str_of(inner), Some("minecraft:textures/models/armor/leather_layer_2_overlay.png"));
         assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial$Layer.dyeable.()Z", &[dyed]), V::I(1));
+    }
+
+    /// Vanilla's armour materials answer 1.21.1's values (`ArmorMaterials`): Mekanism's armour
+    /// copies netherite's defense, toughness and knockback resistance.
+    #[test]
+    fn a_vanilla_armour_material_answers_its_values() {
+        let mut rt = Rt::new();
+        let material = |rt: &mut Rt, key: &'static str| {
+            let holder = api::get_static(rt, key);
+            api::call(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder])
+        };
+        let netherite = material(&mut rt, "net/minecraft/world/item/ArmorMaterials.NETHERITE");
+        let defense = api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial.defense.()Ljava/util/Map;", &[netherite]);
+        for (ty, points) in [("HELMET", 3), ("CHESTPLATE", 8), ("LEGGINGS", 6), ("BOOTS", 3), ("BODY", 11)] {
+            let key = Box::leak(format!("net/minecraft/world/item/ArmorItem$Type.{ty}").into_boxed_str());
+            let ty = api::get_static(&mut rt, key);
+            let boxed = api::call(&mut rt, "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[defense, ty]);
+            assert_eq!(api::call(&mut rt, "java/lang/Integer.intValue.()I", &[boxed]), V::I(points), "{key}");
+        }
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial.toughness.()F", &[netherite]), V::F(3.0));
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial.knockbackResistance.()F", &[netherite]), V::F(0.1));
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial.enchantmentValue.()I", &[netherite]), V::I(15));
+        let chain = material(&mut rt, "net/minecraft/world/item/ArmorMaterials.CHAIN");
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial.enchantmentValue.()I", &[chain]), V::I(12));
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial.toughness.()F", &[chain]), V::F(0.0));
+        let sound = api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial.equipSound.()Lnet/minecraft/core/Holder;", &[chain]);
+        assert_ne!(sound, V::NULL);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]
