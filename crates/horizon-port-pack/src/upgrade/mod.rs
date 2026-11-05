@@ -221,6 +221,25 @@ fn vanilla(name: &str) -> Value {
     Value::String(format!("minecraft:{name}"))
 }
 
+/// A mod's configured or placed feature file (`kind` is its registry folder) in 26.3's form, in
+/// place: what the game's feature catalog reads. NeoForge 1.21.1 mods write features as 26.2 does
+/// (`config` wrapped, 26.2's provider and modifier names). Whether it changed; the types 26.3
+/// dropped are counted in `unknown`. A feature already in 26.3's form (no `config`) is left.
+pub(crate) fn feature_file(kind: &str, v: &mut Value, unknown: &mut BTreeMap<String, usize>) -> bool {
+    let mut report = Report::default();
+    let upgraded = match kind {
+        "configured_feature" if v.get("config").is_some_and(Value::is_object) => features::feature(v, &mut report),
+        "placed_feature" => features::placed(v, &mut report),
+        _ => return false,
+    };
+    for (what, n) in report.unknown {
+        *unknown.entry(what).or_default() += n;
+    }
+    let changed = upgraded != *v;
+    *v = upgraded;
+    changed
+}
+
 // ---------------------------------------------------------------------------
 // Block states
 

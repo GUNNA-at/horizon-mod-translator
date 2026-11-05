@@ -97,6 +97,8 @@ pub enum FeatureDefinition {
         features: Vec<(f32, PlacedFeatureDefinition)>,
         fallback: Box<PlacedFeatureDefinition>,
     },
+    /// A feature type a mod registered, placed by the mod's code.
+    Foreign(super::foreign::ForeignFeature),
 }
 #[derive(Debug)]
 pub enum FeatureExecutionError<E> {
@@ -805,7 +807,15 @@ impl FeatureDefinition {
                     )?),
                 })
             }
-            _ => BasicFeature::from_json(json).map(Self::Basic),
+            // A mod's own feature type, read by its handler; then vanilla's simple ones.
+            other => match super::foreign::feature(other, json) {
+                Some(Ok(inner)) => Ok(Self::Foreign(super::foreign::ForeignFeature {
+                    kind: other.to_owned(),
+                    inner,
+                })),
+                Some(Err(e)) => Err(DecodeError::Registry(format!("feature {other}: {e}"))),
+                None => BasicFeature::from_json(json).map(Self::Basic),
+            },
         }
     }
     pub fn place<W: FeatureWorld + PlacementContext>(
@@ -855,6 +865,9 @@ impl FeatureDefinition {
                 .place(world, random, origin, run.blocks)
                 .map_err(FeatureExecutionError::Basic),
             Self::NoOp => Ok(true),
+            Self::Foreign(feature) => feature
+                .place(world, random, origin)
+                .map_err(FeatureExecutionError::Query),
             Self::Template(feature) => feature
                 .place(world, random, origin)
                 .map_err(FeatureExecutionError::Query),

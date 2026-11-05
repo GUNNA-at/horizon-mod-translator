@@ -173,7 +173,9 @@ pub fn upgrade(
     let dropped = crate::processors::each_list(kind, v, &mut |list| {
         drop_java_processors(list, &mut report.processors_dropped)
     });
-    upgrade_types(kind, v, report, set_tags) || states || dropped || renamed
+    // Features in 26.3's form, as the game's catalog reads them (`config` unwrapped).
+    let reshaped = crate::upgrade::feature_file(kind, v, &mut report.unsupported);
+    upgrade_types(kind, v, report, set_tags) || states || dropped || renamed || reshaped
 }
 
 /// Takes the processors written in Java (any type outside `minecraft:` and
@@ -1256,7 +1258,10 @@ mod tests {
             &mut report,
             &NO_TAGS
         ));
-        assert_eq!(spring["config"]["state"], json!({"id": "minecraft:water"}));
+        // The feature in 26.3's form: `config` unwrapped, its state in 26.3's shape.
+        assert_eq!(spring["state"], json!({"id": "minecraft:water"}));
+        assert_eq!(spring["valid_blocks"], json!(["minecraft:stone"]));
+        assert!(spring.get("config").is_none());
         // An object with other keys is not a state; a 26.3 state is left as it is.
         let mut other = json!({"Name": "x", "weight": 1, "state": {"id": "minecraft:stone"}});
         assert!(!upgrade(

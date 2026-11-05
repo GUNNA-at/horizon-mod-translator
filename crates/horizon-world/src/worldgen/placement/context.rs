@@ -54,6 +54,11 @@ pub trait PlacementContext {
     fn ensure_can_write(&mut self, _position: [i32; 3]) -> Result<bool, PlacementQueryError> {
         Ok(true)
     }
+    /// The block registry this world's state ids index, where the world keeps one at hand (mods'
+    /// worldgen code names states as text); None reads the generator's.
+    fn block_registry(&self) -> Option<&'static crate::registry::BlockRegistry> {
+        None
+    }
     /// BulkSectionAccess read: None outside the world's section range.
     fn section_block(
         &mut self,

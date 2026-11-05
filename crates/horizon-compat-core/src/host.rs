@@ -211,6 +211,16 @@ pub trait Host {
     fn biome_in_tag(&self, _biome: &str, _tag: &str) -> bool {
         false
     }
+    /// A raw write into the chunk section (`LevelChunkSection.setBlockState`, what features write
+    /// through `BulkSectionAccess`): no neighbour updates, no heightmaps. Where the host keeps no
+    /// sections apart, a plain `set_block_state`.
+    fn set_section_state(&mut self, pos: [i32; 3], state: &str) -> bool {
+        self.set_block_state(pos, state)
+    }
+    /// `WorldGenLevel.ensureCanWrite(pos)`: whether the region being generated may write there.
+    fn can_write(&self, _pos: [i32; 3]) -> bool {
+        true
+    }
     /// Game rule `name` as the game has it (26.3's name: `mob_griefing`), a boolean as 0 or 1;
     /// None for a rule the game doesn't have, or a host that keeps no rules.
     fn game_rule(&self, _name: &str) -> Option<i32> {

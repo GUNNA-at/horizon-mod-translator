@@ -1224,11 +1224,18 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             let v = crate::api::get_static(rt, key);
             Ok(if v.r() != 0 { v } else { crate::api::api_enum(rt, "net/minecraft/world/item/DyeColor", DYES[i], i as i32) })
         }
+        // 1.21.1's `{Name, Properties}`, and the shapes the game's data is in (26.3's, which a mod's
+        // data is installed as): `{id, properties}`, or the id alone for a block's default state.
         "block_state" => {
-            let o = object()?;
-            let Some(block) = o.get("Name").and_then(Json::as_str) else { return Err("No key Name in MapLike".into()) };
-            let props: Vec<(String, String)> = o
-                .get("Properties")
+            let (block, properties) = match j {
+                Json::String(id) => (id.as_str(), None),
+                Json::Object(o) => match o.get("Name").or_else(|| o.get("id")).and_then(Json::as_str) {
+                    Some(block) => (block, o.get("Properties").or_else(|| o.get("properties"))),
+                    None => return Err("No key Name in MapLike".into()),
+                },
+                _ => return Err(format!("Not a map: {j}")),
+            };
+            let props: Vec<(String, String)> = properties
                 .and_then(Json::as_object)
                 .map(|p| p.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned()))).collect())
                 .unwrap_or_default();
@@ -1433,5 +1440,24 @@ mod tests {
         let sized = decode_native(&mut rt, "sized_fluid_ingredient", &serde_json::json!({"type": "neoforge:single", "fluid": "minecraft:lava", "amount": 250})).unwrap();
         assert_eq!(rt.get_field(sized, "$amount"), V::I(250));
         assert!(decode_native(&mut rt, "sized_fluid_ingredient", &serde_json::json!({"item": "minecraft:stick"})).is_err());
+    }
+
+    /// `BlockState.CODEC` reads a state in 1.21.1's shape and in the ones a mod's data is
+    /// installed in (26.3's): the same states.
+    #[test]
+    fn block_states_read_in_every_shape_the_data_has() {
+        let mut rt = Rt::new();
+        crate::install();
+        let shapes = [
+            (serde_json::json!({"Name": "minecraft:oak_log", "Properties": {"axis": "x"}}), "minecraft:oak_log[axis=x]"),
+            (serde_json::json!({"id": "minecraft:oak_log", "properties": {"axis": "x"}}), "minecraft:oak_log[axis=x]"),
+            (serde_json::json!({"id": "create:zinc_ore"}), "create:zinc_ore"),
+            (serde_json::json!("minecraft:stone"), "minecraft:stone"),
+        ];
+        for (json, text) in shapes {
+            let v = decode_native(&mut rt, "block_state", &json).unwrap_or_else(|e| panic!("{json}: {e}"));
+            assert_eq!(rt.str_of(v), Some(text), "{json}");
+        }
+        assert!(decode_native(&mut rt, "block_state", &serde_json::json!({"weight": 1})).is_err());
     }
 }

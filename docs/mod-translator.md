@@ -2511,6 +2511,25 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Next: zinc ore in new chunks in game; then stage 2, mods' feature types (`create:layered_ore`,
     Mekanism's `ResizableOreFeature`, Farmer's Delight's `WildCropFeature`): the mod's
     `Feature.place` on a `WorldGenLevel` that writes blocks.
+  - [x] 2026-11-05 IN GAME: Create's zinc ore generates. The placed feature was skipped because of
+    its feature, not its modifier. Mods' worldgen files (NeoForge 1.21.1's shape, which is 26.2's:
+    `config` wrapped) went into the game's feature catalog unchanged, and 26.3's catalog reads
+    features with `config` unwrapped (`invalid world generation field: targets`). Fixes:
+    - `horizon-port-pack`'s install writes a mod's configured and placed features in 26.3's form,
+      through the upgrade 26.2 data packs get (`upgrade::feature_file`).
+    - The game logs each placed feature it skips and why. Before, it logged only a count.
+    - The runtime's `BlockState.CODEC` also reads 26.3's state shapes (`{id, properties}`, or the id
+      alone), since a mod's installed data has them.
+    Fresh world, the four chunks around spawn, y -63 to 70: 81 `create:zinc_ore` and 196
+    `create:deepslate_zinc_ore` (0 before); `find-block` sees 786 within 48 blocks. Still skipped:
+    `create:striated_ores_overworld` (`create:layered_ore`, a mod's feature type: stage 2).
+    Stage 2 so far: `horizon-world` decodes a feature type a mod registered through its handler
+    (`FeatureDefinition::Foreign`) and places it with the mod's code. That code writes states named
+    as text through `setBlock` or the chunk section (`World::set_block`, `set_section_block`), reads
+    block tags by name, and asks `ensureCanWrite`. Tests
+    `foreign::tests::a_mods_feature_writes_the_states_it_names_the_way_it_asks` and
+    `recipes::tests::block_states_read_in_every_shape_the_data_has`. 293 compat and 110 port-pack
+    tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

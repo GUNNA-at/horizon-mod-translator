@@ -507,7 +507,7 @@ impl GeneratorData {
             biome_carvers.push(carvers.decode_set(&value["carvers"].to_string())?);
             biome_json.push(json.clone());
         }
-        super::foreign::set_biomes(biome_names.clone(), biome_tags.clone());
+        super::foreign::set_names(biome_names.clone(), biome_tags.clone(), block_tags.clone());
         let carving_blocks = CarvingBlocks::from_registry(
             registry,
             &tag_set("minecraft:uncarvable")?

@@ -1,8 +1,10 @@
 //! Worldgen types a mod defines in code rather than as data: a NeoForge mod's own placement
-//! modifiers (Create's `create:config_filter`, Mekanism's `mekanism:disableable`). A translated
-//! mod registers a [`Handler`]; the placement decoder asks the handlers for a type vanilla doesn't
-//! have, and the generator runs what one returns on the world and random stream vanilla's own
-//! modifiers get, so the mod's code draws from the feature's random as it would in Java.
+//! modifiers (Create's `create:config_filter`) and feature types (Create's `create:layered_ore`).
+//! A translated mod registers a [`Handler`]; the decoders ask the handlers for a type vanilla
+//! doesn't have, and the generator runs what one returns on the world and random stream vanilla's
+//! own modifiers and features get, so the mod's code draws from the feature's random as it would
+//! in Java.
+use super::feature::FeatureWorld;
 use super::placement::{PlacementContext, PlacementQueryError};
 use crate::heightmap::HeightmapType;
 use crate::registry::{BlockRegistry, BlockStateId};
@@ -19,6 +21,11 @@ pub trait World {
     /// Whether the block at `position` is in block tag `tag` (`minecraft:base_stone_overworld`,
     /// no `#`).
     fn block_in_tag(&mut self, position: [i32; 3], tag: &str) -> bool;
+    /// Whether block `block` (`minecraft:stone`) is in block tag `tag`, as the generator's tags
+    /// hold it (vanilla's and the packs'): a state's `is(TagKey)` where no position is at hand.
+    fn named_block_in_tag(&mut self, block: &str, tag: &str) -> bool;
+    /// `ensureCanWrite(position)`: whether the region being generated may write there.
+    fn can_write(&mut self, position: [i32; 3]) -> bool;
     /// `getHeight(heightmap, x, z)`, the heightmap by vanilla's name (`WORLD_SURFACE_WG`).
     fn height(&mut self, heightmap: &str, x: i32, z: i32) -> Option<i32>;
     /// The lowest y and the highest one.
@@ -32,6 +39,13 @@ pub trait World {
     /// Whether biome `biome` is in biome tag `tag` (`minecraft:is_overworld`, no `#`), as the
     /// generator's tags hold it (vanilla's and the packs').
     fn biome_in_tag(&mut self, biome: &str, tag: &str) -> bool;
+    /// `setBlock(position, state, flags)`, the state as [`World::block`] gives it: false where
+    /// the world refused it (outside the region being generated, an unknown state) or can't be
+    /// written (a placement modifier's world).
+    fn set_block(&mut self, position: [i32; 3], state: &str, flags: i32) -> bool;
+    /// A raw write into the chunk section (`LevelChunkSection.setBlockState`, as features write
+    /// through `BulkSectionAccess`): no heightmaps, no neighbour effects.
+    fn set_section_block(&mut self, position: [i32; 3], state: &str) -> bool;
 }
 
 /// The random stream the generator hands a modifier (the feature's), as `RandomSource` draws.
@@ -52,21 +66,39 @@ pub trait Placement: Send + Sync {
     fn positions(&self, world: &mut dyn World, random: &mut dyn Random, origin: [i32; 3]) -> Result<Vec<[i32; 3]>, String>;
 }
 
+/// A mod's feature, read from its configured feature's JSON: what its `Feature.place` does at a
+/// position (true when it placed something).
+pub trait Feature: Send + Sync {
+    fn place(&self, world: &mut dyn World, random: &mut dyn Random, origin: [i32; 3]) -> Result<bool, String>;
+}
+
 /// What a mod registers: its own worldgen types, by id.
 pub trait Handler: Send + Sync {
     /// The modifier `json` (the whole object, `type` included) describes when `kind` is one of
     /// the mod's placement modifier types; `None` when it isn't the mod's.
     fn placement(&self, kind: &str, json: &str) -> Option<Result<Arc<dyn Placement>, String>>;
+    /// The configured feature `json` (`type` and `config`) describes when `kind` is one of the
+    /// mod's feature types; `None` when it isn't the mod's.
+    fn feature(&self, _kind: &str, _json: &str) -> Option<Result<Arc<dyn Feature>, String>> {
+        None
+    }
 }
 
 static HANDLERS: RwLock<Vec<(String, Arc<dyn Handler>)>> = RwLock::new(Vec::new());
 static BLOCKS: RwLock<Option<&'static BlockRegistry>> = RwLock::new(None);
-static BIOMES: RwLock<Option<Arc<Biomes>>> = RwLock::new(None);
+static NAMES: RwLock<Option<Arc<Names>>> = RwLock::new(None);
 
-/// The generator's biomes: names by id, and the biome tags by name with the biomes in each.
-struct Biomes {
-    names: Vec<Arc<str>>,
-    tags: BTreeMap<String, Vec<String>>,
+/// What the generator names that mods' code reads by name: its biomes by id, and the biome and
+/// block tags by tag name with their members.
+struct Names {
+    biomes: Vec<Arc<str>>,
+    biome_tags: BTreeMap<String, Vec<String>>,
+    block_tags: BTreeMap<String, Vec<String>>,
+}
+
+/// A tag's name as the generator keys them: `minecraft:` where it names no namespace.
+fn tag_name(tag: &str) -> String {
+    if tag.contains(':') { tag.to_owned() } else { format!("minecraft:{tag}") }
 }
 
 /// Registers mod `id`'s handler, replacing one it registered before (a resource reload asks again).
@@ -81,16 +113,28 @@ pub fn set_blocks(registry: &'static BlockRegistry) {
     *BLOCKS.write().unwrap_or_else(|e| e.into_inner()) = Some(registry);
 }
 
-/// The biomes mods' code names (the generator's, by [`super::biome::BiomeId`]) and the biome
-/// tags holding them, by tag name (`minecraft:is_overworld`).
-pub fn set_biomes(names: Vec<Arc<str>>, tags: BTreeMap<String, Vec<String>>) {
-    *BIOMES.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(Biomes { names, tags }));
+/// The biomes mods' code names (the generator's, by [`super::biome::BiomeId`]), and the biome
+/// and block tags by tag name (`minecraft:is_overworld`) with what each holds.
+pub fn set_names(
+    biomes: Vec<Arc<str>>,
+    biome_tags: BTreeMap<String, Vec<String>>,
+    block_tags: BTreeMap<String, Vec<String>>,
+) {
+    *NAMES.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(Names { biomes, biome_tags, block_tags }));
+}
+
+fn handlers() -> Vec<Arc<dyn Handler>> {
+    HANDLERS.read().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, h)| h.clone()).collect()
 }
 
 /// The first registered handler that knows placement modifier type `kind`.
 pub(crate) fn placement(kind: &str, json: &str) -> Option<Result<Arc<dyn Placement>, String>> {
-    let handlers: Vec<Arc<dyn Handler>> = HANDLERS.read().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, h)| h.clone()).collect();
-    handlers.iter().find_map(|h| h.placement(kind, json))
+    handlers().iter().find_map(|h| h.placement(kind, json))
+}
+
+/// The first registered handler that knows feature type `kind`.
+pub(crate) fn feature(kind: &str, json: &str) -> Option<Result<Arc<dyn Feature>, String>> {
+    handlers().iter().find_map(|h| h.feature(kind, json))
 }
 
 /// A state as text, as [`World::block`] gives it.
@@ -124,19 +168,77 @@ impl ForeignPlacement {
         random: &mut R,
         origin: [i32; 3],
     ) -> Result<Vec<[i32; 3]>, PlacementQueryError> {
-        let registry = *BLOCKS.read().unwrap_or_else(|e| e.into_inner());
-        let biomes = BIOMES.read().unwrap_or_else(|e| e.into_inner()).clone();
+        // A modifier reads the world; it doesn't write it.
+        let mut world = ContextWorld::new(context, |_, _, _, _| false);
         self.inner
-            .positions(&mut ContextWorld { context, registry, biomes }, &mut RandomBridge(random), origin)
+            .positions(&mut world, &mut RandomBridge(random), origin)
             .map_err(|e| PlacementQueryError::Failed(format!("{}: {e}", self.kind)))
     }
 }
 
-/// A placement context as the [`World`] a mod's code reads.
+/// A mod's feature in a configured feature: its type and what its handler made of it.
+#[derive(Clone)]
+pub struct ForeignFeature {
+    pub kind: String,
+    pub(crate) inner: Arc<dyn Feature>,
+}
+
+impl std::fmt::Debug for ForeignFeature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ForeignFeature({})", self.kind)
+    }
+}
+
+impl ForeignFeature {
+    /// The mod's `place` at `origin` on `world`, which it reads and writes.
+    pub(crate) fn place<W: FeatureWorld + PlacementContext, R: RandomSource>(
+        &self,
+        world: &mut W,
+        random: &mut R,
+        origin: [i32; 3],
+    ) -> Result<bool, PlacementQueryError> {
+        let mut world = ContextWorld::new(world, write_feature_world::<W>);
+        self.inner
+            .place(&mut world, &mut RandomBridge(random), origin)
+            .map_err(|e| PlacementQueryError::Failed(format!("{}: {e}", self.kind)))
+    }
+}
+
+/// How a mod's code writes a block: `setBlock` with its flags, or into the section.
+#[derive(Clone, Copy)]
+enum Write {
+    Block(i32),
+    Section,
+}
+
+/// A feature's world takes both writes.
+fn write_feature_world<W: FeatureWorld + PlacementContext>(world: &mut W, position: [i32; 3], state: BlockStateId, write: Write) -> bool {
+    match write {
+        Write::Block(flags) => FeatureWorld::set_block(world, position, state, flags).unwrap_or(false),
+        Write::Section => PlacementContext::set_section_block(world, position, state).is_ok(),
+    }
+}
+
+/// A placement context as the [`World`] a mod's code reads, writing through `write`.
 struct ContextWorld<'a, C: PlacementContext + ?Sized> {
     context: &'a mut C,
+    write: fn(&mut C, [i32; 3], BlockStateId, Write) -> bool,
     registry: Option<&'static BlockRegistry>,
-    biomes: Option<Arc<Biomes>>,
+    names: Option<Arc<Names>>,
+}
+
+impl<'a, C: PlacementContext + ?Sized> ContextWorld<'a, C> {
+    fn new(context: &'a mut C, write: fn(&mut C, [i32; 3], BlockStateId, Write) -> bool) -> Self {
+        let registry = context.block_registry().or_else(|| *BLOCKS.read().unwrap_or_else(|e| e.into_inner()));
+        let names = NAMES.read().unwrap_or_else(|e| e.into_inner()).clone();
+        Self { context, write, registry, names }
+    }
+    fn write(&mut self, position: [i32; 3], state: &str, how: Write) -> bool {
+        let Some(id) = self.registry.and_then(|r| super::structure::template::parse_state_string(r, state)) else {
+            return false;
+        };
+        (self.write)(self.context, position, id, how)
+    }
 }
 
 impl<C: PlacementContext + ?Sized> World for ContextWorld<'_, C> {
@@ -146,6 +248,13 @@ impl<C: PlacementContext + ?Sized> World for ContextWorld<'_, C> {
     }
     fn block_in_tag(&mut self, position: [i32; 3], tag: &str) -> bool {
         self.context.block_matches_tag(position, tag).unwrap_or(false)
+    }
+    fn named_block_in_tag(&mut self, block: &str, tag: &str) -> bool {
+        let names = self.names.as_ref();
+        names.and_then(|n| n.block_tags.get(&tag_name(tag))).is_some_and(|members| members.iter().any(|m| m == block))
+    }
+    fn can_write(&mut self, position: [i32; 3]) -> bool {
+        self.context.ensure_can_write(position).unwrap_or(false)
     }
     fn height(&mut self, heightmap: &str, x: i32, z: i32) -> Option<i32> {
         let kind = HeightmapType::ALL.into_iter().find(|k| k.name() == heightmap)?;
@@ -162,12 +271,17 @@ impl<C: PlacementContext + ?Sized> World for ContextWorld<'_, C> {
     }
     fn biome(&mut self, position: [i32; 3]) -> Option<String> {
         let id = self.context.biome_identity(position).ok()?;
-        self.biomes.as_ref()?.names.get(id.0 as usize).map(|name| name.to_string())
+        self.names.as_ref()?.biomes.get(id.0 as usize).map(|name| name.to_string())
     }
     fn biome_in_tag(&mut self, biome: &str, tag: &str) -> bool {
-        let tag = if tag.contains(':') { tag.to_owned() } else { format!("minecraft:{tag}") };
-        let biomes = self.biomes.as_ref();
-        biomes.and_then(|b| b.tags.get(&tag)).is_some_and(|members| members.iter().any(|m| m == biome))
+        let names = self.names.as_ref();
+        names.and_then(|n| n.biome_tags.get(&tag_name(tag))).is_some_and(|members| members.iter().any(|m| m == biome))
+    }
+    fn set_block(&mut self, position: [i32; 3], state: &str, flags: i32) -> bool {
+        self.write(position, state, Write::Block(flags))
+    }
+    fn set_section_block(&mut self, position: [i32; 3], state: &str) -> bool {
+        self.write(position, state, Write::Section)
     }
 }
 
@@ -201,8 +315,13 @@ impl<R: RandomSource> Random for RandomBridge<'_, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worldgen::{DecodeError, anchor::WorldGenerationContext, placement::PlacementModifier};
+    use crate::nbt::Tag;
+    use crate::worldgen::{
+        DecodeError, anchor::WorldGenerationContext, feature::FeatureBlocks, feature_graph::FeatureDefinition,
+        placement::PlacementModifier,
+    };
     use horizon_core::random::LegacyRandom;
+    use std::collections::HashMap;
 
     /// A mod's modifier: the origin, then `step` blocks above it when a draw of four comes up 0,
     /// as a mod's `getPositions` would stream them.
@@ -266,5 +385,162 @@ mod tests {
             Err(DecodeError::Registry(e)) => assert!(e.contains("No key step"), "{e}"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A mod's feature: when the block under its origin is stone, a column of `state` up from the
+    /// origin, one to `height` blocks (a draw), written into the section, capped with stone through
+    /// `setBlock`; nothing elsewhere. A state the world doesn't have is refused.
+    struct Column {
+        height: i32,
+        state: String,
+    }
+    impl Feature for Column {
+        fn place(&self, world: &mut dyn World, random: &mut dyn Random, origin: [i32; 3]) -> Result<bool, String> {
+            let [x, y, z] = origin;
+            if world.block([x, y - 1, z]).as_deref() != Some("minecraft:stone") {
+                return Ok(false);
+            }
+            assert!(!world.set_block([x, y - 2, z], "foreign_test:nothing", 3));
+            let n = 1 + random.next_int_bound(self.height);
+            for i in 0..n {
+                world.set_section_block([x, y + i, z], &self.state);
+            }
+            Ok(world.set_block([x, y + n, z], "minecraft:stone", 2))
+        }
+    }
+    struct ColumnHandler;
+    impl Handler for ColumnHandler {
+        fn placement(&self, _: &str, _: &str) -> Option<Result<Arc<dyn Placement>, String>> {
+            None
+        }
+        fn feature(&self, kind: &str, json: &str) -> Option<Result<Arc<dyn Feature>, String>> {
+            (kind == "foreign_test:column").then(|| {
+                let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+                let config = &v["config"];
+                let height = config["height"].as_i64().ok_or("No key height in MapLike")? as i32;
+                let state = config["state"].as_str().ok_or("No key state in MapLike")?.to_owned();
+                Ok(Arc::new(Column { height, state }) as Arc<dyn Feature>)
+            })
+        }
+    }
+
+    /// Air, stone, and `foreign_test:pipe` along `x` or `y`.
+    fn registry() -> &'static BlockRegistry {
+        let state = |id: &str, axis: Option<&str>| {
+            let mut entries = vec![("id", Tag::String(id.into()))];
+            if let Some(axis) = axis {
+                entries.push(("properties", Tag::compound([("axis", Tag::String(axis.into()))])));
+            }
+            Tag::compound(entries)
+        };
+        let registry = BlockRegistry::from_nbt(&Tag::compound([
+            ("DataVersion", Tag::Int(crate::DATA_VERSION)),
+            (
+                "states",
+                Tag::List(vec![
+                    state("minecraft:air", None),
+                    state("minecraft:stone", None),
+                    state("foreign_test:pipe", Some("x")),
+                    state("foreign_test:pipe", Some("y")),
+                ]),
+            ),
+            (
+                "defaults",
+                Tag::compound([
+                    ("minecraft:air", Tag::Int(0)),
+                    ("minecraft:stone", Tag::Int(1)),
+                    ("foreign_test:pipe", Tag::Int(3)),
+                ]),
+            ),
+        ]))
+        .unwrap();
+        Box::leak(Box::new(registry))
+    }
+
+    /// A region of air with the writes kept in order, each with how it was made.
+    struct Grid {
+        registry: &'static BlockRegistry,
+        blocks: HashMap<[i32; 3], BlockStateId>,
+        writes: Vec<([i32; 3], &'static str, &'static str)>,
+    }
+    impl Grid {
+        fn get(&self, p: [i32; 3]) -> BlockStateId {
+            self.blocks.get(&p).copied().unwrap_or(BlockStateId(0))
+        }
+        fn put(&mut self, p: [i32; 3], state: BlockStateId, how: &'static str) {
+            self.blocks.insert(p, state);
+            let name = ["air", "stone", "pipe[axis=x]", "pipe[axis=y]"][state.0 as usize];
+            self.writes.push((p, name, how));
+        }
+    }
+    impl FeatureWorld for Grid {
+        type Error = PlacementQueryError;
+        fn block(&mut self, p: [i32; 3]) -> Result<BlockStateId, PlacementQueryError> {
+            Ok(self.get(p))
+        }
+        fn set_block(&mut self, p: [i32; 3], state: BlockStateId, _flags: i32) -> Result<bool, PlacementQueryError> {
+            self.put(p, state, "block");
+            Ok(true)
+        }
+    }
+    impl PlacementContext for Grid {
+        fn generation(&self) -> WorldGenerationContext {
+            WorldGenerationContext::new(-64, 384, 63)
+        }
+        fn min_y(&mut self) -> Result<i32, PlacementQueryError> {
+            Ok(-64)
+        }
+        fn height(&mut self, _: crate::heightmap::HeightmapType, _: i32, _: i32) -> Result<i32, PlacementQueryError> {
+            Ok(70)
+        }
+        fn block_state(&mut self, p: [i32; 3]) -> Result<BlockStateId, PlacementQueryError> {
+            Ok(self.get(p))
+        }
+        fn set_section_block(&mut self, p: [i32; 3], state: BlockStateId) -> Result<(), PlacementQueryError> {
+            self.put(p, state, "section");
+            Ok(())
+        }
+        fn block_registry(&self) -> Option<&'static BlockRegistry> {
+            Some(self.registry)
+        }
+    }
+
+    /// A feature type a mod registered decodes through its handler; placed, the mod's code reads
+    /// the world, draws from the feature's stream, and writes the states it names as text through
+    /// the section or `setBlock` as it asked. A type nobody registered is vanilla's to read.
+    #[test]
+    fn a_mods_feature_writes_the_states_it_names_the_way_it_asks() {
+        register("foreign_test_feature", Arc::new(ColumnHandler));
+        let json = r#"{"type": "foreign_test:column", "config": {"height": 4, "state": "foreign_test:pipe[axis=x]"}}"#;
+        let feature = FeatureDefinition::from_json(json).unwrap();
+        assert!(matches!(&feature, FeatureDefinition::Foreign(f) if f.kind == "foreign_test:column"));
+        let blocks = FeatureBlocks {
+            air: BlockStateId(0),
+            stone: BlockStateId(1),
+            cobblestone: BlockStateId(1),
+            end_stone: BlockStateId(1),
+            obsidian: BlockStateId(1),
+        };
+        for seed in (0..8i64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64)) {
+            let mut grid = Grid { registry: registry(), blocks: HashMap::new(), writes: Vec::new() };
+            grid.blocks.insert([2, 9, 5], BlockStateId(1));
+            let mut random = LegacyRandom::new(seed);
+            assert!(feature.place(&mut grid, &mut random, [2, 10, 5], blocks).unwrap());
+            let mut expected_random = LegacyRandom::new(seed);
+            let n = 1 + expected_random.next_int_bound(4).unwrap();
+            let mut expected: Vec<([i32; 3], &str, &str)> = (0..n).map(|i| ([2, 10 + i, 5], "pipe[axis=x]", "section")).collect();
+            expected.push(([2, 10 + n, 5], "stone", "block"));
+            assert_eq!(grid.writes, expected, "seed {seed}");
+            assert_eq!(random.next_long(), expected_random.next_long(), "seed {seed}");
+            // Over air, the mod's code places nothing.
+            let mut empty = Grid { registry: registry(), blocks: HashMap::new(), writes: Vec::new() };
+            assert!(!feature.place(&mut empty, &mut LegacyRandom::new(seed), [2, 10, 5], blocks).unwrap());
+            assert!(empty.writes.is_empty());
+        }
+        match FeatureDefinition::from_json(r#"{"type": "foreign_test:column", "config": {"height": 4}}"#) {
+            Err(DecodeError::Registry(e)) => assert!(e.contains("No key state"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(FeatureDefinition::from_json(r#"{"type": "foreign_test:other", "config": {}}"#).is_err());
     }
 }

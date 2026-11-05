@@ -249,6 +249,10 @@ impl VanillaTerrain {
                 "Horizon: {} placed features cannot run and will be skipped",
                 unsupported.len()
             );
+            // Which, and why: a mod's feature names a type or a block this game doesn't have.
+            for (name, error) in unsupported.iter().take(16) {
+                log::warn!("Horizon:   {name}: {error}");
+            }
             if !dir.join("blocks/block-properties.nbt").exists() {
                 log::warn!(
                     "Horizon: the worldgen bundle lacks the block behavior exports (worldgen/blocks/*.nbt); \
