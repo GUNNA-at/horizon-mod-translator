@@ -2031,6 +2031,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `isUnbound` on that key as the game holds it (Create's tool menu on Left Alt). Tests
     `blocks::tests::a_vanilla_armour_material_answers_its_values`,
     `screens::tests::a_mods_own_key_mapping_answers_on_the_key_it_was_made_with`.
+  - [x] 2026-11-05 Load round 10 (the 28 jars, snapshot `bb82114`): 28 load, exit 0. Kinds summed
+    per mod 256 → 238, distinct 237 → 227 (counted by key), calls 6,967 → 3,970: `MapColor.col`'s
+    2,928, `ItemProperties.register` and the armour materials' reads are gone. Uncaught: FramedBlocks'
+    `Invalid shape` (1) and Mekanism's `Current server is null` (2), as before. Widest now:
+    resources (`Minecraft.getResourceManager` in 4 mods: GeckoLib and Immersive Aircraft register
+    reload listeners, StorageDrawers reads 40 block models with `BlockModel.fromStream` and their
+    elements 1,568 times, Mekanism reads 5 textures with `NativeImage.read` and their pixels), then
+    codec roots (`MapCodec.forGetter` 3, `StreamCodec$CodecOperation.apply`, `Biome.LIST_CODEC`,
+    `Codec.fieldOf`, `MapCodec.xmap`, `SimpleFluidContent.CODEC` 2 each). Results in
+    `scratchpad/lt/r` (round 9's in `r9-all`).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
