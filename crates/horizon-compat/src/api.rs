@@ -1917,7 +1917,8 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         // A stream codec of the game's this runtime doesn't model (`DyeColor.STREAM_CODEC`): the
         // class's codec over the wire, as `ByteBufCodecs.fromCodecWithRegistries` sends it; both
         // ends of Horizon read it alike. `OPTIONAL_STREAM_CODEC` takes `OPTIONAL_CODEC`, else
-        // `CODEC`. A class whose codec isn't modelled either is a miss of its stream codec.
+        // `CODEC`, else `FLAT_CODEC` (NeoForge's sized ingredients have no `CODEC`). A class whose
+        // codec isn't modelled either is a miss of its stream codec.
         k if (k.starts_with("net/minecraft/") || k.starts_with("net/neoforged/")) && k.ends_with("STREAM_CODEC") => {
             let id = format!("compat:stream-of/{k}");
             if let Some(&c) = rt.interned.get(&id) {
@@ -1925,7 +1926,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             }
             let (class, field) = k.rsplit_once('.').unwrap_or((k, ""));
             let prefix = field.strip_suffix("STREAM_CODEC").unwrap_or("");
-            for name in [format!("{prefix}CODEC"), "CODEC".to_owned()] {
+            for name in [format!("{prefix}CODEC"), "CODEC".to_owned(), "FLAT_CODEC".to_owned()] {
                 let ck = rt.static_key(&format!("{class}.{name}"));
                 let since = crate::misses();
                 let codec = get_static(rt, ck);

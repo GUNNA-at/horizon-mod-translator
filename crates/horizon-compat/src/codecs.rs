@@ -138,6 +138,14 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             let record = codec(rt, "compat:codec/record", parts);
             codec(rt, "compat:codec/of_map", vec![record])
         }),
+        // A block item's state properties: a map of names to values, the record around it.
+        ("net/minecraft/world/item/component/BlockItemStateProperties", "CODEC") => rt.intern("compat:codec/block_item_state_properties".into(), |rt| {
+            let string = prim(rt, "string");
+            let map = codec(rt, "compat:codec/map", vec![string, string]);
+            let to = crate::functions::record_constructor(rt, "net/minecraft/world/item/component/BlockItemStateProperties");
+            let from = crate::functions::component(rt, "properties");
+            codec(rt, "compat:codec/xmap", vec![map, to, V::I(0), from, V::I(0)])
+        }),
         ("net/minecraft/core/Vec3i", "CODEC") => native(rt, "vec3i"),
         ("net/minecraft/world/phys/Vec3", "CODEC") => native(rt, "vec3"),
         ("net/minecraft/core/UUIDUtil", "CODEC") => native(rt, "uuid"),
@@ -502,6 +510,16 @@ fn app_value(rt: &mut Rt, app: V, o: &Map<String, Json>) -> Result<V, String> {
             decode_map(rt, field, o)
         }
         "point" => Ok(rt.captured(app).first().copied().unwrap_or_default()),
+        // `builder.dependent(getter, encoder, decoderOf)`: the builder's own field read first, then
+        // the decoder its value picks (a map codec, or a mod's `MapDecoder`) reads the same object.
+        "dependent" => {
+            let parts = rt.captured(app);
+            let part = |i: usize| parts.get(i).copied().unwrap_or_default();
+            let first = app_value(rt, part(0), o)?;
+            let decoder = run(rt, FUNCTION, part(3), &[first])?;
+            let decoder = as_codec(rt, decoder);
+            decode_map(rt, decoder, o)
+        }
         other => Err(format!("a record field of kind {other:?}")),
     }
 }
@@ -771,12 +789,17 @@ fn encode_map(rt: &mut Rt, c: V, value: V, out: &mut BTreeMap<String, Nbt>) -> R
         // Each field from the mod's getter (`forGetter`).
         "record" => {
             for &g in parts.iter().skip(1) {
-                if kind(rt, g) == "getter" {
-                    let field = rt.captured(g);
-                    let (codec, getter) = (field.first().copied().unwrap_or_default(), field.get(1).copied().unwrap_or_default());
-                    let v = run(rt, FUNCTION, getter, &[value])?;
-                    encode_map(rt, codec, v, out)?;
-                }
+                let field = rt.captured(g);
+                let at = |i: usize| field.get(i).copied().unwrap_or_default();
+                // A field's map codec and getter; a dependent one's encoder (its builder's own field
+                // is written by that builder).
+                let (codec, getter) = match kind(rt, g) {
+                    "getter" => (at(0), at(1)),
+                    "dependent" => (as_codec(rt, at(2)), at(1)),
+                    _ => continue,
+                };
+                let v = run(rt, FUNCTION, getter, &[value])?;
+                encode_map(rt, codec, v, out)?;
             }
         }
         "point" | "unit" => {}
@@ -974,6 +997,12 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
         }
         "dye_color" => Nbt::String(serialized_name(rt, v)?),
         "item_enchantments" => crate::enchantments::encode(rt, v)?,
+        // Ingredients, sized ones and fluid ones as their codecs write them (a stream codec built
+        // on one sends this).
+        "ingredient" | "ingredient_nonempty" => json_to_nbt(&crate::recipes::write_ingredient(rt, v))?,
+        "sized_ingredient" => json_to_nbt(&crate::recipes::write_sized_item(rt, v))?,
+        "fluid_ingredient" | "fluid_ingredient_map" => json_to_nbt(&crate::recipes::write_fluid_ingredient(rt, v, name == "fluid_ingredient_map"))?,
+        "sized_fluid_ingredient" => json_to_nbt(&crate::recipes::write_sized_fluid(rt, v))?,
         "component_patch" => {
             let json = rt.get_field(v, "$json");
             match rt.str_of(json).and_then(|t| serde_json::from_str::<Json>(t).ok()) {
@@ -1326,6 +1355,20 @@ const MAP_DECODE: &str = "com/mojang/serialization/MapDecoder.decode.(Lcom/mojan
 const MAP_ENCODE: &str =
     "com/mojang/serialization/MapEncoder.encode.(Ljava/lang/Object;Lcom/mojang/serialization/DynamicOps;Lcom/mojang/serialization/RecordBuilder;)Lcom/mojang/serialization/RecordBuilder;";
 
+/// JSON as the NBT a codec writes (an empty list stays a list).
+fn json_to_nbt(j: &Json) -> Result<Nbt, String> {
+    crate::recipes::json_nbt(j).ok_or_else(|| format!("Not writable: {j}"))
+}
+
+/// `c` as a codec this module reads and writes with: a mod's own codec class wrapped
+/// ([`mod_codec_kind`]), anything else as it is.
+fn as_codec(rt: &mut Rt, c: V) -> V {
+    match mod_codec_kind(rt, c) {
+        Some(k) => codec(rt, k, vec![c]),
+        None => c,
+    }
+}
+
 /// A mod codec's own `decode(NbtOps, tag)` of `j`: the value of the pair it answers.
 fn java_decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
     let (ops, input) = (crate::ops::nbt_ops(rt), crate::ops::json_tag(rt, j));
@@ -1426,6 +1469,8 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
         "validate" => codec(rt, "compat:codec/validate", vec![c, a(1)]),
         "codec" => codec(rt, "compat:codec/of_map", vec![c]),
         "forGetter" => codec(rt, "compat:codec/getter", vec![c, a(1)]),
+        // On a record field (`fieldOf(...).forGetter(...)`): [builder, getter, encoder, decoderOf].
+        "dependent" => codec(rt, "compat:codec/dependent", vec![c, a(1), a(2), a(3)]),
         "dispatch" | "partialDispatch" | "dispatchStable" | "dispatchMap" => {
             // `dispatch([typeKey,] typeOf, codecOf)`.
             let (key, type_of, codec_of) = if desc.starts_with("(Ljava/lang/String;") { (a(1), a(2), a(3)) } else { (rt.string("type"), a(1), a(2)) };
@@ -1945,6 +1990,101 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(crate::api::pos_of(&rt, rt.get_field(back[0], "pos")), [1, -2, 3]);
         assert_eq!(rt.str_of(rt.get_field(back[0], "slot")), Some("TOP_LEFT"));
+    }
+
+    /// Mekanism's `SerializerHelper.oneRequired(main, secondary, getter)` over a record of two
+    /// optional strings: `main.dependent(getter, secondary, m -> m.isEmpty() ? required : secondary)`,
+    /// `required` a `MapDecoder` of the mod's own that fails where the secondary is absent.
+    fn one_required(rt: &mut Rt, _key: &'static str, _: &'static str, args: &[V]) -> V {
+        let optional_string = |rt: &mut Rt, name: &str| {
+            let s = st(rt, "com/mojang/serialization/Codec.STRING");
+            let n = rt.string(name);
+            c(rt, "com/mojang/serialization/Codec.optionalFieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[s, n])
+        };
+        match rt.class_of(args[0]) {
+            "test/Build" => {
+                let main = optional_string(rt, "main");
+                let main_of = rt.new_object("test/MainOf");
+                let main = c(rt, "com/mojang/serialization/MapCodec.forGetter.(Ljava/util/function/Function;)Lcom/mojang/serialization/codecs/RecordCodecBuilder;", &[main, main_of]);
+                let secondary = optional_string(rt, "secondary");
+                let required = rt.new_object("test/Required");
+                rt.put_field(required, "codec", secondary);
+                let pick = rt.new_object("test/Pick");
+                rt.put_field(pick, "codec", secondary);
+                rt.put_field(pick, "required", required);
+                let secondary_of = rt.new_object("test/SecondaryOf");
+                let dependent = c(
+                    rt,
+                    "com/mojang/serialization/codecs/RecordCodecBuilder.dependent.(Ljava/util/function/Function;Lcom/mojang/serialization/MapEncoder;Ljava/util/function/Function;)Lcom/mojang/serialization/codecs/RecordCodecBuilder;",
+                    &[main, secondary_of, secondary, pick],
+                );
+                let group = c(rt, "com/mojang/serialization/codecs/RecordCodecBuilder$Instance.group.(Lcom/mojang/datafixers/kinds/App;Lcom/mojang/datafixers/kinds/App;)Lcom/mojang/datafixers/Products$P2;", &[args[1], main, dependent]);
+                let new = rt.new_object("test/New");
+                c(rt, "com/mojang/datafixers/Products$P2.apply.(Lcom/mojang/datafixers/kinds/Applicative;Ljava/util/function/BiFunction;)Lcom/mojang/datafixers/kinds/App;", &[group, args[1], new])
+            }
+            "test/MainOf" => rt.get_field(args[1], "main"),
+            "test/SecondaryOf" => rt.get_field(args[1], "secondary"),
+            "test/New" => {
+                let o = rt.new_object("test/Outputs");
+                rt.put_field(o, "main", args[1]);
+                rt.put_field(o, "secondary", args[2]);
+                o
+            }
+            "test/Pick" => {
+                let empty = c(rt, "java/util/Optional.isEmpty.()Z", &[args[1]]);
+                rt.get_field(args[0], if empty.i() != 0 { "required" } else { "codec" })
+            }
+            "test/Required" => {
+                let codec = rt.get_field(args[0], "codec");
+                let r = c(rt, "com/mojang/serialization/MapCodec.decode.(Lcom/mojang/serialization/DynamicOps;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;", &[codec, args[1], args[2]]);
+                let value = result_of(rt, r).unwrap_or(V::NULL);
+                if c(rt, "java/util/Optional.isPresent.()Z", &[value]).i() != 0 { r } else { error(rt, "Missing value") }
+            }
+            _ => V::Void,
+        }
+    }
+
+    #[test]
+    fn a_dependent_field_reads_with_the_decoder_the_field_before_picks() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(one_required);
+        rt.supers.insert("test/Required", "com/mojang/serialization/MapDecoder$Implementation");
+        rt.interfaces.insert("test/Required", &["com/mojang/serialization/MapDecoder"]);
+        let build = rt.new_object("test/Build");
+        let record = c(&mut rt, "com/mojang/serialization/codecs/RecordCodecBuilder.create.(Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;", &[build]);
+        let text = |rt: &mut Rt, o: V, field: &'static str| {
+            let opt = rt.get_field(o, field);
+            let v = rt.get_field(opt, "value");
+            rt.str_of(v).map(str::to_owned)
+        };
+        // The main output alone; the secondary alone (the mod's decoder reads it).
+        let read = decode(&mut rt, record, &serde_json::json!({"main": "ingot"})).unwrap();
+        assert_eq!((text(&mut rt, read, "main"), text(&mut rt, read, "secondary")), (Some("ingot".into()), None));
+        let read = decode(&mut rt, record, &serde_json::json!({"secondary": "dust"})).unwrap();
+        assert_eq!((text(&mut rt, read, "main"), text(&mut rt, read, "secondary")), (None, Some("dust".into())));
+        // Neither: the mod's decoder fails, and so does the record.
+        let err = decode(&mut rt, record, &serde_json::json!({})).unwrap_err();
+        assert!(err.contains("Missing value"), "{err}");
+        // Written: each field from its getter, the dependent one by its encoder.
+        let both = decode(&mut rt, record, &serde_json::json!({"main": "ingot", "secondary": "dust"})).unwrap();
+        let written = Nbt::Compound(BTreeMap::from([("main".to_owned(), Nbt::String("ingot".into())), ("secondary".to_owned(), Nbt::String("dust".into()))]));
+        assert_eq!(encode(&mut rt, record, both), Ok(written));
+    }
+
+    /// A block item's state properties (`minecraft:block_state` on a stack): a map of strings in and
+    /// out, the record around it.
+    #[test]
+    fn block_item_state_properties_read_and_write_as_a_map_of_names() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
+        let c = st(&mut rt, "net/minecraft/world/item/component/BlockItemStateProperties.CODEC");
+        let read = decode(&mut rt, c, &serde_json::json!({"facing": "north", "lit": "true"})).unwrap();
+        assert_eq!(rt.class_of(read), "net/minecraft/world/item/component/BlockItemStateProperties");
+        let written = Nbt::Compound(BTreeMap::from([("facing".to_owned(), Nbt::String("north".into())), ("lit".to_owned(), Nbt::String("true".into()))]));
+        assert_eq!(encode(&mut rt, c, read), Ok(written));
+        assert!(decode(&mut rt, c, &serde_json::json!({"facing": 3})).is_err());
     }
 
     #[test]

@@ -420,6 +420,77 @@ fn carries_required(rt: &Rt, ingredient: V, stack: V) -> bool {
     all && (!needs["strict"].as_bool().unwrap_or(false) || want.len() == have.len())
 }
 
+// ---- Writing them (what a stream codec sends: the codec's own form) ----
+
+/// One entry as its codec writes it: `{"tag": tag}` for a `#tag`, else `{key: id}`.
+fn entry_json(entry: &str, key: &str) -> Json {
+    match entry.strip_prefix('#') {
+        Some(tag) => serde_json::json!({ "tag": tag }),
+        None => serde_json::json!({ key: entry }),
+    }
+}
+
+/// `Ingredient.CODEC`'s writing: one entry as `{"item": id}` or `{"tag": tag}`, several (or
+/// none) as a list of them.
+pub(crate) fn write_ingredient(rt: &Rt, ingredient: V) -> Json {
+    let mut values: Vec<Json> = entries(rt, ingredient).iter().map(|e| entry_json(e, "item")).collect();
+    if values.len() == 1 { values.remove(0) } else { Json::Array(values) }
+}
+
+/// `SizedIngredient.FLAT_CODEC`'s writing: the ingredient's keys (several entries as NeoForge's
+/// compound) beside `count`, which is always written.
+pub(crate) fn write_sized_item(rt: &Rt, sized: V) -> Json {
+    let values: Vec<Json> = entries(rt, rt.get_field(sized, "$ingredient")).iter().map(|e| entry_json(e, "item")).collect();
+    let mut m = match values.as_slice() {
+        [Json::Object(one)] => one.clone(),
+        _ => Map::from_iter([("type".to_owned(), Json::from("neoforge:compound")), ("children".to_owned(), Json::Array(values))]),
+    };
+    m.insert("count".into(), Json::from(rt.get_field(sized, "$count").i()));
+    Json::Object(m)
+}
+
+/// `FluidIngredient.MAP_CODEC_NONEMPTY`'s writing: a fluid as `{"fluid": id}` (its untyped
+/// form), a tag as `neoforge:tag`, several as `neoforge:compound`, a components one with them.
+fn fluid_ingredient_map(rt: &Rt, ingredient: V) -> Map<String, Json> {
+    let entries = entries(rt, ingredient);
+    if let Some(needs) = rt.str_of(rt.get_field(ingredient, "$requires")).and_then(|n| serde_json::from_str::<Json>(n).ok()) {
+        return Map::from_iter([
+            ("type".to_owned(), Json::from("neoforge:components")),
+            ("fluids".to_owned(), Json::Array(entries.into_iter().map(Json::from).collect())),
+            ("components".to_owned(), needs["components"].clone()),
+            ("strict".to_owned(), needs["strict"].clone()),
+        ]);
+    }
+    let typed = |e: &str| match e.strip_prefix('#') {
+        Some(tag) => serde_json::json!({ "type": "neoforge:tag", "tag": tag }),
+        None => serde_json::json!({ "fluid": e }),
+    };
+    match entries.as_slice() {
+        [one] => match typed(one) {
+            Json::Object(m) => m,
+            _ => Map::new(),
+        },
+        _ => Map::from_iter([("type".to_owned(), Json::from("neoforge:compound")), ("children".to_owned(), Json::Array(entries.iter().map(|e| typed(e)).collect()))]),
+    }
+}
+
+/// `FluidIngredient.CODEC`'s writing (`as_map` false: a compound as the list of its children) or
+/// `MAP_CODEC_NONEMPTY`'s.
+pub(crate) fn write_fluid_ingredient(rt: &Rt, ingredient: V, as_map: bool) -> Json {
+    let m = fluid_ingredient_map(rt, ingredient);
+    if !as_map && m.get("type").and_then(Json::as_str) == Some("neoforge:compound") {
+        return m.get("children").cloned().unwrap_or_else(|| Json::Array(Vec::new()));
+    }
+    Json::Object(m)
+}
+
+/// `SizedFluidIngredient.FLAT_CODEC`'s writing: the ingredient's keys beside `amount`.
+pub(crate) fn write_sized_fluid(rt: &Rt, sized: V) -> Json {
+    let mut m = fluid_ingredient_map(rt, rt.get_field(sized, "$ingredient"));
+    m.insert("amount".into(), Json::from(rt.get_field(sized, "$amount").i()));
+    Json::Object(m)
+}
+
 /// `SizedFluidIngredient`: an ingredient and an amount in millibuckets.
 fn sized_fluid(rt: &mut Rt, ingredient: V, amount: i32) -> V {
     let o = rt.new_object(SIZED_FLUID);
@@ -1269,6 +1340,12 @@ mod tests {
             let codec = crate::api::get_static(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.FLAT_CODEC");
             let read = crate::codecs::decode(rt, codec, &serde_json::json!({"item": "minecraft:cobblestone", "count": 2})).unwrap();
             assert_eq!(crate::api::call(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.count.()I", &[read]), V::I(2));
+            // Over the wire (`STREAM_CODEC`): the same ingredient comes back.
+            let stream = crate::api::get_static(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.STREAM_CODEC");
+            let buf = crate::network::new_buffer(rt);
+            crate::network::encode(rt, stream, buf, flat);
+            let back = crate::network::decode(rt, stream, buf);
+            assert_eq!(crate::api::call(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.equals.(Ljava/lang/Object;)Z", &[back, flat]), V::I(1));
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
     }
@@ -1311,6 +1388,40 @@ mod tests {
         let c = rt.string(r#"{"minecraft:potion_contents":{"potion":"minecraft:night_vision"}}"#);
         rt.put_field(carrying, "$components", c);
         assert!(fluid_ingredient_test(&mut rt, ing, carrying));
+    }
+
+    #[test]
+    fn a_sized_fluid_ingredient_written_back_takes_the_same_stacks() {
+        let mut rt = Rt::new();
+        crate::install();
+        let water = fluids::fluid(&mut rt, "minecraft:water");
+        let lava = fluids::fluid(&mut rt, "minecraft:lava");
+        let plain_water = fluids::fluid_stack(&mut rt, water, 1000);
+        let plain_lava = fluids::fluid_stack(&mut rt, lava, 1000);
+        let potion_water = fluids::fluid_stack(&mut rt, water, 1000);
+        let c = rt.string(r#"{"minecraft:potion_contents":{"potion":"minecraft:night_vision"}}"#);
+        rt.put_field(potion_water, "$components", c);
+        // What each ingredient takes of plain water, plain lava and water carrying the potion.
+        let cases = [
+            (serde_json::json!({"type": "neoforge:components", "amount": 25, "fluids": "minecraft:water", "components": {"minecraft:potion_contents": {"potion": "minecraft:night_vision"}}}), [false, false, true]),
+            (serde_json::json!({"type": "neoforge:compound", "amount": 100, "children": [{"fluid": "minecraft:water"}, {"fluid": "minecraft:lava"}]}), [true, true, true]),
+            (serde_json::json!({"type": "neoforge:single", "fluid": "minecraft:lava", "amount": 250}), [false, true, false]),
+        ];
+        for (j, takes) in cases {
+            let sized = decode_native(&mut rt, "sized_fluid_ingredient", &j).unwrap();
+            let written = write_sized_fluid(&rt, sized);
+            let back = decode_native(&mut rt, "sized_fluid_ingredient", &written).unwrap_or_else(|e| panic!("{written}: {e}"));
+            assert_eq!(rt.get_field(back, "$amount"), j["amount"].as_i64().map(|a| V::I(a as i32)).unwrap());
+            let ing = rt.get_field(back, "$ingredient");
+            for (stack, want) in [plain_water, plain_lava, potion_water].into_iter().zip(takes) {
+                assert_eq!(fluid_ingredient_test(&mut rt, ing, stack), want, "{written}");
+            }
+            let list = write_fluid_ingredient(&rt, ing, false);
+            let again = decode_native(&mut rt, "fluid_ingredient", &list).unwrap_or_else(|e| panic!("{list}: {e}"));
+            for (stack, want) in [plain_water, plain_lava, potion_water].into_iter().zip(takes) {
+                assert_eq!(fluid_ingredient_test(&mut rt, again, stack), want, "{list}");
+            }
+        }
     }
 
     #[test]

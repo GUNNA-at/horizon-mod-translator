@@ -967,8 +967,21 @@ fn vector3(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let t = f(2);
             set(rt, [v[0] + (o[0] - v[0]) * t, v[1] + (o[1] - v[1]) * t, v[2] + (o[2] - v[2]) * t])
         }
+        // JOML's: 31-based over each component's `Float.floatToIntBits` (one NaN for all), and
+        // equal by those bits (so a map keyed by vectors finds an equal one).
+        ("hashCode", "()I") => V::I(v.iter().fold(1i32, |h, &c| h.wrapping_mul(31).wrapping_add(float_bits(c)))),
+        ("equals", "(Ljava/lang/Object;)Z") => {
+            let o = a(1);
+            let same = o == a(0) || (rt.class_of(o) == rt.class_of(a(0)) && vec3(rt, o).iter().zip(v.iter()).all(|(x, y)| float_bits(*x) == float_bits(*y)));
+            V::I(same as i32)
+        }
         _ => return None,
     })
+}
+
+/// Java's `Float.floatToIntBits`: the bits, with every NaN as the one canonical NaN.
+fn float_bits(f: f32) -> i32 {
+    if f.is_nan() { 0x7fc0_0000 } else { f.to_bits() as i32 }
 }
 
 /// JOML's `Vector2i`: its public `x` and `y` (Copycats+ names a byte panel's parts with them).
@@ -1990,6 +2003,28 @@ mod tests {
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    /// JOML 1.10.5's `Vector3f.hashCode` and `equals` (the values its own run printed): Mekanism
+    /// keys a map by vectors.
+    #[test]
+    fn vectors_hash_and_compare_as_jomls() {
+        let mut rt = Rt::new();
+        crate::install();
+        let vector = |rt: &mut Rt, x: f32, y: f32, z: f32| {
+            let v = rt.new_object("org/joml/Vector3f");
+            crate::api::call(rt, "org/joml/Vector3f.<init>.(FFF)V", &[v, V::F(x), V::F(y), V::F(z)]);
+            v
+        };
+        let hash = |rt: &mut Rt, v: V| crate::api::call(rt, "org/joml/Vector3f.hashCode.()I", &[v]);
+        let equals = |rt: &mut Rt, a: V, b: V| crate::api::call(rt, "org/joml/Vector3f.equals.(Ljava/lang/Object;)Z", &[a, b]);
+        let (a, b) = (vector(&mut rt, 1.0, 2.0, 3.0), vector(&mut rt, 1.0, 2.0, 3.0));
+        assert_eq!(hash(&mut rt, a), V::I(1606448223));
+        let odd = vector(&mut rt, -0.5, 0.0, f32::NAN);
+        assert_eq!(hash(&mut rt, odd), V::I(2126541919));
+        assert_eq!(equals(&mut rt, a, b), V::I(1));
+        let (zero, negative_zero) = (vector(&mut rt, 0.0, 0.0, 0.0), vector(&mut rt, -0.0, 0.0, 0.0));
+        assert_eq!(equals(&mut rt, zero, negative_zero), V::I(0));
     }
 
     /// A mod's own render type (SecurityCraft's overlay lines): built of vanilla's shards and its

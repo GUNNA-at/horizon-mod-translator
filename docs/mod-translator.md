@@ -2450,6 +2450,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `invoke::tests::bound_and_constant_handles_answer_as_javas`, and
     `codegen::annotation_tests::reflection_sees_runtime_annotations_and_element_defaults`
     (javac-compiled: a `CLASS` annotation stays out). 285 compat and 15 translator tests pass.
+  - [x] 2026-11-05 Round 16 (snapshot c37ebab): 48 calls unanswered across the 28 mods (79 in round
+    15), no uncaught exceptions. SecurityCraft registers 671 items (81 in round 15): the block items
+    its `@Reinforced` and `@RegisterItemBlock` fields name, and its one miss left is
+    `EnumProxy.<init>` (NeoForge's enum extensions, which the translator doesn't apply yet). Mekanism
+    went from 48 to 20: every `java.lang.invoke` and `LambdaMetafactory` miss is gone. StorageDrawers
+    went from 2 to 0. Also in this batch:
+    - Records' `dependent` fields (`Codec.dependent`, `RecordCodecBuilder`'s field whose codec the
+      field before it picks): read with the decoder the earlier value names, written with the codec
+      the getter's value gives.
+    - A mod's `STREAM_CODEC` with no stream codec of its own falls back to `FLAT_CODEC` as well as
+      `CODEC`.
+    - Stream codecs write NeoForge's ingredients: `Ingredient` (one entry as `{"item"}` or
+      `{"tag"}`, several as a list), `SizedIngredient`, `FluidIngredient` (single, tag, compound,
+      components) and `SizedFluidIngredient` in the form their codecs read.
+    - `BlockItemStateProperties.CODEC`: a map of property names to values.
+    - JOML's `Vector3f.hashCode` and `equals` as JOML computes them (float bits; `0.0` and `-0.0`
+      differ).
+    Tests `codecs::tests::a_dependent_field_reads_with_the_decoder_the_field_before_picks`,
+    `codecs::tests::block_item_state_properties_read_and_write_as_a_map_of_names`,
+    `render::tests::vectors_hash_and_compare_as_jomls` (values from JOML 1.10.5),
+    `recipes::tests::a_sized_fluid_ingredient_written_back_takes_the_same_stacks`, and
+    `recipes::tests::a_sized_ingredient_wants_as_many_of_its_items` (now through `STREAM_CODEC` and
+    back). 289 compat and 15 translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
