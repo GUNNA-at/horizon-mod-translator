@@ -3637,6 +3637,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `Minecraft.getConnection` 57/130, `ServerGamePacketListenerImpl.send` 54/120, `Player.drop` 49/163,
     `BlockState.cycle` 46/264, `Level.getEntity(int)` 46/151, `Level.clip` 41/113, `Block.getId` 41/101,
     `ItemStack.getComponents` 41/79.
+- [x] 2026-11-06 Part 10b: a console command's deferred changes are made as it ends. `Game::with_after_hits(action)`
+  (`native_hits.rs`) runs an action, then the changes its hooks left (`native_after_hit`), with the player it acts as
+  still in place. Changes left before it wait for their own action or tick: a guest's turn run inside a level's tick
+  doesn't make the tick's, which may name an entity the tick holds out of the level for the while. A guest's action
+  (`as_guest`), the owner's console command (`integrated.rs`) and the dedicated server's console (`dedicated.rs`) use
+  it. The effect trace names the level (`mob_effects.rs`).
+  In game (round 9, 6 November): the cow given `hzcheck:static` by the owner's console command runs its hooks now:
+  `static added to minecraft:cow (level 1)`, `static started on minecraft:cow (level 1)`, then acts 1, 2 and 3, the
+  last; no "doesn't know". The player's effect, the vitals, the hits, the deaths and the drops as in round 8; no panic.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

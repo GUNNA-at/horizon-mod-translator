@@ -245,7 +245,8 @@ pub fn effect_added(rt: &mut Rt, host: &mut dyn crate::host::Host, id: &str, ent
             return;
         };
         let Some(living) = living(rt, entity) else {
-            crate::glue::trace_once(rt, &format!("effect-entity/{what}"), |_| format!("{id} given to entity {entity:?}, which the game doesn't know: no {what}"));
+            let level = rt.host().map(|h| h.dimension()).unwrap_or_default();
+            crate::glue::trace_once(rt, &format!("effect-entity/{what}"), |_| format!("{id} given to entity {entity:?}, which the game doesn't know in {level}: no {what}"));
             return;
         };
         vc(rt, key, nd, &[e, living, V::I(amplifier)]);

@@ -5,7 +5,8 @@
 //! of the player whose blow the hit is was taken as the blow started
 //! ([`native_hit_player`]); what they change of the world waits for the hit
 //! to end ([`native_after_hit`]) and is made in the level the hit was dealt
-//! in, once the player's action or the level's tick that dealt it is over.
+//! in, once the player's action, the console's command or the level's tick
+//! that dealt it is over.
 use super::{Game, native_effects::NativeEffect, native_server::NativeServerPlayer};
 use horizon_client::{first_person::Hand, items::ItemStack};
 use horizon_world::nbt::Tag;
@@ -57,8 +58,8 @@ pub(crate) fn native_hit_player() -> Option<NativeHitPlayer> {
 }
 
 /// Has `change` made to the game once the hit in progress is over, in the
-/// level it was dealt in: after the player's action or the level's tick that
-/// dealt it, changes in the order they came. For a hit's hooks, which have no
+/// level it was dealt in: after the player's action, the console's command or
+/// the level's tick that dealt it, changes in the order they came. For a hit's hooks, which have no
 /// game to change (a sound, a message, another entity hurt), and an effect's
 /// (`native_apply_effect_tick` runs inside the entity's tick). A change that
 /// leaves more runs them in turn. API @API:hit_world@.
@@ -110,9 +111,27 @@ impl Game<'_> {
             components,
         }
     }
+    /// Runs `action`, a player's action or a console's command, then makes
+    /// the changes its hooks left ([`native_after_hit`]), in the level in
+    /// place and with the player it acts as still in place. Changes left
+    /// before it wait for the end of their own action or tick: an action run
+    /// inside a level's tick (a guest's turn) doesn't make the tick's, which
+    /// may name an entity the tick holds out of the level for the while.
+    pub(super) fn with_after_hits<R>(&mut self, action: impl FnOnce(&mut Self) -> R) -> R {
+        let earlier = AFTER_HIT.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        let result = action(self);
+        self.run_after_hits();
+        AFTER_HIT.with(|q| {
+            let mut q = q.borrow_mut();
+            let left = std::mem::replace(&mut *q, earlier);
+            q.extend(left);
+        });
+        result
+    }
     /// Makes the changes hits' hooks left ([`native_after_hit`]), in order,
-    /// in the level in place: the game calls it where a player's action or a
-    /// level's tick ends, and before another level takes this one's place.
+    /// in the level in place: the game calls it where a level's tick ends,
+    /// before another level takes this one's place, and where a player's
+    /// action or a console's command ends ([`Self::with_after_hits`]).
     pub(super) fn run_after_hits(&mut self) {
         for _ in 0..ROUNDS {
             let changes = AFTER_HIT.with(|q| std::mem::take(&mut *q.borrow_mut()));

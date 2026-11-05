@@ -307,12 +307,9 @@ impl Game<'_> {
         // The hits the guest deals in its turn name it (`native_living_*`).
         let entity = self.player.as_ref().map_or(0, |p| p.entity_id);
         let acting = horizon_client::health::set_acting_player(entity);
-        let result = horizon_client::block_contact::in_level(dimension, || {
-            let result = f(self);
-            // What the hits of the guest's action left for after them (`native_hits`).
-            self.run_after_hits();
-            result
-        });
+        // What the hits of the guest's action left for after them (`native_hits`),
+        // made before their state goes back.
+        let result = horizon_client::block_contact::in_level(dimension, || self.with_after_hits(f));
         horizon_client::health::set_acting_player(acting);
         self.leave_guest(host, swap);
         Some(result)
