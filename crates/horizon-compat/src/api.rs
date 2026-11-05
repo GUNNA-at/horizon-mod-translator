@@ -651,7 +651,7 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 49] = [
+const CHAIN: [Module; 50] = [
     mutable_pos,
     crate::worldgen::call,
     crate::mixin::call,
@@ -674,6 +674,7 @@ const CHAIN: [Module; 49] = [
     crate::entities::call_key,
     crate::creative::call,
     crate::commands::call,
+    crate::brigadier::call,
     crate::functions::call,
     crate::gamerules::call,
     crate::value_providers::call,
@@ -706,7 +707,7 @@ const CHAIN: [Module; 49] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 49] = [
+const CLAIMS: [Claims; 50] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::worldgen::claims,
     crate::mixin::claims,
@@ -729,6 +730,7 @@ const CLAIMS: [Claims; 49] = [
     crate::entities::claims,
     crate::creative::claims,
     crate::commands::claims,
+    crate::brigadier::claims,
     crate::functions::claims,
     crate::gamerules::claims,
     crate::value_providers::claims,
@@ -759,7 +761,7 @@ const CLAIMS: [Claims; 49] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 49] = [
+const MODULE_NAMES: [&str; 50] = [
     "mutable_pos",
     "worldgen",
     "mixin",
@@ -782,6 +784,7 @@ const MODULE_NAMES: [&str; 49] = [
     "entities",
     "creative",
     "commands",
+    "brigadier",
     "functions",
     "gamerules",
     "value_providers",
@@ -1871,6 +1874,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::neo::get_static(rt, o, f))
             .or_else(|| crate::files::get_static(rt, o, f))
             .or_else(|| crate::resources::get_static(rt, o, f))
+            .or_else(|| crate::brigadier::get_static(rt, o, f))
             .or_else(|| (o == crate::gson::NULL && f == "INSTANCE").then(|| crate::gson::null(rt)))
     {
         return v;

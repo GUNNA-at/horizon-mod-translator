@@ -2990,6 +2990,47 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     entities other than players, and vanilla's parse error with its context line for a line no
     path reads (it answers as an unknown command). `/create debuginfo` reaches its client-side
     parts (`GlUtil`, `Options.graphicsMode`) and `SystemReport`, unmodelled.
+  - [x] 2026-11-05 Commands parse and run as Brigadier 1.3.10 and vanilla 1.21.1 do, mods' own
+    argument types included. Three modules now:
+    - `brigadier.rs`: `StringReader` over the line's UTF-16 units, each read failing with
+      1.21.1's error where Brigadier leaves the cursor (`parsing.int.expected`,
+      `parsing.quote.escape`...); a reader object (one a mod makes, or the one its parser is
+      handed) runs on it. The exception types, `CommandSyntaxException` with or without a reader's
+      place, and `BUILT_IN_EXCEPTIONS` (1.21.1's `BrigadierExceptions`: one type object per key, so
+      a mod comparing `getType()` finds it).
+    - `command_args.rs` (new): vanilla's argument parsers on that reader, each with its errors at
+      vanilla's cursor: numbers with bounds (`argument.integer.big` [64, 65]), strings, messages,
+      entity selectors as `EntitySelectorParser` reads them (every 1.21.1 option and its errors;
+      selection by name, UUID, `x y z`, `dx dy dz`, distance, sort, limit; `@` needs level 2 at
+      parse and at selection), world and local coordinates (`Mth`'s float sin/cos for `^`),
+      angles, ids, dimensions, items (`[components]`, overstacked), block states (`[props]`,
+      `{nbt}` checked as `TagParser` reads SNBT), times, UUIDs (`UUID.fromString`'s leniency),
+      colours. What a type reads resolves later with the source the command runs for.
+    - `commands.rs`: `parseNodes` as Brigadier's (relevant nodes, `canUse`, a copy of the
+      context and reader per child, the separator, a redirect parsed in a context of its own,
+      potentials ordered by what they read and their errors); a mod's own `ArgumentType` reads
+      with its own `parse` (the one taking the source when it overrides it), a `RuntimeException`
+      it throws being `command.exception`. `Commands.performCommand` as NeoForge's: `CommandEvent`
+      first (cancelled, its exception said; architectury, balm and KubeJS listen), then
+      `finishParsing` (the error, then the line's last ten characters before its place in grey,
+      the rest red and underlined, `<--[HERE]`, clicking it suggesting the line), then
+      `ExecutionContext`'s run: each redirect's modifier gives the sources (`redirect`'s
+      single modifier wrapped as Brigadier's), a fork's syntax errors silent, a modifier's ending
+      the command, the fork limit; the command per source, its syntax errors said to that source,
+      anything else `command.failed` with the message on hover. A mod's own
+      `dispatcher.parse`/`execute` (2 mods each) gets `ParseResults`, `CommandContextBuilder`,
+      `ParsedCommandNode`, `StringRange`, and Brigadier's `executeAll` (forks count 1 each, errors
+      thrown out unless forked). `EntitySelectorParser` on a mod's reader (FTB Teams'
+      `TeamArgument`, KubeJS, FancyMenu: 3 mods). A mod's own type is shown in the chat box as what
+      its `getExamples` look like (words, ids, else strings); its parser reads on the server.
+    `LocalCoordinates` and `AngleArgument$SingleAngle` left the data-class table (657 classes).
+    Tests: `brigadier::tests::*` (3), `command_args::tests::selectors_read_and_fail_as_vanillas_parser`,
+    `coordinates_read_and_resolve_as_vanillas`, `the_other_types_read_and_fail_as_vanillas`,
+    `commands::tests::a_mods_commands_register_and_run_as_brigadier_parses_them` (vanilla's
+    errors and context lines, a mod's own colour type with its own error),
+    `redirects_run_their_modifier_for_each_source`, `a_mods_parser_reads_selectors_with_vanillas`.
+    333 compat tests pass. Not yet: client commands, `Commands.performPrefixedCommand`, suggestion
+    providers, entities other than players in selectors.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

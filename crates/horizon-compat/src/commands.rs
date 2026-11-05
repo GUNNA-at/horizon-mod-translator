@@ -9,18 +9,21 @@
 //!   the operator level its nodes' requirements ask (each requirement is tried with a source of
 //!   level 0 to 4). An argument's kind is its vanilla type's parser, so a player's chat box
 //!   completes and checks it as vanilla's.
-//! - [`perform`]: a player's command line walks the tree as Brigadier parses it (the literal the
-//!   next word names, or else each argument in turn, read by its type; a redirect goes on at its
-//!   target), and the mod's `executes` runs with a `CommandContext` whose source is that player.
-//!   What the command says (`sendSuccess`, `sendFailure`, a `CommandSyntaxException`) is its
-//!   feedback.
+//!   A mod's own argument type is shown as what its examples look like (ids, words or strings).
+//! - [`perform`]: a player's command line is parsed as Brigadier 1.3.10 parses it (`parseNodes`:
+//!   the literal the next word names, or else each argument the source may use, read by its type
+//!   with a `StringReader`; a redirect goes on at its target in a context of its own), then run as
+//!   vanilla 1.21.1 runs it (`Commands.performCommand`): NeoForge's `CommandEvent` first, then a
+//!   parse error answered with its message and the line up to its place, else each redirect's
+//!   modifier giving the sources the command runs for (a fork's errors silent), the command's own
+//!   syntax errors said to its source and any other exception as `command.failed`.
 //!
-//! The vanilla argument types read as their parsers do: Brigadier's numbers (within their bounds),
-//! booleans and strings; entity selectors (`@s`, `@p`, `@a`, `@r`, `@e`, a player's name or UUID)
-//! over the server's players, the entities kept here; block positions and vectors (`~` from the
-//! source); resource locations, dimensions, items, block states, messages, times, angles, colours
-//! and UUIDs. A path through an argument of another type (a mod's own `ArgumentType`) is left out.
-use crate::{api, Data, Rt, V};
+//! The vanilla argument types read as their parsers do ([`crate::command_args`]), failing with
+//! their errors; a mod's own `ArgumentType` reads with its own `parse`, on a `StringReader` object
+//! ([`crate::brigadier`]). A mod that parses or runs a line itself (`dispatcher.parse`,
+//! `execute`) gets Brigadier's `ParseResults`, contexts and exceptions.
+use crate::brigadier::{self, unit, Arg, Reader, Syntax};
+use crate::{api, command_args, Data, Rt, V};
 
 const DISPATCHER: &str = "com/mojang/brigadier/CommandDispatcher";
 const LITERAL_BUILDER: &str = "com/mojang/brigadier/builder/LiteralArgumentBuilder";
@@ -36,20 +39,19 @@ const COMMANDS: &str = "net/minecraft/commands/Commands";
 const EVENT: &str = "net/neoforged/neoforge/event/RegisterCommandsEvent";
 const BUILD_CONTEXT: &str = "net/minecraft/commands/CommandBuildContext";
 const SELECTION: &str = "net/minecraft/commands/Commands$CommandSelection";
-const SYNTAX: &str = "com/mojang/brigadier/exceptions/CommandSyntaxException";
 const BRIGADIER_ARGS: &str = "com/mojang/brigadier/arguments/";
 const MC_ARGS: &str = "net/minecraft/commands/arguments/";
-const SELECTOR: &str = "net/minecraft/commands/arguments/selector/EntitySelector";
 const COORDINATES: &str = "net/minecraft/commands/arguments/coordinates/Coordinates";
-const WORLD_COORDINATES: &str = "net/minecraft/commands/arguments/coordinates/WorldCoordinates";
-const ITEM_INPUT: &str = "net/minecraft/commands/arguments/item/ItemInput";
-const BLOCK_INPUT: &str = "net/minecraft/commands/arguments/blocks/BlockInput";
 const SUGGESTIONS: &str = "net/minecraft/commands/SharedSuggestionProvider";
+const SELECTOR_PARSER: &str = "net/minecraft/commands/arguments/selector/EntitySelectorParser";
 const SERVER_PLAYER: &str = "net/minecraft/server/level/ServerPlayer";
 const RUN: &str = "com/mojang/brigadier/Command.run.(Lcom/mojang/brigadier/context/CommandContext;)I";
 const TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 const SUPPLY: &str = "java/util/function/Supplier.get.()Ljava/lang/Object;";
 const MODIFY: &str = "com/mojang/brigadier/RedirectModifier.apply.(Lcom/mojang/brigadier/context/CommandContext;)Ljava/util/Collection;";
+const MODIFY_SINGLE: &str = "com/mojang/brigadier/SingleRedirectModifier.apply.(Lcom/mojang/brigadier/context/CommandContext;)Ljava/lang/Object;";
+/// The modifier `redirect(target, single)` makes of a `SingleRedirectModifier` (in `$single`).
+const SINGLE_MODIFIER: &str = "compat:single-redirect-modifier";
 /// The server's dispatcher, once the mods registered to it.
 const DISPATCHER_KEY: &str = "compat:commands";
 /// Brigadier's default requirement, which every source passes (`getRequirement` of a node without one).
@@ -59,10 +61,27 @@ const ALWAYS: &str = "compat:command-always";
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     owner.starts_with("com/mojang/brigadier/builder/")
         || owner.starts_with(TREE)
-        || matches!(owner, DISPATCHER | CONTEXT | SOURCE | EVENT | SELECTOR | COORDINATES | WORLD_COORDINATES | ITEM_INPUT | BLOCK_INPUT | SUGGESTIONS)
+        || matches!(
+            owner,
+            DISPATCHER
+                | CONTEXT
+                | CONTEXT_BUILDER
+                | PARSE_RESULTS
+                | PARSED_NODE
+                | PARSED_ARGUMENT
+                | STRING_RANGE
+                | SOURCE
+                | EVENT
+                | COMMAND_EVENT
+                | COORDINATES
+                | SUGGESTIONS
+                | SELECTOR_PARSER
+        )
+        || is_read_value(owner)
         || (owner == COMMANDS && matches!(name, "literal" | "argument" | "getDispatcher"))
         || is_argument_type(owner)
         || (owner == "java/util/function/Predicate" && name == "test")
+        || (owner == "com/mojang/brigadier/RedirectModifier" && name == "apply")
 }
 
 /// A Brigadier or Minecraft command call, or None when this module doesn't model it.
@@ -71,6 +90,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         ("java/util/function/Predicate", "test") if rt.class_of(a(0)) == ALWAYS => V::I(1),
+        ("com/mojang/brigadier/RedirectModifier", "apply") if rt.class_of(a(0)) == SINGLE_MODIFIER => match modify(rt, a(0), a(1)) {
+            Some(sources) => crate::jutil::new_list(rt, sources),
+            None => V::NULL,
+        },
         // The builders. `then` builds its argument at once, as Brigadier's does.
         (COMMANDS | LITERAL_BUILDER, "literal") => {
             let b = rt.new_object(LITERAL_BUILDER);
@@ -119,90 +142,35 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             node
         }
-        // `execute(line, source)`: the command a line names, run for that source.
-        (DISPATCHER, "execute") if desc.starts_with("(Ljava/lang/String;") => {
-            let line = rt.str_of(a(1)).unwrap_or("").to_owned();
-            let root = root_of(rt, a(0));
-            match run_line(rt, root, a(2), &line) {
-                Some(result) => V::I(result),
-                None => syntax_error(rt, "command.unknown.command"),
-            }
-        }
+        // `parse` and `execute`, of a line, a `StringReader` or (`execute`) parse results.
+        (DISPATCHER, "parse" | "execute") => dispatcher_run(rt, name, desc, args),
         // The event: the dispatcher the mods register to, and what it was made for.
         (EVENT, "getDispatcher") => rt.get_field(a(0), "$dispatcher"),
         (EVENT, "getBuildContext") => rt.intern("compat:command-build-context".into(), |rt| rt.new_object(BUILD_CONTEXT)),
         (EVENT, "getCommandSelection") => api::api_enum(rt, SELECTION, "ALL", 0),
-        // A command's context: its source, its arguments, its line.
-        (CONTEXT, n) => match n {
-            "getSource" => rt.get_field(a(0), "$source"),
-            "getInput" => rt.get_field(a(0), "$input"),
-            "getArgument" => {
-                let want = rt.str_of(a(1)).unwrap_or("").to_owned();
-                match argument(rt, a(0), &want) {
-                    Some(v) => boxed(rt, v),
-                    None => no_argument(rt, &want),
-                }
-            }
-            "getCommand" => rt.get_field(a(0), "$command"),
-            "getChild" => V::NULL,
-            "getLastChild" => a(0),
-            "isForked" => V::I(0),
-            _ => return None,
-        },
+        // What a parse read, as Brigadier's objects.
+        (CONTEXT, n) => context_call(rt, n, args)?,
+        (CONTEXT_BUILDER, n) => builder_context_call(rt, n, args)?,
+        (PARSE_RESULTS | PARSED_NODE | PARSED_ARGUMENT | STRING_RANGE, n) => parse_object_call(rt, owner, n, desc, args)?,
+        (COMMAND_EVENT, n) => command_event_call(rt, n, args)?,
         (SOURCE, _) => source_call(rt, name, args)?,
-        // The argument types: one object per use, its kind and bounds; and their getters.
+        // The argument types: one object per use, its kind and bounds; their getters, and a mod's
+        // parser reading with a vanilla one.
         (o, n) if is_argument_type(o) => {
             if n.starts_with("get") && desc.starts_with("(Lcom/mojang/brigadier/context/CommandContext;") {
                 return get_argument(rt, o, n, desc, args);
             }
-            argument_type(rt, o, n, desc, args)?
-        }
-        // What a selector, coordinates, an item or a block read gives.
-        (SELECTOR, n) => {
-            let found = select(rt, a(0), a(1));
             match n {
-                "findEntities" | "findPlayers" => crate::jutil::new_list(rt, found),
-                "findSingleEntity" | "findSinglePlayer" => match found.first() {
-                    Some(&p) => p,
-                    None => syntax_error(rt, if n == "findSinglePlayer" { "argument.entity.notfound.player" } else { "argument.entity.notfound.entity" }),
-                },
-                "includesEntities" => V::I(rt.get_field(a(0), "$players").i() ^ 1),
-                _ => return None,
+                "parse" => type_parse(rt, desc, args)?,
+                // Brigadier's default (and a vanilla type's, not kept here): none.
+                "getExamples" => crate::jutil::new_list(rt, Vec::new()),
+                _ => argument_type(rt, o, n, desc, args)?,
             }
         }
-        (COORDINATES | WORLD_COORDINATES, n) => match n {
-            "getBlockPos" => rt.get_field(a(0), "$block"),
-            "getPosition" => rt.get_field(a(0), "$vec"),
-            "getRotation" => rt.get_field(a(0), "$rot"),
-            "isXRelative" | "isYRelative" | "isZRelative" => {
-                let i = (n.as_bytes()[2] - b'X') as i32;
-                V::I(rt.get_field(a(0), "$relative").i() >> i & 1)
-            }
-            _ => return None,
-        },
-        (ITEM_INPUT, n) => match n {
-            "getItem" => rt.get_field(a(0), "$item"),
-            "createItemStack" => {
-                let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("minecraft:air").to_owned();
-                crate::api_common::stack(rt, &id, a(1).i())
-            }
-            "serialize" => rt.get_field(a(0), "$id"),
-            "getItemName" => {
-                let id = rt.get_field(a(0), "$id");
-                crate::api_common::component(rt, id, false, V::NULL)
-            }
-            _ => return None,
-        },
-        (BLOCK_INPUT, n) => match n {
-            "getState" => rt.get_field(a(0), "$state"),
-            // `place(level, pos, flags)`: the state set there.
-            "place" => {
-                let text = rt.str_of(rt.get_field(a(0), "$text")).unwrap_or("minecraft:air").to_owned();
-                let p = api::pos_of(rt, a(2));
-                V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, &text)) as i32)
-            }
-            _ => return None,
-        },
+        // What a selector, coordinates, an angle, a message, profiles, an item or a block read gives.
+        (command_args::SELECTOR, n) => selector_call(rt, n, args)?,
+        (SELECTOR_PARSER, n) => selector_parser_call(rt, n, args)?,
+        (o, n) if o == COORDINATES || is_read_value(o) => read_value_call(rt, o, n, args)?,
         // A mod's suggestions aren't asked here: a chat box completes from the tree's kinds.
         (SUGGESTIONS, "suggest" | "suggestResource" | "suggestCoordinates" | "suggest2DCoordinates") => crate::jutil::completed_future(rt, V::NULL),
         _ => return None,
@@ -219,6 +187,21 @@ fn is_builder(class: &str) -> bool {
 
 fn is_argument_type(class: &str) -> bool {
     (class.starts_with(BRIGADIER_ARGS) && class.ends_with("ArgumentType")) || (class.starts_with(MC_ARGS) && class.ends_with("Argument"))
+}
+
+/// The objects vanilla's argument types read (resolved later with a source).
+fn is_read_value(class: &str) -> bool {
+    matches!(
+        class,
+        command_args::SELECTOR
+            | command_args::WORLD_COORDINATES
+            | command_args::LOCAL_COORDINATES
+            | command_args::SINGLE_ANGLE
+            | command_args::MESSAGE
+            | command_args::PROFILES
+            | command_args::ITEM_INPUT
+            | command_args::BLOCK_INPUT
+    )
 }
 
 /// A builder's own calls: each gives the builder back, but `build` (its node) and the getters.
@@ -242,7 +225,14 @@ fn builder_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
                 return Some(crate::jlang::throw_with(rt, "java/lang/IllegalStateException", "Cannot forward a node with children"));
             }
             set(rt, b, "$target", a(1));
-            set(rt, b, "$modifier", if desc.contains("RedirectModifier") { a(2) } else { V::NULL });
+            // `redirect(target, single)`: Brigadier's modifier giving the one source it makes.
+            let modifier = if desc.contains("SingleRedirectModifier") && a(2).r() != 0 {
+                let m = rt.new_object(SINGLE_MODIFIER);
+                set(rt, m, "$single", a(2))
+            } else {
+                V::NULL
+            };
+            set(rt, b, "$modifier", modifier);
             set(rt, b, "$forks", V::I(0))
         }
         "fork" | "forward" => {
@@ -522,7 +512,7 @@ fn source_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "hasPermission" => V::I((rt.get_field(s, "$permission").i() >= a(1).i()) as i32),
         "getPlayerOrException" | "getEntityOrException" => {
             if player.r() == 0 {
-                return Some(syntax_error(rt, if name == "getPlayerOrException" { "permissions.requires.player" } else { "permissions.requires.entity" }));
+                return Some(throw_syntax(rt, if name == "getPlayerOrException" { "permissions.requires.player" } else { "permissions.requires.entity" }, Vec::new()));
             }
             player
         }
@@ -638,16 +628,6 @@ fn message_json(rt: &Rt, message: V) -> serde_json::Value {
     crate::api_common::component_json(rt, message)
 }
 
-/// Throws Brigadier's `CommandSyntaxException` with the translated message `key`.
-fn syntax_error(rt: &mut Rt, key: &str) -> V {
-    let k = rt.string(key);
-    let message = crate::api_common::component(rt, k, true, V::NULL);
-    let e = rt.new_object(SYNTAX);
-    rt.put_field(e, "$rawMessage", message);
-    rt.thrown = Some(e);
-    V::NULL
-}
-
 /// `getArgument(name, class)` of a name the command has no argument of: Brigadier's
 /// `IllegalArgumentException`.
 fn no_argument(rt: &mut Rt, name: &str) -> V {
@@ -695,18 +675,15 @@ fn kind_of(rt: &Rt, t: V) -> String {
     rt.str_of(rt.get_field(t, "$kind")).unwrap_or("").to_owned()
 }
 
-/// A factory argument of an argument type (`IntegerArgumentType.integer(min, max)`'s), if given.
-fn bound(rt: &Rt, t: V, i: usize) -> Option<V> {
-    match rt.heap.get(rt.get_field(t, "$args").r() as usize).map(|o| &o.data) {
-        Some(Data::List(v)) => v.get(i).copied(),
-        _ => None,
+/// The kind of a usage's argument (the game's name for vanilla's parser), which the chat box
+/// completes and checks: a vanilla type's own; for a mod's own type, the kind its examples are
+/// ([`mod_usage_kind`]). None for a vanilla type not kept here.
+fn usage_kind(rt: &mut Rt, t: V) -> Option<&'static str> {
+    let kind = kind_of(rt, t);
+    if kind.is_empty() && t.r() != 0 {
+        return Some(mod_usage_kind(rt, t));
     }
-}
-
-/// The kind of a usage's argument (the game's name for vanilla's parser): None for a type not kept
-/// here.
-fn usage_kind(rt: &Rt, t: V) -> Option<&'static str> {
-    Some(match kind_of(rt, t).as_str() {
+    Some(match kind.as_str() {
         "IntegerArgumentType.integer" => "integer",
         "TimeArgument.time" => "time",
         "LongArgumentType.longArg" => "long",
@@ -735,6 +712,36 @@ fn usage_kind(rt: &Rt, t: V) -> Option<&'static str> {
         "ColorArgument.color" => "color",
         _ => return None,
     })
+}
+
+/// The kind a mod's own argument type is checked as in the chat box, from what its examples
+/// (`getExamples`) look like: words Brigadier reads unquoted, ids (`create:shaft`), or else
+/// strings (a word, or a quoted string). Its own parser reads the line on the server whatever the
+/// chat box made of it.
+fn mod_usage_kind(rt: &mut Rt, t: V) -> &'static str {
+    let given = api::virtual_call(rt, (GET_EXAMPLES_KEY, GET_EXAMPLES), &[t]);
+    if caught(rt) {
+        return "string";
+    }
+    let examples: Vec<String> = crate::jutil::elements(rt, given).into_iter().filter_map(|e| rt.str_of(e).map(str::to_owned)).collect();
+    let unquoted = |s: &String| !s.is_empty() && s.encode_utf16().all(brigadier::is_allowed_in_unquoted_string);
+    if examples.is_empty() {
+        "string"
+    } else if examples.iter().all(unquoted) {
+        "word"
+    } else if examples.iter().all(|e| is_location(e)) {
+        "id"
+    } else {
+        "string"
+    }
+}
+
+/// Whether `s` reads whole as a resource location (`ResourceLocation.read`: an optional namespace
+/// of `[a-z0-9_.-]`, a path of those and `/`).
+fn is_location(s: &str) -> bool {
+    let (namespace, path) = s.split_once(':').unwrap_or(("minecraft", s));
+    let ok = |s: &str, slash: bool| s.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-') || (slash && b == b'/'));
+    !path.is_empty() && ok(namespace, false) && ok(path, true)
 }
 
 // ---- Registration and the usages ----
@@ -851,71 +858,860 @@ impl Usages {
     }
 }
 
-// ---- Running a command ----
+// ---- Parsing a line ----
 
 /// `native_perform_command`: runs `line` (without its slash) for `player` (their UUID and name; the
-/// console for None) at their level and place. False when the tree has no path for it (the game
-/// answers as vanilla does an unknown command, or another mod's tree takes it); true once a mod's
-/// command ran, whatever it answered.
+/// console for None) at their level and place, as `Commands.performPrefixedCommand` does. False
+/// when no root literal of the mods' tree is the line's first word (another bundle's tree, or the
+/// game, answers it); else true, whatever the line did: a parse error is answered as vanilla's (its
+/// message, then the line up to where it went wrong), and what the command says is its feedback.
 pub fn perform(rt: &mut Rt, player: Option<(u128, &str)>, permission: u8, at: [f64; 3], rot: [f32; 2], line: &str) -> bool {
     let Some(&dispatcher) = rt.interned.get(DISPATCHER_KEY) else { return false };
+    if !owns(rt, dispatcher, line) {
+        return false;
+    }
     let source = new_source(rt, player, permission, at, rot);
     let root = root_of(rt, dispatcher);
-    run_line(rt, root, source, line).is_some()
+    let parse = parse(rt, root, source, Reader::new(line));
+    let results = results_object(rt, dispatcher, &parse);
+    perform_results(rt, results, line);
+    true
 }
 
-/// A parse of a line: the arguments read, in order, and the node whose command runs.
-struct Parse {
-    args: Vec<(String, V)>,
-    /// The sources the command runs for (a redirect's modifier may give several); None for the
-    /// line's own.
-    sources: Option<Vec<V>>,
+/// Whether the first word of `line` is a root literal of `dispatcher`'s tree.
+fn owns(rt: &mut Rt, dispatcher: V, line: &str) -> bool {
+    let root = root_of(rt, dispatcher);
+    let first = Reader::new(line).word();
+    children(rt, root).into_iter().any(|c| is_literal(rt, c) && name_of(rt, c) == first)
+}
+
+/// What a parse has read so far (`CommandContextBuilder`).
+#[derive(Clone)]
+struct Context {
+    source: V,
+    root: V,
+    /// The arguments read, by name in the order first read (`LinkedHashMap.put`), with their range.
+    args: Vec<(String, V, (i32, i32))>,
+    nodes: Vec<(V, (i32, i32))>,
     command: V,
+    range: (i32, i32),
+    modifier: V,
+    forks: bool,
+    child: Option<Box<Context>>,
 }
 
-/// Parses `line` from `root` for `source` and runs the command it reaches: its result (the sum of
-/// each source's), or None when no path reads the whole line. What the command throws is its
-/// answer: a `CommandSyntaxException` in red, anything else as vanilla's `command.failed`.
-fn run_line(rt: &mut Rt, root: V, source: V, line: &str) -> Option<i32> {
-    let parse = walk(rt, source, root, line, 0, Vec::new(), 0)?;
-    let sources = parse.sources.clone().unwrap_or_else(|| vec![source]);
-    let mut total = 0;
-    for s in sources {
-        let ctx = context(rt, s, line, &parse);
-        let r = rt.call_functional(RUN, parse.command, &[ctx]).i();
-        match rt.thrown.take() {
-            None => total += r,
-            Some(e) => {
-                rt.unwinding.clear();
-                if rt.instance_of(e, SYNTAX) {
-                    let message = rt.get_field(e, "$rawMessage");
-                    feedback(rt, s, message, true);
-                } else {
-                    rt.thrown = Some(e);
-                    rt.report_thrown("a command");
-                    let k = rt.string("command.failed");
-                    let c = crate::api_common::component(rt, k, true, V::NULL);
-                    feedback(rt, s, c, true);
+impl Context {
+    fn new(source: V, root: V, start: i32) -> Self {
+        Context { source, root, args: Vec::new(), nodes: Vec::new(), command: V::NULL, range: (start, start), modifier: V::NULL, forks: false, child: None }
+    }
+
+    /// `withNode`: the node read over `range`; its redirect's modifier is now the context's.
+    fn with_node(&mut self, rt: &Rt, node: V, range: (i32, i32)) {
+        self.nodes.push((node, range));
+        self.range = (self.range.0.min(range.0), self.range.1.max(range.1));
+        self.modifier = reference(rt.get_field(node, "$modifier"));
+        self.forks = rt.get_field(node, "$forks").i() != 0;
+    }
+
+    fn with_argument(&mut self, name: String, value: V, range: (i32, i32)) {
+        match self.args.iter_mut().find(|a| a.0 == name) {
+            Some(a) => (a.1, a.2) = (value, range),
+            None => self.args.push((name, value, range)),
+        }
+    }
+}
+
+/// A field holding an object, or null.
+fn reference(v: V) -> V {
+    match v {
+        V::R(_) => v,
+        _ => V::NULL,
+    }
+}
+
+/// What reading a node failed with: a reader's error, or a mod's `CommandSyntaxException`.
+#[derive(Clone)]
+enum Thrown {
+    Syntax(Syntax),
+    Java(V),
+}
+
+/// `ParseResults`: the context read, the reader where reading stopped, and the errors of the nodes
+/// tried there.
+struct Parse {
+    context: Context,
+    reader: Reader,
+    errors: Vec<(V, Thrown)>,
+}
+
+/// `CommandDispatcher.parse(reader, source)`.
+fn parse(rt: &mut Rt, root: V, source: V, reader: Reader) -> Parse {
+    let context = Context::new(source, root, reader.cursor);
+    parse_nodes(rt, root, &reader, &context, 0)
+}
+
+/// The deepest a parse goes (each level reads a separator at least).
+const MAX_DEPTH: usize = 512;
+
+/// `parseNodes`: each child the source may use that the reader's next word is relevant to, read on
+/// a copy of the reader; one that reads (and is followed by a space or the end) goes on at its own
+/// children, or at its redirect's target in a context of its own. Of the paths that read, the one
+/// that read the whole line without errors is taken first; when none read, the errors are the
+/// children's.
+fn parse_nodes(rt: &mut Rt, node: V, reader: &Reader, so_far: &Context, depth: usize) -> Parse {
+    let source = so_far.source;
+    let mut errors = Vec::new();
+    let mut potentials: Vec<Parse> = Vec::new();
+    if depth <= MAX_DEPTH {
+        for child in relevant_nodes(rt, node, reader) {
+            if !can_use(rt, child, source) {
+                continue;
+            }
+            let mut context = so_far.clone();
+            let mut r = reader.clone();
+            let read = parse_node(rt, child, &mut r, &mut context).and_then(|()| {
+                if r.can_read() && r.peek() != unit(b' ') {
+                    return Err(Thrown::Syntax(r.error("command.expected.separator", Vec::new())));
                 }
+                Ok(())
+            });
+            if let Err(e) = read {
+                errors.push((child, e));
+                continue;
+            }
+            context.command = reference(rt.get_field(child, "$command"));
+            let redirect = reference(rt.get_field(child, "$target"));
+            if r.can_read_n(if redirect.r() == 0 { 2 } else { 1 }) {
+                r.skip();
+                if redirect.r() != 0 {
+                    let child_context = Context::new(source, redirect, r.cursor);
+                    let parse = parse_nodes(rt, redirect, &r, &child_context, depth + 1);
+                    context.child = Some(Box::new(parse.context));
+                    return Parse { context, reader: parse.reader, errors: parse.errors };
+                }
+                potentials.push(parse_nodes(rt, child, &r, &context, depth + 1));
+            } else {
+                potentials.push(Parse { context, reader: r, errors: Vec::new() });
             }
         }
     }
-    Some(total)
+    if potentials.is_empty() {
+        return Parse { context: so_far.clone(), reader: reader.clone(), errors };
+    }
+    potentials.sort_by_key(|p| (p.reader.can_read(), !p.errors.is_empty()));
+    potentials.swap_remove(0)
 }
 
-/// The `CommandContext` a command runs with.
-fn context(rt: &mut Rt, source: V, line: &str, parse: &Parse) -> V {
-    let ctx = rt.new_object(CONTEXT);
-    rt.put_field(ctx, "$source", source);
-    let input = rt.string(line);
-    rt.put_field(ctx, "$input", input);
-    rt.put_field(ctx, "$command", parse.command);
-    let names: Vec<V> = parse.args.iter().map(|(n, _)| rt.string(n)).collect();
-    let values: Vec<V> = parse.args.iter().map(|(_, v)| *v).collect();
-    let (n, v) = (crate::jutil::new_list(rt, names), crate::jutil::new_list(rt, values));
-    rt.put_field(ctx, "$argNames", n);
-    rt.put_field(ctx, "$argValues", v);
-    ctx
+/// `getRelevantNodes`: the literal the next word names, when there is one; else every argument.
+fn relevant_nodes(rt: &Rt, node: V, reader: &Reader) -> Vec<V> {
+    let kids = children(rt, node);
+    if kids.iter().any(|c| is_literal(rt, *c)) {
+        let word = reader.word();
+        if let Some(&literal) = kids.iter().find(|c| is_literal(rt, **c) && name_of(rt, **c) == word) {
+            return vec![literal];
+        }
+    }
+    kids.into_iter().filter(|c| !is_literal(rt, *c)).collect()
+}
+
+/// `CommandNode.parse`: a literal's word (then a space or the end), or an argument its type reads.
+fn parse_node(rt: &mut Rt, node: V, r: &mut Reader, context: &mut Context) -> Result<(), Thrown> {
+    let start = r.cursor;
+    let name = name_of(rt, node);
+    if is_literal(rt, node) {
+        let literal: Vec<u16> = name.encode_utf16().collect();
+        let end = start + literal.len() as i32;
+        if r.can_read_n(literal.len() as i32) && r.s[start as usize..end as usize] == literal[..] {
+            r.cursor = end;
+            if !r.can_read() || r.peek() == unit(b' ') {
+                context.with_node(rt, node, (start, end));
+                return Ok(());
+            }
+            r.cursor = start;
+        }
+        return Err(Thrown::Syntax(r.error("argument.literal.incorrect", vec![Arg::Text(name)])));
+    }
+    let t = rt.get_field(node, "$type");
+    let value = parse_argument(rt, t, context.source, r)?;
+    let range = (start, r.cursor);
+    context.with_argument(name, value, range);
+    context.with_node(rt, node, range);
+    Ok(())
+}
+
+const PARSE: &str = "parse.(Lcom/mojang/brigadier/StringReader;)Ljava/lang/Object;";
+const PARSE_KEY: &str = "com/mojang/brigadier/arguments/ArgumentType.parse.(Lcom/mojang/brigadier/StringReader;)Ljava/lang/Object;";
+const PARSE_WITH_SOURCE: &str = "parse.(Lcom/mojang/brigadier/StringReader;Ljava/lang/Object;)Ljava/lang/Object;";
+const PARSE_WITH_SOURCE_KEY: &str = "com/mojang/brigadier/arguments/ArgumentType.parse.(Lcom/mojang/brigadier/StringReader;Ljava/lang/Object;)Ljava/lang/Object;";
+const GET_EXAMPLES: &str = "getExamples.()Ljava/util/Collection;";
+const GET_EXAMPLES_KEY: &str = "com/mojang/brigadier/arguments/ArgumentType.getExamples.()Ljava/util/Collection;";
+
+/// `ArgumentType.parse(reader, source)`: a vanilla type as its parser reads; a mod's own by its
+/// bytecode, with a `StringReader` object over the line. A `RuntimeException` the mod's parser
+/// throws is Brigadier's `command.exception` with its message.
+fn parse_argument(rt: &mut Rt, t: V, source: V, r: &mut Reader) -> Result<V, Thrown> {
+    let kind = kind_of(rt, t);
+    if !kind.is_empty() {
+        let given = factory_arguments(rt, t);
+        let selectors = command_args::permission(rt, source) >= 2;
+        return match command_args::parse(rt, &kind, &given, r, selectors) {
+            Some(read) => read.map_err(Thrown::Syntax),
+            None => Err(Thrown::Syntax(r.error("command.exception", vec![Arg::Text(format!("{kind} isn't read here"))]))),
+        };
+    }
+    let reader = brigadier::new_reader(rt, r);
+    let class = rt.class_of(t);
+    let value = if rt.class_overrides(class, PARSE_WITH_SOURCE) {
+        api::virtual_call(rt, (PARSE_WITH_SOURCE_KEY, PARSE_WITH_SOURCE), &[t, reader, source])
+    } else {
+        api::virtual_call(rt, (PARSE_KEY, PARSE), &[t, reader])
+    };
+    r.cursor = rt.get_field(reader, "$cursor").i();
+    let Some(e) = rt.thrown.take() else { return Ok(value) };
+    rt.unwinding.clear();
+    if rt.instance_of(e, brigadier::SYNTAX) {
+        return Err(Thrown::Java(e));
+    }
+    let message = rt.str_of(rt.get_field(e, "message")).unwrap_or("null").to_owned();
+    if Rt::tracing() {
+        eprintln!("horizon-compat: {class}.parse threw {}: {message}", rt.class_of(e));
+    }
+    Err(Thrown::Syntax(r.error("command.exception", vec![Arg::Text(message)])))
+}
+
+/// The arguments a vanilla type's factory was given (its bounds).
+fn factory_arguments(rt: &Rt, t: V) -> Vec<V> {
+    crate::jutil::elements(rt, rt.get_field(t, "$args"))
+}
+
+/// `ArgumentType.parse` called by a mod (a type of its own reading with a vanilla one, or
+/// Brigadier's default `parse(reader, source)`): a vanilla type reads natively, moving the reader
+/// object's cursor; a failure throws Brigadier's exception.
+fn type_parse(rt: &mut Rt, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let (t, reader) = (a(0), a(1));
+    let with_source = desc.starts_with("(Lcom/mojang/brigadier/StringReader;Ljava/lang/Object;)");
+    let kind = kind_of(rt, t);
+    if kind.is_empty() {
+        // A mod's type without its own `parse(reader, source)`: Brigadier's default reads alone.
+        return with_source.then(|| api::virtual_call(rt, (PARSE_KEY, PARSE), &[t, reader]));
+    }
+    let source = a(2);
+    let selectors = !with_source || (source.r() != 0 && rt.instance_of(source, SOURCE) && command_args::permission(rt, source) >= 2);
+    let given = factory_arguments(rt, t);
+    let mut r = brigadier::reader_of(rt, reader);
+    let read = command_args::parse(rt, &kind, &given, &mut r, selectors)?;
+    rt.put_field(reader, "$cursor", V::I(r.cursor));
+    Some(match read {
+        Ok(v) => v,
+        Err(e) => {
+            let ex = brigadier::exception(rt, &r.s, &e);
+            rt.thrown = Some(ex);
+            V::NULL
+        }
+    })
+}
+
+// ---- Parse results and contexts as objects ----
+
+const PARSE_RESULTS: &str = "com/mojang/brigadier/ParseResults";
+const CONTEXT_BUILDER: &str = "com/mojang/brigadier/context/CommandContextBuilder";
+const PARSED_NODE: &str = "com/mojang/brigadier/context/ParsedCommandNode";
+const PARSED_ARGUMENT: &str = "com/mojang/brigadier/context/ParsedArgument";
+const STRING_RANGE: &str = "com/mojang/brigadier/context/StringRange";
+const COMMAND_EVENT: &str = "net/neoforged/neoforge/event/CommandEvent";
+/// What a context and its builder hold alike.
+const CONTEXT_FIELDS: [&str; 10] = ["$source", "$root", "$command", "$modifier", "$forks", "$range", "$argNames", "$argValues", "$argRanges", "$nodes"];
+
+/// The `ParseResults` object of `parse`: its context's builder, its reader where reading stopped,
+/// and the errors there by node.
+fn results_object(rt: &mut Rt, dispatcher: V, parse: &Parse) -> V {
+    let o = rt.new_object(PARSE_RESULTS);
+    let context = builder_object(rt, dispatcher, &parse.context);
+    rt.put_field(o, "$context", context);
+    let reader = brigadier::new_reader(rt, &parse.reader);
+    rt.put_field(o, "$reader", reader);
+    let map = rt.alloc("java/util/LinkedHashMap", Data::Table(Default::default()));
+    for (node, e) in &parse.errors {
+        let e = match e {
+            Thrown::Syntax(s) => brigadier::exception(rt, &parse.reader.s, s),
+            Thrown::Java(e) => *e,
+        };
+        crate::jutil::table_put(rt, map, *node, e);
+    }
+    rt.put_field(o, "$exceptions", map);
+    o
+}
+
+/// A `CommandContextBuilder` object of `c` (with its child's).
+fn builder_object(rt: &mut Rt, dispatcher: V, c: &Context) -> V {
+    let child = match &c.child {
+        Some(child) => builder_object(rt, dispatcher, child),
+        None => V::NULL,
+    };
+    let o = rt.new_object(CONTEXT_BUILDER);
+    rt.put_field(o, "$dispatcher", dispatcher);
+    rt.put_field(o, "$child", child);
+    rt.put_field(o, "$source", c.source);
+    rt.put_field(o, "$root", c.root);
+    rt.put_field(o, "$command", c.command);
+    rt.put_field(o, "$modifier", c.modifier);
+    rt.put_field(o, "$forks", V::I(i32::from(c.forks)));
+    let range = string_range(rt, c.range);
+    rt.put_field(o, "$range", range);
+    let (mut names, mut values, mut ranges) = (Vec::new(), Vec::new(), Vec::new());
+    for (name, value, range) in &c.args {
+        names.push(rt.string(name));
+        values.push(*value);
+        ranges.push(string_range(rt, *range));
+    }
+    let mut nodes = Vec::new();
+    for &(node, range) in &c.nodes {
+        let p = rt.new_object(PARSED_NODE);
+        rt.put_field(p, "$node", node);
+        let range = string_range(rt, range);
+        rt.put_field(p, "$range", range);
+        nodes.push(p);
+    }
+    for (field, items) in [("$argNames", names), ("$argValues", values), ("$argRanges", ranges), ("$nodes", nodes)] {
+        let list = crate::jutil::new_list(rt, items);
+        rt.put_field(o, field, list);
+    }
+    o
+}
+
+fn string_range(rt: &mut Rt, (start, end): (i32, i32)) -> V {
+    let r = rt.new_object(STRING_RANGE);
+    rt.put_field(r, "$start", V::I(start));
+    rt.put_field(r, "$end", V::I(end));
+    r
+}
+
+fn range_of(rt: &Rt, range: V) -> (i32, i32) {
+    (rt.get_field(range, "$start").i(), rt.get_field(range, "$end").i())
+}
+
+/// `CommandContextBuilder.build(input)`: the context of `builder` (its child's built too).
+fn build_context(rt: &mut Rt, builder: V, input: V) -> V {
+    let child = reference(rt.get_field(builder, "$child"));
+    let child = if child.r() != 0 { build_context(rt, child, input) } else { V::NULL };
+    let o = rt.new_object(CONTEXT);
+    for field in CONTEXT_FIELDS {
+        let v = rt.get_field(builder, field);
+        rt.put_field(o, field, v);
+    }
+    rt.put_field(o, "$child", child);
+    rt.put_field(o, "$input", input);
+    o
+}
+
+/// `CommandContext.copyFor(source)`: the context with another source (itself for its own).
+fn copy_for(rt: &mut Rt, ctx: V, source: V) -> V {
+    if rt.get_field(ctx, "$source") == source {
+        return ctx;
+    }
+    let o = rt.new_object(CONTEXT);
+    for field in CONTEXT_FIELDS.into_iter().chain(["$child", "$input"]) {
+        let v = rt.get_field(ctx, field);
+        rt.put_field(o, field, v);
+    }
+    rt.put_field(o, "$source", source);
+    o
+}
+
+/// `ContextChain.tryFlatten`: the contexts from the top to the last, whose command runs; None
+/// when the last has no command.
+fn chain(rt: &Rt, top: V) -> Option<Vec<V>> {
+    let mut out = vec![top];
+    loop {
+        let current = *out.last()?;
+        let child = reference(rt.get_field(current, "$child"));
+        if child.r() == 0 {
+            return (reference(rt.get_field(current, "$command")).r() != 0).then_some(out);
+        }
+        out.push(child);
+    }
+}
+
+/// `Commands.getParseException`: none when the whole line was read; else the one error there was,
+/// or Brigadier's unknown command (when nothing was read) or unknown argument.
+fn parse_exception(rt: &mut Rt, results: V) -> Option<V> {
+    let r = brigadier::reader_of(rt, rt.get_field(results, "$reader"));
+    if !r.can_read() {
+        return None;
+    }
+    let errors = crate::jutil::table_pairs(rt, rt.get_field(results, "$exceptions"));
+    if errors.len() == 1 {
+        return Some(errors[0].1);
+    }
+    let range = rt.get_field(rt.get_field(results, "$context"), "$range");
+    let (start, end) = range_of(rt, range);
+    let key = if start == end { "command.unknown.command" } else { "command.unknown.argument" };
+    Some(brigadier::exception(rt, &r.s, &r.error(key, Vec::new())))
+}
+
+/// The top context of `results` and its chain; else the exception Brigadier throws for it (left in
+/// `rt.thrown`).
+fn finished(rt: &mut Rt, results: V, command: &str) -> Result<(V, Vec<V>), V> {
+    if let Some(e) = parse_exception(rt, results) {
+        return Err(e);
+    }
+    let input = rt.string(command);
+    let top = build_context(rt, rt.get_field(results, "$context"), input);
+    match chain(rt, top) {
+        Some(contexts) => Ok((top, contexts)),
+        None => {
+            let r = brigadier::reader_of(rt, rt.get_field(results, "$reader"));
+            Err(brigadier::exception(rt, &r.s, &r.error("command.unknown.command", Vec::new())))
+        }
+    }
+}
+
+// ---- Running a parsed line ----
+
+const COMMAND_FAILED_LIMIT: usize = 65536;
+
+/// `Commands.performCommand(results, command)`: NeoForge's `CommandEvent` first (a listener may
+/// cancel the command, or give other results to run), then vanilla's `finishParsing` (a parse
+/// error answered with its message and the line's context) and execution.
+fn perform_results(rt: &mut Rt, results: V, command: &str) {
+    let source = rt.get_field(rt.get_field(results, "$context"), "$source");
+    let ev = rt.new_object(COMMAND_EVENT);
+    rt.put_field(ev, "$parseResults", results);
+    crate::neo::post(rt, COMMAND_EVENT, ev);
+    if rt.get_field(ev, "$canceled").i() != 0 {
+        let e = reference(rt.get_field(ev, "$exception"));
+        if e.r() != 0 {
+            let text = describe_error(rt, e);
+            let s = rt.string(&text);
+            let c = crate::api_common::component(rt, s, false, V::NULL);
+            feedback(rt, source, c, true);
+        }
+        return;
+    }
+    let results = match reference(rt.get_field(ev, "$parseResults")) {
+        r if r.r() != 0 => r,
+        _ => results,
+    };
+    match finished(rt, results, command) {
+        Ok((_, contexts)) => run_vanilla(rt, &contexts, source),
+        Err(e) => report(rt, source, command, e),
+    }
+}
+
+/// `Util.describeError`: the innermost cause's message, else its name.
+fn describe_error(rt: &Rt, mut e: V) -> String {
+    for _ in 0..64 {
+        let cause = reference(rt.get_field(e, "cause"));
+        if cause.r() == 0 || cause == e {
+            break;
+        }
+        e = cause;
+    }
+    match rt.str_of(rt.get_field(e, "message")) {
+        Some(m) => m.to_owned(),
+        None => rt.class_of(e).replace('/', "."),
+    }
+}
+
+/// `finishParsing`'s answer to a parse error: the message in red, then, where it knows the place,
+/// the line's last ten characters before it in grey, the rest red and underlined, and `<--[HERE]`;
+/// clicking it puts the command back in the chat box.
+fn report(rt: &mut Rt, source: V, command: &str, e: V) {
+    let raw = rt.get_field(e, "$rawMessage");
+    feedback(rt, source, raw, true);
+    let Some(input) = rt.str_of(rt.get_field(e, "$input")).map(str::to_owned) else { return };
+    let cursor = match rt.get_field(e, "$cursor") {
+        V::I(c) => c,
+        _ => -1,
+    };
+    if cursor >= 0 {
+        let line = context_line(command, &input, cursor);
+        feedback_json(rt, source, line);
+    }
+}
+
+/// The context line of a parse error at `cursor` (UTF-16 units) of `input`.
+fn context_line(command: &str, input: &str, cursor: i32) -> serde_json::Value {
+    use serde_json::json;
+    let units: Vec<u16> = input.encode_utf16().collect();
+    let i = (cursor.max(0) as usize).min(units.len());
+    let mut extra = Vec::new();
+    if i > 10 {
+        extra.push(json!({ "text": "..." }));
+    }
+    extra.push(json!({ "text": String::from_utf16_lossy(&units[i.saturating_sub(10)..i]) }));
+    if i < units.len() {
+        extra.push(json!({ "text": String::from_utf16_lossy(&units[i..]), "color": "red", "underlined": true }));
+    }
+    extra.push(json!({ "translate": "command.context.here", "color": "red", "italic": true }));
+    json!({ "text": "", "color": "gray", "click_event": { "action": "suggest_command", "command": format!("/{command}") }, "extra": extra })
+}
+
+/// [`feedback`] of a failure given as JSON: red where it names no colour; a mod's own output hears
+/// its text.
+fn feedback_json(rt: &mut Rt, source: V, mut json: serde_json::Value) {
+    if rt.get_field(source, "$silent").i() != 0 {
+        return;
+    }
+    if rt.get_field(source, "$output").r() != 0 {
+        let text = json_text(&json);
+        let s = rt.string(&text);
+        let c = crate::api_common::component(rt, s, false, V::NULL);
+        feedback(rt, source, c, true);
+        return;
+    }
+    if let serde_json::Value::Object(o) = &mut json {
+        o.entry("color").or_insert_with(|| "red".into());
+    }
+    let text = json.to_string();
+    if let Some(h) = rt.host_mut() {
+        h.command_feedback(&text);
+    }
+}
+
+/// A component's text from its JSON: each part's text (a key where it is translated).
+fn json_text(json: &serde_json::Value) -> String {
+    let mut out = json.get("text").or_else(|| json.get("translate")).and_then(|t| t.as_str()).unwrap_or("").to_owned();
+    for part in json.get("extra").and_then(|e| e.as_array()).into_iter().flatten() {
+        out.push_str(&json_text(part));
+    }
+    out
+}
+
+/// `performCommand`'s answer to an exception that isn't a syntax error: `command.failed`, the
+/// exception's message on hover.
+fn command_failed(rt: &mut Rt, source: V, e: V) {
+    let text = match rt.str_of(rt.get_field(e, "message")) {
+        Some(m) => m.to_owned(),
+        None => rt.class_of(e).replace('/', "."),
+    };
+    rt.thrown = Some(e);
+    rt.report_thrown("a command");
+    rt.thrown = None;
+    let json = serde_json::json!({ "translate": "command.failed", "hover_event": { "action": "show_text", "value": { "text": text } } });
+    feedback_json(rt, source, json);
+}
+
+/// Vanilla's execution of a chain (`ExecutionContext`): each redirect's modifier gives the sources
+/// the next stage runs for, and the command runs for each source. A syntax error is said to its
+/// source (silently skipped in a fork); a modifier's ends the command, as does any other exception
+/// (`command.failed`). Forks stop at vanilla's default limit (`command.forkLimit`).
+fn run_vanilla(rt: &mut Rt, contexts: &[V], source: V) {
+    let Some((&executable, modifiers)) = contexts.split_last() else { return };
+    let mut forked = false;
+    let mut sources = vec![source];
+    for &stage in modifiers {
+        forked |= rt.get_field(stage, "$forks").i() != 0;
+        let modifier = reference(rt.get_field(stage, "$modifier"));
+        if modifier.r() == 0 {
+            continue;
+        }
+        let mut next = Vec::new();
+        for &s in &sources {
+            let ctx = copy_for(rt, stage, s);
+            let Some(got) = modify(rt, modifier, ctx) else {
+                let e = rt.thrown.take().unwrap_or_default();
+                rt.unwinding.clear();
+                if !rt.instance_of(e, brigadier::SYNTAX) {
+                    command_failed(rt, source, e);
+                    return;
+                }
+                if forked {
+                    continue;
+                }
+                let raw = rt.get_field(e, "$rawMessage");
+                feedback(rt, s, raw, true);
+                return;
+            };
+            if next.len() + got.len() >= COMMAND_FAILED_LIMIT {
+                if !forked {
+                    let limit = Syntax { key: "command.forkLimit", args: vec![Arg::Int(COMMAND_FAILED_LIMIT as i32)], cursor: -1 };
+                    let message = brigadier::message(rt, &limit);
+                    feedback(rt, source, message, true);
+                }
+                return;
+            }
+            next.extend(got);
+        }
+        sources = next;
+    }
+    let command = rt.get_field(executable, "$command");
+    for s in sources {
+        let ctx = copy_for(rt, executable, s);
+        rt.call_functional(RUN, command, &[ctx]);
+        let Some(e) = rt.thrown.take() else { continue };
+        rt.unwinding.clear();
+        if !rt.instance_of(e, brigadier::SYNTAX) {
+            command_failed(rt, source, e);
+            return;
+        }
+        if !forked {
+            let raw = rt.get_field(e, "$rawMessage");
+            feedback(rt, s, raw, true);
+        }
+    }
+}
+
+/// What a redirect's modifier gives for `ctx`: the sources the rest runs for (the one a
+/// `SingleRedirectModifier` makes, as Brigadier's `redirect` wraps it). None when it threw (the
+/// exception left in `rt.thrown`).
+fn modify(rt: &mut Rt, modifier: V, ctx: V) -> Option<Vec<V>> {
+    let single = rt.class_of(modifier) == SINGLE_MODIFIER;
+    let given = if single {
+        let m = rt.get_field(modifier, "$single");
+        rt.call_functional(MODIFY_SINGLE, m, &[ctx])
+    } else {
+        rt.call_functional(MODIFY, modifier, &[ctx])
+    };
+    if rt.thrown.is_some() {
+        return None;
+    }
+    Some(if single { vec![given] } else { crate::jutil::elements(rt, given) })
+}
+
+/// Brigadier's own execution (`CommandDispatcher.execute`, which a mod may call): the result summed
+/// over the sources (one for each in a fork); a syntax error is thrown out of it, but in a fork,
+/// where that source is left out. Err leaves the exception in `rt.thrown`.
+fn run_brigadier(rt: &mut Rt, contexts: &[V], source: V) -> Result<i32, ()> {
+    let Some((&executable, modifiers)) = contexts.split_last() else { return Ok(0) };
+    let mut forked = false;
+    let mut sources = vec![source];
+    let skipped = |rt: &mut Rt, forked: bool| -> Result<bool, ()> {
+        let Some(e) = rt.thrown else { return Ok(false) };
+        if forked && rt.instance_of(e, brigadier::SYNTAX) {
+            rt.thrown = None;
+            rt.unwinding.clear();
+            return Ok(true);
+        }
+        Err(())
+    };
+    for &stage in modifiers {
+        forked |= rt.get_field(stage, "$forks").i() != 0;
+        let modifier = reference(rt.get_field(stage, "$modifier"));
+        let mut next = Vec::new();
+        for &s in &sources {
+            if modifier.r() == 0 {
+                next.push(s);
+                continue;
+            }
+            let ctx = copy_for(rt, stage, s);
+            let given = modify(rt, modifier, ctx);
+            if !skipped(rt, forked)? {
+                next.extend(given.unwrap_or_default());
+            }
+        }
+        if next.is_empty() {
+            return Ok(0);
+        }
+        sources = next;
+    }
+    let command = rt.get_field(executable, "$command");
+    let mut result = 0i32;
+    for s in sources {
+        let ctx = copy_for(rt, executable, s);
+        let r = rt.call_functional(RUN, command, &[ctx]).i();
+        if !skipped(rt, forked)? {
+            result = result.wrapping_add(if forked { 1 } else { r });
+        }
+    }
+    Ok(result)
+}
+
+/// `CommandDispatcher.execute(results)`: the parse error, or the unknown command, thrown; else the
+/// chain run as Brigadier runs it.
+fn execute_results(rt: &mut Rt, results: V) -> V {
+    let r = brigadier::reader_of(rt, rt.get_field(results, "$reader"));
+    match finished(rt, results, &r.line()) {
+        Err(e) => {
+            rt.thrown = Some(e);
+            V::I(0)
+        }
+        Ok((top, contexts)) => {
+            let source = rt.get_field(top, "$source");
+            V::I(run_brigadier(rt, &contexts, source).unwrap_or(0))
+        }
+    }
+}
+
+/// The dispatcher's `parse` and `execute`, of a line (`String`), a `StringReader` or (`execute`)
+/// `ParseResults`.
+fn dispatcher_run(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> V {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let results = if desc.starts_with("(Lcom/mojang/brigadier/ParseResults;") {
+        a(1)
+    } else {
+        let reader = if desc.starts_with("(Ljava/lang/String;") { Reader::new(rt.str_of(a(1)).unwrap_or("")) } else { brigadier::reader_of(rt, a(1)) };
+        let root = root_of(rt, a(0));
+        let parse = parse(rt, root, a(2), reader);
+        results_object(rt, a(0), &parse)
+    };
+    if name == "parse" {
+        return results;
+    }
+    execute_results(rt, results)
+}
+
+/// `CommandContext`'s own calls.
+fn context_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let c = a(0);
+    Some(match name {
+        "getSource" => rt.get_field(c, "$source"),
+        "getInput" => rt.get_field(c, "$input"),
+        "getArgument" => {
+            let want = rt.str_of(a(1)).unwrap_or("").to_owned();
+            match argument(rt, c, &want) {
+                Some(v) => boxed(rt, v),
+                None => no_argument(rt, &want),
+            }
+        }
+        "getCommand" => reference(rt.get_field(c, "$command")),
+        "getChild" => reference(rt.get_field(c, "$child")),
+        "getLastChild" => last_child(rt, c),
+        "copyFor" => copy_for(rt, c, a(1)),
+        "getRedirectModifier" => reference(rt.get_field(c, "$modifier")),
+        "isForked" => V::I(rt.get_field(c, "$forks").i()),
+        "getNodes" => list_field(rt, c, "$nodes"),
+        "getRange" => rt.get_field(c, "$range"),
+        "getRootNode" => rt.get_field(c, "$root"),
+        "hasNodes" => V::I(i32::from(!crate::jutil::elements(rt, rt.get_field(c, "$nodes")).is_empty())),
+        _ => return None,
+    })
+}
+
+/// The last of a context's (or builder's) children: itself without one.
+fn last_child(rt: &Rt, mut c: V) -> V {
+    for _ in 0..MAX_DEPTH {
+        let child = reference(rt.get_field(c, "$child"));
+        if child.r() == 0 {
+            break;
+        }
+        c = child;
+    }
+    c
+}
+
+/// A list a context holds (an empty one where it holds none).
+fn list_field(rt: &mut Rt, c: V, field: &'static str) -> V {
+    match reference(rt.get_field(c, field)) {
+        l if l.r() != 0 => l,
+        _ => crate::jutil::new_list(rt, Vec::new()),
+    }
+}
+
+/// `CommandContextBuilder`'s own calls.
+fn builder_context_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let c = a(0);
+    Some(match name {
+        "getSource" => rt.get_field(c, "$source"),
+        "getRootNode" => rt.get_field(c, "$root"),
+        "getCommand" => reference(rt.get_field(c, "$command")),
+        "getChild" => reference(rt.get_field(c, "$child")),
+        "getLastChild" => last_child(rt, c),
+        "getRange" => rt.get_field(c, "$range"),
+        "getNodes" => list_field(rt, c, "$nodes"),
+        "getDispatcher" => rt.get_field(c, "$dispatcher"),
+        "getRedirectModifier" => reference(rt.get_field(c, "$modifier")),
+        "isForked" => V::I(rt.get_field(c, "$forks").i()),
+        "withSource" => set(rt, c, "$source", a(1)),
+        "build" => build_context(rt, c, a(1)),
+        // Each argument's result and range (`ParsedArgument`), by name.
+        "getArguments" => {
+            let names = crate::jutil::elements(rt, rt.get_field(c, "$argNames"));
+            let values = crate::jutil::elements(rt, rt.get_field(c, "$argValues"));
+            let ranges = crate::jutil::elements(rt, rt.get_field(c, "$argRanges"));
+            let map = rt.alloc("java/util/LinkedHashMap", Data::Table(Default::default()));
+            for (i, name) in names.into_iter().enumerate() {
+                let p = rt.new_object(PARSED_ARGUMENT);
+                let value = values.get(i).copied().unwrap_or(V::NULL);
+                let value = boxed(rt, value);
+                rt.put_field(p, "$result", value);
+                rt.put_field(p, "$range", ranges.get(i).copied().unwrap_or(V::NULL));
+                crate::jutil::table_put(rt, map, name, p);
+            }
+            map
+        }
+        _ => return None,
+    })
+}
+
+/// `ParseResults`, `ParsedCommandNode`, `ParsedArgument` and `StringRange`.
+fn parse_object_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let o = a(0);
+    Some(match (owner, name) {
+        (PARSE_RESULTS, "<init>") => {
+            rt.put_field(o, "$context", a(1));
+            let r = brigadier::reader_of(rt, a(2));
+            let reader = brigadier::new_reader(rt, &r);
+            rt.put_field(o, "$reader", reader);
+            let errors = if desc.contains("Ljava/util/Map;") { a(3) } else { rt.alloc("java/util/LinkedHashMap", Data::Table(Default::default())) };
+            rt.put_field(o, "$exceptions", errors);
+            V::Void
+        }
+        (PARSE_RESULTS, "getContext") => rt.get_field(o, "$context"),
+        (PARSE_RESULTS, "getReader") => rt.get_field(o, "$reader"),
+        (PARSE_RESULTS, "getExceptions") => rt.get_field(o, "$exceptions"),
+        (PARSED_NODE, "getNode") => rt.get_field(o, "$node"),
+        (PARSED_NODE | PARSED_ARGUMENT, "getRange") => rt.get_field(o, "$range"),
+        (PARSED_ARGUMENT, "getResult") => rt.get_field(o, "$result"),
+        (PARSED_NODE, "<init>") => {
+            rt.put_field(o, "$node", a(1));
+            set(rt, o, "$range", a(2));
+            V::Void
+        }
+        (STRING_RANGE, n) => {
+            let (start, end) = range_of(rt, o);
+            match n {
+                "<init>" => {
+                    rt.put_field(o, "$start", a(1));
+                    rt.put_field(o, "$end", a(2));
+                    V::Void
+                }
+                "at" => string_range(rt, (a(0).i(), a(0).i())),
+                "between" => string_range(rt, (a(0).i(), a(1).i())),
+                "encompassing" => {
+                    let (x, y) = (range_of(rt, a(0)), range_of(rt, a(1)));
+                    string_range(rt, (x.0.min(y.0), x.1.max(y.1)))
+                }
+                "getStart" => V::I(start),
+                "getEnd" => V::I(end),
+                "isEmpty" => V::I(i32::from(start == end)),
+                "getLength" => V::I(end - start),
+                // `get(string)` or `get(reader)`: the range's text.
+                "get" => {
+                    let text = match rt.str_of(a(1)) {
+                        Some(s) => s.to_owned(),
+                        None => brigadier::reader_of(rt, a(1)).line(),
+                    };
+                    let r = Reader::new(&text);
+                    let part = r.text(start, end);
+                    rt.string(&part)
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// NeoForge's `CommandEvent`: the results it carries (a listener may give others), cancelling,
+/// and the exception to say when cancelled.
+fn command_event_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let ev = a(0);
+    Some(match name {
+        "getParseResults" => rt.get_field(ev, "$parseResults"),
+        "setParseResults" => set(rt, ev, "$parseResults", a(1)),
+        "getException" => reference(rt.get_field(ev, "$exception")),
+        "setException" => set(rt, ev, "$exception", a(1)),
+        "setCanceled" => set(rt, ev, "$canceled", V::I(a(1).i())),
+        "isCanceled" => V::I(rt.get_field(ev, "$canceled").i()),
+        _ => return None,
+    })
+    .map(|v| if matches!(name, "setParseResults" | "setException" | "setCanceled") { V::Void } else { v })
 }
 
 /// The argument named `name` of a command's context.
@@ -937,428 +1733,6 @@ fn boxed(rt: &mut Rt, v: V) -> V {
     let o = rt.new_object(class);
     rt.put_field(o, "value", v);
     o
-}
-
-/// Brigadier's parse from `node` at byte `at` of `line`: the command of the path that reads the
-/// whole line. A literal the next word names is the only way on when there is one; else each
-/// argument the source may use, in order, until one leads through. A redirect goes on at its
-/// target's children, with a context of its own (its modifier, if any, gives the sources).
-fn walk(rt: &mut Rt, source: V, node: V, line: &str, at: usize, args: Vec<(String, V)>, depth: usize) -> Option<Parse> {
-    if depth > 64 {
-        return None;
-    }
-    let is_root = rt.class_of(node) == ROOT_NODE;
-    if at >= line.len() && !is_root {
-        let command = rt.get_field(node, "$command");
-        return (command.r() != 0).then_some(Parse { args, sources: None, command });
-    }
-    let start = if is_root {
-        at
-    } else {
-        if line.as_bytes().get(at) != Some(&b' ') || at + 1 >= line.len() {
-            return None;
-        }
-        at + 1
-    };
-    let target = if is_root { V::NULL } else { rt.get_field(node, "$target") };
-    if target.r() != 0 {
-        let modifier = rt.get_field(node, "$modifier");
-        let mut sources = None;
-        if modifier.r() != 0 {
-            let parse = Parse { args: args.clone(), sources: None, command: V::NULL };
-            let ctx = context(rt, source, line, &parse);
-            let given = rt.call_functional(MODIFY, modifier, &[ctx]);
-            if caught(rt) {
-                return None;
-            }
-            sources = Some(crate::jutil::elements(rt, given));
-        }
-        let first = sources.as_ref().and_then(|s| s.first().copied()).unwrap_or(source);
-        let mut parse = walk_children(rt, first, target, line, start, Vec::new(), depth)?;
-        if parse.sources.is_none() {
-            parse.sources = sources;
-        }
-        return Some(parse);
-    }
-    walk_children(rt, source, node, line, start, args, depth)
-}
-
-fn walk_children(rt: &mut Rt, source: V, node: V, line: &str, start: usize, args: Vec<(String, V)>, depth: usize) -> Option<Parse> {
-    let next = children(rt, node);
-    let word_end = line[start..].find(' ').map_or(line.len(), |i| start + i);
-    let word = &line[start..word_end];
-    if let Some(lit) = next.iter().copied().find(|c| is_literal(rt, *c) && name_of(rt, *c) == word) {
-        if !can_use(rt, lit, source) {
-            return None;
-        }
-        return walk(rt, source, lit, line, word_end, args, depth + 1);
-    }
-    let arguments: Vec<V> = next.into_iter().filter(|c| !is_literal(rt, *c)).collect();
-    for c in arguments {
-        if !can_use(rt, c, source) {
-            continue;
-        }
-        let t = rt.get_field(c, "$type");
-        let Some((value, end)) = parse_argument(rt, source, t, line, start) else { continue };
-        if end < line.len() && line.as_bytes()[end] != b' ' {
-            continue;
-        }
-        let mut args = args.clone();
-        args.push((name_of(rt, c), value));
-        if let Some(parse) = walk(rt, source, c, line, end, args, depth + 1) {
-            return Some(parse);
-        }
-    }
-    None
-}
-
-/// Whether Brigadier reads `c` in an unquoted string.
-fn unquoted(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+')
-}
-
-fn token_end(line: &str, start: usize) -> usize {
-    line[start..].find(' ').map_or(line.len(), |i| start + i)
-}
-
-/// A number as Brigadier's reader takes it: digits, points and minus signs.
-fn number_end(line: &str, start: usize) -> usize {
-    line[start..].find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-')).map_or(line.len(), |i| start + i)
-}
-
-/// A quoted string's text and the byte after its closing quote (`\` escapes the quote and itself).
-fn quoted(line: &str, start: usize) -> Option<(String, usize)> {
-    let quote = line[start..].chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let mut out = String::new();
-    let mut escaped = false;
-    for (i, c) in line[start + 1..].char_indices() {
-        if escaped {
-            if c != quote && c != '\\' {
-                return None;
-            }
-            out.push(c);
-            escaped = false;
-        } else if c == '\\' {
-            escaped = true;
-        } else if c == quote {
-            return Some((out, start + 1 + i + 1));
-        } else {
-            out.push(c);
-        }
-    }
-    None
-}
-
-/// One world coordinate: `~`, `~1.5`, or a number (a whole one is a block's centre when `center`).
-/// Its value from `origin`, whether it was relative, and the byte after it.
-fn coordinate(line: &str, start: usize, origin: f64, center: bool, whole: bool) -> Option<(f64, bool, usize)> {
-    let end = token_end(line, start);
-    let tok = &line[start..end];
-    let (relative, rest) = match tok.strip_prefix('~') {
-        Some(r) => (true, r),
-        None => (false, tok),
-    };
-    if rest.is_empty() {
-        return relative.then_some((origin, true, end));
-    }
-    if whole && !relative && rest.contains('.') {
-        return None;
-    }
-    let n: f64 = rest.parse().ok()?;
-    let v = if relative {
-        origin + n
-    } else if center && !rest.contains('.') {
-        n + 0.5
-    } else {
-        n
-    };
-    Some((v, relative, end))
-}
-
-/// `^left ^up ^forward` from the source's place and look, as vanilla's `LocalCoordinates`.
-fn local(line: &str, start: usize, origin: [f64; 3], rot: [f32; 2]) -> Option<([f64; 3], usize)> {
-    let mut at = start;
-    let mut v = [0.0; 3];
-    for (i, slot) in v.iter_mut().enumerate() {
-        if i > 0 {
-            if line.as_bytes().get(at) != Some(&b' ') {
-                return None;
-            }
-            at += 1;
-        }
-        let end = token_end(line, at);
-        let rest = line[at..end].strip_prefix('^')?;
-        *slot = if rest.is_empty() { 0.0 } else { rest.parse().ok()? };
-        at = end;
-    }
-    let [left, up, forwards] = v;
-    let (yaw, pitch) = (rot[0], rot[1]);
-    let rad = std::f32::consts::PI / 180.0;
-    let (f, f1) = (((yaw + 90.0) * rad).cos(), ((yaw + 90.0) * rad).sin());
-    let (f2, f3) = ((-pitch * rad).cos(), (-pitch * rad).sin());
-    let (f4, f5) = (((-pitch + 90.0) * rad).cos(), ((-pitch + 90.0) * rad).sin());
-    let a = [f64::from(f * f2), f64::from(f3), f64::from(f1 * f2)];
-    let b = [f64::from(f * f4), f64::from(f5), f64::from(f1 * f4)];
-    let c = [-(a[1] * b[2] - a[2] * b[1]), -(a[2] * b[0] - a[0] * b[2]), -(a[0] * b[1] - a[1] * b[0])];
-    let pos = [0, 1, 2].map(|i| origin[i] + a[i] * forwards + b[i] * up + c[i] * left);
-    Some((pos, at))
-}
-
-/// Several world coordinates separated by spaces, each from its origin; which were relative (bits).
-fn coordinates(line: &str, start: usize, origin: &[f64], center: &[bool], whole: bool) -> Option<(Vec<f64>, i32, usize)> {
-    let mut at = start;
-    let mut out = Vec::new();
-    let mut relative = 0;
-    for (i, o) in origin.iter().enumerate() {
-        if i > 0 {
-            if line.as_bytes().get(at) != Some(&b' ') {
-                return None;
-            }
-            at += 1;
-        }
-        let (v, rel, end) = coordinate(line, at, *o, center[i], whole)?;
-        out.push(v);
-        relative |= i32::from(rel) << i;
-        at = end;
-    }
-    Some((out, relative, at))
-}
-
-/// A resource location token (`create:brass_ingot`, `the_nether`): its id with the namespace, and
-/// the byte after it.
-fn location(line: &str, start: usize) -> Option<(String, usize)> {
-    let end = line[start..]
-        .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.' | ':' | '/')))
-        .map_or(line.len(), |i| start + i);
-    let id = &line[start..end];
-    if id.is_empty() || id.matches(':').count() > 1 {
-        return None;
-    }
-    Some((if id.contains(':') { id.to_owned() } else { format!("minecraft:{id}") }, end))
-}
-
-/// The end of a bracketed part (`[...]`, `{...}`) at `start`, nested ones and quotes inside; `start`
-/// itself when there is none there.
-fn bracketed_end(line: &str, start: usize) -> Option<usize> {
-    let open = match line[start..].chars().next() {
-        Some(c @ ('[' | '{')) => c,
-        _ => return Some(start),
-    };
-    let close = if open == '[' { ']' } else { '}' };
-    let mut depth = 0;
-    let mut quote: Option<char> = None;
-    for (i, c) in line[start..].char_indices() {
-        match quote {
-            Some(q) if c == q => quote = None,
-            Some(_) => {}
-            None if c == '"' || c == '\'' => quote = Some(c),
-            None if c == open => depth += 1,
-            None if c == close => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(start + i + 1);
-                }
-            }
-            None => {}
-        }
-    }
-    None
-}
-
-/// The coordinates object a position argument reads: its block, its point, its rotation.
-fn coordinates_object(rt: &mut Rt, v: [f64; 3], relative: i32) -> V {
-    let c = rt.new_object(WORLD_COORDINATES);
-    let block = api::block_pos(rt, v[0].floor() as i64, v[1].floor() as i64, v[2].floor() as i64);
-    let vec = crate::api_common::vec3(rt, v[0], v[1], v[2]);
-    rt.put_field(c, "$block", block);
-    rt.put_field(c, "$vec", vec);
-    rt.put_field(c, "$relative", V::I(relative));
-    c
-}
-
-/// Vanilla's chat colours, `ChatFormatting`'s first sixteen in order, and `reset`.
-const COLOURS: [&str; 16] = [
-    "black", "dark_blue", "dark_green", "dark_aqua", "dark_red", "dark_purple", "gold", "gray", "dark_gray", "blue", "green", "aqua", "red", "light_purple",
-    "yellow", "white",
-];
-
-/// Reads one argument of type `t` at `start`: its value as the type's parser gives it, and the
-/// byte after it. None when the text there isn't one.
-fn parse_argument(rt: &mut Rt, source: V, t: V, line: &str, start: usize) -> Option<(V, usize)> {
-    let kind = kind_of(rt, t);
-    let origin = [rt.get_field(source, "$x").d(), rt.get_field(source, "$y").d(), rt.get_field(source, "$z").d()];
-    let rot = [rt.get_field(source, "$yaw").f(), rt.get_field(source, "$pitch").f()];
-    // A number token here, as Brigadier's reader takes one.
-    let number_at = number_end(line, start);
-    let number = (number_at > start).then(|| (&line[start..number_at], number_at));
-    Some(match kind.as_str() {
-        "IntegerArgumentType.integer" => {
-            let (tok, end) = number?;
-            let n: i32 = tok.parse().ok()?;
-            let (min, max) = (bound(rt, t, 0).map_or(i32::MIN, V::i), bound(rt, t, 1).map_or(i32::MAX, V::i));
-            ((min..=max).contains(&n).then_some(V::I(n))?, end)
-        }
-        "LongArgumentType.longArg" => {
-            let (tok, end) = number?;
-            let n: i64 = tok.parse().ok()?;
-            let (min, max) = (bound(rt, t, 0).map_or(i64::MIN, V::j), bound(rt, t, 1).map_or(i64::MAX, V::j));
-            ((min..=max).contains(&n).then_some(V::J(n))?, end)
-        }
-        "FloatArgumentType.floatArg" => {
-            let (tok, end) = number?;
-            let n: f32 = tok.parse().ok()?;
-            let (min, max) = (bound(rt, t, 0).map_or(-f32::MAX, V::f), bound(rt, t, 1).map_or(f32::MAX, V::f));
-            ((min..=max).contains(&n).then_some(V::F(n))?, end)
-        }
-        "DoubleArgumentType.doubleArg" => {
-            let (tok, end) = number?;
-            let n: f64 = tok.parse().ok()?;
-            let (min, max) = (bound(rt, t, 0).map_or(-f64::MAX, V::d), bound(rt, t, 1).map_or(f64::MAX, V::d));
-            ((min..=max).contains(&n).then_some(V::D(n))?, end)
-        }
-        "BoolArgumentType.bool" => {
-            let end = token_end(line, start);
-            let b = match &line[start..end] {
-                "true" => 1,
-                "false" => 0,
-                _ => return None,
-            };
-            (V::I(b), end)
-        }
-        "StringArgumentType.word" => {
-            let end = line[start..].find(|c: char| !unquoted(c)).map_or(line.len(), |i| start + i);
-            (rt.string(&line[start..end]), end)
-        }
-        "StringArgumentType.string" => match quoted(line, start) {
-            Some((s, end)) => (rt.string(&s), end),
-            None if line[start..].starts_with(['"', '\'']) => return None,
-            None => {
-                let end = line[start..].find(|c: char| !unquoted(c)).map_or(line.len(), |i| start + i);
-                (rt.string(&line[start..end]), end)
-            }
-        },
-        "StringArgumentType.greedyString" => (rt.string(&line[start..]), line.len()),
-        "MessageArgument.message" => {
-            let s = rt.string(&line[start..]);
-            (crate::api_common::component(rt, s, false, V::NULL), line.len())
-        }
-        "EntityArgument.entity" | "EntityArgument.entities" | "EntityArgument.player" | "EntityArgument.players" | "GameProfileArgument.gameProfile" => {
-            let end = if line[start..].starts_with('@') { bracketed_end(line, (start + 2).min(line.len()))? } else { token_end(line, start) };
-            let text = &line[start..end];
-            if text.is_empty() || (text.starts_with('@') && !matches!(text.get(..2), Some("@s" | "@p" | "@a" | "@r" | "@e" | "@n"))) {
-                return None;
-            }
-            let single = matches!(kind.as_str(), "EntityArgument.entity" | "EntityArgument.player");
-            let players = kind != "EntityArgument.entity" && kind != "EntityArgument.entities";
-            // A single target can't be a selector of several (`@a`, `@e` without `limit=1`).
-            if single && matches!(text.get(..2), Some("@a" | "@e")) && !text.contains("limit=1") {
-                return None;
-            }
-            let sel = rt.new_object(SELECTOR);
-            let s = rt.string(text);
-            rt.put_field(sel, "$text", s);
-            rt.put_field(sel, "$single", V::I(single as i32));
-            rt.put_field(sel, "$players", V::I(players as i32));
-            (sel, end)
-        }
-        "BlockPosArgument.blockPos" | "ColumnPosArgument.columnPos" => {
-            let three = kind.starts_with("BlockPos");
-            if three && line[start..].starts_with('^') {
-                let (v, end) = local(line, start, origin, rot)?;
-                return Some((coordinates_object(rt, v, 7), end));
-            }
-            let o: Vec<f64> = if three { origin.iter().map(|v| v.floor()).collect() } else { vec![origin[0].floor(), origin[2].floor()] };
-            let (v, relative, end) = coordinates(line, start, &o, &vec![false; o.len()], true)?;
-            let v = if three { [v[0], v[1], v[2]] } else { [v[0], 0.0, v[1]] };
-            (coordinates_object(rt, v, relative), end)
-        }
-        "Vec3Argument.vec3" => {
-            if line[start..].starts_with('^') {
-                let (v, end) = local(line, start, origin, rot)?;
-                return Some((coordinates_object(rt, v, 7), end));
-            }
-            let center = bound(rt, t, 0).is_none_or(|v| v.i() != 0);
-            let (v, relative, end) = coordinates(line, start, &origin, &[center, false, center], false)?;
-            (coordinates_object(rt, [v[0], v[1], v[2]], relative), end)
-        }
-        "Vec2Argument.vec2" => {
-            let center = bound(rt, t, 0).is_none_or(|v| v.i() != 0);
-            let (v, _, end) = coordinates(line, start, &[origin[0], origin[2]], &[center, center], false)?;
-            (crate::api_common::vec2(rt, v[0] as f32, v[1] as f32), end)
-        }
-        "RotationArgument.rotation" => {
-            let (v, relative, end) = coordinates(line, start, &[f64::from(rot[0]), f64::from(rot[1])], &[false, false], false)?;
-            let c = rt.new_object(WORLD_COORDINATES);
-            let r = crate::api_common::vec2(rt, v[1] as f32, v[0] as f32);
-            rt.put_field(c, "$rot", r);
-            rt.put_field(c, "$relative", V::I(relative));
-            (c, end)
-        }
-        "AngleArgument.angle" => {
-            let (v, _, end) = coordinate(line, start, f64::from(rot[0]), false, false)?;
-            (V::F(v as f32), end)
-        }
-        "ResourceLocationArgument.id" | "DimensionArgument.dimension" => {
-            let (id, end) = location(line, start)?;
-            (rt.string(&id), end)
-        }
-        "ItemArgument.item" | "BlockStateArgument.block" => {
-            let (id, id_end) = location(line, start)?;
-            let props_end = bracketed_end(line, id_end)?;
-            let end = bracketed_end(line, props_end)?;
-            if kind.starts_with("Item") {
-                let input = rt.new_object(ITEM_INPUT);
-                let item = crate::api_common::item(rt, &id);
-                rt.put_field(input, "$item", item);
-                let s = rt.string(&id);
-                rt.put_field(input, "$id", s);
-                (input, end)
-            } else {
-                let text = format!("{id}{}", &line[id_end..props_end]);
-                let input = rt.new_object(BLOCK_INPUT);
-                let state = api::state(rt, &text);
-                rt.put_field(input, "$state", state);
-                let s = rt.string(&text);
-                rt.put_field(input, "$text", s);
-                (input, end)
-            }
-        }
-        "TimeArgument.time" => {
-            let end = token_end(line, start);
-            let tok = &line[start..end];
-            let (n, unit) = match tok.as_bytes().last()? {
-                b'd' => (&tok[..tok.len() - 1], 24000.0),
-                b's' => (&tok[..tok.len() - 1], 20.0),
-                b't' => (&tok[..tok.len() - 1], 1.0),
-                _ => (tok, 1.0),
-            };
-            let ticks = (n.parse::<f32>().ok()? * unit).round() as i32;
-            if ticks < bound(rt, t, 0).map_or(0, V::i) {
-                return None;
-            }
-            (V::I(ticks), end)
-        }
-        "UuidArgument.uuid" => {
-            let end = token_end(line, start);
-            let (msb, lsb) = crate::tags::uuid_parse(&line[start..end])?;
-            (crate::tags::uuid(rt, msb, lsb), end)
-        }
-        "ColorArgument.color" => {
-            let end = token_end(line, start);
-            let name = &line[start..end];
-            let (constant, ordinal) = match COLOURS.iter().position(|c| *c == name) {
-                Some(i) => (name.to_ascii_uppercase(), i as i32),
-                None if name == "reset" => ("RESET".to_owned(), 21),
-                None => return None,
-            };
-            let constant = rt.static_key(&constant);
-            (api::api_enum(rt, "net/minecraft/ChatFormatting", constant, ordinal), end)
-        }
-        _ => return None,
-    })
 }
 
 /// The index of a descriptor's first parameter of type `ty`.
@@ -1384,8 +1758,20 @@ fn param_index(desc: &str, ty: &str) -> Option<usize> {
     None
 }
 
+/// Whether a block position is in the world's height and its ±30,000,000 border
+/// (`Level.isInWorldBounds`).
+fn in_world(rt: &Rt, p: [i32; 3]) -> bool {
+    let (min, height) = rt.host().map_or((-64, 384), |h| h.world_height());
+    p[1] >= min && i64::from(p[1]) < i64::from(min) + i64::from(height) && horizontal(p)
+}
+
+fn horizontal(p: [i32; 3]) -> bool {
+    (-30_000_000..30_000_000).contains(&p[0]) && (-30_000_000..30_000_000).contains(&p[2])
+}
+
 /// An argument type's getter (`IntegerArgumentType.getInteger(ctx, name)`,
-/// `EntityArgument.getPlayer(ctx, name)`...): the parsed value as that getter gives it.
+/// `EntityArgument.getPlayer(ctx, name)`...): the parsed value as that getter gives it, resolved
+/// with the context's source.
 fn get_argument(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let ctx = *args.first()?;
     let want = rt.str_of(*args.get(param_index(desc, "Ljava/lang/String;")?)?).unwrap_or("").to_owned();
@@ -1413,6 +1799,7 @@ fn get_argument(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) ->
             | ("UuidArgument", "getUuid")
             | ("MessageArgument", "getMessage")
             | ("ColorArgument", "getColor")
+            | ("TimeArgument", "getTime")
     );
     if !known {
         return None;
@@ -1422,108 +1809,212 @@ fn get_argument(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) ->
     };
     let source = rt.get_field(ctx, "$source");
     Some(match getter {
-        ("EntityArgument", "getPlayer" | "getEntity") => match select(rt, v, source).first() {
-            Some(&p) => p,
-            None => syntax_error(rt, if name == "getPlayer" { "argument.entity.notfound.player" } else { "argument.entity.notfound.entity" }),
+        ("BoolArgumentType", _) => match v {
+            V::R(_) => rt.get_field(v, "value"),
+            other => other,
         },
-        ("EntityArgument", _) => {
-            let found = select(rt, v, source);
-            if found.is_empty() && !name.starts_with("getOptional") {
-                return Some(syntax_error(rt, if name == "getPlayers" { "argument.entity.notfound.player" } else { "argument.entity.notfound.entity" }));
+        ("EntityArgument", n) => entity_getter(rt, n, v, source),
+        ("GameProfileArgument", _) => match command_args::profiles_of(rt, v, source) {
+            Ok(found) => crate::jutil::new_list(rt, found),
+            Err(e) => throw(rt, &e),
+        },
+        ("BlockPosArgument", n) => {
+            let p = command_args::block_pos(rt, v, source);
+            if n == "getLoadedBlockPos" && !in_world(rt, p) {
+                return Some(throw_syntax(rt, "argument.pos.outofworld", Vec::new()));
             }
-            crate::jutil::new_list(rt, found)
-        }
-        ("GameProfileArgument", _) => {
-            let found = select(rt, v, source);
-            if found.is_empty() {
-                return Some(syntax_error(rt, "argument.player.unknown"));
+            if n == "getSpawnablePos" && !((-20_000_000..20_000_000).contains(&p[1]) && horizontal(p)) {
+                return Some(throw_syntax(rt, "argument.pos.outofbounds", Vec::new()));
             }
-            let profiles: Vec<V> = found.into_iter().map(|p| api::call(rt, "net/minecraft/server/level/ServerPlayer.getGameProfile.()Lcom/mojang/authlib/GameProfile;", &[p])).collect();
-            crate::jutil::new_list(rt, profiles)
+            api::block_pos(rt, i64::from(p[0]), i64::from(p[1]), i64::from(p[2]))
         }
-        ("BlockPosArgument", _) => rt.get_field(v, "$block"),
+        ("Vec3Argument", "getVec3") => {
+            let [x, y, z] = command_args::position(rt, v, source);
+            crate::api_common::vec3(rt, x, y, z)
+        }
+        ("Vec2Argument", _) => {
+            let p = command_args::position(rt, v, source);
+            crate::api_common::vec2(rt, p[0] as f32, p[2] as f32)
+        }
         ("ColumnPosArgument", _) => {
-            let b = rt.get_field(v, "$block");
-            let [x, _, z] = api::pos_of(rt, b);
+            let [x, _, z] = command_args::block_pos(rt, v, source);
             crate::records::make(rt, "net/minecraft/server/level/ColumnPos", &[V::I(x), V::I(z)])
         }
-        ("Vec3Argument", "getVec3") => rt.get_field(v, "$vec"),
+        ("AngleArgument", _) => V::F(command_args::angle_of(rt, v, source)),
         ("DimensionArgument", _) => {
             let here = rt.host().map(|h| h.dimension()).unwrap_or_default();
             let wanted = rt.str_of(v).unwrap_or("").to_owned();
             if !here.is_empty() && wanted != here {
-                return Some(syntax_error(rt, "argument.dimension.invalid"));
+                return Some(throw_syntax(rt, "argument.dimension.invalid", vec![Arg::Text(wanted)]));
             }
             crate::glue::level(rt)
         }
+        ("MessageArgument", _) => match command_args::message_component(rt, v, source) {
+            Ok(c) => c,
+            Err(e) => throw(rt, &e),
+        },
         _ => v,
     })
 }
 
-/// The players a selector picks for `source` (the entities kept here are players): `@s` the
-/// source's own, `@p` the nearest, `@r` one at random, `@a`, `@e` and `@n` every one (nearest
-/// first), a name or UUID that player. Of its options, `name=` and `limit=` are kept.
-fn select(rt: &mut Rt, selector: V, source: V) -> Vec<V> {
-    let text = rt.str_of(rt.get_field(selector, "$text")).unwrap_or("").to_owned();
-    let me = rt.get_field(source, "$player");
-    let mut all = crate::events::server_players(rt);
-    if me.r() != 0 && !all.contains(&me) && rt.class_of(me) == SERVER_PLAYER {
-        all.insert(0, me);
-    }
-    let origin = [rt.get_field(source, "$x").d(), rt.get_field(source, "$y").d(), rt.get_field(source, "$z").d()];
-    let distance = |rt: &Rt, p: V| {
-        let d = [rt.get_field(p, "$x").d() - origin[0], rt.get_field(p, "$y").d() - origin[1], rt.get_field(p, "$z").d() - origin[2]];
-        d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+/// `EntityArgument`'s getters: what the selector finds for the source, one or (for the plural
+/// getters but the optional ones) at least one.
+fn entity_getter(rt: &mut Rt, name: &str, selector: V, source: V) -> V {
+    let players_only = matches!(name, "getPlayer" | "getPlayers" | "getOptionalPlayers") || rt.get_field(selector, "$entities").i() == 0;
+    let found = match command_args::select(rt, selector, source, players_only) {
+        Ok(found) => found,
+        Err(e) => return throw(rt, &e),
     };
-    let options = text.find('[').map_or("", |i| text[i + 1..].trim_end_matches(']'));
-    let option = |key: &str| options.split(',').find_map(|o| o.trim().strip_prefix(key)?.trim_start().strip_prefix('=').map(str::trim));
-    let mut found: Vec<V> = match text.get(..2) {
-        Some("@s") => (me.r() != 0).then_some(me).into_iter().collect(),
-        Some("@p" | "@a" | "@e" | "@n" | "@r") => {
-            let mut v = all;
-            v.sort_by(|a, b| distance(rt, *a).total_cmp(&distance(rt, *b)));
-            if text.starts_with("@r") && v.len() > 1 {
-                let i = rt.host_mut().and_then(|h| h.random()).map_or(0, |r| r.next_int_bound(v.len() as i32)) as usize;
-                v = vec![v[i]];
-            }
-            if text.starts_with("@p") || text.starts_with("@n") {
-                v.truncate(1);
-            }
-            v
-        }
-        _ => {
-            let by_uuid = crate::tags::uuid_parse(&text);
-            all.into_iter()
-                .filter(|p| match by_uuid {
-                    Some(id) => crate::tags::uuid_bits(rt, rt.get_field(*p, "$uuid")) == id,
-                    None => player_name(rt, *p).eq_ignore_ascii_case(&text),
-                })
-                .take(1)
-                .collect()
-        }
-    };
-    if let Some(name) = option("name") {
-        let (negate, name) = name.strip_prefix('!').map_or((false, name), |n| (true, n));
-        let name = name.trim_matches('"');
-        found.retain(|p| (player_name(rt, *p) == name) != negate);
+    match name {
+        "getEntity" => match found.len() {
+            0 => throw_syntax(rt, "argument.entity.notfound.entity", Vec::new()),
+            1 => found[0],
+            _ => throw_syntax(rt, "argument.entity.toomany", Vec::new()),
+        },
+        "getPlayer" if found.len() != 1 => throw_syntax(rt, "argument.entity.notfound.player", Vec::new()),
+        "getPlayer" => found[0],
+        "getEntities" if found.is_empty() => throw_syntax(rt, "argument.entity.notfound.entity", Vec::new()),
+        "getPlayers" if found.is_empty() => throw_syntax(rt, "argument.entity.notfound.player", Vec::new()),
+        _ => crate::jutil::new_list(rt, found),
     }
-    if let Some(limit) = option("limit").and_then(|l| l.parse::<usize>().ok()) {
-        found.truncate(limit);
-    }
-    if rt.get_field(selector, "$single").i() != 0 {
-        found.truncate(1);
-    }
-    found
 }
 
-/// A server player's name: the one the game gave them, else the host's.
-fn player_name(rt: &Rt, p: V) -> String {
-    if let Some(n) = rt.str_of(rt.get_field(p, "$name")) {
-        return n.to_owned();
-    }
-    let (msb, lsb) = crate::tags::uuid_bits(rt, rt.get_field(p, "$uuid"));
-    let uuid = (u128::from(msb as u64) << 64) | u128::from(lsb as u64);
-    rt.host().and_then(|h| h.player_name(uuid)).unwrap_or_default()
+/// A selector's own calls (a mod's `EntitySelector.findPlayers(source)`...).
+fn selector_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let s = a(0);
+    let includes = rt.get_field(s, "$entities").i() != 0;
+    Some(match name {
+        "findEntities" | "findPlayers" => match command_args::select(rt, s, a(1), name == "findPlayers" || !includes) {
+            Ok(found) => crate::jutil::new_list(rt, found),
+            Err(e) => throw(rt, &e),
+        },
+        "findSingleEntity" | "findSinglePlayer" => {
+            let player = name == "findSinglePlayer";
+            match command_args::select(rt, s, a(1), player || !includes) {
+                Ok(found) if found.len() == 1 => found[0],
+                Ok(found) if found.len() > 1 && !player => throw_syntax(rt, "argument.entity.toomany", Vec::new()),
+                Ok(_) => throw_syntax(rt, if player { "argument.entity.notfound.player" } else { "argument.entity.notfound.entity" }, Vec::new()),
+                Err(e) => throw(rt, &e),
+            }
+        }
+        "includesEntities" => V::I(i32::from(includes)),
+        "getMaxResults" => rt.get_field(s, "$max"),
+        "isSelfSelector" => V::I(rt.get_field(s, "$current").i()),
+        "usesSelector" => V::I(rt.get_field(s, "$uses").i()),
+        _ => return None,
+    })
+}
+
+/// `EntitySelectorParser`, which a mod's own argument type may read a selector with
+/// (`new EntitySelectorParser(reader, allowSelectors).parse()`, FTB Teams' `TeamArgument`):
+/// vanilla's selector parser on the mod's reader, its cursor left where vanilla's leaves it.
+fn selector_parser_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let p = a(0);
+    Some(match name {
+        "<init>" => {
+            rt.put_field(p, "$reader", a(1));
+            rt.put_field(p, "$allow", V::I(a(2).i()));
+            V::Void
+        }
+        "getReader" => rt.get_field(p, "$reader"),
+        "parse" => {
+            let reader = rt.get_field(p, "$reader");
+            let mut r = brigadier::reader_of(rt, reader);
+            let start = r.cursor;
+            let read = command_args::parse_selector(&mut r, rt.get_field(p, "$allow").i() != 0);
+            rt.put_field(reader, "$cursor", V::I(r.cursor));
+            match read {
+                Ok(s) => {
+                    let text = r.text(start, r.cursor);
+                    command_args::selector_object(rt, &s, &text)
+                }
+                Err(e) => {
+                    let ex = brigadier::exception(rt, &r.s, &e);
+                    rt.thrown = Some(ex);
+                    V::NULL
+                }
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The objects the vanilla types read (coordinates, angles, messages, profiles, items, blocks):
+/// what they resolve to for the source a mod gives.
+fn read_value_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let o = a(0);
+    Some(match (owner, name) {
+        (COORDINATES | command_args::WORLD_COORDINATES | command_args::LOCAL_COORDINATES, n) => match n {
+            "getPosition" => {
+                let [x, y, z] = command_args::position(rt, o, a(1));
+                crate::api_common::vec3(rt, x, y, z)
+            }
+            "getBlockPos" => {
+                let [x, y, z] = command_args::block_pos(rt, o, a(1));
+                api::block_pos(rt, i64::from(x), i64::from(y), i64::from(z))
+            }
+            "getRotation" => {
+                let [pitch, yaw] = command_args::rotation(rt, o, a(1));
+                crate::api_common::vec2(rt, pitch, yaw)
+            }
+            "isXRelative" | "isYRelative" | "isZRelative" => V::I(i32::from(command_args::is_relative(rt, o, usize::from(n.as_bytes()[2] - b'X')))),
+            _ => return None,
+        },
+        (command_args::SINGLE_ANGLE, "getAngle") => V::F(command_args::angle_of(rt, o, a(1))),
+        (command_args::MESSAGE, "toComponent" | "resolveComponent") => match command_args::message_component(rt, o, a(1)) {
+            Ok(c) => c,
+            Err(e) => throw(rt, &e),
+        },
+        (command_args::MESSAGE, "getText") => rt.get_field(o, "$text"),
+        (command_args::PROFILES, "getNames") => match command_args::profiles_of(rt, o, a(1)) {
+            Ok(found) => crate::jutil::new_list(rt, found),
+            Err(e) => throw(rt, &e),
+        },
+        (command_args::ITEM_INPUT, n) => match n {
+            "getItem" => rt.get_field(o, "$item"),
+            // `createItemStack(count, allowOversizedStacks)`: more than a stack holds is an error.
+            "createItemStack" => {
+                let id = rt.str_of(rt.get_field(o, "$id")).unwrap_or("minecraft:air").to_owned();
+                let limit = rt.host().and_then(|h| h.item_stack_limit(&id)).unwrap_or(64);
+                if a(2).i() != 0 && i64::from(a(1).i()) > i64::from(limit) {
+                    return Some(throw_syntax(rt, "arguments.item.overstacked", vec![Arg::Text(id), Arg::Int(limit as i32)]));
+                }
+                crate::api_common::stack(rt, &id, a(1).i())
+            }
+            "serialize" => {
+                let id = rt.str_of(rt.get_field(o, "$id")).unwrap_or("").to_owned();
+                let components = rt.str_of(rt.get_field(o, "$components")).unwrap_or("").to_owned();
+                rt.string(&format!("{id}{components}"))
+            }
+            _ => return None,
+        },
+        (command_args::BLOCK_INPUT, n) => match n {
+            "getState" => rt.get_field(o, "$state"),
+            // `place(level, pos, flags)`: the state set there.
+            "place" => {
+                let text = rt.str_of(rt.get_field(o, "$text")).unwrap_or("minecraft:air").to_owned();
+                let p = api::pos_of(rt, a(2));
+                V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, &text)) as i32)
+            }
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// Throws a `CommandSyntaxException` of 1.21.1's message `key` made without a reader (`create`).
+fn throw_syntax(rt: &mut Rt, key: &'static str, args: Vec<Arg>) -> V {
+    throw(rt, &Syntax { key, args, cursor: -1 })
+}
+
+/// Throws `e` as a `CommandSyntaxException` (with no place in a line).
+fn throw(rt: &mut Rt, e: &Syntax) -> V {
+    let ex = brigadier::exception_without_context(rt, e);
+    rt.thrown = Some(ex);
+    V::NULL
 }
 
 #[cfg(test)]
@@ -1537,6 +2028,8 @@ mod tests {
     const THEN_NODE: &str = "com/mojang/brigadier/builder/LiteralArgumentBuilder.then.(Lcom/mojang/brigadier/tree/CommandNode;)Lcom/mojang/brigadier/builder/ArgumentBuilder;";
     const EXECUTES: &str = "com/mojang/brigadier/builder/LiteralArgumentBuilder.executes.(Lcom/mojang/brigadier/Command;)Lcom/mojang/brigadier/builder/ArgumentBuilder;";
     const EXECUTES_ARG: &str = "com/mojang/brigadier/builder/RequiredArgumentBuilder.executes.(Lcom/mojang/brigadier/Command;)Lcom/mojang/brigadier/builder/ArgumentBuilder;";
+    const REDIRECT_ARG: &str = "com/mojang/brigadier/builder/RequiredArgumentBuilder.redirect.(Lcom/mojang/brigadier/tree/CommandNode;Lcom/mojang/brigadier/SingleRedirectModifier;)Lcom/mojang/brigadier/builder/ArgumentBuilder;";
+    const FORK_ARG: &str = "com/mojang/brigadier/builder/RequiredArgumentBuilder.fork.(Lcom/mojang/brigadier/tree/CommandNode;Lcom/mojang/brigadier/RedirectModifier;)Lcom/mojang/brigadier/builder/ArgumentBuilder;";
     const REQUIRES: &str = "com/mojang/brigadier/builder/LiteralArgumentBuilder.requires.(Ljava/util/function/Predicate;)Lcom/mojang/brigadier/builder/ArgumentBuilder;";
     const BUILD: &str = "com/mojang/brigadier/builder/LiteralArgumentBuilder.build.()Lcom/mojang/brigadier/tree/LiteralCommandNode;";
     const REGISTER: &str = "com/mojang/brigadier/CommandDispatcher.register.(Lcom/mojang/brigadier/builder/LiteralArgumentBuilder;)Lcom/mojang/brigadier/tree/LiteralCommandNode;";
@@ -1550,14 +2043,23 @@ mod tests {
     const WORD: &str = "com/mojang/brigadier/arguments/StringArgumentType.word.()Lcom/mojang/brigadier/arguments/StringArgumentType;";
     const GET_STRING: &str = "com/mojang/brigadier/arguments/StringArgumentType.getString.(Lcom/mojang/brigadier/context/CommandContext;Ljava/lang/String;)Ljava/lang/String;";
     const PLAYER: &str = "net/minecraft/commands/arguments/EntityArgument.player.()Lnet/minecraft/commands/arguments/EntityArgument;";
+    const PLAYERS: &str = "net/minecraft/commands/arguments/EntityArgument.players.()Lnet/minecraft/commands/arguments/EntityArgument;";
     const GET_PLAYER: &str = "net/minecraft/commands/arguments/EntityArgument.getPlayer.(Lcom/mojang/brigadier/context/CommandContext;Ljava/lang/String;)Lnet/minecraft/server/level/ServerPlayer;";
+    const GET_PLAYERS: &str = "net/minecraft/commands/arguments/EntityArgument.getPlayers.(Lcom/mojang/brigadier/context/CommandContext;Ljava/lang/String;)Ljava/util/Collection;";
     const BLOCK_POS: &str = "net/minecraft/commands/arguments/coordinates/BlockPosArgument.blockPos.()Lnet/minecraft/commands/arguments/coordinates/BlockPosArgument;";
     const GET_BLOCK_POS: &str = "net/minecraft/commands/arguments/coordinates/BlockPosArgument.getLoadedBlockPos.(Lcom/mojang/brigadier/context/CommandContext;Ljava/lang/String;)Lnet/minecraft/core/BlockPos;";
     const CUSTOM: &str = "test/ColourArgument";
     const HAS_PERMISSION: &str = "net/minecraft/commands/CommandSourceStack.hasPermission.(I)Z";
     const SEND_SUCCESS: &str = "net/minecraft/commands/CommandSourceStack.sendSuccess.(Ljava/util/function/Supplier;Z)V";
     const GET_PLAYER_OR_EXCEPTION: &str = "net/minecraft/commands/CommandSourceStack.getPlayerOrException.()Lnet/minecraft/server/level/ServerPlayer;";
+    const WITH_ENTITY: &str = "net/minecraft/commands/CommandSourceStack.withEntity.(Lnet/minecraft/world/entity/Entity;)Lnet/minecraft/commands/CommandSourceStack;";
     const GET_SOURCE: &str = "com/mojang/brigadier/context/CommandContext.getSource.()Ljava/lang/Object;";
+    const GET_ARGUMENT: &str = "com/mojang/brigadier/context/CommandContext.getArgument.(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Object;";
+    const READ_WORD: &str = "com/mojang/brigadier/StringReader.readUnquotedString.()Ljava/lang/String;";
+    const GET_CURSOR: &str = "com/mojang/brigadier/StringReader.getCursor.()I";
+    const SET_CURSOR: &str = "com/mojang/brigadier/StringReader.setCursor.(I)V";
+    const SIMPLE_TYPE: &str = "com/mojang/brigadier/exceptions/SimpleCommandExceptionType";
+    const LITERAL_MESSAGE: &str = "com/mojang/brigadier/LiteralMessage";
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         crate::api::call(rt, key, args)
@@ -1566,16 +2068,53 @@ mod tests {
         rt.string(t)
     }
 
+    /// The test mod's own argument type, `test/ColourArgument`: `parse` reads a word with the
+    /// `StringReader` object it is given, a colour of three or else its own error back at the
+    /// word's start (`SimpleCommandExceptionType` of a `LiteralMessage`); its examples are words.
+    fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
+        if rt.class_of(args[0]) != CUSTOM {
+            return crate::api::call(rt, owner_key, args);
+        }
+        if key == GET_EXAMPLES {
+            let items = vec![rt.string("red"), rt.string("green")];
+            return crate::jutil::new_list(rt, items);
+        }
+        assert_eq!(key, PARSE);
+        let reader = args[1];
+        let start = c(rt, GET_CURSOR, &[reader]);
+        let word = c(rt, READ_WORD, &[reader]);
+        if matches!(rt.str_of(word), Some("red" | "green" | "blue")) {
+            return word;
+        }
+        c(rt, SET_CURSOR, &[reader, start]);
+        let message = rt.new_object(LITERAL_MESSAGE);
+        let text = rt.string("Unknown colour");
+        c(rt, "com/mojang/brigadier/LiteralMessage.<init>.(Ljava/lang/String;)V", &[message, text]);
+        let ty = rt.new_object(SIMPLE_TYPE);
+        c(rt, "com/mojang/brigadier/exceptions/SimpleCommandExceptionType.<init>.(Lcom/mojang/brigadier/Message;)V", &[ty, message]);
+        let e = c(
+            rt,
+            "com/mojang/brigadier/exceptions/SimpleCommandExceptionType.createWithContext.(Lcom/mojang/brigadier/ImmutableStringReader;)Lcom/mojang/brigadier/exceptions/CommandSyntaxException;",
+            &[ty, reader],
+        );
+        rt.thrown = Some(e);
+        V::NULL
+    }
+
+    fn overrides(class: &str, key: &str) -> bool {
+        class == CUSTOM && (key == PARSE || key == GET_EXAMPLES)
+    }
+
     /// The test mod: lambda 1 registers its tree, as Create's `AllCommands` does (a root with
     /// subcommands, a node built apart and added twice, an alias copying the root's children):
     ///
     /// - `/ruby give <count 1..64>` and `/ruby give <count> <player>`,
     /// - `/ruby spot <pos>`, `/ruby say <word>`, an operator's `/ruby wipe`,
-    /// - `/ruby tint <colour>` of a type of the mod's own (left out),
+    /// - `/ruby tint <colour>`, of a type of the mod's own,
     /// - `/rb ...`, the root's children again.
     ///
-    /// 2 is `hasPermission(2)`; 3 to 7 run the commands, saying what they read; 8 is a message's
-    /// supplier.
+    /// 2 is `hasPermission(2)`; 3 to 7 and 9 run the commands, saying what they read; 8 is a
+    /// message's supplier.
     fn lambdas(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
         let captured = rt.captured(args[0]);
         Some(match id {
@@ -1621,7 +2160,7 @@ mod tests {
                 let wipe = c(rt, EXECUTES, &[wipe, r]);
                 let colour = rt.new_object(CUSTOM);
                 let tint = arg(rt, "colour", colour);
-                let r = run(rt, 3);
+                let r = run(rt, 9);
                 let tint = c(rt, EXECUTES_ARG, &[tint, r]);
                 let tint_lit = lit(rt, "tint");
                 let tint_lit = c(rt, THEN, &[tint_lit, tint]);
@@ -1644,7 +2183,7 @@ mod tests {
                 V::Void
             }
             2 => c(rt, HAS_PERMISSION, &[args[1], V::I(2)]),
-            3..=7 => {
+            3..=7 | 9 => {
                 let ctx = args[1];
                 let source = c(rt, GET_SOURCE, &[ctx]);
                 let said = match id {
@@ -1660,7 +2199,7 @@ mod tests {
                         if rt.thrown.is_some() {
                             return Some(V::I(0));
                         }
-                        format!("gave {count} to {}", player_name(rt, player))
+                        format!("gave {count} to {}", command_args::player_name(rt, player))
                     }
                     5 => {
                         let n = s(rt, "pos");
@@ -1675,7 +2214,13 @@ mod tests {
                         if rt.thrown.is_some() {
                             return Some(V::I(0));
                         }
-                        format!("{} says {}", player_name(rt, me), rt.str_of(w).unwrap_or(""))
+                        format!("{} says {}", command_args::player_name(rt, me), rt.str_of(w).unwrap_or(""))
+                    }
+                    9 => {
+                        let n = s(rt, "colour");
+                        let class = rt.alloc("java/lang/Class", Data::Str("java/lang/String".into()));
+                        let colour = c(rt, GET_ARGUMENT, &[ctx, n, class]);
+                        format!("tint {}", rt.str_of(colour).unwrap_or(""))
                     }
                     _ => "wiped".to_owned(),
                 };
@@ -1685,6 +2230,26 @@ mod tests {
                 V::I(1)
             }
             8 => crate::api_common::component(rt, captured[0], false, V::NULL),
+            // A redirect's modifier: the source as the player the context read.
+            10 => {
+                let ctx = args[1];
+                let source = c(rt, GET_SOURCE, &[ctx]);
+                let n = s(rt, "who");
+                let who = c(rt, GET_PLAYER, &[ctx, n]);
+                c(rt, WITH_ENTITY, &[source, who])
+            }
+            // A fork's modifier: a source for each player the context read.
+            11 => {
+                let ctx = args[1];
+                let source = c(rt, GET_SOURCE, &[ctx]);
+                let n = s(rt, "all");
+                let all = c(rt, GET_PLAYERS, &[ctx, n]);
+                let mut each = Vec::new();
+                for p in crate::jutil::elements(rt, all) {
+                    each.push(c(rt, WITH_ENTITY, &[source, p]));
+                }
+                crate::jutil::new_list(rt, each)
+            }
             _ => V::Void,
         })
     }
@@ -1712,18 +2277,29 @@ mod tests {
         }
     }
 
+    fn chat_lines(chat: &mut Chat) -> Vec<serde_json::Value> {
+        chat.lines.drain(..).map(|l| serde_json::from_str(&l).unwrap()).collect()
+    }
+
+    fn said(lines: &[serde_json::Value]) -> Vec<String> {
+        lines.iter().map(|j| j["text"].as_str().or_else(|| j["translate"].as_str()).unwrap_or("").to_owned()).collect()
+    }
+
     /// A mod's command tree, built with Brigadier's builders on the dispatcher
     /// `RegisterCommandsEvent` hands it: its runnable paths are the game's usages, each at the level
-    /// its requirements ask, an alias's as its target's, a path through an argument type of the
-    /// mod's own left out. A player's line runs the command its path reaches, with the arguments
+    /// its requirements ask, an alias's as its target's, an argument of the mod's own type of the
+    /// kind its examples are. A player's line runs the command its path reaches, with the arguments
     /// its types read (a count within its bounds, a player by name, a position from where the
-    /// player stands), and what the command says comes back to them; an error the command throws
-    /// comes back in red. A line no path reads isn't the mod's; one the player's level forbids
-    /// neither; the console runs a command as no player.
+    /// player stands, a colour by the mod's own parser), and what the command says comes back to
+    /// them. A line that doesn't parse is answered as vanilla answers it: the error (the bound and
+    /// what was read, the mod's own message), then the line up to the error's place. A line of a
+    /// word no root has isn't the mod's; the console runs a command as no player.
     #[test]
     fn a_mods_commands_register_and_run_as_brigadier_parses_them() {
         let mut rt = Rt::new();
         rt.lambda_call = Some(lambdas);
+        rt.vcall = Some(vcall);
+        rt.overrides = Some(overrides);
         let listener = rt.lambda_id("java/util/function/Consumer", 1, vec![]);
         rt.listeners.push((EVENT.to_owned(), listener));
         let (me, steve) = (0x11u128, 0x22u128);
@@ -1736,35 +2312,174 @@ mod tests {
                 ("give <count:integer> <player:player>", 0),
                 ("spot <pos:block_pos>", 0),
                 ("wipe", 2),
+                ("tint <colour:word>", 0),
                 ("say <word:word>", 0),
             ] {
                 expected.push((format!("{root} {usage}"), level));
             }
         }
         assert_eq!(usages, expected);
-        let mut run = |level: u8, line: &str| rt.with_host(&mut chat, |rt| perform(rt, Some((me, "Alex")), level, [10.5, 64.0, -3.5], [0.0, 0.0], line));
-        assert!(run(0, "ruby give 5"));
-        assert!(run(0, "ruby give 7 Steve"));
-        assert!(run(0, "rb spot ~1 ~ ~-2"));
-        assert!(run(0, "ruby spot 3 -60 4"));
-        assert!(run(0, "ruby say hello"));
-        assert!(!run(0, "ruby give 65"), "beyond the count's bound");
-        assert!(!run(0, "ruby give five"));
-        assert!(!run(0, "ruby give 5 Steve extra"));
-        assert!(!run(0, "ruby wipe"), "an operator's");
-        assert!(!run(0, "ruby tint red"), "a type of the mod's own");
-        assert!(run(2, "ruby wipe"));
-        assert!(run(0, "ruby give 2 Nobody"));
+        let mut run = |chat: &mut Chat, level: u8, line: &str| rt.with_host(chat, |rt| perform(rt, Some((me, "Alex")), level, [10.5, 64.0, -3.5], [0.0, 0.0], line));
+        for line in ["ruby give 5", "ruby give 7 Steve", "rb spot ~1 ~ ~-2", "ruby spot 3 -60 4", "ruby say hello", "ruby tint red"] {
+            assert!(run(&mut chat, 0, line), "{line}");
+        }
+        assert!(run(&mut chat, 2, "ruby wipe"));
+        assert!(!run(&mut chat, 0, "stone 1"), "no root of the mod's");
+        let lines = chat_lines(&mut chat);
+        assert_eq!(said(&lines), ["gave 5", "gave 7 to Steve", "spot 11 64 -6", "spot 3 -60 4", "Alex says hello", "tint red", "wiped"]);
+        // Errors, each with the line's context: the message, then the text before the place.
+        let mut error = |chat: &mut Chat, line: &str| {
+            assert!(run(chat, 0, line), "{line}");
+            let lines = chat_lines(chat);
+            assert_eq!(lines.len(), 2, "{line}: {lines:?}");
+            assert_eq!(lines[0]["color"], "red", "{line}");
+            let context = &lines[1];
+            assert_eq!(context["color"], "gray");
+            assert_eq!(context["click_event"]["command"], format!("/{line}"));
+            let parts: Vec<String> = context["extra"].as_array().unwrap().iter().map(|p| p["text"].as_str().unwrap_or("<here>").to_owned()).collect();
+            (lines[0].clone(), parts)
+        };
+        let (e, parts) = error(&mut chat, "ruby give 65");
+        assert_eq!(e, serde_json::json!({"translate": "argument.integer.big", "with": [64, 65], "color": "red"}));
+        assert_eq!(parts, ["ruby give ", "65", "<here>"]);
+        let (e, parts) = error(&mut chat, "ruby give five");
+        assert_eq!(e["translate"], "parsing.int.expected");
+        assert_eq!(parts, ["ruby give ", "five", "<here>"]);
+        let (e, parts) = error(&mut chat, "ruby give 5 Steve extra");
+        assert_eq!(e["translate"], "command.unknown.argument");
+        assert_eq!(parts, ["...", "e 5 Steve ", "extra", "<here>"]);
+        let (e, parts) = error(&mut chat, "ruby wipe");
+        assert_eq!(e["translate"], "command.unknown.argument", "an operator's");
+        assert_eq!(parts, ["ruby ", "wipe", "<here>"]);
+        let (e, parts) = error(&mut chat, "ruby tint purple");
+        assert_eq!(e["text"], "Unknown colour", "the mod's own error");
+        assert_eq!(parts, ["ruby tint ", "purple", "<here>"]);
+        let (e, parts) = error(&mut chat, "ruby");
+        assert_eq!(e["translate"], "command.unknown.command", "no command at the root");
+        assert_eq!(parts, ["ruby", "<here>"]);
+        // Two spaces: no literal is the empty word, and `ruby` has no argument to try.
+        let (e, parts) = error(&mut chat, "ruby  say x");
+        assert_eq!(e["translate"], "command.unknown.argument");
+        assert_eq!(parts, ["ruby ", " say x", "<here>"]);
+        // A command's own error: no place in the line.
+        assert!(run(&mut chat, 0, "ruby give 2 Nobody"));
+        let lines = chat_lines(&mut chat);
+        assert_eq!(said(&lines), ["argument.entity.notfound.player"]);
         let console = rt.with_host(&mut chat, |rt| perform(rt, None, 4, [0.0; 3], [0.0; 2], "ruby say hi"));
         assert!(console);
-        let said: Vec<serde_json::Value> = chat.lines.iter().map(|l| serde_json::from_str(l).unwrap()).collect();
-        let texts: Vec<&str> = said.iter().map(|j| j["text"].as_str().or_else(|| j["translate"].as_str()).unwrap_or("")).collect();
-        assert_eq!(
-            texts,
-            ["gave 5", "gave 7 to Steve", "spot 11 64 -6", "spot 3 -60 4", "Alex says hello", "wiped", "argument.entity.notfound.player", "permissions.requires.player"]
-        );
-        assert_eq!(said[6]["color"], "red");
-        assert_eq!(said[7]["color"], "red");
+        let lines = chat_lines(&mut chat);
+        assert_eq!(said(&lines), ["permissions.requires.player"]);
+        assert_eq!(lines[0]["color"], "red");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Redirects as Brigadier and vanilla run them: the line goes on at the target's children in a
+    /// context of its own, and the modifier runs at execution, giving the sources the rest runs
+    /// for: `/ruby as <who> say <word>` speaks as that player; `/ruby each <all> say <word>`
+    /// forks, once for each player found. A mod's `dispatcher.execute` throws a line's parse
+    /// error, with Brigadier's message.
+    #[test]
+    fn redirects_run_their_modifier_for_each_source() {
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(lambdas);
+        let (me, steve) = (0x11u128, 0x22u128);
+        let mut chat = Chat { players: vec![(me, [0.0; 3], "Alex"), (steve, [0.0; 3], "Steve")], ..Chat::default() };
+        let dispatcher = new_dispatcher(&mut rt);
+        rt.interned.insert(DISPATCHER_KEY.into(), dispatcher);
+        let name = |rt: &mut Rt, t: &str| rt.string(t);
+        let n = name(&mut rt, "ruby");
+        let root = c(&mut rt, LITERAL, &[n]);
+        let n = name(&mut rt, "say");
+        let say = c(&mut rt, LITERAL, &[n]);
+        let word_type = c(&mut rt, WORD, &[]);
+        let n = name(&mut rt, "word");
+        let word = c(&mut rt, ARGUMENT, &[n, word_type]);
+        let speak = rt.lambda_id("com/mojang/brigadier/Command", 6, vec![]);
+        let word = c(&mut rt, EXECUTES_ARG, &[word, speak]);
+        c(&mut rt, THEN, &[say, word]);
+        c(&mut rt, THEN, &[root, say]);
+        let ruby = c(&mut rt, REGISTER, &[dispatcher, root]);
+        // `as <who>` and `each <all>`, redirecting to `ruby`.
+        for (lit, arg, ty, modifier, key) in [("as", "who", PLAYER, 10, REDIRECT_ARG), ("each", "all", PLAYERS, 11, FORK_ARG)] {
+            let n = name(&mut rt, lit);
+            let l = c(&mut rt, LITERAL, &[n]);
+            let t = c(&mut rt, ty, &[]);
+            let n = name(&mut rt, arg);
+            let a = c(&mut rt, ARGUMENT, &[n, t]);
+            let interface = if key == REDIRECT_ARG { "com/mojang/brigadier/SingleRedirectModifier" } else { "com/mojang/brigadier/RedirectModifier" };
+            let m = rt.lambda_id(interface, modifier, vec![]);
+            c(&mut rt, key, &[a, ruby, m]);
+            c(&mut rt, THEN, &[l, a]);
+            let n = name(&mut rt, "ruby");
+            let again = c(&mut rt, LITERAL, &[n]);
+            c(&mut rt, THEN, &[again, l]);
+            c(&mut rt, REGISTER, &[dispatcher, again]);
+        }
+        let mut run = |chat: &mut Chat, level: u8, line: &str| rt.with_host(chat, |rt| perform(rt, Some((me, "Alex")), level, [0.0; 3], [0.0; 2], line));
+        assert!(run(&mut chat, 0, "ruby as Steve say hi"));
+        assert!(run(&mut chat, 2, "ruby each @a say hey"));
+        assert!(run(&mut chat, 0, "ruby each @a say hey"), "a selector at level 0");
+        let lines = chat_lines(&mut chat);
+        assert_eq!(said(&lines), ["Steve says hi", "Alex says hey", "Steve says hey", "argument.entity.selector.not_allowed", ""]);
+        assert_eq!(lines[4]["color"], "gray", "the selector, a parse error: the line's context");
+        // `dispatcher.execute(line, source)` by a mod: the parse error thrown.
+        let source = new_source(&mut rt, Some((me, "Alex")), 0, [0.0; 3], [0.0; 2]);
+        let line = rt.string("ruby say");
+        let result = c(&mut rt, "com/mojang/brigadier/CommandDispatcher.execute.(Ljava/lang/String;Ljava/lang/Object;)I", &[dispatcher, line, source]);
+        assert_eq!(result, V::I(0));
+        let e = rt.thrown.take().expect("a syntax error");
+        let message = c(&mut rt, "com/mojang/brigadier/exceptions/CommandSyntaxException.getMessage.()Ljava/lang/String;", &[e]);
+        assert_eq!(rt.str_of(message), Some("command.unknown.command at position 8: ruby say<--[HERE]"));
+        // `dispatcher.parse`: what it read, and where it stopped.
+        let line = rt.string("ruby say a b");
+        let results = c(&mut rt, "com/mojang/brigadier/CommandDispatcher.parse.(Ljava/lang/String;Ljava/lang/Object;)Lcom/mojang/brigadier/ParseResults;", &[dispatcher, line, source]);
+        let reader = c(&mut rt, "com/mojang/brigadier/ParseResults.getReader.()Lcom/mojang/brigadier/ImmutableStringReader;", &[results]);
+        assert_eq!(c(&mut rt, "com/mojang/brigadier/ImmutableStringReader.getCursor.()I", &[reader]), V::I(11));
+        let context = c(&mut rt, "com/mojang/brigadier/ParseResults.getContext.()Lcom/mojang/brigadier/context/CommandContextBuilder;", &[results]);
+        let nodes = c(&mut rt, "com/mojang/brigadier/context/CommandContextBuilder.getNodes.()Ljava/util/List;", &[context]);
+        let names: Vec<String> = crate::jutil::elements(&rt, nodes)
+            .into_iter()
+            .map(|p| {
+                let node = c(&mut rt, "com/mojang/brigadier/context/ParsedCommandNode.getNode.()Lcom/mojang/brigadier/tree/CommandNode;", &[p]);
+                name_of(&rt, node)
+            })
+            .collect();
+        assert_eq!(names, ["ruby", "say", "word"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's parser reading a selector with vanilla's (`new EntitySelectorParser(reader,
+    /// allowSelectors).parse()`, as FTB Teams' `TeamArgument` does): it reads on the mod's reader,
+    /// failing as vanilla's where selectors aren't allowed, and what it read finds the players.
+    #[test]
+    fn a_mods_parser_reads_selectors_with_vanillas() {
+        let mut rt = Rt::new();
+        let (me, steve) = (0x11u128, 0x22u128);
+        let mut chat = Chat { players: vec![(me, [0.0; 3], "Alex"), (steve, [3.0, 0.0, 0.0], "Steve")], ..Chat::default() };
+        let parse = |rt: &mut Rt, line: &str, allow: bool| {
+            let reader = rt.new_object(brigadier::READER);
+            let s = rt.string(line);
+            c(rt, "com/mojang/brigadier/StringReader.<init>.(Ljava/lang/String;)V", &[reader, s]);
+            let parser = rt.new_object(SELECTOR_PARSER);
+            c(rt, "net/minecraft/commands/arguments/selector/EntitySelectorParser.<init>.(Lcom/mojang/brigadier/StringReader;Z)V", &[parser, reader, V::I(i32::from(allow))]);
+            let selector = c(rt, "net/minecraft/commands/arguments/selector/EntitySelectorParser.parse.()Lnet/minecraft/commands/arguments/selector/EntitySelector;", &[parser]);
+            (selector, c(rt, GET_CURSOR, &[reader]))
+        };
+        let (_, cursor) = parse(&mut rt, "@p rest", false);
+        let e = rt.thrown.take().expect("selectors aren't allowed");
+        let message = c(&mut rt, "com/mojang/brigadier/exceptions/CommandSyntaxException.getMessage.()Ljava/lang/String;", &[e]);
+        assert_eq!(rt.str_of(message), Some("argument.entity.selector.not_allowed at position 0: <--[HERE]"));
+        assert_eq!(cursor, V::I(0));
+        let (selector, cursor) = parse(&mut rt, "@p[name=!Alex] rest", true);
+        assert!(rt.thrown.is_none());
+        assert_eq!(cursor, V::I(14), "up to the selector's end");
+        let source = new_source(&mut rt, Some((me, "Alex")), 2, [0.0; 3], [0.0; 2]);
+        let found = rt.with_host(&mut chat, |rt| {
+            let p = c(rt, "net/minecraft/commands/arguments/selector/EntitySelector.findSinglePlayer.(Lnet/minecraft/commands/CommandSourceStack;)Lnet/minecraft/server/level/ServerPlayer;", &[selector, source]);
+            command_args::player_name(rt, p)
+        });
+        assert!(rt.thrown.is_none());
+        assert_eq!(found, "Steve");
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
@@ -1807,44 +2522,5 @@ mod tests {
         assert_eq!(name_of(&rt, found), "y");
         let usages: Vec<String> = usages(&mut rt, dispatcher).into_iter().map(|(u, _)| u).collect();
         assert_eq!(usages, ["tool", "tool a", "tool a x", "tool a y", "tool b"]);
-    }
-
-    /// The vanilla argument types read as their parsers: bounds, quoted strings, relative and local
-    /// coordinates, ids with their namespace, block states with properties, times in units.
-    #[test]
-    fn arguments_read_as_vanillas_parsers() {
-        fn read<'a>(rt: &mut Rt, factory: &'static str, args: &[V], line: &'a str) -> Option<(V, &'a str)> {
-            let source = new_source(rt, None, 4, [10.5, 64.0, -3.5], [90.0, 0.0]);
-            let t = c(rt, factory, args);
-            parse_argument(rt, source, t, line, 0).map(|(v, end)| (v, &line[end..]))
-        }
-        let mut rt = Rt::new();
-        let string = "com/mojang/brigadier/arguments/StringArgumentType.string.()Lcom/mojang/brigadier/arguments/StringArgumentType;";
-        let (v, rest) = read(&mut rt, string, &[], r#""a \"b\" c" d"#).unwrap();
-        assert_eq!((rt.str_of(v), rest), (Some(r#"a "b" c"#), " d"));
-        assert!(read(&mut rt, INTEGER, &[V::I(0), V::I(10)], "11").is_none());
-        assert_eq!(read(&mut rt, INTEGER, &[V::I(0), V::I(10)], "-0").map(|r| r.0), Some(V::I(0)));
-        let (v, _) = read(&mut rt, BLOCK_POS, &[], "~ ~1 ~-1").unwrap();
-        let b = rt.get_field(v, "$block");
-        assert_eq!(api::pos_of(&rt, b), [10, 65, -5]);
-        assert!(read(&mut rt, BLOCK_POS, &[], "1.5 2 3").is_none(), "a block position is whole");
-        // Looking along +x (yaw 90 faces -x in vanilla): `^ ^ ^2` is two blocks ahead.
-        let (v, _) = read(&mut rt, BLOCK_POS, &[], "^ ^ ^2").unwrap();
-        let b = rt.get_field(v, "$block");
-        assert_eq!(api::pos_of(&rt, b), [8, 64, -4]);
-        let vec3 = "net/minecraft/commands/arguments/coordinates/Vec3Argument.vec3.()Lnet/minecraft/commands/arguments/coordinates/Vec3Argument;";
-        let (v, _) = read(&mut rt, vec3, &[], "1 2.5 ~").unwrap();
-        let p = rt.get_field(v, "$vec");
-        let xyz = [rt.get_field(p, "x").d(), rt.get_field(p, "y").d(), rt.get_field(p, "z").d()];
-        assert_eq!(xyz, [1.5, 2.5, -3.5], "a whole x and z are the block's centre");
-        let id = "net/minecraft/commands/arguments/ResourceLocationArgument.id.()Lnet/minecraft/commands/arguments/ResourceLocationArgument;";
-        let (v, _) = read(&mut rt, id, &[], "stone").unwrap();
-        assert_eq!(rt.str_of(v), Some("minecraft:stone"));
-        let block = "net/minecraft/commands/arguments/blocks/BlockStateArgument.block.(Lnet/minecraft/commands/CommandBuildContext;)Lnet/minecraft/commands/arguments/blocks/BlockStateArgument;";
-        let (v, rest) = read(&mut rt, block, &[V::NULL], "create:shaft[axis=x]{x:1} 2").unwrap();
-        assert_eq!((rt.str_of(rt.get_field(v, "$text")), rest), (Some("create:shaft[axis=x]"), " 2"));
-        let time = "net/minecraft/commands/arguments/TimeArgument.time.()Lnet/minecraft/commands/arguments/TimeArgument;";
-        assert_eq!(read(&mut rt, time, &[], "1.5d").map(|r| r.0), Some(V::I(36000)));
-        assert_eq!(read(&mut rt, time, &[], "3s").map(|r| r.0), Some(V::I(60)));
     }
 }
