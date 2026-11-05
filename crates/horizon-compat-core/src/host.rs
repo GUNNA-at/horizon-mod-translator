@@ -416,6 +416,12 @@ pub trait Host {
     /// A message for the acting player (`Player.displayClientMessage`, `sendSystemMessage`):
     /// `component` is vanilla's JSON text, shown over the hotbar when `overlay`.
     fn player_message(&mut self, _component: &str, _overlay: bool) {}
+    /// A message for the server's player `uuid`, whoever acts (a mob's killer told of its death):
+    /// as [`Host::player_message`]'s. False when they aren't on, or the host reaches no other
+    /// player than the acting one.
+    fn tell_player(&mut self, _uuid: u128, _component: &str, _overlay: bool) -> bool {
+        false
+    }
     /// A line of a mod's command's answer (`CommandSourceStack.sendSuccess`, `sendFailure`), for
     /// whoever ran it, as vanilla commands' feedback: `component` is vanilla's JSON text.
     fn command_feedback(&mut self, _component: &str) {}
@@ -836,6 +842,8 @@ pub struct MemoryHost {
     pub changed: Vec<[i32; 3]>,
     /// Messages the acting player was sent (`player_message`): JSON text, and whether over the hotbar.
     pub messages: Vec<(String, bool)>,
+    /// Messages for players by UUID ([`Host::tell_player`]): to whom, JSON, over the hotbar.
+    pub told: Vec<(u128, String, bool)>,
     /// Experience orbs spawned: where, worth, and the motion given.
     pub orbs: Vec<([f64; 3], u32, Option<[f64; 3]>)>,
     /// What the acting player looks at (`player_pov_hit`).
@@ -1047,6 +1055,13 @@ impl Host for MemoryHost {
     }
     fn player_message(&mut self, component: &str, overlay: bool) {
         self.messages.push((component.to_owned(), overlay));
+    }
+    fn tell_player(&mut self, uuid: u128, component: &str, overlay: bool) -> bool {
+        let on = self.players.iter().any(|(id, _)| *id == uuid);
+        if on {
+            self.told.push((uuid, component.to_owned(), overlay));
+        }
+        on
     }
     fn spawn_experience_orb(&mut self, at: [f64; 3], value: u32, motion: Option<[f64; 3]>) -> bool {
         self.orbs.push((at, value, motion));

@@ -1056,6 +1056,22 @@ place; `native_server_tick` does not define one, so name the dimension and expec
 - While the game ticks its mobs they are out of the level: from a hook inside that tick, a spawned mob joins after the tick, and the others
   read as gone.
 
+### Hits
+
+`crates/horizon-client/src/game/native_hits.rs`: for the hooks of a hit (`native_living_incoming_damage`,
+`native_living_knockback`, `native_living_damage_pre`, `native_living_damage_post`), which run inside the game's damage code
+with no `Game` at hand. Server-side.
+
+- `native_hit_player()` is the player whose blow the running hit is, as the blow started (`NativeHitPlayer`): their entity
+  id, their `NativeServerPlayer` (UUID, name, place, look, game mode, health), whether they sneak, and the stacks in their
+  main and off hands with their data (`NativeHitHand`: the stack, the damage at which it breaks, its native components and
+  the vanilla ones translated mods read, its enchantments). None for a hit no player's blow dealt (a mob's, an arrow's, a
+  fall), and outside a hit.
+- `native_after_hit(change)` has `change(&mut Game)` made once the hit is over, in the level it was dealt in: when the
+  player's action that dealt it ends or the level's tick does, and before another level takes its place. Changes run in the
+  order they came; those a change leaves run after it, for up to 8 rounds. A hook plays a sound, tells a player or hurts
+  another entity this way.
+
 ### Loot tables
 
 Changing loot a mod didn't make, as NeoForge's `LootTableLoadEvent` and global loot modifiers and Fabric's

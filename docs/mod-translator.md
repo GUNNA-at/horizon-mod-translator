@@ -3420,6 +3420,57 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     no chat, the hooks' player being the one acting and a mob dying in the mobs' tick; in the hit's
     own hooks a mob that attacks (the wolf) stands as an entity of its id alone, of no type
     (`minecraft:`).
+- [x] 2026-11-05 A hit's world for mods: what a listener does in a hit's own hooks reaches the game, and the
+  hooks read the player whose blow it is (`damage.rs`, `bundle.rs`; game: `native_hits.rs`, new API
+  `native_hit_player` and `native_after_hit`). The hooks of a hit (incoming, pre, post, knockback) run inside the
+  game's damage code, in the middle of the hit, and had no host: a listener's sound, particles, message or another
+  entity hurt went nowhere, and a player's held item read as empty. Measured in the pack: Farmer's Delight's skillet
+  (`LivingDamageEvent.Pre`: the attacker's main hand, `Level.playSound`), its backstabbing
+  (`LivingIncomingDamageEvent`: `getWeaponItem`, its enchantment, `ServerLevel.playSound`) and its knife
+  (`LivingKnockBackEvent`: `getItemInHand`), Create's extendo grip (`getMainHandItem`).
+  - The game takes the acting player as their blow starts (`attack_mob`, `with_hit_player`): their place, look, game
+    mode, whether they sneak, and the stacks in their hands with their data (`NativeHitHand`: the native components
+    and the enchantments). The hooks' host answers from it (`player_hand`, `player_place`, the striker as an entity);
+    a hit no player's blow dealt has no player.
+  - What a listener changes waits for the hit to end (`native_after_hit`): sounds, particles, messages, entities hurt,
+    killed, removed, pushed, moved or healed, orbs, payloads. The game makes them when the player's action that dealt
+    the hit ends (`as_guest`) or the level's tick does (`tick_server`), and before another level takes its place
+    (`enter_level`), so each is made in its own level.
+  - A message to a player object reaches that player by UUID (`Host::tell_player`, through `native_tell` and
+    `native_action_bar`), whoever acts: a mob's death, in the mobs' tick with nobody acting, now tells its killer.
+  Test `damage::tests::a_hits_listener_reads_the_weapon_and_its_sound_and_message_reach_the_game` (a listener like the
+  skillet's reads the striker's skillet, also as the source's weapon; its clang and its word reach the hit's host; a
+  death tells its killer by UUID with nobody acting). In game (`hzcheck`'s `Pre` listener now names what the
+  striking player holds and the source's weapon, plays an anvil's clang at the victim and tells the player;
+  `scratchpad/fdcmd.sh`): each blow on the cow told the player in their chat `hzcheck: pre 3.0 of 1.0 on minecraft:cow,
+  holding minecraft:oak_planks, weapon minecraft:oak_planks` (the planks they held), and the incoming, post and death
+  lines the rounds before only logged reached the chat too, as did the drops listener's from the cow's death. The clang
+  isn't heard in these runs (no audio): the test checks it reaches the hit's host. No change of a hit was left unmade,
+  no panic. 358 compat, 17 translator, 42 game tests pass.
+  - Gaps: what a listener changes of the weapon in a hit's hooks (its wear, its data) doesn't reach the game; a
+    player's blow on another player (`pvp_land`) and their arrows have no striking player in the hooks; a mob that
+    attacks still stands as an entity of its id alone, of no type.
+- [x] 2026-11-05 Who hurt a mob and where it looks, for Farmer's Delight's knife and backstabbing (`damage.rs`,
+  `vanilla_entities.rs`, `api_common.rs`, `api.rs`). Missing in the pack's measure (packcov4, jars/uses):
+  `getLookAngle` 35/140, `getViewVector` 27/75, `getLastHurtByMob` 13/39, `getKillCredit` 6/9. In game, a wolf's blow
+  on a sheep reached Farmer's Delight's own listeners and stopped at `getKillCredit` (its knife:
+  `LivingKnockBackEvent`, the credited attacker's main hand) and `getViewVector` (its backstabbing,
+  `isLookingBehindTarget`), and a player's level read `isClientSide` from a `ServerLevel` that had no such field.
+  - A hit the runtime is told of records its causing entity as what last hurt the victim (`setLastHurtByMob`), and a
+    player also as the last player that did (`lastHurtByPlayer`): at the incoming event, at the push (whose
+    attacker the knockback hook is now given) and at the death. `getLastHurtByMob` and `getLastAttacker` answer the
+    first, `getKillCredit` the player first, as vanilla's.
+  - The game's mobs look where they face (`getLookAngle`, `getViewVector`, `getForward`: `calculateViewVector` with
+    `Mth`'s table, level, as the game doesn't tell a mob's pitch).
+  - A server player's level (`level()`, `getCommandSenderWorld()`) is the hooks' one level, a `ServerLevel` whose
+    `isClientSide` field reads false; a level without the field answers it from the host's side.
+  Test `damage::tests::a_hits_listener_finds_its_attacker_and_where_the_victim_looks` (a knife-like listener credits
+  the cow's push to the player holding a flint knife and weakens it; a backstab-like one doubles a blow from behind
+  the cow turned away, not one from in front; a pig nobody hurt has nobody to credit). Not yet checked in game. 359
+  compat, 17 translator tests pass.
+  - Gaps: what hurt a mob isn't forgotten after 100 ticks or when the attacker dies, as vanilla forgets it; a mob's
+    pitch and head turn aren't told; the attributes mods read of an entity (`getAttribute`, `getAttributeValue`:
+    24 jars, 131 uses) aren't there yet.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

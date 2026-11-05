@@ -200,6 +200,7 @@ mod native_data_maps;
 mod native_entities;
 mod native_explosions;
 mod native_falling;
+mod native_hits;
 mod native_hooks;
 mod native_inventories;
 mod native_lifecycle;
@@ -11203,8 +11204,12 @@ impl Game<'_> {
         true
     }
     /// `Player.attack` on a mob: the damage, knockback, sweep, particles and
-    /// sounds.
+    /// sounds. The hit's native hooks read the player as the blow starts
+    /// (`native_hits`).
     pub(super) fn attack_mob(&mut self, index: usize) {
+        self.with_hit_player(|game| game.strike_mob(index));
+    }
+    fn strike_mob(&mut self, index: usize) {
         let target_kind = self.mobs[index].kind.id.clone();
         let target_kind = format!("minecraft:{}", target_kind.trim_start_matches("minecraft:"));
         let (amount, scale, crit, magic) = self.melee_damage(&target_kind, true);

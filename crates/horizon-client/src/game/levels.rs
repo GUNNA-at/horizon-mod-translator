@@ -308,6 +308,8 @@ impl Game<'_> {
             return Ok(());
         }
         if target != self.dim {
+            // What hits left for after them is made in the level they were dealt in.
+            self.run_after_hits();
             let (mut p, opened) = match self.levels.parked.remove(&target) {
                 Some(p) => (p, false),
                 None => (self.open_level(target)?, true),
@@ -440,7 +442,7 @@ impl Game<'_> {
             result = horizon_client::block_contact::in_level(
                 (self.serving.is_some() || self.options.dedicated.is_some()).then_some(dim.id()),
                 || {
-                    if paused {
+                    let ticked = if paused {
                         self.tick_lan(true);
                         Ok(())
                     } else if k == 0 {
@@ -451,7 +453,10 @@ impl Game<'_> {
                             self.tick_weather_effects();
                         }
                         self.tick_world(running)
-                    }
+                    };
+                    // What the hits of the level's tick left for after them (`native_hits`).
+                    self.run_after_hits();
+                    ticked
                 },
             );
             if result.is_err() {

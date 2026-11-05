@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "a hit's world for its hooks: the striking player as the blow started, with what they held (`native_hit_player`), and changes made to the game once the hit is over (`native_after_hit`).",
+  "doc_summary": "a hit's world for its hooks (`native_living_incoming_damage`, `native_living_knockback`, `native_living_damage_pre`, `native_living_damage_post`), which run inside the game's damage code with no game at hand: `native_hit_player()` is the player whose blow the hit is, as the blow started, with the stacks in their hands and their data; `native_after_hit(change)` has the game changed once the hit is over, in the level it was dealt in (a sound, a message, another entity hurt). Bundles that use them need \"hooks\": @API:hit_world@.",
+  "comments": ["crates/horizon-client/src/game/native_hits.rs"]
+}

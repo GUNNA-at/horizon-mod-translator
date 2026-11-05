@@ -401,6 +401,19 @@ fn server_effects(c: &str) -> String {
                 self.game.native_level_particles(&options, state, p.at, p.delta, p.speed, count);
             }}
         }}
+        // Any player on the server by their UUID, whoever acts (a mob's killer told of its death).
+        fn tell_player(&mut self, uuid: u128, component: &str, overlay: bool) -> bool {{
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(component) else {{
+                return false;
+            }};
+            let plain = json.get("text").or_else(|| json.get("translate")).and_then(|t| t.as_str()).unwrap_or("").to_owned();
+            let line = horizon_client::text::Text::literal(plain).with_component(json);
+            if overlay {{
+                self.game.native_action_bar(uuid, line)
+            }} else {{
+                self.game.native_tell(uuid, line)
+            }}
+        }}
 "#)
 }
 
@@ -1955,8 +1968,185 @@ fn world_writes(c: &str) -> String {
     )
 }
 
+/// A stack's component as the runtime's NBT (`Self::nbt_of`, inside an `impl`): the game's tag,
+/// none for an end tag.
+fn nbt_of_fn(c: &str) -> String {
+    format!(
+        r#"        fn nbt_of(tag: &horizon_world::nbt::Tag) -> Option<{c}::nbt::Nbt> {{
+            use horizon_world::nbt::Tag;
+            use {c}::nbt::Nbt;
+            Some(match tag {{
+                Tag::Byte(b) => Nbt::Byte(*b),
+                Tag::Short(s) => Nbt::Short(*s),
+                Tag::Int(i) => Nbt::Int(*i),
+                Tag::Long(l) => Nbt::Long(*l),
+                Tag::Float(f) => Nbt::Float(f32::from_bits(*f)),
+                Tag::Double(d) => Nbt::Double(f64::from_bits(*d)),
+                Tag::String(s) => Nbt::String(s.to_string_lossy()),
+                Tag::Compound(c) => Nbt::Compound(c.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), Self::nbt_of(v)?))).collect()),
+                Tag::List(l) => Nbt::List(l.iter().filter_map(Self::nbt_of).collect()),
+                Tag::ByteArray(a) => Nbt::ByteArray(a.iter().map(|b| *b as i8).collect()),
+                Tag::IntArray(a) => Nbt::IntArray(a.clone()),
+                Tag::LongArray(a) => Nbt::LongArray(a.clone()),
+                Tag::End => return None,
+            }})
+        }}
+"#
+    )
+}
+
+/// The host of a hit's hooks (`native_living_incoming_damage`, `_knockback`, `_damage_pre`,
+/// `_damage_post`), which run inside the game's damage code with no game at hand: it answers what
+/// the game told of the hit (the player whose blow it is, as the blow started:
+/// `native_hit_player`), and what a listener changes of the world waits for the hit to end
+/// (`native_after_hit`), made then by a host of the game (`Later`).
+fn hit_host(c: &str, server_send: &str) -> String {
+    let writes = world_writes(c);
+    let nbt_of = nbt_of_fn(c);
+    let later = |call: &str| format!("crate::game::native_hits::native_after_hit(move |game| {{\n                {call};\n            }});");
+    let (hurt, kill, remove) = (later("Later { game }.hurt_entity(id, amount)"), later("Later { game }.kill_entity(id)"), later("Later { game }.remove_entity(id)"));
+    let (health, push, teleport) = (later("Later { game }.set_entity_health(id, health)"), later("Later { game }.push_entity(id, velocity)"), later("Later { game }.teleport_entity(id, pos)"));
+    let (orb, payload) = (later("game.native_spawn_experience_orb(at, value, motion)"), later("Later { game }.send_payload(to, &channel, &data)"));
+    format!(r#"    // The trait's methods, called on the hosts below by name.
+    use {c}::host::Host as _;
+    struct Host {{
+        player: Option<crate::game::native_hits::NativeHitPlayer>,
+    }}
+    impl Host {{
+{nbt_of}    }}
+    impl {c}::host::Host for Host {{
+        // No level is at hand inside a hit: no blocks to read or set.
+        fn block_state(&self, _pos: [i32; 3]) -> String {{
+            "minecraft:air".into()
+        }}
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
+            false
+        }}
+        fn dimension(&self) -> String {{
+            self.player.as_ref().map_or_else(|| "minecraft:overworld".to_owned(), |p| p.player.dimension.clone())
+        }}
+        fn player_id(&self) -> Option<u128> {{
+            self.player.as_ref().map(|p| p.player.uuid)
+        }}
+        fn player_creative(&self) -> bool {{
+            self.player.as_ref().is_some_and(|p| p.player.game_mode == 1)
+        }}
+        fn player_sneaking(&self) -> bool {{
+            self.player.as_ref().is_some_and(|p| p.sneaking)
+        }}
+        fn player_place(&self) -> Option<([f64; 3], f32, f32)> {{
+            self.player.as_ref().map(|p| (p.player.position, p.player.yaw, p.player.pitch))
+        }}
+        fn player_held(&self) -> Option<(String, u32)> {{
+            self.player_hand(0).map(|h| (h.item, h.count))
+        }}
+        // What the player held as the blow started, with its data.
+        fn player_hand(&self, hand: u8) -> Option<{c}::host::HandStack> {{
+            let held = self.player.as_ref()?.hands[usize::from(hand.min(1))].as_ref()?;
+            Some({c}::host::HandStack {{
+                item: held.stack.item.to_string(),
+                count: held.stack.count,
+                damage: held.stack.damage,
+                max_damage: held.max_damage,
+                components: held.components.iter().filter_map(|(name, tag)| Some(((*name).to_owned(), Self::nbt_of(tag)?))).collect(),
+            }})
+        }}
+        fn entity(&self, id: i32) -> Option<{c}::host::EntityView> {{
+            let p = self.player.as_ref().filter(|p| p.entity == id)?;
+            Some({c}::host::EntityView {{ id, kind: "minecraft:player".into(), pos: p.player.position, yaw: p.player.yaw, health: Some((p.player.health, 20.0)) }})
+        }}
+        fn player_entities(&self) -> Vec<(i32, u128, [f64; 3])> {{
+            self.player.iter().map(|p| (p.entity, p.player.uuid, p.player.position)).collect()
+        }}
+        // What a listener changes waits for the hit to end.
+        fn play_sound(&mut self, s: &{c}::host::Sound) {{
+            let s = s.clone();
+            crate::game::native_hits::native_after_hit(move |game| {{
+                game.native_level_sound(&s.event, s.at, s.source, s.volume, s.pitch);
+            }});
+        }}
+        fn particles(&mut self, p: &{c}::host::Particles) {{
+            let Some(count) = p.count else {{ return }};
+            let p = p.clone();
+            crate::game::native_hits::native_after_hit(move |game| {{
+                if let Some((options, state)) = game.native_particle_options(&p.kind, p.block.as_deref(), p.item.as_deref(), p.dust, p.at) {{
+                    game.native_level_particles(&options, state, p.at, p.delta, p.speed, count);
+                }}
+            }});
+        }}
+        fn player_message(&mut self, component: &str, overlay: bool) {{
+            if let Some(uuid) = self.player_id() {{
+                self.tell_player(uuid, component, overlay);
+            }}
+        }}
+        fn tell_player(&mut self, uuid: u128, component: &str, overlay: bool) -> bool {{
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(component) else {{
+                return false;
+            }};
+            crate::game::native_hits::native_after_hit(move |game| {{
+                let plain = json.get("text").or_else(|| json.get("translate")).and_then(|t| t.as_str()).unwrap_or("").to_owned();
+                let line = horizon_client::text::Text::literal(plain).with_component(json);
+                if overlay {{
+                    game.native_action_bar(uuid, line);
+                }} else {{
+                    game.native_tell(uuid, line);
+                }}
+            }});
+            true
+        }}
+        fn hurt_entity(&mut self, id: i32, amount: f32) -> bool {{
+            {hurt}
+            true
+        }}
+        fn kill_entity(&mut self, id: i32) -> bool {{
+            {kill}
+            true
+        }}
+        fn remove_entity(&mut self, id: i32) -> bool {{
+            {remove}
+            true
+        }}
+        fn set_entity_health(&mut self, id: i32, health: f32) -> bool {{
+            {health}
+            true
+        }}
+        fn push_entity(&mut self, id: i32, velocity: [f64; 3]) -> bool {{
+            {push}
+            true
+        }}
+        fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {{
+            {teleport}
+            true
+        }}
+        fn spawn_experience_orb(&mut self, at: [f64; 3], value: u32, motion: Option<[f64; 3]>) -> bool {{
+            {orb}
+            true
+        }}
+        fn send_payload(&mut self, to: {c}::host::PayloadTarget, channel: &str, data: &[u8]) -> bool {{
+            let (channel, data) = (channel.to_owned(), data.to_vec());
+            {payload}
+            true
+        }}
+    }}
+    // The game once the hit is over, for what its hooks changed.
+    struct Later<'a, 'b> {{
+        game: &'a mut crate::game::Game<'b>,
+    }}
+    impl {c}::host::Host for Later<'_, '_> {{
+        fn block_state(&self, pos: [i32; 3]) -> String {{
+            self.game.native_state_text_at(pos)
+        }}
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
+            false
+        }}
+{writes}{server_send}    }}
+    let mut host = Host {{ player: crate::game::native_hits::native_hit_player() }};
+"#)
+}
+
 fn player_host(c: &str, server_effects: &str) -> String {
     let (reads, writes) = (world_reads("self.game"), world_writes(c));
+    let nbt_of = nbt_of_fn(c);
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
     }}
@@ -2176,26 +2366,7 @@ fn player_host(c: &str, server_effects: &str) -> String {
                 None => self.game.native_remove_component(stack, name).is_ok(),
             }}
         }}
-        fn nbt_of(tag: &horizon_world::nbt::Tag) -> Option<{c}::nbt::Nbt> {{
-            use horizon_world::nbt::Tag;
-            use {c}::nbt::Nbt;
-            Some(match tag {{
-                Tag::Byte(b) => Nbt::Byte(*b),
-                Tag::Short(s) => Nbt::Short(*s),
-                Tag::Int(i) => Nbt::Int(*i),
-                Tag::Long(l) => Nbt::Long(*l),
-                Tag::Float(f) => Nbt::Float(f32::from_bits(*f)),
-                Tag::Double(d) => Nbt::Double(f64::from_bits(*d)),
-                Tag::String(s) => Nbt::String(s.to_string_lossy()),
-                Tag::Compound(c) => Nbt::Compound(c.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), Self::nbt_of(v)?))).collect()),
-                Tag::List(l) => Nbt::List(l.iter().filter_map(Self::nbt_of).collect()),
-                Tag::ByteArray(a) => Nbt::ByteArray(a.iter().map(|b| *b as i8).collect()),
-                Tag::IntArray(a) => Nbt::IntArray(a.clone()),
-                Tag::LongArray(a) => Nbt::LongArray(a.clone()),
-                Tag::End => return None,
-            }})
-        }}
-        fn tag_of(n: &{c}::nbt::Nbt) -> Option<horizon_world::nbt::Tag> {{
+{nbt_of}        fn tag_of(n: &{c}::nbt::Nbt) -> Option<horizon_world::nbt::Tag> {{
             use horizon_world::nbt::{{Compound, JavaString, Tag}};
             use {c}::nbt::Nbt;
             Some(match n {{
@@ -2226,7 +2397,9 @@ fn block_entity_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
     let player_host = player_host(&c, &format!("{server_effects}{server_send}"));
     let host = game_host(&c, &server_send);
     let (read_host, level_host) = (level_read_host(&c), level_host(krate));
-    // A hit's hooks have no world to ask: the hurt mob as the game holds it then.
+    // A hit's hooks have no game at hand: the hurt mob as the game holds it then, and a host of
+    // what the game told of the hit.
+    let hit_host = hit_host(&c, &server_send);
     let seen = format!(
         "crate::game::native_hooks::native_hit_entity().filter(|h| h.entity == entity).map(|h| {c}::host::EntityView {{ id: entity, kind: kind.to_owned(), pos: h.position, yaw: h.yaw, health: Some((h.health, h.max_health)) }})"
     );
@@ -2454,7 +2627,7 @@ fn {id}_living_incoming_damage(entity: i32, kind: &str, damage_type: &str, causi
     }}
     let seen = {seen};
     let source = {c}::damage::Source {{ damage_type, causing, direct }};
-    if {krate}::hook_runtime("living_incoming_damage", |rt| {c}::damage::incoming(rt, entity, kind, seen.as_ref(), source, &mut *amount)) {{
+{hit_host}    if {krate}::hook_runtime("living_incoming_damage", |rt| {c}::damage::incoming(rt, &mut host, entity, kind, seen.as_ref(), source, &mut *amount)) {{
         *canceled = true;
     }}
 }}
@@ -2466,10 +2639,10 @@ fn {id}_living_knockback(entity: i32, kind: &str, damage_type: &str, causing: i3
     if *canceled {{
         return;
     }}
-    // NeoForge's event names no source.
-    let _ = (damage_type, causing, direct);
+    // NeoForge's event names no source; its attacker has hurt the entity by then (`getKillCredit`).
+    let _ = (damage_type, direct);
     let seen = {seen};
-    if {krate}::hook_runtime("living_knockback", |rt| {c}::damage::knockback(rt, entity, kind, seen.as_ref(), &mut *strength, &mut *x, &mut *z)) {{
+{hit_host}    if {krate}::hook_runtime("living_knockback", |rt| {c}::damage::knockback(rt, &mut host, entity, kind, seen.as_ref(), causing, &mut *strength, &mut *x, &mut *z)) {{
         *canceled = true;
     }}
 }}
@@ -2480,7 +2653,7 @@ fn {id}_living_knockback(entity: i32, kind: &str, damage_type: &str, causing: i3
 fn {id}_living_damage_pre(entity: i32, kind: &str, damage_type: &str, causing: i32, direct: i32, amount: &mut f32) {{
     let seen = {seen};
     let source = {c}::damage::Source {{ damage_type, causing, direct }};
-    {krate}::hook_runtime("living_damage_pre", |rt| {c}::damage::damage_pre(rt, entity, kind, seen.as_ref(), source, &mut *amount));
+{hit_host}    {krate}::hook_runtime("living_damage_pre", |rt| {c}::damage::damage_pre(rt, &mut host, entity, kind, seen.as_ref(), source, &mut *amount));
 }}
 "#)),
         ("living_damage_post", format!(r#"// Generated by horizon-mod-translator: what of a hit reached the health
@@ -2488,7 +2661,7 @@ fn {id}_living_damage_pre(entity: i32, kind: &str, damage_type: &str, causing: i
 fn {id}_living_damage_post(entity: i32, kind: &str, damage_type: &str, causing: i32, direct: i32, amount: f32) {{
     let seen = {seen};
     let source = {c}::damage::Source {{ damage_type, causing, direct }};
-    {krate}::hook_runtime("living_damage_post", |rt| {c}::damage::damage_post(rt, entity, kind, seen.as_ref(), source, amount));
+{hit_host}    {krate}::hook_runtime("living_damage_post", |rt| {c}::damage::damage_post(rt, &mut host, entity, kind, seen.as_ref(), source, amount));
 }}
 "#)),
         ("living_death", format!(r#"// Generated by horizon-mod-translator: a mob dies (`native_living_death`: where

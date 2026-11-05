@@ -1381,7 +1381,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // A level's side is its own (vanilla's `isClientSide` field: the client's level, a mod's
         // wrapper made on either side); one that doesn't carry it is on the host's.
-        (_, "isClientSide") if level => match rt.get_field(a(0), "isClientSide") {
+        (_, "isClientSide" | "$isClientSide") if level => match rt.get_field(a(0), "isClientSide") {
             V::I(c) => V::I(c),
             _ => V::I(rt.host().is_some_and(|h| !h.is_server()) as i32),
         },

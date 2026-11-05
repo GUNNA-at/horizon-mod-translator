@@ -652,6 +652,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         "getYRot" | "getYHeadRot" | "getVisualRotationYInDegrees" => V::F(rt.get_field(e, "$yRot").f()),
         "getXRot" => V::F(0.0),
+        // Where it looks: its facing, level (the game doesn't tell a mob's pitch).
+        "getLookAngle" | "getViewVector" | "getForward" => crate::api_common::view_vector(rt, rt.get_field(e, "$yRot").f(), 0.0),
+        // What last hurt it, as the hits the runtime was told of name it (`damage::hurt_by`): its
+        // revenge target, and who gets the credit for a kill (`getKillCredit`: a player that hurt
+        // it first).
+        "getKillCredit" | "getLastHurtByMob" | "getLastAttacker" if living => {
+            let player = if name == "getKillCredit" { rt.get_field(e, "$lastHurtByPlayer") } else { V::NULL };
+            match (player, rt.get_field(e, "$lastHurtBy")) {
+                (p, _) if p.r() != 0 => p,
+                (_, by) if by.r() != 0 => by,
+                _ => V::NULL,
+            }
+        }
         "getDeltaMovement" => vec3(rt, [0.0; 3]),
         "onGround" => V::I(1),
         "getBoundingBox" => {
@@ -755,7 +768,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         | "isInWater" | "isInLava" | "isInWaterOrRain" | "isUnderWater" | "isBaby" | "isSleeping" | "isUsingItem" | "isFallFlying" | "fireImmune"
         | "isSprinting" | "isSwimming" | "isInvulnerable" | "hasEffect" | "addEffect" | "removeEffect" | "isCustomNameVisible" | "hasCustomName" => V::I(0),
         "isAttackable" | "isPickable" | "canBeCollidedWith" | "isEffectiveAi" | "shouldBeSaved" => V::I(i32::from(name != "canBeCollidedWith")),
-        "getEffect" | "getVehicle" | "getControllingPassenger" | "getFirstPassenger" | "getCustomName" | "getTarget" | "getLastHurtByMob" => V::NULL,
+        "getEffect" | "getVehicle" | "getControllingPassenger" | "getFirstPassenger" | "getCustomName" | "getTarget" => V::NULL,
         "getRootVehicle" => e,
         "getPassengers" | "getActiveEffects" => crate::jutil::new_list(rt, Vec::new()),
         "getMainHandItem" | "getOffhandItem" | "getItemBySlot" | "getItemInHand" | "getUseItem" | "getWeaponItem" => {

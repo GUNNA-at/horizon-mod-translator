@@ -18,10 +18,13 @@
 //! One `DamageContainer` follows a hit from its incoming event to its `Post`, as NeoForge's stack of
 //! them on the entity does, so `getOriginalDamage` is the hit's amount before armour.
 //!
-//! The hit's hooks run inside the game's damage code, with no world to read: the hurt entity is
-//! brought up to date from what the game told of it ([`crate::vanilla_entities::living`]), a player
-//! is the server's player by entity id ([`server_tick`] keeps the map), and an attacker the runtime
-//! hasn't met stands as an entity of its id alone.
+//! The hit's hooks run inside the game's damage code, in the middle of the hit: their host answers
+//! what the game told of it (the player whose blow it is, with what they held as it started), and
+//! makes what a listener changes of the world (a sound, a message, another entity hurt) once the hit
+//! is over. The hurt entity is brought up to date from what the game told of it
+//! ([`crate::vanilla_entities::living`]), a player is the server's player by entity id
+//! ([`server_tick`] keeps the map), and an attacker the runtime hasn't met stands as an entity of
+//! its id alone.
 //!
 //! Not modelled: a container's reduction functions (`addModifier`: the game computes its own
 //! reductions), the invulnerable time a listener sets (the game keeps its own), a player's death a
@@ -659,6 +662,18 @@ fn actor(rt: &mut Rt, id: i32, causes: bool) -> V {
     crate::vanilla_entities::unseen(rt, id, causes)
 }
 
+/// Records `by`, a hit's causing entity, as what last hurt `victim` (`LivingEntity.setLastHurtByMob`),
+/// and a player also as the last player that did (`lastHurtByPlayer`): a living one only, as
+/// vanilla's. What `getLastHurtByMob` and `getKillCredit` (the player first) answer.
+fn hurt_by(rt: &mut Rt, victim: V, by: V) {
+    if victim.r() != 0 && by.r() != 0 && rt.instance_of(by, LIVING) {
+        rt.put_field(victim, "$lastHurtBy", by);
+        if rt.instance_of(by, PLAYER) {
+            rt.put_field(victim, "$lastHurtByPlayer", by);
+        }
+    }
+}
+
 /// The `DamageSource` of a hit as the hooks name it.
 fn hit_source(rt: &mut Rt, s: &Source<'_>) -> V {
     let causing = actor(rt, s.causing, true);
@@ -711,128 +726,143 @@ fn hit_container(rt: &mut Rt, entity: i32, source: &Source<'_>, amount: f32) -> 
 /// `LivingIncomingDamageEvent`: entity `entity` of type `kind` (`minecraft:player` for a player),
 /// as the game saw it (`seen`), is about to take `amount` of `source`. A listener's amount comes
 /// back in `amount`; whether one canceled the hit.
-pub fn incoming(rt: &mut Rt, entity: i32, kind: &str, seen: Option<&EntityView>, source: Source<'_>, amount: &mut f32) -> bool {
+pub fn incoming(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, seen: Option<&EntityView>, source: Source<'_>, amount: &mut f32) -> bool {
     let heard = listened(rt, INCOMING);
     if !heard && !listened(rt, PRE) && !listened(rt, POST) {
         return false;
     }
-    let victim = victim(rt, entity, kind, seen);
-    if victim.r() == 0 {
-        return false;
-    }
-    let s = hit_source(rt, &source);
-    let c = container(rt, s, *amount);
-    keep_hit(rt, entity, c);
-    if !heard {
-        return false;
-    }
-    let ev = rt.new_object(INCOMING);
-    put_all(rt, ev, &[("$entity", victim), ("$container", c), ("$canceled", V::I(0))]);
-    crate::neo::post(rt, INCOMING, ev);
-    let canceled = rt.get_field(ev, "$canceled").i() != 0;
-    let new = rt.get_field(c, "$new").f();
-    if new.is_finite() {
-        *amount = new;
-    }
-    if canceled {
-        drop_hit(rt, entity);
-    }
-    canceled
+    rt.with_host(host, |rt| {
+        let victim = victim(rt, entity, kind, seen);
+        if victim.r() == 0 {
+            return false;
+        }
+        let s = hit_source(rt, &source);
+        let c = container(rt, s, *amount);
+        keep_hit(rt, entity, c);
+        if !heard {
+            return false;
+        }
+        let ev = rt.new_object(INCOMING);
+        put_all(rt, ev, &[("$entity", victim), ("$container", c), ("$canceled", V::I(0))]);
+        crate::neo::post(rt, INCOMING, ev);
+        let canceled = rt.get_field(ev, "$canceled").i() != 0;
+        let new = rt.get_field(c, "$new").f();
+        if new.is_finite() {
+            *amount = new;
+        }
+        if canceled {
+            drop_hit(rt, entity);
+        } else {
+            let by = rt.get_field(s, "$causing");
+            hurt_by(rt, victim, by);
+        }
+        canceled
+    })
 }
 
 /// `LivingDamageEvent.Pre`: what is left of the hit on entity `entity` once armour, enchantments and
 /// Resistance took their share, `amount`, which a listener sets (a value not finite is left as it
 /// was, one below 0 is 0).
-pub fn damage_pre(rt: &mut Rt, entity: i32, kind: &str, seen: Option<&EntityView>, source: Source<'_>, amount: &mut f32) {
+pub fn damage_pre(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, seen: Option<&EntityView>, source: Source<'_>, amount: &mut f32) {
     if !listened(rt, PRE) && !listened(rt, POST) {
         return;
     }
-    let victim = victim(rt, entity, kind, seen);
-    if victim.r() == 0 {
-        return;
-    }
-    let c = hit_container(rt, entity, &source, *amount);
-    rt.put_field(c, "$new", V::F(*amount));
-    if !listened(rt, PRE) {
-        return;
-    }
-    let ev = rt.new_object(PRE);
-    put_all(rt, ev, &[("$entity", victim), ("$container", c)]);
-    crate::neo::post(rt, PRE, ev);
-    let new = rt.get_field(c, "$new").f();
-    if new.is_finite() {
-        *amount = new.max(0.0);
-    }
+    rt.with_host(host, |rt| {
+        let victim = victim(rt, entity, kind, seen);
+        if victim.r() == 0 {
+            return;
+        }
+        let c = hit_container(rt, entity, &source, *amount);
+        rt.put_field(c, "$new", V::F(*amount));
+        if !listened(rt, PRE) {
+            return;
+        }
+        let ev = rt.new_object(PRE);
+        put_all(rt, ev, &[("$entity", victim), ("$container", c)]);
+        crate::neo::post(rt, PRE, ev);
+        let new = rt.get_field(c, "$new").f();
+        if new.is_finite() {
+            *amount = new.max(0.0);
+        }
+    })
 }
 
 /// `LivingDamageEvent.Post`: `amount` of the hit reached entity `entity`'s health (0 when
 /// absorption took it all). Heard only.
-pub fn damage_post(rt: &mut Rt, entity: i32, kind: &str, seen: Option<&EntityView>, source: Source<'_>, amount: f32) {
+pub fn damage_post(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, seen: Option<&EntityView>, source: Source<'_>, amount: f32) {
     if !listened(rt, POST) {
         drop_hit(rt, entity);
         return;
     }
-    let victim = victim(rt, entity, kind, seen);
-    if victim.r() == 0 {
+    rt.with_host(host, |rt| {
+        let victim = victim(rt, entity, kind, seen);
+        if victim.r() == 0 {
+            drop_hit(rt, entity);
+            return;
+        }
+        let c = hit_container(rt, entity, &source, amount);
         drop_hit(rt, entity);
-        return;
-    }
-    let c = hit_container(rt, entity, &source, amount);
-    drop_hit(rt, entity);
-    let ev = rt.new_object(POST);
-    let fields: Vec<(&'static str, V)> = ["$source", "$original", "$blocked", "$shield", "$invulnerability"]
-        .into_iter()
-        .chain(REDUCTIONS)
-        .map(|f| (f, rt.get_field(c, f)))
-        .collect();
-    put_all(rt, ev, &fields);
-    put_all(rt, ev, &[("$entity", victim), ("$new", V::F(amount))]);
-    crate::neo::post(rt, POST, ev);
+        let ev = rt.new_object(POST);
+        let fields: Vec<(&'static str, V)> = ["$source", "$original", "$blocked", "$shield", "$invulnerability"]
+            .into_iter()
+            .chain(REDUCTIONS)
+            .map(|f| (f, rt.get_field(c, f)))
+            .collect();
+        put_all(rt, ev, &fields);
+        put_all(rt, ev, &[("$entity", victim), ("$new", V::F(amount))]);
+        crate::neo::post(rt, POST, ev);
+    })
 }
 
-/// `LivingKnockBackEvent`: entity `entity` is about to be pushed `strength` away from (`x`, `z`).
-/// A listener's values come back (the strength through a float, as NeoForge's event holds it);
+/// `LivingKnockBackEvent`: entity `entity` is about to be pushed `strength` away from (`x`, `z`) by
+/// a blow of entity `causing` (0 for none), which has hurt it by then (`getKillCredit`). A
+/// listener's values come back (the strength through a float, as NeoForge's event holds it);
 /// whether one canceled the push.
-pub fn knockback(rt: &mut Rt, entity: i32, kind: &str, seen: Option<&EntityView>, strength: &mut f64, x: &mut f64, z: &mut f64) -> bool {
+pub fn knockback(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, seen: Option<&EntityView>, causing: i32, strength: &mut f64, x: &mut f64, z: &mut f64) -> bool {
     if !listened(rt, KNOCKBACK) {
         return false;
     }
-    let victim = victim(rt, entity, kind, seen);
-    if victim.r() == 0 {
-        return false;
-    }
-    let ev = rt.new_object(KNOCKBACK);
-    let s = *strength as f32;
-    put_all(
-        rt,
-        ev,
-        &[
-            ("$entity", victim),
-            ("$strength", V::F(s)),
-            ("$ratioX", V::D(*x)),
-            ("$ratioZ", V::D(*z)),
-            ("$originalStrength", V::F(s)),
-            ("$originalRatioX", V::D(*x)),
-            ("$originalRatioZ", V::D(*z)),
-            ("$canceled", V::I(0)),
-        ],
-    );
-    crate::neo::post(rt, KNOCKBACK, ev);
-    if rt.get_field(ev, "$canceled").i() != 0 {
-        return true;
-    }
-    // A strength no listener changed stays the game's own double.
-    let to = rt.get_field(ev, "$strength").f();
-    if to != s && to.is_finite() {
-        *strength = f64::from(to);
-    }
-    for (field, v) in [("$ratioX", x), ("$ratioZ", z)] {
-        let to = rt.get_field(ev, field).d();
-        if to.is_finite() {
-            *v = to;
+    rt.with_host(host, |rt| {
+        let victim = victim(rt, entity, kind, seen);
+        if victim.r() == 0 {
+            return false;
         }
-    }
-    false
+        // The blow's attacker has hurt it by now (`getKillCredit`, as Farmer's Delight's knife asks).
+        let by = actor(rt, causing, true);
+        hurt_by(rt, victim, by);
+        let ev = rt.new_object(KNOCKBACK);
+        let s = *strength as f32;
+        put_all(
+            rt,
+            ev,
+            &[
+                ("$entity", victim),
+                ("$strength", V::F(s)),
+                ("$ratioX", V::D(*x)),
+                ("$ratioZ", V::D(*z)),
+                ("$originalStrength", V::F(s)),
+                ("$originalRatioX", V::D(*x)),
+                ("$originalRatioZ", V::D(*z)),
+                ("$canceled", V::I(0)),
+            ],
+        );
+        crate::neo::post(rt, KNOCKBACK, ev);
+        if rt.get_field(ev, "$canceled").i() != 0 {
+            return true;
+        }
+        // A strength no listener changed stays the game's own double.
+        let to = rt.get_field(ev, "$strength").f();
+        if to != s && to.is_finite() {
+            *strength = f64::from(to);
+        }
+        for (field, v) in [("$ratioX", x), ("$ratioZ", z)] {
+            let to = rt.get_field(ev, field).d();
+            if to.is_finite() {
+                *v = to;
+            }
+        }
+        false
+    })
 }
 
 /// `LivingDeathEvent`: the game's mob `entity` of type `kind` dies of `source`. Whether a listener
@@ -850,6 +880,8 @@ pub fn death(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, source: 
             return false;
         }
         let s = hit_source(rt, &source);
+        let by = rt.get_field(s, "$causing");
+        hurt_by(rt, victim, by);
         let ev = rt.new_object(DEATH);
         put_all(rt, ev, &[("$entity", victim), ("$source", s), ("$canceled", V::I(0))]);
         crate::neo::post(rt, DEATH, ev);
@@ -1254,6 +1286,87 @@ mod tests {
                 crate::api::call(rt, init, &[e, level, V::D(0.5), V::D(70.0), V::D(0.5), diamond, V::D(0.0), V::D(0.3), V::D(0.0)]);
                 crate::api::call(rt, key("java/util/Collection", "add", "(Ljava/lang/Object;)Z"), &[drops, e]);
             }
+            // As Farmer's Delight's skillet: what the striking player holds, a clang at the victim and
+            // a word over the player's hotbar.
+            7 => {
+                let s = source_of(rt, PRE);
+                let by = crate::api::call(rt, key(SOURCE, "getEntity", "()Lnet/minecraft/world/entity/Entity;"), &[s]);
+                if !rt.instance_of(by, PLAYER) {
+                    note(rt, "pre by no player".into());
+                    return Some(V::Void);
+                }
+                let main = crate::hand::constant(rt, crate::hand::MAIN);
+                let held = crate::api::call(rt, key(PLAYER, "getItemInHand", "(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;"), &[by, main]);
+                let held = crate::api_common::item_like_name(rt, rt.get_field(held, "$item"));
+                let weapon = crate::api::call(rt, key(SOURCE, "getWeaponItem", "()Lnet/minecraft/world/item/ItemStack;"), &[s]);
+                let weapon = crate::api_common::item_like_name(rt, rt.get_field(weapon, "$item"));
+                note(rt, format!("pre by a player holding {held}, weapon {weapon}"));
+                let victim = crate::api::call(rt, key(LIVING_EVENT, "getEntity", "()Lnet/minecraft/world/entity/LivingEntity;"), &[ev]);
+                let entity = "net/minecraft/world/entity/Entity";
+                let at: Vec<V> = ["getX", "getY", "getZ"].into_iter().map(|m| crate::api::call(rt, key(entity, m, "()D"), &[victim])).collect();
+                let level = crate::glue::level(rt);
+                let clang = crate::api::get_static(rt, "net/minecraft/sounds/SoundEvents.ANVIL_LAND");
+                let players = crate::api::get_static(rt, "net/minecraft/sounds/SoundSource.PLAYERS");
+                let play = "net/minecraft/world/level/Level.playSound.(Lnet/minecraft/world/entity/player/Player;DDDLnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundSource;FF)V";
+                crate::api::call(rt, play, &[level, V::NULL, at[0], at[1], at[2], clang, players, V::F(1.0), V::F(0.5)]);
+                let text = rt.string("bonk");
+                let line = crate::api::call(rt, "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;", &[text]);
+                crate::api::call(rt, key(PLAYER, "displayClientMessage", "(Lnet/minecraft/network/chat/Component;Z)V"), &[by, line, V::I(1)]);
+            }
+            // A mob's killer told of its death, in the mobs' tick with nobody acting.
+            8 => {
+                let s = source_of(rt, DEATH);
+                let by = crate::api::call(rt, key(SOURCE, "getEntity", "()Lnet/minecraft/world/entity/Entity;"), &[s]);
+                if rt.instance_of(by, PLAYER) {
+                    let text = rt.string("got it");
+                    let line = crate::api::call(rt, "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;", &[text]);
+                    crate::api::call(rt, key(PLAYER, "sendSystemMessage", "(Lnet/minecraft/network/chat/Component;)V"), &[by, line]);
+                }
+            }
+            // As Farmer's Delight's knife: whoever gets the credit for the victim (who just hit it),
+            // if they hold a knife, pushes it less.
+            9 => {
+                let victim = crate::api::call(rt, key(LIVING_EVENT, "getEntity", "()Lnet/minecraft/world/entity/LivingEntity;"), &[ev]);
+                let by = crate::api::call(rt, key(LIVING, "getKillCredit", "()Lnet/minecraft/world/entity/LivingEntity;"), &[victim]);
+                if by.r() == 0 {
+                    note(rt, "knockback with no credit".into());
+                    return Some(V::Void);
+                }
+                let main = crate::hand::constant(rt, crate::hand::MAIN);
+                let held = crate::api::call(rt, key(LIVING, "getItemInHand", "(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;"), &[by, main]);
+                let held = crate::api_common::item_like_name(rt, rt.get_field(held, "$item"));
+                let who = id_of(rt, by);
+                note(rt, format!("knockback credited to {who} holding {held}"));
+                if held.ends_with("_knife") {
+                    let original = crate::api::call(rt, key(KNOCKBACK, "getOriginalStrength", "()F"), &[ev]).f();
+                    crate::api::call(rt, key(KNOCKBACK, "setStrength", "(F)V"), &[ev, V::F(original - 0.1)]);
+                }
+            }
+            // As Farmer's Delight's backstabbing: a blow from behind the victim, as it looks, hurts
+            // double, on the server's side.
+            10 => {
+                let s = source_of(rt, INCOMING);
+                let by = crate::api::call(rt, key(SOURCE, "getEntity", "()Lnet/minecraft/world/entity/Entity;"), &[s]);
+                let victim = crate::api::call(rt, key(LIVING_EVENT, "getEntity", "()Lnet/minecraft/world/entity/LivingEntity;"), &[ev]);
+                let (entity, vec3) = ("net/minecraft/world/entity/Entity", "net/minecraft/world/phys/Vec3");
+                let looks = crate::api::call(rt, key(LIVING, "getViewVector", "(F)Lnet/minecraft/world/phys/Vec3;"), &[victim, V::F(1.0)]);
+                let at = crate::api::call(rt, key(SOURCE, "getSourcePosition", "()Lnet/minecraft/world/phys/Vec3;"), &[s]);
+                let here = crate::api::call(rt, key(entity, "position", "()Lnet/minecraft/world/phys/Vec3;"), &[victim]);
+                let to = crate::api::call(rt, key(vec3, "subtract", "(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;"), &[at, here]);
+                let to = crate::api::call(rt, key(vec3, "normalize", "()Lnet/minecraft/world/phys/Vec3;"), &[to]);
+                let flat = rt.new_object(vec3);
+                let (x, z) = (rt.get_field(to, "x"), rt.get_field(to, "z"));
+                crate::api::call(rt, key(vec3, "<init>", "(DDD)V"), &[flat, x, V::D(0.0), z]);
+                let dot = crate::api::call(rt, key(vec3, "dot", "(Lnet/minecraft/world/phys/Vec3;)D"), &[flat, looks]).d();
+                let level = crate::api::call(rt, key(entity, "level", "()Lnet/minecraft/world/level/Level;"), &[by]);
+                let client = crate::api::call(rt, "net/minecraft/world/level/Level.$isClientSide.()Z", &[level]).i() != 0;
+                let behind = dot < -0.5;
+                note(rt, format!("incoming from behind {behind}, on the client {client}"));
+                if behind && !client {
+                    let amount = crate::api::call(rt, key(INCOMING, "getAmount", "()F"), &[ev]).f();
+                    crate::api::call(rt, key(INCOMING, "setAmount", "(F)V"), &[ev, V::F(amount * 2.0)]);
+                }
+            }
             _ => return None,
         }
         Some(V::Void)
@@ -1353,28 +1466,28 @@ mod tests {
         rt.with_host(&mut h, server_tick);
         let fire = Source { damage_type: "minecraft:in_fire", causing: 0, direct: 0 };
         let mut amount = 6.0;
-        assert!(!incoming(&mut rt, 7, "minecraft:cow", Some(&cow(10.0)), fire, &mut amount));
+        assert!(!incoming(&mut rt, &mut h, 7, "minecraft:cow", Some(&cow(10.0)), fire, &mut amount));
         assert_eq!(amount, 3.0, "halved");
         // Armour took 1 of the 3.
         let mut left = 2.0;
-        damage_pre(&mut rt, 7, "minecraft:cow", Some(&cow(10.0)), fire, &mut left);
+        damage_pre(&mut rt, &mut h, 7, "minecraft:cow", Some(&cow(10.0)), fire, &mut left);
         assert_eq!(left, 3.0, "raised by 1");
-        damage_post(&mut rt, 7, "minecraft:cow", Some(&cow(7.0)), fire, 3.0);
+        damage_post(&mut rt, &mut h, 7, "minecraft:cow", Some(&cow(7.0)), fire, 3.0);
 
         // The player shoots the cow: its source names the player as the shooter.
         let shot = Source { damage_type: "minecraft:arrow", causing: 42, direct: 99 };
         let mut amount = 4.0;
-        assert!(!incoming(&mut rt, 7, "minecraft:cow", Some(&cow(7.0)), shot, &mut amount));
+        assert!(!incoming(&mut rt, &mut h, 7, "minecraft:cow", Some(&cow(7.0)), shot, &mut amount));
         // The cow's arrow on the player: canceled.
         let back = Source { damage_type: "minecraft:arrow", causing: 7, direct: 98 };
         let mut amount = 4.0;
-        assert!(incoming(&mut rt, 42, "minecraft:player", None, back, &mut amount));
+        assert!(incoming(&mut rt, &mut h, 42, "minecraft:player", None, back, &mut amount));
 
         let (mut strength, mut x, mut z) = (0.4, 0.5, -0.5);
-        assert!(!knockback(&mut rt, 7, "minecraft:cow", Some(&cow(4.0)), &mut strength, &mut x, &mut z));
+        assert!(!knockback(&mut rt, &mut h, 7, "minecraft:cow", Some(&cow(4.0)), 42, &mut strength, &mut x, &mut z));
         assert_eq!((strength as f32, x, z), (0.8, 1.0, -0.5));
         let (mut strength, mut x, mut z) = (0.4, 0.5, -0.5);
-        assert!(knockback(&mut rt, 42, "minecraft:player", None, &mut strength, &mut x, &mut z), "the player isn't pushed");
+        assert!(knockback(&mut rt, &mut h, 42, "minecraft:player", None, 7, &mut strength, &mut x, &mut z), "the player isn't pushed");
         // The player behind the arrow is of `EntityType.PLAYER`, as a listener asks its type's name.
         let player = rt.interned[&format!("{PLAYER_ENTITY}42")];
         let ty = crate::api::call(&mut rt, "net/minecraft/world/entity/Entity.getType.()Lnet/minecraft/world/entity/EntityType;", &[player]);
@@ -1389,6 +1502,75 @@ mod tests {
                 "incoming 4 arrow on player by 7 through 98",
                 "knockback 0.4",
                 "knockback 0.4",
+            ]
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A blow's hooks read the striking player as the blow started and what they held (Farmer's
+    /// Delight's skillet asks its holder's main hand, its backstabbing the source's weapon), and what
+    /// a listener does there, a sound and a word to the player, reaches the hit's host, which makes it
+    /// once the hit is over. A mob's death tells its killer by their UUID, with nobody acting.
+    #[test]
+    fn a_hits_listener_reads_the_weapon_and_its_sound_and_message_reach_the_game() {
+        use crate::host::{MemoryHost, Sound};
+        let mut rt = listening(&[(PRE, 7), (DEATH, 8)]);
+        let mut h = world();
+        rt.with_host(&mut h, server_tick);
+        // The hit's host: the player 0xabc (entity 42) strikes with a skillet.
+        let mut hit = MemoryHost { player_id: Some(0xabc), held: Some(("farmersdelight:skillet".into(), 1)), players: h.players.clone(), ..MemoryHost::default() };
+        let blow = Source { damage_type: "minecraft:player_attack", causing: 42, direct: 42 };
+        let mut left = 4.0;
+        damage_pre(&mut rt, &mut hit, 7, "minecraft:cow", Some(&cow(10.0)), blow, &mut left);
+        let clang = Sound { event: "minecraft:block.anvil.land".into(), at: [1.5, 64.0, -2.5], source: 7, volume: 1.0, pitch: 0.5 };
+        assert_eq!(hit.sounds, [clang]);
+        assert_eq!(hit.messages, [(r#"{"text":"bonk"}"#.to_owned(), true)]);
+        // A fall's: no player strikes.
+        let fall = Source { damage_type: "minecraft:fall", causing: 0, direct: 0 };
+        damage_pre(&mut rt, &mut MemoryHost::default(), 7, "minecraft:cow", Some(&cow(10.0)), fall, &mut left);
+        // The cow dies of the blow in the mobs' tick: its killer is told by their UUID.
+        assert!(!death(&mut rt, &mut h, 7, "minecraft:cow", blow));
+        assert_eq!(h.told, [(0xabc, r#"{"text":"got it"}"#.to_owned(), false)]);
+        assert!(h.messages.is_empty(), "nobody acts");
+        assert_eq!(heard(&mut rt), ["pre by a player holding farmersdelight:skillet, weapon farmersdelight:skillet", "pre by no player"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// What Farmer's Delight's knife and backstabbing ask of a hit's victim: who gets the credit for
+    /// it (the player who just hit it, whose knife then pushes it less), and where it looks (a blow
+    /// from behind it, on the server's side, hurts double).
+    #[test]
+    fn a_hits_listener_finds_its_attacker_and_where_the_victim_looks() {
+        let mut rt = listening(&[(INCOMING, 10), (KNOCKBACK, 9)]);
+        let mut h = world();
+        rt.with_host(&mut h, server_tick);
+        h.player_id = Some(0xabc);
+        h.held = Some(("farmersdelight:flint_knife".into(), 1));
+        let blow = Source { damage_type: "minecraft:player_attack", causing: 42, direct: 42 };
+        // The cow looks south (yaw 0), towards the player at 4.5 64 4.5: a blow from in front.
+        let mut amount = 2.0;
+        assert!(!incoming(&mut rt, &mut h, 7, "minecraft:cow", Some(&cow(10.0)), blow, &mut amount));
+        assert_eq!(amount, 2.0);
+        let (mut strength, mut x, mut z) = (0.4, 0.5, -0.5);
+        assert!(!knockback(&mut rt, &mut h, 7, "minecraft:cow", Some(&cow(8.0)), 42, &mut strength, &mut x, &mut z));
+        assert_eq!(strength as f32, 0.3, "the knife's push");
+        // Turned north (yaw 180), its back is to the player.
+        let away = EntityView { yaw: 180.0, ..cow(8.0) };
+        let mut amount = 2.0;
+        assert!(!incoming(&mut rt, &mut h, 7, "minecraft:cow", Some(&away), blow, &mut amount));
+        assert_eq!(amount, 4.0, "doubled");
+        // A pig nobody hurt has nobody to credit.
+        let pig = EntityView { id: 8, kind: "minecraft:pig".into(), pos: [0.5, 64.0, 0.5], yaw: 0.0, health: Some((10.0, 10.0)) };
+        let (mut strength, mut x, mut z) = (0.4, 0.5, -0.5);
+        assert!(!knockback(&mut rt, &mut h, 8, "minecraft:pig", Some(&pig), 0, &mut strength, &mut x, &mut z));
+        assert_eq!(strength, 0.4);
+        assert_eq!(
+            heard(&mut rt),
+            [
+                "incoming from behind false, on the client false",
+                "knockback credited to player holding farmersdelight:flint_knife",
+                "incoming from behind true, on the client false",
+                "knockback with no credit",
             ]
         );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);

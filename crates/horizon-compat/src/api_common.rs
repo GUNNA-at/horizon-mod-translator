@@ -2170,7 +2170,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 crate::hand::worn(rt, i)
             }
         },
-        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "level" | "isLocalPlayer" | "mayBuild") => {
+        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "level" | "getCommandSenderWorld" | "isLocalPlayer" | "mayBuild") => {
             match n {
                 // Survival and creative players build; the hooks act for one of them.
                 "mayBuild" => V::I(1),
@@ -2179,8 +2179,14 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "isSpectator" => V::I(0),
                 // The client's own player (`Minecraft.player`) is in the client's level.
                 "isLocalPlayer" => V::I(i32::from(rt.class_of(a(0)) == LOCAL_PLAYER)),
-                "level" if rt.class_of(a(0)) == LOCAL_PLAYER => crate::glue::level(rt),
-                "level" => rt.new_object("net/minecraft/server/level/ServerLevel"),
+                // A server player's level is the hooks' one level (what mods compare and key their
+                // data by), but on a client's runtime, where that one is the client's.
+                "level" | "getCommandSenderWorld" if rt.class_of(a(0)) == LOCAL_PLAYER || !crate::neo::is_client(rt) => crate::glue::level(rt),
+                "level" | "getCommandSenderWorld" => rt.intern("compat:server-level".into(), |rt| {
+                    let l = rt.new_object("net/minecraft/server/level/ServerLevel");
+                    rt.put_field(l, "isClientSide", V::I(0));
+                    l
+                }),
                 _ => {
                     // One stack object for each of the player's hands through the hook, as
                     // vanilla's: what a mod changes in it, it finds there again, and the game's
@@ -2190,12 +2196,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 }
             }
         }
-        // Messages for the acting player: in their chat, or over the hotbar.
+        // Messages for a player, in their chat or over the hotbar: the acting player's, and another
+        // server player's by their UUID (a mob's killer told of its death, with nobody acting).
         (o, "displayClientMessage" | "sendSystemMessage") if is_player(o) => {
             let json = component_json(rt, a(1)).to_string();
             let overlay = name == "displayClientMessage" && a(2).i() != 0;
+            let to = crate::network::player_uuid(rt, a(0));
             if let Some(h) = rt.host_mut() {
-                h.player_message(&json, overlay);
+                let other = to.filter(|uuid| h.player_id() != Some(*uuid));
+                if !other.is_some_and(|uuid| h.tell_player(uuid, &json, overlay)) {
+                    h.player_message(&json, overlay);
+                }
             }
             V::Void
         }
@@ -2391,12 +2402,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "getEyePosition" => vec3(rt, p[0], eye, p[2]),
                 "getXRot" => V::F(pitch),
                 "getYRot" | "getYHeadRot" => V::F(yaw),
-                // `Entity.calculateViewVector(xRot, yRot)`, with `Mth`'s table.
-                _ => {
-                    let (x_rot, y_rot) = (V::F(pitch * (std::f32::consts::PI / 180.0)), V::F(-yaw * (std::f32::consts::PI / 180.0)));
-                    let (c1, s1, c, s) = (mth_cos(y_rot), mth_sin(y_rot), mth_cos(x_rot), mth_sin(x_rot));
-                    vec3(rt, f64::from(s1 * c), f64::from(-s), f64::from(c1 * c))
-                }
+                _ => view_vector(rt, yaw, pitch),
             }
         }
         // How far the player is from another entity (`Entity.distanceTo`, a float, and
@@ -3782,6 +3788,14 @@ fn mth_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         _ => return None,
     })
+}
+
+/// `Entity.calculateViewVector(xRot, yRot)` of a look (`yaw`, `pitch` in degrees), with `Mth`'s table:
+/// the unit vector it points along.
+pub(crate) fn view_vector(rt: &mut Rt, yaw: f32, pitch: f32) -> V {
+    let (x_rot, y_rot) = (V::F(pitch * (std::f32::consts::PI / 180.0)), V::F(-yaw * (std::f32::consts::PI / 180.0)));
+    let (c1, s1, c, s) = (mth_cos(y_rot), mth_sin(y_rot), mth_cos(x_rot), mth_sin(x_rot));
+    vec3(rt, f64::from(s1 * c), f64::from(-s), f64::from(c1 * c))
 }
 
 /// Vanilla's `Mth.sin`: a 65536-entry table of `Math.sin`, so angles round as the game rounds them.
