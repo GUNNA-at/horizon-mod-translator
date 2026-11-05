@@ -102,6 +102,113 @@ fn descriptor_of(name: &str) -> String {
     }
 }
 
+/// A `Field` for field `name` (a string) of class object `class`.
+fn field_object(rt: &mut Rt, class: V, name: V) -> V {
+    let f = rt.new_object("java/lang/reflect/Field");
+    rt.put_field(f, "$class", class);
+    rt.put_field(f, "$name", name);
+    f
+}
+
+/// The class (internal form) and name of a `Field`, and its static's key.
+fn field_parts(rt: &mut Rt, field: V) -> (String, &'static str, &'static str) {
+    let class = text(rt, rt.get_field(field, "$class")).replace('.', "/");
+    let name = text(rt, rt.get_field(field, "$name"));
+    let key = rt.static_key(&format!("{class}.{name}"));
+    (class, rt.static_key(&name), key)
+}
+
+/// What `field` holds in `obj`, or, given no object, its class's static: a mod class's once its
+/// class is initialised, else the API's.
+fn field_value(rt: &mut Rt, field: V, obj: V) -> V {
+    let (class, name, key) = field_parts(rt, field);
+    if obj.r() != 0 {
+        return rt.get_field(obj, name);
+    }
+    if rt.is_mod_class(&class) {
+        rt.reflect(&class, "<clinit>", &[]);
+        return rt.statics.get(key).copied().unwrap_or(V::NULL);
+    }
+    crate::api::get_static(rt, key)
+}
+
+/// `field = v` in `obj`, or the class's static given no object; a box set into a field holding
+/// a primitive is unboxed.
+fn field_store(rt: &mut Rt, field: V, obj: V, v: V) {
+    let (class, name, key) = field_parts(rt, field);
+    let old = if obj.r() != 0 { rt.get_field(obj, name) } else { rt.statics.get(key).copied().unwrap_or(V::Void) };
+    let v = match old {
+        V::I(_) => crate::mixin::unbox(rt, v, 'I'),
+        V::J(_) => crate::mixin::unbox(rt, v, 'J'),
+        V::F(_) => crate::mixin::unbox(rt, v, 'F'),
+        V::D(_) => crate::mixin::unbox(rt, v, 'D'),
+        _ => v,
+    };
+    if obj.r() != 0 {
+        rt.put_field(obj, name, v);
+    } else {
+        if rt.is_mod_class(&class) {
+            rt.reflect(&class, "<clinit>", &[]);
+        }
+        rt.statics.insert(key, v);
+    }
+}
+
+/// A primitive as `Object` (its box); anything else as it is, nothing as null.
+fn box_raw(rt: &mut Rt, v: V) -> V {
+    match v {
+        V::I(_) => crate::mixin::box_value(rt, v, 'I'),
+        V::J(_) => crate::mixin::box_value(rt, v, 'J'),
+        V::F(_) => crate::mixin::box_value(rt, v, 'F'),
+        V::D(_) => crate::mixin::box_value(rt, v, 'D'),
+        V::Void => V::NULL,
+        v => v,
+    }
+}
+
+/// The kind of what a method with descriptor `desc` returns (`I`, `L`, `V`...).
+fn return_kind(desc: &str) -> char {
+    desc.rsplit(')').next().and_then(|r| r.chars().next()).unwrap_or('V')
+}
+
+/// A `MethodHandle` of kind `getter`, `setter` or `method` reaching `target` (a `Field` or `Method`).
+fn method_handle(rt: &mut Rt, kind: &str, target: V) -> V {
+    let h = rt.new_object("java/lang/invoke/MethodHandle");
+    let k = rt.string(kind);
+    rt.put_field(h, "$kind", k);
+    rt.put_field(h, "$target", target);
+    h
+}
+
+/// `method.invoke(obj, args)` on one of the mod's objects: the instance method its class has by
+/// that name and parameter types, given its arguments unboxed, its result boxed. None (a miss) for
+/// a static method or one no mod class has.
+fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Option<V> {
+    let class = text(rt, rt.get_field(method, "$class")).replace('.', "/");
+    let name = text(rt, rt.get_field(method, "$name"));
+    let params = rt.get_field(method, "$params");
+    let mut prefix = format!("{name}.(");
+    for p in crate::jutil::elements(rt, params) {
+        prefix.push_str(&descriptor_of(rt.str_of(p).unwrap_or("java/lang/Object")));
+    }
+    prefix.push(')');
+    if obj.r() == 0 {
+        return None;
+    }
+    let short = rt.vkeys.keys().copied().find(|k| k.starts_with(&prefix))?;
+    let mut all = Vec::with_capacity(args.len());
+    for (v, k) in args.iter().zip(kinds(&short[short.find('(').unwrap_or(0)..])) {
+        all.push(crate::mixin::unbox(rt, *v, k));
+    }
+    let key = rt.static_key(&format!("{class}.{short}"));
+    let r = rt.call_functional(key, obj, &all);
+    Some(match return_kind(short) {
+        'V' => V::NULL,
+        'L' | '[' => r,
+        _ => box_raw(rt, r),
+    })
+}
+
 /// `new C(args)` by reflection: the mod's constructor with descriptor `desc`.
 fn construct(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
     match rt.reflect(class, &format!("<init>.{desc}"), args) {
@@ -482,6 +589,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 rt.put_field(c, "$desc", d);
                 c
             }
+            // A field or method by name: what it reaches is looked for when it is used.
+            "getDeclaredField" | "getField" => field_object(rt, a(0), a(1)),
+            "getDeclaredMethod" | "getMethod" => {
+                let m = rt.new_object("java/lang/reflect/Method");
+                rt.put_field(m, "$class", a(0));
+                rt.put_field(m, "$name", a(1));
+                rt.put_field(m, "$params", a(2));
+                m
+            }
             "getEnumConstants" => {
                 let n = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
                 enum_constants(rt, &n).unwrap_or(V::NULL)
@@ -540,6 +656,96 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getDeclaringClass" => rt.get_field(a(0), "$class"),
             "setAccessible" => V::Void,
             "trySetAccessible" => V::I(1),
+            _ => return None,
+        }),
+        // A field a mod looks up by name: reading it reads the object's field, or with no object
+        // the class's static (the class initialised first); `get` boxes a primitive, `set` unboxes
+        // into a field that holds one, as Java's do.
+        "java/lang/reflect/Field" => Some(match name {
+            "getName" => rt.get_field(a(0), "$name"),
+            "getDeclaringClass" => rt.get_field(a(0), "$class"),
+            "setAccessible" => V::Void,
+            "trySetAccessible" | "canAccess" => V::I(1),
+            "get" => {
+                let v = field_value(rt, a(0), a(1));
+                box_raw(rt, v)
+            }
+            "getInt" | "getLong" | "getFloat" | "getDouble" | "getBoolean" | "getByte" | "getShort" | "getChar" => {
+                let v = field_value(rt, a(0), a(1));
+                crate::mixin::unbox(rt, v, return_kind(desc))
+            }
+            "set" | "setInt" | "setLong" | "setFloat" | "setDouble" | "setBoolean" | "setByte" | "setShort" | "setChar" => {
+                field_store(rt, a(0), a(1), a(2));
+                V::Void
+            }
+            "hashCode" => {
+                let n = text(rt, rt.get_field(a(0), "$name"));
+                V::I(string_hash(&n))
+            }
+            "equals" => {
+                let same = |rt: &Rt, f: &'static str| text(rt, rt.get_field(a(0), f)) == text(rt, rt.get_field(a(1), f));
+                V::I((rt.class_of(a(1)) == "java/lang/reflect/Field" && same(rt, "$class") && same(rt, "$name")) as i32)
+            }
+            _ => return None,
+        }),
+        // A method a mod looks up by name and parameter types: invoked on one of its objects, the
+        // method its class has by that name and those parameters.
+        "java/lang/reflect/Method" => Some(match name {
+            "getName" => rt.get_field(a(0), "$name"),
+            "getDeclaringClass" => rt.get_field(a(0), "$class"),
+            "setAccessible" => V::Void,
+            "trySetAccessible" | "canAccess" => V::I(1),
+            "getParameterCount" => {
+                let params = rt.get_field(a(0), "$params");
+                V::I(crate::jutil::elements(rt, params).len() as i32)
+            }
+            "invoke" => {
+                let vals = crate::jutil::elements(rt, a(2));
+                return invoke_method(rt, a(0), a(1), &vals);
+            }
+            _ => return None,
+        }),
+        "java/lang/invoke/MethodHandles" => Some(match name {
+            "lookup" | "publicLookup" | "privateLookupIn" => rt.intern("compat:lookup".into(), |rt| rt.new_object("java/lang/invoke/MethodHandles$Lookup")),
+            _ => return None,
+        }),
+        // Handles to fields and methods (Mekanism's computer methods are getters of its own
+        // fields): a handle keeps what it reaches, and invoking it reads, writes or calls that.
+        "java/lang/invoke/MethodHandles$Lookup" => Some(match name {
+            "in" | "dropLookupMode" => a(0),
+            "unreflectGetter" => method_handle(rt, "getter", a(1)),
+            "unreflectSetter" => method_handle(rt, "setter", a(1)),
+            "unreflect" => method_handle(rt, "method", a(1)),
+            "findGetter" | "findStaticGetter" | "findSetter" | "findStaticSetter" => {
+                let f = field_object(rt, a(1), a(2));
+                method_handle(rt, if name.contains("Getter") { "getter" } else { "setter" }, f)
+            }
+            _ => return None,
+        }),
+        "java/lang/invoke/MethodHandle" => Some(match name {
+            "invoke" | "invokeExact" | "invokeWithArguments" => {
+                let rest: Vec<V> = if name == "invokeWithArguments" { crate::jutil::elements(rt, a(1)) } else { args[1..].to_vec() };
+                let kind = text(rt, rt.get_field(a(0), "$kind"));
+                let target = rt.get_field(a(0), "$target");
+                let r = match kind.as_str() {
+                    "getter" => field_value(rt, target, rest.first().copied().unwrap_or(V::NULL)),
+                    "setter" => {
+                        let (obj, v) = match rest.as_slice() {
+                            [v] => (V::NULL, *v),
+                            [obj, v, ..] => (*obj, *v),
+                            [] => (V::NULL, V::NULL),
+                        };
+                        field_store(rt, target, obj, v);
+                        V::Void
+                    }
+                    _ => {
+                        let (obj, vals) = rest.split_first().map_or((V::NULL, &[][..]), |(o, r)| (*o, r));
+                        return invoke_method(rt, target, obj, vals);
+                    }
+                };
+                // The call site's type: an object where it returns one (a box), else the value.
+                if matches!(return_kind(desc), 'L' | '[') { box_raw(rt, r) } else { crate::mixin::unbox(rt, r, return_kind(desc)) }
+            }
             _ => return None,
         }),
 
@@ -1405,6 +1611,64 @@ mod tests {
         assert_eq!(GOT.with(|g| g.borrow().clone()), LONGS);
     }
 
+    /// Reflection over a mod's own class (Mekanism's computer methods are getters of its fields):
+    /// a field by name reads and writes the object's field, boxed through `get`/`set` and raw
+    /// through `getLong`; a static one reads the class's static once the class is initialised; a
+    /// getter handle reads what the field holds as the call site types it; a method by name and
+    /// parameter types runs the object's own method, its result boxed.
+    #[test]
+    fn reflection_reaches_a_mods_fields_and_methods_by_name() {
+        fn vcall(rt: &mut Rt, _key: &'static str, short: &'static str, args: &[V]) -> V {
+            assert_eq!(short, "getEnergy.()J");
+            rt.get_field(args[0], "energy")
+        }
+        fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
+            if (class, what) == ("t/Machine", "<clinit>") && !rt.statics.contains_key("t/Machine.COUNT") {
+                rt.statics.insert("t/Machine.COUNT", V::I(3));
+            }
+            Some(V::Void)
+        }
+        fn none(_: &mut Rt, _: u32, _: &'static str, _: &[V]) -> V {
+            V::Void
+        }
+        let mut rt = Rt::new();
+        rt.supers.insert("t/Machine", "java/lang/Object");
+        rt.vcall = Some(vcall);
+        rt.reflect = Some(reflect);
+        rt.vkeys.insert("getEnergy.()J", (none, |_| true));
+        let class = class_object(&mut rt, "t/Machine");
+        let machine = rt.new_object("t/Machine");
+        rt.put_field(machine, "energy", V::J(5));
+
+        let name = rt.string("energy");
+        let energy = c(&mut rt, "java/lang/Class.getDeclaredField.(Ljava/lang/String;)Ljava/lang/reflect/Field;", &[class, name]);
+        c(&mut rt, "java/lang/reflect/Field.setAccessible.(Z)V", &[energy, V::I(1)]);
+        let boxed = c(&mut rt, "java/lang/reflect/Field.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[energy, machine]);
+        assert_eq!((rt.class_of(boxed), rt.get_field(boxed, "value")), ("java/lang/Long", V::J(5)));
+        let seven = crate::mixin::box_value(&mut rt, V::J(7), 'J');
+        c(&mut rt, "java/lang/reflect/Field.set.(Ljava/lang/Object;Ljava/lang/Object;)V", &[energy, machine, seven]);
+        assert_eq!(rt.get_field(machine, "energy"), V::J(7));
+        assert_eq!(c(&mut rt, "java/lang/reflect/Field.getLong.(Ljava/lang/Object;)J", &[energy, machine]), V::J(7));
+
+        let name = rt.string("COUNT");
+        let count = c(&mut rt, "java/lang/Class.getDeclaredField.(Ljava/lang/String;)Ljava/lang/reflect/Field;", &[class, name]);
+        let boxed = c(&mut rt, "java/lang/reflect/Field.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[count, V::NULL]);
+        assert_eq!((rt.class_of(boxed), rt.get_field(boxed, "value")), ("java/lang/Integer", V::I(3)));
+
+        let lookup = c(&mut rt, "java/lang/invoke/MethodHandles.lookup.()Ljava/lang/invoke/MethodHandles$Lookup;", &[]);
+        let getter = c(&mut rt, "java/lang/invoke/MethodHandles$Lookup.unreflectGetter.(Ljava/lang/reflect/Field;)Ljava/lang/invoke/MethodHandle;", &[lookup, energy]);
+        assert_eq!(c(&mut rt, "java/lang/invoke/MethodHandle.invokeExact.(Lt/Machine;)J", &[getter, machine]), V::J(7));
+        let boxed = c(&mut rt, "java/lang/invoke/MethodHandle.invoke.(Ljava/lang/Object;)Ljava/lang/Object;", &[getter, machine]);
+        assert_eq!(rt.get_field(boxed, "value"), V::J(7));
+
+        let name = rt.string("getEnergy");
+        let no_params = rt.new_array(0, V::NULL);
+        let method = c(&mut rt, "java/lang/Class.getDeclaredMethod.(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;", &[class, name, no_params]);
+        let no_args = rt.new_array(0, V::NULL);
+        let boxed = c(&mut rt, "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", &[method, machine, no_args]);
+        assert_eq!((rt.class_of(boxed), rt.get_field(boxed, "value")), ("java/lang/Long", V::J(7)));
+    }
+
     /// Create's contraption keeps its level behind a `WeakReference`; nothing collects it here.
     #[test]
     fn a_weak_reference_gives_back_what_it_holds_until_cleared() {
@@ -1613,6 +1877,17 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (o, _) if o.starts_with("org/apache/commons/lang3/mutable/Mutable") => return mutable(rt, o, name, desc, args),
         ("java/text/NumberFormat" | "java/text/DecimalFormat" | "java/text/Format", _) => return number_format(rt, name, desc, args),
+        // The root locale's symbols, which every format here prints with.
+        ("java/text/DecimalFormatSymbols", n) => match n {
+            "getInstance" => rt.new_object("java/text/DecimalFormatSymbols"),
+            "<init>" => V::Void,
+            "getDecimalSeparator" | "getMonetaryDecimalSeparator" => V::I('.' as i32),
+            "getGroupingSeparator" => V::I(',' as i32),
+            "getMinusSign" => V::I('-' as i32),
+            "getZeroDigit" => V::I('0' as i32),
+            n if n.starts_with("set") => V::Void,
+            _ => return None,
+        },
         // A character or a string repeated (jopt-simple's and commons-lang's helpers: an indent).
         ("joptsimple/internal/Strings" | "org/apache/commons/lang3/StringUtils", "repeat") => {
             let unit = if desc.starts_with("(C") { char::from_u32(a(0).i() as u32).unwrap_or(' ').to_string() } else { text(rt, a(0)) };

@@ -155,6 +155,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         }),
         // A block-state enum's codec (`WeatheringCopper.WeatherState.CODEC`): by serialized name.
         (o, "CODEC") if crate::blocks::is_vanilla_enum(o) => native(rt, &format!("vanilla_enum/{o}")),
+        // Any other vanilla enum's (`EquipmentSlot.CODEC`, `AttributeModifier.Operation.CODEC`,
+        // `GenerationStep.Decoration.CODEC`): `StringRepresentable.fromEnum` by the serialized
+        // name, which for these is the constant's name in lower case.
+        (o, "CODEC") if crate::api_common::enum_names(o).is_some() => native(rt, &format!("lower_enum/{o}")),
         // `NeoForgeRegistries.FLUID_INGREDIENT_TYPES` is registry `fluid_ingredient_type`, and so is
         // its key (`NeoForgeRegistries.Keys`): registries are their names here.
         ("net/neoforged/neoforge/registries/NeoForgeRegistries" | "net/neoforged/neoforge/registries/NeoForgeRegistries$Keys", f) => {
@@ -956,6 +960,10 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
             let class = &n["vanilla_enum/".len()..];
             Nbt::String(crate::blocks::enum_serialized(rt, class, v).ok_or("Not an enum constant")?)
         }
+        n if n.starts_with("lower_enum/") => {
+            let name = rt.str_of(rt.get_field(v, "$name")).ok_or("Not an enum constant")?;
+            Nbt::String(name.to_ascii_lowercase())
+        }
         other => return Err(format!("codec {other} can't write")),
     })
 }
@@ -1563,6 +1571,26 @@ mod tests {
         let name = rt.string("biomes");
         let field = c(&mut rt, "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[biomes, name]);
         assert!(is_codec(&rt, field));
+    }
+
+    /// A vanilla enum's codec (`EquipmentSlot.CODEC`, `AttributeModifier.Operation.CODEC`) reads
+    /// and writes a constant by its serialized name, and refuses a name that isn't one.
+    #[test]
+    fn a_vanilla_enums_codec_goes_by_its_serialized_name() {
+        let mut rt = Rt::new();
+        crate::install();
+        let slots = st(&mut rt, "net/minecraft/world/entity/EquipmentSlot.CODEC");
+        let chest = decode(&mut rt, slots, &Json::String("chest".into())).unwrap();
+        assert_eq!(chest, st(&mut rt, "net/minecraft/world/entity/EquipmentSlot.CHEST"));
+        assert_eq!(encode(&mut rt, slots, chest), Ok(Nbt::String("chest".into())));
+        assert!(decode(&mut rt, slots, &Json::String("CHEST".into())).is_err());
+        let ops = st(&mut rt, "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation.CODEC");
+        let base = decode(&mut rt, ops, &Json::String("add_multiplied_base".into())).unwrap();
+        assert_eq!(rt.get_field(base, "$ordinal"), V::I(1));
+        let steps = st(&mut rt, "net/minecraft/world/level/levelgen/GenerationStep$Decoration.CODEC");
+        let ores = decode(&mut rt, steps, &Json::String("underground_ores".into())).unwrap();
+        assert_eq!(encode(&mut rt, steps, ores), Ok(Nbt::String("underground_ores".into())));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Vanilla's value codecs write what 1.21.1 writes (`Vec3` three doubles, a UUID four ints, a

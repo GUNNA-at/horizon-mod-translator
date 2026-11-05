@@ -68,6 +68,12 @@ fn constants(class: &str) -> Option<(&'static str, &'static str)> {
     Some(ENUM_CONSTANTS[i])
 }
 
+/// The constants of a vanilla enum the table lists, in ordinal order.
+pub(crate) fn enum_names(class: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    let (c, names) = constants(class)?;
+    Some((c, names.split(',').collect()))
+}
+
 /// `Enum.FIELD` of a vanilla enum the runtime doesn't model by hand (`NoteBlockInstrument.BASS`):
 /// one object per constant, with its name and ordinal ([`crate::api::api_enum`]).
 pub(crate) fn enum_constant(rt: &mut Rt, key: &str) -> Option<V> {

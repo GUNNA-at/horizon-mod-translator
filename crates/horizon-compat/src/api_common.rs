@@ -221,7 +221,7 @@ fn player_eye_height(rt: &Rt) -> f64 {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 18] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 23] = [
     (MONTH, &["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"]),
     // FML's config files, in its order: what `ModConfig.Type.values()` and an enum codec give.
     ("net/neoforged/fml/config/ModConfig$Type", &["COMMON", "CLIENT", "SERVER", "STARTUP"]),
@@ -239,6 +239,25 @@ const PLAIN_ENUMS: [(&str, &[&str]); 18] = [
         ],
     ),
     ("net/minecraft/util/ByIdMap$OutOfBoundsStrategy", &["ZERO", "WRAP", "CLAMP"]),
+    // What an entity wears or holds, in `EquipmentSlot`'s order (`getItemBySlot` reads it).
+    ("net/minecraft/world/entity/EquipmentSlot", &["MAINHAND", "OFFHAND", "FEET", "LEGS", "CHEST", "HEAD", "BODY"]),
+    (
+        "net/minecraft/ChatFormatting",
+        &[
+            "BLACK", "DARK_BLUE", "DARK_GREEN", "DARK_AQUA", "DARK_RED", "DARK_PURPLE", "GOLD", "GRAY", "DARK_GRAY", "BLUE", "GREEN", "AQUA", "RED",
+            "LIGHT_PURPLE", "YELLOW", "WHITE", "OBFUSCATED", "BOLD", "STRIKETHROUGH", "UNDERLINE", "ITALIC", "RESET",
+        ],
+    ),
+    (
+        CHRONO_UNIT,
+        &[
+            "NANOS", "MICROS", "MILLIS", "SECONDS", "MINUTES", "HOURS", "HALF_DAYS", "DAYS", "WEEKS", "MONTHS", "YEARS", "DECADES", "CENTURIES", "MILLENNIA",
+            "ERAS", "FOREVER",
+        ],
+    ),
+    ("java/math/RoundingMode", &["UP", "DOWN", "CEILING", "FLOOR", "HALF_UP", "HALF_DOWN", "HALF_EVEN", "UNNECESSARY"]),
+    // Log4j's levels, most severe first (a class of constants, not an enum, but as plain).
+    ("org/apache/logging/log4j/Level", &["OFF", "FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE", "ALL"]),
     ("java/util/concurrent/TimeUnit", &["NANOSECONDS", "MICROSECONDS", "MILLISECONDS", "SECONDS", "MINUTES", "HOURS", "DAYS"]),
     ("java/lang/StackWalker$Option", &["RETAIN_CLASS_REFERENCE", "SHOW_REFLECT_FRAMES", "SHOW_HIDDEN_FRAMES"]),
     ("net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation", &["ADD_VALUE", "ADD_MULTIPLIED_BASE", "ADD_MULTIPLIED_TOTAL"]),
@@ -262,6 +281,34 @@ const PLAIN_ENUMS: [(&str, &[&str]); 18] = [
 
 /// Plain vanilla enum `class`'s constant `name`; None for another class or name.
 const MONTH: &str = "java/time/Month";
+const CHRONO_UNIT: &str = "java/time/temporal/ChronoUnit";
+const LOCAL_TIME: &str = "java/time/LocalTime";
+const DURATION: &str = "java/time/Duration";
+const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+/// `ChronoUnit`'s estimated durations in nanoseconds, in its order (a month is a twelfth of the
+/// mean Gregorian year, as Java estimates it; `FOREVER` is `Long.MAX_VALUE` seconds).
+const CHRONO_NANOS: [i128; 16] = [
+    1,
+    1_000,
+    1_000_000,
+    1_000_000_000,
+    60_000_000_000,
+    3_600_000_000_000,
+    43_200_000_000_000,
+    86_400_000_000_000,
+    604_800_000_000_000,
+    2_629_746_000_000_000,
+    31_556_952_000_000_000,
+    315_569_520_000_000_000,
+    3_155_695_200_000_000_000,
+    31_556_952_000_000_000_000,
+    31_556_952_000_000_000_000_000_000,
+    i64::MAX as i128 * 1_000_000_000 + 999_999_999,
+];
+const THREAD_POOL: &str = "java/util/concurrent/ThreadPoolExecutor";
+const SCHEDULED_POOL: &str = "java/util/concurrent/ScheduledThreadPoolExecutor";
+const SCHEDULED_FUTURE: &str = "java/util/concurrent/ScheduledFuture";
+const THREAD_FACTORY_BUILDER: &str = "com/google/common/util/concurrent/ThreadFactoryBuilder";
 const TICKET_TYPE: &str = "net/minecraft/server/level/TicketType";
 const LOCAL_DATE: &str = "java/time/LocalDate";
 const BOUNDS_INTS: &str = "net/minecraft/advancements/critereon/MinMaxBounds$Ints";
@@ -325,10 +372,55 @@ fn now_nanos() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64)
 }
 
+/// A `LocalTime` `nanos` into the day.
+fn local_time(rt: &mut Rt, nanos: i64) -> V {
+    let t = rt.new_object(LOCAL_TIME);
+    rt.put_field(t, "$nanoOfDay", V::J(nanos.rem_euclid(NANOS_PER_DAY)));
+    t
+}
+
+/// A `Duration` of `nanos` (seconds and the nanoseconds past them, as Java keeps it).
+fn duration(rt: &mut Rt, nanos: i128) -> V {
+    let d = rt.new_object(DURATION);
+    rt.put_field(d, "$seconds", V::J(nanos.div_euclid(1_000_000_000) as i64));
+    rt.put_field(d, "$nanos", V::I(nanos.rem_euclid(1_000_000_000) as i32));
+    d
+}
+
+fn duration_nanos(rt: &Rt, d: V) -> i128 {
+    i128::from(rt.get_field(d, "$seconds").j()) * 1_000_000_000 + i128::from(rt.get_field(d, "$nanos").i())
+}
+
+/// An executor service: one runtime runs one thread, so what it is given to run runs at once.
+fn executor(rt: &mut Rt, class: &'static str) -> V {
+    rt.new_object(class)
+}
+
+fn is_executor(class: &str) -> bool {
+    matches!(
+        class,
+        "java/util/concurrent/Executor"
+            | "java/util/concurrent/ExecutorService"
+            | "java/util/concurrent/ScheduledExecutorService"
+            | "java/util/concurrent/AbstractExecutorService"
+            | THREAD_POOL
+            | SCHEDULED_POOL
+    )
+}
+
 /// `d` of `TimeUnit` `from` (an ordinal) in `to`, saturating as `TimeUnit.convert` does.
 fn time_convert(d: i64, from: usize, to: usize) -> i64 {
     let n = i128::from(d) * TIME_UNIT_NANOS[from.min(6)] / TIME_UNIT_NANOS[to.min(6)];
     n.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+/// The constants of a vanilla enum the runtime makes (its own table's, else the records'), in
+/// ordinal order, with the class name as the runtime keeps it.
+pub(crate) fn enum_names(class: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    match PLAIN_ENUMS.iter().find(|(c, _)| *c == class) {
+        Some((c, names)) => Some((c, names.to_vec())),
+        None => crate::records::enum_names(class),
+    }
 }
 
 pub(crate) fn plain_enum(rt: &mut Rt, class: &str, name: &str) -> Option<V> {
@@ -681,6 +773,8 @@ pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
         | "NATURAL" | "OMINOUS" | "TIP" | "EYE" | "HAS_RECORD" | "IN_WATER" | "ENABLED_POWER" | "FALLING" | "HAS_BOTTLE_0"
         | "HAS_BOTTLE_1" | "HAS_BOTTLE_2" | "SLOT_0_OCCUPIED" | "SLOT_1_OCCUPIED" | "SLOT_2_OCCUPIED" | "SLOT_3_OCCUPIED"
         | "SLOT_4_OCCUPIED" | "SLOT_5_OCCUPIED" | "CRAFTING" | "MAP" => "bool",
+        // 1.21.1's names of the bookshelf's slots (`CHISELED_BOOKSHELF_SLOT_0_OCCUPIED`).
+        f if f.starts_with("CHISELED_BOOKSHELF_SLOT_") => "bool",
         _ => "string",
     };
     // The property's own name where it isn't the field's (`DOOR_HINGE` is `hinge`).
@@ -711,6 +805,7 @@ pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
         "ROTATION_16" => "rotation".to_owned(),
         "RESPAWN_ANCHOR_CHARGES" => "charges".to_owned(),
         "STABILITY_DISTANCE" => "distance".to_owned(),
+        f if f.starts_with("CHISELED_BOOKSHELF_") => f["CHISELED_BOOKSHELF_".len()..].to_ascii_lowercase(),
         f => f.to_ascii_lowercase(),
     };
     Some((name, kind))
@@ -1372,6 +1467,146 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 _ => return None,
             }
         }
+        // `LocalTime`: a time of day, now in UTC (as `LocalDate.now()`); `until` counts the whole
+        // units of a `ChronoUnit` from one to another, signed (Mekanism's time to midnight).
+        (LOCAL_TIME, "now") => local_time(rt, now_nanos()),
+        (LOCAL_TIME, "of") => {
+            let parts = [a(0).i(), a(1).i(), if desc.starts_with("(III") { a(2).i() } else { 0 }, if desc.starts_with("(IIII)") { a(3).i() } else { 0 }];
+            local_time(rt, i64::from(parts[0]) * 3_600_000_000_000 + i64::from(parts[1]) * 60_000_000_000 + i64::from(parts[2]) * 1_000_000_000 + i64::from(parts[3]))
+        }
+        (LOCAL_TIME, n) => {
+            let nanos = rt.get_field(a(0), "$nanoOfDay").j();
+            let other = |rt: &Rt| rt.get_field(a(1), "$nanoOfDay").j();
+            match n {
+                "until" => {
+                    let unit = CHRONO_NANOS[rt.get_field(a(2), "$ordinal").i().clamp(0, 15) as usize];
+                    V::J((i128::from(other(rt) - nanos) / unit) as i64)
+                }
+                "getHour" => V::I((nanos / 3_600_000_000_000) as i32),
+                "getMinute" => V::I((nanos / 60_000_000_000 % 60) as i32),
+                "getSecond" => V::I((nanos / 1_000_000_000 % 60) as i32),
+                "getNano" => V::I((nanos % 1_000_000_000) as i32),
+                "toNanoOfDay" => V::J(nanos),
+                "toSecondOfDay" => V::I((nanos / 1_000_000_000) as i32),
+                "isBefore" => V::I((nanos < other(rt)) as i32),
+                "isAfter" => V::I((nanos > other(rt)) as i32),
+                "compareTo" => V::I(nanos.cmp(&other(rt)) as i32),
+                "equals" => V::I((rt.class_of(a(1)) == LOCAL_TIME && nanos == other(rt)) as i32),
+                "plusSeconds" | "plusMinutes" | "plusHours" | "plusNanos" => {
+                    let unit: i64 = match n {
+                        "plusNanos" => 1,
+                        "plusSeconds" => 1_000_000_000,
+                        "plusMinutes" => 60_000_000_000,
+                        _ => 3_600_000_000_000,
+                    };
+                    local_time(rt, nanos.wrapping_add(a(1).j().rem_euclid(NANOS_PER_DAY / unit.min(NANOS_PER_DAY)) * unit))
+                }
+                _ => return None,
+            }
+        }
+        (CHRONO_UNIT, "getDuration") => {
+            let unit = CHRONO_NANOS[rt.get_field(a(0), "$ordinal").i().clamp(0, 15) as usize];
+            duration(rt, unit)
+        }
+        // `Duration`: seconds and nanoseconds; made from an amount of a unit, read back in one.
+        (DURATION, n) if n.starts_with("of") => {
+            let unit: i128 = match n {
+                "ofNanos" => 1,
+                "ofMillis" => 1_000_000,
+                "ofSeconds" => 1_000_000_000,
+                "ofMinutes" => 60_000_000_000,
+                "ofHours" => 3_600_000_000_000,
+                "ofDays" => NANOS_PER_DAY as i128,
+                "of" => CHRONO_NANOS[rt.get_field(a(1), "$ordinal").i().clamp(0, 15) as usize],
+                _ => return None,
+            };
+            let extra = if n == "ofSeconds" && desc == "(JJ)Ljava/time/Duration;" { i128::from(a(1).j()) } else { 0 };
+            duration(rt, i128::from(a(0).j()) * unit + extra)
+        }
+        (DURATION, n) => {
+            let d = duration_nanos(rt, a(0));
+            match n {
+                // As Java's: from the whole seconds (rounded down) and the nanoseconds past them.
+                "toNanos" => V::J(d as i64),
+                "toMillis" => V::J((d.div_euclid(1_000_000_000) * 1000 + d.rem_euclid(1_000_000_000) / 1_000_000) as i64),
+                "getSeconds" | "toSeconds" => V::J(d.div_euclid(1_000_000_000) as i64),
+                "toMinutes" => V::J((d.div_euclid(1_000_000_000) / 60) as i64),
+                "toHours" => V::J((d.div_euclid(1_000_000_000) / 3600) as i64),
+                "toDays" => V::J((d.div_euclid(1_000_000_000) / 86_400) as i64),
+                "getNano" => rt.get_field(a(0), "$nanos"),
+                "isZero" => V::I((d == 0) as i32),
+                "isNegative" => V::I((d < 0) as i32),
+                "plus" | "minus" => {
+                    let e = duration_nanos(rt, a(1));
+                    duration(rt, if n == "plus" { d + e } else { d - e })
+                }
+                "compareTo" => V::I(d.cmp(&duration_nanos(rt, a(1))) as i32),
+                "equals" => V::I((rt.class_of(a(1)) == DURATION && d == duration_nanos(rt, a(1))) as i32),
+                _ => return None,
+            }
+        }
+        // Executors: what they are given to run runs at once (one runtime, one thread); a task with
+        // a delay or a period (a scheduled executor's) doesn't run here, its future never done.
+        ("java/util/concurrent/Executors", n) => match n {
+            "newSingleThreadExecutor" | "newFixedThreadPool" | "newCachedThreadPool" | "newWorkStealingPool" | "newVirtualThreadPerTaskExecutor" => executor(rt, THREAD_POOL),
+            "newSingleThreadScheduledExecutor" | "newScheduledThreadPool" => executor(rt, SCHEDULED_POOL),
+            "defaultThreadFactory" => rt.new_object("java/util/concurrent/ThreadFactory"),
+            _ => return None,
+        },
+        (THREAD_POOL | SCHEDULED_POOL, "<init>") => V::Void,
+        (o, n) if is_executor(o) && is_executor(rt.class_of(a(0))) => match n {
+            "execute" => {
+                rt.call_functional("java/lang/Runnable.run.()V", a(1), &[]);
+                V::Void
+            }
+            "submit" => {
+                let value = if desc.starts_with("(Ljava/util/concurrent/Callable;)") {
+                    rt.call_functional("java/util/concurrent/Callable.call.()Ljava/lang/Object;", a(1), &[])
+                } else {
+                    rt.call_functional("java/lang/Runnable.run.()V", a(1), &[]);
+                    if desc.starts_with("(Ljava/lang/Runnable;Ljava/lang/Object;)") { a(2) } else { V::NULL }
+                };
+                crate::jutil::completed_future(rt, value)
+            }
+            "schedule" | "scheduleAtFixedRate" | "scheduleWithFixedDelay" => rt.new_object(SCHEDULED_FUTURE),
+            "shutdownNow" => crate::jutil::new_list(rt, Vec::new()),
+            "isShutdown" | "isTerminated" => V::I(rt.get_field(a(0), "$shutdown").i()),
+            "awaitTermination" => V::I(1),
+            "shutdown" | "close" => {
+                rt.put_field(a(0), "$shutdown", V::I(1));
+                V::Void
+            }
+            n if n.starts_with("set") || n == "allowCoreThreadTimeOut" || n == "prestartAllCoreThreads" => V::Void,
+            _ => return None,
+        },
+        // A task that never runs here: not done, not cancelled until asked.
+        ("java/util/concurrent/ScheduledFuture" | "java/util/concurrent/Future" | "java/util/concurrent/RunnableScheduledFuture", n) if rt.class_of(a(0)) == SCHEDULED_FUTURE => match n {
+            "cancel" => {
+                rt.put_field(a(0), "$cancelled", V::I(1));
+                V::I(1)
+            }
+            "isCancelled" => V::I(rt.get_field(a(0), "$cancelled").i()),
+            "isDone" => V::I(rt.get_field(a(0), "$cancelled").i()),
+            _ => return None,
+        },
+        // Guava's `ThreadFactoryBuilder`: the factory it builds names threads no one starts here.
+        (THREAD_FACTORY_BUILDER, n) => match n {
+            "<init>" => V::Void,
+            "build" => rt.new_object("java/util/concurrent/ThreadFactory"),
+            _ if n.starts_with("set") => a(0),
+            _ => return None,
+        },
+        ("java/util/concurrent/ConcurrentHashMap", "newKeySet") => rt.alloc("java/util/HashSet", Data::Table(Default::default())),
+        // Log4j's configuration: levels are set where its loggers write, which here is the game's log.
+        ("org/apache/logging/log4j/core/config/Configurator", n) if n.starts_with("set") || n == "initialize" || n == "reconfigure" => V::Void,
+        ("org/apache/logging/log4j/Level", "toString" | "name") => rt.get_field(a(0), "$name"),
+        // An SLF4J marker, by name.
+        ("org/slf4j/MarkerFactory", "getMarker" | "getDetachedMarker") => {
+            let m = rt.new_object("org/slf4j/Marker");
+            rt.put_field(m, "$name", a(0));
+            m
+        }
+        ("org/slf4j/Marker", "getName") => rt.get_field(a(0), "$name"),
         // `StatType.get(value[, formatter])`: the stat of that value, one per type and value.
         (STAT_TYPE, "get") => {
             let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned();
@@ -3808,6 +4043,28 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             })
         }
         o if PLAIN_ENUMS.iter().any(|(c, _)| *c == o) => plain_enum(rt, o, field)?,
+        "net/minecraft/util/Mth" if field == "SQRT_OF_TWO" => V::F(std::f32::consts::SQRT_2),
+        // The build limits any dimension type may have (`DimensionType.MIN_Y`, `MAX_Y`).
+        "net/minecraft/world/level/dimension/DimensionType" => match field {
+            "BITS_FOR_Y" => V::I(12),
+            "MIN_HEIGHT" => V::I(16),
+            "Y_SIZE" => V::I(4064),
+            "MAX_Y" => V::I(2031),
+            "MIN_Y" => V::I(-2032),
+            _ => return None,
+        },
+        // The six slots' `occupied` properties of a chiseled bookshelf, vanilla's own.
+        "net/minecraft/world/level/block/ChiseledBookShelfBlock" if field == "SLOT_OCCUPIED_PROPERTIES" => {
+            let props: Vec<V> = (0..6).filter_map(|i| vanilla_property_object(rt, &format!("CHISELED_BOOKSHELF_SLOT_{i}_OCCUPIED"))).collect();
+            crate::jutil::new_list(rt, props)
+        }
+        LOCAL_TIME => match field {
+            "MIDNIGHT" | "MIN" => local_time(rt, 0),
+            "NOON" => local_time(rt, NANOS_PER_DAY / 2),
+            "MAX" => local_time(rt, NANOS_PER_DAY - 1),
+            _ => return None,
+        },
+        DURATION if field == "ZERO" => duration(rt, 0),
         VEC2 => {
             let (x, y) = match field {
                 "ZERO" => (0.0, 0.0),
@@ -3872,12 +4129,6 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
                 rt.put_field(o, "$name", n);
                 o
             })
-        }
-        // What an entity wears or holds, in `EquipmentSlot`'s order (`getItemBySlot` reads it).
-        "net/minecraft/world/entity/EquipmentSlot" => {
-            const SLOTS: [&str; 7] = ["MAINHAND", "OFFHAND", "FEET", "LEGS", "CHEST", "HEAD", "BODY"];
-            let i = SLOTS.iter().position(|s| *s == field)?;
-            crate::api::api_enum(rt, "net/minecraft/world/entity/EquipmentSlot", SLOTS[i], i as i32)
         }
         "java/lang/Boolean" if field == "TRUE" || field == "FALSE" => boolean(rt, field == "TRUE"),
         "net/minecraft/core/Direction$Axis" => axis(rt, AXIS_NAMES.iter().position(|a| a.eq_ignore_ascii_case(field))? as i64),
@@ -3964,6 +4215,54 @@ mod tests {
     }
 
     /// Days since 1970 as `LocalDate.ofEpochDay` gives them (a leap day, the day before 1970), and
+    /// `LocalTime.until` counts whole units, signed (Mekanism's time to midnight is negative
+    /// until it adds a day); a `Duration` reads back as Java's, from whole seconds rounded down;
+    /// an executor runs what it is given at once, and a task with a period never runs.
+    #[test]
+    fn times_of_day_durations_and_executors_are_javas() {
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, key: &str, args: &[V]| {
+            let key = rt.static_key(key);
+            crate::api::call(rt, key, args)
+        };
+        let half_past = c(&mut rt, "java/time/LocalTime.of.(II)Ljava/time/LocalTime;", &[V::I(23), V::I(30)]);
+        let midnight = crate::api::get_static(&mut rt, "java/time/LocalTime.MIDNIGHT");
+        let millis = crate::api::get_static(&mut rt, "java/time/temporal/ChronoUnit.MILLIS");
+        let until = "java/time/LocalTime.until.(Ljava/time/temporal/Temporal;Ljava/time/temporal/TemporalUnit;)J";
+        assert_eq!(c(&mut rt, until, &[half_past, midnight, millis]), V::J(-84_600_000));
+        let minutes = crate::api::get_static(&mut rt, "java/time/temporal/ChronoUnit.MINUTES");
+        assert_eq!(c(&mut rt, until, &[midnight, half_past, minutes]), V::J(1410));
+        let d = c(&mut rt, "java/time/Duration.ofMillis.(J)Ljava/time/Duration;", &[V::J(-1500)]);
+        assert_eq!(c(&mut rt, "java/time/Duration.getSeconds.()J", &[d]), V::J(-2));
+        assert_eq!(c(&mut rt, "java/time/Duration.toMillis.()J", &[d]), V::J(-1500));
+        let hours = crate::api::get_static(&mut rt, "java/time/temporal/ChronoUnit.HOURS");
+        let hour = c(&mut rt, "java/time/temporal/ChronoUnit.getDuration.()Ljava/time/Duration;", &[hours]);
+        assert_eq!(c(&mut rt, "java/time/Duration.toMinutes.()J", &[hour]), V::J(60));
+
+        fn call(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+            let n = rt.get_field(args[0], "runs").i();
+            rt.put_field(args[0], "runs", V::I(n + 1));
+            Some(V::I(7))
+        }
+        rt.lambda_call = Some(call);
+        let task = rt.lambda_id("java/util/concurrent/Callable", 1, vec![]);
+        let pool = c(&mut rt, "java/util/concurrent/Executors.newSingleThreadExecutor.()Ljava/util/concurrent/ExecutorService;", &[]);
+        let done = c(&mut rt, "java/util/concurrent/ExecutorService.submit.(Ljava/util/concurrent/Callable;)Ljava/util/concurrent/Future;", &[pool, task]);
+        assert_eq!(c(&mut rt, "java/util/concurrent/Future.get.()Ljava/lang/Object;", &[done]), V::I(7));
+        let timer = c(&mut rt, "java/util/concurrent/Executors.newSingleThreadScheduledExecutor.()Ljava/util/concurrent/ScheduledExecutorService;", &[]);
+        let seconds = crate::api::get_static(&mut rt, "java/util/concurrent/TimeUnit.SECONDS");
+        let periodic = rt.lambda_id("java/lang/Runnable", 1, vec![]);
+        let f = c(
+            &mut rt,
+            "java/util/concurrent/ScheduledExecutorService.scheduleAtFixedRate.(Ljava/lang/Runnable;JJLjava/util/concurrent/TimeUnit;)Ljava/util/concurrent/ScheduledFuture;",
+            &[timer, periodic, V::J(0), V::J(1), seconds],
+        );
+        assert_eq!(rt.get_field(periodic, "runs"), V::Void, "a periodic task doesn't run here");
+        assert_eq!(c(&mut rt, "java/util/concurrent/ScheduledFuture.isDone.()Z", &[f]), V::I(0));
+        assert_eq!(rt.get_field(task, "runs"), V::I(1));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `TimeUnit`'s conversions, which round down and saturate.
     #[test]
     fn dates_and_time_units_are_javas() {

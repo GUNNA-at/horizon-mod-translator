@@ -1111,6 +1111,12 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
             crate::blocks::vanilla_enum_constant(rt, class, s).ok_or_else(|| format!("Unknown element name: {s}"))
         }
+        n if n.starts_with("lower_enum/") => {
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            let (class, names) = crate::api_common::enum_names(&n["lower_enum/".len()..]).ok_or("Not an enum")?;
+            let i = names.iter().position(|c| c.eq_ignore_ascii_case(s) && c.to_ascii_lowercase() == s).ok_or_else(|| format!("Unknown element name: {s}"))?;
+            Ok(crate::api::api_enum(rt, class, names[i], i as i32))
+        }
         other => Err(format!("{other} is not read yet")),
     }
 }

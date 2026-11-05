@@ -2288,6 +2288,35 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `api::tests::a_state_is_its_blocks_holder_and_a_level_its_own_side`,
     `render::tests::a_mods_own_render_type_is_one_by_its_name`, and the rail filter now through
     `RailShape.isAscending` itself; 259 compat tests pass.
+  - [x] 2026-11-05 Load round 13 (snapshot `8701863`), each load test now given the jar's own
+    `assets/` and `data/` (and its addons') and then vanilla 1.21.1's as `HORIZON_COMPAT_RESOURCES`,
+    as the game's resource root gives them: 28 load, exit 0, and no uncaught exception in any of
+    them (3 in round 12). FramedBlocks gets through its common setup now that its rail slopes are
+    whole: 238 blocks and 213 items registered (114 and 100). StorageDrawers reads its drawers'
+    geometry from its models (its 1568 reads of nothing are gone). Distinct unmapped calls 155 to
+    136. Then: reflection over a mod's own classes (`Class.getDeclaredField`/`getField`,
+    `Field.get`/`set` and the typed ones, a static when given no object after the class is
+    initialised, boxed through `get`; `getDeclaredMethod` and `Method.invoke` on a mod object by
+    name and parameter types; `MethodHandles.lookup()`, `unreflectGetter`/`unreflectSetter`/
+    `unreflect`, `findGetter`/`findStaticGetter`, `MethodHandle.invoke`/`invokeExact` typed as
+    the call site: Mekanism's computer methods take 70 getters this way). A vanilla enum's `CODEC`
+    reads and writes its constants by serialized name (`EquipmentSlot`,
+    `AttributeModifier.Operation`, `GenerationStep.Decoration`...); `EquipmentSlot` and
+    `ChatFormatting` have `values()`. `LocalTime` (now in UTC, `MIDNIGHT`, `until` in whole
+    units, signed), `ChronoUnit` and its durations, `Duration` (seconds rounded down and the
+    nanoseconds past them, as Java keeps it), executors that run what they are given at once
+    while a delayed or periodic task never runs (its future not done until cancelled), Guava's
+    `ThreadFactoryBuilder`, `ConcurrentHashMap.newKeySet`, `RoundingMode`, `DecimalFormatSymbols`
+    (the root locale's), Log4j's `Level` and `Configurator`, SLF4J's `MarkerFactory`.
+    `FeatureFlags.REGISTRY.allFlags()`, `Mth.SQRT_OF_TWO`, `DimensionType.MIN_Y`/`MAX_Y`,
+    `ChiseledBookShelfBlock.SLOT_OCCUPIED_PROPERTIES` (1.21.1's `CHISELED_BOOKSHELF_SLOT_n_OCCUPIED`
+    are `slot_n_occupied`), and vanilla 1.21.1's shapes behind `super.getShape` of chests (a
+    double one's half reaching to the side it joins), ender chests, decorated pots, hoppers (hollow,
+    the spout where it faces) and scaffolding. Tests
+    `jlang::tests::reflection_reaches_a_mods_fields_and_methods_by_name`,
+    `codecs::tests::a_vanilla_enums_codec_goes_by_its_serialized_name`,
+    `api_common::tests::times_of_day_durations_and_executors_are_javas`, chests and hoppers in
+    `blocks::tests::super_get_shape_to_a_vanilla_kind_follows_the_state`; 262 compat tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

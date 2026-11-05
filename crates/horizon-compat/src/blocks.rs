@@ -813,15 +813,62 @@ fn vanilla_state_shape(class: &str, props: &[(&str, &str)]) -> Option<Vec<[f64; 
             one([1.0 + 2.0 * bites, 0.0, 1.0, 15.0, 8.0, 15.0])
         }
         "FarmBlock" => one([0.0, 0.0, 0.0, 16.0, 15.0, 16.0]),
+        "DecoratedPotBlock" => one([1.0, 0.0, 1.0, 15.0, 16.0, 15.0]),
+        "EnderChestBlock" => one([1.0, 0.0, 1.0, 15.0, 14.0, 15.0]),
+        // A single chest's box; half of a double one reaches to the side it joins: the facing's
+        // clockwise for the left half, its counter-clockwise for the right.
+        "ChestBlock" | "TrappedChestBlock" => one(match (get("type"), get("facing")) {
+            ("left", "north") | ("right", "south") => [1.0, 0.0, 1.0, 16.0, 14.0, 15.0],
+            ("left", "south") | ("right", "north") => [0.0, 0.0, 1.0, 15.0, 14.0, 15.0],
+            ("left", "west") | ("right", "east") => [1.0, 0.0, 0.0, 15.0, 14.0, 15.0],
+            ("left", "east") | ("right", "west") => [1.0, 0.0, 1.0, 15.0, 14.0, 16.0],
+            _ => [1.0, 0.0, 1.0, 15.0, 14.0, 15.0],
+        }),
+        // The bowl (its top less the inside, and the funnel) with the spout the facing points.
+        "HopperBlock" => {
+            let mut b = vec![
+                [0.0, 10.0, 0.0, 16.0, 11.0, 16.0],
+                [0.0, 11.0, 0.0, 2.0, 16.0, 16.0],
+                [14.0, 11.0, 0.0, 16.0, 16.0, 16.0],
+                [2.0, 11.0, 0.0, 14.0, 16.0, 2.0],
+                [2.0, 11.0, 14.0, 14.0, 16.0, 16.0],
+                [4.0, 4.0, 4.0, 12.0, 10.0, 12.0],
+            ];
+            match get("facing") {
+                "down" => b.push([6.0, 0.0, 6.0, 10.0, 4.0, 10.0]),
+                "east" => b.push([12.0, 4.0, 6.0, 16.0, 8.0, 10.0]),
+                "north" => b.push([6.0, 4.0, 0.0, 10.0, 8.0, 4.0]),
+                "south" => b.push([6.0, 4.0, 12.0, 10.0, 8.0, 16.0]),
+                "west" => b.push([0.0, 4.0, 6.0, 4.0, 8.0, 10.0]),
+                _ => {}
+            }
+            Some(b)
+        }
+        // Scaffolding to someone not holding scaffolding: its top and posts, and its floor too
+        // where it is a bottom piece.
+        "ScaffoldingBlock" => {
+            let mut b = vec![
+                [0.0, 14.0, 0.0, 16.0, 16.0, 16.0],
+                [0.0, 0.0, 0.0, 2.0, 16.0, 2.0],
+                [14.0, 0.0, 0.0, 16.0, 16.0, 2.0],
+                [0.0, 0.0, 14.0, 2.0, 16.0, 16.0],
+                [14.0, 0.0, 14.0, 16.0, 16.0, 16.0],
+            ];
+            if on("bottom") {
+                b.push([0.0, 0.0, 0.0, 16.0, 2.0, 16.0]);
+            }
+            Some(b)
+        }
         _ => None,
     }
 }
 
 /// The block classes [`vanilla_state_shape`] keeps.
-const STATE_SHAPED: [&str; 22] = [
-    "BaseTorchBlock", "ButtonBlock", "CakeBlock", "ChainBlock", "DoorBlock", "FarmBlock", "FenceBlock", "FenceGateBlock", "IronBarsBlock",
-    "LadderBlock", "LanternBlock", "LeverBlock", "PressurePlateBlock", "RedstoneTorchBlock", "RedstoneWallTorchBlock", "SlabBlock",
-    "StainedGlassPaneBlock", "StairBlock", "TorchBlock", "TrapDoorBlock", "WallTorchBlock", "WeightedPressurePlateBlock",
+const STATE_SHAPED: [&str; 28] = [
+    "BaseTorchBlock", "ButtonBlock", "CakeBlock", "ChainBlock", "ChestBlock", "DecoratedPotBlock", "DoorBlock", "EnderChestBlock", "FarmBlock",
+    "FenceBlock", "FenceGateBlock", "HopperBlock", "IronBarsBlock", "LadderBlock", "LanternBlock", "LeverBlock", "PressurePlateBlock",
+    "RedstoneTorchBlock", "RedstoneWallTorchBlock", "ScaffoldingBlock", "SlabBlock", "StainedGlassPaneBlock", "StairBlock", "TorchBlock",
+    "TrapDoorBlock", "TrappedChestBlock", "WallTorchBlock", "WeightedPressurePlateBlock",
 ];
 
 fn state_shape_class(owner: &str) -> bool {
@@ -2658,6 +2705,19 @@ mod tests {
         let pane = shape(&mut rt, "StainedGlassPaneBlock", "ruby:pane[east=false,north=true,south=false,waterlogged=false,west=true]");
         for (p, filled) in [([8.0, 8.0, 8.0], true), ([8.0, 8.0, 2.0], true), ([2.0, 8.0, 8.0], true), ([14.0, 8.0, 8.0], false), ([8.0, 8.0, 14.0], false), ([3.0, 8.0, 3.0], false)] {
             assert_eq!(inside(&pane, p), filled, "{p:?} in {pane:?}");
+        }
+        // A chest facing north whose left half joins the east one reaches the east edge (a
+        // keypad chest's `super.getShape`); a single one stands a pixel in from each side.
+        let left = shape(&mut rt, "ChestBlock", "ruby:chest[facing=north,type=left,waterlogged=false]");
+        assert_eq!(left, [[1.0, 0.0, 1.0, 16.0, 14.0, 15.0]]);
+        let right = shape(&mut rt, "ChestBlock", "ruby:chest[facing=north,type=right,waterlogged=false]");
+        assert_eq!(right, [[0.0, 0.0, 1.0, 15.0, 14.0, 15.0]]);
+        let single = shape(&mut rt, "ChestBlock", "ruby:chest[facing=east,type=single,waterlogged=false]");
+        assert_eq!(single, [[1.0, 0.0, 1.0, 15.0, 14.0, 15.0]]);
+        // A hopper is hollow at the top, and its spout points where it faces.
+        let hopper = shape(&mut rt, "HopperBlock", "ruby:hopper[enabled=true,facing=west]");
+        for (p, filled) in [([8.0, 10.5, 8.0], true), ([1.0, 14.0, 8.0], true), ([8.0, 14.0, 8.0], false), ([8.0, 7.0, 8.0], true), ([2.0, 6.0, 8.0], true), ([14.0, 6.0, 8.0], false), ([8.0, 2.0, 8.0], false)] {
+            assert_eq!(inside(&hopper, p), filled, "{p:?} in {hopper:?}");
         }
     }
 

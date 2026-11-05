@@ -63,6 +63,11 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         "net/minecraft/world/flag/FeatureFlags" if matches!(field, "VANILLA_SET" | "DEFAULT_FLAGS") => {
             Some(rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet")))
         }
+        // The registry of flags (`FeatureFlags.REGISTRY.allFlags()`): every flag is on, so its set
+        // is that one set.
+        "net/minecraft/world/flag/FeatureFlags" if field == "REGISTRY" => {
+            Some(rt.intern("compat:feature-flag-registry".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagRegistry")))
+        }
         _ => None,
     }
 }
@@ -184,7 +189,10 @@ pub fn api_as_item(rt: &mut Rt, v: V) -> V {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, TAB | BUILDER | OUTPUT | CONTENTS_EVENT | PARAMETERS | "net/minecraft/world/flag/FeatureFlagSet" | "net/minecraft/world/item/BlockItem") || name == "asItem"
+    matches!(
+        owner,
+        TAB | BUILDER | OUTPUT | CONTENTS_EVENT | PARAMETERS | "net/minecraft/world/flag/FeatureFlagSet" | "net/minecraft/world/flag/FeatureFlagRegistry" | "net/minecraft/world/item/BlockItem"
+    ) || name == "asItem"
 }
 
 /// A creative tab call, or None when this module doesn't model it.
@@ -284,6 +292,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (CONTENTS_EVENT | PARAMETERS, "hasPermissions") => V::I(0),
         (CONTENTS_EVENT | PARAMETERS, "getFlags" | "enabledFeatures") => rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet")),
         ("net/minecraft/world/flag/FeatureFlagSet", "contains" | "isSubsetOf") => V::I(1),
+        ("net/minecraft/world/flag/FeatureFlagRegistry", "allFlags" | "subset" | "fromNames") => {
+            rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet"))
+        }
         (_, "asItem") if desc == "()Lnet/minecraft/world/item/Item;" => api_as_item(rt, a(0)),
         ("net/minecraft/world/item/BlockItem", "getBlock") => match rt.str_of(a(0)).map(str::to_owned) {
             Some(n) => api::block(rt, &n),
