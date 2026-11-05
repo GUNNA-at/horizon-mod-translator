@@ -212,7 +212,10 @@ fn registry_name_of(rt: &Rt, registry: &str, obj: V) -> Option<String> {
     if registry == "entity_type" {
         return crate::mod_entities::type_id(rt, obj).map(str::to_owned);
     }
-    rt.registered_name(obj, registry).map(str::to_owned)
+    // Vanilla's potions and effects know their own ids; a mod's are registrations.
+    rt.registered_name(obj, registry)
+        .or_else(|| matches!(registry, "potion" | "mob_effect").then(|| rt.str_of(rt.get_field(obj, "$id"))).flatten())
+        .map(str::to_owned)
 }
 
 /// A registry lookup's id: a `ResourceLocation` (`ns:path`) or a `ResourceKey` (`registry#ns:path`).
@@ -242,6 +245,10 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         "item" if id.starts_with("minecraft:") => crate::api_common::item(rt, id),
         "fluid" if id.starts_with("minecraft:") => crate::fluids::fluid(rt, id),
         "entity_type" if id.starts_with("minecraft:") => crate::mod_entities::vanilla_type(rt, id),
+        "potion" if id.starts_with("minecraft:") => {
+            let h = crate::food::potion_holder(rt, id);
+            rt.get_field(h, "$value")
+        }
         // Enchantments are data the runtime doesn't list: a name is taken to be one, as the
         // game's data has it (`enchantments.rs`).
         "enchantment" if crate::recipes::valid_location(id) => crate::enchantments::value(rt, id),
@@ -360,6 +367,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || owner.starts_with("net/minecraft/resources/")
         || is_registry(owner)
         || owner.starts_with("org/apache/maven/artifact/versioning/")
+        || owner.starts_with("cpw/mods/modlauncher/")
         || matches!(owner, "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference" | "net/minecraft/core/Holder$Direct")
         || (owner.starts_with("net/minecraft/") && matches!(name, "registryAccess" | "holderLookup" | "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup"))
 }
@@ -938,6 +946,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.put_field(a(0), "$done", V::I(0));
             V::Void
         }
+        // ModLauncher's environment (`Launcher.INSTANCE.environment()`): a player's game, which
+        // tells a mod none of its properties (Aquaculture's dev check finds no version).
+        ("cpw/mods/modlauncher/Launcher", "environment") => rt.intern("compat:modlauncher-environment".into(), |rt| rt.new_object("cpw/mods/modlauncher/Environment")),
+        ("cpw/mods/modlauncher/Environment" | "cpw/mods/modlauncher/api/IEnvironment", "getProperty" | "findLaunchPlugin" | "findLaunchHandler" | "findNameMapping") => {
+            crate::api_common::optional(rt, V::NULL)
+        }
         // The side: Horizon runs mods in the client.
         ("net/neoforged/fml/loading/FMLLoader", "isProduction") => V::I(1),
         ("net/neoforged/fml/loading/FMLLoader" | "net/neoforged/fml/loading/FMLEnvironment", "getDist") => {
@@ -1275,6 +1289,17 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         return Some(v);
     }
     match (owner, field) {
+        ("cpw/mods/modlauncher/Launcher", "INSTANCE") => Some(rt.intern("compat:modlauncher".into(), |rt| rt.new_object("cpw/mods/modlauncher/Launcher"))),
+        // `IEnvironment.Keys.VERSION`: a supplier of the property's key.
+        ("cpw/mods/modlauncher/api/IEnvironment$Keys", f) => {
+            let name = f.to_ascii_lowercase();
+            Some(rt.intern(format!("compat:modlauncher-key/{name}"), move |rt| {
+                let key = rt.new_object("cpw/mods/modlauncher/api/TypesafeMap$Key");
+                let n = rt.string(&name);
+                rt.put_field(key, "$name", n);
+                crate::functions::constant(rt, key)
+            }))
+        }
         // NeoForge's abilities: each constant's name lower-cased, but `HOE_TILL`'s is `till`.
         ("net/neoforged/neoforge/common/ItemAbilities", f) if !f.starts_with("DEFAULT_") => {
             let name = if f == "HOE_TILL" { "till".to_owned() } else { f.to_ascii_lowercase() };
@@ -1725,5 +1750,21 @@ mod tests {
         let (pc, drops) = (crate::jlang::class_object(&mut rt, crate::blocks::BLOCK_PROPERTIES), rt.string("drops"));
         call(&mut rt, set, &[pc, p, V::NULL, drops]);
         assert_eq!(rt.get_field(p, "$noLootTable"), V::I(0));
+    }
+
+    /// Aquaculture's dev check, `Launcher.INSTANCE.environment().getProperty(IEnvironment.Keys
+    /// .VERSION.get())`: a player's game tells no property.
+    #[test]
+    fn modlaunchers_environment_tells_no_properties() {
+        let mut rt = Rt::new();
+        crate::install();
+        let launcher = crate::api::get_static(&mut rt, "cpw/mods/modlauncher/Launcher.INSTANCE");
+        let env = call(&mut rt, "cpw/mods/modlauncher/Launcher.environment.()Lcpw/mods/modlauncher/Environment;", &[launcher]).unwrap();
+        let supplier = crate::api::get_static(&mut rt, "cpw/mods/modlauncher/api/IEnvironment$Keys.VERSION");
+        let key = crate::api::call(&mut rt, "java/util/function/Supplier.get.()Ljava/lang/Object;", &[supplier]);
+        assert_eq!(rt.class_of(key), "cpw/mods/modlauncher/api/TypesafeMap$Key");
+        let found = call(&mut rt, "cpw/mods/modlauncher/Environment.getProperty.(Lcpw/mods/modlauncher/api/TypesafeMap$Key;)Ljava/util/Optional;", &[env, key]).unwrap();
+        assert_eq!(crate::api::call(&mut rt, "java/util/Optional.isPresent.()Z", &[found]), V::I(0));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

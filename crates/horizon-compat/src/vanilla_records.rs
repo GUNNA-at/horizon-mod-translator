@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 668] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 667] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1622,7 +1622,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 668] = [
     ("net/minecraft/world/level/storage/loot/LootContext$Builder", "i(Lnet/minecraft/world/level/storage/loot/LootParams;)V=params|o"),
     ("net/minecraft/world/level/storage/loot/LootParams", "i(Lnet/minecraft/server/level/ServerLevel;Ljava/util/Map;Ljava/util/Map;F)V=level,params,dynamicDrops,luck|ggetLevel()Lnet/minecraft/server/level/ServerLevel;=level|ggetLuck()F=luck|o"),
     ("net/minecraft/world/level/storage/loot/ValidationContext", "i(Lnet/minecraft/util/ProblemReporter;Lnet/minecraft/world/level/storage/loot/parameters/LootContextParamSet;Ljava/util/Optional;Ljava/util/Set;)V=reporter,params,resolver,visitedElements|greporter()Lnet/minecraft/util/ProblemReporter;=reporter|o"),
-    ("net/minecraft/world/level/storage/loot/parameters/LootContextParam", "i(Lnet/minecraft/resources/ResourceLocation;)V=name|ggetName()Lnet/minecraft/resources/ResourceLocation;=name|o"),
     ("net/minecraft/world/level/storage/loot/predicates/CompositeLootItemCondition", "i(Ljava/util/List;Ljava/util/function/Predicate;)V=terms,composedPredicate|o"),
     ("net/minecraft/world/level/storage/loot/providers/nbt/ContextNbtProvider", "i(Lnet/minecraft/world/level/storage/loot/providers/nbt/ContextNbtProvider$Getter;)V=getter|o"),
     ("net/minecraft/world/level/timers/FunctionCallback", "i(Lnet/minecraft/resources/ResourceLocation;)V=functionId|o"),

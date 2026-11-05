@@ -907,7 +907,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner == RAIL_SHAPE && name == "isAscending")
         || (matches!(owner, SOUND_TYPE | DEFERRED_SOUND_TYPE) && (name == "<init>" || SOUND_GETTERS.iter().any(|(g, ..)| *g == name) || matches!(name, "getVolume" | "getPitch")))
         || (name == "useItemOn" && cauldron_class(owner))
-        || (matches!(owner, "net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem") && name == "createAttributes")
+        || (matches!(owner, "net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem" | "net/minecraft/world/item/AxeItem" | "net/minecraft/world/item/HoeItem" | "net/minecraft/world/item/PickaxeItem" | "net/minecraft/world/item/ShovelItem") && name == "createAttributes")
         || matches!(owner, TIERS | SIMPLE_TIER)
         || (owner == "net/minecraft/world/item/Tier" && name.starts_with("get"))
 }
@@ -1311,9 +1311,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (BLOCK_PROPERTIES, _) => block_properties(rt, name, desc, args),
         (ITEM_PROPERTIES, _) => item_properties(rt, name, args),
         (TIERS | SIMPLE_TIER | "net/minecraft/world/item/Tier", _) => tier_method(rt, owner, name, desc, args),
-        // `SwordItem.createAttributes(tier, damage, speed)` (and `DiggerItem`'s, the damage a float):
-        // the main hand's attack damage and speed modifiers, the tier's bonus added to the damage.
-        ("net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem", "createAttributes") => {
+        // `SwordItem.createAttributes(tier, damage, speed)` (and `DiggerItem`'s, the damage a float,
+        // which `AxeItem.createAttributes` and the other tools' name): the main hand's attack damage
+        // and speed modifiers, the tier's bonus added to the damage.
+        ("net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem" | "net/minecraft/world/item/AxeItem" | "net/minecraft/world/item/HoeItem" | "net/minecraft/world/item/PickaxeItem" | "net/minecraft/world/item/ShovelItem", "createAttributes") => {
             let bonus = rt.call_functional("net/minecraft/world/item/Tier.getAttackDamageBonus.()F", a(0), &[]);
             let bonus = if let V::F(f) = bonus { f } else { 0.0 };
             let damage = match a(1) {
@@ -3122,5 +3123,22 @@ mod tests {
         // The constant a state gives is the one the static field holds (`!= PushReaction.BLOCK`).
         let push = rt.with_host(&mut host, |rt| push_reaction(rt, "ruby:anchor"));
         assert_eq!(push, blocked);
+    }
+
+    /// `AxeItem.createAttributes(Tiers.IRON, 6, -3.1)` is `DiggerItem`'s (Aquaculture's axes):
+    /// iron's 2 added to the damage, the speed as given.
+    #[test]
+    fn a_tools_attributes_add_its_tiers_damage() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
+        let iron = api::get_static(&mut rt, "net/minecraft/world/item/Tiers.IRON");
+        let m = api::call(
+            &mut rt,
+            "net/minecraft/world/item/AxeItem.createAttributes.(Lnet/minecraft/world/item/Tier;FF)Lnet/minecraft/world/item/component/ItemAttributeModifiers;",
+            &[iron, V::F(6.0), V::F(-3.1)],
+        );
+        assert_eq!(rt.get_field(m, "$attackDamage"), V::D(8.0));
+        assert_eq!(rt.get_field(m, "$attackSpeed"), V::D(f64::from(-3.1f32)));
     }
 }

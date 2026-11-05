@@ -19,6 +19,9 @@ const INSTANCE: &str = "net/minecraft/world/effect/MobEffectInstance";
 const EFFECT: &str = "net/minecraft/world/effect/MobEffect";
 const EFFECTS: &str = "net/minecraft/world/effect/MobEffects";
 const USE_ANIM: &str = "net/minecraft/world/item/UseAnim";
+const POTIONS: &str = "net/minecraft/world/item/alchemy/Potions";
+const POTION: &str = "net/minecraft/world/item/alchemy/Potion";
+const POTION_CONTENTS: &str = "net/minecraft/world/item/alchemy/PotionContents";
 /// `UseAnim`'s constants in 1.21.1's order (NeoForge adds `CUSTOM`).
 const USE_ANIMS: [&str; 11] = ["NONE", "EAT", "DRINK", "BLOCK", "BOW", "SPEAR", "CROSSBOW", "SPYGLASS", "TOOT_HORN", "BRUSH", "CUSTOM"];
 const SUPPLY: &str = "java/util/function/Supplier.get.()Ljava/lang/Object;";
@@ -128,6 +131,17 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         let i = USE_ANIMS.iter().position(|n| *n == field)?;
         return Some(api::api_enum(rt, USE_ANIM, USE_ANIMS[i], i as i32));
     }
+    // `Potions.WATER`: each field registers the potion of its own name (all 46 of 1.21.1's).
+    if owner == POTIONS && !field.is_empty() && field.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') {
+        return Some(potion_holder(rt, &format!("minecraft:{}", field.to_ascii_lowercase())));
+    }
+    // `PotionContents.EMPTY`: no potion, no color, no effects.
+    if owner == POTION_CONTENTS && field == "EMPTY" {
+        return Some(rt.intern("compat:potion-contents/empty".into(), |rt| {
+            let (none, effects) = (api_common::optional(rt, V::NULL), jutil::new_list(rt, Vec::new()));
+            crate::records::make(rt, POTION_CONTENTS, &[none, none, effects])
+        }));
+    }
     if owner != EFFECTS {
         return None;
     }
@@ -139,6 +153,18 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         rt.put_field(effect, "$id", s);
         crate::neo::registry_holder(rt, "mob_effect", &id, effect)
     }))
+}
+
+/// Vanilla's potion `id` (`minecraft:water`) as its registry's holder, one per id; the potion
+/// knows its id (`$id`).
+pub(crate) fn potion_holder(rt: &mut Rt, id: &str) -> V {
+    let name = id.to_owned();
+    rt.intern(format!("potion-holder/{id}"), move |rt| {
+        let potion = rt.new_object(POTION);
+        let s = rt.string(&name);
+        rt.put_field(potion, "$id", s);
+        crate::neo::registry_holder(rt, "potion", &name, potion)
+    })
 }
 
 /// The id of an effect: a holder's (vanilla's, or a mod's `DeferredHolder`), or a registered one's.
@@ -176,8 +202,10 @@ fn copy_instance(rt: &mut Rt, from: V) -> V {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, BUILDER | POSSIBLE | INSTANCE) || (owner == EFFECT && EFFECT_METHODS.contains(&name))
+pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
+    matches!(owner, BUILDER | POSSIBLE | INSTANCE)
+        || (owner == EFFECT && EFFECT_METHODS.contains(&name))
+        || (owner == POTION_CONTENTS && name == "<init>" && desc == "(Lnet/minecraft/core/Holder;)V")
 }
 
 /// What a mod's own effect (a `MobEffect` subclass) takes from vanilla's class.
@@ -209,6 +237,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         this
     };
     Some(match (owner, name) {
+        // `new PotionContents(potion)`: that potion, no color of its own, no effects added.
+        (POTION_CONTENTS, "<init>") => {
+            let (potion, none, effects) = (api_common::optional(rt, a(1)), api_common::optional(rt, V::NULL), jutil::new_list(rt, Vec::new()));
+            rt.put_field(this, "potion", potion);
+            rt.put_field(this, "customColor", none);
+            rt.put_field(this, "customEffects", effects);
+            V::Void
+        }
         (BUILDER, "<init>") => {
             let list = jutil::new_list(rt, Vec::new());
             rt.put_field(this, "$effects", list);
@@ -566,5 +602,28 @@ mod tests {
             ])
         );
         assert_eq!(declared["minecraft:food"], serde_json::json!({"nutrition": 2, "saturation": 1.2}));
+    }
+
+    /// Vanilla's potions: `Potions.WATER` is the potion registry's holder of `minecraft:water`, the
+    /// same the registry gives for that id; `new PotionContents(holder)` holds it, with no color or
+    /// effects of its own (SecurityCraft's water bottles).
+    #[test]
+    fn potions_are_holders_and_contents_hold_them() {
+        let mut rt = Rt::new();
+        crate::install();
+        let water = api::get_static(&mut rt, "net/minecraft/world/item/alchemy/Potions.WATER");
+        let registry = rt.string("potion");
+        let id = rt.string("minecraft:water");
+        let potion = api::call(&mut rt, "net/minecraft/core/Registry.get.(Lnet/minecraft/resources/ResourceLocation;)Ljava/lang/Object;", &[registry, id]);
+        assert_eq!(api::call(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[water]), potion);
+        let key = api::call(&mut rt, "net/minecraft/core/Registry.getKey.(Ljava/lang/Object;)Lnet/minecraft/resources/ResourceLocation;", &[registry, potion]);
+        assert_eq!(rt.str_of(key), Some("minecraft:water"));
+        let contents = rt.new_object(POTION_CONTENTS);
+        api::call(&mut rt, "net/minecraft/world/item/alchemy/PotionContents.<init>.(Lnet/minecraft/core/Holder;)V", &[contents, water]);
+        let held = api::call(&mut rt, "net/minecraft/world/item/alchemy/PotionContents.potion.()Ljava/util/Optional;", &[contents]);
+        assert_eq!(api::call(&mut rt, "java/util/Optional.get.()Ljava/lang/Object;", &[held]), water);
+        let effects = api::call(&mut rt, "net/minecraft/world/item/alchemy/PotionContents.customEffects.()Ljava/util/List;", &[contents]);
+        assert!(jutil::elements(&rt, effects).is_empty());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

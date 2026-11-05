@@ -314,6 +314,17 @@ const LOCAL_DATE: &str = "java/time/LocalDate";
 const BOUNDS_INTS: &str = "net/minecraft/advancements/critereon/MinMaxBounds$Ints";
 const BOUNDS_DOUBLES: &str = "net/minecraft/advancements/critereon/MinMaxBounds$Doubles";
 const STAT_TYPE: &str = "net/minecraft/stats/StatType";
+const LOOT_PARAMS: &str = "net/minecraft/world/level/storage/loot/parameters/LootContextParams";
+const LOOT_PARAM: &str = "net/minecraft/world/level/storage/loot/parameters/LootContextParam";
+const LOOT_PARAM_SET: &str = "net/minecraft/world/level/storage/loot/parameters/LootContextParamSet";
+const LOOT_PARAM_SET_BUILDER: &str = "net/minecraft/world/level/storage/loot/parameters/LootContextParamSet$Builder";
+
+/// A new `LootContextParamSet.Builder`'s state: the required and the optional parameters.
+fn loot_param_builder(rt: &mut Rt, b: V) {
+    let (required, optional) = (crate::jutil::new_list(rt, Vec::new()), crate::jutil::new_list(rt, Vec::new()));
+    rt.put_field(b, "$required", required);
+    rt.put_field(b, "$optional", optional);
+}
 const STAT: &str = "net/minecraft/stats/Stat";
 const STOPWATCH: &str = "com/google/common/base/Stopwatch";
 /// `Stats`' stat types, by field, with their registry ids.
@@ -1623,6 +1634,47 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (STAT, "getType") => rt.get_field(a(0), "type"),
         (STAT, "getValue") => rt.get_field(a(0), "value"),
+        // A mod's own loot parameters and their sets (`new LootContextParamSet.Builder()
+        // .required(LootContextParams.THIS_ENTITY).build()`): what each holds, by identity.
+        (LOOT_PARAM, "<init>") => {
+            rt.put_field(a(0), "$name", a(1));
+            V::Void
+        }
+        (LOOT_PARAM, "getName" | "toString") => rt.get_field(a(0), "$name"),
+        (LOOT_PARAM_SET, "builder") => {
+            let b = rt.new_object(LOOT_PARAM_SET_BUILDER);
+            loot_param_builder(rt, b);
+            b
+        }
+        (LOOT_PARAM_SET_BUILDER, "<init>") => {
+            loot_param_builder(rt, a(0));
+            V::Void
+        }
+        (LOOT_PARAM_SET_BUILDER, "required" | "optional") => {
+            let list = rt.get_field(a(0), if name == "required" { "$required" } else { "$optional" });
+            crate::api::call(rt, "java/util/List.add.(Ljava/lang/Object;)Z", &[list, a(1)]);
+            a(0)
+        }
+        (LOOT_PARAM_SET_BUILDER, "build") => {
+            let required = crate::jutil::elements(rt, rt.get_field(a(0), "$required"));
+            let mut allowed = required.clone();
+            allowed.extend(crate::jutil::elements(rt, rt.get_field(a(0), "$optional")));
+            let set = rt.new_object(LOOT_PARAM_SET);
+            let (r, al) = (crate::jutil::new_set_of(rt, &required), crate::jutil::new_set_of(rt, &allowed));
+            rt.put_field(set, "$required", r);
+            rt.put_field(set, "$allowed", al);
+            set
+        }
+        (LOOT_PARAM_SET, "getRequired" | "getAllowed") => match rt.get_field(a(0), if name == "getRequired" { "$required" } else { "$allowed" }) {
+            s if s.r() != 0 => s,
+            _ => crate::jutil::new_set_of(rt, &[]),
+        },
+        // A vanilla set (`LootContextParamSets.BLOCK`) allows what the game gives it.
+        (LOOT_PARAM_SET, "isAllowed") => match rt.get_field(a(0), "$allowed") {
+            s if s.r() != 0 => crate::api::call(rt, "java/util/Set.contains.(Ljava/lang/Object;)Z", &[s, a(1)]),
+            _ => V::I(1),
+        },
+        (LOOT_PARAM_SET, "validateUser") => V::Void,
         // `PotionContents.withEffectAdded(effect)`: the same contents with the effect after its own.
         ("net/minecraft/world/item/alchemy/PotionContents", "withEffectAdded") => {
             let mut effects = crate::jutil::elements(rt, rt.get_field(a(0), "customEffects"));
@@ -3999,6 +4051,17 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             rt.put_field(f, "$name", n);
             f
         }),
+        // A loot context's parameters (`LootContextParams.THIS_ENTITY`), one per id: each of
+        // 1.21.1's 12 is named by its field.
+        LOOT_PARAMS if !field.is_empty() && field.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') => {
+            let id = format!("minecraft:{}", field.to_ascii_lowercase());
+            rt.intern(format!("compat:loot-param/{id}"), move |rt| {
+                let p = rt.new_object(LOOT_PARAM);
+                let n = rt.string(&id);
+                rt.put_field(p, "$name", n);
+                p
+            })
+        }
         // A loot context's parameter sets (`LootContextParamSets.BLOCK`), by name.
         "net/minecraft/world/level/storage/loot/parameters/LootContextParamSets" => rt.intern(format!("compat:loot-param-set/{field}"), |rt| {
             let set = rt.new_object("net/minecraft/world/level/storage/loot/parameters/LootContextParamSet");
@@ -4854,5 +4917,32 @@ mod tests {
         let lit = c(&mut rt, "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;", &[hello]);
         let j = c(&mut rt, "net/minecraft/network/chat/Component$Serializer.toJson.(Lnet/minecraft/network/chat/Component;Lnet/minecraft/core/HolderLookup$Provider;)Ljava/lang/String;", &[lit, V::NULL]);
         assert_eq!(rt.str_of(j), Some(r#"{"text":"hello"}"#));
+    }
+
+    /// A mod's own loot parameter set (guardvillagers' `new LootContextParamSet.Builder()
+    /// .required(THIS_ENTITY)...build()`): it requires and allows what it was given, one parameter
+    /// object per id.
+    #[test]
+    fn a_mods_loot_parameter_set_holds_its_parameters() {
+        let mut rt = Rt::new();
+        crate::install();
+        let this_entity = api::get_static(&mut rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParams.THIS_ENTITY");
+        assert_eq!(api::get_static(&mut rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParams.THIS_ENTITY"), this_entity);
+        let origin = api::get_static(&mut rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParams.ORIGIN");
+        let tool = api::get_static(&mut rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParams.TOOL");
+        let b = rt.new_object("net/minecraft/world/level/storage/loot/parameters/LootContextParamSet$Builder");
+        api::call(&mut rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParamSet$Builder.<init>.()V", &[b]);
+        let required = "net/minecraft/world/level/storage/loot/parameters/LootContextParamSet$Builder.required.(Lnet/minecraft/world/level/storage/loot/parameters/LootContextParam;)Lnet/minecraft/world/level/storage/loot/parameters/LootContextParamSet$Builder;";
+        let optional = "net/minecraft/world/level/storage/loot/parameters/LootContextParamSet$Builder.optional.(Lnet/minecraft/world/level/storage/loot/parameters/LootContextParam;)Lnet/minecraft/world/level/storage/loot/parameters/LootContextParamSet$Builder;";
+        assert_eq!(api::call(&mut rt, required, &[b, this_entity]), b);
+        api::call(&mut rt, optional, &[b, origin]);
+        let set = api::call(&mut rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParamSet$Builder.build.()Lnet/minecraft/world/level/storage/loot/parameters/LootContextParamSet;", &[b]);
+        let allowed = |rt: &mut Rt, p: V| api::call(rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParamSet.isAllowed.(Lnet/minecraft/world/level/storage/loot/parameters/LootContextParam;)Z", &[set, p]);
+        assert_eq!((allowed(&mut rt, this_entity), allowed(&mut rt, origin), allowed(&mut rt, tool)), (V::I(1), V::I(1), V::I(0)));
+        let needed = api::call(&mut rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParamSet.getRequired.()Ljava/util/Set;", &[set]);
+        assert_eq!(crate::jutil::elements(&rt, needed), [this_entity]);
+        let name = api::call(&mut rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParam.getName.()Lnet/minecraft/resources/ResourceLocation;", &[this_entity]);
+        assert_eq!(rt.str_of(name), Some("minecraft:this_entity"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

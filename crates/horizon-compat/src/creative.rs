@@ -195,6 +195,14 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     ) || name == "asItem"
 }
 
+/// A new tab builder's state: the tabs it comes before and after, none yet.
+fn new_builder(rt: &mut Rt, b: V) {
+    for f in ["$before", "$after"] {
+        let l = crate::jutil::new_list(rt, Vec::new());
+        rt.put_field(b, f, l);
+    }
+}
+
 /// A creative tab call, or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -202,15 +210,18 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     Some(match (owner, name) {
         (TAB, "builder") => {
             let b = rt.new_object(BUILDER);
-            for f in ["$before", "$after"] {
-                let l = crate::jutil::new_list(rt, Vec::new());
-                rt.put_field(b, f, l);
-            }
+            new_builder(rt, b);
             b
         }
         (BUILDER, n) => {
             let this = a(0);
             match n {
+                // `new CreativeModeTab.Builder(row, column)` (`CreativeModeTab.builder(row, column)`
+                // reaches vanilla's tabs; a mod's goes where NeoForge sorts it).
+                "<init>" => {
+                    new_builder(rt, this);
+                    return Some(V::Void);
+                }
                 "title" => rt.put_field(this, "$title", a(1)),
                 "icon" => rt.put_field(this, "$icon", a(1)),
                 "displayItems" => rt.put_field(this, "$display", a(1)),
@@ -518,5 +529,19 @@ mod tests {
                 Tab { id: "t:extra".into(), title: "Extra".into(), icon: String::new(), items: vec![] },
             ]
         );
+    }
+
+    /// `new CreativeModeTab.Builder(row, column)` (Aquaculture's tab) builds as `builder()`'s does.
+    #[test]
+    fn a_tab_built_from_its_constructor_keeps_its_title() {
+        let mut rt = Rt::new();
+        crate::install();
+        let b = rt.new_object(BUILDER);
+        crate::api::call(&mut rt, "net/minecraft/world/item/CreativeModeTab$Builder.<init>.(Lnet/minecraft/world/item/CreativeModeTab$Row;I)V", &[b, V::NULL, V::I(0)]);
+        let title = rt.string("Aquaculture");
+        crate::api::call(&mut rt, "net/minecraft/world/item/CreativeModeTab$Builder.title.(Lnet/minecraft/network/chat/Component;)Lnet/minecraft/world/item/CreativeModeTab$Builder;", &[b, title]);
+        let tab = crate::api::call(&mut rt, "net/minecraft/world/item/CreativeModeTab$Builder.build.()Lnet/minecraft/world/item/CreativeModeTab;", &[b]);
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/world/item/CreativeModeTab.getDisplayName.()Lnet/minecraft/network/chat/Component;", &[tab]), title);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

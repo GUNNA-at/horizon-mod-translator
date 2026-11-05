@@ -2354,6 +2354,21 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `mod_entities::tests::vanilla_entity_types_are_one_object_by_id`,
     `network::tests::a_collection_operation_reads_into_the_factorys_collection`; 267 compat and 14
     translator tests pass.
+  - [x] 2026-11-05 Potions, loot parameters, ModLauncher's environment, the tools' attributes and
+    a tab's constructor (round 13's misses of SecurityCraft, guardvillagers, Aquaculture). Vanilla's
+    `Potions.<NAME>` are the potion registry's holders, one per id (all 46 of 1.21.1's fields name
+    their own id, checked with `javap`), the same the registry gives; `new PotionContents(holder)`
+    and `PotionContents.EMPTY`. `LootContextParams.<NAME>` are one parameter per id (all 12), and a
+    mod's own `LootContextParamSet.Builder` builds a set that requires and allows what it was given.
+    `Launcher.INSTANCE.environment().getProperty(key)` answers nothing, as a player's game
+    (Aquaculture's dev check). `AxeItem`, `HoeItem`, `PickaxeItem` and `ShovelItem.createAttributes`
+    are `DiggerItem`'s; `new CreativeModeTab.Builder(row, column)` builds as `builder()`'s. Tests
+    `food::tests::potions_are_holders_and_contents_hold_them`,
+    `api_common::tests::a_mods_loot_parameter_set_holds_its_parameters`,
+    `neo::tests::modlaunchers_environment_tells_no_properties`,
+    `blocks::tests::a_tools_attributes_add_its_tiers_damage`,
+    `creative::tests::a_tab_built_from_its_constructor_keeps_its_title`; 272 compat and 14
+    translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
