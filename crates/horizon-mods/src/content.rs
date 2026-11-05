@@ -648,6 +648,22 @@ impl Content {
         Ok(())
     }
 
+    /// Declares a mob effect as its file `data/<mod id>/horizon/mob_effect/<path>.json` would, for a
+    /// native mod whose effects its code registers (`native_content`): its category and RGB colour,
+    /// checked as a file's. It replaces an effect of the same id.
+    pub fn declare_effect(&mut self, id: &str, category: EffectCategory, color: u32) -> Result<(), String> {
+        self.own_id(id)?;
+        if color > 0xFF_FFFF {
+            return Err(format!("{id}: color is RGB, 0 to 16777215 (0xFFFFFF)"));
+        }
+        let effect = MobEffect { id: id.to_owned(), category, color };
+        match self.effects.iter_mut().find(|e| e.id == id) {
+            Some(old) => *old = effect,
+            None => self.effects.push(effect),
+        }
+        Ok(())
+    }
+
     /// An id this mod may declare: `<mod id>:<path>`, the path as a file name's.
     fn own_id(&self, id: &str) -> Result<(), String> {
         let own = self.namespaces.first().map(String::as_str).unwrap_or_default();
@@ -1561,6 +1577,23 @@ capabilities = ["registries"]
         }
         assert_eq!(c.blocks.len(), 2);
         assert_eq!(c.items.len(), 1);
+    }
+
+    #[test]
+    fn code_declares_effects_as_files_do() {
+        let files: &[(&str, &[u8])] = &[(
+            "data/ruby/horizon/mob_effect/glow.json",
+            br#"{"category": "beneficial", "color": 16777215}"#,
+        )];
+        let mut c = hmod("declared-effects", MANIFEST_TEXT, files).unwrap();
+        c.declare_effect("ruby:glow", EffectCategory::Harmful, 0x3366ff).unwrap();
+        c.declare_effect("ruby:comfort", EffectCategory::Beneficial, 14545909).unwrap();
+        let effects: Vec<(&str, EffectCategory, u32)> = c.effects.iter().map(|e| (e.id.as_str(), e.category, e.color)).collect();
+        assert_eq!(effects, [("ruby:glow", EffectCategory::Harmful, 0x3366ff), ("ruby:comfort", EffectCategory::Beneficial, 14545909)]);
+        // Another mod's id, or a colour no file could hold.
+        assert!(c.declare_effect("minecraft:glow", EffectCategory::Neutral, 0).is_err());
+        assert!(c.declare_effect("ruby:bright", EffectCategory::Neutral, 0x100_0000).is_err());
+        assert_eq!(c.effects.len(), 2);
     }
 
     #[test]

@@ -1070,7 +1070,8 @@ with no `Game` at hand. Server-side.
 - `native_after_hit(change)` has `change(&mut Game)` made once the hit is over, in the level it was dealt in: when the
   player's action that dealt it ends or the level's tick does, and before another level takes its place. Changes run in the
   order they came; those a change leaves run after it, for up to 8 rounds. A hook plays a sound, tells a player or hurts
-  another entity this way.
+  another entity this way. The effect hooks use it too: `native_apply_effect_tick` runs inside the entity's tick, with the
+  game read-only, and an effect is often given from inside a mod's own call.
 
 ### Attributes
 

@@ -152,6 +152,105 @@ fn instance(rt: &mut Rt, e: &EffectView) -> V {
     i
 }
 
+/// `MobEffect`'s methods a mod's own effect may answer, as the game's effect hooks ask them.
+const SHOULD_APPLY: &str = "shouldApplyEffectTickThisTick.(II)Z";
+const SHOULD_APPLY_KEY: &str = "net/minecraft/world/effect/MobEffect.shouldApplyEffectTickThisTick.(II)Z";
+const APPLY: &str = "applyEffectTick.(Lnet/minecraft/world/entity/LivingEntity;I)Z";
+const APPLY_KEY: &str = "net/minecraft/world/effect/MobEffect.applyEffectTick.(Lnet/minecraft/world/entity/LivingEntity;I)Z";
+const ADDED: &str = "onEffectAdded.(Lnet/minecraft/world/entity/LivingEntity;I)V";
+const ADDED_KEY: &str = "net/minecraft/world/effect/MobEffect.onEffectAdded.(Lnet/minecraft/world/entity/LivingEntity;I)V";
+const STARTED: &str = "onEffectStarted.(Lnet/minecraft/world/entity/LivingEntity;I)V";
+const STARTED_KEY: &str = "net/minecraft/world/effect/MobEffect.onEffectStarted.(Lnet/minecraft/world/entity/LivingEntity;I)V";
+
+/// Every mob effect the mod registered (outside `minecraft`), by id, as `(id, category, colour)`:
+/// what `new MobEffect(category, color)` took, the category by its name in lower case
+/// (`beneficial`, `harmful`, `neutral`), the colour as RGB. The game knows them as a content mod's
+/// effects (`Content::declare_effect`).
+pub fn effect_declarations(rt: &mut Rt) -> Vec<(String, String, u32)> {
+    let mut effects: Vec<(String, V)> = rt
+        .registered
+        .iter()
+        .filter(|((r, n), _)| r == "mob_effect" && n.split_once(':').is_some_and(|(ns, path)| !ns.is_empty() && ns != "minecraft" && !path.is_empty()))
+        .map(|((_, n), v)| (n.clone(), *v))
+        .collect();
+    effects.sort_by(|a, b| a.0.cmp(&b.0));
+    effects
+        .into_iter()
+        .map(|(id, e)| {
+            let category = rt.get_field(e, "$category");
+            let category = rt.str_of(rt.get_field(category, "$name")).unwrap_or("NEUTRAL").to_ascii_lowercase();
+            let color = (rt.get_field(e, "$color").i() as u32) & 0xFF_FFFF;
+            (id, category, color)
+        })
+        .collect()
+}
+
+/// The mod's own effect `id`, when its class answers `nd` itself.
+fn own_effect(rt: &Rt, id: &str, nd: &str) -> Option<V> {
+    let &e = rt.registered.get(&("mob_effect".to_owned(), id.to_owned()))?;
+    let class = rt.class_of(e);
+    rt.overrides.is_some_and(|o| o(class, nd)).then_some(e)
+}
+
+/// `MobEffect.shouldApplyEffectTickThisTick(duration, amplifier)` of the mod's effect `id`: its own
+/// code, which needs no world. None when it isn't the mod's or its class leaves it to vanilla's
+/// (which never applies a tick).
+pub fn should_apply_tick(rt: &mut Rt, id: &str, duration: i32, amplifier: i32) -> Option<bool> {
+    rt.safe_point();
+    let e = own_effect(rt, id, SHOULD_APPLY)?;
+    let vc = rt.vcall?;
+    let r = vc(rt, SHOULD_APPLY_KEY, SHOULD_APPLY, &[e, V::I(duration), V::I(amplifier)]);
+    let thrown = rt.thrown.is_some();
+    rt.report_thrown("shouldApplyEffectTickThisTick");
+    (!thrown).then(|| r.i() != 0)
+}
+
+/// The living entity an effect acts on: the player in place (None) or the level's entity `id`,
+/// as the host tells of it; None when the host doesn't know it.
+fn living(rt: &mut Rt, entity: Option<i32>) -> Option<V> {
+    match entity {
+        None => Some(crate::api_common::acting_player(rt)),
+        Some(id) => {
+            let view = rt.host().and_then(|h| h.entity(id))?;
+            let v = crate::vanilla_entities::of(rt, id, &view.kind, Some(view.pos));
+            (v.r() != 0).then_some(v)
+        }
+    }
+}
+
+/// `MobEffect.applyEffectTick(entity, amplifier)` of the mod's effect `id` on the living entity
+/// `entity` (None: the player in place), with `host`'s world: whether the effect stays. None when
+/// it isn't the mod's own code, the entity isn't there or the code threw.
+pub fn apply_tick(rt: &mut Rt, host: &mut dyn crate::host::Host, id: &str, entity: Option<i32>, amplifier: i32) -> Option<bool> {
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let e = own_effect(rt, id, APPLY)?;
+        let living = living(rt, entity)?;
+        let vc = rt.vcall?;
+        let r = vc(rt, APPLY_KEY, APPLY, &[e, living, V::I(amplifier)]);
+        let thrown = rt.thrown.is_some();
+        rt.report_thrown("applyEffectTick");
+        (!thrown).then(|| r.i() != 0)
+    })
+}
+
+/// The mod's effect `id` was given to the living entity `entity`: its `onEffectAdded(entity,
+/// amplifier)` when the entity hadn't had it, or (`started`) its `onEffectStarted`, each time.
+pub fn effect_added(rt: &mut Rt, host: &mut dyn crate::host::Host, id: &str, entity: Option<i32>, amplifier: i32, started: bool) {
+    rt.safe_point();
+    let (nd, key, what) = if started { (STARTED, STARTED_KEY, "onEffectStarted") } else { (ADDED, ADDED_KEY, "onEffectAdded") };
+    rt.with_host(host, |rt| {
+        let (Some(e), Some(vc)) = (own_effect(rt, id, nd), rt.vcall) else {
+            return;
+        };
+        let Some(living) = living(rt, entity) else {
+            return;
+        };
+        vc(rt, key, nd, &[e, living, V::I(amplifier)]);
+        rt.report_thrown(what);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +329,69 @@ mod tests {
         assert_eq!(h.effects[&None], Vec::new(), "all taken off at the end");
         assert_eq!(h.effects[&Some(7)], Vec::new());
         assert!(!h.effects.contains_key(&Some(9)));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    #[test]
+    fn a_mods_own_effect_is_declared_and_its_code_acts_when_the_game_asks() {
+        const STATIC: &str = "test/StaticEffect";
+        fn overrides(class: &str, short: &str) -> bool {
+            class == STATIC && [SHOULD_APPLY, APPLY, ADDED, STARTED].contains(&short)
+        }
+        // The mod's effect: it acts every 20 ticks and its third act ends it.
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match short {
+                SHOULD_APPLY => V::I((args[1].i() % 20 == 0) as i32),
+                APPLY => {
+                    let acts = rt.get_field(args[0], "acts").i() + 1;
+                    rt.put_field(args[0], "acts", V::I(acts));
+                    rt.put_field(args[0], "actedOn", args[1]);
+                    V::I((acts < 3) as i32)
+                }
+                ADDED => {
+                    rt.put_field(args[0], "addedTo", args[1]);
+                    rt.put_field(args[0], "addedAt", args[2]);
+                    V::Void
+                }
+                STARTED => {
+                    rt.put_field(args[0], "startedOn", args[1]);
+                    V::Void
+                }
+                _ => crate::api::call(rt, key, args),
+            }
+        }
+        let mut h = MemoryHost { player_id: Some(0xabc), ..MemoryHost::default() };
+        h.entities.push(crate::host::EntityView { id: 7, kind: "minecraft:cow".into(), health: Some((10.0, 10.0)), ..Default::default() });
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        rt.supers.insert(STATIC, "net/minecraft/world/effect/MobEffect");
+        let harmful = crate::api::get_static(&mut rt, "net/minecraft/world/effect/MobEffectCategory.HARMFUL");
+        let effect = rt.new_object(STATIC);
+        crate::api::call(&mut rt, "net/minecraft/world/effect/MobEffect.<init>.(Lnet/minecraft/world/effect/MobEffectCategory;I)V", &[effect, harmful, V::I(0x3366ff)]);
+        rt.registered.insert(("mob_effect".into(), "hzcheck:static".into()), effect);
+
+        assert_eq!(effect_declarations(&mut rt), [("hzcheck:static".to_owned(), "harmful".to_owned(), 0x3366ff)]);
+        assert_eq!(should_apply_tick(&mut rt, "hzcheck:static", 40, 0), Some(true));
+        assert_eq!(should_apply_tick(&mut rt, "hzcheck:static", 39, 0), Some(false));
+        assert_eq!(should_apply_tick(&mut rt, "minecraft:speed", 40, 0), None, "vanilla's, not the mod's");
+
+        // It acts on the cow until its third act; on an entity the game doesn't know, it doesn't act.
+        assert_eq!(apply_tick(&mut rt, &mut h, "hzcheck:static", Some(7), 1), Some(true));
+        let cow = rt.get_field(effect, "actedOn");
+        assert_eq!(rt.get_field(cow, "$vid"), V::I(7));
+        assert_eq!(apply_tick(&mut rt, &mut h, "hzcheck:static", Some(9), 1), None);
+        assert_eq!(apply_tick(&mut rt, &mut h, "hzcheck:static", Some(7), 1), Some(true));
+        assert_eq!(apply_tick(&mut rt, &mut h, "hzcheck:static", Some(7), 1), Some(false), "the third ends it");
+
+        // Given to the player, who hadn't had it; then started again on the cow.
+        effect_added(&mut rt, &mut h, "hzcheck:static", None, 1, false);
+        let player = rt.with_host(&mut h, |rt| crate::menus::server_player(rt, 0xabc));
+        assert_eq!((rt.get_field(effect, "addedTo"), rt.get_field(effect, "addedAt")), (player, V::I(1)));
+        assert_eq!(rt.get_field(effect, "startedOn"), V::Void);
+        effect_added(&mut rt, &mut h, "hzcheck:static", Some(7), 0, true);
+        assert_eq!(rt.get_field(effect, "startedOn"), cow);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

@@ -3545,6 +3545,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     refused; NeoForge's `MobEffectEvent` (`Applicable`, `Added`, `Remove`, `Expired`) isn't fired; `canBeAffected`,
     `removeEffectsCuredBy` and `MobEffect.applyInstantenousEffect` aren't there; another player than the one in place
     and a mob inside a hit's hooks have no effects to read.
+- [x] 2026-11-05 A mod's own mob effects in the game (`mob_effects.rs`: `effect_declarations`, `should_apply_tick`,
+  `apply_tick`, `effect_added`; content: `Content::declare_effect`; translator: the content hook declares them, and the
+  hooks `native_should_apply_effect_tick_this_tick`, `native_apply_effect_tick`, `native_on_effect_added` and
+  `native_mob_effect_added` run their code). Until now the game refused Farmer's Delight's Comfort and Nourishment, and
+  every other `MobEffect` a pack's mods register: it didn't know them.
+  - The content hook declares each `mob_effect` the mod registered (outside `minecraft`) as a content mod's effect, with
+    the category and colour its `new MobEffect(category, color)` took. `/effect give`, potions and a mod's `addEffect`
+    then take it, and the game ticks it, shows its icon and sends it to clients as a content mod's.
+  - Its code runs where vanilla's would. `shouldApplyEffectTickThisTick(duration, amplifier)` runs each tick, at once:
+    it needs no world. `applyEffectTick(entity, amplifier)` runs once the entity's tick is over, with the game at hand:
+    inside the tick the game is read-only. The effect is taken off when its code says it ends. `onEffectAdded` runs when
+    the entity hadn't had it and `onEffectStarted` each time it's given, once the action or tick that gave it is over: a
+    mod's own `addEffect` gives it from inside the mod's call, where the runtime is busy. A method the class leaves to
+    vanilla's does what vanilla's does: no tick, nothing on adding.
+  Tests `content::tests::code_declares_effects_as_files_do` (code's declaration replaces a file's of the same id; another
+  mod's id and a colour past RGB refused) and
+  `mob_effects::tests::a_mods_own_effect_is_declared_and_its_code_acts_when_the_game_asks` (a harmful effect declared
+  with its colour; its `shouldApplyEffectTickThisTick` answers by duration, and vanilla's speed isn't the mod's; its
+  `applyEffectTick` acts on the cow the host knows until the third act ends it, and not on an entity the host doesn't
+  know; `onEffectAdded` gets the player and the amplifier, `onEffectStarted` the cow). 362 compat, 17 translator, 33
+  horizon-mods tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

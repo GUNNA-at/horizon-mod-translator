@@ -59,7 +59,8 @@ pub(crate) fn native_hit_player() -> Option<NativeHitPlayer> {
 /// Has `change` made to the game once the hit in progress is over, in the
 /// level it was dealt in: after the player's action or the level's tick that
 /// dealt it, changes in the order they came. For a hit's hooks, which have no
-/// game to change (a sound, a message, another entity hurt). A change that
+/// game to change (a sound, a message, another entity hurt), and an effect's
+/// (`native_apply_effect_tick` runs inside the entity's tick). A change that
 /// leaves more runs them in turn. API @API:hit_world@.
 #[allow(dead_code)]
 pub(crate) fn native_after_hit(change: impl for<'a, 'g> FnOnce(&'a mut Game<'g>) + 'static) {
