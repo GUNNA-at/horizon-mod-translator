@@ -419,6 +419,19 @@ pub enum ItemModelNode {
         model: SpecialModel,
     },
     BundleSelectedItem,
+    /// A 1.21.1 item model's `overrides`, as a translated mod's model has them (Horizon's
+    /// `horizon:overrides`): the last override whose predicates all hold, else `base`
+    /// (`ItemOverrides.resolve`).
+    Overrides {
+        base: Box<ItemModelNode>,
+        overrides: Vec<ModelOverride>,
+    },
+}
+/// One of 1.21.1's `ItemOverride`s: it holds when each property is at least its threshold.
+#[derive(Clone, Debug)]
+pub struct ModelOverride {
+    pub predicates: Vec<(String, f32)>,
+    pub model: ItemModelNode,
 }
 #[derive(Clone, Debug)]
 pub struct SwitchCase {
@@ -512,6 +525,25 @@ impl ItemModelNode {
                 model: SpecialModel::decode(required(m, "model")?)?,
             },
             "minecraft:bundle/selected_item" => Self::BundleSelectedItem,
+            "horizon:overrides" => Self::Overrides {
+                base: Box::new(Self::decode(required(m, "base")?)?),
+                overrides: list(required(m, "overrides")?)?
+                    .iter()
+                    .map(|o| {
+                        let o = object(o)?;
+                        let predicates = object(required(o, "predicate")?)?
+                            .iter()
+                            .map(|(property, threshold)| {
+                                Ok((identifier(property)?, float(threshold)?))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        Ok(ModelOverride {
+                            predicates,
+                            model: Self::decode(required(o, "model")?)?,
+                        })
+                    })
+                    .collect::<Result<_>>()?,
+            },
             _ => return Err(err("unknown item model type")),
         })
     }
@@ -540,6 +572,10 @@ impl ItemModelNode {
                 fallback.iter().for_each(|f| f.dependencies(out));
             }
             Self::Special { base, .. } => out.push(base.clone()),
+            Self::Overrides { base, overrides } => {
+                base.dependencies(out);
+                overrides.iter().for_each(|o| o.model.dependencies(out));
+            }
         }
     }
 }
@@ -981,6 +1017,17 @@ pub trait ItemEnv {
     fn random_float(&self) -> f32 {
         0.0
     }
+    /// A property a translated 1.21.1 mod registered for the stack (`ItemProperties.register`,
+    /// `registerGeneric`): what its function answers, `None` when none is registered.
+    fn item_property(
+        &self,
+        _stack: &StackView,
+        _components: &Components,
+        _id: &str,
+        _ctx: &Context<'_>,
+    ) -> Option<f32> {
+        None
+    }
 }
 /// An [`ItemEnv`] with the trait defaults.
 pub struct NoEnv;
@@ -1281,6 +1328,77 @@ impl Resolve<'_> {
                         .append_layers(out, &selected, self.ctx, self.env);
                 }
             }
+            ItemModelNode::Overrides { base, overrides } => {
+                // `ItemOverrides.resolve`: each property asked once, in the order the overrides
+                // name them; then the last override none of whose properties is below its
+                // threshold (a NaN is never below, as in Java).
+                let mut values: Vec<(&str, f32)> = Vec::new();
+                for o in overrides {
+                    for (property, _) in &o.predicates {
+                        if !values.iter().any(|(p, _)| p == property) {
+                            values.push((property, self.item_property(property)));
+                        }
+                    }
+                }
+                let value = |property: &str| {
+                    values
+                        .iter()
+                        .find(|(p, _)| *p == property)
+                        .map_or(f32::NEG_INFINITY, |(_, v)| *v)
+                };
+                let chosen = overrides.iter().rev().find(|o| {
+                    o.predicates.iter().all(|(property, threshold)| {
+                        let v = value(property);
+                        v >= *threshold || v.is_nan()
+                    })
+                });
+                let next = chosen.map_or(&**base, |o| &o.model);
+                self.node(out, next, parent);
+            }
+        }
+    }
+    /// 1.21.1's `ItemProperties.getProperty(stack, id)` called: vanilla's generic properties
+    /// (`damage` and `damaged` on a stack that can break, `lefthanded`, `cooldown`,
+    /// `custom_model_data`, `trim_type`), else what the mod registered, which the host asks its
+    /// code for; -inf for a property nothing answers (`ItemOverrides.NO_OVERRIDE`).
+    fn item_property(&self, id: &str) -> f32 {
+        if self.max_damage() > 0 {
+            match id {
+                "minecraft:damage" => {
+                    return self.numeric(&NumericProperty::Damage { normalize: true });
+                }
+                "minecraft:damaged" => {
+                    return if self.condition(&ConditionProperty::Damaged) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                }
+                _ => {}
+            }
+        }
+        match id {
+            "minecraft:lefthanded" => {
+                if self.ctx.owner.is_some_and(|o| o.main_arm_left) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            "minecraft:cooldown" => self.numeric(&NumericProperty::Cooldown),
+            // 1.21.1's integer is 26.3's first float (Minecraft's own conversion).
+            "minecraft:custom_model_data" => self.numeric(&NumericProperty::CustomModelData(0)),
+            "minecraft:trim_type" => self
+                .component("minecraft:trim")
+                .and_then(|t| t.get("material"))
+                .and_then(Value::as_str)
+                .and_then(|m| identifier(m).ok())
+                .and_then(|m| trim_model_index(&m))
+                .unwrap_or(f32::NEG_INFINITY),
+            _ => self
+                .env
+                .item_property(self.stack, self.components, id, self.ctx)
+                .unwrap_or(f32::NEG_INFINITY),
         }
     }
     fn item_in_compass_tag(&self) -> bool {
@@ -1615,6 +1733,23 @@ impl Resolve<'_> {
             ),
         }
     }
+}
+
+/// 1.21.1's `TrimMaterial.itemModelIndex` of vanilla's materials (`TrimMaterials.bootstrap`).
+fn trim_model_index(material: &str) -> Option<f32> {
+    Some(match material {
+        "minecraft:quartz" => 0.1,
+        "minecraft:iron" => 0.2,
+        "minecraft:netherite" => 0.3,
+        "minecraft:redstone" => 0.4,
+        "minecraft:copper" => 0.5,
+        "minecraft:gold" => 0.6,
+        "minecraft:emerald" => 0.7,
+        "minecraft:diamond" => 0.8,
+        "minecraft:lapis" => 0.9,
+        "minecraft:amethyst" => 1.0,
+        _ => return None,
+    })
 }
 
 /// `Mth.clamp(float, min, max)` with `Math.min`'s NaN propagation.
