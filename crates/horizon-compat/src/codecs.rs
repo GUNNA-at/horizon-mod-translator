@@ -1218,6 +1218,15 @@ fn mod_codec_kind(rt: &Rt, v: V) -> Option<&'static str> {
 }
 
 const DECODE: &str = "com/mojang/serialization/Decoder.decode.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+pub(crate) const PRIMITIVE_CODEC: &str = "com/mojang/serialization/codecs/PrimitiveCodec";
+/// A `PrimitiveCodec`'s own two methods; its `decode` and `encode` are DFU's defaults over them.
+const PRIMITIVE_READ: &str = "com/mojang/serialization/codecs/PrimitiveCodec.read.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+const PRIMITIVE_WRITE: &str = "com/mojang/serialization/codecs/PrimitiveCodec.write.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Ljava/lang/Object;";
+
+/// Whether the mod codec `c` is a `PrimitiveCodec` (`read`/`write`, DFU's `decode`/`encode`).
+fn primitive_mod_codec(rt: &Rt, c: V) -> bool {
+    rt.is_a(rt.class_of(c), PRIMITIVE_CODEC)
+}
 const ENCODE: &str = "com/mojang/serialization/Encoder.encode.(Ljava/lang/Object;Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
 const MAP_DECODE: &str = "com/mojang/serialization/MapDecoder.decode.(Lcom/mojang/serialization/DynamicOps;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;";
 const MAP_ENCODE: &str =
@@ -1226,6 +1235,11 @@ const MAP_ENCODE: &str =
 /// A mod codec's own `decode(NbtOps, tag)` of `j`: the value of the pair it answers.
 fn java_decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
     let (ops, input) = (crate::ops::nbt_ops(rt), crate::ops::json_tag(rt, j));
+    if primitive_mod_codec(rt, c) {
+        // `read(ops, input).map(r -> Pair.of(r, ops.empty()))`: the value read.
+        let r = run(rt, PRIMITIVE_READ, c, &[ops, input])?;
+        return result_of(rt, r);
+    }
     let r = run(rt, DECODE, c, &[ops, input])?;
     let p = result_of(rt, r)?;
     Ok(rt.get_field(p, "$first"))
@@ -1243,8 +1257,13 @@ fn java_decode_map(rt: &mut Rt, c: V, o: &Map<String, Json>) -> Result<V, String
 /// A mod codec's own `encode(value, NbtOps, EndTag)`.
 fn java_encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
     let (ops, empty) = (crate::ops::nbt_ops(rt), crate::ops::end(rt));
-    let r = run(rt, ENCODE, c, &[value, ops, empty])?;
-    let tag = result_of(rt, r)?;
+    let tag = if primitive_mod_codec(rt, c) {
+        // `ops.mergeToPrimitive(prefix, write(ops, input))` onto an empty prefix: what `write` gave.
+        run(rt, PRIMITIVE_WRITE, c, &[ops, value])?
+    } else {
+        let r = run(rt, ENCODE, c, &[value, ops, empty])?;
+        result_of(rt, r)?
+    };
     crate::nbt::element_from_runtime(rt, tag).ok_or_else(|| format!("a mod codec wrote {}", rt.class_of(tag)))
 }
 

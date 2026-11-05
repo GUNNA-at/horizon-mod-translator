@@ -59,6 +59,12 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         "net/minecraft/client/gui/screens/inventory/MenuAccess" => c == "net/minecraft/client/gui/screens/inventory/AbstractContainerScreen",
         // A mod's container is FML's Java one (`neo::mod_container`).
         "net/neoforged/fml/ModContainer" => c == crate::neo::FML_CONTAINER,
+        // DFU's codec interfaces: a `PrimitiveCodec` (a mod's own, Curios') is a `Codec`, and a
+        // codec decodes and encodes.
+        "com/mojang/serialization/Codec" => c == crate::codecs::PRIMITIVE_CODEC,
+        "com/mojang/serialization/Decoder" | "com/mojang/serialization/Encoder" => {
+            matches!(c, "com/mojang/serialization/Codec" | crate::codecs::PRIMITIVE_CODEC)
+        }
         "java/lang/ReflectiveOperationException" => matches!(
             c,
             "java/lang/ClassNotFoundException"

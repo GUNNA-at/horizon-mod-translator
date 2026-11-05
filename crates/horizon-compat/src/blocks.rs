@@ -37,6 +37,23 @@ const MAP_COLORS: [&str; 62] = [
     "TERRACOTTA_RED", "TERRACOTTA_BLACK", "CRIMSON_NYLIUM", "CRIMSON_STEM", "CRIMSON_HYPHAE", "WARPED_NYLIUM", "WARPED_STEM",
     "WARPED_HYPHAE", "WARPED_WART_BLOCK", "DEEPSLATE", "RAW_IRON", "GLOW_LICHEN",
 ];
+/// `MapColor.col` by id: the colour each constant was built with.
+const MAP_COLOR_VALUES: [i32; 62] = [
+    0, 8368696, 16247203, 13092807, 16711680, 10526975, 10987431, 31744, 16777215, 10791096, 9923917, 7368816, 4210943, 9402184,
+    16776437, 14188339, 11685080, 6724056, 15066419, 8375321, 15892389, 5000268, 10066329, 5013401, 8339378, 3361970, 6704179,
+    6717235, 10040115, 1644825, 16445005, 6085589, 4882687, 55610, 8476209, 7340544, 13742497, 10441252, 9787244, 7367818,
+    12223780, 6780213, 10505550, 3746083, 8874850, 5725276, 8014168, 4996700, 4993571, 5001770, 9321518, 2430480, 12398641,
+    9715553, 6035741, 1474182, 3837580, 5647422, 1356933, 6579300, 14200723, 8365974,
+];
+
+/// The `MapColor` constant with id `id`, its fields `id` and `col` set.
+fn map_color_constant(rt: &mut Rt, id: usize) -> V {
+    let id = id.min(MAP_COLORS.len() - 1);
+    let o = named(rt, MAP_COLOR, MAP_COLORS[id]);
+    rt.put_field(o, "id", V::I(id as i32));
+    rt.put_field(o, "col", V::I(MAP_COLOR_VALUES[id]));
+    o
+}
 
 /// `DyeColor`'s constants in order, with the map colour each one's blocks take.
 pub(crate) const DYES: [(&str, u8); 16] = [
@@ -467,9 +484,7 @@ fn dye_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "getTextColor" => V::I(DYE_COLORS[id(rt)].2 as i32),
         "getMapColor" => {
             let c = DYES[id(rt)].1 as usize;
-            let o = named(rt, MAP_COLOR, MAP_COLORS[c]);
-            rt.put_field(o, "id", V::I(c as i32));
-            o
+            map_color_constant(rt, c)
         }
         // `byId`: out of range gives white, as vanilla's `ByIdMap.OutOfBoundsStrategy.ZERO`.
         "byId" => {
@@ -955,9 +970,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let default_state = rt.str_of(d).unwrap_or("").to_owned();
             let own = if props.r() != 0 { map_color(rt, rt.get_field(props, "$mapColor"), &default_state) } else { None };
             let id = own.or_else(|| vanilla.as_deref().and_then(|c| COPIED.iter().find(|(n, ..)| *n == c)).map(|c| c.4)).unwrap_or(0) as usize;
-            let o = named(rt, MAP_COLOR, MAP_COLORS[id.min(MAP_COLORS.len() - 1)]);
-            rt.put_field(o, "id", V::I(id as i32));
-            Some(o)
+            Some(map_color_constant(rt, id))
         }
         // A block-state enum's name in states (`SlabType.DOUBLE` is `double`); the property enums
         // also give it as `toString`.
@@ -1144,18 +1157,14 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         // Every colour at its id, as `MapColor`'s constructor files them (64 slots).
         MAP_COLOR if field == "MATERIAL_COLORS" => Some(rt.intern(format!("const/{MAP_COLOR}.MATERIAL_COLORS"), |rt| {
             let mut colors = vec![V::NULL; 64];
-            for (id, c) in MAP_COLORS.iter().enumerate() {
-                let o = named(rt, MAP_COLOR, c);
-                rt.put_field(o, "id", V::I(id as i32));
-                colors[id] = o;
+            for (id, slot) in colors.iter_mut().enumerate().take(MAP_COLORS.len()) {
+                *slot = map_color_constant(rt, id);
             }
             rt.alloc("[Lnet/minecraft/world/level/material/MapColor;", crate::Data::Array(colors))
         })),
         MAP_COLOR => {
             let id = MAP_COLORS.iter().position(|c| *c == field)?;
-            let o = named(rt, MAP_COLOR, MAP_COLORS[id]);
-            rt.put_field(o, "id", V::I(id as i32));
-            Some(o)
+            Some(map_color_constant(rt, id))
         }
         DYE_COLOR => {
             let i = DYES.iter().position(|(d, _)| *d == field)?;
@@ -2029,6 +2038,9 @@ mod tests {
         let all = api::get_static(&mut rt, "net/minecraft/world/level/material/MapColor.MATERIAL_COLORS");
         let ids = crate::jutil::elements(&rt, all);
         assert_eq!((ids.len(), ids[15], ids[63]), (64, color, V::NULL));
+        // Its fields as a mod reads them: the id, and the colour it was built with.
+        assert_eq!((rt.get_field(color, "id"), rt.get_field(color, "col")), (V::I(15), V::I(14188339)));
+        assert_eq!(rt.get_field(ids[1], "col"), V::I(8368696), "GRASS");
         let k = |s: &str| -> &'static str { Box::leak(format!("{BLOCK_PROPERTIES}.{s}").into_boxed_str()) };
         let q = api::call(&mut rt, k("strength.(FF)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[p, V::F(3.0), V::F(6.0)]);
         assert_eq!(q, p);

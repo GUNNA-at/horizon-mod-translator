@@ -667,6 +667,46 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
+    /// A mod's `PrimitiveCodec` (Curios' attribute codec): `test/Shout` has only `read` and
+    /// `write`; DFU's `decode` and `encode` run them.
+    fn shout(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        if rt.class_of(args[0]) != "test/Shout" {
+            return api::call(rt, key, args);
+        }
+        match short {
+            "read.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;" => {
+                let r = c(rt, GET_STRING, &[args[1], args[2]]);
+                let s = c(rt, OR_THROW, &[r]);
+                let up = rt.str_of(s).unwrap_or("").to_uppercase();
+                let up = rt.string(&up);
+                c(rt, SUCCESS, &[up])
+            }
+            "write.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Ljava/lang/Object;" => {
+                let low = rt.str_of(args[2]).unwrap_or("").to_lowercase();
+                let low = rt.string(&low);
+                c(rt, CREATE_STRING, &[args[1], low])
+            }
+            _ => api::call(rt, key, args),
+        }
+    }
+
+    #[test]
+    fn a_mods_primitive_codec_reads_and_writes_through_read_and_write() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(shout);
+        rt.supers.insert("test/Shout", "java/lang/Object");
+        rt.interfaces.insert("test/Shout", &["com/mojang/serialization/codecs/PrimitiveCodec"]);
+        let own = rt.new_object("test/Shout");
+        let name = rt.string("name");
+        let field = c(&mut rt, "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[own, name]);
+        let as_codec = c(&mut rt, "com/mojang/serialization/MapCodec.codec.()Lcom/mojang/serialization/Codec;", &[field]);
+        let x = crate::codecs::decode(&mut rt, as_codec, &serde_json::json!({"name": "xy"})).unwrap();
+        assert_eq!(rt.str_of(x), Some("XY"));
+        assert_eq!(crate::codecs::encode(&mut rt, as_codec, x), Ok(Nbt::Compound(BTreeMap::from([("name".to_owned(), Nbt::String("xy".into()))]))));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `NbtOps` as a mod's codec uses it: builders, maps, lists, numbers, as Minecraft's makes them
     /// (ints alone are an int array; `getList` hands each element to a consumer).
     #[test]
