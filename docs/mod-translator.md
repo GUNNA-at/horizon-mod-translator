@@ -2195,6 +2195,49 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     world. Tests: `jlang::tests::a_mods_iterable_walks_its_own_iterator_for_for_each`, the saved
     stack test reads its patch, the player events test reads `ServerLevel.players`; 246 compat
     tests pass.
+  - [x] 2026-11-05 Load round 11 (05a5b75's runtime, the 28-jar set): all 28 done, blocks,
+    items and declarations as round 10 (3651 / 2893 / 3647), kinds of unmapped call 238 to 225
+    (StorageDrawers 11 to 4, immersive_aircraft 10 to 6; Jade now runs further, to 2). Vanilla
+    kinds as templates: a mod block whose first vanilla class is a fence, fence gate, wall,
+    button, lever, pressure plate, weighted plate, chain, lantern, torch, wall torch, stained pane,
+    cake, farmland or flower copies the vanilla block of that kind (`oak_fence`,
+    `cobblestone_wall`, `iron_chain` as 26.3 names the chain...), so the engine gives it that
+    block's states, shapes and behaviour (a fence joins fences and gates by the class chain and
+    tags, a button springs back) where it was a full cube of glass or stone. Counted in the pack's
+    367 jars: 9 extend `FenceBlock`, 9 `FenceGateBlock`, 8 `WallBlock`, 6 `ButtonBlock`, 6
+    `PressurePlateBlock`, 3 `LeverBlock`, 3 `CakeBlock`, 4 `FarmBlock`, 4 `FlowerBlock`, 2 each
+    of chains and torches. Where vanilla's behaviour follows what the constructor was given, so
+    does the template: the `BlockSetType` (kept as vanilla's field `type`) of a door or trapdoor
+    that doesn't open by hand makes it iron's, of a button arrows don't press stone's, of a plate
+    that senses mobs alone stone's; a weighted plate counting past 15 is the heavy one. A wall
+    starts with its post up, as its constructor sets it. Codecs mods build theirs on: a field
+    named `*CODEC*` (not `STREAM_CODEC`) of the game's that isn't modelled is still a codec (was:
+    `Ingredient.LIST_CODEC_NONEMPTY` and `X.CODEC_NONEMPTY` read as null, so Farmer's Delight's
+    cooking recipe codec and every codec after it in its class broke); `PrimitiveCodec.INT` is
+    `Codec.INT` (Lootr); NeoForge's `Ingredient.LIST_CODEC`/`LIST_CODEC_NONEMPTY` read lists of
+    ingredients, the second refusing an empty one with vanilla's message;
+    `RegistryFileCodec.create` reads an entry by id, `RegistryCodecs.homogeneousList` is a codec
+    that can't read yet. The translator resolves a constant the mod's classes reach through an
+    API interface they implement (`RecipeSerializer.SHAPED_RECIPE` through sophisticatedcore's and
+    Farmer's Delight's serializers was `java/lang/Object.SHAPED_RECIPE`), and vanilla's items
+    inherit `Item.BASE_ATTACK_DAMAGE_ID`. Also: `UUID.nameUUIDFromBytes` (MD5, version 3: offline
+    player and fake player UUIDs), `String.getBytes` (UTF-8, Latin-1, ASCII, UTF-16),
+    `ChestBlock.AABB` and its sides, `WallHangingSignBlock`'s shapes, `BrushableBlock`'s fields
+    and getters, `StateDefinition.Builder.properties` (FramedBlocks' accessor), `TicketType`
+    (by hand, out of the data-class table), `MinMaxBounds.Ints`/`Doubles` (factories, `ANY`,
+    `matches`, `isAny`), `Stats` (stat types, custom stat ids, `StatType.get`, formatters),
+    `LootContextParamSets`, `BlockItemStateProperties.EMPTY`, `PotionContents.withEffectAdded`,
+    `Tool.Rule`'s factories, `IngredientType(mapCodec)`, `ConcatenatedListView.of`,
+    `ModLoader.postEvent` (a mod's own event to every mod's bus), `DeferredItem.createItem`,
+    `DeferredBlock.createBlock`, `Registry.asLookup`, `ResourceLocation.Serializer` (Gson),
+    `Minecraft.getEntityModels`, `BlockEntityWithoutLevelRenderer`'s constructor, `Mth.color`,
+    `LocalDate` (UTC) and `Month`, `TimeUnit`'s conversions, Guava's `Stopwatch`, fastutil's
+    `ObjectOpenHashSet.of` and empty maps, `Map.ofEntries`, `Maps.immutableEnumMap`. Tests
+    `blocks::tests::{vanilla_kinds_copy_the_vanilla_block_that_behaves_as_they_do,
+    vanilla_statics_and_fields_mods_read_are_vanillas}`, `codecs::tests::codecs_mods_build_on_are_codecs`,
+    `tags::tests::a_name_uuid_is_javas`, `api_common::tests::{bounds_match_as_vanillas_records_do,
+    dates_and_time_units_are_javas}`, `codegen::field_tests::an_inherited_constant_is_the_api_interfaces_the_chain_implements`;
+    252 compat tests and 14 translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

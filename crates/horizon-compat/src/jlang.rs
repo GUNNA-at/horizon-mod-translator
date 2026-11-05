@@ -607,6 +607,29 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
             let out = format_java(rt, &s, &vals);
             new_str(rt, out)
         }
+        // `getBytes()`, `getBytes(charset)`: UTF-8 (the default, and what mods name); ISO-8859-1 and
+        // US-ASCII a byte per char, `?` for one past their range; UTF-16 big-endian after its mark.
+        "getBytes" if !desc.contains("II") => {
+            let charset = match ks.first() {
+                Some('L') => rt.str_of(rt.get_field(a(1), "$name")).or_else(|| rt.str_of(a(1))).unwrap_or("UTF-8").to_ascii_uppercase(),
+                _ => "UTF-8".to_owned(),
+            };
+            let limit = match charset.as_str() {
+                "ISO-8859-1" | "LATIN1" => Some(0xff),
+                "US-ASCII" | "ASCII" => Some(0x7f),
+                _ => None,
+            };
+            let bytes: Vec<u8> = match (limit, charset.as_str()) {
+                (Some(max), _) => u.iter().map(|&c| if u32::from(c) <= max { c as u8 } else { b'?' }).collect(),
+                (None, "UTF-16" | "UTF-16BE" | "UTF-16LE") => {
+                    let le = charset == "UTF-16LE";
+                    let mark: &[u8] = if charset == "UTF-16" { &[0xfe, 0xff] } else { &[] };
+                    mark.iter().copied().chain(u.iter().flat_map(|c| if le { c.to_le_bytes() } else { c.to_be_bytes() })).collect()
+                }
+                _ => s.as_bytes().to_vec(),
+            };
+            rt.alloc("[B", crate::Data::Array(bytes.iter().map(|b| V::I(i32::from(*b as i8))).collect()))
+        }
         "length" => V::I(u.len() as i32),
         "isEmpty" => V::I(u.is_empty() as i32),
         "isBlank" => V::I(s.trim().is_empty() as i32),

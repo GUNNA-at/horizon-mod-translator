@@ -236,6 +236,55 @@ pub(crate) fn uuid_text(msb: i64, lsb: i64) -> String {
     format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", m >> 32, (m >> 16) & 0xffff, m & 0xffff, l >> 48, l & 0xffff_ffff_ffff)
 }
 
+/// `UUID.nameUUIDFromBytes(name)`: the name's MD5, as version 3 (name-based) of the IETF variant.
+fn name_uuid(name: &[u8]) -> (i64, i64) {
+    let mut h = md5(name);
+    h[6] = (h[6] & 0x0f) | 0x30;
+    h[8] = (h[8] & 0x3f) | 0x80;
+    let half = |b: &[u8]| b.iter().fold(0u64, |n, &x| (n << 8) | u64::from(x)) as i64;
+    (half(&h[..8]), half(&h[8..]))
+}
+
+/// MD5 (RFC 1321) of `data`.
+fn md5(data: &[u8]) -> [u8; 16] {
+    const S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11,
+        16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    // floor(abs(sin(i + 1)) * 2^32).
+    let k: Vec<u32> = (0..64).map(|i| ((i as f64 + 1.0).sin().abs() * 4_294_967_296.0) as u32).collect();
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&((data.len() as u64).wrapping_mul(8)).to_le_bytes());
+    let mut st: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
+    for block in msg.chunks(64) {
+        let m: Vec<u32> = block.chunks(4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])).collect();
+        let [mut a, mut b, mut c, mut d] = st;
+        for i in 0..64 {
+            let (f, g) = match i / 16 {
+                0 => ((b & c) | (!b & d), i),
+                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                2 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let rotated = a.wrapping_add(f).wrapping_add(k[i]).wrapping_add(m[g]).rotate_left(S[i]);
+            (a, d, c) = (d, c, b);
+            b = b.wrapping_add(rotated);
+        }
+        for (s, v) in st.iter_mut().zip([a, b, c, d]) {
+            *s = s.wrapping_add(v);
+        }
+    }
+    let mut out = [0u8; 16];
+    for (i, s) in st.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&s.to_le_bytes());
+    }
+    out
+}
+
 pub(crate) fn uuid_parse(s: &str) -> Option<(i64, i64)> {
     let parts: Vec<&str> = s.split('-').collect();
     let [a, b, c, d, e] = parts.as_slice() else { return None };
@@ -588,6 +637,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             // Version 4, IETF variant.
             uuid(rt, (m & !0xf000) | 0x4000, (l & 0x3fff_ffff_ffff_ffff) | i64::MIN)
         }
+        (UUID, "nameUUIDFromBytes") => {
+            let bytes: Vec<u8> = crate::jutil::elements(rt, a(0)).iter().map(|b| b.i() as u8).collect();
+            let (m, l) = name_uuid(&bytes);
+            uuid(rt, m, l)
+        }
         (UUID, "fromString") => {
             let s = text(rt, a(0));
             match uuid_parse(&s) {
@@ -683,6 +737,29 @@ mod tests {
         assert_eq!(saved.get("Owner"), Some(&nbt::Nbt::IntArray(vec![0x1234_5678, 0x9abc_def0u32 as i32, -1, -2])));
         let text = call(&mut rt, "java/util/UUID.toString.()Ljava/lang/String;", &[id]);
         assert_eq!(rt.str_of(text), Some("12345678-9abc-def0-ffff-fffffffffffe"));
+    }
+
+    /// `UUID.nameUUIDFromBytes(name.getBytes(UTF_8))`, as the offline player's UUID is made (Java's
+    /// answers, from its MD5 with the version 3 bits).
+    #[test]
+    fn a_name_uuid_is_javas() {
+        let mut rt = Rt::new();
+        let utf8 = crate::api::get_static(&mut rt, "java/nio/charset/StandardCharsets.UTF_8");
+        for (name, expected) in [
+            ("OfflinePlayer:Notch", "b50ad385-829d-3141-a216-7e7d7539ba7f"),
+            ("test", "098f6bcd-4621-3373-8ade-4e832627b4f6"),
+            ("", "d41d8cd9-8f00-3204-a980-0998ecf8427e"),
+        ] {
+            let s = rt.string(name);
+            let bytes = crate::api::call(&mut rt, "java/lang/String.getBytes.(Ljava/nio/charset/Charset;)[B", &[s, utf8]);
+            let id = crate::api::call(&mut rt, "java/util/UUID.nameUUIDFromBytes.([B)Ljava/util/UUID;", &[bytes]);
+            let text = call(&mut rt, "java/util/UUID.toString.()Ljava/lang/String;", &[id]);
+            assert_eq!(rt.str_of(text), Some(expected), "{name}");
+        }
+        // Past one block (100 bytes): the length goes in a second.
+        let fox = md5(b"The quick brown fox jumps over the lazy dog, twice over: the quick brown fox jumps over the lazy dog");
+        let hex: String = fox.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "57235f72ffcb541ba1cc281f73b4a37a");
     }
 
     #[test]

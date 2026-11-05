@@ -81,7 +81,8 @@ fn range(rt: &mut Rt, prim_name: &str, min: f64, max: f64) -> V {
 /// and NeoForge's registries (named as this runtime names registries).
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match (owner, field) {
-        ("com/mojang/serialization/Codec", f) => match f {
+        // `PrimitiveCodec.INT` is `Codec.INT`, the interface's constant reached through its own.
+        ("com/mojang/serialization/Codec" | "com/mojang/serialization/codecs/PrimitiveCodec", f) => match f {
             "INT" | "LONG" | "FLOAT" | "DOUBLE" | "BOOL" | "STRING" | "BYTE" | "SHORT" | "INT_STREAM" => prim(rt, &f.to_ascii_lowercase()),
             "PASSTHROUGH" => native(rt, "passthrough"),
             _ => return None,
@@ -127,6 +128,15 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/item/component/ItemContainerContents", "CODEC") => native(rt, "container_contents"),
         ("net/minecraft/world/item/crafting/Ingredient", "CODEC") => native(rt, "ingredient"),
         ("net/minecraft/world/item/crafting/Ingredient", "CODEC_NONEMPTY") => native(rt, "ingredient_nonempty"),
+        // NeoForge's `MAP_CODEC_NONEMPTY.codec().listOf()`, and the same refusing an empty list.
+        ("net/minecraft/world/item/crafting/Ingredient", "LIST_CODEC" | "LIST_CODEC_NONEMPTY") => {
+            let element = native(rt, "ingredient_nonempty");
+            let mut parts = vec![element];
+            if field == "LIST_CODEC_NONEMPTY" {
+                parts.push(rt.string("Item array cannot be empty, at least one item must be defined"));
+            }
+            codec(rt, "compat:codec/list", parts)
+        }
         ("net/minecraft/world/item/crafting/Recipe", "CODEC" | "CONDITIONAL_CODEC") => native(rt, "recipe"),
         ("net/neoforged/neoforge/fluids/FluidStack", "CODEC" | "FIXED_AMOUNT_CODEC") => native(rt, "fluid_stack"),
         ("net/neoforged/neoforge/fluids/FluidStack", "OPTIONAL_CODEC") => native(rt, "optional_fluid_stack"),
@@ -267,6 +277,10 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
         }
         "list" => {
             let Json::Array(items) = j else { return Err(format!("Not a list: {j}")) };
+            // A list that refuses to be empty, with the message it gives.
+            if let Some(message) = rt.str_of(part(1)).filter(|_| items.is_empty()) {
+                return Err(message.to_owned());
+            }
             let mut out = Vec::with_capacity(items.len());
             for x in items {
                 out.push(decode(rt, part(0), x)?);
@@ -951,7 +965,15 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     owner.starts_with("com/mojang/serialization/")
         || owner.starts_with("com/mojang/datafixers/")
-        || matches!(owner, "net/minecraft/util/ExtraCodecs" | "net/minecraft/util/StringRepresentable" | "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs" | "net/minecraft/resources/RegistryOps")
+        || matches!(
+            owner,
+            "net/minecraft/util/ExtraCodecs"
+                | "net/minecraft/util/StringRepresentable"
+                | "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs"
+                | "net/minecraft/resources/RegistryOps"
+                | "net/minecraft/resources/RegistryFileCodec"
+                | "net/minecraft/core/RegistryCodecs"
+        )
         || owner == crate::ops::NBT_OPS
         || matches!(name, "byNameCodec" | "holderByNameCodec" | "createSerializationContext")
         || (matches!(name, "simpleCodec" | "propertiesCodec") && owner.starts_with("net/minecraft/world/level/block/"))
@@ -986,6 +1008,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return Some(if method == "create" { codec(rt, "compat:codec/of_map", vec![built]) } else { built });
         }
         ("com/mojang/serialization/codecs/RecordCodecBuilder", "point") => return Some(codec(rt, "compat:codec/point", vec![a(0)])),
+        // `RegistryFileCodec.create(registry, codec[, inline])`: an entry of the registry by its id
+        // (registries are their names here).
+        ("net/minecraft/resources/RegistryFileCodec", "create") if rt.str_of(a(0)).is_some() => return Some(codec(rt, "compat:codec/registry", vec![a(0)])),
+        // `RegistryCodecs.homogeneousList(registry, ...)`: a holder set (`#tag`, an id, a list of
+        // them), which this runtime doesn't read yet; its codec stands, reading with it fails.
+        ("net/minecraft/core/RegistryCodecs", "homogeneousList") => {
+            let registry = rt.str_of(a(0)).unwrap_or("").to_owned();
+            return Some(native(rt, &format!("unmodelled/RegistryCodecs.homogeneousList/{registry}")));
+        }
         // `TagKey.codec(registry)` reads `ns:path`, `hashedCodec` `#ns:path`; `ResourceKey.codec`
         // an entry's key.
         ("net/minecraft/tags/TagKey", "codec" | "hashedCodec") if rt.str_of(a(0)).is_some() => {
@@ -1510,6 +1541,28 @@ mod tests {
     fn st(rt: &mut Rt, key: &str) -> V {
         let k = rt.static_key(key);
         api::get_static(rt, k)
+    }
+
+    /// The codecs mods build theirs on, reached as javac names them: `PrimitiveCodec.INT` is
+    /// `Codec.INT`; NeoForge's `Ingredient.LIST_CODEC_NONEMPTY` reads a list of ingredients and
+    /// refuses an empty one with vanilla's message; a codec of the game's not modelled yet
+    /// (`Biome.LIST_CODEC`) is still a codec, so a field built on it is one too.
+    #[test]
+    fn codecs_mods_build_on_are_codecs() {
+        let mut rt = Rt::new();
+        crate::install();
+        assert_eq!(st(&mut rt, "com/mojang/serialization/codecs/PrimitiveCodec.INT"), st(&mut rt, "com/mojang/serialization/Codec.INT"));
+        let list = st(&mut rt, "net/minecraft/world/item/crafting/Ingredient.LIST_CODEC_NONEMPTY");
+        let empty: Json = serde_json::from_str("[]").unwrap();
+        assert_eq!(decode(&mut rt, list, &empty).err().as_deref(), Some("Item array cannot be empty, at least one item must be defined"));
+        let two: Json = serde_json::from_str(r#"[{"item": "minecraft:stick"}, {"tag": "c:ingots"}]"#).unwrap();
+        let read = decode(&mut rt, list, &two).unwrap();
+        assert_eq!(crate::jutil::elements(&rt, read).len(), 2);
+        let biomes = st(&mut rt, "net/minecraft/world/level/biome/Biome.LIST_CODEC");
+        assert!(is_codec(&rt, biomes));
+        let name = rt.string("biomes");
+        let field = c(&mut rt, "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[biomes, name]);
+        assert!(is_codec(&rt, field));
     }
 
     /// Vanilla's value codecs write what 1.21.1 writes (`Vec3` three doubles, a UUID four ints, a

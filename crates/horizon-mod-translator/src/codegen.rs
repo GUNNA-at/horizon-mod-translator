@@ -1931,19 +1931,40 @@ impl<'a> Program<'a> {
             return if mixin_has && !target_has { owner.to_owned() } else { found };
         }
         let mut c = owner;
+        // The first of the API's interfaces the chain implements: where the JVM finds a constant the
+        // mod's classes don't declare (`RecipeSerializer.SHAPED_RECIPE` through a mod's serializer)
+        // when the chain then reaches Java's own classes, which declare none.
+        let mut api_interface: Option<String> = None;
         loop {
-            let Some(k) = self.classes.get(c) else { return c.to_owned() };
+            let Some(k) = self.classes.get(c) else {
+                return match api_interface {
+                    Some(i) if c.starts_with("java/") => i,
+                    _ => c.to_owned(),
+                };
+            };
             if k.fields.iter().any(|f| f.name == name) {
                 return k.name.clone();
             }
             if let Some(i) = self.interface_field(k, name) {
                 return i;
             }
+            if api_interface.is_none() {
+                api_interface = self.api_interface(k);
+            }
             match k.superclass.as_deref() {
                 Some(sup) => c = sup,
                 None => return owner.to_owned(),
             }
         }
+    }
+
+    /// The first interface outside the mod's classes that `k` implements, itself or through one of
+    /// the mod's interfaces, in the order the JVM searches them.
+    fn api_interface(&self, k: &ClassFile) -> Option<String> {
+        k.interfaces.iter().find_map(|i| match self.classes.get(i.as_str()) {
+            None => Some(i.clone()),
+            Some(ik) => self.api_interface(ik),
+        })
     }
 
     fn interface_field(&self, k: &ClassFile, name: &str) -> Option<String> {
@@ -2426,5 +2447,49 @@ public class Scanned {
                 "Ljava/lang/Deprecated;\tMETHOD\tscan/Scanned\told(I)V\t{}",
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod field_tests {
+    use crate::class::ClassFile;
+    use std::process::Command;
+
+    /// A static field the mod's classes reach without declaring it resolves as the JVM resolves it
+    /// (JVMS 5.4.3.2): a constant of an API interface the chain implements (javac writes
+    /// `getstatic Child.SHAPED` for `RecipeSerializer.SHAPED_RECIPE` through a mod's serializer)
+    /// is the interface's, since Java's own classes the chain then reaches declare none; past an
+    /// API superclass, that class's.
+    #[test]
+    fn an_inherited_constant_is_the_api_interfaces_the_chain_implements() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("mod-translator-fields-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("api")).unwrap();
+        std::fs::create_dir_all(root.join("m")).unwrap();
+        let files = [
+            ("api/Serializer.java", "package api; public interface Serializer { Object SHAPED = new Object(); }"),
+            ("api/Item.java", "package api; public class Item { public static final Object ID = new Object(); }"),
+            ("m/Base.java", "package m; public class Base implements api.Serializer {}"),
+            ("m/Child.java", "package m; public class Child extends Base { Object get() { return SHAPED; } }"),
+            ("m/MyItem.java", "package m; public class MyItem extends api.Item implements api.Serializer { Object get() { return ID; } }"),
+        ];
+        for (path, src) in files {
+            std::fs::write(root.join(path), src).unwrap();
+        }
+        let paths: Vec<_> = files.iter().map(|(p, _)| root.join(p)).collect();
+        assert!(Command::new("javac").args(["-d", root.to_str().unwrap()]).args(&paths).status().unwrap().success());
+        // The API's classes aren't the mod's: only `m`'s are given.
+        let classes: Vec<ClassFile> = ["m/Base.class", "m/Child.class", "m/MyItem.class"]
+            .iter()
+            .map(|c| ClassFile::parse(&std::fs::read(root.join(c)).unwrap()).unwrap())
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        let p = super::Program::new(&classes);
+        assert_eq!(p.field_owner("m/Child", "SHAPED"), "api/Serializer");
+        assert_eq!(p.field_owner("m/MyItem", "ID"), "api/Item");
     }
 }

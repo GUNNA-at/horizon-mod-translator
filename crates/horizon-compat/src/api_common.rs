@@ -221,7 +221,8 @@ fn player_eye_height(rt: &Rt) -> f64 {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 17] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 18] = [
+    (MONTH, &["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"]),
     // FML's config files, in its order: what `ModConfig.Type.values()` and an enum codec give.
     ("net/neoforged/fml/config/ModConfig$Type", &["COMMON", "CLIENT", "SERVER", "STARTUP"]),
     // A creative tab's kind (a mod's tab is a `CATEGORY`).
@@ -260,6 +261,76 @@ const PLAIN_ENUMS: [(&str, &[&str]); 17] = [
 ];
 
 /// Plain vanilla enum `class`'s constant `name`; None for another class or name.
+const MONTH: &str = "java/time/Month";
+const TICKET_TYPE: &str = "net/minecraft/server/level/TicketType";
+const LOCAL_DATE: &str = "java/time/LocalDate";
+const BOUNDS_INTS: &str = "net/minecraft/advancements/critereon/MinMaxBounds$Ints";
+const BOUNDS_DOUBLES: &str = "net/minecraft/advancements/critereon/MinMaxBounds$Doubles";
+const STAT_TYPE: &str = "net/minecraft/stats/StatType";
+const STAT: &str = "net/minecraft/stats/Stat";
+const STOPWATCH: &str = "com/google/common/base/Stopwatch";
+/// `Stats`' stat types, by field, with their registry ids.
+const STAT_TYPES: [(&str, &str); 9] = [
+    ("BLOCK_MINED", "minecraft:mined"),
+    ("ITEM_CRAFTED", "minecraft:crafted"),
+    ("ITEM_USED", "minecraft:used"),
+    ("ITEM_BROKEN", "minecraft:broken"),
+    ("ITEM_PICKED_UP", "minecraft:picked_up"),
+    ("ITEM_DROPPED", "minecraft:dropped"),
+    ("ENTITY_KILLED", "minecraft:killed"),
+    ("ENTITY_KILLED_BY", "minecraft:killed_by"),
+    ("CUSTOM", "minecraft:custom"),
+];
+/// `TimeUnit`'s constants (ordinal order) in nanoseconds.
+const TIME_UNIT_NANOS: [i128; 7] = [1, 1_000, 1_000_000, 1_000_000_000, 60_000_000_000, 3_600_000_000_000, 86_400_000_000_000];
+
+/// `MinMaxBounds.Ints(min, max)` or `Doubles`' (`class`): the record with the squares its
+/// constructor keeps (an int's as a long).
+fn bounds(rt: &mut Rt, class: &str, min: Option<V>, max: Option<V>) -> V {
+    let ints = class == BOUNDS_INTS;
+    let value = |v: V| if ints { V::I(v.i()) } else { V::D(v.d()) };
+    let square = |v: V| if ints { V::J(i64::from(v.i()) * i64::from(v.i())) } else { V::D(v.d() * v.d()) };
+    let parts: Vec<V> = [min.map(value), max.map(value), min.map(square), max.map(square)]
+        .into_iter()
+        .map(|p| optional(rt, p.unwrap_or(V::NULL)))
+        .collect();
+    crate::records::make(rt, class, &parts)
+}
+
+/// The proleptic Gregorian date `days` after 1970-01-01, as `(year, month, day)` (`LocalDate`'s
+/// `ofEpochDay`).
+fn civil_date(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year as i32, month, day)
+}
+
+fn local_date(rt: &mut Rt, (year, month, day): (i32, u32, u32)) -> V {
+    let d = rt.new_object(LOCAL_DATE);
+    rt.put_field(d, "year", V::I(year));
+    rt.put_field(d, "month", V::I(month as i32));
+    rt.put_field(d, "day", V::I(day as i32));
+    d
+}
+
+/// Now, in nanoseconds since 1970 (`Stopwatch`'s ticker).
+fn now_nanos() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64)
+}
+
+/// `d` of `TimeUnit` `from` (an ordinal) in `to`, saturating as `TimeUnit.convert` does.
+fn time_convert(d: i64, from: usize, to: usize) -> i64 {
+    let n = i128::from(d) * TIME_UNIT_NANOS[from.min(6)] / TIME_UNIT_NANOS[to.min(6)];
+    n.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
 pub(crate) fn plain_enum(rt: &mut Rt, class: &str, name: &str) -> Option<V> {
     let (class, names) = PLAIN_ENUMS.iter().find(|(c, _)| *c == class)?;
     let i = names.iter().position(|n| *n == name)?;
@@ -1122,6 +1193,191 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" | "java/math/BigInteger" | "java/math/BigDecimal"
             );
             V::I((number || matches!(c, "java/lang/Boolean" | "java/lang/String")) as i32)
+        }
+        // A chunk ticket's type: its name, comparator and lifespan (a long), as `create(name,
+        // comparator[, lifespan])` or the constructor gives them.
+        (TICKET_TYPE, "create" | "<init>") => {
+            let (t, at) = if name == "create" { (rt.new_object(TICKET_TYPE), 0) } else { (a(0), 1) };
+            let lifespan = match a(at + 2) {
+                V::J(j) => j,
+                V::I(i) => i64::from(i),
+                _ => 0,
+            };
+            rt.put_field(t, "name", a(at));
+            rt.put_field(t, "comparator", a(at + 1));
+            rt.put_field(t, "timeout", V::J(lifespan));
+            if name == "create" { t } else { V::Void }
+        }
+        (TICKET_TYPE, "toString") => rt.get_field(a(0), "name"),
+        (TICKET_TYPE, "getComparator") => rt.get_field(a(0), "comparator"),
+        (TICKET_TYPE, "timeout") => V::J(rt.get_field(a(0), "timeout").j()),
+        // `MinMaxBounds.Ints.between(min, max)` and the other factories, `Doubles`' too.
+        (BOUNDS_INTS | BOUNDS_DOUBLES, "exactly" | "between" | "atLeast" | "atMost") => {
+            let (min, max) = match name {
+                "exactly" => (Some(a(0)), Some(a(0))),
+                "between" => (Some(a(0)), Some(a(1))),
+                "atLeast" => (Some(a(0)), None),
+                _ => (None, Some(a(0))),
+            };
+            bounds(rt, owner, min, max)
+        }
+        // `matches(value)`: not under its min, not over its max; `isAny()`: neither set.
+        (BOUNDS_INTS | BOUNDS_DOUBLES, "matches" | "isAny") => {
+            let num = |v: V| match v {
+                V::I(i) => f64::from(i),
+                V::J(j) => j as f64,
+                V::F(f) => f64::from(f),
+                V::D(d) => d,
+                _ => 0.0,
+            };
+            // An optional's number, held raw or boxed.
+            let bound = |rt: &Rt, f: &'static str| match rt.get_field(rt.get_field(a(0), f), "value") {
+                V::Void | V::R(0) => None,
+                V::R(boxed) => Some(num(rt.get_field(V::R(boxed), "value"))),
+                v => Some(num(v)),
+            };
+            let (min, max) = (bound(rt, "min"), bound(rt, "max"));
+            if name == "isAny" {
+                V::I((min.is_none() && max.is_none()) as i32)
+            } else {
+                let v = num(a(1));
+                V::I((min.is_none_or(|m| m <= v) && max.is_none_or(|m| m >= v)) as i32)
+            }
+        }
+        // `LocalDate.now()`: today, in UTC (the game holds no time zone); `of(y, m, d)`; its parts.
+        (LOCAL_DATE, "now") => {
+            let days = now_nanos().div_euclid(86_400_000_000_000);
+            local_date(rt, civil_date(days))
+        }
+        (LOCAL_DATE, "of") => {
+            let month = if desc.contains("Ljava/time/Month;") { rt.get_field(a(1), "$ordinal").i() + 1 } else { a(1).i() };
+            local_date(rt, (a(0).i(), month as u32, a(2).i() as u32))
+        }
+        (LOCAL_DATE, "getYear") => rt.get_field(a(0), "year"),
+        (LOCAL_DATE, "getMonthValue") => rt.get_field(a(0), "month"),
+        (LOCAL_DATE, "getDayOfMonth") => rt.get_field(a(0), "day"),
+        (LOCAL_DATE, "getMonth") => {
+            let i = (rt.get_field(a(0), "month").i() - 1).clamp(0, 11) as usize;
+            let (_, names) = PLAIN_ENUMS.iter().find(|(c, _)| *c == MONTH)?;
+            plain_enum(rt, MONTH, names[i])?
+        }
+        (MONTH, "getValue") => V::I(rt.get_field(a(0), "$ordinal").i() + 1),
+        // `TimeUnit`'s conversions (`MILLISECONDS.toSeconds(d)`, `convert(d, unit)`).
+        ("java/util/concurrent/TimeUnit", n) if n.starts_with("to") || n == "convert" => {
+            let this = rt.get_field(a(0), "$ordinal").i().max(0) as usize;
+            let (from, to) = match n {
+                "convert" => (rt.get_field(a(2), "$ordinal").i().max(0) as usize, this),
+                "toNanos" => (this, 0),
+                "toMicros" => (this, 1),
+                "toMillis" => (this, 2),
+                "toSeconds" => (this, 3),
+                "toMinutes" => (this, 4),
+                "toHours" => (this, 5),
+                "toDays" => (this, 6),
+                _ => return None,
+            };
+            V::J(time_convert(a(1).j(), from, to))
+        }
+        // Guava's `Stopwatch`: the time between `start` and `stop`, in the unit asked.
+        (STOPWATCH, n) => {
+            let running = |rt: &Rt| matches!(rt.get_field(a(0), "$start"), V::J(_));
+            let elapsed = |rt: &Rt| {
+                let before = rt.get_field(a(0), "$elapsed").j();
+                match rt.get_field(a(0), "$start") {
+                    V::J(start) => before + (now_nanos() - start),
+                    _ => before,
+                }
+            };
+            match n {
+                "createStarted" | "createUnstarted" => {
+                    let w = rt.new_object(STOPWATCH);
+                    rt.put_field(w, "$elapsed", V::J(0));
+                    if n == "createStarted" {
+                        rt.put_field(w, "$start", V::J(now_nanos()));
+                    }
+                    w
+                }
+                "start" => {
+                    rt.put_field(a(0), "$start", V::J(now_nanos()));
+                    a(0)
+                }
+                "stop" => {
+                    let total = elapsed(rt);
+                    rt.put_field(a(0), "$elapsed", V::J(total));
+                    rt.put_field(a(0), "$start", V::NULL);
+                    a(0)
+                }
+                "reset" => {
+                    rt.put_field(a(0), "$elapsed", V::J(0));
+                    rt.put_field(a(0), "$start", V::NULL);
+                    a(0)
+                }
+                "isRunning" => V::I(running(rt) as i32),
+                "elapsed" if desc.starts_with("(Ljava/util/concurrent/TimeUnit;)") => {
+                    let unit = rt.get_field(a(1), "$ordinal").i().max(0) as usize;
+                    V::J(time_convert(elapsed(rt), 0, unit))
+                }
+                "toString" => {
+                    let ms = elapsed(rt) as f64 / 1e6;
+                    rt.string(&format!("{ms:.4} ms"))
+                }
+                _ => return None,
+            }
+        }
+        // `StatType.get(value[, formatter])`: the stat of that value, one per type and value.
+        (STAT_TYPE, "get") => {
+            let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned();
+            let value = rt.str_of(a(1)).map_or_else(|| format!("#{}", a(1).r()), str::to_owned);
+            let formatter = if desc.contains("Lnet/minecraft/stats/StatFormatter;") { a(2) } else { get_static(rt, "net/minecraft/stats/StatFormatter", "DEFAULT").unwrap_or(V::NULL) };
+            let (t, v) = (a(0), a(1));
+            rt.intern(format!("compat:stat/{id}/{value}"), move |rt| {
+                let s = rt.new_object(STAT);
+                rt.put_field(s, "type", t);
+                rt.put_field(s, "value", v);
+                rt.put_field(s, "formatter", formatter);
+                s
+            })
+        }
+        (STAT, "getType") => rt.get_field(a(0), "type"),
+        (STAT, "getValue") => rt.get_field(a(0), "value"),
+        // `PotionContents.withEffectAdded(effect)`: the same contents with the effect after its own.
+        ("net/minecraft/world/item/alchemy/PotionContents", "withEffectAdded") => {
+            let mut effects = crate::jutil::elements(rt, rt.get_field(a(0), "customEffects"));
+            effects.push(a(1));
+            let list = crate::jutil::new_list(rt, effects);
+            let (potion, color) = (rt.get_field(a(0), "potion"), rt.get_field(a(0), "customColor"));
+            crate::records::make(rt, "net/minecraft/world/item/alchemy/PotionContents", &[potion, color, list])
+        }
+        // `Tool.Rule`'s factories: the blocks (a tag's key, or a list), the speed and whether they
+        // drop, as each sets them.
+        ("net/minecraft/world/item/component/Tool$Rule", "deniesDrops" | "minesAndDrops" | "overrideSpeed") => {
+            let speed = if name == "deniesDrops" { V::NULL } else { V::F(a(1).f()) };
+            let drops = match name {
+                "deniesDrops" => V::I(0),
+                "minesAndDrops" => V::I(1),
+                _ => V::NULL,
+            };
+            let (speed, drops) = (optional(rt, speed), optional(rt, drops));
+            crate::records::make(rt, "net/minecraft/world/item/component/Tool$Rule", &[a(0), speed, drops])
+        }
+        // NeoForge's `ConcatenatedListView.of(lists...)`: their elements in order.
+        ("net/neoforged/neoforge/common/util/ConcatenatedListView", "of") => {
+            let mut items = Vec::new();
+            for l in crate::jutil::elements(rt, a(0)) {
+                items.extend(crate::jutil::elements(rt, l));
+            }
+            crate::jutil::new_list(rt, items)
+        }
+        // NeoForge's `new IngredientType(mapCodec)`: its stream codec the map codec's over the wire
+        // (`ByteBufCodecs.fromCodecWithRegistries(mapCodec.codec())`).
+        ("net/neoforged/neoforge/common/crafting/IngredientType" | "net/neoforged/neoforge/fluids/crafting/FluidIngredientType", "<init>")
+            if desc == "(Lcom/mojang/serialization/MapCodec;)V" =>
+        {
+            let codec = crate::api::call(rt, "com/mojang/serialization/MapCodec.codec.()Lcom/mojang/serialization/Codec;", &[a(1)]);
+            let stream = crate::network::from_codec(rt, codec);
+            rt.put_field(a(0), "codec", a(1));
+            rt.put_field(a(0), "streamCodec", stream);
+            V::Void
         }
         // Sets of stacks by type and components, and the hash they keep them by.
         ("net/minecraft/world/item/ItemStackLinkedSet", "createTypeAndComponentsSet") => strategy_set(rt, ITEM_STRATEGY),
@@ -2913,6 +3169,8 @@ fn mth_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let lerp_f = |t: f32, a: f32, b: f32| a + t * (b - a);
     let lerp_d = |t: f64, a: f64, b: f64| a + t * (b - a);
     Some(match (name, desc) {
+        // `FastColor.ARGB32.color(0, floor(r * 255), floor(g * 255), floor(b * 255))`.
+        ("color", "(FFF)I") => V::I((mth_floor_f(f(0) * 255.0) << 16) | (mth_floor_f(f(1) * 255.0) << 8) | mth_floor_f(f(2) * 255.0)),
         ("isPowerOfTwo", "(I)Z") => V::I(mth_is_pow2(i(0)) as i32),
         ("isPowerOfTwo", "(J)Z") => V::I((j(0) != 0 && j(0) & j(0).wrapping_sub(1) == 0) as i32),
         ("smallestEncompassingPowerOfTwo", "(I)I") => V::I(mth_smallest_pow2(i(0))),
@@ -3368,6 +3626,39 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         "net/minecraft/world/item/ItemStackLinkedSet" if field == "TYPE_AND_TAG" => intern_strategy(rt, ITEM_STRATEGY),
         "net/neoforged/neoforge/fluids/FluidStackLinkedSet" if field == "TYPE_AND_COMPONENTS" => intern_strategy(rt, FLUID_STRATEGY),
         "net/minecraft/world/phys/Vec3" if field == "ZERO" => vec3_zero(rt),
+        BOUNDS_INTS | BOUNDS_DOUBLES if field == "ANY" => {
+            let class: &'static str = if owner == BOUNDS_INTS { BOUNDS_INTS } else { BOUNDS_DOUBLES };
+            rt.intern(format!("const/{class}.ANY"), |rt| bounds(rt, class, None, None))
+        }
+        // `Stats`' stat types (`Stats.CUSTOM`), one object each with its registry id, and its
+        // custom stats' ids (`Stats.JUMP` is `minecraft:jump`).
+        "net/minecraft/stats/Stats" => match STAT_TYPES.iter().find(|(f, _)| *f == field) {
+            Some(&(_, id)) => rt.intern(format!("compat:stat-type/{id}"), |rt| {
+                let t = rt.new_object(STAT_TYPE);
+                let n = rt.string(id);
+                rt.put_field(t, "$id", n);
+                t
+            }),
+            None if field.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') => rt.string(&format!("minecraft:{}", field.to_ascii_lowercase())),
+            None => return None,
+        },
+        "net/minecraft/stats/StatFormatter" if matches!(field, "DEFAULT" | "DIVIDE_BY_TEN" | "DISTANCE" | "TIME") => rt.intern(format!("compat:stat-formatter/{field}"), |rt| {
+            let f = rt.new_object("net/minecraft/stats/StatFormatter");
+            let n = rt.string(field);
+            rt.put_field(f, "$name", n);
+            f
+        }),
+        // A loot context's parameter sets (`LootContextParamSets.BLOCK`), by name.
+        "net/minecraft/world/level/storage/loot/parameters/LootContextParamSets" => rt.intern(format!("compat:loot-param-set/{field}"), |rt| {
+            let set = rt.new_object("net/minecraft/world/level/storage/loot/parameters/LootContextParamSet");
+            let n = rt.string(&field.to_ascii_lowercase());
+            rt.put_field(set, "$name", n);
+            set
+        }),
+        "net/minecraft/world/item/component/BlockItemStateProperties" if field == "EMPTY" => rt.intern("const/BlockItemStateProperties.EMPTY".into(), |rt| {
+            let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Default::default()));
+            crate::records::make(rt, "net/minecraft/world/item/component/BlockItemStateProperties", &[m])
+        }),
         CHUNK_POS if field == "ZERO" => rt.intern("compat:chunk-pos-zero".into(), |rt| chunk_pos(rt, 0, 0)),
         CHUNK_POS if field == "INVALID_CHUNK_POS" => V::J(chunk_long(1_875_066, 1_875_066)),
         // `Integer.TYPE`: the primitive's own class (`int.class`), as reflection names it.
@@ -3496,6 +3787,52 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+
+    /// `MinMaxBounds.Ints.between(1, 3)` matches 1 to 3 and keeps the squares; `ANY` matches all;
+    /// `Doubles.atLeast(0.5)` matches from 0.5 up (vanilla's records and their `matches`).
+    #[test]
+    fn bounds_match_as_vanillas_records_do() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        let between = crate::api::call(&mut rt, "net/minecraft/advancements/critereon/MinMaxBounds$Ints.between.(II)Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;", &[V::I(1), V::I(3)]);
+        let matches = |rt: &mut Rt, b: V, v: i32| crate::api::call(rt, "net/minecraft/advancements/critereon/MinMaxBounds$Ints.matches.(I)Z", &[b, V::I(v)]).i();
+        assert_eq!([0, 1, 2, 3, 4].map(|v| matches(&mut rt, between, v)), [0, 1, 1, 1, 0]);
+        let max_sq = rt.get_field(rt.get_field(between, "maxSq"), "value");
+        assert_eq!(max_sq, V::J(9));
+        let any = crate::api::get_static(&mut rt, "net/minecraft/advancements/critereon/MinMaxBounds$Ints.ANY");
+        assert_eq!(matches(&mut rt, any, i32::MIN), 1);
+        assert_eq!(crate::api::call(&mut rt, "net/minecraft/advancements/critereon/MinMaxBounds$Ints.isAny.()Z", &[any]), V::I(1));
+        let at_least = crate::api::call(&mut rt, "net/minecraft/advancements/critereon/MinMaxBounds$Doubles.atLeast.(D)Lnet/minecraft/advancements/critereon/MinMaxBounds$Doubles;", &[V::D(0.5)]);
+        let d = |rt: &mut Rt, v: f64| crate::api::call(rt, "net/minecraft/advancements/critereon/MinMaxBounds$Doubles.matches.(D)Z", &[at_least, V::D(v)]).i();
+        assert_eq!([d(&mut rt, 0.25), d(&mut rt, 0.5), d(&mut rt, 1e9)], [0, 1, 1]);
+    }
+
+    /// Days since 1970 as `LocalDate.ofEpochDay` gives them (a leap day, the day before 1970), and
+    /// `TimeUnit`'s conversions, which round down and saturate.
+    #[test]
+    fn dates_and_time_units_are_javas() {
+        use super::*;
+        assert_eq!(civil_date(0), (1970, 1, 1));
+        assert_eq!(civil_date(-1), (1969, 12, 31));
+        assert_eq!(civil_date(11_016), (2000, 2, 29));
+        assert_eq!(civil_date(20_000), (2024, 10, 4));
+        let mut rt = Rt::new();
+        crate::install();
+        let date = crate::api::call(&mut rt, "java/time/LocalDate.of.(III)Ljava/time/LocalDate;", &[V::I(2024), V::I(12), V::I(25)]);
+        let month = crate::api::call(&mut rt, "java/time/LocalDate.getMonth.()Ljava/time/Month;", &[date]);
+        assert_eq!(month, crate::api::get_static(&mut rt, "java/time/Month.DECEMBER"));
+        assert_eq!(crate::api::call(&mut rt, "java/time/LocalDate.getDayOfMonth.()I", &[date]), V::I(25));
+        let unit = |rt: &mut Rt, n: &str| {
+            let k = rt.static_key(&format!("java/util/concurrent/TimeUnit.{n}"));
+            crate::api::get_static(rt, k)
+        };
+        let (ms, s) = (unit(&mut rt, "MILLISECONDS"), unit(&mut rt, "SECONDS"));
+        assert_eq!(crate::api::call(&mut rt, "java/util/concurrent/TimeUnit.toSeconds.(J)J", &[ms, V::J(1_999)]), V::J(1));
+        assert_eq!(crate::api::call(&mut rt, "java/util/concurrent/TimeUnit.toMillis.(J)J", &[s, V::J(-2)]), V::J(-2_000));
+        assert_eq!(crate::api::call(&mut rt, "java/util/concurrent/TimeUnit.toNanos.(J)J", &[s, V::J(i64::MAX)]), V::J(i64::MAX));
+        assert_eq!(crate::api::call(&mut rt, "java/util/concurrent/TimeUnit.convert.(JLjava/util/concurrent/TimeUnit;)J", &[ms, V::J(3), s]), V::J(3_000));
+    }
 
     /// `ChunkPos` as vanilla packs it: x in a long's low half, z in its high; a block's chunk is its
     /// coordinates shifted by 4 (floor), and a chunk spans 16 blocks from x * 16.

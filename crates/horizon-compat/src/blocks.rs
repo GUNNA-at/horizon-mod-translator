@@ -214,8 +214,9 @@ const COPIED: [(&str, f32, f32, bool, u8); 14] = [
 ];
 
 /// The vanilla block a mod block copies when it extends one of these classes: its states, shapes
-/// and behaviour (a door opens). The rest copy a property-less block.
-const TEMPLATES: [(&str, &str); 7] = [
+/// and behaviour (a door opens, a fence joins its neighbours, a button springs back). The rest
+/// copy a property-less block. Each class's states are [`vanilla_definition`]'s.
+const TEMPLATES: [(&str, &str); 22] = [
     ("DoorBlock", "minecraft:oak_door"),
     ("TrapDoorBlock", "minecraft:oak_trapdoor"),
     ("SlabBlock", "minecraft:smooth_stone_slab"),
@@ -223,7 +224,44 @@ const TEMPLATES: [(&str, &str); 7] = [
     ("LadderBlock", "minecraft:ladder"),
     ("RotatedPillarBlock", "minecraft:quartz_pillar"),
     ("IronBarsBlock", "minecraft:iron_bars"),
+    ("StainedGlassPaneBlock", "minecraft:white_stained_glass_pane"),
+    ("FenceBlock", "minecraft:oak_fence"),
+    ("FenceGateBlock", "minecraft:oak_fence_gate"),
+    ("WallBlock", "minecraft:cobblestone_wall"),
+    ("ButtonBlock", "minecraft:oak_button"),
+    ("LeverBlock", "minecraft:lever"),
+    ("PressurePlateBlock", "minecraft:oak_pressure_plate"),
+    ("WeightedPressurePlateBlock", "minecraft:light_weighted_pressure_plate"),
+    ("ChainBlock", "minecraft:iron_chain"),
+    ("LanternBlock", "minecraft:lantern"),
+    ("TorchBlock", "minecraft:torch"),
+    ("WallTorchBlock", "minecraft:wall_torch"),
+    ("CakeBlock", "minecraft:cake"),
+    ("FarmBlock", "minecraft:farmland"),
+    ("FlowerBlock", "minecraft:poppy"),
 ];
+
+/// The template of mod block `b`, whose first vanilla class is `simple`: [`TEMPLATES`]' block, or,
+/// where vanilla's behaviour follows what the class's constructor was given (its `BlockSetType`,
+/// vanilla's field `type`; a weighted plate's `maxWeight`), the vanilla block given the same:
+/// iron's door and trapdoor don't open by hand, stone's button ignores arrows and its plate senses
+/// mobs alone, a heavy plate counts to 150.
+fn template_of(rt: &mut Rt, b: V, simple: &str) -> Option<&'static str> {
+    let template = TEMPLATES.iter().find(|(c, _)| *c == simple)?.1;
+    let set = rt.get_field(b, "type");
+    let set = (set.r() != 0 && rt.class_of(set) == BLOCK_SET_TYPE).then_some(set);
+    let lacks = |rt: &Rt, field: &'static str| set.is_some_and(|s| rt.get_field(s, field).i() == 0);
+    let mobs = api_common::get_static(rt, "net/minecraft/world/level/block/state/properties/BlockSetType$PressurePlateSensitivity", "MOBS");
+    let senses_mobs = set.is_some_and(|s| mobs.is_some_and(|m| rt.get_field(s, "pressurePlateSensitivity") == m));
+    Some(match simple {
+        "DoorBlock" if lacks(rt, "canOpenByHand") => "minecraft:iron_door",
+        "TrapDoorBlock" if lacks(rt, "canOpenByHand") => "minecraft:iron_trapdoor",
+        "ButtonBlock" if lacks(rt, "canButtonBeActivatedByArrows") => "minecraft:stone_button",
+        "PressurePlateBlock" if senses_mobs => "minecraft:stone_pressure_plate",
+        "WeightedPressurePlateBlock" if rt.get_field(b, "maxWeight").i() > 15 => "minecraft:heavy_weighted_pressure_plate",
+        _ => template,
+    })
+}
 
 /// The properties a vanilla block class adds in its own `createBlockStateDefinition`
 /// (`BlockStateProperties` fields), for a mod class that extends it.
@@ -267,6 +305,7 @@ fn vanilla_definition(class: &str) -> &'static [&'static str] {
         "BedBlock" => &["HORIZONTAL_FACING", "BED_PART", "OCCUPIED"],
         "CakeBlock" => &["BITES"],
         "CandleBlock" => &["CANDLES", "LIT", "WATERLOGGED"],
+        "FarmBlock" => &["MOISTURE"],
         _ => &[],
     }
 }
@@ -335,9 +374,13 @@ const RAIL_SHAPES: [&str; 10] = [
     "north_west", "north_east",
 ];
 
-/// The value vanilla's constructor gives a property its class's definition adds (`DoorBlock`
-/// starts closed, unpowered, lower half), where `StateDefinition.any()` would take another.
-fn vanilla_default(field: &str) -> Option<&'static str> {
+/// The value vanilla class `class`'s constructor gives a property its definition adds (`DoorBlock`
+/// starts closed, unpowered, lower half; a wall with its post up), where `StateDefinition.any()`
+/// would take another.
+fn vanilla_default(class: &str, field: &str) -> Option<&'static str> {
+    if class.rsplit('/').next() == Some("WallBlock") && field == "UP" {
+        return Some("true");
+    }
     Some(match field {
         "DOUBLE_BLOCK_HALF" => "lower",
         "HALF" | "SLAB_TYPE" => "bottom",
@@ -664,6 +707,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner == DISPENSER && matches!(name, "registerBehavior" | "registerProjectileBehavior"))
         || (owner.starts_with("net/minecraft/core/dispenser/") && name == "<init>")
         || (owner == BLOCK_SET_TYPE && matches!(name, "<init>" | "register" | "values"))
+        || (owner == BRUSHABLE && matches!(name, "getTurnsInto" | "getBrushSound" | "getBrushCompletedSound"))
         || (matches!(owner, SOUND_TYPE | DEFERRED_SOUND_TYPE) && (name == "<init>" || SOUND_GETTERS.iter().any(|(g, ..)| *g == name) || matches!(name, "getVolume" | "getPitch")))
         || (name == "useItemOn" && cauldron_class(owner))
         || (matches!(owner, "net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem") && name == "createAttributes")
@@ -811,6 +855,7 @@ fn interaction_map(rt: &mut Rt, name: &str, fresh: bool) -> V {
 }
 
 const BLOCK_SET_TYPE: &str = "net/minecraft/world/level/block/state/properties/BlockSetType";
+const BRUSHABLE: &str = "net/minecraft/world/level/block/BrushableBlock";
 const DEFERRED_SOUND_TYPE: &str = "net/neoforged/neoforge/common/util/DeferredSoundType";
 
 /// The vanilla `SoundType` constant `t` is (`SoundType.METAL`), by its row of [`VANILLA_SOUND_TYPES`].
@@ -1104,6 +1149,29 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             };
             Some(api::direction(rt, o))
         }
+        (BRUSHABLE, "getTurnsInto" | "getBrushSound" | "getBrushCompletedSound") => {
+            let field = match name {
+                "getTurnsInto" => "turnsInto",
+                "getBrushSound" => "brushSound",
+                _ => "brushCompletedSound",
+            };
+            Some(match rt.get_field(a(0), field) {
+                V::Void => V::NULL,
+                v => v,
+            })
+        }
+        // The builder's `properties` (an accessor's `$properties`): its properties by name, as
+        // vanilla's `Builder` keeps them.
+        (BUILDER, "$properties" | "properties") if desc.starts_with("()") => {
+            let list = rt.get_field(a(0), "$props");
+            let map = rt.alloc("java/util/HashMap", Data::Table(Default::default()));
+            for p in jutil::elements(rt, list) {
+                let (pname, _) = api_common::prop_parts(rt, p);
+                let key = rt.string(&pname);
+                jutil::table_put(rt, map, key, p);
+            }
+            Some(map)
+        }
         (BUILDER, "add") => {
             let list = rt.get_field(a(0), "$props");
             for p in jutil::elements(rt, a(1)) {
@@ -1148,6 +1216,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if let Some(w) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == WOOD_TYPE) {
                 rt.put_field(a(0), "type", w);
             }
+            // A door's, trapdoor's, button's or plate's set (`DoorBlock(BlockSetType, Properties)`),
+            // also `type`, and a weighted plate's `maxWeight` (`(int, BlockSetType, Properties)`):
+            // what its template follows.
+            if let Some(t) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == BLOCK_SET_TYPE) {
+                rt.put_field(a(0), "type", t);
+            }
+            if o == "net/minecraft/world/level/block/WeightedPressurePlateBlock" && desc.starts_with("(I") {
+                rt.put_field(a(0), "maxWeight", a(1));
+            }
+            // `BrushableBlock(turnsInto, brushSound, brushCompletedSound, properties)`: vanilla's fields.
+            if o == BRUSHABLE && desc.starts_with("(Lnet/minecraft/world/level/block/Block;Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundEvent;") {
+                for (i, field) in ["turnsInto", "brushSound", "brushCompletedSound"].into_iter().enumerate() {
+                    rt.put_field(a(0), field, a(1 + i));
+                }
+            }
             // A cauldron's interaction map (`AbstractCauldronBlock(Properties, InteractionMap)`),
             // the field vanilla names `interactions`.
             if let Some(m) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == INTERACTION_MAP) {
@@ -1182,7 +1265,30 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 }
 
 /// Static fields this module owns: `SoundType`, `MapColor`, `DyeColor`, `Rarity` constants.
+/// Vanilla blocks' shapes kept in static fields mods read (`ChestBlock.AABB`), by class and field:
+/// boxes in pixels, as `Block.box` takes them, several for a shape vanilla joins (`Shapes.or`).
+const STATIC_SHAPES: [(&str, &str, &[[f64; 6]]); 9] = [
+    ("ChestBlock", "AABB", &[[1.0, 0.0, 1.0, 15.0, 14.0, 15.0]]),
+    ("ChestBlock", "NORTH_AABB", &[[1.0, 0.0, 0.0, 15.0, 14.0, 15.0]]),
+    ("ChestBlock", "SOUTH_AABB", &[[1.0, 0.0, 1.0, 15.0, 14.0, 16.0]]),
+    ("ChestBlock", "WEST_AABB", &[[0.0, 0.0, 1.0, 15.0, 14.0, 15.0]]),
+    ("ChestBlock", "EAST_AABB", &[[1.0, 0.0, 1.0, 16.0, 14.0, 15.0]]),
+    ("WallHangingSignBlock", "PLANK_NORTHSOUTH", &[[0.0, 14.0, 6.0, 16.0, 16.0, 10.0]]),
+    ("WallHangingSignBlock", "PLANK_EASTWEST", &[[6.0, 14.0, 0.0, 10.0, 16.0, 16.0]]),
+    ("WallHangingSignBlock", "SHAPE_NORTHSOUTH", &[[0.0, 14.0, 6.0, 16.0, 16.0, 10.0], [1.0, 0.0, 7.0, 15.0, 10.0, 9.0]]),
+    ("WallHangingSignBlock", "SHAPE_EASTWEST", &[[6.0, 14.0, 0.0, 10.0, 16.0, 16.0], [7.0, 0.0, 1.0, 9.0, 10.0, 15.0]]),
+];
+
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    if let Some(class) = owner.strip_prefix("net/minecraft/world/level/block/")
+        && let Some((.., pixels)) = STATIC_SHAPES.iter().find(|(c, f, _)| *c == class && *f == field)
+    {
+        let boxes: Vec<crate::shapes::Box3> = pixels.iter().map(|b| b.map(|v| v / 16.0)).collect();
+        return Some(rt.intern(format!("const/{owner}.{field}"), move |rt| {
+            let joined = crate::shapes::optimized(&boxes);
+            crate::shapes::shape(rt, &joined)
+        }));
+    }
     match owner {
         SOUND_TYPE => {
             let &(f, ..) = VANILLA_SOUND_TYPES.iter().find(|(f, ..)| *f == field)?;
@@ -1480,7 +1586,7 @@ fn constructed(rt: &mut Rt, b: V, vanilla: &str, props: V) {
         let values = property_values(rt, p);
         let field = rt.str_of(rt.get_field(p, "$field")).map(str::to_owned);
         let vanilla_set = (rt.get_field(p, "$vanilla-default").i() != 0)
-            .then(|| field.as_deref().and_then(vanilla_default))
+            .then(|| field.as_deref().and_then(|f| vanilla_default(vanilla, f)))
             .flatten()
             .filter(|v| values.iter().any(|x| x == v));
         if let Some(first) = vanilla_set.map(str::to_owned).or_else(|| values.into_iter().next()) {
@@ -1663,7 +1769,7 @@ fn block_declaration(rt: &mut Rt, name: &str, b: V, item: bool) -> String {
     // light through when the block isn't a full cube or doesn't occlude, else stone.
     let simple = vanilla.rsplit('/').next().unwrap_or("");
     let class = rt.class_of(b);
-    let mut vanilla_template = TEMPLATES.iter().find(|(c, _)| *c == simple).map(|(_, t)| t.to_string());
+    let mut vanilla_template = template_of(rt, b, simple).map(str::to_owned);
     let mut template_props: Vec<String> = match vanilla_template {
         Some(_) => vanilla_definition(&vanilla).iter().filter_map(|f| api_common::vanilla_property(f).map(|(n, _)| n)).collect(),
         None => Vec::new(),
@@ -2171,6 +2277,82 @@ mod tests {
         assert!(json.contains("\"template\": \"minecraft:quartz_pillar\""), "{json}");
         assert!(json.contains("\"state_properties\": {}"), "{json}");
         assert!(json.contains("\"default_state\": {\"axis\": \"z\"}"), "{json}");
+    }
+
+    /// Vanilla's shapes in static fields (`ChestBlock.AABB`, a hanging sign's joined two boxes) are
+    /// its boxes, the same object each read; a brushable block keeps what it turns into and its
+    /// sounds; a definition builder lists its properties by name (FramedBlocks reads them).
+    #[test]
+    fn vanilla_statics_and_fields_mods_read_are_vanillas() {
+        let mut rt = Rt::new();
+        crate::install();
+        let chest = api::get_static(&mut rt, "net/minecraft/world/level/block/ChestBlock.AABB");
+        assert_eq!(crate::shapes::boxes(&rt, chest), Some(vec![[1.0 / 16.0, 0.0, 1.0 / 16.0, 15.0 / 16.0, 14.0 / 16.0, 15.0 / 16.0]]));
+        assert_eq!(api::get_static(&mut rt, "net/minecraft/world/level/block/ChestBlock.AABB"), chest);
+        let sign = api::get_static(&mut rt, "net/minecraft/world/level/block/WallHangingSignBlock.SHAPE_NORTHSOUTH");
+        assert_eq!(crate::shapes::boxes(&rt, sign).map(|b| b.len()), Some(2));
+        let p = props(&mut rt);
+        let b = rt.new_object(BRUSHABLE);
+        let (sand, brush, done) = (rt.string("minecraft:sand"), rt.string("minecraft:item.brush.brushing.sand"), rt.string("minecraft:item.brush.brushing.sand.complete"));
+        api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/BrushableBlock.<init>.(Lnet/minecraft/world/level/block/Block;Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V",
+            &[b, sand, brush, done, p],
+        );
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/level/block/BrushableBlock.getBrushCompletedSound.()Lnet/minecraft/sounds/SoundEvent;", &[b]), done);
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/level/block/BrushableBlock.getTurnsInto.()Lnet/minecraft/world/level/block/Block;", &[b]), sand);
+        // `BrushableBlock` adds `dusted`, which its builder then holds by name.
+        let builder = rt.new_object(BUILDER);
+        let list = jutil::new_list(&mut rt, Vec::new());
+        rt.put_field(builder, "$props", list);
+        let dusted = api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.DUSTED");
+        let arr = rt.alloc("[Lnet/minecraft/world/level/block/state/properties/Property;", Data::Array(vec![dusted]));
+        api::call(&mut rt, "net/minecraft/world/level/block/state/StateDefinition$Builder.add.([Lnet/minecraft/world/level/block/state/properties/Property;)Lnet/minecraft/world/level/block/state/StateDefinition$Builder;", &[builder, arr]);
+        let map = api::call(&mut rt, "net/minecraft/world/level/block/state/StateDefinition$Builder.$properties.()Ljava/util/Map;", &[builder]);
+        let key = rt.string("dusted");
+        assert_eq!(jutil::table_get(&mut rt, map, key), Some(dusted));
+    }
+
+    /// Mod blocks of vanilla's kinds copy the vanilla block that behaves as they do: a fence joins
+    /// fences, a wall stands with its post up, farmland keeps its moisture. What their constructor
+    /// was given decides as it does in vanilla: a door of iron's `BlockSetType` doesn't open by
+    /// hand, a button of stone's ignores arrows, a plate of stone's senses mobs alone, a weighted
+    /// plate counting to 150 is the heavy one.
+    #[test]
+    fn vanilla_kinds_copy_the_vanilla_block_that_behaves_as_they_do() {
+        let mut rt = Rt::new();
+        let p = props(&mut rt);
+        let set = |rt: &mut Rt, f: &str| get_static(rt, BLOCK_SET_TYPE, f).unwrap();
+        let (iron, oak, stone) = (set(&mut rt, "IRON"), set(&mut rt, "OAK"), set(&mut rt, "STONE"));
+        const P: &str = "Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;";
+        const S: &str = "Lnet/minecraft/world/level/block/state/properties/BlockSetType;";
+        let blocks = [
+            ("ruby:fence", "FenceBlock", format!("({P})V"), vec![p], "minecraft:oak_fence"),
+            ("ruby:wall", "WallBlock", format!("({P})V"), vec![p], "minecraft:cobblestone_wall"),
+            ("ruby:iron_door", "DoorBlock", format!("({S}{P})V"), vec![iron, p], "minecraft:iron_door"),
+            ("ruby:oak_door", "DoorBlock", format!("({S}{P})V"), vec![oak, p], "minecraft:oak_door"),
+            ("ruby:button", "ButtonBlock", format!("({S}I{P})V"), vec![stone, V::I(20), p], "minecraft:stone_button"),
+            ("ruby:plate", "PressurePlateBlock", format!("({S}{P})V"), vec![stone, p], "minecraft:stone_pressure_plate"),
+            ("ruby:heavy_plate", "WeightedPressurePlateBlock", format!("(I{S}{P})V"), vec![V::I(150), iron, p], "minecraft:heavy_weighted_pressure_plate"),
+            ("ruby:soil", "FarmBlock", format!("({P})V"), vec![p], "minecraft:farmland"),
+        ];
+        for (id, class, desc, args, _) in &blocks {
+            let owner = rt.static_key(&format!("net/minecraft/world/level/block/{class}"));
+            let b = rt.new_object(owner);
+            let init = rt.static_key(&format!("{owner}.<init>.{desc}"));
+            api::call(&mut rt, init, &[&[b][..], args].concat());
+            rt.registered.insert(("block".into(), (*id).into()), b);
+        }
+        let declared: std::collections::HashMap<String, String> = block_declarations(&mut rt).into_iter().collect();
+        for (id, .., template) in &blocks {
+            let json = &declared[*id];
+            assert!(json.contains(&format!("\"template\": \"{template}\"")), "{id}: {json}");
+            // Every state of theirs is one of the template's.
+            assert!(json.contains("\"state_properties\": {}"), "{id}: {json}");
+        }
+        let wall = &declared["ruby:wall"];
+        assert!(wall.contains("\"up\": \"true\"") && wall.contains("\"north\": \"none\""), "{wall}");
+        assert!(declared["ruby:soil"].contains("\"default_state\": {\"moisture\": \"0\"}"), "{}", declared["ruby:soil"]);
     }
 
     const GET_BLOCK: &str = "net/minecraft/world/level/block/state/BlockState.getBlock.()Lnet/minecraft/world/level/block/Block;";

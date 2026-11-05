@@ -1679,6 +1679,13 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         }
         // Work for the render thread's next frame (GPU objects): there is no GPU state to set up.
         ("com/mojang/blaze3d/systems/RenderSystem", "recordRenderCall") => V::Void,
+        // A mod's item renderer built on vanilla's (`super(dispatcher, models)`): the dispatcher and
+        // models are the one objects there are, kept under vanilla's field names.
+        ("net/minecraft/client/renderer/BlockEntityWithoutLevelRenderer", "<init>") => {
+            rt.put_field(a(0), "blockEntityRenderDispatcher", a(1));
+            rt.put_field(a(0), "entityModelSet", a(2));
+            V::Void
+        }
         ("net/minecraft/client/renderer/blockentity/BlockEntityRendererProvider$Context", n) => match n {
             "getBlockRenderDispatcher" => single(rt, "net/minecraft/client/renderer/block/BlockRenderDispatcher"),
             "getBlockEntityRenderDispatcher" => single(rt, "net/minecraft/client/renderer/blockentity/BlockEntityRenderDispatcher"),

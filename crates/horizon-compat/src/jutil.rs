@@ -1115,6 +1115,33 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
                 }
             }
         }
+        // fastutil's `ObjectOpenHashSet.of(a, b, c)` and its kin: a set of them.
+        (o, "of") if o.starts_with("it/unimi/dsi/fastutil/") && o.ends_with("Set") => {
+            let items = varargs(rt);
+            new_set(rt, &items)
+        }
+        // fastutil's empty maps (`Object2IntSortedMaps.emptyMap()`).
+        (o, "emptyMap") if o.starts_with("it/unimi/dsi/fastutil/") && desc.starts_with("()") => rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default())),
+        // `Map.ofEntries(entries...)`: their keys and values in order; Guava's
+        // `Maps.immutableEnumMap(map)` a copy of the map.
+        ("java/util/Map", "ofEntries") | ("com/google/common/collect/Maps", "immutableEnumMap") => {
+            let pairs: Vec<(V, V)> = if name == "ofEntries" {
+                elements(rt, a(0))
+                    .into_iter()
+                    .map(|e| {
+                        let kv = elements(rt, e);
+                        (kv.first().copied().unwrap_or(V::NULL), kv.get(1).copied().unwrap_or(V::NULL))
+                    })
+                    .collect()
+            } else {
+                table_pairs(rt, a(0))
+            };
+            let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+            for (k, v) in pairs {
+                table_put(rt, m, k, v);
+            }
+            m
+        }
         ("java/util/Map" | "com/google/common/collect/ImmutableMap" | "com/google/common/collect/Maps", "of" | "newHashMap" | "newLinkedHashMap" | "newConcurrentMap") => {
             let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
             for kv in args.chunks(2) {

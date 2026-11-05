@@ -1715,6 +1715,10 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
     Some(match (owner, name) {
         (MINECRAFT, "getWindow") => single(rt, WINDOW),
         (MINECRAFT, "renderBuffers") => single(rt, "net/minecraft/client/renderer/RenderBuffers"),
+        // The models' set, as a renderer's context hands it (`new BlockEntityWithoutLevelRenderer(
+        // dispatcher, Minecraft.getInstance().getEntityModels())` for a mod's item renderer).
+        (MINECRAFT, "getEntityModels") => single(rt, "net/minecraft/client/model/geom/EntityModelSet"),
+        (MINECRAFT, "getBlockEntityRenderDispatcher") => single(rt, "net/minecraft/client/renderer/blockentity/BlockEntityRenderDispatcher"),
         // The client's language: the game's (English until it says otherwise), `Locale`'s one object.
         (MINECRAFT, "getLanguageManager") => single(rt, LANGUAGE_MANAGER),
         (LANGUAGE_MANAGER, "getSelected") => rt.string("en_us"),
@@ -2070,7 +2074,11 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | "com/mojang/blaze3d/systems/RenderSystem"
             | "com/mojang/blaze3d/platform/Lighting"
     ) || owner.starts_with(TOOLTIP_EVENT)
-        || (owner == MINECRAFT && matches!(name, "getWindow" | "renderBuffers" | "getLanguageManager" | "hasSingleplayerServer" | "$screen" | "$particleEngine"))
+        || (owner == MINECRAFT
+            && matches!(
+                name,
+                "getWindow" | "renderBuffers" | "getLanguageManager" | "hasSingleplayerServer" | "$screen" | "$particleEngine" | "getEntityModels" | "getBlockEntityRenderDispatcher"
+            ))
         || owner == LANGUAGE_MANAGER
         || (owner == PARTICLE_ENGINE && name == "$providers")
 }

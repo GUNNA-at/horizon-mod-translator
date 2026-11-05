@@ -76,8 +76,9 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             Some(attribute(rt, &format!("minecraft:{id}")))
         }
         ENCHANTMENTS if ENCHANTMENT_FIELDS.contains(&field) => Some(rt.string(&format!("enchantment#minecraft:{}", field.to_ascii_lowercase()))),
-        // The ids of the main hand's base attack modifiers, which the tooltip shows as the item's own.
-        "net/minecraft/world/item/Item" => match field {
+        // The ids of the main hand's base attack modifiers, which the tooltip shows as the item's own;
+        // also through vanilla's items, which inherit them (`BlockItem.BASE_ATTACK_DAMAGE_ID`).
+        o if o.starts_with("net/minecraft/world/item/") && o.ends_with("Item") && !o["net/minecraft/world/item/".len()..].contains('/') => match field {
             "BASE_ATTACK_DAMAGE_ID" => Some(rt.string("minecraft:base_attack_damage")),
             "BASE_ATTACK_SPEED_ID" => Some(rt.string("minecraft:base_attack_speed")),
             _ => None,

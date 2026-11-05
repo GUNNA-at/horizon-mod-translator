@@ -429,6 +429,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
         }
         (o, "hasTime") if o.starts_with("net/neoforged/neoforge/event/tick/ServerTickEvent") => V::I(1),
+        // `ModLoader.postEvent(event)` (or in mod order, `postEventWrapContainerInModOrder`): a mod
+        // posting its own event to every mod's bus (FramedBlocks', Curios' registration events).
+        ("net/neoforged/fml/ModLoader", "postEvent" | "postEventWrapContainerInModOrder" | "postEventWithReturn") => {
+            let class = rt.class_of(a(0));
+            post(rt, class, a(0));
+            if desc.ends_with(")V") { V::Void } else { a(0) }
+        }
         ("net/neoforged/bus/api/IEventBus", "post") => {
             let class = rt.class_of(a(1));
             post(rt, class, a(1));
@@ -616,6 +623,30 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let (reg, _) = split_key(rt, a(0));
             V::I((Some(reg.as_str()) == rt.str_of(a(1))) as i32)
         }
+        // Vanilla's Gson adapter for ids (`new ResourceLocation.Serializer()`, Jade's): an id from a
+        // JSON string, and back.
+        ("net/minecraft/resources/ResourceLocation$Serializer", "<init>") => V::Void,
+        ("net/minecraft/resources/ResourceLocation$Serializer", "deserialize") => {
+            let text = crate::api::call(rt, "com/google/gson/JsonElement.getAsString.()Ljava/lang/String;", &[a(1)]);
+            let id = location(rt, text);
+            rt.string(&id)
+        }
+        ("net/minecraft/resources/ResourceLocation$Serializer", "serialize") => {
+            let id = location(rt, a(1));
+            crate::gson::string(rt, &id)
+        }
+        // `DeferredItem.createItem(id)`, `DeferredBlock.createBlock(id)`: a holder of the item or
+        // block under `id` (a `ResourceLocation`, or a `ResourceKey`).
+        ("net/neoforged/neoforge/registries/DeferredItem", "createItem") | ("net/neoforged/neoforge/registries/DeferredBlock", "createBlock") => {
+            let registry = if name == "createItem" { "item" } else { "block" };
+            let id = if desc.starts_with("(Lnet/minecraft/resources/ResourceKey;") { split_key(rt, a(0)).1 } else { location(rt, a(0)) };
+            let class: &'static str = rt.static_key(owner);
+            let h = rt.new_object(class);
+            let (r, i) = (rt.string(registry), rt.string(&id));
+            rt.put_field(h, "$registry", r);
+            rt.put_field(h, "$id", i);
+            h
+        }
         // DeferredHolder and its subclasses: a registry and a name, resolved when asked.
         (o, "create") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && !o.ends_with("DeferredRegister") => {
             let (registry, id) = if desc.starts_with("(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;") {
@@ -776,7 +807,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 }
                 "key" => rt.string(&reg),
                 // The registry owns its holders (`Holder.Reference.createStandAlone(owner, key)`).
-                "holderOwner" => a(0),
+                // As its lookup (`asLookup()`): registries are their names here.
+                "holderOwner" | "asLookup" => a(0),
                 // `addAlias(from, to)`: an old name that reads as the new one (a renamed block).
                 "addAlias" => {
                     let (from, to) = (name_in(rt, a(1)), name_in(rt, a(2)));

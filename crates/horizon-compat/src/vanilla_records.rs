@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 678] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 675] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1386,7 +1386,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 678] = [
     ("net/minecraft/realms/RealmsLabel", "i(Lnet/minecraft/network/chat/Component;III)V=text,x,y,color|ggetText()Lnet/minecraft/network/chat/Component;=text|o"),
     ("net/minecraft/realms/RepeatedNarrator$Params", "i(Lnet/minecraft/network/chat/Component;Lcom/google/common/util/concurrent/RateLimiter;)V=narration,rateLimiter|o"),
     ("net/minecraft/resources/DelegatingOps", "i(Lcom/mojang/serialization/DynamicOps;)V=delegate|o"),
-    ("net/minecraft/resources/RegistryFileCodec", "i(Lnet/minecraft/resources/ResourceKey;Lcom/mojang/serialization/Codec;Z)V=registryKey,elementCodec,allowInline|o"),
     ("net/minecraft/resources/RegistryFixedCodec", "i(Lnet/minecraft/resources/ResourceKey;)V=registryKey|o"),
     ("net/minecraft/server/ConsoleInput", "i(Ljava/lang/String;Lnet/minecraft/commands/CommandSourceStack;)V=msg,source|o"),
     ("net/minecraft/server/MinecraftServer$TimeProfiler", "i(JI)V=startNanos,startTick|o"),
@@ -1403,7 +1402,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 678] = [
     ("net/minecraft/server/level/ChunkTaskPriorityQueueSorter$Message", "i(Ljava/util/function/Function;JLjava/util/function/IntSupplier;)V=task,pos,level|o"),
     ("net/minecraft/server/level/ChunkTaskPriorityQueueSorter$Release", "i(Ljava/lang/Runnable;JZ)V=task,pos,clearQueue|o"),
     ("net/minecraft/server/level/Ticket", "i(Lnet/minecraft/server/level/TicketType;ILjava/lang/Object;Z)V=type,ticketLevel,key,forceTicks|ggetType()Lnet/minecraft/server/level/TicketType;=type|ggetTicketLevel()I=ticketLevel|ssetCreatedTick(J)V=createdTick|gisForceTicks()Z=forceTicks"),
-    ("net/minecraft/server/level/TicketType", "i(Ljava/lang/String;Ljava/util/Comparator;J)V=name,comparator,timeout|gtoString()Ljava/lang/String;=name|ggetComparator()Ljava/util/Comparator;=comparator|gtimeout()J=timeout|o"),
     ("net/minecraft/server/network/MemoryServerHandshakePacketListenerImpl", "i(Lnet/minecraft/server/MinecraftServer;Lnet/minecraft/network/Connection;)V=server,connection|o"),
     ("net/minecraft/server/network/ServerConnectionListener$LatencySimulator$DelayedMessage", "i(Lio/netty/channel/ChannelHandlerContext;Ljava/lang/Object;)V=ctx,msg|o"),
     ("net/minecraft/server/network/ServerHandshakePacketListenerImpl", "i(Lnet/minecraft/server/MinecraftServer;Lnet/minecraft/network/Connection;)V=server,connection|o"),
@@ -1672,7 +1670,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 678] = [
     ("net/neoforged/neoforge/common/data/internal/NeoForgeRegistryOrderReportProvider", "i(Lnet/minecraft/data/PackOutput;)V=output|o"),
     ("net/neoforged/neoforge/common/loot/CanItemPerformAbility", "i(Lnet/neoforged/neoforge/common/ItemAbility;)V=ability|o"),
     ("net/neoforged/neoforge/common/loot/LootTableIdCondition", "i(Lnet/minecraft/resources/ResourceLocation;)V=targetLootTableId|o"),
-    ("net/neoforged/neoforge/common/util/ConcatenatedListView", "i(Ljava/util/List;)V=lists|o"),
     ("net/neoforged/neoforge/common/util/LogicalSidedProvider", "i(Ljava/util/function/Function;Ljava/util/function/Function;)V=clientSide,serverSide|o"),
     ("net/neoforged/neoforge/common/util/TablePrinter$Header", "i(Ljava/lang/String;Ljava/util/function/Function;Z)V=name,supplier,right|o"),
     ("net/neoforged/neoforge/common/world/ClimateSettingsBuilder", "i(ZFLnet/minecraft/world/level/biome/Biome$TemperatureModifier;F)V=hasPrecipitation,temperature,temperatureModifier,downfall|ghasPrecipitation()Z=hasPrecipitation|ssetHasPrecipitation(Z)V=hasPrecipitation|ggetTemperature()F=temperature|ssetTemperature(F)V=temperature|ggetTemperatureModifier()Lnet/minecraft/world/level/biome/Biome$TemperatureModifier;=temperatureModifier|ssetTemperatureModifier(Lnet/minecraft/world/level/biome/Biome$TemperatureModifier;)V=temperatureModifier|ggetDownfall()F=downfall|ssetDownfall(F)V=downfall|o"),

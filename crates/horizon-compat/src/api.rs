@@ -1912,10 +1912,11 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             let unknown = crate::codecs::native(rt, &format!("unmodelled/{k}"));
             crate::network::from_codec(rt, unknown)
         }
-        // A codec of the game's this runtime doesn't model yet (`FoodProperties.DIRECT_CODEC`): still
-        // a miss, but a codec, so what a mod builds on it stays whole; reading with it fails.
+        // A codec of the game's this runtime doesn't model yet (`FoodProperties.DIRECT_CODEC`,
+        // `Biome.LIST_CODEC`, `X.CODEC_NONEMPTY`): still a miss, but a codec, so what a mod builds on
+        // it stays whole; reading with it fails.
         k if (k.starts_with("net/minecraft/") || k.starts_with("net/neoforged/"))
-            && k.rsplit('.').next().is_some_and(|f| (f == "CODEC" || f.ends_with("_CODEC")) && !f.ends_with("STREAM_CODEC")) =>
+            && k.rsplit('.').next().is_some_and(|f| f.contains("CODEC") && !f.contains("STREAM_CODEC")) =>
         {
             crate::miss(rt, key);
             crate::codecs::native(rt, &format!("unmodelled/{k}"))
