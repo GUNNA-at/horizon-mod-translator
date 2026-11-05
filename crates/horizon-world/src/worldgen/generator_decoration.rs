@@ -1049,6 +1049,11 @@ impl PlacementContext for World<'_> {
         state: BlockStateId,
         position: [i32; 3],
     ) -> Result<bool, PlacementQueryError> {
+        // A mod's block survives where its own code says (Farmer's Delight's wild crops take sand
+        // as well as dirt); its template's rule decides the rest.
+        if let Some(answer) = crate::worldgen::foreign::survives(self, state, position) {
+            return answer;
+        }
         if let (None, Some(behaviours)) = (self.blocks, self.behaviours) {
             let mut level = ShapeLevel {
                 world: self,

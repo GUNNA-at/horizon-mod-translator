@@ -1288,6 +1288,68 @@ fn plant_survives(rt: &mut Rt, class: &str, this: V, state: V, level: V, pos: V)
     bush_soil(rt, if DOUBLE_PLANT_SURVIVAL.contains(&class) { "DoublePlantBlock" } else { class }, &soil)
 }
 
+/// `state.canSurvive(level, pos)` of the mod block `b` (class `class`): the block's own
+/// `canSurvive` where its class has one, else its vanilla plant base's as NeoForge 1.21.1 has it,
+/// which asks the block's own `mayPlaceOn` (Farmer's Delight's wild crops: dirt or sand). `None`
+/// where neither is the block's (its base isn't a plant kept here), or its code threw: the game's
+/// rule for the block's template answers then.
+pub(crate) fn mod_survives(rt: &mut Rt, b: V, class: &'static str, state: V, level: V, pos: V) -> Option<bool> {
+    let survives = survives_by_code(rt, b, class, state, level, pos);
+    if rt.thrown.is_some() {
+        rt.report_thrown("canSurvive");
+        return None;
+    }
+    survives
+}
+
+/// [`mod_survives`] for the mod's own code, which sees what its `canSurvive` throws.
+pub(crate) fn survives_by_code(rt: &mut Rt, b: V, class: &'static str, state: V, level: V, pos: V) -> Option<bool> {
+    if rt.overrides.is_some_and(|o| o(class, api::CAN_SURVIVE)) {
+        let vc = rt.vcall?;
+        return Some(vc(rt, api::CAN_SURVIVE_KEY, api::CAN_SURVIVE, &[b, state, level, pos]).i() != 0);
+    }
+    plant_survives(rt, plant_base(rt, class)?, b, state, level, pos)
+}
+
+/// The vanilla plant class (its simple name) a mod block's class is or extends.
+fn plant_base(rt: &Rt, class: &'static str) -> Option<&'static str> {
+    plant_class(if class.starts_with("net/minecraft/") { class } else { crate::rotation::vanilla_base(rt, class) })
+}
+
+/// The mod's blocks whose survival its own code decides: a class with its own `canSurvive`, or a
+/// vanilla plant base kept here (whose `canSurvive` asks the block's `mayPlaceOn`). The game asks
+/// [`mod_survives`] about these only.
+pub fn survival_blocks(rt: &Rt) -> Vec<String> {
+    let mut blocks: Vec<String> = rt
+        .registered
+        .iter()
+        .filter(|((registry, _), _)| registry == "block")
+        .filter(|(_, b)| {
+            let class = rt.class_of(**b);
+            rt.overrides.is_some_and(|o| o(class, api::CAN_SURVIVE))
+                || plant_base(rt, class).is_some_and(|c| BUSH_SURVIVAL.contains(&c) || DOUBLE_PLANT_SURVIVAL.contains(&c))
+        })
+        .map(|((_, name), _)| name.clone())
+        .collect();
+    blocks.sort();
+    blocks
+}
+
+/// `mayPlaceOn(ground, level, groundPos)` of the mod plant `b` (class `class`): its own where it
+/// has one. `None` where it hasn't, or its code threw: the plant's template decides.
+pub(crate) fn mod_may_place_on(rt: &mut Rt, b: V, class: &'static str, ground: V, level: V, ground_pos: V) -> Option<bool> {
+    if !rt.overrides.is_some_and(|o| o(class, MAY_PLACE_ON)) {
+        return None;
+    }
+    let vc = rt.vcall?;
+    let may = vc(rt, MAY_PLACE_ON_KEY, MAY_PLACE_ON, &[b, ground, level, ground_pos]);
+    if rt.thrown.is_some() {
+        rt.report_thrown("mayPlaceOn");
+        return None;
+    }
+    Some(may.i() != 0)
+}
+
 /// `DoublePlantBlock.placeAt(level, state, pos, flags)`: the lower half at `pos` and the upper above
 /// it, each waterlogged where the level has water (`copyWaterloggedFrom`), when the state has the
 /// property.
@@ -3004,6 +3066,94 @@ mod tests {
     /// `mayPlaceOn`, else the bush's (1.21.1's dirt, grass and podzol too, or farmland). An upper half needs the plant's lower half
     /// below, except in the check made before the block is set. `DoublePlantBlock.placeAt` sets
     /// both halves, the lower waterlogged where there is water.
+    /// A mod block's survival by its own code, as the game's hooks and the world generator ask it:
+    /// Farmer's Delight's wild crops (`WildCropBlock extends BushBlock`, its `mayPlaceOn`
+    /// `BlockTags.DIRT || BlockTags.SAND`) stand on sand as on grass, which their template's rule
+    /// refuses; a block with its own `canSurvive` answers it; a block with neither is left to its
+    /// template. Only the first two are claimed.
+    #[test]
+    fn a_mod_blocks_survival_is_its_own_codes() {
+        const WILD: &str = "test/WildCropBlock";
+        const LANTERN: &str = "test/HangingLantern";
+        const CRATE: &str = "test/Crate";
+        const IS: &str = "net/minecraft/world/level/block/state/BlockState.is.(Lnet/minecraft/tags/TagKey;)Z";
+        fn overrides(class: &str, short: &str) -> bool {
+            (class == WILD && short == MAY_PLACE_ON) || (class == LANTERN && short == api::CAN_SURVIVE)
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match short {
+                MAY_PLACE_ON if rt.class_of(args[0]) == WILD => {
+                    let dirt = api::get_static(rt, "net/minecraft/tags/BlockTags.DIRT");
+                    let sand = api::get_static(rt, "net/minecraft/tags/BlockTags.SAND");
+                    let on = |rt: &mut Rt, tag: V| api::call(rt, IS, &[args[1], tag]).i() != 0;
+                    V::I((on(rt, dirt) || on(rt, sand)) as i32)
+                }
+                // `!level.getBlockState(pos.above()).isAir()`.
+                api::CAN_SURVIVE if rt.class_of(args[0]) == LANTERN => {
+                    let above = api::call(rt, "net/minecraft/core/BlockPos.above.()Lnet/minecraft/core/BlockPos;", &[args[3]]);
+                    let state = api::call(rt, "net/minecraft/world/level/LevelReader.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;", &[args[2], above]);
+                    V::I((api_common::text_of(rt, state) != "minecraft:air") as i32)
+                }
+                _ => api::call(rt, key, args),
+            }
+        }
+        struct Column(std::collections::BTreeMap<[i32; 3], String>);
+        impl crate::host::Host for Column {
+            fn block_state(&self, pos: [i32; 3]) -> String {
+                self.0.get(&pos).cloned().unwrap_or_else(|| "minecraft:air".into())
+            }
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+                false
+            }
+            // 26.3's tags: 1.21.1's `dirt` (grass and podzol too) is `substrate_overworld`.
+            fn block_in_tag(&self, block: &str, tag: &str) -> bool {
+                match tag {
+                    "minecraft:dirt" => matches!(block, "minecraft:dirt" | "minecraft:coarse_dirt" | "minecraft:rooted_dirt"),
+                    "minecraft:substrate_overworld" => matches!(block, "minecraft:dirt" | "minecraft:coarse_dirt" | "minecraft:rooted_dirt" | "minecraft:grass_block" | "minecraft:podzol"),
+                    "minecraft:sand" => matches!(block, "minecraft:sand" | "minecraft:red_sand" | "minecraft:suspicious_sand"),
+                    _ => false,
+                }
+            }
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        rt.supers.insert(WILD, "net/minecraft/world/level/block/BushBlock");
+        rt.supers.insert(LANTERN, "net/minecraft/world/level/block/Block");
+        rt.supers.insert(CRATE, "net/minecraft/world/level/block/Block");
+        for (class, id) in [(WILD, "test:wild_cabbages"), (LANTERN, "test:hanging_lantern"), (CRATE, "test:crate")] {
+            let b = rt.new_object(class);
+            rt.registered.insert(("block".into(), id.into()), b);
+        }
+        assert_eq!(survival_blocks(&rt), ["test:hanging_lantern", "test:wild_cabbages"]);
+        let column = |below: &str, above: &str| Column([([0, 0, 0], below.to_owned()), ([0, 2, 0], above.to_owned())].into());
+        let survives = |rt: &mut Rt, state: &str, below: &str, above: &str| crate::glue::can_survive(rt, &mut column(below, above), [0, 1, 0], state);
+        // The wild crop: grass (1.21.1's dirt) and sand, not stone.
+        assert_eq!(survives(&mut rt, "test:wild_cabbages", "minecraft:sand", "minecraft:air"), Some(true));
+        assert_eq!(survives(&mut rt, "test:wild_cabbages", "minecraft:grass_block", "minecraft:air"), Some(true));
+        assert_eq!(survives(&mut rt, "test:wild_cabbages", "minecraft:stone", "minecraft:air"), Some(false));
+        // The lantern's own rule: something above it.
+        assert_eq!(survives(&mut rt, "test:hanging_lantern", "minecraft:air", "minecraft:oak_planks"), Some(true));
+        assert_eq!(survives(&mut rt, "test:hanging_lantern", "minecraft:stone", "minecraft:air"), Some(false));
+        // Neither: the template's rule; a block that isn't the mod's: the game's.
+        assert_eq!(survives(&mut rt, "test:crate", "minecraft:air", "minecraft:air"), None);
+        assert_eq!(survives(&mut rt, "minecraft:poppy", "minecraft:sand", "minecraft:air"), None);
+        // The plant's own `mayPlaceOn`, which its template's survival asks on the live level.
+        let may = |rt: &mut Rt, state: &str, ground: &str| crate::glue::may_place_on(rt, &mut column(ground, "minecraft:air"), state, ground, [0, 0, 0]);
+        assert_eq!(may(&mut rt, "test:wild_cabbages", "minecraft:red_sand"), Some(true));
+        assert_eq!(may(&mut rt, "test:wild_cabbages", "minecraft:gravel"), Some(false));
+        assert_eq!(may(&mut rt, "test:crate", "minecraft:sand"), None);
+        // The mod's own code asking `state.canSurvive(level, pos)` gets the same answer.
+        let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+        let (state, pos) = (api::state(&mut rt, "test:wild_cabbages"), api::block_pos(&mut rt, 0, 1, 0));
+        let mut on_sand = column("minecraft:sand", "minecraft:air");
+        let asked = rt.with_host(&mut on_sand, |rt| {
+            api::call(rt, "net/minecraft/world/level/block/state/BlockState.canSurvive.(Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z", &[state, level, pos])
+        });
+        assert_eq!(asked, V::I(1));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     #[test]
     fn a_mod_plants_super_survival_is_vanillas() {
         const RICE: &str = "test/Rice";

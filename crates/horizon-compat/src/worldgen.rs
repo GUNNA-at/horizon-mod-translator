@@ -197,6 +197,18 @@ pub fn place(rt: &mut Rt, configured: V, origin: [i32; 3]) -> Result<bool, Strin
     Ok(placed.i() != 0)
 }
 
+/// Whether the mod block `state` survives at `position` on the host's region by the mod's own code
+/// ([`crate::blocks::mod_survives`]): a feature asks before it places it (`simple_block`, a
+/// `would_survive` predicate). None where the block isn't the mod's or its code leaves it to the
+/// block's rule.
+pub fn survives(rt: &mut Rt, state: &str, position: [i32; 3]) -> Option<bool> {
+    let (b, class) = crate::glue::mod_block(rt, state)?;
+    let level = level(rt);
+    let st = crate::api::state(rt, state);
+    let pos = crate::api::block_pos(rt, i64::from(position[0]), i64::from(position[1]), i64::from(position[2]));
+    crate::blocks::mod_survives(rt, b, class, st, level, pos)
+}
+
 /// The generator's region, as the level a modifier's context and a feature are handed.
 fn level(rt: &mut Rt) -> V {
     rt.intern("compat:worldgen/level".into(), |rt| rt.new_object(LEVEL))

@@ -876,8 +876,8 @@ const STATE_DEFINITION: &str = "net/minecraft/world/level/block/state/StateDefin
 const DATA_STORAGE: &str = "net/minecraft/world/level/storage/DimensionDataStorage";
 const UPDATE_SHAPE: &str = "updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
 const UPDATE_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
-const CAN_SURVIVE: &str = "canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
-const CAN_SURVIVE_KEY: &str =
+pub(crate) const CAN_SURVIVE: &str = "canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
+pub(crate) const CAN_SURVIVE_KEY: &str =
     "net/minecraft/world/level/block/state/BlockBehaviour.canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
 const SAVED_DATA: &str = "net/minecraft/world/level/saveddata/SavedData";
 const LEVEL_DATA: &str = "net/minecraft/world/level/storage/LevelData";
@@ -1517,13 +1517,11 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     let ctx = crate::shapes::empty_context(rt);
                     state_shape(rt, &text, false, [a(0), a(1), a(2), ctx])
                 }
-                // The mod block's own `canSurvive`; vanilla's default answers true.
+                // The mod block's own `canSurvive`, else its vanilla plant base's (with its own
+                // `mayPlaceOn`); vanilla's default answers true.
                 "canSurvive" => match crate::glue::mod_block(rt, &text) {
-                    Some((blk, class)) if rt.overrides.is_some_and(|o| o(class, CAN_SURVIVE)) => match rt.vcall {
-                        Some(vc) => vc(rt, CAN_SURVIVE_KEY, CAN_SURVIVE, &[blk, a(0), a(1), a(2)]),
-                        None => V::I(1),
-                    },
-                    _ => V::I(1),
+                    Some((blk, class)) => V::I(crate::blocks::survives_by_code(rt, blk, class, a(0), a(1), a(2)).unwrap_or(true) as i32),
+                    None => V::I(1),
                 },
                 _ => return crate::api_common::call(rt, owner, name, desc, args),
             }

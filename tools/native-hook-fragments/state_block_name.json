@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "a state's block name without its properties (`GameLevel::native_state_block_name`), for hooks asked about every block.",
+  "doc_summary": "`native_state_block_name(state)` gives the block a state is of (`create:shaft`) without building the state's text, so a hook the game asks about every block (`native_can_survive`, `native_may_place_on`) checks cheaply whether the state is its mod's. Bundles that use it need \"hooks\": @API:state_block_name@.",
+  "comments": []
+}

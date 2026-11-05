@@ -427,6 +427,33 @@ pub fn state_for_placement(rt: &mut Rt, host: &mut dyn Host, state: &str, placem
     })
 }
 
+/// `native_can_survive`: `BlockState.canSurvive` of the mod block `state` at `pos` by the mod's own
+/// code ([`crate::blocks::mod_survives`]: the block's `canSurvive`, else its vanilla plant base's
+/// with its `mayPlaceOn`). None where the block isn't the mod's or its code leaves it to the game's
+/// rule for the block's template. The host answers the level's blocks and tags; nothing is written.
+pub fn can_survive(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> Option<bool> {
+    let (b, class) = mod_block(rt, state)?;
+    rt.with_host(host, |rt| {
+        let l = level(rt);
+        let st = api::state(rt, state);
+        let p = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+        crate::blocks::mod_survives(rt, b, class, st, l, p)
+    })
+}
+
+/// `native_may_place_on`: the mod plant `state`'s own `mayPlaceOn(ground, level, groundPos)` (the
+/// blocks it stands on, which its template's survival asks). None where the plant has no
+/// `mayPlaceOn` of its own, or isn't the mod's.
+pub fn may_place_on(rt: &mut Rt, host: &mut dyn Host, state: &str, ground: &str, ground_pos: [i32; 3]) -> Option<bool> {
+    let (b, class) = mod_block(rt, state)?;
+    rt.with_host(host, |rt| {
+        let l = level(rt);
+        let g = api::state(rt, ground);
+        let p = api::block_pos(rt, i64::from(ground_pos[0]), i64::from(ground_pos[1]), i64::from(ground_pos[2]));
+        crate::blocks::mod_may_place_on(rt, b, class, g, l, p)
+    })
+}
+
 const HANDLE_UPDATE_TAG: &str = "handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
 const HANDLE_UPDATE_TAG_KEY: &str =
     "net/minecraft/world/level/block/entity/BlockEntity.handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";

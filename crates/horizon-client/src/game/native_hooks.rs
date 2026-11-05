@@ -3747,6 +3747,16 @@ impl GameLevel<'_> {
     pub(super) fn native_fluid_name_in_tag(&self, fluid: &str, tag: &str) -> bool {
         self.items.fluid_in_tag(tag, fluid)
     }
+    /// The block a state is of (`minecraft:oak_sapling`, `create:shaft`),
+    /// without its properties and without building a string: a hook asked
+    /// about every block (`native_can_survive`) checks with it whether the
+    /// state is its mod's before it reads the whole state. Air for an id past
+    /// the state table. API @API:state_block_name@.
+    pub(super) fn native_state_block_name(&self, state: BlockStateId) -> &str {
+        self.registry
+            .state(state)
+            .map_or("minecraft:air", |info| info.name.as_str())
+    }
     /// A block state as text, as [`Self::native_state_text`] gives a
     /// position's: the state a hook is handed (`native_state_for_placement`'s
     /// `state`) in the form translated Java mods read. Air for an id past the

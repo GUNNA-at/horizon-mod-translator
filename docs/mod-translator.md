@@ -2734,6 +2734,34 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `MarsagliaPolarGaussian`'s cached second value too. Tests:
     `value_providers::tests::{int,float}_providers_draw_as_vanillas`,
     `{int,float}_provider_codecs_read_and_write_as_vanillas`. 307 compat tests pass.
+  - [x] 2026-11-05 A mod block's survival is its own code's, in the world generator and on the live
+    level. Farmer's Delight's beach cabbages and beetroots never generated: FD's
+    `WildCropBlock.mayPlaceOn` (it extends `FlowerBlock`) takes `BlockTags.DIRT || BlockTags.SAND`,
+    but survival was the rule of the block's template (a vanilla plant: no sand), both where the
+    generator decorates (`PlacementContext::block_survives`, the template's `SurvivalRule`) and on
+    the live level (`Sim::can_survive`: the hooks `native_can_survive` and `native_may_place_on`
+    existed, no translated mod answered them).
+    - Runtime (`horizon-compat`): `blocks::mod_survives` is the block's own `canSurvive`, else its
+      vanilla plant base's as NeoForge 1.21.1 has it (`BushBlock`'s, `DoublePlantBlock`'s: the
+      soil's `canSustainPlant`, then the block's own `mayPlaceOn`). `blocks::survival_blocks` lists
+      the mod's blocks it decides (own `canSurvive`, or a plant base kept); others stay their
+      template's. A mod's code asking `state.canSurvive(level, pos)` gets the same answer. Entry
+      points: `glue::can_survive` and `glue::may_place_on` (the level), `worldgen::survives` (the
+      generator).
+    - Generator (`horizon-world/src/worldgen/foreign.rs`): `Handler::survival_blocks` and
+      `Handler::survives`. The decoration world asks the handler first, for the states of the
+      blocks it claims only: a bitset per registry, built on the first question; one atomic load
+      when no mod claims any. The mod's code reads the region and writes nothing.
+    - Translator: the engine's worldgen handler answers on the worldgen runtime, or, while the mod's
+      own feature is in a call on that thread (FD's `WildCropFeature` places the inline
+      `simple_block` that asks), on that thread's probe runtime (`with_worldgen_query`). The level
+      hooks `can_survive` and `may_place_on` are wired. They are asked about every block, so they
+      pass over the others by name: `GameLevel::native_state_block_name` (new, fragment
+      `state_block_name`) reads a state's block without building its text.
+    Tests: `blocks::tests::a_mod_blocks_survival_is_its_own_codes` (a wild crop on sand, grass and
+    stone through `BlockTags.DIRT`'s 26.3 name; a block with its own `canSurvive`; one with
+    neither left to its template; the claims), `foreign::tests::a_mods_block_survives_where_its_code_says`.
+    308 compat and 292 horizon-world tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

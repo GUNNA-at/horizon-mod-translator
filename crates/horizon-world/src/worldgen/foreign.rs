@@ -122,9 +122,35 @@ pub trait Handler: Send + Sync {
     fn biome_modifier(&self, _kind: &str, _json: &str) -> Option<Result<Arc<dyn BiomeModifier>, String>> {
         None
     }
+    /// The blocks whose survival the mod's code decides (`farmersdelight:wild_cabbages`): the
+    /// generator asks [`Handler::survives`] about their states only. Asked once, as it registers.
+    fn survival_blocks(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// `state.canSurvive(level, position)` of one of the mod's blocks (`state` as [`World::block`]
+    /// gives it) by the mod's own code, on `world`, which it only reads: a feature asks before it
+    /// places a plant (`simple_block`, a `would_survive` predicate). `None` where the block isn't
+    /// the mod's or its code leaves it to the block's own rule (the template's).
+    fn survives(&self, _world: &mut dyn World, _state: &str, _position: [i32; 3]) -> Option<Result<bool, String>> {
+        None
+    }
 }
 
 static HANDLERS: RwLock<Vec<(String, Arc<dyn Handler>)>> = RwLock::new(Vec::new());
+/// Each handler's [`Handler::survival_blocks`], by its mod's id.
+static SURVIVAL_BLOCKS: RwLock<BTreeMap<String, Vec<String>>> = RwLock::new(BTreeMap::new());
+/// The states of the blocks whose survival a handler decides, in the registry the generator
+/// numbers them by: made on the first question after a handler registers.
+static SURVIVAL: RwLock<Option<Arc<SurvivalStates>>> = RwLock::new(None);
+/// Whether any registered handler decides some blocks' survival: the generator's question costs
+/// one load when none does.
+static ANY_SURVIVAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Which states of `registry` (by address) have their survival decided by a mod's code.
+struct SurvivalStates {
+    registry: usize,
+    states: Vec<bool>,
+}
 static BLOCKS: RwLock<Option<&'static BlockRegistry>> = RwLock::new(None);
 static NAMES: RwLock<Option<Arc<Names>>> = RwLock::new(None);
 
@@ -143,9 +169,16 @@ fn tag_name(tag: &str) -> String {
 
 /// Registers mod `id`'s handler, replacing one it registered before (a resource reload asks again).
 pub fn register(id: &str, handler: Arc<dyn Handler>) {
-    let mut handlers = HANDLERS.write().unwrap_or_else(|e| e.into_inner());
-    handlers.retain(|(other, _)| other != id);
-    handlers.push((id.to_owned(), handler));
+    let survival = handler.survival_blocks();
+    {
+        let mut handlers = HANDLERS.write().unwrap_or_else(|e| e.into_inner());
+        handlers.retain(|(other, _)| other != id);
+        handlers.push((id.to_owned(), handler));
+    }
+    let mut blocks = SURVIVAL_BLOCKS.write().unwrap_or_else(|e| e.into_inner());
+    blocks.insert(id.to_owned(), survival);
+    *SURVIVAL.write().unwrap_or_else(|e| e.into_inner()) = None;
+    ANY_SURVIVAL.store(blocks.values().any(|b| !b.is_empty()), std::sync::atomic::Ordering::Release);
 }
 
 /// The block registry states are named from for mods' code: the generator's.
@@ -181,6 +214,45 @@ pub(crate) fn feature(kind: &str, json: &str) -> Option<Result<Arc<dyn Feature>,
 /// `json` describes, or why the mod's codec refused it; `None` where no mod registered the type.
 pub fn biome_modifier(kind: &str, json: &str) -> Option<Result<Arc<dyn BiomeModifier>, String>> {
     handlers().iter().find_map(|h| h.biome_modifier(kind, json))
+}
+
+/// The states of `registry` whose survival a registered handler decides.
+fn survival_states(registry: &'static BlockRegistry) -> Arc<SurvivalStates> {
+    let address = std::ptr::from_ref(registry) as usize;
+    if let Some(known) = SURVIVAL.read().unwrap_or_else(|e| e.into_inner()).as_ref().filter(|k| k.registry == address) {
+        return known.clone();
+    }
+    let claimed = SURVIVAL_BLOCKS.read().unwrap_or_else(|e| e.into_inner());
+    let blocks: std::collections::BTreeSet<&str> = claimed.values().flatten().map(String::as_str).collect();
+    let states = (0..registry.len())
+        .map(|id| registry.state(BlockStateId(id as u32)).is_some_and(|state| blocks.contains(state.name.as_str())))
+        .collect();
+    let made = Arc::new(SurvivalStates { registry: address, states });
+    *SURVIVAL.write().unwrap_or_else(|e| e.into_inner()) = Some(made.clone());
+    made
+}
+
+/// Whether `state` survives at `position` on `context`'s world by the code of the mod whose block
+/// it is (its `canSurvive`, which reads the world and writes nothing). `None` where no registered
+/// mod decides that block's survival, or its code leaves it to the block's own rule.
+pub(crate) fn survives<C: PlacementContext + ?Sized>(
+    context: &mut C,
+    state: BlockStateId,
+    position: [i32; 3],
+) -> Option<Result<bool, PlacementQueryError>> {
+    if !ANY_SURVIVAL.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    let registry = context.block_registry().or_else(|| *BLOCKS.read().unwrap_or_else(|e| e.into_inner()))?;
+    if !survival_states(registry).states.get(state.0 as usize).copied().unwrap_or(false) {
+        return None;
+    }
+    let text = state_text(registry, state)?;
+    let mut world = ContextWorld::new(context, |_, _, _, _| false);
+    handlers()
+        .iter()
+        .find_map(|h| h.survives(&mut world, &text, position))
+        .map(|r| r.map_err(PlacementQueryError::Failed))
 }
 
 /// A state as text, as [`World::block`] gives it.
@@ -651,6 +723,42 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(FeatureDefinition::from_json(r#"{"type": "foreign_test:other", "config": {}}"#).is_err());
+    }
+
+    /// A mod whose pipes survive only on stone (its block's `canSurvive`), and which tries to write
+    /// while it is asked.
+    struct StoneFooted;
+    impl Handler for StoneFooted {
+        fn placement(&self, _: &str, _: &str) -> Option<Result<Arc<dyn Placement>, String>> {
+            None
+        }
+        fn survival_blocks(&self) -> Vec<String> {
+            vec!["foreign_test:pipe".into()]
+        }
+        fn survives(&self, world: &mut dyn World, state: &str, position: [i32; 3]) -> Option<Result<bool, String>> {
+            if !state.starts_with("foreign_test:pipe") {
+                return None;
+            }
+            assert!(!world.set_block(position, "minecraft:stone", 3), "a survival question writes nothing");
+            let [x, y, z] = position;
+            Some(Ok(world.block([x, y - 1, z]).as_deref() == Some("minecraft:stone")))
+        }
+    }
+
+    /// The generator asks a mod whether its block survives where a feature would place it (what
+    /// `simple_block` and `would_survive` ask), and only about the blocks it claims: the mod's
+    /// code reads the world and decides; other blocks keep their own rules.
+    #[test]
+    fn a_mods_block_survives_where_its_code_says() {
+        register("foreign_test_survival", Arc::new(StoneFooted));
+        let mut grid = Grid { registry: registry(), blocks: HashMap::new(), writes: Vec::new(), placed: Vec::new() };
+        grid.blocks.insert([0, 63, 0], BlockStateId(1));
+        let pipe = BlockStateId(3);
+        assert!(matches!(survives(&mut grid, pipe, [0, 64, 0]), Some(Ok(true))));
+        assert!(matches!(survives(&mut grid, pipe, [7, 64, 7]), Some(Ok(false))));
+        assert!(matches!(survives(&mut grid, BlockStateId(2), [0, 64, 0]), Some(Ok(true))), "every state of a claimed block");
+        assert!(survives(&mut grid, BlockStateId(1), [0, 64, 0]).is_none(), "stone isn't the mod's");
+        assert!(grid.writes.is_empty());
     }
 
     /// A mod's feature that places a vanilla placed feature (Farmer's Delight's wild crops call
