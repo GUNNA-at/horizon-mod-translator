@@ -3071,6 +3071,35 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   lines reaching the host with each source's place, look, level, player and silence; a parsed
   results object). 335 compat, 15 translator, 16 game (`native_server`, `lan_actions`) tests pass.
   Another entity's `createCommandSourceStack` stays unmapped.
+- [x] 2026-11-05 `java.text.BreakIterator` (`breaks.rs`), and a stop for hooks stuck on what isn't
+  translated. Found in game: `/catnip config client` (working since the ids above) opens catnip's
+  config screen, which wraps its text with a line iterator; `next()` was unmapped, answered 0 and
+  never `DONE`, and the screen's loop hung the client. The pack's users: Create's `TooltipHelper`
+  and catnip's `FontHelper`/`ClientFontHelper` (item summaries), guideme's `LineBuilder`
+  (`preceding`), the Lucene copies in AE2's guide and Ars Nouveau (word, sentence, `isBoundary`,
+  `setText(CharacterIterator)`). Line, word and sentence iterators follow JDK 21's own rule sets
+  (`sun.text.resources.BreakIteratorRules`: line and word as a state machine over the rules'
+  character classes, longest match, format characters passed over; sentences by their lazy rules
+  with the JDK's lookahead point), characters the extended grapheme clusters of Unicode 15.0 (JDK
+  21's). An iterator finds its text's boundaries once, at `setText`, and walks them (`first`,
+  `last`, `next`, `next(n)`, `previous`, `following`, `preceding`, `isBoundary`, `current`, `clone`,
+  `getText`; vanilla's `IllegalArgumentException` for an offset off the text); a
+  `CharacterIterator` text keeps its own indexes (a mod's is read through its methods), and
+  `StringCharacterIterator` is mapped. The expected boundaries are the JDK's own output:
+  `tools/jdk_break_iterator_oracle.py --diff` runs the test's 194 cases through the JDK given and
+  prints the rows it breaks otherwise (0 with JDK 21; JDK 25 differs on one Devanagari conjunct,
+  Unicode 15.1). The guard: an unmapped call answers a stand-in, so any loop waiting for another
+  answer never ends. `api::call_nested` counts the calls nothing maps in the running hook (the
+  outermost `Rt::with_host`, which resets the count); past a million over ten seconds each throws
+  `java.lang.Error` naming the call, which `catch (Exception e)` doesn't stop, so the hook unwinds
+  and the game goes on. Code outside hooks (loading) is never stopped; with `HORIZON_COMPAT_TRACE`
+  a hook that made over 100,000 such calls says so, to measure how close real hooks come. Tests:
+  `breaks::tests::text_breaks_where_the_jdks_iterators_break_it` (194 rows: lines, words,
+  sentences, graphemes), `an_iterator_walks_its_boundaries_as_the_jdks_does`,
+  `text_given_as_a_character_iterator_breaks_in_its_indexes`,
+  `api::tests::a_hook_looping_on_an_unmapped_call_is_stopped`. 339 compat, 15 translator tests
+  pass. Still unmapped on that screen: `ModConfigs.getModConfigs`, `ModConfigSpec.getValues` (its
+  list of settings).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

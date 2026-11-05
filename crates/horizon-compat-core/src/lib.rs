@@ -246,6 +246,10 @@ pub struct Rt {
     keys: HashMap<String, &'static str>,
     /// The runtime's random stream (`RandomSource` without the game's own).
     pub random_state: u64,
+    /// Calls nothing maps that the hook running now (the outermost [`Rt::with_host`]) has made,
+    /// and when it made the first: what tells a hook stuck in a loop on a stand-in answer.
+    pub hook_misses: u64,
+    pub hook_first_miss: Option<std::time::Instant>,
 }
 
 impl Default for Rt {
@@ -291,6 +295,8 @@ impl Default for Rt {
             block_entity_meta: HashMap::default(),
             keys: HashMap::default(),
             random_state: 0x9E37_79B9_7F4A_7C15,
+            hook_misses: 0,
+            hook_first_miss: None,
         }
     }
 }
@@ -312,8 +318,16 @@ impl Rt {
         // mutably borrowed by this call; nothing else can reach it, and it is cleared after.
         let erased: &mut (dyn host::Host + 'static) = unsafe { std::mem::transmute(host) };
         let previous = self.host.replace(std::ptr::NonNull::from(erased));
+        if previous.is_none() {
+            (self.hook_misses, self.hook_first_miss) = (0, None);
+        }
         let r = f(self);
         self.host = previous;
+        // A hook that made many calls nothing maps: how close it came to being taken as stuck.
+        if previous.is_none() && self.hook_misses >= 100_000 && Rt::tracing() {
+            let secs = self.hook_first_miss.map_or(0.0, |t| t.elapsed().as_secs_f32());
+            eprintln!("horizon-compat: a hook made {} calls nothing maps in {secs:.1} s", self.hook_misses);
+        }
         r
     }
 

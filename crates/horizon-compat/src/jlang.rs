@@ -2002,6 +2002,8 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (o, _) if o.starts_with("org/apache/commons/lang3/mutable/Mutable") => return mutable(rt, o, name, desc, args),
         ("java/text/NumberFormat" | "java/text/DecimalFormat" | "java/text/Format", _) => return number_format(rt, name, desc, args),
+        ("java/text/BreakIterator", _) => return crate::breaks::call(rt, name, desc, args),
+        ("java/text/StringCharacterIterator" | "java/text/CharacterIterator", _) => return crate::breaks::string_iterator_call(rt, name, desc, args),
         // The root locale's symbols, which every format here prints with.
         ("java/text/DecimalFormatSymbols", n) => match n {
             "getInstance" => rt.new_object("java/text/DecimalFormatSymbols"),

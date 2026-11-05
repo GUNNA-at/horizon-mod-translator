@@ -110,7 +110,34 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         uncount(rt, up);
     }
     trace_unmapped(rt, key, args);
+    if runaway(rt) {
+        let secs = rt.hook_first_miss.map_or(0, |t| t.elapsed().as_secs());
+        let n = rt.hook_misses;
+        crate::jlang::throw_with(rt, "java/lang/Error", &format!("horizon-compat: {key} isn't translated, and this hook kept calling what isn't ({n} calls in {secs} s): a loop waiting on its stand-in answer"));
+        return r;
+    }
     chained(rt, key, args).unwrap_or(r)
+}
+
+/// Calls nothing maps, in one hook, past which the hook is taken to be stuck ([`runaway`]).
+const RUNAWAY_MISSES: u64 = 1_000_000;
+/// How long a hook goes on making such calls before it is taken to be stuck.
+const RUNAWAY_TIME: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether the hook running now (one call of the game's into the mod: a tick, a screen's frame)
+/// is stuck in a loop on what nothing maps: an unmapped call answers a stand-in (0, null), and a
+/// loop that waits for another answer (`while (it.next() != BreakIterator.DONE)`) never ends. Past
+/// [`RUNAWAY_MISSES`] such calls over [`RUNAWAY_TIME`], each throws `java.lang.Error`, which unwinds
+/// the mod's code to the hook's end, as a `catch (Exception e)` doesn't stop it: the game goes on
+/// without what the hook would have done, and the error names the call. Outside hooks (loading)
+/// there is no game to keep going.
+fn runaway(rt: &mut Rt) -> bool {
+    if rt.host().is_none() {
+        return false;
+    }
+    rt.hook_misses += 1;
+    let first = *rt.hook_first_miss.get_or_insert_with(std::time::Instant::now);
+    rt.hook_misses >= RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_TIME
 }
 
 /// What an unmapped method returning its own class gives back, so a builder chain
@@ -2364,6 +2391,44 @@ mod tests {
         call(&mut rt, "net/minecraft/Nope.x.()V", &[]);
         call(&mut rt, "net/minecraft/Nope.x.()V", &[]);
         assert_eq!(rt.unmapped["net/minecraft/Nope.x.()V"], 2);
+    }
+
+    /// A hook stuck in a loop on a call nothing maps (its stand-in answer never ends the loop) is
+    /// stopped with a `java.lang.Error` naming the call, once it has made a million such calls over
+    /// ten seconds; the next hook starts afresh, and code outside hooks (loading) is never stopped.
+    #[test]
+    fn a_hook_looping_on_an_unmapped_call_is_stopped() {
+        struct Game;
+        impl crate::host::Host for Game {
+            fn block_state(&self, _pos: [i32; 3]) -> String {
+                "minecraft:air".into()
+            }
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+                false
+            }
+        }
+        let key = "net/minecraft/Nope.next.()I";
+        let long_ago = || std::time::Instant::now().checked_sub(RUNAWAY_TIME).expect("a clock older than the limit");
+        let mut rt = Rt::new();
+        rt.hook_misses = RUNAWAY_MISSES;
+        rt.hook_first_miss = Some(long_ago());
+        call(&mut rt, key, &[]);
+        assert!(rt.thrown.is_none(), "loading is never stopped");
+        let mut game = Game;
+        rt.with_host(&mut game, |rt| {
+            call(rt, key, &[]);
+            assert!(rt.thrown.is_none(), "a hook's first unmapped calls answer their stand-in");
+            rt.hook_misses = RUNAWAY_MISSES - 1;
+            rt.hook_first_miss = Some(long_ago());
+            call(rt, key, &[]);
+            let e = rt.thrown.take().expect("a hook stuck on an unmapped call is stopped");
+            assert_eq!(rt.class_of(e), "java/lang/Error");
+            assert!(rt.str_of(rt.get_field(e, "message")).is_some_and(|m| m.contains(key)));
+        });
+        rt.with_host(&mut game, |rt| {
+            call(rt, key, &[]);
+            assert!(rt.thrown.is_none(), "the next hook starts afresh");
+        });
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod api_common;
 pub mod attachments;
 pub mod attributes;
 pub mod blocks;
+pub mod breaks;
 pub mod brigadier;
 pub mod codecs;
 pub mod command_args;
