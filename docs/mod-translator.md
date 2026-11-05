@@ -2716,6 +2716,24 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     once in the log (`generator_decoration::report_failure`); before, the failure only went to
     `DecorateStats`, which nothing reads, so a mod feature failing everywhere looked like a rare one.
     291 horizon-world tests pass.
+  - [x] 2026-11-05 Vanilla's value providers, natively (`horizon-compat/src/value_providers.rs`):
+    `IntProvider` (constant, uniform, biased to bottom, clamped, clamped normal, weighted list) and
+    `FloatProvider` (constant, uniform, clamped normal, trapezoid), as 1.21.1 has them. A mod makes
+    them in code (`UniformInt.of(2, 5)`) or reads them with `IntProvider.CODEC`,
+    `NON_NEGATIVE_CODEC`, `POSITIVE_CODEC`, `IntProvider.codec(min, max)` and `FloatProvider`'s, in
+    its feature configurations. `sample` draws from the random the mod holds (the generator's in
+    worldgen) with vanilla's draws in vanilla's order, so the stream goes on where vanilla's would.
+    `toString`, `getMinValue`/`getMaxValue`, `ConstantInt.ZERO` (`of(0)` is it), `UniformFloat.of`
+    refusing an empty range. The codecs write back what they read (a constant as its number) and
+    refuse with 1.21.1's messages (`Failed to parse either. First: Not a number: ...; Second: Max
+    must be at least min, ...`, `Value provider too high: 10 [11-11]`). Checked against a Java
+    oracle run on the vanilla Mojmapped 1.21.1 jar (`scratchpad/oracle-vp`: the installer's
+    `client-1.21.1-…-srg.jar` plus `-extra.jar` for `Bootstrap`; NeoForge's patched classes can't
+    bootstrap outside FML): three seeds of `LegacyRandomSource`, each provider's samples and the
+    stream's next long after them, bit for bit, the clamped normal ones through
+    `MarsagliaPolarGaussian`'s cached second value too. Tests:
+    `value_providers::tests::{int,float}_providers_draw_as_vanillas`,
+    `{int,float}_provider_codecs_read_and_write_as_vanillas`. 307 compat tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

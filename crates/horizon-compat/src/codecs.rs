@@ -181,6 +181,12 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/item/DyeColor", "CODEC") => native(rt, "dye_color"),
         ("net/neoforged/neoforge/common/ItemAbility", "CODEC") => native(rt, "item_ability"),
         ("net/minecraft/sounds/SoundEvent", "DIRECT_CODEC") => native(rt, "sound_event_direct"),
+        // Value providers: a number is a constant (`IntProvider.CODEC`), the bounded ones refuse a
+        // provider reaching outside (`NON_NEGATIVE_CODEC` from 0, `POSITIVE_CODEC` from 1).
+        ("net/minecraft/util/valueproviders/IntProvider", "CODEC") => native(rt, "int_provider"),
+        ("net/minecraft/util/valueproviders/IntProvider", "NON_NEGATIVE_CODEC") => native(rt, "int_provider/0/2147483647"),
+        ("net/minecraft/util/valueproviders/IntProvider", "POSITIVE_CODEC") => native(rt, "int_provider/1/2147483647"),
+        ("net/minecraft/util/valueproviders/FloatProvider", "CODEC") => native(rt, "float_provider"),
         ("net/minecraft/world/level/block/state/BlockState", "CODEC") => native(rt, "block_state"),
         // Ore targets and the rule tests they're made of (`OreConfiguration.TargetBlockState.CODEC`,
         // `RuleTest.CODEC`: by `predicate_type`).
@@ -1011,6 +1017,7 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
         }
         "dye_color" => Nbt::String(serialized_name(rt, v)?),
         "item_ability" => Nbt::String(rt.str_of(rt.get_field(v, "name")).ok_or("Not an item ability")?.to_owned()),
+        n if n.starts_with("int_provider") || n.starts_with("float_provider") => crate::value_providers::write(rt, v)?,
         // `{sound_id, range}`, the range only when fixed.
         "sound_event_direct" => {
             let id = crate::sounds::sound_id(rt, v).ok_or("Not a sound event")?;

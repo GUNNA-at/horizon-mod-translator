@@ -68,6 +68,7 @@ pub mod vanilla_shapes;
 pub mod vanilla_sounds;
 pub mod vanilla_tag_keys;
 pub mod vanilla_tags;
+pub mod value_providers;
 pub mod worldgen;
 
 // BEGIN RUNTIME HELPERS: bundles inline this part of the root into their `compat` module too.

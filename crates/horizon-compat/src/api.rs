@@ -651,7 +651,7 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 46] = [
+const CHAIN: [Module; 47] = [
     mutable_pos,
     crate::worldgen::call,
     crate::mixin::call,
@@ -675,6 +675,7 @@ const CHAIN: [Module; 46] = [
     crate::creative::call,
     crate::functions::call,
     crate::gamerules::call,
+    crate::value_providers::call,
     crate::nightconfig::call,
     crate::rotation::call,
     crate::blocks::call,
@@ -703,7 +704,7 @@ const CHAIN: [Module; 46] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 46] = [
+const CLAIMS: [Claims; 47] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::worldgen::claims,
     crate::mixin::claims,
@@ -727,6 +728,7 @@ const CLAIMS: [Claims; 46] = [
     crate::creative::claims,
     crate::functions::claims,
     crate::gamerules::claims,
+    crate::value_providers::claims,
     crate::nightconfig::claims,
     crate::rotation::claims,
     crate::blocks::claims,
@@ -1802,6 +1804,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::tanks::get_static(rt, o, f))
             .or_else(|| crate::creative::get_static(rt, o, f))
             .or_else(|| crate::gamerules::get_static(rt, o, f))
+            .or_else(|| crate::value_providers::get_static(rt, o, f))
             .or_else(|| crate::nightconfig::get_static(rt, o, f))
             .or_else(|| crate::codecs::get_static(rt, o, f))
             .or_else(|| crate::recipes::get_static(rt, o, f))

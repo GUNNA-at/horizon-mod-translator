@@ -1302,6 +1302,7 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
         }
         "rule_test" | "target_block_state" | "ore_configuration" | "random_patch_configuration" | "placed_feature" | "placed_feature_direct" => crate::worldgen::decode_native(rt, name, j),
         n if n.starts_with("holder_set/") => crate::worldgen::decode_native(rt, name, j),
+        n if n.starts_with("int_provider") || n.starts_with("float_provider") => crate::value_providers::decode(rt, n, j),
         other => Err(format!("{other} is not read yet")),
     }
 }
