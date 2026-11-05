@@ -1141,6 +1141,16 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             "INTERACTIONS" => Some(cauldron_maps(rt)),
             _ => None,
         },
+        // Every colour at its id, as `MapColor`'s constructor files them (64 slots).
+        MAP_COLOR if field == "MATERIAL_COLORS" => Some(rt.intern(format!("const/{MAP_COLOR}.MATERIAL_COLORS"), |rt| {
+            let mut colors = vec![V::NULL; 64];
+            for (id, c) in MAP_COLORS.iter().enumerate() {
+                let o = named(rt, MAP_COLOR, c);
+                rt.put_field(o, "id", V::I(id as i32));
+                colors[id] = o;
+            }
+            rt.alloc("[Lnet/minecraft/world/level/material/MapColor;", crate::Data::Array(colors))
+        })),
         MAP_COLOR => {
             let id = MAP_COLORS.iter().position(|c| *c == field)?;
             let o = named(rt, MAP_COLOR, MAP_COLORS[id]);
@@ -2015,6 +2025,10 @@ mod tests {
         let p = props(&mut rt);
         let metal = api::get_static(&mut rt, "net/minecraft/world/level/block/SoundType.METAL");
         let color = api::get_static(&mut rt, "net/minecraft/world/level/material/MapColor.COLOR_ORANGE");
+        // Mekanism looks colours up by id in `MATERIAL_COLORS`: orange is 15, the same constant.
+        let all = api::get_static(&mut rt, "net/minecraft/world/level/material/MapColor.MATERIAL_COLORS");
+        let ids = crate::jutil::elements(&rt, all);
+        assert_eq!((ids.len(), ids[15], ids[63]), (64, color, V::NULL));
         let k = |s: &str| -> &'static str { Box::leak(format!("{BLOCK_PROPERTIES}.{s}").into_boxed_str()) };
         let q = api::call(&mut rt, k("strength.(FF)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;"), &[p, V::F(3.0), V::F(6.0)]);
         assert_eq!(q, p);

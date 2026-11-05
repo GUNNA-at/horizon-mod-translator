@@ -207,6 +207,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
             V::Void
         }
+        // A block capability other blocks may hand on (NeoForge's proxies): queries here always
+        // reach the block's own provider, so there is nothing to mark.
+        (EVENT, "setProxyable") => V::Void,
         (EVENT, "registerItem") => {
             for i in crate::jutil::elements(rt, a(3)) {
                 let n = item_name(rt, i);

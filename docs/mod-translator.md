@@ -1870,6 +1870,19 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       `X2YMaps`) walk the map's typed entry set; `Collections.singletonMap`.
     Tests `blocks::tests::a_mod_blocks_reads_of_vanillas_answer_as_vanilla`,
     `jutil::tests::fastutil_int_maps_and_sets_walk_as_in_java`.
+  - [x] 2026-11-05 Stream codecs of the game's that aren't modelled (`DyeColor.STREAM_CODEC`,
+    `CustomData.STREAM_CODEC`, `ItemEnchantments.STREAM_CODEC`...): the class's codec over the wire
+    (`OPTIONAL_STREAM_CODEC` takes `OPTIONAL_CODEC`, else `CODEC`), as
+    `ByteBufCodecs.fromCodecWithRegistries` sends it. Both ends of Horizon run the same runtime,
+    so they read it alike; it is not vanilla's byte layout, which only a vanilla peer would need
+    (and it can't run the mod anyway). A class with no modelled codec either stays a miss under
+    the stream codec's name. `ByteBufCodecs.VECTOR3F` and `QUATERNIONF` write their floats.
+    Small ones: `MapColor.MATERIAL_COLORS` (each colour at its id), `FastColor.as8BitChannel`,
+    `TranslatableContents.isAllowedPrimitiveArgument`, NeoForge's
+    `ModelResourceLocation.standalone`, `BuiltInLootTables.register`, `LazyLoadedValue`,
+    `RegisterCapabilitiesEvent.setProxyable` (queries always reach the block's own provider).
+    Tests `network::tests::a_classs_stream_codec_falls_back_to_its_codec`,
+    `blocks::tests::properties_keep_what_a_declaration_needs`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

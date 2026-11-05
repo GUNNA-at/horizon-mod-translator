@@ -124,6 +124,9 @@ const UUID: &str = "compat:stream/uuid";
 const LOCATION: &str = "compat:stream/location";
 const DIRECTION: &str = "compat:stream/direction";
 const VEC3: &str = "compat:stream/vec3";
+/// JOML's `Vector3f` and `Quaternionf`: their floats in order.
+const VECTOR3F: &str = "compat:stream/vector3f";
+const QUATERNIONF: &str = "compat:stream/quaternionf";
 const STACK: &str = "compat:stream/stack";
 const STACKS: &str = "compat:stream/stacks";
 const CONTENTS: &str = "compat:stream/container-contents";
@@ -148,6 +151,11 @@ fn lazy_codec(rt: &mut Rt, lazy: V) -> V {
         o.data = Data::Array(vec![supplier, made]);
     }
     made
+}
+
+/// `ByteBufCodecs.fromCodecWithRegistries(codec)`: the value as the tag `codec` writes.
+pub(crate) fn from_codec(rt: &mut Rt, codec: V) -> V {
+    make(rt, FROM_CODEC, vec![codec])
 }
 
 /// One object per codec constant, as Minecraft's are.
@@ -179,6 +187,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             "BYTE_ARRAY" => BYTES,
             "TAG" | "TRUSTED_TAG" | "COMPOUND_TAG" | "TRUSTED_COMPOUND_TAG" => TAG,
             "OPTIONAL_COMPOUND_TAG" | "TRUSTED_OPTIONAL_COMPOUND_TAG" => OPTIONAL_TAG,
+            "VECTOR3F" => VECTOR3F,
+            "QUATERNIONF" => QUATERNIONF,
             _ => return None,
         },
         ("net/minecraft/core/BlockPos", "STREAM_CODEC") => BLOCK_POS,
@@ -914,6 +924,13 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
             put_var(rt, buf, o as u64);
         }
         VEC3 => put_vec3(rt, buf, value),
+        VECTOR3F | QUATERNIONF => {
+            let fields: &[&'static str] = if rt.class_of(c) == VECTOR3F { &["x", "y", "z"] } else { &["x", "y", "z", "w"] };
+            for &f in fields {
+                let x = rt.get_field(value, f).f();
+                put(rt, buf, &x.to_be_bytes());
+            }
+        }
         STACK => put_stack(rt, buf, value),
         STACKS => {
             let items = crate::jutil::elements(rt, value);
@@ -1103,6 +1120,16 @@ fn decode_native(rt: &mut Rt, c: V, buf: V) -> Option<V> {
             crate::api_common::direction(rt, i64::from(o))
         }
         VEC3 => read_vec3(rt, buf)?,
+        VECTOR3F | QUATERNIONF => {
+            let (class, fields): (&'static str, &[&'static str]) =
+                if rt.class_of(c) == VECTOR3F { ("org/joml/Vector3f", &["x", "y", "z"]) } else { ("org/joml/Quaternionf", &["x", "y", "z", "w"]) };
+            let o = rt.new_object(class);
+            for &f in fields {
+                let x = f32::from_be_bytes(take_n(rt, buf)?);
+                rt.put_field(o, f, V::F(x));
+            }
+            o
+        }
         STACK => read_stack(rt, buf)?,
         STACKS => {
             let n = read_count(rt, buf)?;
@@ -1789,6 +1816,35 @@ mod tests {
         let (bytes, back) = round_trip(&mut rt, s, text);
         assert_eq!(bytes, vec![3, b'h', 0xC3, 0xA9]);
         assert_eq!(rt.str_of(back), Some("hé"));
+    }
+
+    /// A stream codec of the game's not modelled here (`DyeColor.STREAM_CODEC`) sends what its
+    /// class's codec writes and reads it back; JOML's vectors go as their floats.
+    #[test]
+    fn a_classs_stream_codec_falls_back_to_its_codec() {
+        let mut rt = Rt::new();
+        crate::install();
+        fn vcall(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+            crate::api::call(rt, key, args)
+        }
+        rt.vcall = Some(vcall);
+        let codec = sv(&mut rt, "net/minecraft/world/item/DyeColor.STREAM_CODEC");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        let red = sv(&mut rt, "net/minecraft/world/item/DyeColor.RED");
+        assert_eq!(round_trip(&mut rt, codec, red).1, red);
+        // Without a codec of its class either, it is a miss of its own name.
+        sv(&mut rt, "net/minecraft/world/item/JukeboxSong.STREAM_CODEC");
+        assert_eq!(rt.unmapped.keys().copied().collect::<Vec<_>>(), ["net/minecraft/world/item/JukeboxSong.STREAM_CODEC"]);
+
+        let v3 = sv(&mut rt, "net/minecraft/network/codec/ByteBufCodecs.VECTOR3F");
+        let v = rt.new_object("org/joml/Vector3f");
+        for (f, x) in [("x", 1.0f32), ("y", -2.5), ("z", 0.25)] {
+            rt.put_field(v, f, V::F(x));
+        }
+        let (bytes, back) = round_trip(&mut rt, v3, v);
+        assert_eq!(bytes[..4], 1.0f32.to_be_bytes());
+        assert_eq!(bytes.len(), 12);
+        assert_eq!([rt.get_field(back, "x"), rt.get_field(back, "y"), rt.get_field(back, "z")], [V::F(1.0), V::F(-2.5), V::F(0.25)]);
     }
 
     /// `ResourceKey.streamCodec(registry)` as a mod's class file calls it, through the dispatcher:

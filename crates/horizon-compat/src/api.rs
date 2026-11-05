@@ -1861,6 +1861,33 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             let n = format!("minecraft:{}", k.rsplit('.').next().unwrap_or("").to_ascii_lowercase());
             block(rt, &n)
         }
+        // A stream codec of the game's this runtime doesn't model (`DyeColor.STREAM_CODEC`): the
+        // class's codec over the wire, as `ByteBufCodecs.fromCodecWithRegistries` sends it; both
+        // ends of Horizon read it alike. `OPTIONAL_STREAM_CODEC` takes `OPTIONAL_CODEC`, else
+        // `CODEC`. A class whose codec isn't modelled either is a miss of its stream codec.
+        k if (k.starts_with("net/minecraft/") || k.starts_with("net/neoforged/")) && k.ends_with("STREAM_CODEC") => {
+            let id = format!("compat:stream-of/{k}");
+            if let Some(&c) = rt.interned.get(&id) {
+                return c;
+            }
+            let (class, field) = k.rsplit_once('.').unwrap_or((k, ""));
+            let prefix = field.strip_suffix("STREAM_CODEC").unwrap_or("");
+            for name in [format!("{prefix}CODEC"), "CODEC".to_owned()] {
+                let ck = rt.static_key(&format!("{class}.{name}"));
+                let since = crate::misses();
+                let codec = get_static(rt, ck);
+                if crate::missed_since(ck, since) {
+                    uncount(rt, ck);
+                } else if codec.r() != 0 {
+                    let made = crate::network::from_codec(rt, codec);
+                    rt.interned.insert(id, made);
+                    return made;
+                }
+            }
+            crate::miss(rt, key);
+            let unknown = crate::codecs::native(rt, &format!("unmodelled/{k}"));
+            crate::network::from_codec(rt, unknown)
+        }
         // A codec of the game's this runtime doesn't model yet (`FoodProperties.DIRECT_CODEC`): still
         // a miss, but a codec, so what a mod builds on it stays whole; reading with it fails.
         k if (k.starts_with("net/minecraft/") || k.starts_with("net/neoforged/"))

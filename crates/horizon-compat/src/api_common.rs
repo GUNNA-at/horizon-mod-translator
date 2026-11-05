@@ -1024,6 +1024,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     {
         return Some(V::I(c));
     }
+    // `FastColor.as8BitChannel(f)`: `Mth.floor(f * 255)`.
+    if owner == "net/minecraft/util/FastColor" && name == "as8BitChannel" {
+        let f = args.first().copied().unwrap_or_default().f() * 255.0;
+        return Some(V::I(f.floor() as i32));
+    }
     // `CropBlock`'s own age (a mod crop's `super.getAgeProperty()`): `AGE_7`, up to 7.
     if owner == "net/minecraft/world/level/block/CropBlock" {
         match name {
@@ -1043,6 +1048,39 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     const BASE: &str = "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase";
     const HOLDER: &str = "net/minecraft/world/level/block/state/StateHolder";
     Some(match (owner, name) {
+        // What a translation may take as an argument as it is (a number, a boolean, a string);
+        // anything else becomes a component.
+        ("net/minecraft/network/chat/contents/TranslatableContents", "isAllowedPrimitiveArgument") => {
+            let c = rt.class_of(a(0));
+            let number = matches!(
+                c,
+                "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Float" | "java/lang/Double" | "java/math/BigInteger" | "java/math/BigDecimal"
+            );
+            V::I((number || matches!(c, "java/lang/Boolean" | "java/lang/String")) as i32)
+        }
+        // NeoForge's `ModelResourceLocation.standalone(id)`: the model at `id` itself.
+        ("net/minecraft/client/resources/model/ModelResourceLocation", "standalone") => {
+            let variant = rt.string("standalone");
+            crate::records::make(rt, "net/minecraft/client/resources/model/ModelResourceLocation", &[a(0), variant])
+        }
+        // `BuiltInLootTables.register(key)` adds a table's key to vanilla's set and answers it.
+        ("net/minecraft/world/level/storage/loot/BuiltInLootTables", "register") => a(0),
+        // `LazyLoadedValue(supplier)`: the supplier asked once, at the first `get()`.
+        ("net/minecraft/util/LazyLoadedValue", "<init>") => {
+            rt.put_field(a(0), "$supplier", a(1));
+            V::Void
+        }
+        ("net/minecraft/util/LazyLoadedValue", "get") => match rt.get_field(a(0), "$value") {
+            V::Void => {
+                let s = rt.get_field(a(0), "$supplier");
+                let v = rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", s, &[]);
+                if rt.thrown.is_none() {
+                    rt.put_field(a(0), "$value", v);
+                }
+                v
+            }
+            v => v,
+        },
         // Flywheel's mixins onto vanilla types (`flywheel$setVisualizer`...): its instancing is off
         // (`VisualizationManager.supportsVisualization` is false), so they keep nothing.
         // Flywheel's `TransformStack.of(poseStack)`: its own wrapper over the stack.
