@@ -7,7 +7,11 @@
 //! player's plain items: count, take, give. They act on the server's own
 //! players (the hub's: a dedicated server's, a LAN host's, single player's
 //! server thread's), never on a client's.
-use super::{Dim, Game, commands::execute, lan::LanHost};
+use super::{
+    Dim, Game,
+    commands::{Target, execute},
+    lan::LanHost,
+};
 use horizon_client::{items::ItemStack, lan::data::component_nbt, text::Text};
 use horizon_protocol::packets::play::{self, Clientbound as C};
 use serde_json::{Map, Value, json};
@@ -521,6 +525,73 @@ impl Game<'_> {
         let ok = self.as_console(|g| g.run_command(line));
         self.command_source = outer;
         ok
+    }
+    /// Runs `line` (no slash) for a mod as `Commands.performPrefixedCommand`
+    /// runs it with the mod's source: at `at` (None: the server's own
+    /// source, at the world's spawn in the overworld), facing `rot` (yaw,
+    /// pitch), at operator level `permission`, as the player `player` (by
+    /// UUID; None for no entity), its output dropped when `silent`, else
+    /// sent to that player. Vanilla's commands, and another mod's that
+    /// `native_register_commands` registered (`native_perform_command`, for
+    /// a player). A player not in place runs it in their own turn, as their
+    /// typed command; inside a hook only the acting player, or no entity,
+    /// can be the source, and the other players are out of reach of its
+    /// selectors. Whether it ran without failing. API @API:run_command_as@.
+    pub(super) fn native_run_command_as(
+        &mut self,
+        line: &str,
+        player: Option<u128>,
+        permission: u8,
+        at: Option<[f64; 3]>,
+        rot: [f32; 2],
+        silent: bool,
+    ) -> bool {
+        let run = |game: &mut Self, entity: Option<Target>| {
+            let source = execute::Source {
+                entity,
+                pos: at.unwrap_or_else(|| game.server_position()),
+                rot,
+                silent,
+                dimension: if at.is_some() {
+                    game.dim
+                } else {
+                    Dim::Overworld
+                },
+                ..game.server_source()
+            };
+            let level = std::mem::replace(&mut game.ui.registries.permission, permission);
+            let ok = game.with_source(source, |game| {
+                // Another mod's command, for the player in place.
+                let acting = game.lan_acting.filter(|_| entity.is_some());
+                acting.is_some_and(|conn| game.perform_native_command(conn, permission, line))
+                    || game.run_command(line)
+            });
+            game.ui.registries.permission = level;
+            ok
+        };
+        match player {
+            _ if self.lan.is_none() && self.lan_acting.is_none() => false,
+            None => run(self, None),
+            Some(uuid) if self.lan_acting.is_some() => {
+                self.lan_acting_uuid == Some(uuid) && run(self, Some(Target::Player))
+            }
+            Some(uuid) => {
+                let Some(host) = &self.lan else { return false };
+                let integrated = host.hub.config.integrated;
+                let conn = host
+                    .hub
+                    .guests
+                    .iter()
+                    .find(|g| g.placed && g.uuid == uuid)
+                    .map(|g| g.conn);
+                conn.and_then(|conn| {
+                    self.guest_command_turn(conn, integrated, |game| {
+                        run(game, Some(Target::Player))
+                    })
+                })
+                .unwrap_or(false)
+            }
+        }
     }
     /// The open world's folder (`world/`, beside its `level.dat`): a server
     /// mod keeps its data in a folder of its own there, so the world's

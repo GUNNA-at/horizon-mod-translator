@@ -352,7 +352,14 @@ fn nbt_conversions(c: &str) -> String {
 /// game's mod message channel.
 /// A server host's sounds and particles: for the players near them in the level the game holds.
 fn server_effects(c: &str) -> String {
-    format!(r#"        fn play_sound(&mut self, s: &{c}::host::Sound) {{
+    format!(r#"        fn run_command(&mut self, run: &{c}::host::CommandRun) -> bool {{
+            self.game.native_run_command_as(&run.line, run.player, run.permission, run.at, run.rot, run.silent)
+        }}
+        fn player_permission(&self, uuid: u128) -> Option<u8> {{
+            let acting = self.game.native_acting_player().filter(|p| p.uuid == uuid);
+            acting.or_else(|| self.game.native_server_players().into_iter().find(|p| p.uuid == uuid)).map(|p| p.permission)
+        }}
+        fn play_sound(&mut self, s: &{c}::host::Sound) {{
             self.game.native_level_sound(&s.event, s.at, s.source, s.volume, s.pitch);
         }}
         fn particles(&mut self, p: &{c}::host::Particles) {{

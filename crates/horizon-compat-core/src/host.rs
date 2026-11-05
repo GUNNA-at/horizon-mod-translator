@@ -347,6 +347,11 @@ pub trait Host {
     fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
         None
     }
+    /// The operator level (0 to 4) of the player `uuid`, as their command source has it; None for
+    /// a player not here.
+    fn player_permission(&self, _uuid: u128) -> Option<u8> {
+        None
+    }
     /// The collision boxes of the block at `pos` as the game has them (`BlockState.getCollisionShape`
     /// with the empty context), each relative to the block's corner; None when the game can't say.
     fn collision_boxes(&self, _pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
@@ -378,6 +383,12 @@ pub trait Host {
     /// A line of a mod's command's answer (`CommandSourceStack.sendSuccess`, `sendFailure`), for
     /// whoever ran it, as vanilla commands' feedback: `component` is vanilla's JSON text.
     fn command_feedback(&mut self, _component: &str) {}
+    /// Runs a command line of the game's own (vanilla's commands, or another bundle's mod's) for
+    /// a mod, as `Commands.performPrefixedCommand` runs it with the mod's source: false when it
+    /// failed or the host runs none.
+    fn run_command(&mut self, _run: &CommandRun) -> bool {
+        false
+    }
     /// The name of the server's player `uuid` (a selector naming them), when they are on.
     fn player_name(&self, _uuid: u128) -> Option<String> {
         None
@@ -655,6 +666,20 @@ pub struct Particles {
     pub force: bool,
     /// `addAlwaysVisibleParticle`: drawn at the lowest particle setting too.
     pub always: bool,
+}
+
+/// A command line a mod runs ([`Host::run_command`]) and what its source says: where it runs (None
+/// for the server's own source, at the world's spawn in the overworld) and faces (yaw, pitch), its
+/// operator level, the player it is (by UUID; None for no entity), and whether its output is
+/// dropped (`withSuppressedOutput`, `CommandSource.NULL`, the server's own log).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandRun {
+    pub line: String,
+    pub at: Option<[f64; 3]>,
+    pub rot: [f32; 2],
+    pub permission: u8,
+    pub player: Option<u128>,
+    pub silent: bool,
 }
 
 /// A sound a mod plays ([`Host::play_sound`]).

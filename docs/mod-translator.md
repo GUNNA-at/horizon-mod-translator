@@ -3050,6 +3050,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   `jlang::java_compare` is `String.compareTo` for both. Test:
   `neo::tests::ids_are_checked_read_compared_and_keyed_as_vanilla_does`. 334 compat tests pass.
   Still the string's: `hashCode` and a sort through `Comparable` (ids are strings in the runtime).
+- [x] 2026-11-05 Mods run command lines as `Commands.performPrefixedCommand` does (14 mods: Create's
+  `HighlightCommand`, AE2's spatial storage, Carry On, FramedBlocks' signs, MCreator procedures...),
+  with the sources they make: `server.getCommands()` (20), the server's own source
+  `createCommandSourceStack()` (10: level 4, at the world's spawn in the overworld, what it is
+  told goes to the server's log, never to the chat of the player whose command is running; on the
+  console it is the console's answer), a player's own `createCommandSourceStack()` (9: where they
+  stand and look, at their operator level), `performCommand(results, line)` for results a mod
+  parsed. A line one of the bundle's roots begins runs on the mods' tree with that source; any
+  other goes to the host, `Host::run_command(CommandRun)` (line, place or the server's, look,
+  level, player, silence) → the game's new `native_run_command_as` (API fragment
+  `run_command_as`): vanilla's commands, or another bundle's registered one for the player in
+  place (`perform_native_command`), at the source's level. A player not in place runs it in their
+  own command turn (`guest_command_turn`, taken out of `run_guest_command`: their state swapped in,
+  the hub back in place, their lines and admin feedback sent after), so its answer reaches them;
+  inside a hook only the acting player, or no entity, can be the source. `Host::player_permission`
+  gives a player's level (`native_acting_player`, `native_server_players`). Test:
+  `commands::tests::a_mods_lines_run_as_their_source` (the mods' own line as the player and as the
+  server, whose failure goes to the log, then to the console with no player in place; vanilla
+  lines reaching the host with each source's place, look, level, player and silence; a parsed
+  results object). 335 compat, 15 translator, 16 game (`native_server`, `lan_actions`) tests pass.
+  Another entity's `createCommandSourceStack` stays unmapped.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

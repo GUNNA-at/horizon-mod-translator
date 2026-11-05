@@ -2925,29 +2925,46 @@ impl Game<'_> {
     /// One guest's command as that guest, its feedback sent to them; false
     /// when it failed (or the guest is gone).
     pub(super) fn run_guest_command(&mut self, c: GuestCommand) -> bool {
-        let Some(mut host) = self.lan.take() else {
-            return false;
-        };
-        let Some(swap) = self.enter_guest(&mut host, c.conn) else {
+        self.guest_command_turn(c.conn, c.integrated, |game| {
+            let level = std::mem::replace(&mut game.ui.registries.permission, c.permission);
+            let ok = if game.perform_native_command(c.conn, c.permission, &c.command) {
+                true
+            } else if c.quiet {
+                game.run_command_quietly(&c.command)
+            } else {
+                game.run_command(&c.command)
+            };
+            game.ui.registries.permission = level;
+            ok
+        })
+        .unwrap_or(false)
+    }
+
+    /// Runs `f` (a command) as the guest `conn`: their state swapped in,
+    /// the hub back in `self.lan` so the command reaches the other players
+    /// too, what it says captured. Then what it earned (effects, a teleport
+    /// into another level unless `integrated`, advancements) and its lines
+    /// go to the guest, and its admin feedback to the other operators. None
+    /// when the hub is out or the guest is gone.
+    pub(super) fn guest_command_turn<T>(
+        &mut self,
+        conn: u32,
+        integrated: bool,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> Option<T> {
+        let mut host = self.lan.take()?;
+        let Some(swap) = self.enter_guest(&mut host, conn) else {
             self.lan = Some(host);
-            return false;
+            return None;
         };
         self.lan = Some(host);
         self.chat_capture = Some(Vec::new());
-        let level = std::mem::replace(&mut self.ui.registries.permission, c.permission);
-        let ok = if self.perform_native_command(c.conn, c.permission, &c.command) {
-            true
-        } else if c.quiet {
-            self.run_command_quietly(&c.command)
-        } else {
-            self.run_command(&c.command)
-        };
-        self.ui.registries.permission = level;
+        let out = f(self);
         let lines = self.chat_capture.take().unwrap_or_default();
         let mut host = self.lan.take().expect("a command puts the hub back");
         self.leave_guest(&mut host, swap);
         host.hub.sync_all_effects();
-        if !c.integrated {
+        if !integrated {
             // A teleport into another level happens before its feedback is sent.
             self.run_level_teleports(&mut host);
         }
@@ -2955,7 +2972,7 @@ impl Game<'_> {
         self.announce_guest_advancements(&mut host);
         for line in lines {
             host.hub.send_to(
-                c.conn,
+                conn,
                 &C::SystemChat(play::SystemChat {
                     content: horizon_client::lan::data::component_nbt(&line.component()),
                     overlay: false,
@@ -2963,9 +2980,9 @@ impl Game<'_> {
             );
         }
         // The other operators hear of it; never the player whose command it was.
-        self.send_admin_feedback(&mut host, Some(c.conn));
+        self.send_admin_feedback(&mut host, Some(conn));
         self.lan = Some(host);
-        ok
+        Some(out)
     }
 
     /// The `broadcastToAdmins` lines a command queued (`source`: the guest

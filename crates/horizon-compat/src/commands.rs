@@ -44,6 +44,7 @@ const MC_ARGS: &str = "net/minecraft/commands/arguments/";
 const COORDINATES: &str = "net/minecraft/commands/arguments/coordinates/Coordinates";
 const SUGGESTIONS: &str = "net/minecraft/commands/SharedSuggestionProvider";
 const SELECTOR_PARSER: &str = "net/minecraft/commands/arguments/selector/EntitySelectorParser";
+const SERVER: &str = "net/minecraft/server/MinecraftServer";
 const SERVER_PLAYER: &str = "net/minecraft/server/level/ServerPlayer";
 const RUN: &str = "com/mojang/brigadier/Command.run.(Lcom/mojang/brigadier/context/CommandContext;)I";
 const TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
@@ -78,7 +79,10 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
                 | SELECTOR_PARSER
         )
         || is_read_value(owner)
-        || (owner == COMMANDS && matches!(name, "literal" | "argument" | "getDispatcher"))
+        || (owner == COMMANDS && matches!(name, "literal" | "argument" | "getDispatcher" | "performPrefixedCommand" | "performCommand"))
+        || (owner == SERVER && matches!(name, "getCommands" | "createCommandSourceStack"))
+        || (matches!(owner, SERVER_PLAYER | "net/minecraft/world/entity/player/Player" | "net/minecraft/world/entity/Entity")
+            && name == "createCommandSourceStack")
         || is_argument_type(owner)
         || (owner == "java/util/function/Predicate" && name == "test")
         || (owner == "com/mojang/brigadier/RedirectModifier" && name == "apply")
@@ -107,6 +111,34 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.put_field(b, "$type", a(1));
             new_children(rt, b);
             b
+        }
+        // `server.getCommands()`, and the server's own source (`createCommandSourceStack`: level 4,
+        // at the world's spawn; what it is told goes to the server's log).
+        (SERVER, "getCommands") => rt.intern("compat:commands-object".into(), |rt| rt.new_object(COMMANDS)),
+        (SERVER, "createCommandSourceStack") => {
+            let s = new_source(rt, None, 4, [0.0; 3], [0.0; 2]);
+            set(rt, s, "$console", V::I(1))
+        }
+        // A player's own source (`player.createCommandSourceStack()`): where they stand and look,
+        // at their level; what it is told goes to them. Another entity's stays unmapped.
+        (_, "createCommandSourceStack") if rt.instance_of(a(0), SERVER_PLAYER) => player_source(rt, a(0)),
+        (_, "createCommandSourceStack") => return None,
+        // A line a mod runs (with its slash or not), or results it parsed itself.
+        (COMMANDS, "performPrefixedCommand") => {
+            let line = rt.str_of(a(2)).unwrap_or("").to_owned();
+            run_for(rt, a(1), line.strip_prefix('/').unwrap_or(&line));
+            V::Void
+        }
+        (COMMANDS, "performCommand") => {
+            let line = rt.str_of(a(2)).unwrap_or("").to_owned();
+            match rt.interned.get(DISPATCHER_KEY).copied() {
+                Some(d) if owns(rt, d, &line) => perform_results(rt, a(1), &line),
+                _ => {
+                    let source = rt.get_field(rt.get_field(a(1), "$context"), "$source");
+                    run_on_host(rt, source, &line);
+                }
+            }
+            V::Void
         }
         // `server.getCommands().getDispatcher()`: the server's, once there is one.
         (COMMANDS, "getDispatcher") => match rt.interned.get(DISPATCHER_KEY) {
@@ -469,7 +501,7 @@ fn probe_source(rt: &mut Rt, level: u8) -> V {
 
 fn copy_source(rt: &mut Rt, s: V) -> V {
     let c = rt.new_object(SOURCE);
-    for field in ["$player", "$name", "$display", "$output", "$permission", "$x", "$y", "$z", "$yaw", "$pitch", "$silent"] {
+    for field in ["$player", "$name", "$display", "$output", "$permission", "$x", "$y", "$z", "$yaw", "$pitch", "$silent", "$console"] {
         let v = rt.get_field(s, field);
         if !matches!(v, V::Void) {
             rt.put_field(c, field, v);
@@ -595,7 +627,7 @@ fn source_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 /// A line of the command's answer to whoever ran it (not to a probe or a silenced source).
 fn feedback(rt: &mut Rt, source: V, component: V, failure: bool) {
-    if rt.get_field(source, "$silent").i() != 0 {
+    if rt.get_field(source, "$silent").i() != 0 || to_server_log(rt, source, component) {
         return;
     }
     // A mod's own output (a source it made): its `sendSystemMessage`.
@@ -614,6 +646,20 @@ fn feedback(rt: &mut Rt, source: V, component: V, failure: bool) {
     if let Some(h) = rt.host_mut() {
         h.command_feedback(&text);
     }
+}
+
+/// Whether `component` is the server's own source's line (the console's, `createCommandSourceStack`)
+/// while a player's command runs: it goes to the server's log, never to that player's chat. On the
+/// console it is the console's answer, and goes there.
+fn to_server_log(rt: &mut Rt, source: V, component: V) -> bool {
+    if rt.get_field(source, "$console").i() == 0 || !rt.host().is_some_and(|h| h.player_id().is_some()) {
+        return false;
+    }
+    if Rt::tracing() {
+        let json = message_json(rt, component);
+        eprintln!("horizon-compat: [Server] {}", json_text(&json));
+    }
+    true
 }
 
 /// A Brigadier message's text: a component, Brigadier's `LiteralMessage` or a string.
@@ -871,11 +917,72 @@ pub fn perform(rt: &mut Rt, player: Option<(u128, &str)>, permission: u8, at: [f
         return false;
     }
     let source = new_source(rt, player, permission, at, rot);
+    if player.is_none() {
+        rt.put_field(source, "$console", V::I(1));
+    }
     let root = root_of(rt, dispatcher);
     let parse = parse(rt, root, source, Reader::new(line));
     let results = results_object(rt, dispatcher, &parse);
     perform_results(rt, results, line);
     true
+}
+
+/// `Commands.performPrefixedCommand(source, line)` for a mod: a line one of the mods' roots begins
+/// runs on their tree, as a player's does; any other is the game's own command (or another
+/// bundle's), run for the source by the host.
+fn run_for(rt: &mut Rt, source: V, line: &str) {
+    if let Some(&dispatcher) = rt.interned.get(DISPATCHER_KEY)
+        && owns(rt, dispatcher, line)
+    {
+        let root = root_of(rt, dispatcher);
+        let parse = parse(rt, root, source, Reader::new(line));
+        let results = results_object(rt, dispatcher, &parse);
+        perform_results(rt, results, line);
+        return;
+    }
+    run_on_host(rt, source, line);
+}
+
+/// The game's own command `line`, run for `source` ([`crate::host::Host::run_command`]): its place,
+/// look, level and player, and whether its output is dropped (the server's own source's goes to
+/// its log, which the host doesn't keep).
+fn run_on_host(rt: &mut Rt, source: V, line: &str) {
+    let d = |rt: &Rt, f: &'static str| match rt.get_field(source, f) {
+        V::D(v) => v,
+        _ => 0.0,
+    };
+    let player = rt.get_field(source, "$player");
+    let console = rt.get_field(source, "$console").i() != 0;
+    let run = crate::host::CommandRun {
+        line: line.to_owned(),
+        at: (!console).then(|| [d(rt, "$x"), d(rt, "$y"), d(rt, "$z")]),
+        rot: [rt.get_field(source, "$yaw").f(), rt.get_field(source, "$pitch").f()],
+        permission: rt.get_field(source, "$permission").i().clamp(0, 4) as u8,
+        player: if player.r() != 0 { crate::network::player_uuid(rt, player) } else { None },
+        silent: rt.get_field(source, "$silent").i() != 0 || console,
+    };
+    let ran = rt.host_mut().is_some_and(|h| h.run_command(&run));
+    if !ran && Rt::tracing() {
+        eprintln!("horizon-compat: `{line}` (a mod's command line) didn't run");
+    }
+}
+
+/// `ServerPlayer.createCommandSourceStack()`: the player's source, where they stand and look (the
+/// acting player's look; another's is level), at their operator level.
+fn player_source(rt: &mut Rt, player: V) -> V {
+    let uuid = crate::network::player_uuid(rt, player).unwrap_or(0);
+    let acting = rt.host().and_then(|h| h.player_id()) == Some(uuid);
+    let (at, rot) = match rt.host() {
+        Some(h) if acting => h.player_place().map_or(([0.0; 3], [0.0; 2]), |(at, yaw, pitch)| (at, [yaw, pitch])),
+        Some(h) => (h.players().into_iter().find(|p| p.0 == uuid).map_or([0.0; 3], |p| p.1), [0.0; 2]),
+        None => ([0.0; 3], [0.0; 2]),
+    };
+    let permission = rt.host().and_then(|h| h.player_permission(uuid)).unwrap_or(0);
+    let name = rt.host().and_then(|h| h.player_name(uuid)).unwrap_or_default();
+    let s = new_source(rt, Some((uuid, &name)), permission, at, rot);
+    // The player object the mod holds is the source's.
+    rt.put_field(s, "$player", player);
+    s
 }
 
 /// Whether the first word of `line` is a root literal of `dispatcher`'s tree.
@@ -1352,6 +1459,12 @@ fn context_line(command: &str, input: &str, cursor: i32) -> serde_json::Value {
 /// its text.
 fn feedback_json(rt: &mut Rt, source: V, mut json: serde_json::Value) {
     if rt.get_field(source, "$silent").i() != 0 {
+        return;
+    }
+    if rt.get_field(source, "$console").i() != 0 && rt.host().is_some_and(|h| h.player_id().is_some()) {
+        if Rt::tracing() {
+            eprintln!("horizon-compat: [Server] {}", json_text(&json));
+        }
         return;
     }
     if rt.get_field(source, "$output").r() != 0 {
@@ -2370,6 +2483,138 @@ mod tests {
         let lines = chat_lines(&mut chat);
         assert_eq!(said(&lines), ["permissions.requires.player"]);
         assert_eq!(lines[0]["color"], "red");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A host that records the lines a mod hands the game, with an acting player who stands, looks
+    /// and has a level of their own.
+    #[derive(Default)]
+    struct Runner {
+        chat: Chat,
+        acting: Option<u128>,
+        runs: Vec<crate::host::CommandRun>,
+    }
+    impl crate::host::Host for Runner {
+        fn block_state(&self, _pos: [i32; 3]) -> String {
+            "minecraft:air".into()
+        }
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+            false
+        }
+        fn players(&self) -> Vec<(u128, [f64; 3])> {
+            self.chat.players()
+        }
+        fn player_name(&self, uuid: u128) -> Option<String> {
+            self.chat.player_name(uuid)
+        }
+        fn command_feedback(&mut self, component: &str) {
+            self.chat.command_feedback(component);
+        }
+        fn player_id(&self) -> Option<u128> {
+            self.acting
+        }
+        fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
+            self.acting.map(|_| ([10.5, 64.0, -3.5], 90.0, 10.0))
+        }
+        fn player_permission(&self, uuid: u128) -> Option<u8> {
+            self.chat.players.iter().find(|p| p.0 == uuid).map(|p| if p.2 == "Alex" { 2 } else { 0 })
+        }
+        fn run_command(&mut self, run: &crate::host::CommandRun) -> bool {
+            self.runs.push(run.clone());
+            true
+        }
+    }
+
+    /// `server.getCommands().performPrefixedCommand(source, line)`, as mods run a line: one of the
+    /// mods' own runs on their tree with that source; any other is the game's, handed to the host
+    /// with the source's place, look, level, player and silence. The server's own source
+    /// (`createCommandSourceStack`) is level 4 at the world's spawn, and what it is told goes to the
+    /// server's log, not to the player whose command is running; a player's own source is where
+    /// they stand and look, at their level. `performCommand` runs results a mod parsed itself.
+    #[test]
+    fn a_mods_lines_run_as_their_source() {
+        const SERVER_KEY: &str = "net/minecraft/server/MinecraftServer";
+        const GET_COMMANDS: &str = "net/minecraft/server/MinecraftServer.getCommands.()Lnet/minecraft/commands/Commands;";
+        const COMMANDS_DISPATCHER: &str = "net/minecraft/commands/Commands.getDispatcher.()Lcom/mojang/brigadier/CommandDispatcher;";
+        const SERVER_SOURCE: &str = "net/minecraft/server/MinecraftServer.createCommandSourceStack.()Lnet/minecraft/commands/CommandSourceStack;";
+        const PLAYER_SOURCE: &str = "net/minecraft/server/level/ServerPlayer.createCommandSourceStack.()Lnet/minecraft/commands/CommandSourceStack;";
+        const PREFIXED: &str = "net/minecraft/commands/Commands.performPrefixedCommand.(Lnet/minecraft/commands/CommandSourceStack;Ljava/lang/String;)V";
+        const PERFORM: &str = "net/minecraft/commands/Commands.performCommand.(Lcom/mojang/brigadier/ParseResults;Ljava/lang/String;)V";
+        const PARSE_LINE: &str = "com/mojang/brigadier/CommandDispatcher.parse.(Ljava/lang/String;Ljava/lang/Object;)Lcom/mojang/brigadier/ParseResults;";
+        const QUIET: &str = "net/minecraft/commands/CommandSourceStack.withSuppressedOutput.()Lnet/minecraft/commands/CommandSourceStack;";
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(lambdas);
+        rt.vcall = Some(vcall);
+        rt.overrides = Some(overrides);
+        let listener = rt.lambda_id("java/util/function/Consumer", 1, vec![]);
+        rt.listeners.push((EVENT.to_owned(), listener));
+        let (me, steve) = (0x11u128, 0x22u128);
+        let chat = Chat { players: vec![(me, [10.5, 64.0, -3.5], "Alex"), (steve, [0.0, 70.0, 0.0], "Steve")], ..Chat::default() };
+        let mut host = Runner { chat, acting: Some(me), ..Runner::default() };
+        rt.with_host(&mut host, register);
+        let server = rt.new_object(SERVER_KEY);
+        let alex = crate::menus::server_player(&mut rt, me);
+        let steve_player = crate::menus::server_player(&mut rt, steve);
+        rt.with_host(&mut host, |rt| {
+            let commands = c(rt, GET_COMMANDS, &[server]);
+            assert_eq!(c(rt, GET_COMMANDS, &[server]), commands, "the server's one");
+            let dispatcher = c(rt, COMMANDS_DISPATCHER, &[commands]);
+            assert_eq!(Some(&dispatcher), rt.interned.get(DISPATCHER_KEY));
+            let run = |rt: &mut Rt, source: V, line: &str| {
+                let l = rt.string(line);
+                c(rt, PREFIXED, &[commands, source, l]);
+                assert!(rt.thrown.is_none(), "{line}");
+            };
+            let console = c(rt, SERVER_SOURCE, &[server]);
+            let mine = c(rt, PLAYER_SOURCE, &[alex]);
+            let quiet = c(rt, QUIET, &[mine]);
+            let theirs = c(rt, PLAYER_SOURCE, &[steve_player]);
+            run(rt, console, "time set day");
+            run(rt, mine, "/give @s minecraft:stone 2");
+            run(rt, quiet, "tp @s ~ ~1 ~");
+            run(rt, theirs, "effect give @s minecraft:speed");
+            // The mods' own lines: as the player, then as the server (whose answer is the log's).
+            run(rt, mine, "/ruby say yo");
+            run(rt, console, "ruby say hi");
+            run(rt, mine, "ruby wipe");
+            // Results a mod parsed: its own line, then the game's.
+            for line in ["ruby give 3", "weather clear"] {
+                let l = rt.string(line);
+                let results = c(rt, PARSE_LINE, &[dispatcher, l, mine]);
+                c(rt, PERFORM, &[commands, results, l]);
+            }
+        });
+        let (runs, lines) = (std::mem::take(&mut host.runs), chat_lines(&mut host.chat));
+        let run = |line: &str, at: Option<[f64; 3]>, rot: [f32; 2], permission: u8, player: Option<u128>, silent: bool| crate::host::CommandRun {
+            line: line.to_owned(),
+            at,
+            rot,
+            permission,
+            player,
+            silent,
+        };
+        assert_eq!(
+            runs,
+            [
+                run("time set day", None, [0.0, 0.0], 4, None, true),
+                run("give @s minecraft:stone 2", Some([10.5, 64.0, -3.5]), [90.0, 10.0], 2, Some(me), false),
+                run("tp @s ~ ~1 ~", Some([10.5, 64.0, -3.5]), [90.0, 10.0], 2, Some(me), true),
+                run("effect give @s minecraft:speed", Some([0.0, 70.0, 0.0]), [0.0, 0.0], 0, Some(steve), false),
+                run("weather clear", Some([10.5, 64.0, -3.5]), [90.0, 10.0], 2, Some(me), false),
+            ]
+        );
+        // Alex's level (2) runs the operator's `wipe`; the server's `say` needs a player, and its
+        // failure went to the log.
+        assert_eq!(said(&lines), ["Alex says yo", "wiped", "gave 3"]);
+        // On the console (no player in place), the server's own answer is the console's.
+        host.acting = None;
+        rt.with_host(&mut host, |rt| {
+            let commands = c(rt, GET_COMMANDS, &[server]);
+            let console = c(rt, SERVER_SOURCE, &[server]);
+            let l = rt.string("ruby say hi");
+            c(rt, PREFIXED, &[commands, console, l]);
+        });
+        assert_eq!(said(&chat_lines(&mut host.chat)), ["permissions.requires.player"]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

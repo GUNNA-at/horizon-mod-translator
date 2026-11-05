@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "running a command line for a mod as a given source: a player, a place, a level, quiet or not (`native_run_command_as`).",
+  "doc_summary": "`native_run_command_as(line, player, permission, at, rot, silent)`: runs a command line as `Commands.performPrefixedCommand` runs it with a mod's source: at a place (None: the server's own source, at the world's spawn in the overworld), facing yaw and pitch, at an operator level, as a player by UUID (None for no entity), its output dropped when `silent`, else sent to that player. Vanilla's commands and other mods' registered ones; a player not in place runs it in their own turn, as their typed command. Inside a hook only the acting player, or no entity, can be the source. Returns whether it ran without failing. Translated bundles' `Commands.performPrefixedCommand` runs the game's commands through it: @API:run_command_as@.",
+  "comments": ["crates/horizon-client/src/game/native_server.rs"]
+}
