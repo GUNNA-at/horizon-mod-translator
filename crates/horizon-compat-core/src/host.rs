@@ -211,6 +211,24 @@ pub trait Host {
     fn biome_in_tag(&self, _biome: &str, _tag: &str) -> bool {
         false
     }
+    /// The ids holder set `set` names (its JSON: an id, `#tag`, a list, NeoForge's `any`, `or`,
+    /// `and` and `not` objects) in registry `registry` (`biome`, `placed_feature`), in order, as the
+    /// game's registries and tags hold them; None where the host keeps no registries.
+    fn holder_set(&self, _registry: &str, _set: &str) -> Option<Vec<String>> {
+        None
+    }
+    /// Biome `id`'s data (its JSON: `temperature`, `has_precipitation`...), where the host has the
+    /// biomes' data.
+    fn biome_json(&self, _id: &str) -> Option<String> {
+        None
+    }
+    /// `PlacedFeature.place(level, generator, random, pos)` from the mod's code: the placed feature
+    /// `json` (an object, or a name as a JSON string) placed at `pos` by the world generator, on
+    /// its region and the feature's random stream (the host's [`Host::random`]). Whether it placed
+    /// anything; an error where the host can't place features.
+    fn place_feature(&mut self, _json: &str, _pos: [i32; 3]) -> Result<bool, String> {
+        Err("no world generator to place a feature with".into())
+    }
     /// A raw write into the chunk section (`LevelChunkSection.setBlockState`, what features write
     /// through `BulkSectionAccess`): no neighbour updates, no heightmaps. Where the host keeps no
     /// sections apart, a plain `set_block_state`.

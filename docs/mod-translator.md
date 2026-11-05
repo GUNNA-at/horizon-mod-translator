@@ -2586,6 +2586,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Next: the other mods' feature types (Mekanism's `ResizableOreFeature`,
     `ResizableDiskReplaceFeature`, `OreRetrogenFeature`; Farmer's Delight's `WildCropFeature` and
     `WildRiceFeature`), and speeding up translated code in general (the dispatch above).
+  - [x] 2026-11-05 Stage 3: mods' own biome modifier types (Farmer's Delight's
+    `farmersdelight:add_features_by_filter`, which puts its wild crops in vanilla's biomes), and a
+    mod's feature placing vanilla placed features (FD's `WildCropFeature` places inline ones).
+    - Runtime (`horizon-compat/src/worldgen.rs`): `biome_modifier` reads a modifier file with the
+      codec the mod registered in `NeoForgeRegistries.BIOME_MODIFIER_SERIALIZERS`. `modify_biome`
+      runs the mod's `BiomeModifier.modify(biome, phase, builder)`. The biome is a
+      `Holder$Reference`; its `Biome` answers `getBaseTemperature` and `hasPrecipitation` from the
+      biome's file. The phase is `BiomeModifier$Phase`'s constant. The builder is NeoForge's
+      `BiomeInfo$Builder`; its `BiomeGenerationSettingsBuilder.addFeature`/`getFeatures` grow the
+      step lists up to the step used, as NeoForge's do.
+    - Holder sets (`Biome.LIST_CODEC`, `PlacedFeature.LIST_CODEC`, `RegistryCodecs.homogeneousList`)
+      decode to sets the host resolves (`Host::holder_set`). They answer `contains`, `size`, `get`,
+      `stream`, `iterator`, `forEach`, `getRandomElement` and `unwrapKey`. Also `PlacedFeature.CODEC`,
+      `DIRECT_CODEC`, and `PlacedFeature.place` (`Host::place_feature`).
+    - Generator (`horizon-world`): a mod feature's `PlacedFeature.place` places a vanilla or inline
+      placed feature through the generator (`PlacementContext::place_feature_json`). It draws from
+      the mod feature's own random stream (`CellRandom`), as in vanilla. Placed features made from
+      text are cached (`placed_json`).
+    - Content root (`horizon-client/src/mod_content_biomes.rs`): a modifier file whose type a
+      translated mod registers is read by that mod's codec and run by its code. Biome by biome, the
+      phases run in NeoForge's order (before everything, add, remove, modify, after everything),
+      with NeoForge's own `add_features`/`remove_features` types in the same pass. A tag the root
+      lacks is empty to the mod's code, as NeoForge's missing tags are, and is warned about. A placed
+      feature the root lacks (one that didn't port: 26.3 has no `random_patch`) is left out, also
+      with a warning. Biomes the code doesn't change keep their text.
+    - Port pack (`carry.rs`): the loader's convention biome tags a biome modifier names
+      (`#c:is_mushroom`) come along with the mod, as the structures' did.
+    - `ModifiableBiomeInfo$BiomeInfo$Builder` and `BiomeModifier$Phase` are modelled by hand now
+      (`tools/vanilla_records.py` rerun: data classes 664 → 663, enum constants 363 → 362).
+    Tests: `worldgen::tests::a_mods_biome_modifier_edits_the_biomes_its_code_picks` (a modifier made
+    by the mod's codec with temperature bounds and a denied set; 298 compat tests pass);
+    `worldgen::foreign::tests::a_mods_feature_places_vanilla_features_on_its_own_random_stream`;
+    `mod_content::biomes::tests::a_mods_own_modifier_type_runs_its_code_between_neoforges_phases`
+    (the old biome modifier tests still pass); `carry::tests::biome_modifiers_get_the_loaders_biome_tags`
+    (111 port-pack tests pass); the translator's tests pass. Not checked yet: FD's real bytecode
+    through a bundle (the bundle template's new code compiles only inside a bundle), and in game.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

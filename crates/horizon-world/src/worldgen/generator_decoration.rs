@@ -69,8 +69,9 @@ pub(super) struct Decoration {
     weather: Option<BiomeWeatherBindings>,
     blocks: FeatureBlocks,
     catalog: FeatureCatalog,
-    /// Placed features referenced by name (feature pool elements), decoded lazily.
-    named: std::sync::Mutex<HashMap<String, Option<Arc<PlacedFeatureDefinition>>>>,
+    /// Placed features referenced by name (feature pool elements) or held inline by a mod's
+    /// feature code, by their JSON text, decoded lazily; why one can't be read.
+    named: std::sync::Mutex<HashMap<String, Result<Arc<PlacedFeatureDefinition>, String>>>,
     /// BlockBehaviour.Properties.postProcess: states whose worldgen writes mark
     /// their own position (mushrooms) or the one above (soul sand, magma).
     postprocess_self: Vec<BlockStateId>,
@@ -257,14 +258,19 @@ impl Decoration {
         }))
     }
     fn named_feature(&self, name: &str) -> Option<Arc<PlacedFeatureDefinition>> {
-        let mut named = self.named.lock().unwrap();
+        self.placed_json(&Value::from(name).to_string()).ok()
+    }
+    /// The placed feature `json` describes (a name as a JSON string, or an inline object), read
+    /// once per text with the generator's catalog and blocks; why it can't be read otherwise.
+    fn placed_json(&self, json: &str) -> Result<Arc<PlacedFeatureDefinition>, String> {
+        let mut named = self.named.lock().unwrap_or_else(|e| e.into_inner());
         named
-            .entry(name.to_owned())
+            .entry(json.to_owned())
             .or_insert_with(|| {
                 self.catalog
-                    .placed_feature_with_blocks(&Value::from(name).to_string(), &self.bindings)
-                    .ok()
+                    .placed_feature_with_blocks(json, &self.bindings)
                     .map(Arc::new)
+                    .map_err(|e| e.to_string())
             })
             .clone()
     }
@@ -909,6 +915,21 @@ impl SurvivalWorld for World<'_> {
     }
 }
 impl PlacementContext for World<'_> {
+    fn place_feature_json<R: horizon_core::random::RandomSource>(
+        &mut self,
+        json: &str,
+        random: &mut R,
+        origin: [i32; 3],
+    ) -> Result<Option<bool>, PlacementQueryError> {
+        let decoration = self.decoration;
+        let feature = decoration
+            .placed_json(json)
+            .map_err(|e| PlacementQueryError::Failed(format!("placed feature {json}: {e}")))?;
+        feature
+            .place(self, random, origin, decoration.blocks)
+            .map(Some)
+            .map_err(|e| PlacementQueryError::Failed(e.to_string()))
+    }
     fn state_collision_empty(
         &mut self,
         state: BlockStateId,

@@ -67,6 +67,24 @@ const GET_BLOCK_STATE: &str = "net/minecraft/world/level/LevelReader.getBlockSta
 const SET_BLOCK: &str = "net/minecraft/world/level/LevelWriter.setBlock.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z";
 /// `FeaturePlaceContext`'s fields, in its constructor's order.
 const PLACE_CONTEXT_FIELDS: [&str; 6] = ["topFeature", "level", "chunkGenerator", "random", "origin", "config"];
+/// The registries a mod's biome modifier serializer is registered in
+/// (`NeoForgeRegistries.BIOME_MODIFIER_SERIALIZERS`, as this runtime names registries).
+const MODIFIER_REGISTRIES: [&str; 2] = ["biome_modifier_serializers", "neoforge:biome_modifier_serializers"];
+const MODIFY: &str = "modify.(Lnet/minecraft/core/Holder;Lnet/neoforged/neoforge/common/world/BiomeModifier$Phase;Lnet/neoforged/neoforge/common/world/ModifiableBiomeInfo$BiomeInfo$Builder;)V";
+const MODIFY_KEY: &str = "net/neoforged/neoforge/common/world/BiomeModifier.modify.(Lnet/minecraft/core/Holder;Lnet/neoforged/neoforge/common/world/BiomeModifier$Phase;Lnet/neoforged/neoforge/common/world/ModifiableBiomeInfo$BiomeInfo$Builder;)V";
+const PHASE: &str = "net/neoforged/neoforge/common/world/BiomeModifier$Phase";
+/// NeoForge's `BiomeModifier.Phase`s in ordinal order: every biome's modifiers run phase by phase.
+pub const PHASES: [&str; 5] = ["BEFORE_EVERYTHING", "ADD", "REMOVE", "MODIFY", "AFTER_EVERYTHING"];
+const BIOME_INFO_BUILDER: &str = "net/neoforged/neoforge/common/world/ModifiableBiomeInfo$BiomeInfo$Builder";
+const GENERATION_BUILDER: &str = "net/neoforged/neoforge/common/world/BiomeGenerationSettingsBuilder";
+const PLAIN_BUILDER: &str = "net/minecraft/world/level/biome/BiomeGenerationSettings$PlainBuilder";
+const BIOME: &str = "net/minecraft/world/level/biome/Biome";
+const PLACED: &str = "net/minecraft/world/level/levelgen/placement/PlacedFeature";
+const HOLDER_SET: &str = "net/minecraft/core/HolderSet";
+const HOLDER_SET_DIRECT: &str = "net/minecraft/core/HolderSet$Direct";
+const HOLDER_SET_NAMED: &str = "net/minecraft/core/HolderSet$Named";
+const HOLDER_SET_LIST_BACKED: &str = "net/minecraft/core/HolderSet$ListBacked";
+const CONSUMER: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
 /// `Direction.values()`'s offsets, in its order: down, up, north, south, west, east.
 const DIRECTIONS: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
 
@@ -183,6 +201,291 @@ fn level(rt: &mut Rt) -> V {
     rt.intern("compat:worldgen/level".into(), |rt| rt.new_object(LEVEL))
 }
 
+/// The biome modifier `json` describes (the whole file, `type` included) when `kind` is one of the
+/// mod's biome modifier serializers (`NeoForgeRegistries.BIOME_MODIFIER_SERIALIZERS`: Farmer's
+/// Delight's `farmersdelight:add_features_by_filter`); `None` when it isn't. The serializer is
+/// the map codec itself, which reads the object as NeoForge's dispatch hands it. Once per text.
+pub fn biome_modifier(rt: &mut Rt, kind: &str, json: &str) -> Option<Result<V, String>> {
+    let codec = MODIFIER_REGISTRIES.iter().map(|r| crate::neo::registry_get(rt, r, kind)).find(|v| v.r() != 0)?;
+    let key = format!("compat:worldgen/biome_modifier/{json}");
+    if let Some(&v) = rt.interned.get(&key) {
+        return Some(Ok(v));
+    }
+    let read = (|| {
+        let Json::Object(object) = serde_json::from_str::<Json>(json).map_err(|e| e.to_string())? else {
+            return Err(format!("Not a map: {json}"));
+        };
+        let v = crate::codecs::decode_map(rt, codec, &object)?;
+        if let Some(e) = rt.thrown.take() {
+            return Err(thrown(rt, e));
+        }
+        Ok(v)
+    })();
+    if let Ok(v) = read {
+        rt.interned.insert(key, v);
+    }
+    Some(read)
+}
+
+/// The mod's `modify(biome, phase, builder)` of biome modifier `modifier`, for biome `biome` in
+/// phase `phase` (an index of [`PHASES`]). `features` is the biome's placed features by
+/// generation step, as the builder's lists hold them (`BiomeGenerationSettingsBuilder`): an id, or
+/// an inline placed feature's JSON; after the call, what the lists hold then. The host answers the
+/// biome's data and the holder sets' members.
+pub fn modify_biome(rt: &mut Rt, modifier: V, biome: &str, phase: usize, features: &mut Vec<Vec<String>>) -> Result<(), String> {
+    let phase = PHASES.get(phase).map(|_| phase_constant(rt, phase)).ok_or_else(|| format!("no biome modifier phase {phase}"))?;
+    let value = biome_value(rt, biome);
+    let holder = crate::neo::registry_holder(rt, "biome", biome, value);
+    // The biome's data as this call's host has it, not as an earlier one did.
+    rt.put_field(holder, "$value", value);
+    let mut steps = Vec::with_capacity(features.len());
+    for list in features.iter() {
+        let holders = list.iter().map(|entry| placed_holder(rt, entry)).collect();
+        steps.push(crate::jutil::new_list(rt, holders));
+    }
+    let steps = crate::jutil::new_list(rt, steps);
+    let generation = rt.new_object(GENERATION_BUILDER);
+    rt.put_field(generation, "$features", steps);
+    let builder = rt.new_object(BIOME_INFO_BUILDER);
+    rt.put_field(builder, "$generation", generation);
+    let Some(vcall) = rt.vcall else { return Err("no mod code to run".into()) };
+    vcall(rt, MODIFY_KEY, MODIFY, &[modifier, holder, phase, builder]);
+    if let Some(e) = rt.thrown.take() {
+        return Err(thrown(rt, e));
+    }
+    let mut out = Vec::new();
+    for list in crate::jutil::elements(rt, steps) {
+        out.push(crate::jutil::elements(rt, list).into_iter().map(|h| placed_entry(rt, h)).collect::<Result<Vec<_>, _>>()?);
+    }
+    *features = out;
+    Ok(())
+}
+
+/// `BiomeModifier.Phase`'s constant `PHASES[i]`.
+fn phase_constant(rt: &mut Rt, i: usize) -> V {
+    crate::api::api_enum(rt, PHASE, PHASES[i], i as i32)
+}
+
+/// The statics answered here: `BiomeModifier.Phase`'s constants.
+pub(crate) fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    if owner != PHASE {
+        return None;
+    }
+    let i = PHASES.iter().position(|p| *p == field)?;
+    Some(phase_constant(rt, i))
+}
+
+/// Biome `id` as `Holder<Biome>.value()` gives it: what modifiers read of it, from its data.
+fn biome_value(rt: &mut Rt, id: &str) -> V {
+    let data: Json = rt.host().and_then(|h| h.biome_json(id)).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Json::Null);
+    let b = rt.new_object(BIOME);
+    let name = rt.string(id);
+    rt.put_field(b, "$id", name);
+    // `Biome.ClimateSettings`: no temperature or downfall is 0.5 in a biome's codec only where
+    // it says so; a biome's file always has them.
+    let number = |key: &str| data.get(key).and_then(Json::as_f64).map_or(0.0, |v| v as f32);
+    rt.put_field(b, "$temperature", V::F(number("temperature")));
+    rt.put_field(b, "$downfall", V::F(number("downfall")));
+    let rains = data.get("has_precipitation").and_then(Json::as_bool).unwrap_or(false);
+    rt.put_field(b, "$precipitation", V::I(rains as i32));
+    b
+}
+
+/// A placed feature as `PlacedFeature.CODEC` reads it, kept as its text: `place` hands the text
+/// to the host's world generator, which reads it with vanilla's codecs. One per text.
+fn placed(rt: &mut Rt, json: &str) -> V {
+    let text = json.to_owned();
+    rt.intern(format!("compat:worldgen/placed/{json}"), move |rt| {
+        let p = rt.new_object(PLACED);
+        let s = rt.string(&text);
+        rt.put_field(p, "$json", s);
+        p
+    })
+}
+
+/// The holder of a placed feature an entry of a biome's lists names: the registry's holder for an
+/// id, a direct holder for an inline feature (its JSON).
+fn placed_holder(rt: &mut Rt, entry: &str) -> V {
+    if entry.trim_start().starts_with('{') {
+        let value = placed(rt, entry);
+        let h = rt.new_object("net/minecraft/core/Holder$Direct");
+        rt.put_field(h, "value", value);
+        return h;
+    }
+    let id = if entry.contains(':') { entry.to_owned() } else { format!("minecraft:{entry}") };
+    let value = placed(rt, &Json::String(id.clone()).to_string());
+    crate::neo::registry_holder(rt, "placed_feature", &id, value)
+}
+
+/// The entry of a biome's lists a placed feature holder is: its id, or its inline JSON.
+fn placed_entry(rt: &mut Rt, holder: V) -> Result<String, String> {
+    if let Some(id) = rt.str_of(rt.get_field(holder, "$id")).filter(|id| !id.is_empty()) {
+        return Ok(id.to_owned());
+    }
+    let value = if rt.class_of(holder) == "net/minecraft/core/Holder$Direct" { rt.get_field(holder, "value") } else { V::NULL };
+    let json = rt.str_of(rt.get_field(value, "$json")).map(str::to_owned);
+    match json.as_deref().map(|j| (j, serde_json::from_str::<Json>(j))) {
+        Some((_, Ok(Json::String(id)))) => Ok(id),
+        Some((j, Ok(_))) => Ok(j.to_owned()),
+        _ => Err(format!("a placed feature holder this runtime didn't make ({})", rt.class_of(holder))),
+    }
+}
+
+/// A holder set as `RegistryCodecs.homogeneousList(registry)` reads it (`Biome.LIST_CODEC`,
+/// `PlacedFeature.LIST_CODEC`): an id, `#tag`, a list of ids, or one of NeoForge's holder set
+/// objects (`neoforge:any`, `or`, `and`, `not`), kept as written; the host answers its members.
+fn holder_set(rt: &mut Rt, registry: &str, j: &Json) -> Result<V, String> {
+    let named = j.as_str().is_some_and(|s| s.starts_with('#'));
+    let valid = match j {
+        Json::String(_) => true,
+        Json::Array(items) => items.iter().all(|v| v.as_str().is_some_and(|s| !s.starts_with('#'))),
+        Json::Object(o) => o.get("type").is_some_and(Json::is_string),
+        _ => false,
+    };
+    if !valid {
+        return Err(format!("Not a {registry} id, tag or list: {j}"));
+    }
+    let set = rt.new_object(if named { HOLDER_SET_NAMED } else { HOLDER_SET_DIRECT });
+    let (r, text) = (rt.string(registry), rt.string(&j.to_string()));
+    rt.put_field(set, "$registry", r);
+    rt.put_field(set, "$set", text);
+    Ok(set)
+}
+
+/// The holders of holder set `set`: those it was made of (`HolderSet.direct`), or the members the
+/// host's registries give the set's JSON, in order. A list of ids reads as written where the host
+/// keeps no registries; a tag has no members there.
+fn set_holders(rt: &mut Rt, set: V) -> Vec<V> {
+    let made = rt.get_field(set, "$holders");
+    if made.r() != 0 {
+        return crate::jutil::elements(rt, made);
+    }
+    let registry = rt.str_of(rt.get_field(set, "$registry")).unwrap_or("").to_owned();
+    let text = rt.str_of(rt.get_field(set, "$set")).unwrap_or("").to_owned();
+    let ids = rt.host().and_then(|h| h.holder_set(&registry, &text)).unwrap_or_else(|| match serde_json::from_str::<Json>(&text) {
+        Ok(Json::String(id)) if !id.starts_with('#') => vec![id],
+        Ok(Json::Array(items)) => items.iter().filter_map(Json::as_str).map(str::to_owned).collect(),
+        _ => Vec::new(),
+    });
+    ids.iter()
+        .map(|id| {
+            let id = if id.contains(':') { id.clone() } else { format!("minecraft:{id}") };
+            let value = if registry == "placed_feature" { placed(rt, &Json::String(id.clone()).to_string()) } else { V::NULL };
+            crate::neo::registry_holder(rt, &registry, &id, value)
+        })
+        .collect()
+}
+
+/// Whether holder `holder` is one of `set`'s: the same holder, or a registry holder of the same
+/// entry.
+fn set_contains(rt: &mut Rt, set: V, holder: V) -> bool {
+    let id = rt.str_of(rt.get_field(holder, "$id")).map(str::to_owned);
+    set_holders(rt, set).into_iter().any(|h| h == holder || id.as_ref().is_some_and(|id| rt.str_of(rt.get_field(h, "$id")) == Some(id.as_str())))
+}
+
+/// `HolderSet`'s methods on the sets made here, `Biome`'s on biomes, `PlacedFeature.place`, and the
+/// builder a biome modifier edits.
+fn holder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let set_made_here = |rt: &Rt| matches!(rt.class_of(a(0)), HOLDER_SET_DIRECT | HOLDER_SET_NAMED);
+    Some(match (owner, name) {
+        // `HolderSet.direct(holders...)`, `direct(list)`, `empty()`: a set of those holders.
+        (HOLDER_SET, "direct" | "empty") if !desc.starts_with("(Ljava/util/function/Function;") => {
+            let holders = if name == "empty" { Vec::new() } else { crate::jutil::elements(rt, a(0)) };
+            let set = rt.new_object(HOLDER_SET_DIRECT);
+            let list = crate::jutil::new_list(rt, holders);
+            rt.put_field(set, "$holders", list);
+            set
+        }
+        (HOLDER_SET | HOLDER_SET_DIRECT | HOLDER_SET_NAMED | HOLDER_SET_LIST_BACKED, _) if set_made_here(rt) => match name {
+            "contains" => V::I(set_contains(rt, a(0), a(1)) as i32),
+            "size" => V::I(set_holders(rt, a(0)).len() as i32),
+            "get" => set_holders(rt, a(0)).get(a(1).i().max(0) as usize).copied().unwrap_or(V::NULL),
+            "stream" => {
+                let items = set_holders(rt, a(0));
+                rt.alloc("java/util/stream/Stream", crate::Data::Stream(items))
+            }
+            "iterator" => {
+                let items = set_holders(rt, a(0));
+                crate::jutil::new_iter(rt, items)
+            }
+            "forEach" => {
+                for h in set_holders(rt, a(0)) {
+                    rt.call_functional(CONSUMER, a(1), &[h]);
+                    if rt.thrown.is_some() {
+                        break;
+                    }
+                }
+                V::Void
+            }
+            // `getRandomElement(random)`: one of them, drawn as `Util.getRandomSafe` draws.
+            "getRandomElement" => {
+                let items = set_holders(rt, a(0));
+                let o = rt.new_object("java/util/Optional");
+                if !items.is_empty() {
+                    let i = crate::api::call(rt, NEXT_INT_BOUND, &[a(1), V::I(items.len() as i32)]).i();
+                    rt.put_field(o, "value", items.get(i.max(0) as usize).copied().unwrap_or(V::NULL));
+                }
+                o
+            }
+            "isBound" => V::I(1),
+            "unwrapKey" => {
+                let o = rt.new_object("java/util/Optional");
+                if rt.class_of(a(0)) == HOLDER_SET_NAMED {
+                    let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned();
+                    let text = rt.str_of(rt.get_field(a(0), "$set")).unwrap_or("").to_owned();
+                    let tag = serde_json::from_str::<Json>(&text).ok().and_then(|j| j.as_str().map(|s| s.trim_start_matches('#').to_owned())).unwrap_or_default();
+                    let key = crate::fluids::tag_key(rt, &registry, &tag);
+                    rt.put_field(o, "value", key);
+                }
+                o
+            }
+            _ => return None,
+        },
+        // A biome: its climate, from its data.
+        (BIOME, "getBaseTemperature") => rt.get_field(a(0), "$temperature"),
+        (BIOME, "hasPrecipitation") => rt.get_field(a(0), "$precipitation"),
+        // `PlacedFeature.place(level, generator, random, pos)` from the mod's code: the host's
+        // generator places it on its region, drawing from the feature's stream.
+        (PLACED, "place" | "placeWithBiomeCheck") if rt.get_field(a(0), "$json").r() != 0 => {
+            let json = rt.str_of(rt.get_field(a(0), "$json")).unwrap_or("").to_owned();
+            let pos = crate::api::pos_of(rt, a(4));
+            match rt.host_mut().map(|h| h.place_feature(&json, pos)) {
+                Some(Ok(placed)) => V::I(placed as i32),
+                Some(Err(e)) => {
+                    let ex = rt.new_object("java/lang/IllegalStateException");
+                    let m = rt.string(&format!("placed feature {json}: {e}"));
+                    rt.put_field(ex, "message", m);
+                    rt.thrown = Some(ex);
+                    V::I(0)
+                }
+                None => V::I(0),
+            }
+        }
+        // The builder a biome modifier edits: the biome's generation settings, each step's list of
+        // placed feature holders, which grow to the step added to (`addFeatureStepsUpTo`).
+        (BIOME_INFO_BUILDER, "getGenerationSettings") => rt.get_field(a(0), "$generation"),
+        (GENERATION_BUILDER | PLAIN_BUILDER, "addFeature" | "getFeatures") if rt.get_field(a(0), "$features").r() != 0 => {
+            let step = if desc.starts_with("(I") { a(1).i() } else { rt.get_field(a(1), "$ordinal").i() };
+            let steps = rt.get_field(a(0), "$features");
+            let mut lists = crate::jutil::elements(rt, steps);
+            while lists.len() <= step.max(0) as usize {
+                let l = crate::jutil::new_list(rt, Vec::new());
+                crate::jutil::list_add(rt, steps, l);
+                lists.push(l);
+            }
+            let list = lists[step.max(0) as usize];
+            if name == "getFeatures" {
+                list
+            } else {
+                crate::jutil::list_add(rt, list, a(2));
+                a(0)
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// The keys [`call`] answers: vanilla's placement classes and the worldgen random's draws, and what
 /// features use of vanilla's worldgen.
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
@@ -209,6 +512,15 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
             | RANDOM_BLOCK_MATCH
             | RANDOM_STATE_MATCH
             | ALWAYS_TRUE
+            | HOLDER_SET
+            | HOLDER_SET_DIRECT
+            | HOLDER_SET_NAMED
+            | HOLDER_SET_LIST_BACKED
+            | BIOME
+            | PLACED
+            | BIOME_INFO_BUILDER
+            | GENERATION_BUILDER
+            | PLAIN_BUILDER
     )
 }
 
@@ -220,6 +532,9 @@ pub(crate) fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if matches!(owner, FEATURE | PLACE_CONTEXT | BULK | SECTION | SECTION_POS | SIMPLEX | ORE_CONFIGURATION | TARGET) || owner.starts_with("net/minecraft/world/level/levelgen/structure/templatesystem/") {
         return feature_call(rt, owner, name, desc, args);
+    }
+    if matches!(owner, HOLDER_SET | HOLDER_SET_DIRECT | HOLDER_SET_NAMED | HOLDER_SET_LIST_BACKED | BIOME | PLACED | BIOME_INFO_BUILDER | GENERATION_BUILDER | PLAIN_BUILDER) {
+        return holder_call(rt, owner, name, desc, args);
     }
     let stream = |rt: &mut Rt, items: Vec<V>| rt.alloc("java/util/stream/Stream", crate::Data::Stream(items));
     Some(match (owner, name) {
@@ -490,6 +805,19 @@ fn section_pos(rt: &Rt, section: V, x: i32, y: i32, z: i32) -> [i32; 3] {
 /// Reads what `RuleTest.CODEC` (by `predicate_type`) and `OreConfiguration.TargetBlockState.CODEC`
 /// (`{target, state}`) write.
 pub(crate) fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
+    // Holder sets of a registry (`Biome.LIST_CODEC`, `PlacedFeature.LIST_CODEC`), kept as written.
+    if let Some(registry) = name.strip_prefix("holder_set/") {
+        return holder_set(rt, registry, j);
+    }
+    match (name, j) {
+        // `PlacedFeature.CODEC`: an id (the registry's holder) or an inline placed feature (a
+        // direct holder); `DIRECT_CODEC` the inline one itself.
+        ("placed_feature", Json::String(id)) => return Ok(placed_holder(rt, id)),
+        ("placed_feature", Json::Object(_)) => return Ok(placed_holder(rt, &j.to_string())),
+        ("placed_feature_direct", Json::Object(_)) => return Ok(placed(rt, &j.to_string())),
+        ("placed_feature" | "placed_feature_direct", _) => return Err(format!("Not a placed feature: {j}")),
+        _ => {}
+    }
     let o = j.as_object().ok_or_else(|| format!("Not a map: {j}"))?;
     let field = |key: &str| o.get(key).ok_or_else(|| format!("No key {key} in MapLike[{j}]"));
     match name {
@@ -776,6 +1104,24 @@ mod tests {
             APPLY_SHORT if rt.class_of(args[0]) == "test/Getter" => {
                 let level = rt.get_field(args[0], "level");
                 crate::api::call(rt, "net/minecraft/world/level/WorldGenLevel.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;", &[level, args[1]])
+            }
+            APPLY_SHORT if rt.class_of(args[0]) == "test/WarmCodec" => warm_codec(rt, args[1]),
+            FUNCTION4_SHORT if rt.class_of(args[0]) == "test/MakeWarm" => {
+                let warm = rt.new_object("test/Warm");
+                for (field, v) in ["allowed", "denied", "features", "step"].into_iter().zip(&args[1..]) {
+                    rt.put_field(warm, field, *v);
+                }
+                warm
+            }
+            MODIFY if rt.class_of(args[0]) == "test/Warm" => warm_modify(rt, args[0], args[1], args[2], args[3]),
+            "accept.(Ljava/lang/Object;)V" if rt.class_of(args[0]) == "test/AddTo" => {
+                let (generation, step) = (rt.get_field(args[0], "generation"), rt.get_field(args[0], "step"));
+                crate::api::call(rt, "net/neoforged/neoforge/common/world/BiomeGenerationSettingsBuilder.addFeature.(Lnet/minecraft/world/level/levelgen/GenerationStep$Decoration;Lnet/minecraft/core/Holder;)Lnet/minecraft/world/level/biome/BiomeGenerationSettings$PlainBuilder;", &[generation, step, args[1]]);
+                V::Void
+            }
+            "test.(Ljava/lang/Object;)Z" if rt.class_of(args[0]) == "test/IsGone" => {
+                let name = crate::api::call(rt, "net/minecraft/core/Holder.getRegisteredName.()Ljava/lang/String;", &[args[1]]);
+                V::I((rt.str_of(name) == Some("test:gone")) as i32)
             }
             _ => crate::api::call(rt, owner_key, args),
         }
@@ -1136,5 +1482,148 @@ mod tests {
         let plains = rt.with_host(&mut region, |rt| positions(rt, read, [8, 64, 3])).unwrap();
         assert_eq!(desert, vec![[-8, 64, 3]]);
         assert!(plains.is_empty());
+    }
+
+    const FUNCTION4_SHORT: &str = "apply.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+
+    /// `test/Warm`'s codec, as Farmer's Delight writes its biome modifier's:
+    /// `RecordCodecBuilder.mapCodec(i -> i.group(Biome.LIST_CODEC.fieldOf("allowed_biomes"),
+    /// Biome.LIST_CODEC.optionalFieldOf("denied_biomes"), PlacedFeature.LIST_CODEC.fieldOf("features"),
+    /// Decoration.CODEC.fieldOf("step")).apply(i, Warm::new))`.
+    fn warm_codec(rt: &mut Rt, instance: V) -> V {
+        let call = crate::api::call;
+        let biomes = crate::api::get_static(rt, "net/minecraft/world/level/biome/Biome.LIST_CODEC");
+        let features = crate::api::get_static(rt, "net/minecraft/world/level/levelgen/placement/PlacedFeature.LIST_CODEC");
+        let steps = crate::api::get_static(rt, "net/minecraft/world/level/levelgen/GenerationStep$Decoration.CODEC");
+        let getter = rt.new_object("test/Unused");
+        let mut fields = Vec::new();
+        for (codec, name, optional) in [(biomes, "allowed_biomes", false), (biomes, "denied_biomes", true), (features, "features", false), (steps, "step", false)] {
+            let n = rt.string(name);
+            let field = if optional {
+                call(rt, "com/mojang/serialization/Codec.optionalFieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[codec, n])
+            } else {
+                call(rt, "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;", &[codec, n])
+            };
+            fields.push(call(rt, "com/mojang/serialization/MapCodec.forGetter.(Ljava/util/function/Function;)Lcom/mojang/serialization/codecs/RecordCodecBuilder;", &[field, getter]));
+        }
+        let app = "Lcom/mojang/datafixers/kinds/App;";
+        let group: &'static str = Box::leak(format!("com/mojang/serialization/codecs/RecordCodecBuilder$Instance.group.({})Lcom/mojang/datafixers/Products$P4;", app.repeat(4)).into_boxed_str());
+        let product = call(rt, group, &[instance, fields[0], fields[1], fields[2], fields[3]]);
+        let make = rt.new_object("test/MakeWarm");
+        call(rt, "com/mojang/datafixers/Products$P4.apply.(Lcom/mojang/datafixers/kinds/Applicative;Lcom/mojang/datafixers/util/Function4;)Lcom/mojang/datafixers/kinds/App;", &[product, instance, make])
+    }
+
+    /// `test/Warm.modify(biome, phase, builder)`: in the add phase, a biome of its allowed set and
+    /// not of its denied one (when it has one), warmer than 0.5, gets its features at its step; in
+    /// the remove phase, every biome loses `test:gone` from that step.
+    fn warm_modify(rt: &mut Rt, warm: V, biome: V, phase: V, builder: V) -> V {
+        let call = crate::api::call;
+        let add = crate::api::get_static(rt, "net/neoforged/neoforge/common/world/BiomeModifier$Phase.ADD");
+        let remove = crate::api::get_static(rt, "net/neoforged/neoforge/common/world/BiomeModifier$Phase.REMOVE");
+        let step = rt.get_field(warm, "step");
+        let generation = call(rt, "net/neoforged/neoforge/common/world/ModifiableBiomeInfo$BiomeInfo$Builder.getGenerationSettings.()Lnet/neoforged/neoforge/common/world/BiomeGenerationSettingsBuilder;", &[builder]);
+        const CONTAINS: &str = "net/minecraft/core/HolderSet.contains.(Lnet/minecraft/core/Holder;)Z";
+        if phase == add {
+            if call(rt, CONTAINS, &[rt.get_field(warm, "allowed"), biome]).i() == 0 {
+                return V::Void;
+            }
+            let denied = rt.get_field(warm, "denied");
+            if call(rt, "java/util/Optional.isPresent.()Z", &[denied]).i() != 0 {
+                let set = call(rt, "java/util/Optional.get.()Ljava/lang/Object;", &[denied]);
+                if call(rt, CONTAINS, &[set, biome]).i() != 0 {
+                    return V::Void;
+                }
+            }
+            let value = call(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[biome]);
+            if call(rt, "net/minecraft/world/level/biome/Biome.getBaseTemperature.()F", &[value]).f() <= 0.5 {
+                return V::Void;
+            }
+            let add_to = rt.new_object("test/AddTo");
+            rt.put_field(add_to, "generation", generation);
+            rt.put_field(add_to, "step", step);
+            call(rt, "net/minecraft/core/HolderSet.forEach.(Ljava/util/function/Consumer;)V", &[rt.get_field(warm, "features"), add_to]);
+        } else if phase == remove {
+            let list = call(rt, "net/neoforged/neoforge/common/world/BiomeGenerationSettingsBuilder.getFeatures.(Lnet/minecraft/world/level/levelgen/GenerationStep$Decoration;)Ljava/util/List;", &[generation, step]);
+            let gone = rt.new_object("test/IsGone");
+            call(rt, "java/util/List.removeIf.(Ljava/util/function/Predicate;)Z", &[list, gone]);
+        }
+        V::Void
+    }
+
+    /// The content root's biomes as a biome modifier's host sees them: `test:warm` holds the dunes
+    /// and the jungle, `test:wet` the jungle; the dunes are hot, the jungle warm, the tundra cold.
+    struct Meadows;
+    impl Host for Meadows {
+        fn block_state(&self, _pos: [i32; 3]) -> String {
+            "minecraft:air".into()
+        }
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+            false
+        }
+        fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {
+            let ids = |s: &[&str]| s.iter().map(|id| id.to_string()).collect();
+            Some(match (registry, serde_json::from_str::<Json>(set).ok()?) {
+                ("biome", Json::String(s)) if s == "#test:warm" => ids(&["test:dunes", "test:jungle"]),
+                ("biome", Json::String(s)) if s == "#test:wet" => ids(&["test:jungle"]),
+                (_, Json::String(s)) if !s.starts_with('#') => vec![s],
+                (_, Json::Array(items)) => items.iter().filter_map(Json::as_str).map(str::to_owned).collect(),
+                _ => return None,
+            })
+        }
+        fn biome_json(&self, id: &str) -> Option<String> {
+            let temperature = match id {
+                "test:dunes" => 2.0,
+                "test:jungle" => 0.95,
+                _ => 0.0,
+            };
+            Some(format!(r#"{{"temperature": {temperature}, "downfall": 0.5, "has_precipitation": true}}"#))
+        }
+    }
+
+    /// A mod's biome modifier type (Farmer's Delight's `add_features_by_filter`): its serializer, a
+    /// record codec over holder sets of biomes and placed features, reads the file; run on each
+    /// biome phase by phase, the mod's code adds its features where its sets and the biome's
+    /// temperature say, through the builder's lists, and takes features out of them in its remove
+    /// phase. What the lists hold afterwards is the biome's new features, steps it added included.
+    #[test]
+    fn a_mods_biome_modifier_edits_the_biomes_its_code_picks() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(mod_code);
+        let builder = rt.new_object("test/WarmCodec");
+        let codec = crate::api::call(&mut rt, "com/mojang/serialization/codecs/RecordCodecBuilder.mapCodec.(Ljava/util/function/Function;)Lcom/mojang/serialization/MapCodec;", &[builder]);
+        rt.registered.insert(("biome_modifier_serializers".into(), "test:warm_features".into()), codec);
+        let json = r##"{"type": "test:warm_features", "allowed_biomes": "#test:warm", "denied_biomes": "#test:wet",
+            "features": ["test:cactus_patch", "minecraft:patch_dead_bush"], "step": "vegetal_decoration"}"##;
+        assert!(biome_modifier(&mut rt, "test:other", json).is_none());
+        let modifier = biome_modifier(&mut rt, "test:warm_features", json).unwrap().unwrap();
+        let mut host = Meadows;
+        let mut run = |rt: &mut Rt, biome: &str, mut features: Vec<Vec<String>>| {
+            rt.with_host(&mut host, |rt| {
+                for phase in 0..PHASES.len() {
+                    modify_biome(rt, modifier, biome, phase, &mut features).unwrap();
+                }
+            });
+            features
+        };
+        let v = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // The dunes: allowed, not wet, hot. The step's list is made (the file named three steps).
+        let dunes = run(&mut rt, "test:dunes", vec![v(&["minecraft:lake"]), v(&[]), v(&["test:gone", "minecraft:ore"])]);
+        let mut expected = vec![v(&["minecraft:lake"]), v(&[]), v(&["test:gone", "minecraft:ore"])];
+        expected.resize(10, Vec::new());
+        expected[9] = v(&["test:cactus_patch", "minecraft:patch_dead_bush"]);
+        assert_eq!(dunes, expected);
+        // The jungle is denied; the tundra isn't allowed. Both keep their features, except what
+        // the remove phase takes from the step.
+        let jungle = run(&mut rt, "test:jungle", vec![Vec::new(); 11]);
+        assert_eq!(jungle, vec![Vec::<String>::new(); 11]);
+        let mut tundra_features = vec![Vec::new(); 11];
+        tundra_features[9] = v(&["test:gone", "minecraft:patch_grass", "test:gone"]);
+        let tundra = run(&mut rt, "test:tundra", tundra_features);
+        assert_eq!(tundra[9], v(&["minecraft:patch_grass"]));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        // A file the codec refuses is the codec's error.
+        let bad = r#"{"type": "test:warm_features", "allowed_biomes": 3, "features": [], "step": "vegetal_decoration"}"#;
+        assert!(biome_modifier(&mut rt, "test:warm_features", bad).unwrap().is_err());
     }
 }

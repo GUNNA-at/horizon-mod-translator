@@ -46,6 +46,15 @@ pub trait World {
     /// A raw write into the chunk section (`LevelChunkSection.setBlockState`, as features write
     /// through `BulkSectionAccess`): no heightmaps, no neighbour effects.
     fn set_section_block(&mut self, position: [i32; 3], state: &str) -> bool;
+    /// `PlacedFeature.place(level, generator, random, position)` from the mod's code: the placed
+    /// feature `json` (an inline object, or a name as a JSON string) read with the generator's
+    /// feature data and placed at `position` on this world, drawing from the stream the mod's code
+    /// draws from. Whether it placed anything; an error where this world can't place features (a
+    /// placement modifier's) or the feature can't be read.
+    fn place_feature(&mut self, json: &str, position: [i32; 3]) -> Result<bool, String> {
+        let _ = (json, position);
+        Err("this world places no features".into())
+    }
 }
 
 /// The random stream the generator hands a modifier (the feature's), as `RandomSource` draws.
@@ -72,6 +81,32 @@ pub trait Feature: Send + Sync {
     fn place(&self, world: &mut dyn World, random: &mut dyn Random, origin: [i32; 3]) -> Result<bool, String>;
 }
 
+/// The content root's registries as a mod's biome modifier reads them while the root builds (no
+/// generator exists yet).
+pub trait Biomes {
+    /// The ids holder set `set` names (its JSON: an id, `#tag`, a list of ids, NeoForge's `any`,
+    /// `or`, `and` and `not` objects) in registry `registry` (`biome`, `placed_feature`), in order;
+    /// an error for an id or tag the root doesn't have.
+    fn resolve(&self, registry: &str, set: &str) -> Result<Vec<String>, String>;
+    /// Biome `id`'s file (`temperature`, `has_precipitation`...).
+    fn biome(&self, id: &str) -> Option<String>;
+}
+
+/// NeoForge's `BiomeModifier.Phase`s, in order: every biome's modifiers run phase by phase.
+pub const PHASES: [&str; 5] = ["BEFORE_EVERYTHING", "ADD", "REMOVE", "MODIFY", "AFTER_EVERYTHING"];
+
+/// A biome's placed features by generation step (vanilla's `GenerationStep.Decoration` order):
+/// each an id (`minecraft:patch_grass_plain`), or an inline placed feature's JSON.
+pub type StepFeatures = Vec<Vec<String>>;
+
+/// A mod's biome modifier, read from its file: what its `modify(biome, phase, builder)` does to
+/// a biome's placed features.
+pub trait BiomeModifier: Send + Sync {
+    /// Runs the modifier on biome `biome` in phase `phase` (an index of [`PHASES`]), editing
+    /// `features` as the builder's lists let it.
+    fn modify(&self, biomes: &dyn Biomes, biome: &str, phase: usize, features: &mut StepFeatures) -> Result<(), String>;
+}
+
 /// What a mod registers: its own worldgen types, by id.
 pub trait Handler: Send + Sync {
     /// The modifier `json` (the whole object, `type` included) describes when `kind` is one of
@@ -80,6 +115,11 @@ pub trait Handler: Send + Sync {
     /// The configured feature `json` (`type` and `config`) describes when `kind` is one of the
     /// mod's feature types; `None` when it isn't the mod's.
     fn feature(&self, _kind: &str, _json: &str) -> Option<Result<Arc<dyn Feature>, String>> {
+        None
+    }
+    /// The biome modifier file `json` describes when `kind` (its `type`) is one of the mod's
+    /// biome modifier serializers; `None` when it isn't the mod's.
+    fn biome_modifier(&self, _kind: &str, _json: &str) -> Option<Result<Arc<dyn BiomeModifier>, String>> {
         None
     }
 }
@@ -135,6 +175,12 @@ pub(crate) fn placement(kind: &str, json: &str) -> Option<Result<Arc<dyn Placeme
 /// The first registered handler that knows feature type `kind`.
 pub(crate) fn feature(kind: &str, json: &str) -> Option<Result<Arc<dyn Feature>, String>> {
     handlers().iter().find_map(|h| h.feature(kind, json))
+}
+
+/// The first registered handler that knows biome modifier type `kind`: the modifier its file
+/// `json` describes, or why the mod's codec refused it; `None` where no mod registered the type.
+pub fn biome_modifier(kind: &str, json: &str) -> Option<Result<Arc<dyn BiomeModifier>, String>> {
+    handlers().iter().find_map(|h| h.biome_modifier(kind, json))
 }
 
 /// A state as text, as [`World::block`] gives it.
@@ -197,9 +243,20 @@ impl ForeignFeature {
         random: &mut R,
         origin: [i32; 3],
     ) -> Result<bool, PlacementQueryError> {
-        let mut world = ContextWorld::new(world, write_feature_world::<W>);
+        // The mod's code and the vanilla placed features it places (`PlacedFeature.place`) draw
+        // from the one stream, in the order they ask.
+        let random = std::cell::RefCell::new(random);
+        let mut place = |world: &mut W, json: &str, position: [i32; 3]| -> Result<bool, String> {
+            let mut random = random.try_borrow_mut().map_err(|_| "the feature's random stream is in use".to_owned())?;
+            match world.place_feature_json(json, &mut **random, position) {
+                Ok(Some(placed)) => Ok(placed),
+                Ok(None) => Err("this world places no features".into()),
+                Err(e) => Err(e.to_string()),
+            }
+        };
+        let mut world = ContextWorld::new(world, write_feature_world::<W>).with_place(&mut place);
         self.inner
-            .place(&mut world, &mut RandomBridge(random), origin)
+            .place(&mut world, &mut CellRandom(&random), origin)
             .map_err(|e| PlacementQueryError::Failed(format!("{}: {e}", self.kind)))
     }
 }
@@ -219,10 +276,16 @@ fn write_feature_world<W: FeatureWorld + PlacementContext>(world: &mut W, positi
     }
 }
 
-/// A placement context as the [`World`] a mod's code reads, writing through `write`.
+/// How a feature's world places a vanilla placed feature for the mod's code: its JSON at a
+/// position.
+type PlaceFeature<'a, C> = &'a mut dyn FnMut(&mut C, &str, [i32; 3]) -> Result<bool, String>;
+
+/// A placement context as the [`World`] a mod's code reads, writing through `write` and placing
+/// vanilla's placed features through `place` (a feature's world; a modifier's has none).
 struct ContextWorld<'a, C: PlacementContext + ?Sized> {
     context: &'a mut C,
     write: fn(&mut C, [i32; 3], BlockStateId, Write) -> bool,
+    place: Option<PlaceFeature<'a, C>>,
     registry: Option<&'static BlockRegistry>,
     names: Option<Arc<Names>>,
 }
@@ -231,7 +294,11 @@ impl<'a, C: PlacementContext + ?Sized> ContextWorld<'a, C> {
     fn new(context: &'a mut C, write: fn(&mut C, [i32; 3], BlockStateId, Write) -> bool) -> Self {
         let registry = context.block_registry().or_else(|| *BLOCKS.read().unwrap_or_else(|e| e.into_inner()));
         let names = NAMES.read().unwrap_or_else(|e| e.into_inner()).clone();
-        Self { context, write, registry, names }
+        Self { context, write, place: None, registry, names }
+    }
+    fn with_place(mut self, place: PlaceFeature<'a, C>) -> Self {
+        self.place = Some(place);
+        self
     }
     fn write(&mut self, position: [i32; 3], state: &str, how: Write) -> bool {
         let Some(id) = self.registry.and_then(|r| super::structure::template::parse_state_string(r, state)) else {
@@ -282,6 +349,40 @@ impl<C: PlacementContext + ?Sized> World for ContextWorld<'_, C> {
     }
     fn set_section_block(&mut self, position: [i32; 3], state: &str) -> bool {
         self.write(position, state, Write::Section)
+    }
+    fn place_feature(&mut self, json: &str, position: [i32; 3]) -> Result<bool, String> {
+        match self.place.as_mut() {
+            Some(place) => place(&mut *self.context, json, position),
+            None => Err("a placement modifier's world places no features".into()),
+        }
+    }
+}
+
+/// The feature's random stream, which the vanilla features the mod's code places draw from too,
+/// as the [`Random`] the mod draws from.
+struct CellRandom<'a, 'b, R: RandomSource>(&'a std::cell::RefCell<&'b mut R>);
+
+impl<R: RandomSource> Random for CellRandom<'_, '_, R> {
+    fn next_int(&mut self) -> i32 {
+        self.0.borrow_mut().next_int()
+    }
+    fn next_int_bound(&mut self, bound: i32) -> i32 {
+        self.0.borrow_mut().next_int_bound(bound).unwrap_or(0)
+    }
+    fn next_long(&mut self) -> i64 {
+        self.0.borrow_mut().next_long()
+    }
+    fn next_boolean(&mut self) -> bool {
+        self.0.borrow_mut().next_boolean()
+    }
+    fn next_float(&mut self) -> f32 {
+        self.0.borrow_mut().next_float()
+    }
+    fn next_double(&mut self) -> f64 {
+        self.0.borrow_mut().next_double()
+    }
+    fn next_gaussian(&mut self) -> f64 {
+        self.0.borrow_mut().next_gaussian()
     }
 }
 
@@ -462,6 +563,8 @@ mod tests {
         registry: &'static BlockRegistry,
         blocks: HashMap<[i32; 3], BlockStateId>,
         writes: Vec<([i32; 3], &'static str, &'static str)>,
+        /// The placed features asked for: the JSON, where, and the draw the feature took.
+        placed: Vec<(String, [i32; 3], i32)>,
     }
     impl Grid {
         fn get(&self, p: [i32; 3]) -> BlockStateId {
@@ -503,6 +606,12 @@ mod tests {
         fn block_registry(&self) -> Option<&'static BlockRegistry> {
             Some(self.registry)
         }
+        /// A placed feature takes one draw of a hundred from the stream it is handed.
+        fn place_feature_json<R: RandomSource>(&mut self, json: &str, random: &mut R, origin: [i32; 3]) -> Result<Option<bool>, PlacementQueryError> {
+            let draw = random.next_int_bound(100).unwrap();
+            self.placed.push((json.to_owned(), origin, draw));
+            Ok(Some(draw % 2 == 0))
+        }
     }
 
     /// A feature type a mod registered decodes through its handler; placed, the mod's code reads
@@ -522,7 +631,7 @@ mod tests {
             obsidian: BlockStateId(1),
         };
         for seed in (0..8i64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64)) {
-            let mut grid = Grid { registry: registry(), blocks: HashMap::new(), writes: Vec::new() };
+            let mut grid = Grid { registry: registry(), blocks: HashMap::new(), writes: Vec::new(), placed: Vec::new() };
             grid.blocks.insert([2, 9, 5], BlockStateId(1));
             let mut random = LegacyRandom::new(seed);
             assert!(feature.place(&mut grid, &mut random, [2, 10, 5], blocks).unwrap());
@@ -533,7 +642,7 @@ mod tests {
             assert_eq!(grid.writes, expected, "seed {seed}");
             assert_eq!(random.next_long(), expected_random.next_long(), "seed {seed}");
             // Over air, the mod's code places nothing.
-            let mut empty = Grid { registry: registry(), blocks: HashMap::new(), writes: Vec::new() };
+            let mut empty = Grid { registry: registry(), blocks: HashMap::new(), writes: Vec::new(), placed: Vec::new() };
             assert!(!feature.place(&mut empty, &mut LegacyRandom::new(seed), [2, 10, 5], blocks).unwrap());
             assert!(empty.writes.is_empty());
         }
@@ -542,5 +651,59 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(FeatureDefinition::from_json(r#"{"type": "foreign_test:other", "config": {}}"#).is_err());
+    }
+
+    /// A mod's feature that places a vanilla placed feature (Farmer's Delight's wild crops call
+    /// `PlacedFeature.place` on the ones their configuration holds): a draw of four lifts the
+    /// position, the placed feature goes there, then one more draw.
+    struct Planter;
+    impl Feature for Planter {
+        fn place(&self, world: &mut dyn World, random: &mut dyn Random, origin: [i32; 3]) -> Result<bool, String> {
+            let lift = random.next_int_bound(4);
+            let placed = world.place_feature(r#"{"feature": "test:crop", "placement": []}"#, [origin[0], origin[1] + lift, origin[2]])?;
+            random.next_int_bound(4);
+            Ok(placed)
+        }
+    }
+    struct PlanterHandler;
+    impl Handler for PlanterHandler {
+        fn placement(&self, _: &str, _: &str) -> Option<Result<Arc<dyn Placement>, String>> {
+            None
+        }
+        fn feature(&self, kind: &str, _: &str) -> Option<Result<Arc<dyn Feature>, String>> {
+            (kind == "foreign_test:planter").then(|| Ok(Arc::new(Planter) as Arc<dyn Feature>))
+        }
+    }
+
+    /// The vanilla placed feature a mod's code places is the world's to read and place, at the
+    /// position the code names, and draws from the feature's own stream between the code's
+    /// draws, in the order they come; what it placed is the code's answer. A modifier's world
+    /// places none.
+    #[test]
+    fn a_mods_feature_places_vanilla_features_on_its_own_random_stream() {
+        register("foreign_test_planter", Arc::new(PlanterHandler));
+        let feature = FeatureDefinition::from_json(r#"{"type": "foreign_test:planter", "config": {}}"#).unwrap();
+        let blocks = FeatureBlocks {
+            air: BlockStateId(0),
+            stone: BlockStateId(1),
+            cobblestone: BlockStateId(1),
+            end_stone: BlockStateId(1),
+            obsidian: BlockStateId(1),
+        };
+        for seed in (0..8i64).map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64)) {
+            let mut grid = Grid { registry: registry(), blocks: HashMap::new(), writes: Vec::new(), placed: Vec::new() };
+            let mut random = LegacyRandom::new(seed);
+            let placed = feature.place(&mut grid, &mut random, [4, 20, -3], blocks).unwrap();
+            let mut expected_random = LegacyRandom::new(seed);
+            let lift = expected_random.next_int_bound(4).unwrap();
+            let draw = expected_random.next_int_bound(100).unwrap();
+            expected_random.next_int_bound(4).unwrap();
+            assert_eq!(grid.placed, vec![(r#"{"feature": "test:crop", "placement": []}"#.to_owned(), [4, 20 + lift, -3], draw)], "seed {seed}");
+            assert_eq!(placed, draw % 2 == 0, "seed {seed}");
+            assert_eq!(random.next_long(), expected_random.next_long(), "seed {seed}");
+        }
+        let mut grid = Grid { registry: registry(), blocks: HashMap::new(), writes: Vec::new(), placed: Vec::new() };
+        let mut world = ContextWorld::new(&mut grid, |_, _, _, _| false);
+        assert!(world.place_feature("{}", [0, 0, 0]).is_err());
     }
 }

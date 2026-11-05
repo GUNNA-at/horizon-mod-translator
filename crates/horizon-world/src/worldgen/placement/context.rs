@@ -59,6 +59,21 @@ pub trait PlacementContext {
     fn block_registry(&self) -> Option<&'static crate::registry::BlockRegistry> {
         None
     }
+    /// `PlacedFeature.place(level, generator, random, origin)` from a mod's feature code: the
+    /// placed feature `json` (an inline object, or a name as a JSON string) read with the
+    /// generator's feature data and placed at `origin` on this world, drawing from `random`.
+    /// `Ok(None)` where this world holds no feature data.
+    fn place_feature_json<R: horizon_core::random::RandomSource>(
+        &mut self,
+        _json: &str,
+        _random: &mut R,
+        _origin: [i32; 3],
+    ) -> Result<Option<bool>, PlacementQueryError>
+    where
+        Self: Sized,
+    {
+        Ok(None)
+    }
     /// BulkSectionAccess read: None outside the world's section range.
     fn section_block(
         &mut self,

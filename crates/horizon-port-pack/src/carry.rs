@@ -882,7 +882,13 @@ pub fn carry(
                 {
                     bytes = serde_json::to_vec_pretty(&config).unwrap_or(bytes);
                 }
-            } else if rel.starts_with("tags/worldgen/biome/") && name.starts_with("data/") {
+            } else if (rel.starts_with("tags/worldgen/biome/")
+                || rel.starts_with("neoforge/biome_modifier/")
+                || rel.starts_with("forge/biome_modifier/"))
+                && name.starts_with("data/")
+            {
+                // The mod's biome tags, and the biomes its biome modifiers pick (Farmer's
+                // Delight's wild crops in `#c:is_mushroom`...).
                 if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
                     crate::worldgen::convention_tags(&v, &mut biome_conventions);
                 }
@@ -988,8 +994,9 @@ pub fn carry(
             report.item_definitions_added += 1;
         }
     }
-    // The loader's convention biome tags the structures and their tags name
-    // (NeoForge's `c:is_plains`...): the game has no loader, so they come along.
+    // The loader's convention biome tags the structures, biome modifiers and
+    // biome tags name (NeoForge's `c:is_plains`...): the game has no loader, so
+    // they come along.
     for tag in crate::worldgen::with_included(&biome_conventions, conventions) {
         let file = inside.join(format!("data/c/tags/worldgen/biome/{tag}.json"));
         if !file.exists() {
@@ -1821,6 +1828,49 @@ mod tests {
         assert_eq!(tag("nuggets")["values"], json!(["gem:ruby_nugget", "#c:nuggets/gold", "#c:nuggets/iron"]));
         assert_eq!(tag("nuggets/iron")["values"], json!(["minecraft:iron_nugget"]));
         assert_eq!(tag("nuggets/gold")["values"], json!(["minecraft:gold_nugget"]));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The loader's convention biome tags a biome modifier picks its biomes by come along, with
+    /// the ones they include; the loader's others stay behind.
+    #[test]
+    fn biome_modifiers_get_the_loaders_biome_tags() {
+        let dir = std::env::temp_dir().join(format!("horizon-port-pack-biome-conv-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("crops-1.0.jar");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&jar).unwrap());
+        let files: &[(&str, &str)] = &[
+            (
+                "META-INF/neoforge.mods.toml",
+                "modLoader=\"javafml\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"crops\"\nversion=\"1.0\"\n",
+            ),
+            (
+                "data/crops/neoforge/biome_modifier/wild_rice.json",
+                r##"{"type": "crops:add_features_by_filter", "allowed_biomes": "#c:is_swamp", "denied_biomes": "#minecraft:is_ocean",
+                    "features": "crops:patch_wild_rice", "step": "vegetal_decoration"}"##,
+            ),
+        ];
+        for (name, text) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let conventions = BTreeMap::from([
+            ("is_swamp".to_owned(), json!({"values": ["minecraft:swamp", "#c:is_mangrove"]})),
+            ("is_mangrove".to_owned(), json!({"values": ["minecraft:mangrove_swamp"]})),
+            ("is_desert".to_owned(), json!({"values": ["minecraft:desert"]})),
+        ]);
+        let info = crate::jar::read(&jar).unwrap();
+        let out = dir.join("work/mods/crops");
+        let pack = Pack { loaded: &|_| true, mods: &|_| false };
+        let report = carry(&jar, &info, &out, None, &|_| true, &pack, &conventions).unwrap();
+        let tags = out.join("carry/data/c/tags/worldgen/biome");
+        let tag = |path: &str| -> Value { serde_json::from_slice(&fs::read(tags.join(format!("{path}.json"))).unwrap()).unwrap() };
+        assert_eq!(tag("is_swamp")["values"], json!(["minecraft:swamp", "#c:is_mangrove"]));
+        assert_eq!(tag("is_mangrove")["values"], json!(["minecraft:mangrove_swamp"]));
+        assert!(!tags.join("is_desert.json").exists());
+        assert_eq!(report.convention_biome_tags, 2);
         fs::remove_dir_all(&dir).unwrap();
     }
 

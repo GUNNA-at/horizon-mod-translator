@@ -1790,6 +1790,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
     }
     if let Some((o, f)) = key.split_once('.')
         && let Some(v) = crate::network::get_static(rt, o, f)
+            .or_else(|| crate::worldgen::get_static(rt, o, f))
             .or_else(|| crate::api_common::get_static(rt, o, f))
             .or_else(|| crate::render::get_static(rt, o, f))
             .or_else(|| crate::quads::get_static(rt, o, f))

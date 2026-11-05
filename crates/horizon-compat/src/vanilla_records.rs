@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 664] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 663] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1663,7 +1663,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 664] = [
     ("net/neoforged/neoforge/common/util/LogicalSidedProvider", "i(Ljava/util/function/Function;Ljava/util/function/Function;)V=clientSide,serverSide|o"),
     ("net/neoforged/neoforge/common/util/TablePrinter$Header", "i(Ljava/lang/String;Ljava/util/function/Function;Z)V=name,supplier,right|o"),
     ("net/neoforged/neoforge/common/world/ClimateSettingsBuilder", "i(ZFLnet/minecraft/world/level/biome/Biome$TemperatureModifier;F)V=hasPrecipitation,temperature,temperatureModifier,downfall|ghasPrecipitation()Z=hasPrecipitation|ssetHasPrecipitation(Z)V=hasPrecipitation|ggetTemperature()F=temperature|ssetTemperature(F)V=temperature|ggetTemperatureModifier()Lnet/minecraft/world/level/biome/Biome$TemperatureModifier;=temperatureModifier|ssetTemperatureModifier(Lnet/minecraft/world/level/biome/Biome$TemperatureModifier;)V=temperatureModifier|ggetDownfall()F=downfall|ssetDownfall(F)V=downfall|o"),
-    ("net/neoforged/neoforge/common/world/ModifiableBiomeInfo$BiomeInfo$Builder", "i(Lnet/neoforged/neoforge/common/world/ClimateSettingsBuilder;Lnet/neoforged/neoforge/common/world/BiomeSpecialEffectsBuilder;Lnet/neoforged/neoforge/common/world/BiomeGenerationSettingsBuilder;Lnet/neoforged/neoforge/common/world/MobSpawnSettingsBuilder;)V=climateSettings,effects,generationSettings,mobSpawnSettings|ggetClimateSettings()Lnet/neoforged/neoforge/common/world/ClimateSettingsBuilder;=climateSettings|ggetSpecialEffects()Lnet/neoforged/neoforge/common/world/BiomeSpecialEffectsBuilder;=effects|ggetGenerationSettings()Lnet/neoforged/neoforge/common/world/BiomeGenerationSettingsBuilder;=generationSettings|ggetMobSpawnSettings()Lnet/neoforged/neoforge/common/world/MobSpawnSettingsBuilder;=mobSpawnSettings|o"),
     ("net/neoforged/neoforge/common/world/ModifiableStructureInfo$StructureInfo$Builder", "i(Lnet/neoforged/neoforge/common/world/StructureSettingsBuilder;)V=structureSettings|ggetStructureSettings()Lnet/neoforged/neoforge/common/world/StructureSettingsBuilder;=structureSettings|o"),
     ("net/neoforged/neoforge/common/world/chunk/ForcedChunkManager$TicketOwner", "i(Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Comparable;)V=id,owner|e=id,owner"),
     ("net/neoforged/neoforge/common/world/chunk/TicketHelper", "i(Lnet/minecraft/world/level/ForcedChunksSavedData;Lnet/minecraft/resources/ResourceLocation;Ljava/util/Map;Ljava/util/Map;)V=saveData,controllerId,blockTickets,entityTickets|ggetBlockTickets()Ljava/util/Map;=blockTickets|ggetEntityTickets()Ljava/util/Map;=entityTickets|o"),
@@ -2224,7 +2223,7 @@ pub(crate) const FACTORIES: [(&str, &str); 39] = [
 ];
 
 /// The constants of the enums the runtime doesn't model by hand, in ordinal order.
-pub(crate) const ENUM_CONSTANTS: [(&str, &str); 363] = [
+pub(crate) const ENUM_CONSTANTS: [(&str, &str); 362] = [
     ("com/mojang/blaze3d/audio/Library$Pool", "STATIC,STREAMING"),
     ("com/mojang/blaze3d/pipeline/MainTarget$AttachmentState", "NONE,COLOR,DEPTH,COLOR_DEPTH"),
     ("com/mojang/blaze3d/platform/GlStateManager$LogicOp", "AND,AND_INVERTED,AND_REVERSE,CLEAR,COPY,COPY_INVERTED,EQUIV,INVERT,NAND,NOOP,NOR,OR,OR_INVERTED,OR_REVERSE,SET,XOR"),
@@ -2565,7 +2564,6 @@ pub(crate) const ENUM_CONSTANTS: [(&str, &str); 363] = [
     ("net/neoforged/neoforge/common/util/JsonUtils$ImmutableMapTypeAdapter", "INSTANCE"),
     ("net/neoforged/neoforge/common/util/TextTable$Alignment", "LEFT,CENTER,RIGHT"),
     ("net/neoforged/neoforge/common/util/TransformationHelper$TransformOrigin", "CENTER,CORNER,OPPOSING_CORNER"),
-    ("net/neoforged/neoforge/common/world/BiomeModifier$Phase", "BEFORE_EVERYTHING,ADD,REMOVE,MODIFY,AFTER_EVERYTHING"),
     ("net/neoforged/neoforge/common/world/StructureModifier$Phase", "BEFORE_EVERYTHING,ADD,REMOVE,MODIFY,AFTER_EVERYTHING"),
     ("net/neoforged/neoforge/event/entity/RegisterSpawnPlacementsEvent$Operation", "AND,OR,REPLACE"),
     ("net/neoforged/neoforge/event/entity/living/LivingChangeTargetEvent$LivingTargetType", "MOB_TARGET,BEHAVIOR_TARGET"),

@@ -185,6 +185,12 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/level/levelgen/feature/configurations/OreConfiguration$TargetBlockState", "CODEC") => native(rt, "target_block_state"),
         ("net/minecraft/world/level/levelgen/structure/templatesystem/RuleTest", "CODEC") => native(rt, "rule_test"),
         ("net/minecraft/world/level/levelgen/feature/configurations/OreConfiguration", "CODEC") => native(rt, "ore_configuration"),
+        // Holder sets of biomes and placed features (`RegistryCodecs.homogeneousList`), a placed
+        // feature by id or inline (`PlacedFeature.CODEC`), and inline only (`DIRECT_CODEC`).
+        ("net/minecraft/world/level/biome/Biome", "LIST_CODEC") => native(rt, "holder_set/biome"),
+        ("net/minecraft/world/level/levelgen/placement/PlacedFeature", "LIST_CODEC") => native(rt, "holder_set/placed_feature"),
+        ("net/minecraft/world/level/levelgen/placement/PlacedFeature", "CODEC") => native(rt, "placed_feature"),
+        ("net/minecraft/world/level/levelgen/placement/PlacedFeature", "DIRECT_CODEC") => native(rt, "placed_feature_direct"),
         ("net/minecraft/network/chat/ComponentSerialization", "CODEC" | "FLAT_CODEC") => native(rt, "component"),
         // A fluid by name (`Holder<Fluid>`; registries are their names here, holders their entries).
         ("net/neoforged/neoforge/fluids/FluidStack", "FLUID_NON_EMPTY_CODEC") => rt.intern("compat:codec/fluid-non-empty".into(), |rt| {
@@ -1089,10 +1095,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // (registries are their names here).
         ("net/minecraft/resources/RegistryFileCodec", "create") if rt.str_of(a(0)).is_some() => return Some(codec(rt, "compat:codec/registry", vec![a(0)])),
         // `RegistryCodecs.homogeneousList(registry, ...)`: a holder set (`#tag`, an id, a list of
-        // them), which this runtime doesn't read yet; its codec stands, reading with it fails.
+        // them, NeoForge's holder set objects), kept as written; the host answers its members.
         ("net/minecraft/core/RegistryCodecs", "homogeneousList") => {
             let registry = rt.str_of(a(0)).unwrap_or("").to_owned();
-            return Some(native(rt, &format!("unmodelled/RegistryCodecs.homogeneousList/{registry}")));
+            return Some(native(rt, &format!("holder_set/{registry}")));
         }
         // `TagKey.codec(registry)` reads `ns:path`, `hashedCodec` `#ns:path`; `ResourceKey.codec`
         // an entry's key.

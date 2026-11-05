@@ -888,11 +888,12 @@ fn {id}_component_types(types: &mut Vec<String>) {{
 // makes, declared as content files would (states, default state, strength, sounds, light, map
 // colour), replacing what the bundle could read from bytecode alone.
 fn {id}_content(content: &mut horizon_mods::Content) {{
-    // The mod's own worldgen types (its placement modifiers and features), which the world
-    // generator asks for by id when a placed or configured feature names one: read with the mod's
-    // codec and placed by its code, on the generator's region and random stream.
+    // The mod's own worldgen types (its placement modifiers, features and biome modifiers), which
+    // the world generator asks for by id when a placed or configured feature names one, and the
+    // content root when a biome modifier file does: read with the mod's codec and run by its code,
+    // on the generator's region and random stream, or on the root's biomes.
     {{
-        use horizon_world::worldgen::foreign::{{Feature, Handler, Placement, Random, World}};
+        use horizon_world::worldgen::foreign::{{BiomeModifier, Biomes, Feature, Handler, Placement, Random, StepFeatures, World}};
         struct Draws<'a>(&'a mut dyn Random);
         impl {krate}::compat::host::HostRandom for Draws<'_> {{
             fn next_int(&mut self) -> i32 {{ self.0.next_int() }}
@@ -942,6 +943,31 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
             fn biome_in_tag(&self, biome: &str, tag: &str) -> bool {{
                 self.world.borrow_mut().biome_in_tag(biome, tag)
             }}
+            fn place_feature(&mut self, json: &str, pos: [i32; 3]) -> Result<bool, String> {{
+                self.world.get_mut().place_feature(json, pos)
+            }}
+        }}
+        // The content root's biomes, as a biome modifier's host: holder sets' members, biome tags,
+        // a biome's data.
+        struct Root<'a>(&'a dyn Biomes);
+        impl {krate}::compat::host::Host for Root<'_> {{
+            fn block_state(&self, _pos: [i32; 3]) -> String {{
+                "minecraft:air".to_owned()
+            }}
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
+                false
+            }}
+            fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{
+                self.0.resolve(registry, set).ok()
+            }}
+            fn biome_json(&self, id: &str) -> Option<String> {{
+                self.0.biome(id)
+            }}
+            fn biome_in_tag(&self, biome: &str, tag: &str) -> bool {{
+                // The tag as a holder set's JSON: a string of `#` and the tag's name.
+                let set = format!("{{q}}#{{tag}}{{q}}", q = '"');
+                self.0.resolve("biome", &set).is_ok_and(|members| members.iter().any(|m| m == biome))
+            }}
         }}
         // A call's outermost entry, where garbage may go: what the generator holds of the mod's
         // (the modifiers and configured features it read) is the runtime's own, kept by its text.
@@ -952,6 +978,17 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
                 {krate}::with_worldgen_runtime(|rt| {{
                     rt.safe_point();
                     rt.with_host(&mut region, |rt| {c}::worldgen::positions(rt, self.0, origin))
+                }})
+                .unwrap_or_else(|| Err("the mod's worldgen code is already running on this thread".to_owned()))
+            }}
+        }}
+        struct ModBiomeModifier({krate}::compat::V);
+        impl BiomeModifier for ModBiomeModifier {{
+            fn modify(&self, biomes: &dyn Biomes, biome: &str, phase: usize, features: &mut StepFeatures) -> Result<(), String> {{
+                let mut root = Root(biomes);
+                {krate}::with_worldgen_runtime(|rt| {{
+                    rt.safe_point();
+                    rt.with_host(&mut root, |rt| {c}::worldgen::modify_biome(rt, self.0, biome, phase, features))
                 }})
                 .unwrap_or_else(|| Err("the mod's worldgen code is already running on this thread".to_owned()))
             }}
@@ -983,6 +1020,13 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
                 }}
                 let read = {krate}::with_worldgen_runtime(|rt| {c}::worldgen::feature(rt, kind, json)).flatten()?;
                 Some(read.map(|v| std::sync::Arc::new(ModFeature(v)) as std::sync::Arc<dyn Feature>))
+            }}
+            fn biome_modifier(&self, kind: &str, json: &str) -> Option<Result<std::sync::Arc<dyn BiomeModifier>, String>> {{
+                if !{krate}::ours(kind) {{
+                    return None;
+                }}
+                let read = {krate}::with_worldgen_runtime(|rt| {c}::worldgen::biome_modifier(rt, kind, json)).flatten()?;
+                Some(read.map(|v| std::sync::Arc::new(ModBiomeModifier(v)) as std::sync::Arc<dyn BiomeModifier>))
             }}
         }}
         horizon_world::worldgen::foreign::register({id:?}, std::sync::Arc::new(Worldgen));
