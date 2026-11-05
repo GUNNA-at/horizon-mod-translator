@@ -3532,7 +3532,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   Test `mob_effects::tests::a_mod_gives_reads_and_takes_off_the_games_effects` (the acting player's speed from a potion
   read by holder, amplifier and duration; a stronger one given takes over and a weaker, shorter one changes nothing; a
   cow takes a mod's own effect by its `DeferredHolder`, lists it and loses it once; a wolf the host doesn't know takes
-  none; everything off the player at the end). 361 compat, 17 translator, 41 game tests pass. Not yet checked in game.
+  none; everything off the player at the end). 361 compat, 17 translator, 41 game tests pass. In game (`hzcheck`'s
+  attack listener gives the player night vision, a stronger one over it and then a weaker, shorter one, and the cow
+  glowing; at the next blow on the cow it takes the night vision off): the first blow read `night vision given: true
+  true false, the cow glows: true, the player's night vision level 2 for 1200 ticks, the cow's effects 1`. The game's
+  own `/effect give @s minecraft:night_vision 30 0` then answered `Unable to apply this effect (target is either
+  immune to effects, or has something stronger)`, and `/effect clear` on the cow `Removed effect Glowing from Cow`:
+  both are the game's effects. The next blow read `night vision taken off: true, the player's night vision none, the
+  cow's effects 0` (the command's clearing seen by the mod), and `/effect clear @s minecraft:night_vision` found
+  none left. No panic; no effect call in the run's list of what isn't translated.
   - Gaps: a mod's own effects aren't declared to the game yet (its `MobEffect` registrations), so giving one is
     refused; NeoForge's `MobEffectEvent` (`Applicable`, `Added`, `Remove`, `Expired`) isn't fired; `canBeAffected`,
     `removeEffectsCuredBy` and `MobEffect.applyInstantenousEffect` aren't there; another player than the one in place
