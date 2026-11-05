@@ -2251,6 +2251,13 @@ mod tests {
         let mut carried: Vec<String> = super::COMPAT.iter().map(|(n, _)| n.to_string()).collect();
         carried.sort();
         assert_eq!(carried, on_disk);
+        // The inlined runtime is one crate with the core's entry points left out: carried code names
+        // the core as `crate`, never as the `horizon_compat_core` crate (tests aside).
+        for (n, text) in super::COMPAT {
+            let code = text.split("#[cfg(test)]").next().unwrap_or(text);
+            let named = code.lines().filter(|l| !l.trim_start().starts_with("//")).any(|l| l.contains("horizon_compat_core::"));
+            assert!(!named, "{n} calls the core crate, which an inlined runtime doesn't have");
+        }
         // The inlined core declares every carried mapping module and drops the installable entry points.
         let core = super::inlined_core();
         assert!(!core.contains("pub fn install_fns"));

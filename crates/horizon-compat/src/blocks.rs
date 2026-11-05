@@ -1959,11 +1959,11 @@ mod tests {
         let light = "net/minecraft/world/level/block/state/BlockBehaviour$Properties.$lightEmission.()Ljava/util/function/ToIntFunction;";
         let to_int = "java/util/function/ToIntFunction.applyAsInt.(Ljava/lang/Object;)I";
         let p = props(&mut rt);
-        let f = horizon_compat_core::api::game_field(&mut rt, p, "lightEmission", "$lightEmission", light);
+        let f = crate::api::game_field(&mut rt, p, "lightEmission", "$lightEmission", light);
         assert_eq!(api::call(&mut rt, to_int, &[f, st]), V::I(0), "Properties.of()'s state -> 0");
         let lit = rt.new_object("test/Lit");
         api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.lightLevel.(Ljava/util/function/ToIntFunction;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[p, lit]);
-        assert_eq!(horizon_compat_core::api::game_field(&mut rt, p, "lightEmission", "$lightEmission", light), lit);
+        assert_eq!(crate::api::game_field(&mut rt, p, "lightEmission", "$lightEmission", light), lit);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
 
         // SecurityCraft reads `destroyTime` off the properties it copied; mods read
@@ -1971,7 +1971,7 @@ mod tests {
         let field = |rt: &mut Rt, p: V, f: &'static str, ty: &str| {
             let key = Box::leak(format!("net/minecraft/world/level/block/state/BlockBehaviour$Properties.${f}.(){ty}").into_boxed_str());
             let own = Box::leak(format!("${f}").into_boxed_str());
-            horizon_compat_core::api::game_field(rt, p, f, own, key)
+            crate::api::game_field(rt, p, f, own, key)
         };
         let stone = rt.string("minecraft:stone");
         let copy = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.ofFullCopy.(Lnet/minecraft/world/level/block/state/BlockBehaviour;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[stone]);

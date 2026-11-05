@@ -58,10 +58,18 @@ thread_local! {
 /// stack's end, instead of overflowing the game's.
 const MAX_DEPTH: u32 = 512;
 
-/// A game class's field read by the mod's code ([`horizon_compat_core::api::game_field`]), for
-/// code linked against this crate: generated code names `api::game_field` either way.
+/// A game class's field `name` read by the mod's code: the field when the object has it, else what
+/// the runtime keeps for it (`own`), else the accessor `key` answers. Generated code names
+/// `api::game_field` whether it links the core or carries this runtime inlined, where the core's
+/// entry points are left out: so this is the runtime's own, not a call into the core.
 pub fn game_field(rt: &mut Rt, o: V, name: &'static str, own: &'static str, key: &'static str) -> V {
-    horizon_compat_core::api::game_field(rt, o, name, own, key)
+    match rt.get_field(o, name) {
+        V::Void if o.r() != 0 => match rt.get_field(o, own) {
+            V::Void => call(rt, key, &[o]),
+            v => v,
+        },
+        v => v,
+    }
 }
 
 /// Calls the API method `key` (`owner.name.desc`). For instance methods
