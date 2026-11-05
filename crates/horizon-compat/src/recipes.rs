@@ -26,6 +26,7 @@ const FLUID_INGREDIENT: &str = "net/neoforged/neoforge/fluids/crafting/FluidIngr
 const SIZED_FLUID: &str = "net/neoforged/neoforge/fluids/crafting/SizedFluidIngredient";
 const COMPONENT_PATCH: &str = "net/minecraft/core/component/DataComponentPatch";
 const STACK_ARRAY: &str = "[Lnet/minecraft/world/item/ItemStack;";
+const SIZED_ITEM: &str = "net/neoforged/neoforge/common/crafting/SizedIngredient";
 const FLUID_STACK_ARRAY: &str = "[Lnet/neoforged/neoforge/fluids/FluidStack;";
 const SERIALIZER_CODEC: &str = "net/minecraft/world/item/crafting/RecipeSerializer.codec.()Lcom/mojang/serialization/MapCodec;";
 const MATCHES: &str = "net/minecraft/world/item/crafting/Recipe.matches.(Lnet/minecraft/world/item/crafting/RecipeInput;Lnet/minecraft/world/level/Level;)Z";
@@ -320,6 +321,70 @@ fn ingredient_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V])
         (INGREDIENT, "toString") => {
             let e = format!("Ingredient{{{}}}", entries(rt, a(0)).join(", "));
             rt.string(&e)
+        }
+        _ => return None,
+    })
+}
+
+// ---- Sized ingredients ----
+
+/// NeoForge's `SizedIngredient`: an ingredient and how many of its items (Mekanism's machine
+/// recipes are made of them).
+fn sized_item(rt: &mut Rt, ingredient: V, count: i32) -> V {
+    let o = rt.new_object(SIZED_ITEM);
+    rt.put_field(o, "$ingredient", ingredient);
+    rt.put_field(o, "$count", V::I(count));
+    o
+}
+
+fn sized_item_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match name {
+        // `new SizedIngredient(ingredient, count)`, which refuses a count below one as NeoForge's.
+        "<init>" => {
+            if a(2).i() <= 0 {
+                return Some(crate::jlang::throw_with(rt, "java/lang/IllegalArgumentException", "Size must be positive"));
+            }
+            rt.put_field(a(0), "$ingredient", a(1));
+            rt.put_field(a(0), "$count", a(2));
+            V::Void
+        }
+        // `of(item, count)` and `of(tag, count)`.
+        "of" => {
+            let entry = if desc.starts_with("(Lnet/minecraft/tags/TagKey;") { tag_entry(rt, a(0)) } else { item_like_entry(rt, a(0)) };
+            let i = ingredient(rt, &[entry]);
+            sized_item(rt, i, a(1).i())
+        }
+        "ingredient" => rt.get_field(a(0), "$ingredient"),
+        "count" => rt.get_field(a(0), "$count"),
+        // A stack of the ingredient's items, at least as many.
+        "test" => {
+            let i = rt.get_field(a(0), "$ingredient");
+            let enough = !api_common::stack_empty(rt, a(1)) && rt.get_field(a(1), "$count").i() >= rt.get_field(a(0), "$count").i();
+            V::I((enough && ingredient_test(rt, i, a(1))) as i32)
+        }
+        // The ingredient's items, each `count` of them.
+        "getItems" => {
+            let i = rt.get_field(a(0), "$ingredient");
+            let count = rt.get_field(a(0), "$count").i();
+            let stacks: Vec<V> = ingredient_items(rt, i).iter().map(|item| api_common::stack(rt, item, count)).collect();
+            rt.alloc(STACK_ARRAY, Data::Array(stacks))
+        }
+        "equals" => {
+            let same = rt.class_of(a(1)) == SIZED_ITEM && rt.get_field(a(0), "$count") == rt.get_field(a(1), "$count");
+            let (x, y) = (rt.get_field(a(0), "$ingredient"), rt.get_field(a(1), "$ingredient"));
+            V::I((same && entries(rt, x) == entries(rt, y)) as i32)
+        }
+        "hashCode" => {
+            let i = rt.get_field(a(0), "$ingredient");
+            let e = entries(rt, i).join(" ");
+            let s = rt.string(&e);
+            V::I(rt.java_hash(s).wrapping_mul(31).wrapping_add(rt.get_field(a(0), "$count").i()))
+        }
+        "toString" => {
+            let i = rt.get_field(a(0), "$ingredient");
+            let t = format!("{}x Ingredient{{{}}}", rt.get_field(a(0), "$count").i(), entries(rt, i).join(", "));
+            rt.string(&t)
         }
         _ => return None,
     })
@@ -665,6 +730,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
             "net/neoforged/neoforge/common/crafting/CompoundIngredient"
                 | FLUID_INGREDIENT
                 | SIZED_FLUID
+                | SIZED_ITEM
                 | MANAGER
                 | BREWING
                 | HOLDER
@@ -699,6 +765,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if owner == FLUID_INGREDIENT || owner == SIZED_FLUID {
         return fluid_ingredient_call(rt, owner, name, desc, args);
+    }
+    if owner == SIZED_ITEM {
+        return sized_item_call(rt, name, desc, args);
     }
     if let Some(v) = crate::crafting::call(rt, owner, name, desc, args) {
         return Some(v);
@@ -1027,6 +1096,22 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             requires(rt, i, needs);
             Ok(i)
         }
+        // `SizedIngredient.FLAT_CODEC` (the ingredient's own keys beside `count`) and `NESTED_CODEC`
+        // (it under `ingredient`); a count of one when none is written.
+        "sized_ingredient" => {
+            let o = object()?;
+            let mut out = Vec::new();
+            read_ingredient(rt, o.get("ingredient").unwrap_or(j), &mut out)?;
+            if out.is_empty() {
+                return Err("Cannot serialize empty ingredient using the non-empty codec".into());
+            }
+            let count = int_field(o, "count", 1)?;
+            if count <= 0 {
+                return Err(format!("count: Value must be positive: {count}"));
+            }
+            let i = ingredient(rt, &out);
+            Ok(sized_item(rt, i, count as i32))
+        }
         "sized_fluid_ingredient" => {
             let o = object()?;
             // `NESTED_CODEC` holds the ingredient under `ingredient`; `FLAT_CODEC` beside `amount`.
@@ -1147,6 +1232,44 @@ mod tests {
                 let r = crate::api::call(rt, "net/minecraft/world/item/alchemy/PotionBrewing.isContainer.(Lnet/minecraft/world/item/ItemStack;)Z", &[brewing, s]);
                 assert_eq!(r, V::I(container), "{item}");
             }
+        });
+    }
+
+    /// NeoForge's `SizedIngredient` as Mekanism's recipes hold it: read flat (`{"tag", "count"}`) or
+    /// nested (`{"ingredient": ...}`, one when no count is written); a stack of its items passes with
+    /// as many or more, and its items come as stacks of that many.
+    #[test]
+    fn a_sized_ingredient_wants_as_many_of_its_items() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        host.item_tags.insert("c:ingots/iron".into(), vec!["minecraft:iron_ingot".into()]);
+        const SIZED: &str = "net/neoforged/neoforge/common/crafting/SizedIngredient";
+        rt.with_host(&mut host, |rt| {
+            let flat = decode_native(rt, "sized_ingredient", &serde_json::json!({"tag": "c:ingots/iron", "count": 3})).unwrap();
+            let test = |rt: &mut Rt, item: &str, n: i32| {
+                let s = api_common::stack(rt, item, n);
+                crate::api::call(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.test.(Lnet/minecraft/world/item/ItemStack;)Z", &[flat, s])
+            };
+            assert_eq!(test(rt, "minecraft:iron_ingot", 2), V::I(0));
+            assert_eq!(test(rt, "minecraft:iron_ingot", 3), V::I(1));
+            assert_eq!(test(rt, "minecraft:gold_ingot", 5), V::I(0));
+            let items = crate::api::call(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.getItems.()[Lnet/minecraft/world/item/ItemStack;", &[flat]);
+            let items = jutil::elements(rt, items);
+            assert_eq!(items.len(), 1);
+            assert_eq!((stack_item(rt, items[0]), rt.get_field(items[0], "$count")), ("minecraft:iron_ingot".to_owned(), V::I(3)));
+            let nested = decode_native(rt, "sized_ingredient", &serde_json::json!({"ingredient": {"item": "minecraft:cobblestone"}})).unwrap();
+            assert_eq!(crate::api::call(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.count.()I", &[nested]), V::I(1));
+            assert!(decode_native(rt, "sized_ingredient", &serde_json::json!({"item": "minecraft:cobblestone", "count": 0})).is_err());
+            // `SizedIngredient.of(tag, 3)` is the one read above.
+            let tag = crate::fluids::tag_key(rt, "item", "c:ingots/iron");
+            let made = crate::api::call(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.of.(Lnet/minecraft/tags/TagKey;I)Lnet/neoforged/neoforge/common/crafting/SizedIngredient;", &[tag, V::I(3)]);
+            assert_eq!(rt.class_of(made), SIZED);
+            assert_eq!(crate::api::call(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.equals.(Ljava/lang/Object;)Z", &[made, flat]), V::I(1));
+            let codec = crate::api::get_static(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.FLAT_CODEC");
+            let read = crate::codecs::decode(rt, codec, &serde_json::json!({"item": "minecraft:cobblestone", "count": 2})).unwrap();
+            assert_eq!(crate::api::call(rt, "net/neoforged/neoforge/common/crafting/SizedIngredient.count.()I", &[read]), V::I(2));
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
     }
 

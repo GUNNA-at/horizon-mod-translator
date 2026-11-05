@@ -2399,6 +2399,12 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     superclasses' too), `isArray`, `getComponentType` and `isPrimitive` for the mod's classes:
     Mekanism's `SyncMapper` reads its synced fields' types (70 `Field.getType` misses in round 14).
     Test `jlang::tests::a_mod_classs_fields_tell_their_types`; 277 compat and 14 translator tests pass.
+  - [x] 2026-11-05 NeoForge's `SizedIngredient`, which Mekanism's machine recipes are made of
+    (`ItemStackIngredient` holds one): `FLAT_CODEC` and `NESTED_CODEC` (the ingredient's keys beside
+    `count`, or under `ingredient`; one when no count is written, a count below one refused),
+    `new SizedIngredient(ingredient, count)`, `of(item or tag, count)`, `test` (as many of its items
+    or more), `getItems` (stacks of that many), `equals`, `hashCode`, `toString`. Test
+    `recipes::tests::a_sized_ingredient_wants_as_many_of_its_items`; 278 compat tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

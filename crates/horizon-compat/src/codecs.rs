@@ -141,6 +141,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/neoforged/neoforge/fluids/FluidStack", "CODEC" | "FIXED_AMOUNT_CODEC") => native(rt, "fluid_stack"),
         ("net/neoforged/neoforge/fluids/FluidStack", "OPTIONAL_CODEC") | ("net/neoforged/neoforge/fluids/SimpleFluidContent", "CODEC") => native(rt, "optional_fluid_stack"),
         ("net/neoforged/neoforge/fluids/crafting/SizedFluidIngredient", "FLAT_CODEC" | "NESTED_CODEC") => native(rt, "sized_fluid_ingredient"),
+        ("net/neoforged/neoforge/common/crafting/SizedIngredient", "FLAT_CODEC" | "NESTED_CODEC") => native(rt, "sized_ingredient"),
         ("net/neoforged/neoforge/fluids/crafting/FluidIngredient", "MAP_CODEC_NONEMPTY") => native(rt, "fluid_ingredient_map"),
         ("net/neoforged/neoforge/fluids/crafting/FluidIngredient", "CODEC" | "CODEC_NON_EMPTY") => native(rt, "fluid_ingredient"),
         ("net/minecraft/core/component/DataComponentPatch" | "net/minecraft/core/component/DataComponentMap", "CODEC") => native(rt, "component_patch"),
