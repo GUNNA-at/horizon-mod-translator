@@ -2361,6 +2361,15 @@ fn block_declaration(rt: &mut Rt, name: &str, b: V, item: bool) -> String {
     if rt.get_field(props, "$randomTicks").i() != 0 {
         p.push("\"random_ticks\": true".into());
     }
+    // The vanilla block its properties copy (`ofFullCopy(Blocks.TALL_GRASS)`): the game carries
+    // over what it knows of that block (its hardness, tool, map colour, occlusion, collision...)
+    // under the values above.
+    if let Some(c) = copy.as_deref().filter(|c| c.starts_with("minecraft:")) {
+        p.push(format!("\"copy\": \"{c}\""));
+    }
+    if props.r() != 0 && rt.get_field(props, "$noCollision").i() != 0 {
+        p.push("\"collision\": false".into());
+    }
 
     let own: Vec<String> = states
         .iter()
@@ -2770,9 +2779,31 @@ mod tests {
         api::call(&mut rt, "net/minecraft/world/level/block/Block.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[b, p]);
         rt.registered.insert(("block".into(), "ruby:casing".into()), b);
         let (_, json) = block_declarations(&mut rt).remove(0);
-        for part in ["\"template\": \"minecraft:stone\"", "\"item\": false", "\"hardness\": 1.5", "\"sounds\": \"minecraft:andesite\"", "\"map_color\": 11"] {
+        for part in ["\"template\": \"minecraft:stone\"", "\"item\": false", "\"hardness\": 1.5", "\"sounds\": \"minecraft:andesite\"", "\"map_color\": 11", "\"copy\": \"minecraft:andesite\""] {
             assert!(json.contains(part), "{part} in {json}");
         }
+        assert!(!json.contains("\"collision\""), "{json}");
+        // Farmer's Delight's wild rice: `ofFullCopy(Blocks.TALL_GRASS)`, a block the table doesn't
+        // know: the copy is named for the game to carry over (no collision, light through it).
+        // Another plant says `noCollission()` itself.
+        let copy = "net/minecraft/world/level/block/state/BlockBehaviour$Properties.ofFullCopy.(Lnet/minecraft/world/level/block/state/BlockBehaviour;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;";
+        let grass = api::get_static(&mut rt, "net/minecraft/world/level/block/Blocks.TALL_GRASS");
+        let p = api::call(&mut rt, copy, &[grass]);
+        let rice = rt.new_object("net/minecraft/world/level/block/Block");
+        api::call(&mut rt, "net/minecraft/world/level/block/Block.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[rice, p]);
+        let p = props(&mut rt);
+        api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.noCollission.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[p]);
+        let reed = rt.new_object("net/minecraft/world/level/block/Block");
+        api::call(&mut rt, "net/minecraft/world/level/block/Block.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[reed, p]);
+        rt.registered.clear();
+        rt.registered.insert(("block".into(), "ruby:rice".into()), rice);
+        rt.registered.insert(("block".into(), "ruby:reed".into()), reed);
+        let declared: std::collections::HashMap<String, String> = block_declarations(&mut rt).into_iter().collect();
+        let rice = &declared["ruby:rice"];
+        assert!(rice.contains("\"copy\": \"minecraft:tall_grass\"") && !rice.contains("\"collision\""), "{rice}");
+        let reed = &declared["ruby:reed"];
+        assert!(reed.contains("\"collision\": false") && !reed.contains("\"copy\""), "{reed}");
+        assert!(reed.contains("\"template\": \"minecraft:glass\""), "{reed}");
     }
 
     #[test]

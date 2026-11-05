@@ -2762,6 +2762,51 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     stone through `BlockTags.DIRT`'s 26.3 name; a block with its own `canSurvive`; one with
     neither left to its template; the claims), `foreign::tests::a_mods_block_survives_where_its_code_says`.
     308 compat and 292 horizon-world tests pass.
+  - [x] 2026-11-05 A block copying a vanilla block's properties gets them; a block nothing collides
+    with lets things through; a mod's own `waterlogged=true` holds water. Farmer's Delight's rice
+    drew black: `Properties.ofFullCopy(Blocks.TALL_GRASS)` named a block the runtime's `COPIED`
+    table (14 blocks) didn't know, so the declaration kept its stone template's occlusion,
+    hardness, tool and collision. The pack's mods copy 358 distinct vanilla blocks
+    (`scratchpad/copycensus.py`: `getstatic Blocks.X` then `ofFullCopy`/`ofLegacyCopy`).
+    - Declarations (`horizon-mods`): a block's properties take `copy` (a `minecraft:` block, the one
+      `ofFullCopy` names) and `collision` (`false`: `noCollission()`).
+    - Runtime (`horizon-compat`): `block_declaration` names the copy and a `noCollission()`.
+      `Blocks.X` and `Items.X` give their 26.3 ids (`api::field_id`). Checked against every static
+      field of 1.21.1's two classes (1060 blocks, 1333 items): four differ, `CHAIN` (26.3's
+      `iron_chain`), `POTTED_AZALEA` and `POTTED_FLOWERING_AZALEA` (`*_bush`) and
+      `Items.CUT_STANDSTONE_SLAB` (`cut_sandstone_slab`).
+    - Content root (`mod_content.rs`): the copied block's values carry over under the block's own.
+      Gameplay rows: hardness, resistance, tool, friction, speed and jump factors, map colour,
+      sound, light, lava, push, replaceable, random ticks, offset. A copy of a block that doesn't
+      occlude hides nothing behind it and lets light through. Also worldgen's definition flags
+      (`block-properties.nbt`), the movement factors (`movement-properties.nbt`; a bounce stays
+      the template class's) and the note block instrument. No collision: the empty shape in both
+      collision caches, an open row for mobs (water where it holds water), no sturdy face, not
+      solid, no conductor, no suffocation, `full_collision` false. A copy without its own
+      `collision` collides as the copied block does. `waterlogged=true`: the fluid flag in
+      `facts.json` and worldgen's `block_flags.json`, a water source in `block-behaviours.json`,
+      light dimmed as water dims it.
+    Tests: `mod_content::tests::a_block_copying_a_vanilla_blocks_properties_takes_the_games_rows_for_them`,
+    `content::tests::blocks_copy_a_vanilla_blocks_properties_and_may_not_collide`,
+    `blocks::tests::copied_properties_take_the_vanilla_blocks_values` (a tall grass copy, a
+    `noCollission()` reed), the field ids in `api_common`'s runtime test.
+  - [x] 2026-11-05 A translated mod keeps the recipes for items its code declares at start. The
+    installer moved a recipe whose result was a mod item it didn't declare to `outside/`: for
+    Farmer's Delight 24, among them the cooking pot, skillet, rope, rice, tatami and the pies,
+    whose blocks only the translated code declares. The game now does what vanilla does with a
+    recipe for an unknown item (`ItemStackTemplate.CODEC` reads the id through the item
+    registry, so the file doesn't load): `crafting::result_known` leaves it out of crafting,
+    cooking, smithing and the stonecutter. The installer keeps such recipes and lists them
+    (`recipes_unregistered`). An item table of tags alone (`Items::tags_only`) calls nothing
+    unknown.
+    Tests: `crafting::tests::a_recipe_for_an_unknown_item_is_not_loaded`,
+    `check::tests::recipes_for_left_out_blocks_are_left_out_too` (the file stays).
+  - [x] 2026-11-05 A mod's dyeable items dye in the crafting grid. 1.21.1 dyes anything in
+    `#minecraft:dyeable` (`ArmorDyeRecipe`); 26.3 has no such tag and gives each dyeable item a
+    `crafting_dye` recipe (`leather_helmet_dyed`). The installer writes that recipe for each item
+    the mod adds to the tag (`dye_recipes`), one marked `required: false` too: the game leaves it
+    out while its item is unknown. Test: `carry::tests::a_mods_vanilla_tags_are_26_3s`.
+    113 port-pack, 54 crafting, content and station tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

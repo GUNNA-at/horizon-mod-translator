@@ -91,6 +91,15 @@ pub struct BlockProperties {
     /// How the chunk mesher draws the block (`BlockBehaviour.getRenderShape(state)`), whatever the
     /// template does.
     pub render_shape: Option<RenderShapes>,
+    /// A vanilla block whose properties this block copies (`Properties.ofFullCopy(Blocks.X)`):
+    /// what the copy carries in vanilla and the game knows of that block, its hardness, explosion
+    /// resistance, tool need, friction, speed and jump factors, map colour, sounds, light,
+    /// flammability, piston reaction and replaceability, whether it occludes and whether it
+    /// collides. The fields set here win over it; the template keeps the states and behaviour.
+    pub copy: Option<String>,
+    /// `false`: nothing collides with it (`noCollission()`): entities and mobs pass through, its
+    /// outline stays.
+    pub collision: Option<bool>,
 }
 
 /// A block's `RenderShape` by state: `model` (the chunk draws its block model), `entityblock_animated`
@@ -912,6 +921,9 @@ fn check_block(file: &BlockFile) -> Result<(), String> {
             file.template
         ));
     }
+    if let Some(copy) = file.properties.copy.as_deref().filter(|c| !vanilla_id(c)) {
+        return Err(format!("copy {copy:?} is not a vanilla block (minecraft:...)"));
+    }
     if let Some(shapes) = &file.shapes {
         match shapes {
             BlockShapes::Property(p) if p.property.is_empty() || p.values.is_empty() => {
@@ -1425,6 +1437,25 @@ capabilities = ["registries"]
             assert!(e.contains("random_ticks"), "{bad}: {e}");
         }
         assert!(block("3").is_err());
+    }
+
+    #[test]
+    fn blocks_copy_a_vanilla_blocks_properties_and_may_not_collide() {
+        let block = |properties: &str| {
+            let text = format!(r#"{{"template": "minecraft:stone", "properties": {properties}}}"#);
+            let files: &[(&str, &[u8])] = &[("data/ruby/horizon/block/reed.json", text.as_bytes())];
+            hmod("copy", MANIFEST_TEXT, files).map(|c| c.blocks[0].properties.clone())
+        };
+        // A wild plant: tall grass's properties, nothing in its way; its own hardness still wins.
+        let p = block(r#"{"copy": "minecraft:tall_grass", "collision": false, "hardness": 0.5}"#).unwrap();
+        assert_eq!(p.copy.as_deref(), Some("minecraft:tall_grass"));
+        assert_eq!((p.collision, p.hardness), (Some(false), Some(0.5)));
+        // Unset: the template's.
+        let p = block("{}").unwrap();
+        assert_eq!((p.copy, p.collision), (None, None));
+        // Only a vanilla block is copied.
+        let e = block(r#"{"copy": "ruby:reed"}"#).unwrap_err();
+        assert!(e.contains("copy"), "{e}");
     }
 
     #[test]

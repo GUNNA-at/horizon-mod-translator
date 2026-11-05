@@ -4192,7 +4192,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         {
             vanilla_block_entity_type(rt, field)
         }
-        "net/minecraft/world/item/Items" => item(rt, &field.to_ascii_lowercase()),
+        "net/minecraft/world/item/Items" => item(rt, &crate::api::field_id(field)),
         // What a villager eats and picks up (1.21.1's `Villager.FOOD_POINTS` and `WANTED_ITEMS`, read
         // from its initialiser): FarmersDelight adds its crops to them.
         "net/minecraft/world/entity/npc/Villager" if field == "FOOD_POINTS" => rt.intern("compat:villager-food-points".into(), |rt| {
@@ -4903,6 +4903,21 @@ mod tests {
         assert_eq!(api::call(&mut rt, "net/minecraft/world/phys/Vec3.length.()D", &[a]), V::D(5.0));
         assert_eq!(rt.get_field(a, "z"), V::D(4.0)); // `vec.z` field reads work
 
+        // A field names its 26.3 id: the chain 26.3 renamed, 1.21.1's own odd names.
+        let id = |rt: &mut Rt, key: &'static str| {
+            let v = api::get_static(rt, key);
+            rt.str_of(v).map(str::to_owned)
+        };
+        for (key, want) in [
+            ("net/minecraft/world/level/block/Blocks.CHAIN", "minecraft:iron_chain"),
+            ("net/minecraft/world/level/block/Blocks.POTTED_AZALEA", "minecraft:potted_azalea_bush"),
+            ("net/minecraft/world/level/block/Blocks.STONE", "minecraft:stone"),
+            ("net/minecraft/world/item/Items.CHAIN", "minecraft:iron_chain"),
+            ("net/minecraft/world/item/Items.CUT_STANDSTONE_SLAB", "minecraft:cut_sandstone_slab"),
+            ("net/minecraft/world/item/Items.STONE", "minecraft:stone"),
+        ] {
+            assert_eq!(id(&mut rt, key).as_deref(), Some(want), "{key}");
+        }
         let stone = api::get_static(&mut rt, "net/minecraft/world/item/Items.STONE");
         let s = rt.new_object("net/minecraft/world/item/ItemStack");
         api::call(&mut rt, "net/minecraft/world/item/ItemStack.<init>.(Lnet/minecraft/world/level/ItemLike;I)V", &[s, stone, V::I(3)]);

@@ -1009,6 +1009,20 @@ fn fuzzy_equals(x: f64, y: f64, tolerance: f64) -> bool {
     (x - y).abs() <= tolerance || x == y || (x.is_nan() && y.is_nan())
 }
 
+/// The 26.3 id of the block or item a 1.21.1 `Blocks` or `Items` field holds: its lower-cased name,
+/// but for the chain 26.3 renamed and 1.21.1's own odd names (`Blocks.POTTED_AZALEA` is
+/// `potted_azalea_bush`, `Items.CUT_STANDSTONE_SLAB` is `cut_sandstone_slab`). Checked against every
+/// static field of the two classes in 1.21.1's jar: no other differs.
+pub fn field_id(field: &str) -> String {
+    match field {
+        "CHAIN" => "minecraft:iron_chain".into(),
+        "POTTED_AZALEA" => "minecraft:potted_azalea_bush".into(),
+        "POTTED_FLOWERING_AZALEA" => "minecraft:potted_flowering_azalea_bush".into(),
+        "CUT_STANDSTONE_SLAB" => "minecraft:cut_sandstone_slab".into(),
+        f => format!("minecraft:{}", f.to_ascii_lowercase()),
+    }
+}
+
 /// A block value: the mod's own Block object when it registered one by that name.
 pub fn block(rt: &mut Rt, name: &str) -> V {
     if let Some(v) = rt.registered.get(&("block".to_owned(), name.to_owned())) {
@@ -1935,7 +1949,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             }
         }
         k if k.starts_with("net/minecraft/world/level/block/Blocks.") => {
-            let n = format!("minecraft:{}", k.rsplit('.').next().unwrap_or("").to_ascii_lowercase());
+            let n = field_id(k.rsplit('.').next().unwrap_or(""));
             block(rt, &n)
         }
         // A stream codec of the game's this runtime doesn't model (`DyeColor.STREAM_CODEC`): the

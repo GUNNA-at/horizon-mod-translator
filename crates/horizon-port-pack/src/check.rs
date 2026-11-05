@@ -373,8 +373,10 @@ displayName = "Ruby"
             "{:?}",
             c.skipped
         );
-        assert!(!dir.join("out/carry/data/ruby/recipe/odd.json").exists());
-        assert!(dir.join("out/outside/data/ruby/recipe/odd.json").exists());
+        // The file stays for the mod's code to declare `ruby:odd` at start; until something
+        // does, the game leaves the recipe out, as vanilla does a recipe for an unknown item.
+        assert!(dir.join("out/carry/data/ruby/recipe/odd.json").exists());
+        assert!(!dir.join("out/outside/data/ruby/recipe/odd.json").exists());
         assert!(
             dir.join("out/carry/data/ruby/recipe/ruby_block.json")
                 .exists()

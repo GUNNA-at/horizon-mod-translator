@@ -1883,6 +1883,149 @@ fn content_shapes_drive_outline_and_collision() {
     fs::remove_dir_all(scratch).unwrap();
 }
 
+/// A block copying a vanilla block's properties (`copy`, `Properties.ofFullCopy`) takes what the
+/// copy carries from the game's own rows over its template's, its own values winning: Farmer's
+/// Delight's wild rice copies tall grass on a stone template, so it lets light through, hides
+/// nothing behind it, needs no tool and nothing collides with it; its own `waterlogged=true`
+/// states hold water for the level and dim light as water does. A block that copies nothing keeps
+/// its template's rows.
+#[test]
+fn a_block_copying_a_vanilla_blocks_properties_takes_the_games_rows_for_them() {
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-copy-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let base = scratch.join("base");
+    fs::create_dir_all(&base).unwrap();
+    let facts = r#"{"states":[
+      ["minecraft:stone",false,false,"",{"id":"minecraft:stone"}],
+      ["minecraft:tall_grass",false,false,"",{"id":"minecraft:tall_grass","properties":{"half":"upper"}}],
+      ["minecraft:tall_grass",false,false,"",{"id":"minecraft:tall_grass","properties":{"half":"lower"}}],
+      ["minecraft:water",false,true,"",{"id":"minecraft:water","properties":{"level":"0"}}]],
+      "defaults":{"minecraft:stone":0,"minecraft:tall_grass":2,"minecraft:water":3}}"#;
+    let stone = r#"{"item":"minecraft:stone","hardness":1.5,"requires_tool":true,"can_occlude":true,"solid_render":true,"shape_occlusion":false,"dampening":15,"skylight_down":false,"full_collision":true,"map_color":7368816,"replaceable":false,"offset":false,"push":"PUSH_PULL","random_ticks":false,"sound":{"volume":1.0}}"#;
+    let grass = r#"{"item":"minecraft:tall_grass","hardness":0.0,"requires_tool":false,"can_occlude":false,"solid_render":false,"shape_occlusion":false,"dampening":0,"skylight_down":true,"full_collision":false,"map_color":31744,"replaceable":true,"offset":true,"push":"POPPED","random_ticks":false,"sound":{"volume":0.9}}"#;
+    let water = r#"{"item":"minecraft:air","hardness":100.0,"can_occlude":false,"dampening":1,"skylight_down":false}"#;
+    let gameplay = format!(r#"{{"states":[{stone},{grass},{grass},{water}]}}"#);
+    let mob = r#"{"states":[["BLOCKED",1912,1.0],["OPEN",133,0.0],["OPEN",133,0.0],["WATER",2,0.0]]}"#;
+    let behaviour = r#"{"states":[[262143,5,0,0,false,0,0,false,"BASEDRUM"],[0,32,0,0,false,0,0,false,"HARP"],[0,32,0,0,false,0,0,false,"HARP"],[0,32,2,8,false,0,0,false,"HARP"]],"blocks":[],"items":{}}"#;
+    for (name, text) in [
+        ("facts.json", facts),
+        ("gameplay-facts.json", gameplay.as_str()),
+        ("mob-data.json", mob),
+        ("items.json", r#"{"minecraft:stone":{},"minecraft:tall_grass":{}}"#),
+        ("registries.json", r#"{"minecraft:item":{"entries":{"minecraft:stone":{"protocol_id":0}}},"minecraft:block":{"entries":{"minecraft:stone":{"protocol_id":0}}}}"#),
+    ] {
+        fs::write(base.join(name), text).unwrap();
+    }
+    let m = folder_mod(
+        &scratch.join("mod"),
+        &[
+            ("horizon-mod.toml", &manifest("testmod", "")),
+            ("data/testmod/horizon/block/plain.json", r#"{"template":"minecraft:stone"}"#),
+            (
+                "data/testmod/horizon/block/rice.json",
+                r#"{"template":"minecraft:stone","state_properties":{"waterlogged":{"type":"boolean"}},
+                    "properties":{"copy":"minecraft:tall_grass","hardness":0.5}}"#,
+            ),
+        ],
+    );
+    let mods = [m];
+    let plan = Plan::new(&base, &mods).unwrap();
+    let table = |name: &str, text: &str| -> serde_json::Value {
+        let mut doc: J = serde_json::from_str(text).unwrap();
+        plan.json(name, &mut doc).unwrap();
+        serde_json::to_value(doc).unwrap()
+    };
+    let facts_out = table("facts.json", facts);
+    let rows = facts_out["states"].as_array().unwrap();
+    // testmod:plain is state 4; the rice's two states follow, one dry and one holding water.
+    let wet = |i: usize| rows[i][4]["properties"]["waterlogged"] == "true";
+    let (wet_rice, dry_rice) = if wet(5) { (5, 6) } else { (6, 5) };
+    assert!(wet(wet_rice) && !wet(dry_rice));
+    assert_eq!((rows[wet_rice][2].as_bool(), rows[dry_rice][2].as_bool()), (Some(true), Some(false)));
+    let gameplay_out = table("gameplay-facts.json", &gameplay);
+    let g = |i: usize| gameplay_out["states"][i].clone();
+    // Its own hardness; the rest as tall grass has them; the plain block keeps stone's.
+    assert_eq!(g(dry_rice)["hardness"], 0.5);
+    for key in ["requires_tool", "map_color", "replaceable", "offset", "push", "sound", "can_occlude", "solid_render"] {
+        assert_eq!(g(dry_rice)[key], serde_json::from_str::<serde_json::Value>(grass).unwrap()[key], "{key}");
+    }
+    assert_eq!(g(dry_rice)["full_collision"], false);
+    assert_eq!((g(dry_rice)["dampening"].clone(), g(dry_rice)["skylight_down"].clone()), (0.into(), true.into()));
+    assert_eq!((g(wet_rice)["dampening"].clone(), g(wet_rice)["skylight_down"].clone()), (1.into(), false.into()));
+    assert_eq!((g(4)["hardness"].clone(), g(4)["requires_tool"].clone(), g(4)["can_occlude"].clone()), (1.5.into(), true.into(), true.into()));
+    // Mobs walk through it (swim, where it holds water); stone's row for the plain block.
+    let mob_out = table("mob-data.json", mob);
+    assert_eq!(mob_out["states"][dry_rice], serde_json::json!(["OPEN", 133, 0.0]));
+    assert_eq!(mob_out["states"][wet_rice], serde_json::json!(["WATER", 7, 0.0]));
+    assert_eq!(mob_out["states"][4], serde_json::json!(["BLOCKED", 1912, 1.0]));
+    // The level: no face holds anything up, not solid, no conductor; water where it's waterlogged;
+    // tall grass's note block instrument.
+    let behaviour_out = table("block-behaviours.json", behaviour);
+    let b = |i: usize| behaviour_out["states"][i].clone();
+    assert_eq!(b(wet_rice), serde_json::json!([0, 32, 2, 8, false, 0, 0, false, "HARP"]));
+    assert_eq!(b(dry_rice), serde_json::json!([0, 32, 0, 0, false, 0, 0, false, "HARP"]));
+    assert_eq!(b(4), serde_json::json!([262143, 5, 0, 0, false, 0, 0, false, "BASEDRUM"]));
+    // Worldgen's `[is_air, has_fluid]`: the waterlogged state holds a fluid.
+    let flags_out = table("worldgen/block_flags.json", "[[false,false],[false,false],[false,false],[false,true]]");
+    assert_eq!(
+        (flags_out[wet_rice].clone(), flags_out[dry_rice].clone(), flags_out[4].clone()),
+        (serde_json::json!([false, true]), serde_json::json!([false, false]), serde_json::json!([false, false]))
+    );
+    // Worldgen's definition flags and the movement factors are tall grass's; a bounce stays the
+    // template class's own.
+    let blocks_table = |stone: Tag, grass: Tag| {
+        let mut blocks = Compound::new();
+        blocks.insert("minecraft:stone".into(), stone);
+        blocks.insert("minecraft:tall_grass".into(), grass);
+        let mut c = Compound::new();
+        c.insert("blocks".into(), Tag::Compound(blocks));
+        let mut tag = Tag::Compound(c);
+        plan.nbt(&mut tag);
+        tag
+    };
+    let block = |tag: &Tag, id: &str| tag.get("blocks").and_then(|b| b.get(id)).cloned();
+    let definitions = blocks_table(Tag::Byte(16), Tag::Byte(4));
+    assert_eq!(block(&definitions, "testmod:rice"), Some(Tag::Byte(4)));
+    assert_eq!(block(&definitions, "testmod:plain"), Some(Tag::Byte(16)));
+    let movement = |friction: f32, speed: f32, jump: f32, bounce: f32| {
+        let mut c = Compound::new();
+        for (key, v) in [("friction", friction), ("speedFactor", speed), ("jumpFactor", jump), ("bounceRestitution", bounce)] {
+            c.insert(key.into(), Tag::Float(v.to_bits()));
+        }
+        Tag::Compound(c)
+    };
+    let moving = blocks_table(movement(0.6, 1.0, 1.0, 0.8), movement(0.98, 0.4, 0.5, 0.0));
+    assert_eq!(block(&moving, "testmod:rice"), Some(movement(0.98, 0.4, 0.5, 0.8)));
+    assert_eq!(block(&moving, "testmod:plain"), Some(movement(0.6, 1.0, 1.0, 0.8)));
+    // Its collision is empty; the plain block keeps stone's.
+    let mut tag = {
+        let mut c = Compound::new();
+        c.insert("shapes".into(), Tag::List(vec![encode_shape(&VoxelShape::block())]));
+        c.insert("cached_shapes".into(), Tag::IntArray(vec![0, 0, 0, 0]));
+        Tag::Compound(c)
+    };
+    plan.nbt(&mut tag);
+    plan.collision_shapes(&mut tag).unwrap();
+    let Tag::Compound(c) = &tag else { unreachable!() };
+    let (Some(Tag::List(shapes)), Some(Tag::IntArray(map))) = (c.get(&JavaString::from("shapes")), c.get(&JavaString::from("cached_shapes"))) else {
+        panic!("collision table");
+    };
+    assert_eq!(shapes[map[dry_rice] as usize], encode_shape(&VoxelShape::empty()));
+    assert_eq!(map[wet_rice], map[dry_rice]);
+    assert_eq!(map[4], 0);
+    // A copy the game doesn't have is refused.
+    let m = folder_mod(
+        &scratch.join("mod2"),
+        &[
+            ("horizon-mod.toml", &manifest("testmod", "")),
+            ("data/testmod/horizon/block/x.json", r#"{"template":"minecraft:stone","properties":{"copy":"minecraft:nothing"}}"#),
+        ],
+    );
+    let e = Plan::new(&base, &[m]).err().unwrap().to_string();
+    assert!(e.contains("copy minecraft:nothing"), "{e}");
+    fs::remove_dir_all(scratch).unwrap();
+}
+
 #[test]
 fn content_block_default_state_is_validated_and_overlaid() {
     let scratch = std::env::temp_dir().join(format!("horizon-mod-default-{}", std::process::id()));

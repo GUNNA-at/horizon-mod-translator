@@ -1176,6 +1176,21 @@ pub fn recipe_result(v: &Value) -> Option<ItemStack> {
     let template = Template::parse(v)?;
     template.item.is_some().then(|| template.create())
 }
+/// Whether a recipe's `result` names an item the game has, or names none (a transmuting recipe
+/// keeps its input's). `ItemStackTemplate.CODEC` reads the id through the item registry, so
+/// vanilla doesn't load a recipe for an unknown item ("Couldn't parse data file"): a mod's recipe
+/// for an item its code never registered stays out instead of crafting an item nothing knows.
+pub fn result_known(result: &Value, items: &Items) -> bool {
+    // A table of tags alone (`Items::tags_only`, a test's) lists no items: it calls none unknown.
+    if items.items.is_empty() {
+        return true;
+    }
+    match horizon_world::loot::recipe_result_id(result) {
+        None => true,
+        Some(id) if id.contains(':') => items.get(id).is_some(),
+        Some(id) => items.get(&format!("minecraft:{id}")).is_some(),
+    }
+}
 /// The `.json` files under a `recipe` folder, its subfolders' too, in id
 /// order: each one's path inside the folder without the extension (`a/b`, as a
 /// recipe id has it) and its file. An error when `dir` itself can't be read; a
@@ -1421,6 +1436,9 @@ impl Recipes {
                     .entry(kind)
                     .or_default()
                     .push(CustomRecipe { id, json });
+                continue;
+            }
+            if !result_known(&v["result"], items) {
                 continue;
             }
             let text = |k: &str| v[k].as_str().unwrap_or("").to_owned();
@@ -1875,6 +1893,59 @@ mod tests {
             let json = format!(r#"{{"id":"minecraft:stone","count":{bad}}}"#);
             assert!(parse(&json).is_none(), "count {bad} must be rejected");
         }
+    }
+
+    /// An item table of `ids`, each with its defaults, read as the game reads `items.json`.
+    fn items_of(root: &Path, ids: &[&str]) -> Items {
+        let table: serde_json::Map<String, Value> =
+            ids.iter().map(|id| (id.to_string(), serde_json::json!({}))).collect();
+        fs::write(root.join("items.json"), serde_json::to_vec(&table).unwrap()).unwrap();
+        Items::catalog(root, &PackOverlay::NONE).unwrap()
+    }
+
+    /// `ItemStackTemplate.CODEC` names its item through the registry: a recipe for an item the
+    /// game doesn't have (a mod's block its code never registered) is not loaded, crafting or
+    /// cooking, while the same file loads once the item exists.
+    #[test]
+    fn a_recipe_for_an_unknown_item_is_not_loaded() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-unknown-result-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("data/minecraft/recipe")).unwrap();
+        let shapeless = |result: &str| {
+            format!(r#"{{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:flint"],"result":{{"id":"{result}"}}}}"#)
+        };
+        let smelting = |result: &str| {
+            format!(r#"{{"type":"minecraft:smelting","ingredient":"minecraft:flint","result":{{"id":"{result}"}},"experience":0.1,"cookingtime":200}}"#)
+        };
+        for (name, json) in [
+            ("stick", shapeless("minecraft:stick")),
+            ("pot", shapeless("mymod:cooking_pot")),
+            ("charcoal", smelting("minecraft:charcoal")),
+            ("rice", smelting("mymod:cooked_rice")),
+        ] {
+            fs::write(root.join(format!("data/minecraft/recipe/{name}.json")), json).unwrap();
+        }
+        let loaded = |items: &[&str]| {
+            let recipes =
+                Recipes::load(&root, &items_of(&root, items), &PackOverlay::NONE).unwrap();
+            let mut crafting: Vec<String> = recipes.crafting.iter().map(|(n, _)| n.clone()).collect();
+            let mut cooking: Vec<String> = recipes.cooking.iter().map(|c| c.id.clone()).collect();
+            crafting.sort();
+            cooking.sort();
+            (crafting, cooking)
+        };
+        let vanilla = ["minecraft:flint", "minecraft:stick", "minecraft:charcoal"];
+        assert_eq!(loaded(&vanilla), (vec!["stick".to_owned()], vec!["charcoal".to_owned()]));
+        let declared = [&vanilla[..], &["mymod:cooking_pot", "mymod:cooked_rice"]].concat();
+        assert_eq!(
+            loaded(&declared),
+            (
+                vec!["pot".to_owned(), "stick".to_owned()],
+                vec!["charcoal".to_owned(), "rice".to_owned()]
+            )
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A mod's recipe whose ingredient is one of NeoForge's standard shapes

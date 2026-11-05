@@ -329,6 +329,158 @@ fn set_state_properties(row: &mut J, combo: &[(String, String)]) {
     }
 }
 
+/// Which per-state table [`Plan::states`] fills, for what a declaration
+/// changes in its rows.
+#[derive(Clone, Copy, PartialEq)]
+enum Rows {
+    /// `facts.json`: a state's name, its air and fluid flags, its properties.
+    Facts,
+    /// `gameplay-facts.json`: the declared properties apply.
+    Gameplay,
+    /// `mob-data.json`: path type, flags and collision top.
+    Mob,
+    /// `block-behaviours.json`: face sturdiness, flags, fluid, signals.
+    Behaviour,
+    /// `worldgen/block_flags.json`: `[is_air, has_fluid]`.
+    Flags,
+    /// The others, the template's rows as they are.
+    Plain,
+}
+
+/// Whether a declared combination holds water (`waterlogged=true`).
+fn waterlogged(combo: &[(String, String)]) -> bool {
+    combo.iter().any(|(k, v)| k == "waterlogged" && v == "true")
+}
+
+/// A `facts.json` row's fluid flag, set: the state holds water.
+fn set_fluid_flag(row: &mut J) {
+    if let J::Arr(parts) = row
+        && let Some(flag) = parts.get_mut(2)
+    {
+        *flag = J::Bool(true);
+    }
+}
+
+/// A `mob-data.json` row for a state nothing collides with, as vanilla's
+/// `WalkNodeEvaluator.getPathTypeFromState` and the spawn checks read one: open
+/// (water when it holds water), walked, flown and swum through, and a place a
+/// mob may spawn in when it holds no fluid; no collision top.
+fn passable_mob_row(water: bool) -> J {
+    use crate::mobs::data::{AIR, LAND, VALID_EMPTY_SPAWN, WATER};
+    let (path, flags) = if water {
+        ("WATER", LAND | AIR | WATER)
+    } else {
+        ("OPEN", LAND | AIR | VALID_EMPTY_SPAWN)
+    };
+    J::Arr(vec![J::Str(path.into()), J::Num(flags.into()), J::f64(0.0)])
+}
+
+/// A `block-behaviours.json` row given `source`'s fluid (kind, amount,
+/// falling), a water source's: the level's fluid there is the state's water.
+fn hold_water(row: &mut J, source: &J) {
+    if let (J::Arr(parts), J::Arr(water)) = (row, source) {
+        for i in 2..=4 {
+            if let (Some(slot), Some(v)) = (parts.get_mut(i), water.get(i)) {
+                *slot = v.clone();
+            }
+        }
+    }
+}
+
+/// A `block-behaviours.json` row's note block instrument, `from`'s: `ofFullCopy` carries it.
+fn copy_instrument(row: &mut J, from: &J) {
+    if let (J::Arr(parts), J::Arr(from)) = (row, from)
+        && let (Some(slot), Some(v)) = (parts.get_mut(8), from.get(8))
+    {
+        *slot = v.clone();
+    }
+}
+
+/// A `block-behaviours.json` row for a state nothing collides with: no face
+/// holds anything up, it isn't solid, conducts no redstone and suffocates no
+/// one, as vanilla's defaults read an empty collision shape.
+fn passable_behaviour(row: &mut J) {
+    use horizon_world::level::data::state_flags::{COLLISION_EMPTY, CONDUCTOR, SOLID, SUFFOCATING};
+    let J::Arr(parts) = row else {
+        return;
+    };
+    if let Some(sturdy) = parts.get_mut(0) {
+        *sturdy = J::Num(0.into());
+    }
+    if let Some(J::Num(n)) = parts.get_mut(1) {
+        let flags = n.as_u64().unwrap_or(0) as u32;
+        *n = ((flags & !(SOLID | CONDUCTOR | SUFFOCATING)) | COLLISION_EMPTY).into();
+    }
+}
+
+/// What `Properties.ofFullCopy` carries from one block to another, as
+/// gameplay rows hold it.
+const COPIED_FACTS: [&str; 14] = [
+    "hardness",
+    "explosion_resistance",
+    "requires_tool",
+    "friction",
+    "speed_factor",
+    "jump_factor",
+    "map_color",
+    "sound",
+    "emission",
+    "ignited_by_lava",
+    "push",
+    "replaceable",
+    "random_ticks",
+    "offset",
+];
+
+/// The values a block copies from `from` (the default state's gameplay row of
+/// the vanilla block named by `copy`) over `row` (its template's). A copy of a
+/// block that doesn't occlude hides nothing behind it and lets light through
+/// as that block does; a state holding water dims light as water does.
+fn copy_properties(row: &mut J, from: &J, water: bool) {
+    for key in COPIED_FACTS {
+        if let Some(v) = from.get(key) {
+            row.set(key, v.clone());
+        }
+    }
+    if from.get("can_occlude") == Some(&J::Bool(false)) {
+        for key in ["can_occlude", "solid_render", "shape_occlusion"] {
+            row.set(key, J::Bool(false));
+        }
+        let (dampening, skylight) = if water {
+            (J::Num(1.into()), J::Bool(false))
+        } else {
+            (
+                from.get("dampening").cloned().unwrap_or(J::Num(0.into())),
+                from.get("skylight_down").cloned().unwrap_or(J::Bool(true)),
+            )
+        };
+        row.set("dampening", dampening);
+        row.set("skylight_down", skylight);
+    }
+}
+
+/// Each vanilla state's collision top from `mob-data.json` (0 for a state
+/// nothing collides with); empty when the table can't be read, and every copy
+/// then collides as its template does.
+fn collision_tops(base: &Path) -> Vec<f64> {
+    let Ok(doc) = read_json(&base.join("mob-data.json")) else {
+        return Vec::new();
+    };
+    match doc.get("states") {
+        Some(J::Arr(rows)) => rows
+            .iter()
+            .map(|r| match r {
+                J::Arr(r) => match r.get(2) {
+                    Some(J::Num(n)) => n.as_f64().unwrap_or(1.0),
+                    _ => 1.0,
+                },
+                _ => 1.0,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// The same for an NBT table's state, which spells a state the way
 /// `BlockState::to_nbt` does: `{id: "…", properties: {"<name>": "<value>"}}`,
 /// with the compound left out when there are no properties.
@@ -450,6 +602,11 @@ struct NewBlock<'a> {
     /// default first (one empty combination when the block declares none):
     /// the block's states are its template's states times these.
     combos: Vec<Vec<(String, String)>>,
+    /// The default state of the vanilla block whose properties it copies (`copy`).
+    copy: Option<u32>,
+    /// Whether anything collides with it: its `collision`, else the copied
+    /// block's, else yes.
+    collides: bool,
 }
 impl NewBlock<'_> {
     /// Template states and declared combinations in registry order.
@@ -670,6 +827,8 @@ impl<'a> Plan<'a> {
         let mut sorted: Vec<&ContentMod> = mods.iter().collect();
         sorted.sort_by(|a, b| a.id.cmp(&b.id));
         let mut wanted_sounds = Vec::new();
+        // Each vanilla state's collision top, read once a block copies one.
+        let mut tops: Option<Vec<f64>> = None;
         for m in &sorted {
             let mut declared: Vec<&Block> = m.content.blocks.iter().collect();
             declared.sort_by(|a, b| a.id.cmp(&b.id));
@@ -845,6 +1004,22 @@ impl<'a> Plan<'a> {
                     }
                     wanted_sounds.push(s.clone());
                 }
+                let copy = match &decl.properties.copy {
+                    Some(c) => Some(
+                        *defaults
+                            .get(c)
+                            .ok_or_else(|| format!("{}: copy {c} is not a block", decl.id))?,
+                    ),
+                    None => None,
+                };
+                let collides = match (decl.properties.collision, copy) {
+                    (Some(collides), _) => collides,
+                    (None, Some(state)) => {
+                        let tops = tops.get_or_insert_with(|| collision_tops(base));
+                        tops.get(state as usize).is_none_or(|&top| top > 0.0)
+                    }
+                    (None, None) => true,
+                };
                 blocks.push(NewBlock {
                     decl,
                     rename,
@@ -852,6 +1027,8 @@ impl<'a> Plan<'a> {
                     shapes,
                     default,
                     combos,
+                    copy,
+                    collides,
                 });
             }
         }
@@ -957,14 +1134,23 @@ impl<'a> Plan<'a> {
         out
     }
 
-    /// Appends each new block's copies of the template's states to `list`;
-    /// `gameplay` rows get their index and the declared overrides.
-    fn states(&self, list: &mut Vec<J>, ids: bool, gameplay: bool) -> Result<()> {
+    /// Appends each new block's copies of the template's states to `list`:
+    /// gameplay rows get their index and the declared overrides, a state
+    /// holding water says so, and mobs walk through one nothing collides with.
+    fn states(&self, list: &mut Vec<J>, ids: bool, rows: Rows) -> Result<()> {
         if list.len() != self.states {
             return Err(format!("{} states, not {}", list.len(), self.states).into());
         }
+        // A water source's row: a state of a mod's own `waterlogged=true` holds its water.
+        let water_row = self
+            .defaults
+            .get("minecraft:water")
+            .and_then(|&s| list.get(s as usize))
+            .cloned();
         for b in &self.blocks {
             let renames = self.renames(b);
+            // The row of the vanilla block it copies, for what the copy carries.
+            let copied = b.copy.and_then(|s| list.get(s as usize)).cloned();
             // One row per template state per combination the block declares,
             // so its states stay one run in registry order.
             for (next, (id, combo)) in (b.rename.first..).zip(b.state_combinations()) {
@@ -975,10 +1161,38 @@ impl<'a> Plan<'a> {
                 if !combo.is_empty() {
                     set_state_properties(&mut row, combo);
                 }
-                if gameplay {
+                let water = waterlogged(combo);
+                if rows == Rows::Facts && water {
+                    set_fluid_flag(&mut row);
+                }
+                if rows == Rows::Flags
+                    && water
+                    && let J::Arr(flags) = &mut row
+                    && let Some(fluid) = flags.get_mut(1)
+                {
+                    *fluid = J::Bool(true);
+                }
+                if rows == Rows::Mob && !b.collides {
+                    row = passable_mob_row(water);
+                }
+                if rows == Rows::Behaviour {
+                    if let Some(from) = &copied {
+                        copy_instrument(&mut row, from);
+                    }
+                    if water && let Some(source) = &water_row {
+                        hold_water(&mut row, source);
+                    }
+                    if !b.collides {
+                        passable_behaviour(&mut row);
+                    }
+                }
+                if rows == Rows::Gameplay {
                     row.set("id", J::Num(next.into()));
                     if !b.decl.item {
                         row.set("item", J::Str("minecraft:air".into()));
+                    }
+                    if let Some(from) = &copied {
+                        copy_properties(&mut row, from, water);
                     }
                     self.override_gameplay(b, combo, &mut row);
                     if let Some(shapes) = &b.shapes {
@@ -1008,6 +1222,9 @@ impl<'a> Plan<'a> {
                             "full_collision",
                             J::Bool(!shape.join_is_not_empty(&VoxelShape::block(), ShapeOp::XOR)?),
                         );
+                    }
+                    if !b.collides {
+                        row.set("full_collision", J::Bool(false));
                     }
                 }
                 list.push(row);
@@ -1115,15 +1332,15 @@ impl<'a> Plan<'a> {
 
     /// One JSON table, rewritten.
     fn json(&self, name: &str, doc: &mut J) -> Result<()> {
-        let states = |doc: &mut J, path: &str, ids: bool, gameplay: bool| -> Result<()> {
+        let states = |doc: &mut J, path: &str, ids: bool, rows: Rows| -> Result<()> {
             match doc.at(path) {
-                Some(J::Arr(a)) => self.states(a, ids, gameplay),
+                Some(J::Arr(a)) => self.states(a, ids, rows),
                 _ => Err(format!("no list at /{path}").into()),
             }
         };
         match name {
             "facts.json" => {
-                states(doc, "states", false, false)?;
+                states(doc, "states", false, Rows::Facts)?;
                 let defaults = doc.at("defaults").ok_or("no defaults")?;
                 for b in &self.blocks {
                     let default = b.default;
@@ -1131,10 +1348,10 @@ impl<'a> Plan<'a> {
                     defaults.set(&b.decl.id, J::Num(id.into()));
                 }
             }
-            "gameplay-facts.json" => states(doc, "states", false, true)?,
+            "gameplay-facts.json" => states(doc, "states", false, Rows::Gameplay)?,
             "creative-inventory.json" => self.creative_tabs(doc)?,
             "block-behaviours.json" => {
-                states(doc, "states", false, false)?;
+                states(doc, "states", false, Rows::Behaviour)?;
                 let Some(J::Arr(blocks)) = doc.at("blocks") else {
                     return Err("no blocks".into());
                 };
@@ -1311,11 +1528,11 @@ impl<'a> Plan<'a> {
                     ids.extend(new_types());
                 }
             }
-            "mob-data.json" => states(doc, "states", false, false)?,
-            "worldgen/block_flags.json" => states(doc, "", false, false)?,
+            "mob-data.json" => states(doc, "states", false, Rows::Mob)?,
+            "worldgen/block_flags.json" => states(doc, "", false, Rows::Flags)?,
             "worldgen/blocks/structure-blocks.json" => {
                 for key in ["rotate", "mirror", "full_block"] {
-                    states(doc, key, true, false)?;
+                    states(doc, key, true, Rows::Plain)?;
                 }
                 let added: usize = self
                     .blocks
@@ -1337,7 +1554,21 @@ impl<'a> Plan<'a> {
         let Some(Tag::List(entries)) = root.get_mut(&JavaString::from("shapes")) else {
             return Err("collision table has no shapes".into());
         };
+        let empty = encode_shape(&VoxelShape::empty());
         for block in &self.blocks {
+            if !block.collides {
+                // Its outline stays (`outline` in the gameplay rows); nothing collides.
+                let id = match entries.iter().position(|e| *e == empty) {
+                    Some(id) => id as i32,
+                    None => {
+                        entries.push(empty.clone());
+                        (entries.len() - 1) as i32
+                    }
+                };
+                let count = block.rename.states.len() * block.combos.len();
+                indices.extend((0..count).map(|i| (block.rename.first as usize + i, id)));
+                continue;
+            }
             if let Some(shapes) = &block.shapes {
                 // One shape per state; equal ones share an entry.
                 let mut seen: Vec<(Tag, i32)> = Vec::new();
@@ -1476,6 +1707,25 @@ impl<'a> Plan<'a> {
                         else {
                             continue;
                         };
+                        // What `ofFullCopy` carries from the copied block: the definition's
+                        // flags (worldgen's solidity, replaceable, liquid, occlusion) and the
+                        // movement factors; a bounce or a fall's damage is its class's own.
+                        if let Some(from) = b
+                            .decl
+                            .properties
+                            .copy
+                            .as_deref()
+                            .and_then(|c| map.get(&JavaString::from(c)))
+                        {
+                            if let (Tag::Byte(flags), Tag::Byte(copied)) = (&mut v, from) {
+                                *flags = *copied;
+                            }
+                            for key in ["friction", "speedFactor", "jumpFactor"] {
+                                if let (Some(slot), Some(copied)) = (v.get_mut(key), from.get(key)) {
+                                    *slot = copied.clone();
+                                }
+                            }
+                        }
                         if let (Some(f), Some(slot)) =
                             (b.decl.properties.friction, v.get_mut("friction"))
                         {

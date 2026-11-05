@@ -37,9 +37,9 @@ pub struct Report {
     pub worldgen: usize,
     /// Recipes left as they were: custom types, NeoForge conditions.
     pub recipes_kept: Vec<String>,
-    /// Recipes whose result is one of the mod's own items that isn't declared (its block was
-    /// left out), moved to `outside/`: vanilla refuses a recipe for an unknown item, and the
-    /// game would craft air.
+    /// Recipes whose result is one of the mod's own items the carried data doesn't declare (its
+    /// block was left out). They stay: the mod's translated code may declare the item when the
+    /// game starts, and the game leaves out a recipe for an item it doesn't have, as vanilla does.
     pub recipes_unregistered: Vec<String>,
     pub item_definitions_added: usize,
     /// Templates and properties came from the NeoForge oracle's facts, not
@@ -69,6 +69,8 @@ pub struct Report {
     /// The mod's additions to 1.21.1 vanilla tags 26.3 renamed or dropped, and the 26.3 tags
     /// they went to (`horizon_compat::vanilla_tags::added_to`).
     pub vanilla_tag_additions: BTreeMap<String, Vec<String>>,
+    /// The mod's items in 1.21.1's `#minecraft:dyeable`, each given 26.3's `crafting_dye` recipe.
+    pub dye_recipes: Vec<String>,
 }
 
 /// The pack around a mod being carried.
@@ -341,6 +343,17 @@ pub fn renamed_tags(v: &mut Value, registry: Option<&str>) -> bool {
         }),
         _ => false,
     }
+}
+
+/// The ids a tag file lists (`"mod:item"`, `{"id": "mod:item", "required": false}`, `"#mod:tag"`).
+fn tag_entries(bytes: &[u8]) -> Vec<String> {
+    let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return Vec::new() };
+    v["values"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.as_str().or_else(|| e["id"].as_str()).map(str::to_owned))
+        .collect()
 }
 
 /// A tag file's entries written to `path`, after those of a file already there (two 1.21.1 tags
@@ -1070,6 +1083,20 @@ pub fn carry(
                     }
                     None => write_tag(&dest, &bytes, true)?,
                 }
+                // 1.21.1 dyes any item in `#minecraft:dyeable` in the crafting grid
+                // (`ArmorDyeRecipe`); 26.3 has no such tag and dyes by one `crafting_dye` recipe
+                // per item, as its leather armour's.
+                if ns == "minecraft" && registry == "item" && path == "dyeable" {
+                    for item in tag_entries(&bytes).into_iter().filter(|e| !e.starts_with('#')) {
+                        let Some((item_ns, item_path)) = item.split_once(':') else { continue };
+                        let file = inside.join(format!("data/{item_ns}/recipe/{item_path}_dyed.json"));
+                        if !file.exists() {
+                            let recipe = json!({"type": "minecraft:crafting_dye", "dye": "#minecraft:dyes", "group": "dyed_armor", "result": {"id": item}, "target": item});
+                            write(&file, &serde_json::to_vec_pretty(&recipe).unwrap_or_default())?;
+                            report.dye_recipes.push(item);
+                        }
+                    }
+                }
                 continue;
             }
         }
@@ -1344,7 +1371,7 @@ pub fn carry(
     }
     let owned: Vec<String> = owned.iter().map(|n| n.to_string()).collect();
     let owned: Vec<&str> = owned.iter().map(String::as_str).collect();
-    unregistered_recipes(&inside, &outside, id, &owned, &mut report)?;
+    unregistered_recipes(&inside, id, &owned, &mut report)?;
     let q = |s: &str| toml::Value::String(s.to_owned()).to_string();
     let name = if info.name.is_empty() { id } else { &info.name };
     let mut manifest = format!(
@@ -1379,12 +1406,11 @@ fn recipe_result(recipe: &Value) -> Option<&str> {
         .or_else(|| r["item"].as_str())
 }
 
-/// Moves the recipes whose result is an undeclared item of the mod's own namespaces from
-/// `inside` to `outside` ([`Report::recipes_unregistered`]). The declared items are the blocks
-/// with their item and the items under `data/<id>/horizon/`.
+/// Lists the recipes whose result is an undeclared item of the mod's own namespaces
+/// ([`Report::recipes_unregistered`]). The declared items are the blocks with their item and the
+/// items under `data/<id>/horizon/`.
 fn unregistered_recipes(
     inside: &Path,
-    outside: &Path,
     id: &str,
     owned: &[&str],
     report: &mut Report,
@@ -1437,12 +1463,6 @@ fn unregistered_recipes(
                     continue;
                 }
                 let rel = path.strip_prefix(inside).map_err(|e| e.to_string())?;
-                let to = outside.join(rel);
-                if let Some(parent) = to.parent() {
-                    fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-                }
-                fs::rename(&path, &to).map_err(|e| format!("{}: {e}", to.display()))?;
-                report.copied = report.copied.saturating_sub(1);
                 report
                     .recipes_unregistered
                     .push(rel.to_string_lossy().into_owned());
@@ -2264,6 +2284,10 @@ mod tests {
                 r#"{"type": "minecraft:crafting_shapeless", "ingredients": [{"tag": "minecraft:dirt"}],
                     "result": {"id": "minecraft:bowl"}}"#,
             ),
+            (
+                "data/minecraft/tags/item/dyeable.json",
+                r##"{"values": ["soil:gardening_hat", {"id": "soil:apron", "required": false}, "#soil:dyed_cloths"]}"##,
+            ),
         ] {
             zip.start_file(name, zip::write::SimpleFileOptions::default())
                 .unwrap();
@@ -2318,6 +2342,21 @@ mod tests {
         let bowl = read("data/soil/recipe/bowl.json").unwrap();
         // 26.3's ingredient form; an item tag `dirt` keeps its name.
         assert_eq!(bowl["ingredients"][0], "#minecraft:dirt");
+        // Dyeable items: 26.3's recipe each, as its leather helmet's (`leather_helmet_dyed`); a
+        // tag in the list names no item to make.
+        assert_eq!(
+            read("data/soil/recipe/gardening_hat_dyed.json"),
+            Some(json!({"type": "minecraft:crafting_dye", "dye": "#minecraft:dyes", "group": "dyed_armor",
+                "result": {"id": "soil:gardening_hat"}, "target": "soil:gardening_hat"}))
+        );
+        assert_eq!(read("data/soil/recipe/apron_dyed.json").map(|r| r["target"].clone()), Some(json!("soil:apron")));
+        assert_eq!(report.dye_recipes, ["soil:gardening_hat", "soil:apron"]);
+        // Nothing here declares the hat or the apron: their recipes stay, reported, for the mod's
+        // code to declare the items at start (the game leaves a recipe out while its item is unknown).
+        assert_eq!(
+            report.recipes_unregistered,
+            ["data/soil/recipe/apron_dyed.json", "data/soil/recipe/gardening_hat_dyed.json"]
+        );
         assert_eq!(report.vanilla_tags_renamed, 2);
         assert_eq!(
             report.vanilla_tag_additions.get("data/minecraft/tags/block/dirt.json"),

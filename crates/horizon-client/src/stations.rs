@@ -536,6 +536,10 @@ impl StationRecipes {
         let mut smithing = Vec::new();
         let mut stonecutting = Vec::new();
         for (id, v) in sources {
+            // A result the game has no item for: vanilla's codec refuses the file.
+            if !crate::crafting::result_known(&v["result"], items) {
+                continue;
+            }
             match v["type"].as_str().unwrap_or("") {
                 "minecraft:smithing_transform" => smithing.push(Smithing::Transform {
                     id,
