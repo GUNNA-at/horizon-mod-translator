@@ -2708,6 +2708,14 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `additions_to_renamed_tags_go_where_26_3_takes_them_in`,
     `blocks::tests::a_mod_plants_super_survival_is_vanillas` (now against 26.3's tags; 303 compat
     tests pass), `carry::tests::a_mods_vanilla_tags_are_26_3s` (113 port-pack tests pass).
+  - [x] 2026-11-05 A mod's feature code places its inline placed features on the live level too:
+    `/place feature farmersdelight:patch_wild_carrots`, a mod sapling's tree. Before, the live
+    level answered "this world places no features". `LevelFeatureWorld::place_feature_json` reads
+    the JSON with the live registry's catalog (`LiveFeatures::placed_json`, kept once per text) and
+    places it from the stream the mod draws from. A feature that fails while decorating is now said
+    once in the log (`generator_decoration::report_failure`); before, the failure only went to
+    `DecorateStats`, which nothing reads, so a mod feature failing everywhere looked like a rare one.
+    291 horizon-world tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -491,9 +491,11 @@ impl Decoration {
                     id,
                     |world, random, p| feature.feature.place(world, random, p, blocks),
                 );
-                if placed.is_err() {
+                if let Err(e) = &placed {
                     stats.failed += 1;
-                    stats.skipped.insert(self.names[id.0 as usize].clone());
+                    let name = &self.names[id.0 as usize];
+                    stats.skipped.insert(name.clone());
+                    report_failure(name, e);
                 }
                 Ok(placed.unwrap_or(false))
             },
@@ -914,6 +916,19 @@ impl SurvivalWorld for World<'_> {
         self.region.block_state(position)
     }
 }
+
+/// A placed feature that failed while decorating, said once per feature: the chunk goes on without
+/// the rest of it (vanilla stops with a crash report), and a mod's feature that keeps failing
+/// would otherwise be silent.
+fn report_failure(name: &str, error: &dyn std::fmt::Display) {
+    static SAID: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.insert(name.to_owned()) {
+        eprintln!("Horizon: feature {name} failed while decorating, left out where it fails: {error}");
+    }
+}
+
 impl PlacementContext for World<'_> {
     fn place_feature_json<R: horizon_core::random::RandomSource>(
         &mut self,

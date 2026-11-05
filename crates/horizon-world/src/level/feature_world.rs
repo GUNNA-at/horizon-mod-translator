@@ -149,6 +149,24 @@ impl<L: LevelAccess + ?Sized> PlacementContext for LevelFeatureWorld<'_, '_, L> 
     fn world_seed(&mut self) -> Result<i64, PlacementQueryError> {
         Ok(self.sim.level.world_seed())
     }
+    /// `PlacedFeature.place` from a mod's feature code on the live level (`/place feature`, a
+    /// mod sapling's tree): read with the live registry's catalog, placed here from the stream
+    /// the mod draws from.
+    fn place_feature_json<R: RandomSource>(
+        &mut self,
+        json: &str,
+        random: &mut R,
+        origin: [i32; 3],
+    ) -> Result<Option<bool>, PlacementQueryError> {
+        let features = self.features;
+        let feature = features
+            .placed_json(json)
+            .map_err(|e| PlacementQueryError::Failed(format!("placed feature {json}: {e}")))?;
+        feature
+            .place(self, random, origin, features.blocks())
+            .map(Some)
+            .map_err(|e| PlacementQueryError::Failed(e.to_string()))
+    }
     fn state_collision_empty(
         &mut self,
         state: BlockStateId,

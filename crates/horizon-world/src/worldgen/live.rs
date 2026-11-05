@@ -32,6 +32,8 @@ pub struct LiveFeatures {
     blocks: FeatureBlocks,
     configured: Cache<FeatureDefinition>,
     placed: Cache<PlacedFeatureDefinition>,
+    /// Placed features a mod's code handed over as JSON, by text: why one can't be read.
+    inline: Mutex<HashMap<String, Result<Arc<PlacedFeatureDefinition>, String>>>,
     /// `BiomeGenerationSettings.getBoneMealFeatures` per biome, in vanilla order.
     bone_meal: Vec<Vec<String>>,
     /// Temperature settings per biome (`Biome.getTemperature`).
@@ -210,6 +212,7 @@ impl LiveFeatures {
             blocks: FeatureBlocks::from_registry(registry)?,
             configured: Mutex::new(HashMap::new()),
             placed: Mutex::new(HashMap::new()),
+            inline: Mutex::new(HashMap::new()),
             bone_meal,
         }))
     }
@@ -274,6 +277,24 @@ impl LiveFeatures {
                 }
             })
             .clone()
+    }
+    /// The placed feature `json` describes (a name as a JSON string, or an inline object), as a
+    /// mod's feature code hands it to `PlacedFeature.place`: read once per text.
+    pub(crate) fn placed_json(&self, json: &str) -> Result<Arc<PlacedFeatureDefinition>, String> {
+        let mut cache = self.inline.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .entry(json.to_owned())
+            .or_insert_with(|| {
+                self.catalog
+                    .placed_feature_with_blocks(json, &self.bindings)
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string())
+            })
+            .clone()
+    }
+    /// The blocks features name by role (air, stone...).
+    pub(crate) fn blocks(&self) -> FeatureBlocks {
+        self.blocks
     }
     /// `ConfiguredFeature.place`. Unknown or unsupported features and
     /// execution errors report failure.
