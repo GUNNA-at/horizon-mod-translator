@@ -51,6 +51,37 @@ fn accessor_name(method: &str, verbs: &[&str]) -> String {
     }
 }
 
+/// What reflection sees of class `c`'s annotations, a line each (see the generated `ANNOTATIONS`):
+/// the `RUNTIME` ones on the class, its fields and methods, and an annotation type's element
+/// defaults. None when it has none. Kotlin's metadata is left out: only Kotlin's reflection reads it.
+fn annotation_lines(c: &ClassFile) -> Option<String> {
+    let mut out = String::new();
+    let mut line = |target: &str, member: &str, a: &crate::class::Annotation| {
+        if a.visible && !a.ty.starts_with("Lkotlin/") {
+            let _ = writeln!(out, "{target}\t{member}\t{}\t{}", a.ty, serde_json::Value::Object(a.data.clone()));
+        }
+    };
+    for a in &c.annotations {
+        line("TYPE", "", a);
+    }
+    for f in &c.fields {
+        for a in &f.annotations {
+            line("FIELD", &f.name, a);
+        }
+    }
+    for m in &c.methods {
+        for a in &m.annotations {
+            line("METHOD", &format!("{}{}", m.name, m.desc), a);
+        }
+    }
+    for m in &c.methods {
+        if let Some(d) = &m.default {
+            let _ = writeln!(out, "DEFAULT\t{}\t\t{d}", m.name);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 fn dispatcher(nd: &str) -> String {
     format!("d_{}_{:08x}", ident(nd.split('.').next().unwrap_or("")), hash(nd))
 }
@@ -954,6 +985,8 @@ impl<'a> Program<'a> {
         // A class's declared fields (`getDeclaredFields`, `Field.getType`): one line of
         // `access name descriptor` per field, from the table below.
         s.push_str("        (c, \"fields\") => match FIELDS.binary_search_by(|(n, _)| (*n).cmp(c)) { Ok(i) => rt.string(FIELDS[i].1), Err(_) => return None },\n");
+        // What reflection sees of its annotations (`isAnnotationPresent`, `getAnnotation`).
+        s.push_str("        (c, \"annotations\") => match ANNOTATIONS.binary_search_by(|(n, _)| (*n).cmp(c)) { Ok(i) => rt.string(ANNOTATIONS[i].1), Err(_) => return None },\n");
         s.push_str("        _ => return None,\n    })\n}\n\n");
         let mut fields: Vec<(&str, String)> = self
             .classes
@@ -965,6 +998,19 @@ impl<'a> Program<'a> {
         let _ = writeln!(s, "/// Each class's declared fields, by class name: `access name descriptor` lines.\nstatic FIELDS: [(&str, &str); {}] = [", fields.len());
         for (c, f) in &fields {
             let _ = writeln!(s, "    ({c:?}, {f:?}),");
+        }
+        s.push_str("];\n");
+        let mut annotations: Vec<(&str, String)> = self.classes.values().filter_map(|c| Some((c.name.as_str(), annotation_lines(c)?))).collect();
+        annotations.sort();
+        let _ = writeln!(
+            s,
+            "/// Each class's annotations reflection sees, by class name: `TYPE`, `FIELD name`, `METHOD name+descriptor`\n\
+             /// or an annotation type's `DEFAULT element` lines (tab-separated: target, member, type, typed values).\n\
+             static ANNOTATIONS: [(&str, &str); {}] = [",
+            annotations.len()
+        );
+        for (c, a) in &annotations {
+            let _ = writeln!(s, "    ({c:?}, {a:?}),");
         }
         s.push_str("];\n");
         s
@@ -2460,6 +2506,53 @@ public class Scanned {
                 "Lscan/Plugin;\tTYPE\tscan/Scanned\tscan.Scanned\t{\"value\":\"mymod\"}",
                 "Lscan/Sync;\tFIELD\tscan/Scanned\tenergy\t{\"kind\":{\"e\":\"Ljava/lang/annotation/ElementType;\",\"v\":\"FIELD\"},\"names\":[\"a\",\"b\"],\"size\":{\"I\":3},\"tag\":\"e\",\"type\":{\"c\":\"Ljava/lang/Long;\"}}",
                 "Ljava/lang/Deprecated;\tMETHOD\tscan/Scanned\told(I)V\t{}",
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    use crate::class::ClassFile;
+    use std::process::Command;
+
+    /// What reflection sees, as the bundle's table lists it: the `RUNTIME` annotations only (javac
+    /// keeps `CLASS` ones in the class file too, where reflection can't see them), and an
+    /// annotation type's element defaults.
+    #[test]
+    fn reflection_sees_runtime_annotations_and_element_defaults() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("mod-translator-annotations-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = r#"
+package refl;
+import java.lang.annotation.*;
+@Retention(RetentionPolicy.RUNTIME) @interface Group { String value() default "misc"; int order() default 3; ElementType[] kinds() default {ElementType.FIELD}; }
+@Retention(RetentionPolicy.CLASS) @interface Hidden {}
+public class Content {
+    @Group("blocks") @Hidden public static int STONE;
+    @Hidden public void make() {}
+}
+"#;
+        std::fs::write(root.join("Content.java"), src).unwrap();
+        assert!(Command::new("javac").args(["-d", root.to_str().unwrap()]).arg(root.join("Content.java")).status().unwrap().success());
+        let read = |name: &str| ClassFile::parse(&std::fs::read(root.join(format!("refl/{name}.class"))).unwrap()).unwrap();
+        let (content, group) = (read("Content"), read("Group"));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(super::annotation_lines(&content).as_deref(), Some("FIELD\tSTONE\tLrefl/Group;\t{\"value\":\"blocks\"}\n"));
+        let lines = super::annotation_lines(&group).unwrap();
+        let lines: Vec<&str> = lines.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "TYPE\t\tLjava/lang/annotation/Retention;\t{\"value\":{\"e\":\"Ljava/lang/annotation/RetentionPolicy;\",\"v\":\"RUNTIME\"}}",
+                "DEFAULT\tvalue\t\t\"misc\"",
+                "DEFAULT\torder\t\t{\"I\":3}",
+                "DEFAULT\tkinds\t\t[{\"e\":\"Ljava/lang/annotation/ElementType;\",\"v\":\"FIELD\"}]",
             ]
         );
     }

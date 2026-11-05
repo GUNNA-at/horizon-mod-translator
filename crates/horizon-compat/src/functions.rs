@@ -85,6 +85,13 @@ pub(crate) fn method(rt: &mut Rt, key: &str) -> V {
     combinator(rt, "compat:fn/method", vec![k])
 }
 
+/// A lambda `LambdaMetafactory` made when called by hand: `parts` the implementation's handle,
+/// then what the lambda captured; its functional method invokes the handle with those and its
+/// arguments (see [`crate::invoke`]).
+pub(crate) fn handle_function(rt: &mut Rt, parts: Vec<V>) -> V {
+    combinator(rt, "compat:fn/handle", parts)
+}
+
 /// A new object of the game's `class`, made by its constructor `desc` with `args`.
 fn make(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
     let class: &'static str = rt.static_key(class);
@@ -156,6 +163,20 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
                 }
             }
             V::NULL
+        }
+        // [handle, captured...]: the handle invoked with what was captured, then the arguments,
+        // its result as the functional method returns it.
+        "compat:fn/handle" => {
+            let mut all = parts.get(1..).unwrap_or_default().to_vec();
+            all.extend_from_slice(args);
+            let ret = crate::parts(key).map_or('L', |(_, _, d)| crate::jlang::return_kind(d));
+            match crate::invoke::invoke_handle(rt, part(0), &all, ret) {
+                Some(v) => v,
+                None => {
+                    crate::miss(rt, key);
+                    V::NULL
+                }
+            }
         }
         // A method as a function (`Map.Entry::getKey`): [key], on the first argument with the rest.
         "compat:fn/method" => {

@@ -604,7 +604,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         _ => match chain(rt, key, args) {
             Some(v) => v,
             None if plain_super_init(rt, key, args) => V::Void,
-            None => match crate::functions::invoke_through(rt, key, args) {
+            None => match crate::functions::invoke_through(rt, key, args).or_else(|| crate::annotations::element(rt, key, args)) {
                 Some(v) => v,
                 None => {
                     crate::miss(rt, key);

@@ -80,6 +80,9 @@ pub struct Method {
     pub param_annotations: Vec<Vec<Annotation>>,
     /// Its generic signature (`Signature`: `(Lcom/.../LocalRef<Ljava/lang/String;>;)V`), if any.
     pub signature: Option<String>,
+    /// An annotation type's element default (`AnnotationDefault`), typed as
+    /// [`Annotation::data`]'s values are.
+    pub default: Option<serde_json::Value>,
 }
 
 /// A runtime-visible annotation: its type and element values, each as text (a constant, an enum
@@ -97,6 +100,8 @@ pub struct Annotation {
     /// by its descriptor letter (`B`, `C`, `D`, `F`, `I`, `J`, `S`, `Z`), an array as an array,
     /// `{"@": desc, "v": {...}}` an annotation.
     pub data: serde_json::Map<String, serde_json::Value>,
+    /// Whether reflection sees it (`RuntimeVisibleAnnotations`: retention `RUNTIME`).
+    pub visible: bool,
 }
 
 impl Annotation {
@@ -283,8 +288,9 @@ impl ClassFile {
                 let an = r.u2()?;
                 let len = r.u4()? as usize;
                 let body = r.take(len)?;
-                if matches!(cf.utf8(an)?.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
-                    annotations.extend(cf.annotations(body)?);
+                let attribute = cf.utf8(an)?;
+                if matches!(attribute.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
+                    annotations.extend(cf.annotations(&attribute, body)?);
                 }
             }
             cf.fields.push(Field { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, annotations });
@@ -295,14 +301,20 @@ impl ClassFile {
             let mut annotations = Vec::new();
             let mut param_annotations: Vec<Vec<Annotation>> = Vec::new();
             let mut signature = None;
+            let mut default = None;
             for _ in 0..r.u2()? {
                 let an = r.u2()?;
                 let len = r.u4()? as usize;
                 let body = r.take(len)?;
                 // Class-file-only ones too: what a mixin injects where (`@Inject`, `@At`).
-                if matches!(cf.utf8(an)?.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
-                    let more = cf.annotations(body)?;
+                let attribute = cf.utf8(an)?;
+                if matches!(attribute.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
+                    let more = cf.annotations(&attribute, body)?;
                     annotations.extend(more);
+                }
+                if attribute == "AnnotationDefault" {
+                    let mut d = Reader { b: body, i: 0 };
+                    default = Some(cf.element_value(&mut d)?.2);
                 }
                 if matches!(cf.utf8(an)?.as_str(), "RuntimeVisibleParameterAnnotations" | "RuntimeInvisibleParameterAnnotations") {
                     let mut p = Reader { b: body, i: 0 };
@@ -366,15 +378,16 @@ impl ClassFile {
                     code = Some(Code { max_stack, max_locals, bytes, handlers, locals, lines, frames, frame_news });
                 }
             }
-            cf.methods.push(Method { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, code, annotations, param_annotations, signature });
+            cf.methods.push(Method { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, code, annotations, param_annotations, signature, default });
         }
         for _ in 0..r.u2()? {
             let an = r.u2()?;
             let len = r.u4()? as usize;
             let body = r.take(len)?;
             // Invisible ones too: `@Mixin` (its target) is kept only in the class file.
-            if matches!(cf.utf8(an)?.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
-                let more = cf.annotations(body)?;
+            let attribute = cf.utf8(an)?;
+            if matches!(attribute.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
+                let more = cf.annotations(&attribute, body)?;
                 cf.annotations.extend(more);
             }
             if cf.utf8(an)? == "BootstrapMethods" {
@@ -390,10 +403,14 @@ impl ClassFile {
         Ok(cf)
     }
 
-    /// A `RuntimeVisibleAnnotations` attribute's annotations.
-    fn annotations(&self, body: &[u8]) -> Result<Vec<Annotation>, String> {
+    /// A `Runtime(In)VisibleAnnotations` attribute's annotations, marked visible for the former.
+    fn annotations(&self, attribute: &str, body: &[u8]) -> Result<Vec<Annotation>, String> {
         let mut r = Reader { b: body, i: 0 };
-        (0..r.u2()?).map(|_| self.annotation(&mut r)).collect()
+        let mut out = (0..r.u2()?).map(|_| self.annotation(&mut r)).collect::<Result<Vec<_>, _>>()?;
+        for a in &mut out {
+            a.visible = attribute == "RuntimeVisibleAnnotations";
+        }
+        Ok(out)
     }
 
     fn annotation(&self, r: &mut Reader) -> Result<Annotation, String> {
@@ -410,7 +427,7 @@ impl ClassFile {
             data.insert(name.clone(), typed);
             values.push((name, text));
         }
-        Ok(Annotation { ty, values, nested, data })
+        Ok(Annotation { ty, values, nested, data, visible: false })
     }
 
     /// An element value as text, the annotations it holds, and its typed form ([`Annotation::data`]).

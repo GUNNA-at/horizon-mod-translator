@@ -2421,6 +2421,35 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `codecs::tests::dispatch_or_else_reads_by_type_and_falls_back_without_one`, and
     `codecs::tests::vanilla_value_codecs_write_and_read_as_vanillas` (now with `LONG_STREAM`). 280 compat
     and 14 translator tests pass.
+  - [x] 2026-11-05 Annotations as reflection sees them, and `java.lang.invoke` called by hand.
+    The translator now records which annotations are `RUNTIME` ones (`RuntimeVisibleAnnotations`)
+    and each annotation type's element defaults (`AnnotationDefault`). It writes them into the
+    bundle's reflection table (`ANNOTATIONS`: `TYPE`, `FIELD name`, `METHOD name+descriptor`,
+    `DEFAULT element` lines). The runtime (`annotations.rs`, new) answers `isAnnotationPresent`,
+    `getAnnotation`, `getDeclaredAnnotation`, `getAnnotations` and `getAnnotationsByType` on a mod's
+    classes (`@Inherited` ones from superclasses), fields (from the declaring class) and methods.
+    Each annotation is an object of its own type: its elements come from the class file's values,
+    else the type's defaults (enum constants, classes, arrays typed by the element's return type,
+    nested annotations), and `annotationType()` is answered. SecurityCraft registers its content's
+    block items from `@Reinforced` and `@RegisterItemBlock` on `SCContent`'s fields (2607
+    `isAnnotationPresent` misses in round 15). `java.lang.invoke` moved to its own module
+    (`invoke.rs`, new):
+    - `MethodType` (the `methodType` factories, `wrap`, `unwrap`, `erase`, `generic`, `changeReturnType`,
+      `dropParameterTypes`, `insert`/`appendParameterTypes`, descriptors, `equals`).
+    - `MethodHandle.type()`, `asType`, `bindTo`, `MethodHandles.exactInvoker`/`invoker`, `constant`,
+      `identity`, `insertArguments`.
+    - `Lookup.findVirtual`, `findStatic` (the game's), `findConstructor`, `unreflectConstructor`.
+    - `LambdaMetafactory.metafactory`/`altMetafactory` with `CallSite.getTarget`: the target, given what
+      the lambda captures, makes a function (`compat:fn/handle`) that invokes the implementation through
+      whatever interface holds it.
+    Mekanism's `LambdaMetaFactoryUtil` builds its menus' field getters and setters this way. Tests
+    `annotations::tests::a_fields_annotation_answers_its_values_and_its_types_defaults`,
+    `annotations::tests::classes_and_methods_carry_theirs_and_only_inherited_ones_pass_down`,
+    `invoke::tests::method_types_change_as_javas_do`,
+    `invoke::tests::a_hand_made_metafactory_lambda_reads_and_writes_a_field`,
+    `invoke::tests::bound_and_constant_handles_answer_as_javas`, and
+    `codegen::annotation_tests::reflection_sees_runtime_annotations_and_element_defaults`
+    (javac-compiled: a `CLASS` annotation stays out). 285 compat and 15 translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -5,6 +5,7 @@
 pub use horizon_compat_core::*;
 pub use horizon_compat_core::host;
 
+pub mod annotations;
 pub mod api;
 pub mod api_common;
 pub mod attachments;
@@ -25,6 +26,7 @@ pub mod creative;
 pub mod fluids;
 pub mod food;
 pub mod item_use;
+pub mod invoke;
 pub mod functions;
 pub mod gamerules;
 pub mod glue;

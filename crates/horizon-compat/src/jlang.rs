@@ -10,7 +10,7 @@ fn from16(u: &[u16]) -> String {
     String::from_utf16_lossy(u)
 }
 
-fn text(rt: &Rt, v: V) -> String {
+pub(crate) fn text(rt: &Rt, v: V) -> String {
     rt.str_of(v).map(str::to_owned).unwrap_or_else(|| rt.to_java_string(v, 'L'))
 }
 
@@ -86,7 +86,7 @@ pub(crate) fn throw_with(rt: &mut Rt, class: &'static str, msg: &str) -> V {
 }
 
 /// The descriptor of a class named as `Class.getName` does (`int`, `[I`, `a/b/C`).
-fn descriptor_of(name: &str) -> String {
+pub(crate) fn descriptor_of(name: &str) -> String {
     match name {
         "int" => "I".into(),
         "long" => "J".into(),
@@ -123,7 +123,7 @@ fn declared_fields(rt: &mut Rt, class: &str) -> Option<Vec<(u16, String, String)
 
 /// The class a field descriptor names, as `Class.getName` has it (`I` is `int`, `Lfoo/Bar;`
 /// `foo/Bar`, an array its descriptor).
-fn descriptor_class(desc: &str) -> &str {
+pub(crate) fn descriptor_class(desc: &str) -> &str {
     match desc {
         "I" => "int",
         "J" => "long",
@@ -140,7 +140,7 @@ fn descriptor_class(desc: &str) -> &str {
 }
 
 /// Field `name`'s access and descriptor, from class `class` or the nearest superclass declaring it.
-fn find_field(rt: &mut Rt, class: &str, name: &str) -> Option<(u16, String)> {
+pub(crate) fn find_field(rt: &mut Rt, class: &str, name: &str) -> Option<(u16, String)> {
     let mut c = class.to_owned();
     loop {
         if let Some((access, _, desc)) = declared_fields(rt, &c)?.into_iter().find(|f| f.1 == name) {
@@ -174,7 +174,7 @@ fn fields_array(rt: &mut Rt, class: &str, all: bool) -> Option<V> {
 }
 
 /// A `Field` for field `name` (a string) of class object `class`.
-fn field_object(rt: &mut Rt, class: V, name: V) -> V {
+pub(crate) fn field_object(rt: &mut Rt, class: V, name: V) -> V {
     let f = rt.new_object("java/lang/reflect/Field");
     rt.put_field(f, "$class", class);
     rt.put_field(f, "$name", name);
@@ -191,13 +191,20 @@ fn field_parts(rt: &mut Rt, field: V) -> (String, &'static str, &'static str) {
 
 /// What `field` holds in `obj`, or, given no object, its class's static: a mod class's once its
 /// class is initialised, else the API's.
-fn field_value(rt: &mut Rt, field: V, obj: V) -> V {
-    let (class, name, key) = field_parts(rt, field);
+pub(crate) fn field_value(rt: &mut Rt, field: V, obj: V) -> V {
+    let (class, name, _) = field_parts(rt, field);
     if obj.r() != 0 {
         return rt.get_field(obj, name);
     }
-    if rt.is_mod_class(&class) {
-        rt.reflect(&class, "<clinit>", &[]);
+    static_of(rt, &class, name)
+}
+
+/// Static `name` of class `class` (internal form): a mod class's once its class is initialised
+/// (an enum's constant), else the API's.
+pub(crate) fn static_of(rt: &mut Rt, class: &str, name: &str) -> V {
+    let key = rt.static_key(&format!("{class}.{name}"));
+    if rt.is_mod_class(class) {
+        rt.reflect(class, "<clinit>", &[]);
         return rt.statics.get(key).copied().unwrap_or(V::NULL);
     }
     crate::api::get_static(rt, key)
@@ -205,7 +212,7 @@ fn field_value(rt: &mut Rt, field: V, obj: V) -> V {
 
 /// `field = v` in `obj`, or the class's static given no object; a box set into a field holding
 /// a primitive is unboxed.
-fn field_store(rt: &mut Rt, field: V, obj: V, v: V) {
+pub(crate) fn field_store(rt: &mut Rt, field: V, obj: V, v: V) {
     let (class, name, key) = field_parts(rt, field);
     let old = if obj.r() != 0 { rt.get_field(obj, name) } else { rt.statics.get(key).copied().unwrap_or(V::Void) };
     let v = match old {
@@ -226,7 +233,7 @@ fn field_store(rt: &mut Rt, field: V, obj: V, v: V) {
 }
 
 /// A primitive as `Object` (its box); anything else as it is, nothing as null.
-fn box_raw(rt: &mut Rt, v: V) -> V {
+pub(crate) fn box_raw(rt: &mut Rt, v: V) -> V {
     match v {
         V::I(_) => crate::mixin::box_value(rt, v, 'I'),
         V::J(_) => crate::mixin::box_value(rt, v, 'J'),
@@ -238,23 +245,14 @@ fn box_raw(rt: &mut Rt, v: V) -> V {
 }
 
 /// The kind of what a method with descriptor `desc` returns (`I`, `L`, `V`...).
-fn return_kind(desc: &str) -> char {
+pub(crate) fn return_kind(desc: &str) -> char {
     desc.rsplit(')').next().and_then(|r| r.chars().next()).unwrap_or('V')
-}
-
-/// A `MethodHandle` of kind `getter`, `setter` or `method` reaching `target` (a `Field` or `Method`).
-fn method_handle(rt: &mut Rt, kind: &str, target: V) -> V {
-    let h = rt.new_object("java/lang/invoke/MethodHandle");
-    let k = rt.string(kind);
-    rt.put_field(h, "$kind", k);
-    rt.put_field(h, "$target", target);
-    h
 }
 
 /// `method.invoke(obj, args)` on one of the mod's objects: the instance method its class has by
 /// that name and parameter types, given its arguments unboxed, its result boxed. None (a miss) for
 /// a static method or one no mod class has.
-fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Option<V> {
+pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Option<V> {
     let class = text(rt, rt.get_field(method, "$class")).replace('.', "/");
     let name = text(rt, rt.get_field(method, "$name"));
     let params = rt.get_field(method, "$params");
@@ -281,7 +279,7 @@ fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Option<V> {
 }
 
 /// `new C(args)` by reflection: the mod's constructor with descriptor `desc`.
-fn construct(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
+pub(crate) fn construct(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
     match rt.reflect(class, &format!("<init>.{desc}"), args) {
         Some(o) => o,
         None if rt.thrown.is_some() => V::NULL,
@@ -724,6 +722,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "hashCode" => V::I(string_hash(rt.str_of(a(0)).unwrap_or(""))),
             "equals" => V::I((rt.str_of(a(0)) == rt.str_of(a(1))) as i32),
             "isInterface" | "isRecord" => V::I(0),
+            // A mod class's annotations (`@Inherited` ones from its superclasses unless asked
+            // for the declared ones).
+            "isAnnotationPresent" | "getAnnotation" | "getDeclaredAnnotation" | "getAnnotations" | "getDeclaredAnnotations" | "getAnnotationsByType" | "getDeclaredAnnotationsByType" => {
+                let n = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                let found = crate::annotations::on_class(rt, &n, !name.starts_with("getDeclared"));
+                crate::annotations::query(rt, name, found, a(1))?
+            }
             _ => return None,
         }),
         "java/lang/reflect/Constructor" => Some(match name {
@@ -762,6 +767,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getDeclaringClass" => rt.get_field(a(0), "$class"),
             "setAccessible" => V::Void,
             "trySetAccessible" | "canAccess" => V::I(1),
+            "isAnnotationPresent" | "getAnnotation" | "getDeclaredAnnotation" | "getAnnotations" | "getDeclaredAnnotations" | "getAnnotationsByType" | "getDeclaredAnnotationsByType" => {
+                let (class, field, _) = field_parts(rt, a(0));
+                let found = crate::annotations::on_field(rt, &class, field);
+                crate::annotations::query(rt, name, found, a(1))?
+            }
             "get" => {
                 let v = field_value(rt, a(0), a(1));
                 box_raw(rt, v)
@@ -799,51 +809,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let vals = crate::jutil::elements(rt, a(2));
                 return invoke_method(rt, a(0), a(1), &vals);
             }
-            _ => return None,
-        }),
-        "java/lang/invoke/MethodHandles" => Some(match name {
-            "lookup" | "publicLookup" | "privateLookupIn" => rt.intern("compat:lookup".into(), |rt| rt.new_object("java/lang/invoke/MethodHandles$Lookup")),
-            _ => return None,
-        }),
-        // Handles to fields and methods (Mekanism's computer methods are getters of its own
-        // fields): a handle keeps what it reaches, and invoking it reads, writes or calls that.
-        "java/lang/invoke/MethodHandles$Lookup" => Some(match name {
-            "in" | "dropLookupMode" => a(0),
-            "unreflectGetter" => method_handle(rt, "getter", a(1)),
-            "unreflectSetter" => method_handle(rt, "setter", a(1)),
-            "unreflect" => method_handle(rt, "method", a(1)),
-            "findGetter" | "findStaticGetter" | "findSetter" | "findStaticSetter" => {
-                let f = field_object(rt, a(1), a(2));
-                method_handle(rt, if name.contains("Getter") { "getter" } else { "setter" }, f)
+            "isAnnotationPresent" | "getAnnotation" | "getDeclaredAnnotation" | "getAnnotations" | "getDeclaredAnnotations" | "getAnnotationsByType" | "getDeclaredAnnotationsByType" => {
+                let class = text(rt, rt.get_field(a(0), "$class")).replace('.', "/");
+                let method = text(rt, rt.get_field(a(0), "$name"));
+                let mut params = String::from("(");
+                for p in crate::jutil::elements(rt, rt.get_field(a(0), "$params")) {
+                    params.push_str(&descriptor_of(rt.str_of(p).unwrap_or("java/lang/Object")));
+                }
+                params.push(')');
+                let found = crate::annotations::on_method(rt, &class, &method, &params);
+                crate::annotations::query(rt, name, found, a(1))?
             }
             _ => return None,
         }),
-        "java/lang/invoke/MethodHandle" => Some(match name {
-            "invoke" | "invokeExact" | "invokeWithArguments" => {
-                let rest: Vec<V> = if name == "invokeWithArguments" { crate::jutil::elements(rt, a(1)) } else { args[1..].to_vec() };
-                let kind = text(rt, rt.get_field(a(0), "$kind"));
-                let target = rt.get_field(a(0), "$target");
-                let r = match kind.as_str() {
-                    "getter" => field_value(rt, target, rest.first().copied().unwrap_or(V::NULL)),
-                    "setter" => {
-                        let (obj, v) = match rest.as_slice() {
-                            [v] => (V::NULL, *v),
-                            [obj, v, ..] => (*obj, *v),
-                            [] => (V::NULL, V::NULL),
-                        };
-                        field_store(rt, target, obj, v);
-                        V::Void
-                    }
-                    _ => {
-                        let (obj, vals) = rest.split_first().map_or((V::NULL, &[][..]), |(o, r)| (*o, r));
-                        return invoke_method(rt, target, obj, vals);
-                    }
-                };
-                // The call site's type: an object where it returns one (a box), else the value.
-                if matches!(return_kind(desc), 'L' | '[') { box_raw(rt, r) } else { crate::mixin::unbox(rt, r, return_kind(desc)) }
-            }
-            _ => return None,
-        }),
+        o if o.starts_with("java/lang/invoke/") => crate::invoke::call(rt, o, name, desc, args),
 
         // One runtime runs on one game thread, so it is the same `Thread` each time it asks: ESL's
         // transactions (Create: New Age's energy) check `this.thread != Thread.currentThread()`.
