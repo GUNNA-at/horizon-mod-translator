@@ -64,6 +64,10 @@ pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
     if x == 0 || y == 0 {
         return false;
     }
+    // Gson's elements are values (`JsonObject.equals` compares members).
+    if crate::gson::is_element_class(rt.class_of(a)) || crate::gson::is_element_class(rt.class_of(b)) {
+        return crate::gson::same(rt, a, b);
+    }
     match (rt.heap.get(x as usize).map(|o| &o.data), rt.heap.get(y as usize).map(|o| &o.data)) {
         (Some(Data::Native(k1, h1)), Some(Data::Native(k2, h2))) => return k1 == k2 && h1 == h2,
         (Some(Data::List(l1)), Some(Data::List(l2))) if l1.len() == l2.len() => {
@@ -110,6 +114,9 @@ pub fn hash(rt: &mut Rt, v: V) -> i32 {
 /// `hashCode` without a mod's override: what `Object.hashCode` (and `super.hashCode` up to it)
 /// answers (content for strings, boxes and positions; identity for objects).
 pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
+    if crate::gson::is_element_class(rt.class_of(v)) {
+        return crate::gson::hash_of(rt, v);
+    }
     if let V::R(r) = v
         && r != 0
     {

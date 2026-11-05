@@ -847,6 +847,10 @@ pub(crate) fn nbt_json(n: &crate::nbt::Nbt) -> Json {
 /// A value a mod hands a codec to read (`codec.parse(NbtOps.INSTANCE, tag)`), as JSON: any tag (a
 /// compound, a list, a number...), a string; anything else reads as null.
 pub fn to_json(rt: &mut Rt, v: V) -> Json {
+    // Gson's tree (`codec.parse(JsonOps.INSTANCE, element)`).
+    if crate::gson::is_element_class(rt.class_of(v)) {
+        return crate::gson::to_serde(rt, v);
+    }
     if rt.class_of(v) == "net/minecraft/nbt/CompoundTag" {
         let map = crate::nbt::from_runtime(rt, v);
         return Json::Object(map.iter().map(|(k, n)| (k.clone(), nbt_json(n))).collect());

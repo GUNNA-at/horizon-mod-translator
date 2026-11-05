@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 680] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 679] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1386,7 +1386,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 680] = [
     ("net/minecraft/realms/RealmsLabel", "i(Lnet/minecraft/network/chat/Component;III)V=text,x,y,color|ggetText()Lnet/minecraft/network/chat/Component;=text|o"),
     ("net/minecraft/realms/RepeatedNarrator$Params", "i(Lnet/minecraft/network/chat/Component;Lcom/google/common/util/concurrent/RateLimiter;)V=narration,rateLimiter|o"),
     ("net/minecraft/resources/DelegatingOps", "i(Lcom/mojang/serialization/DynamicOps;)V=delegate|o"),
-    ("net/minecraft/resources/FileToIdConverter", "i(Ljava/lang/String;Ljava/lang/String;)V=prefix,extension|o"),
     ("net/minecraft/resources/RegistryFileCodec", "i(Lnet/minecraft/resources/ResourceKey;Lcom/mojang/serialization/Codec;Z)V=registryKey,elementCodec,allowInline|o"),
     ("net/minecraft/resources/RegistryFixedCodec", "i(Lnet/minecraft/resources/ResourceKey;)V=registryKey|o"),
     ("net/minecraft/server/ConsoleInput", "i(Ljava/lang/String;Lnet/minecraft/commands/CommandSourceStack;)V=msg,source|o"),

@@ -24,6 +24,8 @@ const RESOURCE: &str = "net/minecraft/server/packs/resources/Resource";
 const LISTENER: &str = "net/minecraft/server/packs/resources/PreparableReloadListener";
 const BARRIER: &str = "net/minecraft/server/packs/resources/PreparableReloadListener$PreparationBarrier";
 const SIMPLE: &str = "net/minecraft/server/packs/resources/SimplePreparableReloadListener";
+const SIMPLE_JSON: &str = "net/minecraft/server/packs/resources/SimpleJsonResourceReloadListener";
+const FILE_TO_ID: &str = "net/minecraft/resources/FileToIdConverter";
 const MANAGER_LISTENER: &str = "net/minecraft/server/packs/resources/ResourceManagerReloadListener";
 pub(crate) const CLIENT_LISTENERS_EVENT: &str = "net/neoforged/neoforge/client/event/RegisterClientReloadListenersEvent";
 const PROFILER: &str = "net/minecraft/util/profiling/ProfilerFiller";
@@ -75,6 +77,8 @@ pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | LISTENER
             | BARRIER
             | SIMPLE
+            | SIMPLE_JSON
+            | FILE_TO_ID
             | MANAGER_LISTENER
             | CLIENT_LISTENERS_EVENT
             | PROFILER
@@ -95,6 +99,8 @@ pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 pub(crate) fn is_a(c: &str, class: &str) -> bool {
     match class {
         MANAGER | PROVIDER => matches!(c, RELOADABLE | CLOSEABLE | MULTI),
+        LISTENER => matches!(c, SIMPLE | SIMPLE_JSON | MANAGER_LISTENER),
+        SIMPLE => c == SIMPLE_JSON,
         CLOSEABLE => c == MULTI,
         INPUT_STREAM | "java/io/Closeable" | "java/lang/AutoCloseable" => stream_class(c) || reader_class(c) && class != INPUT_STREAM,
         READER | "java/lang/Readable" => reader_class(c),
@@ -327,7 +333,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (RESOURCE, "sourcePackId") => rt.string("vanilla"),
         (RESOURCE, "isBuiltin") => V::I(1),
         (RESOURCE, "knownPackInfo") => crate::api_common::optional(rt, V::NULL),
-        (LISTENER | SIMPLE | MANAGER_LISTENER, "reload") => reload_one(rt, a(0), a(1), a(2), a(3)),
+        (LISTENER | SIMPLE | SIMPLE_JSON | MANAGER_LISTENER, "reload") => reload_one(rt, a(0), a(1), a(2), a(3)),
+        // A JSON listener's own `prepare` (vanilla's, which its mod subclass keeps).
+        (SIMPLE | SIMPLE_JSON, "prepare") if rt.instance_of(a(0), SIMPLE_JSON) => return json_listener_call(rt, name, args),
+        (SIMPLE_JSON, _) => return json_listener_call(rt, name, args),
+        (FILE_TO_ID, _) => return converter_call(rt, name, args),
         (LISTENER | SIMPLE | MANAGER_LISTENER, "getName") => {
             let c = rt.class_of(a(0)).to_owned();
             rt.string(&c)
@@ -403,21 +413,13 @@ fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         // The files under folder `a(1)` whose location the filter takes, by location, sorted.
         "listResources" | "listResourceStacks" => {
-            let folder = rt.str_of(a(1)).unwrap_or("").trim_matches('/').to_owned();
-            let map = rt.alloc("java/util/TreeMap", Data::Table(Table { sorted: true, ..Table::default() }));
-            let found: Vec<String> = namespaces(rt, &root).iter().flat_map(|ns| paths(rt, &format!("{root}/{ns}/{folder}"))).collect();
-            for path in found {
-                let Some((ns, rest)) = path.strip_prefix(&format!("{root}/")).and_then(|p| p.split_once('/')) else { continue };
-                let loc = rt.string(&format!("{ns}:{rest}"));
-                if rt.call_functional(TEST, a(2), &[loc]).i() == 0 {
-                    rt.thrown = None;
-                    continue;
-                }
-                let r = resource(rt, &path);
-                let value = if name == "listResourceStacks" { crate::jutil::new_list(rt, vec![r]) } else { r };
-                crate::jutil::table_put(rt, map, loc, value);
-            }
-            map
+            let folder = rt.str_of(a(1)).unwrap_or("").to_owned();
+            let filter = a(2);
+            list(rt, &root, &folder, name == "listResourceStacks", &mut |rt, loc| {
+                let keep = rt.call_functional(TEST, filter, &[loc]).i() != 0;
+                rt.thrown = None;
+                keep
+            })
         }
         "getNamespaces" => {
             let spaces = namespaces(rt, &root);
@@ -435,6 +437,142 @@ fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         "close" => V::Void,
         _ if desc.ends_with(")V") => V::Void,
+        _ => return None,
+    })
+}
+
+/// The files under folder `folder` of each namespace in `root`, as vanilla's `listResources`
+/// answers them: a `TreeMap` by location (`create:train_hat_info/pig.json`) of those `keep` takes,
+/// each its `Resource` (or a stack of it, `stacks`).
+fn list(rt: &mut Rt, root: &str, folder: &str, stacks: bool, keep: &mut dyn FnMut(&mut Rt, V) -> bool) -> V {
+    let folder = folder.trim_matches('/');
+    let map = rt.alloc("java/util/TreeMap", Data::Table(Table { sorted: true, ..Table::default() }));
+    let found: Vec<String> = namespaces(rt, root).iter().flat_map(|ns| paths(rt, &format!("{root}/{ns}/{folder}"))).collect();
+    for path in found {
+        let Some((ns, rest)) = path.strip_prefix(&format!("{root}/")).and_then(|p| p.split_once('/')) else { continue };
+        let loc = rt.string(&format!("{ns}:{rest}"));
+        if !keep(rt, loc) {
+            continue;
+        }
+        let r = resource(rt, &path);
+        let value = if stacks { crate::jutil::new_list(rt, vec![r]) } else { r };
+        crate::jutil::table_put(rt, map, loc, value);
+    }
+    map
+}
+
+/// A `FileToIdConverter`'s folder and extension.
+fn converter(rt: &Rt, c: V) -> (String, String) {
+    let field = |f| rt.str_of(rt.get_field(c, f)).unwrap_or("").to_owned();
+    (field("prefix"), field("extension"))
+}
+
+/// `FileToIdConverter`, 1.21.1's: a folder of files of one extension, whose names are the ids.
+fn converter_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match name {
+        "<init>" => {
+            rt.put_field(a(0), "prefix", a(1));
+            rt.put_field(a(0), "extension", a(2));
+            V::Void
+        }
+        "json" => {
+            let c = rt.new_object(FILE_TO_ID);
+            let ext = rt.string(".json");
+            rt.put_field(c, "prefix", a(0));
+            rt.put_field(c, "extension", ext);
+            c
+        }
+        "idToFile" => {
+            let (prefix, ext) = converter(rt, a(0));
+            let id = crate::neo::location(rt, a(1));
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", &id));
+            rt.string(&format!("{ns}:{prefix}/{path}{ext}"))
+        }
+        "fileToId" => {
+            let (prefix, ext) = converter(rt, a(0));
+            let file = crate::neo::location(rt, a(1));
+            let (ns, path) = file.split_once(':').unwrap_or(("minecraft", &file));
+            match path.get(prefix.len() + 1..path.len().saturating_sub(ext.len())) {
+                Some(id) => rt.string(&format!("{ns}:{id}")),
+                None => {
+                    let msg = format!("begin {}, end {}, length {}", prefix.len() + 1, path.len().saturating_sub(ext.len()), path.len());
+                    crate::jlang::throw_with(rt, "java/lang/StringIndexOutOfBoundsException", &msg)
+                }
+            }
+        }
+        "listMatchingResources" | "listMatchingResourceStacks" | "listMatchingResourcesFromNamespace" | "listMatchingResourceStacksFromNamespace" => {
+            let (prefix, ext) = converter(rt, a(0));
+            let root = root_of(rt, a(1));
+            let only = if name.ends_with("FromNamespace") { rt.str_of(a(2)).map(|n| format!("{n}:")) } else { None };
+            list(rt, &root, &prefix, name.contains("Stacks"), &mut |rt, loc| {
+                let id = rt.str_of(loc).unwrap_or("");
+                id.ends_with(&ext) && only.as_ref().is_none_or(|n| id.starts_with(n.as_str()))
+            })
+        }
+        _ => return None,
+    })
+}
+
+/// `SimpleJsonResourceReloadListener.scanDirectory`: each `.json` file under `dir`, by its id,
+/// read as Gson's tree into `out`; a file that isn't JSON is left out, as vanilla logs and skips it.
+fn scan_directory(rt: &mut Rt, manager: V, dir: &str, out: V) {
+    let root = root_of(rt, manager);
+    let found = list(rt, &root, dir, false, &mut |rt, loc| rt.str_of(loc).is_some_and(|l| l.ends_with(".json")));
+    for (loc, res) in crate::jutil::table_pairs(rt, found) {
+        let file = crate::neo::location(rt, loc);
+        let (ns, path) = file.split_once(':').unwrap_or(("minecraft", &file));
+        let id = format!("{ns}:{}", &path[dir.len() + 1..path.len() - ".json".len()]);
+        let path = rt.str_of(rt.get_field(res, "$path")).unwrap_or("").to_owned();
+        let text = file_text(rt, &path);
+        match crate::gson::parse(rt, &text, false) {
+            Ok(Some((element, _))) => {
+                let id = rt.string(&id);
+                crate::jutil::table_put(rt, out, id, element);
+            }
+            Ok(None) => trace(&format!("Couldn't parse data file {id} from {file}: JSON data was null or empty")),
+            Err(e) => trace(&format!("Couldn't parse data file {id} from {file}: {e}")),
+        }
+    }
+}
+
+fn file_text(rt: &Rt, path: &str) -> String {
+    file(rt, path).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+}
+
+fn trace(msg: &str) {
+    if Rt::tracing() {
+        eprintln!("horizon-compat: {msg}");
+    }
+}
+
+/// `SimpleJsonResourceReloadListener`: its folder's JSON files, read by `prepare` into a map of
+/// ids to trees for the mod's `apply`.
+fn json_listener_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match name {
+        "<init>" => {
+            rt.put_field(a(0), "gson", a(1));
+            rt.put_field(a(0), "directory", a(2));
+            V::Void
+        }
+        "prepare" => {
+            let dir = rt.str_of(rt.get_field(a(0), "directory")).unwrap_or("").to_owned();
+            let out = rt.alloc("java/util/HashMap", Data::Table(Table::default()));
+            scan_directory(rt, a(1), &dir, out);
+            out
+        }
+        "scanDirectory" => {
+            let dir = rt.str_of(a(1)).unwrap_or("").to_owned();
+            scan_directory(rt, a(0), &dir, a(3));
+            V::Void
+        }
+        "getPreparedPath" => {
+            let dir = rt.str_of(rt.get_field(a(0), "directory")).unwrap_or("").to_owned();
+            let id = crate::neo::location(rt, a(1));
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", &id));
+            rt.string(&format!("{ns}:{dir}/{path}.json"))
+        }
         _ => return None,
     })
 }
@@ -1024,5 +1162,62 @@ mod tests {
         let applied = rt.statics.get("test/Colors.applied").copied().expect("apply ran");
         assert_eq!(rt.str_of(applied), Some("{\"a\": \"b\"}"));
         assert!(rt.thrown.is_none());
+    }
+
+    /// Create's train hat info: `FileToIdConverter.json(folder)` lists the folder's JSON files in
+    /// every namespace, and a file reads through `openAsReader` into `GsonHelper.parse`. A mod's
+    /// `SimpleJsonResourceReloadListener` gets the same files as trees by id in its `apply`.
+    #[test]
+    fn json_files_list_by_id_and_reach_a_json_listener() {
+        crate::install();
+        let mut rt = Rt::new();
+        let mut h = host();
+        h.resources.insert("assets/create/train_hat_info/pig.json".into(), br#"{"part": "head", "offset": [0, 1, 0]}"#.to_vec());
+        h.resources.insert("assets/create/train_hat_info/sub/cow.json".into(), br#"{"part": "body"}"#.to_vec());
+        h.resources.insert("assets/create/train_hat_info/readme.txt".into(), b"not json".to_vec());
+        h.resources.insert("assets/other/train_hat_info/bad.json".into(), b"{oops".to_vec());
+        rt.supers.insert("test/Hats", SIMPLE_JSON);
+        rt.vcall = Some(|rt, key, short, all| match short {
+            "apply.(Ljava/lang/Object;Lnet/minecraft/server/packs/resources/ResourceManager;Lnet/minecraft/util/profiling/ProfilerFiller;)V" => {
+                rt.statics.insert("test/Hats.applied", all[1]);
+                V::Void
+            }
+            _ => crate::api::call(rt, key, all),
+        });
+        rt.with_host(&mut h, |rt| {
+            let m = manager(rt, "assets");
+            let folder = rt.string("train_hat_info");
+            let converter = crate::api::call(rt, "net/minecraft/resources/FileToIdConverter.json.(Ljava/lang/String;)Lnet/minecraft/resources/FileToIdConverter;", &[folder]);
+            let found = crate::api::call(rt, "net/minecraft/resources/FileToIdConverter.listMatchingResources.(Lnet/minecraft/server/packs/resources/ResourceManager;)Ljava/util/Map;", &[converter, m]);
+            let keys: Vec<String> = crate::jutil::table_keys(rt, found).iter().map(|k| rt.str_of(*k).unwrap_or("").to_owned()).collect();
+            assert_eq!(keys, ["create:train_hat_info/pig.json", "create:train_hat_info/sub/cow.json", "other:train_hat_info/bad.json"]);
+            let cow = rt.string("create:train_hat_info/sub/cow.json");
+            let id = crate::api::call(rt, "net/minecraft/resources/FileToIdConverter.fileToId.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceLocation;", &[converter, cow]);
+            assert_eq!(rt.str_of(id), Some("create:sub/cow"));
+            let pig = rt.string("create:train_hat_info/pig.json");
+            let res = crate::jutil::table_get(rt, found, pig).expect("listed");
+            let reader = crate::api::call(rt, "net/minecraft/server/packs/resources/Resource.openAsReader.()Ljava/io/BufferedReader;", &[res]);
+            let json = crate::api::call(rt, "net/minecraft/util/GsonHelper.parse.(Ljava/io/Reader;)Lcom/google/gson/JsonObject;", &[reader]);
+            let part = rt.string("part");
+            let s = crate::api::call(rt, "net/minecraft/util/GsonHelper.getAsString.(Lcom/google/gson/JsonObject;Ljava/lang/String;)Ljava/lang/String;", &[json, part]);
+            assert_eq!(rt.str_of(s), Some("head"));
+
+            // The listener: `super(gson, "train_hat_info")`, registered, then the resources load.
+            let listener = rt.new_object_id("test/Hats", 9);
+            let gson = rt.new_object(crate::gson::GSON);
+            crate::api::call(rt, "net/minecraft/server/packs/resources/SimpleJsonResourceReloadListener.<init>.(Lcom/google/gson/Gson;Ljava/lang/String;)V", &[listener, gson, folder]);
+            crate::api::call(rt, "net/minecraft/server/packs/resources/ReloadableResourceManager.registerReloadListener.(Lnet/minecraft/server/packs/resources/PreparableReloadListener;)V", &[m, listener]);
+            reload(rt, "assets");
+            let applied = rt.statics.get("test/Hats.applied").copied().expect("apply ran");
+            let mut ids: Vec<String> = crate::jutil::table_keys(rt, applied).iter().map(|k| rt.str_of(*k).unwrap_or("").to_owned()).collect();
+            ids.sort();
+            // The file that isn't JSON is left out, as vanilla logs and skips it.
+            assert_eq!(ids, ["create:pig", "create:sub/cow"]);
+            let cow = rt.string("create:sub/cow");
+            let tree = crate::jutil::table_get(rt, applied, cow).expect("read");
+            assert_eq!(crate::gson::write(rt, tree, crate::gson::TO_STRING), r#"{"part":"body"}"#);
+            assert!(rt.thrown.is_none());
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
     }
 }

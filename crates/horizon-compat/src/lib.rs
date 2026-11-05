@@ -28,6 +28,7 @@ pub mod item_use;
 pub mod functions;
 pub mod glue;
 pub mod gui;
+pub mod gson;
 pub mod hand;
 pub mod jlang;
 pub mod jutil;

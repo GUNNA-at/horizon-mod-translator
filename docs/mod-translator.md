@@ -2071,6 +2071,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `resources::tests::{a_mod_reads_the_games_resources_through_the_manager,
     readers_and_listing_read_as_javas_do, a_registered_reload_listener_prepares_then_applies}`;
     233 compat tests pass. Not yet in game (next build, with Gson).
+  - [x] 2026-11-05 Gson's tree (`gson.rs`), from a census of the pack's method references (287
+    distinct; `JsonElement.getAsJsonObject` in 92 jars, `GsonBuilder.create` 89, `JsonObject.get` 85,
+    `new JsonObject()` 78, `getAsString` 78...). `JsonParser.parseString`/`parseReader`/`parse` read
+    leniently as Gson does (comments, single quotes, unquoted names and words, `;`, `=`, a trailing
+    comma as a null), an empty document is `JsonNull`, text after the value an error; the parser is
+    the runtime's own, so objects keep their members' order (Gson's `LinkedTreeMap`) and a repeated
+    name keeps the last value. Objects are maps and arrays lists of elements shared by reference (a
+    member added through a nested object shows in its parent); a primitive keeps its kind and value
+    (integers that fit a `long` as one, other numbers as doubles; `getAsInt` of a long wraps as
+    `LazilyParsedNumber.intValue` does, a string parses as `Integer.parseInt` would, with its
+    `NumberFormatException`). Every `JsonElement`, `JsonObject`, `JsonArray` and `JsonPrimitive` call
+    of the census (`add`, `addProperty` of each type, `remove`, `has`, `entrySet`, `keySet`, `asMap`,
+    `iterator`, `forEach`, `deepCopy`, `equals`/`hashCode` as Gson's, also as map keys; a one-element
+    array answering for its element; Gson's `IllegalStateException`s and `ClassCastException`s).
+    Writing is Gson's: `toString` compact with nulls; a `Gson` from `new Gson()` or a `GsonBuilder`
+    escapes HTML (`\u003c`) unless `disableHtmlEscaping`, leaves null members out unless
+    `serializeNulls`, and pretty prints with two spaces and `": "`; `toJson` into a `StringBuilder`;
+    `fromJson(reader, string or tree, JsonObject.class...)` for the tree's classes with Gson's
+    `Expected a com.google.gson.JsonObject but was ...` error. `GsonHelper`, 1.21.1's: the
+    `is*Value`/`is*Node` checks, `getAsX`/`convertToX` for every type with and without a fallback and
+    its messages word for word (`Missing count, expected to find a Int`, `Expected tags to be a
+    string, was an array (["a"])`, `getType`'s `abbreviateMiddle`), `parse`, `parseArray`,
+    `fromJson`, `toStableString`. Codecs read a tree (`codec.parse(JsonOps.INSTANCE, element)`).
+    `FileToIdConverter` (`json`, `idToFile`, `fileToId`, `listMatchingResources` and its stack and
+    namespace forms) and `SimpleJsonResourceReloadListener` (its `prepare` reads the folder's JSON
+    files by id, skipping one that isn't JSON as vanilla logs and skips it; `scanDirectory`,
+    `getPreparedPath`): Create's train hat info and the 26 jars' JSON listeners. `FileToIdConverter`
+    left the data-class table. Not modelled: mapping JSON onto a mod's classes (`fromJson(reader,
+    MyConfig.class)`, type adapters) and the streaming `JsonReader`/`JsonWriter`. Tests
+    `gson::tests::{a_parsed_file_reads_as_gsons_tree, a_built_tree_is_written_as_gson_writes_it,
+    gson_helper_reads_and_complains_as_vanillas, the_parser_is_lenient_as_gsons}`,
+    `resources::tests::json_files_list_by_id_and_reach_a_json_listener`; 237 compat tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
