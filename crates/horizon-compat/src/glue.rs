@@ -820,6 +820,40 @@ pub fn player_respawned(rt: &mut Rt, host: &mut dyn Host, player: u128, name: &s
     rt.with_host(host, |rt| crate::events::respawned(rt, player, name));
 }
 
+/// `native_destroy_block` (server): the acting player breaks the block `state` at `pos`, the game
+/// having allowed it ([`crate::world_events::block_break`]). Whether a mod canceled it: the block
+/// then stays.
+pub fn destroy_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| crate::world_events::block_break(rt, pos, state)))
+}
+
+/// `native_place_block` (server): the acting player placed the block `state` at `pos` with an item
+/// ([`crate::world_events::block_place`]).
+pub fn place_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| crate::world_events::block_place(rt, pos, state)));
+}
+
+/// `native_client_level_load` (client): the client made a level for `dimension`, joining a server
+/// or changing dimension ([`crate::world_events::client_level_load`]). The client's setup runs
+/// first when this is its first hook.
+pub fn client_level_load(rt: &mut Rt, host: &mut dyn Host, dimension: &str) {
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| crate::world_events::client_level_load(rt, dimension));
+}
+
+/// `native_client_level_unload` (client): the client dropped its level for `dimension`
+/// ([`crate::world_events::client_level_unload`]).
+pub fn client_level_unload(rt: &mut Rt, host: &mut dyn Host, dimension: &str) {
+    rt.safe_point();
+    if !crate::neo::is_client(rt) {
+        return;
+    }
+    rt.with_host(host, |rt| crate::world_events::client_level_unload(rt, dimension));
+}
+
 /// The client's setup, once, on its first hook ([`crate::neo::fire_client_setup`]), then its first
 /// resource load with the game as host: the reload listeners the mods registered read the game's
 /// resources ([`crate::resources::reload`]).
@@ -1161,15 +1195,25 @@ pub fn payload_from_client(rt: &mut Rt, host: &mut dyn Host, player: u128, chann
 
 /// A player's tick on the server (`ServerPlayer.tick`), `host` acting for them: what their client
 /// sent since runs, and the menu they have open keeps their client in step and closes when it
-/// may no longer stay open ([`crate::menus::player_tick`]).
+/// may no longer stay open ([`crate::menus::player_tick`]). Then the mods hear the tick
+/// ([`crate::world_events::player_tick`]), as `Player.tick` posts it from the player's connection
+/// tick, after the level's.
 pub fn player_tick(rt: &mut Rt, host: &mut dyn Host) {
     rt.safe_point();
     crate::menus::seen_player_tick(rt);
     let Some(uuid) = host.player_id() else { return };
-    if !crate::menus::has_work(rt, uuid) {
+    let menus = crate::menus::has_work(rt, uuid);
+    if !menus && !crate::world_events::player_ticks_heard(rt) {
         return;
     }
-    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| crate::menus::player_tick(rt, uuid)));
+    rt.with_host(host, |rt| {
+        crate::hand::with_hand(rt, |rt| {
+            if menus {
+                crate::menus::player_tick(rt, uuid);
+            }
+            crate::world_events::player_tick(rt);
+        })
+    });
 }
 
 /// The mods' HUD layers at the game's layer `layer` (`minecraft:hotbar`), drawn on `host`'s GUI
@@ -1285,7 +1329,9 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
         let ev = rt.new_object(CLIENT_TICK_PRE);
         crate::neo::post(rt, CLIENT_TICK_PRE, ev);
         crate::screens::tick(rt);
-        // `ClientLevel.tickEntities`: the entities, then the block entities.
+        // `ClientLevel.tickEntities`: the entities (the client's own player among them), then the
+        // block entities.
+        crate::world_events::client_player_tick(rt);
         let dimension = rt.host().map(|h| h.dimension()).unwrap_or_default();
         crate::mod_entities::tick_all(rt, &dimension);
         tick_client_block_entities(rt);

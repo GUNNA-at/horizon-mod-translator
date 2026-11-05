@@ -125,6 +125,10 @@ fn post(rt: &mut Rt, class: &str, ev: V) -> Option<bool> {
 /// listener canceled it (the block's own use and the item's don't run), None when it goes on.
 pub fn right_click_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: i64, hit: [f64; 3], hand: u8) -> Option<bool> {
     rt.safe_point();
+    // A block this click places was placed against the clicked one: its event asks.
+    if crate::world_events::places_heard(rt) {
+        rt.with_host(host, |rt| crate::world_events::clicked(rt, pos, face));
+    }
     if !listened(rt, RIGHT_CLICK_BLOCK) {
         return None;
     }

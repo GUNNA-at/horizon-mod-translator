@@ -3213,6 +3213,40 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   `Registry.getKey` knew mods' registrations only. Vanilla's items and blocks now answer their
   names (test `neo::tests::vanilla_blocks_and_items_have_their_keys`); `Minecraft.getLocale` is
   mapped. 345 compat, 17 translator tests pass.
+- [x] 2026-11-05 Common world events: a block broken or placed, a player's tick, the client joining
+  and leaving (new `horizon-compat/src/world_events.rs`). Measured in the pack (methods taking the
+  event): `BlockEvent.BreakEvent` 26 jars (33 methods, Create 2), `EntityPlaceEvent` 17 (21, Create
+  3), `PlayerTickEvent.Post` 24 (35, Create 3) and `.Pre` 10 (16), `ClientPlayerNetworkEvent.LoggingIn`
+  25 (26, Create 1), `.LoggingOut` 34 (47, Create 1), `.Clone` 4 (20). The runtime posted none of
+  them. Now, through hooks the game already had (bundle bindings `destroy_block`, `place_block`,
+  `client_level_load`, `client_level_unload`; `player_tick` and `client_tick` extended):
+  - `BreakEvent` as `ServerPlayerGameMode.destroyBlock` posts it first (`CommonHooks.fireBlockBreak`):
+    level, position, state, the breaking player; a listener that cancels it keeps the block (the
+    game's `native_destroy_block` cancel).
+  - `EntityPlaceEvent` after a player's `useOn` placed a block (`onPlaceItemIntoWorld`): the placed
+    state, `placedAgainst` (the block on the clicked face's other side, from the right click
+    `events::right_click_block` notes), and the replaced block's `BlockSnapshot` (`create`,
+    `getPos`, `getLevel`, `getState`, `getCurrentState`, `restore`...). A mod's own `new
+    BreakEvent(...)` / `new EntityPlaceEvent(snapshot, against, entity)` and subclasses are made too.
+  - `PlayerTickEvent.Pre` and `.Post` for each player on the server (with the menus' tick) and for
+    the client's own player each client tick.
+  - On the client: `LoggingIn` once its first level is made (after that level's `LevelEvent.Load`),
+    `Clone` for each later one (a change of dimension), `LoggingOut` when the last goes, then that
+    level's `LevelEvent.Unload`; the client's block entities are dropped and `Minecraft.level` /
+    `.player` are null until the next server's (`Minecraft.getInstance` fills them only in a world).
+  Test `world_events::tests::{breaking_and_placing_reach_the_mods_as_block_events,
+  a_mods_own_break_event_and_snapshot, a_players_tick_and_the_client_joining_and_leaving}`. In game
+  (`fdcmd.sh` with `hzcheck.jar`, whose new `World` listeners cancel a break of diamond ore and tell
+  the rest): joining says "hzcheck: logged in"; "100 server ticks of the player" and "100 client
+  ticks of the player"; `c break` of a stone: "hzcheck: break minecraft:stone at -28 70 5", the stone
+  gone; of diamond ore: "..., kept", the ore still there; `c place` of oak planks on it: "hzcheck:
+  placed minecraft:oak_planks against minecraft:diamond_ore"; Save and Quit to Title: "hzcheck:
+  logged out" and the client's level unloaded. The earlier checks (commands, keys, raw input,
+  tooltips) still pass; Ponder's 72 "Could not get key" are gone. 348 compat, 17 translator tests
+  pass.
+  - Gaps: the game's placing hook can't be undone, so a canceled `EntityPlaceEvent` keeps the block;
+    `BreakEvent`'s pre-canceled cases (spectator, adventure mode) aren't posted; `PlayerTickEvent.Pre`
+    comes with `.Post` at the tick's end; a change of dimension keeps the client's one level object.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

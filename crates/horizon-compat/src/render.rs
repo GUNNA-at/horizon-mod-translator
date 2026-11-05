@@ -1432,7 +1432,7 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             // Its public fields: the level this client draws, and its player (mods' client ticks
             // run only with both: Create's `ClientEvents.isGameActive`).
             crate::gui::fill_minecraft(rt, mc);
-            if rt.get_field(mc, "level").r() == 0 && crate::neo::is_client(rt) {
+            if rt.get_field(mc, "level").r() == 0 && crate::neo::is_client(rt) && crate::world_events::client_in_world(rt) {
                 let level = crate::glue::level(rt);
                 rt.put_field(mc, "level", level);
                 let player = crate::network::local_player(rt);
