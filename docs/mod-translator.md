@@ -105,6 +105,12 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
 
 `git checkout mod-translator`, read this file, take the first unchecked item.
 
+The scratchpad (`/private/tmp/...`) is cleaned by macOS of files nobody read for about three days: on 6 November it
+took the prepared resources, the horizon-mixins clone's working tree and parts of the build folders. After a pause,
+run `scratchpad/keepalive.sh` (the round scripts run it); `git checkout -- .` restores a clone, and
+`target/fast/horizon-prepare --prepare --minecraft-dir "$HOME/Library/Application Support/minecraft"` the resources
+(17 s with `.local` cached).
+
 Before a PR: `tools/check_public_tree.py` rejects every tracked `.java` outside `mods/horizon/src/`,
 and the translator's test fixtures (`crates/horizon-mod-translator/tests/fixtures/`: original test
 sources and NeoForge API stubs the tests compile) are `.java`. The maintainer decides how to allow
@@ -3597,6 +3603,40 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   refused; Nourishment's exhaustion emptied; two bites, the saturation capped by the food level and the food at 20;
   the cow's health its own; health 0 is dying) and `with_no_player_to_read_a_player_is_a_new_ones`. 364 compat, 17
   translator and 41 game tests pass.
+  In game (round 8, 6 November, the scenario's `vitals` steps): `/hzrun vitals hurt` (hzcheck sets the health to 10,
+  the food to 17, the saturation to 0 and the exhaustion to 3.5, then heals by -4, refused) answered `health
+  10.0/20.0, hurt true, dying false, absorption 0.0, food 17, saturation 0.0, exhaustion 3.5`. Farmer's Delight's
+  Comfort healed by one every 80 ticks: 12.0 after 170. Its Nourishment emptied the exhaustion (0.0). The game's own
+  `/data get entity @s Health`, `foodLevel` and `foodSaturationLevel` agreed: `12.0f`, `17`, `0.0f`. No panic.
+  - The cow gap of part 9b, traced: `hzcheck:static given to entity Some(456), which the game doesn't know: no
+    onEffectAdded`. The effect hooks wait for the action that gave the effect to end (`native_after_hit`), but the
+    owner's console command (`horizon-ctl command`) and the dedicated console end with no such point. Their changes
+    waited for whichever action ended next, and ran there. The next entry gives them their own.
+- [x] 2026-11-06 Measured again over the pack (packcov5; 367 jars, datagen-only APIs left out), the old way (null or
+  bare receivers): 83 924 of 130 683 API methods (64.2%), 279 095 of 369 268 class uses (75.6%); packcov4 had 83 313
+  and 277 698: the vitals add 611 methods and 1 397 uses. Create alone: 2 330 of 3 994 methods, 21 415 of 25 380
+  uses (84.4%).
+  - New `PROBE=hosted` for `coverage` (`main.rs`): each call also has a game to ask (`probe_host`: a player in
+    place at full health, a cow beside them, no effects), and a method is also tried on the receivers a mod's code
+    finds:
+    - an entity class's on that player and that cow;
+    - a level class's on the runtime's level (`glue::level`);
+    - any class's on the static fields of API classes the mod reads, by their declared type (`BuiltInRegistries.ITEM`
+      for `DefaultedRegistry.getKey`, `MobEffects.SPEED` for `Holder.value`, `Codec.STRING` for `PrimitiveCodec.fieldOf`);
+    - and on what the mod makes of the class: a new object with its constructor run, or what an API method returning
+      the class gives (`NonNullList.withSize`, `new ListTag()`), with null arguments.
+    Up to 3 of each kind per class.
+  - Hosted: 91 772 of 130 683 methods (70.2%), 300 168 of 369 268 uses (81.3%), 13 042 distinct methods missing
+    across the pack. Create: 2 585 of 3 994 methods (64.7%), 22 592 of 25 380 uses (89.0%). By step: the player and
+    the cow alone give 78.4% of the uses; the level and the statics 80.5%; what the mod makes 81.3%. Still a lower
+    bound: two-step chains (`Codec.fieldOf(...).forGetter`, `group(...).apply`), a menu's slots and a null entity
+    argument (`Level.addFreshEntity`) count as missing.
+  - The top of what is missing now, mods/uses: client entity models (`MeshDefinition.getRoot` 42/339,
+    `PartDefinition.addOrReplaceChild` 41/336, `CubeListBuilder` 41/349, `LayerDefinition.create` 39/335,
+    `ModelPart.getChild` 42/294), `ClientboundBlockEntityDataPacket.create` 60/163, `Camera.getPosition` 65/221,
+    `Minecraft.getConnection` 57/130, `ServerGamePacketListenerImpl.send` 54/120, `Player.drop` 49/163,
+    `BlockState.cycle` 46/264, `Level.getEntity(int)` 46/151, `Level.clip` 41/113, `Block.getId` 41/101,
+    `ItemStack.getComponents` 41/79.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
