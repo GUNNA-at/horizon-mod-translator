@@ -1914,6 +1914,20 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `Class.getClassLoader()` answers one loader object (`ServiceLoader.load` ignores it).
     Tests `api_common::tests::a_custom_hash_set_keeps_stacks_by_their_type`,
     `jutil::tests::tree_map_sorts_keys_and_sets_ignore_duplicates`.
+  - [x] 2026-11-05 Load round 9 (the 28 jars, snapshot `945def5`): 28 load, exit 0. 150 distinct
+    misses (180), 256 kinds (312), calls 6,967 (7,940). Mekanism registers 200 blocks, as many as
+    its code declares; rounds 7 and 8 counted 201, one registration with no block behind it. Every
+    block it registers has its blockstate file (`advanced_bounding_block`'s is a leftover no code
+    registers; `LT_NAMES=block` makes the load harness list the names). New in Mekanism now that
+    its scan data answers: its container sync reads its `@ContainerSync` fields by reflection
+    (`getDeclaredField`, 70, then `MethodHandles.Lookup.unreflectGetter` and `LambdaMetafactory`).
+  - [x] 2026-11-05 What round 9 showed:
+    - `MapColor.col` (2,928 reads in one mod): each constant has the colour vanilla builds it with.
+    - A mod's own `PrimitiveCodec` (Curios' attribute codec, an anonymous class with `read` and
+      `write`): it is a `Codec`, `Decoder` and `Encoder` to `instanceof`, and its field codecs read
+      and write through its `read` and `write`, as DFU's `decode` and `encode` do.
+    Tests `blocks::tests::properties_keep_what_a_declaration_needs`,
+    `ops::tests::a_mods_primitive_codec_reads_and_writes_through_read_and_write`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
