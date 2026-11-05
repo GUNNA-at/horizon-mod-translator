@@ -68,18 +68,30 @@ pub fn tick_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) 
 }
 
 /// `random_tick`: `BlockBehaviour.randomTick`. A mod block's random tick is always the mod's,
-/// even when it has none: the block's template (which gives it random ticks) must not act.
+/// even when it has none: the block's template (which gives it random ticks) must not act. A
+/// block without one of its own ticks as its vanilla class does where the runtime has that
+/// class's: a crop grows ([`crate::crops`]).
 pub fn random_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
-    let mine = mod_block(rt, state).is_some();
-    let ran = run(rt, host, state, RANDOM_TICK, |rt| {
+    let Some((b, class)) = mod_block(rt, state) else { return false };
+    let args = |rt: &mut Rt| {
         let l = level(rt);
         let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
         let r = rt.new_object("net/minecraft/util/RandomSource");
         vec![l, p, r]
-    });
-    ran || mine
+    };
+    if !rt.overrides.is_some_and(|o| o(class, RANDOM_TICK)) && crate::crops::grows_as_crop(rt, class) {
+        rt.with_host(host, |rt| {
+            let st = api::state(rt, state);
+            let a = args(rt);
+            crate::crops::random_tick(rt, b, st, a[0], a[1], a[2]);
+            rt.report_thrown(RANDOM_TICK);
+        });
+        return true;
+    }
+    run(rt, host, state, RANDOM_TICK, args);
+    true
 }
 
 /// `neighbor_changed`: `BlockBehaviour.neighborChanged`.

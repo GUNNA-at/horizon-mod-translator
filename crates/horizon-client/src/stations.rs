@@ -32,7 +32,7 @@ impl StationData {
             brewing: crate::brewing::Brewing::load(root, items, overlay),
             trades: crate::merchant::Trades::load(root, overlay),
             banners: crate::banner::Banners::load(root),
-            recipe_index: crate::recipe_book::RecipeIndex::load(root, overlay),
+            recipe_index: crate::recipe_book::RecipeIndex::load_with(root, overlay, Some(items)),
         }
     }
 }
@@ -574,6 +574,16 @@ impl StationRecipes {
                 _ => {}
             }
         }
+        // The recipe registry's order, its files' (`Identifier.compareTo`): the stonecutter lists
+        // its recipes and the smithing table takes the first that fits in it, across mods.
+        let order = crate::crafting::identifier_order;
+        stonecutting.sort_by(|a: &Stonecutting, b: &Stonecutting| order(&a.id, &b.id));
+        fn smithing_id(r: &Smithing) -> &str {
+            match r {
+                Smithing::Transform { id, .. } | Smithing::Trim { id, .. } => id,
+            }
+        }
+        smithing.sort_by(|a, b| order(smithing_id(a), smithing_id(b)));
         let mut trim_materials = Vec::new();
         let mut tm: Vec<_> = fs::read_dir(root.join("data/minecraft/trim_material"))
             .into_iter()

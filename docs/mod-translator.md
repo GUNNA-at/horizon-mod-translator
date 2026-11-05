@@ -2807,6 +2807,47 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the mod adds to the tag (`dye_recipes`), one marked `required: false` too: the game leaves it
     out while its item is unknown. Test: `carry::tests::a_mods_vanilla_tags_are_26_3s`.
     113 port-pack, 54 crafting, content and station tests pass.
+  - [x] 2026-11-05 `/recipe` and the recipe book know a content mod's recipes. The recipe index
+    (`RecipeIndex::load`, which `/recipe` resolves and suggests from) and the server's recipe list
+    for its clients (`lan::recipes`, also the advancements' recipe displays) read only
+    `data/minecraft/recipe`: in game `/recipe give @s farmersdelight:cooking_pot` said "Unknown
+    recipe" while the pot crafted. They read every content namespace now
+    (`crafting::root_recipe_files`), leave out a recipe for an item the game doesn't have, as
+    crafting does, and list the stonecutter's recipes in the registry's order
+    (`crafting::identifier_order`: the path, then the namespace, as `Identifier.compareTo`).
+    Tests: `recipe_book::tests::the_index_holds_the_content_mods_recipes`,
+    `crafting::tests::recipe_ids_sort_by_path_then_namespace`.
+  - [x] 2026-11-05 A mod's configs load as NeoForge loads them (`neo::register_config`).
+    `ModContainer.registerConfig(type, spec[, file])` and `ModLoadingContext`'s keep a `ModConfig`
+    (its type, spec, mod id, and file, `<modid>-<type>.toml` unless named). A `STARTUP` config
+    loads at once; the others after the registries, before common setup, in the order registered.
+    Each loading posts `ModConfigEvent.Loading` with its config, which mods hear to copy the values
+    into their fields (the MDK's `Config.onLoad`). The values are the spec's defaults: Horizon keeps
+    no config files for translated mods. A server's configs load with the rest (NeoForge loads them
+    as its server starts). `ModConfigSpec.isLoaded` is true.
+    Test: `neo::tests::a_mods_configs_load_after_the_registries`.
+  - [x] 2026-11-05 A mod's crops grow (`crops.rs`). In game Farmer's Delight's cabbages, onions
+    and budding tomatoes stayed at age 0 on wet farmland at random tick speed 300 while the wheat
+    beside them grew. A mod crop without a `randomTick` of its own never ran `CropBlock`'s, and the
+    tomatoes' own growth asked three things the runtime didn't answer. A run with
+    `HORIZON_COMPAT_TRACE` named them: `BlockState.canSustainPlant`, `BlockState.isFertile` and
+    `CommonHooks.canCropGrow`, whose missing answer (false) stopped every growth.
+    - `CropBlock`'s methods as NeoForge 1.21.1 has them, for a crop that inherits them:
+      `randomTick` (light 9, then a draw of 1 in `25 / speed + 1`), `getGrowthSpeed` (the soil's
+      say, wet farmland, rows), `getAge`, `getStateForAge`, `isMaxAge`, `isRandomlyTicking`,
+      `hasSufficientLight`, and bone meal's `growCrops`, `getBonemealAgeIncrease`,
+      `isValidBonemealTarget`, `performBonemeal`. Each calls the crop's own overrides where its
+      class has them: the rice panicles count to 3 with their `AGE_3`. A mod block whose first
+      vanilla class is `CropBlock` (or carrots', potatoes') and has no `randomTick` of its own runs
+      it on the game's random tick, in native code; it keeps its own shapes and template.
+    - NeoForge's `canCropGrow` and `fireCropGrowPost` post `CropGrowEvent.Pre` and `Post`
+      (`BlockEvent`'s getters). A listener's `GROW` or `DO_NOT_GROW` decides; with no listener,
+      the crop's own draw does.
+    - The soil: `canSustainPlant` is a mod soil's own answer, else no decision (`DEFAULT`; none of
+      vanilla's soils decide); `isFertile` a mod soil's own, else a `FarmBlock` while wet.
+    Tests: `crops::tests::a_mod_crop_without_a_random_tick_grows_as_vanillas`,
+    `the_growth_speed_counts_the_soil_and_the_rows`,
+    `a_mods_own_growth_asks_neoforges_hooks_and_the_soil`. 312 compat, 206 client tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

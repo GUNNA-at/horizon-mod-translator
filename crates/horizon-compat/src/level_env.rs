@@ -55,7 +55,7 @@ fn light(rt: &Rt, pos: [i32; 3]) -> (i32, i32) {
 }
 
 /// `getRawBrightness(pos, darkening)`: the brighter of the block light and the sky's less `darkening`.
-fn raw_brightness(rt: &Rt, pos: [i32; 3], darkening: i32) -> i32 {
+pub(crate) fn raw_brightness(rt: &Rt, pos: [i32; 3], darkening: i32) -> i32 {
     let (block, sky) = light(rt, pos);
     block.max(sky - darkening)
 }

@@ -625,7 +625,7 @@ fn vanilla_property_named(rt: &mut Rt, name: &str, value: &str) -> V {
 
 /// Vanilla's property in `BlockStateProperties.<field>`: one object per field, as Java's (`FACING`
 /// and `HORIZONTAL_FACING` share a name, not their values).
-fn vanilla_property_object(rt: &mut Rt, field: &str) -> Option<V> {
+pub(crate) fn vanilla_property_object(rt: &mut Rt, field: &str) -> Option<V> {
     let (name, kind) = vanilla_property(field)?;
     let f = field.to_owned();
     Some(rt.intern(format!("prop/field/{field}"), move |rt| {
@@ -1318,14 +1318,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     if owner == "net/minecraft/util/FastColor" && name == "as8BitChannel" {
         let f = args.first().copied().unwrap_or_default().f() * 255.0;
         return Some(V::I(f.floor() as i32));
-    }
-    // `CropBlock`'s own age (a mod crop's `super.getAgeProperty()`): `AGE_7`, up to 7.
-    if owner == "net/minecraft/world/level/block/CropBlock" {
-        match name {
-            "getAgeProperty" => return vanilla_property_object(rt, "AGE_7"),
-            "getMaxAge" => return Some(V::I(7)),
-            _ => {}
-        }
     }
     // `DyeItem.byColor(color)`: vanilla's dye of that colour.
     if owner == "net/minecraft/world/item/DyeItem" && name == "byColor" {

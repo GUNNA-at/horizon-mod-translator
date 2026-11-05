@@ -52,17 +52,17 @@ fn ingredient(v: &Value) -> Option<Ingredient> {
     }
 }
 
-/// Every recipe file, by recipe id (the registry's order).
-pub(super) fn recipes(dir: &Path, prefix: &str, out: &mut BTreeMap<String, Value>) {
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if path.is_dir() {
-            recipes(&path, &format!("{prefix}{name}/"), out);
-        } else if let Some(stem) = name.strip_suffix(".json")
-            && let Ok(v) = serde_json::from_slice(&std::fs::read(&path).unwrap_or_default())
+/// Every recipe file of the game's data, vanilla's and the content mods'
+/// ([`crate::crafting::root_recipe_files`]), by recipe id, whose NeoForge load
+/// conditions hold (`mod_loaded` asks which mods' data is in `root`).
+pub(super) fn recipes(root: &Path, out: &mut BTreeMap<String, Value>) {
+    let mut mods = horizon_items::content_namespaces::mod_ids(root);
+    mods.push("minecraft".to_owned());
+    for (id, path) in crate::crafting::root_recipe_files(root) {
+        if let Ok(v) = serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap_or_default())
+            && horizon_world::conditions::conditions_hold(&v, &|m: &str| mods.iter().any(|x| x == m))
         {
-            out.insert(format!("minecraft:{prefix}{stem}"), v);
+            out.insert(id, v);
         }
     }
 }
@@ -88,11 +88,18 @@ pub fn update_recipes(
     overlay: &horizon_world::loot::PackOverlay,
 ) -> Vec<u8> {
     let mut all = BTreeMap::new();
-    recipes(&resources.join("data/minecraft/recipe"), "", &mut all);
+    recipes(resources, &mut all);
     overlay_recipes(overlay, &mut all);
-    // The data's recipe filters, as the server's own tables apply them.
+    // The data's recipe filters, as the server's own tables apply them; a recipe for an item the
+    // game doesn't have isn't in them either ([`crate::crafting::result_known`]).
     let filters = horizon_items::recipe_filters::RecipeFilters::load(resources, overlay);
-    all.retain(|id, v| filters.apply(id, v));
+    all.retain(|id, v| {
+        filters.apply(id, v)
+            && horizon_world::loot::recipe_result_id(&v["result"]).is_none_or(|r| {
+                let r = if r.contains(':') { r.to_owned() } else { format!("minecraft:{r}") };
+                sync.id("minecraft:item", &r).is_some()
+            })
+    });
     let tags: BTreeMap<&str, &[i32]> = sync
         .tags
         .registries
@@ -137,11 +144,14 @@ pub fn update_recipes(
         }
     }
     // SelectableRecipe.SingleInputSet: each stonecutting recipe's input and
-    // its result as an ItemStackSlotDisplay.
-    let stonecutting: Vec<&Value> = all
-        .values()
-        .filter(|r| r["type"] == "minecraft:stonecutting")
+    // its result as an ItemStackSlotDisplay, in the registry's order
+    // (`Identifier.compareTo`), the server's stonecutter's.
+    let mut stonecutting: Vec<(&String, &Value)> = all
+        .iter()
+        .filter(|(_, r)| r["type"] == "minecraft:stonecutting")
         .collect();
+    stonecutting.sort_by(|a, b| crate::crafting::identifier_order(a.0, b.0));
+    let stonecutting: Vec<&Value> = stonecutting.into_iter().map(|(_, r)| r).collect();
     let item_stack = sync
         .id("minecraft:slot_display", "minecraft:item_stack")
         .unwrap_or(0);

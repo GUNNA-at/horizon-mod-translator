@@ -1191,6 +1191,28 @@ pub fn result_known(result: &Value, items: &Items) -> bool {
         Some(id) => items.get(&format!("minecraft:{id}")).is_some(),
     }
 }
+/// Vanilla's order of ids (`Identifier.compareTo`): by path, then namespace; a bare id is
+/// `minecraft:`'s. The recipe registry lists its recipes in this order (its files' order), so the
+/// stonecutter's list and the first recipe to match follow it across mods.
+pub fn identifier_order(a: &str, b: &str) -> std::cmp::Ordering {
+    fn split(s: &str) -> (&str, &str) {
+        s.split_once(':').unwrap_or(("minecraft", s))
+    }
+    let ((an, ap), (bn, bp)) = (split(a), split(b));
+    ap.cmp(bp).then_with(|| an.cmp(bn))
+}
+/// Every recipe file in `root` by recipe id: vanilla's (`minecraft:<path>`), then the content
+/// mods' (`<namespace>:<path>`), each folder as [`recipe_files`] walks it.
+pub fn root_recipe_files(root: &Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let mods = crate::mod_content::namespaces(root);
+    for ns in std::iter::once("minecraft").chain(mods.iter().map(String::as_str).filter(|n| *n != "minecraft")) {
+        for (name, path) in recipe_files(&root.join(format!("data/{ns}/recipe"))).unwrap_or_default() {
+            out.push((format!("{ns}:{name}"), path));
+        }
+    }
+    out
+}
 /// The `.json` files under a `recipe` folder, its subfolders' too, in id
 /// order: each one's path inside the folder without the extension (`a/b`, as a
 /// recipe id has it) and its file. An error when `dir` itself can't be read; a
@@ -1946,6 +1968,15 @@ mod tests {
             )
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The recipe registry's order is `Identifier.compareTo`'s: the path first, then the
+    /// namespace (a bare id is `minecraft:`'s), so a mod's recipes fall between vanilla's.
+    #[test]
+    fn recipe_ids_sort_by_path_then_namespace() {
+        let mut ids = vec!["mymod:apple", "minecraft:stick", "abc:stick", "zzz", "minecraft:apple", "a:zzz"];
+        ids.sort_by(|a, b| identifier_order(a, b));
+        assert_eq!(ids, ["minecraft:apple", "mymod:apple", "abc:stick", "minecraft:stick", "a:zzz", "zzz"]);
     }
 
     /// A mod's recipe whose ingredient is one of NeoForge's standard shapes

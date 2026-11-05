@@ -660,9 +660,16 @@ pub(crate) fn crafting_station(kind: &str) -> &'static str {
     }
 }
 impl RecipeIndex {
-    /// Reads `data/minecraft/recipe/*.json` under `root`, with the world's
-    /// packs' recipe files over it (`overlay`).
+    /// Reads the recipe files under `root`, vanilla's and the content mods'
+    /// ([`crate::crafting::root_recipe_files`]), with the world's packs' recipe
+    /// files over them (`overlay`).
     pub fn load(root: &std::path::Path, overlay: &PackOverlay) -> Self {
+        Self::load_with(root, overlay, None)
+    }
+    /// [`Self::load`], leaving out a recipe whose result is an item `items`
+    /// doesn't have, as the recipe manager leaves it out
+    /// ([`crate::crafting::result_known`]).
+    pub fn load_with(root: &std::path::Path, overlay: &PackOverlay, items: Option<&Items>) -> Self {
         let mut recipes = std::collections::BTreeMap::new();
         let mut insert = |id: String, v: &serde_json::Value| {
             let kind = v["type"].as_str().unwrap_or_default();
@@ -698,7 +705,6 @@ impl RecipeIndex {
                 },
             );
         };
-        let dir = root.join("data/minecraft/recipe");
         // NeoForge's load conditions: the book lists only what loaded; a
         // recipe gated on an absent mod isn't in the manager either.
         let mods: Vec<String> = {
@@ -717,14 +723,13 @@ impl RecipeIndex {
         // The packs' files replace first and the gate answers the merged
         // file, as the crafting loader's does: a false-conditioned pack
         // file leaves the lower one gone too.
-        let mut sources: Vec<(String, serde_json::Value)> = crate::crafting::recipe_files(&dir)
-            .unwrap_or_default()
+        let mut sources: Vec<(String, serde_json::Value)> = crate::crafting::root_recipe_files(root)
             .into_iter()
-            .filter_map(|(name, path)| {
+            .filter_map(|(id, path)| {
                 let v = std::fs::read(&path)
                     .ok()
                     .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())?;
-                Some((format!("minecraft:{name}"), v))
+                Some((id, v))
             })
             .collect();
         for (id, files) in overlay.kind("recipe") {
@@ -738,7 +743,10 @@ impl RecipeIndex {
         }
         let filters = horizon_items::recipe_filters::RecipeFilters::load(root, overlay);
         for (id, mut v) in sources {
-            if conditions_hold(&v) && filters.apply(&id, &mut v) {
+            if conditions_hold(&v)
+                && filters.apply(&id, &mut v)
+                && items.is_none_or(|items| crate::crafting::result_known(&v["result"], items))
+            {
                 insert(id, &v);
             }
         }
@@ -1015,6 +1023,49 @@ mod tests {
             toast("minecraft:coast_trim"),
             (Some("minecraft:smithing_table"), None)
         );
+    }
+    /// A content root's mods' recipes are the recipe manager's too, under their own namespace
+    /// (`/recipe give @s farmersdelight:cooking_pot`); given the game's items, a recipe for an item
+    /// no mod registered is left out, as the manager leaves it out.
+    #[test]
+    fn the_index_holds_the_content_mods_recipes() {
+        let root = std::env::temp_dir().join(format!("horizon-mod-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (ns, name, result) in [
+            ("minecraft", "stick", "minecraft:stick"),
+            ("mymod", "cooking_pot", "mymod:cooking_pot"),
+            ("mymod", "ghost", "mymod:ghost_block"),
+            ("other", "lamp", "other:lamp"),
+        ] {
+            let dir = root.join(format!("data/{ns}/recipe"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let json = format!(
+                r#"{{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:flint"],"result":{{"id":"{result}"}}}}"#
+            );
+            std::fs::write(dir.join(format!("{name}.json")), json).unwrap();
+        }
+        // `other` is no content mod's namespace: its folder isn't read.
+        std::fs::write(root.join("horizon-mod-content.json"), r#"["mymod"]"#).unwrap();
+        let ids = |index: &RecipeIndex| {
+            let mut v: Vec<String> = index.ids().cloned().collect();
+            v.sort();
+            v
+        };
+        let all = RecipeIndex::load(&root, &PackOverlay::NONE);
+        assert_eq!(
+            ids(&all),
+            ["minecraft:stick", "mymod:cooking_pot", "mymod:ghost"]
+        );
+        assert_eq!(all.result("mymod:cooking_pot"), Some("mymod:cooking_pot"));
+        std::fs::write(
+            root.join("items.json"),
+            r#"{"minecraft:stick":{},"minecraft:flint":{},"mymod:cooking_pot":{}}"#,
+        )
+        .unwrap();
+        let items = Items::catalog(&root, &PackOverlay::NONE).unwrap();
+        let known = RecipeIndex::load_with(&root, &PackOverlay::NONE, Some(&items));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(ids(&known), ["minecraft:stick", "mymod:cooking_pot"]);
     }
     #[test]
     fn small_recipes_are_centred_in_the_grid() {

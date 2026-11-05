@@ -651,7 +651,7 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 47] = [
+const CHAIN: [Module; 48] = [
     mutable_pos,
     crate::worldgen::call,
     crate::mixin::call,
@@ -678,6 +678,7 @@ const CHAIN: [Module; 47] = [
     crate::value_providers::call,
     crate::nightconfig::call,
     crate::rotation::call,
+    crate::crops::call,
     crate::blocks::call,
     crate::shapes::call,
     crate::events::call,
@@ -704,7 +705,7 @@ const CHAIN: [Module; 47] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 47] = [
+const CLAIMS: [Claims; 48] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::worldgen::claims,
     crate::mixin::claims,
@@ -731,6 +732,7 @@ const CLAIMS: [Claims; 47] = [
     crate::value_providers::claims,
     crate::nightconfig::claims,
     crate::rotation::claims,
+    crate::crops::claims,
     crate::blocks::claims,
     crate::shapes::claims,
     crate::events::claims,
@@ -755,7 +757,7 @@ const CLAIMS: [Claims; 47] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 46] = [
+const MODULE_NAMES: [&str; 48] = [
     "mutable_pos",
     "worldgen",
     "mixin",
@@ -779,8 +781,10 @@ const MODULE_NAMES: [&str; 46] = [
     "creative",
     "functions",
     "gamerules",
+    "value_providers",
     "nightconfig",
     "rotation",
+    "crops",
     "blocks",
     "shapes",
     "events",

@@ -182,7 +182,8 @@ pub fn fire_registrations(rt: &mut Rt) {
         rt.call_functional(BAKE, callback, &[registry]);
         rt.report_thrown("BakeCallback.onBake");
     }
-    // Then common setup and capabilities, as NeoForge's loading goes on.
+    // NeoForge's "Config loading" step, then common setup and capabilities, as its loading goes on.
+    fire_config_loading(rt);
     fire_common_setup(rt);
     // NeoForge's network registry: the mods register their payload types.
     crate::network::fire_registration(rt);
@@ -1022,7 +1023,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 _ => return None,
             }
         }
-        (MOD_CONTAINER, "registerConfig" | "registerExtensionPoint") => V::Void,
+        (MOD_CONTAINER, "registerConfig") => {
+            let file = if desc_params(desc).len() > 2 { a(3) } else { V::NULL };
+            register_config(rt, a(0), a(1), a(2), file);
+            V::Void
+        }
+        (MOD_CONTAINER, "registerExtensionPoint") => V::Void,
+        // A mod's config as FML keeps it, and the event its loading posts.
+        (MOD_CONFIG, "getType") => rt.get_field(a(0), "$type"),
+        (MOD_CONFIG, "getSpec") => rt.get_field(a(0), "$spec"),
+        (MOD_CONFIG, "getModId") => rt.get_field(a(0), "$modId"),
+        (MOD_CONFIG, "getFileName") => rt.get_field(a(0), "$fileName"),
+        (o, "getConfig") if o.starts_with(CONFIG_EVENT) => rt.get_field(a(0), "$config"),
+        // Its values are there from the start (the defaults): loaded.
+        ("net/neoforged/neoforge/common/ModConfigSpec", "isLoaded") => V::I(1),
         (MOD_CONTAINER, "getCustomExtension") => crate::api_common::optional(rt, V::NULL),
         (MOD_CONTAINER, "getModInfo") => {
             let id = rt.get_field(a(0), "$modId");
@@ -1054,7 +1068,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let c = active_container(rt);
             rt.get_field(c, "$modId")
         }
-        (LOADING_CONTEXT, "registerExtensionPoint" | "registerConfig") => V::Void,
+        (LOADING_CONTEXT, "registerConfig") => {
+            let file = if desc_params(desc).len() > 2 { a(3) } else { V::NULL };
+            let container = active_container(rt);
+            register_config(rt, container, a(1), a(2), file);
+            V::Void
+        }
+        (LOADING_CONTEXT, "registerExtensionPoint") => V::Void,
         // Kotlin for Forge's loading context: a Kotlin mod's constructor asks it for the mod bus
         // (`MOD_BUS`), as a Java mod's constructor takes the bus.
         (KOTLIN_CONTEXT_COMPANION, "get") => rt.intern("compat:kotlin-loading-context".into(), |rt| rt.new_object(KOTLIN_CONTEXT)),
@@ -1209,6 +1229,65 @@ pub fn is_client(rt: &Rt) -> bool {
 }
 
 const CONFIG_BUILDER: &str = "net/neoforged/neoforge/common/ModConfigSpec$Builder";
+const MOD_CONFIG: &str = "net/neoforged/fml/config/ModConfig";
+const CONFIG_EVENT: &str = "net/neoforged/fml/event/config/ModConfigEvent";
+const CONFIG_LOADING: &str = "net/neoforged/fml/event/config/ModConfigEvent$Loading";
+/// The configs registered and not loaded yet ([`fire_config_loading`]).
+const CONFIGS: &str = "compat:configs";
+
+/// `ModContainer.registerConfig`: the mod's `ModConfig` (its type, spec and file, FML's
+/// `<mod id>-<type>.toml` unless named), loaded with the others once the registries are
+/// ([`fire_config_loading`]); a `STARTUP` config loads at once, as FML opens it there.
+fn register_config(rt: &mut Rt, container: V, ty: V, spec: V, file: V) {
+    let id = rt.get_field(container, "$modId");
+    let kind = rt.str_of(rt.get_field(ty, "$name")).unwrap_or("COMMON").to_ascii_lowercase();
+    let file = if file.r() != 0 {
+        file
+    } else {
+        let name = format!("{}-{kind}.toml", rt.str_of(id).unwrap_or(""));
+        rt.string(&name)
+    };
+    let config = rt.new_object(MOD_CONFIG);
+    for (field, v) in [("$type", ty), ("$spec", spec), ("$modId", id), ("$fileName", file), ("$container", container)] {
+        rt.put_field(config, field, v);
+    }
+    if kind == "startup" {
+        load_config(rt, config);
+        return;
+    }
+    let pending = rt.intern(CONFIGS.into(), |rt| crate::jutil::new_list(rt, Vec::new()));
+    crate::jutil::list_add(rt, pending, config);
+}
+
+/// A config's loading: `ModConfigEvent.Loading` to the mod bus, heard by a listener for it or for
+/// `ModConfigEvent` (the MDK's `Config.onLoad` copies the values into its fields there).
+fn load_config(rt: &mut Rt, config: V) {
+    for (class, sup) in [
+        (CONFIG_LOADING, CONFIG_EVENT),
+        ("net/neoforged/fml/event/config/ModConfigEvent$Reloading", CONFIG_EVENT),
+        ("net/neoforged/fml/event/config/ModConfigEvent$Unloading", CONFIG_EVENT),
+        (CONFIG_EVENT, "net/neoforged/bus/api/Event"),
+    ] {
+        rt.supers.insert(class, sup);
+    }
+    let ev = rt.new_object(CONFIG_LOADING);
+    rt.put_field(ev, "$config", config);
+    post(rt, CONFIG_LOADING, ev);
+}
+
+/// NeoForge's "Config loading" step, once the registries are frozen and before common setup: each
+/// registered config loads, in the order registered. Horizon keeps no config files for translated
+/// mods, so the values are the defaults; a server's configs load with the rest (NeoForge loads
+/// them as its server starts).
+fn fire_config_loading(rt: &mut Rt) {
+    let Some(&pending) = rt.interned.get(CONFIGS) else {
+        return;
+    };
+    let configs = std::mem::take(list_mut(rt, pending));
+    for config in configs {
+        load_config(rt, config);
+    }
+}
 
 /// A `java.lang` box of `v`.
 fn boxed(rt: &mut Rt, class: &'static str, v: V) -> V {
@@ -1620,6 +1699,46 @@ mod tests {
         assert_eq!(heard.first().map(String::as_str), Some(CONSTRUCT));
         assert_eq!(heard.last().map(String::as_str), Some(COMMON_SETUP));
         assert!(heard[1..heard.len() - 1].iter().all(|e| e == REGISTER_EVENT) && heard.len() > 2, "{heard:?}");
+    }
+
+    /// NeoForge's config loading: a mod's configs load once the registries are frozen, before
+    /// common setup, each heard as `ModConfigEvent.Loading` by a listener for `ModConfigEvent` (the
+    /// MDK's `Config.onLoad`), with the config the mod registered; a `STARTUP` config loads as it is
+    /// registered.
+    #[test]
+    fn a_mods_configs_load_after_the_registries() {
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(bake_into_list);
+        let seen = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        for event in [COMMON_SETUP, CONFIG_EVENT] {
+            let listener = rt.lambda_id("java/util/function/Consumer", 2, vec![seen]);
+            rt.listeners.push((event.to_owned(), listener));
+        }
+        let container = mod_container(&mut rt, "ruby");
+        let ty = "net/neoforged/fml/config/ModConfig$Type";
+        let common = crate::api::api_enum(&mut rt, ty, "COMMON", 0);
+        let startup = crate::api::api_enum(&mut rt, ty, "STARTUP", 3);
+        let (spec, early) = (rt.new_object("net/neoforged/neoforge/common/ModConfigSpec"), rt.new_object("net/neoforged/neoforge/common/ModConfigSpec"));
+        let register = "net/neoforged/fml/ModContainer.registerConfig.(Lnet/neoforged/fml/config/ModConfig$Type;Lnet/neoforged/fml/config/IConfigSpec;)V";
+        call(&mut rt, register, &[container, common, spec]);
+        call(&mut rt, register, &[container, startup, early]);
+        assert_eq!(list_mut(&mut rt, seen).len(), 1, "the startup config, at once");
+        fire_registrations(&mut rt);
+        let events = list_mut(&mut rt, seen).clone();
+        let classes: Vec<&str> = events.iter().map(|e| rt.class_of(*e)).collect();
+        assert_eq!(classes, [CONFIG_LOADING, CONFIG_LOADING, COMMON_SETUP]);
+        let get = "net/neoforged/fml/event/config/ModConfigEvent.getConfig.()Lnet/neoforged/fml/config/ModConfig;";
+        let (first, config) = (call(&mut rt, get, &[events[0]]).unwrap(), call(&mut rt, get, &[events[1]]).unwrap());
+        let spec_of = "net/neoforged/fml/config/ModConfig.getSpec.()Lnet/neoforged/fml/config/IConfigSpec;";
+        assert_eq!(call(&mut rt, spec_of, &[first]), Some(early));
+        assert_eq!(call(&mut rt, spec_of, &[config]), Some(spec));
+        assert_eq!(call(&mut rt, "net/neoforged/fml/config/ModConfig.getType.()Lnet/neoforged/fml/config/ModConfig$Type;", &[config]), Some(common));
+        let text = |rt: &mut Rt, key: &'static str| {
+            let v = call(rt, key, &[config]).unwrap();
+            rt.str_of(v).map(str::to_owned)
+        };
+        assert_eq!(text(&mut rt, "net/neoforged/fml/config/ModConfig.getFileName.()Ljava/lang/String;").as_deref(), Some("ruby-common.toml"));
+        assert_eq!(text(&mut rt, "net/neoforged/fml/config/ModConfig.getModId.()Ljava/lang/String;").as_deref(), Some("ruby"));
     }
 
     /// Create's `ContraptionType` makes its holder from the registry before it is registered

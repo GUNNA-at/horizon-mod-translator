@@ -23,6 +23,7 @@ pub mod events;
 pub mod files;
 pub mod convention;
 pub mod creative;
+pub mod crops;
 pub mod fluids;
 pub mod food;
 pub mod item_use;
