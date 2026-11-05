@@ -198,6 +198,7 @@ mod native_claimed_items;
 mod native_components;
 mod native_criteria;
 mod native_data_maps;
+mod native_effects;
 mod native_entities;
 mod native_explosions;
 mod native_falling;

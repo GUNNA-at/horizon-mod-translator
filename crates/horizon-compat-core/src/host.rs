@@ -203,6 +203,53 @@ impl AttributeView {
     }
 }
 
+/// One of a living entity's active effects (vanilla's `MobEffectInstance`), as translated code
+/// reads it (`getEffect`, `getActiveEffects`) and gives it (`addEffect`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EffectView {
+    /// Its effect: `minecraft:speed`, a mod's `<namespace>:<path>`.
+    pub id: String,
+    /// The ticks left; -1 for one that doesn't end.
+    pub duration: i32,
+    pub amplifier: i32,
+    pub ambient: bool,
+    /// Whether it shows its particles.
+    pub visible: bool,
+    pub show_icon: bool,
+}
+
+impl EffectView {
+    /// Vanilla's `MobEffectInstance.update` of an effect already there (`self`) by one of the same
+    /// effect given again (`by`), without the weaker one it keeps hidden: a stronger one takes over,
+    /// one as strong lasts as long as the longer, and its flags follow the newer. Whether it changed.
+    pub fn update(&mut self, by: &EffectView) -> bool {
+        let endless = |e: &EffectView| e.duration == -1;
+        let shorter = |a: &EffectView, b: &EffectView| !endless(a) && (a.duration < b.duration || endless(b));
+        let mut changed = false;
+        if by.amplifier > self.amplifier {
+            self.amplifier = by.amplifier;
+            self.duration = by.duration;
+            changed = true;
+        } else if by.amplifier == self.amplifier && shorter(self, by) {
+            self.duration = by.duration;
+            changed = true;
+        }
+        if (!by.ambient && self.ambient) || changed {
+            self.ambient = by.ambient;
+            changed = true;
+        }
+        if by.visible != self.visible {
+            self.visible = by.visible;
+            changed = true;
+        }
+        if by.show_icon != self.show_icon {
+            self.show_icon = by.show_icon;
+            changed = true;
+        }
+        changed
+    }
+}
+
 /// A damage type of the game's data (`minecraft:in_fire`), as translated code reads it through a
 /// `DamageSource` (`type()`, `getMsgId`, `is(TagKey)`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -491,6 +538,21 @@ pub trait Host {
     /// Makes `change` to an attribute named as [`Host::attribute`] names it: false when it wasn't
     /// made (no such attribute, a modifier's id there already or not there).
     fn change_attribute(&mut self, _entity: Option<i32>, _attribute: &str, _change: &AttributeChange) -> bool {
+        false
+    }
+    /// The active effects of the living entity `entity` (as [`Host::attribute`] names it), in no
+    /// particular order. None when it isn't a living entity the host knows, or the host can't tell.
+    fn effects(&mut self, _entity: Option<i32>) -> Option<Vec<EffectView>> {
+        None
+    }
+    /// Gives `entity` the effect `effect` (`LivingEntity.addEffect`: one of the same effect there
+    /// already is updated as vanilla's; with `force`, `forceAddEffect`, replaced). Whether it was
+    /// added or changed what was there: not when the entity can't have it (a spider's poison).
+    fn add_effect(&mut self, _entity: Option<i32>, _effect: &EffectView, _force: bool) -> bool {
+        false
+    }
+    /// Takes the effect `effect` (`minecraft:speed`) off `entity` (`removeEffect`): whether it had it.
+    fn remove_effect(&mut self, _entity: Option<i32>, _effect: &str) -> bool {
         false
     }
     /// A line of a mod's command's answer (`CommandSourceStack.sendSuccess`, `sendFailure`), for
@@ -918,6 +980,9 @@ pub struct MemoryHost {
     /// The living entities' attributes ([`Host::attribute`]), by entity (None: the acting player)
     /// and the game's attribute id; changes keep their values computed as vanilla's.
     pub attributes: std::collections::BTreeMap<(Option<i32>, String), AttributeView>,
+    /// The living entities' effects ([`Host::effects`]), by entity (None: the acting player): one
+    /// listed here, even with none, is a living entity.
+    pub effects: std::collections::BTreeMap<Option<i32>, Vec<EffectView>>,
     /// Experience orbs spawned: where, worth, and the motion given.
     pub orbs: Vec<([f64; 3], u32, Option<[f64; 3]>)>,
     /// What the acting player looks at (`player_pov_hit`).
@@ -1172,6 +1237,33 @@ impl Host for MemoryHost {
         };
         a.value = AttributeView::computed(a.base, &a.modifiers);
         made
+    }
+    fn effects(&mut self, entity: Option<i32>) -> Option<Vec<EffectView>> {
+        self.effects.get(&entity).cloned()
+    }
+    fn add_effect(&mut self, entity: Option<i32>, effect: &EffectView, force: bool) -> bool {
+        let Some(effects) = self.effects.get_mut(&entity) else {
+            return false;
+        };
+        match effects.iter_mut().find(|e| e.id == effect.id) {
+            Some(there) if force => {
+                *there = effect.clone();
+                true
+            }
+            Some(there) => there.update(effect),
+            None => {
+                effects.push(effect.clone());
+                true
+            }
+        }
+    }
+    fn remove_effect(&mut self, entity: Option<i32>, effect: &str) -> bool {
+        let Some(effects) = self.effects.get_mut(&entity) else {
+            return false;
+        };
+        let before = effects.len();
+        effects.retain(|e| e.id != effect);
+        effects.len() != before
     }
     fn spawn_experience_orb(&mut self, at: [f64; 3], value: u32, motion: Option<[f64; 3]>) -> bool {
         self.orbs.push((at, value, motion));

@@ -64,8 +64,9 @@ const PLAIN: [&str; 8] = [
     "jump_strength",
 ];
 
-/// Whose attribute a mod asks for.
-enum Holder {
+/// A living entity a mod names by its id, of those it reaches: the player in place, a mob or an
+/// armour stand of the level in place.
+pub(super) enum Living {
     Player,
     Mob(u32),
     Stand(u32),
@@ -79,8 +80,8 @@ impl Game<'_> {
     #[allow(dead_code)]
     pub(crate) fn native_attribute(&mut self, entity: Option<i32>, attribute: &str) -> Option<NativeAttribute> {
         let name = attribute_name(attribute);
-        match self.attribute_holder(entity)? {
-            Holder::Player => {
+        match self.living(entity)? {
+            Living::Player => {
                 let attributes = &mut self.player.as_mut()?.attributes;
                 let key = attributes.key(&name)?;
                 if !attributes.has_attribute(Some(key.clone())).ok()? {
@@ -92,7 +93,7 @@ impl Game<'_> {
                 let modifiers = instance.map(modifiers_of).unwrap_or_default();
                 Some(NativeAttribute { value, base, modifiers })
             }
-            Holder::Mob(id) if PLAIN.contains(&short(&name)) => {
+            Living::Mob(id) if PLAIN.contains(&short(&name)) => {
                 let kind = self.target_type(Target::Mob(id));
                 let attribute = self.motion.attributes.id(&name)?;
                 self.motion.attributes.default_base(&kind, attribute)?;
@@ -100,8 +101,8 @@ impl Game<'_> {
                 let value = plain(&m.attrs, short(&name))?;
                 Some(NativeAttribute { value, base: value, modifiers: Vec::new() })
             }
-            Holder::Mob(id) => self.generic_attribute_of(Target::Mob(id), &name),
-            Holder::Stand(id) => self.generic_attribute_of(Target::Stand(id), &name),
+            Living::Mob(id) => self.generic_attribute_of(Target::Mob(id), &name),
+            Living::Stand(id) => self.generic_attribute_of(Target::Stand(id), &name),
         }
     }
 
@@ -127,11 +128,11 @@ impl Game<'_> {
             }
             _ => None,
         };
-        let Some(holder) = self.attribute_holder(entity) else {
+        let Some(holder) = self.living(entity) else {
             return false;
         };
         match holder {
-            Holder::Player => {
+            Living::Player => {
                 let Some(player) = self.player.as_mut() else {
                     return false;
                 };
@@ -141,7 +142,7 @@ impl Game<'_> {
                 };
                 attributes.edit(&handle, |instance, dirty| apply(instance, change, modifier, dirty)).unwrap_or(false)
             }
-            Holder::Mob(id) if PLAIN.contains(&short(&name)) => {
+            Living::Mob(id) if PLAIN.contains(&short(&name)) => {
                 let NativeAttributeChange::Base(value) = *change else {
                     return false;
                 };
@@ -159,22 +160,22 @@ impl Game<'_> {
                 }
                 true
             }
-            Holder::Mob(id) => self.change_generic_attribute(Target::Mob(id), &name, change, modifier),
-            Holder::Stand(id) => self.change_generic_attribute(Target::Stand(id), &name, change, modifier),
+            Living::Mob(id) => self.change_generic_attribute(Target::Mob(id), &name, change, modifier),
+            Living::Stand(id) => self.change_generic_attribute(Target::Stand(id), &name, change, modifier),
         }
     }
 
-    /// Who `entity` is, of those with attributes: the player in place (None, or their entity id),
-    /// a mob or an armour stand of the level in place.
-    fn attribute_holder(&self, entity: Option<i32>) -> Option<Holder> {
+    /// Who `entity` is, of the living entities a mod reaches: the player in place (None, or their
+    /// entity id), a mob or an armour stand of the level in place.
+    pub(super) fn living(&self, entity: Option<i32>) -> Option<Living> {
         // On a server, a player is in place only while they act.
         let in_place = self.player.as_ref().filter(|_| self.lan.is_none() || self.lan_acting.is_some());
         match entity {
-            None => in_place.map(|_| Holder::Player),
-            Some(id) if in_place.is_some_and(|p| p.entity_id == id) => Some(Holder::Player),
+            None => in_place.map(|_| Living::Player),
+            Some(id) if in_place.is_some_and(|p| p.entity_id == id) => Some(Living::Player),
             Some(id) => match self.level_entity(id)? {
-                Target::Mob(id) => Some(Holder::Mob(id)),
-                Target::Stand(id) => Some(Holder::Stand(id)),
+                Target::Mob(id) => Some(Living::Mob(id)),
+                Target::Stand(id) => Some(Living::Stand(id)),
                 _ => None,
             },
         }

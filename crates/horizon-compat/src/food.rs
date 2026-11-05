@@ -146,13 +146,24 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         return None;
     }
     let i = crate::vanilla_effects::MOB_EFFECTS.binary_search_by(|(f, _)| (*f).cmp(field)).ok()?;
-    let id = format!("minecraft:{}", crate::vanilla_effects::MOB_EFFECTS[i].1);
-    Some(rt.intern(format!("effect-holder/{id}"), |rt| {
-        let effect = rt.new_object(EFFECT);
-        let s = rt.string(&id);
-        rt.put_field(effect, "$id", s);
-        crate::neo::registry_holder(rt, "mob_effect", &id, effect)
-    }))
+    Some(effect_holder(rt, &format!("minecraft:{}", crate::vanilla_effects::MOB_EFFECTS[i].1)))
+}
+
+/// The holder of the effect `id` (`minecraft:speed`, a mod's `<namespace>:<path>`): vanilla's is
+/// the one its `MobEffects` field gives, a mod's its registry's (a `DeferredHolder` compares with it
+/// by id).
+pub(crate) fn effect_holder(rt: &mut Rt, id: &str) -> V {
+    let id = if id.contains(':') { id.to_owned() } else { format!("minecraft:{id}") };
+    if id.starts_with("minecraft:") {
+        return rt.intern(format!("effect-holder/{id}"), |rt| {
+            let effect = rt.new_object(EFFECT);
+            let s = rt.string(&id);
+            rt.put_field(effect, "$id", s);
+            crate::neo::registry_holder(rt, "mob_effect", &id, effect)
+        });
+    }
+    let value = crate::neo::registry_get(rt, "mob_effect", &id);
+    crate::neo::registry_holder(rt, "mob_effect", &id, value)
 }
 
 /// Vanilla's potion `id` (`minecraft:water`) as its registry's holder, one per id; the potion
@@ -168,7 +179,7 @@ pub(crate) fn potion_holder(rt: &mut Rt, id: &str) -> V {
 }
 
 /// The id of an effect: a holder's (vanilla's, or a mod's `DeferredHolder`), or a registered one's.
-fn effect_id(rt: &Rt, v: V) -> Option<String> {
+pub(crate) fn effect_id(rt: &Rt, v: V) -> Option<String> {
     if let Some(id) = rt.str_of(rt.get_field(v, "$id")).filter(|s| !s.is_empty()) {
         return Some(id.to_owned());
     }
@@ -366,6 +377,17 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (INSTANCE, "isVisible") => V::I(rt.get_field(this, "$visible").i()),
         (INSTANCE, "showIcon") => V::I(rt.get_field(this, "$showIcon").i()),
         (INSTANCE, "isInfiniteDuration") => V::I((rt.get_field(this, "$duration").i() == -1) as i32),
+        // `endsWithin(ticks)`: an instance with an end, at most that many ticks away.
+        (INSTANCE, "endsWithin") => {
+            let duration = rt.get_field(this, "$duration").i();
+            V::I((duration != -1 && duration <= a(1).i()) as i32)
+        }
+        // Its effect's (`effect.minecraft.speed`).
+        (INSTANCE, "getDescriptionId") => {
+            let id = effect_id(rt, rt.get_field(this, "$effect")).unwrap_or_default();
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id.as_str()));
+            rt.string(&format!("effect.{ns}.{}", path.replace('/', ".")))
+        }
         (INSTANCE, "is") => {
             let mine = effect_id(rt, rt.get_field(this, "$effect"));
             V::I((mine.is_some() && mine == effect_id(rt, a(1))) as i32)

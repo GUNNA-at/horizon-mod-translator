@@ -6,7 +6,7 @@
 //! ([`native_hit_player`]); what they change of the world waits for the hit
 //! to end ([`native_after_hit`]) and is made in the level the hit was dealt
 //! in, once the player's action or the level's tick that dealt it is over.
-use super::{Game, native_server::NativeServerPlayer};
+use super::{Game, native_effects::NativeEffect, native_server::NativeServerPlayer};
 use horizon_client::{first_person::Hand, items::ItemStack};
 use horizon_world::nbt::Tag;
 use std::cell::RefCell;
@@ -33,6 +33,8 @@ pub(crate) struct NativeHitPlayer {
     pub(crate) sneaking: bool,
     /// The main hand's stack, then the off hand's; None for an empty hand.
     pub(crate) hands: [Option<NativeHitHand>; 2],
+    /// Their active effects (`native_effects`).
+    pub(crate) effects: Vec<NativeEffect>,
 }
 
 /// A change a hit's hook made, for the game once the hit is over.
@@ -91,6 +93,7 @@ impl Game<'_> {
             player,
             sneaking,
             hands: [hand(Hand::Main), hand(Hand::Off)],
+            effects: self.native_effects(None).unwrap_or_default(),
         })
     }
     fn hit_hand(&self, stack: &ItemStack) -> NativeHitHand {

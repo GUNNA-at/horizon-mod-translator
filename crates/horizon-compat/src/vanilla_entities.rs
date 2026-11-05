@@ -767,11 +767,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         "isSpectator" | "isInvisible" | "isOnFire" | "isPassenger" | "isVehicle" | "isShiftKeyDown" | "isCrouching" | "isSilent" | "isNoGravity"
         | "isInWater" | "isInLava" | "isInWaterOrRain" | "isUnderWater" | "isBaby" | "isSleeping" | "isUsingItem" | "isFallFlying" | "fireImmune"
-        | "isSprinting" | "isSwimming" | "isInvulnerable" | "hasEffect" | "addEffect" | "removeEffect" | "isCustomNameVisible" | "hasCustomName" => V::I(0),
+        | "isSprinting" | "isSwimming" | "isInvulnerable" | "isCustomNameVisible" | "hasCustomName" => V::I(0),
         "isAttackable" | "isPickable" | "canBeCollidedWith" | "isEffectiveAi" | "shouldBeSaved" => V::I(i32::from(name != "canBeCollidedWith")),
-        "getEffect" | "getVehicle" | "getControllingPassenger" | "getFirstPassenger" | "getCustomName" | "getTarget" => V::NULL,
+        "getVehicle" | "getControllingPassenger" | "getFirstPassenger" | "getCustomName" | "getTarget" => V::NULL,
         "getRootVehicle" => e,
-        "getPassengers" | "getActiveEffects" => crate::jutil::new_list(rt, Vec::new()),
+        "getPassengers" => crate::jutil::new_list(rt, Vec::new()),
         "getMainHandItem" | "getOffhandItem" | "getItemBySlot" | "getItemInHand" | "getUseItem" | "getWeaponItem" => {
             crate::api_common::get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL)
         }

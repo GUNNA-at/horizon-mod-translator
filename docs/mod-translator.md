@@ -3512,6 +3512,31 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Gaps: a mod's own attributes (registered for its entities) aren't in the game's catalog; a mob's plain
     attributes take no modifiers; another player than the one in place has no attributes to read but vanilla's
     defaults; `AttributeMap.addTransientAttributeModifiers` (a multimap of them) isn't there.
+- [x] 2026-11-05 Mob effects for mods (`mob_effects.rs`; game: `native_effects.rs`, new API `native_effects`,
+  `native_add_effect` and `native_remove_effect`; host: `Host::effects`, `add_effect`, `remove_effect`). Missing in the
+  pack's measure (packcov4, uses summed over `LivingEntity`, `Player`, `ServerPlayer` and `LocalPlayer`): `addEffect`
+  about 330 in 40+ jars, `hasEffect` 134, `getEffect` 73, `removeEffect` 57, `getActiveEffects` 25,
+  `removeEffectNoUpdate` 12, `removeAllEffects` and `getActiveEffectsMap` 6 and 8: the most used entity API left.
+  - An entity's `addEffect` (with or without a source), `forceAddEffect`, `hasEffect`, `getEffect`, `removeEffect`,
+    `removeEffectNoUpdate`, `removeAllEffects`, `getActiveEffects` and `getActiveEffectsMap`, on whichever class the
+    mod names them, are the game's effects: the player in place's (`PlayerEffects`: what a mod gives ticks, changes
+    their attributes and reaches their client as `/effect`'s does) and a mob's (its list, read by its behaviour and
+    swirls; refused where `canBeAffected` refuses, a spider's poison). The game updates one given again as vanilla's
+    `MobEffectInstance.update` does; a content mod's effect runs its added hooks.
+  - Effects go by id: vanilla's `MobEffects` holders and a mod's `DeferredHolder`s (`farmersdelight:comfort`); an
+    instance a read makes has the holder `MobEffects`' field gives (one object per effect), and
+    `MobEffectInstance.is` compares ids. `endsWithin` and `getDescriptionId` answer.
+  - Inside a hit's hooks the striking player's effects are those they had as the blow started (`NativeHitPlayer`
+    carries them); what a hook gives or takes waits for the hit to end, as its other changes.
+  - The vanilla mob stand-ins' stubs (no effects, `addEffect` false) are gone: their effects are the game's mob's.
+  Test `mob_effects::tests::a_mod_gives_reads_and_takes_off_the_games_effects` (the acting player's speed from a potion
+  read by holder, amplifier and duration; a stronger one given takes over and a weaker, shorter one changes nothing; a
+  cow takes a mod's own effect by its `DeferredHolder`, lists it and loses it once; a wolf the host doesn't know takes
+  none; everything off the player at the end). 361 compat, 17 translator, 41 game tests pass. Not yet checked in game.
+  - Gaps: a mod's own effects aren't declared to the game yet (its `MobEffect` registrations), so giving one is
+    refused; NeoForge's `MobEffectEvent` (`Applicable`, `Added`, `Remove`, `Expired`) isn't fired; `canBeAffected`,
+    `removeEffectsCuredBy` and `MobEffect.applyInstantenousEffect` aren't there; another player than the one in place
+    and a mob inside a hit's hooks have no effects to read.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

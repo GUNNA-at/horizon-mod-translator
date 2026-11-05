@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "a living entity's mob effects for mods: the effects it has (`native_effects`), and the effects a mod gives (`native_add_effect`) and takes off (`native_remove_effect`), on the player in place and the level's mobs.",
+  "doc_summary": "a living entity's mob effects for a mod (`native_effects`, `native_add_effect`, `native_remove_effect`), by the game's ids (`minecraft:speed`, a content mod's `<namespace>:<path>`): each effect's ticks left, amplifier and flags; an effect given as `LivingEntity.addEffect` gives it (updated, or replaced with `force`), refused where the mob can't have it; one taken off. The player in place has the game's own effects, which tick, change their attributes and reach their client as the `/effect` command's; a mob its own list. Bundles that use them need \"hooks\": @API:effects@.",
+  "comments": ["crates/horizon-client/src/game/native_effects.rs"]
+}

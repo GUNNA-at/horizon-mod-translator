@@ -69,7 +69,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 77] = [
+const COMPAT: [(&str, &str); 78] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -134,6 +134,7 @@ const COMPAT: [(&str, &str); 77] = [
     ("neo.rs", include_str!("../../horizon-compat/src/neo.rs")),
     ("attachments.rs", include_str!("../../horizon-compat/src/attachments.rs")),
     ("attributes.rs", include_str!("../../horizon-compat/src/attributes.rs")),
+    ("mob_effects.rs", include_str!("../../horizon-compat/src/mob_effects.rs")),
     ("enchantments.rs", include_str!("../../horizon-compat/src/enchantments.rs")),
     ("files.rs", include_str!("../../horizon-compat/src/files.rs")),
     ("resources.rs", include_str!("../../horizon-compat/src/resources.rs")),
@@ -462,7 +463,7 @@ fn server_send(c: &str) -> String {
 fn client_host(c: &str, id: &str) -> String {
     let reads = world_reads("self.game.get()");
     // The client's own player's attributes (`native_attribute` of None), where the game is lent.
-    let attributes = attribute_methods(c, "self.game.get_mut()");
+    let attributes = format!("{}{}", attribute_methods(c, "self.game.get_mut()"), effect_methods(c, "self.game.get_mut()"));
     format!(r#"    enum GameRef<'a, 'b> {{
         Mut(&'a mut crate::game::Game<'b>),
         Shared(&'a crate::game::Game<'b>),
@@ -1966,8 +1967,9 @@ fn world_writes(c: &str) -> String {
             let dimension = self.game.native_dimension().to_owned();
             u32::try_from(id).is_ok_and(|i| self.game.native_teleport_mob(&dimension, i, pos))
         }}
-{attributes}"#,
+{attributes}{effects}"#,
         attributes = attribute_methods(c, "Some(&mut *self.game)"),
+        effects = effect_methods(c, "Some(&mut *self.game)"),
     )
 }
 
@@ -1993,6 +1995,32 @@ fn attribute_methods(c: &str, game: &str) -> String {
                 {c}::host::AttributeChange::RemoveAll => Change::RemoveAll,
             }};
             {game}.is_some_and(|game| game.native_change_attribute(entity, attribute, &change))
+        }}
+"#
+    )
+}
+
+/// A host's living entities' effects, through the game `game` gives (`Option<&mut Game>`): the
+/// player in place's and a mob's (`native_effects`, `native_add_effect`, `native_remove_effect`).
+fn effect_methods(c: &str, game: &str) -> String {
+    format!(
+        r#"        fn effects(&mut self, entity: Option<i32>) -> Option<Vec<{c}::host::EffectView>> {{
+            let effects = {game}?.native_effects(entity)?;
+            Some(effects.into_iter().map(|e| {c}::host::EffectView {{ id: e.id, duration: e.duration, amplifier: e.amplifier, ambient: e.ambient, visible: e.visible, show_icon: e.show_icon }}).collect())
+        }}
+        fn add_effect(&mut self, entity: Option<i32>, effect: &{c}::host::EffectView, force: bool) -> bool {{
+            let effect = crate::game::native_effects::NativeEffect {{
+                id: effect.id.clone(),
+                duration: effect.duration,
+                amplifier: effect.amplifier,
+                ambient: effect.ambient,
+                visible: effect.visible,
+                show_icon: effect.show_icon,
+            }};
+            {game}.is_some_and(|game| game.native_add_effect(entity, &effect, force))
+        }}
+        fn remove_effect(&mut self, entity: Option<i32>, effect: &str) -> bool {{
+            {game}.is_some_and(|game| game.native_remove_effect(entity, effect))
         }}
 "#
     )
@@ -2038,6 +2066,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
     let (health, push, teleport) = (later("Later { game }.set_entity_health(id, health)"), later("Later { game }.push_entity(id, velocity)"), later("Later { game }.teleport_entity(id, pos)"));
     let (orb, payload) = (later("game.native_spawn_experience_orb(at, value, motion)"), later("Later { game }.send_payload(to, &channel, &data)"));
     let attribute = later("Later { game }.change_attribute(entity, &attribute, &change)");
+    let (give, take) = (later("Later { game }.add_effect(entity, &effect, force)"), later("Later { game }.remove_effect(entity, &effect)"));
     format!(r#"    // The trait's methods, called on the hosts below by name.
     use {c}::host::Host as _;
     struct Host {{
@@ -2161,6 +2190,21 @@ fn hit_host(c: &str, server_send: &str) -> String {
         fn change_attribute(&mut self, entity: Option<i32>, attribute: &str, change: &{c}::host::AttributeChange) -> bool {{
             let (attribute, change) = (attribute.to_owned(), change.clone());
             {attribute}
+            true
+        }}
+        // The striking player's effects as the blow started; a mob's aren't at hand.
+        fn effects(&mut self, entity: Option<i32>) -> Option<Vec<{c}::host::EffectView>> {{
+            let p = self.player.as_ref().filter(|p| entity.is_none_or(|id| id == p.entity))?;
+            Some(p.effects.iter().map(|e| {c}::host::EffectView {{ id: e.id.clone(), duration: e.duration, amplifier: e.amplifier, ambient: e.ambient, visible: e.visible, show_icon: e.show_icon }}).collect())
+        }}
+        fn add_effect(&mut self, entity: Option<i32>, effect: &{c}::host::EffectView, force: bool) -> bool {{
+            let effect = effect.clone();
+            {give}
+            true
+        }}
+        fn remove_effect(&mut self, entity: Option<i32>, effect: &str) -> bool {{
+            let effect = effect.to_owned();
+            {take}
             true
         }}
     }}

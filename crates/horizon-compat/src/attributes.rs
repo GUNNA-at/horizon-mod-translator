@@ -327,7 +327,7 @@ fn instance_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
 /// Which of the game's living entities `e` is, as the host names it: None for the player in place
 /// (the client's own player, the acting server player), else its entity id; no entity the game
 /// knows is Err.
-fn entity_of(rt: &Rt, e: V) -> Result<Option<i32>, ()> {
+pub(crate) fn entity_of(rt: &Rt, e: V) -> Result<Option<i32>, ()> {
     if e.r() == 0 {
         return Err(());
     }
