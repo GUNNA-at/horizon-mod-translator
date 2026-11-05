@@ -128,6 +128,11 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
         // A column's top by heightmap, and the world's seed: what worldgen code reads of its region.
         ("getHeight", "(Lnet/minecraft/world/level/levelgen/Heightmap$Types;II)I") => crate::worldgen::height(rt, a(1), a(2).i(), a(3).i()),
         ("getSeed", "()J") => V::J(rt.host().and_then(|h| h.world_seed()).unwrap_or(0)),
+        // Whether the region being generated may write at a position (a feature asks before it does).
+        ("ensureCanWrite", "(Lnet/minecraft/core/BlockPos;)Z") => {
+            let p = pos(rt, 1);
+            V::I(rt.host().is_none_or(|h| h.can_write(p)) as i32)
+        }
         // The biome at a position: its registry holder, whose tags the host answers (plains where
         // the host keeps no biomes, as vanilla's own fallback biome).
         ("getBiome", "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/Holder;") => {

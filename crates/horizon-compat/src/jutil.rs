@@ -37,8 +37,8 @@ const EQUALS: &str = "equals.(Ljava/lang/Object;)Z";
 const HASH_CODE: &str = "hashCode.()I";
 const COMPARE_TO: &str = "compareTo.(Ljava/lang/Object;)I";
 
-fn overrides(rt: &Rt, v: V, key: &str) -> bool {
-    rt.overrides.is_some_and(|o| o(rt.class_of(v), key))
+fn overrides(rt: &Rt, v: V, key: &'static str) -> bool {
+    rt.class_overrides(rt.class_of(v), key)
 }
 
 /// `a.equals(b)` as Java answers it: the object's own `equals` when its mod class overrides it.

@@ -247,6 +247,27 @@ public class Fixture {
         Object v = m.get("a");
         return n * 10 + xs.size() + (v == null ? 1000 : 2000);
     }
+    // A codec's constructor reference (`RecordCodecBuilder`'s `apply(instance, Ore::new)`): the
+    // interface hands its arguments boxed, the constructor takes primitives, and the metafactory
+    // unboxes them, widening where the parameter's kind is wider (`Function<Integer, Long>` made
+    // of a method taking a `long`).
+    interface Make3<A, B, C, R> { R apply(A a, B b, C c); }
+    static class Ore {
+        final String name; final int size; final float chance;
+        Ore(String name, int size, float chance) { this.name = name; this.size = size; this.chance = chance; }
+    }
+    static long widen(long x) { return x * 3_000_000_000L; }
+    static double half(double x) { return x / 2; }
+    public static int adapted(int k) {
+        Make3<String, Integer, Float, Ore> make = Ore::new;
+        Ore ore = make.apply("zinc", k + 2, 0.25f * k);
+        java.util.function.Function<Integer, Long> wide = Fixture::widen;
+        java.util.function.Function<Float, Double> halved = Fixture::half;
+        java.util.function.BiFunction<Integer, Integer, Integer> max = Math::max;
+        long w = wide.apply(k);
+        double h = halved.apply(1.5f * k);
+        return ore.size * 100 + (int) (ore.chance * 8) + ore.name.length() + (int) (w % 1000) + max.apply(k, 4) + (int) (h * 4);
+    }
     public static int grid(int n) {
         int[][] g = new int[n][n + 1];
         for (int i = 0; i < n; i++) for (int j = 0; j <= n; j++) g[i][j] = i * j;

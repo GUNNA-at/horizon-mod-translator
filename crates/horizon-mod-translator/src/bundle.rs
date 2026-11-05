@@ -888,11 +888,11 @@ fn {id}_component_types(types: &mut Vec<String>) {{
 // makes, declared as content files would (states, default state, strength, sounds, light, map
 // colour), replacing what the bundle could read from bytecode alone.
 fn {id}_content(content: &mut horizon_mods::Content) {{
-    // The mod's own worldgen types (its placement modifiers), which the world generator asks for
-    // by id when a placed feature names one: read with the mod's codec and placed by its code, on
-    // the generator's region and random stream.
+    // The mod's own worldgen types (its placement modifiers and features), which the world
+    // generator asks for by id when a placed or configured feature names one: read with the mod's
+    // codec and placed by its code, on the generator's region and random stream.
     {{
-        use horizon_world::worldgen::foreign::{{Handler, Placement, Random, World}};
+        use horizon_world::worldgen::foreign::{{Feature, Handler, Placement, Random, World}};
         struct Draws<'a>(&'a mut dyn Random);
         impl {krate}::compat::host::HostRandom for Draws<'_> {{
             fn next_int(&mut self) -> i32 {{ self.0.next_int() }}
@@ -912,8 +912,17 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
             fn block_state(&self, pos: [i32; 3]) -> String {{
                 self.world.borrow_mut().block(pos).unwrap_or_else(|| "minecraft:air".to_owned())
             }}
-            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
-                false
+            fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
+                self.world.get_mut().set_block(pos, state, 3)
+            }}
+            fn set_section_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
+                self.world.get_mut().set_section_block(pos, state)
+            }}
+            fn can_write(&self, pos: [i32; 3]) -> bool {{
+                self.world.borrow_mut().can_write(pos)
+            }}
+            fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+                self.world.borrow_mut().named_block_in_tag(block, tag)
             }}
             fn world_height(&self) -> (i32, i32) {{
                 self.world.borrow_mut().y_range().map_or((-64, 384), |(low, high)| (low, high - low + 1))
@@ -934,12 +943,28 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
                 self.world.borrow_mut().biome_in_tag(biome, tag)
             }}
         }}
+        // A call's outermost entry, where garbage may go: what the generator holds of the mod's
+        // (the modifiers and configured features it read) is the runtime's own, kept by its text.
         struct ModPlacement({krate}::compat::V);
         impl Placement for ModPlacement {{
             fn positions(&self, world: &mut dyn World, random: &mut dyn Random, origin: [i32; 3]) -> Result<Vec<[i32; 3]>, String> {{
                 let mut region = Region {{ world: std::cell::RefCell::new(world), random: Draws(random) }};
-                {krate}::with_worldgen_runtime(|rt| rt.with_host(&mut region, |rt| {c}::worldgen::positions(rt, self.0, origin)))
-                    .unwrap_or_else(|| Err("the mod's worldgen code is already running on this thread".to_owned()))
+                {krate}::with_worldgen_runtime(|rt| {{
+                    rt.safe_point();
+                    rt.with_host(&mut region, |rt| {c}::worldgen::positions(rt, self.0, origin))
+                }})
+                .unwrap_or_else(|| Err("the mod's worldgen code is already running on this thread".to_owned()))
+            }}
+        }}
+        struct ModFeature({krate}::compat::V);
+        impl Feature for ModFeature {{
+            fn place(&self, world: &mut dyn World, random: &mut dyn Random, origin: [i32; 3]) -> Result<bool, String> {{
+                let mut region = Region {{ world: std::cell::RefCell::new(world), random: Draws(random) }};
+                {krate}::with_worldgen_runtime(|rt| {{
+                    rt.safe_point();
+                    rt.with_host(&mut region, |rt| {c}::worldgen::place(rt, self.0, origin))
+                }})
+                .unwrap_or_else(|| Err("the mod's worldgen code is already running on this thread".to_owned()))
             }}
         }}
         struct Worldgen;
@@ -951,6 +976,13 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
                 }}
                 let read = {krate}::with_worldgen_runtime(|rt| {c}::worldgen::placement(rt, kind, json)).flatten()?;
                 Some(read.map(|v| std::sync::Arc::new(ModPlacement(v)) as std::sync::Arc<dyn Placement>))
+            }}
+            fn feature(&self, kind: &str, json: &str) -> Option<Result<std::sync::Arc<dyn Feature>, String>> {{
+                if !{krate}::ours(kind) {{
+                    return None;
+                }}
+                let read = {krate}::with_worldgen_runtime(|rt| {c}::worldgen::feature(rt, kind, json)).flatten()?;
+                Some(read.map(|v| std::sync::Arc::new(ModFeature(v)) as std::sync::Arc<dyn Feature>))
             }}
         }}
         horizon_world::worldgen::foreign::register({id:?}, std::sync::Arc::new(Worldgen));

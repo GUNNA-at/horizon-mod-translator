@@ -180,6 +180,11 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/nbt/CompoundTag", "CODEC") => native(rt, "compound_tag"),
         ("net/minecraft/world/item/DyeColor", "CODEC") => native(rt, "dye_color"),
         ("net/minecraft/world/level/block/state/BlockState", "CODEC") => native(rt, "block_state"),
+        // Ore targets and the rule tests they're made of (`OreConfiguration.TargetBlockState.CODEC`,
+        // `RuleTest.CODEC`: by `predicate_type`).
+        ("net/minecraft/world/level/levelgen/feature/configurations/OreConfiguration$TargetBlockState", "CODEC") => native(rt, "target_block_state"),
+        ("net/minecraft/world/level/levelgen/structure/templatesystem/RuleTest", "CODEC") => native(rt, "rule_test"),
+        ("net/minecraft/world/level/levelgen/feature/configurations/OreConfiguration", "CODEC") => native(rt, "ore_configuration"),
         ("net/minecraft/network/chat/ComponentSerialization", "CODEC" | "FLAT_CODEC") => native(rt, "component"),
         // A fluid by name (`Holder<Fluid>`; registries are their names here, holders their entries).
         ("net/neoforged/neoforge/fluids/FluidStack", "FLUID_NON_EMPTY_CODEC") => rt.intern("compat:codec/fluid-non-empty".into(), |rt| {

@@ -2530,6 +2530,62 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `foreign::tests::a_mods_feature_writes_the_states_it_names_the_way_it_asks` and
     `recipes::tests::block_states_read_in_every_shape_the_data_has`. 293 compat and 110 port-pack
     tests pass.
+  - [x] 2026-11-05 Stage 2, runtime side: a mod's own feature type runs on the worldgen runtime.
+    Create's striated ores (`create:layered_ore`, `LayeredOreFeature`) place their layers in the
+    harness, from Create's real bytecode.
+    - `horizon-compat` `worldgen.rs`: `feature(kind, json)` reads a configured feature with the
+      codec its type was made with (`Feature(Codec)`), from 1.21.1's shape (`config`) or 26.3's
+      (fields inline). `place(configured, origin)` runs the mod's `place(FeaturePlaceContext)` on
+      the host's region and random stream, after `ensureCanWrite(origin)` as vanilla's
+      `Feature.place` asks. What features use of vanilla's worldgen is answered there too:
+      - `BulkSectionAccess` and `LevelChunkSection` (raw section writes, as `Host::set_section_state`);
+      - `SectionPos`;
+      - `SimplexNoise`, checked bit for bit against vanilla 1.21.1's class;
+      - the rule tests ore targets are made of (`RuleTest.CODEC`: tag, block, state, random block,
+        random state, always true) and their `test`;
+      - `OreConfiguration` (codec, constructors, `target`) and `TargetBlockState`;
+      - `FeaturePlaceContext`;
+      - `Feature`'s helpers (`setBlock`, `safeSetBlock`, `isStone`, `isDirt`, `checkNeighbors`,
+        `isAdjacentToAir`);
+      - `Mth`'s draws (`randomBetween`, `randomBetweenInclusive`, `nextInt/Float/Double`);
+      - the level's `ensureCanWrite` and its build height from the host.
+      These classes are modelled by hand, so `tools/vanilla_records.py` leaves them out of the
+      data-class table (rerun against neoforge-21.1.225's merged jar: 3 classes removed, nothing
+      else changed).
+    - The bundle's worldgen hook registers `Handler::feature` (`ModFeature`). The region the mod
+      sees now writes (`setBlock`, section writes), answers `ensureCanWrite` and block tags by name.
+      Each call's outermost entry is a safe point for garbage: what the generator keeps of the
+      mod's code is interned by its text.
+    - Translator fix: a lambda's implementation taking primitives now gets its arguments as
+      `LambdaMetafactory` adapts them: unboxed from the interface method's `Object`s, widened
+      (`Rt::adapt_args`). Create's `LayeredOreConfiguration::new` in its codec took the boxed
+      `Integer` and `Float` as they were, so `size` read as 0 and its layer loop never ended. The
+      differential test's new `adapted` case gives 4 without the fix and 208 (the JVM's) with it.
+    - Speed: one placement (size 32, ~9000 blocks written) took 94 ms. The profile showed 70% in
+      the API dispatch: `call_exact`'s string match and five `exception_class` guards on every key,
+      the generated `overrides` table asked per comparison in `Collections.binarySearch`, and key
+      splitting that missed on nested calls. These are now kept per key: keys that go straight to
+      the modules, `Rt::class_overrides`, and a 256-slot `parts` cache. Now 46 ms, with the same
+      blocks written. Create's translated `place` itself is the top of the profile now.
+    Harness (`WORLDGEN=1`): both shapes give the same layers from the same seed. At y 30:
+    limestone 4858, calcite 1432, diorite 2006, stone 874 (9170 section writes, no `setBlock`).
+    Veridium, asurine and scoria at other heights. Nothing above the ocean floor (y 70), nothing
+    below the world's bottom. No unmapped worldgen calls. Tests:
+    `worldgen::tests::a_mods_feature_places_by_its_rule_tests_through_sections`,
+    `worldgen::tests::rule_tests_test_states_as_vanillas` (a `java.util.Random` oracle for the
+    random test), `worldgen::tests::simplex_noise_draws_and_reads_as_vanillas` (vanilla 1.21.1's
+    `SimplexNoise` through `LegacyRandomSource`: offsets, values and the stream after, by bits).
+    The values come from a Java oracle run on the Mojmapped 1.21.1 classes (NeoForm's
+    `sourcesAndCompiledWithNeoForge` jar). Also
+    `worldgen::tests::ore_configurations_read_and_made_as_vanillas`. 297 compat tests pass.
+  - [x] 2026-11-05 IN GAME: Create's striated ores generate. Fresh world, game built with the
+    translator above (`scratchpad/striatedgame.sh`). `find-block` within 64 blocks of spawn:
+    asurine 773, crimsite 181, ochrum 1730, veridium 1411, limestone 108 (scoria 0 there: one
+    pattern of six, picked at random). Zinc ore is still there (2037). The log lists no skipped
+    features any more: `create:striated_ores_overworld` ran Create's own `LayeredOreFeature`.
+    Next: the other mods' feature types (Mekanism's `ResizableOreFeature`,
+    `ResizableDiskReplaceFeature`, `OreRetrogenFeature`; Farmer's Delight's `WildCropFeature` and
+    `WildRiceFeature`), and speeding up translated code in general (the dispatch above).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

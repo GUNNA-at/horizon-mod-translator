@@ -235,7 +235,17 @@ fn trace_unmapped(rt: &Rt, key: &'static str, args: &[V]) {
     }
 }
 
+thread_local! {
+    /// The keys (by address and length) none of [`call_exact`]'s own arms takes: its arms and
+    /// their guards read the key alone, so such a key goes straight to the modules next time.
+    static TO_CHAIN: std::cell::RefCell<crate::HashMap<(usize, usize), ()>> = std::cell::RefCell::new(crate::HashMap::default());
+}
+
 fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
+    let id = (key.as_ptr() as usize, key.len());
+    if TO_CHAIN.with(|c| c.borrow().contains_key(&id)) {
+        return through_chain(rt, key, args);
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     match key {
         // java.lang
@@ -601,16 +611,24 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
                 _ => V::NULL,
             }
         }
-        _ => match chain(rt, key, args) {
+        _ => {
+            TO_CHAIN.with(|c| c.borrow_mut().insert(id, ()));
+            through_chain(rt, key, args)
+        }
+    }
+}
+
+/// A call no arm of [`call_exact`] takes: the modules that claim its key, then what is left.
+fn through_chain(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
+    match chain(rt, key, args) {
+        Some(v) => v,
+        None if plain_super_init(rt, key, args) => V::Void,
+        None => match crate::functions::invoke_through(rt, key, args).or_else(|| crate::annotations::element(rt, key, args)) {
             Some(v) => v,
-            None if plain_super_init(rt, key, args) => V::Void,
-            None => match crate::functions::invoke_through(rt, key, args).or_else(|| crate::annotations::element(rt, key, args)) {
-                Some(v) => v,
-                None => {
-                    crate::miss(rt, key);
-                    V::Void
-                }
-            },
+            None => {
+                crate::miss(rt, key);
+                V::Void
+            }
         },
     }
 }
@@ -1387,7 +1405,8 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "getSeaLevel") if level => V::I(63),
         (_, "isOutsideBuildHeight") if level => {
             let y = if desc.starts_with("(I)") { a(1).i() } else { pos_of(rt, a(1))[1] };
-            V::I(!(-64..320).contains(&y) as i32)
+            let (bottom, height) = rt.host().map_or((-64, 384), |h| h.world_height());
+            V::I(!(bottom..bottom + height).contains(&y) as i32)
         }
         // A client level has no server (`ClientLevel.getServer` is null).
         (_, "getServer") if level && rt.get_field(a(0), "isClientSide").i() != 0 => V::NULL,

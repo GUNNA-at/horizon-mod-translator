@@ -37,6 +37,7 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("staticRefs", "(I)I", &["3"]),
     ("library", "(I)I", &["0", "3", "-7"]),
     ("rawBoxes", "(I)I", &["0", "2"]),
+    ("adapted", "(I)I", &["0", "3", "-5"]),
 ];
 
 fn has(tool: &str) -> bool {

@@ -327,6 +327,51 @@ impl Rt {
         self.host.map(|p| unsafe { &mut *p.as_ptr() })
     }
 
+    /// Whether mod class `class` overrides method `short` (`name.desc`), as the generated table
+    /// ([`Rt::overrides`]) says. The table is a long match on both names, and sorting or searching
+    /// mod objects asks it once per comparison, so its answers are kept by the table and both
+    /// names' addresses.
+    pub fn class_overrides(&self, class: &'static str, short: &'static str) -> bool {
+        type Id = (usize, usize, usize, usize, usize);
+        thread_local! {
+            static KEPT: std::cell::RefCell<HashMap<Id, bool>> = std::cell::RefCell::new(HashMap::default());
+        }
+        let Some(table) = self.overrides else { return false };
+        let id = (table as usize, class.as_ptr() as usize, class.len(), short.as_ptr() as usize, short.len());
+        if let Some(b) = KEPT.with(|k| k.borrow().get(&id).copied()) {
+            return b;
+        }
+        let b = table(class, short);
+        KEPT.with(|k| k.borrow_mut().insert(id, b));
+        b
+    }
+
+    /// The arguments a lambda's implementation takes, as `LambdaMetafactory` adapts the interface
+    /// method's to them: a primitive parameter handed a box (`Function3.apply`'s `Object` for a
+    /// constructor taking `int`: `LayeredOreConfiguration::new` in a codec) gets the box's value,
+    /// widened to the parameter's kind. `kinds` has one letter per argument, the implementation's
+    /// descriptor's (`L` for a reference, left as it is).
+    pub fn adapt_args(&self, args: &mut [V], kinds: &str) {
+        for (v, k) in args.iter_mut().zip(kinds.chars()) {
+            if k == 'L' {
+                continue;
+            }
+            let raw = match *v {
+                V::R(r) if r != 0 => self.get_field(*v, "value"),
+                other => other,
+            };
+            *v = match (k, raw) {
+                ('J', V::I(i)) => V::J(i64::from(i)),
+                ('F', V::I(i)) => V::F(i as f32),
+                ('D', V::I(i)) => V::D(f64::from(i)),
+                ('F', V::J(j)) => V::F(j as f32),
+                ('D', V::J(j)) => V::D(j as f64),
+                ('D', V::F(f)) => V::D(f64::from(f)),
+                (_, raw) => raw,
+            };
+        }
+    }
+
     /// Calls a functional-interface method on `target` (a lambda or a mod object).
     pub fn call_functional(&mut self, key: &'static str, target: V, args: &[V]) -> V {
         let mut all = vec![target];

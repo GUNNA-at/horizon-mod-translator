@@ -73,20 +73,25 @@ pub mod worldgen;
 // BEGIN RUNTIME HELPERS: bundles inline this part of the root into their `compat` module too.
 
 /// An API key's owner, name and descriptor (`owner.name.desc`). The modules [`api::call`] asks in
-/// turn each want them for the same key, so the last key's parts are kept: one split per call,
-/// not one per module (a third of a client tick went to splitting before).
+/// turn each want them for the same key, and a call's own calls come back to it, so recent keys'
+/// parts are kept, by the key's address (a third of a client tick went to splitting before; a
+/// single kept key missed on every nested call).
 pub(crate) fn parts(key: &'static str) -> Option<(&'static str, &'static str, &'static str)> {
     type Parts = Option<(&'static str, &'static str, &'static str)>;
+    const SLOTS: usize = 256;
     thread_local! {
-        static LAST: std::cell::Cell<(usize, usize, Parts)> = const { std::cell::Cell::new((0, 0, None)) };
+        static KEPT: std::cell::RefCell<[(usize, usize, Parts); SLOTS]> = const { std::cell::RefCell::new([(0, 0, None); SLOTS]) };
     }
-    LAST.with(|last| {
-        let (at, len, parts) = last.get();
-        if at == key.as_ptr() as usize && len == key.len() {
+    let (at, len) = (key.as_ptr() as usize, key.len());
+    let slot = (at >> 3 ^ len) % SLOTS;
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        let (a, l, parts) = kept[slot];
+        if a == at && l == len {
             return parts;
         }
         let parts = key.split_once('.').and_then(|(owner, rest)| rest.split_once('.').map(|(name, desc)| (owner, name, desc)));
-        last.set((key.as_ptr() as usize, key.len(), parts));
+        kept[slot] = (at, len, parts);
         parts
     })
 }

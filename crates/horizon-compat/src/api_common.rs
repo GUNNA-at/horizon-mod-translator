@@ -3571,7 +3571,25 @@ fn mth_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     };
     let lerp_f = |t: f32, a: f32, b: f32| a + t * (b - a);
     let lerp_d = |t: f64, a: f64, b: f64| a + t * (b - a);
+    let draw = |rt: &mut Rt, key: &'static str, bound: Option<i32>| {
+        let mut call = vec![a(0)];
+        call.extend(bound.map(V::I));
+        crate::api::call(rt, key, &call)
+    };
+    const NEXT_INT: &str = "net/minecraft/util/RandomSource.nextInt.(I)I";
+    const NEXT_FLOAT: &str = "net/minecraft/util/RandomSource.nextFloat.()F";
+    const NEXT_DOUBLE: &str = "net/minecraft/util/RandomSource.nextDouble.()D";
     Some(match (name, desc) {
+        // Draws in a range from a `RandomSource`, as `Mth` composes them.
+        ("randomBetween", "(Lnet/minecraft/util/RandomSource;FF)F") => V::F(draw(rt, NEXT_FLOAT, None).f() * (f(2) - f(1)) + f(1)),
+        ("randomBetweenInclusive", "(Lnet/minecraft/util/RandomSource;II)I") => {
+            V::I(draw(rt, NEXT_INT, Some(i(2).wrapping_sub(i(1)).wrapping_add(1))).i().wrapping_add(i(1)))
+        }
+        ("nextInt", "(Lnet/minecraft/util/RandomSource;II)I") => {
+            V::I(if i(1) >= i(2) { i(1) } else { draw(rt, NEXT_INT, Some(i(2).wrapping_sub(i(1)).wrapping_add(1))).i().wrapping_add(i(1)) })
+        }
+        ("nextFloat", "(Lnet/minecraft/util/RandomSource;FF)F") => V::F(if f(1) >= f(2) { f(1) } else { draw(rt, NEXT_FLOAT, None).f() * (f(2) - f(1)) + f(1) }),
+        ("nextDouble", "(Lnet/minecraft/util/RandomSource;DD)D") => V::D(if d(1) >= d(2) { d(1) } else { draw(rt, NEXT_DOUBLE, None).d() * (d(2) - d(1)) + d(1) }),
         // `FastColor.ARGB32.color(0, floor(r * 255), floor(g * 255), floor(b * 255))`.
         ("color", "(FFF)I") => V::I((mth_floor_f(f(0) * 255.0) << 16) | (mth_floor_f(f(1) * 255.0) << 8) | mth_floor_f(f(2) * 255.0)),
         ("isPowerOfTwo", "(I)Z") => V::I(mth_is_pow2(i(0)) as i32),

@@ -1280,6 +1280,7 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             let i = names.iter().position(|c| c.eq_ignore_ascii_case(s) && c.to_ascii_lowercase() == s).ok_or_else(|| format!("Unknown element name: {s}"))?;
             Ok(crate::api::api_enum(rt, class, names[i], i as i32))
         }
+        "rule_test" | "target_block_state" | "ore_configuration" => crate::worldgen::decode_native(rt, name, j),
         other => Err(format!("{other} is not read yet")),
     }
 }

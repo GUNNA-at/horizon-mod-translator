@@ -1215,6 +1215,11 @@ impl<'a> Program<'a> {
                 (_, Some(imp)) => format!("{}(rt, &full)", fn_name(&imp, &m.name, &m.desc)),
                 (_, None) => format!("api::call(rt, {key:?}, &full)"),
             };
+            // `LambdaMetafactory`'s adaptation: a primitive parameter of the implementation takes
+            // the value out of the box the interface method hands it, widened. The receiver of an
+            // instance method comes first.
+            let kinds = format!("{}{}", if matches!(kind, 5 | 7 | 9) { "L" } else { "" }, raw_kinds(&m.desc));
+            let call = if kinds.chars().any(|k| k != 'L') { format!("{{ rt.adapt_args(&mut full, {kinds:?}); {call} }}") } else { call };
             rows.push((lid, format!("        {lid} => {call}, // {key}")));
         }
         for (key, f) in &self.operations {
