@@ -674,6 +674,22 @@ impl GameLevel<'_> {
     }
 }
 
+/// One of a dying mob's drops before it joins the level, as
+/// [`Game::native_living_drops`] hands them (NeoForge's `LivingDropsEvent`
+/// holds them as item entities).
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub(crate) struct NativeDrop {
+    /// What drops.
+    pub(crate) stack: ItemStack,
+    /// Where its item entity appears.
+    pub(crate) position: [f64; 3],
+    /// Its item entity's motion.
+    pub(crate) motion: [f64; 3],
+    /// The ticks before a player can pick it up (10 for a death's drops).
+    pub(crate) pickup_delay: u32,
+}
+
 /// What dropped the items [`Game::native_loot_drops`] hears.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
@@ -3300,15 +3316,27 @@ impl Game<'_> {
     ) {
         let _ = (entity, kind, damage_type, causing, direct, canceled);
     }
-    /// `native_living_death` for mob `m` about to die (`LivingEntity.die`): whether a mod kept it
-    /// from dying. One given health back lives on, and its next death is told again.
-    pub(super) fn living_death_canceled(&mut self, m: &horizon_client::mobs::Mob) -> bool {
-        // A player's blow names that player, whose turn is over by the death.
+    /// What killed mob `m`, as the death hooks name it: its last hit's source, a
+    /// player's blow naming that player (whose turn is over by the death);
+    /// `minecraft:generic` and no entity when no hit is known.
+    pub(super) fn death_source(&self, m: &horizon_client::mobs::Mob) -> HurtSource<'static> {
         let killer = self.player_killer_id(m);
-        let source = m.last_damage.map(|(d, _)| mob_source_by(&d, killer));
-        let (damage_type, causing, direct) = source.map_or(("minecraft:generic", 0, 0), |s| (s.damage_type, s.causing, s.direct));
+        m.last_damage.map_or(
+            HurtSource {
+                damage_type: "minecraft:generic",
+                causing: 0,
+                direct: 0,
+            },
+            |(d, _)| mob_source_by(&d, killer),
+        )
+    }
+    /// `native_living_death` for mob `m` about to die (`LivingEntity.die`) of
+    /// `source` ([`Game::death_source`]): whether a mod kept it from dying. One
+    /// given health back lives on, and its next death is told again.
+    pub(super) fn living_death_canceled(&mut self, m: &horizon_client::mobs::Mob, source: HurtSource<'static>) -> bool {
         let mut canceled = false;
-        self.native_living_death(m.id as i32, &m.kind.id, damage_type, causing, direct, &mut canceled);
+        let kind = mob_kind(m);
+        self.native_living_death(m.id as i32, &kind, source.damage_type, source.causing, source.direct, &mut canceled);
         if canceled
             && let Some(o) = self.mobs.iter_mut().find(|o| o.id == m.id && o.alive())
         {
@@ -3330,6 +3358,59 @@ impl Game<'_> {
             Some(None) if self.lan_acting.is_none() => acting,
             _ => 0,
         }
+    }
+    /// The mob `entity` of type `kind` died and `drops` are what it drops, not
+    /// in the level yet: in `LivingEntity.dropAllDeathLoot` (NeoForge's
+    /// `LivingDropsEvent`), after its loot table, its equipment and what it
+    /// carried, before they join the level. `damage_type`, `causing` and
+    /// `direct` name what killed it as `native_living_death` does;
+    /// `recently_hit` is whether a player hurt it in the last 100 ticks. Change
+    /// a drop (its stack, place, motion, pickup delay), add or remove some, or
+    /// set `canceled` and none joins the level. Its experience isn't among them.
+    /// Not told when a mod kept the mob from dying, nor for a player. Server-side.
+    /// API @API:living_drops@.
+    pub(super) fn native_living_drops(
+        &mut self,
+        entity: i32,
+        kind: &str,
+        damage_type: &str,
+        causing: i32,
+        direct: i32,
+        recently_hit: bool,
+        drops: &mut Vec<NativeDrop>,
+        canceled: &mut bool,
+    ) {
+        let _ = (entity, kind, damage_type, causing, direct, recently_hit, drops, canceled);
+    }
+    /// `native_living_drops` for mob `m`'s death drops: whether a mod canceled
+    /// them. Drops left empty, or at a place that isn't a finite point, go;
+    /// a motion that isn't finite is none.
+    pub(super) fn living_drops_canceled(
+        &mut self,
+        m: &horizon_client::mobs::Mob,
+        source: HurtSource<'static>,
+        drops: &mut Vec<NativeDrop>,
+    ) -> bool {
+        let mut canceled = false;
+        let kind = mob_kind(m);
+        let recently_hit = m.ai.last_hurt_by_player > 0;
+        self.native_living_drops(
+            m.id as i32,
+            &kind,
+            source.damage_type,
+            source.causing,
+            source.direct,
+            recently_hit,
+            drops,
+            &mut canceled,
+        );
+        drops.retain(|d| d.stack.count > 0 && &*d.stack.item != "minecraft:air" && d.position.iter().all(|v| v.is_finite()));
+        for d in drops.iter_mut() {
+            if d.motion.iter().any(|v| !v.is_finite()) {
+                d.motion = [0.0; 3];
+            }
+        }
+        canceled
     }
     /// Whether a mod hears projectiles' impacts (`native_projectile_impact`):
     /// set `hears`. Asked once a server tick before the projectiles fly; only

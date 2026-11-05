@@ -285,6 +285,25 @@ fn new_item_entity(rt: &mut Rt, e: V, p: [f64; 3], stack: V, m: [f64; 3]) {
     rt.put_field(e, "$item", stack);
 }
 
+/// A new item entity of `stack` at `p` with motion `m` and pickup delay `delay`, not in the level: a
+/// dying entity's drop, before `LivingDropsEvent` lets it join (`damage.rs`).
+pub(crate) fn unspawned(rt: &mut Rt, p: [f64; 3], stack: V, m: [f64; 3], delay: u32) -> V {
+    let e = rt.new_object(ITEM_ENTITY);
+    new_item_entity(rt, e, p, stack, m);
+    rt.put_field(e, "$pickupDelay", V::I(delay as i32));
+    e
+}
+
+/// What item entity `e` holds while it isn't in the level, nor removed: its stack, place, motion and
+/// pickup delay. None for anything else, or an empty stack.
+pub(crate) fn unspawned_drop(rt: &mut Rt, e: V) -> Option<(crate::host::HandStack, [f64; 3], [f64; 3], u32)> {
+    if !is_item_entity(rt, e) || spawned(rt, e) || rt.get_field(e, "$removed").i() != 0 {
+        return None;
+    }
+    let stack = crate::hand::hand_stack_of(rt, rt.get_field(e, "$item"))?;
+    Some((stack, pos(rt, e), motion(rt, e), rt.get_field(e, "$pickupDelay").i().max(0) as u32))
+}
+
 /// A double in `[lo, hi)` from the runtime's random stream (`Mth.nextDouble`).
 fn random_between(rt: &mut Rt, lo: f64, hi: f64) -> f64 {
     let d = (crate::api_common::next_random(rt) >> 11) as f64 / (1u64 << 53) as f64;

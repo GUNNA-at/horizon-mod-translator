@@ -12,6 +12,8 @@
 //! - [`knockback`]: `LivingKnockBackEvent`, which a listener changes or cancels.
 //! - [`death`]: a mob's `LivingDeathEvent`, where `LivingEntity.die` starts. A listener that cancels
 //!   it, and gives health back, keeps the mob alive. [`player_died`] tells a player's, heard only.
+//! - [`living_drops`]: a dead mob's `LivingDropsEvent`, its drops as item entities not yet in the
+//!   level: a listener changes, adds or takes them, or cancels them all.
 //!
 //! One `DamageContainer` follows a hit from its incoming event to its `Post`, as NeoForge's stack of
 //! them on the entity does, so `getOriginalDamage` is the hit's amount before armour.
@@ -40,6 +42,7 @@ pub(crate) const PRE: &str = "net/neoforged/neoforge/event/entity/living/LivingD
 pub(crate) const POST: &str = "net/neoforged/neoforge/event/entity/living/LivingDamageEvent$Post";
 pub(crate) const KNOCKBACK: &str = "net/neoforged/neoforge/event/entity/living/LivingKnockBackEvent";
 pub(crate) const DEATH: &str = "net/neoforged/neoforge/event/entity/living/LivingDeathEvent";
+pub(crate) const DROPS: &str = "net/neoforged/neoforge/event/entity/living/LivingDropsEvent";
 const LIVING_EVENT: &str = "net/neoforged/neoforge/event/entity/living/LivingEvent";
 const ENTITY_EVENT: &str = "net/neoforged/neoforge/event/entity/EntityEvent";
 const EVENT: &str = "net/neoforged/bus/api/Event";
@@ -63,8 +66,9 @@ const HIT_IDS: &str = "compat:hit-ids";
 const REDUCTIONS: [&str; 6] = ["$reduction0", "$reduction1", "$reduction2", "$reduction3", "$reduction4", "$reduction5"];
 
 /// The events' classes above them, so a listener for `LivingEvent` (or any event) hears them.
-const SUPERS: [(&str, &str); 8] = [
+const SUPERS: [(&str, &str); 9] = [
     (INCOMING, LIVING_EVENT),
+    (DROPS, LIVING_EVENT),
     (PRE, DAMAGE_EVENT),
     (POST, DAMAGE_EVENT),
     (DAMAGE_EVENT, LIVING_EVENT),
@@ -204,9 +208,9 @@ fn listened(rt: &mut Rt, class: &str) -> bool {
     !crate::neo::hearing(rt, class).is_empty()
 }
 
-/// Whether any mod listens to a hit, a push or a death.
+/// Whether any mod listens to a hit, a push, a death or a death's drops.
 pub fn damage_heard(rt: &mut Rt) -> bool {
-    [INCOMING, PRE, POST, KNOCKBACK, DEATH].into_iter().any(|class| listened(rt, class))
+    [INCOMING, PRE, POST, KNOCKBACK, DEATH, DROPS].into_iter().any(|class| listened(rt, class))
 }
 
 fn put_all(rt: &mut Rt, o: V, fields: &[(&'static str, V)]) {
@@ -877,6 +881,61 @@ pub fn player_died(rt: &mut Rt, host: &mut dyn Host, player: u128, cause: Option
     });
 }
 
+/// One of a dead mob's drops, as [`living_drops`] hands them to the mods and back: its stack, where
+/// its item entity appears, its motion and pickup delay. `origin` is the drop given that it still is,
+/// its stack unchanged (the game keeps its own stack for it); None for one a mod added or changed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drop {
+    pub stack: crate::host::HandStack,
+    pub position: [f64; 3],
+    pub motion: [f64; 3],
+    pub pickup_delay: u32,
+    pub origin: Option<usize>,
+}
+
+/// `LivingDropsEvent` for the dead mob `entity` of type `kind`, killed by `source`, with its drops
+/// `drops` not yet in the level, `recently_hit` whether a player hurt it lately (where NeoForge's
+/// `LivingEntity.dropAllDeathLoot` posts it). The mods see the drops as item entities (`getDrops`)
+/// they may change, add to or take from, and `drops` is left as they leave them. Whether a listener
+/// canceled it (no drop joins the level); None when no mod listens, `drops` untouched.
+pub fn living_drops(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, source: Source<'_>, recently_hit: bool, drops: &mut Vec<Drop>) -> Option<bool> {
+    rt.safe_point();
+    if !listened(rt, DROPS) {
+        return None;
+    }
+    rt.with_host(host, |rt| {
+        load_types(rt);
+        let victim = crate::vanilla_entities::of(rt, entity, kind, None);
+        if victim.r() == 0 {
+            return None;
+        }
+        let s = hit_source(rt, &source);
+        // Each drop as an item entity, and its stack as the runtime reads it back unchanged.
+        let mut given = Vec::with_capacity(drops.len());
+        for d in drops.iter() {
+            let stack = crate::hand::load(rt, Some(d.stack.clone()));
+            let unchanged = crate::hand::hand_stack_of(rt, stack);
+            given.push((crate::entities::unspawned(rt, d.position, stack, d.motion, d.pickup_delay), unchanged));
+        }
+        let list = crate::jutil::new_list(rt, given.iter().map(|g| g.0).collect());
+        let ev = rt.new_object(DROPS);
+        put_all(rt, ev, &[("$entity", victim), ("$source", s), ("$drops", list), ("$recentlyHit", V::I(recently_hit as i32)), ("$canceled", V::I(0))]);
+        crate::neo::post(rt, DROPS, ev);
+        if rt.get_field(ev, "$canceled").i() != 0 {
+            return Some(true);
+        }
+        let left = rt.get_field(ev, "$drops");
+        let mut out = Vec::new();
+        for e in crate::jutil::elements(rt, left) {
+            let Some((stack, position, motion, pickup_delay)) = crate::entities::unspawned_drop(rt, e) else { continue };
+            let origin = given.iter().position(|g| g.0 == e).filter(|&i| given[i].1.as_ref() == Some(&stack));
+            out.push(Drop { stack, position, motion, pickup_delay, origin });
+        }
+        *drops = out;
+        Some(false)
+    })
+}
+
 /// A server tick's start (inside the host): the hits the last tick left go, and while a mod listens
 /// to hits the game's damage types are read and the server's players are kept by entity id, for the
 /// hit's hooks that have no world to ask.
@@ -916,7 +975,7 @@ fn event_class(rt: &Rt, ev: V) -> Option<&'static str> {
     }
     let mut c = rt.class_of(ev);
     for _ in 0..8 {
-        if matches!(c, INCOMING | PRE | POST | KNOCKBACK | DEATH) {
+        if matches!(c, INCOMING | PRE | POST | KNOCKBACK | DEATH | DROPS) {
             return Some(c);
         }
         c = rt.supers.get(c).copied()?;
@@ -926,7 +985,7 @@ fn event_class(rt: &Rt, ev: V) -> Option<&'static str> {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone.
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
-    matches!(owner, SOURCE | SOURCES | CONTAINER | INCOMING | DAMAGE_EVENT | PRE | POST | KNOCKBACK | DEATH)
+    matches!(owner, SOURCE | SOURCES | CONTAINER | INCOMING | DAMAGE_EVENT | PRE | POST | KNOCKBACK | DEATH | DROPS)
         || (matches!(owner, EVENT | CANCELLABLE) && matches!(name, "isCanceled" | "setCanceled"))
         || (matches!(owner, LIVING_EVENT | ENTITY_EVENT) && name == "getEntity")
         || (name == "damageSources" && desc == "()Lnet/minecraft/world/damagesource/DamageSources;")
@@ -954,7 +1013,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     Some(match (class, name) {
         (_, "getEntity") => rt.get_field(ev, "$entity"),
         (_, "isCanceled") => V::I(rt.get_field(ev, "$canceled").i()),
-        (INCOMING | KNOCKBACK | DEATH, "setCanceled") => {
+        (INCOMING | KNOCKBACK | DEATH | DROPS, "setCanceled") => {
             rt.put_field(ev, "$canceled", V::I(a(1).i()));
             V::Void
         }
@@ -971,7 +1030,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::Void
         }
         (INCOMING, "addReductionModifier") => V::Void,
-        (POST | DEATH, "getSource") => rt.get_field(ev, "$source"),
+        (POST | DEATH | DROPS, "getSource") => rt.get_field(ev, "$source"),
+        (DROPS, "getDrops") => rt.get_field(ev, "$drops"),
+        (DROPS, "isRecentlyHit") => V::I(rt.get_field(ev, "$recentlyHit").i()),
         (POST, "getOriginalDamage") => V::F(rt.get_field(ev, "$original").f()),
         (POST, "getNewDamage") => V::F(rt.get_field(ev, "$new").f()),
         (POST, "getBlockedDamage") => V::F(rt.get_field(ev, "$blocked").f()),
@@ -1032,6 +1093,7 @@ fn construct(rt: &mut Rt, owner: &str, args: &[V]) -> Option<V> {
             ],
         ),
         DEATH => put_all(rt, ev, &[("$entity", a(1)), ("$source", a(2)), ("$canceled", V::I(0))]),
+        DROPS => put_all(rt, ev, &[("$entity", a(1)), ("$source", a(2)), ("$drops", a(3)), ("$recentlyHit", V::I(a(4).i())), ("$canceled", V::I(0))]),
         _ => return None,
     }
     Some(V::Void)
@@ -1162,6 +1224,35 @@ mod tests {
                     crate::api::call(rt, key(DEATH, "setCanceled", "(Z)V"), &[ev, V::I(1)]);
                     crate::api::call(rt, key(LIVING, "setHealth", "(F)V"), &[victim, V::F(4.0)]);
                 }
+            }
+            // As Create's crushing wheels still a kill's drops, and other mods add and take some.
+            6 => {
+                let s = source_of(rt, DROPS);
+                let msg = crate::api::call(rt, key(SOURCE, "getMsgId", "()Ljava/lang/String;"), &[s]);
+                let msg = text(rt, msg);
+                let recently = crate::api::call(rt, key(DROPS, "isRecentlyHit", "()Z"), &[ev]).i() != 0;
+                let drops = crate::api::call(rt, key(DROPS, "getDrops", "()Ljava/util/Collection;"), &[ev]);
+                let n = crate::api::call(rt, key("java/util/Collection", "size", "()I"), &[drops]).i();
+                note(rt, format!("drops {n} by {msg}, recently hit {recently}"));
+                if msg == "inFire" {
+                    crate::api::call(rt, key(DROPS, "setCanceled", "(Z)V"), &[ev, V::I(1)]);
+                    return Some(V::Void);
+                }
+                let entity = "net/minecraft/world/entity/Entity";
+                for e in crate::jutil::elements(rt, drops) {
+                    crate::api::call(rt, key(entity, "setDeltaMovement", "(DDD)V"), &[e, V::D(0.0), V::D(0.0), V::D(0.0)]);
+                    let stack = crate::api::call(rt, key(crate::entities::ITEM_ENTITY, "getItem", "()Lnet/minecraft/world/item/ItemStack;"), &[e]);
+                    let item = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
+                    if item == "minecraft:leather" {
+                        crate::api::call(rt, key("java/util/Collection", "remove", "(Ljava/lang/Object;)Z"), &[drops, e]);
+                    }
+                }
+                let level = crate::glue::level(rt);
+                let diamond = crate::api_common::stack(rt, "minecraft:diamond", 1);
+                let e = rt.new_object(crate::entities::ITEM_ENTITY);
+                let init = key(crate::entities::ITEM_ENTITY, "<init>", "(Lnet/minecraft/world/level/Level;DDDLnet/minecraft/world/item/ItemStack;DDD)V");
+                crate::api::call(rt, init, &[e, level, V::D(0.5), V::D(70.0), V::D(0.5), diamond, V::D(0.0), V::D(0.3), V::D(0.0)]);
+                crate::api::call(rt, key("java/util/Collection", "add", "(Ljava/lang/Object;)Z"), &[drops, e]);
             }
             _ => return None,
         }
@@ -1300,6 +1391,36 @@ mod tests {
                 "knockback 0.4",
             ]
         );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A dead mob's drops reach the mods as item entities: a listener stills them, takes the leather
+    /// and adds a diamond, and the game gets them back so, the beef it gave still its own (its stack
+    /// unchanged). One that cancels them leaves none; with no listener nothing is asked.
+    #[test]
+    fn a_mods_drops_listener_changes_the_drops() {
+        use crate::host::HandStack;
+        let stack = |item: &str, count| HandStack { item: item.into(), count, ..HandStack::default() };
+        let drop = |item: &str, count, motion| Drop { stack: stack(item, count), position: [1.5, 64.5, -2.5], motion, pickup_delay: 10, origin: None };
+        let given = || vec![drop("minecraft:beef", 2, [0.05, 0.2, -0.03]), drop("minecraft:leather", 1, [-0.02, 0.2, 0.01])];
+        let blow = Source { damage_type: "minecraft:player_attack", causing: 42, direct: 42 };
+
+        let mut rt = listening(&[]);
+        let mut h = world();
+        let mut drops = given();
+        assert_eq!(living_drops(&mut rt, &mut h, 7, "minecraft:cow", blow, true, &mut drops), None);
+        assert_eq!(drops, given());
+
+        let mut rt = listening(&[(DROPS, 6)]);
+        rt.with_host(&mut h, server_tick);
+        let mut drops = given();
+        assert_eq!(living_drops(&mut rt, &mut h, 7, "minecraft:cow", blow, true, &mut drops), Some(false));
+        let diamond = Drop { stack: stack("minecraft:diamond", 1), position: [0.5, 70.0, 0.5], motion: [0.0, 0.3, 0.0], pickup_delay: 0, origin: None };
+        assert_eq!(drops, vec![Drop { origin: Some(0), ..drop("minecraft:beef", 2, [0.0; 3]) }, diamond]);
+        let fire = Source { damage_type: "minecraft:in_fire", causing: 0, direct: 0 };
+        let mut drops = given();
+        assert_eq!(living_drops(&mut rt, &mut h, 7, "minecraft:cow", fire, false, &mut drops), Some(true));
+        assert_eq!(heard(&mut rt), ["drops 2 by player, recently hit true", "drops 2 by inFire, recently hit false"]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

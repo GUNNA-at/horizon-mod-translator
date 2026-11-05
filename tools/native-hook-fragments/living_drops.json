@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "name": "living_drops",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_living_drops"
+    }
+  ],
+  "rust_summary": "a dead mob's drops a mod can change, add to, take from or cancel before they join the level (`native_living_drops`).",
+  "doc_summary": "a dead mob's drops before they join the level (`native_living_drops`, NeoForge's `LivingDropsEvent`): in\n`LivingEntity.dropAllDeathLoot`, after its loot table, its equipment and what it carried, with the mob's id and type, what\nkilled it named as `native_living_death` names it, and whether a player hurt it in the last 100 ticks. Each drop\n(`NativeDrop`) is a stack, the place its item entity appears, its motion and its pickup delay (10 for the game's own). A mod\nmay change them, add or remove some, or set `canceled` and none joins the level; one left empty, or at a place that isn't a\nfinite point, is dropped, and a motion that isn't finite is none. The mob's experience isn't among them. Not told when a mod\nkept the mob from dying (`native_living_death`), nor for a player. Server-side.\n\nBundles that use it need `\"hooks\": @API:living_drops@`."
+}

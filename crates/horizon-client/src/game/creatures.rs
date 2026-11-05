@@ -1146,7 +1146,8 @@ impl Game<'_> {
     fn mob_died(&mut self, m: &Mob) {
         // LivingEntity.die starts with NeoForge's LivingDeathEvent: a native mod may keep the
         // mob from dying.
-        if self.living_death_canceled(m) {
+        let source = self.death_source(m);
+        if self.living_death_canceled(m, source) {
             return;
         }
         // LivingEntity.die: a sleeper gets up, and its bed is free again.
@@ -1232,7 +1233,7 @@ impl Game<'_> {
         if let Some(player) = player.filter(|_| m.extra.leash.is_some()) {
             self.lead_killers.insert(m.id, (player, self.dim));
         }
-        self.drop_death_loot(&mut dying, player, by_player, killer_entity, consumed, pos);
+        self.drop_death_loot(&mut dying, player, by_player, killer_entity, consumed, pos, source);
         self.create_wither_rose(m);
         if m.species() == Species::CopperGolem {
             // CopperGolem.dropEquipment: the preserved equipment too.
@@ -1373,6 +1374,7 @@ impl Game<'_> {
         killer: horizon_world::loot::LootEntity,
         consumed: bool,
         pos: [f64; 3],
+        source: horizon_client::health::HurtSource<'static>,
     ) {
         use horizon_client::mobs::{DamageKind, Who, drops};
         use horizon_world::loot::{LootDamage, LootEntity};
@@ -1483,15 +1485,19 @@ impl Game<'_> {
         };
         self.native_loot_drops(&context, &mut stacks);
         stacks.retain(|stack| stack.count > 0 && &*stack.item != "minecraft:air");
-        for item in stacks {
-            // Every death drop is its own ItemEntity, and the drop entity's
-            // own random (not the level's) gives it the constructor's
-            // horizontal push (its motion otherwise stays [0, 0.2, 0] and
-            // the drops land stacked at the mob's centre, without disturbing
-            // the level random that the orbs' merge ids and block ticks read
-            // next).
-            self.spawn_item(item, pos, dispenser::new_item_motion(), 10);
-        }
+        // Every death drop is its own ItemEntity, and the drop entity's own
+        // random (not the level's) gives it the constructor's horizontal push
+        // (its motion otherwise stays [0, 0.2, 0] and the drops land stacked at
+        // the mob's centre, without disturbing the level random that the orbs'
+        // merge ids and block ticks read next).
+        let drop_at = |stack| super::native_hooks::NativeDrop {
+            stack,
+            position: pos,
+            motion: dispenser::new_item_motion(),
+            pickup_delay: 10,
+        };
+        let mut items: Vec<_> = stacks.into_iter().map(drop_at).collect();
+        let mut orbs = Vec::new();
         for d in rest {
             match d {
                 drops::Drop::CarriedBlock(state) => {
@@ -1504,13 +1510,21 @@ impl Game<'_> {
                         &mut self.world.random,
                         Some((&mut self.rand_sequences, self.level.seed)),
                     );
-                    for item in stacks {
-                        self.spawn_item(item, pos, dispenser::new_item_motion(), 10);
-                    }
+                    items.extend(stacks.into_iter().map(drop_at));
                 }
-                drops::Drop::Orb(value) if !consumed => self.spawn_orbs(pos, value as u32),
+                drops::Drop::Orb(value) if !consumed => orbs.push(value),
                 drops::Drop::Item(_) | drops::Drop::Stack(_) | drops::Drop::Orb(_) => {}
             }
+        }
+        // NeoForge's LivingDropsEvent: the item entities, made and not yet in
+        // the level, go to the mods, which may change them or keep them out.
+        if !self.living_drops_canceled(m, source, &mut items) {
+            for d in items {
+                self.spawn_item(d.stack, d.position, d.motion, d.pickup_delay);
+            }
+        }
+        for value in orbs {
+            self.spawn_orbs(pos, value as u32);
         }
     }
     /// Melee or ranged damage to another mob; whether the hit landed.

@@ -3382,6 +3382,44 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the receiver, and the most-missed ones answer only an object the runtime made: `Holder.value`
     (136 jars) a registry's holder, `Codec.fieldOf` (113) and `MapCodec.forGetter` (120) a codec,
     `NonNullList.get` (102) a list, `Level.addFreshEntity` (85) an entity.
+- [x] 2026-11-05 A dead mob's drops for mods: NeoForge's `LivingDropsEvent` (`damage.rs`; new hook
+  `native_living_drops`). Measured in the pack (methods taking the event): 13 jars, 17 methods;
+  Create 2 (its crushing wheels set the drops of a mob they crushed still, `setDeltaMovement(Vec3.ZERO)`
+  on each when the source `is(AllDamageTypes.CRUSH)`, so they fall into the wheels; its deployer's
+  fake player collects what it kills), Mystical Agriculture and Agradditions (their mob drops), FTB
+  Quests, KubeJS, Iron's Spellbooks, and for a player's death Curios, Sophisticated Backpacks,
+  Corpse, Cosmetic Armor and Ars Elemental. The runtime posted none.
+  - The game's `drop_death_loot` now makes a death's drops first (the loot table's, after
+    `native_loot_drops`, then what an enderman carried), each with its place, motion and pickup
+    delay as its item entity would have them (`NativeDrop`), hands them to the new hook, and adds
+    to the level what comes back, nothing when it is canceled; the orbs follow as before. The hook
+    names the death's source as `native_living_death` does (`death_source`, read before the game
+    forgets who hit the mob) and whether a player hurt it in the last 100 ticks.
+  - The mods see the drops as `ItemEntity` objects not yet in the level (`entities::unspawned`):
+    `getDrops()` is a list they read, change (`setDeltaMovement`, `setItem`, `setPickUpDelay`, a
+    stack's count), add to (`new ItemEntity(level, x, y, z, stack)`) or take from, `getSource`,
+    `isRecentlyHit`, `setCanceled`; a mod's own `new LivingDropsEvent(...)` too. What they leave
+    goes back to the game; a drop whose stack they didn't change keeps the game's own stack (its
+    vanilla components the runtime doesn't model stay).
+  Test `damage::tests::a_mods_drops_listener_changes_the_drops` (a listener stills a cow's drops,
+  takes its leather and adds a diamond; one canceling a death in fire leaves none; with no listener
+  nothing is asked). In game (Farmer's Delight translated; `hzcheck`'s new drops listener stills a
+  cow's drops and adds `new ItemEntity(level, x, y, z, diamond)`; `scratchpad/fdcmd.sh`): the cow
+  `hzcheck` had kept alive died of two more blows; its leather and two beef lay still where it died
+  (the game's own scatter) and a diamond beside them, moved a little by the constructor's random
+  motion as vanilla's is. The log: `drops of minecraft:cow (player) by minecraft:player, recently
+  hit true: minecraft:leather x1 minecraft:beef x2; stilled, a diamond added`, and for a sheep a
+  wolf killed nearby `by minecraft:wolf, recently hit false: minecraft:mutton x2
+  minecraft:white_wool x1`. The same round confirmed the step before's three fixes: the cow kept
+  alive lived on with health 6, and its death and each of the player's hits named
+  `minecraft:player`. 357 compat, 17 translator tests pass.
+  - Gaps: a player's death drops aren't posted yet (Curios, backpacks and Corpse listen for them);
+    Create's deployer collects its kills' drops only when its fake player's blow is known as the
+    killer, which a mod's own `hurt` doesn't post (the gap of the hit's own hooks above). Seen in
+    game: a message a listener sends the killer from a mob's death (`displayClientMessage`) reaches
+    no chat, the hooks' player being the one acting and a mob dying in the mobs' tick; in the hit's
+    own hooks a mob that attacks (the wolf) stands as an entity of its id alone, of no type
+    (`minecraft:`).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
