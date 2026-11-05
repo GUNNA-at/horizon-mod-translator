@@ -4175,6 +4175,21 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             vanilla_block_entity_type(rt, field)
         }
         "net/minecraft/world/item/Items" => item(rt, &field.to_ascii_lowercase()),
+        // What a villager eats and picks up (1.21.1's `Villager.FOOD_POINTS` and `WANTED_ITEMS`, read
+        // from its initialiser): FarmersDelight adds its crops to them.
+        "net/minecraft/world/entity/npc/Villager" if field == "FOOD_POINTS" => rt.intern("compat:villager-food-points".into(), |rt| {
+            let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Default::default()));
+            for (id, points) in [("bread", 4), ("potato", 1), ("carrot", 1), ("beetroot", 1)] {
+                let (it, n) = (item(rt, id), crate::api::call(rt, "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;", &[V::I(points)]));
+                crate::jutil::table_put(rt, m, it, n);
+            }
+            m
+        }),
+        "net/minecraft/world/entity/npc/Villager" if field == "WANTED_ITEMS" => rt.intern("compat:villager-wanted-items".into(), |rt| {
+            let ids = ["bread", "potato", "carrot", "wheat", "wheat_seeds", "beetroot", "beetroot_seeds", "torchflower_seeds", "pitcher_pod"];
+            let items: Vec<V> = ids.iter().map(|id| item(rt, id)).collect();
+            crate::jutil::new_set_of(rt, &items)
+        }),
         // Vanilla's tag constants: the key of the tag each names in 26.3.
         "net/minecraft/tags/BlockTags" | "net/minecraft/tags/ItemTags" => {
             let kind = if owner == "net/minecraft/tags/BlockTags" { "block" } else { "item" };
@@ -4917,6 +4932,37 @@ mod tests {
         let lit = c(&mut rt, "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;", &[hello]);
         let j = c(&mut rt, "net/minecraft/network/chat/Component$Serializer.toJson.(Lnet/minecraft/network/chat/Component;Lnet/minecraft/core/HolderLookup$Provider;)Ljava/lang/String;", &[lit, V::NULL]);
         assert_eq!(rt.str_of(j), Some(r#"{"text":"hello"}"#));
+    }
+
+    /// What a villager eats and picks up, as 1.21.1 lists them, and then what a mod writes over them
+    /// (FarmersDelight's `Villager.FOOD_POINTS = ImmutableMap.copyOf(theirs)`): later reads see it.
+    #[test]
+    fn villager_food_is_vanillas_until_a_mod_replaces_it() {
+        let mut rt = Rt::new();
+        crate::install();
+        const FOOD: &str = "net/minecraft/world/entity/npc/Villager.FOOD_POINTS";
+        let points = api::get_static(&mut rt, FOOD);
+        let bread = super::item(&mut rt, "minecraft:bread");
+        let n = api::call(&mut rt, "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[points, bread]);
+        assert_eq!(api::call(&mut rt, "java/lang/Integer.intValue.()I", &[n]), V::I(4));
+        assert_eq!(api::call(&mut rt, "java/util/Map.size.()I", &[points]), V::I(4));
+        let wanted = api::get_static(&mut rt, "net/minecraft/world/entity/npc/Villager.WANTED_ITEMS");
+        let seeds = super::item(&mut rt, "minecraft:wheat_seeds");
+        assert_eq!(api::call(&mut rt, "java/util/Set.contains.(Ljava/lang/Object;)Z", &[wanted, seeds]), V::I(1));
+        assert_eq!(api::call(&mut rt, "java/util/Set.size.()I", &[wanted]), V::I(9));
+
+        let theirs = rt.alloc("java/util/HashMap", crate::Data::Table(Default::default()));
+        let cabbage = super::item(&mut rt, "farmersdelight:cabbage");
+        let one = api::call(&mut rt, "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;", &[V::I(1)]);
+        api::call(&mut rt, "java/util/HashMap.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[theirs, cabbage, one]);
+        api::call(&mut rt, "java/util/HashMap.putAll.(Ljava/util/Map;)V", &[theirs, points]);
+        let copy = api::call(&mut rt, "com/google/common/collect/ImmutableMap.copyOf.(Ljava/util/Map;)Lcom/google/common/collect/ImmutableMap;", &[theirs]);
+        rt.statics.insert(FOOD, copy);
+        let now = api::get_static(&mut rt, FOOD);
+        assert_eq!(api::call(&mut rt, "java/util/Map.size.()I", &[now]), V::I(5));
+        let n = api::call(&mut rt, "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;", &[now, cabbage]);
+        assert_eq!(api::call(&mut rt, "java/lang/Integer.intValue.()I", &[n]), V::I(1));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A mod's own loot parameter set (guardvillagers' `new LootContextParamSet.Builder()

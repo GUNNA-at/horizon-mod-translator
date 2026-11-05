@@ -90,6 +90,18 @@ fn make(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
     o
 }
 
+/// A call nothing else answered on one of these functions through an interface of the game's
+/// that holds it (a vanilla constant made one: `CauldronInteraction.DYED_ITEM.interact(...)`):
+/// its one method, unless the name is `Object`'s or a functional interface's default method's,
+/// which a function doesn't answer this way. `args` start with the receiver.
+pub(crate) fn invoke_through(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let this = args.first().copied().unwrap_or_default();
+    let kind = rt.class_of(this);
+    let (_, name, _) = crate::parts(key)?;
+    let defaults = matches!(name, "equals" | "hashCode" | "toString" | "getClass" | "<init>" | "andThen" | "compose" | "negate" | "and" | "or");
+    (kind.starts_with("compat:fn/") && !defaults).then(|| run(rt, kind, this, key, args.get(1..).unwrap_or_default()))
+}
+
 /// A combinator's functional method (`test`, `apply`, `accept`, `get`), invoked by `key` with
 /// `args` after the receiver.
 fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {

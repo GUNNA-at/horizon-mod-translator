@@ -13,40 +13,43 @@ const MODIFIERS: &str = "net/minecraft/world/item/component/ItemAttributeModifie
 const BUILDER: &str = "net/minecraft/world/item/component/ItemAttributeModifiers$Builder";
 const ENTRY: &str = "net/minecraft/world/item/component/ItemAttributeModifiers$Entry";
 const ENCHANTMENTS: &str = "net/minecraft/world/item/enchantment/Enchantments";
+const ATTRIBUTE: &str = "net/minecraft/world/entity/ai/attributes/Attribute";
+const RANGED: &str = "net/minecraft/world/entity/ai/attributes/RangedAttribute";
 
-/// 1.21.1's `Attributes` fields and the ids its initialiser registers them under.
-const VANILLA: [(&str, &str); 31] = [
-    ("ARMOR", "generic.armor"),
-    ("ARMOR_TOUGHNESS", "generic.armor_toughness"),
-    ("ATTACK_DAMAGE", "generic.attack_damage"),
-    ("ATTACK_KNOCKBACK", "generic.attack_knockback"),
-    ("ATTACK_SPEED", "generic.attack_speed"),
-    ("BLOCK_BREAK_SPEED", "player.block_break_speed"),
-    ("BLOCK_INTERACTION_RANGE", "player.block_interaction_range"),
-    ("BURNING_TIME", "generic.burning_time"),
-    ("ENTITY_INTERACTION_RANGE", "player.entity_interaction_range"),
-    ("EXPLOSION_KNOCKBACK_RESISTANCE", "generic.explosion_knockback_resistance"),
-    ("FALL_DAMAGE_MULTIPLIER", "generic.fall_damage_multiplier"),
-    ("FLYING_SPEED", "generic.flying_speed"),
-    ("FOLLOW_RANGE", "generic.follow_range"),
-    ("GRAVITY", "generic.gravity"),
-    ("JUMP_STRENGTH", "generic.jump_strength"),
-    ("KNOCKBACK_RESISTANCE", "generic.knockback_resistance"),
-    ("LUCK", "generic.luck"),
-    ("MAX_ABSORPTION", "generic.max_absorption"),
-    ("MAX_HEALTH", "generic.max_health"),
-    ("MINING_EFFICIENCY", "player.mining_efficiency"),
-    ("MOVEMENT_EFFICIENCY", "generic.movement_efficiency"),
-    ("MOVEMENT_SPEED", "generic.movement_speed"),
-    ("OXYGEN_BONUS", "generic.oxygen_bonus"),
-    ("SAFE_FALL_DISTANCE", "generic.safe_fall_distance"),
-    ("SCALE", "generic.scale"),
-    ("SNEAKING_SPEED", "player.sneaking_speed"),
-    ("SPAWN_REINFORCEMENTS_CHANCE", "zombie.spawn_reinforcements"),
-    ("STEP_HEIGHT", "generic.step_height"),
-    ("SUBMERGED_MINING_SPEED", "player.submerged_mining_speed"),
-    ("SWEEPING_DAMAGE_RATIO", "player.sweeping_damage_ratio"),
-    ("WATER_MOVEMENT_EFFICIENCY", "generic.water_movement_efficiency"),
+/// 1.21.1's `Attributes` fields, the ids its initialiser registers them under, and each one's
+/// default, minimum and maximum (its `RangedAttribute`'s), read from its bytecode.
+const VANILLA: [(&str, &str, f64, f64, f64); 31] = [
+    ("ARMOR", "generic.armor", 0.0, 0.0, 30.0),
+    ("ARMOR_TOUGHNESS", "generic.armor_toughness", 0.0, 0.0, 20.0),
+    ("ATTACK_DAMAGE", "generic.attack_damage", 2.0, 0.0, 2048.0),
+    ("ATTACK_KNOCKBACK", "generic.attack_knockback", 0.0, 0.0, 5.0),
+    ("ATTACK_SPEED", "generic.attack_speed", 4.0, 0.0, 1024.0),
+    ("BLOCK_BREAK_SPEED", "player.block_break_speed", 1.0, 0.0, 1024.0),
+    ("BLOCK_INTERACTION_RANGE", "player.block_interaction_range", 4.5, 0.0, 64.0),
+    ("BURNING_TIME", "generic.burning_time", 1.0, 0.0, 1024.0),
+    ("ENTITY_INTERACTION_RANGE", "player.entity_interaction_range", 3.0, 0.0, 64.0),
+    ("EXPLOSION_KNOCKBACK_RESISTANCE", "generic.explosion_knockback_resistance", 0.0, 0.0, 1.0),
+    ("FALL_DAMAGE_MULTIPLIER", "generic.fall_damage_multiplier", 1.0, 0.0, 100.0),
+    ("FLYING_SPEED", "generic.flying_speed", 0.4, 0.0, 1024.0),
+    ("FOLLOW_RANGE", "generic.follow_range", 32.0, 0.0, 2048.0),
+    ("GRAVITY", "generic.gravity", 0.08, -1.0, 1.0),
+    ("JUMP_STRENGTH", "generic.jump_strength", 0.41999998688697815, 0.0, 32.0),
+    ("KNOCKBACK_RESISTANCE", "generic.knockback_resistance", 0.0, 0.0, 1.0),
+    ("LUCK", "generic.luck", 0.0, -1024.0, 1024.0),
+    ("MAX_ABSORPTION", "generic.max_absorption", 0.0, 0.0, 2048.0),
+    ("MAX_HEALTH", "generic.max_health", 20.0, 1.0, 1024.0),
+    ("MINING_EFFICIENCY", "player.mining_efficiency", 0.0, 0.0, 1024.0),
+    ("MOVEMENT_EFFICIENCY", "generic.movement_efficiency", 0.0, 0.0, 1.0),
+    ("MOVEMENT_SPEED", "generic.movement_speed", 0.7, 0.0, 1024.0),
+    ("OXYGEN_BONUS", "generic.oxygen_bonus", 0.0, 0.0, 1024.0),
+    ("SAFE_FALL_DISTANCE", "generic.safe_fall_distance", 3.0, -1024.0, 1024.0),
+    ("SCALE", "generic.scale", 1.0, 0.0625, 16.0),
+    ("SNEAKING_SPEED", "player.sneaking_speed", 0.3, 0.0, 1.0),
+    ("SPAWN_REINFORCEMENTS_CHANCE", "zombie.spawn_reinforcements", 0.0, 0.0, 1.0),
+    ("STEP_HEIGHT", "generic.step_height", 0.6, 0.0, 10.0),
+    ("SUBMERGED_MINING_SPEED", "player.submerged_mining_speed", 0.2, 0.0, 20.0),
+    ("SWEEPING_DAMAGE_RATIO", "player.sweeping_damage_ratio", 0.0, 0.0, 1.0),
+    ("WATER_MOVEMENT_EFFICIENCY", "generic.water_movement_efficiency", 0.0, 0.0, 1.0),
 ];
 
 /// 1.21.1's `Enchantments` fields: each the key of the enchantment named by its lowercase name
@@ -62,17 +65,38 @@ const ENCHANTMENT_FIELDS: [&str; 42] = [
 /// The holder of vanilla's attribute `id` (`minecraft:generic.attack_damage`): one per attribute.
 pub(crate) fn attribute(rt: &mut Rt, id: &str) -> V {
     rt.intern(format!("attribute-holder/{id}"), |rt| {
-        let value = rt.new_object("net/minecraft/world/entity/ai/attributes/Attribute");
+        let value = rt.new_object(RANGED);
         let s = rt.string(id);
         rt.put_field(value, "$id", s);
+        let path = id.strip_prefix("minecraft:").unwrap_or(id);
+        if let Some(&(_, _, default, min, max)) = VANILLA.iter().find(|r| r.1 == path) {
+            let description = rt.string(&format!("attribute.name.{path}"));
+            set_range(rt, value, description, default, min, max);
+        }
         crate::neo::registry_holder(rt, "attribute", id, value)
     })
+}
+
+/// A number an attribute keeps, or `none` where nothing set it.
+fn field_or(rt: &Rt, a: V, field: &'static str, none: f64) -> V {
+    match rt.get_field(a, field) {
+        V::D(d) => V::D(d),
+        _ => V::D(none),
+    }
+}
+
+/// An attribute's description, default and range (`new RangedAttribute(id, default, min, max)`).
+fn set_range(rt: &mut Rt, a: V, description: V, default: f64, min: f64, max: f64) {
+    rt.put_field(a, "$descriptionId", description);
+    rt.put_field(a, "$default", V::D(default));
+    rt.put_field(a, "$min", V::D(min));
+    rt.put_field(a, "$max", V::D(max));
 }
 
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match owner {
         ATTRIBUTES => {
-            let (_, id) = VANILLA.iter().find(|(f, _)| *f == field)?;
+            let (_, id, ..) = VANILLA.iter().find(|r| r.0 == field)?;
             Some(attribute(rt, &format!("minecraft:{id}")))
         }
         ENCHANTMENTS if ENCHANTMENT_FIELDS.contains(&field) => Some(rt.string(&format!("enchantment#minecraft:{}", field.to_ascii_lowercase()))),
@@ -91,13 +115,41 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    owner == BUILDER || (owner == MODIFIERS && matches!(name, "builder" | "withModifierAdded"))
+    owner == BUILDER || (owner == MODIFIERS && matches!(name, "builder" | "withModifierAdded")) || (matches!(owner, ATTRIBUTE | RANGED) && ATTRIBUTE_METHODS.contains(&name))
 }
+
+/// What vanilla's `Attribute` and `RangedAttribute` answer, for theirs and a mod's own.
+const ATTRIBUTE_METHODS: [&str; 10] =
+    ["<init>", "getDefaultValue", "getMinValue", "getMaxValue", "sanitizeValue", "getDescriptionId", "isClientSyncable", "setSyncable", "setSentiment", "getStyle"];
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, name, _desc) = crate::parts(key)?;
+    let (owner, name, desc) = crate::parts(key)?;
     match (owner, name) {
+        // `new RangedAttribute(id, default, min, max)` and `Attribute(id, default)` (a mod's own,
+        // through `super`): what the getters below read.
+        (ATTRIBUTE | RANGED, "<init>") => {
+            let ranged = desc.starts_with("(Ljava/lang/String;DDD)");
+            let (min, max) = if ranged { (a(3).d(), a(4).d()) } else { (f64::MIN, f64::MAX) };
+            set_range(rt, a(0), a(1), a(2).d(), min, max);
+            Some(V::Void)
+        }
+        (ATTRIBUTE | RANGED, "getDefaultValue") => Some(field_or(rt, a(0), "$default", 0.0)),
+        (ATTRIBUTE | RANGED, "getMinValue") => Some(field_or(rt, a(0), "$min", f64::MIN)),
+        (ATTRIBUTE | RANGED, "getMaxValue") => Some(field_or(rt, a(0), "$max", f64::MAX)),
+        // A ranged attribute's value kept in its range (NaN its minimum), as vanilla's.
+        (ATTRIBUTE | RANGED, "sanitizeValue") => {
+            let (min, max) = (field_or(rt, a(0), "$min", f64::MIN).d(), field_or(rt, a(0), "$max", f64::MAX).d());
+            let v = a(1).d();
+            Some(V::D(if v.is_nan() { min } else { v.clamp(min, max) }))
+        }
+        (ATTRIBUTE | RANGED, "getDescriptionId") => Some(rt.get_field(a(0), "$descriptionId")),
+        (ATTRIBUTE | RANGED, "isClientSyncable") => Some(V::I(rt.get_field(a(0), "$syncable").i())),
+        (ATTRIBUTE | RANGED, "setSyncable") => {
+            rt.put_field(a(0), "$syncable", V::I(a(1).i()));
+            Some(a(0))
+        }
+        (ATTRIBUTE | RANGED, "setSentiment") => Some(a(0)),
         (MODIFIERS, "builder") => {
             let b = rt.new_object(BUILDER);
             let entries = crate::jutil::new_list(rt, Vec::new());
@@ -218,6 +270,36 @@ mod tests {
         assert_eq!(rt.get_field(built, "$attackDamage"), V::D(5.0));
         let key = crate::api::call(&mut rt, "net/minecraft/core/Holder.getRegisteredName.()Ljava/lang/String;", &[damage]);
         assert_eq!(rt.str_of(key), Some("minecraft:generic.attack_damage"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Vanilla's attributes answer the defaults and ranges 1.21.1 gives them (attack speed 4 in 0 to
+    /// 1024, gravity 0.08 in -1 to 1), and a mod's own `RangedAttribute` keeps values in its range as
+    /// vanilla's does (NaN reads as its minimum).
+    #[test]
+    fn attributes_answer_their_defaults_and_keep_values_in_range() {
+        let mut rt = Rt::new();
+        const VALUE: &str = "net/minecraft/core/Holder.value.()Ljava/lang/Object;";
+        const DEFAULT: &str = "net/minecraft/world/entity/ai/attributes/Attribute.getDefaultValue.()D";
+        const SANITIZE: &str = "net/minecraft/world/entity/ai/attributes/Attribute.sanitizeValue.(D)D";
+        let speed = crate::api::get_static(&mut rt, "net/minecraft/world/entity/ai/attributes/Attributes.ATTACK_SPEED");
+        let speed = crate::api::call(&mut rt, VALUE, &[speed]);
+        assert_eq!(crate::api::call(&mut rt, DEFAULT, &[speed]), V::D(4.0));
+        assert_eq!(crate::api::call(&mut rt, SANITIZE, &[speed, V::D(5000.0)]), V::D(1024.0));
+        let gravity = crate::api::get_static(&mut rt, "net/minecraft/world/entity/ai/attributes/Attributes.GRAVITY");
+        let gravity = crate::api::call(&mut rt, VALUE, &[gravity]);
+        assert_eq!(crate::api::call(&mut rt, DEFAULT, &[gravity]), V::D(0.08));
+        assert_eq!(crate::api::call(&mut rt, SANITIZE, &[gravity, V::D(-3.0)]), V::D(-1.0));
+        let name = crate::api::call(&mut rt, "net/minecraft/world/entity/ai/attributes/Attribute.getDescriptionId.()Ljava/lang/String;", &[gravity]);
+        assert_eq!(rt.str_of(name), Some("attribute.name.generic.gravity"));
+
+        let mana = rt.new_object("test/ManaAttribute");
+        let id = rt.string("attribute.name.test.mana");
+        crate::api::call(&mut rt, "net/minecraft/world/entity/ai/attributes/RangedAttribute.<init>.(Ljava/lang/String;DDD)V", &[mana, id, V::D(10.0), V::D(0.0), V::D(100.0)]);
+        assert_eq!(crate::api::call(&mut rt, DEFAULT, &[mana]), V::D(10.0));
+        assert_eq!(crate::api::call(&mut rt, SANITIZE, &[mana, V::D(250.0)]), V::D(100.0));
+        assert_eq!(crate::api::call(&mut rt, SANITIZE, &[mana, V::D(f64::NAN)]), V::D(0.0));
+        assert_eq!(crate::api::call(&mut rt, SANITIZE, &[mana, V::D(42.5)]), V::D(42.5));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

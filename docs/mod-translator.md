@@ -2369,6 +2369,28 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `blocks::tests::a_tools_attributes_add_its_tiers_damage`,
     `creative::tests::a_tab_built_from_its_constructor_keeps_its_title`; 272 compat and 14
     translator tests pass.
+  - [x] 2026-11-05 Round 14 (snapshot 8aee561, the 28 mods): unmapped calls at load, counted per
+    mod, 140 to 74; no uncaught exception, every mod's blocks and items as before (SecurityCraft
+    1215/81, mcw-furniture 662/654, Mekanism 200/381). Then its misses of comforts, Mekanism,
+    FarmersDelight and immersive_aircraft: Night Config in memory (`nightconfig.rs`: `Config.of`,
+    `inMemory`, `wrap`, `CommentedConfig`, values by dotted path or path list, `getEnum` by name,
+    name ignoring case or ordinal as `EnumGetMethod` says, comments, sub-configs; comforts' config
+    spec); vanilla's attributes with 1.21.1's defaults and ranges (all 31, read with `javap`) and a
+    mod's own `Attribute`/`RangedAttribute` (`sanitizeValue` clamps, NaN is the minimum);
+    `Villager.FOOD_POINTS` and `WANTED_ITEMS` as 1.21.1's initialiser fills them; and a game
+    class's static a mod writes (FarmersDelight's `Villager.FOOD_POINTS = ImmutableMap.copyOf(...)`,
+    opened by its access transformer) is what later reads get. `CauldronInteraction.DYED_ITEM` and
+    the other five interaction constants are the lambdas vanilla's initialiser makes them from;
+    `DYED_ITEM`'s is modelled (a dyeable stack with a colour loses it on the server, the cauldron a
+    level, an empty cauldron after the last; `LayeredCauldronBlock.lowerFillLevel`). A call nothing
+    answers on one of the runtime's functions, through whatever interface of the game's holds it
+    (`interact`), runs it. `tools/vanilla_tag_keys.py` now keeps 1.21.1's `BlockTags` and
+    `ItemTags` too (647 constants), read after 26.3's: `ItemTags.DYEABLE`, which 26.3 dropped, is
+    `minecraft:dyeable`. Tests `nightconfig::tests::a_config_keeps_values_by_path_and_reads_enums_by_name`,
+    `attributes::tests::attributes_answer_their_defaults_and_keep_values_in_range`,
+    `api_common::tests::villager_food_is_vanillas_until_a_mod_replaces_it`,
+    `blocks::tests::vanillas_dyed_item_interaction_washes_a_dyed_stack`; 276 compat and 14
+    translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -907,6 +907,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner == RAIL_SHAPE && name == "isAscending")
         || (matches!(owner, SOUND_TYPE | DEFERRED_SOUND_TYPE) && (name == "<init>" || SOUND_GETTERS.iter().any(|(g, ..)| *g == name) || matches!(name, "getVolume" | "getPitch")))
         || (name == "useItemOn" && cauldron_class(owner))
+        || (owner == LAYERED_CAULDRON && name == "lowerFillLevel")
         || (matches!(owner, "net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem" | "net/minecraft/world/item/AxeItem" | "net/minecraft/world/item/HoeItem" | "net/minecraft/world/item/PickaxeItem" | "net/minecraft/world/item/ShovelItem") && name == "createAttributes")
         || matches!(owner, TIERS | SIMPLE_TIER)
         || (owner == "net/minecraft/world/item/Tier" && name.starts_with("get"))
@@ -1022,6 +1023,56 @@ pub(crate) fn dispenser_behaviours(rt: &mut Rt) -> V {
 const CAULDRON_INTERACTION: &str = "net/minecraft/core/cauldron/CauldronInteraction";
 const INTERACTION_MAP: &str = "net/minecraft/core/cauldron/CauldronInteraction$InteractionMap";
 const INTERACT: &str = "net/minecraft/core/cauldron/CauldronInteraction.interact.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/ItemInteractionResult;";
+
+const LAYERED_CAULDRON: &str = "net/minecraft/world/level/block/LayeredCauldronBlock";
+/// `CauldronInteraction`'s interaction constants, in the order its static initializer makes them
+/// (from `lambda$static$0` on).
+const VANILLA_INTERACTIONS: [&str; 6] = ["FILL_WATER", "FILL_LAVA", "FILL_POWDER_SNOW", "SHULKER_BOX", "BANNER", "DYED_ITEM"];
+
+/// `CauldronInteraction.interact`'s descriptor.
+fn interact_desc() -> &'static str {
+    INTERACT.rsplit_once(".interact.").map_or("", |(_, d)| d)
+}
+
+/// Vanilla's `CauldronInteraction.DYED_ITEM`: a dyeable stack with a colour loses it, and the
+/// cauldron a level of water (on the server; the stat vanilla awards isn't counted for mods);
+/// anything else passes to the block. `args` are `interact`'s.
+fn wash_dye(rt: &mut Rt, args: &[V]) -> V {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let (state, level, pos, stack) = (a(0), a(1), a(2), a(5));
+    let dyeable = api::get_static(rt, "net/minecraft/tags/ItemTags.DYEABLE");
+    let dyed = api::get_static(rt, "net/minecraft/core/component/DataComponents.DYED_COLOR");
+    let has = "net/minecraft/world/item/ItemStack.has.(Lnet/minecraft/core/component/DataComponentType;)Z";
+    if api::call(rt, "net/minecraft/world/item/ItemStack.is.(Lnet/minecraft/tags/TagKey;)Z", &[stack, dyeable]).i() == 0 || api::call(rt, has, &[stack, dyed]).i() == 0 {
+        return api_common::result(rt, "net/minecraft/world/ItemInteractionResult", "PASS_TO_DEFAULT_BLOCK_INTERACTION");
+    }
+    let client = api::call(rt, "net/minecraft/world/level/Level.isClientSide.()Z", &[level]).i() != 0;
+    if !client {
+        api::call(rt, "net/minecraft/world/item/ItemStack.remove.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;", &[stack, dyed]);
+        lower_fill_level(rt, state, level, pos);
+    }
+    let sided = "net/minecraft/world/ItemInteractionResult.sidedSuccess.(Z)Lnet/minecraft/world/ItemInteractionResult;";
+    api::call(rt, sided, &[V::I(client as i32)])
+}
+
+/// `LayeredCauldronBlock.lowerFillLevel`: the cauldron `state` at `pos` a level lower, an empty
+/// cauldron below the first.
+fn lower_fill_level(rt: &mut Rt, state: V, level: V, pos: V) {
+    let text = rt.str_of(state).unwrap_or("minecraft:water_cauldron[level=1]").to_owned();
+    let (block, mut props) = crate::host::split_state(&text);
+    let lowered = props.iter().find(|(k, _)| *k == "level").and_then(|(_, v)| v.parse::<i32>().ok()).unwrap_or(1) - 1;
+    let n = lowered.to_string();
+    let next = if lowered <= 0 {
+        "minecraft:cauldron".to_owned()
+    } else {
+        props.retain(|(k, _)| *k != "level");
+        props.push(("level", &n));
+        crate::host::join_state(block, props)
+    };
+    let s = api::state(rt, &next);
+    let set = "net/minecraft/world/level/Level.setBlockAndUpdate.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)Z";
+    api::call(rt, set, &[level, pos, s]);
+}
 
 /// Vanilla's cauldron blocks (`AbstractCauldronBlock`, `LayeredCauldronBlock`...): the ones whose
 /// clicks their interaction map answers.
@@ -1255,6 +1306,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(interaction_map(rt, &n, true))
         }
         (o, "useItemOn") if cauldron_class(o) => Some(cauldron_use(rt, args)),
+        // `CauldronInteraction.DYED_ITEM`'s lambda, called through a map a mod filed it in.
+        (CAULDRON_INTERACTION, "lambda$static$5") if desc == interact_desc() => Some(wash_dye(rt, args)),
+        (LAYERED_CAULDRON, "lowerFillLevel") => {
+            lower_fill_level(rt, a(0), a(1), a(2));
+            Some(V::Void)
+        }
         // `defaultMapColor()`: what the block's properties give its default state (a colour, a dye's,
         // or a function of the state), else the vanilla block's they copy; vanilla's default is none.
         (_, "defaultMapColor") if desc == "()Lnet/minecraft/world/level/material/MapColor;" => {
@@ -1530,7 +1587,14 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         CAULDRON_INTERACTION => match field {
             "EMPTY" | "WATER" | "LAVA" | "POWDER_SNOW" => Some(interaction_map(rt, &field.to_ascii_lowercase(), false)),
             "INTERACTIONS" => Some(cauldron_maps(rt)),
-            _ => None,
+            // Vanilla's own interactions (`DYED_ITEM`...), which mods file under their items: each is
+            // the lambda vanilla's static initializer makes it from, in that order.
+            _ => {
+                let i = VANILLA_INTERACTIONS.iter().position(|f| *f == field)?;
+                Some(rt.intern(format!("compat:cauldron-interaction/{field}"), move |rt| {
+                    crate::functions::method(rt, &format!("{CAULDRON_INTERACTION}.lambda$static${i}.{}", interact_desc()))
+                }))
+            }
         },
         // Every colour at its id, as `MapColor`'s constructor files them (64 slots).
         MAP_COLOR if field == "MATERIAL_COLORS" => Some(rt.intern(format!("const/{MAP_COLOR}.MATERIAL_COLORS"), |rt| {
@@ -3009,6 +3073,57 @@ mod tests {
         let stick = api_common::stack(&mut rt, "minecraft:stick", 1);
         let r = api::call(&mut rt, use_on, &[b, stick, V::NULL, V::NULL, V::NULL, V::NULL, V::NULL, V::NULL]);
         assert_eq!(rt.str_of(r), Some("PASS_TO_DEFAULT_BLOCK_INTERACTION"));
+    }
+
+    /// `CauldronInteraction.DYED_ITEM`, as a mod files it under its dyeable item and a cauldron calls
+    /// it: on the server it washes the colour off and lowers the water a level, to an empty cauldron
+    /// after the last; a stack without a colour passes the click on and leaves the water be.
+    #[test]
+    fn vanillas_dyed_item_interaction_washes_a_dyed_stack() {
+        crate::install();
+        let mut rt = Rt::new();
+        // As a bundle's dispatch does for what isn't the mod's: the runtime answers.
+        rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
+        let mut host = crate::host::MemoryHost::default();
+        host.item_tags.insert("minecraft:dyeable".into(), vec!["minecraft:leather_helmet".into()]);
+        host.blocks.insert([3, 64, -2], "minecraft:water_cauldron[level=2]".into());
+        const SET: &str = "net/minecraft/world/item/ItemStack.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";
+        const HAS: &str = "net/minecraft/world/item/ItemStack.has.(Lnet/minecraft/core/component/DataComponentType;)Z";
+        rt.with_host(&mut host, |rt| {
+            let wash = api::get_static(rt, "net/minecraft/core/cauldron/CauldronInteraction.DYED_ITEM");
+            assert_eq!(api::get_static(rt, "net/minecraft/core/cauldron/CauldronInteraction.DYED_ITEM"), wash, "one object, as vanilla's constant");
+            let dyed = api::get_static(rt, "net/minecraft/core/component/DataComponents.DYED_COLOR");
+            let helmet = api_common::stack(rt, "minecraft:leather_helmet", 1);
+            let dye = |rt: &mut Rt, stack: V| {
+                let color = rt.new_object("net/minecraft/world/item/component/DyedItemColor");
+                api::call(rt, "net/minecraft/world/item/component/DyedItemColor.<init>.(IZ)V", &[color, V::I(0x3355ff), V::I(1)]);
+                api::call(rt, SET, &[stack, dyed, color]);
+            };
+            dye(rt, helmet);
+            let dyeable = api::get_static(rt, "net/minecraft/tags/ItemTags.DYEABLE");
+            assert_eq!(api::call(rt, "net/minecraft/world/item/ItemStack.is.(Lnet/minecraft/tags/TagKey;)Z", &[helmet, dyeable]), V::I(1), "{:?}", rt.str_of(rt.get_field(dyeable, "$location")));
+            assert_eq!(api::call(rt, HAS, &[helmet, dyed]), V::I(1));
+            let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+            let pos = api::block_pos(rt, 3, 64, -2);
+            let click = |rt: &mut Rt, state: &str, stack: V| {
+                let s = api::state(rt, state);
+                let r = rt.call_functional(INTERACT, wash, &[s, level, pos, V::NULL, V::NULL, stack]);
+                rt.str_of(r).map(str::to_owned)
+            };
+            assert_eq!(click(rt, "minecraft:water_cauldron[level=2]", helmet).as_deref(), Some("CONSUME"));
+            assert_eq!(api::call(rt, HAS, &[helmet, dyed]), V::I(0), "the colour is washed off");
+            assert_eq!(rt.host().map(|h| h.block_state([3, 64, -2])).as_deref(), Some("minecraft:water_cauldron[level=1]"));
+            assert_eq!(click(rt, "minecraft:water_cauldron[level=1]", helmet).as_deref(), Some("PASS_TO_DEFAULT_BLOCK_INTERACTION"));
+            assert_eq!(rt.host().map(|h| h.block_state([3, 64, -2])).as_deref(), Some("minecraft:water_cauldron[level=1]"));
+            dye(rt, helmet);
+            assert_eq!(click(rt, "minecraft:water_cauldron[level=1]", helmet).as_deref(), Some("CONSUME"));
+            assert_eq!(rt.host().map(|h| h.block_state([3, 64, -2])).as_deref(), Some("minecraft:cauldron"));
+            // A dyed stack that isn't dyeable is not vanilla's to wash.
+            let wool = api_common::stack(rt, "minecraft:white_wool", 1);
+            dye(rt, wool);
+            assert_eq!(click(rt, "minecraft:water_cauldron[level=3]", wool).as_deref(), Some("PASS_TO_DEFAULT_BLOCK_INTERACTION"));
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
     }
 
     /// `Integer::compareTo`, as the translator calls a method reference.

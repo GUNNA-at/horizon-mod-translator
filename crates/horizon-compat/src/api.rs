@@ -604,10 +604,13 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         _ => match chain(rt, key, args) {
             Some(v) => v,
             None if plain_super_init(rt, key, args) => V::Void,
-            None => {
-                crate::miss(rt, key);
-                V::Void
-            }
+            None => match crate::functions::invoke_through(rt, key, args) {
+                Some(v) => v,
+                None => {
+                    crate::miss(rt, key);
+                    V::Void
+                }
+            },
         },
     }
 }
@@ -630,7 +633,7 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 44] = [
+const CHAIN: [Module; 45] = [
     mutable_pos,
     crate::mixin::call,
     crate::attachments::call,
@@ -653,6 +656,7 @@ const CHAIN: [Module; 44] = [
     crate::creative::call,
     crate::functions::call,
     crate::gamerules::call,
+    crate::nightconfig::call,
     crate::rotation::call,
     crate::blocks::call,
     crate::shapes::call,
@@ -680,7 +684,7 @@ const CHAIN: [Module; 44] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 44] = [
+const CLAIMS: [Claims; 45] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::mixin::claims,
     crate::attachments::claims,
@@ -703,6 +707,7 @@ const CLAIMS: [Claims; 44] = [
     crate::creative::claims,
     crate::functions::claims,
     crate::gamerules::claims,
+    crate::nightconfig::claims,
     crate::rotation::claims,
     crate::blocks::claims,
     crate::shapes::claims,
@@ -728,7 +733,7 @@ const CLAIMS: [Claims; 44] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 44] = [
+const MODULE_NAMES: [&str; 45] = [
     "mutable_pos",
     "mixin",
     "attachments",
@@ -751,6 +756,7 @@ const MODULE_NAMES: [&str; 44] = [
     "creative",
     "functions",
     "gamerules",
+    "nightconfig",
     "rotation",
     "blocks",
     "shapes",
@@ -1753,6 +1759,13 @@ fn offset(rt: &mut Rt, p: V, d: [i64; 3], n: i64) -> V {
 
 /// Static fields of API classes (`Direction.UP`...).
 pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
+    // A game class's static a mod wrote (an access transformer opens it: FarmersDelight's
+    // `Villager.FOOD_POINTS = ImmutableMap.copyOf(...)`): what it wrote, as the field holds it.
+    if let Some(&v) = rt.statics.get(key)
+        && v != V::Void
+    {
+        return v;
+    }
     if let Some((o, f)) = key.split_once('.')
         && let Some(v) = crate::network::get_static(rt, o, f)
             .or_else(|| crate::api_common::get_static(rt, o, f))
@@ -1766,6 +1779,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::tanks::get_static(rt, o, f))
             .or_else(|| crate::creative::get_static(rt, o, f))
             .or_else(|| crate::gamerules::get_static(rt, o, f))
+            .or_else(|| crate::nightconfig::get_static(rt, o, f))
             .or_else(|| crate::codecs::get_static(rt, o, f))
             .or_else(|| crate::recipes::get_static(rt, o, f))
             .or_else(|| crate::components::get_static(rt, o, f))

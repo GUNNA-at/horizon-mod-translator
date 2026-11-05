@@ -216,7 +216,8 @@ pub fn named(owner: &str, field: &str) -> Option<(&'static str, &'static str)> {
 
 /// `Tags.Blocks.RELOCATION_NOT_SUPPORTED` and the rest: the key of the tag each names. Also the
 /// other tag classes' constants (`BiomeTags.IS_END`, `EntityTypeTags.UNDEAD`, `Tags.Biomes.IS_VOID`,
-/// `DamageTypeTags.IS_FIRE`), from [`crate::vanilla_tag_keys`].
+/// `DamageTypeTags.IS_FIRE`), and 1.21.1's `BlockTags` and `ItemTags` constants 26.3 dropped
+/// (`ItemTags.DYEABLE`), from [`crate::vanilla_tag_keys`].
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     let (registry, tag) = named(owner, field).or_else(|| crate::vanilla_tag_keys::named(owner, field))?;
     Some(crate::fluids::tag_key(rt, registry, tag))
