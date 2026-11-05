@@ -2861,6 +2861,12 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     up to its last. Vanilla asks the first question on both sides, so the level is only read
     there. The block hooks' hosts are one text each now (`level_host` and `level_read_host` in
     `bundle.rs`). Test: `crops::tests::bone_meal_grows_a_mod_crop_as_vanillas`.
+    In game (`fdbm.sh`, random ticks off): bone meal on Farmer's Delight's cabbages takes them
+    from age 0 to 3 (wheat beside them 0 to 3); on rice, its own `performBonemeal` grows it
+    0 to 1, then to 3 with its panicles above at 3 after three more. Ripe rice left to random
+    ticks (speed 1000, 200 ticks) grows its panicles by its own tick (to age 2). The ctl's
+    `interact` can't aim at a crop's low shape (it aims at the block's upper half); `look-at` a
+    point inside the shape and `mouse right click` do.
   - [x] 2026-11-05 Rice grows its panicles. In the same run the rice reached age 3 and stopped:
     its random tick grows the panicles above only into an empty block, and
     `LevelReader.isEmptyBlock` had no answer (false). It is the block there being air of any kind
@@ -2870,6 +2876,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     in `blocks.rs`, read from the 1.21.1 classes); one to a class with its own (a falling
     block's) stays unanswered. Test: `blocks::tests::a_rices_tick_and_its_empty_block_test_are_vanillas`.
     314 compat, 15 translator tests pass.
+  - [x] 2026-11-05 NeoForge's finish phase (`neo::fire_registrations`). Loading stopped after the
+    capabilities: no mod heard `InterModEnqueueEvent` (21 of the pack's mods listen),
+    `InterModProcessEvent` (11) or `FMLLoadCompleteEvent` (33), and the payload types registered
+    before the capabilities. The order is NeoForge 21.1's `CommonModLoader` now: common setup,
+    "Registration events" (capabilities), "Enqueue IMC", "Process IMC", "Complete loading", then
+    "Network registry lock" (`RegisterPayloadHandlersEvent`). The client's own setup still fires on
+    the drawing runtime's first hook, after these (NeoForge's comes before them).
+    - `InterModComms`: `sendTo([sender,] modId, method, supplier)` queues a message for a loaded mod
+      and answers false for another; `getMessages(modId[, filter])` and a lifecycle event's
+      `getIMCStream([filter])` take the mod's messages off its queue in the order they were sent,
+      leaving the ones the method filter refuses; `IMCMessage`'s accessors. A lifecycle event's
+      `getContainer` is the runtime's mod. Messages reach the mods of the same engine only: a mod
+      in another translated jar isn't loaded as `ModList` sees it here.
+    Test: `neo::tests::the_mods_message_each_other_then_complete_loading`.
+  - [x] 2026-11-05 `ItemStack.canPerformAction(ability)`, unmapped in the same run: Farmer's
+    Delight asks it of the held stack to tell a knife (`ItemUtils.isKnife`, from its cake
+    listener on every right click on a block). It is the item's `canPerformAction(stack,
+    ability)`: a mod item's own, else the abilities of the item's vanilla class as NeoForge
+    1.21.1's patched classes give them (`ItemAbilities.DEFAULT_*_ACTIONS` in the 13 classes whose
+    class files declare it: axes, hoes, shovels, pickaxes, swords, shears, shields, fishing rods,
+    tridents, brushes, flint and steel, fire charges, spyglasses). A vanilla item is of its class
+    by its name; a mod item by its first vanilla class. Test:
+    `neo::tests::a_stacks_abilities_are_its_items`. 316 compat tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

@@ -182,12 +182,20 @@ pub fn fire_registrations(rt: &mut Rt) {
         rt.call_functional(BAKE, callback, &[registry]);
         rt.report_thrown("BakeCallback.onBake");
     }
-    // NeoForge's "Config loading" step, then common setup and capabilities, as its loading goes on.
+    // NeoForge's "Config loading" step, then common setup and "Registration events"
+    // (capabilities), as its loading goes on. The client's own setup fires on the runtime that
+    // draws, at its first hook ([`fire_client_setup`]).
     fire_config_loading(rt);
     fire_common_setup(rt);
-    // NeoForge's network registry: the mods register their payload types.
-    crate::network::fire_registration(rt);
     crate::capabilities::fire(rt);
+    // Then NeoForge's finish: the mods send each other messages ("Enqueue IMC"), read the ones
+    // sent to them ("Process IMC"), complete their loading, and the network registry locks with
+    // the payload types they registered.
+    for event in [ENQUEUE_IMC, PROCESS_IMC, LOAD_COMPLETE] {
+        let ev = rt.new_object(event);
+        post(rt, event, ev);
+    }
+    crate::network::fire_registration(rt);
 }
 
 fn is_registry(owner: &str) -> bool {
@@ -371,6 +379,69 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || owner.starts_with("cpw/mods/modlauncher/")
         || matches!(owner, "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference" | "net/minecraft/core/Holder$Direct")
         || (owner.starts_with("net/minecraft/") && matches!(name, "registryAccess" | "holderLookup" | "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup"))
+        || (name == "canPerformAction" && owner.starts_with("net/minecraft/world/item/"))
+}
+
+const ITEM_STACK: &str = "net/minecraft/world/item/ItemStack";
+const ITEM: &str = "net/minecraft/world/item/Item";
+/// `IItemExtension.canPerformAction(stack, ability)`, as a call on an item names it.
+const CAN_PERFORM: &str = "canPerformAction.(Lnet/minecraft/world/item/ItemStack;Lnet/neoforged/neoforge/common/ItemAbility;)Z";
+const ITEM_CAN_PERFORM: &str = "net/minecraft/world/item/Item.canPerformAction.(Lnet/minecraft/world/item/ItemStack;Lnet/neoforged/neoforge/common/ItemAbility;)Z";
+
+/// The abilities NeoForge 1.21.1's patched item classes give their items (`canPerformAction` over
+/// `ItemAbilities.DEFAULT_*_ACTIONS`, as their class files say): none for the other classes.
+fn default_abilities(class: &str) -> &'static [&'static str] {
+    match class {
+        "AxeItem" => &["axe_dig", "axe_strip", "axe_scrape", "axe_wax_off"],
+        "HoeItem" => &["hoe_dig", "till"],
+        "ShovelItem" => &["shovel_dig", "shovel_flatten", "shovel_douse"],
+        "PickaxeItem" => &["pickaxe_dig"],
+        "SwordItem" => &["sword_dig", "sword_sweep"],
+        "ShearsItem" => &["shears_dig", "shears_harvest", "shears_remove_armor", "shears_carve", "shears_disarm", "shears_trim"],
+        "ShieldItem" => &["shield_block"],
+        "FishingRodItem" => &["fishing_rod_cast"],
+        "TridentItem" => &["trident_throw"],
+        "BrushItem" => &["brush_brush"],
+        "FlintAndSteelItem" | "FireChargeItem" => &["firestarter_light"],
+        "SpyglassItem" => &["spyglass_scope"],
+        _ => &[],
+    }
+}
+
+/// The vanilla class an item is of, by its simple name: a mod item's first vanilla class, a vanilla
+/// item's by its name (`minecraft:iron_axe` is an `AxeItem`) among the classes with abilities.
+fn item_class(rt: &Rt, item: V) -> &'static str {
+    let mut class = rt.class_of(item);
+    for _ in 0..64 {
+        if class.starts_with("net/minecraft/world/item/") || class.is_empty() {
+            break;
+        }
+        match rt.supers.get(class).copied() {
+            Some(up) => class = up,
+            None => break,
+        }
+    }
+    if class != ITEM {
+        return class.rsplit('/').next().unwrap_or(class);
+    }
+    let name = rt.str_of(item).unwrap_or("");
+    let Some(path) = name.strip_prefix("minecraft:") else { return "Item" };
+    match path {
+        "shears" => "ShearsItem",
+        "shield" => "ShieldItem",
+        "fishing_rod" => "FishingRodItem",
+        "trident" => "TridentItem",
+        "brush" => "BrushItem",
+        "flint_and_steel" => "FlintAndSteelItem",
+        "fire_charge" => "FireChargeItem",
+        "spyglass" => "SpyglassItem",
+        p if p.ends_with("_pickaxe") => "PickaxeItem",
+        p if p.ends_with("_axe") => "AxeItem",
+        p if p.ends_with("_hoe") => "HoeItem",
+        p if p.ends_with("_shovel") => "ShovelItem",
+        p if p.ends_with("_sword") => "SwordItem",
+        _ => "Item",
+    }
 }
 
 /// NeoForge's `ItemAbility` named `name` (`axe_strip`): one object per name.
@@ -1180,11 +1251,105 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             };
             crate::jutil::completed_future(rt, value)
         }
+        // `ItemStack.canPerformAction(ability)`: its item's answer (`IItemExtension`), the mod
+        // item's own where its class has one.
+        (ITEM_STACK, "canPerformAction") => {
+            let item = crate::api::call(rt, "net/minecraft/world/item/ItemStack.getItem.()Lnet/minecraft/world/item/Item;", &[a(0)]);
+            let args = [item, a(0), a(1)];
+            match rt.vcall {
+                Some(vc) => vc(rt, ITEM_CAN_PERFORM, CAN_PERFORM, &args),
+                None => crate::api::call(rt, ITEM_CAN_PERFORM, &args),
+            }
+        }
+        // `Item.canPerformAction(stack, ability)` (a call through `super` names a tool's class):
+        // the abilities of the item's vanilla class.
+        (o, "canPerformAction") if o.starts_with("net/minecraft/world/item/") && desc == &CAN_PERFORM["canPerformAction.".len()..] => {
+            let class = if o == ITEM { item_class(rt, a(0)) } else { o.rsplit('/').next().unwrap_or(o) };
+            let ability = rt.str_of(rt.get_field(a(2), "name")).unwrap_or("").to_owned();
+            V::I(default_abilities(class).contains(&ability.as_str()) as i32)
+        }
+        // A lifecycle event's mod: FML dispatches one to each container, here the runtime's own.
+        (o, "getContainer") if o.starts_with("net/neoforged/fml/event/lifecycle/") => active_container(rt),
+        // `InterModComms.sendTo([sender,] modId, method, supplier)`: queued for a loaded mod only.
+        (IMC, "sendTo") => {
+            let four = desc.starts_with("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;");
+            let (sender, rest) = if four {
+                (a(0), &args[1..])
+            } else {
+                let c = active_container(rt);
+                (rt.get_field(c, "$modId"), args)
+            };
+            let arg = |i: usize| rest.get(i).copied().unwrap_or_default();
+            V::I(send_imc(rt, sender, arg(0), arg(1), arg(2)) as i32)
+        }
+        // `getMessages(modId[, methodFilter])`, and a lifecycle event's `getIMCStream([filter])`
+        // for its mod: the messages sent to it, taken off its queue as the stream reaches them.
+        (IMC, "getMessages") => {
+            let id = rt.str_of(a(0)).unwrap_or("").to_owned();
+            take_imc(rt, &id, args.get(1).copied())
+        }
+        (o, "getIMCStream") if o.starts_with("net/neoforged/fml/event/lifecycle/") => {
+            let c = active_container(rt);
+            let id = rt.str_of(rt.get_field(c, "$modId")).unwrap_or("").to_owned();
+            take_imc(rt, &id, args.get(1).copied())
+        }
+        (IMC_MESSAGE, n) => match n {
+            "senderModId" | "getSenderModId" => rt.get_field(a(0), "senderModId"),
+            "modId" | "getModId" => rt.get_field(a(0), "modId"),
+            "method" | "getMethod" => rt.get_field(a(0), "method"),
+            "messageSupplier" | "getMessageSupplier" => rt.get_field(a(0), "messageSupplier"),
+            _ => return None,
+        },
         _ => return None,
     })
 }
 
+/// The messages sent to mod `id` and not yet read, in the order they were sent.
+fn imc_queue(rt: &mut Rt, id: &str) -> V {
+    rt.intern(format!("compat:imc/{id}"), |rt| rt.alloc("java/util/concurrent/ConcurrentLinkedQueue", Data::List(Vec::new())))
+}
+
+/// `InterModComms.sendTo`: false, and nothing queued, when mod `to` isn't loaded.
+fn send_imc(rt: &mut Rt, sender: V, to: V, method: V, thing: V) -> bool {
+    let target = rt.str_of(to).unwrap_or("").to_owned();
+    if !mod_loaded(rt, &target) {
+        return false;
+    }
+    let m = rt.new_object(IMC_MESSAGE);
+    for (field, v) in [("senderModId", sender), ("modId", to), ("method", method), ("messageSupplier", thing)] {
+        rt.put_field(m, field, v);
+    }
+    let q = imc_queue(rt, &target);
+    list_mut(rt, q).push(m);
+    true
+}
+
+/// The messages to mod `id` whose method `filter` accepts (all without one), off its queue.
+fn take_imc(rt: &mut Rt, id: &str, filter: Option<V>) -> V {
+    let q = imc_queue(rt, id);
+    let queued = std::mem::take(list_mut(rt, q));
+    let (mut taken, mut kept) = (Vec::new(), Vec::new());
+    for m in queued {
+        let wanted = match filter {
+            Some(f) if f.r() != 0 => {
+                let method = rt.get_field(m, "method");
+                rt.call_functional(PREDICATE_TEST, f, &[method]).i() != 0
+            }
+            _ => true,
+        };
+        if wanted { taken.push(m) } else { kept.push(m) }
+    }
+    *list_mut(rt, q) = kept;
+    rt.alloc("java/util/stream/Stream", Data::Stream(taken))
+}
+
 const COMMON_SETUP: &str = "net/neoforged/fml/event/lifecycle/FMLCommonSetupEvent";
+const ENQUEUE_IMC: &str = "net/neoforged/fml/event/lifecycle/InterModEnqueueEvent";
+const PROCESS_IMC: &str = "net/neoforged/fml/event/lifecycle/InterModProcessEvent";
+const LOAD_COMPLETE: &str = "net/neoforged/fml/event/lifecycle/FMLLoadCompleteEvent";
+const IMC: &str = "net/neoforged/fml/InterModComms";
+const IMC_MESSAGE: &str = "net/neoforged/fml/InterModComms$IMCMessage";
+const PREDICATE_TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 const CONSTRUCT: &str = "net/neoforged/fml/event/lifecycle/FMLConstructModEvent";
 const CLIENT_SETUP: &str = "net/neoforged/fml/event/lifecycle/FMLClientSetupEvent";
 const REGISTER_RENDERERS: &str = "net/neoforged/neoforge/client/event/EntityRenderersEvent$RegisterRenderers";
@@ -1681,6 +1846,144 @@ mod tests {
             _ => list_mut(rt, seen).push(args[1]),
         }
         Some(V::Void)
+    }
+
+    /// `ItemStack.canPerformAction(ability)` (Farmer's Delight asks it of the held stack to tell a
+    /// knife): a mod item's own answer, else its vanilla class's abilities as NeoForge 1.21.1's
+    /// patched classes give them: an iron axe strips, a hoe tills, shears harvest, a stick does
+    /// nothing; a mod's axe without an answer of its own strips as vanilla's.
+    #[test]
+    fn a_stacks_abilities_are_its_items() {
+        const KNIFE: &str = "test/KnifeItem";
+        const BIG_AXE: &str = "test/BigAxeItem";
+        fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
+            if key == CAN_PERFORM && rt.class_of(args[0]) == KNIFE {
+                let ability = rt.str_of(rt.get_field(args[2], "name")).unwrap_or("").to_owned();
+                return V::I((ability == "knife_dig") as i32);
+            }
+            crate::api::call(rt, owner_key, args)
+        }
+        let mut rt = Rt::new();
+        rt.vcall = Some(vcall);
+        rt.supers.insert(KNIFE, "net/minecraft/world/item/DiggerItem");
+        rt.supers.insert(BIG_AXE, "net/minecraft/world/item/AxeItem");
+        for (class, id) in [(KNIFE, "test:knife"), (BIG_AXE, "test:big_axe")] {
+            let item = rt.new_object(class);
+            rt.registered.insert(("item".into(), id.into()), item);
+        }
+        let can = |rt: &mut Rt, item: &str, ability: &str| {
+            let stack = crate::api_common::stack(rt, item, 1);
+            let a = item_ability(rt, ability);
+            crate::api::call(rt, "net/minecraft/world/item/ItemStack.canPerformAction.(Lnet/neoforged/neoforge/common/ItemAbility;)Z", &[stack, a]) == V::I(1)
+        };
+        let cases = [
+            ("minecraft:iron_axe", "axe_strip", true),
+            ("minecraft:iron_axe", "till", false),
+            ("minecraft:diamond_pickaxe", "pickaxe_dig", true),
+            ("minecraft:diamond_pickaxe", "axe_dig", false),
+            ("minecraft:wooden_hoe", "till", true),
+            ("minecraft:shears", "shears_harvest", true),
+            ("minecraft:flint_and_steel", "firestarter_light", true),
+            ("minecraft:stick", "sword_sweep", false),
+            ("test:knife", "knife_dig", true),
+            ("test:knife", "axe_dig", false),
+            ("test:big_axe", "axe_strip", true),
+            ("test:big_axe", "sword_sweep", false),
+        ];
+        for (item, ability, expected) in cases {
+            assert_eq!(can(&mut rt, item, ability), expected, "{item} {ability}");
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// NeoForge 21.1's finish, after common setup and the capabilities: the mods send each other
+    /// messages (`InterModEnqueueEvent`), read the ones sent to them (`InterModProcessEvent`),
+    /// complete their loading (`FMLLoadCompleteEvent`), then register their payloads. A message
+    /// reaches a loaded mod only; each is read once, and a method filter leaves the rest queued.
+    #[test]
+    fn the_mods_message_each_other_then_complete_loading() {
+        const SEND: &str = "net/neoforged/fml/InterModComms.sendTo.(Ljava/lang/String;Ljava/lang/String;Ljava/util/function/Supplier;)Z";
+        const SEND_AS: &str = "net/neoforged/fml/InterModComms.sendTo.(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/function/Supplier;)Z";
+        const STREAM: &str = "net/neoforged/fml/event/lifecycle/InterModProcessEvent.getIMCStream.(Ljava/util/function/Predicate;)Ljava/util/stream/Stream;";
+        const MESSAGES: &str = "net/neoforged/fml/InterModComms.getMessages.(Ljava/lang/String;)Ljava/util/stream/Stream;";
+        fn items(rt: &Rt, stream: V) -> Vec<V> {
+            match rt.heap.get(stream.r() as usize).map(|o| &o.data) {
+                Some(Data::Stream(v)) => v.clone(),
+                _ => panic!("not a stream"),
+            }
+        }
+        // What a message says: its method, its sender and what its supplier gives.
+        fn said(rt: &mut Rt, m: V) -> (String, String, String) {
+            let text = |rt: &Rt, v: V| rt.str_of(v).unwrap_or("").to_owned();
+            let supplier = crate::api::call(rt, "net/neoforged/fml/InterModComms$IMCMessage.messageSupplier.()Ljava/util/function/Supplier;", &[m]);
+            let value = rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", supplier, &[]);
+            let method = crate::api::call(rt, "net/neoforged/fml/InterModComms$IMCMessage.method.()Ljava/lang/String;", &[m]);
+            let sender = crate::api::call(rt, "net/neoforged/fml/InterModComms$IMCMessage.senderModId.()Ljava/lang/String;", &[m]);
+            (text(rt, method), text(rt, sender), text(rt, value))
+        }
+        fn mods(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let captured = rt.captured(args[0]);
+            Some(match id {
+                // A message's supplier, and a filter that takes `register` only.
+                7 => captured[0],
+                8 => V::I((rt.str_of(args[1]) == Some("register")) as i32),
+                _ => {
+                    let (seen, answers) = (captured[0], captured[1]);
+                    list_mut(rt, seen).push(args[1]);
+                    if id == 5 {
+                        let s = |rt: &mut Rt, t: &str| rt.string(t);
+                        let (ruby, absent, register, other, lib, gem) =
+                            (s(rt, "ruby"), s(rt, "absent"), s(rt, "register"), s(rt, "other"), s(rt, "lib"), s(rt, "gem"));
+                        let supplier = rt.lambda_id("java/util/function/Supplier", 7, vec![gem]);
+                        for sent in [
+                            crate::api::call(rt, SEND, &[ruby, register, supplier]),
+                            crate::api::call(rt, SEND, &[absent, register, supplier]),
+                            crate::api::call(rt, SEND_AS, &[lib, ruby, other, supplier]),
+                        ] {
+                            list_mut(rt, answers).push(sent);
+                        }
+                    } else if id == 6 {
+                        let filter = rt.lambda_id("java/util/function/Predicate", 8, vec![]);
+                        let stream = crate::api::call(rt, STREAM, &[args[1], filter]);
+                        let read = items(rt, stream);
+                        list_mut(rt, answers).extend(read);
+                    }
+                    V::Void
+                }
+            })
+        }
+        let mut rt = Rt::new();
+        rt.mods = vec!["ruby".into()];
+        rt.lambda_call = Some(mods);
+        let (seen, answers) = (rt.alloc("java/util/ArrayList", Data::List(Vec::new())), rt.alloc("java/util/ArrayList", Data::List(Vec::new())));
+        let events = [
+            (crate::network::REGISTER_PAYLOADS, 2),
+            (LOAD_COMPLETE, 2),
+            (PROCESS_IMC, 6),
+            (ENQUEUE_IMC, 5),
+            ("net/neoforged/neoforge/capabilities/RegisterCapabilitiesEvent", 2),
+            (COMMON_SETUP, 2),
+        ];
+        for (event, id) in events {
+            let listener = rt.lambda_id("java/util/function/Consumer", id, vec![seen, answers]);
+            rt.listeners.push((event.to_owned(), listener));
+        }
+        fire_registrations(&mut rt);
+        let heard: Vec<String> = list_mut(&mut rt, seen).clone().into_iter().map(|e| rt.class_of(e).to_owned()).collect();
+        let order: Vec<&str> = events.iter().rev().map(|(e, _)| *e).collect();
+        assert_eq!(heard, order);
+        let got = list_mut(&mut rt, answers).clone();
+        assert_eq!(got[..3], [V::I(1), V::I(0), V::I(1)], "sent to the loaded mod only");
+        let read: Vec<_> = got[3..].iter().map(|m| said(&mut rt, *m)).collect();
+        assert_eq!(read, [("register".to_owned(), "ruby".to_owned(), "gem".to_owned())]);
+        // The message the filter left waits for the next reader, once.
+        let ruby = rt.string("ruby");
+        let rest = call(&mut rt, MESSAGES, &[ruby]).unwrap();
+        let rest: Vec<_> = items(&rt, rest).into_iter().map(|m| said(&mut rt, m)).collect();
+        assert_eq!(rest, [("other".to_owned(), "lib".to_owned(), "gem".to_owned())]);
+        let again = call(&mut rt, MESSAGES, &[ruby]).unwrap();
+        assert!(items(&rt, again).is_empty());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// NeoForge's loading order on the mod bus: construction (where Dragons Plus makes its blocks,
