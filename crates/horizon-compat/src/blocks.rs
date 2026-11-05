@@ -369,6 +369,7 @@ fn vanilla_values(field: &str) -> Option<Vec<String>> {
 }
 
 /// `RailShape`'s constants in order; the first six are `RAIL_SHAPE_STRAIGHT`'s.
+const RAIL_SHAPE: &str = "net/minecraft/world/level/block/state/properties/RailShape";
 const RAIL_SHAPES: [&str; 10] = [
     "north_south", "east_west", "ascending_east", "ascending_west", "ascending_north", "ascending_south", "south_east", "south_west",
     "north_west", "north_east",
@@ -856,6 +857,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner.starts_with("net/minecraft/core/dispenser/") && name == "<init>")
         || (owner == BLOCK_SET_TYPE && matches!(name, "<init>" | "register" | "values"))
         || (owner == BRUSHABLE && matches!(name, "getTurnsInto" | "getBrushSound" | "getBrushCompletedSound"))
+        || (owner == RAIL_SHAPE && name == "isAscending")
         || (matches!(owner, SOUND_TYPE | DEFERRED_SOUND_TYPE) && (name == "<init>" || SOUND_GETTERS.iter().any(|(g, ..)| *g == name) || matches!(name, "getVolume" | "getPitch")))
         || (name == "useItemOn" && cauldron_class(owner))
         || (matches!(owner, "net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem") && name == "createAttributes")
@@ -1117,6 +1119,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(rt.alloc(class, Data::Array(all)))
         }
         (DYE_COLOR, _) => dye_call(rt, name, args),
+        // `RailShape.isAscending()`: the four that climb.
+        (RAIL_SHAPE, "isAscending") => Some(V::I(api_common::text_of(rt, a(0)).starts_with("ascending_") as i32)),
         // `super.getShape(state, level, pos, context)` to a class with vanilla's default.
         (o, "getShape") if desc == GET_SHAPE.trim_start_matches("getShape.") && default_shape_class(o) => Some(crate::shapes::shape(rt, &[FULL_BOX])),
         // ... and to a vanilla kind whose shape follows its state (a door's facing, hinge, openness).
@@ -2662,8 +2666,8 @@ mod tests {
     #[test]
     fn an_enum_property_filters_a_vanilla_enums_constants() {
         fn vcall(rt: &mut Rt, _key: &'static str, _short: &'static str, args: &[V]) -> V {
-            let name = api_common::text_of(rt, args[1]);
-            V::I(name.starts_with("ascending_") as i32)
+            // `RailShape::isAscending`, as the translated method reference calls it.
+            api::call(rt, "net/minecraft/world/level/block/state/properties/RailShape.isAscending.()Z", &[args[1]])
         }
         let mut rt = Rt::new();
         rt.vcall = Some(vcall);

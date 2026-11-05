@@ -1263,7 +1263,12 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let p = pos_of(rt, a(1));
             V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, "minecraft:air")) as i32)
         }
-        (_, "isClientSide") if level => V::I(rt.host().is_some_and(|h| !h.is_server()) as i32),
+        // A level's side is its own (vanilla's `isClientSide` field: the client's level, a mod's
+        // wrapper made on either side); one that doesn't carry it is on the host's.
+        (_, "isClientSide") if level => match rt.get_field(a(0), "isClientSide") {
+            V::I(c) => V::I(c),
+            _ => V::I(rt.host().is_some_and(|h| !h.is_server()) as i32),
+        },
         (_, "isLoaded" | "hasChunkAt" | "isAreaLoaded" | "hasChunksAt" | "isInWorldBounds") if level => V::I(1),
         (_, "getGameTime") if level => V::J(rt.host().map_or(0, |h| h.game_time())),
         // The level's server services. Ticking is never frozen or stepped here (`/tick` isn't modelled
@@ -1430,6 +1435,12 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "isAir" => V::I(matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") as i32),
                 "hasBlockEntity" => V::I(crate::glue::block_entity_id(rt, b).is_some() as i32),
                 "is" if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") => V::I((block_name(rt, a(1)) == b) as i32),
+                // A block's registry entry (`Holder<Block>`, a `DeferredBlock`): the one holding
+                // this state's block.
+                "is" if desc.starts_with("(Lnet/minecraft/core/Holder;") => {
+                    let held = call(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[a(1)]);
+                    V::I((held.r() != 0 && block_name(rt, held) == b) as i32)
+                }
                 // A block tag, as the game's loaded tags hold it (`BlockTags.LEAVES`, a mod's own).
                 "is" if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
                     let registry = rt.str_of(rt.get_field(a(1), "$registry")).unwrap_or("").to_owned();
@@ -1932,6 +1943,29 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `BlockState.is(Holder)`: the state's block is the one the holder holds (FramedBlocks checks
+    /// an item model's source state against its `DeferredBlock`). A level's side is its own: the
+    /// client's level is on the client with no game around (Mekanism's level load then makes no
+    /// saved data).
+    #[test]
+    fn a_state_is_its_blocks_holder_and_a_level_its_own_side() {
+        let mut rt = Rt::new();
+        crate::install();
+        let (cube, slope) = (rt.new_object("test/Cube"), rt.new_object("test/Slope"));
+        rt.registered.insert(("block".into(), "fb:cube".into()), cube);
+        rt.registered.insert(("block".into(), "fb:slope".into()), slope);
+        let held = crate::neo::registry_holder(&mut rt, "block", "fb:cube", cube);
+        let other = crate::neo::registry_holder(&mut rt, "block", "fb:slope", slope);
+        let st = state(&mut rt, "fb:cube[solid=false]");
+        let is = "net/minecraft/world/level/block/state/BlockState.is.(Lnet/minecraft/core/Holder;)Z";
+        assert_eq!(call(&mut rt, is, &[st, held]), V::I(1));
+        assert_eq!(call(&mut rt, is, &[st, other]), V::I(0));
+
+        rt.interned.insert("compat:client".into(), V::I(1));
+        let level = crate::glue::level(&mut rt);
+        assert_eq!(call(&mut rt, "net/minecraft/world/level/Level.isClientSide.()Z", &[level]), V::I(1));
+    }
 
     /// A mod's own register class (Mekanism's `MekanismDeferredRegister`), made through NeoForge's
     /// constructor: its `createHolder` override makes the holders (its own class, whose `super(key)`

@@ -30,6 +30,7 @@ pub(crate) fn fluid_interactions(rt: &mut Rt) -> V {
 const SOUND_ACTION: &str = "net/neoforged/neoforge/common/SoundAction";
 const TAG_KEY: &str = "net/minecraft/tags/TagKey";
 const FLUID_STACK: &str = "net/neoforged/neoforge/fluids/FluidStack";
+const SIMPLE_FLUID_CONTENT: &str = "net/neoforged/neoforge/fluids/SimpleFluidContent";
 const LIQUID_BLOCK: &str = "net/minecraft/world/level/block/LiquidBlock";
 const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
 const STATE_BASE: &str = "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase";
@@ -667,7 +668,7 @@ fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
 /// Static fields this module owns: `Fluids` and `FluidTags` (NeoForge's `Tags.Fluids` are `neo_tags`').
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match owner {
-        FLUID_STACK if field == "EMPTY" => Some(fluid_stack_empty(rt)),
+        FLUID_STACK | SIMPLE_FLUID_CONTENT if field == "EMPTY" => Some(fluid_stack_empty(rt)),
         "net/minecraft/world/level/material/Fluids" => {
             let f = fluid(rt, &format!("minecraft:{}", field.to_ascii_lowercase()));
             (f.r() != 0).then_some(f)
@@ -689,8 +690,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(
         owner,
-        FLUID_STACK | FLUID_STATE | PROPERTIES | BASE | BASE_FLOWING | BASE_SOURCE | LIQUID_BLOCK | TAG_KEY | "net/minecraft/world/item/BucketItem" | "net/minecraft/tags/FluidTags"
-            | FLUID_TYPE | TYPE_PROPERTIES | SOUND_ACTION | FLUID_INTERACTIONS | INTERACTION_INFO
+        FLUID_STACK | SIMPLE_FLUID_CONTENT | FLUID_STATE | PROPERTIES | BASE | BASE_FLOWING | BASE_SOURCE | LIQUID_BLOCK | TAG_KEY | "net/minecraft/world/item/BucketItem"
+            | "net/minecraft/tags/FluidTags" | FLUID_TYPE | TYPE_PROPERTIES | SOUND_ACTION | FLUID_INTERACTIONS | INTERACTION_INFO
     ) || is_fluid_class(owner)
         || name == "getFluidState"
         || (matches!(owner, "net/minecraft/tags/BlockTags" | "net/minecraft/tags/ItemTags") && name == "create")
@@ -702,6 +703,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     if owner == FLUID_STACK {
         return fluid_stack_call(rt, name, desc, args);
+    }
+    // NeoForge's `SimpleFluidContent` (an item's fluid, immutable): held as the stack it wraps.
+    if owner == SIMPLE_FLUID_CONTENT {
+        return match name {
+            "copyOf" if stack_empty(rt, a(0)) => Some(fluid_stack_empty(rt)),
+            "copyOf" => fluid_stack_call(rt, "copy", desc, args),
+            _ => fluid_stack_call(rt, name, desc, args),
+        };
     }
     Some(match (owner, name) {
         (FLUID_STATE, n) => {

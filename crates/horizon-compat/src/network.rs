@@ -199,7 +199,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/item/ItemStack", "STREAM_CODEC" | "OPTIONAL_STREAM_CODEC") => STACK,
         ("net/minecraft/world/item/ItemStack", "LIST_STREAM_CODEC" | "OPTIONAL_LIST_STREAM_CODEC") => STACKS,
         ("net/minecraft/world/item/component/ItemContainerContents", "STREAM_CODEC") => CONTENTS,
-        ("net/neoforged/neoforge/fluids/FluidStack", "STREAM_CODEC" | "OPTIONAL_STREAM_CODEC") => FLUID_STACK,
+        ("net/neoforged/neoforge/fluids/FluidStack", "STREAM_CODEC" | "OPTIONAL_STREAM_CODEC") | ("net/neoforged/neoforge/fluids/SimpleFluidContent", "STREAM_CODEC") => FLUID_STACK,
         ("net/minecraft/network/chat/ComponentSerialization", "STREAM_CODEC" | "TRUSTED_STREAM_CODEC") => COMPONENT,
         ("net/minecraft/core/particles/ParticleTypes", "STREAM_CODEC") => PARTICLE,
         // Its length a VarInt, as `BYTE_ARRAY`'s (only without the limit).

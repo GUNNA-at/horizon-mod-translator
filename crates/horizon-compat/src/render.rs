@@ -330,7 +330,7 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
         || owner == "com/mojang/math/Axis"
         || owner.starts_with("net/minecraft/client/")
         || owner.starts_with("net/neoforged/")
-        || owner == "org/lwjgl/opengl/GL"
+        || matches!(owner, "org/lwjgl/opengl/GL" | "org/lwjgl/opengl/GLCapabilities")
         || INTRINSICS.iter().any(|k| k.split_once('.').is_some_and(|(o, _)| o == owner))
 }
 
@@ -463,9 +463,24 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/neoforged/neoforge/client/model/data/ModelData", "EMPTY") => {
             rt.intern("compat:model-data".into(), |rt| rt.new_object("net/neoforged/neoforge/client/model/data/ModelData"))
         }
+        // `RenderStateShard`'s shards (`NO_CULL`, `RENDERTYPE_LINES_SHADER`...) that a mod's own
+        // render type is built of: one object each, by name.
+        (SHARD, f) if f.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') => {
+            let name = f.to_owned();
+            rt.intern(format!("shard/{f}"), move |rt| {
+                let o = rt.new_object(SHARD);
+                let n = rt.string(&name);
+                rt.put_field(o, "$name", n);
+                o
+            })
+        }
         _ => return None,
     })
 }
+
+const SHARD: &str = "net/minecraft/client/renderer/RenderStateShard";
+const COMPOSITE_STATE: &str = "net/minecraft/client/renderer/RenderType$CompositeState";
+const COMPOSITE_BUILDER: &str = "net/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder";
 
 fn arg(args: &[V], i: usize) -> V {
     args.get(i).copied().unwrap_or_default()
@@ -1621,10 +1636,53 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         // Flywheel asks the client's GL what it supports: Horizon doesn't draw with GL, so no
         // version or extension reads as there (each capability field is false).
         ("org/lwjgl/opengl/GL", "getCapabilities") => single(rt, "org/lwjgl/opengl/GLCapabilities"),
+        ("org/lwjgl/opengl/GLCapabilities", n) if n.starts_with('$') => V::I(0),
         ("net/minecraft/client/renderer/RenderType", "chunkBufferLayers") => {
             let layers: Vec<V> = CHUNK_LAYERS.iter().map(|n| render_type(rt, n)).collect();
             crate::jutil::new_list(rt, layers)
         }
+        // A mod's own render type (`RenderType.create(name, format, mode, size, ..., state)`, a
+        // `CompositeRenderType`): a type by its name, keeping the state it was built of.
+        ("net/minecraft/client/renderer/RenderType", "create") => {
+            let name = rt.str_of(a(0)).unwrap_or("custom").to_owned();
+            let ty = render_type(rt, &name);
+            if let Some(&state) = args.last().filter(|v| rt.class_of(**v) == COMPOSITE_STATE) {
+                rt.put_field(ty, "$state", state);
+            }
+            ty
+        }
+        (COMPOSITE_STATE, "builder") => rt.new_object(COMPOSITE_BUILDER),
+        // Its builder keeps each shard by the setter that set it.
+        (COMPOSITE_BUILDER, n) if n.starts_with("set") => {
+            let field = rt.static_key(&format!("${n}"));
+            rt.put_field(a(0), field, a(1));
+            a(0)
+        }
+        (COMPOSITE_BUILDER, "createCompositeState") => {
+            let state = rt.new_object(COMPOSITE_STATE);
+            rt.put_field(state, "$builder", a(0));
+            rt.put_field(state, "$outline", a(1));
+            state
+        }
+        // A shard a mod makes: its own (`super(name, setup, clear)`, vanilla's fields), or one of
+        // vanilla's kinds (`new LineStateShard(OptionalDouble.of(2))`), keeping what it was given.
+        (SHARD, "<init>") if desc == "(Ljava/lang/String;Ljava/lang/Runnable;Ljava/lang/Runnable;)V" => {
+            for (field, v) in [("name", a(1)), ("setupState", a(2)), ("clearState", a(3))] {
+                rt.put_field(a(0), field, v);
+            }
+            V::Void
+        }
+        (o, "<init>") if o.starts_with("net/minecraft/client/renderer/RenderStateShard$") => {
+            for (i, v) in args.iter().enumerate().skip(1) {
+                let field = rt.static_key(&format!("$arg{i}"));
+                rt.put_field(a(0), field, *v);
+            }
+            V::Void
+        }
+        (SHARD, "toString") => match rt.get_field(a(0), "name") {
+            V::R(n) if n != 0 => V::R(n),
+            _ => rt.get_field(a(0), "$name"),
+        },
         // Any other factory (`solid()`, `entityCutout(texture)`...) names its type.
         ("net/minecraft/client/renderer/RenderType", n) if desc.ends_with(")Lnet/minecraft/client/renderer/RenderType;") => {
             let n = if n == "create" { rt.str_of(a(0)).unwrap_or("custom").to_owned() } else { snake(n) };
@@ -1932,6 +1990,33 @@ mod tests {
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    /// A mod's own render type (SecurityCraft's overlay lines): built of vanilla's shards and its
+    /// own `LineStateShard`, it is a type by its name that keeps that state; asked for again by
+    /// name it is the same object. The GL capabilities Flywheel probes read as absent.
+    #[test]
+    fn a_mods_own_render_type_is_one_by_its_name() {
+        let mut rt = Rt::new();
+        crate::install();
+        let builder = crate::api::call(&mut rt, "net/minecraft/client/renderer/RenderType$CompositeState.builder.()Lnet/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder;", &[]);
+        let shader = crate::api::get_static(&mut rt, "net/minecraft/client/renderer/RenderStateShard.RENDERTYPE_LINES_SHADER");
+        assert_eq!(rt.str_of(rt.get_field(shader, "$name")), Some("RENDERTYPE_LINES_SHADER"));
+        let set = "net/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder.setShaderState.(Lnet/minecraft/client/renderer/RenderStateShard$ShaderStateShard;)Lnet/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder;";
+        assert_eq!(crate::api::call(&mut rt, set, &[builder, shader]), builder);
+        let line = rt.new_object("net/minecraft/client/renderer/RenderStateShard$LineStateShard");
+        let width = rt.new_object("java/util/OptionalDouble");
+        crate::api::call(&mut rt, "net/minecraft/client/renderer/RenderStateShard$LineStateShard.<init>.(Ljava/util/OptionalDouble;)V", &[line, width]);
+        crate::api::call(&mut rt, "net/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder.setLineState.(Lnet/minecraft/client/renderer/RenderStateShard$LineStateShard;)Lnet/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder;", &[builder, line]);
+        let state = crate::api::call(&mut rt, "net/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder.createCompositeState.(Z)Lnet/minecraft/client/renderer/RenderType$CompositeState;", &[builder, V::I(0)]);
+        let name = rt.string("securitycraft:overlay_lines");
+        let create = "net/minecraft/client/renderer/RenderType.create.(Ljava/lang/String;Lcom/mojang/blaze3d/vertex/VertexFormat;Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;IZZLnet/minecraft/client/renderer/RenderType$CompositeState;)Lnet/minecraft/client/renderer/RenderType$CompositeRenderType;";
+        let ty = crate::api::call(&mut rt, create, &[name, V::NULL, V::NULL, V::I(256), V::I(0), V::I(0), state]);
+        assert_eq!(rt.get_field(ty, "$state"), state);
+        assert_eq!(render_type(&mut rt, "securitycraft:overlay_lines"), ty);
+        let caps = crate::api::call(&mut rt, "org/lwjgl/opengl/GL.getCapabilities.()Lorg/lwjgl/opengl/GLCapabilities;", &[]);
+        assert_eq!(crate::api::call(&mut rt, "org/lwjgl/opengl/GLCapabilities.$OpenGL46.()Z", &[caps]), V::I(0));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// The translated catnip a buffer calls back: an entry's sprite locations, and `reset()`.

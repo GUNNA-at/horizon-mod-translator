@@ -2261,6 +2261,33 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     an_enum_property_filters_a_vanilla_enums_constants,
     super_get_shape_to_a_vanilla_kind_follows_the_state}`,
     `neo::tests::the_current_server_is_there_once_the_world_is`; 256 compat tests pass.
+  - [x] 2026-11-05 Load round 12 (the 28 jars, snapshot `7afb7f7`): 28 load, exit 0; 3651 blocks
+    and 2893 items, as in round 11. Distinct unmapped calls 217 to 155: Farmer's Delight 23 to
+    10, FramedBlocks 17 to 8, Mekanism 74 to 50, lootr 9 to 2, immersive_aircraft 6 to 1, Jade and
+    geckolib to none. Three uncaught exceptions were left, each traced to its root and fixed here:
+    FramedBlocks' "Invalid shape" (`RailShape.isAscending` was unmapped, so the property's filter
+    kept no rail slope), its item model source error (`BlockState.is(Holder)` was unmapped), and
+    Mekanism's "Current server is null" (`Level.isClientSide()` answered by the host's side, not
+    by the level's own field, so the server's level read as the client's). StorageDrawers' 1568
+    reads of nothing come from the load test, not the runtime: its drawers' label, count and
+    indicator areas are elements of JSON models in its own jar
+    (`DrawerModelGeometry.populateGeometryData` reads `models/block/geometry/*.json` through
+    `BlockModel.fromStream`), and a load test has resources only from the folders
+    `HORIZON_COMPAT_RESOURCES` names, so the read throws and the mod indexes a null model; in game
+    the host gives them. The next round passes each jar's own files. Fixes from round 12 and the
+    game run: `StateHolder.getProperties()` (a mod block's own property objects, else vanilla's
+    `BlockStateProperties` constants by name, so a mod copying a vanilla state's values onto its
+    own block keeps them; it was unmapped in game); the local player's look and eyes before the
+    world is there (`getLookAngle`, `getViewVector`, `getEyePosition`); a mod's own render types
+    (`RenderType.create` with the `CompositeState` its builder made, a type by its name that keeps
+    that state; `RenderStateShard`'s constants by name, shards of a mod's own or of vanilla's kinds
+    keep what they were given: SecurityCraft's overlay lines); `GLCapabilities` fields Flywheel
+    reads are false; NeoForge's `SimpleFluidContent` (`CODEC`, `STREAM_CODEC`, `EMPTY`, `copyOf`,
+    its fluid stack calls); `Level.isClientSide()` by the level's field; `BlockState.is(Holder)`;
+    `RailShape.isAscending`. Tests `api_common::tests::a_states_properties_carry_its_values_onto_another`,
+    `api::tests::a_state_is_its_blocks_holder_and_a_level_its_own_side`,
+    `render::tests::a_mods_own_render_type_is_one_by_its_name`, and the rail filter now through
+    `RailShape.isAscending` itself; 259 compat tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

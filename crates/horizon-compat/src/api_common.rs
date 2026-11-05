@@ -484,6 +484,42 @@ fn new_property(rt: &mut Rt, name: &str, kind: &str) -> V {
     p
 }
 
+/// Vanilla's `BlockStateProperties` fields a state's property may be, in the order a name several
+/// share is matched by (`FACING` before `HORIZONTAL_FACING`).
+const PROPERTY_FIELDS: [&str; 111] = [
+    "FACING", "HORIZONTAL_FACING", "FACING_HOPPER", "VERTICAL_DIRECTION", "AXIS", "HORIZONTAL_AXIS", "AGE_1", "AGE_2", "AGE_3", "AGE_4",
+    "AGE_5", "AGE_7", "AGE_15", "AGE_25", "POWER", "LEVEL", "LEVEL_CAULDRON", "LEVEL_COMPOSTER", "LEVEL_FLOWING", "LEVEL_HONEY",
+    "DISTANCE", "MOISTURE", "ROTATION_16", "STAGE", "DELAY", "NOTE", "LAYERS", "BITES", "PICKLES", "EGGS", "HATCH", "CANDLES",
+    "RESPAWN_ANCHOR_CHARGES", "STABILITY_DISTANCE", "DUSTED", "FLOWER_AMOUNT", "SEGMENT_AMOUNT", "WATERLOGGED", "POWERED", "LIT", "OPEN",
+    "OCCUPIED", "ATTACHED", "DISARMED", "EXTENDED", "ENABLED", "HANGING", "PERSISTENT", "SNOWY", "TRIGGERED", "UNSTABLE", "UP", "DOWN",
+    "NORTH", "SOUTH", "EAST", "WEST", "BOTTOM", "CONDITIONAL", "DRAG", "HAS_BOOK", "IN_WALL", "LOCKED", "SHORT", "SIGNAL_FIRE", "INVERTED",
+    "BERRIES", "BLOOM", "SHRIEKING", "CAN_SUMMON", "CRACKED", "NATURAL", "OMINOUS", "TIP", "EYE", "HAS_RECORD", "IN_WATER", "FALLING",
+    "HAS_BOTTLE_0", "HAS_BOTTLE_1", "HAS_BOTTLE_2", "CRAFTING", "MAP", "HALF", "DOUBLE_BLOCK_HALF", "DOOR_HINGE", "SLAB_TYPE",
+    "CHEST_TYPE", "PISTON_TYPE", "STAIRS_SHAPE", "RAIL_SHAPE", "RAIL_SHAPE_STRAIGHT", "ATTACH_FACE", "BED_PART", "MODE_COMPARATOR",
+    "BELL_ATTACHMENT", "TILT", "NORTH_WALL", "EAST_WALL", "SOUTH_WALL", "WEST_WALL", "NORTH_REDSTONE", "EAST_REDSTONE", "SOUTH_REDSTONE",
+    "WEST_REDSTONE", "SLOT_0_OCCUPIED", "SLOT_1_OCCUPIED", "SLOT_2_OCCUPIED", "SLOT_3_OCCUPIED", "SLOT_4_OCCUPIED", "SLOT_5_OCCUPIED",
+];
+
+/// The vanilla property a state spelling `name=value` holds: the first `BlockStateProperties`
+/// field of that name taking that value; else one of that name whose kind the value spells.
+fn vanilla_property_named(rt: &mut Rt, name: &str, value: &str) -> V {
+    for field in PROPERTY_FIELDS {
+        if vanilla_property(field).is_some_and(|(n, _)| n == name)
+            && let Some(p) = vanilla_property_object(rt, field)
+            && crate::blocks::property_values(rt, p).iter().any(|v| v == value)
+        {
+            return p;
+        }
+    }
+    let kind = match value {
+        "true" | "false" => "bool",
+        v if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) => "int",
+        _ => "string",
+    };
+    let (n, k) = (name.to_owned(), kind.to_owned());
+    rt.intern(format!("prop/named/{name}/{kind}"), move |rt| new_property(rt, &n, &k))
+}
+
 /// Vanilla's property in `BlockStateProperties.<field>`: one object per field, as Java's (`FACING`
 /// and `HORIZONTAL_FACING` share a name, not their values).
 fn vanilla_property_object(rt: &mut Rt, field: &str) -> Option<V> {
@@ -1438,6 +1474,18 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 V::NULL
             }
         }
+        // `getProperties()`: the state's properties, in its definition's order (by name): a mod
+        // block's own objects, else vanilla's `BlockStateProperties` of each name and value.
+        (STATE | BASE | HOLDER, "getProperties") => {
+            let text = name_of(rt, a(0));
+            let (block, props) = crate::host::split_state(&text);
+            let own = rt.registered.get(&("block".to_owned(), block.to_owned())).map(|b| rt.get_field(*b, "$state-props")).filter(|l| l.r() != 0);
+            let items: Vec<V> = match own {
+                Some(list) => crate::jutil::elements(rt, list).into_iter().filter(|p| props.iter().any(|(k, _)| *k == prop_parts(rt, *p).0)).collect(),
+                None => props.iter().map(|(k, v)| vanilla_property_named(rt, k, v)).collect(),
+            };
+            crate::jutil::new_list(rt, items)
+        }
         // Block-state properties
         (STATE | BASE | HOLDER, "getValue" | "getOptionalValue" | "hasProperty" | "setValue" | "cycle" | "trySetValue") => {
             let text = name_of(rt, a(0));
@@ -2058,6 +2106,15 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 }
             }
         }
+        // The client's player before its world has placed it (a resource reload at start): where a
+        // new entity is, at the origin with no rotation, so looking south.
+        (o, n @ ("getLookAngle" | "getViewVector" | "getEyePosition")) if is_player(o) && is_player_class(rt.class_of(a(0))) => match n {
+            "getEyePosition" => {
+                let eye = player_eye_height(rt);
+                vec3(rt, 0.0, eye, 0.0)
+            }
+            _ => vec3(rt, 0.0, 0.0, 1.0),
+        },
         // Reach (`Player.blockInteractionRange`, `entityInteractionRange`: the attributes' bases,
         // creative's modifiers added), and whether a block is in it with `margin` more
         // (`canInteractWithBlock`: the block's box from the eyes; a server checks a mod's packet
@@ -3846,6 +3903,45 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+
+    /// `BlockState.getProperties()`: a vanilla state's are `BlockStateProperties`' of its names
+    /// and values, so Copycats' `tryCopyProperties` (each property `to` has takes `from`'s value)
+    /// carries a door's state onto another door; a mod block's are its own objects.
+    #[test]
+    fn a_states_properties_carry_its_values_onto_another() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        const GET_PROPERTIES: &str = "net/minecraft/world/level/block/state/BlockState.getProperties.()Ljava/util/Collection;";
+        let from = state(&mut rt, "minecraft:oak_door[facing=east,half=upper,hinge=right,open=true,powered=false]");
+        let props = crate::api::call(&mut rt, GET_PROPERTIES, &[from]);
+        let props = crate::jutil::elements(&rt, props);
+        let names: Vec<String> = props.iter().map(|p| prop_parts(&rt, *p).0).collect();
+        assert_eq!(names, ["facing", "half", "hinge", "open", "powered"]);
+        let facing = crate::api::get_static(&mut rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.FACING");
+        assert_eq!(props[0], facing);
+        let mut to = state(&mut rt, "ruby:door[facing=north,half=lower,hinge=left,open=false,powered=true]");
+        for p in props {
+            let has = crate::api::call(&mut rt, "net/minecraft/world/level/block/state/BlockState.hasProperty.(Lnet/minecraft/world/level/block/state/properties/Property;)Z", &[to, p]);
+            if has.i() != 0 {
+                let v = crate::api::call(&mut rt, "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;", &[from, p]);
+                to = crate::api::call(&mut rt, "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;", &[to, p, v]);
+            }
+        }
+        assert_eq!(rt.str_of(to), Some("ruby:door[facing=east,half=upper,hinge=right,open=true,powered=false]"));
+
+        let block = rt.new_object("test/Drawer");
+        let (n, k) = (rt.string("slots"), rt.string("int"));
+        let slots = rt.new_object("test/SlotsProperty");
+        rt.put_field(slots, "$name", n);
+        rt.put_field(slots, "$kind", k);
+        let list = crate::jutil::new_list(&mut rt, vec![slots]);
+        rt.put_field(block, "$state-props", list);
+        rt.registered.insert(("block".into(), "ruby:drawer".into()), block);
+        let drawer = state(&mut rt, "ruby:drawer[slots=2]");
+        let own = crate::api::call(&mut rt, GET_PROPERTIES, &[drawer]);
+        assert_eq!(crate::jutil::elements(&rt, own), vec![slots]);
+    }
 
     /// `MinMaxBounds.Ints.between(1, 3)` matches 1 to 3 and keeps the squares; `ANY` matches all;
     /// `Doubles.atLeast(0.5)` matches from 0.5 up (vanilla's records and their `matches`).

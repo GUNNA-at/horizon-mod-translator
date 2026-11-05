@@ -139,7 +139,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         }
         ("net/minecraft/world/item/crafting/Recipe", "CODEC" | "CONDITIONAL_CODEC") => native(rt, "recipe"),
         ("net/neoforged/neoforge/fluids/FluidStack", "CODEC" | "FIXED_AMOUNT_CODEC") => native(rt, "fluid_stack"),
-        ("net/neoforged/neoforge/fluids/FluidStack", "OPTIONAL_CODEC") => native(rt, "optional_fluid_stack"),
+        ("net/neoforged/neoforge/fluids/FluidStack", "OPTIONAL_CODEC") | ("net/neoforged/neoforge/fluids/SimpleFluidContent", "CODEC") => native(rt, "optional_fluid_stack"),
         ("net/neoforged/neoforge/fluids/crafting/SizedFluidIngredient", "FLAT_CODEC" | "NESTED_CODEC") => native(rt, "sized_fluid_ingredient"),
         ("net/neoforged/neoforge/fluids/crafting/FluidIngredient", "MAP_CODEC_NONEMPTY") => native(rt, "fluid_ingredient_map"),
         ("net/neoforged/neoforge/fluids/crafting/FluidIngredient", "CODEC" | "CODEC_NON_EMPTY") => native(rt, "fluid_ingredient"),
