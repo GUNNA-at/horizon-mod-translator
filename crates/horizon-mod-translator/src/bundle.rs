@@ -1,8 +1,9 @@
 //! A translated jar as a Horizon native mod bundle (docs/native-mods.md):
 //! `horizon-mixin.toml`, one helper per hook point that turns Horizon's
 //! `GameLevel` into a [`horizon_compat::host::Host`] and calls the mod
-//! through `horizon_compat::glue`, and `engine/`, the crate holding the
-//! translated code (with `horizon-compat` from Horizon's workspace).
+//! through `horizon_compat::glue`, and the crates holding the translated code:
+//! `runtime/` (horizon-compat's sources), `code-<mod>-<n>/` (the mods' code, see
+//! [`crate::split`]) and `engine/` (the tables and the entry points the hooks call).
 use crate::{class::ClassFile, codegen::Program};
 use std::{fs, io::Read, path::Path};
 
@@ -33,10 +34,11 @@ pub(crate) fn toml_string(v: &str) -> &str {
     }
 }
 
-/// The runtime's sources, carried in each bundle as the engine's own `compat` module: bundle
-/// crates may depend only on Horizon's Cargo.lock registry crates (horizon-mixins' rule; the
-/// engine names [`ENGINE_DEPENDENCIES`] for them). The core's root becomes `compat/mod.rs`;
-/// horizon-compat's root is left out (its modules are declared there instead).
+/// The runtime's sources, carried in each bundle as a crate of its own (`runtime/`), which the
+/// engine and its code crates depend on: bundle crates may depend only on Horizon's Cargo.lock
+/// registry crates and on their own mod's crates (horizon-mixins' rule; the runtime names
+/// [`ENGINE_DEPENDENCIES`] for them). The core's root becomes the crate's `lib.rs`; horizon-compat's
+/// root is left out (its modules are declared there instead).
 const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
@@ -125,13 +127,56 @@ fn inlined_core() -> String {
 }
 
 /// Writes `contents` unless the file already holds exactly that, so an unchanged engine keeps its
-/// mtimes and Cargo does not rebuild it.
+/// mtimes and Cargo does not rebuild it. Makes the file's folder when it is missing.
 fn put(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
     let (path, contents) = (path.as_ref(), contents.as_ref());
     if fs::read(path).is_ok_and(|old| old == contents) {
         return Ok(());
     }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
     fs::write(path, contents)
+}
+
+/// Writes `files` into `dir` ([`put`]: an unchanged file keeps its mtime) and removes whatever else
+/// `dir` holds: a part or module an earlier translation wrote and this one doesn't.
+fn sync_dir(dir: &Path, files: &[(String, String)]) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    for (name, text) in files {
+        put(dir.join(name), text).map_err(|e| e.to_string())?;
+    }
+    for e in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+        if files.iter().any(|(name, _)| *name == *e.file_name().to_string_lossy()) {
+            continue;
+        }
+        let gone = match e.file_type() {
+            Ok(t) if t.is_dir() => fs::remove_dir_all(e.path()),
+            _ => fs::remove_file(e.path()),
+        };
+        gone.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The size a split engine's code crates aim at ([`crate::split`]): `HORIZON_TRANSLATOR_CRATE_MB`
+/// megabytes of Rust, or 8. rustc's memory grows with a crate's size, and Cargo builds as many of
+/// them at once as it has jobs.
+fn crate_bytes() -> usize {
+    std::env::var("HORIZON_TRANSLATOR_CRATE_MB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&mb| mb > 0).unwrap_or(8) << 20
+}
+
+/// A split engine's runtime crate: horizon-compat-core's root, with the API mapping's modules
+/// declared in it ([`inlined_core`]), and their sources.
+fn write_runtime(dir: &Path, package: &str) -> Result<(), String> {
+    put(
+        dir.join("Cargo.toml"),
+        format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\n{ENGINE_DEPENDENCIES}"),
+    )
+    .map_err(|e| e.to_string())?;
+    let core = inlined_core();
+    let files: Vec<(String, String)> = std::iter::once(("lib.rs", core.as_str())).chain(COMPAT).map(|(name, text)| (name.to_owned(), text.replace("#![", "// #!["))).collect();
+    sync_dir(&dir.join("src"), &files)
 }
 
 /// Block hooks the bundle wires: (hook name, glue function).
@@ -2021,7 +2066,7 @@ const BLOCK_ENTITY_BINDINGS: [(&str, &str); 17] = [
     ("release_using", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"stack\", ty = \"&horizon_client::items::ItemStack\", value = \"stack\" },\n    { name = \"entity\", ty = \"Option<i32>\", value = \"entity\" },\n    { name = \"time_left\", ty = \"i32\", value = \"time_left\" },\n"),
 ];
 
-fn mixin_toml(id: &str, version: &str) -> String {
+fn mixin_toml(id: &str, version: &str, crates: &[String]) -> String {
     let mut s = format!(
         "# Generated by horizon-mod-translator from the mod's jar.\n[mod]\nid = \"{id}\"\nversion = \"{version}\"\n\n"
     );
@@ -2039,7 +2084,9 @@ fn mixin_toml(id: &str, version: &str) -> String {
             "[[injection]]\nid = \"{hook}\"\nhook = \"{hook}\"\nhook_version = 1\nkind = \"HEAD\"\nhelper = \"{hook}.rs\"\nbindings = [\n{bindings}]\n\n"
         ));
     }
-    s.push_str("[[crate]]\nid = \"engine\"\npath = \"engine\"\n");
+    for c in crates {
+        s.push_str(&format!("[[crate]]\nid = \"{c}\"\npath = \"{c}\"\n\n"));
+    }
     s
 }
 
@@ -2075,7 +2122,8 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     }
     let namespaces: Vec<&str> = members.iter().map(|(_, n)| n.as_str()).collect();
     let bundle_id = format!("{id}_translated");
-    let krate = format!("{}_translated_engine", id.replace('-', "_"));
+    let prefix = format!("{}_translated", id.replace('-', "_"));
+    let krate = format!("{prefix}_engine");
     let mut program = Program::new(classes);
     program.mod_id = Some(id.clone());
     program.addons = members[1..].iter().map(|(_, n)| n.clone()).collect();
@@ -2083,37 +2131,68 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     program.metadata = jars.iter().flat_map(|j| crate::mod_metadata(j)).collect();
     program.scan_files = jars.iter().map(|j| (crate::mod_metadata(j).into_iter().map(|m| m.0).collect(), crate::class_names(j))).collect();
     program.use_mixin_configs(&crate::mixin_configs_of(jars));
-    let files = program.emit_files(40);
     let src = out.join("engine/src");
-    fs::create_dir_all(&src).map_err(|e| e.to_string())?;
-    let deps = match runtime {
-        Some(core) => format!("\n[dependencies]\nhorizon-compat-core = {{ path = {:?} }}\n", core.display().to_string()),
-        None => format!("\n[dependencies]\n{ENGINE_DEPENDENCIES}"),
+    let package = |name: &str| name.replace('_', "-");
+    // The bundle's crates, the engine last (horizon-mixin.toml lists them).
+    let mut crate_ids: Vec<String> = Vec::new();
+    let (files, deps, root) = match runtime {
+        Some(core) => (
+            program.emit_files(40),
+            format!("horizon-compat-core = {{ path = {:?} }}\n", core.display().to_string()),
+            "/// The runtime core; the API mapping comes through `horizon_compat::install()`.\npub use horizon_compat_core as horizon_compat;\nuse horizon_compat::".to_owned(),
+        ),
+        None => {
+            // The runtime, each mod's code and the engine as crates of their own (`crate::split`):
+            // a mod's crates may depend on each other, and each compiles in a rustc of its own.
+            let runtime_crate = format!("{prefix}_runtime");
+            write_runtime(&out.join("runtime"), &package(&runtime_crate))?;
+            crate_ids.push("runtime".into());
+            let owners: Vec<std::collections::HashSet<String>> = members.iter().map(|(j, _)| crate::class_names(j)).collect();
+            let group = |c: &str| owners.iter().position(|o| o.contains(c)).unwrap_or(owners.len());
+            let (parts, lib) = program.emit_groups(40, owners.len() + 1, &group);
+            // A class no member jar holds is a library's they bundle.
+            let groups: Vec<(String, Vec<String>)> = members.iter().map(|(_, ns)| ns.clone()).chain(["lib".to_owned()]).zip(parts).collect();
+            let split = crate::split::split(&groups, &lib, &runtime_crate, &prefix, crate_bytes());
+            let mut deps = format!("{ENGINE_DEPENDENCIES}{} = {{ path = \"../runtime\" }}\n", package(&runtime_crate));
+            for c in &split.crates {
+                let name = package(&crate::split::crate_name(&prefix, &c.id));
+                put(
+                    out.join(&c.id).join("Cargo.toml"),
+                    format!(
+                        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\n{} = {{ path = \"../runtime\" }}\n",
+                        package(&runtime_crate)
+                    ),
+                )
+                .map_err(|e| e.to_string())?;
+                sync_dir(&out.join(&c.id).join("src"), &c.files)?;
+                deps.push_str(&format!("{name} = {{ path = \"../{}\" }}\n", c.id));
+                crate_ids.push(c.id.clone());
+            }
+            // Code crates an earlier translation made and this one doesn't.
+            for e in fs::read_dir(out).map_err(|e| e.to_string())?.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n.starts_with("code-") && !crate_ids.contains(&n) {
+                    fs::remove_dir_all(e.path()).map_err(|e| e.to_string())?;
+                }
+            }
+            let lib = lib.replacen("pub fn init(rt: &mut Rt) {\n", "pub fn init(rt: &mut Rt) {\n    link_crates();\n", 1);
+            (
+                vec![("lib.rs".to_owned(), format!("{lib}\n{}", split.engine))],
+                deps,
+                format!("/// The runtime (also for the hook helpers compiled into the game).\npub use {runtime_crate} as compat;\npub use compat as horizon_compat;\nuse horizon_compat::"),
+            )
+        }
     };
+    crate_ids.push("engine".into());
     put(
         out.join("engine/Cargo.toml"),
-        format!(
-            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n{deps}",
-            krate.replace('_', "-")
-        ),
+        format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\n{deps}", package(&krate)),
     )
     .map_err(|e| e.to_string())?;
-    let root = if runtime.is_some() {
-        "/// The runtime core; the API mapping comes through `horizon_compat::install()`.\npub use horizon_compat_core as horizon_compat;\nuse horizon_compat::"
-    } else {
-        // The runtime as the engine's own `compat` module (bundle crates take no path dependencies).
-        let compat_dir = src.join("compat");
-        fs::create_dir_all(&compat_dir).map_err(|e| e.to_string())?;
-        let core = inlined_core();
-        for (name, text) in std::iter::once(("mod.rs", core.as_str())).chain(COMPAT) {
-            let text = text.replace("crate::", "crate::compat::").replace("#![", "// #![");
-            put(compat_dir.join(name), text).map_err(|e| e.to_string())?;
-        }
-        "pub mod compat;\n/// The runtime (also for the hook helpers compiled into the game).\npub use compat as horizon_compat;\nuse horizon_compat::"
-    };
+    let mut engine_files = Vec::new();
     for (name, mut text) in files {
         if name == "lib.rs" {
-            text = text.replacen("use horizon_compat::", root, 1);
+            text = text.replacen("use horizon_compat::", &root, 1);
             text.push_str(&format!(
                 "\nthread_local! {{\n    static RUNTIME: std::cell::RefCell<Option<Rt>> = const {{ std::cell::RefCell::new(None) }};\n}}\n\n\
                  /// The mod's runtime on this thread, made and registered on first use. Not from inside one of its\n\
@@ -2144,9 +2223,10 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
                  pub fn ours(id: &str) -> bool {{\n    id.split_once(':').is_some_and(|(ns, _)| NAMESPACES.contains(&ns))\n}}\n"
             ));
         }
-        put(src.join(&name), text).map_err(|e| e.to_string())?;
+        engine_files.push((name, text));
     }
-    put(out.join("horizon-mixin.toml"), mixin_toml(&bundle_id, "0.1.0")).map_err(|e| e.to_string())?;
+    sync_dir(&src, &engine_files)?;
+    put(out.join("horizon-mixin.toml"), mixin_toml(&bundle_id, "0.1.0", &crate_ids)).map_err(|e| e.to_string())?;
     for (hook, text) in block_entity_helpers(&bundle_id, &krate).into_iter().chain(client_helpers(&bundle_id, &krate)) {
         put(out.join(format!("{hook}.rs")), text).map_err(|e| e.to_string())?;
     }

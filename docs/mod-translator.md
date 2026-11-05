@@ -1963,6 +1963,31 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     limits raised: macOS compresses rustc's pages and then moves the compressor to swap in
     seconds, so swap rose 15 GB above its base and fell back (peak footprint ~44 GB); the
     watchdog now reads `SWAP_LIMIT` and `FREE_MIN`, and the build ran with 6 jobs.
+  - [x] 2026-11-05 The engine split into crates (`split.rs`). One crate can't hold more addons:
+    rustc's footprint grows with it (~44 GB for 177 MB). horizon-mixins now lets a mod's bundle
+    crates depend on each other, `<package> = { path = "../<crate id>" }` (the stage puts each at
+    `native-crates/<mod>/<crate id>`; the plan checks the id names another of the mod's crates, the
+    name is its package's, and there is no cycle; scratchpad clone, branch `sibling-crates`,
+    eb84389, test `a_bundle_crate_depends_on_another_crate_of_its_mod`). A bundle
+    (`bundle::write_group`, as the port pack and the game's builds write it) is now `runtime/`
+    (horizon-compat's sources as a crate), `code-<mod>-<n>/` (each mod's classes, a mod at a time,
+    in crates of about 8 MB; `HORIZON_TRANSLATOR_CRATE_MB`; classes no member jar holds go to
+    `code-lib-*`) and `engine/` (the tables, dispatchers, `init` and what the hooks call, over them
+    all). A code crate calls a function of another crate, a dispatcher, `vcall_miss` or
+    `java_string` through a shim of its own (`links.rs`): the engine's `init` links each crate by
+    name first (`link_crates`, once per process), so a crate's text depends only on its own code,
+    and calls inside a crate stay direct. A tools bundle (`--runtime`) stays one crate. Create + ten
+    addons: 29 code crates of 0.5-8.5 MB, a 17 MB engine crate, 3,558 linked functions, 8,188
+    dispatchers. The game's build (6 jobs) took 6 min 53 s instead of 11 min 32 s; the
+    translated crates' rustcs peaked at 15.9 GB RSS together (each code crate 0.3-1.8 GB, the
+    engine crate ~9 GB) and swap grew 5.2 GB instead of 15. In game (`addonsgame.sh`,
+    `clipgame.sh`): the creative tabs, the addons' blocks and the clipboard's icon as before; of the
+    blocks placed, 56 of 62 read back after a wait (the script's first read, right after
+    `setblock`, often sees air: the client hasn't heard yet), the other 6 Dragons Plus's dye
+    fluids, for compat mods the pack lacks. Test
+    `split::tests::calls_between_crates_go_through_links_and_calls_within_stay_direct`. The
+    launcher builds with horizon-mixins at `MIXINS_REV` from horizon-rust/horizon-mixins, so a
+    split bundle needs the sibling change upstream and the pin moved.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

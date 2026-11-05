@@ -555,6 +555,7 @@ pub mod bundle;
 pub mod codegen;
 pub mod insn;
 pub mod props;
+pub mod split;
 pub mod weave;
 
 /// A registration the mod's code makes: registry and name.
