@@ -6,7 +6,16 @@
 //! `ItemAttributeModifiers.Entry` records ([`crate::records`] reads them back); the attack damage and
 //! speed a main hand gets are kept beside them (`$attackDamage`, `$attackSpeed`), as
 //! `SwordItem.createAttributes` keeps them.
-use crate::{Data, Rt, V};
+//!
+//! An entity's attributes (`getAttribute`, `getAttributeValue`, `getAttributes()`) are the game's:
+//! an `AttributeInstance` names its entity and attribute (`$entity`, `$attribute`), and each read
+//! or change asks the host ([`crate::host::Host::attribute`]), so a mod sees the game's values and
+//! the game gets the modifiers a mod adds. Where the host can't tell, a player's read as vanilla's
+//! player has them by default (`Player.createAttributes`), unchanged.
+use crate::{
+    Data, Rt, V,
+    host::{AttributeChange, AttributeModifierView, AttributeView},
+};
 
 const ATTRIBUTES: &str = "net/minecraft/world/entity/ai/attributes/Attributes";
 const MODIFIERS: &str = "net/minecraft/world/item/component/ItemAttributeModifiers";
@@ -114,8 +123,23 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    owner == BUILDER || (owner == MODIFIERS && matches!(name, "builder" | "withModifierAdded")) || (matches!(owner, ATTRIBUTE | RANGED) && ATTRIBUTE_METHODS.contains(&name))
+pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
+    owner == BUILDER
+        || (owner == MODIFIERS && matches!(name, "builder" | "withModifierAdded"))
+        || (matches!(owner, ATTRIBUTE | RANGED) && ATTRIBUTE_METHODS.contains(&name))
+        || matches!(owner, INSTANCE | MAP)
+        || entity_method(name, desc)
+}
+
+/// An entity's own attribute methods, on whichever class a mod names them (`LivingEntity`,
+/// `Player`, a mob's class).
+fn entity_method(name: &str, desc: &str) -> bool {
+    matches!(
+        (name, desc),
+        ("getAttribute", "(Lnet/minecraft/core/Holder;)Lnet/minecraft/world/entity/ai/attributes/AttributeInstance;")
+            | ("getAttributeValue" | "getAttributeBaseValue", "(Lnet/minecraft/core/Holder;)D")
+            | ("getAttributes", "()Lnet/minecraft/world/entity/ai/attributes/AttributeMap;")
+    )
 }
 
 /// What vanilla's `Attribute` and `RangedAttribute` answer, for theirs and a mod's own.
@@ -125,6 +149,14 @@ const ATTRIBUTE_METHODS: [&str; 10] =
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let (owner, name, desc) = crate::parts(key)?;
+    if entity_method(name, desc) && owner != MAP {
+        return entity_call(rt, name, a(0), a(1));
+    }
+    match owner {
+        INSTANCE => return instance_call(rt, name, desc, args),
+        MAP => return map_call(rt, name, args),
+        _ => {}
+    }
     match (owner, name) {
         // `new RangedAttribute(id, default, min, max)` and `Attribute(id, default)` (a mod's own,
         // through `super`): what the getters below read.
@@ -180,6 +212,226 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(m)
         }
         _ => None,
+    }
+}
+
+const INSTANCE: &str = "net/minecraft/world/entity/ai/attributes/AttributeInstance";
+const MAP: &str = "net/minecraft/world/entity/ai/attributes/AttributeMap";
+const MODIFIER: &str = "net/minecraft/world/entity/ai/attributes/AttributeModifier";
+const OPERATION: &str = "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation";
+const OPERATIONS: [&str; 3] = ["ADD_VALUE", "ADD_MULTIPLIED_BASE", "ADD_MULTIPLIED_TOTAL"];
+const OPERATION_KEYS: [&str; 3] = [
+    "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation.ADD_VALUE",
+    "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation.ADD_MULTIPLIED_BASE",
+    "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation.ADD_MULTIPLIED_TOTAL",
+];
+const LOCAL_PLAYER: &str = "net/minecraft/client/player/LocalPlayer";
+const HOLDER_VALUE: &str = "net/minecraft/core/Holder.value.()Ljava/lang/Object;";
+const SERVER_PLAYER: &str = "net/minecraft/server/level/ServerPlayer";
+const PLAYER: &str = "net/minecraft/world/entity/player/Player";
+
+/// What vanilla's player has besides every living entity's attributes, and the bases a player's
+/// differ in (`Player.createAttributes`): the attributes a player lacks are the rest.
+const NOT_PLAYERS: [&str; 3] = ["generic.follow_range", "generic.flying_speed", "zombie.spawn_reinforcements"];
+const PLAYER_BASES: [(&str, f64); 2] = [("generic.attack_damage", 1.0), ("generic.movement_speed", 0.1f32 as f64)];
+
+/// `getAttribute`, `getAttributeValue`, `getAttributeBaseValue` and `getAttributes()` of entity `e`.
+fn entity_call(rt: &mut Rt, name: &str, e: V, holder: V) -> Option<V> {
+    Some(match name {
+        "getAttributes" => {
+            let m = rt.new_object(MAP);
+            rt.put_field(m, "$entity", e);
+            m
+        }
+        "getAttribute" => instance(rt, e, holder),
+        "getAttributeBaseValue" => V::D(read(rt, e, holder).map_or_else(|| default(rt, holder), |a| a.base)),
+        _ => V::D(read(rt, e, holder).map_or_else(|| default(rt, holder), |a| a.value)),
+    })
+}
+
+/// `e`'s instance of the attribute `holder`, null when it doesn't have it (as vanilla's).
+fn instance(rt: &mut Rt, e: V, holder: V) -> V {
+    if read(rt, e, holder).is_none() {
+        return V::NULL;
+    }
+    let i = rt.new_object(INSTANCE);
+    rt.put_field(i, "$entity", e);
+    rt.put_field(i, "$attribute", holder);
+    i
+}
+
+/// What an `AttributeMap` answers (`LivingEntity.getAttributes()`), of its entity.
+fn map_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let e = rt.get_field(a(0), "$entity");
+    let view = |rt: &mut Rt| read(rt, e, a(1));
+    Some(match name {
+        "getInstance" => instance(rt, e, a(1)),
+        "hasAttribute" => V::I(i32::from(view(rt).is_some())),
+        "getValue" => V::D(view(rt).map_or_else(|| default(rt, a(1)), |v| v.value)),
+        "getBaseValue" => V::D(view(rt).map_or_else(|| default(rt, a(1)), |v| v.base)),
+        "hasModifier" | "getModifierValue" => {
+            let id = crate::neo::location(rt, a(2));
+            let m = view(rt).and_then(|v| v.modifiers.into_iter().find(|m| m.id == id));
+            if name == "hasModifier" { V::I(i32::from(m.is_some())) } else { V::D(m.map_or(0.0, |m| m.amount)) }
+        }
+        _ => return None,
+    })
+}
+
+/// What an `AttributeInstance` answers: its entity's attribute as the host has it now, and the
+/// changes a mod makes to it.
+fn instance_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let (e, holder) = (rt.get_field(a(0), "$entity"), rt.get_field(a(0), "$attribute"));
+    let view = |rt: &mut Rt| read(rt, e, holder);
+    Some(match name {
+        "getAttribute" => holder,
+        "getValue" => V::D(view(rt).map_or_else(|| default(rt, holder), |v| v.value)),
+        "getBaseValue" => V::D(view(rt).map_or_else(|| default(rt, holder), |v| v.base)),
+        "getModifiers" | "getModifiersOrEmpty" | "getPermanentModifiers" => {
+            let all = view(rt).map(|v| v.modifiers).unwrap_or_default();
+            let permanent = name == "getPermanentModifiers";
+            let items: Vec<V> = all.iter().filter(|m| !permanent || m.permanent).map(|m| modifier(rt, m)).collect();
+            if name == "getModifiers" { crate::jutil::new_set_of(rt, &items) } else { crate::jutil::new_list(rt, items) }
+        }
+        "getModifier" | "hasModifier" => {
+            let id = crate::neo::location(rt, a(1));
+            let m = view(rt).and_then(|v| v.modifiers.into_iter().find(|m| m.id == id));
+            if name == "hasModifier" { V::I(i32::from(m.is_some())) } else { m.map_or(V::NULL, |m| modifier(rt, &m)) }
+        }
+        "setBaseValue" => {
+            change(rt, e, holder, &AttributeChange::Base(a(1).d()));
+            V::Void
+        }
+        "addTransientModifier" | "addOrUpdateTransientModifier" | "addPermanentModifier" | "addOrReplacePermanentModifier" => {
+            let modifier = modifier_view(rt, a(1), name.contains("Permanent"));
+            let replace = name.starts_with("addOr");
+            change(rt, e, holder, &AttributeChange::Add { modifier, replace });
+            V::Void
+        }
+        // By its id (a boolean: whether one was there), or by the modifier itself.
+        "removeModifier" => {
+            let id = if desc.starts_with("(Lnet/minecraft/resources/ResourceLocation;)") { crate::neo::location(rt, a(1)) } else { modifier_id(rt, a(1)) };
+            let removed = change(rt, e, holder, &AttributeChange::Remove(id));
+            if desc.ends_with(")Z") { V::I(i32::from(removed)) } else { V::Void }
+        }
+        "removeModifiers" => {
+            change(rt, e, holder, &AttributeChange::RemoveAll);
+            V::Void
+        }
+        _ => return None,
+    })
+}
+
+/// Which of the game's living entities `e` is, as the host names it: None for the player in place
+/// (the client's own player, the acting server player), else its entity id; no entity the game
+/// knows is Err.
+fn entity_of(rt: &Rt, e: V) -> Result<Option<i32>, ()> {
+    if e.r() == 0 {
+        return Err(());
+    }
+    if crate::vanilla_entities::is_proxy(rt, e) {
+        return Ok(Some(crate::vanilla_entities::id(rt, e)));
+    }
+    match rt.class_of(e) {
+        LOCAL_PLAYER => Ok(None),
+        SERVER_PLAYER => {
+            let acting = rt.host().and_then(|h| h.player_id());
+            match crate::network::player_uuid(rt, e) {
+                Some(uuid) if Some(uuid) != acting => match rt.get_field(e, "$entityId") {
+                    V::I(id) => Ok(Some(id)),
+                    _ => Err(()),
+                },
+                _ => Ok(None),
+            }
+        }
+        _ if rt.instance_of(e, PLAYER) => Ok(None),
+        _ => Err(()),
+    }
+}
+
+/// The game's id of the attribute `holder` holds: vanilla's 1.21.1 ids (`minecraft:generic.max_health`)
+/// are the game's without their group (`minecraft:max_health`).
+fn game_id(rt: &mut Rt, holder: V) -> Option<String> {
+    if holder.r() == 0 {
+        return None;
+    }
+    let own = rt.str_of(rt.get_field(holder, "$id")).map(str::to_owned);
+    let id = match own {
+        Some(id) => id,
+        None => {
+            let value = crate::api::call(rt, HOLDER_VALUE, &[holder]);
+            rt.str_of(rt.get_field(value, "$id"))?.to_owned()
+        }
+    };
+    let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", &id));
+    let path = match namespace {
+        "minecraft" => ["generic.", "player.", "zombie."].iter().find_map(|g| path.strip_prefix(g)).unwrap_or(path),
+        _ => path,
+    };
+    Some(format!("{namespace}:{path}"))
+}
+
+/// `e`'s attribute `holder` as the host has it; for a player the host can't tell of, vanilla's
+/// player's by default.
+fn read(rt: &mut Rt, e: V, holder: V) -> Option<AttributeView> {
+    let id = game_id(rt, holder)?;
+    let entity = entity_of(rt, e);
+    if let Ok(entity) = entity
+        && let Some(view) = rt.host_mut().and_then(|h| h.attribute(entity, &id))
+    {
+        return Some(view);
+    }
+    let player = entity == Ok(None) || rt.instance_of(e, PLAYER);
+    let (_, path) = id.split_once(':')?;
+    let vanilla = VANILLA.iter().find(|r| r.1.split_once('.').map_or(r.1, |(_, p)| p) == path && id.starts_with("minecraft:"))?;
+    if !player || NOT_PLAYERS.contains(&vanilla.1) {
+        return None;
+    }
+    let base = PLAYER_BASES.iter().find(|(name, _)| *name == vanilla.1).map_or(vanilla.2, |(_, b)| *b);
+    Some(AttributeView { value: base, base, modifiers: Vec::new() })
+}
+
+/// The default of the attribute `holder` holds (`Attribute.getDefaultValue`), for a read of an
+/// attribute the entity doesn't have (vanilla throws there).
+fn default(rt: &mut Rt, holder: V) -> f64 {
+    if holder.r() == 0 {
+        return 0.0;
+    }
+    let value = crate::api::call(rt, HOLDER_VALUE, &[holder]);
+    field_or(rt, value, "$default", 0.0).d()
+}
+
+/// Makes `change` to `e`'s attribute `holder` through the host: whether it was made.
+fn change(rt: &mut Rt, e: V, holder: V, change: &AttributeChange) -> bool {
+    let (Ok(entity), Some(id)) = (entity_of(rt, e), game_id(rt, holder)) else {
+        return false;
+    };
+    rt.host_mut().is_some_and(|h| h.change_attribute(entity, &id, change))
+}
+
+/// A modifier as vanilla's record (`AttributeModifier(id, amount, operation)`).
+fn modifier(rt: &mut Rt, m: &AttributeModifierView) -> V {
+    let r = rt.new_object(MODIFIER);
+    let id = rt.string(&m.id);
+    let op = OPERATION_KEYS.get(usize::from(m.operation)).copied().unwrap_or(OPERATION_KEYS[0]);
+    let op = crate::api::get_static(rt, op);
+    rt.put_field(r, "id", id);
+    rt.put_field(r, "amount", V::D(m.amount));
+    rt.put_field(r, "operation", op);
+    r
+}
+
+/// A mod's `AttributeModifier` record as the host takes it.
+fn modifier_view(rt: &Rt, m: V, permanent: bool) -> AttributeModifierView {
+    let op = rt.get_field(m, "operation");
+    let op = rt.str_of(rt.get_field(op, "$name")).unwrap_or("ADD_VALUE");
+    AttributeModifierView {
+        id: modifier_id(rt, m),
+        amount: rt.get_field(m, "amount").d(),
+        operation: OPERATIONS.iter().position(|o| *o == op).unwrap_or(0) as u8,
+        permanent,
     }
 }
 
@@ -300,6 +552,67 @@ mod tests {
         assert_eq!(crate::api::call(&mut rt, SANITIZE, &[mana, V::D(250.0)]), V::D(100.0));
         assert_eq!(crate::api::call(&mut rt, SANITIZE, &[mana, V::D(f64::NAN)]), V::D(0.0));
         assert_eq!(crate::api::call(&mut rt, SANITIZE, &[mana, V::D(42.5)]), V::D(42.5));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod reads and changes the game's attributes of its entities: the acting player's speed with
+    /// a sprint modifier added and taken off again, their maximum health's base, a cow's maximum
+    /// health, and none of the attack damage a cow doesn't have. With no host to tell, a player has
+    /// vanilla's player's defaults, and nothing a player lacks.
+    #[test]
+    fn a_mod_reads_and_changes_the_games_attributes() {
+        use crate::host::MemoryHost;
+        const ATTRIBUTES: &str = "net/minecraft/world/entity/ai/attributes/Attributes";
+        const GET: &str = "net/minecraft/world/entity/LivingEntity.getAttribute.(Lnet/minecraft/core/Holder;)Lnet/minecraft/world/entity/ai/attributes/AttributeInstance;";
+        const VALUE_OF: &str = "net/minecraft/world/entity/LivingEntity.getAttributeValue.(Lnet/minecraft/core/Holder;)D";
+        let instance = |m: &str, d: &str| -> &'static str { Box::leak(format!("{INSTANCE}.{m}.{d}").into_boxed_str()) };
+        let view = |value: f64| AttributeView { value, base: value, modifiers: Vec::new() };
+        let mut h = MemoryHost { player_id: Some(0xabc), ..MemoryHost::default() };
+        h.attributes.insert((None, "minecraft:movement_speed".into()), view(0.1));
+        h.attributes.insert((None, "minecraft:max_health".into()), view(20.0));
+        h.attributes.insert((Some(7), "minecraft:max_health".into()), view(10.0));
+        let mut rt = Rt::new();
+        crate::install();
+        rt.with_host(&mut h, |rt| {
+            let player = crate::menus::server_player(rt, 0xabc);
+            let cow = crate::vanilla_entities::of(rt, 7, "minecraft:cow", None);
+            let speed = crate::api::get_static(rt, format!("{ATTRIBUTES}.MOVEMENT_SPEED").leak());
+            let health = crate::api::get_static(rt, format!("{ATTRIBUTES}.MAX_HEALTH").leak());
+            let damage = crate::api::get_static(rt, format!("{ATTRIBUTES}.ATTACK_DAMAGE").leak());
+            let walking = crate::api::call(rt, GET, &[player, speed]);
+            assert_eq!(crate::api::call(rt, instance("getValue", "()D"), &[walking]), V::D(0.1));
+            // `new AttributeModifier(ResourceLocation.fromNamespaceAndPath("mymod", "sprint"), 0.5, ADD_MULTIPLIED_TOTAL)`.
+            let sprint = rt.new_object(MODIFIER);
+            let id = rt.string("mymod:sprint");
+            let total = crate::api::get_static(rt, format!("{OPERATION}.ADD_MULTIPLIED_TOTAL").leak());
+            crate::api::call(rt, format!("{MODIFIER}.<init>.(Lnet/minecraft/resources/ResourceLocation;DL{OPERATION};)V").leak(), &[sprint, id, V::D(0.5), total]);
+            crate::api::call(rt, instance("addTransientModifier", "(Lnet/minecraft/world/entity/ai/attributes/AttributeModifier;)V"), &[walking, sprint]);
+            assert_eq!(crate::api::call(rt, instance("getValue", "()D"), &[walking]), V::D(0.1 * 1.5), "a total's multiple: 0.1 * (1 + 0.5)");
+            assert_eq!(crate::api::call(rt, instance("getBaseValue", "()D"), &[walking]), V::D(0.1));
+            assert_eq!(crate::api::call(rt, instance("hasModifier", "(Lnet/minecraft/resources/ResourceLocation;)Z"), &[walking, id]), V::I(1));
+            let found = crate::api::call(rt, instance("getModifier", "(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/world/entity/ai/attributes/AttributeModifier;"), &[walking, id]);
+            assert_eq!(rt.get_field(found, "amount"), V::D(0.5));
+            assert_eq!(crate::api::call(rt, instance("removeModifier", "(Lnet/minecraft/resources/ResourceLocation;)Z"), &[walking, id]), V::I(1));
+            assert_eq!(crate::api::call(rt, instance("removeModifier", "(Lnet/minecraft/resources/ResourceLocation;)Z"), &[walking, id]), V::I(0), "gone already");
+            assert_eq!(crate::api::call(rt, VALUE_OF, &[player, speed]), V::D(0.1));
+            // The player's maximum health raised through their attribute map.
+            let map = crate::api::call(rt, "net/minecraft/world/entity/LivingEntity.getAttributes.()Lnet/minecraft/world/entity/ai/attributes/AttributeMap;", &[player]);
+            let vital = crate::api::call(rt, format!("{MAP}.getInstance.(Lnet/minecraft/core/Holder;)L{INSTANCE};").leak(), &[map, health]);
+            crate::api::call(rt, instance("setBaseValue", "(D)V"), &[vital, V::D(24.0)]);
+            assert_eq!(crate::api::call(rt, format!("{MAP}.getValue.(Lnet/minecraft/core/Holder;)D").leak(), &[map, health]), V::D(24.0));
+            // The cow's, and an attribute it hasn't got.
+            assert_eq!(crate::api::call(rt, VALUE_OF, &[cow, health]), V::D(10.0));
+            assert_eq!(crate::api::call(rt, GET, &[cow, damage]), V::NULL);
+        });
+        assert_eq!(h.attributes[&(None, "minecraft:max_health".to_owned())], view(24.0));
+        assert!(h.attributes[&(None, "minecraft:movement_speed".to_owned())].modifiers.is_empty());
+
+        // No host: a player as vanilla's player is by default.
+        let player = crate::menus::server_player(&mut rt, 0xabc);
+        let speed = crate::api::get_static(&mut rt, format!("{ATTRIBUTES}.MOVEMENT_SPEED").leak());
+        let follow = crate::api::get_static(&mut rt, format!("{ATTRIBUTES}.FOLLOW_RANGE").leak());
+        assert_eq!(crate::api::call(&mut rt, VALUE_OF, &[player, speed]), V::D(f64::from(0.1f32)));
+        assert_eq!(crate::api::call(&mut rt, GET, &[player, follow]), V::NULL);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

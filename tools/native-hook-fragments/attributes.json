@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "a living entity's attributes for mods: its value, base and modifiers (`native_attribute`) and the changes a mod makes to them (`native_change_attribute`), on the player in place and the level's mobs.",
+  "doc_summary": "a living entity's attributes for a mod (`native_attribute`, `native_change_attribute`), by the game's ids (`minecraft:movement_speed`): its value, base and modifiers, and a new base, a modifier added (transient or permanent) or taken off. The player in place has the game's whole attribute map, whose changes move and hurt them and reach their client; a mob's plain attributes (health, speed, attack...) take a new base, not modifiers. Bundles that use them need \"hooks\": @API:attributes@.",
+  "comments": ["crates/horizon-client/src/game/native_attributes.rs"]
+}

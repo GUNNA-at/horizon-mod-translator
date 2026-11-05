@@ -2170,7 +2170,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 crate::hand::worn(rt, i)
             }
         },
-        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "level" | "getCommandSenderWorld" | "isLocalPlayer" | "mayBuild") => {
+        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "getWeaponItem" | "level" | "getCommandSenderWorld" | "isLocalPlayer" | "mayBuild") => {
             match n {
                 // Survival and creative players build; the hooks act for one of them.
                 "mayBuild" => V::I(1),

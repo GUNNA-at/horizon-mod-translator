@@ -3466,11 +3466,44 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `isClientSide` field reads false; a level without the field answers it from the host's side.
   Test `damage::tests::a_hits_listener_finds_its_attacker_and_where_the_victim_looks` (a knife-like listener credits
   the cow's push to the player holding a flint knife and weakens it; a backstab-like one doubles a blow from behind
-  the cow turned away, not one from in front; a pig nobody hurt has nobody to credit). Not yet checked in game. 359
-  compat, 17 translator tests pass.
+  the cow turned away, not one from in front; a pig nobody hurt has nobody to credit). In game (`hzcheck`'s incoming
+  listener now asks, as the backstabbing does, whether the blow came from behind the victim as it looks and whether
+  the striker's level is the client's; its push listener who gets the credit and what they hold): the player's blows
+  on the cow, which faced south (yaw 0) with the player north of it, read `facing 0.0, from behind true, on the client
+  false`, and each push `credited to minecraft:player holding minecraft:oak_planks`. `getKillCredit`, `getViewVector`
+  and the `isClientSide` read left the run's list of what isn't translated; Farmer's Delight's backstabbing went on
+  to the attacker's `getWeaponItem` (a player's main hand, added in the next step) and
+  `EnchantmentHelper.runIterationOnItem`. 359 compat, 17 translator tests pass.
   - Gaps: what hurt a mob isn't forgotten after 100 ticks or when the attacker dies, as vanilla forgets it; a mob's
-    pitch and head turn aren't told; the attributes mods read of an entity (`getAttribute`, `getAttributeValue`:
-    24 jars, 131 uses) aren't there yet.
+    pitch and head turn aren't told; an enchantment's own effect components (`modifyDamageFilteredValue`, which the
+    backstabbing's damage goes through) aren't evaluated.
+- [x] 2026-11-05 The game's attributes for mods (`attributes.rs`; game: `native_attributes.rs`, new API
+  `native_attribute` and `native_change_attribute`; host: `Host::attribute`, `Host::change_attribute`). Missing in
+  the pack's measure (packcov4, jars/uses): `getAttributeValue` 24/131, `AttributeInstance.getValue` 20/51,
+  `getAttributes` 13/23, `addTransientModifier` 11/16, and `getAttribute(Holder)` about 54 uses; in game, Farmer's
+  Delight's health overlay stopped at `Player.getAttribute(MAX_HEALTH)`.
+  - An entity's `getAttribute`, `getAttributeValue`, `getAttributeBaseValue` and `getAttributes()` (an
+    `AttributeMap`: `getInstance`, `getValue`, `hasAttribute`, `hasModifier`, `getModifierValue`) answer the game's
+    attributes: an `AttributeInstance` names its entity and attribute, and each read (`getValue`, `getBaseValue`,
+    `getModifiers`, `getModifier`, `hasModifier`) or change (`setBaseValue`, `addTransientModifier`,
+    `addPermanentModifier` and their replacing kin, `removeModifier`, `removeModifiers`) goes to the game. 1.21.1's
+    ids (`minecraft:generic.max_health`) name the game's (`minecraft:max_health`).
+  - The player in place has the game's whole attribute map: a mod's speed modifier makes them faster, as the
+    `/attribute` command's does, and reaches their client. A mob answers its plain values (maximum health, speed,
+    attack damage...) and takes a new base for them; its other attributes are the map `/attribute` keeps. One a type
+    doesn't have (a cow's attack damage) is null, as vanilla's.
+  - Where the host can't tell (a hit's hooks, a client screen with no game lent), a player reads as vanilla's player
+    by default (`Player.createAttributes`: speed 0.1, attack damage 1), unchanged; a mob has none. A hit's hooks'
+    changes wait for the hit to end, as the rest of what they change.
+  - A player's `getWeaponItem` is their main hand (Farmer's Delight's backstabbing asks the attacker's).
+  Test `attributes::tests::a_mod_reads_and_changes_the_games_attributes` (the acting player's speed with a sprint
+  modifier of the total's multiple added, read, found and taken off; their maximum health's base raised through
+  their attribute map; a cow's maximum health, and no attack damage; with no host, vanilla's player's defaults) and
+  `native_attributes::tests` (1.21.1's ids name the game's). Not yet checked in game. 360 compat, 17 translator, 41
+  game tests pass.
+  - Gaps: a mod's own attributes (registered for its entities) aren't in the game's catalog; a mob's plain
+    attributes take no modifiers; another player than the one in place has no attributes to read but vanilla's
+    defaults; `AttributeMap.addTransientAttributeModifiers` (a multimap of them) isn't there.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

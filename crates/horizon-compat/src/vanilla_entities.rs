@@ -467,7 +467,8 @@ pub fn is_proxy(rt: &Rt, v: V) -> bool {
     matches!(v, V::R(n) if n != 0) && rt.get_field(v, "$vanilla").i() == 1
 }
 
-fn id(rt: &Rt, e: V) -> i32 {
+/// The game's entity id `e` stands for.
+pub(crate) fn id(rt: &Rt, e: V) -> i32 {
     rt.get_field(e, "$vid").i()
 }
 

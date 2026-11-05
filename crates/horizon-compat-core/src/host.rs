@@ -144,6 +144,65 @@ pub struct EntityView {
     pub health: Option<(f32, f32)>,
 }
 
+/// An attribute of a living entity, as translated code reads it through its `AttributeInstance`
+/// (`getValue`, `getBaseValue`, `getModifiers`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AttributeView {
+    /// Its value: the base with the modifiers, kept in the attribute's range.
+    pub value: f64,
+    pub base: f64,
+    /// Its modifiers, in the order they came.
+    pub modifiers: Vec<AttributeModifierView>,
+}
+
+/// One of an attribute's modifiers (vanilla's `AttributeModifier`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AttributeModifierView {
+    /// Its id (`mymod:speed_boost`): an attribute has one modifier of each.
+    pub id: String,
+    pub amount: f64,
+    /// `AttributeModifier.Operation`'s ordinal: 0 adds the amount to the base, 1 the base times the
+    /// amount, 2 multiplies the total by 1 plus the amount.
+    pub operation: u8,
+    /// Kept with the entity's saved data (`addPermanentModifier`).
+    pub permanent: bool,
+}
+
+/// A change translated code makes to an attribute ([`Host::change_attribute`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttributeChange {
+    /// Its base (`setBaseValue`).
+    Base(f64),
+    /// A modifier added (`addTransientModifier`, `addPermanentModifier`); with `replace`, one of its
+    /// id already there is replaced (`addOrUpdateTransientModifier`, `addOrReplacePermanentModifier`),
+    /// without, the change fails.
+    Add { modifier: AttributeModifierView, replace: bool },
+    /// The modifier of this id taken off (`removeModifier`); fails when there is none.
+    Remove(String),
+    /// All its modifiers taken off (`removeModifiers`).
+    RemoveAll,
+}
+
+impl AttributeView {
+    /// Vanilla's `AttributeInstance.calculateValue` of `base` and `modifiers`, before its range:
+    /// the additions, then each multiple of the base, then each multiple of the total.
+    pub fn computed(base: f64, modifiers: &[AttributeModifierView]) -> f64 {
+        let of = |op: u8| modifiers.iter().filter(move |m| m.operation == op).map(|m| m.amount);
+        let mut added = base;
+        for a in of(0) {
+            added += a;
+        }
+        let mut value = added;
+        for a in of(1) {
+            value += added * a;
+        }
+        for a in of(2) {
+            value *= 1.0 + a;
+        }
+        value
+    }
+}
+
 /// A damage type of the game's data (`minecraft:in_fire`), as translated code reads it through a
 /// `DamageSource` (`type()`, `getMsgId`, `is(TagKey)`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -420,6 +479,18 @@ pub trait Host {
     /// as [`Host::player_message`]'s. False when they aren't on, or the host reaches no other
     /// player than the acting one.
     fn tell_player(&mut self, _uuid: u128, _component: &str, _overlay: bool) -> bool {
+        false
+    }
+    /// Attribute `attribute` (the game's id: `minecraft:movement_speed`) of the living entity
+    /// `entity` of the level in place, None for the player in place (the acting player; a client's
+    /// own): its value, base and modifiers. None when the entity or its attribute isn't there, or
+    /// the host can't tell.
+    fn attribute(&mut self, _entity: Option<i32>, _attribute: &str) -> Option<AttributeView> {
+        None
+    }
+    /// Makes `change` to an attribute named as [`Host::attribute`] names it: false when it wasn't
+    /// made (no such attribute, a modifier's id there already or not there).
+    fn change_attribute(&mut self, _entity: Option<i32>, _attribute: &str, _change: &AttributeChange) -> bool {
         false
     }
     /// A line of a mod's command's answer (`CommandSourceStack.sendSuccess`, `sendFailure`), for
@@ -844,6 +915,9 @@ pub struct MemoryHost {
     pub messages: Vec<(String, bool)>,
     /// Messages for players by UUID ([`Host::tell_player`]): to whom, JSON, over the hotbar.
     pub told: Vec<(u128, String, bool)>,
+    /// The living entities' attributes ([`Host::attribute`]), by entity (None: the acting player)
+    /// and the game's attribute id; changes keep their values computed as vanilla's.
+    pub attributes: std::collections::BTreeMap<(Option<i32>, String), AttributeView>,
     /// Experience orbs spawned: where, worth, and the motion given.
     pub orbs: Vec<([f64; 3], u32, Option<[f64; 3]>)>,
     /// What the acting player looks at (`player_pov_hit`).
@@ -1062,6 +1136,42 @@ impl Host for MemoryHost {
             self.told.push((uuid, component.to_owned(), overlay));
         }
         on
+    }
+    fn attribute(&mut self, entity: Option<i32>, attribute: &str) -> Option<AttributeView> {
+        self.attributes.get(&(entity, attribute.to_owned())).cloned()
+    }
+    fn change_attribute(&mut self, entity: Option<i32>, attribute: &str, change: &AttributeChange) -> bool {
+        let Some(a) = self.attributes.get_mut(&(entity, attribute.to_owned())) else {
+            return false;
+        };
+        let made = match change {
+            AttributeChange::Base(v) => {
+                a.base = *v;
+                true
+            }
+            AttributeChange::Add { modifier, replace } => match a.modifiers.iter().position(|m| m.id == modifier.id) {
+                Some(_) if !replace => false,
+                Some(i) => {
+                    a.modifiers[i] = modifier.clone();
+                    true
+                }
+                None => {
+                    a.modifiers.push(modifier.clone());
+                    true
+                }
+            },
+            AttributeChange::Remove(id) => {
+                let before = a.modifiers.len();
+                a.modifiers.retain(|m| &m.id != id);
+                a.modifiers.len() != before
+            }
+            AttributeChange::RemoveAll => {
+                a.modifiers.clear();
+                true
+            }
+        };
+        a.value = AttributeView::computed(a.base, &a.modifiers);
+        made
     }
     fn spawn_experience_orb(&mut self, at: [f64; 3], value: u32, motion: Option<[f64; 3]>) -> bool {
         self.orbs.push((at, value, motion));

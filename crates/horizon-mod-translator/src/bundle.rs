@@ -461,6 +461,8 @@ fn server_send(c: &str) -> String {
 /// conversions (`to_nbt`).
 fn client_host(c: &str, id: &str) -> String {
     let reads = world_reads("self.game.get()");
+    // The client's own player's attributes (`native_attribute` of None), where the game is lent.
+    let attributes = attribute_methods(c, "self.game.get_mut()");
     format!(r#"    enum GameRef<'a, 'b> {{
         Mut(&'a mut crate::game::Game<'b>),
         Shared(&'a crate::game::Game<'b>),
@@ -496,7 +498,7 @@ fn client_host(c: &str, id: &str) -> String {
         fn dimension(&self) -> String {{
             self.game.get().native_dimension().to_owned()
         }}
-{reads}        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+{reads}{attributes}        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.game.get().native_fluid_name_in_tag(fluid, tag)
         }}
         fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
@@ -1964,6 +1966,34 @@ fn world_writes(c: &str) -> String {
             let dimension = self.game.native_dimension().to_owned();
             u32::try_from(id).is_ok_and(|i| self.game.native_teleport_mob(&dimension, i, pos))
         }}
+{attributes}"#,
+        attributes = attribute_methods(c, "Some(&mut *self.game)"),
+    )
+}
+
+/// A host's living entities' attributes, through the game `game` gives (`Option<&mut Game>`):
+/// the player in place's whole map, a mob's plain values and the rest of its attributes
+/// (`native_attribute`, `native_change_attribute`).
+fn attribute_methods(c: &str, game: &str) -> String {
+    format!(
+        r#"        fn attribute(&mut self, entity: Option<i32>, attribute: &str) -> Option<{c}::host::AttributeView> {{
+            let a = {game}?.native_attribute(entity, attribute)?;
+            let modifiers = a.modifiers.into_iter().map(|m| {c}::host::AttributeModifierView {{ id: m.id, amount: m.amount, operation: m.operation, permanent: m.permanent }});
+            Some({c}::host::AttributeView {{ value: a.value, base: a.base, modifiers: modifiers.collect() }})
+        }}
+        fn change_attribute(&mut self, entity: Option<i32>, attribute: &str, change: &{c}::host::AttributeChange) -> bool {{
+            use crate::game::native_attributes::{{NativeAttributeChange as Change, NativeAttributeModifier as Modifier}};
+            let change = match change {{
+                {c}::host::AttributeChange::Base(v) => Change::Base(*v),
+                {c}::host::AttributeChange::Add {{ modifier: m, replace }} => Change::Add {{
+                    modifier: Modifier {{ id: m.id.clone(), amount: m.amount, operation: m.operation, permanent: m.permanent }},
+                    replace: *replace,
+                }},
+                {c}::host::AttributeChange::Remove(id) => Change::Remove(id.clone()),
+                {c}::host::AttributeChange::RemoveAll => Change::RemoveAll,
+            }};
+            {game}.is_some_and(|game| game.native_change_attribute(entity, attribute, &change))
+        }}
 "#
     )
 }
@@ -2007,6 +2037,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
     let (hurt, kill, remove) = (later("Later { game }.hurt_entity(id, amount)"), later("Later { game }.kill_entity(id)"), later("Later { game }.remove_entity(id)"));
     let (health, push, teleport) = (later("Later { game }.set_entity_health(id, health)"), later("Later { game }.push_entity(id, velocity)"), later("Later { game }.teleport_entity(id, pos)"));
     let (orb, payload) = (later("game.native_spawn_experience_orb(at, value, motion)"), later("Later { game }.send_payload(to, &channel, &data)"));
+    let attribute = later("Later { game }.change_attribute(entity, &attribute, &change)");
     format!(r#"    // The trait's methods, called on the hosts below by name.
     use {c}::host::Host as _;
     struct Host {{
@@ -2125,6 +2156,11 @@ fn hit_host(c: &str, server_send: &str) -> String {
         fn send_payload(&mut self, to: {c}::host::PayloadTarget, channel: &str, data: &[u8]) -> bool {{
             let (channel, data) = (channel.to_owned(), data.to_vec());
             {payload}
+            true
+        }}
+        fn change_attribute(&mut self, entity: Option<i32>, attribute: &str, change: &{c}::host::AttributeChange) -> bool {{
+            let (attribute, change) = (attribute.to_owned(), change.clone());
+            {attribute}
             true
         }}
     }}

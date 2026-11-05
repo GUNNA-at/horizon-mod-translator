@@ -1072,6 +1072,25 @@ with no `Game` at hand. Server-side.
   order they came; those a change leaves run after it, for up to 8 rounds. A hook plays a sound, tells a player or hurts
   another entity this way.
 
+### Attributes
+
+`crates/horizon-client/src/game/native_attributes.rs`: a living entity's attributes for a mod to read and change, by
+the game's attribute ids (`minecraft:movement_speed`; 1.21.1's `minecraft:generic.movement_speed` names the same).
+
+- `native_attribute(entity, attribute)` is a `NativeAttribute`: its value (the base with the modifiers, kept in the
+  attribute's range), its base and its modifiers (`NativeAttributeModifier`: id, amount, vanilla's operation ordinal,
+  whether it's permanent), in the order they came. `entity` None is the player in place (the acting player on a server,
+  the client's own on a client), else an entity id of the level in place. None when it isn't a living entity there or
+  its type doesn't have the attribute.
+- `native_change_attribute(entity, attribute, change)` makes a `NativeAttributeChange`: a new base, a modifier added
+  (transient or permanent; replacing one of its id or failing on it), one taken off by its id, or all of them. Whether
+  it was made.
+- The player in place has the game's whole attribute map: what a mod changes there moves, hurts and reaches their client
+  as the game's own changes do (`/attribute`). A mob keeps the attributes its behaviour reads as plain values (its
+  maximum health, speed, attack damage and knockback, follow range, knockback resistance, reinforcements chance and jump
+  strength): they read with their base alone and take a new base, not modifiers; its other attributes are the map the
+  `/attribute` command keeps for it. Armour stands have that map.
+
 ### Loot tables
 
 Changing loot a mod didn't make, as NeoForge's `LootTableLoadEvent` and global loot modifiers and Fabric's
