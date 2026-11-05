@@ -2006,6 +2006,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     registry's holders are one per entry (vanilla's compare by identity). Tests
     `enchantments::tests` (3). Next: the game's stacks carry their enchantments to the runtime and
     back.
+  - [x] 2026-11-05 The game's stacks carry their enchantments to the runtime and back. A stack the
+    runtime reads (a hand, a slot, `stack_of`) takes the game's own levels as its
+    `minecraft:enchantments` and `minecraft:stored_enchantments` components
+    (`ItemData::enchantments_tag`, the game's `native_vanilla_components`), and what a mod sets on
+    them (`ItemStack.enchant`, `EnchantmentHelper.setEnchantments`) goes back to the game's levels
+    (`native_set_vanilla_component`, `ItemData::set_enchantments_tag`), not to a mod component. A
+    stack the runtime saves or loads (a mod's inventory) keeps them by the component's codec. In game
+    (Create and ten addons, `cemgame.sh`): Create Enchantable Machinery's drill and millstone get their
+    block entities (no `EMPTY must not be null`, which was 32,490 in round 9); a drill placed with
+    `{Enchantments:{levels:{"minecraft:efficiency":5,"minecraft:fortune":3}}}` reads back the same,
+    a millstone placed with the levels alone (`{Enchantments:{"minecraft:efficiency":2}}`) reads back
+    as `{levels:{...}}`, and a plain drill saves none. No exception or panic in the log. Tests
+    `item_data::tests::enchantments_cross_as_their_component_and_back`,
+    `hand::tests::a_stack_in_hand_carries_its_enchantments_both_ways`. CEM's own mechanic (a machine
+    item takes its enchantments into the placed block) needs its mixins into `BlockItem` and `Item`
+    (`getPlacementState`, `isEnchantable`), the vanilla hook points still to come.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

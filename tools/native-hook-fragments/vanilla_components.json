@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the vanilla components a translated mod's stacks carry (`native_vanilla_components`, `native_set_vanilla_component`).",
+  "doc_summary": "`native_vanilla_components(stack)` gives the vanilla components a translated mod's stacks carry beside the registered ones: the stack's `minecraft:enchantments` and `minecraft:stored_enchantments`, those it has, as vanilla's `components` map writes them. `native_set_vanilla_component(stack, id, value)` sets one (`None` clears it), from that form or 1.21.1's `{levels: {...}}`. Bundles need \"hooks\": @API:vanilla_components@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_components.rs"
+  ]
+}

@@ -445,6 +445,37 @@ mod tests {
         assert_eq!(host.held, Some(("minecraft:stick".into(), 2)));
     }
 
+    /// The game's enchantments on a stack in hand reach the mod, and what the mod enchants reaches
+    /// the game's stack (in 1.21.1's form, which the game reads too).
+    #[test]
+    fn a_stack_in_hand_carries_its_enchantments_both_ways() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        host.held = Some(("minecraft:diamond_pickaxe".into(), 1));
+        let efficiency3 = BTreeMap::from([("minecraft:efficiency".to_owned(), Nbt::Int(3))]);
+        host.held_components.insert("minecraft:enchantments".into(), Nbt::Compound(efficiency3));
+        let level = rt.with_host(&mut host, |rt| {
+            with_hand(rt, |rt| {
+                let registry = api::get_static(rt, "net/minecraft/core/registries/Registries.ENCHANTMENT");
+                let get = "net/minecraft/core/HolderGetter.getOrThrow.(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/Holder$Reference;";
+                let key = api::get_static(rt, "net/minecraft/world/item/enchantment/Enchantments.EFFICIENCY");
+                let efficiency = api::call(rt, get, &[registry, key]);
+                let key = api::get_static(rt, "net/minecraft/world/item/enchantment/Enchantments.UNBREAKING");
+                let unbreaking = api::call(rt, get, &[registry, key]);
+                let s = stack(rt, MAIN);
+                let level = api::call(rt, "net/minecraft/world/item/ItemStack.getEnchantmentLevel.(Lnet/minecraft/core/Holder;)I", &[s, efficiency]).i();
+                api::call(rt, "net/minecraft/world/item/ItemStack.enchant.(Lnet/minecraft/core/Holder;I)V", &[s, unbreaking, V::I(2)]);
+                level
+            })
+        });
+        assert_eq!(level, 3);
+        let both = BTreeMap::from([("minecraft:efficiency".to_owned(), Nbt::Int(3)), ("minecraft:unbreaking".to_owned(), Nbt::Int(2))]);
+        let levels = BTreeMap::from([("levels".to_owned(), Nbt::Compound(both))]);
+        assert_eq!(host.held_components.get("minecraft:enchantments"), Some(&Nbt::Compound(levels)));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// A stack the mod puts in the hand replaces what it held, its components with it; the old
     /// stack, changed after, changes nothing.
     #[test]

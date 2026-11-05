@@ -311,6 +311,28 @@ impl ItemStack {
     pub fn has_any_enchantments(&self) -> bool {
         !self.enchantments().is_empty() || !self.stored_enchantments().is_empty()
     }
+    /// `minecraft:enchantments`, or `minecraft:stored_enchantments` when `stored`, as vanilla's
+    /// `components` map writes it (`{id: level}`); None when the stack has none.
+    pub fn enchantments_tag(&self, stored: bool) -> Option<Tag> {
+        let levels = if stored {
+            self.stored_enchantments()
+        } else {
+            self.enchantments()
+        };
+        (!levels.is_empty()).then(|| levels_tag(levels))
+    }
+    /// Sets the stack's enchantments, or its stored ones when `stored`, from that form (1.21.1's
+    /// `{levels: {...}}` too); None, or no valid entry, clears them.
+    pub fn set_enchantments_tag(&mut self, stored: bool, tag: Option<&Tag>) {
+        let levels = read_levels(tag);
+        let data = self.data_mut();
+        if stored {
+            data.stored_enchantments = levels;
+        } else {
+            data.enchantments = levels;
+        }
+        self.tidy();
+    }
     /// `ItemStack.hasFoil`: an explicit `minecraft:enchantment_glint_override`
     /// component wins, then the item's default override (`item_glint`), then a
     /// non-empty `minecraft:enchantments` component (`Item.isFoil` is
@@ -423,7 +445,7 @@ pub fn set_level(list: &mut Levels, id: &str, level: u32) {
     }
 }
 
-fn levels_tag(levels: &Levels) -> Tag {
+fn levels_tag(levels: &[(Arc<str>, u32)]) -> Tag {
     Tag::compound(levels.iter().map(|(id, l)| (&**id, Tag::Int(*l as i32))))
 }
 fn int(t: &Tag) -> Option<i64> {
@@ -1110,6 +1132,27 @@ mod tests {
         assert_eq!(back.enchantment_level("minecraft:unbreaking"), 2);
         assert_eq!(back.repair_cost(), 3);
         assert_eq!(back.custom_name().as_deref(), Some("Blade"));
+    }
+
+    #[test]
+    fn enchantments_cross_as_their_component_and_back() {
+        let mut stack = ItemStack::new("minecraft:diamond_pickaxe", 1);
+        assert_eq!(stack.enchantments_tag(false), None);
+        // 1.21.1's form, as a translated mod's runtime writes it.
+        let old = Tag::compound([(
+            "levels",
+            Tag::compound([("minecraft:efficiency", Tag::Int(4)), ("unbreaking", Tag::Int(1))]),
+        )]);
+        stack.set_enchantments_tag(false, Some(&old));
+        assert_eq!(stack.enchantment_level("minecraft:efficiency"), 4);
+        assert_eq!(stack.enchantment_level("minecraft:unbreaking"), 1);
+        let tag = stack.enchantments_tag(false).unwrap();
+        let mut copy = ItemStack::new("minecraft:diamond_pickaxe", 1);
+        copy.set_enchantments_tag(false, Some(&tag));
+        assert_eq!(copy, stack);
+        assert_eq!(copy.enchantments_tag(true), None);
+        copy.set_enchantments_tag(false, None);
+        assert_eq!(copy, ItemStack::new("minecraft:diamond_pickaxe", 1));
     }
 
     #[test]

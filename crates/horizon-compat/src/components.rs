@@ -9,9 +9,9 @@
 //! register, [`load`] reads a game stack's into a stack here and [`saved`] writes them back, each
 //! value through its type's codec (`encodeStart(NbtOps.INSTANCE, value)` and `parse`). A saved
 //! stack (`ItemStack.save`, `ItemStack.CODEC`: what a block entity keeps) carries them as vanilla's
-//! `components` map. Of an item's default components (vanilla's prototype) only `enchantments` is
-//! modelled (`ItemEnchantments.EMPTY`: `get(MAX_STACK_SIZE)` is null), and vanilla's own types on a
-//! game stack aren't carried yet.
+//! `components` map. Of vanilla's own types a game stack carries its enchantments (and a book's
+//! stored ones) here and back; of an item's default components (vanilla's prototype) only
+//! `enchantments` is modelled (`ItemEnchantments.EMPTY`: `get(MAX_STACK_SIZE)` is null).
 use crate::nbt::Nbt;
 use crate::{Data, Rt, V};
 
@@ -27,6 +27,8 @@ const HOLDERS: [&str; 4] = [
     "net/neoforged/neoforge/common/extensions/IDataComponentHolderExtension",
     "net/neoforged/neoforge/common/extensions/IItemStackExtension",
 ];
+/// Vanilla's types a game stack carries to the runtime and back: its enchantments.
+const CARRIED_VANILLA: [&str; 2] = ["minecraft:enchantments", "minecraft:stored_enchantments"];
 /// `DataComponents` statics that aren't component types.
 const NOT_TYPES: [&str; 2] = ["COMMON_ITEM_COMPONENTS", "ITEM_STACK_CODEC"];
 
@@ -95,6 +97,15 @@ pub(crate) fn patch(rt: &mut Rt, stack: V) -> std::collections::BTreeMap<String,
 }
 
 fn load_one(rt: &mut Rt, stack: V, name: &str, value: &serde_json::Value) {
+    if CARRIED_VANILLA.contains(&name) {
+        match crate::enchantments::decode(rt, value) {
+            Ok(v) => {
+                set_vanilla(rt, stack, name, v);
+            }
+            Err(e) => crate::glue::trace_once(rt, &format!("component-read:{name}"), |_| format!("component {name} not read: {e}")),
+        }
+        return;
+    }
     let Some(&ty) = rt.registered.get(&(REGISTRY.to_owned(), name.to_owned())) else { return };
     let Some(codec) = codec_of(rt, ty) else { return };
     match crate::codecs::decode(rt, codec, value) {
@@ -106,12 +117,23 @@ fn load_one(rt: &mut Rt, stack: V, name: &str, value: &serde_json::Value) {
 }
 
 /// `stack`'s components a game stack can carry, by type name (sorted), each written with its type's
-/// codec. Vanilla's types, types without a codec and values the codec can't write are left out (the
-/// last told once).
+/// codec: the mod's, and vanilla's enchantments ([`CARRIED_VANILLA`], none when there are no
+/// levels). Vanilla's other types, types without a codec and values the codec can't write are left
+/// out (the last told once).
 pub(crate) fn saved(rt: &mut Rt, stack: V) -> Vec<(String, Nbt)> {
     let mut out = Vec::new();
     for p in pairs(rt, stack).chunks(2) {
         let (ty, value) = (p[0], p[1]);
+        let id = rt.str_of(rt.get_field(ty, "$id")).unwrap_or("").to_owned();
+        if CARRIED_VANILLA.contains(&id.as_str()) {
+            if !crate::enchantments::levels(rt, value).is_empty() {
+                match crate::enchantments::encode(rt, value) {
+                    Ok(n) => out.push((id, n)),
+                    Err(e) => crate::glue::trace_once(rt, &format!("component-write:{id}"), |_| format!("component {id} not written: {e}")),
+                }
+            }
+            continue;
+        }
         let Some(name) = rt.registered_name(ty, REGISTRY).map(str::to_owned) else { continue };
         let Some(codec) = codec_of(rt, ty) else { continue };
         match crate::codecs::encode(rt, codec, value) {

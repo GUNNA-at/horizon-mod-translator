@@ -621,10 +621,10 @@ fn client_host(c: &str, id: &str) -> String {
         }}
     }}
     impl Host<'_, '_, '_> {{
-        /// A stack of the player's with its mod data, as the runtime holds a hand's.
+        /// A stack of the player's with its mod data and enchantments, as the runtime holds a hand's.
         fn held(&self, stack: &horizon_client::items::ItemStack) -> {c}::host::HandStack {{
             let game = self.game.get();
-            let components = game
+            let mut components: Vec<_> = game
                 .native_registered_components()
                 .into_iter()
                 .filter_map(|name| {{
@@ -632,6 +632,9 @@ fn client_host(c: &str, id: &str) -> String {
                     Some((name.to_owned(), to_nbt(tag)?))
                 }})
                 .collect();
+            for (name, tag) in game.native_vanilla_components(stack) {{
+                components.extend(to_nbt(&tag).map(|n| (name.to_owned(), n)));
+            }}
             {c}::host::HandStack {{
                 item: stack.item.to_string(),
                 count: stack.count,
@@ -1527,11 +1530,7 @@ fn player_host(c: &str, server_effects: &str) -> String {
             }};
             let mut all = true;
             for (name, value) in components {{
-                all &= match value.as_ref().map(Self::tag_of) {{
-                    Some(Some(tag)) => self.game.native_set_component(&mut stack, name, tag).is_ok(),
-                    Some(None) => false,
-                    None => self.game.native_remove_component(&mut stack, name).is_ok(),
-                }};
+                all &= self.set_component(&mut stack, name, value.as_ref());
             }}
             stack.count = count;
             stack.damage = damage;
@@ -1554,11 +1553,7 @@ fn player_host(c: &str, server_effects: &str) -> String {
             }};
             let mut all = true;
             for (name, value) in components {{
-                all &= match value.as_ref().map(Self::tag_of) {{
-                    Some(Some(tag)) => self.game.native_set_component(&mut stack, name, tag).is_ok(),
-                    Some(None) => false,
-                    None => self.game.native_remove_component(&mut stack, name).is_ok(),
-                }};
+                all &= self.set_component(&mut stack, name, value.as_ref());
             }}
             stack.count = count;
             stack.damage = damage;
@@ -1580,9 +1575,10 @@ fn player_host(c: &str, server_effects: &str) -> String {
         fn hand(ordinal: u8) -> horizon_client::first_person::Hand {{
             if ordinal == 1 {{ horizon_client::first_person::Hand::Off }} else {{ horizon_client::first_person::Hand::Main }}
         }}
-        /// The game's stack as the runtime's: its mod data by the registered component types.
+        /// The game's stack as the runtime's: its mod data by the registered component types, and
+        /// the vanilla components the runtime models (its enchantments).
         fn held_of(&self, stack: &horizon_client::items::ItemStack) -> {c}::host::HandStack {{
-            let components = self
+            let mut components: Vec<_> = self
                 .game
                 .native_registered_components()
                 .into_iter()
@@ -1591,6 +1587,9 @@ fn player_host(c: &str, server_effects: &str) -> String {
                     Some((name.to_owned(), Self::nbt_of(tag)?))
                 }})
                 .collect();
+            for (name, tag) in self.game.native_vanilla_components(stack) {{
+                components.extend(Self::nbt_of(&tag).map(|n| (name.to_owned(), n)));
+            }}
             {c}::host::HandStack {{
                 item: stack.item.to_string(),
                 count: stack.count,
@@ -1603,11 +1602,24 @@ fn player_host(c: &str, server_effects: &str) -> String {
         fn stack_of(&self, held: &{c}::host::HandStack) -> horizon_client::items::ItemStack {{
             let mut stack = horizon_client::items::ItemStack {{ item: held.item.as_str().into(), count: held.count, damage: held.damage, extra: None }};
             for (name, value) in &held.components {{
-                if let Some(tag) = Self::tag_of(value) {{
-                    let _ = self.game.native_set_component(&mut stack, name, tag);
-                }}
+                self.set_component(&mut stack, name, Some(value));
             }}
             stack
+        }}
+        /// Sets component `name` on `stack` (None removes it): a registered type's, or a vanilla one
+        /// the runtime carries (`minecraft:enchantments`); false when the game refuses it.
+        fn set_component(&self, stack: &mut horizon_client::items::ItemStack, name: &str, value: Option<&{c}::nbt::Nbt>) -> bool {{
+            let tag = match value.map(Self::tag_of) {{
+                Some(None) => return false,
+                tag => tag.flatten(),
+            }};
+            if name.starts_with("minecraft:") {{
+                return self.game.native_set_vanilla_component(stack, name, tag.as_ref()).is_ok();
+            }}
+            match tag {{
+                Some(tag) => self.game.native_set_component(stack, name, tag).is_ok(),
+                None => self.game.native_remove_component(stack, name).is_ok(),
+            }}
         }}
         fn nbt_of(tag: &horizon_world::nbt::Tag) -> Option<{c}::nbt::Nbt> {{
             use horizon_world::nbt::Tag;
