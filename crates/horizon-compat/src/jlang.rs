@@ -404,6 +404,13 @@ pub(crate) fn kinds(desc: &str) -> Vec<char> {
     out
 }
 
+/// `String.compareTo`: the difference of the first UTF-16 units that differ, else of the lengths.
+pub(crate) fn java_compare(x: &str, y: &str) -> i32 {
+    let (u, o) = (utf16(x), utf16(y));
+    let n = u.len().min(o.len());
+    (0..n).find(|&i| u[i] != o[i]).map_or(u.len() as i32 - o.len() as i32, |i| i32::from(u[i]) - i32::from(o[i]))
+}
+
 pub(crate) fn string_hash(s: &str) -> i32 {
     s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
 }
@@ -917,11 +924,7 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
         "hashCode" => V::I(string_hash(&s)),
         "equals" | "contentEquals" => V::I((Some(s.as_str()) == rt.str_of(a(1))) as i32),
         "equalsIgnoreCase" => V::I(rt.str_of(a(1)).is_some_and(|o| o.to_lowercase() == s.to_lowercase()) as i32),
-        "compareTo" => {
-            let o = utf16(&arg_s(rt, 1));
-            let n = u.len().min(o.len());
-            V::I((0..n).find(|&i| u[i] != o[i]).map_or(u.len() as i32 - o.len() as i32, |i| u[i] as i32 - o[i] as i32))
-        }
+        "compareTo" => V::I(java_compare(&s, &arg_s(rt, 1))),
         "compareToIgnoreCase" => {
             let (x, y) = (s.to_lowercase(), arg_s(rt, 1).to_lowercase());
             V::I(x.cmp(&y) as i32)

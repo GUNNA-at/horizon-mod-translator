@@ -3031,6 +3031,25 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `redirects_run_their_modifier_for_each_source`, `a_mods_parser_reads_selectors_with_vanillas`.
     333 compat tests pass. Not yet: client commands, `Commands.performPrefixedCommand`, suggestion
     providers, entities other than players in selectors.
+    In game (FD + Create bundle, `scratchpad/fdcmd.sh`): `/create trains` and its alias `/c trains`,
+    `/create clone` (usage line, a 3x2x3 copy, `commands.clone.toobig`, relative `~`), a line no
+    path reads (`argument.pos3d.incomplete` plus the context line), an int too big
+    (`parsing.int.invalid`, as vanilla's `readInt`), an unknown subcommand
+    (`command.unknown.argument`) all answer as vanilla's. `/catnip config client` failed with
+    `command.expected.separator`: catnip's `ConfigPathArgument.parse` reads over
+    `ResourceLocation.isAllowedInResourceLocation`, which nothing mapped (so it read nothing).
+- [x] 2026-11-05 Ids are checked, read and keyed as 1.21.1's `ResourceLocation` does (`neo.rs`): the
+  character checks (`isAllowedInResourceLocation` 6 mods, `validPathChar` 7, `validNamespaceChar`,
+  `isValidPath` 5, `isValidNamespace` 6); `parse` and `bySeparator` throw `ResourceLocationException`
+  with vanilla's message for a character an id can't have, `tryParse`/`tryBySeparator` give null
+  (they returned the string as it was), `read(String)` an error `DataResult` (7); the separator
+  given to `bySeparator` is used (it was ignored); `read`/`readNonEmpty(StringReader)` (6) read a
+  command line's id with `argument.id.invalid` where it began; `compareTo` sorts by path, then
+  namespace (11), `compareNamespaced` (5); `toDebugFileName` (6); `toLanguageKey(type[, key])` and
+  `toShortLanguageKey` (dropped `minecraft.`) make vanilla's keys (they ignored their arguments).
+  `jlang::java_compare` is `String.compareTo` for both. Test:
+  `neo::tests::ids_are_checked_read_compared_and_keyed_as_vanilla_does`. 334 compat tests pass.
+  Still the string's: `hashCode` and a sort through `Comparable` (ids are strings in the runtime).
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

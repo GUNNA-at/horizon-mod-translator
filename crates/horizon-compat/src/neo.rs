@@ -341,6 +341,35 @@ pub(crate) fn location(rt: &Rt, v: V) -> String {
     if s.contains(':') { s.to_owned() } else { format!("minecraft:{s}") }
 }
 
+/// `ResourceLocation.bySeparator(s, separator)`'s id, or the message of the
+/// `ResourceLocationException` it throws: the namespace before the first `separator` (`minecraft`
+/// for none, or an empty one) of `[a-z0-9_.-]`, the path after it of `[a-z0-9/._-]`, the namespace
+/// checked first.
+pub(crate) fn checked_location(s: &str, separator: char) -> Result<String, String> {
+    let (ns, path) = match s.find(separator) {
+        Some(0) => ("minecraft", &s[separator.len_utf8()..]),
+        Some(i) => (&s[..i], &s[i + separator.len_utf8()..]),
+        None => ("minecraft", s),
+    };
+    if !ns.chars().all(namespace_char) {
+        return Err(format!("Non [a-z0-9_.-] character in namespace of location: {ns}:{path}"));
+    }
+    if !path.chars().all(path_char) {
+        return Err(format!("Non [a-z0-9/._-] character in path of location: {ns}:{path}"));
+    }
+    Ok(format!("{ns}:{path}"))
+}
+
+/// `ResourceLocation.validPathChar`.
+fn path_char(c: char) -> bool {
+    matches!(c, 'a'..='z' | '0'..='9' | '_' | '-' | '.' | '/')
+}
+
+/// `ResourceLocation.validNamespaceChar`.
+fn namespace_char(c: char) -> bool {
+    matches!(c, 'a'..='z' | '0'..='9' | '_' | '-' | '.')
+}
+
 /// A `ResourceKey`'s registry and element location (`block#create:shaft` → (`block`, `create:shaft`)).
 pub fn split_key(rt: &Rt, key: V) -> (String, String) {
     let s = rt.str_of(key).unwrap_or("");
@@ -714,8 +743,85 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             rt.string(&format!("{ns}:{path}"))
         }
-        ("net/minecraft/resources/ResourceLocation", "parse" | "tryParse" | "bySeparator") => {
-            let s = location(rt, a(0));
+        // An id from a string, split at its first `:` (or the separator given): `parse` and
+        // `bySeparator` throw `ResourceLocationException` for a character vanilla doesn't allow,
+        // `tryParse` and `tryBySeparator` give null, `read(String)` an error result.
+        ("net/minecraft/resources/ResourceLocation", "parse" | "tryParse" | "bySeparator" | "tryBySeparator" | "read")
+            if desc.starts_with("(Ljava/lang/String;") =>
+        {
+            if a(0).is_null() {
+                rt.throw_new("java/lang/NullPointerException");
+                return Some(V::NULL);
+            }
+            let s = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let separator = if name.ends_with("ySeparator") { char::from_u32(a(1).i() as u32).unwrap_or(':') } else { ':' };
+            match checked_location(&s, separator) {
+                Ok(id) => {
+                    let v = rt.string(&id);
+                    if name == "read" { crate::codecs::success(rt, v) } else { v }
+                }
+                Err(_) if name.starts_with("try") => V::NULL,
+                Err(e) if name == "read" => crate::codecs::error(rt, &format!("Not a valid resource location: {s} {e}")),
+                Err(e) => {
+                    let ex = rt.new_object("net/minecraft/ResourceLocationException");
+                    let m = rt.string(&e);
+                    rt.put_field(ex, "message", m);
+                    rt.thrown = Some(ex);
+                    V::NULL
+                }
+            }
+        }
+        // An id read from a command line (`read(StringReader)`, `readNonEmpty`), as
+        // `ResourceLocationArgument` and mods' own argument types read one: the characters an id
+        // may have, then `argument.id.invalid` where it began (`readNonEmpty`: also for none).
+        ("net/minecraft/resources/ResourceLocation", "read" | "readNonEmpty") => {
+            let reader = a(0);
+            let mut r = crate::brigadier::reader_of(rt, reader);
+            let start = r.cursor;
+            let read = match crate::command_args::read_location(&mut r) {
+                Ok(_) if name == "readNonEmpty" && r.cursor == start => Err(r.error("argument.id.invalid", Vec::new())),
+                read => read,
+            };
+            rt.put_field(reader, "$cursor", V::I(r.cursor));
+            match read {
+                Ok(id) => rt.string(&id),
+                Err(e) => {
+                    let ex = crate::brigadier::exception(rt, &r.s, &e);
+                    rt.thrown = Some(ex);
+                    V::NULL
+                }
+            }
+        }
+        // The characters an id may have: in a path, in a namespace, and in either or as their `:`
+        // (what a command line's id is read over).
+        ("net/minecraft/resources/ResourceLocation", "validPathChar" | "validNamespaceChar" | "isAllowedInResourceLocation") => {
+            let c = char::from_u32(a(0).i() as u32).unwrap_or('\0');
+            V::I(match name {
+                "validPathChar" => path_char(c),
+                "validNamespaceChar" => namespace_char(c),
+                _ => path_char(c) || c == ':',
+            } as i32)
+        }
+        ("net/minecraft/resources/ResourceLocation", "isValidPath" | "isValidNamespace") => {
+            if a(0).is_null() {
+                rt.throw_new("java/lang/NullPointerException");
+                return Some(V::I(0));
+            }
+            let s = rt.str_of(a(0)).unwrap_or("");
+            V::I(s.chars().all(if name == "isValidPath" { path_char } else { namespace_char }) as i32)
+        }
+        // Ids sort by path, then namespace; `compareNamespaced` by namespace first. Each part as
+        // `String.compareTo` compares.
+        ("net/minecraft/resources/ResourceLocation", "compareTo" | "compareNamespaced") => {
+            let (x, y) = (location(rt, a(0)), location(rt, a(1)));
+            let (xn, xp) = x.split_once(':').unwrap_or(("minecraft", &x));
+            let (yn, yp) = y.split_once(':').unwrap_or(("minecraft", &y));
+            let (first, then) = if name == "compareTo" { ((xp, yp), (xn, yn)) } else { ((xn, yn), (xp, yp)) };
+            let c = crate::jlang::java_compare(first.0, first.1);
+            V::I(if c != 0 { c } else { crate::jlang::java_compare(then.0, then.1) })
+        }
+        ("net/minecraft/resources/ResourceLocation", "toDebugFileName") => {
+            let s = location(rt, a(0)).replace(['/', ':'], "_");
             rt.string(&s)
         }
         ("net/minecraft/resources/ResourceLocation", "getNamespace" | "getPath") => {
@@ -724,9 +830,24 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let part = if name == "getNamespace" { ns } else { path }.to_owned();
             rt.string(&part)
         }
+        // `namespace.path`, as a translation key names it: `toShortLanguageKey` without the
+        // namespace when it is `minecraft`, `toLanguageKey(type)` and `toLanguageKey(type, key)`
+        // with the type before and the key after.
         ("net/minecraft/resources/ResourceLocation", "toString" | "toLanguageKey" | "toShortLanguageKey") => {
             let s = location(rt, a(0));
-            let s = if name == "toString" { s } else { s.replace(':', ".") };
+            let (ns, path) = s.split_once(':').unwrap_or(("minecraft", &s));
+            let key = format!("{ns}.{path}");
+            let arg = |rt: &Rt, i: usize| rt.str_of(a(i)).unwrap_or("null").to_owned();
+            let s = match name {
+                "toString" => s.clone(),
+                "toShortLanguageKey" if ns == "minecraft" => path.to_owned(),
+                "toShortLanguageKey" => key,
+                _ => match desc_params(desc).len() {
+                    0 => key,
+                    1 => format!("{}.{key}", arg(rt, 1)),
+                    _ => format!("{}.{key}.{}", arg(rt, 1), arg(rt, 2)),
+                },
+            };
             rt.string(&s)
         }
         ("net/minecraft/resources/ResourceLocation", "withPath" | "withPrefix" | "withSuffix") => {
@@ -1778,6 +1899,94 @@ pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
 mod tests {
     use super::*;
     use crate::Data;
+
+    fn location_call(rt: &mut Rt, method: &str, args: &[V]) -> V {
+        let k = rt.static_key(&format!("net/minecraft/resources/ResourceLocation.{method}"));
+        crate::api::call(rt, k, args)
+    }
+
+    /// Ids are checked as 1.21.1 checks them: `parse` throws for a character an id can't have,
+    /// `tryParse` gives null and `read` an error result, each with vanilla's message; a command
+    /// line's id is read over the characters `isAllowedInResourceLocation` allows (catnip's config
+    /// path argument reads its own over them); ids compare by path first and make their keys.
+    #[test]
+    fn ids_are_checked_read_compared_and_keyed_as_vanilla_does() {
+        let mut rt = Rt::new();
+        let allowed = "isAllowedInResourceLocation.(C)Z";
+        let chars: Vec<i32> = ['c', '!', ':', 'A', '/']
+            .iter()
+            .map(|&c| location_call(&mut rt, allowed, &[V::I(c as i32)]).i())
+            .collect();
+        assert_eq!(chars, [1, 0, 1, 0, 1]);
+        assert_eq!(location_call(&mut rt, "validPathChar.(C)Z", &[V::I(':' as i32)]).i(), 0);
+        assert_eq!(location_call(&mut rt, "validNamespaceChar.(C)Z", &[V::I('/' as i32)]).i(), 0);
+        let s = rt.string("a/b.c");
+        assert_eq!(location_call(&mut rt, "isValidPath.(Ljava/lang/String;)Z", &[s]).i(), 1);
+        assert_eq!(location_call(&mut rt, "isValidNamespace.(Ljava/lang/String;)Z", &[s]).i(), 0);
+
+        let parse = "parse.(Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;";
+        let try_parse = "tryParse.(Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;";
+        let bad = rt.string("Bad:x");
+        assert_eq!(location_call(&mut rt, parse, &[bad]), V::NULL);
+        let e = rt.thrown.take().expect("parse throws");
+        assert_eq!(rt.class_of(e), "net/minecraft/ResourceLocationException");
+        let m = rt.get_field(e, "message");
+        assert_eq!(rt.str_of(m), Some("Non [a-z0-9_.-] character in namespace of location: Bad:x"));
+        assert_eq!(location_call(&mut rt, try_parse, &[bad]), V::NULL);
+        assert!(rt.thrown.is_none());
+        let colon_first = rt.string(":stone");
+        let v = location_call(&mut rt, try_parse, &[colon_first]);
+        assert_eq!(rt.str_of(v), Some("minecraft:stone"));
+        let two = rt.string("a:b:c");
+        let r = location_call(&mut rt, "read.(Ljava/lang/String;)Lcom/mojang/serialization/DataResult;", &[two]);
+        assert_eq!(
+            crate::codecs::result_of(&mut rt, r),
+            Err("Not a valid resource location: a:b:c Non [a-z0-9/._-] character in path of location: a:b:c".to_owned())
+        );
+        let dotted = rt.string("create.shaft");
+        let v = location_call(&mut rt, "bySeparator.(Ljava/lang/String;C)Lnet/minecraft/resources/ResourceLocation;", &[dotted, V::I('.' as i32)]);
+        assert_eq!(rt.str_of(v), Some("create:shaft"));
+
+        // From a command line: the id and the cursor after it, or the error where it began.
+        let read = "read.(Lcom/mojang/brigadier/StringReader;)Lnet/minecraft/resources/ResourceLocation;";
+        let non_empty = "readNonEmpty.(Lcom/mojang/brigadier/StringReader;)Lnet/minecraft/resources/ResourceLocation;";
+        let message = "com/mojang/brigadier/exceptions/CommandSyntaxException.getMessage.()Ljava/lang/String;";
+        let reader = crate::brigadier::new_reader(&mut rt, &crate::brigadier::Reader::new("create:shaft rest"));
+        let v = location_call(&mut rt, read, &[reader]);
+        assert_eq!((rt.str_of(v), rt.get_field(reader, "$cursor")), (Some("create:shaft"), V::I(12)));
+        for (line, method) in [(" x", non_empty), ("a:b:c d", read)] {
+            let reader = crate::brigadier::new_reader(&mut rt, &crate::brigadier::Reader::new(line));
+            assert_eq!(location_call(&mut rt, method, &[reader]), V::NULL);
+            let e = rt.thrown.take().expect("the read throws");
+            let m = crate::api::call(&mut rt, message, &[e]);
+            assert_eq!(rt.str_of(m), Some("argument.id.invalid at position 0: <--[HERE]"), "{line}");
+            assert_eq!(rt.get_field(reader, "$cursor"), V::I(0));
+        }
+
+        // Path first, then namespace; `compareNamespaced` the other way round.
+        let (az, ba, aa) = (rt.string("a:z"), rt.string("b:a"), rt.string("a:a"));
+        let compare = "compareTo.(Lnet/minecraft/resources/ResourceLocation;)I";
+        let namespaced = "compareNamespaced.(Lnet/minecraft/resources/ResourceLocation;)I";
+        assert_eq!(location_call(&mut rt, compare, &[az, ba]).i(), 25);
+        assert_eq!(location_call(&mut rt, namespaced, &[az, ba]).i(), -1);
+        assert_eq!(location_call(&mut rt, compare, &[ba, aa]).i(), 1);
+
+        let shaft = rt.string("create:shaft");
+        let stone = rt.string("minecraft:stone");
+        let (block, tooltip) = (rt.string("block"), rt.string("tooltip"));
+        let mut keys = Vec::new();
+        for (method, args) in [
+            ("toLanguageKey.(Ljava/lang/String;)Ljava/lang/String;", vec![shaft, block]),
+            ("toLanguageKey.(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", vec![shaft, block, tooltip]),
+            ("toShortLanguageKey.()Ljava/lang/String;", vec![stone]),
+            ("toShortLanguageKey.()Ljava/lang/String;", vec![shaft]),
+            ("toDebugFileName.()Ljava/lang/String;", vec![rt.string("create:a/b")]),
+        ] {
+            let v = location_call(&mut rt, method, &args);
+            keys.push(rt.str_of(v).unwrap_or("").to_owned());
+        }
+        assert_eq!(keys, ["block.create.shaft", "block.create.shaft.tooltip", "stone", "create.shaft", "create_a_b"]);
+    }
 
     /// `ServerLifecycleHooks.getCurrentServer()` is null until the world's level is open (Mekanism's
     /// saved data asks for it from `LevelEvent.Load`), then the one server, whose overworld is that
