@@ -14,6 +14,10 @@
 //!   `ClientPlayerNetworkEvent.LoggingIn` and `.LoggingOut`, and `.Clone` when a change of dimension
 //!   makes the client's player anew. Leaving, the client's level unloads (`LevelEvent.Unload`), so
 //!   the next server's is a new one.
+//! - A mod's entity joining and leaving a level, on either side ([`entity_joins`],
+//!   [`entity_leaves`]): `EntityJoinLevelEvent`, which a listener cancels to keep it out, and
+//!   `EntityLeaveLevelEvent` (`onTrackingEnd`). Create keeps its contraptions' list for collisions
+//!   from them.
 //!
 //! Create mirrors breaks and placements with its wand of symmetry, wears its extendo grip down on
 //! them, glues a block placed with super glue in the off hand, pulses its haunted bell from a
@@ -41,6 +45,8 @@ pub(crate) const LOGGING_IN: &str = "net/neoforged/neoforge/client/event/ClientP
 pub(crate) const LOGGING_OUT: &str = "net/neoforged/neoforge/client/event/ClientPlayerNetworkEvent$LoggingOut";
 pub(crate) const CLONE: &str = "net/neoforged/neoforge/client/event/ClientPlayerNetworkEvent$Clone";
 const LEVEL_UNLOAD: &str = "net/neoforged/neoforge/event/level/LevelEvent$Unload";
+pub(crate) const ENTITY_JOIN: &str = "net/neoforged/neoforge/event/entity/EntityJoinLevelEvent";
+pub(crate) const ENTITY_LEAVE: &str = "net/neoforged/neoforge/event/entity/EntityLeaveLevelEvent";
 const PLAYER: &str = "net/minecraft/world/entity/player/Player";
 const GAME_MODE: &str = "net/minecraft/client/multiplayer/MultiPlayerGameMode";
 const CONNECTION: &str = "net/minecraft/network/Connection";
@@ -52,7 +58,9 @@ const LAST_CLICK: &str = "compat:last-click";
 
 /// The events' classes above them, so a listener for `BlockEvent` (or `PlayerEvent`, or any
 /// event) hears them.
-const SUPERS: [(&str, &str); 14] = [
+const SUPERS: [(&str, &str); 16] = [
+    (ENTITY_JOIN, ENTITY_EVENT),
+    (ENTITY_LEAVE, ENTITY_EVENT),
     (BREAK, BLOCK_EVENT),
     (PLACE, BLOCK_EVENT),
     (MULTI_PLACE, PLACE),
@@ -314,6 +322,42 @@ pub fn client_level_unload(rt: &mut Rt, dimension: &str) {
     }
 }
 
+// ---- entities joining and leaving ----
+
+/// The level a mod entity was made in (`EntityType.create(level)`), or the runtime's.
+fn level_of(rt: &mut Rt, e: V) -> V {
+    match rt.get_field(e, "$level") {
+        V::R(n) if n != 0 => V::R(n),
+        _ => crate::glue::level(rt),
+    }
+}
+
+/// `EntityJoinLevelEvent`: the mod entity `e` joins the level (`PersistentEntitySectionManager.addEntity`
+/// on a server, `ClientLevel.addEntity` on a client), not yet among its entities. Whether a listener
+/// canceled it: it then stays out.
+pub fn entity_joins(rt: &mut Rt, e: V, from_disk: bool) -> bool {
+    if !listened(rt, ENTITY_JOIN) {
+        return false;
+    }
+    let ev = rt.new_object(ENTITY_JOIN);
+    let level = level_of(rt, e);
+    put_all(rt, ev, &[("$entity", e), ("$level", level), ("$fromDisk", V::I(i32::from(from_disk))), ("$canceled", V::I(0))]);
+    crate::neo::post(rt, ENTITY_JOIN, ev);
+    rt.get_field(ev, "$canceled").i() != 0
+}
+
+/// `EntityLeaveLevelEvent`: the mod entity `e` left the level (`onTrackingEnd`: removed, or its
+/// copy on a client let go).
+pub fn entity_leaves(rt: &mut Rt, e: V) {
+    if !listened(rt, ENTITY_LEAVE) {
+        return;
+    }
+    let ev = rt.new_object(ENTITY_LEAVE);
+    let level = level_of(rt, e);
+    put_all(rt, ev, &[("$entity", e), ("$level", level)]);
+    crate::neo::post(rt, ENTITY_LEAVE, ev);
+}
+
 // ---- the events' calls ----
 
 fn block_event(rt: &Rt, v: V) -> bool {
@@ -322,7 +366,7 @@ fn block_event(rt: &Rt, v: V) -> bool {
 
 /// The keys [`call`] may answer.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, BREAK | PLACE | MULTI_PLACE | SNAPSHOT | PLAYER_TICK | PLAYER_TICK_PRE | PLAYER_TICK_POST)
+    matches!(owner, BREAK | PLACE | MULTI_PLACE | SNAPSHOT | PLAYER_TICK | PLAYER_TICK_PRE | PLAYER_TICK_POST | ENTITY_JOIN | ENTITY_LEAVE)
         || owner.starts_with(NETWORK_EVENT)
         || (owner == BLOCK_EVENT && name == "<init>")
         || (matches!(owner, EVENT | CANCELLABLE) && matches!(name, "isCanceled" | "setCanceled"))
@@ -346,6 +390,23 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if owner.starts_with(PLAYER_TICK) || (matches!(owner, PLAYER_EVENT | LIVING_EVENT | ENTITY_EVENT) && rt.class_of(ev).starts_with(PLAYER_TICK)) {
         return (name == "getEntity").then(|| rt.get_field(ev, "$player"));
+    }
+    let joining = matches!(rt.class_of(ev), ENTITY_JOIN | ENTITY_LEAVE);
+    if matches!(owner, ENTITY_JOIN | ENTITY_LEAVE) || (joining && matches!(owner, ENTITY_EVENT | EVENT | CANCELLABLE)) {
+        if !joining {
+            return None;
+        }
+        return Some(match name {
+            "getEntity" => rt.get_field(ev, "$entity"),
+            "getLevel" => rt.get_field(ev, "$level"),
+            "loadedFromDisk" => V::I(rt.get_field(ev, "$fromDisk").i()),
+            "isCanceled" => V::I(rt.get_field(ev, "$canceled").i()),
+            "setCanceled" if rt.class_of(ev) == ENTITY_JOIN => {
+                rt.put_field(ev, "$canceled", V::I(a(1).i()));
+                V::Void
+            }
+            _ => return None,
+        });
     }
     if name == "<init>" {
         return construct(rt, owner, args);

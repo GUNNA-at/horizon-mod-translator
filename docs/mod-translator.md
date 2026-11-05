@@ -3247,6 +3247,20 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Gaps: the game's placing hook can't be undone, so a canceled `EntityPlaceEvent` keeps the block;
     `BreakEvent`'s pre-canceled cases (spectator, adventure mode) aren't posted; `PlayerTickEvent.Pre`
     comes with `.Post` at the tick's end; a change of dimension keeps the client's one level object.
+- [x] 2026-11-05 A mod's entity joining and leaving a level (`world_events.rs`, `mod_entities.rs`).
+  Measured: `EntityJoinLevelEvent` 31 jars (41 methods, Create 4: `CommonEvents.onEntityAdded`
+  puts a new contraption entity on `ContraptionHandler`'s list for collisions, `attachData`,
+  `CapabilityMinecartController.attach`, Flywheel's visuals), `EntityLeaveLevelEvent` 11 (15,
+  Create 3). The runtime posted neither. Now `EntityJoinLevelEvent` (entity, the level it was made
+  in, `loadedFromDisk` false) as a mod entity joins: `Level.addFreshEntity` on a server, the copy a
+  client is sent; a listener that cancels it keeps it out (`addFreshEntity` answers false, the
+  client drops the copy). `EntityLeaveLevelEvent` as it leaves: removed at a level's tick, its copy
+  let go on a client (the server's removal, or a new copy under its id). Tests
+  `mod_entities::tests::a_mod_entitys_joining_and_leaving_reach_the_mods` (two carts, the second
+  kept out; the first leaves when it discards itself) and the client half in
+  `a_client_is_sent_the_entities_in_its_range_and_follows_them_until_they_go`. Not yet checked in
+  game (it needs a contraption assembled); vanilla entities (Create's minecart controllers) aren't
+  posted yet. 349 compat, 17 translator tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

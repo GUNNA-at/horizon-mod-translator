@@ -311,6 +311,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         let e = a(1);
         let l = live_list(rt);
         if !jutil::elements(rt, l).contains(&e) {
+            // NeoForge's `EntityJoinLevelEvent` first: a listener may keep it out.
+            if crate::world_events::entity_joins(rt, e, false) {
+                return Some(V::I(0));
+            }
             let mut items = jutil::elements(rt, l);
             items.push(e);
             set_live(rt, items);
@@ -742,9 +746,12 @@ pub fn tick_all(rt: &mut Rt, dimension: &str) {
     if rt.host().is_some_and(|h| h.is_server()) {
         track(rt, dimension);
     }
-    let kept: Vec<V> = live(rt).into_iter().filter(|&e| rt.get_field(e, "removalReason").r() == 0).collect();
-    if kept.len() != live(rt).len() {
+    let (kept, gone): (Vec<V>, Vec<V>) = live(rt).into_iter().partition(|&e| rt.get_field(e, "removalReason").r() == 0);
+    if !gone.is_empty() {
         set_live(rt, kept);
+        for e in gone {
+            crate::world_events::entity_leaves(rt, e);
+        }
     }
 }
 
@@ -1110,6 +1117,7 @@ pub fn receive(rt: &mut Rt, data: &[u8]) {
                     rt.put_field(e, "removalReason", r);
                     let kept: Vec<V> = live(rt).into_iter().filter(|&x| x != e).collect();
                     set_live(rt, kept);
+                    crate::world_events::entity_leaves(rt, e);
                 }
             }
         }
@@ -1144,6 +1152,7 @@ fn client_spawn(rt: &mut Rt, buf: V) {
     if let Some(old) = by_id(rt, id) {
         let kept: Vec<V> = live(rt).into_iter().filter(|&x| x != old).collect();
         set_live(rt, kept);
+        crate::world_events::entity_leaves(rt, old);
     }
     let level = crate::glue::level(rt);
     let e = api::call(rt, "net/minecraft/world/entity/EntityType.create.(Lnet/minecraft/world/level/Level;)Lnet/minecraft/world/entity/Entity;", &[ty, level]);
@@ -1161,6 +1170,10 @@ fn client_spawn(rt: &mut Rt, buf: V) {
     read_data(rt, buf, e);
     virtual_call(rt, e, READ_SPAWN_KEY, READ_SPAWN, &[buf]);
     rt.report_thrown("readSpawnData");
+    // NeoForge's `EntityJoinLevelEvent` on the client too: a listener may keep it out.
+    if crate::world_events::entity_joins(rt, e, false) {
+        return;
+    }
     let mut items = live(rt);
     items.push(e);
     set_live(rt, items);
@@ -1245,6 +1258,7 @@ mod tests {
     fn a_client_is_sent_the_entities_in_its_range_and_follows_them_until_they_go() {
         let (mut server, ty) = runtime();
         let (mut client, _) = runtime();
+        listen_joins(&mut client);
         let mut host = MemoryHost { players: vec![(1, [0.0, 64.0, 0.0]), (2, [500.0, 64.0, 0.0])], ..MemoryHost::default() };
         let cart = server.with_host(&mut host, |rt| {
             let level = crate::glue::level(rt);
@@ -1270,6 +1284,7 @@ mod tests {
         assert_eq!(copies.len(), 1);
         let copy = copies[0];
         assert_eq!(client.get_field(copy, "$id"), server.get_field(cart, "$id"));
+        assert_eq!(client.statics.get("t.last-joined").copied(), Some(copy), "EntityJoinLevelEvent on the client");
         assert_eq!(crate::tags::uuid_bits(&client, client.get_field(copy, "uuid")), crate::tags::uuid_bits(&server, server.get_field(cart, "uuid")));
         deliver(&mut server, &mut host, &mut client, &|rt| {
             let cart = live(rt)[0];
@@ -1291,6 +1306,71 @@ mod tests {
         deliver(&mut server, &mut host, &mut client, &|_| {});
         assert!(live(&server).is_empty());
         assert!(live(&client).is_empty(), "removed on the client");
+        assert_eq!(client.statics.get("t.last-left").copied(), Some(copy), "EntityLeaveLevelEvent on the client");
+        assert_eq!(client.statics.get("t.joined").map(|v| v.i()), Some(1));
+    }
+
+    /// A mod listening to entities joining and leaving as Create does (its contraptions' list):
+    /// it hears each cart join (and keeps the second out), then the first leave once discarded.
+    fn joins(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+        let ev = args[1];
+        let e = api::call(rt, "net/neoforged/neoforge/event/entity/EntityEvent.getEntity.()Lnet/minecraft/world/entity/Entity;", &[ev]);
+        let key = if id == 1 { "t.joined" } else { "t.left" };
+        let n = rt.statics.get(key).copied().unwrap_or(V::I(0)).i() + 1;
+        rt.statics.insert(key, V::I(n));
+        rt.statics.insert(if id == 1 { "t.last-joined" } else { "t.last-left" }, e);
+        let level = if id == 1 {
+            let d = api::call(rt, "net/neoforged/neoforge/event/entity/EntityJoinLevelEvent.loadedFromDisk.()Z", &[ev]);
+            rt.statics.insert("t.from-disk", d);
+            api::call(rt, "net/neoforged/neoforge/event/entity/EntityJoinLevelEvent.getLevel.()Lnet/minecraft/world/level/Level;", &[ev])
+        } else {
+            api::call(rt, "net/neoforged/neoforge/event/entity/EntityLeaveLevelEvent.getLevel.()Lnet/minecraft/world/level/Level;", &[ev])
+        };
+        rt.statics.insert(if id == 1 { "t.join-level" } else { "t.leave-level" }, level);
+        if id == 1 && n == 2 {
+            api::call(rt, "net/neoforged/neoforge/event/entity/EntityJoinLevelEvent.setCanceled.(Z)V", &[ev, V::I(1)]);
+        }
+        Some(V::Void)
+    }
+
+    fn listen_joins(rt: &mut Rt) {
+        rt.lambda_call = Some(joins);
+        for (class, id) in [(crate::world_events::ENTITY_JOIN, 1), (crate::world_events::ENTITY_LEAVE, 2)] {
+            let l = rt.lambda_id("java/util/function/Consumer", id, vec![]);
+            rt.listeners.push((class.to_owned(), l));
+        }
+    }
+
+    /// NeoForge's `EntityJoinLevelEvent` as a mod entity joins the level (a listener that cancels it
+    /// keeps it out: `addFreshEntity` answers false) and `EntityLeaveLevelEvent` as it leaves.
+    #[test]
+    fn a_mod_entitys_joining_and_leaving_reach_the_mods() {
+        let (mut rt, ty) = runtime();
+        listen_joins(&mut rt);
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let create = "net/minecraft/world/entity/EntityType.create.(Lnet/minecraft/world/level/Level;)Lnet/minecraft/world/entity/Entity;";
+            let add = "net/minecraft/world/level/Level.addFreshEntity.(Lnet/minecraft/world/entity/Entity;)Z";
+            let first = api::call(rt, create, &[ty, level]);
+            let second = api::call(rt, create, &[ty, level]);
+            assert_eq!(api::call(rt, add, &[level, first]).i(), 1);
+            assert_eq!(api::call(rt, add, &[level, second]).i(), 0, "kept out by the listener");
+            assert_eq!(live(rt), [first]);
+            assert_eq!(rt.statics.get("t.last-joined").copied(), Some(second));
+            assert_eq!(rt.statics.get("t.join-level").copied(), Some(level), "the level it was made in");
+            assert_eq!(rt.statics.get("t.from-disk").map(|v| v.i()), Some(0), "a new one");
+            // Its third tick discards it: it leaves.
+            for _ in 0..3 {
+                tick_all(rt, "minecraft:overworld");
+            }
+            assert!(live(rt).is_empty());
+            assert_eq!(rt.statics.get("t.last-left").copied(), Some(first));
+            assert_eq!(rt.statics.get("t.leave-level").copied(), Some(level));
+        });
+        assert_eq!(rt.statics.get("t.joined").map(|v| v.i()), Some(2));
+        assert_eq!(rt.statics.get("t.left").map(|v| v.i()), Some(1));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]
