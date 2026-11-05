@@ -2559,7 +2559,9 @@ fn {id}_state_for_placement(
     ]
 }
 
-const CLIENT_BINDINGS: [(&str, &str); 22] = [
+const CLIENT_BINDINGS: [(&str, &str); 24] = [
+    ("commands", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"commands\", ty = \"&mut Vec<&'static str>\", value = \"&mut *commands\" },\n"),
+    ("command", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"command\", ty = \"&str\", value = \"command\" },\n    { name = \"ran\", ty = \"&mut bool\", value = \"&mut *ran\" },\n"),
     ("component_types", "    { name = \"types\", ty = \"&mut Vec<String>\", value = \"&mut *types\" },\n"),
     ("level_submit", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"camera\", ty = \"[f64; 3]\", value = \"camera\" },\n    { name = \"draw\", ty = \"&mut crate::game::native_block_entity_draw::BlockEntityDraw\", value = \"&mut *draw\" },\n"),
     ("content", "    { name = \"content\", ty = \"&mut horizon_mods::Content\", value = \"&mut *content\" },\n"),
@@ -2965,6 +2967,42 @@ mod tests {
         for model in [Some(&plain), None] {
             let def: serde_json::Value = serde_json::from_str(&super::item_definition("create", "wrench", model)).unwrap();
             assert_eq!(def, serde_json::json!({"model": leaf("create:item/wrench")}));
+        }
+    }
+
+    /// Every helper a bundle writes is injected (the manifest names it, with its hook), and every
+    /// hook it names is one the game has: in the catalog or a fragment still waiting for its number.
+    /// A helper the manifest leaves out is never called.
+    #[test]
+    fn every_helper_is_injected_into_a_hook_the_game_has() {
+        let mut written: Vec<String> = super::block_entity_helpers("m", "m_engine")
+            .into_iter()
+            .chain(super::client_helpers("m", "m_engine"))
+            .map(|(hook, _)| format!("{hook}.rs"))
+            .chain(super::BLOCK_HOOKS.iter().map(|(hook, _)| format!("{hook}.rs")))
+            .collect();
+        written.sort();
+        let manifest = super::mixin_toml("m", "0.1.0", &[]);
+        let field = |key: &str| -> Vec<String> {
+            let prefix = format!("{key} = \"");
+            manifest.lines().filter_map(|l| l.strip_prefix(prefix.as_str())?.strip_suffix('"')).map(str::to_owned).collect()
+        };
+        let mut injected = field("helper");
+        injected.sort();
+        assert_eq!(injected, written, "helpers written and injected");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let names = |text: &str| -> Vec<String> {
+            let json: serde_json::Value = serde_json::from_str(text).unwrap();
+            json["hooks"].as_array().into_iter().flatten().filter_map(|h| h["name"].as_str()).map(str::to_owned).collect()
+        };
+        let mut known = names(&std::fs::read_to_string(root.join("native-hooks.json")).unwrap());
+        for fragment in std::fs::read_dir(root.join("tools/native-hook-fragments")).unwrap().flatten() {
+            if fragment.path().extension().is_some_and(|e| e == "json") {
+                known.extend(names(&std::fs::read_to_string(fragment.path()).unwrap()));
+            }
+        }
+        for hook in field("hook") {
+            assert!(known.contains(&hook), "the game has no hook `{hook}`");
         }
     }
 
