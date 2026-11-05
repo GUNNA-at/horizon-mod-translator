@@ -393,7 +393,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     let stack_method = matches!(
         name,
-        "isComponentsPatchEmpty" | "getDamageValue" | "setDamageValue" | "getMaxDamage" | "isDamageableItem" | "isDamaged" | "hurtAndBreak" | "hurtWithoutBreaking"
+        "isComponentsPatchEmpty" | "getComponentsPatch" | "getDamageValue" | "setDamageValue" | "getMaxDamage" | "isDamageableItem" | "isDamaged" | "hurtAndBreak" | "hurtWithoutBreaking"
     );
     let typed = desc.starts_with("(Lnet/minecraft/core/component/DataComponentType;") || desc.starts_with("(Ljava/util/function/Supplier;");
     matches!(owner, TYPE | BUILDER) || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || typed))
@@ -434,6 +434,13 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             Some(c)
         }
         (ITEM_STACK, "isComponentsPatchEmpty") => Some(V::I(pairs(rt, a(0)).is_empty() as i32)),
+        // What was set on the stack, as `ItemStack.CODEC` writes its `components` (empty: the one
+        // `EMPTY`).
+        (ITEM_STACK, "getComponentsPatch") => {
+            let patch = patch(rt, a(0));
+            let json = serde_json::Value::Object(patch.iter().map(|(k, v)| (k.clone(), crate::recipes::nbt_json(v))).collect());
+            Some(crate::recipes::component_patch(rt, (!patch.is_empty()).then_some(&json)))
+        }
         // Durability: `ItemStack`'s own damage, worn by the game's rules on a stack in hand.
         (ITEM_STACK, "getDamageValue") => Some(V::I(damage(rt, a(0)).clamp(0, max_damage(rt, a(0)).max(0)))),
         (ITEM_STACK, "setDamageValue") => {
@@ -579,5 +586,15 @@ mod tests {
         let again = crate::codecs::decode(&mut rt, stack_codec, &crate::recipes::nbt_json(&written)).unwrap();
         let read = api::call(&mut rt, get, &[again, address]);
         assert_eq!(rt.str_of(read), Some("Mill"));
+
+        // Its patch (`getComponentsPatch`) holds what was set; a plain stack's is `EMPTY`.
+        let patch_of = "net/minecraft/world/item/ItemStack.getComponentsPatch.()Lnet/minecraft/core/component/DataComponentPatch;";
+        let is_empty = "net/minecraft/core/component/DataComponentPatch.isEmpty.()Z";
+        let p = api::call(&mut rt, patch_of, &[s]);
+        assert_eq!(api::call(&mut rt, is_empty, &[p]), V::I(0));
+        let plain = api_common::stack(&mut rt, "minecraft:paper", 1);
+        let p = api::call(&mut rt, patch_of, &[plain]);
+        assert_eq!(p, api::get_static(&mut rt, "net/minecraft/core/component/DataComponentPatch.EMPTY"));
+        assert_eq!(api::call(&mut rt, is_empty, &[p]), V::I(1));
     }
 }

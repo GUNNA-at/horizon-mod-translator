@@ -14,6 +14,26 @@ fn text(rt: &Rt, v: V) -> String {
     rt.str_of(v).map(str::to_owned).unwrap_or_else(|| rt.to_java_string(v, 'L'))
 }
 
+/// `Iterable.forEach(action)` (or fastutil's typed form) on `this`, a mod's object: its own
+/// `iterator()`, each element given to `action` as the action's type takes it.
+fn for_each(rt: &mut Rt, this: V, action: V, desc: &str) {
+    let (next, accept): (&'static str, &'static str) = match desc {
+        "(Lit/unimi/dsi/fastutil/longs/LongConsumer;)V" => ("it/unimi/dsi/fastutil/longs/LongIterator.nextLong.()J", "it/unimi/dsi/fastutil/longs/LongConsumer.accept.(J)V"),
+        "(Ljava/util/function/LongConsumer;)V" => ("it/unimi/dsi/fastutil/longs/LongIterator.nextLong.()J", "java/util/function/LongConsumer.accept.(J)V"),
+        "(Lit/unimi/dsi/fastutil/ints/IntConsumer;)V" => ("it/unimi/dsi/fastutil/ints/IntIterator.nextInt.()I", "it/unimi/dsi/fastutil/ints/IntConsumer.accept.(I)V"),
+        "(Ljava/util/function/IntConsumer;)V" => ("it/unimi/dsi/fastutil/ints/IntIterator.nextInt.()I", "java/util/function/IntConsumer.accept.(I)V"),
+        _ => ("java/util/Iterator.next.()Ljava/lang/Object;", "java/util/function/Consumer.accept.(Ljava/lang/Object;)V"),
+    };
+    let it = rt.call_functional("java/lang/Iterable.iterator.()Ljava/util/Iterator;", this, &[]);
+    while it.r() != 0 && rt.thrown.is_none() && rt.call_functional("java/util/Iterator.hasNext.()Z", it, &[]).i() != 0 && rt.thrown.is_none() {
+        let e = rt.call_functional(next, it, &[]);
+        if rt.thrown.is_some() {
+            return;
+        }
+        rt.call_functional(accept, action, &[e]);
+    }
+}
+
 fn new_str(rt: &mut Rt, s: String) -> V {
     rt.alloc("java/lang/String", Data::Str(s))
 }
@@ -381,6 +401,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "toString" => {
                 let s = text(rt, a(0));
                 new_str(rt, s)
+            }
+            // A library interface's default `forEach` on a mod's own iterable (electroenergetics'
+            // `ChunkCuboidEntry implements LongIterable`): the object's `iterator()`, walked.
+            "forEach" if desc.ends_with(")V") && ks.len() == 1 => {
+                for_each(rt, a(0), a(1), desc);
+                V::Void
             }
             _ => return None,
         }),
@@ -1319,6 +1345,41 @@ mod tests {
         let t = c(&mut rt, "org/apache/commons/lang3/tuple/Triple.of.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Lorg/apache/commons/lang3/tuple/Triple;", &[x, y, z]);
         assert_eq!(c(&mut rt, "org/apache/commons/lang3/tuple/Triple.getMiddle.()Ljava/lang/Object;", &[t]), y);
         assert_eq!(c(&mut rt, "org/apache/commons/lang3/tuple/Triple.getRight.()Ljava/lang/Object;", &[t]), z);
+    }
+
+    /// `forEach(LongConsumer)` on a mod's own `LongIterable` (a default method of the library's
+    /// interface, which the mod class doesn't declare): the mod's `iterator()` is walked with its
+    /// own `hasNext`/`nextLong`, each long reaching the action in order.
+    #[test]
+    fn a_mods_iterable_walks_its_own_iterator_for_for_each() {
+        const LONGS: [i64; 3] = [3, -1, 1 << 40];
+        thread_local! {
+            static GOT: std::cell::RefCell<Vec<i64>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            let this = args[0];
+            match (rt.class_of(this), short.split('.').next().unwrap_or("")) {
+                ("t/Cuboid", "iterator") => rt.new_object("t/CuboidIterator"),
+                ("t/CuboidIterator", "hasNext") => V::I((rt.get_field(this, "at").i() < 3) as i32),
+                ("t/CuboidIterator", "nextLong") => {
+                    let at = rt.get_field(this, "at").i();
+                    rt.put_field(this, "at", V::I(at + 1));
+                    V::J(LONGS[at as usize])
+                }
+                _ => panic!("unexpected {key}"),
+            }
+        }
+        fn accept(_rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+            GOT.with(|g| g.borrow_mut().push(args[1].j()));
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        rt.vcall = Some(vcall);
+        rt.lambda_call = Some(accept);
+        let cuboid = rt.new_object("t/Cuboid");
+        let action = rt.lambda_id("it/unimi/dsi/fastutil/longs/LongConsumer", 1, vec![]);
+        c(&mut rt, "java/lang/Object.forEach.(Lit/unimi/dsi/fastutil/longs/LongConsumer;)V", &[cuboid, action]);
+        assert_eq!(GOT.with(|g| g.borrow().clone()), LONGS);
     }
 
     /// Create's contraption keeps its level behind a `WeakReference`; nothing collects it here.

@@ -253,8 +253,8 @@ pub(crate) fn player_list(rt: &mut Rt) -> V {
     rt.intern("compat:player-list".into(), |rt| rt.new_object(PLAYER_LIST))
 }
 
-/// The server's players, as their objects (`PlayerList.getPlayers`).
-fn players(rt: &mut Rt) -> Vec<V> {
+/// The server's players, as their objects (`PlayerList.getPlayers`; a level's host lists its own).
+pub(crate) fn server_players(rt: &mut Rt) -> Vec<V> {
     let ids: Vec<u128> = rt.host().map(|h| h.players().into_iter().map(|(id, _)| id).collect()).unwrap_or_default();
     ids.into_iter().map(|id| known_player(rt, id)).collect()
 }
@@ -312,10 +312,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner == PLAYER_LIST {
         return Some(match name {
             "getPlayers" => {
-                let all = players(rt);
+                let all = server_players(rt);
                 crate::jutil::new_list(rt, all)
             }
-            "getPlayerCount" => V::I(players(rt).len() as i32),
+            "getPlayerCount" => V::I(server_players(rt).len() as i32),
             "getPlayer" if desc.starts_with("(Ljava/util/UUID;)") => {
                 let (msb, lsb) = crate::tags::uuid_bits(rt, a(1));
                 let id = (u128::from(msb as u64) << 64) | u128::from(lsb as u64);
@@ -335,7 +335,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getPlayerList" => player_list(rt),
             "getRelevantPlayers" => {
                 let p = rt.get_field(ev, "$player");
-                let items = if p.r() == 0 { players(rt) } else { vec![p] };
+                let items = if p.r() == 0 { server_players(rt) } else { vec![p] };
                 rt.alloc("java/util/stream/Stream", crate::Data::Stream(items))
             }
             "isCanceled" => V::I(0),
@@ -550,6 +550,10 @@ mod tests {
             let b = crate::tags::uuid(rt, 0, 0xb);
             let found = api::call(rt, "net/minecraft/server/players/PlayerList.getPlayer.(Ljava/util/UUID;)Lnet/minecraft/server/level/ServerPlayer;", &[list, b]);
             assert_eq!(found, crate::menus::server_player(rt, 0xb));
+            // A level's players (`ServerLevel.players`): the same objects.
+            let level = crate::glue::level(rt);
+            let here = api::call(rt, "net/minecraft/server/level/ServerLevel.players.()Ljava/util/List;", &[level]);
+            assert_eq!(crate::jutil::elements(rt, here), crate::jutil::elements(rt, players));
         });
         assert_eq!(
             heard(),

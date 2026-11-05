@@ -37,6 +37,8 @@ const TOOLTIP_COLOR: &str = "net/neoforged/neoforge/client/event/RenderTooltipEv
 const TOOLTIP_GATHER: &str = "net/neoforged/neoforge/client/event/RenderTooltipEvent$GatherComponents";
 const WINDOW: &str = "com/mojang/blaze3d/platform/Window";
 const MINECRAFT: &str = "net/minecraft/client/Minecraft";
+const LANGUAGE_MANAGER: &str = "net/minecraft/client/resources/language/LanguageManager";
+const PARTICLE_ENGINE: &str = "net/minecraft/client/particle/ParticleEngine";
 const GAME_MODE: &str = "net/minecraft/client/multiplayer/MultiPlayerGameMode";
 const GAME_TYPE: &str = "net/minecraft/world/level/GameType";
 const GAME_TYPES: [&str; 4] = ["SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR"];
@@ -1713,6 +1715,28 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
     Some(match (owner, name) {
         (MINECRAFT, "getWindow") => single(rt, WINDOW),
         (MINECRAFT, "renderBuffers") => single(rt, "net/minecraft/client/renderer/RenderBuffers"),
+        // The client's language: the game's (English until it says otherwise), `Locale`'s one object.
+        (MINECRAFT, "getLanguageManager") => single(rt, LANGUAGE_MANAGER),
+        (LANGUAGE_MANAGER, "getSelected") => rt.string("en_us"),
+        (LANGUAGE_MANAGER, "getJavaLocale") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
+        // The client's runtime holds no server object, even in single player (the game's server
+        // thread runs its own): a mod syncs over the network, as to a remote server.
+        (MINECRAFT, "hasSingleplayerServer") => V::I(0),
+        // Mixin accessors onto the client: the screen open (none until one opens) and the particle
+        // engine, whose providers map a mod may fill (the game draws particles from its own).
+        (MINECRAFT, "$screen") => V::NULL,
+        (MINECRAFT, "$particleEngine") => single(rt, PARTICLE_ENGINE),
+        (PARTICLE_ENGINE, "$providers") => {
+            let engine = a(0);
+            match rt.get_field(engine, "$providers") {
+                m if m.r() != 0 => m,
+                _ => {
+                    let m = rt.alloc("java/util/HashMap", crate::Data::Table(Default::default()));
+                    rt.put_field(engine, "$providers", m);
+                    m
+                }
+            }
+        }
         ("net/minecraft/client/renderer/RenderBuffers", "bufferSource" | "crumblingBufferSource") => {
             rt.intern("compat:gui-buffers".into(), |rt| rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource"))
         }
@@ -2046,7 +2070,9 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | "com/mojang/blaze3d/systems/RenderSystem"
             | "com/mojang/blaze3d/platform/Lighting"
     ) || owner.starts_with(TOOLTIP_EVENT)
-        || (owner == MINECRAFT && matches!(name, "getWindow" | "renderBuffers"))
+        || (owner == MINECRAFT && matches!(name, "getWindow" | "renderBuffers" | "getLanguageManager" | "hasSingleplayerServer" | "$screen" | "$particleEngine"))
+        || owner == LANGUAGE_MANAGER
+        || (owner == PARTICLE_ENGINE && name == "$providers")
 }
 
 /// The calls this module models (`owner.name.desc`), or None.

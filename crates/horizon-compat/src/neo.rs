@@ -775,6 +775,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     }
                 }
                 "key" => rt.string(&reg),
+                // The registry owns its holders (`Holder.Reference.createStandAlone(owner, key)`).
+                "holderOwner" => a(0),
                 // `addAlias(from, to)`: an old name that reads as the new one (a renamed block).
                 "addAlias" => {
                     let (from, to) = (name_in(rt, a(1)), name_in(rt, a(2)));
@@ -1335,7 +1337,9 @@ mod tests {
         assert_eq!(c(&mut rt, IS_SERVER, &[side]).i(), 0);
         assert_eq!(c(&mut rt, "net/neoforged/fml/LogicalSide.isClient.()Z", &[side]).i(), 1);
 
-        let registry = c(&mut rt, "net/minecraft/core/Registry.holderOwner.()Lnet/minecraft/core/HolderOwner;", &[V::NULL]);
+        // The registry as the game's statics give it: its path, a string.
+        let blocks = crate::api::get_static(&mut rt, "net/minecraft/core/registries/BuiltInRegistries.BLOCK");
+        let registry = c(&mut rt, "net/minecraft/core/Registry.holderOwner.()Lnet/minecraft/core/HolderOwner;", &[blocks]);
         let key = rt.string("block#t:machine");
         let holder = c(&mut rt, "net/minecraft/core/Holder$Reference.createStandAlone.(Lnet/minecraft/core/HolderOwner;Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/Holder$Reference;", &[registry, key]);
         let machine = rt.new_object("t/Machine");

@@ -797,7 +797,7 @@ fn int_field(o: &Map<String, Json>, key: &str, default: i64) -> Result<i64, Stri
 }
 
 /// A component patch's value: its JSON, kept (components aren't applied yet).
-fn component_patch(rt: &mut Rt, j: Option<&Json>) -> V {
+pub(crate) fn component_patch(rt: &mut Rt, j: Option<&Json>) -> V {
     match j {
         None => get_static(rt, COMPONENT_PATCH, "EMPTY").unwrap_or(V::NULL),
         Some(j) => {

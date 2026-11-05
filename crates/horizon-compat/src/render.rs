@@ -330,6 +330,7 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
         || owner == "com/mojang/math/Axis"
         || owner.starts_with("net/minecraft/client/")
         || owner.starts_with("net/neoforged/")
+        || owner == "org/lwjgl/opengl/GL"
         || INTRINSICS.iter().any(|k| k.split_once('.').is_some_and(|(o, _)| o == owner))
 }
 
@@ -1584,20 +1585,42 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         // `addLayer`): the host picks each quad's pass from its sprite's alpha (cut out where its
         // texels are clear, translucent where they are partly), so there is nothing to keep.
         ("net/minecraft/client/renderer/ItemBlockRenderTypes", "setRenderLayer") => V::Void,
-        // Blocks draw in the solid layer here (the host picks its own passes).
-        ("net/neoforged/neoforge/client/ChunkRenderTypeSet", n) => match n {
-            "contains" => V::I((rt.str_of(rt.get_field(a(1), "$name")) == Some("solid")) as i32),
-            "isEmpty" => V::I(0),
-            "asList" => {
-                let solid = render_type(rt, "solid");
-                crate::jutil::new_list(rt, vec![solid])
+        // A set a mod makes (`ChunkRenderTypeSet.of(...)`, `none()`, `all()`) holds its types;
+        // the game's own blocks draw in the solid layer here (the host picks its own passes).
+        ("net/neoforged/neoforge/client/ChunkRenderTypeSet", "of" | "none" | "all") => {
+            let types = match name {
+                "of" => crate::jutil::elements(rt, a(0)),
+                "none" => Vec::new(),
+                _ => CHUNK_LAYERS.iter().map(|t| render_type(rt, t)).collect(),
+            };
+            let set = rt.new_object("net/neoforged/neoforge/client/ChunkRenderTypeSet");
+            let list = crate::jutil::new_list(rt, types);
+            rt.put_field(set, "$types", list);
+            set
+        }
+        ("net/neoforged/neoforge/client/ChunkRenderTypeSet", n) => {
+            let types = match rt.get_field(a(0), "$types") {
+                l if l.r() != 0 => crate::jutil::elements(rt, l),
+                _ => vec![render_type(rt, "solid")],
+            };
+            match n {
+                "contains" => V::I(types.contains(&a(1)) as i32),
+                "isEmpty" => V::I(types.is_empty() as i32),
+                "asList" => crate::jutil::new_list(rt, types),
+                "iterator" => crate::jutil::new_iter(rt, types),
+                _ => return None,
             }
-            "iterator" => {
-                let solid = render_type(rt, "solid");
-                crate::jutil::new_iter(rt, vec![solid])
-            }
-            _ => return None,
-        },
+        }
+        // A mod's own panorama (Create's main menu screen, catnip's config screen): its cube map
+        // kept; the game draws its own title panorama, so drawing this one draws nothing.
+        ("net/minecraft/client/renderer/PanoramaRenderer", "<init>") => {
+            rt.put_field(a(0), "$cubeMap", a(1));
+            V::Void
+        }
+        ("net/minecraft/client/renderer/PanoramaRenderer", "render" | "registerTextures") => V::Void,
+        // Flywheel asks the client's GL what it supports: Horizon doesn't draw with GL, so no
+        // version or extension reads as there (each capability field is false).
+        ("org/lwjgl/opengl/GL", "getCapabilities") => single(rt, "org/lwjgl/opengl/GLCapabilities"),
         ("net/minecraft/client/renderer/RenderType", "chunkBufferLayers") => {
             let layers: Vec<V> = CHUNK_LAYERS.iter().map(|n| render_type(rt, n)).collect();
             crate::jutil::new_list(rt, layers)

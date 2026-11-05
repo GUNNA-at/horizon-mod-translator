@@ -2174,6 +2174,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `api_common::tests::{a_chunk_pos_packs_and_spans_as_vanillas, config_types_are_listed_as_flms}`,
     the player events test now reads each player's name, UUID text and block; 245 compat tests and
     13 translator tests pass.
+  - [x] 2026-11-05 In game (the build of the step before, `cemgame.sh`): the regex, side, holder,
+    `ChunkPos`, config-type and player-identity calls are gone (54 kinds of unmapped call to 32),
+    Copycats' config sync no longer reads `null`, CEM's machines read back as before. The next
+    batch, from that run's list: `ItemStack.getComponentsPatch` (the stack's set components as
+    `ItemStack.CODEC` writes them; `EMPTY` when none), `Registry.holderOwner` on a registry as the
+    game's statics give it (its path), a level's `players()` (a server's in that dimension, a
+    client's own) and its public `random` field, `Minecraft.getLanguageManager` (`getSelected`,
+    `getJavaLocale`), `hasSingleplayerServer` (false: the client's runtime holds no server object,
+    so a mod syncs over the network as to a remote server), the accessors `Minecraft.screen` and
+    `particleEngine` (its `providers` map), `ChunkRenderTypeSet.of`/`none`/`all` holding their
+    types, `GL.getCapabilities` (nothing reads as supported: Horizon doesn't draw with GL),
+    `PanoramaRenderer` (Create's and catnip's menus: kept, drawn by nothing), a library interface's
+    default `forEach` on a mod's own iterable (electroenergetics' `LongIterable`: its `iterator()`
+    walked with its own `hasNext`/`nextLong`), `CriterionTrigger.createCriterion`, and inert
+    advancement and item-predicate builders (advancements built in code are for data generators;
+    the game reads the shipped files). Left: `super.getShape` of a vanilla class (Create
+    Connected's lever, Copycats' ladder and door, read at registration: needs the game's shape of
+    an equivalent vanilla state), `BlockState.getProperties`, `LocalPlayer.getLookAngle` before the
+    world. Tests: `jlang::tests::a_mods_iterable_walks_its_own_iterator_for_for_each`, the saved
+    stack test reads its patch, the player events test reads `ServerLevel.players`; 246 compat
+    tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

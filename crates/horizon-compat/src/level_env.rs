@@ -114,7 +114,13 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
         ("scheduleTick", _) => V::Void,
         // The block ticks: the game keeps them, a tick queued again is kept once.
         ("getBlockTicks" | "getFluidTicks", _) => rt.intern("compat:level-ticks".into(), |rt| rt.new_object(LEVEL_TICKS)),
-        ("getRandom", "()Lnet/minecraft/util/RandomSource;") => rt.intern("compat:level-random".into(), |rt| rt.new_object("net/minecraft/util/RandomSource")),
+        // The level's random, by its getter or its public field (`level.random`).
+        ("getRandom" | "$random", "()Lnet/minecraft/util/RandomSource;") => rt.intern("compat:level-random".into(), |rt| rt.new_object("net/minecraft/util/RandomSource")),
+        // The players in the level: a server's in this dimension, a client's own.
+        ("players", "()Ljava/util/List;") => {
+            let players = if crate::neo::is_client(rt) { vec![crate::network::local_player(rt)] } else { crate::events::server_players(rt) };
+            crate::jutil::new_list(rt, players)
+        }
         ("getMinBuildHeight" | "getMinY", "()I") => V::I(rt.host().map_or(-64, |h| h.world_height().0)),
         ("getMaxBuildHeight", "()I") => V::I(rt.host().map_or(320, |h| h.world_height().0 + h.world_height().1)),
         ("getMaxY", "()I") => V::I(rt.host().map_or(319, |h| h.world_height().0 + h.world_height().1 - 1)),

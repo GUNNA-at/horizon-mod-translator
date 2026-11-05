@@ -2388,6 +2388,24 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         ("com/mojang/brigadier/exceptions/CommandSyntaxException", "getRawMessage") => rt.get_field(a(0), "$rawMessage"),
         ("com/mojang/brigadier/exceptions/CommandSyntaxException", "getType") => rt.get_field(a(0), "$type"),
+        // `CriterionTrigger.createCriterion(instance)`, its default method: the criterion record
+        // of the trigger and the instance (Create's advancements, built in code).
+        ("net/minecraft/advancements/CriterionTrigger", "createCriterion") => crate::records::make(rt, "net/minecraft/advancements/Criterion", &[a(0), a(1)]),
+        // Advancements a mod builds in code (for its data generator; the game reads the files the
+        // mod ships): the builders keep nothing, each step gives the builder back and `build` an
+        // advancement holder of the id; a criterion the vanilla shorthands make has no trigger.
+        (ADVANCEMENT_BUILDER | ITEM_PREDICATE_BUILDER, _) if desc.ends_with(&format!(")L{owner};")) => {
+            let class = if owner == ADVANCEMENT_BUILDER { ADVANCEMENT_BUILDER } else { ITEM_PREDICATE_BUILDER };
+            if a(0).r() != 0 && rt.class_of(a(0)) == class { a(0) } else { rt.new_object(class) }
+        }
+        (ADVANCEMENT_BUILDER, "build" | "save") => {
+            let id = if name == "build" { a(1) } else { a(2) };
+            crate::records::make(rt, "net/minecraft/advancements/AdvancementHolder", &[id, V::NULL])
+        }
+        (ITEM_PREDICATE_BUILDER, "build") => crate::records::make(rt, "net/minecraft/advancements/critereon/ItemPredicate", &[]),
+        (o, "hasItems") if o == "net/minecraft/advancements/critereon/InventoryChangeTrigger$TriggerInstance" => {
+            crate::records::make(rt, "net/minecraft/advancements/Criterion", &[V::NULL, V::NULL])
+        }
         // A player's profile: its id and name.
         ("com/mojang/authlib/GameProfile", "<init>") if desc == "(Ljava/util/UUID;Ljava/lang/String;)V" => {
             rt.put_field(a(0), "$id", a(1));
@@ -2640,6 +2658,8 @@ fn player_identity(rt: &mut Rt, p: V) -> (V, V) {
 }
 
 const CHUNK_POS: &str = "net/minecraft/world/level/ChunkPos";
+const ADVANCEMENT_BUILDER: &str = "net/minecraft/advancements/Advancement$Builder";
+const ITEM_PREDICATE_BUILDER: &str = "net/minecraft/advancements/critereon/ItemPredicate$Builder";
 
 /// `ChunkPos.asLong(x, z)`: x in the low 32 bits, z in the high.
 fn chunk_long(x: i32, z: i32) -> i64 {
