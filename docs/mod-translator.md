@@ -1928,6 +1928,20 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       and write through its `read` and `write`, as DFU's `decode` and `encode` do.
     Tests `blocks::tests::properties_keep_what_a_declaration_needs`,
     `ops::tests::a_mods_primitive_codec_reads_and_writes_through_read_and_write`.
+  - [x] 2026-11-05 The game's build of the Create + ten addons bundle failed in 3 minutes: a bundle
+    built without `--runtime` (as the game's are) carries the runtime inlined, without the core's
+    entry points, and `api::game_field` (round 8's game field reads) called the core crate's. It
+    reads the field itself now, and `bundle::tests::bundles_carry_every_runtime_source_file` checks
+    that no carried source names the core crate outside its tests.
+  - [x] 2026-11-05 Item model overrides (1.21.1), step 1 of 3: horizon-assets reads a translated
+    mod's `overrides` as `horizon:overrides`, Horizon's own item model type: the last override whose
+    predicates all hold, each property asked once, one nothing answers -inf
+    (`ItemOverrides.resolve`). Vanilla's generic properties come from the stack and its holder
+    (`damage` and `damaged` on a stack that can break, `lefthanded`, `cooldown`,
+    `custom_model_data` as 26.3's first float, `trim_type` by 1.21.1's material indices); the rest
+    from the mod (`ItemEnv::item_property`). Next: the runtime keeps `ItemProperties.register` (7 of
+    the 28 mods) and the game asks it through a client hook; the translator writes the
+    definitions. Test `item_model::tests::translated_overrides_pick_as_item_overrides_resolve`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
