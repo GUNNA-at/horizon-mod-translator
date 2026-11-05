@@ -2559,6 +2559,28 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (o, "getUpdateTag") if o.ends_with("BlockEntity") => compound(rt),
         (o, "getUpdatePacket") if o.ends_with("BlockEntity") => V::NULL,
+        // `ClientboundBlockEntityDataPacket.create(blockEntity[, saver])`, what a mod's
+        // `getUpdatePacket` returns: the block entity's position and type, and its update tag, made
+        // by `saver` from it and the level's registries, or its own `getUpdateTag`. The game sends
+        // players the update tag itself (`glue::block_entity_update_tag`): the packet is only read
+        // back, by its getters, which the data-class table answers, as it built it.
+        (o, "create") if o.ends_with("/protocol/game/ClientboundBlockEntityDataPacket") => {
+            const INIT: &str = "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntityType;Lnet/minecraft/nbt/CompoundTag;)V";
+            const SAVER: &str = "java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+            const UPDATE_TAG: &str = "getUpdateTag.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag;";
+            const UPDATE_TAG_KEY: &str = "net/minecraft/world/level/block/entity/BlockEntity.getUpdateTag.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag;";
+            let be = a(0);
+            let access = rt.intern("compat:registry-access".into(), |rt| rt.new_object("net/minecraft/core/RegistryAccess"));
+            let tag = if args.len() > 1 {
+                rt.call_functional(SAVER, a(1), &[be, access])
+            } else if let Some(vc) = rt.vcall {
+                vc(rt, UPDATE_TAG_KEY, UPDATE_TAG, &[be, access])
+            } else {
+                compound(rt)
+            };
+            let (pos, kind) = (rt.get_field(be, "$pos"), rt.get_field(be, "$type"));
+            crate::records::make_data(rt, "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket", INIT, &[pos, kind, tag])
+        }
         ("net/minecraft/world/level/block/entity/BlockEntityType$Builder", "of") => {
             let b = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType$Builder");
             rt.put_field(b, "$factory", a(0));
@@ -5064,6 +5086,59 @@ mod tests {
         assert_eq!(crate::jutil::elements(&rt, needed), [this_entity]);
         let name = api::call(&mut rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParam.getName.()Lnet/minecraft/resources/ResourceLocation;", &[this_entity]);
         assert_eq!(rt.str_of(name), Some("minecraft:this_entity"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's `getUpdatePacket`, `ClientboundBlockEntityDataPacket.create(this)`: the packet holds
+    /// the block entity's position and type and the update tag its own `getUpdateTag` makes;
+    /// `create(this, saver)` holds what `saver` makes of the block entity and the registries.
+    #[test]
+    fn a_block_entitys_update_packet_holds_its_update_tag() {
+        const PACKET: &str = "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket";
+        fn tag_with(rt: &mut Rt, key: &str, value: i32) -> V {
+            let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
+            api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
+            let k = rt.string(key);
+            api::call(rt, "net/minecraft/nbt/CompoundTag.putInt.(Ljava/lang/String;I)V", &[tag, k, V::I(value)]);
+            tag
+        }
+        fn int_of(rt: &mut Rt, tag: V, key: &str) -> V {
+            let k = rt.string(key);
+            api::call(rt, "net/minecraft/nbt/CompoundTag.getInt.(Ljava/lang/String;)I", &[tag, k])
+        }
+        // The mod's block entity overrides `getUpdateTag`: its fuel.
+        fn vcall(rt: &mut Rt, _key: &'static str, short: &'static str, _args: &[V]) -> V {
+            assert_eq!(short, "getUpdateTag.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag;");
+            tag_with(rt, "Fuel", 7)
+        }
+        // The saver `(be, registries) -> be.saveCustomOnly(registries)`: 1 when it was given the
+        // block entity and the registries.
+        fn lambdas(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+            let given = rt.class_of(args[1]) == "test/Furnace" && rt.class_of(args[2]) == "net/minecraft/core/RegistryAccess";
+            Some(tag_with(rt, "Saved", given as i32))
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(vcall);
+        rt.lambda_call = Some(lambdas);
+        let furnace = api::get_static(&mut rt, "net/minecraft/world/level/block/entity/BlockEntityType.FURNACE");
+        let pos = api::block_pos(&mut rt, 4, 64, -2);
+        let state = api::state(&mut rt, "minecraft:furnace[facing=north,lit=false]");
+        let be = rt.new_object("test/Furnace");
+        api::call(&mut rt, "net/minecraft/world/level/block/entity/BlockEntity.<init>.(Lnet/minecraft/world/level/block/entity/BlockEntityType;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V", &[be, furnace, pos, state]);
+
+        let packet = api::call(&mut rt, "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket.create.(Lnet/minecraft/world/level/block/entity/BlockEntity;)Lnet/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket;", &[be]);
+        assert_eq!(rt.class_of(packet), PACKET);
+        assert_eq!(api::call(&mut rt, "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket.getPos.()Lnet/minecraft/core/BlockPos;", &[packet]), pos);
+        assert_eq!(api::call(&mut rt, "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket.getType.()Lnet/minecraft/world/level/block/entity/BlockEntityType;", &[packet]), furnace);
+        let tag = api::call(&mut rt, "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket.getTag.()Lnet/minecraft/nbt/CompoundTag;", &[packet]);
+        assert_eq!(int_of(&mut rt, tag, "Fuel"), V::I(7));
+
+        let saver = rt.lambda_id("test:saver", 1, Vec::new());
+        let packet = api::call(&mut rt, "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket.create.(Lnet/minecraft/world/level/block/entity/BlockEntity;Ljava/util/function/BiFunction;)Lnet/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket;", &[be, saver]);
+        let tag = api::call(&mut rt, "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket.getTag.()Lnet/minecraft/nbt/CompoundTag;", &[packet]);
+        assert_eq!(int_of(&mut rt, tag, "Saved"), V::I(1));
+        assert_eq!(int_of(&mut rt, tag, "Fuel"), V::I(0));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

@@ -205,6 +205,7 @@ mod native_falling;
 mod native_hits;
 mod native_hooks;
 mod native_inventories;
+mod native_level_events;
 mod native_lifecycle;
 mod native_menus;
 mod native_mob_draw;

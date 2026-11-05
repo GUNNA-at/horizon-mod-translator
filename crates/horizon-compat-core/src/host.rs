@@ -588,6 +588,23 @@ pub trait Host {
     fn set_player_vitals(&mut self, _to: &VitalsView) -> bool {
         false
     }
+    /// Level event `event` at `pos`, with `data` (`Level.levelEvent`, vanilla's `LevelEvent` codes:
+    /// a dispenser's click 1000, a door's sound 1005..., smoke 2000, a block breaking 2001 with its
+    /// state's id in `data`, bone meal 1505...): its sound and particles, for the players near.
+    /// Whether the game made it.
+    fn level_event(&mut self, _event: i32, _pos: [i32; 3], _data: i32) -> bool {
+        false
+    }
+    /// The game's id of the block state `state` names (`Block.getId`: its place in the game's
+    /// table of states, which the network uses): None for a state the game doesn't know.
+    fn state_id(&self, _state: &str) -> Option<i32> {
+        None
+    }
+    /// The block state of the game's id `id` (`Block.stateById`), as text: air past the table, as
+    /// vanilla answers. None when the host can't tell.
+    fn state_of_id(&self, _id: i32) -> Option<String> {
+        None
+    }
     /// A line of a mod's command's answer (`CommandSourceStack.sendSuccess`, `sendFailure`), for
     /// whoever ran it, as vanilla commands' feedback: `component` is vanilla's JSON text.
     fn command_feedback(&mut self, _component: &str) {}
@@ -1018,6 +1035,11 @@ pub struct MemoryHost {
     pub effects: std::collections::BTreeMap<Option<i32>, Vec<EffectView>>,
     /// The acting player's health and food ([`Host::player_vitals`]), set as given.
     pub vitals: Option<VitalsView>,
+    /// Level events made: the event, where, its data ([`Host::level_event`]).
+    pub level_events: Vec<(i32, [i32; 3], i32)>,
+    /// The game's block states by id ([`Host::state_id`], [`Host::state_of_id`]): empty for a host
+    /// that tells none.
+    pub state_ids: Vec<String>,
     /// Experience orbs spawned: where, worth, and the motion given.
     pub orbs: Vec<([f64; 3], u32, Option<[f64; 3]>)>,
     /// What the acting player looks at (`player_pov_hit`).
@@ -1305,6 +1327,20 @@ impl Host for MemoryHost {
     }
     fn set_player_vitals(&mut self, to: &VitalsView) -> bool {
         self.vitals.as_mut().map(|v| *v = *to).is_some()
+    }
+    fn level_event(&mut self, event: i32, pos: [i32; 3], data: i32) -> bool {
+        self.level_events.push((event, pos, data));
+        true
+    }
+    fn state_id(&self, state: &str) -> Option<i32> {
+        self.state_ids.iter().position(|s| s == state).and_then(|i| i32::try_from(i).ok())
+    }
+    fn state_of_id(&self, id: i32) -> Option<String> {
+        if self.state_ids.is_empty() {
+            return None;
+        }
+        let i = usize::try_from(id).ok().filter(|&i| i < self.state_ids.len());
+        Some(i.map_or_else(|| "minecraft:air".to_owned(), |i| self.state_ids[i].clone()))
     }
     fn spawn_experience_orb(&mut self, at: [f64; 3], value: u32, motion: Option<[f64; 3]>) -> bool {
         self.orbs.push((at, value, motion));

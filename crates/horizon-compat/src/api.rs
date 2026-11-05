@@ -678,7 +678,7 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 56] = [
+const CHAIN: [Module; 57] = [
     mutable_pos,
     crate::worldgen::call,
     crate::mixin::call,
@@ -689,6 +689,7 @@ const CHAIN: [Module; 56] = [
     crate::attributes::call,
     crate::mob_effects::call,
     crate::vitals::call,
+    crate::level_events::call,
     crate::enchantments::call,
     crate::item_use::call,
     crate::network::call,
@@ -740,7 +741,7 @@ const CHAIN: [Module; 56] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 56] = [
+const CLAIMS: [Claims; 57] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::worldgen::claims,
     crate::mixin::claims,
@@ -751,6 +752,7 @@ const CLAIMS: [Claims; 56] = [
     crate::attributes::claims,
     crate::mob_effects::claims,
     crate::vitals::claims,
+    crate::level_events::claims,
     crate::enchantments::claims,
     crate::item_use::claims,
     crate::network::claims,
@@ -800,7 +802,7 @@ const CLAIMS: [Claims; 56] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 56] = [
+const MODULE_NAMES: [&str; 57] = [
     "mutable_pos",
     "worldgen",
     "mixin",
@@ -811,6 +813,7 @@ const MODULE_NAMES: [&str; 56] = [
     "attributes",
     "mob_effects",
     "vitals",
+    "level_events",
     "enchantments",
     "item_use",
     "network",
@@ -1432,7 +1435,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "sendParticles") if level => crate::particles::send_particles(rt, desc, args),
         (_, "addParticle" | "addAlwaysVisibleParticle") if level => crate::particles::level_particle(rt, name, desc, args),
         (_, "playSound" | "playSeededSound" | "playLocalSound") if level => crate::sounds::level_sound(rt, name, desc, args),
-        (_, "levelEvent" | "gameEvent") if level => V::Void,
+        (_, "gameEvent") if level => V::Void,
         (_, "dimensionType") if level => rt.intern("compat:dimension-type".into(), |rt| rt.new_object("net/minecraft/world/level/dimension/DimensionType")),
         // Its dimension type's holder: vanilla's three dimensions have types of their own names.
         (_, "dimensionTypeRegistration") if level => {

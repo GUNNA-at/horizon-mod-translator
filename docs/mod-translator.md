@@ -3646,6 +3646,36 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   In game (round 9, 6 November): the cow given `hzcheck:static` by the owner's console command runs its hooks now:
   `static added to minecraft:cow (level 1)`, `static started on minecraft:cow (level 1)`, then acts 1, 2 and 3, the
   last; no "doesn't know". The player's effect, the vitals, the hits, the deaths and the drops as in round 8; no panic.
+- [x] 2026-11-06 Part 11: level events and block state ids. A mod's `Level.levelEvent(event, pos, data)` (also the form
+  naming a player, and `globalLevelEvent`) was a no-op; 71 jars of the pack call it, from 191 classes. Vanilla's
+  `LevelEvent` codes carry sounds and particles: a block breaking 2001 with its state's id (Create's drills and saws),
+  a door's sound 1005, smoke 2000, bone meal 1505. New compat module `level_events.rs` gives them to the game
+  (`Host::level_event`), which makes them as its own: `native_level_event` (`game/native_level_events.rs`) calls
+  `level_event_at`, played where the game runs and sent to a server's players near. A hit's hooks queue theirs for
+  after the hit. `Block.getId(state)` and `Block.stateById(id)` read the game's state ids (`Host::state_id`,
+  `state_of_id`); a state the game doesn't know is air's 0, an id past the table air. Fragment
+  `tools/native-hook-fragments/native_level_event.json` (the name `level_events` is the level load and unload hooks').
+  Test `level_events::tests::a_mod_breaks_a_block_with_its_sound_and_particles`.
+- [x] 2026-11-06 Part 12: entities by id and UUID, `Player.drop`, a block entity's update packet (from the gaps packcov5
+  measured).
+  - `Level.getEntity(int)` (46 mods): a mod's entity by its id; the game's: a player by their entity id, any other
+    entity the level holds (`vanilla_entities::by_id`). `ServerLevel.getEntity(UUID)` and `Level.getPlayerByUUID`
+    (18 and 23 mods): a player by their UUID, a mod's entity by its own, the game's others by the UUID the game gives
+    them (`lan::entity_uuid`). A player found so carries their entity id and place (`vanilla_entities::player`, as
+    `damage.rs` marks them), so hits and effects reach them, not the acting player.
+  - `Player.drop(stack, includeThrowerName)` and `drop(stack, dropAround, includeThrowerName)` (49 mods): an item
+    entity of the stack at the player's eyes less 0.3, thrown as 26.3's `LivingEntity.createItemStackToDrop` throws
+    it (in floats, with `Mth`'s sine table, the random numbers drawn in vanilla's order), picked up after 40 ticks, in
+    the level on a server; a client's is only returned. The menus' own drops (a stack thrown out of a menu, what
+    `placeItemBackInInventory` can't place) throw the same way now. Not modelled: the thrower, `ItemTossEvent`, the
+    statistics.
+  - `ClientboundBlockEntityDataPacket.create(blockEntity[, saver])` (60 mods), what a mod's `getUpdatePacket`
+    returns: the block entity's position, type and update tag (its own `getUpdateTag`, or what the saver makes);
+    the data-class table answers its getters. The game sends players the update tag itself.
+  Tests `mod_entities::tests::the_level_finds_its_entities_by_id_and_uuid`,
+  `menus::tests::a_player_throws_a_stack_from_their_eyes_the_way_they_look` and
+  `api_common::tests::a_block_entitys_update_packet_holds_its_update_tag`; the menu test's thrown stack now starts at
+  vanilla's float eye height. 368 compat, 17 translator and 1 + 1 + 41 game tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

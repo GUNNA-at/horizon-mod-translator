@@ -1071,8 +1071,8 @@ with no `Game` at hand. Server-side.
   player's action or the console's command that dealt it ends (with that player still in place), or the level's tick
   does, and before another level takes its place. An action's end makes only its own changes: those left before it wait
   for theirs. Changes run in the order they came; those a change leaves run after it, for up to 8 rounds. A hook plays
-  a sound, tells a player or hurts another entity this way. The effect hooks use it too: `native_apply_effect_tick` runs inside the entity's tick, with the
-  game read-only, and an effect is often given from inside a mod's own call.
+  a sound, tells a player or hurts another entity this way. The effect hooks use it too: `native_apply_effect_tick`
+  runs inside the entity's tick, with the game read-only, and an effect is often given from inside a mod's own call.
 
 ### Attributes
 
@@ -1122,6 +1122,15 @@ by the game's effect ids (`minecraft:speed`; a content mod's `<namespace>:<path>
   setters do: the health kept between 0 and the maximum, the absorption between 0 and the `max_absorption` attribute,
   the food as given. The maximum health isn't set this way: its attribute is (`native_change_attribute`). Never on a
   client, whose player's health and food are the server's. The player's client hears of it as of any other change.
+
+### Level events
+
+`crates/horizon-client/src/game/native_level_events.rs`: a mod's `Level.levelEvent`, made as the game's own.
+
+- `native_level_event(event, pos, data)` makes level event `event` at `pos` with `data`, vanilla's `LevelEvent` codes (a
+  dispenser's click 1000, a door's sound 1005..., smoke 2000, a block breaking 2001 with its state's id in `data`, bone
+  meal 1505...): played where the game runs, and on a server sent to its players near, as the game's own events are.
+  The ids of block states are the game's (`native_state_from_text` and `native_state_id_text` read them either way).
 
 ### Loot tables
 

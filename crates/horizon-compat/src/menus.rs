@@ -348,16 +348,81 @@ fn drop(rt: &mut Rt, stack: V) {
         return;
     }
     let Some(whole) = crate::hand::hand_stack_of(rt, stack) else { return };
-    let Some(([x, y, z], yaw, pitch)) = rt.host().and_then(|h| h.player_place()) else { return };
-    let eye = if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 };
-    let (sy, cy) = (f64::from(yaw.to_radians().sin()), f64::from(yaw.to_radians().cos()));
-    let (sp, cp) = (f64::from(pitch.to_radians().sin()), f64::from(pitch.to_radians().cos()));
-    let motion = [-sy * cp * 0.3, -sp * 0.3 + 0.1, cy * cp * 0.3];
+    let Some((feet, yaw, pitch)) = rt.host().and_then(|h| h.player_place()) else { return };
+    let (at, motion) = throw(rt, feet, eye_height(rt), Some((yaw, pitch)), false);
     if let Some(h) = rt.host_mut() {
-        h.spawn_stack_entity(&whole, [x, y + eye - 0.3, z], motion, 40);
+        h.spawn_stack_entity(&whole, at, motion, 40);
     }
     set_count(rt, stack, 0);
 }
+
+/// The acting player's eye height, as a float: standing, or crouching (`Player`'s poses).
+fn eye_height(rt: &Rt) -> f32 {
+    if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 }
+}
+
+/// Where a player's drop starts and how it's thrown (`LivingEntity.createItemStackToDrop`, 26.3): at
+/// their eyes less 0.3, the way they look (`look`: yaw and pitch) with a little spread, or gently in
+/// any direction (`around`, or no look known). In floats, with `Mth`'s sine table, drawing the
+/// runtime's random numbers in vanilla's order.
+fn throw(rt: &mut Rt, feet: [f64; 3], eye: f32, look: Option<(f32, f32)>, around: bool) -> ([f64; 3], [f64; 3]) {
+    let unit = |rt: &mut Rt| (crate::api_common::next_random(rt) >> 40) as f32 / (1u32 << 24) as f32;
+    let sin = |a: f32| crate::api_common::mth_sin(V::D(f64::from(a)));
+    let cos = |a: f32| crate::api_common::mth_cos(V::D(f64::from(a)));
+    const RADIANS: f32 = 0.017_453_292;
+    const TURN: f32 = 6.283_185_5;
+    let motion = match look {
+        Some((yaw, pitch)) if !around => {
+            let (sp, cp, sy, cy) = (sin(pitch * RADIANS), cos(pitch * RADIANS), sin(yaw * RADIANS), cos(yaw * RADIANS));
+            let spread = unit(rt) * TURN;
+            let strength = 0.02 * unit(rt);
+            let up = -sp * 0.3 + 0.1 + (unit(rt) - unit(rt)) * 0.1;
+            [
+                f64::from(-sy * cp * 0.3) + f64::from(spread).cos() * f64::from(strength),
+                f64::from(up),
+                f64::from(cy * cp * 0.3) + f64::from(spread).sin() * f64::from(strength),
+            ]
+        }
+        _ => {
+            let reach = unit(rt) * 0.5;
+            let angle = unit(rt) * TURN;
+            [f64::from(-sin(angle) * reach), f64::from(0.2f32), f64::from(cos(angle) * reach)]
+        }
+    };
+    ([feet[0], feet[1] + f64::from(eye) - f64::from(0.3f32), feet[2]], motion)
+}
+
+/// `Player.drop(stack, dropAround, ...)`: the stack as a new item entity at the player's eyes less
+/// 0.3, picked up after 40 ticks, thrown the way they look with vanilla's spread (`dropAround`: in
+/// any direction, gently), and, on a server, added to the level. Null for an empty stack, or no
+/// player the game tells of. The stack stays the caller's, as vanilla's does.
+///
+/// Not modelled: the thrower it names, NeoForge's `ItemTossEvent`, and the drop statistics.
+fn player_drop(rt: &mut Rt, p: V, stack: V, around: bool) -> V {
+    if is_empty(rt, stack) {
+        return V::NULL;
+    }
+    let uuid = crate::network::player_uuid(rt, p);
+    let in_place = crate::attributes::entity_of(rt, p) == Ok(None);
+    let Some(h) = rt.host() else { return V::NULL };
+    let (feet, look, eye) = match (in_place, h.player_place()) {
+        (true, Some((feet, yaw, pitch))) => (feet, Some((yaw, pitch)), eye_height(rt)),
+        _ => match uuid.and_then(|u| h.players().into_iter().find(|q| q.0 == u)) {
+            Some((_, feet)) => (feet, None, 1.62),
+            None => return V::NULL,
+        },
+    };
+    let (at, motion) = throw(rt, feet, eye, look, around);
+    let e = crate::entities::unspawned(rt, at, stack, motion, 40);
+    // A client's drop is the server's to make; the entity is only returned.
+    if !is_client_player(rt, p) {
+        let level = crate::glue::level(rt);
+        crate::api::call(rt, ADD_FRESH_ENTITY, &[level, e]);
+    }
+    e
+}
+
+const ADD_FRESH_ENTITY: &str = "net/minecraft/world/level/Level.addFreshEntity.(Lnet/minecraft/world/entity/Entity;)Z";
 
 // ---- menus ----
 
@@ -2233,6 +2298,10 @@ fn player_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             init_player(rt, p);
             inventory(rt, p)
         }
+        // `Player.drop(stack, includeThrowerName)` (NeoForge's `CommonHooks.onPlayerTossEvent`) and
+        // `drop(stack, dropAround, includeThrowerName)`.
+        ("drop", "(Lnet/minecraft/world/item/ItemStack;Z)Lnet/minecraft/world/entity/item/ItemEntity;") => player_drop(rt, p, a(1), false),
+        ("drop", "(Lnet/minecraft/world/item/ItemStack;ZZ)Lnet/minecraft/world/entity/item/ItemEntity;") => player_drop(rt, p, a(1), a(2).i() != 0),
         ("openMenu", "(Lnet/minecraft/world/MenuProvider;)Ljava/util/OptionalInt;") => open_menu(rt, p, a(1), |_, _| {}),
         ("openMenu", "(Lnet/minecraft/world/MenuProvider;Lnet/minecraft/core/BlockPos;)Ljava/util/OptionalInt;") => {
             let pos = a(2);
@@ -2606,7 +2675,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | MENU_SCREENS
     ) || (owner == GAME_MODE && matches!(name, "handleInventoryMouseClick" | "handleInventoryButtonClick"))
         || (player_owner(owner)
-            && matches!(name, "getInventory" | "openMenu" | "closeContainer" | "doCloseContainer" | "clientSideCloseContainer" | "hasContainerOpen" | "initMenu" | "nextContainerCounter"))
+            && matches!(name, "getInventory" | "openMenu" | "closeContainer" | "doCloseContainer" | "clientSideCloseContainer" | "hasContainerOpen" | "initMenu" | "nextContainerCounter" | "drop"))
 }
 
 /// The calls this module models (`owner.name.desc`), or None.
@@ -3103,7 +3172,8 @@ mod tests {
         let thrown: Vec<(&str, u32, u32)> = host.item_entities.iter().map(|e| (e.item.as_str(), e.count, e.pickup_delay)).collect();
         assert_eq!(thrown, vec![("minecraft:stone", 64, 40)]);
         let e = &host.item_entities[0];
-        assert!((e.pos[1] - (64.0 + 1.62 - 0.3)).abs() < 1e-9, "{:?}", e.pos);
+        // Vanilla's `getEyeY() - 0.3F`: the eye height and the 0.3 are floats.
+        assert_eq!(e.pos[1], 64.0 + f64::from(1.62f32) - f64::from(0.3f32), "{:?}", e.pos);
         // Thrown as a whole stack (its data with it), not as an item and a count.
         let whole = &host.item_entity_stacks[&e.id];
         assert_eq!((whole.item.as_str(), whole.count), ("minecraft:stone", 64));
@@ -3126,5 +3196,47 @@ mod tests {
         let long = c(&mut rt, "java/util/OptionalLong.of.(J)Ljava/util/OptionalLong;", &[V::J(7)]);
         assert_eq!(c(&mut rt, "java/util/OptionalLong.orElse.(J)J", &[long, V::J(0)]), V::J(7));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `Player.drop(stack, includeThrowerName)` on a server, as a mod's "throw what it holds" does: a
+    /// new item entity of the stack, picked up after 40 ticks, joins the level at the player's eyes
+    /// less 0.3 (1.62 standing), thrown the way they look (south, level): 0.3 forward and 0.1 up,
+    /// with a spread of up to 0.02 and a lift of up to 0.1 either way. `drop(stack, true, false)`
+    /// throws it around them: 0.2 up, at most 0.5 out. An empty stack drops nothing; a client's drop
+    /// is the server's to make, so it is only returned.
+    #[test]
+    fn a_player_throws_a_stack_from_their_eyes_the_way_they_look() {
+        const DROP: &str = "net/minecraft/world/entity/player/Player.drop.(Lnet/minecraft/world/item/ItemStack;Z)Lnet/minecraft/world/entity/item/ItemEntity;";
+        const DROP_AROUND: &str = "net/minecraft/world/entity/player/Player.drop.(Lnet/minecraft/world/item/ItemStack;ZZ)Lnet/minecraft/world/entity/item/ItemEntity;";
+        let mut rt = runtime();
+        let mut h = MemoryHost { player_id: Some(PLAYER), place: Some(([0.5, 64.0, 0.5], 0.0, 0.0)), ..MemoryHost::default() };
+        rt.with_host(&mut h, |rt| {
+            let p = server_player(rt, PLAYER);
+            let diamonds = crate::hand::load(rt, Some(stack_of("minecraft:diamond", 3)));
+            assert_ne!(crate::api::call(rt, DROP, &[p, diamonds, V::I(0)]), V::NULL);
+            let stone = crate::hand::load(rt, Some(stack_of("minecraft:stone", 1)));
+            assert_ne!(crate::api::call(rt, DROP_AROUND, &[p, stone, V::I(1), V::I(0)]), V::NULL);
+            let empty = crate::hand::load(rt, None);
+            assert_eq!(crate::api::call(rt, DROP, &[p, empty, V::I(0)]), V::NULL);
+        });
+        let eyes = 64.0 + f64::from(1.62f32) - f64::from(0.3f32);
+        let [thrown, around] = &h.item_entities[..] else { panic!("{:?}", h.item_entities.len()) };
+        assert_eq!((thrown.item.as_str(), thrown.count, thrown.pickup_delay, thrown.pos), ("minecraft:diamond", 3, 40, [0.5, eyes, 0.5]));
+        let [x, y, z] = thrown.motion;
+        assert!(x.hypot(z - 0.3) <= 0.02 + 1e-9 && (0.0..0.2).contains(&y), "{:?}", thrown.motion);
+        assert_eq!((around.item.as_str(), around.pos), ("minecraft:stone", [0.5, eyes, 0.5]));
+        let [x, y, z] = around.motion;
+        assert!(x.hypot(z) < 0.5 && y == f64::from(0.2f32), "{:?}", around.motion);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+
+        let mut rt = runtime();
+        rt.interned.insert("compat:client".into(), V::I(1));
+        let mut client = MemoryHost { client: true, player_id: Some(PLAYER), place: Some(([0.5, 64.0, 0.5], 0.0, 0.0)), ..MemoryHost::default() };
+        rt.with_host(&mut client, |rt| {
+            let p = server_player(rt, PLAYER);
+            let diamonds = crate::hand::load(rt, Some(stack_of("minecraft:diamond", 3)));
+            assert_ne!(crate::api::call(rt, DROP, &[p, diamonds, V::I(0)]), V::NULL);
+        });
+        assert!(client.item_entities.is_empty());
     }
 }

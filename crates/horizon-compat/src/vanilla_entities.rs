@@ -505,6 +505,34 @@ pub fn living(rt: &mut Rt, id: i32, kind: &str, view: Option<&EntityView>) -> V 
     proxy(rt, id, kind, view, None, true)
 }
 
+/// The high half of the UUID Horizon gives the game's entity of id `n` (`lan::entity_uuid`), whose
+/// low half is `n`.
+pub(crate) const UUID_HIGH: u64 = 0x4856_5a4e_0000_0000;
+
+/// The object for the game's entity `id` (`Level.getEntity(int)`): a player by their entity id,
+/// any other entity the level holds by its type. None when the game knows none (a client's own
+/// entities aren't told).
+pub(crate) fn by_id(rt: &mut Rt, id: i32) -> Option<V> {
+    let held = rt.host()?.player_entities().into_iter().find(|p| p.0 == id);
+    if let Some((id, uuid, at)) = held {
+        return Some(player(rt, id, uuid, at));
+    }
+    let view = rt.host()?.entity(id)?;
+    let v = of(rt, id, &view.kind, Some(view.pos));
+    (v.r() != 0).then_some(v)
+}
+
+/// The server's player `uuid` as the level holds them: their object, with their entity id (which
+/// tells them from the acting player: `attributes::entity_of`) and their place.
+pub(crate) fn player(rt: &mut Rt, id: i32, uuid: u128, at: [f64; 3]) -> V {
+    let p = crate::menus::server_player(rt, uuid);
+    for (field, v) in ["$x", "$y", "$z"].into_iter().zip(at) {
+        rt.put_field(p, field, V::D(v));
+    }
+    rt.put_field(p, "$entityId", V::I(id));
+    p
+}
+
 /// The object the runtime holds for the game's entity `id`, if any.
 pub fn known(rt: &mut Rt, id: i32) -> Option<V> {
     let list = proxies(rt);
@@ -691,7 +719,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "getUUID" | "getStringUUID" => {
             if rt.get_field(e, "$uuid").r() == 0 {
                 // `lan::entity_uuid`: Horizon's stable UUID for an entity by its id.
-                let u = crate::tags::uuid(rt, 0x4856_5a4e_0000_0000_u64 as i64, i64::from(id as u32));
+                let u = crate::tags::uuid(rt, UUID_HIGH as i64, i64::from(id as u32));
                 rt.put_field(e, "$uuid", u);
             }
             let u = rt.get_field(e, "$uuid");

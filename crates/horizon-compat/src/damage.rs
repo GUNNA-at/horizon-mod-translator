@@ -986,11 +986,7 @@ pub fn server_tick(rt: &mut Rt) {
     }
     let mut ids = Vec::new();
     for (id, uuid, at) in players {
-        let p = crate::menus::server_player(rt, uuid);
-        for (field, v) in ["$x", "$y", "$z"].into_iter().zip(at) {
-            rt.put_field(p, field, V::D(v));
-        }
-        rt.put_field(p, "$entityId", V::I(id));
+        let p = crate::vanilla_entities::player(rt, id, uuid, at);
         rt.interned.insert(format!("{PLAYER_ENTITY}{id}"), p);
         ids.push(id.to_string());
     }

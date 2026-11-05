@@ -51,6 +51,7 @@ pub mod menus;
 pub mod widgets;
 pub mod edit_box;
 pub mod level_env;
+pub mod level_events;
 pub mod mixin;
 pub mod mob_effects;
 pub mod mod_entities;

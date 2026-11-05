@@ -294,8 +294,42 @@ pub(crate) fn type_id(rt: &Rt, ty: V) -> Option<&str> {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(name, "addFreshEntity" | "getEntity")
+    matches!(name, "addFreshEntity" | "getEntity" | "getPlayerByUUID")
         || matches!(owner, TYPE_BUILDER | ENTITY_TYPE | SYNCHED | SYNCHED_BUILDER | ACCESSOR | ENTITY | "net/minecraft/network/syncher/EntityDataSerializer")
+}
+
+/// The level's entity of UUID `uuid` (`ServerLevel.getEntity(UUID)`, `Level.getPlayerByUUID`): a
+/// player on the server, a mod's entity by its own UUID, the game's other entities by the one
+/// Horizon gives them (`lan::entity_uuid`); null for none, or only a player when `player_only`.
+fn by_uuid(rt: &mut Rt, uuid: V, player_only: bool) -> V {
+    if uuid.r() == 0 {
+        return V::NULL;
+    }
+    let (msb, lsb) = crate::tags::uuid_bits(rt, uuid);
+    let full = (u128::from(msb as u64) << 64) | u128::from(lsb as u64);
+    let (held, listed) = rt.host().map_or((None, false), |h| {
+        (h.player_entities().into_iter().find(|p| p.1 == full), h.players().iter().any(|p| p.0 == full))
+    });
+    if let Some((id, uuid, at)) = held {
+        return crate::vanilla_entities::player(rt, id, uuid, at);
+    }
+    if listed {
+        return crate::menus::server_player(rt, full);
+    }
+    if player_only {
+        return V::NULL;
+    }
+    let own = live(rt).into_iter().find(|&e| {
+        let u = rt.get_field(e, "uuid");
+        u.r() != 0 && crate::tags::uuid_bits(rt, u) == (msb, lsb)
+    });
+    if let Some(e) = own {
+        return e;
+    }
+    if msb as u64 == crate::vanilla_entities::UUID_HIGH {
+        return crate::vanilla_entities::by_id(rt, lsb as i32).unwrap_or(V::NULL);
+    }
+    V::NULL
 }
 
 pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -326,7 +360,13 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         if id >= FIRST_ID {
             return Some(live(rt).into_iter().find(|&e| rt.get_field(e, "$id").i() == id).unwrap_or(V::NULL));
         }
-        return None;
+        // The game's own: a player by their entity id, any other entity the level holds.
+        return Some(crate::vanilla_entities::by_id(rt, id).unwrap_or(V::NULL));
+    }
+    if (name == "getEntity" && desc == "(Ljava/util/UUID;)Lnet/minecraft/world/entity/Entity;")
+        || (name == "getPlayerByUUID" && desc == "(Ljava/util/UUID;)Lnet/minecraft/world/entity/player/Player;")
+    {
+        return Some(by_uuid(rt, a(1), name == "getPlayerByUUID"));
     }
     match (owner, name) {
         (TYPE_BUILDER, "of") => {
@@ -1258,6 +1298,63 @@ mod tests {
         rt.put_field(ty, "$range", V::I(4));
         rt.registered.insert(("entity_type".into(), "test:cart".into()), ty);
         (rt, ty)
+    }
+
+    /// `Level.getEntity(id)`, `ServerLevel.getEntity(uuid)` and `Level.getPlayerByUUID(uuid)`: a mod's
+    /// own entity by its id and its UUID; a player by their entity id or UUID, carrying that id (so
+    /// their hits and effects reach them, not the acting player); the game's other entities by their
+    /// id or the UUID the game gives them; null for none, and for a mob's UUID asked as a player's.
+    #[test]
+    fn the_level_finds_its_entities_by_id_and_uuid() {
+        const BY_ID: &str = "net/minecraft/world/level/Level.getEntity.(I)Lnet/minecraft/world/entity/Entity;";
+        const BY_UUID: &str = "net/minecraft/server/level/ServerLevel.getEntity.(Ljava/util/UUID;)Lnet/minecraft/world/entity/Entity;";
+        const PLAYER_BY_UUID: &str = "net/minecraft/world/level/Level.getPlayerByUUID.(Ljava/util/UUID;)Lnet/minecraft/world/entity/player/Player;";
+        const GET_ID: &str = "net/minecraft/world/entity/Entity.getId.()I";
+        const GET_UUID: &str = "net/minecraft/world/entity/Entity.getUUID.()Ljava/util/UUID;";
+        const CREATE: &str = "net/minecraft/world/entity/EntityType.create.(Lnet/minecraft/world/level/Level;)Lnet/minecraft/world/entity/Entity;";
+        const ADD: &str = "net/minecraft/world/level/Level.addFreshEntity.(Lnet/minecraft/world/entity/Entity;)Z";
+        let steve: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+        let alex: u128 = 0x9999_aaaa_bbbb_cccc_dddd_eeee_ffff_0000;
+        let (mut rt, ty) = runtime();
+        let cow = crate::host::EntityView { id: 30, kind: "minecraft:cow".into(), pos: [5.5, 64.0, 5.5], yaw: 0.0, health: Some((10.0, 10.0)) };
+        let mut h = MemoryHost {
+            players: vec![(steve, [1.5, 64.0, 2.5])],
+            player_entity_ids: [(steve, 12)].into_iter().collect(),
+            player_id: Some(alex),
+            entities: vec![cow],
+            ..MemoryHost::default()
+        };
+        rt.with_host(&mut h, |rt| {
+            let level = crate::glue::level(rt);
+            let uuid = |rt: &mut Rt, u: u128| crate::tags::uuid(rt, (u >> 64) as i64, u as i64);
+
+            let p = api::call(rt, BY_ID, &[level, V::I(12)]);
+            assert_eq!(p, crate::menus::server_player(rt, steve));
+            assert_eq!(api::call(rt, GET_ID, &[p]), V::I(12));
+            assert_eq!(crate::attributes::entity_of(rt, p), Ok(Some(12)), "not the acting player");
+            let su = uuid(rt, steve);
+            assert_eq!(api::call(rt, BY_UUID, &[level, su]), p);
+            assert_eq!(api::call(rt, PLAYER_BY_UUID, &[level, su]), p);
+
+            let c = api::call(rt, BY_ID, &[level, V::I(30)]);
+            assert_eq!(api::call(rt, GET_ID, &[c]), V::I(30));
+            let cu = api::call(rt, GET_UUID, &[c]);
+            assert_eq!(api::call(rt, BY_UUID, &[level, cu]), c);
+            assert_eq!(api::call(rt, PLAYER_BY_UUID, &[level, cu]), V::NULL);
+
+            let cart = api::call(rt, CREATE, &[ty, level]);
+            api::call(rt, ADD, &[level, cart]);
+            let id = api::call(rt, GET_ID, &[cart]);
+            assert_eq!(api::call(rt, BY_ID, &[level, id]), cart);
+            let u = api::call(rt, GET_UUID, &[cart]);
+            assert_eq!(api::call(rt, BY_UUID, &[level, u]), cart);
+
+            assert_eq!(api::call(rt, BY_ID, &[level, V::I(31)]), V::NULL);
+            let nobody = uuid(rt, 0x42);
+            assert_eq!(api::call(rt, BY_UUID, &[level, nobody]), V::NULL);
+            assert_eq!(api::call(rt, PLAYER_BY_UUID, &[level, nobody]), V::NULL);
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// The server's tracker sends a player in range the cart, where it moves and its count, then its

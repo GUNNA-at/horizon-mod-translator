@@ -69,7 +69,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 79] = [
+const COMPAT: [(&str, &str); 80] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -136,6 +136,7 @@ const COMPAT: [(&str, &str); 79] = [
     ("attributes.rs", include_str!("../../horizon-compat/src/attributes.rs")),
     ("mob_effects.rs", include_str!("../../horizon-compat/src/mob_effects.rs")),
     ("vitals.rs", include_str!("../../horizon-compat/src/vitals.rs")),
+    ("level_events.rs", include_str!("../../horizon-compat/src/level_events.rs")),
     ("enchantments.rs", include_str!("../../horizon-compat/src/enchantments.rs")),
     ("files.rs", include_str!("../../horizon-compat/src/files.rs")),
     ("resources.rs", include_str!("../../horizon-compat/src/resources.rs")),
@@ -465,7 +466,13 @@ fn client_host(c: &str, id: &str) -> String {
     let reads = world_reads("self.game.get()");
     // The client's own player's attributes, effects, health and food (`native_attribute` of None),
     // where the game is lent.
-    let attributes = format!("{}{}{}", attribute_methods(c, "self.game.get_mut()"), effect_methods(c, "self.game.get_mut()"), vital_methods(c, "self.game.get_mut()"));
+    let attributes = format!(
+        "{}{}{}{}",
+        attribute_methods(c, "self.game.get_mut()"),
+        effect_methods(c, "self.game.get_mut()"),
+        vital_methods(c, "self.game.get_mut()"),
+        level_event_methods("self.game.get_mut()")
+    );
     format!(r#"    enum GameRef<'a, 'b> {{
         Mut(&'a mut crate::game::Game<'b>),
         Shared(&'a crate::game::Game<'b>),
@@ -1894,6 +1901,12 @@ fn world_reads(get: &str) -> String {
         fn resource_namespaces(&self, root: &str) -> Vec<String> {{
             {get}.native_resource_namespaces(root)
         }}
+        fn state_id(&self, state: &str) -> Option<i32> {{
+            {get}.native_state_from_text(state).and_then(|s| i32::try_from(s.0).ok())
+        }}
+        fn state_of_id(&self, id: i32) -> Option<String> {{
+            Some({get}.native_state_id_text(horizon_world::registry::BlockStateId(u32::try_from(id).unwrap_or(u32::MAX))))
+        }}
 "#
     )
 }
@@ -1982,10 +1995,11 @@ fn world_writes(c: &str) -> String {
             let dimension = self.game.native_dimension().to_owned();
             u32::try_from(id).is_ok_and(|i| self.game.native_teleport_mob(&dimension, i, pos))
         }}
-{attributes}{effects}{vitals}"#,
+{attributes}{effects}{vitals}{level_events}"#,
         attributes = attribute_methods(c, "Some(&mut *self.game)"),
         effects = effect_methods(c, "Some(&mut *self.game)"),
         vitals = vital_methods(c, "Some(&mut *self.game)"),
+        level_events = level_event_methods("Some(&mut *self.game)"),
     )
 }
 
@@ -2053,6 +2067,17 @@ fn vital_methods(c: &str, game: &str) -> String {
         fn set_player_vitals(&mut self, to: &{c}::host::VitalsView) -> bool {{
             let to = crate::game::native_vitals::NativeVitals {{ health: to.health, max_health: to.max_health, absorption: to.absorption, food: to.food, saturation: to.saturation, exhaustion: to.exhaustion }};
             {game}.is_some_and(|game| game.native_set_player_vitals(&to))
+        }}
+"#
+    )
+}
+
+/// The level events of a host whose game `game` gives (an `Option<&mut Game>`): a mod's
+/// `levelEvent`, the game's own (`native_level_event`).
+fn level_event_methods(game: &str) -> String {
+    format!(
+        r#"        fn level_event(&mut self, event: i32, pos: [i32; 3], data: i32) -> bool {{
+            {game}.is_some_and(|game| game.native_level_event(event, pos, data))
         }}
 "#
     )
@@ -2188,6 +2213,12 @@ fn hit_host(c: &str, server_send: &str) -> String {
         }}
         fn hurt_entity(&mut self, id: i32, amount: f32) -> bool {{
             {hurt}
+            true
+        }}
+        fn level_event(&mut self, event: i32, pos: [i32; 3], data: i32) -> bool {{
+            crate::game::native_hits::native_after_hit(move |game| {{
+                game.native_level_event(event, pos, data);
+            }});
             true
         }}
         fn kill_entity(&mut self, id: i32) -> bool {{
