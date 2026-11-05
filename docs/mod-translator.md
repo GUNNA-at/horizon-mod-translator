@@ -2899,6 +2899,97 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     tridents, brushes, flint and steel, fire charges, spyglasses). A vanilla item is of its class
     by its name; a mod item by its first vanilla class. Test:
     `neo::tests::a_stacks_abilities_are_its_items`. 316 compat tests pass.
+  - [x] 2026-11-05 The server's lifecycle. Mods heard none of NeoForge's server events, though 29
+    of the pack's mods listen to `ServerAboutToStartEvent`, 21 to `ServerStartingEvent`, 22 to
+    `ServerStartedEvent`, 23 to `ServerStoppingEvent`, 24 to `ServerStoppedEvent` and 26 to
+    `LevelEvent.Unload`. The game's server hooks post them now, in NeoForge's order:
+    `native_server_about_to_start` gives `ServerAboutToStartEvent`, before anything loads (the
+    level's `LevelEvent.Load` comes after); the world open (`native_world_lifecycle`,
+    `open_ready`) gives `ServerStartingEvent`, then `ServerStartedEvent`;
+    `native_server_stopping` gives `ServerStoppingEvent`, the worlds still loaded; the world
+    closed or failed to open gives the level's `LevelEvent.Unload`, then `ServerStoppedEvent`.
+    Each event's `getServer()` is the server; `ServerLifecycleHooks.getCurrentServer()` is it from
+    `ServerAboutToStartEvent` until it stopped, null before and after (the next world has a
+    server and level of its own). Test: `neo::tests::the_server_starts_and_stops_as_neoforge_posts_it`.
+    In game (Create and Farmer's Delight, traced): `ServerAboutToStartEvent` reaches 1 listener,
+    `ServerStoppingEvent` 1 and `LevelEvent.Unload` 4 (these two mods have none for the others),
+    and the world closes with no error and no unmapped call.
+  - [x] 2026-11-05 `IEventBus.unregister(x)`, unmapped 4 times in the same run: Create's
+    `OneTimeEventReceiver` unregisters itself after its one event. What `register(x)` or
+    `addListener(x)` added stops listening, as NeoForge's bus keys it: the listener itself, the
+    `@SubscribeEvent` methods of an object (its class's and its superclasses', bound to it), or a
+    class's static ones; another object of the same class still hears. Test:
+    `neo::tests::unregistered_listeners_stop_hearing`.
+  - [x] 2026-11-05 Mods' commands (`crate::commands`). 82 of the pack's mods register Brigadier
+    commands (69 through `RegisterCommandsEvent.getDispatcher()`); none could run.
+    - The tree: Brigadier's builders (`Commands.literal`/`argument`, `then`, `executes`,
+      `requires`, `redirect`/`fork`, `suggests`, `build`) make nodes, and the dispatcher merges each
+      root it registers as Brigadier does (one registered again merges its children: Create's
+      `/create`, its `/c` shortcut).
+    - Registering: when a world opens to players (`native_register_commands`), the server's
+      runtime posts `RegisterCommandsEvent` with a new dispatcher, and every runnable path of its
+      tree becomes a native usage with the operator level its `requires` needs (the predicates
+      asked at levels 0 to 4 with a silent source; one no level passes gets 4). A path with a
+      literal that isn't a command word, or an argument type the runtime doesn't know (a mod's
+      own `ArgumentType`), is left out, traced. Players get the usages after vanilla's tree, so
+      the chat box completes and colours them.
+    - Running (`native_perform_command`; the console's `native_perform_console_command`): the line
+      is parsed as Brigadier parses it (a literal the next word names is the only way on, else
+      each argument the source may use, in order, backtracking; a redirect goes on at its target
+      with its modifier's sources), then the command runs with a `CommandContext` for each source.
+      A `CommandSyntaxException` it throws is red feedback, anything else vanilla's `command.failed`.
+    - Arguments, as vanilla's parsers read them: Brigadier's numbers with their bounds, booleans,
+      words, strings (quoted, with escapes) and the rest of the line; messages; entity selectors
+      (`@s @p @a @r @e @n`, names, UUIDs; `name=` and `limit=`; players only); block, column and
+      world positions (`~`, `^`); `vec2`, rotations, angles; ids and dimensions; items and block
+      states (with `[...]` and `{...}`); times (`d`, `s`, `t`); UUIDs; colours. Their getters
+      (`IntegerArgumentType.getInteger`, `BlockPosArgument.getLoadedBlockPos`,
+      `EntityArgument.getPlayer`...) read the context, with vanilla's errors (no such player, a
+      dimension the source isn't in).
+    - `CommandSourceStack`: position, rotation, level, server, the player or entity (else the
+      syntax error `permissions.requires.player`), `hasPermission`, `sendSuccess`, `sendFailure`
+      and `sendSystemMessage` (to whoever ran the command: chat for a player, the console's
+      output), the `with*` copies, and one a mod makes itself. It, `BlockInput`, `ItemInput` and
+      `WorldCoordinates` left the data-class table (`vanilla_records.rs`, 659 classes).
+    - The game's native usages take vanilla's other argument types (`string`, `long`, `message`,
+      `players`, `entity`, `entities`, `game_profile`, `block`, `column_pos`, `vec3`, `vec2`,
+      `rotation`, `angle`, `id`, `dimension`, `uuid`, `color`, `time`), and words with capitals
+      and dots (Create's `clearRenderBuffers`) ([native-mods.md](native-mods.md)).
+    Tests: `commands::tests::a_mods_commands_register_and_run_as_brigadier_parses_them`,
+    `registering_a_root_again_merges_its_children`, `arguments_read_as_vanillas_parsers`.
+    In game (`fdcmd.sh`: Create and Farmer's Delight, the owner's console at level 4):
+    `/create trains` and `/c trains` print Create's train summary, `/create clone` alone its
+    help, and a line no path reads answers red.
+  - [x] 2026-11-05 `/create clone` copies blocks. It ran but copied 1 block where it should copy 18:
+    `BoundingBox` and `BlockInWorld` had no model. `BoundingBox` is 1.21.1's now (`shapes.rs`):
+    mutable as vanilla's, corners in any order, sizes counting both corners in Java's wrapping
+    arithmetic, `orientBox` for each facing, `intersects`, `isInside`, `encapsulate`, `move`,
+    `moved`, `inflatedBy`, `getCenter`, `getLength`, `equals`, `hashCode` and the toString
+    (24 of the pack's mods use it). `BlockInWorld` reads its level's block (a mod's own level
+    too) once, when first asked; `Clearable.tryClear` empties a container by its `clearContent`;
+    `LevelTicks.copyArea` copies no queued tick, as the game's own `/clone` doesn't. Tests:
+    `shapes::tests::a_bounding_box_is_vanillas`, `level_env::tests::a_block_in_world_reads_its_level_once`.
+    In game: a 3x2x3 box of planks with glowstone inside copies 7 blocks east ("Successfully cloned
+    18 Blocks"), its corners, the glowstone and the air beside it as they were.
+    Found in the same runs and modelled (tests only so far; the next game build checks them):
+    `Dynamic2CommandExceptionType` (and 3, 4, N: 6 mods; Create's "too many blocks" answered
+    `command.failed`), `new CommandSyntaxException(...)`, its `getMessage`/`getContext`/`getInput`/
+    `getCursor`/`toString` as Brigadier writes them, `LiteralMessage`; Guava's `Lists.reverse`
+    (the clone's barrier step was skipped) and `Lists.transform`; `SharedConstants.getCurrentVersion()`
+    as 1.21.1's `version.json` (23 mods: name, protocol 767, pack formats 34 and 48, data version
+    3955); `Objects.toString` (14 mods); `Stream.generate` until its `limit`;
+    `ModList.forEachModContainer`, `forEachModInOrder`, `applyForEachModContainer`, `getSortedMods`.
+    Tests: `api_common::tests::command_exceptions_say_what_brigadiers_do`,
+    `the_game_is_1_21_1_to_its_mods`, `jutil::tests::objects_print_and_generated_streams_stop_at_their_limit`,
+    `neo::tests::the_mod_list_walks_its_mods_in_order`. 327 compat, 15 translator and the game's 7
+    `native_server` tests pass.
+    Not yet: client commands (`RegisterClientCommandsEvent`, 19 mods: Create's `/create
+    rainbowDebug`...), `Commands.performPrefixedCommand` (14 mods), mods' own argument types (16
+    mods, 28 classes: catnip's `ConfigPathArgument` leaves `/create config` out), suggestion
+    providers (the chat box completes by kind), selector options past `name` and `limit`,
+    entities other than players, and vanilla's parse error with its context line for a line no
+    path reads (it answers as an unknown command). `/create debuginfo` reaches its client-side
+    parts (`GlUtil`, `Options.graphicsMode`) and `SystemReport`, unmodelled.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

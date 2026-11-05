@@ -939,7 +939,7 @@ fn mth_floor(d: f64) -> i32 {
 
 const VEC2: &str = "net/minecraft/world/phys/Vec2";
 
-fn vec2(rt: &mut Rt, x: f32, y: f32) -> V {
+pub(crate) fn vec2(rt: &mut Rt, x: f32, y: f32) -> V {
     let v = rt.new_object(VEC2);
     rt.put_field(v, "x", V::F(x));
     rt.put_field(v, "y", V::F(y));
@@ -2477,6 +2477,20 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         ("net/minecraft/util/Mth", "sin") => V::F(mth_sin(a(0))),
         ("net/minecraft/util/Mth", "cos") => V::F(mth_cos(a(0))),
+        // The game's version, as mods made for it read it: 1.21.1's `version.json`.
+        ("net/minecraft/SharedConstants", "getCurrentVersion") => rt.intern("compat:world-version".into(), |rt| rt.new_object(WORLD_VERSION)),
+        (WORLD_VERSION | "net/minecraft/DetectedVersion", n) => match n {
+            "getName" | "getId" => rt.string("1.21.1"),
+            "getProtocolVersion" => V::I(767),
+            "isStable" => V::I(1),
+            // `PackType`: client resources (its first constant) 34, server data 48.
+            "getPackVersion" => V::I(if rt.get_field(a(1), "$ordinal").i() == 0 { 34 } else { 48 }),
+            "getDataVersion" => {
+                let series = rt.string("main");
+                crate::records::make_data(rt, "net/minecraft/world/level/storage/DataVersion", "(ILjava/lang/String;)V", &[V::I(3955), series])
+            }
+            _ => return None,
+        },
         // Block entities
         // Block entities: the API's state lives in the fields Java names (`level`, `worldPosition`,
         // `blockState`, `remove`), which mod subclasses read directly.
@@ -3037,8 +3051,86 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.put_field(e, "$rawMessage", message);
             e
         }
+        // `Dynamic2CommandExceptionType.create(a, b)` (3, 4, and N's array): the message its
+        // function makes of the arguments; `createWithContext` takes a reader first.
+        (o, "create" | "createWithContext") if matches!(o, DYNAMIC_2 | DYNAMIC_3 | DYNAMIC_4 | DYNAMIC_N) => {
+            let function = rt.get_field(a(0), "$function");
+            let values = &args[if name == "create" { 1 } else { 2 }.min(args.len())..];
+            let apply: &'static str = match o {
+                DYNAMIC_2 => "com/mojang/brigadier/exceptions/Dynamic2CommandExceptionType$Function.apply.(Ljava/lang/Object;Ljava/lang/Object;)Lcom/mojang/brigadier/Message;",
+                DYNAMIC_3 => "com/mojang/brigadier/exceptions/Dynamic3CommandExceptionType$Function.apply.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Lcom/mojang/brigadier/Message;",
+                DYNAMIC_4 => "com/mojang/brigadier/exceptions/Dynamic4CommandExceptionType$Function.apply.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Lcom/mojang/brigadier/Message;",
+                _ => "com/mojang/brigadier/exceptions/DynamicNCommandExceptionType$Function.apply.([Ljava/lang/Object;)Lcom/mojang/brigadier/Message;",
+            };
+            let message = rt.call_functional(apply, function, values);
+            let e = rt.new_object("com/mojang/brigadier/exceptions/CommandSyntaxException");
+            rt.put_field(e, "$type", a(0));
+            rt.put_field(e, "$rawMessage", message);
+            e
+        }
+        // `new CommandSyntaxException(type, message[, input, cursor])`.
+        ("com/mojang/brigadier/exceptions/CommandSyntaxException", "<init>") => {
+            rt.put_field(a(0), "$type", a(1));
+            rt.put_field(a(0), "$rawMessage", a(2));
+            if desc.contains("Ljava/lang/String;I)") {
+                rt.put_field(a(0), "$input", a(3));
+                rt.put_field(a(0), "$cursor", a(4));
+            } else {
+                rt.put_field(a(0), "$cursor", V::I(-1));
+            }
+            V::Void
+        }
         ("com/mojang/brigadier/exceptions/CommandSyntaxException", "getRawMessage") => rt.get_field(a(0), "$rawMessage"),
         ("com/mojang/brigadier/exceptions/CommandSyntaxException", "getType") => rt.get_field(a(0), "$type"),
+        ("com/mojang/brigadier/exceptions/CommandSyntaxException", "getInput") => match rt.get_field(a(0), "$input") {
+            V::R(n) => V::R(n),
+            _ => V::NULL,
+        },
+        ("com/mojang/brigadier/exceptions/CommandSyntaxException", "getCursor") => match rt.get_field(a(0), "$cursor") {
+            V::I(c) => V::I(c),
+            _ => V::I(-1),
+        },
+        // Brigadier's `getMessage()`: the message's text, and where the input went wrong
+        // (`getContext()`: up to ten characters before the cursor, then `<--[HERE]`).
+        ("com/mojang/brigadier/exceptions/CommandSyntaxException", "getMessage" | "getLocalizedMessage" | "getContext" | "toString") => {
+            let input = rt.str_of(rt.get_field(a(0), "$input")).map(str::to_owned);
+            let cursor = match rt.get_field(a(0), "$cursor") {
+                V::I(c) => c,
+                _ => -1,
+            };
+            let context = input.filter(|_| cursor >= 0).map(|input| {
+                let chars: Vec<char> = input.chars().collect();
+                let at = (cursor as usize).min(chars.len());
+                let from = at.saturating_sub(10);
+                format!("{}{}<--[HERE]", if at > 10 { "..." } else { "" }, chars[from..at].iter().collect::<String>())
+            });
+            if name == "getContext" {
+                return Some(match context {
+                    Some(c) => rt.string(&c),
+                    None => V::NULL,
+                });
+            }
+            let raw = rt.get_field(a(0), "$rawMessage");
+            let mut text = brigadier_message(rt, raw);
+            if let Some(c) = context {
+                text = format!("{text} at position {cursor}: {c}");
+            }
+            if name == "toString" {
+                text = format!("com.mojang.brigadier.exceptions.CommandSyntaxException: {text}");
+            }
+            rt.string(&text)
+        }
+        ("com/mojang/brigadier/exceptions/CommandSyntaxException", "printStackTrace") => V::Void,
+        // Brigadier's `LiteralMessage`: a message of plain text.
+        ("com/mojang/brigadier/LiteralMessage", "<init>") => {
+            rt.put_field(a(0), "$str", a(1));
+            V::Void
+        }
+        ("com/mojang/brigadier/LiteralMessage", "getString" | "toString") => rt.get_field(a(0), "$str"),
+        ("com/mojang/brigadier/Message", "getString") => {
+            let text = brigadier_message(rt, a(0));
+            rt.string(&text)
+        }
         // `CriterionTrigger.createCriterion(instance)`, its default method: the criterion record
         // of the trigger and the instance (Create's advancements, built in code).
         ("net/minecraft/advancements/CriterionTrigger", "createCriterion") => crate::records::make(rt, "net/minecraft/advancements/Criterion", &[a(0), a(1)]),
@@ -3309,6 +3401,23 @@ fn player_identity(rt: &mut Rt, p: V) -> (V, V) {
 }
 
 const CHUNK_POS: &str = "net/minecraft/world/level/ChunkPos";
+const DYNAMIC_2: &str = "com/mojang/brigadier/exceptions/Dynamic2CommandExceptionType";
+const DYNAMIC_3: &str = "com/mojang/brigadier/exceptions/Dynamic3CommandExceptionType";
+const DYNAMIC_4: &str = "com/mojang/brigadier/exceptions/Dynamic4CommandExceptionType";
+const DYNAMIC_N: &str = "com/mojang/brigadier/exceptions/DynamicNCommandExceptionType";
+
+/// A Brigadier `Message`'s text: a component's (translated where the game has the language), a
+/// `LiteralMessage`'s, or a string.
+fn brigadier_message(rt: &mut Rt, message: V) -> String {
+    if let Some(s) = rt.str_of(message) {
+        return s.to_owned();
+    }
+    if rt.class_of(message) == "com/mojang/brigadier/LiteralMessage" {
+        return rt.str_of(rt.get_field(message, "$str")).unwrap_or("").to_owned();
+    }
+    crate::gui::plain(rt, message)
+}
+const WORLD_VERSION: &str = "net/minecraft/WorldVersion";
 const ADVANCEMENT_BUILDER: &str = "net/minecraft/advancements/Advancement$Builder";
 const ITEM_PREDICATE_BUILDER: &str = "net/minecraft/advancements/critereon/ItemPredicate$Builder";
 
@@ -4253,6 +4362,77 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Brigadier's exceptions as a mod's command throws them: a `Dynamic2CommandExceptionType`'s
+    /// message made of both arguments (Create's `/create clone` limit), `LiteralMessage`, and the
+    /// exception's `getMessage()`, `getContext()` and `toString()` as Brigadier writes them (up
+    /// to ten characters before the cursor, `...` before them, then `<--[HERE]`).
+    #[test]
+    fn command_exceptions_say_what_brigadiers_do() {
+        use super::*;
+        fn too_big(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+            let key = rt.string("commands.clone.toobig");
+            let with = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![args[1], args[2]]));
+            Some(component(rt, key, true, with))
+        }
+        const SYNTAX: &str = "com/mojang/brigadier/exceptions/CommandSyntaxException";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.lambda_call = Some(too_big);
+        let c = |rt: &mut Rt, k: &str, args: &[V]| {
+            let k: &'static str = rt.static_key(k);
+            crate::api::call(rt, k, args)
+        };
+        let function = rt.lambda_id("com/mojang/brigadier/exceptions/Dynamic2CommandExceptionType$Function", 1, vec![]);
+        let ty = rt.new_object(DYNAMIC_2);
+        c(&mut rt, &format!("{DYNAMIC_2}.<init>.(L{DYNAMIC_2}$Function;)V"), &[ty, function]);
+        let (limit, count) = (integer(&mut rt, 32768), integer(&mut rt, 68921));
+        let e = c(&mut rt, &format!("{DYNAMIC_2}.create.(Ljava/lang/Object;Ljava/lang/Object;)L{SYNTAX};"), &[ty, limit, count]);
+        let raw = c(&mut rt, &format!("{SYNTAX}.getRawMessage.()Lcom/mojang/brigadier/Message;"), &[e]);
+        let json = component_json(&rt, raw);
+        assert_eq!(json["translate"], "commands.clone.toobig", "{json}");
+        assert_eq!(json["with"].as_array().map(Vec::len), Some(2), "{json}");
+        assert_eq!(c(&mut rt, &format!("{SYNTAX}.getCursor.()I"), &[e]), V::I(-1));
+        // A message of plain text, at a place in the input.
+        let message = rt.new_object("com/mojang/brigadier/LiteralMessage");
+        let bad = rt.string("Bad");
+        c(&mut rt, "com/mojang/brigadier/LiteralMessage.<init>.(Ljava/lang/String;)V", &[message, bad]);
+        let text = c(&mut rt, "com/mojang/brigadier/LiteralMessage.getString.()Ljava/lang/String;", &[message]);
+        assert_eq!(rt.str_of(text), Some("Bad"));
+        let e = rt.new_object(SYNTAX);
+        let input = rt.string("create clone 1 2");
+        c(&mut rt, &format!("{SYNTAX}.<init>.(Lcom/mojang/brigadier/exceptions/CommandExceptionType;Lcom/mojang/brigadier/Message;Ljava/lang/String;I)V"), &[e, ty, message, input, V::I(13)]);
+        let said = |rt: &mut Rt, name: &str| {
+            let v = c(rt, &format!("{SYNTAX}.{name}.()Ljava/lang/String;"), &[e]);
+            rt.str_of(v).unwrap_or("").to_owned()
+        };
+        assert_eq!(said(&mut rt, "getContext"), "...ate clone <--[HERE]");
+        assert_eq!(said(&mut rt, "getMessage"), "Bad at position 13: ...ate clone <--[HERE]");
+        assert_eq!(said(&mut rt, "toString"), "com.mojang.brigadier.exceptions.CommandSyntaxException: Bad at position 13: ...ate clone <--[HERE]");
+        assert_eq!(c(&mut rt, &format!("{SYNTAX}.getCursor.()I"), &[e]), V::I(13));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The game's version as a mod made for 1.21.1 reads it: that version's `version.json` (name,
+    /// protocol, pack formats, data version).
+    #[test]
+    fn the_game_is_1_21_1_to_its_mods() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+        let v = c(&mut rt, "net/minecraft/SharedConstants.getCurrentVersion.()Lnet/minecraft/WorldVersion;", &[]);
+        let name = c(&mut rt, "net/minecraft/WorldVersion.getName.()Ljava/lang/String;", &[v]);
+        assert_eq!(rt.str_of(name), Some("1.21.1"));
+        assert_eq!(c(&mut rt, "net/minecraft/WorldVersion.getProtocolVersion.()I", &[v]), V::I(767));
+        let pack = "net/minecraft/WorldVersion.getPackVersion.(Lnet/minecraft/server/packs/PackType;)I";
+        let data = crate::api::get_static(&mut rt, "net/minecraft/server/packs/PackType.SERVER_DATA");
+        let resources = crate::api::get_static(&mut rt, "net/minecraft/server/packs/PackType.CLIENT_RESOURCES");
+        assert_eq!((c(&mut rt, pack, &[v, resources]), c(&mut rt, pack, &[v, data])), (V::I(34), V::I(48)));
+        let dv = c(&mut rt, "net/minecraft/WorldVersion.getDataVersion.()Lnet/minecraft/world/level/storage/DataVersion;", &[v]);
+        assert_eq!(c(&mut rt, "net/minecraft/world/level/storage/DataVersion.getVersion.()I", &[dv]), V::I(3955));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     /// `BlockState.getProperties()`: a vanilla state's are `BlockStateProperties`' of its names
     /// and values, so Copycats' `tryCopyProperties` (each property `to` has takes `from`'s value)

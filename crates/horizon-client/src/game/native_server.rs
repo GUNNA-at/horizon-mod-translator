@@ -49,13 +49,18 @@ pub(crate) struct NativeSidebar {
 /// server's scoreboard never holds it.
 const SIDEBAR_OBJECTIVE: &str = "horizon:native_sidebar";
 
-/// A command a native mod adds, as one usage: words, then arguments
-/// `<name:kind>`, optional ones last in brackets `[name:kind]`:
-/// `pay <player:player> <amount:integer>`, `balance [player:player]`,
-/// `eco give <player:player> <amount:integer>`. Kinds: `word`, `text` (the
-/// rest of the line, last), `integer`, `number`, `boolean`, `player`,
-/// `item`, `block_pos`. Usages of one command share their words; the
-/// server merges them into one tree.
+/// A command a native mod adds, as one usage: words (ASCII letters, digits,
+/// `_`, `-` and `.`, as Brigadier's literals of mods' commands are:
+/// `clearRenderBuffers`), then arguments `<name:kind>`, optional ones last
+/// in brackets `[name:kind]`: `pay <player:player> <amount:integer>`,
+/// `balance [player:player]`, `eco give <player:player> <amount:integer>`.
+/// Kinds: `word`, `string` (a word or a quoted phrase), `text` and `message`
+/// (the rest of the line, last), `integer`, `long`, `number`, `boolean`,
+/// `player`, `players`, `entity`, `entities`, `game_profile`, `item`,
+/// `block`, `block_pos`, `column_pos`, `vec3`, `vec2`, `rotation`, `angle`,
+/// `id`, `dimension`, `uuid`, `color`, `time`: vanilla's argument types.
+/// Usages of one command share their words; the server merges them into
+/// one tree.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NativeCommand {
@@ -96,6 +101,33 @@ fn parser(kind: &str) -> Option<(&'static str, Value)> {
         ),
         "item" => ("minecraft:item_stack", Value::Null),
         "block_pos" => ("minecraft:block_pos", Value::Null),
+        "string" => ("brigadier:string", json!({"type": "phrase"})),
+        "long" => ("brigadier:long", Value::Null),
+        "message" => ("minecraft:message", Value::Null),
+        "players" => (
+            "minecraft:entity",
+            json!({"amount": "multiple", "type": "players"}),
+        ),
+        "entity" => (
+            "minecraft:entity",
+            json!({"amount": "single", "type": "entities"}),
+        ),
+        "entities" => (
+            "minecraft:entity",
+            json!({"amount": "multiple", "type": "entities"}),
+        ),
+        "game_profile" => ("minecraft:game_profile", Value::Null),
+        "block" => ("minecraft:block_state", Value::Null),
+        "column_pos" => ("minecraft:column_pos", Value::Null),
+        "vec3" => ("minecraft:vec3", Value::Null),
+        "vec2" => ("minecraft:vec2", Value::Null),
+        "rotation" => ("minecraft:rotation", Value::Null),
+        "angle" => ("minecraft:angle", Value::Null),
+        "id" => ("minecraft:resource_location", Value::Null),
+        "dimension" => ("minecraft:dimension", Value::Null),
+        "uuid" => ("minecraft:uuid", Value::Null),
+        "color" => ("minecraft:team_color", Value::Null),
+        "time" => ("minecraft:time", json!({"min": 0})),
         _ => return None,
     })
 }
@@ -125,7 +157,7 @@ fn usage_nodes(usage: &str) -> Result<Vec<(String, Value, bool)>, String> {
             let literal = !word.is_empty()
                 && word
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-".contains(c));
+                    .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c));
             if !literal {
                 return Err(format!("`{usage}`: `{word}` is not a command word"));
             }
@@ -142,7 +174,7 @@ fn usage_nodes(usage: &str) -> Result<Vec<(String, Value, bool)>, String> {
             return Err(format!("`{usage}`: unknown kind `{kind}`"));
         };
         optional_seen |= optional;
-        greedy_seen |= kind == "text";
+        greedy_seen |= matches!(kind, "text" | "message");
         let mut node = json!({"type": "argument", "parser": parser});
         if !properties.is_null() {
             node["properties"] = properties;
@@ -1336,7 +1368,7 @@ mod tests {
             NativeCommand::new("b <x:text> <y:word>"),
             NativeCommand::new("c <x:colour>"),
             NativeCommand::new("<x:integer>"),
-            NativeCommand::new("Bad"),
+            NativeCommand::new("b@d"),
             NativeCommand::new("d <x:integer>"),
             NativeCommand::new("d <x:word>"),
         ]);

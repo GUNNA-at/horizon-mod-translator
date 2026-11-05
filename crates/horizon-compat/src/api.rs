@@ -651,7 +651,7 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 48] = [
+const CHAIN: [Module; 49] = [
     mutable_pos,
     crate::worldgen::call,
     crate::mixin::call,
@@ -673,6 +673,7 @@ const CHAIN: [Module; 48] = [
     crate::mod_entities::call_key,
     crate::entities::call_key,
     crate::creative::call,
+    crate::commands::call,
     crate::functions::call,
     crate::gamerules::call,
     crate::value_providers::call,
@@ -705,7 +706,7 @@ const CHAIN: [Module; 48] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 48] = [
+const CLAIMS: [Claims; 49] = [
     |owner, _, _| owner == MUTABLE_POS,
     crate::worldgen::claims,
     crate::mixin::claims,
@@ -727,6 +728,7 @@ const CLAIMS: [Claims; 48] = [
     crate::mod_entities::claims,
     crate::entities::claims,
     crate::creative::claims,
+    crate::commands::claims,
     crate::functions::claims,
     crate::gamerules::claims,
     crate::value_providers::claims,
@@ -757,7 +759,7 @@ const CLAIMS: [Claims; 48] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 48] = [
+const MODULE_NAMES: [&str; 49] = [
     "mutable_pos",
     "worldgen",
     "mixin",
@@ -779,6 +781,7 @@ const MODULE_NAMES: [&str; 48] = [
     "mod_entities",
     "entities",
     "creative",
+    "commands",
     "functions",
     "gamerules",
     "value_providers",
@@ -1123,6 +1126,16 @@ fn update_shape(rt: &mut Rt, args: [V; 6]) -> V {
     }
 }
 
+/// `recv.method(args)` (the receiver first) as the JVM dispatches it: the mod class's override
+/// where the receiver's class has one, else the API's. `(owner_key, key)`: the call's full key and
+/// its `name.desc`.
+pub(crate) fn virtual_call(rt: &mut Rt, (owner_key, key): (&'static str, &'static str), args: &[V]) -> V {
+    match rt.vcall {
+        Some(vc) => vc(rt, owner_key, key, args),
+        None => call(rt, owner_key, args),
+    }
+}
+
 pub(crate) fn pos_of(rt: &Rt, v: V) -> [i32; 3] {
     let h = native(rt, v);
     [h[0] as i32, h[1] as i32, h[2] as i32]
@@ -1166,6 +1179,9 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if crate::level_env::is_ticks(owner) {
         return crate::level_env::ticks_call(rt, name);
+    }
+    if owner == crate::level_env::BLOCK_IN_WORLD {
+        return crate::level_env::block_in_world(rt, name, args);
     }
     Some(match (owner, name) {
         // NeoForge registration
@@ -1357,6 +1373,14 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::Void
         }
         (_, "blockUpdated" | "updateNeighbourForOutputSignal" | "updateNeighborsAt" | "blockEntityChanged") if level => V::Void,
+        // `Clearable.tryClear(object)`: a container (a mod's block entity, the runtime's own) empties
+        // by its `clearContent`; anything else stays.
+        ("net/minecraft/world/Clearable", "tryClear") => {
+            if rt.instance_of(a(0), "net/minecraft/world/Clearable") {
+                virtual_call(rt, ("net/minecraft/world/Container.clearContent.()V", "clearContent.()V"), &[a(0)]);
+            }
+            V::Void
+        }
         (_, "sendParticles") if level => crate::particles::send_particles(rt, desc, args),
         (_, "addParticle" | "addAlwaysVisibleParticle") if level => crate::particles::level_particle(rt, name, desc, args),
         (_, "playSound" | "playSeededSound" | "playLocalSound") if level => crate::sounds::level_sound(rt, name, desc, args),

@@ -62,6 +62,18 @@ pub(crate) fn make(rt: &mut Rt, class: &str, args: &[V]) -> V {
     o
 }
 
+/// A data class of the table built by its constructor `desc` from `args`, as a mod's `new` builds
+/// one: a vanilla value the runtime hands out without modelling it (`new DataVersion(3955, "main")`).
+pub(crate) fn make_data(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
+    let class: &'static str = rt.static_key(class);
+    let o = rt.new_object(class);
+    let key: &'static str = rt.static_key(&format!("{class}.<init>.{desc}"));
+    let mut all = vec![o];
+    all.extend_from_slice(args);
+    call(rt, key, &all);
+    o
+}
+
 /// The constants of a vanilla enum the runtime doesn't model by hand, in ordinal order.
 fn constants(class: &str) -> Option<(&'static str, &'static str)> {
     let i = ENUM_CONSTANTS.binary_search_by(|(c, _)| (*c).cmp(class)).ok()?;
@@ -441,7 +453,8 @@ mod tests {
 
     /// The data-class table answers last, from fields named as vanilla names them; a class the
     /// runtime models by hand keeps its own representation, so the table must leave it out
-    /// (`tools/vanilla_records.py` does; rerun it after modelling one).
+    /// (`tools/vanilla_records.py` does; rerun it after modelling one). One the runtime only builds
+    /// through the table ([`make_data`]) is the table's.
     #[test]
     fn the_data_class_table_leaves_out_what_the_runtime_models_by_hand() {
         let mut text = String::new();
@@ -451,7 +464,10 @@ mod tests {
                 if path.extension().is_some_and(|x| x == "rs") && !path.ends_with("vanilla_records.rs") && !path.ends_with("records.rs") {
                     // The module's code, not its tests.
                     let source = std::fs::read_to_string(&path).unwrap();
-                    text += source.split("#[cfg(test)]").next().unwrap_or("");
+                    for line in source.split("#[cfg(test)]").next().unwrap_or("").lines().filter(|l| !l.contains("records::make_data(")) {
+                        text += line;
+                        text.push('\n');
+                    }
                 }
             }
         }

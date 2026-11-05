@@ -12,6 +12,7 @@ pub mod attachments;
 pub mod attributes;
 pub mod blocks;
 pub mod codecs;
+pub mod commands;
 pub mod crafting;
 pub mod handlers;
 pub mod components;

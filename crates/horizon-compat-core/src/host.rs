@@ -375,6 +375,13 @@ pub trait Host {
     /// A message for the acting player (`Player.displayClientMessage`, `sendSystemMessage`):
     /// `component` is vanilla's JSON text, shown over the hotbar when `overlay`.
     fn player_message(&mut self, _component: &str, _overlay: bool) {}
+    /// A line of a mod's command's answer (`CommandSourceStack.sendSuccess`, `sendFailure`), for
+    /// whoever ran it, as vanilla commands' feedback: `component` is vanilla's JSON text.
+    fn command_feedback(&mut self, _component: &str) {}
+    /// The name of the server's player `uuid` (a selector naming them), when they are on.
+    fn player_name(&self, _uuid: u128) -> Option<String> {
+        None
+    }
     /// Spawns an experience orb worth `value` points at `at` (`new ExperienceOrb` added with
     /// `Level.addFreshEntity`), moving by `motion` when given, else with vanilla's random motion.
     /// False when none spawned.

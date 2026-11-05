@@ -974,6 +974,49 @@ pub fn server_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
     });
 }
 
+/// `native_server_about_to_start` (server): NeoForge's `ServerAboutToStartEvent`, before the
+/// server loads anything; `ServerLifecycleHooks.getCurrentServer()` is the server from here on.
+pub fn server_about_to_start(rt: &mut Rt, host: &mut dyn Host) {
+    rt.safe_point();
+    rt.with_host(host, crate::neo::server_about_to_start);
+}
+
+/// `native_world_lifecycle` (server): the world open (`ServerStartingEvent`, then
+/// `ServerStartedEvent`), or the server gone after its world closed or failed to open
+/// (`LevelEvent.Unload`, then `ServerStoppedEvent`). `phase` is the game's phase:
+/// `open_ready`, `open_failed`, `close_final` or `close_failed`.
+pub fn world_lifecycle(rt: &mut Rt, host: &mut dyn Host, phase: &str) {
+    rt.safe_point();
+    rt.with_host(host, |rt| match phase {
+        "open_ready" => crate::neo::server_started(rt),
+        "open_failed" | "close_final" | "close_failed" => crate::neo::server_stopped(rt),
+        _ => {}
+    });
+}
+
+/// `native_server_stopping` (server): NeoForge's `ServerStoppingEvent`, with the worlds still
+/// loaded and the players still connected.
+pub fn server_stopping(rt: &mut Rt, host: &mut dyn Host) {
+    rt.safe_point();
+    rt.with_host(host, crate::neo::server_stopping);
+}
+
+/// `native_register_commands` (server): the mods hear `RegisterCommandsEvent`, and their commands
+/// come back as native usages with the operator level each needs ([`crate::commands::register`]).
+pub fn register_commands(rt: &mut Rt, host: &mut dyn Host) -> Vec<(String, u8)> {
+    rt.safe_point();
+    rt.with_host(host, crate::commands::register)
+}
+
+/// `native_perform_command` (server): a command line, without its slash, of the player `player`
+/// (their UUID and name; the console's for None) at `permission`, standing at `at` and looking
+/// `rot` (yaw, pitch): whether a mod's command ran it ([`crate::commands::perform`]). What it says
+/// reaches whoever ran it through [`Host::command_feedback`].
+pub fn perform_command(rt: &mut Rt, host: &mut dyn Host, player: Option<(u128, &str)>, permission: u8, at: [f64; 3], rot: [f32; 2], line: &str) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::commands::perform(rt, player, permission, at, rot, line))
+}
+
 const LEVEL_TICK_PRE: &str = "net/neoforged/neoforge/event/tick/LevelTickEvent$Pre";
 const LEVEL_TICK_POST: &str = "net/neoforged/neoforge/event/tick/LevelTickEvent$Post";
 

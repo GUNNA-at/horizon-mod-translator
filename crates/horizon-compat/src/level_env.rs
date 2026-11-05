@@ -151,15 +151,75 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
 }
 
 /// `LevelTicks`/`LevelTickAccess` (what `getBlockTicks` gives): nothing reads as queued, so a mod
-/// schedules again, which keeps the tick already there.
+/// schedules again, which keeps the tick already there. `copyArea` (a clone command's) copies none,
+/// as the game's own `/clone` doesn't.
 pub(crate) fn ticks_call(rt: &mut Rt, name: &str) -> Option<V> {
     let _ = rt;
     match name {
         "hasScheduledTick" | "willTickThisTick" => Some(V::I(0)),
-        "schedule" | "clearArea" => Some(V::Void),
+        "schedule" | "clearArea" | "copyArea" | "copyAreaFrom" => Some(V::Void),
         "count" => Some(V::I(0)),
         _ => None,
     }
+}
+
+pub(crate) const BLOCK_IN_WORLD: &str = "net/minecraft/world/level/block/state/pattern/BlockInWorld";
+const HAS_CHUNK_AT: (&str, &str) =
+    ("net/minecraft/world/level/LevelReader.hasChunkAt.(Lnet/minecraft/core/BlockPos;)Z", "hasChunkAt.(Lnet/minecraft/core/BlockPos;)Z");
+const GET_BLOCK_STATE: (&str, &str) = (
+    "net/minecraft/world/level/BlockGetter.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
+    "getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
+);
+const GET_BLOCK_ENTITY: (&str, &str) = (
+    "net/minecraft/world/level/BlockGetter.getBlockEntity.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;",
+    "getBlockEntity.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;",
+);
+
+/// `BlockInWorld(level, pos, loadChunks)`: a level's block whose state and block entity are read
+/// from the level (a mod's own level too) once, when first asked, as 1.21.1's. Without
+/// `loadChunks`, a state where the level has no chunk is null.
+pub(crate) fn block_in_world(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let at = |rt: &Rt| [rt.get_field(this, "level"), rt.get_field(this, "pos")];
+    Some(match name {
+        "<init>" => {
+            let p = crate::api::pos_of(rt, a(2));
+            let pos = crate::api::block_pos(rt, p[0].into(), p[1].into(), p[2].into());
+            rt.put_field(this, "level", a(1));
+            rt.put_field(this, "pos", pos);
+            rt.put_field(this, "loadChunks", a(3));
+            V::Void
+        }
+        "getState" => match rt.get_field(this, "state") {
+            V::R(n) if n != 0 => V::R(n),
+            _ => {
+                let level_pos = at(rt);
+                let loaded = rt.get_field(this, "loadChunks").i() != 0 || crate::api::virtual_call(rt, HAS_CHUNK_AT, &level_pos).i() != 0;
+                if !loaded {
+                    return Some(V::NULL);
+                }
+                let state = crate::api::virtual_call(rt, GET_BLOCK_STATE, &level_pos);
+                rt.put_field(this, "state", state);
+                state
+            }
+        },
+        "getEntity" => {
+            if rt.get_field(this, "cachedEntity").i() == 0 {
+                let level_pos = at(rt);
+                let entity = crate::api::virtual_call(rt, GET_BLOCK_ENTITY, &level_pos);
+                rt.put_field(this, "entity", entity);
+                rt.put_field(this, "cachedEntity", V::I(1));
+            }
+            match rt.get_field(this, "entity") {
+                V::R(n) => V::R(n),
+                _ => V::NULL,
+            }
+        }
+        "getLevel" => rt.get_field(this, "level"),
+        "getPos" => rt.get_field(this, "pos"),
+        _ => return None,
+    })
 }
 
 pub(crate) fn is_ticks(owner: &str) -> bool {
@@ -255,5 +315,47 @@ mod tests {
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
         assert_eq!(host.scheduled, [([2, 64, 2], "minecraft:stone".to_owned(), 4)]);
+    }
+
+    /// `BlockInWorld` reads its level's block once, when first asked, as 1.21.1's caches it (a
+    /// clone command reads each block of its area so), and its position is its own copy;
+    /// `Clearable.tryClear` empties a container and leaves anything else.
+    #[test]
+    fn a_block_in_world_reads_its_level_once() {
+        const BIW: &str = "net/minecraft/world/level/block/state/pattern/BlockInWorld";
+        let mut host = MemoryHost::default();
+        host.blocks.insert([1, 70, 2], "minecraft:glowstone".to_owned());
+        with_host(&mut host, |rt| {
+            let level = rt.new_object(LEVEL);
+            let pos = rt.alloc("net/minecraft/core/BlockPos$MutableBlockPos", crate::Data::Native("BlockPos", [1, 70, 2, 0]));
+            let biw = rt.new_object(BIW);
+            crate::api::call(rt, "net/minecraft/world/level/block/state/pattern/BlockInWorld.<init>.(Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Z)V", &[biw, level, pos, V::I(0)]);
+            // The position given moves on; the block's stays.
+            crate::api::call(rt, "net/minecraft/core/BlockPos$MutableBlockPos.set.(III)Lnet/minecraft/core/BlockPos$MutableBlockPos;", &[pos, V::I(9), V::I(9), V::I(9)]);
+            let get_state = "net/minecraft/world/level/block/state/pattern/BlockInWorld.getState.()Lnet/minecraft/world/level/block/state/BlockState;";
+            let state = crate::api::call(rt, get_state, &[biw]);
+            assert_eq!(rt.str_of(state), Some("minecraft:glowstone"));
+            rt.host_mut().unwrap().set_block_state([1, 70, 2], "minecraft:stone");
+            assert_eq!(crate::api::call(rt, get_state, &[biw]), state, "read once");
+            let own = crate::api::call(rt, "net/minecraft/world/level/block/state/pattern/BlockInWorld.getPos.()Lnet/minecraft/core/BlockPos;", &[biw]);
+            assert_eq!(crate::api::pos_of(rt, own), [1, 70, 2]);
+            let entity = crate::api::call(rt, "net/minecraft/world/level/block/state/pattern/BlockInWorld.getEntity.()Lnet/minecraft/world/level/block/entity/BlockEntity;", &[biw]);
+            assert_eq!(entity, V::NULL);
+            // A container empties; a string is no container.
+            let chest = rt.new_object("net/minecraft/world/SimpleContainer");
+            crate::api::call(rt, "net/minecraft/world/SimpleContainer.<init>.(I)V", &[chest, V::I(3)]);
+            let item = crate::api::get_static(rt, "net/minecraft/world/item/Items.DIAMOND");
+            let stack = rt.new_object("net/minecraft/world/item/ItemStack");
+            crate::api::call(rt, "net/minecraft/world/item/ItemStack.<init>.(Lnet/minecraft/world/level/ItemLike;I)V", &[stack, item, V::I(5)]);
+            crate::api::call(rt, "net/minecraft/world/SimpleContainer.setItem.(ILnet/minecraft/world/item/ItemStack;)V", &[chest, V::I(1), stack]);
+            let is_empty = "net/minecraft/world/SimpleContainer.isEmpty.()Z";
+            assert_eq!(crate::api::call(rt, is_empty, &[chest]).i(), 0);
+            let try_clear = "net/minecraft/world/Clearable.tryClear.(Ljava/lang/Object;)V";
+            crate::api::call(rt, try_clear, &[chest]);
+            assert_eq!(crate::api::call(rt, is_empty, &[chest]).i(), 1);
+            let text = rt.string("not a container");
+            crate::api::call(rt, try_clear, &[text]);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
     }
 }

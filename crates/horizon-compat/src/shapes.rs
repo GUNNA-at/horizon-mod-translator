@@ -1,5 +1,5 @@
-//! Shapes for translated mods: `VoxelShape` and `Shapes` (`Block.box`, joins), `AABB` and
-//! `CollisionContext`. A shape is the union of boxes, each `[min x, y, z, max x, y, z]`. Joins
+//! Shapes for translated mods: `VoxelShape` and `Shapes` (`Block.box`, joins), `AABB`, a
+//! structure's `BoundingBox` and `CollisionContext`. A shape is the union of boxes, each `[min x, y, z, max x, y, z]`. Joins
 //! work as vanilla's do: cell by cell on the grid of both shapes' coordinates, then merged into
 //! boxes in the order vanilla's `forAllBoxes` merges them (strips along z, grown along x, then y).
 use crate::{api, Data, Rt, V};
@@ -7,6 +7,7 @@ use crate::{api, Data, Rt, V};
 pub const VOXEL_SHAPE: &str = "net/minecraft/world/phys/shapes/VoxelShape";
 const SHAPES: &str = "net/minecraft/world/phys/shapes/Shapes";
 pub const AABB: &str = "net/minecraft/world/phys/AABB";
+pub const BOUNDING_BOX: &str = "net/minecraft/world/level/levelgen/structure/BoundingBox";
 const BOOLEAN_OP: &str = "net/minecraft/world/phys/shapes/BooleanOp";
 const COLLISION_CONTEXT: &str = "net/minecraft/world/phys/shapes/CollisionContext";
 pub const ENTITY_COLLISION_CONTEXT: &str = "net/minecraft/world/phys/shapes/EntityCollisionContext";
@@ -357,7 +358,7 @@ pub fn empty_context(rt: &mut Rt) -> V {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, SHAPES | VOXEL_SHAPE | COLLISION_CONTEXT | ENTITY_COLLISION_CONTEXT | BOOLEAN_OP | AABB | DISCRETE | SLICE)
+    matches!(owner, SHAPES | VOXEL_SHAPE | COLLISION_CONTEXT | ENTITY_COLLISION_CONTEXT | BOOLEAN_OP | AABB | BOUNDING_BOX | DISCRETE | SLICE)
         || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "box" | "isFaceFull" | "isShapeFullBlock"))
 }
 
@@ -542,6 +543,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::I((t >> (((a(1).i() != 0) as u8) << 1 | (a(2).i() != 0) as u8) & 1) as i32)
         }
         (AABB, n) => return aabb_call(rt, n, desc, args),
+        (BOUNDING_BOX, n) => return bounding_box_call(rt, n, desc, args),
         _ => return None,
     })
 }
@@ -703,6 +705,172 @@ fn aabb_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// A structure's `BoundingBox`: whole blocks, both corners inside, `[min x, y, z, max x, y, z]`.
+pub type IntBox = [i32; 6];
+
+const BOX_FIELDS: [&str; 6] = ["minX", "minY", "minZ", "maxX", "maxY", "maxZ"];
+
+pub fn int_box_of(rt: &Rt, o: V) -> IntBox {
+    BOX_FIELDS.map(|k| rt.get_field(o, k).i())
+}
+
+fn set_int_box(rt: &mut Rt, o: V, b: IntBox) {
+    for (k, v) in BOX_FIELDS.into_iter().zip(b) {
+        rt.put_field(o, k, V::I(v));
+    }
+}
+
+/// `new BoundingBox(...)`: inverted bounds swap, as vanilla's constructor does outside a
+/// development environment (it logs them).
+fn ordered(b: IntBox) -> IntBox {
+    [b[0].min(b[3]), b[1].min(b[4]), b[2].min(b[5]), b[0].max(b[3]), b[1].max(b[4]), b[2].max(b[5])]
+}
+
+/// A new `BoundingBox` over `b`.
+pub fn bounding_box(rt: &mut Rt, b: IntBox) -> V {
+    let o = rt.new_object(BOUNDING_BOX);
+    set_int_box(rt, o, ordered(b));
+    o
+}
+
+fn block_of(rt: &Rt, v: V) -> [i32; 3] {
+    pos(rt, v).map(|x| x as i32)
+}
+
+/// `BoundingBox.orientBox`: a piece's box of size `w`, `h`, `d` at `offset` in a structure at
+/// `at`, turned to `facing` (a direction ordinal; up and down face south, as vanilla's `default`).
+fn orient_box(at: [i32; 3], offset: [i32; 3], size: [i32; 3], facing: u8) -> IntBox {
+    let ([x, y, z], [ox, oy, oz], [w, h, d]) = (at, offset, size);
+    let (y0, y1) = (y + oy, y + h - 1 + oy);
+    match facing {
+        2 => [x + ox, y0, z - d + 1 + oz, x + w - 1 + ox, y1, z + oz],
+        4 => [x - d + 1 + oz, y0, z + ox, x + oz, y1, z + w - 1 + ox],
+        5 => [x + oz, y0, z + ox, x + d - 1 + oz, y1, z + w - 1 + ox],
+        _ => [x + ox, y0, z + oz, x + w - 1 + ox, y1, z + d - 1 + oz],
+    }
+}
+
+/// `BoundingBox`, as 1.21.1's: mutable (`encapsulate` and `move` change it, `moved` and
+/// `inflatedBy` make another), its sizes and moves in Java's wrapping `int` arithmetic (an
+/// `infinite()` box spans 0).
+fn bounding_box_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let i = |n: usize| a(n).i();
+    let is_box = |rt: &Rt, v: V| v.r() != 0 && rt.class_of(v) == BOUNDING_BOX;
+    // The static calls first: the rest read their box from the receiver.
+    match (name, desc) {
+        ("<init>", "(Lnet/minecraft/core/BlockPos;)V") => {
+            let p = block_of(rt, a(1));
+            set_int_box(rt, a(0), [p[0], p[1], p[2], p[0], p[1], p[2]]);
+            return Some(V::Void);
+        }
+        ("<init>", "(IIIIII)V") => {
+            set_int_box(rt, a(0), ordered([i(1), i(2), i(3), i(4), i(5), i(6)]));
+            return Some(V::Void);
+        }
+        ("fromCorners", _) => {
+            let (p, q) = (block_of(rt, a(0)), block_of(rt, a(1)));
+            return Some(bounding_box(rt, [p[0], p[1], p[2], q[0], q[1], q[2]]));
+        }
+        ("infinite", _) => return Some(bounding_box(rt, [i32::MIN, i32::MIN, i32::MIN, i32::MAX, i32::MAX, i32::MAX])),
+        ("orientBox", _) => {
+            let facing = crate::api_common::direction_ordinal(rt, a(9));
+            let b = orient_box([i(0), i(1), i(2)], [i(3), i(4), i(5)], [i(6), i(7), i(8)], facing);
+            return Some(bounding_box(rt, b));
+        }
+        // The box around every position (or box) given, none for none.
+        ("encapsulatingPositions" | "encapsulatingBoxes", _) => {
+            let items = crate::jutil::elements(rt, a(0));
+            let mut found: Option<IntBox> = None;
+            for v in items {
+                let b = if is_box(rt, v) {
+                    int_box_of(rt, v)
+                } else {
+                    let p = block_of(rt, v);
+                    [p[0], p[1], p[2], p[0], p[1], p[2]]
+                };
+                found = Some(match found {
+                    None => b,
+                    Some(f) => [f[0].min(b[0]), f[1].min(b[1]), f[2].min(b[2]), f[3].max(b[3]), f[4].max(b[4]), f[5].max(b[5])],
+                });
+            }
+            let held = match found {
+                Some(b) => bounding_box(rt, b),
+                None => V::NULL,
+            };
+            return Some(optional(rt, held));
+        }
+        _ => {}
+    }
+    let this = a(0);
+    let b = int_box_of(rt, this);
+    // A Vec3i argument's coordinates, or three ints.
+    let triple = |rt: &Rt| if desc.starts_with("(III)") { [i(1), i(2), i(3)] } else { block_of(rt, a(1)) };
+    let shifted = |o: [i32; 3]| [b[0].wrapping_add(o[0]), b[1].wrapping_add(o[1]), b[2].wrapping_add(o[2]), b[3].wrapping_add(o[0]), b[4].wrapping_add(o[1]), b[5].wrapping_add(o[2])];
+    let inside = |p: [i32; 3]| (0..3).all(|k| p[k] >= b[k] && p[k] <= b[k + 3]);
+    Some(match name {
+        "minX" => V::I(b[0]),
+        "minY" => V::I(b[1]),
+        "minZ" => V::I(b[2]),
+        "maxX" => V::I(b[3]),
+        "maxY" => V::I(b[4]),
+        "maxZ" => V::I(b[5]),
+        "getXSpan" => V::I(b[3].wrapping_sub(b[0]).wrapping_add(1)),
+        "getYSpan" => V::I(b[4].wrapping_sub(b[1]).wrapping_add(1)),
+        "getZSpan" => V::I(b[5].wrapping_sub(b[2]).wrapping_add(1)),
+        "getLength" => {
+            let l = [0, 1, 2].map(|k| i64::from(b[k + 3].wrapping_sub(b[k])));
+            rt.alloc("net/minecraft/core/Vec3i", Data::Native("BlockPos", [l[0], l[1], l[2], 0]))
+        }
+        "getCenter" => {
+            let c = [0, 1, 2].map(|k| i64::from(b[k].wrapping_add(b[k + 3].wrapping_sub(b[k]).wrapping_add(1) / 2)));
+            api::block_pos(rt, c[0], c[1], c[2])
+        }
+        "isInside" => {
+            let p = triple(rt);
+            V::I(inside(p) as i32)
+        }
+        "intersects" if desc.starts_with("(IIII)") => {
+            let (x0, z0, x1, z1) = (i(1), i(2), i(3), i(4));
+            V::I((b[3] >= x0 && b[0] <= x1 && b[5] >= z0 && b[2] <= z1) as i32)
+        }
+        "intersects" => {
+            let o = int_box_of(rt, a(1));
+            V::I((0..3).all(|k| b[k + 3] >= o[k] && b[k] <= o[k + 3]) as i32)
+        }
+        // This box grown to hold a position or a box: itself, changed.
+        "encapsulate" => {
+            let o = if is_box(rt, a(1)) {
+                int_box_of(rt, a(1))
+            } else {
+                let p = block_of(rt, a(1));
+                [p[0], p[1], p[2], p[0], p[1], p[2]]
+            };
+            set_int_box(rt, this, [b[0].min(o[0]), b[1].min(o[1]), b[2].min(o[2]), b[3].max(o[3]), b[4].max(o[4]), b[5].max(o[5])]);
+            this
+        }
+        "move" => {
+            let o = triple(rt);
+            set_int_box(rt, this, shifted(o));
+            this
+        }
+        "moved" => {
+            let o = [i(1), i(2), i(3)];
+            bounding_box(rt, shifted(o))
+        }
+        "inflatedBy" => {
+            let o = if desc.starts_with("(I)") { [i(1); 3] } else { [i(1), i(2), i(3)] };
+            bounding_box(rt, [b[0].wrapping_sub(o[0]), b[1].wrapping_sub(o[1]), b[2].wrapping_sub(o[2]), b[3].wrapping_add(o[0]), b[4].wrapping_add(o[1]), b[5].wrapping_add(o[2])])
+        }
+        "equals" => V::I((is_box(rt, a(1)) && int_box_of(rt, a(1)) == b) as i32),
+        // `Objects.hash` of the six bounds.
+        "hashCode" => V::I(b.iter().fold(1i32, |h, &x| h.wrapping_mul(31).wrapping_add(x))),
+        // Guava's `MoreObjects.toStringHelper`.
+        "toString" => rt.string(&format!("BoundingBox{{minX={}, minY={}, minZ={}, maxX={}, maxY={}, maxZ={}}}", b[0], b[1], b[2], b[3], b[4], b[5])),
+        _ => return None,
+    })
+}
+
 /// `api::state`'s position argument for shape queries: the origin.
 pub fn origin(rt: &mut Rt) -> V {
     rt.intern("shapes/origin".into(), |rt| api::block_pos(rt, 0, 0, 0))
@@ -803,6 +971,93 @@ mod tests {
         assert_eq!(l, vec![px([0., 0., 0., 8., 8., 16.]), px([8., 0., 0., 16., 8., 8.])]);
         // Thinner than vanilla's epsilon is nothing.
         assert!(create([0., 0., 0., 1., 0., 1.]).is_empty());
+    }
+
+    /// `BoundingBox` as 1.21.1's code computes it (the values worked by hand from its source):
+    /// corners in any order, sizes counting both corners, the centre rounding down, `orientBox`
+    /// for each facing, `moved` beside the mutating `move` and `encapsulate`, `Objects.hash`, the
+    /// toString; and Create's `/create clone` sum, `destination.offset(box.getLength())`.
+    #[test]
+    fn a_bounding_box_is_vanillas() {
+        fn call(rt: &mut Rt, n: &str, args: &[V]) -> V {
+            let key: &'static str = Box::leak(format!("{BOUNDING_BOX}.{n}").into_boxed_str());
+            api::call(rt, key, args)
+        }
+        const BOX_RET: &str = "Lnet/minecraft/world/level/levelgen/structure/BoundingBox;";
+        let mut rt = Rt::new();
+        let (a, b) = (api::block_pos(&mut rt, 5, 64, -3), api::block_pos(&mut rt, 2, 66, 1));
+        let corners = format!("fromCorners.(Lnet/minecraft/core/Vec3i;Lnet/minecraft/core/Vec3i;){BOX_RET}");
+        let bb = call(&mut rt, &corners, &[a, b]);
+        assert_eq!(int_box_of(&rt, bb), [2, 64, -3, 5, 66, 1]);
+        let spans = ["getXSpan", "getYSpan", "getZSpan"].map(|n| call(&mut rt, &format!("{n}.()I"), &[bb]).i());
+        assert_eq!(spans, [4, 3, 5]);
+        let length = call(&mut rt, "getLength.()Lnet/minecraft/core/Vec3i;", &[bb]);
+        assert_eq!(api::pos_of(&rt, length), [3, 2, 4]);
+        let destination = api::block_pos(&mut rt, 10, 70, 0);
+        let end = api::call(&mut rt, "net/minecraft/core/BlockPos.offset.(Lnet/minecraft/core/Vec3i;)Lnet/minecraft/core/BlockPos;", &[destination, length]);
+        assert_eq!(api::pos_of(&rt, end), [13, 72, 4]);
+        let center = call(&mut rt, "getCenter.()Lnet/minecraft/core/BlockPos;", &[bb]);
+        assert_eq!(api::pos_of(&rt, center), [4, 65, -1]);
+        let (corner, past) = (api::block_pos(&mut rt, 5, 66, 1), api::block_pos(&mut rt, 6, 66, 1));
+        assert_eq!(call(&mut rt, "isInside.(Lnet/minecraft/core/Vec3i;)Z", &[bb, corner]).i(), 1);
+        assert_eq!(call(&mut rt, "isInside.(Lnet/minecraft/core/Vec3i;)Z", &[bb, past]).i(), 0);
+        assert_eq!(call(&mut rt, "isInside.(III)Z", &[bb, V::I(2), V::I(64), V::I(-3)]).i(), 1);
+        assert_eq!(call(&mut rt, "hashCode.()I", &[bb]).i(), 1_003_784_806);
+        let text = call(&mut rt, "toString.()Ljava/lang/String;", &[bb]);
+        assert_eq!(rt.str_of(text), Some("BoundingBox{minX=2, minY=64, minZ=-3, maxX=5, maxY=66, maxZ=1}"));
+        let same = call(&mut rt, &corners, &[b, a]);
+        assert_eq!(call(&mut rt, "equals.(Ljava/lang/Object;)Z", &[bb, same]).i(), 1);
+        // Touching boxes intersect; one a block off doesn't.
+        let touching = bounding_box(&mut rt, [5, 66, 1, 9, 70, 9]);
+        let off = bounding_box(&mut rt, [6, 66, 1, 9, 70, 9]);
+        let intersects = format!("intersects.({BOX_RET})Z");
+        assert_eq!(call(&mut rt, &intersects, &[bb, touching]).i(), 1);
+        assert_eq!(call(&mut rt, &intersects, &[bb, off]).i(), 0);
+        assert_eq!(call(&mut rt, "intersects.(IIII)Z", &[bb, V::I(5), V::I(1), V::I(9), V::I(9)]).i(), 1);
+        assert_eq!(call(&mut rt, "intersects.(IIII)Z", &[bb, V::I(6), V::I(1), V::I(9), V::I(9)]).i(), 0);
+        let inflated = call(&mut rt, &format!("inflatedBy.(I){BOX_RET}"), &[bb, V::I(1)]);
+        assert_eq!(int_box_of(&rt, inflated), [1, 63, -4, 6, 67, 2]);
+        let moved = call(&mut rt, &format!("moved.(III){BOX_RET}"), &[bb, V::I(1), V::I(2), V::I(3)]);
+        assert_eq!(int_box_of(&rt, moved), [3, 66, 0, 6, 68, 4]);
+        assert_eq!(int_box_of(&rt, bb), [2, 64, -3, 5, 66, 1], "moved makes another box");
+        let east = api::block_pos(&mut rt, 1, 0, 0);
+        let itself = call(&mut rt, &format!("move.(Lnet/minecraft/core/Vec3i;){BOX_RET}"), &[bb, east]);
+        assert_eq!((itself, int_box_of(&rt, bb)), (bb, [3, 64, -3, 6, 66, 1]));
+        let far = api::block_pos(&mut rt, 10, 0, 0);
+        call(&mut rt, &format!("encapsulate.(Lnet/minecraft/core/BlockPos;){BOX_RET}"), &[bb, far]);
+        assert_eq!(int_box_of(&rt, bb), [3, 0, -3, 10, 66, 1]);
+        // Inverted bounds swap; the infinite box's spans wrap to 0, as Java's ints do.
+        let inverted = rt.new_object(BOUNDING_BOX);
+        call(&mut rt, "<init>.(IIIIII)V", &[inverted, V::I(5), V::I(0), V::I(0), V::I(2), V::I(1), V::I(1)]);
+        assert_eq!(int_box_of(&rt, inverted), [2, 0, 0, 5, 1, 1]);
+        let infinite = call(&mut rt, &format!("infinite.(){BOX_RET}"), &[]);
+        assert_eq!(call(&mut rt, "getXSpan.()I", &[infinite]).i(), 0);
+        // A piece 4 wide, 5 high, 6 deep at (1, 2, 3) in a structure at (100, 64, 200).
+        let orient = format!("orientBox.(IIIIIIIIILnet/minecraft/core/Direction;){BOX_RET}");
+        for (facing, want) in [
+            (3, [101, 66, 203, 104, 70, 208]),
+            (2, [101, 66, 198, 104, 70, 203]),
+            (4, [98, 66, 201, 103, 70, 204]),
+            (5, [103, 66, 201, 108, 70, 204]),
+            (1, [101, 66, 203, 104, 70, 208]),
+        ] {
+            let d = api::direction(&mut rt, facing);
+            let ints = [100, 64, 200, 1, 2, 3, 4, 5, 6].map(V::I);
+            let mut args = ints.to_vec();
+            args.push(d);
+            let o = call(&mut rt, &orient, &args);
+            assert_eq!(int_box_of(&rt, o), want, "facing {facing}");
+        }
+        // The box around positions; none around none.
+        let (p, q) = (api::block_pos(&mut rt, 1, 2, 3), api::block_pos(&mut rt, 0, 5, -1));
+        let list = crate::jutil::new_list(&mut rt, vec![p, q]);
+        let around = call(&mut rt, "encapsulatingPositions.(Ljava/lang/Iterable;)Ljava/util/Optional;", &[list]);
+        let held = rt.get_field(around, "value");
+        assert_eq!(int_box_of(&rt, held), [0, 2, -1, 1, 5, 3]);
+        let empty = crate::jutil::new_list(&mut rt, Vec::new());
+        let none = call(&mut rt, "encapsulatingPositions.(Ljava/lang/Iterable;)Ljava/util/Optional;", &[empty]);
+        assert_eq!(rt.get_field(none, "value").r(), 0);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

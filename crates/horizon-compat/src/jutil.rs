@@ -532,6 +532,8 @@ pub fn elements(rt: &Rt, v: V) -> Vec<V> {
 }
 
 const SPLITTER: &str = "com/google/common/base/Splitter";
+/// What `Stream.generate` gives: its supplier, until `limit` makes it a stream of so many.
+const GENERATED_STREAM: &str = "java/util/stream/Stream$Generated";
 const JOINER: &str = "com/google/common/base/Joiner";
 const OBJECT_ARRAYS: &str = "com/google/common/collect/ObjectArrays";
 
@@ -711,6 +713,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     // Statics first.
     if let Some(v) = statics(rt, owner, name, desc, args) {
         return Some(v);
+    }
+    if rt.class_of(a(0)) == GENERATED_STREAM {
+        if name != "limit" {
+            return None;
+        }
+        let supplier = rt.get_field(a(0), "$supplier");
+        let mut items = Vec::new();
+        for _ in 0..a(1).j().max(0) {
+            items.push(rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", supplier, &[]));
+            if rt.thrown.is_some() {
+                break;
+            }
+        }
+        return Some(rt.alloc("java/util/stream/Stream", Data::Stream(items)));
     }
     // fastutil's `trim()`: the table's storage, which a runtime table sizes itself.
     if owner.starts_with("it/unimi/dsi/fastutil/") && name == "trim" {
@@ -1084,6 +1100,24 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             };
             new_set(rt, &items)
         }
+        // Guava's `Lists.reverse(list)` and `Lists.transform(list, function)`: copies, the elements
+        // turned around or each through the function (Guava's are live views of the list; the code
+        // asking reads them once: Create's clone command walks its blocks back so).
+        ("com/google/common/collect/Lists", "reverse") => {
+            let mut items = elements(rt, a(0));
+            items.reverse();
+            new_list(rt, items)
+        }
+        ("com/google/common/collect/Lists", "transform") => {
+            let mut out = Vec::new();
+            for e in elements(rt, a(0)) {
+                out.push(rt.call_functional("com/google/common/base/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", a(1), &[e]));
+                if rt.thrown.is_some() {
+                    break;
+                }
+            }
+            new_list(rt, out)
+        }
         // Guava's other factories (`Sets.newLinkedHashSet()`, `Lists.newArrayListWithCapacity(n)`,
         // `Maps.newHashMap(map)`...): empty for a size hint, else a copy of what they're given (an
         // `Iterable`, an `Iterator`, an array, a map). The runtime's sets and maps keep insertion
@@ -1335,6 +1369,21 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             V::I(items.into_iter().fold(1i32, |h, v| h.wrapping_mul(31).wrapping_add(if v.is_null() { 0 } else { hash(rt, v) })))
         }
         ("java/util/Objects", "isNull") => V::I(a(0).is_null() as i32),
+        // `Objects.toString(o[, nullDefault])`: `String.valueOf(o)`, or the default for null.
+        ("java/util/Objects", "toString") => {
+            if a(0).is_null() && desc.starts_with("(Ljava/lang/Object;Ljava/lang/String;)") {
+                a(1)
+            } else {
+                let s = rt.to_java_string(a(0), 'L');
+                rt.string(&s)
+            }
+        }
+        // `Stream.generate(supplier)` is endless: the supplier is asked once `limit` says how often.
+        ("java/util/stream/Stream", "generate") => {
+            let g = rt.new_object(GENERATED_STREAM);
+            rt.put_field(g, "$supplier", a(0));
+            g
+        }
         ("java/util/Objects", "nonNull") => V::I(!a(0).is_null() as i32),
         // `IntStream.of(...)`, `LongStream.of(...)`, `DoubleStream.of(...)`: an array's values, or the
         // one given, held unboxed.
@@ -3088,6 +3137,44 @@ mod tests {
         // A bad range throws as the JDK does.
         c(&mut rt, "java/util/Arrays.sort.([III)V", &[b, V::I(3), V::I(1)]);
         assert_eq!(rt.thrown.map(|e| rt.class_of(e)), Some("java/lang/IllegalArgumentException"));
+    }
+
+    fn list_of_three(rt: &mut Rt) -> V {
+        new_list(rt, vec![V::I(1), V::I(2), V::I(3)])
+    }
+
+    /// `Objects.toString` is `String.valueOf` (null as "null") or the default given for null;
+    /// `Stream.generate` asks its supplier as often as `limit` says (Create's debug info indents so);
+    /// Guava's `Lists.reverse` turns a list around (Create's clone command clears its area so).
+    #[test]
+    fn objects_print_and_generated_streams_stop_at_their_limit() {
+        fn tab(rt: &mut Rt, _id: u32, _args: &[V]) -> Option<V> {
+            let n = rt.interned.get("test:asked").map_or(0, |v| v.i()) + 1;
+            rt.interned.insert("test:asked".into(), V::I(n));
+            Some(rt.string("\t"))
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(tab);
+        let to_string = "java/util/Objects.toString.(Ljava/lang/Object;)Ljava/lang/String;";
+        let printed = c(&mut rt, to_string, &[V::NULL]);
+        assert_eq!(rt.str_of(printed), Some("null"));
+        let five = crate::api_common::integer(&mut rt, 5);
+        let printed = c(&mut rt, to_string, &[five]);
+        assert_eq!(rt.str_of(printed), Some("5"));
+        let none = rt.string("none");
+        assert_eq!(c(&mut rt, "java/util/Objects.toString.(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/String;", &[V::NULL, none]), none);
+        let supplier = rt.lambda_id("java/util/function/Supplier", 1, vec![]);
+        let endless = c(&mut rt, "java/util/stream/Stream.generate.(Ljava/util/function/Supplier;)Ljava/util/stream/Stream;", &[supplier]);
+        assert!(!rt.interned.contains_key("test:asked"), "nothing asked before the limit");
+        let three = c(&mut rt, "java/util/stream/Stream.limit.(J)Ljava/util/stream/Stream;", &[endless, V::J(3)]);
+        let forth = list_of_three(&mut rt);
+        let back = c(&mut rt, "com/google/common/collect/Lists.reverse.(Ljava/util/List;)Ljava/util/List;", &[forth]);
+        let back: Vec<i32> = elements(&rt, back).iter().map(|v| v.i()).collect();
+        assert_eq!(back, [3, 2, 1]);
+        let tabs: Vec<&str> = elements(&rt, three).iter().map(|v| rt.str_of(*v).unwrap_or("")).collect();
+        assert_eq!(tabs, ["\t"; 3]);
+        assert_eq!(rt.interned["test:asked"], V::I(3));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Create sorts with `Comparator.comparing(key)`, `thenComparing(next)` and `reversed()`: by the

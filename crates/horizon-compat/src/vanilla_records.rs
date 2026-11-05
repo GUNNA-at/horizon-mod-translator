@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 663] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 659] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1231,7 +1231,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 663] = [
     ("net/minecraft/client/tutorial/OpenInventoryTutorialStep", "i(Lnet/minecraft/client/tutorial/Tutorial;)V=tutorial|o"),
     ("net/minecraft/client/tutorial/PunchTreeTutorialStepInstance", "i(Lnet/minecraft/client/tutorial/Tutorial;)V=tutorial|o"),
     ("net/minecraft/client/tutorial/Tutorial$TimedToast", "i(Lnet/minecraft/client/gui/components/toasts/TutorialToast;I)V=toast,durationTicks|o"),
-    ("net/minecraft/commands/CommandSourceStack", "i(Lnet/minecraft/commands/CommandSource;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/Vec2;Lnet/minecraft/server/level/ServerLevel;ILjava/lang/String;Lnet/minecraft/network/chat/Component;Lnet/minecraft/server/MinecraftServer;Lnet/minecraft/world/entity/Entity;ZLnet/minecraft/commands/CommandResultCallback;Lnet/minecraft/commands/arguments/EntityAnchorArgument$Anchor;Lnet/minecraft/commands/CommandSigningContext;Lnet/minecraft/util/TaskChainer;)V=source,worldPosition,rotation,level,permissionLevel,textName,displayName,server,entity,silent,resultCallback,anchor,signingContext,chatMessageChainer|ggetDisplayName()Lnet/minecraft/network/chat/Component;=displayName|ggetTextName()Ljava/lang/String;=textName|ggetPosition()Lnet/minecraft/world/phys/Vec3;=worldPosition|ggetLevel()Lnet/minecraft/server/level/ServerLevel;=level|ggetEntity()Lnet/minecraft/world/entity/Entity;=entity|ggetRotation()Lnet/minecraft/world/phys/Vec2;=rotation|ggetServer()Lnet/minecraft/server/MinecraftServer;=server|ggetAnchor()Lnet/minecraft/commands/arguments/EntityAnchorArgument$Anchor;=anchor|ggetSigningContext()Lnet/minecraft/commands/CommandSigningContext;=signingContext|ggetChatMessageChainer()Lnet/minecraft/util/TaskChainer;=chatMessageChainer|gcallback()Lnet/minecraft/commands/CommandResultCallback;=resultCallback|gisSilent()Z=silent|o"),
     ("net/minecraft/commands/SharedSuggestionProvider$TextCoordinates", "i(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V=x,y,z|o"),
     ("net/minecraft/commands/arguments/AngleArgument$SingleAngle", "i(FZ)V=angle,isRelative|o"),
     ("net/minecraft/commands/arguments/ComponentArgument", "i(Lnet/minecraft/core/HolderLookup$Provider;)V=registries|o"),
@@ -1246,15 +1245,12 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 663] = [
     ("net/minecraft/commands/arguments/ScoreHolderArgument$SelectorResult", "i(Lnet/minecraft/commands/arguments/selector/EntitySelector;)V=selector|o"),
     ("net/minecraft/commands/arguments/StyleArgument", "i(Lnet/minecraft/core/HolderLookup$Provider;)V=registries|o"),
     ("net/minecraft/commands/arguments/TimeArgument", "i(I)V=minimum|o"),
-    ("net/minecraft/commands/arguments/blocks/BlockInput", "i(Lnet/minecraft/world/level/block/state/BlockState;Ljava/util/Set;Lnet/minecraft/nbt/CompoundTag;)V=state,properties,tag|ggetState()Lnet/minecraft/world/level/block/state/BlockState;=state|ggetDefinedProperties()Ljava/util/Set;=properties|o"),
     ("net/minecraft/commands/arguments/blocks/BlockPredicateArgument$BlockPredicate", "i(Lnet/minecraft/world/level/block/state/BlockState;Ljava/util/Set;Lnet/minecraft/nbt/CompoundTag;)V=state,properties,nbt|o"),
     ("net/minecraft/commands/arguments/blocks/BlockPredicateArgument$TagPredicate", "i(Lnet/minecraft/core/HolderSet;Ljava/util/Map;Lnet/minecraft/nbt/CompoundTag;)V=tag,vagueProperties,nbt|o"),
     ("net/minecraft/commands/arguments/coordinates/LocalCoordinates", "i(DDD)V=left,up,forwards|e=left,up,forwards"),
     ("net/minecraft/commands/arguments/coordinates/Vec2Argument", "i(Z)V=centerCorrect|o"),
     ("net/minecraft/commands/arguments/coordinates/Vec3Argument", "i(Z)V=centerCorrect|o"),
     ("net/minecraft/commands/arguments/coordinates/WorldCoordinate", "i(ZD)V=relative,value|gisRelative()Z=relative|e=relative,value"),
-    ("net/minecraft/commands/arguments/coordinates/WorldCoordinates", "i(Lnet/minecraft/commands/arguments/coordinates/WorldCoordinate;Lnet/minecraft/commands/arguments/coordinates/WorldCoordinate;Lnet/minecraft/commands/arguments/coordinates/WorldCoordinate;)V=x,y,z|e=x,y,z"),
-    ("net/minecraft/commands/arguments/item/ItemInput", "i(Lnet/minecraft/core/Holder;Lnet/minecraft/core/component/DataComponentPatch;)V=item,components|o"),
     ("net/minecraft/commands/execution/tasks/BuildContexts", "i(Ljava/lang/String;Lcom/mojang/brigadier/context/ContextChain;)V=commandInput,command|gtoString()Ljava/lang/String;=commandInput|o"),
     ("net/minecraft/commands/execution/tasks/CallFunction", "i(Lnet/minecraft/commands/functions/InstantiatedFunction;Lnet/minecraft/commands/CommandResultCallback;Z)V=function,resultCallback,returnParentFrame|o"),
     ("net/minecraft/commands/execution/tasks/ExecuteCommand", "i(Ljava/lang/String;Lnet/minecraft/commands/execution/ChainModifiers;Lcom/mojang/brigadier/context/CommandContext;)V=commandInput,modifiers,executionContext|o"),

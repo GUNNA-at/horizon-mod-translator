@@ -102,6 +102,47 @@ pub fn post(rt: &mut Rt, class: &str, event: V) {
     }
 }
 
+/// `IEventBus.unregister(x)`: the listeners `x` added stop listening, as NeoForge's bus keys them by
+/// what was registered: a listener `addListener` took, the `@SubscribeEvent` methods of an object
+/// `register` took (bound to it), or a class's static ones.
+fn unregister(rt: &mut Rt, x: V) {
+    if x.r() == 0 {
+        return;
+    }
+    let static_of = (rt.class_of(x) == "java/lang/Class").then(|| rt.str_of(x).unwrap_or("").to_owned());
+    let mut keys: Vec<(&'static str, bool)> = Vec::new();
+    let mut class = Some(match &static_of {
+        Some(c) => rt.static_key(c),
+        None => rt.class_of(x),
+    });
+    while let Some(c) = class {
+        for (_, key, is_static, _) in rt.subscribers.get(c).cloned().unwrap_or_default() {
+            keys.push((key, is_static));
+        }
+        // A class's static subscribers are its own; an object's are its class's and its supers'.
+        class = if static_of.is_some() { None } else { rt.supers.get(c).copied() };
+    }
+    let before = rt.listeners.len();
+    let listeners = std::mem::take(&mut rt.listeners);
+    rt.listeners = listeners
+        .into_iter()
+        .filter(|(_, l)| {
+            if *l == x {
+                return false;
+            }
+            let class = rt.class_of(*l);
+            let bound = rt.captured(*l);
+            !keys.iter().any(|&(key, is_static)| {
+                key == class && if is_static { static_of.is_some() && bound.is_empty() } else { static_of.is_none() && bound == [x] }
+            })
+        })
+        .collect();
+    if rt.listeners.len() != before {
+        rt.listeners_by_event.clear();
+        rt.listeners_indexed = (usize::MAX, usize::MAX);
+    }
+}
+
 /// The listeners an event of class `class` reaches, in the order they listen (as they were when
 /// it was posted: one a listener adds hears the next post). Kept per class
 /// ([`Rt::listeners_by_event`]): a tick's events don't walk the mod's hundreds of listeners.
@@ -492,6 +533,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.listeners.push((wanted, listener));
             V::Void
         }
+        // `bus.unregister(x)`: what `register(x)` or `addListener(x)` added stops listening.
+        ("net/neoforged/bus/api/IEventBus", "unregister") => {
+            unregister(rt, a(1));
+            V::Void
+        }
         // `bus.register(Foo.class)` listens with its static `@SubscribeEvent` methods, `bus.register(obj)`
         // with the object's.
         ("net/neoforged/bus/api/IEventBus", "register") => {
@@ -513,16 +559,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
         }
         (o, "hasTime") if o.starts_with("net/neoforged/neoforge/event/tick/ServerTickEvent") => V::I(1),
-        // `ServerLifecycleHooks.getCurrentServer()`: the server once its world is open (its level
-        // made, as `LevelEvent.Load` hears it), in the server's runtime; null before, and in the
-        // client's (a client's world can be another machine's).
+        // `ServerLifecycleHooks.getCurrentServer()`: the server from its `ServerAboutToStartEvent`
+        // (or once its world's level is made, as `LevelEvent.Load` hears it) until it stopped, in
+        // the server's runtime; null before and after, and in the client's (a client's world can
+        // be another machine's).
         ("net/neoforged/neoforge/server/ServerLifecycleHooks", "getCurrentServer") => {
-            if is_client(rt) || !rt.interned.contains_key("compat:level") {
+            if is_client(rt) || !(rt.interned.contains_key(SERVER_RUNNING) || rt.interned.contains_key("compat:level")) {
                 V::NULL
             } else {
-                rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
+                server(rt)
             }
         }
+        // A server lifecycle event's server: the one it was posted about.
+        (o, "getServer") if o.starts_with(SERVER_EVENTS) => match rt.get_field(a(0), "$server") {
+            V::R(n) if n != 0 => V::R(n),
+            _ => server(rt),
+        },
         // `ModLoader.postEvent(event)` (or in mod order, `postEventWrapContainerInModOrder`): a mod
         // posting its own event to every mod's bus (FramedBlocks', Curios' registration events).
         ("net/neoforged/fml/ModLoader", "postEvent" | "postEventWrapContainerInModOrder" | "postEventWithReturn") => {
@@ -1162,6 +1214,34 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             crate::api_common::optional(rt, c)
         }
         ("net/neoforged/fml/ModList", "size") => V::I(loaded_mods(rt).len() as i32),
+        // Each loaded mod's id and container, in FML's order: `forEachModContainer(BiConsumer)`,
+        // `forEachModInOrder(Consumer)` (containers), `applyForEachModContainer(Function)` (a stream
+        // of the answers), `getSortedMods()` (the containers).
+        ("net/neoforged/fml/ModList", "forEachModContainer" | "forEachModInOrder" | "applyForEachModContainer" | "getSortedMods") => {
+            let mut out = Vec::new();
+            for id in loaded_mods(rt) {
+                let c = mod_container(rt, &id);
+                match name {
+                    "forEachModContainer" => {
+                        let s = rt.string(&id);
+                        rt.call_functional("java/util/function/BiConsumer.accept.(Ljava/lang/Object;Ljava/lang/Object;)V", a(1), &[s, c]);
+                    }
+                    "forEachModInOrder" => {
+                        rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", a(1), &[c]);
+                    }
+                    "applyForEachModContainer" => out.push(rt.call_functional("java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", a(1), &[c])),
+                    _ => out.push(c),
+                }
+                if rt.thrown.is_some() {
+                    break;
+                }
+            }
+            match name {
+                "applyForEachModContainer" => rt.alloc("java/util/stream/Stream", Data::Stream(out)),
+                "getSortedMods" => crate::jutil::new_list(rt, out),
+                _ => V::Void,
+            }
+        }
         // What FML's scan of each jar found: its annotations ([`crate::scan`]).
         ("net/neoforged/fml/ModList", "getAllScanData") => crate::scan::all(rt),
         // `getMods()`: each loaded mod's metadata, in FML's order.
@@ -1302,6 +1382,69 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         },
         _ => return None,
     })
+}
+
+/// Set while the server runs: from `ServerAboutToStartEvent` until `ServerStoppedEvent`.
+const SERVER_RUNNING: &str = "compat:server-running";
+const SERVER_EVENTS: &str = "net/neoforged/neoforge/event/server/";
+const LEVEL_UNLOAD: &str = "net/neoforged/neoforge/event/level/LevelEvent$Unload";
+
+/// The server: one object while it runs.
+pub(crate) fn server(rt: &mut Rt) -> V {
+    rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
+}
+
+/// Posts the server lifecycle event `name` (`ServerStartingEvent`) about the server.
+fn server_event(rt: &mut Rt, name: &str) {
+    let class: &'static str = rt.static_key(&format!("{SERVER_EVENTS}{name}"));
+    let ev = rt.new_object(class);
+    let s = server(rt);
+    rt.put_field(ev, "$server", s);
+    if Rt::tracing() {
+        eprintln!("horizon-compat: {name} to {} listeners", hearing(rt, class).len());
+    }
+    post(rt, class, ev);
+}
+
+/// NeoForge's `ServerAboutToStartEvent`: the server is there before it loads anything.
+pub(crate) fn server_about_to_start(rt: &mut Rt) {
+    rt.interned.insert(SERVER_RUNNING.into(), V::I(1));
+    server_event(rt, "ServerAboutToStartEvent");
+}
+
+/// The world open: `ServerStartingEvent`, then `ServerStartedEvent`, as `MinecraftServer.runServer`
+/// posts them before its first tick.
+pub(crate) fn server_started(rt: &mut Rt) {
+    rt.interned.insert(SERVER_RUNNING.into(), V::I(1));
+    server_event(rt, "ServerStartingEvent");
+    server_event(rt, "ServerStartedEvent");
+}
+
+/// NeoForge's `ServerStoppingEvent`, with the worlds still loaded.
+pub(crate) fn server_stopping(rt: &mut Rt) {
+    server_event(rt, "ServerStoppingEvent");
+}
+
+/// The server gone: its level unloads (`LevelEvent.Unload`), then `ServerStoppedEvent`; the next
+/// world gets a new server and level (a new `LevelEvent.Load`), and `getCurrentServer()` is null
+/// until then.
+pub(crate) fn server_stopped(rt: &mut Rt) {
+    if !rt.interned.contains_key(SERVER_RUNNING) && !rt.interned.contains_key("compat:server") {
+        return;
+    }
+    if let Some(&level) = rt.interned.get("compat:level") {
+        let ev = rt.new_object(LEVEL_UNLOAD);
+        rt.put_field(ev, "$level", level);
+        if Rt::tracing() {
+            eprintln!("horizon-compat: LevelEvent$Unload to {} listeners", hearing(rt, LEVEL_UNLOAD).len());
+        }
+        post(rt, LEVEL_UNLOAD, ev);
+    }
+    server_event(rt, "ServerStoppedEvent");
+    // The server's commands went with it (`crate::commands`).
+    for key in [SERVER_RUNNING, "compat:server", "compat:level", "compat:commands"] {
+        rt.interned.remove(key);
+    }
 }
 
 /// The messages sent to mod `id` and not yet read, in the order they were sent.
@@ -1846,6 +1989,137 @@ mod tests {
             _ => list_mut(rt, seen).push(args[1]),
         }
         Some(V::Void)
+    }
+
+    /// The server's lifecycle as NeoForge posts it: `ServerAboutToStartEvent` before the world
+    /// loads (its level's `LevelEvent.Load` comes after), `ServerStartingEvent` and
+    /// `ServerStartedEvent` once it opened, `ServerStoppingEvent`, then the level's
+    /// `LevelEvent.Unload` and `ServerStoppedEvent`. `getCurrentServer()` is the events' server
+    /// from the first to the last, null before and after; the next world has a server and level of
+    /// its own.
+    #[test]
+    fn the_server_starts_and_stops_as_neoforge_posts_it() {
+        const CURRENT: &str = "net/neoforged/neoforge/server/ServerLifecycleHooks.getCurrentServer.()Lnet/minecraft/server/MinecraftServer;";
+        const GET_SERVER: &str = "net/neoforged/neoforge/event/server/ServerLifecycleEvent.getServer.()Lnet/minecraft/server/MinecraftServer;";
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(bake_into_list);
+        let seen = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        let events = [
+            "net/neoforged/neoforge/event/server/ServerAboutToStartEvent",
+            "net/neoforged/neoforge/event/level/LevelEvent$Load",
+            "net/neoforged/neoforge/event/server/ServerStartingEvent",
+            "net/neoforged/neoforge/event/server/ServerStartedEvent",
+            "net/neoforged/neoforge/event/server/ServerStoppingEvent",
+            LEVEL_UNLOAD,
+            "net/neoforged/neoforge/event/server/ServerStoppedEvent",
+        ];
+        for event in events {
+            let listener = rt.lambda_id("java/util/function/Consumer", 2, vec![seen]);
+            rt.listeners.push((event.to_owned(), listener));
+        }
+        assert_eq!(call(&mut rt, CURRENT, &[]), Some(V::NULL), "no server before it starts");
+        server_about_to_start(&mut rt);
+        let current = call(&mut rt, CURRENT, &[]).unwrap();
+        assert_ne!(current, V::NULL);
+        let level = crate::glue::level(&mut rt);
+        server_started(&mut rt);
+        server_stopping(&mut rt);
+        server_stopped(&mut rt);
+        let heard = list_mut(&mut rt, seen).clone();
+        let classes: Vec<&str> = heard.iter().map(|e| rt.class_of(*e)).collect();
+        assert_eq!(classes, events);
+        let server_events: Vec<V> = heard.iter().copied().filter(|e| rt.class_of(*e).starts_with(SERVER_EVENTS)).collect();
+        assert_eq!(server_events.len(), 5);
+        for e in server_events {
+            assert_eq!(call(&mut rt, GET_SERVER, &[e]), Some(current));
+        }
+        let unload = heard[5];
+        assert_eq!(rt.get_field(unload, "$level"), level);
+        assert_eq!(call(&mut rt, CURRENT, &[]), Some(V::NULL), "no server once it stopped");
+        // The next world: a server and a level of its own, its level loaded again.
+        server_about_to_start(&mut rt);
+        assert_ne!(call(&mut rt, CURRENT, &[]), Some(current));
+        assert_ne!(crate::glue::level(&mut rt), level);
+        assert_eq!(list_mut(&mut rt, seen).len(), events.len() + 2);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `ModList`'s walks over the loaded mods, in FML's order: ids with containers
+    /// (`forEachModContainer`, Create's debug info lists the mods so), and the containers alone.
+    #[test]
+    fn the_mod_list_walks_its_mods_in_order() {
+        fn seen(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+            let log = rt.interned["test:log"];
+            list_mut(rt, log).push(args[1]);
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        rt.mods = vec!["create".into(), "flywheel".into()];
+        rt.lambda_call = Some(seen);
+        let log = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        rt.interned.insert("test:log".into(), log);
+        let list = call(&mut rt, "net/neoforged/fml/ModList.get.()Lnet/neoforged/fml/ModList;", &[]).unwrap();
+        let each = rt.lambda_id("java/util/function/BiConsumer", 1, vec![]);
+        call(&mut rt, "net/neoforged/fml/ModList.forEachModContainer.(Ljava/util/function/BiConsumer;)V", &[list, each]);
+        let heard = list_mut(&mut rt, log).clone();
+        let ids: Vec<&str> = heard.iter().map(|v| rt.str_of(*v).unwrap_or("")).collect();
+        assert_eq!(ids, ["create", "flywheel"]);
+        let sorted = call(&mut rt, "net/neoforged/fml/ModList.getSortedMods.()Ljava/util/List;", &[list]).unwrap();
+        let mut owners = Vec::new();
+        for c in crate::jutil::elements(&rt, sorted) {
+            let id = call(&mut rt, "net/neoforged/fml/ModContainer.getModId.()Ljava/lang/String;", &[c]).unwrap();
+            owners.push(rt.str_of(id).unwrap_or("").to_owned());
+        }
+        assert_eq!(owners, ["create", "flywheel"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `IEventBus.unregister`, as Create's `OneTimeEventReceiver` does once loading completes: an
+    /// object `register` took stops hearing through its `@SubscribeEvent` methods, a class through
+    /// its static ones, a listener `addListener` took itself; another object of the same class and
+    /// the other listeners still hear.
+    #[test]
+    fn unregistered_listeners_stop_hearing() {
+        const STARTED: &str = "net/neoforged/neoforge/event/server/ServerStartedEvent";
+        const HANDLER: &str = "test/Handler";
+        const ON: &str = "test/Handler.onStarted.(Lnet/neoforged/neoforge/event/server/ServerStartedEvent;)V";
+        const ON_STATIC: &str = "test/Handler.onStartedStatic.(Lnet/neoforged/neoforge/event/server/ServerStartedEvent;)V";
+        const REGISTER: &str = "net/neoforged/bus/api/IEventBus.register.(Ljava/lang/Object;)V";
+        const ADD: &str = "net/neoforged/bus/api/IEventBus.addListener.(Ljava/lang/Class;Ljava/util/function/Consumer;)V";
+        const UNREGISTER: &str = "net/neoforged/bus/api/IEventBus.unregister.(Ljava/lang/Object;)V";
+        /// 7: the handler's method, bound to its object (heard as that object); 8: a plain
+        /// listener; 9: the handler's static method.
+        fn heard(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let who = if id == 7 { rt.captured(args[0])[0] } else { V::I(id as i32) };
+            let log = rt.interned["test:log"];
+            list_mut(rt, log).push(who);
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(heard);
+        let log = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        rt.interned.insert("test:log".into(), log);
+        rt.subscribers.insert(HANDLER, vec![(STARTED, ON, false, 7), (STARTED, ON_STATIC, true, 9)]);
+        let (one, two) = (rt.new_object(HANDLER), rt.new_object(HANDLER));
+        let bus = rt.new_object("net/neoforged/bus/api/IEventBus");
+        let handler_class = crate::jlang::class_object(&mut rt, HANDLER);
+        let started_class = crate::jlang::class_object(&mut rt, STARTED);
+        let plain = rt.lambda_id("java/util/function/Consumer", 8, vec![]);
+        for (key, args) in [(REGISTER, [bus, one, V::NULL]), (REGISTER, [bus, two, V::NULL]), (REGISTER, [bus, handler_class, V::NULL]), (ADD, [bus, started_class, plain])] {
+            call(&mut rt, key, &args[..if key == ADD { 3 } else { 2 }]);
+        }
+        let post_started = |rt: &mut Rt| {
+            let ev = rt.new_object(STARTED);
+            post(rt, STARTED, ev);
+        };
+        post_started(&mut rt);
+        assert_eq!(list_mut(&mut rt, log).clone(), [one, two, V::I(9), V::I(8)]);
+        for gone in [one, handler_class, plain] {
+            call(&mut rt, UNREGISTER, &[bus, gone]);
+        }
+        post_started(&mut rt);
+        assert_eq!(list_mut(&mut rt, log)[4..], [two]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `ItemStack.canPerformAction(ability)` (Farmer's Delight asks it of the held stack to tell a

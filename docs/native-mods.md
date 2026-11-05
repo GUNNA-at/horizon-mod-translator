@@ -956,10 +956,13 @@ For mods that run where the world is simulated: a dedicated server, a LAN host, 
 ([smp.md](smp.md)).
 
 - **`native_register_commands(commands)`**: push a `NativeCommand` per usage, asked once when a world opens to
-  players. A usage is words, then arguments `<name:kind>`, optional ones last in brackets:
-  `NativeCommand::new("pay <player:player> <amount:integer>")`, `NativeCommand::op("eco set <player:player>
-  <amount:integer>", 3)` for operators of level 3. Kinds: `word`, `text` (the rest of the line, last), `integer`,
-  `number`, `boolean`, `player`, `item`, `block_pos`. The usages of one command merge into one tree, which every
+  players. A usage is words (ASCII letters, digits, `_`, `-` and `.`), then arguments `<name:kind>`, optional ones
+  last in brackets: `NativeCommand::new("pay <player:player> <amount:integer>")`, `NativeCommand::op("eco set
+  <player:player> <amount:integer>", 3)` for operators of level 3. Kinds, as vanilla's argument types: `word`,
+  `string` (a word or a quoted phrase), `text` and `message` (the rest of the line, last), `integer`, `long`,
+  `number`, `boolean`, `player`, `players`, `entity`, `entities`, `game_profile`, `item`, `block`, `block_pos`,
+  `column_pos`, `vec3`, `vec2`, `rotation`, `angle`, `id`, `dimension`, `uuid`, `color`, `time`. The usages of one
+  command merge into one tree, which every
   player receives after vanilla's (filtered by their level, as vanilla's is), so their chat box completes and colours
   it. A name vanilla has, or a usage that doesn't parse, is left out with a warning in the log.
 - **`native_player_command(player, name, command, canceled, replies)`**: any command a player typed (without the
