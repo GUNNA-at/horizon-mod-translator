@@ -92,6 +92,16 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 /// `out/carry-report.json` beside it). The carry is the folder mod an
 /// install copies.
 pub fn check(jar_path: &Path, out: &Path) -> Result<Check, String> {
+    check_with(jar_path, out, &BTreeMap::new())
+}
+
+/// [`check`], with the loader's convention biome tags (`c:is_plains`...),
+/// by path, that the carry brings along where the mod names them.
+pub fn check_with(
+    jar_path: &Path,
+    out: &Path,
+    conventions: &BTreeMap<String, serde_json::Value>,
+) -> Result<Check, String> {
     let info = jar::read(jar_path)?;
     let file = fs::File::open(jar_path).map_err(|e| format!("{}: {e}", jar_path.display()))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar_path.display()))?;
@@ -141,15 +151,7 @@ pub fn check(jar_path: &Path, out: &Path) -> Result<Check, String> {
         loaded: &alone,
         mods: &alone,
     };
-    let report = match carry::carry(
-        jar_path,
-        &info,
-        out,
-        None,
-        &|_| true,
-        &pack,
-        &BTreeMap::new(),
-    ) {
+    let report = match carry::carry(jar_path, &info, out, None, &|_| true, &pack, conventions) {
         Ok(r) => r,
         Err(e) => {
             check.summary = format!("Can't be carried over: {e}");

@@ -285,13 +285,17 @@ fn place(carries: &[PathBuf], game: &Path, out: &mut Outcome) -> Result<Vec<(Pat
 
 fn jars(jars: &[PathBuf], game: &Path, work: &Path, log: Log) -> Result<Outcome, String> {
     let mut out = Outcome::default();
+    // The loader's convention biome tags, when the work folder has its jar (a
+    // pack's fetch keeps it in `loader/`): a mod's biome modifiers and
+    // structures name them.
+    let conventions = crate::worldgen::loader_biome_tags(work);
     // Each jar checked: its verdict and carry-over.
     let mut checks = Vec::new();
     for jar in jars {
         let stem = jar.file_stem().unwrap_or_default().to_string_lossy().into_owned();
         let dir = work.join("mods").join(&stem);
         let _ = fs::remove_dir_all(&dir);
-        let c = check::check(jar, &dir);
+        let c = check::check_with(jar, &dir, &conventions);
         match &c {
             Ok(c) => log(format!("{}: {}. {}", c.mod_id, c.verdict.label(), c.summary)),
             Err(e) => log(format!("{}: {e}", jar.display())),
@@ -500,6 +504,48 @@ mod tests {
                 ),
             ],
         );
+    }
+
+    /// A jar installed where the work folder holds the loader's jar gets the loader's convention
+    /// biome tags its biome modifiers name.
+    #[test]
+    fn a_dropped_jar_gets_the_loaders_biome_tags() {
+        let root = std::env::temp_dir().join(format!("port-install-conv-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("game")).unwrap();
+        fs::create_dir_all(root.join("work/loader")).unwrap();
+        jar(
+            &root.join("work/loader/neoforge-21.1.0-universal.jar"),
+            &[
+                ("data/c/tags/worldgen/biome/is_swamp.json", r#"{"values":["minecraft:swamp"]}"#),
+                ("data/c/tags/worldgen/biome/is_desert.json", r#"{"values":["minecraft:desert"]}"#),
+            ],
+        );
+        let path = root.join("rice-1.0.jar");
+        jar(
+            &path,
+            &[
+                (
+                    "META-INF/neoforge.mods.toml",
+                    "modLoader=\"javafml\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"rice\"\nversion=\"1.0\"\n",
+                ),
+                (
+                    "data/rice/neoforge/biome_modifier/wild_rice.json",
+                    r##"{"type":"neoforge:add_features","biomes":"#c:is_swamp","features":"rice:patch","step":"vegetal_decoration"}"##,
+                ),
+                (
+                    "data/rice/recipe/rice.json",
+                    r#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:wheat"],"result":{"id":"minecraft:bread","count":1}}"#,
+                ),
+            ],
+        );
+        let options = Options { work: Some(&root.join("work")), ..Options::default() };
+        let out = install(&path, &root.join("game"), &options, &|_| {}).unwrap();
+        let dir = out.mods[0].path.clone().unwrap_or_else(|| panic!("not installed: {out:?}"));
+        let tags = dir.join("data/c/tags/worldgen/biome");
+        assert!(tags.join("is_swamp.json").is_file(), "{out:?}");
+        assert!(!tags.join("is_desert.json").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -185,6 +185,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/level/levelgen/feature/configurations/OreConfiguration$TargetBlockState", "CODEC") => native(rt, "target_block_state"),
         ("net/minecraft/world/level/levelgen/structure/templatesystem/RuleTest", "CODEC") => native(rt, "rule_test"),
         ("net/minecraft/world/level/levelgen/feature/configurations/OreConfiguration", "CODEC") => native(rt, "ore_configuration"),
+        ("net/minecraft/world/level/levelgen/feature/configurations/RandomPatchConfiguration", "CODEC") => native(rt, "random_patch_configuration"),
         // Holder sets of biomes and placed features (`RegistryCodecs.homogeneousList`), a placed
         // feature by id or inline (`PlacedFeature.CODEC`), and inline only (`DIRECT_CODEC`).
         ("net/minecraft/world/level/biome/Biome", "LIST_CODEC") => native(rt, "holder_set/biome"),

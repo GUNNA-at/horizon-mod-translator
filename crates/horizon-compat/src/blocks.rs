@@ -893,6 +893,9 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         )
         || (name == "type" && owner.ends_with("SignBlock") && owner.starts_with("net/minecraft/world/level/block/"))
         || (name == "getShape" && (default_shape_class(owner) || state_shape_class(owner)))
+        || (name == "canSurvive" && plant_class(owner).is_some_and(|c| BUSH_SURVIVAL.contains(&c) || DOUBLE_PLANT_SURVIVAL.contains(&c)))
+        || (name == "mayPlaceOn" && plant_class(owner).is_some_and(|c| BUSH_SOIL.contains(&c)))
+        || (owner == "net/minecraft/world/level/block/DoublePlantBlock" && name == "placeAt")
         || matches!(name, "values" | "registerDefaultState" | "defaultBlockState" | "defaultMapColor")
         || (name == "getSerializedName" && enum_class(owner))
         || (name == "toString" && enum_class(owner) && owner.starts_with("net/minecraft/world/level/block/state/properties/"))
@@ -1206,10 +1209,129 @@ pub(crate) fn cauldron_use(rt: &mut Rt, args: &[V]) -> V {
 }
 
 /// given, block constructors collect their states.
+/// Vanilla 1.21.1's plant classes whose `canSurvive` is `BushBlock`'s: it, and the ones that
+/// inherit it unchanged (their class files declare no `canSurvive` down to `BushBlock`).
+const BUSH_SURVIVAL: [&str; 17] = [
+    "AttachedStemBlock", "AzaleaBlock", "BushBlock", "DeadBushBlock", "FlowerBlock", "FungusBlock", "NetherSproutsBlock", "NetherWartBlock",
+    "PinkPetalsBlock", "RootsBlock", "SaplingBlock", "SeagrassBlock", "StemBlock", "SweetBerryBushBlock", "TallGrassBlock", "WaterlilyBlock",
+    "WitherRoseBlock",
+];
+/// The ones whose `canSurvive` is `DoublePlantBlock`'s.
+const DOUBLE_PLANT_SURVIVAL: [&str; 2] = ["DoublePlantBlock", "TallFlowerBlock"];
+/// The plant classes whose `mayPlaceOn` is `BushBlock`'s (dirt or farmland).
+const BUSH_SOIL: [&str; 8] = ["BushBlock", "DoublePlantBlock", "FlowerBlock", "PinkPetalsBlock", "SaplingBlock", "SweetBerryBushBlock", "TallFlowerBlock", "TallGrassBlock"];
+const PLANTS: &str = "net/minecraft/world/level/block/";
+const MAY_PLACE_ON: &str = "mayPlaceOn.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Z";
+const MAY_PLACE_ON_KEY: &str =
+    "net/minecraft/world/level/block/BushBlock.mayPlaceOn.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Z";
+const SUSTAIN: &str = "canSustainPlant.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/neoforged/neoforge/common/util/TriState;";
+const SUSTAIN_KEY: &str = "net/neoforged/neoforge/common/extensions/IBlockExtension.canSustainPlant.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/neoforged/neoforge/common/util/TriState;";
+
+/// A vanilla plant class a mod plant's `super.canSurvive`/`super.mayPlaceOn` names: its simple name.
+fn plant_class(owner: &str) -> Option<&str> {
+    owner.strip_prefix(PLANTS).filter(|c| !c.contains('/'))
+}
+
+/// `BushBlock.mayPlaceOn` (dirt or farmland) for a plant class whose own it is; None for another's.
+fn bush_soil(rt: &Rt, class: &str, soil: &str) -> Option<bool> {
+    BUSH_SOIL.contains(&class).then(|| {
+        let (block, _) = crate::host::split_state(soil);
+        block == "minecraft:farmland" || rt.host().is_some_and(|h| h.block_in_tag(block, "minecraft:dirt"))
+    })
+}
+
+/// NeoForge 1.21.1's `canSurvive` of vanilla plant class `class` for the mod plant `this` (a mod
+/// block's `super.canSurvive(state, level, pos)`): `DoublePlantBlock`'s checks its lower half
+/// below an upper one; `BushBlock`'s asks the soil (`canSustainPlant`: a mod soil's own answer,
+/// vanilla's soils leave it to the plant), then the plant's `mayPlaceOn` (the mod's own, else
+/// vanilla's). None for a class not kept here.
+fn plant_survives(rt: &mut Rt, class: &str, this: V, state: V, level: V, pos: V) -> Option<bool> {
+    let text = api_common::text_of(rt, state);
+    let p = api::pos_of(rt, pos);
+    let below = [p[0], p[1] - 1, p[2]];
+    let soil = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(below));
+    if DOUBLE_PLANT_SURVIVAL.contains(&class) {
+        let (block, props) = crate::host::split_state(&text);
+        // An upper half needs this plant's lower half below it; the check made before the block is
+        // set (another block's state) is the bush's.
+        if props.contains(&("half", "upper")) && crate::glue::mod_block(rt, &text).is_some_and(|(b, _)| b == this) {
+            let (under, under_props) = crate::host::split_state(&soil);
+            return Some(under == block && under_props.contains(&("half", "lower")));
+        }
+    } else if !BUSH_SURVIVAL.contains(&class) {
+        return None;
+    }
+    let soil_state = api::state(rt, &soil);
+    let soil_pos = api::block_pos(rt, below[0].into(), below[1].into(), below[2].into());
+    if let Some((block, soil_class)) = crate::glue::mod_block(rt, &soil)
+        && rt.overrides.is_some_and(|o| o(soil_class, SUSTAIN))
+        && let Some(vc) = rt.vcall
+    {
+        let up = api::direction(rt, 1);
+        let decision = vc(rt, SUSTAIN_KEY, SUSTAIN, &[block, soil_state, level, soil_pos, up, state]);
+        match rt.str_of(rt.get_field(decision, "$name")) {
+            Some("TRUE") => return Some(true),
+            Some("FALSE") => return Some(false),
+            _ => {}
+        }
+    }
+    let plant = rt.class_of(this);
+    if rt.overrides.is_some_and(|o| o(plant, MAY_PLACE_ON))
+        && let Some(vc) = rt.vcall
+    {
+        return Some(vc(rt, MAY_PLACE_ON_KEY, MAY_PLACE_ON, &[this, soil_state, level, soil_pos]).i() != 0);
+    }
+    // `DoublePlantBlock`'s and the bush's own soil; a class between with another (`DeadBushBlock`'s
+    // sand) isn't kept.
+    bush_soil(rt, if DOUBLE_PLANT_SURVIVAL.contains(&class) { "DoublePlantBlock" } else { class }, &soil)
+}
+
+/// `DoublePlantBlock.placeAt(level, state, pos, flags)`: the lower half at `pos` and the upper above
+/// it, each waterlogged where the level has water (`copyWaterloggedFrom`), when the state has the
+/// property.
+fn place_double_plant(rt: &mut Rt, level: V, state: V, pos: V, flags: V) {
+    let text = api_common::text_of(rt, state);
+    let p = api::pos_of(rt, pos);
+    for (y, half) in [(p[1], "lower"), (p[1] + 1, "upper")] {
+        let at = [p[0], y, p[2]];
+        let (block, props) = crate::host::split_state(&text);
+        let water = props.iter().any(|(k, _)| *k == "waterlogged") && {
+            let here = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(at));
+            let fluid = crate::fluids::of_block_state(rt, &here);
+            let tag = crate::fluids::tag_key(rt, "fluid", "minecraft:water");
+            api::call(rt, "net/minecraft/world/level/material/FluidState.is.(Lnet/minecraft/tags/TagKey;)Z", &[fluid, tag]).i() != 0
+        };
+        let props: Vec<String> = props
+            .iter()
+            .map(|&(k, v)| match k {
+                "half" => format!("{k}={half}"),
+                "waterlogged" => format!("{k}={water}"),
+                _ => format!("{k}={v}"),
+            })
+            .collect();
+        let placed = if props.is_empty() { block.to_owned() } else { format!("{block}[{}]", props.join(",")) };
+        let placed = api::state(rt, &placed);
+        let at = api::block_pos(rt, at[0].into(), at[1].into(), at[2].into());
+        api::call(rt, "net/minecraft/world/level/LevelAccessor.setBlock.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z", &[level, at, placed, flags]);
+    }
+}
+
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let (owner, name, desc) = crate::parts(key)?;
     match (owner, name) {
+        // A mod plant's `super.canSurvive` and `super.mayPlaceOn` to a vanilla plant class.
+        (o, "canSurvive") if plant_class(o).is_some_and(|c| BUSH_SURVIVAL.contains(&c) || DOUBLE_PLANT_SURVIVAL.contains(&c)) => {
+            plant_survives(rt, plant_class(o)?, a(0), a(1), a(2), a(3)).map(|b| V::I(b as i32))
+        }
+        (o, "mayPlaceOn") if plant_class(o).is_some_and(|c| BUSH_SOIL.contains(&c)) => {
+            let soil = api_common::text_of(rt, a(1));
+            bush_soil(rt, plant_class(o)?, &soil).map(|b| V::I(b as i32))
+        }
+        ("net/minecraft/world/level/block/DoublePlantBlock", "placeAt") => {
+            place_double_plant(rt, a(0), a(1), a(2), a(3));
+            Some(V::Void)
+        }
         // `BellAttachType.values()`: its constants, in order.
         (o, "values") if desc.starts_with("()[") && enum_class(o) => {
             let all = vanilla_enum_values(rt, o)?;
@@ -2873,6 +2995,81 @@ mod tests {
         let east = api::get_static(&mut rt, "net/minecraft/core/Direction.EAST");
         let n = api::call(&mut rt, "net/minecraft/world/level/block/state/properties/DirectionProperty.getName.(Ljava/lang/Comparable;)Ljava/lang/String;", &[facing, east]);
         assert_eq!(rt.str_of(n), Some("east"));
+    }
+
+    /// A mod plant's `super.canSurvive` to `DoublePlantBlock` or `FlowerBlock` answers as NeoForge
+    /// 1.21.1's does. A lower half asks a mod soil's `canSustainPlant` first, then the plant's own
+    /// `mayPlaceOn`, else the bush's (dirt or farmland). An upper half needs the plant's lower half
+    /// below, except in the check made before the block is set. `DoublePlantBlock.placeAt` sets
+    /// both halves, the lower waterlogged where there is water.
+    #[test]
+    fn a_mod_plants_super_survival_is_vanillas() {
+        const RICE: &str = "test/Rice";
+        const FLOWER: &str = "test/Flower";
+        const SOIL: &str = "test/RichSoil";
+        fn overrides(class: &str, short: &str) -> bool {
+            (class == RICE && short == MAY_PLACE_ON) || (class == SOIL && short == SUSTAIN)
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match short {
+                // The rice's own soil: sand only.
+                MAY_PLACE_ON if rt.class_of(args[0]) == RICE => V::I(api_common::text_of(rt, args[1]).starts_with("minecraft:sand") as i32),
+                SUSTAIN if rt.class_of(args[0]) == SOIL => api::api_enum(rt, "net/neoforged/neoforge/common/util/TriState", "TRUE", 0),
+                _ => api::call(rt, key, args),
+            }
+        }
+        struct Column(std::collections::BTreeMap<[i32; 3], String>);
+        impl crate::host::Host for Column {
+            fn block_state(&self, pos: [i32; 3]) -> String {
+                self.0.get(&pos).cloned().unwrap_or_else(|| "minecraft:air".into())
+            }
+            fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {
+                self.0.insert(pos, state.into());
+                true
+            }
+            fn block_in_tag(&self, block: &str, tag: &str) -> bool {
+                tag == "minecraft:dirt" && matches!(block, "minecraft:dirt" | "minecraft:grass_block")
+            }
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        for (class, id) in [(RICE, "test:rice"), (FLOWER, "test:flower"), (SOIL, "test:rich_soil")] {
+            let b = rt.new_object(class);
+            rt.registered.insert(("block".into(), id.into()), b);
+        }
+        let block = |rt: &Rt, id: &str| rt.registered[&("block".to_owned(), id.to_owned())];
+        let (rice, flower) = (block(&rt, "test:rice"), block(&rt, "test:flower"));
+        let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+        const DOUBLE: &str = "net/minecraft/world/level/block/DoublePlantBlock.canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
+        const FLOWER_SURVIVES: &str = "net/minecraft/world/level/block/FlowerBlock.canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
+        let survives = |rt: &mut Rt, key: &'static str, plant: V, state: &str, below: &str| {
+            let mut column = Column([([0, 0, 0], below.to_owned())].into());
+            let (state, pos) = (api::state(rt, state), api::block_pos(rt, 0, 1, 0));
+            rt.with_host(&mut column, |rt| api::call(rt, key, &[plant, state, level, pos])) == V::I(1)
+        };
+        // The rice's lower half: its own soil, unless a mod soil decides.
+        assert!(survives(&mut rt, DOUBLE, rice, "test:rice[half=lower]", "minecraft:sand"));
+        assert!(!survives(&mut rt, DOUBLE, rice, "test:rice[half=lower]", "minecraft:dirt"));
+        assert!(survives(&mut rt, DOUBLE, rice, "test:rice[half=lower]", "test:rich_soil"));
+        // Its upper half: its lower half below; before it is set, the soil check.
+        assert!(survives(&mut rt, DOUBLE, rice, "test:rice[half=upper]", "test:rice[half=lower]"));
+        assert!(!survives(&mut rt, DOUBLE, rice, "test:rice[half=upper]", "minecraft:sand"));
+        assert!(survives(&mut rt, DOUBLE, rice, "minecraft:tall_grass[half=upper]", "minecraft:sand"));
+        // A flower that keeps the bush's soil: dirt, farmland.
+        assert!(survives(&mut rt, FLOWER_SURVIVES, flower, "test:flower", "minecraft:grass_block"));
+        assert!(survives(&mut rt, FLOWER_SURVIVES, flower, "test:flower", "minecraft:farmland[moisture=7]"));
+        assert!(!survives(&mut rt, FLOWER_SURVIVES, flower, "test:flower", "minecraft:sand"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+
+        // Both halves from any state of the plant; water below keeps the lower half waterlogged.
+        let mut column = Column([([5, 1, 5], "minecraft:water[level=0]".to_owned())].into());
+        let (state, pos) = (api::state(&mut rt, "test:rice[half=upper,waterlogged=false]"), api::block_pos(&mut rt, 5, 1, 5));
+        let place = "net/minecraft/world/level/block/DoublePlantBlock.placeAt.(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;I)V";
+        rt.with_host(&mut column, |rt| api::call(rt, place, &[level, state, pos, V::I(2)]));
+        assert_eq!(column.0.get(&[5, 1, 5]).map(String::as_str), Some("test:rice[half=lower,waterlogged=true]"));
+        assert_eq!(column.0.get(&[5, 2, 5]).map(String::as_str), Some("test:rice[half=upper,waterlogged=false]"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// The tests' lambdas: `test/Shape` answers a state's text length; `test/Fill`, a cauldron

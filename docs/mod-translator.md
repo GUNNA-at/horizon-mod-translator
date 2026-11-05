@@ -2622,6 +2622,37 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     (the old biome modifier tests still pass); `carry::tests::biome_modifiers_get_the_loaders_biome_tags`
     (111 port-pack tests pass); the translator's tests pass. Not checked yet: FD's real bytecode
     through a bundle (the bundle template's new code compiles only inside a bundle), and in game.
+  - [x] 2026-11-05 Farmer's Delight's worldgen on its real bytecode (`scratchpad/fdh`: FD bundled on
+    the runtime core, a harness linking its engine; 292 classes, 61k lines, debug build).
+    - Its 9 biome modifier files read with FD's own codec (`AddFeaturesByFilterBiomeModifier`).
+      Run on 26.3's 67 biomes, with vanilla's biome tags and NeoForge 21.1.256's convention tags:
+      3015 `modify` calls, no errors, 120 µs each unoptimised. The features land where FD's files
+      say: cabbages and beetroots on the two beaches, both mushroom colonies in mushroom fields,
+      tomatoes in 10 hot biomes, potatoes in 7 cold ones, carrots and onions in 26, rice in 6.
+    - Its placement modifier `farmersdelight:biome_tag` keeps a beach position and drops a
+      Nether one.
+    - `WildCropFeature` places its inline placed features through the host: 64 primary and 64
+      secondary for cabbages.
+    - `WildRiceFeature` places 24 rice plants in a marsh, each a lower half
+      (`waterlogged=true`) in the water and an upper half (`waterlogged=false`) above.
+    It needed:
+    - `RandomPatchConfiguration.CODEC` (counts default as `orElse` does, the placed feature
+      required). The record's accessors come from the records table.
+    - `WorldGenLevel.getHeightmapPos` (a column's top as a position).
+    - NeoForge 1.21.1's `BushBlock.canSurvive` and `DoublePlantBlock.canSurvive` for a mod plant's
+      `super.canSurvive`. The soil's `canSustainPlant` decides first (a mod soil's override; vanilla
+      soils leave it to the plant), then the plant's own `mayPlaceOn`, else the bush's dirt or
+      farmland. An upper half needs its lower half, except in the check made before the block is
+      set. Kept for the plant classes that inherit these unchanged, as 1.21.1's sources show.
+    - `BushBlock.mayPlaceOn` and `DoublePlantBlock.placeAt` (both halves, `copyWaterloggedFrom`).
+    - A single dropped jar now gets the loader's convention biome tags too
+      (`check::check_with`, `loader_biome_tags(<work>)`); only packs did before. Without them,
+      FD's `#c:` modifiers find empty tags, and only cabbages and beetroots generate.
+    Tests: `worldgen::tests::random_patch_configurations_read_as_vanillas`,
+    `blocks::tests::a_mod_plants_super_survival_is_vanillas` (300 compat tests pass),
+    `install::tests::a_dropped_jar_gets_the_loaders_biome_tags` (112 port-pack tests pass).
+    Still unanswered at FD's load: `ItemAbility.CODEC`, `EnchantmentValueEffect.CODEC`,
+    `SoundEvent.DIRECT_CODEC`.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

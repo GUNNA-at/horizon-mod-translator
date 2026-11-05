@@ -49,6 +49,7 @@ const SECTION_POS: &str = "net/minecraft/core/SectionPos";
 const SIMPLEX: &str = "net/minecraft/world/level/levelgen/synth/SimplexNoise";
 const ORE_CONFIGURATION: &str = "net/minecraft/world/level/levelgen/feature/configurations/OreConfiguration";
 const TARGET: &str = "net/minecraft/world/level/levelgen/feature/configurations/OreConfiguration$TargetBlockState";
+const RANDOM_PATCH: &str = "net/minecraft/world/level/levelgen/feature/configurations/RandomPatchConfiguration";
 const RULE_TEST: &str = "net/minecraft/world/level/levelgen/structure/templatesystem/RuleTest";
 const TAG_MATCH: &str = "net/minecraft/world/level/levelgen/structure/templatesystem/TagMatchTest";
 const BLOCK_MATCH: &str = "net/minecraft/world/level/levelgen/structure/templatesystem/BlockMatchTest";
@@ -835,6 +836,17 @@ pub(crate) fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, Stri
             store(rt, ore, &[("targetStates", list), ("size", V::I(size as i32)), ("discardChanceOnAirExposure", V::F(discard as f32))]);
             Ok(ore)
         }
+        // `RandomPatchConfiguration.CODEC` (1.21.1's; 26.3 has no random patch), for a mod's feature
+        // made with it (Farmer's Delight's wild rice). A missing or bad count reads as its default,
+        // as `orElse` reads it; the placed feature is required.
+        "random_patch_configuration" => {
+            let count = |key: &str, min: i64, default: i32| {
+                o.get(key).and_then(Json::as_i64).filter(|n| (min..=i64::from(i32::MAX)).contains(n)).map_or(default, |n| n as i32)
+            };
+            let (tries, xz, y) = (count("tries", 1, 128), count("xz_spread", 0, 7), count("y_spread", 0, 3));
+            let feature = decode_native(rt, "placed_feature", field("feature")?)?;
+            Ok(crate::records::make(rt, RANDOM_PATCH, &[V::I(tries), V::I(xz), V::I(y), feature]))
+        }
         "target_block_state" => {
             let rule = decode_native(rt, "rule_test", field("target")?)?;
             let state = crate::recipes::decode_native(rt, "block_state", field("state")?)?;
@@ -1344,6 +1356,31 @@ mod tests {
         assert_eq!([rt.get_field(made, "size"), rt.get_field(made, "discardChanceOnAirExposure")], [V::I(4), V::F(0.0)]);
         let target = first_target(&mut rt, made);
         assert_eq!([rt.get_field(target, "target"), rt.get_field(target, "state")], [rule, state]);
+    }
+
+    /// `RandomPatchConfiguration.CODEC` as vanilla 1.21.1's reads it: its counts, each its default
+    /// (128, 7, 3) when missing or out of range (`orElse`), and the placed feature, which it
+    /// needs; the record's accessors read them back.
+    #[test]
+    fn random_patch_configurations_read_as_vanillas() {
+        let mut rt = Rt::new();
+        crate::install();
+        let codec = crate::api::get_static(&mut rt, "net/minecraft/world/level/levelgen/feature/configurations/RandomPatchConfiguration.CODEC");
+        let get = |rt: &mut Rt, c: V, accessor: &'static str| crate::api::call(rt, accessor, &[c]);
+        const TRIES: &str = "net/minecraft/world/level/levelgen/feature/configurations/RandomPatchConfiguration.tries.()I";
+        const XZ: &str = "net/minecraft/world/level/levelgen/feature/configurations/RandomPatchConfiguration.xzSpread.()I";
+        const Y: &str = "net/minecraft/world/level/levelgen/feature/configurations/RandomPatchConfiguration.ySpread.()I";
+        const FEATURE: &str = "net/minecraft/world/level/levelgen/feature/configurations/RandomPatchConfiguration.feature.()Lnet/minecraft/core/Holder;";
+        let inline = serde_json::json!({"feature": {"type": "minecraft:simple_block", "config": {}}, "placement": []});
+        let read = crate::codecs::decode(&mut rt, codec, &serde_json::json!({"tries": 96, "xz_spread": 6, "y_spread": 2, "feature": inline})).unwrap();
+        assert_eq!([TRIES, XZ, Y].map(|a| get(&mut rt, read, a)), [V::I(96), V::I(6), V::I(2)]);
+        let feature = get(&mut rt, read, FEATURE);
+        assert_eq!(placed_entry(&mut rt, feature), Ok(inline.to_string()));
+        let read = crate::codecs::decode(&mut rt, codec, &serde_json::json!({"tries": 0, "y_spread": -1, "feature": "minecraft:patch_grass"})).unwrap();
+        assert_eq!([TRIES, XZ, Y].map(|a| get(&mut rt, read, a)), [V::I(128), V::I(7), V::I(3)]);
+        let feature = get(&mut rt, read, FEATURE);
+        assert_eq!(placed_entry(&mut rt, feature).as_deref(), Ok("minecraft:patch_grass"));
+        assert!(crate::codecs::decode(&mut rt, codec, &serde_json::json!({"tries": 4})).is_err(), "the feature is required");
     }
 
     /// Vanilla 1.21.1's `SimplexNoise(new LegacyRandomSource(seed))` (the oracle run on the

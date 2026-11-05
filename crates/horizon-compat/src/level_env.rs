@@ -127,6 +127,12 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
         ("getHeight", "()I") => V::I(rt.host().map_or(384, |h| h.world_height().1)),
         // A column's top by heightmap, and the world's seed: what worldgen code reads of its region.
         ("getHeight", "(Lnet/minecraft/world/level/levelgen/Heightmap$Types;II)I") => crate::worldgen::height(rt, a(1), a(2).i(), a(3).i()),
+        // `getHeightmapPos(type, pos)`: that column's top as a position (`getHeight` at its x, z).
+        ("getHeightmapPos", "(Lnet/minecraft/world/level/levelgen/Heightmap$Types;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;") => {
+            let [x, _, z] = pos(rt, 2);
+            let y = crate::worldgen::height(rt, a(1), x, z).i();
+            crate::api::block_pos(rt, x.into(), y.into(), z.into())
+        }
         ("getSeed", "()J") => V::J(rt.host().and_then(|h| h.world_seed()).unwrap_or(0)),
         // Whether the region being generated may write at a position (a feature asks before it does).
         ("ensureCanWrite", "(Lnet/minecraft/core/BlockPos;)Z") => {
