@@ -3499,8 +3499,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   Test `attributes::tests::a_mod_reads_and_changes_the_games_attributes` (the acting player's speed with a sprint
   modifier of the total's multiple added, read, found and taken off; their maximum health's base raised through
   their attribute map; a cow's maximum health, and no attack damage; with no host, vanilla's player's defaults) and
-  `native_attributes::tests` (1.21.1's ids name the game's). Not yet checked in game. 360 compat, 17 translator, 41
-  game tests pass.
+  `native_attributes::tests` (1.21.1's ids name the game's). 360 compat, 17 translator, 41 game tests pass. In
+  game (`hzcheck`'s attack listener reads the player's speed, toggles a modifier of its own on it, `hzcheck:rush`
+  adding the total once more, and reads the cow's and the player's maximum health and the cow's attack damage): the
+  first blow on the cow read `speed 0.10000000149011612, rushing: 0.20000000298023224, its max health 10.0, no
+  attack, the player's max health 20.0`, and the game's own `/attribute @s minecraft:movement_speed get` then said
+  `0.20000000298023224`, its `modifier value get hzcheck:rush` `1.0`: the mod's modifier is the game's. The blow on
+  the pig still read `0.20000000298023224`, and the next on the cow `walking again: 0.10000000149011612`. The
+  generated hosts' attribute methods built at the first try; `getAttribute` and `getWeaponItem` left the run's list
+  of what isn't translated, no panic. Farmer's Delight's backstabbing now stops at
+  `EnchantmentHelper.runIterationOnItem` alone.
   - Gaps: a mod's own attributes (registered for its entities) aren't in the game's catalog; a mob's plain
     attributes take no modifiers; another player than the one in place has no attributes to read but vanilla's
     defaults; `AttributeMap.addTransientAttributeModifiers` (a multimap of them) isn't there.
