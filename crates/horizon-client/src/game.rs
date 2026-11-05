@@ -219,6 +219,7 @@ mod native_recipes;
 mod native_server;
 mod native_shaders;
 mod native_visuals;
+mod native_vitals;
 mod native_world_columns;
 mod native_world_edit;
 mod native_world_read;

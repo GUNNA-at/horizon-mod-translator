@@ -69,7 +69,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 78] = [
+const COMPAT: [(&str, &str); 79] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -135,6 +135,7 @@ const COMPAT: [(&str, &str); 78] = [
     ("attachments.rs", include_str!("../../horizon-compat/src/attachments.rs")),
     ("attributes.rs", include_str!("../../horizon-compat/src/attributes.rs")),
     ("mob_effects.rs", include_str!("../../horizon-compat/src/mob_effects.rs")),
+    ("vitals.rs", include_str!("../../horizon-compat/src/vitals.rs")),
     ("enchantments.rs", include_str!("../../horizon-compat/src/enchantments.rs")),
     ("files.rs", include_str!("../../horizon-compat/src/files.rs")),
     ("resources.rs", include_str!("../../horizon-compat/src/resources.rs")),
@@ -462,8 +463,9 @@ fn server_send(c: &str) -> String {
 /// conversions (`to_nbt`).
 fn client_host(c: &str, id: &str) -> String {
     let reads = world_reads("self.game.get()");
-    // The client's own player's attributes (`native_attribute` of None), where the game is lent.
-    let attributes = format!("{}{}", attribute_methods(c, "self.game.get_mut()"), effect_methods(c, "self.game.get_mut()"));
+    // The client's own player's attributes, effects, health and food (`native_attribute` of None),
+    // where the game is lent.
+    let attributes = format!("{}{}{}", attribute_methods(c, "self.game.get_mut()"), effect_methods(c, "self.game.get_mut()"), vital_methods(c, "self.game.get_mut()"));
     format!(r#"    enum GameRef<'a, 'b> {{
         Mut(&'a mut crate::game::Game<'b>),
         Shared(&'a crate::game::Game<'b>),
@@ -1980,9 +1982,10 @@ fn world_writes(c: &str) -> String {
             let dimension = self.game.native_dimension().to_owned();
             u32::try_from(id).is_ok_and(|i| self.game.native_teleport_mob(&dimension, i, pos))
         }}
-{attributes}{effects}"#,
+{attributes}{effects}{vitals}"#,
         attributes = attribute_methods(c, "Some(&mut *self.game)"),
         effects = effect_methods(c, "Some(&mut *self.game)"),
+        vitals = vital_methods(c, "Some(&mut *self.game)"),
     )
 }
 
@@ -2034,6 +2037,22 @@ fn effect_methods(c: &str, game: &str) -> String {
         }}
         fn remove_effect(&mut self, entity: Option<i32>, effect: &str) -> bool {{
             {game}.is_some_and(|game| game.native_remove_effect(entity, effect))
+        }}
+"#
+    )
+}
+
+/// A host's player in place's health and food, through the game `game` gives (`Option<&mut
+/// Game>`): `native_player_vitals`, `native_set_player_vitals`.
+fn vital_methods(c: &str, game: &str) -> String {
+    format!(
+        r#"        fn player_vitals(&mut self) -> Option<{c}::host::VitalsView> {{
+            let v = {game}?.native_player_vitals()?;
+            Some({c}::host::VitalsView {{ health: v.health, max_health: v.max_health, absorption: v.absorption, food: v.food, saturation: v.saturation, exhaustion: v.exhaustion }})
+        }}
+        fn set_player_vitals(&mut self, to: &{c}::host::VitalsView) -> bool {{
+            let to = crate::game::native_vitals::NativeVitals {{ health: to.health, max_health: to.max_health, absorption: to.absorption, food: to.food, saturation: to.saturation, exhaustion: to.exhaustion }};
+            {game}.is_some_and(|game| game.native_set_player_vitals(&to))
         }}
 "#
     )

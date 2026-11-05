@@ -3565,7 +3565,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   with its colour; its `shouldApplyEffectTickThisTick` answers by duration, and vanilla's speed isn't the mod's; its
   `applyEffectTick` acts on the cow the host knows until the third act ends it, and not on an entity the host doesn't
   know; `onEffectAdded` gets the player and the amplifier, `onEffectStarted` the cow). 362 compat, 17 translator, 33
-  horizon-mods tests pass.
+  horizon-mods tests pass. In game (`hzcheck`'s `StaticEffect`: harmful, `0x3366FF`, acts every 20 ticks, ends itself
+  at its third act and logs each call): the content log said `hzcheck (translated): 0 blocks and items declared from its
+  registration, 0 refused, 1 mob effects` and `farmersdelight (translated): ... 2 mob effects` (Comfort and
+  Nourishment). `/effect give @s hzcheck:static 30 1` answered `Applied effect Static to Player65593` (its name from
+  the mod's lang file), and the cow's `Applied effect Static to Cow`. Its code ran: `static added to minecraft:player
+  (level 2)`, `static started on minecraft:player (level 2)`, then `static acts on minecraft:player (level 2), act 1,
+  has it true`, act 2 and `act 3, the last`, and the same on the cow at level 1. After 90 ticks `/effect clear @s
+  hzcheck:static` answered `Target doesn't have the requested effect`: its third act took it off. No panic.
+  - The round's script first loaded only Create's and Farmer's Delight's content mods, not those of the addons
+    translated with Create, so the game didn't know hzcheck's effect (`Can't find element 'hzcheck:static'`). It now
+    loads every `content-<id>` beside Create's; the translator was right.
+  - Gap: on the cow, given the effect by the command, `onEffectAdded` and `onEffectStarted` didn't run, while the
+    player's did. The next round traces each effect hook as it starts, and an entity the game doesn't know.
+- [x] 2026-11-06 The player's health and food for mods (`vitals.rs`; game: `native_vitals.rs`, new API
+  `native_player_vitals` and `native_set_player_vitals`; host: `Host::player_vitals`, `set_player_vitals`). Missing in
+  the pack's measure (packcov4): `getHealth` 87 uses in 38 jars, `getMaxHealth` 80 in 25, `isDeadOrDying` 43, `heal`
+  37, `setHealth` 19, `FoodData.eat(int, float)` 19, `getSaturationLevel` 13, `getAbsorptionAmount` 8 and a few more:
+  327 uses in 52 jars. Farmer's Delight's Comfort heals with them, and its Nourishment keeps the food from draining.
+  - On the player in place, `getHealth`, `getMaxHealth`, `getAbsorptionAmount`, `isHurt`, `isDeadOrDying`,
+    `setHealth`, `setAbsorptionAmount` and `heal` are the game's player's, on whichever class the mod names them. `heal`
+    is NeoForge's: no healing by a negative amount, nor of a dead player. A mob's health stays its stand-in's.
+  - `Player.getFoodData`'s `getFoodLevel`, `needsFood`, `getSaturationLevel`, `getExhaustionLevel`, `setFoodLevel`,
+    `setSaturation`, `setExhaustion` and `eat` act on the game's player's food. `eat` is `FoodData.add`: the food level
+    up to 20, the saturation up to the food level. `addExhaustion` tires the player as before. These methods moved
+    from `api_common` to `vitals`.
+  - The game keeps the health and absorption in their range, as vanilla's setters do, and sets the food as given. A
+    client's player isn't changed: the server's health and food are theirs. Where the host can't tell (a hit's hooks,
+    a screen with no game lent), a player reads as a new one: full health and food.
+  Tests `vitals::tests::a_mod_heals_and_feeds_the_games_player` (Comfort's reads and its heal by one; a negative heal
+  refused; Nourishment's exhaustion emptied; two bites, the saturation capped by the food level and the food at 20;
+  the cow's health its own; health 0 is dying) and `with_no_player_to_read_a_player_is_a_new_ones`. 364 compat, 17
+  translator and 41 game tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

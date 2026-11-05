@@ -1110,6 +1110,18 @@ by the game's effect ids (`minecraft:speed`; a content mod's `<namespace>:<path>
   client as the `/effect` command's does. A mob's are its own list, which its behaviour and swirls read. A content mod's
   effect given either way runs its `native_on_effect_added` and `native_mob_effect_added` hooks.
 
+### Vitals
+
+`crates/horizon-client/src/game/native_vitals.rs`: the player's health and food for a mod to read and set.
+
+- `native_player_vitals()` is the player in place's (the acting player on a server, a client's own) `NativeVitals`: their
+  health, maximum health (the `max_health` attribute), absorption, food level, saturation and exhaustion. None with no
+  player in place.
+- `native_set_player_vitals(to)` sets them as vanilla's `LivingEntity.setHealth`, `setAbsorptionAmount` and `FoodData`'s
+  setters do: the health kept between 0 and the maximum, the absorption between 0 and the `max_absorption` attribute,
+  the food as given. The maximum health isn't set this way: its attribute is (`native_change_attribute`). Never on a
+  client, whose player's health and food are the server's. The player's client hears of it as of any other change.
+
 ### Loot tables
 
 Changing loot a mod didn't make, as NeoForge's `LootTableLoadEvent` and global loot modifiers and Fabric's

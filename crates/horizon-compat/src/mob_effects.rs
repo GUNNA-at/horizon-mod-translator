@@ -240,10 +240,12 @@ pub fn effect_added(rt: &mut Rt, host: &mut dyn crate::host::Host, id: &str, ent
     rt.safe_point();
     let (nd, key, what) = if started { (STARTED, STARTED_KEY, "onEffectStarted") } else { (ADDED, ADDED_KEY, "onEffectAdded") };
     rt.with_host(host, |rt| {
+        crate::glue::trace_some(rt, "effect-added", &format!("{id}/{entity:?}/{what}"), 8, |_| format!("{id} given to {entity:?}: its {what}"));
         let (Some(e), Some(vc)) = (own_effect(rt, id, nd), rt.vcall) else {
             return;
         };
         let Some(living) = living(rt, entity) else {
+            crate::glue::trace_once(rt, &format!("effect-entity/{what}"), |_| format!("{id} given to entity {entity:?}, which the game doesn't know: no {what}"));
             return;
         };
         vc(rt, key, nd, &[e, living, V::I(amplifier)]);

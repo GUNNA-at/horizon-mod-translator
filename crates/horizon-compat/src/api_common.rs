@@ -2221,7 +2221,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             pov_hit_result(rt, fluids)
         }
         // Food: the acting player's, through the host (work by hand, as Create's hand crank, tires
-        // the player).
+        // the player); `FoodData`'s methods are `vitals`'.
         (o, "getFoodData") if is_player(o) => rt.intern("compat:food-data".into(), |rt| rt.new_object(FOOD_DATA)),
         (o, "causeFoodExhaustion") if is_player(o) => {
             let amount = a(1).f();
@@ -2230,15 +2230,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
             V::Void
         }
-        (FOOD_DATA, "addExhaustion") => {
-            let amount = a(1).f();
-            if let Some(h) = rt.host_mut() {
-                h.exhaust_player(amount);
-            }
-            V::Void
-        }
-        (FOOD_DATA, "getFoodLevel") => V::I(rt.host().map_or(20, |h| h.player_food())),
-        (FOOD_DATA, "needsFood") => V::I(i32::from(rt.host().map_or(20, |h| h.player_food()) < 20)),
         // The hand holds the new stack.
         (o, "setItemInHand") if is_player(o) => {
             let hand = if rt.get_field(a(1), "$ordinal").i() == 1 { crate::hand::OFF } else { crate::hand::MAIN };

@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "the player's health and food for mods: what a mod reads of the player in place (`native_player_vitals`) and sets as vanilla's setters do (`native_set_player_vitals`).",
+  "doc_summary": "the player in place's health and food for a mod (`native_player_vitals`, `native_set_player_vitals`): health, maximum health, absorption, food level, saturation and exhaustion, read and set as `LivingEntity.setHealth`, `setAbsorptionAmount` and `FoodData`'s setters set them (health and absorption kept in their range), never on a client. Their client hears of it as of any change to their health and food. Bundles that use them need \"hooks\": @API:vitals@.",
+  "comments": ["crates/horizon-client/src/game/native_vitals.rs"]
+}

@@ -218,7 +218,6 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 const INSTANCE: &str = "net/minecraft/world/entity/ai/attributes/AttributeInstance";
 const MAP: &str = "net/minecraft/world/entity/ai/attributes/AttributeMap";
 const MODIFIER: &str = "net/minecraft/world/entity/ai/attributes/AttributeModifier";
-const OPERATION: &str = "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation";
 const OPERATIONS: [&str; 3] = ["ADD_VALUE", "ADD_MULTIPLIED_BASE", "ADD_MULTIPLIED_TOTAL"];
 const OPERATION_KEYS: [&str; 3] = [
     "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation.ADD_VALUE",
@@ -478,6 +477,8 @@ fn made(rt: &mut Rt, entries: Vec<V>) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OPERATION: &str = "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation";
 
     /// A mod's own weapon: `ItemAttributeModifiers.builder().add(ATTACK_DAMAGE, new AttributeModifier(
     /// BASE_ATTACK_DAMAGE_ID, 5, ADD_VALUE), MAINHAND).add(ATTACK_SPEED, ..., -2.4 ...).build()`, read back

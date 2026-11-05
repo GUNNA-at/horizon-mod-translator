@@ -203,6 +203,28 @@ impl AttributeView {
     }
 }
 
+/// The player in place's health and food, as translated code reads and sets them
+/// (`LivingEntity.getHealth`, `getMaxHealth`, `getAbsorptionAmount`; `Player.getFoodData`'s level,
+/// saturation and exhaustion).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VitalsView {
+    pub health: f32,
+    /// The `max_health` attribute's value; setting the vitals leaves it (the attribute sets it).
+    pub max_health: f32,
+    pub absorption: f32,
+    /// The food level (20 is full), its saturation and exhaustion.
+    pub food: i32,
+    pub saturation: f32,
+    pub exhaustion: f32,
+}
+
+impl Default for VitalsView {
+    /// A new player's: full health and food (`FoodData`'s level 20 and saturation 5).
+    fn default() -> Self {
+        Self { health: 20.0, max_health: 20.0, absorption: 0.0, food: 20, saturation: 5.0, exhaustion: 0.0 }
+    }
+}
+
 /// One of a living entity's active effects (vanilla's `MobEffectInstance`), as translated code
 /// reads it (`getEffect`, `getActiveEffects`) and gives it (`addEffect`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -553,6 +575,17 @@ pub trait Host {
     }
     /// Takes the effect `effect` (`minecraft:speed`) off `entity` (`removeEffect`): whether it had it.
     fn remove_effect(&mut self, _entity: Option<i32>, _effect: &str) -> bool {
+        false
+    }
+    /// The player in place's health and food: the acting player's on a server, a client's own.
+    /// None when the host can't tell.
+    fn player_vitals(&mut self) -> Option<VitalsView> {
+        None
+    }
+    /// Sets the player in place's health, absorption and food to `to`'s, as vanilla's setters do
+    /// (the health kept between 0 and the maximum, the absorption between 0 and its attribute's
+    /// maximum): whether there was a player to change.
+    fn set_player_vitals(&mut self, _to: &VitalsView) -> bool {
         false
     }
     /// A line of a mod's command's answer (`CommandSourceStack.sendSuccess`, `sendFailure`), for
@@ -983,6 +1016,8 @@ pub struct MemoryHost {
     /// The living entities' effects ([`Host::effects`]), by entity (None: the acting player): one
     /// listed here, even with none, is a living entity.
     pub effects: std::collections::BTreeMap<Option<i32>, Vec<EffectView>>,
+    /// The acting player's health and food ([`Host::player_vitals`]), set as given.
+    pub vitals: Option<VitalsView>,
     /// Experience orbs spawned: where, worth, and the motion given.
     pub orbs: Vec<([f64; 3], u32, Option<[f64; 3]>)>,
     /// What the acting player looks at (`player_pov_hit`).
@@ -1264,6 +1299,12 @@ impl Host for MemoryHost {
         let before = effects.len();
         effects.retain(|e| e.id != effect);
         effects.len() != before
+    }
+    fn player_vitals(&mut self) -> Option<VitalsView> {
+        self.vitals
+    }
+    fn set_player_vitals(&mut self, to: &VitalsView) -> bool {
+        self.vitals.as_mut().map(|v| *v = *to).is_some()
     }
     fn spawn_experience_orb(&mut self, at: [f64; 3], value: u32, motion: Option<[f64; 3]>) -> bool {
         self.orbs.push((at, value, motion));
