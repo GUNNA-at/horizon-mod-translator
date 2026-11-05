@@ -223,6 +223,20 @@ fn translate(group: &[PathBuf], pack: &[PathBuf], game: &Path, carried: &dyn Fn(
         let _ = fs::remove_dir_all(&content);
         done.push((jar.to_path_buf(), Translated { native: out.clone(), content: stands }));
     }
+    // The mods the group's jars bundle (Create's Flywheel and Ponder): their look, a content mod of
+    // their own each ([`horizon_mod_translator::bundle::write_group`]'s `content-nested-<id>`).
+    let mut nested: Vec<PathBuf> = fs::read_dir(&out).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    nested.sort();
+    for dir in nested {
+        let Some(nid) = dir.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("content-nested-")).map(str::to_owned) else {
+            continue;
+        };
+        let target = game.join("horizon-mods").join(&nid);
+        if copy_dir(&dir, &target).is_ok() {
+            log(format!("{id}: with {nid}, which it bundles: its assets -> {}", target.display()));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
     done
 }
 

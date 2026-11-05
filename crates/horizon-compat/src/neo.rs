@@ -1637,6 +1637,8 @@ pub fn fire_client_setup(rt: &mut Rt) {
     post(rt, crate::resources::CLIENT_LISTENERS_EVENT, ev);
     let ev = rt.new_object(REGISTER_RENDERERS);
     post(rt, REGISTER_RENDERERS, ev);
+    // The mods' key mappings (`ClientHooks.initClientHooks` posts it after the renderers).
+    crate::keys::post_register(rt);
     let ev = rt.new_object(CLIENT_SETUP);
     post(rt, CLIENT_SETUP, ev);
     // The mods' menu types get their screens (`MenuScreens.register` through the event).
@@ -1751,7 +1753,7 @@ pub(crate) fn desc_params(desc: &str) -> Vec<String> {
 
 /// The mod ids FML would list for this engine: its `@Mod`s (or, from an engine translated before
 /// they were listed, the jar's own namespace).
-fn loaded_mods(rt: &Rt) -> Vec<String> {
+pub(crate) fn loaded_mods(rt: &Rt) -> Vec<String> {
     if rt.mods.is_empty() && !rt.namespace.is_empty() { vec![rt.namespace.clone()] } else { rt.mods.clone() }
 }
 

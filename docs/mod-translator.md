@@ -3126,6 +3126,67 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   an unknown subcommand and other roots left to the server, an out-of-range argument answered
   with its context, `getServer` → `command.failed`). 340 compat, 15 translator, 36 game hook tests
   pass.
+- [x] 2026-11-05 Client commands in game; mods' key mappings; NeoForge's raw input events; the look
+  of the mods a jar bundles (jar-in-jar).
+  - Client commands, checked in game (`scratchpad/fdcmd.sh`): Create's `/create util
+    clearRenderBuffers` answers "Cleared rendering buffers.", its `/c` shortcut too,
+    `/create rainbowDebug` and Flywheel's `/flywheel limitUpdates`, `/flywheel backend` answer on
+    the client, a bad float is answered there with its context line, `/create trains` (not on the
+    client's tree) still reaches the server; the trace lists the client roots `flywheel, create, c`.
+    It took: horizon-ctl's `chat` on a game with a server (the default) now goes through
+    `handle_chat_input` as a typed line does (it sent the line to the server, past the client's
+    commands), and the client host's `command_feedback` draws the whole component
+    (`horizon_client::component::to_text`: translations, siblings, styles), not its first `text`.
+    Typed in the chat box (t, `/flywheel limitUpdates`, Enter) the line runs on the client too.
+  - Key mappings (`RegisterKeyMappingsEvent`, 60 mods of the pack register some; new
+    `horizon-compat/src/keys.rs`): `KeyMapping` (both constructors with a context and a modifier,
+    `consumeClick`, `isDown`, `same`, `getKey`, `setKey`, `getTranslatedKeyMessage`, `matches`,
+    `matchesMouse`...), `KeyModifier` (`SHIFT`, `CONTROL`, `ALT`, `NONE`, `isActive`), the contexts
+    (`KeyConflictContext.IN_GAME`, `GUI`, `UNIVERSAL`: `isActive`, `conflicts`), and the event is
+    posted where `ClientHooks.initClientHooks` posts it (after the renderers, before
+    `FMLClientSetupEvent`). A key goes down with nothing over the world: the mappings on it count a
+    click (`consumeClick` in the mod's client tick), as `KeyMappingLookup.getAll` finds them (with
+    a modifier held that isn't the key itself, those made with that modifier, else those with
+    none). New host calls: `mod_key` (the player's key
+    for a mod's mapping, by its name, else its default) and `playing` (no screen or menu over the
+    world: `IN_GAME`'s `isActive`); the bundle's `key` helper gives the mods the window's keys, and
+    `mods` puts the translated mods' row on Options > Mods (title: the bundle's own mod first, its
+    version, `+ N` for the others; description: all of them) with the mappings as its keys page.
+    `LocalPlayer.displayClientMessage` reaches the window (`Host::player_message`: the chat, or
+    over the hotbar). In game, hzcheck's two mappings on K (alone and with `KeyModifier.SHIFT`):
+    K → "hzcheck: ping on K", SHIFT + K → "hzcheck: shifted on SHIFT + K" (not ping), K with the
+    chat open → nothing; the Mods page has "Create 6.0.10 + 3" with a Settings button, whose page
+    lists the bundle's mappings by their translated names and keys ("Access Nearby Toolboxes: Left
+    Alt", "Open Block Rotation Menu: Not Bound", Ponder's "Ponder: W"...).
+  - Raw input (`InputEvent`, new `horizon-compat/src/input.rs`): `Key` (20 mods listen),
+    `MouseButton.Pre` (cancellable: the game then does nothing with the press, no `Post`),
+    `MouseButton.Post` (7 mods with `Pre`), `MouseScrollingEvent` (15 mods; cancelled, the hotbar
+    stays), from the game's existing hooks `native_input_key` (after the window handled a key, on
+    any screen, repeats too), `native_mouse_button_pre`/`_post` and `native_mouse_scrolling`, with
+    GLFW's key codes, actions and modifier bits; no mod hears input before the client's setup.
+    Test `input::tests::input_reaches_the_mods_as_neoforges_input_events`. In game (hzcheck's
+    listeners, `fdcmd.sh`): the wheel with a stick in hand → "hzcheck: scroll 1.0 kept from the
+    hotbar" and the hotbar stays on slot 1; the right button → "right button kept from the game";
+    the left button → "left button after the game" (its `Post`); with nothing in hand the wheel
+    moves the hotbar (1 → 9). horizon-ctl's keys aren't window key events, so `InputEvent.Key` is
+    checked by the unit test alone.
+  - The mods a jar bundles for jar-in-jar (Create's Flywheel and Ponder) now get their look:
+    `write_group` writes `content-nested-<id>` for each nested jar that declares a mod (Registrate
+    declares none), and `install` puts it in `horizon-mods/<id>`; their names and versions (and
+    every content mod's: `mods.toml`'s `displayName`, `version`, with a basic string's escapes now
+    read) go on the Mods page, not `create 0.1.0`. A content mod carries more of a jar's assets:
+    measured, the old filter (json, png, mcmeta, ogg...) left out 433 `.nbt` files in 34 jars of
+    the pack (Ponder's scenes), Flywheel's 71 shader sources (`.glsl`, `.vert`, `.frag`) and
+    more; it now takes `nbt`, `snbt`, `glsl`, `vert`, `frag`, `vsh`, `fsh`, `txt` too, and leaves
+    out a file whose path isn't a resource location (23 in the pack; one made the game refuse the
+    whole content mod). In game Flywheel's answers are its own text ("Update limiting is currently
+    enabled", "The current Flywheel backend is 'flywheel:off'"), not lang keys.
+  - Still unmapped in this run: catnip's config screen (`ModConfigs.getModConfigs`,
+    `ModConfigSpec.getValues`, `ObjectSelectionList`), Flywheel's GL (`GL20`, `MemoryStack`),
+    `SystemReport`, `LevelLightEngine.<init>`, `BlockAndTintGetter.getModelData`.
+  - 343 compat, 17 translator (`a_mods_look_and_the_mods_it_bundles_become_content_mods` reads
+    the manifests back with `horizon_mods::Manifest::parse`, a dev-dependency), 5 port-pack
+    install, 40 game hook and control tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

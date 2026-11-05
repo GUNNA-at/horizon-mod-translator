@@ -931,20 +931,6 @@ pub fn fill_options(rt: &mut Rt, options: V) {
     }
 }
 
-/// The key bound to mapping `k` and whether it is held.
-fn binding(rt: &Rt, k: V) -> (String, bool) {
-    let name = rt.str_of(rt.get_field(k, "$name")).unwrap_or("");
-    if let Some(b) = rt.host().and_then(|h| h.mapping(name)) {
-        return b;
-    }
-    // A mod's own mapping, which the game's controls don't list: its default key, held as the game
-    // holds keys.
-    match rt.str_of(rt.get_field(k, "$default")) {
-        Some(key) if key != "key.keyboard.unknown" => (key.to_owned(), rt.host().is_some_and(|h| h.key_held(key))),
-        _ => ("key.keyboard.unknown".into(), false),
-    }
-}
-
 /// The key bound to mapping `name` (`key.use`) and whether it is held, as the host says.
 pub(crate) fn mapping_binding(rt: &Rt, name: &str) -> (String, bool) {
     rt.host().and_then(|h| h.mapping(name)).unwrap_or_else(|| ("key.keyboard.unknown".into(), false))
@@ -967,14 +953,18 @@ pub fn key_display(rt: &Rt, key: &str) -> String {
     }
 }
 
-/// What mapping `name` (`key.use`) shows as (`Component.keybind`, `KeyMapping.getTranslatedKeyMessage`):
-/// the key bound to it, by [`key_display`].
+/// What mapping `name` (`key.use`, a mod's `key.create.toolmenu`) shows as (`Component.keybind`,
+/// `KeyMapping.getTranslatedKeyMessage`): the key bound to it, by [`key_display`], with a mod
+/// mapping's modifier.
 pub fn mapping_display(rt: &Rt, name: &str) -> String {
-    key_display(rt, &mapping_binding(rt, name).0)
+    match crate::keys::mod_mapping(rt, name) {
+        Some(k) => crate::keys::display(rt, k),
+        None => key_display(rt, &mapping_binding(rt, name).0),
+    }
 }
 
 /// An `InputConstants.Key` for key `name` (`key.mouse.right`).
-fn input_key(rt: &mut Rt, name: &str) -> V {
+pub(crate) fn input_key(rt: &mut Rt, name: &str) -> V {
     let n = name.to_owned();
     rt.intern(format!("compat:input-key/{name}"), move |rt| {
         let k = rt.new_object(INPUT_KEY);
@@ -999,62 +989,6 @@ fn input_type(rt: &mut Rt, ordinal: i32) -> V {
 fn key_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     Some(match (owner, name) {
-        // `new KeyMapping(name, ..., category)` in each of its forms: vanilla's `(name, [type,]
-        // code, category)`, NeoForge's with a conflict context, a modifier or an
-        // `InputConstants.Key`. It keeps its name, the key it starts on and its category.
-        (KEY_MAPPING, "<init>") => {
-            let params = crate::neo::desc_params(desc);
-            let (mut key, mut mouse) = ("key.keyboard.unknown".to_owned(), false);
-            for (i, p) in params.iter().enumerate() {
-                let v = a(i + 1);
-                match p.as_str() {
-                    "Lcom/mojang/blaze3d/platform/InputConstants$Type;" => mouse = rt.get_field(v, "$ordinal").i() == 2,
-                    "I" => key = if mouse { mouse_name(v.i()) } else { key_name(v.i()).unwrap_or_else(|| "key.keyboard.unknown".into()) },
-                    "Lcom/mojang/blaze3d/platform/InputConstants$Key;" => key = rt.str_of(rt.get_field(v, "$name")).unwrap_or("key.keyboard.unknown").to_owned(),
-                    _ => {}
-                }
-            }
-            let category = match params.iter().rposition(|p| p == "Ljava/lang/String;") {
-                Some(i) if i > 0 => a(i + 1),
-                _ => V::NULL,
-            };
-            let k = rt.string(&key);
-            rt.put_field(a(0), "$name", a(1));
-            rt.put_field(a(0), "$default", k);
-            rt.put_field(a(0), "$category", category);
-            V::Void
-        }
-        (KEY_MAPPING, "getName") => rt.get_field(a(0), "$name"),
-        (KEY_MAPPING, "isDown") => V::I(binding(rt, a(0)).1 as i32),
-        (KEY_MAPPING, "matches") => {
-            let bound = binding(rt, a(0)).0;
-            V::I((a(1).i() != -1 && key_name(a(1).i()).is_some_and(|n| n == bound)) as i32)
-        }
-        (KEY_MAPPING, "matchesMouse") => V::I((binding(rt, a(0)).0 == mouse_name(a(1).i())) as i32),
-        // NeoForge's: the key (an `InputConstants.Key`) is the one bound.
-        (KEY_MAPPING, "isActiveAndMatches") => {
-            let bound = binding(rt, a(0)).0;
-            let key = rt.str_of(rt.get_field(a(1), "$name")).unwrap_or("key.keyboard.unknown");
-            V::I((key != "key.keyboard.unknown" && key == bound) as i32)
-        }
-        (KEY_MAPPING, "isUnbound") => V::I((binding(rt, a(0)).0 == "key.keyboard.unknown") as i32),
-        (KEY_MAPPING, "getKey" | "getDefaultKey") => {
-            let bound = binding(rt, a(0)).0;
-            input_key(rt, &bound)
-        }
-        (KEY_MAPPING, "same") => V::I((binding(rt, a(0)).0 == binding(rt, a(1)).0) as i32),
-        (KEY_MAPPING, "getTranslatedKeyMessage") => {
-            let shown = key_display(rt, &binding(rt, a(0)).0);
-            let s = rt.string(&shown);
-            crate::api_common::component(rt, s, false, V::NULL)
-        }
-        // A click counted while the key went down: not counted here yet.
-        (KEY_MAPPING, "consumeClick") => V::I(0),
-        (KEY_MAPPING, "setDown" | "setKey" | "release") => V::Void,
-        (KEY_MAPPING, "getCategory") => match rt.get_field(a(0), "$category") {
-            c if c.r() != 0 => c,
-            _ => rt.string("key.categories.gameplay"),
-        },
         (INPUT, "isKeyDown") if desc == "(JI)Z" => {
             let code = a(1).i();
             let held = key_name(code).is_some_and(|n| rt.host().is_some_and(|h| h.key_held(&n)));
@@ -1329,6 +1263,15 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | ABSTRACT_CONTAINER
             | LISTENER
             | KEY_MAPPING
+            | crate::keys::REGISTER_EVENT
+            | crate::keys::MODIFIER
+            | crate::keys::CONTEXT
+            | crate::keys::ICONTEXT
+            | crate::input::KEY
+            | crate::input::BUTTON
+            | crate::input::BUTTON_PRE
+            | crate::input::BUTTON_POST
+            | crate::input::SCROLLING
             | INPUT
             | INPUT_KEY
             | INPUT_TYPE
@@ -1357,13 +1300,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         LISTENER => listener_call(rt, name, desc, args),
         MINECRAFT => client_calls(rt, name, args),
         "com/mojang/blaze3d/vertex/VertexConsumer" => vertex_call(rt, name, desc, args),
-        KEY_MAPPING | INPUT | INPUT_KEY | INPUT_TYPE | GLFW => key_calls(rt, owner, name, desc, args),
+        KEY_MAPPING | crate::keys::REGISTER_EVENT | crate::keys::MODIFIER | crate::keys::CONTEXT | crate::keys::ICONTEXT => {
+            crate::keys::call(rt, owner, name, desc, args)
+        }
+        crate::input::KEY | crate::input::BUTTON | crate::input::BUTTON_PRE | crate::input::BUTTON_POST | crate::input::SCROLLING => {
+            crate::input::call(rt, owner, name, args)
+        }
+        INPUT | INPUT_KEY | INPUT_TYPE | GLFW => key_calls(rt, owner, name, desc, args),
         _ => geometry_calls(rt, owner, name, desc, args),
     }
 }
 
 /// Static fields this module owns.
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    if let Some(v) = crate::keys::get_static(rt, owner, field) {
+        return Some(v);
+    }
     Some(match (owner, field) {
         (INPUT, "UNKNOWN") => input_key(rt, "key.keyboard.unknown"),
         (INPUT_TYPE, f) => {

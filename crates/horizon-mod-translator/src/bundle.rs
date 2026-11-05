@@ -24,13 +24,39 @@ pub fn mod_id(jar: &Path) -> Option<String> {
     None
 }
 
-/// A TOML value as written on its line: a quoted string's content, or a bare word, without what
-/// follows it (`modId="torchmaster" #mandatory` is `torchmaster`).
-pub(crate) fn toml_string(v: &str) -> &str {
+/// A TOML value as written on its line: a quoted string's content (a basic string's escapes
+/// read: `displayName="The \"Mod\""`), or a bare word, without what follows it
+/// (`modId="torchmaster" #mandatory` is `torchmaster`).
+pub(crate) fn toml_string(v: &str) -> String {
     let v = v.trim();
     match v.chars().next() {
-        Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or(""),
-        _ => v.split(|c: char| c == '#' || c.is_whitespace()).next().unwrap_or(""),
+        Some('\'') => v[1..].split('\'').next().unwrap_or("").to_owned(),
+        Some('"') => {
+            let mut out = String::new();
+            let mut chars = v[1..].chars();
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' => break,
+                    '\\' => match chars.next() {
+                        Some('n') => out.push('\n'),
+                        Some('t') => out.push('\t'),
+                        Some('r') => out.push('\r'),
+                        Some('b') => out.push('\u{8}'),
+                        Some('f') => out.push('\u{c}'),
+                        Some(u @ ('u' | 'U')) => {
+                            let hex: String = chars.by_ref().take(if u == 'u' { 4 } else { 8 }).collect();
+                            out.extend(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32));
+                        }
+                        // `\"` and `\\`.
+                        Some(c) => out.push(c),
+                        None => break,
+                    },
+                    c => out.push(c),
+                }
+            }
+            out
+        }
+        _ => v.split(|c: char| c == '#' || c.is_whitespace()).next().unwrap_or("").to_owned(),
     }
 }
 
@@ -43,7 +69,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 71] = [
+const COMPAT: [(&str, &str); 73] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -94,6 +120,8 @@ const COMPAT: [(&str, &str); 71] = [
     ("hand.rs", include_str!("../../horizon-compat/src/hand.rs")),
     ("events.rs", include_str!("../../horizon-compat/src/events.rs")),
     ("jutil.rs", include_str!("../../horizon-compat/src/jutil.rs")),
+    ("keys.rs", include_str!("../../horizon-compat/src/keys.rs")),
+    ("input.rs", include_str!("../../horizon-compat/src/input.rs")),
     ("menus.rs", include_str!("../../horizon-compat/src/menus.rs")),
     ("widgets.rs", include_str!("../../horizon-compat/src/widgets.rs")),
     ("edit_box.rs", include_str!("../../horizon-compat/src/edit_box.rs")),
@@ -509,14 +537,26 @@ fn client_host(c: &str, id: &str) -> String {
         fn client_player(&self) -> Option<(String, u8)> {{
             self.game.get().native_client_player()
         }}
-        // A client command's answer: a line in the window's chat.
+        // A client command's answer: a line in the window's chat, the whole component as the
+        // window draws one (translations, siblings, styles).
         fn command_feedback(&mut self, component: &str) {{
             let Ok(json) = serde_json::from_str::<serde_json::Value>(component) else {{
                 return;
             }};
-            let plain = json.get("text").or_else(|| json.get("translate")).and_then(|t| t.as_str()).unwrap_or("").to_owned();
+            let text = horizon_client::component::to_text(&json, &mut |s| horizon_client::text::Text::literal(s));
             if let Some(game) = self.game.get_mut() {{
-                game.native_feedback(horizon_client::text::Text::literal(plain).with_component(json));
+                game.native_feedback(text);
+            }}
+        }}
+        // A message for the window's player (`LocalPlayer.displayClientMessage`): in the chat, or
+        // over the hotbar.
+        fn player_message(&mut self, component: &str, overlay: bool) {{
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(component) else {{
+                return;
+            }};
+            let text = horizon_client::component::to_text(&json, &mut |s| horizon_client::text::Text::literal(s));
+            if let Some(game) = self.game.get_mut() {{
+                game.native_player_message(text, overlay);
             }}
         }}
         fn player_pov_hit(&self, fluids: u8) -> Option<([i32; 3], u8, [f64; 3])> {{
@@ -582,6 +622,13 @@ fn client_host(c: &str, id: &str) -> String {
         }}
         fn key_held(&self, key: &str) -> bool {{
             self.game.get().native_key_held(key)
+        }}
+        // A mod mapping's key as the player chose it on the bundle's page in Options > Mods.
+        fn mod_key(&self, name: &str, default: &str) -> String {{
+            self.game.get().native_mod_key("{id}", name, default)
+        }}
+        fn playing(&self) -> bool {{
+            self.game.get().native_playing()
         }}
         fn cursor(&self) -> [f32; 2] {{
             self.game.get().native_cursor()
@@ -1329,6 +1376,99 @@ fn {id}_command(game: &mut crate::game::Game<'_>, command: &str, ran: &mut bool)
     }}
 {conversions}{client_host}    let mut host = Host {{ game: GameRef::Mut(game), batch: None }};
     *ran = {krate}::hook_runtime("command", |rt| {c}::glue::client_command(rt, &mut host, command));
+}}
+"#)),
+        ("key", format!(r#"// Generated by horizon-mod-translator: a key or mouse button the player pressed or let go
+// (`native_key`, repeats left out). With nothing over the world a press clicks the translated mods'
+// key mappings bound to it (`KeyMapping.click`); they take the clicks with `consumeClick`.
+fn {id}_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {{
+    if !game.native_window() {{
+        return;
+    }}
+{conversions}{client_host}    let mut host = Host {{ game: GameRef::Mut(game), batch: None }};
+    {krate}::hook_runtime("key", |rt| {c}::glue::key_input(rt, &mut host, key, pressed));
+}}
+"#)),
+        ("input_key", format!(r#"// Generated by horizon-mod-translator: a key the window handled (`native_input_key`: on any screen,
+// repeats too), to the translated mods as NeoForge's `InputEvent.Key`.
+fn {id}_input_key(game: &mut crate::game::Game<'_>, event: &winit::event::KeyEvent, modifiers: u32) {{
+    if !game.native_window() {{
+        return;
+    }}
+    let winit::keyboard::PhysicalKey::Code(code) = event.physical_key else {{
+        return;
+    }};
+    let Some(key) = horizon_client::keybinds::key_name(code) else {{
+        return;
+    }};
+    // GLFW's actions: release, press, repeat.
+    let action = match (event.state, event.repeat) {{
+        (winit::event::ElementState::Released, _) => 0,
+        (_, false) => 1,
+        (_, true) => 2,
+    }};
+{conversions}{client_host}    let mut host = Host {{ game: GameRef::Mut(game), batch: None }};
+    {krate}::hook_runtime("input_key", |rt| {c}::glue::input_key(rt, &mut host, key, action, modifiers as i32));
+}}
+"#)),
+        ("mouse_button_pre", format!(r#"// Generated by horizon-mod-translator: a mouse button before the game acts on it
+// (`native_mouse_button_pre`), to the translated mods as NeoForge's `InputEvent.MouseButton.Pre`;
+// one they cancel goes no further.
+fn {id}_mouse_button_pre(game: &mut crate::game::Game<'_>, button: i32, pressed: bool, modifiers: u32, canceled: &mut bool) {{
+    if *canceled || !game.native_window() {{
+        return;
+    }}
+{conversions}{client_host}    let mut host = Host {{ game: GameRef::Mut(game), batch: None }};
+    if {krate}::hook_runtime("mouse_button_pre", |rt| {c}::glue::mouse_button(rt, &mut host, button, pressed, modifiers as i32, true)) {{
+        *canceled = true;
+    }}
+}}
+"#)),
+        ("mouse_button_post", format!(r#"// Generated by horizon-mod-translator: a mouse button after the game acted on it
+// (`native_mouse_button_post`), to the translated mods as NeoForge's `InputEvent.MouseButton.Post`.
+fn {id}_mouse_button_post(game: &mut crate::game::Game<'_>, button: i32, pressed: bool, modifiers: u32) {{
+    if !game.native_window() {{
+        return;
+    }}
+{conversions}{client_host}    let mut host = Host {{ game: GameRef::Mut(game), batch: None }};
+    {krate}::hook_runtime("mouse_button_post", |rt| {c}::glue::mouse_button(rt, &mut host, button, pressed, modifiers as i32, false));
+}}
+"#)),
+        ("mouse_scrolling", format!(r#"// Generated by horizon-mod-translator: the wheel while playing, once whole steps built up and before
+// the hotbar scrolls (`native_mouse_scrolling`), to the translated mods as NeoForge's
+// `InputEvent.MouseScrollingEvent`; one they cancel leaves the hotbar.
+fn {id}_mouse_scrolling(
+    game: &mut crate::game::Game<'_>,
+    scroll: [f64; 2],
+    accumulated: [i32; 2],
+    buttons: [bool; 3],
+    cursor: [f32; 2],
+    modifiers: u32,
+    canceled: &mut bool,
+) {{
+    let _ = (accumulated, modifiers);
+    if *canceled || !game.native_window() {{
+        return;
+    }}
+{conversions}{client_host}    let mut host = Host {{ game: GameRef::Mut(game), batch: None }};
+    let at = [f64::from(cursor[0]), f64::from(cursor[1])];
+    if {krate}::hook_runtime("mouse_scrolling", |rt| {c}::glue::mouse_scrolling(rt, &mut host, scroll, buttons, at)) {{
+        *canceled = true;
+    }}
+}}
+"#)),
+        ("mods", format!(r#"// Generated by horizon-mod-translator: the translated mods' row in Options > Mods (`native_mods`):
+// their names and versions, and the key mappings they registered (`RegisterKeyMappingsEvent`), whose
+// keys the player chooses there.
+fn {id}_mods(game: &mut crate::game::Game<'_>, mods: &mut Vec<crate::game::native_hooks::NativeMod>) {{
+    if !game.native_window() {{
+        return;
+    }}
+{conversions}{client_host}    let mut host = Host {{ game: GameRef::Mut(game), batch: None }};
+    let (title, description, keys) = {krate}::hook_runtime("mods", |rt| {c}::glue::mod_page(rt, &mut host));
+    if !title.is_empty() {{
+        mods.push(crate::game::native_hooks::NativeMod {{ id: "{id}".into(), title, description, keys }});
+    }}
 }}
 "#)),
         ("net_from_server", format!(r#"// Generated by horizon-mod-translator: a mod payload the server sent (`native_net_from_server`), to
@@ -2559,7 +2699,13 @@ fn {id}_state_for_placement(
     ]
 }
 
-const CLIENT_BINDINGS: [(&str, &str); 24] = [
+const CLIENT_BINDINGS: [(&str, &str); 30] = [
+    ("input_key", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"event\", ty = \"&winit::event::KeyEvent\", value = \"event\" },\n    { name = \"modifiers\", ty = \"u32\", value = \"modifiers\" },\n"),
+    ("mouse_button_pre", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"button\", ty = \"i32\", value = \"button\" },\n    { name = \"pressed\", ty = \"bool\", value = \"pressed\" },\n    { name = \"modifiers\", ty = \"u32\", value = \"modifiers\" },\n    { name = \"canceled\", ty = \"&mut bool\", value = \"&mut *canceled\" },\n"),
+    ("mouse_button_post", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"button\", ty = \"i32\", value = \"button\" },\n    { name = \"pressed\", ty = \"bool\", value = \"pressed\" },\n    { name = \"modifiers\", ty = \"u32\", value = \"modifiers\" },\n"),
+    ("mouse_scrolling", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"scroll\", ty = \"[f64; 2]\", value = \"scroll\" },\n    { name = \"accumulated\", ty = \"[i32; 2]\", value = \"accumulated\" },\n    { name = \"buttons\", ty = \"[bool; 3]\", value = \"buttons\" },\n    { name = \"cursor\", ty = \"[f32; 2]\", value = \"cursor\" },\n    { name = \"modifiers\", ty = \"u32\", value = \"modifiers\" },\n    { name = \"canceled\", ty = \"&mut bool\", value = \"&mut *canceled\" },\n"),
+    ("key", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"key\", ty = \"&str\", value = \"key\" },\n    { name = \"pressed\", ty = \"bool\", value = \"pressed\" },\n"),
+    ("mods", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"mods\", ty = \"&mut Vec<crate::game::native_hooks::NativeMod>\", value = \"&mut *mods\" },\n"),
     ("commands", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"commands\", ty = \"&mut Vec<&'static str>\", value = \"&mut *commands\" },\n"),
     ("command", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"command\", ty = \"&str\", value = \"command\" },\n    { name = \"ran\", ty = \"&mut bool\", value = \"&mut *ran\" },\n"),
     ("component_types", "    { name = \"types\", ty = \"&mut Vec<String>\", value = \"&mut *types\" },\n"),
@@ -2682,7 +2828,8 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     program.mod_id = Some(id.clone());
     program.addons = members[1..].iter().map(|(_, n)| n.clone()).collect();
     program.services = crate::services_of(jars)?;
-    program.metadata = jars.iter().flat_map(|j| crate::mod_metadata(j)).collect();
+    // The mods FML lists: the jars', and those they bundle for jar-in-jar (Flywheel, Ponder).
+    program.metadata = jars.iter().flat_map(|j| crate::mod_metadata(j).into_iter().chain(crate::nested_mod_metadata(j))).collect();
     program.scan_files = jars.iter().map(|j| (crate::mod_metadata(j).into_iter().map(|m| m.0).collect(), crate::class_names(j))).collect();
     program.use_mixin_configs(&crate::mixin_configs_of(jars));
     let src = out.join("engine/src");
@@ -2811,12 +2958,11 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
             })
             .map(|r| r.name.rsplit(':').next().unwrap_or(&r.name).to_owned())
             .collect();
-        if blocks.is_empty() {
-            continue;
-        }
         let content = if n == 0 { out.join("content") } else { out.join(format!("content-{ns}")) };
         let dir = content.join("data").join(ns).join("horizon/block");
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        if !blocks.is_empty() {
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
         for b in &blocks {
             // Stone has no state properties and no behaviour of its own; `random_ticks` keeps the
             // mod's `randomTick` reachable.
@@ -2840,65 +2986,127 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
             json.push_str(" }\n");
             put(dir.join(format!("{b}.json")), json).map_err(|e| e.to_string())?;
         }
+        // A mod without blocks still has its look (lang, screens' textures) for its client code.
         copy_assets(j, ns, &content)?;
-        put(content.join("horizon-mod.toml"), manifest(ns)).map_err(|e| e.to_string())?;
+        if content.is_dir() {
+            put(content.join("horizon-mod.toml"), manifest(ns, &program.metadata)).map_err(|e| e.to_string())?;
+        }
+    }
+    // The mod jars the members bundle for jar-in-jar (Create's Flywheel and Ponder): their code is
+    // in the engine, their look (Flywheel's shaders, Ponder's lang and textures) a content mod of
+    // their own, `content-nested-<id>`, as JarJar loads each as a mod of its own; a member of the
+    // group already is one.
+    for (j, _) in &members {
+        for (nid, bytes) in crate::nested_mods(j) {
+            let content = out.join(format!("content-nested-{nid}"));
+            if members.iter().any(|(_, m)| *m == nid) || content.exists() {
+                continue;
+            }
+            if let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
+                let item_models = copy_namespace_assets(&mut zip, &nid, &content);
+                write_item_definitions(&nid, &item_models, &content)?;
+            }
+            if content.is_dir() {
+                put(content.join("horizon-mod.toml"), manifest(&nid, &program.metadata)).map_err(|e| e.to_string())?;
+            }
+        }
     }
     let left: Vec<String> = program.unsupported.iter().map(|(k, n)| format!("{k} ({n})")).collect();
     Ok((id, left))
 }
 
 /// A translated mod's content manifest: it declares registries (the engine's blocks and items).
-fn manifest(id: &str) -> String {
-    format!("id = \"{id}\"\nname = \"{id}\"\nversion = \"0.1.0\"\napi = \"0.2\"\ncapabilities = [\"registries\"]\n")
+/// Its name and version are the mod's own (`mods.toml`'s `displayName` and `version`, in
+/// `metadata` as [`crate::mod_metadata`] reads them), as the Mods page shows them.
+fn manifest(id: &str, metadata: &[(String, String, String)]) -> String {
+    let (version, name) = metadata
+        .iter()
+        .find(|m| m.0 == id)
+        .map(|m| (m.1.as_str(), if m.2.is_empty() { id } else { m.2.as_str() }))
+        .filter(|(v, _)| !v.is_empty())
+        .unwrap_or(("0.1.0", id));
+    // A JSON string is a TOML basic string.
+    let quote = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
+    let description = format!("{name}'s content (blocks, items, models, textures, sounds, text), from its NeoForge jar");
+    format!(
+        "id = \"{id}\"\nname = {}\nversion = {}\ndescription = {}\napi = \"0.2\"\ncapabilities = [\"registries\"]\n",
+        quote(name),
+        quote(version),
+        quote(&description)
+    )
 }
 
-/// Mod `id`'s own look into content mod `content`: its assets (blockstates, models, textures, lang)
-/// from `jar`, with a plain item definition for each item model a 1.21.1 jar leaves without one.
-fn copy_assets(jar: &Path, id: &str, content: &Path) -> Result<(), String> {
-    // The mod's own look: its assets (blockstates, models, textures, lang) from the jar.
-    if let Ok(f) = fs::File::open(jar)
-        && let Ok(mut zip) = zip::ZipArchive::new(f)
-    {
-        let prefix = format!("assets/{id}/");
-        let mut item_models = Vec::new();
-        for i in 0..zip.len() {
-            let Ok(mut e) = zip.by_index(i) else { continue };
-            let Some(name) = e.enclosed_name() else { continue };
-            let path = name.to_string_lossy().into_owned();
-            let resource = [".json", ".png", ".mcmeta", ".ogg", ".obj", ".mtl"].iter().any(|x| path.ends_with(x));
-            if !e.is_file() || !path.starts_with(&prefix) || !resource {
-                continue;
-            }
-            if let Some(model) = path.strip_prefix(&format!("{prefix}models/item/")).and_then(|m| m.strip_suffix(".json")) {
-                item_models.push(model.to_owned());
-            }
-            let target = content.join(&name);
-            if let Some(parent) = target.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let mut bytes = Vec::new();
-            if e.read_to_end(&mut bytes).is_ok() {
-                let _ = put(target, bytes);
-            }
+/// The files of a jar's `assets/` a content mod carries, by extension: what vanilla's resource
+/// loading reads (models, textures, sounds, lang, `.mcmeta`, OBJ models), OptiFine's `.properties`
+/// (`horizon-optifine`), and what mods read through the resource manager themselves: Ponder's
+/// scenes (`.nbt`), structure text (`.snbt`), shader sources (Flywheel's `.glsl`, `.vert`, `.frag`,
+/// core shaders' `.vsh`, `.fsh`) and text (`.txt`).
+const ASSET_TYPES: [&str; 15] = ["json", "png", "mcmeta", "ogg", "obj", "mtl", "properties", "nbt", "snbt", "glsl", "vert", "frag", "vsh", "fsh", "txt"];
+
+/// Whether a content mod carries jar entry `path` (`assets/create/ponder/belt.nbt`): one of
+/// [`ASSET_TYPES`], each part of its path of vanilla's resource-location characters
+/// (`[a-z0-9_.-]`, as `horizon_mods::content::check_path` asks: one other file and the game
+/// refuses the whole content mod).
+fn carried_asset(path: &str) -> bool {
+    let plain = |part: &str| !part.is_empty() && part != "." && part != ".." && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b));
+    path.rsplit_once('.').is_some_and(|(_, ext)| ASSET_TYPES.contains(&ext)) && path.split('/').all(plain)
+}
+
+/// Copies the files under `assets/<ns>/` of `zip` a content mod carries ([`carried_asset`]) into
+/// `content`; the item models among them (`m` of `<ns>:item/<m>`) come back.
+fn copy_namespace_assets<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, ns: &str, content: &Path) -> Vec<String> {
+    let prefix = format!("assets/{ns}/");
+    let mut item_models = Vec::new();
+    for i in 0..zip.len() {
+        let Ok(mut e) = zip.by_index(i) else { continue };
+        let Some(name) = e.enclosed_name() else { continue };
+        let path = name.to_string_lossy().into_owned();
+        if !e.is_file() || !path.starts_with(&prefix) || !carried_asset(&path) {
+            continue;
         }
-        // A jar for 1.21.1 has no client item definitions (1.21.4 put item models behind
-        // `items/<name>.json`): without one an item draws no icon. Each item model gets the
-        // plain definition, as the port-pack's carry-over writes, or its overrides; the jar's
-        // own win.
-        for m in item_models {
-            let def = content.join(format!("assets/{id}/items/{m}.json"));
-            if !def.exists() {
-                if let Some(parent) = def.parent() {
-                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-                let model = fs::read(content.join(format!("assets/{id}/models/item/{m}.json")))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-                put(def, item_definition(id, &m, model.as_ref())).map_err(|e| e.to_string())?;
+        if let Some(model) = path.strip_prefix(&format!("{prefix}models/item/")).and_then(|m| m.strip_suffix(".json")) {
+            item_models.push(model.to_owned());
+        }
+        let target = content.join(&name);
+        if let Some(parent) = target.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let mut bytes = Vec::new();
+        if e.read_to_end(&mut bytes).is_ok() {
+            let _ = put(target, bytes);
+        }
+    }
+    item_models
+}
+
+/// A jar for 1.21.1 has no client item definitions (1.21.4 put item models behind
+/// `items/<name>.json`): without one an item draws no icon. Each item model of `id` in `content`
+/// gets the plain definition, as the port-pack's carry-over writes, or its overrides; the jar's own
+/// win.
+fn write_item_definitions(id: &str, item_models: &[String], content: &Path) -> Result<(), String> {
+    for m in item_models {
+        let def = content.join(format!("assets/{id}/items/{m}.json"));
+        if !def.exists() {
+            if let Some(parent) = def.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
+            let model = fs::read(content.join(format!("assets/{id}/models/item/{m}.json")))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+            put(def, item_definition(id, m, model.as_ref())).map_err(|e| e.to_string())?;
         }
     }
     Ok(())
+}
+
+/// Mod `id`'s own look into content mod `content`: its assets (blockstates, models, textures, lang,
+/// Ponder's scenes, shader sources) from `jar`, with a plain item definition for each item model a
+/// 1.21.1 jar leaves without one.
+fn copy_assets(jar: &Path, id: &str, content: &Path) -> Result<(), String> {
+    let Ok(f) = fs::File::open(jar) else { return Ok(()) };
+    let Ok(mut zip) = zip::ZipArchive::new(f) else { return Ok(()) };
+    let item_models = copy_namespace_assets(&mut zip, id, content);
+    write_item_definitions(id, &item_models, content)
 }
 
 /// The client item definition (`items/<m>.json`) of the mod's item model `<id>:item/<m>`: the
@@ -2928,6 +3136,68 @@ fn item_definition(id: &str, m: &str, model: Option<&serde_json::Value>) -> Stri
 
 #[cfg(test)]
 mod tests {
+    /// A mod's look as content mods: its own assets of the kinds the game and mods read (Ponder's
+    /// scenes, shader sources, lang), none whose path vanilla couldn't name, also for a mod without
+    /// blocks; each mod it bundles for jar-in-jar (Flywheel) a content mod of its own, a library
+    /// that declares no mod (Registrate) none.
+    #[test]
+    fn a_mods_look_and_the_mods_it_bundles_become_content_mods() {
+        let dir = std::env::temp_dir().join(format!("hz-nested-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_of = |files: &[(&str, &[u8])]| -> Vec<u8> {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for (name, body) in files {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                std::io::Write::write_all(&mut zip, body).unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        };
+        let toml = |id: &str| format!("modLoader=\"javafml\"\n[[mods]]\nmodId=\"{id}\"\n");
+        let flywheel_toml = "modLoader=\"javafml\"\n[[mods]]\nmodId=\"flywheel\"\nversion=\"1.0.6\"\ndisplayName=\"Flywheel \\\"engine\\\"\"\n";
+        let flywheel = zip_of(&[
+            ("META-INF/neoforge.mods.toml", flywheel_toml.as_bytes()),
+            ("assets/flywheel/flywheel/internal/components_header.frag", b"// frag"),
+            ("assets/flywheel/lang/en_us.json", b"{}"),
+        ]);
+        let registrate = zip_of(&[("com/tterrag/registrate/Registrate.class", b"\xca\xfe")]);
+        let jar = dir.join("gears.jar");
+        let main = zip_of(&[
+            ("META-INF/neoforge.mods.toml", toml("gears").as_bytes()),
+            ("META-INF/jarjar/flywheel.jar", &flywheel),
+            ("META-INF/jarjar/registrate.jar", &registrate),
+            ("assets/gears/ponder/belt.nbt", b"nbt"),
+            ("assets/gears/lang/en_us.json", b"{}"),
+            ("assets/gears/models/item/gear.json", br#"{"parent": "item/generated"}"#),
+            // Not a resource location (the game would refuse the whole content mod), not a
+            // resource, and another namespace's.
+            ("assets/gears/textures/Gear.png", b"png"),
+            ("assets/gears/notes.md", b"# notes"),
+            ("assets/other/lang/en_us.json", b"{}"),
+        ]);
+        std::fs::write(&jar, main).unwrap();
+        let out = dir.join("out");
+        super::write_group(&[jar.as_path()], &[], &out, None).unwrap();
+        let has = |rel: &str| out.join(rel).is_file();
+        assert!(has("content/horizon-mod.toml"));
+        assert!(has("content/assets/gears/ponder/belt.nbt"));
+        assert!(has("content/assets/gears/lang/en_us.json"));
+        assert!(has("content/assets/gears/items/gear.json"), "an item definition for its item model");
+        assert!(!has("content/assets/gears/textures/Gear.png"));
+        assert!(!has("content/assets/gears/notes.md"));
+        assert!(!has("content/assets/other/lang/en_us.json"));
+        assert!(has("content-nested-flywheel/assets/flywheel/flywheel/internal/components_header.frag"));
+        assert!(has("content-nested-flywheel/assets/flywheel/lang/en_us.json"));
+        let manifest = std::fs::read_to_string(out.join("content-nested-flywheel/horizon-mod.toml")).unwrap();
+        // Named and versioned as the mod is on the Mods page, and read back by the game.
+        let parsed = horizon_mods::Manifest::parse(&manifest).unwrap();
+        assert_eq!((parsed.id.as_str(), parsed.name.as_str(), parsed.version.as_str()), ("flywheel", "Flywheel \"engine\"", "1.0.6"));
+        let own = horizon_mods::Manifest::parse(&std::fs::read_to_string(out.join("content/horizon-mod.toml")).unwrap()).unwrap();
+        assert_eq!((own.name.as_str(), own.version.as_str()), ("gears", "0.1.0"), "a mod without a name or version");
+        assert!(!out.join("content-nested-registrate").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// mods.toml values as jars write them: quoted, single-quoted, bare, and with a comment after
     /// (Torchmaster's, JEI's, Guard Villagers' `modId="..." #mandatory`).
     #[test]
@@ -2936,6 +3206,7 @@ mod tests {
         assert_eq!(super::toml_string(" 'jei' "), "jei");
         assert_eq!(super::toml_string("create # the id"), "create");
         assert_eq!(super::toml_string(r#""a#b""#), "a#b");
+        assert_eq!(super::toml_string(r#""The \"Mod\" \\ \u00e9" # its name"#), "The \"Mod\" \\ \u{e9}");
     }
 
     /// A 1.21.1 item model's `overrides` (Create's clipboard) become Horizon's `horizon:overrides`

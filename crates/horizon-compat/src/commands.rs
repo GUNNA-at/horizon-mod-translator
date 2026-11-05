@@ -974,6 +974,9 @@ pub fn register_client(rt: &mut Rt) -> Vec<String> {
             names.push(name_of(rt, child));
         }
     }
+    if Rt::tracing() {
+        eprintln!("horizon-compat: client commands: {names:?}");
+    }
     names
 }
 

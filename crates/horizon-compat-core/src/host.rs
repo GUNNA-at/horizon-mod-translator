@@ -601,6 +601,17 @@ pub trait Host {
     fn key_held(&self, _key: &str) -> bool {
         false
     }
+    /// The key the player bound a mod's key mapping `name` (`key.create.toolmenu`) to on the
+    /// bundle's page in Options > Mods, as `options.txt` names keys (`key.keyboard.h`); `default`,
+    /// the key the mod made it with, when they chose none.
+    fn mod_key(&self, _name: &str, default: &str) -> String {
+        default.to_owned()
+    }
+    /// Nothing is over the world (`Minecraft.screen == null`): no game screen, no mods' screen.
+    /// Presses reach key mappings only then.
+    fn playing(&self) -> bool {
+        true
+    }
     /// The pointer, in GUI pixels from the window's top left.
     fn cursor(&self) -> [f32; 2] {
         [0.0, 0.0]
@@ -811,6 +822,11 @@ pub struct MemoryHost {
     pub mappings: HashMap<String, (String, bool)>,
     /// Keys held, by name.
     pub keys_held: Vec<String>,
+    /// The keys the player chose for mods' mappings on the bundle's page ([`Host::mod_key`]).
+    pub mod_keys: HashMap<String, String>,
+    /// A game screen over the world (the inventory, the pause menu); it or the mods' screen
+    /// ([`MemoryHost::screen`]) means not [`Host::playing`].
+    pub menu: bool,
     /// The pointer in GUI pixels.
     pub cursor: [f32; 2],
     /// A host lent only to read and draw ([`Host::read_only`]).
@@ -1171,6 +1187,12 @@ impl Host for MemoryHost {
     }
     fn key_held(&self, key: &str) -> bool {
         self.keys_held.iter().any(|k| k == key)
+    }
+    fn mod_key(&self, name: &str, default: &str) -> String {
+        self.mod_keys.get(name).cloned().unwrap_or_else(|| default.to_owned())
+    }
+    fn playing(&self) -> bool {
+        !self.screen && !self.menu
     }
     fn cursor(&self) -> [f32; 2] {
         self.cursor

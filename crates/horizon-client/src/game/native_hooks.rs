@@ -4923,6 +4923,15 @@ impl Game<'_> {
             .and_then(|k| k.get(name));
         chosen.map_or(default, String::as_str).to_owned()
     }
+    /// A message for the window's player (`LocalPlayer.displayClientMessage`):
+    /// a line in the chat, or over the hotbar when `overlay`.
+    pub(super) fn native_player_message(&mut self, line: Text, overlay: bool) {
+        if overlay {
+            self.titles.set_overlay(line, false);
+        } else {
+            self.native_feedback(line);
+        }
+    }
     /// A line in chat from the client.
     pub(super) fn native_chat(&mut self, text: &str) {
         let focused = self.screen == Screen::Chat;

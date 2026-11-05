@@ -1031,6 +1031,69 @@ pub fn client_command(rt: &mut Rt, host: &mut dyn Host, line: &str) -> bool {
     rt.with_host(host, |rt| crate::commands::perform_client(rt, line))
 }
 
+/// `native_key` (client): a key or mouse button went down or up (`key.keyboard.g`), repeats left
+/// out. With nothing over the world a press clicks the mods' key mappings bound to it
+/// ([`crate::keys::key_input`]).
+pub fn key_input(rt: &mut Rt, host: &mut dyn Host, key: &str, pressed: bool) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::keys::key_input(rt, key, pressed));
+}
+
+/// `native_input_key` (client): `InputEvent.Key` for a key the window handled (`key.keyboard.g`, on
+/// any screen), with GLFW's action (release, press, repeat) and modifier bits
+/// ([`crate::input::key`]).
+pub fn input_key(rt: &mut Rt, host: &mut dyn Host, key: &str, action: i32, modifiers: i32) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::input::key(rt, key, action, modifiers));
+}
+
+/// `native_mouse_button_pre` and `_post` (client): `InputEvent.MouseButton.Pre` (`pre`) or `.Post`;
+/// whether a mod cancelled the `Pre` ([`crate::input::button`]).
+pub fn mouse_button(rt: &mut Rt, host: &mut dyn Host, button: i32, pressed: bool, modifiers: i32, pre: bool) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::input::button(rt, button, pressed, modifiers, pre))
+}
+
+/// `native_mouse_scrolling` (client): `InputEvent.MouseScrollingEvent`; whether a mod cancelled it
+/// ([`crate::input::scrolling`]).
+pub fn mouse_scrolling(rt: &mut Rt, host: &mut dyn Host, delta: [f64; 2], buttons: [bool; 3], at: [f64; 2]) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::input::scrolling(rt, delta, buttons, at))
+}
+
+/// `native_mods` (client), as the game starts: the bundle's row in Options > Mods. Its title is
+/// its own mod's name and version (its first jar's), with how many more it holds; its description
+/// every mod's; its keys the mappings the mods registered (`RegisterKeyMappingsEvent`, which
+/// NeoForge posts as the client starts), each as its name, label and default key
+/// ([`crate::keys::page_keys`]).
+pub fn mod_page(rt: &mut Rt, host: &mut dyn Host) -> (String, String, Vec<[String; 3]>) {
+    rt.safe_point();
+    let mut ids = crate::neo::loaded_mods(rt);
+    if let Some(i) = ids.iter().position(|m| *m == rt.namespace) {
+        let own = ids.remove(i);
+        ids.insert(0, own);
+    }
+    let mods: Vec<String> = ids
+        .into_iter()
+        .map(|id| {
+            let text = |rt: &Rt, what: &str| rt.interned.get(&format!("compat:mod-{what}/{id}")).and_then(|&v| rt.str_of(v)).map(str::to_owned);
+            let name = text(rt, "name").unwrap_or_else(|| id.clone());
+            match text(rt, "version") {
+                Some(v) => format!("{name} {v}"),
+                None => name,
+            }
+        })
+        .collect();
+    let Some(first) = mods.first() else { return Default::default() };
+    let title = match mods.len() {
+        1 => first.clone(),
+        n => format!("{first} + {}", n - 1),
+    };
+    let description = mods.join(", ");
+    let keys = rt.with_host(host, crate::keys::page_keys);
+    (title, description, keys)
+}
+
 const LEVEL_TICK_PRE: &str = "net/neoforged/neoforge/event/tick/LevelTickEvent$Pre";
 const LEVEL_TICK_POST: &str = "net/neoforged/neoforge/event/tick/LevelTickEvent$Post";
 
@@ -1219,6 +1282,7 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
         tick_client_block_entities(rt);
         let ev = rt.new_object(CLIENT_TICK_POST);
         crate::neo::post(rt, CLIENT_TICK_POST, ev);
+        crate::keys::tick(rt);
     });
 }
 

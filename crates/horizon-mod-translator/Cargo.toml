@@ -13,3 +13,7 @@ zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The content manifests it writes, read back as the game reads them.
+horizon-mods = { path = "../horizon-mods" }

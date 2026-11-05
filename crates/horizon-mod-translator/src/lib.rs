@@ -42,6 +42,30 @@ pub fn provides(jar: &Path, id: &str) -> bool {
         || nested_jars(&mut zip).into_iter().any(|b| zip::ZipArchive::new(std::io::Cursor::new(b)).is_ok_and(|mut z| declares(&mut z, id)))
 }
 
+/// The mod jars `jar` bundles for jar-in-jar ([`nested_jars`]: Create's Flywheel and Ponder), each
+/// with the id its `neoforge.mods.toml` gives its first mod; a library jar that declares none
+/// (Registrate) is left out.
+pub fn nested_mods(jar: &Path) -> Vec<(String, Vec<u8>)> {
+    let Ok(mut zip) = std::fs::File::open(jar).map_err(|_| ()).and_then(|f| zip::ZipArchive::new(f).map_err(|_| ())) else {
+        return Vec::new();
+    };
+    nested_jars(&mut zip)
+        .into_iter()
+        .filter_map(|b| {
+            let id = {
+                let mut z = zip::ZipArchive::new(std::io::Cursor::new(&b[..])).ok()?;
+                ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"].iter().find_map(|name| {
+                    let mut e = z.by_name(name).ok()?;
+                    let mut text = String::new();
+                    e.read_to_string(&mut text).ok()?;
+                    text.lines().find_map(|l| l.split_once('=').filter(|(k, _)| k.trim() == "modId").map(|(_, v)| bundle::toml_string(v).to_owned()))
+                })?
+            };
+            Some((id, b))
+        })
+        .collect()
+}
+
 /// The jars of `pack` that provide the language loaders `group`'s mods use other than Java's
 /// (Kotlin for Forge for a Kotlin mod): their code runs as the libraries of those mods.
 pub fn language_libraries(group: &[&Path], pack: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
@@ -267,6 +291,11 @@ pub fn services_of(jars: &[&Path]) -> Result<BTreeMap<String, Vec<String>>, Stri
 /// A jar's mod metadata (`META-INF/neoforge.mods.toml`, or Forge's older `mods.toml`) as text.
 fn mods_toml(jar: &Path) -> Option<String> {
     let mut zip = zip::ZipArchive::new(std::fs::File::open(jar).ok()?).ok()?;
+    zip_mods_toml(&mut zip)
+}
+
+/// [`mods_toml`] of a jar's zip, also of one it bundles.
+fn zip_mods_toml<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Option<String> {
     for name in ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"] {
         let Ok(mut e) = zip.by_name(name) else { continue };
         let mut text = String::new();
@@ -280,8 +309,23 @@ fn mods_toml(jar: &Path) -> Option<String> {
 /// What FML reads of each mod a jar declares (`[[mods]]`): id, version and display name, with
 /// `${file.jarVersion}` as the jar's manifest gives it (`Implementation-Version`).
 pub fn mod_metadata(jar: &Path) -> Vec<(String, String, String)> {
-    let Some(text) = mods_toml(jar) else { return Vec::new() };
-    let jar_version = jar_manifest_version(jar).unwrap_or_default();
+    let Ok(f) = std::fs::File::open(jar) else { return Vec::new() };
+    let Ok(mut zip) = zip::ZipArchive::new(f) else { return Vec::new() };
+    zip_mod_metadata(&mut zip)
+}
+
+/// [`mod_metadata`] of the mods `jar` bundles for jar-in-jar ([`nested_mods`]: Flywheel, Ponder).
+pub fn nested_mod_metadata(jar: &Path) -> Vec<(String, String, String)> {
+    nested_mods(jar)
+        .into_iter()
+        .flat_map(|(_, b)| zip::ZipArchive::new(std::io::Cursor::new(b)).map(|mut z| zip_mod_metadata(&mut z)).unwrap_or_default())
+        .collect()
+}
+
+/// [`mod_metadata`] of a jar's zip.
+fn zip_mod_metadata<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<(String, String, String)> {
+    let Some(text) = zip_mods_toml(zip) else { return Vec::new() };
+    let jar_version = zip_manifest_version(zip).unwrap_or_default();
     let mut out: Vec<(String, String, String)> = Vec::new();
     let mut in_mod = false;
     for line in text.lines() {
@@ -490,8 +534,7 @@ pub fn mixin_configs_of(jars: &[&Path]) -> Vec<MixinConfig> {
 }
 
 /// The `Implementation-Version` in a jar's `META-INF/MANIFEST.MF`.
-fn jar_manifest_version(jar: &Path) -> Option<String> {
-    let mut zip = zip::ZipArchive::new(std::fs::File::open(jar).ok()?).ok()?;
+fn zip_manifest_version<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Option<String> {
     let mut text = String::new();
     zip.by_name("META-INF/MANIFEST.MF").ok()?.read_to_string(&mut text).ok()?;
     text.lines().find_map(|l| l.strip_prefix("Implementation-Version:")).map(|v| v.trim().to_owned())
