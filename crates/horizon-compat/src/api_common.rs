@@ -222,8 +222,9 @@ pub(crate) fn entity_place(rt: &Rt, e: V) -> Option<[f64; 3]> {
 }
 
 /// A player's eyes above their feet: standing 1.62, crouching 1.27 (`Player.getStandingEyeHeight`).
+/// The player's eye height, vanilla's float (1.62, 1.27 crouching) as `getEyeY` adds it.
 fn player_eye_height(rt: &Rt) -> f64 {
-    if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 }
+    f64::from(if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27f32 } else { 1.62f32 })
 }
 
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
@@ -891,7 +892,7 @@ pub(crate) fn pov_hit_result(rt: &mut Rt, fluids: u8) -> V {
         None => {
             // From the eyes along the look, 4.5 blocks (`blockInteractionRange`).
             let ([x, y, z], yaw, pitch) = rt.host().and_then(|h| h.player_place()).unwrap_or(([0.0; 3], 0.0, 0.0));
-            let eye = if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27 } else { 1.62 };
+            let eye = player_eye_height(rt);
             let (yr, pr) = (f64::from(-yaw).to_radians(), f64::from(-pitch).to_radians());
             let look = [yr.sin() * pr.cos(), pr.sin(), yr.cos() * pr.cos()];
             let end = [x + look[0] * 4.5, y + eye + look[1] * 4.5, z + look[2] * 4.5];
@@ -2092,6 +2093,110 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 V::NULL
             } else {
                 rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
+            }
+        }
+        // `SectionPos`: a 16-block cube's coordinates (the block's shifted right 4), packed into a
+        // long as vanilla packs them; its static helpers between blocks, sections and chunks.
+        (SECTION_POS, n) => {
+            let at = |rt: &Rt, v: V| native(rt, v).map(|c| c as i32);
+            let section_of = |b: [i32; 3]| b.map(|c| c >> 4);
+            let floor = |d: f64| d.floor() as i32;
+            match (n, desc) {
+                ("of", "(III)Lnet/minecraft/core/SectionPos;") => section_pos(rt, [a(0).i(), a(1).i(), a(2).i()]),
+                ("of", "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/SectionPos;") => {
+                    let b = at(rt, a(0));
+                    section_pos(rt, section_of([b[0], b[1], b[2]]))
+                }
+                ("of", "(Lnet/minecraft/world/level/ChunkPos;I)Lnet/minecraft/core/SectionPos;") => {
+                    let (x, z) = (rt.get_field(a(0), "x").i(), rt.get_field(a(0), "z").i());
+                    section_pos(rt, [x, a(1).i(), z])
+                }
+                ("of", "(Lnet/minecraft/core/Position;)Lnet/minecraft/core/SectionPos;") => {
+                    let p = ["x", "y", "z"].map(|f| floor(rt.get_field(a(0), f).d()));
+                    section_pos(rt, section_of(p))
+                }
+                ("of", "(Lnet/minecraft/world/level/entity/EntityAccess;)Lnet/minecraft/core/SectionPos;") => {
+                    let b = crate::api::call(rt, "net/minecraft/world/entity/Entity.blockPosition.()Lnet/minecraft/core/BlockPos;", &[a(0)]);
+                    let b = at(rt, b);
+                    section_pos(rt, section_of([b[0], b[1], b[2]]))
+                }
+                ("of", "(J)Lnet/minecraft/core/SectionPos;") => section_pos(rt, section_of_long(a(0).j())),
+                ("asLong", "(III)J") => V::J(section_long([a(0).i(), a(1).i(), a(2).i()])),
+                ("asLong", "(Lnet/minecraft/core/BlockPos;)J") => {
+                    let b = at(rt, a(0));
+                    V::J(section_long(section_of([b[0], b[1], b[2]])))
+                }
+                ("asLong", "()J") => {
+                    let s = at(rt, a(0));
+                    V::J(section_long([s[0], s[1], s[2]]))
+                }
+                ("x" | "y" | "z", "(J)I") => V::I(section_of_long(a(0).j())[usize::from(n.as_bytes()[0] - b'x')]),
+                ("x" | "y" | "z" | "getX" | "getY" | "getZ", "()I") => V::I(at(rt, a(0))[usize::from(n.as_bytes()[n.len() - 1].to_ascii_lowercase() - b'x')]),
+                ("minBlockX" | "minBlockY" | "minBlockZ" | "maxBlockX" | "maxBlockY" | "maxBlockZ", "()I") => {
+                    let axis = usize::from(n.as_bytes()[n.len() - 1] - b'X');
+                    let edge = if n.starts_with("max") { 15 } else { 0 };
+                    V::I((at(rt, a(0))[axis] << 4) + edge)
+                }
+                ("origin" | "center", _) => {
+                    let s = at(rt, a(0));
+                    let edge = if n == "center" { 8 } else { 0 };
+                    let b: [i64; 3] = std::array::from_fn(|i| i64::from((s[i] << 4) + edge));
+                    crate::api::block_pos(rt, b[0], b[1], b[2])
+                }
+                ("chunk", _) => {
+                    let s = at(rt, a(0));
+                    chunk_pos(rt, s[0], s[2])
+                }
+                ("offset", "(III)Lnet/minecraft/core/SectionPos;" | "(III)Lnet/minecraft/core/Vec3i;") => {
+                    let s = at(rt, a(0));
+                    section_pos(rt, [s[0].wrapping_add(a(1).i()), s[1].wrapping_add(a(2).i()), s[2].wrapping_add(a(3).i())])
+                }
+                ("offset", "(JIII)J" | "(JLnet/minecraft/core/Direction;)J") => {
+                    let s = section_of_long(a(0).j());
+                    let d = if desc == "(JIII)J" { [a(1).i(), a(2).i(), a(3).i()] } else { DIRECTION_STEPS[native(rt, a(1))[0].clamp(0, 5) as usize].map(|c| c as i32) };
+                    V::J(section_long([s[0].wrapping_add(d[0]), s[1].wrapping_add(d[1]), s[2].wrapping_add(d[2])]))
+                }
+                ("blockToSectionCoord", "(I)I") => V::I(a(0).i() >> 4),
+                ("blockToSectionCoord" | "posToSectionCoord", "(D)I") => V::I(floor(a(0).d()) >> 4),
+                ("sectionToBlockCoord", "(I)I") => V::I(a(0).i() << 4),
+                ("sectionToBlockCoord", "(II)I") => V::I((a(0).i() << 4).wrapping_add(a(1).i())),
+                ("sectionRelative", "(I)I") => V::I(a(0).i() & 15),
+                // A block's place in its section as a short: x in bits 8-11, z in 4-7, y in 0-3.
+                ("sectionRelativePos", _) => {
+                    let b = at(rt, a(0));
+                    V::I(i32::from((((b[0] & 15) << 8) | ((b[2] & 15) << 4) | (b[1] & 15)) as i16))
+                }
+                ("sectionRelativeX" | "sectionRelativeY" | "sectionRelativeZ", "(S)I") => {
+                    let shift = match n.as_bytes()[n.len() - 1] {
+                        b'X' => 8,
+                        b'Z' => 4,
+                        _ => 0,
+                    };
+                    V::I(((a(0).i() as u32) >> shift) as i32 & 15)
+                }
+                ("relativeToBlockX" | "relativeToBlockY" | "relativeToBlockZ" | "relativeToBlockPos", "(S)I" | "(S)Lnet/minecraft/core/BlockPos;") => {
+                    let (s, r) = (at(rt, a(0)), a(1).i() as u32);
+                    let b = [(s[0] << 4) + ((r >> 8) & 15) as i32, (s[1] << 4) + (r & 15) as i32, (s[2] << 4) + ((r >> 4) & 15) as i32];
+                    match n.as_bytes()[n.len() - 1] {
+                        b'X' => V::I(b[0]),
+                        b'Y' => V::I(b[1]),
+                        b'Z' => V::I(b[2]),
+                        _ => crate::api::block_pos(rt, i64::from(b[0]), i64::from(b[1]), i64::from(b[2])),
+                    }
+                }
+                ("getZeroNode", "(II)J") => V::J(section_long([a(0).i(), 0, a(1).i()]) & -1_048_576),
+                ("getZeroNode", "(J)J") => V::J(a(0).j() & -1_048_576),
+                // From a packed block position (`BlockPos.asLong`) to its section's.
+                ("blockToSection", "(J)J") => {
+                    let l = a(0).j();
+                    let b = [(l >> 38) as i32, ((l << 52) >> 52) as i32, ((l << 26) >> 38) as i32];
+                    V::J(section_long(section_of(b)))
+                }
+                ("sectionToChunk", "(J)J") => {
+                    let s = section_of_long(a(0).j());
+                    V::J(chunk_long(s[0], s[2]))
+                }
+                _ => return None,
             }
         }
         // `ChunkPos`: a chunk's x and z in its public fields, packed into a long as vanilla packs
@@ -3341,6 +3446,7 @@ fn player_identity(rt: &mut Rt, p: V) -> (V, V) {
 }
 
 const CHUNK_POS: &str = "net/minecraft/world/level/ChunkPos";
+const SECTION_POS: &str = "net/minecraft/core/SectionPos";
 const WORLD_VERSION: &str = "net/minecraft/WorldVersion";
 const ADVANCEMENT_BUILDER: &str = "net/minecraft/advancements/Advancement$Builder";
 const ITEM_PREDICATE_BUILDER: &str = "net/minecraft/advancements/critereon/ItemPredicate$Builder";
@@ -3355,6 +3461,21 @@ fn chunk_hash(x: i32, z: i32) -> i32 {
     let i = 1_664_525i32.wrapping_mul(x).wrapping_add(1_013_904_223);
     let j = 1_664_525i32.wrapping_mul(z ^ -559_038_737).wrapping_add(1_013_904_223);
     i ^ j
+}
+
+/// `SectionPos.asLong(x, y, z)`: x in 22 bits from bit 42, z in 22 from bit 20, y in the low 20.
+fn section_long(s: [i32; 3]) -> i64 {
+    ((i64::from(s[0]) & 0x3f_ffff) << 42) | (i64::from(s[1]) & 0xf_ffff) | ((i64::from(s[2]) & 0x3f_ffff) << 20)
+}
+
+/// The section a packed section position holds, as `SectionPos.x(l)`, `y(l)` and `z(l)` unpack it.
+fn section_of_long(l: i64) -> [i32; 3] {
+    [(l >> 42) as i32, ((l << 44) >> 44) as i32, ((l << 22) >> 42) as i32]
+}
+
+/// A new `SectionPos` of section `s`: a `Vec3i` as a `BlockPos` is, which `Vec3i`'s methods read.
+fn section_pos(rt: &mut Rt, s: [i32; 3]) -> V {
+    rt.alloc(SECTION_POS, Data::Native("BlockPos", [i64::from(s[0]), i64::from(s[1]), i64::from(s[2]), 0]))
 }
 
 /// A new `ChunkPos` of chunk `x`, `z`.
@@ -4446,6 +4567,109 @@ mod tests {
         assert_eq!(crate::api::call(&mut rt, "java/util/concurrent/TimeUnit.toMillis.(J)J", &[s, V::J(-2)]), V::J(-2_000));
         assert_eq!(crate::api::call(&mut rt, "java/util/concurrent/TimeUnit.toNanos.(J)J", &[s, V::J(i64::MAX)]), V::J(i64::MAX));
         assert_eq!(crate::api::call(&mut rt, "java/util/concurrent/TimeUnit.convert.(JLjava/util/concurrent/TimeUnit;)J", &[ms, V::J(3), s]), V::J(3_000));
+    }
+
+    /// A block position's centres, text, order, distances and turns, and the section it is in, as
+    /// vanilla's `BlockPos`, `Vec3i` and `SectionPos` give them.
+    #[test]
+    fn positions_and_sections_answer_as_vanillas() {
+        use super::*;
+        const POS: &str = "net/minecraft/core/BlockPos";
+        const VEC3I: &str = "net/minecraft/core/Vec3i";
+        const SECTION: &str = "net/minecraft/core/SectionPos";
+        const VEC: &str = "Lnet/minecraft/world/phys/Vec3;";
+        fn c(rt: &mut Rt, key: &str, args: &[V]) -> V {
+            let key = rt.static_key(key);
+            crate::api::call(rt, key, args)
+        }
+        fn at(rt: &Rt, v: V) -> [i64; 3] {
+            let n = native(rt, v);
+            [n[0], n[1], n[2]]
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        let pos = crate::api::block_pos(&mut rt, 1, 64, -3);
+        let center = c(&mut rt, &format!("{POS}.getCenter.(){VEC}"), &[pos]);
+        assert_eq!(xyz(&rt, center), [1.5, 64.5, -2.5]);
+        let bottom = c(&mut rt, &format!("{POS}.getBottomCenter.(){VEC}"), &[pos]);
+        assert_eq!(xyz(&rt, bottom), [1.5, 64.0, -2.5]);
+        // A `Position` is read as the `Vec3` it is.
+        assert_eq!(c(&mut rt, "net/minecraft/core/Position.y.()D", &[center]), V::D(64.5));
+        let low = c(&mut rt, &format!("{POS}.atY.(I)L{POS};"), &[pos, V::I(-60)]);
+        assert_eq!(at(&rt, low), [1, -60, -3]);
+        // Text: `toShortString` (asked of a BlockPos, answered as `Vec3i`'s), and `toString` as
+        // concatenation writes it, with the class's simple name.
+        let short = c(&mut rt, &format!("{POS}.toShortString.()Ljava/lang/String;"), &[pos]);
+        assert_eq!(rt.str_of(short), Some("1, 64, -3"));
+        let text = rt.concat("at \u{1}", "L", &[pos], &[]);
+        assert_eq!(rt.str_of(text), Some("at BlockPos{x=1, y=64, z=-3}"));
+        let moving = c(&mut rt, &format!("{POS}.mutable.()L{POS}$MutableBlockPos;"), &[pos]);
+        let text = c(&mut rt, &format!("{VEC3I}.toString.()Ljava/lang/String;"), &[moving]);
+        assert_eq!(rt.str_of(text), Some("MutableBlockPos{x=1, y=64, z=-3}"));
+        // Order: y first, then z, then x.
+        for (other, want) in [([5, 64, -3], -4), ([1, 63, 9], 1), ([1, 64, -1], -2), ([1, 64, -3], 0)] {
+            let o = crate::api::block_pos(&mut rt, other[0], other[1], other[2]);
+            assert_eq!(c(&mut rt, &format!("{POS}.compareTo.(L{VEC3I};)I"), &[pos, o]), V::I(want), "{other:?}");
+        }
+        // From the centre (1.5, 64.5, -2.5) to (0, 64, 0): 1.5² + 0.5² + 2.5² = 8.75.
+        let d = c(&mut rt, &format!("{POS}.distToCenterSqr.(DDD)D"), &[pos, V::D(0.0), V::D(64.0), V::D(0.0)]);
+        assert_eq!(d, V::D(8.75));
+        let origin = vec3(&mut rt, 0.0, 64.0, 0.0);
+        let closer = |rt: &mut Rt, distance: f64| c(rt, &format!("{POS}.closerToCenterThan.(Lnet/minecraft/core/Position;D)Z"), &[pos, origin, V::D(distance)]);
+        assert_eq!((closer(&mut rt, 3.0), closer(&mut rt, 2.9)), (V::I(1), V::I(0)));
+        // Turns about the origin, seen from above: north (z -1) goes east (x +1) a quarter clockwise.
+        let rotate = format!("{POS}.rotate.(Lnet/minecraft/world/level/block/Rotation;)L{POS};");
+        for (ordinal, name, want) in [(1, "CLOCKWISE_90", [3, 64, 1]), (2, "CLOCKWISE_180", [-1, 64, 3]), (3, "COUNTERCLOCKWISE_90", [-3, 64, -1])] {
+            let r = crate::api::api_enum(&mut rt, crate::rotation::ROTATION, name, ordinal);
+            let turned = c(&mut rt, &rotate, &[pos, r]);
+            assert_eq!(at(&rt, turned), want, "{name}");
+        }
+        let none = crate::api::api_enum(&mut rt, crate::rotation::ROTATION, "NONE", 0);
+        assert_eq!(c(&mut rt, &rotate, &[pos, none]), pos);
+        // A point kept within the block: x up to its low side plus 1e-5 (summed in floats), z down to
+        // its high side less vanilla's ~1e-5.
+        let outside = vec3(&mut rt, 0.0, 64.25, -1.0);
+        let kept = c(&mut rt, &format!("{POS}.clampLocationWithin.({VEC}){VEC}"), &[pos, outside]);
+        assert_eq!(xyz(&rt, kept), [f64::from(1.00001f32), 64.25, -2.0 + -9.999999747378752e-6]);
+
+        // The section of block (-17, 70, 33): (-2, 4, 2), spanning x -32..-17, y 64..79, z 32..47.
+        let block = crate::api::block_pos(&mut rt, -17, 70, 33);
+        let section = c(&mut rt, &format!("{SECTION}.of.(L{POS};)L{SECTION};"), &[block]);
+        assert_eq!(at(&rt, section), [-2, 4, 2]);
+        assert_eq!(c(&mut rt, &format!("{SECTION}.x.()I"), &[section]), V::I(-2));
+        assert_eq!(c(&mut rt, &format!("{SECTION}.getZ.()I"), &[section]), V::I(2));
+        assert_eq!(c(&mut rt, &format!("{SECTION}.minBlockX.()I"), &[section]), V::I(-32));
+        assert_eq!(c(&mut rt, &format!("{SECTION}.maxBlockY.()I"), &[section]), V::I(79));
+        let origin = c(&mut rt, &format!("{SECTION}.origin.()L{POS};"), &[section]);
+        assert_eq!(at(&rt, origin), [-32, 64, 32]);
+        let middle = c(&mut rt, &format!("{SECTION}.center.()L{POS};"), &[section]);
+        assert_eq!(at(&rt, middle), [-24, 72, 40]);
+        let chunk = c(&mut rt, &format!("{SECTION}.chunk.()Lnet/minecraft/world/level/ChunkPos;"), &[section]);
+        assert_eq!((rt.get_field(chunk, "x"), rt.get_field(chunk, "z")), (V::I(-2), V::I(2)));
+        // Packed: x's 22 bits from bit 42, z's from bit 20, y in the low 20 (worked out by hand).
+        let packed = c(&mut rt, &format!("{SECTION}.asLong.()J"), &[section]);
+        assert_eq!(packed, V::J(-8_796_090_925_052));
+        assert_eq!(c(&mut rt, &format!("{SECTION}.asLong.(L{POS};)J"), &[block]), packed);
+        for (axis, want) in [("x", -2), ("y", 4), ("z", 2)] {
+            assert_eq!(c(&mut rt, &format!("{SECTION}.{axis}.(J)I"), &[packed]), V::I(want), "{axis}");
+        }
+        let back = c(&mut rt, &format!("{SECTION}.of.(J)L{SECTION};"), &[packed]);
+        assert_eq!(c(&mut rt, &format!("{VEC3I}.equals.(Ljava/lang/Object;)Z"), &[back, section]), V::I(1));
+        let up = c(&mut rt, &format!("{SECTION}.offset.(JIII)J"), &[packed, V::I(0), V::I(1), V::I(0)]);
+        assert_eq!(c(&mut rt, &format!("{SECTION}.y.(J)I"), &[up]), V::I(5));
+        // A block's place in its section: x 15 in bits 8-11, z 1 in 4-7, y 6 in 0-3; and back.
+        let local = c(&mut rt, &format!("{SECTION}.sectionRelativePos.(L{POS};)S"), &[block]);
+        assert_eq!(local, V::I(15 << 8 | 1 << 4 | 6));
+        let again = c(&mut rt, &format!("{SECTION}.relativeToBlockPos.(S)L{POS};"), &[section, local]);
+        assert_eq!(at(&rt, again), [-17, 70, 33]);
+        assert_eq!(c(&mut rt, &format!("{SECTION}.blockToSectionCoord.(I)I"), &[V::I(-17)]), V::I(-2));
+        assert_eq!(c(&mut rt, &format!("{SECTION}.posToSectionCoord.(D)I"), &[V::D(-0.5)]), V::I(-1));
+        let text = rt.concat("\u{1}", "L", &[section], &[]);
+        assert_eq!(rt.str_of(text), Some("SectionPos{x=-2, y=4, z=2}"));
+        // A `Vec3` as vanilla writes it: "(x, y, z)", in `Double.toString`'s digits.
+        let text = rt.concat("\u{1}", "L", &[center], &[]);
+        assert_eq!(rt.str_of(text), Some("(1.5, 64.5, -2.5)"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `ChunkPos` as vanilla packs it: x in a long's low half, z in its high; a block's chunk is its

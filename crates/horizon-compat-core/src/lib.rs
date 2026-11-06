@@ -852,6 +852,18 @@ impl Rt {
                 None if v.r() == 0 => "null".into(),
                 None => match self.heap.get(v.r() as usize).map(|o| &o.data) {
                     Some(Data::Fields(f)) if f.contains_key("value") => f["value"].i().to_string(),
+                    // A position (`BlockPos`, its mutable form, `SectionPos`): `Vec3i.toString`,
+                    // Guava's `toStringHelper` with the class's simple name.
+                    Some(Data::Native("BlockPos", h)) => {
+                        let class = self.class_of(v);
+                        let simple = class.rsplit(['/', '$']).next().unwrap_or(class);
+                        format!("{simple}{{x={}, y={}, z={}}}", h[0], h[1], h[2])
+                    }
+                    // `Vec3.toString`: "(x, y, z)", each as `Double.toString` writes it.
+                    Some(Data::Fields(f)) if self.class_of(v) == "net/minecraft/world/phys/Vec3" => {
+                        let c = |k: &str| java_double(f.get(k).copied().unwrap_or_default().d(), false);
+                        format!("({}, {}, {})", c("x"), c("y"), c("z"))
+                    }
                     _ => format!("{}@{:x}", self.class_of(v).replace('/', "."), v.r()),
                 },
             },

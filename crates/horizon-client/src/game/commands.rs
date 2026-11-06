@@ -821,7 +821,7 @@ impl Game<'_> {
             .collect()
     }
     /// The entities of the level in place a selector can find.
-    fn level_candidates(&self) -> Vec<Target> {
+    pub(super) fn level_candidates(&self) -> Vec<Target> {
         use horizon_client::projectiles::ProjectileKind as K;
         let mut candidates = Vec::new();
         candidates.extend(

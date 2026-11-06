@@ -3708,6 +3708,43 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - lava isn't water;
   - a ray from inside stone hits at z 3.502, inside.
   369 compat, 17 translator and 1 + 1 + 41 game tests pass.
+- [x] 2026-11-06 Part 14: round 10 in game; the game's entities for `getEntitiesOfClass`; positions; the eye height.
+  - Round 10 checked parts 11 to 13 in game with `/hzrun world`:
+    - stone's id is 1, and id 1 is `minecraft:stone` again;
+    - the break event is at -22 67 0, two blocks over the player;
+    - player 2 is found by id, by UUID and as a player, and is the same object;
+    - `Level.clip` straight down from the eyes gives `BLOCK at -22 64 0 face up, y 65.0, inside false`, the feet at
+      65.0 on grass;
+    - two diamonds are thrown at y 66.31999999284744. They lay on the ground 2.45 blocks off, and the game's
+      `data get` reads `{count: 2, id: "minecraft:diamond"}`.
+    No panic. The screenshot shows the diamonds in front of the eyes; the break particles over the head are out of
+    frame.
+  - The round showed two gaps:
+    - hzcheck's `getEyeY() - 0.3F` read 66.31999998807908. The runtime's eye height was 1.62 as a double, while
+      vanilla's is the float 1.62F (1.27F crouching), widened. `api_common::player_eye_height` now uses the float, and
+      so does the look ray of a `getPlayerPOVHitResult` miss. The drop was already right.
+    - `getEntitiesOfClass(Cow.class, box)` found no cow 3 blocks off: the runtime listed only item entities and the
+      mod's own. New `Host::entities_in(box)` is answered by the new game helper
+      `native_entities_in(dimension, min, max)` (`game/native_entity_queries.rs`, fragment `native_entities_in.json`):
+      the network ids of the server level's entities whose box meets the box, players aside. Each entity's box is its
+      type's size about its feet. `getEntitiesOfClass` and `getEntities` now also give those entities, as
+      `vanilla_entities`' objects of the class asked for (`LivingEntity`, `Animal`, `Cow`...), and the players whose
+      box meets the box. Create's fans, crushing wheels and deployers look for entities this way.
+  - Positions (packcov5: `BlockPos.getCenter` 51 mods, `toShortString` 23, `SectionPos` 16), checked against 26.3's
+    bytecode:
+    - `BlockPos.getCenter`, `getBottomCenter`, `atY`, `rotate` and `clampLocationWithin`;
+    - `Vec3i.toShortString`, `compareTo`, `distToCenterSqr` and `closerToCenterThan`;
+    - `Vec3i.toString` (`BlockPos{x=1, y=2, z=3}`), also in string concatenation, where it was
+      `net.minecraft.core.BlockPos@...`; a `Vec3` concatenated is vanilla's `(1.5, 64.5, -2.5)`;
+    - `SectionPos`: its `of` forms, packing, coordinates, block bounds, origin, centre, chunk, offsets and the static
+      conversions.
+  - Probe artefacts in packcov5's list, already answered in real use:
+    - `Slot.getItem`: the probe's slot has no container;
+    - `BlockState.cycle`: the probe passes a null property;
+    - `Position.x()` on a `Vec3`: the probe has no receiver.
+  Tests `entities::tests::a_mod_finds_the_games_mobs_and_players_by_class_and_box` and
+  `api_common::tests::positions_and_sections_answer_as_vanillas`. 371 compat, 17 translator and 1 + 1 + 41 game tests
+  pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

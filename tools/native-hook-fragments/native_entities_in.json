@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "the game's entities in a box for mods (`native_entities_in`).",
+  "doc_summary": "the game's entities in a box (`native_entities_in(dimension, min, max)`): the network ids of the server\nlevel's entities whose box meets it, players aside, as a mod's `Level.getEntitiesOfClass` finds them. Bundles that use\nit need `\"hooks\": @API:native_entities_in@`.",
+  "comments": ["crates/horizon-client/src/game/native_entity_queries.rs"]
+}

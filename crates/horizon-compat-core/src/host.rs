@@ -738,6 +738,12 @@ pub trait Host {
     fn send_payload(&mut self, _to: PayloadTarget, _channel: &str, _data: &[u8]) -> bool {
         false
     }
+    /// The server level's entities whose box meets `bounds` (min x, y, z, max x, y, z), players
+    /// aside (`player_entities`), as `Level.getEntities` finds the game's own: mobs, item
+    /// entities, boats... A mod's entities are the runtime's. None on a client.
+    fn entities_in(&self, _bounds: [f64; 6]) -> Vec<EntityView> {
+        Vec::new()
+    }
     /// The server level's item entities whose box meets `bounds` (min x, y, z, max x, y, z), in
     /// the level's order (`Level.getEntitiesOfClass(ItemEntity.class, box)`). None on a client.
     fn item_entities(&self, _bounds: [f64; 6]) -> Vec<ItemEntity> {
@@ -1506,6 +1512,10 @@ impl Host for MemoryHost {
     }
     fn item_entities(&self, bounds: [f64; 6]) -> Vec<ItemEntity> {
         self.item_entities.iter().filter(|e| e.count > 0 && boxes_meet(&e.bounds(), &bounds)).cloned().collect()
+    }
+    /// Those of `entities` standing in `bounds`, each taken as its feet.
+    fn entities_in(&self, bounds: [f64; 6]) -> Vec<EntityView> {
+        self.entities.iter().filter(|e| (0..3).all(|i| bounds[i] <= e.pos[i] && e.pos[i] <= bounds[i + 3])).cloned().collect()
     }
     fn entity(&self, id: i32) -> Option<EntityView> {
         self.entities.iter().find(|e| e.id == id).cloned()

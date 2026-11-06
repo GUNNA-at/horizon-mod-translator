@@ -357,7 +357,29 @@ fn entities_of(rt: &mut Rt, class: Option<V>, area: V, predicate: Option<V>) -> 
     let mut found = if items { item_entities_in(rt, b) } else { Vec::new() };
     // A mod's own entities (Create's contraptions), of the class asked for.
     let wanted = class.map(|c| rt.str_of(c).unwrap_or("").replace('.', "/"));
-    found.extend(crate::mod_entities::in_box(rt, b).into_iter().filter(|&e| wanted.as_deref().is_none_or(|w| w.is_empty() || rt.instance_of(e, w))));
+    let fits = |rt: &Rt, e: V| e.r() != 0 && wanted.as_deref().is_none_or(|w| w.is_empty() || rt.instance_of(e, w));
+    found.extend(crate::mod_entities::in_box(rt, b).into_iter().filter(|&e| fits(rt, e)));
+    // The game's own there (a cow, a boat), item entities aside (above), and its players, each
+    // as the object the runtime keeps for it, of the class asked for.
+    let views = rt.host().map(|h| h.entities_in(b)).unwrap_or_default();
+    for v in views.iter().filter(|v| v.kind != "minecraft:item" && v.kind.starts_with("minecraft:")) {
+        let e = crate::vanilla_entities::of(rt, v.id, &v.kind, Some(v.pos));
+        if fits(rt, e) {
+            found.push(e);
+        }
+    }
+    let players = rt.host().map(|h| h.player_entities()).unwrap_or_default();
+    for (id, uuid, at) in players {
+        // A standing player's box: 0.6 wide, 1.8 high (`Player.STANDING_DIMENSIONS`, floats).
+        let half = f64::from(0.6f32 / 2.0);
+        let (lo, hi) = ([at[0] - half, at[1], at[2] - half], [at[0] + half, at[1] + f64::from(1.8f32), at[2] + half]);
+        if (0..3).all(|i| lo[i] < b[i + 3] && hi[i] > b[i]) {
+            let p = crate::vanilla_entities::player(rt, id, uuid, at);
+            if fits(rt, p) {
+                found.push(p);
+            }
+        }
+    }
     let mut out = Vec::new();
     for e in found {
         let keep = match predicate {
@@ -700,5 +722,39 @@ mod tests {
         assert_eq!((new.item.as_str(), new.count, new.pos, new.motion), ("create:iron_sheet", 1, [1.5, 65.0, 1.5], [0.0, 0.1, 0.0]));
         assert_eq!(rt.get_field(fresh, "$id").i() as u32, new.id);
         let _ = host.block_state([0, 0, 0]);
+    }
+
+    #[test]
+    fn a_mod_finds_the_games_mobs_and_players_by_class_and_box() {
+        use crate::host::EntityView;
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        let view = |id: i32, kind: &str, pos: [f64; 3]| EntityView { id, kind: kind.into(), pos, yaw: 0.0, health: Some((10.0, 10.0)) };
+        host.entities = vec![view(7, "minecraft:cow", [0.5, 64.0, 0.5]), view(9, "minecraft:zombie", [40.5, 64.0, 0.5])];
+        // A player standing at the box's edge, half a block outside it: their 0.6 wide box reaches in.
+        let uuid = 0x1234u128;
+        host.players = vec![(uuid, [2.25, 64.0, 0.5])];
+        host.player_entity_ids.insert(uuid, 3);
+        let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+        let area = crate::shapes::aabb(&mut rt, [0.0, 63.0, 0.0, 2.0, 66.0, 2.0]);
+        let query = "net/minecraft/world/level/Level.getEntitiesOfClass.(Ljava/lang/Class;Lnet/minecraft/world/phys/AABB;)Ljava/util/List;";
+        let mut find = |rt: &mut Rt, class: &str| {
+            let c = crate::jlang::class_object(rt, class);
+            let list = rt.with_host(&mut host, |rt| api::call(rt, query, &[level, c, area]));
+            let found = crate::jutil::elements(rt, list);
+            found.iter().map(|&e| (rt.class_of(e).rsplit('/').next().unwrap_or("").to_owned(), api::call(rt, "net/minecraft/world/entity/Entity.getId.()I", &[e]).i())).collect::<Vec<_>>()
+        };
+        // Every living thing there: the cow and the player, not the zombie far off.
+        let living = find(&mut rt, "net/minecraft/world/entity/LivingEntity");
+        assert_eq!(living.len(), 2, "{living:?}");
+        assert!(living.contains(&("Cow".to_owned(), 7)), "{living:?}");
+        assert!(living.iter().any(|(_, id)| *id == 3), "{living:?}");
+        // By class: animals are the cow alone, players the player alone.
+        assert_eq!(find(&mut rt, "net/minecraft/world/entity/animal/Animal"), [("Cow".to_owned(), 7)]);
+        let players = find(&mut rt, "net/minecraft/world/entity/player/Player");
+        assert_eq!(players.iter().map(|p| p.1).collect::<Vec<_>>(), [3]);
+        assert!(find(&mut rt, "net/minecraft/world/entity/monster/Monster").is_empty());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

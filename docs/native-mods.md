@@ -1142,6 +1142,16 @@ by the game's effect ids (`minecraft:speed`; a content mod's `<namespace>:<path>
   offset (a flower's, grass's), what a player targets and the game's own rays stop at, as boxes relative to the block's
   corner. A mod's `Level.clip` with `ClipContext.Block.OUTLINE` clips these.
 
+### Entities in a box
+
+`crates/horizon-client/src/game/native_entity_queries.rs`: the game's entities a mod's box query finds.
+
+- `native_entities_in(dimension, min, max)` is the network ids of the server level `dimension`'s entities whose box meets
+  the box from `min` to `max` (overlapping, not only touching): mobs, item entities, orbs, projectiles, armor stands,
+  frames, paintings, boats, minecarts and the rest, players aside. An entity's box is its type's size about its feet (a
+  baby's as an adult's). Empty on a client. A mod's `Level.getEntitiesOfClass` and `getEntities` find these beside its
+  own.
+
 ### Loot tables
 
 Changing loot a mod didn't make, as NeoForge's `LootTableLoadEvent` and global loot modifiers and Fabric's

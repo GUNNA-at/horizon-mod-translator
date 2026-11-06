@@ -28,7 +28,7 @@ const MUTABLE_POS: &str = "net/minecraft/core/BlockPos$MutableBlockPos";
 fn api_super(class: &str) -> Option<&'static str> {
     match class {
         MUTABLE_POS => Some(BLOCK_POS),
-        BLOCK_POS => Some("net/minecraft/core/Vec3i"),
+        BLOCK_POS | "net/minecraft/core/SectionPos" => Some("net/minecraft/core/Vec3i"),
         _ => None,
     }
 }
@@ -527,6 +527,72 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             let (p, q) = (native(rt, a(0)), native(rt, a(1)));
             let d = |i: usize| (p[i] - q[i]) as f64;
             V::I((d(0) * d(0) + d(1) * d(1) + d(2) * d(2) < a(2).d() * a(2).d()) as i32)
+        }
+        // `BlockPos.getCenter()` and `getBottomCenter()`: `Vec3.atCenterOf(this)`, `atBottomCenterOf(this)`.
+        "net/minecraft/core/BlockPos.getCenter.()Lnet/minecraft/world/phys/Vec3;" | "net/minecraft/core/BlockPos.getBottomCenter.()Lnet/minecraft/world/phys/Vec3;" => {
+            let p = native(rt, a(0));
+            let up = if key.contains(".getCenter.") { 0.5 } else { 0.0 };
+            crate::api_common::vec3(rt, p[0] as f64 + 0.5, p[1] as f64 + up, p[2] as f64 + 0.5)
+        }
+        "net/minecraft/core/BlockPos.atY.(I)Lnet/minecraft/core/BlockPos;" => {
+            let p = native(rt, a(0));
+            block_pos(rt, p[0], i64::from(a(1).i()), p[2])
+        }
+        // `BlockPos.rotate(rotation)` about the origin: a quarter turn clockwise takes (x, z) to
+        // (-z, x); `NONE` gives the position itself.
+        "net/minecraft/core/BlockPos.rotate.(Lnet/minecraft/world/level/block/Rotation;)Lnet/minecraft/core/BlockPos;" => {
+            let p = native(rt, a(0)).map(|c| i64::from(c as i32));
+            let neg = |c: i64| i64::from((c as i32).wrapping_neg());
+            match rt.get_field(a(1), "$ordinal").i() {
+                1 => block_pos(rt, neg(p[2]), p[1], p[0]),
+                2 => block_pos(rt, neg(p[0]), p[1], neg(p[2])),
+                3 => block_pos(rt, p[2], p[1], neg(p[0])),
+                _ => a(0),
+            }
+        }
+        // `BlockPos.clampLocationWithin(v)`: the point kept a hair inside the block, the low bound
+        // summed in floats as vanilla's is.
+        "net/minecraft/core/BlockPos.clampLocationWithin.(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;" => {
+            let p = native(rt, a(0));
+            let v = [rt.get_field(a(1), "x").d(), rt.get_field(a(1), "y").d(), rt.get_field(a(1), "z").d()];
+            let c: [f64; 3] = std::array::from_fn(|i| {
+                let (low, high) = (f64::from(p[i] as i32 as f32 + 1.0e-5), p[i] as f64 + 1.0 - 9.999_999_747_378_752e-6);
+                if v[i] < low { low } else { v[i].min(high) }
+            });
+            crate::api_common::vec3(rt, c[0], c[1], c[2])
+        }
+        // `Vec3i`'s text: `toShortString` "x, y, z"; `toString` Guava's `toStringHelper`, as the
+        // runtime writes any position (`BlockPos{x=1, y=2, z=3}`).
+        "net/minecraft/core/Vec3i.toShortString.()Ljava/lang/String;" => {
+            let p = native(rt, a(0));
+            rt.string(&format!("{}, {}, {}", p[0], p[1], p[2]))
+        }
+        "net/minecraft/core/Vec3i.toString.()Ljava/lang/String;" => {
+            let text = rt.to_java_string(a(0), 'L');
+            rt.string(&text)
+        }
+        // `Vec3i.compareTo`: by y, then z, then x.
+        "net/minecraft/core/Vec3i.compareTo.(Lnet/minecraft/core/Vec3i;)I" | "net/minecraft/core/Vec3i.compareTo.(Ljava/lang/Object;)I" => {
+            let (p, q) = (native(rt, a(0)), native(rt, a(1)));
+            let d = |i: usize| (p[i] as i32).wrapping_sub(q[i] as i32);
+            V::I(if p[1] != q[1] {
+                d(1)
+            } else if p[2] != q[2] {
+                d(2)
+            } else {
+                d(0)
+            })
+        }
+        // `distToCenterSqr` from the block's centre to a point (or a `Position`: a `Vec3`), and
+        // `closerToCenterThan(position, distance)`: that below `distance²`.
+        "net/minecraft/core/Vec3i.distToCenterSqr.(DDD)D"
+        | "net/minecraft/core/Vec3i.distToCenterSqr.(Lnet/minecraft/core/Position;)D"
+        | "net/minecraft/core/Vec3i.closerToCenterThan.(Lnet/minecraft/core/Position;D)Z" => {
+            let p = native(rt, a(0));
+            let to = if key.contains("(DDD)") { [a(1).d(), a(2).d(), a(3).d()] } else { ["x", "y", "z"].map(|f| rt.get_field(a(1), f).d()) };
+            let d: [f64; 3] = std::array::from_fn(|i| p[i] as f64 + 0.5 - to[i]);
+            let sq = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if key.contains(".closerToCenterThan.") { V::I((sq < a(2).d() * a(2).d()) as i32) } else { V::D(sq) }
         }
         "net/minecraft/core/BlockPos.mutable.()Lnet/minecraft/core/BlockPos$MutableBlockPos;" => {
             let p = native(rt, a(0));

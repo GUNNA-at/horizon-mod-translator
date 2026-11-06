@@ -1960,6 +1960,10 @@ fn world_writes(c: &str) -> String {
         fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {{
             self.game.native_schedule_block_tick_at(pos, block, delay)
         }}
+        fn entities_in(&self, b: [f64; 6]) -> Vec<{c}::host::EntityView> {{
+            let dim = self.game.native_dimension();
+            self.game.native_entities_in(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().filter_map(|id| {c}::host::Host::entity(self, id)).collect()
+        }}
         fn entity(&self, id: i32) -> Option<{c}::host::EntityView> {{
             let t = self.game.level_entity(id)?;
             let pos = self.game.target_position(t)?;
