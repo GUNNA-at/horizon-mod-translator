@@ -154,9 +154,7 @@ fn experience_orb(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) 
             while left > 0 {
                 let value = orb_value(left);
                 left -= value;
-                if let Some(h) = rt.host_mut() {
-                    h.spawn_experience_orb(at, value, None);
-                }
+                rt.host_call(|h| h.spawn_experience_orb(at, value, None));
             }
             V::Void
         }
@@ -268,7 +266,7 @@ fn add(rt: &mut Rt, e: V) -> bool {
     let stack = rt.get_field(e, "$item");
     let Some(whole) = crate::hand::hand_stack_of(rt, stack).filter(|w| w.count > 0) else { return false };
     let (p, m, delay) = (pos(rt, e), motion(rt, e), rt.get_field(e, "$pickupDelay").i().max(0) as u32);
-    let Some(new) = rt.host_mut().and_then(|h| h.spawn_stack_entity(&whole, p, m, delay)) else { return false };
+    let Some(new) = rt.host_call(|h| h.spawn_stack_entity(&whole, p, m, delay)).flatten() else { return false };
     rt.put_field(e, "$id", V::I(new as i32));
     rt.put_field(e, "$seen", V::J(game_time(rt)));
     let list = proxies(rt);
@@ -504,7 +502,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         let at = [rt.get_field(o, "$x").d(), rt.get_field(o, "$y").d(), rt.get_field(o, "$z").d()];
         let value = rt.get_field(o, "$value").i().max(0) as u32;
         let moved = (rt.get_field(o, "$moved").i() != 0).then(|| motion(rt, o));
-        let spawned = rt.host_mut().is_some_and(|h| h.spawn_experience_orb(at, value, moved));
+        let spawned = rt.host_call(|h| h.spawn_experience_orb(at, value, moved)).unwrap_or(false);
         return Some(V::I(spawned as i32));
     }
     if let Some(v) = experience_orb(rt, owner, name, desc, args) {

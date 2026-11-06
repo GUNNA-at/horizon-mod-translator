@@ -1634,7 +1634,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "setBlock" | "setBlockAndUpdate") if level => {
             let p = pos_of(rt, a(1));
             let text = rt.str_of(a(2)).unwrap_or("minecraft:air").to_owned();
-            let set = rt.host_mut().is_some_and(|h| h.set_block_state(p, &text));
+            let set = rt.host_call(|h| h.set_block_state(p, &text)).unwrap_or(false);
             crate::glue::drain_replaced(rt);
             V::I(set as i32)
         }
@@ -1644,7 +1644,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let p = pos_of(rt, a(1));
             let here = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
             let left = crate::block_breaking::fluid_block(rt, &here);
-            let set = rt.host_mut().is_some_and(|h| h.set_block_state(p, &left));
+            let set = rt.host_call(|h| h.set_block_state(p, &left)).unwrap_or(false);
             crate::glue::drain_replaced(rt);
             V::I(set as i32)
         }

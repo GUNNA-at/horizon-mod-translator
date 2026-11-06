@@ -3952,17 +3952,19 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
         if name == "lib.rs" {
             text = text.replacen("use horizon_compat::", &root, 1);
             text.push_str(&format!(
-                "\nthread_local! {{\n    static RUNTIME: std::cell::RefCell<Option<Rt>> = const {{ std::cell::RefCell::new(None) }};\n}}\n\n\
+                "\nthread_local! {{\n    static RUNTIME: std::cell::RefCell<Option<Rt>> = const {{ std::cell::RefCell::new(None) }};\n    /// Where the runtime is ([`Rt::address`]), which a hook run from inside one of its calls finds it by.\n    static RUNTIME_AT: std::cell::Cell<usize> = const {{ std::cell::Cell::new(0) }};\n}}\n\n\
                  /// The mod's runtime on this thread, made and registered on first use. Not from inside one of its\n\
                  /// own calls (it is busy then): the game's hooks go through [`hook_runtime`].\n\
-                 pub fn with_runtime<R>(f: impl FnOnce(&mut Rt) -> R) -> R {{\n    RUNTIME.with(|cell| {{\n        let mut slot = cell.borrow_mut();\n        let rt = slot.get_or_insert_with(|| {{\n            let mut rt = Rt::new();\n            rt.namespace = {id:?}.into();\n            init(&mut rt);\n            start(&mut rt);\n            rt\n        }});\n        f(rt)\n    }})\n}}\n\n\
+                 pub fn with_runtime<R>(f: impl FnOnce(&mut Rt) -> R) -> R {{\n    RUNTIME.with(|cell| {{\n        let mut slot = cell.borrow_mut();\n        let rt = slot.get_or_insert_with(|| {{\n            let mut rt = Rt::new();\n            rt.namespace = {id:?}.into();\n            init(&mut rt);\n            start(&mut rt);\n            rt\n        }});\n        RUNTIME_AT.with(|at| at.set(rt.address()));\n        f(rt)\n    }})\n}}\n\n\
                  /// Whether the mod's runtime is in a call on this thread: a hook the game runs from inside one (the\n\
                  /// mod's code places a block, and the game asks for the block's block entity) finds it so.\n\
                  pub fn runtime_busy() -> bool {{\n    RUNTIME.with(|cell| cell.try_borrow_mut().is_err())\n}}\n\n\
                  /// [`with_runtime`] for a hook the game runs. When the runtime is busy on this thread (the game ran\n\
-                 /// the hook from inside one of the mod's calls), the hook does nothing (`R::default()`, which\n\
-                 /// leaves it to the game) instead of entering the runtime again, and says so once.\n\
-                 pub fn hook_runtime<R: Default>(hook: &'static str, f: impl FnOnce(&mut Rt) -> R) -> R {{\n    if runtime_busy() {{\n        thread_local! {{\n            static TOLD: std::cell::RefCell<Vec<&'static str>> = const {{ std::cell::RefCell::new(Vec::new()) }};\n        }}\n        if TOLD.with(|t| !t.borrow().contains(&hook) && {{ t.borrow_mut().push(hook); true }}) {{\n            eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; skipped\");\n        }}\n        return R::default();\n    }}\n    with_runtime(f)\n}}\n\n\
+                 /// the hook from inside one of the mod's calls), the runtime runs it where it waits for the game\n\
+                 /// ([`Rt::host_call`]), as the JVM runs an event's listeners inside the call that posted it. Where it\n\
+                 /// doesn't wait (a call that can't take a hook), the hook does nothing (`R::default()`, which\n\
+                 /// leaves it to the game), and says so once.\n\
+                 pub fn hook_runtime<R: Default>(hook: &'static str, f: impl FnOnce(&mut Rt) -> R) -> R {{\n    if runtime_busy() {{\n        thread_local! {{\n            static TOLD: std::cell::RefCell<Vec<(&'static str, bool)>> = const {{ std::cell::RefCell::new(Vec::new()) }};\n        }}\n        let mut f = Some(f);\n        let at = RUNTIME_AT.with(|at| at.get());\n        let ran = horizon_compat::reenter(at, |rt| f.take().map(|f| f(rt))).flatten();\n        let first = TOLD.with(|t| !t.borrow().contains(&(hook, ran.is_some())) && {{ t.borrow_mut().push((hook, ran.is_some())); true }});\n        if let Some(r) = ran {{\n            if first && Rt::tracing() {{\n                eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; run there\");\n            }}\n            return r;\n        }}\n        if first {{\n            eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; skipped\");\n        }}\n        return R::default();\n    }}\n    with_runtime(f)\n}}\n\n\
                  /// A question about the mod's classes and registrations alone (a block's block entity type, an\n\
                  /// item's use duration, a block's state for a placement): the runtime answers it, or the probe\n\
                  /// runtime while the runtime is busy (a block the mod's own code places asks from inside its call).\n\

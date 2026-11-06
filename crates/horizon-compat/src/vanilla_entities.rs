@@ -645,8 +645,10 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
     class_entry(owner).is_some()
 }
 
+/// A write to the game's entity, which the game may answer by running the mod's hooks (a blow
+/// fires the damage events): those get this runtime ([`Rt::host_call`]).
 fn with_host<T>(rt: &mut Rt, f: impl FnOnce(&mut dyn Host) -> T) -> Option<T> {
-    rt.host_mut().map(f)
+    rt.host_call(f)
 }
 
 fn vec3(rt: &mut Rt, p: [f64; 3]) -> V {
@@ -753,7 +755,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let amount = a(args.len() - 1).f();
             let source = a(args.len() - 2);
             let blow = crate::damage::blow_of(rt, source);
-            let hurt = with_host(rt, |h| h.hurt_entity_by(id, amount, &blow)).unwrap_or(false);
+            let hurt = crate::damage::dealing(rt, id, source, |rt| with_host(rt, |h| h.hurt_entity_by(id, amount, &blow))).unwrap_or(false);
             if Rt::tracing() {
                 eprintln!("horizon-compat: {kind} {id} hurt by {amount} ({}): {}", blow.damage_type, if hurt { "taken" } else { "refused" });
             }

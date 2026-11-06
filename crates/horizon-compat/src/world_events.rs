@@ -600,7 +600,7 @@ fn snapshot_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let p = api::pos_of(rt, at);
             let state = rt.get_field(s, "$state");
             let text = rt.str_of(state).unwrap_or("minecraft:air").to_owned();
-            let set = rt.host_mut().is_some_and(|h| h.set_block_state(p, &text));
+            let set = rt.host_call(|h| h.set_block_state(p, &text)).unwrap_or(false);
             V::I(i32::from(set))
         }
         _ => return None,

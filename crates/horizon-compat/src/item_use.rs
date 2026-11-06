@@ -77,7 +77,7 @@ pub(crate) fn block_item_use_on(rt: &mut Rt, stack: V, ctx: V) -> V {
     let Some(held) = hand::hand_stack_of(rt, stack) else {
         return api_common::result(rt, RESULT, "PASS");
     };
-    let placed = rt.host_mut().and_then(|h| h.place_item_block(&held, pos, face, hit, inside, look, sneaking));
+    let placed = rt.host_call(|h| h.place_item_block(&held, pos, face, hit, inside, look, sneaking)).flatten();
     if placed.is_none() {
         return api_common::result(rt, RESULT, "FAIL");
     }

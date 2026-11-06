@@ -463,7 +463,7 @@ fn holder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
         (PLACED, "place" | "placeWithBiomeCheck") if rt.get_field(a(0), "$json").r() != 0 => {
             let json = rt.str_of(rt.get_field(a(0), "$json")).unwrap_or("").to_owned();
             let pos = crate::api::pos_of(rt, a(4));
-            match rt.host_mut().map(|h| h.place_feature(&json, pos)) {
+            match rt.host_call(|h| h.place_feature(&json, pos)) {
                 Some(Ok(placed)) => V::I(placed as i32),
                 Some(Err(e)) => {
                     let ex = rt.new_object("java/lang/IllegalStateException");
@@ -680,9 +680,7 @@ fn feature_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) ->
             let p = section_pos(rt, a(0), a(1).i(), a(2).i(), a(3).i());
             let old = host_state(rt, p);
             let text = state_text(rt, a(4));
-            if let Some(h) = rt.host_mut() {
-                h.set_section_state(p, &text);
-            }
+            rt.host_call(|h| h.set_section_state(p, &text));
             old
         }
         (SECTION, "acquire" | "release") => V::Void,

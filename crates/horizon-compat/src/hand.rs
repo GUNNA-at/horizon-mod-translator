@@ -271,9 +271,7 @@ fn put(rt: &mut Rt, slot: u8, stack: V) {
         max_damage: 0,
         components: carried.into_iter().collect(),
     });
-    if let Some(h) = rt.host_mut() {
-        h.set_player_slot(slot, held.as_ref());
-    }
+    rt.host_call(|h| h.set_player_slot(slot, held.as_ref()));
 }
 
 /// What the mod did to record `r`'s slot so far reaches the game; the stack then stands for what
@@ -298,18 +296,14 @@ fn flush(rt: &mut Rt, r: V) {
             (None, None) => {}
             // Used up: the slot is empty.
             (Some(_), None) => {
-                if let Some(h) = rt.host_mut() {
-                    h.update_player_slot(slot, 0, 0, &[]);
-                }
+                rt.host_call(|h| h.update_player_slot(slot, 0, 0, &[]));
             }
             (Some(was), Some((id, n, damage))) if was == id => {
                 let mut changes: Vec<(String, Option<Nbt>)> =
                     before.keys().filter(|k| !now.contains_key(*k)).map(|k| (k.clone(), None)).collect();
                 changes.extend(now.iter().filter(|(k, v)| before.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), Some(v.clone()))));
-                if (n != before_count || damage != before_damage || !changes.is_empty())
-                    && let Some(h) = rt.host_mut()
-                {
-                    h.update_player_slot(slot, n, damage, &changes);
+                if n != before_count || damage != before_damage || !changes.is_empty() {
+                    rt.host_call(|h| h.update_player_slot(slot, n, damage, &changes));
                 }
             }
             // The slot's stack holds something else now.

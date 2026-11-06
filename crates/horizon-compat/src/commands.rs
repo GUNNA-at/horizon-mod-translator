@@ -1066,7 +1066,7 @@ fn run_on_host(rt: &mut Rt, source: V, line: &str) {
         player: if player.r() != 0 { crate::network::player_uuid(rt, player) } else { None },
         silent: rt.get_field(source, "$silent").i() != 0 || console,
     };
-    let ran = rt.host_mut().is_some_and(|h| h.run_command(&run));
+    let ran = rt.host_call(|h| h.run_command(&run)).unwrap_or(false);
     if !ran && Rt::tracing() {
         eprintln!("horizon-compat: `{line}` (a mod's command line) didn't run");
     }
@@ -2216,7 +2216,7 @@ fn read_value_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V
             "place" => {
                 let text = rt.str_of(rt.get_field(o, "$text")).unwrap_or("minecraft:air").to_owned();
                 let p = api::pos_of(rt, a(2));
-                V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, &text)) as i32)
+                V::I(rt.host_call(|h| h.set_block_state(p, &text)).unwrap_or(false) as i32)
             }
             _ => return None,
         },

@@ -4996,6 +4996,33 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     (an item entity), `LivingEntity.knockback` (the cow), `setLastHurtMob` (the player), the potato's
     `addAdditionalSaveData` and `readAdditionalSaveData`, and its `spawnAtLocation`; left in this
     area: `EnchantmentHelper.doPostAttackEffects`.
+- [x] 2026-11-06 Part 55: a hook the game runs from inside a mod's own call runs in that call.
+  Measured in game (Part 54's potato round): the game fires `living_incoming_damage`,
+  `living_damage_pre`, `living_damage_post` and `living_knockback` for Create's potato's blow, inside
+  Create's own call; the bundle skipped each ("the game ran the ... hook from inside one of the mod's
+  own calls; skipped": its runtime was busy), so no mod's listener heard the potato's hit. Earlier
+  rounds skipped `place_block` 10 times the same way (the world-events round).
+  - The runtime may wait for the game: a call on the game that the game may answer by running the
+    mod's hooks (`Rt::host_call`: a blow, a kill, a push, a block set or placed, a feature placed, a
+    command run, an effect given or taken, an item entity or orb spawned, a player's slot written)
+    leaves the runtime waiting, and a hook the game runs meanwhile runs in it (`reenter`), as the JVM
+    runs an event's listeners inside the call that posted it. Its innermost wait only, and one hook
+    at a time: a hook inside that hook runs only where that one waits for the game in turn. A hook
+    the game runs from another call (one that doesn't wait) is still skipped, as before.
+  - While the game deals a mod's blow, the damage hooks for its victim hand listeners the mod's own
+    `DamageSource` (its direct entity, the mod's projectile; its damage type, which the game names
+    `minecraft:generic` when it doesn't know it), not one made again from the game's ids.
+  - Sound: the waiting call holds no borrow of the runtime while the game runs (the game is outside
+    it), the hook's runtime comes from that call's own `&mut`, and the garbage collector doesn't run
+    while a game is set (as in any hook).
+  - Tests: `horizon_compat_core::tests::a_hook_gets_the_runtime_that_waits_for_the_game`,
+    `damage::tests::the_game_runs_the_damage_events_of_a_mods_blow_inside_it`.
+  - In game (the potato round): the four hooks the game fires for the potato's blow
+    (`living_incoming_damage`, `living_damage_pre`, `living_damage_post`, `living_knockback`) run in
+    Create's runtime inside its call ("run there"), where Part 54's round skipped them. The cow is hurt
+    twice for 5 as `create:potato_cannon` and dies; no uncaught throws. One new unmapped call:
+    `EntityType.getCategory`, which the potato's `onHitEntity` asks of a target it killed (its
+    advancement's check).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

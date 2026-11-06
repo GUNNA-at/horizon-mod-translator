@@ -52,7 +52,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "addEffect" | "forceAddEffect" => {
             let force = name == "forceAddEffect";
             let added = match (entity, view_of(rt, a(1))) {
-                (Some(entity), Some(effect)) => rt.host_mut().is_some_and(|h| h.add_effect(entity, &effect, force)),
+                (Some(entity), Some(effect)) => rt.host_call(|h| h.add_effect(entity, &effect, force)).unwrap_or(false),
                 _ => false,
             };
             if force { V::Void } else { V::I(added as i32) }
@@ -64,7 +64,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         },
         "removeEffect" => {
             let removed = match (entity, food::effect_id(rt, a(1))) {
-                (Some(entity), Some(id)) => rt.host_mut().is_some_and(|h| h.remove_effect(entity, &full(&id))),
+                (Some(entity), Some(id)) => rt.host_call(|h| h.remove_effect(entity, &full(&id))).unwrap_or(false),
                 _ => false,
             };
             V::I(removed as i32)
@@ -74,13 +74,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let Some(had) = find(rt, entity, a(1)) else {
                 return Some(V::NULL);
             };
-            let removed = entity.is_some_and(|entity| rt.host_mut().is_some_and(|h| h.remove_effect(entity, &had.id)));
+            let removed = entity.is_some_and(|entity| rt.host_call(|h| h.remove_effect(entity, &had.id)).unwrap_or(false));
             if removed { instance(rt, &had) } else { V::NULL }
         }
         "removeAllEffects" => {
             let mut any = false;
             for e in active(rt, entity) {
-                any |= entity.is_some_and(|entity| rt.host_mut().is_some_and(|h| h.remove_effect(entity, &e.id)));
+                any |= entity.is_some_and(|entity| rt.host_call(|h| h.remove_effect(entity, &e.id)).unwrap_or(false));
             }
             V::I(any as i32)
         }

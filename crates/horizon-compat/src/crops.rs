@@ -122,9 +122,7 @@ pub fn random_tick(rt: &mut Rt, this: V, state: V, level: V, pos: V, random: V) 
 
 fn set_block(rt: &mut Rt, p: [i32; 3], state: V) {
     let text = rt.str_of(state).unwrap_or("minecraft:air").to_owned();
-    if let Some(h) = rt.host_mut() {
-        h.set_block_state(p, &text);
-    }
+    rt.host_call(|h| h.set_block_state(p, &text));
 }
 
 fn block_at(rt: &Rt, p: [i32; 3]) -> String {

@@ -154,6 +154,51 @@ pub const LAMBDA: u32 = 1 << 31;
 /// A generated dispatcher: `(rt, receiver's class id, the call's API key, args)`.
 pub type Dispatch = fn(&mut Rt, u32, &'static str, &[V]) -> V;
 
+thread_local! {
+    /// The runtimes waiting for the game in a call on this thread ([`Rt::host_call`]), innermost
+    /// last, each with whether a hook has it now ([`reenter`]).
+    static WAITING: std::cell::RefCell<Vec<(std::ptr::NonNull<Rt>, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Ends a [`Rt::host_call`]'s wait, also when the call unwinds.
+struct Waited;
+
+impl Drop for Waited {
+    fn drop(&mut self) {
+        WAITING.with(|w| {
+            w.borrow_mut().pop();
+        });
+    }
+}
+
+/// Runs `f` on the runtime at `at` ([`Rt::address`]) while it waits for the game on this thread
+/// ([`Rt::host_call`]): the game ran one of the runtime's hooks from inside one of the mod's own
+/// calls. None when it isn't waiting there, or when a hook has it already (it is in use).
+pub fn reenter<R>(at: usize, f: impl FnOnce(&mut Rt) -> R) -> Option<R> {
+    let (index, rt) = WAITING.with(|w| {
+        let w = w.borrow();
+        // Its innermost wait: one further out is in use by the calls this one is inside.
+        let i = w.iter().rposition(|(rt, _)| rt.as_ptr() as usize == at)?;
+        (!w[i].1).then_some((i, w[i].0))
+    })?;
+    struct Given(usize);
+    impl Drop for Given {
+        fn drop(&mut self) {
+            WAITING.with(|w| {
+                if let Some(e) = w.borrow_mut().get_mut(self.0) {
+                    e.1 = false;
+                }
+            });
+        }
+    }
+    WAITING.with(|w| w.borrow_mut()[index].1 = true);
+    let _given = Given(index);
+    // SAFETY: the runtime waits in `host_call` for the game, which borrows nothing of it meanwhile;
+    // the pointer comes from that call's own `&mut`, and, marked given, no other hook has it until
+    // this returns. Waits pushed meanwhile come off before this does: calls nest.
+    Some(f(unsafe { &mut *rt.as_ptr() }))
+}
+
 /// The translated mod's runtime state.
 pub struct Rt {
     pub heap: Vec<Object>,
@@ -345,6 +390,26 @@ impl Rt {
     pub fn host_mut(&mut self) -> Option<&mut dyn host::Host> {
         // SAFETY: as above; `&mut self` makes this the only access.
         self.host.map(|p| unsafe { &mut *p.as_ptr() })
+    }
+
+    /// `f` on the game, for a call the game may answer by running this runtime's own hooks (a
+    /// mod's blow fires the damage events, a block it places its placement's): while `f` runs,
+    /// [`reenter`] hands such a hook this runtime, as the JVM runs an event's listeners inside the
+    /// call that posted it. None without a game.
+    pub fn host_call<R>(&mut self, f: impl FnOnce(&mut dyn host::Host) -> R) -> Option<R> {
+        let host = self.host?;
+        let me = std::ptr::NonNull::from(&mut *self);
+        WAITING.with(|w| w.borrow_mut().push((me, false)));
+        let _done = Waited;
+        // SAFETY: see `with_host`: set only while the borrowed host is alive. The game isn't part
+        // of the runtime, so nothing of the runtime is borrowed while `f` runs, and a hook may have
+        // it through `reenter`, by the pointer made from this call's own `&mut`.
+        Some(f(unsafe { &mut *host.as_ptr() }))
+    }
+
+    /// This runtime's address, which [`reenter`] finds it by.
+    pub fn address(&self) -> usize {
+        std::ptr::from_ref(self) as usize
     }
 
     /// Whether mod class `class` overrides method `short` (`name.desc`), as the generated table
@@ -1161,6 +1226,49 @@ impl<const N: usize> Stack<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hook the game runs while the runtime waits for it in a call (`host_call`) gets that
+    /// runtime, once at a time: a hook inside that hook doesn't, unless the runtime waits again.
+    /// Nothing waits outside such a call, nor in a plain `host_mut` call.
+    #[test]
+    fn a_hook_gets_the_runtime_that_waits_for_the_game() {
+        struct Game {
+            at: usize,
+            heard: Vec<String>,
+        }
+        impl host::Host for Game {
+            fn block_state(&self, _pos: [i32; 3]) -> String {
+                "minecraft:air".into()
+            }
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+                false
+            }
+            fn hurt_entity(&mut self, id: i32, _amount: f32) -> bool {
+                let at = self.at;
+                let got = crate::reenter(at, |rt| {
+                    rt.namespace.push_str(&format!("+{id}"));
+                    let inner = crate::reenter(at, |_| ()).is_some();
+                    // The hook works on the game it was handed, and its own call waits again: a
+                    // hook inside that one gets the runtime.
+                    let again = if id == 1 { rt.with_host(&mut *self, |rt| rt.host_call(|h| h.hurt_entity(2, 1.0))) } else { None };
+                    (inner, again)
+                });
+                self.heard.push(format!("{id}: {got:?}"));
+                true
+            }
+        }
+        let mut rt = Rt::new();
+        let at = rt.address();
+        assert!(crate::reenter(at, |_| ()).is_none(), "not waiting");
+        let mut game = Game { at, heard: Vec::new() };
+        rt.with_host(&mut game, |rt| {
+            assert_eq!(rt.host_call(|h| h.hurt_entity(1, 1.0)), Some(true));
+            assert_eq!(rt.host_mut().map(|h| h.hurt_entity(3, 1.0)), Some(true));
+        });
+        assert_eq!(game.heard, ["2: Some((false, None))", "1: Some((false, Some(true)))", "3: None"]);
+        assert_eq!(rt.namespace, "+1+2");
+        assert!(crate::reenter(at, |_| ()).is_none(), "the waits are over");
+    }
 
     #[test]
     fn the_operand_stack_takes_arguments_deepest_first() {

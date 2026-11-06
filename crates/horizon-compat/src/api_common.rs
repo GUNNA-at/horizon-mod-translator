@@ -3598,7 +3598,7 @@ pub(crate) fn give_player(rt: &mut Rt, stack: V) -> bool {
     }
     let item = item_like_name(rt, rt.get_field(stack, "$item"));
     let count = rt.get_field(stack, "$count").i().max(0) as u32;
-    let gave = rt.host_mut().map_or(0, |h| h.give_player_items(&item, count));
+    let gave = rt.host_call(|h| h.give_player_items(&item, count)).unwrap_or(0);
     rt.put_field(stack, "$count", V::I((count - gave.min(count)) as i32));
     gave >= count
 }

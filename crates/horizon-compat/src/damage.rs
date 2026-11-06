@@ -702,8 +702,36 @@ fn call_source(rt: &mut Rt, name: &str, desc: &str, s: V) -> V {
     crate::api::call(rt, k, &[s])
 }
 
-/// The `DamageSource` of a hit as the hooks name it.
-fn hit_source(rt: &mut Rt, s: &Source<'_>) -> V {
+/// Where a mod's own source of its blow on an entity waits while the game deals it ([`dealing`]).
+const BLOW: &str = "compat:blow/";
+
+/// Runs `f`, the call on the game that deals a mod's blow of `source` on entity `entity`, with that
+/// source kept for the entity: the damage hooks the game runs for it meanwhile (the mod's own,
+/// [`horizon_compat_core::reenter`]) hand listeners that one, its direct entity (the mod's
+/// projectile) and damage type (a mod's own, which the game names `minecraft:generic`), not one
+/// made again from what the game tells.
+pub(crate) fn dealing<R>(rt: &mut Rt, entity: i32, source: V, f: impl FnOnce(&mut Rt) -> R) -> R {
+    let key = format!("{BLOW}{entity}");
+    let before = if source.r() != 0 { rt.interned.insert(key.clone(), source) } else { rt.interned.remove(&key) };
+    let r = f(rt);
+    match before {
+        Some(b) => rt.interned.insert(key, b),
+        None => rt.interned.remove(&key),
+    };
+    r
+}
+
+/// The source of the mod's blow the game is dealing entity `entity` ([`dealing`]).
+fn own_source(rt: &Rt, entity: i32) -> Option<V> {
+    rt.interned.get(&format!("{BLOW}{entity}")).copied()
+}
+
+/// The `DamageSource` of a hit on entity `entity` as the hooks name it: the mod's own while the
+/// game deals the mod's blow ([`dealing`]).
+fn hit_source(rt: &mut Rt, entity: i32, s: &Source<'_>) -> V {
+    if let Some(own) = own_source(rt, entity) {
+        return own;
+    }
     let causing = actor(rt, s.causing, true);
     let direct = if s.direct == s.causing { causing } else { actor(rt, s.direct, false) };
     let id = if s.damage_type.is_empty() { "minecraft:generic".to_owned() } else { full_id(s.damage_type) };
@@ -739,11 +767,11 @@ fn clear_hits(rt: &mut Rt) {
 fn hit_container(rt: &mut Rt, entity: i32, source: &Source<'_>, amount: f32) -> V {
     if let Some(&c) = rt.interned.get(&format!("{HIT}{entity}")) {
         let s = rt.get_field(c, "$source");
-        if type_id(rt, s) == full_id(source.damage_type) {
+        if own_source(rt, entity) == Some(s) || type_id(rt, s) == full_id(source.damage_type) {
             return c;
         }
     }
-    let s = hit_source(rt, source);
+    let s = hit_source(rt, entity, source);
     let c = container(rt, s, amount);
     keep_hit(rt, entity, c);
     c
@@ -764,7 +792,7 @@ pub fn incoming(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, seen:
         if victim.r() == 0 {
             return false;
         }
-        let s = hit_source(rt, &source);
+        let s = hit_source(rt, entity, &source);
         let c = container(rt, s, *amount);
         keep_hit(rt, entity, c);
         if !heard {
@@ -907,7 +935,7 @@ pub fn death(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, source: 
         if victim.r() == 0 {
             return false;
         }
-        let s = hit_source(rt, &source);
+        let s = hit_source(rt, entity, &source);
         let by = rt.get_field(s, "$causing");
         hurt_by(rt, victim, by);
         let ev = rt.new_object(DEATH);
@@ -969,7 +997,7 @@ pub fn living_drops(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, s
         if victim.r() == 0 {
             return None;
         }
-        let s = hit_source(rt, &source);
+        let s = hit_source(rt, entity, &source);
         // Each drop as an item entity, and its stack as the runtime reads it back unchanged.
         let mut given = Vec::with_capacity(drops.len());
         for d in drops.iter() {
@@ -1669,6 +1697,75 @@ mod tests {
             assert_eq!(crate::api::call(rt, key(DEATH, "isCanceled", "()Z"), &[ev]).i(), 1);
         });
         assert_eq!(heard(&mut rt), ["death of 7 by none magic"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The game, as it deals a mod's blow: it fires `LivingIncomingDamageEvent` the way the bundle's
+    /// hook does, in the mod's runtime that waits for this call ([`crate::reenter`]), naming the
+    /// source as the game knows it (no entities, a generic type), then deals what is left.
+    struct Dealing {
+        at: usize,
+        world: MemoryHost,
+        heard_by: Vec<Option<bool>>,
+    }
+
+    impl Host for Dealing {
+        fn block_state(&self, pos: [i32; 3]) -> String {
+            self.world.block_state(pos)
+        }
+        fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {
+            self.world.set_block_state(pos, state)
+        }
+        fn entity(&self, id: i32) -> Option<EntityView> {
+            self.world.entity(id)
+        }
+        fn damage_types(&self) -> Vec<DamageTypeView> {
+            self.world.damage_types()
+        }
+        fn resource(&self, path: &str) -> Option<Vec<u8>> {
+            self.world.resource(path)
+        }
+        fn resource_paths(&self, prefix: &str) -> Vec<String> {
+            self.world.resource_paths(prefix)
+        }
+        fn resource_namespaces(&self, root: &str) -> Vec<String> {
+            self.world.resource_namespaces(root)
+        }
+        fn players(&self) -> Vec<(u128, [f64; 3])> {
+            self.world.players()
+        }
+        fn player_entities(&self) -> Vec<(i32, u128, [f64; 3])> {
+            self.world.player_entities()
+        }
+        fn hurt_entity_by(&mut self, id: i32, amount: f32, by: &crate::host::HurtBy) -> bool {
+            let mut amount = amount;
+            let world = &mut self.world;
+            let game = Source { damage_type: "minecraft:generic", causing: 0, direct: 0 };
+            let canceled = crate::reenter(self.at, |rt| incoming(rt, world, id, "minecraft:cow", None, game, &mut amount));
+            self.heard_by.push(canceled);
+            canceled != Some(true) && self.world.hurt_entity_by(id, amount, by)
+        }
+    }
+
+    /// A mod's blow on the game's cow: the game fires the incoming damage event inside the mod's
+    /// call, in the mod's own runtime, whose listener hears the mod's own source (a player's fire,
+    /// though the game only names it generic, with no entities) and halves it, as the game then
+    /// deals it.
+    #[test]
+    fn the_game_runs_the_damage_events_of_a_mods_blow_inside_it() {
+        let mut rt = listening(&[(INCOMING, 1)]);
+        let mut game = Dealing { at: rt.address(), world: world(), heard_by: Vec::new() };
+        rt.with_host(&mut game, |rt| {
+            let cow = crate::vanilla_entities::of(rt, 7, "minecraft:cow", None);
+            let player = crate::menus::server_player(rt, 0xabc);
+            let fire = source(rt, "minecraft:in_fire", player, player, V::NULL);
+            let hurt = crate::api::call(rt, key(LIVING, "hurt", "(Lnet/minecraft/world/damagesource/DamageSource;F)Z"), &[cow, fire, V::F(4.0)]);
+            assert_eq!(hurt, V::I(1));
+        });
+        assert_eq!(game.heard_by, [Some(false)], "run in the waiting runtime, not canceled");
+        assert_eq!(heard(&mut rt), ["incoming 4 inFire on 7 by player through player"]);
+        let cow = game.world.entities.iter().find(|e| e.id == 7).and_then(|e| e.health);
+        assert_eq!(cow, Some((8.0, 10.0)), "the halved blow");
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

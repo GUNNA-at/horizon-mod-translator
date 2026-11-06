@@ -360,9 +360,7 @@ fn drop(rt: &mut Rt, stack: V) {
     let Some(whole) = crate::hand::hand_stack_of(rt, stack) else { return };
     let Some((feet, yaw, pitch)) = rt.host().and_then(|h| h.player_place()) else { return };
     let (at, motion) = throw(rt, feet, eye_height(rt), Some((yaw, pitch)), false);
-    if let Some(h) = rt.host_mut() {
-        h.spawn_stack_entity(&whole, at, motion, 40);
-    }
+    rt.host_call(|h| h.spawn_stack_entity(&whole, at, motion, 40));
     set_count(rt, stack, 0);
 }
 

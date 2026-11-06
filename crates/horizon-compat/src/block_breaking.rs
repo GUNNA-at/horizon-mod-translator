@@ -257,9 +257,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     if block_override(rt, &text, AFTER_BREAK_KEY, AFTER_BREAK, &[st, a(1), a(2), a(3), a(4)]).is_none() && mod_block_object(rt, &text).is_none() {
                         let p = api::pos_of(rt, a(2));
                         let tool = held(rt, a(3));
-                        if let Some(h) = rt.host_mut() {
-                            h.spawn_after_break(p, &text, tool.as_ref());
-                        }
+                        rt.host_call(|h| h.spawn_after_break(p, &text, tool.as_ref()));
                     }
                     V::Void
                 }
@@ -372,9 +370,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "popExperience" => {
                 if api::call(rt, IS_CLIENT, &[a(1)]).i() == 0 && crate::gamerules::blocks_drop(rt) {
                     let p = api::pos_of(rt, a(2));
-                    if let Some(h) = rt.host_mut() {
-                        h.pop_experience(p, a(3).i());
-                    }
+                    rt.host_call(|h| h.pop_experience(p, a(3).i()));
                 }
                 V::Void
             }
@@ -484,7 +480,7 @@ pub(crate) fn destroy_block(rt: &mut Rt, level: V, pos: V, drop: bool, entity: V
         drop_resources(rt, st, level, pos, be, entity, V::NULL);
     }
     let left = fluid_block(rt, &here);
-    let set = rt.host_mut().is_some_and(|h| h.set_block_state(p, &left));
+    let set = rt.host_call(|h| h.set_block_state(p, &left)).unwrap_or(false);
     crate::glue::drain_replaced(rt);
     set
 }
