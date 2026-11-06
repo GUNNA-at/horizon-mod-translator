@@ -7018,6 +7018,27 @@ impl Game<'_> {
         done
     }
 
+    /// `ServerboundUseItemOnPacket` for `hand`'s use on the block `hit`, with
+    /// the next prediction sequence (`startPrediction`), which it returns.
+    fn send_use_item_on(&mut self, hand: Hand, hit: &super::Hit) -> i32 {
+        let seq = self.next_sequence();
+        let cursor = [
+            (hit.point[0] - f64::from(hit.pos[0])) as f32,
+            (hit.point[1] - f64::from(hit.pos[1])) as f32,
+            (hit.point[2] - f64::from(hit.pos[2])) as f32,
+        ];
+        self.send(S::UseItemOn(play::UseItemOn {
+            hand: hand_id(hand),
+            pos: hit.pos,
+            face: i32::from(face_direction(hit.face)),
+            cursor,
+            inside: hit.face == [0; 3],
+            world_border: false,
+            sequence: seq,
+        }));
+        seq
+    }
+
     /// MultiPlayerGameMode.useItemOn for `hand`: whether the click ends there
     /// (the block reacts, or a block item is placed).
     fn remote_use_item_on(&mut self, hand: Hand) -> bool {
@@ -7030,6 +7051,23 @@ impl Game<'_> {
             .as_ref()
             .is_some_and(|stack| &*stack.item == "minecraft:debug_stick");
         if let Some(hit) = self.pick() {
+            // NeoForge's RightClickBlock on this client (performUseItemOn): a mod
+            // that cancels it answers for the block and the item, and the use
+            // still goes to the server, which posts its own.
+            use super::native_hooks::NativeClientUse;
+            let mut answer = NativeClientUse::Goes;
+            self.native_client_use_item_on(hit.pos, hit.face, hit.point, hand, &mut answer);
+            if answer != NativeClientUse::Goes {
+                self.send_use_item_on(hand, &hit);
+                return match answer {
+                    NativeClientUse::Success => {
+                        self.with_hand(hand, Game::swing_arm);
+                        true
+                    }
+                    NativeClientUse::Consume | NativeClientUse::Fail => true,
+                    NativeClientUse::Pass | NativeClientUse::Goes => false,
+                };
+            }
             // ShelfBlock.useItemOn consumes a nonempty main-hand click client-side
             // without predicting the inventory swap or swinging.
             let shelf_reacts = hand == Hand::Main
@@ -7107,21 +7145,7 @@ impl Game<'_> {
                 && held
                     .as_ref()
                     .is_some_and(|s| self.armor_stand_spawn(&hit, s).is_some());
-            let seq = self.next_sequence();
-            let cursor = [
-                (hit.point[0] - f64::from(hit.pos[0])) as f32,
-                (hit.point[1] - f64::from(hit.pos[1])) as f32,
-                (hit.point[2] - f64::from(hit.pos[2])) as f32,
-            ];
-            self.send(S::UseItemOn(play::UseItemOn {
-                hand: hand_id(hand),
-                pos: hit.pos,
-                face: i32::from(face_direction(hit.face)),
-                cursor,
-                inside: hit.face == [0; 3],
-                world_border: false,
-                sequence: seq,
-            }));
+            let seq = self.send_use_item_on(hand, &hit);
             // MultiPlayerGameMode.performUseItemOn: a spectator's use predicts
             // nothing and ends the click (CONSUME, no swing); the server opens
             // the block's menu.

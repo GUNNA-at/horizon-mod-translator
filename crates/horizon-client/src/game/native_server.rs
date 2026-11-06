@@ -1128,6 +1128,19 @@ impl Game<'_> {
         }?;
         Some((hit.pos, hit.face, hit.point))
     }
+    /// The click on a block that `native_right_click_block` or
+    /// `native_use_item_on` is hearing, where its player aimed it: for a
+    /// player of a server, the `BlockHitResult` their client sent
+    /// (`ServerboundUseItemOnPacket`), which the server takes as it came once
+    /// its point is within a block of the block's centre, as Java's does for
+    /// `PlayerInteractEvent.RightClickBlock` and `useItemOn`; it may differ
+    /// from a look traced on the server (`native_player_pov_hit`), which only
+    /// has the player's last rotation. The block, the face clicked (a unit
+    /// step: up is `[0, 1, 0]`) and the point clicked; None outside those
+    /// hooks. API @API:click_hit@.
+    pub(super) fn native_click_hit(&self) -> Option<([i32; 3], [i32; 3], [f64; 3])> {
+        self.click_hit.map(|hit| (hit.pos, hit.face, hit.point))
+    }
     /// Adds `levels` to the player `uuid`'s level, or takes them off when
     /// negative (`Player.giveExperienceLevels`): what the anvil and the
     /// enchanting table charge with, and a mod can charge or reward with.

@@ -1599,15 +1599,25 @@ pub fn item_property(
     })
 }
 
-/// The client's use key acting with `hand` (`InputEvent.InteractionKeyMappingTriggered`): on the
-/// block under the crosshair, `RightClickBlock` is posted on the client as
-/// `MultiPlayerGameMode.performUseItemOn` does before the use goes to the server. The use itself
-/// goes on either way: the server's own event decides it there.
-pub fn client_use(rt: &mut Rt, host: &mut dyn Host, hand: u8) {
+/// The client's interaction key `key_mapping` about to act with `hand` (0 main, 1 off): `button` 0
+/// attacks, 1 uses, 2 picks a block (`InputEvent.InteractionKeyMappingTriggered`, as
+/// [`crate::input::interaction_key`] posts it). Some(whether the hand swings) when a mod cancelled
+/// it: the game skips the action, and a cancelled use the rest of the click.
+pub fn interaction_key(rt: &mut Rt, host: &mut dyn Host, button: i32, key_mapping: &str, hand: u8) -> Option<bool> {
     rt.safe_point();
     client_setup(rt, host);
-    let Some((pos, face, hit)) = host.player_pov_hit(0) else { return };
-    let _ = crate::events::client_right_click_block(rt, host, pos, i64::from(face), hit, hand);
+    rt.with_host(host, |rt| crate::input::interaction_key(rt, button, key_mapping, hand))
+}
+
+/// The client's player using `hand` on the block at `pos`, `face` the face clicked (a direction's
+/// data value), the cursor meeting it at `hit`: `RightClickBlock` on the client, as
+/// `MultiPlayerGameMode.performUseItemOn` posts it before the use goes to the server, which posts
+/// its own. Some(the result a listener cancelled it with), which the client answers in the block's
+/// and the item's place ([`crate::events::client_right_click_block`]).
+pub fn client_use_item_on(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: i64, hit: [f64; 3], hand: u8) -> Option<crate::events::Answer> {
+    rt.safe_point();
+    client_setup(rt, host);
+    crate::events::client_right_click_block(rt, host, pos, face, hit, hand)
 }
 
 /// The client's tick, in `Minecraft.tick`'s order: `ClientTickEvent.Pre` (animation clocks advance

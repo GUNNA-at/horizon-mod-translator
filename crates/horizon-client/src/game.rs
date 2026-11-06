@@ -2815,6 +2815,9 @@ struct Game<'a> {
     world_icon: Option<WorldIcon>,
     /// The block a guest is acting on (game/lan_actions.rs).
     forced_hit: Option<Hit>,
+    /// The click on a block native mods' click hooks hear, as its player
+    /// aimed it (`native_click_hit`).
+    click_hit: Option<Hit>,
     /// `Minecraft.hitResult` while the clicks of a tick act (game/remote.rs
     /// `remote_handle_input`): picked once, so a creative break does not
     /// move the use that follows it past the broken block.
@@ -5819,7 +5822,9 @@ impl Game<'_> {
         // canceled click does nothing (a guest's block is sent back).
         if let Some(hit) = block_hit {
             let mut canceled = false;
+            let outer = self.click_hit.replace(*hit);
             self.native_right_click_block(hit.pos, hit.face, &mut canceled);
+            self.click_hit = outer;
             if canceled {
                 // Nothing was used, so nothing consumed the action.
                 self.use_failed = true;
@@ -6026,7 +6031,9 @@ impl Game<'_> {
         let on_block = matches!(self.guest_use, Some(GuestUse::OnBlock(_)));
         let mut claimed = false;
         if let Some(hit) = block_hit {
+            let outer = self.click_hit.replace(*hit);
             self.native_use_item_on(&stack, hit.pos, hit.face, &mut claimed);
+            self.click_hit = outer;
         }
         if !claimed && !on_block {
             self.native_use_item(&stack, &mut claimed);
@@ -18281,6 +18288,7 @@ impl<'a> Game<'a> {
             pending_save: None,
             world_icon: None,
             forced_hit: None,
+            click_hit: None,
             tick_hit: None,
             entity_reach: 3.0,
             block_reach: 4.5,

@@ -1,0 +1,13 @@
+{
+  "hooks": [
+    {
+      "name": "client_use_item_on",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_use_item_on",
+      "neoforge": "PlayerInteractEvent.RightClickBlock",
+      "side": "client",
+      "cancellable": true
+    }
+  ],
+  "rust_summary": "the client's use of a hand on a block, before its prediction (`native_client_use_item_on`).",
+  "doc_summary": "`native_client_use_item_on(pos, face, point, hand, result)` fires on the client when its own player uses a hand on the block under the crosshair, where `MultiPlayerGameMode.performUseItemOn` posts NeoForge's `PlayerInteractEvent.RightClickBlock` on the client: once for each hand tried (main first, after `native_interaction_key`), never with an entity aimed at, with the face clicked and the exact point the cursor met. The use still goes to the server, which posts its own (`native_right_click_block`). Set `result` (`NativeClientUse`) to the result the mod's cancel answered: the client then predicts neither the block's use nor the item's; `Success` ends the click with a swing (the other hand gets no turn), `Consume` and `Fail` end it unswung, `Pass` lets the hand's own item use and the other hand go on. A server's player and a single player's window; the deprecated in-frame path is not covered. Bundles need \"hooks\": @API:client_use_item_on@."
+}

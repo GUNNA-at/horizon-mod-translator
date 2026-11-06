@@ -199,17 +199,47 @@ fn hook(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     Some(if rt.get_field(ev, "$canceled").i() != 0 { rt.get_field(ev, "$result") } else { V::NULL })
 }
 
-/// Posts `ev` to the listeners: Some(the click was used) when one canceled it, None when the
+/// The result a listener canceled a click with (`setCancellationResult`; `PASS` unless set), as
+/// the game acts on `InteractionResult`: whether the click was used and ends, and with a swing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// `PASS`: nothing used; the hand's item use and the other hand go on.
+    Pass,
+    /// `FAIL`: nothing used, and the click ends.
+    Fail,
+    /// `CONSUME`, `CONSUME_PARTIAL`: used, unswung.
+    Consume,
+    /// `SUCCESS`, `SUCCESS_NO_ITEM_USED`: used, and the hand swings.
+    Success,
+}
+
+impl Answer {
+    /// Whether the click was used (`InteractionResult.consumesAction`).
+    pub fn used(self) -> bool {
+        matches!(self, Answer::Consume | Answer::Success)
+    }
+}
+
+/// Posts `ev` to the listeners: Some(what the click came to) when one canceled it, None when the
 /// game's own handling goes on.
-fn post(rt: &mut Rt, class: &str, ev: V) -> Option<bool> {
+fn post_answer(rt: &mut Rt, class: &str, ev: V) -> Option<Answer> {
     crate::neo::post(rt, class, ev);
     let both_off = tri_state_name(rt, rt.get_field(ev, "$useBlock")) == "FALSE" && tri_state_name(rt, rt.get_field(ev, "$useItem")) == "FALSE";
     if rt.get_field(ev, "$canceled").i() == 0 && !both_off {
         return None;
     }
     let result = rt.get_field(ev, "$result");
-    let name = rt.str_of(result).unwrap_or("PASS").to_owned();
-    Some(matches!(name.as_str(), "SUCCESS" | "CONSUME" | "SUCCESS_NO_ITEM_USED" | "CONSUME_PARTIAL"))
+    Some(match rt.str_of(result).unwrap_or("PASS") {
+        "SUCCESS" | "SUCCESS_NO_ITEM_USED" => Answer::Success,
+        "CONSUME" | "CONSUME_PARTIAL" => Answer::Consume,
+        "FAIL" => Answer::Fail,
+        _ => Answer::Pass,
+    })
+}
+
+/// [`post_answer`]: Some(the click was used) when a listener canceled it.
+fn post(rt: &mut Rt, class: &str, ev: V) -> Option<bool> {
+    post_answer(rt, class, ev).map(Answer::used)
 }
 
 /// `PlayerInteractEvent.RightClickBlock`: the acting player right-clicks the block at `pos` on
@@ -242,9 +272,9 @@ pub fn right_click_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: 
 
 /// `PlayerInteractEvent.RightClickBlock` on a client (`MultiPlayerGameMode.performUseItemOn`):
 /// the client's own player uses `hand` on the block at `pos` its crosshair is on, before the use
-/// goes to the server, which posts its own. Create starts holding a value setting here. Some(used)
-/// when a listener canceled it.
-pub fn client_right_click_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: i64, hit: [f64; 3], hand: u8) -> Option<bool> {
+/// goes to the server, which posts its own. Create starts holding a value setting here. Some(the
+/// result) when a listener canceled it.
+pub fn client_right_click_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: i64, hit: [f64; 3], hand: u8) -> Option<Answer> {
     rt.safe_point();
     if !listened(rt, RIGHT_CLICK_BLOCK) {
         return None;
@@ -263,7 +293,7 @@ pub fn client_right_click_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3],
             rt.put_field(ev, "$pos", p);
             rt.put_field(ev, "$face", direction);
             rt.put_field(ev, "$hit", hit_result);
-            post(rt, RIGHT_CLICK_BLOCK, ev)
+            post_answer(rt, RIGHT_CLICK_BLOCK, ev)
         })
     })
 }
@@ -659,6 +689,27 @@ mod tests {
         host.place = Some(([-3.5, 70.0, 2.5], 0.0, 0.0));
         assert_eq!(right_click_item(&mut rt, &mut host, hand::MAIN), None);
         assert_eq!(heard(), ["1:RightClickItem:-4"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// On a client the click answers with the result its listener canceled it with, which the
+    /// client acts on in the block's and the item's place: SUCCESS ends the click with a swing (so
+    /// the other hand never clears what the main hand set, as Create's filters would), PASS for a
+    /// click denied both uses, nothing for one that goes on.
+    #[test]
+    fn a_clients_click_answers_with_the_result_it_was_canceled_with() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.lambda_call = Some(listener);
+        let l = rt.lambda_id("java/util/function/Consumer", 2, Vec::new());
+        rt.listeners.push((RIGHT_CLICK_BLOCK.to_owned(), l));
+        let mut host = MemoryHost { client: true, ..Default::default() };
+        host.blocks.insert([7, 64, 0], "minecraft:stone".into());
+        for (held, answer) in [("minecraft:stick", Some(Answer::Success)), ("minecraft:barrier", Some(Answer::Pass)), ("minecraft:dirt", None)] {
+            host.held = Some((held.to_owned(), 3));
+            assert_eq!(client_right_click_block(&mut rt, &mut host, [7, 64, 0], 1, [7.5, 65.0, 0.5], hand::MAIN), answer, "{held}");
+        }
+        assert_eq!(heard().len(), 3);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

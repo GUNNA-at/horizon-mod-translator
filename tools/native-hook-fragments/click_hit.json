@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "where the player aimed the click a block-click hook hears (`native_click_hit`).",
+  "doc_summary": "`native_click_hit()` answers, inside `native_right_click_block` and `native_use_item_on`, the click as its player aimed it: for a player of a server the hit their client sent (the block, the face and the exact point), as NeoForge's `PlayerInteractEvent.RightClickBlock` and `useItemOn` get it. A look traced on the server (`native_player_pov_hit`) only has the player's last rotation, so a click on a small part of a block (a value slot, a filter) can miss it there. None outside those hooks. Bundles need \"hooks\": @API:click_hit@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_server.rs"
+  ]
+}

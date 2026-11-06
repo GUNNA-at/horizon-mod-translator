@@ -4683,6 +4683,10 @@ mod tests {
         assert_eq!(rt.str_of(short), Some("1, 64, -3"));
         let text = rt.concat("at \u{1}", "L", &[pos], &[]);
         assert_eq!(rt.str_of(text), Some("at BlockPos{x=1, y=64, z=-3}"));
+        // A direction and an axis concatenate as their own `toString` writes them.
+        let (up, x) = (direction(&mut rt, 1), axis(&mut rt, 0));
+        let text = rt.concat("\u{1} along \u{1}", "LL", &[up, x], &[]);
+        assert_eq!(rt.str_of(text), Some("up along x"));
         let moving = c(&mut rt, &format!("{POS}.mutable.()L{POS}$MutableBlockPos;"), &[pos]);
         let text = c(&mut rt, &format!("{VEC3I}.toString.()Ljava/lang/String;"), &[moving]);
         assert_eq!(rt.str_of(text), Some("MutableBlockPos{x=1, y=64, z=-3}"));

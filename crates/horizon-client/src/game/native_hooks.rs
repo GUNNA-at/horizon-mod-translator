@@ -941,6 +941,28 @@ pub(crate) struct NativeClock {
     pub(crate) day_time: i64,
 }
 
+/// What a mod made of the client's use of a hand on a block
+/// (`native_client_use_item_on`): the result its `RightClickBlock` on the
+/// client was cancelled with, which `MultiPlayerGameMode.performUseItemOn`
+/// answers in the block's and the item's place. Only native mods answer
+/// anything but `Goes`.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum NativeClientUse {
+    /// Not cancelled: the client predicts the block's and the item's use.
+    #[default]
+    Goes,
+    /// `PASS`: neither the block nor the item acts on it here; the hand's
+    /// own item use and the other hand still get their turn.
+    Pass,
+    /// `FAIL`: the click ends here, unswung.
+    Fail,
+    /// `CONSUME`: the click is used and ends here, unswung.
+    Consume,
+    /// `SUCCESS`: the click is used and ends here, and the hand swings.
+    Success,
+}
+
 /// A native mod as Options > Mods lists it (`native_mods`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct NativeMod {
@@ -1500,6 +1522,28 @@ impl Game<'_> {
         canceled: &mut bool,
     ) {
         let _ = (button, key_mapping, hand, swing_hand, canceled);
+    }
+    /// The client's own player uses `hand` on the block under the crosshair
+    /// (`pos`, `face` the face clicked, `point` where the cursor met it):
+    /// where `MultiPlayerGameMode.performUseItemOn` posts NeoForge's
+    /// `PlayerInteractEvent.RightClickBlock` on the client. Once for each hand
+    /// tried, the main hand first, after `native_interaction_key`; never with an
+    /// entity aimed at. The use still goes to the server, whose own event is
+    /// `native_right_click_block`. Set `result` to the result the mod's cancel
+    /// answered: the client then predicts neither the block's use nor the
+    /// item's, and the click ends or goes on as [`NativeClientUse`] says (a
+    /// cancel that answers `SUCCESS` keeps the other hand from acting). A
+    /// server's player and a single player's window; the deprecated in-frame
+    /// path is not covered. API @API:client_use_item_on@.
+    pub(super) fn native_client_use_item_on(
+        &mut self,
+        pos: [i32; 3],
+        face: [i32; 3],
+        point: [f64; 3],
+        hand: horizon_client::first_person::Hand,
+        result: &mut NativeClientUse,
+    ) {
+        let _ = (pos, face, point, hand, result);
     }
     /// A command typed or clicked in chat, without its slash, before the
     /// server and Horizon's commands see it: set `ran` when the mod ran it.

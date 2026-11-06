@@ -4270,6 +4270,44 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Test: `neo::tests::listeners_hear_by_priority_and_a_canceled_event_only_where_asked` (a `HIGHEST` method
     first, the `NORMAL` one that cancels, a `NORMAL` and a `LOW` listener after it don't hear it, a `LOWEST` one
     receiving canceled events does). 399 compat and 18 translator tests pass.
+- [x] 2026-11-06 Part 30: a client's click as NeoForge's client takes it: `RightClickBlock` answers for the
+  block and the item, the other hand waits; `InputEvent.InteractionKeyMappingTriggered`; `Direction` by name.
+  - Rounds 18 to 23 left a deployer's filter empty after the player clicked its filter slot with three iron
+    ingots. The server heard two clicks: the main hand's, which Create's `ValueSettingsInputHandler` cancels with
+    `SUCCESS` and hands to `FilteringBehaviour.onShortInteract` (`setFilter(side, itemInHand.copy())`: the ingots),
+    then the off hand's, whose empty hand cleared the filter again. On NeoForge's client
+    `MultiPlayerGameMode.performUseItemOn` posts `RightClickBlock` before the block and the item act; a canceled
+    event answers with its `getCancellationResult()`, the packet goes to the server either way, and
+    `Minecraft.startUseItem` ends the click on a result that consumes the action (swinging on `SUCCESS`) or
+    `FAIL`: the off hand is never tried. Horizon's client posted the event from the use key for both hands and
+    did not act on the answer.
+  - Game: a new hook `native_client_use_item_on(pos, face, point, hand, &mut NativeClientUse)` (fragment
+    `client_use_item_on.json`), called in `remote_use_item_on` once the client has picked a block, for each hand it
+    tries. An answer other than `Goes` sends `ServerboundUseItemOnPacket` (`send_use_item_on`, shared with the
+    game's own path) and stands for the block and the item: `Success` swings and ends the click, `Consume` and
+    `Fail` end it, `Pass` goes on to the item's use and the next hand. The server's click hooks now read where the
+    client aimed (`native_click_hit`, fragment `click_hit.json`: the `BlockHitResult` the packet carried, kept
+    while `native_right_click_block` and `native_use_item_on` run) before the look traced on the server: a value
+    slot or a filter is a small part of a face, and Create tests the point.
+  - Compat: `events::Answer` (`Pass`, `Fail`, `Consume`, `Success`, from the result a listener canceled with);
+    `client_right_click_block` answers with it, through `glue::client_use_item_on`. The `interaction_key` hook
+    now posts `InputEvent.InteractionKeyMappingTriggered` for attack, use (per hand) and pick block
+    (`input::interaction_key`: `getButton`, `getKeyMapping`, `getHand`, `isAttack`, `isUseItem`, `isPickBlock`,
+    `shouldSwingHand`/`setSwingHand`, cancelling): a cancel takes the action from the game and says whether
+    the hand swings. 17 jars of the CurseForge pack listen to it.
+  - Compat core: a `Direction`, `Direction.Axis`, `AxisDirection` or `Direction.Plane` in a string concatenation
+    prints as Java's `toString` does (`up`, `x`, `Towards positive`, `HORIZONTAL`), where it printed an object
+    hash (`net.minecraft.core.Direction@417f`).
+  - Tests: `events::tests::a_clients_click_answers_with_the_result_it_was_canceled_with` (a listener cancelling
+    with `SUCCESS` for a stick: Success; one denying both uses for a barrier: Pass; dirt: nothing),
+    `input::tests` (a listener cancelling the off hand's use without a swing: Some(false); attack and the main
+    hand go on, each with its key mapping and hand), the position test's `up along x`. 400 compat, 18 translator
+    and 69 game tests pass.
+  - Round 24 in game: the filter slot click is heard once on the client (`MAIN_HAND client, taken`) and once on
+    the server (`MAIN_HAND server, taken`), no off-hand click; the deployer's filter holds the three iron ingots
+    (`{count: 3, id: "minecraft:iron_ingot"}`, as Create keeps the stack's copy) and the player keeps them. A
+    right click on a cow no longer posts `RightClickBlock` for the dirt behind it (round 23 did, for both hands).
+    No other change from round 23 but the world's (spawn, nearby blocks).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

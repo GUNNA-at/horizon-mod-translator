@@ -892,6 +892,12 @@ impl Rt {
                         let c = |k: &str| java_double(f.get(k).copied().unwrap_or_default().d(), false);
                         format!("({}, {}, {})", c("x"), c("y"), c("z"))
                     }
+                    // Vanilla's directions and axes, kept as natives: their `toString` is the
+                    // name each was built with (`north`, `x`), an axis direction's description.
+                    Some(Data::Native("Direction", h)) => ["down", "up", "north", "south", "west", "east"][h[0].clamp(0, 5) as usize].into(),
+                    Some(Data::Native("Axis", h)) => ["x", "y", "z"][h[0].clamp(0, 2) as usize].into(),
+                    Some(Data::Native("AxisDirection", h)) => if h[0] != 0 { "Towards positive" } else { "Towards negative" }.into(),
+                    Some(Data::Native("Plane", h)) => if h[0] != 0 { "VERTICAL" } else { "HORIZONTAL" }.into(),
                     _ => format!("{}@{:x}", self.class_of(v).replace('/', "."), v.r()),
                 },
             },

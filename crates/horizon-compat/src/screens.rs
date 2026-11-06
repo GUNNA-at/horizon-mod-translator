@@ -1272,6 +1272,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | crate::input::BUTTON_PRE
             | crate::input::BUTTON_POST
             | crate::input::SCROLLING
+            | crate::input::INTERACTION
             | INPUT
             | INPUT_KEY
             | INPUT_TYPE
@@ -1303,9 +1304,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         KEY_MAPPING | crate::keys::REGISTER_EVENT | crate::keys::MODIFIER | crate::keys::CONTEXT | crate::keys::ICONTEXT => {
             crate::keys::call(rt, owner, name, desc, args)
         }
-        crate::input::KEY | crate::input::BUTTON | crate::input::BUTTON_PRE | crate::input::BUTTON_POST | crate::input::SCROLLING => {
-            crate::input::call(rt, owner, name, args)
-        }
+        crate::input::KEY
+        | crate::input::BUTTON
+        | crate::input::BUTTON_PRE
+        | crate::input::BUTTON_POST
+        | crate::input::SCROLLING
+        | crate::input::INTERACTION => crate::input::call(rt, owner, name, args),
         INPUT | INPUT_KEY | INPUT_TYPE | GLFW => key_calls(rt, owner, name, desc, args),
         _ => geometry_calls(rt, owner, name, desc, args),
     }

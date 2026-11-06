@@ -4,6 +4,9 @@
 //! mod cancels to keep the press from the game) and after (`.Post`), and the wheel while playing once
 //! whole steps have built up (`InputEvent.MouseScrollingEvent`, cancelled to keep the scroll from the
 //! hotbar). Create opens its toolbox and schematic tools on keys and scrolls its tools with them.
+//! And an interaction key about to act while playing (`InputEvent.InteractionKeyMappingTriggered`,
+//! `ClientHooks.onClickInput`: attack, use once for each hand tried, pick block), which a mod
+//! cancels to take the action from the game.
 //!
 //! Mods hear none of them before the client's setup (the first tick in a world): their handlers
 //! reach for the player and the level.
@@ -15,6 +18,7 @@ pub(crate) const BUTTON: &str = "net/neoforged/neoforge/client/event/InputEvent$
 pub(crate) const BUTTON_PRE: &str = "net/neoforged/neoforge/client/event/InputEvent$MouseButton$Pre";
 pub(crate) const BUTTON_POST: &str = "net/neoforged/neoforge/client/event/InputEvent$MouseButton$Post";
 pub(crate) const SCROLLING: &str = "net/neoforged/neoforge/client/event/InputEvent$MouseScrollingEvent";
+pub(crate) const INTERACTION: &str = "net/neoforged/neoforge/client/event/InputEvent$InteractionKeyMappingTriggered";
 
 /// GLFW's actions: `GLFW_RELEASE`, `GLFW_PRESS`, `GLFW_REPEAT`.
 pub const RELEASE: i32 = 0;
@@ -81,6 +85,24 @@ pub fn scrolling(rt: &mut Rt, delta: [f64; 2], buttons: [bool; 3], at: [f64; 2])
     rt.get_field(ev, "$canceled").i() != 0
 }
 
+/// `InputEvent.InteractionKeyMappingTriggered`: interaction key `key_mapping` (`key.attack`,
+/// `key.use`, `key.pickItem`) is about to act with `hand` (0 main, 1 off): `button` 0 attacks, 1
+/// uses, 2 picks a block. Some(whether the hand swings) when a mod cancelled it: the game skips the
+/// action then, and a cancelled use the rest of the click.
+pub fn interaction_key(rt: &mut Rt, button: i32, key_mapping: &str, hand: u8) -> Option<bool> {
+    if !heard(rt) || crate::neo::hearing(rt, INTERACTION).is_empty() {
+        return None;
+    }
+    let ev = rt.new_object(INTERACTION);
+    let mapping = crate::screens::key_mapping(rt, key_mapping);
+    let hand = crate::hand::constant(rt, hand);
+    for (field, v) in [("$button", V::I(button)), ("$keyMapping", mapping), ("$hand", hand), ("$swingHand", V::I(1)), ("$canceled", V::I(0))] {
+        rt.put_field(ev, field, v);
+    }
+    crate::neo::post(rt, INTERACTION, ev);
+    (rt.get_field(ev, "$canceled").i() != 0).then(|| rt.get_field(ev, "$swingHand").i() != 0)
+}
+
 /// The events' getters and their cancelling (`ICancellableEvent`).
 pub(crate) fn call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
     let ev = arg(args, 0);
@@ -97,8 +119,24 @@ pub(crate) fn call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V
         (SCROLLING, "isRightDown") => "$rightDown",
         (SCROLLING, "getMouseX") => "$mouseX",
         (SCROLLING, "getMouseY") => "$mouseY",
-        (BUTTON_PRE | SCROLLING, "isCanceled") => "$canceled",
-        (BUTTON_PRE | SCROLLING, "setCanceled") => {
+        (INTERACTION, "getButton") => "$button",
+        (INTERACTION, "getKeyMapping") => "$keyMapping",
+        (INTERACTION, "getHand") => "$hand",
+        (INTERACTION, "shouldSwingHand") => "$swingHand",
+        (INTERACTION, "isAttack" | "isUseItem" | "isPickBlock") => {
+            let button = match name {
+                "isAttack" => 0,
+                "isUseItem" => 1,
+                _ => 2,
+            };
+            return Some(V::I((rt.get_field(ev, "$button").i() == button) as i32));
+        }
+        (INTERACTION, "setSwingHand") => {
+            rt.put_field(ev, "$swingHand", V::I(arg(args, 1).i()));
+            return Some(V::Void);
+        }
+        (BUTTON_PRE | SCROLLING | INTERACTION, "isCanceled") => "$canceled",
+        (BUTTON_PRE | SCROLLING | INTERACTION, "setCanceled") => {
             rt.put_field(ev, "$canceled", V::I(arg(args, 1).i()));
             return Some(V::Void);
         }
@@ -145,6 +183,23 @@ mod tests {
                     crate::api::call(rt, "net/neoforged/neoforge/client/event/InputEvent$MouseScrollingEvent.setCanceled.(Z)V", &[ev, V::I(1)]);
                 }
             }
+            // As a mod that takes the off hand's use and its swing: the key and the hand it heard.
+            4 => {
+                let mapping = get(rt, INTERACTION, "getKeyMapping", "()Lnet/minecraft/client/KeyMapping;");
+                let hand = get(rt, INTERACTION, "getHand", "()Lnet/minecraft/world/InteractionHand;");
+                let (uses, attacks) = (get(rt, INTERACTION, "isUseItem", "()Z").i(), get(rt, INTERACTION, "isAttack", "()Z").i());
+                let heard = format!(
+                    "{} {} use {uses} attack {attacks}",
+                    rt.str_of(rt.get_field(mapping, "$name")).unwrap_or("?"),
+                    rt.str_of(rt.get_field(hand, "$name")).unwrap_or("?"),
+                );
+                let heard = rt.string(&heard);
+                rt.interned.insert("test:interaction".into(), heard);
+                if get(rt, INTERACTION, "isUseItem", "()Z").i() != 0 && rt.str_of(rt.get_field(hand, "$name")) == Some("OFF_HAND") {
+                    crate::api::call(rt, "net/neoforged/neoforge/client/event/InputEvent$InteractionKeyMappingTriggered.setSwingHand.(Z)V", &[ev, V::I(0)]);
+                    crate::api::call(rt, "net/neoforged/neoforge/client/event/InputEvent$InteractionKeyMappingTriggered.setCanceled.(Z)V", &[ev, V::I(1)]);
+                }
+            }
             _ => return None,
         }
         Some(V::Void)
@@ -158,7 +213,7 @@ mod tests {
         let mut rt = Rt::new();
         crate::install();
         rt.lambda_call = Some(lambdas);
-        for (class, id) in [(KEY, 1), (BUTTON_PRE, 2), (SCROLLING, 3)] {
+        for (class, id) in [(KEY, 1), (BUTTON_PRE, 2), (SCROLLING, 3), (INTERACTION, 4)] {
             let l = rt.lambda_id("java/util/function/Consumer", id, vec![]);
             rt.listeners.push((class.to_owned(), l));
         }
@@ -182,6 +237,13 @@ mod tests {
             assert!(!scrolling(rt, [0.0, -2.5], [false; 3], [10.0, 20.0]));
             assert_eq!(rt.interned["test:scroll"], V::D(-2.5));
             assert!(scrolling(rt, [0.0, 1.0], [false, true, false], [10.0, 20.0]), "cancelled with the middle button held");
+            assert_eq!(interaction_key(rt, 0, "key.attack", crate::hand::MAIN), None, "an attack goes on");
+            let heard = rt.interned["test:interaction"];
+            assert_eq!(rt.str_of(heard), Some("key.attack MAIN_HAND use 0 attack 1"));
+            assert_eq!(interaction_key(rt, 1, "key.use", crate::hand::MAIN), None, "the main hand's use goes on");
+            assert_eq!(interaction_key(rt, 1, "key.use", crate::hand::OFF), Some(false), "the off hand's is taken, unswung");
+            let heard = rt.interned["test:interaction"];
+            assert_eq!(rt.str_of(heard), Some("key.use OFF_HAND use 1 attack 0"));
         });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
