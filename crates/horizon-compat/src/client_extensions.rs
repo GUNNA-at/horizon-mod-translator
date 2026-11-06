@@ -525,8 +525,12 @@ mod tests {
         rt.vcall = Some(goo_code);
         let goo = rt.new_object(GOO_TYPE);
         let plain = rt.new_object("net/neoforged/neoforge/fluids/FluidType");
-        rt.registered.insert(("fluid_type".into(), "goo:goo".into()), goo);
-        rt.registered.insert(("fluid_type".into(), "goo:plain".into()), plain);
+        // Registered in NeoForge's registry of fluid types, as Registrate does on its event.
+        let types = api::get_static(&mut rt, "net/neoforged/neoforge/registries/NeoForgeRegistries.FLUID_TYPES");
+        for (name, ty) in [("goo:goo", goo), ("goo:plain", plain)] {
+            let id = rt.string(name);
+            c(&mut rt, "net/minecraft/core/Registry.register.(Lnet/minecraft/core/Registry;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Object;)Ljava/lang/Object;", &[types, id, ty]);
+        }
         init(&mut rt);
         let ext = c(&mut rt, OF_TYPE, &[goo]);
         assert_eq!(rt.class_of(ext), GOO_EXT);

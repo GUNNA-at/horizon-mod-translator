@@ -5477,6 +5477,9 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a tank of healing fills with healing only and drains it; saved and parsed NBT; the network codec
     round trip). Compat tests 485, translator 19.
   - Left: `FluidStack.hashFluidAndComponents` still hashes the fluid only.
+  - In game (Part 68's round): a healing potion right-clicked on Create's item drain in survival
+    leaves 250 mB of `create:potion` in its tank with `minecraft:potion_contents` (`healing`) and
+    `create:potion_fluid_bottle_type` (`regular`). The fluid was drawn white until Part 69.
 - [x] 2026-11-06 Part 68: hoppers, droppers and crafters reach mods' machines (NeoForge's `VanillaInventoryCodeHooks`).
   A vanilla hopper on a Create depot did nothing: NeoForge patches `HopperBlockEntity`,
   `DropperBlock` and `CrafterBlock` so each asks the block it pushes into or pulls from for its
@@ -5509,6 +5512,46 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Left: hopper minecarts (`MinecartHopper.suckInItems` runs `extractHook` too), entities'
     `ItemHandler.ENTITY_AUTOMATION` in `getItemHandlerAt`, and `insertStack`'s cooldown for a
     destination that is a `HopperBlockEntity` (a mod's subclass).
+  - In game (`hoppergame.sh`, survival, blocks set by command): the chain's 5 iron ingots went
+    hopper, depot, hopper, chest (the chest holds 5; the depot and both hoppers are empty); a pulsed
+    dropper put one cobblestone onto its depot and kept 2; a pulsed crafter put its 4 oak planks
+    onto its depot; no item entity was left lying.
+- [x] 2026-11-06 Part 69: `RegisterEvent` for NeoForge's own registries: Create's fluid types, and their tints.
+  Create's item drain drew a healing potion white and untextured. Catnip's fluid renderer asks
+  `IClientFluidTypeExtensions.of(fluid)` for the still texture and the tint, and Create's fluid types
+  hand theirs from `initializeClient`, which the client asks of each fluid type in NeoForge's
+  registry (`ClientExtensionsManager.earlyInit`). Registrate registers a mod's fluid types on
+  `RegisterEvent` for `neoforge:fluid_type` (`FluidBuilder.register`: `simple(this, sourceName,
+  Keys.FLUID_TYPES, fluidType)`), and the runtime fired the event for the game's registries only. So
+  none of Create's fluid types was registered, each got the default extension (no texture, white),
+  and catnip fell back to the missing sprite. Measured over the pack, jars naming NeoForge's
+  registries: `ATTACHMENT_TYPES` 17, `CONDITION_CODECS` 14, `ENTITY_DATA_SERIALIZERS` 12,
+  `BIOME_MODIFIER_SERIALIZERS` 11, `FLUID_TYPES` 10, `INGREDIENT_TYPES` 9,
+  `GLOBAL_LOOT_MODIFIER_SERIALIZERS` 9, `STRUCTURE_MODIFIER_SERIALIZERS` 2, `HOLDER_SET_TYPES` 1.
+  - compat `neo`: `RegisterEvent` fires for NeoForge's registries after the game's, by name, as
+    `GameData.getRegistrationOrder` does: attachment types, biome and structure modifier
+    serializers, condition codecs, entity data serializers, fluid ingredient types, fluid types,
+    global loot modifier serializers, holder set types, ingredient serializers. `attachment_types`
+    was listed before, but the key named the registry `attachment_type`, so no mod's registration
+    matched. The fluid type registry also finds NeoForge's types of vanilla's water, lava and empty.
+  - compat `codecs`: `NeoForgeRegistries`' fields and its `Keys` name their registries as NeoForge
+    does, from a table: `CONDITION_SERIALIZERS` and `Keys.CONDITION_CODECS` are both
+    `condition_codecs`, `INGREDIENT_TYPES` is `ingredient_serializer`, `ATTACHMENT_TYPES` is
+    `attachment_types`, `BIOME_MODIFIERS` is `biome_modifier`. Before, each name came from the field's
+    own, and a registry's field and its key's could disagree.
+  - compat `api_common`: `MissingTextureAtlasSprite.getLocation` (`minecraft:missingno`; 26 jars, 41
+    calls), and `LocalPlayer.clientLevel` read by a mod (8 jars, 19 classes: Create's client packets,
+    `BlockEntityDataPacket` among them, find their block entity in it).
+  - Tests: `neo::tests::register_event_fires_for_neoforges_own_registries` (a fluid type, an
+    attachment type, a condition codec, an ingredient type and a data serializer registered on the
+    event, found through the registry's field; water's type found by name);
+    `client_extensions::tests::initialize_client_overrides_hand_their_extensions_at_setup` registers
+    its types through `NeoForgeRegistries.FLUID_TYPES`. Compat tests 490, translator 19.
+  - In game (`draingame.sh`, survival): a healing potion and a honey bottle right-clicked on two
+    item drains leave 250 mB of `create:potion` (with its potion) and of `create:honey`; the potion
+    is drawn in healing's red, white before. Both fluids are drawn without their textures: Create
+    adds its fluid sprites to the block atlas in `assets/minecraft/atlases/blocks.json`, which the
+    content mod doesn't carry (Part 70).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

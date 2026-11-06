@@ -9,8 +9,10 @@
 use crate::{Data, Rt, V};
 
 /// The registries `RegisterEvent` fires for, in NeoForge's order (blocks before items, items
-/// before what refers to them).
-pub const REGISTRIES: [&str; 22] = [
+/// before what refers to them), then NeoForge's own (`GameData.getRegistrationOrder`: by name
+/// after the game's). Registrate registers a mod's fluid types in `fluid_type` so (Create's potion,
+/// tea, honey and chocolate), the client's extensions for them coming from there.
+pub const REGISTRIES: [&str; 31] = [
     "attribute",
     "sound_event",
     "fluid",
@@ -33,7 +35,41 @@ pub const REGISTRIES: [&str; 22] = [
     "loot_condition_type",
     "loot_function_type",
     "attachment_types",
+    "biome_modifier_serializers",
+    "condition_codecs",
+    "entity_data_serializers",
+    "fluid_ingredient_type",
+    "fluid_type",
+    "global_loot_modifier_serializers",
+    "holder_set_type",
+    "ingredient_serializer",
+    "structure_modifier_serializers",
 ];
+
+/// NeoForge's registries by their fields in `NeoForgeRegistries` and its `Keys`: their names
+/// (`NeoForgeRegistries.Keys`' `key(name)`), as registries are their names here. A registry's
+/// field and its key's may differ (`CONDITION_SERIALIZERS`, `Keys.CONDITION_CODECS`), and the
+/// name may differ from both (`INGREDIENT_TYPES` is `ingredient_serializer`).
+const NEOFORGE_REGISTRIES: [(&str, &str); 13] = [
+    ("ATTACHMENT_TYPES", "attachment_types"),
+    ("BIOME_MODIFIERS", "biome_modifier"),
+    ("BIOME_MODIFIER_SERIALIZERS", "biome_modifier_serializers"),
+    ("CONDITION_CODECS", "condition_codecs"),
+    ("CONDITION_SERIALIZERS", "condition_codecs"),
+    ("ENTITY_DATA_SERIALIZERS", "entity_data_serializers"),
+    ("FLUID_INGREDIENT_TYPES", "fluid_ingredient_type"),
+    ("FLUID_TYPES", "fluid_type"),
+    ("GLOBAL_LOOT_MODIFIER_SERIALIZERS", "global_loot_modifier_serializers"),
+    ("HOLDER_SET_TYPES", "holder_set_type"),
+    ("INGREDIENT_TYPES", "ingredient_serializer"),
+    ("STRUCTURE_MODIFIERS", "structure_modifier"),
+    ("STRUCTURE_MODIFIER_SERIALIZERS", "structure_modifier_serializers"),
+];
+
+/// The registry `NeoForgeRegistries.<field>` (or `.Keys.<field>`) names.
+pub(crate) fn neoforge_registry(field: &str) -> Option<&'static str> {
+    NEOFORGE_REGISTRIES.iter().find(|(f, _)| *f == field).map(|(_, n)| *n)
+}
 
 const REGISTER_EVENT: &str = "net/neoforged/neoforge/registries/RegisterEvent";
 const ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
@@ -316,6 +352,8 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         "block" if id.starts_with("minecraft:") => crate::api::block(rt, id),
         "item" if id.starts_with("minecraft:") => crate::api_common::item(rt, id),
         "fluid" if id.starts_with("minecraft:") => crate::fluids::fluid(rt, id),
+        // NeoForge's own types of vanilla's fluids (`NeoForgeMod.WATER_TYPE`...).
+        "fluid_type" if matches!(id, "minecraft:empty" | "minecraft:water" | "minecraft:lava") => crate::fluids::fluid_type(rt, id),
         "entity_type" if id.starts_with("minecraft:") => crate::mod_entities::vanilla_type(rt, id),
         "potion" if id.starts_with("minecraft:") => {
             let h = crate::food::potion_holder(rt, id);
@@ -2746,6 +2784,62 @@ mod tests {
         let k = call(&mut rt, "net/minecraft/resources/ResourceKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[block, id]).unwrap();
         let loc = call(&mut rt, "net/minecraft/resources/ResourceKey.location.()Lnet/minecraft/resources/ResourceLocation;", &[k]).unwrap();
         assert_eq!(rt.str_of(loc), Some("t:thing"));
+    }
+
+    /// Registrate's listener (`AbstractRegistrate.onRegister`): lambda 1 registers its one entry,
+    /// `event.register(key, id, supplier)`, which an event for another registry ignores; lambda 2 is
+    /// the supplier of its value.
+    fn register_on_event(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+        let captured = rt.captured(args[0]);
+        Some(match id {
+            1 => {
+                let register = "net/neoforged/neoforge/registries/RegisterEvent.register.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;Ljava/util/function/Supplier;)V";
+                call(rt, register, &[args[1], captured[0], captured[1], captured[2]]);
+                V::Void
+            }
+            _ => captured[0],
+        })
+    }
+
+    /// `RegisterEvent` fires for NeoForge's own registries too, as each is named: Registrate
+    /// registers a mod's fluid types there (Create's potion fluid), and the registry's field finds
+    /// them, though it is named apart from its key (`CONDITION_SERIALIZERS` is
+    /// `Keys.CONDITION_CODECS`, `condition_codecs`) or from the registry (`INGREDIENT_TYPES` is
+    /// `ingredient_serializer`).
+    #[test]
+    fn register_event_fires_for_neoforges_own_registries() {
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(register_on_event);
+        let mut made = Vec::new();
+        for (key, registry, name) in [
+            ("FLUID_TYPES", "FLUID_TYPES", "t:goo"),
+            ("ATTACHMENT_TYPES", "ATTACHMENT_TYPES", "t:charge"),
+            ("CONDITION_CODECS", "CONDITION_SERIALIZERS", "t:mod_loaded"),
+            ("INGREDIENT_TYPES", "INGREDIENT_TYPES", "t:any_damage"),
+            ("ENTITY_DATA_SERIALIZERS", "ENTITY_DATA_SERIALIZERS", "t:wheel_angle"),
+        ] {
+            let key = crate::api::get_static(&mut rt, Box::leak(format!("net/neoforged/neoforge/registries/NeoForgeRegistries$Keys.{key}").into_boxed_str()));
+            let id = rt.string(name);
+            let value = rt.new_object("t/Thing");
+            let supplier = rt.lambda_id("java/util/function/Supplier", 2, vec![value]);
+            let listener = rt.lambda_id("java/util/function/Consumer", 1, vec![key, id, supplier]);
+            rt.listeners.push((REGISTER_EVENT.to_owned(), listener));
+            made.push((registry, name, value));
+        }
+        fire_registrations(&mut rt);
+        let get = "net/minecraft/core/Registry.get.(Lnet/minecraft/resources/ResourceLocation;)Ljava/lang/Object;";
+        let fluid_types = crate::api::get_static(&mut rt, "net/neoforged/neoforge/registries/NeoForgeRegistries.FLUID_TYPES");
+        for (registry, name, value) in made {
+            let registry = crate::api::get_static(&mut rt, Box::leak(format!("net/neoforged/neoforge/registries/NeoForgeRegistries.{registry}").into_boxed_str()));
+            let id = rt.string(name);
+            assert_eq!(call(&mut rt, get, &[registry, id]), Some(value), "{name}");
+        }
+        // NeoForge's own types of vanilla's fluids are in it too.
+        let water = rt.string("minecraft:water");
+        let holder = crate::api::get_static(&mut rt, "net/neoforged/neoforge/common/NeoForgeMod.WATER_TYPE");
+        let water_type = crate::api::call(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]);
+        assert_ne!(water_type.r(), 0);
+        assert_eq!(call(&mut rt, get, &[fluid_types, water]), Some(water_type));
     }
 
     #[test]

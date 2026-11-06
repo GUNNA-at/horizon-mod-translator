@@ -506,7 +506,7 @@ pub(crate) fn sound_action(rt: &mut Rt, name: String) -> V {
 }
 
 /// NeoForge's `FluidType` of a vanilla fluid: one per name.
-fn fluid_type(rt: &mut Rt, name: &str) -> V {
+pub(crate) fn fluid_type(rt: &mut Rt, name: &str) -> V {
     rt.intern(format!("fluid-type/{name}"), |rt| {
         let t = rt.new_object(FLUID_TYPE);
         let n = rt.string(name);

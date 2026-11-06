@@ -224,11 +224,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         // `GenerationStep.Decoration.CODEC`): `StringRepresentable.fromEnum` by the serialized
         // name, which for these is the constant's name in lower case.
         (o, "CODEC") if crate::api_common::enum_names(o).is_some() => native(rt, &format!("lower_enum/{o}")),
-        // `NeoForgeRegistries.FLUID_INGREDIENT_TYPES` is registry `fluid_ingredient_type`, and so is
-        // its key (`NeoForgeRegistries.Keys`): registries are their names here.
+        // `NeoForgeRegistries.FLUID_TYPES` is registry `fluid_type`, and so is its key
+        // (`NeoForgeRegistries.Keys`): registries are their names here.
         ("net/neoforged/neoforge/registries/NeoForgeRegistries" | "net/neoforged/neoforge/registries/NeoForgeRegistries$Keys", f) => {
-            let n = f.to_ascii_lowercase();
-            let n = n.strip_suffix("_types").map_or(n.clone(), |t| format!("{t}_type"));
+            let n = crate::neo::neoforge_registry(f).map_or_else(|| f.to_ascii_lowercase(), str::to_owned);
             rt.string(&n)
         }
         _ => return None,

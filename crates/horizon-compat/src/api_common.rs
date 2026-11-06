@@ -1786,6 +1786,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::I(stack_hash(rt, a(0), false))
         }
         ("net/neoforged/neoforge/fluids/FluidStack", "hashFluidAndComponents") => V::I(stack_hash(rt, a(0), true)),
+        // The missing texture's sprite name (`minecraft:missingno`), which a mod compares a sprite with.
+        ("net/minecraft/client/renderer/texture/MissingTextureAtlasSprite", "getLocation") => rt.string("minecraft:missingno"),
         // NeoForge's `ModelResourceLocation.standalone(id)`: the model at `id` itself.
         ("net/minecraft/client/resources/model/ModelResourceLocation", "standalone") => {
             let variant = rt.string("standalone");
@@ -2339,7 +2341,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 crate::hand::worn(rt, i)
             }
         },
-        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "getWeaponItem" | "level" | "getCommandSenderWorld" | "serverLevel" | "isLocalPlayer" | "mayBuild") => {
+        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "getWeaponItem" | "level" | "getCommandSenderWorld" | "serverLevel" | "isLocalPlayer" | "mayBuild" | "$clientLevel") => {
             match n {
                 // Survival and creative players build; the hooks act for one of them.
                 "mayBuild" => V::I(1),
@@ -2348,6 +2350,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "isSpectator" => V::I(0),
                 // The client's own player (`Minecraft.player`) is in the client's level.
                 "isLocalPlayer" => V::I(i32::from(rt.class_of(a(0)) == LOCAL_PLAYER)),
+                // `LocalPlayer.clientLevel`, through a mixin accessor: the client's level.
+                "$clientLevel" => crate::glue::level(rt),
                 // A server player's level is the hooks' one level (what mods compare and key their
                 // data by), but on a client's runtime, where that one is the client's.
                 "level" | "getCommandSenderWorld" | "serverLevel" if rt.class_of(a(0)) == LOCAL_PLAYER || !crate::neo::is_client(rt) => crate::glue::level(rt),
