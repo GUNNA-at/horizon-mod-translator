@@ -545,4 +545,29 @@ mod tests {
         assert_eq!(drawn[1].0.positions[..3], [[1.0, 0.5, 0.0], [0.0, 1.5, 0.0], [1.0, 1.5, 0.0]]);
         assert_eq!(drawn[0].0.facing, drawn[1].0.facing);
     }
+
+    /// A mod's own buffer source (`MultiBufferSource.immediate(new ByteBufferBuilder(256))`, as
+    /// catnip's outline buffers make theirs) hands out consumers that draw what is written into them
+    /// when its batch ends.
+    #[test]
+    fn a_mods_own_buffer_source_draws_when_its_batch_ends() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let memory = rt.new_object("com/mojang/blaze3d/vertex/ByteBufferBuilder");
+            crate::api::call(rt, "com/mojang/blaze3d/vertex/ByteBufferBuilder.<init>.(I)V", &[memory, V::I(256)]);
+            let immediate = "net/minecraft/client/renderer/MultiBufferSource.immediate.(Lcom/mojang/blaze3d/vertex/ByteBufferBuilder;)Lnet/minecraft/client/renderer/MultiBufferSource$BufferSource;";
+            let source = crate::api::call(rt, immediate, &[memory]);
+            let ty = crate::render::render_type(rt, "lightning");
+            let get_buffer = "net/minecraft/client/renderer/MultiBufferSource$BufferSource.getBuffer.(Lnet/minecraft/client/renderer/RenderType;)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+            let c = crate::api::call(rt, get_buffer, &[source, ty]);
+            let pose = lifted_pose(rt);
+            write_square(rt, c, pose, |_, _| [0.0, 0.0]);
+            crate::api::call(rt, "net/minecraft/client/renderer/MultiBufferSource$BufferSource.endBatch.()V", &[source]);
+        });
+        let drawn = quads(&host);
+        assert_eq!(drawn.len(), 1, "{drawn:?}");
+        assert_eq!(drawn[0].0.sprite, WHITE_SPRITE);
+    }
 }

@@ -4478,6 +4478,28 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the next one begins; an untextured type's face white; a line type's vertices drawing nothing; an unfinished
     face dropped; a mod's own `TRIANGLE_STRIP` type on the block sheet drawing a triangle a vertex, both facing
     the same way.
+- [x] 2026-11-06 Part 36: the level's render stages (`RenderLevelStageEvent`), passed each frame.
+  - 43 of the pack's jars listen (Create among them: its outliner, value boxes and schematic previews draw at
+    `AFTER_PARTICLES`). Once the game has drawn the level's mod geometry (the `level_submit` hook, after the
+    mods' entities), the mods hear every stage in vanilla's order, `AFTER_SKY` to `AFTER_LEVEL`, each event with
+    a pose stack of its own at the camera (a mod moves it by minus the camera's place to draw at a place in the
+    world, as on vanilla), `getModelViewMatrix` the view's rotation (the camera's rotation turned back, as
+    `LevelRenderer`'s frustum matrix), the projection, the main camera, the frustum (everything in view: the game
+    culls), the level renderer and the render tick (the game time). Nothing is made when no mod listens.
+  - The stages are one object each (`RenderLevelStageEvent.Stage.AFTER_PARTICLES`...), named as NeoForge
+    registers them (`toString`: `minecraft:after_particles`); `Stage.fromRenderType` gives the stage after a
+    block layer (`translucent()` → `AFTER_TRANSLUCENT_BLOCKS`), null for any other type. The class left the
+    data-class table (645 entries): it is modelled here.
+  - What a listener writes into the client's buffers (`Minecraft.renderBuffers().bufferSource()`) or its own
+    (`MultiBufferSource.immediate`, `immediateWithBuffers`, `new ByteBufferBuilder(size)`) is drawn when it ends
+    the batch, else after its stage (`vertices.rs`, Part 35).
+  - Not yet: a face whose texture isn't on the game's atlas is left out by the game (Create's outlines draw with
+    `create:textures/special/blank.png` and the other special textures, which the atlas doesn't pack).
+  - Tests (`camera::tests`, `vertices::tests`): a listener hears the eleven stages in order and compares them
+    (`fromRenderType(translucent())`, the static `AFTER_TRANSLUCENT_BLOCKS`: one object); the white square it
+    draws on top of a block, its pose stack moved by minus the camera's place, is drawn there relative to the
+    camera, facing up; the view matrix turns the camera's forward (west) to -z; a mod's own buffer source draws
+    what was written when its batch ends.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

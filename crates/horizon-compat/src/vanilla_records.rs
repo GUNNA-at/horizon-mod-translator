@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 646] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 645] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1615,7 +1615,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 646] = [
     ("net/neoforged/neoforge/capabilities/BaseCapability", "i(Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Class;Ljava/lang/Class;)V=name,typeClass,contextClass|gname()Lnet/minecraft/resources/ResourceLocation;=name|gtypeClass()Ljava/lang/Class;=typeClass|gcontextClass()Ljava/lang/Class;=contextClass|o"),
     ("net/neoforged/neoforge/client/entity/animation/json/AnimationHolder", "i(Lnet/minecraft/resources/ResourceLocation;)V=key|sbind(Lnet/minecraft/client/animation/AnimationDefinition;)V=value|gkey()Lnet/minecraft/resources/ResourceLocation;=key|ggetOrNull()Lnet/minecraft/client/animation/AnimationDefinition;=value|o"),
     ("net/neoforged/neoforge/client/event/AddSectionGeometryEvent$SectionRenderingContext", "i(Ljava/util/function/Function;Lnet/minecraft/world/level/BlockAndTintGetter;Lcom/mojang/blaze3d/vertex/PoseStack;)V=getOrCreateLayer,region,poseStack|ggetPoseStack()Lcom/mojang/blaze3d/vertex/PoseStack;=poseStack|ggetRegion()Lnet/minecraft/world/level/BlockAndTintGetter;=region|o"),
-    ("net/neoforged/neoforge/client/event/RenderLevelStageEvent$Stage", "i(Ljava/lang/String;)V=name|gtoString()Ljava/lang/String;=name|o"),
     ("net/neoforged/neoforge/client/model/CompositeModel", "i(Lcom/google/common/collect/ImmutableMap;Lcom/google/common/collect/ImmutableList;)V=children,itemPasses|o"),
     ("net/neoforged/neoforge/client/model/CompositeModel$Baked", "i(ZZZLnet/minecraft/client/renderer/texture/TextureAtlasSprite;Lnet/minecraft/client/renderer/block/model/ItemTransforms;Lnet/minecraft/client/renderer/block/model/ItemOverrides;Lcom/google/common/collect/ImmutableMap;Lcom/google/common/collect/ImmutableList;)V=isGui3d,isSideLit,isAmbientOcclusion,particle,transforms,overrides,children,itemPasses|guseAmbientOcclusion()Z=isAmbientOcclusion|gisGui3d()Z=isGui3d|gusesBlockLight()Z=isSideLit|ggetParticleIcon()Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;=particle|ggetOverrides()Lnet/minecraft/client/renderer/block/model/ItemOverrides;=overrides|ggetTransforms()Lnet/minecraft/client/renderer/block/model/ItemTransforms;=transforms|o"),
     ("net/neoforged/neoforge/client/model/CompositeModel$Data", "i(Ljava/util/Map;)V=partData|o"),

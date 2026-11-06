@@ -3,7 +3,8 @@
 //! billboard to face it or measure a distance from it (`GameRenderer.getMainCamera`,
 //! `EntityRenderDispatcher.camera` and `cameraOrientation`, `BlockEntityRenderDispatcher.camera`,
 //! `Minecraft.getCameraEntity`); the getters of the events that hand a camera over (NeoForge's
-//! viewport events, `RenderLevelStageEvent`, `RenderHighlightEvent`).
+//! viewport events, `RenderLevelStageEvent`, `RenderHighlightEvent`), and the level's render stages
+//! the game passes each frame ([`render_stages`]).
 //!
 //! The main camera follows the game: set up on the client's player while the client is in a world,
 //! at the place the game drew its last frame from ([`prepare`]; the player's eyes until it has
@@ -39,6 +40,37 @@ const FOG_COLOR: &str = "net/neoforged/neoforge/client/event/ViewportEvent$Compu
 const RENDER_FOG: &str = "net/neoforged/neoforge/client/event/ViewportEvent$RenderFog";
 const VIEWPORT_EVENTS: [&str; 5] = [VIEWPORT, COMPUTE_ANGLES, COMPUTE_FOV, FOG_COLOR, RENDER_FOG];
 const LEVEL_STAGE: &str = "net/neoforged/neoforge/client/event/RenderLevelStageEvent";
+const STAGE: &str = "net/neoforged/neoforge/client/event/RenderLevelStageEvent$Stage";
+/// `RenderLevelStageEvent.Stage`'s stages, in the order a frame passes them.
+const STAGES: [&str; 11] = [
+    "AFTER_SKY",
+    "AFTER_SOLID_BLOCKS",
+    "AFTER_CUTOUT_MIPPED_BLOCKS_BLOCKS",
+    "AFTER_CUTOUT_BLOCKS",
+    "AFTER_ENTITIES",
+    "AFTER_BLOCK_ENTITIES",
+    "AFTER_TRANSLUCENT_BLOCKS",
+    "AFTER_TRIPWIRE_BLOCKS",
+    "AFTER_PARTICLES",
+    "AFTER_WEATHER",
+    "AFTER_LEVEL",
+];
+/// Their names (`toString`): the vanilla location each was registered by.
+const STAGE_NAMES: [&str; 11] = [
+    "after_sky",
+    "after_solid_blocks",
+    "after_cutout_mipped_blocks",
+    "after_cutout_blocks",
+    "after_entities",
+    "after_block_entities",
+    "after_translucent_blocks",
+    "after_tripwire_blocks",
+    "after_particles",
+    "after_weather",
+    "after_level",
+];
+/// The block layers a stage follows (`Stage.fromRenderType`), by layer and stage.
+const LAYER_STAGES: [(&str, usize); 5] = [("solid", 1), ("cutout_mipped", 2), ("cutout", 3), ("translucent", 6), ("tripwire", 7)];
 const HIGHLIGHT: &str = "net/neoforged/neoforge/client/event/RenderHighlightEvent";
 const HIGHLIGHT_BLOCK: &str = "net/neoforged/neoforge/client/event/RenderHighlightEvent$Block";
 const HIGHLIGHT_ENTITY: &str = "net/neoforged/neoforge/client/event/RenderHighlightEvent$Entity";
@@ -85,6 +117,7 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     match owner {
         CAMERA | NEAR_PLANE | GAME_RENDERER | SHADER | UNIFORM | ABSTRACT_UNIFORM | REGISTER_SHADERS | LEVEL_STAGE => true,
+        STAGE => matches!(name, "toString" | "fromRenderType"),
         _ if VIEWPORT_EVENTS.contains(&owner) || HIGHLIGHT_EVENTS.contains(&owner) => true,
         MINECRAFT => matches!(name, "getCameraEntity" | "setCameraEntity"),
         ENTITY_DISPATCHER => matches!(name, "cameraOrientation" | "overrideCameraOrientation" | "prepare" | "distanceToSqr"),
@@ -675,12 +708,90 @@ fn event_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+// ---- the level's render stages ----
+
+/// Stage `i` of [`STAGES`]: one object each, as NeoForge registers them.
+fn stage(rt: &mut Rt, i: usize) -> V {
+    rt.intern(format!("compat:stage/{}", STAGES[i]), |rt| {
+        let s = rt.new_object(STAGE);
+        let name = rt.string(&format!("minecraft:{}", STAGE_NAMES[i]));
+        rt.put_field(s, "name", name);
+        s
+    })
+}
+
+/// `RenderLevelStageEvent.Stage.AFTER_PARTICLES`...
+pub(crate) fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    if owner != STAGE {
+        return None;
+    }
+    let i = STAGES.iter().position(|s| *s == field)?;
+    Some(stage(rt, i))
+}
+
+fn stage_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = arg(args, 0);
+    Some(match name {
+        "toString" => rt.get_field(a, "name"),
+        // The stage after a block layer: none for any other type.
+        "fromRenderType" => {
+            let ty = rt.str_of(rt.get_field(a, "$name")).unwrap_or("").to_owned();
+            match LAYER_STAGES.iter().find(|(layer, _)| *layer == ty) {
+                Some(&(_, i)) => stage(rt, i),
+                None => V::NULL,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The level's render stages, as vanilla's `LevelRenderer.renderLevel` passes them each frame
+/// (NeoForge's `RenderLevelStageEvent`), once the game has drawn the level: each stage in its order,
+/// with a pose stack of its own at the camera (a mod moves it by minus the camera's place to draw at
+/// a place in the world), the view's rotation (`getModelViewMatrix`: the camera's turned back), the
+/// projection, the main camera. What a listener draws into the client's buffers (`renderBuffers()
+/// .bufferSource()`) is drawn after it ([`crate::vertices`]). Nothing is made when no mod listens.
+pub(crate) fn render_stages(rt: &mut Rt) {
+    if crate::neo::hearing(rt, LEVEL_STAGE).is_empty() {
+        return;
+    }
+    let cam = main(rt);
+    let rotation = rt.get_field(cam, "$rotation");
+    let [x, y, z, w] = ["x", "y", "z", "w"].map(|f| rt.get_field(rotation, f).f());
+    let view = crate::render::new_mat4(rt, crate::render::quat_m4([-x, -y, -z, w]));
+    let projection = projection(rt, FOV);
+    let ticks = rt.host().map_or(0, |h| h.game_time()) as i32;
+    let frustum = rt.intern("compat:frustum".into(), |rt| rt.new_object("net/minecraft/client/renderer/culling/Frustum"));
+    let renderer = single(rt, "net/minecraft/client/renderer/LevelRenderer");
+    for i in 0..STAGES.len() {
+        let ev = rt.new_object(LEVEL_STAGE);
+        let stage = stage(rt, i);
+        let stack = crate::render::new_pose_stack(rt, crate::render::IDENTITY);
+        let fields = [
+            ("$stage", stage),
+            ("$poseStack", stack),
+            ("$modelViewMatrix", view),
+            ("$projectionMatrix", projection),
+            ("$renderTick", V::I(ticks)),
+            ("$frustum", frustum),
+            ("$levelRenderer", renderer),
+            ("$camera", cam),
+        ];
+        for (f, v) in fields {
+            rt.put_field(ev, f, v);
+        }
+        crate::neo::post(rt, LEVEL_STAGE, ev);
+        crate::vertices::flush(rt, None);
+    }
+}
+
 /// The calls this module models (`owner.name.desc`), or None.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let a = |i| arg(args, i);
     match owner {
         CAMERA => camera_call(rt, name, desc, args),
+        STAGE => stage_call(rt, name, args),
         NEAR_PLANE => near_plane_call(rt, name, args),
         GAME_RENDERER => game_renderer_call(rt, name, desc, args),
         SHADER | UNIFORM | ABSTRACT_UNIFORM | REGISTER_SHADERS | RENDER_SYSTEM => shader_call(rt, owner, name, args),
@@ -915,5 +1026,81 @@ mod tests {
         assert_eq!(crate::api::call(&mut rt, get, &[]), a);
         let name = crate::api::call(&mut rt, key(SHADER, "getName.()Ljava/lang/String;"), &[a]);
         assert_eq!(rt.str_of(name), Some("position_tex"));
+    }
+
+    /// A mod drawing in the level's stages (an outline's renderer, a ghost block's): it hears every
+    /// stage in a frame's order, each one it can compare (`fromRenderType(translucent())` is
+    /// `AFTER_TRANSLUCENT_BLOCKS`). What it draws into the client's buffers at a place in the world,
+    /// its pose stack moved by minus the camera's place, is drawn there relative to the camera; the
+    /// view matrix turns the camera's forward (west) to -z.
+    #[test]
+    fn the_level_stages_pass_in_order_and_what_they_draw_is_drawn() {
+        const GET_STAGE: &str = "getStage.()Lnet/neoforged/neoforge/client/event/RenderLevelStageEvent$Stage;";
+        const FROM_TYPE: &str = "fromRenderType.(Lnet/minecraft/client/renderer/RenderType;)Lnet/neoforged/neoforge/client/event/RenderLevelStageEvent$Stage;";
+        fn listener(rt: &mut Rt, _: u32, args: &[V]) -> Option<V> {
+            let ev = args[1];
+            let stage = crate::api::call(rt, key(LEVEL_STAGE, GET_STAGE), &[ev]);
+            let name = crate::api::call(rt, key(STAGE, "toString.()Ljava/lang/String;"), &[stage]);
+            let heard = rt.intern("test:stages".into(), |rt| rt.alloc("java/util/ArrayList", Data::List(Vec::new())));
+            if let Some(Data::List(l)) = rt.heap.get_mut(heard.r() as usize).map(|o| &mut o.data) {
+                l.push(name);
+            }
+            let translucent = crate::api::call(rt, "net/minecraft/client/renderer/RenderType.translucent.()Lnet/minecraft/client/renderer/RenderType;", &[]);
+            if stage != crate::api::call(rt, key(STAGE, FROM_TYPE), &[translucent]) {
+                return Some(V::Void);
+            }
+            let view = crate::api::call(rt, key(LEVEL_STAGE, "getModelViewMatrix.()Lorg/joml/Matrix4f;"), &[ev]);
+            rt.interned.insert("test:view".into(), view);
+            // A white square on top of the block at (2, 64, 3).
+            let camera = crate::api::call(rt, key(LEVEL_STAGE, "getCamera.()Lnet/minecraft/client/Camera;"), &[ev]);
+            let at = crate::api::call(rt, key(CAMERA, "getPosition.()Lnet/minecraft/world/phys/Vec3;"), &[camera]);
+            let [x, y, z] = doubles3(rt, at);
+            let stack = crate::api::call(rt, key(LEVEL_STAGE, "getPoseStack.()Lcom/mojang/blaze3d/vertex/PoseStack;"), &[ev]);
+            crate::api::call(rt, "com/mojang/blaze3d/vertex/PoseStack.translate.(DDD)V", &[stack, V::D(-x), V::D(-y), V::D(-z)]);
+            let pose = crate::api::call(rt, "com/mojang/blaze3d/vertex/PoseStack.last.()Lcom/mojang/blaze3d/vertex/PoseStack$Pose;", &[stack]);
+            let mc = crate::api::call(rt, "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;", &[]);
+            let buffers = crate::api::call(rt, "net/minecraft/client/Minecraft.renderBuffers.()Lnet/minecraft/client/renderer/RenderBuffers;", &[mc]);
+            let source = crate::api::call(rt, "net/minecraft/client/renderer/RenderBuffers.bufferSource.()Lnet/minecraft/client/renderer/MultiBufferSource$BufferSource;", &[buffers]);
+            let lightning = crate::api::call(rt, "net/minecraft/client/renderer/RenderType.lightning.()Lnet/minecraft/client/renderer/RenderType;", &[]);
+            let get_buffer = "net/minecraft/client/renderer/MultiBufferSource$BufferSource.getBuffer.(Lnet/minecraft/client/renderer/RenderType;)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+            let c = crate::api::call(rt, get_buffer, &[source, lightning]);
+            for [px, pz] in [[2.0, 3.0], [2.0, 4.0], [3.0, 4.0], [3.0, 3.0]] {
+                let add = "com/mojang/blaze3d/vertex/VertexConsumer.addVertex.(Lcom/mojang/blaze3d/vertex/PoseStack$Pose;FFF)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+                let v = crate::api::call(rt, add, &[c, pose, V::F(px), V::F(65.0), V::F(pz)]);
+                crate::api::call(rt, "com/mojang/blaze3d/vertex/VertexConsumer.setColor.(I)Lcom/mojang/blaze3d/vertex/VertexConsumer;", &[v, V::I(-1)]);
+            }
+            crate::api::call(rt, "net/minecraft/client/renderer/MultiBufferSource$BufferSource.endBatch.(Lnet/minecraft/client/renderer/RenderType;)V", &[source, lightning]);
+            Some(V::Void)
+        }
+        let (mut rt, mut host) = client([0.0, 64.0, 0.0], 90.0, 0.0);
+        rt.lambda_call = Some(listener);
+        let l = rt.lambda_id("java/util/function/Consumer", 1, Vec::new());
+        rt.listeners.push((LEVEL_STAGE.to_owned(), l));
+        rt.with_host(&mut host, |rt| {
+            prepare(rt, Some([0.5, 65.5, 0.5]));
+            render_stages(rt);
+        });
+        let heard = rt.interned["test:stages"];
+        let names: Vec<String> = match &rt.heap[heard.r() as usize].data {
+            Data::List(l) => l.iter().map(|n| rt.str_of(*n).unwrap_or("").to_owned()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(names, STAGE_NAMES.map(|n| format!("minecraft:{n}")));
+        let after = crate::api::get_static(&mut rt, "net/neoforged/neoforge/client/event/RenderLevelStageEvent$Stage.AFTER_TRANSLUCENT_BLOCKS");
+        assert_eq!(after, stage(&mut rt, 6));
+        let quads: Vec<_> = host
+            .drawn
+            .iter()
+            .flat_map(|(m, _, _, _)| match m {
+                crate::host::Model::Quads(q) => q.to_vec(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(quads.len(), 1, "{quads:?}");
+        assert_eq!(quads[0].positions, [[1.5, -0.5, 2.5], [1.5, -0.5, 3.5], [2.5, -0.5, 3.5], [2.5, -0.5, 2.5]]);
+        assert_eq!(quads[0].sprite, "horizon/white");
+        assert_eq!(quads[0].facing, 1);
+        let m = crate::render::mat4(&rt, rt.interned["test:view"]);
+        assert!(close([-m[0], -m[1], -m[2]], [0.0, 0.0, -1.0]), "{m:?}");
     }
 }

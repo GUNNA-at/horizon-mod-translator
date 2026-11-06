@@ -151,7 +151,8 @@ fn m4_to_m3(m: &M4) -> M3 {
     [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]]
 }
 
-fn quat_m4(q: [f32; 4]) -> M4 {
+/// `new Matrix4f().rotation(q)`.
+pub(crate) fn quat_m4(q: [f32; 4]) -> M4 {
     m3_to_m4(&quat_m3(q))
 }
 
@@ -1730,6 +1731,14 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             render_type(rt, &n)
         }
         ("net/minecraft/client/renderer/RenderType", "toString" | "name") => rt.get_field(a(0), "$name"),
+        // A mod's own buffer source (catnip's `SuperRenderTypeBuffer`, an outline's): one more source
+        // of the same consumers, which draw what is written into them ([`crate::vertices`]).
+        ("net/minecraft/client/renderer/MultiBufferSource", "immediate" | "immediateWithBuffers") => {
+            rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource")
+        }
+        ("net/minecraft/client/renderer/MultiBufferSource$BufferSource", "<init>") => V::Void,
+        // The memory a buffer is built in: the host's own.
+        ("com/mojang/blaze3d/vertex/ByteBufferBuilder", "<init>" | "close" | "clear" | "discard") => V::Void,
         ("net/minecraft/client/renderer/MultiBufferSource" | "net/minecraft/client/renderer/MultiBufferSource$BufferSource", "getBuffer") => {
             let ty = a(1);
             rt.intern(format!("consumer/{}", ty.r()), |rt| {

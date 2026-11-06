@@ -1250,7 +1250,8 @@ pub(crate) fn entity_renderer(rt: &mut Rt, e: V) -> Option<V> {
 /// registered for its type (`EntityRenderersEvent.RegisterRenderers`), as vanilla's
 /// `EntityRenderDispatcher.render` draws one: when the renderer's `shouldRender` agrees, under a
 /// pose stack at its place this frame (between its last two ticks') relative to `camera`, with its
-/// turn this frame. The number drawn.
+/// turn this frame; then the level's render stages (`RenderLevelStageEvent`, see
+/// [`crate::camera::render_stages`]). The number of entities drawn.
 pub fn render_mod_entities(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3]) -> usize {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
@@ -1294,6 +1295,8 @@ pub fn render_mod_entities(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3]) -
             crate::vertices::flush(rt, None);
             drawn += 1;
         }
+        // The level's render stages, which mods draw their outlines and effects in.
+        crate::camera::render_stages(rt);
         drawn
     })
 }

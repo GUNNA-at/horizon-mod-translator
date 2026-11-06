@@ -2096,6 +2096,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::render::get_static(rt, o, f))
             .or_else(|| crate::models::get_static(rt, o, f))
             .or_else(|| crate::entity_render::get_static(rt, o, f))
+            .or_else(|| crate::camera::get_static(rt, o, f))
             .or_else(|| crate::quads::get_static(rt, o, f))
             .or_else(|| crate::blocks::get_static(rt, o, f))
             .or_else(|| crate::shapes::get_static(rt, o, f))
