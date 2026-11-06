@@ -12,6 +12,7 @@ pub mod attachments;
 pub mod attributes;
 pub mod blocks;
 pub mod block_breaking;
+pub mod loot_params;
 pub mod breaks;
 pub mod brigadier;
 pub mod codecs;

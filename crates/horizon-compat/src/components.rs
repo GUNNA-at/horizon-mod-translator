@@ -486,6 +486,31 @@ fn patch_entries(rt: &mut Rt, patch: V) -> Vec<(V, Option<V>)> {
     out
 }
 
+/// `patch.forget(predicate)`: the patch without the types the predicate takes, whether it sets or
+/// removes them (`EMPTY` when nothing is left), as Create's backtank leaves out of its drops what its
+/// block entity keeps of its own.
+fn forget(rt: &mut Rt, patch: V, predicate: V) -> V {
+    let (mut kept, mut gone) = (Vec::new(), Vec::new());
+    for (ty, value) in patch_entries(rt, patch) {
+        if rt.call_functional("java/util/function/Predicate.test.(Ljava/lang/Object;)Z", predicate, &[ty]).i() != 0 {
+            continue;
+        }
+        match value {
+            Some(v) => kept.extend([ty, v]),
+            None => gone.push(ty),
+        }
+    }
+    if kept.is_empty() && gone.is_empty() {
+        return crate::recipes::get_static(rt, COMPONENT_PATCH, "EMPTY").unwrap_or(V::NULL);
+    }
+    let p = rt.new_object(COMPONENT_PATCH);
+    if !kept.is_empty() {
+        store(rt, p, kept);
+    }
+    set_removed(rt, p, gone);
+    p
+}
+
 /// `stack.applyComponents(patch)`: what the patch sets is set on the stack, what it removes taken
 /// off.
 fn apply_patch(rt: &mut Rt, stack: V, patch: V) {
@@ -706,7 +731,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     let typed = desc.starts_with("(Lnet/minecraft/core/component/DataComponentType;") || desc.starts_with("(Ljava/util/function/Supplier;");
     let maps = matches!(owner, MAP | MAP_BUILDER | PATCH_BUILDER)
         || owner.ends_with("/PatchedDataComponentMap")
-        || (owner == COMPONENT_PATCH && matches!(name, "builder" | "size" | "get" | "entrySet"))
+        || (owner == COMPONENT_PATCH && matches!(name, "builder" | "size" | "get" | "entrySet" | "forget"))
         || (name == "components" && desc == MAP_DESC)
         || owner == INPUT
         || matches!(name, "applyComponentsFromItemStack" | "setComponents" | "collectComponents" | "applyImplicitComponents" | "collectImplicitComponents");
@@ -826,6 +851,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (_, "applyImplicitComponents") if desc == "(Lnet/minecraft/world/level/block/entity/BlockEntity$DataComponentInput;)V" => Some(V::Void),
         (_, "collectImplicitComponents") if desc == "(Lnet/minecraft/core/component/DataComponentMap$Builder;)V" => Some(V::Void),
         (COMPONENT_PATCH, n @ ("size" | "get" | "entrySet")) => patch_call(rt, n, args),
+        (COMPONENT_PATCH, "forget") => Some(forget(rt, a(0), a(1))),
         // A patch's builder: what it sets and what it removes, each undoing the other.
         (PATCH_BUILDER, "set" | "remove") => {
             let ty = type_of(rt, a(1));
@@ -1031,6 +1057,46 @@ mod tests {
         let p = api::call(&mut rt, patch_of, &[plain]);
         assert_eq!(p, api::get_static(&mut rt, "net/minecraft/core/component/DataComponentPatch.EMPTY"));
         assert_eq!(api::call(&mut rt, is_empty, &[p]), V::I(1));
+    }
+
+    /// The test predicate: whether the type is the one it captured.
+    fn is_captured(rt: &mut Rt, _key: &'static str, short: &'static str, args: &[V]) -> V {
+        assert_eq!(short, "test.(Ljava/lang/Object;)Z");
+        let c = rt.captured(args[0]);
+        V::I((c.first() == args.get(1)) as i32)
+    }
+
+    /// `patch.forget(predicate)` (Create's backtank's drops): the types the predicate takes are left
+    /// out, whether the patch sets or removes them; with nothing left, the one `EMPTY`.
+    #[test]
+    fn a_patch_forgets_the_types_a_predicate_takes() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(is_captured);
+        let mut types = Vec::new();
+        for _ in 0..2 {
+            let b = api::call(&mut rt, "net/minecraft/core/component/DataComponentType.builder.()Lnet/minecraft/core/component/DataComponentType$Builder;", &[]);
+            types.push(api::call(&mut rt, "net/minecraft/core/component/DataComponentType$Builder.build.()Lnet/minecraft/core/component/DataComponentType;", &[b]));
+        }
+        let (air, label) = (types[0], types[1]);
+        let pb = api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch.builder.()Lnet/minecraft/core/component/DataComponentPatch$Builder;", &[]);
+        let full = api_common::integer(&mut rt, 900);
+        api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch$Builder.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Lnet/minecraft/core/component/DataComponentPatch$Builder;", &[pb, air, full]);
+        api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch$Builder.remove.(Lnet/minecraft/core/component/DataComponentType;)Lnet/minecraft/core/component/DataComponentPatch$Builder;", &[pb, label]);
+        let patch = api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch$Builder.build.()Lnet/minecraft/core/component/DataComponentPatch;", &[pb]);
+        let forget = "net/minecraft/core/component/DataComponentPatch.forget.(Ljava/util/function/Predicate;)Lnet/minecraft/core/component/DataComponentPatch;";
+        let size = "net/minecraft/core/component/DataComponentPatch.size.()I";
+        let get = "net/minecraft/core/component/DataComponentPatch.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/util/Optional;";
+        let not_air = rt.lambda("test/Pred.test", vec![air]);
+        let left = api::call(&mut rt, forget, &[patch, not_air]);
+        assert_eq!(api::call(&mut rt, size, &[left]), V::I(1));
+        assert_eq!(api::call(&mut rt, get, &[left, air]), V::NULL, "forgotten");
+        assert_ne!(api::call(&mut rt, get, &[left, label]).r(), 0, "still removed");
+        assert_eq!(api::call(&mut rt, size, &[patch]), V::I(2), "the patch itself stays");
+        let not_label = rt.lambda("test/Pred.test", vec![label]);
+        let none = api::call(&mut rt, forget, &[left, not_label]);
+        assert_eq!(none, api::get_static(&mut rt, "net/minecraft/core/component/DataComponentPatch.EMPTY"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A stack's components read as a map (`getComponents`, live), a map built with

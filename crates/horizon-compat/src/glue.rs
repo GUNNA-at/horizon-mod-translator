@@ -444,7 +444,99 @@ fn removed(rt: &mut Rt, b: V, class: &'static str, pos: [i32; 3], old: &str, new
     if changed && kept.is_some() && rt.block_entities.get(&pos).copied() == kept {
         block_entity_removed(rt, pos);
     }
+    // Gone with its block: kept for the drops the game rolls next (`Block.playerDestroy` gets the
+    // block entity the block had).
+    if let Some(be) = kept.filter(|_| changed) {
+        let key = broken_key(pos);
+        if rt.interned.insert(key.clone(), be).is_none() {
+            BROKEN.with(|b| b.borrow_mut().push(key));
+        }
+    }
 }
+
+/// Where the block entity a broken block had is kept until its drops are rolled ([`loot_drops`]).
+fn broken_key(pos: [i32; 3]) -> String {
+    format!("compat:broken/{},{},{}", pos[0], pos[1], pos[2])
+}
+
+thread_local! {
+    /// The [`broken_key`]s kept, let go at the next server tick whether or not drops came for them
+    /// (a `/setblock` drops nothing).
+    static BROKEN: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Lets go of the block entities kept for drops that never came.
+fn forget_broken(rt: &mut Rt) {
+    for key in BROKEN.with(|b| std::mem::take(&mut *b.borrow_mut())) {
+        rt.interned.remove(&key);
+    }
+}
+
+/// What [`loot_drops`] gives for each stack: the index of the game's own stack it left as it was
+/// (the game keeps that one), else the stack.
+pub type LootDrop = (Option<usize>, crate::host::HandStack);
+
+/// `native_loot_drops` (server): the game rolled `rolled` from the loot table of the block `state`
+/// broken at `pos`, by the acting player (`player`) with `tool`, or by an explosion of radius
+/// `explosion`. A mod block with its own `getDrops(state, LootParams.Builder)` answers for its
+/// drops, with the parameters `Block.getDrops` gives it: the block's centre, the tool, the player
+/// and the block entity it had (the one its `onRemove` just let go, else the one still there), and
+/// the explosion's radius. Its `super.` call gets the game's stacks back. None: the game's drops
+/// stand.
+#[allow(clippy::too_many_arguments)]
+pub fn loot_drops(
+    rt: &mut Rt,
+    host: &mut dyn Host,
+    pos: [i32; 3],
+    state: &str,
+    rolled: &[crate::host::HandStack],
+    tool: Option<crate::host::HandStack>,
+    player: Option<u128>,
+    explosion: Option<f32>,
+) -> Option<Vec<LootDrop>> {
+    let (b, class) = mod_block(rt, state)?;
+    if !rt.overrides.is_some_and(|o| o(class, crate::loot_params::DROPS)) {
+        return None;
+    }
+    let vc = rt.vcall?;
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let (block, _) = crate::host::split_state(state);
+        let live = rt.block_entities.get(&pos).copied().filter(|_| rt.block_entity_meta.get(&pos).is_some_and(|(held, _)| held == block));
+        let be = rt.interned.remove(&broken_key(pos)).or(live).unwrap_or(V::NULL);
+        let level = level(rt);
+        let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+        let tool = crate::hand::load(rt, tool);
+        let entity = if player.is_some() { crate::api_common::acting_player(rt) } else { V::NULL };
+        let builder = crate::loot_params::block_builder(rt, level, p, tool, entity, be);
+        if let Some(radius) = explosion {
+            crate::loot_params::with_explosion(rt, builder, radius);
+        }
+        let st = api::state(rt, state);
+        let stacks: Vec<V> = rolled.iter().map(|s| crate::hand::load(rt, Some(s.clone()))).collect();
+        // Each as the runtime reads it back, to tell a stack the mod left alone.
+        let before: Vec<_> = stacks.iter().map(|&s| crate::hand::hand_stack_of(rt, s)).collect();
+        crate::loot_params::rolled(rt, builder, st, stacks.clone());
+        let out = vc(rt, DROPS_KEY, crate::loot_params::DROPS, &[b, st, builder]);
+        if rt.thrown.is_some() {
+            rt.report_thrown(crate::loot_params::DROPS);
+            return None;
+        }
+        let mut drops = Vec::new();
+        for s in crate::jutil::elements(rt, out) {
+            if s.r() == 0 || crate::api_common::stack_empty(rt, s) {
+                continue;
+            }
+            let Some(held) = crate::hand::hand_stack_of(rt, s) else { continue };
+            let origin = stacks.iter().position(|&o| o == s).filter(|&i| before[i].as_ref() == Some(&held));
+            drops.push((origin, held));
+        }
+        Some(drops)
+    })
+}
+
+const DROPS_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.getDrops.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/storage/loot/LootParams$Builder;)Ljava/util/List;";
 
 /// `newState.onPlace(level, pos, oldState, moved)` for a mod block `b`: its override (vanilla's does
 /// nothing), unless the old block's `onRemove` replaced it in turn. Create's pipes schedule their
@@ -1198,6 +1290,7 @@ pub fn server_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
     rt.with_host(host, |rt| {
         if !post {
             crate::damage::server_tick(rt);
+            forget_broken(rt);
         }
         let class = if post { SERVER_TICK_POST } else { SERVER_TICK_PRE };
         let ev = rt.new_object(class);
@@ -1946,6 +2039,116 @@ mod tests {
         let heard = rt.interned.get("test:placed").and_then(|v| rt.str_of(*v)).unwrap_or("");
         assert_eq!(heard, "test:pipe[axis=x] over minecraft:air; test:pipe[axis=y] over test:pipe[axis=x]");
         assert_eq!(host.blocks.get(&at).map(String::as_str), Some("minecraft:stone"), "the trap's onRemove");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const BELT: &str = "test/BeltBlock";
+    const BELT_ENTITY: &str = "test/BeltBlockEntity";
+    const OPTIONAL_PARAM: &str = "net/minecraft/world/level/storage/loot/LootParams$Builder.getOptionalParameter.(Lnet/minecraft/world/level/storage/loot/parameters/LootContextParam;)Ljava/lang/Object;";
+    const STATE_GET_DROPS: &str = "net/minecraft/world/level/block/state/BlockState.getDrops.(Lnet/minecraft/world/level/storage/loot/LootParams$Builder;)Ljava/util/List;";
+    /// A mod block's `super.getDrops`, as the translator names it: the nearest vanilla class's.
+    const SUPER_GET_DROPS: &str = "net/minecraft/world/level/block/Block.getDrops.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/storage/loot/LootParams$Builder;)Ljava/util/List;";
+    const STATIC_GET_DROPS: &str = "net/minecraft/world/level/block/Block.getDrops.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)Ljava/util/List;";
+
+    /// The test belt, as Create's `BeltBlock.getDrops`: its loot (`super.getDrops`), and the shaft's
+    /// when its block entity holds a pulley. It notes the block entity and the entity it was given.
+    fn belt_overrides(class: &str, method: &str) -> bool {
+        class == BELT && (method == NEW_BLOCK_ENTITY || method == crate::loot_params::DROPS)
+    }
+
+    fn belt_code(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        match short {
+            NEW_BLOCK_ENTITY => rt.new_object(BELT_ENTITY),
+            crate::loot_params::DROPS => {
+                let drops = api::call(rt, SUPER_GET_DROPS, args);
+                let param = api::get_static(rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParams.BLOCK_ENTITY");
+                let be = api::call(rt, OPTIONAL_PARAM, &[args[2], param]);
+                rt.interned.insert("test:seen".into(), be);
+                let param = api::get_static(rt, "net/minecraft/world/level/storage/loot/parameters/LootContextParams.THIS_ENTITY");
+                let entity = api::call(rt, OPTIONAL_PARAM, &[args[2], param]);
+                rt.interned.insert("test:entity".into(), entity);
+                if be.r() != 0 && rt.class_of(be) == BELT_ENTITY && rt.get_field(be, "pulley").i() != 0 {
+                    let shaft = api::state(rt, "test:shaft[axis=y]");
+                    let more = api::call(rt, STATE_GET_DROPS, &[shaft, args[2]]);
+                    api::call(rt, "java/util/List.addAll.(Ljava/util/Collection;)Z", &[drops, more]);
+                }
+                drops
+            }
+            _ => api::call(rt, key, args),
+        }
+    }
+
+    fn items(rt: &mut Rt, list: V) -> Vec<(String, u32)> {
+        crate::jutil::elements(rt, list)
+            .into_iter()
+            .filter_map(|s| crate::hand::hand_stack_of(rt, s))
+            .map(|h| (h.item, h.count))
+            .collect()
+    }
+
+    /// A mod block's own `getDrops(state, LootParams.Builder)`: through `Block.getDrops` in a mod's
+    /// code, its `super.` call rolls its loot table; for the game's own break, after its `onRemove`
+    /// let its block entity go, it still gets that block entity and the player, and its `super.`
+    /// call gets the game's stacks back, which the game then keeps as they were. A block without
+    /// one leaves the game's drops alone; a block entity kept for drops that never came is let go
+    /// at the next server tick.
+    #[test]
+    fn a_mod_blocks_get_drops_answers_with_the_block_entity_it_had() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(belt_overrides);
+        rt.vcall = Some(belt_code);
+        rt.supers.insert(BELT, "net/minecraft/world/level/block/Block");
+        rt.supers.insert(BELT_ENTITY, "net/minecraft/world/level/block/entity/BlockEntity");
+        let block = rt.new_object(BELT);
+        rt.registered.insert(("block".into(), "test:belt".into()), block);
+        let mut host = MemoryHost { player_id: Some(7), ..MemoryHost::default() };
+        host.loot.insert("test:belt".into(), vec![("test:belt_connector".into(), 2)]);
+        host.loot.insert("test:shaft".into(), vec![("test:shaft".into(), 1)]);
+        let at = [4, 64, -1];
+        let belt = "test:belt[part=start]";
+        host.blocks.insert(at, belt.into());
+        let be = rt.with_host(&mut host, |rt| block_entity_at(rt, at));
+        assert_ne!(be.r(), 0);
+        rt.put_field(be, "pulley", V::I(1));
+
+        // In a mod's own code (a drill's break): the loot table, then the shaft.
+        let got = rt.with_host(&mut host, |rt| {
+            let (l, p, st) = (level(rt), api::block_pos(rt, 4, 64, -1), api::state(rt, belt));
+            let list = api::call(rt, STATIC_GET_DROPS, &[st, l, p, be, V::NULL, V::NULL]);
+            items(rt, list)
+        });
+        assert_eq!(got, [("test:belt_connector".to_owned(), 2), ("test:shaft".to_owned(), 1)]);
+        assert_eq!(rt.interned.get("test:seen"), Some(&be));
+        assert_eq!(rt.interned.get("test:entity").map(|v| v.r()), Some(0), "no entity broke it");
+
+        // The game's break: the block goes first, then the game rolls its loot (one connector).
+        host.blocks.insert(at, "minecraft:air".into());
+        block_replaced(&mut rt, &mut host, at, belt, "minecraft:air", false);
+        assert!(!rt.block_entities.contains_key(&at), "gone with its block");
+        let connector = crate::host::HandStack { item: "test:belt_connector".into(), count: 1, ..Default::default() };
+        let answer = loot_drops(&mut rt, &mut host, at, belt, std::slice::from_ref(&connector), None, Some(7), None);
+        let answer = answer.expect("the belt answers");
+        assert_eq!(answer.len(), 2, "{answer:?}");
+        assert_eq!(answer[0], (Some(0), connector.clone()), "the game's own stack, left as it was");
+        assert_eq!((answer[1].0, answer[1].1.item.as_str(), answer[1].1.count), (None, "test:shaft", 1));
+        assert_eq!(rt.interned.get("test:seen"), Some(&be), "the block entity it had");
+        let entity = rt.interned.get("test:entity").copied().unwrap_or_default();
+        assert_eq!(rt.class_of(entity), "net/minecraft/server/level/ServerPlayer");
+        assert!(!rt.interned.contains_key(&broken_key(at)), "used");
+
+        // A vanilla block, or none of the mod's own: the game's drops stand.
+        assert!(loot_drops(&mut rt, &mut host, at, "minecraft:stone", std::slice::from_ref(&connector), None, None, None).is_none());
+
+        // Kept for drops that never come (a `/setblock`): let go at the next server tick.
+        host.blocks.insert(at, belt.into());
+        let again = rt.with_host(&mut host, |rt| block_entity_at(rt, at));
+        assert!(again.r() != 0 && again != be);
+        host.blocks.insert(at, "minecraft:stone".into());
+        block_replaced(&mut rt, &mut host, at, belt, "minecraft:stone", false);
+        assert_eq!(rt.interned.get(&broken_key(at)), Some(&again));
+        server_tick(&mut rt, &mut host, false);
+        assert!(!rt.interned.contains_key(&broken_key(at)));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

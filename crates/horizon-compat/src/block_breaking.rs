@@ -10,8 +10,9 @@
 //! - whether it may (`CommonHooks.fireBlockBreak`: `BlockEvent.BreakEvent`, cancelled beforehand for
 //!   a sword in creative, a game mode that can't break, a game master block);
 //! - the tool's wear (`ItemStack.mineBlock`), the block's removal (`onDestroyedByPlayer`, `destroy`),
-//!   its drops rolled from its loot table with the tool (`Block.getDrops`), what comes out of it
-//!   afterwards (`spawnAfterBreak`: an infested block's silverfish), the cracks shown on it
+//!   its drops (`Block.getDrops`: `state.getDrops` with the loot parameters of [`crate::loot_params`],
+//!   a mod block's own `getDrops(state, LootParams.Builder)` first), what comes out of it afterwards
+//!   (`spawnAfterBreak`: an infested block's silverfish), the cracks shown on it
 //!   (`Level.destroyBlockProgress`) and its sounds (`BlockState.getSoundType`).
 //!
 //! A mod block's or item's own override of each answers first. What a tool does to a block, the
@@ -19,9 +20,8 @@
 //! [`block_sounds`](crate::host::Host::block_sounds), [`block_drops`](crate::host::Host::block_drops),
 //! [`destroy_block_progress`](crate::host::Host::destroy_block_progress)).
 //!
-//! Not here yet: a mod block's own `getDrops(state, LootParams.Builder)` (its loot table answers for
-//! it), a mod item's tool component when the game doesn't know the item, Unbreaking on a stack
-//! outside the acting player's hands, and an adventure player's `can_break` predicates.
+//! Not here yet: a mod item's tool component when the game doesn't know the item, Unbreaking on a
+//! stack outside the acting player's hands, and an adventure player's `can_break` predicates.
 
 use crate::{api, api_common, Rt, V};
 
@@ -349,10 +349,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let text = text_of(rt, a(1));
                 sound_type(rt, a(1), &text)
             }
-            // `getDrops`, the static ones: by hand without a tool.
+            // `getDrops`, the static ones: by hand, without an entity, but the 6-argument one.
             "getDrops" => {
-                let tool = if desc == DROPS_BY { a(5) } else { V::NULL };
-                drops(rt, a(0), a(2), tool)
+                let (entity, tool) = if desc == DROPS_BY { (a(4), a(5)) } else { (V::NULL, V::NULL) };
+                crate::loot_params::block_drops(rt, a(0), a(1), a(2), a(3), entity, tool)
             }
             // NeoForge's `getExpDrop`, a mod block's `super.` call: an ore's range, else none.
             "getExpDrop" => V::I(own_exp_drop(rt, a(0), a(1), a(2))),
@@ -557,7 +557,7 @@ fn mod_block_object(rt: &Rt, text: &str) -> Option<V> {
 
 /// Mod block `text`'s own `nd` (its class's, or a mod superclass's), `key` being vanilla's, on
 /// `args` after the block: None without one, or when it threw (told; vanilla's answers then).
-fn block_override(rt: &mut Rt, text: &str, key: &'static str, nd: &'static str, args: &[V]) -> Option<V> {
+pub(crate) fn block_override(rt: &mut Rt, text: &str, key: &'static str, nd: &'static str, args: &[V]) -> Option<V> {
     let (blk, class) = crate::glue::mod_block(rt, text)?;
     if !rt.overrides.is_some_and(|o| o(class, nd)) {
         return None;
@@ -593,7 +593,7 @@ fn item_override(rt: &mut Rt, stack: V, key: &'static str, nd: &'static str, arg
 }
 
 /// What `stack` holds as the game takes a tool: None for an empty one.
-fn held(rt: &mut Rt, stack: V) -> Option<crate::host::HandStack> {
+pub(crate) fn held(rt: &mut Rt, stack: V) -> Option<crate::host::HandStack> {
     if stack.r() == 0 || api_common::stack_empty(rt, stack) {
         return None;
     }
@@ -904,18 +904,6 @@ fn destroyed_by_player(rt: &mut Rt, level: V, pos: V, fluid: V) -> V {
         return api::call(rt, SET_BLOCK, &[level, pos, left, V::I(11)]);
     }
     api::call(rt, REMOVE_BLOCK, &[level, pos, V::I(0)])
-}
-
-/// The static `Block.getDrops(state, level, pos, blockEntity, entity, tool)`: the block's loot,
-/// rolled by the game with `tool` (its enchantments, a block entity's contents kept for the break),
-/// as stacks a mod may put where it likes.
-fn drops(rt: &mut Rt, st: V, pos: V, tool: V) -> V {
-    let text = text_of(rt, st);
-    let p = api::pos_of(rt, pos);
-    let tool = held(rt, tool);
-    let got = rt.host_mut().map(|h| h.block_drops(p, &text, tool.as_ref())).unwrap_or_default();
-    let stacks: Vec<V> = got.into_iter().map(|s| crate::hand::load(rt, Some(s))).collect();
-    crate::jutil::new_list(rt, stacks)
 }
 
 /// `BlockState.getSoundType()`: the mod block's own `getSoundType(state)`, else its own.

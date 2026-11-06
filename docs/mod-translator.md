@@ -4152,6 +4152,35 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `entities::tests::dropped_contents_keep_their_components_and_leave_their_slots_empty` (40 onions in pieces of
     10 to 30 about the block's corner, a sword with damage 7 still at 7, the list's stacks empty). 392 compat, 17
     translator and 48 game tests pass.
+- [x] 2026-11-06 Part 25: a mod block's own `getDrops(state, LootParams.Builder)`; `LootParams.Builder`.
+  - Six of Create's blocks override `getDrops(state, builder)` and nothing called them: the game rolled their loot
+    tables alone. A gearbox on a horizontal axis drops as the vertical gearbox (its loot table says gearbox), a belt
+    adds the shaft its pulley held, a backtank its block entity's components (its air, its enchantments), a
+    clipboard its pages, a shop's table cloth its request data, a cart assembler its rail. They read the block entity
+    from the builder (`getOptionalParameter(BLOCK_ENTITY)`) and call `super.getDrops` for the loot table.
+  - New `loot_params` module: `LootParams.Builder` and `LootParams` as 1.21.1 has them (parameters by identity, a
+    null optional one taken out, a missing one `NoSuchElementException`, dynamic drops, luck; `create` checks only
+    the set's required parameters, as NeoForge lets mods pass their own). `BlockState.getDrops(builder)`: the mod
+    block's own override, else `BlockBehaviour.getDrops`, the loot table, which the game rolls with the builder's
+    origin and tool (`Host::block_drops`). The static `Block.getDrops(state, level, pos, blockEntity, entity,
+    tool)` that Create's drills, saws and deployers call now goes through it with vanilla's parameters, so their
+    breaks get the overrides too. `LootParams` left the generated data-class table (modelled here now).
+  - The game's own breaks: bundles bind `native_loot_drops` (its API 75 hook). For a block of their own with the
+    override, `glue::loot_drops` builds the builder `Block.getDrops` builds (the block's centre, the tool, the
+    player, the block entity, an explosion's radius) and calls it; its `super.getDrops` gets back the stacks the game
+    rolled (once), and a stack it leaves as it was stays the game's own stack. The game rolls a player's loot after
+    the block is gone, so the block entity its `onRemove` let go is kept for that roll (until the next server tick).
+  - The harness (`DRILL=drops`, Create's own code): a gearbox on the x axis drops one vertical gearbox both through
+    the game's break and through `Block.getDrops`; on the y axis its loot table's gearbox, the game's own stack
+    kept; a backtank its loot. The backtank's override called the one unmapped call, `DataComponentPatch.forget
+    (predicate)`, now modelled: the patch without the types the predicate takes, `EMPTY` when nothing is left.
+  - Tests: `loot_params::tests::a_builder_holds_its_parameters_until_create_checks_the_required_ones`,
+    `components::tests::a_patch_forgets_the_types_a_predicate_takes` and
+    `glue::tests::a_mod_blocks_get_drops_answers_with_the_block_entity_it_had` (a belt's override through
+    `Block.getDrops` in a mod's code rolls its loot then the shaft's; through the game's break after `onRemove`, it
+    gets the block entity and the player, its `super.` call the game's stack back, kept as the game's; a vanilla
+    block's drops stand; a block entity kept for drops that never came goes at the next server tick). 395 compat,
+    17 translator and 48 game tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
