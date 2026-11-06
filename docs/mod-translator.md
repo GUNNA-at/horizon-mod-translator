@@ -5432,6 +5432,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `api::tests::get_class_through_any_type_is_the_objects_class`.
   - Left: the composter's handler (`ForwardingItemHandler` over its `SidedInvWrapper`), entities'
     handlers (minecarts, `PlayerInvWrapper`), and `isBlockRegistered` for the vanilla providers.
+  - In game (the funnel round, `funnelgame.sh`, build of a53f72f): andesite funnels facing up on a
+    chest, a furnace and a hopper (kept off by a redstone block, so it can't take the items itself)
+    each took the stack dropped on them: the chest holds 5 iron ingots in slot 0, the furnace 3 raw
+    iron in its input slot (through `SidedInvWrapper`'s top face), the hopper 7 dirt; no item
+    entity was left on them. An extracting funnel on a barrel of 10 gold ingots took one at a
+    time and spat them out on top (3 out, 7 left, while the first one flew clear of the funnel).
+    No throws. A healing potion emptied into an item drain gave 250 mB of `create:potion`, but
+    without its `minecraft:potion_contents`: `FluidStack.set` is unmapped (fluid stacks keep no
+    components yet).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
