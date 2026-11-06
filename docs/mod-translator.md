@@ -5388,6 +5388,50 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     -13083194, worked out by hand from vanilla's formula).
   - Left: `MobEffect.applyInstantenousEffect` (8 jars; Create's potato cannon and open pipes) needs
     an entity healed and harmed.
+- [x] 2026-11-06 Part 66: vanilla containers as NeoForge's item handlers; `getClass` through any type.
+  A Create funnel, chute, mechanical arm or deployer that meets a vanilla chest, furnace or hopper
+  asks the block for `Capabilities.ItemHandler.BLOCK`, and nothing answered for the game's own
+  blocks: NeoForge registers them itself (`CapabilityHooks.registerVanillaProviders`, ahead of the
+  mods' providers), each as a wrapper over the block's `Container`. Measured over the pack: 25 jars
+  make an `InvWrapper` (82 calls), 13 a `CombinedInvWrapper`, 11 a `SidedInvWrapper` (29), 9 a
+  `RecipeWrapper`, 2 a `RangedWrapper`, 1 a `VanillaHopperItemHandler`; so the wrappers work over
+  any `Container`, a mod's as well as the game's.
+  - compat `item_wrappers` (new): `InvWrapper`, `SidedInvWrapper` and `VanillaHopperItemHandler` as
+    NeoForge writes them: `insertItem` in its order (the slot's stack, `canPlaceItem`, the limit of
+    the slot and of the stack, then `setItem` and `setChanged`), `extractItem`, `setStackInSlot`
+    (`InvWrapper`'s sets the item only; `SidedInvWrapper`'s marks the container changed first),
+    `getSlotLimit` and `isItemValid` (called virtually for a mod's subclass). `SidedInvWrapper` maps
+    its slots through `getSlotsForFace` and asks `canPlaceItemThroughFace` and
+    `canTakeItemThroughFace` (with a side only); a brewing stand's three bottle slots hold one, and
+    a furnace's fuel slot takes one bucket into an empty slot. The hopper's handler gives it
+    vanilla's 8-tick cooldown when it was empty and an item went in (unless it was already waiting
+    longer). The container behind a wrapper is a mod's (its own methods, called virtually) or the
+    game's: `compat:VanillaContainer`, one per position, answering `Container` and
+    `WorldlyContainer` through the host.
+  - compat `capabilities`: a vanilla block's `ItemHandler.BLOCK` is found first, as NeoForge's own
+    providers are: a chest (both halves of a double one), a barrel, a dispenser, a dropper, a
+    crafter, a chiseled bookshelf and a jukebox get an `InvWrapper`; a hopper its handler; a
+    furnace, blast furnace, smoker, brewing stand and shulker box a `SidedInvWrapper` for the side
+    asked. `InvWrapper` leaves `vanilla_records`' data classes.
+  - compat-core `Host`: `container`, `container_item`, `set_container_item`, `container_changed`,
+    `container_can_place` (`canPlaceItem`) and `container_can_place_through`, `container_face_slots`,
+    `container_can_take` and `hopper_filled`; `MemoryHost` keeps containers by position for tests.
+  - horizon-client `native_items`: `native_vanilla_container` and its slot helpers read and change
+    the game's own containers (the same `View` the game's hoppers use, so a double chest and a
+    hopper's cooldown stay one), and the bundle's hosts map the `Host` methods onto them
+    (fragment `vanilla_item_handlers`).
+  - compat `api`: `getClass()` called through an interface or any other type is `Object.getClass`
+    (Create's `GenericItemFilling` compares an `IFluidHandlerItem`'s class with `FluidBucketWrapper`). `MODULE_NAMES` was one short
+    since `fluid_wrappers`; it lists every module again.
+  - The draw host answers `player_place` and `player_sneaking` (a mod's block placed from the
+    client side asks for them).
+  - Tests: `item_wrappers::tests::a_chest_fills_up_to_a_stack_and_gives_back_the_rest`,
+    `a_furnace_takes_and_gives_through_its_faces`,
+    `a_brewing_stand_holds_one_bottle_a_slot_and_a_shulker_box_no_shulker_box`,
+    `a_hopper_filled_while_empty_waits`, `a_wrapper_of_a_mods_container_asks_the_container`;
+    `api::tests::get_class_through_any_type_is_the_objects_class`.
+  - Left: the composter's handler (`ForwardingItemHandler` over its `SidedInvWrapper`), entities'
+    handlers (minecarts, `PlayerInvWrapper`), and `isBlockRegistered` for the vanilla providers.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

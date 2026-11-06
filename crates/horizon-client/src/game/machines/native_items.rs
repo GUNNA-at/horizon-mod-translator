@@ -233,6 +233,202 @@ impl Game<'_> {
     }
 }
 
+/// The item handler NeoForge gives a vanilla block's container
+/// (`CapabilityHooks.registerVanillaProviders`, `native_vanilla_container`).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeContainerKind {
+    /// An `InvWrapper`: a chest's (both halves of a double one), a barrel's,
+    /// a dispenser's, a dropper's, a crafter's, a chiseled bookshelf's or a
+    /// jukebox's container.
+    Plain,
+    /// A hopper's `VanillaHopperItemHandler`.
+    Hopper,
+    /// A `SidedInvWrapper` of a furnace, a blast furnace or a smoker.
+    Furnace,
+    /// A `SidedInvWrapper` of a brewing stand.
+    Brewing,
+    /// A `SidedInvWrapper` of a shulker box.
+    Shulker,
+}
+
+// Translated NeoForge mods use these (their item handlers of vanilla's
+// containers); nothing in Horizon does.
+#[allow(dead_code)]
+impl Game<'_> {
+    /// The container of the vanilla block at `pos` that NeoForge gives an item
+    /// handler, with that handler's kind; None for any other block (a
+    /// composter, whose handler is its block state's), and where the world
+    /// isn't simulated.
+    fn vanilla_handler_view(&self, pos: [i32; 3]) -> Option<(View, NativeContainerKind)> {
+        if !self.native_simulates() {
+            return None;
+        }
+        let c = self.containers();
+        // `ChestBlock.getContainer(.., true)`: a chest under a block still gives its items.
+        let view = c.view((pos[0], pos[1], pos[2]), false)?;
+        let kind = match view.kind {
+            Kind::Hopper => NativeContainerKind::Hopper,
+            Kind::Furnace => NativeContainerKind::Furnace,
+            Kind::Brewing => NativeContainerKind::Brewing,
+            Kind::Shulker => NativeContainerKind::Shulker,
+            Kind::Crafter | Kind::Bookshelf | Kind::Jukebox => NativeContainerKind::Plain,
+            Kind::Generic => {
+                let name = c.name(self.world.block(pos[0], pos[1], pos[2]));
+                let plain = horizon_client::containers::is_chest_block(name)
+                    || matches!(
+                        name,
+                        "minecraft:barrel" | "minecraft:dispenser" | "minecraft:dropper"
+                    );
+                if !plain {
+                    return None;
+                }
+                NativeContainerKind::Plain
+            }
+            Kind::Mod | Kind::Composter(_) => return None,
+        };
+        Some((view, kind))
+    }
+    /// The vanilla container at `pos` that NeoForge gives an item handler
+    /// (`Capabilities.ItemHandler.BLOCK`): its slot count, the most a slot
+    /// holds (`getMaxStackSize()`: 1 in a jukebox or a chiseled bookshelf,
+    /// else 99) and its handler's kind. None for any other block, a composter,
+    /// and where the world isn't simulated. API @API:vanilla_item_handlers@.
+    pub(in crate::game) fn native_vanilla_container(
+        &self,
+        pos: [i32; 3],
+    ) -> Option<(u32, u32, NativeContainerKind)> {
+        let (view, kind) = self.vanilla_handler_view(pos)?;
+        let max = if matches!(view.kind, Kind::Jukebox | Kind::Bookshelf) {
+            1
+        } else {
+            99
+        };
+        Some((view.len() as u32, max, kind))
+    }
+    /// What slot `slot` of that container holds (`Container.getItem`).
+    /// API @API:vanilla_item_handlers@.
+    pub(in crate::game) fn native_vanilla_container_item(
+        &self,
+        pos: [i32; 3],
+        slot: u32,
+    ) -> Option<ItemStack> {
+        let (view, _) = self.vanilla_handler_view(pos)?;
+        self.containers().get(&view, slot as usize).cloned()
+    }
+    /// Puts `stack` (None empties the slot) in slot `slot` of that container
+    /// (`Container.setItem`: the stack cut to what the slot holds; a disc put in
+    /// a jukebox starts its song, one taken out stops it), without
+    /// `setChanged` (`native_vanilla_container_changed`). False where there is
+    /// no such slot. API @API:vanilla_item_handlers@.
+    pub(in crate::game) fn native_vanilla_container_set(
+        &mut self,
+        pos: [i32; 3],
+        slot: u32,
+        stack: Option<ItemStack>,
+    ) -> bool {
+        let Some((view, _)) = self.vanilla_handler_view(pos) else {
+            return false;
+        };
+        let c = self.containers();
+        let stack = stack.filter(|s| s.count > 0).map(|mut s| {
+            // `stack.limitSize(getMaxStackSize(stack))`.
+            let most = if matches!(view.kind, Kind::Jukebox | Kind::Bookshelf) {
+                1
+            } else {
+                c.max_stack(&s).min(99)
+            };
+            s.count = s.count.min(most);
+            s
+        });
+        let had = c.get(&view, slot as usize).is_some();
+        let put = stack.is_some();
+        let Some(target) = self.slot_mut_at(&view, slot as usize) else {
+            return false;
+        };
+        *target = stack;
+        if view.kind == Kind::Jukebox {
+            let (x, y, z) = view.parts[0].0;
+            if put {
+                self.jukebox_inserted([x, y, z]);
+            } else if had {
+                self.jukebox_taken([x, y, z]);
+            }
+        }
+        true
+    }
+    /// `Container.setChanged` of that container: the level saves it,
+    /// comparators read it again. API @API:vanilla_item_handlers@.
+    pub(in crate::game) fn native_vanilla_container_changed(&mut self, pos: [i32; 3]) {
+        if let Some((view, _)) = self.vanilla_handler_view(pos) {
+            self.view_changed(&view);
+        }
+    }
+    /// Whether `stack` may go in slot `slot` of that container
+    /// (`Container.canPlaceItem`); `through`: through a face, as a
+    /// `SidedInvWrapper` puts it (`canPlaceItemThroughFace` too, which no
+    /// vanilla container decides by the face: a shulker box takes no shulker
+    /// box). API @API:vanilla_item_handlers@.
+    pub(in crate::game) fn native_vanilla_container_can_place(
+        &self,
+        pos: [i32; 3],
+        slot: u32,
+        stack: &ItemStack,
+        through: bool,
+    ) -> bool {
+        let Some((view, _)) = self.vanilla_handler_view(pos) else {
+            return false;
+        };
+        // A shulker box's own `canPlaceItem` is `Container`'s: anything goes.
+        if view.kind == Kind::Shulker && !through {
+            return (slot as usize) < view.len();
+        }
+        (slot as usize) < view.len() && self.containers().can_place(&view, slot as usize, stack)
+    }
+    /// The slots of that container its side `face` reaches, in order
+    /// (`WorldlyContainer.getSlotsForFace`; every slot of one that isn't a
+    /// `WorldlyContainer`). API @API:vanilla_item_handlers@.
+    pub(in crate::game) fn native_vanilla_container_face_slots(
+        &self,
+        pos: [i32; 3],
+        face: Direction,
+    ) -> Vec<u32> {
+        self.vanilla_handler_view(pos).map_or_else(Vec::new, |(view, _)| {
+            view.slots_for_face(Some(face))
+                .into_iter()
+                .map(|s| s as u32)
+                .collect()
+        })
+    }
+    /// Whether `stack` may be taken out of slot `slot` of that container through
+    /// its side `face` (`WorldlyContainer.canTakeItemThroughFace`: a furnace's
+    /// fuel only as a bucket through its bottom, a brewing stand's ingredient
+    /// only as a glass bottle). API @API:vanilla_item_handlers@.
+    pub(in crate::game) fn native_vanilla_container_can_take(
+        &self,
+        pos: [i32; 3],
+        slot: u32,
+        stack: &ItemStack,
+        face: Direction,
+    ) -> bool {
+        self.vanilla_handler_view(pos)
+            .is_some_and(|(view, _)| self.containers().can_take(&view, slot as usize, stack, face))
+    }
+    /// The hopper at `pos`, empty before, took items through its item handler
+    /// (`VanillaHopperItemHandler.insertItem`): it waits 8 ticks before it moves
+    /// any (`setCooldown(8)`), unless it waits longer already
+    /// (`isOnCustomCooldown`). API @API:vanilla_item_handlers@.
+    pub(in crate::game) fn native_hopper_filled(&mut self, pos: [i32; 3]) {
+        if !matches!(self.vanilla_handler_view(pos), Some((_, NativeContainerKind::Hopper))) {
+            return;
+        }
+        let state = self.hoppers.entry((pos[0], pos[1], pos[2])).or_default();
+        if state.cooldown <= 8 {
+            state.cooldown = 8;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

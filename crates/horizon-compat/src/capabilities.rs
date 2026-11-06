@@ -100,6 +100,7 @@ pub fn fire(rt: &mut Rt) {
 }
 
 const FLUID_HANDLER: &str = "neoforge:fluid_handler";
+const ITEM_HANDLER: &str = "neoforge:item_handler";
 
 /// Whether capability `cap` is the one named `name`.
 fn named(rt: &Rt, cap: V, name: &str) -> bool {
@@ -129,6 +130,14 @@ fn find_block(rt: &mut Rt, cap: V, level: V, pos: V, state: V, be: V, side: V) -
         && let Some(w) = crate::fluid_wrappers::cauldron(rt, level, pos, &block)
     {
         return w;
+    }
+    // NeoForge's own handlers of vanilla's containers (a chest, a furnace, a hopper...), registered
+    // ahead of every mod's provider.
+    if block.starts_with("minecraft:")
+        && named(rt, cap, ITEM_HANDLER)
+        && let Some(h) = crate::item_wrappers::vanilla_handler(rt, at, side)
+    {
+        return h;
     }
     for (kind, c, key, provider) in entries(rt) {
         if kind != Kind::Block || c != cap || api::block_name(rt, key) != block {

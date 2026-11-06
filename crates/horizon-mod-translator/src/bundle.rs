@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 94] = [
+const COMPAT: [(&str, &str); 95] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -121,6 +121,7 @@ const COMPAT: [(&str, &str); 94] = [
     ("entities.rs", include_str!("../../horizon-compat/src/entities.rs")),
     ("tanks.rs", include_str!("../../horizon-compat/src/tanks.rs")),
     ("fluid_wrappers.rs", include_str!("../../horizon-compat/src/fluid_wrappers.rs")),
+    ("item_wrappers.rs", include_str!("../../horizon-compat/src/item_wrappers.rs")),
     ("creative.rs", include_str!("../../horizon-compat/src/creative.rs")),
     ("crops.rs", include_str!("../../horizon-compat/src/crops.rs")),
     ("fluids.rs", include_str!("../../horizon-compat/src/fluids.rs")),
@@ -954,6 +955,14 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
         }}
         fn game_time(&self) -> i64 {{
             self.draw.game_time
+        }}
+        // The window's own player, as a renderer reads it (`Minecraft.player`'s position, look
+        // and sneaking).
+        fn player_place(&self) -> Option<([f64; 3], f32, f32)> {{
+            self.game.native_local_player().map(|(at, yaw, pitch, _)| (at, yaw, pitch))
+        }}
+        fn player_sneaking(&self) -> bool {{
+            self.game.has_shift_down()
         }}
 {reads}        fn partial_tick(&self) -> f32 {{
             self.draw.partial
@@ -1955,6 +1964,7 @@ fn {id}_screen_char_typed_pre(
 fn game_host(c: &str, server_send: &str) -> String {
     let server_effects = server_effects(c);
     let (reads, writes) = (world_reads("self.game", c), world_writes(c));
+    let (containers, stacks) = (container_methods(c), stack_helpers(c));
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
     }}
@@ -2049,8 +2059,8 @@ fn game_host(c: &str, server_send: &str) -> String {
             let stack = horizon_client::items::ItemStack::new(item, count);
             self.game.native_spawn_item_entity(dim, stack, pos, motion, pickup_delay)
         }}
-{server_effects}{server_send}    }}
-"#)
+{containers}{server_effects}{server_send}    }}
+{stacks}"#)
 }
 
 /// A server level's tick (`LevelTickEvent.Pre` before it, `.Post` after), on the server's game
@@ -2693,7 +2703,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
 
 fn player_host(c: &str, server_effects: &str) -> String {
     let (reads, writes) = (world_reads("self.game", c), world_writes(c));
-    let nbt_of = nbt_of_fn(c);
+    let (containers, stacks) = (container_methods(c), stack_helpers(c));
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
     }}
@@ -2867,12 +2877,22 @@ fn player_host(c: &str, server_effects: &str) -> String {
             self.game.native_hurt_hand_stack(Self::hand(hand), amount);
             true
         }}
-{reads}{writes}{server_effects}    }}
-    // A stack's mod data crosses as the runtime's NBT; a hand as `InteractionHand`'s ordinal.
+{reads}{writes}{containers}{server_effects}    }}
+    // A hand as `InteractionHand`'s ordinal.
     impl Host<'_, '_> {{
         fn hand(ordinal: u8) -> horizon_client::first_person::Hand {{
             if ordinal == 1 {{ horizon_client::first_person::Hand::Off }} else {{ horizon_client::first_person::Hand::Main }}
         }}
+    }}
+{stacks}"#)
+}
+
+/// The inherent helpers of a server host whose game is `self.game` (a `&mut Game`): a stack crosses
+/// between the game and the runtime with its mod data as the runtime's NBT.
+fn stack_helpers(c: &str) -> String {
+    let nbt_of = nbt_of_fn(c);
+    format!(r#"    // A stack's mod data crosses as the runtime's NBT.
+    impl Host<'_, '_> {{
         /// The game's stack as the runtime's: its mod data by the registered component types, and
         /// the vanilla components the runtime models (its enchantments).
         fn held_of(&self, stack: &horizon_client::items::ItemStack) -> {c}::host::HandStack {{
@@ -2939,6 +2959,56 @@ fn player_host(c: &str, server_effects: &str) -> String {
         }}
     }}
 "#)
+}
+
+/// A server host's vanilla containers (`self.game` a `&mut Game`), as NeoForge's item handlers of
+/// them reach them; [`stack_helpers`] carry their stacks.
+fn container_methods(c: &str) -> String {
+    format!(
+        r#"        fn container(&self, pos: [i32; 3]) -> Option<{c}::host::ContainerFacts> {{
+            use crate::game::machines::native_items::NativeContainerKind as Kind;
+            use {c}::host::ContainerKind;
+            self.game.native_vanilla_container(pos).map(|(size, max_stack, kind)| {c}::host::ContainerFacts {{
+                size,
+                max_stack,
+                kind: match kind {{
+                    Kind::Plain => ContainerKind::Plain,
+                    Kind::Hopper => ContainerKind::Hopper,
+                    Kind::Furnace => ContainerKind::Furnace,
+                    Kind::Brewing => ContainerKind::Brewing,
+                    Kind::Shulker => ContainerKind::Shulker,
+                }},
+            }})
+        }}
+        fn container_item(&self, pos: [i32; 3], slot: u32) -> Option<{c}::host::HandStack> {{
+            self.game.native_vanilla_container_item(pos, slot).map(|s| self.held_of(&s))
+        }}
+        fn set_container_item(&mut self, pos: [i32; 3], slot: u32, stack: Option<&{c}::host::HandStack>) -> bool {{
+            let stack = stack.filter(|h| !h.item.is_empty() && h.count > 0).map(|h| self.stack_of(h));
+            self.game.native_vanilla_container_set(pos, slot, stack)
+        }}
+        fn container_changed(&mut self, pos: [i32; 3]) {{
+            self.game.native_vanilla_container_changed(pos);
+        }}
+        fn container_can_place(&self, pos: [i32; 3], slot: u32, stack: &{c}::host::HandStack) -> bool {{
+            self.game.native_vanilla_container_can_place(pos, slot, &self.stack_of(stack), false)
+        }}
+        fn container_can_place_through(&self, pos: [i32; 3], slot: u32, stack: &{c}::host::HandStack) -> bool {{
+            self.game.native_vanilla_container_can_place(pos, slot, &self.stack_of(stack), true)
+        }}
+        fn container_face_slots(&self, pos: [i32; 3], face: u8) -> Vec<u32> {{
+            let face = horizon_core::geometry::Direction::ALL[usize::from(face.min(5))];
+            self.game.native_vanilla_container_face_slots(pos, face)
+        }}
+        fn container_can_take(&self, pos: [i32; 3], slot: u32, stack: &{c}::host::HandStack, face: u8) -> bool {{
+            let face = horizon_core::geometry::Direction::ALL[usize::from(face.min(5))];
+            self.game.native_vanilla_container_can_take(pos, slot, &self.stack_of(stack), face)
+        }}
+        fn hopper_filled(&mut self, pos: [i32; 3]) {{
+            self.game.native_hopper_filled(pos);
+        }}
+"#
+    )
 }
 
 fn block_entity_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {

@@ -148,6 +148,35 @@ pub struct ItemEntity {
     pub age: u32,
 }
 
+/// The item handler NeoForge gives a vanilla block's container (`CapabilityHooks.registerVanillaProviders`),
+/// by the rules it adds to a plain container's ([`Host::container`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ContainerKind {
+    /// An `InvWrapper` of the container: a chest's (both halves of a double one), a barrel's, a
+    /// dispenser's, a dropper's, a crafter's, a chiseled bookshelf's or a jukebox's.
+    #[default]
+    Plain,
+    /// A hopper's `VanillaHopperItemHandler`: filling the empty hopper sets its cooldown.
+    Hopper,
+    /// A `SidedInvWrapper` of a furnace, a blast furnace or a smoker (`AbstractFurnaceBlockEntity`):
+    /// one bucket at a time into its fuel slot.
+    Furnace,
+    /// A `SidedInvWrapper` of a brewing stand: one bottle in each of its three bottle slots.
+    Brewing,
+    /// A `SidedInvWrapper` of a shulker box.
+    Shulker,
+}
+
+/// A vanilla block's container (`Container`), as the game holds it ([`Host::container`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContainerFacts {
+    /// Its slots (`getContainerSize`).
+    pub size: u32,
+    /// The most a slot holds (`getMaxStackSize()`): 99, 1 in a jukebox or a chiseled bookshelf.
+    pub max_stack: u32,
+    pub kind: ContainerKind,
+}
+
 /// A blow's source as [`Host::hurt_entity_by`] takes it (vanilla's `DamageSource`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HurtBy {
@@ -875,6 +904,50 @@ pub trait Host {
     fn spawn_item_entity(&mut self, _item: &str, _count: u32, _pos: [f64; 3], _motion: [f64; 3], _pickup_delay: u32) -> Option<u32> {
         None
     }
+    /// The container of the vanilla block at `pos` that NeoForge gives an item handler
+    /// (`Capabilities.ItemHandler.BLOCK`: a chest, a barrel, a furnace, a hopper...). None for any
+    /// other block, and on a client.
+    fn container(&self, _pos: [i32; 3]) -> Option<ContainerFacts> {
+        None
+    }
+    /// What slot `slot` of the container at `pos` holds (`Container.getItem`); None when it's empty.
+    fn container_item(&self, _pos: [i32; 3], _slot: u32) -> Option<HandStack> {
+        None
+    }
+    /// Puts `stack` (None empties the slot) in slot `slot` of the container at `pos`
+    /// (`Container.setItem`: a disc put in a jukebox starts its song), without
+    /// [`Host::container_changed`]. False when there is no such slot.
+    fn set_container_item(&mut self, _pos: [i32; 3], _slot: u32, _stack: Option<&HandStack>) -> bool {
+        false
+    }
+    /// `Container.setChanged` of the container at `pos`: the level saves it, comparators read it
+    /// again.
+    fn container_changed(&mut self, _pos: [i32; 3]) {}
+    /// Whether `stack` may go in slot `slot` of the container at `pos` (`Container.canPlaceItem`).
+    fn container_can_place(&self, _pos: [i32; 3], _slot: u32, _stack: &HandStack) -> bool {
+        false
+    }
+    /// Whether `stack` may go in slot `slot` of the container at `pos` through a face
+    /// (`WorldlyContainer.canPlaceItemThroughFace`, which no vanilla container decides by the face:
+    /// a shulker box never goes in a shulker box).
+    fn container_can_place_through(&self, _pos: [i32; 3], _slot: u32, _stack: &HandStack) -> bool {
+        true
+    }
+    /// The slots face `face` (`Direction`'s data value: 0 down, 1 up, 2 north, 3 south, 4 west,
+    /// 5 east) of the container at `pos` reaches, in order (`WorldlyContainer.getSlotsForFace`).
+    fn container_face_slots(&self, _pos: [i32; 3], _face: u8) -> Vec<u32> {
+        Vec::new()
+    }
+    /// Whether `stack` may be taken out of slot `slot` of the container at `pos` through face
+    /// `face` (`WorldlyContainer.canTakeItemThroughFace`: a furnace's fuel only as a bucket through
+    /// its bottom, a brewing stand's ingredient only as a glass bottle).
+    fn container_can_take(&self, _pos: [i32; 3], _slot: u32, _stack: &HandStack, _face: u8) -> bool {
+        true
+    }
+    /// The hopper at `pos`, empty before, took items through its item handler: it waits 8 ticks
+    /// before it moves any (`setCooldown(8)`), unless it waits longer already
+    /// (`isOnCustomCooldown`).
+    fn hopper_filled(&mut self, _pos: [i32; 3]) {}
     /// The server level's entity `id` (`Level.getEntity`): none on a client, for a player, or
     /// when the level holds no such entity.
     fn entity(&self, _id: i32) -> Option<EntityView> {
@@ -1449,6 +1522,28 @@ pub struct MemoryHost {
     pub scheduled: Vec<([i32; 3], String, i32)>,
     /// Resource files by path ([`Host::resource`]).
     pub resources: std::collections::BTreeMap<String, Vec<u8>>,
+    /// Vanilla blocks' containers by position ([`Host::container`]).
+    pub containers: HashMap<[i32; 3], MemoryContainer>,
+}
+
+/// A vanilla block's container in a [`MemoryHost`].
+#[derive(Clone, Debug, Default)]
+pub struct MemoryContainer {
+    pub facts: ContainerFacts,
+    /// Each slot's stack, `facts.size` of them.
+    pub items: Vec<Option<HandStack>>,
+    /// The slots each face reaches (by `Direction`'s data value); none: every slot, through any.
+    pub faces: Option<[Vec<u32>; 6]>,
+    /// Items no slot takes (`canPlaceItem`).
+    pub refuses: Vec<String>,
+    /// Items no slot takes through a face (`canPlaceItemThroughFace`).
+    pub refuses_through: Vec<String>,
+    /// The slots and items no face lets out (`canTakeItemThroughFace`).
+    pub keeps: Vec<(u32, String)>,
+    /// How often it changed ([`Host::container_changed`]).
+    pub changed: u32,
+    /// How often an item handler filled it while it was empty ([`Host::hopper_filled`]).
+    pub filled: u32,
 }
 
 impl Host for MemoryHost {
@@ -1772,6 +1867,43 @@ impl Host for MemoryHost {
     }
     fn new_liquid(&mut self, pos: [i32; 3], _fluid: &str, _state: &str) -> Option<(String, u8, bool)> {
         self.new_liquids.get(&pos).cloned()
+    }
+    fn container(&self, pos: [i32; 3]) -> Option<ContainerFacts> {
+        self.containers.get(&pos).map(|c| c.facts)
+    }
+    fn container_item(&self, pos: [i32; 3], slot: u32) -> Option<HandStack> {
+        self.containers.get(&pos)?.items.get(slot as usize)?.clone()
+    }
+    fn set_container_item(&mut self, pos: [i32; 3], slot: u32, stack: Option<&HandStack>) -> bool {
+        let Some(s) = self.containers.get_mut(&pos).and_then(|c| c.items.get_mut(slot as usize)) else { return false };
+        *s = stack.filter(|h| h.count > 0).cloned();
+        true
+    }
+    fn container_changed(&mut self, pos: [i32; 3]) {
+        if let Some(c) = self.containers.get_mut(&pos) {
+            c.changed += 1;
+        }
+    }
+    fn container_can_place(&self, pos: [i32; 3], _slot: u32, stack: &HandStack) -> bool {
+        self.containers.get(&pos).is_some_and(|c| !c.refuses.contains(&stack.item))
+    }
+    fn container_can_place_through(&self, pos: [i32; 3], _slot: u32, stack: &HandStack) -> bool {
+        self.containers.get(&pos).is_some_and(|c| !c.refuses_through.contains(&stack.item))
+    }
+    fn container_face_slots(&self, pos: [i32; 3], face: u8) -> Vec<u32> {
+        match self.containers.get(&pos) {
+            Some(MemoryContainer { faces: Some(f), .. }) => f.get(face as usize).cloned().unwrap_or_default(),
+            Some(c) => (0..c.facts.size).collect(),
+            None => Vec::new(),
+        }
+    }
+    fn container_can_take(&self, pos: [i32; 3], slot: u32, stack: &HandStack, _face: u8) -> bool {
+        self.containers.get(&pos).is_some_and(|c| !c.keeps.iter().any(|(s, i)| *s == slot && *i == stack.item))
+    }
+    fn hopper_filled(&mut self, pos: [i32; 3]) {
+        if let Some(c) = self.containers.get_mut(&pos) {
+            c.filled += 1;
+        }
     }
     fn exhaust_player(&mut self, amount: f32) {
         self.exhaustion += amount;

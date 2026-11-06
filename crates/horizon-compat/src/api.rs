@@ -103,6 +103,12 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         return r;
     }
     let Some((owner, rest)) = key.split_once('.') else { return r };
+    // `getClass()` through any type (`wrapper.getClass() == FluidBucketWrapper.class`): it is
+    // final in `Object`, so always `Object`'s own.
+    if rest == "getClass.()Ljava/lang/Class;" {
+        uncount(rt, key);
+        return call_exact(rt, "java/lang/Object.getClass.()Ljava/lang/Class;", args);
+    }
     for class in retry_classes(rt, owner, args) {
         let up = rt.static_key(&format!("{class}.{rest}"));
         let seen = rt.unmapped.get(up).copied().unwrap_or(0);
@@ -759,7 +765,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 68] = [
+const CHAIN: [Module; 69] = [
     crate::fake_players::call,
     crate::block_breaking::call,
     crate::loot_params::call,
@@ -785,6 +791,7 @@ const CHAIN: [Module; 68] = [
     crate::codecs::call,
     crate::recipes::call,
     crate::handlers::call_key,
+    crate::item_wrappers::call_key,
     crate::components::call_key,
     crate::capabilities::call_key,
     crate::projectiles::call,
@@ -833,7 +840,7 @@ const CHAIN: [Module; 68] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 68] = [
+const CLAIMS: [Claims; 69] = [
     crate::fake_players::claims,
     crate::block_breaking::claims,
     crate::loot_params::claims,
@@ -859,6 +866,7 @@ const CLAIMS: [Claims; 68] = [
     crate::codecs::claims,
     crate::recipes::claims,
     crate::handlers::claims,
+    crate::item_wrappers::claims,
     crate::components::claims,
     crate::capabilities::claims,
     crate::projectiles::claims,
@@ -905,7 +913,7 @@ const CLAIMS: [Claims; 68] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 67] = [
+const MODULE_NAMES: [&str; 69] = [
     "fake_players",
     "block_breaking",
     "loot_params",
@@ -927,9 +935,11 @@ const MODULE_NAMES: [&str; 67] = [
     "client_extensions",
     "options",
     "tanks",
+    "fluid_wrappers",
     "codecs",
     "recipes",
     "handlers",
+    "item_wrappers",
     "components",
     "capabilities",
     "projectiles",
@@ -2577,6 +2587,21 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `getClass()` called through a type other than `Object` (Create's spout checks
+    /// `handler.getClass() == FluidBucketWrapper.class` on an `IFluidHandlerItem`): `Object`'s own,
+    /// the object's class.
+    #[test]
+    fn get_class_through_any_type_is_the_objects_class() {
+        let mut rt = Rt::new();
+        crate::install();
+        let wrapper = "net/neoforged/neoforge/fluids/capability/wrappers/FluidBucketWrapper";
+        let w = rt.new_object(wrapper);
+        let key = "net/neoforged/neoforge/fluids/capability/IFluidHandlerItem.getClass.()Ljava/lang/Class;";
+        let class = call(&mut rt, key, &[w]);
+        assert_eq!(class, rt.class_literal(wrapper));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     /// `BlockState.getSeed(pos)`: a mod block's own `getSeed(state, pos)` first; else vanilla's
     /// `Mth.getSeed` of the position (its value at 10, 64, -20 as vanilla computes it).
