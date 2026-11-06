@@ -1610,7 +1610,7 @@ impl Game<'_> {
     /// The player in the world with `uuid` (`EntityReference.getPlayer`), as
     /// `last_hurt_by_player` keeps them: None for the player in place, else the
     /// guest's connection.
-    fn player_with_uuid(&self, uuid: [i32; 4]) -> Option<Option<u32>> {
+    pub(super) fn player_with_uuid(&self, uuid: [i32; 4]) -> Option<Option<u32>> {
         if self.player.is_some()
             && horizon_client::mobs::tame::owned_by(Some(uuid), self.acting_uuid())
         {

@@ -2663,6 +2663,18 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/world/entity/player/Inventory", "getSelectionSize") => V::I(9),
         // Item cooldowns aren't kept for a mod's uses yet: none is ever cooling down.
         (o, "getCooldowns") if is_player(o) => rt.intern("compat:cooldowns".into(), |rt| rt.new_object("net/minecraft/world/item/ItemCooldowns")),
+        // What the player last hurt (`setLastHurtMob`: a mod's own blow, Create's potato), a living
+        // entity only, and when (its `tickCount` then), asked back by `getLastHurtMob` and
+        // `getLastHurtMobTimestamp`. The game's tamed wolves don't hear of it.
+        (o, "setLastHurtMob") if is_player(o) => {
+            let target = if a(1).r() != 0 && rt.instance_of(a(1), "net/minecraft/world/entity/LivingEntity") { a(1) } else { V::NULL };
+            let now = V::I(rt.get_field(a(0), "tickCount").i());
+            rt.put_field(a(0), "$lastHurtMob", target);
+            rt.put_field(a(0), "$lastHurtMobTimestamp", now);
+            V::Void
+        }
+        (o, "getLastHurtMob") if is_player(o) => rt.get_field(a(0), "$lastHurtMob"),
+        (o, "getLastHurtMobTimestamp") if is_player(o) => V::I(rt.get_field(a(0), "$lastHurtMobTimestamp").i()),
         // An entity's main arm (`getMainArm`), a mod class's own aside: the right one, vanilla's
         // default (a player's comes from its client's options, a mob is left-handed when born so:
         // the game tells neither).

@@ -783,6 +783,23 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let h = size(rt, rt.get_field(e, "$type")).1 * 0.85;
             vec3(rt, [p[0], p[1] + h, p[2]])
         }
+        // `spawnAtLocation(stack[, offsetY])`, or an item's (`(item[, offsetY])`): a new item entity
+        // at its feet (raised by the offset), added to the level; none for an empty stack, or on a
+        // client.
+        "spawnAtLocation" => {
+            let stack = if desc.starts_with("(Lnet/minecraft/world/item/ItemStack;") {
+                a(1)
+            } else {
+                let item = crate::api_common::item_like_name(rt, a(1));
+                crate::api_common::stack(rt, &item, 1)
+            };
+            let offset = if desc.contains(";F)") { f64::from(a(2).f()) } else if desc.contains(";I)") { f64::from(a(2).i()) } else { 0.0 };
+            if crate::api_common::stack_empty(rt, stack) || crate::neo::is_client(rt) {
+                return Some(V::NULL);
+            }
+            let p = xyz(rt, e);
+            crate::entities::spawn_at(rt, [p[0], p[1] + offset, p[2]], stack)
+        }
         "registryAccess" => {
             let l = rt.get_field(e, "$level");
             api::call(rt, "net/minecraft/world/level/Level.registryAccess.()Lnet/minecraft/core/RegistryAccess;", &[l])
@@ -852,7 +869,12 @@ fn save(rt: &mut Rt, e: V, tag: V) {
     let u = rt.get_field(e, "uuid");
     let k = rt.string("UUID");
     c(rt, "net/minecraft/nbt/CompoundTag.putUUID.(Ljava/lang/String;Ljava/util/UUID;)V", &[tag, k, u]);
-    virtual_call(rt, e, ADDITIONAL_SAVE_KEY, ADDITIONAL_SAVE, &[tag]);
+    // A mod's projectile that keeps no data of its own saves its vanilla class's.
+    if crate::projectiles::is_projectile_class(vanilla_base(rt, e)) {
+        on_base(rt, e, ADDITIONAL_SAVE, &[tag]);
+    } else {
+        virtual_call(rt, e, ADDITIONAL_SAVE_KEY, ADDITIONAL_SAVE, &[tag]);
+    }
     rt.report_thrown("addAdditionalSaveData");
 }
 
@@ -871,7 +893,11 @@ fn load(rt: &mut Rt, e: V, tag: V) {
         let u = c(rt, "net/minecraft/nbt/CompoundTag.getUUID.(Ljava/lang/String;)Ljava/util/UUID;", &[tag, k]);
         rt.put_field(e, "uuid", u);
     }
-    virtual_call(rt, e, ADDITIONAL_LOAD_KEY, ADDITIONAL_LOAD, &[tag]);
+    if crate::projectiles::is_projectile_class(vanilla_base(rt, e)) {
+        on_base(rt, e, ADDITIONAL_LOAD, &[tag]);
+    } else {
+        virtual_call(rt, e, ADDITIONAL_LOAD_KEY, ADDITIONAL_LOAD, &[tag]);
+    }
     rt.report_thrown("readAdditionalSaveData");
 }
 
@@ -1725,6 +1751,36 @@ mod tests {
         assert_eq!(rt.str_of(key), Some("minecraft:illusioner"));
         let description = api::call(&mut rt, "net/minecraft/world/entity/EntityType.getDescriptionId.()Ljava/lang/String;", &[illusioner]);
         assert_eq!(rt.str_of(description), Some("entity.minecraft.illusioner"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `spawnAtLocation` drops a stack where a mod's entity stands, raised by the offset, as a new
+    /// item entity of the level that a player may pick up after 10 ticks; an item drops one of
+    /// it; an empty stack drops nothing.
+    #[test]
+    fn a_mod_entity_drops_a_stack_at_its_feet() {
+        const DROP: &str = "net/minecraft/world/entity/Entity.spawnAtLocation.(Lnet/minecraft/world/item/ItemStack;F)Lnet/minecraft/world/entity/item/ItemEntity;";
+        const DROP_ITEM: &str = "net/minecraft/world/entity/Entity.spawnAtLocation.(Lnet/minecraft/world/level/ItemLike;)Lnet/minecraft/world/entity/item/ItemEntity;";
+        let (mut rt, ty) = runtime();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let cart = api::call(rt, "net/minecraft/world/entity/EntityType.create.(Lnet/minecraft/world/level/Level;)Lnet/minecraft/world/entity/Entity;", &[ty, level]);
+            set_pos(rt, cart, [2.5, 64.0, -1.5]);
+            let stack = crate::api_common::stack(rt, "minecraft:diamond", 3);
+            let dropped = api::call(rt, DROP, &[cart, stack, V::F(0.5)]);
+            assert!(rt.instance_of(dropped, "net/minecraft/world/entity/item/ItemEntity"));
+            let stick = api::get_static(rt, "net/minecraft/world/item/Items.STICK");
+            assert_ne!(api::call(rt, DROP_ITEM, &[cart, stick]), V::NULL);
+            let air = crate::api_common::stack(rt, "minecraft:air", 1);
+            assert_eq!(api::call(rt, DROP, &[cart, air, V::F(0.0)]), V::NULL);
+        });
+        let drops: Vec<_> = host.item_entities.iter().map(|e| (e.item.as_str(), e.count, e.pos, e.pickup_delay)).collect();
+        assert_eq!(drops, [("minecraft:diamond", 3, [2.5, 64.5, -1.5], 10), ("minecraft:stick", 1, [2.5, 64.0, -1.5], 10)]);
+        for e in &host.item_entities {
+            assert_eq!(e.motion[1], 0.2);
+            assert!(e.motion[0].abs() <= 0.1 && e.motion[2].abs() <= 0.1, "{:?}", e.motion);
+        }
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

@@ -370,6 +370,15 @@ pub(crate) fn popped(rt: &mut Rt, pos: [i32; 3], stack: V) -> Option<V> {
     Some(unspawned(rt, p, stack, m, 10))
 }
 
+/// `new ItemEntity(level, x, y, z, stack)` at `at` (its random sideways motion, 0.2 up) with the
+/// default pickup delay, added to the level: `Entity.spawnAtLocation`'s drop.
+pub(crate) fn spawn_at(rt: &mut Rt, at: [f64; 3], stack: V) -> V {
+    let m = [random_between(rt, -0.1, 0.1), 0.2, random_between(rt, -0.1, 0.1)];
+    let e = unspawned(rt, at, stack, m, 10);
+    add(rt, e);
+    e
+}
+
 /// `Level.addFreshEntity` of an item entity not in the level yet: the game adds it. False for
 /// anything else.
 pub(crate) fn add_item_entity(rt: &mut Rt, e: V) -> bool {
@@ -453,10 +462,10 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 }
 
 /// An item entity's own methods, which it answers whichever class names them.
-const ITEM_ENTITY_METHODS: [&str; 49] = [
+const ITEM_ENTITY_METHODS: [&str; 50] = [
     "absMoveTo", "addDeltaMovement", "blockPosition", "discard", "fireImmune", "getAge", "getBbHeight", "getBbWidth", "getBoundingBox", "getCommandSenderWorld",
     "getControllingPassenger", "getDeltaMovement", "getId", "getItem", "getOnPos", "getOnPosLegacy", "getOwner", "getPersistentData", "getTarget", "getVehicle",
-    "getX", "getY", "getZ", "hasPickUpDelay", "isAlive", "isInLava", "isInWater", "isOnFire", "isPassenger", "isRemoved", "isShiftKeyDown", "isSpectator",
+    "getX", "getY", "getZ", "hasPickUpDelay", "isAlive", "isInLava", "isInWater", "isOnFire", "isPassenger", "isPickable", "isRemoved", "isShiftKeyDown", "isSpectator",
     "isVehicle", "kill", "level", "moveTo", "onClientRemoval", "onGround", "position", "push", "remove", "setDefaultPickUpDelay", "setDeltaMovement", "setItem",
     "setNoPickUpDelay", "setPickUpDelay", "setPos", "setRemoved", "teleportTo",
 ];
@@ -647,7 +656,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::Void
         }
         "getPersistentData" => persistent_data(rt, e),
-        "isOnFire" | "isInWater" | "isInLava" | "isSpectator" | "isShiftKeyDown" | "isPassenger" | "isVehicle" | "fireImmune" => V::I(0),
+        // Nothing finds an item by a blow, the crosshair or a hit (`Entity.isPickable`, which
+        // `ItemEntity` keeps).
+        "isOnFire" | "isInWater" | "isInLava" | "isSpectator" | "isShiftKeyDown" | "isPassenger" | "isVehicle" | "fireImmune" | "isPickable" => V::I(0),
         "getOwner" | "getTarget" | "getVehicle" | "getControllingPassenger" => V::NULL,
         _ => return None,
     })

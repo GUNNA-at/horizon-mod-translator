@@ -2244,6 +2244,21 @@ fn world_writes(c: &str) -> String {
                 self.game.native_kill_mob(&dimension, mob.id)
             }}
         }}
+        fn hurt_entity_by(&mut self, id: i32, amount: f32, by: &{c}::host::HurtBy) -> bool {{
+            let dimension = self.game.native_dimension().to_owned();
+            let hurt = crate::game::native_mobs::NativeHurt {{
+                damage_type: by.damage_type.clone(),
+                player: by.player,
+                mob: by.mob.and_then(|m| u32::try_from(m).ok()),
+                from: by.from,
+                motion: by.motion,
+            }};
+            u32::try_from(id).is_ok_and(|i| self.game.native_hurt_mob(&dimension, i, amount, &hurt))
+        }}
+        fn knockback_entity(&mut self, id: i32, strength: f64, x: f64, z: f64) -> bool {{
+            let dimension = self.game.native_dimension().to_owned();
+            u32::try_from(id).is_ok_and(|i| self.game.native_knockback_mob(&dimension, i, strength, x, z))
+        }}
         fn kill_entity(&mut self, id: i32) -> bool {{
             let Some(t) = self.game.level_entity(id) else {{
                 return false;
@@ -2392,6 +2407,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
     let nbt_of = nbt_of_fn(c);
     let later = |call: &str| format!("crate::game::native_hits::native_after_hit(move |game| {{\n                {call};\n            }});");
     let (hurt, kill, remove) = (later("Later { game }.hurt_entity(id, amount)"), later("Later { game }.kill_entity(id)"), later("Later { game }.remove_entity(id)"));
+    let (hurt_by, knockback) = (later("Later { game }.hurt_entity_by(id, amount, &by)"), later("Later { game }.knockback_entity(id, strength, x, z)"));
     let (health, push, teleport) = (later("Later { game }.set_entity_health(id, health)"), later("Later { game }.push_entity(id, velocity)"), later("Later { game }.teleport_entity(id, pos)"));
     let (orb, payload) = (later("game.native_spawn_experience_orb(at, value, motion)"), later("Later { game }.send_payload(to, &channel, &data)"));
     let attribute = later("Later { game }.change_attribute(entity, &attribute, &change)");
@@ -2485,6 +2501,15 @@ fn hit_host(c: &str, server_send: &str) -> String {
         }}
         fn hurt_entity(&mut self, id: i32, amount: f32) -> bool {{
             {hurt}
+            true
+        }}
+        fn hurt_entity_by(&mut self, id: i32, amount: f32, by: &{c}::host::HurtBy) -> bool {{
+            let by = by.clone();
+            {hurt_by}
+            true
+        }}
+        fn knockback_entity(&mut self, id: i32, strength: f64, x: f64, z: f64) -> bool {{
+            {knockback}
             true
         }}
         fn level_event(&mut self, event: i32, pos: [i32; 3], data: i32) -> bool {{

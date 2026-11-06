@@ -6,6 +6,7 @@
 //! mobs they are out of the level: a mob a hook spawns then joins it after the
 //! tick, and the others read as gone.
 use super::{Game, commands::Target};
+use horizon_client::mobs::{Damage, DamageKind, Who};
 use horizon_core::geometry::Vec3;
 
 /// A mob as a native mod reads it.
@@ -37,6 +38,24 @@ pub(crate) struct NativeSpawn {
     pub(crate) silent: bool,
     pub(crate) invulnerable: bool,
     pub(crate) no_gravity: bool,
+}
+
+/// A blow's source as a native mod tells it (`native_hurt_mob`), vanilla's `DamageSource`.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct NativeHurt {
+    /// Its damage type (`minecraft:thrown`): one the game doesn't know (a mod's own) hurts as
+    /// `minecraft:generic`.
+    pub(crate) damage_type: String,
+    /// The player it is credited to (`getEntity()`), by UUID.
+    pub(crate) player: Option<u128>,
+    /// Else the mob it is credited to, by id.
+    pub(crate) mob: Option<u32>,
+    /// Where it came from (`getSourcePosition()`): the knockback's direction.
+    pub(crate) from: Option<[f64; 3]>,
+    /// The horizontal movement of the projectile that dealt it: the knockback's direction instead
+    /// (`Projectile.calculateHorizontalHurtKnockbackDirection`).
+    pub(crate) motion: Option<[f64; 2]>,
 }
 
 fn finite(v: [f64; 3]) -> bool {
@@ -185,6 +204,72 @@ impl Game<'_> {
         };
         m.health = health.min(m.attrs.max_health);
         m.needs_sync = true;
+        true
+    }
+    /// Hurts mob `id` by `amount` as `LivingEntity.hurt(source, amount)` does,
+    /// as `/damage` deals it: its invulnerability frames, armor and effects,
+    /// the knockback (along a projectile's movement, else away from where the
+    /// blow came from), the hurt flash and sound, its anger, and the kill
+    /// credited to the player or mob `hurt` names. A guest's blow is dealt as
+    /// them, unless another guest is in place (then nobody is credited).
+    /// False when it didn't hurt: no such mob, another dimension, an amount
+    /// that isn't finite, or a mob that refused it. API @API:mob_hurt@.
+    pub(super) fn native_hurt_mob(&mut self, dimension: &str, id: u32, amount: f32, hurt: &NativeHurt) -> bool {
+        if !self.native_mob_level(dimension) || !amount.is_finite() || !self.mobs.iter().any(|m| m.id == id && !m.removed) {
+            return false;
+        }
+        let player = hurt.player.and_then(|u| self.player_with_uuid(horizon_client::lan::playerdata::uuid_ints(u)));
+        let attacker = match player {
+            Some(p) if p == self.lan_acting => Some(Who::Player),
+            Some(Some(conn)) if self.lan_acting.is_none() => {
+                let Some(mut host) = self.lan.take() else {
+                    return false;
+                };
+                let hurt_it = self.as_guest(&mut host, conn, |g| g.hurt_mob_by(id, amount, hurt, Some(Who::Player)));
+                // The mob now answers to the guest (`LivingEntity.lastHurtByPlayer`).
+                if hurt_it.is_some() && self.mobs.iter().any(|m| m.id == id) {
+                    host.mob_players.insert(id, conn);
+                }
+                self.lan = Some(host);
+                return hurt_it.unwrap_or(false);
+            }
+            Some(_) => None,
+            None => hurt.mob.filter(|m| self.mobs.iter().any(|x| x.id == *m && !x.removed)).map(Who::Mob),
+        };
+        self.hurt_mob_by(id, amount, hurt, attacker)
+    }
+    fn hurt_mob_by(&mut self, id: u32, amount: f32, hurt: &NativeHurt, attacker: Option<Who>) -> bool {
+        let source = Damage {
+            kind: Self::damage_kind(&hurt.damage_type),
+            attacker,
+            from: hurt.from.filter(|f| finite(*f)),
+        };
+        let aim = self.attacker_aim(attacker);
+        let motion = hurt.motion.filter(|m| m[0].is_finite() && m[1].is_finite());
+        let hurt_it = self.mobs.iter_mut().find(|m| m.id == id && !m.removed).is_some_and(|m| match motion {
+            Some(motion) => m.damage_projectile(amount, source, aim, motion),
+            None => m.damage_aimed(amount, source, aim),
+        });
+        if attacker == Some(Who::Player) {
+            self.last_hurt_by_player.insert(id, self.lan_acting);
+        }
+        if hurt_it {
+            self.resolve_player_responsible(id, source);
+        }
+        hurt_it
+    }
+    /// Knocks mob `id` back as `LivingEntity.knockback(strength, x, z)` does:
+    /// away from (`x`, `z`), less its knockback resistance, and as native mods'
+    /// knockback hooks (`native_living_knockback`) change it. False for no such
+    /// mob, another dimension or numbers that aren't finite. API @API:mob_hurt@.
+    pub(super) fn native_knockback_mob(&mut self, dimension: &str, id: u32, strength: f64, x: f64, z: f64) -> bool {
+        if !self.native_mob_level(dimension) || !finite([strength, x, z]) {
+            return false;
+        }
+        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id && !m.removed) else {
+            return false;
+        };
+        m.knockback(strength, x, z, &Damage::of(DamageKind::Generic));
         true
     }
     /// Kills mob `id` as `/kill` does: it falls and drops its loot. False for

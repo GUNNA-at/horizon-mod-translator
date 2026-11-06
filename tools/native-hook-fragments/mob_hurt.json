@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "a mob hurt by a named damage source and knocked back (`native_hurt_mob`, `native_knockback_mob`).",
+  "doc_summary": "`native_hurt_mob(dimension, id, amount, hurt)` hurts mob `id` as `LivingEntity.hurt(source, amount)` does, as `/damage` deals it: its invulnerability frames, armor and effects, the knockback (along a projectile's horizontal `motion` when `hurt` gives one, else away from `from`, where the blow came from), the hurt flash and sound, its anger and the kill credit. `hurt` names the source as vanilla's `DamageSource` does: `damage_type` (`minecraft:player_attack`; an unknown one deals generic damage), the causing `player` by UUID or `mob` by id, `from` and `motion`. A guest's blow is dealt as that guest, unless another guest is in place (then nobody is credited). `native_knockback_mob(dimension, id, strength, x, z)` pushes it as `LivingEntity.knockback` does, away from (`x`, `z`), less its knockback resistance and as `native_living_knockback` changes it. Both are false for no such mob, another dimension or numbers that aren't finite, and hurting is false when the mob took no damage. Bundles need \"hooks\": @API:mob_hurt@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mobs.rs"
+  ]
+}

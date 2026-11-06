@@ -746,11 +746,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if name == "distanceTo" { V::F(d2.sqrt() as f32) } else { V::D(d2) }
         }
         // What it does, through the game.
+        // As vanilla's `hurt(source, amount)`, through the game: its frames, armor, knockback, the
+        // flash and sound, the kill credited to the source's player or mob. The blow's causing
+        // entity is what last hurt it.
         "hurt" | "hurtServer" => {
             let amount = a(args.len() - 1).f();
-            let hurt = with_host(rt, |h| h.hurt_entity(id, amount)).unwrap_or(false);
+            let source = a(args.len() - 2);
+            let blow = crate::damage::blow_of(rt, source);
+            let hurt = with_host(rt, |h| h.hurt_entity_by(id, amount, &blow)).unwrap_or(false);
             if Rt::tracing() {
-                eprintln!("horizon-compat: {kind} {id} hurt by {amount}: {}", if hurt { "taken" } else { "refused" });
+                eprintln!("horizon-compat: {kind} {id} hurt by {amount} ({}): {}", blow.damage_type, if hurt { "taken" } else { "refused" });
+            }
+            if hurt && living {
+                let by = rt.get_field(source, "$causing");
+                crate::damage::hurt_by(rt, e, by);
             }
             if hurt {
                 let view = rt.host().and_then(|h| h.entity(id));
@@ -786,6 +795,35 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
+        // `LivingEntity.knockback(strength, x, z)`, as the game knocks a mob back: away from the
+        // direction, less its knockback resistance.
+        "knockback" if living && desc.starts_with("(DDD)") => {
+            with_host(rt, |h| h.knockback_entity(id, a(1).d(), a(2).d(), a(3).d()));
+            V::Void
+        }
+        // Whether a blow, the crosshair or a projectile finds it (`isPickable`), as 1.21.1's
+        // classes answer: a living entity, a vehicle, falling block or lit TNT while it's there
+        // (the game doesn't tell an armor stand that is a marker, which isn't), the dragon's parts
+        // (not the dragon), a crystal, a hanging entity, an interaction, a shulker bullet; a
+        // projectile of `#redirectable_projectile` but an arrow (whether one is stuck isn't told);
+        // nothing else (an item, an orb, a cloud).
+        "isPickable" => {
+            let class = rt.class_of(e);
+            let is = |c: &str| is_a(class, c);
+            const E: &str = "net/minecraft/world/entity/";
+            let pickable = if is("net/minecraft/world/entity/boss/enderdragon/EnderDragon") {
+                false
+            } else if ["LivingEntity", "item/FallingBlockEntity", "item/PrimedTnt", "vehicle/AbstractMinecart", "vehicle/Boat"].iter().any(|c| is(&format!("{E}{c}"))) {
+                alive
+            } else if ["boss/EnderDragonPart", "boss/enderdragon/EndCrystal", "decoration/BlockAttachedEntity", "Interaction", "projectile/ShulkerBullet"].iter().any(|c| is(&format!("{E}{c}"))) {
+                true
+            } else if is("net/minecraft/world/entity/projectile/Projectile") {
+                !is("net/minecraft/world/entity/projectile/AbstractArrow") && rt.host().is_some_and(|h| h.entity_type_in_tag(&kind, "minecraft:redirectable_projectile"))
+            } else {
+                false
+            };
+            V::I(i32::from(pickable))
+        }
         // The game keeps the motion; these add to it (a mob's own is not read yet).
         "push" | "addDeltaMovement" | "setDeltaMovement" => {
             let v = if desc.starts_with("(DDD)") { [a(1).d(), a(2).d(), a(3).d()] } else { xyz_of(rt, a(1)) };
@@ -804,7 +842,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "isSpectator" | "isInvisible" | "isOnFire" | "isPassenger" | "isVehicle" | "isShiftKeyDown" | "isCrouching" | "isSilent" | "isNoGravity"
         | "isInWater" | "isInLava" | "isInWaterOrRain" | "isUnderWater" | "isBaby" | "isSleeping" | "isUsingItem" | "isFallFlying" | "fireImmune"
         | "isSprinting" | "isSwimming" | "isInvulnerable" | "isCustomNameVisible" | "hasCustomName" => V::I(0),
-        "isAttackable" | "isPickable" | "canBeCollidedWith" | "isEffectiveAi" | "shouldBeSaved" => V::I(i32::from(name != "canBeCollidedWith")),
+        "isAttackable" | "canBeCollidedWith" | "isEffectiveAi" | "shouldBeSaved" => V::I(i32::from(name != "canBeCollidedWith")),
         "getVehicle" | "getControllingPassenger" | "getFirstPassenger" | "getCustomName" | "getTarget" => V::NULL,
         "getRootVehicle" => e,
         "getPassengers" => crate::jutil::new_list(rt, Vec::new()),
@@ -899,6 +937,76 @@ mod tests {
             api::call(rt, "net/minecraft/world/entity/Entity.kill.()V", &[cart]);
         });
         assert!(host.entities.is_empty(), "the cow died and the minecart broke: {:?}", host.entities);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's blow tells the game its source as 1.21.1's `DamageSource` names it: the type, the
+    /// player (by UUID) or the mob it is credited to and where it came from (that attacker's
+    /// place); a source of none is generic. `knockback` pushes the living mob. The player keeps
+    /// what they last hurt (a living entity only) and when. `isPickable` answers as 1.21.1's
+    /// classes do: a mob, a minecart and an armor stand are; an orb and an arrow aren't; a
+    /// fireball is as `#redirectable_projectile` holds it.
+    #[test]
+    fn a_mods_blow_names_its_source_and_its_knockback_pushes() {
+        const HURT: &str = "net/minecraft/world/entity/LivingEntity.hurt.(Lnet/minecraft/world/damagesource/DamageSource;F)Z";
+        const SET_LAST: &str = "net/minecraft/world/entity/player/Player.setLastHurtMob.(Lnet/minecraft/world/entity/Entity;)V";
+        const LAST: &str = "net/minecraft/world/entity/player/Player.getLastHurtMob.()Lnet/minecraft/world/entity/LivingEntity;";
+        const LAST_AT: &str = "net/minecraft/world/entity/player/Player.getLastHurtMobTimestamp.()I";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        let view = |id: i32, kind: &str, pos: [f64; 3], health: Option<(f32, f32)>| EntityView { id, kind: kind.into(), pos, yaw: 0.0, health };
+        host.entities.extend([
+            view(7, "minecraft:cow", [1.5, 64.0, -2.5], Some((10.0, 10.0))),
+            view(9, "minecraft:zombie", [4.5, 64.0, -2.5], Some((20.0, 20.0))),
+            view(8, "minecraft:minecart", [4.5, 64.0, 0.5], None),
+            view(10, "minecraft:armor_stand", [0.5, 64.0, 0.5], Some((20.0, 20.0))),
+            view(11, "minecraft:experience_orb", [0.5, 64.0, 0.5], None),
+            view(12, "minecraft:fireball", [0.5, 70.0, 0.5], None),
+            view(13, "minecraft:arrow", [0.5, 70.0, 0.5], None),
+        ]);
+        host.entity_tags.insert("minecraft:redirectable_projectile".into(), vec!["minecraft:fireball".into(), "minecraft:wind_charge".into()]);
+        let pickable = rt.with_host(&mut host, |rt| {
+            let cow = of(rt, 7, "minecraft:cow", None);
+            let player = crate::menus::server_player(rt, 42);
+            for (f, v) in [("$x", 1.5), ("$y", 64.0), ("$z", 1.5)] {
+                rt.put_field(player, f, V::D(v));
+            }
+            let by_player = crate::damage::source(rt, "minecraft:player_attack", player, player, V::NULL);
+            assert_eq!(api::call(rt, HURT, &[cow, by_player, V::F(3.0)]), V::I(1));
+            let zombie = of(rt, 9, "minecraft:zombie", None);
+            let by_zombie = crate::damage::source(rt, "minecraft:mob_attack", zombie, zombie, V::NULL);
+            assert_eq!(api::call(rt, HURT, &[cow, by_zombie, V::F(2.0)]), V::I(1));
+            assert_eq!(api::call(rt, HURT, &[cow, V::NULL, V::F(1.0)]), V::I(1));
+            api::call(rt, "net/minecraft/world/entity/LivingEntity.knockback.(DDD)V", &[cow, V::D(0.4), V::D(-1.0), V::D(0.0)]);
+
+            rt.put_field(player, "tickCount", V::I(17));
+            api::call(rt, SET_LAST, &[player, cow]);
+            assert_eq!(api::call(rt, LAST, &[player]), cow);
+            assert_eq!(api::call(rt, LAST_AT, &[player]), V::I(17));
+            let cart = of(rt, 8, "minecraft:minecart", None);
+            rt.put_field(player, "tickCount", V::I(18));
+            api::call(rt, SET_LAST, &[player, cart]);
+            assert_eq!(api::call(rt, LAST, &[player]), V::NULL, "a minecart isn't living");
+            assert_eq!(api::call(rt, LAST_AT, &[player]), V::I(18));
+
+            [(7, "minecraft:cow"), (8, "minecraft:minecart"), (10, "minecraft:armor_stand"), (11, "minecraft:experience_orb"), (12, "minecraft:fireball"), (13, "minecraft:arrow")].map(|(id, kind)| {
+                let e = of(rt, id, kind, None);
+                api::call(rt, "net/minecraft/world/entity/Entity.isPickable.()Z", &[e]).i()
+            })
+        });
+        assert_eq!(pickable, [1, 1, 1, 0, 1, 0]);
+        let blow = |damage_type: &str, player: Option<u128>, mob: Option<i32>, from: Option<[f64; 3]>| crate::host::HurtBy { damage_type: damage_type.into(), player, mob, from, motion: None };
+        assert_eq!(
+            host.blows,
+            vec![
+                (7, 3.0, blow("minecraft:player_attack", Some(42), None, Some([1.5, 64.0, 1.5]))),
+                (7, 2.0, blow("minecraft:mob_attack", None, Some(9), Some([4.5, 64.0, -2.5]))),
+                (7, 1.0, blow("minecraft:generic", None, None, None)),
+            ]
+        );
+        assert_eq!(host.entities.iter().find(|e| e.id == 7).and_then(|e| e.health), Some((4.0, 10.0)));
+        assert_eq!(host.knockbacks, vec![(7, 0.4, -1.0, 0.0)]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

@@ -665,13 +665,41 @@ fn actor(rt: &mut Rt, id: i32, causes: bool) -> V {
 /// Records `by`, a hit's causing entity, as what last hurt `victim` (`LivingEntity.setLastHurtByMob`),
 /// and a player also as the last player that did (`lastHurtByPlayer`): a living one only, as
 /// vanilla's. What `getLastHurtByMob` and `getKillCredit` (the player first) answer.
-fn hurt_by(rt: &mut Rt, victim: V, by: V) {
+pub(crate) fn hurt_by(rt: &mut Rt, victim: V, by: V) {
     if victim.r() != 0 && by.r() != 0 && rt.instance_of(by, LIVING) {
         rt.put_field(victim, "$lastHurtBy", by);
         if rt.instance_of(by, PLAYER) {
             rt.put_field(victim, "$lastHurtByPlayer", by);
         }
     }
+}
+
+/// A mod's `DamageSource` as the game takes a blow's (`Host::hurt_entity_by`): its type, the
+/// player (by UUID) or the game's mob (by id) it is credited to (`getEntity()`), where it came from
+/// (`getSourcePosition()`), and, dealt by a mod's projectile, that one's horizontal movement
+/// (`Projectile.calculateHorizontalHurtKnockbackDirection`, which the knockback goes along).
+pub(crate) fn blow_of(rt: &mut Rt, s: V) -> crate::host::HurtBy {
+    if s.r() == 0 {
+        return crate::host::HurtBy { damage_type: "minecraft:generic".into(), ..Default::default() };
+    }
+    let causing = rt.get_field(s, "$causing");
+    let player = (causing.r() != 0 && crate::api_common::is_player_class(rt.class_of(causing)))
+        .then(|| crate::network::player_uuid(rt, causing).or_else(|| rt.host().and_then(|h| h.player_id())))
+        .flatten();
+    let mob = (player.is_none() && crate::vanilla_entities::is_proxy(rt, causing)).then(|| crate::vanilla_entities::id(rt, causing));
+    let at = call_source(rt, "getSourcePosition", "()Lnet/minecraft/world/phys/Vec3;", s);
+    let from = (at.r() != 0).then(|| ["x", "y", "z"].map(|f| rt.get_field(at, f).d()));
+    let direct = rt.get_field(s, "$direct");
+    let motion = rt.get_field(direct, "$motion");
+    let projectile = direct.r() != 0 && motion.r() != 0 && crate::projectiles::is_projectile_class(crate::mod_entities::vanilla_base(rt, direct));
+    let motion = projectile.then(|| [rt.get_field(motion, "x").d(), rt.get_field(motion, "z").d()]);
+    let id = type_id(rt, s);
+    crate::host::HurtBy { damage_type: if id.is_empty() { "minecraft:generic".into() } else { id }, player, mob, from, motion }
+}
+
+fn call_source(rt: &mut Rt, name: &str, desc: &str, s: V) -> V {
+    let k = rt.static_key(&format!("{SOURCE}.{name}.{desc}"));
+    crate::api::call(rt, k, &[s])
 }
 
 /// The `DamageSource` of a hit as the hooks name it.

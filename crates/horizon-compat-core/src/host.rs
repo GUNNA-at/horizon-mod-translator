@@ -148,6 +148,22 @@ pub struct ItemEntity {
     pub age: u32,
 }
 
+/// A blow's source as [`Host::hurt_entity_by`] takes it (vanilla's `DamageSource`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HurtBy {
+    /// Its damage type (`minecraft:thrown`, a mod's own `create:potato_cannon`).
+    pub damage_type: String,
+    /// The player it is credited to (`getEntity()`), by UUID.
+    pub player: Option<u128>,
+    /// Else the mob it is credited to (`getEntity()`), by entity id.
+    pub mob: Option<i32>,
+    /// Where it came from (`getSourcePosition()`): the knockback's direction.
+    pub from: Option<[f64; 3]>,
+    /// The horizontal movement of the projectile that dealt it (`getDirectEntity()`'s,
+    /// `Projectile.calculateHorizontalHurtKnockbackDirection`): the knockback's direction instead.
+    pub motion: Option<[f64; 2]>,
+}
+
 /// An entity of the server level in place, as translated code reads it (`Level.getEntity(id)`):
 /// a mob, a minecart, a boat, an armour stand, an item...
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -839,6 +855,18 @@ pub trait Host {
     fn hurt_entity(&mut self, _id: i32, _amount: f32) -> bool {
         false
     }
+    /// Hurts the living mob `id` by `amount` as `LivingEntity.hurt(source, amount)` does, the
+    /// source told (`by`): its invulnerability frames, armor and effects, the knockback, the hurt
+    /// flash and sound, the mob's anger and the kill credited. Whether it was hurt. A host that
+    /// can't tell sources hurts it as [`Host::hurt_entity`].
+    fn hurt_entity_by(&mut self, id: i32, amount: f32, _by: &HurtBy) -> bool {
+        self.hurt_entity(id, amount)
+    }
+    /// Knocks the living mob `id` back as `LivingEntity.knockback(strength, x, z)` does: away from
+    /// the direction (`x`, `z`), less its knockback resistance. False for no such mob.
+    fn knockback_entity(&mut self, _id: i32, _strength: f64, _x: f64, _z: f64) -> bool {
+        false
+    }
     /// Kills entity `id` as `/kill` does (`Entity.kill`): a mob dies with its loot, a vehicle
     /// breaks. False when the level holds no such entity.
     fn kill_entity(&mut self, _id: i32) -> bool {
@@ -1276,6 +1304,10 @@ pub struct MemoryHost {
     pub item_entities: Vec<ItemEntity>,
     /// The level's other entities ([`Host::entity`]); one killed or removed leaves the list.
     pub entities: Vec<EntityView>,
+    /// The blows told with their sources ([`Host::hurt_entity_by`]), in order: entity, amount, source.
+    pub blows: Vec<(i32, f32, HurtBy)>,
+    /// The knockbacks given ([`Host::knockback_entity`]), in order: entity, strength, x, z.
+    pub knockbacks: Vec<(i32, f64, f64, f64)>,
     /// Entity type tags: tag → entity types.
     pub entity_tags: HashMap<String, Vec<String>>,
     /// The whole stacks of the item entities spawned with their data ([`Host::spawn_stack_entity`]), by id.
@@ -1715,6 +1747,17 @@ impl Host for MemoryHost {
             self.entities.retain(|e| e.id != id);
         }
         true
+    }
+    fn hurt_entity_by(&mut self, id: i32, amount: f32, by: &HurtBy) -> bool {
+        self.blows.push((id, amount, by.clone()));
+        self.hurt_entity(id, amount)
+    }
+    fn knockback_entity(&mut self, id: i32, strength: f64, x: f64, z: f64) -> bool {
+        let living = self.entities.iter().any(|e| e.id == id && e.health.is_some());
+        if living {
+            self.knockbacks.push((id, strength, x, z));
+        }
+        living
     }
     fn kill_entity(&mut self, id: i32) -> bool {
         let had = self.entities.len();

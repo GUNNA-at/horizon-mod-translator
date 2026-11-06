@@ -271,8 +271,105 @@ fn projectile_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V])
         // Vanilla's projectiles' own synched data (an item's stack, an arrow's flags) isn't kept: a
         // mod's comes after the entity's on both sides alike.
         "defineSynchedData" => V::Void,
+        // Its saved data, as 1.21.1's classes write it: a projectile's owner (`Owner`, when it has
+        // one), `LeftOwner` (only once it has), `HasBeenShot`; a hurting one's
+        // `acceleration_power`; a thrown item's stack (`Item`). An arrow's isn't modelled.
+        "addAdditionalSaveData" if !is(ARROW) => {
+            save(rt, owner, e, a(1));
+            V::Void
+        }
+        "readAdditionalSaveData" if !is(ARROW) => {
+            load(rt, owner, e, a(1));
+            V::Void
+        }
         _ => return None,
     })
+}
+
+const GET_THROWN_ITEM: Virtual = ("net/minecraft/world/entity/projectile/ThrowableItemProjectile.getItem.()Lnet/minecraft/world/item/ItemStack;", "getItem.()Lnet/minecraft/world/item/ItemStack;");
+const SET_ITEM: Virtual = ("net/minecraft/world/entity/projectile/ThrowableItemProjectile.setItem.(Lnet/minecraft/world/item/ItemStack;)V", "setItem.(Lnet/minecraft/world/item/ItemStack;)V");
+
+fn registries_of(rt: &mut Rt, e: V) -> V {
+    let level = rt.get_field(e, "$level");
+    api::call(rt, "net/minecraft/world/level/Level.registryAccess.()Lnet/minecraft/core/RegistryAccess;", &[level])
+}
+
+/// `addAdditionalSaveData` of vanilla's projectile class `owner` (and those above it) for `e`.
+fn save(rt: &mut Rt, owner: &str, e: V, tag: V) {
+    let own = rt.get_field(e, "$ownerUUID");
+    if own.r() != 0 {
+        let k = rt.string("Owner");
+        api::call(rt, "net/minecraft/nbt/CompoundTag.putUUID.(Ljava/lang/String;Ljava/util/UUID;)V", &[tag, k, own]);
+    }
+    if rt.get_field(e, "$leftOwner").i() != 0 {
+        let k = rt.string("LeftOwner");
+        api::call(rt, "net/minecraft/nbt/CompoundTag.putBoolean.(Ljava/lang/String;Z)V", &[tag, k, V::I(1)]);
+    }
+    let (k, shot) = (rt.string("HasBeenShot"), V::I(rt.get_field(e, "$hasBeenShot").i()));
+    api::call(rt, "net/minecraft/nbt/CompoundTag.putBoolean.(Ljava/lang/String;Z)V", &[tag, k, shot]);
+    if crate::vanilla_entities::is_a(owner, HURTING) {
+        let (k, power) = (rt.string("acceleration_power"), V::D(rt.get_field(e, "accelerationPower").d()));
+        api::call(rt, "net/minecraft/nbt/CompoundTag.putDouble.(Ljava/lang/String;D)V", &[tag, k, power]);
+    }
+    if crate::vanilla_entities::is_a(owner, THROWN_ITEM) {
+        let item = api::virtual_call(rt, GET_THROWN_ITEM, &[e]);
+        if rt.thrown.is_some() {
+            return;
+        }
+        let registries = registries_of(rt, e);
+        let saved = api::call(rt, "net/minecraft/world/item/ItemStack.save.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/Tag;", &[item, registries]);
+        if rt.thrown.is_some() {
+            return;
+        }
+        let k = rt.string("Item");
+        api::call(rt, "net/minecraft/nbt/CompoundTag.put.(Ljava/lang/String;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;", &[tag, k, saved]);
+    }
+}
+
+/// `readAdditionalSaveData` of vanilla's projectile class `owner` (and those above it) for `e`:
+/// [`save`]'s keys back (an owner named is found again by its UUID); a thrown item without a
+/// readable `Item` holds its class's default item.
+fn load(rt: &mut Rt, owner: &str, e: V, tag: V) {
+    let k = rt.string("Owner");
+    if api::call(rt, "net/minecraft/nbt/CompoundTag.hasUUID.(Ljava/lang/String;)Z", &[tag, k]).i() != 0 {
+        let uuid = api::call(rt, "net/minecraft/nbt/CompoundTag.getUUID.(Ljava/lang/String;)Ljava/util/UUID;", &[tag, k]);
+        rt.put_field(e, "$ownerUUID", uuid);
+        rt.put_field(e, "$owner", V::NULL);
+    }
+    for (key, field) in [("LeftOwner", "$leftOwner"), ("HasBeenShot", "$hasBeenShot")] {
+        let k = rt.string(key);
+        let b = api::call(rt, "net/minecraft/nbt/CompoundTag.getBoolean.(Ljava/lang/String;)Z", &[tag, k]);
+        rt.put_field(e, field, V::I(b.i()));
+    }
+    if crate::vanilla_entities::is_a(owner, HURTING) {
+        let k = rt.string("acceleration_power");
+        if api::call(rt, "net/minecraft/nbt/CompoundTag.contains.(Ljava/lang/String;I)Z", &[tag, k, V::I(6)]).i() != 0 {
+            let power = api::call(rt, "net/minecraft/nbt/CompoundTag.getDouble.(Ljava/lang/String;)D", &[tag, k]);
+            rt.put_field(e, "accelerationPower", V::D(power.d()));
+        }
+    }
+    if crate::vanilla_entities::is_a(owner, THROWN_ITEM) {
+        let k = rt.string("Item");
+        let read = if api::call(rt, "net/minecraft/nbt/CompoundTag.contains.(Ljava/lang/String;I)Z", &[tag, k, V::I(10)]).i() != 0 {
+            let registries = registries_of(rt, e);
+            let saved = api::call(rt, "net/minecraft/nbt/CompoundTag.getCompound.(Ljava/lang/String;)Lnet/minecraft/nbt/CompoundTag;", &[tag, k]);
+            let parsed = api::call(rt, "net/minecraft/world/item/ItemStack.parse.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/Tag;)Ljava/util/Optional;", &[registries, saved]);
+            rt.get_field(parsed, "value")
+        } else {
+            V::NULL
+        };
+        let stack = if read.r() != 0 {
+            read
+        } else {
+            let item = crate::mod_entities::on_base(rt, e, "getDefaultItem.()Lnet/minecraft/world/item/Item;", &[]);
+            let s = rt.new_object(ITEM_STACK);
+            api::call(rt, "net/minecraft/world/item/ItemStack.<init>.(Lnet/minecraft/world/level/ItemLike;)V", &[s, item]);
+            s
+        };
+        if rt.thrown.is_none() {
+            api::virtual_call(rt, SET_ITEM, &[e, stack]);
+        }
+    }
 }
 
 /// The constructors of vanilla's projectile classes, by their arguments (the same in each class
@@ -1412,5 +1509,80 @@ mod tests {
         assert_eq!(rt.class_of(thrown), "java/lang/IllegalStateException");
         assert_eq!(rt.statics.get("t.tests"), Some(&V::I(1)));
         assert!(!rt.statics.contains_key("t.weapon"), "no listener told");
+    }
+
+    /// A blow a mod's projectile deals tells the game the projectile's movement (vanilla knocks
+    /// the target back along it) and the thrower it is credited to; the projectile saves and loads
+    /// what 1.21.1's thrown item does: its owner by UUID, `LeftOwner` once it has, `HasBeenShot`
+    /// and its stack (`Item`); one loaded with no stack holds its class's default item.
+    #[test]
+    fn a_mod_projectiles_blow_follows_its_path_and_it_saves_its_owner_and_stack() {
+        const HURT: &str = "net/minecraft/world/entity/LivingEntity.hurt.(Lnet/minecraft/world/damagesource/DamageSource;F)Z";
+        const NEW: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V";
+        const SAVE: &str = "net/minecraft/world/entity/Entity.saveWithoutId.(Lnet/minecraft/nbt/CompoundTag;)Lnet/minecraft/nbt/CompoundTag;";
+        const LOAD: &str = "net/minecraft/world/entity/Entity.load.(Lnet/minecraft/nbt/CompoundTag;)V";
+        const ITEM: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile.getItem.()Lnet/minecraft/world/item/ItemStack;";
+        const SET: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile.setItem.(Lnet/minecraft/world/item/ItemStack;)V";
+        const OWNER: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile.setOwner.(Lnet/minecraft/world/entity/Entity;)V";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.supers.insert(PEBBLE, THROWN);
+        let ty = rt.new_object("net/minecraft/world/entity/EntityType");
+        rt.put_field(ty, "$width", V::F(0.25));
+        rt.put_field(ty, "$height", V::F(0.25));
+        let mut host = MemoryHost::default();
+        host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)) });
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let player = crate::menus::server_player(rt, 42);
+            let pebble = rt.new_object(PEBBLE);
+            api::call(rt, AT, &[pebble, ty, V::D(0.5), V::D(64.5), V::D(2.5), level]);
+            api::call(rt, MOTION, &[pebble, V::D(0.25), V::D(-0.1), V::D(1.0)]);
+            api::call(rt, OWNER, &[pebble, player]);
+            let cow = crate::vanilla_entities::of(rt, 7, "minecraft:cow", None);
+            let source = crate::damage::source(rt, "minecraft:thrown", pebble, player, V::NULL);
+            assert_eq!(api::call(rt, HURT, &[cow, source, V::F(2.0)]), V::I(1));
+
+            let snowballs = crate::api_common::stack(rt, "minecraft:snowball", 3);
+            api::call(rt, SET, &[pebble, snowballs]);
+            rt.put_field(pebble, "$leftOwner", V::I(1));
+            let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
+            api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
+            api::call(rt, SAVE, &[pebble, tag]);
+            let key = |rt: &mut Rt, k: &str| rt.string(k);
+            let k = key(rt, "Owner");
+            let owner = api::call(rt, "net/minecraft/nbt/CompoundTag.getUUID.(Ljava/lang/String;)Ljava/util/UUID;", &[tag, k]);
+            assert_eq!(crate::tags::uuid_bits(rt, owner), (0, 42));
+            for (k, want) in [("LeftOwner", 1), ("HasBeenShot", 0)] {
+                let k = key(rt, k);
+                assert_eq!(api::call(rt, "net/minecraft/nbt/CompoundTag.getBoolean.(Ljava/lang/String;)Z", &[tag, k]), V::I(want));
+            }
+
+            let again = rt.new_object(PEBBLE);
+            api::call(rt, NEW, &[again, ty, level]);
+            api::call(rt, LOAD, &[again, tag]);
+            assert!(rt.thrown.is_none());
+            let stack = api::call(rt, ITEM, &[again]);
+            let snowball = api::get_static(rt, "net/minecraft/world/item/Items.SNOWBALL");
+            assert_eq!(api::call(rt, "net/minecraft/world/item/ItemStack.is.(Lnet/minecraft/world/item/Item;)Z", &[stack, snowball]), V::I(1));
+            assert_eq!(api::call(rt, "net/minecraft/world/item/ItemStack.getCount.()I", &[stack]), V::I(1));
+            let owned_by = "net/minecraft/world/entity/projectile/ThrowableItemProjectile.ownedBy.(Lnet/minecraft/world/entity/Entity;)Z";
+            assert_eq!(api::call(rt, owned_by, &[again, player]), V::I(1));
+            // Saved again, it writes what it read.
+            let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
+            api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
+            api::call(rt, SAVE, &[again, tag]);
+            let k = key(rt, "LeftOwner");
+            assert_eq!(api::call(rt, "net/minecraft/nbt/CompoundTag.getBoolean.(Ljava/lang/String;)Z", &[tag, k]), V::I(1));
+        });
+        let blow = crate::host::HurtBy {
+            damage_type: "minecraft:thrown".into(),
+            player: Some(42),
+            mob: None,
+            from: Some([0.5, 64.5, 2.5]),
+            motion: Some([0.25, 1.0]),
+        };
+        assert_eq!(host.blows, vec![(7, 2.0, blow)]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

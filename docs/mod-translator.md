@@ -4951,6 +4951,51 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Tests: `codecs::tests::a_registrys_codecs_read_vanillas_entries_by_name`,
     `codecs::tests::a_food_written_out_in_full_reads_its_effects` (Create's pufferfish projectile's
     `food_property`).
+- [x] 2026-11-06 Part 54: a mod's blow is the game's own; knockback, a drop at an entity's feet, what a player last hurt, what a blow can find, a projectile's saved data.
+  Measured in game (Part 52's potato round, the gaps it left): Create's potato hurt the cow through
+  `Host::hurt_entity` (health only: no hurt flash, sound, invulnerability frames, knockback or kill
+  credit), and `spawnAtLocation`, `LivingEntity.knockback`, `setLastHurtMob`, `isPickable` and the
+  projectile's `addAdditionalSaveData` were unmapped. Over the pack (367 jars), classes outside
+  `net/minecraft/` call `LivingEntity.hurt(DamageSource, float)` in 58 jars (363 sites),
+  `isPickable` in 16 (34), `spawnAtLocation` in 13 (17), `knockback(DDD)` in 11 (26) and
+  `setLastHurtMob` in 9 (18); Create calls all five.
+  - A mod's blow on a vanilla entity names its source to the game (`Host::hurt_entity_by`,
+    `HurtBy`): the damage type, the player it is credited to by UUID (else the mob by id), where it
+    came from (`getSourcePosition`) and, dealt by a mod's projectile, that projectile's horizontal
+    movement. The game deals it as `/damage` does (`native_hurt_mob`, API @API:mob_hurt@): the
+    mob's invulnerability frames, armor and effects, knockback along the projectile's path (else
+    away from where the blow came from), the hurt flash and sound, its anger, and the kill credited
+    to that player (a guest's blow is dealt as that guest) or mob.
+  - `LivingEntity.knockback(strength, x, z)` on a vanilla mob pushes it as vanilla does, less its
+    knockback resistance and as native mods' knockback hooks change it (`native_knockback_mob`).
+  - `Entity.spawnAtLocation(stack[, offsetY])` (and an item's) on a mod's entity: a new item entity at
+    its feet raised by the offset, with vanilla's random sideways motion, 0.2 up and the default
+    pickup delay (10 ticks), added to the level; none for an empty stack or on a client.
+  - A player keeps what they last hurt (`setLastHurtMob`: a living entity only, else none) and when
+    (their `tickCount`), as `getLastHurtMob` and `getLastHurtMobTimestamp` ask.
+  - `isPickable` as 1.21.1's classes answer it: a living entity, a vehicle, a falling block or lit TNT
+    while there, the dragon's parts but not the dragon, a crystal, a hanging entity, an interaction, a
+    shulker bullet, a projectile of `#redirectable_projectile` (not an arrow); an item never.
+  - A mod's projectile with no save data of its own saves and loads its vanilla class's, as 1.21.1
+    writes it: `Owner` (by UUID, found again when asked), `LeftOwner` (only once it has),
+    `HasBeenShot`, a hurting projectile's `acceleration_power`, a thrown item's stack (`Item`; one
+    with no readable stack holds its class's default item).
+  - Not modelled: a mod's damage hooks fired inside the mod's own call (the bundle's runtime is busy
+    then, and skips them), `EnchantmentHelper.doPostAttackEffects`, the game's tamed wolves hearing
+    of `setLastHurtMob`, an armor stand that is a marker (the game doesn't tell it), whether an arrow
+    is stuck, an arrow's saved data.
+  - Tests: `vanilla_entities::tests::a_mods_blow_names_its_source_and_its_knockback_pushes`,
+    `projectiles::tests::a_mod_projectiles_blow_follows_its_path_and_it_saves_its_owner_and_stack`,
+    `mod_entities::tests::a_mod_entity_drops_a_stack_at_its_feet`.
+  - In game (the potato round): none of Create's 25 potato projectile types is left out any
+    more (Part 53). The cannon fires its 3 shots; two potatoes hit the cow, each dealt by the game as
+    `create:potato_cannon` for 5 (`hurt by 5 (create:potato_cannon): taken`), and the cow dies of the
+    second, its loot on the ground. For those blows the game fires `living_incoming_damage`,
+    `living_damage_pre`, `living_damage_post` and `living_knockback`, which the bundle skips: they run
+    inside Create's own call (next). Gone from the round's unmapped calls since Part 52: `isPickable`
+    (an item entity), `LivingEntity.knockback` (the cow), `setLastHurtMob` (the player), the potato's
+    `addAdditionalSaveData` and `readAdditionalSaveData`, and its `spawnAtLocation`; left in this
+    area: `EnchantmentHelper.doPostAttackEffects`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

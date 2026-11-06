@@ -101,7 +101,7 @@ impl Game<'_> {
 
     // ---- /damage ----------------------------------------------------------------
 
-    fn damage_kind(ty: &str) -> DamageKind {
+    pub(crate) fn damage_kind(ty: &str) -> DamageKind {
         match ty.trim_start_matches("minecraft:") {
             "player_attack" => DamageKind::PlayerAttack,
             "mace_smash" => DamageKind::MaceSmash,
