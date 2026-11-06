@@ -3852,6 +3852,41 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   Tests `chat::tests::item_arguments_take_a_mods_component_types`, `items::tests::a_tables_copies_from_the_block_entity`,
   `glue::tests::a_block_entitys_kept_components_are_saved_with_it`, and the placement test now breaking the pot. 375
   compat, 17 translator and the items tests pass; the game tests (48, with `chat::tests` and the hook catalog) pass.
+- [x] 2026-11-06 Part 18: NeoForge's `FakePlayer`; the cooking pot's recipe lookup (`RecipeManager.createCheck`,
+  `RecipeWrapper`, `RecipeMatcher`).
+  - Round 13 in game: `/give` with `farmersdelight:meal` works; the placed pot shows the stew (display slot 6); the
+    player picked the dropped pot up at once, so the scenario now reads the player's inventory for it. The log
+    showed a new miss: `RecipeManager.createCheck`, so the pot found no recipe and never cooked.
+  - Fake players (`compat/fake_players.rs`, first in the call chain). A mod makes one to act in the world by itself:
+    Create's deployer holds and uses its item through `DeployerFakePlayer`, other mods through
+    `FakePlayerFactory.get`. Before this, a call on one (`setItemInHand`, `getMainHandItem`, `getInventory`) fell to
+    the player modules, which answer for the acting player: the deployer would have taken and given the real
+    player's items. Now `FakePlayer.<init>` gives the object its own state: level, profile, place, look, sneaking,
+    an entity id below the game's (negative), and an inventory of 41 slots of its own (`$slots`: 36, armor, off hand).
+    - Its calls are answered from that state: identity through its profile (a mod's profile class overrides
+      `getId`/`getName`, as Create's `DeployerGameProfile` does: called virtually), place and look, eye height, box,
+      view vector and facing, hands and equipment slots, `addItem`, sneaking, and `FakePlayer`'s own overrides (no
+      messages, stats or menus; invulnerable; `isFakePlayer`; rides nothing; its server). The rest go on to the
+      other modules as `ServerPlayer`'s (a mod subclass's inherited calls reach the API as `FakePlayer.x`; they are
+      forwarded as `ServerPlayer.x`).
+    - `instanceof`: `FakePlayer` is a `ServerPlayer`, `Player`, `LivingEntity` and `Entity` (`api_is_a`).
+    - `Inventory` calls on a fake player's inventory reach its own slots (`menus.rs`: the inventory call runs with
+      `FAKE_INVENTORY` set, read by `inventory_get`/`inventory_set`, the selected slot, `infinite` (never),
+      `whole_inventory` (always) and drops (`fake_drop`: from its place and look, into the level)).
+    - New for every player's inventory: `Inventory.save(ListTag)`, `load(ListTag)` (vanilla's `Slot` numbers: 0-35,
+      armor 100-103, off hand 150) and `dropAll()`. The deployer saves its fake player's inventory as `Inventory`
+      and loads it when it makes the player again.
+  - Recipes: `RecipeManager.createCheck(type)` gives a `CachedCheck` whose `getRecipeFor(input, level)` finds the
+    type's first matching recipe, the last one found tried first (vanilla's cache). NeoForge's `RecipeWrapper`
+    (an item handler as a `RecipeInput`: `getItem`, `size`, `isEmpty` through the handler's own methods, so a mod's
+    handler answers) is modelled by hand now, so it left the data class table. NeoForge's
+    `RecipeMatcher.findMatches(inputs, tests)` is ported from its bytecode (the claim pass, then backtracking), so a
+    mod reading the pairing gets NeoForge's.
+  - Tests `fake_players::tests` (hands and inventory its own, the acting player's untouched; place, look, facing,
+    UUID and id; save and load), `recipes::tests::a_cached_check_finds_the_recipe_a_pots_slots_hold` (FD's `matches`
+    as the mod writes it, through `RecipeWrapper` and `RecipeMatcher`), `recipe_matcher_pairs_inputs_as_neoforge_does`
+    (pairings worked by hand from NeoForge's algorithm). 380 compat and 17 translator tests pass.
+  - The round scenario now hands a deployer three iron ingots (`interact`) and reads what it saves (`Inventory`).
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick

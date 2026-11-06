@@ -24,6 +24,7 @@ pub mod capabilities;
 pub mod enchantments;
 pub mod entities;
 pub mod events;
+pub mod fake_players;
 pub mod files;
 pub mod convention;
 pub mod creative;

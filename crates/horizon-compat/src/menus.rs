@@ -307,6 +307,9 @@ pub fn init_player(rt: &mut Rt, p: V) {
 /// host says.
 pub fn inventory(rt: &mut Rt, p: V) -> V {
     let mut inv = rt.get_field(p, "$inventory");
+    if crate::fake_players::is_fake(rt, p) {
+        return inv;
+    }
     if inv.r() == 0 {
         inv = rt.new_object(INVENTORY);
         rt.put_field(inv, "player", p);
@@ -337,7 +340,7 @@ fn is_client_player(rt: &Rt, p: V) -> bool {
 
 /// `Player.hasInfiniteMaterials()`: a creative player.
 fn infinite(rt: &Rt) -> bool {
-    rt.host().is_some_and(|h| h.player_creative())
+    fake_inventory().is_none() && rt.host().is_some_and(|h| h.player_creative())
 }
 
 /// `Player.drop(stack, includeThrowerName)` on a server: an item entity from the player's eyes less
@@ -345,6 +348,13 @@ fn infinite(rt: &Rt) -> bool {
 /// too). A client's drops are the server's to make.
 fn drop(rt: &mut Rt, stack: V) {
     if is_empty(rt, stack) || crate::neo::is_client(rt) {
+        return;
+    }
+    if let Some(inv) = fake_inventory() {
+        let p = rt.get_field(inv, "player");
+        let whole = copy(rt, stack);
+        fake_drop(rt, p, whole, false);
+        set_count(rt, stack, 0);
         return;
     }
     let Some(whole) = crate::hand::hand_stack_of(rt, stack) else { return };
@@ -423,6 +433,20 @@ fn player_drop(rt: &mut Rt, p: V, stack: V, around: bool) -> V {
 }
 
 const ADD_FRESH_ENTITY: &str = "net/minecraft/world/level/Level.addFreshEntity.(Lnet/minecraft/world/entity/Entity;)Z";
+
+/// [`player_drop`] for a fake player (`fake_players`): from where it stands and looks, into the
+/// level it acts in.
+pub(crate) fn fake_drop(rt: &mut Rt, p: V, stack: V, around: bool) -> V {
+    if is_empty(rt, stack) || crate::neo::is_client(rt) {
+        return V::NULL;
+    }
+    let (feet, yaw, pitch, eye) = crate::fake_players::stand(rt, p);
+    let (at, motion) = throw(rt, feet, eye, Some((yaw, pitch)), around);
+    let e = crate::entities::unspawned(rt, at, stack, motion, 40);
+    let level = crate::glue::level(rt);
+    crate::api::call(rt, ADD_FRESH_ENTITY, &[level, e]);
+    e
+}
 
 // ---- menus ----
 
@@ -1498,6 +1522,9 @@ fn slot_try_remove(rt: &mut Rt, slot: V, n: i32, decrement: i32, player: V) -> O
 
 /// `Inventory.getItem(slot)`: the acting player's, by vanilla's numbering.
 pub(crate) fn inventory_get(rt: &mut Rt, slot: i32) -> V {
+    if let Some(inv) = fake_inventory() {
+        return crate::fake_players::slot(rt, inv, slot);
+    }
     match u8::try_from(slot) {
         Ok(s) if s <= 40 => crate::hand::slot_stack(rt, s),
         _ => empty(rt),
@@ -1505,6 +1532,9 @@ pub(crate) fn inventory_get(rt: &mut Rt, slot: i32) -> V {
 }
 
 pub(crate) fn inventory_set(rt: &mut Rt, slot: i32, s: V) {
+    if let Some(inv) = fake_inventory() {
+        return crate::fake_players::set_slot(rt, inv, slot, s);
+    }
     if let Ok(i) = u8::try_from(slot)
         && i <= 40
     {
@@ -1514,7 +1544,25 @@ pub(crate) fn inventory_set(rt: &mut Rt, slot: i32, s: V) {
 
 /// Whether the host reaches the whole inventory, so stacks go where vanilla's `Inventory` puts them.
 fn whole_inventory(rt: &Rt) -> bool {
-    rt.host().is_some_and(|h| h.player_inventory())
+    fake_inventory().is_some() || rt.host().is_some_and(|h| h.player_inventory())
+}
+
+thread_local! {
+    /// The fake player's inventory (`fake_players`) an `Inventory` call is on, while it runs: its
+    /// slots are its own, never the acting player's.
+    static FAKE_INVENTORY: std::cell::Cell<V> = const { std::cell::Cell::new(V::NULL) };
+}
+
+fn fake_inventory() -> Option<V> {
+    Some(FAKE_INVENTORY.get()).filter(|v| v.r() != 0)
+}
+
+/// The hotbar slot in hand: a fake player's own, else the one the host says.
+fn selected_slot(rt: &Rt) -> i32 {
+    match fake_inventory() {
+        Some(inv) => crate::fake_players::selected(rt, inv),
+        None => rt.host().map_or(0, |h| i32::from(h.player_selected().min(8))),
+    }
 }
 
 /// `Inventory.getMaxStackSize(stack)`: the inventory's 99 or the stack's own, the lesser.
@@ -1532,7 +1580,7 @@ fn has_room_for(rt: &mut Rt, there: V, s: V) -> bool {
 /// `Inventory.getSlotWithRemainingSpace(stack)`: the selected slot, the off hand, then the first
 /// slot that holds the same and has room.
 fn slot_with_room(rt: &mut Rt, s: V) -> i32 {
-    let selected = rt.host().map_or(0, |h| i32::from(h.player_selected().min(8)));
+    let selected = selected_slot(rt);
     for i in [selected, 40].into_iter().chain(0..36) {
         let there = inventory_get(rt, i);
         if has_room_for(rt, there, s) {
@@ -1644,8 +1692,74 @@ fn place_back(rt: &mut Rt, inv: V, s: V) {
     }
 }
 
-/// The calls of the player's `Inventory`.
+/// The calls of a player's `Inventory`: a fake player's on its own slots, else the acting player's.
 fn inventory_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let inv = arg(args, 0);
+    let fake = if crate::fake_players::is_fake_inventory(rt, inv) { inv } else { V::NULL };
+    let outer = FAKE_INVENTORY.replace(fake);
+    let out = player_inventory_call(rt, name, desc, args);
+    FAKE_INVENTORY.set(outer);
+    out
+}
+
+const PUT_BYTE: &str = "net/minecraft/nbt/CompoundTag.putByte.(Ljava/lang/String;B)V";
+const GET_BYTE: &str = "net/minecraft/nbt/CompoundTag.getByte.(Ljava/lang/String;)B";
+const LIST_ADD: &str = "net/minecraft/nbt/ListTag.add.(Ljava/lang/Object;)Z";
+const LIST_SIZE: &str = "net/minecraft/nbt/ListTag.size.()I";
+const LIST_COMPOUND: &str = "net/minecraft/nbt/ListTag.getCompound.(I)Lnet/minecraft/nbt/CompoundTag;";
+const STACK_SAVE: &str = "net/minecraft/world/item/ItemStack.save.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;";
+const STACK_PARSE: &str = "net/minecraft/world/item/ItemStack.parseOptional.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/CompoundTag;)Lnet/minecraft/world/item/ItemStack;";
+
+/// Vanilla's number in `Inventory.save`'s `Slot` for slot `i` of ours: the 36 as they are, the
+/// armor's from 100, the off hand 150.
+fn saved_slot(i: i32) -> i32 {
+    match i {
+        36..=39 => i - 36 + 100,
+        40 => 150,
+        _ => i,
+    }
+}
+
+/// `Inventory.save(list)`: each stack that isn't empty, with its `Slot`, in the list.
+fn inventory_save(rt: &mut Rt, list: V) -> V {
+    for i in 0..=40 {
+        let s = inventory_get(rt, i);
+        if is_empty(rt, s) {
+            continue;
+        }
+        let tag = crate::tags::new_compound(rt);
+        let key = rt.string("Slot");
+        crate::api::call(rt, PUT_BYTE, &[tag, key, V::I(i32::from(saved_slot(i) as u8 as i8))]);
+        let saved = crate::api::call(rt, STACK_SAVE, &[s, V::NULL, tag]);
+        crate::api::call(rt, LIST_ADD, &[list, saved]);
+    }
+    list
+}
+
+/// `Inventory.load(list)`: every slot empty, then each stack the list names in its slot.
+fn inventory_load(rt: &mut Rt, list: V) {
+    for i in 0..=40 {
+        let e = empty(rt);
+        inventory_set(rt, i, e);
+    }
+    let n = crate::api::call(rt, LIST_SIZE, &[list]).i();
+    for k in 0..n {
+        let tag = crate::api::call(rt, LIST_COMPOUND, &[list, V::I(k)]);
+        let key = rt.string("Slot");
+        let slot = crate::api::call(rt, GET_BYTE, &[tag, key]).i() & 255;
+        let at = match slot {
+            0..=35 => slot,
+            100..=103 => slot - 100 + 36,
+            150 => 40,
+            _ => continue,
+        };
+        let s = crate::api::call(rt, STACK_PARSE, &[V::NULL, tag]);
+        inventory_set(rt, at, s);
+    }
+}
+
+/// The calls of a player's `Inventory`, on the slots [`inventory_get`] reaches.
+fn player_inventory_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     let inv = a(0);
     Some(match (name, desc) {
@@ -1661,7 +1775,7 @@ fn inventory_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> 
             V::Void
         }
         ("getSelected", _) => {
-            let selected = rt.host().map_or(0, |h| i32::from(h.player_selected().min(8)));
+            let selected = selected_slot(rt);
             inventory_get(rt, selected)
         }
         ("getArmor", _) => inventory_get(rt, 36 + a(1).i()),
@@ -1762,6 +1876,29 @@ fn inventory_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> 
             crate::api_common::component(rt, key, true, V::NULL)
         }
         ("getSelectionSize", _) => V::I(9),
+        ("save", _) => inventory_save(rt, a(1)),
+        ("load", _) => {
+            inventory_load(rt, a(1));
+            V::Void
+        }
+        // Each stack thrown around its player, its slot emptied.
+        ("dropAll", _) => {
+            let p = rt.get_field(inv, "player");
+            for i in 0..=40 {
+                let s = inventory_get(rt, i);
+                if is_empty(rt, s) {
+                    continue;
+                }
+                if fake_inventory().is_some() {
+                    fake_drop(rt, p, s, true);
+                } else {
+                    player_drop(rt, p, s, true);
+                }
+                let e = empty(rt);
+                inventory_set(rt, i, e);
+            }
+            V::Void
+        }
         ("isHotbarSlot", _) => V::I((0..9).contains(&a(0).i()) as i32),
         _ => return None,
     })

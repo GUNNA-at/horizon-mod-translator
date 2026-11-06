@@ -18,9 +18,18 @@ const TAG_VALUE: &str = "net/minecraft/world/item/crafting/Ingredient$TagValue";
 const ITEM_VALUE: &str = "net/minecraft/world/item/crafting/Ingredient$ItemValue";
 const HOLDER: &str = "net/minecraft/world/item/crafting/RecipeHolder";
 const MANAGER: &str = "net/minecraft/world/item/crafting/RecipeManager";
+/// `RecipeManager.createCheck(type)`'s answer: a lookup of one type's recipes that tries the last
+/// one it found first.
+const CACHED_CHECK: &str = "net/minecraft/world/item/crafting/RecipeManager$CachedCheck";
 const BREWING: &str = "net/minecraft/world/item/alchemy/PotionBrewing";
 const RECIPE_TYPE: &str = "net/minecraft/world/item/crafting/RecipeType";
 const SINGLE_INPUT: &str = "net/minecraft/world/item/crafting/SingleRecipeInput";
+/// NeoForge's `RecipeInput` over an item handler's slots (a cooking pot's).
+const RECIPE_WRAPPER: &str = "net/neoforged/neoforge/items/wrapper/RecipeWrapper";
+const RECIPE_MATCHER: &str = "net/neoforged/neoforge/common/util/RecipeMatcher";
+const HANDLER_SLOTS: &str = "net/neoforged/neoforge/items/IItemHandler.getSlots.()I";
+const HANDLER_GET: &str = "net/neoforged/neoforge/items/IItemHandler.getStackInSlot.(I)Lnet/minecraft/world/item/ItemStack;";
+const PREDICATE_TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 const RECIPE_INPUT: &str = "net/minecraft/world/item/crafting/RecipeInput";
 const FLUID_INGREDIENT: &str = "net/neoforged/neoforge/fluids/crafting/FluidIngredient";
 const SIZED_FLUID: &str = "net/neoforged/neoforge/fluids/crafting/SizedFluidIngredient";
@@ -740,9 +749,138 @@ fn matches(rt: &mut Rt, holder: V, input: V, level: V) -> bool {
     rt.thrown.take().is_none() && r.i() != 0
 }
 
+/// NeoForge's `RecipeMatcher.findMatches(inputs, tests)`: which test each input meets (`ret[input]`),
+/// every test met by a different input, or null when no such pairing is; as NeoForge finds it, so
+/// a mod that reads the pairing gets NeoForge's. `data` is its `BitSet`: the inputs used, the tests
+/// used, then each test's inputs that meet it.
+fn find_matches(rt: &mut Rt, inputs: V, tests: V) -> V {
+    let inputs = jutil::elements(rt, inputs);
+    let tests = jutil::elements(rt, tests);
+    let n = inputs.len();
+    if n != tests.len() {
+        return V::NULL;
+    }
+    let mut ret = vec![-1i32; n];
+    let mut data = vec![false; (n + 2) * n];
+    for (x, &test) in tests.iter().enumerate() {
+        let mut matched = 0;
+        let offset = (x + 2) * n;
+        for (y, &input) in inputs.iter().enumerate() {
+            if data[y] {
+                continue;
+            }
+            let met = if rt.class_of(test) == INGREDIENT {
+                ingredient_test(rt, test, input)
+            } else {
+                rt.call_functional(PREDICATE_TEST, test, &[input]).i() != 0
+            };
+            if met {
+                data[offset + y] = true;
+                matched += 1;
+            }
+        }
+        if matched == 0 || (matched == 1 && !claim(&mut ret, &mut data, x, n)) {
+            return V::NULL;
+        }
+    }
+    if next_clear(&data, 0) >= n || backtrack(&mut data, &mut ret, 0, n) {
+        let ints = ret.into_iter().map(V::I).collect();
+        return rt.alloc("[I", Data::Array(ints));
+    }
+    V::NULL
+}
+
+fn next_clear(data: &[bool], from: usize) -> usize {
+    (from..data.len()).find(|&i| !data[i]).unwrap_or(data.len().max(from))
+}
+
+/// `RecipeMatcher.claim`: test `claimed` takes the one input it meets; a test left with one input
+/// takes it in turn. False when a test is left with none.
+fn claim(ret: &mut [i32], data: &mut [bool], claimed: usize, n: usize) -> bool {
+    let mut pending = std::collections::VecDeque::from([claimed]);
+    while let Some(test) = pending.pop_front() {
+        let offset = (test + 2) * n;
+        let Some(used) = (offset..offset + n).find(|&i| data[i]).map(|i| i - offset) else {
+            return false;
+        };
+        data[used] = true;
+        data[n + test] = true;
+        ret[used] = test as i32;
+        for x in 0..n {
+            let offset = (x + 2) * n;
+            if data[offset + used] && !data[n + x] {
+                data[offset + used] = false;
+                let count = data[offset..offset + n].iter().filter(|&&b| b).count();
+                if count == 0 {
+                    return false;
+                }
+                if count == 1 {
+                    pending.push_back(x);
+                }
+            }
+        }
+    }
+    true
+}
+
+/// `RecipeMatcher.backtrack`: the tests from `start` not yet met, each given a free input that
+/// meets it, depth first.
+fn backtrack(data: &mut [bool], ret: &mut [i32], start: usize, n: usize) -> bool {
+    let test = next_clear(data, n + start) - n;
+    if test >= n {
+        return true;
+    }
+    let offset = (test + 2) * n;
+    for x in 0..n {
+        if !data[offset + x] || data[x] {
+            continue;
+        }
+        data[x] = true;
+        if backtrack(data, ret, test + 1, n) {
+            ret[x] = test as i32;
+            return true;
+        }
+        data[x] = false;
+    }
+    false
+}
+
+/// The first of type `id`'s recipes that matches `input` in `level`, trying `hint` (the last one
+/// found) first.
+fn first_match(rt: &mut Rt, id: &str, input: V, level: V, hint: Option<V>) -> Option<V> {
+    let all = holders(rt, id);
+    let order: Vec<V> = hint.into_iter().chain(all.iter().copied().filter(|&h| Some(h) != hint)).collect();
+    order.into_iter().find(|&h| matches(rt, h, input, level))
+}
+
+/// `RecipeManager.createCheck(type)`'s lookup: `getRecipeFor(input, level)` finds the type's first
+/// matching recipe, the last one it found tried first, as vanilla's keeps it.
+fn cached_check_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    match name {
+        "getRecipeFor" => {
+            let check = a(0);
+            let ty = rt.get_field(check, "$type");
+            let id = type_id(rt, ty);
+            let last = rt.get_field(check, "$last");
+            let found = first_match(rt, &id, a(1), a(2), Some(last).filter(|h| h.r() != 0));
+            if let Some(h) = found {
+                rt.put_field(check, "$last", h);
+            }
+            Some(optional(rt, found))
+        }
+        _ => None,
+    }
+}
+
 fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match name {
+        "createCheck" => {
+            let check = rt.new_object(CACHED_CHECK);
+            rt.put_field(check, "$type", a(0));
+            check
+        }
         "getRecipeFor" => {
             let id = type_id(rt, a(1));
             let all = holders(rt, &id);
@@ -755,14 +893,7 @@ fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             } else {
                 None
             };
-            let order = hint.into_iter().chain(all.iter().copied().filter(|&h| Some(h) != hint));
-            let mut found = None;
-            for h in order.collect::<Vec<_>>() {
-                if matches(rt, h, a(2), a(3)) {
-                    found = Some(h);
-                    break;
-                }
-            }
+            let found = first_match(rt, &id, a(2), a(3), hint);
             optional(rt, found)
         }
         "getRecipesFor" => {
@@ -806,6 +937,9 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
                 | SIZED_FLUID
                 | SIZED_ITEM
                 | MANAGER
+                | CACHED_CHECK
+                | RECIPE_WRAPPER
+                | RECIPE_MATCHER
                 | BREWING
                 | HOLDER
                 | RECIPE_TYPE
@@ -851,6 +985,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.intern("compat:recipe-manager".into(), |rt| rt.new_object(MANAGER))
         }
         (MANAGER, n) => return manager_call(rt, n, desc, args),
+        (CACHED_CHECK, n) => return cached_check_call(rt, n, args),
         // Vanilla brewing (`level.potionBrewing()`): which items are potion containers. Its mixes
         // aren't modelled yet: no mix matches, and NeoForge's brewing recipe list is empty (Create's
         // mixer asks both on every recipe search; its potion mixing reads the mixes through an
@@ -893,6 +1028,29 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.put_field(a(0), "$item", a(1));
             V::Void
         }
+        // `RecipeWrapper`: its handler's slots, read through the handler's own methods.
+        (RECIPE_WRAPPER, "<init>") => {
+            rt.put_field(a(0), "inv", a(1));
+            V::Void
+        }
+        (RECIPE_WRAPPER | RECIPE_INPUT, "getItem" | "size" | "isEmpty") if rt.class_of(a(0)) == RECIPE_WRAPPER => {
+            let inv = rt.get_field(a(0), "inv");
+            let size = crate::menus::virt(rt, HANDLER_SLOTS, inv, &[]).i();
+            match name {
+                "size" => V::I(size),
+                "getItem" => crate::menus::virt(rt, HANDLER_GET, inv, &[a(1)]),
+                _ => {
+                    for i in 0..size {
+                        let s = crate::menus::virt(rt, HANDLER_GET, inv, &[V::I(i)]);
+                        if !api_common::stack_empty(rt, s) {
+                            return Some(V::I(0));
+                        }
+                    }
+                    V::I(1)
+                }
+            }
+        }
+        (RECIPE_MATCHER, "findMatches") => find_matches(rt, a(0), a(1)),
         (SINGLE_INPUT | RECIPE_INPUT, "item" | "getItem" | "size" | "isEmpty") if rt.class_of(a(0)) == SINGLE_INPUT => {
             let stack = rt.get_field(a(0), "$item");
             match name {
@@ -1463,6 +1621,117 @@ mod tests {
         let sized = decode_native(&mut rt, "sized_fluid_ingredient", &serde_json::json!({"type": "neoforge:single", "fluid": "minecraft:lava", "amount": 250})).unwrap();
         assert_eq!(rt.get_field(sized, "$amount"), V::I(250));
         assert!(decode_native(&mut rt, "sized_fluid_ingredient", &serde_json::json!({"item": "minecraft:stick"})).is_err());
+    }
+
+    const COOKING: &str = "test/CookingRecipe";
+    const CREATE_CHECK: &str = "net/minecraft/world/item/crafting/RecipeManager.createCheck.(Lnet/minecraft/world/item/crafting/RecipeType;)Lnet/minecraft/world/item/crafting/RecipeManager$CachedCheck;";
+    const CHECK_FOR: &str = "net/minecraft/world/item/crafting/RecipeManager$CachedCheck.getRecipeFor.(Lnet/minecraft/world/item/crafting/RecipeInput;Lnet/minecraft/world/level/Level;)Ljava/util/Optional;";
+    const WRAPPER_INIT: &str = "net/neoforged/neoforge/items/wrapper/RecipeWrapper.<init>.(Lnet/neoforged/neoforge/items/IItemHandler;)V";
+    const WRAPPER_GET: &str = "net/neoforged/neoforge/items/wrapper/RecipeWrapper.getItem.(I)Lnet/minecraft/world/item/ItemStack;";
+    const FIND_MATCHES: &str = "net/neoforged/neoforge/common/util/RecipeMatcher.findMatches.(Ljava/util/List;Ljava/util/List;)[I";
+    const HANDLER: &str = "net/neoforged/neoforge/items/ItemStackHandler";
+    const HANDLER_INIT: &str = "net/neoforged/neoforge/items/ItemStackHandler.<init>.(I)V";
+    const HANDLER_SET: &str = "net/neoforged/neoforge/items/ItemStackHandler.setStackInSlot.(ILnet/minecraft/world/item/ItemStack;)V";
+
+    /// Farmer's Delight's `CookingPotRecipe.matches`: the pot's first six slots that hold something,
+    /// as many as the recipe's ingredients, each meeting a different one (`RecipeMatcher`).
+    fn cooking_vcall(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+        let (recipe, input) = (args[0], args.get(1).copied().unwrap_or_default());
+        if rt.class_of(recipe) != COOKING {
+            return crate::api::call(rt, key, args);
+        }
+        let mut inputs = Vec::new();
+        for j in 0..6 {
+            let s = crate::api::call(rt, WRAPPER_GET, &[input, V::I(j)]);
+            if !api_common::stack_empty(rt, s) {
+                inputs.push(s);
+            }
+        }
+        let wanted = jutil::elements(rt, rt.get_field(recipe, "$ingredients"));
+        if inputs.len() != wanted.len() {
+            return V::I(0);
+        }
+        let (inputs, wanted) = (jutil::new_list(rt, inputs), jutil::new_list(rt, wanted));
+        V::I((crate::api::call(rt, FIND_MATCHES, &[inputs, wanted]).r() != 0) as i32)
+    }
+
+    fn cooking(rt: &mut Rt, id: &str, items: &[&str]) -> V {
+        let recipe = rt.new_object(COOKING);
+        let ingredients: Vec<V> = items.iter().map(|i| ingredient(rt, &[(*i).to_owned()])).collect();
+        let list = jutil::new_list(rt, ingredients);
+        rt.put_field(recipe, "$ingredients", list);
+        let id = rt.string(id);
+        holder(rt, id, recipe)
+    }
+
+    /// A pot of six slots holding `items` (None: an empty slot), as its recipe input.
+    fn pot(rt: &mut Rt, items: &[Option<&str>]) -> V {
+        let handler = rt.new_object(HANDLER);
+        crate::api::call(rt, HANDLER_INIT, &[handler, V::I(6)]);
+        for (i, item) in items.iter().enumerate() {
+            if let Some(item) = item {
+                let s = api_common::stack(rt, item, 1);
+                crate::api::call(rt, HANDLER_SET, &[handler, V::I(i as i32), s]);
+            }
+        }
+        let wrapper = rt.new_object(RECIPE_WRAPPER);
+        crate::api::call(rt, WRAPPER_INIT, &[wrapper, handler]);
+        wrapper
+    }
+
+    /// A cooking pot's lookup (`RecipeManager.createCheck(type).getRecipeFor(input, level)`) finds
+    /// the type's recipe whose ingredients its slots hold, in any order and with gaps; none when
+    /// one is missing or one is too many.
+    #[test]
+    fn a_cached_check_finds_the_recipe_a_pots_slots_hold() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(cooking_vcall);
+        rt.supers.insert(COOKING, "java/lang/Object");
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let stew = cooking(rt, "test:beef_stew", &["minecraft:beef", "minecraft:carrot", "minecraft:potato"]);
+            let soup = cooking(rt, "test:mushroom_soup", &["minecraft:brown_mushroom", "minecraft:red_mushroom"]);
+            let list = jutil::new_list(rt, vec![stew, soup]);
+            rt.interned.insert("compat:recipes/test:cooking".into(), list);
+            let ty = recipe_type(rt, "test:cooking");
+            let check = crate::api::call(rt, CREATE_CHECK, &[ty]);
+            let found = |rt: &mut Rt, items: &[Option<&str>]| {
+                let input = pot(rt, items);
+                let o = crate::api::call(rt, CHECK_FOR, &[check, input, V::NULL]);
+                let h = rt.get_field(o, "value");
+                (h.r() != 0).then(|| text(rt, rt.get_field(h, "$id")))
+            };
+            assert_eq!(found(rt, &[Some("minecraft:potato"), None, Some("minecraft:beef"), Some("minecraft:carrot")]).as_deref(), Some("test:beef_stew"));
+            assert_eq!(found(rt, &[Some("minecraft:red_mushroom"), Some("minecraft:brown_mushroom")]).as_deref(), Some("test:mushroom_soup"));
+            assert_eq!(found(rt, &[Some("minecraft:beef"), Some("minecraft:carrot")]), None);
+            assert_eq!(found(rt, &[Some("minecraft:beef"), Some("minecraft:carrot"), Some("minecraft:potato"), Some("minecraft:beef")]), None);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+    }
+
+    /// `RecipeMatcher.findMatches` pairs each input with a test it meets as NeoForge does: a test
+    /// that only one input meets takes it first, so the input both meet goes to the other.
+    #[test]
+    fn recipe_matcher_pairs_inputs_as_neoforge_does() {
+        let mut rt = Rt::new();
+        crate::install();
+        let either = ingredient(&mut rt, &["minecraft:iron_ingot".into(), "minecraft:gold_ingot".into()]);
+        let iron_only = ingredient(&mut rt, &["minecraft:iron_ingot".into()]);
+        let gold_only = ingredient(&mut rt, &["minecraft:gold_ingot".into()]);
+        let iron = api_common::stack(&mut rt, "minecraft:iron_ingot", 1);
+        let gold = api_common::stack(&mut rt, "minecraft:gold_ingot", 1);
+        let pairs = |rt: &mut Rt, inputs: Vec<V>, tests: Vec<V>| {
+            let (i, t) = (jutil::new_list(rt, inputs), jutil::new_list(rt, tests));
+            let r = crate::api::call(rt, FIND_MATCHES, &[i, t]);
+            (r.r() != 0).then(|| jutil::elements(rt, r).iter().map(|v| v.i()).collect::<Vec<_>>())
+        };
+        // Tests [either, iron only]: iron goes to the second test, gold to the first.
+        assert_eq!(pairs(&mut rt, vec![iron, gold], vec![either, iron_only]), Some(vec![1, 0]));
+        assert_eq!(pairs(&mut rt, vec![gold, iron], vec![either, iron_only]), Some(vec![0, 1]));
+        assert_eq!(pairs(&mut rt, vec![iron, iron], vec![iron_only, gold_only]), None);
+        assert_eq!(pairs(&mut rt, vec![iron], vec![either, iron_only]), None);
+        assert_eq!(pairs(&mut rt, vec![iron, iron], vec![either, either]), Some(vec![0, 1]));
     }
 
     /// `BlockState.CODEC` reads a state in 1.21.1's shape and in the ones a mod's data is

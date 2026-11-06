@@ -39,6 +39,8 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
             is_player_class(c) || crate::vanilla_entities::is_a(c, class)
         }
         "net/minecraft/client/player/AbstractClientPlayer" => matches!(c, "net/minecraft/client/player/LocalPlayer" | "net/minecraft/client/player/RemotePlayer"),
+        // NeoForge's `FakePlayer` is a server's player.
+        "net/minecraft/server/level/ServerPlayer" => c == crate::fake_players::FAKE_PLAYER,
         // The GUI: vanilla's screens are containers of listeners and draw; its widgets
         // (`AbstractWidget` and the buttons, boxes and sliders under it) are listeners that draw.
         "net/minecraft/client/gui/screens/Screen"
@@ -476,6 +478,7 @@ fn is_player_class(c: &str) -> bool {
             | "net/minecraft/client/player/LocalPlayer"
             | "net/minecraft/client/player/AbstractClientPlayer"
             | "net/minecraft/client/player/RemotePlayer"
+            | crate::fake_players::FAKE_PLAYER
     )
 }
 
