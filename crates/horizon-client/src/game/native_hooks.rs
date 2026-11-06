@@ -2736,6 +2736,25 @@ impl Game<'_> {
     ) {
         let _ = (pos, state, canceled);
     }
+    /// One of a mod's blocks at `pos` changed on the server, `old` replaced
+    /// by `new`: broken, burnt, set by a command, a fluid or a mod's own code,
+    /// or moved by a piston (`moved`). Every change of state is reported, a
+    /// property's included; vanilla's blocks aren't. This is where 1.21.1's
+    /// `BlockBehaviour.onRemove` runs for Java mods built against it (a
+    /// machine drops what it held, a multiblock splits), called once the
+    /// level operation that changed the block is done: its drops are out and
+    /// the game has let go of the block entity, so a bundle keeps its own
+    /// until then. A change the mod's own code makes reaches it while that
+    /// code still runs. API @API:block_replaced@.
+    pub(super) fn native_block_replaced(
+        &mut self,
+        pos: [i32; 3],
+        old: BlockStateId,
+        new: BlockStateId,
+        moved: bool,
+    ) {
+        let _ = (pos, old, new, moved);
+    }
     /// A player placed `stack` as the block `state` at `pos`: where
     /// `BlockItem.place` set it, before the stack shrinks. It only hears; a
     /// mod stops a placement by claiming `native_use_item_on`, which runs
@@ -4136,6 +4155,13 @@ impl Game<'_> {
     pub(super) fn native_fluid_flow_at(&self, pos: [i32; 3]) -> [f64; 3] {
         let v = self.motion.fluids.flow_in(&self.world, pos);
         [v.x, v.y, v.z]
+    }
+    /// A block state as text, as `GameLevel::native_state_id_text` gives it:
+    /// for hooks on `Game` handed a state that may no longer be in the world
+    /// (`native_block_replaced`'s old one). Air for an id past the state
+    /// table. API @API:block_replaced@.
+    pub(super) fn native_state_id_text_of(&self, state: BlockStateId) -> String {
+        state_id_text(self.pack.assets.registry, state)
     }
     /// The block state at `pos` in the current level as text, as
     /// `GameLevel::native_state_text` gives it: for hooks on `Game` (block

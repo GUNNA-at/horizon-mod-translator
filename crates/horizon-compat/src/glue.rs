@@ -265,6 +265,10 @@ pub(crate) fn block_entity_at(rt: &mut Rt, pos: [i32; 3]) -> V {
         if !gone {
             return be;
         }
+        // The old block's `onRemove` runs with its block entity still there, as in vanilla's chunk.
+        if let Some(&kept) = rt.interned.get(&removing_key(pos)) {
+            return kept;
+        }
         block_entity_removed(rt, pos);
     }
     let Some(state) = state else { return V::NULL };
@@ -338,6 +342,96 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
 pub fn block_entity_removed(rt: &mut Rt, pos: [i32; 3]) {
     rt.block_entities.remove(&pos);
     rt.block_entity_meta.remove(&pos);
+}
+
+/// `LevelChunk.removeBlockEntity(pos)`: the block entity the runtime holds there is let go, then
+/// told so (`setRemoved`: Create's kinetic ones leave their network, its others let their
+/// behaviours go).
+pub(crate) fn remove_block_entity(rt: &mut Rt, pos: [i32; 3]) {
+    let mark = removing_key(pos);
+    let be = rt.interned.remove(&mark).or_else(|| rt.block_entities.get(&pos).copied());
+    block_entity_removed(rt, pos);
+    if let (Some(be), Some(vc)) = (be.filter(|b| b.r() != 0), rt.vcall) {
+        vc(rt, SET_REMOVED_KEY, SET_REMOVED, &[be]);
+        rt.report_thrown(SET_REMOVED);
+    }
+}
+
+const SET_REMOVED: &str = "setRemoved.()V";
+const SET_REMOVED_KEY: &str = "net/minecraft/world/level/block/entity/BlockEntity.setRemoved.()V";
+const ON_REMOVE: &str = "onRemove.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Z)V";
+const ON_REMOVE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.onRemove.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Z)V";
+
+/// Where the block entity an old block's `onRemove` still sees at `pos` is kept while it runs.
+fn removing_key(pos: [i32; 3]) -> String {
+    format!("compat:removing/{},{},{}", pos[0], pos[1], pos[2])
+}
+
+thread_local! {
+    /// Mod blocks the game replaced while the mod's own code ran (the change was its own, or came of
+    /// it): their `onRemove`, once that code is back in the runtime ([`drain_replaced`]).
+    static DEFERRED: std::cell::RefCell<Vec<([i32; 3], String, String, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `native_block_replaced`: the mod block `old` at `pos` was replaced by `new` on the server (any
+/// change of state; `moved` by a piston), as 1.21.1's `LevelChunk.setBlockState` tells the old
+/// block: its own `onRemove` (a Create machine drops what it held, a tank splits), with the block
+/// entity it had still at `pos` while it runs.
+pub fn block_replaced(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], old: &str, new: &str, moved: bool) {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        drain_replaced(rt);
+        replaced(rt, pos, old, new, moved);
+    });
+}
+
+/// [`block_replaced`] while the runtime is inside a call of the mod's own: kept until the change
+/// is back in the runtime ([`drain_replaced`]).
+pub fn defer_replaced(pos: [i32; 3], old: &str, new: &str, moved: bool) {
+    DEFERRED.with(|d| d.borrow_mut().push((pos, old.to_owned(), new.to_owned(), moved)));
+}
+
+/// The replaced blocks [`defer_replaced`] kept, oldest first: each one's `onRemove`, the runtime's
+/// host being the game's. Runs after each of the mod's own block writes, so a block it replaced
+/// hears of it before the write returns, as in vanilla.
+pub(crate) fn drain_replaced(rt: &mut Rt) {
+    while let Some((pos, old, new, moved)) = DEFERRED.with(|d| {
+        let mut d = d.borrow_mut();
+        (!d.is_empty()).then(|| d.remove(0))
+    }) {
+        replaced(rt, pos, &old, &new, moved);
+    }
+}
+
+/// `oldState.onRemove(level, pos, newState, moved)` for a mod block: its override (`super.` reaches
+/// vanilla's: the block entity goes with its block), else vanilla's. The runtime's block entity at
+/// `pos` stays the old block's while it runs; one its code left there when the block changed is
+/// let go, as the chunk drops it.
+fn replaced(rt: &mut Rt, pos: [i32; 3], old: &str, new: &str, moved: bool) {
+    let Some((b, class)) = mod_block(rt, old) else { return };
+    let (old_block, _) = crate::host::split_state(old);
+    let changed = old_block != crate::host::split_state(new).0;
+    let kept = rt.block_entities.get(&pos).copied().filter(|_| rt.block_entity_meta.get(&pos).is_some_and(|(b, _)| b == old_block));
+    let mark = removing_key(pos);
+    if let Some(be) = kept {
+        rt.interned.insert(mark.clone(), be);
+    }
+    let st = api::state(rt, old);
+    let to = api::state(rt, new);
+    let l = level(rt);
+    let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+    match rt.vcall.filter(|_| rt.overrides.is_some_and(|o| o(class, ON_REMOVE))) {
+        Some(vc) => {
+            vc(rt, ON_REMOVE_KEY, ON_REMOVE, &[b, st, l, p, to, V::I(moved as i32)]);
+            rt.report_thrown(ON_REMOVE);
+        }
+        None => crate::block_breaking::on_remove(rt, st, l, p, to),
+    }
+    rt.interned.remove(&mark);
+    if changed && kept.is_some() && rt.block_entities.get(&pos).copied() == kept {
+        block_entity_removed(rt, pos);
+    }
 }
 
 const USE_ITEM_ON: &str = "useItemOn.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/ItemInteractionResult;";
@@ -1672,6 +1766,99 @@ mod tests {
         assert_eq!(ask(&mut rt, "t:bow", "minecraft:pulling", None), None);
         // A generic property answers for every item, unclamped.
         assert_eq!(ask(&mut rt, "t:arrow", "t:low", None), Some(-5.0));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const BASIN: &str = "test/BasinBlock";
+    const BASIN_ENTITY: &str = "test/BasinBlockEntity";
+    const GET_BLOCK_ENTITY: &str = "net/minecraft/world/level/Level.getBlockEntity.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;";
+    const SET_BLOCK: &str = "net/minecraft/world/level/Level.setBlock.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z";
+
+    /// The test basin: its block makes a block entity, and its `onRemove` notes the block entity
+    /// the level holds at it while it runs, then goes on to vanilla's (`super.onRemove`), as
+    /// Create's `IBE.onRemove` reads its block entity to drop what it held; its block entity counts
+    /// the times it is told it was removed (`setRemoved`).
+    fn basin_overrides(class: &str, method: &str) -> bool {
+        (class == BASIN && (method == ON_REMOVE || method == NEW_BLOCK_ENTITY)) || (class == BASIN_ENTITY && method == SET_REMOVED)
+    }
+
+    fn basin_code(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        match short {
+            NEW_BLOCK_ENTITY => rt.new_object(BASIN_ENTITY),
+            GET_TICKER => V::NULL,
+            LOAD | SAVE => V::Void,
+            ON_REMOVE => {
+                let seen = api::call(rt, GET_BLOCK_ENTITY, &[args[2], args[3]]);
+                rt.interned.insert("test:seen".into(), seen);
+                api::call(rt, key, args)
+            }
+            SET_REMOVED => {
+                let n = rt.get_field(args[0], "removed").i();
+                rt.put_field(args[0], "removed", V::I(n + 1));
+                V::Void
+            }
+            _ => api::call(rt, key, args),
+        }
+    }
+
+    /// The game as the bundle's hook has it while the runtime is busy: a write that replaces a mod
+    /// block is reported for later ([`defer_replaced`]).
+    struct Reporting(MemoryHost);
+    impl Host for Reporting {
+        fn block_state(&self, pos: [i32; 3]) -> String {
+            self.0.block_state(pos)
+        }
+        fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {
+            let old = self.0.block_state(pos);
+            let set = self.0.set_block_state(pos, state);
+            if old.starts_with("test:") {
+                defer_replaced(pos, &old, state, false);
+            }
+            set
+        }
+    }
+
+    /// A mod block's `onRemove` as the game reports its block replaced: a change of state that
+    /// keeps the block keeps its block entity; broken, the block's `onRemove` still finds its block
+    /// entity at it, which is then let go and told so. Replaced by the mod's own `setBlock`, the
+    /// block hears of it before that call returns.
+    #[test]
+    fn a_mod_blocks_on_remove_finds_its_block_entity_which_then_goes() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(basin_overrides);
+        rt.vcall = Some(basin_code);
+        rt.supers.insert(BASIN, "net/minecraft/world/level/block/Block");
+        rt.supers.insert(BASIN_ENTITY, "net/minecraft/world/level/block/entity/BlockEntity");
+        let block = rt.new_object(BASIN);
+        rt.registered.insert(("block".into(), "test:basin".into()), block);
+        let mut host = MemoryHost::default();
+        let at = [2, 64, 2];
+        host.blocks.insert(at, "test:basin[full=false]".into());
+        let be = rt.with_host(&mut host, |rt| block_entity_at(rt, at));
+        assert_ne!(be.r(), 0);
+        host.blocks.insert(at, "test:basin[full=true]".into());
+        block_replaced(&mut rt, &mut host, at, "test:basin[full=false]", "test:basin[full=true]", false);
+        assert_eq!(rt.block_entities.get(&at), Some(&be), "a change of state keeps it");
+        assert_eq!(rt.get_field(be, "removed").i(), 0);
+        host.blocks.insert(at, "minecraft:air".into());
+        block_replaced(&mut rt, &mut host, at, "test:basin[full=true]", "minecraft:air", false);
+        assert_eq!(rt.interned.get("test:seen"), Some(&be), "onRemove found it");
+        assert_eq!(rt.get_field(be, "removed").i(), 1);
+        assert!(!rt.block_entities.contains_key(&at));
+
+        let mut game = Reporting(host);
+        game.0.blocks.insert(at, "test:basin[full=false]".into());
+        let again = rt.with_host(&mut game, |rt| block_entity_at(rt, at));
+        assert!(again.r() != 0 && again != be);
+        rt.with_host(&mut game, |rt| {
+            let (l, p) = (level(rt), api::block_pos(rt, at[0] as i64, at[1] as i64, at[2] as i64));
+            let stone = api::state(rt, "minecraft:stone");
+            assert_eq!(api::call(rt, SET_BLOCK, &[l, p, stone, V::I(3)]).i(), 1);
+            assert_eq!(rt.interned.get("test:seen"), Some(&again), "before setBlock returned");
+            assert_eq!(rt.get_field(again, "removed").i(), 1);
+        });
+        assert!(!rt.block_entities.contains_key(&at));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

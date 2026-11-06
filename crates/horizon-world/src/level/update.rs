@@ -334,6 +334,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
         }
         let moved = update_flags & flags::UPDATE_MOVE_BY_PISTON != 0;
+        self.level.block_replaced(pos, old, state, moved);
         if (block_changed
             || self
                 .b

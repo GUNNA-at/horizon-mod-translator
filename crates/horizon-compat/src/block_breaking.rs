@@ -95,6 +95,24 @@ const SAMPLE: &str = "net/minecraft/util/valueproviders/IntProvider.sample.(Lnet
 /// tool)`, the static ones.
 const DROPS: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;)Ljava/util/List;";
 const DROPS_BY: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)Ljava/util/List;";
+const DROPS_BY_KEY: &str = "net/minecraft/world/level/block/Block.getDrops.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)Ljava/util/List;";
+/// `BlockBehaviour.onRemove(state, level, pos, newState, movedByPiston)`.
+pub(crate) const ON_REMOVE: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Z)V";
+/// `Block.dropResources(state, level, pos)`, `(state, level, pos, blockEntity)` and `(state, level,
+/// pos, blockEntity, entity, tool)`, the static ones.
+const DROP_RESOURCES: [&str; 3] = [
+    "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;)V",
+    "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;)V",
+    "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)V",
+];
+const HAS_BLOCK_ENTITY: &str = "net/minecraft/world/level/block/state/BlockState.hasBlockEntity.()Z";
+const BLOCK_ENTITY_AT: &str = "net/minecraft/world/level/Level.getBlockEntity.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;";
+const REMOVE_BLOCK_ENTITY: &str = "net/minecraft/world/level/Level.removeBlockEntity.(Lnet/minecraft/core/BlockPos;)V";
+const STATE_AFTER_BREAK_KEY: &str = "net/minecraft/world/level/block/state/BlockState.spawnAfterBreak.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/item/ItemStack;Z)V";
+const POP_EXPERIENCE_KEY: &str = "net/minecraft/world/level/block/Block.popExperience.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;I)V";
+const GET_BLOCK: &str = "net/minecraft/world/level/block/state/BlockState.getBlock.()Lnet/minecraft/world/level/block/Block;";
+const LEVEL_EVENT: &str = "net/minecraft/world/level/Level.levelEvent.(ILnet/minecraft/core/BlockPos;I)V";
+const BLOCK_ID: &str = "net/minecraft/world/level/block/Block.getId.(Lnet/minecraft/world/level/block/state/BlockState;)I";
 
 // An item's (`Item`'s) and its stack's.
 const ITEM_SPEED: &str = "getDestroySpeed.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/block/state/BlockState;)F";
@@ -154,7 +172,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     match owner {
         STATE | STATE_BASE => matches!(
             (name, desc),
-            ("getDestroyProgress", STATE_PROGRESS) | ("getExpDrop", STATE_EXP) | ("isSolid" | "blocksMotion", "()Z")
+            ("getDestroyProgress", STATE_PROGRESS) | ("getExpDrop", STATE_EXP) | ("isSolid" | "blocksMotion" | "liquid", "()Z")
                 | ("canHarvestBlock", STATE_HARVEST)
                 | ("requiresCorrectToolForDrops", "()Z")
                 | ("onDestroyedByPlayer", STATE_DESTROYED)
@@ -184,6 +202,8 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
                 || (name == "destroy" && desc == DESTROY_DESC)
                 || (name == "getDrops" && matches!(desc, DROPS | DROPS_BY))
                 || (name == "popExperience" && desc == POP_EXPERIENCE)
+                || (name == "onRemove" && desc == ON_REMOVE)
+                || (name == "dropResources" && DROP_RESOURCES.contains(&desc))
                 || (o == "net/minecraft/world/level/block/IceBlock" && name == "meltsInto")
                 || EXP.split_once('.') == Some(nd)
         }
@@ -213,6 +233,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "requiresCorrectToolForDrops" => V::I(requires_tool(rt, &text) as i32),
                 "getExpDrop" => V::I(exp_drop(rt, st, &text, [a(1), a(2), a(3), a(4), a(5)])),
                 "isSolid" => V::I(solid(rt, &text) as i32),
+                // `liquid()`: a water or lava block (a mod's fluid's own `LiquidBlock` too).
+                "liquid" => V::I(liquid(rt, &text) as i32),
                 // `blocksMotion`: solid, but never a cobweb or a bamboo sapling.
                 "blocksMotion" => {
                     let (block, _) = crate::host::split_state(&text);
@@ -333,14 +355,27 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             // NeoForge's `getExpDrop`, a mod block's `super.` call: an ore's range, else none.
             "getExpDrop" => V::I(own_exp_drop(rt, a(0), a(1), a(2))),
-            // `popExperience(level, pos, amount)`: orbs, on the server.
+            // `popExperience(level, pos, amount)`: orbs, on the server with `doTileDrops` on.
             "popExperience" => {
-                if api::call(rt, IS_CLIENT, &[a(1)]).i() == 0 {
+                if api::call(rt, IS_CLIENT, &[a(1)]).i() == 0 && crate::gamerules::blocks_drop(rt) {
                     let p = api::pos_of(rt, a(2));
                     if let Some(h) = rt.host_mut() {
                         h.pop_experience(p, a(3).i());
                     }
                 }
+                V::Void
+            }
+            // `onRemove(state, level, pos, newState, moved)`, `BlockBehaviour`'s.
+            "onRemove" => {
+                on_remove(rt, a(1), a(2), a(3), a(4));
+                V::Void
+            }
+            // The static `dropResources`: the 3-argument one has no block entity, none an entity
+            // or a tool but the 6-argument one.
+            "dropResources" => {
+                let be = if desc == DROP_RESOURCES[0] { V::NULL } else { a(3) };
+                let (entity, tool) = if desc == DROP_RESOURCES[2] { (a(4), a(5)) } else { (V::NULL, V::NULL) };
+                drop_resources(rt, a(0), a(1), a(2), be, entity, tool);
                 V::Void
             }
             // `IceBlock.meltsInto()`: water.
@@ -357,6 +392,101 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 /// The block state `v` names (`minecraft:stone`), air for none.
 fn text_of(rt: &Rt, v: V) -> String {
     rt.str_of(v).unwrap_or("minecraft:air").to_owned()
+}
+
+/// `BlockBehaviour.onRemove(state, level, pos, newState, moved)`: a block entity goes with its
+/// block (`removeBlockEntity`), not when only the state's properties changed. Vanilla's subclasses'
+/// own parts (a button's neighbours, a chest's contents) are the game's, which runs them for a mod
+/// block of that template.
+pub(crate) fn on_remove(rt: &mut Rt, st: V, level: V, pos: V, new: V) {
+    let (old, new) = (text_of(rt, st), text_of(rt, new));
+    if crate::host::split_state(&old).0 == crate::host::split_state(&new).0 {
+        return;
+    }
+    if api::call(rt, HAS_BLOCK_ENTITY, &[st]).i() != 0 {
+        api::call(rt, REMOVE_BLOCK_ENTITY, &[level, pos]);
+    }
+}
+
+/// NeoForge's `Block.dropResources(state, level, pos, blockEntity, entity, tool)`: on the server, the
+/// block's drops (`getDrops`), each popped about the block as an item entity (`popResource`, only
+/// with `doTileDrops`), then `CommonHooks.handleBlockDrops`: a `BlockDropsEvent` with them, which
+/// listeners may change or cancel; then the item entities join the level, the state's
+/// `spawnAfterBreak` runs without its experience and the event's experience pops out.
+fn drop_resources(rt: &mut Rt, st: V, level: V, pos: V, be: V, entity: V, tool: V) {
+    if api::call(rt, IS_CLIENT, &[level]).i() != 0 {
+        return;
+    }
+    let tool = if tool.r() == 0 { api_common::stack(rt, "minecraft:air", 0) } else { tool };
+    let drops = api::call(rt, DROPS_BY_KEY, &[st, level, pos, be, entity, tool]);
+    let p = api::pos_of(rt, pos);
+    let mut popped = Vec::new();
+    for stack in crate::jutil::elements(rt, drops) {
+        // `popResource` draws its offsets before it checks the rule.
+        if let Some(e) = crate::entities::popped(rt, p, stack)
+            && crate::gamerules::blocks_drop(rt)
+        {
+            popped.push(e);
+        }
+    }
+    let list = crate::jutil::new_list(rt, popped);
+    let ev = rt.new_object(BLOCK_DROPS);
+    block_drops_event(rt, &[ev, level, pos, st, be, list, entity, tool]);
+    crate::neo::post(rt, BLOCK_DROPS, ev);
+    if rt.get_field(ev, "$canceled").i() != 0 {
+        return;
+    }
+    let left = rt.get_field(ev, "$drops");
+    for e in crate::jutil::elements(rt, left) {
+        crate::entities::add_item_entity(rt, e);
+    }
+    api::call(rt, STATE_AFTER_BREAK_KEY, &[st, level, pos, tool, V::I(0)]);
+    let xp = rt.get_field(ev, "$experience").i();
+    if xp > 0 {
+        let b = api::call(rt, GET_BLOCK, &[st]);
+        api::call(rt, POP_EXPERIENCE_KEY, &[b, level, pos, V::I(xp)]);
+    }
+}
+
+/// `Level.destroyBlock(pos, drop, entity)`: nothing for air; else the break's effect (level event
+/// 2001, not for fire), the block's drops when asked (`Block.dropResources` with its block entity
+/// and `entity`, no tool), then its fluid's block in its place. Whether the block changed.
+pub(crate) fn destroy_block(rt: &mut Rt, level: V, pos: V, drop: bool, entity: V) -> bool {
+    let p = api::pos_of(rt, pos);
+    let here = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
+    let (block, _) = crate::host::split_state(&here);
+    if matches!(block, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") {
+        return false;
+    }
+    let st = api::state(rt, &here);
+    if !matches!(block, "minecraft:fire" | "minecraft:soul_fire") {
+        let id = api::call(rt, BLOCK_ID, &[st]);
+        api::call(rt, LEVEL_EVENT, &[level, V::I(2001), pos, id]);
+    }
+    if drop {
+        let be = if api::call(rt, HAS_BLOCK_ENTITY, &[st]).i() != 0 { api::call(rt, BLOCK_ENTITY_AT, &[level, pos]) } else { V::NULL };
+        drop_resources(rt, st, level, pos, be, entity, V::NULL);
+    }
+    let left = fluid_block(rt, &here);
+    let set = rt.host_mut().is_some_and(|h| h.set_block_state(p, &left));
+    crate::glue::drain_replaced(rt);
+    set
+}
+
+/// What a block removed leaves: its fluid's block (a waterlogged one leaves water), as vanilla's
+/// `fluidState.createLegacyBlock()`.
+pub(crate) fn fluid_block(rt: &mut Rt, here: &str) -> String {
+    let fluid = crate::fluids::of_block_state(rt, here);
+    let left = api::call(rt, LEGACY_BLOCK, &[fluid]);
+    rt.str_of(left).unwrap_or("minecraft:air").to_owned()
+}
+
+/// `BlockState.liquid()` of state `text`: water and lava, and a mod's fluid's block (a
+/// `LiquidBlock`), as vanilla's `Properties.liquid()` marks them.
+fn liquid(rt: &Rt, text: &str) -> bool {
+    let (block, _) = crate::host::split_state(text);
+    matches!(block, "minecraft:water" | "minecraft:lava")
+        || mod_block_object(rt, text).is_some_and(|b| rt.is_a(rt.class_of(b), "net/minecraft/world/level/block/LiquidBlock"))
 }
 
 /// NeoForge's `getExpDrop(level, pos, blockEntity, breaker, tool)` of state `st` (`text`): a mod
@@ -1170,5 +1300,56 @@ mod tests {
             assert!((progress(rt, p) - 1.0 / 5.0 / 1.5 / 100.0).abs() < 1e-6, "{}", progress(rt, p));
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
+    }
+
+    /// `Level.destroyBlock(pos, drop)`, as Create's machines break blocks (a belt's ends, a
+    /// pulley's rope, a link that lost its support): the break's effect each time; with drops, the
+    /// ore's diamond popped about its block and its experience at its centre, as the
+    /// `BlockDropsEvent` listener left it; without, air only; with `doTileDrops` off, neither
+    /// drops nor experience. Air isn't destroyed. No block snapshots are ever restored here, and
+    /// water and lava are the liquids.
+    #[test]
+    fn destroy_block_drops_through_block_drops_event_as_the_rules_allow() {
+        const ORE: &str = "minecraft:diamond_ore";
+        const DESTROY: &str = "net/minecraft/world/level/Level.destroyBlock.(Lnet/minecraft/core/BlockPos;Z)Z";
+        let mut rt = runtime(&[(BLOCK_DROPS, 4)]);
+        let mut h = world();
+        let (east, west) = ([AT[0] + 1, AT[1], AT[2]], [AT[0] - 1, AT[1], AT[2]]);
+        for p in [AT, east, west] {
+            h.blocks.insert(p, ORE.into());
+        }
+        h.loot.insert(ORE.into(), vec![("minecraft:diamond".into(), 1)]);
+        h.experience.insert(ORE.into(), 5);
+        rt.with_host(&mut h, |rt| {
+            let level = crate::glue::level(rt);
+            let at = |rt: &mut Rt, p: [i32; 3]| api::block_pos(rt, p[0].into(), p[1].into(), p[2].into());
+            let pos = at(rt, AT);
+            assert_eq!(api::call(rt, DESTROY, &[level, pos, V::I(1)]).i(), 1);
+            assert_eq!(api::call(rt, DESTROY, &[level, pos, V::I(1)]).i(), 0, "air");
+            let pos = at(rt, east);
+            assert_eq!(api::call(rt, DESTROY, &[level, pos, V::I(0)]).i(), 1);
+            let rules = api::call(rt, "net/minecraft/world/level/Level.getGameRules.()Lnet/minecraft/world/level/GameRules;", &[level]);
+            let drops = api::get_static(rt, "net/minecraft/world/level/GameRules.RULE_DOBLOCKDROPS");
+            let rule = api::call(rt, "net/minecraft/world/level/GameRules.getRule.(Lnet/minecraft/world/level/GameRules$Key;)Lnet/minecraft/world/level/GameRules$Value;", &[rules, drops]);
+            api::call(rt, "net/minecraft/world/level/GameRules$BooleanValue.set.(ZLnet/minecraft/server/MinecraftServer;)V", &[rule, V::I(0), V::NULL]);
+            let pos = at(rt, west);
+            assert_eq!(api::call(rt, DESTROY, &[level, pos, V::I(1)]).i(), 1);
+            assert_eq!(api::call(rt, "net/minecraft/world/level/Level.$restoringBlockSnapshots.()Z", &[level]).i(), 0);
+            for (state, liquid) in [("minecraft:water[level=0]", 1), ("minecraft:lava[level=4]", 1), (STONE, 0)] {
+                let st = api::state(rt, state);
+                assert_eq!(api::call(rt, key(STATE, "liquid", "()Z"), &[st]).i(), liquid, "{state}");
+            }
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+        for p in [AT, east, west] {
+            assert_eq!(h.blocks.get(&p).map(String::as_str), Some("minecraft:air"));
+        }
+        let [item] = h.item_entities.as_slice() else { panic!("one diamond: {:?}", h.item_entities) };
+        assert_eq!((item.item.as_str(), item.count), ("minecraft:diamond", 1));
+        let (lo, hi) = ([3.25, 64.125, -1.75], [3.75, 64.625, -1.25]);
+        assert!((0..3).all(|i| (lo[i]..=hi[i]).contains(&item.pos[i])), "about the block: {:?}", item.pos);
+        assert_eq!(h.orbs, vec![([3.5, 64.5, -1.5], 7, None)], "the listener's 5 + 2");
+        let events: Vec<_> = h.level_events.iter().map(|&(e, p, _)| (e, p)).collect();
+        assert_eq!(events, [(2001, AT), (2001, east), (2001, west)]);
     }
 }

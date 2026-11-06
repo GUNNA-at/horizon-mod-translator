@@ -225,6 +225,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   Staging tip: apply mixins into a fresh folder, then `rsync -r --checksum` (no `-t`) into the old stage, so
   unchanged files keep their times and cargo rebuilds only what changed.
 - [ ] Next: the client half. Rotating parts are drawn by Create's block entity renderers
+  (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
+  `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
+  (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick
+  (`ClientTickEvent`, catnip's `AnimationTickHolder`), and drawing through `native_block_entity_submit`
+  (PoseStack, JOML, catnip's buffers as natives: one draw call per buffer, no per-vertex translated code).
   - [x] Runtime side (commit 18dff8f): setup events (common, client, `RegisterRenderers`), `enqueueWork` and
     `CompletableFuture`, PoseStack/JOML/Axis natives (`horizon-compat/src/render.rs`), catnip's
     `SuperByteBuffer` as intrinsics drawn through `Host::draw_model` (one call per buffer), and the glue:
@@ -4067,11 +4072,54 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     between `destroyBlockAs`'s break and its consumer; the only unmapped call on the way is
     `Level.restoringBlockSnapshots` (an unmapped field reads 0, the false vanilla has). Traced in the harness next.
     The punching deployer works as in round 17 (stone broken, cobblestone in its `Overflow`, pickaxe damage 1).
-  (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
-  `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
-  (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick
-  (`ClientTickEvent`, catnip's `AnimationTickHolder`), and drawing through `native_block_entity_submit`
-  (PoseStack, JOML, catnip's buffers as natives: one draw call per buffer, no per-vertex translated code).
+    Corrected in Part 23: nothing was lost. The harness's drill (`DRILL=1`) drops the diamond by the ore and five
+    experience at its centre; in game the test rows float at y 70 over ground at 64, so the drops fell out of the
+    check's four blocks.
+- [x] 2026-11-06 Part 23: a mod block's `onRemove` (new game hook `native_block_replaced`), `Level.destroyBlock` with
+  its drops, `Block.dropResources`; what round 18 missed.
+  - Round 18's drops, traced in the harness (`DRILL=1`, the drill's block entities ticked against `MemoryHost`): at
+    256 rpm the ore breaks at tick 18, a diamond item entity lands by it, five experience orbs at its centre, level
+    event 2001. The game's test rows float above the ground, so the round's check looked in the wrong place; the
+    drill's step now lays a stone floor and looks within three blocks. The run's only unmapped calls were
+    `BlockState.liquid()` (19 times) and the field `Level.restoringBlockSnapshots` (twice): water, lava and a mod's
+    `LiquidBlock` are liquids now, and no snapshots are ever restored here (false).
+  - Create calls `Level.destroyBlock(pos, true)` at 20 places: `RotationPropagator` (3, a block turning too fast
+    pops), `GeneratingKineticBlockEntity.applyNewSpeed`, `BeltBlock.initBelt` (3), the `neighborChanged` of
+    redstone links, hand cranks, nozzles, belt tunnels and gantry carriages that lost their support, and the
+    `onRemove` of pulleys (3) and water wheels. It only set the fluid's block: nothing dropped. Now as vanilla: air
+    isn't destroyed; level event 2001 (not for fire); with drops `Block.dropResources(state, level, pos,
+    blockEntity, entity, ItemStack.EMPTY)`; then the fluid's legacy block.
+  - `Block.dropResources`, its three static forms, as NeoForge has them: on a `ServerLevel`, `getDrops` popped about
+    the block (`popResource`'s offsets) and captured, then `CommonHooks.handleBlockDrops`: a `BlockDropsEvent`
+    with them; unless a listener cancels it, they join the level, `spawnAfterBreak(.., false)` runs and the event's
+    experience pops. `popResource` and `popExperience` now heed `doTileDrops`, as vanilla does (Part 22 said
+    `popExperience` did; it didn't).
+  - `onRemove`: 61 of Create's blocks override it (`IBE.onRemove` 25 times: a smart block entity's `destroy`, where
+    a basin drops what it holds, then `removeBlockEntity`; `FluidPropagator.propagateChangedPipe` 6;
+    `ConnectivityHandler.splitMulti` 2), and nothing called them: the game removes blocks itself.
+    - Game: new `LevelAccess::block_replaced(pos, old, new, moved)`, called by `chunk_set_block_state` after the
+      write and the block entity's removal, before the neighbours hear of it (1.21.1's `onRemove` point). The
+      server's `GameLevel` keeps those of mod blocks (vanilla's are the game's) in `Spill::replaced`, and
+      `flush_spill` hands them to the new hook `native_block_replaced(pos, old, new, moved)` once the level
+      operation is done (fragment `tools/native-hook-fragments/block_replaced.json`, with the helper
+      `native_state_id_text_of(state)`: the old state is no longer in the world).
+    - Bundle: the hook calls `glue::block_replaced`. A change made while the runtime is busy (the mod's own write)
+      is kept (`glue::defer_replaced`); compat's own writes (`setBlock`, `setBlockAndUpdate`, `removeBlock`,
+      `destroyBlock`) run the kept ones right after the write (`drain_replaced`), so a block the mod replaces
+      hears of it before its call returns, as in vanilla's `LevelChunk.setBlockState`.
+    - Compat: the old state's `onRemove` override, else vanilla's (`removeBlockEntity` when the block changed and
+      has a block entity). While it runs, `getBlockEntity` there still finds the old block entity, as vanilla's
+      chunk still holds it. `Level.removeBlockEntity` lets the runtime's go and calls its `setRemoved` (Create's
+      `SmartBlockEntity.setRemoved`: `remove()`, where a kinetic one leaves its network, then `invalidate()`).
+    - Left: a change the mod's code makes through another game path while it runs waits for the next write or
+      hook. A mod container the game drops itself (`ModContainer`, content mods) would drop twice if its Java
+      `onRemove` also dropped it; bundles don't bind `native_block_entity_container`, so no translated mod has one.
+  - Tests: `glue::tests::a_mod_blocks_on_remove_finds_its_block_entity_which_then_goes` (a change of state keeps the
+    block entity; broken, `onRemove` finds it, then `setRemoved` once and it's gone; replaced by the mod's own
+    `setBlock`, heard before the call returns) and
+    `block_breaking::tests::destroy_block_drops_through_block_drops_event_as_the_rules_allow` (one diamond about the
+    block, one orb of 7 after the listener's +2, level event 2001 each time, air not destroyed, nothing with
+    `doTileDrops` off, `liquid()`). 390 compat, 17 translator and 48 game tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

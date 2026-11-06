@@ -225,6 +225,10 @@ pub(super) struct Spill {
     /// Runs of `spawns` a player's use popped (a picked berry bush), for the
     /// mods' `native_loot_drops`.
     pub(super) used: Vec<UsedDrops>,
+    /// Mod blocks the behaviour replaced (`LevelAccess::block_replaced`):
+    /// where, the old and new states and whether a piston moved it, for the
+    /// mods' `native_block_replaced`.
+    pub(super) replaced: Vec<([i32; 3], BlockStateId, BlockStateId, bool)>,
 }
 
 /// `spawns[start..end]` came from `table` at the block `pos` in `state`.
@@ -242,6 +246,7 @@ impl Spill {
             && self.orbs.is_empty()
             && self.removed.is_empty()
             && self.used.is_empty()
+            && self.replaced.is_empty()
     }
 }
 
@@ -728,6 +733,10 @@ impl Game<'_> {
                 self.container = None;
                 self.screen = Screen::Playing;
             }
+        }
+        // A mod block's own `onRemove` (1.21.1's), once the operation's drops are out.
+        for (pos, old, new, moved) in spill.replaced {
+            self.native_block_replaced(pos, old, new, moved);
         }
     }
 }

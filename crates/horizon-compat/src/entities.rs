@@ -310,10 +310,25 @@ fn random_between(rt: &mut Rt, lo: f64, hi: f64) -> f64 {
     lo + d * (hi - lo)
 }
 
-/// `Block.popResource(level, pos, stack)`: the stack falls out of the block.
-fn pop_resource(rt: &mut Rt, pos: [i32; 3], stack: V) {
-    if crate::api_common::stack_empty(rt, stack) {
+/// `Block.popResource(level, pos, stack)`: the stack falls out of the block, on the server with
+/// `doTileDrops` on.
+fn pop_resource(rt: &mut Rt, level: V, pos: [i32; 3], stack: V) {
+    if crate::api::call(rt, "net/minecraft/world/level/Level.isClientSide.()Z", &[level]).i() != 0 {
         return;
+    }
+    if let Some(e) = popped(rt, pos, stack)
+        && crate::gamerules::blocks_drop(rt)
+    {
+        add(rt, e);
+    }
+}
+
+/// The item entity `Block.popResource(level, pos, stack)` makes, about the block's centre with
+/// `new ItemEntity`'s motion and the default pickup delay, not in the level yet (NeoForge's
+/// `dropResources` captures them for its `BlockDropsEvent`). None for an empty stack.
+pub(crate) fn popped(rt: &mut Rt, pos: [i32; 3], stack: V) -> Option<V> {
+    if crate::api_common::stack_empty(rt, stack) {
+        return None;
     }
     let half = 0.25 / 2.0;
     let p = [
@@ -322,10 +337,13 @@ fn pop_resource(rt: &mut Rt, pos: [i32; 3], stack: V) {
         pos[2] as f64 + 0.5 + random_between(rt, -0.25, 0.25),
     ];
     let m = [random_between(rt, -0.1, 0.1), 0.2, random_between(rt, -0.1, 0.1)];
-    let e = rt.new_object(ITEM_ENTITY);
-    new_item_entity(rt, e, p, stack, m);
-    rt.put_field(e, "$pickupDelay", V::I(10));
-    add(rt, e);
+    Some(unspawned(rt, p, stack, m, 10))
+}
+
+/// `Level.addFreshEntity` of an item entity not in the level yet: the game adds it. False for
+/// anything else.
+pub(crate) fn add_item_entity(rt: &mut Rt, e: V) -> bool {
+    is_item_entity(rt, e) && add(rt, e)
 }
 
 /// The entity's NeoForge persistent data (`getPersistentData`): kept with its object.
@@ -478,7 +496,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         ("net/minecraft/world/level/block/Block", "popResource") if desc == "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/item/ItemStack;)V" => {
             let p = api::pos_of(rt, a(1));
-            pop_resource(rt, p, a(2));
+            pop_resource(rt, a(0), p, a(2));
             return Some(V::Void);
         }
         ("net/minecraft/world/Containers", "dropItemStack") if desc == "(Lnet/minecraft/world/level/Level;DDDLnet/minecraft/world/item/ItemStack;)V" => {

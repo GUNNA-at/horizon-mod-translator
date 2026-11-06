@@ -1471,21 +1471,33 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let b = text.split('[').next().unwrap_or("");
             V::I(matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") as i32)
         }
+        // A mod block the write replaced hears of it (`onRemove`) before the call returns, as in
+        // vanilla's `LevelChunk.setBlockState`.
         (_, "setBlock" | "setBlockAndUpdate") if level => {
             let p = pos_of(rt, a(1));
             let text = rt.str_of(a(2)).unwrap_or("minecraft:air").to_owned();
-            V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, &text)) as i32)
+            let set = rt.host_mut().is_some_and(|h| h.set_block_state(p, &text));
+            crate::glue::drain_replaced(rt);
+            V::I(set as i32)
         }
         // What a block removed leaves is its fluid's block (a waterlogged one leaves water), as
         // vanilla's `setBlock(pos, fluidState.createLegacyBlock(), ...)`.
-        (_, "removeBlock" | "destroyBlock") if level => {
+        (_, "removeBlock") if level => {
             let p = pos_of(rt, a(1));
             let here = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
-            let fluid = crate::fluids::of_block_state(rt, &here);
-            let left = call(rt, "net/minecraft/world/level/material/FluidState.createLegacyBlock.()Lnet/minecraft/world/level/block/state/BlockState;", &[fluid]);
-            let left = rt.str_of(left).unwrap_or("minecraft:air").to_owned();
-            V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, &left)) as i32)
+            let left = crate::block_breaking::fluid_block(rt, &here);
+            let set = rt.host_mut().is_some_and(|h| h.set_block_state(p, &left));
+            crate::glue::drain_replaced(rt);
+            V::I(set as i32)
         }
+        // `destroyBlock(pos, drop[, entity[, recursionLeft]])`: the break's effect and, when asked,
+        // the block's drops (`Block.dropResources`), then the fluid's block.
+        (_, "destroyBlock") if level => {
+            let entity = if desc.contains("Lnet/minecraft/world/entity/Entity;") { a(3) } else { V::NULL };
+            V::I(crate::block_breaking::destroy_block(rt, a(0), a(1), a(2).i() != 0, entity) as i32)
+        }
+        // NeoForge's: no block snapshots are captured or restored here.
+        (_, "$restoringBlockSnapshots" | "$captureBlockSnapshots") if level => V::I(0),
         // A level's side is its own (vanilla's `isClientSide` field: the client's level, a mod's
         // wrapper made on either side); one that doesn't carry it is on the host's.
         (_, "isClientSide" | "$isClientSide") if level => match rt.get_field(a(0), "isClientSide") {
@@ -1593,7 +1605,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (_, "removeBlockEntity") if level => {
             let p = pos_of(rt, a(1));
-            crate::glue::block_entity_removed(rt, p);
+            crate::glue::remove_block_entity(rt, p);
             V::Void
         }
         // The overworld's type (`DimensionTypes.OVERWORLD`).

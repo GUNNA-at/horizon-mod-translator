@@ -118,19 +118,28 @@ fn rule_type(rt: &mut Rt, int: bool, default: i32) -> V {
 /// else its default.
 fn value(rt: &Rt, key: V) -> i32 {
     let id = rt.str_of(rt.get_field(key, "$id")).unwrap_or("").to_owned();
+    by_id(rt, &id).unwrap_or_else(|| rt.get_field(rt.get_field(key, "$type"), "$default").i())
+}
+
+/// The value of 1.21.1's rule `id` (`doTileDrops`): one a mod set here, else the game's, else its
+/// default. None for a rule vanilla doesn't have that no mod set.
+fn by_id(rt: &Rt, id: &str) -> Option<i32> {
     if let Some(V::I(v)) = rt.interned.get(&format!("gamerule-set/{id}")) {
-        return *v;
+        return Some(*v);
     }
-    if let Some(&(_, _, _, _, default, now, read)) = TABLE.iter().find(|r| r.1 == id) {
-        let game = now.and_then(|n| rt.host().and_then(|h| h.game_rule(n)));
-        return match (game, read) {
-            (Some(v), Read::Same) => v,
-            (Some(v), Read::Not) => (v == 0) as i32,
-            (Some(v), Read::NonZero) => (v != 0) as i32,
-            (None, _) => default,
-        };
-    }
-    rt.get_field(rt.get_field(key, "$type"), "$default").i()
+    let &(_, _, _, _, default, now, read) = TABLE.iter().find(|r| r.1 == id)?;
+    let game = now.and_then(|n| rt.host().and_then(|h| h.game_rule(n)));
+    Some(match (game, read) {
+        (Some(v), Read::Same) => v,
+        (Some(v), Read::Not) => (v == 0) as i32,
+        (Some(v), Read::NonZero) => (v != 0) as i32,
+        (None, _) => default,
+    })
+}
+
+/// Whether blocks drop their items (`doTileDrops`, vanilla's `RULE_DOBLOCKDROPS`).
+pub(crate) fn blocks_drop(rt: &Rt) -> bool {
+    by_id(rt, "doTileDrops").is_none_or(|v| v != 0)
 }
 
 fn is_int(rt: &Rt, key: V) -> bool {

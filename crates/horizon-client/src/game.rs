@@ -1145,6 +1145,20 @@ impl LevelAccess for GameLevel<'_> {
             self.native_block_changed(self.dimension, pos, old, new);
         }
     }
+    fn block_replaced(&mut self, pos: BlockPos, old: BlockStateId, new: BlockStateId, moved: bool) {
+        // Only a mod block's own code hears of it (`native_block_replaced`, once the operation is
+        // done): vanilla's blocks are the game's.
+        if self.native_authoritative
+            && self
+                .registry
+                .state(old)
+                .is_some_and(|s| !s.name.starts_with("minecraft:"))
+        {
+            self.spill
+                .replaced
+                .push(([pos.x, pos.y, pos.z], old, new, moved));
+        }
+    }
     fn observe_neighbor_changed(
         &self,
         pos: BlockPos,
