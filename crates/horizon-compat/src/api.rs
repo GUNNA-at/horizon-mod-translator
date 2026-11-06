@@ -34,7 +34,10 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
         // A mod's render types extend `RenderType` and read the shards it inherits from
         // `RenderStateShard` (catnip's `PonderRenderTypes.BLOCK_SHEET_MIPPED`).
         "net/minecraft/client/renderer/RenderType" => Some("net/minecraft/client/renderer/RenderStateShard"),
-        _ => crate::models::api_super(class).or_else(|| crate::entity_render::api_super(class)).or_else(|| crate::camera::api_super(class)),
+        _ => crate::models::api_super(class)
+            .or_else(|| crate::entity_render::api_super(class))
+            .or_else(|| crate::camera::api_super(class))
+            .or_else(|| crate::item_wrappers::api_super(class)),
     }
 }
 

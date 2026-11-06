@@ -3,11 +3,14 @@
 //!   and a mod's own (`BlockCapability.create`);
 //! - `RegisterCapabilitiesEvent`, fired once the registries are full as NeoForge fires it at the end
 //!   of loading, with its block entity, block, item and entity registrations;
-//! - the lookups: `Level.getCapability`, `BlockCapabilityCache` and `ItemStack.getCapability`.
+//! - the lookups: `Level.getCapability`, `BlockCapabilityCache`, `ItemStack.getCapability` and
+//!   `Entity.getCapability`.
 //!
 //! A block lookup asks the block's own providers first, then its block entity's, in the order
 //! NeoForge's `CapabilityHooks` uses. Create's funnels, chutes, arms and basins reach each other's
-//! inventories this way.
+//! inventories this way. An entity lookup asks NeoForge's own handler of a player first (its
+//! inventory), then the providers mods registered for the entity's type, then NeoForge's fallback for
+//! any other living entity (its hands and armour).
 use crate::{Data, Rt, V, api};
 
 const BLOCK_CAP: &str = "net/neoforged/neoforge/capabilities/BlockCapability";
@@ -17,6 +20,8 @@ const EVENT: &str = "net/neoforged/neoforge/capabilities/RegisterCapabilitiesEve
 const CACHE: &str = "net/neoforged/neoforge/capabilities/BlockCapabilityCache";
 const LEVEL_EXTENSION: &str = "net/neoforged/neoforge/common/extensions/ILevelExtension";
 const ITEM_STACK: &str = "net/minecraft/world/item/ItemStack";
+const LIVING: &str = "net/minecraft/world/entity/LivingEntity";
+const HORSE: &str = "net/minecraft/world/entity/animal/horse/AbstractHorse";
 const PROVIDER: &str = "net/neoforged/neoforge/capabilities/ICapabilityProvider.getCapability.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
 const BLOCK_PROVIDER: &str = "net/neoforged/neoforge/capabilities/IBlockCapabilityProvider.getCapability.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/entity/BlockEntity;Ljava/lang/Object;)Ljava/lang/Object;";
 
@@ -202,6 +207,37 @@ fn find_item(rt: &mut Rt, cap: V, stack: V, context: V) -> V {
     V::NULL
 }
 
+/// The entity capability `cap` of `entity` (with `context`), in `CapabilityHooks`' order: NeoForge's
+/// own item handler of a player (a `PlayerInvWrapper` of their inventory) ahead of every mod's
+/// provider; then the providers mods registered for the entity's type; then NeoForge's fallback,
+/// registered after them all for every type: a living entity's hands and armour. A horse's own
+/// inventory and a chest boat's or a minecart's container aren't the host's to give: none for those.
+fn find_entity(rt: &mut Rt, cap: V, entity: V, context: V) -> V {
+    if entity.r() == 0 {
+        return V::NULL;
+    }
+    let items = named(rt, cap, ITEM_HANDLER);
+    let player = crate::api_common::is_player_class(rt.class_of(entity));
+    if items && player {
+        return crate::item_wrappers::player_handler(rt, entity);
+    }
+    let ty = crate::damage::entity_type_name(rt, entity);
+    for (kind, c, key, provider) in entries(rt) {
+        if kind != Kind::Entity || c != cap || ty.is_empty() || crate::mod_entities::type_id(rt, key) != Some(ty.as_str()) {
+            continue;
+        }
+        let r = rt.call_functional(PROVIDER, provider, &[entity, context]);
+        rt.report_thrown("getCapability");
+        if r.r() != 0 {
+            return r;
+        }
+    }
+    if items && !player && rt.instance_of(entity, LIVING) && !rt.instance_of(entity, HORSE) {
+        return crate::item_wrappers::equipment_handler(rt, entity);
+    }
+    V::NULL
+}
+
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
@@ -289,6 +325,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
         }
         (ITEM_STACK, "getCapability") if rt.class_of(a(1)) == ITEM_CAP => find_item(rt, a(1), a(0), a(2)),
+        // `entity.getCapability(cap)` and `(cap, context)`, through any entity class.
+        (_, "getCapability") if rt.class_of(a(1)) == ENTITY_CAP => {
+            let context = if desc.starts_with("(Lnet/neoforged/neoforge/capabilities/EntityCapability;Ljava/lang/Object;)") { a(2) } else { V::NULL };
+            find_entity(rt, a(1), a(0), context)
+        }
         // `BlockCapabilityCache.create(cap, level, pos, context[, isValid, onInvalidate])`: asked
         // afresh each time (a lookup is a map read and a provider call).
         (CACHE, "create") => {
@@ -367,5 +408,57 @@ mod tests {
         let cache = api::call(&mut rt, create, &[cap, level, at, up]);
         let got = rt.with_host(&mut host, |rt| api::call(rt, "net/neoforged/neoforge/capabilities/BlockCapabilityCache.getCapability.()Ljava/lang/Object;", &[cache]));
         assert_eq!(got, slots);
+    }
+
+    /// An entity's capability: the providers registered for its type, in order, the first that
+    /// answers; then NeoForge's fallback item handler of a living entity, its hands and armour (6
+    /// slots, an armour slot holding one), which reads what it holds. An arrow has none.
+    #[test]
+    fn an_entitys_capability_is_its_types_providers_then_neoforges_fallback() {
+        use crate::host::Nbt;
+        use std::collections::BTreeMap;
+        const GET: &str = "net/minecraft/world/entity/Entity.getCapability.(Lnet/neoforged/neoforge/capabilities/EntityCapability;)Ljava/lang/Object;";
+        const REGISTER: &str = "net/neoforged/neoforge/capabilities/RegisterCapabilitiesEvent.registerEntity.(Lnet/neoforged/neoforge/capabilities/EntityCapability;Lnet/minecraft/world/entity/EntityType;Lnet/neoforged/neoforge/capabilities/ICapabilityProvider;)V";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.lambda_call = Some(providers);
+        let items = api::get_static(&mut rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.ENTITY");
+        let energy = api::get_static(&mut rt, "net/neoforged/neoforge/capabilities/Capabilities$EnergyStorage.ENTITY");
+        let ev = rt.new_object(EVENT);
+        // A zombie's energy: the first provider answers null, the second a battery.
+        let zombie_type = crate::mod_entities::vanilla_type(&mut rt, "minecraft:zombie");
+        let nothing = rt.lambda_id("test/Provider", 1, vec![]);
+        let battery = rt.new_object("test/Battery");
+        let gives_battery = rt.lambda_id("test/Provider", 1, vec![battery]);
+        api::call(&mut rt, REGISTER, &[ev, energy, zombie_type, nothing]);
+        api::call(&mut rt, REGISTER, &[ev, energy, zombie_type, gives_battery]);
+        // A cow's items: the mod's own handler, ahead of NeoForge's fallback.
+        let cow_type = crate::mod_entities::vanilla_type(&mut rt, "minecraft:cow");
+        let pouch = rt.new_object("test/Pouch");
+        let gives_pouch = rt.lambda_id("test/Provider", 1, vec![pouch]);
+        api::call(&mut rt, REGISTER, &[ev, items, cow_type, gives_pouch]);
+
+        let mut host = MemoryHost::default();
+        for (id, kind, health) in [(7, "minecraft:zombie", Some((20.0, 20.0))), (8, "minecraft:cow", Some((10.0, 10.0))), (9, "minecraft:arrow", None)] {
+            host.entities.push(crate::host::EntityView { id, kind: kind.into(), pos: [0.5, 64.0, 0.5], yaw: 0.0, health });
+        }
+        let sword = BTreeMap::from([("id".to_owned(), Nbt::String("minecraft:iron_sword".into())), ("count".to_owned(), Nbt::Int(1))]);
+        host.entity_nbts.insert(7, BTreeMap::from([("equipment".to_owned(), Nbt::Compound(BTreeMap::from([("mainhand".to_owned(), Nbt::Compound(sword))])))]));
+        rt.with_host(&mut host, |rt| {
+            let [zombie, cow, arrow] = [(7, "minecraft:zombie"), (8, "minecraft:cow"), (9, "minecraft:arrow")].map(|(id, kind)| crate::vanilla_entities::of(rt, id, kind, None));
+            assert_eq!(api::call(rt, GET, &[zombie, energy]), battery);
+            assert_eq!(api::call(rt, GET, &[cow, energy]), V::NULL);
+            assert_eq!(api::call(rt, GET, &[cow, items]), pouch);
+            let h = api::call(rt, GET, &[zombie, items]);
+            assert_eq!(api::call(rt, "net/neoforged/neoforge/items/IItemHandler.getSlots.()I", &[h]), V::I(6));
+            let held = api::call(rt, "net/neoforged/neoforge/items/IItemHandler.getStackInSlot.(I)Lnet/minecraft/world/item/ItemStack;", &[h, V::I(0)]);
+            assert_eq!(crate::api_common::item_like_name(rt, rt.get_field(held, "$item")), "minecraft:iron_sword");
+            let feet = api::call(rt, "net/neoforged/neoforge/items/IItemHandler.getStackInSlot.(I)Lnet/minecraft/world/item/ItemStack;", &[h, V::I(2)]);
+            assert!(crate::api_common::stack_empty(rt, feet));
+            assert_eq!(api::call(rt, "net/neoforged/neoforge/items/IItemHandler.getSlotLimit.(I)I", &[h, V::I(2)]), V::I(1));
+            assert_eq!(api::call(rt, "net/neoforged/neoforge/items/IItemHandler.getSlotLimit.(I)I", &[h, V::I(1)]), V::I(99));
+            assert_eq!(api::call(rt, GET, &[arrow, items]), V::NULL);
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

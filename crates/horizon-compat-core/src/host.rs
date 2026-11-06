@@ -813,6 +813,12 @@ pub trait Host {
     fn item_max_damage(&self, _item: &str) -> Option<u32> {
         None
     }
+    /// The equipment slot `item` is worn in (`head`, `chest`, `legs`, `feet`, `body`, or `offhand`
+    /// for a shield), as the game equips it; None for an item worn nowhere or one the game doesn't
+    /// know.
+    fn item_equip_slot(&self, _item: &str) -> Option<String> {
+        None
+    }
     /// The recipes of a type outside `minecraft` (`create:pressing`): each one's id and its file as
     /// JSON text, the world's data packs merged and load conditions held. Empty outside a world.
     fn recipes_of_type(&self, _kind: &str) -> Vec<(String, String)> {
@@ -1364,6 +1370,8 @@ pub struct MemoryHost {
     pub inventory: bool,
     /// Items' durability (`max_damage`); unset ones have none.
     pub max_damage: HashMap<String, u32>,
+    /// The slots items are worn in ([`Host::item_equip_slot`]); unset ones are worn nowhere.
+    pub equip_slots: HashMap<String, String>,
     /// Where the acting player stands and looks (yaw, pitch).
     pub place: Option<([f64; 3], f32, f32)>,
     /// What the acting player was given that the main hand didn't take, in order.
@@ -1839,6 +1847,9 @@ impl Host for MemoryHost {
     }
     fn item_max_damage(&self, item: &str) -> Option<u32> {
         self.max_damage.get(item).copied()
+    }
+    fn item_equip_slot(&self, item: &str) -> Option<String> {
+        self.equip_slots.get(item).cloned()
     }
     fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {
         self.recipes.get(kind).cloned().unwrap_or_default()

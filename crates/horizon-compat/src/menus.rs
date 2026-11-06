@@ -2069,8 +2069,10 @@ fn container_default(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
 
 fn container_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let this = arg(args, 0);
+    // An `Inventory` keeps `Container`'s defaults it doesn't override (`canPlaceItem`, which
+    // NeoForge's `InvWrapper` asks before it fills a player's slot).
     if owner == INVENTORY || rt.class_of(this) == INVENTORY {
-        return inventory_call(rt, name, desc, args);
+        return inventory_call(rt, name, desc, args).or_else(|| container_default(rt, name, desc, args));
     }
     if owner == SIMPLE_CONTAINER || rt.instance_of(this, SIMPLE_CONTAINER) {
         return simple_container_call(rt, name, desc, args);

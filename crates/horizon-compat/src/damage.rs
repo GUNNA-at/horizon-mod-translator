@@ -714,7 +714,7 @@ pub(crate) fn struck(rt: &Rt, e: V) -> Option<crate::host::Struck> {
 
 /// The id of entity `e`'s type (`create:potato_projectile`), as its `getType()` names it; empty for
 /// none or one the game can't name.
-fn entity_type_name(rt: &mut Rt, e: V) -> String {
+pub(crate) fn entity_type_name(rt: &mut Rt, e: V) -> String {
     if e.r() == 0 {
         return String::new();
     }

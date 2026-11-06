@@ -5589,6 +5589,66 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     22 sources, vanilla's 4 and Create's 18 (8 of them its fluids); the potion drain's surface is
     Create's potion texture in healing's red, the honey drain's Create's honey texture, both flat
     colours before.
+- [x] 2026-11-06 Part 71: NeoForge's item handlers of entities: a player's inventory, a mob's hands
+  and armour, mods' entity providers. `entity.getCapability(...)` answered nothing: an entity's
+  capability had no lookup, and NeoForge's player and equipment wrappers weren't modelled. Measured
+  over the pack: `Capabilities.ItemHandler.ENTITY` is read by 15 jars in 121 classes (95 of them
+  create-stuff-additions', its tools and armour reaching the player's inventory; sophisticatedcore,
+  create_jetpack, create_things_and_misc, create_winery, Jade, ars_nouveau among the rest),
+  `ENTITY_AUTOMATION` by 9; `getCapability` is called on `Entity` 116 times in 12 jars, on
+  `Player` 8, `LivingEntity` 7; 13 jars register 17 entity providers (`registerEntity`). Of the
+  wrappers, `new PlayerMainInvWrapper` 12 times in 8 jars (Create's toolbox returns a player's
+  items through its subclass `ItemReturnInvWrapper`, which keeps the hotbar out), `RangedWrapper`
+  5 in 2, `EntityHandsInvWrapper` and `EntityArmorInvWrapper` 4 each (create-stuff-additions);
+  `getEquipmentSlotForItem` is called in 7 jars, `ItemStack.canEquip` 15 times in 9.
+  - compat `capabilities`: `Entity.getCapability(cap[, context])` through any entity class, in
+    `CapabilityHooks`' order: NeoForge's own `PlayerInvWrapper` of a player (a fake player's own
+    inventory for Create's deployer) ahead of every mod; then the providers mods registered for the
+    entity's type (`ICapabilityProvider.getCapability(entity, context)`), the first that answers;
+    then NeoForge's fallback for every type: a living entity's hands and armour as one
+    `CombinedInvWrapper`.
+  - compat `item_wrappers`: `RangedWrapper`, `PlayerMainInvWrapper`, `PlayerArmorInvWrapper`,
+    `PlayerOffhandInvWrapper` and `PlayerInvWrapper` as NeoForge writes them (each part a range of
+    the inventory's `InvWrapper`; the armour's takes only what is worn in the slot, through
+    `stack.canEquip`), and `EntityEquipmentInvWrapper` with its hands' and armour's subclasses
+    (`getItemBySlot`/`setItemSlot` called virtually, one item to an armour slot, 99 to a hand,
+    `IllegalArgumentException` past the slots). A mod's subclass reaches them through `super`
+    (the wrappers' superclasses are in `api_super`, so `instanceof` and inherited calls climb).
+    `ItemStack.canEquip(slot, entity)` and `LivingEntity.getEquipmentSlotForItem(stack)` answer
+    where the stack is worn: an `Equipable` mod item's own slot (a mod's armour by its type), the
+    game's for a vanilla item, else the main hand.
+  - compat-core `Host::item_equip_slot` (client `native_item_equip_slot`, API @API:hand_stack@):
+    the slot the game equips an item in (its `equippable` component), so a diamond helmet goes on
+    the head and an elytra on the chest.
+  - compat `menus`: a player's `Inventory` keeps `Container`'s defaults it doesn't override:
+    `canPlaceItem`, which NeoForge's `InvWrapper` asks before it fills a slot, answered nothing.
+  - compat `blocks`: NeoForge's `DyeColor.getColor(stack)` (13 jars, 35 calls): a dye's colour,
+    else the first colour whose `c:dyes/<colour>` tag holds the item (NeoForge's loop stops before
+    black), else null. Unmapped, it answered the stand-in of a static method returning its own
+    class, a new `DyeColor`: Create's toolbox took any item it was clicked with for a dye and
+    turned white instead of opening.
+  - horizon-ctl: `key alt` (`lalt`, `option`), Create's toolbelt key.
+  - Tests: `item_wrappers::tests::a_players_handler_is_their_inventory_whose_armour_takes_only_what_is_worn_there`
+    (41 slots, dirt onto dirt, a helmet only on the head and one of two, torches out of the off
+    hand, the game's slots changed), `item_wrappers::tests::a_stack_is_equipped_where_its_item_is_worn`
+    (a helmet, an elytra, a mod's boots by their armour type, dirt), `capabilities::tests::an_entitys_capability_is_its_types_providers_then_neoforges_fallback`
+    (the first provider that answers, a mod's handler ahead of the fallback, a zombie's sword in
+    the fallback's slot 0, an armour slot holding one, none for an arrow),
+    `blocks::tests::a_stack_has_a_dye_colour_only_when_it_is_a_dye`. Compat 494 tests, translator 19.
+  - In game (`toolboxgame.sh`, survival, a brown toolbox, an iron pickaxe held): right-clicked, the
+    toolbox opened its menu (`ToolboxScreen`: the 8 compartments around the lid, the inventory
+    below) and stayed brown; before the `getColor` fix it became a white toolbox and opened
+    nothing. Not reached yet: `click-slot` numbers the game's own screens' slots, so it missed the
+    mod screen's (the pickaxe stayed in the hotbar), and Alt opened no radial menu: the control
+    socket's keys never reach `InputEvent.Key` (the hook takes the window's own key events), which
+    Create opens the menu on. The toolbox's `ToolboxEquipPacket`, which returns the hotbar's item
+    through `ItemReturnInvWrapper`, waits for that.
+  - Left: a horse's own inventory (NeoForge's fallback gives `InvWrapper(horse.getInventory())`)
+    and a chest boat's or minecart's container (`InvWrapper(entity)`) aren't the host's to give:
+    none for those. A vanilla mob's equipment reads through its saved `equipment`; the host can't
+    change it (`setItemSlot` on the game's entity is unmapped). `PlayerMainInvWrapper`'s pop
+    animation and menu broadcast after an insert, and `canUseSlot` for mobs, aren't modelled; the
+    inventory a player's handler reaches is the acting player's (as every `Inventory` call's).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

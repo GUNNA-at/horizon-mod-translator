@@ -569,6 +569,9 @@ fn client_host(c: &str, id: &str) -> String {
         fn item_max_damage(&self, item: &str) -> Option<u32> {{
             Some(self.game.get().native_item_max_damage(item))
         }}
+        fn item_equip_slot(&self, item: &str) -> Option<String> {{
+            self.game.get().native_item_equip_slot(item).map(str::to_owned)
+        }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
             let boxes = self.game.get().mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
@@ -930,6 +933,9 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
         }}
         fn item_max_damage(&self, item: &str) -> Option<u32> {{
             Some(self.game.native_item_max_damage(item))
+        }}
+        fn item_equip_slot(&self, item: &str) -> Option<String> {{
+            self.game.native_item_equip_slot(item).map(str::to_owned)
         }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
@@ -1999,6 +2005,9 @@ fn game_host(c: &str, server_send: &str) -> String {
         fn item_max_damage(&self, item: &str) -> Option<u32> {{
             Some(self.game.native_item_max_damage(item))
         }}
+        fn item_equip_slot(&self, item: &str) -> Option<String> {{
+            self.game.native_item_equip_slot(item).map(str::to_owned)
+        }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
             let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
@@ -2734,6 +2743,9 @@ fn player_host(c: &str, server_effects: &str) -> String {
         }}
         fn item_max_damage(&self, item: &str) -> Option<u32> {{
             Some(self.game.native_item_max_damage(item))
+        }}
+        fn item_equip_slot(&self, item: &str) -> Option<String> {{
+            self.game.native_item_equip_slot(item).map(str::to_owned)
         }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];

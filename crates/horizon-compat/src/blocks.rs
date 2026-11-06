@@ -536,6 +536,26 @@ fn dye_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             let i = a(0).i();
             dye(rt, if (0..16).contains(&i) { i as usize } else { 0 })
         }
+        // NeoForge's `getColor(stack)`: a dye's own colour, else the first colour whose
+        // `c:dyes/<colour>` tag holds the stack's item (its loop stops before black), else null.
+        // Create's toolbox, among others, dyes itself only with a stack that has one.
+        "getColor" => {
+            let stack = a(0);
+            if api_common::stack_empty(rt, stack) {
+                return Some(V::NULL);
+            }
+            let item = api_common::item_like_name(rt, rt.get_field(stack, "$item"));
+            let colour = |d: &str| d.to_ascii_lowercase();
+            if let Some(i) = DYES.iter().position(|(d, _)| item == format!("minecraft:{}_dye", colour(d))) {
+                return Some(dye(rt, i));
+            }
+            for (i, (d, _)) in DYES.iter().enumerate().take(15) {
+                if crate::recipes::item_in_tag(rt, &item, &format!("c:dyes/{}", colour(d))) {
+                    return Some(dye(rt, i));
+                }
+            }
+            V::NULL
+        }
         "byName" | "byFireworkColor" => {
             let found = if name == "byName" {
                 let n = rt.str_of(a(0)).unwrap_or("").to_ascii_uppercase();
@@ -3895,5 +3915,26 @@ mod tests {
         );
         assert_eq!(rt.get_field(m, "$attackDamage"), V::D(8.0));
         assert_eq!(rt.get_field(m, "$attackSpeed"), V::D(f64::from(-3.1f32)));
+    }
+
+    /// NeoForge's `DyeColor.getColor(stack)`, which Create's toolbox asks of what it is clicked with
+    /// before it dyes itself: a dye's colour, a stack in a `c:dyes/<colour>` tag that colour, null
+    /// for anything else (the toolbox then opens).
+    #[test]
+    fn a_stack_has_a_dye_colour_only_when_it_is_a_dye() {
+        const GET_COLOR: &str = "net/minecraft/world/item/DyeColor.getColor.(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/DyeColor;";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = crate::host::MemoryHost::default();
+        host.item_tags.insert("c:dyes/blue".into(), vec!["test:lapis_dust".into()]);
+        let (red, blue) = (api::get_static(&mut rt, "net/minecraft/world/item/DyeColor.RED"), api::get_static(&mut rt, "net/minecraft/world/item/DyeColor.BLUE"));
+        let got = rt.with_host(&mut host, |rt| {
+            ["minecraft:red_dye", "test:lapis_dust", "minecraft:iron_pickaxe"].map(|item| {
+                let s = api_common::stack(rt, item, 1);
+                api::call(rt, GET_COLOR, &[s])
+            })
+        });
+        assert_eq!(got, [red, blue, V::NULL]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

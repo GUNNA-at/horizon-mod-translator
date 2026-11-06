@@ -14,11 +14,32 @@
 //! through these. Such a container is the game's own here ([`VANILLA`]: by position, through the
 //! host). A container a mod wraps itself (`new InvWrapper(this)`, as 25 mods of a Create pack do) is
 //! the mod's object, whose methods are called virtually, so its own answers count.
+//!
+//! And NeoForge's handlers of entities' items:
+//! - `RangedWrapper`: a run of another handler's slots;
+//! - `PlayerMainInvWrapper`, `PlayerArmorInvWrapper` and `PlayerOffhandInvWrapper`: a player's
+//!   inventory's 36 slots, its 4 armour slots (which take only what is worn there) and its off hand,
+//!   each a `RangedWrapper` of the inventory's `InvWrapper`; `PlayerInvWrapper` the three as one
+//!   `CombinedInvWrapper` (NeoForge's handler of a player, `Capabilities.ItemHandler.ENTITY`);
+//! - `EntityHandsInvWrapper` and `EntityArmorInvWrapper`: a living entity's hands and armour through
+//!   `getItemBySlot` and `setItemSlot` (together NeoForge's handler of any other living entity).
+//!
+//! A mod's subclass (Create's `ItemReturnInvWrapper`, a `PlayerMainInvWrapper`) reaches these through
+//! its `super` calls.
 use crate::host::{ContainerFacts, ContainerKind};
-use crate::{Rt, V, api, api_common, hand, jutil, menus};
+use crate::{Data, Rt, V, api, api_common, hand, jutil, menus};
 
 const INV: &str = "net/neoforged/neoforge/items/wrapper/InvWrapper";
 const SIDED: &str = "net/neoforged/neoforge/items/wrapper/SidedInvWrapper";
+const RANGED: &str = "net/neoforged/neoforge/items/wrapper/RangedWrapper";
+const PLAYER_INV: &str = "net/neoforged/neoforge/items/wrapper/PlayerInvWrapper";
+const PLAYER_MAIN: &str = "net/neoforged/neoforge/items/wrapper/PlayerMainInvWrapper";
+const PLAYER_ARMOR: &str = "net/neoforged/neoforge/items/wrapper/PlayerArmorInvWrapper";
+const PLAYER_OFFHAND: &str = "net/neoforged/neoforge/items/wrapper/PlayerOffhandInvWrapper";
+const EQUIPMENT: &str = "net/neoforged/neoforge/items/wrapper/EntityEquipmentInvWrapper";
+const HANDS: &str = "net/neoforged/neoforge/items/wrapper/EntityHandsInvWrapper";
+const ARMOR: &str = "net/neoforged/neoforge/items/wrapper/EntityArmorInvWrapper";
+const COMBINED: &str = "net/neoforged/neoforge/items/wrapper/CombinedInvWrapper";
 const HOPPER: &str = "net/neoforged/neoforge/items/VanillaHopperItemHandler";
 const ITEM_HANDLER: &str = "net/neoforged/neoforge/items/IItemHandler";
 const MODIFIABLE: &str = "net/neoforged/neoforge/items/IItemHandlerModifiable";
@@ -28,6 +49,7 @@ const CONTAINER: &str = "net/minecraft/world/Container";
 const WORLDLY: &str = "net/minecraft/world/WorldlyContainer";
 const FURNACE: &str = "net/minecraft/world/level/block/entity/AbstractFurnaceBlockEntity";
 const BREWING: &str = "net/minecraft/world/level/block/entity/BrewingStandBlockEntity";
+const ITEM_STACK: &str = "net/minecraft/world/item/ItemStack";
 
 // What the wrappers ask of a mod's container.
 const C_SIZE: &str = "net/minecraft/world/Container.getContainerSize.()I";
@@ -53,10 +75,24 @@ const GET_INV: (&str, &str) = ("net/neoforged/neoforge/items/wrapper/InvWrapper.
 /// `InvWrapper`), a vanilla block's container a `WorldlyContainer`.
 pub(crate) fn is_a(c: &str, class: &str) -> bool {
     match class {
-        ITEM_HANDLER | MODIFIABLE => matches!(c, INV | SIDED | HOPPER),
+        ITEM_HANDLER | MODIFIABLE => {
+            matches!(c, INV | SIDED | HOPPER | RANGED | PLAYER_INV | PLAYER_MAIN | PLAYER_ARMOR | PLAYER_OFFHAND | EQUIPMENT | HANDS | ARMOR)
+        }
         INV => c == HOPPER,
         CONTAINER | WORLDLY | "net/minecraft/world/Clearable" => c == VANILLA,
         _ => false,
+    }
+}
+
+/// The wrappers' superclasses, which answer what a wrapper doesn't itself: a player's whole
+/// handler is a `CombinedInvWrapper`, its parts `RangedWrapper`s, the hands' and the armour's
+/// `EntityEquipmentInvWrapper`s.
+pub(crate) fn api_super(class: &str) -> Option<&'static str> {
+    match class {
+        PLAYER_MAIN | PLAYER_ARMOR | PLAYER_OFFHAND => Some(RANGED),
+        PLAYER_INV => Some(COMBINED),
+        HANDS | ARMOR => Some(EQUIPMENT),
+        _ => None,
     }
 }
 
@@ -588,6 +624,308 @@ fn vanilla_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+// --- Entities' items ---------------------------------------------------------------------------
+
+const EQUIPMENT_SLOT: &str = "net/minecraft/world/entity/EquipmentSlot";
+const EQUIPABLE: &str = "net/minecraft/world/item/Equipable";
+const EQUIPABLE_SLOT: (&str, &str) = (
+    "net/minecraft/world/item/Equipable.getEquipmentSlot.()Lnet/minecraft/world/entity/EquipmentSlot;",
+    "getEquipmentSlot.()Lnet/minecraft/world/entity/EquipmentSlot;",
+);
+const ITEM_BY_SLOT: &str = "net/minecraft/world/entity/LivingEntity.getItemBySlot.(Lnet/minecraft/world/entity/EquipmentSlot;)Lnet/minecraft/world/item/ItemStack;";
+const SET_ITEM_SLOT: &str = "net/minecraft/world/entity/LivingEntity.setItemSlot.(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V";
+const MATCHES: &str = "net/minecraft/world/item/ItemStack.matches.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;)Z";
+const H_SET: &str = "net/neoforged/neoforge/items/IItemHandlerModifiable.setStackInSlot.(ILnet/minecraft/world/item/ItemStack;)V";
+const H_VALID: &str = "net/neoforged/neoforge/items/IItemHandler.isItemValid.(ILnet/minecraft/world/item/ItemStack;)Z";
+const COMBINED_INIT: &str = "net/neoforged/neoforge/items/wrapper/CombinedInvWrapper.<init>.([Lnet/neoforged/neoforge/items/IItemHandlerModifiable;)V";
+/// `EquipmentSlot.Type.HAND`'s slots and `HUMANOID_ARMOR`'s, in `EquipmentSlot.values()` order (the
+/// armour's by their index: feet 0 to head 3).
+const HAND_SLOTS: [&str; 2] = ["MAINHAND", "OFFHAND"];
+const ARMOR_SLOTS: [&str; 4] = ["FEET", "LEGS", "CHEST", "HEAD"];
+/// A player's inventory: the 36 main slots, then the 4 armour slots, then the off hand.
+const MAIN_SIZE: i32 = 36;
+const ARMOR_END: i32 = 40;
+const OFFHAND_END: i32 = 41;
+
+/// The equipment slot `stack` is worn in, as `LivingEntity.getEquipmentSlotForItem` finds it (an
+/// `EquipmentSlot`'s name): an `Equipable` item's own (a mod's armour by its type, its own answer
+/// counting), the game's for a vanilla item; the main hand for anything worn nowhere.
+pub(crate) fn equipment_slot_for(rt: &mut Rt, stack: V) -> String {
+    if api_common::stack_empty(rt, stack) {
+        return "MAINHAND".into();
+    }
+    let item = rt.get_field(stack, "$item");
+    // A vanilla item is its id; the game knows where it is worn.
+    if let Some(id) = rt.str_of(item).map(str::to_owned) {
+        let slot = rt.host().and_then(|h| h.item_equip_slot(&id));
+        return match slot.as_deref() {
+            Some(s @ ("head" | "chest" | "legs" | "feet" | "body" | "offhand")) => s.to_ascii_uppercase(),
+            _ => "MAINHAND".into(),
+        };
+    }
+    if item.r() != 0 && rt.instance_of(item, EQUIPABLE) {
+        let slot = crate::tanks::virt(rt, EQUIPABLE_SLOT, &[item]);
+        if let Some(name) = (slot.r() != 0).then(|| rt.get_field(slot, "$name")).and_then(|n| rt.str_of(n).map(str::to_owned)) {
+            return name;
+        }
+    }
+    "MAINHAND".into()
+}
+
+/// `EquipmentSlot.<name>`.
+fn slot_constant(rt: &mut Rt, name: &str) -> V {
+    api_common::get_static(rt, EQUIPMENT_SLOT, name).unwrap_or(V::NULL)
+}
+
+/// A new `InvWrapper` of container `inv`.
+fn inv_wrapper(rt: &mut Rt, inv: V) -> V {
+    let w = rt.new_object(INV);
+    rt.put_field(w, "inv", inv);
+    w
+}
+
+/// `new RangedWrapper(compose, min, max)`'s fields, on `w`.
+fn ranged_init(rt: &mut Rt, w: V, compose: V, min: i32, max: i32) {
+    rt.put_field(w, "compose", compose);
+    rt.put_field(w, "minSlot", V::I(min));
+    rt.put_field(w, "maxSlot", V::I(max));
+}
+
+/// `new PlayerMainInvWrapper(inv)` (and the armour's and the off hand's) on `w`: a `RangedWrapper`
+/// of the inventory's `InvWrapper`.
+fn player_part_init(rt: &mut Rt, w: V, class: &str, inv: V) {
+    let (min, max) = match class {
+        PLAYER_MAIN => (0, MAIN_SIZE),
+        PLAYER_ARMOR => (MAIN_SIZE, ARMOR_END),
+        _ => (ARMOR_END, OFFHAND_END),
+    };
+    let compose = inv_wrapper(rt, inv);
+    ranged_init(rt, w, compose, min, max);
+    rt.put_field(w, "inventoryPlayer", inv);
+}
+
+/// `new PlayerInvWrapper(inv)` on `w`: the main inventory's, the armour's and the off hand's
+/// wrappers as one `CombinedInvWrapper`.
+fn player_inv_init(rt: &mut Rt, w: V, inv: V) {
+    let mut parts = Vec::with_capacity(3);
+    for class in [PLAYER_MAIN, PLAYER_ARMOR, PLAYER_OFFHAND] {
+        let part = rt.new_object(class);
+        player_part_init(rt, part, class, inv);
+        parts.push(part);
+    }
+    let array = rt.alloc("[Lnet/neoforged/neoforge/items/IItemHandlerModifiable;", Data::Array(parts));
+    api::call(rt, COMBINED_INIT, &[w, array]);
+}
+
+/// NeoForge's item handler of a player (`Capabilities.ItemHandler.ENTITY`, registered for
+/// `EntityType.PLAYER`): a `PlayerInvWrapper` of their inventory.
+pub(crate) fn player_handler(rt: &mut Rt, player: V) -> V {
+    let inv = menus::inventory(rt, player);
+    let w = rt.new_object(PLAYER_INV);
+    player_inv_init(rt, w, inv);
+    w
+}
+
+/// NeoForge's fallback item handler of a living entity that isn't a player or a horse: its hands'
+/// and its armour's wrappers as one `CombinedInvWrapper`.
+pub(crate) fn equipment_handler(rt: &mut Rt, entity: V) -> V {
+    let mut parts = Vec::with_capacity(2);
+    for (class, slots) in [(HANDS, &HAND_SLOTS[..]), (ARMOR, &ARMOR_SLOTS[..])] {
+        let part = rt.new_object(class);
+        equipment_init(rt, part, entity, slots);
+        parts.push(part);
+    }
+    let array = rt.alloc("[Lnet/neoforged/neoforge/items/IItemHandlerModifiable;", Data::Array(parts));
+    let w = rt.new_object(COMBINED);
+    api::call(rt, COMBINED_INIT, &[w, array]);
+    w
+}
+
+/// Whether the armour wrapper's slot `slot` (feet 0 to head 3) takes `stack`:
+/// `stack.canEquip(slot, player)`, the slot the stack is worn in being that one.
+fn worn_there(rt: &mut Rt, slot: i32, stack: V) -> bool {
+    let Some(want) = usize::try_from(slot).ok().and_then(|s| ARMOR_SLOTS.get(s)) else {
+        return false;
+    };
+    !api_common::stack_empty(rt, stack) && equipment_slot_for(rt, stack) == *want
+}
+
+/// `RangedWrapper`'s calls, and its subclasses' (the player's wrappers): slot `s` is the handler's
+/// slot `s + minSlot`, while that is below `maxSlot`. The armour's wrapper takes only what is worn
+/// in a slot; the main inventory's wrapper answers its inventory (`getInventoryPlayer`).
+fn ranged_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let w = a(0);
+    match (owner, name) {
+        (RANGED, "<init>") => {
+            ranged_init(rt, w, a(1), a(2).i(), a(3).i());
+            return Some(V::Void);
+        }
+        (PLAYER_MAIN | PLAYER_ARMOR | PLAYER_OFFHAND, "<init>") => {
+            player_part_init(rt, w, owner, a(1));
+            return Some(V::Void);
+        }
+        (_, "getInventoryPlayer") => return Some(rt.get_field(w, "inventoryPlayer")),
+        _ => {}
+    }
+    let compose = rt.get_field(w, "compose");
+    let (min, max) = (rt.get_field(w, "minSlot").i(), rt.get_field(w, "maxSlot").i());
+    if name == "getSlots" {
+        return Some(V::I(max - min));
+    }
+    let slot = a(1).i();
+    // `checkSlot`: below the end (NeoForge checks no more).
+    let inside = slot + min < max;
+    let at = V::I(slot + min);
+    Some(match name {
+        "getStackInSlot" if inside => menus::virt(rt, H_GET, compose, &[at]),
+        "getStackInSlot" => empty(rt),
+        "insertItem" => {
+            // `PlayerArmorInvWrapper.insertItem`, past `RangedWrapper`'s own (`super`).
+            let armour = owner != RANGED && rt.instance_of(w, PLAYER_ARMOR);
+            if !inside || (armour && !worn_there(rt, slot, a(2))) {
+                return Some(a(2));
+            }
+            menus::virt(rt, H_INSERT, compose, &[at, a(2), a(3)])
+        }
+        "extractItem" if inside => menus::virt(rt, H_EXTRACT, compose, &[at, a(2), a(3)]),
+        "extractItem" => empty(rt),
+        "setStackInSlot" => {
+            if inside {
+                menus::virt(rt, H_SET, compose, &[at, a(2)]);
+            }
+            V::Void
+        }
+        "getSlotLimit" if inside => menus::virt(rt, H_LIMIT, compose, &[at]),
+        "getSlotLimit" => V::I(0),
+        "isItemValid" if inside => menus::virt(rt, H_VALID, compose, &[at, a(2)]),
+        "isItemValid" => V::I(0),
+        _ => return None,
+    })
+}
+
+/// `new EntityEquipmentInvWrapper(entity, type)`'s fields on `w`: the entity and the slots of the
+/// type, as `EquipmentSlot` constants.
+fn equipment_init(rt: &mut Rt, w: V, entity: V, slots: &[&str]) {
+    rt.put_field(w, "entity", entity);
+    let constants: Vec<V> = slots.iter().map(|s| slot_constant(rt, s)).collect();
+    let list = jutil::new_list(rt, constants);
+    rt.put_field(w, "slots", list);
+}
+
+/// What `entity` holds or wears in `slot` (an `EquipmentSlot`): its own answer, a mod's entity's too.
+fn worn(rt: &mut Rt, entity: V, slot: V) -> V {
+    menus::virt(rt, ITEM_BY_SLOT, entity, &[slot])
+}
+
+fn wear(rt: &mut Rt, entity: V, slot: V, stack: V) {
+    menus::virt(rt, SET_ITEM_SLOT, entity, &[slot, stack]);
+}
+
+fn with_count(rt: &mut Rt, stack: V, n: i32) -> V {
+    let out = copy(rt, stack);
+    api::call(rt, SET_COUNT, &[out, V::I(n)]);
+    out
+}
+
+/// `EntityEquipmentInvWrapper`'s calls (the hands' and the armour's wrappers): each slot an
+/// equipment slot of the entity's, one item in an armour slot, 99 in a hand.
+fn equipment_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let w = a(0);
+    if name == "<init>" {
+        let slots: &[&str] = match owner {
+            HANDS => &HAND_SLOTS,
+            ARMOR => &ARMOR_SLOTS,
+            // (entity, type): the slots of an `EquipmentSlot.Type`.
+            _ => match rt.get_field(a(2), "$name") {
+                n if rt.str_of(n) == Some("HAND") => &HAND_SLOTS,
+                n if rt.str_of(n) == Some("HUMANOID_ARMOR") => &ARMOR_SLOTS,
+                _ => &["BODY"],
+            },
+        };
+        equipment_init(rt, w, a(1), slots);
+        return Some(V::Void);
+    }
+    let entity = rt.get_field(w, "entity");
+    let slots = jutil::elements(rt, rt.get_field(w, "slots"));
+    if name == "getSlots" {
+        return Some(V::I(slots.len() as i32));
+    }
+    if name == "isItemValid" {
+        return Some(V::I(1));
+    }
+    if (name == "insertItem" && api_common::stack_empty(rt, a(2))) || (name == "extractItem" && a(2).i() == 0) {
+        return Some(empty(rt));
+    }
+    let slot = a(1).i();
+    // `validateSlotIndex`.
+    let Some(&eq) = usize::try_from(slot).ok().and_then(|s| slots.get(s)) else {
+        return Some(crate::jlang::throw_with(rt, "java/lang/IllegalArgumentException", &format!("Slot {slot} not in valid range - [0,{})", slots.len())));
+    };
+    let eq_name = rt.str_of(rt.get_field(eq, "$name")).unwrap_or("").to_owned();
+    let slot_limit = if ARMOR_SLOTS.contains(&eq_name.as_str()) { 1 } else { 99 };
+    Some(match name {
+        "getStackInSlot" => worn(rt, entity, eq),
+        "getSlotLimit" => V::I(slot_limit),
+        "insertItem" => {
+            let (stack, simulate) = (a(2), a(3).i() != 0);
+            let existing = worn(rt, entity, eq);
+            let mut limit = slot_limit.min(max_stack(rt, stack));
+            if !api_common::stack_empty(rt, existing) {
+                if !same_item(rt, stack, existing) {
+                    return Some(stack);
+                }
+                limit -= count(rt, existing);
+            }
+            if limit <= 0 {
+                return Some(stack);
+            }
+            let n = count(rt, stack);
+            let reached = n > limit;
+            if !simulate {
+                if api_common::stack_empty(rt, existing) {
+                    let put = if reached { with_count(rt, stack, limit) } else { stack };
+                    wear(rt, entity, eq, put);
+                } else {
+                    grow(rt, existing, if reached { limit } else { n });
+                }
+            }
+            if reached { with_count(rt, stack, n - limit) } else { empty(rt) }
+        }
+        "extractItem" => {
+            let (amount, simulate) = (a(2).i(), a(3).i() != 0);
+            let existing = worn(rt, entity, eq);
+            if api_common::stack_empty(rt, existing) {
+                return Some(empty(rt));
+            }
+            let take = amount.min(max_stack(rt, existing));
+            let have = count(rt, existing);
+            if have <= take {
+                if !simulate {
+                    let none = empty(rt);
+                    wear(rt, entity, eq, none);
+                }
+                existing
+            } else {
+                if !simulate {
+                    let rest = with_count(rt, existing, have - take);
+                    wear(rt, entity, eq, rest);
+                }
+                with_count(rt, existing, take)
+            }
+        }
+        "setStackInSlot" => {
+            let existing = worn(rt, entity, eq);
+            if api::call(rt, MATCHES, &[existing, a(2)]).i() == 0 {
+                wear(rt, entity, eq, a(2));
+            }
+            V::Void
+        }
+        _ => return None,
+    })
+}
+
 // --- VanillaInventoryCodeHooks ------------------------------------------------------------------
 //
 // NeoForge's patches to hoppers, droppers and crafters: each asks the block it pushes into or pulls
@@ -775,8 +1113,12 @@ pub(crate) fn crafter_output(rt: &mut Rt, pos: [i32; 3], facing: u8, stack: V) -
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    matches!(owner, INV | SIDED | HOPPER | ITEM_HANDLER | MODIFIABLE | VANILLA | CONTAINER | WORLDLY)
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(
+        owner,
+        INV | SIDED | HOPPER | ITEM_HANDLER | MODIFIABLE | VANILLA | CONTAINER | WORLDLY | RANGED | PLAYER_INV | PLAYER_MAIN | PLAYER_ARMOR | PLAYER_OFFHAND | EQUIPMENT | HANDS | ARMOR
+    ) || (owner == ITEM_STACK && name == "canEquip")
+        || name == "getEquipmentSlotForItem"
 }
 
 /// [`call`] by the call's key (`owner.name.desc`).
@@ -787,20 +1129,48 @@ pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 
 /// Calls on the wrappers and on a vanilla block's container; None for anything else (another
 /// handler, a mod's container).
-pub fn call(rt: &mut Rt, owner: &str, name: &str, _desc: &str, args: &[V]) -> Option<V> {
+pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let this = args.first().copied().unwrap_or_default();
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // `stack.canEquip(slot, entity)` (NeoForge's, by default where the stack is worn) and
+    // `entity.getEquipmentSlotForItem(stack)`.
+    if owner == ITEM_STACK && name == "canEquip" {
+        let want = rt.str_of(rt.get_field(a(1), "$name")).unwrap_or("").to_owned();
+        return Some(V::I((!want.is_empty() && equipment_slot_for(rt, this) == want) as i32));
+    }
+    if name == "getEquipmentSlotForItem" && desc == "(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/entity/EquipmentSlot;" {
+        let slot = equipment_slot_for(rt, a(1));
+        return Some(slot_constant(rt, &slot));
+    }
     match owner {
         // `SidedInvWrapper.getSlot(inv, slot, side)`, static.
-        SIDED if name == "getSlot" => Some(V::I(sided_slot(rt, this, args.get(1).copied().unwrap_or_default().i(), args.get(2).copied().unwrap_or_default()))),
+        SIDED if name == "getSlot" => Some(V::I(sided_slot(rt, this, a(1).i(), a(2)))),
+        PLAYER_INV if name == "<init>" => {
+            player_inv_init(rt, this, a(1));
+            Some(V::Void)
+        }
+        // The rest of a player's handler is its `CombinedInvWrapper`'s.
+        PLAYER_INV => None,
+        RANGED | PLAYER_MAIN | PLAYER_ARMOR | PLAYER_OFFHAND => ranged_call(rt, owner, name, args),
+        EQUIPMENT | HANDS | ARMOR => equipment_call(rt, owner, name, args),
         // By the receiver's class, as the JVM dispatches: a hopper's handler is an `InvWrapper`,
         // and the handlers' interfaces reach them all.
         INV | SIDED | HOPPER | ITEM_HANDLER | MODIFIABLE => {
             let sided = rt.instance_of(this, SIDED);
             let hopper = !sided && rt.instance_of(this, HOPPER);
-            if !sided && !hopper && !rt.instance_of(this, INV) {
+            if sided || hopper || rt.instance_of(this, INV) {
+                return wrapper_call(rt, sided, hopper, name, args);
+            }
+            if !matches!(owner, ITEM_HANDLER | MODIFIABLE) || this.r() == 0 {
                 return None;
             }
-            wrapper_call(rt, sided, hopper, name, args)
+            if rt.instance_of(this, RANGED) {
+                return ranged_call(rt, owner, name, args);
+            }
+            if rt.instance_of(this, EQUIPMENT) {
+                return equipment_call(rt, owner, name, args);
+            }
+            None
         }
         VANILLA | CONTAINER | WORLDLY if this.r() != 0 && rt.class_of(this) == VANILLA => vanilla_call(rt, name, args),
         _ => None,
@@ -1165,6 +1535,98 @@ mod tests {
         });
         assert_eq!(rest, [Some(0), Some(6), None]);
         assert_eq!((in_handler(&mut rt, h, 0), in_handler(&mut rt, h, 1)), (owned("minecraft:bread", 62), owned("minecraft:bread", 6)));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const PLAYER_CAPABILITY: &str = "net/minecraft/world/entity/player/Player.getCapability.(Lnet/neoforged/neoforge/capabilities/EntityCapability;Ljava/lang/Object;)Ljava/lang/Object;";
+    const CAN_EQUIP: &str = "net/minecraft/world/item/ItemStack.canEquip.(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/entity/LivingEntity;)Z";
+    const SLOT_FOR: &str = "net/minecraft/world/entity/LivingEntity.getEquipmentSlotForItem.(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/entity/EquipmentSlot;";
+
+    /// A player whose game wears a diamond helmet (one to a stack) on the head and an elytra on the
+    /// chest, with dirt in inventory slot 5 and torches in the off hand.
+    fn wearing_host() -> MemoryHost {
+        let mut host = MemoryHost { inventory: true, player_id: Some(7), offhand: Some(held("minecraft:torch", 3)), ..MemoryHost::default() };
+        host.equip_slots.insert("minecraft:diamond_helmet".into(), "head".into());
+        host.equip_slots.insert("minecraft:elytra".into(), "chest".into());
+        host.stack_limits.insert("minecraft:diamond_helmet".into(), 1);
+        host.slots.insert(5, held("minecraft:dirt", 10));
+        host
+    }
+
+    /// NeoForge's handler of a player (`Capabilities.ItemHandler.ENTITY`): the inventory's 36 slots,
+    /// then the armour's 4 (feet first), then the off hand. A main slot fills as a chest's does; an
+    /// armour slot takes only what is worn there, one at a time; the game's slots get what it did.
+    #[test]
+    fn a_players_handler_is_their_inventory_whose_armour_takes_only_what_is_worn_there() {
+        let mut rt = rt();
+        let mut host = wearing_host();
+        rt.with_host(&mut host, |rt| {
+            let player = api_common::acting_player(rt);
+            let cap = api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.ENTITY");
+            let h = api::call(rt, PLAYER_CAPABILITY, &[player, cap, V::NULL]);
+            assert_eq!(rt.class_of(h), PLAYER_INV);
+            assert_eq!(api::call(rt, SLOTS, &[h]).i(), 41);
+            let dirt = api::call(rt, GET_STACK, &[h, V::I(5)]);
+            assert_eq!((item_of(rt, dirt), n(rt, dirt)), ("minecraft:dirt".to_owned(), 10));
+            let torches = api::call(rt, GET_STACK, &[h, V::I(40)]);
+            assert_eq!((item_of(rt, torches), n(rt, torches)), ("minecraft:torch".to_owned(), 3));
+            let more = api_common::stack(rt, "minecraft:dirt", 4);
+            let rest = api::call(rt, INSERT, &[h, V::I(5), more, V::I(0)]);
+            assert!(api_common::stack_empty(rt, rest));
+            // Dirt is worn nowhere, the helmet on the head only (the armour's slot 3), one of two.
+            let dirt = api_common::stack(rt, "minecraft:dirt", 1);
+            assert_eq!(api::call(rt, INSERT, &[h, V::I(39), dirt, V::I(0)]), dirt);
+            let helmets = api_common::stack(rt, "minecraft:diamond_helmet", 2);
+            assert_eq!(api::call(rt, INSERT, &[h, V::I(36), helmets, V::I(0)]), helmets, "not on the feet");
+            let rest = api::call(rt, INSERT, &[h, V::I(39), helmets, V::I(0)]);
+            assert_eq!((item_of(rt, rest), n(rt, rest)), ("minecraft:diamond_helmet".to_owned(), 1));
+            let took = api::call(rt, EXTRACT, &[h, V::I(40), V::I(2), V::I(0)]);
+            assert_eq!((item_of(rt, took), n(rt, took)), ("minecraft:torch".to_owned(), 2));
+            assert_eq!(api::call(rt, LIMIT, &[h, V::I(0)]).i(), 99);
+        });
+        assert_eq!(host.slots.get(&5).map(|s| s.count), Some(14));
+        assert_eq!(host.worn[0].as_ref().map(|s| (s.item.as_str(), s.count)), Some(("minecraft:diamond_helmet", 1)));
+        assert_eq!(host.offhand.as_ref().map(|s| s.count), Some(1));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Where a stack is worn, as `LivingEntity.getEquipmentSlotForItem` finds it and NeoForge's
+    /// `ItemStack.canEquip` asks it: a helmet on the head and an elytra on the chest as the game wears
+    /// them, a mod's boots on the feet by their armour type, dirt in the main hand.
+    #[test]
+    fn a_stack_is_equipped_where_its_item_is_worn() {
+        fn forward(rt: &mut Rt, key: &'static str, _: &'static str, args: &[V]) -> V {
+            api::call(rt, key, args)
+        }
+        let mut rt = rt();
+        rt.vcall = Some(forward);
+        rt.supers.insert("test/CardboardBoots", "net/minecraft/world/item/ArmorItem");
+        let mut host = wearing_host();
+        rt.with_host(&mut host, |rt| {
+            let material = api::get_static(rt, "net/minecraft/world/item/ArmorMaterials.LEATHER");
+            let props = rt.new_object("net/minecraft/world/item/Item$Properties");
+            api::call(rt, "net/minecraft/world/item/Item$Properties.<init>.()V", &[props]);
+            let boots = rt.new_object("test/CardboardBoots");
+            let ty = api::get_static(rt, "net/minecraft/world/item/ArmorItem$Type.BOOTS");
+            api::call(rt, "net/minecraft/world/item/ArmorItem.<init>.(Lnet/minecraft/core/Holder;Lnet/minecraft/world/item/ArmorItem$Type;Lnet/minecraft/world/item/Item$Properties;)V", &[boots, material, ty, props]);
+            rt.registered.insert(("item".into(), "test:cardboard_boots".into()), boots);
+            let boots_stack = rt.new_object(ITEM_STACK);
+            api::call(rt, "net/minecraft/world/item/ItemStack.<init>.(Lnet/minecraft/world/level/ItemLike;)V", &[boots_stack, boots]);
+            let player = api_common::acting_player(rt);
+            let slots = ["HEAD", "CHEST", "FEET", "MAINHAND"].map(|s| api_common::get_static(rt, EQUIPMENT_SLOT, s).unwrap());
+            let stacks = [
+                api_common::stack(rt, "minecraft:diamond_helmet", 1),
+                api_common::stack(rt, "minecraft:elytra", 1),
+                boots_stack,
+                api_common::stack(rt, "minecraft:dirt", 1),
+            ];
+            for (i, s) in stacks.into_iter().enumerate() {
+                assert_eq!(api::call(rt, SLOT_FOR, &[player, s]), slots[i], "stack {i}");
+                for (j, there) in slots.into_iter().enumerate() {
+                    assert_eq!(api::call(rt, CAN_EQUIP, &[s, there, player]).i() != 0, i == j, "stack {i} in slot {j}");
+                }
+            }
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

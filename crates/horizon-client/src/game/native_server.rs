@@ -833,6 +833,12 @@ impl Game<'_> {
     pub(super) fn native_item_max_damage(&self, item: &str) -> u32 {
         self.res.items().get(item).map_or(0, |i| i.max_damage)
     }
+    /// The equipment slot `item` is worn in (its `equippable.slot`: `head`, `chest`, `legs`,
+    /// `feet`, `body`...), None for an item worn nowhere or one the game doesn't know.
+    /// API @API:hand_stack@.
+    pub(super) fn native_item_equip_slot(&self, item: &str) -> Option<&str> {
+        self.res.items().get(item).and_then(|i| i.equip_slot.as_deref())
+    }
     /// How many of plain `item` (`minecraft:diamond`) the player carries.
     pub(super) fn native_count_items(&mut self, item: &str) -> u32 {
         count_in(&slots(&mut self.inventory, &mut self.offhand), item)

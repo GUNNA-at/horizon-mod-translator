@@ -1371,6 +1371,7 @@ fn key_code(name: &str) -> Option<KeyCode> {
         "space" => KeyCode::Space,
         "shift" | "lshift" => KeyCode::ShiftLeft,
         "ctrl" | "control" | "lctrl" => KeyCode::ControlLeft,
+        "alt" | "lalt" | "option" => KeyCode::AltLeft,
         // The edit modifier on macOS (Cmd+A selects all there).
         "super" | "cmd" | "meta" => KeyCode::SuperLeft,
         "esc" | "escape" => KeyCode::Escape,
