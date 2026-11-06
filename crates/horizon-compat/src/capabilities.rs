@@ -94,8 +94,16 @@ pub fn fire(rt: &mut Rt) {
         return;
     }
     rt.interned.insert("compat:capabilities-fired".into(), V::I(1));
+    crate::fluid_wrappers::init(rt);
     let ev = rt.new_object(EVENT);
     crate::neo::post(rt, EVENT, ev);
+}
+
+const FLUID_HANDLER: &str = "neoforge:fluid_handler";
+
+/// Whether capability `cap` is the one named `name`.
+fn named(rt: &Rt, cap: V, name: &str) -> bool {
+    rt.str_of(rt.get_field(cap, "$name")) == Some(name)
 }
 
 /// The item a key names (an item, a block, a holder...).
@@ -116,6 +124,12 @@ fn find_block(rt: &mut Rt, cap: V, level: V, pos: V, state: V, be: V, side: V) -
     };
     let be = if be.r() != 0 { be } else { crate::glue::block_entity_at(rt, at) };
     let block = crate::host::split_state(rt.str_of(state).unwrap_or("")).0.to_owned();
+    // NeoForge's own handler of a cauldron, registered ahead of every mod's provider.
+    if named(rt, cap, FLUID_HANDLER)
+        && let Some(w) = crate::fluid_wrappers::cauldron(rt, level, pos, &block)
+    {
+        return w;
+    }
     for (kind, c, key, provider) in entries(rt) {
         if kind != Kind::Block || c != cap || api::block_name(rt, key) != block {
             continue;
@@ -160,6 +174,10 @@ fn find_item(rt: &mut Rt, cap: V, stack: V, context: V) -> V {
         if r.r() != 0 {
             return r;
         }
+    }
+    // NeoForge's fallback, after every mod's provider: a bucket's own wrapper.
+    if named(rt, cap, "neoforge:fluid_handler_item") && crate::fluid_wrappers::plain_bucket(rt, stack) {
+        return crate::fluid_wrappers::bucket(rt, stack);
     }
     V::NULL
 }
@@ -229,7 +247,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 Kind::Item => item_name(rt, a(2)),
                 _ => String::new(),
             };
-            let found = entries(rt).into_iter().any(|(k, c, key, _)| {
+            // NeoForge registers the cauldrons' own before any mod's listener runs.
+            let cauldron = kind == Kind::Block && named(rt, a(1), FLUID_HANDLER) && crate::fluid_wrappers::is_cauldron(rt, &wanted);
+            let found = cauldron || entries(rt).into_iter().any(|(k, c, key, _)| {
                 k == kind
                     && c == a(1)
                     && match kind {

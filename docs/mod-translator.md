@@ -5310,6 +5310,36 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     stays empty: NeoForge's `FluidBucketWrapper`, which both go through, isn't modelled yet. The
     glass bottle is filled (its spout is down to 750 mB) but nothing comes back, since
     `PotionContents.createItemStack` is unmapped.
+- [x] 2026-11-06 Part 63: NeoForge's fluid handlers for buckets and cauldrons, and `FluidUtil`.
+  After Part 62 the spout round kept the bucket on its depot, but its spout never filled it, and
+  the item drain clicked with a water bucket stayed empty. Both go through the bucket's own fluid
+  handler: NeoForge gives every item whose class is exactly `BucketItem` a `FluidBucketWrapper`
+  (`CapabilityHooks.registerFallbackVanillaProviders`, after the mods' own providers), and Create's
+  `GenericItemFilling` checks for that exact class. Nothing answered `FluidHandler.ITEM` for a
+  bucket, so `canItemBeFilled` and `canItemBeEmptied` said no. Measured over the pack: 7 jars make or
+  extend `FluidBucketWrapper` themselves (Mekanism, SecurityCraft, Ad Astra, Architectury...),
+  CreateDragonsPlus registers its dragon's breath cauldron with `RegisterCauldronFluidContentEvent`,
+  and 15 jars call `FluidUtil` (`interactWithFluidHandler` 7, `getFluidContained` 6,
+  `getFluidHandler` 6, `tryFluidTransfer` 4, the container helpers 4...).
+  - compat `fluid_wrappers` (new): `FluidBucketWrapper` as NeoForge writes it (a bucketful in or out
+    of one bucket, the container becoming the filled or the empty bucket; its protected field
+    `container`, and `getFluid`, `setFluid` and `canFillFluidType` called virtually for a mod's
+    subclass); `CauldronFluidContent` (vanilla's empty, water and lava cauldrons, then
+    `RegisterCauldronFluidContentEvent` for the mods', before the capabilities event as NeoForge's
+    `RegistrationEvents.init`) and `CauldronWrapper` (whole increments only: a water cauldron's
+    three levels hold 1000 mB, so it fills from empty to full and drains from full to empty; a
+    block that is no cauldron any more throws NeoForge's `IllegalStateException`); `FluidUtil`'s
+    `getFilledBucket`, `getFluidHandler` (both), `getFluidContained` and `tryFluidTransfer` (both).
+    Milk stays without a handler: NeoForge's milk fluid isn't registered here.
+  - compat `capabilities`: a cauldron's `FluidHandler.BLOCK` is NeoForge's wrapper, ahead of every
+    mod's provider (`isBlockRegistered` says so); a stack's `FluidHandler.ITEM` falls back to the
+    bucket's wrapper after them. `fluids`: `FluidType.getBucket(stack)`. `instanceof
+    IFluidHandler`/`IFluidHandlerItem` knows the wrappers and NeoForge's tank. The three classes
+    leave `vanilla_records`' data classes.
+  - Tests: `fluid_wrappers::tests::a_bucket_takes_a_bucketful_and_gives_it_back`,
+    `a_cauldron_fills_and_drains_a_bucketful_at_a_time`,
+    `cauldron_contents_are_found_by_block_and_by_fluid`, `fluid_util_finds_and_moves_a_buckets_fluid`.
+    In game: with the next part's build (the spout round).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

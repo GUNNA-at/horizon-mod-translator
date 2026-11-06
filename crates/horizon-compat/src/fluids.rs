@@ -62,6 +62,7 @@ const TYPE_TEMPERATURE: &str = "net/neoforged/neoforge/fluids/FluidType.getTempe
 const TYPE_LIGHT: &str = "net/neoforged/neoforge/fluids/FluidType.getLightLevel.()I";
 const TYPE_RARITY: &str = "net/neoforged/neoforge/fluids/FluidType.getRarity.()Lnet/minecraft/world/item/Rarity;";
 const TYPE_DESCRIPTION_ID: &str = "net/neoforged/neoforge/fluids/FluidType.getDescriptionId.()Ljava/lang/String;";
+const FLUID_BUCKET: (&str, &str) = ("net/minecraft/world/level/material/Fluid.getBucket.()Lnet/minecraft/world/item/Item;", "getBucket.()Lnet/minecraft/world/item/Item;");
 const RESISTANCE: &str = "net/minecraft/world/level/material/Fluid.getExplosionResistance.()F";
 const SOURCE: &str = "net/minecraft/world/level/material/FlowingFluid.getSource.()Lnet/minecraft/world/level/material/Fluid;";
 const FLOWING: &str = "net/minecraft/world/level/material/FlowingFluid.getFlowing.()Lnet/minecraft/world/level/material/Fluid;";
@@ -427,6 +428,13 @@ fn fluid_type_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V])
                         _ => TYPE_DESCRIPTION_ID,
                     };
                     on_type(rt, getter, this)
+                }
+                // NeoForge's `new ItemStack(stack.getFluid().getBucket())`, the fluid's own answer.
+                "getBucket" if desc.starts_with("(Lnet/neoforged/neoforge/fluids/FluidStack;)") => {
+                    let f = rt.get_field(a(1), "$fluid");
+                    let item = crate::tanks::virt(rt, FLUID_BUCKET, &[f]);
+                    let name = crate::api_common::item_like_name(rt, item);
+                    crate::api_common::stack(rt, &name, 1)
                 }
                 "getFallDistanceModifier" => own(rt, "$fallDistanceModifier", V::F(match vanilla.as_deref() { Some("minecraft:water") => 0.0, Some("minecraft:empty") => 1.0, _ => 0.5 })),
                 "motionScale" => own(rt, "$motionScale", V::D(match vanilla.as_deref() { Some("minecraft:lava") => 0.0023333333333333335, Some("minecraft:empty") => 1.0, _ => 0.014 })),

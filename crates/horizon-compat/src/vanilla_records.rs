@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 644] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 641] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1649,13 +1649,10 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 644] = [
     ("net/neoforged/neoforge/common/world/chunk/ForcedChunkManager$TicketOwner", "i(Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Comparable;)V=id,owner|e=id,owner"),
     ("net/neoforged/neoforge/common/world/chunk/TicketHelper", "i(Lnet/minecraft/world/level/ForcedChunksSavedData;Lnet/minecraft/resources/ResourceLocation;Ljava/util/Map;Ljava/util/Map;)V=saveData,controllerId,blockTickets,entityTickets|ggetBlockTickets()Ljava/util/Map;=blockTickets|ggetEntityTickets()Ljava/util/Map;=entityTickets|o"),
     ("net/neoforged/neoforge/energy/ComponentEnergyStorage", "i(Lnet/neoforged/neoforge/common/MutableDataComponentHolder;Lnet/minecraft/core/component/DataComponentType;III)V=parent,energyComponent,capacity,maxReceive,maxExtract|ggetMaxEnergyStored()I=capacity|o"),
-    ("net/neoforged/neoforge/fluids/CauldronFluidContent", "i(Lnet/minecraft/world/level/block/Block;Lnet/minecraft/world/level/material/Fluid;IILnet/minecraft/world/level/block/state/properties/IntegerProperty;)V=block,fluid,totalAmount,maxLevel,levelProperty|o"),
     ("net/neoforged/neoforge/fluids/FluidActionResult", "i(ZLnet/minecraft/world/item/ItemStack;)V=success,result|gisSuccess()Z=success|ggetResult()Lnet/minecraft/world/item/ItemStack;=result|o"),
     ("net/neoforged/neoforge/fluids/capability/templates/FluidHandlerItemStack", "i(Ljava/util/function/Supplier;Lnet/minecraft/world/item/ItemStack;I)V=componentType,container,capacity|ggetContainer()Lnet/minecraft/world/item/ItemStack;=container|o"),
     ("net/neoforged/neoforge/fluids/capability/templates/FluidHandlerItemStackSimple", "i(Ljava/util/function/Supplier;Lnet/minecraft/world/item/ItemStack;I)V=componentType,container,capacity|ggetContainer()Lnet/minecraft/world/item/ItemStack;=container|o"),
     ("net/neoforged/neoforge/fluids/capability/wrappers/BucketPickupHandlerWrapper", "i(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/level/block/BucketPickup;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;)V=player,bucketPickupHandler,world,blockPos|o"),
-    ("net/neoforged/neoforge/fluids/capability/wrappers/CauldronWrapper", "i(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;)V=level,pos|o"),
-    ("net/neoforged/neoforge/fluids/capability/wrappers/FluidBucketWrapper", "i(Lnet/minecraft/world/item/ItemStack;)V=container|ggetContainer()Lnet/minecraft/world/item/ItemStack;=container|o"),
     ("net/neoforged/neoforge/items/wrapper/ForwardingItemHandler", "i(Ljava/util/function/Supplier;)V=delegate|o"),
     ("net/neoforged/neoforge/items/wrapper/InvWrapper", "i(Lnet/minecraft/world/Container;)V=inv|ggetInv()Lnet/minecraft/world/Container;=inv"),
     ("net/neoforged/neoforge/network/bundle/PacketAndPayloadAcceptor", "i(Ljava/util/function/Consumer;)V=consumer|o"),

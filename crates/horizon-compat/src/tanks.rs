@@ -31,7 +31,7 @@ const DRAIN: (&str, &str) = (
 const TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 
 /// A method that may be the mod's own: its override, else the API's.
-fn virt(rt: &mut Rt, (owner_key, key): (&'static str, &'static str), args: &[V]) -> V {
+pub(crate) fn virt(rt: &mut Rt, (owner_key, key): (&'static str, &'static str), args: &[V]) -> V {
     match rt.vcall {
         Some(vc) => vc(rt, owner_key, key, args),
         None => api::call(rt, owner_key, args),
@@ -43,7 +43,8 @@ pub fn action(rt: &mut Rt, simulate: bool) -> V {
     if simulate { api::api_enum(rt, ACTION, "SIMULATE", 1) } else { api::api_enum(rt, ACTION, "EXECUTE", 0) }
 }
 
-fn simulating(rt: &Rt, action: V) -> bool {
+/// Whether a `FluidAction` is `SIMULATE`.
+pub(crate) fn simulating(rt: &Rt, action: V) -> bool {
     rt.get_field(action, "$ordinal").i() == 1
 }
 

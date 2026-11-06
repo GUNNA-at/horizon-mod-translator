@@ -31,6 +31,7 @@ pub mod files;
 pub mod convention;
 pub mod creative;
 pub mod crops;
+pub mod fluid_wrappers;
 pub mod fluids;
 pub mod food;
 pub mod item_use;
