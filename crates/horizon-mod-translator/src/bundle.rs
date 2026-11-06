@@ -1058,6 +1058,29 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
             }};
             self.model(model, pose, color, light, Some((&shift.from, &shift.to, how)))
         }}
+        // Text the mod draws in the world (`Font.drawInBatch` in a renderer): its runs under its
+        // pose, lit by its light (`LightTexture.pack`; 0 for the block's own), each run in its own
+        // colour or the text's, with the text's alpha.
+        fn world_text(&mut self, text: &{c}::host::WorldText) -> bool {{
+            use crate::game::native_block_entity_draw::TextPiece;
+            let saved = self.draw.light;
+            if text.light != 0 {{
+                let (block, sky) = (text.light & 0xFFFF, text.light >> 16 & 0xFFFF);
+                self.draw.light = sky.min(0xF0) | block.min(0xF0) << 8;
+            }}
+            let alpha = text.argb & 0xFF00_0000;
+            let pieces: Vec<TextPiece<'_>> = text.runs.iter().map(|r| TextPiece {{
+                text: &r.text,
+                argb: alpha | r.color.unwrap_or(text.argb & 0xFF_FFFF),
+                bold: r.bold,
+            }}).collect();
+            self.draw.push();
+            self.draw.transform(text.pose);
+            self.game.native_draw_text(self.draw, &pieces, text.at, text.shadow, text.outline);
+            self.draw.pop();
+            self.draw.light = saved;
+            true
+        }}
     }}
     impl Host<'_, '_, '_> {{
         /// `model` under `pose`, lit by `light` (`LightTexture.pack`; 0 for the block's own), its

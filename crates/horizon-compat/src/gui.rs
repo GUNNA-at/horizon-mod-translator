@@ -11,6 +11,8 @@ use crate::{Data, Rt, V};
 
 const GRAPHICS: &str = "net/minecraft/client/gui/GuiGraphics";
 const FONT: &str = "net/minecraft/client/gui/Font";
+const FONT_SET: &str = "net/minecraft/client/gui/font/FontSet";
+const BAKED_GLYPH: &str = "net/minecraft/client/gui/font/glyphs/BakedGlyph";
 const SPLITTER: &str = "net/minecraft/client/StringSplitter";
 /// Text in visual order (`FormattedCharSequence`), and text pieces (`FormattedText`) this module
 /// makes: `$of` the text they stand for, `$parts` (a list) when made of several, `$style` the style
@@ -748,7 +750,41 @@ fn text_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
             // (text, x, y, colour, shadow, matrix, buffers, mode, background, light[, bidi])
             let m = render::mat4(rt, a(6));
             let r = runs(rt, a(1));
+            if !drawing(rt) {
+                world_text(rt, &r, &m, [a(2).f(), a(3).f()], a(4).i(), a(5).i() != 0, 0, a(10).i());
+            }
             V::I(draw_runs(rt, &r, a(2).f(), a(3).f(), a(4).i(), a(5).i() != 0, &m))
+        }
+        // `drawInBatch8xOutline(text, x, y, colour, outline, matrix, buffers, light)`: the text over
+        // its outline, which is the text drawn eight times a pixel around it in the outline's
+        // colour (whatever colours its runs have).
+        (FONT, "drawInBatch8xOutline") => {
+            let m = render::mat4(rt, a(6));
+            let r = runs(rt, a(1));
+            let (x, y, color, outline) = (a(2).f(), a(3).f(), a(4).i(), a(5).i());
+            if drawing(rt) {
+                let plain: Vec<TextRun> = r.iter().map(|t| TextRun { color: None, ..t.clone() }).collect();
+                for (dx, dy) in [(-1.0, -1.0), (-1.0, 0.0), (-1.0, 1.0), (0.0, -1.0), (0.0, 1.0), (1.0, -1.0), (1.0, 0.0), (1.0, 1.0)] {
+                    draw_runs(rt, &plain, x + dx, y + dy, outline, false, &m);
+                }
+                draw_runs(rt, &r, x, y, color, false, &m);
+            } else {
+                world_text(rt, &r, &m, [x, y], color, false, adjust_color(outline), a(8).i());
+            }
+            V::Void
+        }
+        // A font's glyphs, asked for to end the text's batch (Create's nixie tubes:
+        // `endBatch(getFontSet(font).whiteGlyph().renderType(mode))`): a font set for each font,
+        // a white glyph, and the text render type of each display mode (`GlyphRenderTypes.select`),
+        // whose batch holds nothing here, as text goes to the host.
+        (FONT, "getFontSet") => {
+            let font = crate::neo::location(rt, a(1));
+            rt.intern(format!("compat:font-set/{font}"), |rt| rt.new_object(FONT_SET))
+        }
+        (FONT_SET, "whiteGlyph") => rt.intern("compat:white-glyph".into(), |rt| rt.new_object(BAKED_GLYPH)),
+        (BAKED_GLYPH, "renderType") => {
+            let mode = rt.get_field(a(1), "$ordinal").i().clamp(0, 2) as usize;
+            render::render_type(rt, ["text", "text_see_through", "text_polygon_offset"][mode])
         }
         (SPLITTER, "stringWidth") => {
             let r = runs(rt, a(1));
@@ -1030,6 +1066,19 @@ fn draw_runs(rt: &mut Rt, runs: &[TextRun], x: f32, y: f32, color: i32, shadow: 
         }
     }
     (x + w) as i32 + shadow as i32
+}
+
+/// Text a renderer draws in the world (`drawInBatch` outside the GUI), to the host: `runs` from
+/// `at` under `m`, in `color` where a run has none, lit by `light` (`LightTexture.pack`).
+#[allow(clippy::too_many_arguments)]
+fn world_text(rt: &mut Rt, runs: &[TextRun], m: &M4, at: [f32; 2], color: i32, shadow: bool, outline: u32, light: i32) {
+    if runs.iter().all(|r| r.text.is_empty()) {
+        return;
+    }
+    let text = crate::host::WorldText { runs: runs.to_vec(), pose: *m, at, argb: adjust_color(color), shadow, outline, light: light as u32 };
+    if let Some(h) = rt.host_mut() {
+        h.world_text(&text);
+    }
 }
 
 /// The texture a GUI sprite is (`blitSprite(create:widget/button)`): its file under
@@ -2106,6 +2155,8 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         GRAPHICS
             | LAYERS_EVENT
             | FONT
+            | FONT_SET
+            | BAKED_GLYPH
             | SPLITTER
             | SEQUENCE
             | FORMATTED
@@ -2260,7 +2311,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{GuiDraw, MemoryHost};
+    use crate::host::{GuiDraw, MemoryHost, WorldText};
 
     fn text(rt: &mut Rt, s: &str) -> V {
         rt.string(s)
@@ -2378,6 +2429,63 @@ mod tests {
                 GuiDraw::Text(vec![run("Hi", None, false)], [11.0, 22.0], 1.0, 0xFFFF_FFFF, true),
             ]
         );
+    }
+
+    #[test]
+    fn text_a_renderer_draws_goes_to_the_world_and_outlined_text_over_its_outline() {
+        const DRAW: &str = "net/minecraft/client/gui/Font.drawInBatch.(Ljava/lang/String;FFIZLorg/joml/Matrix4f;Lnet/minecraft/client/renderer/MultiBufferSource;Lnet/minecraft/client/gui/Font$DisplayMode;II)I";
+        const OUTLINED: &str = "net/minecraft/client/gui/Font.drawInBatch8xOutline.(Lnet/minecraft/util/FormattedCharSequence;FFIILorg/joml/Matrix4f;Lnet/minecraft/client/renderer/MultiBufferSource;I)V";
+        let mut rt = Rt::new();
+        // A renderer's pose: the block's centre, a font pixel a 64th of a block, upright.
+        let s = 1.0 / 64.0;
+        let pose = [s, 0.0, 0.0, 0.0, 0.0, -s, 0.0, 0.0, 0.0, 0.0, s, 0.0, 0.5, 0.5, 0.5, 1.0];
+        let gold = literal(&mut rt, "64", "GOLD,");
+        let seq = sequence(&mut rt, gold, "");
+        // Outside the GUI (a block entity's renderer, a level stage): the host gets the text.
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let font = font(rt);
+            let m = crate::render::new_mat4(rt, pose);
+            let rpm = rt.string("RPM");
+            // A string with a drop shadow, full bright: three characters 6 wide from x 2, and the
+            // shadow's pixel.
+            let end = call(rt, DRAW, &[font, rpm, V::F(2.0), V::F(-4.0), V::I(0x00ED_EDED), V::I(1), m, V::NULL, V::NULL, V::I(0), V::I(0x00F0_00F0)]);
+            assert_eq!(end, Some(V::I(21)));
+            // Outlined: the run keeps its own colour, the outline's colour is made opaque.
+            let end = call(rt, OUTLINED, &[font, seq, V::F(-6.0), V::F(0.0), V::I(0x00FF_FFFF), V::I(0x0033_2211), m, V::NULL, V::I(0x00A0_0050)]);
+            assert_eq!(end, Some(V::Void));
+        });
+        assert!(host.drawn_gui.is_empty());
+        assert_eq!(
+            host.world_texts,
+            vec![
+                WorldText { runs: vec![run("RPM", None, false)], pose, at: [2.0, -4.0], argb: 0xFFED_EDED, shadow: true, outline: 0, light: 0x00F0_00F0 },
+                WorldText { runs: vec![run("64", Some(0xFFAA00), false)], pose, at: [-6.0, 0.0], argb: 0xFFFF_FFFF, shadow: false, outline: 0xFF33_2211, light: 0x00A0_0050 },
+            ]
+        );
+        // On the GUI: the text eight times a pixel around it in the outline's colour (its runs'
+        // own colours dropped), then the text itself, over them.
+        let mut host = MemoryHost { gui: [320, 240], ..MemoryHost::default() };
+        rt.interned.insert(DRAWING.into(), V::I(1));
+        rt.with_host(&mut host, |rt| {
+            let font = font(rt);
+            let m = crate::render::new_mat4(rt, crate::render::IDENTITY);
+            call(rt, OUTLINED, &[font, seq, V::F(10.0), V::F(20.0), V::I(0x00FF_FFFF), V::I(0x0033_2211), m, V::NULL, V::I(0x00F0_00F0)]);
+        });
+        let drawn: Vec<(Option<u32>, [f32; 2], u32)> = host
+            .drawn_gui
+            .iter()
+            .map(|d| match d {
+                GuiDraw::Text(r, at, _, argb, false) => (r[0].color, *at, *argb),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(drawn.len(), 9);
+        assert!(drawn[..8].iter().all(|&(color, _, argb)| color.is_none() && argb == 0xFF33_2211));
+        let mut around: Vec<[i32; 2]> = drawn[..8].iter().map(|(_, at, _)| [at[0] as i32 - 10, at[1] as i32 - 20]).collect();
+        around.sort();
+        assert_eq!(around, [[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]]);
+        assert_eq!(drawn[8], (Some(0xFFAA00), [10.0, 20.0], 0xFFFF_FFFF));
     }
 
     #[test]

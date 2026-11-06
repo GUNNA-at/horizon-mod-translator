@@ -5795,10 +5795,75 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     "Network Stress: Low (0%)", "Remaining Capacity: 1,048,320su / 1,048,576su". The drill broke
     the stone (its cobblestone dropped), the saw cut the log. `Block.shouldRenderFace` and the
     state methods are gone from the unmapped calls; `Font.drawInBatch8xOutline` is still there
-    (next). Found: with the goggles on the creative motor shows no overlay (Create's generator
-    stats, `GeneratingKineticBlockEntity.addToGoggleTooltip`: the motor's capacity from
-    `BlockStressValues.getCapacity` on the client), with no exception and no unmapped call: to
-    measure.
+    (next). With the goggles on, the creative motor seemed to show no overlay: the crosshair was on
+    one of its value box's slots (its north face), and Create leaves the overlay out while a value
+    box is highlighted (`GoggleOverlayRenderer`). Aimed at its back, it shows its generator stats
+    ("Kinetic Stress Capacity: 1,048,576su at current speed"; rechecked in Part 75).
+- [x] 2026-11-06 Part 75: text mods draw in the world. `Font.drawInBatch` with a matrix was drawn on
+  the GUI only: text a block entity's renderer or a level stage drew in the world was measured (its
+  end answered, as vanilla's) and dropped. 37 jars call it (68 calls): Create 9 (its value boxes'
+  numbers, its nixie tubes, its block entities' name plates), FramedBlocks, Applied Energistics 2
+  and MineColonies 4 each, JourneyMap and PolyLib 3, and 31 more. `drawInBatch8xOutline` (text over
+  its outline, as a glowing sign's) was unmapped: 7 jars, 8 calls (Create 2, Farmer's Delight,
+  FramedBlocks, Ars Nouveau, Create Aeronautics, Moonlight, Refurbished Furniture).
+  - compat `gui`: outside the GUI, `drawInBatch` gives the host its text (`Host::world_text`): its
+    runs, its pose, where it starts, its colour, the drop shadow and its light, and still answers
+    vanilla's end. `drawInBatch8xOutline` on the GUI draws the text eight times a pixel around in
+    the outline's colour (the runs' own colours dropped, as vanilla's `withColor` drops them), then
+    the text over them; in the world, one text with its outline. `Font.getFontSet` (3 jars, 6
+    calls), `FontSet.whiteGlyph` (2, 4) and `BakedGlyph.renderType` (3, 5), which Create's nixie
+    tubes end their text's batch with after each digit: a font set for each font, a white glyph,
+    the text render type of each display mode, so that ending it ends the text's batch alone
+    (unmapped, the type was null and ended every batch, a face another type was gathering too).
+    `BakedGlyph` leaves the vanilla records' data classes, modelled by hand now.
+  - compat-core: `WorldText` (runs, a column-major pose from font pixels, the start, `0xAARRGGBB`,
+    shadow, outline, `LightTexture.pack` light) and `Host::world_text` (false by default: no text
+    drawn there); `MemoryHost` keeps them in order.
+  - client: `native_draw_text(draw, pieces, at, shadow, outline)` (API @API:block_entity_draw_text@)
+    draws `TextPiece`s (text, `0xAARRGGBB`, bold) in a row under the draw's pose in the game's font,
+    lit by the draw's light, with the sign renderer's glyph quads (`text_vertices` of
+    `block_entity_render`, shared now): vanilla's drop shadow (a pixel right and down, a quarter as
+    bright, the text 0.03 font pixels in front, `Font.SHADOW_OFFSET`), bold (each glyph again a
+    pixel to its right, a pixel more advance), the outline (eight copies, the text in front of them
+    toward the side it reads from, where vanilla's polygon offset puts it); an alpha below 4 is
+    opaque (`Font.adjustColor`), text fainter than a tenth isn't drawn (vanilla's text shader
+    discards it). It answers where the text ends. Text shows only from the side it reads from, as
+    vanilla's text render types cull back faces: a glyph's quad turns counterclockwise seen from
+    that side (`BakedGlyph.render`), and the frame knows where the camera is (a block entity's from
+    its block's corner, a level stage's and a mob's at the origin of their camera-relative poses);
+    a block entity's frame that draws text isn't kept (`keep`), as what shows depends on the camera.
+  - translator: the drawing host (block entities' renderers, mod entities and the level stages)
+    answers `world_text`: the runs, each in its own colour or the text's with the text's alpha,
+    under its pose, lit by its light (0: the block's own).
+  - Not drawn yet: `drawInBatch`'s background box (a name plate's dark box), underline and
+    strikethrough, italic's slant, `SEE_THROUGH` text (a name plate seen through walls), and alpha
+    (text draws opaque).
+  - Tests: `gui::tests::text_a_renderer_draws_goes_to_the_world_and_outlined_text_over_its_outline`
+    (a string with a shadow and an outlined sequence outside the GUI reach the host as they were
+    drawn, the sequence's run in its own colour, nothing on the GUI; on the GUI, the outlined one
+    is eight copies in the outline's colour around it, then the text),
+    `vertices::tests::ending_the_text_batch_leaves_the_other_types_faces` (the nixie tube's
+    `endBatch` of the white glyph's type leaves a face gathered for another type until that one's
+    batch ends), in `native_block_entity_draw::tests`
+    `text_lands_in_its_glyphs_with_vanillas_shadow_bold_and_outline` (pieces in a row under the
+    pose, a blank space, colours in vertex order, the light; the shadow's place, colour and the
+    text in front; bold's doubled glyphs; the outline's eight copies behind the text, toward the
+    camera; too faint a text drawn not at all but taking its room) and
+    `text_shows_only_from_the_side_it_reads_from` (a sign's text and its shadow from in front, none
+    from behind though it takes its room; a nixie tube's digit and its mirror image for the back,
+    each seen only from its own side; an outline's text in front of it under a sign's pose).
+    Compat 504, translator 19, gameplay 70 (`game-tests.sh`; `catalog_matches_hook_points` checks
+    the new fragment), `native_block_entity_draw` 9, `block_entity_render` 7.
+  - In game (`p75round.sh`: a creative motor at 64 RPM driving a mechanical drill, and a nixie tube
+    facing north beside a redstone block): the motor's value box shows "64" over its outline on the
+    slot the crosshair is on, Create's tip under it ("Generated Speed in RPM", "Click and hold to
+    edit"). The nixie tube's two digits read "0" from its west side, each over its shadow, and the
+    mirrored copies for the other side are left out (before, both showed through each other, the
+    digits unreadable); from north and south, edge-on, nothing shows. With the goggles on, the
+    drill shows its kinetic stats ("Kinetic Stress Impact: 256su at current speed") and the motor,
+    aimed at its back, its generator stats. `Font.getFontSet`, `whiteGlyph` and `renderType` are
+    gone from the unmapped calls; `Level.getSignal(BlockPos, Direction)` is still there, so the
+    tube shows 0 beside the redstone block, not 15 (next).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

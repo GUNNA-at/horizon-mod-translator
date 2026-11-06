@@ -831,6 +831,11 @@ pub trait Host {
     fn draw_item(&mut self, _item: &str, _display: u8, _pose: &[f32; 16], _light: u32, _seed: i32) -> bool {
         false
     }
+    /// Drawing in the world: adds `text`, a mod's `Font.drawInBatch` in a block entity's, an
+    /// entity's or a level stage's renderer. False when the game draws no text there.
+    fn world_text(&mut self, _text: &WorldText) -> bool {
+        false
+    }
     /// Whether `item` places a block, so its model is a block's (`BakedModel.isGui3d`).
     fn item_is_block(&self, _item: &str) -> bool {
         false
@@ -1271,6 +1276,28 @@ pub struct TextRun {
     pub strikethrough: bool,
 }
 
+/// Text a mod draws in the world (`Font.drawInBatch` in a block entity's, an entity's or a level
+/// stage's renderer), as [`Host::world_text`] gets it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldText {
+    /// The text's runs, each in its own style.
+    pub runs: Vec<TextRun>,
+    /// Where it is drawn: a column-major 4x4 matrix, as [`Host::draw_model`]'s pose, from the
+    /// text's own units (a font pixel, y down) to the drawn block's.
+    pub pose: [f32; 16],
+    /// Where the text starts under `pose`: its top left, in font pixels.
+    pub at: [f32; 2],
+    /// `0xAARRGGBB`, for runs without a colour of their own.
+    pub argb: u32,
+    /// Vanilla's drop shadow: the text again a pixel right and down, a quarter as bright, under it.
+    pub shadow: bool,
+    /// An outline around the text, `0xAARRGGBB` (`drawInBatch8xOutline`: the text drawn eight times
+    /// a pixel around it in that colour, under it); 0 for none.
+    pub outline: u32,
+    /// `LightTexture.pack`: block light in bits 4..8, sky light in bits 20..24.
+    pub light: u32,
+}
+
 /// What a mod's `GuiGraphics` drew on a [`MemoryHost`], in order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GuiDraw {
@@ -1537,6 +1564,8 @@ pub struct MemoryHost {
     pub occlusion_faces: HashMap<(String, u8), Vec<[f64; 6]>>,
     /// The server's players and where they are.
     pub players: Vec<(u128, [f64; 3])>,
+    /// The text drawn in the world ([`Host::world_text`]), in order.
+    pub world_texts: Vec<WorldText>,
     /// The server's players' entity ids ([`Host::player_entities`]), by UUID.
     pub player_entity_ids: HashMap<u128, i32>,
     /// The game's damage types ([`Host::damage_types`]).
@@ -2255,6 +2284,10 @@ impl Host for MemoryHost {
     }
     fn gui_text(&mut self, runs: &[TextRun], at: [f32; 2], scale: f32, argb: u32, shadow: bool) {
         self.drawn_gui.push(GuiDraw::Text(runs.to_vec(), at, scale, argb, shadow));
+    }
+    fn world_text(&mut self, text: &WorldText) -> bool {
+        self.world_texts.push(text.clone());
+        true
     }
     fn gui_item(&mut self, item: &str, at: [f32; 2], size: f32) -> bool {
         self.drawn_gui.push(GuiDraw::Item(item.to_owned(), at, size));

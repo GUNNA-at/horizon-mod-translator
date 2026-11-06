@@ -655,23 +655,34 @@ fn sign_text_calls(
 }
 
 /// How far the text of an outlined call sits in front of its outline, in
-/// text units (`Font.DisplayMode.POLYGON_OFFSET`, see `draw_text`).
+/// text units (`Font.DisplayMode.POLYGON_OFFSET`, see `text_vertices`).
 const TEXT_OVER_OUTLINE: f32 = 0.05;
 
-/// Draws a text call with the font atlas: 8x8 glyph cells, the outline as
-/// eight one-pixel offsets under the text.
+/// Draws a text call with the font atlas ([`text_vertices`]).
+fn draw_text(scene: &Scene, call: &TextCall, out: &mut Vec<Vertex>) {
+    text_vertices(scene.glyph, call, out);
+}
+
+/// The vertices of a text call in the font atlas's glyphs, `glyph` giving a
+/// glyph's cell (none for a blank one such as the space) and advance: 8x8
+/// glyph cells, the outline as eight one-pixel offsets under the text. Where
+/// the text ends, in its units.
 ///
 /// `TextFeatureRenderer.renderText` draws the outline glyphs NORMAL and the
 /// text over them POLYGON_OFFSET, so the coplanar text always wins the depth
 /// test. Here both share one mesh, so the text is lifted a hair towards the
 /// reader instead (a twentieth of a font pixel, invisible) rather than
 /// z-fighting with the outline under it.
-fn draw_text(scene: &Scene, call: &TextCall, out: &mut Vec<Vertex>) {
+pub fn text_vertices(
+    glyph: &dyn Fn(char) -> (Option<Rect>, f32),
+    call: &TextCall,
+    out: &mut Vec<Vertex>,
+) -> f32 {
     let mut emit = |dx: f32, dy: f32, z: f32, argb: u32| {
         let mut x = call.x + dx;
         let y0 = call.y + dy;
         for ch in call.text.chars() {
-            let (cell, advance) = (scene.glyph)(ch);
+            let (cell, advance) = glyph(ch);
             if let Some(r) = cell {
                 let corners = [(x, y0 + 8.0), (x + 8.0, y0 + 8.0), (x + 8.0, y0), (x, y0)];
                 let uvs = [[r.u0, r.v1], [r.u1, r.v1], [r.u1, r.v0], [r.u0, r.v0]];
@@ -695,6 +706,7 @@ fn draw_text(scene: &Scene, call: &TextCall, out: &mut Vec<Vertex>) {
             }
             x += advance;
         }
+        x - dx
     };
     if call.outline != 0 {
         for (dx, dy) in [
@@ -715,7 +727,7 @@ fn draw_text(scene: &Scene, call: &TextCall, out: &mut Vec<Vertex>) {
     } else {
         0.0
     };
-    emit(0.0, 0.0, z, call.color);
+    emit(0.0, 0.0, z, call.color)
 }
 
 /// Block-entity fields the level ticks, at one position (vanilla's own field

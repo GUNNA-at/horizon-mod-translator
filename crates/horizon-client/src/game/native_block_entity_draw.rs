@@ -11,7 +11,7 @@ use horizon_assets::{
     model::{Direction, Material},
 };
 use horizon_client::{
-    block_entity_render::{diffuse, diffuse_lights, vertex_light},
+    block_entity_render::{TextCall, diffuse, diffuse_lights, text_vertices, vertex_light},
     containers::{BlockEntity, ModBlockEntity},
     fast_hash::FxHashMap,
     gfx::Cull,
@@ -26,6 +26,27 @@ const VIEW_DISTANCE: f64 = 64.0;
 /// A mod block entity's bounds until its mod says otherwise: the block with
 /// the block of margin Horizon culls vanilla's block entities with.
 const DEFAULT_BOUNDS: [f32; 6] = [-1.0, -1.0, -1.0, 2.0, 2.0, 2.0];
+/// How far text sits in front of its drop shadow, toward the pose's +z, in
+/// font pixels (`Font.SHADOW_OFFSET`).
+const SHADOW_LIFT: Vec3 = Vec3::new(0.0, 0.0, 0.03);
+/// The least alpha text is drawn with: vanilla's text shader discards a
+/// fragment below a tenth.
+const MIN_TEXT_ALPHA: u32 = 26;
+
+/// A piece of text in one style, as [`Game::native_draw_text`] draws it.
+// Native mods make them; nothing in Horizon does but the translator's hosts.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub struct TextPiece<'a> {
+    pub text: &'a str,
+    /// `0xAARRGGBB`. An alpha below 4 is opaque (`Font.adjustColor`); text
+    /// with an alpha below a tenth isn't drawn, as vanilla's text shader
+    /// leaves it out. Other alphas draw opaque.
+    pub argb: u32,
+    /// Vanilla's bold: each glyph drawn again a pixel to its right, the
+    /// glyphs a pixel further apart.
+    pub bold: bool,
+}
 
 /// Whether `bounds` (min then max, in blocks from `origin`, the block's corner
 /// relative to the camera) meet the frustum; an infinite bound always does
@@ -59,6 +80,12 @@ pub struct BlockEntityDraw {
     lights: (Vec3, Vec3),
     vertices: Vec<Vertex>,
     kept: bool,
+    /// Where the camera is, in the space the poses map to: text shows only
+    /// from the side it reads from.
+    camera: Vec3,
+    /// Whether what was drawn depends on where the camera is (text): such a
+    /// frame isn't kept.
+    sided: bool,
 }
 
 #[allow(dead_code)]
@@ -84,6 +111,8 @@ impl BlockEntityDraw {
             lights,
             vertices,
             kept: false,
+            camera: Vec3::ZERO,
+            sided: false,
         }
     }
     /// The vertices drawn, with those it was made with first.
@@ -137,7 +166,10 @@ impl BlockEntityDraw {
     /// yours, and moves nothing by itself: an idle machine, not a turning
     /// shaft. Kept geometry stands still: an enchanted item's glint, and an
     /// item drawn with `native_draw_item` whose model reads the time (a clock,
-    /// a compass), stop where they were. API @API:block_entity_keep@.
+    /// a compass), stop where they were. A frame that draws text
+    /// (`native_draw_text`) isn't kept: text shows only from the side it
+    /// reads from, which depends on where the camera is.
+    /// API @API:block_entity_keep@.
     pub fn keep(&mut self) {
         self.kept = true;
     }
@@ -175,6 +207,100 @@ impl BlockEntityDraw {
                 glint_uv: [0.0, 0.0],
             });
         }
+    }
+    /// Text under the pose, as `Font.drawInBatch` draws it in the world:
+    /// `pieces` in a row from `at` (the text's top left, in font pixels: a
+    /// glyph's cell is 8 high, y down), in the glyphs `glyph` gives (a
+    /// glyph's atlas cell, none for a blank one such as the space, and its
+    /// advance), lit by `light`. `shadow` draws vanilla's drop shadow first,
+    /// a pixel right and down and a quarter as bright, and the text over it
+    /// (`Font.drawInternal`); `outline` (`0xAARRGGBB`, 0 for none) draws the
+    /// text over its outline (`drawInBatch8xOutline`). The text shows only
+    /// from the side it reads from, as vanilla's text render types cull back
+    /// faces. Where the text ends, in font pixels.
+    fn text(
+        &mut self,
+        glyph: &dyn Fn(char) -> (Option<Rect>, f32),
+        pieces: &[TextPiece<'_>],
+        at: [f32; 2],
+        shadow: bool,
+        outline: u32,
+    ) -> f32 {
+        let mut pose = self.pose();
+        // A glyph's quad turns counterclockwise seen from the side it reads
+        // from (`BakedGlyph.render`: top left, bottom left, bottom right; font
+        // y runs down).
+        let corner = pose.transform_point3(Vec3::ZERO);
+        let toward = (pose.transform_point3(Vec3::Y) - corner)
+            .cross(pose.transform_point3(Vec3::new(1.0, 1.0, 0.0)) - corner);
+        let seen = toward.dot(self.camera - corner) > 0.0;
+        self.sided = true;
+        // Vanilla's polygon offset puts outlined text in front of its
+        // outline, toward the camera: font +z, unless the pose turns font +z
+        // away from the side the text reads from.
+        if outline != 0 && toward.dot(pose.transform_vector3(Vec3::Z)) < 0.0 {
+            pose *= Mat4::from_scale(Vec3::new(1.0, 1.0, -1.0));
+        }
+        // `Font.adjustColor`: an alpha below 4 is opaque.
+        let adjust = |c: u32| {
+            if c & 0xFC00_0000 == 0 {
+                c | 0xFF00_0000
+            } else {
+                c
+            }
+        };
+        // The shadow, in each piece's colour a quarter as bright, then the text.
+        let passes = if shadow {
+            vec![
+                (true, pose),
+                (false, pose * Mat4::from_translation(SHADOW_LIFT)),
+            ]
+        } else {
+            vec![(false, pose)]
+        };
+        let mut end = at[0];
+        for (dim, matrix) in passes {
+            let shift = if dim { 1.0 } else { 0.0 };
+            let mut x = at[0];
+            for piece in pieces {
+                let argb = adjust(piece.argb);
+                let quarter = |bits: u32| ((argb >> bits & 255) / 4) << bits;
+                let mut call = TextCall {
+                    matrix,
+                    x: x + shift,
+                    y: at[1] + shift,
+                    text: String::new(),
+                    color: if dim {
+                        argb & 0xFF00_0000 | quarter(16) | quarter(8) | quarter(0)
+                    } else {
+                        argb
+                    },
+                    outline: if dim { 0 } else { outline },
+                    light: self.light,
+                };
+                let shown = seen && argb >> 24 >= MIN_TEXT_ALPHA;
+                if !piece.bold {
+                    if shown {
+                        call.text = piece.text.to_owned();
+                        text_vertices(glyph, &call, &mut self.vertices);
+                    }
+                    x += piece.text.chars().map(|c| glyph(c).1).sum::<f32>();
+                    continue;
+                }
+                for c in piece.text.chars() {
+                    if shown {
+                        call.text = c.to_string();
+                        for bold in [0.0, 1.0] {
+                            call.x = x + shift + bold;
+                            text_vertices(glyph, &call, &mut self.vertices);
+                        }
+                    }
+                    x += glyph(c).1 + 1.0;
+                }
+            }
+            end = x;
+        }
+        end
     }
 }
 
@@ -362,6 +488,8 @@ impl Game<'_> {
             lights: diffuse_lights(self.dim == Dim::Nether),
             vertices: std::mem::take(out),
             kept: false,
+            camera: Vec3::ZERO,
+            sided: false,
         };
         let now = self.world.game_time;
         let mut kept = self.kept_block_entities.borrow_mut();
@@ -412,8 +540,10 @@ impl Game<'_> {
             draw.poses.push(Mat4::IDENTITY);
             draw.light = light;
             draw.kept = false;
+            draw.camera = -origin;
+            draw.sided = false;
             self.native_block_entity_submit(pos, block, id, entity, &mut draw);
-            if draw.kept {
+            if draw.kept && !draw.sided {
                 kept.keep(pos, key, entity, bounds, &draw.vertices[start..], now);
             } else {
                 kept.forget(pos);
@@ -440,6 +570,8 @@ impl Game<'_> {
             lights: diffuse_lights(self.dim == Dim::Nether),
             vertices: std::mem::take(out),
             kept: false,
+            camera: Vec3::ZERO,
+            sided: false,
         };
         let start = draw.vertices.len();
         self.native_level_submit(camera.to_array(), &mut draw);
@@ -564,6 +696,33 @@ impl Game<'_> {
         let pose = draw.pose();
         self.submit_item_world(&item, pose, draw.light, &mut draw.vertices);
         true
+    }
+
+    /// Draws text under `draw`'s pose as vanilla's `Font.drawInBatch` draws
+    /// it in the world (a machine's display, a value on a block): `pieces`
+    /// in a row from `at`, the text's top left in font pixels (a glyph's cell
+    /// is 8 high, y down), in the game's font, lit by `draw.light`. Scale the
+    /// pose first, as vanilla's renderers do: `scale([s, -s, s])` draws a
+    /// font pixel `s` blocks wide (1/16 is a texel), upright, readable from
+    /// the pose's +z. `shadow` draws vanilla's drop shadow under it;
+    /// `outline` (`0xAARRGGBB`, 0 for none) draws it over its outline, as a
+    /// glowing sign's text is (`Font.drawInBatch8xOutline`). Where the text
+    /// ends, in font pixels. API @API:block_entity_draw_text@.
+    pub(super) fn native_draw_text(
+        &self,
+        draw: &mut BlockEntityDraw,
+        pieces: &[TextPiece<'_>],
+        at: [f32; 2],
+        shadow: bool,
+        outline: u32,
+    ) -> f32 {
+        draw.text(
+            &|c| self.gui.atlas.glyph_cell(c),
+            pieces,
+            at,
+            shadow,
+            outline,
+        )
     }
 
     /// Draws block model `model` (`mymod:block/cog_half`, a model file's
@@ -806,7 +965,10 @@ impl SpriteShift {
             ],
             SpriteShift::Sheet { u, v, size } => {
                 let size = if size == 0.0 { 1.0 } else { size };
-                [to.u0 + (uv[0] / size + u) * tw, to.v0 + (uv[1] / size + v) * th]
+                [
+                    to.u0 + (uv[0] / size + u) * tw,
+                    to.v0 + (uv[1] / size + v) * th,
+                ]
             }
         }
     }
@@ -819,7 +981,14 @@ mod tests {
     #[test]
     fn a_shifted_face_lands_where_catnip_puts_it() {
         // A 16x16 sprite and a 16x32 one beside it (Create's belt and belt_scroll), in atlas units.
-        let rect = |u0, v0, u1, v1| Rect { u0, v0, u1, v1, w: 16, h: 16 };
+        let rect = |u0, v0, u1, v1| Rect {
+            u0,
+            v0,
+            u1,
+            v1,
+            w: 16,
+            h: 16,
+        };
         let (belt, scroll) = (rect(0.0, 0.0, 0.25, 0.25), rect(0.5, 0.0, 0.75, 0.5));
         // shiftUVScrolling: the same texels from the corner (a quarter of the atlas), then a
         // quarter of the target further down.
@@ -827,9 +996,11 @@ mod tests {
         assert_eq!(s.place([1.0, 1.0], &belt, &scroll), [0.75, 0.375]);
         assert_eq!(s.place([0.0, 0.0], &belt, &scroll), [0.5, 0.125]);
         // shiftUV: the same fraction of the target.
-        assert_eq!(SpriteShift::Retarget.place([0.5, 0.5], &belt, &scroll), [0.625, 0.25]);
+        let retarget = SpriteShift::Retarget;
+        assert_eq!(retarget.place([0.5, 0.5], &belt, &scroll), [0.625, 0.25]);
         // shiftUVtoSheet: half the target per frame, the second frame across.
-        let sheet = SpriteShift::Sheet { u: 0.5, v: 0.0, size: 2.0 };
+        let (u, v, size) = (0.5, 0.0, 2.0);
+        let sheet = SpriteShift::Sheet { u, v, size };
         assert_eq!(sheet.place([1.0, 1.0], &belt, &scroll), [0.75, 0.25]);
     }
 
@@ -843,6 +1014,10 @@ mod tests {
             lights: diffuse_lights(false),
             vertices: Vec::new(),
             kept: false,
+            // In front of text drawn straight under the pose: font y runs down,
+            // so it reads from -z.
+            camera: Vec3::new(10.0, 0.0, -100.0),
+            sided: false,
         }
     }
 
@@ -900,6 +1075,113 @@ mod tests {
         let up = diffuse(Vec3::Y, diffuse_lights(false));
         assert_eq!(v.color, shaded(0xFFFFFF, up));
         assert_eq!(v.color >> 24, 0xFF);
+    }
+
+    /// Every glyph 6 wide in a cell of its own but the space, which is blank.
+    fn glyph(c: char) -> (Option<Rect>, f32) {
+        ((c != ' ').then_some(sprite()), 6.0)
+    }
+
+    #[test]
+    fn text_lands_in_its_glyphs_with_vanillas_shadow_bold_and_outline() {
+        let piece = |text, argb, bold| TextPiece { text, argb, bold };
+        let (at, white) = ([0.0, 0.0], 0xFFFF_FFFF);
+        let a = [piece("a", white, false)];
+        // A glyph's quad goes bottom left, bottom right, top right, top left.
+        let top_left = |d: &BlockEntityDraw, quad: usize| d.vertices[quad * 4 + 3].pos;
+
+        // Two pieces in a row from (2, 3) under the pose at (10, 0, 0): a quad a glyph, the
+        // second piece's colour opaque (`Font.adjustColor`).
+        let mut d = draw();
+        let pieces = [
+            piece("ab", 0xFF10_2030, false),
+            piece(" c", 0x0040_5060, false),
+        ];
+        assert_eq!(d.text(&glyph, &pieces, [2.0, 3.0], false, 0), 26.0);
+        assert_eq!(d.vertices.len(), 3 * 4);
+        assert_eq!(
+            [top_left(&d, 0), top_left(&d, 1), top_left(&d, 2)],
+            [[12.0, 3.0, 0.0], [18.0, 3.0, 0.0], [30.0, 3.0, 0.0]]
+        );
+        // The vertex colour is RGBA8 read little-endian: red in the low byte.
+        assert_eq!(d.vertices[0].color, 0xFF30_2010);
+        assert_eq!(d.vertices[8].color, 0xFF60_5040);
+        assert!(d.vertices.iter().all(|v| v.light == 0xF0F0));
+
+        // A drop shadow: a pixel right and down, a quarter as bright, the text in front of it.
+        let mut d = draw();
+        d.text(&glyph, &a, at, true, 0);
+        assert_eq!(d.vertices.len(), 2 * 4);
+        assert_eq!(top_left(&d, 0), [11.0, 1.0, 0.0]);
+        assert_eq!(d.vertices[0].color, 0xFF3F_3F3F);
+        assert_eq!(top_left(&d, 1), [10.0, 0.0, 0.03]);
+        assert_eq!(d.vertices[4].color, white);
+
+        // Bold: each glyph again a pixel to its right, the glyphs a pixel further apart.
+        let mut d = draw();
+        let bold = [piece("ab", white, true)];
+        assert_eq!(d.text(&glyph, &bold, at, false, 0), 14.0);
+        let xs: Vec<f32> = (0..4).map(|q| top_left(&d, q)[0] - 10.0).collect();
+        assert_eq!(xs, [0.0, 1.0, 7.0, 8.0]);
+
+        // An outline: eight copies around the text in its colour, the text in front of them,
+        // toward the side it reads from (-z under this pose).
+        let (mut d, black) = (draw(), 0xFF00_0000);
+        d.text(&glyph, &a, at, false, black);
+        assert_eq!(d.vertices.len(), 9 * 4);
+        let (around, text) = d.vertices.split_at(32);
+        assert!(around.iter().all(|v| v.color == black && v.pos[2] == 0.0));
+        assert!(text.iter().all(|v| v.color == white && v.pos[2] < 0.0));
+
+        // Fainter than a tenth: not drawn, shadow and all, though it takes its room.
+        let mut d = draw();
+        let faint = [piece("a", 0x10FF_FFFF, false)];
+        assert_eq!(d.text(&glyph, &faint, at, true, 0), 6.0);
+        assert!(d.vertices.is_empty());
+    }
+
+    #[test]
+    fn text_shows_only_from_the_side_it_reads_from() {
+        let at = [0.0, 0.0];
+        let a = [TextPiece {
+            text: "a",
+            argb: 0xFFFF_FFFF,
+            bold: false,
+        }];
+        // A sign's pose (`scale(s, -s, s)`), its text read from +z, and the camera at `z`.
+        let seen_from = |z: f32| {
+            let mut d = draw();
+            d.camera = Vec3::new(10.0, 0.0, z);
+            d.scale([1.0, -1.0, 1.0]);
+            d
+        };
+        // From the front, the text and its shadow; from behind, nothing, though it takes its room.
+        let mut d = seen_from(100.0);
+        assert_eq!(d.text(&glyph, &a, at, true, 0), 6.0);
+        assert_eq!(d.vertices.len(), 2 * 4);
+        let mut d = seen_from(-100.0);
+        assert_eq!(d.text(&glyph, &a, at, true, 0), 6.0);
+        assert!(d.vertices.is_empty());
+
+        // A nixie tube's digit and its mirror image for the back (Create's `scale(-1, 1, 1)`):
+        // each side shows its own.
+        for (z, front, back) in [(100.0, 4, 0), (-100.0, 0, 4)] {
+            let mut d = seen_from(z);
+            d.text(&glyph, &a, at, false, 0);
+            let drawn = d.vertices.len();
+            d.scale([-1.0, 1.0, 1.0]);
+            d.text(&glyph, &a, at, false, 0);
+            let mirrored = d.vertices.len() - drawn;
+            assert_eq!((drawn, mirrored), (front, back), "seen from z {z}");
+        }
+
+        // Outlined text in front of its outline toward the side it reads from: +z here.
+        let mut d = seen_from(100.0);
+        d.text(&glyph, &a, at, false, 0xFF00_0000);
+        assert_eq!(d.vertices.len(), 9 * 4);
+        let (around, text) = d.vertices.split_at(32);
+        assert!(around.iter().all(|v| v.pos[2] == 0.0));
+        assert!(text.iter().all(|v| v.pos[2] > 0.0));
     }
 
     /// A frustum that sees nothing.

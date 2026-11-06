@@ -620,6 +620,39 @@ mod tests {
         assert_eq!(drawn[0].0.sprite, WHITE_SPRITE);
     }
 
+    /// Create's nixie tubes end their text's batch after each digit they draw
+    /// (`endBatch(font.getFontSet(DEFAULT_FONT).whiteGlyph().renderType(NORMAL))`): that ends the
+    /// text's type only, and a face gathered for another type (lightning's, untextured) waits for
+    /// its own batch's end.
+    #[test]
+    fn ending_the_text_batch_leaves_the_other_types_faces() {
+        const END_TYPE: &str = "net/minecraft/client/renderer/MultiBufferSource$BufferSource.endBatch.(Lnet/minecraft/client/renderer/RenderType;)V";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        let source = rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource");
+        let lightning = crate::render::render_type(&mut rt, "lightning");
+        rt.with_host(&mut host, |rt| {
+            let c = consumer(rt, lightning);
+            let pose = lifted_pose(rt);
+            write_square(rt, c, pose, |_, _| [0.0, 0.0]);
+            let font = rt.new_object("net/minecraft/client/gui/Font");
+            let default = rt.string("minecraft:default");
+            let get_font_set = "net/minecraft/client/gui/Font.getFontSet.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/gui/font/FontSet;";
+            let set = crate::api::call(rt, get_font_set, &[font, default]);
+            let white = crate::api::call(rt, "net/minecraft/client/gui/font/FontSet.whiteGlyph.()Lnet/minecraft/client/gui/font/glyphs/BakedGlyph;", &[set]);
+            let normal = crate::api::api_enum(rt, "net/minecraft/client/gui/Font$DisplayMode", "NORMAL", 0);
+            let render_type = "net/minecraft/client/gui/font/glyphs/BakedGlyph.renderType.(Lnet/minecraft/client/gui/Font$DisplayMode;)Lnet/minecraft/client/renderer/RenderType;";
+            let text = crate::api::call(rt, render_type, &[white, normal]);
+            crate::api::call(rt, END_TYPE, &[source, text]);
+        });
+        assert!(quads(&host).is_empty());
+        rt.with_host(&mut host, |rt| {
+            crate::api::call(rt, END_TYPE, &[source, lightning]);
+        });
+        assert_eq!(quads(&host).len(), 1);
+    }
+
     /// A mod's own type drawn with a texture the game's atlas lacks (Create's outlines, on
     /// `create:textures/special/blank.png`) draws its faces white in their corners' colours, where
     /// the game would leave them out; a texture the atlas has is drawn from.

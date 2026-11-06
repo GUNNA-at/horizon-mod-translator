@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 640] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 639] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1061,7 +1061,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 640] = [
     ("net/minecraft/client/gui/components/toasts/SystemToast$SystemToastId", "i(J)V=displayTime|o"),
     ("net/minecraft/client/gui/font/FontOption$Filter", "i(Ljava/util/Map;)V=values|o"),
     ("net/minecraft/client/gui/font/FontTexture$Node", "i(IIII)V=x,y,width,height|o"),
-    ("net/minecraft/client/gui/font/glyphs/BakedGlyph", "i(Lnet/minecraft/client/gui/font/GlyphRenderTypes;FFFFFFFF)V=renderTypes,u0,u1,v0,v1,left,right,up,down|o"),
     ("net/minecraft/client/gui/font/glyphs/BakedGlyph$Effect", "i(FFFFFFFFF)V=x0,y0,x1,y1,depth,r,g,b,a|o"),
     ("net/minecraft/client/gui/font/providers/BitmapProvider", "i(Lcom/mojang/blaze3d/platform/NativeImage;Lnet/minecraft/client/gui/font/CodepointMap;)V=image,glyphs|o"),
     ("net/minecraft/client/gui/font/providers/UnihexProvider", "i(Lnet/minecraft/client/gui/font/CodepointMap;)V=glyphs|o"),

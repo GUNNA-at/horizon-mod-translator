@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "drawing text in the world for mod block entities and level stages (`native_draw_text`).",
+  "doc_summary": "text in the world for mods: in `native_block_entity_submit` or `native_level_submit`, `native_draw_text(draw, pieces, at, shadow, outline)` draws `TextPiece`s (text, `0xAARRGGBB`, bold) in a row under the pose as vanilla's `Font.drawInBatch` draws in the world, in the game's font, from `at` (the text's top left, in font pixels), lit by `draw.light`: with vanilla's drop shadow, or over an outline (`drawInBatch8xOutline`, a glowing sign's). It answers where the text ends. Translated bundles draw a mod's `Font.drawInBatch` outside the GUI with it (Create's value boxes, its nixie tubes): @API:block_entity_draw_text@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_block_entity_draw.rs"
+  ]
+}
