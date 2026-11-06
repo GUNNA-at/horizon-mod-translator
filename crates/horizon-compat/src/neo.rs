@@ -1203,7 +1203,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     let inside = tag_registry == reg.trim_start_matches("minecraft:")
                         && match tag_registry.as_str() {
                             "block" => rt.host().is_some_and(|h| h.block_in_tag(&id, &tag)),
-                            "fluid" => rt.host().is_some_and(|h| h.fluid_in_tag(&id, &tag)),
+                            "fluid" => crate::fluids::in_tag(rt, a(1), &id),
                             "item" => crate::recipes::item_in_tag(rt, &id, &tag),
                             "biome" => rt.host().is_some_and(|h| h.biome_in_tag(&id, &tag)),
                             "damage_type" => crate::damage::in_tag(rt, &id, &tag),

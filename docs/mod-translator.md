@@ -5229,6 +5229,24 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     after it no longer show in the round's unmapped calls. Left: `FluidStack.saveOptional` and
     `parseOptional`, `FluidType.getLightLevel(FluidStack)`, and login's Flywheel GL and
     `DynamicTexture`.
+- [x] 2026-11-06 Part 60: a fluid's registry entry, a fluid type's overloads, `FluidStack`'s NBT.
+  The fluids round's own unmapped calls, measured over the pack (367 jars), every one of them also
+  Create's: `Fluid.builtInRegistryHolder` in 26 jars (42 calls; `BaseFlowingFluid`'s in 3 more),
+  `FluidType.getLightLevel` 18 (31), `FluidStack.parseOptional` 11 (23), `saveOptional` 10 (21),
+  `FluidType.getTemperature` 5 (11), `getViscosity` 4 (8), `getDensity` 4 (7). The type's getters
+  were modelled without arguments only; NeoForge's forms with a stack or a state went unmapped.
+  - compat `fluids`: a fluid's `builtInRegistryHolder()`, its registry entry, whose `is(tag)` holds
+    what the fluid's tags hold (`neo`'s holders ask fluid tags as `FluidState.is` does, vanilla's
+    water and lava included where no game answers). A fluid type's stack and state forms
+    (`getLightLevel(stack)`, `getTemperature(state, level, pos)`, density, viscosity, rarity,
+    description id) are NeoForge's `this.getX()`: the type's own getter, a mod's override of it
+    included; `isLighterThanAir` asks the density the same way. `FluidStack`'s NBT in its codec's
+    form, `{id, amount}`: `save` (in a new compound or the one given; of nothing it throws, as
+    NeoForge's does), `saveOptional` (an empty compound for nothing), `parse` (an `Optional`) and
+    `parseOptional` (`EMPTY` for an empty compound or a fluid nobody registered).
+  - Tests: `fluids::tests::a_fluid_types_stack_and_state_overloads_ask_its_own_getters`,
+    `a_fluid_stack_saved_as_neoforge_saves_it_reads_back_the_same`, and
+    `fluid_tags_hold_vanilla_water_and_lava` (the holder).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

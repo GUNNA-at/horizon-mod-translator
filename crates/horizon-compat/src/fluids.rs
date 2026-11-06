@@ -56,6 +56,12 @@ const OWN_HEIGHT: &str = "net/minecraft/world/level/material/Fluid.getOwnHeight.
 const HEIGHT: &str = "net/minecraft/world/level/material/Fluid.getHeight.(Lnet/minecraft/world/level/material/FluidState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)F";
 const LEGACY_BLOCK: &str = "net/minecraft/world/level/material/Fluid.createLegacyBlock.(Lnet/minecraft/world/level/material/FluidState;)Lnet/minecraft/world/level/block/state/BlockState;";
 const TYPE_OF: &str = "net/minecraft/world/level/material/Fluid.getFluidType.()Lnet/neoforged/neoforge/fluids/FluidType;";
+const TYPE_DENSITY: &str = "net/neoforged/neoforge/fluids/FluidType.getDensity.()I";
+const TYPE_VISCOSITY: &str = "net/neoforged/neoforge/fluids/FluidType.getViscosity.()I";
+const TYPE_TEMPERATURE: &str = "net/neoforged/neoforge/fluids/FluidType.getTemperature.()I";
+const TYPE_LIGHT: &str = "net/neoforged/neoforge/fluids/FluidType.getLightLevel.()I";
+const TYPE_RARITY: &str = "net/neoforged/neoforge/fluids/FluidType.getRarity.()Lnet/minecraft/world/item/Rarity;";
+const TYPE_DESCRIPTION_ID: &str = "net/neoforged/neoforge/fluids/FluidType.getDescriptionId.()Ljava/lang/String;";
 const RESISTANCE: &str = "net/minecraft/world/level/material/Fluid.getExplosionResistance.()F";
 const SOURCE: &str = "net/minecraft/world/level/material/FlowingFluid.getSource.()Lnet/minecraft/world/level/material/Fluid;";
 const FLOWING: &str = "net/minecraft/world/level/material/FlowingFluid.getFlowing.()Lnet/minecraft/world/level/material/Fluid;";
@@ -202,6 +208,20 @@ pub(crate) fn type_of(rt: &mut Rt, fluid: V) -> V {
     on_fluid(rt, TYPE_OF, &[fluid])
 }
 
+/// `fluidType.getX()` as Java dispatches it: the mod's own getter when the type's class has one,
+/// else what its properties say.
+fn on_type(rt: &mut Rt, key: &'static str, this: V) -> V {
+    let short: &'static str = key.split_once('.').map_or(key, |(_, r)| r);
+    let class = rt.class_of(this);
+    if rt.overrides.is_some_and(|o| o(class, short))
+        && let Some(vc) = rt.vcall
+    {
+        return vc(rt, key, short, &[this]);
+    }
+    let (name, desc) = short.split_once('.').unwrap_or((short, ""));
+    fluid_type_call(rt, FLUID_TYPE, name, desc, &[this]).unwrap_or(V::NULL)
+}
+
 /// The API's own fluid methods (vanilla's fluids by name, `BaseFlowingFluid`'s by its
 /// properties): what a call reaches when the mod's class doesn't have the method, or calls super.
 fn fluid_api(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
@@ -296,6 +316,11 @@ fn fluid_api(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             (None, None) => rt.get_field(f, "$resistance").f(),
         }),
         "createLegacyBlock" => legacy_block(rt, f, a(1)),
+        // The registry entry the fluid is (`builtInRegistryHolder().is(tag)`).
+        "builtInRegistryHolder" => {
+            let n = name_of(rt, f);
+            crate::neo::registry_holder(rt, "fluid", &n, f)
+        }
         "is" if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
             let n = name_of(rt, f);
             V::I(in_tag(rt, a(1), &n) as i32)
@@ -364,7 +389,22 @@ fn fluid_type_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V])
                 "getViscosity" if desc.starts_with("()") => own(rt, "$viscosity", V::I(viscosity)),
                 "getTemperature" if desc.starts_with("()") => own(rt, "$temperature", V::I(temperature)),
                 "getLightLevel" if desc.starts_with("()") => own(rt, "$lightLevel", V::I(light)),
-                "isLighterThanAir" => V::I((own(rt, "$density", V::I(density)).i() <= 0) as i32),
+                // NeoForge's `getDensity() <= 0`, by the type's own getter.
+                "isLighterThanAir" => V::I((on_type(rt, TYPE_DENSITY, this).i() <= 0) as i32),
+                // The stack's and the state's overloads (`getLightLevel(stack)`, `getDensity(state,
+                // level, pos)`...) are NeoForge's `this.getX()`: the type's own getter, a mod's
+                // override of it included.
+                "getDensity" | "getViscosity" | "getTemperature" | "getLightLevel" | "getRarity" | "getDescriptionId" if !desc.starts_with("()") => {
+                    let getter = match n {
+                        "getDensity" => TYPE_DENSITY,
+                        "getViscosity" => TYPE_VISCOSITY,
+                        "getTemperature" => TYPE_TEMPERATURE,
+                        "getLightLevel" => TYPE_LIGHT,
+                        "getRarity" => TYPE_RARITY,
+                        _ => TYPE_DESCRIPTION_ID,
+                    };
+                    on_type(rt, getter, this)
+                }
                 "getFallDistanceModifier" => own(rt, "$fallDistanceModifier", V::F(match vanilla.as_deref() { Some("minecraft:water") => 0.0, Some("minecraft:empty") => 1.0, _ => 0.5 })),
                 "motionScale" => own(rt, "$motionScale", V::D(match vanilla.as_deref() { Some("minecraft:lava") => 0.0023333333333333335, Some("minecraft:empty") => 1.0, _ => 0.014 })),
                 "canExtinguish" => own(rt, "$canExtinguish", V::I((vanilla.as_deref() == Some("minecraft:water")) as i32)),
@@ -668,6 +708,40 @@ fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
             h
         }
         "getComponentsPatch" => crate::recipes::get_static(rt, "net/minecraft/core/component/DataComponentPatch", "EMPTY").unwrap_or(V::NULL),
+        // NBT in `FluidStack.CODEC`'s form, `{id, amount}` (components aren't kept on fluid stacks
+        // yet), in a new compound or the one given. `save` of nothing throws, as NeoForge's does;
+        // `saveOptional` gives an empty compound.
+        "save" | "saveOptional" => {
+            let tag = if desc.contains(";Lnet/minecraft/nbt/Tag;)") { a(2) } else { crate::tags::new_compound(rt) };
+            if stack_empty(rt, s) {
+                if name == "save" {
+                    let e = rt.new_object("java/lang/IllegalStateException");
+                    let m = rt.string("Cannot encode empty FluidStack");
+                    rt.put_field(e, "message", m);
+                    rt.thrown = Some(e);
+                }
+                return Some(tag);
+            }
+            for (k, v) in crate::tanks::save_stack(rt, s) {
+                let key = rt.string(&k);
+                let value = crate::nbt::element_to_runtime(rt, &v).unwrap_or(V::NULL);
+                api::call(rt, "net/minecraft/nbt/CompoundTag.put.(Ljava/lang/String;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;", &[tag, key, value]);
+            }
+            tag
+        }
+        // `parse(registries, tag)`, an `Optional`, and `parseOptional(registries, compound)`: the
+        // stack saved, or nothing (`EMPTY`) for an empty compound or a fluid nobody registered.
+        "parse" | "parseOptional" => {
+            let saved = crate::nbt::from_runtime(rt, a(1));
+            let stack = crate::tanks::parse_stack(rt, &saved);
+            if name == "parseOptional" {
+                return Some(stack);
+            }
+            let value = if stack_empty(rt, stack) { V::NULL } else { stack };
+            let o = rt.new_object("java/util/Optional");
+            rt.put_field(o, "value", value);
+            o
+        }
         _ => return None,
     })
 }
@@ -907,6 +981,71 @@ mod tests {
         assert_eq!(lava, c(&mut rt, "net/minecraft/world/level/material/Fluid.getFluidType.()Lnet/neoforged/neoforge/fluids/FluidType;", &[fluid]));
     }
 
+    /// A fluid type's stack and state overloads ask its own getters, as NeoForge's do: a stack of
+    /// lava gives lava's light, 15, and a mod's type that has its own `getLightLevel()` answers it
+    /// for a stack too. `isLighterThanAir` asks the type's density.
+    #[test]
+    fn a_fluid_types_stack_and_state_overloads_ask_its_own_getters() {
+        fn overrides(class: &str, key: &str) -> bool {
+            class == "t/GlowType" && matches!(key, "getLightLevel.()I" | "getDensity.()I")
+        }
+        fn vcall(_: &mut Rt, _: &'static str, key: &'static str, _: &[V]) -> V {
+            V::I(if key == "getLightLevel.()I" { 9 } else { -1 })
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        let get = |rt: &mut Rt, m: &str, args: &[V]| c(rt, Box::leak(format!("{FLUID_TYPE}.{m}").into_boxed_str()), args);
+        let holder = api::get_static(&mut rt, "net/neoforged/neoforge/common/NeoForgeMod.LAVA_TYPE");
+        let lava_type = c(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]);
+        let lava = fluids(&mut rt, "LAVA");
+        let stack = fluid_stack(&mut rt, lava, 1000);
+        let by_stack = "getLightLevel.(Lnet/neoforged/neoforge/fluids/FluidStack;)I";
+        assert_eq!(get(&mut rt, by_stack, &[lava_type, stack]), V::I(15));
+        let state = fluid_in(&mut rt, "minecraft:lava[level=0]");
+        let by_state = "getTemperature.(Lnet/minecraft/world/level/material/FluidState;Lnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/core/BlockPos;)I";
+        assert_eq!(get(&mut rt, by_state, &[lava_type, state, V::NULL, V::NULL]), V::I(1300));
+        assert_eq!(get(&mut rt, "isLighterThanAir.()Z", &[lava_type]), V::I(0));
+        let glow = rt.new_object("t/GlowType");
+        assert_eq!(get(&mut rt, by_stack, &[glow, stack]), V::I(9));
+        assert_eq!(get(&mut rt, "isLighterThanAir.()Z", &[glow]), V::I(1));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A pipe's or a tank's fluid saved as NeoForge's `FluidStack` saves it (`saveOptional`:
+    /// `{id, amount}`) reads back the same (`parseOptional`, or `parse` in an `Optional`). Nothing
+    /// saves as an empty compound that reads back as `EMPTY`, and `save` of nothing throws.
+    #[test]
+    fn a_fluid_stack_saved_as_neoforge_saves_it_reads_back_the_same() {
+        let mut rt = Rt::new();
+        let save_optional = "net/neoforged/neoforge/fluids/FluidStack.saveOptional.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/Tag;";
+        let save = "net/neoforged/neoforge/fluids/FluidStack.save.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/Tag;";
+        let parse_optional = "net/neoforged/neoforge/fluids/FluidStack.parseOptional.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/CompoundTag;)Lnet/neoforged/neoforge/fluids/FluidStack;";
+        let parse = "net/neoforged/neoforge/fluids/FluidStack.parse.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/Tag;)Ljava/util/Optional;";
+        let water = fluids(&mut rt, "WATER");
+        let stack = fluid_stack(&mut rt, water, 250);
+        let saved = c(&mut rt, save_optional, &[stack, V::NULL]);
+        let expected = std::collections::BTreeMap::from([
+            ("amount".to_owned(), crate::nbt::Nbt::Int(250)),
+            ("id".to_owned(), crate::nbt::Nbt::String("minecraft:water".into())),
+        ]);
+        assert_eq!(crate::nbt::from_runtime(&rt, saved), expected);
+        let back = c(&mut rt, parse_optional, &[V::NULL, saved]);
+        assert_eq!((rt.get_field(back, "$fluid"), stack_amount(&rt, back)), (water, 250));
+        let parsed = c(&mut rt, parse, &[V::NULL, saved]);
+        let inside = rt.get_field(parsed, "value");
+        assert_eq!((rt.get_field(inside, "$fluid"), stack_amount(&rt, inside)), (water, 250));
+        let empty = fluid_stack_empty(&mut rt);
+        let none = c(&mut rt, save_optional, &[empty, V::NULL]);
+        assert!(crate::nbt::from_runtime(&rt, none).is_empty());
+        assert_eq!(c(&mut rt, parse_optional, &[V::NULL, none]), empty);
+        let parsed = c(&mut rt, parse, &[V::NULL, none]);
+        assert_eq!(rt.get_field(parsed, "value"), V::NULL);
+        c(&mut rt, save, &[empty, V::NULL]);
+        assert!(rt.thrown.take().is_some(), "saving nothing throws");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     const GET_TYPE: &str = "net/minecraft/world/level/material/FluidState.getType.()Lnet/minecraft/world/level/material/Fluid;";
     const AMOUNT: &str = "net/minecraft/world/level/material/FluidState.getAmount.()I";
     const IS_SOURCE_NOW: &str = "net/minecraft/world/level/material/FluidState.isSource.()Z";
@@ -1068,6 +1207,12 @@ mod tests {
         assert_eq!(c(&mut rt, "net/minecraft/world/level/material/Fluid.is.(Lnet/minecraft/tags/TagKey;)Z", &[lava, lava_common]), V::I(1));
         let milk = api::get_static(&mut rt, "net/neoforged/neoforge/common/Tags$Fluids.MILK");
         assert_eq!(c(&mut rt, "net/minecraft/world/level/material/Fluid.is.(Lnet/minecraft/tags/TagKey;)Z", &[lava, milk]), V::I(0));
+        // Create asks the fluid's registry entry (`builtInRegistryHolder().is(tag)`): the same tags.
+        let holder = c(&mut rt, "net/minecraft/world/level/material/Fluid.builtInRegistryHolder.()Lnet/minecraft/core/Holder$Reference;", &[lava]);
+        let is_holder = "net/minecraft/core/Holder.is.(Lnet/minecraft/tags/TagKey;)Z";
+        assert_eq!((c(&mut rt, is_holder, &[holder, lava_common]), c(&mut rt, is_holder, &[holder, water_tag])), (V::I(1), V::I(0)));
+        assert_eq!(c(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]), lava);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]
