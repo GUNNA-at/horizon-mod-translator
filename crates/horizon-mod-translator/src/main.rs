@@ -49,6 +49,92 @@ enum Receiver {
     New(&'static str, usize),
     /// What an API method (the key, with its argument count) returns.
     Returned(&'static str, usize),
+    /// A value of the owner's own type as a game gives one ([`sample`]: stone's state for
+    /// `BlockState`), else a bare object of it.
+    Sample,
+}
+
+/// How a probe call's arguments are filled: all null, or each with a value of its declared type
+/// ([`sample`]), read as an instance method's (after the receiver) or a static one's (from the
+/// first).
+#[derive(Clone, Copy)]
+enum Args {
+    Null,
+    Instance,
+    Static,
+}
+
+/// The parameter types of method descriptor `desc`, as field descriptors (`I`,
+/// `Lnet/minecraft/core/BlockPos;`, `[I`).
+fn param_types(desc: &str) -> Vec<&str> {
+    let inner = &desc[1..desc.find(')').unwrap_or(1)];
+    let (b, mut i, mut out) = (inner.as_bytes(), 0, Vec::new());
+    while i < b.len() {
+        let start = i;
+        while i < b.len() && b[i] == b'[' {
+            i += 1;
+        }
+        if i < b.len() && b[i] == b'L' {
+            i += inner[i..].find(';').map_or(inner.len() - i, |e| e + 1);
+        } else {
+            i += 1;
+        }
+        out.push(&inner[start..i.min(b.len())]);
+    }
+    out
+}
+
+/// A value of type `ty` (a field descriptor) such as a mod's call gets in a game: stone (its state,
+/// block, item, a stack of it, its id), the level's origin, up, the main hand, an empty tag, the
+/// probe's level, player and cow; a zero for a primitive. None for a type with no sample (null).
+fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
+    use horizon_compat::{V, api};
+    let class = ty.strip_prefix('L').and_then(|t| t.strip_suffix(';'));
+    Some(match ty {
+        "Z" | "B" | "C" | "S" | "I" => V::I(0),
+        "J" => V::J(0),
+        "F" => V::F(0.0),
+        "D" => V::D(0.0),
+        "Ljava/lang/String;" | "Ljava/lang/CharSequence;" => rt.string("stone"),
+        "Lnet/minecraft/world/level/block/state/BlockState;" | "Lnet/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase;" => {
+            api::state(rt, "minecraft:stone")
+        }
+        "Lnet/minecraft/world/level/block/Block;" => api::block(rt, "minecraft:stone"),
+        "Lnet/minecraft/core/BlockPos;" | "Lnet/minecraft/core/Vec3i;" => api::block_pos(rt, 0, 64, 0),
+        "Lnet/minecraft/core/Direction;" => api::direction(rt, 1),
+        "Lnet/minecraft/world/item/ItemStack;" => horizon_compat::api_common::stack(rt, "minecraft:stone", 1),
+        "Lnet/minecraft/world/level/ItemLike;" | "Lnet/minecraft/world/item/Item;" => api::get_static(rt, "net/minecraft/world/item/Items.STONE"),
+        "Lnet/minecraft/resources/ResourceLocation;" => {
+            let id = rt.string("minecraft:stone");
+            api::call(rt, "net/minecraft/resources/ResourceLocation.parse.(Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;", &[id])
+        }
+        "Lnet/minecraft/network/chat/Component;" => {
+            let text = rt.string("stone");
+            api::call(rt, "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;", &[text])
+        }
+        "Lnet/minecraft/nbt/CompoundTag;" => {
+            let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
+            api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
+            tag
+        }
+        "Lnet/minecraft/world/phys/Vec3;" => {
+            let v = rt.new_object("net/minecraft/world/phys/Vec3");
+            api::call(rt, "net/minecraft/world/phys/Vec3.<init>.(DDD)V", &[v, V::D(0.5), V::D(64.0), V::D(0.5)]);
+            v
+        }
+        "Lnet/minecraft/world/InteractionHand;" => api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND"),
+        "Lnet/minecraft/world/entity/EquipmentSlot;" => api::get_static(rt, "net/minecraft/world/entity/EquipmentSlot.MAINHAND"),
+        "Lnet/minecraft/core/HolderLookup$Provider;" | "Lnet/minecraft/core/RegistryAccess;" => {
+            let level = horizon_compat::glue::level(rt);
+            api::call(rt, "net/minecraft/world/level/Level.registryAccess.()Lnet/minecraft/core/RegistryAccess;", &[level])
+        }
+        "Lnet/minecraft/world/entity/player/Player;" | "Lnet/minecraft/server/level/ServerPlayer;" => horizon_compat::menus::server_player(rt, PROBE_PLAYER),
+        _ if class.is_some_and(level_class) => horizon_compat::glue::level(rt),
+        _ if class.is_some_and(|c| matches!(c.strip_prefix("net/minecraft/world/entity/"), Some("Entity" | "LivingEntity" | "Mob" | "PathfinderMob" | "AgeableMob" | "animal/Animal"))) => {
+            horizon_compat::vanilla_entities::of(rt, PROBE_MOB, "minecraft:cow", None)
+        }
+        _ => return None,
+    })
 }
 
 /// The receivers the mod makes of each API class it calls: a constructor of the class it calls,
@@ -300,13 +386,14 @@ fn main() -> ExitCode {
         let made = if hosted { made_receivers(&calls) } else { Default::default() };
         let (mut mapped, mut sites, mut mapped_sites) = (0usize, 0usize, 0usize);
         let mut missing: Vec<(usize, String)> = Vec::new();
-        let answers = |key: &'static str, owner: &'static str, n: usize, receiver: Receiver| {
+        let answers = |key: &'static str, owner: &'static str, n: usize, receiver: Receiver, fill: Args| {
             let mut rt = horizon_compat::Rt::new();
             let call = |rt: &mut horizon_compat::Rt| {
                 let mut args = vec![horizon_compat::V::NULL; n];
                 match receiver {
                     Receiver::Null => {}
                     Receiver::Bare => args[0] = rt.new_object(owner),
+                    Receiver::Sample => args[0] = sample(rt, &format!("L{owner};")).unwrap_or_else(|| rt.new_object(owner)),
                     Receiver::Player => args[0] = horizon_compat::menus::server_player(rt, PROBE_PLAYER),
                     Receiver::Mob => args[0] = horizon_compat::vanilla_entities::of(rt, PROBE_MOB, "minecraft:cow", None),
                     Receiver::Level => args[0] = horizon_compat::glue::level(rt),
@@ -336,6 +423,23 @@ fn main() -> ExitCode {
                         args[0] = v;
                     }
                 }
+                let params = param_types(key.rsplit_once('.').map_or("()V", |(_, d)| d));
+                let first = match fill {
+                    Args::Null => None,
+                    Args::Instance => Some(1),
+                    Args::Static => Some(0),
+                };
+                if let Some(first) = first {
+                    for (i, ty) in params.iter().enumerate() {
+                        if let (Some(v), true) = (sample(rt, ty), first + i < n) {
+                            args[first + i] = v;
+                        }
+                    }
+                    // The samples' own making must have gone through.
+                    if !rt.unmapped.is_empty() || rt.thrown.is_some() {
+                        return false;
+                    }
+                }
                 horizon_compat::api::call(rt, key, &args);
                 rt.unmapped.is_empty()
             };
@@ -354,12 +458,20 @@ fn main() -> ExitCode {
             let entity = hosted && entity_class(owner);
             let level = hosted && level_class(owner);
             let fields = statics.get(owner).map_or(&[][..], Vec::as_slice);
-            if answers(key, owner, arity, Receiver::Null)
-                || answers(key, owner, arity, Receiver::Bare)
-                || (entity && (answers(key, owner, arity, Receiver::Player) || answers(key, owner, arity, Receiver::Mob)))
-                || (level && answers(key, owner, arity, Receiver::Level))
-                || fields.iter().any(|&f| answers(key, owner, arity, Receiver::Static(f)))
-                || made.get(owner).map_or(&[][..], Vec::as_slice).iter().any(|&r| answers(key, owner, arity, r))
+            let mut receivers = vec![Receiver::Null, Receiver::Bare];
+            if entity {
+                receivers.extend([Receiver::Player, Receiver::Mob]);
+            }
+            if level {
+                receivers.push(Receiver::Level);
+            }
+            receivers.extend(fields.iter().map(|&f| Receiver::Static(f)));
+            receivers.extend(made.get(owner).map_or(&[][..], Vec::as_slice).iter().copied());
+            // Null arguments first; hosted, also each of its declared type (a state, a position, a
+            // stack, the player), on the same receivers and on a value of the owner's type.
+            let fills: &[Args] = if hosted { &[Args::Null, Args::Instance] } else { &[Args::Null] };
+            if fills.iter().any(|&fill| receivers.iter().any(|&r| answers(key, owner, arity, r, fill)))
+                || (hosted && (answers(key, owner, arity, Receiver::Sample, Args::Instance) || answers(key, owner, arity, Receiver::Null, Args::Static)))
             {
                 mapped += 1;
                 mapped_sites += n;

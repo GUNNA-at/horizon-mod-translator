@@ -4308,6 +4308,23 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     (`{count: 3, id: "minecraft:iron_ingot"}`, as Create keeps the stack's copy) and the player keeps them. A
     right click on a cow no longer posts `RightClickBlock` for the dirt behind it (round 23 did, for both hands).
     No other change from round 23 but the world's (spawn, nearby blocks).
+- [x] 2026-11-06 Part 31: the coverage probe fills a call's arguments by their declared types.
+  - `--coverage` asks the runtime each API method a jar calls with null arguments, on the receivers it can
+    make (null, a bare object, the probe's player, cow and level, the class's statics, what the jar's own calls
+    return). A method whose mapping reads an argument (a state's property, a position, a stack's item) failed on
+    the null and was counted missing although a game call would have gone through.
+  - Hosted (`--coverage --host`), each call is now also tried with every argument a value of its declared type
+    as a game gives one (`sample`: stone's state, block, item, a stack of it and its id, the level's origin,
+    up, the main hand, an empty tag, a `Vec3`, the level's registries, the probe's player, cow and level; a zero
+    for a primitive), on the same receivers and on a sample of the owner's own type; a static method from its
+    first argument. A sample whose own making misses doesn't count.
+  - packcov7 (Part 29's tree, the old probe, the same 367 jars): methods 95569/133181 (71.8%), uses
+    312625/379190 (82.4%), 12789 distinct missing; Create 2700/3994 methods (67.6%), 22861/25380 uses (90.1%);
+    Create Aeronautics, now read (Part 28), 1200/1578 (76.0%) and 5821/6524 (89.2%). packcov7t (the typed
+    probe): 95709/133182 (71.9%), 312855/379191 (82.5%), 12735 missing; Create 2709/3994 (67.8%), 22875/25380
+    (90.1%). Still counted missing though mapped, for want of a receiver the probe can make: a codec's
+    `forGetter`, `group` and `Products.apply`, a menu's `Slot` methods, `BlockState.cycle` (needs a property of
+    the state's block).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
