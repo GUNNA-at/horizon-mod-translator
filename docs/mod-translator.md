@@ -4597,6 +4597,35 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     buffer of `BLOCK` vertices). Create's `SuperRenderTypeBuffer` asks `bufferSize` (in game).
   - Tests: `camera::tests::the_viewport_events_change_the_frame_as_their_listeners_say`,
     `render::tests::a_render_type_tells_what_it_is_made_of`.
+- [x] 2026-11-06 Measured (packcov10, after Parts 38 to 40, same 367 jars): missing uses 64481 → 63458
+  (−1023), and no class's count grew. Methods mapped went from 73.7% to 74.2% summed over jars, and uses
+  from 84.4% to 84.7%. Create went from 70.0% to 71.0% of methods and from 90.8% to 91.1% of uses. The
+  biggest drops:
+
+  | Class | packcov9 | packcov10 |
+  |---|---|---|
+  | `Options` | 254 | 6 |
+  | `IClientFluidTypeExtensions` | 205 | 0 |
+  | `OptionInstance` | 145 | 2 |
+  | `RenderType` | 216 | 119 |
+  | `RegisterClientExtensionsEvent` | 83 | 0 |
+  | `IClientItemExtensions` | 57 | 2 |
+  | `ByteBufferBuilder` | 57 | 8 |
+
+  Largest left: `Minecraft` (795: `getConnection` in 57 jars, `getTextureManager` in 46,
+  `getMainRenderTarget`, `getProfiler`, `getBlockColors`), and the codec builders (`MapCodec.forGetter`
+  in 107 jars). The codec builders work in game; the probe calls them on stand-in receivers.
+- [x] 2026-11-06 Part 41: the rest of a render type, and small gaps from the round and the measurement.
+  - A mod's own `RenderType` subclass (`super(name, format, mode, bufferSize, affectsCrumbling,
+    sortOnUpload, setupState, clearState)`, 34 jars) keeps what it was made with, which its getters
+    answer. `setupRenderState`, `clearRenderState` and `draw(MeshData)` set GL state the game doesn't
+    use (it draws what mods write into its consumers), so they do nothing.
+  - fastutil's typed list getters (`IntList.getInt(i)`, `getLong`, `getDouble`...), which missed in game.
+  - `TextureAtlasSprite.uvShrinkRatio()`: vanilla's `4 / atlasSize`, taking a sprite as 16 pixels
+    wide. Create's fluid renderer insets its UVs by it.
+  - `Minecraft.getProfiler()` gives vanilla's inactive profiler (15 jars). `getVersionType()` gives
+    `release` (7 jars). `getToasts()` gives an object whose `addToast` does nothing (22 jars). Before,
+    a toast call on the null it got threw in the mod's code. The game shows none of the mods' toasts yet.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

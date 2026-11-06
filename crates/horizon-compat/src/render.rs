@@ -1530,6 +1530,10 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
                 "getV" => v0 + a(1).f() * CELL,
                 "getUOffset" => (a(1).f() - u0) / CELL,
                 "getVOffset" => (a(1).f() - v0) / CELL,
+                // `4 / atlasSize`, the atlas's size in pixels being a sprite's width over its cell's:
+                // a 16-pixel sprite's (the textures' own sizes are the game's), a sixteenth of a
+                // pixel's inset whatever their size.
+                "uvShrinkRatio" => 4.0 * CELL / 16.0,
                 _ => return None,
             })
         }
@@ -1567,6 +1571,14 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         ("net/minecraft/client/Minecraft", "getBlockRenderer") => single(rt, "net/minecraft/client/renderer/block/BlockRenderDispatcher"),
         ("net/minecraft/client/Minecraft", "getTimer") => single(rt, "net/minecraft/client/DeltaTracker"),
         ("net/minecraft/client/Minecraft", "getModelManager") => single(rt, "net/minecraft/client/resources/model/ModelManager"),
+        // The client's profiler: vanilla's inactive one, which records nothing.
+        ("net/minecraft/client/Minecraft", "getProfiler") => crate::api::get_static(rt, "net/minecraft/util/profiling/InactiveProfiler.INSTANCE"),
+        // What the launcher named this version's kind (`--versionType`): a release's.
+        ("net/minecraft/client/Minecraft", "getVersionType") => rt.string("release"),
+        // The toasts a mod adds aren't shown: the game draws its own and has none of the mods'.
+        ("net/minecraft/client/Minecraft", "getToasts") => single(rt, "net/minecraft/client/gui/components/toasts/ToastComponent"),
+        ("net/minecraft/client/gui/components/toasts/ToastComponent", "addToast" | "clear") => V::Void,
+        ("net/minecraft/client/gui/components/toasts/ToastComponent", "getToast") => V::NULL,
         ("net/minecraft/client/Minecraft", "getItemRenderer") => single(rt, "net/minecraft/client/renderer/entity/ItemRenderer"),
         // Items a block entity's renderer draws (Create's depot, belt, funnel, deployer...): the game
         // draws each one as it draws an item in that display context.
@@ -1847,6 +1859,22 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         ("net/minecraft/client/renderer/RenderType", "bufferSize" | "format" | "mode" | "affectsCrumbling" | "sortOnUpload") if desc.starts_with("()") => {
             type_fact(rt, a(0), name)
         }
+        // A mod's own subclass: `super(name, format, mode, bufferSize, affectsCrumbling,
+        // sortOnUpload, setupState, clearState)`, vanilla's fields (its shard's own by their names).
+        ("net/minecraft/client/renderer/RenderType", "<init>") if args.len() == 9 => {
+            let this = a(0);
+            rt.put_field(this, "$name", a(1));
+            for (field, v) in [("name", a(1)), ("setupState", a(7)), ("clearState", a(8)), ("$format", a(2)), ("$mode", a(3))] {
+                rt.put_field(this, field, v);
+            }
+            for (field, v) in [("$bufferSize", a(4)), ("$affectsCrumbling", a(5)), ("$sortOnUpload", a(6))] {
+                rt.put_field(this, field, V::I(v.i()));
+            }
+            V::Void
+        }
+        // The GL state a type sets around its draws, and a mesh drawn with it: the game's renderer
+        // sets its own, and draws what the mods write into its consumers ([`crate::vertices`]).
+        ("net/minecraft/client/renderer/RenderType", "setupRenderState" | "clearRenderState" | "draw") => V::Void,
         ("net/minecraft/client/renderer/RenderType", "toString" | "name") => rt.get_field(a(0), "$name"),
         // A mod's own buffer source (catnip's `SuperRenderTypeBuffer`, an outline's): one more source
         // of the same consumers, which draw what is written into them ([`crate::vertices`]).
@@ -2198,6 +2226,16 @@ mod tests {
         assert_eq!(fact(&mut rt, glow, "affectsCrumbling", "Z"), V::I(0));
         assert_eq!(fact(&mut rt, glow, "format", "Lcom/mojang/blaze3d/vertex/VertexFormat;"), format);
         assert_eq!(fact(&mut rt, glow, "mode", "Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;"), triangles);
+        // A mod's own subclass, as its constructor's `super(...)` made it.
+        let own = rt.new_object("net/minecraft/client/renderer/RenderType");
+        let own_name = rt.string("mymod:beam");
+        let init = "net/minecraft/client/renderer/RenderType.<init>.(Ljava/lang/String;Lcom/mojang/blaze3d/vertex/VertexFormat;Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;IZZLjava/lang/Runnable;Ljava/lang/Runnable;)V";
+        call(&mut rt, init, &[own, own_name, format, quads, V::I(4096), V::I(1), V::I(0), V::NULL, V::NULL]).unwrap();
+        assert_eq!(fact(&mut rt, own, "bufferSize", "I"), V::I(4096));
+        assert_eq!(fact(&mut rt, own, "affectsCrumbling", "Z"), V::I(1));
+        assert_eq!(fact(&mut rt, own, "mode", "Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;"), quads);
+        let shown = call(&mut rt, "net/minecraft/client/renderer/RenderType.toString.()Ljava/lang/String;", &[own]).unwrap();
+        assert_eq!(rt.str_of(shown), Some("mymod:beam"));
     }
 
     /// JOML 1.10.5's `Vector3f.hashCode` and `equals` (the values its own run printed): Mekanism

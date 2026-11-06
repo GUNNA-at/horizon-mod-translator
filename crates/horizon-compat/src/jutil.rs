@@ -1688,6 +1688,12 @@ fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "size" => V::I(len as i32),
         "isEmpty" => V::I((len == 0) as i32),
         "get" | "elementAt" => list(rt, this)?.get(at(a(1))).copied().unwrap_or(V::NULL),
+        // fastutil's typed lists (`IntList.getInt(i)`): the element as the type returns it.
+        "getInt" | "getLong" | "getFloat" | "getDouble" | "getBoolean" | "getByte" | "getShort" | "getChar" => {
+            let v = list(rt, this)?.get(at(a(1))).copied().unwrap_or(V::Void);
+            let kind = desc.rsplit(')').next().and_then(|r| r.chars().next()).unwrap_or('I');
+            crate::mixin::unbox(rt, v, kind)
+        }
         "getFirst" | "peek" | "peekFirst" | "element" | "first" => list(rt, this)?.first().copied().unwrap_or(V::NULL),
         "getLast" | "peekLast" | "last" => list(rt, this)?.last().copied().unwrap_or(V::NULL),
         // One element (`add(E)`, or fastutil's `add(int)`, `add(long)`...); `add(int index, E)` inserts.
@@ -3355,6 +3361,7 @@ mod tests {
         for i in [5, -2, 9] {
             c(&mut rt, "it/unimi/dsi/fastutil/ints/IntList.add.(I)Z", &[l, V::I(i)]);
         }
+        assert_eq!(c(&mut rt, "it/unimi/dsi/fastutil/ints/IntList.getInt.(I)I", &[l, V::I(1)]), V::I(-2));
         let arr = c(&mut rt, "it/unimi/dsi/fastutil/ints/IntList.toIntArray.()[I", &[l]);
         assert_eq!(rt.class_of(arr), "[I");
         let values = |rt: &Rt, v: V| match rt.heap.get(v.r() as usize).map(|o| &o.data) {
