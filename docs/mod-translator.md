@@ -4364,6 +4364,47 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     methods (68.3%) and 22902/25380 uses (90.2%). The model families' missing uses fell from 5032 to 363; what is
     left is vanilla's own models (`HumanoidModel.createMesh` 123 uses, `HumanoidModel(root)` 86, `ZombieModel`
     18...), the renderers that draw a mob with its model, and calls the probe has no receiver for.
+- [x] 2026-11-06 Part 33: vanilla's own models and the renderers that draw a mob (`models.rs`, new
+  `entity_render.rs`).
+  - packcov8 left, on the model families, vanilla's own models (`HumanoidModel.createMesh` 123 uses,
+    `HumanoidModel(root)` 86, `ZombieModel` 18...), and on the renderers a mod's mob is drawn by,
+    `MobRenderer`/`LivingEntityRenderer` (255 uses) and `Material`/`Sheets` (212).
+  - Models: `HumanoidModel` (its seven parts the root's children; `createMesh` the player's 64 by 64 layout,
+    the hat half a pixel bigger; a young one's head scaled, 16 down), `AgeableListModel` and `ListModel`
+    drawing their `headParts`/`bodyParts`/`parts` (a young one's scaled and moved by its settings),
+    `HumanoidModel.setupAnim` (the head's look, the walk's swing, a rider's legs, each arm's pose, the attack's
+    swing, crouching, the idle bob, a swimmer's strokes; the hat follows the head), `prepareMobModel` (the
+    swim amount), `AbstractZombieModel`/`ZombieModel` (arms held out, higher while aggressive) and
+    `AnimationUtils` (`bobModelPart`, `animateCrossbowHold`/`Charge`, `animateZombieArms`, `swingWeaponDown`).
+    `setupAnim` and `prepareMobModel` are declared at three erasures (`Entity`, `LivingEntity`, `Monster`):
+    a call at any of them reaches the mod's override at whichever one it declares, as the JVM's bridge
+    methods do, without recursing on a mod's `super` call.
+  - Renderers: `EntityRenderer`, `LivingEntityRenderer`, `MobRenderer`, `HumanoidMobRenderer`,
+    `AbstractZombieRenderer`, `NoopRenderer`: their constructors (shadow, model, layer list; a humanoid
+    renderer adds vanilla's head, elytra and item-in-hand layers, a zombie's armour), `addLayer`, `getModel`,
+    and `LivingEntityRenderer.render` in vanilla's order: `RenderLivingEvent.Pre` (a listener may cancel
+    it), the body's and head's yaw lerped, `scale`, `getBob`, `setupRotations` (the body's yaw, a dying one
+    tipping over, shaking while frozen), the flip and the `-1.501` lift, the walk animation,
+    `prepareMobModel`, `setupAnim`, `getRenderType` (none for an invisible body, translucent for one the
+    player sees through), `getOverlayCoords` (the hurt red, the white flash), the model's `renderToBuffer`,
+    each layer, then `.Post`. The entity's yaw, pitch, body and head yaw, hurt and death time, attack and walk
+    animation come from vanilla's public fields, which mods read by name. A mod renderer that doesn't
+    override `render` reaches this one.
+  - `RenderLayer`: its parent model, `renderColoredCutoutModel`, `coloredCutoutModelCopyLayerRender`.
+    Vanilla's own layers (head, elytra, held item, armour) construct and stay in the list but draw nothing yet.
+  - Textures: `Material` (its atlas and texture, `sprite`, `renderType`, `buffer`; `equals`/`hashCode` as
+    vanilla's record), `TextureAtlasSprite.wrap`, `Sheets` (its atlases; the chest, banner, shield, shulker,
+    sign and hanging sign materials and render types; `chooseMaterial`). A consumer wrapped in a sprite draws
+    a model's faces inside that sprite, as vanilla's `SpriteCoordinateExpander` maps them.
+  - `EntityRenderDispatcher.getRenderer` builds a mod entity's renderer on first use through its registered
+    provider (`glue::entity_renderer`); the dispatcher's `render` and the game's entity pass share it.
+  - The API climbs vanilla's model and renderer classes past the one a mod extends (`api::api_super`: a miss
+    on `ZombieModel` tries `AbstractZombieModel`, then `HumanoidModel`), and `instanceof` follows it.
+  - Tests (414 compat and 18 translator tests pass): `models::tests` (a humanoid mesh on the player skin's
+    layout; a young humanoid's big head on a small body; a humanoid's walk, look and swing; a zombie's raised
+    arms) and `entity_render::tests` (a material's sprite on its sheet; a wrapped consumer's model drawn from
+    its sprite; a mob renderer posing its model and drawing it with its texture: the head turned 30 degrees,
+    the arm's idle bob, seven parts on the mod's sprite, the `1.501` lift; a canceled `Pre` drawing nothing).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

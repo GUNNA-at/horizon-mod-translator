@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 649] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 647] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1196,7 +1196,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 649] = [
     ("net/minecraft/client/renderer/debug/LightDebugRenderer", "i(Lnet/minecraft/client/Minecraft;)V=minecraft|o"),
     ("net/minecraft/client/renderer/debug/SolidFaceRenderer", "i(Lnet/minecraft/client/Minecraft;)V=minecraft|o"),
     ("net/minecraft/client/renderer/debug/WaterDebugRenderer", "i(Lnet/minecraft/client/Minecraft;)V=minecraft|o"),
-    ("net/minecraft/client/renderer/entity/layers/RenderLayer", "i(Lnet/minecraft/client/renderer/entity/RenderLayerParent;)V=renderer|o"),
     ("net/minecraft/client/renderer/texture/SpriteContents$FrameInfo", "i(II)V=index,time|o"),
     ("net/minecraft/client/renderer/texture/SpriteLoader", "i(Lnet/minecraft/resources/ResourceLocation;III)V=location,maxSupportedTextureSize,minWidth,minHeight|o"),
     ("net/minecraft/client/renderer/texture/Stitcher$Region", "i(IIII)V=originX,originY,width,height|ggetX()I=originX|ggetY()I=originY|o"),
@@ -1213,7 +1212,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 649] = [
     ("net/minecraft/client/resources/metadata/texture/TextureMetadataSection", "i(ZZ)V=blur,clamp|gisBlur()Z=blur|gisClamp()Z=clamp|o"),
     ("net/minecraft/client/resources/model/AtlasSet$StitchResult", "i(Lnet/minecraft/client/renderer/texture/TextureAtlas;Lnet/minecraft/client/renderer/texture/SpriteLoader$Preparations;)V=atlas,preparations|o"),
     ("net/minecraft/client/resources/model/BuiltInModel", "i(Lnet/minecraft/client/renderer/block/model/ItemTransforms;Lnet/minecraft/client/renderer/block/model/ItemOverrides;Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;Z)V=itemTransforms,overrides,particleTexture,usesBlockLight|gusesBlockLight()Z=usesBlockLight|ggetParticleIcon()Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;=particleTexture|ggetTransforms()Lnet/minecraft/client/renderer/block/model/ItemTransforms;=itemTransforms|ggetOverrides()Lnet/minecraft/client/renderer/block/model/ItemOverrides;=overrides|o"),
-    ("net/minecraft/client/resources/model/Material", "i(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/resources/ResourceLocation;)V=atlasLocation,texture|gatlasLocation()Lnet/minecraft/resources/ResourceLocation;=atlasLocation|gtexture()Lnet/minecraft/resources/ResourceLocation;=texture"),
     ("net/minecraft/client/resources/sounds/Sound", "i(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/util/valueproviders/SampledFloat;Lnet/minecraft/util/valueproviders/SampledFloat;ILnet/minecraft/client/resources/sounds/Sound$Type;ZZI)V=location,volume,pitch,weight,type,stream,preload,attenuationDistance|ggetLocation()Lnet/minecraft/resources/ResourceLocation;=location|ggetVolume()Lnet/minecraft/util/valueproviders/SampledFloat;=volume|ggetPitch()Lnet/minecraft/util/valueproviders/SampledFloat;=pitch|ggetWeight()I=weight|ggetType()Lnet/minecraft/client/resources/sounds/Sound$Type;=type|gshouldStream()Z=stream|gshouldPreload()Z=preload|ggetAttenuationDistance()I=attenuationDistance|o"),
     ("net/minecraft/client/resources/sounds/SoundEventRegistration", "i(Ljava/util/List;ZLjava/lang/String;)V=sounds,replace,subtitle|ggetSounds()Ljava/util/List;=sounds|gisReplace()Z=replace|ggetSubtitle()Ljava/lang/String;=subtitle|o"),
     ("net/minecraft/client/telemetry/TelemetryLogManager", "i(Lnet/minecraft/util/eventlog/EventLogDirectory;)V=directory|o"),

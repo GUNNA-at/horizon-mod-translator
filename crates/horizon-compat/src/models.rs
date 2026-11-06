@@ -480,10 +480,18 @@ pub(crate) fn sprite_of_texture(texture: &str) -> String {
     if ns == "minecraft" { path.to_owned() } else { format!("{ns}:{path}") }
 }
 
-/// The sprite a vertex consumer draws with: its render type's texture. None when it has none.
+/// The sprite a vertex consumer draws with: the one it was wrapped in (`Material.buffer`,
+/// `TextureAtlasSprite.wrap`), else its render type's texture. None when it has neither, or its
+/// texture is an atlas (a model drawn on the whole atlas, with no sprite to map it into).
 fn consumer_sprite(rt: &Rt, consumer: V) -> Option<String> {
+    if let Some(sprite) = rt.str_of(rt.get_field(consumer, "$sprite")) {
+        return Some(sprite.strip_prefix("minecraft:").unwrap_or(sprite).to_owned());
+    }
     let ty = rt.get_field(consumer, "$type");
     let texture = rt.str_of(rt.get_field(ty, "$texture"))?;
+    if texture.contains(":textures/atlas/") {
+        return None;
+    }
     Some(sprite_of_texture(texture))
 }
 
@@ -734,11 +742,18 @@ fn model_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
             crate::api::virtual_call(rt, (RENDER_5_KEY, RENDER_5), &[this, a(1), a(2), a(3), a(4), V::I(WHITE)]);
             V::Void
         }
-        // A hierarchical model draws its root; another model's is abstract (its mod draws it).
+        // A hierarchical model draws its root, a list model its parts; another model's is abstract
+        // (its mod draws it).
         "renderToBuffer" => {
             if rt.instance_of(this, HIERARCHICAL) {
                 let root = crate::api::virtual_call(rt, (ROOT_KEY, ROOT), &[this]);
                 render_part(rt, root, a(1), a(2), a(3).i(), a(5).i());
+            } else if rt.instance_of(this, AGEABLE_LIST) {
+                render_ageable(rt, this, a(1), a(2), a(3).i(), a(5).i());
+            } else if rt.instance_of(this, LIST_MODEL) {
+                for p in parts_of(rt, this, (PARTS_KEY, PARTS)) {
+                    render_part(rt, p, a(1), a(2), a(3).i(), a(5).i());
+                }
             }
             V::Void
         }
@@ -782,9 +797,705 @@ fn render_type_of(rt: &mut Rt, model: V, texture: V) -> V {
     }
 }
 
+// ---- vanilla's model classes mods build on: the list models, the humanoid, the zombie ----
+
+const AGEABLE_LIST: &str = "net/minecraft/client/model/AgeableListModel";
+const LIST_MODEL: &str = "net/minecraft/client/model/ListModel";
+const HUMANOID: &str = "net/minecraft/client/model/HumanoidModel";
+const ABSTRACT_ZOMBIE: &str = "net/minecraft/client/model/AbstractZombieModel";
+const ZOMBIE: &str = "net/minecraft/client/model/ZombieModel";
+const ARM_POSE: &str = "net/minecraft/client/model/HumanoidModel$ArmPose";
+const ANIMATION_UTILS: &str = "net/minecraft/client/model/AnimationUtils";
+const HEAD_PARTS: &str = "headParts.()Ljava/lang/Iterable;";
+const HEAD_PARTS_KEY: &str = "net/minecraft/client/model/AgeableListModel.headParts.()Ljava/lang/Iterable;";
+const BODY_PARTS: &str = "bodyParts.()Ljava/lang/Iterable;";
+const BODY_PARTS_KEY: &str = "net/minecraft/client/model/AgeableListModel.bodyParts.()Ljava/lang/Iterable;";
+const PARTS: &str = "parts.()Ljava/lang/Iterable;";
+const PARTS_KEY: &str = "net/minecraft/client/model/ListModel.parts.()Ljava/lang/Iterable;";
+const IS_AGGRESSIVE: &str = "isAggressive.(Lnet/minecraft/world/entity/monster/Monster;)Z";
+const IS_AGGRESSIVE_KEY: &str = "net/minecraft/client/model/AbstractZombieModel.isAggressive.(Lnet/minecraft/world/entity/monster/Monster;)Z";
+const MOB_IS_AGGRESSIVE: (&str, &str) = ("net/minecraft/world/entity/Mob.isAggressive.()Z", "isAggressive.()Z");
+const MAIN_ARM: &str = "getMainArm.()Lnet/minecraft/world/entity/HumanoidArm;";
+const MAIN_ARM_KEY: &str = "net/minecraft/world/entity/LivingEntity.getMainArm.()Lnet/minecraft/world/entity/HumanoidArm;";
+/// `HumanoidModel`'s parts: its fields, and the root's children they are.
+const HUMANOID_PARTS: [(&str, &str); 7] =
+    [("head", "head"), ("hat", "hat"), ("body", "body"), ("rightArm", "right_arm"), ("leftArm", "left_arm"), ("rightLeg", "right_leg"), ("leftLeg", "left_leg")];
+/// `AgeableListModel`'s settings for a young one: whether its head is scaled, how far its head moves
+/// down and back, how much smaller its head and body are, how far its body moves down.
+const AGEABLE_FIELDS: [&str; 6] = ["$scaleHead", "$babyYHeadOffset", "$babyZHeadOffset", "$babyHeadScale", "$babyBodyScale", "$bodyYOffset"];
+/// The entity a model's `setupAnim` and `prepareMobModel` take at each level of vanilla's classes
+/// (`EntityModel`'s, `HumanoidModel`'s, `AbstractZombieModel`'s erasures), and those classes.
+const ENTITY_ARGS: [&str; 3] = ["Lnet/minecraft/world/entity/Entity;", "Lnet/minecraft/world/entity/LivingEntity;", "Lnet/minecraft/world/entity/monster/Monster;"];
+const LEVEL_OWNERS: [&str; 3] = [ENTITY_MODEL, HUMANOID, ABSTRACT_ZOMBIE];
+
+const PI: f32 = std::f32::consts::PI;
+/// `(float) (Math.PI / 180.0)` and the other fractions of pi vanilla's models round from doubles.
+fn pi_by(d: f64) -> f32 {
+    (std::f64::consts::PI / d) as f32
+}
+
+/// Vanilla's model classes past the ones a mod extends, as the API climbs them (a miss on
+/// `ZombieModel` retries `AbstractZombieModel`'s, then `HumanoidModel`'s...).
+pub(crate) fn api_super(class: &str) -> Option<&'static str> {
+    Some(match class {
+        ZOMBIE => ABSTRACT_ZOMBIE,
+        ABSTRACT_ZOMBIE => HUMANOID,
+        HUMANOID => AGEABLE_LIST,
+        AGEABLE_LIST | LIST_MODEL | HIERARCHICAL => ENTITY_MODEL,
+        ENTITY_MODEL => MODEL,
+        _ => return None,
+    })
+}
+
+/// `EntityModel(renderType)`'s fields: the render type function (null for `entityCutoutNoCull`),
+/// its attack not begun, unridden, young.
+fn init_model(rt: &mut Rt, this: V, render_type: V) {
+    rt.put_field(this, "renderType", render_type);
+    rt.put_field(this, "attackTime", V::F(0.0));
+    rt.put_field(this, "riding", V::I(0));
+    rt.put_field(this, "young", V::I(1));
+}
+
+/// `AgeableListModel`'s constructors: the render type and the young one's settings
+/// ([`AGEABLE_FIELDS`]; the defaults are vanilla's).
+fn init_ageable(rt: &mut Rt, desc: &str, args: &[V]) -> Option<()> {
+    let a = |i| arg(args, i);
+    let (render_type, s) = match desc {
+        "()V" => (V::NULL, [0.0, 5.0, 2.0, 2.0, 2.0, 24.0]),
+        "(ZFF)V" => (V::NULL, [a(1).i() as f32, a(2).f(), a(3).f(), 2.0, 2.0, 24.0]),
+        "(ZFFFFF)V" => (V::NULL, [a(1).i() as f32, a(2).f(), a(3).f(), a(4).f(), a(5).f(), a(6).f()]),
+        "(Ljava/util/function/Function;ZFFFFF)V" => (a(1), [a(2).i() as f32, a(3).f(), a(4).f(), a(5).f(), a(6).f(), a(7).f()]),
+        _ => return None,
+    };
+    init_model(rt, a(0), render_type);
+    for (f, v) in AGEABLE_FIELDS.into_iter().zip(s) {
+        rt.put_field(a(0), f, V::F(v));
+    }
+    Some(())
+}
+
+/// `HumanoidModel(root[, renderType])`: an ageable model whose young head is scaled, 16 down; its
+/// parts the root's children; both arms empty, standing.
+fn init_humanoid(rt: &mut Rt, this: V, root: V, render_type: V) {
+    init_model(rt, this, render_type);
+    for (f, v) in AGEABLE_FIELDS.into_iter().zip([1.0, 16.0, 0.0, 2.0, 2.0, 24.0]) {
+        rt.put_field(this, f, V::F(v));
+    }
+    for (field, name) in HUMANOID_PARTS {
+        let n = rt.string(name);
+        let part = child(rt, root, n);
+        rt.put_field(this, field, part);
+    }
+    let empty = crate::api::api_enum(rt, ARM_POSE, "EMPTY", 0);
+    rt.put_field(this, "leftArmPose", empty);
+    rt.put_field(this, "rightArmPose", empty);
+    rt.put_field(this, "crouching", V::I(0));
+    rt.put_field(this, "swimAmount", V::F(0.0));
+}
+
+/// Adds a cube at `origin` of `size`, grown by `grow`, to builder `this`, at its texture offset.
+fn push_cube(rt: &mut Rt, this: V, origin: [f32; 3], size: [f32; 3], grow: [f32; 3]) {
+    let shape = CubeShape {
+        uv: [rt.get_field(this, "$u").i() as f32, rt.get_field(this, "$v").i() as f32],
+        origin,
+        size,
+        grow,
+        mirror: rt.get_field(this, "$mirror").i() != 0,
+        tex: [1.0, 1.0],
+        faces: ALL_FACES,
+    };
+    let def = rt.new_object(CUBE_DEFINITION);
+    put_shape(rt, def, &shape);
+    let cubes = rt.get_field(this, "$cubes");
+    jutil::list_add(rt, cubes, def);
+}
+
+/// `HumanoidModel.createMesh(deformation, yOffset)`: the player's shape (64 by 64 texture), its
+/// parts `yOffset` lower, the hat half a pixel bigger.
+fn create_mesh(rt: &mut Rt, deformation_arg: V, y: f32) -> V {
+    let mesh = rt.new_object(MESH);
+    init_mesh(rt, mesh);
+    let root = rt.get_field(mesh, "$root");
+    let grow = grow_of(rt, deformation_arg);
+    let hat = grow.map(|g| g + 0.5);
+    let parts: [(&str, [i32; 2], bool, [f32; 3], [f32; 3], [f32; 3], [f32; 3]); 7] = [
+        ("head", [0, 0], false, [-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], grow, [0.0, y, 0.0]),
+        ("hat", [32, 0], false, [-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], hat, [0.0, y, 0.0]),
+        ("body", [16, 16], false, [-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], grow, [0.0, y, 0.0]),
+        ("right_arm", [40, 16], false, [-3.0, -2.0, -2.0], [4.0, 12.0, 4.0], grow, [-5.0, 2.0 + y, 0.0]),
+        ("left_arm", [40, 16], true, [-1.0, -2.0, -2.0], [4.0, 12.0, 4.0], grow, [5.0, 2.0 + y, 0.0]),
+        ("right_leg", [0, 16], false, [-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], grow, [-1.9, 12.0 + y, 0.0]),
+        ("left_leg", [0, 16], true, [-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], grow, [1.9, 12.0 + y, 0.0]),
+    ];
+    for (name, uv, mirror, origin, size, grow, offset) in parts {
+        let builder = rt.new_object(CUBE_LIST);
+        init_cube_list(rt, builder);
+        rt.put_field(builder, "$u", V::I(uv[0]));
+        rt.put_field(builder, "$v", V::I(uv[1]));
+        rt.put_field(builder, "$mirror", V::I(i32::from(mirror)));
+        push_cube(rt, builder, origin, size, grow);
+        let pose = part_pose(rt, [offset[0], offset[1], offset[2], 0.0, 0.0, 0.0]);
+        let n = rt.string(name);
+        add_or_replace_child(rt, root, n, builder, pose);
+    }
+    mesh
+}
+
+/// The parts a list model's `headParts()`, `bodyParts()` or `parts()` gives (the mod's own, or a
+/// humanoid's).
+fn parts_of(rt: &mut Rt, this: V, key: (&'static str, &'static str)) -> Vec<V> {
+    let list = crate::api::virtual_call(rt, key, &[this]);
+    jutil::elements(rt, list)
+}
+
+/// `AgeableListModel.renderToBuffer`: its head parts and body parts, a young one's scaled down and
+/// moved as its settings say.
+fn render_ageable(rt: &mut Rt, this: V, stack: V, consumer: V, light: i32, color: i32) {
+    let heads = parts_of(rt, this, (HEAD_PARTS_KEY, HEAD_PARTS));
+    let bodies = parts_of(rt, this, (BODY_PARTS_KEY, BODY_PARTS));
+    let draw = |rt: &mut Rt, parts: &[V]| {
+        for &p in parts {
+            render_part(rt, p, stack, consumer, light, color);
+        }
+    };
+    if rt.get_field(this, "young").i() == 0 {
+        draw(rt, &heads);
+        draw(rt, &bodies);
+        return;
+    }
+    let [scale_head, head_y, head_z, head_scale, body_scale, body_y] = AGEABLE_FIELDS.map(|f| float(rt, this, f));
+    crate::api::call(rt, PUSH, &[stack]);
+    if scale_head != 0.0 {
+        let f = 1.5 / head_scale;
+        crate::api::call(rt, SCALE, &[stack, V::F(f), V::F(f), V::F(f)]);
+    }
+    crate::api::call(rt, TRANSLATE, &[stack, V::F(0.0), V::F(head_y / 16.0), V::F(head_z / 16.0)]);
+    draw(rt, &heads);
+    crate::api::call(rt, POP, &[stack]);
+    crate::api::call(rt, PUSH, &[stack]);
+    let f = 1.0 / body_scale;
+    crate::api::call(rt, SCALE, &[stack, V::F(f), V::F(f), V::F(f)]);
+    crate::api::call(rt, TRANSLATE, &[stack, V::F(0.0), V::F(body_y / 16.0), V::F(0.0)]);
+    draw(rt, &bodies);
+    crate::api::call(rt, POP, &[stack]);
+}
+
+/// The level of [`ENTITY_ARGS`] whose `setupAnim` (`prepareMobModel` when `prepare`) a model's own
+/// class has: a zombie's `Monster`, a humanoid's `LivingEntity`, `EntityModel`'s `Entity`.
+fn model_level(rt: &Rt, this: V, prepare: bool) -> usize {
+    if !prepare && rt.instance_of(this, ABSTRACT_ZOMBIE) {
+        2
+    } else if rt.instance_of(this, HUMANOID) {
+        1
+    } else {
+        0
+    }
+}
+
+/// The level of [`ENTITY_ARGS`] a call's descriptor takes its entity at.
+fn desc_level(desc: &str) -> usize {
+    ENTITY_ARGS.iter().position(|t| desc.strip_prefix('(').is_some_and(|d| d.starts_with(t))).unwrap_or(0)
+}
+
+/// Vanilla's bridge methods: `setupAnim` or `prepareMobModel` called at level `at` of a model whose
+/// class has the method at a higher level runs the receiver's most specific one: a mod's override
+/// there (through its bridge), as the JVM would. None when the mod overrides none of them, for
+/// vanilla's own at the model's level.
+fn bridged(rt: &mut Rt, this: V, name: &str, tail: &str, at: usize, own: usize, args: &[V]) -> Option<V> {
+    let class = rt.class_of(this);
+    for level in (at + 1..=own).rev() {
+        let short = rt.static_key(&format!("{name}.({}{tail}", ENTITY_ARGS[level]));
+        if rt.overrides.is_some_and(|o| o(class, short)) {
+            let key = rt.static_key(&format!("{}.{short}", LEVEL_OWNERS[level]));
+            return Some(crate::api::virtual_call(rt, (key, short), args));
+        }
+    }
+    None
+}
+
+/// `setupAnim(entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch)` on a model
+/// whose own (or whose mod's override) it reaches: a humanoid's walk, a zombie's raised arms.
+fn setup_anim(rt: &mut Rt, this: V, desc: &str, args: &[V]) -> V {
+    let own = model_level(rt, this, false);
+    let at = desc_level(desc);
+    if let Some(v) = bridged(rt, this, "setupAnim", "FFFFF)V", at, own, args) {
+        return v;
+    }
+    let a = |i| arg(args, i).f();
+    let e = arg(args, 1);
+    if own >= 1 {
+        humanoid_setup_anim(rt, this, e, [a(2), a(3), a(4), a(5), a(6)]);
+    }
+    if own == 2 {
+        let aggressive = crate::api::virtual_call(rt, (IS_AGGRESSIVE_KEY, IS_AGGRESSIVE), &[this, e]).i() != 0;
+        let (left, right) = (rt.get_field(this, "leftArm"), rt.get_field(this, "rightArm"));
+        let attack = float(rt, this, "attackTime");
+        animate_zombie_arms(rt, left, right, aggressive, attack, a(4));
+    }
+    V::Void
+}
+
+/// `prepareMobModel(entity, limbSwing, limbSwingAmount, partialTick)`: a humanoid takes how far
+/// the entity is into swimming (its `swimAmount`, lerped; 0 for one that doesn't swim).
+fn prepare_mob_model(rt: &mut Rt, this: V, desc: &str, args: &[V]) -> V {
+    let own = model_level(rt, this, true);
+    if let Some(v) = bridged(rt, this, "prepareMobModel", "FFF)V", desc_level(desc), own, args) {
+        return v;
+    }
+    if own >= 1 {
+        let e = arg(args, 1);
+        let partial = arg(args, 4).f();
+        let (old, now) = (float(rt, e, "swimAmountO"), float(rt, e, "swimAmount"));
+        rt.put_field(this, "swimAmount", V::F(old + partial * (now - old)));
+    }
+    V::Void
+}
+
+/// Whether `e` holds its main hand on the left (`getMainArm() == HumanoidArm.LEFT`): what its
+/// mod's class answers; right-handed otherwise.
+fn main_arm_left(rt: &mut Rt, e: V) -> bool {
+    let class = rt.class_of(e);
+    if e.r() == 0 || !rt.overrides.is_some_and(|o| o(class, MAIN_ARM)) {
+        return false;
+    }
+    let arm = crate::api::virtual_call(rt, (MAIN_ARM_KEY, MAIN_ARM), &[e]);
+    rt.str_of(rt.get_field(arm, "$name")) == Some("LEFT")
+}
+
+/// The arm `e` swings (`HumanoidModel.getAttackArm`): its main arm, the other one for its off hand.
+fn attack_arm_left(rt: &mut Rt, e: V) -> bool {
+    let main_left = main_arm_left(rt, e);
+    let off = rt.str_of(rt.get_field(rt.get_field(e, "swingingArm"), "$name")) == Some("OFF_HAND");
+    main_left != off
+}
+
+/// `Mth.sin`/`Mth.cos` of a float angle (vanilla's table).
+fn sin(x: f32) -> f32 {
+    crate::api_common::mth_sin(V::F(x))
+}
+fn cos(x: f32) -> f32 {
+    crate::api_common::mth_cos(V::F(x))
+}
+fn lerp(delta: f32, start: f32, end: f32) -> f32 {
+    start + delta * (end - start)
+}
+
+/// `HumanoidModel.rotlerpRad`: from `max` toward `mul` by `angle`, the short way round.
+fn rotlerp_rad(angle: f32, max: f32, mul: f32) -> f32 {
+    let tau = (std::f64::consts::PI * 2.0) as f32;
+    let mut f = (mul - max) % tau;
+    if f < -PI {
+        f += tau;
+    }
+    if f >= PI {
+        f -= tau;
+    }
+    max + angle * f
+}
+
+/// A model part's rotation and position fields, read and written as `ModelPart`'s public fields.
+fn get(rt: &Rt, part: V, f: &'static str) -> f32 {
+    float(rt, part, f)
+}
+fn set(rt: &mut Rt, part: V, f: &'static str, v: f32) {
+    rt.put_field(part, f, V::F(v));
+}
+
+/// `ModelPart.copyFrom`: the scale, rotation and position of `from`.
+fn copy_part(rt: &mut Rt, to: V, from: V) {
+    for f in ["xScale", "yScale", "zScale", "xRot", "yRot", "zRot", "x", "y", "z"] {
+        let v = rt.get_field(from, f);
+        rt.put_field(to, f, v);
+    }
+}
+
+/// `HumanoidModel.setupAnim`: the head turned to look, arms and legs swinging with the walk, a
+/// ridden one's legs forward, each arm as its pose holds it, the attack's swing, crouching, the
+/// arms' idle bob, a swimmer's strokes; the hat follows the head. `l` is limb swing, its
+/// amount, age in ticks, net head yaw and head pitch.
+fn humanoid_setup_anim(rt: &mut Rt, this: V, e: V, l: [f32; 5]) {
+    let [limb, amount, age, head_yaw, head_pitch] = l;
+    let [head, hat, body, right_arm, left_arm, right_leg, left_leg] = HUMANOID_PARTS.map(|(f, _)| rt.get_field(this, f));
+    // Fall flying (an elytra) and the swimming pose are the player's: a mod's mob does neither.
+    let swim = float(rt, this, "swimAmount");
+    set(rt, head, "yRot", head_yaw * pi_by(180.0));
+    let pitch = head_pitch * pi_by(180.0);
+    let x = if swim > 0.0 { rotlerp_rad(swim, get(rt, head, "xRot"), pitch) } else { pitch };
+    set(rt, head, "xRot", x);
+    set(rt, body, "yRot", 0.0);
+    set(rt, right_arm, "z", 0.0);
+    set(rt, right_arm, "x", -5.0);
+    set(rt, left_arm, "z", 0.0);
+    set(rt, left_arm, "x", 5.0);
+    // Vanilla divides the swing by how fast an elytra flies, 1 on foot.
+    set(rt, right_arm, "xRot", cos(limb * 0.6662 + PI) * 2.0 * amount * 0.5);
+    set(rt, left_arm, "xRot", cos(limb * 0.6662) * 2.0 * amount * 0.5);
+    set(rt, right_arm, "zRot", 0.0);
+    set(rt, left_arm, "zRot", 0.0);
+    set(rt, right_leg, "xRot", cos(limb * 0.6662) * 1.4 * amount);
+    set(rt, left_leg, "xRot", cos(limb * 0.6662 + PI) * 1.4 * amount);
+    set(rt, right_leg, "yRot", 0.005);
+    set(rt, left_leg, "yRot", -0.005);
+    set(rt, right_leg, "zRot", 0.005);
+    set(rt, left_leg, "zRot", -0.005);
+    if rt.get_field(this, "riding").i() != 0 {
+        let x = get(rt, right_arm, "xRot");
+        set(rt, right_arm, "xRot", x + -pi_by(5.0));
+        let x = get(rt, left_arm, "xRot");
+        set(rt, left_arm, "xRot", x + -pi_by(5.0));
+        set(rt, right_leg, "xRot", -1.4137167);
+        set(rt, right_leg, "yRot", pi_by(10.0));
+        set(rt, right_leg, "zRot", 0.07853982);
+        set(rt, left_leg, "xRot", -1.4137167);
+        set(rt, left_leg, "yRot", -pi_by(10.0));
+        set(rt, left_leg, "zRot", -0.07853982);
+    }
+    set(rt, right_arm, "yRot", 0.0);
+    set(rt, left_arm, "yRot", 0.0);
+    // Not using an item (a mod's mob draws no bow back here): the two-handed pose goes last.
+    let right_handed = !main_arm_left(rt, e);
+    let (left_pose, right_pose) = (arm_pose(rt, this, "leftArmPose"), arm_pose(rt, this, "rightArmPose"));
+    let two_handed = if right_handed { is_two_handed(&left_pose) } else { is_two_handed(&right_pose) };
+    let parts = Humanoid { head, right_arm, left_arm };
+    if right_handed != two_handed {
+        pose_arm(rt, &parts, &left_pose, false);
+        pose_arm(rt, &parts, &right_pose, true);
+    } else {
+        pose_arm(rt, &parts, &right_pose, true);
+        pose_arm(rt, &parts, &left_pose, false);
+    }
+    setup_attack_animation(rt, this, e, &parts, body);
+    if rt.get_field(this, "crouching").i() != 0 {
+        set(rt, body, "xRot", 0.5);
+        let x = get(rt, right_arm, "xRot");
+        set(rt, right_arm, "xRot", x + 0.4);
+        let x = get(rt, left_arm, "xRot");
+        set(rt, left_arm, "xRot", x + 0.4);
+        set(rt, right_leg, "z", 4.0);
+        set(rt, left_leg, "z", 4.0);
+        set(rt, right_leg, "y", 12.2);
+        set(rt, left_leg, "y", 12.2);
+        set(rt, head, "y", 4.2);
+        set(rt, body, "y", 3.2);
+        set(rt, left_arm, "y", 5.2);
+        set(rt, right_arm, "y", 5.2);
+    } else {
+        set(rt, body, "xRot", 0.0);
+        set(rt, right_leg, "z", 0.0);
+        set(rt, left_leg, "z", 0.0);
+        set(rt, right_leg, "y", 12.0);
+        set(rt, left_leg, "y", 12.0);
+        set(rt, head, "y", 0.0);
+        set(rt, body, "y", 0.0);
+        set(rt, left_arm, "y", 2.0);
+        set(rt, right_arm, "y", 2.0);
+    }
+    if right_pose != "SPYGLASS" {
+        bob_model_part(rt, right_arm, age, 1.0);
+    }
+    if left_pose != "SPYGLASS" {
+        bob_model_part(rt, left_arm, age, -1.0);
+    }
+    if swim > 0.0 {
+        swim_strokes(rt, this, e, limb, swim, [right_arm, left_arm, right_leg, left_leg]);
+    }
+    copy_part(rt, hat, head);
+}
+
+/// The parts an arm pose moves.
+struct Humanoid {
+    head: V,
+    right_arm: V,
+    left_arm: V,
+}
+
+/// The name of the model's arm pose in `field` (`EMPTY` when unset).
+fn arm_pose(rt: &Rt, this: V, field: &'static str) -> String {
+    rt.str_of(rt.get_field(rt.get_field(this, field), "$name")).unwrap_or("EMPTY").to_owned()
+}
+
+/// `ArmPose.isTwoHanded`: drawing a bow and holding or charging a crossbow.
+fn is_two_handed(pose: &str) -> bool {
+    matches!(pose, "BOW_AND_ARROW" | "CROSSBOW_CHARGE" | "CROSSBOW_HOLD")
+}
+
+/// `HumanoidModel.poseRightArm` (`right`) and `poseLeftArm`: the arm as its pose holds it. A pose a
+/// mod adds (NeoForge's extensible enum) moves nothing here.
+fn pose_arm(rt: &mut Rt, p: &Humanoid, pose: &str, right: bool) {
+    let arm = if right { p.right_arm } else { p.left_arm };
+    let side = if right { 1.0 } else { -1.0 };
+    let (head_x, head_y) = (get(rt, p.head, "xRot"), get(rt, p.head, "yRot"));
+    match pose {
+        "EMPTY" => set(rt, arm, "yRot", 0.0),
+        "ITEM" => {
+            let x = get(rt, arm, "xRot");
+            set(rt, arm, "xRot", x * 0.5 - pi_by(10.0));
+            set(rt, arm, "yRot", 0.0);
+        }
+        "BLOCK" => {
+            let x = get(rt, arm, "xRot");
+            set(rt, arm, "xRot", x * 0.5 - 0.9424779 + head_x.clamp((-std::f64::consts::PI * 4.0 / 9.0) as f32, 0.43633232));
+            let base = if right { -30.0 } else { 30.0 };
+            set(rt, arm, "yRot", base * pi_by(180.0) + head_y.clamp(-pi_by(6.0), pi_by(6.0)));
+        }
+        "BOW_AND_ARROW" => {
+            if right {
+                set(rt, p.right_arm, "yRot", -0.1 + head_y);
+                set(rt, p.left_arm, "yRot", 0.1 + head_y + 0.4);
+            } else {
+                set(rt, p.right_arm, "yRot", -0.1 + head_y - 0.4);
+                set(rt, p.left_arm, "yRot", 0.1 + head_y);
+            }
+            set(rt, p.right_arm, "xRot", -pi_by(2.0) + head_x);
+            set(rt, p.left_arm, "xRot", -pi_by(2.0) + head_x);
+        }
+        "THROW_SPEAR" => {
+            let x = get(rt, arm, "xRot");
+            set(rt, arm, "xRot", x * 0.5 - PI);
+            set(rt, arm, "yRot", 0.0);
+        }
+        "CROSSBOW_CHARGE" => animate_crossbow_charge(rt, p.right_arm, p.left_arm, right),
+        "CROSSBOW_HOLD" => animate_crossbow_hold(rt, p.right_arm, p.left_arm, p.head, right),
+        "SPYGLASS" => {
+            // Crouching is the player's: a mod's mob stands.
+            set(rt, arm, "xRot", (head_x - 1.9198622).clamp(-2.4, 3.3));
+            set(rt, arm, "yRot", head_y - side * pi_by(12.0));
+        }
+        "TOOT_HORN" => {
+            set(rt, arm, "xRot", head_x.clamp(-1.2, 1.2) - 1.4835298);
+            set(rt, arm, "yRot", head_y - side * pi_by(6.0));
+        }
+        "BRUSH" => {
+            let x = get(rt, arm, "xRot");
+            set(rt, arm, "xRot", x * 0.5 - pi_by(5.0));
+            set(rt, arm, "yRot", 0.0);
+        }
+        _ => {}
+    }
+}
+
+/// `HumanoidModel.setupAttackAnimation`: while `attackTime` runs, the body twists toward the arm
+/// that swings, and that arm sweeps down and across.
+fn setup_attack_animation(rt: &mut Rt, this: V, e: V, p: &Humanoid, body: V) {
+    let attack = float(rt, this, "attackTime");
+    if attack <= 0.0 {
+        return;
+    }
+    let left = attack_arm_left(rt, e);
+    let arm = if left { p.left_arm } else { p.right_arm };
+    let mut turn = sin(attack.sqrt() * (std::f64::consts::PI * 2.0) as f32) * 0.2;
+    if left {
+        turn *= -1.0;
+    }
+    set(rt, body, "yRot", turn);
+    set(rt, p.right_arm, "z", sin(turn) * 5.0);
+    set(rt, p.right_arm, "x", -cos(turn) * 5.0);
+    set(rt, p.left_arm, "z", -sin(turn) * 5.0);
+    set(rt, p.left_arm, "x", cos(turn) * 5.0);
+    let y = get(rt, p.right_arm, "yRot");
+    set(rt, p.right_arm, "yRot", y + turn);
+    let y = get(rt, p.left_arm, "yRot");
+    set(rt, p.left_arm, "yRot", y + turn);
+    let x = get(rt, p.left_arm, "xRot");
+    set(rt, p.left_arm, "xRot", x + turn);
+    let mut f = 1.0 - attack;
+    f *= f;
+    f *= f;
+    f = 1.0 - f;
+    let f1 = sin(f * PI);
+    let f2 = sin(attack * PI) * -(get(rt, p.head, "xRot") - 0.7) * 0.75;
+    let x = get(rt, arm, "xRot");
+    set(rt, arm, "xRot", x - (f1 * 1.2 + f2));
+    let y = get(rt, arm, "yRot");
+    set(rt, arm, "yRot", y + get(rt, body, "yRot") * 2.0);
+    let z = get(rt, arm, "zRot");
+    set(rt, arm, "zRot", z + sin(attack * PI) * -0.4);
+}
+
+/// The swimming half of `HumanoidModel.setupAnim`: the arms' strokes through a 26-tick cycle (not
+/// the arm that is attacking), the legs' kick.
+fn swim_strokes(rt: &mut Rt, this: V, e: V, limb: f32, swim: f32, [right_arm, left_arm, right_leg, left_leg]: [V; 4]) {
+    let quadratic = |x: f32| -65.0 * x + x * x;
+    let f5 = limb % 26.0;
+    let attacking = float(rt, this, "attackTime") > 0.0;
+    let left = attack_arm_left(rt, e);
+    let f1 = if !left && attacking { 0.0 } else { swim };
+    let f2 = if left && attacking { 0.0 } else { swim };
+    let half = pi_by(2.0);
+    let (lx, ly, lz) = (get(rt, left_arm, "xRot"), get(rt, left_arm, "yRot"), get(rt, left_arm, "zRot"));
+    let (rx, ry, rz) = (get(rt, right_arm, "xRot"), get(rt, right_arm, "yRot"), get(rt, right_arm, "zRot"));
+    let targets = if f5 < 14.0 {
+        Some([0.0, PI, PI + 1.8707964 * quadratic(f5) / quadratic(14.0), 0.0, PI, PI - 1.8707964 * quadratic(f5) / quadratic(14.0)])
+    } else if f5 < 22.0 {
+        let f6 = (f5 - 14.0) / 8.0;
+        Some([half * f6, PI, 5.012389 - 1.8707964 * f6, half * f6, PI, 1.2707963 + 1.8707964 * f6])
+    } else if f5 < 26.0 {
+        let f3 = (f5 - 22.0) / 4.0;
+        Some([half - half * f3, PI, PI, half - half * f3, PI, PI])
+    } else {
+        None
+    };
+    if let Some([tlx, tly, tlz, trx, try_, trz]) = targets {
+        set(rt, left_arm, "xRot", rotlerp_rad(f2, lx, tlx));
+        set(rt, right_arm, "xRot", lerp(f1, rx, trx));
+        set(rt, left_arm, "yRot", rotlerp_rad(f2, ly, tly));
+        set(rt, right_arm, "yRot", lerp(f1, ry, try_));
+        set(rt, left_arm, "zRot", rotlerp_rad(f2, lz, tlz));
+        set(rt, right_arm, "zRot", lerp(f1, rz, trz));
+    }
+    let x = get(rt, left_leg, "xRot");
+    set(rt, left_leg, "xRot", lerp(swim, x, 0.3 * cos(limb * 0.33333334 + PI)));
+    let x = get(rt, right_leg, "xRot");
+    set(rt, right_leg, "xRot", lerp(swim, x, 0.3 * cos(limb * 0.33333334)));
+}
+
+/// `AnimationUtils.bobModelPart`: an arm's idle sway with age.
+fn bob_model_part(rt: &mut Rt, part: V, age: f32, multiplier: f32) {
+    let z = get(rt, part, "zRot");
+    set(rt, part, "zRot", z + multiplier * (cos(age * 0.09) * 0.05 + 0.05));
+    let x = get(rt, part, "xRot");
+    set(rt, part, "xRot", x + multiplier * sin(age * 0.067) * 0.05);
+}
+
+/// `AnimationUtils.animateCrossbowHold`: both arms raised to aim along the head.
+fn animate_crossbow_hold(rt: &mut Rt, right_arm: V, left_arm: V, head: V, right: bool) {
+    let (main, other) = if right { (right_arm, left_arm) } else { (left_arm, right_arm) };
+    let (hx, hy) = (get(rt, head, "xRot"), get(rt, head, "yRot"));
+    set(rt, main, "yRot", (if right { -0.3 } else { 0.3 }) + hy);
+    set(rt, other, "yRot", (if right { 0.6 } else { -0.6 }) + hy);
+    set(rt, main, "xRot", -pi_by(2.0) + hx + 0.1);
+    set(rt, other, "xRot", -1.5 + hx);
+}
+
+/// `AnimationUtils.animateCrossbowCharge` at the charge's start: the entity isn't drawing it (no
+/// ticks of use), so the drawing arm hasn't moved yet.
+fn animate_crossbow_charge(rt: &mut Rt, right_arm: V, left_arm: V, right: bool) {
+    let (main, other) = if right { (right_arm, left_arm) } else { (left_arm, right_arm) };
+    set(rt, main, "yRot", if right { -0.8 } else { 0.8 });
+    set(rt, main, "xRot", -0.97079635);
+    set(rt, other, "xRot", -0.97079635);
+    let f2 = 0.0;
+    set(rt, other, "yRot", lerp(f2, 0.4, 0.85) * if right { 1.0 } else { -1.0 });
+    let x = get(rt, other, "xRot");
+    set(rt, other, "xRot", lerp(f2, x, -pi_by(2.0)));
+}
+
+/// `AnimationUtils.animateZombieArms`: both arms held out (higher while aggressive), swinging with
+/// the attack, bobbing.
+fn animate_zombie_arms(rt: &mut Rt, left_arm: V, right_arm: V, aggressive: bool, attack: f32, age: f32) {
+    let f = sin(attack * PI);
+    let f1 = sin((1.0 - (1.0 - attack) * (1.0 - attack)) * PI);
+    set(rt, right_arm, "zRot", 0.0);
+    set(rt, left_arm, "zRot", 0.0);
+    set(rt, right_arm, "yRot", -(0.1 - f * 0.6));
+    set(rt, left_arm, "yRot", 0.1 - f * 0.6);
+    let f2 = -PI / if aggressive { 1.5 } else { 2.25 };
+    set(rt, right_arm, "xRot", f2 + (f * 1.2 - f1 * 0.4));
+    set(rt, left_arm, "xRot", f2 + (f * 1.2 - f1 * 0.4));
+    bob_model_part(rt, right_arm, age, 1.0);
+    bob_model_part(rt, left_arm, age, -1.0);
+}
+
+/// `AnimationUtils.swingWeaponDown`: a mob's weapon arm raised high and brought down with the
+/// attack, the other arm low; both bob.
+fn swing_weapon_down(rt: &mut Rt, right_arm: V, left_arm: V, mob: V, attack: f32, age: f32) {
+    let f = sin(attack * PI);
+    let f1 = sin((1.0 - (1.0 - attack) * (1.0 - attack)) * PI);
+    set(rt, right_arm, "zRot", 0.0);
+    set(rt, left_arm, "zRot", 0.0);
+    set(rt, right_arm, "yRot", pi_by(20.0));
+    set(rt, left_arm, "yRot", -pi_by(20.0));
+    let (main, other) = if main_arm_left(rt, mob) { (left_arm, right_arm) } else { (right_arm, left_arm) };
+    set(rt, main, "xRot", -1.8849558 + cos(age * 0.09) * 0.15 + (f * 2.2 - f1 * 0.4));
+    set(rt, other, "xRot", -0.0 + cos(age * 0.19) * 0.5 + (f * 1.2 - f1 * 0.4));
+    bob_model_part(rt, right_arm, age, 1.0);
+    bob_model_part(rt, left_arm, age, -1.0);
+}
+
+/// `AnimationUtils`' static helpers.
+fn animation_utils(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    match name {
+        "bobModelPart" => bob_model_part(rt, a(0), a(1).f(), a(2).f()),
+        "bobArms" => {
+            bob_model_part(rt, a(0), a(2).f(), 1.0);
+            bob_model_part(rt, a(1), a(2).f(), -1.0);
+        }
+        "animateZombieArms" => animate_zombie_arms(rt, a(0), a(1), a(2).i() != 0, a(3).f(), a(4).f()),
+        "swingWeaponDown" => swing_weapon_down(rt, a(0), a(1), a(2), a(3).f(), a(4).f()),
+        "animateCrossbowHold" => animate_crossbow_hold(rt, a(0), a(1), a(2), a(3).i() != 0),
+        "animateCrossbowCharge" => animate_crossbow_charge(rt, a(0), a(1), a(3).i() != 0),
+        _ => return None,
+    }
+    Some(V::Void)
+}
+
+/// The vanilla model classes' own calls past `Model`'s (`HumanoidModel`'s parts, mesh and poses,
+/// the list models' drawing); None for the rest.
+fn vanilla_model_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let this = a(0);
+    Some(match name {
+        "<init>" => match owner {
+            LIST_MODEL => {
+                init_model(rt, this, if desc == "(Ljava/util/function/Function;)V" { a(1) } else { V::NULL });
+                V::Void
+            }
+            AGEABLE_LIST => {
+                init_ageable(rt, desc, args)?;
+                V::Void
+            }
+            HUMANOID | ABSTRACT_ZOMBIE | ZOMBIE => {
+                let render_type = if desc.ends_with("Ljava/util/function/Function;)V") { a(2) } else { V::NULL };
+                init_humanoid(rt, this, a(1), render_type);
+                V::Void
+            }
+            _ => return None,
+        },
+        "createMesh" if owner == HUMANOID => create_mesh(rt, a(0), a(1).f()),
+        "headParts" | "bodyParts" if rt.instance_of(this, HUMANOID) => {
+            let fields: &[&'static str] = if name == "headParts" { &["head"] } else { &["body", "rightArm", "leftArm", "rightLeg", "leftLeg", "hat"] };
+            let parts = fields.iter().map(|&f| rt.get_field(this, f)).collect();
+            jutil::new_list(rt, parts)
+        }
+        "setupAnim" if desc.ends_with("FFFFF)V") => setup_anim(rt, this, desc, args),
+        "prepareMobModel" if desc.ends_with("FFF)V") => prepare_mob_model(rt, this, desc, args),
+        "copyPropertiesTo" if desc == "(Lnet/minecraft/client/model/HumanoidModel;)V" => {
+            for f in ["attackTime", "riding", "young", "leftArmPose", "rightArmPose", "crouching"] {
+                let v = rt.get_field(this, f);
+                rt.put_field(a(1), f, v);
+            }
+            for (f, _) in HUMANOID_PARTS {
+                let (to, from) = (rt.get_field(a(1), f), rt.get_field(this, f));
+                copy_part(rt, to, from);
+            }
+            V::Void
+        }
+        "setAllVisible" => {
+            for (f, _) in HUMANOID_PARTS {
+                let p = rt.get_field(this, f);
+                rt.put_field(p, "visible", V::I(a(1).i()));
+            }
+            V::Void
+        }
+        "getHead" => rt.get_field(this, "head"),
+        "getArm" | "translateToHand" => {
+            let left = rt.str_of(rt.get_field(a(1), "$name")) == Some("LEFT");
+            let arm = rt.get_field(this, if left { "leftArm" } else { "rightArm" });
+            if name == "getArm" {
+                return Some(arm);
+            }
+            translate_and_rotate(rt, arm, a(2));
+            V::Void
+        }
+        "isAggressive" if owner == ZOMBIE || rt.instance_of(this, ZOMBIE) => crate::api::virtual_call(rt, MOB_IS_AGGRESSIVE, &[a(1)]),
+        _ => return None,
+    })
+}
+
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(
         owner,
         CUBE_LIST
@@ -801,7 +1512,13 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
             | MODEL
             | ENTITY_MODEL
             | HIERARCHICAL
-    )
+            | AGEABLE_LIST
+            | LIST_MODEL
+            | HUMANOID
+            | ABSTRACT_ZOMBIE
+            | ZOMBIE
+            | ANIMATION_UTILS
+    ) || (owner == ARM_POSE && name == "isTwoHanded")
 }
 
 /// The calls this module models (`owner.name.desc`), or None.
@@ -899,7 +1616,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             put_cube(rt, a(0), &s);
             V::Void
         }
-        (MODEL | ENTITY_MODEL | HIERARCHICAL, _) => return model_call(rt, owner, name, desc, args),
+        (MODEL | ENTITY_MODEL | HIERARCHICAL | AGEABLE_LIST | LIST_MODEL | HUMANOID | ABSTRACT_ZOMBIE | ZOMBIE, _) => {
+            return vanilla_model_call(rt, owner, name, desc, args).or_else(|| model_call(rt, owner, name, desc, args));
+        }
+        (ARM_POSE, "isTwoHanded") => {
+            let pose = rt.str_of(rt.get_field(a(0), "$name")).unwrap_or("EMPTY").to_owned();
+            V::I(i32::from(is_two_handed(&pose)))
+        }
+        (ANIMATION_UTILS, _) => return animation_utils(rt, name, args),
         _ => return None,
     })
 }
@@ -910,6 +1634,40 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         (POSE, "ZERO") => Some(zero_pose(rt)),
         (DEFORMATION, "NONE") => Some(rt.intern("compat:deformation-none".into(), |rt| deformation(rt, [0.0; 3]))),
         _ => None,
+    }
+}
+
+/// Models the other modules' tests draw: a one-cube part, vanilla's humanoid.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    /// A part of one 2-pixel cube at the origin, on a 16 by 16 texture.
+    pub(crate) fn cube_part(rt: &mut Rt) -> V {
+        let mesh = rt.new_object(MESH);
+        init_mesh(rt, mesh);
+        let root = rt.get_field(mesh, "$root");
+        let builder = rt.new_object(CUBE_LIST);
+        init_cube_list(rt, builder);
+        push_cube(rt, builder, [0.0; 3], [2.0; 3], [0.0; 3]);
+        let name = rt.string("cube");
+        let zero = zero_pose(rt);
+        add_or_replace_child(rt, root, name, builder, zero);
+        let (w, h) = (V::I(16), V::I(16));
+        let layer = layer_definition(rt, mesh, w, h);
+        bake_root(rt, layer)
+    }
+
+    /// `new HumanoidModel(LayerDefinition.create(HumanoidModel.createMesh(NONE, 0), 64, 64).bakeRoot())`.
+    pub(crate) fn humanoid(rt: &mut Rt) -> V {
+        let none = deformation(rt, [0.0; 3]);
+        let mesh = create_mesh(rt, none, 0.0);
+        let (w, h) = (V::I(64), V::I(64));
+        let layer = layer_definition(rt, mesh, w, h);
+        let root = bake_root(rt, layer);
+        let model = rt.new_object(HUMANOID);
+        init_humanoid(rt, model, root, V::NULL);
+        model
     }
 }
 
@@ -1229,5 +1987,138 @@ mod tests {
         let found = crate::api::call(&mut rt, "net/minecraft/client/model/HierarchicalModel.getAnyDescendantWithName.(Ljava/lang/String;)Ljava/util/Optional;", &[model, head]);
         assert_ne!(rt.get_field(found, "value"), V::NULL);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const CREATE_MESH: &str = "net/minecraft/client/model/HumanoidModel.createMesh.(Lnet/minecraft/client/model/geom/builders/CubeDeformation;F)Lnet/minecraft/client/model/geom/builders/MeshDefinition;";
+    const HUMANOID_INIT: &str = "net/minecraft/client/model/HumanoidModel.<init>.(Lnet/minecraft/client/model/geom/ModelPart;)V";
+    const SETUP_ANIM: &str = "net/minecraft/client/model/EntityModel.setupAnim.(Lnet/minecraft/world/entity/Entity;FFFFF)V";
+
+    /// The face of `quads` looking `facing`, as [`faces`] gives it on a 64 by 64 texture.
+    fn face(quads: &[Quad], facing: u8) -> [f32; 4] {
+        faces(quads, [64.0, 64.0]).into_iter().find(|f| f.0 == facing).map(|f| f.1).expect("face")
+    }
+
+    /// `HumanoidModel.createMesh` is the player's shape on the 64 by 64 skin: the head drawn first,
+    /// then the body, arms, legs and hat; the right arm's front on the skin's 44..48 by 20..32 and
+    /// its pivot at the shoulder (-5, 2, 0); the left arm the right one's texture mirrored (its
+    /// outer side, east, drawn from the right arm's west rectangle).
+    #[test]
+    fn a_humanoid_mesh_is_the_player_skin_layout() {
+        let mut rt = Rt::new();
+        crate::install();
+        let none = crate::api::get_static(&mut rt, "net/minecraft/client/model/geom/builders/CubeDeformation.NONE");
+        let mesh = crate::api::call(&mut rt, CREATE_MESH, &[none, V::F(0.0)]);
+        let layer = crate::api::call(&mut rt, LAYER_CREATE, &[mesh, V::I(64), V::I(64)]);
+        let root = crate::api::call(&mut rt, BAKE_ROOT, &[layer]);
+        let model = rt.new_object(HUMANOID);
+        crate::api::call(&mut rt, HUMANOID_INIT, &[model, root]);
+        rt.put_field(model, "young", V::I(0));
+        let c = consumer(&mut rt, "minecraft:textures/entity/zombie/zombie.png");
+        let stack = crate::render::new_pose_stack(&mut rt, crate::render::IDENTITY);
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| crate::api::call(rt, RENDER_5_KEY, &[model, stack, c, V::I(0), V::I(0), V::I(WHITE)]));
+        assert_eq!(host.drawn.len(), 7);
+        let (head, right_arm, left_arm, left_leg) = (quads(&host.drawn[0].0), quads(&host.drawn[2].0), quads(&host.drawn[3].0), quads(&host.drawn[5].0));
+        assert_eq!(face(head, NORTH), [8.0, 8.0, 16.0, 16.0]);
+        assert_eq!(face(right_arm, NORTH), [44.0, 20.0, 48.0, 32.0]);
+        assert_eq!(face(right_arm, WEST), [40.0, 20.0, 44.0, 32.0]);
+        assert_eq!(face(left_arm, EAST), [40.0, 20.0, 44.0, 32.0]);
+        assert_eq!(face(left_leg, NORTH), [4.0, 20.0, 8.0, 32.0]);
+        let (arm_pose, leg_pose) = (host.drawn[2].1, host.drawn[5].1);
+        assert_eq!([arm_pose[12], arm_pose[13]], [-5.0 / 16.0, 2.0 / 16.0]);
+        assert_eq!([leg_pose[12], leg_pose[13]], [1.9 / 16.0, 12.0 / 16.0]);
+        assert!(host.drawn.iter().all(|d| quads(&d.0).iter().all(|q| q.sprite == "entity/zombie/zombie")));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A young humanoid's head is three quarters size and a block lower (16 pixels, scaled), its
+    /// body half size and 24 pixels lower, as `AgeableListModel` draws a baby.
+    #[test]
+    fn a_young_humanoid_has_a_big_head_on_a_small_body() {
+        let mut rt = Rt::new();
+        crate::install();
+        let model = tests_support::humanoid(&mut rt);
+        assert_eq!(rt.get_field(model, "young"), V::I(1));
+        let c = consumer(&mut rt, "minecraft:textures/entity/zombie/zombie.png");
+        let stack = crate::render::new_pose_stack(&mut rt, crate::render::IDENTITY);
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| crate::api::call(rt, RENDER_5_KEY, &[model, stack, c, V::I(0), V::I(0), V::I(WHITE)]));
+        let (head, body, right_arm) = (host.drawn[0].1, host.drawn[1].1, host.drawn[2].1);
+        assert_eq!([head[0], head[13]], [0.75, 0.75]);
+        assert_eq!([body[0], body[13]], [0.5, 0.75]);
+        assert_eq!([right_arm[12], right_arm[13]], [0.5 * -5.0 / 16.0, 0.75 + 0.5 * 2.0 / 16.0]);
+    }
+
+    /// `setupAnim` on a humanoid, through `EntityModel`'s bridge: the head looks where it is told,
+    /// the legs swing with the walk, and a right-handed attack (`attackTime` 0.3) twists the body
+    /// and sweeps the right arm, which then bobs with age, as vanilla's formulas give.
+    #[test]
+    fn a_humanoid_walks_looks_and_swings() {
+        let mut rt = Rt::new();
+        crate::install();
+        let model = tests_support::humanoid(&mut rt);
+        rt.put_field(model, "attackTime", V::F(0.3));
+        let e = rt.new_object("mymod/Golem");
+        let (limb, amount, age, yaw, pitch) = (0.5f64, 0.8f64, 10.0f64, 20.0f64, -10.0f64);
+        crate::api::call(&mut rt, SETUP_ANIM, &[model, e, V::F(limb as f32), V::F(amount as f32), V::F(age as f32), V::F(yaw as f32), V::F(pitch as f32)]);
+        let part = |rt: &Rt, f: &'static str| rt.get_field(model, f);
+        let rot = |rt: &Rt, p: V| ["xRot", "yRot", "zRot"].map(|f| f64::from(rt.get_field(p, f).f()));
+        let close = |got: f64, want: f64| assert!((got - want).abs() < 1e-3, "{got} != {want}");
+        let pi = std::f64::consts::PI;
+        let head = rot(&rt, part(&rt, "head"));
+        close(head[0], pitch.to_radians());
+        close(head[1], yaw.to_radians());
+        close(rot(&rt, part(&rt, "rightLeg"))[0], (limb * 0.6662).cos() * 1.4 * amount);
+        close(rot(&rt, part(&rt, "leftLeg"))[0], (limb * 0.6662 + pi).cos() * 1.4 * amount);
+        let a = 0.3f64;
+        let body = (a.sqrt() * 2.0 * pi).sin() * 0.2;
+        close(rot(&rt, part(&rt, "body"))[1], body);
+        let f = 1.0 - (1.0 - a).powi(4);
+        let sweep = (f * pi).sin() * 1.2 + (a * pi).sin() * -(pitch.to_radians() - 0.7) * 0.75;
+        let right = rot(&rt, part(&rt, "rightArm"));
+        close(right[0], (limb * 0.6662 + pi).cos() * amount - sweep + (age * 0.067).sin() * 0.05);
+        close(right[1], 3.0 * body);
+        close(right[2], (a * pi).sin() * -0.4 + (age * 0.09).cos() * 0.05 + 0.05);
+        let arm = rt.get_field(model, "rightArm");
+        close(f64::from(rt.get_field(arm, "x").f()), -body.cos() * 5.0);
+        let left = rot(&rt, part(&rt, "leftArm"));
+        close(left[0], (limb * 0.6662).cos() * amount + body - (age * 0.067).sin() * 0.05);
+        close(left[1], body);
+        // The hat follows the head.
+        assert_eq!(rot(&rt, part(&rt, "hat")), head);
+    }
+
+    fn aggressive_vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        if short == "isAggressive.()Z" {
+            return V::I(1);
+        }
+        crate::api::call(rt, key, args)
+    }
+
+    /// A zombie model holds its arms out, higher while its zombie is aggressive (`-pi / 1.5` rather
+    /// than `-pi / 2.25`), over the humanoid's walk: `EntityModel`'s `setupAnim` reaches
+    /// `AbstractZombieModel`'s through vanilla's bridges.
+    #[test]
+    fn a_zombie_model_raises_its_arms() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(aggressive_vcall);
+        let humanoid = tests_support::humanoid(&mut rt);
+        let model = rt.new_object(ZOMBIE);
+        for (f, _) in HUMANOID_PARTS {
+            let p = rt.get_field(humanoid, f);
+            rt.put_field(model, f, p);
+        }
+        for f in ["attackTime", "riding", "young", "leftArmPose", "rightArmPose", "crouching", "swimAmount"] {
+            let v = rt.get_field(humanoid, f);
+            rt.put_field(model, f, v);
+        }
+        let e = rt.new_object("mymod/Ghoul");
+        crate::api::call(&mut rt, SETUP_ANIM, &[model, e, V::F(0.0), V::F(0.0), V::F(0.0), V::F(0.0), V::F(0.0)]);
+        let arm = rt.get_field(model, "rightArm");
+        // At age 0 the bob adds sin(0) to x.
+        let want = -std::f32::consts::PI / 1.5;
+        assert!((rt.get_field(arm, "xRot").f() - want).abs() < 1e-4, "{}", rt.get_field(arm, "xRot").f());
+        assert!((rt.get_field(arm, "yRot").f() - -0.1).abs() < 1e-6);
     }
 }

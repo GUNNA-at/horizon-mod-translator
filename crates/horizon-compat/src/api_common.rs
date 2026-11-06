@@ -18,6 +18,15 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
     if vanilla_is_a(c, class) {
         return true;
     }
+    // The class trees the runtime climbs for calls too (`ZombieModel` → `HumanoidModel`,
+    // `MobRenderer` → `LivingEntityRenderer`).
+    let mut k = c;
+    while let Some(sup) = crate::api::api_super(k) {
+        if sup == class {
+            return true;
+        }
+        k = sup;
+    }
     let family = |pkg: &str, suffix: &str| c.starts_with(pkg) && c.ends_with(suffix);
     match class {
         "net/minecraft/world/level/block/Block" | "net/minecraft/world/level/block/state/BlockBehaviour" => {

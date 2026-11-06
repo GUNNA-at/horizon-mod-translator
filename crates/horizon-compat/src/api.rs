@@ -24,12 +24,14 @@ const PACKET_FLOW: &str = "net/minecraft/network/protocol/PacketFlow";
 const MUTABLE_POS: &str = "net/minecraft/core/BlockPos$MutableBlockPos";
 
 /// Minecraft's superclasses a missed call climbs past the mod's own (the API's classes aren't in
-/// `rt.supers`): what a `MutableBlockPos` inherits answers as `BlockPos`'s, then `Vec3i`'s.
-fn api_super(class: &str) -> Option<&'static str> {
+/// `rt.supers`): what a `MutableBlockPos` inherits answers as `BlockPos`'s, then `Vec3i`'s; a
+/// `ZombieModel`'s as `HumanoidModel`'s, a `MobRenderer`'s as `LivingEntityRenderer`'s. `instanceof`
+/// climbs them too ([`crate::api_common::api_is_a`]).
+pub(crate) fn api_super(class: &str) -> Option<&'static str> {
     match class {
         MUTABLE_POS => Some(BLOCK_POS),
         BLOCK_POS | "net/minecraft/core/SectionPos" => Some("net/minecraft/core/Vec3i"),
-        _ => None,
+        _ => crate::models::api_super(class).or_else(|| crate::entity_render::api_super(class)),
     }
 }
 
@@ -754,7 +756,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 61] = [
+const CHAIN: [Module; 62] = [
     crate::fake_players::call,
     crate::block_breaking::call,
     crate::loot_params::call,
@@ -812,6 +814,7 @@ const CHAIN: [Module; 61] = [
     crate::tags::call,
     crate::quads::call,
     crate::models::call,
+    crate::entity_render::call,
     crate::render::call,
     world,
     crate::palette::call,
@@ -821,7 +824,7 @@ const CHAIN: [Module; 61] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 61] = [
+const CLAIMS: [Claims; 62] = [
     crate::fake_players::claims,
     crate::block_breaking::claims,
     crate::loot_params::claims,
@@ -879,6 +882,7 @@ const CLAIMS: [Claims; 61] = [
     crate::tags::claims,
     crate::quads::claims,
     crate::models::claims,
+    crate::entity_render::claims,
     crate::render::claims,
     // The world's calls end in `api_common`'s, which take most of vanilla's classes.
     |_, _, _| true,
@@ -886,7 +890,7 @@ const CLAIMS: [Claims; 61] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 61] = [
+const MODULE_NAMES: [&str; 62] = [
     "fake_players",
     "block_breaking",
     "loot_params",
@@ -944,6 +948,7 @@ const MODULE_NAMES: [&str; 61] = [
     "tags",
     "quads",
     "models",
+    "entity_render",
     "render",
     "world",
     "palette",
@@ -2087,6 +2092,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::api_common::get_static(rt, o, f))
             .or_else(|| crate::render::get_static(rt, o, f))
             .or_else(|| crate::models::get_static(rt, o, f))
+            .or_else(|| crate::entity_render::get_static(rt, o, f))
             .or_else(|| crate::quads::get_static(rt, o, f))
             .or_else(|| crate::blocks::get_static(rt, o, f))
             .or_else(|| crate::shapes::get_static(rt, o, f))

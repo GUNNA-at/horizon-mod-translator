@@ -1217,6 +1217,30 @@ const ER_SHOULD_RENDER: &str = "shouldRender.(Lnet/minecraft/world/entity/Entity
 const ER_SHOULD_RENDER_KEY: &str =
     "net/minecraft/client/renderer/entity/EntityRenderer.shouldRender.(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/client/renderer/culling/Frustum;DDD)Z";
 
+/// The renderer a mod's entity `e` is drawn by: the one its mod registered for its type
+/// (`EntityRenderersEvent.RegisterRenderers`), made from its provider the first time it is asked
+/// for, as vanilla's `EntityRenderDispatcher` holds one renderer a type. None for an entity with no
+/// renderer (told once), or one whose renderer couldn't be made.
+pub(crate) fn entity_renderer(rt: &mut Rt, e: V) -> Option<V> {
+    let ty = rt.get_field(e, "$type");
+    let id = rt.registered_name(ty, "entity_type").map(str::to_owned)?;
+    let Some(provider) = rt.interned.get(&format!("er/{id}")).copied() else {
+        trace_once(rt, &format!("no-er/{id}"), |_| format!("client: {id} has no entity renderer"));
+        return None;
+    };
+    let renderer = match rt.interned.get(&format!("er-made/{id}")).copied() {
+        Some(r) => r,
+        None => {
+            let ctx = rt.new_object("net/minecraft/client/renderer/entity/EntityRendererProvider$Context");
+            let r = rt.call_functional(ER_PROVIDER_CREATE, provider, &[ctx]);
+            rt.report_thrown("an entity renderer's constructor");
+            rt.interned.insert(format!("er-made/{id}"), r);
+            r
+        }
+    };
+    (renderer.r() != 0).then_some(renderer)
+}
+
 /// `native_level_submit` (a client): the client's mod entities, each drawn by the renderer its mod
 /// registered for its type (`EntityRenderersEvent.RegisterRenderers`), as vanilla's
 /// `EntityRenderDispatcher.render` draws one: when the renderer's `shouldRender` agrees, under a
@@ -1234,25 +1258,9 @@ pub fn render_mod_entities(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3]) -
             if rt.get_field(e, "removalReason").r() != 0 {
                 continue;
             }
+            let Some(renderer) = entity_renderer(rt, e) else { continue };
             let ty = rt.get_field(e, "$type");
-            let Some(id) = rt.registered_name(ty, "entity_type").map(str::to_owned) else { continue };
-            let Some(provider) = rt.interned.get(&format!("er/{id}")).copied() else {
-                trace_once(rt, &format!("no-er/{id}"), |_| format!("client: {id} has no entity renderer"));
-                continue;
-            };
-            let renderer = match rt.interned.get(&format!("er-made/{id}")).copied() {
-                Some(r) => r,
-                None => {
-                    let ctx = rt.new_object("net/minecraft/client/renderer/entity/EntityRendererProvider$Context");
-                    let r = rt.call_functional(ER_PROVIDER_CREATE, provider, &[ctx]);
-                    rt.report_thrown("an entity renderer's constructor");
-                    rt.interned.insert(format!("er-made/{id}"), r);
-                    r
-                }
-            };
-            if renderer.r() == 0 {
-                continue;
-            }
+            let id = rt.registered_name(ty, "entity_type").unwrap_or("?").to_owned();
             let frustum = rt.intern("compat:frustum".into(), |rt| rt.new_object("net/minecraft/client/renderer/culling/Frustum"));
             let shows = vc(rt, ER_SHOULD_RENDER_KEY, ER_SHOULD_RENDER, &[renderer, e, frustum, V::D(camera[0]), V::D(camera[1]), V::D(camera[2])]);
             rt.report_thrown("an entity renderer's shouldRender");
