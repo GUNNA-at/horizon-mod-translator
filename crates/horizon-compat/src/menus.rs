@@ -304,7 +304,7 @@ pub fn init_player(rt: &mut Rt, p: V) {
 }
 
 /// `Player.getInventory()`: one object for each player object, its `selected` the hotbar slot the
-/// host says.
+/// host says (another player's own, where the host reaches them by UUID).
 pub fn inventory(rt: &mut Rt, p: V) -> V {
     let mut inv = rt.get_field(p, "$inventory");
     if crate::fake_players::is_fake(rt, p) {
@@ -317,8 +317,9 @@ pub fn inventory(rt: &mut Rt, p: V) -> V {
             rt.put_field(p, "$inventory", inv);
         }
     }
-    let selected = rt.host().map_or(0, |h| h.player_selected().min(8));
-    rt.put_field(inv, "selected", V::I(i32::from(selected)));
+    let uuid = network::player_uuid(rt, p);
+    let selected = crate::hand::for_player(rt, uuid, |rt| selected_slot(rt));
+    rt.put_field(inv, "selected", V::I(selected));
     inv
 }
 
@@ -338,9 +339,10 @@ fn is_client_player(rt: &Rt, p: V) -> bool {
     rt.class_of(p) == LOCAL_PLAYER || crate::neo::is_client(rt)
 }
 
-/// `Player.hasInfiniteMaterials()`: a creative player.
+/// `Player.hasInfiniteMaterials()`: a creative player (the acting one: another player's mode
+/// isn't known here).
 fn infinite(rt: &Rt) -> bool {
-    fake_inventory().is_none() && rt.host().is_some_and(|h| h.player_creative())
+    fake_inventory().is_none() && crate::hand::other().is_none() && rt.host().is_some_and(|h| h.player_creative())
 }
 
 /// `Player.drop(stack, includeThrowerName)` on a server: an item entity from the player's eyes less
@@ -1518,7 +1520,8 @@ fn slot_try_remove(rt: &mut Rt, slot: V, n: i32, decrement: i32, player: V) -> O
 
 // ---- the player's inventory ----
 
-/// `Inventory.getItem(slot)`: the acting player's, by vanilla's numbering.
+/// `Inventory.getItem(slot)`: the acting player's (or the player's [`crate::hand::for_player`]
+/// reaches), by vanilla's numbering.
 pub(crate) fn inventory_get(rt: &mut Rt, slot: i32) -> V {
     if let Some(inv) = fake_inventory() {
         return crate::fake_players::slot(rt, inv, slot);
@@ -1540,9 +1543,10 @@ pub(crate) fn inventory_set(rt: &mut Rt, slot: i32, s: V) {
     }
 }
 
-/// Whether the host reaches the whole inventory, so stacks go where vanilla's `Inventory` puts them.
+/// Whether the host reaches the whole inventory, so stacks go where vanilla's `Inventory` puts them:
+/// another player's by UUID, every slot.
 fn whole_inventory(rt: &Rt) -> bool {
-    fake_inventory().is_some() || rt.host().is_some_and(|h| h.player_inventory())
+    fake_inventory().is_some() || crate::hand::other().is_some() || rt.host().is_some_and(|h| h.player_inventory())
 }
 
 thread_local! {
@@ -1555,11 +1559,13 @@ fn fake_inventory() -> Option<V> {
     Some(FAKE_INVENTORY.get()).filter(|v| v.r() != 0)
 }
 
-/// The hotbar slot in hand: a fake player's own, else the one the host says.
+/// The hotbar slot in hand: a fake player's own, another player's the host reaches by UUID, else
+/// the acting player's.
 fn selected_slot(rt: &Rt) -> i32 {
-    match fake_inventory() {
-        Some(inv) => crate::fake_players::selected(rt, inv),
-        None => rt.host().map_or(0, |h| i32::from(h.player_selected().min(8))),
+    match (fake_inventory(), crate::hand::other()) {
+        (Some(inv), _) => crate::fake_players::selected(rt, inv),
+        (None, Some(other)) => i32::from(other.selected),
+        (None, None) => rt.host().map_or(0, |h| i32::from(h.player_selected().min(8))),
     }
 }
 
@@ -1690,12 +1696,15 @@ fn place_back(rt: &mut Rt, inv: V, s: V) {
     }
 }
 
-/// The calls of a player's `Inventory`: a fake player's on its own slots, else the acting player's.
+/// The calls of a player's `Inventory`: a fake player's on its own slots, another player's than the
+/// acting one's on theirs where the host reaches them by UUID (none acts in a block entity's tick,
+/// where Create's toolbox hands a player their tool), else the acting player's.
 fn inventory_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let inv = arg(args, 0);
     let fake = if crate::fake_players::is_fake_inventory(rt, inv) { inv } else { V::NULL };
     let outer = FAKE_INVENTORY.replace(fake);
-    let out = player_inventory_call(rt, name, desc, args);
+    let uuid = if fake.r() == 0 { network::player_uuid(rt, rt.get_field(inv, "player")) } else { None };
+    let out = crate::hand::for_player(rt, uuid, |rt| player_inventory_call(rt, name, desc, args));
     FAKE_INVENTORY.set(outer);
     out
 }
@@ -3375,5 +3384,60 @@ mod tests {
             assert_ne!(crate::api::call(rt, DROP, &[p, diamonds, V::I(0)]), V::NULL);
         });
         assert!(client.item_entities.is_empty());
+    }
+
+    /// With nobody acting (a block entity's tick), another player's inventory is theirs by UUID, as
+    /// Create's toolbox hands a player their tool: what the tick reads and puts there is that
+    /// player's (a stack put whole, one changed in place in a hook), and `add` fills their slots as
+    /// vanilla's; the hands the host acts with stay as they were. The acting player's own object
+    /// still reaches the acting player's inventory.
+    #[test]
+    fn another_players_inventory_is_reached_by_their_uuid() {
+        const INV_GET: &str = "net/minecraft/world/entity/player/Inventory.getItem.(I)Lnet/minecraft/world/item/ItemStack;";
+        const INV_SET: &str = "net/minecraft/world/entity/player/Inventory.setItem.(ILnet/minecraft/world/item/ItemStack;)V";
+        const INV_ADD: &str = "net/minecraft/world/entity/player/Inventory.add.(Lnet/minecraft/world/item/ItemStack;)Z";
+        const SHRINK: &str = "net/minecraft/world/item/ItemStack.shrink.(I)V";
+        const OTHER: u128 = 0xBEEF;
+        let mut rt = runtime();
+        let mut h = MemoryHost {
+            held: Some(("minecraft:stick".into(), 1)),
+            others: std::collections::HashMap::from([(OTHER, std::collections::HashMap::from([(9, stack_of("minecraft:dirt", 64))]))]),
+            ..MemoryHost::default()
+        };
+        rt.with_host(&mut h, |rt| {
+            let p = server_player(rt, OTHER);
+            let inv = crate::api::call(rt, GET_INVENTORY, &[p]);
+            let first = crate::api::call(rt, INV_GET, &[inv, V::I(0)]);
+            assert!(is_empty(rt, first), "their slot 0, not the stick in the host's hand");
+            let dirt = crate::api::call(rt, INV_GET, &[inv, V::I(9)]);
+            assert_eq!(count(rt, dirt), 64);
+            let pick = crate::hand::load(rt, Some(stack_of("minecraft:iron_pickaxe", 1)));
+            crate::api::call(rt, SET_DAMAGE, &[pick, V::I(125)]);
+            crate::api::call(rt, INV_SET, &[inv, V::I(0), pick]);
+            crate::hand::with_hand(rt, |rt| {
+                let dirt = crate::api::call(rt, INV_GET, &[inv, V::I(9)]);
+                crate::api::call(rt, SHRINK, &[dirt, V::I(1)]);
+            });
+            // Onto their dirt first, then their first empty slot.
+            let more = crate::hand::load(rt, Some(stack_of("minecraft:dirt", 3)));
+            assert_eq!(crate::api::call(rt, INV_ADD, &[inv, more]).i(), 1);
+            let gold = crate::hand::load(rt, Some(stack_of("minecraft:gold_ingot", 2)));
+            assert_eq!(crate::api::call(rt, INV_ADD, &[inv, gold]).i(), 1);
+        });
+        let theirs = |slot: u8| h.others[&OTHER].get(&slot).map(|s| (s.item.clone(), s.count, s.damage));
+        assert_eq!(theirs(0), Some(("minecraft:iron_pickaxe".into(), 1, 125)));
+        assert_eq!(theirs(9), Some(("minecraft:dirt".into(), 64, 0)));
+        assert_eq!(theirs(1), Some(("minecraft:dirt".into(), 2, 0)));
+        assert_eq!(theirs(2), Some(("minecraft:gold_ingot".into(), 2, 0)));
+        assert_eq!(h.held, Some(("minecraft:stick".into(), 1)), "the host's hand isn't theirs");
+
+        h.player_id = Some(PLAYER);
+        rt.with_host(&mut h, |rt| {
+            let p = server_player(rt, PLAYER);
+            let inv = crate::api::call(rt, GET_INVENTORY, &[p]);
+            let held = crate::api::call(rt, INV_GET, &[inv, V::I(0)]);
+            assert_eq!(crate::api_common::item_like_name(rt, rt.get_field(held, "$item")), "minecraft:stick");
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

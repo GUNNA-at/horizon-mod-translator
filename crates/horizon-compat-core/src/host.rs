@@ -622,6 +622,32 @@ pub trait Host {
             _ => false,
         }
     }
+    /// The hotbar slot (0 to 8) player `uuid`'s main hand holds, a player other than the acting
+    /// one: with nobody acting, a block entity's tick hands a player their tool (Create's toolbox),
+    /// and a player's own event reaches them by their object. None when the host can't reach that
+    /// player (not here, dead, another player's state in place), and by default: then the other
+    /// `_of` methods don't reach them either.
+    fn player_selected_of(&mut self, _uuid: u128) -> Option<u8> {
+        None
+    }
+    /// The stack in slot `slot` (numbered as [`Host::player_slot`]) of player `uuid`'s inventory,
+    /// a player other than the acting one ([`Host::player_selected_of`]). `Some(None)` for an
+    /// empty slot; None when the host can't reach that player, and by default.
+    fn player_slot_of(&mut self, _uuid: u128, _slot: u8) -> Option<Option<HandStack>> {
+        None
+    }
+    /// Puts `stack` in slot `slot` of player `uuid`'s inventory (`Inventory.setItem`), its
+    /// `max_damage` aside; None empties it. False when the host can't reach that player or the
+    /// game refused, and by default.
+    fn set_player_slot_of(&mut self, _uuid: u128, _slot: u8, _stack: Option<&HandStack>) -> bool {
+        false
+    }
+    /// Changes the stack in slot `slot` of player `uuid`'s inventory in place, as
+    /// [`Host::update_player_slot`] does the acting player's. False when the host can't reach that
+    /// player or the game refused, and by default.
+    fn update_player_slot_of(&mut self, _uuid: u128, _slot: u8, _count: u32, _damage: u32, _components: &[(String, Option<Nbt>)]) -> bool {
+        false
+    }
     /// Where the acting player stands (their feet), and their look (yaw, pitch in degrees); None
     /// when the game can't say.
     fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
@@ -636,6 +662,11 @@ pub trait Host {
     /// operator level (`LocalPlayer.getPermissionLevel`, as the server last said it). None
     /// elsewhere.
     fn client_player(&self) -> Option<(String, u8)> {
+        None
+    }
+    /// On a client, the local player's entity id (`LocalPlayer.getId()`): the one the server gave
+    /// them, by which its packets name them. None elsewhere.
+    fn client_player_id(&self) -> Option<i32> {
         None
     }
     /// The collision boxes of the block at `pos` as the game has them (`BlockState.getCollisionShape`
@@ -1368,6 +1399,9 @@ pub struct MemoryHost {
     pub slots: HashMap<u8, HandStack>,
     /// Whether the slots stand for the whole inventory ([`Host::player_inventory`]).
     pub inventory: bool,
+    /// Other players' inventories by UUID ([`Host::player_slot_of`]), by vanilla's numbering: a
+    /// player listed here, even with none, is within reach, their main hand on slot 0.
+    pub others: HashMap<u128, HashMap<u8, HandStack>>,
     /// Items' durability (`max_damage`); unset ones have none.
     pub max_damage: HashMap<String, u32>,
     /// The slots items are worn in ([`Host::item_equip_slot`]); unset ones are worn nowhere.
@@ -1489,6 +1523,8 @@ pub struct MemoryHost {
     pub damage_types: Vec<DamageTypeView>,
     /// A client's world: its runtime's hooks are a client's (`is_server` false).
     pub client: bool,
+    /// On a client, the local player's entity id ([`Host::client_player_id`]).
+    pub client_player_id: Option<i32>,
     /// Sounds played, in order.
     pub sounds: Vec<Sound>,
     /// Instances' sounds started ([`Host::start_sound`]), in order: their ids are their places
@@ -1805,6 +1841,35 @@ impl Host for MemoryHost {
         }
         self.set_player_slot(slot, Some(&s))
     }
+    fn player_selected_of(&mut self, uuid: u128) -> Option<u8> {
+        self.others.contains_key(&uuid).then_some(0)
+    }
+    fn player_slot_of(&mut self, uuid: u128, slot: u8) -> Option<Option<HandStack>> {
+        let stack = self.others.get(&uuid)?.get(&slot).cloned();
+        Some(stack.map(|s| HandStack { max_damage: self.max_damage.get(&s.item).copied().unwrap_or(0), ..s }))
+    }
+    fn set_player_slot_of(&mut self, uuid: u128, slot: u8, stack: Option<&HandStack>) -> bool {
+        let Some(slots) = self.others.get_mut(&uuid).filter(|_| slot <= OFF_HAND_SLOT) else {
+            return false;
+        };
+        match stack.filter(|s| !s.item.is_empty() && s.count > 0) {
+            Some(s) => slots.insert(slot, HandStack { max_damage: 0, ..s.clone() }),
+            None => slots.remove(&slot),
+        };
+        true
+    }
+    fn update_player_slot_of(&mut self, uuid: u128, slot: u8, count: u32, damage: u32, components: &[(String, Option<Nbt>)]) -> bool {
+        let Some(Some(mut s)) = self.player_slot_of(uuid, slot) else { return false };
+        s.count = count;
+        s.damage = damage;
+        for (name, value) in components {
+            s.components.retain(|(k, _)| k != name);
+            if let Some(v) = value {
+                s.components.push((name.clone(), v.clone()));
+            }
+        }
+        self.set_player_slot_of(uuid, slot, Some(&s))
+    }
     fn block_changed(&mut self, pos: [i32; 3]) {
         self.changed.push(pos);
     }
@@ -1931,6 +1996,9 @@ impl Host for MemoryHost {
     }
     fn player_entities(&self) -> Vec<(i32, u128, [f64; 3])> {
         self.players.iter().filter_map(|&(u, p)| Some((*self.player_entity_ids.get(&u)?, u, p))).collect()
+    }
+    fn client_player_id(&self) -> Option<i32> {
+        self.client_player_id
     }
     fn damage_types(&self) -> Vec<DamageTypeView> {
         self.damage_types.clone()

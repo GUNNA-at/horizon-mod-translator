@@ -539,10 +539,14 @@ pub fn living(rt: &mut Rt, id: i32, kind: &str, view: Option<&EntityView>) -> V 
 /// low half is `n`.
 pub(crate) const UUID_HIGH: u64 = 0x4856_5a4e_0000_0000;
 
-/// The object for the game's entity `id` (`Level.getEntity(int)`): a player by their entity id,
-/// any other entity the level holds by its type. None when the game knows none (a client's own
-/// entities aren't told).
+/// The object for the game's entity `id` (`Level.getEntity(int)`): a player by their entity id (on
+/// a client, its own player by the id the server gave them, as a server's packet names them), any
+/// other entity the level holds by its type. None when the game knows none (a client's own entities
+/// aren't told).
 pub(crate) fn by_id(rt: &mut Rt, id: i32) -> Option<V> {
+    if rt.host()?.client_player_id() == Some(id) {
+        return Some(crate::network::local_player(rt));
+    }
     let held = rt.host()?.player_entities().into_iter().find(|p| p.0 == id);
     if let Some((id, uuid, at)) = held {
         return Some(player(rt, id, uuid, at));

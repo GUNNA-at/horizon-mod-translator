@@ -9,7 +9,9 @@
 //! mod did to it reaches the game's stack when the hook ([`with_hand`]) ends: its count, damage and
 //! components in place (vanilla's own other data on it stays), or the stack the mod put in that
 //! slot instead (`setItemInHand`, `Inventory.setItem`, a use's answer). Wear (`hurtAndBreak`) on a
-//! stack in hand is the game's own, as it happens.
+//! stack in hand is the game's own, as it happens. Another player's inventory, where the host
+//! reaches them by UUID (a block entity's tick hands them their tool), works the same way, with
+//! records of its own ([`for_player`]).
 use crate::nbt::Nbt;
 use crate::{api_common, components, Rt, V};
 use std::collections::BTreeMap;
@@ -31,15 +33,74 @@ pub fn slot_of_hand(rt: &Rt, hand: u8) -> u8 {
     if hand == OFF { OFF_SLOT } else { rt.host().map_or(0, |h| h.player_selected().min(8)) }
 }
 
-/// The record of the acting player's slot `slot`: the stack object there, and what the game held
-/// when it was last read or written.
-fn record(rt: &mut Rt, slot: u8) -> V {
+/// The record of slot `slot` of the acting player's inventory, or of `other`'s (a player the
+/// host reaches by UUID, [`for_player`]): the stack object there, and what the game held when it
+/// was last read or written.
+fn record(rt: &mut Rt, other: Option<Other>, slot: u8) -> V {
+    if let Some(o) = other {
+        let uuid = o.uuid;
+        return rt.intern(format!("compat:other-slot/{uuid:x}/{slot}"), move |rt| {
+            let r = rt.new_object("compat:InventorySlot");
+            rt.put_field(r, "$slot", V::I(i32::from(slot)));
+            rt.put_field(r, "$other", V::I(1));
+            rt.put_field(r, "$uuidHi", V::J((uuid >> 64) as i64));
+            rt.put_field(r, "$uuidLo", V::J(uuid as i64));
+            r
+        });
+    }
     let player = rt.host().and_then(|h| h.player_id()).unwrap_or(0);
     rt.intern(format!("compat:slot/{player:x}/{slot}"), |rt| {
         let r = rt.new_object("compat:InventorySlot");
         rt.put_field(r, "$slot", V::I(i32::from(slot)));
         r
     })
+}
+
+/// A player other than the acting one whose inventory the slot calls reach ([`for_player`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Other {
+    pub uuid: u128,
+    /// The hotbar slot their main hand holds.
+    pub selected: u8,
+}
+
+thread_local! {
+    /// The player whose inventory the slot calls reach while [`for_player`] runs, when not the
+    /// acting player.
+    static OTHER: std::cell::Cell<Option<Other>> = const { std::cell::Cell::new(None) };
+}
+
+/// The player other than the acting one whose inventory the slot calls reach now, if any.
+pub(crate) fn other() -> Option<Other> {
+    OTHER.get()
+}
+
+/// Runs `f` with the slot calls ([`slot_stack`], [`replace_slot`], and what reaches the game after
+/// them) on player `uuid`'s inventory when that isn't the acting player and the host reaches them
+/// by UUID ([`crate::host::Host::player_slot_of`]): with nobody acting, a block entity's tick hands
+/// a player their tool (Create's toolbox). Else, as without it, on the acting player's.
+pub(crate) fn for_player<R>(rt: &mut Rt, uuid: Option<u128>, f: impl FnOnce(&mut Rt) -> R) -> R {
+    let other = uuid
+        .filter(|&u| rt.host().is_some_and(|h| h.player_id() != Some(u)))
+        .and_then(|u| Some(Other { uuid: u, selected: rt.host_call(|h| h.player_selected_of(u)).flatten()?.min(8) }));
+    let outer = OTHER.replace(other);
+    let out = f(rt);
+    OTHER.set(outer);
+    out
+}
+
+/// Whose inventory record `r` is of: None for the acting player's.
+fn other_of(rt: &Rt, r: V) -> Option<u128> {
+    (rt.get_field(r, "$other").i() != 0)
+        .then(|| (u128::from(rt.get_field(r, "$uuidHi").j() as u64) << 64) | u128::from(rt.get_field(r, "$uuidLo").j() as u64))
+}
+
+/// What the game holds in slot `slot` of the acting player's inventory, or of `other`'s.
+fn game_slot(rt: &mut Rt, other: Option<u128>, slot: u8) -> Option<crate::host::HandStack> {
+    match other {
+        Some(u) => rt.host_call(|h| h.player_slot_of(u, slot)).flatten().flatten(),
+        None => rt.host().and_then(|h| h.player_slot(slot)),
+    }
 }
 
 /// How deep in hooks acting for a player this thread is, which hook it is, and the slots it reached.
@@ -147,7 +208,7 @@ pub fn stack(rt: &mut Rt, hand: u8) -> V {
 /// time while the game's stack there doesn't change (`ItemStack.EMPTY` for an empty slot), a new
 /// one read from the game once it has.
 pub fn slot_stack(rt: &mut Rt, slot: u8) -> V {
-    let r = record(rt, slot);
+    let r = record(rt, other(), slot);
     let s = rt.get_field(r, "$stack");
     let hooked = in_hook(rt);
     if s.r() != 0 && hooked {
@@ -156,7 +217,7 @@ pub fn slot_stack(rt: &mut Rt, slot: u8) -> V {
             return s;
         }
     }
-    let held = rt.host().and_then(|h| h.player_slot(slot));
+    let held = game_slot(rt, other_of(rt, r), slot);
     let m = mark(held.as_ref());
     if s.r() == 0 || rt.get_field(r, "$mark").j() != m {
         let s = load(rt, held);
@@ -171,7 +232,8 @@ pub fn slot_stack(rt: &mut Rt, slot: u8) -> V {
     rt.get_field(r, "$stack")
 }
 
-/// The slot `stack` is in during this hook, if it is in one this hook reached.
+/// The slot of the acting player's inventory `stack` is in during this hook, if it is in one this
+/// hook reached.
 pub(crate) fn slot_of(rt: &mut Rt, stack: V) -> Option<u8> {
     if stack.r() == 0 || !in_hook(rt) {
         return None;
@@ -180,7 +242,7 @@ pub(crate) fn slot_of(rt: &mut Rt, stack: V) -> Option<u8> {
     let touched = rt.get_field(d, "$touched");
     crate::jutil::elements(rt, touched)
         .into_iter()
-        .find(|&r| rt.get_field(r, "$stack") == stack)
+        .find(|&r| rt.get_field(r, "$stack") == stack && other_of(rt, r).is_none())
         .map(|r| rt.get_field(r, "$slot").i() as u8)
 }
 
@@ -253,7 +315,7 @@ pub fn replace(rt: &mut Rt, hand: u8, stack: V) {
 pub fn replace_slot(rt: &mut Rt, slot: u8, stack: V) {
     // What the slot held first stays the baseline.
     slot_stack(rt, slot);
-    let r = record(rt, slot);
+    let r = record(rt, other(), slot);
     rt.put_field(r, "$stack", stack);
     rt.put_field(r, "$replaced", V::I(1));
     if !in_hook(rt) {
@@ -261,8 +323,9 @@ pub fn replace_slot(rt: &mut Rt, slot: u8, stack: V) {
     }
 }
 
-/// The game's slot `slot` holds what `stack` holds now.
-fn put(rt: &mut Rt, slot: u8, stack: V) {
+/// The game's slot `slot` (of `other`'s inventory, else the acting player's) holds what `stack`
+/// holds now.
+fn put(rt: &mut Rt, other: Option<u128>, slot: u8, stack: V) {
     let (held, carried) = state(rt, stack);
     let held = held.map(|(item, count, damage)| crate::host::HandStack {
         item,
@@ -271,7 +334,18 @@ fn put(rt: &mut Rt, slot: u8, stack: V) {
         max_damage: 0,
         components: carried.into_iter().collect(),
     });
-    rt.host_call(|h| h.set_player_slot(slot, held.as_ref()));
+    match other {
+        Some(u) => rt.host_call(|h| h.set_player_slot_of(u, slot, held.as_ref())),
+        None => rt.host_call(|h| h.set_player_slot(slot, held.as_ref())),
+    };
+}
+
+/// Changes the game's slot `slot` (of `other`'s inventory, else the acting player's) in place.
+fn update(rt: &mut Rt, other: Option<u128>, slot: u8, count: u32, damage: u32, changes: &[(String, Option<Nbt>)]) {
+    match other {
+        Some(u) => rt.host_call(|h| h.update_player_slot_of(u, slot, count, damage, changes)),
+        None => rt.host_call(|h| h.update_player_slot(slot, count, damage, changes)),
+    };
 }
 
 /// What the mod did to record `r`'s slot so far reaches the game; the stack then stands for what
@@ -283,8 +357,9 @@ fn flush(rt: &mut Rt, r: V) {
         return; // never reached
     }
     let slot = rt.get_field(r, "$slot").i() as u8;
+    let other = other_of(rt, r);
     if rt.get_field(r, "$replaced").i() != 0 {
-        put(rt, slot, s);
+        put(rt, other, slot, s);
     } else {
         let before_id = rt.str_of(rt.get_field(r, "$id")).map(str::to_owned);
         let before_count = rt.get_field(r, "$count").i().max(0) as u32;
@@ -295,22 +370,20 @@ fn flush(rt: &mut Rt, r: V) {
         match (before_id, held) {
             (None, None) => {}
             // Used up: the slot is empty.
-            (Some(_), None) => {
-                rt.host_call(|h| h.update_player_slot(slot, 0, 0, &[]));
-            }
+            (Some(_), None) => update(rt, other, slot, 0, 0, &[]),
             (Some(was), Some((id, n, damage))) if was == id => {
                 let mut changes: Vec<(String, Option<Nbt>)> =
                     before.keys().filter(|k| !now.contains_key(*k)).map(|k| (k.clone(), None)).collect();
                 changes.extend(now.iter().filter(|(k, v)| before.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), Some(v.clone()))));
                 if n != before_count || damage != before_damage || !changes.is_empty() {
-                    rt.host_call(|h| h.update_player_slot(slot, n, damage, &changes));
+                    update(rt, other, slot, n, damage, &changes);
                 }
             }
             // The slot's stack holds something else now.
-            (_, Some(_)) => put(rt, slot, s),
+            (_, Some(_)) => put(rt, other, slot, s),
         }
     }
-    let m = mark(rt.host().and_then(|h| h.player_slot(slot)).as_ref());
+    let m = mark(game_slot(rt, other, slot).as_ref());
     rt.put_field(r, "$mark", V::J(m));
     rt.put_field(r, "$replaced", V::I(0));
     snapshot(rt, r, s);
@@ -328,7 +401,7 @@ pub(crate) fn hurt(rt: &mut Rt, stack: V, amount: i32, wearer: V) {
     if let Some(hand) = hand_of(rt, stack) {
         // The game wears what the mod left so far.
         let slot = slot_of_hand(rt, hand);
-        let r = record(rt, slot);
+        let r = record(rt, None, slot);
         flush(rt, r);
         if rt.host_mut().is_some_and(|h| h.hurt_player_hand(hand, amount as u32)) {
             let now = rt.host().and_then(|h| h.player_slot(slot));

@@ -797,6 +797,36 @@ impl Game<'_> {
     pub(super) fn native_selected_slot(&self) -> usize {
         self.selected
     }
+    /// The hotbar slot player `uuid`'s main hand holds, for a player other
+    /// than the acting one: none acts in a block entity's tick, where
+    /// Create's toolbox hands a player their tool. None when they can't be
+    /// reached as [`Self::native_as_player`] reaches them (not here, dead,
+    /// another player's state swapped in). API @API:slot_stack@.
+    pub(super) fn native_player_selected_slot(&mut self, uuid: u128) -> Option<usize> {
+        let mut selected = None;
+        self.native_as_player(uuid, |game| selected = Some(game.selected));
+        selected
+    }
+    /// The stack in player `uuid`'s inventory slot `slot` (numbered as
+    /// [`Self::native_slot_stack`]) with all its data, for a player other
+    /// than the acting one; `Some(None)` for an empty slot or past 40. None
+    /// when they can't be reached, as for
+    /// [`Self::native_player_selected_slot`]. API @API:slot_stack@.
+    pub(super) fn native_player_slot_stack(&mut self, uuid: u128, slot: usize) -> Option<Option<ItemStack>> {
+        let mut stack = None;
+        self.native_as_player(uuid, |game| stack = Some(game.native_slot_stack(slot).cloned()));
+        stack
+    }
+    /// Puts `stack` in player `uuid`'s inventory slot `slot`, as
+    /// [`Self::native_set_slot_stack`] does in the acting player's: their
+    /// screen gets the change as any change to their inventory. False when
+    /// they can't be reached (as for [`Self::native_player_selected_slot`]),
+    /// past slot 40, and on a client of a server. API @API:slot_stack@.
+    pub(super) fn native_set_player_slot_stack(&mut self, uuid: u128, slot: usize, stack: Option<ItemStack>) -> bool {
+        let mut set = false;
+        self.native_as_player(uuid, |game| set = game.native_set_slot_stack(slot, stack));
+        set
+    }
     /// Puts `stack` in the player's `hand` (`Player.setItemInHand`), replacing
     /// what it held; None, a count of 0 or an item the game doesn't know
     /// empties it. The player's screen gets the change as any change to their
@@ -1159,9 +1189,11 @@ impl Game<'_> {
     /// Runs `f` with the player `uuid`'s state in place: theirs already when
     /// they are the acting player (the host, or a guest swapped in), else a
     /// guest's through `as_guest`, only where no other player is swapped in.
-    /// False when it didn't run: no such player here, or dead.
+    /// A server thread's game has no player of its own: there, with no guest
+    /// acting, every player is a guest. False when it didn't run: no such
+    /// player here, or dead.
     pub(super) fn native_as_player(&mut self, uuid: u128, f: impl FnOnce(&mut Self)) -> bool {
-        if uuid == self.native_acting_id() {
+        if (self.lan_acting.is_some() || self.player.is_some()) && uuid == self.native_acting_id() {
             if self
                 .player
                 .as_ref()

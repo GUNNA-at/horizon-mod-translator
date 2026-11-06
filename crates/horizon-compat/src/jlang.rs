@@ -1454,6 +1454,43 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
     })
 }
 
+/// `Math.round(float)` as the JDK computes it: floor(a + 1/2) exactly, from the bits (0.49999997
+/// rounds to 0, where adding a half in floats would round it up), NaN to 0, beyond the ints
+/// saturated.
+pub(crate) fn round_f32(a: f32) -> i32 {
+    let bits = a.to_bits() as i32;
+    let biased_exp = (bits & 0x7F80_0000) >> 23;
+    // SIGNIFICAND_WIDTH - 2 + EXP_BIAS: 24 - 2 + 127.
+    let shift = 149 - biased_exp;
+    if (shift & -32) == 0 {
+        let mut r = (bits & 0x007F_FFFF) | 0x0080_0000;
+        if bits < 0 {
+            r = -r;
+        }
+        ((r >> shift) + 1) >> 1
+    } else {
+        // Java's `(int) a`, as Rust's cast: NaN to 0, saturating.
+        a as i32
+    }
+}
+
+/// `Math.round(double)` as the JDK computes it ([`round_f32`]'s, on 64 bits).
+pub(crate) fn round_f64(a: f64) -> i64 {
+    let bits = a.to_bits() as i64;
+    let biased_exp = (bits & 0x7FF0_0000_0000_0000) >> 52;
+    // SIGNIFICAND_WIDTH - 2 + EXP_BIAS: 53 - 2 + 1023.
+    let shift = 1074 - biased_exp;
+    if (shift & -64) == 0 {
+        let mut r = (bits & 0x000F_FFFF_FFFF_FFFF) | 0x0010_0000_0000_0000;
+        if bits < 0 {
+            r = -r;
+        }
+        ((r >> shift) + 1) >> 1
+    } else {
+        a as i64
+    }
+}
+
 fn math(name: &str, ks: &[char], args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let d = |i: usize| match a(i) {
@@ -1493,8 +1530,8 @@ fn math(name: &str, ks: &[char], args: &[V]) -> Option<V> {
         "ceil" => V::D(d(0).ceil()),
         "rint" => V::D(d(0).round_ties_even()),
         "round" => match k {
-            'F' => V::I((a(0).f() + 0.5).floor() as i32),
-            _ => V::J((d(0) + 0.5).floor() as i64),
+            'F' => V::I(round_f32(a(0).f())),
+            _ => V::J(round_f64(d(0))),
         },
         // `ceilDiv`: the quotient rounded up.
         "ceilDiv" => match (a(0), a(1)) {
@@ -1671,6 +1708,26 @@ mod tests {
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))
+    }
+
+    /// `Math.round` rounds as the JDK's does: half up, exactly (adding a half in floats would round
+    /// the float just below a half, and 2^23 + 1, the wrong way), NaN to 0, beyond the range
+    /// saturated.
+    #[test]
+    fn math_round_is_the_jdks() {
+        let below_half = f32::from_bits(0x3EFF_FFFF);
+        let floats = [(0.5f32, 1), (-0.5, 0), (2.5, 3), (-2.5, -2), (-1.5, -1), (below_half, 0), (8_388_609.0, 8_388_609), (f32::NAN, 0), (f32::INFINITY, i32::MAX), (-1e20, i32::MIN)];
+        for (x, want) in floats {
+            assert_eq!(round_f32(x), want, "{x}");
+        }
+        let below_half_d = f64::from_bits(0x3FDF_FFFF_FFFF_FFFF);
+        let doubles = [(0.5f64, 1i64), (-0.5, 0), (below_half_d, 0), (4_503_599_627_370_497.0, 4_503_599_627_370_497), (f64::NAN, 0), (-1e300, i64::MIN)];
+        for (x, want) in doubles {
+            assert_eq!(round_f64(x), want, "{x}");
+        }
+        let mut rt = Rt::new();
+        assert_eq!(c(&mut rt, "java/lang/Math.round.(F)I", &[V::F(below_half)]), V::I(0));
+        assert_eq!(c(&mut rt, "java/lang/Math.round.(D)J", &[V::D(4_503_599_627_370_497.0)]), V::J(4_503_599_627_370_497));
     }
 
     /// `new String(...)` makes the object `new` gave the text its arguments spell: bytes in the

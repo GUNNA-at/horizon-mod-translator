@@ -5672,6 +5672,74 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     tooltip under the cursor), stayed in the hotbar. `ToolboxInventory.isItemValid` asks
     `Item.canFitInsideContainerItems()`, unmapped (false), so the toolbox refused every item, and
     `1` found no compartment to pick.
+- [x] 2026-11-06 Part 73: items inside items, items' bars, and another player's inventory: Create's
+  toolbox end to end. Two `Item` defaults NeoForge's mods lean on were unmapped.
+  `Item.canFitInsideContainerItems()` answered false (the unmapped default), so Create's toolbox
+  (`ToolboxInventory.isItemValid` asks it first) refused every item: 7 jars call it (10 calls), and 8
+  classes in 5 jars override it (Create's package, minecart contraption and `UncontainableBlockItem`,
+  Storage Drawers' drawers, Sophisticated Backpacks' backpack and Storage's shulker box, Refurbished
+  Furniture's package). `ItemStack.isBarVisible`/`getBarWidth`/`getBarColor` were unmapped too, so a
+  mod screen drew no durability bar, and the game's own bar ignored a mod item's: 75 classes in 25
+  jars override `isBarVisible` (Create's sequenced assembly shows its progress there, its backtank
+  its air; create-stuff-additions alone 18). Then the toolbox hands the equipped tool to the player
+  from its block entity's tick (`ToolboxBlockEntity.tickPlayers`: `player.getInventory().getItem(slot)`,
+  `setItem(slot, ...)`), where no player acts, and that tick's host had no player slots: the tool,
+  taken out of its compartment, went nowhere. And it syncs the player's toolbox data with their
+  client by the player's entity id (`PersistentDataPacket`), which a server's player object said was
+  0 and a client couldn't find itself by (`Entity.getPersistentData()` on null).
+  - compat `api_common`: `canFitInsideContainerItems` as NeoForge chains it:
+    `ItemStack.canFitInsideContainerItems()` asks the item's `canFitInsideContainerItems(stack)`
+    (`IItemExtension`), which asks vanilla's `canFitInsideContainerItems()`, each virtually (a
+    mod's override of either answers); vanilla's is true but for a shulker box's block item (any
+    colour, or a mod's `BlockItem` of a `ShulkerBoxBlock` subclass). `Mth.hsvToRgb` is shared as
+    `hsv_to_argb`.
+  - compat `components`: `ItemStack.isBarVisible`, `getBarWidth` and `getBarColor` ask the item
+    virtually; NeoForge's `Item` defaults: shown while damaged, `Math.round(13 - damage * 13 /
+    maxDamage)` pixels, `Mth.hsvToRgb(left / 3, 1, 1)` (green whole, yellow at half, red spent).
+    A mod's override calling `super` gets them.
+  - compat `jlang`: `Math.round(float)` and `(double)` as the JDK computes them, from the bits:
+    adding a half rounded the float just below a half up, and 2^23 + 1 to 2^23 + 2.
+  - translator: a client helper for the game's `native_item_bar` (API 60): for a mod's item whose
+    class overrides any of the three, its own answers where it overrides them, the game's bar (the
+    durability) for the rest (`glue::item_bar`); other items are never asked (the engine's
+    `ours(id)` first, then the class).
+  - Another player's inventory than the acting one's, by UUID. compat-core `Host`:
+    `player_selected_of(uuid)`, `player_slot_of`, `set_player_slot_of` and `update_player_slot_of`
+    (none by default: a host that can't reach that player); `MemoryHost` models them. compat
+    `hand::for_player(uuid)` puts the slot calls on that player's inventory while a call of theirs
+    runs: their records apart from the acting player's, flushed to them by UUID when the hook ends;
+    their selected slot (`getSelected`, `add` tries it first). `menus::inventory_call` and
+    `Player.getInventory` pass the inventory's player's UUID; where the host doesn't reach them,
+    the acting player's, as before.
+  - client: `native_player_selected_slot(uuid)`, `native_player_slot_stack(uuid, slot)` and
+    `native_set_player_slot_stack(uuid, slot, stack)` (API @API:slot_stack@), through
+    `native_as_player`, which now finds a guest on a server thread's game (no player of its own)
+    when no guest acts. translator: the block entity tick's host and the player events' hosts
+    (logged in, logged out, respawned) reach other players' slots through them.
+  - A server's player object's `getId()` is the game's id for that player now, found by UUID (it
+    was 0 until a hit told it); a client's level finds its own player by the id the server gave it
+    (`ClientLevel.getEntity`), and `LocalPlayer.getId()` says it: compat-core
+    `Host::client_player_id`, client `native_client_player_id()` (API @API:client_player@), told
+    by the client hooks' host.
+  - Tests: `api_common::tests::only_a_shulker_box_or_what_says_so_cannot_go_inside_an_item`,
+    `components::tests::a_stacks_bar_is_its_items_own_else_its_durability`,
+    `components::tests::the_game_draws_a_mod_items_own_bar`, `jlang::tests::math_round_is_the_jdks`,
+    `menus::tests::another_players_inventory_is_reached_by_their_uuid` (nobody acting: a stack put
+    whole, one shrunk in a hook, `add` onto their stack then their first empty slot, the host's
+    hand untouched; the acting player's own object still theirs),
+    `mod_entities::tests::a_client_finds_its_own_player_by_the_id_the_server_gave`. Compat 500,
+    translator 19, gameplay 70 (`game-tests.sh`; the hook catalog test,
+    `catalog_matches_hook_points`, checks the two fragments against the hook points).
+  - In game (`toolboxgame.sh`, survival, a brown toolbox, an iron pickaxe worn to 125 of 250):
+    shift-clicked on Create's own slot, the pickaxe went into the toolbox's first compartment, its
+    yellow bar drawn on Create's screen; with dirt in the selected hotbar slot, the toolbelt key
+    (left Alt) and `1` equipped it: the dirt went to slot 9 through Create's
+    `ItemReturnInvWrapper`, and the block entity's next tick put the pickaxe (damage 125) in hotbar
+    slot 0, the toolbox's items empty (its compartment keeps the pickaxe as its filter). The client
+    had the player's toolbox data: Create's toolbelt frame drawn on that slot, and no
+    `getPersistentData` on null. The game's bars, 7 of 13 pixels each: the pickaxe's yellow, and a
+    half-full copper backtank's own light grey (`create:banktank_air` 450), in the hotbar and the
+    inventory.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

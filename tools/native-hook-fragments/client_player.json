@@ -1,6 +1,6 @@
 {
   "hooks": [],
-  "rust_summary": "the window's player as a client command's source has them: name and operator level (`native_client_player`).",
-  "doc_summary": "`native_client_player()`: the window's player as a client command's source has them, their name and operator level (0 to 4, as the server last said it: `LocalPlayer.getPermissionLevel`); None outside a world. Translated bundles' client commands (`RegisterClientCommandsEvent`) run with it: @API:client_player@.",
+  "rust_summary": "the window's player as a client command's source has them: name and operator level (`native_client_player`); their entity id (`native_client_player_id`).",
+  "doc_summary": "`native_client_player()`: the window's player as a client command's source has them, their name and operator level (0 to 4, as the server last said it: `LocalPlayer.getPermissionLevel`); None outside a world. `native_client_player_id()`: their entity id (`LocalPlayer.getId()`; on a client of a server, the one the server gave them, by which its packets name them); None outside a world. Translated bundles' client commands (`RegisterClientCommandsEvent`) run with the first, and a server's packet names the player by the second: @API:client_player@.",
   "comments": []
 }

@@ -1554,6 +1554,40 @@ mod tests {
         (rt, ty)
     }
 
+    /// Create syncs a player's data with their client by the player's entity id
+    /// (`PersistentDataPacket`): a server's player object says the id the game gives that player
+    /// now, and a client's level finds its own player by that id (`ClientLevel.getEntity`), which
+    /// says it back; another id isn't theirs.
+    #[test]
+    fn a_client_finds_its_own_player_by_the_id_the_server_gave() {
+        const BY_ID: &str = "net/minecraft/world/level/Level.getEntity.(I)Lnet/minecraft/world/entity/Entity;";
+        const GET_ID: &str = "net/minecraft/world/entity/Entity.getId.()I";
+        let steve: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+        let (mut rt, _) = runtime();
+        let mut server = MemoryHost {
+            players: vec![(steve, [1.5, 64.0, 2.5])],
+            player_entity_ids: [(steve, 57)].into_iter().collect(),
+            ..MemoryHost::default()
+        };
+        let id = rt.with_host(&mut server, |rt| {
+            let p = crate::menus::server_player(rt, steve);
+            api::call(rt, GET_ID, &[p])
+        });
+        assert_eq!(id, V::I(57));
+
+        let (mut rt, _) = runtime();
+        rt.interned.insert("compat:client".into(), V::I(1));
+        let mut client = MemoryHost { client: true, client_player_id: Some(57), ..MemoryHost::default() };
+        rt.with_host(&mut client, |rt| {
+            let level = crate::glue::level(rt);
+            let me = api::call(rt, BY_ID, &[level, V::I(57)]);
+            assert_eq!(me, crate::network::local_player(rt));
+            assert_eq!(api::call(rt, GET_ID, &[me]), V::I(57));
+            assert_eq!(api::call(rt, BY_ID, &[level, V::I(58)]), V::NULL);
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `Level.getEntity(id)`, `ServerLevel.getEntity(uuid)` and `Level.getPlayerByUUID(uuid)`: a mod's
     /// own entity by its id and its UUID; a player by their entity id or UUID, carrying that id (so
     /// their hits and effects reach them, not the acting player); the game's other entities by their

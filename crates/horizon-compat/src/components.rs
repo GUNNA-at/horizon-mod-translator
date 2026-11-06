@@ -256,6 +256,89 @@ pub(crate) fn max_damage(rt: &Rt, stack: V) -> i32 {
     rt.host().and_then(|h| h.item_max_damage(&name)).map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX))
 }
 
+/// The small bar under an item: `Item.isBarVisible`, `getBarWidth` and `getBarColor`, each taking
+/// the stack (their keys on `Item`, and as a mod's class overrides them). 75 classes in 25 jars of
+/// the Create pack override `isBarVisible` (Create's sequenced assembly shows its progress there,
+/// its backtank its air).
+pub(crate) const BAR: [(&str, &str, &str); 3] = [
+    ("isBarVisible", "net/minecraft/world/item/Item.isBarVisible.(Lnet/minecraft/world/item/ItemStack;)Z", "isBarVisible.(Lnet/minecraft/world/item/ItemStack;)Z"),
+    ("getBarWidth", "net/minecraft/world/item/Item.getBarWidth.(Lnet/minecraft/world/item/ItemStack;)I", "getBarWidth.(Lnet/minecraft/world/item/ItemStack;)I"),
+    ("getBarColor", "net/minecraft/world/item/Item.getBarColor.(Lnet/minecraft/world/item/ItemStack;)I", "getBarColor.(Lnet/minecraft/world/item/ItemStack;)I"),
+];
+
+/// `item.isBarVisible(stack)` (`getBarWidth`, `getBarColor`: `name`), as `ItemStack`'s asks it,
+/// virtually: a mod item's override answers, else NeoForge's `Item`'s ([`default_bar`], here
+/// again).
+fn bar_virtually(rt: &mut Rt, name: &str, item: V, stack: V) -> V {
+    let Some(&(_, owner_key, key)) = BAR.iter().find(|(n, ..)| *n == name) else {
+        return V::I(0);
+    };
+    match rt.vcall {
+        Some(vcall) if item.r() != 0 => vcall(rt, owner_key, key, &[item, stack]),
+        _ => default_bar(rt, name, stack),
+    }
+}
+
+/// NeoForge's `Item.isBarVisible` (the stack is damaged), `getBarWidth` (13 pixels whole:
+/// `Math.round(13 - damage * 13 / maxDamage)`) and `getBarColor` (`Mth.hsvToRgb` of a third of
+/// the durability left: green whole, red spent), by `name`.
+pub(crate) fn default_bar(rt: &mut Rt, name: &str, stack: V) -> V {
+    let max = max_damage(rt, stack);
+    let damage = damage(rt, stack).clamp(0, max.max(0));
+    match name {
+        "isBarVisible" => V::I((max > 0 && damage > 0) as i32),
+        "getBarWidth" => V::I(crate::jlang::round_f32(13.0 - damage as f32 * 13.0 / max as f32)),
+        _ => {
+            let max = max as f32;
+            let left = ((max - damage as f32) / max).max(0.0);
+            V::I(crate::api_common::hsv_to_argb(left / 3.0, 1.0, 1.0, 0).unwrap_or(0))
+        }
+    }
+}
+
+/// Whether registered item `name` (a mod's) has a bar of its own: its class overrides
+/// `isBarVisible`, `getBarWidth` or `getBarColor`.
+pub(crate) fn own_bar(rt: &Rt, name: &str) -> bool {
+    let Some(overrides) = rt.overrides else {
+        return false;
+    };
+    let Some(&item) = rt.registered.get(&("item".to_owned(), name.to_owned())) else {
+        return false;
+    };
+    rt.str_of(item).is_none() && BAR.iter().any(|(_, _, key)| overrides(rt.class_of(item), key))
+}
+
+/// The bar the game draws under a mod's item ([`crate::glue::item_bar`]), as
+/// `GuiGraphics.renderItemDecorations` asks it: none unless `isBarVisible`, else `getBarWidth`
+/// pixels (of 13) in `getBarColor`. The item's own methods answer where its class overrides them,
+/// the game's bar (`given`: the durability, NeoForge's default) the rest.
+pub(crate) fn held_bar(rt: &mut Rt, held: crate::host::HandStack, given: Option<(i32, u32)>) -> Option<(i32, u32)> {
+    let item = rt.registered.get(&("item".to_owned(), held.item.clone())).copied()?;
+    let (overrides, vcall) = (rt.overrides?, rt.vcall?);
+    let stack = crate::hand::load(rt, Some(held));
+    let ask = |rt: &mut Rt, i: usize| -> Option<i32> {
+        let (name, owner_key, key) = BAR[i];
+        if !overrides(rt.class_of(item), key) {
+            return None;
+        }
+        let r = vcall(rt, owner_key, key, &[item, stack]).i();
+        rt.report_thrown(name);
+        Some(r)
+    };
+    if !ask(rt, 0).map_or(given.is_some(), |shown| shown != 0) {
+        return None;
+    }
+    let width = match ask(rt, 1) {
+        Some(w) => w,
+        None => given.map_or_else(|| default_bar(rt, "getBarWidth", stack).i(), |(w, _)| w),
+    };
+    let colour = match ask(rt, 2) {
+        Some(c) => c as u32,
+        None => given.map_or_else(|| default_bar(rt, "getBarColor", stack).i() as u32, |(_, c)| c),
+    };
+    Some((width.clamp(0, 13), colour & 0xFF_FFFF))
+}
+
 fn set_damage(rt: &mut Rt, stack: V, n: i32) {
     let empty = crate::api_common::get_static(rt, ITEM_STACK, "EMPTY").unwrap_or(V::NULL);
     if stack.r() != 0 && stack != empty {
@@ -934,7 +1017,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     let stack_method = matches!(
         name,
         "isComponentsPatchEmpty" | "getComponentsPatch" | "getDamageValue" | "setDamageValue" | "getMaxDamage" | "isDamageableItem" | "isDamaged" | "hurtAndBreak" | "hurtWithoutBreaking"
-    );
+    ) || BAR.iter().any(|(n, ..)| *n == name);
     let typed = desc.starts_with("(Lnet/minecraft/core/component/DataComponentType;") || desc.starts_with("(Ljava/util/function/Supplier;");
     let maps = matches!(owner, MAP | MAP_BUILDER | PATCH_BUILDER)
         || owner.ends_with("/PatchedDataComponentMap")
@@ -944,7 +1027,9 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         || matches!(name, "applyComponentsFromItemStack" | "setComponents" | "collectComponents" | "applyImplicitComponents" | "collectImplicitComponents");
     let stack_maps = matches!(name, "getComponents" | "applyComponents" | "applyComponentsAndValidate");
     let fluid_stack = owner == FLUID_STACK && (typed || matches!(name, "getComponents" | "getComponentsPatch" | "isComponentsPatchEmpty" | "applyComponents"));
-    matches!(owner, TYPE | BUILDER | CUSTOM_DATA) || maps || fluid_stack || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || stack_maps || typed))
+    // An item's own bar methods a mod's override hands to its super (`super.getBarColor(stack)`).
+    let item_bar = crate::api_common::is_item_class(owner) && BAR.iter().any(|(n, ..)| *n == name);
+    matches!(owner, TYPE | BUILDER | CUSTOM_DATA) || maps || fluid_stack || item_bar || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || stack_maps || typed))
 }
 
 pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -1120,6 +1205,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (ITEM_STACK, "getMaxDamage") => Some(V::I(max_damage(rt, a(0)))),
         (ITEM_STACK, "isDamageableItem") => Some(V::I((max_damage(rt, a(0)) > 0) as i32)),
         (ITEM_STACK, "isDamaged") => Some(V::I((max_damage(rt, a(0)) > 0 && damage(rt, a(0)) > 0) as i32)),
+        // The bar under an item, each part asking the stack's item.
+        (ITEM_STACK, "isBarVisible" | "getBarWidth" | "getBarColor") => {
+            let item = rt.get_field(a(0), "$item");
+            Some(bar_virtually(rt, name, item, a(0)))
+        }
+        (o, "isBarVisible" | "getBarWidth" | "getBarColor") if crate::api_common::is_item_class(o) => Some(default_bar(rt, name, a(1))),
         // `hurtAndBreak(amount, entity, slot)` and `(amount, level, entity, onBreak)`: worn by the
         // entity holding it.
         (ITEM_STACK, "hurtAndBreak") => {
@@ -1188,6 +1279,85 @@ mod tests {
             return api::call(rt, "net/minecraft/nbt/CompoundTag.putByte.(Ljava/lang/String;B)V", &[args[1], k, V::I(3)]);
         }
         api::call(rt, owner_key, args)
+    }
+
+    /// The test's item with a bar of its own (`test/Progress`, as Create's sequenced assembly):
+    /// always shown, 7 pixels, teal; every other call is the API's.
+    fn progress(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
+        if rt.class_of(args[0]) == "test/Progress" {
+            match key {
+                "isBarVisible.(Lnet/minecraft/world/item/ItemStack;)Z" => return V::I(1),
+                "getBarWidth.(Lnet/minecraft/world/item/ItemStack;)I" => return V::I(7),
+                "getBarColor.(Lnet/minecraft/world/item/ItemStack;)I" => return V::I(0x46_FFE0),
+                _ => {}
+            }
+        }
+        api::call(rt, owner_key, args)
+    }
+
+    /// A stack's bar is its item's: a mod item's own where its class has one; else NeoForge's,
+    /// shown while damaged, 7 of 13 pixels and yellow at half durability, green when whole.
+    #[test]
+    fn a_stacks_bar_is_its_items_own_else_its_durability() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(progress);
+        rt.supers.insert("test/Progress", "net/minecraft/world/item/Item");
+        let it = rt.new_object("test/Progress");
+        rt.registered.insert(("item".into(), "test:progress".into()), it);
+        let bar = |rt: &mut Rt, stack: V| {
+            let visible = api::call(rt, "net/minecraft/world/item/ItemStack.isBarVisible.()Z", &[stack]).i() != 0;
+            let width = api::call(rt, "net/minecraft/world/item/ItemStack.getBarWidth.()I", &[stack]).i();
+            let colour = api::call(rt, "net/minecraft/world/item/ItemStack.getBarColor.()I", &[stack]).i();
+            (visible, width, colour)
+        };
+        let pick = api_common::stack(&mut rt, "minecraft:iron_pickaxe", 1);
+        rt.put_field(pick, "$maxDamage", V::I(250));
+        assert_eq!(bar(&mut rt, pick), (false, 13, 0x00_FF00));
+        rt.put_field(pick, "$damage", V::I(125));
+        assert_eq!(bar(&mut rt, pick), (true, 7, 0xFF_FF00));
+        let made = api_common::stack(&mut rt, "test:progress", 1);
+        assert_eq!(bar(&mut rt, made), (true, 7, 0x46_FFE0));
+        // A mod's override asking its super gets NeoForge's.
+        let colour = api::call(&mut rt, "net/minecraft/world/item/Item.getBarColor.(Lnet/minecraft/world/item/ItemStack;)I", &[it, pick]);
+        assert_eq!(colour, V::I(0xFF_FF00));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The bar the game draws under a mod's item: the item's own parts where its class has them,
+    /// the game's bar for the rest; an item with none of its own isn't asked.
+    #[test]
+    fn the_game_draws_a_mod_items_own_bar() {
+        fn overrides(class: &str, key: &str) -> bool {
+            match class {
+                "test/Progress" => key.starts_with("isBarVisible.") || key.starts_with("getBarWidth.") || key.starts_with("getBarColor."),
+                "test/Tinted" => key.starts_with("getBarColor."),
+                _ => false,
+            }
+        }
+        fn tinted(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
+            if rt.class_of(args[0]) == "test/Tinted" && key.starts_with("getBarColor.") {
+                return V::I(0x12_3456);
+            }
+            progress(rt, owner_key, key, args)
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(tinted);
+        rt.overrides = Some(overrides);
+        for (class, name) in [("test/Progress", "test:progress"), ("test/Tinted", "test:tinted"), ("test/Plain", "test:plain")] {
+            rt.supers.insert(class, "net/minecraft/world/item/Item");
+            let it = rt.new_object(class);
+            rt.registered.insert(("item".into(), name.into()), it);
+        }
+        let held = |item: &str| crate::host::HandStack { item: item.into(), count: 1, damage: 0, max_damage: 0, components: Vec::new() };
+        assert!(own_bar(&rt, "test:progress") && own_bar(&rt, "test:tinted"));
+        assert!(!own_bar(&rt, "test:plain") && !own_bar(&rt, "minecraft:iron_pickaxe"));
+        assert_eq!(held_bar(&mut rt, held("test:progress"), None), Some((7, 0x46_FFE0)));
+        // Its own colour on the game's bar; no bar where the game shows none.
+        assert_eq!(held_bar(&mut rt, held("test:tinted"), Some((5, 0xFF_0000))), Some((5, 0x12_3456)));
+        assert_eq!(held_bar(&mut rt, held("test:tinted"), None), None);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A mod's custom data on a stack (`minecraft:custom_data`), as vanilla's: updated through a

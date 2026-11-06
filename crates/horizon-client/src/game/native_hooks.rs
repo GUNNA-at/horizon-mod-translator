@@ -5376,6 +5376,15 @@ impl Game<'_> {
         self.player.as_ref()?;
         Some((self.options.player_name(), self.ui.registries.permission))
     }
+    /// The window's player's entity id (`LocalPlayer.getId()`): on a client
+    /// of a server, the one the server gave them, by which its packets name
+    /// them (Create's `PersistentDataPacket` finds the player it syncs by
+    /// it, with `ClientLevel.getEntity`). None outside a world. API
+    /// @API:client_player@.
+    pub(super) fn native_client_player_id(&self) -> Option<i32> {
+        let p = self.player.as_ref()?;
+        Some(self.remote.as_ref().map_or(p.entity_id, |r| r.entity_id))
+    }
     /// The clock of the world this window shows, for client mods: its game
     /// time and time of day as the server last sent them
     /// (`ClientboundSetTimePacket`), advanced each tick between packets; none

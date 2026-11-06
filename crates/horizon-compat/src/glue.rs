@@ -1475,6 +1475,23 @@ pub fn tooltip(rt: &mut Rt, host: &mut dyn Host, held: crate::host::HandStack, l
     rt.with_host(host, |rt| crate::tooltips::tooltip(rt, held, lines, advanced))
 }
 
+/// `native_item_bar` (client): whether item `item` (a translated mod's) draws a bar of its own (its
+/// class overrides `isBarVisible`, `getBarWidth` or `getBarColor`); the game's stands for the rest,
+/// unasked.
+pub fn item_bar_own(rt: &mut Rt, item: &str) -> bool {
+    crate::components::own_bar(rt, item)
+}
+
+/// `native_item_bar` (client): the bar under a mod's item, wherever the game draws one: the item's
+/// own `isBarVisible`, `getBarWidth` and `getBarColor` where its class overrides them (Create's
+/// sequenced assembly shows its progress, its backtank its air), the game's bar (`given`) for the
+/// rest ([`crate::components::held_bar`]). None hides it.
+pub fn item_bar(rt: &mut Rt, host: &mut dyn Host, held: crate::host::HandStack, given: Option<(i32, u32)>) -> Option<(i32, u32)> {
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| crate::components::held_bar(rt, held, given))
+}
+
 /// `native_input_key` (client): `InputEvent.Key` for a key the window handled (`key.keyboard.g`, on
 /// any screen), with GLFW's action (release, press, repeat) and modifier bits
 /// ([`crate::input::key`]). `native_control_key` hands over the control socket's keys the same way.

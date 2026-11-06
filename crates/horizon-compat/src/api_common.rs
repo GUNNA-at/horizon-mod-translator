@@ -1190,8 +1190,41 @@ const STACK_GET: &str = "net/minecraft/world/item/ItemStack.get.(Lnet/minecraft/
 
 /// Vanilla's item classes (`Item`, `BlockItem`, `SwordItem`...), the owner a mod item's inherited
 /// calls carry.
-fn is_item_class(owner: &str) -> bool {
+pub(crate) fn is_item_class(owner: &str) -> bool {
     owner.strip_prefix("net/minecraft/world/item/").is_some_and(|n| n.ends_with("Item") && !n.contains('/'))
+}
+
+/// `item.canFitInsideContainerItems(stack)` (NeoForge's, with the stack) or vanilla's
+/// `item.canFitInsideContainerItems()` (without), called virtually: a mod item's override answers,
+/// else the default (here again).
+fn fits_virtually(rt: &mut Rt, item: V, stack: Option<V>) -> V {
+    const WITH_STACK: (&str, &str) = (
+        "net/minecraft/world/item/Item.canFitInsideContainerItems.(Lnet/minecraft/world/item/ItemStack;)Z",
+        "canFitInsideContainerItems.(Lnet/minecraft/world/item/ItemStack;)Z",
+    );
+    const PLAIN: (&str, &str) = ("net/minecraft/world/item/Item.canFitInsideContainerItems.()Z", "canFitInsideContainerItems.()Z");
+    let ((owner_key, key), args) = match stack {
+        Some(s) => (WITH_STACK, vec![item, s]),
+        None => (PLAIN, vec![item]),
+    };
+    match rt.vcall {
+        Some(vcall) => vcall(rt, owner_key, key, &args),
+        None => crate::api::call(rt, owner_key, &args),
+    }
+}
+
+/// Vanilla's `Item.canFitInsideContainerItems()`: true, but for a shulker box's item
+/// (`BlockItem`'s: its block a `ShulkerBoxBlock`, vanilla's 17 or a mod's subclass).
+fn fits_inside_container_items(rt: &Rt, item: V) -> bool {
+    // A vanilla item names its block (`minecraft:red_shulker_box`); a mod's `BlockItem` holds it.
+    let block = if rt.str_of(item).is_some() { item } else { rt.get_field(item, "$block") };
+    if block.r() == 0 {
+        return true;
+    }
+    match rt.str_of(block) {
+        Some(name) => !name.strip_prefix("minecraft:").is_some_and(|n| n == "shulker_box" || n.ends_with("_shulker_box")),
+        None => !rt.instance_of(block, "net/minecraft/world/level/block/ShulkerBoxBlock"),
+    }
 }
 
 /// `ItemStack.getItem`: air for an empty stack.
@@ -2126,8 +2159,15 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // NeoForge's data a mod keeps with the player, on its object.
         // A player's identity: their UUID (a server's player's own, else the one the host acts
         // for), their name as the game gave it at their login, and their profile of both.
-        // A server's player's entity id, as the game last told it (`damage.rs`); 0 before.
-        (o, "getId") if desc == "()I" && is_player(o) && rt.class_of(a(0)) == SERVER_PLAYER => V::I(rt.get_field(a(0), "$entityId").i()),
+        // A server's player's entity id: the game's now, by their UUID (Create names the player it
+        // syncs a client with so), else as the game last told it (`damage.rs`); 0 before. A
+        // client's own player's, as the server gave it.
+        (o, "getId") if desc == "()I" && is_player(o) && rt.class_of(a(0)) == SERVER_PLAYER => {
+            let uuid = crate::network::player_uuid(rt, a(0));
+            let now = uuid.and_then(|u| rt.host()?.player_entities().into_iter().find(|p| p.1 == u));
+            V::I(now.map_or_else(|| rt.get_field(a(0), "$entityId").i(), |p| p.0))
+        }
+        (o, "getId") if desc == "()I" && is_player(o) && rt.class_of(a(0)) == LOCAL_PLAYER => V::I(rt.host().and_then(|h| h.client_player_id()).unwrap_or(0)),
         // A player's type is `EntityType.PLAYER` (`BuiltInRegistries.ENTITY_TYPE.getKey` names it).
         (o, "getType") if desc == "()Lnet/minecraft/world/entity/EntityType;" && is_player(o) && is_player_class(rt.class_of(a(0))) => {
             crate::mod_entities::vanilla_type(rt, "minecraft:player")
@@ -3144,6 +3184,22 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let damaged = crate::components::max_damage(rt, a(0)) > 0 && crate::components::damage(rt, a(0)) > 0;
             V::I((limit > 1 && !damaged) as i32)
         }
+        // Whether the stack may go inside an item that holds items (a bundle, Create's toolbox,
+        // NeoForge's `ComponentItemHandler`): NeoForge's `IItemStackExtension` asks the item's
+        // `canFitInsideContainerItems(stack)`, which asks vanilla's `canFitInsideContainerItems()`;
+        // a mod item's override of either answers (Create's packages and minecart contraptions say
+        // no).
+        ("net/minecraft/world/item/ItemStack", "canFitInsideContainerItems") => {
+            let item = stack_item(rt, a(0));
+            fits_virtually(rt, item, Some(a(0)))
+        }
+        (_, "canFitInsideContainerItems") if is_item_class(owner) || owner == "net/neoforged/neoforge/common/extensions/IItemExtension" => {
+            if desc.starts_with("(Lnet/minecraft/world/item/ItemStack;)") {
+                fits_virtually(rt, a(0), None)
+            } else {
+                V::I(fits_inside_container_items(rt, a(0)) as i32)
+            }
+        }
         // What crafting with the stack's item leaves in the grid (NeoForge's stack-aware forms ask
         // the item the same).
         ("net/minecraft/world/item/ItemStack", "hasCraftingRemainingItem") => {
@@ -4006,30 +4062,38 @@ fn mth_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         ("fastInvSqrt", "(D)D") => V::D(mth_fast_inv_sqrt(d(0))),
         ("atan2", "(DD)D") => V::D(mth_atan2(d(0), d(1))),
         ("hsvToRgb", "(FFF)I") | ("hsvToArgb", "(FFFI)I") => {
-            let (h, sat, val) = (f(0), f(1), f(2));
             let alpha = if args.len() > 3 { i(3) } else { 0 };
-            let sector = ((h * 6.0) as i32) % 6;
-            let frac = h * 6.0 - sector as f32;
-            let p = val * (1.0 - sat);
-            let q = val * (1.0 - frac * sat);
-            let t = val * (1.0 - (1.0 - frac) * sat);
-            let (r, g, b) = match sector {
-                0 => (val, t, p),
-                1 => (q, val, p),
-                2 => (p, val, t),
-                3 => (p, q, val),
-                4 => (t, p, val),
-                5 => (val, p, q),
-                _ => {
+            match hsv_to_argb(f(0), f(1), f(2), alpha) {
+                Some(c) => V::I(c),
+                None => {
                     rt.throw_new("java/lang/RuntimeException");
-                    return Some(V::I(0));
+                    V::I(0)
                 }
-            };
-            let c = |x: f32| ((x * 255.0) as i32).max(0).min(255);
-            V::I((alpha & 0xFF) << 24 | (c(r) & 0xFF) << 16 | (c(g) & 0xFF) << 8 | (c(b) & 0xFF))
+            }
         }
         _ => return None,
     })
+}
+
+/// `Mth.hsvToArgb(hue, saturation, value, alpha)` (`hsvToRgb`: alpha 0); None where vanilla throws
+/// (a negative hue's sector).
+pub(crate) fn hsv_to_argb(h: f32, sat: f32, val: f32, alpha: i32) -> Option<i32> {
+    let sector = ((h * 6.0) as i32) % 6;
+    let frac = h * 6.0 - sector as f32;
+    let p = val * (1.0 - sat);
+    let q = val * (1.0 - frac * sat);
+    let t = val * (1.0 - (1.0 - frac) * sat);
+    let (r, g, b) = match sector {
+        0 => (val, t, p),
+        1 => (q, val, p),
+        2 => (p, val, t),
+        3 => (p, q, val),
+        4 => (t, p, val),
+        5 => (val, p, q),
+        _ => return None,
+    };
+    let c = |x: f32| ((x * 255.0) as i32).clamp(0, 255);
+    Some((alpha & 0xFF) << 24 | (c(r) & 0xFF) << 16 | (c(g) & 0xFF) << 8 | (c(b) & 0xFF))
 }
 
 /// `Entity.calculateViewVector(xRot, yRot)` of a look (`yaw`, `pitch` in degrees), with `Mth`'s table:
@@ -4541,6 +4605,44 @@ mod tests {
         assert_eq!((c(&mut rt, pack, &[v, resources]), c(&mut rt, pack, &[v, data])), (V::I(34), V::I(48)));
         let dv = c(&mut rt, "net/minecraft/WorldVersion.getDataVersion.()Lnet/minecraft/world/level/storage/DataVersion;", &[v]);
         assert_eq!(c(&mut rt, "net/minecraft/world/level/storage/DataVersion.getVersion.()I", &[dv]), V::I(3955));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Only a shulker box can't go inside an item that holds items: vanilla's (any colour) or a
+    /// mod's block item whose block is one. A mod item saying no (Create's package) is heard from
+    /// the stack's question, through NeoForge's stack-aware default.
+    #[test]
+    fn only_a_shulker_box_or_what_says_so_cannot_go_inside_an_item() {
+        use super::*;
+        fn package(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
+            if key == "canFitInsideContainerItems.()Z" && rt.class_of(args[0]) == "test/Package" {
+                return V::I(0);
+            }
+            crate::api::call(rt, owner_key, args)
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(package);
+        let fits = |rt: &mut Rt, name: &str| {
+            let s = stack(rt, name, 1);
+            crate::api::call(rt, "net/minecraft/world/item/ItemStack.canFitInsideContainerItems.()Z", &[s]) != V::I(0)
+        };
+        assert!(fits(&mut rt, "minecraft:iron_pickaxe"));
+        assert!(!fits(&mut rt, "minecraft:shulker_box"));
+        assert!(!fits(&mut rt, "minecraft:red_shulker_box"));
+        rt.supers.insert("test/Package", "net/minecraft/world/item/Item");
+        let package_item = rt.new_object("test/Package");
+        rt.registered.insert(("item".into(), "test:package".into()), package_item);
+        assert!(!fits(&mut rt, "test:package"));
+        rt.supers.insert("test/Crate", "net/minecraft/world/level/block/ShulkerBoxBlock");
+        rt.supers.insert("test/CrateItem", "net/minecraft/world/item/BlockItem");
+        let crate_block = rt.new_object("test/Crate");
+        let crate_item = rt.new_object("test/CrateItem");
+        rt.put_field(crate_item, "$block", crate_block);
+        rt.registered.insert(("item".into(), "test:crate".into()), crate_item);
+        assert!(!fits(&mut rt, "test:crate"));
+        let plain = crate::api::call(&mut rt, "net/minecraft/world/item/Item.canFitInsideContainerItems.()Z", &[crate_item]);
+        assert_eq!(plain, V::I(0));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
