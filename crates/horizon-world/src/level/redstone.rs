@@ -554,7 +554,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let direction = self.b.facing(state);
         let opposite_pos = rel(pos, direction.opposite());
         let block = self.b.block(state);
-        self.neighbor_changed_at(opposite_pos, block);
+        self.neighbor_changed_at(opposite_pos, block, pos);
         self.update_neighbors_at_except(opposite_pos, block, direction);
     }
     fn comparator_calculate_output(&self, pos: BlockPos, state: BlockStateId) -> i32 {
@@ -802,7 +802,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let direction = self.b.facing(state);
         let opposite = rel(pos, direction.opposite());
         let block = self.b.block(state);
-        self.neighbor_changed_at(opposite, block);
+        self.neighbor_changed_at(opposite, block, pos);
         self.update_neighbors_at_except(opposite, block, direction);
     }
     pub(crate) fn observer_tick(&mut self, pos: BlockPos, state: BlockStateId) {

@@ -1,0 +1,16 @@
+{
+  "hooks": [
+    {
+      "name": "block_neighbor_changed",
+      "target": "horizon_client::game::native_hooks::GameLevel<'_>::native_block_neighbor_changed",
+      "neoforge": "BlockBehaviour.neighborChanged",
+      "side": "server",
+      "cancellable": false
+    }
+  ],
+  "rust_summary": "a mod's block hearing a neighbour change on the server, where it may change the level (`native_block_neighbor_changed`: 1.21.1's\n`BlockBehaviour.neighborChanged`, with where the update comes from).",
+  "doc_summary": "`native_block_neighbor_changed(ticks, dimension, pos, state, changed, from, moved, handled)` runs on the server when a mod's block (one outside `minecraft:`) hears that a neighbour changed, in the level's own order of neighbour updates, after `native_neighbor_changed` observed it: 1.21.1's `BlockBehaviour.neighborChanged(state, level, pos, changed, from, moved)`, `changed` naming the block that changed and `from` where the update comes from (the block that changed, or the one passing the update on, as 1.21.1 hands it: 26.3 dropped it). Unlike the observation, it may change blocks and schedule ticks through `ticks`, as a lamp, a door or a redstone-driven machine does when the signal beside it changes; updates its changes cause run after it, as vanilla queues them. Set `handled` to skip what the block's template would do. Bundles need \"hooks\": @API:block_neighbor_changed@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_hooks.rs"
+  ]
+}

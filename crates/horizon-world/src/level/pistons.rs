@@ -202,7 +202,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             };
             self.set_block_and_update(pos, new);
             let block = b.block(new);
-            self.neighbor_changed_at(pos, block);
+            self.neighbor_changed_at(pos, block, pos);
         }
     }
     /// `PistonMovingBlockEntity.tick`. A piston that is still moving reports
@@ -248,7 +248,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     }
                     self.set_block(pos, new, 67);
                     let block = b.block(new);
-                    self.neighbor_changed_at(pos, block);
+                    self.neighbor_changed_at(pos, block, pos);
                 }
             }
         } else {

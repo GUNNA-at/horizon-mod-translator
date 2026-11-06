@@ -10,16 +10,32 @@ use crate::registry::BlockStateId;
 use horizon_core::{geometry::Direction, position::BlockPos, random::RandomSource};
 
 impl<L: LevelAccess + ?Sized> Sim<'_, L> {
-    /// `BlockState.handleNeighborChanged`.
+    /// `BlockState.handleNeighborChanged`. `from` is where the update comes
+    /// from, which 1.21.1's `neighborChanged` takes (a mod's block hears it
+    /// through [`LevelAccess::before_neighbor_changed`]).
     pub fn neighbor_changed(
         &mut self,
         state: BlockStateId,
         pos: BlockPos,
         changed: BlockId,
+        from: BlockPos,
         moved: bool,
     ) {
         self.level
             .observe_neighbor_changed(pos, state, changed, moved);
+        let mut handled = false;
+        self.level.before_neighbor_changed(
+            self.ticks,
+            pos,
+            state,
+            changed,
+            from,
+            moved,
+            &mut handled,
+        );
+        if handled {
+            return;
+        }
         let b = self.b;
         let block = b.block(state);
         let chain = &b.data(state).chain;
@@ -78,7 +94,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 Class::PistonHead => {
                     if self.can_survive(state, pos) {
                         let base = rel(pos, b.facing(state).opposite());
-                        self.neighbor_changed_at(base, changed);
+                        self.neighbor_changed_at(base, changed, from);
                     }
                 }
                 Class::RedstoneLamp => self.lamp_neighbor_changed(pos, state),
@@ -672,7 +688,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         } else {
             let water = b.default_of(b.named.water);
             self.set_block_and_update(pos, water);
-            self.neighbor_changed_at(pos, b.named.water);
+            self.neighbor_changed_at(pos, b.named.water, pos);
             self.game_event_state(pos, "minecraft:block_destroy", state);
         }
     }

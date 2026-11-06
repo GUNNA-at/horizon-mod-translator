@@ -353,6 +353,25 @@ pub trait LevelAccess {
         _moved: bool,
     ) {
     }
+    /// `BlockState.handleNeighborChanged` for `state` at `pos`, after the
+    /// observers and before the block handles it: 1.21.1's
+    /// `neighborChanged(state, level, pos, changed, from, moved)`, `from` the
+    /// position the update comes from. The level may run a mod block's own
+    /// `neighborChanged`: change blocks (`Behaviours::set_block` with
+    /// `ticks`) and schedule ticks as it would. Setting `handled` skips the
+    /// block's own behaviour. The default does nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn before_neighbor_changed(
+        &mut self,
+        _ticks: &mut Ticks,
+        _pos: BlockPos,
+        _state: BlockStateId,
+        _changed: BlockId,
+        _from: BlockPos,
+        _moved: bool,
+        _handled: &mut bool,
+    ) {
+    }
     /// `BlockState.randomTick` from `ServerLevel.tickChunk`, before the block
     /// handles it. The level may change the block (`Behaviours::set_block`
     /// with `ticks`); setting `handled` skips the block's own random tick. A
@@ -1049,7 +1068,8 @@ impl Behaviours {
     ) {
         let mut sim = self.sim(level, ticks);
         let state = sim.state(pos);
-        sim.neighbor_changed(state, pos, changed, false);
+        // 26.3's call names no source: the block's own position stands in.
+        sim.neighbor_changed(state, pos, changed, pos, false);
     }
     /// Entity collision with a block (`entityInside`) for the entity-sensing
     /// blocks: pressure plates, tripwires and buttons hit by arrows are
@@ -1151,6 +1171,24 @@ impl Behaviours {
         pos: BlockPos,
     ) -> i32 {
         self.sim(level, ticks).best_neighbor_signal(pos)
+    }
+    /// The signal the block at `pos` sends back along `direction`, the way
+    /// from the block asking to it (`SignalGetter.getSignal`), or with
+    /// `direct` only its strong signal (`getDirectSignal`).
+    pub fn signal<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        ticks: &mut Ticks,
+        pos: BlockPos,
+        direction: Direction,
+        direct: bool,
+    ) -> i32 {
+        let sim = self.sim(level, ticks);
+        if direct {
+            sim.direct_signal(pos, direction)
+        } else {
+            sim.signal(pos, direction)
+        }
     }
     /// `BlockState.onProjectileHit` of a target block (`TargetBlock`) hit by
     /// a projectile at `location` on the face with normal `face`; `arrow`

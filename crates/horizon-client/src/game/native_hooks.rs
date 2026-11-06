@@ -584,6 +584,31 @@ impl GameLevel<'_> {
         let _ = (ticks, dimension, pos, state, handled);
     }
 
+    /// An authoritative server delivers `neighborChanged` to a mod's block
+    /// `state` at `pos`, after `native_neighbor_changed` observed it: 1.21.1's
+    /// `BlockBehaviour.neighborChanged(state, level, pos, changed, from,
+    /// moved)`, `changed` naming the block that changed
+    /// (`minecraft:redstone_block`), `from` where the update comes from,
+    /// `moved` whether a piston moved it. Only blocks outside `minecraft:`
+    /// hear it. Change blocks and schedule ticks with `ticks`, as the block's
+    /// own `neighborChanged` would, and set `handled` to skip what its
+    /// template block would do. API @API:block_neighbor_changed@.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn native_block_neighbor_changed(
+        &mut self,
+        ticks: &mut Ticks,
+        dimension: LevelDimension,
+        pos: BlockPos,
+        state: BlockStateId,
+        changed: &str,
+        from: BlockPos,
+        moved: bool,
+        handled: &mut bool,
+    ) {
+        let _ = (ticks, dimension, pos, state, changed, from, moved, handled);
+    }
+
     /// A block is about to take the state it is placed in
     /// (`Block.getStateForPlacement(BlockPlaceContext)`), `state` the block's
     /// own default state. Answer only for your blocks: put the state you want
@@ -4125,6 +4150,43 @@ impl GameLevel<'_> {
         let b = self.behaviours;
         b.best_neighbor_signal(self, ticks, BlockPos::new(pos[0], pos[1], pos[2]))
     }
+    /// The redstone signal the block at `pos` sends back along `direction`
+    /// (`Direction`'s data value: the way from the block asking to `pos`),
+    /// 0 to 15, as `Game::native_signal` reads it elsewhere
+    /// (`SignalGetter.getSignal`, or with `direct` only its strong signal,
+    /// `getDirectSignal`). `ticks` is the hook's. 0 where this level isn't the
+    /// server's. API @API:native_signal@.
+    pub(super) fn native_signal_here(
+        &mut self,
+        ticks: &mut Ticks,
+        pos: [i32; 3],
+        direction: u8,
+        direct: bool,
+    ) -> i32 {
+        let Some(&direction) = Direction::ALL.get(usize::from(direction)) else {
+            return 0;
+        };
+        if !self.native_authoritative {
+            return 0;
+        }
+        let b = self.behaviours;
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        b.signal(self, ticks, at, direction, direct)
+    }
+    /// [`Game::native_block_entity_sync`] from a level hook (`tick_block`,
+    /// `block_neighbor_changed`): players are sent the block at `pos` and its
+    /// block entity's update tag again, with the level's other block changes
+    /// (a nixie tube's new number, `Level.sendBlockUpdated` in its tick).
+    /// Nothing happens for an unloaded block or where this level isn't the
+    /// server's. API @API:native_block_entity_sync_here@.
+    pub(super) fn native_block_entity_sync_here(&mut self, pos: [i32; 3]) {
+        if !self.native_authoritative || !self.world.loaded(pos[0], pos[2]) {
+            return;
+        }
+        if let Some(log) = self.world.block_log.as_mut() {
+            log.push((pos[0], pos[1], pos[2]));
+        }
+    }
     /// Whether block `block` (`minecraft:oak_leaves`) is in block tag `tag`
     /// (`minecraft:leaves`, no `#`), as the loaded tags hold it: translated
     /// Java mods' `BlockState.is(TagKey)`. False for an unknown tag. API 81.
@@ -4418,6 +4480,30 @@ impl Game<'_> {
         }
         let at = BlockPos::new(pos[0], pos[1], pos[2]);
         self.with_level(|b, level, ticks| b.best_neighbor_signal(level, ticks, at))
+    }
+    /// The redstone signal the block at `pos` sends back along `direction`
+    /// (`Direction`'s data value: the way from the block asking to `pos`),
+    /// 0 to 15, in the level in place, `dimension`: `SignalGetter.getSignal`,
+    /// what a lamp or a nixie tube reads of each neighbour, or with `direct`
+    /// only its strong signal (`getDirectSignal`). 0 on a client's copy of the
+    /// world and for another dimension. API @API:native_signal@.
+    pub(super) fn native_signal(
+        &mut self,
+        dimension: &str,
+        pos: [i32; 3],
+        direction: u8,
+        direct: bool,
+    ) -> i32 {
+        let Some(&direction) = Direction::ALL.get(usize::from(direction)) else {
+            return 0;
+        };
+        if (self.serving.is_none() && self.options.dedicated.is_none())
+            || dimension != self.dim.id()
+        {
+            return 0;
+        }
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        self.with_level(|b, level, ticks| b.signal(level, ticks, at, direction, direct))
     }
     /// Schedules a tick of `block` (a block name) at `pos` in the level in
     /// place in `delay` game ticks (`Level.scheduleTick(pos, block, delay)`,

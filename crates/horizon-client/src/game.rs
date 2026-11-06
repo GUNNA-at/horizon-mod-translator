@@ -1170,6 +1170,26 @@ impl LevelAccess for GameLevel<'_> {
             self.native_neighbor_changed(self.dimension, pos, state, changed, moved);
         }
     }
+    fn before_neighbor_changed(
+        &mut self,
+        ticks: &mut Ticks,
+        pos: BlockPos,
+        state: BlockStateId,
+        changed: horizon_world::level::BlockId,
+        from: BlockPos,
+        moved: bool,
+        handled: &mut bool,
+    ) {
+        // A mod's block runs its own `neighborChanged`; vanilla's are the library's.
+        let b = self.behaviours;
+        if self.native_authoritative && !b.table.name(state).starts_with("minecraft:") {
+            let changed = &b.table.info(changed).name;
+            let dimension = self.dimension;
+            self.native_block_neighbor_changed(
+                ticks, dimension, pos, state, changed, from, moved, handled,
+            );
+        }
+    }
     fn allow_spread(
         &self,
         kind: horizon_world::level::Spread,

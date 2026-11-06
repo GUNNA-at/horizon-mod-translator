@@ -530,6 +530,13 @@ pub trait Host {
     fn neighbor_signal(&mut self, _pos: [i32; 3]) -> i32 {
         0
     }
+    /// The redstone signal the block at `pos` sends back along `direction` (`Direction`'s data
+    /// value: the way from the block asking to `pos`), 0 to 15: `SignalGetter.getSignal`, or with
+    /// `direct` only its strong signal (`getDirectSignal`). 0 where the world isn't the
+    /// authoritative server's.
+    fn signal(&mut self, _pos: [i32; 3], _direction: u8, _direct: bool) -> i32 {
+        0
+    }
     /// Schedules a tick of `block` (a block name) at `pos` in `delay` game ticks
     /// (`Level.scheduleTick`); one already queued there stays. False where nothing ticks blocks
     /// (a client, an unknown block, a position not loaded).
@@ -1611,6 +1618,10 @@ pub struct MemoryHost {
     pub weather: (f32, f32),
     /// The redstone signal reaching each position from its neighbours; unset ones get none.
     pub signals: HashMap<[i32; 3], i32>,
+    /// The redstone signal each position sends back along a direction (the way from the block
+    /// asking to it, `Direction`'s data value): its signal (`getSignal`) and its strong signal
+    /// (`getDirectSignal`). Unset ones send none.
+    pub sent_signals: HashMap<([i32; 3], u8), (i32, i32)>,
     /// Block ticks scheduled, in order: where, which block, in how many ticks.
     pub scheduled: Vec<([i32; 3], String, i32)>,
     /// Resource files by path ([`Host::resource`]).
@@ -1664,6 +1675,10 @@ impl Host for MemoryHost {
     }
     fn neighbor_signal(&mut self, pos: [i32; 3]) -> i32 {
         if self.client { 0 } else { self.signals.get(&pos).copied().unwrap_or(0) }
+    }
+    fn signal(&mut self, pos: [i32; 3], direction: u8, direct: bool) -> i32 {
+        let sent = if self.client { None } else { self.sent_signals.get(&(pos, direction)) };
+        sent.map_or(0, |&(weak, strong)| if direct { strong } else { weak })
     }
     fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {
         if self.client {

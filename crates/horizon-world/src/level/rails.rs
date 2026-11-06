@@ -327,7 +327,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let state = self.rail_update_dir(pos, state, true);
         if !self.b.data(state).is(Class::Rail) {
             let block = self.b.block(state);
-            self.neighbor_changed_full(state, pos, block, moved);
+            self.neighbor_changed_full(state, pos, block, pos, moved);
         }
         state
     }
@@ -539,7 +539,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             let rail = self.rail_new(pos, next);
             for connection in rail.connections {
                 let at = self.state(connection);
-                self.neighbor_changed_full(at, connection, b.block(at), false);
+                self.neighbor_changed_full(at, connection, b.block(at), pos, false);
             }
             self.update_neighbors_at(pos, block);
             self.update_neighbors_at(below(pos), block);

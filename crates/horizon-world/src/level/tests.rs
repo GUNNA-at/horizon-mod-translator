@@ -398,12 +398,107 @@ fn neighbor_observation_follows_dispatch_order() {
         assert_eq!(*event, (BlockPos::new(x, y, z), b.air(), changed, false));
     }
     drop(actual);
+    let (pos, from) = (BlockPos::new(3, 4, 5), BlockPos::new(3, 4, 6));
     b.sim(&mut level, &mut ticks)
-        .neighbor_changed(b.air(), BlockPos::new(3, 4, 5), changed, true);
+        .neighbor_changed(b.air(), pos, changed, from, true);
     assert_eq!(
         level.seen.borrow().last(),
-        Some(&(BlockPos::new(3, 4, 5), b.air(), changed, true))
+        Some(&(pos, b.air(), changed, true))
     );
+}
+
+#[test]
+fn neighbor_changed_hook_hears_where_updates_come_from_and_can_handle_them() {
+    struct Hooked<'b> {
+        inner: TestLevel,
+        b: &'b Behaviours,
+        seen: Vec<(BlockPos, BlockPos)>,
+        /// Where the hook handles the update, placing `place` above it first.
+        handle_at: Option<BlockPos>,
+        place: Option<BlockStateId>,
+    }
+    impl LevelAccess for Hooked<'_> {
+        fn block_state(&self, pos: BlockPos) -> BlockStateId {
+            self.inner.block_state(pos)
+        }
+        fn set_raw(&mut self, pos: BlockPos, state: BlockStateId) -> Option<BlockStateId> {
+            self.inner.set_raw(pos, state)
+        }
+        fn is_loaded(&self, pos: BlockPos) -> bool {
+            self.inner.is_loaded(pos)
+        }
+        fn random(&mut self) -> &mut LegacyRandom {
+            self.inner.random()
+        }
+        fn game_time(&self) -> i64 {
+            self.inner.game_time()
+        }
+        fn before_neighbor_changed(
+            &mut self,
+            ticks: &mut Ticks,
+            pos: BlockPos,
+            state: BlockStateId,
+            _changed: BlockId,
+            from: BlockPos,
+            _moved: bool,
+            handled: &mut bool,
+        ) {
+            assert_eq!(self.block_state(pos), state);
+            self.seen.push((pos, from));
+            if self.handle_at == Some(pos) {
+                if let Some(place) = self.place.take() {
+                    let b = self.b;
+                    let up = BlockPos::new(pos.x, pos.y + 1, pos.z);
+                    assert!(b.set_block(self, ticks, up, place, flags::UPDATE_ALL));
+                }
+                *handled = true;
+            }
+        }
+    }
+    let Some(f) = fixture() else { return };
+    let b = &f.behaviours;
+    let block = |name: &str| f.registry.default_state(name).unwrap();
+    let (lamp, power, stone) = (
+        BlockPos::new(1, 0, 0),
+        BlockPos::new(2, 0, 0),
+        BlockPos::new(1, 1, 0),
+    );
+    let mut level = Hooked {
+        inner: TestLevel::new(b),
+        b,
+        seen: Vec::new(),
+        handle_at: Some(lamp),
+        place: Some(block("minecraft:stone")),
+    };
+    let mut ticks = Ticks::new(0);
+    level.set_raw(lamp, block("minecraft:redstone_lamp"));
+    let redstone = block("minecraft:redstone_block");
+    assert!(b.set_block(&mut level, &mut ticks, power, redstone, flags::UPDATE_ALL));
+    // The six around the redstone block hear it from there (west first:
+    // `NeighborUpdater.UPDATE_ORDER`); the stone the hook places at the lamp
+    // tells its own six, from where it is, before the rest of the first six.
+    let around = |at: BlockPos| {
+        [
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+        ]
+        .map(|(x, y, z)| (BlockPos::new(at.x + x, at.y + y, at.z + z), at))
+    };
+    let (first, second) = (around(power), around(stone));
+    let expected: Vec<_> = [&first[..1], &second[..], &first[1..]].concat();
+    assert_eq!(level.seen, expected);
+    assert_eq!(level.block_state(stone), block("minecraft:stone"));
+    // Handled, the lamp didn't light, though the redstone block powers it.
+    let lit = |level: &Hooked| b.table.bool(level.block_state(lamp), b.props.lit);
+    assert!(!lit(&level));
+    // Left to itself, it lights.
+    level.handle_at = None;
+    b.update_neighbors_at(&mut level, &mut ticks, power, b.block(redstone));
+    assert!(lit(&level));
 }
 
 #[test]

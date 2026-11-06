@@ -61,11 +61,13 @@ enum Update {
     Simple {
         pos: BlockPos,
         block: BlockId,
+        from: BlockPos,
     },
     Full {
         state: BlockStateId,
         pos: BlockPos,
         block: BlockId,
+        from: BlockPos,
         moved: bool,
     },
     Multi {
@@ -89,6 +91,7 @@ enum Step {
         state: Option<BlockStateId>,
         pos: BlockPos,
         block: BlockId,
+        from: BlockPos,
         moved: bool,
     },
 }
@@ -122,11 +125,12 @@ impl Update {
                 },
                 false,
             ),
-            Self::Simple { pos, block } => (
+            Self::Simple { pos, block, from } => (
                 Step::Neighbor {
                     state: None,
                     pos,
                     block,
+                    from,
                     moved: false,
                 },
                 false,
@@ -135,12 +139,14 @@ impl Update {
                 state,
                 pos,
                 block,
+                from,
                 moved,
             } => (
                 Step::Neighbor {
                     state: Some(state),
                     pos,
                     block,
+                    from,
                     moved,
                 },
                 false,
@@ -161,6 +167,7 @@ impl Update {
                         state: None,
                         pos: rel(source, direction),
                         block,
+                        from: source,
                         moved: false,
                     },
                     *index < UPDATE_ORDER.len(),
@@ -480,20 +487,24 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             index,
         });
     }
-    pub fn neighbor_changed_at(&mut self, pos: BlockPos, block: BlockId) {
-        self.add_and_run(Update::Simple { pos, block });
+    /// `Level.neighborChanged(pos, block, fromPos)`: `from` is where the update
+    /// comes from (1.21.1 hands it to `neighborChanged`; 26.3 dropped it).
+    pub fn neighbor_changed_at(&mut self, pos: BlockPos, block: BlockId, from: BlockPos) {
+        self.add_and_run(Update::Simple { pos, block, from });
     }
     pub fn neighbor_changed_full(
         &mut self,
         state: BlockStateId,
         pos: BlockPos,
         block: BlockId,
+        from: BlockPos,
         moved: bool,
     ) {
         self.add_and_run(Update::Full {
             state,
             pos,
             block,
+            from,
             moved,
         });
     }
@@ -580,10 +591,11 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 state,
                 pos,
                 block,
+                from,
                 moved,
             } => {
                 let state = state.unwrap_or_else(|| self.state(pos));
-                self.neighbor_changed(state, pos, block, moved);
+                self.neighbor_changed(state, pos, block, from, moved);
             }
         }
     }
@@ -596,12 +608,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
             let mut state = self.state(relative);
             if self.b.table.is(state, self.b.named.comparator) {
-                self.neighbor_changed_full(state, relative, block, false);
+                self.neighbor_changed_full(state, relative, block, pos, false);
             } else if self.is_redstone_conductor(state, relative) {
                 relative = rel(relative, direction);
                 state = self.state(relative);
                 if self.b.table.is(state, self.b.named.comparator) {
-                    self.neighbor_changed_full(state, relative, block, false);
+                    self.neighbor_changed_full(state, relative, block, pos, false);
                 }
             }
         }

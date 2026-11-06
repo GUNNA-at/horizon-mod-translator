@@ -5864,6 +5864,66 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     aimed at its back, its generator stats. `Font.getFontSet`, `whiteGlyph` and `renderType` are
     gone from the unmapped calls; `Level.getSignal(BlockPos, Direction)` is still there, so the
     tube shows 0 beside the redstone block, not 15 (next).
+- [x] 2026-11-07 Part 76: redstone reaches mods' blocks: the signal a block sends one way, and a
+  mod's block hearing its neighbours change. Only the neighbour queries were mapped
+  (`hasNeighborSignal`, `getBestNeighborSignal`); `Level.getSignal(BlockPos, Direction)` was not:
+  14 jars, 29 calls (Create 5: a nixie tube shows the strongest signal around it,
+  `NixieTubeBlock.getPower`, as its redstone link does; Create Aeronautics 4, Create Propulsion 4,
+  Aeroworks 3, Tilting Control 2, Create Big Cannons 2 and 3 more through `ServerLevel`,
+  Electroenergetics 2, and ExtendedAE, Jade, Mekanism, SecurityCraft and Ars Nouveau 1 each), nor
+  `hasSignal` (7 jars, 8 calls), `getDirectSignal` (3, 3) or `getDirectSignalTo` (2, 2: Create 1).
+  Mapped, the tube still showed 0 beside a redstone block: it reads the signal when it hears a
+  neighbour change (`neighborChanged` schedules its tick), and no mod's block ever heard one. The
+  game had only an observation hook (`native_neighbor_changed`, which can't change the level), and
+  bundles wired none: `glue::neighbor_changed` was never called.
+  - world: `Behaviours::signal(level, ticks, pos, direction, direct)`, the signal the block at
+    `pos` sends back along `direction` (the redstone simulation's `signal`, which takes a
+    conductor's strongest strong signal in, or `direct_signal`). Neighbour updates carry where
+    they come from, as 1.21.1's `neighborChanged(state, level, pos, changed, from, moved)` takes
+    it and 26.3 dropped it: the block that changed for the six `updateNeighborsAt` tells, the
+    diode or observer for the block in front of it, the comparator's source, the detector rail
+    for its connections, the cactus for the block above it, the block itself for a piston's or
+    melting ice's own update, and a piston head passes its own on to its base.
+    `LevelAccess::before_neighbor_changed(ticks, pos, state, changed, from, moved, handled)` runs
+    after the observers, in the level's order of updates; the level may change blocks and
+    schedule ticks there, and `handled` skips the block's own behaviour.
+  - compat-core: `Host::signal(pos, direction, direct)`, `direction` as `Direction`'s data value,
+    the way from the block asking to `pos` (0 by default); `MemoryHost.sent_signals` answers it,
+    0 on a client.
+  - compat `level_env`: `getSignal`, `hasSignal` and `getDirectSignal` ask the host;
+    `getDirectSignalTo` is the strongest strong signal the six neighbours send the block, in
+    vanilla's order (down, up, north, south, west, east), done at 15 (`SignalGetter`).
+  - client: `native_signal(dimension, pos, direction, direct)` and
+    `GameLevel::native_signal_here(ticks, pos, direction, direct)` for level hooks (API
+    @API:native_signal@): the server's world's answer, 0 on a client and for another dimension.
+    A new hook, `GameLevel::native_block_neighbor_changed(ticks, dimension, pos, state, changed,
+    from, moved, handled)` (API @API:block_neighbor_changed@): a mod's block (outside
+    `minecraft:`) hears a neighbour change on the server where it may change the level. And
+    `GameLevel::native_block_entity_sync_here(pos)` (API @API:native_block_entity_sync_here@):
+    from a level hook, players are sent the block and its block entity's update tag again, with
+    the level's other block changes.
+  - translator: both hosts answer `signal` (level hooks through `native_signal_here`, other code
+    through `native_signal` in the player's dimension); bundles inject `block_neighbor_changed`,
+    which runs the block's own `neighborChanged` (`glue::neighbor_changed`, with `fromPos`) and
+    marks it handled, for blocks whose classes override it. A level hook's host passes
+    `block_changed` on (`native_block_entity_sync_here`): a block entity's data changed in a
+    scheduled tick (the tube's `sendBlockUpdated`) went nowhere before, so the server held 15 while
+    players saw 0.
+  - Tests: `level_env::tests::what_a_block_sends_one_way_comes_from_the_world` (a redstone block's
+    weak signal one way and nothing the other ways, its strong signal 0; a lever's strong signal
+    reaching the block under it through `getDirectSignalTo`; `hasSignal`; all 0 on a client; no
+    unmapped call), `level::tests::neighbor_changed_hook_hears_where_updates_come_from_and_can_handle_them`
+    (a redstone block placed beside a lamp: the six around it hear it from it, west first; the
+    stone the hook places above the lamp tells its own six from where it is before the rest of
+    the first six; the handled lamp stays dark though powered, and lights when left to itself).
+    Compat 505, translator 19, world 295, gameplay 70 (`catalog_matches_hook_points` checks the
+    new fragments).
+  - In game (`p76round.sh`): the nixie tube beside a redstone block holds `RedstoneStrength` 15,
+    the one beside the last of three redstone dust from another redstone block 13 (the dust 15,
+    14 and 13, as vanilla's). Players see the digits: from the west, where Create draws the tubes'
+    back (each digit readable, the pair in reverse order), "5 1" and "3 1". Before, 0 on the
+    server, and once the server had 15, "0 0" on the client. No throws; `Level.getSignal` is gone
+    from the unmapped calls.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

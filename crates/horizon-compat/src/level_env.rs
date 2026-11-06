@@ -1,12 +1,16 @@
 //! What a level answers about a block's surroundings, from the host's world: light, the time of
 //! day and the sky, the weather, redstone reaching a block, and its scheduled ticks
 //! (`Level.getBrightness`, `getSkyDarken`, `isDay`, `getRainLevel`, `hasNeighborSignal`,
-//! `scheduleTick`...). A solar panel, a lamp, a clutch or a redstone-driven machine reads these.
-//! The sky follows 1.21.1's formulas (`DimensionType.timeOfDay`, `Level.updateSkyBrightness`).
+//! `getSignal`, `scheduleTick`...). A solar panel, a lamp, a clutch or a redstone-driven machine
+//! reads these. The sky follows 1.21.1's formulas (`DimensionType.timeOfDay`,
+//! `Level.updateSkyBrightness`).
 use crate::{Rt, V};
 
 pub(crate) const LIGHT_LAYER: &str = "net/minecraft/world/level/LightLayer";
 const LEVEL_TICKS: &str = "net/minecraft/world/ticks/LevelTicks";
+/// A block's neighbour each way, by `Direction`'s data value (down, up, north, south, west, east),
+/// the order `SignalGetter` asks them in.
+const STEPS: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
 
 /// `Mth.cos`: 1.21.1 reads a table of 65536 sines.
 fn mth_cos(f: f32) -> f32 {
@@ -100,6 +104,28 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
         ("getBestNeighborSignal", _) => {
             let p = pos(rt, 1);
             V::I(rt.host_mut().map_or(0, |h| h.neighbor_signal(p)).clamp(0, 15))
+        }
+        // `getSignal(pos, direction)`: what the block at `pos` sends back along `direction` (the
+        // way from the block asking to it), a nixie tube's or a lamp's input; `hasSignal`, whether
+        // it sends any; `getDirectSignal`, its strong signal alone.
+        ("getSignal" | "hasSignal" | "getDirectSignal", "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)I" | "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z") => {
+            let (p, d) = (pos(rt, 1), crate::api_common::direction_ordinal(rt, a(2)));
+            let direct = name == "getDirectSignal";
+            let signal = rt.host_mut().map_or(0, |h| h.signal(p, d, direct)).clamp(0, 15);
+            V::I(if name == "hasSignal" { (signal > 0) as i32 } else { signal })
+        }
+        // `getDirectSignalTo(pos)`: the strongest strong signal its neighbours send into it.
+        ("getDirectSignalTo", "(Lnet/minecraft/core/BlockPos;)I") => {
+            let p = pos(rt, 1);
+            let mut best = 0;
+            for (d, step) in STEPS.iter().enumerate() {
+                let n = [p[0] + step[0], p[1] + step[1], p[2] + step[2]];
+                best = best.max(rt.host_mut().map_or(0, |h| h.signal(n, d as u8, true)).clamp(0, 15));
+                if best >= 15 {
+                    break;
+                }
+            }
+            V::I(best)
         }
         // `scheduleTick(pos, block, delay[, priority])`; a fluid's ticks are the game's own.
         ("scheduleTick", d) if d.starts_with("(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;I") => {
@@ -315,6 +341,45 @@ mod tests {
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
         assert_eq!(host.scheduled, [([2, 64, 2], "minecraft:stone".to_owned(), 4)]);
+    }
+
+    /// Create's nixie tube asks each neighbour what it sends it (`getSignal(pos.relative(d), d)`):
+    /// a redstone block east of it sends 15 that way only, and none of it strong; a lever on top of
+    /// another block sends that block a strong 15, which `getDirectSignalTo` finds. A client's
+    /// world sends nothing.
+    #[test]
+    fn what_a_block_sends_one_way_comes_from_the_world() {
+        const SIGNAL: &str = "getSignal.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)I";
+        const HAS: &str = "hasSignal.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z";
+        const DIRECT: &str = "getDirectSignal.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)I";
+        const DIRECT_TO: &str = "getDirectSignalTo.(Lnet/minecraft/core/BlockPos;)I";
+        let (tube, redstone, block, lever) = ([0, 64, 0], [1, 64, 0], [0, 64, 5], [0, 65, 5]);
+        let mut host = MemoryHost::default();
+        host.sent_signals.insert((redstone, 5), (15, 0));
+        host.sent_signals.insert((lever, 1), (15, 15));
+        let mut client = MemoryHost { client: true, sent_signals: host.sent_signals.clone(), ..MemoryHost::default() };
+        let ask = |host: &mut MemoryHost| {
+            with_host(host, |rt| {
+                let level = rt.new_object(LEVEL);
+                let at = |rt: &mut Rt, p: [i32; 3]| crate::api::block_pos(rt, p[0].into(), p[1].into(), p[2].into());
+                let (tube, redstone, block, lever) = (at(rt, tube), at(rt, redstone), at(rt, block), at(rt, lever));
+                let (up, west, east) = (crate::api::direction(rt, 1), crate::api::direction(rt, 4), crate::api::direction(rt, 5));
+                let answers = [
+                    level_call(rt, SIGNAL, &[level, redstone, east]).i(),
+                    level_call(rt, SIGNAL, &[level, redstone, west]).i(),
+                    level_call(rt, HAS, &[level, redstone, east]).i(),
+                    level_call(rt, HAS, &[level, redstone, west]).i(),
+                    level_call(rt, DIRECT, &[level, redstone, east]).i(),
+                    level_call(rt, DIRECT, &[level, lever, up]).i(),
+                    level_call(rt, DIRECT_TO, &[level, tube]).i(),
+                    level_call(rt, DIRECT_TO, &[level, block]).i(),
+                ];
+                assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+                answers
+            })
+        };
+        assert_eq!(ask(&mut host), [15, 0, 1, 0, 0, 15, 0, 15]);
+        assert_eq!(ask(&mut client), [0; 8]);
     }
 
     /// `BlockInWorld` reads its level's block once, when first asked, as 1.21.1's caches it (a

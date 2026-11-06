@@ -928,7 +928,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             self.set_block_and_update(above_pos, b.default_of(block));
             let reset = b.table.set_int(state, b.props.age, 0);
             self.set_block(pos, reset, 260);
-            self.neighbor_changed_full(reset, above_pos, block, false);
+            self.neighbor_changed_full(reset, above_pos, block, pos, false);
         }
         if age < 15 {
             self.set_block(pos, b.table.set_int(state, b.props.age, age + 1), 260);

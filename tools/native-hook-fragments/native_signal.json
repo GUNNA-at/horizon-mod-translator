@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the redstone signal a block sends one way, for server mods (`native_signal`, `GameLevel::native_signal_here`).",
+  "doc_summary": "`native_signal(dimension, pos, direction, direct)` is the redstone signal the block at `pos` sends back along `direction` (`Direction`'s data value: the way from the block asking to `pos`), 0 to 15: `SignalGetter.getSignal`, what a lamp or a nixie tube reads of each neighbour, or with `direct` only its strong signal (`getDirectSignal`). 0 on a client and for another dimension. `native_signal_here(ticks, pos, direction, direct)` gives a level hook (`tick_block`, `neighbor_changed`) the same. Translated bundles answer `Level.getSignal`, `hasSignal`, `getDirectSignal` and `getDirectSignalTo` with them (Create's nixie tubes show the signal beside them): @API:native_signal@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_hooks.rs"
+  ]
+}
