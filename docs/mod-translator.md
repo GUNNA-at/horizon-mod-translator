@@ -4539,6 +4539,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     stack accessors Create's fluid renderer asks (empty answers the defaults); the event registers by object
     or holder, each kind apart; an `initializeClient` override hands its extension at setup and the stack
     accessors reach that extension's own plain ones; a biome's water colour in either file format.
+  - In game (tank round 3, Create's fluid tanks of water and lava): the `IClientFluidTypeExtensions` misses
+    are gone and the water tank's window shows its water, blue. Two gaps remain. The water is flat, with no
+    ripples. The lava tank's window is white. Both look like a face sampling one texel of a white region,
+    tinted by the vertex colour, rather than the fluid's sprite. `uvShrinkRatio` is still unmapped, but an
+    unmapped call answers 0, so it can't cause this. Next: follow the face's UVs from `getU`/`getV` through
+    `render::locate` to `native_draw_faces`.
+  - Still unmapped in that round: Flywheel's GL backend (LWJGL `MemoryStack`, `GL20` shaders),
+    `AbstractTickableSoundInstance.<init>`, `DynamicTexture`, `RenderType.bufferSize`,
+    `Options.graphicsMode`/`OptionInstance.get`, and `new String(bytes, charset)`. The last two are
+    drafted (`scratchpad/drafts/options.rs`, `string_init.rs`) and not applied yet.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
