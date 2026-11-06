@@ -5184,6 +5184,51 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     on null is gone from the round's unmapped calls. Left at login: Flywheel's GL calls and
     `DynamicTexture` (3), both from Flywheel's own GL backend starting (`NoiseTextures`), which
     Horizon doesn't run.
+- [x] 2026-11-06 Part 59: chunks by their coordinates, and mod blocks' own `updateShape` in the game.
+  The fluids round (`pumpgame.sh`: a creative motor turns a mechanical pump, a pipe from a walled-in
+  water source on one side, a pipe into a fluid tank on the other) moved no fluid. Create's pipes look
+  for a fluid next door only in a chunk that is there, `level.getChunk(x, z, ChunkStatus.FULL, false)`,
+  and the runtime had neither that call nor `ChunkStatus`: no chunk, so the pipe did nothing.
+  Measured over the pack (367 jars): `Level.getChunk` in 28 jars (53 calls), `ServerLevel.getChunk`
+  19 (40), `LevelReader.getChunk` 9 (11), `ClientLevel.getChunk` 7 (8), `Level.hasChunk` 8 (13);
+  `ChunkStatus.FULL` read in 19 jars (31 reads), `STRUCTURE_STARTS` 3, `STRUCTURE_REFERENCES` 2,
+  `LIGHT`, `EMPTY` and `SURFACE` 1 each.
+  With the chunk found, water reached the tank, but 200 mB of the source's 1000. The pipes'
+  block entities showed why: pipes put down by `/setblock` keep their default shape, open on every
+  side, so each still had open ends to the north and up. In vanilla the pipe's own `updateShape`
+  closes them as the pump goes in next to it. Horizon has the hook point for it
+  (`native_update_shape`, which `GameLevel::before_update_shape` calls for every neighbour change),
+  but nothing answered it for a translated block, so a mod block's state never followed its
+  neighbours. Measured: 562 classes in 88 of the pack's jars declare their own `updateShape`
+  (Create 62, Create: Things and Misc 43, FramedBlocks 35, SecurityCraft 32, Electroenergetics 31,
+  TFMG 20...): pipes, shafts, cables, panes, fences, connected windows, furniture.
+  - compat `api`: `ChunkStatus` as 1.21.1 has it: its twelve statuses in order, one object each;
+    `getIndex`, `getParent`, `isOrAfter`, `isAfter`, `isOrBefore`, `isBefore`, `max`; `getName` and
+    `toString` (the registry key, `minecraft:full`); `byName` (a name it doesn't know gives `empty`,
+    as the defaulted registry does); `getChunkType`; `getStatusList`. A level's `getChunk` by a
+    position, by chunk coordinates, and with a status and whether the chunk must be there, gives
+    the chunk its level answers for: as `isLoaded` already says, every chunk the level reaches is
+    there. `hasChunk` says so too.
+  - compat `glue::update_shape`: the state a mod block takes when its neighbour on one side changes,
+    by its own `updateShape`, for a block whose class has one. A throw is reported and leaves the
+    game's rule.
+  - translator `bundle`: the generated `update_shape` hook into `native_update_shape`, for the
+    translated mod's blocks. The block reads the level; the ticks it schedules go to the level's; it
+    sets no block itself (vanilla's `updateShape` gives the new state and the level sets it).
+  - Tests: `api::tests::a_pipe_finds_the_chunk_next_door_and_the_water_in_it`,
+    `glue::tests::a_mods_pipe_joins_the_tank_put_next_to_it`.
+  - The first game build with the hook stopped in the mixin tool (`E_INVALID_HELPER`): the
+    generated helper carried an `#[allow(...)]`, and a helper must be one plain private function.
+    The translator's tests passed it. `bundle::tests::every_helper_is_one_plain_private_function` now
+    checks every helper a bundle writes against that rule.
+  - In game (`pumpgame.sh`, which now prints the pipes' full states): both pipes are
+    `east=true,west=true` and closed on their other four sides from the first probe (tick 20),
+    where they had stayed open to the north and up. The tank holds 416 mB at tick 20 and all
+    1000 mB of the source by tick 100 (200 before), and the source is drained; at tick 20 the in-pipe's
+    open end still held 552 mB on its way. `Fluid.builtInRegistryHolder` and the `Holder.is` on null
+    after it no longer show in the round's unmapped calls. Left: `FluidStack.saveOptional` and
+    `parseOptional`, `FluidType.getLightLevel(FluidStack)`, and login's Flywheel GL and
+    `DynamicTexture`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

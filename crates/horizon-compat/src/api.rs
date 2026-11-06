@@ -1043,7 +1043,7 @@ const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
 const BLOCK: &str = "net/minecraft/world/level/block/Block";
 const STATE_DEFINITION: &str = "net/minecraft/world/level/block/state/StateDefinition";
 const DATA_STORAGE: &str = "net/minecraft/world/level/storage/DimensionDataStorage";
-const UPDATE_SHAPE: &str = "updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
+pub(crate) const UPDATE_SHAPE: &str = "updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
 const UPDATE_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
 pub(crate) const CAN_SURVIVE: &str = "canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
 pub(crate) const CAN_SURVIVE_KEY: &str =
@@ -1419,7 +1419,7 @@ pub(crate) fn adopt_names(rt: &mut Rt) {
 
 /// `BlockState.updateShape(direction, neighbour, level, pos, neighbourPos)` (`args`, the state
 /// first): the mod block's own `updateShape`; a block without one keeps its state.
-fn update_shape(rt: &mut Rt, args: [V; 6]) -> V {
+pub(crate) fn update_shape(rt: &mut Rt, args: [V; 6]) -> V {
     let text = rt.str_of(args[0]).unwrap_or("").to_owned();
     match crate::glue::mod_block(rt, &text) {
         Some((b, class)) if rt.overrides.is_some_and(|o| o(class, UPDATE_SHAPE)) => match rt.vcall {
@@ -1472,6 +1472,71 @@ pub(crate) fn is_level(owner: &str) -> bool {
             || owner.ends_with("LevelTimeAccess"))
 }
 
+const CHUNK_STATUS: &str = "net/minecraft/world/level/chunk/status/ChunkStatus";
+/// 1.21.1's chunk statuses in their order, by their registry names (`ChunkStatus`' fields).
+const CHUNK_STATUSES: [&str; 12] =
+    ["empty", "structure_starts", "structure_references", "biomes", "noise", "surface", "carvers", "features", "initialize_light", "light", "spawn", "full"];
+
+/// The chunk status at `index` in vanilla's order, one object each (`ChunkStatus.FULL`...).
+fn chunk_status(rt: &mut Rt, index: usize) -> V {
+    let index = index.min(CHUNK_STATUSES.len() - 1);
+    rt.intern(format!("compat:chunk-status/{index}"), |rt| {
+        let o = rt.new_object(CHUNK_STATUS);
+        rt.put_field(o, "$index", V::I(index as i32));
+        o
+    })
+}
+
+/// A chunk status's calls: where it stands in vanilla's order, its name and its parent; `byName`
+/// gives `empty` for a name it doesn't know, as vanilla's defaulted registry does.
+fn chunk_status_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let index = |rt: &Rt, v: V| rt.get_field(v, "$index").i();
+    Some(match name {
+        "getIndex" => V::I(index(rt, a(0))),
+        "getParent" => chunk_status(rt, (index(rt, a(0)) - 1).max(0) as usize),
+        "isOrAfter" => V::I((index(rt, a(0)) >= index(rt, a(1))) as i32),
+        "isAfter" => V::I((index(rt, a(0)) > index(rt, a(1))) as i32),
+        "isOrBefore" => V::I((index(rt, a(0)) <= index(rt, a(1))) as i32),
+        "isBefore" => V::I((index(rt, a(0)) < index(rt, a(1))) as i32),
+        "max" => {
+            if index(rt, a(0)) > index(rt, a(1)) {
+                a(0)
+            } else {
+                a(1)
+            }
+        }
+        "getName" | "toString" => {
+            let i = (index(rt, a(0)).max(0) as usize).min(CHUNK_STATUSES.len() - 1);
+            rt.string(&format!("minecraft:{}", CHUNK_STATUSES[i]))
+        }
+        "byName" => {
+            let text = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let path = text.strip_prefix("minecraft:").unwrap_or(&text);
+            chunk_status(rt, CHUNK_STATUSES.iter().position(|s| *s == path).unwrap_or(0))
+        }
+        "getChunkType" => {
+            let full = index(rt, a(0)) as usize == CHUNK_STATUSES.len() - 1;
+            let (constant, ordinal) = if full { ("LEVELCHUNK", 1) } else { ("PROTOCHUNK", 0) };
+            api_enum(rt, "net/minecraft/world/level/chunk/status/ChunkType", constant, ordinal)
+        }
+        "getStatusList" => {
+            let all = (0..CHUNK_STATUSES.len()).map(|i| chunk_status(rt, i)).collect();
+            crate::jutil::new_list(rt, all)
+        }
+        _ => return None,
+    })
+}
+
+/// The chunk of `level` at chunk coordinates `x`, `z`: a `LevelChunk` its level answers for.
+fn level_chunk(rt: &mut Rt, level: V, x: i32, z: i32) -> V {
+    let c = rt.new_object(LEVEL_CHUNK);
+    rt.put_field(c, "$level", level);
+    rt.put_field(c, "$x", V::I(x));
+    rt.put_field(c, "$z", V::I(z));
+    c
+}
+
 /// Registration, the level and block states: the API that reaches the game.
 fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -1486,6 +1551,9 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if owner == crate::level_env::BLOCK_IN_WORLD {
         return crate::level_env::block_in_world(rt, name, args);
+    }
+    if owner == CHUNK_STATUS {
+        return chunk_status_call(rt, name, args);
     }
     Some(match (owner, name) {
         // NeoForge registration
@@ -1665,7 +1733,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::I(c) => V::I(c),
             _ => V::I(rt.host().is_some_and(|h| !h.is_server()) as i32),
         },
-        (_, "isLoaded" | "hasChunkAt" | "isAreaLoaded" | "hasChunksAt" | "isInWorldBounds") if level => V::I(1),
+        (_, "isLoaded" | "hasChunkAt" | "hasChunk" | "isAreaLoaded" | "hasChunksAt" | "isInWorldBounds") if level => V::I(1),
         // `mayInteract(player, pos)`: vanilla's `Level` says yes; its `ServerLevel` asks the server's
         // spawn protection and world border, neither of which mods get here, so it says yes too.
         (_, "mayInteract") if level && desc == "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/core/BlockPos;)Z" => V::I(1),
@@ -1739,15 +1807,19 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "isHardcore" => V::I(0),
             _ => return None,
         },
-        // The chunk holding a position: its level answers for it.
+        // The chunk holding a position (`getChunkAt`, `getChunk(pos)`), or at chunk coordinates
+        // (`getChunk(x, z)`, also with a status and whether it must be there: Create's pipes ask
+        // `getChunk(x, z, FULL, false)` before they look for fluid next door, and do nothing on null).
+        // As `isLoaded` says, every chunk the level reaches is there; its level answers for it.
         (_, "getChunkAt") if level => {
             let p = pos_of(rt, a(1));
-            let c = rt.new_object(LEVEL_CHUNK);
-            rt.put_field(c, "$level", a(0));
-            rt.put_field(c, "$x", V::I(p[0] >> 4));
-            rt.put_field(c, "$z", V::I(p[2] >> 4));
-            c
+            level_chunk(rt, a(0), p[0] >> 4, p[2] >> 4)
         }
+        (_, "getChunk") if level && desc.starts_with("(Lnet/minecraft/core/BlockPos;)") => {
+            let p = pos_of(rt, a(1));
+            level_chunk(rt, a(0), p[0] >> 4, p[2] >> 4)
+        }
+        (_, "getChunk") if level && desc.starts_with("(II") => level_chunk(rt, a(0), a(1).i(), a(2).i()),
         (LEVEL_CHUNK, "getLevel") => rt.get_field(a(0), "$level"),
         (LEVEL_CHUNK, "getBlockState") => {
             let level = rt.get_field(a(0), "$level");
@@ -2317,6 +2389,11 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
     {
         return v;
     }
+    if let Some(field) = key.strip_prefix(CHUNK_STATUS).and_then(|k| k.strip_prefix('.'))
+        && let Some(index) = CHUNK_STATUSES.iter().position(|s| s.eq_ignore_ascii_case(field))
+    {
+        return chunk_status(rt, index);
+    }
     let dir = |rt: &mut Rt, o| direction(rt, o);
     match key {
         "net/minecraft/core/Direction.DOWN" => dir(rt, 0),
@@ -2545,6 +2622,52 @@ mod tests {
         rt.interned.insert("compat:client".into(), V::I(1));
         let level = crate::glue::level(&mut rt);
         assert_eq!(call(&mut rt, "net/minecraft/world/level/Level.isClientSide.()Z", &[level]), V::I(1));
+    }
+
+    /// Create's pipes ask for the chunk next door (`getChunk(x, z, ChunkStatus.FULL, false)`) and
+    /// look for the fluid there only when one comes back: every chunk the level reaches is there and
+    /// reads the level's blocks, by chunk coordinates or by a position. Chunk statuses keep
+    /// vanilla's order and names.
+    #[test]
+    fn a_pipe_finds_the_chunk_next_door_and_the_water_in_it() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = crate::host::MemoryHost::default();
+        host.blocks.insert([-34, 69, 9], "minecraft:water[level=0]".into());
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let full = get_static(rt, "net/minecraft/world/level/chunk/status/ChunkStatus.FULL");
+            let get_chunk = "net/minecraft/world/level/Level.getChunk.(IILnet/minecraft/world/level/chunk/status/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;";
+            // -34 >> 4 is -3, 9 >> 4 is 0.
+            let chunk = call(rt, get_chunk, &[level, V::I(-3), V::I(0), full, V::I(0)]);
+            assert_ne!(chunk.r(), 0);
+            let pos = block_pos(rt, -34, 69, 9);
+            let read = "net/minecraft/world/level/chunk/LevelChunk.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
+            let water = call(rt, read, &[chunk, pos]);
+            assert_eq!(rt.str_of(water), Some("minecraft:water[level=0]"));
+            let at = call(rt, "net/minecraft/world/level/LevelReader.getChunk.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/chunk/ChunkAccess;", &[level, pos]);
+            let water = call(rt, read, &[at, pos]);
+            assert_eq!(rt.str_of(water), Some("minecraft:water[level=0]"));
+            assert_eq!(call(rt, "net/minecraft/world/level/Level.hasChunk.(II)Z", &[level, V::I(-3), V::I(0)]), V::I(1));
+            // `FULL` is the last status, after `LIGHT`; `byName` knows the registry's names and gives
+            // `empty` for others; `empty` is its own parent.
+            let status = |rt: &mut Rt, f: &str| get_static(rt, Box::leak(format!("{CHUNK_STATUS}.{f}").into_boxed_str()));
+            let (light, empty) = (status(rt, "LIGHT"), status(rt, "EMPTY"));
+            let s = |rt: &mut Rt, n: &str, d: &str, args: &[V]| call(rt, Box::leak(format!("{CHUNK_STATUS}.{n}.{d}").into_boxed_str()), args);
+            let order = "(Lnet/minecraft/world/level/chunk/status/ChunkStatus;)Z";
+            assert_eq!(s(rt, "isOrAfter", order, &[full, light]), V::I(1));
+            assert_eq!(s(rt, "isOrAfter", order, &[light, full]), V::I(0));
+            assert_eq!(s(rt, "getIndex", "()I", &[full]), V::I(11));
+            let name = s(rt, "getName", "()Ljava/lang/String;", &[full]);
+            assert_eq!(rt.str_of(name), Some("minecraft:full"));
+            let by_name = "(Ljava/lang/String;)Lnet/minecraft/world/level/chunk/status/ChunkStatus;";
+            let light_name = rt.string("minecraft:light");
+            assert_eq!(s(rt, "byName", by_name, &[light_name]), light);
+            let unknown = rt.string("mymod:baked");
+            assert_eq!(s(rt, "byName", by_name, &[unknown]), empty);
+            assert_eq!(s(rt, "getParent", "()Lnet/minecraft/world/level/chunk/status/ChunkStatus;", &[empty]), empty);
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A mod's own register class (Mekanism's `MekanismDeferredRegister`), made through NeoForge's

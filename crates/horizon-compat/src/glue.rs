@@ -760,6 +760,32 @@ pub fn may_place_on(rt: &mut Rt, host: &mut dyn Host, state: &str, ground: &str,
     })
 }
 
+/// `native_update_shape`: the state the mod block `state` at `pos` takes now that its neighbour in
+/// `direction` (vanilla's index: down, up, north, south, west, east) is `neighbour` at
+/// `neighbour_pos`, by its own `updateShape`, as vanilla runs it on a neighbour's change (a pipe, a
+/// cable or a pane joining what is next to it). The level is the host's; ticks the block schedules
+/// go to it. None where the block has no `updateShape` of its own, or isn't the mod's: the game's
+/// rule for it runs. Also None when the code throws.
+pub fn update_shape(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, direction: usize, neighbour_pos: [i32; 3], neighbour: &str) -> Option<String> {
+    let (_, class) = mod_block(rt, state)?;
+    if !rt.overrides.is_some_and(|o| o(class, api::UPDATE_SHAPE)) {
+        return None;
+    }
+    rt.with_host(host, |rt| {
+        let l = level(rt);
+        let (st, next) = (api::state(rt, state), api::state(rt, neighbour));
+        let d = api::direction(rt, direction.min(5) as i64);
+        let p = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+        let np = api::block_pos(rt, i64::from(neighbour_pos[0]), i64::from(neighbour_pos[1]), i64::from(neighbour_pos[2]));
+        let new = api::update_shape(rt, [st, d, next, l, p, np]);
+        if rt.thrown.is_some() {
+            rt.report_thrown("updateShape");
+            return None;
+        }
+        rt.str_of(new).map(str::to_owned)
+    })
+}
+
 const HANDLE_UPDATE_TAG: &str = "handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
 const HANDLE_UPDATE_TAG_KEY: &str =
     "net/minecraft/world/level/block/entity/BlockEntity.handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
@@ -1761,6 +1787,55 @@ mod tests {
         let n = rt.get_field(be, "ticks").i();
         rt.put_field(be, "ticks", V::I(n + 1));
         Some(V::Void)
+    }
+
+    /// The game asks a mod block's own `updateShape` when a neighbour changes: a pipe joins the tank
+    /// put next to it, as its code reads it from the level at the neighbour's position, and lets go
+    /// of the air. A mod block without its own `updateShape`, and the game's blocks, are left to the
+    /// game.
+    #[test]
+    fn a_mods_pipe_joins_the_tank_put_next_to_it() {
+        const PIPE: &str = "test/Pipe";
+        const SIDES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
+        fn overrides(class: &str, short: &str) -> bool {
+            class == PIPE && short == api::UPDATE_SHAPE
+        }
+        // `updateShape(state, direction, neighbourState, level, pos, neighbourPos)`, the block first.
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            if short != api::UPDATE_SHAPE || rt.class_of(args[0]) != PIPE {
+                return api::call(rt, key, args);
+            }
+            let side = SIDES[usize::from(crate::api_common::direction_ordinal(rt, args[2]))];
+            let get = "net/minecraft/world/level/LevelReader.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
+            let there = api::call(rt, get, &[args[4], args[6]]);
+            let there = crate::api_common::text_of(rt, there);
+            let join = there.starts_with("test:tank") || there.starts_with("test:pipe");
+            let state = crate::api_common::text_of(rt, args[1]);
+            let (name, props) = state.split_once('[').unwrap_or((&state, "]"));
+            let props: Vec<String> = props
+                .trim_end_matches(']')
+                .split(',')
+                .filter(|p| !p.is_empty())
+                .map(|p| if p.split('=').next() == Some(side) { format!("{side}={join}") } else { p.to_owned() })
+                .collect();
+            api::state(rt, &format!("{name}[{}]", props.join(",")))
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        for (class, id) in [(PIPE, "test:pipe"), ("test/Crate", "test:crate")] {
+            let b = rt.new_object(class);
+            rt.registered.insert(("block".into(), id.into()), b);
+        }
+        let mut host = MemoryHost::default();
+        host.blocks.insert([1, 64, 0], "test:tank".into());
+        let (here, east, west) = ([0, 64, 0], [1, 64, 0], [-1, 64, 0]);
+        let open = "test:pipe[east=false,north=true,west=true]";
+        assert_eq!(update_shape(&mut rt, &mut host, here, open, 5, east, "test:tank").as_deref(), Some("test:pipe[east=true,north=true,west=true]"));
+        assert_eq!(update_shape(&mut rt, &mut host, here, open, 4, west, "minecraft:air").as_deref(), Some("test:pipe[east=false,north=true,west=false]"));
+        assert_eq!(update_shape(&mut rt, &mut host, here, "test:crate", 5, east, "test:tank"), None);
+        assert_eq!(update_shape(&mut rt, &mut host, here, "minecraft:stone", 5, east, "test:tank"), None);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]
