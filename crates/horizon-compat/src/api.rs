@@ -1932,6 +1932,16 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let unstable = direction == 0 && rt.host().is_some_and(|h| h.block_in_tag(b, "minecraft:unstable_bottom_center"));
             V::I(i32::from(!unstable && face_sturdy(rt, &text, [state, a(0), a(1)], direction, SUPPORT_CENTER)))
         }
+        // `Block.shouldRenderFace(state, level, pos, face, neighbourPos)`: whether a face shows past
+        // its neighbour (`faces`). On any block class, as `javac` names the class a call was written
+        // on.
+        (o, "shouldRenderFace") if o.starts_with("net/minecraft/world/level/block/") && desc == crate::faces::SHOULD_RENDER_FACE => {
+            V::I(i32::from(crate::faces::should_render_face(rt, [a(0), a(1), a(2), a(3), a(4)])))
+        }
+        // `super.skipRendering(state, neighbour, face)` to a vanilla block class: that class's rule.
+        (o, "skipRendering") if o.starts_with("net/minecraft/world/level/block/") && desc == crate::faces::SKIP_RENDERING => {
+            V::I(i32::from(crate::faces::class_skips(rt, o, a(1), a(2), a(3))))
+        }
         // `super.getCollisionShape(state, level, pos, context)` to a class with `BlockBehaviour`'s.
         (o, "getCollisionShape")
             if GET_COLLISION_KEY.ends_with(desc) && crate::blocks::declaring_class(o, &crate::blocks::COLLISION_SHAPED) == Some("BlockBehaviour") =>
@@ -2003,6 +2013,23 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "isSlimeBlock" | "isStickyBlock" if desc == "()Z" => V::I(sticky(rt, n, a(0), V::NULL) as i32),
                 "canStickTo" if desc == "(Lnet/minecraft/world/level/block/state/BlockState;)Z" => V::I(sticky(rt, n, a(0), a(1)) as i32),
                 "getDestroySpeed" => V::F(crate::blocks::state_facts(rt, &text).hardness),
+                // What the renderer asks of a state's faces (`faces`).
+                "canOcclude" if desc == "()Z" => V::I(i32::from(crate::faces::can_occlude(rt, &text))),
+                "isSolidRender" if desc == "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Z" => {
+                    V::I(i32::from(crate::faces::solid_render(rt, a(0), a(1), a(2))))
+                }
+                "skipRendering" if desc == "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;)Z" => {
+                    V::I(i32::from(crate::faces::skip_rendering(rt, a(0), a(1), a(2))))
+                }
+                "getFaceOcclusionShape" if desc == "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Lnet/minecraft/world/phys/shapes/VoxelShape;" => {
+                    let direction = usize::from(crate::api_common::direction_ordinal(rt, a(3)));
+                    let face = crate::faces::face_occlusion(rt, a(0), a(1), a(2), direction);
+                    crate::shapes::shape(rt, &face)
+                }
+                "hidesNeighborFace" if desc == "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;)Z" => {
+                    V::I(i32::from(crate::faces::hides_neighbor_face(rt, a(0), a(1), a(2), a(3), a(4))))
+                }
+                "supportsExternalFaceHiding" if desc == "()Z" => V::I(i32::from(crate::faces::supports_external_face_hiding(rt, a(0)))),
                 // `isFaceSturdy(level, pos, direction[, support])`: FULL unless it says.
                 "isFaceSturdy" if desc.starts_with("(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;") => {
                     let direction = usize::from(crate::api_common::direction_ordinal(rt, a(3)));

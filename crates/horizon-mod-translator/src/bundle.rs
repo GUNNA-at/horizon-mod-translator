@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 95] = [
+const COMPAT: [(&str, &str); 96] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -140,6 +140,7 @@ const COMPAT: [(&str, &str); 95] = [
     ("vanilla_shapes.rs", include_str!("../../horizon-compat/src/vanilla_shapes.rs")),
     ("functions.rs", include_str!("../../horizon-compat/src/functions.rs")),
     ("gamerules.rs", include_str!("../../horizon-compat/src/gamerules.rs")),
+    ("faces.rs", include_str!("../../horizon-compat/src/faces.rs")),
     ("shapes.rs", include_str!("../../horizon-compat/src/shapes.rs")),
     ("sounds.rs", include_str!("../../horizon-compat/src/sounds.rs")),
     ("vanilla_sounds.rs", include_str!("../../horizon-compat/src/vanilla_sounds.rs")),
@@ -297,6 +298,9 @@ fn level_host(krate: &str) -> String {
         fn block_facts(&self, state: &str) -> Option<{krate}::compat::host::BlockFacts> {{
             self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {krate}::compat::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
+        fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {{
+            self.level.native_state_occlusion(state)
+        }}
         fn dimension(&self) -> String {{
             self.level.native_dimension_name().to_owned()
         }}
@@ -338,6 +342,9 @@ fn level_read_host(c: &str) -> String {
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
+        }}
+        fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {{
+            self.level.native_state_occlusion(state)
         }}
         fn dimension(&self) -> String {{
             self.level.native_dimension_name().to_owned()
@@ -550,6 +557,12 @@ fn client_host(c: &str, id: &str) -> String {
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.game.get().native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
+        }}
+        fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {{
+            self.game.get().native_state_occlusion(state)
+        }}
+        fn face_occlusion(&self, state: &str, direction: u8) -> Option<Vec<[f64; 6]>> {{
+            self.game.get().native_face_occlusion(state, direction)
         }}
         fn dimension(&self) -> String {{
             self.game.get().native_dimension().to_owned()
@@ -918,6 +931,12 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
+        }}
+        fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {{
+            self.game.native_state_occlusion(state)
+        }}
+        fn face_occlusion(&self, state: &str, direction: u8) -> Option<Vec<[f64; 6]>> {{
+            self.game.native_face_occlusion(state, direction)
         }}
         fn dimension(&self) -> String {{
             self.game.native_dimension().to_owned()
@@ -2019,6 +2038,9 @@ fn game_host(c: &str, server_send: &str) -> String {
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
+        fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {{
+            self.game.native_state_occlusion(state)
+        }}
         fn dimension(&self) -> String {{
             self.game.native_dimension().to_owned()
         }}
@@ -2760,6 +2782,9 @@ fn player_host(c: &str, server_effects: &str) -> String {
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
+        }}
+        fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {{
+            self.game.native_state_occlusion(state)
         }}
         fn dimension(&self) -> String {{
             self.game.native_dimension().to_owned()
@@ -4003,6 +4028,9 @@ fn {id}_state_for_placement(
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
+        fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {{
+            self.level.native_state_occlusion(state)
+        }}
         fn dimension(&self) -> String {{
             self.level.native_dimension_name().to_owned()
         }}
@@ -4079,6 +4107,9 @@ fn {id}_update_shape(
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
+        }}
+        fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {{
+            self.level.native_state_occlusion(state)
         }}
         fn dimension(&self) -> String {{
             self.level.native_dimension_name().to_owned()

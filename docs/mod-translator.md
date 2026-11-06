@@ -5740,6 +5740,65 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `getPersistentData` on null. The game's bars, 7 of 13 pixels each: the pickaxe's yellow, and a
     half-full copper backtank's own light grey (`create:banktank_air` 450), in the hotbar and the
     inventory.
+- [x] 2026-11-06 Part 74: which faces of a block show, as a mod asks (`faces.rs`, a module of the
+  chain). A survey of Create's machines never checked in game before (`kinsurvey.sh`: two creative
+  motors, a speedometer, a stressometer, a mechanical drill facing stone, a mechanical saw facing an
+  oak log) found the drill breaking the stone (its cobblestone dropped), the saw cutting the log, and
+  the gauges' network data right (speed 64, stress 256, capacity 1048576, the speedometer's dial at
+  0.5957), but two calls unmapped. One was `Block.shouldRenderFace(state, level, pos, face,
+  neighbourPos)`: Create's `GaugeBlock.shouldRenderHeadOnFace` asks it for each face its dial could
+  go on, and the unmapped answer (false) left every gauge without its dial and needle. 8 jars call it
+  (12 calls: Create's gauges, copycats, connected textures and table cloth, DnDesires' multimeter,
+  Railways' copycat headstock, Copycats+, Sable's sub-level mesher, Fabric's renderer in txnilib);
+  and the `BlockState` methods it is made of were unmapped too: `canOcclude` (28 jars, 44 calls),
+  `isSolidRender` (24, 42), `skipRendering` (11, 20; 38 classes in 22 jars override it),
+  `hidesNeighborFace` (5, 6), `supportsExternalFaceHiding` (5, 5), `getFaceOcclusionShape` (4, 6).
+  - compat `faces`: `Block.shouldRenderFace` as NeoForge's: not where the block leaves its face
+    out toward that neighbour (`skipRendering`), nor where the neighbour hides it
+    (`hidesNeighborFace`) and the block lets it (`supportsExternalFaceHiding`); else wherever the
+    neighbour can't occlude, the block's own occlusion face is empty, or part of it is outside the
+    neighbour's face toward it (`Shapes.joinIsNotEmpty(own, theirs, ONLY_FIRST)`). Each piece is
+    the state's own method, mapped: `canOcclude` (a mod block's properties: `noOcclusion`,
+    `noCollission`, a copy of a vanilla block that can't; a vanilla block's as the game has it),
+    `isSolidRender` (a vanilla block's from the game, a mod block's: it occludes and its occlusion
+    shape is the whole block), `getFaceOcclusionShape` (the occlusion shape's face,
+    `Shapes.getFaceShape`; a vanilla block that occludes hides faces as the game hides them with
+    it), `skipRendering` (a mod block's own override; else its 1.21.1 class's rule, read off the
+    merged jar: a `HalfTransparentBlock` (glass, ice, slime, honey) and powder snow toward the same
+    block, bars and panes toward the same block above or below or where both join, a liquid toward
+    the same fluid, mangrove roots above or below mangrove roots; a mod block's `super.` call to its
+    vanilla class gets that class's), NeoForge's `hidesNeighborFace` (a mod block's own, else no)
+    and `supportsExternalFaceHiding` (a mod block's own; else yes on a server, and on a client for a
+    block outside the solid layer, which isn't known here: a block is taken as in it, as most are).
+  - compat-core `Host::block_occlusion(state)` (can it occlude, is it solid to the renderer) and
+    `Host::face_occlusion(state, direction)` (its occlusion shape's face, as the game culls with
+    it); `MemoryHost` models both. client: `native_state_occlusion(text)` (the block facts'
+    `CAN_OCCLUDE` and `SOLID_RENDER` flags, on the game and on a level) and
+    `native_face_occlusion(text, direction)` (the face visibility tables the mesher culls with; none
+    on a server, which loads none), API @API:state_occlusion@; translator: every host that tells
+    block facts tells the first, the client's (its hooks' and its drawing's) the second.
+  - Tests (`faces::tests`): a dial's face shows beside air, glass, a bottom slab's side (half of it
+    is past the slab) and above a bottom slab, not against stone; a pane of glass leaves out its face
+    toward the same pane, and stone or a solid mod block covers it; a copycat beside a block hides
+    that block's face only where the block lets it; a block's own `skipRendering` is its answer.
+    What states say of themselves: `canOcclude` and `isSolidRender` of mod blocks (a plain one, one
+    with `noOcclusion`, a copy of glass) and vanilla ones, a slab's occlusion faces, the vanilla
+    classes' `skipRendering` (glass, ice, bars joined or not and above, water beside water and lava,
+    mangrove roots, stone) and a mod block's `super.skipRendering` to `HalfTransparentBlock`. Compat 502,
+    translator 19, gameplay 70 (`game-tests.sh`; `catalog_matches_hook_points` checks the new
+    fragment against the hook points).
+  - In game (`kinsurvey3.sh`: a creative motor at 64 RPM driving a speedometer, a stressometer and
+    a mechanical drill facing stone, both gauges facing north; the shots wait out the chat and aim
+    with `look-at-block`): both gauges draw their dial and needle on their north face, the
+    speedometer's needle at 0.5957 of its scale, the stressometer's at rest (256 of 1,048,576 su).
+    With Create's goggles on, each gauge's readout: "Rotation Speed: Moderate (64 RPM)";
+    "Network Stress: Low (0%)", "Remaining Capacity: 1,048,320su / 1,048,576su". The drill broke
+    the stone (its cobblestone dropped), the saw cut the log. `Block.shouldRenderFace` and the
+    state methods are gone from the unmapped calls; `Font.drawInBatch8xOutline` is still there
+    (next). Found: with the goggles on the creative motor shows no overlay (Create's generator
+    stats, `GeneratingKineticBlockEntity.addToGoggleTooltip`: the motor's capacity from
+    `BlockStressValues.getCapacity` on the client), with no exception and no unmapped call: to
+    measure.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

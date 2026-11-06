@@ -1121,6 +1121,20 @@ pub trait Host {
     fn block_solid(&self, _state: &str) -> Option<bool> {
         None
     }
+    /// Whether block state `state` can hide its neighbours' faces (`canOcclude`, from its
+    /// properties) and whether it is an opaque full cube to the renderer (`isSolidRender`), as the
+    /// game's block facts have them. None for a state the game doesn't know.
+    fn block_occlusion(&self, _state: &str) -> Option<(bool, bool)> {
+        None
+    }
+    /// The face of block state `state`'s occlusion shape toward `direction` (a direction ordinal:
+    /// down, up, north, south, west, east), as the game hides the faces beside it
+    /// (`getFaceOcclusionShape` of a state that can occlude): boxes in block space, as deep as the
+    /// block; none for a face that hides nothing. None where the game can't tell: a server, which
+    /// draws nothing, or a state it doesn't know.
+    fn face_occlusion(&self, _state: &str, _direction: u8) -> Option<Vec<[f64; 6]>> {
+        None
+    }
     /// A sound a mod plays (`Level.playSound`, `playLocalSound`, `Entity.playSound`). A server's
     /// game sends it to the players near it; a client's plays it for its player.
     fn play_sound(&mut self, _sound: &Sound) {}
@@ -1515,6 +1529,12 @@ pub struct MemoryHost {
     pub experience: HashMap<String, i32>,
     /// Blocks that are solid ([`Host::block_solid`]); any other block the host has facts for isn't.
     pub solid: Vec<String>,
+    /// What the renderer knows of blocks' faces ([`Host::block_occlusion`]): whether each can hide
+    /// its neighbours' faces and is an opaque full cube, by block (any of its states).
+    pub occlusion: HashMap<String, (bool, bool)>,
+    /// Occlusion shapes' faces ([`Host::face_occlusion`]), by state (as written, else its block)
+    /// and direction ordinal.
+    pub occlusion_faces: HashMap<(String, u8), Vec<[f64; 6]>>,
     /// The server's players and where they are.
     pub players: Vec<(u128, [f64; 3])>,
     /// The server's players' entity ids ([`Host::player_entities`]), by UUID.
@@ -2185,6 +2205,14 @@ impl Host for MemoryHost {
         let block = state.split('[').next().unwrap_or(state);
         let known = self.facts.contains_key(block) || self.solid.iter().any(|b| b == block);
         known.then(|| self.solid.iter().any(|b| b == block))
+    }
+    fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {
+        self.occlusion.get(state.split('[').next().unwrap_or(state)).copied()
+    }
+    fn face_occlusion(&self, state: &str, direction: u8) -> Option<Vec<[f64; 6]>> {
+        let block = state.split('[').next().unwrap_or(state);
+        let faces = &self.occlusion_faces;
+        faces.get(&(state.to_owned(), direction)).or_else(|| faces.get(&(block.to_owned(), direction))).cloned()
     }
     fn play_sound(&mut self, sound: &Sound) {
         if !self.read_only {

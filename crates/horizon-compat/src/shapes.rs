@@ -200,7 +200,7 @@ pub fn optimized(boxes: &[Box3]) -> Vec<Box3> {
 /// `BooleanOp`s by truth table: bit `a << 1 | b` is `op(a, b)`.
 const OR: u8 = 0b1110;
 const NOT_SAME: u8 = 0b0110;
-const ONLY_FIRST: u8 = 0b0100;
+pub(crate) const ONLY_FIRST: u8 = 0b0100;
 const ONLY_SECOND: u8 = 0b0010;
 
 /// `Block.isShapeFullBlock`: the shape is the whole block, nothing missing and nothing past it.

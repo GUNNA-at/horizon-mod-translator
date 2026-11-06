@@ -4176,6 +4176,13 @@ impl GameLevel<'_> {
     pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool, u32)> {
         Some(state_facts(self.behaviours, self.native_state_from_text(text)?))
     }
+    /// Whether the state `text` names can hide its neighbours' faces
+    /// (`canOcclude`) and is an opaque full cube to the renderer
+    /// (`isSolidRender`), as vanilla's `BlockStateBase` keeps them. None for
+    /// an unknown block, property or value. API @API:state_occlusion@.
+    pub(super) fn native_state_occlusion(&self, text: &str) -> Option<(bool, bool)> {
+        Some(state_occlusion(self.behaviours, self.native_state_from_text(text)?))
+    }
     /// The dimension this level is (`minecraft:the_nether`), as
     /// `Game::native_dimension` names the current one.
     pub(super) fn native_dimension_name(&self) -> &'static str {
@@ -4353,6 +4360,13 @@ impl Game<'_> {
     /// `GameLevel::native_state_facts` answers, for hooks on `Game`.
     pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool, u32)> {
         Some(state_facts(self.res.behaviours(), state_from_text(self.pack.assets.registry, text)?))
+    }
+    /// Whether the state `text` names can hide its neighbours' faces and is
+    /// an opaque full cube to the renderer, as
+    /// `GameLevel::native_state_occlusion` answers, for hooks on `Game`.
+    /// API @API:state_occlusion@.
+    pub(super) fn native_state_occlusion(&self, text: &str) -> Option<(bool, bool)> {
+        Some(state_occlusion(self.res.behaviours(), state_from_text(self.pack.assets.registry, text)?))
     }
     /// Sets a block in the current authoritative level through `Level.setBlock`.
     /// Returns false for another dimension, an invalid state, or no change.
@@ -6576,6 +6590,14 @@ fn state_facts(
     };
     let sturdy = f.sturdy & ((1 << 18) - 1);
     (f.hardness, push, behaviours.is_replaceable(state), sturdy)
+}
+
+/// Whether `state` can hide its neighbours' faces (`canOcclude`) and is an
+/// opaque full cube to the renderer (`isSolidRender`).
+fn state_occlusion(behaviours: &horizon_world::level::Behaviours, state: BlockStateId) -> (bool, bool) {
+    use horizon_world::level::data::state_flags::{CAN_OCCLUDE, SOLID_RENDER};
+    let flags = behaviours.facts(state).flags;
+    (flags & CAN_OCCLUDE != 0, flags & SOLID_RENDER != 0)
 }
 
 /// `state` with its property `key` set to `value`; none when the block has

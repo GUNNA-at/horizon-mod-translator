@@ -103,7 +103,7 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
 
 /// Whether 1.21.1's block or item class `c` is `class` or a subtype of it, by the generated table
 /// of those classes' superclasses and interfaces; false for a class the table doesn't have.
-fn vanilla_is_a(c: &str, class: &str) -> bool {
+pub(crate) fn vanilla_is_a(c: &str, class: &str) -> bool {
     use crate::vanilla_classes::CLASSES;
     let entry = |k: &str| CLASSES.binary_search_by(|e| e.0.cmp(k)).ok().map(|i| &CLASSES[i]);
     if entry(c).is_none() {
