@@ -528,6 +528,9 @@ fn client_host(c: &str, id: &str) -> String {
                 [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
             }}).collect())
         }}
+        fn outline_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            Some(self.game.get().native_outline_boxes(pos))
+        }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false
         }}
@@ -854,6 +857,9 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
                 let (lo, hi) = (b.min_position(), b.max_position());
                 [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
             }}).collect())
+        }}
+        fn outline_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            Some(self.game.native_outline_boxes(pos))
         }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false
@@ -1801,6 +1807,9 @@ fn game_host(c: &str, server_send: &str) -> String {
                 [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
             }}).collect())
         }}
+        fn outline_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            Some(self.game.native_outline_boxes(pos))
+        }}
         fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
             self.game.native_set_state_text_at(pos, state, 3)
         }}
@@ -1902,10 +1911,10 @@ fn world_reads(get: &str) -> String {
             {get}.native_resource_namespaces(root)
         }}
         fn state_id(&self, state: &str) -> Option<i32> {{
-            {get}.native_state_from_text(state).and_then(|s| i32::try_from(s.0).ok())
+            {get}.native_state_id_of(state).and_then(|s| i32::try_from(s).ok())
         }}
         fn state_of_id(&self, id: i32) -> Option<String> {{
-            Some({get}.native_state_id_text(horizon_world::registry::BlockStateId(u32::try_from(id).unwrap_or(u32::MAX))))
+            Some({get}.native_state_of_id(u32::try_from(id).unwrap_or(u32::MAX)))
         }}
 "#
     )
@@ -2325,6 +2334,9 @@ fn player_host(c: &str, server_effects: &str) -> String {
                 let (lo, hi) = (b.min_position(), b.max_position());
                 [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
             }}).collect())
+        }}
+        fn outline_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            Some(self.game.native_outline_boxes(pos))
         }}
         fn set_block_state(&mut self, pos: [i32; 3], state: &str) -> bool {{
             self.game.native_set_state_text_at(pos, state, 3)

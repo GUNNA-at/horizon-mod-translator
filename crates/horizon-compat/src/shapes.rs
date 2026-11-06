@@ -329,19 +329,193 @@ fn axis_of(rt: &Rt, v: V) -> usize {
 fn clip(b: Box3, from: [f64; 3], to: [f64; 3]) -> Option<[f64; 3]> {
     let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
     let mut scale = 1.0;
-    let mut hit = false;
-    // Each axis in vanilla's order (x, y, z), with the other two in its cycle.
-    for (a, b1, c1) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)] {
-        let point = if d[a] > EPSILON { b[a] } else if d[a] < -EPSILON { b[a + 3] } else { continue };
+    enter(b, from, d, &mut scale)?;
+    Some([from[0] + scale * d[0], from[1] + scale * d[1], from[2] + scale * d[2]])
+}
+
+/// Vanilla's `AABB.getDirection` (with its `clipPoint`): whether the segment from `from` along `d`
+/// enters `b` sooner than `*scale` (a fraction of `d`), which then becomes that fraction, and the
+/// face it enters by, as a 3D data value (0 down, 1 up, 2 north, 3 south, 4 west, 5 east).
+fn enter(b: Box3, from: [f64; 3], d: [f64; 3], scale: &mut f64) -> Option<u8> {
+    let mut face = None;
+    // Each axis in vanilla's order (x, y, z), with the other two in its cycle, and the faces a
+    // segment going up the axis and down it enters by.
+    for (a, b1, c1, faces) in [(0, 1, 2, [4, 5]), (1, 2, 0, [0, 1]), (2, 0, 1, [2, 3])] {
+        let (point, f) = if d[a] > EPSILON {
+            (b[a], faces[0])
+        } else if d[a] < -EPSILON {
+            (b[a + 3], faces[1])
+        } else {
+            continue;
+        };
         let s = (point - from[a]) / d[a];
         let pb = from[b1] + s * d[b1];
         let pc = from[c1] + s * d[c1];
-        if 0.0 < s && s < scale && b[b1] - EPSILON < pb && pb < b[b1 + 3] + EPSILON && b[c1] - EPSILON < pc && pc < b[c1 + 3] + EPSILON {
-            scale = s;
-            hit = true;
+        if 0.0 < s && s < *scale && b[b1] - EPSILON < pb && pb < b[b1 + 3] + EPSILON && b[c1] - EPSILON < pc && pc < b[c1 + 3] + EPSILON {
+            *scale = s;
+            face = Some(f);
         }
     }
-    hit.then(|| [from[0] + scale * d[0], from[1] + scale * d[1], from[2] + scale * d[2]])
+    face
+}
+
+/// Vanilla's `AABB.clip(boxes, from, to, pos)`: where the segment first enters one of `boxes` moved
+/// to `pos`, and the face it enters by; None for none.
+fn clip_boxes(boxes: &[Box3], from: [f64; 3], to: [f64; 3], pos: [i32; 3]) -> Option<([f64; 3], u8)> {
+    let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let o = pos.map(f64::from);
+    let (mut scale, mut face) = (1.0, None);
+    for b in boxes {
+        let moved = [b[0] + o[0], b[1] + o[1], b[2] + o[2], b[3] + o[0], b[4] + o[1], b[5] + o[2]];
+        if let Some(f) = enter(moved, from, d, &mut scale) {
+            face = Some(f);
+        }
+    }
+    Some(([from[0] + scale * d[0], from[1] + scale * d[1], from[2] + scale * d[2]], face?))
+}
+
+/// Vanilla's `VoxelShape.clip(from, to, pos)` for the shape of `boxes` at `pos`: a segment that
+/// starts inside it (a thousandth of the way in) hits there, inside, on the face looking back along
+/// it; else where it first enters a box. None for an empty shape, a segment shorter than vanilla's
+/// least, or a miss.
+pub(crate) fn clip_shape(boxes: &[Box3], from: [f64; 3], to: [f64; 3], pos: [i32; 3]) -> Option<([f64; 3], u8, bool)> {
+    let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    if boxes.is_empty() || d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < 1.0e-7 {
+        return None;
+    }
+    let inner = [from[0] + d[0] * 0.001, from[1] + d[1] * 0.001, from[2] + d[2] * 0.001];
+    let local = [inner[0] - f64::from(pos[0]), inner[1] - f64::from(pos[1]), inner[2] - f64::from(pos[2])];
+    if boxes.iter().any(|b| (0..3).all(|i| b[i] <= local[i] && local[i] < b[i + 3])) {
+        return Some((inner, nearest(d) ^ 1, true));
+    }
+    clip_boxes(boxes, from, to, pos).map(|(at, face)| (at, face, false))
+}
+
+/// `Direction.getApproximateNearest(x, y, z)`: the direction nearest the vector, as a 3D data value
+/// (the first of the largest dot products, in floats; north for none).
+pub(crate) fn nearest(v: [f64; 3]) -> u8 {
+    const NORMALS: [[f32; 3]; 6] = [[0.0, -1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    let v = v.map(|x| x as f32);
+    let (mut face, mut best) = (2, f32::from_bits(1));
+    for (i, n) in NORMALS.iter().enumerate() {
+        let dot = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
+        if dot > best {
+            (face, best) = (i as u8, dot);
+        }
+    }
+    face
+}
+
+/// A `BlockHitResult` hitting block `pos` at `at` on face `face` (`inside`: from within the shape).
+fn block_hit(rt: &mut Rt, at: [f64; 3], face: u8, pos: [i32; 3], inside: bool) -> V {
+    let hit = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+    let (loc, dir) = (vec3(rt, at), crate::api_common::direction(rt, i64::from(face)));
+    let p = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+    rt.put_field(hit, "$loc", loc);
+    rt.put_field(hit, "$dir", dir);
+    rt.put_field(hit, "$pos", p);
+    rt.put_field(hit, "$inside", V::I(inside as i32));
+    hit
+}
+
+/// What a ray that clips fluids asks of a block's fluid ([`crate::fluids`]): whether there is one,
+/// whether it is a source, how high it stands.
+const FLUID_IS_EMPTY: &str = "net/minecraft/world/level/material/FluidState.isEmpty.()Z";
+const FLUID_IS_SOURCE: &str = "net/minecraft/world/level/material/FluidState.isSource.()Z";
+const FLUID_HEIGHT: &str = "net/minecraft/world/level/material/FluidState.getHeight.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)F";
+/// `BlockGetter.clip`'s descriptor, and `ClipContext`'s constructors: with an entity (whose
+/// collision context it takes), and with a collision context (the table's, [`crate::records`]).
+const LEVEL_CLIP: &str = "(Lnet/minecraft/world/level/ClipContext;)Lnet/minecraft/world/phys/BlockHitResult;";
+const CLIP_CONTEXT_OF_ENTITY: &str = "(Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/level/ClipContext$Block;Lnet/minecraft/world/level/ClipContext$Fluid;Lnet/minecraft/world/entity/Entity;)V";
+const CLIP_CONTEXT_OF_CONTEXT: &str = "(Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/level/ClipContext$Block;Lnet/minecraft/world/level/ClipContext$Fluid;Lnet/minecraft/world/phys/shapes/CollisionContext;)V";
+
+/// `BlockGetter.clip(context)` on the level, for the context's `from`, `to` and modes (the
+/// ordinals of `ClipContext.Block`: collider, outline, visual, fall damage resetting; of
+/// `ClipContext.Fluid`: none, sources, any, water): vanilla's `traverseBlocks` walks the blocks the
+/// segment crosses (from a hair before `from` to a hair past `to`), and in each the block's shape
+/// the mode picks (its collision shape, its outline, or a full block for one that resets fall
+/// damage) and, when the fluid mode takes it, the fluid's (as high as it stands) are clipped; the
+/// nearer of the two hits. A miss at `to` when nothing is, facing back along the segment. Not
+/// modelled: a block's interaction shape (a cauldron's inside), which vanilla prefers for the face
+/// hit, a visual shape apart from the collision shape (glass's), and the context's entity, which
+/// some collision shapes read (scaffolding).
+fn level_clip(rt: &mut Rt, level: V, ctx: V) -> V {
+    let (from, to) = (rt.get_field(ctx, "from"), rt.get_field(ctx, "to"));
+    let (from, to) = (xyz(rt, from), xyz(rt, to));
+    let ordinal = |rt: &Rt, v: V| rt.get_field(v, "$ordinal").i();
+    let (block_mode, fluid_mode) = (ordinal(rt, rt.get_field(ctx, "block")), ordinal(rt, rt.get_field(ctx, "fluid")));
+    let test = |rt: &mut Rt, p: [i32; 3]| -> Option<V> {
+        let host = rt.host()?;
+        let text = host.block_state(p);
+        let boxes = match block_mode {
+            1 => host.outline_boxes(p).or_else(|| host.collision_boxes(p)),
+            3 => {
+                let (block, _) = crate::host::split_state(&text);
+                Some(if host.block_in_tag(block, "minecraft:fall_damage_resetting") { vec![FULL] } else { Vec::new() })
+            }
+            _ => host.collision_boxes(p),
+        }
+        .unwrap_or_default();
+        let block = clip_shape(&boxes, from, to, p);
+        let fluid = if fluid_mode == 0 {
+            None
+        } else {
+            let state = crate::fluids::of_block_state(rt, &text);
+            let empty = api::call(rt, FLUID_IS_EMPTY, &[state]).i() != 0;
+            let picks = !empty
+                && match fluid_mode {
+                    1 => api::call(rt, FLUID_IS_SOURCE, &[state]).i() != 0,
+                    3 => {
+                        let name = crate::fluids::name_of(rt, rt.get_field(state, "$fluid"));
+                        rt.host().is_some_and(|h| h.fluid_in_tag(&name, "minecraft:water"))
+                    }
+                    _ => true,
+                };
+            if picks {
+                let at = api::block_pos(rt, i64::from(p[0]), i64::from(p[1]), i64::from(p[2]));
+                let height = api::call(rt, FLUID_HEIGHT, &[state, level, at]).f();
+                clip_shape(&[[0.0, 0.0, 0.0, 1.0, f64::from(height), 1.0]], from, to, p)
+            } else {
+                None
+            }
+        };
+        let distance = |h: &Option<([f64; 3], u8, bool)>| h.map_or(f64::MAX, |(at, _, _)| (0..3).map(|i| (at[i] - from[i]).powi(2)).sum());
+        let (at, face, inside) = if distance(&block) <= distance(&fluid) { block } else { fluid }?;
+        Some(block_hit(rt, at, face, p, inside))
+    };
+    if from != to {
+        let lerp = |delta: f64, start: f64, end: f64| start + delta * (end - start);
+        let end: [f64; 3] = std::array::from_fn(|i| lerp(-1.0e-7, to[i], from[i]));
+        let start: [f64; 3] = std::array::from_fn(|i| lerp(-1.0e-7, from[i], to[i]));
+        let mut p = start.map(|v| v.floor() as i32);
+        if let Some(hit) = test(rt, p) {
+            return hit;
+        }
+        let delta: [f64; 3] = std::array::from_fn(|i| end[i] - start[i]);
+        let sign = delta.map(|v| if v == 0.0 { 0 } else if v > 0.0 { 1 } else { -1 });
+        let step: [f64; 3] = std::array::from_fn(|i| if sign[i] == 0 { f64::MAX } else { f64::from(sign[i]) / delta[i] });
+        let frac = |v: f64| v - v.floor();
+        let mut t: [f64; 3] = std::array::from_fn(|i| step[i] * if sign[i] > 0 { 1.0 - frac(start[i]) } else { frac(start[i]) });
+        while t[0] <= 1.0 || t[1] <= 1.0 || t[2] <= 1.0 {
+            let axis = if t[0] < t[1] {
+                if t[0] < t[2] { 0 } else { 2 }
+            } else if t[1] < t[2] {
+                1
+            } else {
+                2
+            };
+            p[axis] += sign[axis];
+            t[axis] += step[axis];
+            if let Some(hit) = test(rt, p) {
+                return hit;
+            }
+        }
+    }
+    // `BlockHitResult.miss(to, the direction nearest from - to, the block holding to)`.
+    let back = nearest([from[0] - to[0], from[1] - to[1], from[2] - to[2]]);
+    let hit = block_hit(rt, to, back, to.map(|v| v.floor() as i32), false);
+    rt.put_field(hit, "$miss", V::I(1));
+    hit
 }
 
 fn optional(rt: &mut Rt, v: V) -> V {
@@ -360,6 +534,8 @@ pub fn empty_context(rt: &mut Rt) -> V {
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(owner, SHAPES | VOXEL_SHAPE | COLLISION_CONTEXT | ENTITY_COLLISION_CONTEXT | BOOLEAN_OP | AABB | BOUNDING_BOX | DISCRETE | SLICE)
         || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "box" | "isFaceFull" | "isShapeFullBlock"))
+        || (name == "clip" && api::is_level(owner))
+        || (name == "<init>" && owner.ends_with("/level/ClipContext"))
 }
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -368,6 +544,31 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let shape_of = |rt: &Rt, v: V| boxes(rt, v).unwrap_or_default();
     Some(match (owner, name) {
+        // `BlockGetter.clip(context)`: where a ray through the level stops.
+        (o, "clip") if api::is_level(o) && desc == LEVEL_CLIP => level_clip(rt, a(0), a(1)),
+        // `new ClipContext(from, to, block, fluid, entity)`: the entity's collision context (the
+        // empty one for none), then as the constructor taking a context, which the table models.
+        (o, "<init>") if o.ends_with("/level/ClipContext") && desc == CLIP_CONTEXT_OF_ENTITY => {
+            let entity = a(5);
+            let context = if entity.r() == 0 {
+                empty_context(rt)
+            } else {
+                let c = rt.new_object(ENTITY_COLLISION_CONTEXT);
+                rt.put_field(c, "$entity", entity);
+                c
+            };
+            let key = rt.static_key(&format!("{o}.<init>.{CLIP_CONTEXT_OF_CONTEXT}"));
+            return crate::records::call(rt, key, &[a(0), a(1), a(2), a(3), a(4), context]);
+        }
+        // `AABB.clip(boxes, from, to, pos)`: where the segment first enters one of the boxes at `pos`.
+        (AABB, "clip") if desc.starts_with("(Ljava/lang/Iterable;") => {
+            let list: Vec<Box3> = crate::jutil::elements(rt, a(0)).into_iter().map(|b| aabb_of(rt, b)).collect();
+            let (from, to, p) = (xyz(rt, a(1)), xyz(rt, a(2)), block_of(rt, a(3)));
+            match clip_boxes(&list, from, to, p) {
+                Some((at, face)) => block_hit(rt, at, face, p, false),
+                None => V::NULL,
+            }
+        }
         // `Block.box`, in pixels; reached through any block class.
         (o, "box") if o.starts_with("net/minecraft/world/level/block/") && desc == "(DDDDDD)Lnet/minecraft/world/phys/shapes/VoxelShape;" => {
             let b = [d(0), d(1), d(2), d(3), d(4), d(5)].map(|x| x / 16.0);
@@ -431,6 +632,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             match n {
                 "isEmpty" => V::I(s.is_empty() as i32),
                 "$shape" => discrete(rt, a(0)),
+                // `clip(from, to, pos)`: where the segment hits the shape at `pos`; null for a miss.
+                "clip" => {
+                    let (from, to, p) = (xyz(rt, a(1)), xyz(rt, a(2)), block_of(rt, a(3)));
+                    match clip_shape(&s, from, to, p) {
+                        Some((at, face, inside)) => block_hit(rt, at, face, p, inside),
+                        None => V::NULL,
+                    }
+                }
                 "optimize" => shape(rt, &optimized(&s)),
                 "move" => {
                     let o = match desc {
@@ -1057,6 +1266,82 @@ mod tests {
         let empty = crate::jutil::new_list(&mut rt, Vec::new());
         let none = call(&mut rt, "encapsulatingPositions.(Ljava/lang/Iterable;)Ljava/util/Optional;", &[empty]);
         assert_eq!(rt.get_field(none, "value").r(), 0);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    #[test]
+    fn a_ray_through_the_level_stops_where_vanillas_does() {
+        use crate::host::MemoryHost;
+        const CLIP_CONTEXT: &str = "net/minecraft/world/level/ClipContext";
+        const HIT: &str = "net/minecraft/world/phys/BlockHitResult";
+        fn key(owner: &str, name: &str, desc: &str) -> &'static str {
+            format!("{owner}.{name}.{desc}").leak()
+        }
+        /// `level.clip(new ClipContext(from, to, block, fluid, null))`, read back through
+        /// `BlockHitResult`'s getters: where, the face, the block, inside, a miss.
+        fn ray(rt: &mut Rt, from: [f64; 3], to: [f64; 3], block: (&'static str, i32), fluid: (&'static str, i32)) -> ([f64; 3], u8, [i32; 3], bool, bool) {
+            let ctx = rt.new_object(CLIP_CONTEXT);
+            let (f, t) = (vec3(rt, from), vec3(rt, to));
+            let b = api::api_enum(rt, "net/minecraft/world/level/ClipContext$Block", block.0, block.1);
+            let fl = api::api_enum(rt, "net/minecraft/world/level/ClipContext$Fluid", fluid.0, fluid.1);
+            api::call(rt, key(CLIP_CONTEXT, "<init>", CLIP_CONTEXT_OF_ENTITY), &[ctx, f, t, b, fl, V::NULL]);
+            let level = crate::glue::level(rt);
+            let hit = api::call(rt, key("net/minecraft/world/level/Level", "clip", LEVEL_CLIP), &[level, ctx]);
+            let loc = api::call(rt, key(HIT, "getLocation", "()Lnet/minecraft/world/phys/Vec3;"), &[hit]);
+            let dir = api::call(rt, key(HIT, "getDirection", "()Lnet/minecraft/core/Direction;"), &[hit]);
+            let at = api::call(rt, key(HIT, "getBlockPos", "()Lnet/minecraft/core/BlockPos;"), &[hit]);
+            let inside = api::call(rt, key(HIT, "isInside", "()Z"), &[hit]).i() != 0;
+            let kind = api::call(rt, key(HIT, "getType", "()Lnet/minecraft/world/phys/HitResult$Type;"), &[hit]);
+            let miss = rt.get_field(kind, "$name");
+            let miss = rt.str_of(miss) == Some("MISS");
+            (xyz(rt, loc), crate::api_common::direction_ordinal(rt, dir), block_of(rt, at), inside, miss)
+        }
+        fn near(a: [f64; 3], b: [f64; 3]) -> bool {
+            (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9)
+        }
+        const COLLIDER: (&str, i32) = ("COLLIDER", 0);
+        const OUTLINE: (&str, i32) = ("OUTLINE", 1);
+        const NONE: (&str, i32) = ("NONE", 0);
+        const SOURCE_ONLY: (&str, i32) = ("SOURCE_ONLY", 1);
+        const ANY: (&str, i32) = ("ANY", 2);
+        const WATER: (&str, i32) = ("WATER", 3);
+        let (north, up) = (2, 1);
+        // A poppy (nothing to collide with, a 6x10x6 pixel outline) at z 1, stone at z 3, a water
+        // source at y 60 and a lava source beside it.
+        let mut h = MemoryHost::default();
+        h.blocks.insert([0, 64, 1], "minecraft:poppy".into());
+        h.collisions.insert([0, 64, 1], Vec::new());
+        h.outlines.insert([0, 64, 1], vec![[5. / 16., 0., 5. / 16., 11. / 16., 10. / 16., 11. / 16.]]);
+        h.blocks.insert([0, 64, 3], "minecraft:stone".into());
+        h.blocks.insert([0, 60, 0], "minecraft:water[level=0]".into());
+        h.blocks.insert([2, 60, 0], "minecraft:lava[level=0]".into());
+        h.fluid_tags.insert("minecraft:water".into(), vec!["minecraft:water".into(), "minecraft:flowing_water".into()]);
+        let mut rt = Rt::new();
+        crate::install();
+        rt.with_host(&mut h, |rt| {
+            let (from, to) = ([0.5, 64.5, -0.5], [0.5, 64.5, 5.5]);
+            // What collides: through the poppy to the stone's north face.
+            assert!(matches!(ray(rt, from, to, COLLIDER, NONE), (at, f, [0, 64, 3], false, false) if near(at, [0.5, 64.5, 3.0]) && f == north));
+            // What a player targets: the poppy's outline, 5 pixels into its block.
+            assert!(matches!(ray(rt, from, to, OUTLINE, NONE), (at, f, [0, 64, 1], false, false) if near(at, [0.5, 64.5, 1.3125]) && f == north));
+            // Nothing on the way: a miss at the end, facing back, in the block holding it.
+            assert!(matches!(ray(rt, [10.5, 80.5, 0.5], [10.5, 80.5, 3.5], COLLIDER, NONE), (at, f, [10, 80, 3], false, true) if near(at, [10.5, 80.5, 3.5]) && f == north));
+            // Down onto water: its surface stands 8/9 of a block high (a source's amount over 9, in
+            // floats), unless the ray ignores fluids.
+            let (above, below) = ([0.5, 62.5, 0.5], [0.5, 58.5, 0.5]);
+            let surface = [0.5, 60.0 + f64::from(8f32 / 9f32), 0.5];
+            for fluid in [ANY, SOURCE_ONLY, WATER] {
+                assert!(matches!(ray(rt, above, below, COLLIDER, fluid), (at, f, [0, 60, 0], false, false) if near(at, surface) && f == up), "{fluid:?}");
+            }
+            assert!(matches!(ray(rt, above, below, COLLIDER, NONE), (at, _, _, false, true) if near(at, below)));
+            // Lava isn't water.
+            let (lava_above, lava_below) = ([2.5, 62.5, 0.5], [2.5, 58.5, 0.5]);
+            assert!(ray(rt, lava_above, lava_below, COLLIDER, WATER).4);
+            assert!(!ray(rt, lava_above, lava_below, COLLIDER, ANY).4);
+            // From inside the stone: a hit a thousandth of the way along, inside, on the face
+            // looking back.
+            assert!(matches!(ray(rt, [0.5, 64.5, 3.5], [0.5, 64.5, 5.5], COLLIDER, NONE), (at, f, [0, 64, 3], true, false) if near(at, [0.5, 64.5, 3.502]) && f == north));
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

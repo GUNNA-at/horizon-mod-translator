@@ -1036,7 +1036,8 @@ const GET_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviou
 
 /// `state.getCollisionShape(level, pos)` and `state.getShape(level, pos)`, args [state, level, pos,
 /// context]: for a collision, the game's own boxes when `state` is the block at `pos` (vanilla's
-/// and the content mods' shapes); else the mod block's own `getShape`; else a full block (air, none).
+/// and the content mods' shapes); else the mod block's own `getShape`; else, for an outline, the
+/// game's when `state` is the block at `pos`; else a full block (air, none).
 fn state_shape(rt: &mut Rt, text: &str, collision: bool, args: [V; 4]) -> V {
     let at = pos_of(rt, args[2]);
     if collision
@@ -1058,6 +1059,14 @@ fn state_shape(rt: &mut Rt, text: &str, collision: bool, args: [V; 4]) -> V {
             return shape;
         }
         rt.report_thrown("getShape");
+    }
+    // A vanilla block's outline, as the game has it where it stands.
+    if !collision
+        && let Some(h) = rt.host()
+        && h.block_state(at) == text
+        && let Some(boxes) = h.outline_boxes(at)
+    {
+        return crate::shapes::shape(rt, &boxes);
     }
     crate::shapes::shape(rt, &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]])
 }

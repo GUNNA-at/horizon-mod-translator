@@ -3676,6 +3676,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   `menus::tests::a_player_throws_a_stack_from_their_eyes_the_way_they_look` and
   `api_common::tests::a_block_entitys_update_packet_holds_its_update_tag`; the menu test's thrown stack now starts at
   vanilla's float eye height. 368 compat, 17 translator and 1 + 1 + 41 game tests pass.
+- [x] 2026-11-06 Part 13: `Level.clip`, a block's outline from the game, and the state ids fixed.
+  - Round 10's game build failed: the bundles' host asked `Game` for `native_state_from_text` and
+    `native_state_id_text`, which are the hook level's (`GameLevel`), not the game's. New `Game::native_state_id_of(text)`
+    and `native_state_of_id(id)` (`native_level_events.rs`, the same fragment) share `state_from_text` and the new
+    `state_id_text` with the hook level (`native_hooks.rs`).
+  - `Level.clip(ClipContext)` (41 mods, 113 uses; `BlockGetter.clip`), where a mod's ray through the world stops, was
+    missing. `shapes.rs` walks the blocks the segment crosses as 26.3's `BlockGetter.traverseBlocks` does (checked with
+    javap). In each block it clips the shape the context's block mode picks: the collision boxes, the outline for
+    `OUTLINE`, a full block in `minecraft:fall_damage_resetting` for `FALLDAMAGE_RESETTING`. When the fluid mode takes
+    the fluid there (`SOURCE_ONLY` a source, `ANY`, `WATER` one in the water tag), it also clips the fluid's box, as high
+    as `FluidState.getHeight` says. The nearer hit wins. A segment that starts inside a shape hits a thousandth of the
+    way in, inside, on the face looking back (`VoxelShape.clip`). A miss is at `to`, facing back along the segment
+    (`Direction.getApproximateNearest`, in floats).
+  - Also new: `VoxelShape.clip(from, to, pos)`, `AABB.clip(boxes, from, to, pos)`, and
+    `new ClipContext(from, to, block, fluid, entity)`, which takes the entity's collision context (the empty one for
+    null); the data-class table's form takes a context.
+  - The outline comes from the game. New `Host::outline_boxes(pos)` is answered by the new game helper
+    `native_outline_boxes(pos)` (`game/native_shapes.rs`, fragment `native_outline_boxes.json`): the block's
+    `getShape` with its random offset, what the player targets, relative to the block. A vanilla block's
+    `BlockState.getShape(level, pos)` (`api::state_shape`) reads it too when the state asked is the one at `pos`; it
+    was a full block.
+  - Not modelled: interaction shapes (a cauldron's inside, which vanilla prefers for the face hit), visual shapes apart
+    from collision ones (glass's), and the context's entity in collision shapes (scaffolding).
+  - The tests' `MemoryHost` gives water and lava no collision boxes (they were full cubes). `collisions` and `outlines`
+    set a position's own boxes.
+  Test `shapes::tests::a_ray_through_the_level_stops_where_vanillas_does`:
+  - a ray hits stone's north face at z 3, through a poppy, and the poppy's outline at z 1.3125;
+  - a ray through air misses at its end;
+  - water's surface is hit at 60 + 8/9 (in floats) with `ANY`, `SOURCE_ONLY` and `WATER`, and missed with `NONE`;
+  - lava isn't water;
+  - a ray from inside stone hits at z 3.502, inside.
+  369 compat, 17 translator and 1 + 1 + 41 game tests pass.
   - [ ] Outlines and collisions from shapes checked by hand in game; the 5 slow `mod_content` tests (need
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla

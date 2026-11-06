@@ -1,6 +1,8 @@
 {
   "hooks": [],
-  "rust_summary": "a mod's level events with their sound and particles (`native_level_event`).",
-  "doc_summary": "a mod's level event (`native_level_event`): vanilla's `LevelEvent` codes at a position with their data (a block\nbreaking 2001 with its state's id), played where the game runs and sent to a server's players near, as the game's own\nare. Bundles that use it need `\"hooks\": @API:native_level_event@`.",
-  "comments": ["crates/horizon-client/src/game/native_level_events.rs"]
+  "rust_summary": "a mod's level events with their sound and particles (`native_level_event`), the game's block state ids (`native_state_id_of`, `native_state_of_id`).",
+  "doc_summary": "a mod's level event (`native_level_event`): vanilla's `LevelEvent` codes at a position with their data (a block\nbreaking 2001 with its state's id), played where the game runs and sent to a server's players near, as the game's own\nare; the game's block state ids (`native_state_id_of`, `native_state_of_id`). Bundles that use it need `\"hooks\": @API:native_level_event@`.",
+  "comments": [
+    "crates/horizon-client/src/game/native_level_events.rs"
+  ]
 }

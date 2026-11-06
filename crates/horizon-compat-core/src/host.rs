@@ -521,6 +521,12 @@ pub trait Host {
     fn collision_boxes(&self, _pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
         None
     }
+    /// The outline boxes of the block at `pos` as the game has them (`BlockState.getShape` with the
+    /// empty context and its random offset: what a player targets), each relative to the block's
+    /// corner; None when the game can't say.
+    fn outline_boxes(&self, _pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
+        None
+    }
     /// Takes up to `count` of `item` from the acting player, the main hand first; what it took
     /// (`Player.setItemInHand` replacing what the hand holds).
     fn take_player_items(&mut self, _item: &str, _count: u32) -> u32 {
@@ -1044,6 +1050,10 @@ pub struct MemoryHost {
     pub orbs: Vec<([f64; 3], u32, Option<[f64; 3]>)>,
     /// What the acting player looks at (`player_pov_hit`).
     pub pov: Option<([i32; 3], u8, [f64; 3])>,
+    /// Collision boxes by position, where they aren't a full cube's (a flower's: none).
+    pub collisions: HashMap<[i32; 3], Vec<[f64; 6]>>,
+    /// Outline boxes by position, where they aren't the collision boxes (a flower's small box).
+    pub outlines: HashMap<[i32; 3], Vec<[f64; 6]>>,
     /// The partial tick drawing reads.
     pub partial: f32,
     /// What was drawn: model, pose, colour, light.
@@ -1222,10 +1232,21 @@ impl Host for MemoryHost {
     fn player_place(&self) -> Option<([f64; 3], f32, f32)> {
         self.place
     }
-    /// Air (and unset positions) has none; any other block is a full cube.
+    /// Those set in `collisions`; else air (and unset positions) and fluids have none, any other
+    /// block is a full cube.
     fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
-        let air = self.blocks.get(&pos).is_none_or(|b| b == "minecraft:air");
-        Some(if air { Vec::new() } else { vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]] })
+        if let Some(boxes) = self.collisions.get(&pos) {
+            return Some(boxes.clone());
+        }
+        let none = self.blocks.get(&pos).is_none_or(|b| {
+            let block = b.split('[').next().unwrap_or("");
+            matches!(block, "minecraft:air" | "minecraft:water" | "minecraft:lava")
+        });
+        Some(if none { Vec::new() } else { vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]] })
+    }
+    /// Those set in `outlines`; else the collision boxes.
+    fn outline_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {
+        self.outlines.get(&pos).cloned().or_else(|| self.collision_boxes(pos))
     }
     fn take_player_items(&mut self, item: &str, count: u32) -> u32 {
         let Some((held, n)) = &mut self.held else { return 0 };

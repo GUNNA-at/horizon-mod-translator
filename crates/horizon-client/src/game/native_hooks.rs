@@ -3990,27 +3990,7 @@ impl GameLevel<'_> {
     /// `state`) in the form translated Java mods read. Air for an id past the
     /// state table. API 81.
     pub(super) fn native_state_id_text(&self, state: BlockStateId) -> String {
-        let Some(info) = self.registry.state(state) else {
-            return "minecraft:air".to_owned();
-        };
-        let mut props: Vec<(&String, &String)> = info.properties.iter().collect();
-        props.sort();
-        if props.is_empty() {
-            return info.name.to_string();
-        }
-        // No macro here: horizon-mixins refuses a hook point's body with one.
-        let mut out = info.name.to_string();
-        out.push('[');
-        for (i, (k, v)) in props.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            out.push_str(k);
-            out.push('=');
-            out.push_str(v);
-        }
-        out.push(']');
-        out
+        state_id_text(self.registry, state)
     }
     /// The block state text names, as [`Self::native_state_text`] writes it
     /// (properties not named keep the block's defaults): what a hook answers
@@ -6247,9 +6227,35 @@ fn mod_menu(name: &str) -> Option<(&'static str, usize)> {
         .or_else(|| horizon_client::containers::mod_menu_type(name).map(|m| (m.id, m.slots)))
 }
 
+/// The state `state` as text (`create:shaft[axis=y]`, its properties sorted),
+/// the form translated Java mods read; air for an id past the state table.
+pub(super) fn state_id_text(registry: &BlockRegistry, state: BlockStateId) -> String {
+    let Some(info) = registry.state(state) else {
+        return "minecraft:air".to_owned();
+    };
+    let mut props: Vec<(&String, &String)> = info.properties.iter().collect();
+    props.sort();
+    if props.is_empty() {
+        return info.name.to_string();
+    }
+    // No macro here: horizon-mixins refuses a hook point's body with one.
+    let mut out = info.name.to_string();
+    out.push('[');
+    for (i, (k, v)) in props.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(k);
+        out.push('=');
+        out.push_str(v);
+    }
+    out.push(']');
+    out
+}
+
 /// The state `text` names (`create:shaft[axis=y]`; properties not named keep
 /// the block's defaults); none for an unknown block, property or value.
-fn state_from_text(registry: &BlockRegistry, text: &str) -> Option<BlockStateId> {
+pub(super) fn state_from_text(registry: &BlockRegistry, text: &str) -> Option<BlockStateId> {
     let (name, props) = match text.split_once('[') {
         Some((n, rest)) => (n, rest.trim_end_matches(']')),
         None => (text, ""),

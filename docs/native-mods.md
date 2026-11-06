@@ -1130,7 +1130,17 @@ by the game's effect ids (`minecraft:speed`; a content mod's `<namespace>:<path>
 - `native_level_event(event, pos, data)` makes level event `event` at `pos` with `data`, vanilla's `LevelEvent` codes (a
   dispenser's click 1000, a door's sound 1005..., smoke 2000, a block breaking 2001 with its state's id in `data`, bone
   meal 1505...): played where the game runs, and on a server sent to its players near, as the game's own events are.
-  The ids of block states are the game's (`native_state_from_text` and `native_state_id_text` read them either way).
+- `native_state_id_of(text)` is the game's id of the block state `text` names (as `native_state_text` writes it): what
+  `Block.getId` gives and event 2001 carries. None for an unknown block, property or value. `native_state_of_id(id)` is
+  the state of an id as text (`Block.stateById`), air past the state table.
+
+### Block shapes
+
+`crates/horizon-client/src/game/native_shapes.rs`: a block's shapes as the game has them, for a mod to read.
+
+- `native_outline_boxes(pos)` is the outline of the block at `pos`: its `getShape` with the empty context and its random
+  offset (a flower's, grass's), what a player targets and the game's own rays stop at, as boxes relative to the block's
+  corner. A mod's `Level.clip` with `ClipContext.Block.OUTLINE` clips these.
 
 ### Loot tables
 

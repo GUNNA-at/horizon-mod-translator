@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "a block's outline for mods (`native_outline_boxes`).",
+  "doc_summary": "a block's outline (`native_outline_boxes(pos)`): its `getShape` with its random offset, what a player\ntargets and the game's own ray stops at, as boxes relative to the block's corner. Bundles that use it need\n`\"hooks\": @API:native_outline_boxes@`.",
+  "comments": ["crates/horizon-client/src/game/native_shapes.rs"]
+}
