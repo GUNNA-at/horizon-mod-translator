@@ -174,7 +174,8 @@ pub(crate) fn damage(rt: &Rt, stack: V) -> i32 {
 }
 
 /// The damage at which `stack` breaks (`minecraft:max_damage`): the game's word for a stack from a
-/// hand, else its mod item's `durability`; 0 for none.
+/// hand, else its mod item's `durability`, else the game's for a vanilla item (an iron sword's
+/// 250); 0 for none.
 pub(crate) fn max_damage(rt: &Rt, stack: V) -> i32 {
     if stack.r() == 0 {
         return 0;
@@ -184,7 +185,11 @@ pub(crate) fn max_damage(rt: &Rt, stack: V) -> i32 {
     }
     let item = rt.get_field(stack, "$item");
     let props = if item.r() != 0 { rt.get_field(item, "$properties") } else { V::NULL };
-    if props.r() == 0 { 0 } else { rt.get_field(props, "$durability").i() }
+    if props.r() != 0 {
+        return rt.get_field(props, "$durability").i();
+    }
+    let name = crate::api_common::item_like_name(rt, item);
+    rt.host().and_then(|h| h.item_max_damage(&name)).map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX))
 }
 
 fn set_damage(rt: &mut Rt, stack: V, n: i32) {
@@ -1010,5 +1015,46 @@ mod tests {
         let read = api::call(&mut rt, get, &[w, progress]);
         assert_eq!(rt.get_field(read, "value"), V::I(12));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A stack a mod makes of a vanilla tool wears as the game's: its durability is the game's
+    /// (`max_damage`), and a map or another stack's patch carries its damage.
+    #[test]
+    fn a_vanilla_tools_stack_has_the_games_durability() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = crate::host::MemoryHost::default();
+        host.max_damage.insert("minecraft:iron_sword".into(), 250);
+        let damage = api::get_static(&mut rt, "net/minecraft/core/component/DataComponents.DAMAGE");
+        let max = api::get_static(&mut rt, "net/minecraft/core/component/DataComponents.MAX_DAMAGE");
+        let (sword, copy, built) = rt.with_host(&mut host, |rt| {
+            let sword = api_common::stack(rt, "minecraft:iron_sword", 1);
+            api::call(rt, "net/minecraft/world/item/ItemStack.setDamageValue.(I)V", &[sword, V::I(5)]);
+            let copy = api_common::stack(rt, "minecraft:iron_sword", 1);
+            let patch = api::call(rt, "net/minecraft/world/item/ItemStack.getComponentsPatch.()Lnet/minecraft/core/component/DataComponentPatch;", &[sword]);
+            api::call(rt, "net/minecraft/world/item/ItemStack.applyComponents.(Lnet/minecraft/core/component/DataComponentPatch;)V", &[copy, patch]);
+            let b = api::call(rt, "net/minecraft/core/component/DataComponentMap.builder.()Lnet/minecraft/core/component/DataComponentMap$Builder;", &[]);
+            let seven = boxed(rt, 7);
+            api::call(rt, "net/minecraft/core/component/DataComponentMap$Builder.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Lnet/minecraft/core/component/DataComponentMap$Builder;", &[b, damage, seven]);
+            let map = api::call(rt, "net/minecraft/core/component/DataComponentMap$Builder.build.()Lnet/minecraft/core/component/DataComponentMap;", &[b]);
+            let built = api_common::stack(rt, "minecraft:iron_sword", 1);
+            api::call(rt, "net/minecraft/world/item/ItemStack.applyComponents.(Lnet/minecraft/core/component/DataComponentMap;)V", &[built, map]);
+            (sword, copy, built)
+        });
+        let read = |rt: &mut Rt, host: &mut crate::host::MemoryHost, key: &'static str, s: V| rt.with_host(host, |rt| api::call(rt, key, &[s]));
+        let value = "net/minecraft/world/item/ItemStack.getDamageValue.()I";
+        assert_eq!(read(&mut rt, &mut host, "net/minecraft/world/item/ItemStack.getMaxDamage.()I", sword), V::I(250));
+        assert_eq!(read(&mut rt, &mut host, "net/minecraft/world/item/ItemStack.isDamageableItem.()Z", sword), V::I(1));
+        assert_eq!(read(&mut rt, &mut host, value, sword), V::I(5));
+        assert_eq!(read(&mut rt, &mut host, value, copy), V::I(5), "the patch carries the damage");
+        assert_eq!(read(&mut rt, &mut host, value, built), V::I(7), "the map sets it");
+        // The stack's map holds both, as vanilla's does for a damaged sword.
+        let view = read(&mut rt, &mut host, "net/minecraft/world/item/ItemStack.getComponents.()Lnet/minecraft/core/component/DataComponentMap;", sword);
+        let has = "net/minecraft/core/component/DataComponentMap.has.(Lnet/minecraft/core/component/DataComponentType;)Z";
+        let held = rt.with_host(&mut host, |rt| (api::call(rt, has, &[view, damage]), api::call(rt, has, &[view, max])));
+        assert_eq!(held, (V::I(1), V::I(1)));
+        // A stick takes none.
+        let stick = rt.with_host(&mut host, |rt| api_common::stack(rt, "minecraft:stick", 1));
+        assert_eq!(read(&mut rt, &mut host, "net/minecraft/world/item/ItemStack.isDamageableItem.()Z", stick), V::I(0));
     }
 }

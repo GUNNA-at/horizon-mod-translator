@@ -680,6 +680,11 @@ pub trait Host {
     fn item_stack_limit(&self, _item: &str) -> Option<u32> {
         None
     }
+    /// The damage at which `item` breaks (its `max_damage`: 250 for an iron sword), 0 for one
+    /// without durability; None when the game doesn't know it.
+    fn item_max_damage(&self, _item: &str) -> Option<u32> {
+        None
+    }
     /// The recipes of a type outside `minecraft` (`create:pressing`): each one's id and its file as
     /// JSON text, the world's data packs merged and load conditions held. Empty outside a world.
     fn recipes_of_type(&self, _kind: &str) -> Vec<(String, String)> {
@@ -1465,6 +1470,9 @@ impl Host for MemoryHost {
     }
     fn item_stack_limit(&self, item: &str) -> Option<u32> {
         Some(self.stack_limits.get(item).copied().unwrap_or(64))
+    }
+    fn item_max_damage(&self, item: &str) -> Option<u32> {
+        self.max_damage.get(item).copied()
     }
     fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {
         self.recipes.get(kind).cloned().unwrap_or_default()

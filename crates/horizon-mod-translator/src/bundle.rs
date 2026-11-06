@@ -520,6 +520,9 @@ fn client_host(c: &str, id: &str) -> String {
         fn item_stack_limit(&self, item: &str) -> Option<u32> {{
             self.game.get().native_item_facts(item).map(|(_, limit)| limit)
         }}
+        fn item_max_damage(&self, item: &str) -> Option<u32> {{
+            self.game.get().native_item_max_damage(item)
+        }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
             let boxes = self.game.get().mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
@@ -849,6 +852,9 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
         }}
         fn item_stack_limit(&self, item: &str) -> Option<u32> {{
             self.game.native_item_facts(item).map(|(_, limit)| limit)
+        }}
+        fn item_max_damage(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_max_damage(item)
         }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
@@ -1799,6 +1805,9 @@ fn game_host(c: &str, server_send: &str) -> String {
         fn item_stack_limit(&self, item: &str) -> Option<u32> {{
             self.game.native_item_facts(item).map(|(_, limit)| limit)
         }}
+        fn item_max_damage(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_max_damage(item)
+        }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
             let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
@@ -2330,6 +2339,9 @@ fn player_host(c: &str, server_effects: &str) -> String {
         }}
         fn item_stack_limit(&self, item: &str) -> Option<u32> {{
             self.game.native_item_facts(item).map(|(_, limit)| limit)
+        }}
+        fn item_max_damage(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_max_damage(item)
         }}
         fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
             let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];

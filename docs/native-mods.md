@@ -1152,6 +1152,15 @@ by the game's effect ids (`minecraft:speed`; a content mod's `<namespace>:<path>
   baby's as an adult's). Empty on a client. A mod's `Level.getEntitiesOfClass` and `getEntities` find these beside its
   own.
 
+### Item durability
+
+`crates/horizon-client/src/game/native_item_durability.rs`: the damage at which a vanilla item breaks.
+
+- `native_item_max_damage(item)` is the item's `max_damage` component (250 for an iron sword), 0 for an item without
+  durability, None for an item the game doesn't have. A stack a mod makes of a vanilla tool
+  (`new ItemStack(Items.IRON_SWORD)`) reads it in `getMaxDamage`, `isDamageableItem` and `getDamageValue`, so the tool
+  wears as the game's does.
+
 ### Loot tables
 
 Changing loot a mod didn't make, as NeoForge's `LootTableLoadEvent` and global loot modifiers and Fabric's
