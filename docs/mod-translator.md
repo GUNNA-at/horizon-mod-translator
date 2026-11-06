@@ -4500,6 +4500,20 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     draws on top of a block, its pose stack moved by minus the camera's place, is drawn there relative to the
     camera, facing up; the view matrix turns the camera's forward (west) to -z; a mod's own buffer source draws
     what was written when its batch ends.
+- [x] 2026-11-06 Part 37: the sprites the game's atlas lacks, and `Minecraft.getTextureAtlas`.
+  - The host says whether its atlas has a sprite (`Host::has_sprite`: the game's draw host looks it up where
+    `native_draw_faces` does, which leaves out a face whose sprite isn't there; true for a host that can't
+    tell). A face of written vertices whose sprite the atlas lacks is drawn from the white sprite in its corners'
+    colours: Create's outlines (`create:textures/special/blank.png` and the other special textures, which the
+    atlas doesn't pack) and a fluid sprite only a fluid type names show as their colour instead of nothing.
+  - `Minecraft.getTextureAtlas(atlas)` (40 of the pack's jars, 75 uses): a function from a location to the
+    atlas's sprite (`atlas::getSprite`: one object a sprite, in a cell of its own), as fluid renderers find a
+    fluid's still and flowing sprites (Create's `FluidRenderer`). One object's method as a function is a
+    combinator of its own (`functions.rs`, `compat:fn/bound`).
+  - Tests (`vertices::tests`): the fluid surface test takes the water's sprite as Create does,
+    `getTextureAtlas(BLOCK_ATLAS).apply(still)` (the same object as the atlas's); a mod's own type on
+    `create:textures/special/blank.png` draws white in its vertices' colours on a host whose atlas lacks it,
+    while a texture the atlas has is drawn from.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -273,8 +273,18 @@ fn inside(uv: [[f32; 2]; 4]) -> [[f32; 2]; 4] {
 }
 
 /// The sprite a face of `consumer` is drawn from and where each corner is in it (see the module's
-/// comment); None when its UVs are in no sprite's cell on the atlas.
+/// comment); the white sprite, its corners' colours alone, when the game's atlas lacks that sprite
+/// (a mod's `textures/special/`, an outline's blank texture). None when its UVs are in no sprite's
+/// cell on the atlas.
 fn sprite_and_uv(rt: &Rt, consumer: V, uv: [[f32; 2]; 4]) -> Option<(String, [[f32; 2]; 4])> {
+    let (sprite, uv) = named_sprite_and_uv(rt, consumer, uv)?;
+    if rt.host().is_some_and(|h| !h.has_sprite(&sprite)) {
+        return Some((WHITE_SPRITE.to_owned(), [[0.5, 0.5]; 4]));
+    }
+    Some((sprite, uv))
+}
+
+fn named_sprite_and_uv(rt: &Rt, consumer: V, uv: [[f32; 2]; 4]) -> Option<(String, [[f32; 2]; 4])> {
     if let Some(sprite) = rt.str_of(rt.get_field(consumer, "$sprite")) {
         return Some((sprite.to_owned(), inside(uv)));
     }
@@ -429,10 +439,10 @@ mod tests {
             .collect()
     }
 
-    /// A fluid's surface as Create's `FluidRenderer` writes it: four vertices into a translucent
-    /// buffer, each UV `sprite.getU/getV` of the still water's sprite. One face, lifted by the pose,
-    /// facing up, drawn from the water's sprite at the fractions the mod asked for, in the colour
-    /// and light it gave.
+    /// A fluid's surface as Create's `FluidRenderer` writes it: its still sprite from
+    /// `Minecraft.getTextureAtlas(BLOCK_ATLAS).apply(texture)`, four vertices into a translucent
+    /// buffer, each UV `sprite.getU/getV` of it. One face, lifted by the pose, facing up, drawn from
+    /// the water's sprite at the fractions the mod asked for, in the colour and light it gave.
     #[test]
     fn four_vertices_on_atlas_uvs_are_a_face_of_their_sprite() {
         let mut rt = Rt::new();
@@ -440,7 +450,14 @@ mod tests {
         let mut host = MemoryHost::default();
         rt.with_host(&mut host, |rt| {
             crate::render::sprite_named(rt, "minecraft:block/lava_still");
-            let water = crate::render::sprite_named(rt, "minecraft:block/water_still");
+            let mc = crate::api::call(rt, "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;", &[]);
+            let atlas_location = rt.string(BLOCK_ATLAS);
+            let get_atlas = "net/minecraft/client/Minecraft.getTextureAtlas.(Lnet/minecraft/resources/ResourceLocation;)Ljava/util/function/Function;";
+            let atlas = crate::api::call(rt, get_atlas, &[mc, atlas_location]);
+            let still = rt.string("minecraft:block/water_still");
+            // As the mod's `function.apply(still)` reaches an API object.
+            let water = crate::api::call(rt, "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", &[atlas, still]);
+            assert_eq!(water, crate::render::sprite_named(rt, "minecraft:block/water_still"));
             let ty = crate::render::render_type(rt, "translucent");
             let c = consumer(rt, ty);
             let pose = lifted_pose(rt);
@@ -569,5 +586,40 @@ mod tests {
         let drawn = quads(&host);
         assert_eq!(drawn.len(), 1, "{drawn:?}");
         assert_eq!(drawn[0].0.sprite, WHITE_SPRITE);
+    }
+
+    /// A mod's own type drawn with a texture the game's atlas lacks (Create's outlines, on
+    /// `create:textures/special/blank.png`) draws its faces white in their corners' colours, where
+    /// the game would leave them out; a texture the atlas has is drawn from.
+    #[test]
+    fn a_texture_the_atlas_lacks_is_drawn_white_in_the_vertices_colours() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost { sprites: vec!["block/stone".into(), "mymod:entity/beam".into()], ..MemoryHost::default() };
+        rt.with_host(&mut host, |rt| {
+            let builder = crate::api::call(rt, "net/minecraft/client/renderer/RenderType$CompositeState.builder.()Lnet/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder;", &[]);
+            let shard = rt.new_object(TEXTURE_SHARD);
+            let location = rt.string("create:textures/special/blank.png");
+            crate::api::call(rt, "net/minecraft/client/renderer/RenderStateShard$TextureStateShard.<init>.(Lnet/minecraft/resources/ResourceLocation;ZZ)V", &[shard, location, V::I(0), V::I(0)]);
+            crate::api::call(rt, "net/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder.setTextureState.(Lnet/minecraft/client/renderer/RenderStateShard$EmptyTextureStateShard;)Lnet/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder;", &[builder, shard]);
+            let state = crate::api::call(rt, "net/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder.createCompositeState.(Z)Lnet/minecraft/client/renderer/RenderType$CompositeState;", &[builder, V::I(0)]);
+            let name = rt.string("create:outline_solid");
+            let create = "net/minecraft/client/renderer/RenderType.create.(Ljava/lang/String;Lcom/mojang/blaze3d/vertex/VertexFormat;Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;IZZLnet/minecraft/client/renderer/RenderType$CompositeState;)Lnet/minecraft/client/renderer/RenderType$CompositeRenderType;";
+            let outline = crate::api::call(rt, create, &[name, V::NULL, V::NULL, V::I(256), V::I(0), V::I(0), state]);
+            let pose = lifted_pose(rt);
+            let c = consumer(rt, outline);
+            write_square(rt, c, pose, |_, k| [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]][k]);
+            let beam_texture = rt.string("mymod:textures/entity/beam.png");
+            let beam = crate::render::textured_render_type(rt, "entity_translucent", beam_texture);
+            let c = consumer(rt, beam);
+            write_square(rt, c, pose, |_, k| [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]][k]);
+            flush(rt, None);
+        });
+        let drawn = quads(&host);
+        assert_eq!(drawn.len(), 2, "{drawn:?}");
+        assert_eq!(drawn[0].0.sprite, WHITE_SPRITE);
+        assert_eq!(drawn[0].0.colors, [0xC8FF_8000; 4]);
+        assert_eq!(drawn[1].0.sprite, "mymod:entity/beam");
+        assert_eq!(drawn[1].0.uv, [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
     }
 }

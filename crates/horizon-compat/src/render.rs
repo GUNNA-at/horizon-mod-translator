@@ -1332,6 +1332,8 @@ fn snake(name: &str) -> String {
 
 const TEXTURE_ATLAS: &str = "net/minecraft/client/renderer/texture/TextureAtlas";
 const SPRITE: &str = "net/minecraft/client/renderer/texture/TextureAtlasSprite";
+const GET_SPRITE: &str =
+    "net/minecraft/client/renderer/texture/TextureAtlas.getSprite.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
 const SPRITE_CONTENTS: &str = "net/minecraft/client/renderer/texture/SpriteContents";
 pub const ATLAS_STITCHED: &str = "net/neoforged/neoforge/client/event/TextureAtlasStitchedEvent";
 
@@ -1410,6 +1412,12 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
     let a = |i| arg(args, i);
     Some(match (owner, name) {
         (ATLAS_STITCHED, "getAtlas") => rt.get_field(a(0), "$atlas"),
+        // `Minecraft.getTextureAtlas(atlas)`: its sprites by location (`atlas::getSprite`), as a fluid
+        // renderer finds a fluid's still and flowing sprites (one atlas of cells here).
+        ("net/minecraft/client/Minecraft", "getTextureAtlas") => {
+            let atlas = block_atlas(rt);
+            crate::functions::bound(rt, GET_SPRITE, atlas)
+        }
         (TEXTURE_ATLAS, "location") => rt.get_field(a(0), "$location"),
         (TEXTURE_ATLAS, "getSprite") => sprite(rt, a(1)),
         (SPRITE, n) if !matches!(n, "atlasLocation" | "contents") => {

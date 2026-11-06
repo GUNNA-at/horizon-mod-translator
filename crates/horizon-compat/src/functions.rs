@@ -66,6 +66,13 @@ pub(crate) fn block_item(rt: &mut Rt, block: V, properties: V) -> V {
     combinator(rt, "compat:fn/block_item", vec![block, properties])
 }
 
+/// One object's method as a function (`atlas::getSprite`): `key` called on `receiver` with the
+/// functional method's arguments.
+pub(crate) fn bound(rt: &mut Rt, key: &str, receiver: V) -> V {
+    let k = rt.string(key);
+    combinator(rt, "compat:fn/bound", vec![k, receiver])
+}
+
 /// A record component's accessor (`name`) as a function of the record.
 pub(crate) fn component(rt: &mut Rt, name: &str) -> V {
     let n = rt.string(name);
@@ -177,6 +184,15 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
                     V::NULL
                 }
             }
+        }
+        // One object's method as a function (`atlas::getSprite`): [key, receiver], on the receiver
+        // with the arguments.
+        "compat:fn/bound" => {
+            let k = rt.str_of(part(0)).unwrap_or("").to_owned();
+            let k: &'static str = rt.static_key(&k);
+            let mut all = vec![part(1)];
+            all.extend_from_slice(args);
+            crate::api::call(rt, k, &all)
         }
         // A method as a function (`Map.Entry::getKey`): [key], on the first argument with the rest.
         "compat:fn/method" => {

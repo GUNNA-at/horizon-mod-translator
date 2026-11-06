@@ -942,6 +942,10 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
         fn draw_model(&mut self, model: &{c}::host::Model, pose: &[f32; 16], color: u32, light: u32) -> bool {{
             self.model(model, pose, color, light, None)
         }}
+        // The sprites `native_draw_faces` finds (it leaves out a face whose sprite isn't there).
+        fn has_sprite(&self, name: &str) -> bool {{
+            self.game.gui.atlas.sprites.contains_key(name.trim_start_matches("minecraft:"))
+        }}
         // A model's faces as the game bakes them, for the mod to read, change and build its own
         // models from (`BakedModel.getQuads`).
         fn model_quads(&self, model: &{c}::host::Model) -> Option<std::sync::Arc<[{c}::host::Quad]>> {{

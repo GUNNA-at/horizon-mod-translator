@@ -701,6 +701,12 @@ pub trait Host {
     fn draw_model(&mut self, _model: &Model, _pose: &[f32; 16], _color: u32, _light: u32) -> bool {
         false
     }
+    /// Drawing: whether the game's atlas has sprite `name` (`create:special/blank`,
+    /// `minecraft:block/stone`); the game leaves out a face drawn from one it lacks. True for a host
+    /// that can't tell.
+    fn has_sprite(&self, _name: &str) -> bool {
+        true
+    }
     /// The faces of `model` as the game bakes it, every side's (`BakedModel.getQuads`): a state's
     /// model picked with seed 42, as vanilla draws a block in an entity's place. None when the game
     /// has no such model.
@@ -1221,6 +1227,9 @@ pub struct MemoryHost {
     pub payloads: Vec<(PayloadTarget, String, Vec<u8>)>,
     /// The items the game knows; when empty, every id is one.
     pub items: Vec<String>,
+    /// The sprites the game's atlas has (`block/stone`, `create:block/cogwheel`); when empty, every
+    /// one ([`Host::has_sprite`]).
+    pub sprites: Vec<String>,
     /// Items drawn: item, display context, pose, light.
     pub items_drawn: Vec<(String, u8, [f32; 16], u32)>,
     /// Items that place blocks.
@@ -1564,6 +1573,10 @@ impl Host for MemoryHost {
     fn draw_model(&mut self, model: &Model, pose: &[f32; 16], color: u32, light: u32) -> bool {
         self.drawn.push((model.clone(), *pose, color, light));
         true
+    }
+    fn has_sprite(&self, name: &str) -> bool {
+        let name = name.trim_start_matches("minecraft:");
+        self.sprites.is_empty() || self.sprites.iter().any(|s| s.trim_start_matches("minecraft:") == name)
     }
     fn model_quads(&self, model: &Model) -> Option<std::sync::Arc<[Quad]>> {
         match model {
