@@ -357,8 +357,78 @@ fn sheets_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
-/// `Sheets`' constants: its atlases and the materials it keeps.
+const MODEL_BAKERY: &str = "net/minecraft/client/resources/model/ModelBakery";
+
+/// `ModelBakery`'s materials, 1.21.1's: the fire, lava and water sprites a renderer draws by hand,
+/// on the block atlas (no sheet named), and the banner's and shield's bases on their sheets.
+const BAKERY_MATERIALS: [(&str, Option<&str>, &str); 8] = [
+    ("FIRE_0", None, "block/fire_0"),
+    ("FIRE_1", None, "block/fire_1"),
+    ("LAVA_FLOW", None, "block/lava_flow"),
+    ("WATER_FLOW", None, "block/water_flow"),
+    ("WATER_OVERLAY", None, "block/water_overlay"),
+    ("BANNER_BASE", Some("BANNER_SHEET"), "entity/banner_base"),
+    ("SHIELD_BASE", Some("SHIELD_SHEET"), "entity/shield_base"),
+    ("NO_PATTERN_SHIELD", Some("SHIELD_SHEET"), "entity/shield_base_nopattern"),
+];
+
+/// How many stages a block's cracks go through (`ModelBakery.DESTROY_STAGE_COUNT`).
+const DESTROY_STAGE_COUNT: u32 = 10;
+
+/// `ModelBakery`'s constants, one object each however often a mod reads it: its materials; the
+/// cracks' stages as sprites (`DESTROY_STAGES`), as textures (`BREAKING_LOCATIONS`) and as the
+/// `RenderType.crumbling` of each texture (`DESTROY_TYPES`, what catnip's buffers, Ponder and
+/// Flywheel draw a breaking block with); the missing model's location and variant; the models'
+/// folder (`MODEL_LISTER`); and the marker models a mod compares a model's root with.
+fn bakery_static(rt: &mut Rt, field: &str) -> Option<V> {
+    let key = format!("compat:model-bakery/{field}");
+    if let Some(&(_, sheet_field, texture)) = BAKERY_MATERIALS.iter().find(|(f, _, _)| *f == field) {
+        let atlas = sheet_field.map_or(BLOCKS, sheet);
+        return Some(rt.intern(key, |rt| material(rt, atlas, &format!("minecraft:{texture}"))));
+    }
+    let stage = |i: u32| format!("minecraft:block/destroy_stage_{i}");
+    let breaking = |i: u32| format!("minecraft:textures/block/destroy_stage_{i}.png");
+    Some(match field {
+        "DESTROY_STAGES" => rt.intern(key, |rt| {
+            let items = (0..DESTROY_STAGE_COUNT).map(|i| rt.string(&stage(i))).collect();
+            crate::jutil::new_list(rt, items)
+        }),
+        "BREAKING_LOCATIONS" => rt.intern(key, |rt| {
+            let items = (0..DESTROY_STAGE_COUNT).map(|i| rt.string(&breaking(i))).collect();
+            crate::jutil::new_list(rt, items)
+        }),
+        "DESTROY_TYPES" => rt.intern(key, |rt| {
+            let items = (0..DESTROY_STAGE_COUNT)
+                .map(|i| {
+                    let texture = rt.string(&breaking(i));
+                    crate::render::textured_render_type(rt, "crumbling", texture)
+                })
+                .collect();
+            crate::jutil::new_list(rt, items)
+        }),
+        "MISSING_MODEL_LOCATION" => rt.intern(key, |rt| rt.string("minecraft:builtin/missing")),
+        "MISSING_MODEL_VARIANT" => {
+            let location = bakery_static(rt, "MISSING_MODEL_LOCATION")?;
+            rt.intern(key, |rt| {
+                let variant = rt.string("missing");
+                crate::records::make(rt, "net/minecraft/client/resources/model/ModelResourceLocation", &[location, variant])
+            })
+        }
+        "MODEL_LISTER" => rt.intern(key, |rt| {
+            let folder = rt.string("models");
+            crate::api::call(rt, "net/minecraft/resources/FileToIdConverter.json.(Ljava/lang/String;)Lnet/minecraft/resources/FileToIdConverter;", &[folder])
+        }),
+        "GENERATION_MARKER" => rt.intern(key, |rt| crate::resources::marker_model(rt, "generation marker")),
+        "BLOCK_ENTITY_MARKER" => rt.intern(key, |rt| crate::resources::marker_model(rt, "block entity marker")),
+        _ => return None,
+    })
+}
+
+/// `Sheets`' constants: its atlases and the materials it keeps; and `ModelBakery`'s.
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    if owner == MODEL_BAKERY {
+        return bakery_static(rt, field);
+    }
     if owner != SHEETS {
         return None;
     }
@@ -861,6 +931,44 @@ mod tests {
         let rl = |ns: &str, p: &str| crate::jlang::string_hash(ns).wrapping_mul(31).wrapping_add(crate::jlang::string_hash(p));
         let expected = (31i32.wrapping_add(rl("minecraft", "textures/atlas/chest.png"))).wrapping_mul(31).wrapping_add(rl("minecraft", "entity/chest/normal"));
         assert_eq!(h(&mut rt, chest), expected);
+    }
+
+    #[test]
+    fn a_breaking_block_draws_with_vanillas_ten_crumbling_stages() {
+        let mut rt = Rt::new();
+        crate::install();
+        let bakery = |f: &str| Box::leak(format!("{MODEL_BAKERY}.{f}").into_boxed_str()) as &'static str;
+        // catnip's buffers, Ponder and Flywheel read the stages' types, one per stage of the ten.
+        let types = crate::api::get_static(&mut rt, bakery("DESTROY_TYPES"));
+        let locations = crate::api::get_static(&mut rt, bakery("BREAKING_LOCATIONS"));
+        let (types_v, locations_v) = (crate::jutil::elements(&rt, types), crate::jutil::elements(&rt, locations));
+        assert_eq!((types_v.len(), locations_v.len()), (10, 10));
+        assert_eq!(rt.str_of(locations_v[3]), Some("minecraft:textures/block/destroy_stage_3.png"));
+        let stages = crate::api::get_static(&mut rt, bakery("DESTROY_STAGES"));
+        let stage9 = crate::jutil::elements(&rt, stages)[9];
+        assert_eq!(rt.str_of(stage9), Some("minecraft:block/destroy_stage_9"));
+        // A stage's type is `RenderType.crumbling` of its texture, the very one a mod asking for it
+        // gets, with vanilla's 1536-byte buffer, sorted on upload.
+        let crumbling = crate::api::call(
+            &mut rt,
+            key("net/minecraft/client/renderer/RenderType", "crumbling", "(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/renderer/RenderType;"),
+            &[locations_v[3]],
+        );
+        assert_eq!(types_v[3], crumbling);
+        let fact = |rt: &mut Rt, name: &str, desc: &str| crate::api::call(rt, key("net/minecraft/client/renderer/RenderType", name, desc), &[crumbling]).i();
+        assert_eq!(fact(&mut rt, "bufferSize", "()I"), 1536);
+        assert_eq!(fact(&mut rt, "sortOnUpload", "()Z"), 1);
+        // A static field: the same list at every read.
+        assert_eq!(crate::api::get_static(&mut rt, bakery("DESTROY_TYPES")), types);
+        // Fire's first sprite, on the block atlas.
+        let fire = crate::api::get_static(&mut rt, bakery("FIRE_0"));
+        let atlas = crate::api::call(&mut rt, key(MATERIAL, "atlasLocation", "()Lnet/minecraft/resources/ResourceLocation;"), &[fire]);
+        let texture = crate::api::call(&mut rt, key(MATERIAL, "texture", "()Lnet/minecraft/resources/ResourceLocation;"), &[fire]);
+        assert_eq!((crate::neo::location(&rt, atlas), crate::neo::location(&rt, texture)), ("minecraft:textures/atlas/blocks.png".into(), "minecraft:block/fire_0".into()));
+        // The missing model's variant: `minecraft:builtin/missing#missing`.
+        let missing = crate::api::get_static(&mut rt, bakery("MISSING_MODEL_VARIANT"));
+        let variant = crate::api::call(&mut rt, key("net/minecraft/client/resources/model/ModelResourceLocation", "variant", "()Ljava/lang/String;"), &[missing]);
+        assert_eq!(rt.str_of(variant), Some("missing"));
     }
 
     #[test]

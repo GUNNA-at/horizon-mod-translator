@@ -940,6 +940,16 @@ fn direction_named(rt: &mut Rt, name: &str) -> Option<V> {
     Some(crate::api_common::direction(rt, i as i64))
 }
 
+/// One of `ModelBakery`'s marker models (`GENERATION_MARKER`, `BLOCK_ENTITY_MARKER`): a model
+/// with no elements and no parent, named for what it marks, which a mod compares a model's root
+/// with to tell a generated item model or a block entity's from the rest.
+pub(crate) fn marker_model(rt: &mut Rt, name: &str) -> V {
+    let m = block_model(rt, &serde_json::Value::Object(serde_json::Map::new()));
+    let n = rt.string(name);
+    rt.put_field(m, "name", n);
+    m
+}
+
 fn block_model(rt: &mut Rt, json: &serde_json::Value) -> V {
     let m = rt.new_object(BLOCK_MODEL);
     let mut elements = Vec::new();

@@ -5161,6 +5161,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     base a horse summoned with a compound keeps), and the armor lies beside it as an item. No new
     unmapped calls. Left in the round: Flywheel's GL calls, `DynamicTexture` (3), and
     `List.forEach` on null after `create:sync_edge_group`.
+- [x] 2026-11-06 Part 58: `ModelBakery`'s constants.
+  The `List.forEach` on null left in every Create round isn't Create's `sync_edge_group` packet, the
+  log line before it (Parts 56 and 57 named it after that). A round with
+  `HORIZON_COMPAT_BACKTRACE=List.forEach` shows it comes from Create's first world render
+  (`ClientEvents.onRenderWorld`): catnip's `DefaultSuperRenderTypeBuffer` starts its buffers with
+  `ModelBakery.DESTROY_TYPES.forEach(...)`, and the runtime had none of `ModelBakery`'s constants.
+  Measured over the pack (367 jars): `MISSING_MODEL_LOCATION` in 7 jars (9 reads),
+  `DESTROY_TYPES` 5 (10: catnip's buffers, Ponder's scenes, Flywheel's draw managers, Sable, Sodium),
+  `BANNER_BASE`, `MODEL_LISTER` and `GENERATION_MARKER` 4 each, `MISSING_MODEL_VARIANT` 3,
+  `BREAKING_LOCATIONS`, `FIRE_0`, `FIRE_1` and `BLOCK_ENTITY_MARKER` 2 each.
+  - compat `entity_render`: `ModelBakery`'s constants as 1.21.1 makes them, one object each however
+    often a mod reads it. The ten stages of a block's cracks as sprites (`DESTROY_STAGES`), textures
+    (`BREAKING_LOCATIONS`) and the `RenderType.crumbling` of each texture (`DESTROY_TYPES`, the same
+    object a mod asking for that type gets). The fire, lava and water materials on the block atlas,
+    the banner's and shield's bases on their sheets. The missing model's location and variant
+    (`minecraft:builtin/missing#missing`), the models' folder (`MODEL_LISTER`, `FileToIdConverter`),
+    and the two marker models (`GENERATION_MARKER`, `BLOCK_ENTITY_MARKER`: empty models named for what
+    they mark, which mods compare a model's root with; their GUI light isn't kept).
+  - Tests: `entity_render::tests::a_breaking_block_draws_with_vanillas_ten_crumbling_stages`.
+  - In game (the fluids round, `pumpgame.sh`, which logs in as every round does): the `List.forEach`
+    on null is gone from the round's unmapped calls. Left at login: Flywheel's GL calls and
+    `DynamicTexture` (3), both from Flywheel's own GL backend starting (`NoiseTextures`), which
+    Horizon doesn't run.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
