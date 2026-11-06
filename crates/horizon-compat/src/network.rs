@@ -1345,9 +1345,18 @@ const CONNECTION: &str = "net/minecraft/network/Connection";
 const SERVERBOUND_PAYLOAD: &str = "net/minecraft/network/protocol/common/ServerboundCustomPayloadPacket";
 
 /// `Minecraft.getConnection()`: the client's connection to its server while its player plays in a
-/// world (vanilla's `player.connection`), else null.
+/// world (vanilla's `player.connection`), else null. The server's thread sees it too, as
+/// NeoForge's single player has it (the integrated server runs in the client's JVM, `Dist` the
+/// client's): there once a player is in the server, the one acting in its own hook (whom the
+/// server's list leaves out then) or another. A mod asks it for the registries from either thread
+/// (Create's `GlobalRegistryAccess`, whose client way `Dist.CLIENT` picks), the server's own here.
 pub(crate) fn client_connection(rt: &mut Rt) -> V {
-    if !(crate::neo::is_client(rt) && crate::world_events::client_in_world(rt)) {
+    let connected = if crate::neo::is_client(rt) {
+        crate::world_events::client_in_world(rt)
+    } else {
+        rt.host().is_some_and(|h| h.player_id().is_some() || !h.players().is_empty())
+    };
+    if !connected {
         return V::NULL;
     }
     rt.intern("compat:client-connection".into(), |rt| rt.new_object(CLIENT_LISTENER))
@@ -2313,6 +2322,34 @@ mod tests {
         assert_eq!((host.payloads[0].0, host.payloads[0].1.as_str()), (PayloadTarget::Server, "test:speed"));
         // The game packet left unsent is counted under its class.
         assert_eq!(rt.unmapped.keys().copied().collect::<Vec<_>>(), ["net/minecraft/network/protocol/game/ServerboundSwingPacket.<sent>.()V"]);
+    }
+
+    /// The server's thread sees the client's connection as NeoForge's single player does: null
+    /// until a player is in the server (the integrated server starting), then there, whether the
+    /// player acts in its own hook (an item's use: the server's list leaves it out) or is listed,
+    /// and the registries it gives (Create's `GlobalRegistryAccess`:
+    /// `Minecraft.getInstance().getConnection().registryAccess()`) are the level's.
+    #[test]
+    fn the_server_thread_sees_the_clients_connection_once_a_player_is_in() {
+        let mut rt = Rt::new();
+        let connection = |rt: &mut Rt| {
+            let mc = crate::api::call(rt, "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;", &[]);
+            crate::api::call(rt, "net/minecraft/client/Minecraft.getConnection.()Lnet/minecraft/client/multiplayer/ClientPacketListener;", &[mc])
+        };
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| assert_eq!(connection(rt), V::NULL, "nobody in the server yet"));
+        let mut acting = MemoryHost { player_id: Some(0xa), ..MemoryHost::default() };
+        rt.with_host(&mut acting, |rt| assert_ne!(connection(rt), V::NULL, "a player using an item"));
+        host.players.push((0xa, [0.5, 64.0, 0.5]));
+        rt.with_host(&mut host, |rt| {
+            let conn = connection(rt);
+            assert_ne!(conn, V::NULL);
+            let access = crate::api::call(rt, "net/minecraft/client/multiplayer/ClientPacketListener.registryAccess.()Lnet/minecraft/core/RegistryAccess$Frozen;", &[conn]);
+            let level = crate::glue::level(rt);
+            let levels = crate::api::call(rt, "net/minecraft/world/level/Level.registryAccess.()Lnet/minecraft/core/RegistryAccess;", &[level]);
+            assert_ne!(access, V::NULL);
+            assert_eq!(access, levels, "the level's registries");
+        });
     }
 
     /// A server mod sends a player a payload on the player's connection (`player.connection.send(new

@@ -4888,6 +4888,40 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     get RegistryAccess` (Create's `GlobalRegistryAccess` asks the client's connection for the
     registries, as `Dist` is the client's, and the server's thread had none), and the search went
     on asking the other slots after the throw: Part 52.
+- [x] 2026-11-06 Part 52: the client's connection on the server's thread; an exception leaves a combined function.
+  Measured in game (Part 51's potato round): the potato cannon's ammo test threw `Could not get
+  RegistryAccess`. Create's `GlobalRegistryAccess` asks `Minecraft.getInstance().getConnection()`
+  for the registries (its client way, which `Dist.CLIENT` picks, as in NeoForge's single player),
+  and on the server's thread that was null here; the ammo search then went on asking the other
+  slots after the throw. Over the pack: 67 jars call `Minecraft.getConnection`, 25 ask the client's
+  connection for its registries (`ClientPacketListener.registryAccess`).
+  - `Minecraft.getConnection()` on the server's thread: the client's connection once a player is
+    in the server, as NeoForge's integrated server sees it (it runs in the client's JVM): the one
+    acting in its own hook (an item's use, where the server's list leaves it out) or another; null
+    before, while the server starts. Its registries are the level's.
+  - An exception leaves `Predicate.or` and `and` (Guava's too), `Function.andThen` and `compose`,
+    and `Consumer.andThen` as it leaves Java's default methods: the parts after the one that threw
+    aren't run. The ammo search (`getProjectile`) ends where a weapon's test throws, the exception
+    the caller's, no listener told.
+  - An entity's main arm (`getMainArm`, the barrel's side for Create's gadgets), a mod class's own
+    aside: the right one, vanilla's default (the game tells neither a player's option nor a mob's
+    handedness).
+  - Traces for a round (`HORIZON_COMPAT_TRACE`): a mod item's `use` and its result, and each hurt a
+    mod deals a vanilla entity (by how much, taken or refused).
+  - Not modelled: a payload sent on the client's connection from the server's thread (vanilla's
+    goes to the server as the local player's; here it isn't sent).
+  - Tests: `network::tests::the_server_thread_sees_the_clients_connection_once_a_player_is_in`,
+    `functions::tests::a_part_that_throws_ends_the_combined_call`,
+    `projectiles::tests::an_exception_in_a_weapons_ammo_test_ends_the_search`.
+  - In game (the potato round; its cow now tagged and mob spawning off by 26.3's `spawn_mobs`: the
+    earlier rounds' `@e[type=cow,limit=1]` read another, spawned cow, whose health stood at 10):
+    Create's potato cannon fires each of its 3 shots (`use`: SUCCESS), the client draws the flying
+    potato, and two hit the cow for 5 each (the potato type's `damage`), which dies of them, its
+    loot on the ground. No uncaught throws. Left for the shot: the potato's recovery drop
+    (`spawnAtLocation`), the cow's knockback (`LivingEntity.knockback`), `setLastHurtMob`,
+    `EnchantmentHelper.doPostAttackEffects`, the projectile's saved data; 6 of Create's 25
+    projectile types are left out (their effects' `mob_effect` holders and food properties are not
+    read by the codecs yet).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

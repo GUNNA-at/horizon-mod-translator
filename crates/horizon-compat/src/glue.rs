@@ -662,6 +662,9 @@ pub fn use_item(rt: &mut Rt, host: &mut dyn Host, item: &str, hand: u8) -> bool 
             return false;
         }
         let result = rt.get_field(r, "$result");
+        if Rt::tracing() {
+            eprintln!("horizon-compat: {item} used: {}", rt.str_of(result).unwrap_or("?"));
+        }
         let took = rt.str_of(result).is_some_and(|n| matches!(n, "SUCCESS" | "CONSUME" | "SUCCESS_NO_ITEM_USED" | "CONSUME_PARTIAL"));
         // A use over time it started (`startUsingItem`) is the game's to run: the click goes on to
         // it, whatever the result.

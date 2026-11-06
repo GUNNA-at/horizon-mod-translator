@@ -2663,6 +2663,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/world/entity/player/Inventory", "getSelectionSize") => V::I(9),
         // Item cooldowns aren't kept for a mod's uses yet: none is ever cooling down.
         (o, "getCooldowns") if is_player(o) => rt.intern("compat:cooldowns".into(), |rt| rt.new_object("net/minecraft/world/item/ItemCooldowns")),
+        // An entity's main arm (`getMainArm`), a mod class's own aside: the right one, vanilla's
+        // default (a player's comes from its client's options, a mob is left-handed when born so:
+        // the game tells neither).
+        (o, "getMainArm") if is_player(o) => crate::api::get_static(rt, "net/minecraft/world/entity/HumanoidArm.RIGHT"),
         ("net/minecraft/world/item/ItemCooldowns", "addCooldown" | "removeCooldown") => V::Void,
         ("net/minecraft/world/item/ItemCooldowns", "isOnCooldown") => V::I(0),
         ("net/minecraft/world/item/ItemCooldowns", "getCooldownPercent") => V::F(0.0),

@@ -744,6 +744,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "hurt" | "hurtServer" => {
             let amount = a(args.len() - 1).f();
             let hurt = with_host(rt, |h| h.hurt_entity(id, amount)).unwrap_or(false);
+            if Rt::tracing() {
+                eprintln!("horizon-compat: {kind} {id} hurt by {amount}: {}", if hurt { "taken" } else { "refused" });
+            }
             if hurt {
                 let view = rt.host().and_then(|h| h.entity(id));
                 match view {

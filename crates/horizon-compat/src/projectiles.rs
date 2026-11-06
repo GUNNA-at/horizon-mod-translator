@@ -910,7 +910,9 @@ fn vec3(rt: &mut Rt, p: [f64; 3]) -> V {
 /// else the first stack in its inventory it takes (`getAllSupportedProjectiles`), else in creative
 /// the weapon's default (`getDefaultCreativeAmmo`), each the weapon's own where its class has one;
 /// none at all, unheard, for an item that is no `ProjectileWeaponItem`. A monster's: what it holds
-/// that the weapon takes, else an arrow. Any other entity's: none.
+/// that the weapon takes, else an arrow. Any other entity's: none. An exception the weapon's own
+/// methods throw (a predicate reading the registries before there are any) ends the search
+/// there, as it leaves the JVM's: pending, with nothing found and nobody told.
 fn ammo(rt: &mut Rt, e: V, weapon: V) -> V {
     let item = api::call(rt, GET_ITEM, &[weapon]);
     let shoots = rt.instance_of(item, WEAPON);
@@ -921,11 +923,14 @@ fn ammo(rt: &mut Rt, e: V, weapon: V) -> V {
         player_ammo(rt, e, item, weapon)
     } else if shoots && rt.instance_of(e, MONSTER) {
         let takes = api::virtual_call(rt, HELD_AMMO, &[item, weapon]);
-        let held = held_ammo(rt, e, takes);
-        if crate::api_common::stack_empty(rt, held) { crate::api_common::stack(rt, "minecraft:arrow", 1) } else { held }
+        let held = if rt.thrown.is_some() { V::NULL } else { held_ammo(rt, e, takes) };
+        if rt.thrown.is_some() || !crate::api_common::stack_empty(rt, held) { held } else { crate::api_common::stack(rt, "minecraft:arrow", 1) }
     } else {
         crate::menus::empty(rt)
     };
+    if rt.thrown.is_some() {
+        return V::NULL;
+    }
     crate::world_events::get_projectile(rt, e, weapon, found)
 }
 
@@ -934,14 +939,24 @@ fn ammo(rt: &mut Rt, e: V, weapon: V) -> V {
 /// armour, its off hand), each the slot's own stack, so what the mod takes from it is taken there.
 fn player_ammo(rt: &mut Rt, player: V, item: V, weapon: V) -> V {
     let takes = api::virtual_call(rt, HELD_AMMO, &[item, weapon]);
+    if rt.thrown.is_some() {
+        return V::NULL;
+    }
     let held = held_ammo(rt, player, takes);
-    if !crate::api_common::stack_empty(rt, held) {
+    if rt.thrown.is_some() || !crate::api_common::stack_empty(rt, held) {
         return held;
     }
     let takes = api::virtual_call(rt, ALL_AMMO, &[item, weapon]);
+    if rt.thrown.is_some() {
+        return V::NULL;
+    }
     for slot in 0..=40 {
         let s = crate::menus::inventory_get(rt, slot);
-        if rt.call_functional(TEST, takes, &[s]).i() != 0 {
+        let taken = rt.call_functional(TEST, takes, &[s]).i() != 0;
+        if rt.thrown.is_some() {
+            return V::NULL;
+        }
+        if taken {
             return s;
         }
     }
@@ -958,7 +973,11 @@ fn held_ammo(rt: &mut Rt, shooter: V, takes: V) -> V {
     for hand in ["net/minecraft/world/InteractionHand.OFF_HAND", "net/minecraft/world/InteractionHand.MAIN_HAND"] {
         let hand = api::get_static(rt, hand);
         let s = api::virtual_call(rt, IN_HAND, &[shooter, hand]);
-        if rt.call_functional(TEST, takes, &[s]).i() != 0 {
+        let taken = rt.call_functional(TEST, takes, &[s]).i() != 0;
+        if rt.thrown.is_some() {
+            return V::NULL;
+        }
+        if taken {
             return s;
         }
     }
@@ -1256,6 +1275,8 @@ mod tests {
 
     const SLING: &str = "test/Sling";
     const SNOWBALLS: &str = "test/SnowballsOnly";
+    const CURSED: &str = "test/CursedSling";
+    const REGISTRY_LESS: &str = "test/RegistryLessAmmo";
     const SWAP: &str = "test/AmmoSwap";
     const SNOWBALL_TEST: &str = "test.(Ljava/lang/Object;)Z";
     const ACCEPT: &str = "accept.(Ljava/lang/Object;)V";
@@ -1265,10 +1286,18 @@ mod tests {
 
     /// The tests' weapon, a sling, takes snowballs (its own `getAllSupportedProjectiles()`, the
     /// one `ProjectileWeaponItem` leaves abstract); a listener of `LivingGetProjectileEvent` puts
-    /// two arrows in place of what was found, noting the weapon it was told of.
+    /// two arrows in place of what was found, noting the weapon it was told of. A cursed sling's
+    /// ammo test throws, as Create's does where it finds no registries, counting its runs.
     fn ammo_vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
         match (rt.class_of(args[0]), short) {
             (SLING, s) if s == ALL_AMMO_PLAIN.1 => rt.new_object(SNOWBALLS),
+            (CURSED, s) if s == ALL_AMMO_PLAIN.1 => rt.new_object(REGISTRY_LESS),
+            (REGISTRY_LESS, SNOWBALL_TEST) => {
+                let runs = rt.statics.get("t.tests").map_or(0, |v| v.i());
+                rt.statics.insert("t.tests", V::I(runs + 1));
+                rt.throw_new("java/lang/IllegalStateException");
+                V::I(0)
+            }
             (SNOWBALLS, SNOWBALL_TEST) => {
                 let item = api::call(rt, GET_ITEM, &[args[1]]);
                 V::I(i32::from(crate::api_common::item_like_name(rt, item) == "minecraft:snowball"))
@@ -1357,5 +1386,31 @@ mod tests {
             let weapon = crate::hand::stack(rt, crate::hand::MAIN);
             assert_eq!(rt.statics.get("t.weapon"), Some(&weapon));
         });
+    }
+
+    /// An exception a weapon's ammo test throws ends the search as it leaves the JVM's: it is the
+    /// caller's, the test ran once (on the off hand's stack, the first one asked), and no
+    /// listener of `LivingGetProjectileEvent` was told.
+    #[test]
+    fn an_exception_in_a_weapons_ammo_test_ends_the_search() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(ammo_vcall);
+        rt.supers.insert(CURSED, WEAPON);
+        let cursed = rt.new_object(CURSED);
+        rt.registered.insert(("item".into(), "testmod:cursed_sling".into()), cursed);
+        let swap = rt.new_object(SWAP);
+        rt.listeners.push(("net/neoforged/neoforge/event/entity/living/LivingGetProjectileEvent".into(), swap));
+        let mut host = MemoryHost { held: Some(("testmod:cursed_sling".into(), 1)), inventory: true, creative: true, ..MemoryHost::default() };
+        host.slots.insert(5, HandStack { item: "minecraft:snowball".into(), count: 16, ..HandStack::default() });
+        rt.with_host(&mut host, |rt| {
+            let player = crate::api_common::acting_player(rt);
+            let weapon = crate::hand::stack(rt, crate::hand::MAIN);
+            api::call(rt, PLAYER_GET_PROJECTILE, &[player, weapon]);
+        });
+        let thrown = rt.thrown.take().expect("the exception is the caller's");
+        assert_eq!(rt.class_of(thrown), "java/lang/IllegalStateException");
+        assert_eq!(rt.statics.get("t.tests"), Some(&V::I(1)));
+        assert!(!rt.statics.contains_key("t.weapon"), "no listener told");
     }
 }

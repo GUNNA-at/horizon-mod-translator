@@ -129,8 +129,21 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
     let part = |i: usize| parts.get(i).copied().unwrap_or_default();
     let truth = |b: bool| V::I(b as i32);
     match kind {
-        "compat:fn/and" => truth(parts.iter().all(|&p| rt.call_functional(key, p, args).i() != 0)),
-        "compat:fn/or" => truth(parts.iter().any(|&p| rt.call_functional(key, p, args).i() != 0)),
+        // Java's default methods: a part that throws ends the call, the exception the caller's,
+        // and the parts after it aren't asked.
+        "compat:fn/and" | "compat:fn/or" => {
+            let all = kind == "compat:fn/and";
+            for &p in &parts {
+                let answer = rt.call_functional(key, p, args).i() != 0;
+                if rt.thrown.is_some() {
+                    return V::I(0);
+                }
+                if answer != all {
+                    return truth(answer);
+                }
+            }
+            truth(all)
+        }
         "compat:fn/not" => truth(rt.call_functional(key, part(0), args).i() == 0),
         "compat:fn/equal" => truth(rt.java_equals(part(0), args.first().copied().unwrap_or_default())),
         "compat:fn/null" => truth(args.first().is_none_or(|v| v.r() == 0)),
@@ -139,11 +152,16 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
         // `first.andThen(second)`: the first takes the arguments, the second its result.
         "compat:fn/then" => {
             let r = rt.call_functional(key, part(0), args);
+            if rt.thrown.is_some() {
+                return V::NULL;
+            }
             rt.call_functional(APPLY, part(1), &[r])
         }
         "compat:fn/both" => {
             rt.call_functional(key, part(0), args);
-            rt.call_functional(key, part(1), args);
+            if rt.thrown.is_none() {
+                rt.call_functional(key, part(1), args);
+            }
             V::Void
         }
         "compat:fn/identity" => args.first().copied().unwrap_or_default(),
@@ -335,7 +353,8 @@ mod tests {
         crate::api::call(rt, key, args)
     }
 
-    /// Lambda 1: `x -> x > 2`; lambda 2: `x -> x * 10`; lambda 3: counts its runs, gives 7.
+    /// Lambda 1: `x -> x > 2`; lambda 2: `x -> x * 10`; lambda 3: counts its runs, gives 7;
+    /// lambda 4: throws an `IllegalStateException`.
     fn lambdas(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
         Some(match id {
             1 => V::I((args[1].i() > 2) as i32),
@@ -344,6 +363,10 @@ mod tests {
                 let n = rt.statics.get("t.runs").copied().unwrap_or(V::I(0)).i();
                 rt.statics.insert("t.runs", V::I(n + 1));
                 V::I(7)
+            }
+            4 => {
+                rt.throw_new("java/lang/IllegalStateException");
+                V::I(0)
             }
             _ => return None,
         })
@@ -374,6 +397,28 @@ mod tests {
         assert_eq!(answers, vec![(1, 1, 0), (0, 1, 0), (0, 0, 1)]);
         let guava = c(&mut rt, "com/google/common/base/Predicates.and.(Lcom/google/common/base/Predicate;Lcom/google/common/base/Predicate;)Lcom/google/common/base/Predicate;", &[big, neither]);
         assert_eq!(rt.call_functional("com/google/common/base/Predicate.apply.(Ljava/lang/Object;)Z", guava, &[V::I(5)]).i(), 1);
+    }
+
+    /// A part that throws ends a combined call as Java's default methods do: the exception is
+    /// the caller's, and the parts after it are never run.
+    #[test]
+    fn a_part_that_throws_ends_the_combined_call() {
+        let mut rt = rt();
+        let throws = rt.lambda_id("t.throws", 4, Vec::new());
+        let counts = rt.lambda_id("t.counts", 3, Vec::new());
+        let combined = [
+            ("java/util/function/Predicate.or.(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;", TEST),
+            ("java/util/function/Predicate.and.(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;", TEST),
+            ("java/util/function/Function.andThen.(Ljava/util/function/Function;)Ljava/util/function/Function;", APPLY),
+            ("java/util/function/Consumer.andThen.(Ljava/util/function/Consumer;)Ljava/util/function/Consumer;", "java/util/function/Consumer.accept.(Ljava/lang/Object;)V"),
+        ];
+        for (make, run) in combined {
+            let both = c(&mut rt, make, &[throws, counts]);
+            rt.call_functional(run, both, &[V::I(1)]);
+            let thrown = rt.thrown.take().unwrap_or_else(|| panic!("{make}: the exception is the caller's"));
+            assert_eq!(rt.class_of(thrown), "java/lang/IllegalStateException");
+            assert_eq!(rt.statics.get("t.runs"), None, "{make}: the second part never ran");
+        }
     }
 
     #[test]
