@@ -4638,6 +4638,26 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - `getPlayerInfo(uuid)` (13 jars) gives null and `getOnlinePlayers()` an empty list. The game
     doesn't hand its tab list to the runtime yet; vanilla gives null for a player who isn't on it.
   - Test: `network::tests::a_payload_sent_on_the_clients_connection_goes_to_the_server`.
+- [x] 2026-11-06 Part 43: a server player's connection, and the light a renderer draws with.
+  - `serverPlayer.connection` is the player's connection, one per player object, which knows its
+    player (`connection.player`, `getPlayer()`). `send(packet)` on it (55 jars), or on its
+    `getConnection()`, sends a mod's payload, bare or in a `ClientboundCustomPayloadPacket`, to that
+    player on the mods' channel, as `PacketDistributor.sendToPlayer` does. A fake player has no
+    client, so nothing is sent. `hasChannel(type | id | payload)` (12 jars) is true for every channel
+    the server registered, since the client runs the same mods. `isAcceptingMessages()` is true.
+    `LocalPlayer.connection` is the client's connection from Part 42.
+  - A game packet a mod sends (`net/minecraft/...`, on either side) still isn't sent. It is now
+    counted as unmapped under its class (`ClientboundSetTitleTextPacket.<sent>`), so a round shows
+    which ones mods send.
+  - `LevelRenderer.getLightColor(level[, state], pos)` (36 jars, 25 calls in Create) is vanilla's
+    `sky << 20 | block << 4`. Each layer is what the level answers to `getBrightness`, so a mod's
+    own level gives its own light: Ponder's scene level answers 15, full light, as in vanilla.
+    Before, the stand-in 0 drew with the light of the block being rendered, whatever place the mod
+    asked about.
+    Vanilla also raises the block light to the state's own emission; the game's light already
+    includes it where the block stands.
+  - Tests: `network::tests::a_payload_sent_on_a_players_connection_goes_to_that_player`,
+    `render::tests::a_renderer_reads_the_light_its_level_gives`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

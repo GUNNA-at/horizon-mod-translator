@@ -1506,6 +1506,20 @@ fn type_fact(rt: &mut Rt, ty: V, fact: &str) -> V {
     }
 }
 
+const BRIGHTNESS: &str = "net/minecraft/world/level/BlockAndTintGetter.getBrightness.(Lnet/minecraft/world/level/LightLayer;Lnet/minecraft/core/BlockPos;)I";
+
+/// `LightTexture.pack(block, sky)` of `level`'s light at `pos`, as `LevelRenderer.getLightColor`
+/// reads it: each layer as the level answers `getBrightness`, so a mod's own level gives its own
+/// (Ponder's scene is lit full). Vanilla also raises the block light to the state's own emission,
+/// which the game's light already holds where the block stands.
+pub(crate) fn light_color(rt: &mut Rt, level: V, pos: V) -> i32 {
+    let sky = crate::api::get_static(rt, "net/minecraft/world/level/LightLayer.SKY");
+    let block = crate::api::get_static(rt, "net/minecraft/world/level/LightLayer.BLOCK");
+    let sky = crate::menus::virt(rt, BRIGHTNESS, level, &[sky, pos]).i();
+    let block = crate::menus::virt(rt, BRIGHTNESS, level, &[block, pos]).i();
+    sky << 20 | block << 4
+}
+
 fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     Some(match (owner, name) {
@@ -1571,6 +1585,11 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         ("net/minecraft/client/Minecraft", "getBlockRenderer") => single(rt, "net/minecraft/client/renderer/block/BlockRenderDispatcher"),
         ("net/minecraft/client/Minecraft", "getTimer") => single(rt, "net/minecraft/client/DeltaTracker"),
         ("net/minecraft/client/Minecraft", "getModelManager") => single(rt, "net/minecraft/client/resources/model/ModelManager"),
+        // `LevelRenderer.getLightColor(level[, state], pos)`: the light a renderer draws with there.
+        ("net/minecraft/client/renderer/LevelRenderer", "getLightColor") => {
+            let pos = if desc.contains("BlockState;") { a(2) } else { a(1) };
+            V::I(light_color(rt, a(0), pos))
+        }
         // The client's connection to its server while it plays (null before: vanilla's
         // `player.connection`), which sends the mods' payloads ([`crate::network`]).
         ("net/minecraft/client/Minecraft", "getConnection") => crate::network::client_connection(rt),
@@ -2473,5 +2492,34 @@ mod tests {
     fn inverse_undoes() {
         let m = mul4(&mul4(&translation(1.0, 2.0, 3.0), &quat_m4(quat_axis(0.7, 1.0, 2.0, 0.5))), &scaling(2.0, 2.0, 2.0));
         assert!(close(&mul4(&m, &invert4(&m)), &IDENTITY));
+    }
+
+    /// A scene's own level: it answers its light itself (Ponder's `getBrightness` gives 15).
+    fn scene_level(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        if short.starts_with("getBrightness.") { V::I(15) } else { crate::api::call(rt, key, args) }
+    }
+
+    /// `LevelRenderer.getLightColor`: the game's light where the level is the game's (block light 7
+    /// and sky 12 pack as `12 << 20 | 7 << 4`), and the level's own answer for a mod's level.
+    #[test]
+    fn a_renderer_reads_the_light_its_level_gives() {
+        let mut rt = Rt::new();
+        rt.vcall = Some(scene_level);
+        rt.supers.insert("test/SceneLevel", "net/minecraft/world/level/Level");
+        let mut host = crate::host::MemoryHost::default();
+        host.light.insert([1, 64, 2], (7, 12));
+        let light_color = "net/minecraft/client/renderer/LevelRenderer.getLightColor.(Lnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/core/BlockPos;)I";
+        let with_state = "net/minecraft/client/renderer/LevelRenderer.getLightColor.(Lnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;)I";
+        let (game, scene) = rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let pos = crate::api::block_pos(rt, 1, 64, 2);
+            let state = crate::api::state(rt, "minecraft:stone");
+            let game = [crate::api::call(rt, light_color, &[level, pos]), crate::api::call(rt, with_state, &[level, state, pos])];
+            let scene = rt.new_object("test/SceneLevel");
+            (game, crate::api::call(rt, light_color, &[scene, pos]))
+        });
+        assert_eq!(game, [V::I(12 << 20 | 7 << 4); 2]);
+        assert_eq!(scene, V::I(15_728_880));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

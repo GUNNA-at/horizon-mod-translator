@@ -1331,7 +1331,10 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | CLIENT_LISTENER
             | CLIENT_COMMON_LISTENER
             | CONNECTION
+            | SERVER_LISTENER
+            | SERVER_COMMON_LISTENER
     ) || (owner == REGISTER_PAYLOADS && name == "registrar")
+        || (matches!(owner, SERVER_PLAYER | LOCAL_PLAYER) && name == "$connection")
         || (owner == "net/minecraft/network/protocol/common/custom/CustomPacketPayload" && name == "createType")
         || (owner == "net/minecraft/resources/ResourceKey" && name == "streamCodec")
 }
@@ -1350,19 +1353,29 @@ pub(crate) fn client_connection(rt: &mut Rt) -> V {
     rt.intern("compat:client-connection".into(), |rt| rt.new_object(CLIENT_LISTENER))
 }
 
-/// A packet the client sends its server: a mod's payload (`new ServerboundCustomPayloadPacket(payload)`,
-/// or NeoForge's `send(payload)`) goes on the mods' channel, as `PacketDistributor.sendToServer`
-/// sends it. The game's own packets are the game's to send: one a mod builds is dropped.
-fn send_to_server(rt: &mut Rt, packet: V) {
+/// The mod's payload a packet carries: the packet itself when it is one (NeoForge's
+/// `send(payload)`), or what a custom-payload packet of class `wrapper` wraps (`new
+/// ServerboundCustomPayloadPacket(payload)`). The game's own packets carry none: they are the game's
+/// to send, and one a mod builds isn't sent. It is counted as unmapped, under its class
+/// (`ClientboundSetTitleTextPacket.<sent>`), so a round tells which ones mods send.
+fn mod_payload(rt: &mut Rt, packet: V, wrapper: &str) -> Option<V> {
     let class = rt.class_of(packet);
-    let payload = if class == SERVERBOUND_PAYLOAD {
+    let payload = if class == wrapper {
         rt.get_field(packet, "payload")
     } else if class.starts_with("net/minecraft/") {
+        let key = rt.static_key(&format!("{class}.<sent>.()V"));
+        crate::miss(rt, key);
         V::NULL
     } else {
         packet
     };
-    if payload.r() != 0 {
+    (payload.r() != 0).then_some(payload)
+}
+
+/// A packet the client sends its server: a mod's payload goes on the mods' channel, as
+/// `PacketDistributor.sendToServer` sends it.
+fn send_to_server(rt: &mut Rt, packet: V) {
+    if let Some(payload) = mod_payload(rt, packet, SERVERBOUND_PAYLOAD) {
         send(rt, PayloadTarget::Server, payload);
     }
 }
@@ -1386,15 +1399,96 @@ fn client_listener_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
-/// `Connection`: `send(packet)` as the listener's, connected while the client plays.
+/// `Connection`: `send(packet)` as its listener's: a server player's sends to that player, the
+// client's to its server, connected while the client plays.
 fn connection_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let listener = rt.get_field(a(0), "$listener");
     Some(match name {
+        "send" if listener.r() != 0 => {
+            send_to_player(rt, listener, a(1));
+            V::Void
+        }
         "send" => {
             send_to_server(rt, a(1));
             V::Void
         }
+        "isConnected" if listener.r() != 0 => V::I(1),
         "isConnected" => V::I(i32::from(client_connection(rt).r() != 0)),
+        _ => return None,
+    })
+}
+
+const SERVER_PLAYER: &str = "net/minecraft/server/level/ServerPlayer";
+const LOCAL_PLAYER: &str = "net/minecraft/client/player/LocalPlayer";
+const SERVER_LISTENER: &str = "net/minecraft/server/network/ServerGamePacketListenerImpl";
+const SERVER_COMMON_LISTENER: &str = "net/minecraft/server/network/ServerCommonPacketListenerImpl";
+const CLIENTBOUND_PAYLOAD: &str = "net/minecraft/network/protocol/common/ClientboundCustomPayloadPacket";
+
+/// `serverPlayer.connection`: the player's connection to their client, one for each player object,
+/// which knows its player (`connection.player`).
+fn player_connection(rt: &mut Rt, player: V) -> V {
+    if player.r() == 0 {
+        return V::NULL;
+    }
+    let c = rt.get_field(player, "$connection");
+    if c.r() != 0 {
+        return c;
+    }
+    let c = rt.new_object(SERVER_LISTENER);
+    rt.put_field(c, "player", player);
+    rt.put_field(player, "$connection", c);
+    c
+}
+
+/// A packet the server sends one player on their connection: a mod's payload, bare or in a
+/// `ClientboundCustomPayloadPacket`, goes to that player on the mods' channel, as
+/// `PacketDistributor.sendToPlayer` sends it. A fake player has no client (NeoForge's `FakePlayer`
+/// drops what it is sent).
+fn send_to_player(rt: &mut Rt, connection: V, packet: V) {
+    let player = rt.get_field(connection, "player");
+    let Some(uuid) = player_uuid(rt, player).filter(|_| !crate::fake_players::is_fake(rt, player)) else { return };
+    if let Some(payload) = mod_payload(rt, packet, CLIENTBOUND_PAYLOAD) {
+        send(rt, PayloadTarget::Player(uuid), payload);
+    }
+}
+
+/// The id of a payload's channel, as `hasChannel` is asked it: a `CustomPacketPayload.Type`, a
+/// `ResourceLocation`, or a payload.
+fn channel_id(rt: &mut Rt, v: V) -> Option<String> {
+    let ty = match rt.class_of(v) {
+        PAYLOAD_TYPE => v,
+        _ if rt.str_of(v).is_some() => return rt.str_of(v).map(str::to_owned),
+        _ => rt.call_functional(TYPE_OF, v, &[]),
+    };
+    rt.str_of(rt.get_field(ty, "$id")).map(str::to_owned)
+}
+
+/// A server player's connection's calls: sending them packets, and what it knows of their client.
+fn server_listener_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match name {
+        "send" => {
+            send_to_player(rt, a(0), a(1));
+            V::Void
+        }
+        "getPlayer" => rt.get_field(a(0), "player"),
+        // The client runs the same mods, so it has every channel the server registered.
+        "hasChannel" => {
+            let id = channel_id(rt, a(1));
+            V::I(i32::from(id.is_some_and(|id| registered(rt).contains(&id))))
+        }
+        "isAcceptingMessages" => V::I(1),
+        "getConnection" => {
+            let c = rt.get_field(a(0), "$connection");
+            if c.r() != 0 {
+                return Some(c);
+            }
+            let c = rt.new_object(CONNECTION);
+            rt.put_field(c, "$listener", a(0));
+            rt.put_field(a(0), "$connection", c);
+            c
+        }
         _ => return None,
     })
 }
@@ -1484,6 +1578,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         CONTEXT => context_call(rt, name, desc, args),
         CLIENT_LISTENER | CLIENT_COMMON_LISTENER => client_listener_call(rt, name, args),
         CONNECTION => connection_call(rt, name, args),
+        SERVER_LISTENER | SERVER_COMMON_LISTENER => server_listener_call(rt, name, args),
+        // The player's `connection` field.
+        SERVER_PLAYER if name == "$connection" => Some(player_connection(rt, args.first().copied().unwrap_or_default())),
+        LOCAL_PLAYER if name == "$connection" => Some(client_connection(rt)),
         _ => None,
     }
 }
@@ -2213,6 +2311,43 @@ mod tests {
         });
         assert_eq!(host.payloads.len(), 1);
         assert_eq!((host.payloads[0].0, host.payloads[0].1.as_str()), (PayloadTarget::Server, "test:speed"));
+        // The game packet left unsent is counted under its class.
+        assert_eq!(rt.unmapped.keys().copied().collect::<Vec<_>>(), ["net/minecraft/network/protocol/game/ServerboundSwingPacket.<sent>.()V"]);
+    }
+
+    /// A server mod sends a player a payload on the player's connection (`player.connection.send(new
+    /// ClientboundCustomPayloadPacket(payload))`): it goes to that player alone, on the mods'
+    /// channel. The connection is the player's own (`connection.player`) and knows the channels.
+    #[test]
+    fn a_payload_sent_on_a_players_connection_goes_to_that_player() {
+        let mut rt = Rt::new();
+        register(&mut rt);
+        let uuid = 0x0123_4567_89ab_cdef_0011_2233_4455_6677_u128;
+        let player = crate::menus::server_player(&mut rt, uuid);
+        let packet = rt.new_object("test/Packet");
+        let pos = crate::api::block_pos(&mut rt, 4, 5, 6);
+        rt.put_field(packet, "pos", pos);
+        rt.put_field(packet, "speed", V::F(1.0));
+        let field = "net/minecraft/server/level/ServerPlayer.$connection.()Lnet/minecraft/server/network/ServerGamePacketListenerImpl;";
+        let listener = "net/minecraft/server/network/ServerGamePacketListenerImpl";
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let conn = crate::api::game_field(rt, player, "connection", "$connection", field);
+            assert_eq!(rt.class_of(conn), listener);
+            assert_eq!(crate::api::game_field(rt, player, "connection", "$connection", field), conn);
+            assert_eq!(rt.get_field(conn, "player"), player);
+            let wrapped = rt.new_object(CLIENTBOUND_PAYLOAD);
+            crate::api::call(rt, "net/minecraft/network/protocol/common/ClientboundCustomPayloadPacket.<init>.(Lnet/minecraft/network/protocol/common/custom/CustomPacketPayload;)V", &[wrapped, packet]);
+            crate::api::call(rt, "net/minecraft/server/network/ServerGamePacketListenerImpl.send.(Lnet/minecraft/network/protocol/Packet;)V", &[conn, wrapped]);
+            let ty = vcall(rt, "", "type.()", &[]);
+            let other = rt.string("test:other");
+            let has = |rt: &mut Rt, key: &'static str, v: V| crate::api::call(rt, key, &[conn, v]);
+            assert_eq!(has(rt, "net/minecraft/server/network/ServerGamePacketListenerImpl.hasChannel.(Lnet/minecraft/network/protocol/common/custom/CustomPacketPayload$Type;)Z", ty), V::I(1));
+            assert_eq!(has(rt, "net/minecraft/server/network/ServerGamePacketListenerImpl.hasChannel.(Lnet/minecraft/resources/ResourceLocation;)Z", other), V::I(0));
+        });
+        assert_eq!(host.payloads.len(), 1);
+        assert_eq!((host.payloads[0].0, host.payloads[0].1.as_str()), (PayloadTarget::Player(uuid), "test:speed"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]
