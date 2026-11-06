@@ -32,6 +32,11 @@ const SET_POS: &str = "setPos.(DDD)V";
 const SET_POS_KEY: &str = "net/minecraft/world/entity/Entity.setPos.(DDD)V";
 const TICK: &str = "tick.()V";
 const TICK_KEY: &str = "net/minecraft/world/entity/Entity.tick.()V";
+const BASE_TICK: &str = "baseTick.()V";
+const BASE_TICK_KEY: &str = "net/minecraft/world/entity/Entity.baseTick.()V";
+const ON_BELOW_WORLD: &str = "onBelowWorld.()V";
+const ON_BELOW_WORLD_KEY: &str = "net/minecraft/world/entity/Entity.onBelowWorld.()V";
+const FLUID_HEIGHT: &str = "net/minecraft/world/level/material/FluidState.getHeight.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)F";
 const ON_SYNCED: &str = "onSyncedDataUpdated.(Lnet/minecraft/network/syncher/EntityDataAccessor;)V";
 const ON_SYNCED_KEY: &str = "net/minecraft/world/entity/Entity.onSyncedDataUpdated.(Lnet/minecraft/network/syncher/EntityDataAccessor;)V";
 const REMOVE: &str = "remove.(Lnet/minecraft/world/entity/Entity$RemovalReason;)V";
@@ -72,6 +77,28 @@ fn virtual_call(rt: &mut Rt, e: V, owner_key: &'static str, key: &'static str, a
     let mut all = vec![e];
     all.extend_from_slice(args);
     Some(vc(rt, owner_key, key, &all))
+}
+
+/// The first vanilla class above mod entity `e`'s class (`ThrowableItemProjectile` for a mod's
+/// thrown item): the class its inherited calls name.
+pub(crate) fn vanilla_base(rt: &Rt, e: V) -> &'static str {
+    let mut class = rt.class_of(e);
+    while let Some(&up) = rt.supers.get(class) {
+        class = up;
+    }
+    class
+}
+
+/// A call on mod entity `e` (`name.desc`) as the JVM dispatches it: its class's own, else its
+/// vanilla class's, named by that class (a default that differs by class is that class's: a thrown
+/// projectile's gravity is `ThrowableProjectile`'s).
+pub(crate) fn on_base(rt: &mut Rt, e: V, short: &'static str, args: &[V]) -> V {
+    let base = vanilla_base(rt, e);
+    let key = rt.static_key(&format!("{base}.{short}"));
+    let mut all = Vec::with_capacity(args.len() + 1);
+    all.push(e);
+    all.extend_from_slice(args);
+    api::virtual_call(rt, (key, short), &all)
 }
 
 fn xyz(rt: &Rt, e: V) -> [f64; 3] {
@@ -117,6 +144,9 @@ pub(crate) fn construct(rt: &mut Rt, e: V, ty: V, level: V) {
     rt.put_field(e, "$id", V::I(id));
     rt.put_field(e, "$type", ty);
     rt.put_field(e, "$level", level);
+    // `Entity.random`: a mod's class reads its own (`this.random.nextFloat()`).
+    let random = api::call(rt, "net/minecraft/util/RandomSource.create.()Lnet/minecraft/util/RandomSource;", &[]);
+    rt.put_field(e, "random", random);
     for f in ["$x", "$y", "$z", "xo", "yo", "zo", "xOld", "yOld", "zOld"] {
         rt.put_field(e, f, V::D(0.0));
     }
@@ -675,9 +705,63 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
-        "onRemovedFromLevel" | "onClientRemoval" | "ejectPassengers" | "baseTick" | "tick" | "onAddedToLevel" | "refreshDimensions" => V::Void,
+        "onRemovedFromLevel" | "onClientRemoval" | "ejectPassengers" | "onAddedToLevel" | "refreshDimensions" => V::Void,
+        // `Entity.tick`: the base tick (virtual: a class's own `baseTick` first).
+        "tick" => {
+            if virtual_call(rt, e, BASE_TICK_KEY, BASE_TICK, &[]).is_none() {
+                base_tick(rt, e);
+            }
+            V::Void
+        }
+        "baseTick" => {
+            base_tick(rt, e);
+            V::Void
+        }
+        "isNoGravity" => V::I(rt.get_field(e, "$noGravity").i()),
+        "setNoGravity" => {
+            rt.put_field(e, "$noGravity", V::I(i32::from(a(1).i() != 0)));
+            V::Void
+        }
+        // `getGravity` (final): none without gravity, else its class's (`getDefaultGravity`,
+        // `Entity`'s none); `applyGravity`, its motion pulled down by it.
+        "getGravity" => V::D(gravity(rt, e)),
+        "getDefaultGravity" => V::D(0.0),
+        "applyGravity" => {
+            let g = gravity(rt, e);
+            if g != 0.0 {
+                let m = api::virtual_call(rt, ("net/minecraft/world/entity/Entity.getDeltaMovement.()Lnet/minecraft/world/phys/Vec3;", "getDeltaMovement.()Lnet/minecraft/world/phys/Vec3;"), &[e]);
+                let m = of_vec3(rt, m);
+                let v = vec3(rt, [m[0], m[1] - g, m[2]]);
+                api::virtual_call(rt, ("net/minecraft/world/entity/Entity.setDeltaMovement.(Lnet/minecraft/world/phys/Vec3;)V", "setDeltaMovement.(Lnet/minecraft/world/phys/Vec3;)V"), &[e, v]);
+            }
+            V::Void
+        }
+        // Its fire: the ticks it has left to burn (`remainingFireTicks`).
+        "isOnFire" => V::I(i32::from(rt.get_field(e, "$fire").i() > 0)),
+        "getRemainingFireTicks" => V::I(rt.get_field(e, "$fire").i()),
+        "setRemainingFireTicks" => {
+            rt.put_field(e, "$fire", a(1));
+            V::Void
+        }
+        "clearFire" => {
+            rt.put_field(e, "$fire", V::I(0));
+            V::Void
+        }
+        // `igniteForSeconds` (final, `Mth.floor(seconds * 20.0F)` ticks) and `igniteForTicks`: alight
+        // at least that long.
+        "igniteForSeconds" | "igniteForTicks" => {
+            let ticks = if name == "igniteForSeconds" { (a(1).f() * 20.0).floor() as i32 } else { a(1).i() };
+            if rt.get_field(e, "$fire").i() < ticks {
+                rt.put_field(e, "$fire", V::I(ticks));
+            }
+            V::Void
+        }
+        // As its last base tick found it.
+        "isInWater" => V::I(rt.get_field(e, "$inWater").i()),
+        "isInLava" => V::I(i32::from(rt.get_field(e, "$inLava").i() != 0 && rt.get_field(e, "$ticked").i() != 0)),
+        "getRandom" => rt.get_field(e, "random"),
         "getPassengers" => crate::jutil::new_list(rt, Vec::new()),
-        "hasPassenger" | "isPassenger" | "isVehicle" | "isSpectator" | "isAlwaysTicking" | "isOnFire" | "isInvisible" | "isSilent" | "isNoGravity" | "noCulling" => V::I(0),
+        "hasPassenger" | "isPassenger" | "isVehicle" | "isSpectator" | "isAlwaysTicking" | "isInvisible" | "isSilent" | "noCulling" => V::I(0),
         "getVehicle" | "getControllingPassenger" | "getFirstPassenger" | "getRootVehicle" if desc.ends_with("Lnet/minecraft/world/entity/Entity;") && name != "getRootVehicle" => V::NULL,
         "getRootVehicle" => e,
         "shouldRender" | "shouldRenderAtSqrDistance" | "isPickable" | "isAttackable" => V::I((name != "isPickable" && name != "isAttackable") as i32),
@@ -791,6 +875,77 @@ fn load(rt: &mut Rt, e: V, tag: V) {
     rt.report_thrown("readAdditionalSaveData");
 }
 
+/// `Entity.getGravity`: none for an entity without gravity, else its class's default (both
+/// virtual, the default named by its vanilla class).
+fn gravity(rt: &mut Rt, e: V) -> f64 {
+    if on_base(rt, e, "isNoGravity.()Z", &[]).i() != 0 {
+        return 0.0;
+    }
+    on_base(rt, e, "getDefaultGravity.()D", &[]).d()
+}
+
+/// `Entity.baseTick` for a mod entity (its rotation a tick ago is kept by [`set_old`] first):
+/// whether its box is in water (which puts its fire out) or lava (which, after its first tick, sets
+/// it alight for fifteen seconds); its fire burning down on a server (a client's goes out); and below
+/// the world, gone (`onBelowWorld`, virtual). Not modelled: a fluid's current pushing it, fire and
+/// lava hurting it, a fire-immune type's fire going out faster, portals, powder snow, riding.
+fn base_tick(rt: &mut Rt, e: V) {
+    let first = rt.get_field(e, "$ticked").i() == 0;
+    let (water, lava) = fluids_touched(rt, e);
+    rt.put_field(e, "$inWater", V::I(i32::from(water)));
+    rt.put_field(e, "$inLava", V::I(i32::from(lava)));
+    let server = rt.host().is_none_or(|h| h.is_server());
+    let fire = rt.get_field(e, "$fire").i();
+    let fire = if water || !server { 0 } else { (fire - 1).max(0) };
+    rt.put_field(e, "$fire", V::I(fire));
+    // `isInLava` is false through its first base tick (`firstTick`).
+    if lava && !first && fire < 300 {
+        rt.put_field(e, "$fire", V::I(300));
+    }
+    let bottom = rt.host().map_or(-64, |h| h.world_height().0);
+    if rt.get_field(e, "$y").d() < f64::from(bottom - 64) && virtual_call(rt, e, ON_BELOW_WORLD_KEY, ON_BELOW_WORLD, &[]).is_none() {
+        let r = removal(rt, 1);
+        remove(rt, e, r);
+    }
+    rt.put_field(e, "$ticked", V::I(1));
+}
+
+/// Whether entity `e`'s box, less a thousandth each way, is in water (a block of it whose water's
+/// surface, the block's y plus the fluid's height, is at or above the box's bottom) and in lava
+/// (above it), as NeoForge's `updateFluidHeightAndDoFluidPushing` finds them.
+fn fluids_touched(rt: &mut Rt, e: V) -> (bool, bool) {
+    if rt.host().is_none() {
+        return (false, false);
+    }
+    let bb = rt.get_field(e, "$bb");
+    let b = if bb.r() != 0 { crate::shapes::aabb_of(rt, bb) } else { make_box(rt, e, xyz(rt, e)) };
+    let b = [b[0] + 0.001, b[1] + 0.001, b[2] + 0.001, b[3] - 0.001, b[4] - 0.001, b[5] - 0.001];
+    let level = rt.get_field(e, "$level");
+    let (mut water, mut lava) = (false, false);
+    for x in b[0].floor() as i32..b[3].ceil() as i32 {
+        for y in b[1].floor() as i32..b[4].ceil() as i32 {
+            for z in b[2].floor() as i32..b[5].ceil() as i32 {
+                let text = rt.host().map(|h| h.block_state([x, y, z])).unwrap_or_default();
+                if matches!(text.as_str(), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") {
+                    continue;
+                }
+                let state = crate::fluids::of_block_state(rt, &text);
+                let name = crate::fluids::name_of(rt, rt.get_field(state, "$fluid"));
+                let (is_water, is_lava) = rt.host().map_or((false, false), |h| (h.fluid_in_tag(&name, "minecraft:water"), h.fluid_in_tag(&name, "minecraft:lava")));
+                if !is_water && !is_lava {
+                    continue;
+                }
+                let at = api::block_pos(rt, i64::from(x), i64::from(y), i64::from(z));
+                let height = api::call(rt, FLUID_HEIGHT, &[state, level, at]).f();
+                let surface = f64::from(y as f32 + height);
+                water |= is_water && surface >= b[1];
+                lava |= is_lava && surface > b[1];
+            }
+        }
+    }
+    (water, lava)
+}
+
 /// The level's tick for mod entities in dimension `dimension`, as `ServerLevel.tickNonPassenger`
 /// (and the client's) runs each: the last position kept, a tick counted, `tick()`; then those
 /// removed leave the list.
@@ -802,7 +957,11 @@ pub fn tick_all(rt: &mut Rt, dimension: &str) {
         set_old(rt, e);
         let t = rt.get_field(e, "tickCount").i();
         rt.put_field(e, "tickCount", V::I(t + 1));
-        virtual_call(rt, e, TICK_KEY, TICK, &[]);
+        if virtual_call(rt, e, TICK_KEY, TICK, &[]).is_none() {
+            // A class without a tick of its own runs its vanilla class's (a mod's thrown item flies
+            // as `ThrowableProjectile.tick` moves it; one right below `Entity`, the base tick).
+            on_base(rt, e, TICK, &[]);
+        }
         rt.report_thrown("Entity.tick");
     }
     // A server's: those removed are sent their removal (`track` sends none to a removed entity's

@@ -47,6 +47,8 @@ pub(crate) const CLONE: &str = "net/neoforged/neoforge/client/event/ClientPlayer
 const LEVEL_UNLOAD: &str = "net/neoforged/neoforge/event/level/LevelEvent$Unload";
 pub(crate) const ENTITY_JOIN: &str = "net/neoforged/neoforge/event/entity/EntityJoinLevelEvent";
 pub(crate) const ENTITY_LEAVE: &str = "net/neoforged/neoforge/event/entity/EntityLeaveLevelEvent";
+const PROJECTILE_IMPACT: &str = "net/neoforged/neoforge/event/entity/ProjectileImpactEvent";
+const EVENT_HOOKS: &str = "net/neoforged/neoforge/event/EventHooks";
 const PLAYER: &str = "net/minecraft/world/entity/player/Player";
 const GAME_MODE: &str = "net/minecraft/client/multiplayer/MultiPlayerGameMode";
 const CONNECTION: &str = "net/minecraft/network/Connection";
@@ -58,9 +60,10 @@ const LAST_CLICK: &str = "compat:last-click";
 
 /// The events' classes above them, so a listener for `BlockEvent` (or `PlayerEvent`, or any
 /// event) hears them.
-const SUPERS: [(&str, &str); 16] = [
+const SUPERS: [(&str, &str); 17] = [
     (ENTITY_JOIN, ENTITY_EVENT),
     (ENTITY_LEAVE, ENTITY_EVENT),
+    (PROJECTILE_IMPACT, ENTITY_EVENT),
     (BREAK, BLOCK_EVENT),
     (PLACE, BLOCK_EVENT),
     (MULTI_PLACE, PLACE),
@@ -360,6 +363,18 @@ pub fn entity_leaves(rt: &mut Rt, e: V) {
     crate::neo::post(rt, ENTITY_LEAVE, ev);
 }
 
+/// `ProjectileImpactEvent` (`EventHooks.onProjectileImpact`): projectile `e` is about to hit what
+/// `hit` names. Whether a listener canceled it (the projectile then flies on unhurt).
+pub(crate) fn projectile_impact(rt: &mut Rt, e: V, hit: V) -> bool {
+    if !listened(rt, PROJECTILE_IMPACT) {
+        return false;
+    }
+    let ev = rt.new_object(PROJECTILE_IMPACT);
+    put_all(rt, ev, &[("$entity", e), ("$hit", hit)]);
+    crate::neo::post(rt, PROJECTILE_IMPACT, ev);
+    rt.get_field(ev, "$canceled").i() != 0
+}
+
 // ---- the events' calls ----
 
 fn block_event(rt: &Rt, v: V) -> bool {
@@ -368,7 +383,8 @@ fn block_event(rt: &Rt, v: V) -> bool {
 
 /// The keys [`call`] may answer.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, BREAK | PLACE | MULTI_PLACE | SNAPSHOT | PLAYER_TICK | PLAYER_TICK_PRE | PLAYER_TICK_POST | ENTITY_JOIN | ENTITY_LEAVE)
+    matches!(owner, BREAK | PLACE | MULTI_PLACE | SNAPSHOT | PLAYER_TICK | PLAYER_TICK_PRE | PLAYER_TICK_POST | ENTITY_JOIN | ENTITY_LEAVE | PROJECTILE_IMPACT)
+        || (owner == EVENT_HOOKS && name == "onProjectileImpact")
         || owner.starts_with(NETWORK_EVENT)
         || (owner == BLOCK_EVENT && matches!(name, "<init>" | "getLevel" | "getPos" | "getState"))
         || (matches!(owner, EVENT | CANCELLABLE) && matches!(name, "isCanceled" | "setCanceled"))
@@ -392,6 +408,27 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if owner.starts_with(PLAYER_TICK) || (matches!(owner, PLAYER_EVENT | LIVING_EVENT | ENTITY_EVENT) && rt.class_of(ev).starts_with(PLAYER_TICK)) {
         return (name == "getEntity").then(|| rt.get_field(ev, "$player"));
+    }
+    if owner == EVENT_HOOKS && name == "onProjectileImpact" {
+        return Some(V::I(i32::from(projectile_impact(rt, a(0), a(1)))));
+    }
+    if owner == PROJECTILE_IMPACT || (matches!(owner, ENTITY_EVENT | EVENT | CANCELLABLE) && rt.class_of(ev) == PROJECTILE_IMPACT) {
+        return Some(match name {
+            // `new ProjectileImpactEvent(projectile, ray)`.
+            "<init>" => {
+                know_classes(rt);
+                put_all(rt, ev, &[("$entity", a(1)), ("$hit", a(2))]);
+                V::Void
+            }
+            "getEntity" | "getProjectile" => rt.get_field(ev, "$entity"),
+            "getRayTraceResult" => rt.get_field(ev, "$hit"),
+            "isCanceled" => V::I(rt.get_field(ev, "$canceled").i()),
+            "setCanceled" => {
+                rt.put_field(ev, "$canceled", V::I(a(1).i()));
+                V::Void
+            }
+            _ => return None,
+        });
     }
     let joining = matches!(rt.class_of(ev), ENTITY_JOIN | ENTITY_LEAVE);
     if matches!(owner, ENTITY_JOIN | ENTITY_LEAVE) || (joining && matches!(owner, ENTITY_EVENT | EVENT | CANCELLABLE)) {

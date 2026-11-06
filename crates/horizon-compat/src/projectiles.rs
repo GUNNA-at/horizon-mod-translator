@@ -1,16 +1,22 @@
 //! Vanilla's projectile classes for a mod's projectile: a mod entity whose class extends
 //! `Projectile` or a class below it (Create's potato, a spell's bolt, a cannon's shell). How one is
-//! made (`ThrowableProjectile(type, shooter, level)`...), who shot it (`setOwner`, `getOwner`), and
-//! what it hits: `EntityHitResult`, `ProjectileUtil`'s searches along a path (the blocks through the
+//! made (`ThrowableProjectile(type, shooter, level)`...), who shot it (`setOwner`, `getOwner`), what
+//! it hits: `EntityHitResult`, `ProjectileUtil`'s searches along a path (the blocks through the
 //! level's `clip`, then the entities whose boxes the path crosses), and `onHit`, which hands an
 //! entity hit to the projectile's `onHitEntity` and a block hit to its `onHitBlock`, the mod's own
-//! where its class has them. As 1.21.1 does; a game event (`PROJECTILE_LAND`), a deflecting target
-//! (a breeze) and a vanilla block's own answer to a hit (a bell, a target block) are not modelled.
+//! where its class has them; and how it flies: `shoot`, and the ticks of `Projectile`,
+//! `ThrowableProjectile` and `AbstractHurtingProjectile`, which move it along its motion through the
+//! air or water. As 1.21.1 does; game events (`PROJECTILE_SHOOT`, `PROJECTILE_LAND`), a deflecting
+//! target (a breeze), a vanilla block's own answer to a hit (a bell, a target block), the blocks a
+//! projectile passes through (`checkInsideBlocks`) and an arrow's own tick are not modelled.
 use crate::{Rt, V, api, jutil};
 
 const ENTITY: &str = "net/minecraft/world/entity/Entity";
 pub(crate) const PROJECTILE: &str = "net/minecraft/world/entity/projectile/Projectile";
 const HURTING: &str = "net/minecraft/world/entity/projectile/AbstractHurtingProjectile";
+const THROWABLE: &str = "net/minecraft/world/entity/projectile/ThrowableProjectile";
+const THROWN_ITEM: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile";
+const ARROW: &str = "net/minecraft/world/entity/projectile/AbstractArrow";
 const UTIL: &str = "net/minecraft/world/entity/projectile/ProjectileUtil";
 const DEFLECTION: &str = "net/minecraft/world/entity/projectile/ProjectileDeflection";
 pub(crate) const ENTITY_HIT: &str = "net/minecraft/world/phys/EntityHitResult";
@@ -54,6 +60,28 @@ const MOVE_TO: Virtual = ("net/minecraft/world/entity/Entity.moveTo.(DDDFF)V", "
 const BOUNDING_BOX: Virtual = ("net/minecraft/world/entity/Entity.getBoundingBox.()Lnet/minecraft/world/phys/AABB;", "getBoundingBox.()Lnet/minecraft/world/phys/AABB;");
 const LEVEL: Virtual = ("net/minecraft/world/entity/Entity.level.()Lnet/minecraft/world/level/Level;", "level.()Lnet/minecraft/world/level/Level;");
 const SET_OWNER: Virtual = ("net/minecraft/world/entity/projectile/Projectile.setOwner.(Lnet/minecraft/world/entity/Entity;)V", "setOwner.(Lnet/minecraft/world/entity/Entity;)V");
+const HIT_OR_DEFLECT: Virtual = (
+    "net/minecraft/world/entity/projectile/Projectile.hitTargetOrDeflectSelf.(Lnet/minecraft/world/phys/HitResult;)Lnet/minecraft/world/entity/projectile/ProjectileDeflection;",
+    "hitTargetOrDeflectSelf.(Lnet/minecraft/world/phys/HitResult;)Lnet/minecraft/world/entity/projectile/ProjectileDeflection;",
+);
+const CAN_HIT_ENTITY: Virtual = ("net/minecraft/world/entity/projectile/Projectile.canHitEntity.(Lnet/minecraft/world/entity/Entity;)Z", "canHitEntity.(Lnet/minecraft/world/entity/Entity;)Z");
+const MOVEMENT_TO_SHOOT: Virtual =
+    ("net/minecraft/world/entity/projectile/Projectile.getMovementToShoot.(DDDFF)Lnet/minecraft/world/phys/Vec3;", "getMovementToShoot.(DDDFF)Lnet/minecraft/world/phys/Vec3;");
+const SHOOT: Virtual = ("net/minecraft/world/entity/projectile/Projectile.shoot.(DDDFF)V", "shoot.(DDDFF)V");
+const UPDATE_ROTATION: Virtual = ("net/minecraft/world/entity/projectile/Projectile.updateRotation.()V", "updateRotation.()V");
+const SET_Y_ROT: Virtual = ("net/minecraft/world/entity/Entity.setYRot.(F)V", "setYRot.(F)V");
+const SET_X_ROT: Virtual = ("net/minecraft/world/entity/Entity.setXRot.(F)V", "setXRot.(F)V");
+const KNOWN_MOVEMENT: Virtual = ("net/minecraft/world/entity/Entity.getKnownMovement.()Lnet/minecraft/world/phys/Vec3;", "getKnownMovement.()Lnet/minecraft/world/phys/Vec3;");
+const ON_GROUND: Virtual = ("net/minecraft/world/entity/Entity.onGround.()Z", "onGround.()Z");
+const IS_IN_WATER: Virtual = ("net/minecraft/world/entity/Entity.isInWater.()Z", "isInWater.()Z");
+const BASE_TICK: Virtual = ("net/minecraft/world/entity/Entity.baseTick.()V", "baseTick.()V");
+const DISCARD: Virtual = ("net/minecraft/world/entity/Entity.discard.()V", "discard.()V");
+const BLOCK_POSITION: Virtual = ("net/minecraft/world/entity/Entity.blockPosition.()Lnet/minecraft/core/BlockPos;", "blockPosition.()Lnet/minecraft/core/BlockPos;");
+const IGNITE: Virtual = ("net/minecraft/world/entity/Entity.igniteForSeconds.(F)V", "igniteForSeconds.(F)V");
+const HAS_CHUNK_AT: &str = "net/minecraft/world/level/Level.hasChunkAt.(Lnet/minecraft/core/BlockPos;)Z";
+const ADD_PARTICLE: &str = "net/minecraft/world/level/Level.addParticle.(Lnet/minecraft/core/particles/ParticleOptions;DDDDDD)V";
+const NEXT_DOUBLE: &str = "net/minecraft/util/RandomSource.nextDouble.()D";
+const ITEM_STACK: &str = "net/minecraft/world/item/ItemStack";
 const GET_ENTITIES: &str = "net/minecraft/world/level/Level.getEntities.(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/AABB;Ljava/util/function/Predicate;)Ljava/util/List;";
 const BY_UUID: &str = "net/minecraft/server/level/ServerLevel.getEntity.(Ljava/util/UUID;)Lnet/minecraft/world/entity/Entity;";
 
@@ -126,16 +154,62 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "deflection") => deflection(rt, "NONE"),
         // A mod's projectile being made: the entity, then what its vanilla class's constructor sets.
         (o, "<init>") if is_projectile_class(o) && rt.supers.contains_key(rt.class_of(a(0))) => return construct(rt, o, desc, args),
-        (o, _) if is_projectile_class(o) && crate::mod_entities::is_mod_entity(rt, a(0)) => return projectile_call(rt, name, args),
+        (o, "lerpRotation") if is_projectile_class(o) && desc == "(FF)F" => V::F(lerp_rotation(a(0).f(), a(1).f())),
+        (o, _) if is_projectile_class(o) && crate::mod_entities::is_mod_entity(rt, a(0)) => return projectile_call(rt, o, name, desc, args),
         _ => return None,
     })
 }
 
-/// `Projectile`'s own methods, for a mod's projectile.
-fn projectile_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+/// `Projectile`'s own methods and its subclasses' (by the class the call names), for a mod's
+/// projectile.
+fn projectile_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let e = a(0);
+    let is = |class: &str| crate::vanilla_entities::is_a(owner, class);
     Some(match name {
+        "tick" => {
+            tick(rt, owner, e);
+            V::Void
+        }
+        "shoot" if desc == "(DDDFF)V" => {
+            shoot(rt, e, [a(1).d(), a(2).d(), a(3).d()], a(4).f(), a(5).f());
+            V::Void
+        }
+        "getMovementToShoot" => movement_to_shoot(rt, e, [a(1).d(), a(2).d(), a(3).d()], a(4).f(), a(5).f()),
+        "shootFromRotation" => {
+            shoot_from_rotation(rt, e, a(1), [a(2).f(), a(3).f(), a(4).f()], a(5).f(), a(6).f());
+            V::Void
+        }
+        "updateRotation" => {
+            update_rotation(rt, e);
+            V::Void
+        }
+        // A class's gravity: a thrown one's 0.03, an arrow's 0.05 (`Entity`'s none, below).
+        "getDefaultGravity" if is(THROWABLE) => V::D(0.03),
+        "getDefaultGravity" if is(ARROW) => V::D(0.05),
+        // A hurting projectile's: how it slows in the air and in water, that it burns, the smoke it
+        // trails, the shapes its path meets.
+        "getInertia" if is(HURTING) => V::F(0.95),
+        "getLiquidInertia" if is(HURTING) => V::F(0.8),
+        "shouldBurn" if is(HURTING) => V::I(1),
+        "getTrailParticle" if is(HURTING) => api::get_static(rt, "net/minecraft/core/particles/ParticleTypes.SMOKE"),
+        "getClipType" if is(HURTING) => clip_block(rt),
+        // A thrown item's stack: one of what it is given, else one of its class's default item.
+        "setItem" if is(THROWN_ITEM) => {
+            let one = api::call(rt, "net/minecraft/world/item/ItemStack.copyWithCount.(I)Lnet/minecraft/world/item/ItemStack;", &[a(1), V::I(1)]);
+            rt.put_field(e, "$item", one);
+            V::Void
+        }
+        "getItem" if is(THROWN_ITEM) => match rt.get_field(e, "$item") {
+            s if s.r() != 0 => s,
+            _ => {
+                let item = crate::mod_entities::on_base(rt, e, "getDefaultItem.()Lnet/minecraft/world/item/Item;", &[]);
+                let s = rt.new_object(ITEM_STACK);
+                api::call(rt, "net/minecraft/world/item/ItemStack.<init>.(Lnet/minecraft/world/level/ItemLike;)V", &[s, item]);
+                rt.put_field(e, "$item", s);
+                s
+            }
+        },
         "setOwner" => {
             set_owner(rt, e, a(1));
             V::Void
@@ -226,10 +300,7 @@ fn construct(rt: &mut Rt, owner: &str, desc: &str, args: &[V]) -> Option<V> {
 fn moving(rt: &mut Rt, e: V, at: [V; 3], movement: V) {
     let (y_rot, x_rot) = (api::virtual_call(rt, GET_Y_ROT, &[e]), api::virtual_call(rt, GET_X_ROT, &[e]));
     api::virtual_call(rt, MOVE_TO, &[e, at[0], at[1], at[2], y_rot, x_rot]);
-    let m = xyz(rt, movement);
-    let length = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
-    // `Vec3.normalize`: zero below a float's hundred-thousandth.
-    let unit = if length < f64::from(1.0e-5f32) { [0.0; 3] } else { m.map(|v| v / length) };
+    let unit = normalize(xyz(rt, movement));
     let power = rt.get_field(e, "accelerationPower").d();
     let v = vec3(rt, unit.map(|u| u * power));
     api::virtual_call(rt, SET_DELTA, &[e, v]);
@@ -312,6 +383,284 @@ fn on_hit(rt: &mut Rt, e: V, hit: V) {
     }
 }
 
+/// A projectile's vanilla tick, by the class the call names (its class's `super.tick()`, or the
+/// vanilla class it extends when it has no tick of its own): a hurting projectile's, a thrown one's,
+/// else `Projectile`'s own (an arrow's isn't modelled: it is `Projectile`'s, and the arrow stays).
+fn tick(rt: &mut Rt, owner: &str, e: V) {
+    if crate::vanilla_entities::is_a(owner, HURTING) {
+        hurting_tick(rt, e);
+    } else if crate::vanilla_entities::is_a(owner, THROWABLE) {
+        throwable_tick(rt, e);
+    } else {
+        projectile_tick(rt, e);
+    }
+}
+
+/// `Projectile.tick`: shot (its game event isn't modelled), whether it has left its owner yet, then
+/// `Entity.tick`'s base tick (virtual: a class's own `baseTick` first).
+fn projectile_tick(rt: &mut Rt, e: V) {
+    rt.put_field(e, "$hasBeenShot", V::I(1));
+    if rt.get_field(e, "$leftOwner").i() == 0 {
+        let left = left_owner(rt, e);
+        rt.put_field(e, "$leftOwner", V::I(i32::from(left)));
+    }
+    api::virtual_call(rt, BASE_TICK, &[e]);
+}
+
+/// `Projectile.checkLeftOwner`: no owner, or none of the entities its box stretched along its
+/// motion and grown by a block meets that can be picked (not a spectator) is its owner (nothing
+/// rides here: each entity is its own vehicle).
+fn left_owner(rt: &mut Rt, e: V) -> bool {
+    let owner = owner_of(rt, e);
+    if owner.r() == 0 {
+        return true;
+    }
+    let motion = api::virtual_call(rt, DELTA, &[e]);
+    let motion = xyz(rt, motion);
+    let level = api::virtual_call(rt, LEVEL, &[e]);
+    let area = swept_area(rt, e, motion);
+    for target in entities(rt, level, e, area, Filter::Predicate(V::NULL)) {
+        if same_vehicle(target, owner) && pickable(rt, target) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `!entity.isSpectator() && entity.isPickable()`: a player is while in the level (a living
+/// entity's `isPickable`).
+fn pickable(rt: &mut Rt, e: V) -> bool {
+    if api::virtual_call(rt, IS_SPECTATOR, &[e]).i() != 0 {
+        return false;
+    }
+    crate::api_common::is_player_class(rt.class_of(e)) || api::virtual_call(rt, IS_PICKABLE, &[e]).i() != 0
+}
+
+/// `ThrowableProjectile.tick`: `Projectile`'s, what its path hits this tick, then on to the end of
+/// that path, turned toward it (`updateRotation`), slowed by the air (0.99) or water (0.8, four
+/// bubbles behind it), and pulled down by its gravity (`applyGravity`: a thrown one's 0.03).
+fn throwable_tick(rt: &mut Rt, e: V) {
+    projectile_tick(rt, e);
+    let clip = clip_block(rt);
+    hit_along_motion(rt, e, clip);
+    let m = api::virtual_call(rt, DELTA, &[e]);
+    let m = xyz(rt, m);
+    let p = place(rt, e);
+    let next = [p[0] + m[0], p[1] + m[1], p[2] + m[2]];
+    api::virtual_call(rt, UPDATE_ROTATION, &[e]);
+    let drag = if api::virtual_call(rt, IS_IN_WATER, &[e]).i() != 0 {
+        bubbles(rt, e, next, m);
+        0.8f32
+    } else {
+        0.99f32
+    };
+    let v = vec3(rt, m.map(|c| c * f64::from(drag)));
+    api::virtual_call(rt, SET_DELTA, &[e, v]);
+    crate::mod_entities::on_base(rt, e, "applyGravity.()V", &[]);
+    api::virtual_call(rt, SET_POS, &[e, V::D(next[0]), V::D(next[1]), V::D(next[2])]);
+}
+
+/// `AbstractHurtingProjectile.tick` (a fireball's): on a server, gone where its chunk isn't loaded
+/// (or its owner was removed); else `Projectile`'s tick, alight for a second (`shouldBurn`), what
+/// its path hits (its `getClipType`'s shapes), then on to the end of that path, turned toward it
+/// (`rotateTowardsMovement`, a fifth of the way), speeding up along its heading by its
+/// `accelerationPower` and slowed by its inertia (`getInertia`, 0.95; in water `getLiquidInertia`,
+/// 0.8, four bubbles behind it), its trail (`getTrailParticle`, smoke) half a block above.
+fn hurting_tick(rt: &mut Rt, e: V) {
+    if rt.host().is_none_or(|h| h.is_server()) {
+        let owner = owner_of(rt, e);
+        let level = api::virtual_call(rt, LEVEL, &[e]);
+        let at = api::virtual_call(rt, BLOCK_POSITION, &[e]);
+        let loaded = api::call(rt, HAS_CHUNK_AT, &[level, at]).i() != 0;
+        if (owner.r() != 0 && removed(rt, owner)) || !loaded {
+            api::virtual_call(rt, DISCARD, &[e]);
+            return;
+        }
+    }
+    projectile_tick(rt, e);
+    if crate::mod_entities::on_base(rt, e, "shouldBurn.()Z", &[]).i() != 0 {
+        api::virtual_call(rt, IGNITE, &[e, V::F(1.0)]);
+    }
+    let clip = crate::mod_entities::on_base(rt, e, "getClipType.()Lnet/minecraft/world/level/ClipContext$Block;", &[]);
+    hit_along_motion(rt, e, clip);
+    let m = api::virtual_call(rt, DELTA, &[e]);
+    let m = xyz(rt, m);
+    let p = place(rt, e);
+    let next = [p[0] + m[0], p[1] + m[1], p[2] + m[2]];
+    rotate_towards_movement(rt, e, 0.2);
+    let inertia = if api::virtual_call(rt, IS_IN_WATER, &[e]).i() != 0 {
+        bubbles(rt, e, next, m);
+        crate::mod_entities::on_base(rt, e, "getLiquidInertia.()F", &[]).f()
+    } else {
+        crate::mod_entities::on_base(rt, e, "getInertia.()F", &[]).f()
+    };
+    let power = rt.get_field(e, "accelerationPower").d();
+    let heading = normalize(m);
+    let v = vec3(rt, [0, 1, 2].map(|i| (m[i] + heading[i] * power) * f64::from(inertia)));
+    api::virtual_call(rt, SET_DELTA, &[e, v]);
+    let trail = crate::mod_entities::on_base(rt, e, "getTrailParticle.()Lnet/minecraft/core/particles/ParticleOptions;", &[]);
+    if trail.r() != 0 {
+        add_particle(rt, e, trail, [next[0], next[1] + 0.5, next[2]], [0.0; 3]);
+    }
+    api::virtual_call(rt, SET_POS, &[e, V::D(next[0]), V::D(next[1]), V::D(next[2])]);
+}
+
+/// What projectile `e`'s path hits this tick (`getHitResultOnMoveVector` with its own
+/// `canHitEntity`, `clip`'s shapes), handed to its `hitTargetOrDeflectSelf` unless a listener of
+/// `ProjectileImpactEvent` cancels the hit.
+fn hit_along_motion(rt: &mut Rt, e: V, clip: V) {
+    let hit = move_hit(rt, e, Filter::CanHit(e), clip);
+    if hit.r() == 0 {
+        return;
+    }
+    let kind = api::virtual_call(rt, HIT_GET_TYPE, &[hit]);
+    if rt.get_field(kind, "$ordinal").i() != 0 && !crate::world_events::projectile_impact(rt, e, hit) {
+        api::virtual_call(rt, HIT_OR_DEFLECT, &[e, hit]);
+    }
+}
+
+/// Four bubbles behind a projectile in water, a quarter of its motion back from where it is going,
+/// moving as it does.
+fn bubbles(rt: &mut Rt, e: V, next: [f64; 3], m: [f64; 3]) {
+    let bubble = api::get_static(rt, "net/minecraft/core/particles/ParticleTypes.BUBBLE");
+    for _ in 0..4 {
+        add_particle(rt, e, bubble, [next[0] - m[0] * 0.25, next[1] - m[1] * 0.25, next[2] - m[2] * 0.25], m);
+    }
+}
+
+/// `level.addParticle(options, at, delta)` in entity `e`'s level (a client's draws it).
+fn add_particle(rt: &mut Rt, e: V, options: V, at: [f64; 3], delta: [f64; 3]) {
+    let level = api::virtual_call(rt, LEVEL, &[e]);
+    let args = [level, options, V::D(at[0]), V::D(at[1]), V::D(at[2]), V::D(delta[0]), V::D(delta[1]), V::D(delta[2])];
+    api::call(rt, ADD_PARTICLE, &args);
+}
+
+/// `Projectile.shoot`: moving as its `getMovementToShoot` gives, facing along that motion, with no
+/// turn to make from the rotation it had (`yRotO`, `xRotO`).
+fn shoot(rt: &mut Rt, e: V, direction: [f64; 3], velocity: f32, inaccuracy: f32) {
+    let [x, y, z] = direction.map(V::D);
+    let m = api::virtual_call(rt, MOVEMENT_TO_SHOOT, &[e, x, y, z, V::F(velocity), V::F(inaccuracy)]);
+    api::virtual_call(rt, SET_DELTA, &[e, m]);
+    let m = xyz(rt, m);
+    let horizontal = (m[0] * m[0] + m[2] * m[2]).sqrt();
+    let (yaw, pitch) = (degrees(crate::api_common::mth_atan2(m[0], m[2])), degrees(crate::api_common::mth_atan2(m[1], horizontal)));
+    api::virtual_call(rt, SET_Y_ROT, &[e, V::F(yaw)]);
+    api::virtual_call(rt, SET_X_ROT, &[e, V::F(pitch)]);
+    let (yaw, pitch) = (api::virtual_call(rt, GET_Y_ROT, &[e]), api::virtual_call(rt, GET_X_ROT, &[e]));
+    rt.put_field(e, "yRotO", yaw);
+    rt.put_field(e, "xRotO", pitch);
+}
+
+/// `Projectile.getMovementToShoot`: the direction made a unit long, each axis put off by a
+/// triangle draw of the projectile's random spread by `inaccuracy` (0.0172275 each), times the
+/// speed.
+fn movement_to_shoot(rt: &mut Rt, e: V, direction: [f64; 3], velocity: f32, inaccuracy: f32) -> V {
+    let unit = normalize(direction);
+    let spread = 0.0172275 * f64::from(inaccuracy);
+    let random = rt.get_field(e, "random");
+    let mut m = [0.0; 3];
+    for (i, u) in unit.into_iter().enumerate() {
+        // `RandomSource.triangle(0, spread)`: two draws.
+        let (a, b) = (api::call(rt, NEXT_DOUBLE, &[random]).d(), api::call(rt, NEXT_DOUBLE, &[random]).d());
+        m[i] = (u + spread * (a - b)) * f64::from(velocity);
+    }
+    vec3(rt, m)
+}
+
+/// `Projectile.shootFromRotation(shooter, xRot, yRot, roll, velocity, inaccuracy)`: shot where that
+/// rotation looks (`Mth`'s table sines; the roll tips it up), then the shooter's own motion added
+/// (`getKnownMovement`, its fall only while it is off the ground).
+fn shoot_from_rotation(rt: &mut Rt, e: V, shooter: V, [x, y, roll]: [f32; 3], velocity: f32, inaccuracy: f32) {
+    use crate::api_common::{mth_cos, mth_sin};
+    // `(float) (Math.PI / 180.0)`.
+    let rad = (std::f64::consts::PI / 180.0) as f32;
+    let dx = -mth_sin(V::F(y * rad)) * mth_cos(V::F(x * rad));
+    let dy = -mth_sin(V::F((x + roll) * rad));
+    let dz = mth_cos(V::F(y * rad)) * mth_cos(V::F(x * rad));
+    let [dx, dy, dz] = [dx, dy, dz].map(|c| V::D(f64::from(c)));
+    api::virtual_call(rt, SHOOT, &[e, dx, dy, dz, V::F(velocity), V::F(inaccuracy)]);
+    let known = api::virtual_call(rt, KNOWN_MOVEMENT, &[shooter]);
+    let known = if known.r() != 0 { xyz(rt, known) } else { [0.0; 3] };
+    let grounded = api::virtual_call(rt, ON_GROUND, &[shooter]).i() != 0;
+    let m = api::virtual_call(rt, DELTA, &[e]);
+    let m = xyz(rt, m);
+    let v = vec3(rt, [m[0] + known[0], m[1] + if grounded { 0.0 } else { known[1] }, m[2] + known[2]]);
+    api::virtual_call(rt, SET_DELTA, &[e, v]);
+}
+
+/// `Projectile.updateRotation`: a fifth of the way from its rotation a tick ago to its motion's
+/// heading.
+fn update_rotation(rt: &mut Rt, e: V) {
+    let m = api::virtual_call(rt, DELTA, &[e]);
+    let m = xyz(rt, m);
+    let horizontal = (m[0] * m[0] + m[2] * m[2]).sqrt();
+    let (pitch_o, yaw_o) = (rt.get_field(e, "xRotO").f(), rt.get_field(e, "yRotO").f());
+    let pitch = lerp_rotation(pitch_o, degrees(crate::api_common::mth_atan2(m[1], horizontal)));
+    let yaw = lerp_rotation(yaw_o, degrees(crate::api_common::mth_atan2(m[0], m[2])));
+    api::virtual_call(rt, SET_X_ROT, &[e, V::F(pitch)]);
+    api::virtual_call(rt, SET_Y_ROT, &[e, V::F(yaw)]);
+}
+
+/// `Projectile.lerpRotation`: from `current`, turned by whole turns to within half a turn of
+/// `target`, a fifth of the way to it.
+fn lerp_rotation(mut current: f32, target: f32) -> f32 {
+    if current.is_finite() && target.is_finite() {
+        while target - current < -180.0 {
+            current -= 360.0;
+        }
+        while target - current >= 180.0 {
+            current += 360.0;
+        }
+    }
+    current + 0.2 * (target - current)
+}
+
+/// `ProjectileUtil.rotateTowardsMovement(projectile, speed)`: facing its motion (a hurting
+/// projectile's own convention: yaw from x toward z plus a quarter turn, pitch from straight up less
+/// a quarter), its rotation a tick ago turned by whole turns to within half a turn of that, then
+/// `speed` of the way there. Nothing for no motion.
+fn rotate_towards_movement(rt: &mut Rt, e: V, speed: f32) {
+    use crate::api_common::mth_atan2;
+    let m = api::virtual_call(rt, DELTA, &[e]);
+    let m = xyz(rt, m);
+    if m[0] * m[0] + m[1] * m[1] + m[2] * m[2] == 0.0 {
+        return;
+    }
+    let horizontal = (m[0] * m[0] + m[2] * m[2]).sqrt();
+    api::virtual_call(rt, SET_Y_ROT, &[e, V::F(degrees(mth_atan2(m[2], m[0])) + 90.0)]);
+    api::virtual_call(rt, SET_X_ROT, &[e, V::F(degrees(mth_atan2(horizontal, m[1])) - 90.0)]);
+    let (yaw, pitch) = (api::virtual_call(rt, GET_Y_ROT, &[e]).f(), api::virtual_call(rt, GET_X_ROT, &[e]).f());
+    let turned = |was: f32, now: f32| {
+        let mut was = was;
+        if was.is_finite() && now.is_finite() {
+            while now - was < -180.0 {
+                was -= 360.0;
+            }
+            while now - was >= 180.0 {
+                was += 360.0;
+            }
+        }
+        was
+    };
+    let pitch_o = turned(rt.get_field(e, "xRotO").f(), pitch);
+    let yaw_o = turned(rt.get_field(e, "yRotO").f(), yaw);
+    rt.put_field(e, "xRotO", V::F(pitch_o));
+    rt.put_field(e, "yRotO", V::F(yaw_o));
+    api::virtual_call(rt, SET_X_ROT, &[e, V::F(pitch_o + speed * (pitch - pitch_o))]);
+    api::virtual_call(rt, SET_Y_ROT, &[e, V::F(yaw_o + speed * (yaw - yaw_o))]);
+}
+
+/// Radians to degrees as vanilla writes it: `(float)(angle * 180.0F / (float)Math.PI)`.
+fn degrees(radians: f64) -> f32 {
+    (radians * 180.0 / f64::from(std::f32::consts::PI)) as f32
+}
+
+/// `Vec3.normalize`: a unit vector, or zero below a float's hundred-thousandth.
+fn normalize(v: [f64; 3]) -> [f64; 3] {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if length < f64::from(1.0e-5f32) { [0.0; 3] } else { v.map(|c| c / length) }
+}
+
 /// `ProjectileUtil`'s searches.
 fn util_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -320,20 +669,18 @@ fn util_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "getEntityHitResult" if desc.starts_with("(Lnet/minecraft/world/level/Level;") => {
             let inflation = if desc.contains("Predicate;F)") { a(6).f() } else { MARGIN };
             let (from, to) = (xyz(rt, a(2)), xyz(rt, a(3)));
-            nearest_hit(rt, a(0), a(1), from, to, a(4), a(5), inflation)
+            nearest_hit(rt, a(0), a(1), from, to, a(4), Filter::Predicate(a(5)), inflation)
         }
         // `(shooter, from, to, box, filter, maxDistanceSq)`
         "getEntityHitResult" => {
             let (from, to) = (xyz(rt, a(1)), xyz(rt, a(2)));
-            shooter_hit(rt, a(0), from, to, a(3), a(4), a(5).d())
+            shooter_hit(rt, a(0), from, to, a(3), Filter::Predicate(a(4)), a(5).d())
         }
         // `(projectile, filter[, clip])`: along its motion from where it is.
         "getHitResultOnMoveVector" => {
             let e = a(0);
             let clip = if desc.contains("ClipContext$Block") { a(2) } else { clip_block(rt) };
-            let (from, motion) = (api::virtual_call(rt, POSITION, &[e]), api::virtual_call(rt, DELTA, &[e]));
-            let (from, motion) = (xyz(rt, from), xyz(rt, motion));
-            path_hit(rt, e, a(1), from, motion, MARGIN, clip)
+            move_hit(rt, e, Filter::Predicate(a(1)), clip)
         }
         // `(projectile, filter, scale)`: from its eyes along where it looks, `scale` far, no margin.
         "getHitResultOnViewVector" => {
@@ -344,10 +691,21 @@ fn util_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let from = api::virtual_call(rt, EYE_POSITION, &[e]);
             let from = xyz(rt, from);
             let clip = clip_block(rt);
-            path_hit(rt, e, a(1), from, motion, 0.0, clip)
+            path_hit(rt, e, Filter::Predicate(a(1)), from, motion, 0.0, clip)
+        }
+        "rotateTowardsMovement" => {
+            rotate_towards_movement(rt, a(0), a(1).f());
+            V::Void
         }
         _ => return None,
     })
+}
+
+/// `ProjectileUtil.getHitResultOnMoveVector`: along projectile `e`'s motion from where it is.
+fn move_hit(rt: &mut Rt, e: V, filter: Filter, clip: V) -> V {
+    let (from, motion) = (api::virtual_call(rt, POSITION, &[e]), api::virtual_call(rt, DELTA, &[e]));
+    let (from, motion) = (xyz(rt, from), xyz(rt, motion));
+    path_hit(rt, e, filter, from, motion, MARGIN, clip)
 }
 
 /// `ClipContext.Block.COLLIDER`.
@@ -359,7 +717,7 @@ fn clip_block(rt: &mut Rt) -> V {
 /// level's `clip` with `clip`'s shapes, no fluids), else where the path ends; then the nearest
 /// entity the path to there crosses, searched in the projectile's box stretched along the motion and
 /// grown by a block, which wins over the block.
-fn path_hit(rt: &mut Rt, e: V, filter: V, from: [f64; 3], motion: [f64; 3], margin: f32, clip: V) -> V {
+fn path_hit(rt: &mut Rt, e: V, filter: Filter, from: [f64; 3], motion: [f64; 3], margin: f32, clip: V) -> V {
     let level = api::virtual_call(rt, LEVEL, &[e]);
     let mut to = [from[0] + motion[0], from[1] + motion[1], from[2] + motion[2]];
     // `level.clip(new ClipContext(from, to, clip, Fluid.NONE, projectile))`.
@@ -367,9 +725,19 @@ fn path_hit(rt: &mut Rt, e: V, filter: V, from: [f64; 3], motion: [f64; 3], marg
     if block.r() != 0 && rt.get_field(block, "$miss").i() == 0 {
         to = xyz(rt, rt.get_field(block, "$loc"));
     }
+    let area = swept_area(rt, e, motion);
+    match nearest_hit(rt, level, e, from, to, area, filter, margin) {
+        hit if hit.r() != 0 => hit,
+        _ => block,
+    }
+}
+
+/// Entity `e`'s box stretched along `motion` and grown by a block each way
+/// (`expandTowards(motion).inflate(1.0)`): where a projectile looks for what it may hit or still
+/// touch this tick.
+fn swept_area(rt: &mut Rt, e: V, motion: [f64; 3]) -> V {
     let bb = api::virtual_call(rt, BOUNDING_BOX, &[e]);
     let mut area = crate::shapes::aabb_of(rt, bb);
-    // `expandTowards(motion).inflate(1.0)`.
     for i in 0..3 {
         if motion[i] < 0.0 {
             area[i] += motion[i];
@@ -379,18 +747,14 @@ fn path_hit(rt: &mut Rt, e: V, filter: V, from: [f64; 3], motion: [f64; 3], marg
         area[i] -= 1.0;
         area[i + 3] += 1.0;
     }
-    let area = crate::shapes::aabb(rt, area);
-    match nearest_hit(rt, level, e, from, to, area, filter, margin) {
-        hit if hit.r() != 0 => hit,
-        _ => block,
-    }
+    crate::shapes::aabb(rt, area)
 }
 
 /// `ProjectileUtil.getEntityHitResult(level, projectile, from, to, box, filter, inflation)`: of the
 /// level's entities in `area` that pass `filter` (the projectile aside), the one whose box, grown by
 /// `inflation`, the segment enters nearest `from`; a hit at that entity's feet. Null for none.
 #[allow(clippy::too_many_arguments)]
-fn nearest_hit(rt: &mut Rt, level: V, projectile: V, from: [f64; 3], to: [f64; 3], area: V, filter: V, inflation: f32) -> V {
+fn nearest_hit(rt: &mut Rt, level: V, projectile: V, from: [f64; 3], to: [f64; 3], area: V, filter: Filter, inflation: f32) -> V {
     let grow = f64::from(inflation);
     let mut best: Option<(f64, V)> = None;
     for target in entities(rt, level, projectile, area, filter) {
@@ -416,7 +780,7 @@ fn nearest_hit(rt: &mut Rt, level: V, projectile: V, from: [f64; 3], to: [f64; 3
 /// [`nearest_hit`], each box grown by its entity's pick radius and the hit where the segment enters
 /// it, nearer than `max_sq`; an entity whose box holds `from` is hit there at once (a later one
 /// entered nearer still wins). Nothing rides, so the shooter's own vehicle needs no exception.
-fn shooter_hit(rt: &mut Rt, shooter: V, from: [f64; 3], to: [f64; 3], area: V, filter: V, max_sq: f64) -> V {
+fn shooter_hit(rt: &mut Rt, shooter: V, from: [f64; 3], to: [f64; 3], area: V, filter: Filter, max_sq: f64) -> V {
     let level = api::virtual_call(rt, LEVEL, &[shooter]);
     let mut nearest = max_sq;
     let mut found: Option<(V, [f64; 3])> = None;
@@ -447,10 +811,34 @@ fn shooter_hit(rt: &mut Rt, shooter: V, from: [f64; 3], to: [f64; 3], area: V, f
     }
 }
 
+/// What a search for entities keeps: those a mod's predicate passes (`ProjectileUtil`'s callers'),
+/// or those projectile `e`'s own `canHitEntity` can hit (the vanilla ticks' `this::canHitEntity`).
+#[derive(Clone, Copy)]
+enum Filter {
+    Predicate(V),
+    CanHit(V),
+}
+
 /// `level.getEntities(except, area, filter)`.
-fn entities(rt: &mut Rt, level: V, except: V, area: V, filter: V) -> Vec<V> {
-    let list = api::call(rt, GET_ENTITIES, &[level, except, area, filter]);
-    jutil::elements(rt, list)
+fn entities(rt: &mut Rt, level: V, except: V, area: V, filter: Filter) -> Vec<V> {
+    let predicate = match filter {
+        Filter::Predicate(p) => p,
+        Filter::CanHit(_) => V::NULL,
+    };
+    let list = api::call(rt, GET_ENTITIES, &[level, except, area, predicate]);
+    let found = jutil::elements(rt, list);
+    match filter {
+        Filter::Predicate(_) => found,
+        Filter::CanHit(e) => {
+            let mut kept = Vec::with_capacity(found.len());
+            for target in found {
+                if api::virtual_call(rt, CAN_HIT_ENTITY, &[e, target]).i() != 0 {
+                    kept.push(target);
+                }
+            }
+            kept
+        }
+    }
 }
 
 fn entity_hit(rt: &mut Rt, entity: V, location: V) -> V {
@@ -505,15 +893,20 @@ mod tests {
     const DISTANCE_TO: &str = "net/minecraft/world/phys/HitResult.distanceTo.(Lnet/minecraft/world/entity/Entity;)D";
     const BLOCK_POS_OF: &str = "net/minecraft/world/phys/BlockHitResult.getBlockPos.()Lnet/minecraft/core/BlockPos;";
 
-    /// The test's projectile has its own `onHitEntity` and `onHitBlock`, which note what they get.
+    const PEBBLE: &str = "test/Pebble";
+    const EMBER: &str = "test/Ember";
+
+    /// The tests' projectiles have their own `onHitEntity` and `onHitBlock`, which note what they
+    /// get (and which projectile got it); nothing else of their own.
     fn overrides(class: &str, short: &str) -> bool {
-        class == BOLT && (short == ON_HIT_ENTITY.1 || short == ON_HIT_BLOCK.1)
+        matches!(class, BOLT | PEBBLE) && (short == ON_HIT_ENTITY.1 || short == ON_HIT_BLOCK.1)
     }
 
     fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
-        if rt.class_of(args[0]) == BOLT && short == ON_HIT_ENTITY.1 {
+        if matches!(rt.class_of(args[0]), BOLT | PEBBLE) && short == ON_HIT_ENTITY.1 {
             let target = api::call(rt, GET_ENTITY, &[args[1]]);
             rt.statics.insert("t.entity", target);
+            rt.statics.insert("t.by", args[0]);
             return V::Void;
         }
         if rt.class_of(args[0]) == BOLT && short == ON_HIT_BLOCK.1 {
@@ -608,6 +1001,140 @@ mod tests {
             assert_eq!(api::call(rt, CAN_HIT, &[thrown, pig]), V::I(1));
             rt.put_field(thrown, "$leftOwner", V::I(1));
             assert_eq!(api::call(rt, CAN_HIT, &[thrown, cow]), V::I(1), "once it has left it");
+        });
+    }
+
+    fn pos(rt: &mut Rt, e: V) -> [f64; 3] {
+        let p = api::call(rt, GET_POS, &[e]);
+        xyz(rt, p)
+    }
+
+    fn motion(rt: &mut Rt, e: V) -> [f64; 3] {
+        let m = api::call(rt, "net/minecraft/world/entity/Entity.getDeltaMovement.()Lnet/minecraft/world/phys/Vec3;", &[e]);
+        xyz(rt, m)
+    }
+
+    /// Yaw and pitch.
+    fn rotation(rt: &mut Rt, e: V) -> [f32; 2] {
+        let yaw = api::call(rt, "net/minecraft/world/entity/Entity.getYRot.()F", &[e]).f();
+        [yaw, api::call(rt, "net/minecraft/world/entity/Entity.getXRot.()F", &[e]).f()]
+    }
+
+    /// A mod's projectiles whose classes have no tick of their own fly as vanilla's ticks move
+    /// them. A thrown one shot along +z at 1.5 moves by its motion each tick, which the air slows
+    /// by 0.99 (a float) and its gravity pulls down by 0.03 (none after `setNoGravity`), turning a
+    /// fifth of the way toward its path; on the tick its path reaches a cow (the cow's box grown by
+    /// 0.3 starts at z 3.75) it hits it. One a player throws doesn't hit them while beside them. A
+    /// hurting one gains 0.1 along its heading, loses 5% (a float) and burns. One below the world is
+    /// gone.
+    #[test]
+    fn a_mod_projectile_flies_as_vanillas_ticks_move_it() {
+        const ADD: &str = "net/minecraft/world/level/Level.addFreshEntity.(Lnet/minecraft/world/entity/Entity;)Z";
+        const SHOOT: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile.shoot.(DDDFF)V";
+        const NO_GRAVITY: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile.setNoGravity.(Z)V";
+        const SET_ITEM: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile.setItem.(Lnet/minecraft/world/item/ItemStack;)V";
+        const GET_ITEM: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile.getItem.()Lnet/minecraft/world/item/ItemStack;";
+        const EMBER_AT: &str = "net/minecraft/world/entity/projectile/AbstractHurtingProjectile.<init>.(Lnet/minecraft/world/entity/EntityType;DDDLnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/level/Level;)V";
+        const ON_FIRE: &str = "net/minecraft/world/entity/Entity.isOnFire.()Z";
+        const REMOVED: &str = "net/minecraft/world/entity/Entity.isRemoved.()Z";
+        const DISCARD: &str = "net/minecraft/world/entity/Entity.discard.()V";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        rt.supers.insert(PEBBLE, THROWN);
+        rt.supers.insert(EMBER, HURTING);
+        let ty = rt.new_object("net/minecraft/world/entity/EntityType");
+        rt.put_field(ty, "$width", V::F(0.25));
+        rt.put_field(ty, "$height", V::F(0.25));
+        const STEVE: u128 = 0x5;
+        let steve_at = [-10.5, 64.0, -10.5];
+        let mut host = MemoryHost::default();
+        host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)) });
+        host.players.push((STEVE, steve_at));
+        host.player_entity_ids.insert(STEVE, 9);
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let tick = |rt: &mut Rt| crate::mod_entities::tick_all(rt, "minecraft:overworld");
+            let drag = f64::from(0.99f32);
+
+            let pebble = rt.new_object(PEBBLE);
+            api::call(rt, AT, &[pebble, ty, V::D(0.5), V::D(64.5), V::D(0.5), level]);
+            api::call(rt, ADD, &[level, pebble]);
+            api::call(rt, SHOOT, &[pebble, V::D(0.0), V::D(0.0), V::D(2.0), V::F(1.5), V::F(0.0)]);
+            assert_eq!(motion(rt, pebble), [0.0, 0.0, 1.5]);
+            assert_eq!(rotation(rt, pebble), [0.0, 0.0], "facing along +z, level");
+            let snow = crate::api_common::stack(rt, "minecraft:snowball", 5);
+            api::call(rt, SET_ITEM, &[pebble, snow]);
+            let held = api::call(rt, GET_ITEM, &[pebble]);
+            assert_eq!(api::call(rt, "net/minecraft/world/item/ItemStack.getCount.()I", &[held]), V::I(1), "one of the stack");
+
+            tick(rt);
+            assert_eq!(pos(rt, pebble), [0.5, 64.5, 0.5 + 1.5]);
+            assert_eq!(motion(rt, pebble), [0.0, -0.03, 1.5 * drag]);
+            tick(rt);
+            assert_eq!(pos(rt, pebble), [0.5, 64.5 - 0.03, 0.5 + 1.5 + 1.5 * drag]);
+            assert_eq!(motion(rt, pebble), [0.0, -0.03 * drag - 0.03, 1.5 * drag * drag]);
+            // Turned a fifth of the way toward the path it had, now dipping.
+            let toward = (-0.03f64).atan2(1.5 * drag).to_degrees() as f32;
+            let pitch = rotation(rt, pebble)[1];
+            assert!((pitch - 0.2 * toward).abs() < 1e-3, "pitch {pitch}, toward {toward}");
+            assert!(!rt.statics.contains_key("t.entity"), "short of the cow");
+            tick(rt);
+            let cow = rt.statics.get("t.entity").copied().unwrap_or_default();
+            assert_eq!(api::call(rt, "net/minecraft/world/entity/Entity.getId.()I", &[cow]), V::I(7));
+            assert_eq!(rt.statics.get("t.by"), Some(&pebble));
+            api::call(rt, DISCARD, &[pebble]);
+
+            // Thrown by a player, from their eyes along +z, from inside their box: not a hit on them
+            // while their box is still in its reach.
+            rt.statics.remove("t.entity");
+            let steve = crate::vanilla_entities::player(rt, 9, STEVE, steve_at);
+            let thrown = rt.new_object(PEBBLE);
+            api::call(rt, BY, &[thrown, ty, steve, level]);
+            api::call(rt, ADD, &[level, thrown]);
+            api::call(rt, SHOOT, &[thrown, V::D(0.0), V::D(0.0), V::D(1.0), V::F(1.5), V::F(0.0)]);
+            tick(rt);
+            assert!(!rt.statics.contains_key("t.entity"), "no hit on its thrower");
+            assert_eq!(api::call(rt, CAN_HIT, &[thrown, steve]), V::I(0), "still beside them");
+            for _ in 0..3 {
+                tick(rt);
+            }
+            assert_eq!(api::call(rt, CAN_HIT, &[thrown, steve]), V::I(1), "it has left them");
+
+            // No gravity: only the air slows it.
+            let floating = rt.new_object(PEBBLE);
+            api::call(rt, AT, &[floating, ty, V::D(10.5), V::D(70.5), V::D(0.5), level]);
+            api::call(rt, ADD, &[level, floating]);
+            api::call(rt, NO_GRAVITY, &[floating, V::I(1)]);
+            api::call(rt, SHOOT, &[floating, V::D(1.0), V::D(0.0), V::D(0.0), V::F(1.0), V::F(0.0)]);
+            assert!((rotation(rt, floating)[0] - 90.0).abs() < 1e-3, "facing along +x");
+            tick(rt);
+            assert_eq!(pos(rt, floating), [10.5 + 1.0, 70.5, 0.5]);
+            assert_eq!(motion(rt, floating), [drag, 0.0, 0.0]);
+
+            // A hurting one, made moving along +z: at its acceleration (0.1), then faster.
+            let ember = rt.new_object(EMBER);
+            let along = vec3(rt, [0.0, 0.0, 2.0]);
+            api::call(rt, EMBER_AT, &[ember, ty, V::D(20.5), V::D(70.5), V::D(0.5), along, level]);
+            api::call(rt, ADD, &[level, ember]);
+            assert_eq!(motion(rt, ember), [0.0, 0.0, 0.1]);
+            let inertia = f64::from(0.95f32);
+            tick(rt);
+            assert_eq!(pos(rt, ember), [20.5, 70.5, 0.5 + 0.1]);
+            assert_eq!(motion(rt, ember), [0.0, 0.0, (0.1 + 0.1) * inertia]);
+            assert_eq!(api::call(rt, ON_FIRE, &[ember]), V::I(1), "it burns");
+            tick(rt);
+            assert_eq!(pos(rt, ember), [20.5, 70.5, 0.5 + 0.1 + (0.1 + 0.1) * inertia]);
+            assert_eq!(motion(rt, ember), [0.0, 0.0, ((0.1 + 0.1) * inertia + 0.1) * inertia]);
+
+            // Below the world (64 under its bottom, y -128): gone.
+            let lost = rt.new_object(PEBBLE);
+            api::call(rt, AT, &[lost, ty, V::D(0.5), V::D(-130.0), V::D(0.5), level]);
+            api::call(rt, ADD, &[level, lost]);
+            tick(rt);
+            assert_eq!(api::call(rt, REMOVED, &[lost]), V::I(1));
+            assert!(!crate::mod_entities::live(rt).contains(&lost));
         });
     }
 }

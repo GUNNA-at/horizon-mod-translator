@@ -3736,7 +3736,7 @@ fn mth_fast_inv_sqrt(x: f64) -> f64 {
 }
 
 /// `Mth.atan2`: vanilla's table approximation (its `ASIN_TAB`/`COS_TAB` of 257 entries).
-fn mth_atan2(mut y: f64, mut x: f64) -> f64 {
+pub(crate) fn mth_atan2(mut y: f64, mut x: f64) -> f64 {
     use std::sync::OnceLock;
     static TABLES: OnceLock<(Vec<f64>, Vec<f64>)> = OnceLock::new();
     let (asin_tab, cos_tab) = TABLES.get_or_init(|| {

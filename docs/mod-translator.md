@@ -4814,6 +4814,47 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a hit (a bell rings), riding (each entity is its own vehicle). A projectile doesn't fly yet:
     its vanilla `tick` (part 50).
   - Test: `projectiles::tests::a_mod_projectile_hits_the_nearest_entity_on_its_path_else_the_block`.
+- [x] 2026-11-06 Part 50: a mod's projectile flies. Measured over the pack's 204 projectile classes
+  (`scratchpad/projscan/flightscan.py`): 29 have no tick of their own in their class chain (their
+  vanilla class's runs), 154 have one that calls a vanilla `tick()` (`super.tick()`), 21 one that
+  doesn't; so 183 run a vanilla projectile tick: `Projectile`'s 101, a thrown one's
+  (`ThrowableProjectile`, `ThrowableItemProjectile`) 34, a hurting one's 6, an arrow's 31. Before
+  this part each was nothing (`Entity.tick` answered void), and the level ticked only a class with
+  its own `tick`: a mod's snowball never moved.
+  - The level's tick runs a mod entity's vanilla class's `tick` when its class has none
+    (`mod_entities::on_base`: a call named by the entity's first vanilla class, so a default that
+    differs by class is that class's).
+  - `Projectile.tick`: whether it has left its owner (`checkLeftOwner`: none of the pickable
+    entities its box stretched along its motion and grown by a block meets is its owner), then
+    the base tick. `ThrowableProjectile.tick`: what its path hits (`hitTargetOrDeflectSelf` with its
+    own `canHitEntity`, unless a listener cancels `ProjectileImpactEvent`), on to the end of the
+    path, `updateRotation`, slowed by 0.99 (water 0.8, bubbles), `applyGravity` (0.03).
+    `AbstractHurtingProjectile.tick`: gone on a server where its chunk isn't loaded; alight
+    (`shouldBurn`), the hit along its `getClipType`, `rotateTowardsMovement(0.2)`, faster by its
+    `accelerationPower` along its heading times `getInertia` (0.95; `getLiquidInertia` 0.8), its
+    `getTrailParticle` (smoke). Each of those is the mod's own where its class has one.
+  - `shoot` (`getMovementToShoot`: the unit direction put off by triangle draws of the entity's
+    `random`, spread 0.0172275 × inaccuracy, times the speed; facing along it), `shootFromRotation`
+    (`Mth`'s table sines, plus the shooter's `getKnownMovement`), `updateRotation`, `lerpRotation`,
+    `ProjectileUtil.rotateTowardsMovement`, a thrown item's `setItem`/`getItem` (one of the stack;
+    else one of its `getDefaultItem`).
+  - Every mod entity: `Entity.tick` is the base tick (`baseTick`, virtual): whether its box is in
+    water (which puts its fire out) or lava (alight 15 s after its first tick), its fire burning
+    down on a server, gone 64 below the world's bottom (`onBelowWorld`). Its `random`
+    (`getRandom`), gravity (`setNoGravity`, `getGravity`, `getDefaultGravity`, `applyGravity`), fire
+    (`igniteForSeconds`, `igniteForTicks`, `isOnFire`, `get`/`setRemainingFireTicks`,
+    `clearFire`), `isInWater`, `isInLava`.
+  - `ProjectileImpactEvent` (and `EventHooks.onProjectileImpact`): posted where a mod listens (6 of
+    the pack's mods name it), cancelable.
+  - Not modelled: an arrow's own tick (`AbstractArrow`: it stays), the blocks a projectile passes
+    through (`checkInsideBlocks`), a fluid's current, fire and lava hurting a mod entity, game events
+    (`PROJECTILE_SHOOT`), a vanilla subclass's own defaults (a dragon fireball's trail).
+  - Test: `projectiles::tests::a_mod_projectile_flies_as_vanillas_ticks_move_it`.
+  - In game: Create's mechanical bearing still assembles its contraption and turns it (angle 67.2
+    at 10 ticks; its entity now runs `Entity.tick`'s base tick), no uncaught throws or panics. The
+    potato cannon doesn't fire yet: its `getAmmo` stops at `Player.getProjectile` (unmapped), and
+    the ammo's type after it is a datapack registry entry (`create:potato_projectile/type`), which
+    nothing loads yet.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
