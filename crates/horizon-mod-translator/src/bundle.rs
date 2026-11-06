@@ -1938,6 +1938,9 @@ fn world_reads(get: &str, c: &str) -> String {
         fn block_sounds(&self, state: &str) -> Option<{c}::host::BlockSounds> {{
             {get}.native_state_sounds(state).map(|(volume, pitch, events)| {c}::host::BlockSounds {{ volume, pitch, events }})
         }}
+        fn block_solid(&self, state: &str) -> Option<bool> {{
+            {get}.native_state_solid(state)
+        }}
 "#
     )
 }
@@ -2004,6 +2007,12 @@ fn world_writes(c: &str) -> String {
         }}
         fn destroy_block_progress(&mut self, breaker: i32, pos: [i32; 3], progress: i32) {{
             self.game.native_destroy_block_progress(breaker, pos, progress);
+        }}
+        fn block_experience(&mut self, state: &str) -> i32 {{
+            i32::try_from(self.game.native_block_experience(state)).unwrap_or(i32::MAX)
+        }}
+        fn pop_experience(&mut self, pos: [i32; 3], amount: i32) {{
+            self.game.native_pop_experience(pos, u32::try_from(amount).unwrap_or(0));
         }}
         fn damage_types(&self) -> Vec<{c}::host::DamageTypeView> {{
             let catalog = &self.game.motion.health.damage;

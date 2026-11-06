@@ -907,6 +907,21 @@ pub trait Host {
     /// `Level.destroyBlockProgress(breaker, pos, progress)`: entity `breaker`'s cracks on the block
     /// at `pos`, stage 0 to 9 (any other value takes them away), for the players around to see.
     fn destroy_block_progress(&mut self, _breaker: i32, _pos: [i32; 3], _progress: i32) {}
+    /// NeoForge's `getExpDrop` of vanilla block state `state`: the experience breaking it drops, drawn
+    /// as the block draws it (an ore's range, a spawner's 15 + 0..14 + 0..14), before enchantments
+    /// (silk touch) take it away. 0 for a block that drops none, or a state the game doesn't know.
+    fn block_experience(&mut self, _state: &str) -> i32 {
+        0
+    }
+    /// `Block.popExperience(level, pos, amount)`: experience orbs worth `amount` at the centre of
+    /// `pos`, when blocks drop (`doTileDrops`).
+    fn pop_experience(&mut self, _pos: [i32; 3], _amount: i32) {}
+    /// Whether block state `state` is solid as vanilla's movement and heightmaps once asked
+    /// (`BlockState.isSolid`, its `legacySolid`: forced by its properties, else from its collision
+    /// shape's size). None for a state the game doesn't know.
+    fn block_solid(&self, _state: &str) -> Option<bool> {
+        None
+    }
     /// A sound a mod plays (`Level.playSound`, `playLocalSound`, `Entity.playSound`). A server's
     /// game sends it to the players near it; a client's plays it for its player.
     fn play_sound(&mut self, _sound: &Sound) {}
@@ -1238,6 +1253,10 @@ pub struct MemoryHost {
     pub after_breaks: Vec<([i32; 3], String, Option<String>)>,
     /// Cracks shown ([`Host::destroy_block_progress`]): breaker, position, stage.
     pub cracks: Vec<(i32, [i32; 3], i32)>,
+    /// The experience each block drops ([`Host::block_experience`]), by block.
+    pub experience: HashMap<String, i32>,
+    /// Blocks that are solid ([`Host::block_solid`]); any other block the host has facts for isn't.
+    pub solid: Vec<String>,
     /// The server's players and where they are.
     pub players: Vec<(u128, [f64; 3])>,
     /// The server's players' entity ids ([`Host::player_entities`]), by UUID.
@@ -1757,6 +1776,20 @@ impl Host for MemoryHost {
         if !self.read_only {
             self.cracks.push((breaker, pos, progress));
         }
+    }
+    fn block_experience(&mut self, state: &str) -> i32 {
+        self.experience.get(state.split('[').next().unwrap_or(state)).copied().unwrap_or(0)
+    }
+    fn pop_experience(&mut self, pos: [i32; 3], amount: i32) {
+        if !self.read_only && amount > 0 {
+            let at = pos.map(|c| f64::from(c) + 0.5);
+            self.orbs.push((at, amount as u32, None));
+        }
+    }
+    fn block_solid(&self, state: &str) -> Option<bool> {
+        let block = state.split('[').next().unwrap_or(state);
+        let known = self.facts.contains_key(block) || self.solid.iter().any(|b| b == block);
+        known.then(|| self.solid.iter().any(|b| b == block))
     }
     fn play_sound(&mut self, sound: &Sound) {
         if !self.read_only {

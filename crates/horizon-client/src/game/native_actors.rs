@@ -7,7 +7,8 @@
 //! One that breaks blocks (the deployer punching, Create's drills and saws) asks what the game
 //! knows of a break: whether the block needs the right tool for its drops, what a tool does to it
 //! (its speed, whether it is right for the drops, its wear per block), the block's sounds, its loot
-//! rolled with the tool, an infested block's silverfish afterwards, and the cracks shown on it.
+//! rolled with the tool, its experience and the orbs it pops, an infested block's silverfish
+//! afterwards, whether a block is solid, and the cracks shown on it.
 use super::Game;
 use super::native_hooks::state_from_text;
 use horizon_client::items::ItemStack;
@@ -142,6 +143,33 @@ impl Game<'_> {
                 self.mob_poof(id);
             }
         }
+    }
+
+    /// NeoForge's `getExpDrop` of the block state `text` names: the experience its break drops,
+    /// drawn from the level's random as the block draws it (an ore's range, a spawner's 15 + 0..14
+    /// + 0..14), before enchantments (silk touch) take it away. 0 for a block that drops none or a
+    /// state the game doesn't know. API @API:actors@.
+    pub(super) fn native_block_experience(&mut self, text: &str) -> u32 {
+        let Some(state) = state_from_text(self.pack.assets.registry, text) else {
+            return 0;
+        };
+        let name = self.res.facts().get(state).name.clone();
+        self.block_experience(&name)
+    }
+
+    /// `Block.popExperience(level, pos, amount)`: experience orbs worth `amount` at the centre of
+    /// `pos`, when blocks drop (`doTileDrops`). API @API:actors@.
+    pub(super) fn native_pop_experience(&mut self, pos: [i32; 3], amount: u32) {
+        if amount > 0 && self.ui.rules.bool("block_drops") {
+            self.spawn_orbs(pos.map(|c| f64::from(c) + 0.5), amount);
+        }
+    }
+
+    /// Whether the block state `text` names is solid (`BlockState.isSolid`, vanilla's
+    /// `legacySolid`); None for a state the game doesn't know. API @API:actors@.
+    pub(super) fn native_state_solid(&self, text: &str) -> Option<bool> {
+        let state = state_from_text(self.pack.assets.registry, text)?;
+        Some(self.res.facts().get(state).legacy_solid)
     }
 
     /// `ServerLevel.destroyBlockProgress(breaker, pos, progress)`: entity `breaker`'s cracks on

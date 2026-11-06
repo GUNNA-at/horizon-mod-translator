@@ -405,6 +405,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             update(rt, a(0), |_, l| upgrade(l, &n, to));
             V::Void
         }
+        // `processBlockExperience(level, tool, experience)`: what a block's break drops after the
+        // tool's enchantments; of vanilla's, silk touch's `block_experience` effect sets it to 0.
+        (HELPER, "processBlockExperience") => {
+            let e = on_stack(rt, a(1), ENCHANTMENTS);
+            V::I(if level(&levels(rt, e), "minecraft:silk_touch") > 0 { 0 } else { a(2).i() })
+        }
         (HELPER, "getItemEnchantmentLevel" | "getTagEnchantmentLevel") => {
             let n = name_of(rt, a(0)).unwrap_or_default();
             let e = on_stack(rt, a(1), ENCHANTMENTS);

@@ -1781,6 +1781,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     rt.put_field(a(0), field, a(1 + i));
                 }
             }
+            // An ore's experience (`DropExperienceBlock(IntProvider, Properties)`), the field vanilla
+            // names `xpRange`: what NeoForge's `getExpDrop` draws from.
+            if o == "net/minecraft/world/level/block/DropExperienceBlock" && desc.starts_with("(Lnet/minecraft/util/valueproviders/IntProvider;") {
+                rt.put_field(a(0), "xpRange", a(1));
+            }
             // A cauldron's interaction map (`AbstractCauldronBlock(Properties, InteractionMap)`),
             // the field vanilla names `interactions`.
             if let Some(m) = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == INTERACTION_MAP) {

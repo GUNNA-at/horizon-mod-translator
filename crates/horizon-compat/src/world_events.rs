@@ -368,7 +368,7 @@ fn block_event(rt: &Rt, v: V) -> bool {
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(owner, BREAK | PLACE | MULTI_PLACE | SNAPSHOT | PLAYER_TICK | PLAYER_TICK_PRE | PLAYER_TICK_POST | ENTITY_JOIN | ENTITY_LEAVE)
         || owner.starts_with(NETWORK_EVENT)
-        || (owner == BLOCK_EVENT && name == "<init>")
+        || (owner == BLOCK_EVENT && matches!(name, "<init>" | "getLevel" | "getPos" | "getState"))
         || (matches!(owner, EVENT | CANCELLABLE) && matches!(name, "isCanceled" | "setCanceled"))
         || (matches!(owner, PLAYER_EVENT | LIVING_EVENT | ENTITY_EVENT) && matches!(name, "getEntity"))
 }
@@ -411,7 +411,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if name == "<init>" {
         return construct(rt, owner, args);
     }
-    let ours = matches!(owner, BREAK | PLACE | MULTI_PLACE) || (matches!(owner, EVENT | CANCELLABLE) && block_event(rt, ev));
+    let ours = matches!(owner, BREAK | PLACE | MULTI_PLACE) || (matches!(owner, BLOCK_EVENT | EVENT | CANCELLABLE) && block_event(rt, ev));
     if !ours {
         return None;
     }

@@ -43,14 +43,18 @@ const ENTITY_EVENT: &str = "net/neoforged/neoforge/event/entity/EntityEvent";
 const EVENT: &str = "net/neoforged/bus/api/Event";
 const CANCELLABLE: &str = "net/neoforged/bus/api/ICancellableEvent";
 const BREAK: &str = crate::world_events::BREAK;
+const BLOCK_DROPS: &str = "net/neoforged/neoforge/event/level/BlockDropsEvent";
+const BLOCK_EVENT: &str = "net/neoforged/neoforge/event/level/BlockEvent";
 /// The events' classes above them, so a listener for `PlayerEvent` (or any event) hears them.
-const SUPERS: [(&str, &str); 6] = [
+const SUPERS: [(&str, &str); 8] = [
     (BREAK_SPEED, PLAYER_EVENT),
     (HARVEST_CHECK, PLAYER_EVENT),
     (DESTROY_ITEM, PLAYER_EVENT),
     (PLAYER_EVENT, LIVING_EVENT),
     (LIVING_EVENT, ENTITY_EVENT),
     (ENTITY_EVENT, EVENT),
+    (BLOCK_DROPS, BLOCK_EVENT),
+    (BLOCK_EVENT, EVENT),
 ];
 
 // The block state's calls (`BlockStateBase`'s, NeoForge's `IBlockStateExtension`'s).
@@ -59,6 +63,8 @@ const STATE_HARVEST: &str = "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecr
 const STATE_DESTROYED: &str = "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;ZLnet/minecraft/world/level/material/FluidState;)Z";
 const STATE_AFTER_BREAK: &str = "(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/item/ItemStack;Z)V";
 const STATE_SOUND: &str = "()Lnet/minecraft/world/level/block/SoundType;";
+const STATE_EXP: &str = "(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)I";
+const STATE_EXP_KEY: &str = "net/minecraft/world/level/block/state/BlockState.getExpDrop.(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)I";
 const STATE_SOUND_AT: &str = "(Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/Entity;)Lnet/minecraft/world/level/block/SoundType;";
 
 // A block's own (`BlockBehaviour`'s, `Block`'s and NeoForge's `IBlockExtension`'s), by name and
@@ -76,6 +82,15 @@ const SOUND_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.ge
 const SOUND_AT: &str = "getSoundType.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/Entity;)Lnet/minecraft/world/level/block/SoundType;";
 const SOUND_AT_KEY: &str = "net/minecraft/world/level/block/Block.getSoundType.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/Entity;)Lnet/minecraft/world/level/block/SoundType;";
 const DESTROY_DESC: &str = "(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V";
+const EXP: &str = "getExpDrop.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)I";
+const EXP_KEY: &str = "net/minecraft/world/level/block/Block.getExpDrop.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)I";
+/// `Block.popExperience(level, pos, amount)`.
+const POP_EXPERIENCE: &str = "(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;I)V";
+const DROPS_INIT: &str = "(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/entity/BlockEntity;Ljava/util/List;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)V";
+const PROCESS_EXPERIENCE: &str = "net/minecraft/world/item/enchantment/EnchantmentHelper.processBlockExperience.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/item/ItemStack;I)I";
+const DEFAULT_STATE: &str = "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;";
+const GET_RANDOM: &str = "net/minecraft/world/level/Level.getRandom.()Lnet/minecraft/util/RandomSource;";
+const SAMPLE: &str = "net/minecraft/util/valueproviders/IntProvider.sample.(Lnet/minecraft/util/RandomSource;)I";
 /// `Block.getDrops(state, level, pos, blockEntity)` and `(state, level, pos, blockEntity, entity,
 /// tool)`, the static ones.
 const DROPS: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;)Ljava/util/List;";
@@ -139,7 +154,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     match owner {
         STATE | STATE_BASE => matches!(
             (name, desc),
-            ("getDestroyProgress", STATE_PROGRESS)
+            ("getDestroyProgress", STATE_PROGRESS) | ("getExpDrop", STATE_EXP) | ("isSolid" | "blocksMotion", "()Z")
                 | ("canHarvestBlock", STATE_HARVEST)
                 | ("requiresCorrectToolForDrops", "()Z")
                 | ("onDestroyedByPlayer", STATE_DESTROYED)
@@ -150,7 +165,8 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         COMMON_HOOKS => name == "fireBlockBreak",
         EVENT_HOOKS => matches!(name, "doPlayerHarvestCheck" | "getBreakSpeed" | "onPlayerDestroyItem"),
         GAME_MODE => matches!(name, "getGameModeForPlayer" | "getPreviousGameModeForPlayer" | "isCreative" | "isSurvival"),
-        BREAK_SPEED | HARVEST_CHECK | DESTROY_ITEM => true,
+        BREAK_SPEED | HARVEST_CHECK | DESTROY_ITEM | BLOCK_DROPS => true,
+        BLOCK_EVENT => matches!(name, "getLevel" | "getPos" | "getState"),
         PLAYER_EVENT | LIVING_EVENT | ENTITY_EVENT => name == "getEntity",
         EVENT | CANCELLABLE => matches!(name, "isCanceled" | "setCanceled"),
         o if api_common::is_player(o) => matches!(
@@ -167,6 +183,9 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
             [PROGRESS, HARVEST, DESTROYED, AFTER_BREAK, SOUND, SOUND_AT].iter().any(|k| k.split_once('.') == Some(nd))
                 || (name == "destroy" && desc == DESTROY_DESC)
                 || (name == "getDrops" && matches!(desc, DROPS | DROPS_BY))
+                || (name == "popExperience" && desc == POP_EXPERIENCE)
+                || (o == "net/minecraft/world/level/block/IceBlock" && name == "meltsInto")
+                || EXP.split_once('.') == Some(nd)
         }
         _ => false,
     }
@@ -192,6 +211,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     None => V::I(harvest_check(rt, a(3), st, a(1), a(2)) as i32),
                 },
                 "requiresCorrectToolForDrops" => V::I(requires_tool(rt, &text) as i32),
+                "getExpDrop" => V::I(exp_drop(rt, st, &text, [a(1), a(2), a(3), a(4), a(5)])),
+                "isSolid" => V::I(solid(rt, &text) as i32),
+                // `blocksMotion`: solid, but never a cobweb or a bamboo sapling.
+                "blocksMotion" => {
+                    let (block, _) = crate::host::split_state(&text);
+                    V::I((!matches!(block, "minecraft:cobweb" | "minecraft:bamboo_sapling") && solid(rt, &text)) as i32)
+                }
                 "onDestroyedByPlayer" => match block_override(rt, &text, DESTROYED_KEY, DESTROYED, &[st, a(1), a(2), a(3), a(4), a(5)]) {
                     Some(v) => v,
                     None => destroyed_by_player(rt, a(1), a(2), a(5)),
@@ -254,7 +280,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 _ => V::I(matches!(i, 0 | 2) as i32),
             }
         }
-        BREAK_SPEED | HARVEST_CHECK | DESTROY_ITEM | PLAYER_EVENT | LIVING_EVENT | ENTITY_EVENT | EVENT | CANCELLABLE => return event_call(rt, owner, name, args),
+        BLOCK_DROPS if name == "<init>" && desc == DROPS_INIT => {
+            block_drops_event(rt, args);
+            V::Void
+        }
+        BREAK_SPEED | HARVEST_CHECK | DESTROY_ITEM | BLOCK_DROPS | BLOCK_EVENT | PLAYER_EVENT | LIVING_EVENT | ENTITY_EVENT | EVENT | CANCELLABLE => {
+            return event_call(rt, owner, name, args);
+        }
         o if api_common::is_player(o) => match name {
             "getDigSpeed" => V::F(dig_speed(rt, a(0), a(1), a(2))),
             // The deprecated one is vanilla's own test; the other NeoForge's, with `HarvestCheck`.
@@ -299,6 +331,23 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let tool = if desc == DROPS_BY { a(5) } else { V::NULL };
                 drops(rt, a(0), a(2), tool)
             }
+            // NeoForge's `getExpDrop`, a mod block's `super.` call: an ore's range, else none.
+            "getExpDrop" => V::I(own_exp_drop(rt, a(0), a(1), a(2))),
+            // `popExperience(level, pos, amount)`: orbs, on the server.
+            "popExperience" => {
+                if api::call(rt, IS_CLIENT, &[a(1)]).i() == 0 {
+                    let p = api::pos_of(rt, a(2));
+                    if let Some(h) = rt.host_mut() {
+                        h.pop_experience(p, a(3).i());
+                    }
+                }
+                V::Void
+            }
+            // `IceBlock.meltsInto()`: water.
+            "meltsInto" => {
+                let water = api::block(rt, "minecraft:water");
+                api::call(rt, DEFAULT_STATE, &[water])
+            }
             // `destroy` and `spawnAfterBreak` do nothing in `Block` and `BlockBehaviour`.
             _ => V::Void,
         },
@@ -308,6 +357,51 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 /// The block state `v` names (`minecraft:stone`), air for none.
 fn text_of(rt: &Rt, v: V) -> String {
     rt.str_of(v).unwrap_or("minecraft:air").to_owned()
+}
+
+/// NeoForge's `getExpDrop(level, pos, blockEntity, breaker, tool)` of state `st` (`text`): a mod
+/// block's own; else a mod block made as an ore draws from its range (vanilla's
+/// `DropExperienceBlock`), and a vanilla block's experience is what the game draws for it. Before
+/// enchantments: `EnchantmentHelper.processBlockExperience` takes silk touch's away.
+fn exp_drop(rt: &mut Rt, st: V, text: &str, args: [V; 5]) -> i32 {
+    let mut all = vec![st];
+    all.extend_from_slice(&args);
+    if let Some(v) = block_override(rt, text, EXP_KEY, EXP, &all) {
+        return v.i();
+    }
+    if let Some(b) = mod_block_object(rt, text) {
+        return own_exp_drop(rt, b, st, args[0]);
+    }
+    rt.host_mut().map_or(0, |h| h.block_experience(text))
+}
+
+/// `Block.getExpDrop` as vanilla's own classes answer for block `b` in state `st`: an ore's range
+/// (`DropExperienceBlock.xpRange`) drawn from `level`'s random, else none; a vanilla block's what
+/// the game draws.
+fn own_exp_drop(rt: &mut Rt, b: V, st: V, level: V) -> i32 {
+    let range = rt.get_field(b, "xpRange");
+    if range.r() != 0 {
+        let level = if level.r() != 0 { level } else { crate::glue::level(rt) };
+        let random = api::call(rt, GET_RANDOM, &[level]);
+        return api::call(rt, SAMPLE, &[range, random]).i();
+    }
+    if rt.str_of(b).is_some() {
+        let text = text_of(rt, st);
+        return rt.host_mut().map_or(0, |h| h.block_experience(&text));
+    }
+    0
+}
+
+/// `BlockState.isSolid()` (vanilla's `legacySolid`) of state `text`: as the game has the block;
+/// a mod block the game doesn't know is solid when its `Properties` force it (`forceSolidOn`).
+fn solid(rt: &Rt, text: &str) -> bool {
+    if let Some(s) = rt.host().and_then(|h| h.block_solid(text)) {
+        return s;
+    }
+    mod_block_object(rt, text).is_some_and(|b| {
+        let props = rt.get_field(b, "$properties");
+        props.r() != 0 && rt.get_field(props, "$forceSolidOn").i() == 1
+    })
 }
 
 /// A call on `this` as Java dispatches it: a mod object's own override (a mod's player class), else
@@ -717,7 +811,7 @@ fn put_all(rt: &mut Rt, o: V, fields: &[(&'static str, V)]) {
 }
 
 fn know_classes(rt: &mut Rt) {
-    if rt.supers.get(BREAK_SPEED) != Some(&PLAYER_EVENT) || rt.supers.get(PLAYER_EVENT) != Some(&LIVING_EVENT) {
+    if rt.supers.get(BREAK_SPEED) != Some(&PLAYER_EVENT) || rt.supers.get(PLAYER_EVENT) != Some(&LIVING_EVENT) || rt.supers.get(BLOCK_DROPS) != Some(&BLOCK_EVENT) {
         for (class, sup) in SUPERS {
             rt.supers.insert(class, sup);
         }
@@ -735,6 +829,9 @@ fn listened(rt: &mut Rt, class: &str) -> bool {
 fn event_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let ev = a(0);
+    if rt.class_of(ev) == BLOCK_DROPS || owner == BLOCK_DROPS {
+        return drops_event_call(rt, name, args);
+    }
     if name == "<init>" {
         know_classes(rt);
         let fields = match owner {
@@ -783,6 +880,55 @@ fn event_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// `new BlockDropsEvent(level, pos, state, blockEntity, drops, breaker, tool)`: what NeoForge's
+/// constructor keeps, and the experience the break drops (`state.getExpDrop(...)` after the tool's
+/// enchantments), which a listener may change.
+fn block_drops_event(rt: &mut Rt, args: &[V]) {
+    know_classes(rt);
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let ev = a(0);
+    put_all(rt, ev, &[("$level", a(1)), ("$pos", a(2)), ("$state", a(3)), ("$blockEntity", a(4)), ("$drops", a(5)), ("$breaker", a(6)), ("$tool", a(7)), ("$canceled", V::I(0))]);
+    let experience = api::call(rt, STATE_EXP_KEY, &[a(3), a(1), a(2), a(4), a(6), a(7)]).i();
+    let experience = api::call(rt, PROCESS_EXPERIENCE, &[a(1), a(7), V::I(experience)]);
+    rt.put_field(ev, "$experience", V::I(experience.i()));
+}
+
+/// A `BlockDropsEvent`'s own calls, and `BlockEvent`'s and `Event`'s on one.
+fn drops_event_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let ev = a(0);
+    let field = match name {
+        "getLevel" => "$level",
+        "getPos" => "$pos",
+        "getState" => "$state",
+        "getDrops" => "$drops",
+        "getBlockEntity" => "$blockEntity",
+        "getBreaker" => "$breaker",
+        "getTool" => "$tool",
+        "getDroppedExperience" => "$experience",
+        "isCanceled" => "$canceled",
+        "setCanceled" => {
+            rt.put_field(ev, "$canceled", V::I((a(1).i() != 0) as i32));
+            return Some(V::Void);
+        }
+        // `Preconditions.checkArgument`: no negative experience.
+        "setDroppedExperience" if a(1).i() < 0 => {
+            crate::jlang::throw_with(rt, "java/lang/IllegalArgumentException", "May not set a negative experience drop.");
+            return Some(V::Void);
+        }
+        "setDroppedExperience" => {
+            rt.put_field(ev, "$experience", V::I(a(1).i()));
+            return Some(V::Void);
+        }
+        _ => return None,
+    };
+    Some(match rt.get_field(ev, field) {
+        V::Void if matches!(field, "$experience" | "$canceled") => V::I(0),
+        V::Void => V::NULL,
+        v => v,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -822,6 +968,10 @@ mod tests {
             }
             3 => {
                 api::call(rt, key(HARVEST_CHECK, "setCanHarvest", "(Z)V"), &[ev, V::I(0)]);
+            }
+            4 => {
+                let xp = api::call(rt, key(BLOCK_DROPS, "getDroppedExperience", "()I"), &[ev]).i();
+                api::call(rt, key(BLOCK_DROPS, "setDroppedExperience", "(I)V"), &[ev, V::I(xp + 2)]);
             }
             _ => return None,
         }
@@ -934,6 +1084,72 @@ mod tests {
         assert_eq!(h.blocks.get(&AT).map(String::as_str), Some("minecraft:air"));
         assert_eq!(h.after_breaks, vec![(AT, STONE.to_owned(), Some("minecraft:iron_pickaxe".to_owned()))]);
         assert!(matches!(h.cracks.as_slice(), [(id, AT, 4)] if *id < 0), "{:?}", h.cracks);
+    }
+
+    /// Create's drills and saws break through `BlockHelper.destroyBlockAs`: an ore's experience as
+    /// `BlockDropsEvent` makes it (silk touch takes it away, a listener changes it) and the orbs it
+    /// pops; broken ice melts into water when what is below blocks motion (a cobweb never does); a
+    /// mod's ore made as vanilla's `DropExperienceBlock` draws from its own range.
+    #[test]
+    fn a_drill_pops_an_ores_experience_through_block_drops_event() {
+        const ORE: &str = "minecraft:diamond_ore";
+        const EXPERIENCE: &str = "()I";
+        let mut rt = runtime(&[(BLOCK_DROPS, 4)]);
+        let mut h = world();
+        h.blocks.insert(AT, ORE.into());
+        h.experience.insert(ORE.into(), 5);
+        h.solid.extend([STONE.to_owned(), "minecraft:cobweb".to_owned()]);
+        rt.with_host(&mut h, |rt| {
+            let (p, pickaxe) = fake(rt, Some("minecraft:iron_pickaxe"));
+            let level = crate::glue::level(rt);
+            let pos = api::block_pos(rt, AT[0].into(), AT[1].into(), AT[2].into());
+            let st = api::call(rt, GET_BLOCK_STATE, &[level, pos]);
+            let made = |rt: &mut Rt, tool: V| {
+                let drops = crate::jutil::new_list(rt, Vec::new());
+                let ev = rt.new_object(BLOCK_DROPS);
+                api::call(rt, key(BLOCK_DROPS, "<init>", DROPS_INIT), &[ev, level, pos, st, V::NULL, drops, p, tool]);
+                ev
+            };
+            let ev = made(rt, pickaxe);
+            assert_eq!(api::call(rt, key(BLOCK_DROPS, "getDroppedExperience", EXPERIENCE), &[ev]).i(), 5);
+            crate::neo::post(rt, BLOCK_DROPS, ev);
+            let xp = api::call(rt, key(BLOCK_DROPS, "getDroppedExperience", EXPERIENCE), &[ev]).i();
+            assert_eq!(xp, 7, "the listener's");
+            assert_eq!(api::call(rt, key(BLOCK_DROPS, "isCanceled", "()Z"), &[ev]).i(), 0);
+            let breaker = api::call(rt, key(BLOCK_DROPS, "getBreaker", "()Lnet/minecraft/world/entity/Entity;"), &[ev]);
+            assert_eq!(breaker, p);
+            let block = api::call(rt, key(STATE, "getBlock", "()Lnet/minecraft/world/level/block/Block;"), &[st]);
+            api::call(rt, key(BLOCK, "popExperience", POP_EXPERIENCE), &[block, level, pos, V::I(xp)]);
+            // Silk touch drops none.
+            let registry = api::get_static(rt, "net/minecraft/core/registries/Registries.ENCHANTMENT");
+            let silk = api::get_static(rt, "net/minecraft/world/item/enchantment/Enchantments.SILK_TOUCH");
+            let silk = api::call(rt, "net/minecraft/core/HolderGetter.getOrThrow.(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/Holder$Reference;", &[registry, silk]);
+            let silky = api_common::stack(rt, "minecraft:iron_pickaxe", 1);
+            api::call(rt, "net/minecraft/world/item/ItemStack.enchant.(Lnet/minecraft/core/Holder;I)V", &[silky, silk, V::I(1)]);
+            let ev = made(rt, silky);
+            assert_eq!(api::call(rt, key(BLOCK_DROPS, "getDroppedExperience", EXPERIENCE), &[ev]).i(), 0);
+            // Ice melts into water over a block that blocks motion.
+            let ice = api::state(rt, "minecraft:ice");
+            let ice = api::call(rt, key(STATE, "getBlock", "()Lnet/minecraft/world/level/block/Block;"), &[ice]);
+            assert!(rt.instance_of(ice, "net/minecraft/world/level/block/IceBlock"));
+            let water = api::call(rt, "net/minecraft/world/level/block/IceBlock.meltsInto.()Lnet/minecraft/world/level/block/state/BlockState;", &[]);
+            assert_eq!(crate::host::split_state(&text_of(rt, water)).0, "minecraft:water");
+            for (block, blocks) in [(STONE, 1), ("minecraft:cobweb", 0), ("minecraft:air", 0)] {
+                let below = api::state(rt, block);
+                assert_eq!(api::call(rt, key(STATE, "blocksMotion", "()Z"), &[below]).i(), blocks, "{block}");
+            }
+            // A mod's ore: `DropExperienceBlock(ConstantInt.of(4), properties)`.
+            rt.supers.insert("com/example/ZincOre", "net/minecraft/world/level/block/DropExperienceBlock");
+            let ore = rt.new_object("com/example/ZincOre");
+            let range = api::call(rt, "net/minecraft/util/valueproviders/ConstantInt.of.(I)Lnet/minecraft/util/valueproviders/ConstantInt;", &[V::I(4)]);
+            let props = api::call(rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.of.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[]);
+            api::call(rt, "net/minecraft/world/level/block/DropExperienceBlock.<init>.(Lnet/minecraft/util/valueproviders/IntProvider;Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V", &[ore, range, props]);
+            rt.registered.insert(("block".into(), "example:zinc_ore".into()), ore);
+            let ore_state = api::state(rt, "example:zinc_ore");
+            assert_eq!(api::call(rt, key(STATE, "getExpDrop", STATE_EXP), &[ore_state, level, pos, V::NULL, p, pickaxe]).i(), 4);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+        assert_eq!(h.orbs, vec![([3.5, 64.5, -1.5], 7, None)], "at the ore's centre");
     }
 
     /// NeoForge's events have their say: a `BreakSpeed` listener's speed is the player's, and a

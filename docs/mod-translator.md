@@ -4028,6 +4028,45 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     and a chest against 1.21.1's declared classes; static checks for two blocks of one runtime class; sword,
     diamond, torch items; `getClass()`; a mod crop through `CropBlock`) and
     `the_vanilla_class_tables_are_sorted_for_their_searches`. 387 compat and 17 translator tests pass.
+- [x] 2026-11-06 Part 22: Create's drills and saws (`BlockHelper.destroyBlockAs`): NeoForge's `BlockDropsEvent`, a
+  block's experience, ice melting into water; round 18 in game.
+  - What `destroyBlockAs` calls, in order (its bytecode): the fluid and block state, `levelEvent(2001)`, the block
+    entity; with a player, `BreakEvent`, `ItemStack.mineBlock` and `Stats.BLOCK_MINED`; then on a `ServerLevel` with
+    `doTileDrops` (and no creative player) `Block.getDrops`, `new BlockDropsEvent(level, pos, state, blockEntity,
+    new ArrayList(), player, tool)` posted for any breaker (a drill's is null), `popExperience` of its
+    `getDroppedExperience()`, the drops to the caller's consumer (a drill throws them out as `ItemEntity`s), silk
+    touch's holder for ice, `IceBlock.meltsInto()` over a block that `blocksMotion()` or a liquid,
+    `spawnAfterBreak` and `setBlockAndUpdate` to the fluid's block. Missing were the event, the experience, ice
+    and `blocksMotion`.
+  - `BlockDropsEvent`: NeoForge's constructor keeps level, position, state, block entity, drops, breaker and tool
+    and draws the experience, `EnchantmentHelper.processBlockExperience(level, tool, state.getExpDrop(level, pos,
+    blockEntity, breaker, tool))`. Its getters, `setCanceled`, and `setDroppedExperience`, which refuses a negative
+    amount as NeoForge's `Preconditions.checkArgument` does (`IllegalArgumentException`, "May not set a negative
+    experience drop."). `world_events` now answers `BlockEvent.getLevel`, `getPos` and `getState` on its own events.
+  - `BlockState.getExpDrop` (NeoForge's): a mod block's own override; a mod block made as vanilla's
+    `DropExperienceBlock(IntProvider, Properties)` draws from its range (the constructor keeps it as vanilla's
+    `xpRange`) with the level's random; a vanilla block's is what the game draws (the new
+    `Host::block_experience`: ore ranges, a spawner's). `Block.getExpDrop` as a mod block's `super.` call answers
+    the same without the override.
+  - `processBlockExperience`: silk touch's `block_experience` effect leaves none; vanilla's other enchantments
+    don't change it. `Block.popExperience(level, pos, amount)` on the server: the game's `ExperienceOrb.award` at
+    the block's centre (new `Host::pop_experience`), only with `doTileDrops` on, as vanilla checks.
+  - `IceBlock.meltsInto()`: water's default state (ice is an `IceBlock` since Part 21). `BlockState.isSolid()`
+    (vanilla's `legacySolid`) as the game has the block (new `Host::block_solid`); a mod block the game doesn't
+    know is solid when its `Properties` force it. `blocksMotion()`: solid, but never a cobweb or a bamboo sapling.
+  - New native helpers (`native_actors.rs`, in `tools/native-hook-fragments/actors.json`):
+    `native_block_experience(state)`, `native_pop_experience(pos, amount)` and `native_state_solid(state)`, bound
+    by the bundle's server host.
+  - Tests: `block_breaking::tests::a_drill_pops_an_ores_experience_through_block_drops_event`: diamond ore's 5 from
+    the host, 7 after a listener adds 2, the breaker kept, `popExperience` leaving one orb of 7 at the block's
+    centre; a silk touch pickaxe leaves none; ice melts into water; stone `blocksMotion`, a cobweb and air don't;
+    a mod's `DropExperienceBlock` with `ConstantInt.of(4)` gives 4; nothing unmapped. 388 compat, 17 translator and
+    48 game tests pass.
+  - Round 18 in game: the drill (a creative motor at 256 rpm behind it) broke the diamond ore in front of it within
+    100 ticks (the drill's `Speed` read 256), but no diamond and no orbs appeared near it. The drops are lost
+    between `destroyBlockAs`'s break and its consumer; the only unmapped call on the way is
+    `Level.restoringBlockSnapshots` (an unmapped field reads 0, the false vanilla has). Traced in the harness next.
+    The punching deployer works as in round 17 (stone broken, cobblestone in its `Overflow`, pickaxe damage 1).
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick
