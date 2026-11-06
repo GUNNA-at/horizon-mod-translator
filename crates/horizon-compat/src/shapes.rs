@@ -348,7 +348,7 @@ fn axis_of(rt: &Rt, v: V) -> usize {
 
 /// `AABB.clip`: where the segment `from` → `to` enters the box, as vanilla's `getDirection`
 /// finds it (the nearest face crossed going in).
-fn clip(b: Box3, from: [f64; 3], to: [f64; 3]) -> Option<[f64; 3]> {
+pub(crate) fn clip(b: Box3, from: [f64; 3], to: [f64; 3]) -> Option<[f64; 3]> {
     let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
     let mut scale = 1.0;
     enter(b, from, d, &mut scale)?;
@@ -466,6 +466,11 @@ fn level_clip(rt: &mut Rt, level: V, ctx: V) -> V {
     let (from, to) = (xyz(rt, from), xyz(rt, to));
     let ordinal = |rt: &Rt, v: V| rt.get_field(v, "$ordinal").i();
     let (block_mode, fluid_mode) = (ordinal(rt, rt.get_field(ctx, "block")), ordinal(rt, rt.get_field(ctx, "fluid")));
+    clip_through(rt, level, from, to, block_mode, fluid_mode)
+}
+
+/// [`level_clip`] for a context's parts: the segment and the ordinals of its block and fluid modes.
+pub(crate) fn clip_through(rt: &mut Rt, level: V, from: [f64; 3], to: [f64; 3], block_mode: i32, fluid_mode: i32) -> V {
     let test = |rt: &mut Rt, p: [i32; 3]| -> Option<V> {
         let host = rt.host()?;
         let text = host.block_state(p);

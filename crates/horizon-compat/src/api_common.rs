@@ -36,6 +36,7 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         "net/minecraft/core/BlockPos" => c == "net/minecraft/core/BlockPos$MutableBlockPos",
         "net/minecraft/core/Vec3i" => matches!(c, "net/minecraft/core/BlockPos" | "net/minecraft/core/BlockPos$MutableBlockPos"),
         "net/minecraft/world/phys/shapes/CollisionContext" => c == crate::shapes::ENTITY_COLLISION_CONTEXT,
+        "net/minecraft/world/phys/HitResult" => matches!(c, "net/minecraft/world/phys/BlockHitResult" | crate::projectiles::ENTITY_HIT),
         "net/minecraft/world/item/Item" => family("net/minecraft/world/item/", "Item"),
         // Fluids: vanilla's (`WaterFluid$Source` is a `FlowingFluid` and a `WaterFluid`) and NeoForge's
         // `BaseFlowingFluid` and its `Flowing` and `Source`.
@@ -523,7 +524,7 @@ fn plain_enum_values(rt: &mut Rt, class: &str) -> Option<V> {
     Some(arr)
 }
 
-fn is_player_class(c: &str) -> bool {
+pub(crate) fn is_player_class(c: &str) -> bool {
     matches!(
         c,
         "net/minecraft/server/level/ServerPlayer"

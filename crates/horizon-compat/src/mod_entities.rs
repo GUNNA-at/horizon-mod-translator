@@ -111,7 +111,7 @@ fn removal(rt: &mut Rt, i: usize) -> V {
 /// `Entity(EntityType, Level)`: an id, a random UUID, at the origin, the synched data vanilla's
 /// constructor defines and then the subclass's own (`defineSynchedData`), then `setPos(0, 0, 0)`
 /// (both virtual, as in Java: a subclass's run before its own fields are set).
-fn construct(rt: &mut Rt, e: V, ty: V, level: V) {
+pub(crate) fn construct(rt: &mut Rt, e: V, ty: V, level: V) {
     let id = next_id(rt);
     rt.put_field(e, "$modEntity", V::I(1));
     rt.put_field(e, "$id", V::I(id));
@@ -296,6 +296,7 @@ pub(crate) fn type_id(rt: &Rt, ty: V) -> Option<&str> {
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(name, "addFreshEntity" | "getEntity" | "getPlayerByUUID")
         || matches!(owner, TYPE_BUILDER | ENTITY_TYPE | SYNCHED | SYNCHED_BUILDER | ACCESSOR | ENTITY | "net/minecraft/network/syncher/EntityDataSerializer")
+        || crate::projectiles::is_projectile_class(owner)
 }
 
 /// The level's entity of UUID `uuid` (`ServerLevel.getEntity(UUID)`, `Level.getPlayerByUUID`): a
@@ -514,7 +515,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             construct(rt, a(0), a(1), a(2));
             Some(V::Void)
         }
-        (ENTITY, _) if is_mod_entity(rt, a(0)) => entity_call(rt, name, desc, args),
+        // A mod's projectile's calls name its vanilla class (`ThrowableItemProjectile.setPos`).
+        (o, _) if (o == ENTITY || crate::projectiles::is_projectile_class(o)) && is_mod_entity(rt, a(0)) => entity_call(rt, name, desc, args),
         _ => None,
     }
 }
@@ -613,6 +615,19 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         "getYRot" => rt.get_field(e, "$yRot"),
         "getXRot" => rt.get_field(e, "$xRot"),
+        // Where it looks (`calculateViewVector`): now, or a share `partialTick` of the way from the
+        // last tick's rotation (`getViewVector(0)`: the last tick's).
+        "getLookAngle" | "getViewVector" => {
+            let (x, y) = (rt.get_field(e, "$xRot").f(), rt.get_field(e, "$yRot").f());
+            let (x, y) = match (name, a(1)) {
+                ("getViewVector", V::F(t)) if t != 1.0 => {
+                    let lerp = |t: f32, from: f32, to: f32| from + t * (to - from);
+                    (lerp(t, rt.get_field(e, "xRotO").f(), x), lerp(t, rt.get_field(e, "yRotO").f(), y))
+                }
+                _ => (x, y),
+            };
+            crate::api_common::view_vector(rt, y, x)
+        }
         "setYRot" => {
             rt.put_field(e, "$yRot", a(1));
             V::Void

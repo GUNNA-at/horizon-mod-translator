@@ -4782,6 +4782,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     brass) keep theirs; a vanilla bottom slab (from stone) drops its own, the control.
   - Tests: `level::tests::sturdy_faces_of_a_collision_shape_are_vanillas`,
     `mod_content::tests::a_shaped_blocks_faces_hold_up_what_its_shape_does`.
+- [x] 2026-11-06 Part 49: what a mod's projectile hits. Measured over the pack's 367 jars
+  (`scratchpad/projscan/projscan.py`, class files and their jar-in-jar ones): 29 mods have 204
+  classes below vanilla's projectiles (`Projectile` 115, `AbstractArrow` 31, `ThrowableItemProjectile`
+  18, `ThrowableProjectile` 17, `AbstractHurtingProjectile` 6...: Iron's Spellbooks 58, Cataclysm 37,
+  Ars Nouveau 20, Create Big Cannons 19, Create's potato), declaring `tick` 120 times, `onHitEntity`
+  99, `onHit` 64, `onHitBlock` 61, `canHitEntity` 31. None could be made: a mod class's
+  `super(type, level)` names its vanilla class (`ThrowableItemProjectile.<init>`), which nothing
+  answered, and nothing dispatched a hit.
+  - `projectiles.rs` (new): a mod's projectile is a mod entity (`mod_entities`), whose calls naming
+    any vanilla projectile class (`ThrowableItemProjectile.setPos`) are the entity's. Their
+    constructors by arguments: `(type, level)`; `(type, x, y, z, level)`; `(type, shooter, level)`
+    at the shooter's eyes less a tenth (`0.1F`), shot by it; a hurting projectile's `(type, x, y,
+    z, movement, level)` and `(type, shooter, movement, level)`, moving along `movement` at its
+    `accelerationPower` (0.1). `setOwner`, `getOwner` (on a server, by UUID once the entity it
+    held is gone), `ownedBy`, `getEffectSource`.
+  - `EntityHitResult` (at the entity's feet unless told), `HitResult.getType` (ENTITY for it),
+    `getLocation`, `distanceTo`; `instanceof HitResult` for both kinds of hit.
+  - `ProjectileUtil`: `getEntityHitResult(level, projectile, from, to, box, filter[, inflation])`,
+    the entity whose box grown by 0.3 (a float) the segment enters nearest; `(shooter, from, to,
+    box, filter, maxDistanceSq)`, by pick radius, an entity whose box holds the start hit there;
+    `getHitResultOnMoveVector` and `getHitResultOnViewVector`: the level's `clip` (colliders, no
+    fluids), then the nearest entity in the projectile's box stretched along the motion and grown
+    by a block, which wins over the block.
+  - `Projectile.onHit` hands an entity hit to the projectile's `onHitEntity` and a block hit to its
+    `onHitBlock` (the mod's own); `hitTargetOrDeflectSelf` hits (`ProjectileDeflection.NONE`);
+    `canHitEntity`: `canBeHitByProjectile` (alive and pickable; a player not a spectator), never
+    the owner before the projectile has left it. A mod entity's `getViewVector(partialTick)` and
+    `getLookAngle`.
+  - Not modelled: a target that deflects (a breeze), `PROJECTILE_LAND`, a vanilla block's answer to
+    a hit (a bell rings), riding (each entity is its own vehicle). A projectile doesn't fly yet:
+    its vanilla `tick` (part 50).
+  - Test: `projectiles::tests::a_mod_projectile_hits_the_nearest_entity_on_its_path_else_the_block`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
