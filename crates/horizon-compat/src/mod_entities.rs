@@ -14,6 +14,20 @@ const SYNCHED: &str = "net/minecraft/network/syncher/SynchedEntityData";
 const SYNCHED_BUILDER: &str = "net/minecraft/network/syncher/SynchedEntityData$Builder";
 const ACCESSOR: &str = "net/minecraft/network/syncher/EntityDataAccessor";
 const REMOVAL: &str = "net/minecraft/world/entity/Entity$RemovalReason";
+const MOB_CATEGORY: &str = "net/minecraft/world/entity/MobCategory";
+/// 1.21.1's `MobCategory` constants, in their order: the name they are saved by, how many a chunk
+/// spawns (`getMaxInstancesPerChunk`), `isFriendly`, `isPersistent` and `getDespawnDistance`
+/// (`getNoDespawnDistance` is 32 for each).
+const MOB_CATEGORIES: [(&str, i32, bool, bool, i32); 8] = [
+    ("monster", 70, false, false, 128),
+    ("creature", 10, true, true, 128),
+    ("ambient", 15, true, false, 128),
+    ("axolotls", 5, true, false, 128),
+    ("underground_water_creature", 5, true, false, 128),
+    ("water_creature", 5, true, false, 128),
+    ("water_ambient", 20, true, false, 64),
+    ("misc", -1, true, true, 128),
+];
 /// `Entity.RemovalReason`'s constants in order, and whether each destroys the entity.
 const REMOVALS: [(&str, bool); 5] =
     [("KILLED", true), ("DISCARDED", true), ("UNLOADED_TO_CHUNK", false), ("UNLOADED_WITH_PLAYER", false), ("CHANGED_DIMENSION", false)];
@@ -326,6 +340,7 @@ pub(crate) fn type_id(rt: &Rt, ty: V) -> Option<&str> {
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(name, "addFreshEntity" | "getEntity" | "getPlayerByUUID")
         || matches!(owner, TYPE_BUILDER | ENTITY_TYPE | SYNCHED | SYNCHED_BUILDER | ACCESSOR | ENTITY | "net/minecraft/network/syncher/EntityDataSerializer")
+        || (owner == MOB_CATEGORY && matches!(name, "getName" | "getSerializedName" | "getMaxInstancesPerChunk" | "isFriendly" | "isPersistent" | "getDespawnDistance" | "getNoDespawnDistance"))
         || crate::projectiles::is_projectile_class(owner)
 }
 
@@ -469,6 +484,29 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let id = description_id(rt, a(0));
             let key = rt.string(&id);
             Some(crate::api_common::component(rt, key, true, V::NULL))
+        }
+        // A mod's type was built with its category (`EntityType.Builder.of(factory, category)`);
+        // vanilla's are 1.21.1's.
+        (ENTITY_TYPE, "getCategory") => {
+            let own = rt.get_field(a(0), "$category");
+            if own.r() != 0 {
+                return Some(own);
+            }
+            let id = type_id(rt, a(0)).unwrap_or("").to_owned();
+            crate::api_common::plain_enum(rt, MOB_CATEGORY, crate::vanilla_entities::category(&id))
+        }
+        (MOB_CATEGORY, _) => {
+            let ordinal = crate::api_common::enum_ordinal(rt, a(0)).clamp(0, 7) as usize;
+            let (serialized, max, friendly, persistent, despawn) = MOB_CATEGORIES[ordinal];
+            Some(match name {
+                "getName" | "getSerializedName" => rt.string(serialized),
+                "getMaxInstancesPerChunk" => V::I(max),
+                "isFriendly" => V::I(friendly as i32),
+                "isPersistent" => V::I(persistent as i32),
+                "getDespawnDistance" => V::I(despawn),
+                "getNoDespawnDistance" => V::I(32),
+                _ => return None,
+            })
         }
 
         // Synched data
@@ -1781,6 +1819,46 @@ mod tests {
             assert_eq!(e.motion[1], 0.2);
             assert!(e.motion[0].abs() <= 0.1 && e.motion[2].abs() <= 0.1, "{:?}", e.motion);
         }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// What a type's category answers, as Create's potato cannon asks it of what its potato killed
+    /// (`target.getType().getCategory() == MobCategory.MONSTER`): vanilla's types their 1.21.1
+    /// category, a mod's type the one it was built with.
+    #[test]
+    fn an_entity_types_category_is_vanillas_or_the_one_it_was_built_with() {
+        const CATEGORY: &str = "net/minecraft/world/entity/EntityType.getCategory.()Lnet/minecraft/world/entity/MobCategory;";
+        const GET_TYPE: &str = "net/minecraft/world/entity/Entity.getType.()Lnet/minecraft/world/entity/EntityType;";
+        let mut rt = Rt::new();
+        crate::install();
+        let monster = api::get_static(&mut rt, "net/minecraft/world/entity/MobCategory.MONSTER");
+        let creature = api::get_static(&mut rt, "net/minecraft/world/entity/MobCategory.CREATURE");
+        let water_ambient = api::get_static(&mut rt, "net/minecraft/world/entity/MobCategory.WATER_AMBIENT");
+        let misc = api::get_static(&mut rt, "net/minecraft/world/entity/MobCategory.MISC");
+        let mut host = MemoryHost::default();
+        let categories = rt.with_host(&mut host, |rt| {
+            let mut entities = [(7, "minecraft:zombie"), (8, "minecraft:cow"), (9, "minecraft:cod"), (10, "minecraft:villager")].map(|(id, kind)| crate::vanilla_entities::of(rt, id, kind, None)).to_vec();
+            let level = crate::glue::level(rt);
+            let item = rt.new_object("net/minecraft/world/entity/item/ItemEntity");
+            let stack = crate::api_common::stack(rt, "minecraft:stick", 1);
+            api::call(rt, "net/minecraft/world/entity/item/ItemEntity.<init>.(Lnet/minecraft/world/level/Level;DDDLnet/minecraft/world/item/ItemStack;)V", &[item, level, V::D(0.5), V::D(64.0), V::D(0.5), stack]);
+            entities.push(item);
+            entities.into_iter().map(|e| {
+                let ty = api::call(rt, GET_TYPE, &[e]);
+                api::call(rt, CATEGORY, &[ty])
+            }).collect::<Vec<_>>()
+        });
+        assert_eq!(categories, [monster, creature, water_ambient, misc, misc]);
+        let of = "net/minecraft/world/entity/EntityType$Builder.of.(Lnet/minecraft/world/entity/EntityType$EntityFactory;Lnet/minecraft/world/entity/MobCategory;)Lnet/minecraft/world/entity/EntityType$Builder;";
+        let builder = api::call(&mut rt, of, &[V::NULL, monster]);
+        let name = rt.string("test:goblin");
+        let goblin = api::call(&mut rt, "net/minecraft/world/entity/EntityType$Builder.build.(Ljava/lang/String;)Lnet/minecraft/world/entity/EntityType;", &[builder, name]);
+        assert_eq!(api::call(&mut rt, CATEGORY, &[goblin]), monster);
+        // What Create asks of a category before it counts a kill.
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/entity/MobCategory.isFriendly.()Z", &[monster]), V::I(0));
+        assert_eq!(api::call(&mut rt, "net/minecraft/world/entity/MobCategory.isFriendly.()Z", &[creature]), V::I(1));
+        let saved = api::call(&mut rt, "net/minecraft/world/entity/MobCategory.getSerializedName.()Ljava/lang/String;", &[water_ambient]);
+        assert_eq!(rt.str_of(saved), Some("water_ambient"));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

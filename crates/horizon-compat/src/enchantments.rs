@@ -446,6 +446,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let id = component_of(rt, a(0));
             V::I(crate::components::vanilla(rt, a(0), id).is_some() as i32)
         }
+        // `doPostAttackEffects(level, victim, source)`: the enchantments' effects after a blow, as
+        // the game runs them (`Host::post_attack_effects`): the victim's worn ones, and those of the
+        // weapon of the living entity the blow is credited to. `doPostAttackEffectsWithItemSource`
+        // names that weapon (none: the victim's only). None for an entity of a mod's own.
+        (HELPER, "doPostAttackEffects" | "doPostAttackEffectsWithItemSource") => {
+            if let Some(victim) = crate::damage::struck(rt, a(1)) {
+                let by = crate::damage::blow_of(rt, a(2));
+                let weapon = match name {
+                    "doPostAttackEffects" => crate::host::AttackWeapon::Held,
+                    _ => crate::block_breaking::held(rt, a(3)).map_or(crate::host::AttackWeapon::None, crate::host::AttackWeapon::Stack),
+                };
+                rt.host_call(|h| h.post_attack_effects(victim, &by, &weapon));
+            }
+            V::Void
+        }
         // `runIterationOnItem(stack, visitor)`: `visitor(enchantment, level)` for each enchantment
         // on the stack.
         (HELPER, "runIterationOnItem") if desc.ends_with("$EnchantmentVisitor;)V") => {
@@ -615,6 +630,57 @@ mod tests {
         assert!(silk.get("extra").is_none(), "{silk}");
         let curse = line(&mut rt, "net/minecraft/world/item/enchantment/Enchantments.BINDING_CURSE", 1);
         assert_eq!(curse["color"], "red");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Once a blow lands, mods' projectiles and bosses (Create's potato, Cataclysm's) have the game
+    /// run its enchantments' effects: what was struck, by whom, through what, and whose weapon acts
+    /// (the one in hand, a stack named, or none).
+    #[test]
+    fn a_blows_enchantment_effects_go_to_the_game_with_its_source_and_weapon() {
+        use crate::host::{AttackWeapon, EntityView, MemoryHost, Struck};
+        const AFTER: &str = "net/minecraft/world/item/enchantment/EnchantmentHelper.doPostAttackEffects.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/damagesource/DamageSource;)V";
+        const WITH_ITEM: &str = "net/minecraft/world/item/enchantment/EnchantmentHelper.doPostAttackEffectsWithItemSource.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/damagesource/DamageSource;Lnet/minecraft/world/item/ItemStack;)V";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        for (id, kind) in [(7, "minecraft:cow"), (9, "minecraft:zombie"), (11, "minecraft:arrow")] {
+            host.entities.push(EntityView { id, kind: kind.into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: None });
+        }
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let player = crate::menus::server_player(rt, 42);
+            let cow = crate::vanilla_entities::of(rt, 7, "minecraft:cow", None);
+            let zombie = crate::vanilla_entities::of(rt, 9, "minecraft:zombie", None);
+            let arrow = crate::vanilla_entities::of(rt, 11, "minecraft:arrow", None);
+            // The player's arrow in the cow; the zombie's blow on the player.
+            let shot = crate::damage::source(rt, "minecraft:arrow", arrow, player, V::NULL);
+            api::call(rt, AFTER, &[level, cow, shot]);
+            let bite = crate::damage::source(rt, "minecraft:mob_attack", zombie, zombie, V::NULL);
+            api::call(rt, AFTER, &[level, player, bite]);
+            // The player's own blow, with no item, then with a fire aspect sword.
+            let hit = crate::damage::source(rt, "minecraft:player_attack", player, player, V::NULL);
+            api::call(rt, WITH_ITEM, &[level, cow, hit, V::NULL]);
+            let sword = crate::api_common::stack(rt, "minecraft:diamond_sword", 1);
+            let fire = enchantment(rt, "net/minecraft/world/item/enchantment/Enchantments.FIRE_ASPECT");
+            api::call(rt, "net/minecraft/world/item/ItemStack.enchant.(Lnet/minecraft/core/Holder;I)V", &[sword, fire, V::I(2)]);
+            api::call(rt, WITH_ITEM, &[level, cow, hit, sword]);
+            // An entity of a mod's own has no worn enchantments the game knows.
+            let own = rt.new_object("com/example/Golem");
+            api::call(rt, AFTER, &[level, own, hit]);
+        });
+        let told: Vec<_> = host.post_attacks.iter().map(|(victim, by, weapon)| (*victim, by.player, by.mob, by.direct.clone(), weapon.clone())).collect();
+        let AttackWeapon::Stack(sword) = &told[3].4 else { panic!("{:?}", told[3].4) };
+        assert_eq!((sword.item.as_str(), sword.enchantments()), ("minecraft:diamond_sword", vec![("minecraft:fire_aspect".to_owned(), 2)]));
+        assert_eq!(
+            told[..3],
+            [
+                (Struck::Entity(7), Some(42), None, Some("minecraft:arrow".to_owned()), AttackWeapon::Held),
+                (Struck::Player(42), None, Some(9), None, AttackWeapon::Held),
+                (Struck::Entity(7), Some(42), None, None, AttackWeapon::None),
+            ]
+        );
+        assert_eq!(told.len(), 4);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

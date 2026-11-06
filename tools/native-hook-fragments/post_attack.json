@@ -1,0 +1,9 @@
+{
+  "hooks": [],
+  "rust_summary": "the enchantments' effects that follow a blow (`native_post_attack`).",
+  "doc_summary": "`native_post_attack(dimension, victim, hurt, weapon)` runs the enchantments' effects that follow blow `hurt` on `victim` (`NativeStruck::Player(uuid)` or `NativeStruck::Mob(id)`), as `EnchantmentHelper.doPostAttackEffectsWithItemSource` does once a blow has landed. A player's blow on a mob runs `weapon`'s effects on the mob (`NativeWeapon::Held`: what the player holds in their main hand; `NativeWeapon::Stack`: that stack; `NativeWeapon::None`: none): fire aspect sets it alight, bane of arthropods slows it, and a mod's own effect types run their hooks. A blow through a projectile (`hurt.direct`, the projectile's type) runs only the ones that don't need a direct blow, and no wind bursts. A mob's blow on a player runs the player's worn thorns on that mob. A guest's run as that guest, unless another guest is in place. False when none could run: another dimension, no such mob or player, or a blow of a mob on a mob or of a player on a player, whose effects the game doesn't model. `NativeHurt` also gains `direct`. Bundles need \"hooks\": @API:post_attack@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mobs.rs",
+    "docs/mod-translator.md"
+  ]
+}

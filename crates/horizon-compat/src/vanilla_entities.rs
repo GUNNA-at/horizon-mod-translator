@@ -166,6 +166,26 @@ const TYPES: [(&str, &str, f32, f32, f32); 130] = [
     ("minecraft:zombified_piglin", "net/minecraft/world/entity/monster/ZombifiedPiglin", 0.6, 1.95, 1.79),
 ];
 
+/// The `MobCategory` constant 1.21.1 builds entity type `id` with (`EntityType.Builder.of(factory,
+/// category)`): `MISC` for the types not named here, and for a type 1.21.1 lacks.
+pub(crate) fn category(id: &str) -> &'static str {
+    match id.strip_prefix("minecraft:").unwrap_or(id) {
+        "blaze" | "bogged" | "breeze" | "cave_spider" | "creeper" | "drowned" | "elder_guardian" | "ender_dragon" | "enderman" | "endermite"
+        | "evoker" | "ghast" | "giant" | "guardian" | "hoglin" | "husk" | "illusioner" | "magma_cube" | "phantom" | "piglin" | "piglin_brute"
+        | "pillager" | "ravager" | "shulker" | "silverfish" | "skeleton" | "slime" | "spider" | "stray" | "vex" | "vindicator" | "warden"
+        | "witch" | "wither" | "wither_skeleton" | "zoglin" | "zombie" | "zombie_villager" | "zombified_piglin" => "MONSTER",
+        "allay" | "armadillo" | "bee" | "camel" | "cat" | "chicken" | "cow" | "donkey" | "fox" | "frog" | "goat" | "horse" | "llama"
+        | "mooshroom" | "mule" | "ocelot" | "panda" | "parrot" | "pig" | "polar_bear" | "rabbit" | "sheep" | "skeleton_horse" | "sniffer"
+        | "strider" | "tadpole" | "trader_llama" | "turtle" | "wandering_trader" | "wolf" | "zombie_horse" => "CREATURE",
+        "bat" => "AMBIENT",
+        "axolotl" => "AXOLOTLS",
+        "glow_squid" => "UNDERGROUND_WATER_CREATURE",
+        "dolphin" | "squid" => "WATER_CREATURE",
+        "cod" | "pufferfish" | "salmon" | "tropical_fish" => "WATER_AMBIENT",
+        _ => "MISC",
+    }
+}
+
 /// Those classes' superclasses and interfaces, up to `Entity`, by name: the superclass (none for
 /// an interface), then the interfaces the class itself names.
 const CLASSES: [(&str, &str, &[&str]); 218] = [
@@ -998,7 +1018,7 @@ mod tests {
             })
         });
         assert_eq!(pickable, [1, 1, 1, 0, 1, 0]);
-        let blow = |damage_type: &str, player: Option<u128>, mob: Option<i32>, from: Option<[f64; 3]>| crate::host::HurtBy { damage_type: damage_type.into(), player, mob, from, motion: None };
+        let blow = |damage_type: &str, player: Option<u128>, mob: Option<i32>, from: Option<[f64; 3]>| crate::host::HurtBy { damage_type: damage_type.into(), player, mob, from, motion: None, direct: None };
         assert_eq!(
             host.blows,
             vec![

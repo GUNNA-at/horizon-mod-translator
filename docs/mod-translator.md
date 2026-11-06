@@ -5054,6 +5054,46 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   gives null, and a vanilla entity's constructor isn't modelled (only an item entity's, an orb's and a
   mod's own projectile's are). In Create the most missed are `Level` (150), `BlockState` (97), `Entity` (82)
   and the fluid and item handlers (`IFluidHandler` 79, `IItemHandlerModifiable` 69, `IItemHandler` 65).
+- [x] 2026-11-06 Part 56: what follows a blow, and an entity type's category.
+  Measured in game (the potato round): on each hit Create's potato calls
+  `EnchantmentHelper.doPostAttackEffects`, and on a kill it asks `getType().getCategory()` of the
+  victim before it awards its advancement; both were unmapped. Over the pack (367 jars),
+  `EntityType.getCategory` is called in 19 jars (26 sites), `doPostAttackEffects` in 8 (30),
+  `MobCategory.isFriendly` in 5 and `doPostAttackEffectsWithItemSource` in 3 (6). Most of the
+  post-attack callers are mods' projectiles and bosses after a hit (Cataclysm, Iron's Spellbooks,
+  Block Factory's Bosses, Create).
+  - `EntityType.getCategory()`: a mod's type answers the category it was built with
+    (`EntityType.Builder.of(factory, category)`), and vanilla's answer their 1.21.1 one (39
+    monsters, 31 creatures, the water and ambient ones, the rest `MISC`). The constant is the same
+    one `MobCategory.MONSTER` gives, so `==` holds. `MobCategory`'s `getName`, `getSerializedName`,
+    `getMaxInstancesPerChunk`, `isFriendly`, `isPersistent`, `getDespawnDistance` and
+    `getNoDespawnDistance` answer as 1.21.1's.
+  - `EnchantmentHelper.doPostAttackEffects(level, victim, source)` has the game run the
+    enchantments' effects that follow the blow (`Host::post_attack_effects`, `native_post_attack`,
+    API @API:post_attack@).
+    - A player's blow on a mob runs the effects of the player's weapon in hand. Fire aspect sets the
+      mob alight, bane of arthropods slows it, and a mod's own effect types run their hooks.
+    - A blow through a projectile isn't direct (`HurtBy::direct`, the projectile's type, now also
+      told with a mod's blow). It runs only the effects that don't need a direct blow, and no wind
+      bursts. Fire aspect and bane of arthropods need one, as 26.3's data has them.
+    - A mob's blow on a player runs the player's worn thorns on that mob.
+    - A guest's effects run as that guest.
+    - `doPostAttackEffectsWithItemSource` names the weapon: a stack's enchantments, or with none
+      only the victim's side.
+  - An item entity answers `getType()` (`EntityType.ITEM`). The category test found it missing.
+  - Not modelled: the effects of a mob's blow on a mob or of a player's on a player (the game runs
+    neither), a mob's worn enchantments, a mod's own entity as the victim, a mod's own
+    `MobCategory` (NeoForge lets mods add some), and the categories of 26.3 types that 1.21.1 lacks
+    (they answer `MISC`).
+  - Tests: `mod_entities::tests::an_entity_types_category_is_vanillas_or_the_one_it_was_built_with`,
+    `enchantments::tests::a_blows_enchantment_effects_go_to_the_game_with_its_source_and_weapon`.
+  - In game (the potato round): `doPostAttackEffects` and `getCategory` are gone from the round's
+    unmapped calls. The cannon fires its 3 shots. Two potatoes hurt the cow, 5 each as
+    `create:potato_cannon`, and the second kills it. The damage hooks run inside Create's own call
+    (Part 55). A potato's blow isn't direct and the cannon has no enchantments, so nothing follows
+    it, as in vanilla. The cow is a creature, so Create awards no advancement for it. Left in the
+    round: Flywheel's GL calls, `DynamicTexture` (3), and `List.forEach` on null after
+    `create:sync_edge_group`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -162,6 +162,29 @@ pub struct HurtBy {
     /// The horizontal movement of the projectile that dealt it (`getDirectEntity()`'s,
     /// `Projectile.calculateHorizontalHurtKnockbackDirection`): the knockback's direction instead.
     pub motion: Option<[f64; 2]>,
+    /// The type of the entity that dealt it (`getDirectEntity()`) when that isn't the one it is
+    /// credited to, a projectile (`create:potato_projectile`): the blow isn't direct (`isDirect`).
+    pub direct: Option<String>,
+}
+
+/// Whom a blow struck ([`Host::post_attack_effects`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Struck {
+    /// A player, by UUID.
+    Player(u128),
+    /// Another entity, by id.
+    Entity(i32),
+}
+
+/// The weapon whose enchantments act after a blow ([`Host::post_attack_effects`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttackWeapon {
+    /// None: only the victim's worn ones act (`doPostAttackEffectsWithItemSource` with no item).
+    None,
+    /// What the one the blow is credited to holds in their main hand (`getWeaponItem`).
+    Held,
+    /// This stack (`doPostAttackEffectsWithItemSource`'s item).
+    Stack(HandStack),
 }
 
 /// An entity of the server level in place, as translated code reads it (`Level.getEntity(id)`):
@@ -867,6 +890,14 @@ pub trait Host {
     fn knockback_entity(&mut self, _id: i32, _strength: f64, _x: f64, _z: f64) -> bool {
         false
     }
+    /// Runs the enchantments' effects that follow blow `by` on `victim`, as
+    /// `EnchantmentHelper.doPostAttackEffectsWithItemSource` does: the victim's worn ones (thorns
+    /// hurting the one the blow is credited to) and, when a living entity is credited with it,
+    /// those of `weapon` (fire aspect setting the victim alight; the ones that need a direct blow
+    /// don't act for a projectile's). False when the game ran none.
+    fn post_attack_effects(&mut self, _victim: Struck, _by: &HurtBy, _weapon: &AttackWeapon) -> bool {
+        false
+    }
     /// Kills entity `id` as `/kill` does (`Entity.kill`): a mob dies with its loot, a vehicle
     /// breaks. False when the level holds no such entity.
     fn kill_entity(&mut self, _id: i32) -> bool {
@@ -1308,6 +1339,8 @@ pub struct MemoryHost {
     pub blows: Vec<(i32, f32, HurtBy)>,
     /// The knockbacks given ([`Host::knockback_entity`]), in order: entity, strength, x, z.
     pub knockbacks: Vec<(i32, f64, f64, f64)>,
+    /// The blows whose enchantment effects were asked for ([`Host::post_attack_effects`]), in order.
+    pub post_attacks: Vec<(Struck, HurtBy, AttackWeapon)>,
     /// Entity type tags: tag → entity types.
     pub entity_tags: HashMap<String, Vec<String>>,
     /// The whole stacks of the item entities spawned with their data ([`Host::spawn_stack_entity`]), by id.
@@ -1758,6 +1791,10 @@ impl Host for MemoryHost {
             self.knockbacks.push((id, strength, x, z));
         }
         living
+    }
+    fn post_attack_effects(&mut self, victim: Struck, by: &HurtBy, weapon: &AttackWeapon) -> bool {
+        self.post_attacks.push((victim, by.clone(), weapon.clone()));
+        true
     }
     fn kill_entity(&mut self, id: i32) -> bool {
         let had = self.entities.len();

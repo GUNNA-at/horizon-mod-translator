@@ -1530,6 +1530,7 @@ mod tests {
         let ty = rt.new_object("net/minecraft/world/entity/EntityType");
         rt.put_field(ty, "$width", V::F(0.25));
         rt.put_field(ty, "$height", V::F(0.25));
+        rt.registered.insert(("entity_type".into(), "test:pebble".into()), ty);
         let mut host = MemoryHost::default();
         host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)) });
         rt.with_host(&mut host, |rt| {
@@ -1581,6 +1582,7 @@ mod tests {
             mob: None,
             from: Some([0.5, 64.5, 2.5]),
             motion: Some([0.25, 1.0]),
+            direct: Some("test:pebble".into()),
         };
         assert_eq!(host.blows, vec![(7, 2.0, blow)]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);

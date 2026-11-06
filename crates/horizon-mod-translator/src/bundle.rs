@@ -2252,8 +2252,40 @@ fn world_writes(c: &str) -> String {
                 mob: by.mob.and_then(|m| u32::try_from(m).ok()),
                 from: by.from,
                 motion: by.motion,
+                direct: by.direct.clone(),
             }};
             u32::try_from(id).is_ok_and(|i| self.game.native_hurt_mob(&dimension, i, amount, &hurt))
+        }}
+        fn post_attack_effects(&mut self, victim: {c}::host::Struck, by: &{c}::host::HurtBy, weapon: &{c}::host::AttackWeapon) -> bool {{
+            use crate::game::native_mobs::{{NativeStruck, NativeWeapon}};
+            let dimension = self.game.native_dimension().to_owned();
+            let hurt = crate::game::native_mobs::NativeHurt {{
+                damage_type: by.damage_type.clone(),
+                player: by.player,
+                mob: by.mob.and_then(|m| u32::try_from(m).ok()),
+                from: by.from,
+                motion: by.motion,
+                direct: by.direct.clone(),
+            }};
+            let victim = match victim {{
+                {c}::host::Struck::Player(uuid) => NativeStruck::Player(uuid),
+                {c}::host::Struck::Entity(id) => match u32::try_from(id) {{
+                    Ok(id) => NativeStruck::Mob(id),
+                    Err(_) => return false,
+                }},
+            }};
+            let weapon = match weapon {{
+                {c}::host::AttackWeapon::None => NativeWeapon::None,
+                {c}::host::AttackWeapon::Held => NativeWeapon::Held,
+                {c}::host::AttackWeapon::Stack(t) => {{
+                    let mut stack = horizon_client::items::ItemStack {{ item: t.item.as_str().into(), count: t.count, damage: t.damage, extra: None }};
+                    for (id, level) in t.enchantments() {{
+                        stack.enchant(&id, u32::try_from(level).unwrap_or(0));
+                    }}
+                    NativeWeapon::Stack(stack)
+                }}
+            }};
+            self.game.native_post_attack(&dimension, victim, &hurt, &weapon)
         }}
         fn knockback_entity(&mut self, id: i32, strength: f64, x: f64, z: f64) -> bool {{
             let dimension = self.game.native_dimension().to_owned();
@@ -2408,6 +2440,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
     let later = |call: &str| format!("crate::game::native_hits::native_after_hit(move |game| {{\n                {call};\n            }});");
     let (hurt, kill, remove) = (later("Later { game }.hurt_entity(id, amount)"), later("Later { game }.kill_entity(id)"), later("Later { game }.remove_entity(id)"));
     let (hurt_by, knockback) = (later("Later { game }.hurt_entity_by(id, amount, &by)"), later("Later { game }.knockback_entity(id, strength, x, z)"));
+    let post_attack = later("Later { game }.post_attack_effects(victim, &by, &weapon)");
     let (health, push, teleport) = (later("Later { game }.set_entity_health(id, health)"), later("Later { game }.push_entity(id, velocity)"), later("Later { game }.teleport_entity(id, pos)"));
     let (orb, payload) = (later("game.native_spawn_experience_orb(at, value, motion)"), later("Later { game }.send_payload(to, &channel, &data)"));
     let attribute = later("Later { game }.change_attribute(entity, &attribute, &change)");
@@ -2510,6 +2543,11 @@ fn hit_host(c: &str, server_send: &str) -> String {
         }}
         fn knockback_entity(&mut self, id: i32, strength: f64, x: f64, z: f64) -> bool {{
             {knockback}
+            true
+        }}
+        fn post_attack_effects(&mut self, victim: {c}::host::Struck, by: &{c}::host::HurtBy, weapon: &{c}::host::AttackWeapon) -> bool {{
+            let (by, weapon) = (by.clone(), weapon.clone());
+            {post_attack}
             true
         }}
         fn level_event(&mut self, event: i32, pos: [i32; 3], data: i32) -> bool {{

@@ -460,9 +460,9 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 }
 
 /// An item entity's own methods, which it answers whichever class names them.
-const ITEM_ENTITY_METHODS: [&str; 50] = [
+const ITEM_ENTITY_METHODS: [&str; 51] = [
     "absMoveTo", "addDeltaMovement", "blockPosition", "discard", "fireImmune", "getAge", "getBbHeight", "getBbWidth", "getBoundingBox", "getCommandSenderWorld",
-    "getControllingPassenger", "getDeltaMovement", "getId", "getItem", "getOnPos", "getOnPosLegacy", "getOwner", "getPersistentData", "getTarget", "getVehicle",
+    "getControllingPassenger", "getDeltaMovement", "getId", "getItem", "getOnPos", "getOnPosLegacy", "getOwner", "getPersistentData", "getTarget", "getType", "getVehicle",
     "getX", "getY", "getZ", "hasPickUpDelay", "isAlive", "isInLava", "isInWater", "isOnFire", "isPassenger", "isPickable", "isRemoved", "isShiftKeyDown", "isSpectator",
     "isVehicle", "kill", "level", "moveTo", "onClientRemoval", "onGround", "position", "push", "remove", "setDefaultPickUpDelay", "setDeltaMovement", "setItem",
     "setNoPickUpDelay", "setPickUpDelay", "setPos", "setRemoved", "teleportTo",
@@ -600,6 +600,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         "isAlive" => V::I((rt.get_field(e, "$removed").i() == 0) as i32),
         "isRemoved" => V::I((rt.get_field(e, "$removed").i() != 0) as i32),
         "getId" => V::I(id(rt, e) as i32),
+        "getType" => crate::mod_entities::vanilla_type(rt, "minecraft:item"),
         "level" | "getCommandSenderWorld" => crate::glue::level(rt),
         "blockPosition" | "getOnPos" | "getOnPosLegacy" => {
             let [x, y, z] = pos(rt, e);

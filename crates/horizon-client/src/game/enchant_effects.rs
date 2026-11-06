@@ -173,14 +173,22 @@ impl Game<'_> {
         let Some(held) = self.held().cloned() else {
             return;
         };
+        self.post_attack_with(mob, &held, None);
+    }
+    /// [`Self::post_attack`] of the player's blow with `held`'s enchantments.
+    /// One dealt through `direct` (a projectile's type: the blow isn't direct)
+    /// runs none of the effects that need a direct blow (fire aspect, bane of
+    /// arthropods) and no wind bursts, which ask the projectile's fall, not
+    /// the player's.
+    pub(super) fn post_attack_with(&mut self, mob: usize, held: &ItemStack, direct: Option<&str>) {
         let Some(m) = self.mobs.get(mob) else { return };
         let kind = m.kind.id.clone();
         let victim = m.id;
         let ctx = EffectContext {
             this: Some(&kind),
             attacker: Some("minecraft:player"),
-            direct_attacker: Some("minecraft:player"),
-            is_direct: true,
+            direct_attacker: Some(direct.unwrap_or("minecraft:player")),
+            is_direct: direct.is_none(),
             items: Some(world_items!(self)),
             ..Default::default()
         };
@@ -247,7 +255,9 @@ impl Game<'_> {
         for (id, kind_of, data, level) in hook_calls {
             self.native_enchant_effect(&id, &kind_of, &data, level, victim);
         }
-        self.post_attack_bursts(&held, &kind);
+        if direct.is_none() {
+            self.post_attack_bursts(held, &kind);
+        }
     }
     /// `EnchantmentHelper.doPostPiercingAttackEffects`: the
     /// `minecraft:post_piercing_attack` effects of the weapon in hand after a

@@ -56,6 +56,31 @@ pub(crate) struct NativeHurt {
     /// The horizontal movement of the projectile that dealt it: the knockback's direction instead
     /// (`Projectile.calculateHorizontalHurtKnockbackDirection`).
     pub(crate) motion: Option<[f64; 2]>,
+    /// The type of what dealt it (`getDirectEntity()`) when that isn't the one it is credited to,
+    /// a projectile: the blow isn't direct (`isDirect`).
+    pub(crate) direct: Option<String>,
+}
+
+/// Whom a blow struck (`native_post_attack`).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum NativeStruck {
+    /// A player, by UUID.
+    Player(u128),
+    /// A mob, by id.
+    Mob(u32),
+}
+
+/// The weapon whose enchantments act after a blow (`native_post_attack`).
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum NativeWeapon {
+    /// None: the victim's worn enchantments only.
+    None,
+    /// What the player the blow is credited to holds in their main hand.
+    Held,
+    /// This stack, with its enchantments.
+    Stack(horizon_client::items::ItemStack),
 }
 
 fn finite(v: [f64; 3]) -> bool {
@@ -257,6 +282,49 @@ impl Game<'_> {
             self.resolve_player_responsible(id, source);
         }
         hurt_it
+    }
+    /// Runs the enchantments' effects that follow a blow `hurt` on `victim`, as
+    /// `EnchantmentHelper.doPostAttackEffectsWithItemSource` does once it has
+    /// landed. A player's blow on a mob: `weapon`'s effects on the mob (fire
+    /// aspect sets it alight, bane of arthropods slows it; for a blow through a
+    /// projectile, `hurt.direct`, only the ones that don't need a direct blow).
+    /// A mob's blow on a player: the player's worn thorns hurt that mob. A
+    /// guest's run as them, unless another guest is in place. False when none
+    /// could run: another dimension, no such mob or player, or a blow the game
+    /// doesn't model the effects of (one of a mob on a mob, or of a player on
+    /// a player). API @API:post_attack@.
+    pub(super) fn native_post_attack(&mut self, dimension: &str, victim: NativeStruck, hurt: &NativeHurt, weapon: &NativeWeapon) -> bool {
+        if !self.native_mob_level(dimension) {
+            return false;
+        }
+        match victim {
+            NativeStruck::Mob(id) => {
+                let Some(player) = hurt.player else {
+                    return false;
+                };
+                let direct = hurt.direct.as_deref();
+                let mut ran = false;
+                self.native_as_player(player, |game| {
+                    let held = match weapon {
+                        NativeWeapon::None => None,
+                        NativeWeapon::Held => game.held().cloned(),
+                        NativeWeapon::Stack(s) => Some(s.clone()),
+                    };
+                    let index = game.mobs.iter().position(|m| m.id == id && !m.removed && m.alive());
+                    if let (Some(held), Some(index)) = (held, index) {
+                        game.post_attack_with(index, &held, direct);
+                        ran = true;
+                    }
+                });
+                ran
+            }
+            NativeStruck::Player(uuid) => {
+                let Some(mob) = hurt.mob.filter(|m| self.mobs.iter().any(|x| x.id == *m && !x.removed && x.alive())) else {
+                    return false;
+                };
+                self.native_as_player(uuid, |game| game.thorns(mob))
+            }
+        }
     }
     /// Knocks mob `id` back as `LivingEntity.knockback(strength, x, z)` does:
     /// away from (`x`, `z`), less its knockback resistance, and as native mods'

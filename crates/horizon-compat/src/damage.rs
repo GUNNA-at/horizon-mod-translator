@@ -693,8 +693,33 @@ pub(crate) fn blow_of(rt: &mut Rt, s: V) -> crate::host::HurtBy {
     let motion = rt.get_field(direct, "$motion");
     let projectile = direct.r() != 0 && motion.r() != 0 && crate::projectiles::is_projectile_class(crate::mod_entities::vanilla_base(rt, direct));
     let motion = projectile.then(|| [rt.get_field(motion, "x").d(), rt.get_field(motion, "z").d()]);
+    // `isDirect`: dealt by the one it is credited to. Else the type of what dealt it.
+    let direct = (direct.r() != causing.r()).then(|| entity_type_name(rt, direct));
     let id = type_id(rt, s);
-    crate::host::HurtBy { damage_type: if id.is_empty() { "minecraft:generic".into() } else { id }, player, mob, from, motion }
+    crate::host::HurtBy { damage_type: if id.is_empty() { "minecraft:generic".into() } else { id }, player, mob, from, motion, direct }
+}
+
+/// Whom entity `e` is as a blow's victim the game knows: a player by UUID, a vanilla entity by
+/// id; None for an entity of a mod's own.
+pub(crate) fn struck(rt: &Rt, e: V) -> Option<crate::host::Struck> {
+    if e.r() == 0 {
+        return None;
+    }
+    if crate::api_common::is_player_class(rt.class_of(e)) {
+        let uuid = crate::network::player_uuid(rt, e).or_else(|| rt.host().and_then(|h| h.player_id()))?;
+        return Some(crate::host::Struck::Player(uuid));
+    }
+    crate::vanilla_entities::is_proxy(rt, e).then(|| crate::host::Struck::Entity(crate::vanilla_entities::id(rt, e)))
+}
+
+/// The id of entity `e`'s type (`create:potato_projectile`), as its `getType()` names it; empty for
+/// none or one the game can't name.
+fn entity_type_name(rt: &mut Rt, e: V) -> String {
+    if e.r() == 0 {
+        return String::new();
+    }
+    let ty = crate::api::call(rt, "net/minecraft/world/entity/Entity.getType.()Lnet/minecraft/world/entity/EntityType;", &[e]);
+    crate::mod_entities::type_id(rt, ty).unwrap_or("").to_owned()
 }
 
 fn call_source(rt: &mut Rt, name: &str, desc: &str, s: V) -> V {
