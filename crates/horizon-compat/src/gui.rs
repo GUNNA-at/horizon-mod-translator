@@ -1681,6 +1681,9 @@ fn single(rt: &mut Rt, class: &'static str) -> V {
     rt.intern(format!("client/{class}"), |rt| rt.new_object(class))
 }
 
+/// `CameraType`'s constants, in its order.
+const CAMERA_TYPES: [&str; 3] = ["FIRST_PERSON", "THIRD_PERSON_BACK", "THIRD_PERSON_FRONT"];
+
 /// `Minecraft`'s GUI fields, set once: its font, options (the HUD shown), game mode, mouse and
 /// window.
 pub fn fill_minecraft(rt: &mut Rt, mc: V) {
@@ -1700,6 +1703,8 @@ pub fn fill_minecraft(rt: &mut Rt, mc: V) {
     rt.put_field(mc, "mouseHandler", mouse);
     let keyboard = single(rt, "net/minecraft/client/KeyboardHandler");
     rt.put_field(mc, "keyboardHandler", keyboard);
+    let renderer = single(rt, "net/minecraft/client/renderer/GameRenderer");
+    rt.put_field(mc, "gameRenderer", renderer);
 }
 
 /// The game type the client's player plays in.
@@ -1789,6 +1794,17 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
         }
         ("net/minecraft/client/Options", "getCameraType") => crate::api::api_enum(rt, "net/minecraft/client/CameraType", "FIRST_PERSON", 0),
         ("net/minecraft/client/CameraType", "isFirstPerson") => V::I((rt.get_field(a(0), "$ordinal").i() == 0) as i32),
+        // `THIRD_PERSON_FRONT` looks back at the player.
+        ("net/minecraft/client/CameraType", "isMirrored") => V::I((rt.get_field(a(0), "$ordinal").i() == 2) as i32),
+        ("net/minecraft/client/CameraType", "cycle") => {
+            let next = (rt.get_field(a(0), "$ordinal").i() + 1).rem_euclid(3);
+            crate::api::api_enum(rt, "net/minecraft/client/CameraType", CAMERA_TYPES[next as usize], next)
+        }
+        // The game keeps its own view (F5 is the player's).
+        ("net/minecraft/client/Options", "setCameraType") => {
+            crate::glue::trace_once(rt, "camera-type", |_| "client: a mod set the camera type; the game keeps its own view".into());
+            V::Void
+        }
         // GL state for what it draws next: the host keeps its own; only the tint reaches blits.
         ("com/mojang/blaze3d/systems/RenderSystem", "setShaderColor") => {
             let c = |k: usize, shift: u32| ((a(k).f().clamp(0.0, 1.0) * 255.0).round() as u32) << shift;

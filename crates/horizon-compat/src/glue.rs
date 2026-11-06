@@ -1174,6 +1174,8 @@ pub fn render_block_entity(
     }
     rt.with_host(host, |rt| {
         let Some(be) = client_block_entity(rt, pos, state, nbt) else { return false };
+        // The camera the renderer finds on its dispatcher (`context.getBlockEntityRenderDispatcher().camera`).
+        crate::camera::prepare(rt, None);
         let ty = rt.get_field(be, "$type");
         let Some(id) = rt.registered_name(ty, "block_entity_type").map(str::to_owned) else { return false };
         let Some(provider) = rt.interned.get(&format!("ber/{id}")).copied() else {
@@ -1251,6 +1253,8 @@ pub fn render_mod_entities(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3]) -
     rt.safe_point();
     client_setup(rt, host);
     rt.with_host(host, |rt| {
+        // The frame's camera: where the mods' renderers measure from (`Camera.getPosition`).
+        crate::camera::prepare(rt, Some(camera));
         let Some(vc) = rt.vcall else { return 0 };
         let partial = rt.host().map_or(0.0, |h| h.partial_tick());
         let mut drawn = 0;

@@ -31,7 +31,7 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
     match class {
         MUTABLE_POS => Some(BLOCK_POS),
         BLOCK_POS | "net/minecraft/core/SectionPos" => Some("net/minecraft/core/Vec3i"),
-        _ => crate::models::api_super(class).or_else(|| crate::entity_render::api_super(class)),
+        _ => crate::models::api_super(class).or_else(|| crate::entity_render::api_super(class)).or_else(|| crate::camera::api_super(class)),
     }
 }
 
@@ -756,7 +756,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 62] = [
+const CHAIN: [Module; 63] = [
     crate::fake_players::call,
     crate::block_breaking::call,
     crate::loot_params::call,
@@ -815,6 +815,7 @@ const CHAIN: [Module; 62] = [
     crate::quads::call,
     crate::models::call,
     crate::entity_render::call,
+    crate::camera::call,
     crate::render::call,
     world,
     crate::palette::call,
@@ -824,7 +825,7 @@ const CHAIN: [Module; 62] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 62] = [
+const CLAIMS: [Claims; 63] = [
     crate::fake_players::claims,
     crate::block_breaking::claims,
     crate::loot_params::claims,
@@ -883,6 +884,7 @@ const CLAIMS: [Claims; 62] = [
     crate::quads::claims,
     crate::models::claims,
     crate::entity_render::claims,
+    crate::camera::claims,
     crate::render::claims,
     // The world's calls end in `api_common`'s, which take most of vanilla's classes.
     |_, _, _| true,
@@ -890,7 +892,7 @@ const CLAIMS: [Claims; 62] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 62] = [
+const MODULE_NAMES: [&str; 63] = [
     "fake_players",
     "block_breaking",
     "loot_params",
@@ -949,6 +951,7 @@ const MODULE_NAMES: [&str; 62] = [
     "quads",
     "models",
     "entity_render",
+    "camera",
     "render",
     "world",
     "palette",
@@ -957,19 +960,19 @@ const MODULE_NAMES: [&str; 62] = [
 
 thread_local! {
     /// By key (its address and length): the modules of [`CHAIN`] that claim it, as bits.
-    static CLAIMED: std::cell::RefCell<crate::HashMap<(usize, usize), u64>> = std::cell::RefCell::new(crate::HashMap::default());
+    static CLAIMED: std::cell::RefCell<crate::HashMap<(usize, usize), u128>> = std::cell::RefCell::new(crate::HashMap::default());
 }
 
 /// The modules of [`CHAIN`] that claim `key`, as bits (all of them for a key that isn't
 /// `owner.name.desc`).
-fn claimed(key: &'static str) -> u64 {
+fn claimed(key: &'static str) -> u128 {
     let id = (key.as_ptr() as usize, key.len());
     if let Some(bits) = CLAIMED.with(|c| c.borrow().get(&id).copied()) {
         return bits;
     }
     let bits = match crate::parts(key) {
-        Some((owner, name, desc)) => CLAIMS.iter().enumerate().filter(|(_, claims)| claims(owner, name, desc)).fold(0u64, |bits, (i, _)| bits | 1 << i),
-        None => u64::MAX,
+        Some((owner, name, desc)) => CLAIMS.iter().enumerate().filter(|(_, claims)| claims(owner, name, desc)).fold(0u128, |bits, (i, _)| bits | 1 << i),
+        None => (1u128 << CHAIN.len()) - 1,
     };
     CLAIMED.with(|c| c.borrow_mut().insert(id, bits));
     bits
@@ -1002,10 +1005,10 @@ fn chain(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 
 /// [`chain`] past every module, telling (or, in tests, failing) when one that answers doesn't
 /// claim the key: the claims would then have kept the call from it.
-fn checked_chain(rt: &mut Rt, key: &'static str, args: &[V], claimed: u64) -> Option<V> {
+fn checked_chain(rt: &mut Rt, key: &'static str, args: &[V], claimed: u128) -> Option<V> {
     for (i, module) in CHAIN.iter().enumerate() {
         if let Some(v) = module(rt, key, args) {
-            if claimed & (1u64 << i) == 0 {
+            if claimed & (1u128 << i) == 0 {
                 let message = format!("horizon-compat: {} answered {key} without claiming it", MODULE_NAMES[i]);
                 assert!(!cfg!(test), "{message}");
                 thread_local! {

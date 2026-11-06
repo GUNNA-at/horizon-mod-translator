@@ -1453,6 +1453,7 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
                 rt.put_field(mc, "level", level);
                 let player = crate::network::local_player(rt);
                 rt.put_field(mc, "player", player);
+                rt.put_field(mc, "cameraEntity", player);
             }
             mc
         }

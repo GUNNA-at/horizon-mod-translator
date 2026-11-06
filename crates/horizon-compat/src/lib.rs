@@ -60,6 +60,7 @@ pub mod mob_effects;
 pub mod mod_entities;
 pub mod models;
 pub mod entity_render;
+pub mod camera;
 pub mod nbt;
 pub mod ops;
 pub mod neo;

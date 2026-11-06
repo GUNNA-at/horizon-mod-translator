@@ -4405,6 +4405,43 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     arms) and `entity_render::tests` (a material's sprite on its sheet; a wrapped consumer's model drawn from
     its sprite; a mob renderer posing its model and drawing it with its texture: the head turned 30 degrees,
     the arm's idle bob, seven parts on the mod's sprite, the `1.501` lift; a canceled `Pre` drawing nothing).
+- [x] 2026-11-06 Part 34: the camera, natively (new `horizon-compat/src/camera.rs`).
+  - packcov8 counted 1243 missing uses in 112 keys around the camera: `Camera.getPosition` (246 uses, 66 jars),
+    `GameRenderer.getMainCamera` (129, 42), the game renderer's shader getters (`getPositionTexShader` 91, 48
+    jars...), `Minecraft.getCameraEntity` (68), `EntityRenderDispatcher.cameraOrientation` (38), `Camera.getEntity`
+    and `rotation`, and the viewport events' getters.
+  - The main camera follows the game: on the client's player while the client is in a world, at the place the game
+    drew its last frame from (the `level_submit` hook's camera, kept until the client leaves the world), the
+    player's eyes (1.62 up, 1.27 crouching) until then; turned as `Camera.setRotation` turns it:
+    `rotationYXZ(PI - yaw, -pitch, -roll)` with JOML's arithmetic (`Math.sin`, `cosFromSin`), the forward, up and
+    left vectors rotated by it (`Quaternionf.transform`), each in its own object as vanilla's final fields are.
+    `getPosition`, `getBlockPosition`, `getXRot`/`getYRot`/`getRoll`, `rotation`, `getLookVector`/`getUpVector`/
+    `getLeftVector`, `getEntity`, `isInitialized`, `isDetached`, `getPartialTickTime`, `getNearPlane` (and
+    `NearPlane`'s corners and `getPointOnPlane`), `getFluidInCamera` (water below the surface in the camera's
+    block, else lava or powder snow at the near plane's centre or corners), `getBlockAtCamera`. A camera a mod
+    makes (`new Camera()`, `setup`, a subclass's `setRotation`/`setPosition`/`move`) keeps its own state.
+  - Before the mods' renderers draw, the render dispatchers hold the main camera (`EntityRenderDispatcher.camera`,
+    `BlockEntityRenderDispatcher.camera`, as their `prepare` sets them each frame); `cameraOrientation` is the
+    camera's rotation until a mod overrides it (`overrideCameraOrientation`); `distanceToSqr` from the camera.
+    `Minecraft.gameRenderer`, `cameraEntity` and `getCameraEntity` are the client's; `setCameraEntity` and
+    `Options.setCameraType` leave the game's view as it is (traced). `CameraType.isMirrored` and `cycle`.
+  - `GameRenderer`: `getMainCamera`, `lightTexture`, `overlayTexture`, its static shader getters (one
+    `ShaderInstance` a name: `getPositionTexShader` is `position_tex`; uniforms, `apply`, `clear` are the host's),
+    `getProjectionMatrix` (JOML's `perspective` of the field of view on the window's shape, 0.05 to
+    `getDepthFar`), `getRenderDistance`/`getDepthFar` and `getFov` at vanilla's default options (70 degrees, 12
+    chunks: the game doesn't hand its own over yet). `RegisterShadersEvent.registerShader` hands the mod its
+    shader at once. `LightTexture.getBrightness` is vanilla's curve; the lightmap's switches are the host's.
+  - The getters and setters of NeoForge's viewport events (`ComputeCameraAngles`, `ComputeFov`,
+    `ComputeFogColor`, `RenderFog`), `RenderLevelStageEvent` and `RenderHighlightEvent`, on the fields an event
+    carries (the main camera for an event that names none). The game posts none of them yet: the pack's jars that
+    listen are 43 for `RenderLevelStageEvent`, 17 `RenderHighlightEvent.Block`, 10 `ComputeCameraAngles` (Create
+    among them), 6 `RenderFog`, 6 `ComputeFogColor`, 4 `ComputeFov`.
+  - The dispatcher's module bits are 128 wide now (63 modules), and a key that isn't `owner.name.desc` is offered
+    to the chain's modules only (it was offered past the chain's end).
+  - Tests (`camera::tests`, 420 compat tests pass): the camera at the player's eyes looking west (forward -x, left
+    +z) and down (forward -y, up +z); the frame's camera placing it, the dispatchers holding it, the orientation
+    overridden; no camera out of a world; water, lava and powder snow fog by where the eyes are (a water source's
+    surface 8/9 up its block); the projection as OpenGL's perspective; the shaders one object a name.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -276,7 +276,7 @@ pub(crate) fn entity_place(rt: &Rt, e: V) -> Option<[f64; 3]> {
 }
 
 /// The player's eye height, vanilla's float (1.62, 1.27 crouching) as `getEyeY` adds it.
-fn player_eye_height(rt: &Rt) -> f64 {
+pub(crate) fn player_eye_height(rt: &Rt) -> f64 {
     f64::from(if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27f32 } else { 1.62f32 })
 }
 

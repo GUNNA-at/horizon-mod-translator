@@ -319,7 +319,9 @@ pub fn client_level_unload(rt: &mut Rt, dimension: &str) {
     if let Some(&mc) = rt.interned.get("client/net/minecraft/client/Minecraft") {
         rt.put_field(mc, "level", V::NULL);
         rt.put_field(mc, "player", V::NULL);
+        rt.put_field(mc, "cameraEntity", V::NULL);
     }
+    crate::camera::forget_frame(rt);
 }
 
 // ---- entities joining and leaving ----
