@@ -1976,6 +1976,9 @@ fn game_host(c: &str, server_send: &str) -> String {
         fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
             self.game.native_fluid_flow_at(pos)
         }}
+        fn new_liquid(&mut self, pos: [i32; 3], fluid: &str, state: &str) -> Option<(String, u8, bool)> {{
+            self.game.native_new_liquid(pos, fluid, state).map(|(name, amount, falls)| (name.to_owned(), amount, falls))
+        }}
         fn item_is_block(&self, item: &str) -> bool {{
             self.game.native_item_facts(item).is_some_and(|(block, _)| block)
         }}

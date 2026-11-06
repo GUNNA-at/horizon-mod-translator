@@ -4227,6 +4227,25 @@ impl Game<'_> {
         let v = self.motion.fluids.flow_in(&self.world, pos);
         [v.x, v.y, v.z]
     }
+    /// The fluid that `fluid` (`minecraft:flowing_water`) takes at `pos` in the
+    /// current level if the block there were `state`, from its neighbours
+    /// (vanilla's `FlowingFluid.getNewLiquid`): its name, amount and whether it
+    /// falls. None for a fluid or a state the game doesn't know. For hooks on
+    /// `Game` (block entity ticks).
+    pub(super) fn native_new_liquid(
+        &mut self,
+        pos: [i32; 3],
+        fluid: &str,
+        state: &str,
+    ) -> Option<(&'static str, u8, bool)> {
+        let kind = FluidKind::from_name(fluid)?;
+        let state = state_from_text(self.pack.assets.registry, state)?;
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        let new = self.with_level(|b, level, ticks| {
+            b.new_liquid_for(level, ticks, kind, at, state)
+        });
+        Some((new.kind().name(), new.amount(), new.falling()))
+    }
     /// A block state as text, as `GameLevel::native_state_id_text` gives it:
     /// for hooks on `Game` handed a state that may no longer be in the world
     /// (`native_block_replaced`'s old one). Air for an id past the state

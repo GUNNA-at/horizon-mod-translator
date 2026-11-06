@@ -347,7 +347,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         fluid.kind().same_family(kind) && fluid.is_source()
     }
     /// `FlowingFluid.getNewLiquid`.
-    fn new_liquid(&self, kind: FluidKind, pos: BlockPos, state: BlockStateId) -> FluidState {
+    pub(crate) fn new_liquid(
+        &self,
+        kind: FluidKind,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> FluidState {
         let b = self.b;
         let mut highest = 0;
         let mut sources = 0;

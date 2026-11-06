@@ -822,6 +822,13 @@ pub trait Host {
     fn fluid_flow(&self, _pos: [i32; 3]) -> [f64; 3] {
         [0.0; 3]
     }
+    /// The fluid that fluid `fluid` (a name: `minecraft:flowing_water`) takes at `pos` if the
+    /// block there were `state`, from its neighbours (`FlowingFluid.getNewLiquid`, as the game's
+    /// own fluids work it out): the fluid's name, its amount and whether it falls. None where no
+    /// game answers, or for a fluid the game doesn't know.
+    fn new_liquid(&mut self, _pos: [i32; 3], _fluid: &str, _state: &str) -> Option<(String, u8, bool)> {
+        None
+    }
     /// The server's players: UUID and where each is (in the hook's dimension or not). None on a
     /// client.
     fn players(&self) -> Vec<(u128, [f64; 3])> {
@@ -1333,6 +1340,8 @@ pub struct MemoryHost {
     pub fluid_tags: HashMap<String, Vec<String>>,
     /// Fluid currents by position (`fluid_flow`); unset positions have none.
     pub flows: HashMap<[i32; 3], [f64; 3]>,
+    /// What the fluid takes at a position from its neighbours (`new_liquid`), by position.
+    pub new_liquids: HashMap<[i32; 3], (String, u8, bool)>,
     /// The exhaustion the acting player was given (`exhaust_player`), in all.
     pub exhaustion: f32,
     /// Mod payloads sent, in order: where to, channel, bytes.
@@ -1760,6 +1769,9 @@ impl Host for MemoryHost {
     }
     fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {
         self.flows.get(&pos).copied().unwrap_or_default()
+    }
+    fn new_liquid(&mut self, pos: [i32; 3], _fluid: &str, _state: &str) -> Option<(String, u8, bool)> {
+        self.new_liquids.get(&pos).cloned()
     }
     fn exhaust_player(&mut self, amount: f32) {
         self.exhaustion += amount;

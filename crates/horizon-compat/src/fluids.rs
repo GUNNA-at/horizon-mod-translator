@@ -316,6 +316,29 @@ fn fluid_api(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             (None, None) => rt.get_field(f, "$resistance").f(),
         }),
         "createLegacyBlock" => legacy_block(rt, f, a(1)),
+        // `FlowingFluid.getNewLiquid(level, pos, state)`: the fluid the cell at `pos` takes from
+        // its neighbours if it held `state`, as the game's own fluids work it out. Create asks it
+        // of a source a pipe drains: when the source would fill again (two sources beside it over
+        // solid ground), the source stays: infinite water. With no game to ask, none.
+        "getNewLiquid" => {
+            let p = api::pos_of(rt, a(2));
+            let state = rt.str_of(a(3)).unwrap_or("minecraft:air").to_owned();
+            let name = name_of(rt, f);
+            match rt.host_mut().and_then(|h| h.new_liquid(p, &name, &state)) {
+                Some((new, amount, falls)) => {
+                    let n = fluid(rt, &new);
+                    match kind(rt, n) {
+                        Kind::Empty => default_state(rt, n),
+                        Kind::Source => on_fluid(rt, SOURCE_STATE, &[n, V::I(falls as i32)]),
+                        Kind::Flowing => on_fluid(rt, FLOWING_STATE, &[n, V::I(i32::from(amount)), V::I(falls as i32)]),
+                    }
+                }
+                None => {
+                    let e = fluid(rt, "minecraft:empty");
+                    default_state(rt, e)
+                }
+            }
+        }
         // The registry entry the fluid is (`builtInRegistryHolder().is(tag)`).
         "builtInRegistryHolder" => {
             let n = name_of(rt, f);
@@ -1043,6 +1066,36 @@ mod tests {
         assert_eq!(rt.get_field(parsed, "value"), V::NULL);
         c(&mut rt, save, &[empty, V::NULL]);
         assert!(rt.thrown.take().is_some(), "saving nothing throws");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Create's pipe drains a source and asks, through its mixin accessor on vanilla's
+    /// `FlowingFluid` (`instanceof FlowingFluidAccessor`, then `getNewLiquid`), whether the source
+    /// fills again. Mixin makes `FlowingFluid` implement the accessor, so water and flowing water
+    /// are instances of it and the empty fluid isn't; the answer is the game's: a source between
+    /// two sources (the same state the block gives), flowing water by its amount, none elsewhere.
+    #[test]
+    fn a_drained_source_asks_the_game_whether_it_fills_again() {
+        let mut rt = Rt::new();
+        crate::install();
+        let accessor = "t/FlowingFluidAccessor";
+        rt.add_game_interfaces("net/minecraft/world/level/material/FlowingFluid", &["t/FlowingFluidAccessor"]);
+        let (water, flowing, empty) = (fluids(&mut rt, "WATER"), fluids(&mut rt, "FLOWING_WATER"), fluids(&mut rt, "EMPTY"));
+        assert!(rt.instance_of_static(water, accessor) && rt.instance_of_static(flowing, accessor));
+        assert!(!rt.instance_of_static(empty, accessor));
+        let (source, level_five, nothing) = (fluid_in(&mut rt, "minecraft:water[level=0]"), fluid_in(&mut rt, "minecraft:water[level=5]"), fluid_in(&mut rt, "minecraft:air"));
+        let mut host = MemoryHost::default();
+        host.new_liquids.insert([4, 64, 0], ("minecraft:water".into(), 8, false));
+        host.new_liquids.insert([5, 64, 0], ("minecraft:flowing_water".into(), 3, false));
+        let get_new = "net/minecraft/world/level/material/FlowingFluid.getNewLiquid.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/material/FluidState;";
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let drained = api::state(rt, "minecraft:water[level=14]");
+            for (x, expected) in [(4, source), (5, level_five), (9, nothing)] {
+                let at = api::block_pos(rt, x, 64, 0);
+                assert_eq!(c(rt, get_new, &[flowing, level, at, drained]), expected, "at x {x}");
+            }
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

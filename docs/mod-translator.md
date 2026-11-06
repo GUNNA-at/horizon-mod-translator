@@ -5247,6 +5247,41 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Tests: `fluids::tests::a_fluid_types_stack_and_state_overloads_ask_its_own_getters`,
     `a_fluid_stack_saved_as_neoforge_saves_it_reads_back_the_same`, and
     `fluid_tags_hold_vanilla_water_and_lava` (the holder).
+  - In game (`pumpgame.sh`, the game built with Part 61): `FluidStack.saveOptional`,
+    `parseOptional` and `FluidType.getLightLevel(FluidStack)` are gone from the round's unmapped
+    calls; left are login's Flywheel GL calls and `DynamicTexture`. A pipe's saved flow now carries
+    its fluid, `Flow: {In: 1b, Fluid: {amount: 1, id: "minecraft:water"}}`, where it kept only its
+    direction (`Flow: {In: 1b}`). The tank still holds all 1000 mB by tick 100.
+- [x] 2026-11-06 Part 61: the interfaces mods' mixins add to the game's classes, and
+  `FlowingFluid.getNewLiquid` from the game.
+  A Create pipe that drains a water source through an open end asks whether the source fills
+  again before it takes the block: `fluid instanceof FlowingFluidAccessor` (Create's accessor mixin
+  on vanilla's `FlowingFluid`), then the accessor's `create$getNewLiquid`. A source between two
+  sources over solid ground stays: infinite water. The runtime said no to the `instanceof`. It
+  registered a mixin's interfaces for the game class the mixin targets only when a mixin class
+  implemented them, never an interface mixin (an accessor) itself, and only for that very class,
+  not for the game's classes under it: vanilla's water and lava are under `FlowingFluid`, and the
+  drained state Create asks with is a falling flowing water. Measured over the pack: 74 jars test
+  `instanceof` against an interface their own mixins add, at 653 sites (Copycats+ 80, Sable 68,
+  FancyMenu 66, Steam 'n' Rails 25, Create 11...). `getNewLiquid` itself only Create calls,
+  through that accessor.
+  - translator `codegen`: what a mixin adds to its targets includes an interface mixin itself
+    (`mixin_adds`), for the game's classes (with the interfaces' own superinterfaces) and for the
+    translated ones alike. The game's are registered with `Rt::add_game_interfaces`.
+  - compat-core: `instanceof` (`Rt::is_a`) finds them on a game class and on the game's classes
+    under it, by the API's families; it looks only when asked for one of those interfaces.
+  - compat `fluids`: `FlowingFluid.getNewLiquid(level, pos, state)` asks the game (`Host::new_liquid`)
+    and answers with the same `FluidState` objects the level's blocks give; none where no game
+    answers.
+  - horizon-world: `Behaviours::new_liquid_for`, the `getNewLiquid` the game's fluid ticks already
+    run. The game: `Game::native_new_liquid`, which the block entity ticks' host answers with.
+  - Tests: `fluids::tests::a_drained_source_asks_the_game_whether_it_fills_again`.
+  - In game (`INFINITE=1 pumpgame.sh`: the round's source walled in between two more, over stone):
+    the source is still `minecraft:water[level=0]` at every probe, and the tank holds 448 mB at
+    tick 20, 3096 at tick 100, 6416 at tick 200 and 8000, a one-block tank's capacity, by tick 400.
+    With the source alone (`pumpgame.sh`) it is drained and the tank stops at 1000 mB, as before.
+    No unmapped call or throw of the round's own; login's Flywheel GL calls and `DynamicTexture`
+    are left.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

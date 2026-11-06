@@ -37,6 +37,13 @@ fn ident(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect()
 }
 
+/// The interfaces a mixin adds to its targets: an interface mixin (an accessor, an invoker) is one
+/// itself, and a mixin class adds the interfaces it implements.
+fn mixin_adds(mixin: &ClassFile) -> Vec<&str> {
+    let own = (mixin.access & 0x0200 != 0).then_some(mixin.name.as_str());
+    own.into_iter().chain(mixin.interfaces.iter().map(String::as_str)).collect()
+}
+
 /// The dispatcher of instance method `nd` (`name.desc`): `fn(rt, cid, owner_key, args) -> V`.
 /// The member a mixin accessor or invoker names when its annotation has no value: the method's name
 /// without its mod prefix (`create$`) and verb (`get`, `call`...), its first letter lowered.
@@ -547,9 +554,9 @@ impl<'a> Program<'a> {
     fn interfaces_of(&self, k: &ClassFile) -> Vec<String> {
         let mut out = k.interfaces.clone();
         for m in self.mixins_of(&k.name) {
-            for i in self.classes.get(m.as_str()).map(|mk| mk.interfaces.as_slice()).unwrap_or_default() {
-                if !out.contains(i) {
-                    out.push(i.clone());
+            for i in self.classes.get(m.as_str()).copied().map(mixin_adds).unwrap_or_default() {
+                if !out.iter().any(|o| o == i) {
+                    out.push(i.to_owned());
                 }
             }
         }
@@ -865,21 +872,24 @@ impl<'a> Program<'a> {
                 let _ = writeln!(out, "    rt.interfaces.insert({:?}, &{:?});", c.name, interfaces);
             }
         }
-        // The game's classes with the interfaces their mixins add (`instanceof` a duck interface).
+        // The game's classes with the interfaces their mixins add, and those interfaces' own
+        // superinterfaces: `instanceof` a duck interface or an accessor on a game object.
         let mut joined: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for (mixin, targets) in &self.weave.vanilla {
             let Some(k) = self.classes.get(mixin.as_str()) else { continue };
             for t in targets {
                 let list = joined.entry(t.as_str()).or_default();
-                for i in &k.interfaces {
-                    if !list.contains(&i.as_str()) {
+                let mut queue: Vec<&str> = mixin_adds(k);
+                while let Some(i) = queue.pop() {
+                    if !list.contains(&i) {
                         list.push(i);
+                        queue.extend(self.classes.get(i).map(|ik| ik.interfaces.iter().map(String::as_str).collect::<Vec<_>>()).unwrap_or_default());
                     }
                 }
             }
         }
         for (target, interfaces) in joined.iter().filter(|(_, l)| !l.is_empty()) {
-            let _ = writeln!(out, "    rt.interfaces.insert({target:?}, &{interfaces:?});");
+            let _ = writeln!(out, "    rt.add_game_interfaces({target:?}, &{interfaces:?});");
         }
         // `@SubscribeEvent` methods by class: what `bus.register(...)` and `@EventBusSubscriber` listen with.
         let mut subs: BTreeMap<String, Vec<String>> = BTreeMap::new();

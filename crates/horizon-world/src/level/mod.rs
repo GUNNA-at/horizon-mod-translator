@@ -930,6 +930,21 @@ impl Behaviours {
         self.sim(level, ticks)
             .turtle_egg_destroyed_by_player(pos, destroyed);
     }
+    /// `FlowingFluid.getNewLiquid(level, pos, state)` for a fluid of `kind`'s
+    /// family: the fluid the cell at `pos`, holding `state`, takes from its
+    /// neighbours. A source between two sources over solid ground or a
+    /// source (where the fluid converts), falling fluid under the same fluid,
+    /// else one level less than its fullest neighbour, or none.
+    pub fn new_liquid_for<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        ticks: &mut Ticks,
+        kind: FluidKind,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> FluidState {
+        self.sim(level, ticks).new_liquid(kind, pos, state)
+    }
     /// `BaseFireBlock.getState(level, pos)`: soul fire on its base blocks,
     /// otherwise fire shaped by its neighbours.
     pub fn fire_state_for<L: LevelAccess + ?Sized>(

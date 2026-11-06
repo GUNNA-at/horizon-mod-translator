@@ -214,6 +214,12 @@ pub struct Rt {
     pub supers: HashMap<&'static str, &'static str>,
     /// Interfaces each of the mod's classes declares (registered by generated code).
     pub interfaces: HashMap<&'static str, &'static [&'static str]>,
+    /// The interfaces the mod's mixins add to the game's classes, by target class: an accessor
+    /// mixin's own interface, the ones a mixin class implements. An object of the target class or
+    /// of one under it is an instance of them ([`Rt::add_game_interfaces`]).
+    pub game_interfaces: Vec<(&'static str, &'static [&'static str])>,
+    /// Every interface in `game_interfaces`, so `instanceof` asks the game's classes only for one.
+    game_interface_names: std::collections::HashSet<&'static str, std::hash::BuildHasherDefault<FxHasher>>,
     /// The game, only while a hook runs translated code (see [`Rt::with_host`]).
     host: Option<std::ptr::NonNull<dyn host::Host>>,
     /// The generated `vcall` and `lambda_call`, so API code can call back into the mod.
@@ -312,6 +318,8 @@ impl Default for Rt {
             thrown: None,
             supers: HashMap::default(),
             interfaces: HashMap::default(),
+            game_interfaces: Vec::new(),
+            game_interface_names: Default::default(),
             subscribers: HashMap::default(),
             subscriber_options: HashMap::default(),
             host: None,
@@ -718,6 +726,15 @@ impl Rt {
         v.r() != 0 && self.is_a(self.type_of(v), class)
     }
 
+    /// Registers the interfaces mixins add to the game's class `target` (generated code): Mixin
+    /// makes the class implement them, so its objects and those of the classes under it are
+    /// instances of them (`fluid instanceof FlowingFluidAccessor`).
+    pub fn add_game_interfaces(&mut self, target: &'static str, interfaces: &'static [&'static str]) {
+        self.game_interface_names.extend(interfaces.iter().copied());
+        self.game_interfaces.push((target, interfaces));
+        self.is_a_cache.borrow_mut().clear();
+    }
+
     /// The class `v` is in Java: its own, but a game object the runtime stands for by its id (a
     /// vanilla block, `Block` naming `minecraft:ice`; a vanilla item) is of the class Java makes it
     /// (`IceBlock`, `SwordItem`), as the mapping's tables know them.
@@ -749,6 +766,9 @@ impl Rt {
         if class == "java/lang/Object" {
             return true;
         }
+        // Past the mod's classes, the game's take the interfaces mixins add to them or to a class
+        // above them (by the API's families: `WaterFluid$Source` is a `FlowingFluid`).
+        let added = self.game_interface_names.contains(class);
         let mut todo: Vec<&str> = vec![c];
         let mut seen: Vec<&str> = Vec::new();
         while let Some(k) = todo.pop() {
@@ -764,6 +784,13 @@ impl Rt {
             }
             if let Some(is) = self.interfaces.get(k) {
                 todo.extend(is.iter().copied());
+            }
+            if added {
+                for &(target, is) in &self.game_interfaces {
+                    if target == k || api_is_a(k, target) {
+                        todo.extend(is.iter().copied());
+                    }
+                }
             }
         }
         false
