@@ -1796,6 +1796,23 @@ impl Game<'_> {
     ) {
         let _ = (pos, entity, tag);
     }
+    /// The components the mod block entity at `pos` gives the item its
+    /// block drops, when its `id` is yours (`BlockEntity.collectComponents`:
+    /// what it kept of the stack it was placed from, then what it adds
+    /// itself), by component name, each as its codec writes it. Asked as a
+    /// player or an explosion breaks the block, while the block and its block
+    /// entity are still there, when the block's loot table copies components
+    /// from its block entity (`copy_components`, source `block_entity`): the
+    /// game puts those the table copies on the item it drops. Server-side.
+    /// API @API:block_entity_components@.
+    pub(super) fn native_block_entity_components(
+        &mut self,
+        pos: [i32; 3],
+        entity: &ModBlockEntity,
+        components: &mut Vec<(String, horizon_world::nbt::Tag)>,
+    ) {
+        let _ = (pos, entity, components);
+    }
     /// A content mod's content as its files declare it, before its blocks
     /// one by one (`native_content_block`) and before the game builds its
     /// resources: a mod whose code registers its blocks and items declares

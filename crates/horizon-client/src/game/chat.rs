@@ -271,6 +271,22 @@ fn command_export(dir: &Path) -> Option<Arc<serde_json::Value>> {
     export
 }
 
+/// A mod's persistent data component type among the command registries' own: the type registry's
+/// ids and the types item arguments take (`ItemParser` reads `DataComponentType.PERSISTENT_CODEC`).
+fn add_component_type(reg: &mut Registries, name: &str) {
+    let types = &mut reg
+        .by_registry
+        .entry("minecraft:data_component_type".to_owned())
+        .or_default()
+        .ids;
+    for list in [types, &mut reg.persistent_components] {
+        if !list.iter().any(|known| known == name) {
+            let at = list.partition_point(|known| known.as_str() < name);
+            list.insert(at, name.to_owned());
+        }
+    }
+}
+
 /// The `minecraft:` ids of the `extension` files under `root`, sorted.
 fn ids_under(root: &Path, extension: &str) -> Vec<String> {
     ids_in(root, extension, "minecraft")
@@ -537,6 +553,11 @@ impl Game<'_> {
             }
         }
         let reg = &mut self.ui.registries;
+        // The mods' persistent data component types (`native_component_types`), registered after
+        // vanilla's as a modded server's registry holds them, so item arguments take them too.
+        for (_, name) in horizon_protocol::item::custom::entries() {
+            add_component_type(reg, name);
+        }
         reg.timelines = self.ui.timelines.keys().cloned().collect();
         reg.time_markers = self
             .ui
@@ -1557,6 +1578,27 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &command_export(&dir).unwrap()));
         assert!(command_export(&dir.join("missing")).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An item argument names a mod's component, as Farmer's Delight's cooking pot carries its
+    /// meal: refused while the type is unknown, taken once the mod has registered it, and the value
+    /// stays the mod's to read.
+    #[test]
+    fn item_arguments_take_a_mods_component_types() {
+        let mut reg = Registries::default();
+        reg.permission = 4;
+        reg.items = vec!["test:pot".to_owned()];
+        reg.persistent_components = vec!["minecraft:damage".to_owned()];
+        let tree = horizon_client::command::vanilla::game_dispatcher();
+        let line = r#"give @s test:pot[test:meal={id:"test:stew",count:1}]"#;
+        assert!(tree.parse(line, &reg).executable().is_err(), "unknown before the mod registers it");
+        add_component_type(&mut reg, "test:meal");
+        add_component_type(&mut reg, "test:meal");
+        assert_eq!(reg.persistent_components, ["minecraft:damage", "test:meal"]);
+        assert_eq!(reg.ids("minecraft:data_component_type"), ["test:meal"]);
+        assert!(tree.parse(line, &reg).executable().is_ok(), "{line}");
+        let removal = "give @s test:pot[!test:meal]";
+        assert!(tree.parse(removal, &reg).executable().is_ok(), "{removal}");
     }
 
     #[test]

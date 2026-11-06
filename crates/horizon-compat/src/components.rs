@@ -600,6 +600,25 @@ pub(crate) fn apply_from_stack(rt: &mut Rt, be: V, stack: V) {
     rt.put_field(be, "$components", m);
 }
 
+/// What block entity `be` kept of the stack it was placed from (`components()`), as vanilla saves
+/// them under `components` (`BlockEntity.saveWithoutMetadata`): those a game stack can carry, each
+/// written with its type's codec ([`saved`]).
+pub(crate) fn kept_saved(rt: &mut Rt, be: V) -> Vec<(String, Nbt)> {
+    let kept = rt.get_field(be, "$components");
+    if kept.r() == 0 {
+        return Vec::new();
+    }
+    saved(rt, kept)
+}
+
+/// Block entity `be`'s kept components back from what it saved under `components`
+/// (`BlockEntity.loadWithComponents`), each read with its type's codec ([`load`]).
+pub(crate) fn load_kept(rt: &mut Rt, be: V, carried: &[(String, Nbt)]) {
+    let m = plain_map(rt, Vec::new());
+    load(rt, m, carried);
+    rt.put_field(be, "$components", m);
+}
+
 /// `BlockEntity.collectComponents()`: what it kept of its stack, then what it adds itself (its own
 /// `collectImplicitComponents`), as the item it drops or is picked as carries them.
 pub(crate) fn collect_components(rt: &mut Rt, be: V) -> V {

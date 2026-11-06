@@ -231,7 +231,8 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
 
 /// Loads the game's saved data into block entity `be`. Only saved data, as vanilla's: a block
 /// entity just placed keeps what its constructor set (an empty compound would read every field as
-/// absent: Create's creative motor would lose its default speed).
+/// absent: Create's creative motor would lose its default speed). What it kept of the stack it was
+/// placed from comes back from `components` (`BlockEntity.loadWithComponents`).
 fn load_saved(rt: &mut Rt, be: V, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) {
     let Some(vc) = rt.vcall else { return };
     if !nbt.is_empty() {
@@ -240,7 +241,14 @@ fn load_saved(rt: &mut Rt, be: V, nbt: &std::collections::BTreeMap<String, crate
         vc(rt, LOAD, LOAD, &[be, tag, provider]);
         rt.report_thrown("loadAdditional");
     }
+    if let Some(crate::nbt::Nbt::Compound(kept)) = nbt.get(KEPT) {
+        let kept: Vec<(String, crate::nbt::Nbt)> = kept.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        crate::components::load_kept(rt, be, &kept);
+    }
 }
+
+/// The key a block entity's kept components are saved under (`BlockEntity.ComponentHelper`).
+const KEPT: &str = "components";
 
 /// The block entity at `pos` as `Level.getBlockEntity` finds it: the one this runtime holds, or,
 /// for a mod block that has one, made now. Vanilla makes it with its block; here one is otherwise
@@ -314,6 +322,11 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
         vc(rt, SAVE, SAVE, &[be, tag, provider]);
         rt.report_thrown("saveAdditional");
         *nbt = crate::nbt::from_runtime(rt, tag);
+        // `saveWithoutMetadata`: what it kept of its stack goes beside its own data.
+        let kept = crate::components::kept_saved(rt, be);
+        if !kept.is_empty() {
+            nbt.insert(KEPT.to_owned(), crate::nbt::Nbt::Compound(kept.into_iter().collect()));
+        }
         rt.put_field(be, "$written", V::J(crate::nbt::data_hash(nbt) as i64));
         let (block, _) = crate::host::split_state(state);
         rt.block_entity_meta.insert(pos, (block.to_owned(), !nbt.is_empty()));
@@ -659,6 +672,24 @@ pub fn block_entity_update_tag(rt: &mut Rt, pos: [i32; 3]) -> Option<std::collec
     let brief = nbt_brief(&nbt);
     trace_some(rt, &format!("server-tag/{pos:?}"), &brief, 8, |_| format!("server: update tag sent for {pos:?}: {brief}"));
     Some(nbt)
+}
+
+/// `native_block_entity_components` (server): what the mod block entity at `pos` gives the item its
+/// block drops (`BlockEntity.collectComponents()`), by component name, each as its codec writes it:
+/// its object here, else one made from its saved data. None for a block that isn't the mod's.
+pub fn block_entity_components(
+    rt: &mut Rt,
+    host: &mut dyn Host,
+    pos: [i32; 3],
+    state: &str,
+    nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
+) -> Vec<(String, crate::nbt::Nbt)> {
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let Some(be) = block_entity(rt, pos, state, nbt) else { return Vec::new() };
+        let map = crate::components::collect_components(rt, be);
+        crate::components::saved(rt, map)
+    })
 }
 
 /// With `HORIZON_COMPAT_TRACE` set, prints `msg` the first time `key` comes up on this runtime.
@@ -1471,6 +1502,9 @@ mod tests {
         let meal = rt.registered.get(&("data_component_type".to_owned(), "test:meal".to_owned())).copied().unwrap_or(V::NULL);
         match short {
             NEW_BLOCK_ENTITY => rt.new_object(POT_ENTITY),
+            // No ticker, and no data of its own to save or load.
+            GET_TICKER => V::NULL,
+            LOAD | SAVE => V::Void,
             SET_PLACED_BY => {
                 rt.put_field(args[0], "placer", args[4]);
                 rt.put_field(args[0], "stack", args[5]);
@@ -1490,12 +1524,9 @@ mod tests {
         }
     }
 
-    /// A mod block placed from a stack: its block entity reads the stack's components
-    /// (`applyImplicitComponents`), keeps those it didn't read (`components()`) and gives both back
-    /// for its item (`collectComponents()`); the block hears who placed it, with what
-    /// (`setPlacedBy`).
-    #[test]
-    fn a_placed_mod_block_reads_its_stack_and_hears_who_placed_it() {
+    /// The test pot's block and its two persistent component types: `test:meal` (a string, which
+    /// its block entity reads) and `test:lid` (an int, which it doesn't).
+    fn pot_runtime() -> (Rt, V, V, V) {
         let mut rt = Rt::new();
         crate::install();
         rt.overrides = Some(pot_overrides);
@@ -1514,12 +1545,48 @@ mod tests {
         };
         let meal = new_type(&mut rt, "test:meal", "com/mojang/serialization/Codec.STRING");
         let lid = new_type(&mut rt, "test:lid", "com/mojang/serialization/Codec.INT");
+        (rt, block, meal, lid)
+    }
+
+    /// A host with the test pot at `pos` and one in the main hand carrying a meal and a lid.
+    fn pot_host(pos: [i32; 3]) -> MemoryHost {
         let mut host = MemoryHost::default();
-        let pos = [3, 64, 3];
         host.blocks.insert(pos, "test:pot".into());
         host.held = Some(("test:pot".into(), 1));
         host.held_components.insert("test:meal".into(), crate::nbt::Nbt::String("stew".into()));
         host.held_components.insert("test:lid".into(), crate::nbt::Nbt::Int(2));
+        host
+    }
+
+    /// What a placed block entity kept of its stack is saved with it under `components`, as
+    /// vanilla's `saveWithoutMetadata` writes it, and the block entity made again from that data
+    /// (the world loaded again) has it back.
+    #[test]
+    fn a_block_entitys_kept_components_are_saved_with_it() {
+        use crate::nbt::Nbt;
+        let (mut rt, _, _, _) = pot_runtime();
+        let pos = [3, 64, 3];
+        let mut host = pot_host(pos);
+        place_block(&mut rt, &mut host, pos, "test:pot", "test:pot");
+        let mut nbt = std::collections::BTreeMap::new();
+        assert!(block_entity_tick(&mut rt, &mut host, pos, "test:pot", &mut nbt));
+        let lid = || Nbt::Compound([("test:lid".to_owned(), Nbt::Int(2))].into_iter().collect());
+        assert_eq!(nbt.get("components"), Some(&lid()), "the lid, which it didn't read, is kept: {nbt:?}");
+        block_entity_removed(&mut rt, pos);
+        let named = block_entity_components(&mut rt, &mut host, pos, "test:pot", &nbt);
+        assert_eq!(named, [("test:lid".to_owned(), Nbt::Int(2))], "the test pot saves no meal of its own");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod block placed from a stack: its block entity reads the stack's components
+    /// (`applyImplicitComponents`), keeps those it didn't read (`components()`) and gives both back
+    /// for its item (`collectComponents()`); the block hears who placed it, with what
+    /// (`setPlacedBy`).
+    #[test]
+    fn a_placed_mod_block_reads_its_stack_and_hears_who_placed_it() {
+        let (mut rt, block, meal, lid) = pot_runtime();
+        let pos = [3, 64, 3];
+        let mut host = pot_host(pos);
 
         place_block(&mut rt, &mut host, pos, "test:pot", "test:pot");
         let be = rt.block_entities[&pos];
@@ -1536,6 +1603,14 @@ mod tests {
         let get = "net/minecraft/core/component/DataComponentMap.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
         let back = api::call(&mut rt, get, &[all, meal]);
         assert_eq!(rt.str_of(back), Some("stew"));
+
+        // Broken, it names what its item keeps, each as its type's codec writes it; a block that
+        // isn't the mod's names nothing.
+        use crate::nbt::Nbt;
+        let named = block_entity_components(&mut rt, &mut host, pos, "test:pot", &Default::default());
+        assert_eq!(named, [("test:lid".to_owned(), Nbt::Int(2)), ("test:meal".to_owned(), Nbt::String("stew".into()))]);
+        host.blocks.insert([9, 64, 9], "minecraft:stone".into());
+        assert!(block_entity_components(&mut rt, &mut host, [9, 64, 9], "minecraft:stone", &Default::default()).is_empty());
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

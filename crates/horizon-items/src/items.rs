@@ -362,6 +362,67 @@ fn registry_order(root: &Path, order: &[Arc<str>]) -> Vec<Arc<str>> {
 }
 /// Item ids standing for a loot table's `minecraft:dynamic` entries.
 const DYNAMIC: &str = "#dynamic:";
+/// One `copy_components` function of a block's loot table with source `block_entity`: what it
+/// copies from the block entity (`BlockEntity.collectComponents()`) onto the item it runs on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockEntityCopies {
+    /// The item of the loot entry it belongs to; None when it runs on a whole pool or table.
+    pub item: Option<String>,
+    /// The components it copies (`include`); None for every one.
+    pub include: Option<Vec<String>>,
+    /// The components it leaves out (`exclude`).
+    pub exclude: Vec<String>,
+}
+impl BlockEntityCopies {
+    /// Whether it copies component `name` (`CopyComponentsFunction`'s predicate).
+    pub fn copies(&self, name: &str) -> bool {
+        self.include
+            .as_ref()
+            .is_none_or(|include| include.iter().any(|n| n == name))
+            && !self.exclude.iter().any(|n| n == name)
+    }
+    /// The functions in loot table JSON `v`, in order; `item` is the entry it sits in.
+    fn find(v: &Value, item: Option<&str>, out: &mut Vec<Self>) {
+        fn id(s: &str) -> String {
+            if s.contains(':') {
+                s.to_owned()
+            } else {
+                format!("minecraft:{s}")
+            }
+        }
+        fn names(v: Option<&Value>) -> Option<Vec<String>> {
+            v.and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(id).collect())
+        }
+        match v {
+            Value::Object(o) => {
+                let text = |key: &str| o.get(key).and_then(Value::as_str).map(id);
+                let item = match (text("type").as_deref(), o.get("name").and_then(Value::as_str)) {
+                    (Some("minecraft:item"), Some(name)) => Some(name),
+                    _ => item,
+                };
+                if text("function").as_deref() == Some("minecraft:copy_components")
+                    && o.get("source").and_then(Value::as_str) == Some("block_entity")
+                {
+                    out.push(Self {
+                        item: item.map(id),
+                        include: names(o.get("include")),
+                        exclude: names(o.get("exclude")).unwrap_or_default(),
+                    });
+                }
+                for x in o.values() {
+                    Self::find(x, item, out);
+                }
+            }
+            Value::Array(a) => {
+                for x in a {
+                    Self::find(x, item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 pub struct Items {
     pub items: HashMap<Arc<str>, ItemInfo>,
     pub order: Vec<Arc<str>>,
@@ -1097,6 +1158,23 @@ impl Items {
         let standing = standing.replacen("wall_", "", 1);
         let standing = format!("{namespace}:blocks/{standing}");
         self.loot.contains_key(&standing).then_some(standing)
+    }
+    /// What `state`'s loot table copies from its block entity onto its drops: each
+    /// `copy_components` function with source `block_entity`, in the table's order. Empty when the
+    /// table copies nothing from it.
+    pub fn block_entity_copies(
+        &self,
+        registry: &BlockRegistry,
+        state: BlockStateId,
+    ) -> Vec<BlockEntityCopies> {
+        let mut found = Vec::new();
+        if let Some(table) = self
+            .block_loot_table(registry, state)
+            .and_then(|id| self.loot.get(&id))
+        {
+            BlockEntityCopies::find(table, None, &mut found);
+        }
+        found
     }
     /// Evaluate the block's loot table for a player break without explosions.
     pub fn block_drops<R: RandomSource>(
@@ -2129,6 +2207,55 @@ mod tests {
             Some("minecraft:blocks/cobblestone_wall")
         );
         assert_eq!(table(0), None);
+    }
+
+    /// A mod block's table copies components from its block entity, as Farmer's Delight's cooking
+    /// pot keeps its meal (on its own entry), or a whole pool copies all but one; a table that
+    /// copies nothing from it has none.
+    #[test]
+    fn a_tables_copies_from_the_block_entity() {
+        let facts = br#"{"defaults":{"minecraft:air":0,"test:pot":1,"test:crate":2,"test:plain":3},
+            "states":[
+            ["air",true,false,"","minecraft:air"],
+            ["a",false,false,"","test:pot"],
+            ["b",false,false,"","test:crate"],
+            ["c",false,false,"","test:plain"]
+        ]}"#;
+        let registry = BlockRegistry::from_facts_json(&facts[..]).unwrap();
+        let mut items = Items::for_tests(HashMap::new());
+        let pot = json!({"type": "minecraft:block", "pools": [{"rolls": 1.0, "entries": [{
+            "type": "minecraft:item", "name": "test:pot",
+            "functions": [{"function": "minecraft:copy_components", "source": "block_entity",
+                "include": ["custom_name", "test:meal"]}]}]}]});
+        let crate_table = json!({"pools": [{"rolls": 1.0,
+            "entries": [{"type": "item", "name": "test:crate"}],
+            "functions": [{"function": "copy_components", "source": "block_entity", "exclude": ["test:lock"]},
+                {"function": "minecraft:copy_components", "source": "this", "include": ["test:owner"]}]}]});
+        let plain = json!({"pools": [{"rolls": 1.0, "entries": [{"type": "minecraft:item", "name": "test:plain"}]}]});
+        items.loot = Arc::new(
+            [("test:blocks/pot", pot), ("test:blocks/crate", crate_table), ("test:blocks/plain", plain)]
+                .map(|(id, t)| (id.to_owned(), t))
+                .into_iter()
+                .collect(),
+        );
+        let copies = |state| items.block_entity_copies(&registry, BlockStateId(state));
+        let pot = copies(1);
+        assert_eq!(
+            pot,
+            [BlockEntityCopies {
+                item: Some("test:pot".into()),
+                include: Some(vec!["minecraft:custom_name".into(), "test:meal".into()]),
+                exclude: Vec::new(),
+            }]
+        );
+        assert!(pot[0].copies("test:meal") && pot[0].copies("minecraft:custom_name"));
+        assert!(!pot[0].copies("test:container"));
+        let crate_copies = copies(2);
+        assert_eq!(crate_copies.len(), 1, "the copy from the entity itself is no block entity's");
+        assert_eq!(crate_copies[0].item, None);
+        assert!(crate_copies[0].copies("test:anything") && !crate_copies[0].copies("test:lock"));
+        assert!(copies(3).is_empty());
+        assert!(copies(0).is_empty());
     }
 
     fn ctx<'a>(

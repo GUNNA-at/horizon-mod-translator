@@ -201,6 +201,7 @@ mod native_data_maps;
 mod native_effects;
 mod native_entities;
 mod native_entity_queries;
+mod native_block_entity_drops;
 mod native_explosions;
 mod native_falling;
 mod native_hits;
@@ -5508,6 +5509,7 @@ impl Game<'_> {
         if let Some(entity) = self.world.block_entities.get(&key).cloned() {
             let name = self.world.block_names.get(&key).cloned();
             self.pending.record(pos, &entity, &facts.name, name);
+            self.record_block_entity_copies(pos, broken, &entity);
         } else if let Some(tag) = spill::saved_entity(&self.world, pos) {
             self.pending.record_saved(pos, &tag);
         }

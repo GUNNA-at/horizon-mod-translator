@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "name": "block_entity_components",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_components"
+    }
+  ],
+  "rust_summary": "what a mod block entity gives the item its block drops (`native_block_entity_components`).",
+  "doc_summary": "the components a mod block entity gives the item its block drops (`native_block_entity_components`,\n`BlockEntity.collectComponents`), asked as a player or an explosion breaks the block while it and its block entity are\nstill there, when the block's loot table copies components from its block entity (`copy_components`, source\n`block_entity`). The mod names them, each as its codec writes it, and the game puts those the table copies on the item\nit drops: a cooking pot keeps its meal. Server-side.\n\nBundles that use it need `\"hooks\": @API:block_entity_components@`."
+}

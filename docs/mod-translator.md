@@ -3809,6 +3809,49 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     runtime. A block entity's kept components are not saved with it.
   Test `glue::tests::a_placed_mod_block_reads_its_stack_and_hears_who_placed_it`; 374 compat and 17 translator tests
   pass.
+- [x] 2026-11-06 Part 17: round 12 in game; a mod's component types in item arguments; a mod block entity's
+  components on its drops.
+  - Round 12 (commit `f0790e0`, hzcheck jar with the component checks) in game:
+    - `getEntitiesOfClass(LivingEntity, player box inflated)` now finds the player beside the mobs: "living near:
+      minecraft:cow 448, minecraft:pig 449, minecraft:player 2".
+    - Components: "max 250, the copy's damage 5, built 7, the map has damage true (5), its patch empty false, a
+      stick's true", as vanilla gives them.
+    - A deployer placed by the player has its owner (`setPlacedBy`): `data get block` shows `Owner` as a UUID int
+      array.
+    - The cooking pot step failed before placing anything: `item replace ... with
+      farmersdelight:cooking_pot[farmersdelight:meal={...}]` answered "Unknown item component 'farmersdelight:meal'".
+  - Cause: item arguments (`ItemParser`) take the types in the command registries (`persistent_components`, the
+    `data_component_type` registry), which held vanilla's only. The game registers the mods' persistent component
+    types at start (`native_component_types` → `horizon_protocol::item::custom`), and its stacks already keep such a
+    component (`StackData.other`) for the hand to give the runtime. `build_registries` now adds the registered types
+    to both lists, so `/give` and `/item` take `farmersdelight:meal=...` and `!farmersdelight:meal`. The value is
+    checked as SNBT only; the mod's codec reads it when the runtime first sees the stack.
+  - Mod block entities' components on their drops. Vanilla's `copy_components` loot function with source
+    `block_entity` copies `BlockEntity.collectComponents()` onto the dropped item. The game handled it for vanilla's
+    own block entities only (heads, hives, banners, shulker boxes, pots). In this pack, 990 such functions in 22 jars
+    use it: Refined Storage 351, FramedBlocks 232 (`camo_list`), Mekanism 113 (owner, energy, items, side
+    config...), SecurityCraft 81, Domum Ornamentum 44, Waystones 38, Comforts 32, Create 19 (toolbox contents and
+    UUID, backtank air, enchantments), Farmer's Delight 14 (the cooking pot's meal and container, cabinets' names),
+    Create Big Cannons 13...
+    - `Items::block_entity_copies` (horizon-items): the block's loot table's functions with source `block_entity`,
+      each with its `include`/`exclude` and the entry's item (`BlockEntityCopies`).
+    - New hook `native_block_entity_components(pos, entity, components)`, fragment
+      `block_entity_components.json`. The game asks it as a player (`break_block_as_player`) or an explosion
+      (`explosion_hit_block`) breaks a mod block, while the block and its block entity are still there, when the
+      table copies anything from the block entity (`game/native_block_entity_drops.rs`). What the mod names and the
+      table copies waits in `Pending::copied` for the dropped item (`attach`).
+    - Bundle template `block_entity_components`: the runtime's `glue::block_entity_components` collects the block
+      entity's components (its live object, else one made from its saved data) and writes each with its type's
+      codec (`components::saved`).
+    - Not yet: a mod block broken by the world itself (`GameLevel::drop_resources_now`: a lost support, `/setblock
+      destroy`) runs no game hook, so its drops don't get them; vanilla components other than enchantments (a
+      `custom_name` the runtime holds) aren't written back.
+  - A block entity's kept components (what it didn't read of the stack it was placed from) are saved with it under
+    `components`, as vanilla's `saveWithoutMetadata` writes them, and read back when it is made again from saved data
+    (`loadWithComponents`): they survive the world being saved and loaded.
+  Tests `chat::tests::item_arguments_take_a_mods_component_types`, `items::tests::a_tables_copies_from_the_block_entity`,
+  `glue::tests::a_block_entitys_kept_components_are_saved_with_it`, and the placement test now breaking the pot. 375
+  compat, 17 translator and the items tests pass; the game tests (48, with `chat::tests` and the hook catalog) pass.
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick
