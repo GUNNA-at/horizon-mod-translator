@@ -43,6 +43,13 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(if holder { rt.intern(format!("sound-holder/{id}"), |rt| crate::neo::registry_holder(rt, "sound_event", &id, event)) } else { event })
 }
 
+/// Vanilla's sound event `id` (`minecraft:block.anvil.land`): the one its `SoundEvents` field
+/// gives; none for a name vanilla doesn't register.
+pub(crate) fn vanilla_event(rt: &mut Rt, id: &str) -> Option<V> {
+    let path = id.strip_prefix("minecraft:")?;
+    crate::vanilla_sounds::SOUND_EVENTS.iter().any(|(_, p, _)| *p == path).then(|| rt.intern(format!("sound/{id}"), |rt| sound_event(rt, id, None)))
+}
+
 /// The id a `SoundEvent`, or a holder of one, plays.
 pub(crate) fn sound_id(rt: &Rt, v: V) -> Option<String> {
     let held = rt.get_field(v, "$value");

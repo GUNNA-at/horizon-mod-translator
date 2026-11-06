@@ -393,6 +393,11 @@ fn type_entry(kind: &str) -> Option<&'static (&'static str, &'static str, f32, f
     TYPES.binary_search_by(|t| t.0.cmp(kind)).ok().map(|i| &TYPES[i])
 }
 
+/// Whether `id` names one of 1.21.1's entity types (`minecraft:cow`).
+pub(crate) fn is_vanilla_type(id: &str) -> bool {
+    type_entry(id).is_some()
+}
+
 fn class_entry(c: &str) -> Option<&'static (&'static str, &'static str, &'static [&'static str])> {
     CLASSES.binary_search_by(|e| e.0.cmp(c)).ok().map(|i| &CLASSES[i])
 }

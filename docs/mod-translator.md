@@ -4922,6 +4922,35 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `EnchantmentHelper.doPostAttackEffects`, the projectile's saved data; 6 of Create's 25
     projectile types are left out (their effects' `mob_effect` holders and food properties are not
     read by the codecs yet).
+- [x] 2026-11-06 Part 53: a registry's codecs read vanilla's entries; holders; a food and an effect written out in full.
+  Measured in game (Part 52's potato round): 6 of Create's 25 potato projectile types were left out,
+  4 for `Unknown registry key in mob_effect: minecraft:poison` (and `slowness`, `glowing`: vanilla's
+  effects, by `BuiltInRegistries.MOB_EFFECT.holderByNameCodec()`), 2 for `FoodProperties.DIRECT_CODEC`
+  (not read). The codecs knew vanilla's items, blocks and fluids by name; another vanilla entry of a
+  registry mods fill was unknown. Over the pack (367 jars): 14 call `holderByNameCodec` on a built-in
+  registry (items 7, effects, attributes, blocks and sounds 3 each, fluids 2), 11 read effects,
+  attributes, sounds, entity types or potions by `byNameCodec` (entity types 9), 5 use
+  `RegistryFileCodec`.
+  - A registry's codec by name reads vanilla's entry of the registries mods fill as the runtime
+    models it (`neo::registry_get`): effects (vanilla's 39), attributes (1.21.1's 31), sound events
+    (vanilla's 1,603), entity types (1.21.1's 130; another `minecraft:` name is refused), potions;
+    items, blocks and fluids as before. Writing one back gives its name (an effect's, attribute's or
+    entity type's id, a sound's location).
+  - `holderByNameCodec` and `RegistryFileCodec` read the registry's holder of the entry (the one
+    `MobEffects.POISON` and `Attributes.ARMOR` are), as vanilla's do, `byNameCodec` the entry;
+    `RegistryFileCodec`'s inline entry (allowed unless told) is a `Holder.direct` of what its codec
+    reads. A holder is written by its name, a direct one in full where the codec can.
+  - `FoodProperties.DIRECT_CODEC` (`{nutrition, saturation, can_always_eat, eat_seconds,
+    using_converts_to, effects}`) and `MobEffectInstance.CODEC` (`{id, amplifier, duration, ambient,
+    show_particles, show_icon}`; the amplifier an unsigned byte, the icon with the particles unless
+    told): read with vanilla's defaults, checks and messages, written back with what differs from
+    the defaults.
+  - Not modelled: an effect instance's hidden effect and NeoForge's cures (`neoforge:cures` is read
+    past, not kept); other vanilla registries' entries by name (particle types, block entity types,
+    menus...: still unknown, as before).
+  - Tests: `codecs::tests::a_registrys_codecs_read_vanillas_entries_by_name`,
+    `codecs::tests::a_food_written_out_in_full_reads_its_effects` (Create's pufferfish projectile's
+    `food_property`).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

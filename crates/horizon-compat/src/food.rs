@@ -10,7 +10,9 @@
 //! [`components`] writes them for a mod's item. Its class may change how it's eaten by overriding
 //! `Item`'s `getUseDuration`, `getUseAnimation` (a drink), `getEatingSound` or `getDrinkingSound`:
 //! those are asked once, with a stack of the item, as they answer the same for any.
+use crate::nbt::Nbt;
 use crate::{api, api_common, jutil, Rt, V};
+use std::collections::BTreeMap;
 
 const BUILDER: &str = "net/minecraft/world/food/FoodProperties$Builder";
 const FOOD: &str = "net/minecraft/world/food/FoodProperties";
@@ -164,6 +166,11 @@ pub(crate) fn effect_holder(rt: &mut Rt, id: &str) -> V {
     }
     let value = crate::neo::registry_get(rt, "mob_effect", &id);
     crate::neo::registry_holder(rt, "mob_effect", &id, value)
+}
+
+/// Whether `id` names one of vanilla's 39 effects (`minecraft:poison`).
+pub(crate) fn is_vanilla_effect(id: &str) -> bool {
+    id.strip_prefix("minecraft:").is_some_and(|path| crate::vanilla_effects::MOB_EFFECTS.iter().any(|(_, p)| *p == path))
 }
 
 /// Vanilla's potion `id` (`minecraft:water`) as its registry's holder, one per id; the potion
@@ -421,6 +428,158 @@ fn effect_json(rt: &Rt, instance: V) -> Option<String> {
     }
     parts.push(format!("\"show_icon\": {}", int("$showIcon") != 0));
     Some(format!("{{{}}}", parts.join(", ")))
+}
+
+// ---- `MobEffectInstance.CODEC` and `FoodProperties.DIRECT_CODEC` (a mod's data: Create's potato
+// projectile types) ----
+
+type JsonMap = serde_json::Map<String, serde_json::Value>;
+
+/// A number a codec reads at `key`, if there.
+fn json_number(o: &JsonMap, key: &str) -> Result<Option<f64>, String> {
+    match o.get(key) {
+        None => Ok(None),
+        Some(n) => n.as_f64().map(Some).ok_or_else(|| format!("{key}: Not a number: {n}")),
+    }
+}
+
+/// A boolean a codec reads at `key`, else `default`: JSON's, or a number (DFU's `JsonOps` takes
+/// one as true unless its byte is 0).
+fn json_bool(o: &JsonMap, key: &str, default: bool) -> Result<bool, String> {
+    match o.get(key) {
+        None => Ok(default),
+        Some(serde_json::Value::Bool(b)) => Ok(*b),
+        Some(n) if n.is_number() => Ok(n.as_f64().unwrap_or(0.0) as i64 as i8 != 0),
+        Some(other) => Err(format!("{key}: Not a boolean: {other}")),
+    }
+}
+
+/// `MobEffectInstance.CODEC`'s instance: `{id, amplifier, duration, ambient, show_particles,
+/// show_icon}`, all but the id optional (the amplifier an unsigned byte, the icon shown with the
+/// particles unless told). A hidden effect and NeoForge's cures aren't kept.
+pub(crate) fn decode_instance(rt: &mut Rt, j: &serde_json::Value) -> Result<V, String> {
+    let o = j.as_object().ok_or_else(|| format!("Not a map: {j}"))?;
+    let id = o.get("id").ok_or("No key id in MapLike")?;
+    let id = id.as_str().ok_or_else(|| format!("id: Not a string: {id}"))?;
+    let id = if id.contains(':') { id.to_owned() } else { format!("minecraft:{id}") };
+    if crate::neo::registry_get(rt, "mob_effect", &id).r() == 0 {
+        return Err(format!("id: Unknown registry key in mob_effect: {id}"));
+    }
+    let effect = effect_holder(rt, &id);
+    let amplifier = json_number(o, "amplifier")?.map_or(0, |n| n as i64 as i8 as u8 as i32);
+    let duration = json_number(o, "duration")?.map_or(0, |n| n as i32);
+    let ambient = json_bool(o, "ambient", false)?;
+    let particles = json_bool(o, "show_particles", true)?;
+    let icon = json_bool(o, "show_icon", particles)?;
+    let e = rt.new_object(INSTANCE);
+    rt.put_field(e, "$effect", effect);
+    rt.put_field(e, "$duration", V::I(duration));
+    rt.put_field(e, "$amplifier", V::I(amplifier));
+    rt.put_field(e, "$ambient", V::I(ambient as i32));
+    rt.put_field(e, "$visible", V::I(particles as i32));
+    rt.put_field(e, "$showIcon", V::I(icon as i32));
+    Ok(e)
+}
+
+/// The tag `MobEffectInstance.CODEC` writes: what differs from the defaults, and the icon always.
+pub(crate) fn encode_instance(rt: &Rt, e: V) -> Result<Nbt, String> {
+    let id = effect_id(rt, rt.get_field(e, "$effect")).ok_or("Unknown registry element in mob_effect")?;
+    let int = |f: &'static str| rt.get_field(e, f).i();
+    let mut m = BTreeMap::from([("id".to_owned(), Nbt::String(id))]);
+    if int("$amplifier") != 0 {
+        m.insert("amplifier".to_owned(), Nbt::Byte(int("$amplifier") as i8));
+    }
+    if int("$duration") != 0 {
+        m.insert("duration".to_owned(), Nbt::Int(int("$duration")));
+    }
+    if int("$ambient") != 0 {
+        m.insert("ambient".to_owned(), Nbt::Byte(1));
+    }
+    if int("$visible") == 0 {
+        m.insert("show_particles".to_owned(), Nbt::Byte(0));
+    }
+    m.insert("show_icon".to_owned(), Nbt::Byte((int("$showIcon") != 0) as i8));
+    Ok(Nbt::Compound(m))
+}
+
+/// `FoodProperties.DIRECT_CODEC`'s food: `{nutrition, saturation, can_always_eat, eat_seconds,
+/// using_converts_to, effects}`, the last four optional; an effect is `{effect, probability}`.
+pub(crate) fn decode_food(rt: &mut Rt, j: &serde_json::Value) -> Result<V, String> {
+    let o = j.as_object().ok_or_else(|| format!("Not a map: {j}"))?;
+    let nutrition = json_number(o, "nutrition")?.ok_or("No key nutrition in MapLike")? as i32;
+    if nutrition < 0 {
+        return Err(format!("nutrition: Value must be non-negative: {nutrition}"));
+    }
+    let saturation = json_number(o, "saturation")?.ok_or("No key saturation in MapLike")? as f32;
+    let always = json_bool(o, "can_always_eat", false)?;
+    let seconds = json_number(o, "eat_seconds")?.map_or(EAT_SECONDS, |s| s as f32);
+    if seconds <= 0.0 {
+        return Err(format!("eat_seconds: Value must be positive: {seconds}"));
+    }
+    let converts = match o.get("using_converts_to") {
+        Some(s) => crate::recipes::decode_native(rt, "item_stack", s).map_err(|e| format!("using_converts_to: {e}"))?,
+        None => V::NULL,
+    };
+    let mut effects = Vec::new();
+    for e in o.get("effects").map(|l| l.as_array().ok_or_else(|| format!("effects: Not a list: {l}"))).transpose()?.into_iter().flatten() {
+        let eo = e.as_object().ok_or_else(|| format!("effects: Not a map: {e}"))?;
+        let instance = decode_instance(rt, eo.get("effect").ok_or("effects: No key effect in MapLike")?).map_err(|err| format!("effects: effect: {err}"))?;
+        let p = json_number(eo, "probability")?.map_or(1.0, |p| p as f32);
+        if !(0.0..=1.0).contains(&p) {
+            return Err(format!("effects: probability: Value {p} outside of range [0.0:1.0]"));
+        }
+        let possible = rt.new_object(POSSIBLE);
+        rt.put_field(possible, "$instance", instance);
+        rt.put_field(possible, "probability", V::F(p));
+        effects.push(possible);
+    }
+    let (converts, effects) = (api_common::optional(rt, converts), jutil::new_list(rt, effects));
+    let f = rt.new_object(FOOD);
+    rt.put_field(f, "nutrition", V::I(nutrition));
+    rt.put_field(f, "saturation", V::F(saturation));
+    rt.put_field(f, "canAlwaysEat", V::I(always as i32));
+    rt.put_field(f, "eatSeconds", V::F(seconds));
+    rt.put_field(f, "usingConvertsTo", converts);
+    rt.put_field(f, "effects", effects);
+    Ok(f)
+}
+
+/// The tag `FoodProperties.DIRECT_CODEC` writes: what differs from the defaults (the remainder a
+/// single item, `{id, components}`).
+pub(crate) fn encode_food(rt: &mut Rt, f: V) -> Result<Nbt, String> {
+    let field = |rt: &Rt, n: &'static str| rt.get_field(f, n);
+    let mut m = BTreeMap::from([("nutrition".to_owned(), Nbt::Int(field(rt, "nutrition").i())), ("saturation".to_owned(), Nbt::Float(field(rt, "saturation").f()))]);
+    if field(rt, "canAlwaysEat").i() != 0 {
+        m.insert("can_always_eat".to_owned(), Nbt::Byte(1));
+    }
+    if field(rt, "eatSeconds").f() != EAT_SECONDS {
+        m.insert("eat_seconds".to_owned(), Nbt::Float(field(rt, "eatSeconds").f()));
+    }
+    let converts = rt.get_field(field(rt, "usingConvertsTo"), "value");
+    if converts.r() != 0 {
+        let mut item = crate::codecs::write_native(rt, "item_stack", converts)?;
+        if let Nbt::Compound(c) = &mut item {
+            c.remove("count");
+        }
+        m.insert("using_converts_to".to_owned(), item);
+    }
+    let mut effects = Vec::new();
+    for e in jutil::elements(rt, field(rt, "effects")) {
+        let instance = possible_instance(rt, e);
+        if instance.r() == 0 {
+            return Err("effects: effect: no instance".into());
+        }
+        let mut written = BTreeMap::from([("effect".to_owned(), encode_instance(rt, instance)?)]);
+        let p = rt.get_field(e, "probability").f();
+        if p != 1.0 {
+            written.insert("probability".to_owned(), Nbt::Float(p));
+        }
+        effects.push(Nbt::Compound(written));
+    }
+    if !effects.is_empty() {
+        m.insert("effects".to_owned(), Nbt::List(effects));
+    }
+    Ok(Nbt::Compound(m))
 }
 
 /// What a mod class of `item` answers to `Item`'s `nd`, when it overrides it.

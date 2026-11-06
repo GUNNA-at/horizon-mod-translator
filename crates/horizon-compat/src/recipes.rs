@@ -1426,6 +1426,8 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             Ok(api_common::state(rt, &text))
         }
         "recipe" => decode_recipe(rt, j),
+        "food_properties" => crate::food::decode_food(rt, j),
+        "effect_instance" => crate::food::decode_instance(rt, j),
         "component" => Ok(crate::api_common::component_from_json(rt, j)),
         n if n.starts_with("tag_key/") || n.starts_with("hashed_tag_key/") => {
             let (kind, registry) = n.split_once('/').unwrap_or((n, ""));

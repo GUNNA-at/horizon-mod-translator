@@ -189,6 +189,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/item/DyeColor", "CODEC") => native(rt, "dye_color"),
         ("net/neoforged/neoforge/common/ItemAbility", "CODEC") => native(rt, "item_ability"),
         ("net/minecraft/sounds/SoundEvent", "DIRECT_CODEC") => native(rt, "sound_event_direct"),
+        // A food written out in full (`FoodProperties.DIRECT_CODEC`), and an effect instance
+        // (`MobEffectInstance.CODEC`): a mod's data (Create's potato projectile types).
+        ("net/minecraft/world/food/FoodProperties", "DIRECT_CODEC") => native(rt, "food_properties"),
+        ("net/minecraft/world/effect/MobEffectInstance", "CODEC") => native(rt, "effect_instance"),
         // Value providers: a number is a constant (`IntProvider.CODEC`), the bounded ones refuse a
         // provider reaching outside (`NON_NEGATIVE_CODEC` from 0, `POSITIVE_CODEC` from 1).
         ("net/minecraft/util/valueproviders/IntProvider", "CODEC") => native(rt, "int_provider"),
@@ -404,10 +408,23 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
             decode(rt, inner, j)
         }
         "java" => java_decode(rt, part(0), j),
+        // An entry by its id; a holder codec's (`holderByNameCodec`, `RegistryFileCodec`) the
+        // registry's holder of it, and `RegistryFileCodec`'s an entry written out in full too, a
+        // holder of it alone (`Holder.direct`).
         "registry" => {
-            let Json::String(id) = j else { return Err(format!("Not a string: {j}")) };
             let registry = rt.str_of(part(0)).unwrap_or("").to_owned();
-            registry_value(rt, &registry, id)
+            let Json::String(id) = j else {
+                if part(2).r() == 0 {
+                    return Err(format!("Not a string: {j}"));
+                }
+                let v = decode(rt, part(2), j)?;
+                let h = rt.new_object("net/minecraft/core/Holder$Direct");
+                rt.put_field(h, "value", v);
+                return Ok(h);
+            };
+            let id = if id.contains(':') { id.clone() } else { format!("minecraft:{id}") };
+            let v = registry_value(rt, &registry, &id)?;
+            Ok(if part(1).i() != 0 { crate::neo::registry_holder(rt, &registry, &id, v) } else { v })
         }
         "enum" | "enum_codec" => {
             let Json::String(name) = j else { return Err(format!("Not a string: {j}")) };
@@ -678,28 +695,35 @@ fn primitive(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
 }
 
 /// An entry of a registry by id (`byNameCodec`): what the mod registered, vanilla's and the game's
-/// items, blocks and fluids; another registry's entry the mod didn't make is its id.
+/// items, blocks and fluids, and the vanilla entries the runtime models of the registries mods fill
+/// (effects, attributes, sounds, entity types, potions: [`crate::neo::registry_get`]); another
+/// registry's entry the mod didn't make is its id.
 fn registry_value(rt: &mut Rt, registry: &str, id: &str) -> Result<V, String> {
-    let id = if id.contains(':') { id.to_owned() } else { format!("minecraft:{id}") };
-    if let Some(&v) = rt.registered.get(&(registry.to_owned(), id.clone())) {
+    if let Some(&v) = rt.registered.get(&(registry.to_owned(), id.to_owned())) {
         return Ok(v);
     }
     let unknown = || Err(format!("Unknown registry key in {registry}: {id}"));
     match registry {
         "item" => {
-            if id == "minecraft:air" || !crate::recipes::item_known(rt, &id) {
+            if id == "minecraft:air" || !crate::recipes::item_known(rt, id) {
                 return unknown();
             }
-            Ok(crate::api_common::item(rt, &id))
+            Ok(crate::api_common::item(rt, id))
         }
-        "fluid" => match crate::fluids::fluid(rt, &id) {
+        "fluid" => match crate::fluids::fluid(rt, id) {
             f if f.r() != 0 => Ok(f),
             _ => unknown(),
         },
-        "block" if id.starts_with("minecraft:") => Ok(crate::api::block(rt, &id)),
-        // The mod's own registries, and the vanilla ones it fills, hold what it registered.
-        r if rt.custom_registries.iter().any(|c| c == r) || crate::neo::REGISTRIES.contains(&r) => unknown(),
-        _ => Ok(rt.string(&id)),
+        "block" if id.starts_with("minecraft:") => Ok(crate::api::block(rt, id)),
+        // Vanilla's entity types are 1.21.1's: another `minecraft:` name is none.
+        "entity_type" if id.starts_with("minecraft:") && !crate::vanilla_entities::is_vanilla_type(id) => unknown(),
+        // The mod's own registries, and the vanilla ones it fills: what it registered, else
+        // vanilla's entry the runtime models.
+        r if rt.custom_registries.iter().any(|c| c == r) || crate::neo::REGISTRIES.contains(&r) => match crate::neo::registry_get(rt, r, id) {
+            v if v.r() != 0 => Ok(v),
+            _ => unknown(),
+        },
+        _ => Ok(rt.string(id)),
     }
 }
 
@@ -760,7 +784,23 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
         "java" => java_encode(rt, part(0), value),
         "registry" => {
             let registry = rt.str_of(part(0)).unwrap_or("").to_owned();
-            registry_key(rt, &registry, value).map(Nbt::String)
+            // A holder: a registry's by its entry's id, a direct one written out in full where
+            // the codec can (`RegistryFileCodec`'s inline entry), else refused as vanilla's is.
+            match rt.class_of(value) {
+                "net/minecraft/core/Holder$Reference" => {
+                    if let Some(id) = rt.str_of(rt.get_field(value, "$id")).filter(|s| !s.is_empty()) {
+                        return Ok(Nbt::String(id.to_owned()));
+                    }
+                    let held = rt.get_field(value, "$value");
+                    registry_key(rt, &registry, held).map(Nbt::String)
+                }
+                "net/minecraft/core/Holder$Direct" if part(2).r() != 0 => {
+                    let held = rt.get_field(value, "value");
+                    encode(rt, part(2), held)
+                }
+                "net/minecraft/core/Holder$Direct" => Err(format!("Unregistered holder in {registry}")),
+                _ => registry_key(rt, &registry, value).map(Nbt::String),
+            }
         }
         "enum" | "enum_codec" => serialized_name(rt, value).map(Nbt::String),
         "native" => {
@@ -907,6 +947,12 @@ fn registry_key(rt: &mut Rt, registry: &str, v: V) -> Result<String, String> {
             return Ok(n);
         }
     }
+    // Vanilla's entries the runtime models know their names: a sound event its location, an
+    // effect, attribute, entity type or potion its id.
+    let own = if registry == "sound_event" { crate::sounds::sound_id(rt, v) } else { rt.str_of(rt.get_field(v, "$id")).filter(|s| !s.is_empty()).map(str::to_owned) };
+    if let Some(n) = own {
+        return Ok(n);
+    }
     rt.str_of(v).map(str::to_owned).ok_or_else(|| format!("Unknown registry element in {registry}"))
 }
 
@@ -952,7 +998,7 @@ fn write_primitive(rt: &Rt, name: &str, v: V) -> Result<Nbt, String> {
 }
 
 /// Minecraft's and NeoForge's own codecs, as vanilla writes them.
-fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
+pub(crate) fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
     Ok(match name {
         "resource_location" => Nbt::String(rt.str_of(v).ok_or("Not a resource location")?.to_owned()),
         "block_pos" | "vec3i" => Nbt::IntArray(crate::api::pos_of(rt, v).to_vec()),
@@ -1035,6 +1081,8 @@ fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
             }
             Nbt::Compound(m)
         }
+        "food_properties" => crate::food::encode_food(rt, v)?,
+        "effect_instance" => crate::food::encode_instance(rt, v)?,
         "item_enchantments" => crate::enchantments::encode(rt, v)?,
         // Ingredients, sized ones and fluid ones as their codecs write them (a stream codec built
         // on one sends this).
@@ -1119,9 +1167,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return Some(if method == "create" { codec(rt, "compat:codec/of_map", vec![built]) } else { built });
         }
         ("com/mojang/serialization/codecs/RecordCodecBuilder", "point") => return Some(codec(rt, "compat:codec/point", vec![a(0)])),
-        // `RegistryFileCodec.create(registry, codec[, inline])`: an entry of the registry by its id
-        // (registries are their names here).
-        ("net/minecraft/resources/RegistryFileCodec", "create") if rt.str_of(a(0)).is_some() => return Some(codec(rt, "compat:codec/registry", vec![a(0)])),
+        // `RegistryFileCodec.create(registry, codec[, inline])`: the registry's holder of an entry
+        // by its id (registries are their names here), or, inline allowed (the default), of one
+        // written out in full that `codec` reads.
+        ("net/minecraft/resources/RegistryFileCodec", "create") if rt.str_of(a(0)).is_some() => {
+            let inline = if desc.starts_with("(Lnet/minecraft/resources/ResourceKey;Lcom/mojang/serialization/Codec;Z)") && a(2).i() == 0 { V::NULL } else { a(1) };
+            return Some(codec(rt, "compat:codec/registry", vec![a(0), V::I(1), inline]));
+        }
         // `RegistryCodecs.homogeneousList(registry, ...)`: a holder set (`#tag`, an id, a list of
         // them, NeoForge's holder set objects), kept as written; the host answers its members.
         ("net/minecraft/core/RegistryCodecs", "homogeneousList") => {
@@ -1253,9 +1305,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return Some(codec(rt, "compat:codec/optional", vec![a(1), a(0), a(2), V::I(1), V::I(0), V::I(1)]));
         }
         ("net/minecraft/util/ExtraCodecs", "nonEmptyList") => return Some(a(0)),
-        // Registries are their names here: `BuiltInRegistries.ITEM.byNameCodec()`.
+        // Registries are their names here: `BuiltInRegistries.ITEM.byNameCodec()` reads an entry,
+        // `holderByNameCodec()` the registry's holder of it.
         (_, "byNameCodec" | "holderByNameCodec") if rt.str_of(a(0)).is_some() => {
-            return Some(codec(rt, "compat:codec/registry", vec![a(0)]));
+            let holder = V::I((method == "holderByNameCodec") as i32);
+            return Some(codec(rt, "compat:codec/registry", vec![a(0), holder]));
         }
         (DATA_RESULT, "success") => {
             let v = a(0);
@@ -2356,6 +2410,96 @@ mod tests {
         let mut out = BTreeMap::new();
         encode_map(&mut rt, xor, right, &mut out).unwrap();
         assert_eq!(out, BTreeMap::from([("b".to_owned(), Nbt::String("x".into()))]));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A registry's codecs by name read vanilla's entries of the registries mods fill, as the game
+    /// has them: `holderByNameCodec` the registry's holder (the one `MobEffects.POISON` and
+    /// `Attributes.ARMOR` are), `byNameCodec` the entry (`SoundEvents.ANVIL_LAND`'s event,
+    /// `EntityType.COW`); a name vanilla doesn't register is refused with vanilla's message, and a
+    /// holder is written back by its name.
+    #[test]
+    fn a_registrys_codecs_read_vanillas_entries_by_name() {
+        let mut rt = Rt::new();
+        crate::install();
+        let by_name = |rt: &mut Rt, registry: &str, holder: bool| {
+            let r = st(rt, &format!("net/minecraft/core/registries/BuiltInRegistries.{registry}"));
+            let method = if holder { "holderByNameCodec" } else { "byNameCodec" };
+            c(rt, &format!("net/minecraft/core/Registry.{method}.()Lcom/mojang/serialization/Codec;"), &[r])
+        };
+        let name = |s: &str| Json::String(s.into());
+        let value = |rt: &mut Rt, h: V| c(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[h]);
+
+        let effects = by_name(&mut rt, "MOB_EFFECT", true);
+        let poison = decode(&mut rt, effects, &name("minecraft:poison")).unwrap();
+        assert_eq!(poison, st(&mut rt, "net/minecraft/world/effect/MobEffects.POISON"));
+        assert_eq!(encode(&mut rt, effects, poison), Ok(Nbt::String("minecraft:poison".into())));
+        assert_eq!(decode(&mut rt, effects, &name("minecraft:nope")).err().as_deref(), Some("Unknown registry key in mob_effect: minecraft:nope"));
+        let entries = by_name(&mut rt, "MOB_EFFECT", false);
+        let entry = decode(&mut rt, entries, &name("slowness")).unwrap();
+        let slowness = st(&mut rt, "net/minecraft/world/effect/MobEffects.MOVEMENT_SLOWDOWN");
+        assert_eq!(entry, value(&mut rt, slowness));
+
+        let attributes = by_name(&mut rt, "ATTRIBUTE", true);
+        let armor = decode(&mut rt, attributes, &name("minecraft:generic.armor")).unwrap();
+        assert_eq!(armor, st(&mut rt, "net/minecraft/world/entity/ai/attributes/Attributes.ARMOR"));
+
+        let sounds = by_name(&mut rt, "SOUND_EVENT", false);
+        let anvil = decode(&mut rt, sounds, &name("minecraft:block.anvil.land")).unwrap();
+        assert_eq!(anvil, st(&mut rt, "net/minecraft/sounds/SoundEvents.ANVIL_LAND"));
+        assert_eq!(encode(&mut rt, sounds, anvil), Ok(Nbt::String("minecraft:block.anvil.land".into())));
+
+        let types = by_name(&mut rt, "ENTITY_TYPE", false);
+        let cow = decode(&mut rt, types, &name("minecraft:cow")).unwrap();
+        assert_eq!(cow, st(&mut rt, "net/minecraft/world/entity/EntityType.COW"));
+        assert_eq!(decode(&mut rt, types, &name("minecraft:unicorn")).err().as_deref(), Some("Unknown registry key in entity_type: minecraft:unicorn"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A food written out in full (`FoodProperties.DIRECT_CODEC`, Create's pufferfish projectile's
+    /// `food_property`): its numbers, and each effect an instance of vanilla's effect by name, as
+    /// eating it gives them; written back, what differs from the defaults (NeoForge's cures aside).
+    #[test]
+    fn a_food_written_out_in_full_reads_its_effects() {
+        let mut rt = Rt::new();
+        crate::install();
+        let foods = st(&mut rt, "net/minecraft/world/food/FoodProperties.DIRECT_CODEC");
+        let json: Json = serde_json::from_str(r#"{"effects": [
+            {"effect": {"amplifier": 1, "duration": 1200, "id": "minecraft:poison", "neoforge:cures": ["protected_by_totem", "honey", "milk"], "show_icon": true}},
+            {"effect": {"duration": 300, "id": "minecraft:nausea", "show_particles": false}, "probability": 0.5}
+        ], "nutrition": 1, "saturation": 0.2}"#).unwrap();
+        let food = decode(&mut rt, foods, &json).unwrap();
+        let nutrition = c(&mut rt, "net/minecraft/world/food/FoodProperties.nutrition.()I", &[food]);
+        assert_eq!(nutrition, V::I(1));
+        assert_eq!(c(&mut rt, "net/minecraft/world/food/FoodProperties.saturation.()F", &[food]), V::F(0.2));
+        let effects = c(&mut rt, "net/minecraft/world/food/FoodProperties.effects.()Ljava/util/List;", &[food]);
+        let effects = crate::jutil::elements(&rt, effects);
+        assert_eq!(effects.len(), 2);
+        let first = c(&mut rt, "net/minecraft/world/food/FoodProperties$PossibleEffect.effect.()Lnet/minecraft/world/effect/MobEffectInstance;", &[effects[0]]);
+        let effect = c(&mut rt, "net/minecraft/world/effect/MobEffectInstance.getEffect.()Lnet/minecraft/core/Holder;", &[first]);
+        assert_eq!(effect, st(&mut rt, "net/minecraft/world/effect/MobEffects.POISON"));
+        assert_eq!(c(&mut rt, "net/minecraft/world/effect/MobEffectInstance.getAmplifier.()I", &[first]), V::I(1));
+        assert_eq!(c(&mut rt, "net/minecraft/world/effect/MobEffectInstance.getDuration.()I", &[first]), V::I(1200));
+        let second = c(&mut rt, "net/minecraft/world/food/FoodProperties$PossibleEffect.effect.()Lnet/minecraft/world/effect/MobEffectInstance;", &[effects[1]]);
+        assert_eq!(c(&mut rt, "net/minecraft/world/effect/MobEffectInstance.isVisible.()Z", &[second]), V::I(0));
+        assert_eq!(c(&mut rt, "net/minecraft/world/effect/MobEffectInstance.showIcon.()Z", &[second]), V::I(0), "the icon goes with the particles");
+        assert_eq!(c(&mut rt, "net/minecraft/world/food/FoodProperties$PossibleEffect.probability.()F", &[effects[1]]), V::F(0.5));
+
+        let compound = |pairs: Vec<(&str, Nbt)>| Nbt::Compound(pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect());
+        let written = compound(vec![
+            ("nutrition", Nbt::Int(1)),
+            ("saturation", Nbt::Float(0.2)),
+            ("effects", Nbt::List(vec![
+                compound(vec![("effect", compound(vec![("id", Nbt::String("minecraft:poison".into())), ("amplifier", Nbt::Byte(1)), ("duration", Nbt::Int(1200)), ("show_icon", Nbt::Byte(1))]))]),
+                compound(vec![
+                    ("effect", compound(vec![("id", Nbt::String("minecraft:nausea".into())), ("duration", Nbt::Int(300)), ("show_particles", Nbt::Byte(0)), ("show_icon", Nbt::Byte(0))])),
+                    ("probability", Nbt::Float(0.5)),
+                ]),
+            ])),
+        ]);
+        assert_eq!(encode(&mut rt, foods, food), Ok(written));
+        let unknown: Json = serde_json::from_str(r#"{"nutrition": 1, "saturation": 0.2, "effects": [{"effect": {"id": "minecraft:nope"}}]}"#).unwrap();
+        assert_eq!(decode(&mut rt, foods, &unknown).err().as_deref(), Some("effects: effect: id: Unknown registry key in mob_effect: minecraft:nope"));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

@@ -321,6 +321,17 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
             let h = crate::food::potion_holder(rt, id);
             rt.get_field(h, "$value")
         }
+        // Vanilla's effects, attributes and sound events: the objects its static fields give
+        // (`MobEffects.POISON`'s, `Attributes.ARMOR`'s, `SoundEvents.ANVIL_LAND`'s).
+        "mob_effect" if crate::food::is_vanilla_effect(id) => {
+            let h = crate::food::effect_holder(rt, id);
+            rt.get_field(h, "$value")
+        }
+        "attribute" => match crate::attributes::vanilla_attribute(rt, id) {
+            Some(h) => rt.get_field(h, "$value"),
+            None => V::NULL,
+        },
+        "sound_event" => crate::sounds::vanilla_event(rt, id).unwrap_or(V::NULL),
         // Enchantments are data the runtime doesn't list: a name is taken to be one, as the
         // game's data has it (`enchantments.rs`).
         "enchantment" if crate::recipes::valid_location(id) => crate::enchantments::value(rt, id),

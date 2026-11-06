@@ -88,6 +88,13 @@ pub(crate) fn attribute(rt: &mut Rt, id: &str) -> V {
     })
 }
 
+/// Vanilla's attribute `id` (`minecraft:generic.armor`) as its registry's holder, the one its
+/// `Attributes` field gives; none for a name vanilla doesn't register.
+pub(crate) fn vanilla_attribute(rt: &mut Rt, id: &str) -> Option<V> {
+    let path = id.strip_prefix("minecraft:")?;
+    VANILLA.iter().any(|r| r.1 == path).then(|| attribute(rt, id))
+}
+
 /// A number an attribute keeps, or `none` where nothing set it.
 fn field_or(rt: &Rt, a: V, field: &'static str, none: f64) -> V {
     match rt.get_field(a, field) {
