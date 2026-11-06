@@ -4549,6 +4549,31 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `AbstractTickableSoundInstance.<init>`, `DynamicTexture`, `RenderType.bufferSize`,
     `Options.graphicsMode`/`OptionInstance.get`, and `new String(bytes, charset)`. The last two are
     drafted (`scratchpad/drafts/options.rs`, `string_init.rs`) and not applied yet.
+- [x] 2026-11-06 Part 39: inherited statics of the game's classes, the client's options (`options.rs`, a
+  module of the chain) and `new String(...)`.
+  - Why the tanks' fluid was white: catnip's `PonderRenderTypes extends RenderType` reads
+    `BLOCK_SHEET_MIPPED` by its simple name. The translator names a static by the first of the game's
+    classes on the way up (`RenderType.BLOCK_SHEET_MIPPED`), but `RenderStateShard` declares it, and
+    nothing answered for `RenderType`. The fluid's render type got no texture, so its faces were drawn
+    from the white sprite in their vertex colour: water a flat blue, lava white. `api::get_static` now
+    climbs the game's superclasses (`api_super`, which gains `RenderType` → `RenderStateShard`) when no
+    module answers, as the JVM resolves an inherited static.
+  - `Options`' getters (`fov()`, `graphicsMode()`, `renderDistance()`, `mainHand()`: 71 of them) each
+    hand out one `OptionInstance` per option. It holds vanilla 1.21.1's initial value until a mod sets
+    it. An enum option holds the very constant its class holds, as mods compare them by identity.
+    Also mapped: `get`/`set`, and the getters computed from them (`getEffectiveRenderDistance`,
+    `getCloudsType`, `getBackgroundOpacity`/`Color`, `getMenuBackgroundBlurriness`,
+    `getSoundSourceVolume`). A mod's own option (its constructor, `createBoolean`) holds its initial
+    value and tells its listener when it is set. The values are vanilla's defaults, because the game
+    doesn't hand its settings over yet.
+  - `new String(bytes, charset)`, and from chars, code points, a range of either, or another string or
+    builder: the object `new` made becomes that text. This was unmapped, so the object was not a string
+    and every call on it missed (`String.isEmpty`, in game).
+  - Measured on the pack (packcov9): `Options` and `OptionInstance` had 400 missing uses
+    (`OptionInstance.get` in 50 jars).
+  - Tests: `options::tests` (vanilla's defaults, a set option changing the derived getters, a mod's
+    boolean option); `jlang::tests::new_string_spells_its_arguments`;
+    `vertices::tests::a_type_reading_the_sheet_through_render_type_draws_its_sprites`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

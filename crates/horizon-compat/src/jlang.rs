@@ -856,6 +856,31 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
 }
 
+/// Java's `(offset, count)` range of a `length`-long array, kept inside it.
+fn span(offset: V, count: V, len: usize) -> std::ops::Range<usize> {
+    let start = (offset.i().max(0) as usize).min(len);
+    start..(start + count.i().max(0) as usize).min(len)
+}
+
+/// `bytes` read in `charset` (its canonical name, upper case): a char a byte in ISO-8859-1, US-ASCII
+/// with U+FFFD past its range, UTF-16 by its byte-order mark (big-endian without one), else UTF-8
+/// with U+FFFD for a malformed sequence, as Java's decoders replace them.
+fn decode(bytes: &[u8], charset: &str) -> String {
+    let utf16 = |b: &[u8], big: bool| from16(&b.chunks_exact(2).map(|p| if big { u16::from_be_bytes([p[0], p[1]]) } else { u16::from_le_bytes([p[0], p[1]]) }).collect::<Vec<_>>());
+    match charset {
+        "ISO-8859-1" | "ISO8859_1" | "LATIN1" => bytes.iter().map(|&b| char::from(b)).collect(),
+        "US-ASCII" | "ASCII" => bytes.iter().map(|&b| if b < 0x80 { char::from(b) } else { '\u{FFFD}' }).collect(),
+        "UTF-16BE" => utf16(bytes, true),
+        "UTF-16LE" => utf16(bytes, false),
+        "UTF-16" => match bytes {
+            [0xFF, 0xFE, rest @ ..] => utf16(rest, false),
+            [0xFE, 0xFF, rest @ ..] => utf16(rest, true),
+            _ => utf16(bytes, true),
+        },
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
 fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     // Statics first.
@@ -883,6 +908,39 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
             let vals = crate::jutil::elements(rt, rest);
             let s = format_java(rt, &f, &vals);
             return Some(new_str(rt, s));
+        }
+        // `new String(...)`: the object `new` made becomes the text its arguments spell (chars or
+        // code points with an offset and count, bytes in a charset, another string or builder).
+        "<init>" => {
+            let s = match desc {
+                "()V" => String::new(),
+                "(Ljava/lang/String;)V" | "(Ljava/lang/StringBuilder;)V" | "(Ljava/lang/StringBuffer;)V" => text(rt, a(1)),
+                d if d.starts_with("([C") => {
+                    let chars: Vec<u16> = crate::jutil::elements(rt, a(1)).iter().map(|v| v.i() as u16).collect();
+                    let range = if d == "([CII)V" { span(a(2), a(3), chars.len()) } else { 0..chars.len() };
+                    from16(chars.get(range).unwrap_or(&[]))
+                }
+                "([III)V" => {
+                    let points: Vec<i32> = crate::jutil::elements(rt, a(1)).iter().map(|v| v.i()).collect();
+                    let range = span(a(2), a(3), points.len());
+                    points.get(range).unwrap_or(&[]).iter().map(|&p| char::from_u32(p as u32).unwrap_or('\u{FFFD}')).collect()
+                }
+                d if d.starts_with("([B") => {
+                    let bytes: Vec<u8> = crate::jutil::elements(rt, a(1)).iter().map(|v| v.i() as u8).collect();
+                    let (range, charset) = if d.starts_with("([BII") { (span(a(2), a(3), bytes.len()), a(4)) } else { (0..bytes.len(), a(2)) };
+                    let charset = if d.contains("Ljava/nio/charset/Charset;") || d.contains("ILjava/lang/String;)") || d == "([BLjava/lang/String;)V" {
+                        rt.str_of(rt.get_field(charset, "$name")).or_else(|| rt.str_of(charset)).unwrap_or("UTF-8").to_ascii_uppercase()
+                    } else {
+                        "UTF-8".to_owned()
+                    };
+                    decode(bytes.get(range).unwrap_or(&[]), &charset)
+                }
+                _ => return None,
+            };
+            if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
+                o.data = Data::Str(s);
+            }
+            return Some(V::Void);
         }
         _ => {}
     }
@@ -1613,6 +1671,42 @@ mod tests {
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))
+    }
+
+    /// `new String(...)` makes the object `new` gave the text its arguments spell: bytes in the
+    /// charset named (UTF-8 by default, Latin-1 a char a byte, UTF-16 by its mark), a range of
+    /// chars, code points.
+    #[test]
+    fn new_string_spells_its_arguments() {
+        let mut rt = Rt::new();
+        let made = |rt: &mut Rt, key: &'static str, args: &[V]| {
+            let s = rt.new_object("java/lang/String");
+            let mut all = vec![s];
+            all.extend_from_slice(args);
+            assert_eq!(c(rt, key, &all), V::Void);
+            rt.str_of(s).map(str::to_owned)
+        };
+        let bytes = |rt: &mut Rt, b: &[u8]| rt.alloc("[B", Data::Array(b.iter().map(|&x| V::I(i32::from(x as i8))).collect()));
+        // "héllo" in UTF-8: é is two bytes.
+        let utf8 = bytes(&mut rt, &[0x68, 0xC3, 0xA9, 0x6C, 0x6C, 0x6F]);
+        let utf8_name = rt.string("UTF-8");
+        assert_eq!(made(&mut rt, "java/lang/String.<init>.([B)V", &[utf8]).as_deref(), Some("héllo"));
+        assert_eq!(made(&mut rt, "java/lang/String.<init>.([BLjava/lang/String;)V", &[utf8, utf8_name]).as_deref(), Some("héllo"));
+        let charset = crate::api::get_static(&mut rt, "java/nio/charset/StandardCharsets.UTF_8");
+        assert_eq!(made(&mut rt, "java/lang/String.<init>.([BLjava/nio/charset/Charset;)V", &[utf8, charset]).as_deref(), Some("héllo"));
+        // The same bytes in Latin-1: a char each.
+        let latin = rt.string("ISO-8859-1");
+        assert_eq!(made(&mut rt, "java/lang/String.<init>.([BLjava/lang/String;)V", &[utf8, latin]).as_deref(), Some("hÃ©llo"));
+        // Bytes 1 to 3 of them.
+        assert_eq!(made(&mut rt, "java/lang/String.<init>.([BII)V", &[utf8, V::I(3), V::I(3)]).as_deref(), Some("llo"));
+        // UTF-16, little-endian by its mark.
+        let wide = bytes(&mut rt, &[0xFF, 0xFE, 0x68, 0x00, 0x69, 0x00]);
+        let utf16 = rt.string("UTF-16");
+        assert_eq!(made(&mut rt, "java/lang/String.<init>.([BLjava/lang/String;)V", &[wide, utf16]).as_deref(), Some("hi"));
+        let chars = rt.alloc("[C", Data::Array("crate".encode_utf16().map(|u| V::I(i32::from(u))).collect()));
+        assert_eq!(made(&mut rt, "java/lang/String.<init>.([CII)V", &[chars, V::I(1), V::I(3)]).as_deref(), Some("rat"));
+        let points = rt.alloc("[I", Data::Array(vec![V::I(0x1F600), V::I(0x41)]));
+        assert_eq!(made(&mut rt, "java/lang/String.<init>.([III)V", &[points, V::I(0), V::I(2)]).as_deref(), Some("\u{1F600}A"));
     }
 
     /// A runtime is one game thread: `Thread.currentThread()` is the same object each time it

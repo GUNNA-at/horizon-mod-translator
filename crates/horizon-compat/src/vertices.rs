@@ -563,6 +563,38 @@ mod tests {
         assert_eq!(drawn[0].0.facing, drawn[1].0.facing);
     }
 
+    /// A mod's render type that reads the block sheet through `RenderType`, the class it extends
+    /// (catnip's `PonderRenderTypes.fluid()`, which Create's tanks draw their fluid with): its faces
+    /// are drawn from the sprite their UVs are in, not white.
+    #[test]
+    fn a_type_reading_the_sheet_through_render_type_draws_its_sprites() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let water = crate::render::sprite_named(rt, "minecraft:block/water_still");
+            let mode = crate::api::get_static(rt, "com/mojang/blaze3d/vertex/VertexFormat$Mode.QUADS");
+            let builder = crate::api::call(rt, "net/minecraft/client/renderer/RenderType$CompositeState.builder.()Lnet/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder;", &[]);
+            let sheet = crate::api::get_static(rt, "net/minecraft/client/renderer/RenderType.BLOCK_SHEET_MIPPED");
+            crate::api::call(rt, "net/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder.setTextureState.(Lnet/minecraft/client/renderer/RenderStateShard$EmptyTextureStateShard;)Lnet/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder;", &[builder, sheet]);
+            let state = crate::api::call(rt, "net/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder.createCompositeState.(Z)Lnet/minecraft/client/renderer/RenderType$CompositeState;", &[builder, V::I(1)]);
+            let name = rt.string("ponder:fluid");
+            let create = "net/minecraft/client/renderer/RenderType.create.(Ljava/lang/String;Lcom/mojang/blaze3d/vertex/VertexFormat;Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;IZZLnet/minecraft/client/renderer/RenderType$CompositeState;)Lnet/minecraft/client/renderer/RenderType$CompositeRenderType;";
+            let ty = crate::api::call(rt, create, &[name, V::NULL, mode, V::I(256), V::I(0), V::I(1), state]);
+            let c = consumer(rt, ty);
+            let pose = lifted_pose(rt);
+            write_square(rt, c, pose, |rt, k| {
+                let [u, v] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]][k];
+                [crate::api::call(rt, GET_U, &[water, V::F(u)]).f(), crate::api::call(rt, GET_V, &[water, V::F(v)]).f()]
+            });
+            flush(rt, None);
+        });
+        let drawn = quads(&host);
+        assert_eq!(drawn.len(), 1);
+        assert_eq!(drawn[0].0.sprite, "minecraft:block/water_still");
+        assert_eq!(drawn[0].0.uv, [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+    }
+
     /// A mod's own buffer source (`MultiBufferSource.immediate(new ByteBufferBuilder(256))`, as
     /// catnip's outline buffers make theirs) hands out consumers that draw what is written into them
     /// when its batch ends.

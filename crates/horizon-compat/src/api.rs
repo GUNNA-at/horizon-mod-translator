@@ -31,6 +31,9 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
     match class {
         MUTABLE_POS => Some(BLOCK_POS),
         BLOCK_POS | "net/minecraft/core/SectionPos" => Some("net/minecraft/core/Vec3i"),
+        // A mod's render types extend `RenderType` and read the shards it inherits from
+        // `RenderStateShard` (catnip's `PonderRenderTypes.BLOCK_SHEET_MIPPED`).
+        "net/minecraft/client/renderer/RenderType" => Some("net/minecraft/client/renderer/RenderStateShard"),
         _ => crate::models::api_super(class).or_else(|| crate::entity_render::api_super(class)).or_else(|| crate::camera::api_super(class)),
     }
 }
@@ -756,7 +759,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 64] = [
+const CHAIN: [Module; 65] = [
     crate::fake_players::call,
     crate::block_breaking::call,
     crate::loot_params::call,
@@ -776,6 +779,7 @@ const CHAIN: [Module; 64] = [
     crate::network::call,
     crate::fluids::call,
     crate::client_extensions::call,
+    crate::options::call,
     crate::tanks::call_key,
     crate::codecs::call,
     crate::recipes::call,
@@ -826,7 +830,7 @@ const CHAIN: [Module; 64] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 64] = [
+const CLAIMS: [Claims; 65] = [
     crate::fake_players::claims,
     crate::block_breaking::claims,
     crate::loot_params::claims,
@@ -846,6 +850,7 @@ const CLAIMS: [Claims; 64] = [
     crate::network::claims,
     crate::fluids::claims,
     crate::client_extensions::claims,
+    crate::options::claims,
     crate::tanks::claims,
     crate::codecs::claims,
     crate::recipes::claims,
@@ -894,7 +899,7 @@ const CLAIMS: [Claims; 64] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 64] = [
+const MODULE_NAMES: [&str; 65] = [
     "fake_players",
     "block_breaking",
     "loot_params",
@@ -914,6 +919,7 @@ const MODULE_NAMES: [&str; 64] = [
     "network",
     "fluids",
     "client_extensions",
+    "options",
     "tanks",
     "codecs",
     "recipes",
@@ -2295,10 +2301,22 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             crate::codecs::native(rt, &format!("unmodelled/{k}"))
         }
         // A constant of a vanilla enum no module models (`NoteBlockInstrument.BASS`), from its class.
-        _ => crate::records::enum_constant(rt, key).unwrap_or_else(|| {
-            crate::miss(rt, key);
-            V::NULL
-        }),
+        // Else the field of the game's superclass that declares it, as the JVM resolves a static
+        // inherited by the class it is read through: the translator names the first of the game's
+        // classes a mod's class extends, which may only inherit it.
+        _ => match crate::records::enum_constant(rt, key) {
+            Some(v) => v,
+            None => match key.rsplit_once('.').and_then(|(o, f)| Some((api_super(o)?, f))) {
+                Some((declaring, field)) => {
+                    let inherited = rt.static_key(&format!("{declaring}.{field}"));
+                    get_static(rt, inherited)
+                }
+                None => {
+                    crate::miss(rt, key);
+                    V::NULL
+                }
+            },
+        },
     }
 }
 
