@@ -71,6 +71,10 @@ pub enum Ticking {
     /// A native mod's music layer (`MusicLayers`), whose volume its owner
     /// sets each tick.
     MusicLayer,
+    /// A client mod's own instance (a NeoForge mod's
+    /// `TickableSoundInstance`), which its owner moves, sets and stops each
+    /// tick.
+    Owned,
 }
 /// What a minecart's sound instances read about it.
 #[derive(Clone, Copy, Debug)]
@@ -544,7 +548,7 @@ impl SoundInstance {
     /// `TickableSoundInstance.tick`.
     pub fn tick(&mut self, ctx: &TickContext) {
         match &mut self.ticking {
-            Ticking::No | Ticking::MusicLayer => {}
+            Ticking::No | Ticking::MusicLayer | Ticking::Owned => {}
             Ticking::BiomeLoop { fade, direction } => {
                 let stop = *fade < 0;
                 *fade += *direction;
@@ -1201,6 +1205,15 @@ impl SoundEngine {
             self.queued.push((id, at));
         }
     }
+    /// Whether the engine plays `id` or waits to (delayed, or queued to
+    /// tick), its owner's reference aside: false once it has ended or was
+    /// never started.
+    pub fn holds(&self, id: InstanceId) -> bool {
+        self.instance_to_channel.iter().any(|(i, _)| *i == id)
+            || self.queued.iter().any(|(i, _)| *i == id)
+            || self.queued_tickable.contains(&id)
+            || self.ticking.contains(&id)
+    }
     /// `isActive`.
     pub fn is_active(&self, id: InstanceId) -> bool {
         self.loaded && self.channel_of(id).is_some()
@@ -1585,6 +1598,50 @@ mod tests {
         s.tick(&ctx);
         assert_eq!(s.volume, 0.0);
         assert!(!s.stopped);
+    }
+    /// A client mod's own instance (`Ticking::Owned`): each tick the engine
+    /// plays it at the volume its owner set last, leaving that as set; the
+    /// engine holds it while it plays, and lets it go once stopped.
+    #[test]
+    fn an_owned_sound_plays_as_its_owner_sets_it() {
+        use test_backend::Null;
+        let mut registry = SoundRegistry::default();
+        registry.add_file(
+            "create",
+            br#"{"steam": {"sounds": ["steam"]}}"#,
+            &|_, _| true,
+        );
+        let mut engine = SoundEngine::new(registry);
+        let mut backend = Null::default();
+        let mut s = SoundInstance::new(
+            "create:steam",
+            8,
+            0.5,
+            1.0,
+            LegacyRandom::new(0),
+            true,
+            0,
+            Attenuation::Linear,
+            [1.0, 64.0, 2.0],
+            false,
+        );
+        s.ticking = Ticking::Owned;
+        let (id, played) = engine.play_new(s, true, &mut backend);
+        assert_eq!(played, PlayResult::Started);
+        assert!(engine.holds(id));
+        engine.instance_mut(id).expect("held").volume = 0.25;
+        engine.tick(false, &TickContext::default(), &mut backend);
+        assert_eq!(engine.instance(id).map(|i| i.volume), Some(0.25));
+        let channel = *backend.volume.keys().next().expect("a channel");
+        assert_eq!(backend.volume[&channel], engine.calculate_volume(0.25, 8));
+        // Stopped, it ends with the channel's least lifetime, as vanilla's.
+        engine.stop(id, &mut backend);
+        for _ in 0..25 {
+            engine.tick(false, &TickContext::default(), &mut backend);
+        }
+        assert!(!engine.holds(id));
+        engine.release(id);
+        assert!(engine.instance(id).is_none());
     }
     #[test]
     fn world_sounds_leave_channels_for_the_listener_only_with_the_extra() {

@@ -9,7 +9,7 @@
 //! player's own). One difference: vanilla's server leaves out the player named in `playSound`
 //! (their client played it already), but here only the server runs a mod's interactions, so that
 //! player hears it from the server too.
-use crate::host::Sound;
+use crate::host::{InstanceSound, Sound};
 use crate::{Rt, V};
 
 const SOUND_EVENT: &str = "net/minecraft/sounds/SoundEvent";
@@ -94,9 +94,214 @@ fn instance(rt: &mut Rt, sound: V, at: Option<[f64; 3]>, source: usize, volume: 
     i
 }
 
+const SOUND_INSTANCE: &str = "net/minecraft/client/resources/sounds/SoundInstance";
+const ABSTRACT_INSTANCE: &str = "net/minecraft/client/resources/sounds/AbstractSoundInstance";
+const ABSTRACT_TICKABLE: &str = "net/minecraft/client/resources/sounds/AbstractTickableSoundInstance";
+const TICKABLE: &str = "net/minecraft/client/resources/sounds/TickableSoundInstance";
+const ATTENUATION: &str = "net/minecraft/client/resources/sounds/SoundInstance$Attenuation";
+/// The mods' own instances the game plays, each with its id (`$soundId`).
+const PLAYING: &str = "compat:mod-sounds";
+
+/// `new AbstractSoundInstance(event or location, source, random)`, as a mod's own instance class
+/// starts (Create's `ContinuousSound`, a fan's wind): vanilla's fields, under their own names,
+/// which the mod's code reads and writes too (`this.looping = true`).
+fn instance_init(rt: &mut Rt, i: V, desc: &str, args: &[V]) {
+    let a = |k: usize| args.get(k).copied().unwrap_or_default();
+    let id = if desc.starts_with("(Lnet/minecraft/sounds/SoundEvent;") { sound_id(rt, a(1)) } else { rt.str_of(a(1)).map(str::to_owned) };
+    let location = rt.string(&id.unwrap_or_default());
+    let linear = crate::api::api_enum(rt, ATTENUATION, "LINEAR", 1);
+    let fields = [
+        ("location", location),
+        ("source", a(2)),
+        ("random", a(3)),
+        ("volume", V::F(1.0)),
+        ("pitch", V::F(1.0)),
+        ("attenuation", linear),
+        ("x", V::D(0.0)),
+        ("y", V::D(0.0)),
+        ("z", V::D(0.0)),
+        ("looping", V::I(0)),
+        ("delay", V::I(0)),
+        ("relative", V::I(0)),
+    ];
+    for (f, v) in fields {
+        rt.put_field(i, f, v);
+    }
+}
+
+/// A sound instance's own calls (`AbstractSoundInstance`'s getters, `AbstractTickableSoundInstance`'s
+/// `stop`), reading the fields its constructor set and the mod's code changes.
+fn instance_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |k: usize| args.get(k).copied().unwrap_or_default();
+    let field = |rt: &Rt, f: &'static str, zero: V| match rt.get_field(a(0), f) {
+        V::Void => zero,
+        v => v,
+    };
+    Some(match name {
+        "<init>" if owner != SOUND_INSTANCE && owner != TICKABLE => {
+            instance_init(rt, a(0), desc, args);
+            V::Void
+        }
+        "createUnseededRandom" => rt.new_object("net/minecraft/util/RandomSource"),
+        "getLocation" => field(rt, "location", V::NULL),
+        "getSource" => field(rt, "source", V::NULL),
+        "getVolume" => field(rt, "volume", V::F(1.0)),
+        "getPitch" => field(rt, "pitch", V::F(1.0)),
+        "getX" => field(rt, "x", V::D(0.0)),
+        "getY" => field(rt, "y", V::D(0.0)),
+        "getZ" => field(rt, "z", V::D(0.0)),
+        "isLooping" => field(rt, "looping", V::I(0)),
+        "getDelay" => field(rt, "delay", V::I(0)),
+        "isRelative" => field(rt, "relative", V::I(0)),
+        "getAttenuation" => match rt.get_field(a(0), "attenuation") {
+            V::Void => crate::api::api_enum(rt, ATTENUATION, "LINEAR", 1),
+            v => v,
+        },
+        "canStartSilent" => V::I(0),
+        "canPlaySound" => V::I(1),
+        "isStopped" => field(rt, "stopped", V::I(0)),
+        // `AbstractTickableSoundInstance.stop()`: it stops, and loops no more.
+        "stop" if desc == "()V" => {
+            rt.put_field(a(0), "stopped", V::I(1));
+            rt.put_field(a(0), "looping", V::I(0));
+            V::Void
+        }
+        _ => return None,
+    })
+}
+
+/// `instance.name()` as the JVM dispatches it: the mod's override, else the getters above.
+fn ask(rt: &mut Rt, i: V, key: &'static str) -> V {
+    crate::menus::virt(rt, key, i, &[])
+}
+
+const CAN_PLAY: &str = "net/minecraft/client/resources/sounds/SoundInstance.canPlaySound.()Z";
+const GET_LOCATION: &str = "net/minecraft/client/resources/sounds/SoundInstance.getLocation.()Lnet/minecraft/resources/ResourceLocation;";
+const GET_SOURCE: &str = "net/minecraft/client/resources/sounds/SoundInstance.getSource.()Lnet/minecraft/sounds/SoundSource;";
+const GET_VOLUME: &str = "net/minecraft/client/resources/sounds/SoundInstance.getVolume.()F";
+const GET_PITCH: &str = "net/minecraft/client/resources/sounds/SoundInstance.getPitch.()F";
+const GET_X: &str = "net/minecraft/client/resources/sounds/SoundInstance.getX.()D";
+const GET_Y: &str = "net/minecraft/client/resources/sounds/SoundInstance.getY.()D";
+const GET_Z: &str = "net/minecraft/client/resources/sounds/SoundInstance.getZ.()D";
+const IS_LOOPING: &str = "net/minecraft/client/resources/sounds/SoundInstance.isLooping.()Z";
+const GET_DELAY: &str = "net/minecraft/client/resources/sounds/SoundInstance.getDelay.()I";
+const GET_ATTENUATION: &str = "net/minecraft/client/resources/sounds/SoundInstance.getAttenuation.()Lnet/minecraft/client/resources/sounds/SoundInstance$Attenuation;";
+const IS_RELATIVE: &str = "net/minecraft/client/resources/sounds/SoundInstance.isRelative.()Z";
+const CAN_START_SILENT: &str = "net/minecraft/client/resources/sounds/SoundInstance.canStartSilent.()Z";
+const TICK: &str = "net/minecraft/client/resources/sounds/TickableSoundInstance.tick.()V";
+const IS_STOPPED: &str = "net/minecraft/client/resources/sounds/TickableSoundInstance.isStopped.()Z";
+
+/// Where instance `i` is now (`getX()`, `getY()`, `getZ()`).
+fn place(rt: &mut Rt, i: V) -> [f64; 3] {
+    [ask(rt, i, GET_X).d(), ask(rt, i, GET_Y).d(), ask(rt, i, GET_Z).d()]
+}
+
+/// The mods' instances playing now.
+fn playing(rt: &Rt) -> Vec<V> {
+    rt.interned.get(PLAYING).map(|l| crate::jutil::elements(rt, *l)).unwrap_or_default()
+}
+
+fn set_playing(rt: &mut Rt, list: Vec<V>) {
+    let l = crate::jutil::new_list(rt, list);
+    rt.interned.insert(PLAYING.into(), l);
+}
+
+fn is_playing(rt: &Rt, i: V) -> bool {
+    i.r() != 0 && playing(rt).contains(&i)
+}
+
+/// `SoundManager.play(instance)` of a mod's own instance, as vanilla's `SoundEngine.play` plays
+/// it: when it can play (`canPlaySound`), with what its getters give, `start_delay` ticks from
+/// now (`playDelayed`). One already playing isn't started twice.
+fn start(rt: &mut Rt, i: V, start_delay: i32) {
+    if i.r() == 0 || is_playing(rt, i) || ask(rt, i, CAN_PLAY).i() == 0 {
+        return;
+    }
+    let location = ask(rt, i, GET_LOCATION);
+    let event = rt.str_of(location).unwrap_or("").to_owned();
+    let source = ask(rt, i, GET_SOURCE);
+    let source = ordinal(rt, source);
+    let at = place(rt, i);
+    let (volume, pitch) = (ask(rt, i, GET_VOLUME).f(), ask(rt, i, GET_PITCH).f());
+    let attenuation = ask(rt, i, GET_ATTENUATION);
+    let sound = InstanceSound {
+        sound: Sound { event, at, source, volume, pitch },
+        looping: ask(rt, i, IS_LOOPING).i() != 0,
+        delay: ask(rt, i, GET_DELAY).i(),
+        start_delay,
+        linear: rt.get_field(attenuation, "$ordinal").i() == 1,
+        relative: ask(rt, i, IS_RELATIVE).i() != 0,
+        can_start_silent: ask(rt, i, CAN_START_SILENT).i() != 0,
+    };
+    if rt.thrown.is_some() {
+        rt.report_thrown("SoundManager.play");
+        return;
+    }
+    let started = rt.host_mut().and_then(|h| h.start_sound(&sound));
+    let class = rt.class_of(i);
+    crate::glue::trace_some(rt, "mod-sound", &format!("{class}/{}", sound.sound.event), 24, |_| {
+        let s = &sound.sound;
+        let state = if started.is_some() { "started" } else { "not started by the game" };
+        format!("client: {class}'s own sound {} (volume {}, pitch {}, looping {}) {state}", s.event, s.volume, s.pitch, sound.looping)
+    });
+    let Some(id) = started else { return };
+    rt.put_field(i, "$soundId", V::J(id as i64));
+    let mut list = playing(rt);
+    list.push(i);
+    set_playing(rt, list);
+}
+
+/// `SoundManager.stop(instance)`: the game stops it, and it is let go.
+fn stop(rt: &mut Rt, i: V) {
+    if !is_playing(rt, i) {
+        return;
+    }
+    let id = rt.get_field(i, "$soundId").j() as u64;
+    if let Some(h) = rt.host_mut() {
+        h.stop_sound(id);
+    }
+    let list = playing(rt).into_iter().filter(|&p| p != i).collect();
+    set_playing(rt, list);
+}
+
+/// The sound manager's tick for the mods' own instances (`SoundEngine.tick`): a ticking one
+/// stops if it can't play any more; else it ticks, and stops if it stopped itself, or gives the
+/// game where it is with its volume and pitch. One the game no longer plays (it ended) is let go.
+pub(crate) fn tick(rt: &mut Rt) {
+    let list = playing(rt);
+    if list.is_empty() {
+        return;
+    }
+    let mut kept = Vec::with_capacity(list.len());
+    for i in list {
+        let id = rt.get_field(i, "$soundId").j() as u64;
+        if rt.instance_of(i, ABSTRACT_TICKABLE) || rt.instance_of(i, TICKABLE) {
+            let stopped = ask(rt, i, CAN_PLAY).i() == 0 || {
+                ask(rt, i, TICK);
+                ask(rt, i, IS_STOPPED).i() != 0
+            };
+            if rt.thrown.is_some() {
+                rt.report_thrown("TickableSoundInstance.tick");
+            }
+            if stopped {
+                if let Some(h) = rt.host_mut() {
+                    h.stop_sound(id);
+                }
+                continue;
+            }
+        }
+        let at = place(rt, i);
+        let (volume, pitch) = (ask(rt, i, GET_VOLUME).f(), ask(rt, i, GET_PITCH).f());
+        if rt.host_mut().is_some_and(|h| h.update_sound(id, at, volume, pitch)) {
+            kept.push(i);
+        }
+    }
+    set_playing(rt, kept);
+}
+
 /// The client's sounds a mod plays itself (`Minecraft.getSoundManager().play(instance)`): the
-/// game's own instances (`SimpleSoundInstance.forUI`, one at a place), played once. A mod's own
-/// instance class (a looping, ticking one) isn't played yet.
+/// game's own instances (`SimpleSoundInstance.forUI`, one at a place), played once, and the mod's
+/// own instance classes, which the game plays as they say, ticking them ([`tick`]).
 fn manager_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
@@ -120,6 +325,15 @@ fn manager_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) ->
             }
             V::Void
         }
+        (SOUND_MANAGER, "play" | "playDelayed" | "queueTickingSound") if rt.is_mod_class(rt.class_of(a(1))) => {
+            start(rt, a(1), if name == "playDelayed" { a(2).i() } else { 0 });
+            V::Void
+        }
+        (SOUND_MANAGER, "stop") if desc == "(Lnet/minecraft/client/resources/sounds/SoundInstance;)V" => {
+            stop(rt, a(1));
+            V::Void
+        }
+        (SOUND_MANAGER, "isActive") => V::I(i32::from(is_playing(rt, a(1)))),
         (SOUND_MANAGER, "play" | "playDelayed") => {
             let i = a(1);
             let Some(event) = rt.str_of(rt.get_field(i, "$event")).map(str::to_owned) else {
@@ -141,7 +355,7 @@ fn manager_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) ->
             V::Void
         }
         (SOUND_MANAGER, "stop" | "pause" | "resume" | "tick" | "destroy" | "reload") => V::Void,
-        (SOUND_MANAGER, "isActive") => V::I(0),
+        (SOUND_INSTANCE | ABSTRACT_INSTANCE | ABSTRACT_TICKABLE | TICKABLE, _) => return instance_call(rt, owner, name, desc, args),
         _ => return None,
     })
 }
@@ -187,7 +401,8 @@ pub fn level_sound(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> V {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, SOUND_EVENT | SIMPLE_SOUND | SOUND_MANAGER) || matches!(name, "getSoundManager" | "playSound")
+    matches!(owner, SOUND_EVENT | SIMPLE_SOUND | SOUND_MANAGER | SOUND_INSTANCE | ABSTRACT_INSTANCE | ABSTRACT_TICKABLE | TICKABLE)
+        || matches!(name, "getSoundManager" | "playSound")
 }
 
 /// `SoundEvent`'s own calls and `Entity.playSound`; None for anything else.
@@ -305,5 +520,81 @@ mod tests {
                 sound("minecraft:entity.experience_orb.pickup", [4.0, 5.0, 6.0], 7, 0.5, 2.0),
             ]
         );
+    }
+
+    /// A mod's own ticking instance (Create's `ContinuousSound`): `play` starts it as its getters
+    /// say (its own `getVolume` override among them), each tick gives the game where it is and how
+    /// loud, and once it stops itself (`stop()` in its `tick`) the game stops it. `isActive`
+    /// follows, and `SoundManager.stop` stops another.
+    #[test]
+    fn a_mods_ticking_sound_plays_as_it_says_until_it_stops() {
+        fn hum(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match short {
+                "tick.()V" => {
+                    let t = rt.get_field(args[0], "ticks").i() + 1;
+                    rt.put_field(args[0], "ticks", V::I(t));
+                    if t == 3 {
+                        crate::api::call(rt, "net/minecraft/client/resources/sounds/AbstractTickableSoundInstance.stop.()V", &[args[0]]);
+                    }
+                    V::Void
+                }
+                "getVolume.()F" => rt.get_field(args[0], "level"),
+                _ => crate::api::call(rt, key, args),
+            }
+        }
+        let mut rt = Rt::new();
+        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.vcall = Some(hum);
+        rt.supers.insert("test/Hum", ABSTRACT_TICKABLE);
+        let event = sound_event(&mut rt, "create:steam", None);
+        let ambient = crate::api::get_static(&mut rt, "net/minecraft/sounds/SoundSource.AMBIENT");
+        let init = "net/minecraft/client/resources/sounds/AbstractTickableSoundInstance.<init>.(Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundSource;Lnet/minecraft/util/RandomSource;)V";
+        let make = |rt: &mut Rt| {
+            let random = crate::api::call(rt, "net/minecraft/client/resources/sounds/SoundInstance.createUnseededRandom.()Lnet/minecraft/util/RandomSource;", &[]);
+            let h = rt.new_object("test/Hum");
+            crate::api::call(rt, init, &[h, event, ambient, random]);
+            rt.put_field(h, "looping", V::I(1));
+            rt.put_field(h, "x", V::D(1.5));
+            rt.put_field(h, "level", V::F(0.5));
+            h
+        };
+        let (a, b) = (make(&mut rt), make(&mut rt));
+        let manager = "net/minecraft/client/Minecraft.getSoundManager.()Lnet/minecraft/client/sounds/SoundManager;";
+        let play = "net/minecraft/client/sounds/SoundManager.play.(Lnet/minecraft/client/resources/sounds/SoundInstance;)V";
+        let active = "net/minecraft/client/sounds/SoundManager.isActive.(Lnet/minecraft/client/resources/sounds/SoundInstance;)Z";
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let m = crate::api::call(rt, manager, &[V::NULL]);
+            crate::api::call(rt, play, &[m, a]);
+            crate::api::call(rt, play, &[m, a]);
+            crate::api::call(rt, play, &[m, b]);
+            assert_eq!(crate::api::call(rt, active, &[m, a]), V::I(1));
+            crate::api::call(rt, "net/minecraft/client/sounds/SoundManager.stop.(Lnet/minecraft/client/resources/sounds/SoundInstance;)V", &[m, b]);
+            assert_eq!(crate::api::call(rt, active, &[m, b]), V::I(0));
+            rt.put_field(a, "level", V::F(0.25));
+            rt.put_field(a, "x", V::D(2.5));
+            tick(rt);
+        });
+        let started = InstanceSound {
+            sound: Sound { event: "create:steam".into(), at: [1.5, 0.0, 0.0], source: 8, volume: 0.5, pitch: 1.0 },
+            looping: true,
+            delay: 0,
+            start_delay: 0,
+            linear: true,
+            relative: false,
+            can_start_silent: false,
+        };
+        assert_eq!(host.started_sounds, [started.clone(), started]);
+        assert_eq!(host.playing_sounds.get(&1), Some(&([2.5, 0.0, 0.0], 0.25, 1.0)));
+        assert!(!host.playing_sounds.contains_key(&2));
+        // Its third tick stops it.
+        rt.with_host(&mut host, |rt| {
+            tick(rt);
+            tick(rt);
+            let m = crate::api::call(rt, manager, &[V::NULL]);
+            assert_eq!(crate::api::call(rt, active, &[m, a]), V::I(0));
+        });
+        assert!(host.playing_sounds.is_empty());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

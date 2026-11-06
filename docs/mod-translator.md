@@ -4672,6 +4672,34 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - `SectionBufferBuilderPack` (catnip's buffer source takes its fixed buffers from one): one
     `ByteBufferBuilder` per render type. Its memory is the host's, as for any `ByteBufferBuilder`.
   - Test: `gui::tests::the_hud_shows_what_a_mod_gives_it`.
+- [x] 2026-11-06 Part 45: a mod's own sound instances. A mod's `SoundInstance` class
+  (`AbstractTickableSoundInstance` in 20 jars) now plays as vanilla's `SoundEngine` plays it.
+  Create uses them for its machines' hum (`ContinuousSound`), fans' wind, steam whistles and
+  trains. Before, the game played none of them.
+  - `new AbstractSoundInstance(event or location, source, random)` sets vanilla's fields under their
+    own names, which the mod's code reads and writes (`this.looping = true`). The getters read
+    them, and `stop()` stops the instance. `SoundInstance.createUnseededRandom()` gives a random
+    source.
+  - `SoundManager.play(instance)` (also `playDelayed`, `queueTickingSound`) starts it if it can
+    play (`canPlaySound`), with what its getters give, the mod's overrides among them (Create's
+    `getVolume` follows its machines). Each client tick, a ticking instance ticks. If it stopped
+    itself it is stopped; otherwise the game gets its place, volume and pitch, as vanilla's
+    `SoundEngine.tick` does. `SoundManager.stop(instance)` stops it and `isActive` tells whether
+    it plays.
+  - The game: a host API `start_sound` / `update_sound` / `stop_sound`
+    (`native_start_sound`, `native_update_sound`, `native_stop_sound`, helpers in the fragment
+    `native_mod_sounds.json`). An instance of the new kind `Ticking::Owned` is moved and set by its
+    owner each tick, and the engine plays it as set. `SoundEngine::holds(id)` tells whether the
+    engine still plays an instance or waits to.
+  - Difference: vanilla's `getVolume()` multiplies by the sound definition's own volume
+    (`sounds.json`). Here the game applies that factor itself, so an override that leaves it out
+    (Create's) gets it too. This only matters for definitions whose volume isn't 1.
+  - With `HORIZON_COMPAT_TRACE`, the first sound of each class and event is traced: event,
+    volume, pitch, looping, and whether the game started it. Test rounds run with
+    `HORIZON_NO_AUDIO`, so the game has no sound library and starts none. A round shows which
+    sounds a mod plays, not that they are heard. The engine side is covered by its test.
+  - Tests: `sounds::tests::a_mods_ticking_sound_plays_as_it_says_until_it_stops`,
+    `sound_engine::tests::an_owned_sound_plays_as_its_owner_sets_it`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

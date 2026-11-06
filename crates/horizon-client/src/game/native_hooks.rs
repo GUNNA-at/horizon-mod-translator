@@ -755,6 +755,30 @@ pub(crate) struct NativeZoom {
     pub(crate) turn: f32,
 }
 
+/// A sound a client mod's own instance plays (`native_start_sound`): a
+/// NeoForge mod's `SoundInstance` as its getters give it when it starts.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct NativeSound {
+    /// Its sound event, vanilla's or the mod's own.
+    pub(crate) event: String,
+    pub(crate) at: [f64; 3],
+    /// Its `SoundSource`'s ordinal (master 0 to voice 9).
+    pub(crate) source: usize,
+    pub(crate) volume: f32,
+    pub(crate) pitch: f32,
+    /// It starts again when it ends: at once, or `delay` ticks later.
+    pub(crate) looping: bool,
+    pub(crate) delay: i32,
+    /// Ticks before it first starts (`SoundManager.playDelayed`).
+    pub(crate) start_delay: i32,
+    /// It fades with distance (`Attenuation.LINEAR`), else it doesn't.
+    pub(crate) linear: bool,
+    /// It is placed relative to the listener.
+    pub(crate) relative: bool,
+    /// It starts even at volume 0 (`canStartSilent`).
+    pub(crate) can_start_silent: bool,
+}
+
 /// The camera shake native mods ask for (`native_camera_shake`): turns in
 /// degrees, and an offset in blocks along the camera's right, up and back.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -4845,6 +4869,95 @@ impl Game<'_> {
         }
         self.audio.play_after(sound, at, volume, pitch, delay);
         true
+    }
+    /// Starts the sound a client mod's own instance plays (`SoundManager.play`
+    /// of a NeoForge mod's `SoundInstance`, often a `TickableSoundInstance`:
+    /// Create's machines' hum, a fan's wind). Its event is vanilla's or the
+    /// mod's own from its `assets/<id>/sounds.json`. The instance is the mod's
+    /// to drive: [`Self::native_update_sound`] moves it and sets its volume
+    /// and pitch each tick, and [`Self::native_stop_sound`] stops it. Its id
+    /// while the game holds it; None on a server, for a value out of range,
+    /// or when the engine doesn't start it (an event the resources don't
+    /// have, a silent one that can't start silent). API
+    /// @API:native_mod_sounds@.
+    pub(super) fn native_start_sound(&mut self, sound: &NativeSound) -> Option<u64> {
+        use horizon_client::sound_engine::{
+            Attenuation, SoundEngine, SoundInstance, Sounds, Ticking,
+        };
+        let s = sound;
+        let delays = (0..=1200).contains(&s.delay) && (0..=1200).contains(&s.start_delay);
+        if !self.native_window()
+            || !local_sound_ok(&s.event, s.at, s.volume, s.pitch, 0)
+            || !delays
+            || s.source > 9
+        {
+            return None;
+        }
+        let attenuation = if s.linear {
+            Attenuation::Linear
+        } else {
+            Attenuation::None
+        };
+        let mut instance = SoundInstance::new(
+            &s.event,
+            s.source,
+            s.volume,
+            s.pitch,
+            SoundEngine::unseeded(),
+            s.looping,
+            s.delay,
+            attenuation,
+            s.at,
+            s.relative,
+        );
+        instance.ticking = Ticking::Owned;
+        instance.can_start_silent = s.can_start_silent;
+        let id = if s.start_delay > 0 {
+            let id = self.audio.engine().add(instance, true);
+            self.audio.engine().play_delayed(id, s.start_delay);
+            id
+        } else {
+            self.audio.play_instance(instance, true).0
+        };
+        if !self.audio.engine().holds(id) {
+            self.audio.release(id);
+            return None;
+        }
+        Some(id)
+    }
+    /// Moves sound `id` (from [`Self::native_start_sound`]) to `at` and sets
+    /// its volume and pitch, as a ticking instance's getters give them each
+    /// tick; the engine applies them on its tick, as vanilla's
+    /// `SoundEngine.tick` does. False once the engine no longer plays it or
+    /// waits to (it ended); the id is then let go. API
+    /// @API:native_mod_sounds@.
+    pub(super) fn native_update_sound(
+        &mut self,
+        id: u64,
+        at: [f64; 3],
+        volume: f32,
+        pitch: f32,
+    ) -> bool {
+        use horizon_client::sound_engine::Sounds;
+        if !self.audio.engine().holds(id) {
+            self.audio.release(id);
+            return false;
+        }
+        if let Some(instance) = self.audio.engine().instance_mut(id) {
+            if at.iter().all(|v| v.is_finite() && v.abs() <= 30_000_000.0) {
+                instance.position = at;
+            }
+            instance.volume = finite(volume, 0.0, f32::MAX);
+            instance.pitch = finite(pitch, 0.0, f32::MAX);
+        }
+        true
+    }
+    /// Stops sound `id` and lets it go: `SoundManager.stop(instance)`, or an
+    /// instance that stopped itself. API @API:native_mod_sounds@.
+    pub(super) fn native_stop_sound(&mut self, id: u64) {
+        use horizon_client::sound_engine::Sounds;
+        self.audio.stop_instance(id);
+        self.audio.release(id);
     }
     /// Draws one vanilla HUD layer between the mods' hooks: `native_gui_layer_pre`
     /// (which may hide it), the layer, then `native_gui_layer_post`. `None` when

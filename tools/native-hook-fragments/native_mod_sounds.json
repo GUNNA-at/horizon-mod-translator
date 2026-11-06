@@ -1,0 +1,5 @@
+{
+  "hooks": [],
+  "rust_summary": "client mods' own sound instances (`native_start_sound`, `native_update_sound`, `native_stop_sound`).",
+  "doc_summary": "client mods' own sound instances: `native_start_sound(sound)` starts a sound event, vanilla's or the mod's own,\nwith the instance's place, source, volume, pitch, looping, delays, attenuation and relativity, and gives its id;\n`native_update_sound(id, at, volume, pitch)` moves it and sets its volume and pitch each tick (false once it has\nended), and `native_stop_sound(id)` stops it. A NeoForge mod's `TickableSoundInstance` (Create's machines' hum)\nplays through them. Bundles that use them need `\"hooks\": @API:native_mod_sounds@`."
+}

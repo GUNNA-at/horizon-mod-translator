@@ -1685,7 +1685,8 @@ pub fn client_use_item_on(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face:
 
 /// The client's tick, in `Minecraft.tick`'s order: `ClientTickEvent.Pre` (animation clocks advance
 /// here: catnip's `AnimationTickHolder`), the open screen's tick (and what screens left for it:
-/// payloads, opening and closing), the level's block entities, then `ClientTickEvent.Post`.
+/// payloads, opening and closing), the level's block entities, then `ClientTickEvent.Post`, and
+/// the mods' ticking sound instances.
 pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
@@ -1704,6 +1705,8 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
         let ev = rt.new_object(CLIENT_TICK_POST);
         crate::neo::post(rt, CLIENT_TICK_POST, ev);
         crate::keys::tick(rt);
+        // The sound manager's: the mods' own instances that tick.
+        crate::sounds::tick(rt);
     });
 }
 

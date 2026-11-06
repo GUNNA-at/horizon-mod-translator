@@ -931,6 +931,19 @@ pub trait Host {
     /// A sound a mod plays (`Level.playSound`, `playLocalSound`, `Entity.playSound`). A server's
     /// game sends it to the players near it; a client's plays it for its player.
     fn play_sound(&mut self, _sound: &Sound) {}
+    /// Starts the sound a client mod's own instance plays (`SoundManager.play(instance)`), which
+    /// the mod may go on changing (a `TickableSoundInstance`). Its id while the game holds it;
+    /// None when it doesn't start (a server, an event the game doesn't have).
+    fn start_sound(&mut self, _sound: &InstanceSound) -> Option<u64> {
+        None
+    }
+    /// Moves sound `id` to `at` and sets its volume and pitch, as a ticking instance gives them
+    /// each tick. False once the game no longer plays it (it ended); the id is then gone.
+    fn update_sound(&mut self, _id: u64, _at: [f64; 3], _volume: f32, _pitch: f32) -> bool {
+        false
+    }
+    /// Stops sound `id` (`SoundManager.stop(instance)`, or an instance that stopped itself).
+    fn stop_sound(&mut self, _id: u64) {}
     /// Particles a mod makes: a client's game draws them (`Level.addParticle`), a server's sends
     /// them to the players near them (`ServerLevel.sendParticles`).
     fn particles(&mut self, _particles: &Particles) {}
@@ -1112,6 +1125,25 @@ pub struct Sound {
     pub pitch: f32,
 }
 
+/// The sound a client mod's own instance plays ([`Host::start_sound`]): a `SoundInstance` as its
+/// getters give it when it starts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InstanceSound {
+    /// Its event, place, source, volume and pitch.
+    pub sound: Sound,
+    /// `isLooping()`: it starts again when it ends, at once or `delay` ticks later (`getDelay()`).
+    pub looping: bool,
+    pub delay: i32,
+    /// Ticks before it first starts (`SoundManager.playDelayed`).
+    pub start_delay: i32,
+    /// `getAttenuation()`: LINEAR, fading with distance, or NONE.
+    pub linear: bool,
+    /// `isRelative()`: placed relative to the listener.
+    pub relative: bool,
+    /// `canStartSilent()`: it starts even at volume 0.
+    pub can_start_silent: bool,
+}
+
 /// What vanilla's block state accessors read from a block's properties: what the game knows of a
 /// state.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1276,6 +1308,10 @@ pub struct MemoryHost {
     pub client: bool,
     /// Sounds played, in order.
     pub sounds: Vec<Sound>,
+    /// Instances' sounds started ([`Host::start_sound`]), in order: their ids are their places
+    /// here, from 1. Those still playing, where they are with their volume and pitch.
+    pub started_sounds: Vec<InstanceSound>,
+    pub playing_sounds: HashMap<u64, ([f64; 3], f32, f32)>,
     /// Particles made, in order.
     pub particles: Vec<Particles>,
     /// The GUI's size while a mod draws on it ([`Host::gui_size`]), and what it drew, in order.
@@ -1808,6 +1844,27 @@ impl Host for MemoryHost {
         if !self.read_only {
             self.sounds.push(sound.clone());
         }
+    }
+    fn start_sound(&mut self, sound: &InstanceSound) -> Option<u64> {
+        if self.read_only {
+            return None;
+        }
+        self.started_sounds.push(sound.clone());
+        let id = self.started_sounds.len() as u64;
+        self.playing_sounds.insert(id, (sound.sound.at, sound.sound.volume, sound.sound.pitch));
+        Some(id)
+    }
+    fn update_sound(&mut self, id: u64, at: [f64; 3], volume: f32, pitch: f32) -> bool {
+        match self.playing_sounds.get_mut(&id) {
+            Some(s) => {
+                *s = (at, volume, pitch);
+                true
+            }
+            None => false,
+        }
+    }
+    fn stop_sound(&mut self, id: u64) {
+        self.playing_sounds.remove(&id);
     }
     fn particles(&mut self, particles: &Particles) {
         self.particles.push(particles.clone());

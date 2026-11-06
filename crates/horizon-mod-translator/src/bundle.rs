@@ -592,6 +592,35 @@ fn client_host(c: &str, id: &str) -> String {
                 g.native_play_local_sound(&s.event, s.at, s.volume, s.pitch, 0);
             }}
         }}
+        // A mod's own sound instance, which it goes on changing (`TickableSoundInstance`).
+        fn start_sound(&mut self, s: &{c}::host::InstanceSound) -> Option<u64> {{
+            let sound = crate::game::native_hooks::NativeSound {{
+                event: s.sound.event.clone(),
+                at: s.sound.at,
+                source: s.sound.source,
+                volume: s.sound.volume,
+                pitch: s.sound.pitch,
+                looping: s.looping,
+                delay: s.delay,
+                start_delay: s.start_delay,
+                linear: s.linear,
+                relative: s.relative,
+                can_start_silent: s.can_start_silent,
+            }};
+            self.game.get_mut()?.native_start_sound(&sound)
+        }}
+        // A host that only reads (a screen's drawing) changes nothing: the sound goes on as it was.
+        fn update_sound(&mut self, id: u64, at: [f64; 3], volume: f32, pitch: f32) -> bool {{
+            match self.game.get_mut() {{
+                Some(g) => g.native_update_sound(id, at, volume, pitch),
+                None => true,
+            }}
+        }}
+        fn stop_sound(&mut self, id: u64) {{
+            if let Some(g) = self.game.get_mut() {{
+                g.native_stop_sound(id);
+            }}
+        }}
         fn particles(&mut self, p: &{c}::host::Particles) {{
             if p.count.is_some() {{
                 return;
