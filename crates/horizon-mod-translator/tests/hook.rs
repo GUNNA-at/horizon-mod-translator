@@ -87,10 +87,10 @@ fn main() {
     println!("level loads: static={:?} object={:?}", rt.statics.get("testmod/ModEvents.loads"), rt.statics.get("testmod/ModEvents.objectLoads"));
     // Right clicks: toggles, and passes while sneaking.
     host.set_block_state([12, 64, 12], "testmod:switch[powered=false]");
-    let took = glue::use_block(&mut rt, &mut host, [12, 64, 12], "testmod:switch[powered=false]", 1, 0);
+    let took = glue::use_block(&mut rt, &mut host, [12, 64, 12], "testmod:switch[powered=false]", 1, [12.5, 65.0, 12.5], 0);
     println!("click: took={took} now={} above={}", host.block_state([12, 64, 12]), host.block_state([12, 65, 12]));
     host.sneaking = true;
-    let took = glue::use_block(&mut rt, &mut host, [12, 64, 12], "testmod:switch[powered=true]", 1, 0);
+    let took = glue::use_block(&mut rt, &mut host, [12, 64, 12], "testmod:switch[powered=true]", 1, [12.5, 65.0, 12.5], 0);
     println!("sneak click: took={took} now={}", host.block_state([12, 64, 12]));
     let mut un: Vec<_> = rt.unmapped.keys().collect();
     un.sort();

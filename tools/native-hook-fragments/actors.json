@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "what a mod's own actor (a fake player: Create's deployer, drills and saws) does through the game: placing a block item's block (`native_place_item_block`) and the pieces of a break (`native_state_requires_tool`, `native_item_tool`, `native_state_sounds`, `native_block_loot`, `native_spawn_after_break`, `native_destroy_block_progress`).",
+  "doc_summary": "`native_place_item_block(stack, pos, face, hit, inside, look, sneaking)` places a block item's block for a mod's fake player as `BlockItem.place` does, and says where it went. For a break by one: `native_state_requires_tool(state)` is `requiresCorrectToolForDrops`; `native_item_tool(item, state)` is a tool's speed on the state, whether it is right for its drops and its wear per block (None without a tool); `native_state_sounds(state)` is its `SoundType`; `native_block_loot(pos, state, tool)` rolls its loot with the tool without spawning it; `native_spawn_after_break(pos, state, tool)` lets an infested block's silverfish out; `native_destroy_block_progress(breaker, pos, progress)` shows the breaker's cracks to the players near it. Bundles need \"hooks\": @API:actors@.",
+  "comments": ["crates/horizon-client/src/game/native_actors.rs"]
+}

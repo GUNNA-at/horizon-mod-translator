@@ -69,12 +69,13 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 81] = [
+const COMPAT: [(&str, &str); 82] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
     ("api_common.rs", include_str!("../../horizon-compat/src/api_common.rs")),
     ("blocks.rs", include_str!("../../horizon-compat/src/blocks.rs")),
+    ("block_breaking.rs", include_str!("../../horizon-compat/src/block_breaking.rs")),
     ("breaks.rs", include_str!("../../horizon-compat/src/breaks.rs")),
     ("brigadier.rs", include_str!("../../horizon-compat/src/brigadier.rs")),
     ("codecs.rs", include_str!("../../horizon-compat/src/codecs.rs")),
@@ -464,7 +465,7 @@ fn server_send(c: &str) -> String {
 /// they would change waits for the next tick ([`Host::read_only`]). Needs the helper's NBT
 /// conversions (`to_nbt`).
 fn client_host(c: &str, id: &str) -> String {
-    let reads = world_reads("self.game.get()");
+    let reads = world_reads("self.game.get()", &c);
     // The client's own player's attributes, effects, health and food (`native_attribute` of None),
     // where the game is lent.
     let attributes = format!(
@@ -824,7 +825,7 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
     let conversions = nbt_conversions(&c);
     let client_host = client_host(&c, id);
     // The host a client's draws get: the game, and the frame's pose stack and geometry.
-    let reads = world_reads("self.game");
+    let reads = world_reads("self.game", &c);
     let draw_host = format!(r#"    struct Host<'a, 'b, 'c> {{
         game: &'a crate::game::Game<'b>,
         draw: &'c mut crate::game::native_block_entity_draw::BlockEntityDraw,
@@ -1777,7 +1778,7 @@ fn {id}_screen_char_typed_pre(
 /// to players.
 fn game_host(c: &str, server_send: &str) -> String {
     let server_effects = server_effects(c);
-    let (reads, writes) = (world_reads("self.game"), world_writes(c));
+    let (reads, writes) = (world_reads("self.game", c), world_writes(c));
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
     }}
@@ -1894,7 +1895,7 @@ fn {id}_level_tick_{phase}(game: &mut crate::game::Game<'_>, dimension: &str) {{
 /// sneaking, food, mode, place), its blocks, items and recipes, and the effects it makes.
 /// A host's reads of the world around a block (light, time of day, weather, height), for a host
 /// whose game `get` gives (`self.game`, `self.game.get()`).
-fn world_reads(get: &str) -> String {
+fn world_reads(get: &str, c: &str) -> String {
     format!(
         r#"        fn day_time(&self) -> i64 {{
             {get}.native_day_time()
@@ -1926,6 +1927,15 @@ fn world_reads(get: &str) -> String {
         fn state_of_id(&self, id: i32) -> Option<String> {{
             Some({get}.native_state_of_id(u32::try_from(id).unwrap_or(u32::MAX)))
         }}
+        fn block_requires_tool(&self, state: &str) -> bool {{
+            {get}.native_state_requires_tool(state).unwrap_or(false)
+        }}
+        fn item_tool(&self, item: &str, state: &str) -> Option<{c}::host::ToolFacts> {{
+            {get}.native_item_tool(item, state).map(|(speed, correct, per_block)| {c}::host::ToolFacts {{ speed, correct, damage_per_block: i32::try_from(per_block).unwrap_or(i32::MAX) }})
+        }}
+        fn block_sounds(&self, state: &str) -> Option<{c}::host::BlockSounds> {{
+            {get}.native_state_sounds(state).map(|(volume, pitch, events)| {c}::host::BlockSounds {{ volume, pitch, events }})
+        }}
 "#
     )
 }
@@ -1940,6 +1950,58 @@ fn world_writes(c: &str) -> String {
         r#"        fn place_item_block(&mut self, held: &{c}::host::HandStack, pos: [i32; 3], face: u8, hit: [f64; 3], inside: bool, look: (f32, f32), sneaking: bool) -> Option<[i32; 3]> {{
             let stack = horizon_client::items::ItemStack {{ item: held.item.as_str().into(), count: held.count, damage: held.damage, extra: None }};
             self.game.native_place_item_block(&stack, pos, face, hit, inside, look, sneaking)
+        }}
+        // A break by a mod's actor: the tool crosses with its enchantments, the drops with their
+        // mod data (a toolbox's contents) as the runtime's NBT.
+        fn block_drops(&mut self, pos: [i32; 3], state: &str, tool: Option<&{c}::host::HandStack>) -> Vec<{c}::host::HandStack> {{
+            fn nbt(tag: &horizon_world::nbt::Tag) -> Option<{c}::nbt::Nbt> {{
+                use horizon_world::nbt::Tag;
+                use {c}::nbt::Nbt;
+                Some(match tag {{
+                    Tag::Byte(b) => Nbt::Byte(*b),
+                    Tag::Short(s) => Nbt::Short(*s),
+                    Tag::Int(i) => Nbt::Int(*i),
+                    Tag::Long(l) => Nbt::Long(*l),
+                    Tag::Float(f) => Nbt::Float(f32::from_bits(*f)),
+                    Tag::Double(d) => Nbt::Double(f64::from_bits(*d)),
+                    Tag::String(s) => Nbt::String(s.to_string_lossy()),
+                    Tag::Compound(c) => Nbt::Compound(c.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), nbt(v)?))).collect()),
+                    Tag::List(l) => Nbt::List(l.iter().filter_map(nbt).collect()),
+                    Tag::ByteArray(a) => Nbt::ByteArray(a.iter().map(|b| *b as i8).collect()),
+                    Tag::IntArray(a) => Nbt::IntArray(a.clone()),
+                    Tag::LongArray(a) => Nbt::LongArray(a.clone()),
+                    Tag::End => return None,
+                }})
+            }}
+            let tool = tool.map(|t| {{
+                let mut stack = horizon_client::items::ItemStack {{ item: t.item.as_str().into(), count: t.count, damage: t.damage, extra: None }};
+                for (id, level) in t.enchantments() {{
+                    stack.enchant(&id, u32::try_from(level).unwrap_or(0));
+                }}
+                stack
+            }});
+            let drops = self.game.native_block_loot(pos, state, tool.as_ref());
+            let types = self.game.native_registered_components();
+            drops
+                .iter()
+                .map(|d| {{
+                    let components = types.iter().filter_map(|name| Some((name.to_string(), nbt(&self.game.native_component(d, name).ok()??)?))).collect();
+                    {c}::host::HandStack {{ item: d.item.to_string(), count: d.count, damage: d.damage, max_damage: self.game.native_item_max_damage(&d.item), components }}
+                }})
+                .collect()
+        }}
+        fn spawn_after_break(&mut self, pos: [i32; 3], state: &str, tool: Option<&{c}::host::HandStack>) {{
+            let tool = tool.map(|t| {{
+                let mut stack = horizon_client::items::ItemStack::new(&t.item, t.count);
+                for (id, level) in t.enchantments() {{
+                    stack.enchant(&id, u32::try_from(level).unwrap_or(0));
+                }}
+                stack
+            }});
+            self.game.native_spawn_after_break(pos, state, tool.as_ref());
+        }}
+        fn destroy_block_progress(&mut self, breaker: i32, pos: [i32; 3], progress: i32) {{
+            self.game.native_destroy_block_progress(breaker, pos, progress);
         }}
         fn damage_types(&self) -> Vec<{c}::host::DamageTypeView> {{
             let catalog = &self.game.motion.health.damage;
@@ -2315,7 +2377,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
 }
 
 fn player_host(c: &str, server_effects: &str) -> String {
-    let (reads, writes) = (world_reads("self.game"), world_writes(c));
+    let (reads, writes) = (world_reads("self.game", c), world_writes(c));
     let nbt_of = nbt_of_fn(c);
     format!(r#"    struct Host<'a, 'b> {{
         game: &'a mut crate::game::Game<'b>,
@@ -2567,7 +2629,7 @@ fn player_host(c: &str, server_effects: &str) -> String {
 fn block_entity_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
     let conversions = nbt_conversions(&c);
-    let (reads, writes) = (world_reads("self.game"), world_writes(&c));
+    let (reads, writes) = (world_reads("self.game", &c), world_writes(&c));
     let server_send = server_send(&c);
     let server_effects = server_effects(&c);
     // A player's hooks reach their client too: a menu the mod opens, a payload it sends.
@@ -3111,7 +3173,7 @@ fn {id}_right_click_block(game: &mut crate::game::Game<'_>, pos: [i32; 3], face:
     if !{krate}::ours(&state) {{
         return;
     }}
-    if {krate}::hook_runtime("right_click_block", |rt| {c}::glue::use_block(rt, &mut host, pos, &state, face, hand)) {{
+    if {krate}::hook_runtime("right_click_block", |rt| {c}::glue::use_block(rt, &mut host, pos, &state, face, hit, hand)) {{
         *canceled = true;
     }}
 }}

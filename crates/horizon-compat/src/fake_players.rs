@@ -339,6 +339,9 @@ fn player_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             V::Void
         }
         "isCreative" | "isSpectator" | "isLocalPlayer" | "isSleeping" | "isPassenger" | "isFallFlying" | "isSwimming" | "isInWater" | "isOnFire" => V::I(0),
+        // `FakePlayer.tick()` does nothing, so it never lands nor finds water at its eyes; it has
+        // no creative abilities nor a permission level.
+        "onGround" | "isEyeInFluid" | "isUnderWater" | "canUseGameMasterBlocks" | "hasInfiniteMaterials" => V::I(0),
         "mayBuild" => V::I(1),
         "isAlive" => V::I(i32::from(rt.get_field(p, "$removed").i() == 0)),
         "isRemoved" => V::I(rt.get_field(p, "$removed").i()),

@@ -882,8 +882,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (ITEM_STACK, "getMaxDamage") => Some(V::I(max_damage(rt, a(0)))),
         (ITEM_STACK, "isDamageableItem") => Some(V::I((max_damage(rt, a(0)) > 0) as i32)),
         (ITEM_STACK, "isDamaged") => Some(V::I((max_damage(rt, a(0)) > 0 && damage(rt, a(0)) > 0) as i32)),
+        // `hurtAndBreak(amount, entity, slot)` and `(amount, level, entity, onBreak)`: worn by the
+        // entity holding it.
         (ITEM_STACK, "hurtAndBreak") => {
-            crate::hand::hurt(rt, a(0), a(1).i());
+            let wearer = if desc.starts_with("(ILnet/minecraft/server/level/ServerLevel;") { a(3) } else { a(2) };
+            crate::hand::hurt(rt, a(0), a(1).i(), wearer);
             Some(V::Void)
         }
         (ITEM_STACK, "hurtWithoutBreaking") => {

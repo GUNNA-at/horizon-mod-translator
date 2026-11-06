@@ -3940,6 +3940,57 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     acts, 1 + 5 and 3² + 1, then off again; the acting player's attribute untouched),
     `events::tests::a_fake_players_click_is_posted_with_its_own_stack`. 383 compat and 17 translator tests pass;
     the game tests (48) pass.
+- [x] 2026-11-06 Part 20: round 16 in game; a mod's own player breaking blocks (NeoForge's break path); a right
+  click's real point.
+  - Round 16 in game: the `USE` deployer placed one stone in front of it and then waited, as in Java (it places only
+    into a block that `canBeReplaced`, and its target holds stone now). The hand-off "failure" was the scenario's:
+    the middle of a deployer's top is its filter slot (`DeployerFilterSlot`, a `ValueBoxTransform.Sided` on each
+    side but its front, its back and its shaft's), so Create's `ValueSettingsInputHandler` takes that click,
+    cancels `RightClickBlock` and sets the filter to the held item (`FilteringBehaviour.onShortInteract`), as in
+    Java. The scenario now reads that filter, then hands the ingots over by the shaft's side (north for a
+    deployer facing west) away from the front. The punching deployer's first misses were
+    `BlockState.getDestroyProgress` and `BlockState.getSoundType`.
+  - Found on the way: a right click gave a mod block the block's centre as the hit's location
+    (`glue::use_block`); it is the click's own point now (Create's deployer takes an item only from a click at
+    most 0.75 from its back along its facing).
+  - `block_breaking.rs` (new module, second in the chain): NeoForge 1.21.1's break path for a mod's own player,
+    as Create's deployer punches (`DeployerHandler.tryHarvestBlock`) and its drills and saws break
+    (`BlockHelper.destroyBlockAs`): `BlockState.getDestroyProgress` (vanilla's: hardness, the right tool's 30 or
+    100, `Player.getDigSpeed`: the tool's speed, mining efficiency, haste and conduit power, mining fatigue, the
+    block break speed, submerged mining speed with its eyes in water, a fifth off the ground, then
+    `PlayerEvent.BreakSpeed`), `EventHooks.doPlayerHarvestCheck` (`hasCorrectToolForDrops`, then
+    `PlayerEvent.HarvestCheck`), `BlockState.canHarvestBlock` and `requiresCorrectToolForDrops`,
+    `CommonHooks.fireBlockBreak` (`BreakEvent`, cancelled beforehand for a weapon in creative, a restricted game
+    mode, a game master block), `ItemStack.getDestroySpeed`, `isCorrectToolForDrops` and `mineBlock` (a tool wears
+    by its `damagePerBlock` on a block that doesn't break at once; shears by one on any but fire),
+    `EventHooks.onPlayerDestroyItem`, `BlockState.onDestroyedByPlayer` (server: `removeBlock`; client: the
+    fluid's block, flags 11), `Block.destroy`, the static `Block.getDrops` (the block's loot rolled by the game
+    with the tool and its enchantments, a block entity's contents kept for the break), `spawnAfterBreak` (an
+    infested block's silverfish), `Level.destroyBlockProgress` (the cracks, to the players within 32 blocks),
+    `BlockState.getSoundType` (both), a player's `gameMode` (`ServerPlayerGameMode`: a fake player's is
+    survival) and `blockActionRestricted`. A mod block's or item's own override of each answers first; a
+    `super.` call gets vanilla's.
+  - The game's side (`game/native_actors.rs`, fragment `actors.json`): `native_state_requires_tool`,
+    `native_item_tool` (speed, right for drops, wear per block), `native_state_sounds`, `native_block_loot`
+    (`block_loot_rolled`, split out of `block_loot_at`, which adds the mods' `BlockDropsEvent` hook),
+    `native_spawn_after_break`, `native_destroy_block_progress`. The host trait's matching reads and writes, the
+    memory host's for tests, and `HandStack::enchantments`.
+  - Also: a block's `SoundType` from the game's sounds is vanilla's own constant (`blocks::sound_type_of`, so
+    `== SoundType.STONE` holds), else a new one with them; a mod block's sound type and required tool come from
+    its `Properties` or the vanilla block they copy. `Level.removeBlock` and `destroyBlock` leave the block's
+    fluid (a waterlogged block leaves water). `ItemStack.hurtAndBreak` asks the entity wearing the stack about
+    creative (a fake player's tool wears; before, the acting player's mode spared it). A fake player is never on
+    the ground, has no water at its eyes and may not use game master blocks (`FakePlayer.tick` does nothing).
+  - Not yet: a mod block's own `getDrops(state, LootParams.Builder)` (its loot table answers), a mod tool the game
+    doesn't know (bare-hand speed), Unbreaking on a stack outside the acting player's hands, an adventure
+    player's `can_break`, listeners that receive cancelled events, `DoublePlantBlock` checks on vanilla blocks,
+    and the drills' and saws' `BlockDropsEvent` and experience.
+  - Tests: `block_breaking::tests::a_fake_player_breaks_stone_with_a_pickaxe_as_the_deployer_does` (the deployer's
+    calls in order: progress 6 / 5 / 1.5 / 30, stone's sound type and hit sound, survival, the `BreakEvent`
+    heard with the fake player, the pickaxe worn by one, air left, cobblestone into the fake player's
+    inventory, the silverfish check and the cracks told to the game, nothing unmapped),
+    `break_speed_and_harvest_check_listeners_decide` (a listener's doubled speed and refused harvest: / 100; bare
+    hand on stone: 1 / 5 / 1.5 / 100). 385 compat and 17 translator tests pass; the game tests (48) pass.
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick

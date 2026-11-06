@@ -322,10 +322,12 @@ fn flush(rt: &mut Rt, r: V) {
     snapshot(rt, r, s);
 }
 
-/// `stack.hurtAndBreak(amount, ...)`: a stack in hand is worn by the game's own rules (creative,
-/// Unbreaking, breaking with its sound) and then holds what the game left; any other stack (or
-/// with a host that can't) wears here: none for a creative player, and one worn out shrinks by one.
-pub(crate) fn hurt(rt: &mut Rt, stack: V, amount: i32) {
+/// `stack.hurtAndBreak(amount, ...)` by `wearer` (the entity holding it; null when unknown): a stack
+/// in the acting player's hand is worn by the game's own rules (creative, Unbreaking, breaking with
+/// its sound) and then holds what the game left; any other stack (or with a host that can't) wears
+/// here: none for a player with infinite materials (the game's player in creative; never a fake
+/// player nor a mob), and one worn out shrinks by one.
+pub(crate) fn hurt(rt: &mut Rt, stack: V, amount: i32, wearer: V) {
     if amount <= 0 || api_common::stack_empty(rt, stack) {
         return;
     }
@@ -344,7 +346,13 @@ pub(crate) fn hurt(rt: &mut Rt, stack: V, amount: i32) {
             return;
         }
     }
-    if rt.host().is_some_and(|h| h.player_creative()) {
+    let infinite = match wearer {
+        w if w.r() == 0 => rt.host().is_some_and(|h| h.player_creative()),
+        w if crate::fake_players::is_fake(rt, w) => false,
+        w if api_common::is_player(rt.class_of(w)) => rt.host().is_some_and(|h| h.player_creative()),
+        _ => false,
+    };
+    if infinite {
         return;
     }
     let max = components::max_damage(rt, stack);

@@ -39,6 +39,26 @@ pub struct HandStack {
     pub components: Vec<(String, Nbt)>,
 }
 
+impl HandStack {
+    /// Its enchantments (`minecraft:enchantments`, as the runtime carries it: `{levels: {id:
+    /// level}}`): each one's id and level.
+    pub fn enchantments(&self) -> Vec<(String, i32)> {
+        let Some((_, Nbt::Compound(c))) = self.components.iter().find(|(n, _)| n == "minecraft:enchantments") else {
+            return Vec::new();
+        };
+        let Some(Nbt::Compound(levels)) = c.get("levels") else {
+            return Vec::new();
+        };
+        levels
+            .iter()
+            .filter_map(|(id, l)| match l {
+                Nbt::Int(l) => Some((id.clone(), *l)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 /// A model a block entity draws (`BakedModel`): a block state's, or one named by its location (a
 /// mod's part model, `create:block/shaft_half`, never placed as a block), or faces a mod put
 /// together itself (a `SimpleBakedModel` of `BakedQuad`s: Create's water wheel, its template's
@@ -855,6 +875,38 @@ pub trait Host {
     fn place_item_block(&mut self, _stack: &HandStack, _pos: [i32; 3], _face: u8, _hit: [f64; 3], _inside: bool, _look: (f32, f32), _sneaking: bool) -> Option<[i32; 3]> {
         None
     }
+    /// Whether only the right tool gets block state `state`'s drops
+    /// (`BlockState.requiresCorrectToolForDrops`), as the game knows the block. False for a state
+    /// it doesn't know.
+    fn block_requires_tool(&self, _state: &str) -> bool {
+        false
+    }
+    /// What item `item`'s tool (its `minecraft:tool` component) does to block state `state`, as
+    /// the game knows the item. None for an item that is no tool: vanilla's `Item.getDestroySpeed`
+    /// is then 1, it is the right tool for no block's drops, and mining doesn't wear it.
+    fn item_tool(&self, _item: &str, _state: &str) -> Option<ToolFacts> {
+        None
+    }
+    /// Block state `state`'s sounds (its `SoundType`), as the game knows them. None for a state it
+    /// doesn't know.
+    fn block_sounds(&self, _state: &str) -> Option<BlockSounds> {
+        None
+    }
+    /// `Block.getDrops(state, level, pos, blockEntity, entity, tool)` of block state `state` broken
+    /// at `pos` with `tool` (None: by hand, `ItemStack.EMPTY`): its loot table, rolled as the game
+    /// rolls a player's break, with what the game kept of the block entity there. Nothing spawns:
+    /// the drops are the caller's.
+    fn block_drops(&mut self, _pos: [i32; 3], _state: &str, _tool: Option<&HandStack>) -> Vec<HandStack> {
+        Vec::new()
+    }
+    /// `BlockState.spawnAfterBreak(level, pos, tool, dropExperience)` of vanilla block state
+    /// `state` just broken at `pos` with `tool`: an infested block lets its silverfish out (not for
+    /// a tool with silk touch, nor without block drops). NeoForge's other vanilla blocks drop their
+    /// experience from the game's own break (`getExpDrop`), so nothing else happens here.
+    fn spawn_after_break(&mut self, _pos: [i32; 3], _state: &str, _tool: Option<&HandStack>) {}
+    /// `Level.destroyBlockProgress(breaker, pos, progress)`: entity `breaker`'s cracks on the block
+    /// at `pos`, stage 0 to 9 (any other value takes them away), for the players around to see.
+    fn destroy_block_progress(&mut self, _breaker: i32, _pos: [i32; 3], _progress: i32) {}
     /// A sound a mod plays (`Level.playSound`, `playLocalSound`, `Entity.playSound`). A server's
     /// game sends it to the players near it; a client's plays it for its player.
     fn play_sound(&mut self, _sound: &Sound) {}
@@ -1052,6 +1104,27 @@ pub struct BlockFacts {
     pub replaceable: bool,
 }
 
+/// What a tool (an item's `minecraft:tool` component) does to one block state.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ToolFacts {
+    /// `Tool.getMiningSpeed(state)`: the speed of its rule for the state, else its default speed.
+    pub speed: f32,
+    /// `Tool.isCorrectForDrops(state)`.
+    pub correct: bool,
+    /// `Tool.damagePerBlock()`: what mining a block that isn't broken instantly wears it.
+    pub damage_per_block: i32,
+}
+
+/// A block state's `SoundType`: its volume and pitch and the ids of the sound events it breaks,
+/// steps, is placed, is hit and is fallen on with (`minecraft:block.stone.break`...).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BlockSounds {
+    pub volume: f32,
+    pub pitch: f32,
+    /// Break, step, place, hit, fall.
+    pub events: [String; 5],
+}
+
 /// A world in a map, for tests and tools. Unset positions are air.
 #[derive(Default)]
 pub struct MemoryHost {
@@ -1151,6 +1224,20 @@ pub struct MemoryHost {
     pub clipboard: String,
     /// Block facts by block (`minecraft:oak_planks`, any of its states).
     pub facts: HashMap<String, BlockFacts>,
+    /// Blocks whose drops need the right tool ([`Host::block_requires_tool`]).
+    pub requires_tool: Vec<String>,
+    /// What each item's tool does to a block ([`Host::item_tool`]), by item and block; an item
+    /// with any entry is a tool, with speed 1 and wrong for drops on another block.
+    pub tools: HashMap<(String, String), ToolFacts>,
+    /// Block sounds by block ([`Host::block_sounds`]).
+    pub block_sounds: HashMap<String, BlockSounds>,
+    /// What each block drops, whatever the tool ([`Host::block_drops`]): item and count.
+    pub loot: HashMap<String, Vec<(String, u32)>>,
+    /// The blocks' breaks told to the game afterwards ([`Host::spawn_after_break`]): where, the
+    /// state and the tool's item.
+    pub after_breaks: Vec<([i32; 3], String, Option<String>)>,
+    /// Cracks shown ([`Host::destroy_block_progress`]): breaker, position, stage.
+    pub cracks: Vec<(i32, [i32; 3], i32)>,
     /// The server's players and where they are.
     pub players: Vec<(u128, [f64; 3])>,
     /// The server's players' entity ids ([`Host::player_entities`]), by UUID.
@@ -1640,6 +1727,36 @@ impl Host for MemoryHost {
         }
         self.blocks.insert(at, stack.item.clone());
         Some(at)
+    }
+    fn block_requires_tool(&self, state: &str) -> bool {
+        self.requires_tool.iter().any(|b| b == state.split('[').next().unwrap_or(state))
+    }
+    fn item_tool(&self, item: &str, state: &str) -> Option<ToolFacts> {
+        let block = state.split('[').next().unwrap_or(state);
+        if let Some(t) = self.tools.get(&(item.to_owned(), block.to_owned())) {
+            return Some(*t);
+        }
+        let wears = self.tools.iter().find(|((i, _), _)| i == item).map(|(_, t)| t.damage_per_block)?;
+        Some(ToolFacts { speed: 1.0, correct: false, damage_per_block: wears })
+    }
+    fn block_sounds(&self, state: &str) -> Option<BlockSounds> {
+        self.block_sounds.get(state.split('[').next().unwrap_or(state)).cloned()
+    }
+    fn block_drops(&mut self, _pos: [i32; 3], state: &str, _tool: Option<&HandStack>) -> Vec<HandStack> {
+        let block = state.split('[').next().unwrap_or(state);
+        self.loot.get(block).map_or_else(Vec::new, |drops| {
+            drops.iter().map(|(item, count)| HandStack { item: item.clone(), count: *count, ..Default::default() }).collect()
+        })
+    }
+    fn spawn_after_break(&mut self, pos: [i32; 3], state: &str, tool: Option<&HandStack>) {
+        if !self.read_only {
+            self.after_breaks.push((pos, state.to_owned(), tool.map(|t| t.item.clone())));
+        }
+    }
+    fn destroy_block_progress(&mut self, breaker: i32, pos: [i32; 3], progress: i32) {
+        if !self.read_only {
+            self.cracks.push((breaker, pos, progress));
+        }
     }
     fn play_sound(&mut self, sound: &Sound) {
         if !self.read_only {

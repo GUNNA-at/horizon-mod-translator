@@ -344,12 +344,13 @@ const USE_ITEM_ON: &str = "useItemOn.(Lnet/minecraft/world/item/ItemStack;Lnet/m
 const USE_WITHOUT_ITEM: &str = "useWithoutItem.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/InteractionResult;";
 
 /// `right_click_block`: the acting player right clicks the mod block at `pos` on face `face` (a
-/// direction ordinal), as `ServerPlayerGameMode.useItemOn` asks the block: `useItemOn` with the held
-/// stack first, then, when it passes to the default, `useWithoutItem`. True when the block took the
-/// click (the game's own handling then stops). The game asks once per hand, as vanilla's
-/// `ServerPlayerGameMode.useItemOn`: `hand` is the one acting, and only the main hand's click
-/// reaches `useWithoutItem`.
-pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, face: i64, hand: u8) -> bool {
+/// direction ordinal), the click landing at `hit`, as `ServerPlayerGameMode.useItemOn` asks the
+/// block: `useItemOn` with the held stack first, then, when it passes to the default,
+/// `useWithoutItem`. Both read the hit result's location (Create's deployer takes an item only from
+/// a click away from its front). True when the block took the click (the game's own handling then
+/// stops). The game asks once per hand, as vanilla's `ServerPlayerGameMode.useItemOn`: `hand` is the
+/// one acting, and only the main hand's click reaches `useWithoutItem`.
+pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, face: i64, hit: [f64; 3], hand: u8) -> bool {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
     let Some((b, class)) = mod_block(rt, state) else { return false };
@@ -368,7 +369,9 @@ pub fn use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, f
         let l = level(rt);
         let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
         let player = crate::api_common::acting_player(rt);
+        let at = crate::api_common::vec3(rt, hit[0], hit[1], hit[2]);
         let hit = crate::api_common::hit(rt, pos, face);
+        rt.put_field(hit, "$loc", at);
         let mut took = None;
         if with_item || cauldron {
             let stack = crate::hand::stack(rt, hand);

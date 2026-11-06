@@ -1157,6 +1157,61 @@ fn vanilla_sound_type(rt: &Rt, t: V) -> Option<&'static (&'static str, f32, f32,
     let n = rt.str_of(rt.get_field(t, "$name"))?;
     VANILLA_SOUND_TYPES.iter().find(|(f, ..)| *f == n)
 }
+
+/// The `SoundType` the game's block sounds `s` are: vanilla's constant with that volume, pitch and
+/// those five sounds (`SoundType.STONE`, the very object a mod compares with), else a new one
+/// holding them.
+pub(crate) fn sound_type_of(rt: &mut Rt, s: &crate::host::BlockSounds) -> V {
+    let path = |field: &str| {
+        let all = &crate::vanilla_sounds::SOUND_EVENTS;
+        all.binary_search_by(|(f, ..)| (*f).cmp(field)).ok().map(|i| all[i].1)
+    };
+    let same = |a: f32, b: f32| (a - b).abs() < 1e-4;
+    let row = VANILLA_SOUND_TYPES.iter().find(|(_, volume, pitch, events)| {
+        same(*volume, s.volume) && same(*pitch, s.pitch) && events.iter().zip(&s.events).all(|(f, id)| path(f).is_some_and(|p| id.strip_prefix("minecraft:") == Some(p)))
+    });
+    if let Some(&(name, ..)) = row {
+        return named(rt, SOUND_TYPE, name);
+    }
+    let t = rt.new_object(SOUND_TYPE);
+    rt.put_field(t, "volume", V::F(s.volume));
+    rt.put_field(t, "pitch", V::F(s.pitch));
+    for (&(_, field, _), id) in SOUND_GETTERS.iter().zip(&s.events) {
+        let event = rt.intern(format!("sound/{id}"), |rt| crate::sounds::sound_event(rt, id, None));
+        rt.put_field(t, field, event);
+    }
+    t
+}
+
+/// The `SoundType` a mod block's `Properties` give it: what `sound(...)` set, else the vanilla
+/// block's it copies (`ofFullCopy`) as the game has them, else `Properties.of()`'s stone.
+pub(crate) fn properties_sound_type(rt: &mut Rt, block: V) -> V {
+    let props = rt.get_field(block, "$properties");
+    let own = rt.get_field(props, "$sound");
+    if props.r() != 0 && own.r() != 0 {
+        return own;
+    }
+    let copy = rt.str_of(rt.get_field(props, "$copy")).map(str::to_owned);
+    if let Some(s) = copy.and_then(|c| rt.host().and_then(|h| h.block_sounds(&c))) {
+        return sound_type_of(rt, &s);
+    }
+    named(rt, SOUND_TYPE, "STONE")
+}
+
+/// Whether a mod block's `Properties` say only the right tool gets its drops
+/// (`requiresCorrectToolForDrops()`), or the vanilla block's they copy, as the game has it.
+pub(crate) fn properties_require_tool(rt: &Rt, block: V) -> bool {
+    let props = rt.get_field(block, "$properties");
+    if props.r() == 0 {
+        return false;
+    }
+    match rt.get_field(props, "$requiresTool") {
+        V::Void | V::NULL => rt.str_of(rt.get_field(props, "$copy")).is_some_and(|c| {
+            rt.host().map_or_else(|| COPIED.iter().any(|&(n, .., tool, _)| n == c && tool), |h| h.block_requires_tool(c))
+        }),
+        v => v.i() != 0,
+    }
+}
 /// `SoundType`'s sound getters, the fields vanilla keeps them in (in its constructor's order) and
 /// those a `DeferredSoundType` keeps its suppliers in.
 const SOUND_GETTERS: [(&str, &str, &str); 5] = [

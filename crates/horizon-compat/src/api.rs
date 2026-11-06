@@ -744,8 +744,9 @@ type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 58] = [
+const CHAIN: [Module; 59] = [
     crate::fake_players::call,
+    crate::block_breaking::call,
     mutable_pos,
     crate::worldgen::call,
     crate::mixin::call,
@@ -808,8 +809,9 @@ const CHAIN: [Module; 58] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 58] = [
+const CLAIMS: [Claims; 59] = [
     crate::fake_players::claims,
+    crate::block_breaking::claims,
     |owner, _, _| owner == MUTABLE_POS,
     crate::worldgen::claims,
     crate::mixin::claims,
@@ -870,8 +872,9 @@ const CLAIMS: [Claims; 58] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 58] = [
+const MODULE_NAMES: [&str; 59] = [
     "fake_players",
+    "block_breaking",
     "mutable_pos",
     "worldgen",
     "mixin",
@@ -1473,9 +1476,15 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let text = rt.str_of(a(2)).unwrap_or("minecraft:air").to_owned();
             V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, &text)) as i32)
         }
+        // What a block removed leaves is its fluid's block (a waterlogged one leaves water), as
+        // vanilla's `setBlock(pos, fluidState.createLegacyBlock(), ...)`.
         (_, "removeBlock" | "destroyBlock") if level => {
             let p = pos_of(rt, a(1));
-            V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, "minecraft:air")) as i32)
+            let here = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
+            let fluid = crate::fluids::of_block_state(rt, &here);
+            let left = call(rt, "net/minecraft/world/level/material/FluidState.createLegacyBlock.()Lnet/minecraft/world/level/block/state/BlockState;", &[fluid]);
+            let left = rt.str_of(left).unwrap_or("minecraft:air").to_owned();
+            V::I(rt.host_mut().is_some_and(|h| h.set_block_state(p, &left)) as i32)
         }
         // A level's side is its own (vanilla's `isClientSide` field: the client's level, a mod's
         // wrapper made on either side); one that doesn't carry it is on the host's.

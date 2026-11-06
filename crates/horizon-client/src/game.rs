@@ -3679,9 +3679,22 @@ impl Game<'_> {
         state: BlockStateId,
         held: Option<&ItemStack>,
     ) -> Vec<ItemStack> {
+        let mut drops = self.block_loot_rolled(pos, state, held);
+        let player = self.native_acting_id();
+        self.native_block_drops(pos, state, Some(player), held, None, &mut drops);
+        drops
+    }
+    /// The block loot of `state` broken at `pos` with `held`, rolled as a player's break rolls
+    /// it, before any native mod hears of the drops.
+    fn block_loot_rolled(
+        &mut self,
+        pos: [i32; 3],
+        state: BlockStateId,
+        held: Option<&ItemStack>,
+    ) -> Vec<ItemStack> {
         let registry = self.pack.assets.registry;
         let dynamic = self.pending.dynamic(pos);
-        let mut drops = match world_items!(self).block_loot_sequence(registry, state) {
+        match world_items!(self).block_loot_sequence(registry, state) {
             Some(sequence) => {
                 let random = self.rand_sequences.get(&sequence, self.level.seed);
                 self.res
@@ -3695,10 +3708,7 @@ impl Game<'_> {
                 &dynamic,
                 &mut self.world.random,
             ),
-        };
-        let player = self.native_acting_id();
-        self.native_block_drops(pos, state, Some(player), held, None, &mut drops);
-        drops
+        }
     }
     /// Block.popResource
     fn pop_resource(&mut self, pos: [i32; 3], mut stack: ItemStack) {
