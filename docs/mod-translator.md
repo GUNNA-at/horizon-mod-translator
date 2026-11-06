@@ -5649,6 +5649,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     change it (`setItemSlot` on the game's entity is unmapped). `PlayerMainInvWrapper`'s pop
     animation and menu broadcast after an insert, and `canUseSlot` for mobs, aren't modelled; the
     inventory a player's handler reaches is the acting player's (as every `Inventory` call's).
+- [x] 2026-11-06 Part 72: the control socket's keys reach mods' `InputEvent.Key`. `horizon-ctl key`
+  drove the game's own key handling and the open screen, but mods heard only the window's real key
+  events (`native_input_key` takes a winit `KeyEvent`), so nothing a mod opens on a key in the world
+  could be driven from a test: Create opens its toolbox's radial menu on the toolbelt key (left Alt)
+  there. Measured over the pack: 21 jars read `InputEvent.Key` (`getAction` 20 jars, `getKey` 19,
+  `getScanCode` 8, `getModifiers` 6).
+  - client: hook point `native_control_key(key, action, modifiers)` (API @API:control_key@), run
+    after a `key` command the game handled without error, as `native_input_key` runs after the
+    window's: vanilla's name for the key (`key.keyboard.left.alt`), GLFW's action (a `tap` is a
+    press, then a release; `repeat` a repeat) and the modifier bits the screen hooks pass,
+    captured before handling. The window's keys keep their own hook, so a key is heard once.
+  - translator: a client helper per mod for the hook, `InputEvent.Key` through
+    `glue::input_key`, as the window's.
+  - Tests: `control::tests::socket_keys_reach_mods_by_vanillas_name`; the hook catalog test
+    (`catalog_matches_hook_points`) checks the new fragment against the hook point. Translator 19
+    tests, gameplay 70 (`native_hooks`, `control` and the rest of `game-tests.sh`).
+  - In game (`toolboxgame.sh`, survival, a brown toolbox): `key alt down` opened Create's radial
+    toolbox menu (`RadialToolboxMenu`: its 8 compartment slots in a ring around the crosshair and
+    the toolbox button beside them; the screen reads `mod`); before, nothing opened.
+    The equip itself waits for the next step: the pickaxe, shift-clicked on Create's own slot (its
+    tooltip under the cursor), stayed in the hotbar. `ToolboxInventory.isItemValid` asks
+    `Item.canFitInsideContainerItems()`, unmapped (false), so the toolbox refused every item, and
+    `1` found no compartment to pick.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

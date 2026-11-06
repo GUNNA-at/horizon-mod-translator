@@ -246,9 +246,20 @@ impl Game<'_> {
         // editor or a screen consumes the key, there is no world, or a
         // command handler returns an error: a lost release keeps Shift down.
         let released = released_modifier(line);
+        // Native mods hear the socket's key after the game handled it, as the
+        // window's (`native_control_key`): Create opens its toolbox on one.
+        let pressed = socket_key(line);
+        let modifiers = super::glfw_modifiers(self.modifiers);
         let result = self.control_command_inner(line, reply, event_loop);
         if let Some(key) = released {
             self.press_modifier_key(key, false);
+        }
+        if result.is_ok()
+            && let Some((name, actions)) = pressed
+        {
+            for &action in actions {
+                self.native_control_key(name, action, modifiers);
+            }
         }
         result
     }
@@ -1309,6 +1320,23 @@ fn vendor_name(id: u32) -> String {
     }
 }
 
+/// A `key` command's key, by vanilla's name, and the GLFW actions it makes (1 press, 0 release, 2
+/// repeat; a tap presses and releases).
+fn socket_key(line: &str) -> Option<(&'static str, &'static [i32])> {
+    let mut words = line.split_whitespace();
+    let (Some("key"), Some(key)) = (words.next(), words.next()) else {
+        return None;
+    };
+    let actions: &'static [i32] = match words.next()? {
+        "down" => &[1],
+        "up" => &[0],
+        "repeat" => &[2],
+        "tap" => &[1, 0],
+        _ => return None,
+    };
+    Some((horizon_client::keybinds::key_name(key_code(key)?)?, actions))
+}
+
 /// The key a `key <name> tap|up` command releases, whatever its handler does.
 fn released_modifier(line: &str) -> Option<KeyCode> {
     let mut words = line.split_whitespace();
@@ -1413,6 +1441,25 @@ mod tests {
             "key nope up",
         ] {
             assert_eq!(released_modifier(line), None, "{line}");
+        }
+    }
+
+    /// Mods' `InputEvent.Key` hears a socket key by vanilla's name, pressed and released as the
+    /// command says.
+    #[test]
+    fn socket_keys_reach_mods_by_vanillas_name() {
+        assert_eq!(
+            socket_key("key lalt tap"),
+            Some(("key.keyboard.left.alt", &[1, 0][..]))
+        );
+        assert_eq!(socket_key("key 1 down"), Some(("key.keyboard.1", &[1][..])));
+        assert_eq!(socket_key("key g up"), Some(("key.keyboard.g", &[0][..])));
+        assert_eq!(
+            socket_key("key g repeat"),
+            Some(("key.keyboard.g", &[2][..]))
+        );
+        for line in ["key nope tap", "key g", "key g hold", "keys g tap", "click 1 2"] {
+            assert_eq!(socket_key(line), None, "{line}");
         }
     }
 }

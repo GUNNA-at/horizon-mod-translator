@@ -1,0 +1,12 @@
+{
+  "hooks": [
+    {
+      "name": "control_key",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_control_key",
+      "neoforge": "InputEvent.Key",
+      "side": "client"
+    }
+  ],
+  "rust_summary": "a key the control socket pressed (`native_control_key`).",
+  "doc_summary": "`native_control_key(key, action, modifiers)` runs after the control socket's `key` command (`horizon-ctl key KEY down|up|tap|repeat`) finishes handling a key, as `native_input_key` after the window's: vanilla's name for the key (`key.keyboard.left.alt`), GLFW's action (0 release, 1 press, 2 repeat; a tap is a press, then a release) and the screen hooks' GLFW modifier bits, captured before handling. Not cancellable. A command that fails fires nothing. The window's own keys keep `native_input_key`, so a mod listening to both hears each key once. Bundles need \"hooks\": @API:control_key@."
+}

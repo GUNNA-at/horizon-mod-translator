@@ -1493,6 +1493,14 @@ impl Game<'_> {
     pub(super) fn native_input_key(&mut self, event: &winit::event::KeyEvent, modifiers: u32) {
         let _ = (event, modifiers);
     }
+    /// A key the control socket pressed (`horizon-ctl key KEY down|up|tap|repeat`), after the game
+    /// handled it, as `native_input_key` hands over the window's: vanilla's name for the key
+    /// (`key.keyboard.left.alt`), GLFW's action (0 release, 1 press, 2 repeat; a tap is a press,
+    /// then a release) and the screen hooks' modifier bits, captured before handling. Not
+    /// cancellable. API @API:control_key@.
+    pub(super) fn native_control_key(&mut self, key: &str, action: i32, modifiers: u32) {
+        let _ = (key, action, modifiers);
+    }
     /// Raw mouse button input on any screen, before dispatch; cancel skips dispatch and Post.
     /// Button/modifiers use the same GLFW encoding as screen hooks. Synthetic clicks skip it.
     pub(super) fn native_mouse_button_pre(

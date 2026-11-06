@@ -1477,7 +1477,7 @@ pub fn tooltip(rt: &mut Rt, host: &mut dyn Host, held: crate::host::HandStack, l
 
 /// `native_input_key` (client): `InputEvent.Key` for a key the window handled (`key.keyboard.g`, on
 /// any screen), with GLFW's action (release, press, repeat) and modifier bits
-/// ([`crate::input::key`]).
+/// ([`crate::input::key`]). `native_control_key` hands over the control socket's keys the same way.
 pub fn input_key(rt: &mut Rt, host: &mut dyn Host, key: &str, action: i32, modifiers: i32) {
     rt.safe_point();
     rt.with_host(host, |rt| crate::input::key(rt, key, action, modifiers));
