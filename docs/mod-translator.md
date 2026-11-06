@@ -4181,6 +4181,18 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     gets the block entity and the player, its `super.` call the game's stack back, kept as the game's; a vanilla
     block's drops stand; a block entity kept for drops that never came goes at the next server tick). 395 compat,
     17 translator and 48 game tests pass.
+  - Round 20 in game (this part's build): a gearbox on the x axis broken by the player in survival with an iron
+    pickaxe dropped one `create:vertical_gearbox`, which the player picked up (no gearbox), as in Java. No step
+    regressed; `Containers.dropContents` left the unmapped list (part 24), and one client GUI call joined it
+    (`ObjectSelectionList.getY`, Catnip's config screen). The drill's step found no experience orb near the ore
+    this time: the harness (`DRILL=1`, this build) still pops the ore's 5, so the round now prints the player's
+    experience around that step (an orb that reached the player was taken in).
+  - The deployer's filter slot (rounds 18 to 20: `Filter` stayed `{}`, the ingots left the hand): the round's
+    click missed the slot. `interact X Y Z up` aims 0.45 from the block's centre towards the face, ~0.2 from the
+    top's middle, and Create's `ValueSettingsInputHandler` takes a click only within its slot's `testHit` (~0.2),
+    so `DeployerBlock.useItemOn` took the ingots, as it would in Java. The harness (`DRILL=slot`, Create's own
+    handler through `RightClickBlock`) with a click at the top's middle: the filter holds the three ingots, and
+    they stay in hand. The round now aims at that point (`look-at`, then `use-item`).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
