@@ -413,6 +413,16 @@ fn passable_behaviour(row: &mut J) {
     }
 }
 
+/// A `block-behaviours.json` row's sturdy faces: `isFaceSturdy`'s bits, as
+/// [`horizon_world::level::sturdy_faces`] gives them.
+fn set_sturdy(row: &mut J, bits: u32) {
+    if let J::Arr(parts) = row
+        && let Some(sturdy) = parts.get_mut(0)
+    {
+        *sturdy = J::Num(bits.into());
+    }
+}
+
 /// What `Properties.ofFullCopy` carries from one block to another, as
 /// gameplay rows hold it.
 const COPIED_FACTS: [&str; 14] = [
@@ -1184,6 +1194,10 @@ impl<'a> Plan<'a> {
                     }
                     if !b.collides {
                         passable_behaviour(&mut row);
+                    } else if let Some(shapes) = &b.shapes {
+                        // Its faces hold up what its own shape does, not its template's.
+                        let shape = &shapes[(next - b.rename.first) as usize];
+                        set_sturdy(&mut row, horizon_world::level::sturdy_faces(shape)?);
                     }
                 }
                 if rows == Rows::Gameplay {

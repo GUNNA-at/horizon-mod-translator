@@ -89,7 +89,7 @@ use crate::{
     registry::{BlockRegistry, BlockStateId},
 };
 use horizon_core::{
-    geometry::{Aabb, Direction, VoxelShape},
+    geometry::{Aabb, Direction, ShapeError, VoxelShape},
     position::{BlockPos, ChunkPos},
     random::LegacyRandom,
 };
@@ -819,6 +819,26 @@ impl Behaviours {
     pub fn fluid_kind(&self, state: BlockStateId) -> FluidKind {
         self.fluid(state).kind()
     }
+}
+
+/// What `isFaceSturdy` answers for a state whose support shape (`getBlockSupportShape`, by
+/// default its collision shape) is `support`, in [`StateFacts::sturdy`]'s bits (`support * 6 +
+/// direction`): vanilla's `SupportType` tests of each face's slice (`getFaceShape`).
+pub fn sturdy_faces(support: &VoxelShape) -> Result<u32, ShapeError> {
+    use crate::block_support::SupportType;
+    let mut bits = 0;
+    for direction in Direction::ALL {
+        let face = support.face_shape_transient(direction)?;
+        for (i, kind) in [SupportType::Full, SupportType::Center, SupportType::Rigid]
+            .into_iter()
+            .enumerate()
+        {
+            if kind.supported_by(&face)? {
+                bits |= 1 << (6 * i as u32 + direction as u32);
+            }
+        }
+    }
+    Ok(bits)
 }
 
 /// Level mutation entry points (all keep vanilla update semantics).

@@ -17,7 +17,7 @@ impl SupportType {
         self.supported_by(&shape.face_shape(direction)?)
     }
     /// [`Self::is_supporting`] given the shape's face in that direction.
-    fn supported_by(self, face: &VoxelShape) -> Result<bool, ShapeError> {
+    pub(crate) fn supported_by(self, face: &VoxelShape) -> Result<bool, ShapeError> {
         let (required, operation) = match self {
             Self::Full => (VoxelShape::block(), ShapeOp::XOR),
             Self::Center => {

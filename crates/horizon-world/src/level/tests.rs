@@ -3290,3 +3290,43 @@ fn survive_hooks_answer_for_the_block() {
     ));
     assert!(level.asked.get() > asked);
 }
+
+/// [`sturdy_faces`] of each vanilla state's collision shape, its support shape by default, is the
+/// sturdiness the game exports from vanilla, but for the blocks whose class declares its own
+/// support shape (26.3's are 1.21.1's nine, as their class files say: leaves, snow layers...).
+#[test]
+fn sturdy_faces_of_a_collision_shape_are_vanillas() {
+    let Some(f) = fixture() else { return };
+    let b = &f.behaviours;
+    use classes::Class;
+    let own = [
+        Class::CeilingHangingSign,
+        Class::ChorusFlower,
+        Class::FenceGate,
+        Class::Leaves,
+        Class::Mud,
+        Class::ShulkerBox,
+        Class::SnowLayer,
+        Class::SoulSand,
+        Class::WallHangingSign,
+    ];
+    let (mut same, mut differ) = (0, Vec::new());
+    for id in 0..f.registry.len() {
+        let state = BlockStateId(id as u32);
+        let exported = b.facts(state).sturdy;
+        let Some(shape) = b.collision_shape(state) else {
+            continue;
+        };
+        if exported & 1 << 30 != 0 || own.iter().any(|&c| b.instance_of(state, c)) {
+            continue;
+        }
+        if sturdy_faces(shape).expect("a valid shape") == exported {
+            same += 1;
+        } else {
+            differ.push(f.registry.state(state).map_or_else(String::new, |s| s.name.clone()));
+        }
+    }
+    differ.dedup();
+    assert!(differ.is_empty(), "differ: {differ:?}");
+    assert!(same > 20_000, "{same} states checked");
+}

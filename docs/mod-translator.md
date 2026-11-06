@@ -4758,6 +4758,30 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     game's own placement checks), not its shapes'.
   - Tests: `api::tests::a_faces_sturdiness_is_the_games_or_the_mod_blocks_support_shape`,
     `a_support_shape_is_the_classes_own_else_the_collision_shape`.
+- [x] 2026-11-06 Part 48: a content mod block's sturdy faces in the game itself. Part 47 left
+  the game's own support checks (torches, rails, lanterns, redstone: 60 reads of the sturdy bits
+  in horizon-world) reading a translated block's template's faces: a Create shaft lying sideways
+  held a torch on top like the glass block it is templated on.
+  - `horizon_world::level::sturdy_faces(shape)`: the bits `StateFacts.sturdy` holds (`support * 6 +
+    direction`) for a support shape, from horizon-world's own `SupportType` tests of each face's
+    slice (`block_support.rs`: FULL the whole face, CENTER `Block.column(2, 0, 10)`, RIGID the
+    block less `Block.column(12, 0, 16)`; 26.3's class files test the same as 1.21.1's).
+  - A content block with shapes gets, per state, the bits of its shape (the one the game also
+    collides with); one without collision keeps none.
+  - Oracle: for all 33,764 vanilla states with a cached collision shape, `sturdy_faces` of that
+    shape is the sturdiness the game exports from vanilla, but for the blocks whose class declares
+    its own support shape (26.3's nine, 1.21.1's: leaves, snow layers, mud, soul sand, fence
+    gates, shulker boxes, chorus flowers, hanging signs).
+  - Create's declarations get their shapes at startup: the bundle's `content/` files are only the
+    first declarations (stone, states), and the `native_content` hook replaces them with what
+    `block_declarations` reads from the registration, shapes per state among it.
+  - In game (`scratchpad/sturdygame.sh`, game built 2026-11-06 12:37): torches stand on blocks
+    set under them, then each block below changes state. On Create's shaft turned from upright to
+    lying (axis y to z) the torch pops, as in Java; on the build before this part it stayed (the
+    shaft's glass template held it). An upright shaft (from axis x) and a casing (andesite to
+    brass) keep theirs; a vanilla bottom slab (from stone) drops its own, the control.
+  - Tests: `level::tests::sturdy_faces_of_a_collision_shape_are_vanillas`,
+    `mod_content::tests::a_shaped_blocks_faces_hold_up_what_its_shape_does`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

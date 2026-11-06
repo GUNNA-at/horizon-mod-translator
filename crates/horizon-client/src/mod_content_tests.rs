@@ -1883,6 +1883,50 @@ fn content_shapes_drive_outline_and_collision() {
     fs::remove_dir_all(scratch).unwrap();
 }
 
+/// A block with its own shapes holds up what its shape does, as vanilla's `SupportType` tests each
+/// face, not what its stone template does: a post the middle of its top and bottom (a torch, a
+/// hanging lantern) but no whole face and not a rail's rim; a bottom slab all of its bottom and
+/// nothing above or on its sides. The rest of the row stays the template's.
+#[test]
+fn a_shaped_blocks_faces_hold_up_what_its_shape_does() {
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-sturdy-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let base = scratch.join("base");
+    fs::create_dir_all(&base).unwrap();
+    let facts = r#"{"states":[["minecraft:stone",false,false,"",{"id":"minecraft:stone"}]],"defaults":{"minecraft:stone":0}}"#;
+    let stone = r#"{"item":"minecraft:stone","hardness":1.5,"requires_tool":true,"can_occlude":true,"solid_render":true,"shape_occlusion":false,"dampening":15,"skylight_down":false,"full_collision":true,"map_color":7368816,"replaceable":false,"offset":false,"push":"PUSH_PULL","random_ticks":false,"sound":{"volume":1.0}}"#;
+    let gameplay = format!(r#"{{"states":[{stone}]}}"#);
+    let behaviour = r#"{"states":[[262143,5,0,0,false,0,0,false,"BASEDRUM"]],"blocks":[],"items":{}}"#;
+    for (name, text) in [
+        ("facts.json", facts),
+        ("gameplay-facts.json", gameplay.as_str()),
+        ("mob-data.json", r#"{"states":[["BLOCKED",1912,1.0]]}"#),
+        ("items.json", r#"{"minecraft:stone":{}}"#),
+        ("registries.json", r#"{"minecraft:item":{"entries":{"minecraft:stone":{"protocol_id":0}}},"minecraft:block":{"entries":{"minecraft:stone":{"protocol_id":0}}}}"#),
+    ] {
+        fs::write(base.join(name), text).unwrap();
+    }
+    let m = folder_mod(
+        &scratch.join("mod"),
+        &[
+            ("horizon-mod.toml", &manifest("testmod", "")),
+            ("data/testmod/horizon/block/post.json", r#"{"template":"minecraft:stone","shapes":[[0.375,0,0.375,0.625,1,0.625]]}"#),
+            ("data/testmod/horizon/block/slab.json", r#"{"template":"minecraft:stone","shapes":[[0,0,0,1,0.5,1]]}"#),
+        ],
+    );
+    let mods = [m];
+    let plan = Plan::new(&base, &mods).unwrap();
+    let mut doc: J = serde_json::from_str(behaviour).unwrap();
+    plan.json("block-behaviours.json", &mut doc).unwrap();
+    let rows = serde_json::to_value(doc).unwrap()["states"].clone();
+    // Bit `support * 6 + direction`: FULL, CENTER, RIGID; down 0, up 1.
+    let (down, up) = (0, 1);
+    let (full, center, rigid) = (0, 6, 12);
+    assert_eq!(rows[1], serde_json::json!([1 << (center + down) | 1 << (center + up), 5, 0, 0, false, 0, 0, false, "BASEDRUM"]));
+    assert_eq!(rows[2][0], 1 << (full + down) | 1 << (center + down) | 1 << (rigid + down));
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
 /// A block copying a vanilla block's properties (`copy`, `Properties.ofFullCopy`) takes what the
 /// copy carries from the game's own rows over its template's, its own values winning: Farmer's
 /// Delight's wild rice copies tall grass on a stone template, so it lets light through, hides
