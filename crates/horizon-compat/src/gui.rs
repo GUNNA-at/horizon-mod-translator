@@ -47,6 +47,10 @@ const GAME_TYPES: [&str; 4] = ["SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR"]
 const DRAWING: &str = "compat:gui-drawing";
 /// The tint blits take (`RenderSystem.setShaderColor`), `0xAARRGGBB`.
 const TINT: &str = "compat:gui-tint";
+/// The HUD (`Minecraft.gui`), its chat, and GL's state as mods set it.
+const HUD: &str = "net/minecraft/client/gui/Gui";
+const CHAT: &str = "net/minecraft/client/gui/components/ChatComponent";
+const GL_STATE: &str = "com/mojang/blaze3d/platform/GlStateManager";
 
 /// The default tooltip's colours (`TooltipRenderUtil`): background, border top and bottom.
 const TOOLTIP_BACKGROUND: i32 = 0xF010_0010_u32 as i32;
@@ -1705,6 +1709,17 @@ pub fn fill_minecraft(rt: &mut Rt, mc: V) {
     rt.put_field(mc, "keyboardHandler", keyboard);
     let renderer = single(rt, "net/minecraft/client/renderer/GameRenderer");
     rt.put_field(mc, "gameRenderer", renderer);
+    let hud = single(rt, HUD);
+    rt.put_field(mc, "gui", hud);
+}
+
+/// Shows `text` (a component) to the client's player: over the hotbar when `overlay`, else in the
+/// chat.
+fn hud_message(rt: &mut Rt, text: V, overlay: bool) {
+    let json = crate::api_common::component_json(rt, text).to_string();
+    if let Some(h) = rt.host_mut() {
+        h.player_message(&json, overlay);
+    }
 }
 
 /// The game type the client's player plays in.
@@ -1810,6 +1825,35 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
             crate::glue::trace_once(rt, "camera-type", |_| "client: a mod set the camera type; the game keeps its own view".into());
             V::Void
         }
+        // A mod's subclass of the HUD (Create's stealth overlay, for `renderTextureOverlay`) keeps
+        // none of vanilla's state: the game's HUD has it.
+        (HUD, "<init>") => V::Void,
+        // `renderTextureOverlay(graphics, texture, alpha)`: the texture over the whole screen at
+        // `alpha`, as vanilla draws a carved pumpkin's.
+        (HUD, "renderTextureOverlay") => {
+            let (g, texture) = (a(1), a(2));
+            let width = crate::api::call(rt, "net/minecraft/client/gui/GuiGraphics.guiWidth.()I", &[g]);
+            let height = crate::api::call(rt, "net/minecraft/client/gui/GuiGraphics.guiHeight.()I", &[g]);
+            let set_color = "net/minecraft/client/gui/GuiGraphics.setColor.(FFFF)V";
+            crate::api::call(rt, set_color, &[g, V::F(1.0), V::F(1.0), V::F(1.0), a(3)]);
+            let blit = "net/minecraft/client/gui/GuiGraphics.blit.(Lnet/minecraft/resources/ResourceLocation;IIIFFIIII)V";
+            crate::api::call(rt, blit, &[g, texture, V::I(0), V::I(0), V::I(-90), V::F(0.0), V::F(0.0), width, height, width, height]);
+            crate::api::call(rt, set_color, &[g, V::F(1.0), V::F(1.0), V::F(1.0), V::F(1.0)]);
+            V::Void
+        }
+        // A message over the hotbar (`setOverlayMessage(text, animate)`), and one in the chat.
+        (HUD, "setOverlayMessage") => {
+            hud_message(rt, a(1), true);
+            V::Void
+        }
+        (HUD, "getChat") => single(rt, CHAT),
+        (CHAT, "addMessage") => {
+            hud_message(rt, a(1), false);
+            V::Void
+        }
+        (HUD, "getFont") => font(rt),
+        // Its ticks, one more each tick of the game: the level's.
+        (HUD, "getGuiTicks") => V::I(rt.host().map_or(0, |h| h.game_time()) as i32),
         // GL state for what it draws next: the host keeps its own; only the tint reaches blits.
         ("com/mojang/blaze3d/systems/RenderSystem", "setShaderColor") => {
             let c = |k: usize, shift: u32| ((a(k).f().clamp(0.0, 1.0) * 255.0).round() as u32) << shift;
@@ -2094,6 +2138,9 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | "net/minecraft/client/CameraType"
             | "com/mojang/blaze3d/systems/RenderSystem"
             | "com/mojang/blaze3d/platform/Lighting"
+            | HUD
+            | CHAT
+            | GL_STATE
     ) || owner.starts_with(TOOLTIP_EVENT)
         || (owner == MINECRAFT
             && matches!(
@@ -2110,6 +2157,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     match owner {
         GRAPHICS => graphics_call(rt, name, desc, args),
         LAYERS_EVENT => layers_event(rt, name, args),
+        // GL state a mod sets (`_activeTexture`, `_bindTexture`, `_depthMask`), as `RenderSystem`'s:
+        // the game's renderer keeps its own. What reads GL back (`_getActiveTexture`, `_genTexture`)
+        // stays unmapped.
+        GL_STATE => desc.ends_with(")V").then_some(V::Void),
         _ => text_calls(rt, owner, name, desc, args)
             .or_else(|| tooltip_calls(rt, owner, name, desc, args))
             .or_else(|| client_calls(rt, owner, name, args)),
@@ -2347,5 +2398,37 @@ mod tests {
         assert_eq!(texts, vec![("Kinetic Stats".to_owned(), [112.0, 38.0]), ("Speed".to_owned(), [112.0, 50.0])]);
         // The background's top line spans the text (78 wide) and 3 pixels each side.
         assert!(host.drawn_gui.iter().any(|d| matches!(d, GuiDraw::Fill(q, c) if *c == TOOLTIP_BACKGROUND as u32 && q[0] == [109.0, 34.0] && q[2] == [193.0, 35.0])));
+    }
+
+    /// The HUD a mod reaches through `Minecraft.gui`: a message over the hotbar and one in the chat
+    /// reach the player, and `renderTextureOverlay` (Create's stealth overlay, through its invoker)
+    /// covers the screen with the texture at the alpha given.
+    #[test]
+    fn the_hud_shows_what_a_mod_gives_it() {
+        let mut rt = Rt::new();
+        let mut host = MemoryHost { gui: [320, 240], ..MemoryHost::default() };
+        rt.with_host(&mut host, |rt| {
+            let mc = crate::api::call(rt, "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;", &[]);
+            let hud = crate::api::game_field(rt, mc, "gui", "$gui", "net/minecraft/client/Minecraft.$gui.()Lnet/minecraft/client/gui/Gui;");
+            let over = text(rt, "Stealthy");
+            let over = crate::api_common::component(rt, over, false, V::NULL);
+            crate::api::call(rt, "net/minecraft/client/gui/Gui.setOverlayMessage.(Lnet/minecraft/network/chat/Component;Z)V", &[hud, over, V::I(0)]);
+            let chat = crate::api::call(rt, "net/minecraft/client/gui/Gui.getChat.()Lnet/minecraft/client/gui/components/ChatComponent;", &[hud]);
+            let said = text(rt, "Hello");
+            let said = crate::api_common::component(rt, said, false, V::NULL);
+            crate::api::call(rt, "net/minecraft/client/gui/components/ChatComponent.addMessage.(Lnet/minecraft/network/chat/Component;)V", &[chat, said]);
+            let g = rt.new_object(GRAPHICS);
+            crate::api::call(rt, "net/minecraft/client/gui/GuiGraphics.<init>.(Lnet/minecraft/client/Minecraft;Lnet/minecraft/client/renderer/MultiBufferSource$BufferSource;)V", &[g, mc, V::NULL]);
+            let blur = text(rt, "create:textures/misc/package_blur.png");
+            crate::api::call(rt, "net/minecraft/client/gui/Gui.renderTextureOverlay.(Lnet/minecraft/client/gui/GuiGraphics;Lnet/minecraft/resources/ResourceLocation;F)V", &[hud, g, blur, V::F(0.5)]);
+            crate::api::call(rt, "com/mojang/blaze3d/platform/GlStateManager._activeTexture.(I)V", &[V::I(33984)]);
+        });
+        let shown: Vec<(&str, bool)> = host.messages.iter().map(|(m, o)| (m.as_str(), *o)).collect();
+        assert_eq!(shown, [(r#"{"text":"Stealthy"}"#, true), (r#"{"text":"Hello"}"#, false)]);
+        let GuiDraw::Blit(texture, uv, rect, tint) = &host.drawn_gui[0] else { panic!("{:?}", host.drawn_gui) };
+        assert_eq!((texture.as_str(), *uv, *rect), ("create:textures/misc/package_blur.png", [0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 320.0, 240.0]));
+        assert_eq!(tint >> 24, 0x80);
+        assert_eq!(host.drawn_gui.len(), 1);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

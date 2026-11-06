@@ -4658,6 +4658,20 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     includes it where the block stands.
   - Tests: `network::tests::a_payload_sent_on_a_players_connection_goes_to_that_player`,
     `render::tests::a_renderer_reads_the_light_its_level_gives`.
+- [x] 2026-11-06 Part 44: the HUD, GL state and a section's buffers, from round 4's unmapped list
+  and the measurement.
+  - `Minecraft.gui` is the HUD. `setOverlayMessage(text, animate)` (12 jars) shows the text over the
+    hotbar, and `getChat().addMessage(text)` (10 jars) puts it in the chat, as
+    `displayClientMessage` does. `getFont()` gives the font, and `getGuiTicks()` (7 jars) the
+    level's ticks, one more each tick as vanilla's. A mod's own subclass of `Gui` (Create's
+    stealth overlay) keeps none of vanilla's state. Its `renderTextureOverlay(graphics, texture,
+    alpha)` covers the screen with the texture at that alpha, as vanilla's does.
+  - `GlStateManager`'s calls that set GL state (`_activeTexture`, `_bindTexture`, `_depthMask`...,
+    up to 9 jars each) do nothing, as `RenderSystem`'s already did: the game's renderer keeps its
+    own state. The ones that read GL back (`_getActiveTexture`, `_genTexture`) stay unmapped.
+  - `SectionBufferBuilderPack` (catnip's buffer source takes its fixed buffers from one): one
+    `ByteBufferBuilder` per render type. Its memory is the host's, as for any `ByteBufferBuilder`.
+  - Test: `gui::tests::the_hud_shows_what_a_mod_gives_it`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

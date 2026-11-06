@@ -1904,6 +1904,13 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource")
         }
         ("net/minecraft/client/renderer/MultiBufferSource$BufferSource", "<init>") => V::Void,
+        // The buffers a chunk section is built in, one for each block layer (catnip's buffer source
+        // takes its fixed buffers from one): memory the host keeps, as a `ByteBufferBuilder`'s.
+        ("net/minecraft/client/renderer/SectionBufferBuilderPack", "<init>" | "clearAll" | "discardAll" | "close") => V::Void,
+        ("net/minecraft/client/renderer/SectionBufferBuilderPack", "buffer") => {
+            let (pack, ty) = (a(0), a(1));
+            rt.intern(format!("section-buffer/{}/{}", pack.r(), ty.r()), |rt| rt.new_object("com/mojang/blaze3d/vertex/ByteBufferBuilder"))
+        }
         // The memory a buffer is built in: the host's own.
         ("com/mojang/blaze3d/vertex/ByteBufferBuilder", "<init>" | "close" | "clear" | "discard") => V::Void,
         ("net/minecraft/client/renderer/MultiBufferSource" | "net/minecraft/client/renderer/MultiBufferSource$BufferSource", "getBuffer") => {
