@@ -1147,13 +1147,13 @@ impl LevelAccess for GameLevel<'_> {
     }
     fn block_replaced(&mut self, pos: BlockPos, old: BlockStateId, new: BlockStateId, moved: bool) {
         // Only a mod block's own code hears of it (`native_block_replaced`, once the operation is
-        // done): vanilla's blocks are the game's.
-        if self.native_authoritative
-            && self
-                .registry
-                .state(old)
+        // done: the old one's `onRemove`, the new one's `onPlace`): vanilla's blocks are the game's.
+        let modded = |s: BlockStateId| {
+            self.registry
+                .state(s)
                 .is_some_and(|s| !s.name.starts_with("minecraft:"))
-        {
+        };
+        if self.native_authoritative && (modded(old) || modded(new)) {
             self.spill
                 .replaced
                 .push(([pos.x, pos.y, pos.z], old, new, moved));

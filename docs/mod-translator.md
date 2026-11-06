@@ -4120,6 +4120,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `block_breaking::tests::destroy_block_drops_through_block_drops_event_as_the_rules_allow` (one diamond about the
     block, one orb of 7 after the listener's +2, level event 2001 each time, air not destroyed, nothing with
     `doTileDrops` off, `liquid()`). 390 compat, 17 translator and 48 game tests pass.
+  - Round 19 in game (this part's build, the drill's step on a floor, a new basin step): the drill broke the
+    diamond ore, its diamond lay 1.6 blocks off with two experience orbs by it (the drill's `Speed` 256); a basin
+    given three iron ingots by `/setblock` (`InputItems` read back) and then set to air dropped the three ingots
+    where it stood (`native_block_replaced` → `BasinBlock.onRemove` → `IBE.onRemove` → `SmartBlockEntity.destroy`
+    → `ItemHelper.dropContents`). The harness (`DRILL=remove`) shows the same basin, a drill stopping at once when
+    the shaft between it and its motor is broken (the shaft's `setRemoved` leaves the network), and
+    `destroyBlock(ore, true)`'s diamond, five experience and level event 2001, with no unmapped call. The rest of
+    the round answered as in round 18; the deployer's filter slot still reads `{}` after a click on its top with
+    ingots in hand, and the ingots leave the hand (round 18 the same; to trace).
+- [x] 2026-11-06 Part 24: a mod block's `onPlace` through the same hook; `Containers.dropContents`.
+  - 31 of Create's blocks override `onPlace`, which 1.21.1's `LevelChunk.setBlockState` calls after the old
+    state's `onRemove` while the new block is still there, and nothing called them. Its pipes, valves and pumps
+    schedule a tick (a pipe's tick runs `FluidPropagator.propagateChangedPipe`), water wheels schedule one too,
+    tanks and item vaults reach into their block entity (`withBlockEntityDo`), `KineticBlock.onPlace` keeps a
+    block's speed through a change of state that leaves its connections alone (`areStatesKineticallyEquivalent`),
+    redstone links, nixie tubes, chutes, belt tunnels, deployers and arms update themselves.
+  - `native_block_replaced` now fires when either state is a mod's (a mod block placed over air or a vanilla block
+    too), and a bundle's hook runs when either is its own. `glue::replaced`: the old state's `onRemove` (Part 23),
+    then the new state's `onPlace(level, pos, oldState, moved)` override when the block at `pos` is still the new
+    one (an `onRemove` can replace it). A mod's `super.onPlace` is `BlockBehaviour`'s, which does nothing; a
+    vanilla template's own stays the game's.
+  - Round 19's log had one new unmapped call, from Farmer's Delight's cooking pot `onRemove` (now that it runs):
+    `Containers.dropContents(level, pos, NonNullList)`. All three `dropContents` (a position and a list, a
+    position and a `Container`, an entity and a `Container`) and `dropContentsOnDestroy` now drop each stack as
+    `dropItemStack` does, and `dropItemStack` splits the stack itself (`ItemStack.split`): each piece keeps the
+    stack's components (a damaged or enchanted tool stays so) and the stack is empty after, as in vanilla. It made
+    plain stacks of the item before.
+  - Tests: `glue::tests::a_mod_blocks_on_place_hears_what_it_replaced` (placed over air, then a change of its own
+    property, each with the state it replaced; not after a trap block's `onRemove` set stone there) and
+    `entities::tests::dropped_contents_keep_their_components_and_leave_their_slots_empty` (40 onions in pieces of
+    10 to 30 about the block's corner, a sword with damage 7 still at 7, the list's stacks empty). 392 compat, 17
+    translator and 48 game tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

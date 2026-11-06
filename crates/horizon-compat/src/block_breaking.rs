@@ -96,8 +96,9 @@ const SAMPLE: &str = "net/minecraft/util/valueproviders/IntProvider.sample.(Lnet
 const DROPS: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;)Ljava/util/List;";
 const DROPS_BY: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)Ljava/util/List;";
 const DROPS_BY_KEY: &str = "net/minecraft/world/level/block/Block.getDrops.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)Ljava/util/List;";
-/// `BlockBehaviour.onRemove(state, level, pos, newState, movedByPiston)`.
-pub(crate) const ON_REMOVE: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Z)V";
+/// `BlockBehaviour.onRemove(state, level, pos, newState, movedByPiston)` and `onPlace(state, level,
+/// pos, oldState, movedByPiston)`.
+const REPLACED: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Z)V";
 /// `Block.dropResources(state, level, pos)`, `(state, level, pos, blockEntity)` and `(state, level,
 /// pos, blockEntity, entity, tool)`, the static ones.
 const DROP_RESOURCES: [&str; 3] = [
@@ -202,7 +203,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
                 || (name == "destroy" && desc == DESTROY_DESC)
                 || (name == "getDrops" && matches!(desc, DROPS | DROPS_BY))
                 || (name == "popExperience" && desc == POP_EXPERIENCE)
-                || (name == "onRemove" && desc == ON_REMOVE)
+                || (matches!(name, "onRemove" | "onPlace") && desc == REPLACED)
                 || (name == "dropResources" && DROP_RESOURCES.contains(&desc))
                 || (o == "net/minecraft/world/level/block/IceBlock" && name == "meltsInto")
                 || EXP.split_once('.') == Some(nd)
@@ -370,6 +371,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 on_remove(rt, a(1), a(2), a(3), a(4));
                 V::Void
             }
+            // `onPlace(state, level, pos, oldState, moved)`: nothing, as `BlockBehaviour`'s; a
+            // vanilla template's own (a rail's, a falling block's) is the game's.
+            "onPlace" => V::Void,
             // The static `dropResources`: the 3-argument one has no block entity, none an entity
             // or a tool but the 6-argument one.
             "dropResources" => {

@@ -305,6 +305,36 @@ pub(crate) fn unspawned_drop(rt: &mut Rt, e: V) -> Option<(crate::host::HandStac
 }
 
 /// A double in `[lo, hi)` from the runtime's random stream (`Mth.nextDouble`).
+const CONTAINERS: &str = "net/minecraft/world/Containers";
+
+/// `Containers.dropItemStack(level, x, y, z, stack)`: the stack split into pieces of 10 to 30
+/// (`random.nextInt(21) + 10`, each keeping the stack's components), item entities about the
+/// corner `at` names; the stack is empty after, as in vanilla.
+pub(crate) fn drop_item_stack(rt: &mut Rt, at: [f64; 3], stack: V) {
+    let size = 0.25;
+    let spread = 1.0 - size;
+    let half = size / 2.0;
+    let p = [
+        at[0].floor() + random_between(rt, 0.0, 1.0) * spread + half,
+        at[1].floor() + random_between(rt, 0.0, 1.0) * spread,
+        at[2].floor() + random_between(rt, 0.0, 1.0) * spread + half,
+    ];
+    while !crate::api_common::stack_empty(rt, stack) {
+        let n = 10 + random_between(rt, 0.0, 21.0) as i32;
+        let piece = api::call(rt, "net/minecraft/world/item/ItemStack.split.(I)Lnet/minecraft/world/item/ItemStack;", &[stack, V::I(n)]);
+        let m = [random_between(rt, -0.05, 0.05) * 1.1485, random_between(rt, -0.05, 0.05) * 1.1485 + 0.2, random_between(rt, -0.05, 0.05) * 1.1485];
+        let e = rt.new_object(ITEM_ENTITY);
+        new_item_entity(rt, e, p, piece, m);
+        add(rt, e);
+    }
+}
+
+/// A `Container`'s stacks, slot by slot (its own `getContainerSize` and `getItem`).
+fn container_stacks(rt: &mut Rt, c: V) -> Vec<V> {
+    let n = crate::menus::virt(rt, "net/minecraft/world/Container.getContainerSize.()I", c, &[]).i();
+    (0..n.max(0)).map(|i| crate::menus::virt(rt, "net/minecraft/world/Container.getItem.(I)Lnet/minecraft/world/item/ItemStack;", c, &[V::I(i)])).collect()
+}
+
 fn random_between(rt: &mut Rt, lo: f64, hi: f64) -> f64 {
     let d = (crate::api_common::next_random(rt) >> 11) as f64 / (1u64 << 53) as f64;
     lo + d * (hi - lo)
@@ -418,7 +448,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(name, "getEntitiesOfClass" | "getEntities" | "addFreshEntity")
         || matches!(owner, EXPERIENCE_ORB | ITEM_ENTITY)
         || (block && matches!(name, "updateEntityAfterFallOn" | "entityInside" | "stepOn" | "popResource"))
-        || (owner == "net/minecraft/world/Containers" && name == "dropItemStack")
+        || (owner == CONTAINERS && matches!(name, "dropItemStack" | "dropContents" | "dropContentsOnDestroy"))
         || ITEM_ENTITY_METHODS.contains(&name)
 }
 
@@ -499,27 +529,43 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             pop_resource(rt, a(0), p, a(2));
             return Some(V::Void);
         }
-        ("net/minecraft/world/Containers", "dropItemStack") if desc == "(Lnet/minecraft/world/level/Level;DDDLnet/minecraft/world/item/ItemStack;)V" => {
-            // Containers.dropItemStack: the stack in pieces of 10 to 30 (`random.nextInt(21) + 10`).
-            let stack = a(4);
-            let (item, mut count) = stack_parts(rt, stack);
-            let (x, y, z) = (a(1).d(), a(2).d(), a(3).d());
-            let size = 0.25;
-            let spread = 1.0 - size;
-            let half = size / 2.0;
-            let p = [
-                x.floor() + random_between(rt, 0.0, 1.0) * spread + half,
-                y.floor() + random_between(rt, 0.0, 1.0) * spread,
-                z.floor() + random_between(rt, 0.0, 1.0) * spread + half,
-            ];
-            while count > 0 {
-                let piece = (10 + (random_between(rt, 0.0, 21.0) as u32)).min(count);
-                count -= piece;
-                let s = crate::api_common::stack(rt, &item, piece as i32);
-                let m = [random_between(rt, -0.05, 0.05) * 1.1485, random_between(rt, -0.05, 0.05) * 1.1485 + 0.2, random_between(rt, -0.05, 0.05) * 1.1485];
-                let e = rt.new_object(ITEM_ENTITY);
-                new_item_entity(rt, e, p, s, m);
-                add(rt, e);
+        (CONTAINERS, "dropItemStack") if desc == "(Lnet/minecraft/world/level/Level;DDDLnet/minecraft/world/item/ItemStack;)V" => {
+            drop_item_stack(rt, [a(1).d(), a(2).d(), a(3).d()], a(4));
+            return Some(V::Void);
+        }
+        // `dropContents(level, pos, container)`, `(level, entity, container)` and `(level, pos,
+        // NonNullList)`: each stack dropped from the block's corner (the entity's place).
+        (CONTAINERS, "dropContents") => {
+            let at = if desc.starts_with("(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/Entity;") {
+                let e = a(1);
+                let x = api::call(rt, "net/minecraft/world/entity/Entity.getX.()D", &[e]).d();
+                let y = api::call(rt, "net/minecraft/world/entity/Entity.getY.()D", &[e]).d();
+                let z = api::call(rt, "net/minecraft/world/entity/Entity.getZ.()D", &[e]).d();
+                [x, y, z]
+            } else {
+                api::pos_of(rt, a(1)).map(f64::from)
+            };
+            let stacks = if desc.ends_with("Lnet/minecraft/core/NonNullList;)V") { crate::jutil::elements(rt, a(2)) } else { container_stacks(rt, a(2)) };
+            for stack in stacks {
+                drop_item_stack(rt, at, stack);
+            }
+            return Some(V::Void);
+        }
+        // `dropContentsOnDestroy(state, newState, level, pos)`: a container block entity's
+        // contents when the block changes, then its comparators hear of it.
+        (CONTAINERS, "dropContentsOnDestroy") => {
+            let (old, new) = (rt.str_of(a(0)).unwrap_or("").to_owned(), rt.str_of(a(1)).unwrap_or("").to_owned());
+            if crate::host::split_state(&old).0 == crate::host::split_state(&new).0 {
+                return Some(V::Void);
+            }
+            let be = api::call(rt, "net/minecraft/world/level/Level.getBlockEntity.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;", &[a(2), a(3)]);
+            if be.r() != 0 && rt.instance_of(be, "net/minecraft/world/Container") {
+                let at = api::pos_of(rt, a(3)).map(f64::from);
+                for stack in container_stacks(rt, be) {
+                    drop_item_stack(rt, at, stack);
+                }
+                let block = api::call(rt, "net/minecraft/world/level/block/state/BlockState.getBlock.()Lnet/minecraft/world/level/block/Block;", &[a(0)]);
+                api::call(rt, "net/minecraft/world/level/Level.updateNeighbourForOutputSignal.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;)V", &[a(2), a(3), block]);
             }
             return Some(V::Void);
         }
@@ -675,6 +721,40 @@ mod tests {
 
     fn item(id: u32, pos: [f64; 3], on_ground: bool, what: &str) -> View {
         View { id, pos, on_ground, item: what.into(), count: 2, ..View::default() }
+    }
+
+    /// `Containers.dropContents(level, pos, NonNullList)`, as Farmer's Delight's cooking pot drops
+    /// what it holds when it is broken: each stack as item entities of 10 to 30 (the last what is
+    /// left) about the block's corner, a damaged sword still damaged; the list's stacks are empty
+    /// after, as vanilla splits them off.
+    #[test]
+    fn dropped_contents_keep_their_components_and_leave_their_slots_empty() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+        rt.with_host(&mut host, |rt| {
+            let pos = api::block_pos(rt, 2, 64, -3);
+            let onions = crate::api_common::stack(rt, "farmersdelight:onion", 40);
+            let sword = crate::api_common::stack(rt, "minecraft:iron_sword", 1);
+            rt.put_field(sword, "$maxDamage", V::I(250));
+            api::call(rt, "net/minecraft/world/item/ItemStack.setDamageValue.(I)V", &[sword, V::I(7)]);
+            let list = crate::jutil::new_list(rt, vec![onions, sword]);
+            api::call(rt, "net/minecraft/world/Containers.dropContents.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/NonNullList;)V", &[level, pos, list]);
+            assert!(crate::api_common::stack_empty(rt, onions) && crate::api_common::stack_empty(rt, sword));
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+        let onions: Vec<u32> = host.item_entities.iter().filter(|e| e.item == "farmersdelight:onion").map(|e| e.count).collect();
+        assert_eq!(onions.iter().sum::<u32>(), 40);
+        // Pieces of 10 to 30 drawn, the last what was left.
+        let (last, drawn) = onions.split_last().unwrap();
+        assert!(!drawn.is_empty() && drawn.iter().all(|n| (10..=30).contains(n)) && *last <= 30, "{onions:?}");
+        for e in &host.item_entities {
+            let inside = (2.125..=2.875).contains(&e.pos[0]) && (64.0..=64.75).contains(&e.pos[1]) && (-2.875..=-2.125).contains(&e.pos[2]);
+            assert!(inside, "{:?}", e.pos);
+        }
+        let sword = host.item_entities.iter().find(|e| e.item == "minecraft:iron_sword").map(|e| host.item_entity_stacks[&e.id].damage);
+        assert_eq!(sword, Some(7));
     }
 
     #[test]

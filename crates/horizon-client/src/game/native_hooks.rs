@@ -2736,16 +2736,18 @@ impl Game<'_> {
     ) {
         let _ = (pos, state, canceled);
     }
-    /// One of a mod's blocks at `pos` changed on the server, `old` replaced
-    /// by `new`: broken, burnt, set by a command, a fluid or a mod's own code,
-    /// or moved by a piston (`moved`). Every change of state is reported, a
-    /// property's included; vanilla's blocks aren't. This is where 1.21.1's
-    /// `BlockBehaviour.onRemove` runs for Java mods built against it (a
-    /// machine drops what it held, a multiblock splits), called once the
-    /// level operation that changed the block is done: its drops are out and
-    /// the game has let go of the block entity, so a bundle keeps its own
-    /// until then. A change the mod's own code makes reaches it while that
-    /// code still runs. API @API:block_replaced@.
+    /// A block at `pos` changed on the server, `old` replaced by `new`, one of
+    /// them a mod's: broken, burnt, placed, set by a command, a fluid or a
+    /// mod's own code, or moved by a piston (`moved`). Every change of state
+    /// is reported, a property's included; one between vanilla's blocks
+    /// isn't. This is where 1.21.1's `BlockBehaviour.onRemove` (the old
+    /// state's: a machine drops what it held, a multiblock splits) and
+    /// `onPlace` (the new one's: a pipe schedules its tick, a tank joins its
+    /// neighbours) run for Java mods built against it, called once the level
+    /// operation that changed the block is done: its drops are out and the
+    /// game has let go of the block entity, so a bundle keeps its own until
+    /// then. A change the mod's own code makes reaches it while that code
+    /// still runs. API @API:block_replaced@.
     pub(super) fn native_block_replaced(
         &mut self,
         pos: [i32; 3],
