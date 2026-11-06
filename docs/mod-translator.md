@@ -3783,6 +3783,32 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `PatchedDataComponentMap`'s own calls (`asPatch` 6), `DataComponentPatch.forget` (4).
   Test `components::tests::component_maps_and_patches_carry_a_stacks_components`; the entities test checks the player's
   box. 372 compat and 17 translator tests pass. The game tests were not rerun: no game code changed.
+- [x] 2026-11-06 Part 16: a vanilla tool's durability; a placed mod block's `setPlacedBy` and its block entity's
+  components.
+  - A stack a mod makes of a vanilla tool (`new ItemStack(Items.IRON_SWORD)`) had no durability: `getMaxDamage` was 0,
+    so it never wore and its damage read 0. New `Host::item_max_damage` is answered by the game's existing
+    `native_item_max_damage` (API `hand_stack`). A first try added a second helper of that name to the game, and round
+    12's build failed on the duplicate (`E0592`). The game's own helper is used now.
+  - Placing a mod block ran only NeoForge's `EntityPlaceEvent`. Vanilla's `BlockItem.place` does two more things once
+    the block is set, and the runtime now does both, in vanilla's order (`glue::place_block`, which now gets the
+    placing item; the main hand's stack when it holds that item, else the off hand's):
+    - the block entity reads the stack's components (`BlockEntity.applyComponentsFromItemStack`: the mod's
+      `applyImplicitComponents` with a `DataComponentInput`, `get`/`getOrDefault` by type or holder). It keeps the
+      components set on the stack that it didn't read, `block_entity_data` aside (`components()`);
+    - the block's own `setPlacedBy(level, pos, state, placer, stack)`.
+  - Who uses them, scanned in the jars: `setPlacedBy` in 32 Create classes (`KineticBlock`, the base of every kinetic
+    block, `DeployerBlock`, `ToolboxBlock`, `SteamEngineBlock`, `BacktankBlock`...) and 3 of Farmer's Delight's.
+    `applyImplicitComponents` and `collectImplicitComponents` in Create's toolbox, backtank and schematicannon, and in
+    Farmer's Delight's cooking pot, which reads its meal and container this way.
+  - A block entity's `collectComponents()` (what it kept, then its `collectImplicitComponents`: the cooking pot's
+    `getAsItem`), `components()`, `setComponents`, and `applyComponentsFromItemStack` called by a mod. Vanilla's own
+    `applyImplicitComponents` and `collectImplicitComponents` do nothing; packcov5m counted the mods' `super` calls
+    to them as missing (6 each).
+  - Not yet: the game's loot `copy_components` from a mod's block entity. The cooking pot's loot table copies
+    `custom_name`, `farmersdelight:meal` and `farmersdelight:container` from it, and that needs the game to ask the
+    runtime. A block entity's kept components are not saved with it.
+  Test `glue::tests::a_placed_mod_block_reads_its_stack_and_hears_who_placed_it`; 374 compat and 17 translator tests
+  pass.
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick

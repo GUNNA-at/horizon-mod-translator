@@ -828,11 +828,47 @@ pub fn destroy_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &st
     rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| crate::world_events::block_break(rt, pos, state)))
 }
 
-/// `native_place_block` (server): the acting player placed the block `state` at `pos` with an item
-/// ([`crate::world_events::block_place`]).
-pub fn place_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) {
+/// `native_place_block` (server): the acting player placed the block `state` at `pos` with `item`.
+/// As `BlockItem.place` goes on once the block is set: a mod's block entity reads the stack's
+/// components ([`crate::components::apply_from_stack`]), the mod's block hears who placed it with
+/// what (`setPlacedBy`), then the mods hear the placement ([`crate::world_events::block_place`]).
+pub fn place_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, item: &str) {
     rt.safe_point();
-    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| crate::world_events::block_place(rt, pos, state)));
+    rt.with_host(host, |rt| {
+        crate::hand::with_hand(rt, |rt| {
+            placed_with(rt, pos, state, item);
+            crate::world_events::block_place(rt, pos, state)
+        })
+    });
+}
+
+const SET_PLACED_BY: &str = "setPlacedBy.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;)V";
+const SET_PLACED_BY_KEY: &str = "net/minecraft/world/level/block/Block.setPlacedBy.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;)V";
+
+/// The mod's side of `BlockItem.place` once its block is set from the stack of `item` (the main
+/// hand's when it holds that item, else the off hand's): the block entity reads the stack's
+/// components (`applyComponentsFromItemStack`: Farmer's Delight's cooking pot its meal, Create's
+/// toolbox its contents), then the block's `setPlacedBy` (Create's kinetic blocks note the player,
+/// a deployer its owner).
+fn placed_with(rt: &mut Rt, pos: [i32; 3], state: &str, item: &str) {
+    let Some((b, class)) = mod_block(rt, state) else { return };
+    let main = crate::hand::stack(rt, crate::hand::MAIN);
+    let in_main = crate::api_common::item_like_name(rt, rt.get_field(main, "$item")) == item;
+    let stack = if in_main { main } else { crate::hand::stack(rt, crate::hand::OFF) };
+    let be = block_entity_at(rt, pos);
+    if be.r() != 0 {
+        crate::components::apply_from_stack(rt, be, stack);
+    }
+    if !rt.overrides.is_some_and(|o| o(class, SET_PLACED_BY)) {
+        return;
+    }
+    let Some(vc) = rt.vcall else { return };
+    let l = level(rt);
+    let p = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+    let st = api::state(rt, state);
+    let player = crate::api_common::acting_player(rt);
+    vc(rt, SET_PLACED_BY_KEY, SET_PLACED_BY, &[b, l, p, st, player, stack]);
+    rt.report_thrown("setPlacedBy");
 }
 
 /// `native_client_level_load` (client): the client made a level for `dimension`, joining a server
@@ -1415,6 +1451,92 @@ mod tests {
         }
         assert_eq!(rt.get_field(be, "ticks"), V::I(3));
         assert!(!rt.block_entities.contains_key(&gone));
+    }
+
+    const POT: &str = "test/PotBlock";
+    const POT_ENTITY: &str = "test/PotBlockEntity";
+    const INPUT_GET: &str = "net/minecraft/world/level/block/entity/BlockEntity$DataComponentInput.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+    const BUILDER_SET: &str =
+        "net/minecraft/core/component/DataComponentMap$Builder.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Lnet/minecraft/core/component/DataComponentMap$Builder;";
+
+    /// The test pot: its block makes a block entity and hears `setPlacedBy`; its block entity reads
+    /// the stack's meal as it is placed and gives it back for its item, as Farmer's Delight's
+    /// cooking pot does.
+    fn pot_overrides(class: &str, method: &str) -> bool {
+        (class == POT && (method == SET_PLACED_BY || method == NEW_BLOCK_ENTITY))
+            || (class == POT_ENTITY && (method.starts_with("applyImplicitComponents.") || method.starts_with("collectImplicitComponents.")))
+    }
+
+    fn pot_code(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        let meal = rt.registered.get(&("data_component_type".to_owned(), "test:meal".to_owned())).copied().unwrap_or(V::NULL);
+        match short {
+            NEW_BLOCK_ENTITY => rt.new_object(POT_ENTITY),
+            SET_PLACED_BY => {
+                rt.put_field(args[0], "placer", args[4]);
+                rt.put_field(args[0], "stack", args[5]);
+                V::Void
+            }
+            s if s.starts_with("applyImplicitComponents.") => {
+                let got = api::call(rt, INPUT_GET, &[args[1], meal]);
+                rt.put_field(args[0], "meal", got);
+                V::Void
+            }
+            s if s.starts_with("collectImplicitComponents.") => {
+                let m = rt.get_field(args[0], "meal");
+                api::call(rt, BUILDER_SET, &[args[1], meal, m]);
+                V::Void
+            }
+            _ => api::call(rt, key, args),
+        }
+    }
+
+    /// A mod block placed from a stack: its block entity reads the stack's components
+    /// (`applyImplicitComponents`), keeps those it didn't read (`components()`) and gives both back
+    /// for its item (`collectComponents()`); the block hears who placed it, with what
+    /// (`setPlacedBy`).
+    #[test]
+    fn a_placed_mod_block_reads_its_stack_and_hears_who_placed_it() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(pot_overrides);
+        rt.vcall = Some(pot_code);
+        rt.supers.insert(POT, "net/minecraft/world/level/block/Block");
+        rt.supers.insert(POT_ENTITY, "net/minecraft/world/level/block/entity/BlockEntity");
+        let block = rt.new_object(POT);
+        rt.registered.insert(("block".into(), "test:pot".into()), block);
+        let new_type = |rt: &mut Rt, name: &str, codec: &'static str| {
+            let b = api::call(rt, "net/minecraft/core/component/DataComponentType.builder.()Lnet/minecraft/core/component/DataComponentType$Builder;", &[]);
+            let c = api::get_static(rt, codec);
+            let b = api::call(rt, "net/minecraft/core/component/DataComponentType$Builder.persistent.(Lcom/mojang/serialization/Codec;)Lnet/minecraft/core/component/DataComponentType$Builder;", &[b, c]);
+            let t = api::call(rt, "net/minecraft/core/component/DataComponentType$Builder.build.()Lnet/minecraft/core/component/DataComponentType;", &[b]);
+            rt.registered.insert(("data_component_type".into(), name.into()), t);
+            t
+        };
+        let meal = new_type(&mut rt, "test:meal", "com/mojang/serialization/Codec.STRING");
+        let lid = new_type(&mut rt, "test:lid", "com/mojang/serialization/Codec.INT");
+        let mut host = MemoryHost::default();
+        let pos = [3, 64, 3];
+        host.blocks.insert(pos, "test:pot".into());
+        host.held = Some(("test:pot".into(), 1));
+        host.held_components.insert("test:meal".into(), crate::nbt::Nbt::String("stew".into()));
+        host.held_components.insert("test:lid".into(), crate::nbt::Nbt::Int(2));
+
+        place_block(&mut rt, &mut host, pos, "test:pot", "test:pot");
+        let be = rt.block_entities[&pos];
+        assert_eq!(rt.str_of(rt.get_field(be, "meal")), Some("stew"));
+        let (placer, stack) = (rt.get_field(block, "placer"), rt.get_field(block, "stack"));
+        assert!(crate::api_common::is_player(rt.class_of(placer)), "{}", rt.class_of(placer));
+        assert_eq!(crate::api_common::item_like_name(&rt, rt.get_field(stack, "$item")), "test:pot");
+
+        let has = "net/minecraft/core/component/DataComponentMap.has.(Lnet/minecraft/core/component/DataComponentType;)Z";
+        let kept = api::call(&mut rt, "net/minecraft/world/level/block/entity/BlockEntity.components.()Lnet/minecraft/core/component/DataComponentMap;", &[be]);
+        assert_eq!((api::call(&mut rt, has, &[kept, lid]), api::call(&mut rt, has, &[kept, meal])), (V::I(1), V::I(0)), "the lid wasn't read, the meal was");
+        let all = api::call(&mut rt, "net/minecraft/world/level/block/entity/BlockEntity.collectComponents.()Lnet/minecraft/core/component/DataComponentMap;", &[be]);
+        assert_eq!((api::call(&mut rt, has, &[all, lid]), api::call(&mut rt, has, &[all, meal])), (V::I(1), V::I(1)));
+        let get = "net/minecraft/core/component/DataComponentMap.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+        let back = api::call(&mut rt, get, &[all, meal]);
+        assert_eq!(rt.str_of(back), Some("stew"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Lambda 1 is vanilla 1.21.1's bow `pull`: how far the stack in use is drawn, in seconds of

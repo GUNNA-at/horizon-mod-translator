@@ -201,7 +201,6 @@ mod native_data_maps;
 mod native_effects;
 mod native_entities;
 mod native_entity_queries;
-mod native_item_durability;
 mod native_explosions;
 mod native_falling;
 mod native_hits;

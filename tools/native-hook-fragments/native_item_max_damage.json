@@ -1,6 +1,0 @@
-{
-  "hooks": [],
-  "rust_summary": "an item's durability for mods (`native_item_max_damage`).",
-  "doc_summary": "an item's durability (`native_item_max_damage(item)`): the damage at which a vanilla item breaks (its\n`max_damage`), 0 for one without, as a mod's `ItemStack.getMaxDamage` reads it. Bundles that use it need\n`\"hooks\": @API:native_item_max_damage@`.",
-  "comments": ["crates/horizon-client/src/game/native_item_durability.rs"]
-}

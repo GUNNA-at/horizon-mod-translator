@@ -52,6 +52,16 @@ const GET_DESC: &str = "(Lnet/minecraft/core/component/DataComponentType;)Ljava/
 const SET_DESC: &str = "(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";
 const PREDICATE_TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 
+/// What a block entity reads of the stack it is placed from: `$map` (the stack's components), each
+/// type it reads kept in `$used`.
+const INPUT: &str = "net/minecraft/world/level/block/entity/BlockEntity$DataComponentInput";
+const APPLY_IMPLICIT: &str = "applyImplicitComponents.(Lnet/minecraft/world/level/block/entity/BlockEntity$DataComponentInput;)V";
+const APPLY_IMPLICIT_KEY: &str =
+    "net/minecraft/world/level/block/entity/BlockEntity.applyImplicitComponents.(Lnet/minecraft/world/level/block/entity/BlockEntity$DataComponentInput;)V";
+const COLLECT_IMPLICIT: &str = "collectImplicitComponents.(Lnet/minecraft/core/component/DataComponentMap$Builder;)V";
+const COLLECT_IMPLICIT_KEY: &str = "net/minecraft/world/level/block/entity/BlockEntity.collectImplicitComponents.(Lnet/minecraft/core/component/DataComponentMap$Builder;)V";
+const MAP_DESC: &str = "()Lnet/minecraft/core/component/DataComponentMap;";
+
 /// The registry a mod's component types are registered in (`Registries.DATA_COMPONENT_TYPE`).
 const REGISTRY: &str = "data_component_type";
 
@@ -564,6 +574,52 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// `BlockEntity.applyComponentsFromItemStack(stack)`, as a block placed from `stack` does: the block
+/// entity reads the stack's components (its own `applyImplicitComponents`), and keeps those set on
+/// the stack that it didn't read, `block_entity_data` aside (`components()`).
+pub(crate) fn apply_from_stack(rt: &mut Rt, be: V, stack: V) {
+    if be.r() == 0 || stack.r() == 0 {
+        return;
+    }
+    let input = rt.new_object(INPUT);
+    let view = stack_view(rt, stack);
+    rt.put_field(input, "$map", view);
+    let used = crate::jutil::new_list(rt, Vec::new());
+    rt.put_field(input, "$used", used);
+    let class = rt.class_of(be);
+    if rt.overrides.is_some_and(|o| o(class, APPLY_IMPLICIT))
+        && let Some(vc) = rt.vcall
+    {
+        vc(rt, APPLY_IMPLICIT_KEY, APPLY_IMPLICIT, &[be, input]);
+        rt.report_thrown("applyImplicitComponents");
+    }
+    let read = crate::jutil::elements(rt, used);
+    let entity_data = vanilla_type(rt, "minecraft:block_entity_data");
+    let kept: Vec<V> = set_pairs(rt, view).chunks(2).filter(|p| p[0] != entity_data && !read.contains(&p[0])).flat_map(|p| [p[0], p[1]]).collect();
+    let m = plain_map(rt, kept);
+    rt.put_field(be, "$components", m);
+}
+
+/// `BlockEntity.collectComponents()`: what it kept of its stack, then what it adds itself (its own
+/// `collectImplicitComponents`), as the item it drops or is picked as carries them.
+pub(crate) fn collect_components(rt: &mut Rt, be: V) -> V {
+    let b = rt.new_object(MAP_BUILDER);
+    let kept = rt.get_field(be, "$components");
+    if kept.r() != 0 {
+        let l = map_pairs(rt, kept);
+        store(rt, b, l);
+    }
+    let class = rt.class_of(be);
+    if rt.overrides.is_some_and(|o| o(class, COLLECT_IMPLICIT))
+        && let Some(vc) = rt.vcall
+    {
+        vc(rt, COLLECT_IMPLICIT_KEY, COLLECT_IMPLICIT, &[be, b]);
+        rt.report_thrown("collectImplicitComponents");
+    }
+    let l = pairs(rt, b);
+    plain_map(rt, l)
+}
+
 /// `to` gets `from`'s components and damage (a copy of the stack keeps them).
 pub(crate) fn copy_patch(rt: &mut Rt, from: V, to: V) {
     let l = pairs(rt, from);
@@ -632,7 +688,9 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     let maps = matches!(owner, MAP | MAP_BUILDER | PATCH_BUILDER)
         || owner.ends_with("/PatchedDataComponentMap")
         || (owner == COMPONENT_PATCH && matches!(name, "builder" | "size" | "get" | "entrySet"))
-        || (name == "components" && desc == "()Lnet/minecraft/core/component/DataComponentMap;");
+        || (name == "components" && desc == MAP_DESC)
+        || owner == INPUT
+        || matches!(name, "applyComponentsFromItemStack" | "setComponents" | "collectComponents" | "applyImplicitComponents" | "collectImplicitComponents");
     let stack_maps = matches!(name, "getComponents" | "applyComponents" | "applyComponentsAndValidate");
     matches!(owner, TYPE | BUILDER) || maps || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || stack_maps || typed))
 }
@@ -680,7 +738,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             Some(V::Void)
         }
         // `Item.components()`: the item's default components, as a new stack of it reads them.
-        (_, "components") if desc == "()Lnet/minecraft/core/component/DataComponentMap;" && rt.instance_of(a(0), "net/minecraft/world/item/Item") => {
+        (_, "components") if desc == MAP_DESC && rt.instance_of(a(0), "net/minecraft/world/item/Item") => {
             let id = crate::api_common::item_like_name(rt, a(0));
             let stack = crate::api_common::stack(rt, &id, 1);
             Some(stack_view(rt, stack))
@@ -715,6 +773,39 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (o, n) if (o == MAP || o.ends_with("/PatchedDataComponentMap")) && rt.class_of(a(0)) == MAP => map_call(rt, n, desc, args),
         (COMPONENT_PATCH, "builder") => Some(rt.new_object(PATCH_BUILDER)),
+        // What a block entity reads of the stack it is placed from; each type it reads is kept.
+        (INPUT, n @ ("get" | "getOrDefault")) => {
+            let map = rt.get_field(a(0), "$map");
+            let ty = type_of(rt, a(1));
+            let used = rt.get_field(a(0), "$used");
+            if used.r() != 0 {
+                crate::jutil::list_add(rt, used, ty);
+            }
+            let mut all = vec![map, ty];
+            all.extend_from_slice(args.get(2..).unwrap_or_default());
+            let desc = if n == "get" { GET_DESC } else { "(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;" };
+            map_call(rt, n, desc, &all)
+        }
+        // A block entity's components: what it kept of the stack it was placed from
+        // (`components()`, `setComponents`), and all it gives its item (`collectComponents()`).
+        (_, "applyComponentsFromItemStack") if desc == "(Lnet/minecraft/world/item/ItemStack;)V" => {
+            apply_from_stack(rt, a(0), a(1));
+            Some(V::Void)
+        }
+        (_, "components") if desc == MAP_DESC && rt.instance_of(a(0), "net/minecraft/world/level/block/entity/BlockEntity") => {
+            let kept = rt.get_field(a(0), "$components");
+            Some(if kept.r() != 0 { kept } else { rt.intern("compat:component-map/empty".into(), |rt| plain_map(rt, Vec::new())) })
+        }
+        (_, "setComponents") if desc == "(Lnet/minecraft/core/component/DataComponentMap;)V" => {
+            let l = map_pairs(rt, a(1));
+            let m = plain_map(rt, l);
+            rt.put_field(a(0), "$components", m);
+            Some(V::Void)
+        }
+        (_, "collectComponents") if desc == MAP_DESC => Some(collect_components(rt, a(0))),
+        // Vanilla's own do nothing: a mod's override calls them through `super`.
+        (_, "applyImplicitComponents") if desc == "(Lnet/minecraft/world/level/block/entity/BlockEntity$DataComponentInput;)V" => Some(V::Void),
+        (_, "collectImplicitComponents") if desc == "(Lnet/minecraft/core/component/DataComponentMap$Builder;)V" => Some(V::Void),
         (COMPONENT_PATCH, n @ ("size" | "get" | "entrySet")) => patch_call(rt, n, args),
         // A patch's builder: what it sets and what it removes, each undoing the other.
         (PATCH_BUILDER, "set" | "remove") => {
