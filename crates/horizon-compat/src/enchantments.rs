@@ -23,6 +23,8 @@ const ENCHANTMENTS: &str = "minecraft:enchantments";
 const STORED: &str = "minecraft:stored_enchantments";
 const PREDICATE: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 const CONSUMER: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
+const BI_CONSUMER: &str = "java/util/function/BiConsumer.accept.(Ljava/lang/Object;Ljava/lang/Object;)V";
+const VISITOR: &str = "net/minecraft/world/item/enchantment/EnchantmentHelper$EnchantmentVisitor.accept.(Lnet/minecraft/core/Holder;I)V";
 
 /// 1.21.1's enchantments and their maximum levels (`data/minecraft/enchantment/*.json`).
 const MAX_LEVELS: [(&str, i32); 42] = [
@@ -34,6 +36,58 @@ const MAX_LEVELS: [(&str, i32); 42] = [
     ("smite", 5), ("soul_speed", 3), ("sweeping_edge", 3), ("swift_sneak", 3), ("thorns", 3), ("unbreaking", 3), ("vanishing_curse", 1),
     ("wind_burst", 3),
 ];
+
+/// How an enchantment's attribute modifier grows with its level: the `LevelBasedValue`s 1.21.1's
+/// enchantments give theirs by.
+#[derive(Clone, Copy)]
+enum Amount {
+    /// `base + per_level_above_first * (level - 1)`.
+    Linear(f32, f32),
+    /// `level * level + added`.
+    LevelsSquared(f32),
+    /// One linear amount over another, 0 where the second is.
+    Fraction((f32, f32), (f32, f32)),
+}
+
+impl Amount {
+    fn at(self, level: i32) -> f32 {
+        let linear = |(base, per): (f32, f32)| base + per * (level - 1) as f32;
+        match self {
+            Amount::Linear(base, per) => linear((base, per)),
+            Amount::LevelsSquared(added) => (level * level) as f32 + added,
+            Amount::Fraction(n, d) => match linear(d) {
+                0.0 => 0.0,
+                d => linear(n) / d,
+            },
+        }
+    }
+}
+
+/// 1.21.1's enchantments that give attribute modifiers (`effects."minecraft:attributes"` in
+/// `data/minecraft/enchantment/*.json`): the enchantment, the slot groups it works in, the
+/// attribute, the modifier's id (the slot's name goes after it), its amount and its operation's
+/// ordinal.
+const ATTRIBUTE_EFFECTS: [(&str, &[&str], &str, &str, Amount, u8); 8] = [
+    ("aqua_affinity", &["head"], "minecraft:player.submerged_mining_speed", "minecraft:enchantment.aqua_affinity", Amount::Linear(4.0, 4.0), 2),
+    ("blast_protection", &["armor"], "minecraft:generic.explosion_knockback_resistance", "minecraft:enchantment.blast_protection", Amount::Linear(0.15, 0.15), 0),
+    ("depth_strider", &["feet"], "minecraft:generic.water_movement_efficiency", "minecraft:enchantment.depth_strider", Amount::Linear(0.333_333_34, 0.333_333_34), 0),
+    ("efficiency", &["mainhand"], "minecraft:player.mining_efficiency", "minecraft:enchantment.efficiency", Amount::LevelsSquared(1.0), 0),
+    ("fire_protection", &["armor"], "minecraft:generic.burning_time", "minecraft:enchantment.fire_protection", Amount::Linear(-0.15, -0.15), 1),
+    ("respiration", &["head"], "minecraft:generic.oxygen_bonus", "minecraft:enchantment.respiration", Amount::Linear(1.0, 1.0), 0),
+    ("sweeping_edge", &["mainhand"], "minecraft:player.sweeping_damage_ratio", "minecraft:enchantment.sweeping_edge", Amount::Fraction((1.0, 1.0), (2.0, 1.0)), 0),
+    ("swift_sneak", &["legs"], "minecraft:player.sneaking_speed", "minecraft:enchantment.swift_sneak", Amount::Linear(0.15, 0.15), 0),
+];
+
+/// Whether slot group `group` holds equipment slot `slot` (both by their names), as
+/// `EquipmentSlotGroup.test` has it.
+fn group_holds(group: &str, slot: &str) -> bool {
+    match group {
+        "any" => true,
+        "hand" => matches!(slot, "mainhand" | "offhand"),
+        "armor" => matches!(slot, "feet" | "legs" | "chest" | "head" | "body"),
+        g => g == slot,
+    }
+}
 
 /// `#minecraft:curse`, which a tooltip shows red.
 const CURSES: [&str; 2] = ["minecraft:binding_curse", "minecraft:vanishing_curse"];
@@ -255,7 +309,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let (owner, name, _desc) = crate::parts(key)?;
+    let (owner, name, desc) = crate::parts(key)?;
     Some(match (owner, name) {
         (ITEM_ENCHANTMENTS | MUTABLE, "getLevel") => {
             let n = name_of(rt, a(1)).unwrap_or_default();
@@ -385,6 +439,39 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (HELPER, "canStoreEnchantments") => {
             let id = component_of(rt, a(0));
             V::I(crate::components::vanilla(rt, a(0), id).is_some() as i32)
+        }
+        // `runIterationOnItem(stack, visitor)`: `visitor(enchantment, level)` for each enchantment
+        // on the stack.
+        (HELPER, "runIterationOnItem") if desc.ends_with("$EnchantmentVisitor;)V") => {
+            let on = on_stack(rt, a(0), ENCHANTMENTS);
+            for (name, level) in levels(rt, on) {
+                let h = holder(rt, &name);
+                rt.call_functional(VISITOR, a(1), &[h, V::I(level)]);
+            }
+            V::Void
+        }
+        // `forEachModifier(stack, slot, action)`: `action(attribute, modifier)` for each modifier
+        // the stack's enchantments give in `slot`: an `EquipmentSlot` one of the enchantment's slot
+        // groups holds, or an `EquipmentSlotGroup` it names. The modifier's id is the effect's with
+        // the slot's name after a slash.
+        (HELPER, "forEachModifier") => {
+            let slot = rt.str_of(rt.get_field(a(1), "$name")).unwrap_or("").to_ascii_lowercase();
+            let group = desc.contains("EquipmentSlotGroup;");
+            let on = on_stack(rt, a(0), ENCHANTMENTS);
+            for (name, level) in levels(rt, on) {
+                let path = name.strip_prefix("minecraft:").unwrap_or("");
+                for &(_, groups, attribute, id, amount, operation) in ATTRIBUTE_EFFECTS.iter().filter(|e| e.0 == path) {
+                    let applies = if group { groups.contains(&slot.as_str()) } else { groups.iter().any(|g| group_holds(g, &slot)) };
+                    if !applies {
+                        continue;
+                    }
+                    let holder = crate::attributes::attribute(rt, attribute);
+                    let view = crate::host::AttributeModifierView { id: format!("{id}/{slot}"), amount: f64::from(amount.at(level)), operation, permanent: false };
+                    let modifier = crate::attributes::modifier(rt, &view);
+                    rt.call_functional(BI_CONSUMER, a(2), &[holder, modifier]);
+                }
+            }
+            V::Void
         }
         _ => return None,
     })

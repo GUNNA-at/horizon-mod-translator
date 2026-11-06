@@ -3887,6 +3887,59 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     as the mod writes it, through `RecipeWrapper` and `RecipeMatcher`), `recipe_matcher_pairs_inputs_as_neoforge_does`
     (pairings worked by hand from NeoForge's algorithm). 380 compat and 17 translator tests pass.
   - The round scenario now hands a deployer three iron ingots (`interact`) and reads what it saves (`Inventory`).
+- [x] 2026-11-06 Part 19: a deployer's block item used through the game; a fake player's own attributes; NeoForge's
+  click hooks for a mod's own player.
+  - Round 14 in game: the cooking pot dropped and picked up keeps its meal (`farmersdelight:meal` = beef stew), and
+    the placed pot shows it; the attack, attribute and effect steps hold. The hand-placed deployer failed: the
+    terrain this run had nothing solid under it (the scenario now sets stone there). The powered deployer stayed
+    `WAITING` with its 4 stone: its `activate` ran, then met `ServerLevel.mayInteract` (unmapped, so false: it
+    gave up) and, before it, the attribute modifier calls.
+  - A block item used on a block by a mod (`ItemStack.useOn`, `BlockItem.useOn`, NeoForge's `onItemUseFirst`): the
+    mod item's own `useOn` where it has one; a block item places through the game (`Host::place_item_block`; the
+    game's `native_place_item_block`, `game/native_actors.rs`): vanilla's `BlockItem.place` rules (the clicked block
+    replaced, or the one beside it), the block entity and the item's data on it, the place sound and a mod block's
+    placement hook, as the dispenser places. The stack shrinks unless a real creative player used it; `CONSUME`
+    on a server.
+  - `UseOnContext(player, hand, hit)` and `Item.use` read the hand and level through the whole call chain: a fake
+    player's are its own (before, they were the acting player's). A fake player's item use is its own too
+    (`startUsingItem`, `getUseItem`, `isUsingItem`, `getUsedItemHand`, `stopUsingItem`, `releaseUsingItem`).
+  - A fake player's attributes (`attributes.rs`). It is no entity of the game's: it reads as vanilla's player by
+    default, and what a mod changes stays on it (`$attributes`, by the game's id: base and modifiers). Before,
+    its reads and changes went to the acting player. `AttributeView::apply` (compat-core) is now the one rule for
+    a change, the memory host's and a fake player's.
+  - `AttributeMap.addTransientAttributeModifiers` and `removeAttributeModifiers` (a multimap), as vanilla's: each
+    modifier on its attribute in place of one of its id; taken off by id.
+  - `ItemStack.getAttributeModifiers()` (NeoForge's): the stack's own component, else the mod item's
+    `Item.Properties.attributes`, else `EMPTY`. A tool's `createAttributes` is now vanilla's two entries (base
+    attack damage and speed in the main hand), not only the two numbers.
+  - `EnchantmentHelper.forEachModifier` (by `EquipmentSlot` and by `EquipmentSlotGroup`) and
+    `runIterationOnItem(stack, visitor)`: the 8 vanilla enchantments with attribute effects, read from 1.21.1's
+    data (`effects."minecraft:attributes"`), their amounts as `LevelBasedValue` computes them (linear, levels
+    squared, a fraction), each modifier's id the effect's with the slot after a slash.
+  - `Level.mayInteract(player, pos)`: yes (a server's spawn protection and border aren't asked for mods).
+  - A block state asked by a mod: `canBeReplaced(BlockPlaceContext)` (the mod block's own, else a replaceable block
+    not of the item placed); `useItemOn`, `useWithoutItem` and `attack` (the mod block's own; a vanilla block's
+    pass for now).
+  - `CommonHooks.onRightClickBlock`, `onLeftClickBlock` and `onInteractEntity` for a mod's own player: the event,
+    posted with that player's stack (`getItemStack`), given back to the caller (`isCanceled`, `getUseBlock`,
+    `getUseItem`; `onInteractEntity` gives the result a listener canceled with, else null);
+    `LeftClickBlock.getAction`. `ItemStack.doesSneakBypassUse`: the mod item's own, else no.
+  - A vanilla block's item is a `BlockItem` where the game says it places a block (`instanceof`): Create's deployer
+    checks it before it places (it won't place against a block it can't replace, and waits while its target is
+    already the block it holds). Without a host to ask (none at that point), an `Item` as before.
+  - Round 15 in game: the deployer misses above are gone from the log, the deployer placed by hand keeps its owner,
+    and the powered one cycles (the client draws its pole moving). It placed nothing because it was punching: a
+    deployer saved without `Mode` reads `PUNCH`, the first of Create's modes (`NBTHelper.readEnum`), as it would
+    in Java, so the scenario now sets `Mode:"USE"`. The hand-off didn't happen because `c interact` clicked its
+    front, which passes (`DeployerBlock.useItemOn` swaps hands for a click on the back, sides or top: the hit's
+    distance from the back along its facing at most 0.75); the scenario clicks its top now. A third deployer,
+    punching stone with an iron pickaxe, measures the breaking path.
+  - Tests: `fake_players::tests::a_fake_player_places_the_block_it_holds` (stone from its own stack beside the face
+    clicked, 4 to 3, `CONSUME`; the acting player's hand untouched; stone is a `BlockItem`, iron isn't), `a_fake_players_attributes_are_its_own`
+    (Create's `activate` sequence: a sword's +5 and efficiency III's mining efficiency on the fake player while it
+    acts, 1 + 5 and 3² + 1, then off again; the acting player's attribute untouched),
+    `events::tests::a_fake_players_click_is_posted_with_its_own_stack`. 383 compat and 17 translator tests pass;
+    the game tests (48) pass.
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick

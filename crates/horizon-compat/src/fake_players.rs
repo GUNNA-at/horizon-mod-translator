@@ -250,12 +250,7 @@ fn player_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             V::Void
         }
         "setPos" | "moveTo" if desc.starts_with("(Lnet/minecraft/world/phys/Vec3;") => {
-            let v = a(1);
-            let xyz = [
-                crate::api::call(rt, "net/minecraft/world/phys/Vec3.x.()D", &[v]).d(),
-                crate::api::call(rt, "net/minecraft/world/phys/Vec3.y.()D", &[v]).d(),
-                crate::api::call(rt, "net/minecraft/world/phys/Vec3.z.()D", &[v]).d(),
-            ];
+            let xyz = crate::api_common::xyz(rt, a(1));
             set_place(rt, p, xyz);
             V::Void
         }
@@ -311,13 +306,39 @@ fn player_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             V::Void
         }
         "addItem" => crate::api::call(rt, ADD, &[inv, a(1)]),
+        // Using an item over time (`LivingEntity.startUsingItem`): a fake player's own. Create's
+        // deployer finishes a use its `Item.use` started at once (`finishUsingItem`: a drink, a food).
+        "startUsingItem" => {
+            let i = hand_slot(rt, inv, a(1));
+            let s = slot(rt, inv, i);
+            if !crate::api_common::stack_empty(rt, s) {
+                rt.put_field(p, "$useItem", s);
+                rt.put_field(p, "$useHand", a(1));
+            }
+            V::Void
+        }
+        "getUseItem" => match rt.get_field(p, "$useItem") {
+            s if s.r() != 0 => s,
+            _ => empty(rt),
+        },
+        "isUsingItem" => V::I(i32::from(rt.get_field(p, "$useItem").r() != 0)),
+        "getUsedItemHand" => match rt.get_field(p, "$useHand") {
+            h if h.r() != 0 => h,
+            _ => crate::api_common::get_static(rt, "net/minecraft/world/InteractionHand", "MAIN_HAND").unwrap_or(V::NULL),
+        },
+        "getUseItemRemainingTicks" | "getTicksUsingItem" => V::I(0),
+        "stopUsingItem" | "releaseUsingItem" => {
+            rt.put_field(p, "$useItem", V::NULL);
+            rt.put_field(p, "$useHand", V::NULL);
+            V::Void
+        }
         // What it is doing: nothing a player's client would show.
         "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isSecondaryUseActive" => V::I(rt.get_field(p, "$sneaking").i()),
         "setShiftKeyDown" => {
             rt.put_field(p, "$sneaking", V::I(a(1).i()));
             V::Void
         }
-        "isCreative" | "isSpectator" | "isLocalPlayer" | "isSleeping" | "isPassenger" | "isFallFlying" | "isSwimming" | "isUsingItem" | "isInWater" | "isOnFire" => V::I(0),
+        "isCreative" | "isSpectator" | "isLocalPlayer" | "isSleeping" | "isPassenger" | "isFallFlying" | "isSwimming" | "isInWater" | "isOnFire" => V::I(0),
         "mayBuild" => V::I(1),
         "isAlive" => V::I(i32::from(rt.get_field(p, "$removed").i() == 0)),
         "isRemoved" => V::I(rt.get_field(p, "$removed").i()),
@@ -521,5 +542,107 @@ mod tests {
             let held = crate::api::call(rt, MAIN_HAND, &[q]);
             assert_eq!(item(rt, held), ("minecraft:iron_ingot".into(), 3));
         });
+    }
+
+    /// A deployer's use of the block in its hand on a block (`stack.useOn(new UseOnContext(player,
+    /// MAIN_HAND, hit))`): the block goes beside the face clicked, from the fake player's own
+    /// stack, and the acting player keeps what they hold.
+    #[test]
+    fn a_fake_player_places_the_block_it_holds() {
+        let mut rt = runtime();
+        let mut h = MemoryHost { held: Some(("minecraft:paper".into(), 1)), block_items: vec!["minecraft:stone".into()], ..Default::default() };
+        h.blocks.insert([0, 63, 0], "minecraft:dirt".into());
+        rt.with_host(&mut h, |rt| {
+            let p = made(rt, 3);
+            let main = hand(rt, "MAIN_HAND");
+            let stone = crate::api_common::stack(rt, "minecraft:stone", 4);
+            crate::api::call(rt, SET_IN_HAND, &[p, main, stone]);
+            let hit = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+            let at = crate::api_common::vec3(rt, 0.5, 64.0, 0.5);
+            let up = crate::api::get_static(rt, "net/minecraft/core/Direction.UP");
+            let pos = crate::api::block_pos(rt, 0, 63, 0);
+            let hit_init = "net/minecraft/world/phys/BlockHitResult.<init>.(Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/core/Direction;Lnet/minecraft/core/BlockPos;Z)V";
+            crate::api::call(rt, hit_init, &[hit, at, up, pos, V::I(0)]);
+            let ctx = rt.new_object("net/minecraft/world/item/context/UseOnContext");
+            let ctx_init = "net/minecraft/world/item/context/UseOnContext.<init>.(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)V";
+            crate::api::call(rt, ctx_init, &[ctx, p, main, hit]);
+            let held = crate::api::call(rt, MAIN_HAND, &[p]);
+            // Stone is a `BlockItem` (the deployer checks before it places), iron isn't.
+            let get_item = "net/minecraft/world/item/ItemStack.getItem.()Lnet/minecraft/world/item/Item;";
+            let stone_item = crate::api::call(rt, get_item, &[held]);
+            assert!(rt.instance_of(stone_item, "net/minecraft/world/item/BlockItem"));
+            let iron = crate::api_common::stack(rt, "minecraft:iron_ingot", 1);
+            let iron_item = crate::api::call(rt, get_item, &[iron]);
+            assert!(!rt.instance_of(iron_item, "net/minecraft/world/item/BlockItem"));
+            let use_on = "net/minecraft/world/item/ItemStack.useOn.(Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;";
+            let result = crate::api::call(rt, use_on, &[held, ctx]);
+            assert_eq!(rt.str_of(result), Some("CONSUME"), "a server's placement");
+            let held = crate::api::call(rt, MAIN_HAND, &[p]);
+            assert_eq!(item(rt, held), ("minecraft:stone".into(), 3));
+        });
+        assert_eq!(h.blocks.get(&[0, 64, 0]).map(String::as_str), Some("minecraft:stone"));
+        assert_eq!(h.blocks.get(&[0, 63, 0]).map(String::as_str), Some("minecraft:dirt"));
+        assert_eq!(h.held, Some(("minecraft:paper".into(), 1)));
+    }
+
+    /// What a deployer does before it acts (`DeployerHandler.activate`): the modifiers of the
+    /// weapon in its hand and of its enchantments go on the fake player's own attributes for the
+    /// while, then come off. The acting player's attributes stay as the game has them.
+    #[test]
+    fn a_fake_players_attributes_are_its_own() {
+        const ATTACK_DAMAGE: &str = "net/minecraft/world/entity/ai/attributes/Attributes.ATTACK_DAMAGE";
+        const MINING: &str = "net/minecraft/world/entity/ai/attributes/Attributes.MINING_EFFICIENCY";
+        const VALUE: &str = "net/minecraft/world/entity/LivingEntity.getAttributeValue.(Lnet/minecraft/core/Holder;)D";
+        const ATTRIBUTES: &str = "net/minecraft/world/entity/LivingEntity.getAttributes.()Lnet/minecraft/world/entity/ai/attributes/AttributeMap;";
+        const ADD: &str = "net/minecraft/world/entity/ai/attributes/AttributeMap.addTransientAttributeModifiers.(Lcom/google/common/collect/Multimap;)V";
+        const REMOVE: &str = "net/minecraft/world/entity/ai/attributes/AttributeMap.removeAttributeModifiers.(Lcom/google/common/collect/Multimap;)V";
+        const PUT: &str = "com/google/common/collect/HashMultimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z";
+        fn put(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+            let into = rt.captured(args[0])[0];
+            Some(crate::api::call(rt, PUT, &[into, args[1], args[2]]))
+        }
+        let mut rt = runtime();
+        rt.lambda_call = Some(put);
+        let mut h = MemoryHost::default();
+        let theirs = crate::host::AttributeView { value: 1.0, base: 1.0, modifiers: Vec::new() };
+        h.attributes.insert((None, "minecraft:attack_damage".into()), theirs.clone());
+        rt.with_host(&mut h, |rt| {
+            let p = made(rt, 4);
+            let damage = crate::api::get_static(rt, ATTACK_DAMAGE);
+            let mining = crate::api::get_static(rt, MINING);
+            assert_eq!(crate::api::call(rt, VALUE, &[p, damage]).d(), 1.0, "a player's base");
+            // A sword's modifiers (+5 damage, -2.4 speed) and efficiency III on it.
+            let sword = crate::api_common::stack(rt, "minecraft:iron_sword", 1);
+            let weapon = crate::attributes::weapon(rt, 5.0, -2.4);
+            crate::components::set_vanilla(rt, sword, "minecraft:attribute_modifiers", weapon);
+            let efficiency = crate::api::get_static(rt, "net/minecraft/world/item/enchantment/Enchantments.EFFICIENCY");
+            let level = rt.new_object("net/minecraft/world/level/Level");
+            let registry = crate::api::get_static(rt, "net/minecraft/core/registries/Registries.ENCHANTMENT");
+            let lookup = crate::api::call(rt, "net/minecraft/world/level/Level.holderLookup.(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/HolderLookup;", &[level, registry]);
+            let efficiency = crate::api::call(rt, "net/minecraft/core/HolderLookup.getOrThrow.(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/Holder$Reference;", &[lookup, efficiency]);
+            crate::api::call(rt, "net/minecraft/world/item/ItemStack.enchant.(Lnet/minecraft/core/Holder;I)V", &[sword, efficiency, V::I(3)]);
+            // Create's `activate`: the stack's modifiers and its enchantments' into one multimap.
+            let all = crate::api::call(rt, "com/google/common/collect/HashMultimap.create.()Lcom/google/common/collect/HashMultimap;", &[]);
+            let modifiers = crate::api::call(rt, "net/minecraft/world/item/ItemStack.getAttributeModifiers.()Lnet/minecraft/world/item/component/ItemAttributeModifiers;", &[sword]);
+            let list = crate::api::call(rt, "net/minecraft/world/item/component/ItemAttributeModifiers.modifiers.()Ljava/util/List;", &[modifiers]);
+            for e in crate::jutil::elements(rt, list) {
+                let attribute = crate::api::call(rt, "net/minecraft/world/item/component/ItemAttributeModifiers$Entry.attribute.()Lnet/minecraft/core/Holder;", &[e]);
+                let modifier = crate::api::call(rt, "net/minecraft/world/item/component/ItemAttributeModifiers$Entry.modifier.()Lnet/minecraft/world/entity/ai/attributes/AttributeModifier;", &[e]);
+                crate::api::call(rt, PUT, &[all, attribute, modifier]);
+            }
+            let mainhand = crate::api::get_static(rt, "net/minecraft/world/entity/EquipmentSlot.MAINHAND");
+            let action = rt.lambda_id("java/util/function/BiConsumer", 1, vec![all]);
+            let each = "net/minecraft/world/item/enchantment/EnchantmentHelper.forEachModifier.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/entity/EquipmentSlot;Ljava/util/function/BiConsumer;)V";
+            crate::api::call(rt, each, &[sword, mainhand, action]);
+            let map = crate::api::call(rt, ATTRIBUTES, &[p]);
+            crate::api::call(rt, ADD, &[map, all]);
+            assert_eq!(crate::api::call(rt, VALUE, &[p, damage]).d(), 6.0, "1 and the sword's 5");
+            assert_eq!(crate::api::call(rt, VALUE, &[p, mining]).d(), 10.0, "efficiency III: 3 squared and 1");
+            crate::api::call(rt, REMOVE, &[map, all]);
+            assert_eq!(crate::api::call(rt, VALUE, &[p, damage]).d(), 1.0);
+            assert_eq!(crate::api::call(rt, VALUE, &[p, mining]).d(), 0.0);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+        assert_eq!(h.attributes.get(&(None, "minecraft:attack_damage".into())), Some(&theirs), "the acting player's are untouched");
     }
 }

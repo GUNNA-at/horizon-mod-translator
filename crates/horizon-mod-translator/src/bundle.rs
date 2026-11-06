@@ -1937,7 +1937,11 @@ fn world_reads(get: &str) -> String {
 /// entity's name, `Component.getString`).
 fn world_writes(c: &str) -> String {
     format!(
-        r#"        fn damage_types(&self) -> Vec<{c}::host::DamageTypeView> {{
+        r#"        fn place_item_block(&mut self, held: &{c}::host::HandStack, pos: [i32; 3], face: u8, hit: [f64; 3], inside: bool, look: (f32, f32), sneaking: bool) -> Option<[i32; 3]> {{
+            let stack = horizon_client::items::ItemStack {{ item: held.item.as_str().into(), count: held.count, damage: held.damage, extra: None }};
+            self.game.native_place_item_block(&stack, pos, face, hit, inside, look, sneaking)
+        }}
+        fn damage_types(&self) -> Vec<{c}::host::DamageTypeView> {{
             let catalog = &self.game.motion.health.damage;
             let tags: Vec<&str> = catalog.tags().collect();
             let named = |t: &str| {{

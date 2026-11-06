@@ -28,6 +28,88 @@ const EQUIPMENT_SLOT: &str = "net/minecraft/world/entity/EquipmentSlot";
 const GET_ITEM_IN_HAND: &str = "net/minecraft/world/entity/player/Player.getItemInHand.(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;";
 const START_USING: &str = "net/minecraft/world/entity/player/Player.startUsingItem.(Lnet/minecraft/world/InteractionHand;)V";
 
+const USE_ON: &str = "useOn.(Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;";
+const USE_ON_KEY: &str = "net/minecraft/world/item/Item.useOn.(Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;";
+const USE_FIRST: &str = "onItemUseFirst.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;";
+const USE_FIRST_KEY: &str = "net/minecraft/world/item/Item.onItemUseFirst.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/context/UseOnContext;)Lnet/minecraft/world/InteractionResult;";
+const SNEAK_BYPASS: &str = "doesSneakBypassUse.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)Z";
+const SNEAK_BYPASS_KEY: &str = "net/minecraft/world/item/Item.doesSneakBypassUse.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)Z";
+const SNEAKING: &str = "net/minecraft/world/entity/player/Player.isSecondaryUseActive.()Z";
+const RESULT: &str = "net/minecraft/world/InteractionResult";
+
+/// The mod's own override of `nd` on the class of item object `item`, if it has one.
+fn own_override(rt: &Rt, item: V, nd: &str) -> bool {
+    let class = rt.class_of(item);
+    rt.is_mod_class(class) && rt.overrides.is_some_and(|o| o(class, nd))
+}
+
+/// `ItemStack.useOn(context)` (a click with the stack on a block): the item's `useOn`, a mod
+/// item's own where its class has one. A block item's is `BlockItem.place`, which the game does
+/// for whoever the context names (a fake player: Create's deployer) through
+/// `Host::place_item_block`: placed, the stack loses one (none in a creative player's hand) and the
+/// use consumes the action (`CONSUME` on a server); refused, it fails. Other vanilla items' uses on a
+/// block (bone meal, a hoe, a bucket) aren't modelled here yet: they pass.
+pub(crate) fn stack_use_on(rt: &mut Rt, stack: V, ctx: V) -> V {
+    let item = rt.get_field(stack, "$item");
+    if own_override(rt, item, USE_ON) {
+        return rt.call_functional(USE_ON_KEY, item, &[ctx]);
+    }
+    let name = api_common::item_like_name(rt, item);
+    if !rt.host().is_some_and(|h| h.item_is_block(&name)) {
+        return api_common::result(rt, RESULT, "PASS");
+    }
+    block_item_use_on(rt, stack, ctx)
+}
+
+/// `BlockItem.useOn(context)`: `place`, as [`stack_use_on`] says.
+pub(crate) fn block_item_use_on(rt: &mut Rt, stack: V, ctx: V) -> V {
+    if api_common::stack_empty(rt, stack) {
+        return api_common::result(rt, RESULT, "FAIL");
+    }
+    let player = rt.get_field(ctx, "$player");
+    let h = rt.get_field(ctx, "$hitResult");
+    let pos = api::pos_of(rt, rt.get_field(h, "$pos"));
+    let face = api_common::direction_ordinal(rt, rt.get_field(h, "$dir"));
+    let hit = api_common::xyz(rt, rt.get_field(h, "$loc"));
+    let inside = rt.get_field(h, "$inside").i() != 0;
+    let look = (rt.get_field(player, "$yaw").f(), rt.get_field(player, "$pitch").f());
+    let sneaking = player.r() != 0 && api::call(rt, SNEAKING, &[player]).i() != 0;
+    let Some(held) = hand::hand_stack_of(rt, stack) else {
+        return api_common::result(rt, RESULT, "PASS");
+    };
+    let placed = rt.host_mut().and_then(|h| h.place_item_block(&held, pos, face, hit, inside, look, sneaking));
+    if placed.is_none() {
+        return api_common::result(rt, RESULT, "FAIL");
+    }
+    let creative = !crate::fake_players::is_fake(rt, player) && player.r() != 0 && rt.host().is_some_and(|h| h.player_creative());
+    if !creative {
+        let n = rt.get_field(stack, "$count").i();
+        rt.put_field(stack, "$count", V::I(n - 1));
+    }
+    let client = crate::neo::is_client(rt);
+    api_common::result(rt, RESULT, if client { "SUCCESS" } else { "CONSUME" })
+}
+
+/// `ItemStack.onItemUseFirst(context)`, NeoForge's: the item's own (a mod's override), else
+/// `IItemExtension`'s, which passes.
+pub(crate) fn stack_use_first(rt: &mut Rt, stack: V, ctx: V) -> V {
+    let item = rt.get_field(stack, "$item");
+    if own_override(rt, item, USE_FIRST) {
+        return rt.call_functional(USE_FIRST_KEY, item, &[stack, ctx]);
+    }
+    api_common::result(rt, RESULT, "PASS")
+}
+
+/// `ItemStack.doesSneakBypassUse(level, pos, player)`, NeoForge's: whether a sneaking player's click
+/// still uses the block: the item's own answer, else `IItemExtension`'s, no.
+pub(crate) fn sneak_bypasses(rt: &mut Rt, stack: V, level: V, pos: V, player: V) -> V {
+    let item = rt.get_field(stack, "$item");
+    if own_override(rt, item, SNEAK_BYPASS) {
+        return rt.call_functional(SNEAK_BYPASS_KEY, item, &[stack, level, pos, player]);
+    }
+    V::I(0)
+}
+
 /// The mod's registered item `item` and its class, when the class has its own `nd`.
 fn own(rt: &Rt, item: &str, nd: &str) -> Option<V> {
     let &it = rt.registered.get(&("item".to_owned(), item.to_owned()))?;

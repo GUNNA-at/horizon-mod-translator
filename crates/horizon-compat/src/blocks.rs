@@ -1610,10 +1610,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 V::F(f) => f,
                 _ => 0.0,
             };
-            let m = rt.new_object("net/minecraft/world/item/component/ItemAttributeModifiers");
-            rt.put_field(m, "$attackDamage", V::D(f64::from(damage + bonus)));
-            rt.put_field(m, "$attackSpeed", V::D(f64::from(a(2).f())));
-            Some(m)
+            Some(crate::attributes::weapon(rt, f64::from(damage + bonus), f64::from(a(2).f())))
         }
         (WOOD_TYPE, "name") => Some(rt.get_field(a(0), "$name")),
         // `SignBlock.getWoodType(block)`: a sign's own wood, else oak; `sign.type()`.

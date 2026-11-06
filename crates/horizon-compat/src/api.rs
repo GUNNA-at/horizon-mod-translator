@@ -1098,6 +1098,17 @@ pub fn api_enum(rt: &mut Rt, class: &'static str, name: &'static str, ordinal: i
     })
 }
 
+const STATE_USE_ITEM_ON: &str = "(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/ItemInteractionResult;";
+const STATE_USE_WITHOUT_ITEM: &str = "(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/InteractionResult;";
+const STATE_ATTACK: &str = "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)V";
+const USE_ITEM_ON: &str = "useItemOn.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/ItemInteractionResult;";
+const USE_ITEM_ON_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.useItemOn.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/ItemInteractionResult;";
+const USE_WITHOUT_ITEM: &str = "useWithoutItem.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/InteractionResult;";
+const USE_WITHOUT_ITEM_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.useWithoutItem.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/minecraft/world/InteractionResult;";
+const ATTACK: &str = "attack.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)V";
+const ATTACK_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.attack.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)V";
+const CAN_BE_REPLACED: &str = "canBeReplaced.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/item/context/BlockPlaceContext;)Z";
+const CAN_BE_REPLACED_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.canBeReplaced.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/item/context/BlockPlaceContext;)Z";
 const GET_OCCLUSION: &str = "getOcclusionShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
 const GET_OCCLUSION_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.getOcclusionShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
 const GET_SHAPE: &str = "getShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
@@ -1473,6 +1484,9 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => V::I(rt.host().is_some_and(|h| !h.is_server()) as i32),
         },
         (_, "isLoaded" | "hasChunkAt" | "isAreaLoaded" | "hasChunksAt" | "isInWorldBounds") if level => V::I(1),
+        // `mayInteract(player, pos)`: vanilla's `Level` says yes; its `ServerLevel` asks the server's
+        // spawn protection and world border, neither of which mods get here, so it says yes too.
+        (_, "mayInteract") if level && desc == "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/core/BlockPos;)Z" => V::I(1),
         (_, "getGameTime") if level => V::J(rt.host().map_or(0, |h| h.game_time())),
         // The level's server services. Ticking is never frozen or stepped here (`/tick` isn't modelled
         // for mods), and the game syncs changed blocks and block entities itself.
@@ -1675,6 +1689,60 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "canStickTo" if desc == "(Lnet/minecraft/world/level/block/state/BlockState;)Z" => V::I(sticky(rt, n, a(0), a(1)) as i32),
                 "getDestroySpeed" => V::F(crate::blocks::state_facts(rt, &text).hardness),
                 "canBeReplaced" if desc == "()Z" => V::I(crate::blocks::state_facts(rt, &text).replaceable as i32),
+                // `canBeReplaced(context)`: the mod block's own, else `BlockBehaviour`'s: a
+                // replaceable block, unless the stack placed is its own item.
+                "canBeReplaced" if desc == "(Lnet/minecraft/world/item/context/BlockPlaceContext;)Z" => {
+                    if let Some((blk, class)) = crate::glue::mod_block(rt, &text)
+                        && rt.overrides.is_some_and(|o| o(class, CAN_BE_REPLACED))
+                        && let Some(vc) = rt.vcall
+                    {
+                        let r = vc(rt, CAN_BE_REPLACED_KEY, CAN_BE_REPLACED, &[blk, a(0), a(1)]);
+                        if rt.thrown.is_none() {
+                            return Some(r);
+                        }
+                        rt.report_thrown("canBeReplaced");
+                    }
+                    let held = rt.get_field(a(1), "$item");
+                    let own = !crate::api_common::stack_empty(rt, held) && crate::api_common::item_like_name(rt, rt.get_field(held, "$item")) == crate::host::split_state(&text).0;
+                    V::I(i32::from(crate::blocks::state_facts(rt, &text).replaceable && !own))
+                }
+                // A block's use and its punch, as a mod asks them for a player of its own (Create's
+                // deployer): `useItemOn(stack, level, player, hand, hit)`, `useWithoutItem(level,
+                // player, hit)` and `attack(level, pos, player)` reach the mod block's own, at the
+                // hit's position. A vanilla block's aren't run for a mod's player yet: they pass.
+                "useItemOn" | "useWithoutItem" | "attack" if matches!(desc, STATE_USE_ITEM_ON | STATE_USE_WITHOUT_ITEM | STATE_ATTACK) => {
+                    let (nd, key) = match n {
+                        "useItemOn" => (USE_ITEM_ON, USE_ITEM_ON_KEY),
+                        "useWithoutItem" => (USE_WITHOUT_ITEM, USE_WITHOUT_ITEM_KEY),
+                        _ => (ATTACK, ATTACK_KEY),
+                    };
+                    if let Some((blk, class)) = crate::glue::mod_block(rt, &text)
+                        && rt.overrides.is_some_and(|o| o(class, nd))
+                        && let Some(vc) = rt.vcall
+                    {
+                        let all = match n {
+                            "useItemOn" => {
+                                let pos = rt.get_field(a(5), "$pos");
+                                vec![blk, a(1), a(0), a(2), pos, a(3), a(4), a(5)]
+                            }
+                            "useWithoutItem" => {
+                                let pos = rt.get_field(a(3), "$pos");
+                                vec![blk, a(0), a(1), pos, a(2), a(3)]
+                            }
+                            _ => vec![blk, a(0), a(1), a(2), a(3)],
+                        };
+                        let r = vc(rt, key, nd, &all);
+                        if rt.thrown.is_none() {
+                            return Some(r);
+                        }
+                        rt.report_thrown(n);
+                    }
+                    match n {
+                        "useItemOn" => crate::api_common::result(rt, "net/minecraft/world/ItemInteractionResult", "PASS_TO_DEFAULT_BLOCK_INTERACTION"),
+                        "useWithoutItem" => crate::api_common::result(rt, "net/minecraft/world/InteractionResult", "PASS"),
+                        _ => V::Void,
+                    }
+                }
                 "updateShape" if desc.starts_with("(Lnet/minecraft/core/Direction;") => update_shape(rt, [a(0), a(1), a(2), a(3), a(4), a(5)]),
                 "getCollisionShape" | "getShape" if desc.starts_with("(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;") => {
                     let ctx = if desc.contains("CollisionContext;)") { a(3) } else { crate::shapes::empty_context(rt) };

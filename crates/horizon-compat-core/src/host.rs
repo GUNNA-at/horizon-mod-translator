@@ -184,6 +184,40 @@ pub enum AttributeChange {
 }
 
 impl AttributeView {
+    /// Makes `change` as vanilla's `AttributeInstance` makes it (a modifier of an id already there
+    /// replaced only where the change says so), the value computed again before its range:
+    /// whether it was made.
+    pub fn apply(&mut self, change: &AttributeChange) -> bool {
+        let made = match change {
+            AttributeChange::Base(v) => {
+                self.base = *v;
+                true
+            }
+            AttributeChange::Add { modifier, replace } => match self.modifiers.iter().position(|m| m.id == modifier.id) {
+                Some(_) if !replace => false,
+                Some(i) => {
+                    self.modifiers[i] = modifier.clone();
+                    true
+                }
+                None => {
+                    self.modifiers.push(modifier.clone());
+                    true
+                }
+            },
+            AttributeChange::Remove(id) => {
+                let before = self.modifiers.len();
+                self.modifiers.retain(|m| &m.id != id);
+                self.modifiers.len() != before
+            }
+            AttributeChange::RemoveAll => {
+                self.modifiers.clear();
+                true
+            }
+        };
+        self.value = Self::computed(self.base, &self.modifiers);
+        made
+    }
+
     /// Vanilla's `AttributeInstance.calculateValue` of `base` and `modifiers`, before its range:
     /// the additions, then each multiple of the base, then each multiple of the total.
     pub fn computed(base: f64, modifiers: &[AttributeModifierView]) -> f64 {
@@ -811,6 +845,16 @@ pub trait Host {
     fn spawn_stack_entity(&mut self, stack: &HandStack, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {
         self.spawn_item_entity(&stack.item, stack.count, pos, motion, pickup_delay)
     }
+    /// `BlockItem.place` of `stack`'s block by one other than the acting player (a mod's fake
+    /// player: Create's deployer), as the game places a player's or a dispenser's: clicking block
+    /// `pos` on its face `face` (a direction ordinal) at `hit`, the click `inside` its shape or not,
+    /// looking `look` (yaw, pitch), sneaking or not. The block's own rules choose its state, a mod
+    /// block's included; its block entity, sound and level events follow. Where the block went, or
+    /// None when vanilla's placement fails (nothing is written). The stack is the caller's to shrink.
+    #[allow(clippy::too_many_arguments)]
+    fn place_item_block(&mut self, _stack: &HandStack, _pos: [i32; 3], _face: u8, _hit: [f64; 3], _inside: bool, _look: (f32, f32), _sneaking: bool) -> Option<[i32; 3]> {
+        None
+    }
     /// A sound a mod plays (`Level.playSound`, `playLocalSound`, `Entity.playSound`). A server's
     /// game sends it to the players near it; a client's plays it for its player.
     fn play_sound(&mut self, _sound: &Sound) {}
@@ -1295,37 +1339,7 @@ impl Host for MemoryHost {
         self.attributes.get(&(entity, attribute.to_owned())).cloned()
     }
     fn change_attribute(&mut self, entity: Option<i32>, attribute: &str, change: &AttributeChange) -> bool {
-        let Some(a) = self.attributes.get_mut(&(entity, attribute.to_owned())) else {
-            return false;
-        };
-        let made = match change {
-            AttributeChange::Base(v) => {
-                a.base = *v;
-                true
-            }
-            AttributeChange::Add { modifier, replace } => match a.modifiers.iter().position(|m| m.id == modifier.id) {
-                Some(_) if !replace => false,
-                Some(i) => {
-                    a.modifiers[i] = modifier.clone();
-                    true
-                }
-                None => {
-                    a.modifiers.push(modifier.clone());
-                    true
-                }
-            },
-            AttributeChange::Remove(id) => {
-                let before = a.modifiers.len();
-                a.modifiers.retain(|m| &m.id != id);
-                a.modifiers.len() != before
-            }
-            AttributeChange::RemoveAll => {
-                a.modifiers.clear();
-                true
-            }
-        };
-        a.value = AttributeView::computed(a.base, &a.modifiers);
-        made
+        self.attributes.get_mut(&(entity, attribute.to_owned())).is_some_and(|a| a.apply(change))
     }
     fn effects(&mut self, entity: Option<i32>) -> Option<Vec<EffectView>> {
         self.effects.get(&entity).cloned()
@@ -1610,6 +1624,22 @@ impl Host for MemoryHost {
         let id = self.spawn_item_entity(&stack.item, stack.count, pos, motion, pickup_delay)?;
         self.item_entity_stacks.insert(id, stack.clone());
         Some(id)
+    }
+    /// A block item's block, named as the item, into the clicked block when it is air or else the
+    /// one beside the face, when that one is air.
+    fn place_item_block(&mut self, stack: &HandStack, pos: [i32; 3], face: u8, _hit: [f64; 3], _inside: bool, _look: (f32, f32), _sneaking: bool) -> Option<[i32; 3]> {
+        if self.read_only || !self.item_is_block(&stack.item) {
+            return None;
+        }
+        let air = |h: &Self, p: [i32; 3]| h.blocks.get(&p).is_none_or(|b| b == "minecraft:air");
+        const STEPS: [[i32; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
+        let s = STEPS[usize::from(face.min(5))];
+        let at = if air(self, pos) { pos } else { [pos[0] + s[0], pos[1] + s[1], pos[2] + s[2]] };
+        if !air(self, at) {
+            return None;
+        }
+        self.blocks.insert(at, stack.item.clone());
+        Some(at)
     }
     fn play_sound(&mut self, sound: &Sound) {
         if !self.read_only {

@@ -17,6 +17,11 @@
 //! and the server's data going to every player after `/reload` ([`datapack_sync`]). A mod sends its
 //! players what it keeps for them here (Create its train maps, a mod its loaded data).
 //!
+//! A mod posts the same events for a player of its own through NeoForge's `CommonHooks`
+//! (`onRightClickBlock`, `onLeftClickBlock`, `onInteractEntity`): Create's deployer does for its fake
+//! player before each use, punch and click on an entity. The event is that player's, its stack the
+//! one in that player's hand.
+//!
 //! And a player's blows and clicks on the game's entities ([`attack_entity`]: `AttackEntityEvent`;
 //! [`interact_entity`]: `PlayerInteractEvent.EntityInteractSpecific`, then `.EntityInteract`), the
 //! entity one of [`crate::vanilla_entities`]' objects. Create's wrench breaks minecarts this way, and
@@ -25,6 +30,9 @@ use crate::host::Host;
 use crate::{api, api_common, hand, Rt, V};
 
 const INTERACT: &str = "net/neoforged/neoforge/event/entity/player/PlayerInteractEvent";
+const HOOKS: &str = "net/neoforged/neoforge/common/CommonHooks";
+const LEFT_CLICK_BLOCK: &str = "net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$LeftClickBlock";
+const LEFT_CLICK_ACTION: &str = "net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$LeftClickBlock$Action";
 pub(crate) const RIGHT_CLICK_BLOCK: &str = "net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$RightClickBlock";
 pub(crate) const RIGHT_CLICK_ITEM: &str = "net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$RightClickItem";
 const PLAYER_EVENT: &str = "net/neoforged/neoforge/event/entity/player/PlayerEvent";
@@ -50,7 +58,7 @@ pub(crate) const ATTACK: &str = "net/neoforged/neoforge/event/entity/player/Atta
 const SUPERS: [(&str, &str); 17] = [
     (RIGHT_CLICK_BLOCK, INTERACT),
     (RIGHT_CLICK_ITEM, INTERACT),
-    ("net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$LeftClickBlock", INTERACT),
+    (LEFT_CLICK_BLOCK, INTERACT),
     (ENTITY_INTERACT, INTERACT),
     (ENTITY_INTERACT_SPECIFIC, INTERACT),
     (ATTACK, PLAYER_EVENT),
@@ -114,6 +122,81 @@ fn interaction(rt: &mut Rt, class: &'static str, hand: u8) -> V {
         rt.put_field(ev, field, v);
     }
     ev
+}
+
+/// A new event of `class` for `player`, a player a mod's code names (a fake player), using `hand`
+/// (an `InteractionHand`): its level and the stack in that hand are the player's own.
+fn for_player(rt: &mut Rt, class: &'static str, player: V, hand: V) -> V {
+    know_classes(rt);
+    let ev = rt.new_object(class);
+    let level = api::call(rt, "net/minecraft/world/entity/player/Player.level.()Lnet/minecraft/world/level/Level;", &[player]);
+    let stack = api::call(rt, "net/minecraft/world/entity/player/Player.getItemInHand.(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;", &[player, hand]);
+    let off = hand::constant(rt, hand::OFF);
+    let default = tri_state(rt, "DEFAULT");
+    let pass = api_common::result(rt, RESULT, "PASS");
+    for (field, v) in [
+        ("$player", player),
+        ("$level", level),
+        ("$hand", hand),
+        ("$handOrdinal", V::I(i32::from(if hand == off { hand::OFF } else { hand::MAIN }))),
+        ("$stack", stack),
+        ("$canceled", V::I(0)),
+        ("$result", pass),
+        ("$useBlock", default),
+        ("$useItem", default),
+    ] {
+        rt.put_field(ev, field, v);
+    }
+    ev
+}
+
+/// `CommonHooks`' posts a mod makes for a player of its own, as NeoForge's: the event, posted to the
+/// listeners, given back to read (`isCanceled`, `getUseBlock`, `getUseItem`); `onInteractEntity`
+/// gives the result a listener canceled it with, else null.
+fn hook(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let ev = match name {
+        // `(player, hand, pos, hit)`: the face is the hit's.
+        "onRightClickBlock" => {
+            let ev = for_player(rt, RIGHT_CLICK_BLOCK, a(0), a(1));
+            let face = rt.get_field(a(3), "$dir");
+            for (field, v) in [("$pos", a(2)), ("$face", face), ("$hit", a(3))] {
+                rt.put_field(ev, field, v);
+            }
+            ev
+        }
+        // `(player, pos, face, action)`: the main hand's, the packet's action as the event's own.
+        "onLeftClickBlock" => {
+            let main = hand::constant(rt, hand::MAIN);
+            let ev = for_player(rt, LEFT_CLICK_BLOCK, a(0), main);
+            let (action, ordinal) = match rt.str_of(rt.get_field(a(3), "$name")).unwrap_or("") {
+                "STOP_DESTROY_BLOCK" => ("STOP", 1),
+                "ABORT_DESTROY_BLOCK" => ("ABORT", 2),
+                _ => ("START", 0),
+            };
+            let action = api::api_enum(rt, LEFT_CLICK_ACTION, action, ordinal);
+            for (field, v) in [("$pos", a(1)), ("$face", a(2)), ("$action", action)] {
+                rt.put_field(ev, field, v);
+            }
+            ev
+        }
+        // `(player, entity, hand)`: at the entity's block.
+        "onInteractEntity" => {
+            let ev = for_player(rt, ENTITY_INTERACT, a(0), a(2));
+            let at = api::call(rt, "net/minecraft/world/entity/Entity.blockPosition.()Lnet/minecraft/core/BlockPos;", &[a(1)]);
+            for (field, v) in [("$target", a(1)), ("$pos", at), ("$face", V::NULL)] {
+                rt.put_field(ev, field, v);
+            }
+            ev
+        }
+        _ => return None,
+    };
+    let class = rt.class_of(ev);
+    crate::neo::post(rt, class, ev);
+    if name != "onInteractEntity" {
+        return Some(ev);
+    }
+    Some(if rt.get_field(ev, "$canceled").i() != 0 { rt.get_field(ev, "$result") } else { V::NULL })
 }
 
 /// Posts `ev` to the listeners: Some(the click was used) when one canceled it, None when the
@@ -358,8 +441,9 @@ fn listened(rt: &mut Rt, class: &str) -> bool {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     owner == TRI_STATE
+        || (owner == HOOKS && matches!(name, "onRightClickBlock" | "onLeftClickBlock" | "onInteractEntity"))
         || owner == ATTACK
         || owner.starts_with(INTERACT)
         || owner.starts_with(PLAYER_EVENT)
@@ -371,6 +455,9 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    if owner == HOOKS {
+        return hook(rt, name, args);
+    }
     if owner == TRI_STATE {
         let n = tri_state_name(rt, a(0));
         return Some(match name {
@@ -439,10 +526,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "getHand" => rt.get_field(ev, "$hand"),
         "getFace" => rt.get_field(ev, "$face"),
         "getHitVec" => rt.get_field(ev, "$hit"),
-        "getItemStack" => {
-            let h = rt.get_field(ev, "$handOrdinal").i() as u8;
-            hand::stack(rt, h)
-        }
+        // The stack in the hand of the player the event is for: a mod's own player's, else the
+        // acting player's.
+        "getItemStack" => match rt.get_field(ev, "$stack") {
+            V::Void => {
+                let h = rt.get_field(ev, "$handOrdinal").i() as u8;
+                hand::stack(rt, h)
+            }
+            s => s,
+        },
+        "getAction" => rt.get_field(ev, "$action"),
         "getSide" => match rt.get_field(ev, "$client").i() {
             0 => api::api_enum(rt, LOGICAL_SIDE, "SERVER", 1),
             _ => api::api_enum(rt, LOGICAL_SIDE, "CLIENT", 0),
@@ -567,6 +660,43 @@ mod tests {
         assert_eq!(right_click_item(&mut rt, &mut host, hand::MAIN), None);
         assert_eq!(heard(), ["1:RightClickItem:-4"]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's own player (Create's deployer, a fake player) right-clicks through
+    /// `CommonHooks.onRightClickBlock`: the listeners hear the event with that player's stack, what
+    /// they do to it stays with that player, and the caller reads the canceled event back.
+    #[test]
+    fn a_fake_players_click_is_posted_with_its_own_stack() {
+        const HOOK: &str = "net/neoforged/neoforge/common/CommonHooks.onRightClickBlock.(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/BlockHitResult;)Lnet/neoforged/neoforge/event/entity/player/PlayerInteractEvent$RightClickBlock;";
+        const MAIN_HAND: &str = "net/minecraft/world/entity/player/Player.getMainHandItem.()Lnet/minecraft/world/item/ItemStack;";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.lambda_call = Some(listener);
+        for (id, class) in [(1, INTERACT), (2, RIGHT_CLICK_BLOCK), (3, RIGHT_CLICK_BLOCK)] {
+            let l = rt.lambda_id("java/util/function/Consumer", id, Vec::new());
+            rt.listeners.push((class.to_owned(), l));
+        }
+        rt.supers.insert("test/DeployerPlayer", crate::fake_players::FAKE_PLAYER);
+        let mut host = MemoryHost { held: Some(("minecraft:paper".into(), 1)), ..Default::default() };
+        rt.with_host(&mut host, |rt| {
+            let p = rt.new_object("test/DeployerPlayer");
+            let profile = rt.new_object("com/mojang/authlib/GameProfile");
+            let uuid = crate::tags::uuid(rt, 9, 9);
+            let name = rt.string("Deployer");
+            api::call(rt, "com/mojang/authlib/GameProfile.<init>.(Ljava/util/UUID;Ljava/lang/String;)V", &[profile, uuid, name]);
+            api::call(rt, "net/neoforged/neoforge/common/util/FakePlayer.<init>.(Lnet/minecraft/server/level/ServerLevel;Lcom/mojang/authlib/GameProfile;)V", &[p, V::NULL, profile]);
+            let main = hand::constant(rt, hand::MAIN);
+            let sticks = api_common::stack(rt, "minecraft:stick", 2);
+            api::call(rt, "net/neoforged/neoforge/common/util/FakePlayer.setItemInHand.(Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;)V", &[p, main, sticks]);
+            let pos = api::block_pos(rt, 7, 64, 0);
+            let hit = api_common::hit(rt, [7, 64, 0], 1);
+            let ev = api::call(rt, HOOK, &[p, main, pos, hit]);
+            assert_eq!(api::call(rt, IS_CANCELED, &[ev]).i(), 1, "listener 2 used the stick");
+            let held = api::call(rt, MAIN_HAND, &[p]);
+            assert_eq!(rt.get_field(held, "$count").i(), 1, "from the fake player's own stack");
+        });
+        assert_eq!(heard(), ["1:RightClickBlock:7", "2:RightClickBlock:7"]);
+        assert_eq!(host.held, Some(("minecraft:paper".into(), 1)), "the acting player's hand is untouched");
     }
 
     /// What a listener of a player's own events heard: the event, the player's UUID, and the rest.

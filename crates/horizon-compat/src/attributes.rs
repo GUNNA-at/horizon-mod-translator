@@ -11,7 +11,9 @@
 //! an `AttributeInstance` names its entity and attribute (`$entity`, `$attribute`), and each read
 //! or change asks the host ([`crate::host::Host::attribute`]), so a mod sees the game's values and
 //! the game gets the modifiers a mod adds. Where the host can't tell, a player's read as vanilla's
-//! player has them by default (`Player.createAttributes`), unchanged.
+//! player has them by default (`Player.createAttributes`), unchanged. A fake player (NeoForge's
+//! `FakePlayer`, Create's deployer) is no entity of the game's: it has vanilla's player's
+//! attributes, and what a mod changes of them stays on it.
 use crate::{
     Data, Rt, V,
     host::{AttributeChange, AttributeModifierView, AttributeView},
@@ -116,7 +118,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             "BASE_ATTACK_SPEED_ID" => Some(rt.string("minecraft:base_attack_speed")),
             _ => None,
         },
-        MODIFIERS if field == "EMPTY" => Some(rt.intern("compat:item-attribute-modifiers/empty".into(), |rt| made(rt, Vec::new()))),
+        MODIFIERS if field == "EMPTY" => Some(empty(rt)),
         _ => None,
     }
 }
@@ -126,6 +128,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     owner == BUILDER
         || (owner == MODIFIERS && matches!(name, "builder" | "withModifierAdded"))
+        || (matches!(owner, ITEM_STACK | STACK_EXTENSION) && name == "getAttributeModifiers" && desc == STACK_MODIFIERS)
         || (matches!(owner, ATTRIBUTE | RANGED) && ATTRIBUTE_METHODS.contains(&name))
         || matches!(owner, INSTANCE | MAP)
         || entity_method(name, desc)
@@ -199,6 +202,18 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let entries = crate::jutil::elements(rt, rt.get_field(a(0), "$entries"));
             Some(made(rt, entries))
         }
+        // NeoForge's `ItemStack.getAttributeModifiers()`: the stack's own `attribute_modifiers` where
+        // it has any, else its item's (a mod item's `Item.Properties.attributes`), else `EMPTY`.
+        (ITEM_STACK | STACK_EXTENSION, "getAttributeModifiers") => {
+            let any = |rt: &Rt, m: V| m.r() != 0 && !crate::jutil::elements(rt, rt.get_field(m, "modifiers")).is_empty();
+            if let Some(own) = crate::components::vanilla(rt, a(0), "minecraft:attribute_modifiers").filter(|&m| any(rt, m)) {
+                return Some(own);
+            }
+            let item = rt.get_field(a(0), "$item");
+            let props = if item.r() != 0 { rt.get_field(item, "$properties") } else { V::NULL };
+            let of_item = if props.r() != 0 { rt.get_field(props, "$attributes") } else { V::NULL };
+            Some(if any(rt, of_item) { of_item } else { empty(rt) })
+        }
         // A copy with one entry more (vanilla drops an equal one first: same attribute and modifier id).
         (MODIFIERS, "withModifierAdded") => {
             let mut entries = crate::jutil::elements(rt, rt.get_field(a(0), "modifiers"));
@@ -218,6 +233,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 const INSTANCE: &str = "net/minecraft/world/entity/ai/attributes/AttributeInstance";
 const MAP: &str = "net/minecraft/world/entity/ai/attributes/AttributeMap";
 const MODIFIER: &str = "net/minecraft/world/entity/ai/attributes/AttributeModifier";
+const ITEM_STACK: &str = "net/minecraft/world/item/ItemStack";
+const STACK_EXTENSION: &str = "net/neoforged/neoforge/common/extensions/IItemStackExtension";
+const STACK_MODIFIERS: &str = "()Lnet/minecraft/world/item/component/ItemAttributeModifiers;";
+/// What a fake player keeps of an attribute a mod changed on it: its base and modifiers.
+const FAKE_ATTRIBUTE: &str = "compat/FakePlayerAttribute";
 const OPERATIONS: [&str; 3] = ["ADD_VALUE", "ADD_MULTIPLIED_BASE", "ADD_MULTIPLIED_TOTAL"];
 const OPERATION_KEYS: [&str; 3] = [
     "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation.ADD_VALUE",
@@ -274,6 +294,25 @@ fn map_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             let m = view(rt).and_then(|v| v.modifiers.into_iter().find(|m| m.id == id));
             if name == "hasModifier" { V::I(i32::from(m.is_some())) } else { V::D(m.map_or(0.0, |m| m.amount)) }
         }
+        // `addTransientAttributeModifiers(multimap)`: each modifier on its attribute, in place of one
+        // of its id; `removeAttributeModifiers(multimap)`: each taken off by its id. An attribute the
+        // entity doesn't have is passed over, as vanilla's.
+        "addTransientAttributeModifiers" | "removeAttributeModifiers" => {
+            for (holder, values) in crate::jutil::table_pairs(rt, a(1)) {
+                for m in crate::jutil::elements(rt, values) {
+                    if read(rt, e, holder).is_none() {
+                        continue;
+                    }
+                    let id = modifier_id(rt, m);
+                    change(rt, e, holder, &AttributeChange::Remove(id));
+                    if name.starts_with("add") {
+                        let modifier = modifier_view(rt, m, false);
+                        change(rt, e, holder, &AttributeChange::Add { modifier, replace: true });
+                    }
+                }
+            }
+            V::Void
+        }
         _ => return None,
     })
 }
@@ -327,7 +366,7 @@ fn instance_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
 /// (the client's own player, the acting server player), else its entity id; no entity the game
 /// knows is Err.
 pub(crate) fn entity_of(rt: &Rt, e: V) -> Result<Option<i32>, ()> {
-    if e.r() == 0 {
+    if e.r() == 0 || crate::fake_players::is_fake(rt, e) {
         return Err(());
     }
     if crate::vanilla_entities::is_proxy(rt, e) {
@@ -376,6 +415,9 @@ fn game_id(rt: &mut Rt, holder: V) -> Option<String> {
 /// player's by default.
 fn read(rt: &mut Rt, e: V, holder: V) -> Option<AttributeView> {
     let id = game_id(rt, holder)?;
+    if crate::fake_players::is_fake(rt, e) {
+        return fake_read(rt, e, &id);
+    }
     let entity = entity_of(rt, e);
     if let Ok(entity) = entity
         && let Some(view) = rt.host_mut().and_then(|h| h.attribute(entity, &id))
@@ -383,13 +425,78 @@ fn read(rt: &mut Rt, e: V, holder: V) -> Option<AttributeView> {
         return Some(view);
     }
     let player = entity == Ok(None) || rt.instance_of(e, PLAYER);
-    let (_, path) = id.split_once(':')?;
-    let vanilla = VANILLA.iter().find(|r| r.1.split_once('.').map_or(r.1, |(_, p)| p) == path && id.starts_with("minecraft:"))?;
-    if !player || NOT_PLAYERS.contains(&vanilla.1) {
+    player.then(|| player_default(&id)).flatten()
+}
+
+/// Vanilla's attribute of the game's id `id` (`minecraft:max_health`): its `Attributes` row.
+fn vanilla_row(id: &str) -> Option<&'static (&'static str, &'static str, f64, f64, f64)> {
+    let path = id.strip_prefix("minecraft:")?;
+    VANILLA.iter().find(|r| r.1.split_once('.').map_or(r.1, |(_, p)| p) == path)
+}
+
+/// Vanilla's player's attribute `id` as it starts (`Player.createAttributes`); None for one a
+/// player lacks.
+fn player_default(id: &str) -> Option<AttributeView> {
+    let vanilla = vanilla_row(id)?;
+    if NOT_PLAYERS.contains(&vanilla.1) {
         return None;
     }
     let base = PLAYER_BASES.iter().find(|(name, _)| *name == vanilla.1).map_or(vanilla.2, |(_, b)| *b);
     Some(AttributeView { value: base, base, modifiers: Vec::new() })
+}
+
+/// A fake player's attribute `id`: vanilla's player's, with what a mod changed of it, its value in
+/// the attribute's range.
+fn fake_read(rt: &mut Rt, e: V, id: &str) -> Option<AttributeView> {
+    let mut view = player_default(id)?;
+    let kept = fake_kept(rt, e, id);
+    if kept.r() != 0 {
+        view.base = rt.get_field(kept, "$base").d();
+        let modifiers = crate::jutil::elements(rt, rt.get_field(kept, "$modifiers"));
+        view.modifiers = modifiers.into_iter().map(|m| modifier_view(rt, m, rt.get_field(m, "$permanent").i() != 0)).collect();
+    }
+    let (min, max) = vanilla_row(id).map_or((f64::MIN, f64::MAX), |r| (r.3, r.4));
+    view.value = AttributeView::computed(view.base, &view.modifiers).clamp(min, max);
+    Some(view)
+}
+
+/// What fake player `e` keeps of its attribute `id`, null for nothing changed.
+fn fake_kept(rt: &Rt, e: V, id: &str) -> V {
+    let all = rt.get_field(e, "$attributes");
+    match (all.r() != 0).then(|| rt.heap.get(all.r() as usize)).flatten().map(|o| &o.data) {
+        Some(Data::Map(m)) => m.get(id).copied().unwrap_or(V::NULL),
+        _ => V::NULL,
+    }
+}
+
+/// Makes `change` to fake player `e`'s attribute `id`, kept on it: whether it was made.
+fn fake_change(rt: &mut Rt, e: V, id: &str, change: &AttributeChange) -> bool {
+    let Some(mut view) = fake_read(rt, e, id) else {
+        return false;
+    };
+    let made = view.apply(change);
+    let kept = rt.new_object(FAKE_ATTRIBUTE);
+    rt.put_field(kept, "$base", V::D(view.base));
+    let modifiers: Vec<V> = view
+        .modifiers
+        .iter()
+        .map(|m| {
+            let r = modifier(rt, m);
+            rt.put_field(r, "$permanent", V::I(i32::from(m.permanent)));
+            r
+        })
+        .collect();
+    let list = crate::jutil::new_list(rt, modifiers);
+    rt.put_field(kept, "$modifiers", list);
+    let mut all = rt.get_field(e, "$attributes");
+    if all.r() == 0 {
+        all = rt.alloc(FAKE_ATTRIBUTE, Data::Map(Default::default()));
+        rt.put_field(e, "$attributes", all);
+    }
+    if let Some(crate::Object { data: Data::Map(m), .. }) = rt.heap.get_mut(all.r() as usize) {
+        m.insert(id.to_owned(), kept);
+    }
+    made
 }
 
 /// The default of the attribute `holder` holds (`Attribute.getDefaultValue`), for a read of an
@@ -404,6 +511,9 @@ fn default(rt: &mut Rt, holder: V) -> f64 {
 
 /// Makes `change` to `e`'s attribute `holder` through the host: whether it was made.
 fn change(rt: &mut Rt, e: V, holder: V, change: &AttributeChange) -> bool {
+    if crate::fake_players::is_fake(rt, e) {
+        return game_id(rt, holder).is_some_and(|id| fake_change(rt, e, &id, change));
+    }
     let (Ok(entity), Some(id)) = (entity_of(rt, e), game_id(rt, holder)) else {
         return false;
     };
@@ -411,7 +521,7 @@ fn change(rt: &mut Rt, e: V, holder: V, change: &AttributeChange) -> bool {
 }
 
 /// A modifier as vanilla's record (`AttributeModifier(id, amount, operation)`).
-fn modifier(rt: &mut Rt, m: &AttributeModifierView) -> V {
+pub(crate) fn modifier(rt: &mut Rt, m: &AttributeModifierView) -> V {
     let r = rt.new_object(MODIFIER);
     let id = rt.string(&m.id);
     let op = OPERATION_KEYS.get(usize::from(m.operation)).copied().unwrap_or(OPERATION_KEYS[0]);
@@ -451,6 +561,27 @@ fn push(rt: &mut Rt, list: V, v: V) {
 /// An `AttributeModifier` record's id (its location).
 fn modifier_id(rt: &Rt, modifier: V) -> String {
     crate::neo::location(rt, rt.get_field(modifier, "id"))
+}
+
+/// `ItemAttributeModifiers.EMPTY`: one object.
+fn empty(rt: &mut Rt) -> V {
+    rt.intern("compat:item-attribute-modifiers/empty".into(), |rt| made(rt, Vec::new()))
+}
+
+/// A weapon's or tool's modifiers (`SwordItem.createAttributes`, `DiggerItem`'s): `damage` added to
+/// the attack damage and `speed` to the attack speed, in the main hand, by vanilla's base ids.
+pub(crate) fn weapon(rt: &mut Rt, damage: f64, speed: f64) -> V {
+    let slot = crate::api::get_static(rt, "net/minecraft/world/entity/EquipmentSlotGroup.MAINHAND");
+    let rows = [("minecraft:generic.attack_damage", "minecraft:base_attack_damage", damage), ("minecraft:generic.attack_speed", "minecraft:base_attack_speed", speed)];
+    let entries = rows
+        .iter()
+        .map(|&(attribute_id, id, amount)| {
+            let holder = attribute(rt, attribute_id);
+            let m = modifier(rt, &AttributeModifierView { id: id.to_owned(), amount, operation: 0, permanent: false });
+            entry(rt, holder, m, slot)
+        })
+        .collect();
+    made(rt, entries)
 }
 
 /// An `ItemAttributeModifiers` of `entries`, shown in the tooltip, with the main hand's attack

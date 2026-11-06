@@ -568,7 +568,13 @@ pub fn item(rt: &mut Rt, name: &str) -> V {
     if let Some(v) = rt.registered.get(&("item".to_owned(), name.clone())) {
         return *v;
     }
-    rt.intern(format!("item/{name}"), move |rt| rt.alloc("net/minecraft/world/item/Item", Data::Str(name)))
+    // A vanilla block's item is a `BlockItem` where the game says so (a mod checks `instanceof
+    // BlockItem`: Create's deployer won't place against a block it can't replace); without a host to
+    // ask, an `Item`.
+    rt.intern(format!("item/{name}"), move |rt| {
+        let class = if rt.host().is_some_and(|h| h.item_is_block(&name)) { "net/minecraft/world/item/BlockItem" } else { "net/minecraft/world/item/Item" };
+        rt.alloc(class, Data::Str(name))
+    })
 }
 
 fn native(rt: &Rt, v: V) -> [i64; 4] {
@@ -970,7 +976,7 @@ pub(crate) fn vec3(rt: &mut Rt, x: f64, y: f64, z: f64) -> V {
     v
 }
 
-fn xyz(rt: &Rt, v: V) -> [f64; 3] {
+pub(crate) fn xyz(rt: &Rt, v: V) -> [f64; 3] {
     [rt.get_field(v, "x").d(), rt.get_field(v, "y").d(), rt.get_field(v, "z").d()]
 }
 
@@ -2360,10 +2366,16 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (o, "addItem") if is_player(o) => V::I(give_player(rt, a(1)) as i32),
         // An item's `useOn` that reaches vanilla's `Item`: nothing happens.
         ("net/minecraft/world/item/Item", "useOn") => result(rt, "net/minecraft/world/InteractionResult", "PASS"),
+        // A mod's block item calling `super.useOn(context)`: the stack in the context's hand placed.
+        ("net/minecraft/world/item/BlockItem", "useOn") => {
+            let stack = rt.get_field(a(1), "$item");
+            crate::item_use::block_item_use_on(rt, stack, a(1))
+        }
         // `Item.use` reaching vanilla's: the game's own use of the stack goes on (eating a food,
         // placing a block item's block).
         ("net/minecraft/world/item/Item" | "net/minecraft/world/item/BlockItem", "use") => {
-            let stack = call(rt, "net/minecraft/world/entity/player/Player", "getItemInHand", "(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;", &[a(2), a(3)]).unwrap_or(V::NULL);
+            // Through the whole chain: a fake player's hand is its own.
+            let stack = crate::api::call(rt, "net/minecraft/world/entity/player/Player.getItemInHand.(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;", &[a(2), a(3)]);
             result_holder(rt, "PASS", stack)
         }
         // `InteractionResultHolder`: what `Item.use` answers, a result and the stack the hand keeps.
@@ -2470,8 +2482,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 (a(1), a(2), a(3), a(4), a(5))
             } else if desc.starts_with("(Lnet/minecraft/world/entity/player/Player;") {
                 let player = a(1);
-                let stack = call(rt, "net/minecraft/world/entity/player/Player", "getItemInHand", "(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;", &[player, a(2)]).unwrap_or(V::NULL);
-                (crate::glue::level(rt), player, a(2), stack, a(3))
+                // `player.level()` and `player.getItemInHand(hand)` through the whole chain: a fake
+                // player's are its own.
+                let stack = crate::api::call(rt, "net/minecraft/world/entity/player/Player.getItemInHand.(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;", &[player, a(2)]);
+                let level = crate::api::call(rt, "net/minecraft/world/entity/player/Player.level.()Lnet/minecraft/world/level/Level;", &[player]);
+                (level, player, a(2), stack, a(3))
             } else {
                 return Some(V::Void);
             };
@@ -3107,6 +3122,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 None => get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
             }
         }
+        ("net/minecraft/world/item/ItemStack", "useOn") => crate::item_use::stack_use_on(rt, a(0), a(1)),
+        ("net/minecraft/world/item/ItemStack", "onItemUseFirst") => crate::item_use::stack_use_first(rt, a(0), a(1)),
+        ("net/minecraft/world/item/ItemStack", "doesSneakBypassUse") => crate::item_use::sneak_bypasses(rt, a(0), a(1), a(2), a(3)),
         // The item's `max_stack_size`, as the game knows it.
         ("net/minecraft/world/item/ItemStack", "getMaxStackSize") => {
             let item = item_like_name(rt, rt.get_field(a(0), "$item"));
