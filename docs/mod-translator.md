@@ -4514,6 +4514,31 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `getTextureAtlas(BLOCK_ATLAS).apply(still)` (the same object as the atlas's); a mod's own type on
     `create:textures/special/blank.png` draws white in its vertices' colours on a host whose atlas lacks it,
     while a texture the atlas has is drawn from.
+  - In game (Create alone, creative): Parts 33 to 37 build and run with no panic; the generated
+    `has_sprite` compiles. Create's fluid tanks of water and lava (`TankContent:{Fluid:{id,amount}}`, 1.21.1's
+    `FluidTank` format) hold their fluid on the server and on the client (the update tags carry it), and
+    their renderer runs, but drew nothing you could see: `IClientFluidTypeExtensions` was unmapped (its
+    `getTintColor` gave 0, an alpha of 0). Part 38 maps it.
+- [x] 2026-11-06 Part 38: NeoForge's client extensions (`client_extensions.rs`, a module of the chain).
+  - What a mod tells the client about how its blocks, items, mob effects and fluid types look
+    (`IClientBlockExtensions`, `IClientItemExtensions`, `IClientMobEffectExtensions`,
+    `IClientFluidTypeExtensions`): gathered at the client's setup as NeoForge's `ClientExtensionsManager`
+    does, first from each registered object whose class overrides `initializeClient(consumer)` (the
+    deprecated way: Create's tinted fluid types, its wrench, potato cannon, sandpaper, symmetry wand and other
+    tools), then from `RegisterClientExtensionsEvent` (`registerFluidType`/`registerItem`/`registerBlock`/
+    `registerMobEffect`, of objects or holders, and `is…Registered`).
+  - `of(fluid | state | type)`, `of(stack | item)`, `of(state | block)`, `of(instance | effect)` hand out what
+    was registered, else NeoForge's own extensions for vanilla's water (`block/water_still`, `water_flow`,
+    `water_overlay`, the underwater overlay, tint `0xFF3F76E4`, its biome's water colour in the level) and
+    lava (`block/lava_still`, `lava_flow`), else the interface's `DEFAULT`. The interfaces' default methods
+    answer as NeoForge's do, and the ones that defer to another (`getTintColor(stack)` is `getTintColor()`)
+    ask the receiver, so a mod's override of the plain accessor counts.
+  - Measured on the pack (packcov9): 358 missing uses in this family, `IClientFluidTypeExtensions.of(Fluid)` in
+    32 jars, `RegisterClientExtensionsEvent.registerItem` in 26.
+  - Tests (`client_extensions::tests`): vanilla water and lava answer NeoForge's textures and tint through the
+    stack accessors Create's fluid renderer asks (empty answers the defaults); the event registers by object
+    or holder, each kind apart; an `initializeClient` override hands its extension at setup and the stack
+    accessors reach that extension's own plain ones; a biome's water colour in either file format.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

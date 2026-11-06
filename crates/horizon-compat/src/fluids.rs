@@ -197,6 +197,11 @@ fn on_fluid(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     fluid_api(rt, name, desc, args).unwrap_or(V::NULL)
 }
 
+/// `fluid.getFluidType()`, as the fluid's class answers it (the mod's override, else the API's).
+pub(crate) fn type_of(rt: &mut Rt, fluid: V) -> V {
+    on_fluid(rt, TYPE_OF, &[fluid])
+}
+
 /// The API's own fluid methods (vanilla's fluids by name, `BaseFlowingFluid`'s by its
 /// properties): what a call reaches when the mod's class doesn't have the method, or calls super.
 fn fluid_api(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {

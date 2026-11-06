@@ -1664,6 +1664,9 @@ pub fn fire_client_setup(rt: &mut Rt) {
         return;
     }
     rt.interned.insert("compat:client".into(), V::I(1));
+    // The mods' client extensions (how their fluids, items, blocks and effects look), as the
+    // client is made, before its resources load.
+    crate::client_extensions::init(rt);
     // The mods' reload listeners, as the client's resource manager is made.
     let ev = crate::resources::client_listeners_event(rt);
     post(rt, crate::resources::CLIENT_LISTENERS_EVENT, ev);
