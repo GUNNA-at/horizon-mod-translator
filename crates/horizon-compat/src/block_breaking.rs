@@ -1175,7 +1175,7 @@ mod tests {
     fn world() -> MemoryHost {
         let mut h = MemoryHost::default();
         h.blocks.insert(AT, STONE.into());
-        h.facts.insert(STONE.into(), BlockFacts { hardness: 1.5, push: 0, replaceable: false });
+        h.facts.insert(STONE.into(), BlockFacts { hardness: 1.5, push: 0, replaceable: false, sturdy: (1 << 18) - 1 });
         h.requires_tool.push(STONE.into());
         h.tools.insert(("minecraft:iron_pickaxe".into(), STONE.into()), ToolFacts { speed: 6.0, correct: true, damage_per_block: 1 });
         h.loot.insert(STONE.into(), vec![("minecraft:cobblestone".into(), 1)]);

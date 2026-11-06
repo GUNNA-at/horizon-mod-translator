@@ -4109,10 +4109,11 @@ impl GameLevel<'_> {
     /// [`Self::native_state_text`] writes it): its destroy time
     /// (`getDestroySpeed`, -1 for a block nothing breaks), how pistons move
     /// it (`getPistonPushReaction`, as `PushReaction`'s ordinal: normal,
-    /// destroy, block, ignore, push only) and whether a block placed there
-    /// replaces it (`canBeReplaced`). None for an unknown block, property or
-    /// value.
-    pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool)> {
+    /// destroy, block, ignore, push only), whether a block placed there
+    /// replaces it (`canBeReplaced`), and its sturdy faces (`isFaceSturdy`,
+    /// bit `support * 6 + direction` by `SupportType`'s and `Direction`'s
+    /// ordinals). None for an unknown block, property or value.
+    pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool, u32)> {
         Some(state_facts(self.behaviours, self.native_state_from_text(text)?))
     }
     /// The dimension this level is (`minecraft:the_nether`), as
@@ -4271,7 +4272,7 @@ impl Game<'_> {
     }
     /// What vanilla's state accessors give for the state `text` names, as
     /// `GameLevel::native_state_facts` answers, for hooks on `Game`.
-    pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool)> {
+    pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool, u32)> {
         Some(state_facts(self.res.behaviours(), state_from_text(self.pack.assets.registry, text)?))
     }
     /// Sets a block in the current authoritative level through `Level.setBlock`.
@@ -6469,9 +6470,13 @@ pub(super) fn state_from_text(registry: &BlockRegistry, text: &str) -> Option<Bl
     Some(id)
 }
 
-/// A state's destroy time, push reaction (`PushReaction`'s ordinal) and
-/// replaceability, as vanilla's `BlockStateBase` keeps them.
-fn state_facts(behaviours: &horizon_world::level::Behaviours, state: BlockStateId) -> (f32, u8, bool) {
+/// A state's destroy time, push reaction (`PushReaction`'s ordinal),
+/// replaceability and sturdy faces (`isFaceSturdy`, three supports of six
+/// faces), as vanilla's `BlockStateBase` keeps them.
+fn state_facts(
+    behaviours: &horizon_world::level::Behaviours,
+    state: BlockStateId,
+) -> (f32, u8, bool, u32) {
     use horizon_world::level::PushReaction;
     let f = behaviours.facts(state);
     let push = match f.push {
@@ -6481,7 +6486,8 @@ fn state_facts(behaviours: &horizon_world::level::Behaviours, state: BlockStateI
         PushReaction::IgnoreEntity => 3,
         PushReaction::Push => 4,
     };
-    (f.hardness, push, behaviours.is_replaceable(state))
+    let sturdy = f.sturdy & ((1 << 18) - 1);
+    (f.hardness, push, behaviours.is_replaceable(state), sturdy)
 }
 
 /// `state` with its property `key` set to `value`; none when the block has

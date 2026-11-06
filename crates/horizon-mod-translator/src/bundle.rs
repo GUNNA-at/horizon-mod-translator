@@ -290,7 +290,7 @@ fn level_host(krate: &str) -> String {
             self.level.native_block_name_in_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{krate}::compat::host::BlockFacts> {{
-            self.level.native_state_facts(state).map(|(hardness, push, replaceable)| {krate}::compat::host::BlockFacts {{ hardness, push, replaceable }})
+            self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {krate}::compat::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
         fn dimension(&self) -> String {{
             self.level.native_dimension_name().to_owned()
@@ -332,7 +332,7 @@ fn level_read_host(c: &str) -> String {
             self.level.native_block_name_in_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
-            self.level.native_state_facts(state).map(|(hardness, push, replaceable)| {c}::host::BlockFacts {{ hardness, push, replaceable }})
+            self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
         fn dimension(&self) -> String {{
             self.level.native_dimension_name().to_owned()
@@ -544,7 +544,7 @@ fn client_host(c: &str, id: &str) -> String {
             self.game.get().native_block_name_in_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
-            self.game.get().native_state_facts(state).map(|(hardness, push, replaceable)| {c}::host::BlockFacts {{ hardness, push, replaceable }})
+            self.game.get().native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
         fn dimension(&self) -> String {{
             self.game.get().native_dimension().to_owned()
@@ -906,7 +906,7 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
             self.game.native_block_name_in_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
-            self.game.native_state_facts(state).map(|(hardness, push, replaceable)| {c}::host::BlockFacts {{ hardness, push, replaceable }})
+            self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
         fn dimension(&self) -> String {{
             self.game.native_dimension().to_owned()
@@ -1962,7 +1962,7 @@ fn game_host(c: &str, server_send: &str) -> String {
             self.game.native_block_name_in_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
-            self.game.native_state_facts(state).map(|(hardness, push, replaceable)| {c}::host::BlockFacts {{ hardness, push, replaceable }})
+            self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
         fn dimension(&self) -> String {{
             self.game.native_dimension().to_owned()
@@ -2571,7 +2571,7 @@ fn player_host(c: &str, server_effects: &str) -> String {
             self.game.native_block_name_in_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
-            self.game.native_state_facts(state).map(|(hardness, push, replaceable)| {c}::host::BlockFacts {{ hardness, push, replaceable }})
+            self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
         fn dimension(&self) -> String {{
             self.game.native_dimension().to_owned()
@@ -3654,7 +3654,7 @@ fn {id}_state_for_placement(
             self.level.native_block_name_in_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
-            self.level.native_state_facts(state).map(|(hardness, push, replaceable)| {c}::host::BlockFacts {{ hardness, push, replaceable }})
+            self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
         fn dimension(&self) -> String {{
             self.level.native_dimension_name().to_owned()

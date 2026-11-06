@@ -200,20 +200,21 @@ pub fn optimized(boxes: &[Box3]) -> Vec<Box3> {
 /// `BooleanOp`s by truth table: bit `a << 1 | b` is `op(a, b)`.
 const OR: u8 = 0b1110;
 const NOT_SAME: u8 = 0b0110;
+const ONLY_FIRST: u8 = 0b0100;
+const ONLY_SECOND: u8 = 0b0010;
 
 /// `Block.isShapeFullBlock`: the shape is the whole block, nothing missing and nothing past it.
 pub fn full_block(boxes: &[Box3]) -> bool {
     join(&[FULL], boxes, NOT_SAME).is_empty()
 }
 
-/// `Block.isFaceFull(shape, direction)` (`direction` by ordinal): the shape's slice just inside
-/// that face (`VoxelShape.getFaceShape`: the cells at 1e-7, or 0.9999999 on a positive face, along
-/// its axis, made as deep as the block) is a full block, so it covers the whole face and nothing
-/// past it.
-pub fn face_full(boxes: &[Box3], direction: usize) -> bool {
+/// `VoxelShape.getFaceShape(direction)` (`direction` by ordinal): the shape's slice just inside
+/// that face (the cells at 1e-7, or 0.9999999 on a positive face, along its axis), made as deep as
+/// the block.
+pub fn face_slice(boxes: &[Box3], direction: usize) -> Vec<Box3> {
     let axis = [1, 1, 2, 2, 0, 0][direction.min(5)];
     let at = if direction % 2 == 1 { 0.9999999 } else { 1.0e-7 };
-    let slice: Vec<Box3> = boxes
+    boxes
         .iter()
         .filter(|b| b[axis] <= at && at < b[axis + 3])
         .map(|b| {
@@ -221,9 +222,30 @@ pub fn face_full(boxes: &[Box3], direction: usize) -> bool {
             (s[axis], s[axis + 3]) = (0.0, 1.0);
             s
         })
-        .collect();
+        .collect()
+}
+
+/// `Block.isFaceFull(shape, direction)`: the shape's [`face_slice`] there is a full block, so it
+/// covers the whole face and nothing past it.
+pub fn face_full(boxes: &[Box3], direction: usize) -> bool {
+    let slice = face_slice(boxes, direction);
     !slice.is_empty() && full_block(&slice)
 }
+
+/// `SupportType.isSupporting` of a support shape's face (`direction` by ordinal): FULL (0) the
+/// whole face (`Block.isFaceFull`); CENTER (1) its middle, nothing of `Block.box(7, 0, 7, 9, 10,
+/// 9)` outside the face's [`face_slice`]; RIGID (2) its rim, nothing of the block less
+/// `Block.box(2, 0, 2, 14, 16, 14)` outside it.
+pub fn sturdy(boxes: &[Box3], direction: usize, support: usize) -> bool {
+    const PX: f64 = 1.0 / 16.0;
+    let test = match support {
+        0 => return face_full(boxes, direction),
+        1 => vec![[7.0 * PX, 0.0, 7.0 * PX, 9.0 * PX, 10.0 * PX, 9.0 * PX]],
+        _ => join(&[FULL], &[[2.0 * PX, 0.0, 2.0 * PX, 14.0 * PX, 1.0, 14.0 * PX]], ONLY_FIRST),
+    };
+    join(&face_slice(boxes, direction), &test, ONLY_SECOND).is_empty()
+}
+
 const OPS: [(&str, u8); 16] = [
     ("FALSE", 0b0000),
     ("NOT_OR", 0b0001),

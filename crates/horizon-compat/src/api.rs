@@ -1187,6 +1187,128 @@ fn state_shape(rt: &mut Rt, text: &str, collision: bool, args: [V; 4]) -> V {
     crate::shapes::shape(rt, &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]])
 }
 
+const GET_SUPPORT_SHAPE: &str = "getBlockSupportShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+const GET_SUPPORT_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.getBlockSupportShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+const GET_COLLISION: &str = "getCollisionShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+const GET_COLLISION_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.getCollisionShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+const GET_BLOCK_STATE: &str = "net/minecraft/world/level/BlockGetter.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
+/// `SupportType`'s ordinals and `Direction.UP`'s.
+const SUPPORT_CENTER: usize = 1;
+const SUPPORT_RIGID: usize = 2;
+const UP: usize = 1;
+
+/// `state.isFaceSturdy(level, pos, direction, support)` for state `text` (`support` by
+/// `SupportType`'s ordinal). A vanilla block's is the game's (vanilla's own answer, which doesn't
+/// depend on where the block stands). A mod block's comes from its [`support_shape`], tested as
+/// `SupportType` tests a face.
+pub(crate) fn face_sturdy(rt: &mut Rt, text: &str, [state, level, pos]: [V; 3], direction: usize, support: usize) -> bool {
+    if own_block(rt, text).is_none()
+        && let Some(f) = rt.host().and_then(|h| h.block_facts(text))
+    {
+        return f.sturdy & 1 << (support.min(2) * 6 + direction.min(5)) != 0;
+    }
+    let shape = support_shape(rt, text, [state, level, pos]);
+    let boxes = crate::shapes::boxes(rt, shape).unwrap_or_default();
+    crate::shapes::sturdy(&boxes, direction.min(5), support.min(2))
+}
+
+/// The mod's own block object behind state `text` and its class: one the mod made itself.
+fn own_block(rt: &Rt, text: &str) -> Option<(V, &'static str)> {
+    crate::glue::mod_block(rt, text).filter(|(b, _)| rt.str_of(*b).is_none())
+}
+
+/// `state.getBlockSupportShape(level, pos)` for state `text`, as 1.21.1 finds it: a mod block's
+/// own `getBlockSupportShape`; else that of the vanilla class it is or extends, for a class with
+/// its own ([`crate::blocks::SUPPORT_SHAPED`]: leaves hold nothing up, a snow layer by its
+/// layers); else, as `BlockBehaviour`'s, its [`collision_shape`].
+fn support_shape(rt: &mut Rt, text: &str, [state, level, pos]: [V; 3]) -> V {
+    let own = own_block(rt, text);
+    if let Some((blk, class)) = own
+        && let Some(s) = own_shape(rt, class, GET_SUPPORT_SHAPE_KEY, GET_SUPPORT_SHAPE, &[blk, state, level, pos])
+    {
+        return s;
+    }
+    let class = match own {
+        Some((_, class)) => crate::rotation::vanilla_base(rt, class),
+        None => {
+            let (name, _) = crate::host::split_state(text);
+            let table = &crate::vanilla_classes::BLOCKS;
+            table.binary_search_by(|(id, _)| (*id).cmp(name)).map_or("net/minecraft/world/level/block/Block", |i| table[i].1)
+        }
+    };
+    match crate::blocks::declaring_class(class, &crate::blocks::SUPPORT_SHAPED) {
+        Some(c) if c != "BlockBehaviour" => declared_support_shape(rt, c, text, [state, level, pos]),
+        _ => collision_shape(rt, text, own, [state, level, pos]),
+    }
+}
+
+/// The support shape vanilla class `class` (one of [`crate::blocks::SUPPORT_SHAPED`]) declares,
+/// for state `text`: 1.21.1's, or a hanging sign's, its shape.
+fn declared_support_shape(rt: &mut Rt, class: &str, text: &str, [state, level, pos]: [V; 3]) -> V {
+    let (_, props) = crate::host::split_state(text);
+    match crate::blocks::vanilla_support_shape(class, &props) {
+        Some(pixels) => {
+            let boxes: Vec<crate::shapes::Box3> = pixels.iter().map(|b| b.map(|v| v / 16.0)).collect();
+            crate::shapes::shape(rt, &boxes)
+        }
+        None => {
+            let ctx = crate::shapes::empty_context(rt);
+            state_shape(rt, text, false, [state, level, pos, ctx])
+        }
+    }
+}
+
+/// `block.getCollisionShape(state, level, pos, CollisionContext.empty())` for state `text`, of
+/// `own`, the mod's block object and class when it made one: its own `getCollisionShape`; else
+/// [`behaviour_collision`] when its vanilla class has `BlockBehaviour`'s; else [`state_shape`]'s.
+fn collision_shape(rt: &mut Rt, text: &str, own: Option<(V, &'static str)>, [state, level, pos]: [V; 3]) -> V {
+    let ctx = crate::shapes::empty_context(rt);
+    if let Some((blk, class)) = own {
+        if let Some(s) = own_shape(rt, class, GET_COLLISION_KEY, GET_COLLISION, &[blk, state, level, pos, ctx]) {
+            return s;
+        }
+        let base = crate::rotation::vanilla_base(rt, class);
+        if crate::blocks::declaring_class(base, &crate::blocks::COLLISION_SHAPED) == Some("BlockBehaviour") {
+            return behaviour_collision(rt, blk, [state, level, pos]);
+        }
+    }
+    state_shape(rt, text, true, [state, level, pos, ctx])
+}
+
+/// `BlockBehaviour.getCollisionShape(state, level, pos, context)` of block `blk`: none when its
+/// properties say `noCollission`, else the state's shape (`state.getShape(level, pos)`, the
+/// block's own `getShape`).
+fn behaviour_collision(rt: &mut Rt, blk: V, [state, level, pos]: [V; 3]) -> V {
+    let props = rt.get_field(blk, "$properties");
+    if props.r() != 0 && rt.get_field(props, "$noCollision").i() != 0 {
+        return crate::shapes::shape(rt, &[]);
+    }
+    let text = rt.str_of(state).unwrap_or("minecraft:air").to_owned();
+    let ctx = crate::shapes::empty_context(rt);
+    state_shape(rt, &text, false, [state, level, pos, ctx])
+}
+
+/// The mod's own `short` (`key`) on its block of class `class`, when the class overrides it and
+/// it answers with a shape.
+fn own_shape(rt: &mut Rt, class: &str, key: &'static str, short: &'static str, args: &[V]) -> Option<V> {
+    if !rt.overrides.is_some_and(|o| o(class, short)) {
+        return None;
+    }
+    let shape = (rt.vcall?)(rt, key, short, args);
+    if rt.thrown.is_none() && crate::shapes::boxes(rt, shape).is_some() {
+        return Some(shape);
+    }
+    rt.report_thrown(short.split('.').next().unwrap_or(short));
+    None
+}
+
+/// The block state `level` has at `pos` (a mod's own level answers for itself) and its text.
+fn level_state(rt: &mut Rt, level: V, pos: V) -> (V, String) {
+    let state = crate::menus::virt(rt, GET_BLOCK_STATE, level, &[pos]);
+    let text = rt.str_of(state).unwrap_or("minecraft:air").to_owned();
+    (state, text)
+}
+
 /// Guava's `DoubleMath.fuzzyEquals`.
 fn fuzzy_equals(x: f64, y: f64, tolerance: f64) -> bool {
     (x - y).abs() <= tolerance || x == y || (x.is_nan() && y.is_nan())
@@ -1699,6 +1821,43 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 
         // `Block.getSeed(state, pos)`, a mod block's `super.` call: `Mth.getSeed(pos)`.
         ("net/minecraft/world/level/block/Block", "getSeed") if BLOCK_SEED_KEY.ends_with(desc) => pos_seed(rt, a(2)),
+        // `Block.canSupportRigidBlock(level, pos)`: the top of the block there holds a rigid one
+        // (a rail, redstone dust). On any block class, as `javac` names the class a call was
+        // written on.
+        (o, "canSupportRigidBlock") if o.starts_with("net/minecraft/world/level/block/") && desc == "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Z" => {
+            let (state, text) = level_state(rt, a(0), a(1));
+            V::I(i32::from(face_sturdy(rt, &text, [state, a(0), a(1)], UP, SUPPORT_RIGID)))
+        }
+        // `Block.canSupportCenter(level, pos, direction)`: the middle of that face holds a post (a
+        // torch, a lantern), but never the bottom of an `unstable_bottom_center` block.
+        (o, "canSupportCenter")
+            if o.starts_with("net/minecraft/world/level/block/") && desc == "(Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z" =>
+        {
+            let (state, text) = level_state(rt, a(0), a(1));
+            let direction = usize::from(crate::api_common::direction_ordinal(rt, a(2)));
+            let (b, _) = crate::host::split_state(&text);
+            let unstable = direction == 0 && rt.host().is_some_and(|h| h.block_in_tag(b, "minecraft:unstable_bottom_center"));
+            V::I(i32::from(!unstable && face_sturdy(rt, &text, [state, a(0), a(1)], direction, SUPPORT_CENTER)))
+        }
+        // `super.getCollisionShape(state, level, pos, context)` to a class with `BlockBehaviour`'s.
+        (o, "getCollisionShape")
+            if GET_COLLISION_KEY.ends_with(desc) && crate::blocks::declaring_class(o, &crate::blocks::COLLISION_SHAPED) == Some("BlockBehaviour") =>
+        {
+            behaviour_collision(rt, a(0), [a(1), a(2), a(3)])
+        }
+        // `super.getBlockSupportShape(state, level, pos)` to a vanilla block class: its own (a
+        // leaf's), else `BlockBehaviour`'s, the block's collision shape.
+        (o, "getBlockSupportShape") if GET_SUPPORT_SHAPE_KEY.ends_with(desc) && crate::blocks::declaring_class(o, &crate::blocks::SUPPORT_SHAPED).is_some() => {
+            let text = rt.str_of(a(1)).unwrap_or("minecraft:air").to_owned();
+            match crate::blocks::declaring_class(o, &crate::blocks::SUPPORT_SHAPED).unwrap_or_default() {
+                "BlockBehaviour" => {
+                    let class = rt.class_of(a(0));
+                    let own = rt.is_mod_class(class).then_some((a(0), class));
+                    collision_shape(rt, &text, own, [a(1), a(2), a(3)])
+                }
+                c => declared_support_shape(rt, c, &text, [a(1), a(2), a(3)]),
+            }
+        }
 
         // Block states
         (STATE | "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase", n) => {
@@ -1751,6 +1910,15 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "isSlimeBlock" | "isStickyBlock" if desc == "()Z" => V::I(sticky(rt, n, a(0), V::NULL) as i32),
                 "canStickTo" if desc == "(Lnet/minecraft/world/level/block/state/BlockState;)Z" => V::I(sticky(rt, n, a(0), a(1)) as i32),
                 "getDestroySpeed" => V::F(crate::blocks::state_facts(rt, &text).hardness),
+                // `isFaceSturdy(level, pos, direction[, support])`: FULL unless it says.
+                "isFaceSturdy" if desc.starts_with("(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;") => {
+                    let direction = usize::from(crate::api_common::direction_ordinal(rt, a(3)));
+                    let support = if desc.contains("SupportType;)") { rt.get_field(a(4), "$ordinal").i().clamp(0, 2) as usize } else { 0 };
+                    V::I(i32::from(face_sturdy(rt, &text, [a(0), a(1), a(2)], direction, support)))
+                }
+                "getBlockSupportShape" if desc == "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;" => {
+                    support_shape(rt, &text, [a(0), a(1), a(2)])
+                }
                 "canBeReplaced" if desc == "()Z" => V::I(crate::blocks::state_facts(rt, &text).replaceable as i32),
                 // `canBeReplaced(context)`: the mod block's own, else `BlockBehaviour`'s: a
                 // replaceable block, unless the stack placed is its own item.
@@ -2736,5 +2904,143 @@ mod tests {
         assert_eq!(call(&mut rt, get, &[storage, factory, name]), first);
         let second = call(&mut rt, compute, &[storage, factory, other]);
         assert_ne!(second, first);
+    }
+
+    const IS_FACE_STURDY: &str = "net/minecraft/world/level/block/state/BlockState.isFaceSturdy.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z";
+    const IS_FACE_STURDY_AS: &str = "net/minecraft/world/level/block/state/BlockState.isFaceSturdy.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/SupportType;)Z";
+    const SUPPORT_SHAPE_OF_STATE: &str = "net/minecraft/world/level/block/state/BlockState.getBlockSupportShape.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+    const PX: f64 = 1.0 / 16.0;
+
+    /// Mod blocks for the support tests: a post, a bottom slab, a thin pillar the mod says holds
+    /// as a whole block, and a plain block.
+    fn shaped_blocks(rt: &mut Rt) {
+        fn overrides(class: &str, short: &str) -> bool {
+            matches!(class, "test/Post" | "test/Slab" | "test/Pillar") && short == GET_SHAPE || class == "test/Pillar" && short == GET_SUPPORT_SHAPE
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match (rt.class_of(args[0]), short) {
+                ("test/Post" | "test/Pillar", GET_SHAPE) => crate::shapes::shape(rt, &[[6.0 * PX, 0.0, 6.0 * PX, 10.0 * PX, 1.0, 10.0 * PX]]),
+                ("test/Slab", GET_SHAPE) => crate::shapes::shape(rt, &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]),
+                ("test/Pillar", GET_SUPPORT_SHAPE) => crate::shapes::shape(rt, &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]),
+                _ => call(rt, key, args),
+            }
+        }
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        for (class, name) in [("test/Post", "test:post"), ("test/Slab", "test:slab"), ("test/Pillar", "test:pillar"), ("test/Gate", "test:gate")] {
+            rt.supers.insert(class, "net/minecraft/world/level/block/Block");
+            let b = rt.new_object(class);
+            rt.registered.insert(("block".into(), name.into()), b);
+        }
+    }
+
+    /// `isFaceSturdy`: a vanilla block's answer is the game's; a mod block's comes from its
+    /// support shape, tested as 1.21.1's `SupportType` tests a face. A post's top holds a torch's
+    /// middle but not a rail's rim, a bottom slab's side not even a torch. `canSupportCenter` and
+    /// `canSupportRigidBlock` ask about the block where they look, but nothing hangs under an
+    /// `unstable_bottom_center` block.
+    #[test]
+    fn a_faces_sturdiness_is_the_games_or_the_mod_blocks_support_shape() {
+        let mut rt = Rt::new();
+        crate::install();
+        shaped_blocks(&mut rt);
+        let mut host = crate::host::MemoryHost::default();
+        // An unconnected fence, as the game exports it: only the middles of its top and bottom.
+        let fence = crate::host::BlockFacts { hardness: 2.0, push: 0, replaceable: false, sturdy: 1 << (6 + 1) | 1 << 6 };
+        host.facts.insert("minecraft:oak_fence".into(), fence);
+        host.facts.insert("minecraft:stone".into(), crate::host::BlockFacts { hardness: 1.5, push: 0, replaceable: false, sturdy: (1 << 18) - 1 });
+        host.blocks.insert([0, 64, 0], "minecraft:stone".into());
+        host.blocks.insert([1, 64, 0], "test:gate".into());
+        host.blocks.insert([2, 64, 0], "test:post".into());
+        host.block_tags.insert("minecraft:unstable_bottom_center".into(), vec!["test:gate".into()]);
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let pos = block_pos(rt, 0, 64, 0);
+            let (down, up, north) = (direction(rt, 0), direction(rt, 1), direction(rt, 2));
+            let center = get_static(rt, "net/minecraft/world/level/block/SupportType.CENTER");
+            let rigid = get_static(rt, "net/minecraft/world/level/block/SupportType.RIGID");
+            let sturdy = |rt: &mut Rt, text: &str, face: V, support: Option<V>| {
+                let st = state(rt, text);
+                let held = match support {
+                    None => call(rt, IS_FACE_STURDY, &[st, level, pos, face]),
+                    Some(s) => call(rt, IS_FACE_STURDY_AS, &[st, level, pos, face, s]),
+                };
+                held == V::I(1)
+            };
+            let fence = "minecraft:oak_fence[east=false,north=false,south=false,waterlogged=false,west=false]";
+            assert!(!sturdy(rt, fence, up, None));
+            assert!(sturdy(rt, fence, up, Some(center)));
+            assert!(!sturdy(rt, "test:post", up, None));
+            assert!(sturdy(rt, "test:post", up, Some(center)));
+            assert!(!sturdy(rt, "test:post", up, Some(rigid)));
+            assert!(!sturdy(rt, "test:post", north, Some(center)));
+            assert!(sturdy(rt, "test:slab", down, None));
+            assert!(!sturdy(rt, "test:slab", up, Some(center)));
+            assert!(!sturdy(rt, "test:slab", north, Some(center)));
+            assert!(sturdy(rt, "test:pillar", up, None));
+            assert!(sturdy(rt, "test:pillar", north, Some(rigid)));
+
+            let (stone, gate, post, air) = (pos, block_pos(rt, 1, 64, 0), block_pos(rt, 2, 64, 0), block_pos(rt, 5, 64, 0));
+            let center_at = |rt: &mut Rt, at: V, face: V| call(rt, "net/minecraft/world/level/block/Block.canSupportCenter.(Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z", &[level, at, face]) == V::I(1);
+            assert!(center_at(rt, stone, down));
+            assert!(!center_at(rt, gate, down));
+            assert!(center_at(rt, gate, up));
+            let rigid_at = |rt: &mut Rt, at: V| call(rt, "net/minecraft/world/level/block/Block.canSupportRigidBlock.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Z", &[level, at]) == V::I(1);
+            assert!(rigid_at(rt, stone));
+            assert!(!rigid_at(rt, post));
+            assert!(!rigid_at(rt, air));
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `getBlockSupportShape`, as 1.21.1 finds it: a vanilla class's own (leaves hold nothing up, a
+    /// snow layer by its layers, a closed gate a bar above its middle), also for a mod block
+    /// extending the class; else, as `BlockBehaviour`'s, the collision shape: none for a block
+    /// without collision, whatever its outline. A mod block's `super.` calls reach the same.
+    #[test]
+    fn a_support_shape_is_the_classes_own_else_the_collision_shape() {
+        let mut rt = Rt::new();
+        crate::install();
+        shaped_blocks(&mut rt);
+        rt.supers.insert("test/Hedge", "net/minecraft/world/level/block/LeavesBlock");
+        rt.supers.insert("test/Ghost", "net/minecraft/world/level/block/Block");
+        let (hedge, ghost) = (rt.new_object("test/Hedge"), rt.new_object("test/Ghost"));
+        let props = rt.new_object(crate::blocks::BLOCK_PROPERTIES);
+        call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.noCollission.()Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[props]);
+        rt.put_field(ghost, "$properties", props);
+        rt.registered.insert(("block".into(), "test:hedge".into()), hedge);
+        rt.registered.insert(("block".into(), "test:ghost".into()), ghost);
+        let level = crate::glue::level(&mut rt);
+        let pos = block_pos(&mut rt, 0, 64, 0);
+        let support = |rt: &mut Rt, text: &str| {
+            let st = state(rt, text);
+            let shape = call(rt, SUPPORT_SHAPE_OF_STATE, &[st, level, pos]);
+            crate::shapes::boxes(rt, shape).expect("a shape")
+        };
+        let none: Vec<crate::shapes::Box3> = Vec::new();
+        assert_eq!(support(&mut rt, "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]"), none);
+        assert_eq!(support(&mut rt, "minecraft:snow[layers=3]"), vec![[0.0, 0.0, 0.0, 1.0, 6.0 * PX, 1.0]]);
+        let gate = "minecraft:oak_fence_gate[facing=east,in_wall=false,open=false,powered=false]";
+        assert_eq!(support(&mut rt, gate), vec![[6.0 * PX, 5.0 * PX, 0.0, 10.0 * PX, 1.5, 1.0]]);
+        assert_eq!(support(&mut rt, "minecraft:stone"), vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]);
+        assert_eq!(support(&mut rt, "test:hedge[distance=7,persistent=false,waterlogged=false]"), none);
+        assert_eq!(support(&mut rt, "test:ghost"), none);
+        assert_eq!(support(&mut rt, "test:post"), vec![[6.0 * PX, 0.0, 6.0 * PX, 10.0 * PX, 1.0, 10.0 * PX]]);
+
+        let ctx = crate::shapes::empty_context(&mut rt);
+        let ghost_state = state(&mut rt, "test:ghost");
+        let collision = "net/minecraft/world/level/block/Block.getCollisionShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+        let shape = call(&mut rt, collision, &[ghost, ghost_state, level, pos, ctx]);
+        assert_eq!(crate::shapes::boxes(&rt, shape), Some(none.clone()));
+        let hedge_state = state(&mut rt, "test:hedge[distance=7,persistent=false,waterlogged=false]");
+        let leaves = "net/minecraft/world/level/block/LeavesBlock.getBlockSupportShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+        let shape = call(&mut rt, leaves, &[hedge, hedge_state, level, pos]);
+        assert_eq!(crate::shapes::boxes(&rt, shape), Some(none));
+        let post = rt.registered[&("block".to_owned(), "test:post".to_owned())];
+        let post_state = state(&mut rt, "test:post");
+        let behaviours = "net/minecraft/world/level/block/Block.getBlockSupportShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+        let shape = call(&mut rt, behaviours, &[post, post_state, level, pos]);
+        assert_eq!(crate::shapes::boxes(&rt, shape), Some(vec![[6.0 * PX, 0.0, 6.0 * PX, 10.0 * PX, 1.0, 10.0 * PX]]));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

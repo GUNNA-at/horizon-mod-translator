@@ -4732,6 +4732,32 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     text). `itemMatcher`, `loadInto` and the codec forms `read` and `update(ops, encoder, value)`
     aren't modelled.
   - Test: `components::tests::a_stacks_custom_data_is_vanillas_and_crosses_to_the_game`.
+- [x] 2026-11-06 Part 47: a face's sturdiness and a block's support shape. packcov10: 41 mods call
+  `BlockState.isFaceSturdy` (130 uses), 8 `BlockState.getBlockSupportShape` (Create among them), 7
+  `Block.canSupportCenter`, 4 `Block.canSupportRigidBlock`, 11 a `super.getCollisionShape`. None
+  was modelled.
+  - A vanilla block's `isFaceSturdy` is the game's own answer, vanilla's for that state: the game
+    already exports it (`StateFacts.sturdy`, a bit per direction for each of FULL, CENTER and
+    RIGID), and `BlockFacts.sturdy` now carries it to the runtime (`native_state_facts`).
+  - A mod block's comes from its support shape, tested as 1.21.1's `SupportType` tests a face
+    (`shapes::sturdy`, on the slice `VoxelShape.getFaceShape` takes): FULL the whole face
+    (`Block.isFaceFull`), CENTER its middle (`Block.box(7, 0, 7, 9, 10, 9)`), RIGID its rim.
+  - `getBlockSupportShape` as 1.21.1 finds it: the mod block's own; else that of the vanilla class
+    it is or extends, for a class that declares one (leaves none, mud and soul sand a full block,
+    a snow layer by its layers, a closed fence gate its bar, a chorus flower its box, a hanging sign
+    its shape); else `BlockBehaviour`'s, the collision shape: the mod block's own
+    `getCollisionShape`, else none without collision (`noCollission`), else its shape. Which
+    1.21.1 classes declare their own `getBlockSupportShape` (9) and `getCollisionShape` (21) is
+    measured from 1.21.1's class files (the same scan gives the 99 classes of
+    `DEFAULT_SHAPE_BLOCKS`); a class's chain comes from the generated table of 1.21.1's classes.
+  - `canSupportCenter(level, pos, direction)`, never under an `unstable_bottom_center` block, and
+    `canSupportRigidBlock(level, pos)`, of the block the level has there. `super.getCollisionShape`
+    to a class with `BlockBehaviour`'s, and `super.getBlockSupportShape` to any vanilla block class.
+  - Difference: an open shulker box holds as a closed one (vanilla reads its block entity while it
+    opens). In the game itself, a content mod block's sturdy faces are still its template's (the
+    game's own placement checks), not its shapes'.
+  - Tests: `api::tests::a_faces_sturdiness_is_the_games_or_the_mod_blocks_support_shape`,
+    `a_support_shape_is_the_classes_own_else_the_collision_shape`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

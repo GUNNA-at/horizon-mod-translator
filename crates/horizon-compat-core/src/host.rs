@@ -1155,6 +1155,10 @@ pub struct BlockFacts {
     pub push: u8,
     /// Whether placing a block where it is replaces it (`canBeReplaced()`).
     pub replaceable: bool,
+    /// Which of its faces are sturdy (`isFaceSturdy(level, pos, direction, support)`, which
+    /// doesn't depend on where a vanilla block stands): bit `support * 6 + direction`, with
+    /// `SupportType`'s ordinal (FULL 0, CENTER 1, RIGID 2) and `Direction`'s.
+    pub sturdy: u32,
 }
 
 /// What a tool (an item's `minecraft:tool` component) does to one block state.

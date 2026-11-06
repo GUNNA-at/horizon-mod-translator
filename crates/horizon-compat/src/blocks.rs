@@ -413,10 +413,11 @@ const GET_PUSH_REACTION_KEY: &str =
 /// What vanilla's `BlockStateBase` keeps of a block's properties, for state `text`: a mod block's
 /// from what its `Properties` recorded, over the vanilla block they copy (`ofFullCopy`); a vanilla
 /// block's from the game. Where neither says, `Properties.of()`'s: breaks at once, pistons push
-/// and pull it, placing doesn't replace it.
+/// and pull it, placing doesn't replace it, a full cube's faces are sturdy. (A mod block's own
+/// faces come from its shapes: `api::face_sturdy`.)
 pub(crate) fn state_facts(rt: &Rt, text: &str) -> BlockFacts {
     let (name, _) = crate::host::split_state(text);
-    let java = BlockFacts { hardness: 0.0, push: 0, replaceable: false };
+    let java = BlockFacts { hardness: 0.0, push: 0, replaceable: false, sturdy: (1 << 18) - 1 };
     let from_game = |text: &str| rt.host().and_then(|h| h.block_facts(text));
     // A vanilla block's object is its name; a mod's holds fields.
     let Some(b) = rt.registered.get(&("block".to_owned(), name.to_owned())).copied().filter(|b| rt.str_of(*b).is_none()) else {
@@ -679,6 +680,63 @@ const DEFAULT_SHAPE_BLOCKS: [&str; 99] = [
     "WaterloggedTransparentBlock", "WeatheringCopperBulbBlock", "WeatheringCopperFullBlock", "WeatheringCopperGrateBlock", "WebBlock",
     "WetSpongeBlock",
 ];
+
+/// The block classes of 1.21.1 declaring their own `getCollisionShape(state, level, pos, context)`,
+/// as Minecraft 1.21.1's class files say (`piston/` names that package's).
+pub(crate) const COLLISION_SHAPED: [&str; 21] = [
+    "BambooStalkBlock", "BellBlock", "BigDripleafBlock", "CactusBlock", "ComposterBlock", "CrossCollisionBlock", "FenceGateBlock",
+    "GrindstoneBlock", "HoneyBlock", "LecternBlock", "LiquidBlock", "MudBlock", "PitcherCropBlock", "PowderSnowBlock", "ScaffoldingBlock",
+    "SculkShriekerBlock", "SnowLayerBlock", "SoulSandBlock", "WallBlock", "WallHangingSignBlock", "piston/MovingPistonBlock",
+];
+
+/// ... and their own `getBlockSupportShape(state, level, pos)`.
+pub(crate) const SUPPORT_SHAPED: [&str; 9] = [
+    "CeilingHangingSignBlock", "ChorusFlowerBlock", "FenceGateBlock", "LeavesBlock", "MudBlock", "ShulkerBoxBlock", "SnowLayerBlock",
+    "SoulSandBlock", "WallHangingSignBlock",
+];
+
+/// The class whose method 1.21.1's block class `class` runs, given the classes `declaring` their
+/// own (as [`COLLISION_SHAPED`] names them): the first of `class` and the classes above it that is
+/// one of them, else `"BlockBehaviour"`. None for a class the generated table of 1.21.1's classes
+/// doesn't have.
+pub(crate) fn declaring_class(class: &str, declaring: &[&'static str]) -> Option<&'static str> {
+    use crate::vanilla_classes::CLASSES;
+    let mut c = class;
+    for _ in 0..32 {
+        let short = c.strip_prefix("net/minecraft/world/level/block/")?;
+        if let Some(d) = declaring.iter().find(|d| **d == short) {
+            return Some(d);
+        }
+        if matches!(short, "Block" | "state/BlockBehaviour") {
+            return Some("BlockBehaviour");
+        }
+        c = CLASSES[CLASSES.binary_search_by(|e| e.0.cmp(c)).ok()?].1;
+    }
+    None
+}
+
+/// Vanilla 1.21.1's own `getBlockSupportShape` of [`SUPPORT_SHAPED`] class `class` for a state
+/// with properties `props`, in pixels as `Block.box` takes them, read from 1.21.1's classes. None
+/// for a hanging sign's, which is its shape. A shulker box's is a closed one's: an open box's
+/// (while it opens) needs its block entity.
+pub(crate) fn vanilla_support_shape(class: &str, props: &[(&str, &str)]) -> Option<Vec<[f64; 6]>> {
+    let get = |k: &str| props.iter().find(|(n, _)| *n == k).map_or("", |(_, v)| *v);
+    Some(match class {
+        "LeavesBlock" => Vec::new(),
+        "MudBlock" | "SoulSandBlock" | "ShulkerBoxBlock" => vec![[0.0, 0.0, 0.0, 16.0, 16.0, 16.0]],
+        // `SHAPE_BY_LAYER[layers]`: two pixels a layer.
+        "SnowLayerBlock" => {
+            let layers = get("layers").parse::<u8>().unwrap_or(1).clamp(1, 8);
+            vec![[0.0, 0.0, 0.0, 16.0, 2.0 * f64::from(layers), 16.0]]
+        }
+        "ChorusFlowerBlock" => vec![[1.0, 0.0, 1.0, 15.0, 15.0, 15.0]],
+        // Open: none; closed: a bar along the gate, from 5 pixels up to a fence's height.
+        "FenceGateBlock" if get("open") == "true" => Vec::new(),
+        "FenceGateBlock" if matches!(get("facing"), "north" | "south") => vec![[0.0, 5.0, 6.0, 16.0, 24.0, 10.0]],
+        "FenceGateBlock" => vec![[6.0, 5.0, 0.0, 10.0, 24.0, 16.0]],
+        _ => return None,
+    })
+}
 
 /// The block classes of 1.21.1 whose scheduled `tick(state, level, pos, random)` is `BlockBehaviour`'s,
 /// which does nothing: neither they nor a class above them declares one, as Minecraft 1.21.1's class
@@ -3775,9 +3833,9 @@ mod tests {
         let mut rt = Rt::new();
         crate::install();
         let mut host = crate::host::MemoryHost::default();
-        host.facts.insert("minecraft:oak_planks".into(), BlockFacts { hardness: 2.0, push: 0, replaceable: false });
-        host.facts.insert("minecraft:obsidian".into(), BlockFacts { hardness: 50.0, push: 2, replaceable: false });
-        host.facts.insert("minecraft:short_grass".into(), BlockFacts { hardness: 0.0, push: 1, replaceable: true });
+        host.facts.insert("minecraft:oak_planks".into(), BlockFacts { hardness: 2.0, push: 0, replaceable: false, sturdy: (1 << 18) - 1 });
+        host.facts.insert("minecraft:obsidian".into(), BlockFacts { hardness: 50.0, push: 2, replaceable: false, sturdy: (1 << 18) - 1 });
+        host.facts.insert("minecraft:short_grass".into(), BlockFacts { hardness: 0.0, push: 1, replaceable: true, sturdy: 0 });
         let k = |s: &str| -> &'static str { Box::leak(format!("{BLOCK_PROPERTIES}.{s}").into_boxed_str()) };
         // A mod block pistons can't move, which nothing breaks.
         let p = props(&mut rt);
