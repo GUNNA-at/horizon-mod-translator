@@ -167,6 +167,17 @@ fn find_block(rt: &mut Rt, cap: V, level: V, pos: V, state: V, be: V, side: V) -
     V::NULL
 }
 
+/// `level.getCapability(Capabilities.ItemHandler.BLOCK, pos, side)` at `at`, through `side` (a 3D
+/// data value): the item handler NeoForge's hoppers, droppers and crafters find there
+/// (`VanillaInventoryCodeHooks.getItemHandlerAt`), or null.
+pub(crate) fn block_item_handler(rt: &mut Rt, at: [i32; 3], side: u8) -> V {
+    let cap = capability(rt, BLOCK_CAP, ITEM_HANDLER);
+    let level = crate::glue::level(rt);
+    let pos = api::block_pos(rt, i64::from(at[0]), i64::from(at[1]), i64::from(at[2]));
+    let side = api::direction(rt, i64::from(side));
+    find_block(rt, cap, level, pos, V::NULL, V::NULL, side)
+}
+
 /// The item capability `cap` of a stack: the providers registered for its item.
 fn find_item(rt: &mut Rt, cap: V, stack: V, context: V) -> V {
     if crate::api_common::stack_empty(rt, stack) {

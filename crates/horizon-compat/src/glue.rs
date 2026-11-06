@@ -733,6 +733,57 @@ pub fn state_for_placement(rt: &mut Rt, host: &mut dyn Host, state: &str, placem
     })
 }
 
+/// `native_hopper_insert`: NeoForge's `VanillaInventoryCodeHooks.insertHook` for the hopper at `pos`
+/// facing `facing` (a 3D data value): whether one of its items went into the item handler in front
+/// ([`crate::item_wrappers::insert_hook`]). None when there is no handler there: the game goes on
+/// with its own containers.
+pub fn hopper_insert(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], facing: u8) -> Option<bool> {
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let moved = crate::item_wrappers::insert_hook(rt, pos, facing);
+        rt.report_thrown("insertHook");
+        moved
+    })
+}
+
+/// `native_hopper_extract`: NeoForge's `VanillaInventoryCodeHooks.extractHook` for the hopper at
+/// `pos`: whether it took an item from the item handler above it. None when there is no handler
+/// there: the hopper sucks up items lying above, as the game's does.
+pub fn hopper_extract(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3]) -> Option<bool> {
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let took = crate::item_wrappers::extract_hook(rt, pos);
+        rt.report_thrown("extractHook");
+        took
+    })
+}
+
+/// `native_dropper_insert`: NeoForge's `VanillaInventoryCodeHooks.dropperInsertHook` for the dropper
+/// at `pos` facing `facing`, dropping from slot `slot`: whether an item handler in front took the
+/// turn (one item in when it fits, the slot as it was when not; nothing drops either way).
+pub fn dropper_insert(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], facing: u8, slot: u32) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let handled = crate::item_wrappers::dropper_insert_hook(rt, pos, facing, slot as i32);
+        rt.report_thrown("dropperInsertHook");
+        handled
+    })
+}
+
+/// `native_crafter_output`: NeoForge's `VanillaInventoryCodeHooks.insertCrafterOutput` for the
+/// crafter at `pos` whose front is `facing`, with no container of the game's in front: what of
+/// `stack` the item handler there doesn't take (None: it took it all). None when there is no
+/// handler there.
+pub fn crafter_output(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], facing: u8, stack: crate::host::HandStack) -> Option<Option<crate::host::HandStack>> {
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let s = crate::hand::load(rt, Some(stack));
+        let rest = crate::item_wrappers::crafter_output(rt, pos, facing, s);
+        rt.report_thrown("insertCrafterOutput");
+        rest.map(|r| crate::hand::hand_stack_of(rt, r))
+    })
+}
+
 /// `native_can_survive`: `BlockState.canSurvive` of the mod block `state` at `pos` by the mod's own
 /// code ([`crate::blocks::mod_survives`]: the block's `canSurvive`, else its vanilla plant base's
 /// with its `mayPlaceOn`). None where the block isn't the mod's or its code leaves it to the game's

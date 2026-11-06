@@ -1,0 +1,11 @@
+{
+  "hooks": [
+    {"name": "hopper_insert", "target": "horizon_client::game::native_hooks::Game<'_>::native_hopper_insert", "neoforge": "VanillaInventoryCodeHooks.insertHook", "side": "server"},
+    {"name": "hopper_extract", "target": "horizon_client::game::native_hooks::Game<'_>::native_hopper_extract", "neoforge": "VanillaInventoryCodeHooks.extractHook", "side": "server"},
+    {"name": "dropper_insert", "target": "horizon_client::game::native_hooks::Game<'_>::native_dropper_insert", "neoforge": "VanillaInventoryCodeHooks.dropperInsertHook", "side": "server"},
+    {"name": "crafter_output", "target": "horizon_client::game::native_hooks::Game<'_>::native_crafter_output", "neoforge": "VanillaInventoryCodeHooks.insertCrafterOutput", "side": "server"}
+  ],
+  "rust_summary": "hoppers, droppers and crafters meeting a mod's machine (`native_hopper_insert`, `native_hopper_extract`, `native_dropper_insert`, `native_crafter_output`).",
+  "doc_summary": "hoppers, droppers and crafters meeting a mod's machine, as NeoForge's `VanillaInventoryCodeHooks` patches them: each hook runs where the block pushed into or pulled from has no container of the game's own. `native_hopper_insert(pos, facing, moved)`: a hopper pushes one item into the block in front (left false, it tries a container entity there). `native_hopper_extract(pos, took)`: a hopper pulls one item from the block above (`Some(true)` or `Some(false)` when the block has a handler; left None, it sucks up the items lying there). `native_dropper_insert(pos, facing, slot, handled)`: a dropper puts one item of a slot into the block in front, or keeps it; handled, nothing drops. `native_crafter_output(pos, facing, stack)`: a crafter's result goes into the block in front, and what the hook leaves in `stack` flies out. The hopper, dropper and crafter's slots are read and changed through `native_vanilla_container_item` and `native_vanilla_container_set`. Bundles need \"hooks\": @API:vanilla_inventory_hooks@.",
+  "comments": []
+}

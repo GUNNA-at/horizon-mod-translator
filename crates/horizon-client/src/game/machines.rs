@@ -765,6 +765,13 @@ impl Game<'_> {
         if let Some(target) = c.view(front, false) {
             return self.eject_into(pos, hopper, &target, face);
         }
+        // NeoForge's `insertHook`: a mod's machine in front takes it through
+        // its item handler.
+        let mut moved = false;
+        self.native_hopper_insert([pos.0, pos.1, pos.2], facing, &mut moved);
+        if moved {
+            return true;
+        }
         let Some(id) = self.entity_container_at([
             f64::from(front.0) + 0.5,
             f64::from(front.1) + 0.5,
@@ -802,6 +809,15 @@ impl Game<'_> {
             f64::from(pos.1) + 1.5,
             f64::from(pos.2) + 0.5,
         ];
+        // NeoForge's `extractHook`: a mod's machine above gives through its
+        // item handler, and nothing lying there is sucked up then.
+        if self.containers().view(above, false).is_none() {
+            let mut took = None;
+            self.native_hopper_extract([pos.0, pos.1, pos.2], &mut took);
+            if let Some(took) = took {
+                return took;
+            }
+        }
         if let Some(took) = self.suck_from_container(above, at, hopper) {
             return took;
         }
@@ -1117,7 +1133,17 @@ impl Game<'_> {
         let target = offset(key, facing);
         let remaining = if dropper {
             match self.containers().view(target, false) {
-                None => self.dispense_default(key, facing, stack),
+                None => {
+                    // NeoForge's `dropperInsertHook`: a mod's machine in front
+                    // takes one through its item handler, or nothing leaves.
+                    let mut handled = false;
+                    self.native_dropper_insert([pos.x, pos.y, pos.z], facing, slot as u32, &mut handled);
+                    if handled {
+                        self.container_changed(key);
+                        return Ok(());
+                    }
+                    self.dispense_default(key, facing, stack)
+                }
                 Some(into) => {
                     let one = ItemStack {
                         count: 1,

@@ -5477,6 +5477,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a tank of healing fills with healing only and drains it; saved and parsed NBT; the network codec
     round trip). Compat tests 485, translator 19.
   - Left: `FluidStack.hashFluidAndComponents` still hashes the fluid only.
+- [x] 2026-11-06 Part 68: hoppers, droppers and crafters reach mods' machines (NeoForge's `VanillaInventoryCodeHooks`).
+  A vanilla hopper on a Create depot did nothing: NeoForge patches `HopperBlockEntity`,
+  `DropperBlock` and `CrafterBlock` so each asks the block it pushes into or pulls from for its
+  `Capabilities.ItemHandler.BLOCK`, and the game's hoppers knew only the game's own containers.
+  Measured over the pack: 67 jars of 369 use `Capabilities.ItemHandler.BLOCK` (224 classes), and 67
+  register a block entity capability (184 `registerBlockEntity` calls, 15 `registerBlock`); a hopper
+  should reach each of those machines.
+  - horizon-client: four hooks, asked where the block faced has no container of the game's own (the
+    game's containers keep vanilla's rules): `native_hopper_insert` in `ejectItems` (left false, a
+    container entity there is tried), `native_hopper_extract` in `suckInItems` (a block with a handler
+    answers, and the items lying on it stay), `native_dropper_insert` in the dropper's `dispenseFrom`
+    (handled: nothing drops, no sound) and `native_crafter_output` in the crafter's `dispenseItem`
+    (what is left flies out). Fragment `vanilla_inventory_hooks`.
+  - compat `item_wrappers`: NeoForge's `insertHook`, `extractHook`, `dropperInsertHook` and
+    `insertCrafterOutput` as written. Nothing goes into a full handler (`isFull`); one item a turn,
+    the hopper's slot put back for each item the handler refuses; `putStackInInventoryAllSlots`
+    offers a stack to each slot and puts it only where it fits whole (6 bread skip a slot with room
+    for 2); a hopper pulls into its first slot that takes the item, past full ones. The hopper,
+    dropper and crafter are the game's containers (`compat:VanillaContainer`); the handler is the
+    block's (`capabilities::block_item_handler`: the providers in NeoForge's order).
+  - The bundle's helpers (`hopper_insert`, `hopper_extract`, `dropper_insert`, `crafter_output`) ask
+    only when the block faced is one of the mod's.
+  - The `mod_screen_input` and `vanilla_item_handlers` fragments listed files without their marker,
+    which the stamp refuses; they list only files that have it now.
+  - Tests: `item_wrappers::tests::a_hopper_pushes_one_item_a_turn_into_a_mods_handler`,
+    `a_hopper_pulls_one_item_a_turn_out_of_a_mods_handler`,
+    `a_dropper_puts_one_item_into_a_mods_handler_or_keeps_it` and
+    `a_crafters_output_goes_where_it_fits_whole`, against a mod's `ItemStackHandler` registered for
+    its block entity type. Compat tests 489, translator 19.
+  - Left: hopper minecarts (`MinecartHopper.suckInItems` runs `extractHook` too), entities'
+    `ItemHandler.ENTITY_AUTOMATION` in `getItemHandlerAt`, and `insertStack`'s cooldown for a
+    destination that is a `HopperBlockEntity` (a mod's subclass).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

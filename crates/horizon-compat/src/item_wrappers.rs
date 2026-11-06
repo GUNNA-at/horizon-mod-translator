@@ -588,6 +588,189 @@ fn vanilla_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+// --- VanillaInventoryCodeHooks ------------------------------------------------------------------
+//
+// NeoForge's patches to hoppers, droppers and crafters: each asks the block it pushes into or pulls
+// from for its item handler (`Capabilities.ItemHandler.BLOCK`), so a mod's machine takes and gives
+// items as a chest does. The game runs its own rules for its own containers and asks these for the
+// rest (a mod's block), so a hopper's own cooldown for a hopper it fills stays the game's.
+
+const H_SLOTS: &str = "net/neoforged/neoforge/items/IItemHandler.getSlots.()I";
+const H_GET: &str = "net/neoforged/neoforge/items/IItemHandler.getStackInSlot.(I)Lnet/minecraft/world/item/ItemStack;";
+const H_INSERT: &str = "net/neoforged/neoforge/items/IItemHandler.insertItem.(ILnet/minecraft/world/item/ItemStack;Z)Lnet/minecraft/world/item/ItemStack;";
+const H_EXTRACT: &str = "net/neoforged/neoforge/items/IItemHandler.extractItem.(IIZ)Lnet/minecraft/world/item/ItemStack;";
+const H_LIMIT: &str = "net/neoforged/neoforge/items/IItemHandler.getSlotLimit.(I)I";
+/// `Direction.DOWN`'s 3D data value.
+const DOWN: u8 = 0;
+
+/// The block next to `pos` in direction `d` (a 3D data value: down, up, north, south, west, east).
+fn step(pos: [i32; 3], d: u8) -> [i32; 3] {
+    let [x, y, z] = pos;
+    match d {
+        0 => [x, y - 1, z],
+        1 => [x, y + 1, z],
+        2 => [x, y, z - 1],
+        3 => [x, y, z + 1],
+        4 => [x - 1, y, z],
+        _ => [x + 1, y, z],
+    }
+}
+
+/// `getItemHandlerAt`, the block's half: the item handler at `at` reached through `side` (its
+/// providers, NeoForge's own for a vanilla block first); None for none.
+fn handler_at(rt: &mut Rt, at: [i32; 3], side: u8) -> Option<V> {
+    let h = crate::capabilities::block_item_handler(rt, at, side);
+    rt.report_thrown("getCapability");
+    (h.r() != 0).then_some(h)
+}
+
+fn h_slots(rt: &mut Rt, h: V) -> i32 {
+    menus::virt(rt, H_SLOTS, h, &[]).i()
+}
+
+fn h_get(rt: &mut Rt, h: V, slot: i32) -> V {
+    menus::virt(rt, H_GET, h, &[V::I(slot)])
+}
+
+fn h_insert(rt: &mut Rt, h: V, slot: i32, stack: V, simulate: bool) -> V {
+    menus::virt(rt, H_INSERT, h, &[V::I(slot), stack, V::I(simulate as i32)])
+}
+
+fn h_extract(rt: &mut Rt, h: V, slot: i32, n: i32, simulate: bool) -> V {
+    menus::virt(rt, H_EXTRACT, h, &[V::I(slot), V::I(n), V::I(simulate as i32)])
+}
+
+/// `isFull(handler)`: every slot holds as much as the handler lets it.
+fn handler_full(rt: &mut Rt, h: V) -> bool {
+    for slot in 0..h_slots(rt, h) {
+        let s = h_get(rt, h, slot);
+        if api_common::stack_empty(rt, s) || count(rt, s) < menus::virt(rt, H_LIMIT, h, &[V::I(slot)]).i() {
+            return false;
+        }
+    }
+    true
+}
+
+/// `putStackInInventoryAllSlots`: `stack` offered to the handler's slots in order, until none is
+/// left; what is left.
+fn put_in_all_slots(rt: &mut Rt, h: V, mut stack: V) -> V {
+    let mut slot = 0;
+    while slot < h_slots(rt, h) && !api_common::stack_empty(rt, stack) {
+        stack = insert_stack(rt, h, stack, slot);
+        slot += 1;
+    }
+    stack
+}
+
+/// `insertStack`: only a stack the slot takes whole goes in, into an empty slot or onto the same
+/// item and components.
+fn insert_stack(rt: &mut Rt, h: V, stack: V, slot: i32) -> V {
+    let there = h_get(rt, h, slot);
+    let tried = h_insert(rt, h, slot, stack, true);
+    if !api_common::stack_empty(rt, tried) {
+        return stack;
+    }
+    if api_common::stack_empty(rt, there) {
+        h_insert(rt, h, slot, stack, false);
+        return empty(rt);
+    }
+    if same_item(rt, there, stack) {
+        return h_insert(rt, h, slot, stack, false);
+    }
+    stack
+}
+
+/// `VanillaInventoryCodeHooks.insertHook`: the hopper at `pos` pushes into the item handler in
+/// front (`facing`, reached through the face opposite). Nothing when the handler is full; else one
+/// item of the hopper's first slot whose item the handler takes, the slot put back as it was for
+/// each that it doesn't. Whether one went in; None when there is no handler in front.
+pub(crate) fn insert_hook(rt: &mut Rt, pos: [i32; 3], facing: u8) -> Option<bool> {
+    let h = handler_at(rt, step(pos, facing), facing ^ 1)?;
+    if handler_full(rt, h) {
+        return Some(false);
+    }
+    let hopper = vanilla(rt, pos);
+    for i in 0..size(rt, hopper) {
+        let there = get(rt, hopper, i);
+        if api_common::stack_empty(rt, there) {
+            continue;
+        }
+        let original = copy(rt, there);
+        let one = remove(rt, hopper, i, 1);
+        changed(rt, hopper);
+        let rest = put_in_all_slots(rt, h, one);
+        if api_common::stack_empty(rt, rest) {
+            return Some(true);
+        }
+        set(rt, hopper, i, original);
+    }
+    Some(false)
+}
+
+/// `VanillaInventoryCodeHooks.extractHook`: the hopper at `pos` pulls one item from the item
+/// handler above it, through that block's bottom: the first slot that gives one, into the hopper's
+/// first slot that takes it (empty, or the same item and components under both limits). Whether
+/// one came; None when there is no handler above (the hopper sucks up items lying there instead).
+pub(crate) fn extract_hook(rt: &mut Rt, pos: [i32; 3]) -> Option<bool> {
+    let h = handler_at(rt, step(pos, 1), DOWN)?;
+    let hopper = vanilla(rt, pos);
+    for i in 0..h_slots(rt, h) {
+        let one = h_extract(rt, h, i, 1, true);
+        if api_common::stack_empty(rt, one) {
+            continue;
+        }
+        for j in 0..size(rt, hopper) {
+            let dest = get(rt, hopper, j);
+            let fits = can_place(rt, hopper, j, one)
+                && (api_common::stack_empty(rt, dest)
+                    || (count(rt, dest) < max_stack(rt, dest) && count(rt, dest) < max(rt, hopper) && same_item(rt, one, dest)));
+            if !fits {
+                continue;
+            }
+            let taken = h_extract(rt, h, i, 1, false);
+            if api_common::stack_empty(rt, dest) {
+                set(rt, hopper, j, taken);
+            } else {
+                grow(rt, dest, 1);
+                set(rt, hopper, j, dest);
+            }
+            changed(rt, hopper);
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// `VanillaInventoryCodeHooks.dropperInsertHook`: the dropper at `pos` facing `facing` puts one of
+/// slot `slot`'s items into the item handler in front; the slot loses it when it went in and keeps
+/// it when it didn't (nothing drops). False when there is no handler in front: the dropper drops
+/// the item as usual.
+pub(crate) fn dropper_insert_hook(rt: &mut Rt, pos: [i32; 3], facing: u8, slot: i32) -> bool {
+    let Some(h) = handler_at(rt, step(pos, facing), facing ^ 1) else {
+        return false;
+    };
+    let dropper = vanilla(rt, pos);
+    let stack = get(rt, dropper, slot);
+    let whole = copy(rt, stack);
+    let one = split(rt, whole, 1);
+    let rest = put_in_all_slots(rt, h, one);
+    let remainder = copy(rt, stack);
+    if api_common::stack_empty(rt, rest) {
+        grow(rt, remainder, -1);
+    }
+    set(rt, dropper, slot, remainder);
+    changed(rt, dropper);
+    true
+}
+
+/// `VanillaInventoryCodeHooks.insertCrafterOutput`: what of `stack` the item handler in front of the
+/// crafter at `pos` (its front `facing`) doesn't take, offered slot by slot; None when there is no
+/// handler there.
+pub(crate) fn crafter_output(rt: &mut Rt, pos: [i32; 3], facing: u8, stack: V) -> Option<V> {
+    let h = handler_at(rt, step(pos, facing), facing ^ 1)?;
+    Some(put_in_all_slots(rt, h, stack))
+}
+
 // --- Dispatch -----------------------------------------------------------------------------------
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
@@ -832,6 +1015,156 @@ mod tests {
         let took = api::call(&mut rt, EXTRACT, &[w, V::I(0), V::I(10), V::I(1)]);
         assert_eq!(n(&rt, took), 10);
         assert_eq!(n(&rt, there), 64, "simulating takes nothing");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Every test lambda is a capability provider answering with what it captured.
+    fn providers(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+        Some(rt.captured(args[0]).first().copied().unwrap_or(V::NULL))
+    }
+
+    const SET_STACK: &str = "net/neoforged/neoforge/items/IItemHandlerModifiable.setStackInSlot.(ILnet/minecraft/world/item/ItemStack;)V";
+
+    /// A mod's block `test:depot` at `at` whose block entity hands out a two-slot `ItemStackHandler`
+    /// (`Capabilities.ItemHandler.BLOCK`, registered for its block entity type): the handler.
+    fn mod_depot(rt: &mut Rt, host: &mut MemoryHost, at: [i32; 3], slots: [Option<(&str, i32)>; 2]) -> V {
+        rt.lambda_call = Some(providers);
+        let cap = api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.BLOCK");
+        let ty = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType");
+        let h = rt.new_object("net/neoforged/neoforge/items/ItemStackHandler");
+        api::call(rt, "net/neoforged/neoforge/items/ItemStackHandler.<init>.(I)V", &[h, V::I(2)]);
+        for (i, s) in slots.iter().enumerate() {
+            if let Some((item, count)) = s {
+                let stack = api_common::stack(rt, item, *count);
+                api::call(rt, SET_STACK, &[h, V::I(i as i32), stack]);
+            }
+        }
+        let provider = rt.lambda_id("test/Provider", 1, vec![h]);
+        let ev = rt.new_object("net/neoforged/neoforge/capabilities/RegisterCapabilitiesEvent");
+        let register = "net/neoforged/neoforge/capabilities/RegisterCapabilitiesEvent.registerBlockEntity.(Lnet/neoforged/neoforge/capabilities/BlockCapability;Lnet/minecraft/world/level/block/entity/BlockEntityType;Lnet/neoforged/neoforge/capabilities/ICapabilityProvider;)V";
+        api::call(rt, register, &[ev, cap, ty, provider]);
+        let be = rt.new_object("test/DepotBlockEntity");
+        rt.put_field(be, "$type", ty);
+        rt.block_entities.insert(at, be);
+        host.blocks.insert(at, "test:depot".into());
+        h
+    }
+
+    /// What slot `i` of handler `h` holds: its item and count.
+    fn in_handler(rt: &mut Rt, h: V, i: i32) -> Option<(String, i32)> {
+        let s = api::call(rt, GET_STACK, &[h, V::I(i)]);
+        (!api_common::stack_empty(rt, s)).then(|| (item_of(rt, s), n(rt, s)))
+    }
+
+    fn owned(s: &str, n: i32) -> Option<(String, i32)> {
+        Some((s.to_owned(), n))
+    }
+
+    /// NeoForge's `insertHook`: a hopper facing down onto a mod's block pushes one item a turn into
+    /// its handler, from its first slot with an item the handler takes; a handler with no room for
+    /// it leaves the hopper as it was; with no handler in front the game's own rules go on.
+    #[test]
+    fn a_hopper_pushes_one_item_a_turn_into_a_mods_handler() {
+        let mut rt = rt();
+        let mut host = MemoryHost::default();
+        host.blocks.insert(AT, "minecraft:hopper[enabled=true,facing=down]".into());
+        let mut hopper = container(ContainerKind::Hopper, 5, None);
+        hopper.items[1] = Some(held("minecraft:cobblestone", 3));
+        host.containers.insert(AT, hopper);
+        let below = [AT[0], AT[1] - 1, AT[2]];
+        let h = mod_depot(&mut rt, &mut host, below, [None, None]);
+        let moved = rt.with_host(&mut host, |rt| [insert_hook(rt, AT, 0), insert_hook(rt, AT, 0)]);
+        assert_eq!(moved, [Some(true), Some(true)]);
+        assert_eq!(in_handler(&mut rt, h, 0), owned("minecraft:cobblestone", 2));
+        assert_eq!(slot(&host, AT, 1), Some(("minecraft:cobblestone".to_owned(), 1)));
+
+        // Room for another item only: the hopper's cobblestone stays.
+        let east = [AT[0] + 1, AT[1], AT[2]];
+        let full = mod_depot(&mut rt, &mut host, east, [Some(("minecraft:stone", 64)), Some(("minecraft:dirt", 64))]);
+        let moved = rt.with_host(&mut host, |rt| [insert_hook(rt, AT, 5), insert_hook(rt, AT, 2)]);
+        assert_eq!(moved, [Some(false), None], "nothing fits; no handler to the north");
+        assert_eq!(slot(&host, AT, 1), Some(("minecraft:cobblestone".to_owned(), 1)));
+        assert_eq!(in_handler(&mut rt, full, 0), owned("minecraft:stone", 64));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// NeoForge's `extractHook`: a hopper under a mod's block pulls one item a turn out of its
+    /// handler's first slot that gives one, onto the same item in the hopper or into an empty slot;
+    /// a full hopper takes nothing; under a block with no handler it is left to the game.
+    #[test]
+    fn a_hopper_pulls_one_item_a_turn_out_of_a_mods_handler() {
+        let mut rt = rt();
+        let mut host = MemoryHost::default();
+        host.blocks.insert(AT, "minecraft:hopper[enabled=true,facing=down]".into());
+        let mut hopper = container(ContainerKind::Hopper, 5, None);
+        hopper.items[0] = Some(held("minecraft:dirt", 64));
+        hopper.items[1] = Some(held("minecraft:iron_ingot", 1));
+        host.containers.insert(AT, hopper);
+        let above = [AT[0], AT[1] + 1, AT[2]];
+        let h = mod_depot(&mut rt, &mut host, above, [None, Some(("minecraft:iron_ingot", 5))]);
+        let took = rt.with_host(&mut host, |rt| [extract_hook(rt, AT), extract_hook(rt, AT)]);
+        assert_eq!(took, [Some(true), Some(true)]);
+        assert_eq!(slot(&host, AT, 1), Some(("minecraft:iron_ingot".to_owned(), 3)), "onto the iron, past the full dirt");
+        assert_eq!(slot(&host, AT, 2), None);
+        assert_eq!(in_handler(&mut rt, h, 1), owned("minecraft:iron_ingot", 3));
+
+        // A hopper with no room.
+        let below = [AT[0], AT[1] - 2, AT[2]];
+        host.blocks.insert(below, "minecraft:hopper[enabled=true,facing=down]".into());
+        let mut packed = container(ContainerKind::Hopper, 5, None);
+        packed.items = vec![Some(held("minecraft:dirt", 64)); 5];
+        host.containers.insert(below, packed);
+        mod_depot(&mut rt, &mut host, [AT[0], AT[1] - 1, AT[2]], [Some(("minecraft:gold_ingot", 2)), None]);
+        let lone = [AT[0] + 5, AT[1], AT[2]];
+        host.blocks.insert(lone, "minecraft:hopper[enabled=true,facing=down]".into());
+        host.containers.insert(lone, container(ContainerKind::Hopper, 5, None));
+        let took = rt.with_host(&mut host, |rt| [extract_hook(rt, below), extract_hook(rt, lone)]);
+        assert_eq!(took, [Some(false), None]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// NeoForge's `dropperInsertHook`: a dropper facing a mod's block puts one item of the slot it
+    /// drops from into the handler; when nothing fits, the slot keeps it and nothing drops; facing
+    /// a block with no handler, it drops as usual.
+    #[test]
+    fn a_dropper_puts_one_item_into_a_mods_handler_or_keeps_it() {
+        let mut rt = rt();
+        let mut host = MemoryHost::default();
+        host.blocks.insert(AT, "minecraft:dropper[facing=east,triggered=false]".into());
+        let mut dropper = container(ContainerKind::Plain, 9, None);
+        dropper.items[4] = Some(held("minecraft:arrow", 3));
+        host.containers.insert(AT, dropper);
+        let east = [AT[0] + 1, AT[1], AT[2]];
+        let h = mod_depot(&mut rt, &mut host, east, [None, None]);
+        let west = [AT[0] - 1, AT[1], AT[2]];
+        mod_depot(&mut rt, &mut host, west, [Some(("minecraft:stone", 64)), Some(("minecraft:dirt", 64))]);
+        let handled = rt.with_host(&mut host, |rt| [dropper_insert_hook(rt, AT, 5, 4), dropper_insert_hook(rt, AT, 4, 4), dropper_insert_hook(rt, AT, 1, 4)]);
+        assert_eq!(handled, [true, true, false], "east takes one, west none, nothing above");
+        assert_eq!(in_handler(&mut rt, h, 0), owned("minecraft:arrow", 1));
+        assert_eq!(slot(&host, AT, 4), Some(("minecraft:arrow".to_owned(), 2)));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// NeoForge's `insertCrafterOutput`: a crafter's result goes into a mod's handler slot by slot,
+    /// only into a slot that takes all of what is left (6 bread skip a slot with room for 2), and
+    /// what no slot takes comes back.
+    #[test]
+    fn a_crafters_output_goes_where_it_fits_whole() {
+        let mut rt = rt();
+        let mut host = MemoryHost::default();
+        let south = [AT[0], AT[1], AT[2] + 1];
+        let h = mod_depot(&mut rt, &mut host, south, [Some(("minecraft:bread", 62)), None]);
+        let north = [AT[0], AT[1], AT[2] - 1];
+        mod_depot(&mut rt, &mut host, north, [Some(("minecraft:bread", 62)), Some(("minecraft:stone", 1))]);
+        let rest = rt.with_host(&mut host, |rt| {
+            let into_south = api_common::stack(rt, "minecraft:bread", 6);
+            let into_north = api_common::stack(rt, "minecraft:bread", 6);
+            let up = api_common::stack(rt, "minecraft:bread", 6);
+            let (south, north, up) = (crafter_output(rt, AT, 3, into_south), crafter_output(rt, AT, 2, into_north), crafter_output(rt, AT, 1, up));
+            [south.map(|s| n(rt, s)), north.map(|s| n(rt, s)), up.map(|s| n(rt, s))]
+        });
+        assert_eq!(rest, [Some(0), Some(6), None]);
+        assert_eq!((in_handler(&mut rt, h, 0), in_handler(&mut rt, h, 1)), (owned("minecraft:bread", 62), owned("minecraft:bread", 6)));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

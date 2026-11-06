@@ -2623,6 +2623,58 @@ impl Game<'_> {
     ) {
         let _ = (dimension, pos, facing, stack, answer);
     }
+    /// The hopper at `pos`, facing `facing`, pushes toward a block that has
+    /// no container of the game's own (NeoForge's
+    /// `VanillaInventoryCodeHooks.insertHook`, for a mod's machine): set
+    /// `moved` when that block is yours and one of the hopper's items went
+    /// into it. Read and change the hopper through
+    /// `native_vanilla_container_item` and `native_vanilla_container_set`.
+    /// Left false, the hopper tries a container entity there, as vanilla
+    /// does; a hopper that moved an item waits its 8 ticks. Server-side.
+    /// API @API:vanilla_inventory_hooks@.
+    pub(super) fn native_hopper_insert(&mut self, pos: [i32; 3], facing: Direction, moved: &mut bool) {
+        let _ = (pos, facing, moved);
+    }
+    /// The hopper at `pos` pulls from the block above it, which has no
+    /// container of the game's own (NeoForge's
+    /// `VanillaInventoryCodeHooks.extractHook`): when that block is yours and
+    /// has an item handler, set `took`: `Some(true)` when an item came into
+    /// the hopper, `Some(false)` when none could. Left None, the hopper sucks
+    /// up the items lying above it. Server-side.
+    /// API @API:vanilla_inventory_hooks@.
+    pub(super) fn native_hopper_extract(&mut self, pos: [i32; 3], took: &mut Option<bool>) {
+        let _ = (pos, took);
+    }
+    /// The dropper at `pos`, facing `facing`, drops from slot `slot` toward a
+    /// block that has no container of the game's own (NeoForge's
+    /// `VanillaInventoryCodeHooks.dropperInsertHook`): set `handled` when that
+    /// block is yours and takes the turn, one item of the slot into it or
+    /// none when it has no room (change the slot through
+    /// `native_vanilla_container_set`). Handled, nothing drops and no sound
+    /// plays. Server-side. API @API:vanilla_inventory_hooks@.
+    pub(super) fn native_dropper_insert(
+        &mut self,
+        pos: [i32; 3],
+        facing: Direction,
+        slot: u32,
+        handled: &mut bool,
+    ) {
+        let _ = (pos, facing, slot, handled);
+    }
+    /// The crafter at `pos`, whose front is `facing`, puts its result `stack`
+    /// out toward a block that has no container of the game's own (NeoForge's
+    /// `VanillaInventoryCodeHooks.insertCrafterOutput`): when that block is
+    /// yours, take what it holds out of `stack` (a count of 0: all of it).
+    /// What is left flies out as an item. Server-side.
+    /// API @API:vanilla_inventory_hooks@.
+    pub(super) fn native_crafter_output(
+        &mut self,
+        pos: [i32; 3],
+        facing: Direction,
+        stack: &mut ItemStack,
+    ) {
+        let _ = (pos, facing, stack);
+    }
     /// A player uses `stack` (right click) with `self.hand`: in the air, or
     /// on a block once `native_use_item_on` let it through, where `Item.use`
     /// starts. Each click reaches it once. Set `claimed` to take the use: the

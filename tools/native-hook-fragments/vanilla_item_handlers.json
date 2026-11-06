@@ -3,7 +3,6 @@
   "rust_summary": "vanilla containers as NeoForge's item handlers see them (`native_vanilla_container` and its slot helpers, `native_hopper_filled`).",
   "doc_summary": "`native_vanilla_container(pos)` gives the vanilla block's container at `pos` that NeoForge gives an item handler (`CapabilityHooks.registerVanillaProviders`): its slot count, the most a slot holds (`getMaxStackSize()`: 1 in a jukebox or a chiseled bookshelf, else 99) and the handler's kind (`NativeContainerKind`: `Plain` for a chest, both halves of a double one, a barrel, a dispenser, a dropper, a crafter, a chiseled bookshelf or a jukebox; `Hopper`; `Furnace`, `Brewing` and `Shulker` for the `SidedInvWrapper`s). `native_vanilla_container_item`, `_set` (`Container.setItem`: the stack cut to the slot's limit, a disc starting or stopping a jukebox's song), `_changed` (`setChanged`), `_can_place` (`canPlaceItem`, and through a face `canPlaceItemThroughFace`), `_face_slots` (`getSlotsForFace`) and `_can_take` (`canTakeItemThroughFace`) read and change it slot by slot, so a translated mod's `InvWrapper` and `SidedInvWrapper` run NeoForge's own rules on it. `native_hopper_filled(pos)` is `VanillaHopperItemHandler`'s cooldown for a hopper an item handler filled while it was empty. All of them act on the level in place where the world is simulated, and answer None, nothing or false elsewhere. Bundles need \"hooks\": @API:vanilla_item_handlers@.",
   "comments": [
-    "crates/horizon-client/src/game/machines/native_items.rs",
-    "docs/mod-translator.md"
+    "crates/horizon-client/src/game/machines/native_items.rs"
   ]
 }

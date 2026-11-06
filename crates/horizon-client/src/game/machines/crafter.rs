@@ -170,6 +170,10 @@ impl Game<'_> {
                     }
                 }
             }
+        } else {
+            // NeoForge's `insertCrafterOutput`: a mod's machine in front takes
+            // what it can through its item handler.
+            self.native_crafter_output([pos.0, pos.1, pos.2], facing, &mut rest);
         }
         if rest.count == 0 {
             return;
