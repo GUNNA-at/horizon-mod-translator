@@ -4359,6 +4359,11 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     quarter turn about y takes x to -z); `addBox`'s named, deformed, mirrored and face-limited forms (the hat
     layer's front on the skin's 40..48 by 8..16); a registered layer baked afresh for each renderer and an
     unknown one empty; a mod's `HierarchicalModel` drawing its root in white or the renderer's colour.
+  - packcov8 (this part, the same 367 jars, the typed probe): methods 96505/133182 (72.5%, from 71.9% in
+    packcov7t), uses 317131/379191 (83.6%, from 82.5%), 12669 distinct missing (from 12735); Create 2728/3994
+    methods (68.3%) and 22902/25380 uses (90.2%). The model families' missing uses fell from 5032 to 363; what is
+    left is vanilla's own models (`HumanoidModel.createMesh` 123 uses, `HumanoidModel(root)` 86, `ZombieModel`
+    18...), the renderers that draw a mob with its model, and calls the probe has no receiver for.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
