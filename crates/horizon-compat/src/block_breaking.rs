@@ -15,6 +15,9 @@
 //!   (`spawnAfterBreak`: an infested block's silverfish), the cracks shown on it
 //!   (`Level.destroyBlockProgress`) and its sounds (`BlockState.getSoundType`).
 //!
+//! When the game's own player breaks a mod block, the block's part in it runs here too: its
+//! `playerWillDestroy`, then `onDestroyedByPlayer`, which may keep it ([`player_breaks`]).
+//!
 //! A mod block's or item's own override of each answers first. What a tool does to a block, the
 //! block's sounds and loot, and the cracks shown are the game's ([`crate::host::Host::item_tool`],
 //! [`block_sounds`](crate::host::Host::block_sounds), [`block_drops`](crate::host::Host::block_drops),
@@ -75,6 +78,10 @@ const HARVEST: &str = "canHarvestBlock.(Lnet/minecraft/world/level/block/state/B
 const HARVEST_KEY: &str = "net/minecraft/world/level/block/Block.canHarvestBlock.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)Z";
 const DESTROYED: &str = "onDestroyedByPlayer.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;ZLnet/minecraft/world/level/material/FluidState;)Z";
 const DESTROYED_KEY: &str = "net/minecraft/world/level/block/Block.onDestroyedByPlayer.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;ZLnet/minecraft/world/level/material/FluidState;)Z";
+/// `Block.playerWillDestroy(level, pos, state, player)`: what the block does as a player starts to
+/// break it, and the state it leaves.
+const WILL_DESTROY: &str = "playerWillDestroy.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/entity/player/Player;)Lnet/minecraft/world/level/block/state/BlockState;";
+const WILL_DESTROY_KEY: &str = "net/minecraft/world/level/block/Block.playerWillDestroy.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/entity/player/Player;)Lnet/minecraft/world/level/block/state/BlockState;";
 const AFTER_BREAK: &str = "spawnAfterBreak.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/item/ItemStack;Z)V";
 const AFTER_BREAK_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.spawnAfterBreak.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/item/ItemStack;Z)V";
 const SOUND: &str = "getSoundType.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/SoundType;";
@@ -109,6 +116,7 @@ const DROP_RESOURCES: [&str; 3] = [
 const HAS_BLOCK_ENTITY: &str = "net/minecraft/world/level/block/state/BlockState.hasBlockEntity.()Z";
 const BLOCK_ENTITY_AT: &str = "net/minecraft/world/level/Level.getBlockEntity.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;";
 const REMOVE_BLOCK_ENTITY: &str = "net/minecraft/world/level/Level.removeBlockEntity.(Lnet/minecraft/core/BlockPos;)V";
+const STATE_HARVEST_KEY: &str = "net/minecraft/world/level/block/state/BlockState.canHarvestBlock.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)Z";
 const STATE_AFTER_BREAK_KEY: &str = "net/minecraft/world/level/block/state/BlockState.spawnAfterBreak.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/item/ItemStack;Z)V";
 const POP_EXPERIENCE_KEY: &str = "net/minecraft/world/level/block/Block.popExperience.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;I)V";
 const GET_BLOCK: &str = "net/minecraft/world/level/block/state/BlockState.getBlock.()Lnet/minecraft/world/level/block/Block;";
@@ -199,7 +207,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         }
         o if block_class(o) => {
             let nd = (name, desc);
-            [PROGRESS, HARVEST, DESTROYED, AFTER_BREAK, SOUND, SOUND_AT].iter().any(|k| k.split_once('.') == Some(nd))
+            [PROGRESS, HARVEST, DESTROYED, WILL_DESTROY, AFTER_BREAK, SOUND, SOUND_AT].iter().any(|k| k.split_once('.') == Some(nd))
                 || (name == "destroy" && desc == DESTROY_DESC)
                 || (name == "getDrops" && matches!(desc, DROPS | DROPS_BY))
                 || (name == "popExperience" && desc == POP_EXPERIENCE)
@@ -340,6 +348,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getDestroyProgress" => V::F(destroy_progress(rt, a(1), a(2), a(3), a(4))),
             "canHarvestBlock" => V::I(harvest_check(rt, a(4), a(1), a(2), a(3)) as i32),
             "onDestroyedByPlayer" => destroyed_by_player(rt, a(2), a(3), a(6)),
+            // `playerWillDestroy(level, pos, state, player)`, `Block`'s: the state, as it was. Its
+            // effects (the break's particles, piglins angered over their gold, the `BLOCK_DESTROY`
+            // game event) are the game's, which makes them for every block its player breaks.
+            "playerWillDestroy" => a(3),
             "getSoundType" if desc.starts_with("(Lnet/minecraft/world/level/block/state/BlockState;)") => {
                 let text = text_of(rt, a(1));
                 own_sound_type(rt, &text)
@@ -897,13 +909,60 @@ fn mine_block(rt: &mut Rt, stack: V, level: V, st: V, miner: V) -> bool {
 }
 
 /// NeoForge's `IBlockExtension.onDestroyedByPlayer`: on the server, `level.removeBlock(pos, false)`;
-/// on a client, the fluid left there set in the block's place. Whether the block went.
+/// on a client, the fluid left there set in the block's place. Whether the block went. The block
+/// the game's own player is breaking ([`player_breaks`]) is the game's to remove: it goes.
 fn destroyed_by_player(rt: &mut Rt, level: V, pos: V, fluid: V) -> V {
+    if BREAKING.with(std::cell::Cell::get) == Some(api::pos_of(rt, pos)) {
+        return V::I(1);
+    }
     if api::call(rt, IS_CLIENT, &[level]).i() != 0 {
         let left = api::call(rt, LEGACY_BLOCK, &[fluid]);
         return api::call(rt, SET_BLOCK, &[level, pos, left, V::I(11)]);
     }
     api::call(rt, REMOVE_BLOCK, &[level, pos, V::I(0)])
+}
+
+thread_local! {
+    /// Where the game's own player is breaking a block, while that block's `onDestroyedByPlayer`
+    /// runs ([`player_breaks`]).
+    static BREAKING: std::cell::Cell<Option<[i32; 3]>> = const { std::cell::Cell::new(None) };
+}
+
+/// The mod block `state`'s own part of `ServerPlayerGameMode.destroyBlock` once the acting player
+/// may break it at `p` (the `BreakEvent` let them): its `playerWillDestroy` (Create's mechanical
+/// piston takes its poles and head with it, a water wheel's structure its wheel in creative, a
+/// track notes a creative player took it), then NeoForge's `onDestroyedByPlayer`, told whether
+/// the player harvests the block, which may keep it (Create's factory panel loses the gauge the
+/// player looks at instead). The game removes the block itself: the default
+/// `onDestroyedByPlayer`, a mod block's `super.` call, leaves it to the game. Whether the block
+/// goes.
+pub(crate) fn player_breaks(rt: &mut Rt, p: [i32; 3], state: &str) -> bool {
+    let Some((b, class)) = crate::glue::mod_block(rt, state) else { return true };
+    let Some(overrides) = rt.overrides else { return true };
+    let (will, destroyed) = (overrides(class, WILL_DESTROY), overrides(class, DESTROYED));
+    let Some(vc) = rt.vcall.filter(|_| will || destroyed) else { return true };
+    let level = crate::glue::level(rt);
+    let pos = api::block_pos(rt, i64::from(p[0]), i64::from(p[1]), i64::from(p[2]));
+    let st = api::state(rt, state);
+    let player = api_common::acting_player(rt);
+    if will {
+        vc(rt, WILL_DESTROY_KEY, WILL_DESTROY, &[b, level, pos, st, player]);
+        rt.report_thrown("playerWillDestroy");
+    }
+    if !destroyed {
+        return true;
+    }
+    // A creative player never harvests (`removeBlock(pos, state, false)`); else `canHarvestBlock`.
+    let harvest = api::call(rt, IS_CREATIVE, &[player]).i() == 0 && api::call(rt, STATE_HARVEST_KEY, &[st, level, pos, player]).i() != 0;
+    let fluid = api::call(rt, FLUID_AT, &[level, pos]);
+    let outer = BREAKING.with(|c| c.replace(Some(p)));
+    let gone = vc(rt, DESTROYED_KEY, DESTROYED, &[b, st, level, pos, player, V::I(i32::from(harvest)), fluid]);
+    BREAKING.with(|c| c.set(outer));
+    if rt.thrown.is_some() {
+        rt.report_thrown("onDestroyedByPlayer");
+        return true;
+    }
+    gone.i() != 0
 }
 
 /// `BlockState.getSoundType()`: the mod block's own `getSoundType(state)`, else its own.

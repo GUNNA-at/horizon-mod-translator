@@ -4193,6 +4193,40 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     so `DeployerBlock.useItemOn` took the ingots, as it would in Java. The harness (`DRILL=slot`, Create's own
     handler through `RightClickBlock`) with a click at the top's middle: the filter holds the three ingots, and
     they stay in hand. The round now aims at that point (`look-at`, then `use-item`).
+- [x] 2026-11-06 Part 26: a mod block's own part when the game's player breaks it (`playerWillDestroy`,
+  `onDestroyedByPlayer`).
+  - NeoForge's `ServerPlayerGameMode.destroyBlock`, once the `BreakEvent` lets the player break the block: the
+    block's `playerWillDestroy(level, pos, state, player)`, then `removeBlock`, which is the state's
+    `onDestroyedByPlayer(level, pos, player, willHarvest, fluid)` (NeoForge's default: `level.removeBlock`), then
+    `destroy` and, when harvested, `playerDestroy`. The game ran vanilla's part for every block and the mods'
+    `BreakEvent` listeners, but no mod block's own override: eight of Create's blocks override `playerWillDestroy`
+    (its mechanical piston, extension pole and piston head take the rest of the piston with them, a water wheel's
+    structure block its wheel in creative, a copycat, chain conveyor and track note a creative break, a clipboard
+    drops itself in creative), and its factory panel overrides `onDestroyedByPlayer` (a panel with several gauges
+    loses the one the player looks at and stays).
+  - `native_destroy_block` (`glue::destroy_block`) now runs, after the `BreakEvent`, the mod block's
+    `playerWillDestroy`, then its `onDestroyedByPlayer` with whether the player harvests it (never in creative,
+    else `canHarvestBlock`) and the fluid there (`block_breaking::player_breaks`). The game still removes the
+    block: the default `onDestroyedByPlayer`, a mod block's `super.` call, leaves the block the game's player is
+    breaking to the game and answers true. An override that answers false keeps the block, which the hook tells the
+    game as it tells a canceled break (unlike Java, the tool then takes no wear). A mod block's
+    `super.playerWillDestroy` (`Block`'s, through any vanilla class) gives the state back: its effects (the break's
+    particles, piglins angered over their gold, the `BLOCK_DESTROY` game event) are the game's, for every block.
+  - The harness (`DRILL=break`, Create's own `MechanicalPistonBlock.playerWillDestroy`): a piston facing up with
+    two poles and its head above, broken by the game's player in survival, takes the poles and the head with it,
+    two poles dropped and a break effect for each; in creative the same without drops; the piston stays for the
+    game; no unmapped call.
+  - Test: `glue::tests::a_mod_block_does_its_part_when_the_player_breaks_it` (a piston's override takes the pole
+    above with it, dropped in survival only, its `super.` call answering the state; a panel's override keeps the
+    block while it has two gauges, its `super.` call leaves the block to the game; harvested in survival, not in
+    creative). 396 compat and 17 translator tests pass; no game code changed.
+  - packcov6 (this part's translator before the change, the same 367 jars of the CurseForge pack): methods
+    93680/130683 (71.7%, from 69.4% in packcov5n), uses 304060/369268 (82.3%, from 80.5%); Create 2695/3994
+    methods (67.5%, from 64.2%) and 22852/25380 uses (90.0%, from 88.4%); 12712 distinct missing methods (from
+    13092). The probe still counts some mapped calls as missing when it has no receiver to try them on (a
+    `MapCodec` from `fieldOf` for `forGetter`, a menu's `Slot`); entity model definitions (`MeshDefinition`,
+    `PartDefinition`, `CubeListBuilder`, `LayerDefinition.create`, `ModelPart.getChild`, about 40 mods each) are a
+    real gap.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

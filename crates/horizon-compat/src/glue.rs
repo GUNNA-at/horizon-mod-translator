@@ -1071,11 +1071,14 @@ pub fn player_respawned(rt: &mut Rt, host: &mut dyn Host, player: u128, name: &s
 }
 
 /// `native_destroy_block` (server): the acting player breaks the block `state` at `pos`, the game
-/// having allowed it ([`crate::world_events::block_break`]). Whether a mod canceled it: the block
-/// then stays.
+/// having allowed it: the mods hear it ([`crate::world_events::block_break`]), then a mod block
+/// does its own part before the game removes it ([`crate::block_breaking::player_breaks`]).
+/// Whether the block stays: a mod canceled the break, or the block's `onDestroyedByPlayer` kept it.
 pub fn destroy_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> bool {
     rt.safe_point();
-    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| crate::world_events::block_break(rt, pos, state)))
+    rt.with_host(host, |rt| {
+        crate::hand::with_hand(rt, |rt| crate::world_events::block_break(rt, pos, state) || !crate::block_breaking::player_breaks(rt, pos, state))
+    })
 }
 
 /// `native_place_block` (server): the acting player placed the block `state` at `pos` with `item`.
@@ -2149,6 +2152,92 @@ mod tests {
         assert_eq!(rt.interned.get(&broken_key(at)), Some(&again));
         server_tick(&mut rt, &mut host, false);
         assert!(!rt.interned.contains_key(&broken_key(at)));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const PISTON: &str = "test/PistonBlock";
+    const PANEL: &str = "test/PanelBlock";
+    const WILL_DESTROY: &str = "playerWillDestroy.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/entity/player/Player;)Lnet/minecraft/world/level/block/state/BlockState;";
+    const DESTROYED: &str = "onDestroyedByPlayer.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;ZLnet/minecraft/world/level/material/FluidState;)Z";
+    /// The test blocks' `super.` calls, as the translator names them: the nearest vanilla class's.
+    const SUPER_WILL_DESTROY: &str = "net/minecraft/world/level/block/DirectionalBlock.playerWillDestroy.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/entity/player/Player;)Lnet/minecraft/world/level/block/state/BlockState;";
+    const SUPER_DESTROYED: &str = "net/minecraft/world/level/block/FaceAttachedHorizontalDirectionalBlock.onDestroyedByPlayer.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;ZLnet/minecraft/world/level/material/FluidState;)Z";
+
+    /// The test piston, as Create's `MechanicalPistonBlock.playerWillDestroy`: the pole above it goes
+    /// with it (`Level.destroyBlock`, dropped but for a creative player), then its `super.` call. The
+    /// test panel, as Create's `FactoryPanelBlock.onDestroyedByPlayer`: with two gauges it loses one
+    /// and stays, else its `super.` call; it notes whether the player harvests it.
+    fn break_overrides(class: &str, method: &str) -> bool {
+        (class == PISTON && method == WILL_DESTROY) || (class == PANEL && method == DESTROYED)
+    }
+
+    fn break_code(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        match short {
+            WILL_DESTROY => {
+                let above = api::call(rt, "net/minecraft/core/BlockPos.above.()Lnet/minecraft/core/BlockPos;", &[args[2]]);
+                let creative = api::call(rt, "net/minecraft/world/entity/player/Player.isCreative.()Z", &[args[4]]).i() != 0;
+                api::call(rt, "net/minecraft/world/level/Level.destroyBlock.(Lnet/minecraft/core/BlockPos;Z)Z", &[args[1], above, V::I(i32::from(!creative))]);
+                let left = api::call(rt, SUPER_WILL_DESTROY, args);
+                rt.interned.insert("test:left".into(), left);
+                left
+            }
+            DESTROYED => {
+                rt.interned.insert("test:harvest".into(), args[5]);
+                if rt.str_of(args[1]) == Some("test:panel[gauges=2]") {
+                    let one = api::state(rt, "test:panel[gauges=1]");
+                    api::call(rt, SET_BLOCK, &[args[2], args[3], one, V::I(3)]);
+                    return V::I(0);
+                }
+                api::call(rt, SUPER_DESTROYED, args)
+            }
+            _ => api::call(rt, key, args),
+        }
+    }
+
+    /// The game's player breaking a mod block: its `playerWillDestroy` first (the test piston takes
+    /// the pole above with it, dropped in survival, not in creative; its `super.` call gives the
+    /// state back), then its `onDestroyedByPlayer`, told whether the player harvests it, which keeps
+    /// the test panel while it has two gauges; its `super.` call leaves the block to the game, which
+    /// removes it.
+    #[test]
+    fn a_mod_block_does_its_part_when_the_player_breaks_it() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(break_overrides);
+        rt.vcall = Some(break_code);
+        for (class, name, sup) in [(PISTON, "test:piston", "net/minecraft/world/level/block/DirectionalBlock"), (PANEL, "test:panel", "net/minecraft/world/level/block/FaceAttachedHorizontalDirectionalBlock")] {
+            rt.supers.insert(class, sup);
+            let block = rt.new_object(class);
+            rt.registered.insert(("block".into(), name.into()), block);
+        }
+        let mut host = MemoryHost { player_id: Some(7), ..MemoryHost::default() };
+        host.loot.insert("test:pole".into(), vec![("test:pole".into(), 1)]);
+        let (at, above) = ([2, 64, 2], [2, 65, 2]);
+        let piston = "test:piston[facing=up]";
+        let block = |host: &MemoryHost, p: [i32; 3]| host.blocks.get(&p).cloned().unwrap_or_default();
+        for creative in [false, true] {
+            host.creative = creative;
+            host.item_entities.clear();
+            host.blocks.insert(at, piston.into());
+            host.blocks.insert(above, "test:pole[facing=up]".into());
+            assert!(!destroy_block(&mut rt, &mut host, at, piston), "it goes");
+            assert_eq!(block(&host, above), "minecraft:air", "the pole with it");
+            let dropped: Vec<_> = host.item_entities.iter().map(|e| (e.item.clone(), e.count)).collect();
+            assert_eq!(dropped, if creative { vec![] } else { vec![("test:pole".to_owned(), 1)] });
+            assert_eq!(block(&host, at), piston, "the game removes it");
+            let left = rt.interned.get("test:left").copied().unwrap_or_default();
+            assert_eq!(rt.str_of(left), Some(piston), "its super.playerWillDestroy: the state");
+        }
+
+        host.creative = false;
+        host.blocks.insert(at, "test:panel[gauges=2]".into());
+        assert!(destroy_block(&mut rt, &mut host, at, "test:panel[gauges=2]"), "it stays");
+        assert_eq!(block(&host, at), "test:panel[gauges=1]", "a gauge less");
+        assert_eq!(rt.interned.get("test:harvest").map(|v| v.i()), Some(1), "a survival player harvests it");
+        host.creative = true;
+        assert!(!destroy_block(&mut rt, &mut host, at, "test:panel[gauges=1]"), "it goes");
+        assert_eq!(block(&host, at), "test:panel[gauges=1]", "the game removes it");
+        assert_eq!(rt.interned.get("test:harvest").map(|v| v.i()), Some(0), "a creative player never harvests");
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }
