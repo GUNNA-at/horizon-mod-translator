@@ -11,8 +11,10 @@
 //! `Item`'s `getUseDuration`, `getUseAnimation` (a drink), `getEatingSound` or `getDrinkingSound`:
 //! those are asked once, with a stack of the item, as they answer the same for any.
 //!
-//! Potions: `Potions.X` are holders of vanilla's potions, `PotionContents` a potion, a color and
-//! effects of its own (`createItemStack`, `is`, `withPotion` here). A stack's contents are vanilla's
+//! Potions: `Potions.X` are holders of vanilla's potions, which hold their effects as `Potions` made
+//! them (`vanilla_effects.rs`, where vanilla's effects have their category, color and kind too).
+//! `PotionContents` is a potion, a color and effects of its own (`createItemStack`, `is`,
+//! `withPotion`, all its effects and their color mix here). A stack's contents are vanilla's
 //! `minecraft:potion_contents`, which the game's stacks carry ([`encode_potion_contents`],
 //! [`decode_potion_contents`]).
 use crate::nbt::Nbt;
@@ -29,6 +31,7 @@ const USE_ANIM: &str = "net/minecraft/world/item/UseAnim";
 const POTIONS: &str = "net/minecraft/world/item/alchemy/Potions";
 const POTION: &str = "net/minecraft/world/item/alchemy/Potion";
 const POTION_CONTENTS: &str = "net/minecraft/world/item/alchemy/PotionContents";
+const CATEGORY: &str = "net/minecraft/world/effect/MobEffectCategory";
 /// `UseAnim`'s constants in 1.21.1's order (NeoForge adds `CUSTOM`).
 const USE_ANIMS: [&str; 11] = ["NONE", "EAT", "DRINK", "BLOCK", "BOW", "SPEAR", "CROSSBOW", "SPYGLASS", "TOOT_HORN", "BRUSH", "CUSTOM"];
 const SUPPLY: &str = "java/util/function/Supplier.get.()Ljava/lang/Object;";
@@ -152,7 +155,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     if owner != EFFECTS {
         return None;
     }
-    let i = crate::vanilla_effects::MOB_EFFECTS.binary_search_by(|(f, _)| (*f).cmp(field)).ok()?;
+    let i = crate::vanilla_effects::MOB_EFFECTS.binary_search_by(|(f, ..)| (*f).cmp(field)).ok()?;
     Some(effect_holder(rt, &format!("minecraft:{}", crate::vanilla_effects::MOB_EFFECTS[i].1)))
 }
 
@@ -175,8 +178,119 @@ pub(crate) fn effect_holder(rt: &mut Rt, id: &str) -> V {
 
 /// Whether `id` names one of vanilla's 39 effects (`minecraft:poison`).
 pub(crate) fn is_vanilla_effect(id: &str) -> bool {
-    id.strip_prefix("minecraft:").is_some_and(|path| crate::vanilla_effects::MOB_EFFECTS.iter().any(|(_, p)| *p == path))
+    id.starts_with("minecraft:") && vanilla_effect(id).is_some()
 }
+
+/// Vanilla's effect `id` (`minecraft:speed`, or its path) as `MobEffects` makes it: (field, id,
+/// category, colour, instantaneous).
+fn vanilla_effect(id: &str) -> Option<&'static (&'static str, &'static str, &'static str, i32, bool)> {
+    let path = id.strip_prefix("minecraft:").unwrap_or(id);
+    crate::vanilla_effects::MOB_EFFECTS.iter().find(|(_, p, ..)| *p == path)
+}
+
+/// An effect's category: what a mod's effect was made with, vanilla's from `MobEffects`; null for
+/// an effect that is neither.
+fn category(rt: &mut Rt, effect: V) -> V {
+    let made = rt.get_field(effect, "$category");
+    if made.r() != 0 {
+        return made;
+    }
+    match effect_id(rt, effect).as_deref().and_then(vanilla_effect).map(|e| e.2) {
+        Some("HARMFUL") => api::get_static(rt, "net/minecraft/world/effect/MobEffectCategory.HARMFUL"),
+        Some("NEUTRAL") => api::get_static(rt, "net/minecraft/world/effect/MobEffectCategory.NEUTRAL"),
+        Some(_) => api::get_static(rt, "net/minecraft/world/effect/MobEffectCategory.BENEFICIAL"),
+        None => V::NULL,
+    }
+}
+
+/// The value a holder holds (`Holder.value()`).
+fn held(rt: &mut Rt, holder: V) -> V {
+    api::call(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder])
+}
+
+/// An instance of effect `id` for `duration` ticks at `amplifier`, as `new MobEffectInstance(effect,
+/// duration, amplifier)` makes it: not ambient, its particles and icon shown.
+fn effect_instance(rt: &mut Rt, id: &str, duration: i32, amplifier: i32) -> V {
+    let holder = effect_holder(rt, id);
+    let i = rt.new_object(INSTANCE);
+    rt.put_field(i, "$effect", holder);
+    for (f, v) in [("$duration", duration), ("$amplifier", amplifier), ("$ambient", 0), ("$visible", 1), ("$showIcon", 1)] {
+        rt.put_field(i, f, V::I(v));
+    }
+    i
+}
+
+/// The list `Potion.getEffects()` gives: what a mod's potion was made with, vanilla's made once from
+/// `Potions`' table.
+fn potion_effect_list(rt: &mut Rt, potion: V) -> V {
+    let made = rt.get_field(potion, "$effects");
+    if made.r() != 0 || potion.r() == 0 {
+        return made;
+    }
+    let id = rt.str_of(rt.get_field(potion, "$id")).map(str::to_owned).unwrap_or_default();
+    let path = id.strip_prefix("minecraft:").unwrap_or("");
+    let effects = crate::vanilla_effects::POTIONS.iter().find(|(p, ..)| *p == path).map_or(&[][..], |(_, _, e)| *e);
+    let instances: Vec<V> = effects.iter().map(|&(effect, duration, amplifier)| effect_instance(rt, effect, duration, amplifier)).collect();
+    let list = jutil::new_list(rt, instances);
+    rt.put_field(potion, "$effects", list);
+    list
+}
+
+/// A potion's effects ([`potion_effect_list`]); none for no potion.
+fn potion_effects(rt: &mut Rt, potion: V) -> Vec<V> {
+    let list = potion_effect_list(rt, potion);
+    jutil::elements(rt, list)
+}
+
+/// Potion contents' effects (`getAllEffects`): their potion's, then their own.
+fn all_effects(rt: &mut Rt, contents: V) -> Vec<V> {
+    let holder = rt.get_field(rt.get_field(contents, "potion"), "value");
+    let mut all = if holder.r() != 0 {
+        let potion = held(rt, holder);
+        potion_effects(rt, potion)
+    } else {
+        Vec::new()
+    };
+    all.extend(jutil::elements(rt, rt.get_field(contents, "customEffects")));
+    all
+}
+
+/// The name a potion's descriptions use instead of its id's path (`Potion.name`): what a mod's
+/// potion was made with, vanilla's long and strong potions' their base's.
+fn potion_name(rt: &Rt, potion: V) -> Option<String> {
+    if let Some(name) = rt.str_of(rt.get_field(potion, "$name")) {
+        return Some(name.to_owned());
+    }
+    let path = rt.str_of(rt.get_field(potion, "$id"))?.strip_prefix("minecraft:")?;
+    crate::vanilla_effects::POTIONS.iter().find(|(p, ..)| *p == path).and_then(|(_, name, _)| name.map(str::to_owned))
+}
+
+/// `PotionContents.getColorOptional(effects)`: the colours of the effects that show their
+/// particles, each weighted by its amplifier + 1, averaged by channel and opaque; None when no
+/// effect shows. Java's int arithmetic, as vanilla's.
+fn effects_color(rt: &mut Rt, effects: &[V]) -> Option<i32> {
+    let (mut r, mut g, mut b, mut n) = (0i32, 0i32, 0i32, 0i32);
+    for &e in effects {
+        if rt.get_field(e, "$visible").i() == 0 {
+            continue;
+        }
+        let holder = rt.get_field(e, "$effect");
+        let effect = held(rt, holder);
+        let color = crate::tanks::virt(rt, (EFFECT_GET_COLOR, "getColor.()I"), &[effect]).i();
+        let w = rt.get_field(e, "$amplifier").i().wrapping_add(1);
+        r = r.wrapping_add(w.wrapping_mul(color >> 16 & 0xFF));
+        g = g.wrapping_add(w.wrapping_mul(color >> 8 & 0xFF));
+        b = b.wrapping_add(w.wrapping_mul(color & 0xFF));
+        n = n.wrapping_add(w);
+    }
+    (n != 0).then(|| 255 << 24 | r.wrapping_div(n) << 16 | g.wrapping_div(n) << 8 | b.wrapping_div(n))
+}
+
+/// What `PotionContents.getColor` gives for effects with no colour to show: vanilla's water blue.
+const NO_EFFECT_COLOR: i32 = -13083194;
+const EFFECT_GET_COLOR: &str = "net/minecraft/world/effect/MobEffect.getColor.()I";
+const EFFECT_INSTANT: &str = "net/minecraft/world/effect/MobEffect.isInstantenous.()Z";
+const CONSUME: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
 
 /// Vanilla's potion `id` (`minecraft:water`) as its registry's holder, one per id; the potion
 /// knows its id (`$id`).
@@ -319,8 +433,15 @@ fn copy_instance(rt: &mut Rt, from: V) -> V {
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     matches!(owner, BUILDER | POSSIBLE | INSTANCE)
         || (owner == EFFECT && EFFECT_METHODS.contains(&name))
-        || (owner == POTION_CONTENTS && (matches!(name, "createItemStack" | "is" | "withPotion") || (name == "<init>" && desc == "(Lnet/minecraft/core/Holder;)V")))
+        || (owner == CATEGORY && name == "getTooltipFormatting")
+        || (owner == POTION && matches!(name, "<init>" | "getEffects" | "hasInstantEffects" | "getName" | "isEnabled"))
+        || (owner == POTION_CONTENTS && (CONTENTS_METHODS.contains(&name) || (name == "<init>" && desc == "(Lnet/minecraft/core/Holder;)V")))
 }
+
+/// `PotionContents`' methods answered here (the record's accessors are [`crate::records`]', but for
+/// `customEffects`, which gives copies).
+const CONTENTS_METHODS: [&str; 9] =
+    ["createItemStack", "is", "withPotion", "getAllEffects", "forEachEffect", "hasEffects", "getColor", "getColorOptional", "customEffects"];
 
 /// What a mod's own effect (a `MobEffect` subclass) takes from vanilla's class.
 const EFFECT_METHODS: [&str; 15] = [
@@ -371,6 +492,96 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let (color, effects) = (rt.get_field(this, "customColor"), rt.get_field(this, "customEffects"));
             let potion = api_common::optional(rt, a(1));
             crate::records::make(rt, POTION_CONTENTS, &[potion, color, effects])
+        }
+        // `getAllEffects()`: the potion's effects, then the contents' own.
+        (POTION_CONTENTS, "getAllEffects") => {
+            let all = all_effects(rt, this);
+            jutil::new_list(rt, all)
+        }
+        // `forEachEffect(action)`: a copy of each of them, in that order.
+        (POTION_CONTENTS, "forEachEffect") => {
+            for e in all_effects(rt, this) {
+                let copy = copy_instance(rt, e);
+                rt.call_functional(CONSUME, a(1), &[copy]);
+                if rt.thrown.is_some() {
+                    break;
+                }
+            }
+            V::Void
+        }
+        (POTION_CONTENTS, "hasEffects") => V::I(!all_effects(rt, this).is_empty() as i32),
+        // `customEffects()`: copies of the contents' own effects.
+        (POTION_CONTENTS, "customEffects") => {
+            let own = jutil::elements(rt, rt.get_field(this, "customEffects"));
+            let copies = own.into_iter().map(|e| copy_instance(rt, e)).collect();
+            jutil::new_list(rt, copies)
+        }
+        // `getColor()`: the contents' own color, else their effects' mix; the statics
+        // `getColor(potion)` and `getColor(effects)` the mix of those. Vanilla's water blue when no
+        // effect shows.
+        (POTION_CONTENTS, "getColor") => {
+            let effects = match desc {
+                "()I" => {
+                    let own = rt.get_field(rt.get_field(this, "customColor"), "value");
+                    if !matches!(own, V::Void | V::R(0)) {
+                        return Some(V::I(crate::mixin::unbox(rt, own, 'I').i()));
+                    }
+                    all_effects(rt, this)
+                }
+                "(Lnet/minecraft/core/Holder;)I" => {
+                    let potion = held(rt, a(0));
+                    potion_effects(rt, potion)
+                }
+                _ => jutil::elements(rt, a(0)),
+            };
+            V::I(effects_color(rt, &effects).unwrap_or(NO_EFFECT_COLOR))
+        }
+        (POTION_CONTENTS, "getColorOptional") => {
+            let effects = jutil::elements(rt, a(0));
+            let color = effects_color(rt, &effects);
+            crate::menus::optional_int(rt, color)
+        }
+        // `new Potion([name,] effects...)`, as a mod makes its own.
+        (POTION, "<init>") => {
+            let named = desc.starts_with("(Ljava/lang/String;");
+            let effects = jutil::elements(rt, a(if named { 2 } else { 1 }));
+            let list = jutil::new_list(rt, effects);
+            rt.put_field(this, "$name", if named { a(1) } else { V::NULL });
+            rt.put_field(this, "$effects", list);
+            V::Void
+        }
+        (POTION, "getEffects") => potion_effect_list(rt, this),
+        (POTION, "hasInstantEffects") => {
+            let mut instant = false;
+            for e in potion_effects(rt, this) {
+                let holder = rt.get_field(e, "$effect");
+                let effect = held(rt, holder);
+                if crate::tanks::virt(rt, (EFFECT_INSTANT, "isInstantenous.()Z"), &[effect]).i() != 0 {
+                    instant = true;
+                    break;
+                }
+            }
+            V::I(instant as i32)
+        }
+        // The static `getName(potion, prefix)`: the prefix and the potion's name, else its id's
+        // path, else `empty`.
+        (POTION, "getName") => {
+            let holder = rt.get_field(a(0), "value");
+            let name = if matches!(holder, V::Void | V::R(0)) {
+                None
+            } else {
+                let potion = held(rt, holder);
+                potion_name(rt, potion).or_else(|| potion_id(rt, holder).map(|id| id.rsplit(':').next().unwrap_or_default().to_owned()))
+            };
+            let prefix = rt.str_of(a(1)).unwrap_or_default().to_owned();
+            rt.string(&format!("{prefix}{}", name.as_deref().unwrap_or("empty")))
+        }
+        // Vanilla's potions need no feature flag.
+        (POTION, "isEnabled") => V::I(1),
+        // `BENEFICIAL` and `NEUTRAL` blue, `HARMFUL` red.
+        (CATEGORY, "getTooltipFormatting") => {
+            let harmful = rt.str_of(rt.get_field(this, "$name")) == Some("HARMFUL");
+            api::get_static(rt, if harmful { "net/minecraft/ChatFormatting.RED" } else { "net/minecraft/ChatFormatting.BLUE" })
         }
         // `new PotionContents(potion)`: that potion, no color of its own, no effects added.
         (POTION_CONTENTS, "<init>") => {
@@ -464,13 +675,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
-        (EFFECT, "getCategory") => rt.get_field(this, "$category"),
-        (EFFECT, "getColor") => V::I(rt.get_field(this, "$color").i()),
+        // A mod's effect has what it was made with, vanilla's what `MobEffects` made it with.
+        (EFFECT, "getCategory") => category(rt, this),
+        (EFFECT, "getColor") => match rt.get_field(this, "$color") {
+            V::I(c) => V::I(c),
+            _ => V::I(effect_id(rt, this).as_deref().and_then(vanilla_effect).map_or(0, |e| e.3)),
+        },
         (EFFECT, "isBeneficial") => {
-            let category = rt.get_field(this, "$category");
+            let category = category(rt, this);
             V::I((rt.str_of(rt.get_field(category, "$name")) == Some("BENEFICIAL")) as i32)
         }
-        (EFFECT, "isInstantenous" | "shouldApplyEffectTickThisTick") => V::I(0),
+        // Vanilla's instant health, instant damage and saturation.
+        (EFFECT, "isInstantenous") => V::I(effect_id(rt, this).as_deref().and_then(vanilla_effect).is_some_and(|e| e.4) as i32),
+        (EFFECT, "shouldApplyEffectTickThisTick") => V::I(0),
         // Vanilla's own tick: nothing happens, and the effect stays.
         (EFFECT, "applyEffectTick") => V::I(1),
         (EFFECT, "onEffectStarted" | "onEffectAdded" | "onMobRemoved" | "onMobHurt") => V::Void,
@@ -969,6 +1186,150 @@ mod tests {
         assert_eq!(api::call(&mut rt, "java/util/Optional.get.()Ljava/lang/Object;", &[held]), water);
         let effects = api::call(&mut rt, "net/minecraft/world/item/alchemy/PotionContents.customEffects.()Ljava/util/List;", &[contents]);
         assert!(jutil::elements(&rt, effects).is_empty());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Vanilla's effects as `MobEffects` makes them: speed is beneficial and light blue, poison
+    /// harmful, bad omen neutral; instant damage is instantaneous, poison isn't. A category's
+    /// tooltip is red for harmful effects, blue for the others.
+    #[test]
+    fn vanilla_effects_have_their_colour_category_and_kind() {
+        let mut rt = Rt::new();
+        crate::install();
+        let effect = |rt: &mut Rt, field: &'static str| {
+            let h = api::get_static(rt, field);
+            held(rt, h)
+        };
+        let speed = effect(&mut rt, "net/minecraft/world/effect/MobEffects.MOVEMENT_SPEED");
+        let poison = effect(&mut rt, "net/minecraft/world/effect/MobEffects.POISON");
+        let omen = effect(&mut rt, "net/minecraft/world/effect/MobEffects.BAD_OMEN");
+        let harm = effect(&mut rt, "net/minecraft/world/effect/MobEffects.HARM");
+        let call = |rt: &mut Rt, key: &'static str, e: V| api::call(rt, key, &[e]);
+        assert_eq!(call(&mut rt, "net/minecraft/world/effect/MobEffect.getColor.()I", speed), V::I(3402751));
+        let category = "net/minecraft/world/effect/MobEffect.getCategory.()Lnet/minecraft/world/effect/MobEffectCategory;";
+        let (beneficial, harmful, neutral) = (
+            api::get_static(&mut rt, "net/minecraft/world/effect/MobEffectCategory.BENEFICIAL"),
+            api::get_static(&mut rt, "net/minecraft/world/effect/MobEffectCategory.HARMFUL"),
+            api::get_static(&mut rt, "net/minecraft/world/effect/MobEffectCategory.NEUTRAL"),
+        );
+        assert_eq!(call(&mut rt, category, speed), beneficial);
+        assert_eq!(call(&mut rt, category, poison), harmful);
+        assert_eq!(call(&mut rt, category, omen), neutral);
+        let beneficial_of = |rt: &mut Rt, e: V| api::call(rt, "net/minecraft/world/effect/MobEffect.isBeneficial.()Z", &[e]);
+        assert_eq!((beneficial_of(&mut rt, speed), beneficial_of(&mut rt, poison)), (V::I(1), V::I(0)));
+        let instant = |rt: &mut Rt, e: V| api::call(rt, EFFECT_INSTANT, &[e]);
+        assert_eq!((instant(&mut rt, harm), instant(&mut rt, poison)), (V::I(1), V::I(0)));
+        let tooltip = "net/minecraft/world/effect/MobEffectCategory.getTooltipFormatting.()Lnet/minecraft/ChatFormatting;";
+        let (red, blue) = (api::get_static(&mut rt, "net/minecraft/ChatFormatting.RED"), api::get_static(&mut rt, "net/minecraft/ChatFormatting.BLUE"));
+        assert_eq!((call(&mut rt, tooltip, harmful), call(&mut rt, tooltip, neutral)), (red, blue));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Vanilla's potions hold `Potions`' effects (swiftness: speed for 3600 ticks), and their
+    /// descriptions use their base's name (long swiftness's is swiftness's). Contents' color is their
+    /// effects' mix, each weighted by its amplifier + 1 (turtle master: slowness IV and resistance
+    /// III), vanilla's water blue with no effect, their own color when they have one. All their
+    /// effects are the potion's, then their own; `forEachEffect` hands copies of them. A mod's own
+    /// potion holds what it was made with.
+    #[test]
+    fn potions_hold_their_effects_and_mix_their_colours() {
+        let mut rt = Rt::new();
+        crate::install();
+        const OF: &str = "net/minecraft/world/item/alchemy/PotionContents.<init>.(Lnet/minecraft/core/Holder;)V";
+        const COLOR: &str = "net/minecraft/world/item/alchemy/PotionContents.getColor.()I";
+        const ALL: &str = "net/minecraft/world/item/alchemy/PotionContents.getAllEffects.()Ljava/lang/Iterable;";
+        const HAS: &str = "net/minecraft/world/item/alchemy/PotionContents.hasEffects.()Z";
+        const EFFECTS: &str = "net/minecraft/world/item/alchemy/Potion.getEffects.()Ljava/util/List;";
+        const NAME: &str = "net/minecraft/world/item/alchemy/Potion.getName.(Ljava/util/Optional;Ljava/lang/String;)Ljava/lang/String;";
+        let contents = |rt: &mut Rt, potion: &'static str| {
+            let h = api::get_static(rt, potion);
+            let c = rt.new_object(POTION_CONTENTS);
+            api::call(rt, OF, &[c, h]);
+            c
+        };
+        let swiftness = api::get_static(&mut rt, "net/minecraft/world/item/alchemy/Potions.SWIFTNESS");
+        let potion = held(&mut rt, swiftness);
+        let effects = api::call(&mut rt, EFFECTS, &[potion]);
+        let effects = jutil::elements(&rt, effects);
+        assert_eq!(effects.len(), 1);
+        let speed = api::get_static(&mut rt, "net/minecraft/world/effect/MobEffects.MOVEMENT_SPEED");
+        let instance = |rt: &mut Rt, e: V| {
+            let effect = api::call(rt, "net/minecraft/world/effect/MobEffectInstance.getEffect.()Lnet/minecraft/core/Holder;", &[e]);
+            let duration = api::call(rt, "net/minecraft/world/effect/MobEffectInstance.getDuration.()I", &[e]).i();
+            let amplifier = api::call(rt, "net/minecraft/world/effect/MobEffectInstance.getAmplifier.()I", &[e]).i();
+            (effect, duration, amplifier)
+        };
+        assert_eq!(instance(&mut rt, effects[0]), (speed, 3600, 0));
+        // The colors: one effect's own, made opaque; two mixed; none shown.
+        let swift = contents(&mut rt, "net/minecraft/world/item/alchemy/Potions.SWIFTNESS");
+        assert_eq!(api::call(&mut rt, COLOR, &[swift]), V::I(0xFF33EBFF_u32 as i32));
+        let turtle = contents(&mut rt, "net/minecraft/world/item/alchemy/Potions.TURTLE_MASTER");
+        assert_eq!(api::call(&mut rt, COLOR, &[turtle]), V::I(-7503130));
+        let turtle_holder = api::get_static(&mut rt, "net/minecraft/world/item/alchemy/Potions.TURTLE_MASTER");
+        let of_holder = "net/minecraft/world/item/alchemy/PotionContents.getColor.(Lnet/minecraft/core/Holder;)I";
+        assert_eq!(api::call(&mut rt, of_holder, &[turtle_holder]), V::I(-7503130));
+        let water = contents(&mut rt, "net/minecraft/world/item/alchemy/Potions.WATER");
+        assert_eq!(api::call(&mut rt, COLOR, &[water]), V::I(-13083194));
+        assert_eq!((api::call(&mut rt, HAS, &[water]), api::call(&mut rt, HAS, &[swift])), (V::I(0), V::I(1)));
+        let nothing = jutil::new_list(&mut rt, Vec::new());
+        let optional = api::call(&mut rt, "net/minecraft/world/item/alchemy/PotionContents.getColorOptional.(Ljava/lang/Iterable;)Ljava/util/OptionalInt;", &[nothing]);
+        assert_eq!(api::call(&mut rt, "java/util/OptionalInt.isPresent.()Z", &[optional]), V::I(0));
+        // Swiftness with poison of its own and a color of its own: the color is its own; the effects
+        // are speed, then poison; `forEachEffect` hands copies.
+        let poison = effect_instance(&mut rt, "minecraft:poison", 100, 0);
+        let own = jutil::new_list(&mut rt, vec![poison]);
+        let (potion, color) = (api_common::optional(&mut rt, swiftness), api_common::optional(&mut rt, V::I(0x123456)));
+        let mixed = crate::records::make(&mut rt, POTION_CONTENTS, &[potion, color, own]);
+        assert_eq!(api::call(&mut rt, COLOR, &[mixed]), V::I(0x123456));
+        let all = api::call(&mut rt, ALL, &[mixed]);
+        let all = jutil::elements(&rt, all);
+        let poison_holder = api::get_static(&mut rt, "net/minecraft/world/effect/MobEffects.POISON");
+        assert_eq!(all.iter().map(|&e| instance(&mut rt, e)).collect::<Vec<_>>(), [(speed, 3600, 0), (poison_holder, 100, 0)]);
+        fn note(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+            let seen = rt.captured(args[0])[0];
+            jutil::list_add(rt, seen, args[1]);
+            Some(V::Void)
+        }
+        rt.lambda_call = Some(note);
+        let seen = jutil::new_list(&mut rt, Vec::new());
+        let action = rt.lambda_id("java/util/function/Consumer", 1, vec![seen]);
+        api::call(&mut rt, "net/minecraft/world/item/alchemy/PotionContents.forEachEffect.(Ljava/util/function/Consumer;)V", &[mixed, action]);
+        let copies = jutil::elements(&rt, seen);
+        assert_eq!(copies.iter().map(|&e| instance(&mut rt, e)).collect::<Vec<_>>(), [(speed, 3600, 0), (poison_holder, 100, 0)]);
+        assert!(copies.iter().zip(&all).all(|(c, e)| c != e), "copies, not the potion's own instances");
+        // Names: long swiftness's descriptions are swiftness's; no potion is `empty`.
+        let prefix = rt.string("item.minecraft.potion.effect.");
+        let name = |rt: &mut Rt, potion: V| {
+            let o = api_common::optional(rt, potion);
+            let n = api::call(rt, NAME, &[o, prefix]);
+            rt.str_of(n).unwrap_or_default().to_owned()
+        };
+        let long = api::get_static(&mut rt, "net/minecraft/world/item/alchemy/Potions.LONG_SWIFTNESS");
+        let water_holder = api::get_static(&mut rt, "net/minecraft/world/item/alchemy/Potions.WATER");
+        assert_eq!(name(&mut rt, long), "item.minecraft.potion.effect.swiftness");
+        assert_eq!(name(&mut rt, water_holder), "item.minecraft.potion.effect.water");
+        assert_eq!(name(&mut rt, V::NULL), "item.minecraft.potion.effect.empty");
+        // Instant effects: healing has one, swiftness hasn't.
+        let instant = |rt: &mut Rt, field: &'static str| {
+            let h = api::get_static(rt, field);
+            let p = held(rt, h);
+            api::call(rt, "net/minecraft/world/item/alchemy/Potion.hasInstantEffects.()Z", &[p])
+        };
+        assert_eq!(instant(&mut rt, "net/minecraft/world/item/alchemy/Potions.HEALING"), V::I(1));
+        assert_eq!(instant(&mut rt, "net/minecraft/world/item/alchemy/Potions.SWIFTNESS"), V::I(0));
+        // A mod's potion (`new Potion("cure", effects)`): its effects, and its color theirs.
+        let cure = rt.new_object(POTION);
+        let regeneration = effect_instance(&mut rt, "minecraft:regeneration", 200, 0);
+        let array = rt.new_array(1, V::NULL);
+        rt.array_set(array, 0, regeneration);
+        let named = rt.string("cure");
+        api::call(&mut rt, "net/minecraft/world/item/alchemy/Potion.<init>.(Ljava/lang/String;[Lnet/minecraft/world/effect/MobEffectInstance;)V", &[cure, named, array]);
+        let made = api::call(&mut rt, EFFECTS, &[cure]);
+        assert_eq!(jutil::elements(&rt, made), [regeneration]);
+        let cure_holder = crate::neo::registry_holder(&mut rt, "potion", "test:cure", cure);
+        let of_cure = api::call(&mut rt, of_holder, &[cure_holder]);
+        // Regeneration's own color (13458603, 0xCD5CAB), opaque.
+        assert_eq!(of_cure, V::I(0xFFCD5CAB_u32 as i32));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

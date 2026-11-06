@@ -5365,6 +5365,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - In game (the spout round): the glass bottle's depot holds a `minecraft:potion` with
     `{"minecraft:potion_contents": {potion: "minecraft:water"}}`, drawn as the game's water bottle;
     its spout went from 1000 to 750 mB. The dirt's spout made grass (500 mB left), as before.
+- [x] 2026-11-06 Part 65: potions' effects and colors; vanilla effects' category, color and kind.
+  A potion a mod read had no effects and no color: `Potions.X` were bare holders, and vanilla's
+  effects (`MobEffects.X`) knew their id only, so their `getColor` was 0 and `getCategory` null.
+  Measured over the pack: `PotionContents.getAllEffects` 14 jars, `MobEffect.getCategory` 13,
+  `PotionContents.getColor` 9, `MobEffect.isInstantenous` 9, `Potion.getEffects` 9, `Potion.<init>`
+  7, `hasEffects` 6, `MobEffect.getColor` 4, `MobEffectCategory.getTooltipFormatting` 4,
+  `forEachEffect` 4, `Potion.getName` 3. Create's potion fluid takes its tint from `getColor()`,
+  its name from `Potion.getName`, its tooltip from `getAllEffects` and the effects' categories, and
+  the open pipe's spill walks `forEachEffect`.
+  - `tools/vanilla_mob_effects.py` also reads each effect's category, color and class (an
+    `InstantenousMobEffect` is instantaneous) from `MobEffects`' static initialiser, and each
+    potion's name and effects from `Potions`' (`vanilla_effects.rs`: 39 effects, 46 potions).
+  - compat `food`: vanilla's effects answer `getColor`, `getCategory`, `isBeneficial` and
+    `isInstantenous` from the table; `MobEffectCategory.getTooltipFormatting`. `Potion`: a mod's
+    `new Potion([name,] effects...)`, `getEffects` (vanilla's made once from the table),
+    `hasInstantEffects`, the static `getName`, `isEnabled`. `PotionContents`: `getAllEffects`,
+    `forEachEffect` and `customEffects` (copies), `hasEffects`, `getColor` (the instance's and both
+    statics) and `getColorOptional`: vanilla's mix, in Java's int arithmetic.
+  - Tests: `food::tests::vanilla_effects_have_their_colour_category_and_kind`,
+    `potions_hold_their_effects_and_mix_their_colours` (turtle master's -7503130 and the water blue
+    -13083194, worked out by hand from vanilla's formula).
+  - Left: `MobEffect.applyInstantenousEffect` (8 jars; Create's potato cannon and open pipes) needs
+    an entity healed and harmed.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
