@@ -907,6 +907,23 @@ pub trait Host {
     fn remove_entity(&mut self, _id: i32) -> bool {
         false
     }
+    /// Adds an entity of `kind` (`minecraft:skeleton_horse`) at `pos` to the level, made from its
+    /// compound `nbt` (`Rotation`, `Motion`, `CustomName`, a TNT's `fuse`...) as `/summon <kind>
+    /// <pos> <nbt>` makes one: its id. None when the game didn't add it (a kind it can't make, a
+    /// chunk that isn't loaded, a mod that kept it out).
+    fn summon(&mut self, _kind: &str, _pos: [f64; 3], _nbt: &std::collections::BTreeMap<String, Nbt>) -> Option<i32> {
+        None
+    }
+    /// Strikes lightning at `pos` (`LightningBolt` added to the level): only its flash and sound
+    /// when `visual_only`, and credited to the player `cause` (`setCause`: a channeling trident's
+    /// thrower). Its id, or None.
+    fn strike_lightning(&mut self, _pos: [f64; 3], _visual_only: bool, _cause: Option<u128>) -> Option<i32> {
+        None
+    }
+    /// The entity `id` as the level saves it (`Entity.saveWithoutId`); None for no such entity.
+    fn entity_nbt(&mut self, _id: i32) -> Option<std::collections::BTreeMap<String, Nbt>> {
+        None
+    }
     /// Sets the living mob `id`'s health (`LivingEntity.setHealth`), above 0.
     fn set_entity_health(&mut self, _id: i32, _health: f32) -> bool {
         false
@@ -1341,6 +1358,13 @@ pub struct MemoryHost {
     pub knockbacks: Vec<(i32, f64, f64, f64)>,
     /// The blows whose enchantment effects were asked for ([`Host::post_attack_effects`]), in order.
     pub post_attacks: Vec<(Struck, HurtBy, AttackWeapon)>,
+    /// The entities added from their compound ([`Host::summon`]), in order: kind, position,
+    /// compound. Each also joins [`MemoryHost::entities`] under the next id from 1000.
+    pub summoned: Vec<(String, [f64; 3], std::collections::BTreeMap<String, Nbt>)>,
+    /// The lightning struck ([`Host::strike_lightning`]), in order: where, visual only, cause.
+    pub lightning: Vec<([f64; 3], bool, Option<u128>)>,
+    /// The entities' saved compounds ([`Host::entity_nbt`]), by id.
+    pub entity_nbts: HashMap<i32, std::collections::BTreeMap<String, Nbt>>,
     /// Entity type tags: tag → entity types.
     pub entity_tags: HashMap<String, Vec<String>>,
     /// The whole stacks of the item entities spawned with their data ([`Host::spawn_stack_entity`]), by id.
@@ -1795,6 +1819,21 @@ impl Host for MemoryHost {
     fn post_attack_effects(&mut self, victim: Struck, by: &HurtBy, weapon: &AttackWeapon) -> bool {
         self.post_attacks.push((victim, by.clone(), weapon.clone()));
         true
+    }
+    fn summon(&mut self, kind: &str, pos: [f64; 3], nbt: &std::collections::BTreeMap<String, Nbt>) -> Option<i32> {
+        let id = 1000 + i32::try_from(self.summoned.len() + self.lightning.len()).ok()?;
+        self.summoned.push((kind.to_owned(), pos, nbt.clone()));
+        self.entities.push(EntityView { id, kind: kind.to_owned(), pos, yaw: 0.0, health: None });
+        Some(id)
+    }
+    fn strike_lightning(&mut self, pos: [f64; 3], visual_only: bool, cause: Option<u128>) -> Option<i32> {
+        let id = 1000 + i32::try_from(self.summoned.len() + self.lightning.len()).ok()?;
+        self.lightning.push((pos, visual_only, cause));
+        self.entities.push(EntityView { id, kind: "minecraft:lightning_bolt".into(), pos, yaw: 0.0, health: None });
+        Some(id)
+    }
+    fn entity_nbt(&mut self, id: i32) -> Option<std::collections::BTreeMap<String, Nbt>> {
+        self.entity_nbts.get(&id).cloned()
     }
     fn kill_entity(&mut self, id: i32) -> bool {
         let had = self.entities.len();

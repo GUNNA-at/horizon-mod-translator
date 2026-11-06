@@ -5094,6 +5094,73 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     it, as in vanilla. The cow is a creature, so Create awards no advancement for it. Left in the
     round: Flywheel's GL calls, `DynamicTexture` (3), and `List.forEach` on null after
     `create:sync_edge_group`.
+- [x] 2026-11-06 Part 57: vanilla entities a mod makes and adds.
+  Measured over the pack (367 jars): `EntityType.create` is called in 58 jars (202 sites), 26 of
+  them (79 sites) on vanilla's own types, a lightning bolt most (9 jars, 35 sites), then skeleton
+  horses, horses, armor stands, zombie horses, cows and sheep. `EntityType.spawn` is in 15 jars.
+  Mods also build vanilla classes directly: `new ArmorStand(level, x, y, z)` (6 jars),
+  `new AreaEffectCloud(level, x, y, z)` (7), `new PrimedTnt(level, x, y, z, owner)` (4, Create's
+  mounted dispenser among them), `FireworkRocketEntity`'s constructors (7, Create's mounted
+  dispenser again), `FallingBlockEntity.fall` (6, Create's potato cannon placing a block). A
+  vanilla type's `create` answered null, and none of those constructors was modelled, so the mod's
+  next call failed. Create's haunting (an encased fan blowing through soul fire onto a horse) makes
+  a skeleton horse from the horse's saved compound.
+  - The entity a mod makes (`made_entities`) is an object of the type's 1.21.1 class, so
+    `instanceof` answers as in Java. It keeps what the mod sets: its place, facing and motion as
+    fields, the rest in the compound `saveWithoutId` would write.
+    - The setters it answers: `setPos`, `moveTo` (each form), `absMoveTo`, `teleportTo`,
+      `copyPosition`, `setYRot`/`setXRot` (non-finite refused), `setDeltaMovement`, `push`,
+      `Projectile.shoot` (vanilla's scatter), `setCustomName`, `setCustomNameVisible`,
+      `setNoGravity`, `setSilent`, `setInvisible`, `setGlowingTag`, `setInvulnerable`,
+      `addTag`/`removeTag`, fire, frost and air.
+    - Per class: a bolt's `setVisualOnly`/`setCause`/`setDamage`; a TNT's fuse; a falling block's
+      damage; an armor stand's arms, base plate, size and marker; a mob's health, equipment
+      (`setItemSlot`, as the game's `equipment`), persistence, no-AI, left hand, baby or age, and
+      `finalizeSpawn` (NeoForge's `finalizeMobSpawn` too).
+    - `load`/`deserializeNBT` take a compound whole (its place, motion and facing into the fields,
+      `NeoForgeData` into its persistent data), and `saveWithoutId`/`serializeNBT` give it back.
+    - The constructors: any vanilla class's `(EntityType, Level)` on an object of that very class
+      (a mod subclass's `super(...)` is left to it), `ArmorStand(level, x, y, z)`,
+      `PrimedTnt(level, x, y, z, owner)` (80-tick fuse, vanilla's hop),
+      `FallingBlockEntity(level, x, y, z, state)`, and `FireworkRocketEntity`'s four with a
+      position (its lifetime from the stack's flight duration, its drift, its owner, shot at an
+      angle).
+  - Adding it (`addFreshEntity`, `addFreshEntityWithPassengers`, `tryAddFreshEntityWithPassengers`)
+    hands its compound to the game, which makes the entity as `/summon <kind> <pos> <nbt>` does
+    (`Host::summon`, `native_summon`). A mob `finalizeSpawn` was asked of is finished as the game
+    adds it (`horizon:finalize`). A lightning bolt strikes instead (`Host::strike_lightning`,
+    `native_strike_lightning`, API @API:mod_made_entities@), as a real strike or a flash only,
+    credited to its cause. From then on the object stands for the game's entity
+    (`vanilla_entities::adopt`), so the mod's later calls (`getX`, `discard`) reach it. A client's
+    level, a discarded entity, or an entity the level already holds isn't added.
+  - `FallingBlockEntity.fall(level, pos, state)`: the block falls from the middle of its floor, no
+    longer waterlogged, what its fluid leaves takes its place, and the falling block is added.
+  - `EntityType.spawn` and the `create` of the same arguments: the type's entity on the block,
+    facing a random way, finalized as the game adds it when a mob, given to the consumer, then
+    added.
+  - The game's entities answer more (Create's haunting needs them): `saveWithoutId` and
+    `serializeNBT` from the game's saved compound (`Host::entity_nbt`, `native_entity_nbt`), with
+    the mod data the runtime keeps for it. Also what a living one holds and wears from its saved
+    `equipment` (`getBodyArmorItem`, `getItemBySlot`, the hands), `getPosition`,
+    `spawnAtLocation` and `registryAccess` (the last found missing by the haunting test).
+  - `tryAddFreshEntityWithPassengers` and `addFreshEntityWithPassengers` of a mod's entity or an
+    item entity add it as `addFreshEntity` does (Create's trains use the first for a carriage).
+  - Inside a hit's hooks the game has no level at hand, so an entity a listener adds comes once the
+    hit is over, with no id for the runtime yet.
+  - Not modelled: an area effect cloud (the game doesn't make one from a compound), a firework
+    attached to the entity it boosts, a TNT's owner (the game keeps none for a summoned one), a
+    falling block's damage set after `fall` added it, and what `finalizeSpawn` would have set before
+    the mob is added. A compound a mod loads passes to the game as given. A game entity's saved
+    compound is already in the game's form, but one a mod builds in 1.21.1's form isn't upgraded.
+  - Tests: `made_entities::tests::a_mods_lightning_strikes_through_the_game`,
+    `a_mods_tnt_is_summoned_lit_with_its_hop`, `a_horse_haunted_by_create_becomes_a_skeleton_horse`,
+    `a_block_falls_and_an_armor_stand_stands_as_set`.
+  - In game (the haunting round, `hauntgame.sh`): a summoned horse in iron horse armor stands in
+    front of an encased fan turning at 64 RPM through soul fire. After Create's 100 haunting ticks
+    it is a skeleton horse in the same place (seen at tick 140), with the horse's health (53, the
+    base a horse summoned with a compound keeps), and the armor lies beside it as an item. No new
+    unmapped calls. Left in the round: Flywheel's GL calls, `DynamicTexture` (3), and
+    `List.forEach` on null after `create:sync_edge_group`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

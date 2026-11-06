@@ -17,7 +17,7 @@
 //! made from the id, as `lan::entity_uuid` makes for entities with none), and a blow's armour,
 //! knockback and attacker: `hurt` takes the amount off the health.
 
-use crate::host::{EntityView, Host};
+use crate::host::{EntityView, Host, Nbt};
 use crate::{Rt, V, api};
 
 const ENTITY: &str = "net/minecraft/world/entity/Entity";
@@ -439,6 +439,11 @@ pub fn class_for(kind: &str, living: bool) -> &'static str {
     }
 }
 
+/// Vanilla's entity type `kind`'s box (width, height) and eye height, as [`size`] gives them.
+pub(crate) fn dimensions(kind: &str) -> (f32, f32, f32) {
+    size(kind, false)
+}
+
 /// An entity type's box (width, height) and eye height: 1.21.1's, a boat's for 26.3's boats, a
 /// player's size for another mob it lacks, half a block for the rest.
 fn size(kind: &str, living: bool) -> (f32, f32, f32) {
@@ -562,6 +567,25 @@ pub(crate) fn player(rt: &mut Rt, id: i32, uuid: u128, at: [f64; 3]) -> V {
 pub fn known(rt: &mut Rt, id: i32) -> Option<V> {
     let list = proxies(rt);
     crate::jutil::elements(rt, list).into_iter().find(|&e| self::id(rt, e) == id && rt.get_field(e, "$alive").i() != 0)
+}
+
+/// Makes `e`, an entity of a vanilla class a mod made (`made_entities`), the object of the game's
+/// entity `id` of type `kind`, which the game just made from it: the one object for that entity
+/// from now on, brought up to date from the game. Its UUID is then the game's.
+pub(crate) fn adopt(rt: &mut Rt, e: V, id: i32, kind: &str) {
+    let now = game_time(rt);
+    let list = proxies(rt);
+    let mut items: Vec<V> = crate::jutil::elements(rt, list).into_iter().filter(|&o| self::id(rt, o) != id).collect();
+    rt.put_field(e, "$vanilla", V::I(1));
+    rt.put_field(e, "$vid", V::I(id));
+    let k = rt.string(kind);
+    rt.put_field(e, "$kind", k);
+    rt.put_field(e, "$uuid", V::NULL);
+    items.push(e);
+    set_list(rt, list, items);
+    let view = rt.host().and_then(|h| h.entity(id));
+    refresh(rt, e, view.as_ref(), None);
+    rt.put_field(e, "$seen", V::J(now));
 }
 
 /// An object standing for the game's entity `id` that the runtime hasn't seen and can't ask the
@@ -701,7 +725,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "getY" => V::D(p[1]),
         "getZ" => V::D(p[2]),
         "getBlockX" | "getBlockY" | "getBlockZ" => V::I(p[(name.as_bytes()[8] - b'X') as usize].floor() as i32),
-        "position" => vec3(rt, p),
+        "position" | "getPosition" => vec3(rt, p),
         "blockPosition" | "getOnPos" => {
             let y = if name == "getOnPos" { p[1] - 1.0e-5 } else { p[1] };
             api::block_pos(rt, p[0].floor() as i64, y.floor() as i64, p[2].floor() as i64)
@@ -733,6 +757,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "getEyeY" => V::D(p[1] + f64::from(eye)),
         "getEyePosition" => vec3(rt, [p[0], p[1] + f64::from(eye), p[2]]),
         "level" | "getCommandSenderWorld" => crate::glue::level(rt),
+        // Its level's registries (Create's haunting hands them to `deserializeNBT`).
+        "registryAccess" => {
+            let level = crate::glue::level(rt);
+            api::call(rt, "net/minecraft/world/level/Level.registryAccess.()Lnet/minecraft/core/RegistryAccess;", &[level])
+        }
         "isAlive" => V::I(i32::from(alive && (!living || health > 0.0))),
         "isRemoved" => V::I(i32::from(!alive)),
         "isDeadOrDying" if living => V::I(i32::from(health <= 0.0)),
@@ -868,8 +897,72 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "getVehicle" | "getControllingPassenger" | "getFirstPassenger" | "getCustomName" | "getTarget" => V::NULL,
         "getRootVehicle" => e,
         "getPassengers" => crate::jutil::new_list(rt, Vec::new()),
-        "getMainHandItem" | "getOffhandItem" | "getItemBySlot" | "getItemInHand" | "getUseItem" | "getWeaponItem" => {
+        // What it wears and holds, as the level saves it (`equipment`): a horse's armor (Create's
+        // haunting drops it), a zombie's weapon.
+        "getMainHandItem" | "getOffhandItem" | "getItemBySlot" | "getItemInHand" | "getBodyArmorItem" | "getWeaponItem" if living => {
+            let slot = match name {
+                "getMainHandItem" | "getWeaponItem" => Some("mainhand".to_owned()),
+                "getOffhandItem" => Some("offhand".to_owned()),
+                "getBodyArmorItem" => Some("body".to_owned()),
+                // `InteractionHand`: the main hand first.
+                "getItemInHand" => Some(if rt.get_field(a(1), "$ordinal").i() == 1 { "offhand" } else { "mainhand" }.to_owned()),
+                _ => rt.str_of(rt.get_field(a(1), "$name")).map(str::to_ascii_lowercase),
+            };
+            let saved = slot.and_then(|slot| match with_host(rt, |h| h.entity_nbt(id)).flatten()?.remove("equipment")? {
+                Nbt::Compound(mut eq) => match eq.remove(&slot)? {
+                    Nbt::Compound(stack) => Some(stack),
+                    _ => None,
+                },
+                _ => None,
+            });
+            match saved.and_then(|stack| crate::api_common::parse_stack(rt, &stack)) {
+                Some(stack) => stack,
+                None => crate::api_common::get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL),
+            }
+        }
+        "getMainHandItem" | "getOffhandItem" | "getItemBySlot" | "getItemInHand" | "getUseItem" | "getWeaponItem" | "getBodyArmorItem" => {
             crate::api_common::get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL)
+        }
+        // As the level saves it (`saveWithoutId`, NeoForge's `serializeNBT` with the type's id),
+        // with the mod data the runtime keeps for it (`NeoForgeData`).
+        "saveWithoutId" | "serializeNBT" => {
+            let mut nbt = with_host(rt, |h| h.entity_nbt(id)).flatten().unwrap_or_default();
+            let data = rt.get_field(e, "$data");
+            if data.r() != 0 {
+                let d = crate::nbt::from_runtime(rt, data);
+                if !d.is_empty() {
+                    nbt.insert("NeoForgeData".into(), Nbt::Compound(d));
+                }
+            }
+            if name == "serializeNBT" {
+                nbt.insert("id".into(), Nbt::String(kind.clone()));
+                crate::nbt::to_runtime(rt, &nbt)
+            } else {
+                let out = crate::nbt::to_runtime(rt, &nbt);
+                crate::made_entities::merge(rt, a(1), out);
+                a(1)
+            }
+        }
+        // `spawnAtLocation(stack[, offsetY])`, or an item's: a new item entity at its feet (raised by
+        // the offset), added to the level; none for an empty stack, or on a client.
+        "spawnAtLocation" => {
+            let stack = if desc.starts_with("(Lnet/minecraft/world/item/ItemStack;") {
+                a(1)
+            } else {
+                let item = crate::api_common::item_like_name(rt, a(1));
+                crate::api_common::stack(rt, &item, 1)
+            };
+            let offset = if desc.contains(";F)") {
+                f64::from(a(2).f())
+            } else if desc.contains(";I)") {
+                f64::from(a(2).i())
+            } else {
+                0.0
+            };
+            if crate::api_common::stack_empty(rt, stack) || crate::neo::is_client(rt) {
+                return Some(V::NULL);
+            }
+            crate::entities::spawn_at(rt, [p[0], p[1] + offset, p[2]], stack)
         }
         "getRemainingFireTicks" | "getAirSupply" | "getTicksFrozen" | "getArmorValue" => V::I(0),
         _ => return None,

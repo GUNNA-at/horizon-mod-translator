@@ -179,6 +179,48 @@ impl Game<'_> {
             })
         })
     }
+    /// Entity `id` of the level in place, `dimension`, as saved
+    /// (`Entity.saveWithoutId`, what `/data get entity` reads): its compound.
+    /// None for no such entity (a player included), another dimension or a
+    /// client's copy of the world. API @API:mod_made_entities@.
+    pub(super) fn native_entity_nbt(&mut self, dimension: &str, id: u32) -> Option<Compound> {
+        if !self.native_entity_level(dimension) {
+            return None;
+        }
+        let target = self.level_entity(i32::try_from(id).ok()?)?;
+        match self.entity_nbt(target)? {
+            Tag::Compound(c) => Some(c),
+            _ => None,
+        }
+    }
+    /// Strikes lightning at `pos` in the level in place, `dimension`, as a
+    /// `LightningBolt` a mod adds: a real strike (fire, damage, conversions)
+    /// or only its flash and sound (`visual_only`), credited to the player of
+    /// UUID `cause` when given (`setCause`, as a channeling trident's thrower
+    /// is). The bolt's id; None on a client's copy of the world, for another
+    /// dimension or a position outside `/summon`'s bounds. API
+    /// @API:mod_made_entities@.
+    pub(super) fn native_strike_lightning(
+        &mut self,
+        dimension: &str,
+        pos: [f64; 3],
+        visual_only: bool,
+        cause: Option<u128>,
+    ) -> Option<u32> {
+        if !self.native_entity_level(dimension) || !position_ok(pos) {
+            return None;
+        }
+        let cause = cause.and_then(|u| {
+            self.player_with_uuid(horizon_client::lan::playerdata::uuid_ints(u))
+        });
+        self.spawn_bolt(pos, visual_only);
+        let bolt = self.bolts.last_mut()?;
+        bolt.cause = cause;
+        Some(super::lan_entities::assign_entity_id(
+            &mut self.next_entity,
+            &mut bolt.id,
+        ))
+    }
     /// Moves entity `id`, one Horizon keeps without simulating (a display, a
     /// marker, an interaction), to `pos` facing `yaw` and `pitch` in degrees;
     /// a display eases there over its `teleport` ticks. False for no such

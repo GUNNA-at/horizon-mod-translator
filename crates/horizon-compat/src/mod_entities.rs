@@ -446,9 +446,25 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (ENTITY_TYPE, "create") if desc.starts_with("(Lnet/minecraft/world/level/Level;") => {
             let factory = rt.get_field(a(0), "$factory");
             if factory.r() == 0 {
-                return Some(V::NULL);
+                // Vanilla's type: an entity of its 1.21.1 class, which the game makes once it is added.
+                let vanilla = type_id(rt, a(0)).filter(|id| crate::vanilla_entities::is_vanilla_type(id)).map(str::to_owned);
+                return Some(match vanilla {
+                    Some(id) => crate::made_entities::make(rt, &id, a(1)),
+                    None => V::NULL,
+                });
             }
             Some(rt.call_functional(ENTITY_FACTORY, factory, &[a(0), a(1)]))
+        }
+        // `create(level, consumer, pos, spawnType, offset, offsetMore)` and the `spawn`s: the type's
+        // entity placed on the block, finalized as the game adds it when a mob, and (`spawn`) added.
+        (ENTITY_TYPE, "create" | "spawn") if desc.starts_with("(Lnet/minecraft/server/level/ServerLevel;") => {
+            let (consumer, pos) = match desc {
+                d if d.starts_with("(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;") => (V::NULL, a(2)),
+                d if d.starts_with("(Lnet/minecraft/server/level/ServerLevel;Ljava/util/function/Consumer;") => (a(2), a(3)),
+                d if d.starts_with("(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/item/ItemStack;") => (V::NULL, a(4)),
+                _ => return None,
+            };
+            Some(crate::made_entities::spawn(rt, a(0), a(1), pos, consumer, name == "spawn"))
         }
         (ENTITY_TYPE, "getWidth") => Some(V::F(size(rt, a(0)).0 as f32)),
         (ENTITY_TYPE, "getHeight") => Some(V::F(size(rt, a(0)).1 as f32)),

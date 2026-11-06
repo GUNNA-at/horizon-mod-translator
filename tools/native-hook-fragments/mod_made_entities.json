@@ -1,0 +1,9 @@
+{
+  "hooks": [],
+  "rust_summary": "a mod's vanilla entities: an entity's saved compound (`native_entity_nbt`) and lightning a mod adds (`native_strike_lightning`).",
+  "doc_summary": "`native_entity_nbt(dimension, id)` gives entity `id` of the level in place as it is saved (`Entity.saveWithoutId`, what `/data get entity` reads). `native_strike_lightning(dimension, pos, visual_only, cause)` strikes lightning at `pos` as a `LightningBolt` a mod adds does: a real strike (fire, damage, conversions), or with `visual_only` its flash and sound alone, credited to the player of UUID `cause` when given (`setCause`, as a channeling trident's thrower is). It gives the bolt's entity id. Both answer None on a client's copy of the world and for another dimension, the strike also for a position outside `/summon`'s bounds. With `native_summon` they let translated mods make vanilla's entities and add them (`EntityType.create`, `new PrimedTnt(...)`, `FallingBlockEntity.fall`). Bundles need \"hooks\": @API:mod_made_entities@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_entities.rs",
+    "docs/mod-translator.md"
+  ]
+}

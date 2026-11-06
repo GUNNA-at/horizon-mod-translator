@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 92] = [
+const COMPAT: [(&str, &str); 93] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -161,6 +161,7 @@ const COMPAT: [(&str, &str); 92] = [
     ("world_events.rs", include_str!("../../horizon-compat/src/world_events.rs")),
     ("datapack.rs", include_str!("../../horizon-compat/src/datapack.rs")),
     ("vanilla_entities.rs", include_str!("../../horizon-compat/src/vanilla_entities.rs")),
+    ("made_entities.rs", include_str!("../../horizon-compat/src/made_entities.rs")),
     ("menus.rs", include_str!("../../horizon-compat/src/menus.rs")),
     ("widgets.rs", include_str!("../../horizon-compat/src/widgets.rs")),
     ("edit_box.rs", include_str!("../../horizon-compat/src/edit_box.rs")),
@@ -2302,6 +2303,59 @@ fn world_writes(c: &str) -> String {
             let dimension = self.game.native_dimension().to_owned();
             u32::try_from(id).is_ok_and(|i| self.game.native_remove_mob(&dimension, i))
         }}
+        // A vanilla entity a mod made and added (`made_entities`): the game makes it from its
+        // compound as `/summon` does, or strikes its lightning; and an entity's compound, read back.
+        fn summon(&mut self, kind: &str, pos: [f64; 3], nbt: &std::collections::BTreeMap<String, {c}::nbt::Nbt>) -> Option<i32> {{
+            fn tag(n: &{c}::nbt::Nbt) -> horizon_world::nbt::Tag {{
+                use horizon_world::nbt::{{Compound, JavaString, Tag}};
+                use {c}::nbt::Nbt;
+                match n {{
+                    Nbt::Byte(b) => Tag::Byte(*b),
+                    Nbt::Short(s) => Tag::Short(*s),
+                    Nbt::Int(i) => Tag::Int(*i),
+                    Nbt::Long(l) => Tag::Long(*l),
+                    Nbt::Float(f) => Tag::Float(f.to_bits()),
+                    Nbt::Double(d) => Tag::Double(d.to_bits()),
+                    Nbt::String(s) => Tag::String(JavaString::from(s.as_str())),
+                    Nbt::Compound(m) => Tag::Compound(m.iter().map(|(k, v)| (JavaString::from(k.as_str()), tag(v))).collect::<Compound>()),
+                    Nbt::List(l) => Tag::List(l.iter().map(tag).collect()),
+                    Nbt::ByteArray(a) => Tag::ByteArray(a.iter().map(|b| *b as u8).collect()),
+                    Nbt::IntArray(a) => Tag::IntArray(a.clone()),
+                    Nbt::LongArray(a) => Tag::LongArray(a.clone()),
+                }}
+            }}
+            let dimension = self.game.native_dimension().to_owned();
+            let compound = nbt.iter().map(|(k, v)| (horizon_world::nbt::JavaString::from(k.as_str()), tag(v))).collect::<horizon_world::nbt::Compound>();
+            self.game.native_summon(&dimension, kind, pos, compound).and_then(|id| i32::try_from(id).ok())
+        }}
+        fn strike_lightning(&mut self, pos: [f64; 3], visual_only: bool, cause: Option<u128>) -> Option<i32> {{
+            let dimension = self.game.native_dimension().to_owned();
+            self.game.native_strike_lightning(&dimension, pos, visual_only, cause).and_then(|id| i32::try_from(id).ok())
+        }}
+        fn entity_nbt(&mut self, id: i32) -> Option<std::collections::BTreeMap<String, {c}::nbt::Nbt>> {{
+            fn nbt(tag: &horizon_world::nbt::Tag) -> Option<{c}::nbt::Nbt> {{
+                use horizon_world::nbt::Tag;
+                use {c}::nbt::Nbt;
+                Some(match tag {{
+                    Tag::Byte(b) => Nbt::Byte(*b),
+                    Tag::Short(s) => Nbt::Short(*s),
+                    Tag::Int(i) => Nbt::Int(*i),
+                    Tag::Long(l) => Nbt::Long(*l),
+                    Tag::Float(f) => Nbt::Float(f32::from_bits(*f)),
+                    Tag::Double(d) => Nbt::Double(f64::from_bits(*d)),
+                    Tag::String(s) => Nbt::String(s.to_string_lossy()),
+                    Tag::Compound(m) => Nbt::Compound(m.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), nbt(v)?))).collect()),
+                    Tag::List(l) => Nbt::List(l.iter().filter_map(nbt).collect()),
+                    Tag::ByteArray(a) => Nbt::ByteArray(a.iter().map(|b| *b as i8).collect()),
+                    Tag::IntArray(a) => Nbt::IntArray(a.clone()),
+                    Tag::LongArray(a) => Nbt::LongArray(a.clone()),
+                    Tag::End => return None,
+                }})
+            }}
+            let dimension = self.game.native_dimension().to_owned();
+            let saved = self.game.native_entity_nbt(&dimension, u32::try_from(id).ok()?)?;
+            Some(saved.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), nbt(v)?))).collect())
+        }}
         fn set_entity_health(&mut self, id: i32, health: f32) -> bool {{
             let dimension = self.game.native_dimension().to_owned();
             u32::try_from(id).is_ok_and(|i| self.game.native_set_mob_health(&dimension, i, health))
@@ -2445,6 +2499,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
     let (orb, payload) = (later("game.native_spawn_experience_orb(at, value, motion)"), later("Later { game }.send_payload(to, &channel, &data)"));
     let attribute = later("Later { game }.change_attribute(entity, &attribute, &change)");
     let (give, take) = (later("Later { game }.add_effect(entity, &effect, force)"), later("Later { game }.remove_effect(entity, &effect)"));
+    let (summon, strike) = (later("Later { game }.summon(&kind, pos, &nbt)"), later("Later { game }.strike_lightning(pos, visual_only, cause)"));
     format!(r#"    // The trait's methods, called on the hosts below by name.
     use {c}::host::Host as _;
     struct Host {{
@@ -2555,6 +2610,16 @@ fn hit_host(c: &str, server_send: &str) -> String {
                 game.native_level_event(event, pos, data);
             }});
             true
+        }}
+        // An entity a listener makes comes once the hit is over, with no id for it yet.
+        fn summon(&mut self, kind: &str, pos: [f64; 3], nbt: &std::collections::BTreeMap<String, {c}::nbt::Nbt>) -> Option<i32> {{
+            let (kind, nbt) = (kind.to_owned(), nbt.clone());
+            {summon}
+            None
+        }}
+        fn strike_lightning(&mut self, pos: [f64; 3], visual_only: bool, cause: Option<u128>) -> Option<i32> {{
+            {strike}
+            None
         }}
         fn kill_entity(&mut self, id: i32) -> bool {{
             {kill}
