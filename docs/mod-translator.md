@@ -4442,6 +4442,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     +z) and down (forward -y, up +z); the frame's camera placing it, the dispatchers holding it, the orientation
     overridden; no camera out of a world; water, lava and powder snow fog by where the eyes are (a water source's
     surface 8/9 up its block); the projection as OpenGL's perspective; the shaders one object a name.
+  - packcov9 (this part, the same 367 jars, the typed probe): methods 98120/133182 (73.7%, from 72.5% in
+    packcov8), uses 320014/379191 (84.4%, from 83.6%), 12388 distinct missing (from 12669); Create 2797/3994
+    methods (70.0%) and 23051/25380 uses (90.8%). The camera's family (`Camera`, `GameRenderer`, shaders and
+    uniforms, `LightTexture`, the viewport, level stage, highlight and shader events) fell from 1563 missing uses
+    to 27; all missing uses from 67364 to 64481. Not counted by packcov: the vertices a mod writes one by one
+    (`addVertex` in 112 of the pack's jars, `putBulkData` in 26), which every consumer answered by chaining and
+    dropping them: no key was missing, nothing was drawn (Part 35).
+- [x] 2026-11-06 Part 35: the vertices a mod writes one by one, drawn (new `horizon-compat/src/vertices.rs`).
+  - A world consumer (`MultiBufferSource.getBuffer(type)` in a block entity's or an entity's renderer, maybe
+    wrapped in a sprite) keeps the vertices written into it: `addVertex` in each of its forms (a position, under
+    a `Matrix4f` or a `PoseStack.Pose`, a `Vector3f`, the whole vertex at once), then `setColor` (ints, floats, one
+    ARGB int, `setWhiteAlpha`), `setUv`, `setLight`/`setUv2`; overlay and normals chain as before. When a face is
+    whole (the next vertex begins, the renderer is done, or the mod ends the batch: `endBatch()`,
+    `endBatch(type)`), the host draws it as a model face where the pose put it, each corner in its own colour,
+    lit by the light the mod gave. A `QUADS` type makes a face of every four vertices; `TRIANGLES` of three;
+    `TRIANGLE_STRIP` and `TRIANGLE_FAN` a triangle a vertex after the second (a strip's every other one turned to
+    wind as the first); lines aren't drawn (traced once). The mode is the one a mod's own type was made with
+    (`RenderType.create(name, format, mode, ...)` keeps it), else vanilla's type's (`leash()` is a strip,
+    `dragonRays()` triangles).
+  - A face's sprite: the one its consumer was wrapped in (UVs 0 to 1 across it); else, on the block atlas
+    (`translucent()` and the other block layers, a type whose texture is an atlas, a mod's own type built with
+    `setTextureState(BLOCK_SHEET_MIPPED)` as Create's fluid type is), the sprite whose cell holds its UVs
+    (`sprite.getU/getV` give a UV in the sprite's cell), its UVs measured across that cell; else its type's
+    texture (`entityTranslucent(texture)`, a `TextureStateShard`); else the game's white sprite (`lightning()`,
+    `debugQuads()`: the vertices' colours alone). UVs running past the texture (a scrolling beam's) are moved
+    back by whole textures and kept inside it, since one sprite of an atlas can't repeat.
+  - `putBulkData(pose, quad, ...)` (vanilla's two forms and NeoForge's): the baked face under the pose, tinted by
+    the colour given (times each corner's brightness), lit by the light given.
+  - Vertices written outside the world's hooks (a screen's, into its own buffer source) are forgotten before a
+    block entity or the entities are drawn, so they never land in the world.
+  - Tests (`vertices::tests`): a fluid surface written as Create's `FluidRenderer` writes it (four vertices into
+    `translucent()`, UVs from `sprite.getU/getV` of the still water) is one upward face of the water's sprite,
+    lifted by the pose, in the mod's colour and light; a wrapped consumer's face drawn from its sprite as soon as
+    the next one begins; an untextured type's face white; a line type's vertices drawing nothing; an unfinished
+    face dropped; a mod's own `TRIANGLE_STRIP` type on the block sheet drawing a triangle a vertex, both facing
+    the same way.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -1749,7 +1749,12 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
         ("net/minecraft/client/renderer/RenderBuffers", "bufferSource" | "crumblingBufferSource") => {
             rt.intern("compat:gui-buffers".into(), |rt| rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource"))
         }
-        ("net/minecraft/client/renderer/MultiBufferSource$BufferSource", "endBatch" | "endLastBatch") => V::Void,
+        // The batch ends: the vertices written into it are drawn (`endBatch(type)`: that type's).
+        ("net/minecraft/client/renderer/MultiBufferSource$BufferSource", "endBatch" | "endLastBatch") => {
+            let only = a(1);
+            crate::vertices::flush(rt, (only.r() != 0).then_some(only));
+            V::Void
+        }
         (WINDOW, "getGuiScaledWidth") => V::I(size(rt)[0]),
         (WINDOW, "getGuiScaledHeight") => V::I(size(rt)[1]),
         (WINDOW, "getGuiScale") => V::D(scale(rt)),

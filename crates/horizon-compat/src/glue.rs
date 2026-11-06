@@ -1176,6 +1176,7 @@ pub fn render_block_entity(
         let Some(be) = client_block_entity(rt, pos, state, nbt) else { return false };
         // The camera the renderer finds on its dispatcher (`context.getBlockEntityRenderDispatcher().camera`).
         crate::camera::prepare(rt, None);
+        crate::vertices::discard(rt);
         let ty = rt.get_field(be, "$type");
         let Some(id) = rt.registered_name(ty, "block_entity_type").map(str::to_owned) else { return false };
         let Some(provider) = rt.interned.get(&format!("ber/{id}")).copied() else {
@@ -1206,6 +1207,8 @@ pub fn render_block_entity(
         let partial = rt.host().map_or(0.0, |h| h.partial_tick());
         vc(rt, BER_RENDER_KEY, BER_RENDER, &[renderer, be, V::F(partial), stack, buffers, V::I(light), V::I(crate::render::NO_OVERLAY)]);
         rt.report_thrown("a block entity renderer");
+        // The vertices it wrote one by one, drawn where it put them.
+        crate::vertices::flush(rt, None);
         true
     })
 }
@@ -1255,6 +1258,7 @@ pub fn render_mod_entities(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3]) -
     rt.with_host(host, |rt| {
         // The frame's camera: where the mods' renderers measure from (`Camera.getPosition`).
         crate::camera::prepare(rt, Some(camera));
+        crate::vertices::discard(rt);
         let Some(vc) = rt.vcall else { return 0 };
         let partial = rt.host().map_or(0.0, |h| h.partial_tick());
         let mut drawn = 0;
@@ -1287,6 +1291,7 @@ pub fn render_mod_entities(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3]) -
             trace_once(rt, &format!("er-used/{id}"), |_| format!("client: {id} drawn by its entity renderer"));
             vc(rt, ER_RENDER_KEY, ER_RENDER, &[renderer, e, V::F(yaw), V::F(partial), stack, buffers, V::I(crate::render::FULL_BRIGHT)]);
             rt.report_thrown("an entity renderer");
+            crate::vertices::flush(rt, None);
             drawn += 1;
         }
         drawn

@@ -1384,7 +1384,7 @@ pub fn sprite_origin(rt: &Rt, sprite: V) -> Option<(f32, f32)> {
 }
 
 /// The sprite whose cell holds atlas coordinates `(u, v)`, if one does.
-fn sprite_at(rt: &Rt, u: f32, v: f32) -> Option<V> {
+pub(crate) fn sprite_at(rt: &Rt, u: f32, v: f32) -> Option<V> {
     if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
         return None;
     }
@@ -1679,6 +1679,10 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             if let Some(&state) = args.last().filter(|v| rt.class_of(**v) == COMPOSITE_STATE) {
                 rt.put_field(ty, "$state", state);
             }
+            // How its vertices make faces (`VertexFormat.Mode.QUADS`...), for [`crate::vertices`].
+            if a(2).r() != 0 {
+                rt.put_field(ty, "$mode", a(2));
+            }
             ty
         }
         (COMPOSITE_STATE, "builder") => rt.new_object(COMPOSITE_BUILDER),
@@ -1734,12 +1738,15 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
                 c
             })
         }
-        // Vertices written one by one are not drawn yet; the consumer chains as vanilla's does.
-        ("com/mojang/blaze3d/vertex/VertexConsumer", _) => {
-            if desc.ends_with(")V") {
-                V::Void
-            } else {
-                a(0)
+        // Vertices written one by one into a world buffer are drawn ([`crate::vertices`]); what
+        // changes nothing drawn (overlay, normals) chains as vanilla's does.
+        ("com/mojang/blaze3d/vertex/VertexConsumer" | "net/neoforged/neoforge/client/extensions/IVertexConsumerExtension", _) => {
+            match crate::vertices::call(rt, name, desc, args) {
+                Some(v) => v,
+                // `applyBakedLighting(light, data)`: the light as it was.
+                None if name == "applyBakedLighting" => a(1),
+                None if desc.ends_with(")V") => V::Void,
+                None => a(0),
             }
         }
         ("net/minecraft/client/renderer/texture/OverlayTexture", "pack") => {

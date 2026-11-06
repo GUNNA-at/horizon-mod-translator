@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 87] = [
+const COMPAT: [(&str, &str); 88] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -182,6 +182,7 @@ const COMPAT: [(&str, &str); 87] = [
     ("models.rs", include_str!("../../horizon-compat/src/models.rs")),
     ("entity_render.rs", include_str!("../../horizon-compat/src/entity_render.rs")),
     ("camera.rs", include_str!("../../horizon-compat/src/camera.rs")),
+    ("vertices.rs", include_str!("../../horizon-compat/src/vertices.rs")),
     ("quads.rs", include_str!("../../horizon-compat/src/quads.rs")),
     ("vanilla_tags.rs", include_str!("../../horizon-compat/src/vanilla_tags.rs")),
     ("vanilla_classes.rs", include_str!("../../horizon-compat/src/vanilla_classes.rs")),
