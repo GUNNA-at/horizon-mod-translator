@@ -4325,6 +4325,40 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     (90.1%). Still counted missing though mapped, for want of a receiver the probe can make: a codec's
     `forGetter`, `group` and `Products.apply`, a menu's `Slot` methods, `BlockState.cycle` (needs a property of
     the state's block).
+- [x] 2026-11-06 Part 32: entity models, natively (`horizon-compat/src/models.rs`).
+  - packcov7t counted 5032 missing uses in 82 of the pack's jars on the classes a mod builds and draws an entity
+    model with: the layer builders (`CubeListBuilder`, `CubeDeformation`, `PartDefinition`, `MeshDefinition`,
+    `LayerDefinition`: 3017 uses, 47 jars), `PartPose` (658), `ModelPart` (1034, 74 jars), `EntityModelSet`
+    (118), the model base classes (`EntityModel`, `HierarchicalModel`, `Model`: 165) and the layer registration
+    event (40 jars). A renderer's `bakeLayer` gave a bare `ModelPart` whose `getChild` and `render` missed.
+  - The builders keep what vanilla's keep: a builder's texture offset and mirror, each cube's corner, size,
+    deformation, texture scale and visible faces (every `addBox` overload), a part definition's cubes, pose and
+    children (`addOrReplaceChild` keeps the replaced child's children), the mesh's root, the layer's texture size.
+    `PartDefinition.bake` and `LayerDefinition.bakeRoot` make `ModelPart`s as vanilla does: the cubes on the
+    texture's size times their scale, the texture offset truncated, each part at its pose (its initial pose too).
+  - `RegisterLayerDefinitions.registerLayerDefinition` keeps the supplier; the client setup posts the event before
+    `RegisterRenderers`. `EntityModelSet.bakeLayer` and both renderer contexts' `bakeLayer` build the registered
+    layer afresh for each renderer; a layer nobody registered (vanilla's own, which the runtime has no definition
+    of) bakes as an empty part whose children are empty too, so a renderer built on it constructs and draws the
+    rest.
+  - `ModelPart`: vanilla's public fields (`x`... `zRot`, the scales, `visible`, `skipDraw`), the poses
+    (`storePose`, `loadPose`, `resetPose`, the initial pose), `copyFrom`, `getChild`, `hasChild`, `setPos`,
+    `setRotation`, `offsetPos`/`Rotation`/`Scale`, `getAllParts`, `getRandomCube`, `isEmpty`,
+    `translateAndRotate` (JOML's `rotationZYX`), `visit` and `render`: each visible part moves the pose stack to
+    its pose and draws its cubes as one `Host::draw_model` of faces, laid out as `ModelPart.Cube` and
+    `Polygon` lay them (the six faces' rectangles on the texture, the mirrored cube's sides swapped and flipped),
+    with the sprite of the consumer's render type's texture (`ns:textures/entity/x.png` is `ns:entity/x`).
+    `RenderType` factories that take a texture keep it (`textured_render_type`).
+  - `Model`, `EntityModel`, `HierarchicalModel`: their constructors and fields, `renderType` (the model's
+    function, or `entityCutoutNoCull`), the final four-argument `renderToBuffer`, a hierarchical model's drawing
+    of the root its mod's `root()` gives, `copyPropertiesTo`, `getAnyDescendantWithName`.
+  - Not yet: the renderers that draw a mob with its model (`LivingEntityRenderer`, `MobRenderer`), vanilla's own
+    layers and models (`HumanoidModel`), `Material`/`Sheets`, keyframe animations.
+  - Tests (`models::tests`, 406 compat and 18 translator tests pass): a baked head's six faces on the player skin's head rectangles, on the mod's sprite,
+    under its part's pose; a mirrored cube's sides swapped and flipped; a part's rotation about its pivot (a
+    quarter turn about y takes x to -z); `addBox`'s named, deformed, mirrored and face-limited forms (the hat
+    layer's front on the skin's 40..48 by 8..16); a registered layer baked afresh for each renderer and an
+    unknown one empty; a mod's `HierarchicalModel` drawing its root in white or the renderer's colour.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

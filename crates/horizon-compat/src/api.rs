@@ -754,7 +754,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 60] = [
+const CHAIN: [Module; 61] = [
     crate::fake_players::call,
     crate::block_breaking::call,
     crate::loot_params::call,
@@ -811,6 +811,7 @@ const CHAIN: [Module; 60] = [
     crate::jutil::call,
     crate::tags::call,
     crate::quads::call,
+    crate::models::call,
     crate::render::call,
     world,
     crate::palette::call,
@@ -820,7 +821,7 @@ const CHAIN: [Module; 60] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 60] = [
+const CLAIMS: [Claims; 61] = [
     crate::fake_players::claims,
     crate::block_breaking::claims,
     crate::loot_params::claims,
@@ -877,6 +878,7 @@ const CLAIMS: [Claims; 60] = [
     crate::jutil::claims,
     crate::tags::claims,
     crate::quads::claims,
+    crate::models::claims,
     crate::render::claims,
     // The world's calls end in `api_common`'s, which take most of vanilla's classes.
     |_, _, _| true,
@@ -884,7 +886,7 @@ const CLAIMS: [Claims; 60] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 60] = [
+const MODULE_NAMES: [&str; 61] = [
     "fake_players",
     "block_breaking",
     "loot_params",
@@ -941,6 +943,7 @@ const MODULE_NAMES: [&str; 60] = [
     "jutil",
     "tags",
     "quads",
+    "models",
     "render",
     "world",
     "palette",
@@ -2083,6 +2086,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::worldgen::get_static(rt, o, f))
             .or_else(|| crate::api_common::get_static(rt, o, f))
             .or_else(|| crate::render::get_static(rt, o, f))
+            .or_else(|| crate::models::get_static(rt, o, f))
             .or_else(|| crate::quads::get_static(rt, o, f))
             .or_else(|| crate::blocks::get_static(rt, o, f))
             .or_else(|| crate::shapes::get_static(rt, o, f))

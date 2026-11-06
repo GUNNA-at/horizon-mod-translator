@@ -1656,8 +1656,9 @@ pub fn fire_common_setup(rt: &mut Rt) {
     post(rt, COMMON_SETUP, ev);
 }
 
-/// The client's own setup, once, on the runtime that draws: `EntityRenderersEvent.RegisterRenderers`
-/// and `FMLClientSetupEvent` (Registrate registers block entity renderers there).
+/// The client's own setup, once, on the runtime that draws: `EntityRenderersEvent
+/// .RegisterLayerDefinitions` and `.RegisterRenderers`, and `FMLClientSetupEvent` (Registrate
+/// registers block entity renderers there).
 pub fn fire_client_setup(rt: &mut Rt) {
     if rt.interned.contains_key("compat:client") {
         return;
@@ -1666,6 +1667,10 @@ pub fn fire_client_setup(rt: &mut Rt) {
     // The mods' reload listeners, as the client's resource manager is made.
     let ev = crate::resources::client_listeners_event(rt);
     post(rt, crate::resources::CLIENT_LISTENERS_EVENT, ev);
+    // The mods' entity model layers (`LayerDefinitions.createRoots` posts it as the models load),
+    // which their renderers bake.
+    let ev = rt.new_object(crate::models::REGISTER_LAYERS);
+    post(rt, crate::models::REGISTER_LAYERS, ev);
     let ev = rt.new_object(REGISTER_RENDERERS);
     post(rt, REGISTER_RENDERERS, ev);
     // The mods' key mappings (`ClientHooks.initClientHooks` posts it after the renderers).

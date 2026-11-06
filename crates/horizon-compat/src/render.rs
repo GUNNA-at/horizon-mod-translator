@@ -1296,6 +1296,22 @@ pub fn render_type(rt: &mut Rt, name: &str) -> V {
     })
 }
 
+/// A `RenderType` drawn with a texture (`entityCutoutNoCull(texture)`, `entitySolid(texture)`...):
+/// one object for each factory and texture, keeping the texture (`$texture`) the consumers it is
+/// asked for draw with ([`crate::models`]).
+pub fn textured_render_type(rt: &mut Rt, name: &str, texture: V) -> V {
+    let location = crate::neo::location(rt, texture);
+    let n = name.to_owned();
+    rt.intern(format!("render-type/{name}/{location}"), move |rt| {
+        let o = rt.new_object("net/minecraft/client/renderer/RenderType");
+        let s = rt.string(&n);
+        rt.put_field(o, "$name", s);
+        let t = rt.string(&location);
+        rt.put_field(o, "$texture", t);
+        o
+    })
+}
+
 /// `RenderType.chunkBufferLayers()`, in vanilla's order.
 const CHUNK_LAYERS: [&str; 5] = ["solid", "cutout_mipped", "cutout", "translucent", "tripwire"];
 
@@ -1696,7 +1712,14 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             V::R(n) if n != 0 => V::R(n),
             _ => rt.get_field(a(0), "$name"),
         },
-        // Any other factory (`solid()`, `entityCutout(texture)`...) names its type.
+        // A factory of a textured type (`entityCutoutNoCull(texture)`, `entityTranslucent(texture,
+        // outline)`...) keeps its texture: an entity model's faces are drawn with it.
+        ("net/minecraft/client/renderer/RenderType", n)
+            if desc.starts_with("(Lnet/minecraft/resources/ResourceLocation;") && desc.ends_with(")Lnet/minecraft/client/renderer/RenderType;") =>
+        {
+            textured_render_type(rt, &snake(n), a(0))
+        }
+        // Any other factory (`solid()`, `cutoutMipped()`...) names its type.
         ("net/minecraft/client/renderer/RenderType", n) if desc.ends_with(")Lnet/minecraft/client/renderer/RenderType;") => {
             let n = if n == "create" { rt.str_of(a(0)).unwrap_or("custom").to_owned() } else { snake(n) };
             render_type(rt, &n)
@@ -1764,7 +1787,7 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             "getEntityRenderer" => single(rt, "net/minecraft/client/renderer/entity/EntityRenderDispatcher"),
             "getModelSet" => single(rt, "net/minecraft/client/model/geom/EntityModelSet"),
             "getFont" => single(rt, "net/minecraft/client/gui/Font"),
-            "bakeLayer" => rt.new_object("net/minecraft/client/model/geom/ModelPart"),
+            "bakeLayer" => crate::models::bake_layer(rt, a(1)),
             _ => return None,
         },
         ("net/minecraft/client/renderer/entity/EntityRendererProvider$Context", n) => match n {
@@ -1774,7 +1797,7 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             "getModelSet" => single(rt, "net/minecraft/client/model/geom/EntityModelSet"),
             "getFont" => single(rt, "net/minecraft/client/gui/Font"),
             "getItemInHandRenderer" => single(rt, "net/minecraft/client/renderer/ItemInHandRenderer"),
-            "bakeLayer" => rt.new_object("net/minecraft/client/model/geom/ModelPart"),
+            "bakeLayer" => crate::models::bake_layer(rt, a(1)),
             _ => return None,
         },
         // Vanilla's base entity renderer, as a mod's renderer reaches it with `super`: its name tag

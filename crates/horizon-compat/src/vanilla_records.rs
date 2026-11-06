@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 654] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 649] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1090,13 +1090,8 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 654] = [
     ("net/minecraft/client/main/GameConfig$FolderData", "i(Ljava/io/File;Ljava/io/File;Ljava/io/File;Ljava/lang/String;)V=gameDirectory,resourcePackDirectory,assetDirectory,assetIndex|o"),
     ("net/minecraft/client/main/GameConfig$GameData", "i(ZLjava/lang/String;Ljava/lang/String;ZZ)V=demo,launchVersion,versionType,disableMultiplayer,disableChat|o"),
     ("net/minecraft/client/main/GameConfig$UserData", "i(Lnet/minecraft/client/User;Lcom/mojang/authlib/properties/PropertyMap;Lcom/mojang/authlib/properties/PropertyMap;Ljava/net/Proxy;)V=user,userProperties,profileProperties,proxy|o"),
-    ("net/minecraft/client/model/Model", "i(Ljava/util/function/Function;)V=renderType|o"),
     ("net/minecraft/client/model/geom/ModelLayerLocation", "i(Lnet/minecraft/resources/ResourceLocation;Ljava/lang/String;)V=model,layer|ggetModel()Lnet/minecraft/resources/ResourceLocation;=model|ggetLayer()Ljava/lang/String;=layer|e=model,layer"),
     ("net/minecraft/client/model/geom/ModelPart$Vertex", "i(Lorg/joml/Vector3f;FF)V=pos,u,v|o"),
-    ("net/minecraft/client/model/geom/PartPose", "i(FFFFFF)V=x,y,z,xRot,yRot,zRot|o"),
-    ("net/minecraft/client/model/geom/builders/CubeDeformation", "i(FFF)V=growX,growY,growZ|o"),
-    ("net/minecraft/client/model/geom/builders/LayerDefinition", "i(Lnet/minecraft/client/model/geom/builders/MeshDefinition;Lnet/minecraft/client/model/geom/builders/MaterialDefinition;)V=mesh,material|o"),
-    ("net/minecraft/client/model/geom/builders/MaterialDefinition", "i(II)V=xTexSize,yTexSize|o"),
     ("net/minecraft/client/model/geom/builders/UVPair", "i(FF)V=u,v|gu()F=u|gv()F=v|o"),
     ("net/minecraft/client/multiplayer/PingDebugMonitor", "i(Lnet/minecraft/client/multiplayer/ClientPacketListener;Lnet/minecraft/util/debugchart/LocalSampleLogger;)V=connection,delayTimer|o"),
     ("net/minecraft/client/multiplayer/chat/report/Report$Builder", "i(Lnet/minecraft/client/multiplayer/chat/report/Report;Lcom/mojang/authlib/minecraft/report/AbuseReportLimits;)V=report,limits|greport()Lnet/minecraft/client/multiplayer/chat/report/Report;=report|o"),
@@ -2171,14 +2166,13 @@ pub(crate) const ENUMS: [&str; 488] = [
 
 /// (class, factories): the static methods of the records and data classes above that only build
 /// one from their arguments (`<name><desc>=<constructor desc>`, `|` between them).
-pub(crate) const FACTORIES: [(&str, &str); 39] = [
+pub(crate) const FACTORIES: [(&str, &str); 38] = [
     ("com/mojang/realmsclient/util/TextRenderingUtils$LineSegment", "text(Ljava/lang/String;)Lcom/mojang/realmsclient/util/TextRenderingUtils$LineSegment;=(Ljava/lang/String;)V"),
     ("net/minecraft/advancements/Criterion", "lambda$criterionCodec$0(Lnet/minecraft/advancements/CriterionTrigger;Lnet/minecraft/advancements/CriterionTriggerInstance;)Lnet/minecraft/advancements/Criterion;=(Lnet/minecraft/advancements/CriterionTrigger;Lnet/minecraft/advancements/CriterionTriggerInstance;)V"),
     ("net/minecraft/advancements/critereon/ItemCustomDataPredicate", "customData(Lnet/minecraft/advancements/critereon/NbtPredicate;)Lnet/minecraft/advancements/critereon/ItemCustomDataPredicate;=(Lnet/minecraft/advancements/critereon/NbtPredicate;)V"),
     ("net/minecraft/advancements/critereon/PlayerPredicate$StatMatcher", "lambda$createTypedCodec$1(Lnet/minecraft/stats/StatType;Lnet/minecraft/core/Holder;Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)Lnet/minecraft/advancements/critereon/PlayerPredicate$StatMatcher;=(Lnet/minecraft/stats/StatType;Lnet/minecraft/core/Holder;Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)V"),
     ("net/minecraft/advancements/critereon/SlimePredicate", "sized(Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)Lnet/minecraft/advancements/critereon/SlimePredicate;=(Lnet/minecraft/advancements/critereon/MinMaxBounds$Ints;)V"),
     ("net/minecraft/client/gui/components/Tooltip", "create(Lnet/minecraft/network/chat/Component;Lnet/minecraft/network/chat/Component;)Lnet/minecraft/client/gui/components/Tooltip;=(Lnet/minecraft/network/chat/Component;Lnet/minecraft/network/chat/Component;)V"),
-    ("net/minecraft/client/model/geom/PartPose", "offsetAndRotation(FFFFFF)Lnet/minecraft/client/model/geom/PartPose;=(FFFFFF)V"),
     ("net/minecraft/client/telemetry/TelemetryProperty", "create(Ljava/lang/String;Ljava/lang/String;Lcom/mojang/serialization/Codec;Lnet/minecraft/client/telemetry/TelemetryProperty$Exporter;)Lnet/minecraft/client/telemetry/TelemetryProperty;=(Ljava/lang/String;Ljava/lang/String;Lcom/mojang/serialization/Codec;Lnet/minecraft/client/telemetry/TelemetryProperty$Exporter;)V"),
     ("net/minecraft/commands/arguments/ResourceKeyArgument", "key(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/commands/arguments/ResourceKeyArgument;=(Lnet/minecraft/resources/ResourceKey;)V"),
     ("net/minecraft/commands/arguments/ResourceOrTagKeyArgument", "resourceOrTagKey(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/commands/arguments/ResourceOrTagKeyArgument;=(Lnet/minecraft/resources/ResourceKey;)V"),

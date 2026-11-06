@@ -58,6 +58,7 @@ pub mod level_events;
 pub mod mixin;
 pub mod mob_effects;
 pub mod mod_entities;
+pub mod models;
 pub mod nbt;
 pub mod ops;
 pub mod neo;
