@@ -18,6 +18,9 @@
 //!   [`entity_leaves`]): `EntityJoinLevelEvent`, which a listener cancels to keep it out, and
 //!   `EntityLeaveLevelEvent` (`onTrackingEnd`). Create keeps its contraptions' list for collisions
 //!   from them.
+//! - A projectile about to hit ([`projectile_impact`], `ProjectileImpactEvent`), cancelable, and the
+//!   ammo an entity finds for its weapon ([`get_projectile`], `LivingGetProjectileEvent`), which a
+//!   listener changes.
 //!
 //! Create mirrors breaks and placements with its wand of symmetry, wears its extendo grip down on
 //! them, glues a block placed with super glue in the off hand, pulses its haunted bell from a
@@ -48,7 +51,9 @@ const LEVEL_UNLOAD: &str = "net/neoforged/neoforge/event/level/LevelEvent$Unload
 pub(crate) const ENTITY_JOIN: &str = "net/neoforged/neoforge/event/entity/EntityJoinLevelEvent";
 pub(crate) const ENTITY_LEAVE: &str = "net/neoforged/neoforge/event/entity/EntityLeaveLevelEvent";
 const PROJECTILE_IMPACT: &str = "net/neoforged/neoforge/event/entity/ProjectileImpactEvent";
+const GET_PROJECTILE: &str = "net/neoforged/neoforge/event/entity/living/LivingGetProjectileEvent";
 const EVENT_HOOKS: &str = "net/neoforged/neoforge/event/EventHooks";
+const COMMON_HOOKS: &str = "net/neoforged/neoforge/common/CommonHooks";
 const PLAYER: &str = "net/minecraft/world/entity/player/Player";
 const GAME_MODE: &str = "net/minecraft/client/multiplayer/MultiPlayerGameMode";
 const CONNECTION: &str = "net/minecraft/network/Connection";
@@ -60,10 +65,11 @@ const LAST_CLICK: &str = "compat:last-click";
 
 /// The events' classes above them, so a listener for `BlockEvent` (or `PlayerEvent`, or any
 /// event) hears them.
-const SUPERS: [(&str, &str); 17] = [
+const SUPERS: [(&str, &str); 18] = [
     (ENTITY_JOIN, ENTITY_EVENT),
     (ENTITY_LEAVE, ENTITY_EVENT),
     (PROJECTILE_IMPACT, ENTITY_EVENT),
+    (GET_PROJECTILE, LIVING_EVENT),
     (BREAK, BLOCK_EVENT),
     (PLACE, BLOCK_EVENT),
     (MULTI_PLACE, PLACE),
@@ -375,6 +381,18 @@ pub(crate) fn projectile_impact(rt: &mut Rt, e: V, hit: V) -> bool {
     rt.get_field(ev, "$canceled").i() != 0
 }
 
+/// `CommonHooks.getProjectile(entity, weapon, ammo)`: `LivingGetProjectileEvent`, where a mod
+/// listens. The ammo `entity` shoots from `weapon` as its listeners leave it (`ammo` unheard).
+pub(crate) fn get_projectile(rt: &mut Rt, entity: V, weapon: V, ammo: V) -> V {
+    if !listened(rt, GET_PROJECTILE) {
+        return ammo;
+    }
+    let ev = rt.new_object(GET_PROJECTILE);
+    put_all(rt, ev, &[("$entity", entity), ("$weapon", weapon), ("$ammo", ammo)]);
+    crate::neo::post(rt, GET_PROJECTILE, ev);
+    rt.get_field(ev, "$ammo")
+}
+
 // ---- the events' calls ----
 
 fn block_event(rt: &Rt, v: V) -> bool {
@@ -383,8 +401,9 @@ fn block_event(rt: &Rt, v: V) -> bool {
 
 /// The keys [`call`] may answer.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, BREAK | PLACE | MULTI_PLACE | SNAPSHOT | PLAYER_TICK | PLAYER_TICK_PRE | PLAYER_TICK_POST | ENTITY_JOIN | ENTITY_LEAVE | PROJECTILE_IMPACT)
+    matches!(owner, BREAK | PLACE | MULTI_PLACE | SNAPSHOT | PLAYER_TICK | PLAYER_TICK_PRE | PLAYER_TICK_POST | ENTITY_JOIN | ENTITY_LEAVE | PROJECTILE_IMPACT | GET_PROJECTILE)
         || (owner == EVENT_HOOKS && name == "onProjectileImpact")
+        || (owner == COMMON_HOOKS && name == "getProjectile")
         || owner.starts_with(NETWORK_EVENT)
         || (owner == BLOCK_EVENT && matches!(name, "<init>" | "getLevel" | "getPos" | "getState"))
         || (matches!(owner, EVENT | CANCELLABLE) && matches!(name, "isCanceled" | "setCanceled"))
@@ -425,6 +444,27 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "isCanceled" => V::I(rt.get_field(ev, "$canceled").i()),
             "setCanceled" => {
                 rt.put_field(ev, "$canceled", V::I(a(1).i()));
+                V::Void
+            }
+            _ => return None,
+        });
+    }
+    if owner == COMMON_HOOKS && name == "getProjectile" {
+        return Some(get_projectile(rt, a(0), a(1), a(2)));
+    }
+    if owner == GET_PROJECTILE || (matches!(owner, LIVING_EVENT | ENTITY_EVENT | EVENT) && rt.class_of(ev) == GET_PROJECTILE) {
+        return Some(match name {
+            // `new LivingGetProjectileEvent(entity, weapon, ammo)`.
+            "<init>" => {
+                know_classes(rt);
+                put_all(rt, ev, &[("$entity", a(1)), ("$weapon", a(2)), ("$ammo", a(3))]);
+                V::Void
+            }
+            "getEntity" => rt.get_field(ev, "$entity"),
+            "getProjectileWeaponItemStack" => rt.get_field(ev, "$weapon"),
+            "getProjectileItemStack" => rt.get_field(ev, "$ammo"),
+            "setProjectileItemStack" => {
+                rt.put_field(ev, "$ammo", a(1));
                 V::Void
             }
             _ => return None,

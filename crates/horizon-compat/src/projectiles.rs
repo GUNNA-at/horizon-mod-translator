@@ -6,9 +6,12 @@
 //! entity hit to the projectile's `onHitEntity` and a block hit to its `onHitBlock`, the mod's own
 //! where its class has them; and how it flies: `shoot`, and the ticks of `Projectile`,
 //! `ThrowableProjectile` and `AbstractHurtingProjectile`, which move it along its motion through the
-//! air or water. As 1.21.1 does; game events (`PROJECTILE_SHOOT`, `PROJECTILE_LAND`), a deflecting
-//! target (a breeze), a vanilla block's own answer to a hit (a bell, a target block), the blocks a
-//! projectile passes through (`checkInsideBlocks`) and an arrow's own tick are not modelled.
+//! air or water. And the ammo a weapon shoots: what an entity finds for a mod's
+//! `ProjectileWeaponItem` (`getProjectile`), in its hands, then in a player's inventory. As 1.21.1
+//! does; game events (`PROJECTILE_SHOOT`, `PROJECTILE_LAND`), a deflecting target (a breeze), a
+//! vanilla block's own answer to a hit (a bell, a target block), the blocks a projectile passes
+//! through (`checkInsideBlocks`), an arrow's own tick and vanilla's bow and crossbow as weapons are
+//! not modelled.
 use crate::{Rt, V, api, jutil};
 
 const ENTITY: &str = "net/minecraft/world/entity/Entity";
@@ -83,6 +86,33 @@ const ADD_PARTICLE: &str = "net/minecraft/world/level/Level.addParticle.(Lnet/mi
 const NEXT_DOUBLE: &str = "net/minecraft/util/RandomSource.nextDouble.()D";
 const ITEM_STACK: &str = "net/minecraft/world/item/ItemStack";
 const GET_ENTITIES: &str = "net/minecraft/world/level/Level.getEntities.(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/AABB;Ljava/util/function/Predicate;)Ljava/util/List;";
+const WEAPON: &str = "net/minecraft/world/item/ProjectileWeaponItem";
+const MONSTER: &str = "net/minecraft/world/entity/monster/Monster";
+/// `getProjectile(weapon)`'s descriptor, on any living entity.
+const GET_PROJECTILE: &str = "(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;";
+const HELD_AMMO: Virtual = (
+    "net/minecraft/world/item/ProjectileWeaponItem.getSupportedHeldProjectiles.(Lnet/minecraft/world/item/ItemStack;)Ljava/util/function/Predicate;",
+    "getSupportedHeldProjectiles.(Lnet/minecraft/world/item/ItemStack;)Ljava/util/function/Predicate;",
+);
+const HELD_AMMO_PLAIN: Virtual =
+    ("net/minecraft/world/item/ProjectileWeaponItem.getSupportedHeldProjectiles.()Ljava/util/function/Predicate;", "getSupportedHeldProjectiles.()Ljava/util/function/Predicate;");
+const ALL_AMMO: Virtual = (
+    "net/minecraft/world/item/ProjectileWeaponItem.getAllSupportedProjectiles.(Lnet/minecraft/world/item/ItemStack;)Ljava/util/function/Predicate;",
+    "getAllSupportedProjectiles.(Lnet/minecraft/world/item/ItemStack;)Ljava/util/function/Predicate;",
+);
+const ALL_AMMO_PLAIN: Virtual =
+    ("net/minecraft/world/item/ProjectileWeaponItem.getAllSupportedProjectiles.()Ljava/util/function/Predicate;", "getAllSupportedProjectiles.()Ljava/util/function/Predicate;");
+const CREATIVE_AMMO: Virtual = (
+    "net/minecraft/world/item/ProjectileWeaponItem.getDefaultCreativeAmmo.(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;",
+    "getDefaultCreativeAmmo.(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;",
+);
+const IN_HAND: Virtual = (
+    "net/minecraft/world/entity/LivingEntity.getItemInHand.(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;",
+    "getItemInHand.(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;",
+);
+const GET_ITEM: &str = "net/minecraft/world/item/ItemStack.getItem.()Lnet/minecraft/world/item/Item;";
+const TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
+const OR: &str = "java/util/function/Predicate.or.(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;";
 const BY_UUID: &str = "net/minecraft/server/level/ServerLevel.getEntity.(Ljava/util/UUID;)Lnet/minecraft/world/entity/Entity;";
 
 /// `ProjectileUtil`'s margin around an entity's box (`DEFAULT_ENTITY_HIT_RESULT_MARGIN`, a float).
@@ -102,9 +132,9 @@ fn is_entity_class(class: &str) -> bool {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, UTIL | ENTITY_HIT | HIT_RESULT)
+    matches!(owner, UTIL | ENTITY_HIT | HIT_RESULT | WEAPON)
         || is_projectile_class(owner)
-        || (matches!(name, "canBeHitByProjectile" | "getPickRadius" | "isPassengerOfSameVehicle" | "canRiderInteract" | "deflection") && is_entity_class(owner))
+        || (matches!(name, "canBeHitByProjectile" | "getPickRadius" | "isPassengerOfSameVehicle" | "canRiderInteract" | "deflection" | "getProjectile") && is_entity_class(owner))
 }
 
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
@@ -146,6 +176,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::D((0..3).map(|i| (at[i] - p[i]).powi(2)).sum())
         }
         (UTIL, _) => return util_call(rt, name, desc, args),
+        // The ammo an entity shoots from a weapon, and a mod weapon's defaults.
+        (_, "getProjectile") if desc == GET_PROJECTILE => ammo(rt, a(0), a(1)),
+        (WEAPON, _) => return weapon_call(rt, name, desc, args),
         // Vanilla's answers for any entity (a mod class's own come first, through its dispatch).
         (_, "canBeHitByProjectile") => V::I(i32::from(can_be_hit(rt, a(0)))),
         (_, "getPickRadius") => V::F(0.0),
@@ -869,10 +902,93 @@ fn vec3(rt: &mut Rt, p: [f64; 3]) -> V {
     crate::api_common::vec3(rt, p[0], p[1], p[2])
 }
 
+// ---- a weapon's ammo ----
+
+/// `getProjectile(weapon)` (NeoForge 1.21.1's): the ammo entity `e` shoots from `weapon`, as
+/// `LivingGetProjectileEvent`'s listeners leave it (`CommonHooks.getProjectile`). A player's: what
+/// its weapon takes from a hand (`getSupportedHeldProjectiles`: the off hand, then the main one),
+/// else the first stack in its inventory it takes (`getAllSupportedProjectiles`), else in creative
+/// the weapon's default (`getDefaultCreativeAmmo`), each the weapon's own where its class has one;
+/// none at all, unheard, for an item that is no `ProjectileWeaponItem`. A monster's: what it holds
+/// that the weapon takes, else an arrow. Any other entity's: none.
+fn ammo(rt: &mut Rt, e: V, weapon: V) -> V {
+    let item = api::call(rt, GET_ITEM, &[weapon]);
+    let shoots = rt.instance_of(item, WEAPON);
+    let found = if crate::api_common::is_player_class(rt.class_of(e)) {
+        if !shoots {
+            return crate::menus::empty(rt);
+        }
+        player_ammo(rt, e, item, weapon)
+    } else if shoots && rt.instance_of(e, MONSTER) {
+        let takes = api::virtual_call(rt, HELD_AMMO, &[item, weapon]);
+        let held = held_ammo(rt, e, takes);
+        if crate::api_common::stack_empty(rt, held) { crate::api_common::stack(rt, "minecraft:arrow", 1) } else { held }
+    } else {
+        crate::menus::empty(rt)
+    };
+    crate::world_events::get_projectile(rt, e, weapon, found)
+}
+
+/// A player's ammo for weapon `item` (`weapon` its stack), before the event: see [`ammo`]. The
+/// inventory's slots in vanilla's order (`Inventory.getContainerSize()`: the 36 of its items, its
+/// armour, its off hand), each the slot's own stack, so what the mod takes from it is taken there.
+fn player_ammo(rt: &mut Rt, player: V, item: V, weapon: V) -> V {
+    let takes = api::virtual_call(rt, HELD_AMMO, &[item, weapon]);
+    let held = held_ammo(rt, player, takes);
+    if !crate::api_common::stack_empty(rt, held) {
+        return held;
+    }
+    let takes = api::virtual_call(rt, ALL_AMMO, &[item, weapon]);
+    for slot in 0..=40 {
+        let s = crate::menus::inventory_get(rt, slot);
+        if rt.call_functional(TEST, takes, &[s]).i() != 0 {
+            return s;
+        }
+    }
+    if rt.host().is_some_and(|h| h.player_creative()) {
+        api::virtual_call(rt, CREATIVE_AMMO, &[item, player, weapon])
+    } else {
+        crate::menus::empty(rt)
+    }
+}
+
+/// `ProjectileWeaponItem.getHeldProjectile(shooter, isAmmo)`: the stack in the shooter's off hand
+/// if it is ammo, else the one in its main hand if that is, else none.
+fn held_ammo(rt: &mut Rt, shooter: V, takes: V) -> V {
+    for hand in ["net/minecraft/world/InteractionHand.OFF_HAND", "net/minecraft/world/InteractionHand.MAIN_HAND"] {
+        let hand = api::get_static(rt, hand);
+        let s = api::virtual_call(rt, IN_HAND, &[shooter, hand]);
+        if rt.call_functional(TEST, takes, &[s]).i() != 0 {
+            return s;
+        }
+    }
+    crate::menus::empty(rt)
+}
+
+/// `ProjectileWeaponItem`'s own methods, for a mod's weapon whose class leaves them to it: its
+/// ammo from a hand is its whole ammo's (with the stack) or its held ammo's, which is its whole
+/// ammo's; its whole ammo with the stack is its whole ammo (`getAllSupportedProjectiles()`, the
+/// mod's own: vanilla's is abstract); its creative ammo an arrow.
+fn weapon_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let with_stack = desc.starts_with("(Lnet/minecraft/world/item/ItemStack;)");
+    Some(match name {
+        "getHeldProjectile" => held_ammo(rt, a(0), a(1)),
+        "getSupportedHeldProjectiles" if with_stack => {
+            let all = api::virtual_call(rt, ALL_AMMO, &[a(0), a(1)]);
+            let held = api::virtual_call(rt, HELD_AMMO_PLAIN, &[a(0)]);
+            api::call(rt, OR, &[all, held])
+        }
+        "getSupportedHeldProjectiles" | "getAllSupportedProjectiles" if with_stack || name == "getSupportedHeldProjectiles" => api::virtual_call(rt, ALL_AMMO_PLAIN, &[a(0)]),
+        "getDefaultCreativeAmmo" => crate::api_common::stack(rt, "minecraft:arrow", 1),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{EntityView, MemoryHost};
+    use crate::host::{EntityView, HandStack, MemoryHost};
 
     const BOLT: &str = "test/Bolt";
     const THROWN: &str = "net/minecraft/world/entity/projectile/ThrowableItemProjectile";
@@ -1135,6 +1251,111 @@ mod tests {
             tick(rt);
             assert_eq!(api::call(rt, REMOVED, &[lost]), V::I(1));
             assert!(!crate::mod_entities::live(rt).contains(&lost));
+        });
+    }
+
+    const SLING: &str = "test/Sling";
+    const SNOWBALLS: &str = "test/SnowballsOnly";
+    const SWAP: &str = "test/AmmoSwap";
+    const SNOWBALL_TEST: &str = "test.(Ljava/lang/Object;)Z";
+    const ACCEPT: &str = "accept.(Ljava/lang/Object;)V";
+    const PLAYER_GET_PROJECTILE: &str = "net/minecraft/world/entity/player/Player.getProjectile.(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;";
+    const SET_AMMO: &str = "net/neoforged/neoforge/event/entity/living/LivingGetProjectileEvent.setProjectileItemStack.(Lnet/minecraft/world/item/ItemStack;)V";
+    const GET_WEAPON: &str = "net/neoforged/neoforge/event/entity/living/LivingGetProjectileEvent.getProjectileWeaponItemStack.()Lnet/minecraft/world/item/ItemStack;";
+
+    /// The tests' weapon, a sling, takes snowballs (its own `getAllSupportedProjectiles()`, the
+    /// one `ProjectileWeaponItem` leaves abstract); a listener of `LivingGetProjectileEvent` puts
+    /// two arrows in place of what was found, noting the weapon it was told of.
+    fn ammo_vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        match (rt.class_of(args[0]), short) {
+            (SLING, s) if s == ALL_AMMO_PLAIN.1 => rt.new_object(SNOWBALLS),
+            (SNOWBALLS, SNOWBALL_TEST) => {
+                let item = api::call(rt, GET_ITEM, &[args[1]]);
+                V::I(i32::from(crate::api_common::item_like_name(rt, item) == "minecraft:snowball"))
+            }
+            (SWAP, ACCEPT) => {
+                let weapon = api::call(rt, GET_WEAPON, &[args[1]]);
+                rt.statics.insert("t.weapon", weapon);
+                let arrows = crate::api_common::stack(rt, "minecraft:arrow", 2);
+                api::call(rt, SET_AMMO, &[args[1], arrows])
+            }
+            _ => api::call(rt, key, args),
+        }
+    }
+
+    fn stack_of(rt: &Rt, s: V) -> Option<(String, i32)> {
+        crate::menus::stack_view(rt, s)
+    }
+
+    /// A player's ammo for a mod's projectile weapon (`getProjectile`), as NeoForge 1.21.1 finds
+    /// it: what the weapon takes from the off hand first; else the first slot of the inventory, in
+    /// vanilla's order, whose stack it takes, that very stack (so what the mod takes from it is
+    /// gone from the slot); else nothing, but in creative the weapon's default, an arrow. An item
+    /// that is no weapon finds nothing. A `LivingGetProjectileEvent` listener is told the weapon and
+    /// may hand other ammo.
+    #[test]
+    fn a_players_weapon_finds_its_ammo_in_a_hand_then_the_inventory() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(ammo_vcall);
+        rt.supers.insert(SLING, WEAPON);
+        let sling = rt.new_object(SLING);
+        rt.registered.insert(("item".into(), "testmod:sling".into()), sling);
+        let snowballs = |count| HandStack { item: "minecraft:snowball".into(), count, ..HandStack::default() };
+        let mut host = MemoryHost { held: Some(("testmod:sling".into(), 1)), inventory: true, ..MemoryHost::default() };
+        host.slots.insert(7, snowballs(3));
+        host.slots.insert(5, snowballs(16));
+        host.slots.insert(2, HandStack { item: "minecraft:stick".into(), count: 1, ..HandStack::default() });
+        let ammo = |rt: &mut Rt| {
+            let player = crate::api_common::acting_player(rt);
+            let weapon = crate::hand::stack(rt, crate::hand::MAIN);
+            api::call(rt, PLAYER_GET_PROJECTILE, &[player, weapon])
+        };
+        rt.with_host(&mut host, |rt| {
+            crate::hand::with_hand(rt, |rt| {
+                let found = ammo(rt);
+                assert_eq!(stack_of(rt, found), Some(("minecraft:snowball".into(), 16)), "the first slot that holds some");
+                assert_eq!(found, crate::menus::inventory_get(rt, 5), "the slot's own stack");
+                api::call(rt, "net/minecraft/world/item/ItemStack.shrink.(I)V", &[found, V::I(1)]);
+            })
+        });
+        assert_eq!(host.slots[&5].count, 15, "a shot taken from it is gone from the slot");
+
+        host.offhand = Some(snowballs(1));
+        rt.with_host(&mut host, |rt| {
+            let found = ammo(rt);
+            assert_eq!(found, crate::hand::stack(rt, crate::hand::OFF), "the off hand's comes first");
+        });
+
+        host.offhand = None;
+        host.slots.retain(|_, s| s.item != "minecraft:snowball");
+        rt.with_host(&mut host, |rt| {
+            let found = ammo(rt);
+            assert!(crate::api_common::stack_empty(rt, found), "none left");
+        });
+        host.creative = true;
+        rt.with_host(&mut host, |rt| {
+            let found = ammo(rt);
+            assert_eq!(stack_of(rt, found), Some(("minecraft:arrow".into(), 1)), "in creative, the weapon's default");
+        });
+
+        // Not a weapon: nothing, and no listener hears of it.
+        host.held = Some(("minecraft:stick".into(), 1));
+        let swap = rt.new_object(SWAP);
+        rt.listeners.push(("net/neoforged/neoforge/event/entity/living/LivingGetProjectileEvent".into(), swap));
+        rt.with_host(&mut host, |rt| {
+            let found = ammo(rt);
+            assert!(crate::api_common::stack_empty(rt, found));
+        });
+        assert!(!rt.statics.contains_key("t.weapon"));
+
+        // A listener hands two arrows in place of the creative default, told of the sling.
+        host.held = Some(("testmod:sling".into(), 1));
+        rt.with_host(&mut host, |rt| {
+            let found = ammo(rt);
+            assert_eq!(stack_of(rt, found), Some(("minecraft:arrow".into(), 2)));
+            let weapon = crate::hand::stack(rt, crate::hand::MAIN);
+            assert_eq!(rt.statics.get("t.weapon"), Some(&weapon));
         });
     }
 }

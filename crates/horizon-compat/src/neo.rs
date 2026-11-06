@@ -39,6 +39,7 @@ const REGISTER_EVENT: &str = "net/neoforged/neoforge/registries/RegisterEvent";
 const ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
 const REGISTRY_BUILDER: &str = "net/neoforged/neoforge/registries/RegistryBuilder";
 const NEW_REGISTRY_EVENT: &str = "net/neoforged/neoforge/registries/NewRegistryEvent";
+const DATAPACK_REGISTRY_EVENT: &str = "net/neoforged/neoforge/registries/DataPackRegistryEvent$NewRegistry";
 const BAKE: &str = "net/neoforged/neoforge/registries/callback/BakeCallback.onBake.(Lnet/minecraft/core/Registry;)V";
 
 /// The last parameter type of a method descriptor (`(La;Lnet/x/Event;)V` → `net/x/Event`).
@@ -212,9 +213,12 @@ pub fn fire_registrations(rt: &mut Rt) {
             names.push(extra);
         }
     }
-    // NeoForge asks for new registries first (`event.create(builder)`, `event.register(registry)`).
+    // NeoForge asks for new registries first (`event.create(builder)`, `event.register(registry)`),
+    // then for datapack registries (`dataPackRegistry(key, codec)`).
     let ev = rt.new_object(NEW_REGISTRY_EVENT);
     post(rt, NEW_REGISTRY_EVENT, ev);
+    let ev = rt.new_object(DATAPACK_REGISTRY_EVENT);
+    post(rt, DATAPACK_REGISTRY_EVENT, ev);
     for registry in names {
         let ev = rt.new_object(REGISTER_EVENT);
         let key = rt.string(&registry);
@@ -291,8 +295,10 @@ fn name_in(rt: &Rt, v: V) -> String {
     if s.contains(':') { s.to_owned() } else { format!("minecraft:{s}") }
 }
 
-/// What `registry` holds under `id`: the mod's registrations, vanilla's blocks and items.
+/// What `registry` holds under `id`: the mod's registrations (a datapack registry's files among
+/// them), vanilla's blocks and items.
 pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
+    crate::datapack::read(rt, registry);
     if let Some(v) = rt.registered.get(&(registry.to_owned(), id.to_owned())) {
         return *v;
     }
@@ -670,6 +676,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (REGISTRY_BUILDER, _) if desc.ends_with(")Lnet/neoforged/neoforge/registries/RegistryBuilder;") => a(0),
         (NEW_REGISTRY_EVENT, "create") => make_registry(rt, a(1)),
         (NEW_REGISTRY_EVENT, "register") => V::Void,
+        // `DataPackRegistryEvent.NewRegistry.dataPackRegistry(key, codec[, networkCodec[, builder]])`:
+        // a registry whose entries are data files, read with `codec` (`datapack`).
+        (DATAPACK_REGISTRY_EVENT, "dataPackRegistry") => {
+            let registry = rt.str_of(a(1)).unwrap_or("").to_owned();
+            crate::datapack::add(rt, &registry, a(2));
+            V::Void
+        }
         (o, "makeRegistry") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
             let builder = rt.new_object(REGISTRY_BUILDER);
             let key = rt.get_field(a(0), "$registry");
@@ -900,6 +913,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         ("net/minecraft/resources/ResourceKey", "createRegistryKey") => {
             let loc = location(rt, a(0));
+            crate::datapack::key_made(rt, &loc);
             let path = loc.split_once(':').map_or(loc.as_str(), |(_, p)| p).to_owned();
             if !rt.custom_registries.contains(&path) && !REGISTRIES.contains(&path.as_str()) {
                 rt.custom_registries.push(path.clone());
@@ -1066,8 +1080,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     }
                 }
                 "keySet" | "entrySet" | "stream" | "iterator" | "size" | "holders" | "listElements" | "forEach" => {
+                    crate::datapack::read(rt, &reg);
                     let mut entries: Vec<(String, V)> = rt.registered.iter().filter(|((r, _), _)| *r == reg).map(|((_, k), v)| (k.clone(), *v)).collect();
-                    entries.sort_by(|x, y| x.0.cmp(&y.0));
+                    // A datapack registry's in the order its files were registered.
+                    if crate::datapack::is_datapack(rt, &reg) {
+                        entries.sort_by(|x, y| crate::datapack::registration_order(&x.0, &y.0));
+                    } else {
+                        entries.sort_by(|x, y| x.0.cmp(&y.0));
+                    }
                     match n {
                         "size" => V::I(entries.len() as i32),
                         "keySet" => {
@@ -1796,7 +1816,7 @@ pub(crate) fn loaded_mods(rt: &Rt) -> Vec<String> {
     if rt.mods.is_empty() && !rt.namespace.is_empty() { vec![rt.namespace.clone()] } else { rt.mods.clone() }
 }
 
-fn mod_loaded(rt: &Rt, id: &str) -> bool {
+pub(crate) fn mod_loaded(rt: &Rt, id: &str) -> bool {
     !id.is_empty() && loaded_mods(rt).iter().any(|m| m == id)
 }
 

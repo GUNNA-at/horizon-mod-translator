@@ -39,6 +39,7 @@ pub mod input;
 pub mod tooltips;
 pub mod damage;
 pub mod world_events;
+pub mod datapack;
 pub mod vanilla_entities;
 pub mod functions;
 pub mod gamerules;

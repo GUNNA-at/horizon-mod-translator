@@ -4855,6 +4855,39 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     potato cannon doesn't fire yet: its `getAmmo` stops at `Player.getProjectile` (unmapped), and
     the ammo's type after it is a datapack registry entry (`create:potato_projectile/type`), which
     nothing loads yet.
+- [x] 2026-11-06 Part 51: a mod's weapon finds its ammo, and a mod's datapack registry its entries.
+  Measured in game (Part 50's potato round): Create's potato cannon stopped at
+  `Player.getProjectile` (unmapped); the type of the ammo it finds comes next, from a datapack
+  registry (`create:potato_projectile/type`), which nothing read. Over the pack: 9 mods call
+  `getProjectile` or `ProjectileWeaponItem`'s ammo methods, 15 make datapack registries
+  (`DataPackRegistryEvent.NewRegistry`), and 5 jars carry potato projectile types (Create's 25,
+  Farmer's Delight's 9, Garnished's 9, Bitterballen's 8, Create Crafts & Additions' 4).
+  - `getProjectile(weapon)`, as NeoForge 1.21.1's: a player's ammo is what its
+    `ProjectileWeaponItem` takes from a hand (`getSupportedHeldProjectiles`, off hand first), else
+    the first stack of its inventory it takes (`getAllSupportedProjectiles`, vanilla's slot order;
+    the slot's own stack, so a shot taken from it is gone from the slot), else in creative the
+    weapon's default (`getDefaultCreativeAmmo`, an arrow); a monster's what it holds, else an arrow;
+    nothing for an item that is no weapon. `ProjectileWeaponItem`'s defaults for a mod's weapon,
+    `getHeldProjectile`, and `LivingGetProjectileEvent` (`CommonHooks.getProjectile`), posted where
+    a mod listens: a listener's ammo is the one shot.
+  - Datapack registries (`datapack.rs`): `dataPackRegistry(key, codec, ...)` keeps the registry's
+    codec (the event is posted after `NewRegistryEvent`, as NeoForge does). The first time the
+    registry is reached with the game's resources at hand, every
+    `data/<namespace>/<registry namespace>/<registry path>/**.json` is read with the codec
+    (`Registries.elementsDirPath`), a file whose `neoforge:conditions` don't hold left out (mod
+    loaded, true, false, not, and, or; an unknown kind fails the file, as NeoForge can't read it),
+    and its entry `<namespace>:<path>` registered in `ResourceLocation`'s order (path, then
+    namespace), the order `listElements` gives them in. A file the codec refuses is left out.
+  - Not modelled: the datapack registries' tags, their network codecs (a client reads the same
+    files), the `RegistryBuilder` a mod configures for one; vanilla's bow and crossbow as weapons.
+  - Tests: `projectiles::tests::a_players_weapon_finds_its_ammo_in_a_hand_then_the_inventory`,
+    `datapack::tests::a_mods_datapack_registry_reads_its_entries_from_the_data_files`.
+  - In game (the potato round, Create's data carried into its content mod as an install carries
+    it: 4,081 files): the cannon's `getProjectile` is no longer unmapped, and finds the potatoes.
+    The shot stops one step later: the cannon's ammo test throws `IllegalStateException: Could not
+    get RegistryAccess` (Create's `GlobalRegistryAccess` asks the client's connection for the
+    registries, as `Dist` is the client's, and the server's thread had none), and the search went
+    on asking the other slots after the throw: Part 52.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
