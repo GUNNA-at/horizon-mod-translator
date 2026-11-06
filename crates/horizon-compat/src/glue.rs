@@ -1702,14 +1702,65 @@ pub fn interaction_key(rt: &mut Rt, host: &mut dyn Host, button: i32, key_mappin
 }
 
 /// The client's player using `hand` on the block at `pos`, `face` the face clicked (a direction's
-/// data value), the cursor meeting it at `hit`: `RightClickBlock` on the client, as
-/// `MultiPlayerGameMode.performUseItemOn` posts it before the use goes to the server, which posts
-/// its own. Some(the result a listener cancelled it with), which the client answers in the block's
-/// and the item's place ([`crate::events::client_right_click_block`]).
+/// data value), the cursor meeting it at `hit`, as `MultiPlayerGameMode.performUseItemOn` does it
+/// before the use goes to the server: `RightClickBlock` on the client
+/// ([`crate::events::client_right_click_block`]), then, on the mod's own block, the block's use
+/// ([`client_use_block`]). Some(the result a listener cancelled it with, or the block's use that took
+/// the click), which the client answers in the block's and the item's place.
 pub fn client_use_item_on(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: i64, hit: [f64; 3], hand: u8) -> Option<crate::events::Answer> {
     rt.safe_point();
     client_setup(rt, host);
-    crate::events::client_right_click_block(rt, host, pos, face, hit, hand)
+    crate::events::client_right_click_block(rt, host, pos, face, hit, hand).or_else(|| client_use_block(rt, host, pos, face, hit, hand))
+}
+
+/// The mod's block at `pos` used on the client level (`isClientSide`), as `performUseItemOn` asks
+/// it once `RightClickBlock` let the click through: `useItemOn` with the hand's stack, then, when it
+/// passes to the default and the hand is the main one, `useWithoutItem`. Some(the answer) when
+/// either uses the click (`consumesAction`): the click ends there, so the other hand isn't tried.
+/// Create's depot answers `SUCCESS` on the client and takes the item on the server; without this
+/// answer the client went on to the empty off hand, whose use on the server handed the item back.
+/// None when the item's turn comes.
+fn client_use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: i64, hit: [f64; 3], hand: u8) -> Option<crate::events::Answer> {
+    use crate::events::Answer;
+    let state = host.block_state(pos);
+    let (b, class) = mod_block(rt, &state)?;
+    let overrides = rt.overrides?;
+    let (with_item, without) = (overrides(class, USE_ITEM_ON), overrides(class, USE_WITHOUT_ITEM));
+    if !with_item && !without {
+        return None;
+    }
+    // `InteractionResult.consumesAction`, and whether it swings: the names of both results' constants.
+    let used = |name: &str| match name {
+        "SUCCESS" | "SUCCESS_NO_ITEM_USED" => Some(Answer::Success),
+        "CONSUME" | "CONSUME_PARTIAL" => Some(Answer::Consume),
+        _ => None,
+    };
+    rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| {
+        let vc = rt.vcall?;
+        let st = api::state(rt, &state);
+        let l = level(rt);
+        let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+        let player = crate::network::local_player(rt);
+        let at = crate::api_common::vec3(rt, hit[0], hit[1], hit[2]);
+        let hit = crate::api_common::hit(rt, pos, face);
+        rt.put_field(hit, "$loc", at);
+        // `BlockBehaviour.useItemOn` passes to the default unless the block has its own.
+        let mut item_on = "PASS_TO_DEFAULT_BLOCK_INTERACTION".to_owned();
+        if with_item {
+            let stack = crate::hand::stack(rt, hand);
+            let hand = crate::hand::constant(rt, hand);
+            let r = vc(rt, USE_ITEM_ON, USE_ITEM_ON, &[b, stack, st, l, p, player, hand, hit]);
+            item_on = rt.str_of(r).unwrap_or("PASS_TO_DEFAULT_BLOCK_INTERACTION").to_owned();
+        }
+        let mut answer = used(&item_on);
+        if answer.is_none() && item_on == "PASS_TO_DEFAULT_BLOCK_INTERACTION" && without && hand == crate::hand::MAIN {
+            let r = vc(rt, USE_WITHOUT_ITEM, USE_WITHOUT_ITEM, &[b, st, l, p, player, hit]);
+            answer = rt.str_of(r).and_then(used);
+        }
+        let thrown = rt.thrown.is_some();
+        rt.report_thrown("a right click on the client");
+        if thrown { None } else { answer }
+    }))
 }
 
 /// The client's tick, in `Minecraft.tick`'s order: `ClientTickEvent.Pre` (animation clocks advance
@@ -1835,6 +1886,49 @@ mod tests {
         assert_eq!(update_shape(&mut rt, &mut host, here, open, 4, west, "minecraft:air").as_deref(), Some("test:pipe[east=false,north=true,west=false]"));
         assert_eq!(update_shape(&mut rt, &mut host, here, "test:crate", 5, east, "test:tank"), None);
         assert_eq!(update_shape(&mut rt, &mut host, here, "minecraft:stone", 5, east, "test:tank"), None);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// On the client a mod block answers a click with its own use, as vanilla's client asks it
+    /// (`performUseItemOn`): a block whose `useItemOn` takes the click there (Create's depot answers
+    /// `SUCCESS` on the client, and only the server takes the item) ends it with a swing, for either
+    /// hand; one whose `useWithoutItem` consumes it ends it unswung, for the main hand only. A block
+    /// that passes, and the game's own, leave the item its turn.
+    #[test]
+    fn a_mod_block_that_takes_a_click_on_the_client_ends_it_there() {
+        use crate::events::Answer;
+        const DEPOT: &str = "test/Depot";
+        const LEVER: &str = "test/Lever";
+        fn overrides(class: &str, short: &str) -> bool {
+            (class == DEPOT && short == USE_ITEM_ON) || (class == LEVER && short == USE_WITHOUT_ITEM)
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match (rt.class_of(args[0]), short) {
+                (DEPOT, USE_ITEM_ON) if rt.get_field(args[3], "isClientSide").i() != 0 => api::get_static(rt, "net/minecraft/world/ItemInteractionResult.SUCCESS"),
+                (DEPOT, USE_ITEM_ON) => api::get_static(rt, "net/minecraft/world/ItemInteractionResult.CONSUME"),
+                (LEVER, USE_WITHOUT_ITEM) => api::get_static(rt, "net/minecraft/world/InteractionResult.CONSUME"),
+                _ => api::call(rt, key, args),
+            }
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        rt.interned.insert("compat:client".into(), V::I(1));
+        let mut host = MemoryHost::default();
+        let (depot, lever, crate_box, stone) = ([0, 64, 0], [1, 64, 0], [2, 64, 0], [3, 64, 0]);
+        for (class, id, pos) in [(DEPOT, "test:depot", depot), (LEVER, "test:lever", lever), ("test/Crate", "test:crate", crate_box)] {
+            let b = rt.new_object(class);
+            rt.registered.insert(("block".into(), id.into()), b);
+            host.blocks.insert(pos, id.into());
+        }
+        host.blocks.insert(stone, "minecraft:stone".into());
+        let mut click = |pos: [i32; 3], hand: u8| client_use_item_on(&mut rt, &mut host, pos, 1, [f64::from(pos[0]) + 0.5, 65.0, 0.5], hand);
+        assert_eq!(click(depot, crate::hand::MAIN), Some(Answer::Success));
+        assert_eq!(click(depot, 1), Some(Answer::Success));
+        assert_eq!(click(lever, crate::hand::MAIN), Some(Answer::Consume));
+        assert_eq!(click(lever, 1), None);
+        assert_eq!(click(crate_box, crate::hand::MAIN), None);
+        assert_eq!(click(stone, crate::hand::MAIN), None);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

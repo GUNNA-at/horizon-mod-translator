@@ -5282,6 +5282,34 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     With the source alone (`pumpgame.sh`) it is drained and the tank stops at 1000 mB, as before.
     No unmapped call or throw of the round's own; login's Flywheel GL calls and `DynamicTexture`
     are left.
+- [x] 2026-11-06 Part 62: a mod block's own use on the client.
+  The spout round (`spoutgame.sh`: three spouts holding 1000 mB of water over three depots, a
+  glass bottle, an empty bucket and dirt put on the depots with a right click in survival, and an
+  item drain right-clicked with a water bucket) turned the dirt into grass, but the bottle and the
+  bucket were back in the player's inventory within 40 ticks, the depots empty, and the water
+  bucket ended up an empty bucket with nothing in the drain. Vanilla's client asks the clicked
+  block itself (`MultiPlayerGameMode.performUseItemOn`: `useItemOn`, then `useWithoutItem` for the
+  main hand) and ends the click when it takes it; Create's depot answers `SUCCESS` on the client
+  and takes the item only on the server. Horizon's client predicted the click from the game's own
+  blocks, so a mod block always passed: the click went on to the other hand, whose use reached
+  the server with an empty hand (the depot handed the item back), and to the item's own use (the
+  water bucket emptied over the drain). Measured over the pack (367 jars): 565 classes in 87 jars
+  declare their own `useItemOn` (Create 71, FramedBlocks 37, Copycats+ 31, Ars Nouveau 29, Create
+  Aeronautics 29, TFMG 29...), 319 in 83 jars their own `useWithoutItem` (SecurityCraft 40, Applied
+  Energistics 2 23, Copycats+ 23, Refurbished Furniture 22, Create 13...).
+  - compat `glue::client_use_item_on`: once `RightClickBlock` lets the click through, the mod's own
+    block is used on the client level as `performUseItemOn` does it, with the hand's stack and the
+    local player; a use that consumes the action answers for the click (`SUCCESS` swings,
+    `CONSUME` doesn't), so the other hand and the item aren't tried. A block that passes, and the
+    game's own blocks, leave the click to the game as before.
+  - Tests: `glue::tests::a_mod_block_that_takes_a_click_on_the_client_ends_it_there`.
+  - In game (`spoutgame.sh`): the bucket stays on its depot (`Item: {count: 1, id:
+    "minecraft:bucket"}` at the end) and the dirt is a grass block, its spout down to 500 mB. The
+    water bucket clicked on the drain stays a water bucket in the hand (`inventory_change: {}`), so
+    nothing is poured out over it. The drain's tank stays empty and the bucket under its spout
+    stays empty: NeoForge's `FluidBucketWrapper`, which both go through, isn't modelled yet. The
+    glass bottle is filled (its spout is down to 750 mB) but nothing comes back, since
+    `PotionContents.createItemStack` is unmapped.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
