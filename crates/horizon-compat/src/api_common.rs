@@ -221,10 +221,14 @@ pub(crate) fn entity_place(rt: &Rt, e: V) -> Option<[f64; 3]> {
     player_place(rt, e).map(|(p, _, _)| p).or_else(|| crate::vanilla_entities::position(rt, e))
 }
 
-/// A player's eyes above their feet: standing 1.62, crouching 1.27 (`Player.getStandingEyeHeight`).
 /// The player's eye height, vanilla's float (1.62, 1.27 crouching) as `getEyeY` adds it.
 fn player_eye_height(rt: &Rt) -> f64 {
     f64::from(if rt.host().is_some_and(|h| h.player_sneaking()) { 1.27f32 } else { 1.62f32 })
+}
+
+/// The player's width and height (`Player.STANDING_DIMENSIONS` 0.6 by 1.8, crouching 1.5).
+fn player_size(rt: &Rt) -> (f32, f32) {
+    (0.6, if rt.host().is_some_and(|h| h.player_sneaking()) { 1.5 } else { 1.8 })
 }
 
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
@@ -2275,7 +2279,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 crate::hand::worn(rt, i)
             }
         },
-        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "getWeaponItem" | "level" | "getCommandSenderWorld" | "isLocalPlayer" | "mayBuild") => {
+        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "getWeaponItem" | "level" | "getCommandSenderWorld" | "serverLevel" | "isLocalPlayer" | "mayBuild") => {
             match n {
                 // Survival and creative players build; the hooks act for one of them.
                 "mayBuild" => V::I(1),
@@ -2286,8 +2290,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "isLocalPlayer" => V::I(i32::from(rt.class_of(a(0)) == LOCAL_PLAYER)),
                 // A server player's level is the hooks' one level (what mods compare and key their
                 // data by), but on a client's runtime, where that one is the client's.
-                "level" | "getCommandSenderWorld" if rt.class_of(a(0)) == LOCAL_PLAYER || !crate::neo::is_client(rt) => crate::glue::level(rt),
-                "level" | "getCommandSenderWorld" => rt.intern("compat:server-level".into(), |rt| {
+                "level" | "getCommandSenderWorld" | "serverLevel" if rt.class_of(a(0)) == LOCAL_PLAYER || !crate::neo::is_client(rt) => crate::glue::level(rt),
+                "level" | "getCommandSenderWorld" | "serverLevel" => rt.intern("compat:server-level".into(), |rt| {
                     let l = rt.new_object("net/minecraft/server/level/ServerLevel");
                     rt.put_field(l, "isClientSide", V::I(0));
                     l
@@ -2483,7 +2487,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // The player's place: the acting server player's when the game told it (`acting_player`),
         // the client's own as the host places it.
         (o, n) if is_player(o)
-            && matches!(n, "getX" | "getY" | "getZ" | "position" | "getPosition" | "blockPosition" | "getEyeY" | "getEyePosition" | "getLookAngle" | "getViewVector" | "getXRot" | "getYRot" | "getYHeadRot")
+            && matches!(
+                n,
+                "getX" | "getY" | "getZ" | "position" | "getPosition" | "blockPosition" | "getEyeY" | "getEyePosition" | "getEyeHeight" | "getLookAngle" | "getViewVector" | "getXRot" | "getYRot" | "getYHeadRot" | "getBoundingBox" | "getBbWidth" | "getBbHeight"
+            )
             && player_place(rt, a(0)).is_some() =>
         {
             let (p, yaw, pitch) = player_place(rt, a(0)).unwrap_or_default();
@@ -2496,6 +2503,15 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "blockPosition" => crate::api::block_pos(rt, p[0].floor() as i64, p[1].floor() as i64, p[2].floor() as i64),
                 "getEyeY" => V::D(eye),
                 "getEyePosition" => vec3(rt, p[0], eye, p[2]),
+                "getEyeHeight" => V::F(player_eye_height(rt) as f32),
+                // `EntityDimensions.makeBoundingBox`: half the width and the height, as floats.
+                "getBoundingBox" => {
+                    let (w, h) = player_size(rt);
+                    let half = f64::from(w / 2.0);
+                    crate::shapes::aabb(rt, [p[0] - half, p[1], p[2] - half, p[0] + half, p[1] + f64::from(h), p[2] + half])
+                }
+                "getBbWidth" => V::F(player_size(rt).0),
+                "getBbHeight" => V::F(player_size(rt).1),
                 "getXRot" => V::F(pitch),
                 "getYRot" | "getYHeadRot" => V::F(yaw),
                 _ => view_vector(rt, yaw, pitch),

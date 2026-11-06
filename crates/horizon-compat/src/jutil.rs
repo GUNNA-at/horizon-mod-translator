@@ -662,7 +662,7 @@ pub fn new_iter(rt: &mut Rt, items: Vec<V>) -> V {
     rt.alloc("java/util/Iterator", Data::Iter(items, 0))
 }
 
-fn entry(rt: &mut Rt, k: V, v: V) -> V {
+pub(crate) fn entry(rt: &mut Rt, k: V, v: V) -> V {
     rt.alloc("java/util/Map$Entry", Data::List(vec![k, v]))
 }
 

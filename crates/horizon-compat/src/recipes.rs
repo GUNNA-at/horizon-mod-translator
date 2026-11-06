@@ -908,7 +908,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (COMPONENT_PATCH, "isEmpty") => {
             let json = rt.get_field(a(0), "$json");
-            V::I((json.r() == 0 || text(rt, json) == "{}") as i32)
+            V::I(((json.r() == 0 || text(rt, json) == "{}") && crate::components::built_patch_empty(rt, a(0))) as i32)
         }
         _ => return None,
     })

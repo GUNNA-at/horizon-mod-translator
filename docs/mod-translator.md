@@ -3749,6 +3749,40 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `.local/horizon-client/26.3`, absent in this checkout; the prepared copy is `scratchpad/prepared`).
   - Gaps seen: `ItemBlockRenderTypes.setRenderLayer` (cutout layers), fluid pipes' side properties (vanilla
     `PipeBlock`'s getShape isn't Create's), item `getDefaultInstance`, title-screen panorama calls.
+- [x] 2026-11-06 Part 15: round 11 in game; the player's box; data component maps and patches.
+  - Round 11 checked part 14 in game with `/hzrun world`:
+    - positions: `BlockPos{x=-35, y=64, z=-7}`, centre `(-34.5, 64.5, -6.5)`, short `-35, 64, -7`, section `-3 4 -1`
+      from `-48, 64, -16`, and the block above compares -1. All are vanilla's.
+    - the eye check: hzcheck's `getEyeY() - 0.3F` and the drop's y are both 65.31999999284744, vanilla's value.
+    - `getEntitiesOfClass` still found nobody: "no cow", and "living near" was empty, without even the player. The log
+      showed `ServerPlayer.getBoundingBox` unmapped. The box a mod asks around (`player.getBoundingBox().inflate(6)`)
+      was null, so the query had no area.
+  - The player's own box (`api_common`): `getBoundingBox` is vanilla's `EntityDimensions.makeBoundingBox`, 0.6 by 1.8
+    (1.5 crouching) with half the width a float. Also `getBbWidth`, `getBbHeight`, `getEyeHeight` (the float) and
+    `ServerPlayer.serverLevel()`, which was unmapped too. The entities test now asks around the player's own box,
+    inflated, as hzcheck and Create do.
+  - Data component maps (packcov5m: `ItemStack.getComponents` 41 mods, `applyComponents` 26 with a map and 22 with a
+    patch, `DataComponentMap$Builder.set` 22 + 10, `DataComponentMap.get` 17 and `has` 14):
+    - `ItemStack.getComponents()` (also through `DataComponentHolder`) is a live view: `get`, `getOrDefault` and `has`
+      go through the stack's own calls, so the damage and the defaults answer as the stack's do. Also `isEmpty`,
+      `size`, `keySet`, `iterator` and `stream` (each a `TypedDataComponent`), `getTyped` and `filter`.
+    - `DataComponentMap.builder()`: `set` (a type or its holder; null takes it out), `addAll`, `build`. Also
+      `DataComponentMap.EMPTY` and `composite`.
+    - `DataComponentPatch.builder()`: `set`, `remove`, `build`. A built patch counts in `isEmpty`.
+    - `ItemStack.applyComponents(map)` sets what was set on the map's stack, and its damage. Vanilla keeps a value equal
+      to the item's default out of a stack's patch, so the defaults are not copied.
+    - `applyComponents(patch)` and `applyComponentsAndValidate(patch)` make the patch's sets and removals. A saved or
+      recipe patch is read with the types' codecs.
+    - `getComponentsPatch()` keeps the stack's values on the patch, so `other.applyComponents(stack.getComponentsPatch())`
+      carries a transient type's value too.
+    - A patch's `entrySet`, `get` (an `Optional`, empty where it removes) and `size`.
+    - `Item.components()`: what a new stack of the item reads.
+    - `DataComponentType.equals` and `hashCode` work by identity.
+  - Not yet: `BlockEntity$DataComponentInput` (13 + 8 mods; Create's), `collectImplicitComponents` and
+    `applyImplicitComponents` (6), `FluidStack.getComponents` (7) and `applyComponents` (5 + 4),
+    `PatchedDataComponentMap`'s own calls (`asPatch` 6), `DataComponentPatch.forget` (4).
+  Test `components::tests::component_maps_and_patches_carry_a_stacks_components`; the entities test checks the player's
+  box. 372 compat and 17 translator tests pass. The game tests were not rerun: no game code changed.
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick

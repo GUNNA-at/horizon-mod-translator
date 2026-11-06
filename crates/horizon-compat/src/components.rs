@@ -12,6 +12,10 @@
 //! `components` map. Of vanilla's own types a game stack carries its enchantments (and a book's
 //! stored ones) here and back; of an item's default components (vanilla's prototype) only
 //! `enchantments` is modelled (`ItemEnchantments.EMPTY`: `get(MAX_STACK_SIZE)` is null).
+//!
+//! Component maps: a stack's as a live view (`ItemStack.getComponents()`), maps built by
+//! `DataComponentMap.builder()` and patches by `DataComponentPatch.builder()`, which
+//! `ItemStack.applyComponents` puts on a stack.
 use crate::nbt::Nbt;
 use crate::{Data, Rt, V};
 
@@ -31,6 +35,22 @@ const HOLDERS: [&str; 4] = [
 const CARRIED_VANILLA: [&str; 2] = ["minecraft:enchantments", "minecraft:stored_enchantments"];
 /// `DataComponents` statics that aren't component types.
 const NOT_TYPES: [&str; 2] = ["COMMON_ITEM_COMPONENTS", "ITEM_STACK_CODEC"];
+
+/// `DataComponentMap`: a stack's components (`$stack`: `ItemStack.getComponents()`, a live view)
+/// or a map built here (`builder()`, `EMPTY`, `filter`, `composite`), whose (type, value) pairs
+/// are kept as a stack keeps its own (`$patch`).
+const MAP: &str = "net/minecraft/core/component/DataComponentMap";
+const MAP_BUILDER: &str = "net/minecraft/core/component/DataComponentMap$Builder";
+const TYPED: &str = "net/minecraft/core/component/TypedDataComponent";
+/// A patch: from a saved stack or a recipe (`$json`, [`crate::recipes::component_patch`]) or built
+/// by its builder (`$patch` pairs set, `$removed` types removed).
+const COMPONENT_PATCH: &str = "net/minecraft/core/component/DataComponentPatch";
+const PATCH_BUILDER: &str = "net/minecraft/core/component/DataComponentPatch$Builder";
+/// The stack's own calls a map's reads and an applied map go through: the damage and the
+/// defaults answer as the stack's do.
+const GET_DESC: &str = "(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+const SET_DESC: &str = "(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";
+const PREDICATE_TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 
 /// The registry a mod's component types are registered in (`Registries.DATA_COMPONENT_TYPE`).
 const REGISTRY: &str = "data_component_type";
@@ -332,6 +352,213 @@ fn put(rt: &mut Rt, stack: V, ty: V, value: V) -> V {
     before
 }
 
+/// A view of `stack`'s components (`ItemStack.getComponents()`): what it reads is the stack's as
+/// it is then.
+fn stack_view(rt: &mut Rt, stack: V) -> V {
+    let m = rt.new_object(MAP);
+    rt.put_field(m, "$stack", stack);
+    m
+}
+
+/// A component map built here holding `pairs` (type, value, type, value...).
+fn plain_map(rt: &mut Rt, pairs: Vec<V>) -> V {
+    let m = rt.new_object(MAP);
+    if !pairs.is_empty() {
+        store(rt, m, pairs);
+    }
+    m
+}
+
+/// The stack a map is a view of, if it is one.
+fn viewed(rt: &Rt, map: V) -> Option<V> {
+    match rt.get_field(map, "$stack") {
+        V::R(r) if r != 0 => Some(V::R(r)),
+        _ => None,
+    }
+}
+
+/// The (type, value) pairs a component map holds: a stack's are what was set on it, then its
+/// damage and the defaults this runtime knows (`enchantments`, a book's `stored_enchantments`).
+fn map_pairs(rt: &mut Rt, map: V) -> Vec<V> {
+    let Some(stack) = viewed(rt, map) else { return pairs(rt, map) };
+    let mut l = pairs(rt, stack);
+    for id in ["minecraft:enchantments", "minecraft:stored_enchantments", "minecraft:damage", "minecraft:max_damage"] {
+        let ty = vanilla_type(rt, id);
+        if l.chunks(2).any(|p| p[0] == ty) {
+            continue;
+        }
+        let v = call(rt, ITEM_STACK, "get", GET_DESC, &[stack, ty]).unwrap_or(V::NULL);
+        if v.r() != 0 {
+            l.extend([ty, v]);
+        }
+    }
+    l
+}
+
+/// What `applyComponents(map)` sets of a map: of a stack's, what was set on the stack and its
+/// damage (vanilla keeps a value equal to the item's default out of a stack's patch); of a built
+/// one, its pairs.
+fn set_pairs(rt: &mut Rt, map: V) -> Vec<V> {
+    let Some(stack) = viewed(rt, map) else { return pairs(rt, map) };
+    let mut l = pairs(rt, stack);
+    let n = damage(rt, stack);
+    if n > 0 {
+        let ty = vanilla_type(rt, "minecraft:damage");
+        let v = crate::api_common::integer(rt, n);
+        l.extend([ty, v]);
+    }
+    l
+}
+
+/// The types a built patch removes.
+fn removed(rt: &Rt, patch: V) -> Vec<V> {
+    match rt.get_field(patch, "$removed") {
+        V::R(r) if r != 0 => crate::jutil::elements(rt, V::R(r)),
+        _ => Vec::new(),
+    }
+}
+
+fn set_removed(rt: &mut Rt, patch: V, types: Vec<V>) {
+    let l = crate::jutil::new_list(rt, types);
+    rt.put_field(patch, "$removed", l);
+}
+
+/// Whether a patch built here sets and removes nothing ([`crate::recipes`] asks it of any patch).
+pub(crate) fn built_patch_empty(rt: &Rt, patch: V) -> bool {
+    pairs(rt, patch).is_empty() && removed(rt, patch).is_empty()
+}
+
+/// The patch's written form (`$json`: a saved stack's or a recipe's components), if it has one.
+fn patch_json(rt: &Rt, patch: V) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match serde_json::from_str::<serde_json::Value>(rt.str_of(rt.get_field(patch, "$json"))?).ok()? {
+        serde_json::Value::Object(map) => Some(map),
+        _ => None,
+    }
+}
+
+/// The component type named `name`: the mod's registered one, else vanilla's.
+fn type_named(rt: &mut Rt, name: &str) -> V {
+    match rt.registered.get(&(REGISTRY.to_owned(), name.to_owned())).copied() {
+        Some(t) => t,
+        None => vanilla_type(rt, name),
+    }
+}
+
+/// What a patch holds, type by type: the value it sets, or None where it removes the type. A
+/// built patch's and a stack's (`getComponentsPatch`, which keeps the stack's values as they are),
+/// else its written form's read with the types' codecs (the mod's types, the damage).
+fn patch_entries(rt: &mut Rt, patch: V) -> Vec<(V, Option<V>)> {
+    let mut out: Vec<(V, Option<V>)> = pairs(rt, patch).chunks(2).map(|p| (p[0], Some(p[1]))).collect();
+    let kept = !out.is_empty();
+    for ty in removed(rt, patch) {
+        out.push((ty, None));
+    }
+    for (name, value) in patch_json(rt, patch).unwrap_or_default() {
+        if let Some(gone) = name.strip_prefix('!') {
+            let ty = type_named(rt, gone);
+            out.push((ty, None));
+        } else if name == "minecraft:damage" {
+            let ty = vanilla_type(rt, &name);
+            let n = crate::api_common::integer(rt, value.as_i64().unwrap_or(0) as i32);
+            out.push((ty, Some(n)));
+        } else if !kept {
+            // Read onto a scratch stack, as a stack would take it.
+            let scratch = rt.new_object(ITEM_STACK);
+            load_one(rt, scratch, &name, &value);
+            out.extend(pairs(rt, scratch).chunks(2).map(|p| (p[0], Some(p[1]))));
+        }
+    }
+    out
+}
+
+/// `stack.applyComponents(patch)`: what the patch sets is set on the stack, what it removes taken
+/// off.
+fn apply_patch(rt: &mut Rt, stack: V, patch: V) {
+    for (ty, value) in patch_entries(rt, patch) {
+        match value {
+            Some(v) => call(rt, ITEM_STACK, "set", SET_DESC, &[stack, ty, v]),
+            None => call(rt, ITEM_STACK, "remove", GET_DESC, &[stack, ty]),
+        };
+    }
+}
+
+/// Calls on a patch: its entries (`entrySet`: type to `Optional` value, empty where it removes),
+/// what it holds of a type (`get`: null for nothing, else an `Optional`), its size.
+fn patch_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let entries = patch_entries(rt, a(0));
+    Some(match name {
+        "size" => V::I(entries.len() as i32),
+        "get" => {
+            let ty = type_of(rt, a(1));
+            match entries.iter().find(|e| e.0 == ty) {
+                Some(&(_, v)) => crate::api_common::optional(rt, v.unwrap_or(V::NULL)),
+                None => V::NULL,
+            }
+        }
+        "entrySet" => {
+            let mut list = Vec::new();
+            for (ty, v) in entries {
+                let o = crate::api_common::optional(rt, v.unwrap_or(V::NULL));
+                list.push(crate::jutil::entry(rt, ty, o));
+            }
+            crate::jutil::identity_set(rt, &list)
+        }
+        _ => return None,
+    })
+}
+
+/// Calls on a component map: its reads (a view's go through its stack), its types and size, its
+/// components one by one (`TypedDataComponent`s), a filtered copy.
+fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let map = a(0);
+    Some(match name {
+        "get" | "getOrDefault" | "has" => {
+            if let Some(stack) = viewed(rt, map) {
+                let mut all = vec![stack];
+                all.extend_from_slice(args.get(1..).unwrap_or_default());
+                return call(rt, ITEM_STACK, name, desc, &all);
+            }
+            let ty = type_of(rt, a(1));
+            let v = get(rt, map, ty);
+            match name {
+                "has" => V::I(v.is_some() as i32),
+                "get" => v.unwrap_or(V::NULL),
+                _ => v.unwrap_or(a(2)),
+            }
+        }
+        "isEmpty" => V::I(map_pairs(rt, map).is_empty() as i32),
+        "size" => V::I((map_pairs(rt, map).len() / 2) as i32),
+        "keySet" => {
+            let types: Vec<V> = map_pairs(rt, map).chunks(2).map(|p| p[0]).collect();
+            crate::jutil::new_set_of(rt, &types)
+        }
+        "iterator" | "stream" => {
+            let l = map_pairs(rt, map);
+            let typed: Vec<V> = l.chunks(2).map(|p| crate::records::make(rt, TYPED, &[p[0], p[1]])).collect();
+            if name == "iterator" { crate::jutil::new_iter(rt, typed) } else { rt.alloc("java/util/stream/Stream", Data::Stream(typed)) }
+        }
+        "getTyped" => {
+            let ty = type_of(rt, a(1));
+            let v = map_call(rt, "get", GET_DESC, &[map, ty])?;
+            if v.r() == 0 { V::NULL } else { crate::records::make(rt, TYPED, &[ty, v]) }
+        }
+        // `filter(predicate)`: a map of the components whose type passes.
+        "filter" => {
+            let l = map_pairs(rt, map);
+            let mut kept = Vec::new();
+            for p in l.chunks(2) {
+                if rt.call_functional(PREDICATE_TEST, a(1), &[p[0]]).i() != 0 {
+                    kept.extend([p[0], p[1]]);
+                }
+            }
+            plain_map(rt, kept)
+        }
+        _ => return None,
+    })
+}
+
 /// `to` gets `from`'s components and damage (a copy of the stack keeps them).
 pub(crate) fn copy_patch(rt: &mut Rt, from: V, to: V) {
     let l = pairs(rt, from);
@@ -384,6 +611,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         "net/minecraft/core/component/DataComponents" if !NOT_TYPES.contains(&field) && !field.ends_with("CODEC") => {
             Some(vanilla_type(rt, &format!("minecraft:{}", field.to_ascii_lowercase())))
         }
+        MAP if field == "EMPTY" => Some(rt.intern("compat:component-map/empty".into(), |rt| plain_map(rt, Vec::new()))),
         _ => None,
     }
 }
@@ -396,7 +624,12 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         "isComponentsPatchEmpty" | "getComponentsPatch" | "getDamageValue" | "setDamageValue" | "getMaxDamage" | "isDamageableItem" | "isDamaged" | "hurtAndBreak" | "hurtWithoutBreaking"
     );
     let typed = desc.starts_with("(Lnet/minecraft/core/component/DataComponentType;") || desc.starts_with("(Ljava/util/function/Supplier;");
-    matches!(owner, TYPE | BUILDER) || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || typed))
+    let maps = matches!(owner, MAP | MAP_BUILDER | PATCH_BUILDER)
+        || owner.ends_with("/PatchedDataComponentMap")
+        || (owner == COMPONENT_PATCH && matches!(name, "builder" | "size" | "get" | "entrySet"))
+        || (name == "components" && desc == "()Lnet/minecraft/core/component/DataComponentMap;");
+    let stack_maps = matches!(name, "getComponents" | "applyComponents" | "applyComponentsAndValidate");
+    matches!(owner, TYPE | BUILDER) || maps || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || stack_maps || typed))
 }
 
 pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -422,6 +655,83 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             c => c,
         }),
         (TYPE, "isTransient") => Some(V::I((rt.get_field(a(0), "$codec").r() == 0) as i32)),
+        // One object per type: compared by identity.
+        (TYPE, "equals") => Some(V::I((a(0) == a(1)) as i32)),
+        (TYPE, "hashCode") => Some(V::I(a(0).r() as i32)),
+        // `getComponents()`: the stack's components as a map, live.
+        (o, "getComponents") if (o == ITEM_STACK || HOLDERS.contains(&o)) && rt.class_of(a(0)) == ITEM_STACK => Some(stack_view(rt, a(0))),
+        // `applyComponents(map)`: each of the map's components set on the stack; `(patch)`: the
+        // patch's sets and removals made.
+        (ITEM_STACK, "applyComponents") if desc == "(Lnet/minecraft/core/component/DataComponentMap;)V" => {
+            let l = set_pairs(rt, a(1));
+            for p in l.chunks(2) {
+                call(rt, ITEM_STACK, "set", SET_DESC, &[a(0), p[0], p[1]]);
+            }
+            Some(V::Void)
+        }
+        // `applyComponentsAndValidate(patch)`: the patch applied (the stack's own checks aside).
+        (ITEM_STACK, "applyComponents" | "applyComponentsAndValidate") => {
+            apply_patch(rt, a(0), a(1));
+            Some(V::Void)
+        }
+        // `Item.components()`: the item's default components, as a new stack of it reads them.
+        (_, "components") if desc == "()Lnet/minecraft/core/component/DataComponentMap;" && rt.instance_of(a(0), "net/minecraft/world/item/Item") => {
+            let id = crate::api_common::item_like_name(rt, a(0));
+            let stack = crate::api_common::stack(rt, &id, 1);
+            Some(stack_view(rt, stack))
+        }
+        (MAP, "builder") => Some(rt.new_object(MAP_BUILDER)),
+        (MAP_BUILDER, "<init>") | (PATCH_BUILDER, "<init>") => Some(V::Void),
+        // `set(type, value)` (a null value takes it out), `addAll(map)`, then `build()`.
+        (MAP_BUILDER, "set") => {
+            let ty = type_of(rt, a(1));
+            put(rt, a(0), ty, a(2));
+            Some(a(0))
+        }
+        (MAP_BUILDER, "addAll") => {
+            let l = map_pairs(rt, a(1));
+            for p in l.chunks(2) {
+                put(rt, a(0), p[0], p[1]);
+            }
+            Some(a(0))
+        }
+        (MAP_BUILDER, "build") => {
+            let l = pairs(rt, a(0));
+            Some(plain_map(rt, l))
+        }
+        // `composite(prototype, overrides)`: the overrides' components over the prototype's.
+        (MAP, "composite") => {
+            let (base, over) = (map_pairs(rt, a(0)), map_pairs(rt, a(1)));
+            let m = plain_map(rt, base);
+            for p in over.chunks(2) {
+                put(rt, m, p[0], p[1]);
+            }
+            Some(m)
+        }
+        (o, n) if (o == MAP || o.ends_with("/PatchedDataComponentMap")) && rt.class_of(a(0)) == MAP => map_call(rt, n, desc, args),
+        (COMPONENT_PATCH, "builder") => Some(rt.new_object(PATCH_BUILDER)),
+        (COMPONENT_PATCH, n @ ("size" | "get" | "entrySet")) => patch_call(rt, n, args),
+        // A patch's builder: what it sets and what it removes, each undoing the other.
+        (PATCH_BUILDER, "set" | "remove") => {
+            let ty = type_of(rt, a(1));
+            let setting = name == "set";
+            put(rt, a(0), ty, if setting { a(2) } else { V::NULL });
+            let mut gone: Vec<V> = removed(rt, a(0)).into_iter().filter(|&t| t != ty).collect();
+            if !setting {
+                gone.push(ty);
+            }
+            set_removed(rt, a(0), gone);
+            Some(a(0))
+        }
+        (PATCH_BUILDER, "build") => {
+            let p = rt.new_object(COMPONENT_PATCH);
+            let (l, gone) = (pairs(rt, a(0)), removed(rt, a(0)));
+            if !l.is_empty() {
+                store(rt, p, l);
+            }
+            set_removed(rt, p, gone);
+            Some(p)
+        }
         (TYPE, "codecOrThrow") => {
             let c = rt.get_field(a(0), "$codec");
             if c.r() == 0 {
@@ -436,10 +746,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (ITEM_STACK, "isComponentsPatchEmpty") => Some(V::I(pairs(rt, a(0)).is_empty() as i32)),
         // What was set on the stack, as `ItemStack.CODEC` writes its `components` (empty: the one
         // `EMPTY`).
+        // The values themselves stay on it too (a transient type's among them), for a stack it is
+        // applied to (`applyComponents(other.getComponentsPatch())`).
         (ITEM_STACK, "getComponentsPatch") => {
             let patch = patch(rt, a(0));
+            let kept = pairs(rt, a(0));
             let json = serde_json::Value::Object(patch.iter().map(|(k, v)| (k.clone(), crate::recipes::nbt_json(v))).collect());
-            Some(crate::recipes::component_patch(rt, (!patch.is_empty()).then_some(&json)))
+            let p = crate::recipes::component_patch(rt, (!patch.is_empty() || !kept.is_empty()).then_some(&json));
+            if !kept.is_empty() {
+                store(rt, p, kept);
+            }
+            Some(p)
         }
         // Durability: `ItemStack`'s own damage, worn by the game's rules on a stack in hand.
         (ITEM_STACK, "getDamageValue") => Some(V::I(damage(rt, a(0)).clamp(0, max_damage(rt, a(0)).max(0)))),
@@ -596,5 +913,102 @@ mod tests {
         let p = api::call(&mut rt, patch_of, &[plain]);
         assert_eq!(p, api::get_static(&mut rt, "net/minecraft/core/component/DataComponentPatch.EMPTY"));
         assert_eq!(api::call(&mut rt, is_empty, &[p]), V::I(1));
+    }
+
+    /// A stack's components read as a map (`getComponents`, live), a map built with
+    /// `DataComponentMap.builder()` and a patch with `DataComponentPatch.builder()` put on stacks
+    /// (`applyComponents`), and one stack's patch put on another carrying what was set on it, a
+    /// transient type's value too.
+    #[test]
+    fn component_maps_and_patches_carry_a_stacks_components() {
+        let mut rt = Rt::new();
+        crate::install();
+        let new_type = |rt: &mut Rt, codec: Option<&'static str>| {
+            let mut b = api::call(rt, "net/minecraft/core/component/DataComponentType.builder.()Lnet/minecraft/core/component/DataComponentType$Builder;", &[]);
+            if let Some(c) = codec {
+                let c = api::get_static(rt, c);
+                b = api::call(rt, "net/minecraft/core/component/DataComponentType$Builder.persistent.(Lcom/mojang/serialization/Codec;)Lnet/minecraft/core/component/DataComponentType$Builder;", &[b, c]);
+            }
+            api::call(rt, "net/minecraft/core/component/DataComponentType$Builder.build.()Lnet/minecraft/core/component/DataComponentType;", &[b])
+        };
+        let progress = new_type(&mut rt, Some("com/mojang/serialization/Codec.INT"));
+        rt.registered.insert((REGISTRY.into(), "test:progress".into()), progress);
+        let label = new_type(&mut rt, None);
+        let set = "net/minecraft/world/item/ItemStack.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";
+        let get = "net/minecraft/world/item/ItemStack.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+        let has = "net/minecraft/world/item/ItemStack.has.(Lnet/minecraft/core/component/DataComponentType;)Z";
+        let map_get = "net/minecraft/core/component/DataComponentMap.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+        let map_has = "net/minecraft/core/component/DataComponentMap.has.(Lnet/minecraft/core/component/DataComponentType;)Z";
+        let map_empty = "net/minecraft/core/component/DataComponentMap.isEmpty.()Z";
+        let apply_map = "net/minecraft/world/item/ItemStack.applyComponents.(Lnet/minecraft/core/component/DataComponentMap;)V";
+        let apply_patch = "net/minecraft/world/item/ItemStack.applyComponents.(Lnet/minecraft/core/component/DataComponentPatch;)V";
+
+        // The stack's map reads what is set on it, as it is when read.
+        let s = api_common::stack(&mut rt, "minecraft:iron_ingot", 1);
+        let (five, hot) = (boxed(&mut rt, 5), rt.string("hot"));
+        api::call(&mut rt, set, &[s, progress, five]);
+        api::call(&mut rt, set, &[s, label, hot]);
+        let view = api::call(&mut rt, "net/minecraft/world/item/ItemStack.getComponents.()Lnet/minecraft/core/component/DataComponentMap;", &[s]);
+        assert_eq!(api::call(&mut rt, map_get, &[view, progress]), five);
+        let damage = api::get_static(&mut rt, "net/minecraft/core/component/DataComponents.DAMAGE");
+        assert_eq!(api::call(&mut rt, map_has, &[view, damage]), V::I(0), "an ingot takes no damage");
+        let seven = boxed(&mut rt, 7);
+        api::call(&mut rt, set, &[s, progress, seven]);
+        assert_eq!(api::call(&mut rt, map_get, &[view, progress]), seven, "the map is the stack's, live");
+        // Its components one by one, each a type with its value.
+        let it = api::call(&mut rt, "net/minecraft/core/component/DataComponentMap.iterator.()Ljava/util/Iterator;", &[view]);
+        let mut seen = Vec::new();
+        while api::call(&mut rt, "java/util/Iterator.hasNext.()Z", &[it]) == V::I(1) {
+            let t = api::call(&mut rt, "java/util/Iterator.next.()Ljava/lang/Object;", &[it]);
+            let ty = api::call(&mut rt, "net/minecraft/core/component/TypedDataComponent.type.()Lnet/minecraft/core/component/DataComponentType;", &[t]);
+            let v = api::call(&mut rt, "net/minecraft/core/component/TypedDataComponent.value.()Ljava/lang/Object;", &[t]);
+            seen.push((ty, v));
+        }
+        assert!(seen.contains(&(progress, seven)) && seen.contains(&(label, hot)), "{seen:?}");
+
+        // A built map, put on a stack.
+        let b = api::call(&mut rt, "net/minecraft/core/component/DataComponentMap.builder.()Lnet/minecraft/core/component/DataComponentMap$Builder;", &[]);
+        let nine = boxed(&mut rt, 9);
+        api::call(&mut rt, "net/minecraft/core/component/DataComponentMap$Builder.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Lnet/minecraft/core/component/DataComponentMap$Builder;", &[b, progress, nine]);
+        let built = api::call(&mut rt, "net/minecraft/core/component/DataComponentMap$Builder.build.()Lnet/minecraft/core/component/DataComponentMap;", &[b]);
+        assert_eq!(api::call(&mut rt, map_get, &[built, progress]), nine);
+        assert_eq!(api::call(&mut rt, map_has, &[built, label]), V::I(0));
+        let t = api_common::stack(&mut rt, "minecraft:iron_ingot", 1);
+        api::call(&mut rt, apply_map, &[t, built]);
+        assert_eq!(api::call(&mut rt, get, &[t, progress]), nine);
+        let none = api::get_static(&mut rt, "net/minecraft/core/component/DataComponentMap.EMPTY");
+        assert_eq!(api::call(&mut rt, map_empty, &[none]), V::I(1));
+        assert_eq!(api::call(&mut rt, map_get, &[none, progress]), V::NULL);
+
+        // A built patch sets one type and takes another off; one that does nothing is empty.
+        let pb = api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch.builder.()Lnet/minecraft/core/component/DataComponentPatch$Builder;", &[]);
+        let cold = rt.string("cold");
+        api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch$Builder.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Lnet/minecraft/core/component/DataComponentPatch$Builder;", &[pb, label, cold]);
+        api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch$Builder.remove.(Lnet/minecraft/core/component/DataComponentType;)Lnet/minecraft/core/component/DataComponentPatch$Builder;", &[pb, progress]);
+        let patch = api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch$Builder.build.()Lnet/minecraft/core/component/DataComponentPatch;", &[pb]);
+        let is_empty = "net/minecraft/core/component/DataComponentPatch.isEmpty.()Z";
+        assert_eq!(api::call(&mut rt, is_empty, &[patch]), V::I(0));
+        assert_eq!(api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch.size.()I", &[patch]), V::I(2));
+        api::call(&mut rt, apply_patch, &[t, patch]);
+        assert_eq!(api::call(&mut rt, has, &[t, progress]), V::I(0));
+        let now = api::call(&mut rt, get, &[t, label]);
+        assert_eq!(rt.str_of(now), Some("cold"));
+        let pb = api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch.builder.()Lnet/minecraft/core/component/DataComponentPatch$Builder;", &[]);
+        let nothing = api::call(&mut rt, "net/minecraft/core/component/DataComponentPatch$Builder.build.()Lnet/minecraft/core/component/DataComponentPatch;", &[pb]);
+        assert_eq!(api::call(&mut rt, is_empty, &[nothing]), V::I(1));
+
+        // One stack's patch put on another: what was set on it, the transient label too.
+        let u = api_common::stack(&mut rt, "minecraft:iron_ingot", 1);
+        let from = api::call(&mut rt, "net/minecraft/world/item/ItemStack.getComponentsPatch.()Lnet/minecraft/core/component/DataComponentPatch;", &[s]);
+        api::call(&mut rt, apply_patch, &[u, from]);
+        assert_eq!(api::call(&mut rt, get, &[u, progress]), seven);
+        assert_eq!(api::call(&mut rt, get, &[u, label]), hot);
+        // A saved stack's patch (as a recipe's result carries one) is read with the types' codecs.
+        let written = crate::recipes::component_patch(&mut rt, Some(&serde_json::json!({"test:progress": 12, "minecraft:damage": 0})));
+        let w = api_common::stack(&mut rt, "minecraft:iron_ingot", 1);
+        api::call(&mut rt, apply_patch, &[w, written]);
+        let read = api::call(&mut rt, get, &[w, progress]);
+        assert_eq!(rt.get_field(read, "value"), V::I(12));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }
