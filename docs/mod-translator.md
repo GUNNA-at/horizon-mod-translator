@@ -4254,6 +4254,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     holding a mod with a commented header, one with `[[ mods ]]` and a library: both mods' classes are translated
     and their ids read, the library's class stays out); the mixin configs test's `mods.toml` now writes its headers
     both ways. 398 compat and 18 translator tests pass.
+- [x] 2026-11-06 Part 29: NeoForge's listener priorities and `receiveCanceled`.
+  - The runtime's bus called an event's listeners in the order they listened and stopped at the first that
+    canceled it. NeoForge's bus calls them by `EventPriority` (`HIGHEST`, `HIGH`, `NORMAL`, `LOW`, `LOWEST`; in the
+    order they listen within one) and, while an event is canceled, still calls the listeners that asked for
+    canceled events (`receiveCanceled = true`; one of them may let it go on). In the CurseForge pack 95 of the 367
+    jars name `EventPriority` (204 classes) and 6 `receiveCanceled` (7 classes): a mod that listens at `HIGHEST`
+    to act before the others, or at `LOWEST` to see what they did, got the wrong turn.
+  - The translator reads `@SubscribeEvent(priority, receiveCanceled)` and registers the options of the methods
+    that don't keep the default (`rt.subscriber_options`, by method key); a listener made of one carries them
+    (`Rt::listen_options`), as does one `addListener(EventPriority, [boolean,] ...)` or `addListener(boolean,
+    ...)` took. `EventPriority`'s constants are its enum values (they were their names, as strings).
+    `neo::hearing` orders an event's listeners by priority, `neo::post` passes a canceled event only to those
+    that receive canceled ones.
+  - Test: `neo::tests::listeners_hear_by_priority_and_a_canceled_event_only_where_asked` (a `HIGHEST` method
+    first, the `NORMAL` one that cancels, a `NORMAL` and a `LOW` listener after it don't hear it, a `LOWEST` one
+    receiving canceled events does). 399 compat and 18 translator tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

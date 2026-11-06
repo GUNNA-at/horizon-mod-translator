@@ -611,6 +611,30 @@ impl<'a> Program<'a> {
         out
     }
 
+    /// The `@SubscribeEvent` methods whose options aren't the default, by key: `EventPriority`'s
+    /// ordinal (0 `HIGHEST` to 4 `LOWEST`, 2 `NORMAL`) and `receiveCanceled`.
+    fn subscriber_options(&self) -> BTreeMap<String, (u8, bool)> {
+        const PRIORITIES: [&str; 5] = ["HIGHEST", "HIGH", "NORMAL", "LOW", "LOWEST"];
+        let mut out = BTreeMap::new();
+        for c in self.classes.values() {
+            for m in c.methods.iter().filter(|m| m.code.is_some()) {
+                let Some(a) = m.annotations.iter().find(|a| a.ty == SUBSCRIBE_EVENT) else { continue };
+                let priority = a
+                    .data
+                    .get("priority")
+                    .and_then(|p| p.get("v"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|n| PRIORITIES.iter().position(|&p| p == n))
+                    .map_or(2, |i| i as u8);
+                let canceled = a.data.get("receiveCanceled").and_then(|v| v.get("Z")).and_then(serde_json::Value::as_i64).is_some_and(|z| z != 0);
+                if (priority, canceled) != (2, false) {
+                    out.insert(format!("{}.{}.{}", c.name, m.name, m.desc), (priority, canceled));
+                }
+            }
+        }
+        out
+    }
+
     fn own(&self, class: &str) -> bool {
         self.classes.contains_key(class)
     }
@@ -866,6 +890,10 @@ impl<'a> Program<'a> {
         }
         for (class, list) in subs {
             let _ = writeln!(out, "    rt.subscribers.insert({class:?}, vec![{}]);", list.join(", "));
+        }
+        // Their `@SubscribeEvent(priority = ..., receiveCanceled = ...)` where it isn't the default.
+        for (key, options) in self.subscriber_options() {
+            let _ = writeln!(out, "    rt.subscriber_options.insert({key:?}, {options:?});");
         }
         // What FML's scan of each jar finds (`ModList.getAllScanData`).
         let scans = self.scan_texts(classes);

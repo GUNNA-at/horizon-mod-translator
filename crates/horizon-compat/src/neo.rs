@@ -85,20 +85,29 @@ pub(crate) fn reaches(rt: &Rt, event: &str, wanted: &str) -> bool {
     }
 }
 
-/// Posts `event` (an object of class `class`) to the mod bus's listeners. Once one cancels it
-/// (`setCanceled(true)` on a cancellable event), the listeners after it don't hear it.
+/// Posts `event` (an object of class `class`) to the mod bus's listeners, by priority (see
+/// [`hearing`]). While it is canceled (`setCanceled(true)` on a cancellable event), only the
+/// listeners that asked for canceled events hear it (`receiveCanceled`; one may let it go on).
 pub fn post(rt: &mut Rt, class: &str, event: V) {
     let profile = profiling();
     for l in hearing(rt, class) {
+        if rt.get_field(event, "$canceled").i() != 0 && rt.get_field(l, "$receiveCanceled").i() == 0 {
+            continue;
+        }
         let started = profile.then(std::time::Instant::now);
         rt.call_functional(ACCEPT, l, &[event]);
         if let Some(t) = started {
             record(rt, class, l, t.elapsed());
         }
         rt.report_thrown(class);
-        if rt.get_field(event, "$canceled").i() != 0 {
-            break;
-        }
+    }
+}
+
+/// Listener `l`'s `EventPriority` ordinal: 0 `HIGHEST` to 4 `LOWEST`, `NORMAL` (2) unless it said.
+fn priority(rt: &Rt, l: V) -> i32 {
+    match rt.get_field(l, "$priority") {
+        V::I(p) => p,
+        _ => 2,
     }
 }
 
@@ -155,7 +164,9 @@ pub(crate) fn hearing(rt: &mut Rt, class: &str) -> Vec<V> {
     if let Some(l) = rt.listeners_by_event.get(class) {
         return l.clone();
     }
-    let l: Vec<V> = rt.listeners.iter().filter(|(wanted, _)| reaches(rt, class, wanted)).map(|(_, l)| *l).collect();
+    let mut l: Vec<V> = rt.listeners.iter().filter(|(wanted, _)| reaches(rt, class, wanted)).map(|(_, l)| *l).collect();
+    // NeoForge's bus calls them by priority, `HIGHEST` first; within one, in the order they listen.
+    l.sort_by_key(|&l| priority(rt, l));
     rt.listeners_by_event.insert(class.to_owned(), l.clone());
     l
 }
@@ -566,6 +577,18 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 .find(|&&v| rt.class_of(v) == "java/lang/Class")
                 .and_then(|&v| rt.str_of(v).map(str::to_owned))
                 .unwrap_or_else(|| listener_event(rt, listener));
+            // `addListener(EventPriority, [boolean receiveCanceled,] ...)`, `addListener(boolean, ...)`.
+            let params = desc.trim_start_matches('(');
+            let (priority, canceled) = if let Some(rest) = params.strip_prefix("Lnet/neoforged/bus/api/EventPriority;") {
+                (rt.get_field(a(1), "$ordinal").i().clamp(0, 4), rest.starts_with('Z') && a(2).i() != 0)
+            } else if params.starts_with('Z') {
+                (2, a(1).i() != 0)
+            } else {
+                (2, false)
+            };
+            if (priority, canceled) != (2, false) {
+                rt.listen_options(listener, u8::try_from(priority.clamp(0, 4)).unwrap_or(2), canceled);
+            }
             rt.listeners.push((wanted, listener));
             V::Void
         }
@@ -2338,6 +2361,52 @@ mod tests {
         }
         post_started(&mut rt);
         assert_eq!(list_mut(&mut rt, log)[4..], [two]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// NeoForge's bus calls the listeners by priority (`HIGHEST` first; within one, in the order
+    /// they listen), as `@SubscribeEvent(priority = ...)` or `addListener(EventPriority, ...)` gave
+    /// it; once one cancels the event, only those that asked for canceled events
+    /// (`receiveCanceled`) hear it.
+    #[test]
+    fn listeners_hear_by_priority_and_a_canceled_event_only_where_asked() {
+        const EVENT: &str = "net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$RightClickBlock";
+        const HANDLER: &str = "test/Handler";
+        const CANCELS: &str = "test/Handler.cancels.(Lnet/neoforged/neoforge/event/entity/player/PlayerInteractEvent$RightClickBlock;)V";
+        const FIRST: &str = "test/Handler.first.(Lnet/neoforged/neoforge/event/entity/player/PlayerInteractEvent$RightClickBlock;)V";
+        const PRIORITY: &str = "net/neoforged/bus/api/EventPriority";
+        /// Each listener notes its id; 1 cancels the event.
+        fn heard(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let log = rt.interned["test:log"];
+            list_mut(rt, log).push(V::I(id as i32));
+            if id == 1 {
+                let ev = *args.last()?;
+                rt.put_field(ev, "$canceled", V::I(1));
+            }
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(heard);
+        let log = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        rt.interned.insert("test:log".into(), log);
+        // Static `@SubscribeEvent` methods: `cancels` at NORMAL, then `first` at HIGHEST.
+        rt.subscribers.insert(HANDLER, vec![(EVENT, CANCELS, true, 1), (EVENT, FIRST, true, 2)]);
+        rt.subscriber_options.insert(FIRST, (0, false));
+        let bus = rt.new_object("net/neoforged/bus/api/IEventBus");
+        let class = crate::jlang::class_object(&mut rt, EVENT);
+        let handler = crate::jlang::class_object(&mut rt, HANDLER);
+        call(&mut rt, "net/neoforged/bus/api/IEventBus.register.(Ljava/lang/Object;)V", &[bus, handler]);
+        let lowest = crate::api::get_static(&mut rt, "net/neoforged/bus/api/EventPriority.LOWEST");
+        let low = crate::api::get_static(&mut rt, "net/neoforged/bus/api/EventPriority.LOW");
+        assert_eq!(rt.class_of(lowest), PRIORITY);
+        // LOWEST hearing canceled events (3), LOW (5), and NORMAL after `cancels` (4).
+        let [late, low_one, plain] = [3, 5, 4].map(|id| rt.lambda_id("java/util/function/Consumer", id, vec![]));
+        call(&mut rt, "net/neoforged/bus/api/IEventBus.addListener.(Lnet/neoforged/bus/api/EventPriority;ZLjava/lang/Class;Ljava/util/function/Consumer;)V", &[bus, lowest, V::I(1), class, late]);
+        call(&mut rt, "net/neoforged/bus/api/IEventBus.addListener.(Lnet/neoforged/bus/api/EventPriority;Ljava/lang/Class;Ljava/util/function/Consumer;)V", &[bus, low, class, low_one]);
+        call(&mut rt, "net/neoforged/bus/api/IEventBus.addListener.(Ljava/lang/Class;Ljava/util/function/Consumer;)V", &[bus, class, plain]);
+        let ev = rt.new_object(EVENT);
+        post(&mut rt, EVENT, ev);
+        assert_eq!(list_mut(&mut rt, log).clone(), [V::I(2), V::I(1), V::I(3)]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

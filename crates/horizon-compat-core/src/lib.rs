@@ -229,6 +229,11 @@ pub struct Rt {
     /// `@SubscribeEvent` methods by class (registered by generated code): (event class, method
     /// key, static). [`Rt::subscribe_class`] and [`Rt::subscribe_object`] listen with them.
     pub subscribers: HashMap<&'static str, Vec<(&'static str, &'static str, bool, u32)>>,
+    /// The `@SubscribeEvent(priority, receiveCanceled)` of those methods whose options aren't the
+    /// default (registered by generated code), by method key: `EventPriority`'s ordinal (0
+    /// `HIGHEST` to 4 `LOWEST`) and whether it hears canceled events. A listener made of one
+    /// carries them ([`Rt::listen_options`]).
+    pub subscriber_options: HashMap<&'static str, (u8, bool)>,
     /// Each lambda object's functional interface and its method name.
     pub lambda_info: HashMap<u32, (&'static str, &'static str)>,
     /// The class of the last call into a caller-sensitive method (`StackWalker.getCallerClass`).
@@ -263,6 +268,7 @@ impl Default for Rt {
             supers: HashMap::default(),
             interfaces: HashMap::default(),
             subscribers: HashMap::default(),
+            subscriber_options: HashMap::default(),
             host: None,
             vcall: None,
             lambda_call: None,
@@ -610,9 +616,20 @@ impl Rt {
         for (event, key, is_static, id) in self.subscribers.get(class).cloned().unwrap_or_default() {
             if is_static {
                 let l = self.lambda_id(key, id, Vec::new());
+                if let Some(&(priority, canceled)) = self.subscriber_options.get(key) {
+                    self.listen_options(l, priority, canceled);
+                }
                 self.listeners.push((event.to_owned(), l));
             }
         }
+    }
+
+    /// Gives listener `l` NeoForge's options: `EventPriority`'s ordinal `priority` (0 `HIGHEST`, 2
+    /// `NORMAL`, 4 `LOWEST`: the bus calls the higher first, in the order they listen within one)
+    /// and whether it hears an event a listener before it canceled (`receiveCanceled`).
+    pub fn listen_options(&mut self, l: V, priority: u8, canceled: bool) {
+        self.put_field(l, "$priority", V::I(i32::from(priority)));
+        self.put_field(l, "$receiveCanceled", V::I(i32::from(canceled)));
     }
 
     /// Listens with `obj`'s instance `@SubscribeEvent` methods, its superclasses' too: `bus.register(obj)`.
@@ -622,6 +639,9 @@ impl Rt {
             for (event, key, is_static, id) in self.subscribers.get(c).cloned().unwrap_or_default() {
                 if !is_static {
                     let l = self.lambda_id(key, id, vec![obj]);
+                    if let Some(&(priority, canceled)) = self.subscriber_options.get(key) {
+                        self.listen_options(l, priority, canceled);
+                    }
                     self.listeners.push((event.to_owned(), l));
                 }
             }

@@ -2159,9 +2159,17 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
                 }
             }
         }
+        // NeoForge's listener priorities, highest first.
         k if k.starts_with("net/neoforged/bus/api/EventPriority.") => {
+            const NAMES: [&str; 5] = ["HIGHEST", "HIGH", "NORMAL", "LOW", "LOWEST"];
             let n = k.rsplit('.').next().unwrap_or("");
-            rt.string(n)
+            match NAMES.iter().position(|&x| x == n) {
+                Some(i) => api_enum(rt, "net/neoforged/bus/api/EventPriority", NAMES[i], i as i32),
+                None => {
+                    crate::miss(rt, key);
+                    V::NULL
+                }
+            }
         }
         k if k.starts_with("java/util/Locale.") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
         // The data fixer's type references (`References.BLOCK_ENTITY`), by their type names.
