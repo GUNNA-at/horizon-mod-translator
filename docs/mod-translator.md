@@ -4574,6 +4574,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Tests: `options::tests` (vanilla's defaults, a set option changing the derived getters, a mod's
     boolean option); `jlang::tests::new_string_spells_its_arguments`;
     `vertices::tests::a_type_reading_the_sheet_through_render_type_draws_its_sprites`.
+  - In game (tank round 4): the lava tank's window shows lava, orange and textured, and the water tank's
+    window shows rippled water. `Options.graphicsMode`, `OptionInstance.get`,
+    `new String(bytes, charset)` and `String.isEmpty` no longer miss. One new miss shows the code
+    reaching further: `IntList.getInt` on an `IntArrayList`.
+- [x] 2026-11-06 Part 40: NeoForge's viewport events, and what a render type is made of.
+  - The game asks four of its hooks each frame. The mods' listeners now answer them:
+    - `compute_fov`: `ViewportEvent.ComputeFov` sets the world's field of view.
+    - `compute_fog_color`: `ComputeFogColor` sets the fog's colour.
+    - `render_fog`: `RenderFog` sets the fog's distances. Like `ClientHooks.onFogRender`, it applies
+      only what a listener that cancels it set. The game's fog maps to 1.21.1's two fogs: the sky's
+      (`sky_end`), and the terrain's, which is the environment's (a fluid's, the Nether's) where that is
+      nearer than the render distance's.
+    - `camera_shake`: `ComputeCameraAngles` turns the camera. The listeners' turn past the camera's
+      own is added to the frame's shake, which the game bounds.
+
+    With no listener no event is made, so a frame runs no mod code (`neo::hearing`). Pack jars that
+    listen: ComputeFov 4, ComputeFogColor 6, RenderFog 6, ComputeCameraAngles 10.
+  - `RenderType.bufferSize()`, `format()`, `mode()`, `affectsCrumbling()`, `sortOnUpload()`: for a
+    mod's own type, what `create` was given; for vanilla's, the values from 1.21.1's `RenderType`
+    (57 types, from the source: `translucent` sorts its faces and shows cracks, in a 786432-byte
+    buffer of `BLOCK` vertices). Create's `SuperRenderTypeBuffer` asks `bufferSize` (in game).
+  - Tests: `camera::tests::the_viewport_events_change_the_frame_as_their_listeners_say`,
+    `render::tests::a_render_type_tells_what_it_is_made_of`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

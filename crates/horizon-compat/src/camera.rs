@@ -708,6 +708,84 @@ fn event_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+// ---- the viewport events the game asks each frame ----
+
+/// `FogRenderer.FogMode`: the sky's fog and the terrain's.
+const FOG_MODE: &str = "net/minecraft/client/renderer/FogRenderer$FogMode";
+const FOG_MODES: [&str; 2] = ["FOG_SKY", "FOG_TERRAIN"];
+const FOG_SHAPE: &str = "com/mojang/blaze3d/shaders/FogShape";
+const FOG_SHAPES: [&str; 2] = ["SPHERE", "CYLINDER"];
+
+/// A viewport event of `class` the mods hear, made as NeoForge makes it for this frame (`partial`
+/// ticks past the last), the main camera at `camera` when the game says where; None when no mod
+/// listens, so a frame with no listener runs nothing.
+fn viewport_event(rt: &mut Rt, class: &'static str, partial: f32, camera: Option<[f64; 3]>) -> Option<V> {
+    if crate::neo::hearing(rt, class).is_empty() {
+        return None;
+    }
+    prepare(rt, camera);
+    let ev = rt.new_object(class);
+    let cam = main(rt);
+    rt.put_field(ev, "$camera", cam);
+    rt.put_field(ev, "$partialTick", V::D(f64::from(partial)));
+    Some(ev)
+}
+
+/// `ViewportEvent.ComputeFov` (`ClientHooks.getFieldOfView`, the world's): the field of view in
+/// degrees as the mods listening leave it.
+pub(crate) fn compute_fov(rt: &mut Rt, partial: f32, camera: [f64; 3], degrees: f32) -> f32 {
+    let Some(ev) = viewport_event(rt, COMPUTE_FOV, partial, Some(camera)) else { return degrees };
+    rt.put_field(ev, "$fov", V::D(f64::from(degrees)));
+    rt.put_field(ev, "$usedConfiguredFov", V::I(1));
+    crate::neo::post(rt, COMPUTE_FOV, ev);
+    rt.report_thrown("a ComputeFov listener");
+    rt.get_field(ev, "$fov").d() as f32
+}
+
+/// `ViewportEvent.ComputeFogColor` (`ClientHooks.getFogColor`): the fog's colour as the mods
+/// listening leave it.
+pub(crate) fn compute_fog_color(rt: &mut Rt, partial: f32, camera: [f64; 3], rgb: [f32; 3]) -> [f32; 3] {
+    let Some(ev) = viewport_event(rt, FOG_COLOR, partial, Some(camera)) else { return rgb };
+    for (f, c) in ["$red", "$green", "$blue"].into_iter().zip(rgb) {
+        rt.put_field(ev, f, V::F(c));
+    }
+    crate::neo::post(rt, FOG_COLOR, ev);
+    rt.report_thrown("a ComputeFogColor listener");
+    ["$red", "$green", "$blue"].map(|f| rt.get_field(ev, f).f())
+}
+
+/// `ViewportEvent.RenderFog` (`ClientHooks.onFogRender`) for the fog of `mode` (0 the sky's, 1 the
+/// terrain's) of type `fog_type` (`FogType`'s ordinal), from `near` to `far` blocks: the distances
+/// a mod that cancels it sets, else None (vanilla's stand).
+pub(crate) fn render_fog(rt: &mut Rt, partial: f32, camera: [f64; 3], mode: usize, fog_type: usize, near: f32, far: f32) -> Option<(f32, f32)> {
+    let ev = viewport_event(rt, RENDER_FOG, partial, Some(camera))?;
+    let mode_v = crate::api::api_enum(rt, FOG_MODE, FOG_MODES[mode.min(1)], mode.min(1) as i32);
+    let type_v = crate::api::api_enum(rt, FOG_TYPE, FOG_TYPES[fog_type.min(3)], fog_type.min(3) as i32);
+    // The sky's fog is a sphere, the terrain's a cylinder (`FogRenderer.setupFog`).
+    let shape = crate::api::api_enum(rt, FOG_SHAPE, FOG_SHAPES[mode.min(1)], mode.min(1) as i32);
+    for (f, v) in [("$mode", mode_v), ("$type", type_v), ("$fogShape", shape), ("$nearPlaneDistance", V::F(near)), ("$farPlaneDistance", V::F(far))] {
+        rt.put_field(ev, f, v);
+    }
+    crate::neo::post(rt, RENDER_FOG, ev);
+    rt.report_thrown("a RenderFog listener");
+    (rt.get_field(ev, "$canceled").i() != 0).then(|| (rt.get_field(ev, "$nearPlaneDistance").f(), rt.get_field(ev, "$farPlaneDistance").f()))
+}
+
+/// `ViewportEvent.ComputeCameraAngles` (`GameRenderer.renderLevel`): the turn the mods listening
+/// give the camera, as pitch, yaw and roll in degrees past the camera's own.
+pub(crate) fn camera_angles(rt: &mut Rt, partial: f32) -> Option<[f32; 3]> {
+    let ev = viewport_event(rt, COMPUTE_ANGLES, partial, None)?;
+    let cam = main(rt);
+    let (yaw, pitch) = (rt.get_field(cam, "$yRot").f(), rt.get_field(cam, "$xRot").f());
+    for (f, v) in [("$yaw", yaw), ("$pitch", pitch), ("$roll", 0.0)] {
+        rt.put_field(ev, f, V::F(v));
+    }
+    crate::neo::post(rt, COMPUTE_ANGLES, ev);
+    rt.report_thrown("a ComputeCameraAngles listener");
+    let [y, p, r] = ["$yaw", "$pitch", "$roll"].map(|f| rt.get_field(ev, f).f());
+    Some([p - pitch, y - yaw, r])
+}
+
 // ---- the level's render stages ----
 
 /// Stage `i` of [`STAGES`]: one object each, as NeoForge registers them.
@@ -1026,6 +1104,63 @@ mod tests {
         assert_eq!(crate::api::call(&mut rt, get, &[]), a);
         let name = crate::api::call(&mut rt, key(SHADER, "getName.()Ljava/lang/String;"), &[a]);
         assert_eq!(rt.str_of(name), Some("position_tex"));
+    }
+
+    /// Mods listening to the viewport events change what the game draws with. Tested: a narrower
+    /// field of view, a redder fog, the terrain's fog farther (NeoForge applies a `RenderFog` only when
+    /// the listener cancels it, and leaves the sky's, set but not cancelled, as it was), and a camera
+    /// turned and rolled past its own. With no listener, the game's own stand, and no event made.
+    #[test]
+    fn the_viewport_events_change_the_frame_as_their_listeners_say() {
+        fn listener(rt: &mut Rt, _: u32, args: &[V]) -> Option<V> {
+            let ev = args[1];
+            match rt.class_of(ev).to_owned().as_str() {
+                COMPUTE_FOV => {
+                    let fov = crate::api::call(rt, key(COMPUTE_FOV, "getFOV.()D"), &[ev]).d();
+                    crate::api::call(rt, key(COMPUTE_FOV, "setFOV.(D)V"), &[ev, V::D(fov * 0.5)]);
+                }
+                FOG_COLOR => {
+                    crate::api::call(rt, key(FOG_COLOR, "setRed.(F)V"), &[ev, V::F(1.0)]);
+                }
+                RENDER_FOG => {
+                    let mode = crate::api::call(rt, key(RENDER_FOG, "getMode.()Lnet/minecraft/client/renderer/FogRenderer$FogMode;"), &[ev]);
+                    let terrain = crate::api::get_static(rt, "net/minecraft/client/renderer/FogRenderer$FogMode.FOG_TERRAIN");
+                    if mode == terrain {
+                        crate::api::call(rt, key(RENDER_FOG, "setFarPlaneDistance.(F)V"), &[ev, V::F(500.0)]);
+                        crate::api::call(rt, key(RENDER_FOG, "setCanceled.(Z)V"), &[ev, V::I(1)]);
+                    } else {
+                        crate::api::call(rt, key(RENDER_FOG, "setFarPlaneDistance.(F)V"), &[ev, V::F(1.0)]);
+                    }
+                }
+                COMPUTE_ANGLES => {
+                    let yaw = crate::api::call(rt, key(COMPUTE_ANGLES, "getYaw.()F"), &[ev]).f();
+                    crate::api::call(rt, key(COMPUTE_ANGLES, "setYaw.(F)V"), &[ev, V::F(yaw + 2.0)]);
+                    crate::api::call(rt, key(COMPUTE_ANGLES, "setRoll.(F)V"), &[ev, V::F(5.0)]);
+                }
+                _ => {}
+            }
+            Some(V::Void)
+        }
+        let (mut rt, mut host) = client([0.0, 64.0, 0.0], 90.0, 0.0);
+        let at = [0.5, 65.6, 0.5];
+        rt.with_host(&mut host, |rt| {
+            assert_eq!(compute_fov(rt, 0.5, at, 70.0), 70.0);
+            assert_eq!(compute_fog_color(rt, 0.5, at, [0.5, 0.6, 0.7]), [0.5, 0.6, 0.7]);
+            assert_eq!(render_fog(rt, 0.5, at, 1, 3, 10.0, 192.0), None);
+            assert_eq!(camera_angles(rt, 0.5), None);
+        });
+        rt.lambda_call = Some(listener);
+        for class in [COMPUTE_FOV, FOG_COLOR, RENDER_FOG, COMPUTE_ANGLES] {
+            let l = rt.lambda_id("java/util/function/Consumer", 1, Vec::new());
+            rt.listeners.push((class.to_owned(), l));
+        }
+        rt.with_host(&mut host, |rt| {
+            assert_eq!(compute_fov(rt, 0.5, at, 70.0), 35.0);
+            assert_eq!(compute_fog_color(rt, 0.5, at, [0.5, 0.6, 0.7]), [1.0, 0.6, 0.7]);
+            assert_eq!(render_fog(rt, 0.5, at, 1, 3, 10.0, 192.0), Some((10.0, 500.0)));
+            assert_eq!(render_fog(rt, 0.5, at, 0, 3, 0.0, 192.0), None);
+            assert_eq!(camera_angles(rt, 0.5), Some([0.0, 2.0, 5.0]));
+        });
     }
 
     /// A mod drawing in the level's stages (an outline's renderer, a ghost block's): it hears every

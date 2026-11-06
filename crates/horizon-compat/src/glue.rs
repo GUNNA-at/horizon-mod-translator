@@ -1539,6 +1539,49 @@ pub fn gui_layer(rt: &mut Rt, host: &mut dyn Host, layer: &str, pre: bool) -> bo
     rt.with_host(host, |rt| crate::gui::draw_layers(rt, layer, pre))
 }
 
+/// `native_compute_fov` (client): the world's field of view as the mods' `ViewportEvent.ComputeFov`
+/// listeners leave it; None when no mod listens. `host` only reads.
+pub fn compute_fov(rt: &mut Rt, host: &mut dyn Host, partial: f32, camera: [f64; 3], degrees: f32) -> Option<f32> {
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| {
+        let fov = crate::camera::compute_fov(rt, partial, camera, degrees);
+        (fov != degrees).then_some(fov)
+    })
+}
+
+/// `native_compute_fog_color` (client): the fog's colour as the mods' `ViewportEvent.ComputeFogColor`
+/// listeners leave it; None when no mod listens. `host` only reads.
+pub fn compute_fog_color(rt: &mut Rt, host: &mut dyn Host, partial: f32, camera: [f64; 3], rgb: [f32; 3]) -> Option<[f32; 3]> {
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| {
+        let out = crate::camera::compute_fog_color(rt, partial, camera, rgb);
+        (out != rgb).then_some(out)
+    })
+}
+
+/// `native_render_fog` (client): `ViewportEvent.RenderFog` for the sky's fog (`sky_end` blocks
+/// away) and the terrain's (`near` to `far`, of type `fog_type`: `FogType`'s ordinal): the distances
+/// of each a mod that cancels it sets. `host` only reads.
+pub fn render_fog(rt: &mut Rt, host: &mut dyn Host, partial: f32, camera: [f64; 3], fog_type: usize, sky_end: f32, near: f32, far: f32) -> (Option<f32>, Option<(f32, f32)>) {
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| {
+        let sky = crate::camera::render_fog(rt, partial, camera, 0, fog_type, 0.0, sky_end).map(|(_, end)| end);
+        let terrain = crate::camera::render_fog(rt, partial, camera, 1, fog_type, near, far);
+        (sky, terrain)
+    })
+}
+
+/// `native_camera_shake` (client): the turn the mods' `ViewportEvent.ComputeCameraAngles` listeners
+/// give the camera (pitch, yaw, roll in degrees); None when no mod listens. `host` only reads.
+pub fn camera_angles(rt: &mut Rt, host: &mut dyn Host, partial: f32) -> Option<[f32; 3]> {
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| crate::camera::camera_angles(rt, partial))
+}
+
 /// The mods' screen drawn over the game's (`native_screen_render_post` while it is open), the
 /// pointer at `mouse` in GUI pixels ([`crate::screens::render`]). `host` only reads and draws.
 pub fn screen_render(rt: &mut Rt, host: &mut dyn Host, mouse: [f32; 2], partial: f32) {

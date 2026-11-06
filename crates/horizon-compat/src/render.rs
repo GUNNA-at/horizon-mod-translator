@@ -1408,6 +1408,104 @@ pub fn locate(rt: &Rt, own: V, uv: &[[f32; 2]; 4]) -> (V, [[f32; 2]; 4]) {
     (sprite, uv.map(|[u, v]| [(u - u0) / CELL, (v - v0) / CELL]))
 }
 
+/// Vanilla 1.21.1's render types as `RenderType.create` makes them (`RenderType`'s fields): the
+/// name, its vertex format (`DefaultVertexFormat`'s field), how its vertices make faces
+/// (`VertexFormat.Mode`), its buffer's size in bytes, whether it shows a block's cracks and
+/// whether its faces are sorted when uploaded.
+const VANILLA_TYPES: [(&str, &str, &str, i32, bool, bool); 57] = [
+    ("solid", "BLOCK", "QUADS", 4194304, true, false),
+    ("cutout_mipped", "BLOCK", "QUADS", 4194304, true, false),
+    ("cutout", "BLOCK", "QUADS", 786432, true, false),
+    ("translucent", "BLOCK", "QUADS", 786432, true, true),
+    ("translucent_moving_block", "BLOCK", "QUADS", 786432, false, true),
+    ("entity_solid", "NEW_ENTITY", "QUADS", 1536, true, false),
+    ("entity_cutout", "NEW_ENTITY", "QUADS", 1536, true, false),
+    ("entity_cutout_no_cull", "NEW_ENTITY", "QUADS", 1536, true, false),
+    ("entity_cutout_no_cull_z_offset", "NEW_ENTITY", "QUADS", 1536, true, false),
+    ("item_entity_translucent_cull", "NEW_ENTITY", "QUADS", 1536, true, true),
+    ("entity_translucent_cull", "NEW_ENTITY", "QUADS", 1536, true, true),
+    ("entity_translucent", "NEW_ENTITY", "QUADS", 1536, true, true),
+    ("entity_translucent_emissive", "NEW_ENTITY", "QUADS", 1536, true, true),
+    ("entity_smooth_cutout", "NEW_ENTITY", "QUADS", 1536, false, false),
+    ("beacon_beam", "BLOCK", "QUADS", 1536, false, true),
+    ("entity_decal", "NEW_ENTITY", "QUADS", 1536, false, false),
+    ("entity_no_outline", "NEW_ENTITY", "QUADS", 1536, false, true),
+    ("entity_shadow", "NEW_ENTITY", "QUADS", 1536, false, false),
+    ("entity_alpha", "NEW_ENTITY", "QUADS", 1536, false, false),
+    ("eyes", "NEW_ENTITY", "QUADS", 1536, false, true),
+    ("leash", "POSITION_COLOR_LIGHTMAP", "TRIANGLE_STRIP", 1536, false, false),
+    ("water_mask", "POSITION", "QUADS", 1536, false, false),
+    ("armor_entity_glint", "POSITION_TEX", "QUADS", 1536, false, false),
+    ("glint_translucent", "POSITION_TEX", "QUADS", 1536, false, false),
+    ("glint", "POSITION_TEX", "QUADS", 1536, false, false),
+    ("entity_glint", "POSITION_TEX", "QUADS", 1536, false, false),
+    ("entity_glint_direct", "POSITION_TEX", "QUADS", 1536, false, false),
+    ("crumbling", "BLOCK", "QUADS", 1536, false, true),
+    ("text", "POSITION_COLOR_TEX_LIGHTMAP", "QUADS", 786432, false, true),
+    ("text_background", "POSITION_COLOR_LIGHTMAP", "QUADS", 1536, false, true),
+    ("text_intensity", "POSITION_COLOR_TEX_LIGHTMAP", "QUADS", 786432, false, true),
+    ("text_polygon_offset", "POSITION_COLOR_TEX_LIGHTMAP", "QUADS", 1536, false, true),
+    ("text_intensity_polygon_offset", "POSITION_COLOR_TEX_LIGHTMAP", "QUADS", 1536, false, true),
+    ("text_see_through", "POSITION_COLOR_TEX_LIGHTMAP", "QUADS", 1536, false, true),
+    ("text_background_see_through", "POSITION_COLOR_LIGHTMAP", "QUADS", 1536, false, true),
+    ("text_intensity_see_through", "POSITION_COLOR_TEX_LIGHTMAP", "QUADS", 1536, false, true),
+    ("lightning", "POSITION_COLOR", "QUADS", 1536, false, true),
+    ("dragon_rays", "POSITION_COLOR", "TRIANGLES", 1536, false, false),
+    ("dragon_rays_depth", "POSITION", "TRIANGLES", 1536, false, false),
+    ("tripwire", "BLOCK", "QUADS", 1536, true, true),
+    ("end_portal", "POSITION", "QUADS", 1536, false, false),
+    ("end_gateway", "POSITION", "QUADS", 1536, false, false),
+    ("lines", "POSITION_COLOR_NORMAL", "LINES", 1536, false, false),
+    ("line_strip", "POSITION_COLOR_NORMAL", "LINE_STRIP", 1536, false, false),
+    ("debug_line_strip", "POSITION_COLOR", "DEBUG_LINE_STRIP", 1536, false, false),
+    ("debug_filled_box", "POSITION_COLOR", "TRIANGLE_STRIP", 1536, false, true),
+    ("debug_quads", "POSITION_COLOR", "QUADS", 1536, false, true),
+    ("debug_structure_quads", "POSITION_COLOR", "QUADS", 1536, false, true),
+    ("debug_section_quads", "POSITION_COLOR", "QUADS", 1536, false, true),
+    ("gui", "POSITION_COLOR", "QUADS", 786432, false, false),
+    ("gui_overlay", "POSITION_COLOR", "QUADS", 1536, false, false),
+    ("gui_text_highlight", "POSITION_COLOR", "QUADS", 1536, false, false),
+    ("gui_ghost_recipe_overlay", "POSITION_COLOR", "QUADS", 1536, false, false),
+    ("breeze_wind", "NEW_ENTITY", "QUADS", 1536, false, true),
+    ("energy_swirl", "NEW_ENTITY", "QUADS", 1536, false, true),
+    ("clouds", "POSITION_TEX_COLOR_NORMAL", "QUADS", 786432, false, false),
+    ("outline", "POSITION_TEX_COLOR", "QUADS", 1536, false, false),
+];
+
+/// The size of the buffer of a type vanilla doesn't name (`RenderType.TRANSIENT_BUFFER_SIZE`).
+const TRANSIENT_BUFFER_SIZE: i32 = 1536;
+
+/// What render type `ty` is made of (`bufferSize()`, `format()`, `mode()`, `affectsCrumbling()`,
+/// `sortOnUpload()`): what a mod's own type was created with, else vanilla's type of its name.
+fn type_fact(rt: &mut Rt, ty: V, fact: &str) -> V {
+    let own = match fact {
+        "bufferSize" => rt.get_field(ty, "$bufferSize"),
+        "format" => rt.get_field(ty, "$format"),
+        "mode" => rt.get_field(ty, "$mode"),
+        "affectsCrumbling" => rt.get_field(ty, "$affectsCrumbling"),
+        _ => rt.get_field(ty, "$sortOnUpload"),
+    };
+    if own != V::Void {
+        return own;
+    }
+    let name = rt.str_of(rt.get_field(ty, "$name")).unwrap_or("").to_owned();
+    let vanilla = VANILLA_TYPES.iter().find(|t| t.0 == name).copied();
+    let (format, mode, size, crumbling, sort) = vanilla.map_or(("NEW_ENTITY", "QUADS", TRANSIENT_BUFFER_SIZE, false, false), |t| (t.1, t.2, t.3, t.4, t.5));
+    match fact {
+        "bufferSize" => V::I(size),
+        "affectsCrumbling" => V::I(i32::from(crumbling)),
+        "sortOnUpload" => V::I(i32::from(sort)),
+        "format" => {
+            let key = rt.static_key(&format!("com/mojang/blaze3d/vertex/DefaultVertexFormat.{format}"));
+            crate::api::get_static(rt, key)
+        }
+        _ => {
+            let key = rt.static_key(&format!("com/mojang/blaze3d/vertex/VertexFormat$Mode.{mode}"));
+            crate::api::get_static(rt, key)
+        }
+    }
+}
+
 fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     Some(match (owner, name) {
@@ -1692,6 +1790,14 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             if a(2).r() != 0 {
                 rt.put_field(ty, "$mode", a(2));
             }
+            if a(1).r() != 0 {
+                rt.put_field(ty, "$format", a(1));
+            }
+            // `create(name, format, mode, size, [affectsCrumbling, sortOnUpload,] state)`.
+            rt.put_field(ty, "$bufferSize", V::I(a(3).i()));
+            let flags = if desc.contains(";IZZL") { [a(4).i(), a(5).i()] } else { [0, 0] };
+            rt.put_field(ty, "$affectsCrumbling", V::I(flags[0]));
+            rt.put_field(ty, "$sortOnUpload", V::I(flags[1]));
             ty
         }
         (COMPOSITE_STATE, "builder") => rt.new_object(COMPOSITE_BUILDER),
@@ -1737,6 +1843,9 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         ("net/minecraft/client/renderer/RenderType", n) if desc.ends_with(")Lnet/minecraft/client/renderer/RenderType;") => {
             let n = if n == "create" { rt.str_of(a(0)).unwrap_or("custom").to_owned() } else { snake(n) };
             render_type(rt, &n)
+        }
+        ("net/minecraft/client/renderer/RenderType", "bufferSize" | "format" | "mode" | "affectsCrumbling" | "sortOnUpload") if desc.starts_with("()") => {
+            type_fact(rt, a(0), name)
         }
         ("net/minecraft/client/renderer/RenderType", "toString" | "name") => rt.get_field(a(0), "$name"),
         // A mod's own buffer source (catnip's `SuperRenderTypeBuffer`, an outline's): one more source
@@ -2051,6 +2160,44 @@ mod tests {
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    /// What a render type is made of: vanilla's of its name (`translucent()` sorts its faces and
+    /// shows cracks, in a 786432-byte buffer of `BLOCK` vertices), and a mod's own as it created it.
+    #[test]
+    fn a_render_type_tells_what_it_is_made_of() {
+        let mut rt = Rt::new();
+        crate::install();
+        let ty = "net/minecraft/client/renderer/RenderType";
+        let fact = |rt: &mut Rt, t: V, f: &str, ret: &str| {
+            let k = rt.static_key(&format!("{ty}.{f}.(){ret}"));
+            call(rt, k, &[t]).unwrap()
+        };
+        let translucent = call(&mut rt, "net/minecraft/client/renderer/RenderType.translucent.()Lnet/minecraft/client/renderer/RenderType;", &[]).unwrap();
+        assert_eq!(fact(&mut rt, translucent, "bufferSize", "I"), V::I(786432));
+        assert_eq!(fact(&mut rt, translucent, "sortOnUpload", "Z"), V::I(1));
+        assert_eq!(fact(&mut rt, translucent, "affectsCrumbling", "Z"), V::I(1));
+        let block = crate::api::get_static(&mut rt, "com/mojang/blaze3d/vertex/DefaultVertexFormat.BLOCK");
+        assert_eq!(fact(&mut rt, translucent, "format", "Lcom/mojang/blaze3d/vertex/VertexFormat;"), block);
+        let quads = crate::api::get_static(&mut rt, "com/mojang/blaze3d/vertex/VertexFormat$Mode.QUADS");
+        assert_eq!(fact(&mut rt, translucent, "mode", "Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;"), quads);
+        let lines = call(&mut rt, "net/minecraft/client/renderer/RenderType.lines.()Lnet/minecraft/client/renderer/RenderType;", &[]).unwrap();
+        let line_mode = crate::api::get_static(&mut rt, "com/mojang/blaze3d/vertex/VertexFormat$Mode.LINES");
+        assert_eq!(fact(&mut rt, lines, "mode", "Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;"), line_mode);
+        assert_eq!(fact(&mut rt, lines, "bufferSize", "I"), V::I(1536));
+        // A mod's own: `create("mymod:glow", POSITION_COLOR, TRIANGLES, 256, false, true, state)`.
+        let builder = call(&mut rt, "net/minecraft/client/renderer/RenderType$CompositeState.builder.()Lnet/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder;", &[]).unwrap();
+        let state = call(&mut rt, "net/minecraft/client/renderer/RenderType$CompositeState$CompositeStateBuilder.createCompositeState.(Z)Lnet/minecraft/client/renderer/RenderType$CompositeState;", &[builder, V::I(0)]).unwrap();
+        let name = rt.string("mymod:glow");
+        let format = crate::api::get_static(&mut rt, "com/mojang/blaze3d/vertex/DefaultVertexFormat.POSITION_COLOR");
+        let triangles = crate::api::get_static(&mut rt, "com/mojang/blaze3d/vertex/VertexFormat$Mode.TRIANGLES");
+        let create = "net/minecraft/client/renderer/RenderType.create.(Ljava/lang/String;Lcom/mojang/blaze3d/vertex/VertexFormat;Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;IZZLnet/minecraft/client/renderer/RenderType$CompositeState;)Lnet/minecraft/client/renderer/RenderType$CompositeRenderType;";
+        let glow = call(&mut rt, create, &[name, format, triangles, V::I(256), V::I(0), V::I(1), state]).unwrap();
+        assert_eq!(fact(&mut rt, glow, "bufferSize", "I"), V::I(256));
+        assert_eq!(fact(&mut rt, glow, "sortOnUpload", "Z"), V::I(1));
+        assert_eq!(fact(&mut rt, glow, "affectsCrumbling", "Z"), V::I(0));
+        assert_eq!(fact(&mut rt, glow, "format", "Lcom/mojang/blaze3d/vertex/VertexFormat;"), format);
+        assert_eq!(fact(&mut rt, glow, "mode", "Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;"), triangles);
     }
 
     /// JOML 1.10.5's `Vector3f.hashCode` and `equals` (the values its own run printed): Mekanism
