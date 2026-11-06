@@ -35,6 +35,7 @@ fn key_equals(rt: &mut Rt, strategy: V, a: V, b: V) -> bool {
 
 const EQUALS: &str = "equals.(Ljava/lang/Object;)Z";
 const HASH_CODE: &str = "hashCode.()I";
+const OPTIONAL: &str = "java/util/Optional";
 const COMPARE_TO: &str = "compareTo.(Ljava/lang/Object;)I";
 
 fn overrides(rt: &Rt, v: V, key: &'static str) -> bool {
@@ -94,6 +95,14 @@ pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
     if let Some(same) = crate::components::same_custom_data(rt, a, b) {
         return same;
     }
+    // `Optional`s are values: what they hold (`Optional.equals`).
+    if rt.class_of(a) == OPTIONAL && rt.class_of(b) == OPTIONAL {
+        return crate::api_common::call(rt, OPTIONAL, "equals", "(Ljava/lang/Object;)Z", &[a, b]).is_some_and(|v| v.i() != 0);
+    }
+    // Vanilla's records and data classes made here (`PotionContents`): their own `equals`.
+    if let Some(same) = crate::records::equals(rt, a, b) {
+        return same;
+    }
     false
 }
 
@@ -120,6 +129,9 @@ pub fn hash(rt: &mut Rt, v: V) -> i32 {
 pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
     if crate::gson::is_element_class(rt.class_of(v)) {
         return crate::gson::hash_of(rt, v);
+    }
+    if rt.class_of(v) == OPTIONAL {
+        return crate::api_common::call(rt, OPTIONAL, "hashCode", "()I", &[v]).map_or(0, |h| h.i());
     }
     if let Some(h) = crate::components::custom_data_hash(rt, v) {
         return h;
@@ -151,6 +163,9 @@ pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
             }
             _ => {}
         }
+    }
+    if let Some(h) = crate::records::hash(rt, v) {
+        return h;
     }
     rt.java_hash(v)
 }

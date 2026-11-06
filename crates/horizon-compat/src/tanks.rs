@@ -60,8 +60,9 @@ fn capacity(rt: &Rt, tank: V) -> i32 {
     rt.get_field(tank, "capacity").i()
 }
 
-fn same_fluid(rt: &Rt, x: V, y: V) -> bool {
-    rt.get_field(x, "$fluid") == rt.get_field(y, "$fluid")
+/// NeoForge's `FluidStack.isSameFluidSameComponents`: a potion fluid only goes onto the same potion.
+fn same_fluid(rt: &mut Rt, x: V, y: V) -> bool {
+    fluids::same_fluid_same_components(rt, x, y)
 }
 
 /// `FluidTank.fill`: into an empty tank up to its capacity, or onto the same fluid; how much went in.
@@ -78,8 +79,8 @@ fn fill(rt: &mut Rt, tank: V, resource: V, simulate: bool) -> i32 {
         return if empty { cap.min(amount) } else { (cap - fluids::stack_amount(rt, have)).min(amount) };
     }
     if empty {
-        let f = rt.get_field(resource, "$fluid");
-        let put = fluids::fluid_stack(rt, f, cap.min(amount));
+        // `resource.copyWithAmount(...)`: its components come along.
+        let put = fluids::copy_with_amount(rt, resource, cap.min(amount));
         rt.put_field(tank, "fluid", put);
         virt(rt, ON_CHANGED, &[tank]);
         return cap.min(amount);
@@ -103,11 +104,11 @@ fn fill(rt: &mut Rt, tank: V, resource: V, simulate: bool) -> i32 {
 fn drain(rt: &mut Rt, tank: V, max: i32, simulate: bool) -> V {
     let have = stack(rt, tank);
     let drained = max.min(fluids::stack_amount(rt, have)).max(0);
+    // `fluid.copyWithAmount(drained)`: what comes out carries the tank's components.
     let out = if fluids::stack_empty(rt, have) || drained == 0 {
         fluids::fluid_stack_empty(rt)
     } else {
-        let f = rt.get_field(have, "$fluid");
-        fluids::fluid_stack(rt, f, drained)
+        fluids::copy_with_amount(rt, have, drained)
     };
     if !simulate && drained > 0 {
         let left = fluids::stack_amount(rt, have) - drained;
@@ -117,12 +118,17 @@ fn drain(rt: &mut Rt, tank: V, max: i32, simulate: bool) -> V {
     out
 }
 
-/// `FluidStack.save`: `{id, amount}` (components aren't kept on fluid stacks yet).
-pub fn save_stack(rt: &Rt, s: V) -> BTreeMap<String, nbt::Nbt> {
+/// `FluidStack.save`: `{id, amount, components}`, the components when it has some.
+pub fn save_stack(rt: &mut Rt, s: V) -> BTreeMap<String, nbt::Nbt> {
     let mut m = BTreeMap::new();
     if !fluids::stack_empty(rt, s) {
         m.insert("id".into(), nbt::Nbt::String(fluids::name_of(rt, rt.get_field(s, "$fluid"))));
         m.insert("amount".into(), nbt::Nbt::Int(fluids::stack_amount(rt, s)));
+        // Its components, as an item stack's patch is written (a potion fluid's contents).
+        let patch = crate::components::patch(rt, s);
+        if !patch.is_empty() {
+            m.insert("components".into(), nbt::Nbt::Compound(patch));
+        }
     }
     m
 }
@@ -144,7 +150,11 @@ pub fn parse_stack(rt: &mut Rt, tag: &BTreeMap<String, nbt::Nbt>) -> V {
     if f.r() == 0 || amount <= 0 {
         return fluids::fluid_stack_empty(rt);
     }
-    fluids::fluid_stack(rt, f, amount)
+    let stack = fluids::fluid_stack(rt, f, amount);
+    if let Some(nbt::Nbt::Compound(patch)) = tag.get("components") {
+        crate::components::load_saved_nbt(rt, stack, patch);
+    }
+    stack
 }
 
 fn tank_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {

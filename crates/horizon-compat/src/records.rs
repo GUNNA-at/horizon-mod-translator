@@ -33,6 +33,32 @@ fn made_here(rt: &Rt, v: V, class: &str) -> bool {
     v.r() != 0 && rt.class_of(v) == class && matches!(rt.heap.get(v.r() as usize).map(|o| &o.data), Some(Data::Fields(_)))
 }
 
+/// `a.equals(b)` for a vanilla record or data class made here, as the class's own `equals` answers
+/// (component by component, field by field, or by identity); None for any other object. What
+/// `Object.equals` reaches for them (`Objects.equals`, a map's keys, a stack's components).
+pub(crate) fn equals(rt: &mut Rt, a: V, b: V) -> Option<bool> {
+    let key = own_key(rt, a, "equals.(Ljava/lang/Object;)Z")?;
+    call(rt, key, &[a, b]).map(|v| v.i() != 0)
+}
+
+/// `v.hashCode()` for the same objects, so a map finds an equal one.
+pub(crate) fn hash(rt: &mut Rt, v: V) -> Option<i32> {
+    let key = own_key(rt, v, "hashCode.()I")?;
+    call(rt, key, &[v]).map(|h| h.i())
+}
+
+/// `{class}.{method}` for `v`'s class when it is a record or a data class this module models.
+fn own_key(rt: &mut Rt, v: V, method: &str) -> Option<&'static str> {
+    if v.r() == 0 || !matches!(rt.heap.get(v.r() as usize).map(|o| &o.data), Some(Data::Fields(_))) {
+        return None;
+    }
+    let class = rt.class_of(v);
+    if RECORDS.binary_search_by(|(c, _)| (*c).cmp(class)).is_err() && members(class).is_none() {
+        return None;
+    }
+    Some(rt.static_key(&format!("{class}.{method}")))
+}
+
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {

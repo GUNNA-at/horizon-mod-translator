@@ -5441,6 +5441,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     No throws. A healing potion emptied into an item drain gave 250 mB of `create:potion`, but
     without its `minecraft:potion_contents`: `FluidStack.set` is unmapped (fluid stacks keep no
     components yet).
+- [x] 2026-11-06 Part 67: components on NeoForge's fluid stacks; vanilla records and `Optional`s equal by value.
+  A healing potion emptied into Create's item drain gave `create:potion` without its potion. Create
+  keeps a potion fluid's contents on the stack (`FluidStack.set(DataComponents.POTION_CONTENTS, ...)`:
+  NeoForge 21.1's `FluidStack` is a `MutableDataComponentHolder`), and fluid stacks kept no
+  components, so the fluid's tint and name had nothing to read. Measured over the pack: 45 jars call
+  a component method of `FluidStack`: `isSameFluidSameComponents` 16 jars (52 calls),
+  `copyWithAmount` 18 (42), `getHoverName` 23 (36), `getComponentsPatch` 18 (33), `get` 8 (10),
+  `applyComponents` 6 (10), `getComponents` 8 (9), `getOrDefault` 3 (8), `set` 6 (8), `has` 3 (4),
+  `remove` 4 (4), `update` 2 (4).
+  - compat `components`: a fluid stack holds components as an item stack does, through the same
+    calls (`set`, `get`, `has`, `getOrDefault`, `remove`, `update`, `getComponents`,
+    `applyComponents`, `getComponentsPatch`, `isComponentsPatchEmpty`), with no item defaults and no
+    damage. The shared `FluidStack.EMPTY` takes none, and an empty stack's patch is
+    `DataComponentPatch.EMPTY`.
+  - compat `fluids`: the components go where the stack goes, as NeoForge writes it: the constructor
+    with a patch, `copy`, `copyWithAmount`, `copyAndClear`, `split` and `limitSize` keep them;
+    `isSameFluidSameComponents`, `isFluidEqual`, `areFluidStackTagsEqual`, `containsFluid` and
+    `isFluidStackIdentical`/`matches` compare them. `getHoverName` and `getDescriptionId` ask the
+    fluid type for the stack (`FluidType.getDescription(stack)`, a mod's own override first: Create's
+    potion fluid names itself by its potion).
+  - compat `tanks`: `FluidTank` fills only with the same fluid and components (a tank of healing
+    takes no swiftness) and gives copies that keep them. `FluidStack.save` writes
+    `{id, amount, components}` (the components when there are some), and `parse`/`parseOptional`
+    read them back; a recipe's fluid stack JSON reads `components` too.
+  - compat `network`: `FluidStack.STREAM_CODEC` (and `OPTIONAL_STREAM_CODEC`) write the patch after
+    the fluid and read it back.
+  - compat `jutil` and `records`: `Object.equals` and `hashCode` of a vanilla record or data class
+    made here are the class's own (component by component), and two `Optional`s compare what they
+    hold. Before, two `PotionContents` of the same potion made apart were different, through
+    `Objects.equals`, a map's keys and a stack's components (an item stack's
+    `isSameItemSameComponents` of two potions made apart included).
+  - Test: `fluids::tests::a_fluid_stacks_components_go_where_the_stack_goes` (set and read back;
+    copies and splits keep them; the same potion made twice is the same fluid and swiftness isn't;
+    a tank of healing fills with healing only and drains it; saved and parsed NBT; the network codec
+    round trip). Compat tests 485, translator 19.
+  - Left: `FluidStack.hashFluidAndComponents` still hashes the fluid only.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

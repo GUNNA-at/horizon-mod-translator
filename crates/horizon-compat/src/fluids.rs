@@ -62,6 +62,9 @@ const TYPE_TEMPERATURE: &str = "net/neoforged/neoforge/fluids/FluidType.getTempe
 const TYPE_LIGHT: &str = "net/neoforged/neoforge/fluids/FluidType.getLightLevel.()I";
 const TYPE_RARITY: &str = "net/neoforged/neoforge/fluids/FluidType.getRarity.()Lnet/minecraft/world/item/Rarity;";
 const TYPE_DESCRIPTION_ID: &str = "net/neoforged/neoforge/fluids/FluidType.getDescriptionId.()Ljava/lang/String;";
+const TYPE_STACK_DESCRIPTION_ID: &str = "net/neoforged/neoforge/fluids/FluidType.getDescriptionId.(Lnet/neoforged/neoforge/fluids/FluidStack;)Ljava/lang/String;";
+const TYPE_STACK_DESCRIPTION: &str = "net/neoforged/neoforge/fluids/FluidType.getDescription.(Lnet/neoforged/neoforge/fluids/FluidStack;)Lnet/minecraft/network/chat/Component;";
+const TRANSLATABLE: &str = "net/minecraft/network/chat/Component.translatable.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;";
 const FLUID_BUCKET: (&str, &str) = ("net/minecraft/world/level/material/Fluid.getBucket.()Lnet/minecraft/world/item/Item;", "getBucket.()Lnet/minecraft/world/item/Item;");
 const RESISTANCE: &str = "net/minecraft/world/level/material/Fluid.getExplosionResistance.()F";
 const SOURCE: &str = "net/minecraft/world/level/material/FlowingFluid.getSource.()Lnet/minecraft/world/level/material/Fluid;";
@@ -211,6 +214,19 @@ pub(crate) fn type_of(rt: &mut Rt, fluid: V) -> V {
 
 /// `fluidType.getX()` as Java dispatches it: the mod's own getter when the type's class has one,
 /// else what its properties say.
+/// [`on_type`] with arguments after the type (`getDescriptionId(stack)`...).
+fn on_type_with(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
+    let short: &'static str = key.split_once('.').map_or(key, |(_, r)| r);
+    let class = rt.class_of(args.first().copied().unwrap_or_default());
+    if rt.overrides.is_some_and(|o| o(class, short))
+        && let Some(vc) = rt.vcall
+    {
+        return vc(rt, key, short, args);
+    }
+    let (name, desc) = short.split_once('.').unwrap_or((short, ""));
+    fluid_type_call(rt, FLUID_TYPE, name, desc, args).unwrap_or(V::NULL)
+}
+
 fn on_type(rt: &mut Rt, key: &'static str, this: V) -> V {
     let short: &'static str = key.split_once('.').map_or(key, |(_, r)| r);
     let class = rt.class_of(this);
@@ -451,6 +467,12 @@ fn fluid_type_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V])
                     V::Void => api::get_static(rt, "net/minecraft/world/item/Rarity.COMMON"),
                     v => v,
                 },
+                // NeoForge's `Component.translatable(getDescriptionId())`, and the stack's form with
+                // the stack's key (a potion fluid's names its potion).
+                "getDescription" => {
+                    let key = if desc.starts_with("()") { on_type(rt, TYPE_DESCRIPTION_ID, this) } else { on_type_with(rt, TYPE_STACK_DESCRIPTION_ID, &[this, a(1)]) };
+                    api::call(rt, TRANSLATABLE, &[key])
+                }
                 // The translation key: the properties' own, else `fluid_type.<namespace>.<path>`.
                 "getDescriptionId" if desc.starts_with("()") => match rt.get_field(this, "$descriptionId") {
                     V::Void => {
@@ -666,6 +688,47 @@ pub fn stack_amount(rt: &Rt, s: V) -> i32 {
     if stack_empty(rt, s) { 0 } else { rt.get_field(s, "$amount").i() }
 }
 
+/// `FluidStack.getFluid()`: the stack's fluid, `minecraft:empty` for an empty stack.
+fn fluid_of_stack(rt: &mut Rt, s: V) -> V {
+    if stack_empty(rt, s) { fluid(rt, "minecraft:empty") } else { rt.get_field(s, "$fluid") }
+}
+
+/// `FluidStack.copy()`: `EMPTY` for an empty stack, else its fluid, amount and components.
+fn copied(rt: &mut Rt, s: V) -> V {
+    if stack_empty(rt, s) {
+        return fluid_stack_empty(rt);
+    }
+    let (f, n) = (rt.get_field(s, "$fluid"), rt.get_field(s, "$amount").i());
+    let c = fluid_stack(rt, f, n);
+    crate::components::copy_patch(rt, s, c);
+    c
+}
+
+/// `FluidStack.copyWithAmount(n)`: `EMPTY` for an empty stack, else a copy (its components too)
+/// holding `n`.
+pub(crate) fn copy_with_amount(rt: &mut Rt, s: V, n: i32) -> V {
+    let c = copied(rt, s);
+    if !stack_empty(rt, s) {
+        rt.put_field(c, "$amount", V::I(n));
+    }
+    c
+}
+
+/// `FluidStack.isSameFluidSameComponents`: the same fluid, and both empty or the same components.
+pub(crate) fn same_fluid_same_components(rt: &mut Rt, x: V, y: V) -> bool {
+    let (fx, fy) = (fluid_of_stack(rt, x), fluid_of_stack(rt, y));
+    if fx != fy {
+        return false;
+    }
+    (stack_empty(rt, x) && stack_empty(rt, y)) || crate::components::same_patch(rt, x, y)
+}
+
+/// `FluidStack.matches`: the same stack, or the same amount of the same fluid with the same
+/// components.
+fn stacks_match(rt: &mut Rt, x: V, y: V) -> bool {
+    x == y || (stack_amount(rt, x) == stack_amount(rt, y) && same_fluid_same_components(rt, x, y))
+}
+
 fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let s = a(0);
@@ -676,6 +739,10 @@ fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
             let f = if f.r() == 0 { a(1) } else { f };
             rt.put_field(s, "$fluid", f);
             rt.put_field(s, "$amount", a(2));
+            // `(fluid, amount, patch)`: the patch's components on the new stack.
+            if desc.contains("Lnet/minecraft/core/component/DataComponentPatch;") {
+                crate::components::apply_patch(rt, s, a(3));
+            }
             V::Void
         }
         "getFluid" => {
@@ -687,25 +754,34 @@ fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
             rt.put_field(s, "$amount", a(1));
             V::Void
         }
+        // `setAmount(getAmount() + n)`: an empty stack counts as 0.
         "grow" | "shrink" => {
             let d = if name == "grow" { a(1).i() } else { -a(1).i() };
-            let n = rt.get_field(s, "$amount").i() + d;
+            let n = stack_amount(rt, s) + d;
             rt.put_field(s, "$amount", V::I(n));
             V::Void
         }
-        "copy" => {
-            let (f, n) = (rt.get_field(s, "$fluid"), rt.get_field(s, "$amount").i());
-            if stack_empty(rt, s) { fluid_stack_empty(rt) } else { fluid_stack(rt, f, n) }
+        "limitSize" => {
+            if !stack_empty(rt, s) && stack_amount(rt, s) > a(1).i() {
+                rt.put_field(s, "$amount", a(1));
+            }
+            V::Void
         }
-        "copyWithAmount" => {
-            let f = rt.get_field(s, "$fluid");
-            if stack_empty(rt, s) { fluid_stack_empty(rt) } else { fluid_stack(rt, f, a(1).i()) }
+        // Copies keep the components (NeoForge's `components.copy()`).
+        "copy" => copied(rt, s),
+        "copyWithAmount" => copy_with_amount(rt, s, a(1).i()),
+        "copyAndClear" => {
+            let c = copied(rt, s);
+            if !stack_empty(rt, s) {
+                rt.put_field(s, "$amount", V::I(0));
+            }
+            c
         }
+        // `copyWithAmount(min(amount, this.amount))`, then `shrink` by as much.
         "split" => {
-            let take = a(1).i().min(stack_amount(rt, s));
-            let f = rt.get_field(s, "$fluid");
-            let out = fluid_stack(rt, f, take);
-            let left = rt.get_field(s, "$amount").i() - take;
+            let take = a(1).i().min(rt.get_field(s, "$amount").i());
+            let out = copy_with_amount(rt, s, take);
+            let left = stack_amount(rt, s) - take;
             rt.put_field(s, "$amount", V::I(left));
             out
         }
@@ -719,14 +795,30 @@ fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
             let t = on_fluid(rt, TYPE_OF, &[f]);
             V::I((t == a(1)) as i32)
         }
-        // Same fluid (components aren't kept yet, so same components too).
-        "isSameFluid" | "isSameFluidSameComponents" => {
-            let (x, y) = (a(0), a(1));
-            V::I((rt.get_field(x, "$fluid") == rt.get_field(y, "$fluid")) as i32)
+        // `first.is(second.getFluid())`.
+        "isSameFluid" => {
+            let (x, y) = (fluid_of_stack(rt, a(0)), fluid_of_stack(rt, a(1)));
+            V::I((x == y) as i32)
         }
-        "matches" => {
-            let (x, y) = (a(0), a(1));
-            V::I((rt.get_field(x, "$fluid") == rt.get_field(y, "$fluid") && stack_amount(rt, x) == stack_amount(rt, y)) as i32)
+        // The static one and the instance's (`isFluidEqual(other)`, deprecated).
+        "isSameFluidSameComponents" => V::I(same_fluid_same_components(rt, a(0), a(1)) as i32),
+        "isFluidEqual" if desc == "(Lnet/neoforged/neoforge/fluids/FluidStack;)Z" => V::I(same_fluid_same_components(rt, a(0), a(1)) as i32),
+        "areFluidStackTagsEqual" => V::I(crate::components::same_patch(rt, a(0), a(1)) as i32),
+        "containsFluid" => {
+            let more = rt.get_field(a(0), "$amount").i() >= rt.get_field(a(1), "$amount").i();
+            V::I((same_fluid_same_components(rt, a(0), a(1)) && more) as i32)
+        }
+        "matches" | "isFluidStackIdentical" => V::I(stacks_match(rt, a(0), a(1)) as i32),
+        // The name: the fluid type's for this stack (`getDescription(stack)`, a mod's own).
+        "getHoverName" | "getDisplayName" => {
+            let f = fluid_of_stack(rt, s);
+            let t = on_fluid(rt, TYPE_OF, &[f]);
+            on_type_with(rt, TYPE_STACK_DESCRIPTION, &[t, s])
+        }
+        "getDescriptionId" | "getTranslationKey" => {
+            let f = fluid_of_stack(rt, s);
+            let t = on_fluid(rt, TYPE_OF, &[f]);
+            on_type_with(rt, TYPE_STACK_DESCRIPTION_ID, &[t, s])
         }
         "getFluidType" => {
             let f = rt.get_field(s, "$fluid");
@@ -738,9 +830,8 @@ fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
             rt.put_field(h, "value", f);
             h
         }
-        "getComponentsPatch" => crate::recipes::get_static(rt, "net/minecraft/core/component/DataComponentPatch", "EMPTY").unwrap_or(V::NULL),
-        // NBT in `FluidStack.CODEC`'s form, `{id, amount}` (components aren't kept on fluid stacks
-        // yet), in a new compound or the one given. `save` of nothing throws, as NeoForge's does;
+        // NBT in `FluidStack.CODEC`'s form, `{id, amount, components}`, in a new compound or the one
+        // given. `save` of nothing throws, as NeoForge's does;
         // `saveOptional` gives an empty compound.
         "save" | "saveOptional" => {
             let tag = if desc.contains(";Lnet/minecraft/nbt/Tag;)") { a(2) } else { crate::tags::new_compound(rt) };
@@ -1074,6 +1165,92 @@ mod tests {
         assert_eq!(rt.get_field(parsed, "value"), V::NULL);
         c(&mut rt, save, &[empty, V::NULL]);
         assert!(rt.thrown.take().is_some(), "saving nothing throws");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Create's potion fluid holds the potion's contents as a component (`FluidStack.set`), as
+    /// NeoForge's `FluidStack` keeps them: copies and splits keep them, the same potion made twice
+    /// is the same fluid and another potion isn't, a tank of healing takes more healing and nothing
+    /// else and gives healing back, and a stack saved (`{id, amount, components}`) or sent over the
+    /// network comes back with them.
+    #[test]
+    fn a_fluid_stacks_components_go_where_the_stack_goes() {
+        use crate::nbt::Nbt;
+        use std::collections::BTreeMap;
+        let mut rt = Rt::new();
+        let k = |m: &str| -> &'static str { Box::leak(format!("{FLUID_STACK}.{m}").into_boxed_str()) };
+        let set = k("set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;");
+        let get = k("get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;");
+        let has = k("has.(Lnet/minecraft/core/component/DataComponentType;)Z");
+        let same = k("isSameFluidSameComponents.(Lnet/neoforged/neoforge/fluids/FluidStack;Lnet/neoforged/neoforge/fluids/FluidStack;)Z");
+        let copy = k("copy.()Lnet/neoforged/neoforge/fluids/FluidStack;");
+        let split = k("split.(I)Lnet/neoforged/neoforge/fluids/FluidStack;");
+        let patch_empty = k("isComponentsPatchEmpty.()Z");
+        let save = k("saveOptional.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/Tag;");
+        let parse = k("parseOptional.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/CompoundTag;)Lnet/neoforged/neoforge/fluids/FluidStack;");
+        let tank_key = |m: &str| -> &'static str { Box::leak(format!("net/neoforged/neoforge/fluids/capability/templates/FluidTank.{m}").into_boxed_str()) };
+        let ty = api::get_static(&mut rt, "net/minecraft/core/component/DataComponents.POTION_CONTENTS");
+        let contents = |rt: &mut Rt, potion: &str| crate::food::decode_potion_contents(rt, &serde_json::json!({ "potion": potion }));
+        let potion = |rt: &mut Rt, name: &str, amount: i32| {
+            let water = fluids(rt, "WATER");
+            let s = fluid_stack(rt, water, amount);
+            let v = contents(rt, name);
+            c(rt, set, &[s, ty, v]);
+            s
+        };
+        let healing = potion(&mut rt, "minecraft:healing", 1000);
+        let h = c(&mut rt, get, &[healing, ty]);
+        assert_eq!(rt.class_of(h), "net/minecraft/world/item/alchemy/PotionContents");
+        assert_eq!(c(&mut rt, patch_empty, &[healing]), V::I(0));
+        let copied = c(&mut rt, copy, &[healing]);
+        assert_eq!(c(&mut rt, get, &[copied, ty]), h);
+        let part = c(&mut rt, split, &[healing, V::I(250)]);
+        assert_eq!((stack_amount(&rt, part), stack_amount(&rt, healing)), (250, 750));
+        assert_eq!(c(&mut rt, same, &[part, healing]), V::I(1));
+        let again = potion(&mut rt, "minecraft:healing", 100);
+        assert_eq!(c(&mut rt, same, &[again, healing]), V::I(1), "the same potion made twice");
+        let swiftness = potion(&mut rt, "minecraft:swiftness", 100);
+        let water = fluids(&mut rt, "WATER");
+        let plain = fluid_stack(&mut rt, water, 100);
+        assert_eq!(c(&mut rt, same, &[swiftness, healing]), V::I(0));
+        assert_eq!(c(&mut rt, same, &[plain, healing]), V::I(0));
+        assert_eq!(c(&mut rt, has, &[plain, ty]), V::I(0));
+        assert_eq!(c(&mut rt, patch_empty, &[plain]), V::I(1));
+
+        // A tank: healing in, more healing on top, nothing else; healing out.
+        let tank = rt.new_object("net/neoforged/neoforge/fluids/capability/templates/FluidTank");
+        c(&mut rt, tank_key("<init>.(I)V"), &[tank, V::I(4000)]);
+        let execute = crate::tanks::action(&mut rt, false);
+        let fill = tank_key("fill.(Lnet/neoforged/neoforge/fluids/FluidStack;Lnet/neoforged/neoforge/fluids/capability/IFluidHandler$FluidAction;)I");
+        let drain = tank_key("drain.(ILnet/neoforged/neoforge/fluids/capability/IFluidHandler$FluidAction;)Lnet/neoforged/neoforge/fluids/FluidStack;");
+        assert_eq!(c(&mut rt, fill, &[tank, healing, execute]), V::I(750));
+        assert_eq!(c(&mut rt, fill, &[tank, again, execute]), V::I(100));
+        assert_eq!(c(&mut rt, fill, &[tank, swiftness, execute]), V::I(0));
+        assert_eq!(c(&mut rt, fill, &[tank, plain, execute]), V::I(0));
+        let out = c(&mut rt, drain, &[tank, V::I(500), execute]);
+        assert_eq!(stack_amount(&rt, out), 500);
+        assert_eq!(c(&mut rt, same, &[out, healing]), V::I(1));
+
+        // Saved and read back.
+        let saved = c(&mut rt, save, &[healing, V::NULL]);
+        let potion_nbt = Nbt::Compound(BTreeMap::from([("potion".to_owned(), Nbt::String("minecraft:healing".into()))]));
+        let expected = BTreeMap::from([
+            ("amount".to_owned(), Nbt::Int(750)),
+            ("components".to_owned(), Nbt::Compound(BTreeMap::from([("minecraft:potion_contents".to_owned(), potion_nbt)]))),
+            ("id".to_owned(), Nbt::String("minecraft:water".into())),
+        ]);
+        assert_eq!(crate::nbt::from_runtime(&rt, saved), expected);
+        let back = c(&mut rt, parse, &[V::NULL, saved]);
+        assert_eq!(c(&mut rt, same, &[back, healing]), V::I(1));
+        assert_eq!(stack_amount(&rt, back), 750);
+
+        // Over the network.
+        let codec = api::get_static(&mut rt, "net/neoforged/neoforge/fluids/FluidStack.STREAM_CODEC");
+        let buf = crate::network::new_buffer(&mut rt);
+        crate::network::encode(&mut rt, codec, buf, healing);
+        let sent = crate::network::decode(&mut rt, codec, buf);
+        assert_eq!(c(&mut rt, same, &[sent, healing]), V::I(1));
+        assert_eq!(stack_amount(&rt, sent), 750);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

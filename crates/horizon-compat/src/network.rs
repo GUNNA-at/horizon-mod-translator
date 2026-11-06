@@ -737,6 +737,10 @@ fn put_fluid(rt: &mut Rt, buf: V, s: V) {
     let name = crate::fluids::name_of(rt, rt.get_field(s, "$fluid"));
     put_var(rt, buf, u64::from(amount as u32));
     put_utf(rt, buf, &name);
+    // Its components, as a stack's patch goes (both ends are this runtime).
+    let patch = crate::components::patch(rt, s);
+    let patch = (!patch.is_empty()).then_some(Nbt::Compound(patch));
+    put_nbt(rt, buf, patch.as_ref());
 }
 
 fn read_fluid(rt: &mut Rt, buf: V) -> Option<V> {
@@ -745,8 +749,16 @@ fn read_fluid(rt: &mut Rt, buf: V) -> Option<V> {
         return Some(crate::fluids::fluid_stack_empty(rt));
     }
     let name = read_utf(rt, buf)?;
+    let patch = read_nbt(rt, buf)?;
     let f = crate::fluids::fluid(rt, &name);
-    Some(if f.r() == 0 { crate::fluids::fluid_stack_empty(rt) } else { crate::fluids::fluid_stack(rt, f, amount) })
+    if f.r() == 0 {
+        return Some(crate::fluids::fluid_stack_empty(rt));
+    }
+    let s = crate::fluids::fluid_stack(rt, f, amount);
+    if let Some(Nbt::Compound(patch)) = patch {
+        crate::components::load_saved_nbt(rt, s, &patch);
+    }
+    Some(s)
 }
 
 /// The name of an entry of `registry` (`fluid`, `item`...): the mod's, or one of Minecraft's.

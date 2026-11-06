@@ -18,6 +18,10 @@
 //! Component maps: a stack's as a live view (`ItemStack.getComponents()`), maps built by
 //! `DataComponentMap.builder()` and patches by `DataComponentPatch.builder()`, which
 //! `ItemStack.applyComponents` puts on a stack.
+//!
+//! NeoForge's `FluidStack` holds components too (`MutableDataComponentHolder`: Create's potion
+//! fluid carries the potion's contents): kept as an item stack's are, read and set through the
+//! same calls, with no item defaults.
 use crate::nbt::Nbt;
 use crate::{Data, Rt, V};
 use std::collections::BTreeMap;
@@ -25,6 +29,7 @@ use std::collections::BTreeMap;
 pub(crate) const TYPE: &str = "net/minecraft/core/component/DataComponentType";
 const BUILDER: &str = "net/minecraft/core/component/DataComponentType$Builder";
 const ITEM_STACK: &str = "net/minecraft/world/item/ItemStack";
+const FLUID_STACK: &str = "net/neoforged/neoforge/fluids/FluidStack";
 const PATCH: &str = "compat:components";
 /// Interfaces a stack's component methods are called through (`DataComponentHolder.has`,
 /// NeoForge's `MutableDataComponentHolder.set`...): answered when the receiver is a stack.
@@ -331,6 +336,10 @@ fn current(rt: &mut Rt, stack: V, ty: V) -> Option<V> {
     if let Some(v) = get(rt, stack, ty) {
         return Some(v);
     }
+    // A fluid stack has no defaults: only what was set on it.
+    if rt.class_of(stack) != ITEM_STACK {
+        return None;
+    }
     let id = rt.str_of(rt.get_field(ty, "$id")).unwrap_or("").to_owned();
     let item = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
     let defaulted = match id.as_str() {
@@ -373,6 +382,11 @@ fn type_of(rt: &mut Rt, v: V) -> V {
     rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", v, &[])
 }
 
+/// Whether `v` holds components of its own: an item stack or a fluid stack.
+fn holder(rt: &Rt, v: V) -> bool {
+    v.r() != 0 && matches!(rt.class_of(v), ITEM_STACK | FLUID_STACK)
+}
+
 /// The stack's components, as (type, value) pairs in the order they were set.
 fn pairs(rt: &Rt, stack: V) -> Vec<V> {
     let p = rt.get_field(stack, "$patch");
@@ -401,9 +415,10 @@ fn get(rt: &Rt, stack: V, ty: V) -> Option<V> {
 
 /// Sets (or, for null, removes) the stack's component; the value it had before, or null.
 fn put(rt: &mut Rt, stack: V, ty: V, value: V) -> V {
-    // `ItemStack.EMPTY` is one shared object: nothing is written onto it.
+    // `ItemStack.EMPTY` and `FluidStack.EMPTY` are shared objects: nothing is written onto them.
     let empty = crate::api_common::get_static(rt, ITEM_STACK, "EMPTY").unwrap_or(V::NULL);
-    if stack.r() == 0 || stack == empty || ty.r() == 0 {
+    let no_fluid = rt.interned.get("compat:fluid-stack/empty").copied().unwrap_or(V::NULL);
+    if stack.r() == 0 || stack == empty || (no_fluid.r() != 0 && stack == no_fluid) || ty.r() == 0 {
         return V::NULL;
     }
     let mut l = pairs(rt, stack);
@@ -567,8 +582,8 @@ fn forget(rt: &mut Rt, patch: V, predicate: V) -> V {
 }
 
 /// `stack.applyComponents(patch)`: what the patch sets is set on the stack, what it removes taken
-/// off.
-fn apply_patch(rt: &mut Rt, stack: V, patch: V) {
+/// off (an item stack or a fluid stack).
+pub(crate) fn apply_patch(rt: &mut Rt, stack: V, patch: V) {
     for (ty, value) in patch_entries(rt, patch) {
         match value {
             Some(v) => call(rt, ITEM_STACK, "set", SET_DESC, &[stack, ty, v]),
@@ -748,7 +763,7 @@ fn same_value(rt: &mut Rt, x: V, y: V) -> bool {
     if class.starts_with("java/lang/") && class == rt.class_of(y) && !matches!(rt.get_field(x, "value"), V::Void) {
         return rt.get_field(x, "value") == rt.get_field(y, "value");
     }
-    rt.call_functional("java/lang/Object.equals.(Ljava/lang/Object;)Z", x, &[y]).i() != 0
+    crate::jutil::equals(rt, x, y)
 }
 
 /// Whether two stacks carry the same components (`isSameItemSameComponents`).
@@ -928,7 +943,8 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         || owner == INPUT
         || matches!(name, "applyComponentsFromItemStack" | "setComponents" | "collectComponents" | "applyImplicitComponents" | "collectImplicitComponents");
     let stack_maps = matches!(name, "getComponents" | "applyComponents" | "applyComponentsAndValidate");
-    matches!(owner, TYPE | BUILDER | CUSTOM_DATA) || maps || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || stack_maps || typed))
+    let fluid_stack = owner == FLUID_STACK && (typed || matches!(name, "getComponents" | "getComponentsPatch" | "isComponentsPatchEmpty" | "applyComponents"));
+    matches!(owner, TYPE | BUILDER | CUSTOM_DATA) || maps || fluid_stack || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || stack_maps || typed))
 }
 
 pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -959,10 +975,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (TYPE, "equals") => Some(V::I((a(0) == a(1)) as i32)),
         (TYPE, "hashCode") => Some(V::I(a(0).r() as i32)),
         // `getComponents()`: the stack's components as a map, live.
-        (o, "getComponents") if (o == ITEM_STACK || HOLDERS.contains(&o)) && rt.class_of(a(0)) == ITEM_STACK => Some(stack_view(rt, a(0))),
+        (o, "getComponents") if (o == ITEM_STACK || o == FLUID_STACK || HOLDERS.contains(&o)) && holder(rt, a(0)) => Some(stack_view(rt, a(0))),
         // `applyComponents(map)`: each of the map's components set on the stack; `(patch)`: the
         // patch's sets and removals made.
-        (ITEM_STACK, "applyComponents") if desc == "(Lnet/minecraft/core/component/DataComponentMap;)V" => {
+        (ITEM_STACK | FLUID_STACK, "applyComponents") if desc == "(Lnet/minecraft/core/component/DataComponentMap;)V" => {
             let l = set_pairs(rt, a(1));
             for p in l.chunks(2) {
                 call(rt, ITEM_STACK, "set", SET_DESC, &[a(0), p[0], p[1]]);
@@ -970,7 +986,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             Some(V::Void)
         }
         // `applyComponentsAndValidate(patch)`: the patch applied (the stack's own checks aside).
-        (ITEM_STACK, "applyComponents" | "applyComponentsAndValidate") => {
+        (ITEM_STACK | FLUID_STACK, "applyComponents" | "applyComponentsAndValidate") => {
             apply_patch(rt, a(0), a(1));
             Some(V::Void)
         }
@@ -1078,11 +1094,14 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             Some(c)
         }
         (ITEM_STACK, "isComponentsPatchEmpty") => Some(V::I(pairs(rt, a(0)).is_empty() as i32)),
+        // An empty fluid stack's patch is empty, whatever was set on it.
+        (FLUID_STACK, "isComponentsPatchEmpty") => Some(V::I((crate::fluids::stack_empty(rt, a(0)) || pairs(rt, a(0)).is_empty()) as i32)),
+        (FLUID_STACK, "getComponentsPatch") if crate::fluids::stack_empty(rt, a(0)) => crate::recipes::get_static(rt, COMPONENT_PATCH, "EMPTY"),
         // What was set on the stack, as `ItemStack.CODEC` writes its `components` (empty: the one
         // `EMPTY`).
         // The values themselves stay on it too (a transient type's among them), for a stack it is
         // applied to (`applyComponents(other.getComponentsPatch())`).
-        (ITEM_STACK, "getComponentsPatch") => {
+        (ITEM_STACK | FLUID_STACK, "getComponentsPatch") => {
             let patch = patch(rt, a(0));
             let kept = pairs(rt, a(0));
             let json = serde_json::Value::Object(patch.iter().map(|(k, v)| (k.clone(), crate::recipes::nbt_json(v))).collect());
@@ -1116,13 +1135,16 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
             Some(V::Void)
         }
-        (o, _) if (o == ITEM_STACK || HOLDERS.contains(&o)) && rt.class_of(a(0)) == ITEM_STACK => {
+        (o, _) if (o == ITEM_STACK || o == FLUID_STACK || HOLDERS.contains(&o)) && holder(rt, a(0)) => {
             let typed = desc.starts_with("(Lnet/minecraft/core/component/DataComponentType;") || desc.starts_with("(Ljava/util/function/Supplier;");
             if !typed {
                 return None;
             }
             let (stack, ty) = (a(0), type_of(rt, a(1)));
-            if let Some(v) = damage_component(rt, name, stack, ty, args) {
+            // An item's damage is the stack's own; a fluid stack keeps any type as it was set.
+            if rt.class_of(stack) == ITEM_STACK
+                && let Some(v) = damage_component(rt, name, stack, ty, args)
+            {
                 return Some(v);
             }
             Some(match name {

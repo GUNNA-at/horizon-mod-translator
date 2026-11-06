@@ -1311,7 +1311,11 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             }
             let Some(amount) = o.get("amount") else { return Err("No key amount in MapLike".into()) };
             let amount = amount.as_i64().filter(|a| *a > 0).ok_or_else(|| format!("amount: Value must be positive: {amount}"))?;
-            Ok(fluids::fluid_stack(rt, f, amount as i32))
+            let stack = fluids::fluid_stack(rt, f, amount as i32);
+            if let Some(Json::Object(patch)) = o.get("components") {
+                crate::components::load_saved(rt, stack, patch);
+            }
+            Ok(stack)
         }
         "fluid_ingredient" | "fluid_ingredient_map" => {
             let (mut out, mut needs) = (Vec::new(), None);
