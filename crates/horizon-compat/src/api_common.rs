@@ -13,6 +13,11 @@ pub(crate) const AXIS_NAMES: [&str; 3] = ["x", "y", "z"];
 /// aren't translated, so a mod block extending `RotatedPillarBlock` is a `Block` by this table.
 /// The core's `Rt::is_a` asks it (directly when inlined, through `Fns` otherwise).
 pub fn api_is_a(c: &str, class: &str) -> bool {
+    // 1.21.1's block and item classes by their own supertypes (`CropBlock` a `BonemealableBlock`,
+    // `ChestBlock` an `EntityBlock`, `SwordItem` a `TieredItem`); the families below past them.
+    if vanilla_is_a(c, class) {
+        return true;
+    }
     let family = |pkg: &str, suffix: &str| c.starts_with(pkg) && c.ends_with(suffix);
     match class {
         "net/minecraft/world/level/block/Block" | "net/minecraft/world/level/block/state/BlockBehaviour" => {
@@ -84,6 +89,44 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         }
         _ => crate::resources::is_a(c, class) || crate::gson::is_a(c, class) || java_is_a(c, class) || crate::vanilla_entities::is_a(c, class),
     }
+}
+
+/// Whether 1.21.1's block or item class `c` is `class` or a subtype of it, by the generated table
+/// of those classes' superclasses and interfaces; false for a class the table doesn't have.
+fn vanilla_is_a(c: &str, class: &str) -> bool {
+    use crate::vanilla_classes::CLASSES;
+    let entry = |k: &str| CLASSES.binary_search_by(|e| e.0.cmp(k)).ok().map(|i| &CLASSES[i]);
+    if entry(c).is_none() {
+        return false;
+    }
+    let mut todo = vec![c];
+    while let Some(k) = todo.pop() {
+        if k == class {
+            return true;
+        }
+        if let Some((_, sup, ifs)) = entry(k) {
+            if !sup.is_empty() {
+                todo.push(sup);
+            }
+            todo.extend_from_slice(ifs);
+        }
+    }
+    false
+}
+
+/// The class Java has for `v`, an object of the runtime's class `c`, when the runtime stands for a
+/// game object by its id: a vanilla block (`Block` naming `minecraft:ice`) is of its 1.21.1 class
+/// (`IceBlock`), a vanilla item of its (`SwordItem`, `StandingAndWallBlockItem`). None for any other
+/// object, and for the blocks and items 1.21.1 makes plain `Block`s, `Item`s and `BlockItem`s: the
+/// runtime's class already is theirs. A block or item 1.21.1 lacks keeps the runtime's class.
+pub fn vanilla_class(rt: &Rt, v: V, c: &'static str) -> Option<&'static str> {
+    let table: &[(&str, &str)] = match c {
+        "net/minecraft/world/level/block/Block" => &crate::vanilla_classes::BLOCKS,
+        "net/minecraft/world/item/Item" | "net/minecraft/world/item/BlockItem" => &crate::vanilla_classes::ITEMS,
+        _ => return None,
+    };
+    let id = rt.str_of(v)?;
+    table.binary_search_by(|(i, _)| (*i).cmp(id)).ok().map(|i| table[i].1)
 }
 
 /// Java's own class families, for the runtime's objects (a `new HashMap<>()` is a `Map`, a
@@ -4819,6 +4862,67 @@ mod tests {
         ] {
             assert_eq!(super::api_is_a(c, class), is, "{c} instanceof {class}");
         }
+    }
+
+    #[test]
+    fn vanilla_blocks_and_items_are_their_1_21_1_classes() {
+        // A mod asks what kind of block it breaks or grows (`instanceof IceBlock`, Create's drill
+        // melting ice; `BonemealableBlock`, a fertilizer) of the runtime's block named by its id.
+        // Expected classes from 1.21.1's own declarations.
+        crate::install();
+        let mut rt = Rt::new();
+        let b = |c: &str| format!("net/minecraft/world/level/block/{c}");
+        let ice = crate::api::block(&mut rt, "minecraft:ice");
+        let stone = crate::api::block(&mut rt, "minecraft:stone");
+        let leaves = crate::api::block(&mut rt, "minecraft:oak_leaves");
+        let wheat = crate::api::block(&mut rt, "minecraft:wheat");
+        let chest = crate::api::block(&mut rt, "minecraft:chest");
+        for (v, class, is) in [
+            (ice, b("IceBlock"), true),
+            (ice, b("HalfTransparentBlock"), true),
+            (ice, b("Block"), true),
+            (ice, b("LeavesBlock"), false),
+            (stone, b("Block"), true),
+            (stone, b("IceBlock"), false),
+            (stone, b("BonemealableBlock"), false),
+            (leaves, b("LeavesBlock"), true),
+            (leaves, b("SimpleWaterloggedBlock"), true),
+            (leaves, "net/neoforged/neoforge/common/IShearable".to_owned(), true),
+            (wheat, b("CropBlock"), true),
+            (wheat, b("BushBlock"), true),
+            (wheat, b("BonemealableBlock"), true),
+            (chest, b("EntityBlock"), true),
+            (chest, b("BaseEntityBlock"), true),
+            (chest, b("CropBlock"), false),
+        ] {
+            assert_eq!(rt.instance_of(v, &class), is, "{} instanceof {class}", super::name_of(&rt, v));
+        }
+        // Generated code's `instanceof`, whose answers are kept: one block's doesn't stand for another's.
+        assert!(rt.instance_of_static(ice, "net/minecraft/world/level/block/IceBlock"));
+        assert!(!rt.instance_of_static(stone, "net/minecraft/world/level/block/IceBlock"));
+        let sword = super::item(&mut rt, "minecraft:diamond_sword");
+        let diamond = super::item(&mut rt, "minecraft:diamond");
+        let torch = super::item(&mut rt, "minecraft:torch");
+        assert!(rt.instance_of(sword, "net/minecraft/world/item/SwordItem"));
+        assert!(rt.instance_of(sword, "net/minecraft/world/item/TieredItem"));
+        assert!(!rt.instance_of(diamond, "net/minecraft/world/item/TieredItem"));
+        assert!(rt.instance_of(diamond, "net/minecraft/world/item/Item"));
+        assert!(rt.instance_of(torch, "net/minecraft/world/item/BlockItem"), "a StandingAndWallBlockItem");
+        // `getClass()` as `instanceof` answers.
+        let class = crate::api::call(&mut rt, "java/lang/Object.getClass.()Ljava/lang/Class;", &[ice]);
+        assert_eq!(rt.str_of(class), Some("net/minecraft/world/level/block/IceBlock"));
+        // A mod's crop, extending vanilla's, is bonemealable through it.
+        rt.supers.insert("com/example/RiceCrop", "net/minecraft/world/level/block/CropBlock");
+        assert!(rt.is_a("com/example/RiceCrop", "net/minecraft/world/level/block/BonemealableBlock"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    #[test]
+    fn the_vanilla_class_tables_are_sorted_for_their_searches() {
+        use crate::vanilla_classes::{BLOCKS, CLASSES, ITEMS};
+        assert!(BLOCKS.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(ITEMS.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(CLASSES.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]

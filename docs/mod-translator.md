@@ -3991,6 +3991,43 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     inventory, the silverfish check and the cracks told to the game, nothing unmapped),
     `break_speed_and_harvest_check_listeners_decide` (a listener's doubled speed and refused harvest: / 100; bare
     hand on stone: 1 / 5 / 1.5 / 100). 385 compat and 17 translator tests pass; the game tests (48) pass.
+- [x] 2026-11-06 Part 21: round 17 in game, the deployer punching; vanilla blocks' and items' own classes for
+  `instanceof`.
+  - Round 17's first build failed on Part 20's drops binding: `nbt(&x?)`, where the `?` under `&` is checked
+    against the `Tag` the call expects, not the `&Tag` it gives (`?` operator has incompatible types, once per
+    engine). The binding passes the component's `&Tag` itself now. The unit tests don't compile the bundle's host
+    bindings; only the game build does.
+  - Rerun in game: the punching deployer (iron pickaxe, stone two blocks ahead, creative motor at 32 rpm, 200
+    ticks) broke the stone (air left), its pickaxe took 1 damage (`minecraft:damage: 1`), and the cobblestone
+    went to the deployer's `Overflow`, where Create moves what lands in its fake player's inventory past the held
+    slot, as in Java. Nothing unmapped came from the break path: the log's 61 unmapped lines are the client
+    screens, GL, config and Flywheel ones known before. The place-mode deployer, the entity, attribute, effect
+    and vitals checks answered as in round 16.
+  - `instanceof` on a vanilla block or item: the runtime stands for `Blocks.ICE` by a `Block` naming
+    `minecraft:ice`, so `instanceof IceBlock`, `LeavesBlock`, `BonemealableBlock` or `EntityBlock` (a chest's)
+    was false and `getClass()` gave `Block`; `instanceof SwordItem` or `TieredItem` on vanilla items likewise.
+    Measured: Create and Farmer's Delight have 210 `instanceof` sites on vanilla block and item classes, 173 of
+    them on classes past `Block`, `Item` and `BlockItem` (`BaseRailBlock` 10, `LiquidBlock` 6, `DoorBlock`,
+    `FarmBlock` and `SpawnEggItem` 5 each, `CropBlock`, `SlabBlock`, `SimpleWaterloggedBlock` 4 each; the
+    drills' and saws' `BlockHelper.destroyBlockAs` melts broken ice by `instanceof IceBlock`).
+    - New `tools/vanilla_classes.py` writes `horizon-compat/src/vanilla_classes.rs` from the merged jar: each
+      block's class from `Blocks`' static initialiser (`register("ice", new IceBlock(...))`; its helpers such as
+      `log` or `stair` by what they construct; the six registered by a `references.Blocks` key), each item's
+      from `Items`' (`registerItem` by name or key, `registerBlock` by its block's id, factories such as
+      `SmithingTemplateItem.createNetheriteUpgradeTemplate`), and the 387 classes' superclasses and interfaces
+      from their headers. 892 of 1060 blocks and 399 of 1333 items aren't plain `Block`, `Item` or `BlockItem`
+      (those are left out: the runtime makes them anyway).
+    - The core's new `Rt::type_of` gives such an object its 1.21.1 class, through the new entry point
+      `Fns::vanilla_class` (`api_common::vanilla_class`, used directly when a bundle inlines the runtime).
+      `instanceof` uses it (generated code's static checks still cached, now by that class), as do
+      `Class.isInstance`, pattern `switch` and `getClass()`.
+    - `api_is_a` walks the table first, so a mod's block extending `CropBlock` is a `BonemealableBlock`, a
+      `ChestBlock` an `EntityBlock`, a `SwordItem` a `TieredItem`.
+    - A block or item 1.21.1 lacks (26.3's pale oak) keeps the runtime's class.
+  - Tests: `api_common::tests::vanilla_blocks_and_items_are_their_1_21_1_classes` (ice, stone, oak leaves, wheat
+    and a chest against 1.21.1's declared classes; static checks for two blocks of one runtime class; sword,
+    diamond, torch items; `getClass()`; a mod crop through `CropBlock`) and
+    `the_vanilla_class_tables_are_sorted_for_their_searches`. 387 compat and 17 translator tests pass.
   (`KineticBlockEntityRenderer`, catnip's `SuperByteBuffer`), which need: a client runtime (the render thread's own
   `with_runtime`, `FMLClientSetupEvent` registering renderers), block entity update tags to the client
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick

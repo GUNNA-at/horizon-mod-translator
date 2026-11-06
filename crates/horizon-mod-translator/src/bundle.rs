@@ -69,7 +69,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 82] = [
+const COMPAT: [(&str, &str); 83] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -150,6 +150,7 @@ const COMPAT: [(&str, &str); 82] = [
     ("render.rs", include_str!("../../horizon-compat/src/render.rs")),
     ("quads.rs", include_str!("../../horizon-compat/src/quads.rs")),
     ("vanilla_tags.rs", include_str!("../../horizon-compat/src/vanilla_tags.rs")),
+    ("vanilla_classes.rs", include_str!("../../horizon-compat/src/vanilla_classes.rs")),
     ("value_providers.rs", include_str!("../../horizon-compat/src/value_providers.rs")),
     ("vanilla_tag_keys.rs", include_str!("../../horizon-compat/src/vanilla_tag_keys.rs")),
 ];
@@ -175,8 +176,9 @@ fn inlined_core() -> String {
     let (_, helpers) = COMPAT_ROOT.split_once("// BEGIN RUNTIME HELPERS").expect("compat runtime helper markers");
     let (helpers, _) = helpers.split_once("// END RUNTIME HELPERS").expect("compat runtime helper markers");
     let helpers = helpers.split_once('\n').map_or("", |(_, rest)| rest);
-    // `Rt::is_a` asks the mapping's table of Minecraft's class families.
-    format!("{head}{tail}\n{mods}pub use api_common::api_is_a;\n{helpers}")
+    // `Rt::is_a` asks the mapping's table of Minecraft's class families, `Rt::type_of` its
+    // vanilla blocks' and items' classes.
+    format!("{head}{tail}\n{mods}pub use api_common::{{api_is_a, vanilla_class}};\n{helpers}")
 }
 
 /// Writes `contents` unless the file already holds exactly that, so an unchanged engine keeps its
@@ -1985,7 +1987,7 @@ fn world_writes(c: &str) -> String {
             drops
                 .iter()
                 .map(|d| {{
-                    let components = types.iter().filter_map(|name| Some((name.to_string(), nbt(&self.game.native_component(d, name).ok()??)?))).collect();
+                    let components = types.iter().filter_map(|name| Some((name.to_string(), nbt(self.game.native_component(d, name).ok()??)?))).collect();
                     {c}::host::HandStack {{ item: d.item.to_string(), count: d.count, damage: d.damage, max_damage: self.game.native_item_max_damage(&d.item), components }}
                 }})
                 .collect()

@@ -630,7 +630,15 @@ impl Rt {
     }
 
     pub fn instance_of(&self, v: V, class: &str) -> bool {
-        v.r() != 0 && self.is_a(self.class_of(v), class)
+        v.r() != 0 && self.is_a(self.type_of(v), class)
+    }
+
+    /// The class `v` is in Java: its own, but a game object the runtime stands for by its id (a
+    /// vanilla block, `Block` naming `minecraft:ice`; a vanilla item) is of the class Java makes it
+    /// (`IceBlock`, `SwordItem`), as the mapping's tables know them.
+    pub fn type_of(&self, v: V) -> &'static str {
+        let c = self.class_of(v);
+        vanilla_class(self, v, c).unwrap_or(c)
     }
 
     /// [`Rt::instance_of`] for generated code (`instanceof`, `catch`): both names are static
@@ -639,7 +647,7 @@ impl Rt {
         if v.r() == 0 || matches!(v, V::Void) {
             return false;
         }
-        let c = self.class_of(v);
+        let c = self.type_of(v);
         let key = (c.as_ptr() as usize, c.len(), class.as_ptr() as usize, class.len());
         if let Some(&hit) = self.is_a_cache.borrow().get(&key) {
             return hit;
@@ -977,6 +985,9 @@ pub struct Fns {
     pub fire_registrations: fn(&mut Rt),
     /// Minecraft's class families for `instanceof` (`api_common::api_is_a`).
     pub api_is_a: fn(&str, &str) -> bool,
+    /// The class Java has for a game object the runtime stands for by its id
+    /// (`api_common::vanilla_class`).
+    pub vanilla_class: fn(&Rt, V, &'static str) -> Option<&'static str>,
 }
 
 static FNS: std::sync::OnceLock<Fns> = std::sync::OnceLock::new();
@@ -994,6 +1005,12 @@ fn fns() -> &'static Fns {
 /// mod's own classes still answer through their registered hierarchy).
 fn api_is_a(c: &str, class: &str) -> bool {
     FNS.get().is_some_and(|f| (f.api_is_a)(c, class))
+}
+
+/// The class Java has for `v` (of runtime class `c`) when the installed mapping stands for a game
+/// object by it; None before `install()`.
+fn vanilla_class(rt: &Rt, v: V, c: &'static str) -> Option<&'static str> {
+    FNS.get().and_then(|f| (f.vanilla_class)(rt, v, c))
 }
 
 /// The API calls generated code makes, through the installed mapping.

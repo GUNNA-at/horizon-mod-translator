@@ -574,8 +574,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         "java/lang/Math" | "java/lang/StrictMath" => math(name, &ks, args),
         "java/lang/Object" => Some(match name {
+            // A vanilla block's or item's is its 1.21.1 class (`IceBlock`), as `instanceof` answers.
             "getClass" => {
-                let c = rt.class_of(a(0));
+                let c = rt.type_of(a(0));
                 rt.class_literal(c)
             }
             // Object's own: `super.hashCode()` from an override must not come back to it.

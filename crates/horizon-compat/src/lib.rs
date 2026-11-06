@@ -77,6 +77,7 @@ pub mod shapes;
 pub mod sounds;
 pub mod tags;
 pub mod tanks;
+pub mod vanilla_classes;
 pub mod vanilla_effects;
 pub mod vanilla_records;
 pub mod vanilla_shapes;
@@ -149,5 +150,6 @@ pub fn install() {
         constructor_arg: neo::constructor_arg,
         fire_registrations: neo::fire_registrations,
         api_is_a: api_common::api_is_a,
+        vanilla_class: api_common::vanilla_class,
     });
 }
