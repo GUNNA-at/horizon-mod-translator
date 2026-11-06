@@ -5023,6 +5023,37 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     twice for 5 as `create:potato_cannon` and dies; no uncaught throws. One new unmapped call:
     `EntityType.getCategory`, which the potato's `onHitEntity` asks of a target it killed (its
     advancement's check).
+- [x] 2026-11-06 Measured (packcov11, after Parts 41 to 55, same 367 jars): missing uses 63458 → 61124
+  (−2334), and no class's count grew. Methods mapped went from 74.2% to 75.0% summed over jars
+  (98795 → 99900 of 133194), and uses from 84.7% to 85.3%. Create went from 71.0% to 72.2% of methods
+  (2836 → 2883 of 3995) and from 91.1% to 91.6% of uses. Distinct API methods missing somewhere in the
+  pack: 12268 → 12091. The biggest drops:
+
+  | Class | packcov10 | packcov11 |
+  |---|---|---|
+  | `EntityHitResult` | 317 | 0 |
+  | `CustomData` | 306 | 9 |
+  | `GlStateManager` | 288 | 56 |
+  | `Minecraft` | 795 | 568 |
+  | `ServerGamePacketListenerImpl` | 197 | 31 |
+  | `BlockState` | 1178 | 1034 |
+  | `LevelRenderer` | 229 | 111 |
+  | `ClientPacketListener` | 158 | 46 |
+  | `RenderType` | 119 | 13 |
+  | `SoundInstance` | 118 | 17 |
+  | `LivingEntity` | 936 | 850 |
+
+  Largest left: `Level` (1746: `addFreshEntity` in 86 jars, `getCapability`), the codec builders
+  (`MapCodec.forGetter` in 107 jars, `RecordCodecBuilder$Instance.group`, `Products$P2.apply`),
+  `Entity` (1159), `BlockState` (1034: `cycle` in 47 jars) and `Slot` (664: `getItem` in 87 jars,
+  `hasItem`, `set`). Several of these are the probe's: it calls each method on stand-ins, so a call
+  the layer answers only for a real object counts as missing here though it works in game. Among them:
+  the codec builders, a state's `cycle`, `addFreshEntity` of a mod's entity, an item entity or an orb,
+  and a slot's item (a bare `Slot` has no container, so its `getItem` asks a null one). `addFreshEntity`
+  of a vanilla entity a mod makes is a real gap: a vanilla `EntityType` has no factory, so its `create`
+  gives null, and a vanilla entity's constructor isn't modelled (only an item entity's, an orb's and a
+  mod's own projectile's are). In Create the most missed are `Level` (150), `BlockState` (97), `Entity` (82)
+  and the fluid and item handlers (`IFluidHandler` 79, `IItemHandlerModifiable` 69, `IItemHandler` 65).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
