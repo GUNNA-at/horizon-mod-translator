@@ -101,8 +101,8 @@ impl Game<'_> {
 
     /// The vanilla components a translated mod's stacks carry beside the registered ones: the
     /// stack's enchantments and stored (book) enchantments, those it has, as vanilla's
-    /// `components` map writes them, and its custom data (`minecraft:custom_data`).
-    /// API @API:vanilla_components@.
+    /// `components` map writes them, its custom data (`minecraft:custom_data`) and its potion
+    /// contents (`minecraft:potion_contents`). API @API:vanilla_components@.
     pub(super) fn native_vanilla_components(&self, stack: &ItemStack) -> Vec<(&'static str, Tag)> {
         let mut out: Vec<_> = [(VANILLA_COMPONENTS[0], false), (VANILLA_COMPONENTS[1], true)]
             .into_iter()
@@ -110,12 +110,19 @@ impl Game<'_> {
             .collect();
         let custom = stack.data().and_then(|d| d.other(VANILLA_COMPONENTS[2]));
         out.extend(custom.map(|tag| (VANILLA_COMPONENTS[2], tag.clone())));
+        let potion = stack
+            .data()
+            .filter(|d| d.potion.is_some() || !d.potion_extra.is_empty())
+            .and_then(|_| horizon_client::item_data::encode_components(stack))
+            .and_then(|all| all.get(VANILLA_COMPONENTS[3]).cloned());
+        out.extend(potion.map(|tag| (VANILLA_COMPONENTS[3], tag)));
         out
     }
 
     /// Sets (None: clears) a component [`Self::native_vanilla_components`] names, from vanilla's
     /// form (1.21.1's too). Custom data is a compound within the network NBT limits; an empty one
-    /// clears it, as vanilla's `CustomData.set` does. API @API:vanilla_components@.
+    /// clears it, as vanilla's `CustomData.set` does. Potion contents are a potion's id or
+    /// vanilla's compound, read as the game's own stacks read them. API @API:vanilla_components@.
     pub(super) fn native_set_vanilla_component(
         &self,
         stack: &mut ItemStack,
@@ -143,6 +150,26 @@ impl Game<'_> {
                     stack.tidy();
                 }
             }
+            Some(3) => {
+                if let Some(tag) = value {
+                    horizon_protocol::item::custom::validate(tag)
+                        .map_err(NativeComponentError::InvalidValue)?;
+                }
+                let read = value.and_then(|tag| {
+                    let all = Tag::compound([(id, tag.clone())]);
+                    horizon_client::item_data::decode_components(Some(&all)).1
+                });
+                let (potion, extra) = read.map_or((None, Vec::new()), |d| {
+                    let d = *d;
+                    (d.potion, d.potion_extra)
+                });
+                if potion.is_some() || !extra.is_empty() || stack.data().is_some() {
+                    let data = stack.data_mut();
+                    data.potion = potion;
+                    data.potion_extra = extra;
+                    stack.tidy();
+                }
+            }
             Some(i) => stack.set_enchantments_tag(i == 1, value),
             None => return Err(NativeComponentError::UnknownType),
         }
@@ -151,8 +178,9 @@ impl Game<'_> {
 }
 
 /// The vanilla components [`Game::native_vanilla_components`] carries.
-const VANILLA_COMPONENTS: [&str; 3] = [
+const VANILLA_COMPONENTS: [&str; 4] = [
     "minecraft:enchantments",
     "minecraft:stored_enchantments",
     "minecraft:custom_data",
+    "minecraft:potion_contents",
 ];

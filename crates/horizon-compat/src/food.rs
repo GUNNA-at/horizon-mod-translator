@@ -10,6 +10,11 @@
 //! [`components`] writes them for a mod's item. Its class may change how it's eaten by overriding
 //! `Item`'s `getUseDuration`, `getUseAnimation` (a drink), `getEatingSound` or `getDrinkingSound`:
 //! those are asked once, with a stack of the item, as they answer the same for any.
+//!
+//! Potions: `Potions.X` are holders of vanilla's potions, `PotionContents` a potion, a color and
+//! effects of its own (`createItemStack`, `is`, `withPotion` here). A stack's contents are vanilla's
+//! `minecraft:potion_contents`, which the game's stacks carry ([`encode_potion_contents`],
+//! [`decode_potion_contents`]).
 use crate::nbt::Nbt;
 use crate::{api, api_common, jutil, Rt, V};
 use std::collections::BTreeMap;
@@ -185,6 +190,97 @@ pub(crate) fn potion_holder(rt: &mut Rt, id: &str) -> V {
     })
 }
 
+/// `minecraft:potion_contents`, the component a stack's potion contents are.
+pub(crate) const POTION_CONTENTS_ID: &str = "minecraft:potion_contents";
+
+/// A potion's id from its holder: vanilla's (a `Potions` field's), or a mod's registered one.
+fn potion_id(rt: &Rt, h: V) -> Option<String> {
+    if let Some(id) = rt.str_of(rt.get_field(h, "$id")).filter(|s| !s.is_empty()) {
+        return Some(id.to_owned());
+    }
+    rt.registered_name(rt.get_field(h, "$value"), "potion").or_else(|| rt.registered_name(h, "potion")).map(str::to_owned)
+}
+
+/// Potion contents, as the record holds them: the potion's holder (null for none), a color of its
+/// own (null for none) and effects of its own.
+fn potion_contents(rt: &mut Rt, potion: V, color: V, effects: Vec<V>) -> V {
+    let (potion, color, effects) = (api_common::optional(rt, potion), api_common::optional(rt, color), jutil::new_list(rt, effects));
+    crate::records::make(rt, POTION_CONTENTS, &[potion, color, effects])
+}
+
+/// Potion contents `c` as vanilla's codec writes them: `{potion, custom_color, custom_effects}`, each
+/// when there, an effect as `{id, amplifier, duration, ambient, show_particles, show_icon}` with
+/// its defaults left out (`show_icon` is always written); None for contents without any of them.
+pub(crate) fn encode_potion_contents(rt: &Rt, c: V) -> Option<Nbt> {
+    let mut m = BTreeMap::new();
+    let potion = rt.get_field(rt.get_field(c, "potion"), "value");
+    if potion.r() != 0
+        && let Some(id) = potion_id(rt, potion)
+    {
+        m.insert("potion".to_owned(), Nbt::String(id));
+    }
+    let color = rt.get_field(rt.get_field(c, "customColor"), "value");
+    if !matches!(color, V::Void | V::R(0)) {
+        m.insert("custom_color".to_owned(), Nbt::Int(crate::mixin::unbox(rt, color, 'I').i()));
+    }
+    let effects: Vec<Nbt> = jutil::elements(rt, rt.get_field(c, "customEffects")).into_iter().filter_map(|e| encode_effect(rt, e)).collect();
+    if !effects.is_empty() {
+        m.insert("custom_effects".to_owned(), Nbt::List(effects));
+    }
+    (!m.is_empty()).then_some(Nbt::Compound(m))
+}
+
+fn encode_effect(rt: &Rt, e: V) -> Option<Nbt> {
+    let id = effect_id(rt, rt.get_field(e, "$effect"))?;
+    let int = |f: &'static str| rt.get_field(e, f).i();
+    let (amplifier, duration, visible) = (int("$amplifier"), int("$duration"), int("$visible") != 0);
+    let mut m = BTreeMap::from([("id".to_owned(), Nbt::String(id)), ("show_icon".to_owned(), Nbt::Byte((int("$showIcon") != 0) as i8))]);
+    if amplifier != 0 {
+        m.insert("amplifier".to_owned(), Nbt::Byte(amplifier as i8));
+    }
+    if duration != 0 {
+        m.insert("duration".to_owned(), Nbt::Int(duration));
+    }
+    if int("$ambient") != 0 {
+        m.insert("ambient".to_owned(), Nbt::Byte(1));
+    }
+    if !visible {
+        m.insert("show_particles".to_owned(), Nbt::Byte(0));
+    }
+    Some(Nbt::Compound(m))
+}
+
+/// Potion contents read from vanilla's form (as JSON): a potion's id alone, or what
+/// [`encode_potion_contents`] writes.
+pub(crate) fn decode_potion_contents(rt: &mut Rt, v: &serde_json::Value) -> V {
+    use serde_json::Value;
+    let (potion, color, effects) = match v {
+        Value::String(id) => (Some(id.clone()), None, Vec::new()),
+        Value::Object(m) => (
+            m.get("potion").and_then(Value::as_str).map(str::to_owned),
+            m.get("custom_color").and_then(Value::as_i64),
+            m.get("custom_effects").and_then(Value::as_array).cloned().unwrap_or_default(),
+        ),
+        _ => (None, None, Vec::new()),
+    };
+    let holder = potion.map_or(V::NULL, |id| potion_holder(rt, &id));
+    let effects: Vec<V> = effects.iter().filter_map(|e| decode_effect(rt, e)).collect();
+    potion_contents(rt, holder, color.map_or(V::NULL, |c| V::I(c as i32)), effects)
+}
+
+fn decode_effect(rt: &mut Rt, e: &serde_json::Value) -> Option<V> {
+    let id = e.get("id")?.as_str()?;
+    let int = |k: &str, default: i64| e.get(k).and_then(|v| v.as_i64().or_else(|| v.as_bool().map(i64::from))).unwrap_or(default);
+    let visible = int("show_particles", 1);
+    let holder = effect_holder(rt, id);
+    let i = rt.new_object(INSTANCE);
+    rt.put_field(i, "$effect", holder);
+    for (f, v) in [("$duration", int("duration", 0)), ("$amplifier", int("amplifier", 0)), ("$ambient", int("ambient", 0)), ("$visible", visible), ("$showIcon", int("show_icon", visible))] {
+        rt.put_field(i, f, V::I(v as i32));
+    }
+    Some(i)
+}
+
 /// The id of an effect: a holder's (vanilla's, or a mod's `DeferredHolder`), or a registered one's.
 pub(crate) fn effect_id(rt: &Rt, v: V) -> Option<String> {
     if let Some(id) = rt.str_of(rt.get_field(v, "$id")).filter(|s| !s.is_empty()) {
@@ -223,7 +319,7 @@ fn copy_instance(rt: &mut Rt, from: V) -> V {
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     matches!(owner, BUILDER | POSSIBLE | INSTANCE)
         || (owner == EFFECT && EFFECT_METHODS.contains(&name))
-        || (owner == POTION_CONTENTS && name == "<init>" && desc == "(Lnet/minecraft/core/Holder;)V")
+        || (owner == POTION_CONTENTS && (matches!(name, "createItemStack" | "is" | "withPotion") || (name == "<init>" && desc == "(Lnet/minecraft/core/Holder;)V")))
 }
 
 /// What a mod's own effect (a `MobEffect` subclass) takes from vanilla's class.
@@ -255,6 +351,27 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         this
     };
     Some(match (owner, name) {
+        // `PotionContents.createItemStack(item, potion)`: one of the item holding that potion.
+        (POTION_CONTENTS, "createItemStack") => {
+            let item = api_common::item_like_name(rt, a(0));
+            let stack = api_common::stack(rt, &item, 1);
+            let contents = potion_contents(rt, a(1), V::NULL, Vec::new());
+            crate::components::set_vanilla(rt, stack, POTION_CONTENTS_ID, contents);
+            stack
+        }
+        // `is(potion)`: the contents are that potion alone (holders compare by their ids), with no
+        // effects of their own.
+        (POTION_CONTENTS, "is") => {
+            let held = rt.get_field(rt.get_field(this, "potion"), "value");
+            let same = held.r() != 0 && potion_id(rt, held).is_some_and(|id| potion_id(rt, a(1)).as_deref() == Some(id.as_str()));
+            V::I((same && jutil::elements(rt, rt.get_field(this, "customEffects")).is_empty()) as i32)
+        }
+        // `withPotion(potion)`: the same color and effects with that potion.
+        (POTION_CONTENTS, "withPotion") => {
+            let (color, effects) = (rt.get_field(this, "customColor"), rt.get_field(this, "customEffects"));
+            let potion = api_common::optional(rt, a(1));
+            crate::records::make(rt, POTION_CONTENTS, &[potion, color, effects])
+        }
         // `new PotionContents(potion)`: that potion, no color of its own, no effects added.
         (POTION_CONTENTS, "<init>") => {
             let (potion, none, effects) = (api_common::optional(rt, a(1)), api_common::optional(rt, V::NULL), jutil::new_list(rt, Vec::new()));
@@ -678,6 +795,53 @@ mod tests {
     use super::*;
 
     const INSTANCE_6: &str = "net/minecraft/world/effect/MobEffectInstance.<init>.(Lnet/minecraft/core/Holder;IIZZZ)V";
+    const GET: &str = "net/minecraft/world/item/ItemStack.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+    const IS: &str = "net/minecraft/world/item/alchemy/PotionContents.is.(Lnet/minecraft/core/Holder;)Z";
+
+    /// A water bottle as Create's spout makes it (`PotionContents.createItemStack(Items.POTION,
+    /// Potions.WATER)`): a potion holding water, which the game's stack carries as vanilla's
+    /// `minecraft:potion_contents`. Contents with a color and an effect of their own come from a
+    /// game stack and go back the same; a plain potion holds the empty contents.
+    #[test]
+    fn a_made_potion_carries_its_contents_to_the_game_and_back() {
+        let mut rt = Rt::new();
+        crate::install();
+        let item = api::get_static(&mut rt, "net/minecraft/world/item/Items.POTION");
+        let water = api::get_static(&mut rt, "net/minecraft/world/item/alchemy/Potions.WATER");
+        let make = "net/minecraft/world/item/alchemy/PotionContents.createItemStack.(Lnet/minecraft/world/item/Item;Lnet/minecraft/core/Holder;)Lnet/minecraft/world/item/ItemStack;";
+        let stack = api::call(&mut rt, make, &[item, water]);
+        assert_eq!(api_common::item_like_name(&rt, rt.get_field(stack, "$item")), "minecraft:potion");
+        let ty = api::get_static(&mut rt, "net/minecraft/core/component/DataComponents.POTION_CONTENTS");
+        let contents = api::call(&mut rt, GET, &[stack, ty]);
+        assert_eq!(api::call(&mut rt, IS, &[contents, water]).i(), 1);
+        let awkward = api::get_static(&mut rt, "net/minecraft/world/item/alchemy/Potions.AWKWARD");
+        assert_eq!(api::call(&mut rt, IS, &[contents, awkward]).i(), 0);
+        let water_only = Nbt::Compound(BTreeMap::from([("potion".to_owned(), Nbt::String("minecraft:water".into()))]));
+        assert_eq!(crate::components::saved(&mut rt, stack), vec![(POTION_CONTENTS_ID.to_owned(), water_only)]);
+
+        let effect = BTreeMap::from([
+            ("id".to_owned(), Nbt::String("minecraft:speed".into())),
+            ("duration".to_owned(), Nbt::Int(600)),
+            ("amplifier".to_owned(), Nbt::Byte(1)),
+            ("show_icon".to_owned(), Nbt::Byte(1)),
+        ]);
+        let carried = Nbt::Compound(BTreeMap::from([
+            ("potion".to_owned(), Nbt::String("minecraft:awkward".into())),
+            ("custom_color".to_owned(), Nbt::Int(0x385DC6)),
+            ("custom_effects".to_owned(), Nbt::List(vec![Nbt::Compound(effect)])),
+        ]));
+        let other = api_common::stack(&mut rt, "minecraft:potion", 1);
+        crate::components::load(&mut rt, other, &[(POTION_CONTENTS_ID.to_owned(), carried.clone())]);
+        let read = api::call(&mut rt, GET, &[other, ty]);
+        assert_eq!(rt.get_field(rt.get_field(read, "potion"), "value"), awkward);
+        assert_eq!(api::call(&mut rt, IS, &[read, awkward]).i(), 0, "effects of its own make it another potion");
+        assert_eq!(crate::components::saved(&mut rt, other), vec![(POTION_CONTENTS_ID.to_owned(), carried)]);
+
+        let plain = api_common::stack(&mut rt, "minecraft:potion", 1);
+        let empty = api::call(&mut rt, GET, &[plain, ty]);
+        assert_eq!(empty, api::get_static(&mut rt, "net/minecraft/world/item/alchemy/PotionContents.EMPTY"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     fn builder(rt: &mut Rt, nutrition: i32, modifier: f32) -> V {
         let b = rt.new_object(BUILDER);

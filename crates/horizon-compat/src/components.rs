@@ -10,9 +10,10 @@
 //! value through its type's codec (`encodeStart(NbtOps.INSTANCE, value)` and `parse`). A saved
 //! stack (`ItemStack.save`, `ItemStack.CODEC`: what a block entity keeps) carries them as vanilla's
 //! `components` map. Of vanilla's own types a game stack carries its enchantments (and a book's
-//! stored ones) and its custom data (`CustomData`, modelled here) here and back; of an item's
-//! default components (vanilla's prototype) only `enchantments` is modelled
-//! (`ItemEnchantments.EMPTY`: `get(MAX_STACK_SIZE)` is null).
+//! stored ones), its potion contents ([`crate::food`]) and its custom data (`CustomData`, modelled
+//! here) here and back; of an item's default components (vanilla's prototype) only `enchantments`
+//! and a potion's empty `potion_contents` are modelled (`ItemEnchantments.EMPTY`:
+//! `get(MAX_STACK_SIZE)` is null).
 //!
 //! Component maps: a stack's as a live view (`ItemStack.getComponents()`), maps built by
 //! `DataComponentMap.builder()` and patches by `DataComponentPatch.builder()`, which
@@ -148,6 +149,11 @@ pub(crate) fn patch(rt: &mut Rt, stack: V) -> BTreeMap<String, Nbt> {
 }
 
 fn load_one(rt: &mut Rt, stack: V, name: &str, value: &serde_json::Value) {
+    if name == crate::food::POTION_CONTENTS_ID {
+        let contents = crate::food::decode_potion_contents(rt, value);
+        set_vanilla(rt, stack, name, contents);
+        return;
+    }
     // Custom data as JSON (a saved stack's), through `CustomData.CODEC`.
     if name == CUSTOM_DATA_ID {
         let codec = crate::codecs::get_static(rt, CUSTOM_DATA, "CODEC").unwrap_or(V::NULL);
@@ -192,6 +198,10 @@ pub(crate) fn saved(rt: &mut Rt, stack: V) -> Vec<(String, Nbt)> {
             if !tag.is_empty() {
                 out.push((id, Nbt::Compound(tag)));
             }
+            continue;
+        }
+        if id == crate::food::POTION_CONTENTS_ID {
+            out.extend(crate::food::encode_potion_contents(rt, value).map(|n| (id, n)));
             continue;
         }
         if CARRIED_VANILLA.contains(&id.as_str()) {
@@ -322,12 +332,18 @@ fn current(rt: &mut Rt, stack: V, ty: V) -> Option<V> {
         return Some(v);
     }
     let id = rt.str_of(rt.get_field(ty, "$id")).unwrap_or("").to_owned();
+    let item = crate::api_common::item_like_name(rt, rt.get_field(stack, "$item"));
     let defaulted = match id.as_str() {
         "minecraft:enchantments" => true,
-        "minecraft:stored_enchantments" => crate::api_common::item_like_name(rt, rt.get_field(stack, "$item")) == "minecraft:enchanted_book",
+        "minecraft:stored_enchantments" => item == "minecraft:enchanted_book",
+        // Vanilla's potions and tipped arrows hold `PotionContents.EMPTY`.
+        crate::food::POTION_CONTENTS_ID => matches!(item.as_str(), "minecraft:potion" | "minecraft:splash_potion" | "minecraft:lingering_potion" | "minecraft:tipped_arrow"),
         _ => false,
     };
-    (defaulted && stack.r() != 0 && !crate::api_common::stack_empty(rt, stack)).then(|| crate::enchantments::empty(rt))
+    if !defaulted || stack.r() == 0 || crate::api_common::stack_empty(rt, stack) {
+        return None;
+    }
+    Some(if id == crate::food::POTION_CONTENTS_ID { crate::api::get_static(rt, "net/minecraft/world/item/alchemy/PotionContents.EMPTY") } else { crate::enchantments::empty(rt) })
 }
 
 /// A component type built from a builder the mod configured: its codec is kept.

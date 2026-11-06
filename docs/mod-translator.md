@@ -5340,6 +5340,26 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `a_cauldron_fills_and_drains_a_bucketful_at_a_time`,
     `cauldron_contents_are_found_by_block_and_by_fluid`, `fluid_util_finds_and_moves_a_buckets_fluid`.
     In game: with the next part's build (the spout round).
+- [x] 2026-11-06 Part 64: potion contents on mods' stacks and the game's.
+  The spout round's glass bottle was filled (its spout gave 250 mB) but the depot was left holding
+  nothing: Create makes the water bottle with `PotionContents.createItemStack(Items.POTION,
+  Potions.WATER)`, which was unmapped. A potion's contents are vanilla's `minecraft:potion_contents`
+  component, which the game's stacks didn't carry to the mods' and back either, so a potion a mod
+  made or read was a bottle of nothing. Measured over the pack: 34 jars use `PotionContents` (its
+  constructor 18, `getAllEffects` 14, `EMPTY` 13, `createItemStack` 13 (Create, SecurityCraft,
+  PuzzlesLib, RPG Potions...), `getColor` 9, `potion()` 9, `is` 7, `hasEffects` 6...).
+  - compat `food`: `PotionContents.createItemStack`, `is` (vanilla's: that potion, with no effects of its own) and `withPotion`; the
+    contents' NBT form as vanilla's codec writes it (`{potion, custom_color, custom_effects}`, an
+    effect `{id, amplifier, duration, ambient, show_particles, show_icon}`, defaults left out) and
+    read back, a potion's id alone too.
+  - compat `components`: a stack's `minecraft:potion_contents` goes to the game's stack and comes
+    back (also in a block entity's saved items); vanilla's potions and tipped arrows hold
+    `PotionContents.EMPTY` when nothing was set.
+  - horizon-client `native_components`: the vanilla components a translated mod's stacks carry
+    include the potion contents, read and set as the game's own stacks read them.
+  - Left: `getAllEffects`, `hasEffects`, `getColor` and `forEachEffect` need each potion's effects,
+    which the game's tables have (`horizon-client-core::potions`) and the runtime doesn't yet.
+  - Tests: `food::tests::a_made_potion_carries_its_contents_to_the_game_and_back`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
