@@ -4626,6 +4626,18 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - `Minecraft.getProfiler()` gives vanilla's inactive profiler (15 jars). `getVersionType()` gives
     `release` (7 jars). `getToasts()` gives an object whose `addToast` does nothing (22 jars). Before,
     a toast call on the null it got threw in the mod's code. The game shows none of the mods' toasts yet.
+- [x] 2026-11-06 Part 42: the client's connection. `Minecraft.getConnection()` (130 uses in 57 jars)
+  gives the client's connection to its server while its player is in a world, and null otherwise, as in
+  vanilla. On it:
+  - `send(packet)`, also on its `getConnection()` (`Connection.send`). A mod's payload, sent bare or
+    wrapped in `new ServerboundCustomPayloadPacket(payload)`, goes to the server on the mods' channel,
+    as `PacketDistributor.sendToServer` sends it. A game packet a mod builds (`net/minecraft/...`) is
+    the game's to send, so it is dropped. 14 jars send this way.
+  - `registryAccess()` (14 jars) gives the registries object `RegistryAccess` calls already answer.
+    `getLevel()` gives the client's level.
+  - `getPlayerInfo(uuid)` (13 jars) gives null and `getOnlinePlayers()` an empty list. The game
+    doesn't hand its tab list to the runtime yet; vanilla gives null for a player who isn't on it.
+  - Test: `network::tests::a_payload_sent_on_the_clients_connection_goes_to_the_server`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

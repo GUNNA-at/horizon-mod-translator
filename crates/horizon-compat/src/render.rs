@@ -1571,6 +1571,9 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         ("net/minecraft/client/Minecraft", "getBlockRenderer") => single(rt, "net/minecraft/client/renderer/block/BlockRenderDispatcher"),
         ("net/minecraft/client/Minecraft", "getTimer") => single(rt, "net/minecraft/client/DeltaTracker"),
         ("net/minecraft/client/Minecraft", "getModelManager") => single(rt, "net/minecraft/client/resources/model/ModelManager"),
+        // The client's connection to its server while it plays (null before: vanilla's
+        // `player.connection`), which sends the mods' payloads ([`crate::network`]).
+        ("net/minecraft/client/Minecraft", "getConnection") => crate::network::client_connection(rt),
         // The client's profiler: vanilla's inactive one, which records nothing.
         ("net/minecraft/client/Minecraft", "getProfiler") => crate::api::get_static(rt, "net/minecraft/util/profiling/InactiveProfiler.INSTANCE"),
         // What the launcher named this version's kind (`--versionType`): a release's.

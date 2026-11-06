@@ -1328,9 +1328,75 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | PAYLOAD_TYPE
             | DISTRIBUTOR
             | CONTEXT
+            | CLIENT_LISTENER
+            | CLIENT_COMMON_LISTENER
+            | CONNECTION
     ) || (owner == REGISTER_PAYLOADS && name == "registrar")
         || (owner == "net/minecraft/network/protocol/common/custom/CustomPacketPayload" && name == "createType")
         || (owner == "net/minecraft/resources/ResourceKey" && name == "streamCodec")
+}
+
+const CLIENT_LISTENER: &str = "net/minecraft/client/multiplayer/ClientPacketListener";
+const CLIENT_COMMON_LISTENER: &str = "net/minecraft/client/multiplayer/ClientCommonPacketListenerImpl";
+const CONNECTION: &str = "net/minecraft/network/Connection";
+const SERVERBOUND_PAYLOAD: &str = "net/minecraft/network/protocol/common/ServerboundCustomPayloadPacket";
+
+/// `Minecraft.getConnection()`: the client's connection to its server while its player plays in a
+/// world (vanilla's `player.connection`), else null.
+pub(crate) fn client_connection(rt: &mut Rt) -> V {
+    if !(crate::neo::is_client(rt) && crate::world_events::client_in_world(rt)) {
+        return V::NULL;
+    }
+    rt.intern("compat:client-connection".into(), |rt| rt.new_object(CLIENT_LISTENER))
+}
+
+/// A packet the client sends its server: a mod's payload (`new ServerboundCustomPayloadPacket(payload)`,
+/// or NeoForge's `send(payload)`) goes on the mods' channel, as `PacketDistributor.sendToServer`
+/// sends it. The game's own packets are the game's to send: one a mod builds is dropped.
+fn send_to_server(rt: &mut Rt, packet: V) {
+    let class = rt.class_of(packet);
+    let payload = if class == SERVERBOUND_PAYLOAD {
+        rt.get_field(packet, "payload")
+    } else if class.starts_with("net/minecraft/") {
+        V::NULL
+    } else {
+        packet
+    };
+    if payload.r() != 0 {
+        send(rt, PayloadTarget::Server, payload);
+    }
+}
+
+/// The client's connection's calls: sending, and what it knows of the server (its registries).
+fn client_listener_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match name {
+        "send" => {
+            send_to_server(rt, a(1));
+            V::Void
+        }
+        "registryAccess" => rt.intern("compat:registry-access".into(), |rt| rt.new_object("net/minecraft/core/RegistryAccess")),
+        "getConnection" => rt.intern("compat:client-network-connection".into(), |rt| rt.new_object(CONNECTION)),
+        "getLevel" => crate::glue::level(rt),
+        // The tab list's players: the game doesn't hand it over, so no one is known (vanilla's null
+        // for a UUID not on it).
+        "getPlayerInfo" => V::NULL,
+        "getOnlinePlayers" | "getListedOnlinePlayers" => crate::jutil::new_list(rt, Vec::new()),
+        _ => return None,
+    })
+}
+
+/// `Connection`: `send(packet)` as the listener's, connected while the client plays.
+fn connection_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match name {
+        "send" => {
+            send_to_server(rt, a(1));
+            V::Void
+        }
+        "isConnected" => V::I(i32::from(client_connection(rt).r() != 0)),
+        _ => return None,
+    })
 }
 
 /// A networking call, or None when this module doesn't model it.
@@ -1416,6 +1482,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         DISTRIBUTOR => distribute(rt, name, args),
         CONTEXT => context_call(rt, name, desc, args),
+        CLIENT_LISTENER | CLIENT_COMMON_LISTENER => client_listener_call(rt, name, args),
+        CONNECTION => connection_call(rt, name, args),
         _ => None,
     }
 }
@@ -2117,6 +2185,34 @@ mod tests {
         .unwrap();
         let handle = rt.lambda_id("test/Handler", 7, Vec::new());
         call(rt, "net/neoforged/neoforge/network/registration/PayloadRegistrar.playToClient.(Lnet/minecraft/network/protocol/common/custom/CustomPacketPayload$Type;Lnet/minecraft/network/codec/StreamCodec;Lnet/neoforged/neoforge/network/handling/IPayloadHandler;)Lnet/neoforged/neoforge/network/registration/PayloadRegistrar;", &[registrar, ty, codec, handle]);
+    }
+
+    /// A client mod sends its payload on its connection (`Minecraft.getConnection().send(new
+    /// ServerboundCustomPayloadPacket(payload))`): it goes to the server on the mods' channel, as
+    /// `PacketDistributor.sendToServer` sends it. A game packet a mod builds isn't sent.
+    #[test]
+    fn a_payload_sent_on_the_clients_connection_goes_to_the_server() {
+        let mut rt = Rt::new();
+        register(&mut rt);
+        rt.interned.insert("compat:client".into(), V::I(1));
+        let packet = rt.new_object("test/Packet");
+        let pos = crate::api::block_pos(&mut rt, 1, 2, 3);
+        rt.put_field(packet, "pos", pos);
+        rt.put_field(packet, "speed", V::F(2.0));
+        let send = "net/minecraft/client/multiplayer/ClientPacketListener.send.(Lnet/minecraft/network/protocol/Packet;)V";
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let mc = crate::api::call(rt, "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;", &[]);
+            let conn = crate::api::call(rt, "net/minecraft/client/Minecraft.getConnection.()Lnet/minecraft/client/multiplayer/ClientPacketListener;", &[mc]);
+            assert_ne!(conn, V::NULL);
+            let wrapped = rt.new_object(SERVERBOUND_PAYLOAD);
+            crate::api::call(rt, "net/minecraft/network/protocol/common/ServerboundCustomPayloadPacket.<init>.(Lnet/minecraft/network/protocol/common/custom/CustomPacketPayload;)V", &[wrapped, packet]);
+            crate::api::call(rt, send, &[conn, wrapped]);
+            let swing = rt.new_object("net/minecraft/network/protocol/game/ServerboundSwingPacket");
+            crate::api::call(rt, send, &[conn, swing]);
+        });
+        assert_eq!(host.payloads.len(), 1);
+        assert_eq!((host.payloads[0].0, host.payloads[0].1.as_str()), (PayloadTarget::Server, "test:speed"));
     }
 
     #[test]
