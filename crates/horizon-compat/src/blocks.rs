@@ -926,6 +926,8 @@ fn default_shape_class(owner: &str) -> bool {
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     matches!(owner, DYE_COLOR | "net/minecraft/world/item/ArmorItem$Type" | BLOCK_PROPERTIES | ITEM_PROPERTIES | WOOD_TYPE | BUILDER)
+        || (matches!(owner, ARMOR_ITEM | EQUIPABLE) && name == "getEquipmentSlot" && desc == "()Lnet/minecraft/world/entity/EquipmentSlot;")
+        || (owner == ARMOR_ITEM && matches!(name, "getType" | "getMaterial"))
         || (owner == ARMOR_MATERIAL && matches!(name, "defense" | "enchantmentValue" | "toughness" | "knockbackResistance" | "equipSound"))
         || matches!(
             (owner, name),
@@ -1019,6 +1021,20 @@ const DISPENSER: &str = "net/minecraft/world/level/block/DispenserBlock";
 const ARMOR_LAYER: &str = "net/minecraft/world/item/ArmorMaterial$Layer";
 const ARMOR_MATERIAL: &str = "net/minecraft/world/item/ArmorMaterial";
 const ARMOR_TYPE: &str = "net/minecraft/world/item/ArmorItem$Type";
+const ARMOR_ITEM: &str = "net/minecraft/world/item/ArmorItem";
+const EQUIPABLE: &str = "net/minecraft/world/item/Equipable";
+const EQUIPMENT_SLOT: &str = "net/minecraft/world/entity/EquipmentSlot";
+/// `ArmorItem.Type`'s slots, by its ordinal (helmet, chestplate, leggings, boots, body).
+const ARMOR_SLOTS: [&str; 5] = ["HEAD", "CHEST", "LEGS", "FEET", "BODY"];
+
+/// The slot of armour type `ty` (an `ArmorItem.Type`): `Type.getSlot()`. None for no type.
+fn armor_slot(rt: &mut Rt, ty: V) -> Option<V> {
+    if ty.r() == 0 {
+        return None;
+    }
+    let slot = ARMOR_SLOTS.get(rt.get_field(ty, "$ordinal").i() as usize)?;
+    crate::api_common::get_static(rt, EQUIPMENT_SLOT, slot)
+}
 
 /// 1.21.1's armour materials (`ArmorMaterials`): defense by `ArmorItem.Type` (helmet, chestplate,
 /// leggings, boots, body), enchantment value, equip sound, toughness, knockback resistance.
@@ -1646,6 +1662,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let n = rt.str_of(rt.get_field(a(0), "$name")).unwrap_or("").to_ascii_lowercase();
             Some(rt.string(&n))
         }
+        (ARMOR_TYPE, "getSlot") => armor_slot(rt, a(0)),
+        // `ArmorItem`'s own (a mod's armour, Create's cardboard armour): the slot its type names,
+        // which is what makes it `Equipable`; an `Equipable` that isn't one answers itself.
+        (ARMOR_ITEM | EQUIPABLE, "getEquipmentSlot") => {
+            let ty = rt.get_field(a(0), "type");
+            armor_slot(rt, ty)
+        }
+        (ARMOR_ITEM, "getType") => Some(rt.get_field(a(0), "type")),
+        (ARMOR_ITEM, "getMaterial") => Some(rt.get_field(a(0), "material")),
         ("net/minecraft/world/item/ArmorItem$Type", "getDurability") => {
             const HEALTH: [i32; 5] = [11, 16, 15, 13, 16];
             let i = rt.get_field(a(0), "$ordinal").i().clamp(0, 4) as usize;
@@ -1808,6 +1833,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             // `BlockItem(Block, Properties)` and its kinds: the block it places (`Block.asItem()` finds it).
             if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") {
                 rt.put_field(a(0), "$block", a(1));
+            }
+            // `ArmorItem(material, type, properties)`: vanilla's fields `material` and `type`.
+            if o == ARMOR_ITEM && desc.starts_with("(Lnet/minecraft/core/Holder;Lnet/minecraft/world/item/ArmorItem$Type;") {
+                rt.put_field(a(0), "material", a(1));
+                rt.put_field(a(0), "type", a(2));
             }
             // `BucketItem(Fluid, Properties)`: the fluid it holds, vanilla's field `content`.
             if o == "net/minecraft/world/item/BucketItem" {
@@ -3553,6 +3583,33 @@ mod tests {
         assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial.toughness.()F", &[chain]), V::F(0.0));
         let sound = api::call(&mut rt, "net/minecraft/world/item/ArmorMaterial.equipSound.()Lnet/minecraft/core/Holder;", &[chain]);
         assert_ne!(sound, V::NULL);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's armour that keeps `ArmorItem`'s `getEquipmentSlot` (Create's cardboard armour) is worn
+    /// in the slot its type takes: the game gets that `equippable` slot. It keeps the type and the
+    /// material it was made with.
+    #[test]
+    fn a_mod_armour_item_is_worn_in_the_slot_its_type_takes() {
+        fn forward(rt: &mut Rt, key: &'static str, _: &'static str, args: &[V]) -> V {
+            api::call(rt, key, args)
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(forward);
+        rt.supers.insert("test/CardboardArmorItem", ARMOR_ITEM);
+        let material = api::get_static(&mut rt, "net/minecraft/world/item/ArmorMaterials.LEATHER");
+        let props = rt.new_object(ITEM_PROPERTIES);
+        api::call(&mut rt, "net/minecraft/world/item/Item$Properties.<init>.()V", &[props]);
+        for (ty, slot) in [("HELMET", "head"), ("CHESTPLATE", "chest"), ("LEGGINGS", "legs"), ("BOOTS", "feet")] {
+            let item = rt.new_object("test/CardboardArmorItem");
+            let key = Box::leak(format!("{ARMOR_TYPE}.{ty}").into_boxed_str());
+            let ty = api::get_static(&mut rt, key);
+            api::call(&mut rt, "net/minecraft/world/item/ArmorItem.<init>.(Lnet/minecraft/core/Holder;Lnet/minecraft/world/item/ArmorItem$Type;Lnet/minecraft/world/item/Item$Properties;)V", &[item, material, ty, props]);
+            assert_eq!(equippable(&mut rt, item), Some(format!("\"minecraft:equippable\": {{\"slot\": \"{slot}\"}}")), "{key}");
+            assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorItem.getType.()Lnet/minecraft/world/item/ArmorItem$Type;", &[item]), ty);
+            assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorItem.getMaterial.()Lnet/minecraft/core/Holder;", &[item]), material);
+        }
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

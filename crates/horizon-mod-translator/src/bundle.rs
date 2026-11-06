@@ -27,6 +27,36 @@ pub fn mod_id(jar: &Path) -> Option<String> {
 /// A TOML value as written on its line: a quoted string's content (a basic string's escapes
 /// read: `displayName="The \"Mod\""`), or a bare word, without what follows it
 /// (`modId="torchmaster" #mandatory` is `torchmaster`).
+/// A TOML table header line as its table, without its comment and the spaces TOML allows in it
+/// (`[[mods]] #mandatory` and `[[ mods ]]` are `[[mods]]`); None for a line that isn't one.
+pub(crate) fn toml_header(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    if !line.starts_with('[') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut quote: Option<char> = None;
+    for c in line.chars() {
+        match quote {
+            Some(q) => {
+                out.push(c);
+                if c == q {
+                    quote = None;
+                }
+            }
+            None if c == '#' => break,
+            None if c.is_whitespace() => {}
+            None => {
+                if matches!(c, '"' | '\'') {
+                    quote = Some(c);
+                }
+                out.push(c);
+            }
+        }
+    }
+    Some(out)
+}
+
 pub(crate) fn toml_string(v: &str) -> String {
     let v = v.trim();
     match v.chars().next() {

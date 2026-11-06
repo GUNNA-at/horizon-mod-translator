@@ -186,7 +186,7 @@ fn declares_mod<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> bool {
     ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"].iter().any(|name| {
         let Ok(mut e) = zip.by_name(name) else { return false };
         let mut text = String::new();
-        e.read_to_string(&mut text).is_ok() && text.lines().any(|l| l.trim() == "[[mods]]")
+        e.read_to_string(&mut text).is_ok() && text.lines().any(|l| bundle::toml_header(l).as_deref() == Some("[[mods]]"))
     })
 }
 
@@ -330,8 +330,8 @@ fn zip_mod_metadata<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Ve
     let mut in_mod = false;
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with('[') {
-            in_mod = line == "[[mods]]";
+        if let Some(header) = bundle::toml_header(line) {
+            in_mod = header == "[[mods]]";
             if in_mod {
                 out.push(Default::default());
             }
@@ -451,8 +451,8 @@ pub fn mixin_configs_of(jars: &[&Path]) -> Vec<MixinConfig> {
             let mut in_mixins = false;
             for line in text.lines() {
                 let line = line.trim();
-                if line.starts_with('[') {
-                    in_mixins = line == "[[mixins]]";
+                if let Some(header) = bundle::toml_header(line) {
+                    in_mixins = header == "[[mixins]]";
                     continue;
                 }
                 if let (true, Some((k, v))) = (in_mixins, line.split_once('='))
@@ -506,8 +506,8 @@ pub fn mixin_configs_of(jars: &[&Path]) -> Vec<MixinConfig> {
             let mut in_mod = false;
             for line in text.lines() {
                 let line = line.trim();
-                if line.starts_with('[') {
-                    in_mod = line == "[[mods]]";
+                if let Some(header) = bundle::toml_header(line) {
+                    in_mod = header == "[[mods]]";
                 } else if let (true, Some((k, v))) = (in_mod, line.split_once('='))
                     && k.trim() == "modId"
                 {
@@ -911,7 +911,7 @@ mod mixin_census_tests {
         put("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\r\nMixinConfigs: old.mixins.json\r\n");
         put(
             "META-INF/neoforge.mods.toml",
-            "modLoader=\"javafml\"\n[[mods]]\nmodId=\"m\"\n[[mixins]]\nconfig=\"m.mixins.json\" # common\n[[dependencies.m]]\nmodId=\"create\"\n",
+            "modLoader=\"javafml\"\n[[mods]] #mandatory\nmodId=\"m\"\n[[ mixins ]] # common and client\nconfig=\"m.mixins.json\" # common\n[[dependencies.m]]\nmodId=\"create\"\n",
         );
         put(
             "m.mixins.json",
@@ -936,6 +936,58 @@ mod mixin_census_tests {
                 MixinConfig { file: "old.mixins.json".into(), classes: vec!["com/m/old/ServerMixin".into()], default_require: 0, plugin: None, off: Vec::new() },
             ]
         );
+    }
+
+    /// A jar that only bundles its mods (Create Aeronautics: three under `META-INF/jarjar/`, no class
+    /// of its own) is their program: a bundled jar whose mods.toml declares a mod counts as one
+    /// however it writes the table's header (`[[mods]] #mandatory`, `[[ mods ]]`), so its classes are
+    /// translated and its metadata read; a bundled library's classes that nothing reaches stay out.
+    #[test]
+    fn a_bundles_nested_mods_are_its_program_however_their_headers_are_written() {
+        /// A class file with no members: `name`, extending `Object`.
+        fn class(name: &str) -> Vec<u8> {
+            let mut b = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 65, 0, 5];
+            for (i, s) in [name, "java/lang/Object"].into_iter().enumerate() {
+                b.push(1);
+                b.extend((s.len() as u16).to_be_bytes());
+                b.extend(s.as_bytes());
+                b.push(7);
+                b.extend((2 * i as u16 + 1).to_be_bytes());
+            }
+            b.extend([0x00, 0x21, 0, 2, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0]);
+            b
+        }
+        fn jar(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for (name, bytes) in files {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                std::io::Write::write_all(&mut zip, bytes).unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        }
+        let toml = |t: &str| t.as_bytes().to_vec();
+        let aeronautics = jar(&[
+            ("META-INF/neoforge.mods.toml", toml("modLoader = \"javafml\" #mandatory\n[[mods]] #mandatory\nmodId = \"aeronautics\" #mandatory\nversion = \"1.3.2\" #mandatory\n")),
+            ("dev/a/Aeronautics.class", class("dev/a/Aeronautics")),
+        ]);
+        let offroad = jar(&[("META-INF/neoforge.mods.toml", toml("[[ mods ]]\nmodId = \"offroad\"\n")), ("dev/o/Offroad.class", class("dev/o/Offroad"))]);
+        let library = jar(&[("lib/Unused.class", class("lib/Unused"))]);
+        let bundle = jar(&[
+            ("META-INF/neoforge.mods.toml", toml("[[mods]]\nmodId = \"bundled\"\n")),
+            ("META-INF/jarjar/aeronautics.jar", aeronautics),
+            ("META-INF/jarjar/offroad.jar", offroad),
+            ("META-INF/jarjar/library.jar", library),
+        ]);
+        let dir = std::env::temp_dir().join(format!("hz-bundled-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bundled.jar");
+        std::fs::write(&path, bundle).unwrap();
+        let mut names: Vec<String> = classes(&path).unwrap().into_iter().map(|c| c.name).collect();
+        names.sort();
+        let ids: Vec<String> = nested_mod_metadata(&path).into_iter().map(|m| m.0).collect();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(names, ["dev/a/Aeronautics", "dev/o/Offroad"]);
+        assert_eq!(ids, ["aeronautics", "offroad"]);
     }
 
     #[test]

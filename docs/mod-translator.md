@@ -4227,6 +4227,33 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `MapCodec` from `fieldOf` for `forGetter`, a menu's `Slot`); entity model definitions (`MeshDefinition`,
     `PartDefinition`, `CubeListBuilder`, `LayerDefinition.create`, `ModelPart.getChild`, about 40 mods each) are a
     real gap.
+- [x] 2026-11-06 Part 27: a block state's seed (`BlockState.getSeed`) and a mod armour's slot
+  (`ArmorItem.getEquipmentSlot`).
+  - Round 21's unmapped list still had two calls from Create's own code: Flywheel baking a block's model in its
+    virtual level (`BlockState.getSeed(pos)`, the seed a model's random offset and texture variant draw from), and
+    Create's cardboard armour (`CardboardArmorItem`, an `ArmorItem` that keeps `getEquipmentSlot`) when the game
+    asked where it is worn.
+  - `BlockState.getSeed(pos)`: the block's own `getSeed(state, pos)` when a mod block overrides it, else
+    `Mth.getSeed(pos)`, as vanilla's `Block.getSeed`; a mod block's `super.getSeed` is the same `Mth.getSeed`.
+  - `ArmorItem(material, type, properties)` keeps vanilla's fields `material` and `type`; `getType`, `getMaterial`,
+    `ArmorItem.Type.getSlot` and `getEquipmentSlot` (the slot its type names) answer from them, so a mod's armour
+    is worn in the slot its type takes (the game reads its `equippable` slot from it).
+  - Tests: `api::tests::a_states_seed_is_its_blocks_own_else_its_positions` (stone at 10, 64, -20: vanilla's
+    `Mth.getSeed`, recomputed apart from the code; a block with its own seed: that seed) and
+    `blocks::tests::a_mod_armour_item_is_worn_in_the_slot_its_type_takes` (a helmet, chestplate, leggings and boots
+    of a mod's own class: head, chest, legs and feet; its type and material as made).
+- [x] 2026-11-06 Part 28: nested mods whose `mods.toml` headers carry a comment or spaces (Create Aeronautics).
+  - packcov6 measured Create Aeronautics' jar at 0/0: it holds no class of its own, only three nested mods under
+    `META-INF/jarjar/` (aeronautics 254 classes, offroad 86, simulated 795), and their `neoforge.mods.toml` write
+    `[[mods]] #mandatory`. The translator compared a header with the whole trimmed line, found no mod in them, and
+    took their classes for an unreached library's.
+  - `bundle::toml_header` reads a table header as TOML does: whitespace inside the brackets and a trailing comment
+    don't count (a `#` in a quoted key does). Everything that reads a `mods.toml` uses it: whether a jar declares a
+    mod, its metadata, its mixin configs (`[[mixins]]`) and its nested mods' ids.
+  - Test: `mixin_census_tests::a_bundles_nested_mods_are_its_program_however_their_headers_are_written` (a bundle
+    holding a mod with a commented header, one with `[[ mods ]]` and a library: both mods' classes are translated
+    and their ids read, the library's class stays out); the mixin configs test's `mods.toml` now writes its headers
+    both ways. 398 compat and 18 translator tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

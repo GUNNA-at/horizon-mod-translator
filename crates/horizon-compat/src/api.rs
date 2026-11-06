@@ -742,6 +742,16 @@ fn plain_super_init(rt: &Rt, key: &str, args: &[V]) -> bool {
 
 type Module = fn(&mut Rt, &'static str, &[V]) -> Option<V>;
 
+/// `Block.getSeed(state, pos)`: a mod block overrides it by name and descriptor.
+const BLOCK_SEED: &str = "getSeed.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;)J";
+const BLOCK_SEED_KEY: &str = "net/minecraft/world/level/block/Block.getSeed.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;)J";
+
+/// `Mth.getSeed(pos)`: the seed vanilla draws a block's random look from.
+fn pos_seed(rt: &mut Rt, pos: V) -> V {
+    let p = pos_of(rt, pos);
+    call(rt, "net/minecraft/util/Mth.getSeed.(III)J", &[V::I(p[0]), V::I(p[1]), V::I(p[2])])
+}
+
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
 const CHAIN: [Module; 60] = [
@@ -1667,6 +1677,9 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => return None,
         },
 
+        // `Block.getSeed(state, pos)`, a mod block's `super.` call: `Mth.getSeed(pos)`.
+        ("net/minecraft/world/level/block/Block", "getSeed") if BLOCK_SEED_KEY.ends_with(desc) => pos_seed(rt, a(2)),
+
         // Block states
         (STATE | "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase", n) => {
             let text = rt.str_of(a(0)).unwrap_or("minecraft:air").to_owned();
@@ -1709,6 +1722,12 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 // The game updates the shapes around a block it sets.
                 "updateIndirectNeighbourShapes" | "updateNeighbourShapes" => V::Void,
                 "getRenderShape" if desc == "()Lnet/minecraft/world/level/block/RenderShape;" => render_shape(rt, a(0), &text),
+                // `getSeed(pos)`, what random model offsets and textures draw from: the block's own
+                // `getSeed(state, pos)`, else `Mth.getSeed(pos)`.
+                "getSeed" if desc == "(Lnet/minecraft/core/BlockPos;)J" => match crate::block_breaking::block_override(rt, &text, BLOCK_SEED_KEY, BLOCK_SEED, &[a(0), a(1)]) {
+                    Some(v) => v,
+                    None => pos_seed(rt, a(1)),
+                },
                 "isSlimeBlock" | "isStickyBlock" if desc == "()Z" => V::I(sticky(rt, n, a(0), V::NULL) as i32),
                 "canStickTo" if desc == "(Lnet/minecraft/world/level/block/state/BlockState;)Z" => V::I(sticky(rt, n, a(0), a(1)) as i32),
                 "getDestroySpeed" => V::F(crate::blocks::state_facts(rt, &text).hardness),
@@ -2260,6 +2279,31 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `BlockState.getSeed(pos)`: a mod block's own `getSeed(state, pos)` first; else vanilla's
+    /// `Mth.getSeed` of the position (its value at 10, 64, -20 as vanilla computes it).
+    #[test]
+    fn a_states_seed_is_its_blocks_own_else_its_positions() {
+        fn fixed_seed(class: &str, nd: &str) -> bool {
+            class == "test/FixedSeedBlock" && nd == BLOCK_SEED
+        }
+        fn fixed_code(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            if short == BLOCK_SEED { V::J(42) } else { call(rt, key, args) }
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(fixed_seed);
+        rt.vcall = Some(fixed_code);
+        let block = rt.new_object("test/FixedSeedBlock");
+        rt.registered.insert(("block".into(), "test:fixed".into()), block);
+        let get_seed = "net/minecraft/world/level/block/state/BlockState.getSeed.(Lnet/minecraft/core/BlockPos;)J";
+        let pos = block_pos(&mut rt, 10, 64, -20);
+        let stone = state(&mut rt, "minecraft:stone");
+        assert_eq!(call(&mut rt, get_seed, &[stone, pos]), V::J(-62_212_282_568_415));
+        let fixed = state(&mut rt, "test:fixed");
+        assert_eq!(call(&mut rt, get_seed, &[fixed, pos]), V::J(42));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     /// `BlockState.is(Holder)`: the state's block is the one the holder holds (FramedBlocks checks
     /// an item model's source state against its `DeferredBlock`). A level's side is its own: the
