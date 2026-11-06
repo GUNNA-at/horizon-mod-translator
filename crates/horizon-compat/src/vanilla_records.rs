@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 645] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 644] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1479,7 +1479,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 645] = [
     ("net/minecraft/world/item/armortrim/ArmorTrim", "i(Lnet/minecraft/core/Holder;Lnet/minecraft/core/Holder;ZLjava/util/function/Function;Ljava/util/function/Function;)V=material,pattern,showInTooltip,innerTexture,outerTexture|gpattern()Lnet/minecraft/core/Holder;=pattern|gmaterial()Lnet/minecraft/core/Holder;=material"),
     ("net/minecraft/world/item/component/BundleContents", "i(Ljava/util/List;Lorg/apache/commons/lang3/math/Fraction;)V=items,weight|gweight()Lorg/apache/commons/lang3/math/Fraction;=weight"),
     ("net/minecraft/world/item/component/ChargedProjectiles", "i(Ljava/util/List;)V=items|e=items"),
-    ("net/minecraft/world/item/component/CustomData", "i(Lnet/minecraft/nbt/CompoundTag;)V=tag|ggetUnsafe()Lnet/minecraft/nbt/CompoundTag;=tag|e=tag"),
     ("net/minecraft/world/item/crafting/AbstractCookingRecipe", "i(Lnet/minecraft/world/item/crafting/RecipeType;Ljava/lang/String;Lnet/minecraft/world/item/crafting/CookingBookCategory;Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/ItemStack;FI)V=type,group,category,ingredient,result,experience,cookingTime|ggetExperience()F=experience|ggetGroup()Ljava/lang/String;=group|ggetCookingTime()I=cookingTime|ggetType()Lnet/minecraft/world/item/crafting/RecipeType;=type|gcategory()Lnet/minecraft/world/item/crafting/CookingBookCategory;=category|o"),
     ("net/minecraft/world/item/crafting/CustomRecipe", "i(Lnet/minecraft/world/item/crafting/CraftingBookCategory;)V=category|gcategory()Lnet/minecraft/world/item/crafting/CraftingBookCategory;=category|o"),
     ("net/minecraft/world/item/crafting/SingleItemRecipe", "i(Lnet/minecraft/world/item/crafting/RecipeType;Lnet/minecraft/world/item/crafting/RecipeSerializer;Ljava/lang/String;Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/ItemStack;)V=type,serializer,group,ingredient,result|ggetType()Lnet/minecraft/world/item/crafting/RecipeType;=type|ggetSerializer()Lnet/minecraft/world/item/crafting/RecipeSerializer;=serializer|ggetGroup()Ljava/lang/String;=group|o"),

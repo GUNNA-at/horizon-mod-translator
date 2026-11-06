@@ -125,6 +125,23 @@ pub fn from_runtime(rt: &Rt, v: V) -> BTreeMap<String, Nbt> {
     out
 }
 
+/// `NbtUtils.compareNbt(expected, actual, partial_lists)`: a compound in `expected` matches one in
+/// `actual` that has each of its keys, each matching; with `partial_lists` each element of a list
+/// matches one of `actual`'s (an empty list only an empty one); anything else is equal (of the
+/// same kind).
+pub(crate) fn matches(expected: &Nbt, actual: &Nbt, partial_lists: bool) -> bool {
+    match (expected, actual) {
+        (Nbt::Compound(e), Nbt::Compound(a)) => a.len() >= e.len() && e.iter().all(|(k, v)| a.get(k).is_some_and(|x| matches(v, x, partial_lists))),
+        (Nbt::List(e), Nbt::List(a)) if partial_lists => {
+            if e.is_empty() {
+                return a.is_empty();
+            }
+            a.len() >= e.len() && e.iter().all(|v| a.iter().any(|x| matches(v, x, partial_lists)))
+        }
+        _ => expected == actual,
+    }
+}
+
 /// A hash of a compound's contents (keys, kinds and values), to tell when data changed.
 pub fn hash(tag: &BTreeMap<String, Nbt>) -> u64 {
     hash_entries(tag.iter())

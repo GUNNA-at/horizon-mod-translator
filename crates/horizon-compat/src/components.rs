@@ -10,14 +10,16 @@
 //! value through its type's codec (`encodeStart(NbtOps.INSTANCE, value)` and `parse`). A saved
 //! stack (`ItemStack.save`, `ItemStack.CODEC`: what a block entity keeps) carries them as vanilla's
 //! `components` map. Of vanilla's own types a game stack carries its enchantments (and a book's
-//! stored ones) here and back; of an item's default components (vanilla's prototype) only
-//! `enchantments` is modelled (`ItemEnchantments.EMPTY`: `get(MAX_STACK_SIZE)` is null).
+//! stored ones) and its custom data (`CustomData`, modelled here) here and back; of an item's
+//! default components (vanilla's prototype) only `enchantments` is modelled
+//! (`ItemEnchantments.EMPTY`: `get(MAX_STACK_SIZE)` is null).
 //!
 //! Component maps: a stack's as a live view (`ItemStack.getComponents()`), maps built by
 //! `DataComponentMap.builder()` and patches by `DataComponentPatch.builder()`, which
 //! `ItemStack.applyComponents` puts on a stack.
 use crate::nbt::Nbt;
 use crate::{Data, Rt, V};
+use std::collections::BTreeMap;
 
 pub(crate) const TYPE: &str = "net/minecraft/core/component/DataComponentType";
 const BUILDER: &str = "net/minecraft/core/component/DataComponentType$Builder";
@@ -100,12 +102,17 @@ pub fn persistent_types(rt: &mut Rt) -> Vec<String> {
 /// once).
 pub(crate) fn load(rt: &mut Rt, stack: V, carried: &[(String, Nbt)]) {
     for (name, value) in carried {
-        load_one(rt, stack, name, &crate::recipes::nbt_json(value));
+        match value {
+            // Custom data as NBT: its tags' kinds stay.
+            Nbt::Compound(tag) if name == CUSTOM_DATA_ID => load_custom_data(rt, stack, tag),
+            _ => load_one(rt, stack, name, &crate::recipes::nbt_json(value)),
+        }
     }
 }
 
 /// [`load`] from a saved stack's `components` (vanilla's patch, as `ItemStack.CODEC` writes it):
-/// the mod's own types and the damage; a removal (`!name`) and vanilla's other types are left out.
+/// the mod's own types, the damage and the custom data; a removal (`!name`) and vanilla's other
+/// types are left out.
 pub(crate) fn load_saved(rt: &mut Rt, stack: V, patch: &serde_json::Map<String, serde_json::Value>) {
     for (name, value) in patch {
         if name == "minecraft:damage" {
@@ -116,9 +123,23 @@ pub(crate) fn load_saved(rt: &mut Rt, stack: V, patch: &serde_json::Map<String, 
     }
 }
 
+/// [`load_saved`] from NBT (`ItemStack.parse`): the custom data keeps its tags' kinds.
+pub(crate) fn load_saved_nbt(rt: &mut Rt, stack: V, patch: &BTreeMap<String, Nbt>) {
+    let mut rest = serde_json::Map::new();
+    for (name, value) in patch {
+        match value {
+            Nbt::Compound(tag) if name == CUSTOM_DATA_ID => load_custom_data(rt, stack, tag),
+            _ => {
+                rest.insert(name.clone(), crate::recipes::nbt_json(value));
+            }
+        }
+    }
+    load_saved(rt, stack, &rest);
+}
+
 /// `stack`'s patch as `ItemStack.CODEC` writes it: [`saved`] and its damage, when it has some.
-pub(crate) fn patch(rt: &mut Rt, stack: V) -> std::collections::BTreeMap<String, Nbt> {
-    let mut out: std::collections::BTreeMap<String, Nbt> = saved(rt, stack).into_iter().collect();
+pub(crate) fn patch(rt: &mut Rt, stack: V) -> BTreeMap<String, Nbt> {
+    let mut out: BTreeMap<String, Nbt> = saved(rt, stack).into_iter().collect();
     let n = damage(rt, stack);
     if n > 0 {
         out.insert("minecraft:damage".into(), Nbt::Int(n));
@@ -127,6 +148,17 @@ pub(crate) fn patch(rt: &mut Rt, stack: V) -> std::collections::BTreeMap<String,
 }
 
 fn load_one(rt: &mut Rt, stack: V, name: &str, value: &serde_json::Value) {
+    // Custom data as JSON (a saved stack's), through `CustomData.CODEC`.
+    if name == CUSTOM_DATA_ID {
+        let codec = crate::codecs::get_static(rt, CUSTOM_DATA, "CODEC").unwrap_or(V::NULL);
+        match crate::codecs::decode(rt, codec, value) {
+            Ok(v) => {
+                set_vanilla(rt, stack, name, v);
+            }
+            Err(e) => crate::glue::trace_once(rt, &format!("component-read:{name}"), |_| format!("component {name} not read: {e}")),
+        }
+        return;
+    }
     if CARRIED_VANILLA.contains(&name) {
         match crate::enchantments::decode(rt, value) {
             Ok(v) => {
@@ -147,14 +179,21 @@ fn load_one(rt: &mut Rt, stack: V, name: &str, value: &serde_json::Value) {
 }
 
 /// `stack`'s components a game stack can carry, by type name (sorted), each written with its type's
-/// codec: the mod's, and vanilla's enchantments ([`CARRIED_VANILLA`], none when there are no
-/// levels). Vanilla's other types, types without a codec and values the codec can't write are left
-/// out (the last told once).
+/// codec: the mod's, vanilla's enchantments ([`CARRIED_VANILLA`], none when there are no levels)
+/// and its custom data (its tag, none when empty). Vanilla's other types, types without a codec
+/// and values the codec can't write are left out (the last told once).
 pub(crate) fn saved(rt: &mut Rt, stack: V) -> Vec<(String, Nbt)> {
     let mut out = Vec::new();
     for p in pairs(rt, stack).chunks(2) {
         let (ty, value) = (p[0], p[1]);
         let id = rt.str_of(rt.get_field(ty, "$id")).unwrap_or("").to_owned();
+        if id == CUSTOM_DATA_ID {
+            let tag = custom_nbt(rt, value);
+            if !tag.is_empty() {
+                out.push((id, Nbt::Compound(tag)));
+            }
+            continue;
+        }
         if CARRIED_VANILLA.contains(&id.as_str()) {
             if !crate::enchantments::levels(rt, value).is_empty() {
                 match crate::enchantments::encode(rt, value) {
@@ -711,12 +750,149 @@ pub(crate) fn same_patch(rt: &mut Rt, a: V, b: V) -> bool {
     true
 }
 
+// ---- Vanilla's custom data (`minecraft:custom_data`) ----
+
+/// `CustomData`: a stack's free-form NBT (`minecraft:custom_data`; a block entity's and an
+/// entity's too), as vanilla keeps it: its own `CompoundTag` in `tag`, which `getUnsafe` hands out
+/// and everything else copies. A game stack carries it here and back ([`load`], [`saved`]).
+const CUSTOM_DATA: &str = "net/minecraft/world/item/component/CustomData";
+const CUSTOM_DATA_ID: &str = "minecraft:custom_data";
+const TAG_COPY: &str = "net/minecraft/nbt/CompoundTag.copy.()Lnet/minecraft/nbt/CompoundTag;";
+const TAG_SIZE: &str = "net/minecraft/nbt/CompoundTag.size.()I";
+const TAG_CONTAINS: &str = "net/minecraft/nbt/CompoundTag.contains.(Ljava/lang/String;)Z";
+const TAG_TO_STRING: &str = "net/minecraft/nbt/CompoundTag.toString.()Ljava/lang/String;";
+const CONSUMER_ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
+const GET_OR_DEFAULT_DESC: &str = "(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";
+const REMOVE_DESC: &str = "(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+
+/// A `CustomData` holding `tag` itself (vanilla's private constructor).
+fn custom_data(rt: &mut Rt, tag: V) -> V {
+    let d = rt.new_object(CUSTOM_DATA);
+    rt.put_field(d, "tag", tag);
+    d
+}
+
+/// `CustomData.EMPTY`: one object, of an empty tag.
+fn empty_custom_data(rt: &mut Rt) -> V {
+    rt.intern("compat:custom-data/empty".into(), |rt| {
+        let tag = crate::nbt::to_runtime(rt, &BTreeMap::new());
+        custom_data(rt, tag)
+    })
+}
+
+/// The tag `data` (a `CustomData`) holds, as NBT.
+fn custom_nbt(rt: &Rt, data: V) -> BTreeMap<String, Nbt> {
+    if data.r() == 0 {
+        return BTreeMap::new();
+    }
+    crate::nbt::from_runtime(rt, rt.get_field(data, "tag"))
+}
+
+/// A stack's custom data from the NBT a game stack (or a saved one) carries.
+fn load_custom_data(rt: &mut Rt, stack: V, tag: &BTreeMap<String, Nbt>) {
+    let t = crate::nbt::to_runtime(rt, tag);
+    let d = custom_data(rt, t);
+    set_vanilla(rt, stack, CUSTOM_DATA_ID, d);
+}
+
+/// Whether `x` and `y` are custom data holding equal tags (vanilla's `CustomData.equals`); None
+/// when either isn't custom data.
+pub(crate) fn same_custom_data(rt: &Rt, x: V, y: V) -> Option<bool> {
+    (x.r() != 0 && y.r() != 0 && rt.class_of(x) == CUSTOM_DATA && rt.class_of(y) == CUSTOM_DATA).then(|| custom_nbt(rt, x) == custom_nbt(rt, y))
+}
+
+/// Custom data's hash, from its tag's contents (equal tags, equal hashes); None for anything else.
+pub(crate) fn custom_data_hash(rt: &Rt, v: V) -> Option<i32> {
+    (v.r() != 0 && rt.class_of(v) == CUSTOM_DATA).then(|| crate::nbt::hash(&custom_nbt(rt, v)) as i32)
+}
+
+/// `CustomData`'s own calls, as vanilla's.
+fn custom_data_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let tag = |rt: &Rt, d: V| if d.r() == 0 { V::NULL } else { rt.get_field(d, "tag") };
+    Some(match name {
+        "<init>" => {
+            rt.put_field(a(0), "tag", a(1));
+            V::Void
+        }
+        // `of(tag)`: a copy of the tag.
+        "of" => {
+            let t = crate::api::call(rt, TAG_COPY, &[a(0)]);
+            custom_data(rt, t)
+        }
+        "getUnsafe" => tag(rt, a(0)),
+        "copyTag" => {
+            let t = tag(rt, a(0));
+            crate::api::call(rt, TAG_COPY, &[t])
+        }
+        "isEmpty" => V::I(i32::from(custom_nbt(rt, a(0)).is_empty())),
+        "size" => {
+            let t = tag(rt, a(0));
+            crate::api::call(rt, TAG_SIZE, &[t])
+        }
+        "contains" => {
+            let t = tag(rt, a(0));
+            crate::api::call(rt, TAG_CONTAINS, &[t, a(1)])
+        }
+        // `matchedBy(tag)`: `NbtUtils.compareNbt(tag, this.tag, true)`.
+        "matchedBy" => {
+            let expected = if a(1).r() == 0 { None } else { crate::nbt::element_from_runtime(rt, a(1)) };
+            let actual = Nbt::Compound(custom_nbt(rt, a(0)));
+            V::I(i32::from(expected.is_none_or(|e| crate::nbt::matches(&e, &actual, true))))
+        }
+        // `update(updater)`: a copy of the tag, as the updater leaves it.
+        "update" if desc == "(Ljava/util/function/Consumer;)Lnet/minecraft/world/item/component/CustomData;" => updated(rt, a(0), a(1)),
+        // `update(type, stack, updater)`: the stack's (or an empty one), updated; an empty result
+        // is taken off the stack.
+        "update" if desc.starts_with("(Lnet/minecraft/core/component/DataComponentType;Lnet/minecraft/world/item/ItemStack;Ljava/util/function/Consumer;)") => {
+            let empty = empty_custom_data(rt);
+            let held = call(rt, ITEM_STACK, "getOrDefault", GET_OR_DEFAULT_DESC, &[a(1), a(0), empty]).unwrap_or(V::NULL);
+            let data = updated(rt, if held.r() == 0 { empty } else { held }, a(2));
+            put_custom_data(rt, a(0), a(1), data);
+            V::Void
+        }
+        // `set(type, stack, tag)`: a copy of the tag on the stack; an empty tag takes it off.
+        "set" if desc.starts_with("(Lnet/minecraft/core/component/DataComponentType;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/nbt/CompoundTag;)") => {
+            let t = crate::api::call(rt, TAG_COPY, &[a(2)]);
+            let data = custom_data(rt, t);
+            put_custom_data(rt, a(0), a(1), data);
+            V::Void
+        }
+        "equals" => V::I(i32::from(a(0) == a(1) || same_custom_data(rt, a(0), a(1)) == Some(true))),
+        "hashCode" => V::I(custom_data_hash(rt, a(0)).unwrap_or(0)),
+        "toString" => {
+            let t = tag(rt, a(0));
+            crate::api::call(rt, TAG_TO_STRING, &[t])
+        }
+        _ => return None,
+    })
+}
+
+/// `data.update(updater)`: a copy of its tag given to the updater, then held by new custom data.
+fn updated(rt: &mut Rt, data: V, updater: V) -> V {
+    let t = rt.get_field(data, "tag");
+    let t = crate::api::call(rt, TAG_COPY, &[t]);
+    rt.call_functional(CONSUMER_ACCEPT, updater, &[t]);
+    custom_data(rt, t)
+}
+
+/// Custom data on `stack` as type `ty`, or none when its tag is empty (vanilla keeps no empty
+/// custom data on a stack).
+fn put_custom_data(rt: &mut Rt, ty: V, stack: V, data: V) {
+    if custom_nbt(rt, data).is_empty() {
+        call(rt, ITEM_STACK, "remove", REMOVE_DESC, &[stack, ty]);
+    } else {
+        call(rt, ITEM_STACK, "set", SET_DESC, &[stack, ty, data]);
+    }
+}
+
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match owner {
         "net/minecraft/core/component/DataComponents" if !NOT_TYPES.contains(&field) && !field.ends_with("CODEC") => {
             Some(vanilla_type(rt, &format!("minecraft:{}", field.to_ascii_lowercase())))
         }
         MAP if field == "EMPTY" => Some(rt.intern("compat:component-map/empty".into(), |rt| plain_map(rt, Vec::new()))),
+        CUSTOM_DATA if field == "EMPTY" => Some(empty_custom_data(rt)),
         _ => None,
     }
 }
@@ -736,7 +912,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         || owner == INPUT
         || matches!(name, "applyComponentsFromItemStack" | "setComponents" | "collectComponents" | "applyImplicitComponents" | "collectImplicitComponents");
     let stack_maps = matches!(name, "getComponents" | "applyComponents" | "applyComponentsAndValidate");
-    matches!(owner, TYPE | BUILDER) || maps || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || stack_maps || typed))
+    matches!(owner, TYPE | BUILDER | CUSTOM_DATA) || maps || ((owner == ITEM_STACK || HOLDERS.contains(&owner)) && (stack_method || stack_maps || typed))
 }
 
 pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -748,6 +924,7 @@ pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     match (owner, name) {
+        (CUSTOM_DATA, _) => custom_data_call(rt, name, desc, args),
         (TYPE, "builder") => Some(rt.new_object(BUILDER)),
         // `new DataComponentType.Builder<>()` (SophisticatedCore's): what `builder()` makes.
         (BUILDER, "<init>") => Some(V::Void),
@@ -963,6 +1140,86 @@ mod tests {
 
     fn boxed(rt: &mut Rt, n: i32) -> V {
         api::call(rt, "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;", &[V::I(n)])
+    }
+
+    /// The test's consumer (`test/Charger`): `tag -> tag.putByte("charge", 3)`; every other call
+    /// is the API's, as a translated mod's dispatch leaves it.
+    fn charger(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
+        if key == "accept.(Ljava/lang/Object;)V" && rt.class_of(args[0]) == "test/Charger" {
+            let k = rt.string("charge");
+            return api::call(rt, "net/minecraft/nbt/CompoundTag.putByte.(Ljava/lang/String;B)V", &[args[1], k, V::I(3)]);
+        }
+        api::call(rt, owner_key, args)
+    }
+
+    /// A mod's custom data on a stack (`minecraft:custom_data`), as vanilla's: updated through a
+    /// copy, read as copies, matched in part, compared by its tag. A game stack gets it as NBT
+    /// (its tags' kinds kept) and a stack read from that has it again; an empty tag takes it off.
+    #[test]
+    fn a_stacks_custom_data_is_vanillas_and_crosses_to_the_game() {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(charger);
+        let ty = api::get_static(&mut rt, "net/minecraft/core/component/DataComponents.CUSTOM_DATA");
+        let data_class = "net/minecraft/world/item/component/CustomData";
+        let update = "net/minecraft/world/item/component/CustomData.update.(Lnet/minecraft/core/component/DataComponentType;Lnet/minecraft/world/item/ItemStack;Ljava/util/function/Consumer;)V";
+        let set = "net/minecraft/world/item/component/CustomData.set.(Lnet/minecraft/core/component/DataComponentType;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/nbt/CompoundTag;)V";
+        let copy_tag = "net/minecraft/world/item/component/CustomData.copyTag.()Lnet/minecraft/nbt/CompoundTag;";
+        let contains = "net/minecraft/world/item/component/CustomData.contains.(Ljava/lang/String;)Z";
+        let matched = "net/minecraft/world/item/component/CustomData.matchedBy.(Lnet/minecraft/nbt/CompoundTag;)Z";
+        let get = "net/minecraft/world/item/ItemStack.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
+        let or = "net/minecraft/world/item/ItemStack.getOrDefault.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";
+        let same = "net/minecraft/world/item/ItemStack.isSameItemSameComponents.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;)Z";
+        let get_byte = "net/minecraft/nbt/CompoundTag.getByte.(Ljava/lang/String;)B";
+        let put_byte = "net/minecraft/nbt/CompoundTag.putByte.(Ljava/lang/String;B)V";
+
+        let s = api_common::stack(&mut rt, "minecraft:stick", 1);
+        let empty = api::get_static(&mut rt, "net/minecraft/world/item/component/CustomData.EMPTY");
+        assert_eq!(api::call(&mut rt, or, &[s, ty, empty]), empty, "a stick has none of its own");
+        let charger = rt.new_object("test/Charger");
+        api::call(&mut rt, update, &[ty, s, charger]);
+        let data = api::call(&mut rt, get, &[s, ty]);
+        assert_eq!(rt.class_of(data), data_class);
+        let charge = rt.string("charge");
+        assert_eq!(api::call(&mut rt, contains, &[data, charge]), V::I(1));
+        let copy = api::call(&mut rt, copy_tag, &[data]);
+        assert_eq!(api::call(&mut rt, get_byte, &[copy, charge]), V::I(3));
+        // The copy is the mod's: changing it leaves the stack's as it was.
+        api::call(&mut rt, put_byte, &[copy, charge, V::I(9)]);
+        let fresh = api::call(&mut rt, copy_tag, &[data]);
+        assert_eq!(api::call(&mut rt, get_byte, &[fresh, charge]), V::I(3));
+        assert_eq!(api::call(&mut rt, matched, &[data, fresh]), V::I(1));
+        assert_eq!(api::call(&mut rt, matched, &[data, copy]), V::I(0), "9 isn't 3");
+        let none = crate::nbt::to_runtime(&mut rt, &BTreeMap::new());
+        assert_eq!(api::call(&mut rt, matched, &[data, none]), V::I(1), "an empty tag asks nothing");
+
+        // To the game: a byte stays a byte. Back: a new stack holds equal data, so it stacks.
+        let carried = saved(&mut rt, s);
+        let tag = BTreeMap::from([("charge".to_owned(), Nbt::Byte(3))]);
+        assert_eq!(carried, vec![(CUSTOM_DATA_ID.to_owned(), Nbt::Compound(tag.clone()))]);
+        let back = api_common::stack(&mut rt, "minecraft:stick", 1);
+        load(&mut rt, back, &carried);
+        assert_ne!(api::call(&mut rt, get, &[back, ty]), data, "its own object");
+        assert_eq!(api::call(&mut rt, same, &[s, back]), V::I(1), "equal by its tag");
+        assert_eq!(saved(&mut rt, back), carried);
+        let other = api_common::stack(&mut rt, "minecraft:stick", 1);
+        let nine = crate::nbt::to_runtime(&mut rt, &BTreeMap::from([("charge".to_owned(), Nbt::Byte(9))]));
+        api::call(&mut rt, set, &[ty, other, nine]);
+        assert_eq!(api::call(&mut rt, same, &[s, other]), V::I(0));
+
+        // Saved by a block entity (`ItemStack.save`) and read back (`parseOptional`): the same.
+        let saved_stack = BTreeMap::from([
+            ("id".to_owned(), Nbt::String("minecraft:stick".into())),
+            ("count".to_owned(), Nbt::Int(1)),
+            ("components".to_owned(), Nbt::Compound(patch(&mut rt, s))),
+        ]);
+        let parsed = api_common::parse_stack(&mut rt, &saved_stack).expect("a stick");
+        assert_eq!(saved(&mut rt, parsed), carried);
+
+        // `set` with an empty tag takes it off.
+        api::call(&mut rt, set, &[ty, s, none]);
+        assert_eq!(api::call(&mut rt, get, &[s, ty]), V::NULL);
+        assert!(saved(&mut rt, s).is_empty());
     }
 
     #[test]

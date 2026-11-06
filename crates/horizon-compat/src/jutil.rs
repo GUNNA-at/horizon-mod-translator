@@ -90,6 +90,10 @@ pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
         let (l1, l2, r1, r2) = (rt.get_field(a, "$left"), rt.get_field(b, "$left"), rt.get_field(a, "$right"), rt.get_field(b, "$right"));
         return (l1 == l2 || equals(rt, l1, l2)) && (r1 == r2 || equals(rt, r1, r2));
     }
+    // A stack's custom data is a value: its tag (`CustomData.equals`).
+    if let Some(same) = crate::components::same_custom_data(rt, a, b) {
+        return same;
+    }
     false
 }
 
@@ -116,6 +120,9 @@ pub fn hash(rt: &mut Rt, v: V) -> i32 {
 pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
     if crate::gson::is_element_class(rt.class_of(v)) {
         return crate::gson::hash_of(rt, v);
+    }
+    if let Some(h) = crate::components::custom_data_hash(rt, v) {
+        return h;
     }
     if let V::R(r) = v
         && r != 0

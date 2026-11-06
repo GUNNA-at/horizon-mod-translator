@@ -1070,10 +1070,8 @@ pub(crate) fn parse_stack(rt: &mut Rt, tag: &std::collections::BTreeMap<String, 
     }
     let i = item(rt, &id);
     let s = stack_of(rt, i, count);
-    if let Some(patch @ Nbt::Compound(_)) = tag.get("components")
-        && let serde_json::Value::Object(patch) = crate::recipes::nbt_json(patch)
-    {
-        crate::components::load_saved(rt, s, &patch);
+    if let Some(Nbt::Compound(patch)) = tag.get("components") {
+        crate::components::load_saved_nbt(rt, s, patch);
     }
     Some(s)
 }

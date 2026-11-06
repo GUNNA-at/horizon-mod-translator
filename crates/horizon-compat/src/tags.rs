@@ -571,6 +571,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "getId") => V::I(kind_of(rt, a(0))),
         (_, "copy") => copy(rt, a(0)),
         // NbtUtils
+        // `compareNbt(expected, actual, partialLists)`: whether `actual` holds what `expected`
+        // does (a null `expected` asks nothing; a null `actual` holds nothing).
+        ("net/minecraft/nbt/NbtUtils", "compareNbt") => {
+            let (expected, actual) = (a(0), a(1));
+            let held = expected == actual
+                || expected.r() == 0
+                || (actual.r() != 0
+                    && match (crate::nbt::element_from_runtime(rt, expected), crate::nbt::element_from_runtime(rt, actual)) {
+                        (Some(e), Some(x)) => crate::nbt::matches(&e, &x, a(2).i() != 0),
+                        _ => false,
+                    });
+            V::I(i32::from(held))
+        }
         ("net/minecraft/nbt/NbtUtils", "writeBlockPos") => {
             let h = match data(rt, a(0)) {
                 Some(Data::Native(_, h)) => *h,

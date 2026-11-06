@@ -146,6 +146,14 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             let from = crate::functions::component(rt, "properties");
             codec(rt, "compat:codec/xmap", vec![map, to, V::I(0), from, V::I(0)])
         }),
+        // A stack's custom data: a compound tag, the custom data around it (vanilla also reads one
+        // written as SNBT text).
+        ("net/minecraft/world/item/component/CustomData", "CODEC") => rt.intern("compat:codec/custom_data".into(), |rt| {
+            let tag = native(rt, "compound_tag");
+            let to = crate::functions::constructor(rt, "net/minecraft/world/item/component/CustomData", "(Lnet/minecraft/nbt/CompoundTag;)V");
+            let from = crate::functions::method(rt, "net/minecraft/world/item/component/CustomData.getUnsafe.()Lnet/minecraft/nbt/CompoundTag;");
+            codec(rt, "compat:codec/xmap", vec![tag, to, V::I(0), from, V::I(0)])
+        }),
         ("net/minecraft/core/Vec3i", "CODEC") => native(rt, "vec3i"),
         ("net/minecraft/world/phys/Vec3", "CODEC") => native(rt, "vec3"),
         ("net/minecraft/core/UUIDUtil", "CODEC") => native(rt, "uuid"),

@@ -20,7 +20,7 @@ pub(crate) struct NativeHitHand {
     /// The damage at which it breaks, 0 for none (`native_item_max_damage`).
     pub(crate) max_damage: u32,
     /// Its native components (`native_component`), then the vanilla ones
-    /// translated mods read (`native_vanilla_components`: its enchantments).
+    /// translated mods read (`native_vanilla_components`: its enchantments and custom data).
     pub(crate) components: Vec<(&'static str, Tag)>,
 }
 

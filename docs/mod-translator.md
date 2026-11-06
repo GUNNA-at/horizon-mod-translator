@@ -4700,6 +4700,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     sounds a mod plays, not that they are heard. The engine side is covered by its test.
   - Tests: `sounds::tests::a_mods_ticking_sound_plays_as_it_says_until_it_stops`,
     `sound_engine::tests::an_owned_sound_plays_as_its_owner_sets_it`.
+- [x] 2026-11-06 In game: tank round 5 checks Parts 40 to 45. The scene is round 4's, and the round
+  script (`tankgame5.sh`) now also lists the mods' sound traces.
+  - No panics. The water and lava tanks and the creative motor draw as in round 4.
+  - Gone from round 4's misses: `Gui.<init>`, `SectionBufferBuilderPack`,
+    `GlStateManager._activeTexture`, `AbstractTickableSoundInstance.<init>`,
+    `SoundInstance.createUnseededRandom`, `TextureAtlasSprite.uvShrinkRatio`,
+    `RenderType.bufferSize`, `IntList.getInt`.
+  - Create's kinetic hum reaches the game. Its `ContinuousSound` plays
+    `minecraft:entity.minecart.inside`, looping, at pitch 0.85 and volume 0.009 (one motor's
+    share of Create's soundscape). The round has no sound library (`HORIZON_NO_AUDIO`), so the
+    game starts none.
+  - Left: an OpenGL shader probe in Flywheel's code (`GL20.glCreateShader`, LWJGL's
+    `MemoryStack`; Horizon draws with its own renderer), a `DynamicTexture` (Flywheel's
+    `NoiseTextures.reload`), and one `List.forEach` on null.
+- [x] 2026-11-06 Part 46: vanilla's custom data (`minecraft:custom_data`), a stack's free-form NBT.
+  packcov10: 40 mods call `CustomData.copyTag` (147 uses). Of `CustomData` only its constructor
+  and `getUnsafe` were modelled. Worse, a game stack didn't carry its custom data to the runtime:
+  what a mod wrote stayed on the runtime's stack and was gone once the game had the stack.
+  - `CustomData` as vanilla's: `EMPTY`, `of`, `copyTag`, `getUnsafe`, `isEmpty`, `size`,
+    `contains`, `matchedBy`, `update(updater)`, and the statics `update(type, stack, updater)` and
+    `set(type, stack, tag)` (an empty tag takes it off the stack). It equals and hashes by its tag,
+    also through `Object.equals`, so two sticks with the same data are the same
+    (`isSameItemSameComponents`). Also `CustomData.CODEC`, and `NbtUtils.compareNbt` (what
+    `matchedBy` uses).
+  - The game: a translated mod's stacks carry `minecraft:custom_data` beside their enchantments
+    (`native_vanilla_components`, `native_set_vanilla_component`; the game keeps it as a preserved
+    component). It crosses as NBT, so its tags keep their kinds (a byte stays a byte), and so
+    does a stack a block entity saves and reads back (`ItemStack.parse`).
+  - Difference: `CustomData.CODEC` reads a compound only (vanilla also reads one written as SNBT
+    text). `itemMatcher`, `loadInto` and the codec forms `read` and `update(ops, encoder, value)`
+    aren't modelled.
+  - Test: `components::tests::a_stacks_custom_data_is_vanillas_and_crosses_to_the_game`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

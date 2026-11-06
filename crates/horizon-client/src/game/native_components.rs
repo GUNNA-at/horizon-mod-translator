@@ -101,30 +101,58 @@ impl Game<'_> {
 
     /// The vanilla components a translated mod's stacks carry beside the registered ones: the
     /// stack's enchantments and stored (book) enchantments, those it has, as vanilla's
-    /// `components` map writes them. API @API:vanilla_components@.
+    /// `components` map writes them, and its custom data (`minecraft:custom_data`).
+    /// API @API:vanilla_components@.
     pub(super) fn native_vanilla_components(&self, stack: &ItemStack) -> Vec<(&'static str, Tag)> {
-        [(VANILLA_COMPONENTS[0], false), (VANILLA_COMPONENTS[1], true)]
+        let mut out: Vec<_> = [(VANILLA_COMPONENTS[0], false), (VANILLA_COMPONENTS[1], true)]
             .into_iter()
             .filter_map(|(id, stored)| Some((id, stack.enchantments_tag(stored)?)))
-            .collect()
+            .collect();
+        let custom = stack.data().and_then(|d| d.other(VANILLA_COMPONENTS[2]));
+        out.extend(custom.map(|tag| (VANILLA_COMPONENTS[2], tag.clone())));
+        out
     }
 
     /// Sets (None: clears) a component [`Self::native_vanilla_components`] names, from vanilla's
-    /// form (1.21.1's too). API @API:vanilla_components@.
+    /// form (1.21.1's too). Custom data is a compound within the network NBT limits; an empty one
+    /// clears it, as vanilla's `CustomData.set` does. API @API:vanilla_components@.
     pub(super) fn native_set_vanilla_component(
         &self,
         stack: &mut ItemStack,
         id: &str,
         value: Option<&Tag>,
     ) -> Result<(), NativeComponentError> {
-        let stored = match VANILLA_COMPONENTS.iter().position(|c| *c == id) {
-            Some(i) => i == 1,
+        match VANILLA_COMPONENTS.iter().position(|c| *c == id) {
+            Some(2) => {
+                let value = match value {
+                    Some(Tag::Compound(c)) if c.is_empty() => None,
+                    Some(tag @ Tag::Compound(_)) => {
+                        horizon_protocol::item::custom::validate(tag)
+                            .map_err(NativeComponentError::InvalidValue)?;
+                        Some(tag.clone())
+                    }
+                    Some(_) => {
+                        return Err(NativeComponentError::InvalidValue(
+                            horizon_protocol::Error::new("custom data must be a compound"),
+                        ));
+                    }
+                    None => None,
+                };
+                if value.is_some() || stack.data().is_some() {
+                    stack.data_mut().set_other(id, value);
+                    stack.tidy();
+                }
+            }
+            Some(i) => stack.set_enchantments_tag(i == 1, value),
             None => return Err(NativeComponentError::UnknownType),
-        };
-        stack.set_enchantments_tag(stored, value);
+        }
         Ok(())
     }
 }
 
 /// The vanilla components [`Game::native_vanilla_components`] carries.
-const VANILLA_COMPONENTS: [&str; 2] = ["minecraft:enchantments", "minecraft:stored_enchantments"];
+const VANILLA_COMPONENTS: [&str; 3] = [
+    "minecraft:enchantments",
+    "minecraft:stored_enchantments",
+    "minecraft:custom_data",
+];
