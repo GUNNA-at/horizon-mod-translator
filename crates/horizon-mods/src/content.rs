@@ -704,11 +704,15 @@ impl Content {
             let owned = own || manifest.namespaces.iter().any(|n| n == namespace);
             // Vanilla's own files stay vanilla's and another mod's its own; a
             // mod may only add to their tags (Farmer's Delight's foods in
-            // Create's `upright_on_belt`), and to the convention tags mods share.
-            let allowed = owned || (top == "data" && rest.starts_with("tags/"));
+            // Create's `upright_on_belt`), and to the convention tags mods
+            // share, and to their atlases (Create's fluid sprites in the
+            // block atlas, `assets/minecraft/atlases/blocks.json`).
+            let allowed = owned
+                || (top == "data" && rest.starts_with("tags/"))
+                || (top == "assets" && rest.starts_with("atlases/"));
             if !allowed {
                 return Err(format!(
-                    "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces) or to tags"
+                    "{name}: a mod adds files in its own namespaces ({top}/{id}/ and those listed in namespaces), to tags or to atlases"
                 ));
             }
             if !own && top == "data" && rest.starts_with("horizon/") {
@@ -1174,9 +1178,11 @@ capabilities = ["registries"]
             // An addition to another mod's tag.
             ("data/create/tags/item/upright_on_belt.json", b"{}"),
             ("assets/ruby/textures/block/ruby_block.png", b"png"),
+            // Sprites added to vanilla's block atlas.
+            ("assets/minecraft/atlases/blocks.json", b"{}"),
         ];
         let content = hmod("ok", MANIFEST_TEXT, files).unwrap();
-        assert_eq!(content.files.len(), 7);
+        assert_eq!(content.files.len(), 8);
         assert_eq!(
             content.blocks,
             [Block {

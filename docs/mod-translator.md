@@ -5552,6 +5552,43 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     is drawn in healing's red, white before. Both fluids are drawn without their textures: Create
     adds its fluid sprites to the block atlas in `assets/minecraft/atlases/blocks.json`, which the
     content mod doesn't carry (Part 70).
+- [x] 2026-11-06 Part 70: mods' additions to atlases: Create's fluids drawn with their textures.
+  Part 69's drains drew the potion red but untextured, and honey plain white: catnip asked for
+  `create:fluid/potion_still`, the game's atlas had no such sprite, and the compat drew the white
+  sprite. Create lists its fluid sprites in `assets/minecraft/atlases/blocks.json`, as a resource
+  pack adds to an atlas, and neither the translator's content mod (only `assets/<id>/`) nor a
+  pack's carry (a mod's own namespaces and its tag additions) took that file. Measured over the pack: 51 jars ship atlas files, 37 of them add to
+  `minecraft:blocks`; their sources are `single` (1,136), `directory` (29), `paletted_permutations`
+  (7), `unstitch` (3) and one `framedblocks:anim_splitter`, a kind FramedBlocks' code registers.
+  - translator `bundle`: a mod's content mod (and each jar-in-jar mod's) carries its
+    `assets/<ns>/atlases/*.json` whatever the namespace, besides its own namespace's assets.
+  - port-pack `carry`: the same for a carried pack, like a mod's tag additions; they name
+    namespaces for the claim as tag additions do (a namespace whose textures its atlas additions
+    list is the mod's).
+  - horizon-mods: the content fence lets a mod add to any namespace's atlases (docs/mods.md).
+  - client `mod_content::build`: atlases merge as resource packs' do, the base's sources first,
+    then each mod's in load order. A source of a kind the game does not read is left out with a
+    warning: the game's reader fails a whole atlas file on one unknown source, and FramedBlocks'
+    would have dropped vanilla's blocks with it.
+  - client `hud`: a file a mod lists in the block atlas outside `block/` and `item/` keeps its
+    first frame and animates (Create's potion, milk, tea and chocolate stills are 16x512 strips of
+    32 frames, the flows 32x1024); before, only those two folders were cut, and a strip packed
+    whole. Create's block atlas also lists `create:entity/*` sprites its renderers draw (blueprints,
+    couplings, the train and logistics hats).
+  - Tests: `bundle::tests::a_mods_look_and_the_mods_it_bundles_become_content_mods` (its block
+    atlas addition carried), `carry::tests::claims_the_namespaces_its_files_name` (an atlas
+    addition carried, its textures' namespace claimed), `mod_content::tests::atlas_additions_merge_after_the_bases_sources`,
+    `hud::tests::an_animated_sprite_a_mod_lists_in_the_block_atlas_packs_its_first_frame_and_animates`,
+    horizon-mods' `content_only_mod_round_trips` with an atlas file.
+  - Left: 1.21.1's `paletted_permutations` read palettes from `textures/`, 26.3's from
+    `textures/palettes/` (vanilla's trim palettes moved to `trim/<material>` and `trim_base`), so a
+    mod's trim permutations generate nothing yet: Create's cardboard armour items' in the block
+    atlas, and Create's 504, Cataclysm's 144 and Biomes O' Plenty's 72 in `minecraft:armor_trims`,
+    an atlas 26.3 does not have.
+  - In game (`draingame.sh`, survival, the drains of Part 69): the content root's block atlas holds
+    22 sources, vanilla's 4 and Create's 18 (8 of them its fluids); the potion drain's surface is
+    Create's potion texture in healing's red, the honey drain's Create's honey texture, both flat
+    colours before.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

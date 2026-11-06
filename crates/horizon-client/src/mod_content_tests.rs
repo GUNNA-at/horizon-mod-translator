@@ -1540,6 +1540,69 @@ fn listed_namespaces_join_the_root() {
     let _ = fs::remove_dir_all(&scratch);
 }
 
+/// Mods' additions to an atlas merge as resource packs' do: the base's
+/// sources, then each mod's in load order. A source of a kind the game does
+/// not read (a mod's own, registered by its code) is left out with a
+/// warning, and the game reads the rest of the atlas.
+#[test]
+fn atlas_additions_merge_after_the_bases_sources() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-atlas-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let file = "assets/minecraft/atlases/blocks.json";
+    let goo = folder_mod(
+        &scratch.join("goo"),
+        &[
+            ("horizon-mod.toml", &manifest("goo", "")),
+            (
+                file,
+                r#"{"sources": [{"type": "single", "resource": "goo:fluid/goo_still"},
+                    {"type": "goo:anim_splitter", "resource": "goo:block/frame"}]}"#,
+            ),
+        ],
+    );
+    let ooze = folder_mod(
+        &scratch.join("ooze"),
+        &[
+            ("horizon-mod.toml", &manifest("ooze", "")),
+            (
+                file,
+                r#"{"sources": [{"type": "minecraft:directory", "source": "ooze", "prefix": "ooze/"}]}"#,
+            ),
+        ],
+    );
+    let root = scratch.join("root");
+    let warnings = build(&base, &[goo, ooze], &root).unwrap();
+    let sources = |path: &Path| -> Vec<serde_json::Value> {
+        let doc: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        doc["sources"].as_array().unwrap().clone()
+    };
+    let vanilla = sources(&base.join(file));
+    assert!(!vanilla.is_empty());
+    let merged = sources(&root.join(file));
+    assert_eq!(merged[..vanilla.len()], vanilla[..]);
+    assert_eq!(
+        merged[vanilla.len()..],
+        [
+            serde_json::json!({"type": "single", "resource": "goo:fluid/goo_still"}),
+            serde_json::json!({"type": "minecraft:directory", "source": "ooze", "prefix": "ooze/"}),
+        ]
+    );
+    let text = fs::read_to_string(root.join(file)).unwrap();
+    assert!(crate::atlas_sources::decode(&text).is_some());
+    assert!(
+        warnings.contains(
+            &"goo: assets/minecraft/atlases/blocks.json: a sprite source of type \
+              goo:anim_splitter is left out: the game does not read it"
+                .to_owned()
+        ),
+        "{warnings:?}"
+    );
+    let _ = fs::remove_dir_all(&scratch);
+}
+
 /// Two mods owning one namespace (one's listed namespace is the other's id,
 /// or both list it) are refused together, naming both.
 #[test]

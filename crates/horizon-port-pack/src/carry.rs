@@ -610,12 +610,19 @@ fn shared_tag(root: &str, rest: &str) -> bool {
     root == "data" && rest.starts_with("tags/")
 }
 
+/// Additions to atlases, vanilla's and other mods' (`assets/<ns>/atlases/<atlas>.json`),
+/// which merge as resource packs' do: the sprites a mod draws besides its blocks' and
+/// items' (Create's fluids in the block atlas).
+fn shared_atlas(root: &str, rest: &str) -> bool {
+    root == "assets" && rest.starts_with("atlases/") && rest.ends_with(".json")
+}
+
 /// Where a jar entry goes: `Some(true)` inside the content mod (its own
-/// namespaces, additions to tags), `Some(false)` to `outside/`, `None` not
-/// carried (code, metadata).
+/// namespaces, additions to tags and atlases), `Some(false)` to `outside/`,
+/// `None` not carried (code, metadata).
 fn place(name: &str, owned: &[&str]) -> Option<bool> {
     let (root, ns, rest) = split(name)?;
-    Some(owned.contains(&ns) || shared_tag(root, rest))
+    Some(owned.contains(&ns) || shared_tag(root, rest) || shared_atlas(root, rest))
 }
 
 /// Namespaces no carried mod claims: vanilla's, the convention tags', the
@@ -643,6 +650,7 @@ fn extra_namespaces(
             && !NOT_CLAIMED.contains(&ns)
             && !pack_mod(ns)
             && !shared_tag(root, rest)
+            && !shared_atlas(root, rest)
         {
             candidates.insert(ns.to_owned());
         }
@@ -650,7 +658,7 @@ fn extra_namespaces(
     if candidates.is_empty() {
         return Vec::new();
     }
-    // The JSON files that could be the mod's, by namespace ("" for tag additions).
+    // The JSON files that could be the mod's, by namespace ("" for tag and atlas additions).
     let mut texts: Vec<(String, Vec<u8>)> = Vec::new();
     for i in 0..zip.len() {
         let Ok(mut entry) = zip.by_index(i) else {
@@ -664,7 +672,7 @@ fn extra_namespaces(
         };
         let ns = match () {
             _ if ns == id || candidates.contains(ns) => ns.to_owned(),
-            _ if shared_tag(root, rest) => String::new(),
+            _ if shared_tag(root, rest) || shared_atlas(root, rest) => String::new(),
             _ => continue,
         };
         let mut bytes = Vec::new();
@@ -889,7 +897,7 @@ pub fn carry(
             outside.join(&name)
         };
         if keep {
-            // The path in one of the mod's own namespaces; "" for tag additions.
+            // The path in one of the mod's own namespaces; "" for tag and atlas additions.
             let (ns, rel) = match split(&name) {
                 Some((_, ns, rest)) if owned.contains(&ns) => (ns, rest),
                 _ => ("", ""),
@@ -2020,7 +2028,8 @@ mod tests {
     /// A mod shipping its files under other names than its id: the
     /// namespaces its own files name are its, compat files for other mods
     /// and a pack mod's namespace stay outside, and its additions to another
-    /// mod's tags are carried without that mod's namespace becoming its.
+    /// mod's tags and to vanilla's atlases are carried without that namespace
+    /// becoming its.
     #[test]
     fn claims_the_namespaces_its_files_name() {
         let dir = std::env::temp_dir().join(format!("horizon-port-pack-ns-{}", std::process::id()));
@@ -2062,6 +2071,12 @@ mod tests {
                 "data/towers/loot_table/pie.json",
                 r#"{"pools": [{"entries": [{"type": "minecraft:item", "name": "create:dough"}]}]}"#,
             ),
+            // An addition to vanilla's block atlas, naming the sprite it draws.
+            (
+                "assets/minecraft/atlases/blocks.json",
+                r#"{"sources": [{"type": "single", "resource": "towers_fx:fluid/goo"}]}"#,
+            ),
+            ("assets/towers_fx/textures/fluid/goo.png", "png"),
             // A pack mod's config naming the mod's sets, and a loader's file.
             (
                 "data/cristel/config/towers.json",
@@ -2085,7 +2100,7 @@ mod tests {
             mods: &|m| m == "cristel",
         };
         let report = carry(&jar, &info, &out, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
-        assert_eq!(report.namespaces, ["kaisyn", "towers_wg"]);
+        assert_eq!(report.namespaces, ["kaisyn", "towers_fx", "towers_wg"]);
         assert_eq!(report.worldgen, 2);
         assert_eq!(
             report.outside,
@@ -2099,13 +2114,18 @@ mod tests {
         assert!(report.blocks.is_empty());
         let carried = out.join("carry");
         let package = horizon_mods::Package::read(&carried).unwrap();
-        assert_eq!(package.manifest.namespaces, ["kaisyn", "towers_wg"]);
-        let content = horizon_mods::Content::read(&carried, &package.manifest).unwrap();
-        assert!(
-            content
-                .files
-                .contains(&"data/kaisyn/structure/tower.nbt".to_owned())
+        assert_eq!(
+            package.manifest.namespaces,
+            ["kaisyn", "towers_fx", "towers_wg"]
         );
+        let content = horizon_mods::Content::read(&carried, &package.manifest).unwrap();
+        for file in [
+            "data/kaisyn/structure/tower.nbt",
+            "assets/minecraft/atlases/blocks.json",
+            "assets/towers_fx/textures/fluid/goo.png",
+        ] {
+            assert!(content.files.contains(&file.to_owned()), "{file}");
+        }
         assert!(content.blocks.is_empty());
         // Its own tag that replaces is the same tag added to.
         let tag: Value = serde_json::from_slice(

@@ -4413,8 +4413,19 @@ fn carried_asset(path: &str) -> bool {
     path.rsplit_once('.').is_some_and(|(_, ext)| ASSET_TYPES.contains(&ext)) && path.split('/').all(plain)
 }
 
-/// Copies the files under `assets/<ns>/` of `zip` a content mod carries ([`carried_asset`]) into
-/// `content`; the item models among them (`m` of `<ns>:item/<m>`) come back.
+/// Whether jar entry `path` adds to an atlas, vanilla's or another mod's
+/// (`assets/<ns>/atlases/<atlas>.json`), as a resource pack does: a mod lists there the sprites it
+/// draws besides its models' (Create's fluids and blueprints in `minecraft:blocks`). The game merges
+/// every mod's into the atlas.
+fn atlas_addition(path: &str) -> bool {
+    path.strip_prefix("assets/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(_, rest)| rest.starts_with("atlases/") && rest.ends_with(".json"))
+}
+
+/// Copies the files under `assets/<ns>/` of `zip` a content mod carries ([`carried_asset`]), and its
+/// additions to any namespace's atlases ([`atlas_addition`]), into `content`; the item models among
+/// them (`m` of `<ns>:item/<m>`) come back.
 fn copy_namespace_assets<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, ns: &str, content: &Path) -> Vec<String> {
     let prefix = format!("assets/{ns}/");
     let mut item_models = Vec::new();
@@ -4422,7 +4433,7 @@ fn copy_namespace_assets<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, 
         let Ok(mut e) = zip.by_index(i) else { continue };
         let Some(name) = e.enclosed_name() else { continue };
         let path = name.to_string_lossy().into_owned();
-        if !e.is_file() || !path.starts_with(&prefix) || !carried_asset(&path) {
+        if !e.is_file() || !(path.starts_with(&prefix) || atlas_addition(&path)) || !carried_asset(&path) {
             continue;
         }
         if let Some(model) = path.strip_prefix(&format!("{prefix}models/item/")).and_then(|m| m.strip_suffix(".json")) {
@@ -4461,8 +4472,8 @@ fn write_item_definitions(id: &str, item_models: &[String], content: &Path) -> R
 }
 
 /// Mod `id`'s own look into content mod `content`: its assets (blockstates, models, textures, lang,
-/// Ponder's scenes, shader sources) from `jar`, with a plain item definition for each item model a
-/// 1.21.1 jar leaves without one.
+/// Ponder's scenes, shader sources) and its additions to atlases from `jar`, with a plain item
+/// definition for each item model a 1.21.1 jar leaves without one.
 fn copy_assets(jar: &Path, id: &str, content: &Path) -> Result<(), String> {
     let Ok(f) = fs::File::open(jar) else { return Ok(()) };
     let Ok(mut zip) = zip::ZipArchive::new(f) else { return Ok(()) };
@@ -4498,9 +4509,9 @@ fn item_definition(id: &str, m: &str, model: Option<&serde_json::Value>) -> Stri
 #[cfg(test)]
 mod tests {
     /// A mod's look as content mods: its own assets of the kinds the game and mods read (Ponder's
-    /// scenes, shader sources, lang), none whose path vanilla couldn't name, also for a mod without
-    /// blocks; each mod it bundles for jar-in-jar (Flywheel) a content mod of its own, a library
-    /// that declares no mod (Registrate) none.
+    /// scenes, shader sources, lang) and its additions to vanilla's atlases, none whose path vanilla
+    /// couldn't name, also for a mod without blocks; each mod it bundles for jar-in-jar (Flywheel) a
+    /// content mod of its own, a library that declares no mod (Registrate) none.
     #[test]
     fn a_mods_look_and_the_mods_it_bundles_become_content_mods() {
         let dir = std::env::temp_dir().join(format!("hz-nested-{}", std::process::id()));
@@ -4535,6 +4546,8 @@ mod tests {
             ("assets/gears/textures/Gear.png", b"png"),
             ("assets/gears/notes.md", b"# notes"),
             ("assets/other/lang/en_us.json", b"{}"),
+            // Its sprites in vanilla's block atlas, which merge with every mod's.
+            ("assets/minecraft/atlases/blocks.json", br#"{"sources": [{"type": "single", "resource": "gears:fluid/oil_still"}]}"#),
         ]);
         std::fs::write(&jar, main).unwrap();
         let out = dir.join("out");
@@ -4547,6 +4560,7 @@ mod tests {
         assert!(!has("content/assets/gears/textures/Gear.png"));
         assert!(!has("content/assets/gears/notes.md"));
         assert!(!has("content/assets/other/lang/en_us.json"));
+        assert!(has("content/assets/minecraft/atlases/blocks.json"));
         assert!(has("content-nested-flywheel/assets/flywheel/flywheel/internal/components_header.frag"));
         assert!(has("content-nested-flywheel/assets/flywheel/lang/en_us.json"));
         let manifest = std::fs::read_to_string(out.join("content-nested-flywheel/horizon-mod.toml")).unwrap();

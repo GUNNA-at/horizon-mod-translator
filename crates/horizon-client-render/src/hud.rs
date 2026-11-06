@@ -295,19 +295,16 @@ fn atlas_sprites(root: &Path, packed: &[PackedImage]) -> (Vec<PackedImage>, Vec<
                 SpriteOrigin::File(texture) => {
                     // Its path under `textures/` in any namespace (a server
                     // pack's `lobby:item/...` as well as vanilla's).
-                    let path = texture.split_once(':').map_or(texture.as_str(), |(_, p)| p);
                     let file = atlas_sources::texture_path(root, texture, "textures");
                     decode(&file).ok().map(|image| {
                         // Animated strips keep their first frame and animate,
-                        // like the packed files.
-                        if path.starts_with("block/") || path.starts_with("item/") {
-                            let mcmeta = fs::read_to_string(file.with_extension("png.mcmeta")).ok();
-                            let animation = animation_of(mcmeta.as_deref());
-                            animated = animation.is_some();
-                            first_frame(image, animation.as_ref())
-                        } else {
-                            image
-                        }
+                        // like the packed files: a file only the block and
+                        // item atlases list, any of whose sprites vanilla
+                        // animates (a mod's `fluid/...` in the block atlas).
+                        let mcmeta = fs::read_to_string(file.with_extension("png.mcmeta")).ok();
+                        let animation = animation_of(mcmeta.as_deref());
+                        animated = animation.is_some();
+                        first_frame(image, animation.as_ref())
                     })
                 }
                 generated => atlas_sources::generate(generated, &load),
@@ -2478,6 +2475,44 @@ mod tests {
             .find(|(r, _)| r.u0 == rect.u0 && r.v0 == rect.v0)
             .expect("the namespaced sprite animates");
         assert_eq!(animation.frame_count(), 2);
+    }
+    /// A sprite a mod adds to the block atlas outside the block and item
+    /// folders (Create's fluids: a `single` source in its
+    /// `assets/minecraft/atlases/blocks.json`) packs one frame of its strip
+    /// and animates, as vanilla animates any sprite of the atlas.
+    #[test]
+    fn an_animated_sprite_a_mod_lists_in_the_block_atlas_packs_its_first_frame_and_animates() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-atlas-fluid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let atlases = root.join("assets/minecraft/atlases");
+        let fluid = root.join("assets/goo/textures/fluid");
+        fs::create_dir_all(&atlases).unwrap();
+        fs::create_dir_all(&fluid).unwrap();
+        fs::write(
+            atlases.join("blocks.json"),
+            r#"{"sources": [{"type": "single", "resource": "goo:fluid/goo_still"}]}"#,
+        )
+        .unwrap();
+        // Two 16x16 frames, white then grey.
+        write_strip(
+            &fluid.join("goo_still.png"),
+            16,
+            32,
+            &[[255, 255, 255, 255], [128, 128, 128, 255]],
+            Some(r#"{"animation": {"frametime": 2}}"#),
+        );
+        let atlas = HudAtlas::build(&root).unwrap();
+        let rect = atlas.sprites["goo:fluid/goo_still"];
+        assert_eq!(rect.texels((atlas.width, atlas.height)), (16, 16));
+        assert_eq!(texel_at(&atlas, rect, 0, 15), [255, 255, 255, 255]);
+        let (_, animation) = atlas
+            .sprite_animations
+            .iter()
+            .find(|(r, _)| r.u0 == rect.u0 && r.v0 == rect.v0)
+            .expect("the fluid sprite animates");
+        assert_eq!(animation.frame_count(), 2);
+        let _ = fs::remove_dir_all(&root);
     }
     /// `count` images of `w x h`; layout reads only their sizes.
     fn sized(count: usize, w: u32, h: u32) -> Vec<PackedImage> {

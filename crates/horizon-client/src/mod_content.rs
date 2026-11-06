@@ -2281,8 +2281,49 @@ fn tables(base: &Path, plan: &Plan, overlay: &Overlay<'_>) -> Result<()> {
     Ok(())
 }
 
+/// An atlas definition, `assets/<ns>/atlases/<atlas>.json`.
+fn is_atlas(file: &str) -> bool {
+    file.strip_prefix("assets/")
+        .and_then(|r| r.split_once('/'))
+        .is_some_and(|(_, rest)| rest.starts_with("atlases/") && rest.ends_with(".json"))
+}
+
+/// The sprite sources of a mod's atlas file the game reads. A source of a
+/// kind only a mod's code reads (FramedBlocks' `anim_splitter`) is left
+/// out with a warning, so the rest of the atlas still loads; a file that is
+/// not an atlas definition adds nothing, as vanilla skips it.
+fn sprite_sources(id: &str, file: &str, bytes: &[u8], warnings: &mut Vec<String>) -> Vec<J> {
+    let sources = match serde_json::from_slice::<J>(bytes) {
+        Ok(J::Obj(o)) => o.into_iter().find(|(k, _)| k == "sources").map(|(_, v)| v),
+        _ => None,
+    };
+    let Some(J::Arr(sources)) = sources else {
+        warnings.push(format!("{id}: {file}: not an atlas definition, left out"));
+        return Vec::new();
+    };
+    let readable = |source: &J| {
+        let doc = J::Obj(vec![("sources".to_owned(), J::Arr(vec![source.clone()]))]);
+        serde_json::to_string(&doc)
+            .ok()
+            .and_then(|text| crate::atlas_sources::decode(&text))
+            .is_some()
+    };
+    let (kept, left): (Vec<J>, Vec<J>) = sources.into_iter().partition(readable);
+    for source in &left {
+        let kind = match source.get("type") {
+            Some(J::Str(kind)) => kind.as_str(),
+            _ => "(none)",
+        };
+        warnings.push(format!(
+            "{id}: {file}: a sprite source of type {kind} is left out: the game does not read it"
+        ));
+    }
+    kept
+}
+
 /// Builds the content root for `mods` over `base` in `out`. Returns the
-/// warnings for the log: the shared tags a mod replaced.
+/// warnings for the log: the shared tags a mod replaced, the sprite sources
+/// left out of atlases.
 pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>> {
     // Two mods owning one namespace would mix their files.
     for (i, a) in mods.iter().enumerate() {
@@ -2307,6 +2348,8 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     let mut worldgen: BTreeMap<&str, Vec<(String, String)>> = BTreeMap::new();
     let mut additions: BTreeMap<&str, Vec<Addition>> = BTreeMap::new();
     let mut modifiers = Vec::new();
+    // Every mod's sprite sources, gathered per atlas file.
+    let mut atlases: BTreeMap<String, Vec<J>> = BTreeMap::new();
     for m in mods {
         let declarations = format!("data/{}/horizon/", m.id);
         let mut reader = m.content.reader()?;
@@ -2323,6 +2366,11 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                 let shared = !m.content.namespaces.iter().any(|n| n == ns);
                 let merge = tags.entry(file.clone()).or_default();
                 warnings.extend(merge.add(&m.id, file, replace, shared, values));
+            } else if is_atlas(file) {
+                atlases
+                    .entry(file.clone())
+                    .or_default()
+                    .extend(sprite_sources(&m.id, file, &bytes, &mut warnings));
             } else if !file.starts_with(&declarations) {
                 overlay.write(file, &bytes)?;
                 if biomes::is_modifier(file) {
@@ -2346,6 +2394,23 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                 }
             }
         }
+    }
+    // Atlases merge as resource packs' do: the sources of the base's file,
+    // then every mod's in order.
+    for (file, sources) in atlases {
+        let mut merged = match fs::read(base.join(&file)) {
+            Ok(bytes) => match serde_json::from_slice::<J>(&bytes)
+                .map_err(|e| format!("{file}: {e}"))?
+                .get("sources")
+            {
+                Some(J::Arr(base_sources)) => base_sources.clone(),
+                _ => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        };
+        merged.extend(sources);
+        let doc = J::Obj(vec![("sources".to_owned(), J::Arr(merged))]);
+        overlay.write(&file, &serde_json::to_vec_pretty(&doc)?)?;
     }
     // A tag naming an id nobody registers fails as a whole in vanilla, and
     // carried-over mods name blocks left out or other mods' ids: such
