@@ -168,6 +168,20 @@ pub(crate) fn construct(rt: &mut Rt, e: V, ty: V, level: V) {
         rt.put_field(e, f, V::F(0.0));
     }
     rt.put_field(e, "tickCount", V::I(0));
+    // `Entity`'s fields a mod's class reads itself (`this.noPhysics`, as Create's contraptions
+    // do), as Java's start: false, 0.
+    for f in [
+        "noPhysics",
+        "hurtMarked",
+        "hasImpulse",
+        "noCulling",
+        "horizontalCollision",
+        "verticalCollision",
+    ] {
+        rt.put_field(e, f, V::I(0));
+    }
+    rt.put_field(e, "invulnerableTime", V::I(0));
+    rt.put_field(e, "fallDistance", V::F(0.0));
     let zero = vec3(rt, [0.0; 3]);
     rt.put_field(e, "$motion", zero);
     let uuid = api::call(rt, "java/util/UUID.randomUUID.()Ljava/util/UUID;", &[]);
@@ -1552,6 +1566,28 @@ mod tests {
         rt.put_field(ty, "$range", V::I(4));
         rt.registered.insert(("entity_type".into(), "test:cart".into()), ty);
         (rt, ty)
+    }
+
+    /// A mod's entity reads the fields it takes from `Entity` (`this.noPhysics`, as Create's
+    /// contraption does) as Java starts them: false, 0.
+    #[test]
+    fn a_mods_entity_starts_with_javas_fields() {
+        const INIT: &str = "net/minecraft/world/entity/Entity.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V";
+        const NO_PHYSICS: &str = "net/minecraft/world/entity/Entity.$noPhysics.()Z";
+        const HURT_MARKED: &str = "net/minecraft/world/entity/Entity.$hurtMarked.()Z";
+        const FALL_DISTANCE: &str = "net/minecraft/world/entity/Entity.$fallDistance.()F";
+        let (mut rt, ty) = runtime();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let cart = rt.new_object(CART);
+            api::call(rt, INIT, &[cart, ty, level]);
+            let no_physics = api::game_field(rt, cart, "noPhysics", "$noPhysics", NO_PHYSICS);
+            let hurt = api::game_field(rt, cart, "hurtMarked", "$hurtMarked", HURT_MARKED);
+            let fall = api::game_field(rt, cart, "fallDistance", "$fallDistance", FALL_DISTANCE);
+            assert_eq!((no_physics, hurt, fall), (V::I(0), V::I(0), V::F(0.0)));
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Create syncs a player's data with their client by the player's entity id

@@ -123,6 +123,18 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         }
         uncount(rt, up);
     }
+    // What every class takes from `Object` where nothing up its chain declares it (an entity's,
+    // a block entity's): Java's own `equals`, `hashCode` and `toString`, as the JVM resolves a
+    // method no class below `Object` has. Create finds the contraptions around one by
+    // `e -> !e.equals(self)`: unanswered, a contraption counted itself and stopped at once.
+    if matches!(
+        rest,
+        "equals.(Ljava/lang/Object;)Z" | "hashCode.()I" | "toString.()Ljava/lang/String;"
+    ) {
+        uncount(rt, key);
+        let object = rt.static_key(&format!("java/lang/Object.{rest}"));
+        return call_exact(rt, object, args);
+    }
     trace_unmapped(rt, key, args);
     if runaway(rt) {
         let secs = rt.hook_first_miss.map_or(0, |t| t.elapsed().as_secs());
@@ -1756,6 +1768,13 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // spawn protection and world border, neither of which mods get here, so it says yes too.
         (_, "mayInteract") if level && desc == "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/core/BlockPos;)Z" => V::I(1),
         (_, "getGameTime") if level => V::J(rt.host().map_or(0, |h| h.game_time())),
+        // What a mod's own level takes from the one it copies (Create's and Ponder's virtual
+        // worlds, `super(..., level.getProfilerSupplier(), ...)`): vanilla's inactive profiler,
+        // which records nothing, as the client's (`Minecraft.getProfiler`).
+        (_, "getProfilerSupplier") if level && desc == "()Ljava/util/function/Supplier;" => {
+            let profiler = get_static(rt, "net/minecraft/util/profiling/InactiveProfiler.INSTANCE");
+            crate::functions::constant(rt, profiler)
+        }
         // The level's server services. Ticking is never frozen or stepped here (`/tick` isn't modelled
         // for mods), and the game syncs changed blocks and block entities itself.
         (_, "tickRateManager") if level => rt.intern("compat:tick-rate".into(), |rt| rt.new_object("net/minecraft/server/ServerTickRateManager")),
@@ -1765,6 +1784,29 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "tickrate" => V::F(20.0),
             "nanosecondsPerTick" => V::J(50_000_000),
             "millisecondsPerTick" => V::F(50.0),
+            _ => return None,
+        },
+        // A mod level's own light engine (Create's and Ponder's virtual worlds make one, and run
+        // its updates after placing their blocks): light here is the game's, which every level's
+        // `getBrightness` reads where the blocks are, so the engine keeps nothing and has no work.
+        ("net/minecraft/world/level/lighting/LevelLightEngine", n) => match n {
+            "<init>"
+            | "checkBlock"
+            | "updateSectionStatus"
+            | "setLightEnabled"
+            | "propagateLightSources"
+            | "retainData"
+            | "queueSectionData" => V::Void,
+            "runLightUpdates" | "hasLightWork" => V::I(0),
+            "getRawBrightness" => V::I(crate::level_env::raw_brightness(
+                rt,
+                pos_of(rt, a(1)),
+                a(2).i(),
+            )),
+            "getLayerListener" => get_static(
+                rt,
+                "net/minecraft/world/level/lighting/LayerLightEventListener$DummyLightLayerEventListener.INSTANCE",
+            ),
             _ => return None,
         },
         (_, "getChunkSource") if level => rt.intern("compat:chunk-source".into(), |rt| rt.new_object("net/minecraft/server/level/ServerChunkCache")),
@@ -1987,7 +2029,9 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let text = rt.str_of(a(0)).unwrap_or("minecraft:air").to_owned();
             let (b, _) = crate::host::split_state(&text);
             match n {
-                "getBlock" => block(rt, &b.to_owned()),
+                // `StateHolder.owner`, read as a field where an access transformer opens it: the
+                // state's block.
+                "getBlock" | "$owner" => block(rt, &b.to_owned()),
                 // The block's registry entry; a mod block not registered yet learns its name when
                 // it is.
                 "getBlockHolder" => {
@@ -2650,6 +2694,75 @@ mod tests {
         let key = "net/neoforged/neoforge/fluids/capability/IFluidHandlerItem.getClass.()Ljava/lang/Class;";
         let class = call(&mut rt, key, &[w]);
         assert_eq!(class, rt.class_literal(wrapper));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `equals` and `hashCode` through a class that doesn't declare them (a mod's entity, called
+    /// as Create's `ControlledContraptionEntity.equals`): `Object`'s, by identity. Create's
+    /// contraption looks for the others around it by `e -> !e.equals(self)`, and must not find
+    /// itself.
+    #[test]
+    fn equals_through_a_class_without_its_own_is_identity() {
+        const EQUALS: &str = "test/Contraption.equals.(Ljava/lang/Object;)Z";
+        const HASH: &str = "test/Contraption.hashCode.()I";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.supers
+            .insert("test/Contraption", "net/minecraft/world/entity/Entity");
+        let (a, b) = (
+            rt.new_object("test/Contraption"),
+            rt.new_object("test/Contraption"),
+        );
+        assert_eq!(call(&mut rt, EQUALS, &[a, a]).i(), 1);
+        assert_eq!(call(&mut rt, EQUALS, &[a, b]).i(), 0);
+        assert_eq!(call(&mut rt, EQUALS, &[a, V::NULL]).i(), 0);
+        assert_eq!(call(&mut rt, HASH, &[a]), call(&mut rt, HASH, &[a]));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's own level (Create's virtual world for a contraption's blocks) takes its profiler
+    /// from the level it copies (vanilla's inactive one) and makes a light engine whose updates
+    /// it runs; the light is the game's, read where the blocks are.
+    #[test]
+    fn a_mods_virtual_level_gets_a_profiler_and_a_light_engine() {
+        const PROFILERS: &str =
+            "net/minecraft/world/level/Level.getProfilerSupplier.()Ljava/util/function/Supplier;";
+        const ENGINE: &str = "net/minecraft/world/level/lighting/LevelLightEngine";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = crate::host::MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let supplier = call(rt, PROFILERS, &[level]);
+            // The supplier as the mod's code calls it (`supplier.get()`, through the API).
+            let profiler = call(rt, "java/util/function/Supplier.get.()Ljava/lang/Object;", &[supplier]);
+            assert_eq!(profiler, get_static(rt, "net/minecraft/util/profiling/InactiveProfiler.INSTANCE"));
+            let engine = rt.new_object(ENGINE);
+            call(rt, "net/minecraft/world/level/lighting/LevelLightEngine.<init>.(Lnet/minecraft/world/level/chunk/LightChunkGetter;ZZ)V", &[engine, level, V::I(1), V::I(0)]);
+            assert_eq!(call(rt, "net/minecraft/world/level/lighting/LevelLightEngine.runLightUpdates.()I", &[engine]).i(), 0);
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `StateHolder.owner` read as a field (an access transformer opens it) on a block state: the
+    /// state's block, as `getBlock()` gives it.
+    #[test]
+    fn a_states_owner_is_its_block() {
+        let mut rt = Rt::new();
+        crate::install();
+        let state = crate::api::state(&mut rt, "minecraft:oak_planks");
+        let owner = call(
+            &mut rt,
+            "net/minecraft/world/level/block/state/StateHolder.$owner.()Ljava/lang/Object;",
+            &[state],
+        );
+        let block = call(
+            &mut rt,
+            "net/minecraft/world/level/block/state/BlockState.getBlock.()Lnet/minecraft/world/level/block/Block;",
+            &[state],
+        );
+        assert_eq!(owner, block);
+        assert!(owner.r() != 0);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

@@ -1710,6 +1710,40 @@ mod tests {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))
     }
 
+    /// `new MutablePair<>()` holds null and null, as its fields start (Create's contraption code
+    /// reads its `left` field itself), until `setLeft` puts something in.
+    #[test]
+    fn an_empty_mutable_pair_holds_nulls() {
+        const PAIR: &str = "org/apache/commons/lang3/tuple/MutablePair";
+        const LEFT: &str = "org/apache/commons/lang3/tuple/MutablePair.$left.()Ljava/lang/Object;";
+        const RIGHT: &str =
+            "org/apache/commons/lang3/tuple/MutablePair.$right.()Ljava/lang/Object;";
+        let mut rt = Rt::new();
+        crate::install();
+        let p = rt.new_object(PAIR);
+        crate::api::call(
+            &mut rt,
+            "org/apache/commons/lang3/tuple/MutablePair.<init>.()V",
+            &[p],
+        );
+        assert_eq!(
+            crate::api::game_field(&mut rt, p, "left", "$left", LEFT),
+            V::NULL
+        );
+        assert_eq!(
+            crate::api::game_field(&mut rt, p, "right", "$right", RIGHT),
+            V::NULL
+        );
+        let s = rt.string("x");
+        crate::api::call(
+            &mut rt,
+            "org/apache/commons/lang3/tuple/MutablePair.setLeft.(Ljava/lang/Object;)V",
+            &[p, s],
+        );
+        assert_eq!(crate::api::game_field(&mut rt, p, "left", "$left", LEFT), s);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `Math.round` rounds as the JDK's does: half up, exactly (adding a half in floats would round
     /// the float just below a half, and 2^23 + 1, the wrong way), NaN to 0, beyond the range
     /// saturated.
@@ -2119,7 +2153,13 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("org/apache/logging/log4j/MarkerManager", "getMarker") => a(0),
         ("org/apache/commons/lang3/tuple/Pair" | "org/apache/commons/lang3/tuple/ImmutablePair" | "org/apache/commons/lang3/tuple/MutablePair" | "com/mojang/datafixers/util/Pair", "of" | "<init>") => {
             let made = if owner.ends_with("MutablePair") { "org/apache/commons/lang3/tuple/MutablePair" } else { "org/apache/commons/lang3/tuple/Pair" };
-            let (p, l, r) = if name == "<init>" { (a(0), a(1), a(2)) } else { (rt.new_object(made), a(0), a(1)) };
+            // `new MutablePair<>()` holds null and null, as its fields start.
+            let half = |v: V| if matches!(v, V::Void) { V::NULL } else { v };
+            let (p, l, r) = if name == "<init>" {
+                (a(0), half(a(1)), half(a(2)))
+            } else {
+                (rt.new_object(made), a(0), a(1))
+            };
             rt.put_field(p, "$left", l);
             rt.put_field(p, "$right", r);
             if name == "<init>" { V::Void } else { p }

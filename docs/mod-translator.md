@@ -6123,6 +6123,58 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     receiver placed without data, holds `Receive` 0 and no frequency data, as in Create. A pulse
     extender placed: `ScrollValue` 2, `State` 0, and no unmapped call (Part 78 had two). No
     throws; unmapped: only the 16 client GL and texture calls of the earlier surveys.
+- [x] 2026-11-07 Part 81: what every class takes from `Object`, and what Create's moving
+  contraptions read on their way. A kinetics survey (`kinsurvey4.sh`: a mechanical piston with two
+  extension poles, two rope pulleys, two encased chain drives) found the chain drives passing 64
+  RPM sideways to a speedometer (0.5957 of its dial, as before), but the piston and the pulleys
+  still: `Running` 0, `Offset` 0, the planks where they were. A pulley assembled its contraption (a
+  `ControlledContraptionEntity`, drawn by its renderer) and took it apart the same tick
+  (`contraption_disassemble`). Create's `ContraptionCollider.collideBlocks` looks for the other
+  contraptions in the way by `e -> !e.equals(self)`, and `equals` through
+  `ControlledContraptionEntity` was unmapped: it answered false, so the contraption found itself in
+  its own way and stopped. In Java the call resolves to `Object.equals`, identity: no class below
+  `Object` declares it. Measured on the pack (`p80scan2/objmethods.py`, per call, through a class
+  that doesn't declare the method, into a game class): `equals` 2035 calls in 1442 classes of 181
+  jars, `hashCode` 180 in 154 classes of 61 jars, `toString` 2104 in 1437 classes of 198 jars; most
+  reach classes the runtime models (`BlockPos` 873, `ResourceLocation` 484, `Vec3` 67), 67 reach
+  `Entity` and `LivingEntity`, which declare none. With them, four more calls on the contraption's
+  path were unmapped: `Entity.noPhysics` read as a field (the mod entity had no such field; 17
+  classes in 6 jars read it), `MutablePair.left` of a `new MutablePair<>()` (its halves were never
+  set), `StateHolder.owner` read as a field, and the virtual world Create builds for a contraption's
+  blocks (`Level.getProfilerSupplier`, a `LevelLightEngine` and its `runLightUpdates`).
+  - compat `api`: a call missed on its class and every class and interface above it, of
+    `equals(Object)`, `hashCode()` or `toString()`, is `Object`'s (identity, or the runtime's own
+    values' content), as the JVM resolves it; no longer counted unmapped.
+  - compat: a mod's entity starts with `Entity`'s fields as Java does (`noPhysics`, `hurtMarked`,
+    `hasImpulse`, `noCulling`, `horizontalCollision`, `verticalCollision` false,
+    `invulnerableTime` 0, `fallDistance` 0); `new MutablePair<>()` holds null and null;
+    `StateHolder.owner` of a block state is its block; `Level.getProfilerSupplier()` gives
+    vanilla's inactive profiler; a mod level's `LevelLightEngine` keeps nothing (light is the
+    game's, read where the blocks are): `runLightUpdates` and `hasLightWork` 0, `getRawBrightness`
+    the game's, `getLayerListener` vanilla's dummy listener.
+  - Tests: compat 523 (5 new: `equals` and `hashCode` through a class without its own are
+    `Object`'s; a mod's virtual level gets a profiler and a light engine that keeps nothing; a
+    state's `owner` is its block; `new MutablePair<>()` holds nulls; a mod's entity starts with
+    `Entity`'s fields), translator 19.
+  - In game (`kinsurvey5.sh`: two mechanical pistons facing east, two extension poles behind each
+    and planks in front, two rope pulleys with planks right under them, each driven by a creative
+    motor at 64 RPM, one each way): the piston at −64 RPM extended, `Offset` 2, its planks moved
+    from +1 to +3 and the piston `extended`; the one at +64 RPM stayed retracted with its planks at
+    +1, as Create's do. The pulley at +64 RPM lowered its planks 3 blocks to the floor (`Offset` 3,
+    rope above them, the magnet below the rope); the one at −64 RPM kept them where they were. Nothing threw,
+    nothing was unmapped. Not yet right: no piston head at +2, where Create puts it (Part 82).
+  - All of Create's blocks (`allblocks.sh`, 643 from its blockstates, one `/setblock` each, then
+    100 ticks, a read-back and `/setblock ... air destroy`): 639 stand. A lone `belt` is destroyed
+    by Create's own `initBelt` (a belt is a chain), `factory_gauge` and `gantry_carriage` can't
+    survive with nothing to hang on, and `fake_track` was gone before the read-back (Part 82
+    measures why). 211 hold block-entity data, the destroyed blocks dropped 607 items, nothing
+    threw, and 15 calls in 10 blocks were unmapped: `BlockState.handleNeighborChanged` (andesite
+    door), `ServerChunkCache.getGenerator` (belt), `StringDecomposer.iterateFormatted` (display
+    board), `getTicker` and `saveAdditional` by their short keys (fake track, mechanical
+    harvester), fastutil's `ObjectHeapPriorityQueue` (hose pulley), the lectern controller's item
+    model (`BakedModelWrapper.getOriginalModel`, `ItemStack.hasFoil`, `BakedModel.getRenderPasses`),
+    `ChunkSource.hasChunk` (mechanical arm), Guava's `Objects.equal` and `Collectors.summingInt`
+    (track, train door).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
