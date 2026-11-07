@@ -230,6 +230,21 @@ pub fn program_of(jars: &[&Path], libraries: &[&Path]) -> Result<(Vec<ClassFile>
     }
     let all: Vec<&Path> = jars.iter().chain(libraries).copied().collect();
     let services = services_of(&all)?;
+    // Another loader's build beside NeoForge's (a multi-loader jar's Fabric classes, a Forge
+    // entry point) never runs here: it stays out, as a library's unreached classes do.
+    // HZ_DEBUG_OTHER_LOADERS=1 lists them on stderr.
+    let theirs = other_loaders_classes(&out, &services, &mixin_configs_of(&all));
+    if !theirs.is_empty() {
+        if std::env::var_os("HZ_DEBUG_OTHER_LOADERS").is_some() {
+            let mut v: Vec<&String> = theirs.iter().collect();
+            v.sort();
+            for n in v {
+                eprintln!("other-loader {n}");
+            }
+        }
+        out.retain(|c| !theirs.contains(&c.name));
+        library.retain(|c| !theirs.contains(c));
+    }
     let mut reached = reach::reach(&out, &library, &services, &is_api);
     let kept = reached.len();
     let program = out
@@ -244,6 +259,207 @@ pub fn program_of(jars: &[&Path], libraries: &[&Path]) -> Result<(Vec<ClassFile>
         })
         .collect();
     Ok((program, library.len(), kept))
+}
+
+/// Whether a name or descriptor names one of Minecraft's classes by Fabric's intermediary name
+/// (`net/minecraft/class_1937`): code built for Fabric. No NeoForge game has these classes.
+fn names_intermediary(s: &str) -> bool {
+    s.match_indices("net/minecraft/class_").any(|(i, m)| {
+        s.as_bytes()
+            .get(i + m.len())
+            .is_some_and(u8::is_ascii_digit)
+    })
+}
+
+/// Whether a class is another loader's own API (Fabric's and Quilt's loaders, Forge's FML), which
+/// NeoForge doesn't have unless a jar of the program brings it.
+fn loader_api(class: &str) -> bool {
+    [
+        "net/fabricmc/api/",
+        "net/fabricmc/loader/",
+        "org/quiltmc/loader/",
+        "org/quiltmc/qsl/",
+        "net/minecraftforge/fml/",
+    ]
+    .iter()
+    .any(|p| class.starts_with(p))
+}
+
+/// Whether a class's code uses Minecraft's classes by intermediary names (the classes it names,
+/// the members it calls or reads): code built for Fabric. Its own members' types don't count: a
+/// NeoForge build may leave one in an API it never calls, and the class still loads.
+fn uses_intermediary(c: &ClassFile) -> bool {
+    c.pool.iter().any(|k| match k {
+        class::Const::Class(i) | class::Const::NameAndType(_, i) | class::Const::MethodType(i) => {
+            c.utf8(*i).is_ok_and(|s| names_intermediary(&s))
+        }
+        _ => false,
+    })
+}
+
+/// Whether a class annotation may be how a loader or another mod finds the class on its own:
+/// one reflection sees (FML's `@Mod` and `@EventBusSubscriber`, JEI's `@JeiPlugin`...), not a
+/// mixin's (configs list those), another loader's, or the language's or Minecraft's own markers.
+fn finding_annotation(a: &class::Annotation) -> bool {
+    a.visible
+        && ![
+            "Lorg/spongepowered/",
+            "Lnet/fabricmc/",
+            "Lorg/quiltmc/",
+            "Lnet/minecraftforge/",
+            "Lkotlin/",
+            "Ljava/lang/",
+            "Ljavax/annotation/",
+            "Lnet/minecraft/",
+        ]
+        .iter()
+        .any(|p| a.ty.starts_with(p))
+}
+
+/// The classes of another loader's build that NeoForge never runs, as a multi-loader ("merged")
+/// jar carries Fabric's beside NeoForge's, and what only they reach (by supertype, use, or a
+/// service interface's listed implementations). Theirs are the classes the JVM can't load here
+/// (over another loader's API the program lacks, over a class by intermediary name, or over such
+/// a class), code built against Minecraft's intermediary names ([`uses_intermediary`]), and
+/// mixins no config NeoForge reads lists (`configs`: Fabric's own). Any of them NeoForge's code
+/// reaches stays, with what NeoForge may find on its own: a class none of theirs reaches, one with
+/// a finding annotation ([`finding_annotation`]), a mixin of `configs` or its plugin, one a string
+/// names (reflection).
+pub fn other_loaders_classes(
+    classes: &[ClassFile],
+    services: &BTreeMap<String, Vec<String>>,
+    configs: &[MixinConfig],
+) -> std::collections::HashSet<String> {
+    use std::collections::{HashMap, HashSet};
+    const MIXIN: &str = "Lorg/spongepowered/asm/mixin/Mixin;";
+    let by_name: HashMap<&str, &ClassFile> = classes.iter().map(|c| (c.name.as_str(), c)).collect();
+    let key = |n: &str| by_name.get_key_value(n).map(|(k, _)| *k);
+    let supertypes = |c: &'_ ClassFile| {
+        c.superclass
+            .clone()
+            .into_iter()
+            .chain(c.interfaces.iter().cloned())
+            .collect::<Vec<String>>()
+    };
+    let mut unloadable: HashSet<&str> = classes
+        .iter()
+        .filter(|c| {
+            supertypes(c).iter().any(|s| {
+                names_intermediary(s) || (loader_api(s) && !by_name.contains_key(s.as_str()))
+            })
+        })
+        .map(|c| c.name.as_str())
+        .collect();
+    // A class over one that can't load can't load either.
+    loop {
+        let more: Vec<&str> = classes
+            .iter()
+            .filter(|c| {
+                !unloadable.contains(c.name.as_str())
+                    && supertypes(c)
+                        .iter()
+                        .any(|s| unloadable.contains(s.as_str()))
+            })
+            .map(|c| c.name.as_str())
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        unloadable.extend(more);
+    }
+    let listed: HashSet<&str> = configs
+        .iter()
+        .flat_map(|c| c.classes.iter().chain(&c.plugin))
+        .map(String::as_str)
+        .collect();
+    let is_mixin = |c: &ClassFile| c.annotation_of(MIXIN).is_some();
+    let theirs_own = |c: &ClassFile| {
+        unloadable.contains(c.name.as_str())
+            || uses_intermediary(c)
+            || (is_mixin(c) && !listed.contains(c.name.as_str()))
+    };
+    let marked: Vec<&str> = classes
+        .iter()
+        .filter(|c| theirs_own(c))
+        .map(|c| c.name.as_str())
+        .collect();
+    if marked.is_empty() {
+        return HashSet::new();
+    }
+    // A class's edges: its supertypes, the classes its pool names (an array's element class), and
+    // for a service interface the implementations listed for it.
+    let edges = |c: &ClassFile| -> Vec<&str> {
+        let mut out: Vec<&str> = c
+            .superclass
+            .iter()
+            .chain(&c.interfaces)
+            .filter_map(|s| key(s))
+            .collect();
+        for k in &c.pool {
+            if let class::Const::Class(i) = k
+                && let Ok(n) = c.utf8(*i)
+            {
+                let element = n.trim_start_matches('[');
+                let element = element
+                    .strip_prefix('L')
+                    .and_then(|e| e.strip_suffix(';'))
+                    .unwrap_or(element);
+                out.extend(key(element));
+            }
+        }
+        if let Some(list) = services.get(&c.name) {
+            out.extend(list.iter().filter_map(|s| key(s)));
+        }
+        out
+    };
+    let mut theirs: HashSet<&str> = marked.iter().copied().collect();
+    let mut todo = marked;
+    while let Some(n) = todo.pop() {
+        for e in edges(by_name[n]) {
+            if theirs.insert(e) {
+                todo.push(e);
+            }
+        }
+    }
+    let named: HashSet<String> = classes
+        .iter()
+        .filter(|c| !theirs.contains(c.name.as_str()))
+        .flat_map(|c| {
+            c.pool.iter().filter_map(|k| {
+                if let class::Const::String(i) = k {
+                    c.utf8(*i).ok()
+                } else {
+                    None
+                }
+            })
+        })
+        .map(|s| s.replace('.', "/"))
+        .collect();
+    let root = |c: &ClassFile| {
+        !unloadable.contains(c.name.as_str())
+            && (!theirs.contains(c.name.as_str())
+                || c.annotations.iter().any(finding_annotation)
+                || listed.contains(c.name.as_str())
+                || named.contains(&c.name))
+    };
+    let mut ours: HashSet<&str> = classes
+        .iter()
+        .filter(|c| root(c))
+        .map(|c| c.name.as_str())
+        .collect();
+    let mut todo: Vec<&str> = ours.iter().copied().collect();
+    while let Some(n) = todo.pop() {
+        for e in edges(by_name[n]) {
+            if !unloadable.contains(e) && ours.insert(e) {
+                todo.push(e);
+            }
+        }
+    }
+    theirs
+        .into_iter()
+        .filter(|n| !ours.contains(n))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// `META-INF/services` of a jar and the jars it bundles: interface → implementations, in
@@ -436,6 +652,64 @@ fn enum_strings(e: &ClassFile) -> BTreeMap<String, String> {
     out
 }
 
+/// JSON as Mixin reads a config (Gson, leniently): comments (`//`, `#` to the line's end, `/* */`)
+/// are left out, and an array's empty element (`["A",]`) is null, which Mixin skips. What lenient
+/// Gson refuses too (an object's trailing comma) stays an error.
+fn lenient_json(text: &str) -> Option<serde_json::Value> {
+    if let Ok(v) = serde_json::from_str(text) {
+        return Some(v);
+    }
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    // The containers open where the text is (true for an array), and the last token's byte.
+    let (mut open, mut last, mut i) = (Vec::<bool>::new(), b' ', 0);
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                let start = i;
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i = (i + 1).min(b.len());
+                out.push_str(&text[start..i]);
+                last = b'"';
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = text[i + 2..].find("*/").map_or(b.len(), |e| i + 2 + e + 2);
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                i = text[i..].find('\n').map_or(b.len(), |e| i + e);
+                continue;
+            }
+            b'#' => {
+                i = text[i..].find('\n').map_or(b.len(), |e| i + e);
+                continue;
+            }
+            c @ (b'[' | b'{') => open.push(c == b'['),
+            b']' | b'}' => {
+                if last == b',' && open.last() == Some(&true) {
+                    out.push_str("null");
+                }
+                open.pop();
+            }
+            b',' if open.last() == Some(&true) && matches!(last, b',' | b'[') => {
+                out.push_str("null")
+            }
+            _ => {}
+        }
+        let c = text[i..].chars().next().unwrap_or(' ');
+        out.push(c);
+        if !c.is_whitespace() {
+            last = if c.is_ascii() { c as u8 } else { b'a' };
+        }
+        i += c.len_utf8();
+    }
+    serde_json::from_str(&out).ok()
+}
+
 /// The mixin configurations of `jars` and of the jars they bundle, as FML hands them to Mixin:
 /// each `[[mixins]] config = "..."` of a jar's mods.toml, and the manifest's `MixinConfigs`.
 pub fn mixin_configs_of(jars: &[&Path]) -> Vec<MixinConfig> {
@@ -472,7 +746,9 @@ pub fn mixin_configs_of(jars: &[&Path]) -> Vec<MixinConfig> {
             if out.iter().any(|c| c.file == file) {
                 continue;
             }
-            let Some(json) = entry(zip, &file).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) else { continue };
+            let Some(json) = entry(zip, &file).and_then(|t| lenient_json(&t)) else {
+                continue;
+            };
             let package = json["package"].as_str().unwrap_or("").to_owned();
             let classes = ["mixins", "client", "server"]
                 .iter()
@@ -918,7 +1194,8 @@ mod mixin_census_tests {
             r#"{"package": "com.m.mixin", "plugin": "com.m.mixin.Plugin", "mixins": ["KineticMixin", "compat.TrackMixin"],
                 "client": ["ScreenMixin"], "injectors": {"defaultRequire": 1}}"#,
         );
-        put("old.mixins.json", r#"{"package": "com.m.old", "server": ["ServerMixin"]}"#);
+        // Read as Mixin's Gson reads it: leniently.
+        put("old.mixins.json", "{\"package\": \"com.m.old\", // FML's older way\n \"server\": [\"ServerMixin\",]}");
         put("unlisted.mixins.json", r#"{"package": "com.m.unused", "mixins": ["NeverMixin"]}"#);
         zip.finish().unwrap();
         let found = mixin_configs_of(&[jar.as_path()]);
@@ -936,6 +1213,243 @@ mod mixin_census_tests {
                 MixinConfig { file: "old.mixins.json".into(), classes: vec!["com/m/old/ServerMixin".into()], default_require: 0, plugin: None, off: Vec::new() },
             ]
         );
+    }
+
+    /// Mixin reads a config with Gson, leniently: comments of each kind are left out (not in a
+    /// string), an array's empty element is a null (which Mixin skips), and an object's trailing
+    /// comma fails there too.
+    #[test]
+    fn a_mixin_config_reads_as_gson_reads_it() {
+        let read = |t: &str| lenient_json(t);
+        assert_eq!(
+            read(
+                "{\"package\": \"a.b\", // the mixins\n \"mixins\": [\"A\", \"B\",], /* none */ \"client\": [,\"C\",,] # end\n}"
+            ),
+            Some(
+                serde_json::json!({ "package": "a.b", "mixins": ["A", "B", null], "client": [null, "C", null, null] })
+            )
+        );
+        assert_eq!(
+            read(r##"{"refmap": "a//b.json", "x": "#1 /* */"}"##),
+            Some(serde_json::json!({ "refmap": "a//b.json", "x": "#1 /* */" }))
+        );
+        assert_eq!(
+            read(r#"{"a": "\"//\"", "b": []}"#),
+            Some(serde_json::json!({ "a": "\"//\"", "b": [] }))
+        );
+        assert_eq!(read(r#"{"a": 1,}"#), None);
+    }
+
+    /// A multi-loader jar's Fabric build stays out of the program: a class over Fabric's loader API
+    /// (which the program lacks) and one over it, code built against Minecraft's intermediary
+    /// names, a mixin of no config NeoForge reads, and what only they reach, the implementations a
+    /// service lists for an interface only they use included. What NeoForge may find on its own
+    /// stays: its `@Mod` class and what it reaches, a class with another mod's plugin annotation,
+    /// one a string names, a mixin of its configs and their plugin, a class whose code merely
+    /// mentions another loader's classes (an optional integration), one over a loader class the
+    /// program brings, and an API whose own method a build left with an intermediary type.
+    #[test]
+    fn another_loaders_build_in_a_merged_jar_stays_out() {
+        use class::{Annotation, Const, Method};
+        fn class(
+            name: &str,
+            interfaces: &[&str],
+            uses: &[&str],
+            strings: &[&str],
+            annotations: Vec<Annotation>,
+        ) -> ClassFile {
+            let mut pool = vec![Const::Unused];
+            for (text, string) in uses
+                .iter()
+                .map(|u| (u, false))
+                .chain(strings.iter().map(|s| (s, true)))
+            {
+                pool.push(Const::Utf8(text.to_string()));
+                let i = pool.len() as u16 - 1;
+                pool.push(if string {
+                    Const::String(i)
+                } else {
+                    Const::Class(i)
+                });
+            }
+            ClassFile {
+                pool,
+                access: 0x21,
+                name: name.into(),
+                superclass: Some("java/lang/Object".into()),
+                interfaces: interfaces.iter().map(|i| i.to_string()).collect(),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                bootstrap: Vec::new(),
+                annotations,
+            }
+        }
+        let annotation = |ty: &str, value: Option<&str>| Annotation {
+            ty: ty.into(),
+            values: value
+                .map(|v| ("value".to_owned(), v.to_owned()))
+                .into_iter()
+                .collect(),
+            visible: true,
+            ..Default::default()
+        };
+        let mixin = |target: &str| {
+            vec![Annotation {
+                visible: false,
+                ..annotation("Lorg/spongepowered/asm/mixin/Mixin;", Some(target))
+            }]
+        };
+        let mut client = class("m/fabric/ModFabricClient", &[], &[], &[], Vec::new());
+        client.superclass = Some("m/fabric/ModFabric".into());
+        let mut entry_gui = class("m/api/EntryGui", &[], &[], &[], Vec::new());
+        entry_gui.methods.push(Method {
+            access: 0x401,
+            name: "getAdvancement".into(),
+            desc: "()Lnet/minecraft/class_8781;".into(),
+            code: None,
+            annotations: Vec::new(),
+            param_annotations: Vec::new(),
+            signature: None,
+            default: None,
+        });
+        let classes = vec![
+            class(
+                "m/neoforge/ModNeo",
+                &[],
+                &["m/common_neo/Util", "m/shared/Constants", "m/gui/Widget"],
+                &["m.reflect.Loaded"],
+                vec![annotation("Lnet/neoforged/fml/common/Mod;", Some("m"))],
+            ),
+            class(
+                "m/common_neo/Util",
+                &[],
+                &["net/minecraft/world/level/Level"],
+                &[],
+                Vec::new(),
+            ),
+            class("m/shared/Constants", &[], &[], &[], Vec::new()),
+            class(
+                "m/neoforge/mixin/LevelMixin",
+                &[],
+                &["m/shared/Constants"],
+                &[],
+                mixin("Lnet/minecraft/world/level/Level;"),
+            ),
+            class("m/neoforge/mixin/Plugin", &[], &[], &[], Vec::new()),
+            class(
+                "m/compat/FabricApiCompat",
+                &[],
+                &[
+                    "net/fabricmc/fabric/api/event/Event",
+                    "net/minecraftforge/common/ForgeConfigSpec",
+                ],
+                &[],
+                Vec::new(),
+            ),
+            entry_gui,
+            class("m/gui/Widget", &["m/api/EntryGui"], &[], &[], Vec::new()),
+            class(
+                "m/fabric/ModFabric",
+                &["net/fabricmc/api/ModInitializer"],
+                &[
+                    "m/common_fabric/Helper",
+                    "m/shared/Constants",
+                    "m/compat/JeiPlugin",
+                    "m/reflect/Loaded",
+                    "m/common_fabric/Services",
+                ],
+                &[],
+                Vec::new(),
+            ),
+            client,
+            class(
+                "m/common_fabric/Helper",
+                &[],
+                &["net/minecraft/class_1937", "m/common_fabric/Plain"],
+                &[],
+                Vec::new(),
+            ),
+            class("m/common_fabric/Plain", &[], &[], &[], Vec::new()),
+            class(
+                "m/fabric/mixin/LevelMixin",
+                &[],
+                &["m/common_fabric/Plain"],
+                &[],
+                mixin("Lnet/minecraft/class_1937;"),
+            ),
+            class(
+                "m/compat/JeiPlugin",
+                &[],
+                &[],
+                &[],
+                vec![annotation("Lmezz/jei/api/JeiPlugin;", None)],
+            ),
+            class("m/reflect/Loaded", &[], &[], &[], Vec::new()),
+            class(
+                "m/common_fabric/Services",
+                &[],
+                &["m/common_fabric/PlatformHelper"],
+                &[],
+                Vec::new(),
+            ),
+            class("m/common_fabric/PlatformHelper", &[], &[], &[], Vec::new()),
+            class(
+                "m/fabric/FabricPlatformHelper",
+                &["m/common_fabric/PlatformHelper"],
+                &[],
+                &[],
+                Vec::new(),
+            ),
+            class(
+                "net/fabricmc/api/ClientModInitializer",
+                &[],
+                &[],
+                &[],
+                Vec::new(),
+            ),
+            class(
+                "m/bundled/UsesBundled",
+                &["net/fabricmc/api/ClientModInitializer"],
+                &[],
+                &[],
+                Vec::new(),
+            ),
+        ];
+        let services: BTreeMap<String, Vec<String>> = [(
+            "m/common_fabric/PlatformHelper".to_owned(),
+            vec!["m/fabric/FabricPlatformHelper".to_owned()],
+        )]
+        .into();
+        let configs = [MixinConfig {
+            file: "m_neoforge.mixins.json".into(),
+            classes: vec!["m/neoforge/mixin/LevelMixin".into()],
+            default_require: 0,
+            plugin: Some("m/neoforge/mixin/Plugin".into()),
+            off: Vec::new(),
+        }];
+        let mut out: Vec<String> = other_loaders_classes(&classes, &services, &configs)
+            .into_iter()
+            .collect();
+        out.sort();
+        assert_eq!(
+            out,
+            [
+                "m/common_fabric/Helper",
+                "m/common_fabric/Plain",
+                "m/common_fabric/PlatformHelper",
+                "m/common_fabric/Services",
+                "m/fabric/FabricPlatformHelper",
+                "m/fabric/ModFabric",
+                "m/fabric/ModFabricClient",
+                "m/fabric/mixin/LevelMixin",
+            ]
+        );
+        // A NeoForge-only program keeps every class.
+        let neo: Vec<ClassFile> = classes
+            .into_iter()
+            .filter(|c| !c.name.contains("fabric/"))
+            .collect();
+        assert!(other_loaders_classes(&neo, &services, &configs).is_empty());
     }
 
     /// A jar that only bundles its mods (Create Aeronautics: three under `META-INF/jarjar/`, no class

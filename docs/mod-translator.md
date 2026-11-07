@@ -7120,6 +7120,44 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     sanitized, with vanilla's errors; mods give their types attributes through NeoForge's two
     events, and a type put twice throws; hover events keep their action and value, an item's info
     keeps the stack it had, and an entity's tooltip is its name, type and UUID), translator 20.
+- [x] 2026-11-07 Part 107: multi-loader jars translate only their NeoForge build; mixin configs read as Mixin reads them.
+  - Some jars carry several loaders' builds side by side: 13 of the pack's, among them Serilum's
+    `collective`, Double Doors and Villager Names, and BadOptimizations. Their Fabric build names
+    Minecraft's classes by intermediary names (`net/minecraft/class_1937`), which no NeoForge game
+    has. It was translated and counted as missing API all the same. The program now leaves out what
+    NeoForge never runs (`other_loaders_classes`, from `program_of`, so translation and coverage both
+    skip it). Three kinds of class count as the other loader's:
+    - classes the JVM can't load: over another loader's API the program lacks (Fabric's
+      `ModInitializer`, Forge's `ModContainer`: Kotlin for Forge's Forge half, JourneyMap's
+      Fabric error screen), or over such a class;
+    - code that uses intermediary names;
+    - mixins no config NeoForge reads lists (Fabric's own, and leftovers such as anvilcore's six,
+      which have no config at all).
+  - Anything else those classes reach goes too, a listed service's implementations included,
+    unless NeoForge reaches it on its own:
+    - classes their code doesn't reach;
+    - classes with an annotation found by reflection (FML's `@Mod`, JEI's `@JeiPlugin`);
+    - mixins of FML's configs and their plugins;
+    - classes a string names;
+    - whatever these reach.
+  - Measured first, then narrowed: names alone mislead. Sodium bundles Fabric's renderer API, YACL
+    Quilt's JSON parser, dragonlib Forge's `ForgeConfigSpec` (Forge Config API Port), all of them
+    present on NeoForge. BetterAdvancements' NeoForge API keeps an intermediary return type in a
+    method nothing calls, and the class loads all the same. Only supertypes and code count.
+  - Mixin configs: FML 4.0.45 hands Mixin only `[[mixins]]` (its container's `getAttribute` gives
+    null). Mixin's ModLauncher plugin reads each mod jar's manifest `MixinConfigs` itself
+    (`MixinPlatformAgentDefault`), so both count, as before. Multi-loader jars list their Forge config
+    there; its plugin turns those mixins off at load, which the translator doesn't evaluate yet. A
+    config is now read as Mixin's Gson reads it, leniently: comments, and an array's empty element
+    as a null that Mixin skips. Longer Following Time's config, with a trailing comma, was dropped
+    before.
+  - Measured (packcov20, the same 367 jars): methods 81.3% (from 80.5%), uses 90.2% (from 89.7%),
+    distinct missing API methods 9978 (from 10960). That is the measure getting honest, not new
+    mappings: 1444 API methods of other loaders' code are no longer counted, 63 of them mapped.
+    Create unchanged (78.4%, 95.2%).
+  - Tests: translator 22 (2 new: a multi-loader jar's Fabric build and what only it reaches stays
+    out, while NeoForge's, its annotated, named and configured classes, optional integrations and
+    bundled loader classes stay; a mixin config reads as Gson reads it), compat 607.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
