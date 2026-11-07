@@ -29,6 +29,9 @@ const MENU_TYPE_EXTENSION: &str = "net/neoforged/neoforge/common/extensions/IMen
 pub(crate) const INVENTORY: &str = "net/minecraft/world/entity/player/Inventory";
 pub(crate) const CONTAINER: &str = "net/minecraft/world/Container";
 pub(crate) const SIMPLE_CONTAINER: &str = "net/minecraft/world/SimpleContainer";
+pub(crate) const CRAFTING_CONTAINER: &str = "net/minecraft/world/inventory/CraftingContainer";
+pub(crate) const TRANSIENT_CRAFTING: &str =
+    "net/minecraft/world/inventory/TransientCraftingContainer";
 const MENU_PROVIDER: &str = "net/minecraft/world/MenuProvider";
 const MENU_CONSTRUCTOR: &str = "net/minecraft/world/inventory/MenuConstructor";
 const MENU_PROVIDER_EXTENSION: &str = "net/neoforged/neoforge/common/extensions/IMenuProviderExtension";
@@ -116,6 +119,12 @@ const C_CHANGED: &str = "net/minecraft/world/Container.setChanged.()V";
 const C_MAX: &str = "net/minecraft/world/Container.getMaxStackSize.()I";
 const C_MAX_FOR: &str = "net/minecraft/world/Container.getMaxStackSize.(Lnet/minecraft/world/item/ItemStack;)I";
 const C_SIZE: &str = "net/minecraft/world/Container.getContainerSize.()I";
+const CC_WIDTH: &str = "net/minecraft/world/inventory/CraftingContainer.getWidth.()I";
+const CC_HEIGHT: &str = "net/minecraft/world/inventory/CraftingContainer.getHeight.()I";
+const CC_ITEMS: &str =
+    "net/minecraft/world/inventory/CraftingContainer.getItems.()Ljava/util/List;";
+const M_SLOTS_CHANGED: &str = "net/minecraft/world/inventory/AbstractContainerMenu.slotsChanged.(Lnet/minecraft/world/Container;)V";
+const SC_ACCOUNT: &str = "net/minecraft/world/entity/player/StackedContents.accountSimpleStack.(Lnet/minecraft/world/item/ItemStack;)V";
 
 const H_GET: &str = "net/neoforged/neoforge/items/IItemHandler.getStackInSlot.(I)Lnet/minecraft/world/item/ItemStack;";
 const H_SET: &str = "net/neoforged/neoforge/items/IItemHandlerModifiable.setStackInSlot.(ILnet/minecraft/world/item/ItemStack;)V";
@@ -2047,6 +2056,135 @@ fn simple_container_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Opt
     })
 }
 
+/// `TransientCraftingContainer`: a crafting grid of `width` × `height` stacks that tells its menu
+/// (`slotsChanged`) when one is set or taken. Create's basin crafts through an empty one whose
+/// stacks are its own.
+fn transient_crafting_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let c = a(0);
+    let items = rt.get_field(c, "items");
+    let size = list_len(rt, items);
+    let valid = |i: i32| i >= 0 && (i as usize) < size;
+    // The menu hears of a change, as vanilla's tells it (a container made without one throws).
+    let changed = |rt: &mut Rt| {
+        let menu = rt.get_field(c, "menu");
+        if menu.r() == 0 {
+            rt.throw_new("java/lang/NullPointerException");
+        } else {
+            virt(rt, M_SLOTS_CHANGED, menu, &[c]);
+        }
+    };
+    Some(match (name, desc) {
+        ("<init>", _) => {
+            let (w, h) = (a(2).i(), a(3).i());
+            let list = if desc.ends_with("Lnet/minecraft/core/NonNullList;)V") {
+                a(4)
+            } else {
+                let e = empty(rt);
+                rt.alloc(NON_NULL_LIST, Data::List(vec![e; (w * h).max(0) as usize]))
+            };
+            rt.put_field(c, "menu", a(1));
+            rt.put_field(c, "width", V::I(w));
+            rt.put_field(c, "height", V::I(h));
+            rt.put_field(c, "items", list);
+            V::Void
+        }
+        ("getContainerSize", _) => V::I(size as i32),
+        ("getWidth", _) => V::I(rt.get_field(c, "width").i()),
+        ("getHeight", _) => V::I(rt.get_field(c, "height").i()),
+        // A copy: what the caller does to it leaves the grid as it is (`List.copyOf`).
+        ("getItems", _) => {
+            let stacks = crate::jutil::elements(rt, items);
+            crate::jutil::new_list(rt, stacks)
+        }
+        ("getItem", _) => {
+            let i = a(1).i();
+            if i >= virt(rt, C_SIZE, c, &[]).i() || !valid(i) {
+                empty(rt)
+            } else {
+                list_get(rt, items, i as usize)
+            }
+        }
+        ("isEmpty", _) => V::I(
+            crate::jutil::elements(rt, items)
+                .into_iter()
+                .all(|s| is_empty(rt, s)) as i32,
+        ),
+        // `ContainerHelper.takeItem`: the stack, its slot left empty, without a word to the menu.
+        ("removeItemNoUpdate", _) => {
+            if !valid(a(1).i()) {
+                return Some(empty(rt));
+            }
+            let (there, e) = (list_get(rt, items, a(1).i() as usize), empty(rt));
+            list_set(rt, items, a(1).i() as usize, e);
+            there
+        }
+        // `ContainerHelper.removeItem`: up to `n` of the stack.
+        ("removeItem", _) => {
+            let there = if valid(a(1).i()) {
+                list_get(rt, items, a(1).i() as usize)
+            } else {
+                V::NULL
+            };
+            if there.r() == 0 || is_empty(rt, there) || a(2).i() <= 0 {
+                return Some(empty(rt));
+            }
+            let out = split(rt, there, a(2).i());
+            if !is_empty(rt, out) {
+                changed(rt);
+            }
+            out
+        }
+        ("setItem", _) => {
+            if valid(a(1).i()) {
+                list_set(rt, items, a(1).i() as usize, a(2));
+            }
+            changed(rt);
+            V::Void
+        }
+        ("clearContent", _) => {
+            let e = empty(rt);
+            for i in 0..size {
+                list_set(rt, items, i, e);
+            }
+            V::Void
+        }
+        ("fillStackedContents", _) => {
+            for s in crate::jutil::elements(rt, items) {
+                virt(rt, SC_ACCOUNT, a(1), &[s]);
+            }
+            V::Void
+        }
+        ("setChanged", _) => V::Void,
+        ("stillValid", _) => V::I(1),
+        _ => return None,
+    })
+}
+
+/// `CraftingContainer`'s grid as a recipe reads it (`asCraftInput`, `asPositionedCraftInput`):
+/// its own width, height and stacks, which a mod's container may answer itself, trimmed.
+fn crafting_input(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let c = arg(args, 0);
+    let with_position = match name {
+        "asCraftInput" => false,
+        "asPositionedCraftInput" => true,
+        _ => return None,
+    };
+    let (w, h) = (
+        virt(rt, CC_WIDTH, c, &[]).i(),
+        virt(rt, CC_HEIGHT, c, &[]).i(),
+    );
+    let list = virt(rt, CC_ITEMS, c, &[]);
+    let stacks = crate::jutil::elements(rt, list);
+    Some(crate::crafting::container_input(
+        rt,
+        w,
+        h,
+        &stacks,
+        with_position,
+    ))
+}
+
 /// `Container`'s default methods, for a mod's own container.
 fn container_default(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
@@ -2085,6 +2223,16 @@ fn container_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) 
     }
     if owner == SIMPLE_CONTAINER || rt.instance_of(this, SIMPLE_CONTAINER) {
         return simple_container_call(rt, name, desc, args);
+    }
+    if matches!(owner, TRANSIENT_CRAFTING | CRAFTING_CONTAINER)
+        || rt.instance_of(this, TRANSIENT_CRAFTING)
+    {
+        let own = owner == TRANSIENT_CRAFTING || rt.instance_of(this, TRANSIENT_CRAFTING);
+        let answer = crafting_input(rt, name, args).or_else(|| {
+            own.then(|| transient_crafting_call(rt, name, desc, args))
+                .flatten()
+        });
+        return answer.or_else(|| container_default(rt, name, desc, args));
     }
     container_default(rt, name, desc, args)
 }
@@ -2806,6 +2954,8 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | INVENTORY
             | CONTAINER
             | SIMPLE_CONTAINER
+            | CRAFTING_CONTAINER
+            | TRANSIENT_CRAFTING
             | MENU_PROVIDER
             | MENU_CONSTRUCTOR
             | MENU_PROVIDER_EXTENSION
@@ -2830,7 +2980,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     match owner {
         MENU | INVENTORY_MENU => menu_call(rt, name, desc, args),
         SLOT | HANDLER_SLOT => slot_call(rt, owner, name, desc, args),
-        INVENTORY | CONTAINER | SIMPLE_CONTAINER => container_call(rt, owner, name, desc, args),
+        INVENTORY | CONTAINER | SIMPLE_CONTAINER | CRAFTING_CONTAINER | TRANSIENT_CRAFTING => {
+            container_call(rt, owner, name, desc, args)
+        }
         MENU_TYPE | MENU_TYPE_EXTENSION => type_call(rt, owner, name, desc, args),
         MENU_PROVIDER | MENU_CONSTRUCTOR | MENU_PROVIDER_EXTENSION | SIMPLE_MENU_PROVIDER => provider_call(rt, owner, name, args),
         DATA_SLOT | CONTAINER_DATA | SIMPLE_CONTAINER_DATA => data_call(rt, owner, name, args),

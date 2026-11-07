@@ -6615,6 +6615,46 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     gives the same item to the smoker). Over the campfire, beef x2 became cooked beef x2 and
     potatoes x3 baked potatoes x3. The water washed red wool white and a magma block to obsidian
     as before. Nothing unmapped, no recipe refused, nothing threw.
+- [x] 2026-11-07 Part 92: Create's press and mixer craft by Minecraft's recipes in a basin (after
+  Part 91 they found nothing at all: their search for what to make (`matchStaticFilters`) asks
+  `AllRecipeTypes.shouldIgnoreInAutomation` of every crafting recipe, which looks the recipe's
+  serializer up in `BuiltInRegistries.RECIPE_SERIALIZER` (`getResourceKey(serializer).orElseThrow()`);
+  vanilla's serializers weren't in it, so every press and mixer threw `NoSuchElementException` each
+  tick, and not even Create's own compacting and mixing ran). Measured over the pack: 13 classes in 7
+  jars call `shouldIgnoreInAutomation`; `TransientCraftingContainer` is used in 23 classes of 16
+  jars, `CraftingContainer` in 59 of 21, `asCraftInput` in 25 of 15, `asPositionedCraftInput` in 8
+  of 5.
+  - compat: Minecraft's own recipe types and serializers are in their registries under vanilla's
+    names: `getKey`, `getResourceKey`, `containsValue`, `get` and `getHolder` find
+    `RecipeType.SMELTING` as `minecraft:smelting` and `RecipeSerializer.SHAPED_RECIPE` as
+    `minecraft:crafting_shaped`; a type made apart from the registry (`RecipeType.simple`) and a
+    name vanilla has nothing under find nothing. The serializers are in no tag (Create's
+    `automation_ignore` names other mods').
+  - compat: `TransientCraftingContainer` is modelled (it was a plain data class of
+    `vanilla_records`, 637 → 636): both constructors (`(menu, width, height)` fills the grid with
+    empty stacks: Create's basin builds an empty one through it), `getItem`, `setItem` and
+    `removeItem` (which tell the menu, `slotsChanged`; a grid made without one throws, as
+    vanilla's), `removeItemNoUpdate`, `getItems` (a copy), `isEmpty`, `clearContent`,
+    `fillStackedContents`, its size, width and height; it is a `CraftingContainer`, `Container`,
+    `Clearable` and `StackedContentsCompatible` for `instanceof`. `CraftingContainer`'s
+    `asCraftInput` and `asPositionedCraftInput` read a container's own width, height and stacks (a
+    mod's container answers them itself) and trim them as `CraftingInput.ofPositioned` does, which is
+    modelled too, with `CraftingInput.Positioned.EMPTY`. The trimming is vanilla's line for line now:
+    an empty grid is the one `CraftingInput.EMPTY`, and a one-by-one grid stays whole even empty.
+  - compat: `Recipe`'s default methods answer for a mod's recipe that doesn't override them
+    (`getRemainingItems`, `getIngredients`, `isSpecial`, `showNotification`, `getGroup`,
+    `getToastSymbol`, `isIncomplete`): Create's basin asks its compacting recipe what it leaves of
+    the grid, which Create leaves to `Recipe` (a milk bucket leaves its bucket).
+  - Tests: compat 575 (3 new: vanilla's recipe serializers and types are in their registries,
+    found both ways, in no tag, a type made apart and a name vanilla lacks not found; a crafting grid
+    gives the input a recipe reads, trimmed and where it starts, a copy from `getItems`, the empty
+    input for a grid of no rows as Create's basin makes, a one-by-one grid whole, and a grid without
+    a menu throwing when set; a mod's recipe taking `Recipe`'s defaults), translator 19.
+  - In game: on presses over basins, 9 iron nuggets became an iron ingot, 9 iron ingots an iron
+    block, 4 clay balls a clay block (Minecraft's recipes) and 9 snow blocks ice (Create's own
+    compacting) within 20 ticks; a mixer made 3 fire charges of gunpowder, blaze powder and coal
+    within 60; nothing threw, and nothing of the basin's crafting is unmapped (left: the mixer's
+    brewing, `PotionBrewing`'s mixes).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

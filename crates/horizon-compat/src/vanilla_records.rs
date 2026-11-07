@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 637] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 636] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1471,7 +1471,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 637] = [
     ("net/minecraft/world/entity/schedule/Keyframe", "i(IF)V=timeStamp,value|ggetTimeStamp()I=timeStamp|ggetValue()F=value|o"),
     ("net/minecraft/world/entity/schedule/ScheduleBuilder$ActivityTransition", "i(ILnet/minecraft/world/entity/schedule/Activity;)V=time,activity|ggetTime()I=time|ggetActivity()Lnet/minecraft/world/entity/schedule/Activity;=activity|o"),
     ("net/minecraft/world/flag/FeatureFlagUniverse", "i(Ljava/lang/String;)V=id|gtoString()Ljava/lang/String;=id|o"),
-    ("net/minecraft/world/inventory/TransientCraftingContainer", "i(Lnet/minecraft/world/inventory/AbstractContainerMenu;IILnet/minecraft/core/NonNullList;)V=menu,width,height,items|ggetHeight()I=height|ggetWidth()I=width|o"),
     ("net/minecraft/world/item/AdventureModePredicate", "i(Ljava/util/List;ZLjava/util/List;)V=predicates,showInTooltip,tooltip|gshowInTooltip()Z=showInTooltip"),
     ("net/minecraft/world/item/ItemCooldowns$CooldownInstance", "i(II)V=startTime,endTime|o"),
     ("net/minecraft/world/item/JukeboxSongPlayer", "i(Lnet/minecraft/world/item/JukeboxSongPlayer$OnSongChanged;Lnet/minecraft/core/BlockPos;)V=onSongChanged,blockPos|ggetTicksSinceSongStarted()J=ticksSinceSongStarted|o"),

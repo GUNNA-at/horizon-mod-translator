@@ -74,8 +74,9 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         "net/minecraft/world/inventory/AbstractContainerMenu" => c == crate::menus::INVENTORY_MENU,
         // ... and vanilla's container block entities (a chest's, a furnace's).
         "net/minecraft/world/Container" | "net/minecraft/world/Clearable" => {
-            matches!(c, crate::menus::INVENTORY | crate::menus::SIMPLE_CONTAINER) || crate::item_wrappers::is_a(c, class)
+            matches!(c, crate::menus::INVENTORY | crate::menus::SIMPLE_CONTAINER | crate::menus::TRANSIENT_CRAFTING) || crate::item_wrappers::is_a(c, class)
         }
+        crate::menus::CRAFTING_CONTAINER | "net/minecraft/world/inventory/StackedContentsCompatible" => c == crate::menus::TRANSIENT_CRAFTING,
         "net/minecraft/world/MenuProvider" | "net/minecraft/world/inventory/MenuConstructor" => c == "net/minecraft/world/SimpleMenuProvider",
         "net/minecraft/world/inventory/ContainerData" => c == "net/minecraft/world/inventory/SimpleContainerData",
         "net/minecraft/client/gui/screens/inventory/MenuAccess" => c == "net/minecraft/client/gui/screens/inventory/AbstractContainerScreen",

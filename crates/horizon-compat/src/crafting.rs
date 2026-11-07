@@ -10,6 +10,9 @@
 use crate::{Data, Rt, V, api, api_common, codecs, jutil, recipes};
 use serde_json::{Map, Value as Json};
 
+const RECIPE: &str = "net/minecraft/world/item/crafting/Recipe";
+const GET_INGREDIENTS: &str =
+    "net/minecraft/world/item/crafting/Recipe.getIngredients.()Lnet/minecraft/core/NonNullList;";
 const SHAPED: &str = "net/minecraft/world/item/crafting/ShapedRecipe";
 const SHAPELESS: &str = "net/minecraft/world/item/crafting/ShapelessRecipe";
 const COOKING: &str = "net/minecraft/world/item/crafting/AbstractCookingRecipe";
@@ -132,6 +135,7 @@ const SERIALIZER: &str = "net/minecraft/world/item/crafting/RecipeSerializer";
 const SIMPLE: &str = "net/minecraft/world/item/crafting/SimpleCraftingRecipeSerializer";
 const CATEGORY: &str = "net/minecraft/world/item/crafting/CraftingBookCategory";
 const INPUT: &str = "net/minecraft/world/item/crafting/CraftingInput";
+const POSITIONED: &str = "net/minecraft/world/item/crafting/CraftingInput$Positioned";
 const NON_NULL_LIST: &str = "net/minecraft/core/NonNullList";
 /// The class of vanilla's serializers here: `$id`, and `$codec` when this runtime reads its recipes.
 const VANILLA_SERIALIZER: &str = "compat:recipe-serializer";
@@ -186,6 +190,33 @@ pub(crate) fn vanilla_codec(rt: &mut Rt, id: &str) -> V {
             vanilla_serializer(rt, field).map_or(V::NULL, |s| rt.get_field(s, "$codec"))
         }
         None => V::NULL,
+    }
+}
+
+/// The name Minecraft's own recipe type or serializer `obj` has in `registry`: the objects
+/// `RecipeType.SMELTING` and `RecipeSerializer.SHAPED_RECIPE` hold are registered under
+/// `minecraft:smelting` and `minecraft:crafting_shaped` (Create looks a recipe's serializer up in
+/// its registry before it automates the recipe).
+pub(crate) fn vanilla_entry_name<'a>(rt: &'a Rt, registry: &str, obj: V) -> Option<&'a str> {
+    let interned = match registry {
+        "recipe_type" => "compat:recipe-type/",
+        "recipe_serializer" => "compat:recipe-serializer/",
+        _ => return None,
+    };
+    let id = rt.str_of(rt.get_field(obj, "$id"))?;
+    (rt.interned.get(&format!("{interned}{id}")) == Some(&obj)).then_some(id)
+}
+
+/// Minecraft's own recipe type or serializer registered under `id` in `registry`, None for a name
+/// it has none under.
+pub(crate) fn vanilla_entry(rt: &mut Rt, registry: &str, id: &str) -> Option<V> {
+    match registry {
+        "recipe_type" => recipes::vanilla_type_entry(rt, id),
+        "recipe_serializer" => {
+            let &(field, ..) = SERIALIZERS.iter().find(|(_, i, _)| *i == id)?;
+            vanilla_serializer(rt, field)
+        }
+        _ => None,
     }
 }
 
@@ -520,29 +551,61 @@ fn input(rt: &mut Rt, o: V, w: i32, h: i32, items: Vec<V>) -> V {
     o
 }
 
-/// `CraftingInput.of(w, h, items)`: the grid trimmed to the stacks in it (`ofPositioned`).
-fn input_of(rt: &mut Rt, w: i32, h: i32, items: Vec<V>) -> V {
-    let (mut x0, mut x1, mut y0, mut y1) = (w, -1, h, -1);
+/// `CraftingInput.ofPositioned(w, h, items)`: the grid trimmed to the columns and rows that hold a
+/// stack, with the column and row it starts at; the empty input at 0, 0 when nothing is left. As
+/// vanilla's, a one-by-one grid stays whole even when its stack is empty.
+fn positioned(rt: &mut Rt, w: i32, h: i32, items: &[V]) -> (V, i32, i32) {
+    let at = |x: i32, y: i32| items.get((x + y * w) as usize).copied().unwrap_or_default();
+    let (mut left, mut right, mut top, mut bottom) = (w - 1, 0, h - 1, 0);
     for y in 0..h {
+        let mut row_empty = true;
         for x in 0..w {
-            let s = items.get((x + y * w) as usize).copied().unwrap_or_default();
-            if !api_common::stack_empty(rt, s) {
-                (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+            if !api_common::stack_empty(rt, at(x, y)) {
+                (left, right, row_empty) = (left.min(x), right.max(x), false);
             }
         }
-    }
-    let o = rt.new_object(INPUT);
-    if x1 < 0 {
-        return input(rt, o, 0, 0, Vec::new());
-    }
-    let (nw, nh) = (x1 - x0 + 1, y1 - y0 + 1);
-    let mut kept = Vec::with_capacity((nw * nh) as usize);
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            kept.push(items.get((x + y * w) as usize).copied().unwrap_or_default());
+        if !row_empty {
+            (top, bottom) = (top.min(y), bottom.max(y));
         }
     }
-    input(rt, o, nw, nh, kept)
+    let (nw, nh) = (right - left + 1, bottom - top + 1);
+    if w == 0 || h == 0 || nw <= 0 || nh <= 0 {
+        return (get_static(rt, INPUT, "EMPTY").unwrap_or(V::NULL), 0, 0);
+    }
+    let kept = if nw == w && nh == h {
+        items.to_vec()
+    } else {
+        (0..nh)
+            .flat_map(|y| (0..nw).map(move |x| (x, y)))
+            .map(|(x, y)| at(x + left, y + top))
+            .collect()
+    };
+    let o = rt.new_object(INPUT);
+    (input(rt, o, nw, nh, kept), left, top)
+}
+
+/// `CraftingInput.of(w, h, items)`: the grid trimmed to the stacks in it ([`positioned`]).
+fn input_of(rt: &mut Rt, w: i32, h: i32, items: Vec<V>) -> V {
+    positioned(rt, w, h, &items).0
+}
+
+/// `CraftingInput.Positioned` of a trimmed grid: vanilla's `EMPTY` for the empty one.
+fn positioned_record(rt: &mut Rt, (input, left, top): (V, i32, i32)) -> V {
+    match get_static(rt, POSITIONED, "EMPTY") {
+        Some(empty) if rt.get_field(empty, "input") == input => empty,
+        _ => crate::records::make(rt, POSITIONED, &[input, V::I(left), V::I(top)]),
+    }
+}
+
+/// A crafting container's grid as a recipe reads it (`CraftingContainer.asCraftInput` and
+/// `asPositionedCraftInput`): its width, height and stacks, trimmed.
+pub(crate) fn container_input(rt: &mut Rt, w: i32, h: i32, items: &[V], with_position: bool) -> V {
+    let trimmed = positioned(rt, w, h, items);
+    if with_position {
+        positioned_record(rt, trimmed)
+    } else {
+        trimmed.0
+    }
 }
 
 fn input_item(rt: &mut Rt, input: V, i: i32) -> V {
@@ -674,11 +737,47 @@ fn incomplete(rt: &mut Rt, ingredients: &[V]) -> bool {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone (every arm, guards aside): part of
 /// [`crate::recipes::claims`], whose `call` asks this one.
-pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(
         owner,
         SERIALIZER | SIMPLE | CATEGORY | SHAPED | PATTERN | INPUT
     ) || recipe_class(owner)
+        || (owner == RECIPE && RECIPE_DEFAULTS.contains(&name))
+}
+
+/// `Recipe`'s default methods.
+const RECIPE_DEFAULTS: [&str; 7] = [
+    "getRemainingItems",
+    "getIngredients",
+    "isSpecial",
+    "showNotification",
+    "getGroup",
+    "getToastSymbol",
+    "isIncomplete",
+];
+
+/// `Recipe`'s default methods, for a mod's recipe that doesn't override them (Create's basin asks
+/// its own recipes what they leave of the grid). A vanilla recipe modelled here answers by its
+/// class.
+fn recipe_default(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let this = args.first().copied().unwrap_or_default();
+    if this.r() == 0 || !rt.is_mod_class(rt.class_of(this)) {
+        return None;
+    }
+    Some(match name {
+        "getRemainingItems" => remaining_items(rt, args.get(1).copied().unwrap_or_default()),
+        "getIngredients" => non_null_list(rt, Vec::new()),
+        "isSpecial" => V::I(0),
+        "showNotification" => V::I(1),
+        "getGroup" => rt.string(""),
+        "getToastSymbol" => api_common::stack(rt, "minecraft:crafting_table", 1),
+        "isIncomplete" => {
+            let list = crate::menus::virt(rt, GET_INGREDIENTS, this, &[]);
+            let ingredients = jutil::elements(rt, list);
+            V::I(incomplete(rt, &ingredients) as i32)
+        }
+        _ => return None,
+    })
 }
 
 /// One of the recipe classes [`recipe_call`] models.
@@ -808,6 +907,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     if recipe_class(owner) {
         return recipe_call(rt, owner, name, args);
     }
+    if owner == RECIPE {
+        return recipe_default(rt, name, args);
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         // `serializer.codec()`: vanilla's, and a special recipe's (the factory given the category).
@@ -880,6 +982,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let items = jutil::elements(rt, a(2));
             input_of(rt, a(0).i(), a(1).i(), items)
         }
+        (INPUT, "ofPositioned") => {
+            let items = jutil::elements(rt, a(2));
+            let trimmed = positioned(rt, a(0).i(), a(1).i(), &items);
+            positioned_record(rt, trimmed)
+        }
         (INPUT, "<init>") => {
             let items = jutil::elements(rt, a(3));
             input(rt, a(0), a(1).i(), a(2).i(), items);
@@ -914,6 +1021,13 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             let o = rt.new_object(INPUT);
             input(rt, o, 0, 0, Vec::new())
         })),
+        (POSITIONED, "EMPTY") => Some(rt.intern(
+            "compat:crafting-input/positioned-empty".into(),
+            |rt| {
+                let input = get_static(rt, INPUT, "EMPTY").unwrap_or(V::NULL);
+                crate::records::make(rt, POSITIONED, &[input, V::I(0), V::I(0)])
+            },
+        )),
         _ => None,
     }
 }
@@ -1279,5 +1393,144 @@ mod tests {
         assert!(!matches(&mut rt, one_more));
         let result = call(&mut rt, SHAPED, "getResultItem", "(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/world/item/ItemStack;", &[recipe, V::NULL]).unwrap();
         assert_eq!(rt.get_field(result, "$count"), V::I(4));
+    }
+
+    /// Create checks a recipe's serializer against a tag before it automates the recipe:
+    /// `RECIPE_SERIALIZER.getHolder(RECIPE_SERIALIZER.getResourceKey(serializer).orElseThrow())`.
+    /// Minecraft's own serializers and types are in their registries under vanilla's names.
+    #[test]
+    fn vanillas_recipe_serializers_and_types_are_in_their_registries() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            const REGISTRY: &str = "net/minecraft/core/Registry";
+            let serializers = api::get_static(rt, "net/minecraft/core/registries/BuiltInRegistries.RECIPE_SERIALIZER");
+            let shapeless = api::get_static(rt, "net/minecraft/world/item/crafting/RecipeSerializer.SHAPELESS_RECIPE");
+            let key = api::call(rt, "net/minecraft/core/Registry.getResourceKey.(Ljava/lang/Object;)Ljava/util/Optional;", &[serializers, shapeless]);
+            let key = rt.get_field(key, "value");
+            assert_ne!(key, V::NULL, "the shapeless serializer is registered");
+            let holder = api::call(rt, "net/minecraft/core/Registry.getHolder.(Lnet/minecraft/resources/ResourceKey;)Ljava/util/Optional;", &[serializers, key]);
+            let holder = rt.get_field(holder, "value");
+            assert_eq!(api::call(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]), shapeless);
+            let name = api::call(rt, "net/minecraft/core/Holder.getRegisteredName.()Ljava/lang/String;", &[holder]);
+            assert_eq!(rt.str_of(name), Some("minecraft:crafting_shapeless"));
+            // Create's `automation_ignore` holds other mods' serializers, none of vanilla's.
+            let registry = api::get_static(rt, "net/minecraft/core/registries/Registries.RECIPE_SERIALIZER");
+            let location = rt.string("create:automation_ignore");
+            let tag = api::call(rt, "net/minecraft/tags/TagKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/tags/TagKey;", &[registry, location]);
+            assert_eq!(api::call(rt, "net/minecraft/core/Holder$Reference.is.(Lnet/minecraft/tags/TagKey;)Z", &[holder, tag]), V::I(0));
+            // Recipe types, by name and back.
+            let types = api::get_static(rt, "net/minecraft/core/registries/BuiltInRegistries.RECIPE_TYPE");
+            let get_key = format!("{REGISTRY}.getKey.(Ljava/lang/Object;)Lnet/minecraft/resources/ResourceLocation;");
+            let get_key: &'static str = rt.static_key(&get_key);
+            let smelting = api::get_static(rt, SMELTING);
+            let name = api::call(rt, get_key, &[types, smelting]);
+            assert_eq!(rt.str_of(name), Some("minecraft:smelting"));
+            let get = "net/minecraft/core/Registry.get.(Lnet/minecraft/resources/ResourceLocation;)Ljava/lang/Object;";
+            let blasting = rt.string("minecraft:blasting");
+            assert_eq!(api::call(rt, get, &[types, blasting]), api::get_static(rt, BLASTING));
+            // A type made apart from the registry has no name in it, and vanilla has no type of
+            // a mod's name.
+            let press = rt.string("mymod:press");
+            let own = api::call(rt, "net/minecraft/world/item/crafting/RecipeType.simple.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/world/item/crafting/RecipeType;", &[press]);
+            assert_eq!(api::call(rt, get_key, &[types, own]), V::NULL);
+            let pressing = rt.string("minecraft:pressing");
+            assert_eq!(api::call(rt, get, &[types, pressing]), V::NULL);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+    }
+
+    /// The game's crafting grid (`TransientCraftingContainer`) is the input a recipe reads: its
+    /// stacks trimmed to those it holds, and where they start. Create's basin crafts through a grid
+    /// of no rows, the empty input; a one-by-one grid stays whole even empty, as vanilla's does.
+    #[test]
+    fn a_crafting_grid_gives_the_input_a_recipe_reads() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        host.recipes.insert(
+            "minecraft:crafting".into(),
+            vec![("minecraft:stick".into(), r##"{"type":"minecraft:crafting_shaped","category":"misc","key":{"#":"minecraft:oak_planks"},"pattern":["#","#"],"result":{"count":4,"id":"minecraft:stick"}}"##.into())],
+        );
+        rt.with_host(&mut host, |rt| {
+            const GRID: &str = "net/minecraft/world/inventory/TransientCraftingContainer";
+            const WITH_ITEMS: &str = "net/minecraft/world/inventory/TransientCraftingContainer.<init>.(Lnet/minecraft/world/inventory/AbstractContainerMenu;IILnet/minecraft/core/NonNullList;)V";
+            const SIZED: &str = "net/minecraft/world/inventory/TransientCraftingContainer.<init>.(Lnet/minecraft/world/inventory/AbstractContainerMenu;II)V";
+            const AS_INPUT: &str = "net/minecraft/world/inventory/CraftingContainer.asCraftInput.()Lnet/minecraft/world/item/crafting/CraftingInput;";
+            const GET: &str = "net/minecraft/world/Container.getItem.(I)Lnet/minecraft/world/item/ItemStack;";
+            let cells: Vec<V> = (0..9).map(|i| if i == 1 || i == 4 { api_common::stack(rt, "minecraft:oak_planks", 1) } else { empty_stack(rt) }).collect();
+            let list = rt.alloc(NON_NULL_LIST, Data::List(cells));
+            let grid = rt.new_object(GRID);
+            api::call(rt, WITH_ITEMS, &[grid, V::NULL, V::I(3), V::I(3), list]);
+            assert!(rt.is_a(GRID, "net/minecraft/world/inventory/CraftingContainer") && rt.is_a(GRID, "net/minecraft/world/Container"));
+            let input = api::call(rt, AS_INPUT, &[grid]);
+            let size = |rt: &mut Rt, input: V| (call(rt, INPUT, "width", "()I", &[input]), call(rt, INPUT, "height", "()I", &[input]));
+            assert_eq!(size(rt, input), (Some(V::I(1)), Some(V::I(2))), "the middle column's top two");
+            let at = api::call(rt, "net/minecraft/world/inventory/CraftingContainer.asPositionedCraftInput.()Lnet/minecraft/world/item/crafting/CraftingInput$Positioned;", &[grid]);
+            assert_eq!((rt.get_field(at, "left"), rt.get_field(at, "top")), (V::I(1), V::I(0)));
+            let crafting = api::get_static(rt, "net/minecraft/world/item/crafting/RecipeType.CRAFTING");
+            let manager = rt.new_object("net/minecraft/world/item/crafting/RecipeManager");
+            let found = api::call(rt, GET_RECIPE_FOR, &[manager, crafting, input, V::NULL]);
+            let holder = rt.get_field(found, "value");
+            assert_eq!(rt.str_of(rt.get_field(holder, "$id")), Some("minecraft:stick"));
+            // What `getItems` gives is a copy; `removeItemNoUpdate` takes the stack from the grid.
+            let copy = api::call(rt, "net/minecraft/world/inventory/CraftingContainer.getItems.()Ljava/util/List;", &[grid]);
+            let stone = api_common::stack(rt, "minecraft:stone", 1);
+            api::call(rt, "java/util/List.set.(ILjava/lang/Object;)Ljava/lang/Object;", &[copy, V::I(0), stone]);
+            let first = api::call(rt, GET, &[grid, V::I(0)]);
+            assert!(api_common::stack_empty(rt, first));
+            let taken = api::call(rt, "net/minecraft/world/Container.removeItemNoUpdate.(I)Lnet/minecraft/world/item/ItemStack;", &[grid, V::I(4)]);
+            assert_eq!(item_of(rt, taken), ("minecraft:oak_planks".into(), 1));
+            let left = api::call(rt, AS_INPUT, &[grid]);
+            assert_eq!(size(rt, left), (Some(V::I(1)), Some(V::I(1))));
+            // A grid of no rows, as Create's basin makes one, and an empty one-by-one grid.
+            let none = rt.new_object(GRID);
+            api::call(rt, SIZED, &[none, V::NULL, V::I(0), V::I(0)]);
+            let nothing = api::call(rt, AS_INPUT, &[none]);
+            assert_eq!(nothing, get_static(rt, INPUT, "EMPTY").unwrap());
+            let one = rt.new_object(GRID);
+            api::call(rt, SIZED, &[one, V::NULL, V::I(1), V::I(1)]);
+            let whole = api::call(rt, AS_INPUT, &[one]);
+            assert_eq!(size(rt, whole), (Some(V::I(1)), Some(V::I(1))));
+            assert_eq!(call(rt, INPUT, "isEmpty", "()Z", &[whole]), Some(V::I(1)));
+            // Setting a stack tells the grid's menu: a grid made without one throws, as vanilla's.
+            assert!(rt.thrown.is_none());
+            api::call(rt, "net/minecraft/world/Container.setItem.(ILnet/minecraft/world/item/ItemStack;)V", &[one, V::I(0), stone]);
+            let thrown = rt.thrown.take().expect("no menu to tell");
+            assert_eq!(rt.class_of(thrown), "java/lang/NullPointerException");
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+    }
+
+    /// A mod's recipe has `Recipe`'s default methods where it declares none: what a grid leaves
+    /// (Create's basin asks its own compacting recipe), not special, a notification, no group.
+    #[test]
+    fn a_mods_recipe_takes_the_default_methods_of_recipe() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            rt.supers.insert("t/Compacting", "java/lang/Object");
+            rt.interfaces.insert("t/Compacting", &["net/minecraft/world/item/crafting/Recipe"]);
+            let recipe = rt.new_object("t/Compacting");
+            let stacks = vec![api_common::stack(rt, "minecraft:milk_bucket", 1), api_common::stack(rt, "minecraft:sugar", 1)];
+            let list = jutil::new_list(rt, stacks);
+            let input = call(rt, INPUT, "of", "(IILjava/util/List;)Lnet/minecraft/world/item/crafting/CraftingInput;", &[V::I(2), V::I(1), list]).unwrap();
+            // As Create's code names the call: the method of a class of its own, which only the
+            // interface has code for.
+            let left = api::call(rt, "java/lang/Object.getRemainingItems.(Lnet/minecraft/world/item/crafting/RecipeInput;)Lnet/minecraft/core/NonNullList;", &[recipe, input]);
+            let left: Vec<String> = jutil::elements(rt, left).into_iter().map(|s| if api_common::stack_empty(rt, s) { String::new() } else { item_of(rt, s).0 }).collect();
+            assert_eq!(left, ["minecraft:bucket", ""]);
+            let default = |rt: &mut Rt, name: &str, ret: &str| {
+                let key: &'static str = rt.static_key(&format!("net/minecraft/world/item/crafting/Recipe.{name}.(){ret}"));
+                api::call(rt, key, &[recipe])
+            };
+            assert_eq!(default(rt, "isSpecial", "Z"), V::I(0));
+            assert_eq!(default(rt, "showNotification", "Z"), V::I(1));
+            let group = default(rt, "getGroup", "Ljava/lang/String;");
+            assert_eq!(rt.str_of(group), Some(""));
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
     }
 }

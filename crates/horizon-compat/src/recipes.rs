@@ -753,6 +753,16 @@ const VANILLA_TYPES: [&str; 7] = [
     "minecraft:smithing",
 ];
 
+/// Minecraft's own recipe type registered under `id` (`minecraft:smelting`): the object its
+/// `RecipeType` field holds (`RecipeType.SMELTING`).
+pub(crate) fn vanilla_type_entry(rt: &mut Rt, id: &str) -> Option<V> {
+    let field = id
+        .strip_prefix("minecraft:")
+        .filter(|_| VANILLA_TYPES.contains(&id))?
+        .to_ascii_uppercase();
+    get_static(rt, RECIPE_TYPE, &field)
+}
+
 /// The recipes of every type: Minecraft's own, then those of every type the mods registered, as
 /// vanilla's manager holds every recipe (`getRecipes`, `byKey`).
 fn all_holders(rt: &mut Rt) -> Vec<V> {
