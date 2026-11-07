@@ -52,6 +52,27 @@ enum Receiver {
     /// A value of the owner's own type as a game gives one ([`sample`]: stone's state for
     /// `BlockState`), else a bare object of it.
     Sample,
+    /// The owner's second value where it has one ([`alternate`]: a lever's state for a state's
+    /// methods, which holds the property the property sample is).
+    Alternate,
+}
+
+/// A second value of class `owner` for the probe where its [`sample`] can't take a call: a state
+/// with properties (a lever's, `powered` among them) for a state's methods (`cycle`, `setValue`).
+fn alternate(rt: &mut horizon_compat::Rt, owner: &str) -> Option<horizon_compat::V> {
+    has_alternate(owner).then(|| {
+        horizon_compat::api::state(rt, "minecraft:lever[face=floor,facing=north,powered=false]")
+    })
+}
+
+/// Whether class `owner` has an [`alternate`] value.
+fn has_alternate(owner: &str) -> bool {
+    matches!(
+        owner,
+        "net/minecraft/world/level/block/state/BlockState"
+            | "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase"
+            | "net/minecraft/world/level/block/state/StateHolder"
+    )
 }
 
 /// How a probe call's arguments are filled: all null, or each with a value of its declared type
@@ -88,7 +109,9 @@ fn param_types(desc: &str) -> Vec<&str> {
 /// block, item, a stack of it, its id), the level's origin, up, the main hand, an empty tag, the
 /// probe's level, player and cow, a container of one slot and its slot, an item handler and a
 /// fluid tank, NeoForge's item and fluid capabilities, the codec builder's instance and groups of
-/// fields; a zero for a primitive. None for a type with no sample (null).
+/// fields, stone's item's registry holder, the `powered` property, a stream codec and the list
+/// operation on one, a random source, an empty list; a zero for a primitive. None for a type with
+/// no sample (null).
 fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
     use horizon_compat::{V, api};
     let class = ty.strip_prefix('L').and_then(|t| t.strip_suffix(';'));
@@ -124,6 +147,24 @@ fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
             api::call(rt, "net/minecraft/world/phys/Vec3.<init>.(DDD)V", &[v, V::D(0.5), V::D(64.0), V::D(0.5)]);
             v
         }
+        // A registry entry's holder, as `Registry.wrapAsHolder` gives one (stone's item).
+        "Lnet/minecraft/core/Holder;" | "Lnet/minecraft/core/Holder$Reference;" => {
+            let items = api::get_static(rt, "net/minecraft/core/registries/BuiltInRegistries.ITEM");
+            let stone = api::get_static(rt, "net/minecraft/world/item/Items.STONE");
+            api::call(rt, "net/minecraft/core/Registry.wrapAsHolder.(Ljava/lang/Object;)Lnet/minecraft/core/Holder;", &[items, stone])
+        }
+        // A state's property: `powered`, which the state's [`alternate`] holds.
+        "Lnet/minecraft/world/level/block/state/properties/Property;" | "Lnet/minecraft/world/level/block/state/properties/BooleanProperty;" => {
+            api::get_static(rt, "net/minecraft/world/level/block/state/properties/BlockStateProperties.POWERED")
+        }
+        // A stream codec, and an operation on one (`codec.apply(ByteBufCodecs.list())`).
+        "Lnet/minecraft/network/codec/StreamCodec;" => api::get_static(rt, "net/minecraft/network/codec/ByteBufCodecs.VAR_INT"),
+        "Lnet/minecraft/network/codec/StreamCodec$CodecOperation;" => {
+            api::call(rt, "net/minecraft/network/codec/ByteBufCodecs.list.()Lnet/minecraft/network/codec/StreamCodec$CodecOperation;", &[])
+        }
+        "Lnet/minecraft/util/RandomSource;" => api::call(rt, "net/minecraft/util/RandomSource.create.()Lnet/minecraft/util/RandomSource;", &[]),
+        "Lnet/minecraft/core/NonNullList;" => api::call(rt, "net/minecraft/core/NonNullList.create.()Lnet/minecraft/core/NonNullList;", &[]),
+        "Lnet/minecraft/core/Position;" => sample(rt, "Lnet/minecraft/world/phys/Vec3;")?,
         "Lnet/minecraft/world/InteractionHand;" => api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND"),
         "Lnet/minecraft/world/entity/EquipmentSlot;" => api::get_static(rt, "net/minecraft/world/entity/EquipmentSlot.MAINHAND"),
         "Lnet/minecraft/core/HolderLookup$Provider;" | "Lnet/minecraft/core/RegistryAccess;" => {
@@ -216,6 +257,52 @@ fn static_receivers(classes: &[horizon_mod_translator::class::ClassFile]) -> std
         }
     }
     by
+}
+
+/// The API classes of data generation: the game's and NeoForge's data providers and builders,
+/// and NeoForge's model generators.
+const DATAGEN_API: [&str; 4] = [
+    "net/minecraft/data/",
+    "net/neoforged/neoforge/data/",
+    "net/neoforged/neoforge/common/data/",
+    "net/neoforged/neoforge/client/model/generators/",
+];
+
+/// The jar's classes of data generation, which a player's game never runs: one whose superclasses
+/// (the jar's own, up to the API's) reach a class of [`DATAGEN_API`] or implement one of its
+/// interfaces (`BlockLootSubProvider`, `RecipeProvider`, `DataProvider`), one in a `datagen`
+/// package, and the classes nested in them.
+fn datagen_classes(
+    classes: &[horizon_mod_translator::class::ClassFile],
+) -> std::collections::BTreeSet<&str> {
+    let by: std::collections::HashMap<&str, &horizon_mod_translator::class::ClassFile> =
+        classes.iter().map(|c| (c.name.as_str(), c)).collect();
+    let api = |n: &str| DATAGEN_API.iter().any(|p| n.starts_with(p));
+    let mut out: std::collections::BTreeSet<&str> = classes
+        .iter()
+        .filter(|c| {
+            if c.name.contains("/datagen/") {
+                return true;
+            }
+            let mut at = Some(*c);
+            for _ in 0..64 {
+                let Some(k) = at else { break };
+                if k.superclass.as_deref().is_some_and(api) || k.interfaces.iter().any(|i| api(i)) {
+                    return true;
+                }
+                at = k.superclass.as_deref().and_then(|s| by.get(s).copied());
+            }
+            false
+        })
+        .map(|c| c.name.as_str())
+        .collect();
+    let outer: Vec<&str> = out.iter().copied().collect();
+    out.extend(classes.iter().map(|c| c.name.as_str()).filter(|n| {
+        outer
+            .iter()
+            .any(|o| n.len() > o.len() && n.starts_with(o) && n.as_bytes()[o.len()] == b'$')
+    }));
+    out
 }
 
 /// How many static fields of one class a method is tried on.
@@ -402,7 +489,14 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let calls = horizon_mod_translator::api_calls(&classes);
+        // A player's game never runs the mod's data generation: its providers are left out.
+        let datagen = datagen_classes(&classes);
+        let runtime: Vec<_> = classes
+            .iter()
+            .filter(|c| !datagen.contains(c.name.as_str()))
+            .cloned()
+            .collect();
+        let calls = horizon_mod_translator::api_calls(&runtime);
         // Which of them the runtime maps: call each and see whether it counts as unmapped. Null
         // arguments first; then, as a handler may answer only for an object of its class, with an
         // object of the owner's class as the receiver (or first argument of a static call). With
@@ -427,6 +521,7 @@ fn main() -> ExitCode {
                     Receiver::Null => {}
                     Receiver::Bare => args[0] = rt.new_object(owner),
                     Receiver::Sample => args[0] = sample(rt, &format!("L{owner};")).unwrap_or_else(|| rt.new_object(owner)),
+                    Receiver::Alternate => args[0] = alternate(rt, owner).unwrap_or_else(|| rt.new_object(owner)),
                     Receiver::Player => args[0] = horizon_compat::menus::server_player(rt, PROBE_PLAYER),
                     Receiver::Mob => args[0] = horizon_compat::vanilla_entities::of(rt, PROBE_MOB, "minecraft:cow", None),
                     Receiver::Level => args[0] = horizon_compat::glue::level(rt),
@@ -497,6 +592,9 @@ fn main() -> ExitCode {
             }
             if level {
                 receivers.push(Receiver::Level);
+            }
+            if hosted && has_alternate(owner) {
+                receivers.push(Receiver::Alternate);
             }
             receivers.extend(fields.iter().map(|&f| Receiver::Static(f)));
             receivers.extend(made.get(owner).map_or(&[][..], Vec::as_slice).iter().copied());

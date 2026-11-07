@@ -6877,6 +6877,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     advancements (`players/advancements/<uuid>.json`) and gold on Create's tab of the
     advancements screen; no call unmapped, no exception. Before the registry fix a run granted
     nothing; before the players fix, Kelp Drive only (the fan had no `Owner`).
+- [x] 2026-11-07 Part 100: the measure's probe reaches holders, properties, stream codecs and
+  random sources, and leaves data generation out (three of packcov14's top four missing APIs,
+  `Holder.value`, `BlockState.cycle` and `StreamCodec.apply`, are answered in game: the probe had
+  no holder of a registry, no state holding the property and no real stream codec to call them on).
+  - translator (`coverage`, `PROBE=hosted`): the probe's samples hold what a mod's calls get in
+    game for these: a registry entry's holder (`Registry.wrapAsHolder`), the `powered` property and
+    a lever's state holding it (a state's second receiver, `alternate`), a stream codec and the list
+    operation on one, a random source, an empty `NonNullList` and a `Position` (a `Vec3`). A mod's
+    data generation is left out of what is measured, as a player's game never runs it: the classes
+    reaching the game's or NeoForge's data providers through their superclasses or interfaces, the
+    ones in a `datagen` package, and the classes nested in them (182 API methods only Create's data
+    generator calls, 168 only AE2's).
+  - Measured (packcov15, HEAD 69615a5 with this, 367 jars, none failed): methods 103973/131670
+    (79.0%; packcov14 78.3%), uses 332873/375372 (88.7%; 88.1%), distinct missing 11230 (11389);
+    Create 3071/3972 (77.3%), uses 23918/25241 (94.8%). No jar misses `BlockState.cycle`,
+    `StreamCodec.apply` or `Holder.value` (47, 43 and 47 mods before), and the loot builders of
+    data generators are out of the top. The top is now gaps of the runtime:
+    `Minecraft.getTextureManager` (46 mods), `Player.awardStat` (38, and 25 by a stat's id),
+    `ConfigurationScreen` (38), a mod block's `super.updateShape` (34), `LevelChunk.getPos` (34),
+    mod entities' attributes (`AttributeSupplier.Builder.build` 33, `EntityAttributeCreationEvent.put`
+    32), `RandomSource.nextGaussian` (27).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
