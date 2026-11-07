@@ -34,6 +34,8 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
         // A mod's render types extend `RenderType` and read the shards it inherits from
         // `RenderStateShard` (catnip's `PonderRenderTypes.BLOCK_SHEET_MIPPED`).
         "net/minecraft/client/renderer/RenderType" => Some("net/minecraft/client/renderer/RenderStateShard"),
+        // A space's glyph draws nothing (Create's display boards skip it by `instanceof`).
+        crate::gui::EMPTY_GLYPH => Some("net/minecraft/client/gui/font/glyphs/BakedGlyph"),
         NOISE_GENERATOR => Some(CHUNK_GENERATOR),
         _ => crate::models::api_super(class)
             .or_else(|| crate::entity_render::api_super(class))

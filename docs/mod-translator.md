@@ -6281,6 +6281,32 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     an opaque full cube (Create's `LecternControllerBlock` extends vanilla's `LecternBlock`, whose
     shape the declaration didn't know), so the light inside it, which lights its renderer, is 0
     (Part 85). `kinsurvey7.sh`: the extending piston's head is at +2 (`type=normal`).
+- [x] 2026-11-07 Part 84: a font's glyphs, which a renderer draws one character at a time (Create's
+  display boards, `FlapDisplayRenderer`). Counted on the pack's 367 jars: `FontSet` in 5 (Create,
+  Jade, Bits 'n' Bobs, DragonLib, GuideME), `getGlyphInfo` 5, `GlyphInfo.getAdvance(bold)` 5,
+  `getGlyph` 3, `BakedGlyph.render` 3, `renderType` 3, `whiteGlyph` 2, `getRandomGlyph` 2,
+  `renderEffect` and `BakedGlyph$Effect` 2, `EmptyGlyph` 2.
+  - compat `gui`: a font set's glyphs by code point, one object each as a font set keeps them:
+    `getGlyphInfo` (its advance is the game's width of the character, a bold one a pixel more; the
+    bold and shadow offsets a pixel), `getGlyph` (the default font's spaces, U+0020 and U+200C, are
+    `EmptyGlyph`s, which `instanceof` tells apart and which draw nothing), `getRandomGlyph` (an
+    obfuscated glyph: a printable one as wide, at random, as vanilla's `glyphsByWidth`).
+    `BakedGlyph.render(italic, x, y, matrix, ...)` draws its character from (x, y) under the matrix
+    in the colour given, as the host draws a renderer's text (on the GUI when a mod draws there); a
+    colour too faint to see draws nothing, as vanilla's glyph does. `renderEffect` puts the
+    effect's rectangle into the buffer as vanilla's four vertices (white in the effect's colour, as
+    the text types' texture isn't the game's atlas), a fill on the GUI.
+  - Tests: compat 545 (2 new: a font's glyphs draw their characters, the spaces drawing nothing;
+    a glyph's effect is a rectangle in its colour), translator 19, core 7.
+  - In game (`allblocks.sh`, every Create block placed, with Part 83): the display board's four
+    glyph calls and the lectern controller's two model calls are gone from the unmapped list. The
+    blocks their renderer draws are 101 (98 before): the cogwheel, the large cogwheel and the shaft
+    join them, as the models Create swaps in for them have no faces of their own (Part 83). Four
+    lines are new: Flywheel's shader sources throw in the probe runtime that reads render shapes,
+    whose host has no resources, and a renderer there asks the unplaced player's `position`, as the
+    probe runtime now sets the client up (Part 83; both Part 85); `DebugPackets
+    .sendNeighborsUpdatePacket` from Create's fluid pipes, and `BellBlock.updateShape` from its
+    peculiar bell as its neighbour breaks (Part 85).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -13,6 +13,23 @@ const GRAPHICS: &str = "net/minecraft/client/gui/GuiGraphics";
 const FONT: &str = "net/minecraft/client/gui/Font";
 const FONT_SET: &str = "net/minecraft/client/gui/font/FontSet";
 const BAKED_GLYPH: &str = "net/minecraft/client/gui/font/glyphs/BakedGlyph";
+pub(crate) const EMPTY_GLYPH: &str = "net/minecraft/client/gui/font/glyphs/EmptyGlyph";
+const GLYPH_INFO: &str = "com/mojang/blaze3d/font/GlyphInfo";
+/// A code point no font has a glyph for: the host draws its missing glyph for it.
+const MISSING_GLYPH: i32 = 0xFFFF;
+const MISSING_CHAR: char = '\u{FFFF}';
+const RANDOM: &str = "net/minecraft/util/RandomSource.create.()Lnet/minecraft/util/RandomSource;";
+const NEXT_INT: &str = "net/minecraft/util/RandomSource.nextInt.(I)I";
+const ADD_VERTEX: &str =
+    "addVertex.(Lorg/joml/Matrix4f;FFF)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+const ADD_VERTEX_KEY: &str = "com/mojang/blaze3d/vertex/VertexConsumer.addVertex.(Lorg/joml/Matrix4f;FFF)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+const SET_COLOR: &str = "setColor.(FFFF)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+const SET_COLOR_KEY: &str = "com/mojang/blaze3d/vertex/VertexConsumer.setColor.(FFFF)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+const SET_UV: &str = "setUv.(FF)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+const SET_UV_KEY: &str =
+    "com/mojang/blaze3d/vertex/VertexConsumer.setUv.(FF)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+const SET_LIGHT: &str = "setLight.(I)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
+const SET_LIGHT_KEY: &str = "com/mojang/blaze3d/vertex/VertexConsumer.setLight.(I)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
 const SPLITTER: &str = "net/minecraft/client/StringSplitter";
 /// Text in visual order (`FormattedCharSequence`), and text pieces (`FormattedText`) this module
 /// makes: `$of` the text they stand for, `$parts` (a list) when made of several, `$style` the style
@@ -808,6 +825,114 @@ fn text_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
             let mode = rt.get_field(a(1), "$ordinal").i().clamp(0, 2) as usize;
             render::render_type(rt, ["text", "text_see_through", "text_polygon_offset"][mode])
         }
+        // A font's glyphs by code point, one object each as a font set keeps them: how far each
+        // advances (`GlyphInfo`: the game's width of its character) and the glyph drawn
+        // (`BakedGlyph`, its character in the host's text). The default font's spaces draw
+        // nothing (`EmptyGlyph`: its `space` provider's U+0020 and U+200C).
+        (FONT_SET, "getGlyphInfo") => glyph_object(rt, GLYPH_INFO, a(1).i()),
+        (FONT_SET, "getGlyph") => {
+            let cp = a(1).i();
+            glyph_object(
+                rt,
+                if matches!(cp, 0x20 | 0x200C) {
+                    EMPTY_GLYPH
+                } else {
+                    BAKED_GLYPH
+                },
+                cp,
+            )
+        }
+        // An obfuscated glyph: one as many pixels wide, at random (vanilla's `glyphsByWidth`,
+        // here the printable ASCII ones), else the missing glyph.
+        (FONT_SET, "getRandomGlyph") => {
+            let width = glyph_advance(rt, a(1), false).ceil();
+            let same = glyphs_by_width(rt, width);
+            let cp = if same.is_empty() {
+                MISSING_GLYPH
+            } else {
+                let random = rt.intern("compat:font-random".into(), |rt| {
+                    crate::api::call(rt, RANDOM, &[])
+                });
+                let i = crate::api::call(rt, NEXT_INT, &[random, V::I(same.len() as i32)]).i();
+                same[i.clamp(0, same.len() as i32 - 1) as usize]
+            };
+            glyph_object(rt, if cp == 0x20 { EMPTY_GLYPH } else { BAKED_GLYPH }, cp)
+        }
+        // `getAdvance(bold)` as vanilla's: the plain advance, a pixel more when bold.
+        (GLYPH_INFO, "getAdvance") => {
+            V::F(glyph_advance(rt, a(0), desc == "(Z)F" && a(1).i() != 0))
+        }
+        (GLYPH_INFO, "getBoldOffset" | "getShadowOffset") => V::F(1.0),
+        // `render(italic, x, y, matrix, buffer, r, g, b, a, light)`: the glyph's character from
+        // (x, y) under the matrix in the colour given, drawn as the host draws text (on the GUI
+        // when a mod draws there). A space draws nothing, nor does the white glyph, nor a colour
+        // too faint to see (`Font` would make it opaque; a glyph draws it as faint as it is).
+        (BAKED_GLYPH, "render") => {
+            if let V::I(cp) = rt.get_field(a(0), "$codepoint")
+                && rt.class_of(a(0)) != EMPTY_GLYPH
+            {
+                let argb = float_argb([a(9), a(6), a(7), a(8)]);
+                if argb >> 24 >= 4 {
+                    let c = char::from_u32(cp as u32).unwrap_or(MISSING_CHAR);
+                    let run = TextRun {
+                        text: c.to_string(),
+                        italic: a(1).i() != 0,
+                        ..TextRun::default()
+                    };
+                    let m = render::mat4(rt, a(4));
+                    let (x, y) = (a(2).f(), a(3).f());
+                    if drawing(rt) {
+                        draw_runs(rt, std::slice::from_ref(&run), x, y, argb as i32, false, &m);
+                    } else {
+                        world_text(
+                            rt,
+                            std::slice::from_ref(&run),
+                            &m,
+                            [x, y],
+                            argb as i32,
+                            false,
+                            0,
+                            a(10).i(),
+                        );
+                    }
+                }
+            }
+            V::Void
+        }
+        // `renderEffect(effect, matrix, buffer, light)`: the effect's rectangle (an underline, a
+        // strikethrough, a background) in its colour. In the world, four vertices into the buffer
+        // as vanilla's, which a text type, off the game's atlas, draws white in their colour; on
+        // the GUI, a fill.
+        (BAKED_GLYPH, "renderEffect") => {
+            let e = a(1);
+            let [x0, y0, x1, y1, depth, r, g, b, alpha] =
+                ["x0", "y0", "x1", "y1", "depth", "r", "g", "b", "a"].map(|k| rt.get_field(e, k));
+            if drawing(rt) {
+                let m = render::mat4(rt, a(2));
+                let q = quad(&m, x0.f(), y0.f(), x1.f(), y1.f());
+                let argb = float_argb([alpha, r, g, b]);
+                if let Some(h) = rt.host_mut() {
+                    h.gui_fill(q, argb);
+                }
+            } else if let Some(vc) = rt.vcall {
+                let corners = [
+                    (x0, y0, 0.0, 0.0),
+                    (x1, y0, 0.0, 1.0),
+                    (x1, y1, 1.0, 1.0),
+                    (x0, y1, 1.0, 0.0),
+                ];
+                for (x, y, u, v) in corners {
+                    let c = vc(rt, ADD_VERTEX_KEY, ADD_VERTEX, &[a(3), a(2), x, y, depth]);
+                    let c = vc(rt, SET_COLOR_KEY, SET_COLOR, &[c, r, g, b, alpha]);
+                    let c = vc(rt, SET_UV_KEY, SET_UV, &[c, V::F(u), V::F(v)]);
+                    vc(rt, SET_LIGHT_KEY, SET_LIGHT, &[c, a(4)]);
+                    if rt.thrown.is_some() {
+                        break;
+                    }
+                }
+            }
+            V::Void
+        }
         (SPLITTER, "stringWidth") => {
             let r = runs(rt, a(1));
             V::F(width_of(rt, &r))
@@ -1067,6 +1192,50 @@ fn fill_gradient(rt: &mut Rt, m: &M4, x0: i32, y0: i32, x1: i32, y1: i32, from: 
             h.gui_fill(q, c);
         }
     }
+}
+
+/// The glyph object of `class` (a `GlyphInfo`, a `BakedGlyph`, an `EmptyGlyph`) for code point
+/// `cp`: one each, as a font set keeps them.
+fn glyph_object(rt: &mut Rt, class: &'static str, cp: i32) -> V {
+    rt.intern(format!("compat:glyph/{class}/{cp}"), |rt| {
+        let g = rt.new_object(class);
+        rt.put_field(g, "$codepoint", V::I(cp));
+        g
+    })
+}
+
+/// How far `info`'s glyph advances (`GlyphInfo.getAdvance(bold)`): its character's width in the
+/// game's font, the bold offset (a pixel) more when bold.
+fn glyph_advance(rt: &Rt, info: V, bold: bool) -> f32 {
+    let c = match rt.get_field(info, "$codepoint") {
+        V::I(cp) => char::from_u32(cp as u32).unwrap_or(MISSING_CHAR),
+        _ => MISSING_CHAR,
+    };
+    char_width(rt, c, false) + if bold { 1.0 } else { 0.0 }
+}
+
+/// The printable ASCII code points `width` pixels wide (their advance rounded up), as a font set's
+/// `glyphsByWidth` lists its glyphs; kept per runtime.
+fn glyphs_by_width(rt: &mut Rt, width: f32) -> Vec<i32> {
+    let list = rt.intern(format!("compat:glyphs-by-width/{width}"), |rt| {
+        let same: Vec<V> = (0x20..0x7F)
+            .filter(|&c| char_width(rt, char::from(c as u8), false).ceil() == width)
+            .map(V::I)
+            .collect();
+        crate::jutil::new_list(rt, same)
+    });
+    crate::jutil::elements(rt, list)
+        .iter()
+        .map(|v| v.i())
+        .collect()
+}
+
+/// `0xAARRGGBB` of a colour's float channels (alpha first), each `(int) (f * 255.0F)` as vanilla's
+/// `setColor` makes it.
+fn float_argb(channels: [V; 4]) -> u32 {
+    channels.iter().fold(0, |c, v| {
+        c << 8 | ((v.f() * 255.0) as i32).clamp(0, 255) as u32
+    })
 }
 
 /// `Font.adjustColor`: a colour with (almost) no alpha is opaque.
@@ -2179,6 +2348,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | FONT
             | FONT_SET
             | BAKED_GLYPH
+            | GLYPH_INFO
             | SPLITTER
             | SEQUENCE
             | FORMATTED
@@ -2564,5 +2734,182 @@ mod tests {
         assert_eq!(tint >> 24, 0x80);
         assert_eq!(host.drawn_gui.len(), 1);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const GET_FONT_SET: &str = "net/minecraft/client/gui/Font.getFontSet.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/gui/font/FontSet;";
+    const GLYPH_RENDER: &str = "net/minecraft/client/gui/font/glyphs/BakedGlyph.render.(ZFFLorg/joml/Matrix4f;Lcom/mojang/blaze3d/vertex/VertexConsumer;FFFFI)V";
+
+    fn font_set(rt: &mut Rt) -> V {
+        let font = font(rt);
+        let default = rt.string("minecraft:default");
+        call(rt, GET_FONT_SET, &[font, default]).unwrap()
+    }
+
+    /// A font's glyphs as Create's display boards draw them, a character at a time
+    /// (`FlapDisplayRenderer`): each advances the game's width of its character (a bold one a
+    /// pixel more), a space is an `EmptyGlyph` that draws nothing, and a glyph drawn is its
+    /// character from where it's drawn, in its colour, in the world or on the GUI.
+    #[test]
+    fn a_fonts_glyphs_draw_their_characters() {
+        crate::install();
+        let mut rt = Rt::new();
+        let mut host = MemoryHost::default();
+        let s = 1.0 / 32.0;
+        let pose = [
+            s, 0.0, 0.0, 0.0, 0.0, -s, 0.0, 0.0, 0.0, 0.0, s, 0.0, 0.5, 1.0, 1.0, 1.0,
+        ];
+        rt.with_host(&mut host, |rt| {
+            let set = font_set(rt);
+            let info = call(rt, "net/minecraft/client/gui/font/FontSet.getGlyphInfo.(IZ)Lcom/mojang/blaze3d/font/GlyphInfo;", &[set, V::I('A' as i32), V::I(0)]).unwrap();
+            let advance = "com/mojang/blaze3d/font/GlyphInfo.getAdvance.(Z)F";
+            assert_eq!(call(rt, advance, &[info, V::I(0)]), Some(V::F(6.0)));
+            assert_eq!(call(rt, advance, &[info, V::I(1)]), Some(V::F(7.0)));
+            let get = "net/minecraft/client/gui/font/FontSet.getGlyph.(I)Lnet/minecraft/client/gui/font/glyphs/BakedGlyph;";
+            let a = call(rt, get, &[set, V::I('A' as i32)]).unwrap();
+            assert_eq!(call(rt, get, &[set, V::I('A' as i32)]), Some(a));
+            let space = call(rt, get, &[set, V::I(' ' as i32)]).unwrap();
+            assert!(!rt.instance_of(a, EMPTY_GLYPH));
+            assert!(rt.instance_of(space, EMPTY_GLYPH) && rt.instance_of(space, BAKED_GLYPH));
+            let m = crate::render::new_mat4(rt, pose);
+            for (glyph, italic) in [(a, 1), (space, 0)] {
+                let args = [glyph, V::I(italic), V::F(3.5), V::F(0.0), m, V::NULL, V::F(1.0), V::F(0.5), V::F(0.0), V::F(0.85), V::I(0x00F0_00F0)];
+                assert_eq!(call(rt, GLYPH_RENDER, &args), Some(V::Void));
+            }
+        });
+        let italic = TextRun {
+            italic: true,
+            ..run("A", None, false)
+        };
+        assert_eq!(
+            host.world_texts,
+            vec![WorldText {
+                runs: vec![italic.clone()],
+                pose,
+                at: [3.5, 0.0],
+                argb: 0xD8FF_7F00,
+                shadow: false,
+                outline: 0,
+                light: 0x00F0_00F0
+            }]
+        );
+        assert!(host.drawn_gui.is_empty());
+        // On the GUI: the character where the pose puts it.
+        let mut host = MemoryHost {
+            gui: [320, 240],
+            ..MemoryHost::default()
+        };
+        rt.interned.insert(DRAWING.into(), V::I(1));
+        rt.with_host(&mut host, |rt| {
+            let set = font_set(rt);
+            let a = call(rt, "net/minecraft/client/gui/font/FontSet.getGlyph.(I)Lnet/minecraft/client/gui/font/glyphs/BakedGlyph;", &[set, V::I('A' as i32)]).unwrap();
+            let m = crate::render::new_mat4(rt, crate::render::IDENTITY);
+            call(rt, GLYPH_RENDER, &[a, V::I(1), V::F(10.0), V::F(20.0), m, V::NULL, V::F(1.0), V::F(1.0), V::F(1.0), V::F(1.0), V::I(0)]);
+        });
+        assert_eq!(
+            host.drawn_gui,
+            vec![GuiDraw::Text(
+                vec![italic],
+                [10.0, 20.0],
+                1.0,
+                0xFFFF_FFFF,
+                false
+            )]
+        );
+        assert!(host.world_texts.is_empty());
+    }
+
+    /// An effect a glyph draws (`renderEffect`: an underline, a background) is a rectangle in the
+    /// effect's colour: in the world a face of the buffer's, white in that colour as the white
+    /// glyph's texture isn't the game's atlas; on the GUI a fill.
+    #[test]
+    fn a_glyphs_effect_is_a_rectangle_in_its_colour() {
+        const EFFECT: &str = "net/minecraft/client/gui/font/glyphs/BakedGlyph$Effect";
+        const RENDER_EFFECT: &str = "net/minecraft/client/gui/font/glyphs/BakedGlyph.renderEffect.(Lnet/minecraft/client/gui/font/glyphs/BakedGlyph$Effect;Lorg/joml/Matrix4f;Lcom/mojang/blaze3d/vertex/VertexConsumer;I)V";
+        crate::install();
+        let mut rt = Rt::new();
+        // A consumer of the runtime's own: its vertex calls are the API's.
+        rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
+        let effect = |rt: &mut Rt| {
+            let e = rt.new_object(EFFECT);
+            let args = [
+                e,
+                V::F(-1.0),
+                V::F(9.0),
+                V::F(20.0),
+                V::F(-2.0),
+                V::F(0.01),
+                V::F(1.0),
+                V::F(0.0),
+                V::F(0.0),
+                V::F(0.5),
+            ];
+            crate::api::call(
+                rt,
+                "net/minecraft/client/gui/font/glyphs/BakedGlyph$Effect.<init>.(FFFFFFFFF)V",
+                &args,
+            );
+            e
+        };
+        let mut host = MemoryHost {
+            sprites: vec!["horizon/white".into()],
+            ..MemoryHost::default()
+        };
+        rt.with_host(&mut host, |rt| {
+            let set = font_set(rt);
+            let white = call(rt, "net/minecraft/client/gui/font/FontSet.whiteGlyph.()Lnet/minecraft/client/gui/font/glyphs/BakedGlyph;", &[set]).unwrap();
+            let normal = crate::api::api_enum(rt, "net/minecraft/client/gui/Font$DisplayMode", "NORMAL", 0);
+            let text = call(rt, "net/minecraft/client/gui/font/glyphs/BakedGlyph.renderType.(Lnet/minecraft/client/gui/Font$DisplayMode;)Lnet/minecraft/client/renderer/RenderType;", &[white, normal]).unwrap();
+            let buffers = rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource");
+            let consumer = crate::api::call(rt, "net/minecraft/client/renderer/MultiBufferSource.getBuffer.(Lnet/minecraft/client/renderer/RenderType;)Lcom/mojang/blaze3d/vertex/VertexConsumer;", &[buffers, text]);
+            let m = crate::render::new_mat4(rt, crate::render::IDENTITY);
+            let e = effect(rt);
+            call(rt, RENDER_EFFECT, &[white, e, m, consumer, V::I(0x00F0_00F0)]);
+            crate::api::call(rt, "net/minecraft/client/renderer/MultiBufferSource$BufferSource.endBatch.(Lnet/minecraft/client/renderer/RenderType;)V", &[buffers, text]);
+        });
+        let faces: Vec<_> = host
+            .drawn
+            .iter()
+            .flat_map(|(m, _, _, light)| match m {
+                crate::host::Model::Quads(q) => q
+                    .iter()
+                    .map(|q| (q.positions, q.sprite.clone(), q.colors, *light))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let corners = [
+            [-1.0, 9.0, 0.01],
+            [20.0, 9.0, 0.01],
+            [20.0, -2.0, 0.01],
+            [-1.0, -2.0, 0.01],
+        ];
+        assert_eq!(
+            faces,
+            vec![(
+                corners,
+                "horizon/white".to_owned(),
+                [0x7FFF_0000; 4],
+                0x00F0_00F0
+            )]
+        );
+        let mut host = MemoryHost {
+            gui: [320, 240],
+            ..MemoryHost::default()
+        };
+        rt.interned.insert(DRAWING.into(), V::I(1));
+        rt.with_host(&mut host, |rt| {
+            let set = font_set(rt);
+            let white = call(rt, "net/minecraft/client/gui/font/FontSet.whiteGlyph.()Lnet/minecraft/client/gui/font/glyphs/BakedGlyph;", &[set]).unwrap();
+            let m = crate::render::new_mat4(rt, crate::render::IDENTITY);
+            let e = effect(rt);
+            call(rt, RENDER_EFFECT, &[white, e, m, V::NULL, V::I(0)]);
+        });
+        assert_eq!(
+            host.drawn_gui,
+            vec![GuiDraw::Fill(
+                [[-1.0, 9.0], [-1.0, -2.0], [20.0, -2.0], [20.0, 9.0]],
+                0x7FFF_0000
+            )]
+        );
     }
 }
