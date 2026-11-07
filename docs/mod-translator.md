@@ -7197,6 +7197,55 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a mod item's own burn time, a listener that sees the stack and sets one, a negative time
     thrown; a mod's own type of blocks read with its codec, by holder, by key and whole, nothing
     for another registry, refused when registered twice), translator 22.
+- [x] 2026-11-08 Part 109: block entities' saved data as vanilla's, block events, model data and narration.
+  - Block entities' data (`block_entity_data`, a new compat module), as 1.21.1 writes and reads it:
+    `saveCustomOnly` is a new compound the block entity's own `saveAdditional` fills;
+    `saveWithoutMetadata` adds what it kept of the stack it was placed from under `components`;
+    `saveWithId` its type's id, `saveWithFullMetadata` that and `x`, `y`, `z` (as Create keeps each
+    block entity a contraption or schematic holds), `saveCustomAndMetadata` its own data with both.
+    A type nothing registered can't save its id: vanilla's `RuntimeException`. `loadCustomOnly`
+    is its `loadAdditional`, `loadWithComponents` also takes back what it kept (none when the tag
+    has none), `loadStatic(pos, state, tag)` makes the block entity of the type `id` names and
+    loads it (null for an unknown type, or when making or loading it throws, logged as vanilla
+    logs it). NeoForge's base `saveAdditional` and `loadAdditional` now write and read
+    `getPersistentData()` as `NeoForgeData`, so a mod's own data on a block entity is saved with
+    the world.
+  - Items: `saveToItem(stack)` puts the block entity's data on the stack as `block_entity_data`
+    (with its type's id; none when it saved nothing; less what its `removeComponentsFromTag`
+    takes) and its components; `BlockItem.setBlockEntityData`, `BlockEntity.addEntityType`. A
+    block item placed with such data loads it into the new block entity on a server
+    (`updateCustomBlockEntityTag`, the instance one and the static one): merged into what the block
+    entity saves and loaded when that changes it (`CustomData.loadInto`, which loads the old data
+    back when loading throws). Data only operators may set (`onlyOpCanSetNbt`) is taken only from a
+    player who may use game master blocks: `canUseGameMasterBlocks` is now vanilla's, in creative
+    and at operator level 2 or more (the server's level of the player, or on a client the local
+    player's as the server last said it); breaking a command block uses the same rule.
+  - Block events: a block's `triggerEvent` is false, an entity block's (`BaseEntityBlock`, a
+    comparator) its block entity's, whose own is false; `BlockState.triggerEvent` asks its block.
+    Vanilla's own (a note block's, a piston's, a chest's lid) aren't answered as the base's.
+  - Model data (NeoForge): a block entity's `getModelData()` is `ModelData.EMPTY`; a client
+    level's `getModelData(pos)` is what the block entity there gives (NeoForge's manager keeps it
+    as of its last refresh), null being NeoForge's `NullPointerException`; any other getter's is
+    `EMPTY`.
+  - Types: `BlockEntityType.getKey`, `getValidBlocks` (the blocks it was built with, now kept),
+    `builtInRegistryHolder`; `EntityType.builtInRegistryHolder` too.
+  - Narration (`widgets`): a narration output the runtime makes collects what widgets add as
+    vanilla's `ScreenNarrationCollector` does: one entry for each kind (title, position, hint,
+    usage) and depth (`nest()`), the last given, read out by kind and then depth (`narration`, for
+    the game's narrator, which doesn't read mod screens yet). `add` takes a component, a string or
+    several components; `CommonComponents.joinForNarration` and
+    `AbstractWidget.wrapDefaultNarrationMessage` as vanilla's. Not carried: contents given as a
+    `NarrationThunk`.
+  - Measured (packcov22b, the same 367 jars): methods 81.7% (from 81.6%: 245 more mapped), uses
+    90.5% (from 90.3%), distinct missing API methods 9874 (from 9934); Create 79.2% of its methods
+    (from 78.9%), 95.6% of its uses (from 95.4%). Left of the batch: `ChestBlockEntity`'s own
+    `triggerEvent`, `CustomData.loadInto(entity)`, `getModelDataManager`, thunks.
+  - Tests: compat 616 (5 new: a block entity saved with its full metadata and NeoForge's data,
+    loaded back and made again by `loadStatic`, an unknown id making nothing; a type nothing
+    registered can't save its id; a block entity's data on its item and loaded into a placed one on
+    a server, not on a client; a block event reaching an entity block's block entity and not a
+    plain block's, a client level's model data and the null one thrown; widgets narrating into
+    their screen's output, `joinForNarration`), translator 22.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

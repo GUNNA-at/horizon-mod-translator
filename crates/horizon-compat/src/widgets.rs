@@ -3,7 +3,7 @@
 //! `onDrag`), `AbstractButton` (drawn as vanilla's button sprites, pressed by a click or Enter)
 //! and `Button` with its builder, and `Tooltip`. A mod's widget extending them (Create's
 //! `AbstractSimiWidget`) keeps its own overrides; what it inherits answers here.
-use crate::{Rt, V};
+use crate::{Data, Rt, V};
 
 pub(crate) const WIDGET: &str = "net/minecraft/client/gui/components/AbstractWidget";
 const ABSTRACT_BUTTON: &str = "net/minecraft/client/gui/components/AbstractButton";
@@ -13,6 +13,19 @@ const TOOLTIP: &str = "net/minecraft/client/gui/components/Tooltip";
 const RENDERABLE: &str = "net/minecraft/client/gui/components/Renderable";
 const LAYOUT_ELEMENT: &str = "net/minecraft/client/gui/layouts/LayoutElement";
 const NARRATABLE: &str = "net/minecraft/client/gui/narration/NarratableEntry";
+const NARRATION_OUTPUT: &str = "net/minecraft/client/gui/narration/NarrationElementOutput";
+const COMMON_COMPONENTS: &str = "net/minecraft/network/chat/CommonComponents";
+/// One thing a narration output was given: its kind, depth and lines ([`narration`]).
+const NARRATION_ENTRY: &str = "compat:narration-entry";
+const ADD_COMPONENT: &str = "(Lnet/minecraft/client/gui/narration/NarratedElementType;Lnet/minecraft/network/chat/Component;)V";
+const ADD_STRING: &str =
+    "(Lnet/minecraft/client/gui/narration/NarratedElementType;Ljava/lang/String;)V";
+const ADD_COMPONENTS: &str = "(Lnet/minecraft/client/gui/narration/NarratedElementType;[Lnet/minecraft/network/chat/Component;)V";
+const GET_STRING: &str = "net/minecraft/network/chat/Component.getString.()Ljava/lang/String;";
+const EMPTY_COMPONENT: &str =
+    "net/minecraft/network/chat/Component.empty.()Lnet/minecraft/network/chat/MutableComponent;";
+const LITERAL: &str = "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;";
+const APPEND: &str = "net/minecraft/network/chat/MutableComponent.append.(Lnet/minecraft/network/chat/Component;)Lnet/minecraft/network/chat/MutableComponent;";
 
 const K_RENDER_WIDGET: &str = "net/minecraft/client/gui/components/AbstractWidget.renderWidget.(Lnet/minecraft/client/gui/GuiGraphics;IIF)V";
 const K_CLICKED: &str = "net/minecraft/client/gui/components/AbstractWidget.clicked.(DD)Z";
@@ -423,9 +436,114 @@ fn builder_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// A screen's narration output (`ScreenNarrationCollector`'s), which its widgets'
+/// `updateNarration` fill: [`narration`] reads it, for the game's narrator.
+pub fn narration_output(rt: &mut Rt) -> V {
+    let o = rt.new_object(NARRATION_OUTPUT);
+    let entries = crate::jutil::new_list(rt, Vec::new());
+    rt.put_field(o, "$entries", entries);
+    rt.put_field(o, "$depth", V::I(0));
+    o
+}
+
+/// What narration output `output` holds, as vanilla's collector reads it out: one entry for each
+/// kind (`NarratedElementType`'s ordinal: title, position, hint, usage) and depth (how many
+/// `nest()`s down), the last given, in that order.
+pub fn narration(rt: &Rt, output: V) -> Vec<(i32, i32, Vec<String>)> {
+    let entries = rt.get_field(output, "$entries");
+    let mut all: Vec<(i32, i32, Vec<String>)> = crate::jutil::elements(rt, entries)
+        .into_iter()
+        .map(|e| {
+            let lines = crate::jutil::elements(rt, rt.get_field(e, "$lines"))
+                .into_iter()
+                .map(|l| rt.str_of(l).unwrap_or("").to_owned())
+                .collect();
+            (
+                rt.get_field(e, "$kind").i(),
+                rt.get_field(e, "$depth").i(),
+                lines,
+            )
+        })
+        .collect();
+    all.sort_by_key(|(kind, depth, _)| (*kind, *depth));
+    all
+}
+
+/// `NarrationElementOutput`'s `add` and `nest`, on an output the runtime made (its class is the
+/// interface's: [`narration_output`]'s): None for a mod's own output, which adds through its own
+/// `add`, and for contents given as a `NarrationThunk`.
+fn narration_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let out = arg(args, 0);
+    let mut entries = rt.get_field(out, "$entries");
+    if entries.r() == 0 {
+        if out.r() == 0 || rt.class_of(out) != NARRATION_OUTPUT {
+            return None;
+        }
+        entries = crate::jutil::new_list(rt, Vec::new());
+        rt.put_field(out, "$entries", entries);
+    }
+    let depth = rt.get_field(out, "$depth").i();
+    match name {
+        "nest" => {
+            let nested = rt.new_object(NARRATION_OUTPUT);
+            rt.put_field(nested, "$entries", entries);
+            rt.put_field(nested, "$depth", V::I(depth + 1));
+            Some(nested)
+        }
+        "add" => {
+            let contents = arg(args, 2);
+            let lines = match desc {
+                ADD_STRING => vec![contents],
+                ADD_COMPONENT => vec![crate::api::call(rt, GET_STRING, &[contents])],
+                ADD_COMPONENTS => crate::jutil::elements(rt, contents)
+                    .into_iter()
+                    .map(|c| crate::api::call(rt, GET_STRING, &[c]))
+                    .collect(),
+                _ => return None,
+            };
+            let kind = rt.get_field(arg(args, 1), "$ordinal").i();
+            let lines = crate::jutil::new_list(rt, lines);
+            // The collector keeps one entry for each kind and depth: the last given.
+            let same = crate::jutil::elements(rt, entries).into_iter().find(|e| {
+                rt.get_field(*e, "$kind").i() == kind && rt.get_field(*e, "$depth").i() == depth
+            });
+            let entry = match same {
+                Some(e) => e,
+                None => {
+                    let e = rt.new_object(NARRATION_ENTRY);
+                    rt.put_field(e, "$kind", V::I(kind));
+                    rt.put_field(e, "$depth", V::I(depth));
+                    crate::jutil::list_add(rt, entries, e);
+                    e
+                }
+            };
+            rt.put_field(entry, "$lines", lines);
+            Some(V::Void)
+        }
+        _ => None,
+    }
+}
+
+/// `CommonComponents.joinForNarration(components)`: the components, `. ` between each two.
+fn join_for_narration(rt: &mut Rt, components: V) -> V {
+    let parts = crate::jutil::elements(rt, components);
+    let joined = crate::api::call(rt, EMPTY_COMPONENT, &[]);
+    let separator = rt.string(". ");
+    let separator = crate::api::call(rt, LITERAL, &[separator]);
+    for (i, c) in parts.iter().enumerate() {
+        crate::api::call(rt, APPEND, &[joined, *c]);
+        if i + 1 != parts.len() {
+            crate::api::call(rt, APPEND, &[joined, separator]);
+        }
+    }
+    joined
+}
+
 /// The keys [`call`] may answer, by owner, name and descriptor alone.
-pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(owner, WIDGET | ABSTRACT_BUTTON | BUTTON | BUILDER | TOOLTIP | RENDERABLE | LAYOUT_ELEMENT | NARRATABLE | crate::edit_box::EDIT_BOX)
+        || (owner == NARRATION_OUTPUT && matches!(name, "add" | "nest"))
+        || (owner == COMMON_COMPONENTS && name == "joinForNarration")
 }
 
 /// The calls this module models (`owner.name.desc`), or None.
@@ -435,6 +553,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return None;
     }
     match (owner, name) {
+        (NARRATION_OUTPUT, _) => narration_call(rt, name, desc, args),
+        (COMMON_COMPONENTS, _) => Some(join_for_narration(rt, arg(args, 0))),
+        // `wrapDefaultNarrationMessage(message)`: "Button: message".
+        (WIDGET, "wrapDefaultNarrationMessage") => {
+            let key = rt.string("gui.narrate.button");
+            let with = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![arg(args, 0)]));
+            Some(crate::api_common::component(rt, key, true, with))
+        }
         (BUILDER, _) => builder_call(rt, name, args),
         (BUTTON, "builder") => {
             let b = rt.new_object(BUILDER);
@@ -448,5 +574,67 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (TOOLTIP, _) => None,
         _ => own(rt, name, desc, args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ADD: &str = "net/minecraft/client/gui/narration/NarrationElementOutput.add.(Lnet/minecraft/client/gui/narration/NarratedElementType;Lnet/minecraft/network/chat/Component;)V";
+    const ADD_ALL: &str = "net/minecraft/client/gui/narration/NarrationElementOutput.add.(Lnet/minecraft/client/gui/narration/NarratedElementType;[Lnet/minecraft/network/chat/Component;)V";
+    const NEST: &str = "net/minecraft/client/gui/narration/NarrationElementOutput.nest.()Lnet/minecraft/client/gui/narration/NarrationElementOutput;";
+    const JOIN: &str = "net/minecraft/network/chat/CommonComponents.joinForNarration.([Lnet/minecraft/network/chat/Component;)Lnet/minecraft/network/chat/MutableComponent;";
+
+    fn literal(rt: &mut Rt, text: &str) -> V {
+        let t = rt.string(text);
+        crate::api::call(rt, LITERAL, &[t])
+    }
+
+    /// A screen's widgets narrate into one output, as vanilla's collector keeps it: an entry for
+    /// each kind and depth, the last one given, read out by kind and then depth.
+    #[test]
+    fn widgets_narrate_into_their_screens_output() {
+        crate::install();
+        let mut rt = Rt::new();
+        let out = narration_output(&mut rt);
+        let title = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/client/gui/narration/NarratedElementType.TITLE",
+        );
+        let usage = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/client/gui/narration/NarratedElementType.USAGE",
+        );
+        let (screen, hint) = (literal(&mut rt, "Stockpile"), literal(&mut rt, "Use Tab"));
+        crate::api::call(&mut rt, ADD, &[out, usage, hint]);
+        crate::api::call(&mut rt, ADD, &[out, title, screen]);
+        let widget = crate::api::call(&mut rt, NEST, &[out]);
+        let first = literal(&mut rt, "Button: Sort");
+        crate::api::call(&mut rt, ADD, &[widget, title, first]);
+        let (button, state) = (literal(&mut rt, "Button: Filter"), literal(&mut rt, "Off"));
+        let both = rt.alloc(
+            "[Lnet/minecraft/network/chat/Component;",
+            Data::Array(vec![button, state]),
+        );
+        crate::api::call(&mut rt, ADD_ALL, &[widget, title, both]);
+        let lines = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            narration(&rt, out),
+            vec![
+                (0, 0, lines(&["Stockpile"])),
+                (0, 1, lines(&["Button: Filter", "Off"])),
+                (3, 0, lines(&["Use Tab"]))
+            ]
+        );
+        let (a, b) = (literal(&mut rt, "Sort"), literal(&mut rt, "Descending"));
+        let parts = rt.alloc(
+            "[Lnet/minecraft/network/chat/Component;",
+            Data::Array(vec![a, b]),
+        );
+        let joined = crate::api::call(&mut rt, JOIN, &[parts]);
+        let text = crate::api::call(&mut rt, GET_STRING, &[joined]);
+        assert_eq!(rt.str_of(text), Some("Sort. Descending"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

@@ -791,7 +791,7 @@ fn fire_block_break(rt: &mut Rt, [level, game_type, p, pos, st]: [V; 5]) -> V {
     let stack = virt(rt, MAIN_HAND, p, &[]);
     let mut cancel = !api_common::stack_empty(rt, stack) && !can_attack_block(rt, stack, st, level, pos, p);
     cancel |= virt(rt, RESTRICTED_KEY, p, &[level, pos, game_type]).i() != 0;
-    cancel |= game_master_block(rt, &text) && !may_use_game_master_blocks(rt, p);
+    cancel |= game_master_block(rt, &text) && !crate::block_entity_data::may_use_game_master_blocks(rt, p);
     let ev = rt.new_object(BREAK);
     api::call(rt, BREAK_INIT, &[ev, level, pos, st, p]);
     rt.put_field(ev, "$canceled", V::I(cancel as i32));
@@ -835,11 +835,6 @@ fn game_master_block(rt: &Rt, text: &str) -> bool {
         Some(b) => rt.instance_of(b, "net/minecraft/world/level/block/GameMasterBlock"),
         None => GAME_MASTER_BLOCKS.contains(&crate::host::split_state(text).0),
     }
-}
-
-/// `Player.canUseGameMasterBlocks()`: never a fake player; the game's player in creative.
-fn may_use_game_master_blocks(rt: &Rt, p: V) -> bool {
-    !crate::fake_players::is_fake(rt, p) && rt.host().is_some_and(|h| h.player_creative())
 }
 
 /// `Player.blockActionRestricted(level, pos, gameMode)`: a spectator breaks nothing; an adventure

@@ -3335,8 +3335,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::Void
         }
         (o, "setChanged" | "onLoad" | "onChunkUnloaded" | "invalidateCapabilities") if o.ends_with("BlockEntity") => V::Void,
-        // The base class saves and loads nothing of its own beyond what the glue writes (id, position).
-        (o, "saveAdditional" | "loadAdditional" | "requestModelDataUpdate" | "onDataPacket") if o.ends_with("BlockEntity") => V::Void,
+        // The base class saves and loads NeoForge's own data of it (`getPersistentData()`); the glue
+        // writes its id and position.
+        (o, "saveAdditional") if o.ends_with("BlockEntity") => {
+            crate::block_entity_data::base_save(rt, a(0), a(1));
+            V::Void
+        }
+        (o, "loadAdditional") if o.ends_with("BlockEntity") => {
+            crate::block_entity_data::base_load(rt, a(0), a(1));
+            V::Void
+        }
+        (o, "requestModelDataUpdate" | "onDataPacket") if o.ends_with("BlockEntity") => V::Void,
         // Vanilla's `handleUpdateTag`: `loadWithComponents`, which loads through the block entity's
         // own `loadAdditional`.
         (o, "handleUpdateTag") if o.ends_with("BlockEntity") => {
@@ -3370,21 +3379,26 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let (pos, kind) = (rt.get_field(be, "$pos"), rt.get_field(be, "$type"));
             crate::records::make_data(rt, "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket", INIT, &[pos, kind, tag])
         }
+        // A type keeps its factory and the blocks it is valid for (an array, or a set).
         ("net/minecraft/world/level/block/entity/BlockEntityType$Builder", "of") => {
             let b = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType$Builder");
             rt.put_field(b, "$factory", a(0));
+            rt.put_field(b, "$blocks", a(1));
             b
         }
         // `new BlockEntityType(factory, validBlocks, dataType)` (Refined Storage makes its types
         // so): what `Builder.of(factory, blocks).build(type)` makes.
         ("net/minecraft/world/level/block/entity/BlockEntityType", "<init>") if desc.starts_with("(Lnet/minecraft/world/level/block/entity/BlockEntityType$BlockEntitySupplier;") => {
             rt.put_field(a(0), "$factory", a(1));
+            rt.put_field(a(0), "$blocks", a(2));
             V::Void
         }
         ("net/minecraft/world/level/block/entity/BlockEntityType$Builder", "build") => {
             let t = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType");
-            let f = rt.get_field(a(0), "$factory");
-            rt.put_field(t, "$factory", f);
+            for f in ["$factory", "$blocks"] {
+                let v = rt.get_field(a(0), f);
+                rt.put_field(t, f, v);
+            }
             t
         }
         // `type.create(pos, state)`: the factory the type was built with.

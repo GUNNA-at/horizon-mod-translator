@@ -506,6 +506,19 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let entity_types = registry.trim_start_matches("minecraft:") == "entity_type";
             Some(V::I((entity_types && rt.host().is_some_and(|h| h.entity_type_in_tag(&kind, &tag))) as i32))
         }
+        // The registry entry the type is (`builtInRegistryHolder().is(tag)`).
+        (ENTITY_TYPE, "builtInRegistryHolder") => {
+            let id = type_id(rt, a(0))
+                .map(|id| {
+                    if id.contains(':') {
+                        id.to_owned()
+                    } else {
+                        format!("minecraft:{id}")
+                    }
+                })
+                .unwrap_or_default();
+            Some(crate::neo::registry_holder(rt, "entity_type", &id, a(0)))
+        }
         // `EntityType.getKey(type)`: its registry id (the entity type registry's default, the pig,
         // for a type it does not hold).
         (ENTITY_TYPE, "getKey")
