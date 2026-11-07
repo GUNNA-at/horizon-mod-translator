@@ -6802,6 +6802,24 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     file) on the death screen and in chat. A running saw facing up (64 rpm), walled in so the
     knockback keeps the player on it, cuts them 5 a blow (`DrillBlock.getDamage`), 20, 15, 10, 5,
     then dead with the same message. Nothing unmapped, no warning.
+- [x] 2026-11-07 Part 98: the measure counts what the runtime answers on codecs, slots and handlers
+  (packcov13's top missing APIs were mostly ones the runtime answers in game: the hosted probe had
+  no receiver of their kind, so a call on it never reached them).
+  - translator (`coverage`, `PROBE=hosted`): the probe's samples now hold what a mod's calls get
+    in game for these: a codec function's `RecordCodecBuilder.Instance`, groups of fields
+    (`Products.P1`..`P16`), a field (`MapCodec`), a container of one slot and a slot of it, an item
+    handler and a fluid tank of their own, and NeoForge's item and fluid capabilities.
+  - compat: `codecs::probe_receiver` makes the codec ones, of the runtime's own codec objects.
+  - Tests: compat 581 (1 new: the probe's codec receivers answer a field's `forGetter`, the
+    instance's `group` and a group's `apply` as the codec building's own do), translator 20.
+  - Measured (packcov14, HEAD c66c8c3 with this, 367 jars, none failed): methods 104295/133194
+    (78.3%; packcov13 76.7%), uses 334138/379207 (88.1%; 86.3%), distinct missing 11389 (11519);
+    Create 3074/3995 (76.9%; 75.9%), uses 23982/25382 (94.5%; 92.8%). No jar misses the codec
+    builders (`forGetter` 107 jars before, `Instance.group`, `Products.P2.apply`), `Slot.getItem`,
+    `hasItem` (87, 70), `IItemHandler.getSlots`, `getStackInSlot` (38, 43),
+    `IFluidHandler.getTanks` (21), `Level.getCapability` (61) or `ItemStack.getCapability` (42) any
+    more. The top is now `Holder.value` and `BlockState.cycle` (47 mods each),
+    `Minecraft.getTextureManager` (46) and `StreamCodec.apply` (43).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

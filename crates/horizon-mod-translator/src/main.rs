@@ -86,7 +86,9 @@ fn param_types(desc: &str) -> Vec<&str> {
 
 /// A value of type `ty` (a field descriptor) such as a mod's call gets in a game: stone (its state,
 /// block, item, a stack of it, its id), the level's origin, up, the main hand, an empty tag, the
-/// probe's level, player and cow; a zero for a primitive. None for a type with no sample (null).
+/// probe's level, player and cow, a container of one slot and its slot, an item handler and a
+/// fluid tank, NeoForge's item and fluid capabilities, the codec builder's instance and groups of
+/// fields; a zero for a primitive. None for a type with no sample (null).
 fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
     use horizon_compat::{V, api};
     let class = ty.strip_prefix('L').and_then(|t| t.strip_suffix(';'));
@@ -129,11 +131,42 @@ fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
             api::call(rt, "net/minecraft/world/level/Level.registryAccess.()Lnet/minecraft/core/RegistryAccess;", &[level])
         }
         "Lnet/minecraft/world/entity/player/Player;" | "Lnet/minecraft/server/level/ServerPlayer;" => horizon_compat::menus::server_player(rt, PROBE_PLAYER),
+        // A container of one slot and a slot of it, as a menu's are; an item handler and a fluid
+        // tank of their own, as a block entity's are; the capabilities a mod asks for.
+        "Lnet/minecraft/world/Container;" | "Lnet/minecraft/world/SimpleContainer;" => {
+            let c = rt.new_object("net/minecraft/world/SimpleContainer");
+            api::call(
+                rt,
+                "net/minecraft/world/SimpleContainer.<init>.(I)V",
+                &[c, V::I(1)],
+            );
+            c
+        }
+        "Lnet/minecraft/world/inventory/Slot;" => {
+            let c = sample(rt, "Lnet/minecraft/world/Container;")?;
+            let s = rt.new_object("net/minecraft/world/inventory/Slot");
+            api::call(rt, "net/minecraft/world/inventory/Slot.<init>.(Lnet/minecraft/world/Container;III)V", &[s, c, V::I(0), V::I(0), V::I(0)]);
+            s
+        }
+        "Lnet/neoforged/neoforge/items/IItemHandler;" | "Lnet/neoforged/neoforge/items/IItemHandlerModifiable;" | "Lnet/neoforged/neoforge/items/ItemStackHandler;" => {
+            let h = rt.new_object("net/neoforged/neoforge/items/ItemStackHandler");
+            api::call(rt, "net/neoforged/neoforge/items/ItemStackHandler.<init>.(I)V", &[h, V::I(1)]);
+            h
+        }
+        "Lnet/neoforged/neoforge/fluids/capability/IFluidHandler;" | "Lnet/neoforged/neoforge/fluids/capability/templates/FluidTank;" => {
+            let t = rt.new_object("net/neoforged/neoforge/fluids/capability/templates/FluidTank");
+            api::call(rt, "net/neoforged/neoforge/fluids/capability/templates/FluidTank.<init>.(I)V", &[t, V::I(1000)]);
+            t
+        }
+        "Lnet/neoforged/neoforge/capabilities/BlockCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.BLOCK"),
+        "Lnet/neoforged/neoforge/capabilities/EntityCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.ENTITY"),
+        "Lnet/neoforged/neoforge/capabilities/ItemCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$FluidHandler.ITEM"),
         _ if class.is_some_and(level_class) => horizon_compat::glue::level(rt),
         _ if class.is_some_and(|c| matches!(c.strip_prefix("net/minecraft/world/entity/"), Some("Entity" | "LivingEntity" | "Mob" | "PathfinderMob" | "AgeableMob" | "animal/Animal"))) => {
             horizon_compat::vanilla_entities::of(rt, PROBE_MOB, "minecraft:cow", None)
         }
-        _ => return None,
+        // What a codec's function builds on (`RecordCodecBuilder.Instance`, a group of fields).
+        _ => return class.and_then(|c| horizon_compat::codecs::probe_receiver(rt, c)),
     })
 }
 

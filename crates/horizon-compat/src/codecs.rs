@@ -35,6 +35,31 @@ pub fn is_codec(rt: &Rt, v: V) -> bool {
     v.r() != 0 && rt.class_of(v).starts_with("compat:codec/")
 }
 
+/// One of these codec objects of DFU's `class`, as a mod's codec building gets it: the
+/// `RecordCodecBuilder.Instance` that `create` hands its function, a group of fields
+/// (`Products.P1`..`P16`, of nulls), a field (`MapCodec`, `Codec.INT`'s). For a probe of the
+/// calls a mod makes on them, which only a codec's function gets otherwise. None for another
+/// class.
+pub fn probe_receiver(rt: &mut Rt, class: &str) -> Option<V> {
+    if class == "com/mojang/serialization/codecs/RecordCodecBuilder$Instance" {
+        return Some(rt.intern("compat:codec/instance".into(), |rt| {
+            codec(rt, "compat:codec/instance", vec![])
+        }));
+    }
+    if let Some(n) = class
+        .strip_prefix("com/mojang/datafixers/Products$P")
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        return Some(codec(rt, "compat:codec/products", vec![V::NULL; n]));
+    }
+    if class == "com/mojang/serialization/MapCodec" {
+        let int = crate::api::get_static(rt, "com/mojang/serialization/Codec.INT");
+        let name = rt.string("count");
+        return Some(codec(rt, "compat:codec/field", vec![name, int]));
+    }
+    None
+}
+
 fn kind(rt: &Rt, c: V) -> &'static str {
     match rt.class_of(c) {
         // A mod's `new StringRepresentable.EnumCodec(values, resolver)`.
@@ -1740,6 +1765,45 @@ mod tests {
     fn st(rt: &mut Rt, key: &str) -> V {
         let k = rt.static_key(key);
         api::get_static(rt, k)
+    }
+
+    /// The coverage probe's codec receivers answer what a mod's codec function calls on them, as
+    /// the codec building's own do: a field's `forGetter`, the instance's `group`, a group's
+    /// `apply`. Another class has none.
+    #[test]
+    fn a_probes_codec_receivers_answer_the_builders_calls() {
+        let mut rt = Rt::new();
+        crate::install();
+        let instance = probe_receiver(
+            &mut rt,
+            "com/mojang/serialization/codecs/RecordCodecBuilder$Instance",
+        )
+        .unwrap();
+        let field = probe_receiver(&mut rt, "com/mojang/serialization/MapCodec").unwrap();
+        let getter = c(
+            &mut rt,
+            "com/mojang/serialization/MapCodec.forGetter.(Ljava/util/function/Function;)Lcom/mojang/serialization/codecs/RecordCodecBuilder;",
+            &[field, V::NULL],
+        );
+        assert_eq!(kind(&rt, getter), "getter");
+        let group = c(
+            &mut rt,
+            "com/mojang/serialization/codecs/RecordCodecBuilder$Instance.group.(Lcom/mojang/datafixers/kinds/App;Lcom/mojang/datafixers/kinds/App;)Lcom/mojang/datafixers/Products$P2;",
+            &[instance, getter, getter],
+        );
+        assert_eq!(kind(&rt, group), "products");
+        let p2 = probe_receiver(&mut rt, "com/mojang/datafixers/Products$P2").unwrap();
+        let record = c(
+            &mut rt,
+            "com/mojang/datafixers/Products$P2.apply.(Lcom/mojang/datafixers/kinds/Applicative;Ljava/util/function/BiFunction;)Lcom/mojang/datafixers/kinds/App;",
+            &[p2, instance, V::NULL],
+        );
+        assert_eq!(kind(&rt, record), "record");
+        assert_eq!(
+            probe_receiver(&mut rt, "net/minecraft/world/item/Item"),
+            None
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// The codecs mods build theirs on, reached as javac names them: `PrimitiveCodec.INT` is
