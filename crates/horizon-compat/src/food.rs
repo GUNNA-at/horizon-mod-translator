@@ -307,8 +307,18 @@ pub(crate) fn potion_holder(rt: &mut Rt, id: &str) -> V {
 /// `minecraft:potion_contents`, the component a stack's potion contents are.
 pub(crate) const POTION_CONTENTS_ID: &str = "minecraft:potion_contents";
 
+/// The potion a stack's contents hold (`minecraft:awkward`); None without one.
+pub(crate) fn stack_potion(rt: &mut Rt, stack: V) -> Option<String> {
+    let contents = crate::components::vanilla(rt, stack, POTION_CONTENTS_ID)?;
+    let held = rt.get_field(rt.get_field(contents, "potion"), "value");
+    if held.r() == 0 {
+        return None;
+    }
+    potion_id(rt, held)
+}
+
 /// A potion's id from its holder: vanilla's (a `Potions` field's), or a mod's registered one.
-fn potion_id(rt: &Rt, h: V) -> Option<String> {
+pub(crate) fn potion_id(rt: &Rt, h: V) -> Option<String> {
     if let Some(id) = rt.str_of(rt.get_field(h, "$id")).filter(|s| !s.is_empty()) {
         return Some(id.to_owned());
     }

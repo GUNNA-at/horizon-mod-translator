@@ -6679,6 +6679,31 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     filling (10), compacting (7) and sequenced assembly (3) recipes are read now, and 10 of its 11
     mixing ones: `mud_by_mixing` names NeoForge's `neoforge:block_tag` item ingredient, which the
     runtime doesn't read yet. Nothing threw.
+- [x] 2026-11-07 Part 94: Create's mixer brews potions (its potion mixing recipes are built from
+  `PotionBrewing`'s mixes, `create$getPotionMixes` and `create$getContainerMixes`, and both lists
+  were unmapped, so a heated basin of water and nether wart made nothing). Measured over the pack:
+  `PotionBrewing` is named by 50 classes in 24 jars, its `Mix` by 10 classes in 7, `hasMix` by 4 in
+  3; 8 jars register mixes of their own through NeoForge's `RegisterBrewingRecipesEvent`, which
+  isn't fired yet.
+  - game: the brewing recipes of 26.3 (`recipe/brewing/`, data-driven since 26.1) are kept under
+    `minecraft:brewing` in the table mods look recipes up by.
+  - compat: `PotionBrewing`'s potion and container mixes are built from those recipes (a mix of one
+    potion into another, the same container, is a potion mix; a change of container a container
+    mix), each list one object; `isIngredient`, `isContainerIngredient`, `isPotionIngredient`,
+    `isBrewablePotion`, `hasMix`, `hasContainerMix`, `hasPotionMix` and `mix` answer by them as
+    vanilla 1.21.1's do, and NeoForge's `getRecipes` is the empty list of mods' brewing recipes.
+  - compat: `DataComponentFluidIngredient.of(strict, FluidStack)` takes stacks of the fluid carrying
+    the stack's components (strict: only those), and a fluid ingredient's component check reads a
+    stack's real components, not only the ones a recipe file wrote.
+  - Tests: compat 578 (2 new: the mixes and every query over a host holding six brewing recipes, one
+    list object each time, `mix` turning water and nether wart into awkward and a potion into its
+    splash form; a components fluid ingredient taking stacks with its components, loosely or
+    strictly), client-lib crafting 18 (the brewing recipes filed under `minecraft:brewing`),
+    translator 19.
+  - In game: two mixers over lit blaze burners. A basin of water with a nether wart made 1000 mB of
+    awkward potion fluid, and a basin of awkward potion fluid with sugar 1000 mB of swiftness, both
+    by t+120, each basin showing its potion's colour. Nothing threw. The scene's only unmapped calls
+    left are `Integer.getInteger` and `LocalPlayer.isInvisible`.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -5872,8 +5872,9 @@ impl Game<'_> {
     }
     /// The recipes of type `kind` (`mymod:crusher`), a type outside `minecraft`
     /// or one of Minecraft's own as vanilla's `RecipeManager` files them
-    /// (`minecraft:smelting`; every crafting recipe is `minecraft:crafting` and
-    /// both smithing kinds are `minecraft:smithing`), from
+    /// (`minecraft:smelting`; every crafting recipe is `minecraft:crafting`,
+    /// both smithing kinds are `minecraft:smithing` and the brewing recipes of
+    /// `recipe/brewing/` are `minecraft:brewing`), from
     /// `data/<namespace>/recipe/*.json` of the game, the content mods (`.hmod`)
     /// and the world's data packs, in file order: each one's id and its file as
     /// JSON, for the mod to read as it likes. Minecraft's own leave out a

@@ -1271,16 +1271,16 @@ fn custom_type(v: &Value) -> Option<&str> {
         .filter(|t| t.contains(':') && !t.starts_with("minecraft:"))
 }
 /// The `RecipeType` a recipe of one of Minecraft's own serializers is of: every crafting kind's
-/// is `minecraft:crafting` and both smithing kinds' `minecraft:smithing`; the cooking kinds and
-/// stonecutting are their own (`minecraft:smelting`). None for another namespace's and a kind
-/// Minecraft doesn't have.
+/// is `minecraft:crafting` and both smithing kinds' `minecraft:smithing`; the cooking kinds,
+/// stonecutting and brewing are their own (`minecraft:smelting`). None for another namespace's and
+/// a kind Minecraft doesn't have.
 fn vanilla_type(v: &Value) -> Option<String> {
     let t = v["type"].as_str()?;
     let t = t.strip_prefix("minecraft:").or((!t.contains(':')).then_some(t))?;
     let kind = match t {
         _ if t.starts_with("crafting_") => "crafting",
         _ if t.starts_with("smithing_") => "smithing",
-        "smelting" | "blasting" | "smoking" | "campfire_cooking" | "stonecutting" => t,
+        "smelting" | "blasting" | "smoking" | "campfire_cooking" | "stonecutting" | "brewing" => t,
         _ => return None,
     };
     Some(format!("minecraft:{kind}"))
@@ -2234,13 +2234,14 @@ mod tests {
     }
     /// Minecraft's own recipes are kept as files too, by the type a mod looks them up by: every
     /// crafting kind under `minecraft:crafting`, both smithing kinds under `minecraft:smithing`, a
-    /// cooking kind or stonecutting under its own; a kind Minecraft doesn't have, nowhere.
+    /// cooking kind, stonecutting or brewing (in its folder) under its own; a kind Minecraft
+    /// doesn't have, nowhere.
     #[test]
     fn vanilla_recipes_are_kept_by_the_type_mods_look_them_up_by() {
         let root =
             std::env::temp_dir().join(format!("horizon-vanilla-recipes-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("data/minecraft/recipe")).unwrap();
+        fs::create_dir_all(root.join("data/minecraft/recipe/brewing")).unwrap();
         fs::create_dir_all(root.join("data/mymod/recipe")).unwrap();
         fs::write(
             root.join(horizon_items::content_namespaces::MARKER),
@@ -2248,6 +2249,10 @@ mod tests {
         )
         .unwrap();
         for (path, json) in [
+            (
+                "minecraft/recipe/brewing/potion_water_nether_wart.json",
+                r#"{"type":"minecraft:brewing","input":{"item":"minecraft:potion","potion_contents":{"potions":"minecraft:water"}},"reagent":{"item":"minecraft:nether_wart"},"output":{"id":"minecraft:potion","components":{"minecraft:potion_contents":{"potion":"minecraft:awkward"}}}}"#,
+            ),
             (
                 "minecraft/recipe/iron_ingot_from_smelting_raw_iron.json",
                 r#"{"type":"minecraft:smelting","ingredient":"minecraft:raw_iron","result":{"id":"minecraft:iron_ingot"},"experience":0.7,"cookingtime":200}"#,
@@ -2295,6 +2300,7 @@ mod tests {
             kinds,
             [
                 ("minecraft:blasting", vec!["minecraft:iron_ingot_from_blasting_raw_iron"]),
+                ("minecraft:brewing", vec!["minecraft:brewing/potion_water_nether_wart"]),
                 ("minecraft:crafting", vec!["minecraft:repair_item", "minecraft:stick"]),
                 (
                     "minecraft:smelting",

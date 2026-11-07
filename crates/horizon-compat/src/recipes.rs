@@ -34,6 +34,8 @@ const RECIPE_INPUT: &str = "net/minecraft/world/item/crafting/RecipeInput";
 const FLUID_INGREDIENT: &str = "net/neoforged/neoforge/fluids/crafting/FluidIngredient";
 const SIZED_FLUID: &str = "net/neoforged/neoforge/fluids/crafting/SizedFluidIngredient";
 const TAG_FLUID: &str = "net/neoforged/neoforge/fluids/crafting/TagFluidIngredient";
+const COMPONENTS_FLUID: &str =
+    "net/neoforged/neoforge/fluids/crafting/DataComponentFluidIngredient";
 const FLUID_INGREDIENT_TYPE: &str = "net/neoforged/neoforge/fluids/crafting/FluidIngredientType";
 const COMPONENT_PATCH: &str = "net/minecraft/core/component/DataComponentPatch";
 const STACK_ARRAY: &str = "[Lnet/minecraft/world/item/ItemStack;";
@@ -473,14 +475,39 @@ fn requires(rt: &mut Rt, ingredient: V, needs: Option<Json>) {
 }
 
 /// Whether a fluid stack carries the components its ingredient requires: all of them (and, when
-/// strict, only them). Fluid stacks carry their components in `$components` (JSON), none so far.
-fn carries_required(rt: &Rt, ingredient: V, stack: V) -> bool {
+/// strict, only them). A stack's components are the ones set on it, as they are saved (a stack
+/// read from JSON may hold them in `$components`).
+fn carries_required(rt: &mut Rt, ingredient: V, stack: V) -> bool {
     let Some(needs) = rt.str_of(rt.get_field(ingredient, "$requires")) else { return true };
     let needs: Json = serde_json::from_str(needs).unwrap_or_default();
-    let has: Json = rt.str_of(rt.get_field(stack, "$components")).and_then(|c| serde_json::from_str(c).ok()).unwrap_or_else(|| Json::Object(Map::new()));
-    let (Some(want), Some(have)) = (needs["components"].as_object(), has.as_object()) else { return false };
+    let written = rt.str_of(rt.get_field(stack, "$components")).and_then(|c| serde_json::from_str::<Map<String, Json>>(c).ok());
+    let mut have = written.unwrap_or_default();
+    for (k, n) in crate::components::saved(rt, stack) {
+        have.insert(k, nbt_json(&n));
+    }
+    let Some(want) = needs["components"].as_object() else {
+        return false;
+    };
     let all = want.iter().all(|(k, v)| have.get(k) == Some(v));
     all && (!needs["strict"].as_bool().unwrap_or(false) || want.len() == have.len())
+}
+
+/// `DataComponentFluidIngredient.of(strict, stack)`: the stack's fluid carrying the stack's
+/// components (all of them; strict, only them).
+fn components_fluid_ingredient(rt: &mut Rt, strict: bool, stack: V) -> V {
+    let f = rt.get_field(stack, "$fluid");
+    let name = fluids::name_of(rt, f);
+    let components: Map<String, Json> = crate::components::saved(rt, stack)
+        .iter()
+        .map(|(k, n)| (k.clone(), nbt_json(n)))
+        .collect();
+    let i = fluid_ingredient(rt, &[name]);
+    requires(
+        rt,
+        i,
+        Some(serde_json::json!({"components": components, "strict": strict})),
+    );
+    i
 }
 
 // ---- Writing them (what a stream codec sends: the codec's own form) ----
@@ -694,6 +721,11 @@ fn fluid_ingredient_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args:
             };
             fluid_ingredient(rt, &[n])
         }
+        (COMPONENTS_FLUID, "of")
+            if desc.starts_with("(ZLnet/neoforged/neoforge/fluids/FluidStack;)") =>
+        {
+            components_fluid_ingredient(rt, a(0).i() != 0, a(1))
+        }
         (FLUID_INGREDIENT | TAG_FLUID, "tag") => {
             let e = tag_entry(rt, a(0));
             fluid_ingredient(rt, &[e])
@@ -728,6 +760,200 @@ fn fluid_ingredient_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args:
         }
         (FLUID_INGREDIENT, "isEmpty" | "hasNoFluids") => V::I(entries(rt, a(0)).is_empty() as i32),
         (FLUID_INGREDIENT, "isSimple") => V::I(1),
+        _ => return None,
+    })
+}
+
+// ---- Brewing ----
+
+const MIX: &str = "net/minecraft/world/item/alchemy/PotionBrewing$Mix";
+const POTION_MIXES: &str = "compat:brewing/potion-mixes";
+const CONTAINER_MIXES: &str = "compat:brewing/container-mixes";
+
+/// Mixes as a brewing recipe names them: from, the reagent's entries, to.
+type Mixes = Vec<(String, Vec<String>, String)>;
+
+/// The entries a brewing recipe's `item` names (an id, a `#tag` or a list of them).
+fn brewing_entries(j: &Json) -> Vec<String> {
+    let entry = |s: &str| match s.strip_prefix('#') {
+        Some(tag) => format!("#{}", qualified(tag)),
+        None => qualified(s),
+    };
+    match j {
+        Json::String(s) => vec![entry(s)],
+        Json::Array(a) => a.iter().filter_map(Json::as_str).map(entry).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Vanilla's brewing as 1.21.1's `PotionBrewing` keeps it, read off the game's brewing recipes
+/// (`minecraft:brewing`, which 26.3 writes out once per container): the potion mixes (`Mix<Potion>`,
+/// from a potion to another, as the plain potion's recipes have them) and the container mixes
+/// (`Mix<Item>`, from a container to another, once per reagent). Each list is one object, kept
+/// once the game has given some (none outside a world).
+fn brewing_mix_list(rt: &mut Rt, containers: bool) -> V {
+    let key = if containers {
+        CONTAINER_MIXES
+    } else {
+        POTION_MIXES
+    };
+    if let Some(&list) = rt.interned.get(key) {
+        return list;
+    }
+    let files = rt
+        .host()
+        .map(|h| h.recipes_of_type("minecraft:brewing"))
+        .unwrap_or_default();
+    let (mut potions, mut items): (Mixes, Mixes) = (Vec::new(), Vec::new());
+    for (_, text) in &files {
+        let Ok(j) = serde_json::from_str::<Json>(text) else {
+            continue;
+        };
+        let (Some(from), Some(to)) = (j["input"]["item"].as_str(), j["output"]["id"].as_str())
+        else {
+            continue;
+        };
+        let (from, to) = (qualified(from), qualified(to));
+        let reagent = brewing_entries(&j["reagent"]["item"]);
+        if reagent.is_empty() {
+            continue;
+        }
+        if from != to {
+            let mix = (from, reagent, to);
+            if !items.contains(&mix) {
+                items.push(mix);
+            }
+            continue;
+        }
+        let Some(out) = j["output"]["components"]["minecraft:potion_contents"]["potion"].as_str()
+        else {
+            continue;
+        };
+        if from == "minecraft:potion" {
+            for p in brewing_entries(&j["input"]["potion_contents"]["potions"]) {
+                potions.push((p, reagent.clone(), qualified(out)));
+            }
+        }
+    }
+    if files.is_empty() {
+        return jutil::new_list(rt, Vec::new());
+    }
+    let mut potion_mixes = Vec::new();
+    for (from, reagent, to) in potions {
+        let (from, to) = (
+            crate::food::potion_holder(rt, &from),
+            crate::food::potion_holder(rt, &to),
+        );
+        let i = ingredient(rt, &reagent);
+        potion_mixes.push(crate::records::make(rt, MIX, &[from, i, to]));
+    }
+    let mut container_mixes = Vec::new();
+    for (from, reagent, to) in items {
+        let (f, t) = (api_common::item(rt, &from), api_common::item(rt, &to));
+        let (f, t) = (
+            crate::neo::registry_holder(rt, "item", &from, f),
+            crate::neo::registry_holder(rt, "item", &to, t),
+        );
+        let i = ingredient(rt, &reagent);
+        container_mixes.push(crate::records::make(rt, MIX, &[f, i, t]));
+    }
+    let p = jutil::new_list(rt, potion_mixes);
+    let c = jutil::new_list(rt, container_mixes);
+    rt.interned.insert(POTION_MIXES.into(), p);
+    rt.interned.insert(CONTAINER_MIXES.into(), c);
+    if containers { c } else { p }
+}
+
+/// The mixes of one list ([`brewing_mix_list`]) as (from, ingredient, to).
+fn brewing_mixes(rt: &mut Rt, containers: bool) -> Vec<(V, V, V)> {
+    let list = brewing_mix_list(rt, containers);
+    let mixes = jutil::elements(rt, list);
+    mixes
+        .into_iter()
+        .map(|m| {
+            (
+                rt.get_field(m, "from"),
+                rt.get_field(m, "ingredient"),
+                rt.get_field(m, "to"),
+            )
+        })
+        .collect()
+}
+
+/// The id a mix's holder names: a potion's, or a container item's.
+fn held_id(rt: &Rt, holder: V) -> String {
+    text(rt, rt.get_field(holder, "$id"))
+}
+
+/// `PotionBrewing`'s questions, by its mixes: what is a reagent, which mix a container and a
+/// reagent make, and the stack it brews (`mix(reagent, input)`, which tries the container mixes
+/// first, as vanilla does).
+fn brewing_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let container_mix = |rt: &mut Rt, input: V, reagent: V| {
+        let item = stack_item(rt, input);
+        brewing_mixes(rt, true)
+            .into_iter()
+            .find(|&(from, i, _)| held_id(rt, from) == item && ingredient_test(rt, i, reagent))
+    };
+    let potion_mix = |rt: &mut Rt, input: V, reagent: V| {
+        let potion = crate::food::stack_potion(rt, input)?;
+        brewing_mixes(rt, false)
+            .into_iter()
+            .find(|&(from, i, _)| held_id(rt, from) == potion && ingredient_test(rt, i, reagent))
+    };
+    let reagent_of = |rt: &mut Rt, containers: bool, stack: V| {
+        brewing_mixes(rt, containers)
+            .into_iter()
+            .any(|(_, i, _)| ingredient_test(rt, i, stack))
+    };
+    let is_container = |rt: &mut Rt, stack: V| {
+        matches!(
+            stack_item(rt, stack).as_str(),
+            "minecraft:potion" | "minecraft:splash_potion" | "minecraft:lingering_potion"
+        )
+    };
+    Some(match name {
+        "isIngredient" => V::I((reagent_of(rt, true, a(1)) || reagent_of(rt, false, a(1))) as i32),
+        "isContainerIngredient" => V::I(reagent_of(rt, true, a(1)) as i32),
+        "isPotionIngredient" => V::I(reagent_of(rt, false, a(1)) as i32),
+        "isBrewablePotion" => {
+            let wanted = crate::food::potion_id(rt, a(1)).unwrap_or_default();
+            V::I(
+                brewing_mixes(rt, false)
+                    .into_iter()
+                    .any(|(_, _, to)| held_id(rt, to) == wanted) as i32,
+            )
+        }
+        "hasContainerMix" => V::I(container_mix(rt, a(1), a(2)).is_some() as i32),
+        "hasPotionMix" => V::I(potion_mix(rt, a(1), a(2)).is_some() as i32),
+        "hasMix" => {
+            let found = is_container(rt, a(1))
+                && (container_mix(rt, a(1), a(2)).is_some()
+                    || potion_mix(rt, a(1), a(2)).is_some());
+            V::I(found as i32)
+        }
+        // `mix(reagent, input)`: the input brewed, or itself when nothing brews it.
+        "mix" => {
+            let (reagent, input) = (a(1), a(2));
+            if api_common::stack_empty(rt, input) {
+                return Some(input);
+            }
+            let Some(potion) = crate::food::stack_potion(rt, input) else {
+                return Some(input);
+            };
+            let create = "net/minecraft/world/item/alchemy/PotionContents.createItemStack.(Lnet/minecraft/world/item/Item;Lnet/minecraft/core/Holder;)Lnet/minecraft/world/item/ItemStack;";
+            if let Some((_, _, to)) = container_mix(rt, input, reagent) {
+                let item = rt.get_field(to, "$value");
+                let held = crate::food::potion_holder(rt, &potion);
+                crate::api::call(rt, create, &[item, held])
+            } else if let Some((_, _, to)) = potion_mix(rt, input, reagent) {
+                let item = rt.get_field(input, "$item");
+                crate::api::call(rt, create, &[item, to])
+            } else {
+                input
+            }
+        }
         _ => return None,
     })
 }
@@ -1056,6 +1282,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
                 | FLUID_INGREDIENT
                 | SIZED_FLUID
                 | TAG_FLUID
+                | COMPONENTS_FLUID
                 | SIZED_ITEM
                 | MANAGER
                 | CACHED_CHECK
@@ -1092,7 +1319,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner.starts_with(INGREDIENT) {
         return ingredient_call(rt, owner, name, desc, args);
     }
-    if matches!(owner, FLUID_INGREDIENT | SIZED_FLUID | TAG_FLUID) {
+    if matches!(
+        owner,
+        FLUID_INGREDIENT | SIZED_FLUID | TAG_FLUID | COMPONENTS_FLUID
+    ) {
         return fluid_ingredient_call(rt, owner, name, desc, args);
     }
     if owner == SIZED_ITEM {
@@ -1107,10 +1337,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (MANAGER, n) => return manager_call(rt, n, desc, args),
         (CACHED_CHECK, n) => return cached_check_call(rt, n, args),
-        // Vanilla brewing (`level.potionBrewing()`): which items are potion containers. Its mixes
-        // aren't modelled yet: no mix matches, and NeoForge's brewing recipe list is empty (Create's
-        // mixer asks both on every recipe search; its potion mixing reads the mixes through an
-        // accessor mixin, `create$getPotionMixes`, which gets the empty lists).
+        // Vanilla brewing (`level.potionBrewing()`): which items are potion containers, and the
+        // mixes the game brews by ([`brewing_mixes`]). NeoForge's own brewing recipes (the
+        // `IBrewingRecipe`s mods add) are none yet.
         (_, "potionBrewing") if desc == "()Lnet/minecraft/world/item/alchemy/PotionBrewing;" => {
             rt.intern("compat:potion-brewing".into(), |rt| rt.new_object(BREWING))
         }
@@ -1119,8 +1348,17 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let id = crate::api_common::item_like_name(rt, item);
             V::I(matches!(id.as_str(), "minecraft:potion" | "minecraft:splash_potion" | "minecraft:lingering_potion") as i32)
         }
-        (BREWING, "isIngredient" | "hasMix" | "hasPotionMix" | "hasContainerMix" | "isBrewablePotion" | "isPotionIngredient" | "isContainerIngredient") => V::I(0),
-        (BREWING, n) if n == "getRecipes" || n.ends_with("PotionMixes") || n.ends_with("ContainerMixes") => jutil::new_list(rt, Vec::new()),
+        (BREWING, "getRecipes") => jutil::new_list(rt, Vec::new()),
+        // The mix lists themselves (the fields `potionMixes` and `containerMixes`, read by a mod
+        // or through Create's accessor `create$getPotionMixes`).
+        (BREWING, n)
+            if n.to_ascii_lowercase().ends_with("potionmixes")
+                || n.to_ascii_lowercase().ends_with("containermixes") =>
+        {
+            let containers = n.to_ascii_lowercase().ends_with("containermixes");
+            brewing_mix_list(rt, containers)
+        }
+        (BREWING, name) => return brewing_call(rt, name, args),
         (HOLDER, "<init>") => {
             rt.put_field(a(0), "$id", a(1));
             rt.put_field(a(0), "$value", a(2));
@@ -1826,6 +2064,138 @@ mod tests {
         let water_stack = fluids::fluid_stack(&mut rt, water, 1000);
         assert!(fluid_ingredient_test(&mut rt, read, lava_stack));
         assert!(!fluid_ingredient_test(&mut rt, read, water_stack));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Vanilla's brewing as 1.21.1's `PotionBrewing` keeps it, read off the game's brewing recipes
+    /// (26.3 writes them out per container): the plain potion's recipes are the potion mixes, a
+    /// recipe from one container to another a container mix (once per reagent); `hasMix` and `mix`
+    /// brew by them as vanilla does, a container mix first and a potion mix in any container.
+    #[test]
+    fn potion_brewing_brews_by_the_games_brewing_recipes() {
+        let mut rt = Rt::new();
+        crate::install();
+        let recipe = |input: &str, potion: &str, reagent: &str, output: &str, made: &str| {
+            let id = format!("minecraft:brewing/{input}_{potion}_{reagent}");
+            let json = serde_json::json!({
+                "type": "minecraft:brewing",
+                "input": {"item": format!("minecraft:{input}"), "potion_contents": {"potions": format!("minecraft:{potion}")}},
+                "reagent": {"item": format!("minecraft:{reagent}")},
+                "output": {"id": format!("minecraft:{output}"), "components": {"minecraft:potion_contents": {"potion": format!("minecraft:{made}")}}}
+            });
+            (id, json.to_string())
+        };
+        let mut host = MemoryHost::default();
+        let recipes = vec![
+            recipe("potion", "water", "nether_wart", "potion", "awkward"),
+            recipe(
+                "splash_potion",
+                "water",
+                "nether_wart",
+                "splash_potion",
+                "awkward",
+            ),
+            recipe("potion", "awkward", "sugar", "potion", "swiftness"),
+            recipe("potion", "water", "gunpowder", "splash_potion", "water"),
+            recipe("potion", "awkward", "gunpowder", "splash_potion", "awkward"),
+            recipe(
+                "splash_potion",
+                "awkward",
+                "dragon_breath",
+                "lingering_potion",
+                "awkward",
+            ),
+        ];
+        host.recipes.insert("minecraft:brewing".into(), recipes);
+        rt.with_host(&mut host, |rt| {
+            let key = |rt: &mut Rt, m: &str| rt.static_key(&format!("net/minecraft/world/item/alchemy/PotionBrewing.{m}"));
+            let k = rt.static_key("net/minecraft/world/level/Level.potionBrewing.()Lnet/minecraft/world/item/alchemy/PotionBrewing;");
+            let brewing = super::call(rt, k, &[V::NULL]).unwrap();
+            let k = key(rt, "$potionMixes.()Ljava/util/List;");
+            let potion_mixes = super::call(rt, k, &[brewing]).unwrap();
+            let k = key(rt, "$containerMixes.()Ljava/util/List;");
+            let container_mixes = super::call(rt, k, &[brewing]).unwrap();
+            assert_eq!((jutil::elements(rt, potion_mixes).len(), jutil::elements(rt, container_mixes).len()), (2, 2));
+            let k = key(rt, "$potionMixes.()Ljava/util/List;");
+            assert_eq!(super::call(rt, k, &[brewing]), Some(potion_mixes), "the field's one list");
+
+            let bottle = |rt: &mut Rt, item: &str, potion: &str| {
+                let create = "net/minecraft/world/item/alchemy/PotionContents.createItemStack.(Lnet/minecraft/world/item/Item;Lnet/minecraft/core/Holder;)Lnet/minecraft/world/item/ItemStack;";
+                let (item, held) = (api_common::item(rt, item), crate::food::potion_holder(rt, potion));
+                let k = rt.static_key(create);
+                crate::api::call(rt, k, &[item, held])
+            };
+            let water = bottle(rt, "minecraft:potion", "minecraft:water");
+            let awkward = bottle(rt, "minecraft:potion", "minecraft:awkward");
+            let splash_water = bottle(rt, "minecraft:splash_potion", "minecraft:water");
+            let [wart, sugar, gunpowder, stick] = ["nether_wart", "sugar", "gunpowder", "stick"].map(|i| api_common::stack(rt, &format!("minecraft:{i}"), 1));
+            let has_mix = key(rt, "hasMix.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;)Z");
+            for (input, reagent, brews) in [(water, wart, true), (water, sugar, false), (awkward, sugar, true), (splash_water, wart, true), (stick, wart, false)] {
+                assert_eq!(super::call(rt, has_mix, &[brewing, input, reagent]), Some(V::I(brews as i32)));
+            }
+            let is_ingredient = key(rt, "isIngredient.(Lnet/minecraft/world/item/ItemStack;)Z");
+            assert_eq!(super::call(rt, is_ingredient, &[brewing, sugar]), Some(V::I(1)));
+            assert_eq!(super::call(rt, is_ingredient, &[brewing, stick]), Some(V::I(0)));
+            let brewable = key(rt, "isBrewablePotion.(Lnet/minecraft/core/Holder;)Z");
+            let swiftness = crate::food::potion_holder(rt, "minecraft:swiftness");
+            let plain = crate::food::potion_holder(rt, "minecraft:water");
+            assert_eq!(super::call(rt, brewable, &[brewing, swiftness]), Some(V::I(1)));
+            assert_eq!(super::call(rt, brewable, &[brewing, plain]), Some(V::I(0)));
+
+            let mix = key(rt, "mix.(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/item/ItemStack;");
+            let brewed = |rt: &mut Rt, reagent: V, input: V| {
+                let out = super::call(rt, mix, &[brewing, reagent, input]).unwrap();
+                (stack_item(rt, out), crate::food::stack_potion(rt, out).unwrap_or_default())
+            };
+            assert_eq!(brewed(rt, wart, water), ("minecraft:potion".into(), "minecraft:awkward".into()));
+            assert_eq!(brewed(rt, wart, splash_water), ("minecraft:splash_potion".into(), "minecraft:awkward".into()));
+            assert_eq!(brewed(rt, gunpowder, awkward), ("minecraft:splash_potion".into(), "minecraft:awkward".into()));
+            assert_eq!(super::call(rt, mix, &[brewing, sugar, water]), Some(water), "nothing brews it");
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `DataComponentFluidIngredient.of(strict, stack)`, which Create's mixer asks for a potion as a
+    /// fluid: the stack's fluid carrying its components takes the same potion, not another one or
+    /// plain water; strict, it takes no stack carrying more than those.
+    #[test]
+    fn a_components_fluid_ingredient_of_a_stack_takes_stacks_carrying_its_components() {
+        let mut rt = Rt::new();
+        crate::install();
+        let water = fluids::fluid(&mut rt, "minecraft:water");
+        let potion = |rt: &mut Rt, name: Option<&str>| {
+            let s = fluids::fluid_stack(rt, water, 1000);
+            if let Some(name) = name {
+                let contents =
+                    crate::food::decode_potion_contents(rt, &serde_json::json!({ "potion": name }));
+                crate::components::set_vanilla(rt, s, crate::food::POTION_CONTENTS_ID, contents);
+            }
+            s
+        };
+        let of = "net/neoforged/neoforge/fluids/crafting/DataComponentFluidIngredient.of.(ZLnet/neoforged/neoforge/fluids/FluidStack;)Lnet/neoforged/neoforge/fluids/crafting/FluidIngredient;";
+        let of = rt.static_key(of);
+        let awkward = potion(&mut rt, Some("minecraft:awkward"));
+        let loose = crate::api::call(&mut rt, of, &[V::I(0), awkward]);
+        let strict = crate::api::call(&mut rt, of, &[V::I(1), awkward]);
+        let same = potion(&mut rt, Some("minecraft:awkward"));
+        let other = potion(&mut rt, Some("minecraft:swiftness"));
+        let plain = potion(&mut rt, None);
+        let more = potion(&mut rt, Some("minecraft:awkward"));
+        let rarity = rt.string(r#"{"minecraft:rarity":"rare"}"#);
+        rt.put_field(more, "$components", rarity);
+        for (stack, by_loose, by_strict) in [
+            (same, true, true),
+            (other, false, false),
+            (plain, false, false),
+            (more, true, false),
+        ] {
+            assert_eq!(fluid_ingredient_test(&mut rt, loose, stack), by_loose);
+            assert_eq!(fluid_ingredient_test(&mut rt, strict, stack), by_strict);
+        }
+        // Of plain water: any water, whatever it carries.
+        let any_water = crate::api::call(&mut rt, of, &[V::I(0), plain]);
+        assert!(fluid_ingredient_test(&mut rt, any_water, same));
+        assert_eq!(fluid_ingredient_kind(&rt, loose), "neoforge:components");
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
