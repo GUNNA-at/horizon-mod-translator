@@ -26,6 +26,10 @@
 //!
 //! A mod's subclass (Create's `ItemReturnInvWrapper`, a `PlayerMainInvWrapper`) reaches these through
 //! its `super` calls.
+//!
+//! `Level.getBlockEntity` at such a container finds its block entity, of vanilla's class (a
+//! `ChestBlockEntity`, a `HopperBlockEntity`): a `Container` of the same slots, by position through
+//! the host (Create's threshold switch measures a chest only where a block entity is).
 use crate::host::{ContainerFacts, ContainerKind};
 use crate::{Data, Rt, V, api, api_common, hand, jutil, menus};
 
@@ -79,10 +83,100 @@ pub(crate) fn is_a(c: &str, class: &str) -> bool {
             matches!(c, INV | SIDED | HOPPER | RANGED | PLAYER_INV | PLAYER_MAIN | PLAYER_ARMOR | PLAYER_OFFHAND | EQUIPMENT | HANDS | ARMOR)
         }
         INV => c == HOPPER,
-        CONTAINER | WORLDLY | "net/minecraft/world/Clearable" => c == VANILLA,
+        CONTAINER | "net/minecraft/world/Clearable" => c == VANILLA || CONTAINER_BLOCK_ENTITIES.contains(&c),
+        WORLDLY => c == VANILLA || WORLDLY_BLOCK_ENTITIES.contains(&c),
         _ => false,
     }
 }
+
+/// 1.21.1's block entity classes that are a `Container` (a `BaseContainerBlockEntity`'s, a
+/// chiseled bookshelf's, a jukebox's, a decorated pot's).
+const CONTAINER_BLOCK_ENTITIES: [&str; 18] = [
+    "net/minecraft/world/level/block/entity/BaseContainerBlockEntity",
+    "net/minecraft/world/level/block/entity/RandomizableContainerBlockEntity",
+    "net/minecraft/world/level/block/entity/ChestBlockEntity",
+    "net/minecraft/world/level/block/entity/TrappedChestBlockEntity",
+    "net/minecraft/world/level/block/entity/BarrelBlockEntity",
+    "net/minecraft/world/level/block/entity/DispenserBlockEntity",
+    "net/minecraft/world/level/block/entity/DropperBlockEntity",
+    "net/minecraft/world/level/block/entity/HopperBlockEntity",
+    "net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity",
+    "net/minecraft/world/level/block/entity/CrafterBlockEntity",
+    "net/minecraft/world/level/block/entity/AbstractFurnaceBlockEntity",
+    "net/minecraft/world/level/block/entity/FurnaceBlockEntity",
+    "net/minecraft/world/level/block/entity/SmokerBlockEntity",
+    "net/minecraft/world/level/block/entity/BlastFurnaceBlockEntity",
+    "net/minecraft/world/level/block/entity/BrewingStandBlockEntity",
+    "net/minecraft/world/level/block/entity/ChiseledBookShelfBlockEntity",
+    "net/minecraft/world/level/block/entity/JukeboxBlockEntity",
+    "net/minecraft/world/level/block/entity/DecoratedPotBlockEntity",
+];
+
+/// Those of them that are a `WorldlyContainer`, whose faces reach their own slots.
+const WORLDLY_BLOCK_ENTITIES: [&str; 6] = [
+    "net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity",
+    "net/minecraft/world/level/block/entity/AbstractFurnaceBlockEntity",
+    "net/minecraft/world/level/block/entity/FurnaceBlockEntity",
+    "net/minecraft/world/level/block/entity/SmokerBlockEntity",
+    "net/minecraft/world/level/block/entity/BlastFurnaceBlockEntity",
+    "net/minecraft/world/level/block/entity/BrewingStandBlockEntity",
+];
+
+/// The class of the block entity of vanilla container block `block` and its type's field in
+/// `BlockEntityType`; None for a block without one.
+fn block_entity_class(block: &str) -> Option<(&'static str, &'static str)> {
+    let class = |name: &'static str, field: &'static str| Some((name, field));
+    match block.strip_prefix("minecraft:")? {
+        "trapped_chest" => class("net/minecraft/world/level/block/entity/TrappedChestBlockEntity", "TRAPPED_CHEST"),
+        "barrel" => class("net/minecraft/world/level/block/entity/BarrelBlockEntity", "BARREL"),
+        "dispenser" => class("net/minecraft/world/level/block/entity/DispenserBlockEntity", "DISPENSER"),
+        "dropper" => class("net/minecraft/world/level/block/entity/DropperBlockEntity", "DROPPER"),
+        "hopper" => class("net/minecraft/world/level/block/entity/HopperBlockEntity", "HOPPER"),
+        "crafter" => class("net/minecraft/world/level/block/entity/CrafterBlockEntity", "CRAFTER"),
+        "furnace" => class("net/minecraft/world/level/block/entity/FurnaceBlockEntity", "FURNACE"),
+        "smoker" => class("net/minecraft/world/level/block/entity/SmokerBlockEntity", "SMOKER"),
+        "blast_furnace" => class("net/minecraft/world/level/block/entity/BlastFurnaceBlockEntity", "BLAST_FURNACE"),
+        "brewing_stand" => class("net/minecraft/world/level/block/entity/BrewingStandBlockEntity", "BREWING_STAND"),
+        "chiseled_bookshelf" => class("net/minecraft/world/level/block/entity/ChiseledBookShelfBlockEntity", "CHISELED_BOOKSHELF"),
+        "jukebox" => class("net/minecraft/world/level/block/entity/JukeboxBlockEntity", "JUKEBOX"),
+        "ender_chest" => None,
+        b if b.ends_with("shulker_box") => class("net/minecraft/world/level/block/entity/ShulkerBoxBlockEntity", "SHULKER_BOX"),
+        // A chest, and the copper ones, which are chests.
+        b if b.ends_with("chest") => class("net/minecraft/world/level/block/entity/ChestBlockEntity", "CHEST"),
+        _ => None,
+    }
+}
+
+/// `Level.getBlockEntity(pos)` at the vanilla container in block state `state` at `pos`: its
+/// block entity, of vanilla's class, in the level with the block's state, one object for each
+/// position and block. None where the game has no container ([`ContainerFacts`]).
+pub(crate) fn vanilla_block_entity(rt: &mut Rt, pos: [i32; 3], state: &str) -> Option<V> {
+    facts(rt, pos)?;
+    let block = crate::host::split_state(state).0;
+    let (class, field) = block_entity_class(block)?;
+    let be = rt.intern(format!("compat:vanilla-block-entity/{},{},{}/{block}", pos[0], pos[1], pos[2]), |rt| {
+        let be = rt.new_object(class);
+        rt.put_field(be, "$x", V::I(pos[0]));
+        rt.put_field(be, "$y", V::I(pos[1]));
+        rt.put_field(be, "$z", V::I(pos[2]));
+        rt.put_field(be, VANILLA_BLOCK_ENTITY, V::I(1));
+        let ty = api_common::vanilla_block_entity_type(rt, field);
+        let at = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+        for (k, v) in [("$type", ty), ("type", ty), ("$pos", at), ("worldPosition", at)] {
+            rt.put_field(be, k, v);
+        }
+        be
+    });
+    // The block's state and the level as they are now.
+    let (st, level) = (api::state(rt, state), crate::glue::level(rt));
+    for (k, v) in [("$state", st), ("blockState", st), ("level", level)] {
+        rt.put_field(be, k, v);
+    }
+    Some(be)
+}
+
+/// The field that marks a vanilla container's block entity ([`vanilla_block_entity`]).
+const VANILLA_BLOCK_ENTITY: &str = "$vanillaBlockEntity";
 
 /// The wrappers' superclasses, which answer what a wrapper doesn't itself: a player's whole
 /// handler is a `CombinedInvWrapper`, its parts `RangedWrapper`s, the hands' and the armour's
@@ -110,9 +204,10 @@ pub(crate) fn vanilla(rt: &mut Rt, pos: [i32; 3]) -> V {
     })
 }
 
-/// Where container `inv` is, when it is a vanilla block's.
+/// Where container `inv` is, when it is a vanilla block's (or its block entity).
 fn vanilla_at(rt: &Rt, inv: V) -> Option<[i32; 3]> {
-    (inv.r() != 0 && rt.class_of(inv) == VANILLA).then(|| [rt.get_field(inv, "$x").i(), rt.get_field(inv, "$y").i(), rt.get_field(inv, "$z").i()])
+    let vanilla = inv.r() != 0 && !matches!(inv, V::Void) && (rt.class_of(inv) == VANILLA || rt.get_field(inv, VANILLA_BLOCK_ENTITY).i() != 0);
+    vanilla.then(|| [rt.get_field(inv, "$x").i(), rt.get_field(inv, "$y").i(), rt.get_field(inv, "$z").i()])
 }
 
 fn facts(rt: &Rt, pos: [i32; 3]) -> Option<ContainerFacts> {
@@ -1119,6 +1214,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         INV | SIDED | HOPPER | ITEM_HANDLER | MODIFIABLE | VANILLA | CONTAINER | WORLDLY | RANGED | PLAYER_INV | PLAYER_MAIN | PLAYER_ARMOR | PLAYER_OFFHAND | EQUIPMENT | HANDS | ARMOR
     ) || (owner == ITEM_STACK && name == "canEquip")
         || name == "getEquipmentSlotForItem"
+        || CONTAINER_BLOCK_ENTITIES.contains(&owner)
 }
 
 /// [`call`] by the call's key (`owner.name.desc`).
@@ -1172,7 +1268,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
             None
         }
-        VANILLA | CONTAINER | WORLDLY if this.r() != 0 && rt.class_of(this) == VANILLA => vanilla_call(rt, name, args),
+        VANILLA | CONTAINER | WORLDLY if vanilla_at(rt, this).is_some() => vanilla_call(rt, name, args),
+        // A vanilla container's block entity by its own class (`ChestBlockEntity.getItem`); what
+        // isn't the container's is the block entity's (`getBlockPos`).
+        o if CONTAINER_BLOCK_ENTITIES.contains(&o) && vanilla_at(rt, this).is_some() => vanilla_call(rt, name, args),
         _ => None,
     }
 }
@@ -1260,6 +1359,57 @@ mod tests {
         assert_eq!(slot(&host, AT, 0), None);
         assert_eq!(slot(&host, AT, 1), Some(("minecraft:gold_ingot".to_owned(), 5)));
         assert_eq!(host.containers[&AT].changed, 3, "each change once");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `Level.getBlockEntity` at a chest finds its block entity, of vanilla's class: a block entity
+    /// at the chest's position and a container of the chest's slots, the same object each time, as
+    /// Create's threshold switch takes it before it measures the chest. A furnace's is a
+    /// `WorldlyContainer` of its 3 slots. Stone has none, nor a chest the game holds no container
+    /// for.
+    #[test]
+    fn a_vanilla_containers_block_entity_is_its_container() {
+        const GET_BE: &str = "net/minecraft/world/level/Level.getBlockEntity.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;";
+        const BE_POS: &str = "net/minecraft/world/level/block/entity/BlockEntity.getBlockPos.()Lnet/minecraft/core/BlockPos;";
+        const BE_STATE: &str = "net/minecraft/world/level/block/entity/BlockEntity.getBlockState.()Lnet/minecraft/world/level/block/state/BlockState;";
+        const SIZE: &str = "net/minecraft/world/Container.getContainerSize.()I";
+        const GET: &str = "net/minecraft/world/Container.getItem.(I)Lnet/minecraft/world/item/ItemStack;";
+        const OWN_SIZE: &str = "net/minecraft/world/level/block/entity/ChestBlockEntity.getContainerSize.()I";
+        const CHEST: &str = "minecraft:chest[facing=north,type=single,waterlogged=false]";
+        let (furnace_at, stone, lone) = ([1, 64, 0], [2, 64, 0], [3, 64, 0]);
+        let mut rt = rt();
+        let mut host = MemoryHost::default();
+        host.blocks.insert(AT, CHEST.into());
+        let mut chest = container(ContainerKind::Plain, 27, None);
+        chest.items[3] = Some(held("minecraft:iron_ingot", 5));
+        host.containers.insert(AT, chest);
+        host.blocks.insert(furnace_at, "minecraft:furnace[facing=north,lit=false]".into());
+        host.containers.insert(furnace_at, container(ContainerKind::Furnace, 3, None));
+        host.blocks.insert(stone, "minecraft:stone".into());
+        host.blocks.insert(lone, CHEST.into());
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let mut at = |p: [i32; 3]| {
+                let pos = api::block_pos(rt, i64::from(p[0]), i64::from(p[1]), i64::from(p[2]));
+                api::call(rt, GET_BE, &[level, pos])
+            };
+            let (be, again, furnace) = (at(AT), at(AT), at(furnace_at));
+            assert_eq!((at(stone), at(lone)), (V::NULL, V::NULL));
+            assert_eq!(rt.class_of(be), "net/minecraft/world/level/block/entity/ChestBlockEntity");
+            assert_eq!(again, be, "the same object again");
+            assert!(rt.instance_of(be, "net/minecraft/world/level/block/entity/BlockEntity"));
+            assert!(rt.instance_of(be, CONTAINER) && !rt.instance_of(be, WORLDLY));
+            assert!(rt.instance_of(furnace, CONTAINER) && rt.instance_of(furnace, WORLDLY));
+            let pos = api::call(rt, BE_POS, &[be]);
+            assert_eq!(api::pos_of(rt, pos), AT);
+            let state = api::call(rt, BE_STATE, &[be]);
+            assert_eq!(rt.str_of(state), Some(CHEST));
+            assert_eq!(api::call(rt, SIZE, &[be]).i(), 27);
+            assert_eq!(api::call(rt, OWN_SIZE, &[be]).i(), 27);
+            let iron = api::call(rt, GET, &[be, V::I(3)]);
+            assert_eq!((item_of(rt, iron), n(rt, iron)), ("minecraft:iron_ingot".to_owned(), 5));
+            assert_eq!(api::call(rt, SIZE, &[furnace]).i(), 3);
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

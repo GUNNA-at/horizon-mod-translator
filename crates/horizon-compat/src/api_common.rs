@@ -72,7 +72,10 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         // player's inventory and `SimpleContainer` containers.
         "net/minecraft/world/inventory/Slot" => c == crate::menus::HANDLER_SLOT,
         "net/minecraft/world/inventory/AbstractContainerMenu" => c == crate::menus::INVENTORY_MENU,
-        "net/minecraft/world/Container" | "net/minecraft/world/Clearable" => matches!(c, crate::menus::INVENTORY | crate::menus::SIMPLE_CONTAINER),
+        // ... and vanilla's container block entities (a chest's, a furnace's).
+        "net/minecraft/world/Container" | "net/minecraft/world/Clearable" => {
+            matches!(c, crate::menus::INVENTORY | crate::menus::SIMPLE_CONTAINER) || crate::item_wrappers::is_a(c, class)
+        }
         "net/minecraft/world/MenuProvider" | "net/minecraft/world/inventory/MenuConstructor" => c == "net/minecraft/world/SimpleMenuProvider",
         "net/minecraft/world/inventory/ContainerData" => c == "net/minecraft/world/inventory/SimpleContainerData",
         "net/minecraft/client/gui/screens/inventory/MenuAccess" => c == "net/minecraft/client/gui/screens/inventory/AbstractContainerScreen",
@@ -4378,7 +4381,7 @@ const VANILLA_BLOCK_ENTITY_TYPES: [&str; 49] = [
 
 /// Vanilla block entity type `field` (`LECTERN`): registered as `minecraft:lectern`, so the same
 /// object every time and its id found from it.
-fn vanilla_block_entity_type(rt: &mut Rt, field: &str) -> V {
+pub(crate) fn vanilla_block_entity_type(rt: &mut Rt, field: &str) -> V {
     let id = format!("minecraft:{}", field.to_ascii_lowercase());
     if let Some(v) = rt.registered.get(&("block_entity_type".to_owned(), id.clone())) {
         return *v;

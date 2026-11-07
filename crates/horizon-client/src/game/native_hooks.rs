@@ -4130,6 +4130,72 @@ impl GameLevel<'_> {
             ticks.has_block_tick(at, block)
         }
     }
+    /// Adds an item entity of `stack` to this server level at `position`
+    /// with motion `motion` and `pickup_delay`, as a hook's
+    /// `level.addFreshEntity(new ItemEntity(...))` (a mod block popping its
+    /// drops as it breaks off). Its ID comes at once, the entity joins once
+    /// the hook's level operation ends (where a native mod may still keep it
+    /// out: `native_entity_join_level`). None for an empty stack, and on a
+    /// client. API @API:level_item_entities@.
+    pub(super) fn native_spawn_item_entity_here(
+        &mut self,
+        stack: ItemStack,
+        position: [f64; 3],
+        motion: [f64; 3],
+        pickup_delay: u32,
+    ) -> Option<u32> {
+        if !self.native_authoritative || stack.count == 0 || &*stack.item == "minecraft:air" {
+            return None;
+        }
+        *self.next_entity += 1;
+        let id = *self.next_entity;
+        self.spill.spawns.push(super::spill::Spawn {
+            stack,
+            pos: position,
+            motion: Some(motion),
+            delay: pickup_delay,
+            id: Some(id),
+        });
+        Some(id)
+    }
+    /// `Block.getDrops(state, level, pos, blockEntity, null, tool)` of the
+    /// block state `text` names at `pos`, broken with `tool` (None: by
+    /// hand), as a hook in this level rolls them (a mod block's
+    /// `dropResources` as it breaks off): its loot table, from its random
+    /// sequence, else the level random, with what the block entity there
+    /// copies into it (its name, its contents). Nothing spawns: the drops are
+    /// the caller's. Empty for a state the game doesn't know, and on a
+    /// client. API @API:level_item_entities@.
+    pub(super) fn native_block_loot_here(
+        &mut self,
+        pos: [i32; 3],
+        text: &str,
+        tool: Option<&ItemStack>,
+    ) -> Vec<ItemStack> {
+        if !self.native_authoritative {
+            return Vec::new();
+        }
+        let Some(state) = state_from_text(self.registry, text) else {
+            return Vec::new();
+        };
+        let mut drops = self.roll_block_drops(BlockPos::new(pos[0], pos[1], pos[2]), state, tool);
+        drops.retain(|d| &*d.item != "minecraft:air" && d.count > 0);
+        for d in &mut drops {
+            self.pending.attach(pos, d);
+        }
+        self.pending.clear(pos);
+        drops
+    }
+    /// `Block.popExperience(level, pos, amount)` from a hook in this level:
+    /// experience orbs worth `amount` at the centre of `pos`
+    /// (`ExperienceOrb.award`) when blocks drop (`doTileDrops`), joining once
+    /// the hook's level operation ends. Nothing on a client.
+    /// API @API:level_item_entities@.
+    pub(super) fn native_pop_experience_here(&mut self, pos: [i32; 3], amount: u32) {
+        if self.native_authoritative && amount > 0 && self.rules.block_drops {
+            self.award_orbs(pos.map(|c| f64::from(c) + 0.5), amount);
+        }
+    }
     /// Schedules a tick of `fluid` (`minecraft:water`, `minecraft:lava`,
     /// `minecraft:flowing_water`...) at `pos` in `delay` game ticks, as a
     /// waterlogged block's shape update schedules its water in 5

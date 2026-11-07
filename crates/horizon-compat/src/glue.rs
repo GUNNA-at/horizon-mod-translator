@@ -261,7 +261,8 @@ const KEPT: &str = "components";
 /// The block entity at `pos` as `Level.getBlockEntity` finds it: the one this runtime holds, or,
 /// for a mod block that has one, made now. Vanilla makes it with its block; here one is otherwise
 /// made on its first tick or draw, and Create's belt asks for its segments' before they tick (and
-/// breaks itself when one is missing). It takes the game's saved data on its first tick.
+/// breaks itself when one is missing). It takes the game's saved data on its first tick. A vanilla
+/// container's is the game's, which the runtime stands for ([`crate::item_wrappers`]).
 pub(crate) fn block_entity_at(rt: &mut Rt, pos: [i32; 3]) -> V {
     let state = rt.host().map(|h| h.block_state(pos));
     if let Some(be) = rt.block_entities.get(&pos).copied() {
@@ -280,6 +281,9 @@ pub(crate) fn block_entity_at(rt: &mut Rt, pos: [i32; 3]) -> V {
         block_entity_removed(rt, pos);
     }
     let Some(state) = state else { return V::NULL };
+    if state.starts_with("minecraft:") {
+        return crate::item_wrappers::vanilla_block_entity(rt, pos, &state).unwrap_or(V::NULL);
+    }
     if !implements(rt, &state, NEW_BLOCK_ENTITY) {
         return V::NULL;
     }

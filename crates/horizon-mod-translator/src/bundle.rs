@@ -282,8 +282,14 @@ fn write_runtime(dir: &Path, package: &str) -> Result<(), String> {
 const BLOCK_HOOKS: [(&str, &str); 2] = [("tick_block", "tick_block"), ("random_tick", "random_tick")];
 
 /// A block hook's host: the hook's level, which it may change, and its scheduled ticks (`level`
-/// and `ticks` in scope).
+/// and `ticks` in scope). What the mod's code drops there (a block breaking off, its loot) joins
+/// the level once the hook's operation ends; its stacks cross with their mod data.
 fn level_host(krate: &str) -> String {
+    let stacks = stack_helpers_on(
+        &format!("{krate}::compat"),
+        "Host<'_, '_, '_>",
+        "self.level",
+    );
     format!(
         r#"    struct Host<'a, 'b, 'c> {{
         level: &'a mut crate::game::GameLevel<'b>,
@@ -343,8 +349,23 @@ fn level_host(krate: &str) -> String {
         fn play_sound(&mut self, s: &{krate}::compat::host::Sound) {{
             self.level.native_play_sound(&s.event, s.at, s.source, s.volume, s.pitch);
         }}
+        fn block_drops(&mut self, pos: [i32; 3], state: &str, tool: Option<&{krate}::compat::host::HandStack>) -> Vec<{krate}::compat::host::HandStack> {{
+            let tool = tool.map(|t| self.stack_of(t));
+            let drops = self.level.native_block_loot_here(pos, state, tool.as_ref());
+            drops.iter().map(|d| self.held_of(d)).collect()
+        }}
+        fn spawn_item_entity(&mut self, item: &str, count: u32, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {{
+            self.level.native_spawn_item_entity_here(horizon_client::items::ItemStack::new(item, count), pos, motion, pickup_delay)
+        }}
+        fn spawn_stack_entity(&mut self, held: &{krate}::compat::host::HandStack, pos: [f64; 3], motion: [f64; 3], pickup_delay: u32) -> Option<u32> {{
+            let stack = self.stack_of(held);
+            self.level.native_spawn_item_entity_here(stack, pos, motion, pickup_delay)
+        }}
+        fn pop_experience(&mut self, pos: [i32; 3], amount: i32) {{
+            self.level.native_pop_experience_here(pos, u32::try_from(amount).unwrap_or(0));
+        }}
     }}
-"#
+{stacks}"#
     )
 }
 
@@ -3031,29 +3052,34 @@ fn player_host(c: &str, server_effects: &str) -> String {
 /// The inherent helpers of a server host whose game is `self.game` (a `&mut Game`): a stack crosses
 /// between the game and the runtime with its mod data as the runtime's NBT.
 fn stack_helpers(c: &str) -> String {
+    stack_helpers_on(c, "Host<'_, '_>", "self.game")
+}
+
+/// [`stack_helpers`] for host type `host`, whose stacks' helpers are `on`'s: the game's, or a level
+/// hook's level, which has the same ones.
+fn stack_helpers_on(c: &str, host: &str, on: &str) -> String {
     let nbt_of = nbt_of_fn(c);
     format!(r#"    // A stack's mod data crosses as the runtime's NBT.
-    impl Host<'_, '_> {{
+    impl {host} {{
         /// The game's stack as the runtime's: its mod data by the registered component types, and
         /// the vanilla components the runtime models (its enchantments).
         fn held_of(&self, stack: &horizon_client::items::ItemStack) -> {c}::host::HandStack {{
-            let mut components: Vec<_> = self
-                .game
+            let mut components: Vec<_> = {on}
                 .native_registered_components()
                 .into_iter()
                 .filter_map(|name| {{
-                    let tag = self.game.native_component(stack, name).ok()??;
+                    let tag = {on}.native_component(stack, name).ok()??;
                     Some((name.to_owned(), Self::nbt_of(tag)?))
                 }})
                 .collect();
-            for (name, tag) in self.game.native_vanilla_components(stack) {{
+            for (name, tag) in {on}.native_vanilla_components(stack) {{
                 components.extend(Self::nbt_of(&tag).map(|n| (name.to_owned(), n)));
             }}
             {c}::host::HandStack {{
                 item: stack.item.to_string(),
                 count: stack.count,
                 damage: stack.damage,
-                max_damage: self.game.native_item_max_damage(&stack.item),
+                max_damage: {on}.native_item_max_damage(&stack.item),
                 components,
             }}
         }}
@@ -3073,11 +3099,11 @@ fn stack_helpers(c: &str) -> String {
                 tag => tag.flatten(),
             }};
             if name.starts_with("minecraft:") {{
-                return self.game.native_set_vanilla_component(stack, name, tag.as_ref()).is_ok();
+                return {on}.native_set_vanilla_component(stack, name, tag.as_ref()).is_ok();
             }}
             match tag {{
-                Some(tag) => self.game.native_set_component(stack, name, tag).is_ok(),
-                None => self.game.native_remove_component(stack, name).is_ok(),
+                Some(tag) => {on}.native_set_component(stack, name, tag).is_ok(),
+                None => {on}.native_remove_component(stack, name).is_ok(),
             }}
         }}
 {nbt_of}        fn tag_of(n: &{c}::nbt::Nbt) -> Option<horizon_world::nbt::Tag> {{

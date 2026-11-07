@@ -1,0 +1,9 @@
+{
+  "hooks": [],
+  "rust_summary": "item entities, block loot and experience from a level hook (`GameLevel::native_spawn_item_entity_here`, `native_block_loot_here`, `native_pop_experience_here`), and the item component helpers on the level (`native_component`, `native_set_component`, `native_vanilla_components`... as on `Game`).",
+  "doc_summary": "A level hook (a block's tick, random tick, neighbour change or bone meal) can now drop items. `native_spawn_item_entity_here(stack, position, motion, pickup_delay)` is `level.addFreshEntity(new ItemEntity(...))`: the ID comes at once and the entity joins once the hook's level operation ends. `native_block_loot_here(pos, state, tool)` is `Block.getDrops` rolled in the level (its random sequence, what the block entity there copies into the stacks), spawning nothing. `native_pop_experience_here(pos, amount)` is `Block.popExperience`. The level also has the game's item component helpers (`native_registered_components`, `native_component`, `native_set_component`, `native_remove_component`, `native_vanilla_components`, `native_set_vanilla_component`, `native_item_max_damage`), so a stack crosses with its mod data as on the game. Translated bundles drop a mod block's loot when its own code breaks it inside a level hook (a Create latch losing its floor): @API:level_item_entities@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_hooks.rs",
+    "crates/horizon-client/src/game/native_components.rs"
+  ]
+}

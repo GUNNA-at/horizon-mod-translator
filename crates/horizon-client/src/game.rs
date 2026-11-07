@@ -936,6 +936,9 @@ struct GameLevel<'w> {
     rand_sequences: &'w mut horizon_client::random_sequences::RandomSequences,
     pending: &'w mut spill::Pending,
     spill: &'w mut spill::Spill,
+    /// The game's entity counter: an item entity a hook adds takes its ID at
+    /// once (`addFreshEntity`) and joins with it once the operation ends.
+    next_entity: &'w mut u32,
     /// Where the chunk tickets let blocks tick.
     tickets: horizon_client::ticket_levels::Levels,
     random_tick_sections: &'w mut horizon_client::random_tick_sections::RandomTickSections,
@@ -3682,6 +3685,18 @@ impl Game<'_> {
         pickup_delay: u32,
     ) {
         self.next_entity += 1;
+        self.spawn_item_as(self.next_entity, stack, position, velocity, pickup_delay);
+    }
+    /// [`Self::spawn_item`] with the ID `id`, handed out already (an item
+    /// entity a level's hook added).
+    fn spawn_item_as(
+        &mut self,
+        id: u32,
+        stack: ItemStack,
+        position: [f64; 3],
+        velocity: [f64; 3],
+        pickup_delay: u32,
+    ) {
         let p = Vec3::new(position[0], position[1], position[2]);
         // ItemEntity.bobOffs comes from the entity's own random, not the level's.
         let bob = self.particles.random().next_float() * std::f32::consts::PI * 2.0;
@@ -3690,7 +3705,7 @@ impl Game<'_> {
             fire_ticks: 0,
             thrower: None,
             target: None,
-            id: self.next_entity,
+            id,
             stack,
             position: p,
             previous: p,
@@ -3703,7 +3718,7 @@ impl Game<'_> {
             needs_sync: false,
         });
         // ServerLevel.addFreshEntity.
-        if !self.native_entity_joins(self.next_entity, "minecraft:item", position, false) {
+        if !self.native_entity_joins(id, "minecraft:item", position, false) {
             self.dropped.pop();
         }
     }
@@ -4163,6 +4178,7 @@ impl Game<'_> {
             rand_sequences: &mut self.rand_sequences,
             pending: &mut self.pending,
             spill: &mut self.spill,
+            next_entity: &mut self.next_entity,
             tickets: self.tickets.levels(),
             random_tick_sections: &mut self.random_tick_sections,
             lid_openers: &self.lid_openers,

@@ -211,6 +211,9 @@ pub(super) struct Spawn {
     pub(super) pos: [f64; 3],
     pub(super) motion: Option<[f64; 3]>,
     pub(super) delay: u32,
+    /// The entity ID handed out already: an item entity a mod's hook added
+    /// (`addFreshEntity`), which it knows by that ID. None takes the next.
+    pub(super) id: Option<u32>,
 }
 
 #[derive(Default)]
@@ -272,6 +275,7 @@ fn retell_runs(
                 pos: run.get(i).or(run.last()).map_or(top, |s| s.pos),
                 motion: run.get(i).and_then(|s| s.motion),
                 delay: run.get(i).map_or(10, |s| s.delay),
+                id: None,
             })
             .collect();
         spawns.splice(used.start..used.start, kept);
@@ -350,6 +354,7 @@ impl GameLevel<'_> {
             pos: at,
             motion: None,
             delay: 10,
+            id: None,
         });
     }
     /// `Block.popResource(level, pos, new ItemStack(block))`.
@@ -368,6 +373,7 @@ impl GameLevel<'_> {
             pos: at,
             motion: None,
             delay: 10,
+            id: None,
         });
     }
     /// `Block.dropFromBlockInteractLootTable` with `Block.popResource` of
@@ -400,10 +406,16 @@ impl GameLevel<'_> {
             table,
         });
     }
-    /// `Block.dropResources(state, level, pos, blockEntity)`: the block's loot
-    /// (from its random sequence, else the level random), with what its block
-    /// entity copies into it, popped at once.
-    pub(super) fn drop_resources_now(&mut self, pos: BlockPos, state: BlockStateId) {
+    /// `Block.getDrops(state, level, pos, blockEntity, null, tool)`: the loot
+    /// of `state` at `pos` broken with `tool` (None: by hand), from its random
+    /// sequence, else the level random, with what the block entity there
+    /// copies into it, which waits in `pending` for the stacks.
+    pub(super) fn roll_block_drops(
+        &mut self,
+        pos: BlockPos,
+        state: BlockStateId,
+        tool: Option<&ItemStack>,
+    ) -> Vec<ItemStack> {
         let key = (pos.x, pos.y, pos.z);
         let at = [pos.x, pos.y, pos.z];
         if let Some(entity) = self.world.block_entities.get(&key) {
@@ -411,25 +423,31 @@ impl GameLevel<'_> {
             let name = self.world.block_names.get(&key).cloned();
             let block = self.facts.get(state).name.clone();
             self.pending.record(at, &entity, &block, name);
-        } else if let Some(tag) = saved_entity(self.world, [pos.x, pos.y, pos.z]) {
+        } else if let Some(tag) = saved_entity(self.world, at) {
             self.pending.record_saved(at, &tag);
         }
         let dynamic = self.pending.dynamic(at);
-        let drops = match self.items.block_loot_sequence(self.registry, state) {
+        match self.items.block_loot_sequence(self.registry, state) {
             Some(sequence) => {
                 let random = self.rand_sequences.get(&sequence, self.seed);
                 self.items
-                    .block_drops_with(self.registry, state, None, &dynamic, random)
+                    .block_drops_with(self.registry, state, tool, &dynamic, random)
             }
             None => self.items.block_drops_with(
                 self.registry,
                 state,
-                None,
+                tool,
                 &dynamic,
                 &mut self.world.random,
             ),
-        };
-        for stack in drops {
+        }
+    }
+    /// `Block.dropResources(state, level, pos, blockEntity)`: the block's loot
+    /// (from its random sequence, else the level random), with what its block
+    /// entity copies into it, popped at once.
+    pub(super) fn drop_resources_now(&mut self, pos: BlockPos, state: BlockStateId) {
+        let at = [pos.x, pos.y, pos.z];
+        for stack in self.roll_block_drops(pos, state, None) {
             if &*stack.item != "minecraft:air" && stack.count > 0 {
                 self.pop_resource(at, stack);
             }
@@ -549,6 +567,7 @@ impl GameLevel<'_> {
                             pos: at,
                             motion: None,
                             delay: 10,
+                            id: None,
                         });
                         neighbour_updates += 1;
                     }
@@ -573,6 +592,7 @@ impl GameLevel<'_> {
                             pos: removal::lectern_book_position(pos, step),
                             motion: None,
                             delay: 10,
+                            id: None,
                         });
                     }
                 }
@@ -697,6 +717,7 @@ impl GameLevel<'_> {
                 pos: piece.pos,
                 motion: Some(piece.motion),
                 delay: 0,
+                id: None,
             });
         }
     }
@@ -718,7 +739,10 @@ impl Game<'_> {
         });
         for s in spill.spawns {
             let motion = s.motion.unwrap_or_else(new_item_motion);
-            self.spawn_item(s.stack, s.pos, motion, s.delay);
+            match s.id {
+                Some(id) => self.spawn_item_as(id, s.stack, s.pos, motion, s.delay),
+                None => self.spawn_item(s.stack, s.pos, motion, s.delay),
+            }
         }
         for (at, value, merge_id) in spill.orbs {
             self.award_orb(at, value, merge_id);
@@ -754,6 +778,7 @@ mod tests {
             pos: [x, 0.0, 0.0],
             motion: None,
             delay: 10,
+            id: None,
         };
         let mut spawns = vec![
             spawn("minecraft:stone", 0.0),

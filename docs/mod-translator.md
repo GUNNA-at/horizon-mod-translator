@@ -6045,6 +6045,53 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     next). The threshold switch still reads -1 (no block entity object for a vanilla chest), the
     link's receiver 0. Unmapped: two reads of a pulse extender's `BlockEntity.level` where the
     runtime had none set. No throws.
+- [x] 2026-11-07 Part 79: what a mod's code drops inside a level hook lands, and a vanilla
+  container's block entity is there for it. Measured on the pack (`p79scan/drops.py`, per method,
+  direct calls): 58 level-hook methods (a block's `tick`, `randomTick`, `neighborChanged` or
+  `performBonemeal`) in 58 classes of 20 jars drop items themselves: `destroyBlock` 40,
+  `addFreshEntity` 12, `dropResources` 5, `popResource` 4 (Farmer's Delight's tomatoes, Create's
+  nozzle, hand crank, redstone link and belt tunnel, SecurityCraft's mines, Aeronautics' handle and
+  nameplate). These hooks run on the level (`GameLevel`), whose bundle host had no
+  `spawn_item_entity`, no `block_drops` and no `pop_experience`: the block went, its drops never
+  came (a Create latch losing its floor, Part 78). And 2 of Create's inventory behaviours take an
+  inventory only where `Level.getBlockEntity` finds a block entity (the threshold switch's
+  `isSuitableInventory`, the packager's); 32 methods in 30 classes of 15 jars take a block entity
+  as a `Container`. Vanilla blocks had none: the threshold switch read -1 by any chest.
+  - client: `GameLevel::native_spawn_item_entity_here(stack, pos, motion, delay)`: the item entity
+    gets its ID at once from the game's counter (`GameLevel` now holds it) and joins with it when the
+    level operation ends (the spill's spawns carry an optional ID; `Game::spawn_item_as`).
+    `native_block_loot_here(pos, state, tool)`: `Block.getDrops` rolled in the level (its random
+    sequence, what the block entity copies into the stacks; `GameLevel::roll_block_drops`, which
+    `drop_resources_now` now shares). `native_pop_experience_here(pos, amount)`. The level has the
+    game's item component helpers too (`native_component`, `native_set_component`,
+    `native_vanilla_components`... as on `Game`, one implementation over the item registry), so a
+    stack crosses with its mod data. API @API:level_item_entities@.
+  - translator: the bundles' level host answers `block_drops`, `spawn_item_entity`,
+    `spawn_stack_entity` and `pop_experience`; its stacks cross by the same helpers as the game's
+    hosts (`stack_helpers_on`, parametrized by host type and receiver).
+  - compat `item_wrappers`: `Level.getBlockEntity` at a vanilla container the game holds (chest,
+    trapped and copper chests, barrel, dispenser, dropper, hopper, crafter, furnaces, brewing stand,
+    shulker boxes, chiseled bookshelf, jukebox) gives its block entity, of vanilla's class, one object
+    per position and block, with its type, position, state and level; its `Container` methods (by
+    the interface or by its own class) are the container's through the host. 1.21.1's container
+    block entity classes are `Container`s, the furnaces', brewing stand's and shulker box's
+    `WorldlyContainer`s (a mod's subclass of one with them). `glue::block_entity_at` gives it for
+    a `minecraft:` block.
+  - Tests: compat `item_wrappers::tests::a_vanilla_containers_block_entity_is_its_container` (a
+    chest's block entity is vanilla's class and the same object again, with the chest's position
+    and state; it is a `Container` of 27 slots holding the chest's iron, by the interface and by
+    its own class, and not a `WorldlyContainer`; a furnace's is one, of 3 slots; stone and a chest
+    without a container have none). The gameplay run now includes `spill::tests` and
+    `native_components`. Compat 517, translator 19, gameplay 72.
+  - In game (`p79survey.sh`): four stockpile switches, each with a container east of it and a lamp
+    west. A chest of 27 stacks of cobblestone, one of 14 stacks, a barrel of 16 logs and an empty
+    chest read 1728, 896, 16 and 0 items and show levels 5, 3, 1 and 0 (before: -1 by any chest).
+    The two over the switch's default 128 items light their lamps; the two under 64 stay dark.
+    Emptying the full chest (`/data merge`, `Items:[]`) takes its switch to 0 and its lamp off. A
+    smart observer on a chest of logs is powered and lights its lamp. A powered latch on a stone
+    over air: the stone goes, the latch is removed and drops one `create:powered_latch` item entity
+    by its position (before: nothing). Unmapped: the 16 client-side GL and texture calls of the
+    earlier surveys (LWJGL's shader compile, `DynamicTexture`), none from a level hook. No throws.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
