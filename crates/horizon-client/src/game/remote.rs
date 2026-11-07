@@ -5642,6 +5642,7 @@ impl Game<'_> {
         };
         let was_gliding = player.fall_flying;
         let dead = self.screen == Screen::Dead;
+        let mut touched = Vec::new();
         // LivingEntity.isImmobile: a sleeper lies still in the bed.
         let sleeping = self.sleeping;
         if let Some(head) = sleeping {
@@ -5656,15 +5657,20 @@ impl Game<'_> {
         } else if !dead && !riding {
             player.client_side = true;
             player.velocity = player.velocity.add_vector(pushed);
-            MotionWorld {
-                entities: &entity_collisions,
-                player,
-                scene: &mut self.world,
-                assets: &self.pack.assets,
-                collision_binding: self.collision,
-                resources: self.motion,
-            }
-            .controlled_simulation_tick_with_sprint_window(keys, sprint_window)?;
+            // The mods' blocks the move touches are told to the client's mods once it is over.
+            let (moved, contacts) = horizon_client::block_contact::on_client(|| {
+                MotionWorld {
+                    entities: &entity_collisions,
+                    player: &mut *player,
+                    scene: &mut self.world,
+                    assets: &self.pack.assets,
+                    collision_binding: self.collision,
+                    resources: self.motion,
+                }
+                .controlled_simulation_tick_with_sprint_window(keys, sprint_window)
+            });
+            moved?;
+            touched = contacts;
         } else {
             // LivingEntity.baseTick counts hurtTime down for a dead or riding
             // player too (controlled_simulation_tick does it otherwise): left
@@ -5779,6 +5785,9 @@ impl Game<'_> {
                 _ => {}
             }
         }
+        // Block.stepOn and entityInside on the client's own level (Create's belt takes its player
+        // on there, and carries them).
+        self.native_client_block_contacts(touched);
         // A stand riding the player follows this move (tickPassenger).
         self.seat_own_stands();
         // The server owns health and hunger.

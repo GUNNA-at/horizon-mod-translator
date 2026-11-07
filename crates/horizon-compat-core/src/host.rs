@@ -1132,6 +1132,18 @@ pub trait Host {
     fn mark_player_motion(&mut self, _uuid: u128) -> bool {
         false
     }
+    /// Moves a client's own player by `movement` as their own move does
+    /// (`LocalPlayer.move(MoverType.SELF, movement)`: blocks stop them, they step up), as a client
+    /// mod's code moves them (Create's belts carry the player on their client). False where there
+    /// is no such player.
+    fn move_client_player(&mut self, _movement: [f64; 3]) -> bool {
+        false
+    }
+    /// A client's own player's walking input this tick (`LocalPlayer.xxa`, `zza`: sideways and
+    /// forward, -1 to 1, slowed by sneaking or by an item in use). None where there is none.
+    fn client_player_input(&self) -> Option<[f32; 2]> {
+        None
+    }
     /// The text on the clipboard (`KeyboardHandler.getClipboard`), empty when none: a client's.
     fn clipboard(&self) -> String {
         String::new()
@@ -1657,6 +1669,8 @@ pub struct MemoryHost {
     pub client: bool,
     /// On a client, the local player's entity id ([`Host::client_player_id`]).
     pub client_player_id: Option<i32>,
+    /// On a client, its own player's walking input ([`Host::client_player_input`]).
+    pub client_input: [f32; 2],
     /// Sounds played, in order.
     pub sounds: Vec<Sound>,
     /// Instances' sounds started ([`Host::start_sound`]), in order: their ids are their places
@@ -2309,6 +2323,22 @@ impl Host for MemoryHost {
             self.marked_players.push(uuid);
         }
         known
+    }
+    // A client's own player stands at `place`; no blocks stop a move here.
+    fn move_client_player(&mut self, movement: [f64; 3]) -> bool {
+        if !self.client {
+            return false;
+        }
+        let Some((at, ..)) = self.place.as_mut() else {
+            return false;
+        };
+        for (a, m) in at.iter_mut().zip(movement) {
+            *a += m;
+        }
+        true
+    }
+    fn client_player_input(&self) -> Option<[f32; 2]> {
+        self.client.then_some(self.client_input)
     }
     fn set_item_entity(&mut self, id: u32, item: &str, count: u32) -> bool {
         let Some(i) = self.item_entities.iter().position(|e| e.id == id) else { return false };

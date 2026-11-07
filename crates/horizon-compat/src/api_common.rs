@@ -2460,6 +2460,33 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         {
             V::Void
         }
+        // A client moves its own player: a mod's move of them (Create's belt carries them on their
+        // client) is a step of theirs, blocks stopping it.
+        (o, "move")
+            if is_player(o)
+                && rt.class_of(a(0)) == LOCAL_PLAYER
+                && desc
+                    == "(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V" =>
+        {
+            let movement = ["x", "y", "z"].map(|k| rt.get_field(a(2), k).d());
+            rt.host_call(|h| h.move_client_player(movement));
+            V::Void
+        }
+        // A client's own player walks by its keys (`LocalPlayer.aiStep` sets `xxa` and `zza`): a
+        // belt holds to its middle a player who doesn't walk.
+        (o, n @ ("$xxa" | "$yya" | "$zza"))
+            if is_player(o) && rt.class_of(a(0)) == LOCAL_PLAYER =>
+        {
+            let input = rt
+                .host()
+                .and_then(|h| h.client_player_input())
+                .unwrap_or_default();
+            V::F(match n {
+                "$xxa" => input[0],
+                "$zza" => input[1],
+                _ => 0.0,
+            })
+        }
         // Where a player stands is their physics' (`setOnGround`); a walking player's inputs reach a
         // server only while riding (`$xxa`, `$zza`); they step as `STEP_HEIGHT`'s default says, carry
         // no passengers here, and a piston (or a belt) pushes them.

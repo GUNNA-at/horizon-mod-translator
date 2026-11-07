@@ -3695,6 +3695,41 @@ impl Game<'_> {
     ) {
         let _ = (dimension, entity, kind, state, position, distance, damage);
     }
+    /// `Block.stepOn` on the window's client's level, for the mod block its
+    /// own player stands on as they move (vanilla's `Entity.move` calls it on
+    /// a client too): told once the move is over, with the game at hand.
+    /// Client-side; the server's is `native_block_step_on`. API
+    /// @API:client_block_contacts@.
+    pub(super) fn native_client_block_step_on(&mut self, state: BlockStateId, position: [i32; 3]) {
+        let _ = (state, position);
+    }
+    /// `BlockBehaviour.entityInside` on the window's client's level, for each
+    /// mod block its own player's box is in along their move, standing still
+    /// included (Create's belt takes the player on there, and carries them):
+    /// told once the move is over. Client-side; the server's is
+    /// `native_block_entity_inside`. API @API:client_block_contacts@.
+    pub(super) fn native_client_block_entity_inside(
+        &mut self,
+        state: BlockStateId,
+        position: [i32; 3],
+    ) {
+        let _ = (state, position);
+    }
+    /// The mods' blocks the window's own player touched in a move on its
+    /// client's level, told to the client's mods in the order met.
+    pub(super) fn native_client_block_contacts(
+        &mut self,
+        touched: Vec<horizon_client::block_contact::ClientContact>,
+    ) {
+        for c in touched {
+            let position = [c.position.x, c.position.y, c.position.z];
+            if c.inside {
+                self.native_client_block_entity_inside(c.state, position);
+            } else {
+                self.native_client_block_step_on(c.state, position);
+            }
+        }
+    }
 }
 
 /// The mob a hit's hooks run for, as the game holds it then

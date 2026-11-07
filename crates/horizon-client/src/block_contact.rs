@@ -2,7 +2,7 @@
 use horizon_core::position::BlockPos;
 use horizon_world::registry::BlockStateId;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     sync::{
         OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -38,6 +38,31 @@ pub fn set_mod_blocks(any: bool) {
 }
 thread_local! {
     static LEVEL: Cell<Option<&'static str>> = const { Cell::new(None) };
+    static CLIENT: RefCell<Option<Vec<ClientContact>>> = const { RefCell::new(None) };
+}
+
+/// A mod's block the window's own player touched on its client's level: `Block.stepOn` (the block
+/// under them) or `BlockBehaviour.entityInside` (a block their box is in), which vanilla's
+/// `Entity.move` calls on a client too (Create's belts carry the player there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientContact {
+    pub inside: bool,
+    pub state: BlockStateId,
+    pub position: BlockPos,
+}
+
+/// Runs `f`, the window's own player's move on its client's level, and gives the mods' blocks it
+/// touched, in order: the window tells its mods once the move is over, with the game at hand.
+pub fn on_client<R>(f: impl FnOnce() -> R) -> (R, Vec<ClientContact>) {
+    struct Restore(Option<Vec<ClientContact>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CLIENT.set(self.0.take());
+        }
+    }
+    let _restore = Restore(CLIENT.replace(Some(Vec::new())));
+    let result = f();
+    (result, CLIENT.take().unwrap_or_default())
 }
 
 /// Scope authority to this thread and restore it even on an error or panic.
@@ -68,6 +93,22 @@ fn dispatch(event: Event<'_>, damage: &mut f32) {
         Event::StepOn(c) | Event::Inside(c) | Event::FallOn(c, _) => c,
     };
     if contact.block.starts_with("minecraft:") {
+        return;
+    }
+    // No server level: the window's own player on its client's level, kept for after the move
+    // (`on_client`). A fall's damage is the server's.
+    if LEVEL.get().is_none() {
+        if contact.kind == "minecraft:player" && !matches!(event, Event::FallOn(..)) {
+            CLIENT.with_borrow_mut(|touched| {
+                if let Some(touched) = touched {
+                    touched.push(ClientContact {
+                        inside: matches!(event, Event::Inside(_)),
+                        state: contact.state,
+                        position: contact.position,
+                    });
+                }
+            });
+        }
         return;
     }
     if let Some(dimension) = LEVEL.get()
@@ -197,5 +238,37 @@ mod tests {
         let _ =
             std::panic::catch_unwind(|| in_level(Some("minecraft:the_nether"), || panic!("test")));
         assert_eq!(fall(c, 12.0, 10.0), 10.0);
+    }
+    /// The window's player's touches of mods' blocks wait for its move to end; another entity's,
+    /// a vanilla block's, a fall's and any outside the move are not kept. (A server's level tells
+    /// its hook at once: the test above.)
+    #[test]
+    fn the_windows_player_touches_wait_for_its_move() {
+        let touch = |entity, kind, block, x| Contact {
+            entity,
+            kind,
+            block,
+            state: BlockStateId(5),
+            position: BlockPos::new(x, 64, 0),
+        };
+        let player = |block, x| touch(1, "minecraft:player", block, x);
+        let ((), outside) = on_client(|| {});
+        emit(Event::Inside(player("create:belt", 0)));
+        let (moved, touched) = on_client(|| {
+            emit(Event::StepOn(player("create:belt", 1)));
+            emit(Event::Inside(player("create:belt", 2)));
+            emit(Event::Inside(player("minecraft:cactus", 3)));
+            emit(Event::Inside(touch(9, "minecraft:item", "create:belt", 4)));
+            fall(player("create:belt", 5), 3.0, 1.0)
+        });
+        let at = |inside, x| ClientContact {
+            inside,
+            state: BlockStateId(5),
+            position: BlockPos::new(x, 64, 0),
+        };
+        assert_eq!((outside, moved), (Vec::new(), 1.0));
+        assert_eq!(touched, vec![at(false, 1), at(true, 2)]);
+        let ((), after) = on_client(|| {});
+        assert!(after.is_empty());
     }
 }

@@ -100,9 +100,14 @@ fn contact(
     })
 }
 
-/// The object of the entity a contact names: the acting player's (the hook runs as them), else the
-/// game's entity of that id (an item entity's own object for an item).
+/// The object of the entity a contact names: a client's own player's, the acting player's (the hook
+/// runs as them), else the game's entity of that id (an item entity's own object for an item).
 fn object(rt: &mut Rt, id: i32, kind: &str) -> V {
+    // A client's own player: the one object its runtime keeps for them (a belt's passengers are
+    // keyed by it).
+    if kind == "minecraft:player" && rt.host().and_then(|h| h.client_player_id()) == Some(id) {
+        return crate::network::local_player(rt);
+    }
     if kind == "minecraft:player" {
         let Some(uuid) = rt.host().and_then(|h| h.player_id()) else {
             return V::NULL;
@@ -130,14 +135,22 @@ mod tests {
     /// A pool of dye, a block with no block entity: an item in it is dyed (its stack becomes red
     /// wool).
     const DYE: &str = "test/DyeBlock";
+    /// A belt as Create's carries what is in it, cut down: a quarter block along it, and an eighth
+    /// toward its middle unless the entity walks (`xxa`, `zza`), by the entity's own `move`.
+    const BELT: &str = "test/BeltBlock";
     const ENTITY: &str = "net/minecraft/world/entity/Entity";
     const LIVING: &str = "net/minecraft/world/entity/LivingEntity";
 
     fn overrides(class: &str, key: &str) -> bool {
         matches!(
             (class, key),
-            (SAW, ENTITY_INSIDE) | (PLATE, STEP_ON) | (DYE, ENTITY_INSIDE)
+            (SAW, ENTITY_INSIDE) | (PLATE, STEP_ON) | (DYE, ENTITY_INSIDE) | (BELT, ENTITY_INSIDE)
         )
+    }
+
+    thread_local! {
+        /// The entity the belt last carried.
+        static CARRIED: std::cell::Cell<V> = const { std::cell::Cell::new(V::NULL) };
     }
 
     fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> V {
@@ -233,6 +246,21 @@ mod tests {
                     );
                 }
             }
+            (BELT, _) => {
+                let e = args[4];
+                let walks = ["$xxa", "$zza"]
+                    .into_iter()
+                    .any(|input| call(rt, LIVING, input, "()F", &[e]).f() != 0.0);
+                let along = crate::api_common::vec3(rt, if walks { 0.0 } else { 0.125 }, 0.0, 0.25);
+                call(
+                    rt,
+                    ENTITY,
+                    "move",
+                    "(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V",
+                    &[e, V::NULL, along],
+                );
+                CARRIED.set(e);
+            }
             _ => unreachable!(),
         }
         V::Void
@@ -246,6 +274,7 @@ mod tests {
             (SAW, "test:saw"),
             (PLATE, "test:hot_plate"),
             (DYE, "test:dye"),
+            (BELT, "test:belt"),
         ] {
             rt.supers
                 .insert(class, "net/minecraft/world/level/block/Block");
@@ -424,6 +453,57 @@ mod tests {
                 (12, "minecraft:white_wool", 2)
             ]
         );
+    }
+
+    /// On a client, its own player in a mod's block is its `LocalPlayer`, the one object the
+    /// client's runtime keeps for them (a belt keys its passengers by it), and a belt there carries
+    /// them by their own move, held to its middle unless they walk. A server's player is moved by
+    /// their client: the server's belt doesn't move them.
+    #[test]
+    fn a_clients_belt_carries_its_own_player() {
+        crate::install();
+        let mut rt = runtime();
+        let mut client = MemoryHost {
+            client: true,
+            client_player_id: Some(57),
+            place: Some(([0.25, 64.8125, 0.5], 0.0, 0.0)),
+            ..MemoryHost::default()
+        };
+        let at = |host: &MemoryHost| host.place.map(|p| p.0);
+        assert!(entity_inside(
+            &mut rt,
+            &mut client,
+            [0, 64, 0],
+            "test:belt",
+            57,
+            "minecraft:player"
+        ));
+        assert_eq!(at(&client), Some([0.375, 64.8125, 0.75]));
+        let own = crate::network::local_player(&mut rt);
+        assert!(CARRIED.get() == own, "the client's own player object");
+        // Walking: not pulled to the middle.
+        client.client_input = [0.0, 0.98];
+        assert!(entity_inside(
+            &mut rt,
+            &mut client,
+            [0, 64, 0],
+            "test:belt",
+            57,
+            "minecraft:player"
+        ));
+        assert_eq!(at(&client), Some([0.375, 64.8125, 1.0]));
+        assert!(CARRIED.get() == own);
+        let mut rt = runtime();
+        let mut server = level();
+        assert!(entity_inside(
+            &mut rt,
+            &mut server,
+            [2, 64, 0],
+            "test:belt",
+            STEVE_ENTITY,
+            "minecraft:player"
+        ));
+        assert_eq!(at(&server), Some([2.5, 64.0, 0.5]));
     }
 
     #[test]

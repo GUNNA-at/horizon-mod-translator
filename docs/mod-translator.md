@@ -6744,6 +6744,37 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     hears the player in it and moves them there), which the window's game doesn't tell its mods
     yet: the next part. `p94scene.sh` on this build still brews awkward and swiftness potions
     (1000 mB each by t+120).
+- [x] 2026-11-07 Part 96: Create's belts carry the player (a player standing on a running belt
+  stayed put: Create carries the player on their own client, where the belt hears them in it
+  through `entityInside` and moves them with `LocalPlayer.move`, and the window's game told its mods
+  of no block its player touched: the server's contacts were the only ones).
+  - game: the window's player's move on its client's level gathers the mods' blocks it touches
+    (`block_contact::on_client`: `stepOn` for the block under them, `entityInside` for each block
+    their box is in, standing still included; a fall's damage stays the server's), told once the
+    move is over through two client hooks, `native_client_block_step_on` and
+    `native_client_block_entity_inside`, with the game at hand (fragment
+    `client_block_contacts.json`). `native_move_client_player(movement)` moves the window's player
+    as their own move does (`LocalPlayer.move(SELF, movement)`: collisions, step-up, auto-jump), and
+    their client tells the server where that took them; `native_client_player_input()` is their
+    walking input (`xxa`, `zza`).
+  - translator: bundles answer both hooks on the client's runtime, the player being its
+    `LocalPlayer`; the client's host moves its player and reads their input.
+  - compat: a contact names a client's own player by its `LocalPlayer`, the one object the client's
+    runtime keeps for them (a belt keys its passengers by it); `LocalPlayer.move(MoverType, Vec3)`
+    moves them through the host, and their `xxa` and `zza` are their keys' (a belt holds a player
+    who doesn't walk to its middle).
+  - Tests: compat 580 (1 new: a client's belt moves its own player by its speed, toward its middle
+    while they don't walk and only along it while they do, with the one `LocalPlayer` it keys them
+    by; a server's player is not moved this way), translator 20, client lib (1 new: the window's
+    player's contacts with mod blocks wait for its move, a fall's, a vanilla block's and another
+    entity's not kept).
+  - In game (`p96scene.sh`, the same belt at 32 rpm): the player, in survival, put on the belt's
+    start rides it as the pig does, z 8.50, 10.90, 13.30, 14.79 at 20-tick steps (0.12 a tick, the
+    belt's speed). At the far end the pig that dropped off there holds them, as Create holds a
+    passenger with an entity half a block ahead (`transportEntity` below 0.5 blocks a tick), and
+    they are on the floor at 15.40 by t+100. The pig rides as in Part 95 (z 9.04, 11.48, 13.88, off
+    at 15.63); the fan still blows the player (x -32.37 to -28.53 in 60 ticks). Unmapped:
+    `ServerPlayer.getAdvancements` only.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

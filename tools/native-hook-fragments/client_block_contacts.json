@@ -1,0 +1,19 @@
+{
+  "hooks": [
+    {
+      "name": "client_block_step_on",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_block_step_on",
+      "side": "client"
+    },
+    {
+      "name": "client_block_entity_inside",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_block_entity_inside",
+      "side": "client"
+    }
+  ],
+  "rust_summary": "the window's own player's contacts with mod blocks on its client's level (`native_client_block_step_on`, `native_client_block_entity_inside`), and their move and walking input for a client mod (`native_move_client_player`, `native_client_player_input`).",
+  "doc_summary": "`native_client_block_step_on(state, position)` and `native_client_block_entity_inside(state, position)` fire on the window's client when its own player stands on a mod block (`Block.stepOn`) or has their box in one along their move, standing still included (`BlockBehaviour.entityInside`), as vanilla's `Entity.move` calls both on a client too: once the move is over, with the game at hand, in the order met. A fall's damage stays the server's (`native_block_fall_on`), and a server's players and mobs are its own hooks'. `native_move_client_player(movement)` moves the window's player by `movement` as their own move does (`LocalPlayer.move(MoverType.SELF, movement)`: blocks stop them, they step up), and their client tells the server where that took them; false outside the window, with no player, a movement that isn't finite, or a player riding, asleep or dead. `native_client_player_input()` is their walking input this tick (`LocalPlayer.xxa`, `zza`). Create's belt takes its player on and carries them this way. Bundles need \"hooks\": @API:client_block_contacts@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mobs.rs"
+  ]
+}

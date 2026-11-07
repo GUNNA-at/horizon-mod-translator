@@ -342,6 +342,40 @@ impl Game<'_> {
         p.velocity = Vec3::new(motion[0], motion[1], motion[2]);
         true
     }
+    /// Moves the window's own player by `movement` as their own move does
+    /// (`LocalPlayer.move(MoverType.SELF, movement)`): blocks stop them and
+    /// they step up as high as they may, as a client mod moves them (Create's
+    /// belts carry the player on their client); their client then tells the
+    /// server where that took them. False outside the window's game, with no
+    /// player, a movement that isn't finite, or a player riding, asleep or
+    /// dead. API @API:client_block_contacts@.
+    pub(super) fn native_move_client_player(&mut self, movement: [f64; 3]) -> bool {
+        let still =
+            self.riding.is_some() || self.sleeping.is_some() || self.screen == super::Screen::Dead;
+        if !self.native_window() || !finite(movement) || still {
+            return false;
+        }
+        let entities = self.player_entity_collisions();
+        let Some(player) = self.player.as_mut() else {
+            return false;
+        };
+        horizon_client::motion::MotionWorld {
+            entities: &entities,
+            player,
+            scene: &mut self.world,
+            assets: &self.pack.assets,
+            collision_binding: self.collision,
+            resources: self.motion,
+        }
+        .move_self(Vec3::new(movement[0], movement[1], movement[2]))
+        .is_ok()
+    }
+    /// The window's own player's walking input this tick (`LocalPlayer.xxa`
+    /// and `zza`: sideways and forward, -1 to 1, slowed by sneaking or by an
+    /// item in use): None with no player. API @API:client_block_contacts@.
+    pub(super) fn native_client_player_input(&self) -> Option<[f32; 2]> {
+        self.player.as_ref().map(|p| p.applied_input)
+    }
     /// Sets mob `id`'s health, cut to its maximum: false for no such mob,
     /// another dimension or a health that isn't above 0 (`native_kill_mob`
     /// kills). A dying mob's too, as `LivingEntity.setHealth` sets it: one a
