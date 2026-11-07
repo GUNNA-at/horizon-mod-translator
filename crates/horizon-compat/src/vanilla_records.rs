@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 633] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 629] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1280,9 +1280,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 633] = [
     ("net/minecraft/network/chat/ClickEvent", "i(Lnet/minecraft/network/chat/ClickEvent$Action;Ljava/lang/String;)V=action,value|ggetAction()Lnet/minecraft/network/chat/ClickEvent$Action;=action|ggetValue()Ljava/lang/String;=value|e=action,value"),
     ("net/minecraft/network/chat/Component$SerializerAdapter", "i(Lnet/minecraft/core/HolderLookup$Provider;)V=registries|o"),
     ("net/minecraft/network/chat/FilterMask", "i(Ljava/util/BitSet;Lnet/minecraft/network/chat/FilterMask$Type;)V=mask,type|gtype()Lnet/minecraft/network/chat/FilterMask$Type;=type|gmask()Ljava/util/BitSet;=mask|e=mask,type"),
-    ("net/minecraft/network/chat/HoverEvent", "i(Lnet/minecraft/network/chat/HoverEvent$TypedHoverEvent;)V=event|e=event"),
-    ("net/minecraft/network/chat/HoverEvent$EntityTooltipInfo", "i(Lnet/minecraft/world/entity/EntityType;Ljava/util/UUID;Ljava/util/Optional;)V=type,id,name"),
-    ("net/minecraft/network/chat/HoverEvent$ItemStackInfo", "i(Lnet/minecraft/core/Holder;ILnet/minecraft/core/component/DataComponentPatch;)V=item,count,components"),
     ("net/minecraft/network/chat/contents/KeybindContents", "i(Ljava/lang/String;)V=name|ggetName()Ljava/lang/String;=name"),
     ("net/minecraft/network/chat/contents/NbtContents", "i(Ljava/lang/String;Lnet/minecraft/commands/arguments/NbtPathArgument$NbtPath;ZLjava/util/Optional;Lnet/minecraft/network/chat/contents/DataSource;)V=nbtPathPattern,compiledNbtPath,interpreting,separator,dataSource|ggetNbtPath()Ljava/lang/String;=nbtPathPattern|gisInterpreting()Z=interpreting|ggetSeparator()Ljava/util/Optional;=separator|ggetDataSource()Lnet/minecraft/network/chat/contents/DataSource;=dataSource"),
     ("net/minecraft/network/chat/numbers/FixedFormat", "i(Lnet/minecraft/network/chat/Component;)V=value|o"),
@@ -1441,7 +1438,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 633] = [
     ("net/minecraft/world/entity/ItemBasedSteering", "i(Lnet/minecraft/network/syncher/SynchedEntityData;Lnet/minecraft/network/syncher/EntityDataAccessor;Lnet/minecraft/network/syncher/EntityDataAccessor;)V=entityData,boostTimeAccessor,hasSaddleAccessor|o"),
     ("net/minecraft/world/entity/Leashable$LeashData", "i(Lcom/mojang/datafixers/util/Either;)V=delayedLeashInfo|i(Lnet/minecraft/world/entity/Entity;)V=leashHolder|i(I)V=delayedLeashHolderId|o"),
     ("net/minecraft/world/entity/ai/Brain$MemoryValue", "i(Lnet/minecraft/world/entity/ai/memory/MemoryModuleType;Ljava/util/Optional;)V=type,value|o"),
-    ("net/minecraft/world/entity/ai/attributes/AttributeSupplier", "i(Ljava/util/Map;)V=instances|o"),
     ("net/minecraft/world/entity/ai/behavior/EntityTracker", "i(Lnet/minecraft/world/entity/Entity;Z)V=entity,trackEyeHeight|ggetEntity()Lnet/minecraft/world/entity/Entity;=entity|o"),
     ("net/minecraft/world/entity/ai/behavior/PrepareRamNearestTarget$RamCandidate", "i(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/LivingEntity;)V=startPosition,targetPosition,target|ggetStartPosition()Lnet/minecraft/core/BlockPos;=startPosition|ggetTargetPosition()Lnet/minecraft/core/BlockPos;=targetPosition|ggetTarget()Lnet/minecraft/world/entity/LivingEntity;=target|o"),
     ("net/minecraft/world/entity/ai/behavior/ShufflingList$WeightedEntry", "i(Ljava/lang/Object;I)V=data,weight|ggetRandWeight()D=randWeight|ggetData()Ljava/lang/Object;=data|ggetWeight()I=weight|o"),

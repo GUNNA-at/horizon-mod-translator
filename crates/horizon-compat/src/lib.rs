@@ -9,6 +9,7 @@ pub mod annotations;
 pub mod api;
 pub mod api_common;
 pub mod attachments;
+pub mod attribute_suppliers;
 pub mod attributes;
 pub mod baked_models;
 pub mod blocks;

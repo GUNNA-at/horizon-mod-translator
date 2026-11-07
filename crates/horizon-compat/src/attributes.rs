@@ -63,6 +63,41 @@ const VANILLA: [(&str, &str, f64, f64, f64); 31] = [
     ("WATER_MOVEMENT_EFFICIENCY", "generic.water_movement_efficiency", 0.0, 0.0, 1.0),
 ];
 
+/// NeoForge's own attributes (`NeoForgeMod.SWIM_SPEED`...): the field, the id it registers under,
+/// the attribute's class, description, default, minimum and maximum (a `BooleanAttribute` is off
+/// or on).
+const NEOFORGE: [(&str, &str, &str, &str, f64, f64, f64); 3] = [
+    (
+        "SWIM_SPEED",
+        "neoforge:swim_speed",
+        "net/neoforged/neoforge/common/PercentageAttribute",
+        "neoforge.swim_speed",
+        1.0,
+        0.0,
+        1024.0,
+    ),
+    (
+        "NAMETAG_DISTANCE",
+        "neoforge:nametag_distance",
+        RANGED,
+        "neoforge.name_tag_distance",
+        64.0,
+        0.0,
+        64.0,
+    ),
+    (
+        "CREATIVE_FLIGHT",
+        "neoforge:creative_flight",
+        BOOLEAN,
+        "neoforge.creative_flight",
+        0.0,
+        0.0,
+        1.0,
+    ),
+];
+const BOOLEAN: &str = "net/neoforged/neoforge/common/BooleanAttribute";
+const NEOFORGE_MOD: &str = "net/neoforged/neoforge/common/NeoForgeMod";
+
 /// 1.21.1's `Enchantments` fields: each the key of the enchantment named by its lowercase name
 /// (`SILK_TOUCH` is `minecraft:silk_touch`), as its initialiser makes them.
 const ENCHANTMENT_FIELDS: [&str; 42] = [
@@ -76,12 +111,16 @@ const ENCHANTMENT_FIELDS: [&str; 42] = [
 /// The holder of vanilla's attribute `id` (`minecraft:generic.attack_damage`): one per attribute.
 pub(crate) fn attribute(rt: &mut Rt, id: &str) -> V {
     rt.intern(format!("attribute-holder/{id}"), |rt| {
-        let value = rt.new_object(RANGED);
+        let neoforge = NEOFORGE.iter().find(|r| r.1 == id);
+        let value = rt.new_object(neoforge.map_or(RANGED, |r| r.2));
         let s = rt.string(id);
         rt.put_field(value, "$id", s);
         let path = id.strip_prefix("minecraft:").unwrap_or(id);
         if let Some(&(_, _, default, min, max)) = VANILLA.iter().find(|r| r.1 == path) {
             let description = rt.string(&format!("attribute.name.{path}"));
+            set_range(rt, value, description, default, min, max);
+        } else if let Some(&(_, _, _, description, default, min, max)) = neoforge {
+            let description = rt.string(description);
             set_range(rt, value, description, default, min, max);
         }
         crate::neo::registry_holder(rt, "attribute", id, value)
@@ -126,6 +165,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             _ => None,
         },
         MODIFIERS if field == "EMPTY" => Some(empty(rt)),
+        NEOFORGE_MOD => {
+            let row = NEOFORGE.iter().find(|r| r.0 == field)?;
+            Some(attribute(rt, row.1))
+        }
         _ => None,
     }
 }
@@ -396,20 +439,22 @@ pub(crate) fn entity_of(rt: &Rt, e: V) -> Result<Option<i32>, ()> {
     }
 }
 
-/// The game's id of the attribute `holder` holds: vanilla's 1.21.1 ids (`minecraft:generic.max_health`)
-/// are the game's without their group (`minecraft:max_health`).
-fn game_id(rt: &mut Rt, holder: V) -> Option<String> {
+/// The registry id of the attribute `holder` holds (`minecraft:generic.max_health`, a mod's own).
+pub(crate) fn registry_id(rt: &mut Rt, holder: V) -> Option<String> {
     if holder.r() == 0 {
         return None;
     }
-    let own = rt.str_of(rt.get_field(holder, "$id")).map(str::to_owned);
-    let id = match own {
-        Some(id) => id,
-        None => {
-            let value = crate::api::call(rt, HOLDER_VALUE, &[holder]);
-            rt.str_of(rt.get_field(value, "$id"))?.to_owned()
-        }
-    };
+    if let Some(id) = rt.str_of(rt.get_field(holder, "$id")) {
+        return Some(id.to_owned());
+    }
+    let value = crate::api::call(rt, HOLDER_VALUE, &[holder]);
+    rt.str_of(rt.get_field(value, "$id")).map(str::to_owned)
+}
+
+/// The game's id of the attribute `holder` holds: vanilla's 1.21.1 ids (`minecraft:generic.max_health`)
+/// are the game's without their group (`minecraft:max_health`).
+fn game_id(rt: &mut Rt, holder: V) -> Option<String> {
+    let id = registry_id(rt, holder)?;
     let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", &id));
     let path = match namespace {
         "minecraft" => ["generic.", "player.", "zombie."].iter().find_map(|g| path.strip_prefix(g)).unwrap_or(path),
@@ -506,9 +551,31 @@ fn fake_change(rt: &mut Rt, e: V, id: &str, change: &AttributeChange) -> bool {
     made
 }
 
+/// `Attribute.sanitizeValue` of the attribute `holder` holds: a ranged one's value in its range
+/// (its minimum for NaN, as `Mth.clamp` keeps it), a boolean one's 1 when above 0 (else 0), any
+/// other's as it is.
+pub(crate) fn sanitize(rt: &mut Rt, holder: V, v: f64) -> f64 {
+    let value = if holder.r() == 0 {
+        V::NULL
+    } else {
+        crate::api::call(rt, HOLDER_VALUE, &[holder])
+    };
+    if value.r() == 0 {
+        return v;
+    }
+    if rt.class_of(value) == BOOLEAN {
+        return if v > 0.0 { 1.0 } else { 0.0 };
+    }
+    match (rt.get_field(value, "$min"), rt.get_field(value, "$max")) {
+        (V::D(min), V::D(_)) if v.is_nan() || v < min => min,
+        (V::D(_), V::D(max)) => v.min(max),
+        _ => v,
+    }
+}
+
 /// The default of the attribute `holder` holds (`Attribute.getDefaultValue`), for a read of an
 /// attribute the entity doesn't have (vanilla throws there).
-fn default(rt: &mut Rt, holder: V) -> f64 {
+pub(crate) fn default(rt: &mut Rt, holder: V) -> f64 {
     if holder.r() == 0 {
         return 0.0;
     }

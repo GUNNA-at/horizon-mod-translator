@@ -4031,6 +4031,108 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
             V::Void
         }
+        // `new HoverEvent(action, value)`: what a style shows on hover (kept with it, as its events
+        // are); `getValue(action)` is the value when the event is of that action, else null.
+        (HOVER_EVENT, "<init>")
+            if desc == "(Lnet/minecraft/network/chat/HoverEvent$Action;Ljava/lang/Object;)V" =>
+        {
+            rt.put_field(a(0), "$action", a(1));
+            rt.put_field(a(0), "$value", a(2));
+            V::Void
+        }
+        (HOVER_EVENT, "getAction") => rt.get_field(a(0), "$action"),
+        (HOVER_EVENT, "getValue") => {
+            if rt.get_field(a(0), "$action") == a(1) {
+                rt.get_field(a(0), "$value")
+            } else {
+                V::NULL
+            }
+        }
+        // Equal for the same action and an equal value, hashed as its `TypedHoverEvent` record.
+        (HOVER_EVENT, "equals") => {
+            let other = a(1);
+            let same = a(0) == other
+                || (other.r() != 0
+                    && rt.class_of(other) == HOVER_EVENT
+                    && rt.get_field(a(0), "$action") == rt.get_field(other, "$action")
+                    && {
+                        let (x, y) = (rt.get_field(a(0), "$value"), rt.get_field(other, "$value"));
+                        x == y || (x.r() != 0 && crate::jutil::equals(rt, x, y))
+                    });
+            V::I(i32::from(same))
+        }
+        (HOVER_EVENT, "hashCode") => {
+            let (action, value) = (rt.get_field(a(0), "$action"), rt.get_field(a(0), "$value"));
+            let action = crate::jutil::hash(rt, action);
+            let value = if value.r() == 0 {
+                0
+            } else {
+                crate::jutil::hash(rt, value)
+            };
+            V::I(action.wrapping_mul(31).wrapping_add(value))
+        }
+        // Vanilla's three actions, each allowed from a server.
+        (HOVER_ACTION, "getSerializedName") => rt.get_field(a(0), "$name"),
+        (HOVER_ACTION, "isAllowedFromServer") => V::I(1),
+        (HOVER_ACTION, "cast") => a(1),
+        (HOVER_ACTION, "toString") => {
+            let named = format!(
+                "<action {}>",
+                rt.str_of(rt.get_field(a(0), "$name")).unwrap_or("")
+            );
+            rt.string(&named)
+        }
+        // `new ItemStackInfo(stack)`: the stack as it was then (its item, count and components),
+        // which `getItemStack()` gives, the same object each time.
+        (ITEM_STACK_INFO, "<init>") if desc == "(Lnet/minecraft/world/item/ItemStack;)V" => {
+            let copy = crate::api::call(
+                rt,
+                "net/minecraft/world/item/ItemStack.copy.()Lnet/minecraft/world/item/ItemStack;",
+                &[a(1)],
+            );
+            rt.put_field(a(0), "$stack", copy);
+            V::Void
+        }
+        (ITEM_STACK_INFO, "getItemStack") => rt.get_field(a(0), "$stack"),
+        // `new EntityTooltipInfo(type, id, name)`: its public fields, the name optional; its tooltip
+        // the name if any, the type (`gui.entity_tooltip.type`) and the UUID, made once.
+        (ENTITY_TOOLTIP_INFO, "<init>") => {
+            let named = if desc.ends_with("Ljava/util/Optional;)V") {
+                a(3)
+            } else {
+                optional(rt, a(3))
+            };
+            rt.put_field(a(0), "type", a(1));
+            rt.put_field(a(0), "id", a(2));
+            rt.put_field(a(0), "name", named);
+            V::Void
+        }
+        (ENTITY_TOOLTIP_INFO, "getTooltipLines") => {
+            let cached = rt.get_field(a(0), "$lines");
+            if cached.r() != 0 {
+                return Some(cached);
+            }
+            let mut lines = Vec::new();
+            let named = rt.get_field(rt.get_field(a(0), "name"), "value");
+            if named.r() != 0 {
+                lines.push(named);
+            }
+            let ty = rt.get_field(a(0), "type");
+            let kind = crate::api::call(
+                rt,
+                "net/minecraft/world/entity/EntityType.getDescription.()Lnet/minecraft/network/chat/Component;",
+                &[ty],
+            );
+            let key = rt.string("gui.entity_tooltip.type");
+            let with = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![kind]));
+            lines.push(component(rt, key, true, with));
+            let uuid = rt.get_field(a(0), "id");
+            let id = crate::api::call(rt, "java/util/UUID.toString.()Ljava/lang/String;", &[uuid]);
+            lines.push(component(rt, id, false, V::NULL));
+            let list = crate::jutil::new_list(rt, lines);
+            rt.put_field(a(0), "$lines", list);
+            list
+        }
         (WIDGET_SPRITES, "get") if desc == "(ZZ)Lnet/minecraft/resources/ResourceLocation;" => {
             let field = match (a(1).i() != 0, a(2).i() != 0) {
                 (true, true) => "enabledFocused",
@@ -4152,6 +4254,16 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 const MUTABLE_COMPONENT: &str = "net/minecraft/network/chat/MutableComponent";
 const TRANSLATABLE_CONTENTS: &str = "net/minecraft/network/chat/contents/TranslatableContents";
 const WIDGET_SPRITES: &str = "net/minecraft/client/gui/components/WidgetSprites";
+const HOVER_EVENT: &str = "net/minecraft/network/chat/HoverEvent";
+const HOVER_ACTION: &str = "net/minecraft/network/chat/HoverEvent$Action";
+const ITEM_STACK_INFO: &str = "net/minecraft/network/chat/HoverEvent$ItemStackInfo";
+const ENTITY_TOOLTIP_INFO: &str = "net/minecraft/network/chat/HoverEvent$EntityTooltipInfo";
+/// `HoverEvent.Action`'s constants: their fields and serialized names.
+const HOVER_ACTIONS: [(&str, &str); 3] = [
+    ("SHOW_TEXT", "show_text"),
+    ("SHOW_ITEM", "show_item"),
+    ("SHOW_ENTITY", "show_entity"),
+];
 const WIDGET_SPRITES_TWO: &str =
     "(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/resources/ResourceLocation;)V";
 const WIDGET_SPRITES_THREE: &str = "(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/resources/ResourceLocation;)V";
@@ -5191,6 +5303,15 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         "net/minecraft/world/item/ItemStackLinkedSet" if field == "TYPE_AND_TAG" => intern_strategy(rt, ITEM_STRATEGY),
         "net/neoforged/neoforge/fluids/FluidStackLinkedSet" if field == "TYPE_AND_COMPONENTS" => intern_strategy(rt, FLUID_STRATEGY),
         "net/minecraft/world/phys/Vec3" if field == "ZERO" => vec3_zero(rt),
+        HOVER_ACTION => {
+            let &(_, named) = HOVER_ACTIONS.iter().find(|(f, _)| *f == field)?;
+            rt.intern(format!("compat:hover-action/{named}"), |rt| {
+                let action = rt.new_object(HOVER_ACTION);
+                let s = rt.string(named);
+                rt.put_field(action, "$name", s);
+                action
+            })
+        }
         BOUNDS_INTS | BOUNDS_DOUBLES if field == "ANY" => {
             let class: &'static str = if owner == BOUNDS_INTS { BOUNDS_INTS } else { BOUNDS_DOUBLES };
             rt.intern(format!("const/{class}.ANY"), |rt| bounds(rt, class, None, None))
@@ -7333,6 +7454,102 @@ mod tests {
             assert_eq!(rt.get_field(back, "$item"), stone);
             assert_eq!(crate::api::call(rt, SECONDARY, &[player]), V::I(0));
         });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A hover event keeps its action and value, gives the value only for its own action, and
+    /// equals another of both; an item's info is the stack as it was; an entity's tooltip is its
+    /// name, its type and its UUID.
+    #[test]
+    fn hover_events_keep_what_they_show() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        const NEW: &str = "net/minecraft/network/chat/HoverEvent.<init>.(Lnet/minecraft/network/chat/HoverEvent$Action;Ljava/lang/Object;)V";
+        const VALUE: &str = "net/minecraft/network/chat/HoverEvent.getValue.(Lnet/minecraft/network/chat/HoverEvent$Action;)Ljava/lang/Object;";
+        const EQUALS: &str = "net/minecraft/network/chat/HoverEvent.equals.(Ljava/lang/Object;)Z";
+        let [text, item, entity] = ["SHOW_TEXT", "SHOW_ITEM", "SHOW_ENTITY"]
+            .map(|f| get_static(&mut rt, HOVER_ACTION, f).unwrap());
+        let hi = rt.string("Hi");
+        let shown = component(&mut rt, hi, false, V::NULL);
+        let event = |rt: &mut Rt, action: V, value: V| {
+            let e = rt.new_object(HOVER_EVENT);
+            crate::api::call(rt, NEW, &[e, action, value]);
+            e
+        };
+        let e = event(&mut rt, text, shown);
+        assert_eq!(crate::api::call(&mut rt, VALUE, &[e, text]), shown);
+        assert_eq!(crate::api::call(&mut rt, VALUE, &[e, item]), V::NULL);
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "net/minecraft/network/chat/HoverEvent.getAction.()Lnet/minecraft/network/chat/HoverEvent$Action;",
+                &[e]
+            ),
+            text
+        );
+        let name = crate::api::call(
+            &mut rt,
+            "net/minecraft/network/chat/HoverEvent$Action.getSerializedName.()Ljava/lang/String;",
+            &[entity],
+        );
+        assert_eq!(rt.str_of(name), Some("show_entity"));
+        let same = event(&mut rt, text, shown);
+        let other = event(&mut rt, item, shown);
+        assert_eq!(
+            [same, other].map(|o| crate::api::call(&mut rt, EQUALS, &[e, o])),
+            [V::I(1), V::I(0)]
+        );
+
+        // An item's info is the stack when it was made, not what the stack becomes.
+        let stone = stack(&mut rt, "minecraft:stone", 5);
+        let info = rt.new_object(ITEM_STACK_INFO);
+        crate::api::call(
+            &mut rt,
+            "net/minecraft/network/chat/HoverEvent$ItemStackInfo.<init>.(Lnet/minecraft/world/item/ItemStack;)V",
+            &[info, stone],
+        );
+        rt.put_field(stone, "$count", V::I(1));
+        let got = crate::api::call(
+            &mut rt,
+            "net/minecraft/network/chat/HoverEvent$ItemStackInfo.getItemStack.()Lnet/minecraft/world/item/ItemStack;",
+            &[info],
+        );
+        assert_eq!(rt.get_field(got, "$count"), V::I(5));
+        assert_eq!(
+            item_like_name(&rt, rt.get_field(got, "$item")),
+            "minecraft:stone"
+        );
+
+        // An entity's: its name, its type's description, its UUID.
+        let zombie =
+            crate::api::get_static(&mut rt, "net/minecraft/world/entity/EntityType.ZOMBIE");
+        let uuid = crate::tags::uuid(&mut rt, 1, 2);
+        let named = rt.string("Bob");
+        let bob = component(&mut rt, named, false, V::NULL);
+        let tip = rt.new_object(ENTITY_TOOLTIP_INFO);
+        crate::api::call(
+            &mut rt,
+            "net/minecraft/network/chat/HoverEvent$EntityTooltipInfo.<init>.(Lnet/minecraft/world/entity/EntityType;Ljava/util/UUID;Lnet/minecraft/network/chat/Component;)V",
+            &[tip, zombie, uuid, bob],
+        );
+        let lines = crate::api::call(
+            &mut rt,
+            "net/minecraft/network/chat/HoverEvent$EntityTooltipInfo.getTooltipLines.()Ljava/util/List;",
+            &[tip],
+        );
+        let json: Vec<serde_json::Value> = crate::jutil::elements(&rt, lines)
+            .into_iter()
+            .map(|c| component_json(&rt, c))
+            .collect();
+        assert_eq!(json[0], serde_json::json!({ "text": "Bob" }));
+        assert_eq!(json[1]["translate"], "gui.entity_tooltip.type");
+        assert_eq!(json[1]["with"][0]["translate"], "entity.minecraft.zombie");
+        assert_eq!(
+            json[2],
+            serde_json::json!({ "text": "00000000-0000-0001-0000-000000000002" })
+        );
+        assert_eq!(json.len(), 3);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

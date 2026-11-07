@@ -7083,6 +7083,43 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     reader leaves it after the compound; a widget's sprites follow its state; consuming spares only
     a creative player's stack, and secondary use is the shift key; the entity type tests now also
     ask a type's key), translator 20.
+- [x] 2026-11-07 Part 106: entity attributes through NeoForge's events, and hover events.
+  - Attribute suppliers (`attribute_suppliers`, a new compat module): `AttributeSupplier` and its
+    `Builder` as 1.21.1's: `add` with a base value or the attribute's default, `build`, `combine`,
+    `getValue` (sanitized into the attribute's range, so 5000 health reads 1024), `getBaseValue`,
+    `hasAttribute`, and vanilla's errors (`IllegalArgumentException` for an attribute the supplier
+    lacks, `UnsupportedOperationException` for changing a default after the build). The 73 vanilla
+    factories, read from 1.21.1's sources, give vanilla's values: `Mob.createMobAttributes` (19
+    mods), `Monster.createMonsterAttributes` (7), `LivingEntity.createLivingAttributes` (5) and each
+    mob's `createAttributes`, inherited ones included (a husk's are a zombie's).
+    `DefaultAttributes.getSupplier` gives the 84 vanilla types' suppliers, one object per type.
+  - NeoForge's events: once the registries are full (as `GameData.postRegisterEvents` does), compat
+    posts `EntityAttributeCreationEvent` (`put`, 32 mods; a type put twice throws vanilla's
+    `IllegalStateException`), then `EntityAttributeModificationEvent` (`add` 9 mods, `getTypes` 8,
+    `has`). Its types are the ones with suppliers: vanilla's in registry order, then the mods' by
+    id. Each type's additions are combined over its supplier, and `DefaultAttributes` answers with
+    the result.
+  - NeoForge's own attributes: `NeoForgeMod.SWIM_SPEED`, `NAMETAG_DISTANCE` and `CREATIVE_FLIGHT`,
+    with their classes and ranges. A ranged or boolean attribute sanitizes its values.
+  - Not yet in the game: mod living entities don't spawn, so their suppliers are kept until they
+    do, and the game doesn't apply mods' changes to vanilla types' attributes.
+  - `HoverEvent` (32 mods build one):
+    - the action and value, `getValue(action)` only for its own action, `equals` and `hashCode`;
+    - `HoverEvent$Action`'s `SHOW_TEXT`, `SHOW_ITEM` and `SHOW_ENTITY` with their serialized names;
+    - `ItemStackInfo`, which keeps a copy of its stack;
+    - `EntityTooltipInfo` (a type, a UUID, maybe a name), whose tooltip lines are the name, the
+      type's description in `gui.entity_tooltip.type`, and the UUID.
+  - Measured (packcov19, the same 367 jars): methods 80.5% (from 80.3%: 220 more mapped), uses
+    89.7% (from 89.5%), distinct missing API methods 10960 (from 10993); Create 78.4% of its
+    methods, 95.2% of its uses. The attribute and hover calls are off the list. Now at its top:
+    `getTextureManager` (46 mods), `Player.awardStat` (38), `ConfigurationScreen` (38),
+    `registerSpriteSet` (31), `SimplePreparableReloadListener` (30), `ModelEvent$RegisterAdditional`
+    (30), `GoalSelector.addGoal` (28). Also on it: `RegisterSpawnPlacementsEvent.register` (19),
+    which NeoForge fires right after the attribute events, and `ImageButton`'s constructors (13).
+  - Tests: compat 607 (3 new: vanilla's factories give vanilla's attributes, inherited and
+    sanitized, with vanilla's errors; mods give their types attributes through NeoForge's two
+    events, and a type put twice throws; hover events keep their action and value, an item's info
+    keeps the stack it had, and an entity's tooltip is its name, type and UUID), translator 20.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -337,6 +337,9 @@ pub fn fire_registrations(rt: &mut Rt) {
         post(rt, REGISTER_EVENT, ev);
     }
     resolve(rt);
+    // With the registries full, NeoForge gives entity types their attributes
+    // (`CommonHooks.modifyAttributes`, from `GameData.postRegisterEvents`).
+    crate::attribute_suppliers::fire(rt);
     // The registries are frozen: each mod registry's bake callbacks run, once, on the full registry
     // (Create sorts its fan processing types and arm interaction points here).
     let all = bake_callbacks(rt);
