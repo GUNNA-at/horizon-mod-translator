@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 636] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 635] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1043,7 +1043,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 636] = [
     ("net/minecraft/BlockUtil$IntBounds", "i(II)V=min,max|o"),
     ("net/minecraft/DefaultUncaughtExceptionHandler", "i(Lorg/slf4j/Logger;)V=logger|o"),
     ("net/minecraft/DefaultUncaughtExceptionHandlerWithName", "i(Lorg/slf4j/Logger;)V=logger|o"),
-    ("net/minecraft/advancements/CriterionProgress", "i()V=|i(Ljava/time/Instant;)V=obtained|ggetObtained()Ljava/time/Instant;=obtained|o"),
     ("net/minecraft/advancements/DisplayInfo", "i(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/network/chat/Component;Lnet/minecraft/network/chat/Component;Ljava/util/Optional;Lnet/minecraft/advancements/AdvancementType;ZZZ)V=icon,title,description,background,type,showToast,announceChat,hidden|ggetTitle()Lnet/minecraft/network/chat/Component;=title|ggetDescription()Lnet/minecraft/network/chat/Component;=description|ggetIcon()Lnet/minecraft/world/item/ItemStack;=icon|ggetBackground()Ljava/util/Optional;=background|ggetType()Lnet/minecraft/advancements/AdvancementType;=type|ggetX()F=x|ggetY()F=y|gshouldShowToast()Z=showToast|gshouldAnnounceChat()Z=announceChat|gisHidden()Z=hidden|o"),
     ("net/minecraft/advancements/critereon/CriterionValidator", "i(Lnet/minecraft/util/ProblemReporter;Lnet/minecraft/core/HolderGetter$Provider;)V=reporter,lootData|o"),
     ("net/minecraft/advancements/critereon/ItemEnchantmentsPredicate", "i(Ljava/util/List;)V=enchantments|genchantments()Ljava/util/List;=enchantments|o"),

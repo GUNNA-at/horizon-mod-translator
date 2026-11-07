@@ -48,6 +48,7 @@ pub mod invoke;
 pub mod input;
 pub mod tooltips;
 pub mod damage;
+pub mod player_advancements;
 pub mod world_events;
 pub mod datapack;
 pub mod vanilla_entities;

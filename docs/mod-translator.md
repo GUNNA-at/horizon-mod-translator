@@ -6820,6 +6820,63 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `IFluidHandler.getTanks` (21), `Level.getCapability` (61) or `ItemStack.getCapability` (42) any
     more. The top is now `Holder.value` and `BlockState.cycle` (47 mods each),
     `Minecraft.getTextureManager` (46) and `StreamCodec.apply` (43).
+- [x] 2026-11-07 Part 99: mods' advancement triggers (Create's 103 advancements of its own
+  triggers, `create:<name>_builtin`, never granted: a trigger fires on the player's
+  `PlayerAdvancements` (`ServerPlayer.getAdvancements()`), which had no listener on it, and
+  `Listener.run`, `ServerAdvancementManager.get` and `AdvancementProgress.isDone` were unmapped; 24
+  to 39 mods of the pack call these to award or read advancements by hand).
+  - compat (`player_advancements.rs`): a server's player's `PlayerAdvancements`, one object a
+    player, registers a listener on each criterion of the game's advancements whose trigger this
+    runtime's mods registered, as vanilla's `registerListeners` does as the player joins: the
+    criterion's conditions read with the trigger's own codec, the listener added through the
+    trigger's `addPlayerListener` (Create's `CriterionTriggerBase` keeps them by player itself).
+    `Listener.run` grants the criterion through the game while it is open (not granted, of an
+    advancement not done), as vanilla keeps a listener only then; a criterion revoked is heard of
+    again. A mod's trigger extending vanilla's `SimpleCriterionTrigger` keeps its listeners here,
+    and its `trigger(player, test)` runs those whose instance passes the mod's test and whose
+    `player` predicate the player passes (the game tests it). `MinecraftServer.getAdvancements()`
+    and its `get(id)` give an advancement's holder (null for one the server lacks), and
+    `PlayerAdvancements.award`, `getOrStartProgress` and the progress's `isDone`, `hasProgress`,
+    `getRemainingCriteria`, `getCompletedCriteria` and `getCriterion` read and change the game's
+    progress when asked. A fake player's advancements (Create's deployer's) grant nothing.
+    `CriterionProgress` is modelled here now, so it left `vanilla_records`' data classes.
+  - compat (`neo.rs`): `RegisterEvent` fires for every registry of the game, as NeoForge's loading
+    does: 57 more (`EVENT_REGISTRIES`, in `BuiltInRegistries`' order), after the game's ones it
+    already fired and before NeoForge's. Create registers its advancements and their triggers on
+    the trigger registry's event (`Create.onRegister`: `event.getRegistry() ==
+    BuiltInRegistries.TRIGGER_TYPES`), which never fired, so no trigger of it was registered (the
+    first run of the scene below granted nothing); a mod that registers a villager profession, a
+    structure type or a loot entry type on hearing its registry's event does now too. Their
+    entries are the mods' only, and a codec of one still reads any name, as before.
+  - compat-core: `Host::mod_criteria`, `has_advancement`, `advancement_progress`,
+    `award_criterion`, `criterion_player_holds`, and `MemoryHost`'s advancements.
+  - game (`native_criteria.rs`, API @API:mod_advancements@, fragment `mod_advancements.json`):
+    `native_mod_criteria`, `native_has_advancement`, `native_advancement_progress` (any player on
+    the server, read without swapping their state in), `native_award_criterion` (vanilla's
+    `PlayerAdvancements.award`: the toast, chat line and rewards of an advancement it completes)
+    and `native_criterion_player_holds`, the last two reaching a player as
+    `native_trigger_criterion` does (now through the same helper). Every server host of a bundle
+    has them (`advancement_methods`, with the world's writes).
+  - game (`native_server.rs`): inside a player's action `native_server_players` lists that player
+    as they are now, and only them where the other players are out of reach (the hub taken for the
+    action, where the list was empty); `native_acting_player_entity` is their entity id, and the
+    bundles' `player_entities` has them so too. Create's kinetic blocks note who placed them
+    (`AdvancementBehaviour.setPlacedBy`, through `Level.getPlayerByUUID`), which found nobody, so
+    none awarded its placer (Wind Maker, a millstone's, a funnel's...); any mod finding the player
+    who acts by UUID in their action now does.
+  - Tests: compat 585 (4 new: `RegisterEvent` fires for each of the game's registries, the trigger
+    registry after items and before NeoForge's, and a mod's trigger and profession registered on
+    their events are there; a mod's own trigger hears of each player once and grants only open
+    criteria, a revoked one again; a `SimpleCriterionTrigger` subclass tests each listener's
+    instance and the player predicate, and forgets a player's listeners; a mod awards by hand and
+    reads the progress, a fake player's grants nothing), translator 20.
+  - In game (`p99scene.sh`, Create and its addons): two shafts joined by a belt connector award
+    Kelp Drive (`create:belt`): its toast shows, `@s[advancements={create:belt=true}]` passes.
+    An encased fan the player placed notes them (`Owner` in its data) and, once a creative motor
+    turns it, awards Wind Maker (`create:encased_fan`). Both are in the player's saved
+    advancements (`players/advancements/<uuid>.json`) and gold on Create's tab of the
+    advancements screen; no call unmapped, no exception. Before the registry fix a run granted
+    nothing; before the players fix, Kelp Drive only (the fan had no `Owner`).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -31,6 +31,28 @@ impl NativeCriterion<'_> {
     }
 }
 
+/// A criterion of the server's advancements whose trigger is a mod's
+/// (`native_mod_criteria`).
+#[allow(dead_code)]
+pub(crate) struct NativeModCriterion {
+    /// The advancement's id and the criterion's name in it.
+    pub(crate) advancement: String,
+    pub(crate) criterion: String,
+    /// The trigger's id (`create:andesite_alloy_builtin`).
+    pub(crate) trigger: String,
+    /// The criterion's `conditions` as JSON text, `{}` for none.
+    pub(crate) conditions: String,
+}
+
+/// A player's progress in one advancement (`native_advancement_progress`).
+#[allow(dead_code)]
+pub(crate) struct NativeProgress {
+    /// Its criteria in order, and whether the player has each.
+    pub(crate) criteria: Vec<(String, bool)>,
+    /// Whether it is done (`AdvancementProgress.isDone`).
+    pub(crate) done: bool,
+}
+
 /// Whether a mod may fire `trigger`: a namespaced id outside `minecraft`,
 /// whose triggers the game fires from its own events.
 fn mod_trigger(trigger: &str) -> bool {
@@ -64,31 +86,173 @@ impl Game<'_> {
         trigger: &str,
         test: impl Fn(&NativeCriterion<'_>) -> bool,
     ) -> bool {
-        if !mod_trigger(trigger) || self.remote.is_some() {
+        mod_trigger(trigger)
+            && self
+                .as_criteria_player(uuid, |g| g.trigger_mod_criteria(trigger, &test))
+                .is_some()
+    }
+
+    /// The criteria of the server's advancements whose trigger is a mod's
+    /// (a namespaced id outside `minecraft`), in the tree's order: what a
+    /// NeoForge server's `PlayerAdvancements` listens for on the mods' own
+    /// triggers (`registerListeners`), for a translated mod to listen the
+    /// same way. None off a server. API @API:mod_advancements@.
+    pub(super) fn native_mod_criteria(&mut self) -> Option<Vec<NativeModCriterion>> {
+        if self.remote.is_some() {
+            return None;
+        }
+        let tree = self.advancement_tree();
+        let criteria = tree.list.iter().flat_map(|a| {
+            let id = &a.id;
+            a.criteria
+                .iter()
+                .filter(|c| mod_trigger(&c.trigger))
+                .map(move |c| NativeModCriterion {
+                    advancement: id.clone(),
+                    criterion: c.name.clone(),
+                    trigger: c.trigger.clone(),
+                    // Read, not kept: most are never tested.
+                    conditions: match &*c.conditions.read() {
+                        Value::Null => "{}".to_owned(),
+                        v => v.to_string(),
+                    },
+                })
+        });
+        Some(criteria.collect())
+    }
+
+    /// Whether the server has the advancement `id`
+    /// (`ServerAdvancementManager.get`); false off a server.
+    /// API @API:mod_advancements@.
+    pub(super) fn native_has_advancement(&mut self, id: &str) -> bool {
+        self.remote.is_none() && self.advancement_tree().by_id.contains_key(id)
+    }
+
+    /// The progress of the server's player with that UUID in the
+    /// advancement `id` (`PlayerAdvancements.getOrStartProgress`): each of
+    /// its criteria in order with whether they have it, and whether it is
+    /// done. Any player on the server, from anywhere: no player's state is
+    /// swapped for it. None off a server, for an advancement the server
+    /// lacks or a player not on. API @API:mod_advancements@.
+    pub(super) fn native_advancement_progress(
+        &mut self,
+        uuid: u128,
+        id: &str,
+    ) -> Option<NativeProgress> {
+        if self.remote.is_some() {
+            return None;
+        }
+        let tree = self.advancement_tree();
+        let a = tree.get(id)?;
+        let progress = if self.lan_acting_uuid == Some(uuid) {
+            &self.adv.progress
+        } else {
+            // Another player's is on their guest while they don't act.
+            let guests = &self.lan.as_ref()?.hub.guests;
+            &guests
+                .iter()
+                .find(|g| g.placed && g.uuid == uuid)?
+                .advancements
+        };
+        Some(NativeProgress {
+            criteria: a
+                .criteria
+                .iter()
+                .map(|c| (c.name.clone(), progress.has(&a.id, &c.name)))
+                .collect(),
+            done: progress.done(a),
+        })
+    }
+
+    /// Grants criterion `criterion` of advancement `advancement` to the
+    /// server's player with that UUID, as `PlayerAdvancements.award` does,
+    /// done advancement or not: one it completes is awarded with its toast,
+    /// chat line and rewards. True when it was granted; false when they had
+    /// it, for an advancement or criterion the server lacks, and off a
+    /// server or for a player not reached (as `native_trigger_criterion`
+    /// reaches them). API @API:mod_advancements@.
+    pub(super) fn native_award_criterion(
+        &mut self,
+        uuid: u128,
+        advancement: &str,
+        criterion: &str,
+    ) -> bool {
+        if self.remote.is_some() {
             return false;
+        }
+        let tree = self.advancement_tree();
+        let Some(&index) = tree.by_id.get(advancement) else {
+            return false;
+        };
+        if !tree.list[index]
+            .criteria
+            .iter()
+            .any(|c| c.name == criterion)
+        {
+            return false;
+        }
+        self.as_criteria_player(uuid, |g| {
+            g.load_advancements();
+            !g.no_player_here() && g.grant_advancement(index, Some(criterion))
+        })
+        .unwrap_or(false)
+    }
+
+    /// Whether the server's player with that UUID passes the `player`
+    /// predicate of criterion `criterion` of advancement `advancement`
+    /// (`SimpleInstance.player()`), in their own context as
+    /// `SimpleCriterionTrigger.trigger` tests it: true for a criterion with
+    /// none. False for a criterion the server lacks, and off a server or for
+    /// a player not reached (as `native_trigger_criterion` reaches them).
+    /// API @API:mod_advancements@.
+    pub(super) fn native_criterion_player_holds(
+        &mut self,
+        uuid: u128,
+        advancement: &str,
+        criterion: &str,
+    ) -> bool {
+        if self.remote.is_some() {
+            return false;
+        }
+        let tree = self.advancement_tree();
+        let Some(c) = tree
+            .get(advancement)
+            .and_then(|a| a.criteria.iter().find(|c| c.name == criterion))
+        else {
+            return false;
+        };
+        self.as_criteria_player(uuid, |g| {
+            let me = g.player_entity();
+            g.conditions_hold(&c.conditions.get()["player"], Some(&me), me.position)
+        })
+        .unwrap_or(false)
+    }
+
+    /// Runs `f` for the server's player with that UUID in place: the acting
+    /// player inside their hook; any other, in their own level, only where
+    /// no player's state is swapped in (`native_tick`, `native_menu_clicked`).
+    /// None off a server, or when the player isn't on or can't be reached
+    /// from here.
+    fn as_criteria_player<T>(&mut self, uuid: u128, f: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        if self.remote.is_some() {
+            return None;
         }
         if self.lan_acting_uuid == Some(uuid) {
-            self.trigger_mod_criteria(trigger, &test);
-            return true;
+            return Some(f(self));
         }
         if self.lan_acting.is_some() {
-            return false;
+            return None;
         }
-        let Some(conn) = self.lan.as_ref().and_then(|host| {
+        let conn = self.lan.as_ref().and_then(|host| {
             host.hub
                 .guests
                 .iter()
                 .find(|g| g.placed && g.uuid == uuid)
                 .map(|g| g.conn)
-        }) else {
-            return false;
-        };
+        })?;
         // In their level: the predicates read where they are, and a reward
         // that doesn't fit drops there.
-        self.for_player(Target::Guest(conn), |g| {
-            g.trigger_mod_criteria(trigger, &test)
-        })
-        .is_some()
+        self.for_player(Target::Guest(conn), f)
     }
 
     /// `trigger` for a mod's trigger, for the player in place.

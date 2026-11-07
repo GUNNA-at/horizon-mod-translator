@@ -815,6 +815,45 @@ pub trait Host {
     fn player_name(&self, _uuid: u128) -> Option<String> {
         None
     }
+    /// The criteria of the server's advancements whose trigger is a mod's (any namespace but
+    /// `minecraft`), in the tree's order: what a player's `PlayerAdvancements` listens for on the
+    /// mods' triggers (`registerListeners`). None when the host can't tell (a client).
+    fn mod_criteria(&mut self) -> Option<Vec<ModCriterion>> {
+        None
+    }
+    /// Whether the server has the advancement `id` (`ServerAdvancementManager.get`).
+    fn has_advancement(&mut self, _id: &str) -> bool {
+        false
+    }
+    /// The server's player `player`'s progress in the advancement `id`
+    /// (`PlayerAdvancements.getOrStartProgress`): None for an advancement or a player the host
+    /// doesn't have.
+    fn advancement_progress(
+        &mut self,
+        _player: u128,
+        _id: &str,
+    ) -> Option<AdvancementProgressView> {
+        None
+    }
+    /// Grants criterion `criterion` of advancement `advancement` to the server's player `player`
+    /// as `PlayerAdvancements.award` does, done advancement or not: one it completes is awarded,
+    /// with its rewards, toast and chat line. Whether it was granted: false when they had it, or
+    /// for a player, advancement or criterion the host doesn't have.
+    fn award_criterion(&mut self, _player: u128, _advancement: &str, _criterion: &str) -> bool {
+        false
+    }
+    /// Whether the server's player `player` passes the `player` predicate of criterion `criterion`
+    /// of advancement `advancement` (`SimpleInstance.player()`), tested in their own context as
+    /// `SimpleCriterionTrigger.trigger` tests it: true for a criterion with none, false when the
+    /// host can't reach the player.
+    fn criterion_player_holds(
+        &mut self,
+        _player: u128,
+        _advancement: &str,
+        _criterion: &str,
+    ) -> bool {
+        false
+    }
     /// Spawns an experience orb worth `value` points at `at` (`new ExperienceOrb` added with
     /// `Level.addFreshEntity`), moving by `motion` when given, else with vanilla's random motion.
     /// False when none spawned.
@@ -1417,6 +1456,28 @@ pub struct Particles {
     pub always: bool,
 }
 
+/// A criterion of one of the server's advancements whose trigger is a mod's
+/// (`create:andesite_alloy_builtin`), as [`Host::mod_criteria`] lists them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModCriterion {
+    /// The advancement's id (`create:andesite_alloy`) and the criterion's name in it (`0`).
+    pub advancement: String,
+    pub criterion: String,
+    /// The trigger's id, as the trigger type registry names it.
+    pub trigger: String,
+    /// The criterion's `conditions` as JSON text, `{}` for none.
+    pub conditions: String,
+}
+
+/// A server's player's progress in one advancement ([`Host::advancement_progress`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AdvancementProgressView {
+    /// Its criteria in the advancement's order, and whether each is granted.
+    pub criteria: Vec<(String, bool)>,
+    /// Whether it is done: a criterion granted in each of its requirements (`isDone`).
+    pub done: bool,
+}
+
 /// A command line a mod runs ([`Host::run_command`]) and what its source says: where it runs (None
 /// for the server's own source, at the world's spawn in the overworld) and faces (yaw, pitch), its
 /// operator level, the player it is (by UUID; None for no entity), and whether its output is
@@ -1726,6 +1787,13 @@ pub struct MemoryHost {
     pub resources: std::collections::BTreeMap<String, Vec<u8>>,
     /// Vanilla blocks' containers by position ([`Host::container`]).
     pub containers: HashMap<[i32; 3], MemoryContainer>,
+    /// The server's advancements: each id with its criteria (name, trigger, conditions as JSON
+    /// text), every one required ([`Host::mod_criteria`] lists the mods' triggers' ones).
+    pub advancements: Vec<(String, Vec<(String, String, String)>)>,
+    /// Criteria granted ([`Host::award_criterion`]), in order: player, advancement, criterion.
+    pub granted: Vec<(u128, String, String)>,
+    /// The criteria whose `player` predicate a player fails: player, advancement, criterion.
+    pub player_fails: Vec<(u128, String, String)>,
 }
 
 /// A vanilla block's container in a [`MemoryHost`].
@@ -2551,6 +2619,62 @@ impl Host for MemoryHost {
         let mut out: Vec<String> = self.resources.keys().filter_map(|p| p.strip_prefix(&folder)?.split_once('/').map(|(ns, _)| ns.to_owned())).collect();
         out.dedup();
         out
+    }
+    fn mod_criteria(&mut self) -> Option<Vec<ModCriterion>> {
+        let mods = |trigger: &str| {
+            trigger
+                .split_once(':')
+                .is_some_and(|(ns, _)| ns != "minecraft")
+        };
+        let list = self.advancements.iter().flat_map(|(id, criteria)| {
+            criteria.iter().filter(|(_, trigger, _)| mods(trigger)).map(
+                move |(name, trigger, conditions)| ModCriterion {
+                    advancement: id.clone(),
+                    criterion: name.clone(),
+                    trigger: trigger.clone(),
+                    conditions: conditions.clone(),
+                },
+            )
+        });
+        (!self.client).then(|| list.collect())
+    }
+    fn has_advancement(&mut self, id: &str) -> bool {
+        self.advancements.iter().any(|(a, _)| a == id)
+    }
+    fn advancement_progress(&mut self, player: u128, id: &str) -> Option<AdvancementProgressView> {
+        let (_, criteria) = self.advancements.iter().find(|(a, _)| a == id)?;
+        let has = |name: &str| {
+            self.granted
+                .iter()
+                .any(|(p, a, c)| *p == player && a == id && c == name)
+        };
+        let criteria: Vec<(String, bool)> = criteria
+            .iter()
+            .map(|(name, _, _)| (name.clone(), has(name)))
+            .collect();
+        let done = !criteria.is_empty() && criteria.iter().all(|(_, granted)| *granted);
+        Some(AdvancementProgressView { criteria, done })
+    }
+    fn award_criterion(&mut self, player: u128, advancement: &str, criterion: &str) -> bool {
+        let known = self.advancements.iter().any(|(a, criteria)| {
+            a == advancement && criteria.iter().any(|(n, _, _)| n == criterion)
+        });
+        let had = self
+            .granted
+            .iter()
+            .any(|(p, a, c)| *p == player && a == advancement && c == criterion);
+        if !known || had {
+            return false;
+        }
+        self.granted
+            .push((player, advancement.to_owned(), criterion.to_owned()));
+        true
+    }
+    fn criterion_player_holds(&mut self, player: u128, advancement: &str, criterion: &str) -> bool {
+        !self
+            .player_fails
+            .iter()
+            .any(|(p, a, c)| *p == player && a == advancement && c == criterion)
     }
 }
 

@@ -46,6 +46,71 @@ pub const REGISTRIES: [&str; 31] = [
     "structure_modifier_serializers",
 ];
 
+/// The game's other registries, in `BuiltInRegistries`' order: `RegisterEvent` fires for each
+/// after [`REGISTRIES`]' vanilla ones and before NeoForge's, as NeoForge fires one for every
+/// registry, so a mod that fills one on hearing its event does (Create registers its advancement
+/// triggers when `TRIGGER_TYPES`' fires). Named as `Registries.X` reads (its field in lower case);
+/// their entries are what mods register, and a codec of one still reads any name.
+const EVENT_REGISTRIES: [&str; 57] = [
+    "game_event",
+    "chunk_status",
+    "rule_test",
+    "rule_block_entity_modifier",
+    "pos_rule_test",
+    "position_source_type",
+    "command_argument_type",
+    "stat_type",
+    "villager_type",
+    "villager_profession",
+    "point_of_interest_type",
+    "memory_module_type",
+    "sensor_type",
+    "schedule",
+    "activity",
+    "loot_pool_entry_type",
+    "loot_number_provider_type",
+    "loot_nbt_provider_type",
+    "loot_score_provider_type",
+    "float_provider_type",
+    "int_provider_type",
+    "height_provider_type",
+    "block_predicate_type",
+    "carver",
+    "structure_placement",
+    "structure_piece",
+    "structure_type",
+    "placement_modifier_type",
+    "block_state_provider_type",
+    "foliage_placer_type",
+    "trunk_placer_type",
+    "root_placer_type",
+    "tree_decorator_type",
+    "feature_size_type",
+    "biome_source",
+    "chunk_generator",
+    "material_condition",
+    "material_rule",
+    "density_function_type",
+    "block_type",
+    "structure_processor",
+    "structure_pool_element",
+    "pool_alias_binding",
+    "cat_variant",
+    "frog_variant",
+    "instrument",
+    "decorated_pot_pattern",
+    "trigger_type",
+    "number_format_type",
+    "entity_sub_predicate_type",
+    "item_sub_predicate_type",
+    "map_decoration_type",
+    "enchantment_level_based_value_type",
+    "enchantment_entity_effect_type",
+    "enchantment_location_based_effect_type",
+    "enchantment_value_effect_type",
+    "enchantment_provider_type",
+];
+
 /// NeoForge's registries by their fields in `NeoForgeRegistries` and its `Keys`: their names
 /// (`NeoForgeRegistries.Keys`' `key(name)`), as registries are their names here. A registry's
 /// field and its key's may differ (`CONDITION_SERIALIZERS`, `Keys.CONDITION_CODECS`), and the
@@ -243,7 +308,17 @@ pub fn profile() -> Vec<(String, String, u32, std::time::Duration)> {
 pub fn fire_registrations(rt: &mut Rt) {
     let ev = rt.new_object(CONSTRUCT);
     post(rt, CONSTRUCT, ev);
-    let mut names: Vec<String> = REGISTRIES.iter().map(|s| s.to_string()).collect();
+    let neoforge = REGISTRIES
+        .iter()
+        .position(|r| NEOFORGE_REGISTRIES.iter().any(|(_, n)| n == r))
+        .unwrap_or(REGISTRIES.len());
+    let (vanilla, own) = REGISTRIES.split_at(neoforge);
+    let mut names: Vec<String> = vanilla
+        .iter()
+        .chain(&EVENT_REGISTRIES)
+        .chain(own)
+        .map(|s| s.to_string())
+        .collect();
     for extra in rt.custom_registries.clone() {
         if !names.contains(&extra) {
             names.push(extra);
@@ -2867,6 +2942,94 @@ mod tests {
         let water_type = crate::api::call(&mut rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]);
         assert_ne!(water_type.r(), 0);
         assert_eq!(call(&mut rt, get, &[fluid_types, water]), Some(water_type));
+    }
+
+    /// Create's `onRegister`: on the event of the game's trigger registry
+    /// (`event.getRegistry() == BuiltInRegistries.TRIGGER_TYPES`), lambda 3 registers its trigger
+    /// there; every event's registry goes to the list it holds.
+    fn register_triggers_on_their_event(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+        if id != 3 {
+            return register_on_event(rt, id, args);
+        }
+        let captured = rt.captured(args[0]);
+        let registry = call(rt, "net/neoforged/neoforge/registries/RegisterEvent.getRegistry.()Lnet/minecraft/core/Registry;", &[args[1]]).unwrap();
+        let name = rt.str_of(registry).map(str::to_owned);
+        if let Some(name) = name {
+            let name = rt.string(&name);
+            list_mut(rt, captured[2]).push(name);
+        }
+        let triggers = crate::api::get_static(
+            rt,
+            "net/minecraft/core/registries/BuiltInRegistries.TRIGGER_TYPES",
+        );
+        if registry == triggers {
+            let register = "net/minecraft/core/Registry.register.(Lnet/minecraft/core/Registry;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Object;)Ljava/lang/Object;";
+            call(rt, register, &[triggers, captured[0], captured[1]]);
+        }
+        Some(V::Void)
+    }
+
+    /// `RegisterEvent` fires for every registry of the game, as NeoForge's loading does: the
+    /// game's own after blocks and items and before NeoForge's. A mod that registers on hearing
+    /// one's event (Create's advancement triggers, a villager profession through
+    /// `event.register(key, id, supplier)`) has its entry in that registry.
+    #[test]
+    fn register_event_fires_for_each_of_the_games_registries() {
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(register_triggers_on_their_event);
+        let (trigger, heard) = (
+            rt.new_object("t/ChargedTrigger"),
+            rt.alloc("java/util/ArrayList", Data::List(Vec::new())),
+        );
+        let trigger_id = rt.string("t:charged");
+        let listener = rt.lambda_id(
+            "java/util/function/Consumer",
+            3,
+            vec![trigger_id, trigger, heard],
+        );
+        rt.listeners.push((REGISTER_EVENT.to_owned(), listener));
+        let professions = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/core/registries/Registries.VILLAGER_PROFESSION",
+        );
+        let (profession, profession_id) = (rt.new_object("t/Profession"), rt.string("t:smith"));
+        let supplier = rt.lambda_id("java/util/function/Supplier", 2, vec![profession]);
+        let listener = rt.lambda_id(
+            "java/util/function/Consumer",
+            1,
+            vec![professions, profession_id, supplier],
+        );
+        rt.listeners.push((REGISTER_EVENT.to_owned(), listener));
+        fire_registrations(&mut rt);
+        assert_eq!(registry_get(&mut rt, "trigger_type", "t:charged"), trigger);
+        let triggers = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/core/registries/BuiltInRegistries.TRIGGER_TYPES",
+        );
+        let get = "net/minecraft/core/Registry.get.(Lnet/minecraft/resources/ResourceLocation;)Ljava/lang/Object;";
+        assert_eq!(call(&mut rt, get, &[triggers, trigger_id]), Some(trigger));
+        assert_eq!(
+            registry_get(&mut rt, "villager_profession", "t:smith"),
+            profession
+        );
+        let heard: Vec<String> = list_mut(&mut rt, heard)
+            .clone()
+            .into_iter()
+            .filter_map(|v| rt.str_of(v).map(str::to_owned))
+            .collect();
+        let at = |name: &str| {
+            heard
+                .iter()
+                .position(|n| n == name)
+                .unwrap_or_else(|| panic!("no event for {name}: {heard:?}"))
+        };
+        assert!(
+            at("block") < at("item")
+                && at("item") < at("trigger_type")
+                && at("trigger_type") < at("attachment_types"),
+            "{heard:?}"
+        );
+        assert_eq!(heard.iter().filter(|n| *n == "trigger_type").count(), 1);
     }
 
     #[test]

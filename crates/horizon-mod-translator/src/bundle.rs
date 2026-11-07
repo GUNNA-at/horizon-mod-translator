@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 104] = [
+const COMPAT: [(&str, &str); 105] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -168,6 +168,7 @@ const COMPAT: [(&str, &str); 104] = [
     ("input.rs", include_str!("../../horizon-compat/src/input.rs")),
     ("tooltips.rs", include_str!("../../horizon-compat/src/tooltips.rs")),
     ("damage.rs", include_str!("../../horizon-compat/src/damage.rs")),
+    ("player_advancements.rs", include_str!("../../horizon-compat/src/player_advancements.rs")),
     ("world_events.rs", include_str!("../../horizon-compat/src/world_events.rs")),
     ("datapack.rs", include_str!("../../horizon-compat/src/datapack.rs")),
     ("vanilla_entities.rs", include_str!("../../horizon-compat/src/vanilla_entities.rs")),
@@ -2451,10 +2452,21 @@ fn world_writes(c: &str) -> String {
                 }})
                 .collect()
         }}
-        // The players in this level, living (another level's at the same place aren't here).
+        // The players in this level, living (another level's at the same place aren't here); inside
+        // a player's action, that player as they are now, though its hub is out of reach.
         fn player_entities(&self) -> Vec<(i32, u128, [f64; 3])> {{
             let dim = self.game.native_dimension();
-            self.game.lan.as_ref().map_or_else(Vec::new, |host| host.hub.guests.iter().filter(|g| g.placed && !g.dead && g.dimension == dim).map(|g| (g.entity_id, g.uuid, g.position)).collect())
+            let acting = self.game.native_acting_player().zip(self.game.native_acting_player_entity()).map(|(p, id)| ((id, p.uuid, p.position), p.health > 0.0 && p.dimension == dim));
+            let mut all: Vec<(i32, u128, [f64; 3])> = self.game.lan.as_ref().map_or_else(Vec::new, |host| host.hub.guests.iter().filter(|g| g.placed).filter_map(|g| match acting {{
+                Some((now, here)) if now.1 == g.uuid => here.then_some(now),
+                _ => (!g.dead && g.dimension == dim).then_some((g.entity_id, g.uuid, g.position)),
+            }}).collect());
+            if let Some((now, true)) = acting
+                && !all.iter().any(|q| q.1 == now.1)
+            {{
+                all.push(now);
+            }}
+            all
         }}
         fn translate(&self, key: &str) -> Option<String> {{
             horizon_client::lang::has(key).then(|| horizon_client::lang::get(key))
@@ -2663,11 +2675,37 @@ fn world_writes(c: &str) -> String {
         fn mark_player_motion(&mut self, uuid: u128) -> bool {{
             self.game.native_mark_player_motion(uuid)
         }}
-{attributes}{effects}{vitals}{level_events}"#,
+{attributes}{effects}{vitals}{level_events}{advancements}"#,
         attributes = attribute_methods(c, "Some(&mut *self.game)"),
         effects = effect_methods(c, "Some(&mut *self.game)"),
         vitals = vital_methods(c, "Some(&mut *self.game)"),
         level_events = level_event_methods("Some(&mut *self.game)"),
+        advancements = advancement_methods(c),
+    )
+}
+
+/// A server host's advancements: the criteria of the mods' triggers its players listen for, a
+/// player's progress, and criteria granted through the game (`native_criteria.rs`).
+fn advancement_methods(c: &str) -> String {
+    format!(
+        r#"        fn mod_criteria(&mut self) -> Option<Vec<{c}::host::ModCriterion>> {{
+            let list = self.game.native_mod_criteria()?;
+            Some(list.into_iter().map(|m| {c}::host::ModCriterion {{ advancement: m.advancement, criterion: m.criterion, trigger: m.trigger, conditions: m.conditions }}).collect())
+        }}
+        fn has_advancement(&mut self, id: &str) -> bool {{
+            self.game.native_has_advancement(id)
+        }}
+        fn advancement_progress(&mut self, player: u128, id: &str) -> Option<{c}::host::AdvancementProgressView> {{
+            let p = self.game.native_advancement_progress(player, id)?;
+            Some({c}::host::AdvancementProgressView {{ criteria: p.criteria, done: p.done }})
+        }}
+        fn award_criterion(&mut self, player: u128, advancement: &str, criterion: &str) -> bool {{
+            self.game.native_award_criterion(player, advancement, criterion)
+        }}
+        fn criterion_player_holds(&mut self, player: u128, advancement: &str, criterion: &str) -> bool {{
+            self.game.native_criterion_player_holds(player, advancement, criterion)
+        }}
+"#
     )
 }
 

@@ -289,27 +289,40 @@ fn finish(children: &mut Value) {
 #[allow(dead_code)]
 impl Game<'_> {
     /// The players on this server, in the order they joined. Empty on a
-    /// client and in a world nobody else can join.
+    /// client and in a world nobody else can join. Inside a player's action
+    /// (`native_acting_player`) that player is as they are now, and where
+    /// the others are out of reach of it (its hub taken), the only one: a
+    /// mod finding who acts by UUID (`Level.getPlayerByUUID`) finds them.
     pub(super) fn native_server_players(&self) -> Vec<NativeServerPlayer> {
+        let acting = self.native_acting_player();
         let Some(host) = &self.lan else {
-            return Vec::new();
+            return acting.into_iter().collect();
         };
         host.hub
             .guests
             .iter()
             .filter(|g| g.placed)
-            .map(|g| NativeServerPlayer {
-                uuid: g.uuid,
-                name: g.name.clone(),
-                permission: g.permission,
-                dimension: g.dimension.clone(),
-                position: g.position,
-                game_mode: g.game_mode,
-                health: g.health,
-                yaw: g.yaw,
-                pitch: g.pitch,
+            .map(|g| match &acting {
+                Some(p) if p.uuid == g.uuid => p.clone(),
+                _ => NativeServerPlayer {
+                    uuid: g.uuid,
+                    name: g.name.clone(),
+                    permission: g.permission,
+                    dimension: g.dimension.clone(),
+                    position: g.position,
+                    game_mode: g.game_mode,
+                    health: g.health,
+                    yaw: g.yaw,
+                    pitch: g.pitch,
+                },
             })
             .collect()
+    }
+    /// The entity id of the player whose action runs (their state swapped
+    /// in), None outside one. API @API:mod_advancements@.
+    pub(super) fn native_acting_player_entity(&self) -> Option<i32> {
+        self.native_acting_player()?;
+        self.player.as_ref().map(|p| p.entity_id)
     }
     /// A system line in that player's chat, also inside a player's hook for
     /// the acting player; false when they aren't on.
