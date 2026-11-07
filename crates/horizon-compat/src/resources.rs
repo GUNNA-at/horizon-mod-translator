@@ -1021,7 +1021,7 @@ fn block_model(rt: &mut Rt, json: &serde_json::Value) -> V {
 }
 
 /// A PNG's pixels as RGBA bytes, with its size.
-fn decode_png(bytes: &[u8]) -> Option<(usize, Vec<u8>)> {
+pub(crate) fn decode_png(bytes: &[u8]) -> Option<(usize, Vec<u8>)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;

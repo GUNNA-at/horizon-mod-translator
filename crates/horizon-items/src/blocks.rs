@@ -78,6 +78,41 @@ pub struct StateFacts {
     pub outline_edges: Arc<[[f64; 6]]>,
     /// `getMapColor(..).id` (0 = NONE).
     pub map_color: u8,
+    /// What a mod block declares tints its model, by tint index (the last for any higher one);
+    /// None for vanilla's, which the mesher tints by name.
+    pub tints: Option<Arc<[BlockTint]>>,
+}
+/// A declared tint index's colour: the biome's grass, foliage, dry foliage or water colour at the
+/// block, nothing, or one colour (`0xRRGGBB`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockTint {
+    None,
+    Grass,
+    Foliage,
+    DryFoliage,
+    Water,
+    Constant(u32),
+}
+impl BlockTint {
+    /// A facts row's `tints`: a list of names (`grass`, `foliage`, `dry_foliage`, `water`,
+    /// `none`) and colour numbers. None when the row has no list.
+    pub fn row(v: &serde_json::Value) -> Option<Arc<[BlockTint]>> {
+        let list = v.as_array()?;
+        let tint = |t: &serde_json::Value| match t {
+            serde_json::Value::Number(n) => n.as_u64().map_or(BlockTint::None, |c| {
+                BlockTint::Constant(c as u32 & 0xFF_FFFF)
+            }),
+            serde_json::Value::String(name) => match name.as_str() {
+                "grass" => BlockTint::Grass,
+                "foliage" => BlockTint::Foliage,
+                "dry_foliage" => BlockTint::DryFoliage,
+                "water" => BlockTint::Water,
+                _ => BlockTint::None,
+            },
+            _ => BlockTint::None,
+        };
+        Some(list.iter().map(tint).collect())
+    }
 }
 /// `MapColor.col` by id.
 pub const MAP_COLORS: [u32; 62] = [
@@ -453,6 +488,7 @@ impl BlockFacts {
                     .get(state.name.as_str())
                     .cloned()
                     .ok_or("missing block behaviour class chain")?,
+                tints: BlockTint::row(&entry.tints),
             });
         }
         let extra = callback(entries)?;

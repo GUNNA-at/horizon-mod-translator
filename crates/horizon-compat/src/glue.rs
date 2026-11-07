@@ -1366,7 +1366,7 @@ fn client_setup(rt: &mut Rt, host: &mut dyn Host) {
 /// [`client_setup`] on the runtime that probes how blocks draw (the bundles' `with_probe_runtime`),
 /// whose host has no resources: the models are baked, and the reload listeners the mods registered,
 /// which would read nothing (Flywheel's shader sources throw), don't run.
-fn probe_setup(rt: &mut Rt, host: &mut dyn Host) {
+pub(crate) fn probe_setup(rt: &mut Rt, host: &mut dyn Host) {
     if crate::neo::is_client(rt) {
         return;
     }

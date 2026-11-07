@@ -1281,6 +1281,20 @@ impl<'a> Plan<'a> {
                 J::Str(shapes.shape(combo).to_ascii_uppercase()),
             );
         }
+        // Each tint index's source: a biome colour's name, or a colour number.
+        if let Some(tints) = &p.tints {
+            let sources = tints.sources(combo).iter().map(|s| match s {
+                horizon_mods::content::TintSource::Constant(c) => J::Num((*c).into()),
+                named => J::Str(
+                    horizon_mods::content::TintSource::NAMED
+                        .iter()
+                        .find(|(_, n)| n == named)
+                        .map_or("none", |(name, _)| name)
+                        .to_owned(),
+                ),
+            });
+            row.set("tints", J::Arr(sources.collect()));
+        }
     }
 
     /// Adds each new block's copy of the template's entry to a map by name.

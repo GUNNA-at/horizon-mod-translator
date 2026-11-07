@@ -100,6 +100,15 @@ renderer draws it, as a chest: a turning shaft whose renderer draws it at its an
 mod can set it from code before the resources are built (`native_content_block`), as translated NeoForge mods
 do from their `getRenderShape` and their swapped models.
 
+`tints` says what colours the block's model faces with a `tintindex`, as vanilla's `BlockColors` does: a
+list by tint index, the last for any higher index, of `"grass"`, `"foliage"`, `"dry_foliage"` or `"water"`
+(the biome's colour at the block, blended across biomes as vanilla's leaves are), `"none"`, or a colour
+number `0xRRGGBB`. `["foliage"]` for every state, or `{ "property": "power", "values": { "0": [4980736],
+"15": [16724480] } }` by one of its own state properties, the values not listed untinted. Unset, a block
+is untinted, whatever its template. Translated NeoForge mods set it from the colour handlers their client
+registers (`RegisterColorHandlersEvent.Block`), run once per state where the biome colours are markers; the
+game keeps two sources, so a third index takes the second's.
+
 A native mod whose code registers its blocks and items can declare them at startup instead of in files
 (`native_content`): `content.declare_block(id, json)` and `content.declare_item(id, json)` take what the
 file would hold, check it the same way and replace a declaration of the same id. Translated NeoForge mods

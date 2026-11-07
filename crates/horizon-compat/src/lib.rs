@@ -73,6 +73,7 @@ pub mod models;
 pub mod entity_render;
 pub mod camera;
 pub mod client_extensions;
+pub mod colors;
 pub mod options;
 pub mod vertices;
 pub mod nbt;

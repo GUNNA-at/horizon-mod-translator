@@ -783,7 +783,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 71] = [
+const CHAIN: [Module; 72] = [
     crate::diodes::call,
     crate::fake_players::call,
     crate::block_breaking::call,
@@ -804,6 +804,7 @@ const CHAIN: [Module; 71] = [
     crate::network::call,
     crate::fluids::call,
     crate::client_extensions::call,
+    crate::colors::call,
     crate::options::call,
     crate::tanks::call_key,
     crate::fluid_wrappers::call_key,
@@ -860,7 +861,7 @@ const CHAIN: [Module; 71] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 71] = [
+const CLAIMS: [Claims; 72] = [
     crate::diodes::claims,
     crate::fake_players::claims,
     crate::block_breaking::claims,
@@ -881,6 +882,7 @@ const CLAIMS: [Claims; 71] = [
     crate::network::claims,
     crate::fluids::claims,
     crate::client_extensions::claims,
+    crate::colors::claims,
     crate::options::claims,
     crate::tanks::claims,
     crate::fluid_wrappers::claims,
@@ -935,7 +937,7 @@ const CLAIMS: [Claims; 71] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 71] = [
+const MODULE_NAMES: [&str; 72] = [
     "diodes",
     "fake_players",
     "block_breaking",
@@ -956,6 +958,7 @@ const MODULE_NAMES: [&str; 71] = [
     "network",
     "fluids",
     "client_extensions",
+    "colors",
     "options",
     "tanks",
     "fluid_wrappers",
@@ -2509,6 +2512,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::entity_render::get_static(rt, o, f))
             .or_else(|| crate::camera::get_static(rt, o, f))
             .or_else(|| crate::client_extensions::get_static(rt, o, f))
+            .or_else(|| crate::colors::get_static(rt, o, f))
             .or_else(|| crate::quads::get_static(rt, o, f))
             .or_else(|| crate::blocks::get_static(rt, o, f))
             .or_else(|| crate::shapes::get_static(rt, o, f))

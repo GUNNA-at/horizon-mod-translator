@@ -91,6 +91,9 @@ pub struct BlockProperties {
     /// How the chunk mesher draws the block (`BlockBehaviour.getRenderShape(state)`), whatever the
     /// template does.
     pub render_shape: Option<RenderShapes>,
+    /// What tints the block's model (its faces' `tintindex`), whatever the template does: by tint
+    /// index, a biome colour or one colour (`BlockColor.getColor(state, level, pos, tintIndex)`).
+    pub tints: Option<BlockTints>,
     /// A vanilla block whose properties this block copies (`Properties.ofFullCopy(Blocks.X)`):
     /// what the copy carries in vanilla and the game knows of that block, its hardness, explosion
     /// resistance, tool need, friction, speed and jump factors, map colour, sounds, light,
@@ -134,6 +137,81 @@ impl RenderShapes {
                     "model"
                 }
             }
+        }
+    }
+}
+
+/// A block's tints by state: each tint index's source, the last for any higher index; no source
+/// is untinted.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum BlockTints {
+    /// Every state (`["foliage"]`).
+    All(Vec<TintSource>),
+    /// By the block's own state property `property`: each listed value's sources; the values not
+    /// listed are untinted (`{"property": "power", "values": {"0": [4980736], ...}}`).
+    States {
+        property: String,
+        values: BTreeMap<String, Vec<TintSource>>,
+    },
+}
+
+impl BlockTints {
+    /// A state's sources, `combo` being its values of the block's own state properties.
+    pub fn sources(&self, combo: &[(String, String)]) -> &[TintSource] {
+        match self {
+            BlockTints::All(sources) => sources,
+            BlockTints::States { property, values } => combo
+                .iter()
+                .find(|(name, _)| name == property)
+                .and_then(|(_, value)| values.get(value))
+                .map_or(&[], Vec::as_slice),
+        }
+    }
+}
+
+/// Where a tint index's colour comes from: the biome's grass, foliage, dry foliage or water colour
+/// at the block (blended across biomes, as vanilla's blocks are), nothing, or one colour. Declared
+/// by name (`"grass"`, `"foliage"`, `"dry_foliage"`, `"water"`, `"none"`) or as a number
+/// `0xRRGGBB`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TintSource {
+    None,
+    Grass,
+    Foliage,
+    DryFoliage,
+    Water,
+    Constant(u32),
+}
+
+impl TintSource {
+    /// The sources a declaration names, by name.
+    pub const NAMED: [(&str, TintSource); 5] = [
+        ("none", TintSource::None),
+        ("grass", TintSource::Grass),
+        ("foliage", TintSource::Foliage),
+        ("dry_foliage", TintSource::DryFoliage),
+        ("water", TintSource::Water),
+    ];
+}
+
+impl<'de> Deserialize<'de> for TintSource {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Declared {
+            Color(u32),
+            Name(String),
+        }
+        match Declared::deserialize(d)? {
+            Declared::Color(c) if c <= 0xFF_FFFF => Ok(TintSource::Constant(c)),
+            Declared::Color(c) => Err(D::Error::custom(format!("a tint colour is 0xRRGGBB, not {c:#x}"))),
+            Declared::Name(name) => TintSource::NAMED
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, s)| *s)
+                .ok_or_else(|| D::Error::custom(format!("a tint is a colour number or one of none, grass, foliage, dry_foliage, water, not {name:?}"))),
         }
     }
 }
@@ -1037,6 +1115,19 @@ fn check_block(file: &BlockFile) -> Result<(), String> {
             }
         }
     }
+    if let Some(BlockTints::States { property, values }) = &p.tints {
+        let declared = file
+            .state_properties
+            .get(property)
+            .map(StateProperty::values);
+        if declared.is_none_or(|all| {
+            values.is_empty() || values.keys().any(|v| !all.contains(&v.as_str()))
+        }) {
+            return Err(format!(
+                "tints needs values of the block's own state property {property:?} (state_properties)"
+            ));
+        }
+    }
     let finite = |v: Option<f32>| v.is_none_or(f32::is_finite);
     if !finite(p.hardness) || !finite(p.explosion_resistance) || !finite(p.friction) {
         return Err("hardness, explosion_resistance and friction are numbers".into());
@@ -1512,6 +1603,47 @@ capabilities = ["registries"]
         ] {
             let e = block(bad).err().unwrap();
             assert!(e.contains("render_shape"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn blocks_declare_what_tints_their_models() {
+        let own = r#""state_properties": {"power": {"type": "enum", "values": ["0", "1", "2"]}}"#;
+        let block = |tints: &str| {
+            let text = format!(
+                r#"{{"template": "minecraft:stone", {own}, "properties": {{"tints": {tints}}}}}"#
+            );
+            let files: &[(&str, &[u8])] = &[("data/ruby/horizon/block/rail.json", text.as_bytes())];
+            hmod("tints", MANIFEST_TEXT, files)
+        };
+        let tints = |c: Result<Content, String>| c.unwrap().blocks[0].properties.tints.clone();
+        let state = |v: &str| [("power".to_owned(), v.to_owned())];
+        // Leaves: the biome's foliage colour at every index.
+        let all = tints(block(r#"["foliage"]"#)).unwrap();
+        assert_eq!(all.sources(&state("0")), [TintSource::Foliage]);
+        // A wire: its colour by power, untinted where the declaration lists no value.
+        let by_power = tints(block(
+            r#"{"property": "power", "values": {"1": [16711680], "2": ["grass", 255]}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            by_power.sources(&state("1")),
+            [TintSource::Constant(0xFF_0000)]
+        );
+        assert_eq!(
+            by_power.sources(&state("2")),
+            [TintSource::Grass, TintSource::Constant(0x00_00FF)]
+        );
+        assert!(by_power.sources(&state("0")).is_empty());
+        // An unknown source, a colour past 0xRRGGBB, a property that isn't the block's own or a
+        // value it doesn't have.
+        for bad in [
+            r#"["sky"]"#,
+            r#"[16777216]"#,
+            r#"{"property": "lit", "values": {"true": ["grass"]}}"#,
+            r#"{"property": "power", "values": {"9": ["grass"]}}"#,
+        ] {
+            assert!(block(bad).is_err(), "{bad}");
         }
     }
 

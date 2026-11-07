@@ -289,7 +289,7 @@ pub(crate) fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 }
 
 /// Biome `id` as `Holder<Biome>.value()` gives it: what modifiers read of it, from its data.
-fn biome_value(rt: &mut Rt, id: &str) -> V {
+pub(crate) fn biome_value(rt: &mut Rt, id: &str) -> V {
     let data: Json = rt.host().and_then(|h| h.biome_json(id)).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Json::Null);
     let b = rt.new_object(BIOME);
     let name = rt.string(id);

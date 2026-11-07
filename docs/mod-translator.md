@@ -6367,6 +6367,49 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     board shows both words in its flaps' font, each letter in its flap, where it showed nothing;
     its client decomposes "RUST" and "MODS" (it was handed "    "), and nothing is unmapped but
     Flywheel's GL calls.
+- [x] 2026-11-07 Part 87: mod blocks tinted by their colour handlers (Create's controller rail drew
+  its wire uncoloured, as every mod block drew its tinted faces: the mesher tints by vanilla's
+  names only). Measured over the 466 scanned jars: `RegisterColorHandlersEvent$Item.register` 34,
+  `Minecraft.getBlockColors` 31, `BlockColors.getColor(state, getter, pos, index)` 31,
+  `$Block.register` 29; their handlers read `BiomeColors` (foliage 10, water 8, grass 7),
+  `getBlockTint` (8), `GrassColor.get` (9), `FoliageColor`'s constants (7/5/5/3) and
+  `RedStoneWireBlock.getColorForPower` (3). None of it was answered.
+  - compat `colors` (new module): the client's `BlockColors` and `ItemColors`
+    (`Minecraft.getBlockColors()`, the events'), registration through
+    `RegisterColorHandlersEvent.Block`/`Item` (posted as the client is set up, after its client
+    extensions) and the deprecated `register`; `BlockColors.getColor` (the handler, else vanilla's
+    own blocks as 1.21.1's `BlockColors.createDefault` registers them, else -1) and its 3-argument
+    form, `ItemColors.getColor`; `BiomeColors`' averages, its three resolvers and any getter's
+    `getBlockTint(pos, resolver)`, a mod's own resolver run on the biome there; a biome's colours
+    from its data (`effects`' colours, the colour map at its climate, dark forest's modifier, swamp
+    grass's lighter shade; no blend across biomes, plains' where the host has no biome);
+    `GrassColor`/`FoliageColor` (the colour maps read from the resources, the constants) and
+    `getColorForPower` in vanilla's floats.
+  - compat `colors::block_tints(rt, state)`: runs the block's handler for tint indices 0 to 2 in a
+    level of that block, three times: twice with marker biome colours (equal to the marker both
+    times: that biome colour; equal across the runs: a constant, white none), once with plains'
+    (a colour derived from a biome one without being it). The last source holds for higher
+    indices.
+  - horizon-mods: a block's `properties.tints` (all states, or by one own state property), each
+    source `grass`, `foliage`, `dry_foliage`, `water`, `none` or a colour number; checked like
+    `render_shape`. docs/mods.md says it.
+  - translator: the content hook asks the tints as it asks render shapes (the default state, then
+    one property at a time; one property deciding gives its values' own).
+  - client: a mod state's facts row carries its `tints`; horizon-items `StateFacts.tints`; the
+    mesher tints a mod state by them (two sources kept, the second for any higher index), with the
+    game's own biome blend.
+  - Tests: compat 554 (6 new: a registered handler answers for its block; vanilla's blocks their
+    own colours; `getColorForPower` in vanilla's floats, worked by hand; the probe tells a biome
+    colour from constants and from a state's own (a rail's power); the resolvers through
+    `getBlockTint`; a biome's data colours and modifiers), translator 19, core 7, horizon-mods 34
+    (1 new: declared tints, all states or by a property, and what is refused), horizon-items 53
+    (the facts row's tints read, what it can't read untinted).
+  - In game (`p87scene.sh`): Create's controller rails set to powers 0 to 14 draw their wire from
+    dark to bright red as vanilla's dust beside them does; power 15's brightest pixel is
+    (250, 50, 1) and power 0's (75, 1, 1) (`0xFF3200` and `0x4C0000` on a near-white texel),
+    where the wire drew grey. Nothing new is unmapped. Seen: a controller rail beside a redstone
+    block placed after it stays at power 0 (vanilla's `BaseRailBlock.neighborChanged`, which runs
+    Create's `updateState`, isn't run for a mod rail): next.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

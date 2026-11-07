@@ -584,7 +584,25 @@ impl MeshTables {
                 }
                 "melon_stem" | "pumpkin_stem" => ([Tint::Stem(prop("age")); 2], 1),
                 "lily_pad" => ([Tint::LilyPad; 2], 1),
-                _ => ([Tint::None; 2], 0),
+                // A mod block: what its content declares (its mod's colour handler), the last
+                // source for every higher index. Two are kept: a third index takes the second's.
+                _ => match s.tints.as_deref() {
+                    Some([first, rest @ ..]) => {
+                        let tint = |t: &horizon_items::blocks::BlockTint| {
+                            use horizon_items::blocks::BlockTint as B;
+                            match *t {
+                                B::None => Tint::None,
+                                B::Grass => Tint::Grass,
+                                B::Foliage => Tint::Foliage,
+                                B::DryFoliage => Tint::DryFoliage,
+                                B::Water => Tint::Water,
+                                B::Constant(c) => Tint::Constant(c),
+                            }
+                        };
+                        ([tint(first), tint(rest.first().unwrap_or(first))], u8::MAX)
+                    }
+                    _ => ([Tint::None; 2], 0),
+                },
             };
             // getShadeBrightness overrides; the default is 0.2 for full collision shapes.
             let overrides = [
