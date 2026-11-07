@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 96] = [
+const COMPAT: [(&str, &str); 97] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -124,6 +124,7 @@ const COMPAT: [(&str, &str); 96] = [
     ("item_wrappers.rs", include_str!("../../horizon-compat/src/item_wrappers.rs")),
     ("creative.rs", include_str!("../../horizon-compat/src/creative.rs")),
     ("crops.rs", include_str!("../../horizon-compat/src/crops.rs")),
+    ("diodes.rs", include_str!("../../horizon-compat/src/diodes.rs")),
     ("fluids.rs", include_str!("../../horizon-compat/src/fluids.rs")),
     ("neo_tags.rs", include_str!("../../horizon-compat/src/neo_tags.rs")),
     ("nightconfig.rs", include_str!("../../horizon-compat/src/nightconfig.rs")),
@@ -326,6 +327,12 @@ fn level_host(krate: &str) -> String {
         }}
         fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {{
             self.level.native_schedule_block_tick(self.ticks, pos, block, delay)
+        }}
+        fn schedule_block_tick_at_priority(&mut self, pos: [i32; 3], block: &str, delay: i32, priority: i32) -> bool {{
+            self.level.native_schedule_prioritized_block_tick(self.ticks, pos, block, delay, priority)
+        }}
+        fn block_tick_queued(&mut self, pos: [i32; 3], block: &str, this_tick: bool) -> bool {{
+            self.level.native_block_tick_queued(self.ticks, pos, block, this_tick)
         }}
         fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.level.native_fluid_name_in_tag(fluid, tag)
@@ -2356,6 +2363,12 @@ fn world_writes(c: &str) -> String {
         fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {{
             self.game.native_schedule_block_tick_at(pos, block, delay)
         }}
+        fn schedule_block_tick_at_priority(&mut self, pos: [i32; 3], block: &str, delay: i32, priority: i32) -> bool {{
+            self.game.native_schedule_prioritized_block_tick_at(pos, block, delay, priority)
+        }}
+        fn block_tick_queued(&mut self, pos: [i32; 3], block: &str, this_tick: bool) -> bool {{
+            self.game.native_block_tick_queued_at(pos, block, this_tick)
+        }}
         fn entities_in(&self, b: [f64; 6]) -> Vec<{c}::host::EntityView> {{
             let dim = self.game.native_dimension();
             self.game.native_entities_in(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().filter_map(|id| {c}::host::Host::entity(self, id)).collect()
@@ -4281,6 +4294,12 @@ fn {id}_update_shape(
         }}
         fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {{
             self.level.native_schedule_block_tick(self.ticks, pos, block, delay)
+        }}
+        fn schedule_block_tick_at_priority(&mut self, pos: [i32; 3], block: &str, delay: i32, priority: i32) -> bool {{
+            self.level.native_schedule_prioritized_block_tick(self.ticks, pos, block, delay, priority)
+        }}
+        fn block_tick_queued(&mut self, pos: [i32; 3], block: &str, this_tick: bool) -> bool {{
+            self.level.native_block_tick_queued(self.ticks, pos, block, this_tick)
         }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false // the level is only read

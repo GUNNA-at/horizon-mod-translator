@@ -4085,6 +4085,51 @@ impl GameLevel<'_> {
         ticks.schedule_block(time, at, block, delay, TickPriority::Normal)
             != ScheduleResult::MissingChunk
     }
+    /// [`Self::native_schedule_block_tick`] at a priority, `TickPriority`'s
+    /// value (-3 extremely high to 3 extremely low, beyond them the nearest):
+    /// of the ticks due in one game tick, the higher priorities run first, as
+    /// a diode schedules its change (`Level.scheduleTick(pos, block, delay,
+    /// priority)`). API @API:native_block_tick_queue@.
+    pub(super) fn native_schedule_prioritized_block_tick(
+        &self,
+        ticks: &mut Ticks,
+        pos: [i32; 3],
+        block: &str,
+        delay: i32,
+        priority: i32,
+    ) -> bool {
+        let Some(state) = self.registry.default_state(block) else {
+            return false;
+        };
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        let block = self.behaviours.block(state);
+        let time = self.game_time();
+        ticks.schedule_block(time, at, block, delay, TickPriority::by_value(priority))
+            != ScheduleResult::MissingChunk
+    }
+    /// Whether a tick of `block` (a block name) is queued at `pos`
+    /// (`LevelTicks.hasScheduledTick`), or, with `this_tick`, taken from the
+    /// queue to run in the game tick under way (`willTickThisTick`, which a
+    /// diode asks before it schedules another). False for an unknown block.
+    /// `ticks` is the hook's. API @API:native_block_tick_queue@.
+    pub(super) fn native_block_tick_queued(
+        &self,
+        ticks: &mut Ticks,
+        pos: [i32; 3],
+        block: &str,
+        this_tick: bool,
+    ) -> bool {
+        let Some(state) = self.registry.default_state(block) else {
+            return false;
+        };
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        let block = self.behaviours.block(state);
+        if this_tick {
+            ticks.will_block_tick_this_tick(at, block)
+        } else {
+            ticks.has_block_tick(at, block)
+        }
+    }
     /// Schedules a tick of `fluid` (`minecraft:water`, `minecraft:lava`,
     /// `minecraft:flowing_water`...) at `pos` in `delay` game ticks, as a
     /// waterlogged block's shape update schedules its water in 5
@@ -4577,6 +4622,40 @@ impl Game<'_> {
             return false;
         }
         self.with_level(|_, level, ticks| level.native_schedule_block_tick(ticks, pos, block, delay))
+    }
+    /// [`Self::native_schedule_block_tick_at`] at a priority, `TickPriority`'s
+    /// value (`GameLevel::native_schedule_prioritized_block_tick`). API
+    /// @API:native_block_tick_queue@.
+    pub(super) fn native_schedule_prioritized_block_tick_at(
+        &mut self,
+        pos: [i32; 3],
+        block: &str,
+        delay: i32,
+        priority: i32,
+    ) -> bool {
+        if self.serving.is_none() && self.options.dedicated.is_none() {
+            return false;
+        }
+        self.with_level(|_, level, ticks| {
+            level.native_schedule_prioritized_block_tick(ticks, pos, block, delay, priority)
+        })
+    }
+    /// Whether a tick of `block` is queued at `pos` in the level in place, or
+    /// with `this_tick` about to run in the game tick under way
+    /// (`GameLevel::native_block_tick_queued`). False where this window isn't
+    /// a server. API @API:native_block_tick_queue@.
+    pub(super) fn native_block_tick_queued_at(
+        &mut self,
+        pos: [i32; 3],
+        block: &str,
+        this_tick: bool,
+    ) -> bool {
+        if self.serving.is_none() && self.options.dedicated.is_none() {
+            return false;
+        }
+        self.with_level(|_, level, ticks| {
+            level.native_block_tick_queued(ticks, pos, block, this_tick)
+        })
     }
     /// The light at `pos` in the world in place, as `(block, sky)`, each 0 to
     /// 15 (`Level.getBrightness` for `LightLayer.BLOCK` and `LightLayer.SKY`).

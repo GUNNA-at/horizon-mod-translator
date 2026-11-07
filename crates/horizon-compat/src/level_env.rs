@@ -115,6 +115,11 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
             let signal = rt.host_call(|h| h.signal(p, d, direct)).unwrap_or(0).clamp(0, 15);
             V::I(if name == "hasSignal" { (signal > 0) as i32 } else { signal })
         }
+        // `getControlInputSignal(pos, direction, diodesOnly)`: what a diode's side reads there.
+        ("getControlInputSignal", "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;Z)I") => {
+            let (p, d) = (pos(rt, 1), crate::api_common::direction_ordinal(rt, a(2)));
+            V::I(control_input_signal(rt, p, d, a(3).i() != 0))
+        }
         // `getDirectSignalTo(pos)`: the strongest strong signal its neighbours send into it.
         ("getDirectSignalTo", "(Lnet/minecraft/core/BlockPos;)I") => {
             let p = pos(rt, 1);
@@ -128,13 +133,18 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
             }
             V::I(best)
         }
-        // `scheduleTick(pos, block, delay[, priority])`; a fluid's ticks are the game's own.
+        // `scheduleTick(pos, block, delay[, priority])`, a priority by `TickPriority`'s value (its
+        // constants run from `EXTREMELY_HIGH`, -3); a fluid's ticks are the game's own.
         ("scheduleTick", d) if d.starts_with("(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;I") => {
             let (p, block) = (pos(rt, 1), crate::api::block_name(rt, a(2)));
+            let priority = d.contains("TickPriority").then(|| crate::api_common::enum_ordinal(rt, a(4)) - 3);
             if !block.is_empty()
                 && let Some(h) = rt.host_mut()
             {
-                h.schedule_block_tick(p, &block, a(3).i());
+                match priority {
+                    Some(priority) => h.schedule_block_tick_at_priority(p, &block, a(3).i(), priority),
+                    None => h.schedule_block_tick(p, &block, a(3).i()),
+                };
             }
             V::Void
         }
@@ -177,13 +187,40 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
     })
 }
 
-/// `LevelTicks`/`LevelTickAccess` (what `getBlockTicks` gives): nothing reads as queued, so a mod
-/// schedules again, which keeps the tick already there. `copyArea` (a clone command's) copies none,
-/// as the game's own `/clone` doesn't.
-pub(crate) fn ticks_call(rt: &mut Rt, name: &str) -> Option<V> {
-    let _ = rt;
+/// `SignalGetter.getControlInputSignal(pos, direction, diodesOnly)`: the side input a diode (a
+/// repeater's lock, a comparator's subtraction) reads from the block at `pos`, `direction` being the
+/// way to it: a diode's strong signal where only diodes count; else a redstone block's 15, a wire's
+/// power, or the block's strong signal (none from a block that is no signal source).
+pub(crate) fn control_input_signal(rt: &mut Rt, p: [i32; 3], direction: u8, diodes_only: bool) -> i32 {
+    let text = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
+    let (block, props) = crate::host::split_state(&text);
+    let direct = |rt: &mut Rt| rt.host_call(|h| h.signal(p, direction, true)).unwrap_or(0).clamp(0, 15);
+    if diodes_only {
+        return if crate::diodes::is_diode(rt, &text) { direct(rt) } else { 0 };
+    }
+    match block {
+        "minecraft:redstone_block" => 15,
+        "minecraft:redstone_wire" => props.iter().find(|(k, _)| *k == "power").and_then(|(_, v)| v.parse().ok()).unwrap_or(0),
+        _ => direct(rt),
+    }
+}
+
+/// `LevelTicks`/`LevelTickAccess` (what `getBlockTicks` gives, and `getFluidTicks`): whether a
+/// block's tick is queued at a position (`hasScheduledTick`) or about to run in the game tick under
+/// way (`willTickThisTick`, which a diode or a nixie tube asks before it schedules one), from the
+/// host; a fluid's never reads as queued, so a mod schedules again, which keeps the tick already
+/// there. `copyArea` (a clone command's) copies none, as the game's own `/clone` doesn't.
+pub(crate) fn ticks_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
     match name {
-        "hasScheduledTick" | "willTickThisTick" => Some(V::I(0)),
+        "hasScheduledTick" | "willTickThisTick" => {
+            let p = crate::api::pos_of(rt, a(1));
+            let block = crate::api::block_name(rt, a(2));
+            let fluid = rt.registered_name(a(2), "fluid").is_some() || crate::fluids::is_fluid_class(rt.class_of(a(2)));
+            let known = !fluid && !block.is_empty() && !block.starts_with(crate::api::UNREGISTERED);
+            let this_tick = name == "willTickThisTick";
+            Some(V::I((known && rt.host_mut().is_some_and(|h| h.block_tick_queued(p, &block, this_tick))) as i32))
+        }
         "schedule" | "clearArea" | "copyArea" | "copyAreaFrom" => Some(V::Void),
         "count" => Some(V::I(0)),
         _ => None,
@@ -337,8 +374,14 @@ mod tests {
             let stone = crate::api::get_static(rt, "net/minecraft/world/level/block/Blocks.STONE");
             level_call(rt, "scheduleTick.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;I)V", &[level, lit, stone, V::I(4)]);
             let ticks = level_call(rt, "getBlockTicks.()Lnet/minecraft/world/ticks/LevelTickAccess;", &[level]);
-            let queued = crate::api::call(rt, "net/minecraft/world/ticks/LevelTickAccess.hasScheduledTick.(Lnet/minecraft/core/BlockPos;Ljava/lang/Object;)Z", &[ticks, lit, stone]);
-            assert_eq!(queued.i(), 0);
+            const QUEUED: &str = "net/minecraft/world/ticks/LevelTickAccess.hasScheduledTick.(Lnet/minecraft/core/BlockPos;Ljava/lang/Object;)Z";
+            const THIS_TICK: &str = "net/minecraft/world/ticks/LevelTickAccess.willTickThisTick.(Lnet/minecraft/core/BlockPos;Ljava/lang/Object;)Z";
+            // Queued there for stone, not for dirt; neither about to run in this game tick.
+            let dirt = crate::api::get_static(rt, "net/minecraft/world/level/block/Blocks.DIRT");
+            assert_eq!(crate::api::call(rt, QUEUED, &[ticks, lit, stone]).i(), 1);
+            assert_eq!(crate::api::call(rt, QUEUED, &[ticks, lit, dirt]).i(), 0);
+            assert_eq!(crate::api::call(rt, QUEUED, &[ticks, dim, stone]).i(), 0);
+            assert_eq!(crate::api::call(rt, THIS_TICK, &[ticks, lit, stone]).i(), 0);
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
         assert_eq!(host.scheduled, [([2, 64, 2], "minecraft:stone".to_owned(), 4)]);

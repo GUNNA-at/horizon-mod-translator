@@ -5988,6 +5988,63 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     vanilla `DiodeBlock`'s (Part 78). The threshold switch reads `CurrentAmount` -1: its inventory
     filter wants the chest's block entity, and `level.getBlockEntity` gives null for a vanilla
     block's. The redstone link's receiver holds `Receive` 0 (its network). No throws.
+- [x] 2026-11-07 Part 78: a mod's diode is vanilla's `DiodeBlock`. 8 classes in 4 of the pack's jars
+  extend it (Create's toggle and powered latches and brass diodes, Aeronautics' accumulator and
+  inductor, Create Connected's sequenced pulse generator, Create Propulsion's redstone converter);
+  none has its own `neighborChanged`, `onPlace`, `onRemove`, `getDirectSignal`,
+  `getStateForPlacement` or `canSurvive`, 5 have their own `tick` (most calling `super.tick`), 4
+  their own `checkTickOnNeighbor`. With only their template answering, a latch never heard its
+  input, never scheduled its change, and told no one when it changed. Mods also ask the level's
+  tick queue: `willTickThisTick` (14 classes in 4 jars), `hasScheduledTick` (36 in 12), a
+  `scheduleTick` with a `TickPriority` (25 in 12), `getControlInputSignal` (2 in 2).
+  - compat `diodes` (new, first in the chain): `DiodeBlock`'s 21 methods as NeoForge 1.21.1 has
+    them, each calling the block's own overrides as the JVM dispatches (`tick`, `getSignal` forward
+    only while powered, `getDirectSignal` = the block's own `getSignal`, `neighborChanged` (drops
+    without a rigid floor, else `checkTickOnNeighbor`), `checkTickOnNeighbor` (no second tick
+    while one is about to run; priority high, very high while on, extremely high feeding a diode),
+    `shouldTurnOn`, `getInputSignal` (a wire's power counts), `getAlternateSignal`, `isLocked`,
+    `isSignalSource`, `getStateForPlacement` (input on the placer's side), `setPlacedBy`,
+    `onPlace`/`onRemove` (`updateNeighborsInFront`: the block in front, then its neighbours but
+    the diode), `shouldPrioritize`, `isDiode`, `canSurvive`/`canSurviveOn`, `getOutputSignal` 15).
+    `inherited(rt, class, method)`: the `DiodeBlock` key the game's hooks fall back to for a block
+    whose first vanilla class is `DiodeBlock` and that has no such method of its own.
+  - compat `glue`: `hook_key` picks the block's own method, else the inherited one, for the
+    scheduled tick, the neighbour change, `onPlace`/`onRemove`, the signal answers,
+    `getStateForPlacement` and `setPlacedBy`; `blocks::survives_by_code` and `survival_blocks`
+    take a diode's `canSurvive`.
+  - compat `level_env`: `scheduleTick(pos, block, delay, priority)` keeps its priority;
+    `getBlockTicks().hasScheduledTick` and `willTickThisTick` ask the host (before: always false);
+    `getControlInputSignal(pos, direction, diodesOnly)` (a redstone block's 15, a wire's power, a
+    source's strong signal; only a diode's where `diodesOnly`).
+  - compat-core: `Host::schedule_block_tick_at_priority(pos, block, delay, priority)` (default:
+    without one) and `Host::block_tick_queued(pos, block, this_tick)`; `MemoryHost` keeps the
+    priorities and the ticks running now.
+  - client: `GameLevel::native_schedule_prioritized_block_tick` and `native_block_tick_queued`,
+    `Game::native_schedule_prioritized_block_tick_at` and `native_block_tick_queued_at` (API
+    @API:native_block_tick_queue@); the bundles' three hosts pass them on.
+  - Tests (`diodes::tests`, 8): a mod diode on and off a delay after its input at vanilla's
+    priorities, forward only, strong as weak, a pulse passing as one as long, a wire's power as
+    input; no second tick while one runs; the highest priority feeding a diode; the block in
+    front and its neighbours hear each change and the removal, none when moved; it drops off a
+    floor that isn't rigid; a toggle latch's own `tick` runs vanilla's with its own delay (on,
+    stays, off); a powered latch's own `checkTickOnNeighbor` and a lock by side inputs (redstone
+    block, wire, torch); placement facing and `setPlacedBy`'s tick. `level_env`'s tick test now
+    expects the queued tick. Compat 516, translator 19, gameplay 70.
+  - In game (`latchsurvey.sh`: Part 77's rows, then new ones): the powered latch and the toggle
+    latch with a redstone block behind them hold `powered` and `powering` and light their lamps
+    (before: dark). A toggle latch fed on, off, on and off again goes powering, stays powering,
+    stops, stays stopped, its lamp with it. A pulse extender lights its lamp while fed and stops
+    within 4 ticks of its input going (its delay of 2). A toggle latch the player places standing
+    west of the spot faces west (its input on the player's side; the script waits a few ticks after
+    turning the player, as the server reads the look a tick later). Part 77's `host_call` in game:
+    the nixie tube by the analog lever shows the lever's 6, and both contacts' lamps light (placed
+    before the contacts: a lamp `/setblock` puts beside a block already sending stays dark until a
+    neighbour changes, as in vanilla; placed after, one stayed dark). Left: a latch whose floor goes
+    is removed but drops nothing, as its `dropResources` runs in a level hook (the neighbour
+    change) whose host spawns no item entity (the bundles' level host has no `spawn_item_entity`;
+    next). The threshold switch still reads -1 (no block entity object for a vanilla chest), the
+    link's receiver 0. Unmapped: two reads of a pulse extender's `BlockEntity.level` where the
+    runtime had none set. No throws.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

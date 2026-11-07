@@ -1482,9 +1482,9 @@ fn plant_survives(rt: &mut Rt, class: &str, this: V, state: V, level: V, pos: V)
 
 /// `state.canSurvive(level, pos)` of the mod block `b` (class `class`): the block's own
 /// `canSurvive` where its class has one, else its vanilla plant base's as NeoForge 1.21.1 has it,
-/// which asks the block's own `mayPlaceOn` (Farmer's Delight's wild crops: dirt or sand). `None`
-/// where neither is the block's (its base isn't a plant kept here), or its code threw: the game's
-/// rule for the block's template answers then.
+/// which asks the block's own `mayPlaceOn` (Farmer's Delight's wild crops: dirt or sand), or a
+/// diode's (a rigid top face below, [`crate::diodes`]). `None` where none is the block's (its base
+/// isn't one kept here), or its code threw: the game's rule for the block's template answers then.
 pub(crate) fn mod_survives(rt: &mut Rt, b: V, class: &'static str, state: V, level: V, pos: V) -> Option<bool> {
     let survives = survives_by_code(rt, b, class, state, level, pos);
     if rt.thrown.is_some() {
@@ -1500,6 +1500,11 @@ pub(crate) fn survives_by_code(rt: &mut Rt, b: V, class: &'static str, state: V,
         let vc = rt.vcall?;
         return Some(vc(rt, api::CAN_SURVIVE_KEY, api::CAN_SURVIVE, &[b, state, level, pos]).i() != 0);
     }
+    // A diode's: on a rigid top face, by its own `canSurviveOn` where it has one.
+    if let Some(key) = crate::diodes::inherited(rt, class, api::CAN_SURVIVE) {
+        let vc = rt.vcall?;
+        return Some(vc(rt, key, api::CAN_SURVIVE, &[b, state, level, pos]).i() != 0);
+    }
     plant_survives(rt, plant_base(rt, class)?, b, state, level, pos)
 }
 
@@ -1508,8 +1513,8 @@ fn plant_base(rt: &Rt, class: &'static str) -> Option<&'static str> {
     plant_class(if class.starts_with("net/minecraft/") { class } else { crate::rotation::vanilla_base(rt, class) })
 }
 
-/// The mod's blocks whose survival its own code decides: a class with its own `canSurvive`, or a
-/// vanilla plant base kept here (whose `canSurvive` asks the block's `mayPlaceOn`). The game asks
+/// The mod's blocks whose survival its own code decides: a class with its own `canSurvive`, a
+/// diode, or a vanilla plant base kept here (whose `canSurvive` asks the block's `mayPlaceOn`). The game asks
 /// [`mod_survives`] about these only.
 pub fn survival_blocks(rt: &Rt) -> Vec<String> {
     let mut blocks: Vec<String> = rt
@@ -1519,6 +1524,7 @@ pub fn survival_blocks(rt: &Rt) -> Vec<String> {
         .filter(|(_, b)| {
             let class = rt.class_of(**b);
             rt.overrides.is_some_and(|o| o(class, api::CAN_SURVIVE))
+                || crate::diodes::inherited(rt, class, api::CAN_SURVIVE).is_some()
                 || plant_base(rt, class).is_some_and(|c| BUSH_SURVIVAL.contains(&c) || DOUBLE_PLANT_SURVIVAL.contains(&c))
         })
         .map(|((_, name), _)| name.clone())

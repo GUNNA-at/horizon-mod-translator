@@ -32,6 +32,7 @@ pub mod files;
 pub mod convention;
 pub mod creative;
 pub mod crops;
+pub mod diodes;
 pub mod fluid_wrappers;
 pub mod item_wrappers;
 pub mod fluids;

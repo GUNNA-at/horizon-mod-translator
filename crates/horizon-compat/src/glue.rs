@@ -17,18 +17,26 @@ pub(crate) fn mod_block(rt: &Rt, state: &str) -> Option<(V, &'static str)> {
     (class != "net/minecraft/world/level/block/Block").then_some((b, class))
 }
 
+/// The key a hook calls the block method `short` by on a mod block of class `class`: `own` where
+/// the class has the method itself, else the vanilla method it inherits where the runtime has that
+/// (a diode's, [`crate::diodes::inherited`]). None where neither: the block's template acts.
+fn hook_key(rt: &Rt, class: &'static str, short: &'static str, own: &'static str) -> Option<&'static str> {
+    if rt.overrides.is_some_and(|o| o(class, short)) {
+        return Some(own);
+    }
+    crate::diodes::inherited(rt, class, short)
+}
+
 /// Runs `key` on the block's object with the game as host. Returns whether it ran.
 fn run(rt: &mut Rt, host: &mut dyn Host, state: &str, key: &'static str, extra: impl FnOnce(&mut Rt) -> Vec<V>) -> bool {
     let Some((b, class)) = mod_block(rt, state) else { return false };
-    if !rt.overrides.is_some_and(|o| o(class, key)) {
-        return false;
-    }
+    let Some(owner) = hook_key(rt, class, key, key) else { return false };
     rt.with_host(host, |rt| {
         let st = api::state(rt, state);
         let mut args = vec![b, st];
         args.extend(extra(rt));
         if let Some(vc) = rt.vcall {
-            vc(rt, key, key, &args);
+            vc(rt, owner, key, &args);
         }
         rt.report_thrown(key); // an exception escaping a hook ends that call only, as the game logs and goes on
     });
@@ -433,9 +441,9 @@ fn removed(rt: &mut Rt, b: V, class: &'static str, pos: [i32; 3], old: &str, new
     let to = api::state(rt, new);
     let l = level(rt);
     let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
-    match rt.vcall.filter(|_| rt.overrides.is_some_and(|o| o(class, ON_REMOVE))) {
-        Some(vc) => {
-            vc(rt, ON_REMOVE_KEY, ON_REMOVE, &[b, st, l, p, to, V::I(moved as i32)]);
+    match rt.vcall.zip(hook_key(rt, class, ON_REMOVE, ON_REMOVE_KEY)) {
+        Some((vc, key)) => {
+            vc(rt, key, ON_REMOVE, &[b, st, l, p, to, V::I(moved as i32)]);
             rt.report_thrown(ON_REMOVE);
         }
         None => crate::block_breaking::on_remove(rt, st, l, p, to),
@@ -543,7 +551,7 @@ const DROPS_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.ge
 /// tick here, its tanks and vaults join their neighbours, a kinetic block keeps its speed through a
 /// change that leaves its connections alone.
 fn placed(rt: &mut Rt, b: V, class: &'static str, pos: [i32; 3], old: &str, new: &str, moved: bool) {
-    let Some(vc) = rt.vcall.filter(|_| rt.overrides.is_some_and(|o| o(class, ON_PLACE))) else { return };
+    let Some((vc, key)) = rt.vcall.zip(hook_key(rt, class, ON_PLACE, ON_PLACE_KEY)) else { return };
     let here = rt.host().map(|h| h.block_state(pos)).unwrap_or_default();
     if crate::host::split_state(&here).0 != crate::host::split_state(new).0 {
         return;
@@ -552,7 +560,7 @@ fn placed(rt: &mut Rt, b: V, class: &'static str, pos: [i32; 3], old: &str, new:
     let from = api::state(rt, old);
     let l = level(rt);
     let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
-    vc(rt, ON_PLACE_KEY, ON_PLACE, &[b, st, l, p, from, V::I(moved as i32)]);
+    vc(rt, key, ON_PLACE, &[b, st, l, p, from, V::I(moved as i32)]);
     rt.report_thrown(ON_PLACE);
 }
 
@@ -712,13 +720,11 @@ pub struct Placement {
 pub fn state_for_placement(rt: &mut Rt, host: &mut dyn Host, state: &str, placement: &Placement) -> Option<Option<String>> {
     rt.safe_point();
     let (b, class) = mod_block(rt, state)?;
-    if !rt.overrides.is_some_and(|o| o(class, STATE_FOR_PLACEMENT)) {
-        return None;
-    }
+    let key = hook_key(rt, class, STATE_FOR_PLACEMENT, STATE_FOR_PLACEMENT_KEY)?;
     rt.with_host(host, |rt| {
         let vc = rt.vcall?;
         let ctx = crate::api_common::place_context(rt, placement);
-        let r = vc(rt, STATE_FOR_PLACEMENT_KEY, STATE_FOR_PLACEMENT, &[b, ctx]);
+        let r = vc(rt, key, STATE_FOR_PLACEMENT, &[b, ctx]);
         if rt.thrown.is_some() {
             rt.report_thrown("getStateForPlacement");
             return None;
@@ -863,9 +869,7 @@ const GET_ANALOG_OUTPUT: (&str, &str) = (
 /// (the answer of the block's template stands), the block isn't the mod's, or its code threw.
 fn own_answer(rt: &mut Rt, host: &mut dyn Host, state: &str, (key, owner_key): (&'static str, &'static str), extra: impl FnOnce(&mut Rt) -> Vec<V>) -> Option<V> {
     let (b, class) = mod_block(rt, state)?;
-    if !rt.overrides.is_some_and(|o| o(class, key)) {
-        return None;
-    }
+    let owner_key = hook_key(rt, class, key, owner_key)?;
     let vc = rt.vcall?;
     rt.with_host(host, |rt| {
         let st = api::state(rt, state);
@@ -1274,15 +1278,13 @@ fn placed_with(rt: &mut Rt, pos: [i32; 3], state: &str, item: &str) {
     if be.r() != 0 {
         crate::components::apply_from_stack(rt, be, stack);
     }
-    if !rt.overrides.is_some_and(|o| o(class, SET_PLACED_BY)) {
-        return;
-    }
+    let Some(key) = hook_key(rt, class, SET_PLACED_BY, SET_PLACED_BY_KEY) else { return };
     let Some(vc) = rt.vcall else { return };
     let l = level(rt);
     let p = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
     let st = api::state(rt, state);
     let player = crate::api_common::acting_player(rt);
-    vc(rt, SET_PLACED_BY_KEY, SET_PLACED_BY, &[b, l, p, st, player, stack]);
+    vc(rt, key, SET_PLACED_BY, &[b, l, p, st, player, stack]);
     rt.report_thrown("setPlacedBy");
 }
 

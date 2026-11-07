@@ -560,6 +560,20 @@ pub trait Host {
     fn schedule_block_tick(&mut self, _pos: [i32; 3], _block: &str, _delay: i32) -> bool {
         false
     }
+    /// [`Host::schedule_block_tick`] at `priority` (`TickPriority`'s value: -3, extremely high, to
+    /// 3, extremely low; 0 is normal): of the ticks due in the same game tick, the lower value runs
+    /// first (a diode facing another one ticks before it). A host that keeps no priorities
+    /// schedules it as a normal one.
+    fn schedule_block_tick_at_priority(&mut self, pos: [i32; 3], block: &str, delay: i32, priority: i32) -> bool {
+        let _ = priority;
+        self.schedule_block_tick(pos, block, delay)
+    }
+    /// Whether a tick of `block` (a block name) is queued at `pos` (`hasScheduledTick`), or, with
+    /// `this_tick`, about to run in the game tick under way (`willTickThisTick`: taken from the
+    /// queue, not run yet). False where nothing ticks blocks.
+    fn block_tick_queued(&mut self, _pos: [i32; 3], _block: &str, _this_tick: bool) -> bool {
+        false
+    }
     /// The acting player (the one whose click or action runs the mod): sneaking.
     fn player_sneaking(&self) -> bool {
         false
@@ -1641,6 +1655,12 @@ pub struct MemoryHost {
     pub sent_signals: HashMap<([i32; 3], u8), (i32, i32)>,
     /// Block ticks scheduled, in order: where, which block, in how many ticks.
     pub scheduled: Vec<([i32; 3], String, i32)>,
+    /// The priorities of the ticks scheduled with one ([`Host::schedule_block_tick_at_priority`]),
+    /// in order, by position.
+    pub tick_priorities: Vec<([i32; 3], i32)>,
+    /// The block ticks taken from the queue to run in the game tick under way
+    /// ([`Host::block_tick_queued`] with `this_tick`).
+    pub ticking_now: Vec<([i32; 3], String)>,
     /// Neighbour updates asked for, in order, with the block that changed ([`Host::update_neighbors`]).
     pub neighbor_updates: Vec<(NeighborUpdate, String)>,
     /// Resource files by path ([`Host::resource`]).
@@ -1710,6 +1730,20 @@ impl Host for MemoryHost {
         }
         self.scheduled.push((pos, block.to_owned(), delay));
         true
+    }
+    fn schedule_block_tick_at_priority(&mut self, pos: [i32; 3], block: &str, delay: i32, priority: i32) -> bool {
+        let scheduled = self.schedule_block_tick(pos, block, delay);
+        if scheduled {
+            self.tick_priorities.push((pos, priority));
+        }
+        scheduled
+    }
+    fn block_tick_queued(&mut self, pos: [i32; 3], block: &str, this_tick: bool) -> bool {
+        if this_tick {
+            self.ticking_now.iter().any(|(p, b)| *p == pos && b == block)
+        } else {
+            self.scheduled.iter().any(|(p, b, _)| *p == pos && b == block)
+        }
     }
     fn player_sneaking(&self) -> bool {
         self.sneaking

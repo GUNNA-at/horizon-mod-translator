@@ -768,7 +768,8 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 69] = [
+const CHAIN: [Module; 70] = [
+    crate::diodes::call,
     crate::fake_players::call,
     crate::block_breaking::call,
     crate::loot_params::call,
@@ -843,7 +844,8 @@ const CHAIN: [Module; 69] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 69] = [
+const CLAIMS: [Claims; 70] = [
+    crate::diodes::claims,
     crate::fake_players::claims,
     crate::block_breaking::claims,
     crate::loot_params::claims,
@@ -916,7 +918,8 @@ const CLAIMS: [Claims; 69] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 69] = [
+const MODULE_NAMES: [&str; 70] = [
+    "diodes",
     "fake_players",
     "block_breaking",
     "loot_params",
@@ -1562,7 +1565,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return Some(v);
     }
     if crate::level_env::is_ticks(owner) {
-        return crate::level_env::ticks_call(rt, name);
+        return crate::level_env::ticks_call(rt, name, args);
     }
     if owner == crate::level_env::BLOCK_IN_WORLD {
         return crate::level_env::block_in_world(rt, name, args);
