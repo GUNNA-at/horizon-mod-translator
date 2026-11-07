@@ -6221,6 +6221,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `iterateBackwards`, `visit` until the consumer answers; a stack's shine; a block entity
     without its own ticker or data ticks on vanilla's; a state's neighbour change reaches the
     level; the level's generator; an item model's passes and fallback type), translator 19, core 7.
+  - In game (`allblocks.sh` again, all 643 of Create's blocks): nothing threw, and of Part 81's 15
+    unmapped calls only the lectern controller's `getOriginalModel` is left, now followed by
+    `ItemRenderer.renderQuadList` (Part 83). The display board, which reaches its text through
+    `iterateFormatted` now, asks the font for single glyphs (`FontSet.getGlyphInfo` and
+    `getGlyph`, `GlyphInfo.getAdvance`, `BakedGlyph.render`), which the game doesn't give mods yet.
+    `kinsurvey6.sh` reads the two pistons cell by cell and watches five lone fake tracks. The
+    extending piston ends `extended` with its pole at +1 and its planks at +3, but air at +2 where
+    Create puts the head (Part 83). The fake tracks stay through 100 ticks with random ticks off and
+    200 at the default speed (3), and all are gone within 40 at 4096, as Create's: a fake track lives
+    three random ticks unless something keeps it (`keepAlive`).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
