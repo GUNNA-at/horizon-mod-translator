@@ -6092,6 +6092,37 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     over air: the stone goes, the latch is removed and drops one `create:powered_latch` item entity
     by its position (before: nothing). Unmapped: the 16 client-side GL and texture calls of the
     earlier surveys (LWJGL's shader compile, `DynamicTexture`), none from a level hook. No throws.
+- [x] 2026-11-07 Part 80: a block entity has no level until it joins one, as Java's field starts;
+  and Create's redstone links checked the ways a player makes a receiver. Measured on the pack
+  (`p80scan/levelreads.py`, per method, direct `getfield`): 3112 methods in 874 classes of 108 jars
+  read a block entity's `level` field; 75 of them in 70 classes of 32 jars are load methods
+  (`loadAdditional`, `read`, `applyImplicitComponents`...), which vanilla runs before the block
+  entity joins its level (a chunk's load), where the field is null. None reads it in a constructor
+  itself, but Create's do through calls: a `ScrollValueBehaviour` taking its default in
+  `addBehaviours` (the constructor's) calls back `sendData`, `level != null && !level.isClientSide`.
+  The runtime had no `level` at all until `setLevel`: the read went to the API as an unmapped call
+  (`BlockEntity.$level`, twice per pulse extender placed, Part 78) and answered nothing.
+  - compat: `BlockEntity.<init>` sets `level` null and `remove` false, as the JVM's fields start;
+    `setLevel` and the game's hooks set the level as before.
+  - Redstone links: Create makes a link's `LinkBehaviour` only on its first data read
+    (`addBehavioursDeferred`) or when its block's mode differs from the one it keeps
+    (`RedstoneLinkBlockEntity.tick`); a link is placed a transmitter (`receiver=false` is its
+    default state) and toggled to a receiver by the wrench (`toggleMode`: `setBlock` with `receiver`
+    cycled). Part 78's receiver was `/setblock` as a receiver without data: in Create too it never
+    gets a link, and reads 0.
+  - Tests: compat `api_common::tests::a_new_block_entity_has_no_level_until_it_joins_one` (what
+    the generated code reads for `this.level` and `this.remove` after `BlockEntity.<init>`: null
+    and false, `hasLevel` false; after `setLevel`, that level), no unmapped call. Compat 518,
+    translator 19.
+  - In game (`p80survey.sh`: a transmitter link beside which a redstone block is placed, four links
+    east of it, a lamp east of each): R1 placed a transmitter then `/setblock` a receiver (the same
+    block, the block entity kept), R2 placed a receiver with `{Transmitter:0b}`, R3 placed a
+    transmitter then wrenched by the player (`use-item` with Create's wrench: `onWrenched`,
+    `toggleMode`) are receivers; with the transmitter powered (`Transmit` 15) each holds `Receive`
+    15, `powered`, and lights its lamp, and all three go dark when the redstone block goes. R0, a
+    receiver placed without data, holds `Receive` 0 and no frequency data, as in Create. A pulse
+    extender placed: `ScrollValue` 2, `State` 0, and no unmapped call (Part 78 had two). No
+    throws; unmapped: only the 16 client GL and texture calls of the earlier surveys.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

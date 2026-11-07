@@ -2769,8 +2769,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         },
         // Block entities
         // Block entities: the API's state lives in the fields Java names (`level`, `worldPosition`,
-        // `blockState`, `remove`), which mod subclasses read directly.
+        // `blockState`, `remove`), which mod subclasses read directly. Until it joins a level its
+        // `level` is null and it isn't removed, as Java's fields start: a constructor that asks
+        // (Create's `sendData` from a value's default, `level != null && ...`) reads them so.
         ("net/minecraft/world/level/block/entity/BlockEntity", "<init>") => {
+            rt.put_field(a(0), "level", V::NULL);
+            rt.put_field(a(0), "remove", V::I(0));
             rt.put_field(a(0), "$type", a(1));
             rt.put_field(a(0), "type", a(1));
             rt.put_field(a(0), "$pos", a(2));
@@ -5661,6 +5665,34 @@ mod tests {
         let tag = api::call(&mut rt, "net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket.getTag.()Lnet/minecraft/nbt/CompoundTag;", &[packet]);
         assert_eq!(int_of(&mut rt, tag, "Saved"), V::I(1));
         assert_eq!(int_of(&mut rt, tag, "Fuel"), V::I(0));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A block entity's constructor that reads its own `level` (Create's `sendData` when a value
+    /// takes its default) finds null and not removed, as Java's fields start; once in a level it
+    /// finds that one.
+    #[test]
+    fn a_new_block_entity_has_no_level_until_it_joins_one() {
+        const INIT: &str = "net/minecraft/world/level/block/entity/BlockEntity.<init>.(Lnet/minecraft/world/level/block/entity/BlockEntityType;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V";
+        const LEVEL: &str = "net/minecraft/world/level/block/entity/BlockEntity.$level.()Lnet/minecraft/world/level/Level;";
+        const REMOVED: &str = "net/minecraft/world/level/block/entity/BlockEntity.$remove.()Z";
+        const HAS_LEVEL: &str = "net/minecraft/world/level/block/entity/BlockEntity.hasLevel.()Z";
+        const SET_LEVEL: &str = "net/minecraft/world/level/block/entity/BlockEntity.setLevel.(Lnet/minecraft/world/level/Level;)V";
+        let mut rt = Rt::new();
+        crate::install();
+        let ty = api::get_static(&mut rt, "net/minecraft/world/level/block/entity/BlockEntityType.FURNACE");
+        let pos = api::block_pos(&mut rt, 4, 64, -2);
+        let state = api::state(&mut rt, "minecraft:furnace[facing=north,lit=false]");
+        let be = rt.new_object("test/Diode");
+        api::call(&mut rt, INIT, &[be, ty, pos, state]);
+        // What the generated code reads for `this.level` and `this.remove`.
+        assert_eq!(api::game_field(&mut rt, be, "level", "$level", LEVEL), V::NULL);
+        assert_eq!(api::game_field(&mut rt, be, "remove", "$remove", REMOVED).i(), 0);
+        assert_eq!(api::call(&mut rt, HAS_LEVEL, &[be]).i(), 0);
+        let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+        api::call(&mut rt, SET_LEVEL, &[be, level]);
+        assert_eq!(api::game_field(&mut rt, be, "level", "$level", LEVEL), level);
+        assert_eq!(api::call(&mut rt, HAS_LEVEL, &[be]).i(), 1);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }
