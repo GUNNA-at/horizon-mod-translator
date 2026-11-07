@@ -335,6 +335,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             };
             combinator(rt, if n == "and" { "compat:fn/and" } else { "compat:fn/or" }, parts)
         }
+        // Guava's `Predicate.test` is a default method that runs its `apply`, the method a lambda
+        // made for Guava's `Predicate` has (Create's `InvManipulationBehaviour` filters).
+        ("com/google/common/base/Predicate", "test") => {
+            let r = rt.call_functional("com/google/common/base/Predicate.apply.(Ljava/lang/Object;)Z", a(0), &[a(1)]);
+            V::I(r.i())
+        }
         ("com/google/common/base/Suppliers", "memoize") => combinator(rt, "compat:fn/memo", vec![a(0), V::NULL, V::I(0)]),
         ("com/google/common/base/Suppliers", "ofInstance") => constant(rt, a(0)),
         _ => return None,
@@ -397,6 +403,10 @@ mod tests {
         assert_eq!(answers, vec![(1, 1, 0), (0, 1, 0), (0, 0, 1)]);
         let guava = c(&mut rt, "com/google/common/base/Predicates.and.(Lcom/google/common/base/Predicate;Lcom/google/common/base/Predicate;)Lcom/google/common/base/Predicate;", &[big, neither]);
         assert_eq!(rt.call_functional("com/google/common/base/Predicate.apply.(Ljava/lang/Object;)Z", guava, &[V::I(5)]).i(), 1);
+        // Java's `test` on a lambda made for Guava's `Predicate` (it has only `apply`) runs it.
+        let guava_test = "com/google/common/base/Predicate.test.(Ljava/lang/Object;)Z";
+        assert_eq!((c(&mut rt, guava_test, &[big, V::I(5)]).i(), c(&mut rt, guava_test, &[big, V::I(1)]).i()), (1, 0));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A part that throws ends a combined call as Java's default methods do: the exception is

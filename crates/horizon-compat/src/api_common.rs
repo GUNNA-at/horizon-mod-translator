@@ -2795,6 +2795,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.put_field(a(0), "remove", V::I((name == "setRemoved") as i32));
             V::Void
         }
+        (o, "setChanged") if o.ends_with("BlockEntity") && desc == "()V" => {
+            block_entity_changed(rt, a(0));
+            V::Void
+        }
         (o, "setChanged" | "onLoad" | "onChunkUnloaded" | "invalidateCapabilities") if o.ends_with("BlockEntity") => V::Void,
         // The base class saves and loads nothing of its own beyond what the glue writes (id, position).
         (o, "saveAdditional" | "loadAdditional" | "requestModelDataUpdate" | "onDataPacket") if o.ends_with("BlockEntity") => V::Void,
@@ -3447,6 +3451,22 @@ const MUTABLE_COMPONENT: &str = "net/minecraft/network/chat/MutableComponent";
 
 /// A text component: `text` itself (`Component.literal`) or the translation key it is
 /// (`Component.translatable`, with the arguments `with`, an `Object[]` or null).
+/// `BlockEntity.setChanged()` of the block entity `be` once it is in a level: as vanilla's, the
+/// comparators beside it read it again (`updateNeighbourForOutputSignal`) unless its block is air.
+fn block_entity_changed(rt: &mut Rt, be: V) {
+    let (level, pos, state) = (rt.get_field(be, "level"), rt.get_field(be, "worldPosition"), rt.get_field(be, "blockState"));
+    if level.r() == 0 || pos.r() == 0 {
+        return;
+    }
+    let text = rt.str_of(state).unwrap_or("minecraft:air").to_owned();
+    let (block, _) = crate::host::split_state(&text);
+    if matches!(block, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") {
+        return;
+    }
+    let pos = crate::api::pos_of(rt, pos);
+    rt.host_call(|h| h.update_neighbors(crate::host::NeighborUpdate::Output { pos }, block));
+}
+
 pub(crate) fn component(rt: &mut Rt, text: V, translatable: bool, with: V) -> V {
     let t = rt.new_object(MUTABLE_COMPONENT);
     rt.put_field(t, "$text", text);

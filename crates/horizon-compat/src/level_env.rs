@@ -96,14 +96,15 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
         ("isThundering", "()Z") => V::I((f64::from(weather(rt).1) > 0.9) as i32),
         // Raining on the block: under open sky. (Vanilla also asks the biome: no rain in a desert.)
         ("isRainingAt", _) => V::I((f64::from(weather(rt).0) > 0.2 && light(rt, pos(rt, 1)).1 >= 15) as i32),
-        // `SignalGetter`: the strongest signal any neighbour sends it.
+        // `SignalGetter`: the strongest signal any neighbour sends it. Each read is the game's call,
+        // inside which a neighbour of the mod's answers by its own code (an analog lever's level).
         ("hasNeighborSignal", _) => {
             let p = pos(rt, 1);
-            V::I((rt.host_mut().map_or(0, |h| h.neighbor_signal(p)) > 0) as i32)
+            V::I((rt.host_call(|h| h.neighbor_signal(p)).unwrap_or(0) > 0) as i32)
         }
         ("getBestNeighborSignal", _) => {
             let p = pos(rt, 1);
-            V::I(rt.host_mut().map_or(0, |h| h.neighbor_signal(p)).clamp(0, 15))
+            V::I(rt.host_call(|h| h.neighbor_signal(p)).unwrap_or(0).clamp(0, 15))
         }
         // `getSignal(pos, direction)`: what the block at `pos` sends back along `direction` (the
         // way from the block asking to it), a nixie tube's or a lamp's input; `hasSignal`, whether
@@ -111,7 +112,7 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
         ("getSignal" | "hasSignal" | "getDirectSignal", "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)I" | "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z") => {
             let (p, d) = (pos(rt, 1), crate::api_common::direction_ordinal(rt, a(2)));
             let direct = name == "getDirectSignal";
-            let signal = rt.host_mut().map_or(0, |h| h.signal(p, d, direct)).clamp(0, 15);
+            let signal = rt.host_call(|h| h.signal(p, d, direct)).unwrap_or(0).clamp(0, 15);
             V::I(if name == "hasSignal" { (signal > 0) as i32 } else { signal })
         }
         // `getDirectSignalTo(pos)`: the strongest strong signal its neighbours send into it.
@@ -120,7 +121,7 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
             let mut best = 0;
             for (d, step) in STEPS.iter().enumerate() {
                 let n = [p[0] + step[0], p[1] + step[1], p[2] + step[2]];
-                best = best.max(rt.host_mut().map_or(0, |h| h.signal(n, d as u8, true)).clamp(0, 15));
+                best = best.max(rt.host_call(|h| h.signal(n, d as u8, true)).unwrap_or(0).clamp(0, 15));
                 if best >= 15 {
                     break;
                 }

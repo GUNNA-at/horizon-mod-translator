@@ -130,6 +130,20 @@ pub enum PayloadTarget {
     Near { x: f64, y: f64, z: f64, radius: f64 },
 }
 
+/// A neighbour update a mod's code asks the level for ([`Host::update_neighbors`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NeighborUpdate {
+    /// `Level.updateNeighborsAt(pos, block)` (and `blockUpdated`): the six blocks around `pos`, in
+    /// vanilla's order, but the one in direction `skip` (`Direction`'s data value) when set
+    /// (`updateNeighborsAtExceptFromFacing`).
+    Around { pos: [i32; 3], skip: Option<u8> },
+    /// `Level.neighborChanged(pos, block, fromPos)`: the block at `pos` hears the change at `from`.
+    One { pos: [i32; 3], from: [i32; 3] },
+    /// `Level.updateNeighbourForOutputSignal(pos, block)` (and a block entity's `setChanged`):
+    /// comparators beside `pos`, or behind a conductor there, read it again.
+    Output { pos: [i32; 3] },
+}
+
 /// An item entity of the server level (`ItemEntity`), as translated code reads it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ItemEntity {
@@ -537,6 +551,9 @@ pub trait Host {
     fn signal(&mut self, _pos: [i32; 3], _direction: u8, _direct: bool) -> i32 {
         0
     }
+    /// A neighbour update the mod's code asks for, on the authoritative server's level: what
+    /// [`NeighborUpdate`] says hears that `block` (a block name) changed. Nothing elsewhere.
+    fn update_neighbors(&mut self, _update: NeighborUpdate, _block: &str) {}
     /// Schedules a tick of `block` (a block name) at `pos` in `delay` game ticks
     /// (`Level.scheduleTick`); one already queued there stays. False where nothing ticks blocks
     /// (a client, an unknown block, a position not loaded).
@@ -1624,6 +1641,8 @@ pub struct MemoryHost {
     pub sent_signals: HashMap<([i32; 3], u8), (i32, i32)>,
     /// Block ticks scheduled, in order: where, which block, in how many ticks.
     pub scheduled: Vec<([i32; 3], String, i32)>,
+    /// Neighbour updates asked for, in order, with the block that changed ([`Host::update_neighbors`]).
+    pub neighbor_updates: Vec<(NeighborUpdate, String)>,
     /// Resource files by path ([`Host::resource`]).
     pub resources: std::collections::BTreeMap<String, Vec<u8>>,
     /// Vanilla blocks' containers by position ([`Host::container`]).
@@ -1679,6 +1698,11 @@ impl Host for MemoryHost {
     fn signal(&mut self, pos: [i32; 3], direction: u8, direct: bool) -> i32 {
         let sent = if self.client { None } else { self.sent_signals.get(&(pos, direction)) };
         sent.map_or(0, |&(weak, strong)| if direct { strong } else { weak })
+    }
+    fn update_neighbors(&mut self, update: NeighborUpdate, block: &str) {
+        if !self.client {
+            self.neighbor_updates.push((update, block.to_owned()));
+        }
     }
     fn schedule_block_tick(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {
         if self.client {

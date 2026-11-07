@@ -1780,7 +1780,24 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
-        (_, "blockUpdated" | "updateNeighbourForOutputSignal" | "updateNeighborsAt" | "blockEntityChanged") if level => V::Void,
+        // Neighbour updates the mod asks for (a redstone link's receiver changing its signal, a
+        // vault telling comparators its fill changed): the server's level runs them.
+        (_, "updateNeighborsAt" | "blockUpdated" | "updateNeighborsAtExceptFromFacing" | "neighborChanged" | "updateNeighbourForOutputSignal")
+            if level && desc.starts_with("(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;") =>
+        {
+            use crate::host::NeighborUpdate;
+            let (pos, block) = (pos_of(rt, a(1)), block_name(rt, a(2)));
+            let update = match name {
+                "updateNeighborsAtExceptFromFacing" => NeighborUpdate::Around { pos, skip: Some(crate::api_common::direction_ordinal(rt, a(3))) },
+                "neighborChanged" => NeighborUpdate::One { pos, from: pos_of(rt, a(3)) },
+                "updateNeighbourForOutputSignal" => NeighborUpdate::Output { pos },
+                _ => NeighborUpdate::Around { pos, skip: None },
+            };
+            // As the game's call: the neighbours' own code (a mod's nixie tube) runs inside it.
+            rt.host_call(|h| h.update_neighbors(update, &block));
+            V::Void
+        }
+        (_, "blockEntityChanged") if level => V::Void,
         // `Clearable.tryClear(object)`: a container (a mod's block entity, the runtime's own) empties
         // by its `clearContent`; anything else stays.
         ("net/minecraft/world/Clearable", "tryClear") => {
@@ -2679,6 +2696,123 @@ mod tests {
         rt.interned.insert("compat:client".into(), V::I(1));
         let level = crate::glue::level(&mut rt);
         assert_eq!(call(&mut rt, "net/minecraft/world/level/Level.isClientSide.()Z", &[level]), V::I(1));
+    }
+
+    /// The neighbour updates a mod asks the level for reach it in the order asked, with the block
+    /// that changed: `updateNeighborsAt` (and `blockUpdated`, the same on a level), one neighbour
+    /// left out (`updateNeighborsAtExceptFromFacing`), one block's `neighborChanged` with where the
+    /// change is, `updateNeighbourForOutputSignal`, and a block entity's `setChanged` once it is in
+    /// a level (comparators read it again). A client's level asks for none.
+    #[test]
+    fn a_mods_neighbour_updates_reach_the_level() {
+        use crate::host::{MemoryHost, NeighborUpdate};
+        const AROUND: &str = "net/minecraft/world/level/Level.updateNeighborsAt.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;)V";
+        const UPDATED: &str = "net/minecraft/world/level/Level.blockUpdated.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;)V";
+        const EXCEPT: &str = "net/minecraft/world/level/Level.updateNeighborsAtExceptFromFacing.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;Lnet/minecraft/core/Direction;)V";
+        const ONE: &str = "net/minecraft/world/level/Level.neighborChanged.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;Lnet/minecraft/core/BlockPos;)V";
+        const OUTPUT: &str = "net/minecraft/world/level/Level.updateNeighbourForOutputSignal.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;)V";
+        const SET_CHANGED: &str = "net/minecraft/world/level/block/entity/BlockEntity.setChanged.()V";
+        let ask = |client: bool| {
+            let mut rt = Rt::new();
+            crate::install();
+            let mut host = MemoryHost { client, ..MemoryHost::default() };
+            rt.with_host(&mut host, |rt| {
+                let l = crate::glue::level(rt);
+                let (at, above, vault_at) = (block_pos(rt, 1, 64, 2), block_pos(rt, 1, 65, 2), block_pos(rt, 3, 64, 2));
+                let (lamp, east) = (block(rt, "minecraft:redstone_lamp"), direction(rt, 5));
+                call(rt, AROUND, &[l, at, lamp]);
+                call(rt, UPDATED, &[l, at, lamp]);
+                call(rt, EXCEPT, &[l, at, lamp, east]);
+                call(rt, ONE, &[l, at, lamp, above]);
+                call(rt, OUTPUT, &[l, at, lamp]);
+                let vault = rt.new_object("test/VaultBlockEntity");
+                let vault_state = state(rt, "test:vault[large=false]");
+                rt.put_field(vault, "worldPosition", vault_at);
+                rt.put_field(vault, "blockState", vault_state);
+                call(rt, SET_CHANGED, &[vault]);
+                rt.put_field(vault, "level", l);
+                call(rt, SET_CHANGED, &[vault]);
+            });
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+            host.neighbor_updates
+        };
+        let lamp = |u: NeighborUpdate| (u, "minecraft:redstone_lamp".to_owned());
+        let at = [1, 64, 2];
+        assert_eq!(
+            ask(false),
+            [
+                lamp(NeighborUpdate::Around { pos: at, skip: None }),
+                lamp(NeighborUpdate::Around { pos: at, skip: None }),
+                lamp(NeighborUpdate::Around { pos: at, skip: Some(5) }),
+                lamp(NeighborUpdate::One { pos: at, from: [1, 65, 2] }),
+                lamp(NeighborUpdate::Output { pos: at }),
+                (NeighborUpdate::Output { pos: [3, 64, 2] }, "test:vault".to_owned()),
+            ]
+        );
+        assert_eq!(ask(true), []);
+    }
+
+    /// The game answers some of a mod's calls by running the mod's own code (a neighbour update
+    /// reaches a nixie tube's `neighborChanged`, a signal read an analog lever's `getSignal`): the
+    /// runtime, busy with the call, is there for those hooks while the game works on it.
+    #[test]
+    fn the_game_reaches_the_mods_own_code_inside_its_updates_and_signal_reads() {
+        use crate::host::{Host, NeighborUpdate};
+        struct Reentrant {
+            at: usize,
+            reached: Vec<&'static str>,
+        }
+        impl Reentrant {
+            fn reach(&mut self, what: &'static str) -> bool {
+                let ran = crate::reenter(self.at, |_| ()).is_some();
+                if ran {
+                    self.reached.push(what);
+                }
+                ran
+            }
+        }
+        impl Host for Reentrant {
+            fn block_state(&self, _: [i32; 3]) -> String {
+                "minecraft:stone".into()
+            }
+            fn set_block_state(&mut self, _: [i32; 3], _: &str) -> bool {
+                false
+            }
+            fn update_neighbors(&mut self, _: NeighborUpdate, _: &str) {
+                self.reach("updateNeighborsAt");
+            }
+            fn signal(&mut self, _: [i32; 3], _: u8, direct: bool) -> i32 {
+                if self.reach(if direct { "getDirectSignal" } else { "getSignal" }) { 7 } else { 0 }
+            }
+            fn neighbor_signal(&mut self, _: [i32; 3]) -> i32 {
+                if self.reach("hasNeighborSignal") { 3 } else { 0 }
+            }
+        }
+        const AROUND: &str = "net/minecraft/world/level/Level.updateNeighborsAt.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;)V";
+        const SET_CHANGED: &str = "net/minecraft/world/level/block/entity/BlockEntity.setChanged.()V";
+        const SIGNAL: &str = "net/minecraft/world/level/Level.getSignal.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)I";
+        const NEIGHBOR: &str = "net/minecraft/world/level/Level.hasNeighborSignal.(Lnet/minecraft/core/BlockPos;)Z";
+        const STRONG: &str = "net/minecraft/world/level/Level.getDirectSignalTo.(Lnet/minecraft/core/BlockPos;)I";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = Reentrant { at: rt.address(), reached: Vec::new() };
+        let answers = rt.with_host(&mut host, |rt| {
+            let l = crate::glue::level(rt);
+            let (at, lamp, west) = (block_pos(rt, 1, 64, 2), block(rt, "minecraft:redstone_lamp"), direction(rt, 4));
+            call(rt, AROUND, &[l, at, lamp]);
+            let be = rt.new_object("test/LeverBlockEntity");
+            let lever = state(rt, "test:analog_lever");
+            for (field, v) in [("level", l), ("worldPosition", at), ("blockState", lever)] {
+                rt.put_field(be, field, v);
+            }
+            call(rt, SET_CHANGED, &[be]);
+            [call(rt, SIGNAL, &[l, at, west]).i(), call(rt, NEIGHBOR, &[l, at]).i(), call(rt, STRONG, &[l, at]).i()]
+        });
+        assert_eq!(answers, [7, 1, 7]);
+        // The strong signal into a block is its six neighbours' (none of them 15 here).
+        let mut expected = vec!["updateNeighborsAt", "updateNeighborsAt", "getSignal", "hasNeighborSignal"];
+        expected.extend(["getDirectSignal"; 6]);
+        assert_eq!(host.reached, expected);
     }
 
     /// Create's pipes ask for the chunk next door (`getChunk(x, z, ChunkStatus.FULL, false)`) and

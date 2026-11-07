@@ -4187,6 +4187,67 @@ impl GameLevel<'_> {
             log.push((pos[0], pos[1], pos[2]));
         }
     }
+    /// `Level.updateNeighborsAt(pos, block)` from a level hook: the six
+    /// blocks around `pos` hear that `block` (a block name) changed there, in
+    /// vanilla's order, but the one in direction `skip` (`Direction`'s data
+    /// value) when set (`updateNeighborsAtExceptFromFacing`). They run in the
+    /// level's queue of updates, after the hook's own. Nothing happens for an
+    /// unknown block or where this level isn't the server's. API
+    /// @API:native_neighbor_updates@.
+    pub(super) fn native_update_neighbors_here(
+        &mut self,
+        ticks: &mut Ticks,
+        pos: [i32; 3],
+        block: &str,
+        skip: Option<u8>,
+    ) {
+        let Some(state) = self.native_state_from_text(block) else {
+            return;
+        };
+        if !self.native_authoritative {
+            return;
+        }
+        let b = self.behaviours;
+        let (block, at) = (b.block(state), BlockPos::new(pos[0], pos[1], pos[2]));
+        match skip.and_then(|d| Direction::ALL.get(usize::from(d)).copied()) {
+            Some(skip) => b.update_neighbors_at_except(self, ticks, at, block, skip),
+            None => b.update_neighbors_at(self, ticks, at, block),
+        }
+    }
+    /// `Level.neighborChanged(pos, block, from)` from a level hook: the block
+    /// at `pos` hears that `block` (a block name) changed at `from`, in the
+    /// level's queue of updates. Nothing happens for an unknown block or
+    /// where this level isn't the server's. API
+    /// @API:native_neighbor_updates@.
+    pub(super) fn native_neighbor_changed_here(
+        &mut self,
+        ticks: &mut Ticks,
+        pos: [i32; 3],
+        block: &str,
+        from: [i32; 3],
+    ) {
+        let Some(state) = self.native_state_from_text(block) else {
+            return;
+        };
+        if !self.native_authoritative {
+            return;
+        }
+        let b = self.behaviours;
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        let from = BlockPos::new(from[0], from[1], from[2]);
+        b.neighbor_changed_at(self, ticks, at, b.block(state), from);
+    }
+    /// `Level.updateNeighbourForOutputSignal(pos, block)` from a level hook:
+    /// comparators beside `pos`, or behind a conductor there, read it again.
+    /// Nothing happens where this level isn't the server's. API
+    /// @API:native_neighbor_updates@.
+    pub(super) fn native_update_output_neighbors_here(&mut self, ticks: &mut Ticks, pos: [i32; 3]) {
+        if !self.native_authoritative {
+            return;
+        }
+        let b = self.behaviours;
+        b.update_neighbour_for_output_signal(self, ticks, BlockPos::new(pos[0], pos[1], pos[2]));
+    }
     /// Whether block `block` (`minecraft:oak_leaves`) is in block tag `tag`
     /// (`minecraft:leaves`, no `#`), as the loaded tags hold it: translated
     /// Java mods' `BlockState.is(TagKey)`. False for an unknown tag. API 81.
@@ -4848,6 +4909,68 @@ impl Game<'_> {
             ] {
                 b.update_neighbors_at(level, ticks, at.offset(x, y, z), block);
             }
+        });
+        true
+    }
+    /// `Level.updateNeighborsAt(pos, block)`: the six blocks around `pos`
+    /// hear that `block` (a block name) changed there, in vanilla's order,
+    /// but the one in direction `skip` (`Direction`'s data value) when set
+    /// (`updateNeighborsAtExceptFromFacing`); [`Self::native_update_signal_neighbors`]
+    /// tells their neighbours too. Acts on the level in place: false (and
+    /// nothing happens) when `dimension` is another, `block` is unknown, or
+    /// this window isn't a server. API @API:native_neighbor_updates@.
+    pub(super) fn native_update_neighbors(
+        &mut self,
+        dimension: &str,
+        pos: [i32; 3],
+        block: &str,
+        skip: Option<u8>,
+    ) -> bool {
+        if (self.serving.is_none() && self.options.dedicated.is_none())
+            || dimension != self.dim.id()
+        {
+            return false;
+        }
+        let Some(state) = state_from_text(self.pack.assets.registry, block) else {
+            return false;
+        };
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        let skip = skip.and_then(|d| Direction::ALL.get(usize::from(d)).copied());
+        self.with_level(|b, level, ticks| {
+            let block = b.block(state);
+            match skip {
+                Some(skip) => b.update_neighbors_at_except(level, ticks, at, block, skip),
+                None => b.update_neighbors_at(level, ticks, at, block),
+            }
+        });
+        true
+    }
+    /// `Level.neighborChanged(pos, block, from)`: the block at `pos` hears
+    /// that `block` (a block name) changed at `from`. Acts on the level in
+    /// place: false (and nothing happens) when `dimension` is another,
+    /// `block` is unknown, or this window isn't a server. API
+    /// @API:native_neighbor_updates@.
+    pub(super) fn native_neighbor_changed(
+        &mut self,
+        dimension: &str,
+        pos: [i32; 3],
+        block: &str,
+        from: [i32; 3],
+    ) -> bool {
+        if (self.serving.is_none() && self.options.dedicated.is_none())
+            || dimension != self.dim.id()
+        {
+            return false;
+        }
+        let Some(state) = state_from_text(self.pack.assets.registry, block) else {
+            return false;
+        };
+        let (at, from) = (
+            BlockPos::new(pos[0], pos[1], pos[2]),
+            BlockPos::new(from[0], from[1], from[2]),
+        );
+        self.with_level(|b, level, ticks| {
+            b.neighbor_changed_at(level, ticks, at, b.block(state), from)
         });
         true
     }

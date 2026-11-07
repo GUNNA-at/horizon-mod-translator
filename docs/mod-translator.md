@@ -5924,6 +5924,70 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     back (each digit readable, the pair in reverse order), "5 1" and "3 1". Before, 0 on the
     server, and once the server had 15, "0 0" on the client. No throws; `Level.getSignal` is gone
     from the unmapped calls.
+- [x] 2026-11-07 Part 77: a mod's block answers redstone by its own code, and the neighbour
+  updates a mod asks for reach the level. The game asked a mod's block only its template
+  (`minecraft:stone` for all of Create's redstone blocks), which sends nothing: its own
+  `getSignal` (73 classes in 27 jars; Create 13 and 11 in its two jars, SecurityCraft 16),
+  `getDirectSignal` (42 in 17), `isSignalSource` (64 in 26), `hasAnalogOutputSignal` (143 in 45)
+  and `getAnalogOutputSignal` (153 in 47) never ran, though the catalog had their hook points. And
+  the level's neighbour updates did nothing: `updateNeighborsAt` (110 classes in 33 jars),
+  `updateNeighbourForOutputSignal` (92 in 42), `neighborChanged(pos, block, from)` (48 in 28),
+  `blockUpdated` (25 in 17), `updateNeighborsAtExceptFromFacing` (4 in 4), and a block entity's
+  `setChanged`, which in vanilla tells the comparators beside it (273 classes in 88 jars call a
+  `setChanged`). A redstone link's receiver, an analog lever or a contact changing its output told
+  no one.
+  - compat `glue`: `is_signal_source(state)`, `signal(pos, state, side, direct)` (`side` as
+    `Direction`'s data value, the way from the block asking), `has_analog_output(state)` and
+    `analog_output(pos, state)`: the block's own `BlockBehaviour` method where its class has one,
+    with the level and position, a signal clamped to 0 to 15. None where it has none (its
+    template's answer stands), for another mod's or vanilla's block, and when its code throws (the
+    throw is reported, not left pending).
+  - compat-core: `NeighborUpdate` (`Around { pos, skip }`: `updateNeighborsAt`, `blockUpdated`,
+    `updateNeighborsAtExceptFromFacing`; `One { pos, from }`: `neighborChanged`;
+    `Output { pos }`: `updateNeighbourForOutputSignal`) and `Host::update_neighbors(update,
+    block)`; `MemoryHost.neighbor_updates` keeps them, none on a client.
+  - compat `api`: the five level calls go to the host. `BlockEntity.setChanged()` tells the
+    comparators beside the block entity (`Output`) once it has a level and a position, unless
+    its block is air (vanilla's `setChanged`). These and the level's signal reads (`getSignal`,
+    `hasSignal`, `getDirectSignal`, `getDirectSignalTo`, `hasNeighborSignal`,
+    `getBestNeighborSignal`) are the game's calls (`host_call`): the game may run the mod's own
+    code inside them, a nixie tube's `neighborChanged` for an analog lever's update, the lever's
+    `getSignal` for the tube's read.
+  - compat `functions`: Guava's `Predicate.test(t)` is its `apply(t)`; a lambda answered only
+    its functional method's name.
+  - world: `Behaviours::update_neighbors_at_except(level, ticks, pos, block, skip)` and
+    `neighbor_changed_at(level, ticks, pos, block, from)`, through the level's collecting
+    updater, as the other updates.
+  - client: `GameLevel::native_update_neighbors_here(ticks, pos, block, skip)`,
+    `native_neighbor_changed_here(ticks, pos, block, from)` and
+    `native_update_output_neighbors_here(ticks, pos)` for level hooks, and
+    `Game::native_update_neighbors(dimension, pos, block, skip)` and
+    `native_neighbor_changed(dimension, pos, block, from)` for other code (API
+    @API:native_neighbor_updates@): the server's level runs them, nothing on a client or in
+    another dimension.
+  - translator: bundles wire the catalog's `block_signal`, `is_signal_source`,
+    `has_analog_output` and `analog_output` to the four glue functions for their own blocks, and
+    both hosts pass `update_neighbors` on (level hooks to the `_here` helpers, other code to the
+    player's dimension).
+  - Tests: `glue::tests::a_mod_blocks_own_redstone_answers_reach_the_world` (a latch sends 15
+    only east while powering and has no strong signal of its own; an analog output of 7 over
+    gold and 99 clamped to 15; a block whose code throws, a block without these methods and
+    vanilla's give None), `api::tests::a_mods_neighbour_updates_reach_the_level` (each call as
+    its update, a block entity's `setChanged` only once it has a level, none on a client),
+    `api::tests::the_game_reaches_the_mods_own_code_inside_its_updates_and_signal_reads` (a host
+    whose answers need the runtime gets it inside each update and read), Guava `test` in
+    `functions::tests::predicates_combine_as_in_java`. Compat 508, translator 19, gameplay 70.
+  - In game (`redsurvey2.sh`): the comparator behind a speedometer at 64 RPM (dial 0.596) gives
+    the dust 9; the smart observer on a chest holding one stack powers and lights the lamp beside
+    it; the two contacts facing each other hold `powered=true`. Before, nothing of these reached
+    the world. Still dark: the contacts' lamps and the nixie tube by the analog lever (the lever
+    at 6 after 7 clicks): the log said "the game ran the block_neighbor_changed hook from inside
+    one of the mod's own calls; skipped". The updates went to the host without the game being able
+    to run the mod's hooks inside them (`host_mut`): now `host_call` (unit-tested above; in game
+    with Part 78). The latches stay off: their neighbour handling, placement and strong signal are
+    vanilla `DiodeBlock`'s (Part 78). The threshold switch reads `CurrentAmount` -1: its inventory
+    filter wants the chest's block entity, and `level.getBlockEntity` gives null for a vanilla
+    block's. The redstone link's receiver holds `Receive` 0 (its network). No throws.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

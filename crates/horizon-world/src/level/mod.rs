@@ -1032,6 +1032,31 @@ impl Behaviours {
     ) {
         self.sim(level, ticks).update_neighbors_at(pos, block);
     }
+    /// `Level.updateNeighborsAtExceptFromFacing(pos, block, skip)`: notify
+    /// the neighbours but the one in direction `skip`.
+    pub fn update_neighbors_at_except<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        ticks: &mut Ticks,
+        pos: BlockPos,
+        block: BlockId,
+        skip: Direction,
+    ) {
+        self.sim(level, ticks)
+            .update_neighbors_at_except(pos, block, skip);
+    }
+    /// `Level.neighborChanged(pos, block, from)`: the block at `pos` hears
+    /// that `block` changed at `from`.
+    pub fn neighbor_changed_at<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        ticks: &mut Ticks,
+        pos: BlockPos,
+        block: BlockId,
+        from: BlockPos,
+    ) {
+        self.sim(level, ticks).neighbor_changed_at(pos, block, from);
+    }
     /// `Level.updateNeighbourForOutputSignal(pos, block)` for the block at
     /// `pos`: comparators beside it (or behind a conductor there) read their
     /// input again.

@@ -837,6 +837,88 @@ pub fn update_shape(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str
     })
 }
 
+const IS_SIGNAL_SOURCE: (&str, &str) = (
+    "isSignalSource.(Lnet/minecraft/world/level/block/state/BlockState;)Z",
+    "net/minecraft/world/level/block/state/BlockBehaviour.isSignalSource.(Lnet/minecraft/world/level/block/state/BlockState;)Z",
+);
+const GET_SIGNAL: (&str, &str) = (
+    "getSignal.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)I",
+    "net/minecraft/world/level/block/state/BlockBehaviour.getSignal.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)I",
+);
+const GET_DIRECT_SIGNAL: (&str, &str) = (
+    "getDirectSignal.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)I",
+    "net/minecraft/world/level/block/state/BlockBehaviour.getDirectSignal.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)I",
+);
+const HAS_ANALOG_OUTPUT: (&str, &str) = (
+    "hasAnalogOutputSignal.(Lnet/minecraft/world/level/block/state/BlockState;)Z",
+    "net/minecraft/world/level/block/state/BlockBehaviour.hasAnalogOutputSignal.(Lnet/minecraft/world/level/block/state/BlockState;)Z",
+);
+const GET_ANALOG_OUTPUT: (&str, &str) = (
+    "getAnalogOutputSignal.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;)I",
+    "net/minecraft/world/level/block/state/BlockBehaviour.getAnalogOutputSignal.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;)I",
+);
+
+/// The mod block `state`'s own answer to the `BlockBehaviour` method `key` (its state first, then
+/// what `extra` makes), with the game as host. None where its class has no such method of its own
+/// (the answer of the block's template stands), the block isn't the mod's, or its code threw.
+fn own_answer(rt: &mut Rt, host: &mut dyn Host, state: &str, (key, owner_key): (&'static str, &'static str), extra: impl FnOnce(&mut Rt) -> Vec<V>) -> Option<V> {
+    let (b, class) = mod_block(rt, state)?;
+    if !rt.overrides.is_some_and(|o| o(class, key)) {
+        return None;
+    }
+    let vc = rt.vcall?;
+    rt.with_host(host, |rt| {
+        let st = api::state(rt, state);
+        let mut args = vec![b, st];
+        args.extend(extra(rt));
+        let r = vc(rt, owner_key, key, &args);
+        if rt.thrown.is_some() {
+            rt.report_thrown(key);
+            return None;
+        }
+        Some(r)
+    })
+}
+
+/// `native_is_signal_source`: whether the mod block `state` gives redstone signals
+/// (`BlockBehaviour.isSignalSource`: redstone wire beside it connects to it), by its own code.
+pub fn is_signal_source(rt: &mut Rt, host: &mut dyn Host, state: &str) -> Option<bool> {
+    own_answer(rt, host, state, IS_SIGNAL_SOURCE, |_| Vec::new()).map(|v| v.i() != 0)
+}
+
+/// `native_block_signal`: the signal the mod block `state` at `pos` sends one way, by its own code:
+/// `getDirectSignal` when `direct` (what passes on through the block it touches), else `getSignal`.
+/// `side` is `Direction`'s data value for the way from the block reading it to `pos`, as the
+/// methods take it. 0 to 15.
+pub fn signal(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, side: u8, direct: bool) -> Option<i32> {
+    let method = if direct { GET_DIRECT_SIGNAL } else { GET_SIGNAL };
+    own_answer(rt, host, state, method, |rt| {
+        let l = level(rt);
+        let p = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+        let d = api::direction(rt, i64::from(side.min(5)));
+        vec![l, p, d]
+    })
+    .map(|v| v.i().clamp(0, 15))
+}
+
+/// `native_has_analog_output`: whether comparators read the mod block `state`
+/// (`hasAnalogOutputSignal`), by its own code.
+pub fn has_analog_output(rt: &mut Rt, host: &mut dyn Host, state: &str) -> Option<bool> {
+    own_answer(rt, host, state, HAS_ANALOG_OUTPUT, |_| Vec::new()).map(|v| v.i() != 0)
+}
+
+/// `native_analog_output`: the signal a comparator reads from the mod block `state` at `pos`
+/// (1.21.1's `getAnalogOutputSignal(state, level, pos)`, which takes no side), by its own code. 0
+/// to 15.
+pub fn analog_output(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str) -> Option<i32> {
+    own_answer(rt, host, state, GET_ANALOG_OUTPUT, |rt| {
+        let l = level(rt);
+        let p = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+        vec![l, p]
+    })
+    .map(|v| v.i().clamp(0, 15))
+}
+
 const HANDLE_UPDATE_TAG: &str = "handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
 const HANDLE_UPDATE_TAG_KEY: &str =
     "net/minecraft/world/level/block/entity/BlockEntity.handleUpdateTag.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
@@ -1954,6 +2036,72 @@ mod tests {
         assert_eq!(update_shape(&mut rt, &mut host, here, open, 4, west, "minecraft:air").as_deref(), Some("test:pipe[east=false,north=true,west=false]"));
         assert_eq!(update_shape(&mut rt, &mut host, here, "test:crate", 5, east, "test:tank"), None);
         assert_eq!(update_shape(&mut rt, &mut host, here, "minecraft:stone", 5, east, "test:tank"), None);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The world asks a mod block's own redstone code: a latch (as Create's toggle latch) is a
+    /// signal source sending 15 out of its front only while it is on, and comparators read it, 7
+    /// over gold and anything else it answers clamped to 15. What it has no code of its own for
+    /// (its direct signal), a block of a class with none, one whose code throws and the game's
+    /// blocks are left to the game.
+    #[test]
+    fn a_mod_blocks_own_redstone_answers_reach_the_world() {
+        const LATCH: &str = "test/Latch";
+        const BROKEN: &str = "test/Broken";
+        fn overrides(class: &str, short: &str) -> bool {
+            (class == LATCH && [IS_SIGNAL_SOURCE.0, GET_SIGNAL.0, HAS_ANALOG_OUTPUT.0, GET_ANALOG_OUTPUT.0].contains(&short))
+                || (class == BROKEN && short == GET_SIGNAL.0)
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            if rt.class_of(args[0]) == BROKEN {
+                rt.throw_new("java/lang/IllegalStateException");
+                return V::I(15);
+            }
+            let state = crate::api_common::text_of(rt, args[1]);
+            match short {
+                s if s == IS_SIGNAL_SOURCE.0 || s == HAS_ANALOG_OUTPUT.0 => V::I(1),
+                // `getSignal(state, level, pos, side)`: `side` is the way from the block reading it.
+                s if s == GET_SIGNAL.0 => {
+                    let side = crate::api_common::direction_ordinal(rt, args[4]);
+                    V::I(if state.contains("powering=true") && side == 5 { 15 } else { 0 })
+                }
+                // `getAnalogOutputSignal(state, level, pos)`: what it stands on, from the level.
+                s if s == GET_ANALOG_OUTPUT.0 => {
+                    let [x, y, z] = api::pos_of(rt, args[3]);
+                    let below = api::block_pos(rt, i64::from(x), i64::from(y - 1), i64::from(z));
+                    let get = "net/minecraft/world/level/LevelReader.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
+                    let there = api::call(rt, get, &[args[2], below]);
+                    V::I(if crate::api_common::text_of(rt, there) == "minecraft:gold_block" { 7 } else { 99 })
+                }
+                _ => api::call(rt, key, args),
+            }
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        for (class, id) in [(LATCH, "test:latch"), (BROKEN, "test:broken"), ("test/Plain", "test:plain")] {
+            let b = rt.new_object(class);
+            rt.registered.insert(("block".into(), id.into()), b);
+        }
+        let mut host = MemoryHost::default();
+        host.blocks.insert([0, 63, 0], "minecraft:gold_block".into());
+        let (on, off, at) = ("test:latch[facing=east,powering=true]", "test:latch[facing=east,powering=false]", [0, 64, 0]);
+        assert_eq!(is_signal_source(&mut rt, &mut host, off), Some(true));
+        let ways: Vec<Option<i32>> = (0..6).map(|side| signal(&mut rt, &mut host, at, on, side, false)).collect();
+        assert_eq!(ways, [Some(0), Some(0), Some(0), Some(0), Some(0), Some(15)]);
+        assert_eq!(signal(&mut rt, &mut host, at, off, 5, false), Some(0));
+        assert_eq!(signal(&mut rt, &mut host, at, on, 5, true), None, "no getDirectSignal of its own");
+        assert_eq!(has_analog_output(&mut rt, &mut host, on), Some(true));
+        assert_eq!(analog_output(&mut rt, &mut host, at, on), Some(7));
+        assert_eq!(analog_output(&mut rt, &mut host, [0, 70, 0], on), Some(15));
+        assert_eq!(signal(&mut rt, &mut host, at, "test:broken", 5, false), None);
+        assert!(rt.thrown.is_none(), "the exception ends the call only");
+        for state in ["test:plain", "minecraft:stone"] {
+            assert_eq!(is_signal_source(&mut rt, &mut host, state), None);
+            assert_eq!(signal(&mut rt, &mut host, at, state, 5, false), None);
+            assert_eq!(has_analog_output(&mut rt, &mut host, state), None);
+            assert_eq!(analog_output(&mut rt, &mut host, at, state), None);
+        }
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

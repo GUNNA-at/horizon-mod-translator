@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "neighbour updates a server mod asks for (`native_update_neighbors`, `native_neighbor_changed`, and `GameLevel::native_update_neighbors_here`, `native_neighbor_changed_here` and `native_update_output_neighbors_here` for level hooks).",
+  "doc_summary": "`native_update_neighbors(dimension, pos, block, skip)` is `Level.updateNeighborsAt(pos, block)`: the six blocks around `pos` hear that `block` changed there, in vanilla's order, but the one in direction `skip` (`Direction`'s data value) when set (`updateNeighborsAtExceptFromFacing`). `native_neighbor_changed(dimension, pos, block, from)` is `Level.neighborChanged(pos, block, from)`: the block at `pos` hears the change at `from`. Both act on the server's level of `dimension`, and are false elsewhere. A level hook (`tick_block`, `block_neighbor_changed`) has `native_update_neighbors_here(ticks, pos, block, skip)`, `native_neighbor_changed_here(ticks, pos, block, from)` and `native_update_output_neighbors_here(ticks, pos)` (`updateNeighbourForOutputSignal`), whose updates run in the level's queue after the hook's own. Translated bundles answer `Level.updateNeighborsAt`, `blockUpdated`, `updateNeighborsAtExceptFromFacing`, `neighborChanged`, `updateNeighbourForOutputSignal` and a block entity's `setChanged` with them (a redstone link's receiver tells the lamp beside it): @API:native_neighbor_updates@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_hooks.rs"
+  ]
+}
