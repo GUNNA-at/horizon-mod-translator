@@ -263,6 +263,25 @@ fn template_of(rt: &mut Rt, b: V, simple: &str) -> Option<&'static str> {
     })
 }
 
+/// The nearest of 1.21.1's block class `class` and the vanilla classes above it that has a
+/// template ([`TEMPLATES`]), by its short name: weathering copper stairs are stairs. None past
+/// `Block`, or for a class the generated table of 1.21.1's classes doesn't have.
+fn templated_class(class: &str) -> Option<&'static str> {
+    use crate::vanilla_classes::CLASSES;
+    let mut c = class;
+    for _ in 0..32 {
+        let short = c.strip_prefix("net/minecraft/world/level/block/")?;
+        if let Some(&(t, _)) = TEMPLATES.iter().find(|(t, _)| *t == short) {
+            return Some(t);
+        }
+        if matches!(short, "Block" | "state/BlockBehaviour") {
+            return None;
+        }
+        c = CLASSES[CLASSES.binary_search_by(|e| e.0.cmp(c)).ok()?].1;
+    }
+    None
+}
+
 /// The properties a vanilla block class adds in its own `createBlockStateDefinition`
 /// (`BlockStateProperties` fields), for a mod class that extends it.
 fn vanilla_definition(class: &str) -> &'static [&'static str] {
@@ -854,6 +873,51 @@ fn vanilla_state_shape(class: &str, props: &[(&str, &str)]) -> Option<Vec<[f64; 
                 _ => [5.0, 16.0 - d, 6.0, 11.0, 16.0, 10.0],
             })
         }
+        // A diode's plate (a repeater's, a comparator's); a rail's, half a block where it climbs.
+        "DiodeBlock" => one([0.0, 0.0, 0.0, 16.0, 2.0, 16.0]),
+        "BaseRailBlock" => one([
+            0.0,
+            0.0,
+            0.0,
+            16.0,
+            if get("shape").starts_with("ascending_") {
+                8.0
+            } else {
+                2.0
+            },
+            16.0,
+        ]),
+        // A lectern's base and post, and its sloped top by where it faces (above the block).
+        "LecternBlock" => {
+            let mut boxes = match get("facing") {
+                "north" => vec![
+                    [0.0, 10.0, 1.0, 16.0, 14.0, 5.333333],
+                    [0.0, 12.0, 5.333333, 16.0, 16.0, 9.666667],
+                    [0.0, 14.0, 9.666667, 16.0, 18.0, 14.0],
+                ],
+                "south" => vec![
+                    [0.0, 10.0, 10.666667, 16.0, 14.0, 15.0],
+                    [0.0, 12.0, 6.333333, 16.0, 16.0, 10.666667],
+                    [0.0, 14.0, 2.0, 16.0, 18.0, 6.333333],
+                ],
+                "east" => vec![
+                    [10.666667, 10.0, 0.0, 15.0, 14.0, 16.0],
+                    [6.333333, 12.0, 0.0, 10.666667, 16.0, 16.0],
+                    [2.0, 14.0, 0.0, 6.333333, 18.0, 16.0],
+                ],
+                "west" => vec![
+                    [1.0, 10.0, 0.0, 5.333333, 14.0, 16.0],
+                    [5.333333, 12.0, 0.0, 9.666667, 16.0, 16.0],
+                    [9.666667, 14.0, 0.0, 14.0, 18.0, 16.0],
+                ],
+                _ => Vec::new(),
+            };
+            boxes.extend([
+                [0.0, 0.0, 0.0, 16.0, 2.0, 16.0],
+                [4.0, 2.0, 4.0, 12.0, 14.0, 12.0],
+            ]);
+            Some(boxes)
+        }
         // `getSignalForState(state) > 0`: powered, or a weight on it.
         "PressurePlateBlock" | "WeightedPressurePlateBlock" => {
             let pressed = on("powered") || get("power").parse::<i32>().is_ok_and(|p| p > 0);
@@ -976,12 +1040,47 @@ fn vanilla_state_shape(class: &str, props: &[(&str, &str)]) -> Option<Vec<[f64; 
 }
 
 /// The block classes [`vanilla_state_shape`] keeps.
-const STATE_SHAPED: [&str; 28] = [
-    "BaseTorchBlock", "ButtonBlock", "CakeBlock", "ChainBlock", "ChestBlock", "DecoratedPotBlock", "DoorBlock", "EnderChestBlock", "FarmBlock",
-    "FenceBlock", "FenceGateBlock", "HopperBlock", "IronBarsBlock", "LadderBlock", "LanternBlock", "LeverBlock", "PressurePlateBlock",
-    "RedstoneTorchBlock", "RedstoneWallTorchBlock", "ScaffoldingBlock", "SlabBlock", "StainedGlassPaneBlock", "StairBlock", "TorchBlock",
-    "TrapDoorBlock", "TrappedChestBlock", "WallTorchBlock", "WeightedPressurePlateBlock",
+const STATE_SHAPED: [&str; 31] = [
+    "BaseRailBlock",
+    "BaseTorchBlock",
+    "ButtonBlock",
+    "CakeBlock",
+    "ChainBlock",
+    "ChestBlock",
+    "DecoratedPotBlock",
+    "DiodeBlock",
+    "DoorBlock",
+    "EnderChestBlock",
+    "FarmBlock",
+    "FenceBlock",
+    "FenceGateBlock",
+    "HopperBlock",
+    "IronBarsBlock",
+    "LadderBlock",
+    "LanternBlock",
+    "LecternBlock",
+    "LeverBlock",
+    "PressurePlateBlock",
+    "RedstoneTorchBlock",
+    "RedstoneWallTorchBlock",
+    "ScaffoldingBlock",
+    "SlabBlock",
+    "StainedGlassPaneBlock",
+    "StairBlock",
+    "TorchBlock",
+    "TrapDoorBlock",
+    "TrappedChestBlock",
+    "WallTorchBlock",
+    "WeightedPressurePlateBlock",
 ];
+
+/// The vanilla class whose own `getShape` a block of 1.21.1's class `class` draws, where the
+/// runtime keeps it ([`STATE_SHAPED`]): the nearest of `class` and the classes above it that is one
+/// (a repeater's is its diode's). None where that is `BlockBehaviour`'s full cube, or past a class
+/// the generated table of 1.21.1's classes doesn't have.
+fn shape_class(class: &str) -> Option<&'static str> {
+    declaring_class(class, &STATE_SHAPED).filter(|c| *c != "BlockBehaviour")
+}
 
 fn state_shape_class(owner: &str) -> bool {
     owner.strip_prefix("net/minecraft/world/level/block/").is_some_and(|c| STATE_SHAPED.contains(&c))
@@ -2503,13 +2602,26 @@ fn block_declaration(rt: &mut Rt, name: &str, b: V, item: bool) -> String {
         format!("{name}[{}]", inner.join(","))
     };
 
-    // The template: a vanilla block of the same kind (a door), else one without states that lets
-    // light through when the block isn't a full cube or doesn't occlude, else stone.
-    let simple = vanilla.rsplit('/').next().unwrap_or("");
+    // The template: a vanilla block of the same kind (a door; weathering copper stairs are
+    // stairs), else one without states that lets light through when the block isn't a full cube or
+    // doesn't occlude, else stone.
+    let kind =
+        templated_class(&vanilla).unwrap_or_else(|| vanilla.rsplit('/').next().unwrap_or(""));
     let class = rt.class_of(b);
-    let mut vanilla_template = template_of(rt, b, simple).map(str::to_owned);
+    let mut vanilla_template = template_of(rt, b, kind).map(str::to_owned);
     let mut template_props: Vec<String> = match vanilla_template {
-        Some(_) => vanilla_definition(&vanilla).iter().filter_map(|f| api_common::vanilla_property(f).map(|(n, _)| n)).collect(),
+        Some(_) => {
+            let own = vanilla_definition(&vanilla);
+            let definition = if own.is_empty() {
+                vanilla_definition(kind)
+            } else {
+                own
+            };
+            definition
+                .iter()
+                .filter_map(|f| api_common::vanilla_property(f).map(|(n, _)| n))
+                .collect()
+        }
         None => Vec::new(),
     };
     // The game orders a block's states by property name, its template's first: a property of its
@@ -2519,16 +2631,23 @@ fn block_declaration(rt: &mut Rt, name: &str, b: V, item: bool) -> String {
         vanilla_template = None;
         template_props.clear();
     }
-    // A shape of its own (`getShape`), read for every state; a vanilla template keeps its own.
+    // A shape of its own (`getShape`), or the one the vanilla class it extends draws (a lectern's,
+    // a diode's), read for every state; a vanilla template keeps its own.
     let own_shape = rt.overrides.is_some_and(|o| o(class, GET_SHAPE));
-    let shapes = if vanilla_template.is_none() && own_shape { state_shapes(rt, b, name, &states) } else { None };
+    let inherited = !vanilla.is_empty() && !default_shape_class(&vanilla);
+    let read = own_shape || (inherited && shape_class(&vanilla).is_some());
+    let shapes = if vanilla_template.is_none() && read {
+        state_shapes(rt, b, name, &states)
+    } else {
+        None
+    };
     let template = match vanilla_template {
         Some(t) => t,
         None => {
             let full = match &shapes {
                 Some(s) => s.iter().all(|(_, boxes)| boxes[..] == [FULL_BOX]),
-                // Unread: taken as not a full cube.
-                None => !own_shape,
+                // Unread: a full cube unless its class or a vanilla one above it draws another.
+                None => !own_shape && !inherited,
             };
             let see_through = rt.get_field(props, "$noOcclusion").i() != 0 || !full;
             if see_through { "minecraft:glass".into() } else { "minecraft:stone".into() }
@@ -2623,6 +2742,14 @@ fn state_shapes(rt: &mut Rt, b: V, name: &str, states: &[(String, Vec<String>)])
     }
     let ctx = crate::shapes::empty_context(rt);
     let origin = crate::shapes::origin(rt);
+    // A class that doesn't draw its own shape draws the one of the vanilla class it extends.
+    let owner = match rt.str_of(rt.get_field(b, "$vanilla")).and_then(shape_class) {
+        Some(c) => {
+            let key = format!("net/minecraft/world/level/block/{c}.{GET_SHAPE}");
+            rt.static_key(&key)
+        }
+        None => GET_SHAPE_KEY,
+    };
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         // The i-th combination, the last property changing fastest.
@@ -2640,7 +2767,7 @@ fn state_shapes(rt: &mut Rt, b: V, name: &str, states: &[(String, Vec<String>)])
         };
         let st = api::state(rt, &text);
         rt.interned.remove("compat:missing-property");
-        let shape = vc(rt, GET_SHAPE_KEY, GET_SHAPE, &[b, st, V::NULL, origin, ctx]);
+        let shape = vc(rt, owner, GET_SHAPE, &[b, st, V::NULL, origin, ctx]);
         let unknown = rt.thrown.is_some() || rt.interned.remove("compat:missing-property").is_some();
         rt.report_thrown("getShape");
         let boxes = crate::shapes::boxes(rt, shape).filter(|_| !unknown)?;
@@ -3217,6 +3344,119 @@ mod tests {
         for (p, filled) in [([8.0, 10.5, 8.0], true), ([1.0, 14.0, 8.0], true), ([8.0, 14.0, 8.0], false), ([8.0, 7.0, 8.0], true), ([2.0, 6.0, 8.0], true), ([14.0, 6.0, 8.0], false), ([8.0, 2.0, 8.0], false)] {
             assert_eq!(inside(&hopper, p), filled, "{p:?} in {hopper:?}");
         }
+    }
+
+    /// A mod block whose class extends one of vanilla's with a shape of its own, and draws none
+    /// itself (Create's lectern controller, its latches and pulse repeaters, its controller rail),
+    /// is declared see-through with vanilla's shapes for its states: a lectern's base, post and the
+    /// sloped top that stands above the block, by where it faces; a repeater's, its diode's plate.
+    /// A kind that is a full cube stays opaque; weathering copper stairs are stairs.
+    #[test]
+    fn a_block_draws_the_shape_of_the_vanilla_class_it_extends() {
+        let mut rt = Rt::new();
+        rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
+        let p = props(&mut rt);
+        const P: &str = "Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;";
+        let stairs = format!(
+            "(Lnet/minecraft/world/level/block/WeatheringCopper$WeatherState;Lnet/minecraft/world/level/block/state/BlockState;{P})V"
+        );
+        let blocks = [
+            (
+                "ruby:lectern",
+                "test/Lectern",
+                "LecternBlock",
+                format!("({P})V"),
+                vec![p],
+            ),
+            (
+                "ruby:repeater",
+                "test/Repeater",
+                "RepeaterBlock",
+                format!("({P})V"),
+                vec![p],
+            ),
+            (
+                "ruby:machine",
+                "test/Machine",
+                "HorizontalDirectionalBlock",
+                format!("({P})V"),
+                vec![p],
+            ),
+            (
+                "ruby:copper_stairs",
+                "test/CopperStairs",
+                "WeatheringCopperStairBlock",
+                stairs,
+                vec![V::NULL, V::NULL, p],
+            ),
+        ];
+        for (id, class, vanilla, desc, args) in &blocks {
+            let b = rt.new_object(*class);
+            let init = rt.static_key(&format!(
+                "net/minecraft/world/level/block/{vanilla}.<init>.{desc}"
+            ));
+            api::call(&mut rt, init, &[&[b][..], args].concat());
+            rt.registered.insert(("block".into(), (*id).into()), b);
+        }
+        let declared: std::collections::HashMap<String, serde_json::Value> =
+            block_declarations(&mut rt)
+                .into_iter()
+                .map(|(id, json)| (id, serde_json::from_str(&json).unwrap()))
+                .collect();
+        let template = |id: &str| {
+            declared[id]["template"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let boxes = |v: &serde_json::Value| -> Vec<[f64; 6]> {
+            let each = v.as_array().unwrap().iter().map(|b| {
+                b.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.as_f64().unwrap() * 16.0)
+                    .collect::<Vec<f64>>()
+            });
+            each.map(|b| [b[0], b[1], b[2], b[3], b[4], b[5]]).collect()
+        };
+        let inside = |boxes: &[[f64; 6]], p: [f64; 3]| {
+            boxes
+                .iter()
+                .any(|b| (0..3).all(|i| b[i] < p[i] && p[i] < b[i + 3]))
+        };
+        assert_eq!(template("ruby:lectern"), "minecraft:glass");
+        let shapes = &declared["ruby:lectern"]["shapes"];
+        assert_eq!(shapes["property"], "facing", "{shapes}");
+        let (north, south) = (
+            boxes(&shapes["values"]["north"]),
+            boxes(&shapes["values"]["south"]),
+        );
+        // The base, the post (not beside it), and the top's high edge, above the block, at the back.
+        for (p, filled) in [
+            ([8.0, 1.0, 8.0], true),
+            ([8.0, 8.0, 8.0], true),
+            ([2.0, 8.0, 2.0], false),
+            ([8.0, 17.0, 12.0], true),
+            ([8.0, 17.0, 4.0], false),
+        ] {
+            assert_eq!(inside(&north, p), filled, "{p:?} in {north:?}");
+        }
+        assert!(
+            inside(&south, [8.0, 17.0, 4.0]) && !inside(&south, [8.0, 17.0, 12.0]),
+            "{south:?}"
+        );
+        assert_eq!(template("ruby:repeater"), "minecraft:glass");
+        assert_eq!(
+            boxes(&declared["ruby:repeater"]["shapes"]),
+            [[0.0, 0.0, 0.0, 16.0, 2.0, 16.0]]
+        );
+        assert_eq!(template("ruby:machine"), "minecraft:stone");
+        assert!(declared["ruby:machine"].get("shapes").is_none());
+        assert_eq!(template("ruby:copper_stairs"), "minecraft:stone_stairs");
+        assert_eq!(
+            declared["ruby:copper_stairs"]["state_properties"],
+            serde_json::json!({})
+        );
     }
 
     /// `EnumProperty.create(name, RailShape.class, RailShape::isAscending)` (FramedBlocks' rail

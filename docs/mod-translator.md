@@ -6307,6 +6307,48 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     probe runtime now sets the client up (Part 83; both Part 85); `DebugPackets
     .sendNeighborsUpdatePacket` from Create's fluid pipes, and `BellBlock.updateShape` from its
     peculiar bell as its neighbour breaks (Part 85).
+- [x] 2026-11-07 Part 85: mod blocks that inherit a vanilla class's own shape, and the loose ends
+  of the every-block survey. Counted with a scan of the pack's 367 jars (`shapes_pack.py`, every
+  class file, nested jars too): 153 mod block classes draw no shape of their own and extend a
+  vanilla class whose shape isn't a full cube (13 jars' liquids, 9 saplings, plants, signs,
+  pipes, cauldrons, Create's diodes, lectern and rail); 23 of them reach a class whose shape the
+  runtime keeps (diodes 5, chests 4, lecterns 3, rails 5, redstone torches 4, a hopper, an ender
+  chest). Two have no template while a vanilla class above theirs has one (Create's weathering
+  copper stairs, Farmer's Delight's hay).
+  - compat `blocks`: such a block was declared an opaque full cube (stone), so the light inside it,
+    which lights what its renderer draws, was 0: Create's lectern controller drew its controller
+    black, and its latches, pulse repeaters and fluid pipes were dark. It is now declared
+    see-through unless its first vanilla class is one whose shape is `BlockBehaviour`'s, and its
+    states' shapes are read through the nearest vanilla class above it whose shape the runtime
+    keeps (a repeater's is its diode's), as vanilla dispatches `getShape` to it. The runtime keeps
+    three more: a diode's plate, a rail's (half a block where it climbs) and a lectern's (base,
+    post and the sloped top that stands above the block, by where it faces). The template is the
+    nearest vanilla class's above it that has one, so weathering copper stairs are stairs.
+  - The probe runtime that reads render shapes sets the client up without reloading resources:
+    its host has none, so the mods' reload listeners read nothing (Flywheel's shader sources
+    threw in the every-block survey, Part 84); the models are baked as before.
+  - compat: a player the game hasn't placed yet (the client's before its world loads, the probe
+    runtime drawing a renderer) is where a new entity is: `position`, `getX`, `blockPosition` and
+    the rest at the origin, looking south (only the look and the eyes were). Create's factory
+    panel renderer asks for it.
+  - compat: vanilla's `DebugPackets` do nothing, as in a released game (Create's fluid pipes send
+    `sendNeighborsUpdatePacket`), but for game tests' markers.
+  - Measured, not done (`supers_pack.py`): 69 mod classes call `super.updateShape` into one of 25
+    vanilla classes with a rule of their own (Create's peculiar bell into `BellBlock`, the
+    survey's last unmapped line), and 375 inherit one of 44 such rules without overriding it
+    (bushes 41, slabs 39, stairs 34, face-attached blocks 27, liquids 21, trapdoors 17, falling
+    blocks 14).
+  - Tests: compat 547 (2 new: a block draws the shape of the vanilla class it extends, a lectern's
+    by where it faces and a repeater's plate, none for one whose first vanilla class's shape is a
+    full cube, and weathering copper stairs are stairs; a player the game hasn't placed is at the
+    origin), translator 19, core 7.
+  - In game (`p85scene.sh`, each block beside the vanilla one it extends): the sky light inside
+    Create's lectern controller, latches, pulse repeater, controller rail, fluid pipe and copper
+    shingle stairs is 15, as inside the vanilla lectern, repeater, rail and stairs (0 inside the
+    controller in Part 84's run); the lectern draws the controller as lit as the lectern beside it,
+    the block below each is the floor, and nothing is unmapped but Flywheel's GL calls. The
+    controller rail draws without its colour (the mods' colour handlers: next). Create's display
+    board (`boardscene.sh`) draws its board and its cogwheel, not yet its text.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

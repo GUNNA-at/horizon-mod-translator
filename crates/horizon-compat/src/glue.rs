@@ -972,7 +972,7 @@ pub fn render_shape(rt: &mut Rt, state: &str) -> Option<&'static str> {
         }
     }
     // The models a client swaps in are baked once it is set up, as its resources load.
-    client_setup(
+    probe_setup(
         rt,
         &mut ShapeProbe {
             state: state.to_owned(),
@@ -1343,6 +1343,17 @@ fn client_setup(rt: &mut Rt, host: &mut dyn Host) {
         crate::resources::reload(rt, "assets");
         crate::baked_models::client_resources_loaded(rt);
     });
+}
+
+/// [`client_setup`] on the runtime that probes how blocks draw (the bundles' `with_probe_runtime`),
+/// whose host has no resources: the models are baked, and the reload listeners the mods registered,
+/// which would read nothing (Flywheel's shader sources throw), don't run.
+fn probe_setup(rt: &mut Rt, host: &mut dyn Host) {
+    if crate::neo::is_client(rt) {
+        return;
+    }
+    crate::neo::fire_client_setup(rt);
+    rt.with_host(host, |rt| crate::baked_models::client_resources_loaded(rt));
 }
 
 /// `native_block_entity_submit` (client): draws the mod block entity at `pos` with the renderer its

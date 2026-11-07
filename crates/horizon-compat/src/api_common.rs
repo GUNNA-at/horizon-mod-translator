@@ -2603,15 +2603,20 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let (yaw, pitch) = (rt.get_field(a(0), "$yaw").f(), rt.get_field(a(0), "$pitch").f());
             directions(rt, &ordered_by_nearest(yaw, pitch))
         }
+        // Vanilla's debug renderers' packets: a released game's do nothing, but for game tests'
+        // markers (Create's fluid pipes tell of their neighbours' updates).
+        ("net/minecraft/network/protocol/game/DebugPackets", n) if !n.starts_with("sendGameTest") => V::Void,
         ("net/minecraft/core/Direction", "fromYRot") => direction(rt, horizontal_facing(a(0).d() as f32)),
         // The player's place: the acting server player's when the game told it (`acting_player`),
-        // the client's own as the host places it.
+        // the client's own as the host places it; a player the game hasn't placed (the client's
+        // before its world loads: a resource reload at start, a probe drawing a block) is where a
+        // new entity is, at the origin with no rotation, so looking south.
         (o, n) if is_player(o)
             && matches!(
                 n,
                 "getX" | "getY" | "getZ" | "position" | "getPosition" | "blockPosition" | "getEyeY" | "getEyePosition" | "getEyeHeight" | "getLookAngle" | "getViewVector" | "getXRot" | "getYRot" | "getYHeadRot" | "getBoundingBox" | "getBbWidth" | "getBbHeight"
             )
-            && player_place(rt, a(0)).is_some() =>
+            && (player_place(rt, a(0)).is_some() || is_player_class(rt.class_of(a(0)))) =>
         {
             let (p, yaw, pitch) = player_place(rt, a(0)).unwrap_or_default();
             let eye = p[1] + player_eye_height(rt);
@@ -2649,15 +2654,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let d2 = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2);
             if n == "distanceTo" { V::F(d2.sqrt() as f32) } else { V::D(d2) }
         }
-        // The client's player before its world has placed it (a resource reload at start): where a
-        // new entity is, at the origin with no rotation, so looking south.
-        (o, n @ ("getLookAngle" | "getViewVector" | "getEyePosition")) if is_player(o) && is_player_class(rt.class_of(a(0))) => match n {
-            "getEyePosition" => {
-                let eye = player_eye_height(rt);
-                vec3(rt, 0.0, eye, 0.0)
-            }
-            _ => vec3(rt, 0.0, 0.0, 1.0),
-        },
         // Reach (`Player.blockInteractionRange`, `entityInteractionRange`: the attributes' bases,
         // creative's modifiers added), and whether a block is in it with `margin` more
         // (`canInteractWithBlock`: the block's box from the eyes; a server checks a mod's packet
@@ -4638,6 +4634,43 @@ mod tests {
         assert_eq!((c(&mut rt, pack, &[v, resources]), c(&mut rt, pack, &[v, data])), (V::I(34), V::I(48)));
         let dv = c(&mut rt, "net/minecraft/WorldVersion.getDataVersion.()Lnet/minecraft/world/level/storage/DataVersion;", &[v]);
         assert_eq!(c(&mut rt, "net/minecraft/world/level/storage/DataVersion.getVersion.()I", &[dv]), V::I(3955));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The client's player before the game has placed it (a resource reload at start, the probe
+    /// runtime drawing a block entity's renderer) is where a new entity is: at the origin, with no
+    /// rotation, so looking south.
+    #[test]
+    fn a_player_the_game_has_not_placed_is_at_the_origin() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        let p = rt.new_object(LOCAL_PLAYER);
+        let c = |rt: &mut Rt, k: &'static str| crate::api::call(rt, k, &[p]);
+        let at = c(
+            &mut rt,
+            "net/minecraft/world/entity/Entity.position.()Lnet/minecraft/world/phys/Vec3;",
+        );
+        assert_eq!(xyz(&rt, at), [0.0, 0.0, 0.0]);
+        assert_eq!(
+            c(&mut rt, "net/minecraft/world/entity/Entity.getZ.()D"),
+            V::D(0.0)
+        );
+        let block = c(
+            &mut rt,
+            "net/minecraft/world/entity/Entity.blockPosition.()Lnet/minecraft/core/BlockPos;",
+        );
+        assert_eq!(crate::api::pos_of(&rt, block), [0, 0, 0]);
+        let look = c(
+            &mut rt,
+            "net/minecraft/world/entity/Entity.getLookAngle.()Lnet/minecraft/world/phys/Vec3;",
+        );
+        assert_eq!(xyz(&rt, look), [0.0, 0.0, 1.0]);
+        let eye = c(
+            &mut rt,
+            "net/minecraft/world/entity/Entity.getEyePosition.()Lnet/minecraft/world/phys/Vec3;",
+        );
+        assert_eq!(xyz(&rt, eye), [0.0, f64::from(1.62f32), 0.0]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
