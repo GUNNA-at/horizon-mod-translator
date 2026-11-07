@@ -372,6 +372,9 @@ fn level_host(krate: &str) -> String {
         fn pop_experience(&mut self, pos: [i32; 3], amount: i32) {{
             self.level.native_pop_experience_here(pos, u32::try_from(amount).unwrap_or(0));
         }}
+        fn vanilla_can_survive(&self, classes: &[&str], pos: [i32; 3], state: &str) -> Option<bool> {{
+            self.level.native_vanilla_can_survive(classes, pos, state)
+        }}
     }}
 {stacks}"#
     )
@@ -407,6 +410,9 @@ fn level_read_host(c: &str) -> String {
         }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false // a question changes nothing
+        }}
+        fn vanilla_can_survive(&self, classes: &[&str], pos: [i32; 3], state: &str) -> Option<bool> {{
+            self.level.native_vanilla_can_survive(classes, pos, state)
         }}
     }}
 "#
@@ -4480,6 +4486,9 @@ fn {id}_state_for_placement(
         fn player_held(&self) -> Option<(String, u32)> {{
             (!self.item.is_empty()).then(|| (self.item.clone(), 1))
         }}
+        fn vanilla_can_survive(&self, classes: &[&str], pos: [i32; 3], state: &str) -> Option<bool> {{
+            self.level.native_vanilla_can_survive(classes, pos, state)
+        }}
     }}
     let placement = {c}::glue::Placement {{
         pos: [context.pos.x, context.pos.y, context.pos.z],
@@ -4566,6 +4575,9 @@ fn {id}_update_shape(
         }}
         fn vanilla_update_shape(&mut self, classes: &[&str], pos: [i32; 3], state: &str, direction: usize, neighbour_pos: [i32; 3], neighbour: &str) -> Option<String> {{
             self.level.native_vanilla_update_shape(self.ticks, classes, pos, state, direction, neighbour_pos, neighbour)
+        }}
+        fn vanilla_can_survive(&self, classes: &[&str], pos: [i32; 3], state: &str) -> Option<bool> {{
+            self.level.native_vanilla_can_survive(classes, pos, state)
         }}
     }}
     let mut host = Host {{ level, ticks }};

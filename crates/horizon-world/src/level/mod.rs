@@ -1049,6 +1049,34 @@ impl Behaviours {
             neighbour,
         ))
     }
+    /// `canSurvive` as a vanilla class declares it: the rule of the first of `classes` (simple
+    /// names, nearest first, as `LadderBlock`) that `state`'s block has among its classes, and of
+    /// the classes after it, past the level's hook (`before_can_survive`). What a mod block's
+    /// `super.canSurvive` asks of its template's classes from inside that hook, where the level is
+    /// only read. None where the block has none of `classes`, or for a state past the table.
+    pub fn class_can_survive<L: LevelAccess + ?Sized>(
+        &self,
+        level: &L,
+        classes: &[&str],
+        state: BlockStateId,
+        pos: BlockPos,
+    ) -> Option<bool> {
+        if state.0 as usize >= self.table.state_count() {
+            return None;
+        }
+        let chain = &self.data(state).chain;
+        let depth = classes
+            .iter()
+            .filter_map(|name| classes::Class::from_java(name))
+            .find_map(|class| chain.iter().position(|&c| c == class))?;
+        let mut read = read_level::ReadLevel::new(level);
+        // Survival schedules nothing; the simulation wants somewhere to put ticks all the same.
+        let mut ticks = Ticks::new(0);
+        Some(
+            self.sim(&mut read, &mut ticks)
+                .can_survive_at(depth, state, pos),
+        )
+    }
     /// `Block.updateFromNeighbourShapes`: a state adjusted to its neighbours.
     pub fn update_from_neighbour_shapes<L: LevelAccess + ?Sized>(
         &self,

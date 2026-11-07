@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "a vanilla block class's own survival run for a mod's block (`native_vanilla_can_survive`).",
+  "doc_summary": "`native_vanilla_can_survive(classes, pos, state)` on a level is `canSurvive` as a vanilla block class declares it, for the state `state` names: the rule of the first of `classes` (simple names, nearest first, as `LadderBlock`) that the state's block has among its classes (a mod block's are its template's), past `native_can_survive`, with the level only read. None for an unknown state or a block with none of the classes. A translated mod block's `super.canSurvive` into a vanilla class (Create's metal ladder asks `LadderBlock`'s) answers through it from the hooks that read a level: @API:vanilla_can_survive@.",
+  "comments": []
+}

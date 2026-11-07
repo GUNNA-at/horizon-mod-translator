@@ -391,16 +391,92 @@ const UPDATE_SHAPE_CLASSES: [&str; 104] = [
     "WaterloggedTransparentBlock",
 ];
 
+/// 1.21.1's block classes that declare a `canSurvive` of their own (read from their bytecode), by
+/// name under `net/minecraft/world/level/block/`.
+const CAN_SURVIVE_CLASSES: [&str; 59] = [
+    "AmethystClusterBlock",
+    "BambooSaplingBlock",
+    "BambooStalkBlock",
+    "BannerBlock",
+    "BaseCoralPlantTypeBlock",
+    "BaseCoralWallFanBlock",
+    "BasePressurePlateBlock",
+    "BaseRailBlock",
+    "BaseTorchBlock",
+    "BellBlock",
+    "BigDripleafBlock",
+    "BigDripleafStemBlock",
+    "BubbleColumnBlock",
+    "BushBlock",
+    "CactusBlock",
+    "CakeBlock",
+    "CandleBlock",
+    "CandleCakeBlock",
+    "CarpetBlock",
+    "CeilingHangingSignBlock",
+    "ChorusFlowerBlock",
+    "ChorusPlantBlock",
+    "CocoaBlock",
+    "CropBlock",
+    "DiodeBlock",
+    "DirtPathBlock",
+    "DoorBlock",
+    "DoublePlantBlock",
+    "FaceAttachedHorizontalDirectionalBlock",
+    "FarmBlock",
+    "FireBlock",
+    "FrogspawnBlock",
+    "GrindstoneBlock",
+    "GrowingPlantBlock",
+    "HangingRootsBlock",
+    "LadderBlock",
+    "LanternBlock",
+    "MangrovePropaguleBlock",
+    "MultifaceBlock",
+    "MushroomBlock",
+    "PitcherCropBlock",
+    "PointedDripstoneBlock",
+    "RedStoneWireBlock",
+    "RedstoneWallTorchBlock",
+    "ScaffoldingBlock",
+    "SeaPickleBlock",
+    "SmallDripleafBlock",
+    "SnowLayerBlock",
+    "SoulFireBlock",
+    "SporeBlossomBlock",
+    "StandingSignBlock",
+    "SugarCaneBlock",
+    "TallSeagrassBlock",
+    "TripWireHookBlock",
+    "VineBlock",
+    "WallBannerBlock",
+    "WallSignBlock",
+    "WallTorchBlock",
+    "piston/PistonHeadBlock",
+];
+
 /// The class whose `updateShape` a call naming vanilla block class `class` runs (a mod block's
 /// `super.updateShape`): the nearest of it and the classes above it that declares one, by name
 /// under `net/minecraft/world/level/block/`, `state/BlockBehaviour` (which keeps the state) past
 /// them all. None for a class the table of 1.21.1's classes doesn't have.
 pub(crate) fn update_shape_declarer(class: &str) -> Option<&'static str> {
+    declarer_in(class, &UPDATE_SHAPE_CLASSES)
+}
+
+/// The class whose `canSurvive` a call naming vanilla block class `class` runs (a mod block's
+/// `super.canSurvive`), as [`update_shape_declarer`] finds `updateShape`'s: `state/BlockBehaviour`
+/// (true) past them all.
+pub(crate) fn can_survive_declarer(class: &str) -> Option<&'static str> {
+    declarer_in(class, &CAN_SURVIVE_CLASSES)
+}
+
+/// The nearest of 1.21.1's block class `class` and the classes above it that `declaring` names.
+fn declarer_in(class: &str, declaring: &[&'static str]) -> Option<&'static str> {
     use crate::vanilla_classes::CLASSES;
     let mut c = class;
     for _ in 0..32 {
         let short = c.strip_prefix("net/minecraft/world/level/block/")?;
-        if let Some(d) = UPDATE_SHAPE_CLASSES.iter().find(|d| **d == short) {
+        if let Some(d) = declaring.iter().find(|d| **d == short) {
             return Some(d);
         }
         if short == "state/BlockBehaviour" {
@@ -416,6 +492,15 @@ pub(crate) fn update_shape_declarer(class: &str) -> Option<&'static str> {
 /// among a mod block's template's classes, a renamed or untemplated class passed over (a flower's
 /// is its template's, the game's own `FlowerBlock`). Empty past `BlockBehaviour`'s.
 pub(crate) fn update_shape_ancestry(class: &str) -> Vec<&'static str> {
+    ancestry_in(class, &UPDATE_SHAPE_CLASSES)
+}
+
+/// The same for `canSurvive` ([`can_survive_declarer`]).
+pub(crate) fn can_survive_ancestry(class: &str) -> Vec<&'static str> {
+    ancestry_in(class, &CAN_SURVIVE_CLASSES)
+}
+
+fn ancestry_in(class: &str, declaring: &[&str]) -> Vec<&'static str> {
     use crate::vanilla_classes::CLASSES;
     let mut names = Vec::new();
     let Some(mut at) = CLASSES.binary_search_by(|e| e.0.cmp(class)).ok() else {
@@ -431,7 +516,7 @@ pub(crate) fn update_shape_ancestry(class: &str) -> Vec<&'static str> {
             break;
         }
         names.push(short.rsplit('/').next().unwrap_or(short));
-        if UPDATE_SHAPE_CLASSES.contains(&short) {
+        if declaring.contains(&short) {
             break;
         }
         let Ok(next) = CLASSES.binary_search_by(|e| e.0.cmp(parent)) else {
@@ -1276,6 +1361,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         || (name == "getShape" && (default_shape_class(owner) || state_shape_class(owner)))
         || (name == "tick" && desc == TICK_DESC && default_tick_class(owner))
         || (name == "canSurvive" && plant_class(owner).is_some_and(|c| BUSH_SURVIVAL.contains(&c) || DOUBLE_PLANT_SURVIVAL.contains(&c)))
+        || (name == "canSurvive" && api::CAN_SURVIVE.ends_with(desc) && can_survive_declarer(owner).is_some())
         || (name == "mayPlaceOn" && plant_class(owner).is_some_and(|c| BUSH_SOIL.contains(&c)))
         || (owner == "net/minecraft/world/level/block/DoublePlantBlock" && name == "placeAt")
         || matches!(name, "values" | "registerDefaultState" | "defaultBlockState" | "defaultMapColor")
@@ -1768,6 +1854,21 @@ pub(crate) fn survives_by_code(rt: &mut Rt, b: V, class: &'static str, state: V,
     plant_survives(rt, plant_base(rt, class)?, b, state, level, pos)
 }
 
+/// `canSurvive` as vanilla block class `class` (or the nearest class above it that declares one)
+/// has it, for `state` at `pos`: the host runs that class's rule where the state's block has the
+/// class among its own; true past `BlockBehaviour`'s, and where the host runs nothing.
+fn vanilla_survives(rt: &mut Rt, class: &str, state: V, pos: V) -> bool {
+    let classes = can_survive_ancestry(class);
+    if classes.is_empty() {
+        return true;
+    }
+    let text = api_common::text_of(rt, state);
+    let at = api::pos_of(rt, pos);
+    rt.host()
+        .and_then(|h| h.vanilla_can_survive(&classes, at, &text))
+        .unwrap_or(true)
+}
+
 /// The vanilla plant class (its simple name) a mod block's class is or extends.
 fn plant_base(rt: &Rt, class: &'static str) -> Option<&'static str> {
     plant_class(if class.starts_with("net/minecraft/") { class } else { crate::rotation::vanilla_base(rt, class) })
@@ -1845,6 +1946,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // A mod plant's `super.canSurvive` and `super.mayPlaceOn` to a vanilla plant class.
         (o, "canSurvive") if plant_class(o).is_some_and(|c| BUSH_SURVIVAL.contains(&c) || DOUBLE_PLANT_SURVIVAL.contains(&c)) => {
             plant_survives(rt, plant_class(o)?, a(0), a(1), a(2), a(3)).map(|b| V::I(b as i32))
+        }
+        // ... and to any other vanilla block class: `BlockBehaviour`'s is true; a class with a rule
+        // of its own (a ladder's wall, farmland's open sky) is the game's, where the block's
+        // template has that class, else true (as `BlockBehaviour`'s: nothing breaks the block).
+        (o, "canSurvive")
+            if api::CAN_SURVIVE.ends_with(desc) && can_survive_declarer(o).is_some() =>
+        {
+            Some(V::I(vanilla_survives(rt, o, a(1), a(3)) as i32))
         }
         (o, "mayPlaceOn") if plant_class(o).is_some_and(|c| BUSH_SOIL.contains(&c)) => {
             let soil = api_common::text_of(rt, a(1));
@@ -4593,6 +4702,141 @@ mod tests {
         assert!(
             update_shape_ancestry("net/minecraft/world/level/block/HorizontalDirectionalBlock")
                 .is_empty()
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Create's metal ladder survives by its `super.canSurvive` (`LadderBlock`'s: a wall behind it)
+    /// or a rung of its own above it. The host runs `LadderBlock`'s rule, asked with the class; a
+    /// `super.canSurvive` that reaches `BlockBehaviour`'s is true without asking; a host that runs
+    /// no rule leaves the block standing.
+    #[test]
+    fn a_super_can_survive_into_a_vanilla_class_is_the_games_rule() {
+        const LADDER: &str = "test/MetalLadderBlock";
+        const PEDESTAL: &str = "test/PedestalBlock";
+        fn overrides(class: &str, short: &str) -> bool {
+            (class == LADDER || class == PEDESTAL) && short == api::CAN_SURVIVE
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match short {
+                // `super.canSurvive(state, level, pos) || level.getBlockState(pos.above())` the same rung.
+                api::CAN_SURVIVE if rt.class_of(args[0]) == LADDER => {
+                    let key = rt.static_key(&format!(
+                        "net/minecraft/world/level/block/LadderBlock.{}",
+                        api::CAN_SURVIVE
+                    ));
+                    if api::call(rt, key, args).i() != 0 {
+                        return V::I(1);
+                    }
+                    let above = api::call(
+                        rt,
+                        "net/minecraft/core/BlockPos.above.()Lnet/minecraft/core/BlockPos;",
+                        &[args[3]],
+                    );
+                    let get = "net/minecraft/world/level/LevelReader.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
+                    let state = api::call(rt, get, &[args[2], above]);
+                    V::I(
+                        (api_common::text_of(rt, state) == api_common::text_of(rt, args[1])) as i32,
+                    )
+                }
+                // `return super.canSurvive(state, level, pos);`
+                api::CAN_SURVIVE if rt.class_of(args[0]) == PEDESTAL => {
+                    let key = rt.static_key(&format!(
+                        "net/minecraft/world/level/block/Block.{}",
+                        api::CAN_SURVIVE
+                    ));
+                    api::call(rt, key, args)
+                }
+                _ => api::call(rt, key, args),
+            }
+        }
+        /// The game, whose ladder rule wants stone south of a rung facing north.
+        #[derive(Default)]
+        struct Game {
+            blocks: std::collections::BTreeMap<[i32; 3], String>,
+            asked: std::cell::RefCell<Vec<Vec<String>>>,
+        }
+        impl crate::host::Host for Game {
+            fn block_state(&self, pos: [i32; 3]) -> String {
+                self.blocks
+                    .get(&pos)
+                    .cloned()
+                    .unwrap_or_else(|| "minecraft:air".into())
+            }
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+                false
+            }
+            fn vanilla_can_survive(
+                &self,
+                classes: &[&str],
+                pos: [i32; 3],
+                _state: &str,
+            ) -> Option<bool> {
+                self.asked
+                    .borrow_mut()
+                    .push(classes.iter().map(|c| (*c).to_owned()).collect());
+                (classes.first() == Some(&"LadderBlock"))
+                    .then(|| self.block_state([pos[0], pos[1], pos[2] + 1]) == "minecraft:stone")
+            }
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        rt.supers
+            .insert(LADDER, "net/minecraft/world/level/block/LadderBlock");
+        rt.supers
+            .insert(PEDESTAL, "net/minecraft/world/level/block/Block");
+        for (class, id) in [(LADDER, "test:metal_ladder"), (PEDESTAL, "test:pedestal")] {
+            let b = rt.new_object(class);
+            rt.registered.insert(("block".into(), id.into()), b);
+        }
+        let rung = "test:metal_ladder[facing=north,waterlogged=false]";
+        let mut game = Game::default();
+        game.blocks.insert([0, 1, 1], "minecraft:stone".into());
+        assert_eq!(
+            crate::glue::can_survive(&mut rt, &mut game, [0, 1, 0], rung),
+            Some(true),
+            "on its wall"
+        );
+        assert_eq!(*game.asked.borrow(), [vec!["LadderBlock".to_owned()]]);
+        game.blocks.clear();
+        assert_eq!(
+            crate::glue::can_survive(&mut rt, &mut game, [0, 1, 0], rung),
+            Some(false),
+            "no wall, nothing above"
+        );
+        game.blocks.insert([0, 2, 0], rung.into());
+        assert_eq!(
+            crate::glue::can_survive(&mut rt, &mut game, [0, 1, 0], rung),
+            Some(true),
+            "hung from the rung above"
+        );
+        // `BlockBehaviour`'s is true, and the host isn't asked.
+        game.asked.borrow_mut().clear();
+        assert_eq!(
+            crate::glue::can_survive(&mut rt, &mut game, [5, 1, 5], "test:pedestal"),
+            Some(true)
+        );
+        assert!(game.asked.borrow().is_empty());
+        // A host that runs no rule leaves the block standing.
+        let mut memory = crate::host::MemoryHost::default();
+        assert_eq!(
+            crate::glue::can_survive(&mut rt, &mut memory, [0, 1, 0], rung),
+            Some(true)
+        );
+        // The classes asked: a class, then those above it up to the one declaring the rule.
+        assert_eq!(
+            can_survive_ancestry("net/minecraft/world/level/block/TorchBlock"),
+            ["TorchBlock", "BaseTorchBlock"]
+        );
+        assert_eq!(
+            can_survive_ancestry("net/minecraft/world/level/block/FlowerBlock"),
+            ["FlowerBlock", "BushBlock"]
+        );
+        assert!(can_survive_ancestry("net/minecraft/world/level/block/StairBlock").is_empty());
+        assert_eq!(
+            can_survive_declarer("net/minecraft/world/level/block/StairBlock"),
+            Some("state/BlockBehaviour")
         );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }

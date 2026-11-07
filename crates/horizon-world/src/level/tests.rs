@@ -3151,6 +3151,111 @@ fn a_hook_can_run_a_vanilla_classes_update_shape() {
 }
 
 #[test]
+fn a_hook_can_run_a_vanilla_classes_survival() {
+    use std::cell::Cell;
+
+    /// A level whose hook answers a ladder's survival as Create's metal ladder does: its
+    /// `super.canSurvive` (`LadderBlock`'s rule), or a rung of the same facing above it.
+    struct Hanging {
+        inner: TestLevel,
+        b: &'static Behaviours,
+        ladder: BlockId,
+        classes: &'static [&'static str],
+        asked: Cell<u32>,
+    }
+    impl LevelAccess for Hanging {
+        fn block_state(&self, pos: BlockPos) -> BlockStateId {
+            self.inner.block_state(pos)
+        }
+        fn set_raw(&mut self, pos: BlockPos, state: BlockStateId) -> Option<BlockStateId> {
+            self.inner.set_raw(pos, state)
+        }
+        fn is_loaded(&self, pos: BlockPos) -> bool {
+            self.inner.is_loaded(pos)
+        }
+        fn random(&mut self) -> &mut LegacyRandom {
+            self.inner.random()
+        }
+        fn game_time(&self) -> i64 {
+            self.inner.game_time()
+        }
+        fn emit(&mut self, event: LevelEvent) {
+            self.inner.emit(event);
+        }
+        fn before_can_survive(
+            &self,
+            pos: BlockPos,
+            state: BlockStateId,
+            survives: &mut Option<bool>,
+        ) {
+            if self.b.block(state) != self.ladder {
+                return;
+            }
+            self.asked.set(self.asked.get() + 1);
+            let above = self.block_state(pos.offset(0, 1, 0));
+            let own = self.b.class_can_survive(self, self.classes, state, pos);
+            *survives = Some(own.unwrap_or(true) || above == state);
+        }
+    }
+    let Some(f) = fixture() else { return };
+    let b = &f.behaviours;
+    let ladder = {
+        let mut s = f
+            .registry
+            .state(f.registry.default_state("minecraft:ladder").unwrap())
+            .unwrap()
+            .clone();
+        s.properties.insert("facing".into(), "north".into());
+        f.registry.resolve(&s).unwrap()
+    };
+    let stone = f.registry.default_state("minecraft:stone").unwrap();
+    let mut level = Hanging {
+        inner: TestLevel::new(b),
+        b,
+        ladder: b.block(ladder),
+        classes: &["LadderBlock"],
+        asked: Cell::new(0),
+    };
+    let mut ticks = Ticks::new(0);
+    ticks.add_empty_chunk(ChunkPos::new(0, 0)).unwrap();
+    // A ladder facing north hangs on the block south of it.
+    let (low, high) = (BlockPos::new(1, 1, 1), BlockPos::new(1, 2, 1));
+    let (low_wall, high_wall) = (BlockPos::new(1, 1, 2), BlockPos::new(1, 2, 2));
+    level.set_raw(low_wall, stone);
+    level.set_raw(low, ladder);
+    assert!(b.can_survive(&mut level, &mut ticks, low, ladder));
+    assert_eq!(
+        level.asked.get(),
+        1,
+        "the class's rule doesn't ask the hook again"
+    );
+    level.set_raw(low_wall, b.air());
+    assert!(!b.can_survive(&mut level, &mut ticks, low, ladder));
+    // A rung on a wall above holds the one below it, by the hook's own rule.
+    level.set_raw(high_wall, stone);
+    level.set_raw(high, ladder);
+    assert!(b.can_survive(&mut level, &mut ticks, low, ladder));
+    assert!(b.can_survive(&mut level, &mut ticks, high, ladder));
+    // Names the game doesn't have are passed over; a class the block lacks runs nothing.
+    assert_eq!(
+        b.class_can_survive(&level, &["MetalLadderBlock", "LadderBlock"], ladder, high),
+        Some(true)
+    );
+    assert_eq!(
+        b.class_can_survive(&level, &["MetalLadderBlock", "LadderBlock"], ladder, low),
+        Some(false)
+    );
+    assert_eq!(
+        b.class_can_survive(&level, &["CakeBlock"], ladder, high),
+        None
+    );
+    assert_eq!(
+        b.class_can_survive(&level, &["LadderBlock"], BlockStateId(u32::MAX), high),
+        None
+    );
+}
+
+#[test]
 fn the_level_chooses_the_state_a_block_is_placed_in() {
     use crate::fluid::{FluidKind, FluidState};
     use horizon_core::geometry::Vec3;

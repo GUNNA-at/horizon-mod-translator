@@ -4491,6 +4491,29 @@ impl GameLevel<'_> {
         )?;
         Some(self.native_state_id_text(new))
     }
+    /// `canSurvive` as a vanilla block class declares it, for the state
+    /// `state` names at `pos`: the rule of the first of `classes` (simple
+    /// names, nearest first, as `LadderBlock`) that the state's block has
+    /// among its classes (a mod block's are its template's), past
+    /// `native_can_survive`, on this level only read. What a mod block's
+    /// `super.canSurvive` gets from inside the hooks that read this level: a
+    /// ladder needs its wall, farmland no solid block on it. None for an
+    /// unknown state or a block with none of `classes`. API
+    /// @API:vanilla_can_survive@.
+    pub(super) fn native_vanilla_can_survive(
+        &self,
+        classes: &[&str],
+        pos: [i32; 3],
+        state: &str,
+    ) -> Option<bool> {
+        let state = self.native_state_from_text(state)?;
+        self.behaviours.class_can_survive(
+            self,
+            classes,
+            state,
+            BlockPos::new(pos[0], pos[1], pos[2]),
+        )
+    }
     /// The dimension this level is (`minecraft:the_nether`), as
     /// `Game::native_dimension` names the current one.
     pub(super) fn native_dimension_name(&self) -> &'static str {

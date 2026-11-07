@@ -6981,6 +6981,33 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a fence's hook running `FenceBlock`'s rule joins the stone set beside it and isn't asked again,
     unknown names are passed over, a class the block lacks runs nothing, a state past the table is
     refused), translator 20.
+- [x] 2026-11-07 Part 103: a mod block's `super.canSurvive` into a vanilla class answers as the
+  class does. Part 102's game run found it: Create's metal ladder survives by `LadderBlock`'s rule
+  or a rung above it, and the `LadderBlock.canSurvive` it asks was answered by nothing (false), so
+  a rung on its wall fell with the one above it. `Block.canSurvive` (`BlockBehaviour`'s true) was
+  unanswered the same way, so a mod block whose own rule asks it (4 mods of the pack) could never
+  stand. Of the pack's 17 classes calling one, 5 reach `BlockBehaviour`'s, 8 a plant's (`BushBlock`,
+  `FlowerBlock`, `DoublePlantBlock`...: compat's own rule, which asks the mod's
+  `mayPlaceOn`), and 4 a class with a rule of its own (`CropBlock`, `FarmBlock`, `LadderBlock`).
+  - World: `Behaviours::class_can_survive`, from the first of the classes given that the state's
+    block has, past the level's hook, on the read-only view of Part 102.
+  - Game: `GameLevel::native_vanilla_can_survive` (a new API, fragment `vanilla_can_survive`); the
+    translated bundles' hooks that read or tick a level (survival, placement, shape updates,
+    ticks, random ticks...) give it to compat as `Host::vanilla_can_survive`.
+  - Compat: `super.canSurvive` to a vanilla block class (1.21.1's 59 classes that declare one, read
+    from their bytecode, `blocks::can_survive_ancestry`) is true past `BlockBehaviour`'s and asks the
+    host for the others; where nothing answers (a hook on the game, or a template without the
+    class, as a mod crop's) it is true, as `BlockBehaviour`'s: nothing breaks the block.
+  - In the game (Create translated, `p103scene.sh`): three pairs of Create's andesite ladders, each
+    rung on a wall, one above the other. Taking the upper rung's wall breaks the upper rung and
+    leaves the lower one; taking the lower rung's wall leaves both (the lower hangs from the one
+    above, Create's own rule past `LadderBlock`'s); taking both walls breaks both. The log has no
+    `canSurvive` unmapped or thrown.
+  - Tests: compat 593 (1 new: a mod ladder's `super.canSurvive` is the host's answer, asked with
+    `LadderBlock`; a host without one says true; the classes asked for a torch, a flower, none for
+    a stair), world `level::tests` 74 (1 new: a ladder hook running `LadderBlock`'s rule survives on
+    its wall, fails without it, hangs from a rung above by the hook's own rule; a class the block
+    lacks runs nothing, a state past the table is refused), translator 20.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

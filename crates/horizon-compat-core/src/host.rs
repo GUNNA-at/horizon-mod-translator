@@ -574,6 +574,13 @@ pub trait Host {
     fn block_tick_queued(&mut self, _pos: [i32; 3], _block: &str, _this_tick: bool) -> bool {
         false
     }
+    /// `canSurvive` as a vanilla block class declares it, for the block `state` at `pos` (as
+    /// [`Host::block_state`] writes it): the rule of the first of `classes` (simple names, nearest
+    /// first, as `LadderBlock`) that the state's block has among its classes, the level only read.
+    /// What a mod block's `super.canSurvive` gets. None where nothing runs it (the default).
+    fn vanilla_can_survive(&self, _classes: &[&str], _pos: [i32; 3], _state: &str) -> Option<bool> {
+        None
+    }
     /// `updateShape` as a vanilla block class declares it, for the block `state` at `pos` whose
     /// neighbour toward `direction` (`Direction`'s ordinal) at `neighbour_pos` is `neighbour`
     /// (states as [`Host::block_state`] writes them): the rule of the first of `classes` (simple

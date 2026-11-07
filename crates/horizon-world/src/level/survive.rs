@@ -17,7 +17,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         self.level.before_can_survive(pos, state, &mut survives);
         survives.unwrap_or_else(|| self.can_survive_at(0, state, pos))
     }
-    fn can_survive_at(&self, depth: usize, state: BlockStateId, pos: BlockPos) -> bool {
+    pub(super) fn can_survive_at(&self, depth: usize, state: BlockStateId, pos: BlockPos) -> bool {
         let chain = &self.b.data(state).chain;
         for (index, class) in chain.iter().enumerate().skip(depth) {
             if let Some(result) = self.can_survive_class(*class, index, state, pos) {
