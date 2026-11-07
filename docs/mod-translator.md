@@ -6175,6 +6175,52 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     model (`BakedModelWrapper.getOriginalModel`, `ItemStack.hasFoil`, `BakedModel.getRenderPasses`),
     `ChunkSource.hasChunk` (mechanical arm), Guava's `Objects.equal` and `Collectors.summingInt`
     (track, train door).
+- [x] 2026-11-07 Part 82: the calls Part 81's survey of Create's blocks left unmapped, each made
+  general: Java's collectors and priority queues, text read a character at a time, a level's chunk
+  generator, an item's shine and its model's render passes. Counted on the pack's 367 jars and the
+  jars inside them (`p82scan/refs.py`: every member reference, with the jars that make it): 22
+  `Collectors` methods (`toList` in 101 jars), `new PriorityQueue(comparator)` in 13 jars and
+  fastutil's heap queues in 3, `ServerChunkCache.getGenerator` 26, `ItemStack.hasFoil` 29,
+  `BakedModel.getRenderPasses` and `getRenderTypes(ItemStack, boolean)` 14 each,
+  `FormattedCharSequence.accept` 11, `Component.visit` 8, Guava's `Objects.equal` 12,
+  `BlockState.handleNeighborChanged` 6, `StringDecomposer.iterateFormatted` 4.
+  - compat `collectors` (new): `Collectors` whole, as the JDK's: `toList`/`toSet`/unmodifiable
+    forms, `joining`, `toMap`/`toUnmodifiableMap`/`toConcurrentMap` (a key twice throws
+    `IllegalStateException` with Java's message unless a merge is given; with a map factory),
+    `toCollection`, `groupingBy`/`groupingByConcurrent` with any downstream and map factory,
+    `partitioningBy` (`{false=…, true=…}`), `collectingAndThen`, `mapping`, `filtering`,
+    `flatMapping`, `counting`, `summingInt/Long/Double` (doubles summed with Java's compensation),
+    `averaging*`, `minBy`/`maxBy`, `reducing`, `Collector.of`, Guava's `toImmutableList/Set/Map/
+    BiMap`; a mod's own `Collector` runs through its supplier, accumulator and finisher; the
+    three-argument `collect(supplier, accumulator, combiner)` of object and primitive streams.
+  - compat `heaps` (new): `java.util.PriorityQueue`, `PriorityBlockingQueue` and fastutil's
+    `*HeapPriorityQueue` are binary heaps in the JDK's (or fastutil's) sift order, by their
+    comparator or natural order: `poll`/`peek`/`remove(o)`/`removeIf` and iteration in the heap's
+    array order, as Java's. Before, a priority queue was a list in insertion order.
+  - compat `char_sinks` (new): `StringDecomposer.iterate`, `iterateBackwards` and
+    `iterateFormatted` (its four forms: `§` codes become styles, `§r` back to the default, a code
+    point at the index of its first UTF-16 unit, a broken pair as U+FFFD, the sink's false stops the
+    walk), `getPlainText`, `filterBrokenSurrogates`; `FormattedCharSequence.accept(sink)` and
+    `Component`/`FormattedText.visit(consumer[, style])` on the runtime's texts.
+  - compat: `level.getChunkSource().getGenerator()` is a `NoiseBasedChunkGenerator` (a
+    `ChunkGenerator`, not the debug world's `DebugLevelSource`) with its dimension's sea level,
+    lowest y and depth from vanilla's noise settings; `ChunkSource.hasChunk` is true;
+    `BlockState.handleNeighborChanged` runs the level's neighbour update; `ItemStack.hasFoil` is the
+    glint override, else the item's own `isFoil` (a mod's override first), else enchanted or a
+    lodestone compass; `BakedModel.getRenderPasses(stack, fabulous)` is the model itself and
+    `getRenderTypes(stack, fabulous)` NeoForge's fallback item type; `EntityBlock.getTicker` and
+    `getListener` default to none, and a block or block entity without its own `getTicker`,
+    `loadAdditional` or `saveAdditional` falls back by the full key (the short one never resolved).
+  - compat core: `String.valueOf` of a list, set, map or map entry prints it as Java does (`[a, b]`,
+    `{k=v}`, `k=v`, "(this Collection)" for one holding itself), a number a collection holds unboxed
+    prints as its box (it printed "null"), a `Boolean` box `true`/`false`.
+  - Tests: compat 538 (15 new: a priority queue polls least first in Java's heap order, follows
+    its comparator, is heapified from a collection, and fastutil's dequeues its least;
+    `groupingBy` with its downstreams, `toCollection`/`partitioningBy`/`collectingAndThen`, `toMap`
+    refusing a key twice; `iterateFormatted` styles by `§` codes and stops when told,
+    `iterateBackwards`, `visit` until the consumer answers; a stack's shine; a block entity
+    without its own ticker or data ticks on vanilla's; a state's neighbour change reaches the
+    level; the level's generator; an item model's passes and fallback type), translator 19, core 7.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

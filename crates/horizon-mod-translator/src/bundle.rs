@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 97] = [
+const COMPAT: [(&str, &str); 100] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -110,11 +110,14 @@ const COMPAT: [(&str, &str); 97] = [
     ("breaks.rs", include_str!("../../horizon-compat/src/breaks.rs")),
     ("brigadier.rs", include_str!("../../horizon-compat/src/brigadier.rs")),
     ("codecs.rs", include_str!("../../horizon-compat/src/codecs.rs")),
+    ("char_sinks.rs", include_str!("../../horizon-compat/src/char_sinks.rs")),
+    ("collectors.rs", include_str!("../../horizon-compat/src/collectors.rs")),
     ("command_args.rs", include_str!("../../horizon-compat/src/command_args.rs")),
     ("commands.rs", include_str!("../../horizon-compat/src/commands.rs")),
     ("recipes.rs", include_str!("../../horizon-compat/src/recipes.rs")),
     ("crafting.rs", include_str!("../../horizon-compat/src/crafting.rs")),
     ("handlers.rs", include_str!("../../horizon-compat/src/handlers.rs")),
+    ("heaps.rs", include_str!("../../horizon-compat/src/heaps.rs")),
     ("components.rs", include_str!("../../horizon-compat/src/components.rs")),
     ("container_screens.rs", include_str!("../../horizon-compat/src/container_screens.rs")),
     ("capabilities.rs", include_str!("../../horizon-compat/src/capabilities.rs")),

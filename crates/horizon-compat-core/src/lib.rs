@@ -967,33 +967,104 @@ impl Rt {
             'J' => v.j().to_string(),
             'F' => java_double(v.f() as f64, true),
             'D' => java_double(v.d(), false),
-            'L' => match self.str_of(v) {
-                Some(s) => s.to_owned(),
-                None if v.r() == 0 => "null".into(),
-                None => match self.heap.get(v.r() as usize).map(|o| &o.data) {
-                    Some(Data::Fields(f)) if f.contains_key("value") => f["value"].i().to_string(),
-                    // A position (`BlockPos`, its mutable form, `SectionPos`): `Vec3i.toString`,
-                    // Guava's `toStringHelper` with the class's simple name.
-                    Some(Data::Native("BlockPos", h)) => {
-                        let class = self.class_of(v);
-                        let simple = class.rsplit(['/', '$']).next().unwrap_or(class);
-                        format!("{simple}{{x={}, y={}, z={}}}", h[0], h[1], h[2])
-                    }
-                    // `Vec3.toString`: "(x, y, z)", each as `Double.toString` writes it.
-                    Some(Data::Fields(f)) if self.class_of(v) == "net/minecraft/world/phys/Vec3" => {
-                        let c = |k: &str| java_double(f.get(k).copied().unwrap_or_default().d(), false);
-                        format!("({}, {}, {})", c("x"), c("y"), c("z"))
-                    }
-                    // Vanilla's directions and axes, kept as natives: their `toString` is the
-                    // name each was built with (`north`, `x`), an axis direction's description.
-                    Some(Data::Native("Direction", h)) => ["down", "up", "north", "south", "west", "east"][h[0].clamp(0, 5) as usize].into(),
-                    Some(Data::Native("Axis", h)) => ["x", "y", "z"][h[0].clamp(0, 2) as usize].into(),
-                    Some(Data::Native("AxisDirection", h)) => if h[0] != 0 { "Towards positive" } else { "Towards negative" }.into(),
-                    Some(Data::Native("Plane", h)) => if h[0] != 0 { "VERTICAL" } else { "HORIZONTAL" }.into(),
-                    _ => format!("{}@{:x}", self.class_of(v).replace('/', "."), v.r()),
-                },
-            },
+            'L' => self.object_string(v, 0),
             _ => v.i().to_string(),
+        }
+    }
+
+    /// `String.valueOf(Object)` of `v`, `depth` collections down. A number held unboxed (as
+    /// collections hold theirs) prints as its box would; a collection, a map and a map's entry as
+    /// `AbstractCollection`, `AbstractMap` and their entries print them, each element as
+    /// `String.valueOf` does (one that holds itself says so).
+    fn object_string(&self, v: V, depth: u32) -> String {
+        match v {
+            V::I(i) => return i.to_string(),
+            V::J(j) => return j.to_string(),
+            V::F(f) => return java_double(f64::from(f), true),
+            V::D(d) => return java_double(d, false),
+            _ => {}
+        }
+        if let Some(s) = self.str_of(v) {
+            return s.to_owned();
+        }
+        if v.r() == 0 {
+            return "null".into();
+        }
+        let class = self.class_of(v);
+        let shown = |e: V, this: &str| {
+            if e == v {
+                this.to_owned()
+            } else {
+                self.object_string(e, depth + 1)
+            }
+        };
+        match self.heap.get(v.r() as usize).map(|o| &o.data) {
+            Some(Data::List(kv))
+                if depth < 16 && class == "java/util/Map$Entry" && kv.len() == 2 =>
+            {
+                format!(
+                    "{}={}",
+                    shown(kv[0], "(this Map)"),
+                    shown(kv[1], "(this Map)")
+                )
+            }
+            Some(Data::List(items)) if depth < 16 && self.is_a(class, "java/util/Collection") => {
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|&e| shown(e, "(this Collection)"))
+                    .collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Some(Data::Table(t)) if depth < 16 && self.is_a(class, "java/util/Map") => {
+                let parts: Vec<String> = t
+                    .entries
+                    .iter()
+                    .map(|&(k, e)| format!("{}={}", shown(k, "(this Map)"), shown(e, "(this Map)")))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+            Some(Data::Table(t)) if depth < 16 && self.is_a(class, "java/util/Collection") => {
+                let parts: Vec<String> = t
+                    .entries
+                    .iter()
+                    .map(|&(k, _)| shown(k, "(this Collection)"))
+                    .collect();
+                format!("[{}]", parts.join(", "))
+            }
+            // A box prints what it holds (`Boolean.toString`: true or false).
+            Some(Data::Fields(f)) if f.contains_key("value") => match (class, f["value"]) {
+                ("java/lang/Boolean", b) => (b.i() != 0).to_string(),
+                ("java/lang/Character", c) => self.to_java_string(c, 'C'),
+                (_, n @ (V::J(_) | V::F(_) | V::D(_))) => self.object_string(n, depth + 1),
+                (_, n) => n.i().to_string(),
+            },
+            // A position (`BlockPos`, its mutable form, `SectionPos`): `Vec3i.toString`,
+            // Guava's `toStringHelper` with the class's simple name.
+            Some(Data::Native("BlockPos", h)) => {
+                let simple = class.rsplit(['/', '$']).next().unwrap_or(class);
+                format!("{simple}{{x={}, y={}, z={}}}", h[0], h[1], h[2])
+            }
+            // `Vec3.toString`: "(x, y, z)", each as `Double.toString` writes it.
+            Some(Data::Fields(f)) if class == "net/minecraft/world/phys/Vec3" => {
+                let c = |k: &str| java_double(f.get(k).copied().unwrap_or_default().d(), false);
+                format!("({}, {}, {})", c("x"), c("y"), c("z"))
+            }
+            // Vanilla's directions and axes, kept as natives: their `toString` is the
+            // name each was built with (`north`, `x`), an axis direction's description.
+            Some(Data::Native("Direction", h)) => {
+                ["down", "up", "north", "south", "west", "east"][h[0].clamp(0, 5) as usize].into()
+            }
+            Some(Data::Native("Axis", h)) => ["x", "y", "z"][h[0].clamp(0, 2) as usize].into(),
+            Some(Data::Native("AxisDirection", h)) => if h[0] != 0 {
+                "Towards positive"
+            } else {
+                "Towards negative"
+            }
+            .into(),
+            Some(Data::Native("Plane", h)) => {
+                if h[0] != 0 { "VERTICAL" } else { "HORIZONTAL" }.into()
+            }
+            _ => format!("{}@{:x}", class.replace('/', "."), v.r()),
         }
     }
 

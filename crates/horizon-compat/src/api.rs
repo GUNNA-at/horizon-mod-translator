@@ -34,6 +34,7 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
         // A mod's render types extend `RenderType` and read the shards it inherits from
         // `RenderStateShard` (catnip's `PonderRenderTypes.BLOCK_SHEET_MIPPED`).
         "net/minecraft/client/renderer/RenderType" => Some("net/minecraft/client/renderer/RenderStateShard"),
+        NOISE_GENERATOR => Some(CHUNK_GENERATOR),
         _ => crate::models::api_super(class)
             .or_else(|| crate::entity_render::api_super(class))
             .or_else(|| crate::camera::api_super(class))
@@ -1082,6 +1083,22 @@ const SAVED_DATA: &str = "net/minecraft/world/level/saveddata/SavedData";
 const LEVEL_DATA: &str = "net/minecraft/world/level/storage/LevelData";
 const LEVEL_CHUNK: &str = "net/minecraft/world/level/chunk/LevelChunk";
 const SAVED_DATA_FACTORY: &str = "net/minecraft/world/level/saveddata/SavedData$Factory";
+const CHUNK_CACHE: &str = "net/minecraft/server/level/ServerChunkCache";
+const CHUNK_SOURCE: &str = "net/minecraft/world/level/chunk/ChunkSource";
+const CHUNK_GENERATOR: &str = "net/minecraft/world/level/chunk/ChunkGenerator";
+const NOISE_GENERATOR: &str = "net/minecraft/world/level/levelgen/NoiseBasedChunkGenerator";
+
+/// A vanilla dimension's sea level, lowest y and height, as its noise settings give them
+/// (`NoiseGeneratorSettings.overworld/nether/end`).
+fn noise_heights(dimension: &str) -> Option<(i32, i32, i32)> {
+    match dimension {
+        "minecraft:overworld" => Some((63, -64, 384)),
+        "minecraft:the_nether" => Some((32, 0, 128)),
+        "minecraft:the_end" => Some((0, 0, 128)),
+        _ => None,
+    }
+}
+
 /// 1.21.1's `RenderShape`, in declaration order (ordinals).
 pub const RENDER_SHAPES: [&str; 3] = ["INVISIBLE", "ENTITYBLOCK_ANIMATED", "MODEL"];
 
@@ -1810,6 +1827,25 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             _ => return None,
         },
         (_, "getChunkSource") if level => rt.intern("compat:chunk-source".into(), |rt| rt.new_object("net/minecraft/server/level/ServerChunkCache")),
+        // The level's generator, a noise-based one as every dimension of a normal world has (Create's
+        // belts ask whether it is the debug world's `DebugLevelSource`, whose blocks may not change).
+        (CHUNK_CACHE | CHUNK_SOURCE, "getGenerator") => {
+            let make = |rt: &mut Rt| rt.new_object(NOISE_GENERATOR);
+            rt.intern("compat:chunk-generator".into(), make)
+        }
+        // Every chunk a mod reaches here is loaded (the level's `hasChunkAt` says the same).
+        (CHUNK_CACHE | CHUNK_SOURCE, "hasChunk") => V::I(1),
+        // The generator's heights are its dimension's noise settings (`NoiseGeneratorSettings`); a
+        // dimension a datapack adds has its own, which aren't read here.
+        (CHUNK_GENERATOR | NOISE_GENERATOR, "getSeaLevel" | "getMinY" | "getGenDepth") => {
+            let dimension = rt.host().map(|h| h.dimension()).unwrap_or_default();
+            let (sea, min_y, depth) = noise_heights(&dimension)?;
+            V::I(match name {
+                "getSeaLevel" => sea,
+                "getMinY" => min_y,
+                _ => depth,
+            })
+        }
         // Players see the block entity's new data (Create's `sendData`).
         ("net/minecraft/server/level/ServerChunkCache" | "net/minecraft/world/level/chunk/ChunkSource", "blockChanged") => {
             let p = pos_of(rt, a(1));
@@ -2032,6 +2068,15 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 // `StateHolder.owner`, read as a field where an access transformer opens it: the
                 // state's block.
                 "getBlock" | "$owner" => block(rt, &b.to_owned()),
+                // `handleNeighborChanged(level, pos, block, fromPos, movedByPiston)`: the block at
+                // `pos` hears of the change at `fromPos`, as `Level.neighborChanged` has it do (Create's
+                // sliding door tells its other half): the game runs it, a mod block's own code inside.
+                "handleNeighborChanged" if desc.starts_with("(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;") => {
+                    use crate::host::NeighborUpdate;
+                    let (pos, from, changed) = (pos_of(rt, a(2)), pos_of(rt, a(4)), block_name(rt, a(3)));
+                    rt.host_call(|h| h.update_neighbors(NeighborUpdate::One { pos, from }, &changed));
+                    V::Void
+                }
                 // The block's registry entry; a mod block not registered yet learns its name when
                 // it is.
                 "getBlockHolder" => {
@@ -2764,6 +2809,65 @@ mod tests {
         assert_eq!(owner, block);
         assert!(owner.r() != 0);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `state.handleNeighborChanged(level, pos, block, fromPos, moved)` is the level's
+    /// `neighborChanged(pos, block, fromPos)`: the game tells the block at `pos`.
+    #[test]
+    fn a_states_neighbour_change_reaches_the_level() {
+        use crate::host::{MemoryHost, NeighborUpdate};
+        const HANDLE: &str = "net/minecraft/world/level/block/state/BlockState.handleNeighborChanged.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;Lnet/minecraft/core/BlockPos;Z)V";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let l = crate::glue::level(rt);
+            let door = state(rt, "minecraft:oak_door[half=upper]");
+            let (at, below) = (block_pos(rt, 4, 65, 0), block_pos(rt, 4, 64, 0));
+            let changed = block(rt, "minecraft:oak_door");
+            call(rt, HANDLE, &[door, l, at, changed, below, V::I(0)]);
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        assert_eq!(
+            host.neighbor_updates,
+            [(
+                NeighborUpdate::One {
+                    pos: [4, 65, 0],
+                    from: [4, 64, 0]
+                },
+                "minecraft:oak_door".to_owned()
+            )]
+        );
+    }
+
+    /// `level.getChunkSource().getGenerator()` is a noise-based generator, not the debug world's,
+    /// with the overworld's heights from its noise settings.
+    #[test]
+    fn a_levels_generator_is_its_dimensions_noise_generator() {
+        const SOURCE: &str = "net/minecraft/world/level/Level.getChunkSource.()Lnet/minecraft/world/level/chunk/ChunkSource;";
+        const GENERATOR: &str = "net/minecraft/server/level/ServerChunkCache.getGenerator.()Lnet/minecraft/world/level/chunk/ChunkGenerator;";
+        const HEIGHTS: [&str; 3] = [
+            "net/minecraft/world/level/chunk/ChunkGenerator.getSeaLevel.()I",
+            "net/minecraft/world/level/chunk/ChunkGenerator.getMinY.()I",
+            "net/minecraft/world/level/chunk/ChunkGenerator.getGenDepth.()I",
+        ];
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = crate::host::MemoryHost::default();
+        let (generator, heights) = rt.with_host(&mut host, |rt| {
+            let l = crate::glue::level(rt);
+            let source = call(rt, SOURCE, &[l]);
+            let generator = call(rt, GENERATOR, &[source]);
+            let heights = HEIGHTS.map(|key| call(rt, key, &[generator]));
+            (generator, heights)
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        assert!(rt.instance_of(generator, "net/minecraft/world/level/chunk/ChunkGenerator"));
+        assert!(!rt.instance_of(
+            generator,
+            "net/minecraft/world/level/levelgen/DebugLevelSource"
+        ));
+        assert_eq!(heights, [V::I(63), V::I(-64), V::I(384)]);
     }
 
     /// `BlockState.getSeed(pos)`: a mod block's own `getSeed(state, pos)` first; else vanilla's

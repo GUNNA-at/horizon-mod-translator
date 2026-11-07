@@ -703,7 +703,7 @@ fn int_box(rt: &mut Rt, i: i32) -> V {
 fn kind_of(class: &str) -> Option<&'static str> {
     let simple = class.rsplit('/').next().unwrap_or(class);
     Some(match simple {
-        "ArrayList" | "LinkedList" | "ArrayDeque" | "Vector" | "Stack" | "CopyOnWriteArrayList" | "PriorityQueue"
+        "ArrayList" | "LinkedList" | "ArrayDeque" | "Vector" | "Stack" | "CopyOnWriteArrayList"
         | "ConcurrentLinkedQueue" | "ConcurrentLinkedDeque" | "LinkedBlockingQueue" => "list",
         // fastutil's lists and queues of each element type (`ReferenceArrayList`, `LongArrayList`,
         // `IntArrayFIFOQueue`...).
@@ -795,6 +795,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if name == "<init>" {
         let this = a(0);
+        if crate::heaps::heap_class(owner) {
+            crate::heaps::construct(rt, owner, desc, args);
+            return Some(V::Void);
+        }
         let kind = kind_of(owner)?;
         let class = rt.class_of(this);
         let data = match kind {
@@ -863,6 +867,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     match data_kind? {
         'l' if rt.class_of(this) == "java/util/Map$Entry" => entry_call(rt, name, args),
+        // A priority queue moves its elements as a heap; the rest it shares with a list.
+        'l' if crate::heaps::is_heap(rt, this) => {
+            crate::heaps::call(rt, name, desc, args).or_else(|| list_call(rt, name, desc, args))
+        }
         'l' => list_call(rt, name, desc, args),
         't' if is_map(rt.class_of(this)) => map_call(rt, name, desc, args),
         't' => set_call(rt, name, args),
@@ -1057,6 +1065,11 @@ fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    if crate::collectors::makes(owner, name)
+        && let Some(v) = crate::collectors::make(rt, owner, name, desc, args)
+    {
+        return Some(v);
+    }
     if owner == "java/util/Arrays"
         && let Some(v) = arrays_call(rt, name, desc, args)
     {
@@ -1384,9 +1397,13 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         ("java/util/Objects", "requireNonNull" | "requireNonNullElse") => {
             if a(0).r() == 0 && name == "requireNonNullElse" { a(1) } else { a(0) }
         }
-        ("java/util/Objects", "equals") => V::I(equals(rt, a(0), a(1)) as i32),
+        // Guava's `Objects.equal(a, b)` and `Objects.hashCode(Object...)` are `Objects.equals`
+        // and `Objects.hash`.
+        ("java/util/Objects", "equals") | ("com/google/common/base/Objects", "equal") => {
+            V::I(equals(rt, a(0), a(1)) as i32)
+        }
         ("java/util/Objects", "hashCode") => V::I(if a(0).is_null() { 0 } else { hash(rt, a(0)) }),
-        ("java/util/Objects", "hash") => {
+        ("java/util/Objects", "hash") | ("com/google/common/base/Objects", "hashCode") => {
             let items = elements(rt, a(0));
             V::I(items.into_iter().fold(1i32, |h, v| h.wrapping_mul(31).wrapping_add(if v.is_null() { 0 } else { hash(rt, v) })))
         }
@@ -1419,19 +1436,6 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             let (lo, hi) = (i64::from(a(0).i()), i64::from(a(1).i()) + i64::from(name == "rangeClosed"));
             let items = (lo..hi).map(|i| V::I(i as i32)).collect();
             rt.alloc("java/util/stream/IntStream", Data::Stream(items))
-        }
-        ("java/util/stream/Collectors", "toList" | "toSet" | "toUnmodifiableList" | "toUnmodifiableSet") => {
-            rt.alloc(if name.contains("Set") { "compat:collect-set" } else { "compat:collect-list" }, Data::List(Vec::new()))
-        }
-        // `joining([separator[, prefix, suffix]])`, and `toMap(key, value[, merge])`: what `collect`
-        // does with them, kept on the collector.
-        ("java/util/stream/Collectors", "joining") => {
-            let parts = if args.len() == 3 { vec![a(0), a(1), a(2)] } else { vec![a(0)] };
-            rt.alloc("compat:collect-join", Data::List(parts))
-        }
-        ("java/util/stream/Collectors", "toMap" | "toUnmodifiableMap") if args.len() <= 3 => {
-            let parts = args.to_vec();
-            rt.alloc("compat:collect-map", Data::List(parts))
         }
         ("java/util/stream/Stream", "of") => {
             let items = varargs(rt);
@@ -2866,48 +2870,11 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             };
             rt.alloc(class, Data::Array(items))
         }
-        "collect" => match rt.class_of(a(1)) {
-            "compat:collect-set" => new_set(rt, &items),
-            "compat:collect-join" => {
-                let parts = match rt.heap.get(a(1).r() as usize).map(|o| &o.data) {
-                    Some(Data::List(p)) => p.clone(),
-                    _ => Vec::new(),
-                };
-                let text = |rt: &Rt, v: Option<&V>| v.and_then(|v| rt.str_of(*v)).unwrap_or("").to_owned();
-                let joined: Vec<String> = items.iter().map(|e| rt.str_of(*e).unwrap_or("null").to_owned()).collect();
-                let s = format!("{}{}{}", text(rt, parts.get(1)), joined.join(&text(rt, parts.first())), text(rt, parts.get(2)));
-                rt.alloc("java/lang/String", Data::Str(s))
-            }
-            "compat:collect-map" => {
-                let parts = match rt.heap.get(a(1).r() as usize).map(|o| &o.data) {
-                    Some(Data::List(p)) => p.clone(),
-                    _ => Vec::new(),
-                };
-                let f = |k: usize| parts.get(k).copied().unwrap_or_default();
-                const APPLY: &str = "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
-                let m = rt.alloc("java/util/HashMap", Data::Table(Table::default()));
-                for e in items {
-                    let k = rt.call_functional(APPLY, f(0), &[e]);
-                    let v = rt.call_functional(APPLY, f(1), &[e]);
-                    if rt.thrown.is_some() {
-                        return Some(V::NULL);
-                    }
-                    let old = table_get(rt, m, k);
-                    let v = match old {
-                        Some(o) if parts.len() == 3 => rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", f(2), &[o, v]),
-                        // Java's `toMap` refuses a key twice without a merge.
-                        Some(_) => {
-                            rt.throw_new("java/lang/IllegalStateException");
-                            return Some(V::NULL);
-                        }
-                        None => v,
-                    };
-                    table_put(rt, m, k, v);
-                }
-                m
-            }
-            _ => new_list(rt, items),
-        },
+        "collect" if args.len() > 2 => {
+            let class = rt.class_of(this);
+            crate::collectors::collect_into(rt, class, a(1), a(2), items)
+        }
+        "collect" => crate::collectors::collect(rt, a(1), items),
         "count" => V::J(items.len() as i64),
         "anyMatch" | "allMatch" | "noneMatch" => {
             let mut hit = false;

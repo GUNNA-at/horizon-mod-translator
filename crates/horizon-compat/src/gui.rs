@@ -157,7 +157,7 @@ impl St {
 }
 
 /// The style of a drawn run, as tokens.
-fn tokens_of(r: &TextRun) -> String {
+pub(crate) fn tokens_of(r: &TextRun) -> String {
     let mut t = String::new();
     if let Some(c) = r.color {
         t.push_str(&format!("#{c:06X},"));
@@ -169,6 +169,22 @@ fn tokens_of(r: &TextRun) -> String {
         }
     }
     t
+}
+
+/// The `ChatFormatting` a `§` code names, by its name (`ChatFormatting.getByCode`, which lowers
+/// the code's case first).
+pub(crate) fn legacy_format(code: char) -> Option<&'static str> {
+    let code = code.to_lowercase().next()?;
+    FORMATS.iter().find(|f| f.1 == code).map(|f| f.0)
+}
+
+/// Tokens with a `ChatFormatting` applied the legacy way (`Style.applyLegacyFormat`): a colour
+/// turns every format off, a format turns on.
+pub(crate) fn legacy_applied(tokens: &str, name: &str) -> String {
+    match color_named(name) {
+        Some(_) => format!("{tokens}!BOLD,!ITALIC,!UNDERLINE,!STRIKETHROUGH,!OBFUSCATED,{name},"),
+        None => format!("{tokens}{name},"),
+    }
 }
 
 /// A colour token's colour: a `ChatFormatting` colour's name, or `#RRGGBB`.
@@ -186,12 +202,12 @@ fn formatting_name(rt: &Rt, v: V) -> String {
     rt.str_of(rt.get_field(v, "$name")).unwrap_or("").to_owned()
 }
 
-fn style_tokens(rt: &Rt, v: V) -> String {
+pub(crate) fn style_tokens(rt: &Rt, v: V) -> String {
     rt.str_of(rt.get_field(v, "$style")).unwrap_or("").to_owned()
 }
 
 /// A `Style` with `tokens`.
-fn style_object(rt: &mut Rt, tokens: &str) -> V {
+pub(crate) fn style_object(rt: &mut Rt, tokens: &str) -> V {
     let s = rt.new_object(STYLE);
     let t = rt.string(tokens);
     rt.put_field(s, "$style", t);
@@ -257,9 +273,10 @@ fn style_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         "applyFormat" | "applyLegacyFormat" => {
             let n = formatting_name(rt, a(1));
-            let t = match (name, color_named(&n)) {
-                ("applyLegacyFormat", Some(_)) => format!("{tokens}!BOLD,!ITALIC,!UNDERLINE,!STRIKETHROUGH,!OBFUSCATED,{n},"),
-                _ => format!("{tokens}{n},"),
+            let t = if name == "applyLegacyFormat" {
+                legacy_applied(&tokens, &n)
+            } else {
+                format!("{tokens}{n},")
             };
             derived(rt, t)
         }
@@ -322,8 +339,13 @@ fn is_component(rt: &Rt, v: V) -> bool {
 /// (its `§` codes applied), a component (translated, with its arguments and siblings), or a
 /// `FormattedCharSequence` / `FormattedText` this module made.
 pub fn runs(rt: &mut Rt, v: V) -> Vec<TextRun> {
+    runs_under(rt, v, "")
+}
+
+/// [`runs`] with the text's own styles over the style of `tokens` (`visit(consumer, style)`).
+pub(crate) fn runs_under(rt: &mut Rt, v: V, tokens: &str) -> Vec<TextRun> {
     let mut out = Vec::new();
-    push(rt, v, St::default(), &mut out, 0);
+    push(rt, v, St::default().apply(tokens), &mut out, 0);
     out
 }
 
@@ -2193,6 +2215,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | CHAT
             | GL_STATE
     ) || owner.starts_with(TOOLTIP_EVENT)
+        || crate::char_sinks::claims(owner, name)
         || (owner == MINECRAFT
             && matches!(
                 name,
@@ -2205,6 +2228,9 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 /// The calls this module models (`owner.name.desc`), or None.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
+    if crate::char_sinks::claims(owner, name) {
+        return crate::char_sinks::call(rt, owner, name, desc, args);
+    }
     match owner {
         GRAPHICS => graphics_call(rt, name, desc, args),
         LAYERS_EVENT => layers_event(rt, name, args),

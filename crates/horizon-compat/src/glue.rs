@@ -180,6 +180,11 @@ const GET_TICKER: &str = "getTicker.(Lnet/minecraft/world/level/Level;Lnet/minec
 const TICKER_TICK: &str = "net/minecraft/world/level/block/entity/BlockEntityTicker.tick.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/entity/BlockEntity;)V";
 const LOAD: &str = "loadAdditional.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
 const SAVE: &str = "saveAdditional.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
+// What a block or block entity without its own answers: `EntityBlock`'s ticker (none) and
+// `BlockEntity`'s saving and loading (nothing of its own).
+const GET_TICKER_KEY: &str = "net/minecraft/world/level/block/EntityBlock.getTicker.(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/entity/BlockEntityType;)Lnet/minecraft/world/level/block/entity/BlockEntityTicker;";
+const LOAD_KEY: &str = "net/minecraft/world/level/block/entity/BlockEntity.loadAdditional.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
+const SAVE_KEY: &str = "net/minecraft/world/level/block/entity/BlockEntity.saveAdditional.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/HolderLookup$Provider;)V";
 
 fn implements(rt: &Rt, block: &str, key: &str) -> bool {
     mod_block(rt, block).is_some_and(|(_, class)| rt.overrides.is_some_and(|o| o(class, key)))
@@ -246,7 +251,7 @@ fn load_saved(rt: &mut Rt, be: V, nbt: &std::collections::BTreeMap<String, crate
     if !nbt.is_empty() {
         let tag = crate::nbt::to_runtime(rt, nbt);
         let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
-        vc(rt, LOAD, LOAD, &[be, tag, provider]);
+        vc(rt, LOAD_KEY, LOAD, &[be, tag, provider]);
         rt.report_thrown("loadAdditional");
     }
     if let Some(crate::nbt::Nbt::Compound(kept)) = nbt.get(KEPT) {
@@ -322,7 +327,7 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
         rt.put_field(be, "$state", st);
         rt.put_field(be, "blockState", st);
         let ty = rt.get_field(be, "$type");
-        let ticker = vc(rt, GET_TICKER, GET_TICKER, &[b, level, st, ty]);
+        let ticker = vc(rt, GET_TICKER_KEY, GET_TICKER, &[b, level, st, ty]);
         if ticker.r() != 0 {
             let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
             rt.call_functional(TICKER_TICK, ticker, &[level, p, st, be]);
@@ -335,7 +340,7 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
         let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
         api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
         let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
-        vc(rt, SAVE, SAVE, &[be, tag, provider]);
+        vc(rt, SAVE_KEY, SAVE, &[be, tag, provider]);
         rt.report_thrown("saveAdditional");
         *nbt = crate::nbt::from_runtime(rt, tag);
         // `saveWithoutMetadata`: what it kept of its stack goes beside its own data.
@@ -1970,7 +1975,7 @@ fn tick_client_block_entities(rt: &mut Rt) {
         rt.put_field(be, "$state", st);
         rt.put_field(be, "blockState", st);
         let ty = rt.get_field(be, "$type");
-        let ticker = vc(rt, GET_TICKER, GET_TICKER, &[b, level, st, ty]);
+        let ticker = vc(rt, GET_TICKER_KEY, GET_TICKER, &[b, level, st, ty]);
         if ticker.r() != 0 {
             let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
             rt.call_functional(TICKER_TICK, ticker, &[level, p, st, be]);
@@ -1994,6 +1999,44 @@ mod tests {
         let n = rt.get_field(be, "ticks").i();
         rt.put_field(be, "ticks", V::I(n + 1));
         Some(V::Void)
+    }
+
+    /// A block entity whose block and class have no `getTicker`, `loadAdditional` or
+    /// `saveAdditional` of their own (Create's fake track, its harvester) ticks on `EntityBlock`'s
+    /// and `BlockEntity`'s: no ticker, nothing of its own loaded or saved, nothing unmapped.
+    #[test]
+    fn a_block_entity_without_its_own_ticker_or_data_ticks_on_vanillas() {
+        const LAMP: &str = "test/Lamp";
+        fn overrides(class: &str, short: &str) -> bool {
+            class == LAMP && short == NEW_BLOCK_ENTITY
+        }
+        // As generated code dispatches: the mod's own where it has one, else the API's.
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            if short == NEW_BLOCK_ENTITY && rt.class_of(args[0]) == LAMP {
+                return rt.new_object("test/LampEntity");
+            }
+            api::call(rt, key, args)
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        let b = rt.new_object(LAMP);
+        rt.registered
+            .insert(("block".into(), "test:lamp".into()), b);
+        let mut host = MemoryHost::default();
+        host.blocks.insert([0, 64, 0], "test:lamp".into());
+        let mut nbt = std::collections::BTreeMap::new();
+        nbt.insert("Lit".to_owned(), crate::nbt::Nbt::Byte(1));
+        assert!(block_entity_tick(
+            &mut rt,
+            &mut host,
+            [0, 64, 0],
+            "test:lamp",
+            &mut nbt
+        ));
+        assert!(nbt.is_empty(), "nothing of its own saved: {nbt:?}");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// The game asks a mod block's own `updateShape` when a neighbour changes: a pipe joins the tank

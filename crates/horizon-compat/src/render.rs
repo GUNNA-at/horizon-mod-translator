@@ -1282,6 +1282,27 @@ fn draw_item(rt: &mut Rt, stack: V, context: V, pose_stack: V, light: i32, seed:
 }
 
 /// The interned object for a client singleton (`Minecraft`, its block renderer...).
+/// `getRenderPasses(stack, fabulous)` and `getRenderTypes(stack, fabulous)`, a model's item forms.
+const ITEM_LISTS: &str = "(Lnet/minecraft/world/item/ItemStack;Z)Ljava/util/List;";
+
+/// The render type an item model draws in when it names none
+/// (`RenderTypeHelper.getFallbackItemRenderType`): a block item's on the block sheet, cut out;
+/// any other item's translucent, culled or not. A translucent block's item (stained glass) is
+/// drawn cut out here: block models don't say their chunk layer to mods yet.
+fn fallback_item_type(rt: &mut Rt, stack: V, cull: bool) -> V {
+    const GET_ITEM: &str =
+        "net/minecraft/world/item/ItemStack.getItem.()Lnet/minecraft/world/item/Item;";
+    let item = crate::api::call(rt, GET_ITEM, &[stack]);
+    let sheet = if rt.instance_of(item, "net/minecraft/world/item/BlockItem") {
+        "net/minecraft/client/renderer/Sheets.cutoutBlockSheet.()Lnet/minecraft/client/renderer/RenderType;"
+    } else if cull {
+        "net/minecraft/client/renderer/Sheets.translucentCullBlockSheet.()Lnet/minecraft/client/renderer/RenderType;"
+    } else {
+        "net/minecraft/client/renderer/Sheets.translucentItemSheet.()Lnet/minecraft/client/renderer/RenderType;"
+    };
+    crate::api::call(rt, sheet, &[])
+}
+
 fn single(rt: &mut Rt, class: &'static str) -> V {
     rt.intern(format!("client/{class}"), |rt| rt.new_object(class))
 }
@@ -1664,6 +1685,16 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             let m = rt.new_object("net/minecraft/client/resources/model/BakedModel");
             rt.put_field(m, "$state", a(1));
             m
+        }
+        // An item's passes and render types (NeoForge's `IBakedModelExtension` defaults): the model
+        // itself, in the type `RenderTypeHelper.getFallbackItemRenderType` gives the stack.
+        ("net/minecraft/client/resources/model/BakedModel", "getRenderPasses") if desc == ITEM_LISTS => {
+            let this = a(0);
+            crate::jutil::new_list(rt, vec![this])
+        }
+        ("net/minecraft/client/resources/model/BakedModel", "getRenderTypes") if desc == ITEM_LISTS => {
+            let ty = fallback_item_type(rt, a(1), a(2).i() != 0);
+            crate::jutil::new_list(rt, vec![ty])
         }
         // A model a mod built of faces answers from them (`SimpleBakedModel`).
         ("net/minecraft/client/resources/model/BakedModel", n) if !matches!(rt.get_field(a(0), "$unculled"), V::Void) => {
@@ -2527,6 +2558,49 @@ mod tests {
         });
         assert_eq!(game, [V::I(12 << 20 | 7 << 4); 2]);
         assert_eq!(scene, V::I(15_728_880));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// An item model's passes are the model; its render type is NeoForge's fallback for the stack:
+    /// a block item's cut out on the block sheet, another item's translucent and culled when asked.
+    #[test]
+    fn an_item_model_draws_itself_in_its_stacks_fallback_type() {
+        const PASSES: &str = "net/minecraft/client/resources/model/BakedModel.getRenderPasses.(Lnet/minecraft/world/item/ItemStack;Z)Ljava/util/List;";
+        const TYPES: &str = "net/minecraft/client/resources/model/BakedModel.getRenderTypes.(Lnet/minecraft/world/item/ItemStack;Z)Ljava/util/List;";
+        const SHEETS: &str = "net/minecraft/client/renderer/Sheets";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = crate::host::MemoryHost {
+            block_items: vec!["minecraft:stone".into()],
+            ..Default::default()
+        };
+        let model = rt.new_object("net/minecraft/client/resources/model/BakedModel");
+        let (passes, stick_culled, stick_unculled, stone_types) = rt.with_host(&mut host, |rt| {
+            let stick = crate::api_common::stack(rt, "minecraft:stick", 1);
+            let stone = crate::api_common::stack(rt, "minecraft:stone", 1);
+            let passes = crate::api::call(rt, PASSES, &[model, stick, V::I(1)]);
+            let types = |rt: &mut Rt, stack: V, cull: i32| {
+                let list = crate::api::call(rt, TYPES, &[model, stack, V::I(cull)]);
+                crate::jutil::elements(rt, list)
+            };
+            (
+                crate::jutil::elements(rt, passes),
+                types(rt, stick, 1),
+                types(rt, stick, 0),
+                types(rt, stone, 1),
+            )
+        });
+        assert_eq!(passes, [model]);
+        let sheet = |rt: &mut Rt, name: &str| {
+            let key: &'static str = Box::leak(
+                format!("{SHEETS}.{name}.()Lnet/minecraft/client/renderer/RenderType;")
+                    .into_boxed_str(),
+            );
+            crate::api::call(rt, key, &[])
+        };
+        assert_eq!(stick_culled, [sheet(&mut rt, "translucentCullBlockSheet")]);
+        assert_eq!(stick_unculled, [sheet(&mut rt, "translucentItemSheet")]);
+        assert_eq!(stone_types, [sheet(&mut rt, "cutoutBlockSheet")]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

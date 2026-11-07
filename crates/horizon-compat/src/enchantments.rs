@@ -20,6 +20,23 @@ const HELPER: &str = "net/minecraft/world/item/enchantment/EnchantmentHelper";
 const ITEM_STACK: &str = "net/minecraft/world/item/ItemStack";
 const STACK_EXTENSION: &str = "net/neoforged/neoforge/common/extensions/IItemStackExtension";
 const ENCHANTMENTS: &str = "minecraft:enchantments";
+const ITEM: &str = "net/minecraft/world/item/Item";
+/// `Item.isFoil(stack)`, which a mod's item may override.
+const IS_FOIL: &str = "isFoil.(Lnet/minecraft/world/item/ItemStack;)Z";
+const IS_FOIL_KEY: &str =
+    "net/minecraft/world/item/Item.isFoil.(Lnet/minecraft/world/item/ItemStack;)Z";
+const GLINT: &str = "minecraft:enchantment_glint_override";
+/// Vanilla's items whose `enchantment_glint_override` is `true` unless the stack says otherwise
+/// (1.21.1's `Items`).
+const SHINING: [&str; 7] = [
+    "minecraft:enchanted_golden_apple",
+    "minecraft:experience_bottle",
+    "minecraft:written_book",
+    "minecraft:nether_star",
+    "minecraft:enchanted_book",
+    "minecraft:end_crystal",
+    "minecraft:debug_stick",
+];
 const STORED: &str = "minecraft:stored_enchantments";
 const PREDICATE: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 const CONSUMER: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
@@ -211,6 +228,40 @@ fn component_of(rt: &Rt, stack: V) -> &'static str {
     if crate::api_common::item_like_name(rt, rt.get_field(stack, "$item")) == "minecraft:enchanted_book" { STORED } else { ENCHANTMENTS }
 }
 
+/// `ItemStack.hasFoil()`.
+fn has_foil(rt: &mut Rt, stack: V) -> bool {
+    if let Some(v) = crate::components::vanilla(rt, stack, GLINT)
+        && !v.is_null()
+    {
+        return match v {
+            V::R(_) => rt.get_field(v, "value").i() != 0,
+            raw => raw.i() != 0,
+        };
+    }
+    let item = rt.get_field(stack, "$item");
+    if SHINING.contains(&crate::api_common::item_like_name(rt, item).as_str()) {
+        return true;
+    }
+    if rt.class_overrides(rt.class_of(item), IS_FOIL)
+        && let Some(vc) = rt.vcall
+    {
+        return vc(rt, IS_FOIL_KEY, IS_FOIL, &[item, stack]).i() != 0;
+    }
+    item_foil(rt, item, stack)
+}
+
+/// Vanilla's `Item.isFoil(stack)`: enchanted, or (`CompassItem`'s) a compass tracking a lodestone.
+fn item_foil(rt: &mut Rt, item: V, stack: V) -> bool {
+    if crate::api_common::item_like_name(rt, item) == "minecraft:compass"
+        && crate::components::vanilla(rt, stack, "minecraft:lodestone_tracker")
+            .is_some_and(|v| !v.is_null())
+    {
+        return true;
+    }
+    let e = on_stack(rt, stack, ENCHANTMENTS);
+    !levels(rt, e).is_empty()
+}
+
 /// What `stack` holds of component `id`, `EMPTY` for none.
 fn on_stack(rt: &mut Rt, stack: V, id: &str) -> V {
     crate::components::vanilla(rt, stack, id).unwrap_or_else(|| empty(rt))
@@ -304,7 +355,17 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(owner, ITEM_ENCHANTMENTS | MUTABLE | HELPER)
         || (owner == ENCHANTMENT && matches!(name, "getFullname" | "getMaxLevel" | "description"))
         || (matches!(owner, ITEM_STACK | STACK_EXTENSION)
-            && matches!(name, "getEnchantments" | "getTagEnchantments" | "getAllEnchantments" | "isEnchanted" | "enchant" | "getEnchantmentLevel"))
+            && matches!(
+                name,
+                "getEnchantments"
+                    | "getTagEnchantments"
+                    | "getAllEnchantments"
+                    | "isEnchanted"
+                    | "enchant"
+                    | "getEnchantmentLevel"
+                    | "hasFoil"
+            ))
+        || (owner == ITEM && name == "isFoil")
 }
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -395,6 +456,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let e = on_stack(rt, a(0), ENCHANTMENTS);
             V::I(!levels(rt, e).is_empty() as i32)
         }
+        // Whether the stack is drawn with the enchantment glint: its `enchantment_glint_override`
+        // where it carries one (vanilla's nether star, written book... by default), else its
+        // item's `isFoil(stack)`, a mod item's own where it has one.
+        (ITEM_STACK | STACK_EXTENSION, "hasFoil") => V::I(has_foil(rt, a(0)) as i32),
+        (ITEM, "isFoil") => V::I(item_foil(rt, a(0), a(1)) as i32),
         (ITEM_STACK | STACK_EXTENSION, "getEnchantmentLevel") => {
             let n = name_of(rt, a(1)).unwrap_or_default();
             let e = on_stack(rt, a(0), ENCHANTMENTS);
@@ -608,6 +674,38 @@ mod tests {
         let first = crate::jutil::elements(&rt, entries)[0];
         assert_eq!(api::call(&mut rt, "it/unimi/dsi/fastutil/objects/Object2IntMap$Entry.getKey.()Ljava/lang/Object;", &[first]), efficiency);
         assert_eq!(api::call(&mut rt, "it/unimi/dsi/fastutil/objects/Object2IntMap$Entry.getIntValue.()I", &[first]), V::I(2));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `hasFoil`: a plain pickaxe has no glint, an enchanted one has; a nether star shines by
+    /// default, and a stack whose `enchantment_glint_override` is set to false doesn't.
+    #[test]
+    fn a_stack_shines_enchanted_or_where_its_glint_says() {
+        let mut rt = Rt::new();
+        crate::install();
+        const FOIL: &str = "net/minecraft/world/item/ItemStack.hasFoil.()Z";
+        const SET: &str = "net/minecraft/world/item/ItemStack.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";
+        let efficiency = enchantment(
+            &mut rt,
+            "net/minecraft/world/item/enchantment/Enchantments.EFFICIENCY",
+        );
+        let pick = crate::api_common::stack(&mut rt, "minecraft:diamond_pickaxe", 1);
+        assert_eq!(api::call(&mut rt, FOIL, &[pick]), V::I(0));
+        api::call(
+            &mut rt,
+            "net/minecraft/world/item/ItemStack.enchant.(Lnet/minecraft/core/Holder;I)V",
+            &[pick, efficiency, V::I(1)],
+        );
+        assert_eq!(api::call(&mut rt, FOIL, &[pick]), V::I(1));
+        let star = crate::api_common::stack(&mut rt, "minecraft:nether_star", 1);
+        assert_eq!(api::call(&mut rt, FOIL, &[star]), V::I(1));
+        let glint = api::get_static(
+            &mut rt,
+            "net/minecraft/core/component/DataComponents.ENCHANTMENT_GLINT_OVERRIDE",
+        );
+        let no = crate::mixin::box_value(&mut rt, V::I(0), 'Z');
+        api::call(&mut rt, SET, &[star, glint, no]);
+        assert_eq!(api::call(&mut rt, FOIL, &[star]), V::I(0));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

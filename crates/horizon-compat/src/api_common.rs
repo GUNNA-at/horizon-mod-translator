@@ -2869,6 +2869,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
         }
         ("net/minecraft/world/level/block/entity/BlockEntityType", "isValid") => V::I(1),
+        // `EntityBlock`'s defaults, for a block without its own: no ticker, no game-event listener.
+        ("net/minecraft/world/level/block/EntityBlock", "getTicker" | "getListener") => V::NULL,
         (o, "createTickerHelper") if o.ends_with("BaseEntityBlock") => {
             if a(0) == a(1) { a(2) } else { V::NULL }
         }
