@@ -1099,6 +1099,25 @@ pub trait Host {
     fn push_entity(&mut self, _id: i32, _velocity: [f64; 3]) -> bool {
         false
     }
+    /// The mob `id`'s motion in blocks a tick (`Entity.getDeltaMovement`): None for no such mob, or
+    /// a host that can't tell.
+    fn entity_motion(&self, _id: i32) -> Option<[f64; 3]> {
+        None
+    }
+    /// Sets the mob `id`'s motion (`Entity.setDeltaMovement`): false for no such mob.
+    fn set_entity_motion(&mut self, _id: i32, _motion: [f64; 3]) -> bool {
+        false
+    }
+    /// The player `uuid`'s motion in blocks a tick, as this side holds it (a server's copy of a
+    /// player's, a client's own player's): None for a player the host doesn't have.
+    fn player_motion(&mut self, _uuid: u128) -> Option<[f64; 3]> {
+        None
+    }
+    /// Sets the player `uuid`'s motion as this side holds it (`setDeltaMovement`): a client's own
+    /// player moves by it; a server's copy changes, as vanilla's does without `hurtMarked`.
+    fn set_player_motion(&mut self, _uuid: u128, _motion: [f64; 3]) -> bool {
+        false
+    }
     /// Moves the mob `id` to `pos` at once (`Entity.teleportTo`).
     fn teleport_entity(&mut self, _id: i32, _pos: [f64; 3]) -> bool {
         false
@@ -1566,6 +1585,10 @@ pub struct MemoryHost {
     pub blows: Vec<(i32, f32, HurtBy)>,
     /// The blows told to players ([`Host::hurt_player_by`]), in order: player, amount, source.
     pub player_blows: Vec<(u128, f32, HurtBy)>,
+    /// The mobs' motions ([`Host::entity_motion`]): a living mob without one stands still.
+    pub motions: HashMap<i32, [f64; 3]>,
+    /// The players' motions ([`Host::player_motion`]), by UUID.
+    pub player_motions: HashMap<u128, [f64; 3]>,
     /// The knockbacks given ([`Host::knockback_entity`]), in order: entity, strength, x, z.
     pub knockbacks: Vec<(i32, f64, f64, f64)>,
     /// The blows whose enchantment effects were asked for ([`Host::post_attack_effects`]), in order.
@@ -2210,8 +2233,40 @@ impl Host for MemoryHost {
             _ => false,
         }
     }
-    fn push_entity(&mut self, id: i32, _velocity: [f64; 3]) -> bool {
-        self.entities.iter().any(|e| e.id == id && e.health.is_some())
+    fn push_entity(&mut self, id: i32, velocity: [f64; 3]) -> bool {
+        let Some(m) = self.entity_motion(id) else {
+            return false;
+        };
+        self.motions.insert(
+            id,
+            [m[0] + velocity[0], m[1] + velocity[1], m[2] + velocity[2]],
+        );
+        true
+    }
+    fn entity_motion(&self, id: i32) -> Option<[f64; 3]> {
+        let living = self
+            .entities
+            .iter()
+            .any(|e| e.id == id && e.health.is_some());
+        living.then(|| self.motions.get(&id).copied().unwrap_or_default())
+    }
+    fn set_entity_motion(&mut self, id: i32, motion: [f64; 3]) -> bool {
+        let living = self.entity_motion(id).is_some();
+        if living {
+            self.motions.insert(id, motion);
+        }
+        living
+    }
+    fn player_motion(&mut self, uuid: u128) -> Option<[f64; 3]> {
+        let known = self.player_id == Some(uuid) || self.players.iter().any(|p| p.0 == uuid);
+        known.then(|| self.player_motions.get(&uuid).copied().unwrap_or_default())
+    }
+    fn set_player_motion(&mut self, uuid: u128, motion: [f64; 3]) -> bool {
+        let known = self.player_motion(uuid).is_some();
+        if known {
+            self.player_motions.insert(uuid, motion);
+        }
+        known
     }
     fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {
         match self.entities.iter_mut().find(|e| e.id == id && e.health.is_some()) {

@@ -216,6 +216,89 @@ impl Game<'_> {
         m.needs_sync = true;
         true
     }
+    /// Mob `id`'s motion in blocks a tick (`Entity.getDeltaMovement`) in the
+    /// level in place, `dimension`: None for no such mob, another dimension
+    /// or a client's copy. API @API:entity_motion@.
+    pub(super) fn native_mob_motion(&self, dimension: &str, id: u32) -> Option<[f64; 3]> {
+        if !self.native_mob_level(dimension) {
+            return None;
+        }
+        let m = self.mobs.iter().find(|m| m.id == id && !m.removed)?;
+        Some([m.velocity.x, m.velocity.y, m.velocity.z])
+    }
+    /// Sets mob `id`'s motion (`Entity.setDeltaMovement`), which the players
+    /// who see it are sent: false for no such mob, another dimension or a
+    /// motion that isn't finite. API @API:entity_motion@.
+    pub(super) fn native_set_mob_motion(
+        &mut self,
+        dimension: &str,
+        id: u32,
+        motion: [f64; 3],
+    ) -> bool {
+        if !self.native_mob_level(dimension) || !finite(motion) {
+            return false;
+        }
+        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id && !m.removed) else {
+            return false;
+        };
+        m.velocity = Vec3::new(motion[0], motion[1], motion[2]);
+        m.needs_sync = true;
+        true
+    }
+    /// The player `uuid`'s motion in blocks a tick as the server holds it
+    /// (`getDeltaMovement` on a server's player), also inside a player's hook
+    /// for the acting player: None for no such player here, or dead. API
+    /// @API:entity_motion@.
+    pub(super) fn native_player_motion(&mut self, uuid: u128) -> Option<[f64; 3]> {
+        let mut motion = None;
+        self.native_as_player(uuid, |game| {
+            motion = game
+                .player
+                .as_ref()
+                .map(|p| [p.velocity.x, p.velocity.y, p.velocity.z]);
+        });
+        motion
+    }
+    /// Sets the player `uuid`'s motion as the server holds it
+    /// (`setDeltaMovement` on a server's player): their client isn't told, as
+    /// vanilla's isn't without `hurtMarked`, and goes on moving them by its
+    /// own. False for no such player here, dead, or a motion that isn't
+    /// finite. API @API:entity_motion@.
+    pub(super) fn native_set_player_motion(&mut self, uuid: u128, motion: [f64; 3]) -> bool {
+        if !finite(motion) {
+            return false;
+        }
+        let mut set = false;
+        self.native_as_player(uuid, |game| {
+            if let Some(p) = game.player.as_mut() {
+                p.velocity = Vec3::new(motion[0], motion[1], motion[2]);
+                set = true;
+            }
+        });
+        set
+    }
+    /// The window's own player's motion in blocks a tick
+    /// (`LocalPlayer.getDeltaMovement`): None with no player. API
+    /// @API:entity_motion@.
+    pub(super) fn native_client_player_motion(&self) -> Option<[f64; 3]> {
+        let p = self.player.as_ref()?;
+        Some([p.velocity.x, p.velocity.y, p.velocity.z])
+    }
+    /// Sets the window's own player's motion (`LocalPlayer.setDeltaMovement`),
+    /// as a client mod's code does (Create's fans blow the player on their
+    /// client): they move by it as by their own, and their client tells the
+    /// server where that took them. False with no player or a motion that
+    /// isn't finite. API @API:entity_motion@.
+    pub(super) fn native_set_client_player_motion(&mut self, motion: [f64; 3]) -> bool {
+        if !finite(motion) {
+            return false;
+        }
+        let Some(p) = self.player.as_mut() else {
+            return false;
+        };
+        p.velocity = Vec3::new(motion[0], motion[1], motion[2]);
+        true
+    }
     /// Sets mob `id`'s health, cut to its maximum: false for no such mob,
     /// another dimension or a health that isn't above 0 (`native_kill_mob`
     /// kills). A dying mob's too, as `LivingEntity.setHealth` sets it: one a

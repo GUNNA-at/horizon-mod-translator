@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the motion of a mob, of a server's player and of the window's own player, read and set (`native_mob_motion`, `native_set_mob_motion`, `native_player_motion`, `native_set_player_motion`, `native_client_player_motion`, `native_set_client_player_motion`).",
+  "doc_summary": "`native_mob_motion(dimension, id)` is mob `id`'s motion in blocks a tick (`Entity.getDeltaMovement`), None for no such mob, another dimension or a client's copy; `native_set_mob_motion(dimension, id, motion)` sets it (`setDeltaMovement`), and the players who see the mob are sent it; false for no such mob, another dimension or a motion that isn't finite. `native_player_motion(uuid)` and `native_set_player_motion(uuid, motion)` read and set a server's player's motion as the server holds it, as that player (`native_as_player`), also inside a player's hook for the acting player: their client isn't told, as vanilla's isn't without `hurtMarked`. `native_client_player_motion()` and `native_set_client_player_motion(motion)` read and set the window's own player's motion: they move by it as by their own (a client mod's fan blows them). Bundles need \"hooks\": @API:entity_motion@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mobs.rs"
+  ]
+}

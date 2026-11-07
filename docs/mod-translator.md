@@ -6501,6 +6501,46 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Nothing new is unmapped, nothing threw. Seen: the death message is the generic one (`died`): the
     game doesn't know Create's damage types (`create:mechanical_saw` hurts as `minecraft:generic`):
     later.
+- [x] 2026-11-07 Part 90: mods' code reads and sets the motion of the game's mobs and players (a
+  mob's `getDeltaMovement` was always still and its `setDeltaMovement` added to its motion; a
+  player's motion wasn't the game's, and a client's box queries didn't find its own player: a
+  running Create fan left the player in front of it standing). Measured: the pack's mods call an
+  entity's motion methods in 452 classes of 90 jars: `setDeltaMovement` in 315 classes of 70,
+  `getDeltaMovement` in 281 of 69, `push` in 83 of 17, `addDeltaMovement` in 5 of 3; 129 of them
+  (31 jars) find what they move with a box query (Create's fans, belts, seats, crushing wheels,
+  contraption collisions, chain conveyors).
+  - compat: a mob's `getDeltaMovement` is the game's motion of it (`Host::entity_motion`, new),
+    `setDeltaMovement` sets it (`set_entity_motion`, new), `push` and `addDeltaMovement` add to it;
+    another entity's `push(Entity)` (two boxes apart) is the game's own. A player's motion is this
+    side's (`player_motion`, `set_player_motion`, new): a server's player's by their UUID, the
+    server's copy, which vanilla's `setDeltaMovement` changes without telling their client (no
+    `hurtMarked`); a client's own player's, by which they move; another player's on a client isn't
+    moved there. A push on a motion the host can't read (inside a hit) is lost, as a set isn't. A
+    client's box queries find its own player (`LocalPlayer`, the object its hooks know them by)
+    where their box reaches in: Create's fans look on the client for what to blow, as vanilla's
+    client moves its own player. `isAlive` on a player: the player in place by their health, another
+    while the server has them here, living (it was unmapped: a fan on the server dropped the player
+    it caught).
+  - game: `native_mob_motion`, `native_set_mob_motion` (sent to the players who see the mob),
+    `native_player_motion`, `native_set_player_motion` (as that player, `native_as_player`),
+    `native_client_player_motion`, `native_set_client_player_motion` (fragment `entity_motion.json`).
+  - translator: every server host reads and sets mobs' and players' motions; a hit's host sets them
+    once the hit is over; a client's host reads and sets its own player's. A level's box queries find
+    its own living players only (another dimension's at the same place were found, and dead ones).
+  - Tests: compat 569 (3 new: a mod reads and changes the motion of the game's mob and players, as
+    `setDeltaMovement`, `push`, `addDeltaMovement` and `push(Entity)` do, on a server and on a
+    client; a client's box query finds its own player by class and box, a server's doesn't; a player
+    is alive while their health is above 0, another player while the server has them), translator
+    19, core 7.
+  - In game (`p90scene.sh`, the same scene on Part 89's build and on this one): two glass corridors
+    east of an encased fan each, turned at 64 RPM by a creative motor (Create blows 7.25 blocks at
+    that speed). A survival player 2 blocks east of the fan's centre: on Part 89's build they stood
+    still for 30 ticks; now they are blown 2.3 blocks east in 30 ticks (x −29.50, −29.28, −29.09,
+    −28.91, −28.51 ... −27.19), fastest near the fan (Create's push falls with the distance) and
+    slowed by the floor's friction as their own walk is. A pig in the other corridor: before, 4.7
+    blocks in 80 ticks (each of the fan's sets added to a motion read as still); now 4.3, its motion
+    nearing the fan's by an eighth each tick, as Create's code means. The unmapped `Entity.isAlive`
+    on a `ServerPlayer` is gone; nothing new is unmapped, nothing threw.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

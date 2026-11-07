@@ -749,7 +749,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 _ => V::NULL,
             }
         }
-        "getDeltaMovement" => vec3(rt, [0.0; 3]),
+        // The game's motion of it, in blocks a tick: still when the game can't tell.
+        "getDeltaMovement" => {
+            let m = rt
+                .host()
+                .and_then(|h| h.entity_motion(id))
+                .unwrap_or_default();
+            vec3(rt, m)
+        }
         "onGround" => V::I(1),
         "getBoundingBox" => {
             let (hw, h) = (f64::from(width) / 2.0, f64::from(height));
@@ -879,10 +886,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             };
             V::I(i32::from(pickable))
         }
-        // The game keeps the motion; these add to it (a mob's own is not read yet).
+        // The game keeps the motion: `setDeltaMovement` sets it, `push` and `addDeltaMovement` add to
+        // it. Another entity's push (`push(Entity)`: two boxes apart) is the game's own.
+        "push" if desc == "(Lnet/minecraft/world/entity/Entity;)V" => V::Void,
         "push" | "addDeltaMovement" | "setDeltaMovement" => {
             let v = if desc.starts_with("(DDD)") { [a(1).d(), a(2).d(), a(3).d()] } else { xyz_of(rt, a(1)) };
-            with_host(rt, |h| h.push_entity(id, v));
+            if name == "setDeltaMovement" {
+                with_host(rt, |h| h.set_entity_motion(id, v));
+            } else {
+                with_host(rt, |h| h.push_entity(id, v));
+            }
             V::Void
         }
         "teleportTo" | "setPos" | "moveTo" | "absMoveTo" if desc.starts_with("(DDD") || desc.starts_with("(Lnet/minecraft/world/phys/Vec3;") => {
@@ -1056,6 +1069,97 @@ mod tests {
             api::call(rt, "net/minecraft/world/entity/Entity.kill.()V", &[cart]);
         });
         assert!(host.entities.is_empty(), "the cow died and the minecart broke: {:?}", host.entities);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod reads the game's motion of its mob and changes it as vanilla's `Entity` does:
+    /// `setDeltaMovement` sets it, `push` and `addDeltaMovement` add to it, and the next read sees
+    /// it; another entity's `push(Entity)` is the game's own. A player's is this side's: a server's
+    /// player's by their UUID, a client's own player's; another player's on a client isn't moved
+    /// there.
+    #[test]
+    fn a_mod_reads_and_changes_the_motion_of_the_games_mob_and_players() {
+        const GET: &str =
+            "net/minecraft/world/entity/Entity.getDeltaMovement.()Lnet/minecraft/world/phys/Vec3;";
+        const SET: &str =
+            "net/minecraft/world/entity/Entity.setDeltaMovement.(Lnet/minecraft/world/phys/Vec3;)V";
+        const SET_XYZ: &str = "net/minecraft/world/entity/Entity.setDeltaMovement.(DDD)V";
+        const PUSH: &str = "net/minecraft/world/entity/Entity.push.(DDD)V";
+        const ADD: &str =
+            "net/minecraft/world/entity/Entity.addDeltaMovement.(Lnet/minecraft/world/phys/Vec3;)V";
+        const PUSH_BY: &str =
+            "net/minecraft/world/entity/Entity.push.(Lnet/minecraft/world/entity/Entity;)V";
+        let mut rt = Rt::new();
+        crate::install();
+        let read = |rt: &mut Rt, e: V| {
+            let v = api::call(rt, GET, &[e]);
+            xyz_of(rt, v)
+        };
+        let mut host = MemoryHost::default();
+        host.entities.push(EntityView {
+            id: 7,
+            kind: "minecraft:pig".into(),
+            pos: [0.5, 64.0, 0.5],
+            yaw: 0.0,
+            health: Some((10.0, 10.0)),
+        });
+        host.motions.insert(7, [0.0, -0.0784, 0.0]);
+        let uuid = 0x42u128;
+        host.players = vec![(uuid, [3.5, 64.0, 0.5])];
+        rt.with_host(&mut host, |rt| {
+            let pig = of(rt, 7, "minecraft:pig", None);
+            assert_eq!(
+                read(rt, pig),
+                [0.0, -0.0784, 0.0],
+                "the game's motion of it"
+            );
+            let up = crate::api_common::vec3(rt, 0.0, 0.42, 0.0);
+            api::call(rt, SET, &[pig, up]);
+            api::call(rt, PUSH, &[pig, V::D(0.25), V::D(0.0), V::D(0.0)]);
+            let back = crate::api_common::vec3(rt, 0.0, 0.0, -0.5);
+            api::call(rt, ADD, &[pig, back]);
+            assert_eq!(read(rt, pig), [0.25, 0.42, -0.5]);
+            let player = crate::menus::server_player(rt, uuid);
+            api::call(rt, PUSH_BY, &[pig, player]);
+            assert_eq!(
+                read(rt, pig),
+                [0.25, 0.42, -0.5],
+                "another entity's push is the game's"
+            );
+            // A server's player: the server's copy of theirs, by UUID.
+            assert_eq!(read(rt, player), [0.0; 3]);
+            api::call(rt, SET_XYZ, &[player, V::D(0.1), V::D(0.0), V::D(0.0)]);
+            api::call(rt, PUSH, &[player, V::D(0.0), V::D(0.2), V::D(0.0)]);
+            assert_eq!(read(rt, player), [0.1, 0.2, 0.0]);
+        });
+        assert_eq!(host.motions[&7], [0.25, 0.42, -0.5]);
+        assert_eq!(host.player_motions[&uuid], [0.1, 0.2, 0.0]);
+        // A client: its own player's, whatever the host calls them; another player's object there
+        // is left alone.
+        let mut client = MemoryHost {
+            client: true,
+            client_player_id: Some(57),
+            player_id: Some(0x99),
+            ..MemoryHost::default()
+        };
+        client.player_motions.insert(0x99, [0.0, -0.0784, 0.0]);
+        client.players = vec![(uuid, [3.5, 64.0, 0.5])];
+        rt.with_host(&mut client, |rt| {
+            let me = crate::network::local_player(rt);
+            assert_eq!(read(rt, me), [0.0, -0.0784, 0.0]);
+            let wind = crate::api_common::vec3(rt, 0.0, 0.0, 0.3);
+            api::call(rt, ADD, &[me, wind]);
+            assert_eq!(read(rt, me), [0.0, -0.0784, 0.3]);
+            let other = crate::menus::server_player(rt, uuid);
+            api::call(rt, SET_XYZ, &[other, V::D(1.0), V::D(1.0), V::D(1.0)]);
+            assert_eq!(read(rt, other), [0.0; 3]);
+        });
+        assert_eq!(
+            client.player_motions.get(&uuid),
+            None,
+            "another player's isn't the client's"
+        );
+        assert_eq!(client.player_motions[&0x99], [0.0, -0.0784, 0.3]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

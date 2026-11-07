@@ -2388,6 +2388,44 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 crate::hand::worn(rt, i)
             }
         },
+        // A player's motion, in blocks a tick, as this side holds it: a client's own player moves by
+        // it; a server's copy changes, as vanilla's does without `hurtMarked`. Another entity's push
+        // (`push(Entity)`) is the game's own.
+        (o, n @ ("getDeltaMovement" | "setDeltaMovement" | "addDeltaMovement" | "push"))
+            if is_player(o)
+                && is_player_class(rt.class_of(a(0)))
+                && desc != "(Lnet/minecraft/world/entity/Entity;)V" =>
+        {
+            // A client holds its own player's motion alone (another's is the server's to send): any
+            // UUID names them there.
+            let own = rt.class_of(a(0)) == LOCAL_PLAYER;
+            let client = rt.host().is_some_and(|h| h.client_player_id().is_some());
+            let uuid = crate::network::player_uuid(rt, a(0))
+                .or_else(|| rt.host().and_then(|h| h.player_id()))
+                .or(own.then_some(0))
+                .filter(|_| own || !client);
+            let now = uuid.and_then(|u| rt.host_call(|h| h.player_motion(u)).flatten());
+            if n == "getDeltaMovement" {
+                let m = now.unwrap_or_default();
+                vec3(rt, m[0], m[1], m[2])
+            } else {
+                let v = if desc.starts_with("(DDD)") {
+                    [a(1).d(), a(2).d(), a(3).d()]
+                } else {
+                    ["x", "y", "z"].map(|k| rt.get_field(a(1), k).d())
+                };
+                // A push on a motion the host can't read (a hit's) is lost, as a set isn't.
+                let to = if n == "setDeltaMovement" {
+                    Some(v)
+                } else {
+                    now.map(|m| [m[0] + v[0], m[1] + v[1], m[2] + v[2]])
+                };
+                if let (Some(u), Some(to)) = (uuid, to) {
+                    rt.host_call(|h| h.set_player_motion(u, to));
+                }
+                V::Void
+            }
+        }
         // `hurt(source, amount)` on a server's player, through the game: nothing in creative, else
         // their frames, a raised shield, armor and effects, the knockback and the sound. The game's
         // damage hooks hear the mod's own source.

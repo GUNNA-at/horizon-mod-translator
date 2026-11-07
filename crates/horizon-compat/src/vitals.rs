@@ -12,7 +12,9 @@ const FOOD_DATA: &str = "net/minecraft/world/food/FoodData";
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the living methods on any
 /// class (the owner names whichever the mod's code did), `FoodData`'s on its own.
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
-    living_method(name, desc) || (owner == FOOD_DATA && food_method(name, desc))
+    living_method(name, desc)
+        || (owner == FOOD_DATA && food_method(name, desc))
+        || (name, desc) == ("isAlive", "()Z")
 }
 
 fn living_method(name: &str, desc: &str) -> bool {
@@ -41,6 +43,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     if owner == FOOD_DATA && food_method(name, desc) {
         return Some(food(rt, name, desc, a(1), a(2)));
+    }
+    // `isAlive` on a player: the player in place by their health; another while the server has
+    // them here, living (`player_entities`). Any other entity answers its own.
+    if (name, desc) == ("isAlive", "()Z") {
+        if !crate::api_common::is_player_class(rt.class_of(a(0))) {
+            return None;
+        }
+        let alive = match crate::attributes::entity_of(rt, a(0)) {
+            Ok(None) => vitals(rt).health > 0.0,
+            Ok(Some(id)) => rt
+                .host()
+                .is_some_and(|h| h.player_entities().iter().any(|p| p.0 == id)),
+            Err(()) => return None,
+        };
+        return Some(V::I(i32::from(alive)));
     }
     if !living_method(name, desc) || crate::attributes::entity_of(rt, a(0)) != Ok(None) {
         return None;
@@ -121,6 +138,62 @@ mod tests {
 
     fn key(owner: &str, name: &str, desc: &str) -> &'static str {
         format!("{owner}.{name}.{desc}").leak()
+    }
+
+    /// A player lives while their health is above 0 (`LivingEntity.isAlive`): the player in place
+    /// by theirs, another by the server's living players here (Create's fans ask before they blow).
+    #[test]
+    fn a_player_is_alive_while_their_health_is_above_0() {
+        let alive = |rt: &mut Rt, p: V| {
+            crate::api::call(
+                rt,
+                key("net/minecraft/world/entity/Entity", "isAlive", "()Z"),
+                &[p],
+            )
+        };
+        let mut rt = Rt::new();
+        crate::install();
+        let hurt = VitalsView {
+            health: 0.5,
+            ..VitalsView::default()
+        };
+        let mut h = MemoryHost {
+            player_id: Some(0xabc),
+            vitals: Some(hurt),
+            ..MemoryHost::default()
+        };
+        h.players = vec![(0xdef, [0.5, 64.0, 0.5])];
+        h.player_entity_ids.insert(0xdef, 9);
+        rt.with_host(&mut h, |rt| {
+            let me = crate::menus::server_player(rt, 0xabc);
+            assert_eq!(alive(rt, me), V::I(1));
+            let other = crate::vanilla_entities::player(rt, 9, 0xdef, [0.5, 64.0, 0.5]);
+            assert_eq!(alive(rt, other), V::I(1), "on the server, living");
+            let gone = crate::vanilla_entities::player(rt, 11, 0x123, [0.5, 64.0, 0.5]);
+            assert_eq!(alive(rt, gone), V::I(0), "not on it");
+        });
+        h.vitals = Some(VitalsView {
+            health: 0.0,
+            ..VitalsView::default()
+        });
+        let dead = rt.with_host(&mut h, |rt| {
+            let me = crate::menus::server_player(rt, 0xabc);
+            alive(rt, me)
+        });
+        assert_eq!(dead, V::I(0));
+        // A client's own player.
+        let mut client = MemoryHost {
+            client: true,
+            client_player_id: Some(57),
+            vitals: Some(VitalsView::default()),
+            ..MemoryHost::default()
+        };
+        let me = rt.with_host(&mut client, |rt| {
+            let me = crate::network::local_player(rt);
+            alive(rt, me)
+        });
+        assert_eq!(me, V::I(1));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

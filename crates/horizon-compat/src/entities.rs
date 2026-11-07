@@ -423,16 +423,33 @@ fn entities_of(rt: &mut Rt, class: Option<V>, area: V, predicate: Option<V>) -> 
             found.push(e);
         }
     }
+    // A standing player's box: 0.6 wide, 1.8 high (`Player.STANDING_DIMENSIONS`, floats).
+    let half = f64::from(0.6f32 / 2.0);
+    let touches = |at: [f64; 3]| {
+        let (lo, hi) = (
+            [at[0] - half, at[1], at[2] - half],
+            [at[0] + half, at[1] + f64::from(1.8f32), at[2] + half],
+        );
+        (0..3).all(|i| lo[i] < b[i + 3] && hi[i] > b[i])
+    };
     let players = rt.host().map(|h| h.player_entities()).unwrap_or_default();
     for (id, uuid, at) in players {
-        // A standing player's box: 0.6 wide, 1.8 high (`Player.STANDING_DIMENSIONS`, floats).
-        let half = f64::from(0.6f32 / 2.0);
-        let (lo, hi) = ([at[0] - half, at[1], at[2] - half], [at[0] + half, at[1] + f64::from(1.8f32), at[2] + half]);
-        if (0..3).all(|i| lo[i] < b[i + 3] && hi[i] > b[i]) {
+        if touches(at) {
             let p = crate::vanilla_entities::player(rt, id, uuid, at);
             if fits(rt, p) {
                 found.push(p);
             }
+        }
+    }
+    // A client's level holds its own player too (Create's fans blow them on the client).
+    let own = rt
+        .host()
+        .filter(|h| h.client_player_id().is_some())
+        .and_then(|h| h.player_place());
+    if own.is_some_and(|(at, ..)| touches(at)) {
+        let p = crate::network::local_player(rt);
+        if fits(rt, p) {
+            found.push(p);
         }
     }
     let mut out = Vec::new();
@@ -830,6 +847,73 @@ mod tests {
         assert_eq!((new.item.as_str(), new.count, new.pos, new.motion), ("create:iron_sheet", 1, [1.5, 65.0, 1.5], [0.0, 0.1, 0.0]));
         assert_eq!(rt.get_field(fresh, "$id").i() as u32, new.id);
         let _ = host.block_state([0, 0, 0]);
+    }
+
+    /// A client's level holds its own player: a box query there finds them (`LocalPlayer`, the
+    /// object the client's hooks know them by) where their 0.6 by 1.8 box reaches in, as Create's
+    /// fans look on the client for what to blow; not by a class they aren't, nor in a box away
+    /// from them, nor on a server, which answers its players by their entities.
+    #[test]
+    fn a_clients_box_query_finds_its_own_player() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut client = MemoryHost {
+            client: true,
+            client_player_id: Some(57),
+            place: Some(([2.25, 64.0, 0.5], 0.0, 0.0)),
+            ..MemoryHost::default()
+        };
+        let level = rt.new_object("net/minecraft/client/multiplayer/ClientLevel");
+        let near = crate::shapes::aabb(&mut rt, [0.0, 63.0, 0.0, 2.0, 66.0, 2.0]);
+        let far = crate::shapes::aabb(&mut rt, [3.0, 63.0, 0.0, 5.0, 66.0, 2.0]);
+        let me = crate::network::local_player(&mut rt);
+        let find = |rt: &mut Rt, host: &mut MemoryHost, class: Option<&str>, area: V| {
+            let list = rt.with_host(host, |rt| match class {
+                Some(class) => {
+                    let c = crate::jlang::class_object(rt, class);
+                    api::call(rt, "net/minecraft/world/level/Level.getEntitiesOfClass.(Ljava/lang/Class;Lnet/minecraft/world/phys/AABB;)Ljava/util/List;", &[level, c, area])
+                }
+                None => api::call(rt, "net/minecraft/world/level/Level.getEntities.(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/AABB;)Ljava/util/List;", &[level, V::NULL, area]),
+            });
+            crate::jutil::elements(rt, list)
+        };
+        assert_eq!(
+            find(&mut rt, &mut client, None, near),
+            [me],
+            "Create's fan: `getEntities(null, box)`"
+        );
+        assert_eq!(
+            find(
+                &mut rt,
+                &mut client,
+                Some("net/minecraft/world/entity/LivingEntity"),
+                near
+            ),
+            [me]
+        );
+        assert_eq!(
+            find(
+                &mut rt,
+                &mut client,
+                Some("net/minecraft/world/entity/player/Player"),
+                near
+            ),
+            [me]
+        );
+        assert!(find(&mut rt, &mut client, Some(ITEM_ENTITY), near).is_empty());
+        assert!(
+            find(&mut rt, &mut client, None, far).is_empty(),
+            "their box ends at x 2.55"
+        );
+        let mut server = MemoryHost {
+            place: Some(([2.25, 64.0, 0.5], 0.0, 0.0)),
+            ..MemoryHost::default()
+        };
+        assert!(
+            find(&mut rt, &mut server, None, near).is_empty(),
+            "a server's players are its entities"
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

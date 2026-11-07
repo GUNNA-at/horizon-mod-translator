@@ -715,6 +715,13 @@ fn client_host(c: &str, id: &str) -> String {
         fn client_player_id(&self) -> Option<i32> {{
             self.game.get().native_client_player_id()
         }}
+        // The client holds one player's motion, its own (Create's fans blow them on the client).
+        fn player_motion(&mut self, _uuid: u128) -> Option<[f64; 3]> {{
+            self.game.get().native_client_player_motion()
+        }}
+        fn set_player_motion(&mut self, _uuid: u128, motion: [f64; 3]) -> bool {{
+            self.game.get_mut().is_some_and(|g| g.native_set_client_player_motion(motion))
+        }}
         // A client command's answer: a line in the window's chat, the whole component as the
         // window draws one (translations, siblings, styles).
         fn command_feedback(&mut self, component: &str) {{
@@ -2417,8 +2424,10 @@ fn world_writes(c: &str) -> String {
                 }})
                 .collect()
         }}
+        // The players in this level, living (another level's at the same place aren't here).
         fn player_entities(&self) -> Vec<(i32, u128, [f64; 3])> {{
-            self.game.lan.as_ref().map_or_else(Vec::new, |host| host.hub.guests.iter().filter(|g| g.placed).map(|g| (g.entity_id, g.uuid, g.position)).collect())
+            let dim = self.game.native_dimension();
+            self.game.lan.as_ref().map_or_else(Vec::new, |host| host.hub.guests.iter().filter(|g| g.placed && !g.dead && g.dimension == dim).map(|g| (g.entity_id, g.uuid, g.position)).collect())
         }}
         fn translate(&self, key: &str) -> Option<String> {{
             horizon_client::lang::has(key).then(|| horizon_client::lang::get(key))
@@ -2599,6 +2608,21 @@ fn world_writes(c: &str) -> String {
             let dimension = self.game.native_dimension().to_owned();
             u32::try_from(id).is_ok_and(|i| self.game.native_push_mob(&dimension, i, velocity))
         }}
+        // The motion of a mob, in blocks a tick, and of a player as the server holds it (as that
+        // player): `getDeltaMovement`, `setDeltaMovement`.
+        fn entity_motion(&self, id: i32) -> Option<[f64; 3]> {{
+            self.game.native_mob_motion(self.game.native_dimension(), u32::try_from(id).ok()?)
+        }}
+        fn set_entity_motion(&mut self, id: i32, motion: [f64; 3]) -> bool {{
+            let dimension = self.game.native_dimension().to_owned();
+            u32::try_from(id).is_ok_and(|i| self.game.native_set_mob_motion(&dimension, i, motion))
+        }}
+        fn player_motion(&mut self, uuid: u128) -> Option<[f64; 3]> {{
+            self.game.native_player_motion(uuid)
+        }}
+        fn set_player_motion(&mut self, uuid: u128, motion: [f64; 3]) -> bool {{
+            self.game.native_set_player_motion(uuid, motion)
+        }}
         fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {{
             let dimension = self.game.native_dimension().to_owned();
             u32::try_from(id).is_ok_and(|i| self.game.native_teleport_mob(&dimension, i, pos))
@@ -2732,6 +2756,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
     let hurt_player = later("Later { game }.hurt_player_by(uuid, amount, &by)");
     let post_attack = later("Later { game }.post_attack_effects(victim, &by, &weapon)");
     let (health, push, teleport) = (later("Later { game }.set_entity_health(id, health)"), later("Later { game }.push_entity(id, velocity)"), later("Later { game }.teleport_entity(id, pos)"));
+    let (motion, player_motion) = (later("Later { game }.set_entity_motion(id, motion)"), later("Later { game }.set_player_motion(uuid, motion)"));
     let (orb, payload) = (later("game.native_spawn_experience_orb(at, value, motion)"), later("Later { game }.send_payload(to, &channel, &data)"));
     let attribute = later("Later { game }.change_attribute(entity, &attribute, &change)");
     let (give, take) = (later("Later { game }.add_effect(entity, &effect, force)"), later("Later { game }.remove_effect(entity, &effect)"));
@@ -2876,6 +2901,15 @@ fn hit_host(c: &str, server_send: &str) -> String {
         }}
         fn push_entity(&mut self, id: i32, velocity: [f64; 3]) -> bool {{
             {push}
+            true
+        }}
+        // A motion set in a hit, once it is over (no motion to read here).
+        fn set_entity_motion(&mut self, id: i32, motion: [f64; 3]) -> bool {{
+            {motion}
+            true
+        }}
+        fn set_player_motion(&mut self, uuid: u128, motion: [f64; 3]) -> bool {{
+            {player_motion}
             true
         }}
         fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {{
