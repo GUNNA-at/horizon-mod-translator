@@ -6541,6 +6541,34 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     blocks in 80 ticks (each of the fan's sets added to a motion read as still); now 4.3, its motion
     nearing the fan's by an eighth each tick, as Create's code means. The unmapped `Entity.isAlive`
     on a `ServerPlayer` is gone; nothing new is unmapped, nothing threw.
+- [x] 2026-11-07 Measured (packcov12, after Parts 56 to 90, same 367 jars): missing uses 61124 → 57689
+  (−3435), and no class's count grew. Methods mapped went from 75.0% to 76.5% summed over jars
+  (99900 → 101937 of 133194), and uses from 85.3% to 86.2%. Create went from 72.2% to 75.3% of
+  methods (2883 → 3007 of 3995) and from 91.6% to 92.6% of uses. Distinct API methods missing
+  somewhere in the pack: 12091 → 11590. The biggest drops:
+
+  | Class | packcov11 | packcov12 |
+  |---|---|---|
+  | `Level` | 1746 | 947 |
+  | `ServerLevel` | 460 | 278 |
+  | `FluidStack` | 181 | 19 |
+  | `BlockState` | 1034 | 876 |
+  | `ItemStack` | 752 | 624 |
+  | `PotionContents` | 95 | 9 |
+  | `Player` | 848 | 779 |
+  | `LevelLightEngine` | 65 | 2 |
+  | `Entity` | 1159 | 1098 |
+  | `FluidType` | 88 | 28 |
+  | `ModelManager` | 94 | 36 |
+
+  Largest left: the codec builders (`MapCodec` 1533: `forGetter` in 107 jars;
+  `RecordCodecBuilder$Instance` 1381: `group`), `Entity` (1098: `setYRot` in 28 jars,
+  `setYHeadRot`, `setXRot`), `Level` (947: `getCapability`, `broadcastEntityEvent`), `BlockState`
+  (876: `cycle` in 47 jars), `LivingEntity` (800: `getRandom`), `Player` (779: `awardStat` in 38
+  jars) and `Slot` (664: `getItem` in 87 jars). As before, the codec builders, `cycle` and a bare
+  slot's item are the probe's stand-ins' (they work in game). In Create the most missed are
+  `BlockState` (87), `Level` (86), `IFluidHandler` (79), `Entity` (77) and the item handlers
+  (`IItemHandlerModifiable` 69, `IItemHandler` 64).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
