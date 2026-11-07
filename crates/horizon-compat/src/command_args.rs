@@ -16,9 +16,11 @@
 //!   as `WorldCoordinates` and `LocalCoordinates` resolve them.
 //! - Resource locations, dimensions, items (known to the game, with their `[components]`), block
 //!   states (with `[properties]` and `{nbt}`), times in units, angles, UUIDs and colours. SNBT is
-//!   read as `TagParser` reads it, its structure checked (its values aren't typed here).
+//!   read as `TagParser` reads it, into typed tags (`TagParser.parseTag` reads with it too).
 use crate::brigadier::{decimal, is_quoted_string_start, unit, Arg, Read, Reader, Syntax};
+use crate::nbt::Nbt;
 use crate::{api, Rt, V};
+use std::collections::BTreeMap;
 
 pub(crate) const SELECTOR: &str = "net/minecraft/commands/arguments/selector/EntitySelector";
 pub(crate) const WORLD_COORDINATES: &str = "net/minecraft/commands/arguments/coordinates/WorldCoordinates";
@@ -1217,12 +1219,13 @@ fn properties(r: &mut Reader, id: &str) -> Read<Vec<(String, String)>> {
 /// The deepest SNBT read here (`TagParser` itself has no limit; the stack has).
 const SNBT_DEPTH: u32 = 256;
 
-/// `TagParser.readStruct`: `{key: value, ...}`.
-pub(crate) fn snbt_struct(r: &mut Reader, depth: u32) -> Read<()> {
+/// `TagParser.readStruct`: `{key: value, ...}`, the compound read.
+pub(crate) fn snbt_struct(r: &mut Reader, depth: u32) -> Read<BTreeMap<String, Nbt>> {
     if depth > SNBT_DEPTH {
         return Err(r.error("argument.nbt.expected.value", Vec::new()));
     }
-    r.expect(unit(b'{'))?;
+    expect_after_space(r, b'{')?;
+    let mut compound = BTreeMap::new();
     r.skip_whitespace();
     while r.can_read() && r.peek() != unit(b'}') {
         let i = r.cursor;
@@ -1230,12 +1233,14 @@ pub(crate) fn snbt_struct(r: &mut Reader, depth: u32) -> Read<()> {
         if !r.can_read() {
             return Err(r.error("argument.nbt.expected.key", Vec::new()));
         }
-        if r.read_string()?.is_empty() {
+        let key = r.read_string()?;
+        if key.is_empty() {
             r.cursor = i;
             return Err(r.error("argument.nbt.expected.key", Vec::new()));
         }
         expect_after_space(r, b':')?;
-        snbt_value(r, depth + 1)?;
+        let value = snbt_value(r, depth + 1)?;
+        compound.insert(key, value);
         if !separator(r) {
             break;
         }
@@ -1243,27 +1248,30 @@ pub(crate) fn snbt_struct(r: &mut Reader, depth: u32) -> Read<()> {
             return Err(r.error("argument.nbt.expected.key", Vec::new()));
         }
     }
-    expect_after_space(r, b'}')
+    expect_after_space(r, b'}')?;
+    Ok(compound)
 }
 
-/// `TagParser.readValue`: a compound, a list or array, a quoted string or an unquoted word.
-fn snbt_value(r: &mut Reader, depth: u32) -> Read<()> {
+/// `TagParser.readValue`: a compound, a list or array, a quoted string or a typed word.
+pub(crate) fn snbt_value(r: &mut Reader, depth: u32) -> Read<Nbt> {
     r.skip_whitespace();
     if !r.can_read() {
         return Err(r.error("argument.nbt.expected.value", Vec::new()));
     }
     if r.at(b'{') {
-        return snbt_struct(r, depth);
+        return snbt_struct(r, depth).map(Nbt::Compound);
     }
     if !r.at(b'[') {
         let i = r.cursor;
         if is_quoted_string_start(r.peek()) {
-            r.read_quoted_string()?;
-        } else if r.read_unquoted_string().is_empty() {
+            return r.read_quoted_string().map(Nbt::String);
+        }
+        let word = r.read_unquoted_string();
+        if word.is_empty() {
             r.cursor = i;
             return Err(r.error("argument.nbt.expected.value", Vec::new()));
         }
-        return Ok(());
+        return Ok(snbt_typed(&word));
     }
     if depth > SNBT_DEPTH {
         return Err(r.error("argument.nbt.expected.value", Vec::new()));
@@ -1272,26 +1280,29 @@ fn snbt_value(r: &mut Reader, depth: u32) -> Read<()> {
     let array = r.can_read_n(3) && !is_quoted_string_start(r.peek_at(1)) && r.peek_at(2) == unit(b';');
     expect_after_space(r, b'[')?;
     if array {
-        let i = r.cursor;
-        let c = r.peek();
-        r.skip();
-        r.skip();
-        r.skip_whitespace();
-        if !r.can_read() {
-            return Err(r.error("argument.nbt.expected.value", Vec::new()));
-        }
-        if !matches!(u8::try_from(c), Ok(b'B' | b'I' | b'L')) {
-            r.cursor = i;
-            return Err(r.error("argument.nbt.array.invalid", vec![Arg::Text(String::from_utf16_lossy(&[c]))]));
-        }
-    } else {
-        r.skip_whitespace();
-        if !r.can_read() {
-            return Err(r.error("argument.nbt.expected.value", Vec::new()));
-        }
+        return snbt_array(r, depth);
     }
+    r.skip_whitespace();
+    if !r.can_read() {
+        return Err(r.error("argument.nbt.expected.value", Vec::new()));
+    }
+    // A list: its elements of one type, the first's.
+    let mut list: Vec<Nbt> = Vec::new();
     while r.peek() != unit(b']') {
-        snbt_value(r, depth + 1)?;
+        let i = r.cursor;
+        let value = snbt_value(r, depth + 1)?;
+        if let Some(first) = list
+            .first()
+            .filter(|first| tag_name(first) != tag_name(&value))
+        {
+            let args = vec![
+                Arg::Text(tag_name(&value).into()),
+                Arg::Text(tag_name(first).into()),
+            ];
+            r.cursor = i;
+            return Err(r.error("argument.nbt.list.mixed", args));
+        }
+        list.push(value);
         if !separator(r) {
             break;
         }
@@ -1299,7 +1310,123 @@ fn snbt_value(r: &mut Reader, depth: u32) -> Read<()> {
             return Err(r.error("argument.nbt.expected.value", Vec::new()));
         }
     }
-    expect_after_space(r, b']')
+    expect_after_space(r, b']')?;
+    Ok(Nbt::List(list))
+}
+
+/// `TagParser.readArrayTag`, past its `[`: `B;`, `I;` or `L;`, then numbers of that type only.
+fn snbt_array(r: &mut Reader, depth: u32) -> Read<Nbt> {
+    let i = r.cursor;
+    let c = r.peek();
+    r.skip();
+    r.skip();
+    r.skip_whitespace();
+    if !r.can_read() {
+        return Err(r.error("argument.nbt.expected.value", Vec::new()));
+    }
+    let (array, element) = match u8::try_from(c) {
+        Ok(b'B') => ("TAG_Byte_Array", "TAG_Byte"),
+        Ok(b'L') => ("TAG_Long_Array", "TAG_Long"),
+        Ok(b'I') => ("TAG_Int_Array", "TAG_Int"),
+        _ => {
+            r.cursor = i;
+            return Err(r.error(
+                "argument.nbt.array.invalid",
+                vec![Arg::Text(String::from_utf16_lossy(&[c]))],
+            ));
+        }
+    };
+    let mut values: Vec<i64> = Vec::new();
+    while r.peek() != unit(b']') {
+        let i = r.cursor;
+        let value = snbt_value(r, depth + 1)?;
+        values.push(match value {
+            Nbt::Byte(b) if element == "TAG_Byte" => i64::from(b),
+            Nbt::Int(n) if element == "TAG_Int" => i64::from(n),
+            Nbt::Long(l) if element == "TAG_Long" => l,
+            other => {
+                r.cursor = i;
+                return Err(r.error(
+                    "argument.nbt.array.mixed",
+                    vec![Arg::Text(tag_name(&other).into()), Arg::Text(array.into())],
+                ));
+            }
+        });
+        if !separator(r) {
+            break;
+        }
+        if !r.can_read() {
+            return Err(r.error("argument.nbt.expected.value", Vec::new()));
+        }
+    }
+    expect_after_space(r, b']')?;
+    // Each value fits its array's type: it was read as one.
+    Ok(match element {
+        "TAG_Byte" => Nbt::ByteArray(values.into_iter().map(|v| v as i8).collect()),
+        "TAG_Long" => Nbt::LongArray(values),
+        _ => Nbt::IntArray(values.into_iter().map(|v| v as i32).collect()),
+    })
+}
+
+/// A tag's type as `TagType.getPrettyName` names it in an error.
+fn tag_name(tag: &Nbt) -> &'static str {
+    match tag {
+        Nbt::Byte(_) => "TAG_Byte",
+        Nbt::Short(_) => "TAG_Short",
+        Nbt::Int(_) => "TAG_Int",
+        Nbt::Long(_) => "TAG_Long",
+        Nbt::Float(_) => "TAG_Float",
+        Nbt::Double(_) => "TAG_Double",
+        Nbt::String(_) => "TAG_String",
+        Nbt::List(_) => "TAG_List",
+        Nbt::Compound(_) => "TAG_Compound",
+        Nbt::ByteArray(_) => "TAG_Byte_Array",
+        Nbt::IntArray(_) => "TAG_Int_Array",
+        Nbt::LongArray(_) => "TAG_Long_Array",
+    }
+}
+
+/// `TagParser.type`: an unquoted word's tag, by the first of vanilla's patterns it matches: a
+/// float (`1.5f`), byte (`1b`), long (`1l`), short (`1s`), int, double (`1.5d`, `1.5`), then
+/// `true` and `false` (bytes); anything else, or a number too big for its type, is a string.
+pub(crate) fn snbt_typed(word: &str) -> Nbt {
+    static PATTERNS: std::sync::OnceLock<[regex::Regex; 7]> = std::sync::OnceLock::new();
+    let [float, byte, long, short, int, double, bare_double] = PATTERNS.get_or_init(|| {
+        [
+            r"(?i-u)\A[-+]?(?:[0-9]+[.]?|[0-9]*[.][0-9]+)(?:e[-+]?[0-9]+)?f\z",
+            r"(?i-u)\A[-+]?(?:0|[1-9][0-9]*)b\z",
+            r"(?i-u)\A[-+]?(?:0|[1-9][0-9]*)l\z",
+            r"(?i-u)\A[-+]?(?:0|[1-9][0-9]*)s\z",
+            r"\A[-+]?(?:0|[1-9][0-9]*)\z",
+            r"(?i-u)\A[-+]?(?:[0-9]+[.]?|[0-9]*[.][0-9]+)(?:e[-+]?[0-9]+)?d\z",
+            r"(?i-u)\A[-+]?(?:[0-9]+[.]|[0-9]*[.][0-9]+)(?:e[-+]?[0-9]+)?\z",
+        ]
+        .map(|p| regex::Regex::new(p).expect("TagParser's patterns are valid"))
+    });
+    // The word less its one-letter suffix (ASCII once a pattern with one matched).
+    let body = || &word[..word.len() - 1];
+    let tag = if float.is_match(word) {
+        body().parse().ok().map(Nbt::Float)
+    } else if byte.is_match(word) {
+        body().parse().ok().map(Nbt::Byte)
+    } else if long.is_match(word) {
+        body().parse().ok().map(Nbt::Long)
+    } else if short.is_match(word) {
+        body().parse().ok().map(Nbt::Short)
+    } else if int.is_match(word) {
+        word.parse().ok().map(Nbt::Int)
+    } else if double.is_match(word) {
+        body().parse().ok().map(Nbt::Double)
+    } else if bare_double.is_match(word) {
+        word.parse().ok().map(Nbt::Double)
+    } else if word.eq_ignore_ascii_case("true") {
+        Some(Nbt::Byte(1))
+    } else if word.eq_ignore_ascii_case("false") {
+        Some(Nbt::Byte(0))
+    } else {
+        None
+    };
+    tag.unwrap_or_else(|| Nbt::String(word.to_owned()))
 }
 
 /// `TagParser.expect`: spaces, then `c`.

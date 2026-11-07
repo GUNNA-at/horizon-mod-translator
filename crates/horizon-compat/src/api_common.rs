@@ -106,7 +106,7 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
             matches!(c, "java/lang/IllegalArgumentException" | "java/lang/IllegalStateException" | "java/lang/NullPointerException" | "java/lang/UnsupportedOperationException" | "java/lang/ClassCastException" | "java/lang/ArithmeticException" | "java/lang/IndexOutOfBoundsException" | "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/NumberFormatException")
                 || java_is_a(c, class)
         }
-        _ => crate::resources::is_a(c, class) || crate::gson::is_a(c, class) || java_is_a(c, class) || crate::vanilla_entities::is_a(c, class) || crate::fluid_wrappers::is_a(c, class) || crate::item_wrappers::is_a(c, class),
+        _ => crate::resources::is_a(c, class) || crate::gson::is_a(c, class) || java_is_a(c, class) || crate::vanilla_entities::is_a(c, class) || crate::fluid_wrappers::is_a(c, class) || crate::item_wrappers::is_a(c, class) || crate::energy::is_a(c, class),
     }
 }
 
@@ -2881,12 +2881,47 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             };
             V::I(i32::from(hurt))
         }
-        (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "getWeaponItem" | "level" | "getCommandSenderWorld" | "serverLevel" | "isLocalPlayer" | "mayBuild" | "$clientLevel") => {
+        (o, n)
+            if is_player(o)
+                && matches!(
+                    n,
+                    "isShiftKeyDown"
+                        | "isCrouching"
+                        | "isSteppingCarefully"
+                        | "isSecondaryUseActive"
+                        | "isCreative"
+                        | "hasInfiniteMaterials"
+                        | "isSpectator"
+                        | "getItemInHand"
+                        | "getMainHandItem"
+                        | "getOffhandItem"
+                        | "getWeaponItem"
+                        | "level"
+                        | "getCommandSenderWorld"
+                        | "serverLevel"
+                        | "isLocalPlayer"
+                        | "mayBuild"
+                        | "$clientLevel"
+                ) =>
+        {
             match n {
                 // Survival and creative players build; the hooks act for one of them.
                 "mayBuild" => V::I(1),
-                "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" => V::I(rt.host().is_some_and(|h| h.player_sneaking()) as i32),
+                // `Player.isSecondaryUseActive` is its shift key; `hasInfiniteMaterials`, creative's
+                // `instabuild` ability.
+                "isShiftKeyDown"
+                | "isCrouching"
+                | "isSteppingCarefully"
+                | "isSecondaryUseActive" => {
+                    V::I(rt.host().is_some_and(|h| h.player_sneaking()) as i32)
+                }
                 "isCreative" => V::I(rt.host().is_some_and(|h| h.player_creative()) as i32),
+                // Only a player builds from infinite materials: other living entities answer false.
+                "hasInfiniteMaterials" => V::I(
+                    (is_player_class(rt.class_of(a(0)))
+                        && rt.host().is_some_and(|h| h.player_creative()))
+                        as i32,
+                ),
                 "isSpectator" => V::I(0),
                 // The client's own player (`Minecraft.player`) is in the client's level.
                 "isLocalPlayer" => V::I(i32::from(rt.class_of(a(0)) == LOCAL_PLAYER)),
@@ -3665,6 +3700,31 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             crate::components::copy_patch(rt, a(0), s);
             s
         }
+        // `consume(n, entity)`: the stack shrinks by n unless the entity builds from infinite
+        // materials (a creative player); `consumeAndReturn` first copies n of it, to give back.
+        ("net/minecraft/world/item/ItemStack", "consume" | "consumeAndReturn")
+            if desc.starts_with("(ILnet/minecraft/world/entity/LivingEntity;)") =>
+        {
+            let back = if name == "consumeAndReturn" {
+                if stack_empty(rt, a(0)) {
+                    get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL)
+                } else {
+                    let i = rt.get_field(a(0), "$item");
+                    let s = stack_of(rt, i, a(1).i());
+                    crate::components::copy_patch(rt, a(0), s);
+                    s
+                }
+            } else {
+                V::Void
+            };
+            let infinite =
+                a(2).r() != 0 && crate::tanks::virt(rt, HAS_INFINITE_MATERIALS, &[a(2)]).i() != 0;
+            if !infinite {
+                let c = rt.get_field(a(0), "$count").i();
+                rt.put_field(a(0), "$count", V::I(c - a(1).i()));
+            }
+            back
+        }
         // `split(n)`: a stack of up to n taken off this one.
         ("net/minecraft/world/item/ItemStack", "split") => {
             let have = if stack_empty(rt, a(0)) { 0 } else { rt.get_field(a(0), "$count").i() };
@@ -3948,6 +4008,38 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (PLAIN_TEXT_CONTENTS | LITERAL_CONTENTS, "text") => rt.get_field(a(0), "text"),
         (PLAIN_TEXT_CONTENTS, "create") => crate::records::make(rt, LITERAL_CONTENTS, &[a(0)]),
+        // `WidgetSprites`, a record: its shorter constructors repeat sprites as vanilla's do (two:
+        // one for enabled, one for focused; three: the disabled one serves unfocused and focused),
+        // and `get(enabled, focused)` is the sprite of that state.
+        (WIDGET_SPRITES, "<init>")
+            if desc == WIDGET_SPRITES_TWO || desc == WIDGET_SPRITES_THREE =>
+        {
+            let [enabled, disabled, focused] = if desc == WIDGET_SPRITES_TWO {
+                [a(1), a(1), a(2)]
+            } else {
+                [a(1), a(2), a(3)]
+            };
+            // Disabled and focused is the second sprite either way: the focused one of two, the
+            // disabled one of three.
+            for (field, v) in [
+                ("enabled", enabled),
+                ("disabled", disabled),
+                ("enabledFocused", focused),
+                ("disabledFocused", a(2)),
+            ] {
+                rt.put_field(a(0), field, v);
+            }
+            V::Void
+        }
+        (WIDGET_SPRITES, "get") if desc == "(ZZ)Lnet/minecraft/resources/ResourceLocation;" => {
+            let field = match (a(1).i() != 0, a(2).i() != 0) {
+                (true, true) => "enabledFocused",
+                (true, false) => "enabled",
+                (false, true) => "disabledFocused",
+                (false, false) => "disabled",
+            };
+            rt.get_field(a(0), field)
+        }
         // `CriterionTrigger.createCriterion(instance)`, its default method: the criterion record
         // of the trigger and the instance (Create's advancements, built in code).
         ("net/minecraft/advancements/CriterionTrigger", "createCriterion") => crate::records::make(rt, "net/minecraft/advancements/Criterion", &[a(0), a(1)]),
@@ -4059,6 +4151,14 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 
 const MUTABLE_COMPONENT: &str = "net/minecraft/network/chat/MutableComponent";
 const TRANSLATABLE_CONTENTS: &str = "net/minecraft/network/chat/contents/TranslatableContents";
+const WIDGET_SPRITES: &str = "net/minecraft/client/gui/components/WidgetSprites";
+const WIDGET_SPRITES_TWO: &str =
+    "(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/resources/ResourceLocation;)V";
+const WIDGET_SPRITES_THREE: &str = "(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/resources/ResourceLocation;)V";
+const HAS_INFINITE_MATERIALS: (&str, &str) = (
+    "net/minecraft/world/entity/LivingEntity.hasInfiniteMaterials.()Z",
+    "hasInfiniteMaterials.()Z",
+);
 const PLAIN_TEXT_CONTENTS: &str = "net/minecraft/network/chat/contents/PlainTextContents";
 const LITERAL_CONTENTS: &str =
     "net/minecraft/network/chat/contents/PlainTextContents$LiteralContents";
@@ -7156,6 +7256,83 @@ mod tests {
             component_json(&rt, made),
             serde_json::json!({ "text": "Hi" })
         );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `WidgetSprites`' shorter constructors repeat sprites as vanilla's do, and `get` picks the
+    /// sprite of a button's state.
+    #[test]
+    fn a_widgets_sprites_follow_its_state() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        const GET: &str = "net/minecraft/client/gui/components/WidgetSprites.get.(ZZ)Lnet/minecraft/resources/ResourceLocation;";
+        let [plain, off, lit] = ["test:plain", "test:off", "test:lit"].map(|s| rt.string(s));
+        let make = |rt: &mut Rt, desc: &str, sprites: &[V]| {
+            let w = rt.new_object(WIDGET_SPRITES);
+            let key = rt.static_key(&format!("{WIDGET_SPRITES}.<init>.{desc}"));
+            crate::api::call(rt, key, &[&[w], sprites].concat());
+            w
+        };
+        let states = |rt: &mut Rt, w: V| {
+            [(1, 0), (1, 1), (0, 0), (0, 1)].map(|(enabled, focused)| {
+                crate::api::call(rt, GET, &[w, V::I(enabled), V::I(focused)])
+            })
+        };
+        let two = make(&mut rt, WIDGET_SPRITES_TWO, &[plain, lit]);
+        assert_eq!(states(&mut rt, two), [plain, lit, plain, lit]);
+        let three = make(&mut rt, WIDGET_SPRITES_THREE, &[plain, off, lit]);
+        assert_eq!(states(&mut rt, three), [plain, lit, off, off]);
+        // The record's own accessor reads the component the constructor filled.
+        let got = crate::api::call(
+            &mut rt,
+            "net/minecraft/client/gui/components/WidgetSprites.disabledFocused.()Lnet/minecraft/resources/ResourceLocation;",
+            &[three],
+        );
+        assert_eq!(got, off);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// An item use consumes from the stack, except a creative player's (infinite materials); a
+    /// mob's or no one's always does. A player's secondary use is its shift key.
+    #[test]
+    fn consuming_spares_only_a_creative_players_stack() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        const CONSUME: &str = "net/minecraft/world/item/ItemStack.consume.(ILnet/minecraft/world/entity/LivingEntity;)V";
+        const AND_RETURN: &str = "net/minecraft/world/item/ItemStack.consumeAndReturn.(ILnet/minecraft/world/entity/LivingEntity;)Lnet/minecraft/world/item/ItemStack;";
+        const SECONDARY: &str = "net/minecraft/world/entity/player/Player.isSecondaryUseActive.()Z";
+        let count = |rt: &Rt, s: V| rt.get_field(s, "$count").i();
+        let stone = item(&mut rt, "minecraft:stone");
+        let stack = stack_of(&mut rt, stone, 8);
+        let mob = rt.new_object("net/minecraft/world/entity/animal/Pig");
+        let mut host = crate::host::MemoryHost {
+            creative: true,
+            sneaking: true,
+            ..Default::default()
+        };
+        let player = rt.with_host(&mut host, |rt| {
+            let player = crate::menus::server_player(rt, 7);
+            crate::api::call(rt, CONSUME, &[stack, V::I(2), player]);
+            assert_eq!(count(rt, stack), 8);
+            crate::api::call(rt, CONSUME, &[stack, V::I(2), mob]);
+            assert_eq!(count(rt, stack), 6);
+            crate::api::call(rt, CONSUME, &[stack, V::I(1), V::NULL]);
+            assert_eq!(count(rt, stack), 5);
+            let back = crate::api::call(rt, AND_RETURN, &[stack, V::I(3), player]);
+            assert_eq!((count(rt, back), count(rt, stack)), (3, 5));
+            assert_eq!(crate::api::call(rt, SECONDARY, &[player]), V::I(1));
+            player
+        });
+        host.creative = false;
+        host.sneaking = false;
+        rt.with_host(&mut host, |rt| {
+            let back = crate::api::call(rt, AND_RETURN, &[stack, V::I(3), player]);
+            assert_eq!((count(rt, back), count(rt, stack)), (3, 2));
+            assert_eq!(rt.get_field(back, "$item"), stone);
+            assert_eq!(crate::api::call(rt, SECONDARY, &[player]), V::I(0));
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

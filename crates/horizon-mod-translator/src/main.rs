@@ -210,6 +210,39 @@ fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
             api::call(rt, "net/neoforged/neoforge/fluids/capability/templates/FluidTank.<init>.(I)V", &[t, V::I(1000)]);
             t
         }
+        // NeoForge's energy buffer, as a machine's capability gives one; a water bucket's fluid
+        // handler, as its item capability gives it.
+        "Lnet/neoforged/neoforge/energy/IEnergyStorage;"
+        | "Lnet/neoforged/neoforge/energy/EnergyStorage;" => {
+            let s = rt.new_object("net/neoforged/neoforge/energy/EnergyStorage");
+            api::call(
+                rt,
+                "net/neoforged/neoforge/energy/EnergyStorage.<init>.(I)V",
+                &[s, V::I(1000)],
+            );
+            s
+        }
+        "Lnet/neoforged/neoforge/fluids/capability/IFluidHandlerItem;" => {
+            let bucket = horizon_compat::api_common::stack(rt, "minecraft:water_bucket", 1);
+            let fluids = api::get_static(
+                rt,
+                "net/neoforged/neoforge/capabilities/Capabilities$FluidHandler.ITEM",
+            );
+            api::call(
+                rt,
+                "net/minecraft/world/item/ItemStack.getCapability.(Lnet/neoforged/neoforge/capabilities/ItemCapability;)Ljava/lang/Object;",
+                &[bucket, fluids],
+            )
+        }
+        // A parser of SNBT over a reader of one compound, as a mod makes one to read its own.
+        "Lnet/minecraft/nbt/TagParser;" => {
+            let reader = rt.new_object("com/mojang/brigadier/StringReader");
+            let line = rt.string("{}");
+            api::call(rt, "com/mojang/brigadier/StringReader.<init>.(Ljava/lang/String;)V", &[reader, line]);
+            let p = rt.new_object("net/minecraft/nbt/TagParser");
+            api::call(rt, "net/minecraft/nbt/TagParser.<init>.(Lcom/mojang/brigadier/StringReader;)V", &[p, reader]);
+            p
+        }
         "Lnet/neoforged/neoforge/capabilities/BlockCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.BLOCK"),
         "Lnet/neoforged/neoforge/capabilities/EntityCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.ENTITY"),
         "Lnet/neoforged/neoforge/capabilities/ItemCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$FluidHandler.ITEM"),

@@ -29,6 +29,7 @@ pub mod contacts;
 pub mod container_screens;
 pub mod capabilities;
 pub mod enchantments;
+pub mod energy;
 pub mod entities;
 pub mod events;
 pub mod faces;

@@ -27,13 +27,14 @@ const VANILLA_PROVIDER: &str = "net/minecraft/commands/BrigadierExceptions";
 const LITERAL_MESSAGE: &str = "com/mojang/brigadier/LiteralMessage";
 const MESSAGE: &str = "com/mojang/brigadier/Message";
 const APPLY: &str = "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
+const TAG_PARSER: &str = "net/minecraft/nbt/TagParser";
 
 /// The keys [`call`] may answer.
-pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(
         owner,
         READER | IMMUTABLE_READER | SYNTAX | SIMPLE | DYNAMIC | DYNAMIC_2 | DYNAMIC_3 | DYNAMIC_4 | DYNAMIC_N | PROVIDER | VANILLA_PROVIDER | LITERAL_MESSAGE | MESSAGE
-    )
+    ) || (owner == TAG_PARSER && matches!(name, "<init>" | "parseTag" | "readStruct" | "readValue"))
 }
 
 /// `CommandSyntaxException.BUILT_IN_EXCEPTIONS`: 1.21.1's provider (vanilla's bootstrap sets it).
@@ -440,6 +441,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(type_of(rt, key, usize::from(arity)))
         }
         SYNTAX => syntax_call(rt, name, desc, args),
+        TAG_PARSER => tag_parser_call(rt, name, desc, args),
         LITERAL_MESSAGE | MESSAGE => {
             let a0 = args.first().copied().unwrap_or_default();
             Some(match name {
@@ -456,6 +458,64 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         _ => None,
     }
+}
+
+/// `TagParser`: SNBT read into tags as vanilla reads it. `parseTag(text)` reads one compound with
+/// nothing after it; `readStruct()` and `readValue()` read from the parser's reader (`new
+/// TagParser(reader)`), which moves past what they read. A syntax error throws vanilla's
+/// `CommandSyntaxException`.
+fn tag_parser_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let this = args.first().copied().unwrap_or_default();
+    if name == "<init>" && desc == "(Lcom/mojang/brigadier/StringReader;)V" {
+        rt.put_field(this, "$reader", args.get(1).copied().unwrap_or_default());
+        return Some(V::Void);
+    }
+    let (mut r, reader) = match name {
+        "parseTag" if desc == "(Ljava/lang/String;)Lnet/minecraft/nbt/CompoundTag;" => {
+            let Some(text) = rt.str_of(this).map(str::to_owned) else {
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/NullPointerException",
+                    "Cannot invoke \"String.length()\" because \"this.string\" is null",
+                ));
+            };
+            (Reader::new(&text), None)
+        }
+        "readStruct" | "readValue" if desc.starts_with("()") => {
+            let reader = rt.get_field(this, "$reader");
+            if reader.r() == 0 {
+                return None;
+            }
+            (reader_of(rt, reader), Some(reader))
+        }
+        _ => return None,
+    };
+    let read = match name {
+        "readValue" => crate::command_args::snbt_value(&mut r, 0),
+        _ => crate::command_args::snbt_struct(&mut r, 0).map(crate::nbt::Nbt::Compound),
+    };
+    // `parseTag` reads the whole text: only spaces may follow the compound.
+    let read = read.and_then(|tag| {
+        if reader.is_none() {
+            r.skip_whitespace();
+            if r.can_read() {
+                return Err(r.error("argument.nbt.trailing", Vec::new()));
+            }
+        }
+        Ok(tag)
+    });
+    if let Some(reader) = reader {
+        rt.put_field(reader, "$cursor", V::I(r.cursor));
+    }
+    Some(match read {
+        Ok(crate::nbt::Nbt::Compound(c)) => crate::nbt::to_runtime(rt, &c),
+        Ok(other) => crate::nbt::element_to_runtime(rt, &other).unwrap_or(V::NULL),
+        Err(e) => {
+            let ex = exception(rt, &r.s, &e);
+            rt.thrown = Some(ex);
+            V::NULL
+        }
+    })
 }
 
 /// `StringReader`'s methods on a reader object (its line in `$string`, its cursor in `$cursor`).
@@ -821,6 +881,142 @@ mod tests {
         assert_eq!(said(&mut rt, "getMessage"), "Bad at position 13: ...ate clone <--[HERE]");
         assert_eq!(said(&mut rt, "toString"), "com.mojang.brigadier.exceptions.CommandSyntaxException: Bad at position 13: ...ate clone <--[HERE]");
         assert_eq!(c(&mut rt, &format!("{SYNTAX}.getCursor.()I"), &[e]), V::I(13));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `TagParser` reads SNBT into tags of the type vanilla gives each word (its suffix's, its
+    /// number's form, a boolean's byte, else a string, as is a number its type can't hold), lists
+    /// of one type and typed arrays; it fails with vanilla's errors where vanilla's cursor stops.
+    #[test]
+    fn tag_parser_reads_snbt_into_vanillas_tags() {
+        use crate::nbt::Nbt;
+        use std::collections::BTreeMap;
+        const PARSE: &str = "net/minecraft/nbt/TagParser.parseTag.(Ljava/lang/String;)Lnet/minecraft/nbt/CompoundTag;";
+        let mut rt = Rt::new();
+        crate::install();
+        let parse = |rt: &mut Rt, text: &str| {
+            let s = rt.string(text);
+            let tag = c(rt, PARSE, &[s]);
+            (tag, rt.thrown.take())
+        };
+        let (tag, thrown) = parse(
+            &mut rt,
+            r#" {a:1b, b:-2S, c:3, d:4L, e:1.5f, f:2.5, g:3d, h:1.e3, i:true, j:False, k:hello, l:'it"s', m:300b, n:1e3, o:[1, 2], p:[B;1b,2B], q:[I; 3], r:[L;4l], s:{t:[]}, "u v":+7} "#,
+        );
+        assert!(thrown.is_none());
+        let text = |s: &str| Nbt::String(s.into());
+        let expected: BTreeMap<String, Nbt> = [
+            ("a", Nbt::Byte(1)),
+            ("b", Nbt::Short(-2)),
+            ("c", Nbt::Int(3)),
+            ("d", Nbt::Long(4)),
+            ("e", Nbt::Float(1.5)),
+            ("f", Nbt::Double(2.5)),
+            ("g", Nbt::Double(3.0)),
+            ("h", Nbt::Double(1000.0)),
+            ("i", Nbt::Byte(1)),
+            ("j", Nbt::Byte(0)),
+            ("k", text("hello")),
+            ("l", text("it\"s")),
+            ("m", text("300b")),
+            ("n", text("1e3")),
+            ("o", Nbt::List(vec![Nbt::Int(1), Nbt::Int(2)])),
+            ("p", Nbt::ByteArray(vec![1, 2])),
+            ("q", Nbt::IntArray(vec![3])),
+            ("r", Nbt::LongArray(vec![4])),
+            (
+                "s",
+                Nbt::Compound([("t".to_owned(), Nbt::List(Vec::new()))].into()),
+            ),
+            ("u v", Nbt::Int(7)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        assert_eq!(crate::nbt::from_runtime(&rt, tag), expected);
+
+        let failure = |rt: &mut Rt, text: &str| {
+            let (tag, thrown) = parse(rt, text);
+            assert_eq!(tag, V::NULL, "{text}");
+            let e = thrown.expect("a syntax error");
+            let raw = c(
+                rt,
+                &format!("{SYNTAX}.getRawMessage.()Lcom/mojang/brigadier/Message;"),
+                &[e],
+            );
+            let json = crate::api_common::component_json(rt, raw);
+            (
+                json["translate"].as_str().unwrap_or("").to_owned(),
+                json["with"].to_string(),
+                c(rt, &format!("{SYNTAX}.getCursor.()I"), &[e]),
+            )
+        };
+        let mixed = failure(&mut rt, "{a:[1,2b]}");
+        assert_eq!(
+            (mixed.0.as_str(), mixed.2),
+            ("argument.nbt.list.mixed", V::I(6))
+        );
+        assert!(
+            mixed.1.find("TAG_Byte") < mixed.1.find("TAG_Int"),
+            "{}",
+            mixed.1
+        );
+        let in_array = failure(&mut rt, "{a:[I;1,2b]}");
+        assert_eq!(
+            (in_array.0.as_str(), in_array.2),
+            ("argument.nbt.array.mixed", V::I(8))
+        );
+        assert!(in_array.1.contains("TAG_Int_Array"), "{}", in_array.1);
+        assert_eq!(
+            failure(&mut rt, "{a:[X;1]}").0,
+            "argument.nbt.array.invalid"
+        );
+        let trailing = failure(&mut rt, "{a:1} x");
+        assert_eq!(
+            (trailing.0.as_str(), trailing.2),
+            ("argument.nbt.trailing", V::I(6))
+        );
+        // A comma may close a compound (`{a:1,}` reads), but not end the text, and a key is needed.
+        let (tag, thrown) = parse(&mut rt, "{a:1,}");
+        assert!(thrown.is_none() && tag.r() != 0);
+        let open = failure(&mut rt, "{a:1,");
+        assert_eq!(
+            (open.0.as_str(), open.2),
+            ("argument.nbt.expected.key", V::I(5))
+        );
+        let keyless = failure(&mut rt, "{:1}");
+        assert_eq!(
+            (keyless.0.as_str(), keyless.2),
+            ("argument.nbt.expected.key", V::I(1))
+        );
+
+        // A parser over a reader reads one compound from its cursor and leaves the reader after it.
+        let reader = rt.new_object(READER);
+        let line = rt.string("{x:[I;1,2]} rest");
+        c(
+            &mut rt,
+            &format!("{READER}.<init>.(Ljava/lang/String;)V"),
+            &[reader, line],
+        );
+        let parser = rt.new_object(TAG_PARSER);
+        c(
+            &mut rt,
+            &format!("{TAG_PARSER}.<init>.(L{READER};)V"),
+            &[parser, reader],
+        );
+        let tag = c(
+            &mut rt,
+            &format!("{TAG_PARSER}.readStruct.()Lnet/minecraft/nbt/CompoundTag;"),
+            &[parser],
+        );
+        assert_eq!(
+            crate::nbt::from_runtime(&rt, tag),
+            [("x".to_owned(), Nbt::IntArray(vec![1, 2]))].into()
+        );
+        assert_eq!(
+            c(&mut rt, &format!("{READER}.getCursor.()I"), &[reader]),
+            V::I(11)
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

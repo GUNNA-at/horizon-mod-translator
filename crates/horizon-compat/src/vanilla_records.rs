@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 634] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 633] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1277,7 +1277,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 634] = [
     ("net/minecraft/gametest/framework/TestCommand$Runner", "i(Lnet/minecraft/gametest/framework/TestFinder;)V=finder|o"),
     ("net/minecraft/gametest/framework/TestFinder", "i(Lnet/minecraft/commands/CommandSourceStack;Ljava/util/function/Function;Lnet/minecraft/gametest/framework/TestFunctionFinder;Lnet/minecraft/gametest/framework/StructureBlockPosFinder;)V=source,contextProvider,testFunctionFinder,structureBlockPosFinder|gsource()Lnet/minecraft/commands/CommandSourceStack;=source|o"),
     ("net/minecraft/gametest/framework/TestFinder$Builder", "i(Ljava/util/function/Function;Ljava/util/function/UnaryOperator;Ljava/util/function/UnaryOperator;)V=contextProvider,testFunctionFinderWrapper,structureBlockPosFinderWrapper|o"),
-    ("net/minecraft/nbt/TagParser", "i(Lcom/mojang/brigadier/StringReader;)V=reader|o"),
     ("net/minecraft/network/chat/ClickEvent", "i(Lnet/minecraft/network/chat/ClickEvent$Action;Ljava/lang/String;)V=action,value|ggetAction()Lnet/minecraft/network/chat/ClickEvent$Action;=action|ggetValue()Ljava/lang/String;=value|e=action,value"),
     ("net/minecraft/network/chat/Component$SerializerAdapter", "i(Lnet/minecraft/core/HolderLookup$Provider;)V=registries|o"),
     ("net/minecraft/network/chat/FilterMask", "i(Ljava/util/BitSet;Lnet/minecraft/network/chat/FilterMask$Type;)V=mask,type|gtype()Lnet/minecraft/network/chat/FilterMask$Type;=type|gmask()Ljava/util/BitSet;=mask|e=mask,type"),

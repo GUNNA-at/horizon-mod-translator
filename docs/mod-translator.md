@@ -7045,6 +7045,44 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     directions step, turn up onto their normals with JOML's numbers, and are found by delta, name
     and nearest vector; a dye item's colour and a colour's tag; a component's contents, their
     classes and a component made from them), translator 20.
+- [x] 2026-11-07 Part 105: NeoForge's energy, typed SNBT, and more of packcov17's list.
+  - Energy (`energy`, a new compat module): NeoForge's `EnergyStorage` as 1.21.1's (capacity,
+    receive and extract limits; `receiveEnergy` and `extractEnergy` within them, simulated or not;
+    `canReceive` and `canExtract` asked virtually, so a subclass's rule holds; saved as an `IntTag`
+    and read back from one only, else vanilla's `IllegalArgumentException`), `EmptyEnergyStorage`
+    (`INSTANCE`: nothing in, nothing out) and the `IEnergyStorage` and `INBTSerializable` calls on
+    them. 18, 17, 15, 11 and 10 mods called `IEnergyStorage`'s methods.
+  - SNBT (`brigadier`, `command_args`): `TagParser.parseTag` (19 mods), `readStruct` and
+    `readValue` read text into typed tags as 1.21.1's parser: each word by the first of vanilla's
+    patterns it matches (float, byte, long, short, int, double, then `true` and `false`), a number
+    too big for its type a string, lists of one type, `[B;`, `[I;` and `[L;` arrays, with vanilla's
+    errors and cursors (mixed list, mixed array, invalid array, expected key or value, trailing
+    data). Command arguments (`{nbt}` of a block, a selector's `nbt=`) now read through it, so they
+    fail on mixed lists as vanilla's do.
+  - Players and stacks: `Player.isSecondaryUseActive()` (18 mods: the shift key) and
+    `hasInfiniteMaterials()` (17: creative's `instabuild`; false for any other living entity);
+    `ItemStack.consume(n, entity)` (14) and `consumeAndReturn`: the stack shrinks unless the entity
+    builds from infinite materials.
+  - `WidgetSprites` (24 mods ask `get(enabled, focused)`): its two- and three-sprite constructors
+    repeat sprites as vanilla's do, `get` picks the state's sprite.
+  - `EntityType.getKey(type)` (15): the entity type registry's id, its default (the pig's) for a
+    type it doesn't hold.
+  - Probe: samples of an `IEnergyStorage` (a buffer of 1000), an `IFluidHandlerItem` (a water
+    bucket's, by `ItemStack.getCapability(Capabilities.FluidHandler.ITEM)`) and a `TagParser` over
+    a reader, without which the calls on them were counted missing (17, 15 and 14 mods'
+    `IFluidHandlerItem` calls compat already answered).
+  - Measured (packcov18, the same 367 jars): methods 80.3% (from 80.0%: 368 more mapped), uses
+    89.5% (from 89.4%), distinct missing API methods 10993 (from 11031); Create 78.3% of its
+    methods, 95.1% of its uses. Every call above is off the list. Now at its top: `getTextureManager`
+    (46 mods), `Player.awardStat` (38), `ConfigurationScreen` (38), mod entities' attributes
+    (`AttributeSupplier$Builder.build` 33, `EntityAttributeCreationEvent.put` 32), `HoverEvent`
+    (32); with `WidgetSprites` answered, `ImageButton`'s constructors (13 mods) come up.
+  - Tests: compat 604 (5 new: a buffer takes and gives within its limits and its subclass's
+    rules, saves and loads what it holds, refuses another tag, and the empty storage holds nothing;
+    SNBT reads into vanilla's tag types and fails with vanilla's errors and cursors, a parser over a
+    reader leaves it after the compound; a widget's sprites follow its state; consuming spares only
+    a creative player's stack, and secondary use is the shift key; the entity type tests now also
+    ask a type's key), translator 20.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

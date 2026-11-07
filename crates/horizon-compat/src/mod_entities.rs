@@ -506,6 +506,19 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let entity_types = registry.trim_start_matches("minecraft:") == "entity_type";
             Some(V::I((entity_types && rt.host().is_some_and(|h| h.entity_type_in_tag(&kind, &tag))) as i32))
         }
+        // `EntityType.getKey(type)`: its registry id (the entity type registry's default, the pig,
+        // for a type it does not hold).
+        (ENTITY_TYPE, "getKey")
+            if desc
+                == "(Lnet/minecraft/world/entity/EntityType;)Lnet/minecraft/resources/ResourceLocation;" =>
+        {
+            let id = match type_id(rt, a(0)) {
+                Some(id) if id.contains(':') => id.to_owned(),
+                Some(id) => format!("minecraft:{id}"),
+                None => "minecraft:pig".to_owned(),
+            };
+            Some(rt.string(&id))
+        }
         (ENTITY_TYPE, "getDescriptionId") => {
             let id = description_id(rt, a(0));
             Some(rt.string(&id))
@@ -1873,6 +1886,12 @@ mod tests {
         assert_ne!(api::get_static(&mut rt, "net/minecraft/world/entity/EntityType.ZOMBIE"), illusioner);
         let key = api::call(&mut rt, "net/minecraft/core/Registry.getKey.(Ljava/lang/Object;)Lnet/minecraft/resources/ResourceLocation;", &[registry, illusioner]);
         assert_eq!(rt.str_of(key), Some("minecraft:illusioner"));
+        // `EntityType.getKey(type)` asks the registry: the type's id, or its default, the pig's.
+        const TYPE_KEY: &str = "net/minecraft/world/entity/EntityType.getKey.(Lnet/minecraft/world/entity/EntityType;)Lnet/minecraft/resources/ResourceLocation;";
+        let key = api::call(&mut rt, TYPE_KEY, &[illusioner]);
+        assert_eq!(rt.str_of(key), Some("minecraft:illusioner"));
+        let key = api::call(&mut rt, TYPE_KEY, &[V::NULL]);
+        assert_eq!(rt.str_of(key), Some("minecraft:pig"));
         let description = api::call(&mut rt, "net/minecraft/world/entity/EntityType.getDescriptionId.()Ljava/lang/String;", &[illusioner]);
         assert_eq!(rt.str_of(description), Some("entity.minecraft.illusioner"));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
@@ -1940,6 +1959,22 @@ mod tests {
         let name = rt.string("test:goblin");
         let goblin = api::call(&mut rt, "net/minecraft/world/entity/EntityType$Builder.build.(Ljava/lang/String;)Lnet/minecraft/world/entity/EntityType;", &[builder, name]);
         assert_eq!(api::call(&mut rt, CATEGORY, &[goblin]), monster);
+        // Its key is the registry's: the default (the pig's) until the mod registers it.
+        const TYPE_KEY: &str = "net/minecraft/world/entity/EntityType.getKey.(Lnet/minecraft/world/entity/EntityType;)Lnet/minecraft/resources/ResourceLocation;";
+        let key = api::call(&mut rt, TYPE_KEY, &[goblin]);
+        assert_eq!(rt.str_of(key), Some("minecraft:pig"));
+        let registry = api::get_static(
+            &mut rt,
+            "net/minecraft/core/registries/BuiltInRegistries.ENTITY_TYPE",
+        );
+        let id = rt.string("test:goblin");
+        api::call(
+            &mut rt,
+            "net/minecraft/core/Registry.register.(Lnet/minecraft/core/Registry;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[registry, id, goblin],
+        );
+        let key = api::call(&mut rt, TYPE_KEY, &[goblin]);
+        assert_eq!(rt.str_of(key), Some("test:goblin"));
         // What Create asks of a category before it counts a kill.
         assert_eq!(api::call(&mut rt, "net/minecraft/world/entity/MobCategory.isFriendly.()Z", &[monster]), V::I(0));
         assert_eq!(api::call(&mut rt, "net/minecraft/world/entity/MobCategory.isFriendly.()Z", &[creature]), V::I(1));
