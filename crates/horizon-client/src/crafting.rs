@@ -1270,11 +1270,30 @@ fn custom_type(v: &Value) -> Option<&str> {
         .as_str()
         .filter(|t| t.contains(':') && !t.starts_with("minecraft:"))
 }
+/// The `RecipeType` a recipe of one of Minecraft's own serializers is of: every crafting kind's
+/// is `minecraft:crafting` and both smithing kinds' `minecraft:smithing`; the cooking kinds and
+/// stonecutting are their own (`minecraft:smelting`). None for another namespace's and a kind
+/// Minecraft doesn't have.
+fn vanilla_type(v: &Value) -> Option<String> {
+    let t = v["type"].as_str()?;
+    let t = t.strip_prefix("minecraft:").or((!t.contains(':')).then_some(t))?;
+    let kind = match t {
+        _ if t.starts_with("crafting_") => "crafting",
+        _ if t.starts_with("smithing_") => "smithing",
+        "smelting" | "blasting" | "smoking" | "campfire_cooking" | "stonecutting" => t,
+        _ => return None,
+    };
+    Some(format!("minecraft:{kind}"))
+}
 pub struct Recipes {
     pub crafting: Vec<(String, Recipe)>,
     pub cooking: Vec<Cooking>,
     /// The recipes of types of mods' own, by type, in file order.
     pub custom: HashMap<String, Vec<CustomRecipe>>,
+    /// The files of Minecraft's own recipes whose result the game has, in file order, by the
+    /// type vanilla's `RecipeManager` keeps them under ([`vanilla_type`]): what a mod's code
+    /// reads them as.
+    pub vanilla: HashMap<String, Vec<CustomRecipe>>,
     /// `category` and `group` of each crafting recipe, by file name.
     pub meta: HashMap<String, (String, String)>,
     facts: HashMap<Arc<str>, Facts>,
@@ -1444,6 +1463,7 @@ impl Recipes {
         let mut crafting = Vec::new();
         let mut cooking = Vec::new();
         let mut custom: HashMap<String, Vec<CustomRecipe>> = HashMap::new();
+        let mut vanilla: HashMap<String, Vec<CustomRecipe>> = HashMap::new();
         let mut meta = HashMap::new();
         for (name, v) in sources {
             if let Some(kind) = custom_type(&v) {
@@ -1463,6 +1483,7 @@ impl Recipes {
             if !result_known(&v["result"], items) {
                 continue;
             }
+            let file = vanilla_type(&v).map(|kind| (kind, recipe_id(&name)));
             let text = |k: &str| v[k].as_str().unwrap_or("").to_owned();
             meta.insert(name.clone(), (text("category"), text("group")));
             let ing = |k: &str| Ingredient::parse(&v[k], items);
@@ -1643,6 +1664,10 @@ impl Recipes {
             if let Some(recipe) = parsed {
                 crafting.push((name, recipe));
             }
+            if let Some((kind, id)) = file {
+                let json = Arc::new(v);
+                vanilla.entry(kind).or_default().push(CustomRecipe { id, json });
+            }
         }
         let facts = items
             .items
@@ -1670,6 +1695,7 @@ impl Recipes {
             crafting,
             cooking,
             custom,
+            vanilla,
             meta,
             facts,
             curses,
@@ -2107,6 +2133,7 @@ mod tests {
             crafting: Vec::new(),
             cooking,
             custom: HashMap::new(),
+            vanilla: HashMap::new(),
             meta: HashMap::new(),
             facts: HashMap::new(),
             curses: HashSet::new(),
@@ -2203,6 +2230,85 @@ mod tests {
         );
         assert_eq!(crusher[1].json["tag"], "pack-b");
         assert_eq!(recipes.custom["pack:press"][0].id, "minecraft:p");
+        let _ = fs::remove_dir_all(&root);
+    }
+    /// Minecraft's own recipes are kept as files too, by the type a mod looks them up by: every
+    /// crafting kind under `minecraft:crafting`, both smithing kinds under `minecraft:smithing`, a
+    /// cooking kind or stonecutting under its own; a kind Minecraft doesn't have, nowhere.
+    #[test]
+    fn vanilla_recipes_are_kept_by_the_type_mods_look_them_up_by() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-vanilla-recipes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("data/minecraft/recipe")).unwrap();
+        fs::create_dir_all(root.join("data/mymod/recipe")).unwrap();
+        fs::write(
+            root.join(horizon_items::content_namespaces::MARKER),
+            br#"["mymod"]"#,
+        )
+        .unwrap();
+        for (path, json) in [
+            (
+                "minecraft/recipe/iron_ingot_from_smelting_raw_iron.json",
+                r#"{"type":"minecraft:smelting","ingredient":"minecraft:raw_iron","result":{"id":"minecraft:iron_ingot"},"experience":0.7,"cookingtime":200}"#,
+            ),
+            (
+                "minecraft/recipe/iron_ingot_from_blasting_raw_iron.json",
+                r#"{"type":"minecraft:blasting","ingredient":"minecraft:raw_iron","result":{"id":"minecraft:iron_ingot"},"experience":0.7,"cookingtime":100}"#,
+            ),
+            (
+                "minecraft/recipe/stick.json",
+                r##"{"type":"minecraft:crafting_shaped","key":{"#":"#minecraft:planks"},"pattern":["#","#"],"result":{"id":"minecraft:stick","count":4}}"##,
+            ),
+            (
+                "minecraft/recipe/repair_item.json",
+                r#"{"type":"minecraft:crafting_special_repairitem","category":"misc"}"#,
+            ),
+            (
+                "minecraft/recipe/stone_slab_from_stone_stonecutting.json",
+                r#"{"type":"minecraft:stonecutting","ingredient":"minecraft:stone","result":{"id":"minecraft:stone_slab","count":2}}"#,
+            ),
+            (
+                "minecraft/recipe/later.json",
+                r#"{"type":"minecraft:from_a_later_version"}"#,
+            ),
+            (
+                "mymod/recipe/press.json",
+                r#"{"type":"mymod:press","ingredient":"minecraft:stone"}"#,
+            ),
+            (
+                "mymod/recipe/plates.json",
+                r#"{"type":"smelting","ingredient":"minecraft:iron_block","result":{"id":"minecraft:iron_ingot","count":9}}"#,
+            ),
+        ] {
+            fs::write(root.join("data").join(path), json).unwrap();
+        }
+        let items = Items::for_tests(HashMap::new());
+        let recipes = Recipes::load(&root, &items, &PackOverlay::NONE).unwrap();
+        let mut kinds: Vec<(&str, Vec<&str>)> = recipes
+            .vanilla
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.iter().map(|r| r.id.as_str()).collect()))
+            .collect();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            [
+                ("minecraft:blasting", vec!["minecraft:iron_ingot_from_blasting_raw_iron"]),
+                ("minecraft:crafting", vec!["minecraft:repair_item", "minecraft:stick"]),
+                (
+                    "minecraft:smelting",
+                    vec!["minecraft:iron_ingot_from_smelting_raw_iron", "mymod:plates"]
+                ),
+                (
+                    "minecraft:stonecutting",
+                    vec!["minecraft:stone_slab_from_stone_stonecutting"]
+                ),
+            ]
+        );
+        let smelting = &recipes.vanilla["minecraft:smelting"][0].json;
+        assert_eq!(smelting["experience"], 0.7);
+        assert_eq!(recipes.custom["mymod:press"].len(), 1);
         let _ = fs::remove_dir_all(&root);
     }
     #[test]
@@ -2386,6 +2492,7 @@ mod tests {
             crafting: Vec::new(),
             cooking: Vec::new(),
             custom: HashMap::new(),
+            vanilla: HashMap::new(),
             meta: HashMap::new(),
             facts: HashMap::new(),
             curses: HashSet::new(),

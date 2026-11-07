@@ -15,7 +15,7 @@ pub(crate) const AXIS_NAMES: [&str; 3] = ["x", "y", "z"];
 pub fn api_is_a(c: &str, class: &str) -> bool {
     // 1.21.1's block and item classes by their own supertypes (`CropBlock` a `BonemealableBlock`,
     // `ChestBlock` an `EntityBlock`, `SwordItem` a `TieredItem`); the families below past them.
-    if vanilla_is_a(c, class) {
+    if vanilla_is_a(c, class) || crate::crafting::recipe_is_a(c, class) {
         return true;
     }
     // The class trees the runtime climbs for calls too (`ZombieModel` → `HumanoidModel`,

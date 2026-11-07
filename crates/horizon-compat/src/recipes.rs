@@ -685,18 +685,25 @@ fn holder(rt: &mut Rt, id: V, recipe: V) -> V {
 }
 
 /// A recipe from its file: the serializer its `type` names reads it with its codec, as
-/// `Recipe.CODEC` dispatches.
+/// `Recipe.CODEC` dispatches; one of Minecraft's own serializers, as [`crate::crafting`] models it.
 pub fn decode_recipe(rt: &mut Rt, j: &Json) -> Result<V, String> {
     let Json::Object(o) = j else { return Err(format!("Not a map: {j}")) };
     let Some(ty) = o.get("type").and_then(Json::as_str) else { return Err("No key type in MapLike".into()) };
     let ty = qualified(ty);
-    let Some(&serializer) = rt.registered.get(&("recipe_serializer".to_owned(), ty.clone())) else {
-        return Err(format!("Unknown registry key in recipe_serializer: {ty}"));
+    let codec = match rt
+        .registered
+        .get(&("recipe_serializer".to_owned(), ty.clone()))
+    {
+        Some(&serializer) => {
+            let codec = rt.call_functional(SERIALIZER_CODEC, serializer, &[]);
+            if let Some(e) = rt.thrown.take() {
+                return Err(format!("{ty}'s serializer threw {}", rt.class_of(e)));
+            }
+            codec
+        }
+        None if ty.starts_with("minecraft:") => crate::crafting::vanilla_codec(rt, &ty),
+        None => return Err(format!("Unknown registry key in recipe_serializer: {ty}")),
     };
-    let codec = rt.call_functional(SERIALIZER_CODEC, serializer, &[]);
-    if let Some(e) = rt.thrown.take() {
-        return Err(format!("{ty}'s serializer threw {}", rt.class_of(e)));
-    }
     if !codecs::is_codec(rt, codec) {
         return Err(format!("{ty}'s serializer has no codec this runtime reads"));
     }
@@ -735,16 +742,42 @@ pub fn holders(rt: &mut Rt, id: &str) -> Vec<V> {
     out
 }
 
-/// The recipes of every type the mod registered.
-fn own_holders(rt: &mut Rt) -> Vec<V> {
-    let mut types: Vec<String> = rt.registered.keys().filter(|(r, _)| r == "recipe_type").map(|(_, n)| n.clone()).collect();
+/// Minecraft's own recipe types, whose recipes the game hands over as a mod type's.
+const VANILLA_TYPES: [&str; 7] = [
+    "minecraft:crafting",
+    "minecraft:smelting",
+    "minecraft:blasting",
+    "minecraft:smoking",
+    "minecraft:campfire_cooking",
+    "minecraft:stonecutting",
+    "minecraft:smithing",
+];
+
+/// The recipes of every type: Minecraft's own, then those of every type the mods registered, as
+/// vanilla's manager holds every recipe (`getRecipes`, `byKey`).
+fn all_holders(rt: &mut Rt) -> Vec<V> {
+    let mut types: Vec<String> = rt
+        .registered
+        .keys()
+        .filter(|(r, _)| r == "recipe_type")
+        .map(|(_, n)| n.clone())
+        .filter(|n| !VANILLA_TYPES.contains(&n.as_str()))
+        .collect();
     types.sort();
-    types.iter().flat_map(|t| holders(rt, t)).collect()
+    VANILLA_TYPES
+        .iter()
+        .map(|t| (*t).to_owned())
+        .chain(types)
+        .flat_map(|t| holders(rt, &t))
+        .collect()
 }
 
-/// `recipe.matches(input, level)`, the mod's own; a recipe that throws doesn't match.
+/// `recipe.matches(input, level)`, the mod's own or vanilla's; a recipe that throws doesn't match.
 fn matches(rt: &mut Rt, holder: V, input: V, level: V) -> bool {
     let recipe = rt.get_field(holder, "$value");
+    if let Some(m) = crate::crafting::vanilla_matches(rt, recipe, input) {
+        return m;
+    }
     let r = rt.call_functional(MATCHES, recipe, &[input, level]);
     rt.thrown.take().is_none() && r.i() != 0
 }
@@ -756,9 +789,20 @@ fn matches(rt: &mut Rt, holder: V, input: V, level: V) -> bool {
 fn find_matches(rt: &mut Rt, inputs: V, tests: V) -> V {
     let inputs = jutil::elements(rt, inputs);
     let tests = jutil::elements(rt, tests);
+    match pairing(rt, &inputs, &tests) {
+        Some(ret) => {
+            let ints = ret.into_iter().map(V::I).collect();
+            rt.alloc("[I", Data::Array(ints))
+        }
+        None => V::NULL,
+    }
+}
+
+/// [`find_matches`]' pairing of `inputs` (stacks) with `tests` (ingredients or predicates).
+pub(crate) fn pairing(rt: &mut Rt, inputs: &[V], tests: &[V]) -> Option<Vec<i32>> {
     let n = inputs.len();
     if n != tests.len() {
-        return V::NULL;
+        return None;
     }
     let mut ret = vec![-1i32; n];
     let mut data = vec![false; (n + 2) * n];
@@ -780,14 +824,10 @@ fn find_matches(rt: &mut Rt, inputs: V, tests: V) -> V {
             }
         }
         if matched == 0 || (matched == 1 && !claim(&mut ret, &mut data, x, n)) {
-            return V::NULL;
+            return None;
         }
     }
-    if next_clear(&data, 0) >= n || backtrack(&mut data, &mut ret, 0, n) {
-        let ints = ret.into_iter().map(V::I).collect();
-        return rt.alloc("[I", Data::Array(ints));
-    }
-    V::NULL
+    (next_clear(&data, 0) >= n || backtrack(&mut data, &mut ret, 0, n)).then_some(ret)
 }
 
 fn next_clear(data: &[bool], from: usize) -> usize {
@@ -913,12 +953,12 @@ fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         "byKey" => {
             let wanted = text(rt, a(1));
-            let all = own_holders(rt);
+            let all = all_holders(rt);
             let found = all.into_iter().find(|&h| text(rt, rt.get_field(h, "$id")) == wanted);
             optional(rt, found)
         }
         "getRecipes" | "getRecipeIds" => {
-            let all = own_holders(rt);
+            let all = all_holders(rt);
             let values = if name == "getRecipeIds" { all.iter().map(|&h| rt.get_field(h, "$id")).collect() } else { all };
             jutil::new_list(rt, values)
         }

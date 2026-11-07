@@ -5870,10 +5870,14 @@ impl Game<'_> {
         let page = RecipePage::new(title, tabs, tab, views);
         self.panel.show_recipes(mod_id, page);
     }
-    /// The recipes of type `kind` (`mymod:crusher`), a type outside `minecraft`,
-    /// from `data/<namespace>/recipe/*.json` of the content mods (`.hmod`) and
-    /// the world's data packs, in file order: each one's id and its file as
-    /// JSON, for the mod to read as it likes. A data pack changes them on
+    /// The recipes of type `kind` (`mymod:crusher`), a type outside `minecraft`
+    /// or one of Minecraft's own as vanilla's `RecipeManager` files them
+    /// (`minecraft:smelting`; every crafting recipe is `minecraft:crafting` and
+    /// both smithing kinds are `minecraft:smithing`), from
+    /// `data/<namespace>/recipe/*.json` of the game, the content mods (`.hmod`)
+    /// and the world's data packs, in file order: each one's id and its file as
+    /// JSON, for the mod to read as it likes. Minecraft's own leave out a
+    /// recipe whose result the game doesn't have. A data pack changes them on
     /// `/reload`, so look them up again when you need them. Empty for a type
     /// nobody uses and outside a world. These are the server's table on the
     /// server thread, a dedicated server or a LAN host; a client, the
@@ -5884,7 +5888,12 @@ impl Game<'_> {
         if self.outside_world() {
             return &[];
         }
-        self.recipes().custom.get(kind).map_or(&[], Vec::as_slice)
+        let recipes = self.recipes();
+        recipes
+            .custom
+            .get(kind)
+            .or_else(|| recipes.vanilla.get(kind))
+            .map_or(&[], Vec::as_slice)
     }
     /// An ingredient as a recipe's JSON names it: an item, a `#tag`, or a list
     /// of them, a bare id as `minecraft:` (as vanilla reads it); `test` says

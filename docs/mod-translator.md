@@ -6569,6 +6569,52 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   slot's item are the probe's stand-ins' (they work in game). In Create the most missed are
   `BlockState` (87), `Level` (86), `IFluidHandler` (79), `Entity` (77) and the item handlers
   (`IItemHandlerModifiable` 69, `IItemHandler` 64).
+- [x] 2026-11-07 Part 91: mods' code finds and runs Minecraft's own recipes (a mod's lookup of
+  `RecipeType.SMELTING` or `CRAFTING` found nothing: the game kept its vanilla recipes to itself, and
+  the runtime had no model of the shapeless, cooking and stonecutting classes. A Create fan over lava
+  burnt every item it carried, as Create's blasting finds no smelting or blasting recipe for it).
+  Measured: the pack's mods read `RecipeType.CRAFTING` in 57 classes of 23 jars, `SMELTING` in 36
+  of 19, `SMITHING` in 18 of 8, `SMOKING` in 14 of 8, `CAMPFIRE_COOKING` in 13 of 6, `BLASTING` in
+  13 of 8, `STONECUTTING` in 11 of 6; they build `ShapelessRecipe` in 20 jars, `ShapedRecipe` in 17,
+  `SmeltingRecipe` in 13, `BlastingRecipe` in 12, `SmokingRecipe` and `CampfireCookingRecipe` in 11,
+  and call `CraftingRecipe.getIngredients` in 14, `assemble` in 13, `matches` in 10.
+  - game: the recipe table keeps the files of Minecraft's own recipes whose result the game has, by
+    the type vanilla's `RecipeManager` files them under (every crafting kind under
+    `minecraft:crafting`, both smithing kinds under `minecraft:smithing`, the cooking kinds and
+    stonecutting under their own), and `native_recipes_of_type` gives them as it gives a mod type's.
+  - compat: a recipe file of a `minecraft:` type nothing registered is read by vanilla's own
+    serializer: shaped as before, and now shapeless (`group`, `category`, `result`, one to nine
+    ingredients), smelting, blasting, smoking and campfire cooking (`experience` 0 and the kind's
+    own cooking time, 200 or 100, where the file names none; category misc), and stonecutting.
+    `ShapelessRecipe`, `AbstractCookingRecipe` and its four classes, `StonecutterRecipe` and
+    `SingleItemRecipe` are modelled: constructors (a mod's own, and the type and serializer each
+    kind gives itself), `matches` (a shapeless recipe pairs each stack with a different
+    ingredient, NeoForge's `RecipeMatcher`; a single-item one tests its ingredient), `assemble`,
+    `getResultItem`, `getIngredients`, the getters, `getSerializer`, `getType`, `getToastSymbol`,
+    `canCraftInDimensions`, `isIncomplete`. `getRemainingItems` is vanilla's for every recipe
+    modelled here, shaped included: a milk bucket leaves its bucket (it left nothing). A lookup
+    matches vanilla's recipes directly, without a call through the mod's dispatch. The manager's
+    `getRecipes`, `getRecipeIds` and `byKey` hold Minecraft's types too, as vanilla's holds every
+    recipe (Create's press and mixer look for what to compact through `getRecipes`), and
+    `instanceof` knows these classes' supertypes (`CraftingRecipe` for the shaped and shapeless
+    ones, the press's test; `AbstractCookingRecipe`, `SingleItemRecipe`, `Recipe`). The two classes
+    leave `vanilla_records`' plain data classes (639 → 637).
+  - docs: `native-mods.md` says which of Minecraft's types `native_recipes_of_type` gives.
+  - Tests: compat 572 (3 new: a mod finds the game's smelting and blasting recipes by type, a tag
+    ingredient's items included, with the kind's own cooking time, vanilla's type and serializer
+    objects, and `byKey`; a shapeless recipe matches its ingredients anywhere in the grid, each
+    stack a different one, a special crafting recipe left out and the rest read, and too many or
+    no ingredients refused as vanilla refuses them; a mod builds a smoking and a stonecutter recipe
+    and reads them back, and a cake's grid leaves the milk bucket's bucket), translator 19, core
+    7, client lib crafting 18 (1 new: Minecraft's recipe files are kept by the type mods look them
+    up by; a kind Minecraft doesn't have is kept nowhere).
+  - In game: three glass corridors, each a Create fan on a creative motor at 128 RPM blowing
+    through water, lava or a lit campfire, items dropped in front of it. Over lava, raw iron x3
+    became iron ingots x3 and cobblestone x2 stone x2 by t+180, where before this part the fan
+    burnt them; the beef burnt, as Create means it to (its blasting leaves a food whose smoking
+    gives the same item to the smoker). Over the campfire, beef x2 became cooked beef x2 and
+    potatoes x3 baked potatoes x3. The water washed red wool white and a magma block to obsidian
+    as before. Nothing unmapped, no recipe refused, nothing threw.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

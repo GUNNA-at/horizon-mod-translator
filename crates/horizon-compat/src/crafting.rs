@@ -1,12 +1,132 @@
-//! Vanilla's crafting recipes as a translated mod builds on them, natively: `ShapedRecipe` and its
-//! `ShapedRecipePattern`, read by vanilla's codec (Create's mechanical crafting is a shaped recipe
-//! plus a flag, its pattern as large as NeoForge's `setCraftingSize` allows), a mod's subclass of
-//! it, `SimpleCraftingRecipeSerializer` (a special recipe: the mod's factory given the category),
-//! `CraftingBookCategory`, and `CraftingInput`, the grid a crafting recipe matches.
+//! Vanilla's recipes as a translated mod builds on them and looks them up, natively:
+//! `ShapedRecipe` and its `ShapedRecipePattern`, read by vanilla's codec (Create's mechanical
+//! crafting is a shaped recipe plus a flag, its pattern as large as NeoForge's `setCraftingSize`
+//! allows), a mod's subclass of it, `ShapelessRecipe`, the cooking recipes (`SmeltingRecipe`,
+//! `BlastingRecipe`, `SmokingRecipe`, `CampfireCookingRecipe`, their `AbstractCookingRecipe`),
+//! `StonecutterRecipe` and its `SingleItemRecipe`, `SimpleCraftingRecipeSerializer` (a special
+//! recipe: the mod's factory given the category), `CraftingBookCategory`, and `CraftingInput`, the
+//! grid a crafting recipe matches. The game's files of Minecraft's own recipe types are read by
+//! these ([`vanilla_codec`]): Create's fans smelt by vanilla's smelting and blasting recipes.
 use crate::{Data, Rt, V, api, api_common, codecs, jutil, recipes};
 use serde_json::{Map, Value as Json};
 
 const SHAPED: &str = "net/minecraft/world/item/crafting/ShapedRecipe";
+const SHAPELESS: &str = "net/minecraft/world/item/crafting/ShapelessRecipe";
+const COOKING: &str = "net/minecraft/world/item/crafting/AbstractCookingRecipe";
+const SINGLE_ITEM: &str = "net/minecraft/world/item/crafting/SingleItemRecipe";
+const STONECUTTER: &str = "net/minecraft/world/item/crafting/StonecutterRecipe";
+const COOKING_CATEGORY: &str = "net/minecraft/world/item/crafting/CookingBookCategory";
+/// `CookingBookCategory`'s constants in declaration order, with their serialized names.
+const COOKING_CATEGORIES: [(&str, &str); 3] =
+    [("FOOD", "food"), ("BLOCKS", "blocks"), ("MISC", "misc")];
+const COOKING_MISC: usize = 2;
+const SINGLE_INPUT: &str = "net/minecraft/world/item/crafting/SingleRecipeInput";
+const INPUT_GET: &str =
+    "net/minecraft/world/item/crafting/RecipeInput.getItem.(I)Lnet/minecraft/world/item/ItemStack;";
+const INPUT_SIZE: &str = "net/minecraft/world/item/crafting/RecipeInput.size.()I";
+const REMAINDER: &str = "net/minecraft/world/item/ItemStack.getCraftingRemainingItem.()Lnet/minecraft/world/item/ItemStack;";
+const STACK_COPY: &str =
+    "net/minecraft/world/item/ItemStack.copy.()Lnet/minecraft/world/item/ItemStack;";
+/// `AbstractCookingRecipe`'s fields in its constructor's order. They are protected: a mod's
+/// subclass reads them by these names.
+const COOKING_FIELDS: [&str; 7] = [
+    "type",
+    "group",
+    "category",
+    "ingredient",
+    "result",
+    "experience",
+    "cookingTime",
+];
+/// `SingleItemRecipe`'s fields in its constructor's order (`ingredient`, `result` and `group` are
+/// protected).
+const SINGLE_ITEM_FIELDS: [&str; 5] = ["type", "serializer", "group", "ingredient", "result"];
+
+/// One of vanilla's cooking recipe classes.
+struct Cooking {
+    class: &'static str,
+    /// Its `RecipeType` static.
+    ty: &'static str,
+    /// Its serializer's `RecipeSerializer` field.
+    serializer: &'static str,
+    /// The cooking time its serializer gives a file that names none.
+    time: i32,
+    /// The block its recipe toast shows.
+    toast: &'static str,
+}
+
+const COOKINGS: [Cooking; 4] = [
+    Cooking {
+        class: "net/minecraft/world/item/crafting/SmeltingRecipe",
+        ty: "net/minecraft/world/item/crafting/RecipeType.SMELTING",
+        serializer: "SMELTING_RECIPE",
+        time: 200,
+        toast: "minecraft:furnace",
+    },
+    Cooking {
+        class: "net/minecraft/world/item/crafting/BlastingRecipe",
+        ty: "net/minecraft/world/item/crafting/RecipeType.BLASTING",
+        serializer: "BLASTING_RECIPE",
+        time: 100,
+        toast: "minecraft:blast_furnace",
+    },
+    Cooking {
+        class: "net/minecraft/world/item/crafting/SmokingRecipe",
+        ty: "net/minecraft/world/item/crafting/RecipeType.SMOKING",
+        serializer: "SMOKING_RECIPE",
+        time: 100,
+        toast: "minecraft:smoker",
+    },
+    Cooking {
+        class: "net/minecraft/world/item/crafting/CampfireCookingRecipe",
+        ty: "net/minecraft/world/item/crafting/RecipeType.CAMPFIRE_COOKING",
+        serializer: "CAMPFIRE_COOKING_RECIPE",
+        time: 100,
+        toast: "minecraft:campfire",
+    },
+];
+
+/// Vanilla's serializers: their `RecipeSerializer` field, their id, and the codec ([`decode_map`])
+/// that reads their recipes here when this runtime models them.
+const SERIALIZERS: [(&str, &str, Option<&str>); 9] = [
+    (
+        "SHAPED_RECIPE",
+        "minecraft:crafting_shaped",
+        Some("shaped_recipe"),
+    ),
+    (
+        "SHAPELESS_RECIPE",
+        "minecraft:crafting_shapeless",
+        Some("shapeless_recipe"),
+    ),
+    (
+        "SMELTING_RECIPE",
+        "minecraft:smelting",
+        Some("SMELTING_RECIPE"),
+    ),
+    (
+        "BLASTING_RECIPE",
+        "minecraft:blasting",
+        Some("BLASTING_RECIPE"),
+    ),
+    (
+        "SMOKING_RECIPE",
+        "minecraft:smoking",
+        Some("SMOKING_RECIPE"),
+    ),
+    (
+        "CAMPFIRE_COOKING_RECIPE",
+        "minecraft:campfire_cooking",
+        Some("CAMPFIRE_COOKING_RECIPE"),
+    ),
+    (
+        "STONECUTTER",
+        "minecraft:stonecutting",
+        Some("stonecutting"),
+    ),
+    ("SMITHING_TRANSFORM", "minecraft:smithing_transform", None),
+    ("SMITHING_TRIM", "minecraft:smithing_trim", None),
+];
 const PATTERN: &str = "net/minecraft/world/item/crafting/ShapedRecipePattern";
 const SERIALIZER: &str = "net/minecraft/world/item/crafting/RecipeSerializer";
 const SIMPLE: &str = "net/minecraft/world/item/crafting/SimpleCraftingRecipeSerializer";
@@ -44,31 +164,55 @@ fn empty_stack(rt: &mut Rt) -> V {
     api_common::get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL)
 }
 
-/// The serializer in `RecipeSerializer.<field>`: vanilla's own, which reads its recipes here when
-/// this runtime models them (the shaped one).
+/// The serializer in `RecipeSerializer.<field>`: vanilla's own, with the codec that reads its
+/// recipes here when this runtime models them.
 fn vanilla_serializer(rt: &mut Rt, field: &str) -> Option<V> {
-    let id = match field {
-        "SHAPED_RECIPE" => "crafting_shaped",
-        "SHAPELESS_RECIPE" => "crafting_shapeless",
-        "SMELTING_RECIPE" => "smelting",
-        "BLASTING_RECIPE" => "blasting",
-        "SMOKING_RECIPE" => "smoking",
-        "CAMPFIRE_COOKING_RECIPE" => "campfire_cooking",
-        "STONECUTTER" => "stonecutting",
-        "SMITHING_TRANSFORM" => "smithing_transform",
-        "SMITHING_TRIM" => "smithing_trim",
-        _ => return None,
-    };
-    let id = format!("minecraft:{id}");
-    let shaped = field == "SHAPED_RECIPE";
+    let &(_, id, codec) = SERIALIZERS.iter().find(|(f, ..)| *f == field)?;
     Some(rt.intern(format!("compat:recipe-serializer/{id}"), move |rt| {
         let o = rt.new_object(VANILLA_SERIALIZER);
-        let s = rt.string(&id);
+        let s = rt.string(id);
         rt.put_field(o, "$id", s);
-        let codec = if shaped { codecs::native_map(rt, "shaped_recipe", &[]) } else { V::NULL };
+        let codec = codec.map_or(V::NULL, |c| codecs::native_map(rt, c, &[]));
         rt.put_field(o, "$codec", codec);
         o
     }))
+}
+
+/// The codec of Minecraft's serializer `id` (`minecraft:smelting`), for a file of its own type:
+/// null for one this runtime doesn't model (a special crafting recipe, smithing).
+pub(crate) fn vanilla_codec(rt: &mut Rt, id: &str) -> V {
+    match SERIALIZERS.iter().find(|(_, i, _)| *i == id) {
+        Some(&(field, ..)) => {
+            vanilla_serializer(rt, field).map_or(V::NULL, |s| rt.get_field(s, "$codec"))
+        }
+        None => V::NULL,
+    }
+}
+
+/// Vanilla's recipe classes modelled here by their supertypes, for `instanceof` (Create's press
+/// compacts by a `CraftingRecipe`).
+pub(crate) fn recipe_is_a(c: &str, class: &str) -> bool {
+    let crafting = matches!(c, SHAPED | SHAPELESS);
+    let cooking = COOKINGS.iter().any(|k| k.class == c);
+    match class {
+        "net/minecraft/world/item/crafting/Recipe" => {
+            crafting || cooking || matches!(c, COOKING | SINGLE_ITEM | STONECUTTER)
+        }
+        "net/minecraft/world/item/crafting/CraftingRecipe" => crafting,
+        COOKING => cooking,
+        SINGLE_ITEM => c == STONECUTTER,
+        _ => false,
+    }
+}
+
+/// The cooking kind `recipe` is of: its class's, or the one its mod class extends.
+fn cooking_kind(rt: &Rt, recipe: V) -> Option<&'static Cooking> {
+    let class = rt.class_of(recipe);
+    COOKINGS.iter().find(|c| rt.is_a(class, c.class))
+}
+
+fn cooking_category(rt: &mut Rt, i: usize) -> V {
+    api::api_enum(rt, COOKING_CATEGORY, COOKING_CATEGORIES[i].0, i as i32)
 }
 
 // ---- Reading ----
@@ -79,15 +223,10 @@ pub fn decode_map(rt: &mut Rt, name: &str, extra: &[V], o: &Map<String, Json>) -
     match name {
         "shaped_pattern" => decode_pattern(rt, o),
         "shaped_recipe" => {
-            let group = match o.get("group") {
-                None => String::new(),
-                Some(Json::String(g)) => g.clone(),
-                Some(j) => return Err(format!("group: Not a string: {j}")),
-            };
-            // `fieldOf("category").orElse(MISC)`: a missing or unknown category is misc.
-            let cat = o.get("category").and_then(Json::as_str).and_then(|c| CATEGORIES.iter().position(|(_, n)| *n == c)).unwrap_or(MISC);
+            let group = read_group(o)?;
+            let cat = crafting_category_index(o);
             let pattern = decode_pattern(rt, o)?;
-            let result = recipes::decode_native(rt, "item_stack", o.get("result").ok_or("No key result in MapLike")?).map_err(|e| format!("result: {e}"))?;
+            let result = read_result(rt, o)?;
             let show = match o.get("show_notification") {
                 None => true,
                 Some(Json::Bool(b)) => *b,
@@ -98,9 +237,60 @@ pub fn decode_map(rt: &mut Rt, name: &str, extra: &[V], o: &Map<String, Json>) -
             init_shaped(rt, r, g, c, pattern, result, show);
             Ok(r)
         }
+        "shapeless_recipe" => {
+            let group = read_group(o)?;
+            let cat = crafting_category_index(o);
+            let result = read_result(rt, o)?;
+            let list = match o.get("ingredients") {
+                Some(Json::Array(list)) => list,
+                Some(j) => return Err(format!("ingredients: Not a list: {j}")),
+                None => return Err("No key ingredients in MapLike".into()),
+            };
+            let mut ingredients = Vec::with_capacity(list.len());
+            for j in list {
+                ingredients.push(
+                    recipes::decode_native(rt, "ingredient_nonempty", j)
+                        .map_err(|e| format!("ingredients: {e}"))?,
+                );
+            }
+            let (w, h) = max_size(rt);
+            if ingredients.is_empty() {
+                return Err("ingredients: No ingredients for shapeless recipe".into());
+            }
+            if ingredients.len() > w * h {
+                return Err(format!(
+                    "ingredients: Too many ingredients for shapeless recipe. The maximum is: {}",
+                    w * h
+                ));
+            }
+            let r = rt.new_object(SHAPELESS);
+            let (g, c) = (rt.string(&group), category(rt, cat));
+            let list = non_null_list(rt, ingredients);
+            init_shapeless(rt, r, [g, c, result, list]);
+            Ok(r)
+        }
+        "stonecutting" => {
+            let group = read_group(o)?;
+            let ingredient = read_ingredient(rt, o)?;
+            let result = read_result(rt, o)?;
+            let r = rt.new_object(STONECUTTER);
+            let ty = api::get_static(
+                rt,
+                "net/minecraft/world/item/crafting/RecipeType.STONECUTTING",
+            );
+            let serializer = vanilla_serializer(rt, "STONECUTTER").unwrap_or(V::NULL);
+            let g = rt.string(&group);
+            init_fields(
+                rt,
+                r,
+                &SINGLE_ITEM_FIELDS,
+                &[ty, serializer, g, ingredient, result],
+            );
+            Ok(r)
+        }
         "simple_crafting" => {
-            let cat = o.get("category").and_then(Json::as_str).and_then(|c| CATEGORIES.iter().position(|(_, n)| *n == c)).unwrap_or(MISC);
-            let c = category(rt, cat);
+            let c = crafting_category_index(o);
+            let c = category(rt, c);
             let factory = extra.first().copied().unwrap_or_default();
             let r = rt.call_functional(FACTORY_CREATE, factory, &[c]);
             if let Some(e) = rt.thrown.take() {
@@ -108,8 +298,79 @@ pub fn decode_map(rt: &mut Rt, name: &str, extra: &[V], o: &Map<String, Json>) -
             }
             Ok(r)
         }
-        _ => Err(format!("no codec {name}")),
+        _ => match COOKINGS.iter().find(|c| c.serializer == name) {
+            Some(kind) => decode_cooking(rt, kind, o),
+            None => Err(format!("no codec {name}")),
+        },
     }
+}
+
+/// A cooking recipe of `kind` as its serializer reads one (`SimpleCookingSerializer`): `group`,
+/// `category` (misc when missing or unknown), `ingredient`, `result`, `experience` (0 when
+/// missing or unreadable) and `cookingtime` (the kind's when missing or unreadable).
+fn decode_cooking(rt: &mut Rt, kind: &Cooking, o: &Map<String, Json>) -> Result<V, String> {
+    let group = read_group(o)?;
+    let cat = o
+        .get("category")
+        .and_then(Json::as_str)
+        .and_then(|c| COOKING_CATEGORIES.iter().position(|(_, n)| *n == c))
+        .unwrap_or(COOKING_MISC);
+    let ingredient = read_ingredient(rt, o)?;
+    let result = read_result(rt, o)?;
+    let experience = o
+        .get("experience")
+        .and_then(Json::as_f64)
+        .map_or(0.0, |x| x as f32);
+    let time = o
+        .get("cookingtime")
+        .and_then(Json::as_f64)
+        .map_or(kind.time, |t| t as i32);
+    let r = rt.new_object(kind.class);
+    let ty = api::get_static(rt, kind.ty);
+    let (g, c) = (rt.string(&group), cooking_category(rt, cat));
+    init_fields(
+        rt,
+        r,
+        &COOKING_FIELDS,
+        &[ty, g, c, ingredient, result, V::F(experience), V::I(time)],
+    );
+    Ok(r)
+}
+
+/// `Codec.STRING.optionalFieldOf("group", "")`.
+fn read_group(o: &Map<String, Json>) -> Result<String, String> {
+    match o.get("group") {
+        None => Ok(String::new()),
+        Some(Json::String(g)) => Ok(g.clone()),
+        Some(j) => Err(format!("group: Not a string: {j}")),
+    }
+}
+
+/// `CraftingBookCategory.CODEC.fieldOf("category").orElse(MISC)`: a missing or unknown category
+/// is misc.
+fn crafting_category_index(o: &Map<String, Json>) -> usize {
+    o.get("category")
+        .and_then(Json::as_str)
+        .and_then(|c| CATEGORIES.iter().position(|(_, n)| *n == c))
+        .unwrap_or(MISC)
+}
+
+fn read_result(rt: &mut Rt, o: &Map<String, Json>) -> Result<V, String> {
+    recipes::decode_native(
+        rt,
+        "item_stack",
+        o.get("result").ok_or("No key result in MapLike")?,
+    )
+    .map_err(|e| format!("result: {e}"))
+}
+
+fn read_ingredient(rt: &mut Rt, o: &Map<String, Json>) -> Result<V, String> {
+    recipes::decode_native(
+        rt,
+        "ingredient_nonempty",
+        o.get("ingredient").ok_or("No key ingredient in MapLike")?,
+    )
+    .map_err(|e| format!("ingredient: {e}"))
 }
 
 /// `CraftingBookCategory.CODEC`'s reading of a category name.
@@ -230,6 +491,22 @@ fn init_shaped(rt: &mut Rt, r: V, group: V, cat: V, pattern: V, result: V, show:
     rt.put_field(r, "$showNotification", V::I(show as i32));
 }
 
+/// A shapeless recipe's group, category, result and ingredients (its constructor's order).
+fn init_shapeless(rt: &mut Rt, r: V, values: [V; 4]) {
+    init_fields(
+        rt,
+        r,
+        &["$group", "$category", "$result", "$ingredients"],
+        &values,
+    );
+}
+
+fn init_fields(rt: &mut Rt, r: V, fields: &[&'static str], values: &[V]) {
+    for (&f, &v) in fields.iter().zip(values) {
+        rt.put_field(r, f, v);
+    }
+}
+
 // ---- Matching ----
 
 /// A crafting grid of `w`×`h` stacks, row by row.
@@ -308,16 +585,229 @@ fn pattern_of(rt: &Rt, recipe: V) -> V {
     rt.get_field(recipe, "$pattern")
 }
 
+/// `ShapelessRecipe.matches(input)`: as many stacks in the grid as ingredients, each meeting a
+/// different one (NeoForge's `RecipeMatcher`; vanilla's `StackedContents` pairs them alike).
+fn shapeless_matches(rt: &mut Rt, recipe: V, input: V) -> bool {
+    let list = rt.get_field(recipe, "$ingredients");
+    let ingredients = jutil::elements(rt, list);
+    if rt.get_field(input, "$ingredientCount").i() as usize != ingredients.len() {
+        return false;
+    }
+    let list = rt.get_field(input, "$items");
+    let stacks: Vec<V> = jutil::elements(rt, list)
+        .into_iter()
+        .filter(|&s| !api_common::stack_empty(rt, s))
+        .collect();
+    recipes::pairing(rt, &stacks, &ingredients).is_some()
+}
+
+/// The stack a cooking or stonecutting recipe takes: `SingleRecipeInput.item()`, or another
+/// input's first.
+fn single_input(rt: &mut Rt, input: V) -> V {
+    if rt.class_of(input) == SINGLE_INPUT {
+        return rt.get_field(input, "$item");
+    }
+    rt.call_functional(INPUT_GET, input, &[V::I(0)])
+}
+
+/// A cooking or stonecutting recipe's `matches`: its ingredient takes the input's stack.
+fn single_matches(rt: &mut Rt, recipe: V, input: V) -> bool {
+    let ingredient = rt.get_field(recipe, "ingredient");
+    let stack = single_input(rt, input);
+    recipes::ingredient_test(rt, ingredient, stack)
+}
+
+/// `recipe.matches(input, level)` for a recipe of one of vanilla's classes modelled here; None
+/// for any other, a mod's subclass included (it may match in its own way).
+pub(crate) fn vanilla_matches(rt: &mut Rt, recipe: V, input: V) -> Option<bool> {
+    let class = rt.class_of(recipe);
+    Some(match class {
+        SHAPED => {
+            let p = pattern_of(rt, recipe);
+            pattern_matches(rt, p, input)
+        }
+        SHAPELESS => shapeless_matches(rt, recipe, input),
+        STONECUTTER => single_matches(rt, recipe, input),
+        _ if COOKINGS.iter().any(|c| c.class == class) => single_matches(rt, recipe, input),
+        _ => return None,
+    })
+}
+
+/// The stacks of `input` in order: a crafting grid's, a single input's one, or what another
+/// input's `size()` and `getItem(i)` give.
+fn input_stacks(rt: &mut Rt, input: V) -> Vec<V> {
+    match rt.class_of(input) {
+        INPUT => {
+            let list = rt.get_field(input, "$items");
+            jutil::elements(rt, list)
+        }
+        SINGLE_INPUT => vec![rt.get_field(input, "$item")],
+        _ => {
+            let n = rt.call_functional(INPUT_SIZE, input, &[]).i();
+            (0..n.max(0))
+                .map(|i| rt.call_functional(INPUT_GET, input, &[V::I(i)]))
+                .collect()
+        }
+    }
+}
+
+/// `Recipe.getRemainingItems(input)`, vanilla's: what crafting leaves of each of the input's
+/// stacks (a bucket of a milk bucket), an empty stack for the rest.
+fn remaining_items(rt: &mut Rt, input: V) -> V {
+    let stacks = input_stacks(rt, input);
+    let left = stacks
+        .into_iter()
+        .map(|s| api::call(rt, REMAINDER, &[s]))
+        .collect();
+    non_null_list(rt, left)
+}
+
+/// `Recipe.isIncomplete()`, vanilla's: no ingredients, or one no item meets (a tag nothing is in).
+fn incomplete(rt: &mut Rt, ingredients: &[V]) -> bool {
+    ingredients.is_empty()
+        || ingredients
+            .iter()
+            .any(|&c| recipes::ingredient_items(rt, c).is_empty())
+}
+
 // ---- Calls ----
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone (every arm, guards aside): part of
 /// [`crate::recipes::claims`], whose `call` asks this one.
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    matches!(owner, SERIALIZER | SIMPLE | CATEGORY | SHAPED | PATTERN | INPUT)
+    matches!(
+        owner,
+        SERIALIZER | SIMPLE | CATEGORY | SHAPED | PATTERN | INPUT
+    ) || recipe_class(owner)
+}
+
+/// One of the recipe classes [`recipe_call`] models.
+fn recipe_class(owner: &str) -> bool {
+    matches!(owner, SHAPELESS | COOKING | SINGLE_ITEM | STONECUTTER)
+        || COOKINGS.iter().any(|c| c.class == owner)
+}
+
+/// Calls on a shapeless, cooking or stonecutting recipe: vanilla's, or a member a mod's subclass
+/// inherits.
+fn recipe_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let shapeless = owner == SHAPELESS;
+    let single = owner == SINGLE_ITEM || owner == STONECUTTER;
+    let field = |s: &'static str, plain: &'static str| if shapeless { s } else { plain };
+    Some(match name {
+        "<init>" if shapeless => {
+            init_shapeless(rt, this, [a(1), a(2), a(3), a(4)]);
+            V::Void
+        }
+        // `StonecutterRecipe(group, ingredient, result)`, of its own type and serializer.
+        "<init>" if owner == STONECUTTER => {
+            let ty = api::get_static(
+                rt,
+                "net/minecraft/world/item/crafting/RecipeType.STONECUTTING",
+            );
+            let serializer = vanilla_serializer(rt, "STONECUTTER").unwrap_or(V::NULL);
+            init_fields(
+                rt,
+                this,
+                &SINGLE_ITEM_FIELDS,
+                &[ty, serializer, a(1), a(2), a(3)],
+            );
+            V::Void
+        }
+        "<init>" if single => {
+            init_fields(
+                rt,
+                this,
+                &SINGLE_ITEM_FIELDS,
+                args.get(1..).unwrap_or_default(),
+            );
+            V::Void
+        }
+        "<init>" if owner == COOKING => {
+            init_fields(rt, this, &COOKING_FIELDS, args.get(1..).unwrap_or_default());
+            V::Void
+        }
+        // A cooking class's `(group, category, ingredient, result, experience, cookingTime)`, of
+        // its own type.
+        "<init>" => {
+            let kind = COOKINGS.iter().find(|c| c.class == owner)?;
+            let ty = api::get_static(rt, kind.ty);
+            init_fields(
+                rt,
+                this,
+                &COOKING_FIELDS,
+                &[ty, a(1), a(2), a(3), a(4), a(5), a(6)],
+            );
+            V::Void
+        }
+        "matches" if shapeless => V::I(shapeless_matches(rt, this, a(1)) as i32),
+        "matches" => V::I(single_matches(rt, this, a(1)) as i32),
+        "getResultItem" => rt.get_field(this, field("$result", "result")),
+        "assemble" => {
+            let result = rt.get_field(this, field("$result", "result"));
+            api::call(rt, STACK_COPY, &[result])
+        }
+        "getIngredients" if shapeless => rt.get_field(this, "$ingredients"),
+        "getIngredients" => {
+            let ingredient = rt.get_field(this, "ingredient");
+            non_null_list(rt, vec![ingredient])
+        }
+        "getGroup" => rt.get_field(this, field("$group", "group")),
+        "category" => rt.get_field(this, field("$category", "category")),
+        "getExperience" => match rt.get_field(this, "experience") {
+            V::F(x) => V::F(x),
+            _ => V::F(0.0),
+        },
+        "getCookingTime" => V::I(rt.get_field(this, "cookingTime").i()),
+        "getType" if shapeless => {
+            api::get_static(rt, "net/minecraft/world/item/crafting/RecipeType.CRAFTING")
+        }
+        "getType" => rt.get_field(this, "type"),
+        "getSerializer" if shapeless => {
+            vanilla_serializer(rt, "SHAPELESS_RECIPE").unwrap_or(V::NULL)
+        }
+        "getSerializer" if single => rt.get_field(this, "serializer"),
+        "getSerializer" => match cooking_kind(rt, this) {
+            Some(kind) => vanilla_serializer(rt, kind.serializer).unwrap_or(V::NULL),
+            None => V::NULL,
+        },
+        "canCraftInDimensions" if shapeless => {
+            let list = rt.get_field(this, "$ingredients");
+            let n = jutil::elements(rt, list).len() as i64;
+            V::I((a(1).i() as i64 * a(2).i() as i64 >= n) as i32)
+        }
+        "canCraftInDimensions" => V::I(1),
+        "getToastSymbol" => {
+            let class = rt.class_of(this);
+            let block = match cooking_kind(rt, this) {
+                Some(kind) => kind.toast,
+                None if rt.is_a(class, STONECUTTER) => "minecraft:stonecutter",
+                None => "minecraft:crafting_table",
+            };
+            api_common::stack(rt, block, 1)
+        }
+        "isSpecial" => V::I(0),
+        "showNotification" => V::I(1),
+        "isIncomplete" => {
+            let ingredients = if shapeless {
+                let list = rt.get_field(this, "$ingredients");
+                jutil::elements(rt, list)
+            } else {
+                vec![rt.get_field(this, "ingredient")]
+            };
+            V::I(incomplete(rt, &ingredients) as i32)
+        }
+        "getRemainingItems" => remaining_items(rt, a(1)),
+        _ => return None,
+    })
 }
 
 /// Calls on vanilla's crafting pieces; None for what this module doesn't model.
 pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    if recipe_class(owner) {
+        return recipe_call(rt, owner, name, args);
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
         // `serializer.codec()`: vanilla's, and a special recipe's (the factory given the category).
@@ -350,7 +840,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (SHAPED, "getResultItem") => rt.get_field(a(0), "$result"),
         (SHAPED, "assemble") => {
             let result = rt.get_field(a(0), "$result");
-            api::call(rt, "net/minecraft/world/item/ItemStack.copy.()Lnet/minecraft/world/item/ItemStack;", &[result])
+            api::call(rt, STACK_COPY, &[result])
         }
         (SHAPED, "getWidth") => V::I(rt.get_field(pattern_of(rt, a(0)), "$width").i()),
         (SHAPED, "getHeight") => V::I(rt.get_field(pattern_of(rt, a(0)), "$height").i()),
@@ -372,12 +862,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (SHAPED, "getSerializer") => vanilla_serializer(rt, "SHAPED_RECIPE").unwrap_or(V::NULL),
         (SHAPED, "getType") => api::get_static(rt, "net/minecraft/world/item/crafting/RecipeType.CRAFTING"),
-        (SHAPED, "getRemainingItems") => {
-            let n = rt.get_field(a(1), "$items");
-            let size = jutil::elements(rt, n).len();
-            let empty = empty_stack(rt);
-            non_null_list(rt, vec![empty; size])
-        }
+        (SHAPED, "getRemainingItems") => remaining_items(rt, a(1)),
+        (SHAPED, "getToastSymbol") => api_common::stack(rt, "minecraft:crafting_table", 1),
         (PATTERN, "width") => V::I(rt.get_field(a(0), "$width").i()),
         (PATTERN, "height") => V::I(rt.get_field(a(0), "$height").i()),
         (PATTERN, "ingredients") => rt.get_field(a(0), "$ingredients"),
@@ -435,10 +921,322 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::MemoryHost;
     use serde_json::json;
 
     fn obj(j: Json) -> Map<String, Json> {
         j.as_object().cloned().unwrap_or_default()
+    }
+
+    const GET_RECIPE_FOR: &str = "net/minecraft/world/item/crafting/RecipeManager.getRecipeFor.(Lnet/minecraft/world/item/crafting/RecipeType;Lnet/minecraft/world/item/crafting/RecipeInput;Lnet/minecraft/world/level/Level;)Ljava/util/Optional;";
+    const SINGLE_INPUT_INIT: &str = "net/minecraft/world/item/crafting/SingleRecipeInput.<init>.(Lnet/minecraft/world/item/ItemStack;)V";
+    const RESULT_ITEM: &str = "net/minecraft/world/item/crafting/Recipe.getResultItem.(Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/world/item/ItemStack;";
+    const SMELTING: &str = "net/minecraft/world/item/crafting/RecipeType.SMELTING";
+    const BLASTING: &str = "net/minecraft/world/item/crafting/RecipeType.BLASTING";
+
+    /// What `level.getRecipeManager().getRecipeFor(type, new SingleRecipeInput(item), level)`
+    /// finds: the holder's id and its recipe.
+    fn found(rt: &mut Rt, ty: &'static str, item: &str) -> Option<(String, V)> {
+        let manager = rt.new_object("net/minecraft/world/item/crafting/RecipeManager");
+        let ty = api::get_static(rt, ty);
+        let input = rt.new_object(SINGLE_INPUT);
+        let stack = api_common::stack(rt, item, 1);
+        api::call(rt, SINGLE_INPUT_INIT, &[input, stack]);
+        let o = api::call(rt, GET_RECIPE_FOR, &[manager, ty, input, V::NULL]);
+        let h = rt.get_field(o, "value");
+        if h.r() == 0 {
+            return None;
+        }
+        let id = rt.get_field(h, "$id");
+        Some((
+            rt.str_of(id).unwrap_or_default().to_owned(),
+            rt.get_field(h, "$value"),
+        ))
+    }
+
+    fn item_of(rt: &Rt, stack: V) -> (String, i32) {
+        (
+            api_common::item_like_name(rt, rt.get_field(stack, "$item")),
+            rt.get_field(stack, "$count").i(),
+        )
+    }
+
+    /// Create's fans smelt as `getRecipeFor(SMELTING or BLASTING, new SingleRecipeInput(stack))`
+    /// and the found recipe's `getResultItem`: the game's own recipe files, read as vanilla's
+    /// serializers read them (a cooking time a file doesn't name is the kind's own).
+    #[test]
+    fn a_mod_finds_the_games_smelting_and_blasting_recipes() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        host.item_tags.insert(
+            "minecraft:iron_ores".into(),
+            vec![
+                "minecraft:iron_ore".into(),
+                "minecraft:deepslate_iron_ore".into(),
+            ],
+        );
+        host.recipes.insert(
+            "minecraft:smelting".into(),
+            vec![
+                ("minecraft:iron_ingot_from_smelting_raw_iron".into(), r#"{"type":"minecraft:smelting","category":"misc","cookingtime":200,"experience":0.7,"group":"iron_ingot","ingredient":"minecraft:raw_iron","result":{"id":"minecraft:iron_ingot"}}"#.into()),
+                ("minecraft:stone".into(), r#"{"type":"minecraft:smelting","category":"blocks","experience":0.1,"ingredient":"minecraft:cobblestone","result":{"id":"minecraft:stone"}}"#.into()),
+            ],
+        );
+        host.recipes.insert(
+            "minecraft:blasting".into(),
+            vec![("minecraft:iron_ingot_from_blasting_iron_ore".into(), r##"{"type":"minecraft:blasting","ingredient":"#minecraft:iron_ores","result":{"id":"minecraft:iron_ingot"},"experience":0.7}"##.into())],
+        );
+        rt.with_host(&mut host, |rt| {
+            let (id, stone) = found(rt, SMELTING, "minecraft:cobblestone").expect("cobblestone smelts");
+            assert_eq!(id, "minecraft:stone");
+            let result = api::call(rt, RESULT_ITEM, &[stone, V::NULL]);
+            assert_eq!(item_of(rt, result), ("minecraft:stone".into(), 1));
+            let time = "net/minecraft/world/item/crafting/AbstractCookingRecipe.getCookingTime.()I";
+            assert_eq!(api::call(rt, time, &[stone]), V::I(200), "smelting's own time");
+            let category = api::call(rt, "net/minecraft/world/item/crafting/SmeltingRecipe.category.()Lnet/minecraft/world/item/crafting/CookingBookCategory;", &[stone]);
+            assert_eq!(category, api::get_static(rt, "net/minecraft/world/item/crafting/CookingBookCategory.BLOCKS"));
+            assert!(found(rt, SMELTING, "minecraft:raw_gold").is_none());
+            assert!(found(rt, BLASTING, "minecraft:cobblestone").is_none());
+            let (_, ore) = found(rt, BLASTING, "minecraft:deepslate_iron_ore").expect("the tag's ores blast");
+            assert_eq!(api::call(rt, time, &[ore]), V::I(100), "blasting's own time");
+            assert_eq!(api::call(rt, "net/minecraft/world/item/crafting/BlastingRecipe.getExperience.()F", &[ore]), V::F(0.7));
+            // Vanilla's type and serializer objects, as a mod compares them.
+            let ty = api::call(rt, "net/minecraft/world/item/crafting/Recipe.getType.()Lnet/minecraft/world/item/crafting/RecipeType;", &[ore]);
+            assert_eq!(ty, api::get_static(rt, BLASTING));
+            let serializer = api::call(rt, "net/minecraft/world/item/crafting/Recipe.getSerializer.()Lnet/minecraft/world/item/crafting/RecipeSerializer;", &[ore]);
+            assert_eq!(serializer, api::get_static(rt, "net/minecraft/world/item/crafting/RecipeSerializer.BLASTING_RECIPE"));
+            assert!(found(rt, "net/minecraft/world/item/crafting/RecipeType.SMOKING", "minecraft:beef").is_none());
+            // The manager holds them with the rest: `byKey` finds one by its id.
+            let manager = rt.new_object("net/minecraft/world/item/crafting/RecipeManager");
+            let id = rt.string("minecraft:iron_ingot_from_blasting_iron_ore");
+            let by_key = api::call(rt, "net/minecraft/world/item/crafting/RecipeManager.byKey.(Lnet/minecraft/resources/ResourceLocation;)Ljava/util/Optional;", &[manager, id]);
+            let h = rt.get_field(by_key, "value");
+            assert_eq!(rt.get_field(h, "$value"), ore);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+    }
+
+    /// The game's crafting recipes are one type: a shapeless one matches its ingredients in any
+    /// order and place, each stack meeting a different one; a special recipe this runtime has no
+    /// model of is left out, the rest read.
+    #[test]
+    fn a_shapeless_recipe_matches_its_ingredients_anywhere_in_the_grid() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        host.item_tags.insert(
+            "minecraft:planks".into(),
+            vec![
+                "minecraft:oak_planks".into(),
+                "minecraft:birch_planks".into(),
+            ],
+        );
+        host.recipes.insert(
+            "minecraft:crafting".into(),
+            vec![
+                ("minecraft:repair_item".into(), r#"{"type":"minecraft:crafting_special_repairitem","category":"misc"}"#.into()),
+                ("minecraft:mossy_cobblestone_from_vine".into(), r#"{"type":"minecraft:crafting_shapeless","category":"building","ingredients":["minecraft:cobblestone","minecraft:vine"],"result":{"id":"minecraft:mossy_cobblestone"}}"#.into()),
+                ("test:planks_and_sticks".into(), r##"{"type":"minecraft:crafting_shapeless","ingredients":["#minecraft:planks","#minecraft:planks",["minecraft:stick","minecraft:bamboo"]],"result":{"id":"minecraft:chest","count":2}}"##.into()),
+            ],
+        );
+        rt.with_host(&mut host, |rt| {
+            let all = recipes::holders(rt, "minecraft:crafting");
+            assert_eq!(all.len(), 2, "the special recipe is left out");
+            let grid = |rt: &mut Rt, cells: [&str; 9]| {
+                let items: Vec<V> = cells.iter().map(|c| if c.is_empty() { empty_stack(rt) } else { api_common::stack(rt, &format!("minecraft:{c}"), 1) }).collect();
+                let list = jutil::new_list(rt, items);
+                call(rt, INPUT, "of", "(IILjava/util/List;)Lnet/minecraft/world/item/crafting/CraftingInput;", &[V::I(3), V::I(3), list]).unwrap()
+            };
+            let manager = rt.new_object("net/minecraft/world/item/crafting/RecipeManager");
+            let crafting = api::get_static(rt, "net/minecraft/world/item/crafting/RecipeType.CRAFTING");
+            let find = |rt: &mut Rt, input: V| {
+                let o = api::call(rt, GET_RECIPE_FOR, &[manager, crafting, input, V::NULL]);
+                let h = rt.get_field(o, "value");
+                (h.r() != 0).then(|| rt.str_of(rt.get_field(h, "$id")).unwrap_or_default().to_owned())
+            };
+            let moss = grid(rt, ["", "vine", "", "", "", "", "cobblestone", "", ""]);
+            assert_eq!(find(rt, moss).as_deref(), Some("minecraft:mossy_cobblestone_from_vine"));
+            let chest = grid(rt, ["bamboo", "", "", "", "birch_planks", "", "", "", "oak_planks"]);
+            assert_eq!(find(rt, chest).as_deref(), Some("test:planks_and_sticks"));
+            // Each stack meets one ingredient: two sticks and a plank leave a plank unmet.
+            let short = grid(rt, ["stick", "stick", "oak_planks", "", "", "", "", "", ""]);
+            assert_eq!(find(rt, short), None);
+            let extra = grid(rt, ["vine", "cobblestone", "vine", "", "", "", "", "", ""]);
+            assert_eq!(find(rt, extra), None);
+            let recipe = rt.get_field(all[1], "$value");
+            let result = api::call(rt, "net/minecraft/world/item/crafting/CraftingRecipe.assemble.(Lnet/minecraft/world/item/crafting/RecipeInput;Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/world/item/ItemStack;", &[recipe, chest, V::NULL]);
+            assert_eq!(item_of(rt, result), ("minecraft:chest".into(), 2));
+            assert!(rt.is_a(rt.class_of(recipe), "net/minecraft/world/item/crafting/CraftingRecipe"), "Create's press takes it");
+            let fits = |rt: &mut Rt, w: i32, h: i32| api::call(rt, "net/minecraft/world/item/crafting/ShapelessRecipe.canCraftInDimensions.(II)Z", &[recipe, V::I(w), V::I(h)]);
+            assert_eq!((fits(rt, 1, 2), fits(rt, 3, 1)), (V::I(0), V::I(1)));
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+        // Read as vanilla reads them: no ingredients, or more than the grid holds, is no recipe.
+        let mut rt = Rt::new();
+        let err =
+            |rt: &mut Rt, j: Json| decode_map(rt, "shapeless_recipe", &[], &obj(j)).unwrap_err();
+        assert_eq!(
+            err(
+                &mut rt,
+                json!({"ingredients": [], "result": {"id": "stone"}})
+            ),
+            "ingredients: No ingredients for shapeless recipe"
+        );
+        let ten = vec![json!("stone"); 10];
+        assert_eq!(
+            err(
+                &mut rt,
+                json!({"ingredients": ten, "result": {"id": "stone"}})
+            ),
+            "ingredients: Too many ingredients for shapeless recipe. The maximum is: 9"
+        );
+    }
+
+    /// A mod makes vanilla's recipes itself (a datagen, a recipe viewer's display): the cooking
+    /// constructors give the kind's type and serializer, a stonecutter's takes its ingredient's
+    /// stack, and what crafting leaves (a milk bucket's bucket) stays in the grid.
+    #[test]
+    fn a_mod_builds_vanilla_recipes_and_reads_them_back() {
+        let mut rt = Rt::new();
+        crate::install();
+        let raw = recipes::ingredient(&mut rt, &["minecraft:raw_copper".into()]);
+        let ingot = api_common::stack(&mut rt, "minecraft:copper_ingot", 1);
+        let misc = api::get_static(
+            &mut rt,
+            "net/minecraft/world/item/crafting/CookingBookCategory.MISC",
+        );
+        let group = rt.string("copper");
+        let smoking = rt.new_object("net/minecraft/world/item/crafting/SmokingRecipe");
+        let init = "net/minecraft/world/item/crafting/SmokingRecipe.<init>.(Ljava/lang/String;Lnet/minecraft/world/item/crafting/CookingBookCategory;Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/ItemStack;FI)V";
+        api::call(
+            &mut rt,
+            init,
+            &[smoking, group, misc, raw, ingot, V::F(0.35), V::I(100)],
+        );
+        let ty = api::call(
+            &mut rt,
+            "net/minecraft/world/item/crafting/SmokingRecipe.getType.()Lnet/minecraft/world/item/crafting/RecipeType;",
+            &[smoking],
+        );
+        assert_eq!(
+            ty,
+            api::get_static(
+                &mut rt,
+                "net/minecraft/world/item/crafting/RecipeType.SMOKING"
+            )
+        );
+        let serializer = api::call(
+            &mut rt,
+            "net/minecraft/world/item/crafting/SmokingRecipe.getSerializer.()Lnet/minecraft/world/item/crafting/RecipeSerializer;",
+            &[smoking],
+        );
+        assert_eq!(
+            serializer,
+            api::get_static(
+                &mut rt,
+                "net/minecraft/world/item/crafting/RecipeSerializer.SMOKING_RECIPE"
+            )
+        );
+        let toast = api::call(
+            &mut rt,
+            "net/minecraft/world/item/crafting/Recipe.getToastSymbol.()Lnet/minecraft/world/item/ItemStack;",
+            &[smoking],
+        );
+        assert_eq!(item_of(&rt, toast).0, "minecraft:smoker");
+        let ingredients = api::call(
+            &mut rt,
+            "net/minecraft/world/item/crafting/AbstractCookingRecipe.getIngredients.()Lnet/minecraft/core/NonNullList;",
+            &[smoking],
+        );
+        assert_eq!(jutil::elements(&rt, ingredients), [raw]);
+        // A stonecutter recipe matches its ingredient's stack; its result keeps its count.
+        let stone = recipes::ingredient(&mut rt, &["minecraft:stone".into()]);
+        let slabs = api_common::stack(&mut rt, "minecraft:stone_slab", 2);
+        let cutter = rt.new_object(STONECUTTER);
+        let empty = rt.string("");
+        api::call(
+            &mut rt,
+            "net/minecraft/world/item/crafting/StonecutterRecipe.<init>.(Ljava/lang/String;Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/ItemStack;)V",
+            &[cutter, empty, stone, slabs],
+        );
+        let input = |rt: &mut Rt, item: &str| {
+            let i = rt.new_object(SINGLE_INPUT);
+            let s = api_common::stack(rt, item, 1);
+            api::call(rt, SINGLE_INPUT_INIT, &[i, s]);
+            i
+        };
+        let (on_stone, on_dirt) = (
+            input(&mut rt, "minecraft:stone"),
+            input(&mut rt, "minecraft:dirt"),
+        );
+        assert_eq!(vanilla_matches(&mut rt, cutter, on_stone), Some(true));
+        assert_eq!(vanilla_matches(&mut rt, cutter, on_dirt), Some(false));
+        let out = api::call(
+            &mut rt,
+            "net/minecraft/world/item/crafting/StonecutterRecipe.assemble.(Lnet/minecraft/world/item/crafting/RecipeInput;Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/world/item/ItemStack;",
+            &[cutter, on_stone, V::NULL],
+        );
+        assert_eq!(item_of(&rt, out), ("minecraft:stone_slab".into(), 2));
+        assert_ne!(out, slabs, "a copy");
+        let is_a = |rt: &Rt, o: V, class: &str| rt.is_a(rt.class_of(o), class);
+        assert!(
+            is_a(&rt, smoking, COOKING)
+                && is_a(&rt, cutter, SINGLE_ITEM)
+                && is_a(&rt, cutter, "net/minecraft/world/item/crafting/Recipe")
+        );
+        assert!(!is_a(
+            &rt,
+            smoking,
+            "net/minecraft/world/item/crafting/CraftingRecipe"
+        ));
+        let ty = api::call(
+            &mut rt,
+            "net/minecraft/world/item/crafting/SingleItemRecipe.getType.()Lnet/minecraft/world/item/crafting/RecipeType;",
+            &[cutter],
+        );
+        assert_eq!(
+            ty,
+            api::get_static(
+                &mut rt,
+                "net/minecraft/world/item/crafting/RecipeType.STONECUTTING"
+            )
+        );
+        // Crafting a cake leaves the milk buckets' buckets.
+        let cells: Vec<V> = ["milk_bucket", "sugar", "egg"]
+            .iter()
+            .map(|c| api_common::stack(&mut rt, &format!("minecraft:{c}"), 1))
+            .collect();
+        let list = jutil::new_list(&mut rt, cells);
+        let grid = call(
+            &mut rt,
+            INPUT,
+            "of",
+            "(IILjava/util/List;)Lnet/minecraft/world/item/crafting/CraftingInput;",
+            &[V::I(3), V::I(1), list],
+        )
+        .unwrap();
+        let shapeless = rt.new_object(SHAPELESS);
+        let left = call(
+            &mut rt,
+            SHAPELESS,
+            "getRemainingItems",
+            "(Lnet/minecraft/world/item/crafting/CraftingInput;)Lnet/minecraft/core/NonNullList;",
+            &[shapeless, grid],
+        )
+        .unwrap();
+        let left: Vec<String> = jutil::elements(&rt, left)
+            .into_iter()
+            .map(|s| {
+                if api_common::stack_empty(&rt, s) {
+                    String::new()
+                } else {
+                    item_of(&rt, s).0
+                }
+            })
+            .collect();
+        assert_eq!(left, ["minecraft:bucket", "", ""]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]
