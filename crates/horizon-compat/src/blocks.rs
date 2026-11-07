@@ -1599,8 +1599,9 @@ pub(crate) fn survives_by_code(rt: &mut Rt, b: V, class: &'static str, state: V,
         let vc = rt.vcall?;
         return Some(vc(rt, api::CAN_SURVIVE_KEY, api::CAN_SURVIVE, &[b, state, level, pos]).i() != 0);
     }
-    // A diode's: on a rigid top face, by its own `canSurviveOn` where it has one.
-    if let Some(key) = crate::diodes::inherited(rt, class, api::CAN_SURVIVE) {
+    // A diode's: on a rigid top face, by its own `canSurviveOn` where it has one; a rail's, on a
+    // rigid top face.
+    if let Some(key) = crate::glue::inherited(rt, class, api::CAN_SURVIVE) {
         let vc = rt.vcall?;
         return Some(vc(rt, key, api::CAN_SURVIVE, &[b, state, level, pos]).i() != 0);
     }
@@ -1613,7 +1614,7 @@ fn plant_base(rt: &Rt, class: &'static str) -> Option<&'static str> {
 }
 
 /// The mod's blocks whose survival its own code decides: a class with its own `canSurvive`, a
-/// diode, or a vanilla plant base kept here (whose `canSurvive` asks the block's `mayPlaceOn`). The game asks
+/// diode, a rail, or a vanilla plant base kept here (whose `canSurvive` asks the block's `mayPlaceOn`). The game asks
 /// [`mod_survives`] about these only.
 pub fn survival_blocks(rt: &Rt) -> Vec<String> {
     let mut blocks: Vec<String> = rt
@@ -1623,7 +1624,7 @@ pub fn survival_blocks(rt: &Rt) -> Vec<String> {
         .filter(|(_, b)| {
             let class = rt.class_of(**b);
             rt.overrides.is_some_and(|o| o(class, api::CAN_SURVIVE))
-                || crate::diodes::inherited(rt, class, api::CAN_SURVIVE).is_some()
+                || crate::glue::inherited(rt, class, api::CAN_SURVIVE).is_some()
                 || plant_base(rt, class).is_some_and(|c| BUSH_SURVIVAL.contains(&c) || DOUBLE_PLANT_SURVIVAL.contains(&c))
         })
         .map(|((_, name), _)| name.clone())
@@ -1983,6 +1984,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if o == "net/minecraft/world/level/block/WeightedPressurePlateBlock" && desc.starts_with("(I") {
                 rt.put_field(a(0), "maxWeight", a(1));
             }
+            // A rail's kind: `isStraight` (`BaseRailBlock(isStraight, properties)`), a powered
+            // rail's `isActivator`.
+            crate::rails::constructed(rt, a(0), o, desc, args);
             // `BrushableBlock(turnsInto, brushSound, brushCompletedSound, properties)`: vanilla's fields.
             if o == BRUSHABLE && desc.starts_with("(Lnet/minecraft/world/level/block/Block;Lnet/minecraft/sounds/SoundEvent;Lnet/minecraft/sounds/SoundEvent;") {
                 for (i, field) in ["turnsInto", "brushSound", "brushCompletedSound"].into_iter().enumerate() {

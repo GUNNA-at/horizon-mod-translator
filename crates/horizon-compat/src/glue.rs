@@ -19,12 +19,19 @@ pub(crate) fn mod_block(rt: &Rt, state: &str) -> Option<(V, &'static str)> {
 
 /// The key a hook calls the block method `short` by on a mod block of class `class`: `own` where
 /// the class has the method itself, else the vanilla method it inherits where the runtime has that
-/// (a diode's, [`crate::diodes::inherited`]). None where neither: the block's template acts.
+/// ([`inherited`]). None where neither: the block's template acts.
 fn hook_key(rt: &Rt, class: &'static str, short: &'static str, own: &'static str) -> Option<&'static str> {
     if rt.overrides.is_some_and(|o| o(class, short)) {
         return Some(own);
     }
-    crate::diodes::inherited(rt, class, short)
+    inherited(rt, class, short)
+}
+
+/// The key of the vanilla method `short` a mod block of class `class` without its own inherits,
+/// where the runtime has that class's: a diode's ([`crate::diodes::inherited`]), a rail's
+/// ([`crate::rails::inherited`]).
+pub(crate) fn inherited(rt: &Rt, class: &'static str, short: &str) -> Option<&'static str> {
+    crate::diodes::inherited(rt, class, short).or_else(|| crate::rails::inherited(rt, class, short))
 }
 
 /// Runs `key` on the block's object with the game as host. Returns whether it ran.

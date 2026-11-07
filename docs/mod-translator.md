@@ -6410,6 +6410,51 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     where the wire drew grey. Nothing new is unmapped. Seen: a controller rail beside a redstone
     block placed after it stays at power 0 (vanilla's `BaseRailBlock.neighborChanged`, which runs
     Create's `updateState`, isn't run for a mod rail): next.
+- [x] 2026-11-07 Part 88: mod rails run vanilla's `BaseRailBlock` (Create's controller rail stayed
+  at power 0 beside a redstone block, and joined no rail: a mod block's hooks ran only the methods
+  its own class has, and a rail's `onPlace`, `neighborChanged` and `onRemove` are vanilla's).
+  Measured: 9 classes of the pack's mods are rails (Create's controller rail and cart assembler,
+  FramedBlocks' rail slope on `BaseRailBlock`; its fancy rail and SecurityCraft's track mine on
+  `RailBlock`; FramedBlocks' fancy powered and activator rails on `PoweredRailBlock`, two detector
+  rails on `DetectorRailBlock`), all in `#minecraft:rails`; mods call `getRailDirection` 11 times
+  (Create 6, MineColonies, Moonlight, Sophisticated Storage in Motion), `super.neighborChanged`,
+  `updateShape` and `updateDir` from their own.
+  - compat `rails` (new module): `BaseRailBlock` and `RailState` as NeoForge 1.21.1 has them.
+    `onPlace` → `updateState(state, level, pos, moved)` → `updateDir` (`RailState.place`: the rail
+    turns to join the rails beside it, curving where it may, at a junction of three toward the south
+    and east, toward the north and west while powered, climbing to a rail a step up where it may;
+    each rail it joins turns to it, `connectTo`) and, a straight rail, its own `neighborChanged`;
+    `neighborChanged` drops a rail with no rigid top face under it (or under its climb), else runs
+    the rail's own `updateState(state, level, pos, block)`: `RailBlock`'s turns a junction a signal
+    source switched, `PoweredRailBlock`'s (`findPoweredRailSignal`, `isSameRailWithPower`, eight
+    rails along its line, not across an activator rail) switches it; `onRemove` tells the blocks
+    around a straight rail and below it, above one that climbed; `canSurvive`;
+    `getStateForPlacement` (along the look, waterlogged in a water source); `isRail`,
+    `getRailDirection`, `getShapeProperty` of vanilla's classes, `isFlexibleRail`, NeoForge's
+    `canMakeSlopes`/`isValidRailShape`/`onMinecartPass` defaults, `isActivatorRail`,
+    `updateShape`'s state. Each method dispatches to the rail's own overrides (Create's `updateDir`
+    runs `super.updateDir` here); the rails beside it may be vanilla's, which answer as theirs.
+  - compat glue: the hooks' fallback for a method a mod block's class leaves to vanilla is one
+    `inherited` (diodes', then rails'; a detector rail's own `onPlace` is left out); survival asks it
+    too. A rail's constructor keeps `isStraight` and a powered rail's `isActivator` (NeoForge's
+    one-argument constructor makes an activator rail).
+  - translator: `rails.rs` joins the compat sources the bundle includes.
+  - Tests: compat 562 (8 new, vanilla's rules worked by hand: a mod rail curves to the rails beside it
+    and they turn to it; a junction turns as a signal source switches it, not for stone; a rail
+    climbs to a rail a step up, a rail that makes no slopes doesn't; Create's controller rail (its
+    own `updateDir` and `updateState`, cut down) takes the signal beside it once placed and as it
+    changes; a rail drops without rigid support under it or under its climb, and the game's survival
+    hook says so; a removed rail tells the blocks around it as vanilla's straight, climbing and flat
+    rails do, none when moved; a mod's powered rail takes power eight rails along its line, not nine,
+    not through an activator rail, and its own activator rail takes none from it; a placed rail lies
+    along the look and holds water), translator 19, core 7.
+  - In game (`p88scene.sh`): twelve controller rails placed one by one east of a redstone block
+    lie east-west, joined, the nine nearest it at power 15 and the three past them at 0 (Create's
+    `calculatePower` reaches eight rails along); five rails placed before a redstone block set
+    beside the first all go to 15 as it is placed, which Part 87 saw stay at 0; a lone rail takes 15
+    from a block set beside it later and doesn't turn to it; a rail whose floor is taken away drops
+    as its item. Nothing new is unmapped, nothing threw. Seen: minecarts don't ride a mod rail (the
+    game's minecarts know vanilla's four rails by name): later.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
