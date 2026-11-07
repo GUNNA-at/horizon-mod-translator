@@ -3449,7 +3449,13 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/network/chat/Component$Serializer", "fromJson" | "fromJsonLenient") if desc.starts_with("(Ljava/lang/String;") => {
             match rt.str_of(a(0)).and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok()) {
                 Some(j) => component_from_json(rt, &j),
-                None => V::NULL,
+                None => {
+                    let t = rt.str_of(a(0)).unwrap_or("").to_owned();
+                    crate::glue::trace_some(rt, "unread-json", &t, 8, |_| {
+                        format!("component JSON unread: {t:?}")
+                    });
+                    V::NULL
+                }
             }
         }
         _ => return None,

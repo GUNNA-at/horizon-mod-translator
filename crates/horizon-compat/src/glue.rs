@@ -208,22 +208,7 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
         // compound where the live one had saved data): then it is made again.
         let fresh = rt.block_entity_meta.get(&pos).is_some_and(|(b, saved)| b != block || (*saved && nbt.is_empty()));
         if !fresh {
-            // Made when something asked for it, before the game first ticked it: the game's saved
-            // data goes in now, as vanilla's chunk load would have put it in.
-            if rt.get_field(be, "$demand").i() != 0 {
-                rt.put_field(be, "$demand", V::I(0));
-                load_saved(rt, be, nbt);
-            } else if let V::J(written) = rt.get_field(be, "$written")
-                && written != crate::nbt::data_hash(nbt) as i64
-            {
-                // The game changed its data since it last saved (`/data merge block`): it loads
-                // that and players are sent it, as vanilla's `BlockDataAccessor.setData` does
-                // (`sendBlockUpdated`).
-                load_saved(rt, be, nbt);
-                if let Some(h) = rt.host_mut() {
-                    h.block_changed(pos);
-                }
-            }
+            take_saved(rt, pos, be, nbt);
             return Some(be);
         }
         rt.block_entities.remove(&pos);
@@ -240,6 +225,31 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
     load_saved(rt, be, nbt);
     rt.block_entities.insert(pos, be);
     Some(be)
+}
+
+/// What the game holds of the live block entity `be` at `pos` (`nbt`), when that is news to it.
+/// Made when something asked for it, before the game first ticked it or sent it to players: the
+/// game's saved data goes in now, as vanilla's chunk load (or `/setblock`'s data) would have put it
+/// in. Changed since it last saved (`/data merge block`): it loads that and players are sent it, as
+/// vanilla's `BlockDataAccessor.setData` does (`sendBlockUpdated`), once.
+fn take_saved(
+    rt: &mut Rt,
+    pos: [i32; 3],
+    be: V,
+    nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
+) {
+    if rt.get_field(be, "$demand").i() != 0 {
+        rt.put_field(be, "$demand", V::I(0));
+        load_saved(rt, be, nbt);
+    } else if let V::J(written) = rt.get_field(be, "$written")
+        && written != crate::nbt::data_hash(nbt) as i64
+    {
+        load_saved(rt, be, nbt);
+        rt.put_field(be, "$written", V::J(crate::nbt::data_hash(nbt) as i64));
+        if let Some(h) = rt.host_mut() {
+            h.block_changed(pos);
+        }
+    }
 }
 
 /// Loads the game's saved data into block entity `be`. Only saved data, as vanilla's: a block
@@ -1069,9 +1079,17 @@ const CLIENT_TICK_POST: &str = "net/neoforged/neoforge/client/event/ClientTickEv
 
 /// `native_block_entity_update_tag` (server): what players are sent of the mod block entity at
 /// `pos`, its `getUpdateTag`. None when its object isn't live here (players get its saved data).
-pub fn block_entity_update_tag(rt: &mut Rt, pos: [i32; 3]) -> Option<std::collections::BTreeMap<String, crate::nbt::Nbt>> {
+/// `saved` is what the game holds of it, which it takes first when that is news to it
+/// ([`take_saved`]): a block set with data (`/setblock`) whose block entity its `onPlace` made
+/// already sends that data, as vanilla's block entity has loaded it before its chunk sends it.
+pub fn block_entity_update_tag(
+    rt: &mut Rt,
+    pos: [i32; 3],
+    saved: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
+) -> Option<std::collections::BTreeMap<String, crate::nbt::Nbt>> {
     rt.safe_point();
     let be = rt.block_entities.get(&pos).copied()?;
+    take_saved(rt, pos, be, saved);
     let vc = rt.vcall?;
     let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
     let tag = vc(rt, GET_UPDATE_TAG_KEY, GET_UPDATE_TAG, &[be, provider]);
@@ -2467,6 +2485,106 @@ mod tests {
             }
             _ => api::call(rt, key, args),
         }
+    }
+
+    const BOARD: &str = "test/BoardBlock";
+    const BOARD_ENTITY: &str = "test/BoardBlockEntity";
+
+    /// The test board, as Create's display board: its block entity keeps the text its data holds
+    /// (`Text`), counts its loads, and saves and sends that text.
+    fn board_code(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        let text_key = |rt: &mut Rt| rt.string("Text");
+        match short {
+            NEW_BLOCK_ENTITY => rt.new_object(BOARD_ENTITY),
+            GET_TICKER => V::NULL,
+            LOAD => {
+                let k = text_key(rt);
+                let text = api::call(
+                    rt,
+                    "net/minecraft/nbt/CompoundTag.getString.(Ljava/lang/String;)Ljava/lang/String;",
+                    &[args[1], k],
+                );
+                rt.put_field(args[0], "text", text);
+                let n = rt.get_field(args[0], "loads").i();
+                rt.put_field(args[0], "loads", V::I(n + 1));
+                V::Void
+            }
+            SAVE => {
+                let (k, text) = (text_key(rt), rt.get_field(args[0], "text"));
+                if text.r() != 0 {
+                    api::call(
+                        rt,
+                        "net/minecraft/nbt/CompoundTag.putString.(Ljava/lang/String;Ljava/lang/String;)V",
+                        &[args[1], k, text],
+                    );
+                }
+                V::Void
+            }
+            GET_UPDATE_TAG => {
+                let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
+                api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
+                board_code(rt, key, SAVE, &[args[0], tag, V::NULL]);
+                tag
+            }
+            _ => api::call(rt, key, args),
+        }
+    }
+
+    /// A block set with data (`/setblock ... {Text:...}`) whose block entity something made before
+    /// the data was set (its block's `onPlace`): players are first sent that data, not the new
+    /// block entity's own, as vanilla's has loaded it before the chunk sends it; the next tick
+    /// doesn't load it again. Data the game changes later (`/data merge block`) is sent as well.
+    #[test]
+    fn a_block_entity_made_before_its_data_was_set_sends_that_data() {
+        use crate::nbt::Nbt;
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(|class, method| class == BOARD && method == NEW_BLOCK_ENTITY);
+        rt.vcall = Some(board_code);
+        rt.supers
+            .insert(BOARD, "net/minecraft/world/level/block/Block");
+        rt.supers.insert(
+            BOARD_ENTITY,
+            "net/minecraft/world/level/block/entity/BlockEntity",
+        );
+        let block = rt.new_object(BOARD);
+        rt.registered
+            .insert(("block".into(), "test:board".into()), block);
+        let mut host = MemoryHost::default();
+        let at = [3, 70, -2];
+        host.blocks.insert(at, "test:board".into());
+        let be = rt.with_host(&mut host, |rt| block_entity_at(rt, at));
+        assert_ne!(be.r(), 0);
+        let text = |t: &str| {
+            std::collections::BTreeMap::from([("Text".to_owned(), Nbt::String(t.into()))])
+        };
+        let mut saved = text("RUST");
+        let sent = block_entity_update_tag(&mut rt, at, &saved).expect("it is live");
+        assert_eq!(sent.get("Text"), Some(&Nbt::String("RUST".into())));
+        assert!(block_entity_tick(
+            &mut rt,
+            &mut host,
+            at,
+            "test:board",
+            &mut saved
+        ));
+        assert_eq!(rt.get_field(be, "loads").i(), 1, "loaded once");
+        assert_eq!(saved, text("RUST"));
+
+        let changed = text("MODS");
+        let sent = block_entity_update_tag(&mut rt, at, &changed).expect("it is live");
+        assert_eq!(sent.get("Text"), Some(&Nbt::String("MODS".into())));
+        let mut saved = changed.clone();
+        assert!(block_entity_tick(
+            &mut rt,
+            &mut host,
+            at,
+            "test:board",
+            &mut saved
+        ));
+        assert_eq!(rt.get_field(be, "loads").i(), 2, "the change loaded once");
+        assert_eq!(saved, changed);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// The game as the bundle's hook has it while the runtime is busy: a write that replaces a mod

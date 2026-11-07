@@ -6349,6 +6349,24 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the block below each is the floor, and nothing is unmapped but Flywheel's GL calls. The
     controller rail draws without its colour (the mods' colour handlers: next). Create's display
     board (`boardscene.sh`) draws its board and its cogwheel, not yet its text.
+- [x] 2026-11-07 Part 86: a block set with data sends that data (Create's display board showed no
+  text). `/setblock` with a mod block entity's data placed the block, whose `onPlace` made its block
+  entity (Create's kinetic blocks ask for theirs), and the game took the data after; players were
+  sent the block entity's update tag before its first tick loaded that data, and nothing sent it
+  again: the board's client read four blank flaps (`StringDecomposer` was handed "    ").
+  - compat `glue`: what the game holds of a live block entity is taken before its update tag is
+    sent too, when it is news to it: made when something asked for it, it loads the game's data
+    first, as vanilla's has loaded it before its chunk sends it; changed since it last saved
+    (`/data merge block`), it loads that, once (the tick after doesn't load it again).
+  - translator: the update tag hook hands the runtime what the game holds of the block entity.
+  - compat: when tracing, a component's JSON the runtime can't read is told (`component JSON
+    unread`), as `fromJson` answers null for it.
+  - Tests: compat 548 (1 new: a block entity made before its data was set sends that data, and a
+    later change of the data once), translator 19, core 7.
+  - In game (`boardscene.sh`: a display board set with `RUST` and `MODS` on its two lines): the
+    board shows both words in its flaps' font, each letter in its flap, where it showed nothing;
+    its client decomposes "RUST" and "MODS" (it was handed "    "), and nothing is unmapped but
+    Flywheel's GL calls.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

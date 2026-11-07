@@ -1207,7 +1207,9 @@ fn {id}_block_entity_update_tag(
 {conversions}    if tag.is_some() || !{krate}::ours(&entity.id) {{
         return;
     }}
-    let live = {krate}::hook_runtime("block_entity_update_tag", |rt| {c}::glue::block_entity_update_tag(rt, pos));
+    // What the game holds of it, which a block entity made before its data was set takes first.
+    let saved: std::collections::BTreeMap<String, Nbt> = entity.nbt.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect();
+    let live = {krate}::hook_runtime("block_entity_update_tag", |rt| {c}::glue::block_entity_update_tag(rt, pos, &saved));
     *tag = Some(match live {{
         Some(nbt) => nbt.iter().filter_map(|(k, v)| Some((JavaString::from(k.as_str()), to_tag(v)?))).collect::<Compound>(),
         None => entity.nbt.clone(),
