@@ -6775,6 +6775,33 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     they are on the floor at 15.40 by t+100. The pig rides as in Part 95 (z 9.04, 11.48, 13.88, off
     at 15.63); the fan still blows the player (x -32.37 to -28.53 in 60 ticks). Unmapped:
     `ServerPlayer.getAdvancements` only.
+- [x] 2026-11-07 Part 97: mods' damage types (a mod's damage type, Create's saw's
+  `create:mechanical_saw` among the 154 types of 31 mods in the pack, hurt a player as
+  `minecraft:generic`: armor counted where the type bypasses it, and the death message was the
+  generic one; `/damage` refused the type, and a server's clients never heard of it).
+  - game: a content root's damage types (`data/<ns>/damage_type/<path>.json`) join the damage
+    catalog as `DamageType.CODEC` reads them (`effects` and `death_message_type` default as its
+    optional fields do), and its damage type tags (`bypasses_armor`, `is_fire`) join the catalog's
+    tags after vanilla's (`mod_content_damage.rs`). A type the catalog can't read is left out with
+    a warning, and so are tag entries naming a type or a tag the root lacks (the catalog refuses
+    such a tag whole, as vanilla's tag loader does); should the catalog still refuse them, vanilla's
+    stays and a warning says so. The commands take the types and tags (`/damage @s 5
+    create:crush`). A server sends the mods' types to its clients in `minecraft:damage_type`, in
+    vanilla's file order and always with their data, as no client knows them; their tags reach
+    the clients through vanilla's tag files as before. A mob still takes a mod's type as
+    `minecraft:generic`: its damage has rules only for the types it names.
+  - Tests: client lib 2 new (a mod's types and tag entries join the catalog: the codec's defaults,
+    the exhaustion's float, a type the catalog can't read and entries naming what the root lacks
+    left out; a content root's damage types join the registry in file order with their data,
+    another registry's folders and the tags left out).
+  - In game (`p97scene.sh`, a survival player on normal difficulty, natural regeneration off): in
+    full diamond armor, `/damage @s 6 create:mechanical_roller` takes 1.56 (20 to 18.44: armor
+    counts, 6 × (1 − 18.5/25)) and `/damage @s 6 create:mechanical_saw` the whole 6 (to 12.44:
+    Create's `bypasses_armor` entry). `/damage @s 1000 create:mechanical_saw` kills with "Player…
+    got cut in half by a Mechanical Saw" (`death.attack.create.mechanical_saw`, Create's language
+    file) on the death screen and in chat. A running saw facing up (64 rpm), walled in so the
+    knockback keeps the player on it, cuts them 5 a blow (`DrillBlock.getDamage`), 20, 15, 10, 5,
+    then dead with the same message. Nothing unmapped, no warning.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

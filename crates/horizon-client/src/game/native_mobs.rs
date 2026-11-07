@@ -44,8 +44,9 @@ pub(crate) struct NativeSpawn {
 #[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct NativeHurt {
-    /// Its damage type (`minecraft:thrown`): one the game doesn't know (a mod's own) hurts as
-    /// `minecraft:generic`.
+    /// Its damage type (`minecraft:thrown`, a content mod's `create:crush`): one the damage
+    /// catalog doesn't hold hurts a player as `minecraft:generic`, and a mob takes the types it
+    /// has no rule for (a mod's own) as `minecraft:generic`.
     pub(crate) damage_type: String,
     /// The player it is credited to (`getEntity()`), by UUID.
     pub(crate) player: Option<u128>,
@@ -428,8 +429,10 @@ impl Game<'_> {
     /// else their invulnerability frames, a raised shield, armor and effects,
     /// the knockback away from where the blow came from, the hurt sound, and
     /// the death message's killer, the mob `hurt` names (a player's credit
-    /// isn't kept). A damage type the game doesn't know (a mod's own) hurts as
-    /// `minecraft:generic`. Also inside a player's hook, for the acting player.
+    /// isn't kept). A damage type the damage catalog doesn't hold (one no
+    /// content mod brought) hurts as `minecraft:generic`; a content mod's own
+    /// (`create:mechanical_saw`) hurts and names the death as its data says.
+    /// Also inside a player's hook, for the acting player.
     /// False when it didn't hurt: no such player in `dimension`, dead, an
     /// amount that isn't finite, or a hit refused. API @API:player_hurt@.
     pub(super) fn native_hurt_player(

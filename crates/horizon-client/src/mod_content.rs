@@ -1998,6 +1998,8 @@ fn place_in_biomes(
 
 #[path = "mod_content_biomes.rs"]
 mod biomes;
+#[path = "mod_content_damage.rs"]
+mod damage;
 
 /// The overlay being written: `out` mirrors `base` through links, and a
 /// directory becomes real only when something inside it is written.
@@ -2103,11 +2105,22 @@ struct Known {
     /// The worldgen loader's biomes and biome tags.
     biomes: std::collections::BTreeSet<String>,
     biome_tags: std::collections::BTreeSet<String>,
+    /// The damage catalog's types and the base's damage type tags, when the
+    /// root rewrites the catalog.
+    damage: Option<(
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    )>,
     /// `data/<ns>/tags/<kind>/<path>.json` files the mods add.
     tag_files: std::collections::BTreeSet<String>,
 }
 impl Known {
-    fn new(base: &Path, plan: &Plan, tags: &BTreeMap<String, TagMerge>) -> Result<Self> {
+    fn new(
+        base: &Path,
+        plan: &Plan,
+        tags: &BTreeMap<String, TagMerge>,
+        damage: Option<&damage::Damage>,
+    ) -> Result<Self> {
         let mut blocks: std::collections::BTreeSet<String> =
             plan.defaults.keys().cloned().collect();
         blocks.extend(plan.blocks.iter().map(|b| b.decl.id.clone()));
@@ -2130,13 +2143,15 @@ impl Known {
             items,
             biomes: keys("worldgen/biomes.json")?,
             biome_tags: keys(BIOME_TAGS)?,
+            damage: damage.map(|d| (d.ids.clone(), d.base_tags.clone())),
             tag_files: tags.keys().cloned().collect(),
         })
     }
     /// Whether tag `file` keeps entry `v`: a known id or an existing tag,
-    /// for block, item and biome tags (other registries are kept as they
-    /// are). The worldgen loader refuses a biome tag naming what it lacks
-    /// (another mod's biomes, a loader's tags), so those entries go.
+    /// for block, item, biome and damage type tags (other registries are
+    /// kept as they are). The worldgen loader refuses a biome tag naming what
+    /// it lacks (another mod's biomes, a loader's tags), and the damage
+    /// catalog a damage type tag, so those entries go.
     fn keeps(&self, file: &str, v: &J) -> bool {
         let id = match v {
             J::Str(s) => s.as_str(),
@@ -2161,6 +2176,10 @@ impl Known {
             "block" => &self.blocks,
             "item" => &self.items,
             "worldgen/biome" => &self.biomes,
+            "damage_type" => match &self.damage {
+                Some((ids, _)) => ids,
+                None => return true,
+            },
             _ => return true,
         };
         match id.strip_prefix('#') {
@@ -2170,6 +2189,10 @@ impl Known {
                 self.tag_files.contains(&rel)
                     || match kind {
                         "worldgen/biome" => self.biome_tags.contains(&format!("{tns}:{path}")),
+                        "damage_type" => self
+                            .damage
+                            .as_ref()
+                            .is_some_and(|(_, tags)| tags.contains(&format!("{tns}:{path}"))),
                         _ => tns == "minecraft",
                     }
             }
@@ -2364,6 +2387,8 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     let mut modifiers = Vec::new();
     // Every mod's sprite sources, gathered per atlas file.
     let mut atlases: BTreeMap<String, Vec<J>> = BTreeMap::new();
+    // Every mod's damage types (id → the mod and its file), a later mod's over an earlier's.
+    let mut damage_types: BTreeMap<String, (String, Vec<u8>)> = BTreeMap::new();
     for m in mods {
         let declarations = format!("data/{}/horizon/", m.id);
         let mut reader = m.content.reader()?;
@@ -2387,7 +2412,9 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                     .extend(sprite_sources(&m.id, file, &bytes, &mut warnings));
             } else if !file.starts_with(&declarations) {
                 overlay.write(file, &bytes)?;
-                if biomes::is_modifier(file) {
+                if let Some(id) = damage::type_id(file) {
+                    damage_types.insert(id, (m.id.clone(), bytes));
+                } else if biomes::is_modifier(file) {
                     let text = String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?;
                     modifiers.extend(biomes::Modifier::read(&m.id, file, &text, &mut warnings)?);
                 } else if let Some((bundle, id)) = worldgen_entry(file) {
@@ -2429,9 +2456,36 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     // A tag naming an id nobody registers fails as a whole in vanilla, and
     // carried-over mods name blocks left out or other mods' ids: such
     // entries are dropped instead, so the rest of the tag holds.
-    let known = Known::new(base, &plan, &tags)?;
+    let has_damage_tags = tags.keys().any(|f| damage::tag_id(f).is_some());
+    let mut damage = match base.join(damage::CATALOG).exists()
+        && base.join(damage::TAGS).exists()
+        && (!damage_types.is_empty() || has_damage_tags)
+    {
+        true => Some(damage::Damage::new(
+            serde_json::from_slice(&fs::read(base.join(damage::CATALOG))?)?,
+            serde_json::from_slice(&fs::read(base.join(damage::TAGS))?)?,
+            &damage_types,
+            &mut warnings,
+        )?),
+        false => None,
+    };
+    let known = Known::new(base, &plan, &tags, damage.as_ref())?;
     for (file, merge) in &mut tags {
         merge.values.retain(|v| known.keeps(file, v));
+    }
+    if let Some(damage) = &mut damage {
+        for (file, merge) in &tags {
+            if let Some(id) = damage::tag_id(file) {
+                damage.merge(&id, &merge.values, merge.replaced)?;
+            }
+        }
+        if let Some((catalog, tags)) = damage.files(&mut warnings)? {
+            overlay.write(damage::CATALOG, &catalog)?;
+            overlay.write(damage::TAGS, &tags)?;
+        } else {
+            damage.new_ids.clear();
+            damage.new_tags.clear();
+        }
     }
     let mut bundles: Vec<(&str, J)> = Vec::new();
     for name in TAG_BUNDLES {
@@ -2551,6 +2605,14 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                 .collect();
             add(&["by_registry", registry, "ids"], &new);
         }
+        // The mods' damage types, for `/damage`.
+        if let Some(damage) = &damage {
+            let ids: Vec<J> = damage.new_ids.iter().map(|i| J::Str(i.clone())).collect();
+            let tags: Vec<J> = damage.new_tags.iter().map(|t| J::Str(t.clone())).collect();
+            add(&["damage_types"], &ids);
+            add(&["by_registry", "minecraft:damage_type", "ids"], &ids);
+            add(&["by_registry", "minecraft:damage_type", "tags"], &tags);
+        }
         overlay.write("command-registries.json", &serde_json::to_vec(&doc)?)?;
     }
     // A block without its own blockstate looks like its template, so every
@@ -2658,7 +2720,13 @@ fn stamp(base: &Path, mods: &[ContentMod]) -> Result<String> {
     parts.push(
         String::from_utf8_lossy(&fs::read(base.join("horizon-resources.json"))?).into_owned(),
     );
-    for name in JSON_TABLES.iter().chain(&NBT_TABLES).chain(&TAG_BUNDLES) {
+    let damage = [damage::CATALOG, damage::TAGS];
+    for name in JSON_TABLES
+        .iter()
+        .chain(&NBT_TABLES)
+        .chain(&TAG_BUNDLES)
+        .chain(&damage)
+    {
         if base.join(name).exists() {
             parts.push(meta(&base.join(name))?);
         }

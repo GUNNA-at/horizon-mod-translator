@@ -192,6 +192,140 @@ fn tags_merge_without_repeats() {
     );
 }
 
+/// A mod's damage types join the damage catalog as `DamageType.CODEC` reads
+/// them (the optional fields' defaults, the exhaustion as a float), and its
+/// tag entries the catalog's tags after vanilla's. A type the catalog can't
+/// read is left out with a warning, and so are tag entries naming a type or a
+/// tag the root lacks.
+#[test]
+fn mod_damage_types_join_the_catalog_and_its_tags() {
+    use horizon_world::damage_source::Catalog;
+    let row = |id: &str, message: &str, effects: &str| {
+        serde_json::json!({"id": id, "message_id": message, "exhaustion": "3dcccccd",
+            "scaling": "when_caused_by_living_non_player", "effects": effects,
+            "death_message_type": "default"})
+    };
+    let base = serde_json::json!({"data_version": horizon_world::DATA_VERSION, "types": [
+        row("minecraft:generic", "generic", "hurt"),
+        row("minecraft:in_fire", "inFire", "burning"),
+    ]});
+    let base_tags = BTreeMap::from([
+        (
+            "minecraft:bypasses_armor".to_owned(),
+            r#"{"values": ["minecraft:generic"]}"#.to_owned(),
+        ),
+        (
+            "minecraft:is_fire".to_owned(),
+            r#"{"values": ["minecraft:in_fire"]}"#.to_owned(),
+        ),
+    ]);
+    let file = |text: &str| ("create".to_owned(), text.as_bytes().to_vec());
+    let types = BTreeMap::from([
+        (
+            "create:mechanical_saw".to_owned(),
+            file(
+                r#"{"exhaustion": 0.0, "message_id": "create.mechanical_saw", "scaling": "when_caused_by_living_non_player"}"#,
+            ),
+        ),
+        (
+            "create:cuckoo_surprise".to_owned(),
+            file(
+                r#"{"exhaustion": 0.1, "message_id": "create.cuckoo_surprise", "scaling": "always"}"#,
+            ),
+        ),
+        (
+            "create:fan_fire".to_owned(),
+            file(
+                r#"{"effects": "burning", "exhaustion": 0, "message_id": "create.fan_fire", "scaling": "when_caused_by_living_non_player"}"#,
+            ),
+        ),
+        (
+            "create:odd".to_owned(),
+            file(r#"{"exhaustion": 0.0, "message_id": "create.odd", "scaling": "sometimes"}"#),
+        ),
+    ]);
+    let mut warnings = Vec::new();
+    let mut damage = damage::Damage::new(base, base_tags, &types, &mut warnings).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].starts_with("mod create: damage type create:odd is left out"),
+        "{warnings:?}"
+    );
+    // The entries the root keeps of a mod's addition to `bypasses_armor`.
+    let tag_file = "data/minecraft/tags/damage_type/bypasses_armor.json";
+    let known = Known {
+        blocks: BTreeSet::new(),
+        items: BTreeSet::new(),
+        biomes: BTreeSet::new(),
+        biome_tags: BTreeSet::new(),
+        damage: Some((damage.ids.clone(), damage.base_tags.clone())),
+        tag_files: BTreeSet::from([tag_file.to_owned()]),
+    };
+    let s = |v: &str| J::Str(v.to_owned());
+    let added = [
+        s("create:mechanical_saw"),
+        s("create:odd"),
+        s("other:gone"),
+        s("#minecraft:is_fire"),
+        s("#c:nowhere"),
+    ];
+    let kept: Vec<J> = added
+        .into_iter()
+        .filter(|v| known.keeps(tag_file, v))
+        .collect();
+    assert_eq!(kept, [s("create:mechanical_saw"), s("#minecraft:is_fire")]);
+    damage
+        .merge("minecraft:bypasses_armor", &kept, false)
+        .unwrap();
+    damage
+        .merge("create:saws", &[s("create:mechanical_saw")], false)
+        .unwrap();
+    let (catalog, tags) = damage.files(&mut warnings).unwrap().unwrap();
+    let catalog = Catalog::from_json(
+        &serde_json::from_slice(&catalog).unwrap(),
+        &serde_json::from_slice(&tags).unwrap(),
+    )
+    .unwrap();
+    let id = |name: &str| catalog.id(name).unwrap();
+    let saw = catalog.definition(id("create:mechanical_saw")).unwrap();
+    assert_eq!(
+        (
+            saw.message_id.as_str(),
+            saw.exhaustion,
+            saw.effects.as_str(),
+            saw.death_message_type.as_str()
+        ),
+        ("create.mechanical_saw", 0.0, "hurt", "default")
+    );
+    let cuckoo = catalog.definition(id("create:cuckoo_surprise")).unwrap();
+    assert_eq!(
+        (cuckoo.exhaustion, cuckoo.scaling.name()),
+        (0.1f32, "always")
+    );
+    let fan = catalog.definition(id("create:fan_fire")).unwrap();
+    assert_eq!((fan.effects.as_str(), fan.exhaustion), ("burning", 0.0));
+    assert!(catalog.id("create:odd").is_none());
+    let armor = "minecraft:bypasses_armor";
+    for name in [
+        "minecraft:generic",
+        "create:mechanical_saw",
+        "minecraft:in_fire",
+    ] {
+        assert!(catalog.in_tag(id(name), armor), "{name}");
+    }
+    assert!(!catalog.in_tag(id("create:fan_fire"), armor));
+    assert!(catalog.in_tag(id("create:mechanical_saw"), "create:saws"));
+    assert_eq!(
+        damage.new_ids,
+        [
+            "create:cuckoo_surprise",
+            "create:fan_fire",
+            "create:mechanical_saw"
+        ]
+    );
+    assert_eq!(damage.new_tags, ["create:saws"]);
+}
+
 /// Registry IDs and state IDs must not depend on package discovery order.
 #[test]
 fn allocated_ids_follow_mod_and_entry_order_after_vanilla() {

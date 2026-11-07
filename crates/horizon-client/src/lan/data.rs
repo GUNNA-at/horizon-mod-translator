@@ -57,6 +57,12 @@ pub const CORE_PACK: (&str, &str, &str) = ("minecraft", "core", horizon_protocol
 /// from the prepared resources only.
 const PACK_REGISTRIES: &[&str] = &["minecraft:dialog"];
 
+/// Synchronized registries a content mod's root adds entries to
+/// (`data/<ns>/<registry>/` beside vanilla's): the damage types, which the
+/// game's damage catalog reads too (`mod_content`). No client knows them, so
+/// their data is always sent.
+const MOD_REGISTRIES: &[&str] = &["minecraft:damage_type"];
+
 /// A data-driven registry: entry names in network order and their JSON.
 #[derive(Clone)]
 struct Entries {
@@ -138,6 +144,28 @@ fn pack_entries(
             }
             None => entries.push((key, value, true)),
         }
+    }
+}
+
+/// The entries of a registry's folder `dir` in every namespace of `data` but
+/// `minecraft` (a content mod's: `data/create/damage_type/crush.json` is
+/// `create:crush`), as ((namespace, path), JSON, from a pack).
+fn mod_entries(data: &Path, dir: &str, entries: &mut Vec<((String, String), Value, bool)>) {
+    let Ok(read) = std::fs::read_dir(data) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let ns = entry.file_name().to_string_lossy().into_owned();
+        if ns == "minecraft" {
+            continue;
+        }
+        let mut found = BTreeMap::new();
+        walk(&entry.path().join(dir), "", &mut found);
+        entries.extend(
+            found
+                .into_iter()
+                .map(|(path, value)| ((ns.clone(), path), value, true)),
+        );
     }
 }
 
@@ -223,6 +251,9 @@ impl SyncData {
                 .into_iter()
                 .map(|(p, v)| (("minecraft".to_owned(), p), v, false))
                 .collect();
+            if MOD_REGISTRIES.contains(key) {
+                mod_entries(&resources.join("data"), path, &mut entries);
+            }
             if PACK_REGISTRIES.contains(key) {
                 pack_entries(path, overlay, &mut entries);
             }
@@ -650,6 +681,57 @@ mod tests {
         };
         assert_eq!(data(true), [false, true]);
         assert_eq!(data(false), [true, true]);
+    }
+
+    /// A content root's damage types (`data/<ns>/damage_type/`) join
+    /// vanilla's in the registry in vanilla's file order, their data always
+    /// sent; another registry's folders and tags stay out.
+    #[test]
+    fn a_content_roots_damage_types_join_the_registry() {
+        let root = std::env::temp_dir().join(format!("horizon-mod-damage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (file, text) in [
+            (
+                "minecraft/damage_type/cactus.json",
+                r#"{"message_id": "cactus"}"#,
+            ),
+            (
+                "create/damage_type/crush.json",
+                r#"{"message_id": "create.crush"}"#,
+            ),
+            (
+                "create/damage_type/fan_fire.json",
+                r#"{"message_id": "create.fan_fire"}"#,
+            ),
+            ("aaa/damage_type/zap.json", r#"{"message_id": "aaa.zap"}"#),
+            ("c/tags/damage_type/is_magic.json", r#"{"values": []}"#),
+            ("create/enchantment/sharp.json", r#"{}"#),
+        ] {
+            let path = root.join("data").join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let mut entries = vec![(
+            ("minecraft".to_owned(), "cactus".to_owned()),
+            serde_json::json!({"message_id": "cactus"}),
+            false,
+        )];
+        mod_entries(&root.join("data"), "damage_type", &mut entries);
+        file_order(&mut entries);
+        let names: Vec<(String, bool)> = entries
+            .iter()
+            .map(|((ns, path), _, from_pack)| (format!("{ns}:{path}"), *from_pack))
+            .collect();
+        let expected = [
+            ("minecraft:cactus", false),
+            ("create:crush", true),
+            ("create:fan_fire", true),
+            ("aaa:zap", true),
+        ]
+        .map(|(n, p)| (n.to_owned(), p));
+        assert_eq!(names, expected);
+        assert_eq!(entries[1].1["message_id"], "create.crush");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
