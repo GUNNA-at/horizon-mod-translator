@@ -2143,6 +2143,43 @@ fn mod_log(rt: &Rt, level: &str, desc: &str, args: &[V]) {
 
 /// Small libraries mods lean on: loggers (printed only when tracing), commons-lang `Pair`,
 /// `Record`'s constructor.
+/// Vanilla's `Util.offsetByCodepoints`: `cursor` (a UTF-16 index of `text`) moved `by` code points,
+/// a surrogate pair counting once, stopping at either end.
+fn offset_by_codepoints(text: &str, mut cursor: i32, by: i32) -> i32 {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let len = units.len() as i32;
+    let unit = |i: i32| {
+        usize::try_from(i)
+            .ok()
+            .and_then(|i| units.get(i))
+            .copied()
+            .unwrap_or(0)
+    };
+    let high = |u: u16| (0xD800..0xDC00).contains(&u);
+    let low = |u: u16| (0xDC00..0xE000).contains(&u);
+    if by >= 0 {
+        let mut moved = 0;
+        while cursor < len && moved < by {
+            let c = unit(cursor);
+            cursor += 1;
+            if high(c) && cursor < len && low(unit(cursor)) {
+                cursor += 1;
+            }
+            moved += 1;
+        }
+    } else {
+        let mut left = by;
+        while cursor > 0 && left < 0 {
+            cursor -= 1;
+            if low(unit(cursor)) && cursor > 0 && high(unit(cursor - 1)) {
+                cursor -= 1;
+            }
+            left += 1;
+        }
+    }
+    cursor
+}
+
 fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -2273,6 +2310,54 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("net/minecraft/Util", "getNanos") => {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i64);
             V::J(now)
+        }
+        // The system the game runs on, as vanilla reads it from `os.name` (a BSD is `UNKNOWN`).
+        ("net/minecraft/Util", "getPlatform") => {
+            let os = if cfg!(target_os = "windows") {
+                "WINDOWS"
+            } else if cfg!(target_os = "macos") {
+                "OSX"
+            } else if cfg!(any(target_os = "solaris", target_os = "illumos")) {
+                "SOLARIS"
+            } else if cfg!(target_os = "linux") {
+                "LINUX"
+            } else {
+                "UNKNOWN"
+            };
+            crate::records::enum_constant(rt, &format!("net/minecraft/Util$OS.{os}"))?
+        }
+        // Vanilla's shared pools, one each: what they are given runs at once (one runtime, one thread).
+        ("net/minecraft/Util", "backgroundExecutor" | "ioPool" | "nonCriticalIoPool") => {
+            rt.intern("compat:util-executor".into(), |rt| crate::api::call(rt, "java/util/concurrent/Executors.newCachedThreadPool.()Ljava/util/concurrent/ExecutorService;", &[]))
+        }
+        // `getRandom(values, random)`: `values[random.nextInt(values.length)]`; `getRandomSafe` an
+        // `Optional`, empty for no values.
+        ("net/minecraft/Util", "getRandom" | "getRandomSafe") => {
+            let items = crate::jutil::elements(rt, a(0));
+            let picked = if items.is_empty() {
+                V::NULL
+            } else {
+                let i = crate::api::call(rt, "net/minecraft/util/RandomSource.nextInt.(I)I", &[a(1), V::I(items.len() as i32)]).i();
+                items.get(i as usize).copied().unwrap_or(V::NULL)
+            };
+            if name == "getRandomSafe" { crate::api_common::optional(rt, picked) } else { picked }
+        }
+        // `shuffle(list, random)`: vanilla's Fisher-Yates, from the end, in place.
+        ("net/minecraft/Util", "shuffle") => {
+            let mut items = crate::jutil::elements(rt, a(0));
+            for j in (2..=items.len()).rev() {
+                let k = crate::api::call(rt, "net/minecraft/util/RandomSource.nextInt.(I)I", &[a(1), V::I(j as i32)]).i();
+                items.swap(j - 1, (k.max(0) as usize).min(j - 1));
+            }
+            if let Some(Data::List(v)) = rt.heap.get_mut(a(0).r() as usize).map(|o| &mut o.data) {
+                *v = items;
+            }
+            V::Void
+        }
+        // `offsetByCodepoints(text, cursor, by)`: the cursor moved by code points, in UTF-16 units.
+        ("net/minecraft/Util", "offsetByCodepoints") => {
+            let text = rt.str_of(a(0)).unwrap_or("").to_owned();
+            V::I(offset_by_codepoints(&text, a(1).i(), a(2).i()))
         }
         _ => return None,
     })

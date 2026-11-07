@@ -702,6 +702,28 @@ fn vanilla_property_named(rt: &mut Rt, name: &str, value: &str) -> V {
     rt.intern(format!("prop/named/{name}/{kind}"), move |rt| new_property(rt, &n, &k))
 }
 
+/// The properties of block state `state`, in its definition's order (by name): a mod block's own
+/// objects, else vanilla's `BlockStateProperties` of each name and value.
+pub(crate) fn state_properties(rt: &mut Rt, state: V) -> Vec<V> {
+    let text = name_of(rt, state);
+    let (block, props) = crate::host::split_state(&text);
+    let own = rt
+        .registered
+        .get(&("block".to_owned(), block.to_owned()))
+        .map(|b| rt.get_field(*b, "$state-props"))
+        .filter(|l| l.r() != 0);
+    match own {
+        Some(list) => crate::jutil::elements(rt, list)
+            .into_iter()
+            .filter(|p| props.iter().any(|(k, _)| *k == prop_parts(rt, *p).0))
+            .collect(),
+        None => props
+            .iter()
+            .map(|(k, v)| vanilla_property_named(rt, k, v))
+            .collect(),
+    }
+}
+
 /// Vanilla's property in `BlockStateProperties.<field>`: one object per field, as Java's (`FACING`
 /// and `HORIZONTAL_FACING` share a name, not their values).
 pub(crate) fn vanilla_property_object(rt: &mut Rt, field: &str) -> Option<V> {
@@ -1305,6 +1327,216 @@ pub(crate) fn next_random(rt: &mut Rt) -> u64 {
     x.wrapping_mul(0x2545_F491_4F6C_DD1D)
 }
 
+const CRASH_REPORT: &str = "net/minecraft/CrashReport";
+const CRASH_REPORT_CATEGORY: &str = "net/minecraft/CrashReportCategory";
+const REPORTED_EXCEPTION: &str = "net/minecraft/ReportedException";
+const RANDOM_SOURCE: &str = "net/minecraft/util/RandomSource";
+/// `forkPositional()`'s factory of sources by position or name (`LegacyPositionalRandomFactory`).
+const POSITIONAL_RANDOM: &str = "net/minecraft/world/level/levelgen/PositionalRandomFactory";
+const LEGACY_POSITIONAL_RANDOM: &str =
+    "net/minecraft/world/level/levelgen/LegacyRandomSource$LegacyPositionalRandomFactory";
+/// `java.util.Random`'s generator, which vanilla's legacy sources are.
+const LCG_MULTIPLIER: i64 = 0x5_DEEC_E66D;
+const LCG_MASK: i64 = (1 << 48) - 1;
+
+/// Vanilla's random sources by class: the interface, and the legacy generator's classes a mod makes
+/// with `new` (`new LegacyRandomSource(seed)`; the single-threaded and thread-safe ones draw the
+/// same numbers).
+fn is_random_class(class: &str) -> bool {
+    matches!(
+        class,
+        RANDOM_SOURCE
+            | "net/minecraft/world/level/levelgen/BitRandomSource"
+            | "net/minecraft/world/level/levelgen/LegacyRandomSource"
+            | "net/minecraft/world/level/levelgen/SingleThreadedRandomSource"
+            | "net/minecraft/world/level/levelgen/ThreadSafeLegacyRandomSource"
+    )
+}
+
+/// A source of its own from `seed`, as `new LegacyRandomSource(seed)`: the same seed draws the same
+/// numbers (a block's look picked by its position).
+pub(crate) fn seeded_random(rt: &mut Rt, seed: i64) -> V {
+    let r = rt.new_object(RANDOM_SOURCE);
+    set_random_seed(rt, r, seed);
+    r
+}
+
+/// `setSeed(seed)`: the generator restarted from `seed`, its kept gaussian dropped.
+fn set_random_seed(rt: &mut Rt, r: V, seed: i64) {
+    rt.put_field(r, "$seed", V::J((seed ^ LCG_MULTIPLIER) & LCG_MASK));
+    rt.put_field(r, "$gaussian", V::Void);
+}
+
+/// `next(bits)`: the source's own generator (`LegacyRandomSource.next`), or the runtime's stream for
+/// a source without one (the level's, a tick's).
+fn random_bits(rt: &mut Rt, r: V, bits: u32) -> i32 {
+    match rt.get_field(r, "$seed") {
+        V::J(s) => {
+            let s = s.wrapping_mul(LCG_MULTIPLIER).wrapping_add(11) & LCG_MASK;
+            rt.put_field(r, "$seed", V::J(s));
+            (s >> (48 - bits)) as i32
+        }
+        _ => (next_random(rt) >> (64 - bits)) as i32,
+    }
+}
+
+/// `nextInt(bound)` as `BitRandomSource` draws it; 0 for a bound below 1.
+fn random_int_bound(rt: &mut Rt, r: V, bound: i32) -> i32 {
+    if bound <= 0 {
+        return 0;
+    }
+    if bound & (bound - 1) == 0 {
+        return ((i64::from(bound) * i64::from(random_bits(rt, r, 31))) >> 31) as i32;
+    }
+    loop {
+        let bits = random_bits(rt, r, 31);
+        let value = bits % bound;
+        // Java's signed overflow is part of the rejection rule.
+        if bits.wrapping_sub(value).wrapping_add(bound - 1) >= 0 {
+            return value;
+        }
+    }
+}
+
+fn random_long(rt: &mut Rt, r: V) -> i64 {
+    let high = i64::from(random_bits(rt, r, 32)) << 32;
+    high.wrapping_add(i64::from(random_bits(rt, r, 32)))
+}
+
+fn random_float(rt: &mut Rt, r: V) -> f32 {
+    random_bits(rt, r, 24) as f32 * (1.0 / 16_777_216.0)
+}
+
+fn random_double(rt: &mut Rt, r: V) -> f64 {
+    let value = (i64::from(random_bits(rt, r, 26)) << 27) + i64::from(random_bits(rt, r, 27));
+    value as f64 * (1.0 / 9_007_199_254_740_992.0)
+}
+
+/// `nextGaussian()`: Marsaglia's polar method, as vanilla's legacy source (`MarsagliaPolarGaussian`),
+/// the second value of a pair kept for the next call.
+fn random_gaussian(rt: &mut Rt, r: V) -> f64 {
+    if let V::D(kept) = rt.get_field(r, "$gaussian") {
+        rt.put_field(r, "$gaussian", V::Void);
+        return kept;
+    }
+    loop {
+        let x = 2.0 * random_double(rt, r) - 1.0;
+        let y = 2.0 * random_double(rt, r) - 1.0;
+        let radius = x * x + y * y;
+        if radius >= 1.0 || radius == 0.0 {
+            continue;
+        }
+        let multiplier = (-2.0 * radius.ln() / radius).sqrt();
+        rt.put_field(r, "$gaussian", V::D(y * multiplier));
+        return x * multiplier;
+    }
+}
+
+/// A random source's methods (`RandomSource`'s and the defaults vanilla composes from `next(bits)`),
+/// on receiver `args[0]`.
+fn random_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let r = a(0);
+    Some(match (name, desc) {
+        ("nextInt", "()I") => V::I(random_bits(rt, r, 32)),
+        ("nextInt", "(I)I") => V::I(random_int_bound(rt, r, a(1).i())),
+        // `origin + nextInt(bound - origin)`, the origin itself for an empty range.
+        ("nextInt", "(II)I") if a(1).i() >= a(2).i() => a(1),
+        ("nextInt", "(II)I") => V::I(a(1).i().wrapping_add(random_int_bound(
+            rt,
+            r,
+            a(2).i().wrapping_sub(a(1).i()),
+        ))),
+        ("nextIntBetweenInclusive", "(II)I") => V::I(a(1).i().wrapping_add(random_int_bound(
+            rt,
+            r,
+            a(2).i().wrapping_sub(a(1).i()).wrapping_add(1),
+        ))),
+        ("nextLong", "()J") => V::J(random_long(rt, r)),
+        ("nextBoolean", "()Z") => V::I(i32::from(random_bits(rt, r, 1) != 0)),
+        ("nextFloat", "()F") => V::F(random_float(rt, r)),
+        ("nextDouble", "()D") => V::D(random_double(rt, r)),
+        ("nextGaussian", "()D") => V::D(random_gaussian(rt, r)),
+        // `mean + deviation * (next() - next())`.
+        ("triangle", "(DD)D") => {
+            let (one, two) = (random_double(rt, r), random_double(rt, r));
+            V::D(a(1).d() + a(2).d() * (one - two))
+        }
+        ("triangle", "(FF)F") => {
+            let (one, two) = (random_float(rt, r), random_float(rt, r));
+            V::F(a(1).f() + a(2).f() * (one - two))
+        }
+        ("consumeCount", "(I)V") => {
+            for _ in 0..a(1).i() {
+                random_bits(rt, r, 32);
+            }
+            V::Void
+        }
+        ("setSeed", "(J)V") => {
+            set_random_seed(rt, r, a(1).j());
+            V::Void
+        }
+        // `new LegacyRandomSource(nextLong())`, and the positional factory of `nextLong()`.
+        ("fork", _) => {
+            let seed = random_long(rt, r);
+            seeded_random(rt, seed)
+        }
+        ("forkPositional", _) => {
+            let seed = random_long(rt, r);
+            let f = rt.new_object(LEGACY_POSITIONAL_RANDOM);
+            rt.put_field(f, "seed", V::J(seed));
+            f
+        }
+        _ => return None,
+    })
+}
+
+/// The source `holder` keeps in its field `random`, made (from the runtime's stream) on first use.
+fn own_random(rt: &mut Rt, holder: V) -> V {
+    match rt.get_field(holder, "random") {
+        r if r.r() != 0 => r,
+        _ => {
+            let seed = next_random(rt) as i64;
+            let r = seeded_random(rt, seed);
+            if holder.r() != 0 {
+                rt.put_field(holder, "random", r);
+            }
+            r
+        }
+    }
+}
+
+/// `PositionalRandomFactory`'s sources (`LegacyPositionalRandomFactory`'s): one of `Mth.getSeed(x, y,
+/// z) ^ seed` at a position, of `name.hashCode() ^ seed` by name, or of a seed given.
+fn positional_random_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let seed = rt.get_field(a(0), "seed").j();
+    let at = |x: i32, y: i32, z: i32| {
+        let mut l = i64::from(x.wrapping_mul(3_129_871))
+            ^ i64::from(z).wrapping_mul(116_129_781)
+            ^ i64::from(y);
+        l = l
+            .wrapping_mul(l)
+            .wrapping_mul(42_317_861)
+            .wrapping_add(l.wrapping_mul(11));
+        (l >> 16) ^ seed
+    };
+    let s = match (name, desc) {
+        ("at", "(III)Lnet/minecraft/util/RandomSource;") => at(a(1).i(), a(2).i(), a(3).i()),
+        ("at", "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/util/RandomSource;") => {
+            let p = crate::api::pos_of(rt, a(1));
+            at(p[0], p[1], p[2])
+        }
+        ("fromHashOf", _) => {
+            let text = text_of(rt, a(1));
+            i64::from(crate::jlang::string_hash(&text)) ^ seed
+        }
+        ("fromSeed", "(J)Lnet/minecraft/util/RandomSource;") => a(1).j(),
+        _ => return None,
+    };
+    Some(seeded_random(rt, s))
+}
+
 /// A `java.util.Optional` holding `v` (null: empty), in the JDK's own field.
 pub fn optional(rt: &mut Rt, v: V) -> V {
     let o = rt.new_object("java/util/Optional");
@@ -1872,14 +2104,26 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // `getProperties()`: the state's properties, in its definition's order (by name): a mod
         // block's own objects, else vanilla's `BlockStateProperties` of each name and value.
         (STATE | BASE | HOLDER, "getProperties") => {
-            let text = name_of(rt, a(0));
-            let (block, props) = crate::host::split_state(&text);
-            let own = rt.registered.get(&("block".to_owned(), block.to_owned())).map(|b| rt.get_field(*b, "$state-props")).filter(|l| l.r() != 0);
-            let items: Vec<V> = match own {
-                Some(list) => crate::jutil::elements(rt, list).into_iter().filter(|p| props.iter().any(|(k, _)| *k == prop_parts(rt, *p).0)).collect(),
-                None => props.iter().map(|(k, v)| vanilla_property_named(rt, k, v)).collect(),
-            };
+            let items = state_properties(rt, a(0));
             crate::jutil::new_list(rt, items)
+        }
+        // `getValues()`: each property to the value the state holds, in the same order.
+        (STATE | BASE | HOLDER, "getValues") => {
+            let text = name_of(rt, a(0));
+            let (_, props) = crate::host::split_state(&text);
+            let props: Vec<(String, String)> = props
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect();
+            let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Default::default()));
+            for p in state_properties(rt, a(0)) {
+                let (pname, kind) = prop_parts(rt, p);
+                if let Some((_, text)) = props.iter().find(|(k, _)| *k == pname) {
+                    let v = prop_value(rt, p, &kind, text);
+                    crate::jutil::table_put(rt, m, p, v);
+                }
+            }
+            m
         }
         // Block-state properties
         (STATE | BASE | HOLDER, "getValue" | "getOptionalValue" | "hasProperty" | "setValue" | "cycle" | "trySetValue") => {
@@ -3276,6 +3520,16 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/world/item/ItemStack", "getItem") => {
             if stack_empty(rt, a(0)) { item(rt, "minecraft:air") } else { rt.get_field(a(0), "$item") }
         }
+        // `getItemHolder()`: its item's registry entry (`stack.getItemHolder().is(tag)`).
+        ("net/minecraft/world/item/ItemStack", "getItemHolder") => {
+            let it = if stack_empty(rt, a(0)) {
+                item(rt, "minecraft:air")
+            } else {
+                rt.get_field(a(0), "$item")
+            };
+            let n = item_like_name(rt, it);
+            crate::neo::registry_holder(rt, "item", &n, it)
+        }
         ("net/minecraft/world/item/ItemStack", "getCount") => V::I(if stack_empty(rt, a(0)) { 0 } else { rt.get_field(a(0), "$count").i() }),
         ("net/minecraft/world/item/ItemStack", "setCount") => {
             rt.put_field(a(0), "$count", a(1));
@@ -3480,24 +3734,88 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // `Math.abs(b - a) < 1.0E-5F`, for floats and doubles alike.
         ("net/minecraft/util/Mth", "equal") => V::I(if desc == "(FF)Z" { (a(1).f() - a(0).f()).abs() < 1.0e-5 } else { (a(1).d() - a(0).d()).abs() < f64::from(1.0e-5f32) } as i32),
         ("net/minecraft/util/Mth", "sign") => V::I(if a(0).d() > 0.0 { 1 } else if a(0).d() < 0.0 { -1 } else { 0 }),
-        // A new source (seeded or not), or one forked from another: all draw from the runtime's.
-        ("net/minecraft/util/RandomSource", "create" | "createNewThreadLocalInstance" | "createThreadSafe" | "fork" | "forkPositional") => rt.new_object("net/minecraft/util/RandomSource"),
-        ("net/minecraft/util/RandomSource", "setSeed" | "consumeCount") => V::Void,
+        // `RandomSource.create(seed)` is vanilla's legacy source of that seed; `create()` and the
+        // thread kinds are seeded from the runtime's stream, as vanilla's from a unique seed.
+        (RANDOM_SOURCE, "create") if desc.starts_with("(J)") => seeded_random(rt, a(0).j()),
+        (RANDOM_SOURCE, "create" | "createNewThreadLocalInstance" | "createThreadSafe") => {
+            let seed = next_random(rt) as i64;
+            seeded_random(rt, seed)
+        }
+        // `new LegacyRandomSource(seed)` and its kinds.
+        (o, "<init>") if is_random_class(o) && desc == "(J)V" => {
+            set_random_seed(rt, a(0), a(1).j());
+            V::Void
+        }
+        (o, n) if is_random_class(o) => return random_call(rt, n, desc, args),
+        (POSITIONAL_RANDOM | LEGACY_POSITIONAL_RANDOM, n) => {
+            return positional_random_call(rt, n, desc, args);
+        }
+        // An entity's own source (vanilla's field `random`, made with it): a mod's entity keeps its
+        // own (`mod_entities`); the game's entities and players, and a loot roll, one each.
+        (o, "getRandom")
+            if desc == "()Lnet/minecraft/util/RandomSource;"
+                && (crate::vanilla_entities::is_a(o, "net/minecraft/world/entity/Entity")
+                    || is_player(o)
+                    || o == "net/minecraft/world/level/storage/loot/LootContext") =>
+        {
+            own_random(rt, a(0))
+        }
+        // `Util.getRandom(Direction.values(), random)`.
+        ("net/minecraft/core/Direction", "getRandom")
+            if desc == "(Lnet/minecraft/util/RandomSource;)Lnet/minecraft/core/Direction;" =>
+        {
+            let i = crate::api::call(
+                rt,
+                "net/minecraft/util/RandomSource.nextInt.(I)I",
+                &[a(0), V::I(6)],
+            )
+            .i();
+            direction(rt, i64::from(i))
+        }
+        // A crash report a mod makes to throw (`throw new ReportedException(CrashReport.forThrowable(e,
+        // "Ticking block entity"))`): its title and exception, which the exception carries as its
+        // message and cause, as vanilla's `getMessage` and `getCause` give them (the hook logs both).
+        // Its categories' details are for the report's text, which nobody writes here.
+        (CRASH_REPORT, "<init>") => {
+            rt.put_field(a(0), "$title", a(1));
+            rt.put_field(a(0), "$exception", a(2));
+            V::Void
+        }
+        // A `ReportedException`'s own report, else a new one.
+        (CRASH_REPORT, "forThrowable") if rt.class_of(a(0)) == REPORTED_EXCEPTION => {
+            rt.get_field(a(0), "$report")
+        }
+        (CRASH_REPORT, "forThrowable") => {
+            let r = rt.new_object(CRASH_REPORT);
+            rt.put_field(r, "$title", a(1));
+            rt.put_field(r, "$exception", a(0));
+            r
+        }
+        (CRASH_REPORT, "getTitle") => rt.get_field(a(0), "$title"),
+        (CRASH_REPORT, "getException") => rt.get_field(a(0), "$exception"),
+        (CRASH_REPORT, "addCategory") => {
+            let c = rt.new_object(CRASH_REPORT_CATEGORY);
+            rt.put_field(c, "$title", a(1));
+            c
+        }
+        (CRASH_REPORT_CATEGORY, "setDetail") => a(0),
+        (CRASH_REPORT_CATEGORY, "setDetailError") => V::Void,
+        (REPORTED_EXCEPTION, "<init>") => {
+            let (title, cause) = (
+                rt.get_field(a(1), "$title"),
+                rt.get_field(a(1), "$exception"),
+            );
+            rt.put_field(a(0), "$report", a(1));
+            rt.put_field(a(0), "message", title);
+            rt.put_field(a(0), "cause", cause);
+            V::Void
+        }
+        (REPORTED_EXCEPTION, "getReport") => rt.get_field(a(0), "$report"),
+        (REPORTED_EXCEPTION, "getMessage") => rt.get_field(a(0), "message"),
+        (REPORTED_EXCEPTION, "getCause") => rt.get_field(a(0), "cause"),
         // Nothing here caps how much NBT a read may take.
         ("net/minecraft/nbt/NbtAccounter", "unlimitedHeap" | "create" | "defaultQuota") => rt.intern("compat:nbt-accounter".into(), |rt| rt.new_object("net/minecraft/nbt/NbtAccounter")),
         ("net/minecraft/nbt/NbtAccounter", "accountBytes" | "pushDepth" | "popDepth") => V::Void,
-        ("net/minecraft/util/RandomSource", n) => {
-            let r = next_random(rt);
-            match (n, desc) {
-                ("nextFloat", _) => V::F((r >> 40) as f32 / (1u64 << 24) as f32),
-                ("nextDouble", _) => V::D((r >> 11) as f64 / (1u64 << 53) as f64),
-                ("nextBoolean", _) => V::I((r >> 63) as i32),
-                ("nextInt", "(I)I") => V::I(((r >> 33) % a(1).i().max(1) as u64) as i32),
-                ("nextInt", "(II)I") => V::I(a(1).i() + ((r >> 33) % (a(2).i() - a(1).i()).max(1) as u64) as i32),
-                ("nextInt", "()I") => V::I((r >> 32) as i32),
-                _ => return None,
-            }
-        }
         ("net/minecraft/network/chat/Component", "literal" | "translatable") => {
             let with = if desc.contains("[Ljava/lang/Object;") { a(1) } else { V::NULL };
             component(rt, a(0), name == "translatable", with)
@@ -5918,6 +6236,439 @@ mod tests {
         api::call(&mut rt, SET_LEVEL, &[be, level]);
         assert_eq!(api::game_field(&mut rt, be, "level", "$level", LEVEL), level);
         assert_eq!(api::call(&mut rt, HAS_LEVEL, &[be]).i(), 1);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A source made from a seed draws as vanilla's legacy one (`java.util.Random`): the numbers a
+    /// JDK's `new Random(42)` gives, worked out apart from the runtime. A fork and a positional
+    /// factory make sources of their own seeds, as vanilla's.
+    #[test]
+    fn a_seeded_random_source_draws_as_vanillas_legacy_one() {
+        use super::*;
+        const CREATE: &str =
+            "net/minecraft/util/RandomSource.create.(J)Lnet/minecraft/util/RandomSource;";
+        const NEXT_INT: &str = "net/minecraft/util/RandomSource.nextInt.()I";
+        const NEXT_BOUND: &str = "net/minecraft/util/RandomSource.nextInt.(I)I";
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        assert_eq!(
+            (c(&mut rt, NEXT_INT, &[r]), c(&mut rt, NEXT_INT, &[r])),
+            (V::I(-1_170_105_035), V::I(234_785_527))
+        );
+        // A bound that isn't a power of two, and one that is (drawn otherwise).
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let tens: Vec<i32> = (0..5)
+            .map(|_| c(&mut rt, NEXT_BOUND, &[r, V::I(10)]).i())
+            .collect();
+        assert_eq!(tens, [0, 3, 8, 4, 0]);
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let sixteens: Vec<i32> = (0..5)
+            .map(|_| c(&mut rt, NEXT_BOUND, &[r, V::I(16)]).i())
+            .collect();
+        assert_eq!(sixteens, [11, 0, 10, 0, 4]);
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        assert_eq!(
+            c(
+                &mut rt,
+                "net/minecraft/util/RandomSource.nextLong.()J",
+                &[r]
+            ),
+            V::J(-5_025_562_857_975_149_833)
+        );
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        assert_eq!(
+            c(
+                &mut rt,
+                "net/minecraft/util/RandomSource.nextDouble.()D",
+                &[r]
+            ),
+            V::D(0.727_563_680_032_868_1)
+        );
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        assert_eq!(
+            c(
+                &mut rt,
+                "net/minecraft/util/RandomSource.nextFloat.()F",
+                &[r]
+            ),
+            V::F(12_206_493.0 / 16_777_216.0)
+        );
+        // Gaussians in pairs, the second kept for the next call.
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let gauss: Vec<f64> = (0..3)
+            .map(|_| {
+                c(
+                    &mut rt,
+                    "net/minecraft/util/RandomSource.nextGaussian.()D",
+                    &[r],
+                )
+                .d()
+            })
+            .collect();
+        for (got, want) in gauss.iter().zip([
+            1.141_905_315_473_054_7,
+            0.919_407_948_982_788,
+            -0.949_866_636_890_895_9,
+        ]) {
+            assert!((got - want).abs() < 1e-12, "{gauss:?}");
+        }
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let between: Vec<i32> = (0..6)
+            .map(|_| {
+                c(
+                    &mut rt,
+                    "net/minecraft/util/RandomSource.nextIntBetweenInclusive.(II)I",
+                    &[r, V::I(3), V::I(7)],
+                )
+                .i()
+            })
+            .collect();
+        assert_eq!(between, [3, 6, 6, 7, 3, 3]);
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let t = c(
+            &mut rt,
+            "net/minecraft/util/RandomSource.triangle.(DD)D",
+            &[r, V::D(10.0), V::D(2.0)],
+        )
+        .d();
+        assert!((t - 10.088_680_416_546_046).abs() < 1e-12, "{t}");
+        // `fork()`: a source seeded with the next long.
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let fork = c(
+            &mut rt,
+            "net/minecraft/util/RandomSource.fork.()Lnet/minecraft/util/RandomSource;",
+            &[r],
+        );
+        assert_eq!(c(&mut rt, NEXT_INT, &[fork]), V::I(2_040_010_338));
+        // `forkPositional()`: by position (`Mth.getSeed`) and by a name's hash.
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let f = c(
+            &mut rt,
+            "net/minecraft/util/RandomSource.forkPositional.()Lnet/minecraft/world/level/levelgen/PositionalRandomFactory;",
+            &[r],
+        );
+        let at = c(
+            &mut rt,
+            "net/minecraft/world/level/levelgen/PositionalRandomFactory.at.(III)Lnet/minecraft/util/RandomSource;",
+            &[f, V::I(1), V::I(2), V::I(3)],
+        );
+        assert_eq!(c(&mut rt, NEXT_BOUND, &[at, V::I(100)]), V::I(38));
+        let stone = rt.string("minecraft:stone");
+        let named = c(
+            &mut rt,
+            "net/minecraft/world/level/levelgen/PositionalRandomFactory.fromHashOf.(Ljava/lang/String;)Lnet/minecraft/util/RandomSource;",
+            &[f, stone],
+        );
+        assert_eq!(c(&mut rt, NEXT_BOUND, &[named, V::I(100)]), V::I(99));
+        // `new LegacyRandomSource(42)`, and a source without a seed of its own given one.
+        let legacy = rt.new_object("net/minecraft/world/level/levelgen/LegacyRandomSource");
+        c(
+            &mut rt,
+            "net/minecraft/world/level/levelgen/LegacyRandomSource.<init>.(J)V",
+            &[legacy, V::J(42)],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "net/minecraft/world/level/levelgen/LegacyRandomSource.nextInt.()I",
+                &[legacy]
+            ),
+            V::I(-1_170_105_035)
+        );
+        let level_random = rt.new_object("net/minecraft/util/RandomSource");
+        c(
+            &mut rt,
+            "net/minecraft/util/RandomSource.setSeed.(J)V",
+            &[level_random, V::J(42)],
+        );
+        assert_eq!(c(&mut rt, NEXT_INT, &[level_random]), V::I(-1_170_105_035));
+        // `Direction.getRandom`, `Util.getRandom` and `Util.shuffle` draw from the source given.
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let d = c(
+            &mut rt,
+            "net/minecraft/core/Direction.getRandom.(Lnet/minecraft/util/RandomSource;)Lnet/minecraft/core/Direction;",
+            &[r],
+        );
+        assert_eq!(d, direction(&mut rt, 2), "north");
+        let items: Vec<V> = (1..=5).map(V::I).collect();
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let three = crate::jutil::new_list(&mut rt, items[..3].to_vec());
+        assert_eq!(
+            c(
+                &mut rt,
+                "net/minecraft/Util.getRandom.(Ljava/util/List;Lnet/minecraft/util/RandomSource;)Ljava/lang/Object;",
+                &[three, r]
+            ),
+            V::I(3)
+        );
+        let r = c(&mut rt, CREATE, &[V::J(42)]);
+        let five = crate::jutil::new_list(&mut rt, items.clone());
+        c(
+            &mut rt,
+            "net/minecraft/Util.shuffle.(Ljava/util/List;Lnet/minecraft/util/RandomSource;)V",
+            &[five, r],
+        );
+        assert_eq!(
+            crate::jutil::elements(&rt, five),
+            [V::I(2), V::I(3), V::I(4), V::I(5), V::I(1)]
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// An entity's random source is its own and stays the same (a mod's particles and drops draw
+    /// from it); a player's too, whichever class names the call.
+    #[test]
+    fn an_entity_keeps_its_own_random_source() {
+        let mut rt = Rt::new();
+        crate::install();
+        let player = rt.new_object("net/minecraft/server/level/ServerPlayer");
+        let first = api::call(
+            &mut rt,
+            "net/minecraft/world/entity/LivingEntity.getRandom.()Lnet/minecraft/util/RandomSource;",
+            &[player],
+        );
+        let again = api::call(
+            &mut rt,
+            "net/minecraft/world/entity/player/Player.getRandom.()Lnet/minecraft/util/RandomSource;",
+            &[player],
+        );
+        assert!(first.r() != 0 && first == again);
+        let other = rt.new_object("net/minecraft/server/level/ServerPlayer");
+        assert_ne!(
+            api::call(
+                &mut rt,
+                "net/minecraft/world/entity/Entity.getRandom.()Lnet/minecraft/util/RandomSource;",
+                &[other]
+            ),
+            first
+        );
+        let roll = api::call(
+            &mut rt,
+            "net/minecraft/util/RandomSource.nextInt.(I)I",
+            &[first, V::I(4)],
+        )
+        .i();
+        assert!((0..4).contains(&roll));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Vanilla's `Util`: the platform the game runs on, one shared pool that runs what it is given,
+    /// and a cursor moved by code points (an emoji's surrogate pair is one).
+    #[test]
+    fn util_answers_the_platform_its_pools_and_code_points() {
+        let mut rt = Rt::new();
+        crate::install();
+        let os = api::call(
+            &mut rt,
+            "net/minecraft/Util.getPlatform.()Lnet/minecraft/Util$OS;",
+            &[],
+        );
+        let want = if cfg!(target_os = "macos") {
+            "net/minecraft/Util$OS.OSX"
+        } else if cfg!(target_os = "windows") {
+            "net/minecraft/Util$OS.WINDOWS"
+        } else if cfg!(target_os = "linux") {
+            "net/minecraft/Util$OS.LINUX"
+        } else {
+            "net/minecraft/Util$OS.UNKNOWN"
+        };
+        assert!(os.r() != 0);
+        assert_eq!(os, api::get_static(&mut rt, want));
+        let pool = api::call(
+            &mut rt,
+            "net/minecraft/Util.backgroundExecutor.()Ljava/util/concurrent/ExecutorService;",
+            &[],
+        );
+        assert!(pool.r() != 0);
+        assert_eq!(
+            api::call(
+                &mut rt,
+                "net/minecraft/Util.backgroundExecutor.()Ljava/util/concurrent/ExecutorService;",
+                &[]
+            ),
+            pool
+        );
+        let text = rt.string("a\u{1F600}b");
+        let offset = |rt: &mut Rt, cursor: i32, by: i32| {
+            api::call(
+                rt,
+                "net/minecraft/Util.offsetByCodepoints.(Ljava/lang/String;II)I",
+                &[text, V::I(cursor), V::I(by)],
+            )
+            .i()
+        };
+        assert_eq!(offset(&mut rt, 0, 2), 3, "past the pair at once");
+        assert_eq!(offset(&mut rt, 4, -2), 1);
+        assert_eq!(offset(&mut rt, 1, 9), 4, "stops at the end");
+        assert_eq!(offset(&mut rt, 3, -9), 0, "and at the start");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `throw new ReportedException(CrashReport.forThrowable(e, title))`: the exception says the
+    /// report's title and has `e` as its cause; a report made again from it is the same report.
+    #[test]
+    fn a_reported_exception_carries_its_crash_report() {
+        let mut rt = Rt::new();
+        crate::install();
+        let cause = rt.new_object("java/lang/IllegalStateException");
+        let why = rt.string("bad state");
+        api::call(
+            &mut rt,
+            "java/lang/IllegalStateException.<init>.(Ljava/lang/String;)V",
+            &[cause, why],
+        );
+        let title = rt.string("Ticking block entity");
+        let report = api::call(
+            &mut rt,
+            "net/minecraft/CrashReport.forThrowable.(Ljava/lang/Throwable;Ljava/lang/String;)Lnet/minecraft/CrashReport;",
+            &[cause, title],
+        );
+        let block = rt.string("Block entity details");
+        let category = api::call(
+            &mut rt,
+            "net/minecraft/CrashReport.addCategory.(Ljava/lang/String;)Lnet/minecraft/CrashReportCategory;",
+            &[report, block],
+        );
+        let (key, value) = (rt.string("Name"), rt.string("create:belt"));
+        let detail = "net/minecraft/CrashReportCategory.setDetail.(Ljava/lang/String;Ljava/lang/Object;)Lnet/minecraft/CrashReportCategory;";
+        assert_eq!(
+            api::call(&mut rt, detail, &[category, key, value]),
+            category
+        );
+        let thrown = rt.new_object("net/minecraft/ReportedException");
+        api::call(
+            &mut rt,
+            "net/minecraft/ReportedException.<init>.(Lnet/minecraft/CrashReport;)V",
+            &[thrown, report],
+        );
+        let message = api::call(
+            &mut rt,
+            "net/minecraft/ReportedException.getMessage.()Ljava/lang/String;",
+            &[thrown],
+        );
+        assert_eq!(rt.str_of(message), Some("Ticking block entity"));
+        assert_eq!(
+            api::call(
+                &mut rt,
+                "net/minecraft/ReportedException.getCause.()Ljava/lang/Throwable;",
+                &[thrown]
+            ),
+            cause
+        );
+        assert_eq!(
+            api::call(
+                &mut rt,
+                "net/minecraft/ReportedException.getReport.()Lnet/minecraft/CrashReport;",
+                &[thrown]
+            ),
+            report
+        );
+        let again = api::call(
+            &mut rt,
+            "net/minecraft/CrashReport.forThrowable.(Ljava/lang/Throwable;Ljava/lang/String;)Lnet/minecraft/CrashReport;",
+            &[thrown, block],
+        );
+        assert_eq!(again, report);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A chunk the level gives a mod: where it is, the world's height in sections, its fluids and
+    /// the mods' block entities in it; the server's levels are the one the hook runs in.
+    #[test]
+    fn a_chunk_knows_its_place_and_the_worlds_height() {
+        let mut rt = Rt::new();
+        crate::install();
+        let level = crate::glue::level(&mut rt);
+        let pos = api::block_pos(&mut rt, -20, 70, 35);
+        let chunk = api::call(
+            &mut rt,
+            "net/minecraft/world/level/Level.getChunkAt.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/chunk/LevelChunk;",
+            &[level, pos],
+        );
+        let at = api::call(
+            &mut rt,
+            "net/minecraft/world/level/chunk/LevelChunk.getPos.()Lnet/minecraft/world/level/ChunkPos;",
+            &[chunk],
+        );
+        assert_eq!(
+            (rt.get_field(at, "x"), rt.get_field(at, "z")),
+            (V::I(-2), V::I(2))
+        );
+        let ask = |rt: &mut Rt, k: &'static str, arg: Option<i32>| {
+            let mut args = vec![chunk];
+            args.extend(arg.map(V::I));
+            api::call(rt, k, &args).i()
+        };
+        // Vanilla's overworld, the default where no host tells: y from -64, 384 high.
+        assert_eq!(
+            ask(
+                &mut rt,
+                "net/minecraft/world/level/chunk/ChunkAccess.getSectionsCount.()I",
+                None
+            ),
+            24
+        );
+        assert_eq!(
+            ask(
+                &mut rt,
+                "net/minecraft/world/level/chunk/LevelChunk.getMinSection.()I",
+                None
+            ),
+            -4
+        );
+        assert_eq!(
+            ask(
+                &mut rt,
+                "net/minecraft/world/level/chunk/LevelChunk.getSectionIndex.(I)I",
+                Some(0)
+            ),
+            4
+        );
+        assert_eq!(
+            ask(
+                &mut rt,
+                "net/minecraft/world/level/chunk/LevelChunk.getSectionIndex.(I)I",
+                Some(-64)
+            ),
+            0
+        );
+        assert_eq!(
+            ask(
+                &mut rt,
+                "net/minecraft/world/level/chunk/LevelChunk.getSectionYFromSectionIndex.(I)I",
+                Some(23)
+            ),
+            19
+        );
+        assert_eq!(
+            ask(
+                &mut rt,
+                "net/minecraft/world/level/chunk/LevelChunk.isOutsideBuildHeight.(I)Z",
+                Some(320)
+            ),
+            1
+        );
+        assert_eq!(
+            ask(
+                &mut rt,
+                "net/minecraft/world/level/chunk/LevelChunk.isOutsideBuildHeight.(I)Z",
+                Some(319)
+            ),
+            0
+        );
+        api::call(
+            &mut rt,
+            "net/minecraft/world/level/chunk/LevelChunk.setUnsaved.(Z)V",
+            &[chunk, V::I(1)],
+        );
+        let levels = api::call(
+            &mut rt,
+            "net/minecraft/server/MinecraftServer.getAllLevels.()Ljava/lang/Iterable;",
+            &[V::NULL],
+        );
+        assert_eq!(crate::jutil::elements(&rt, levels), [level]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

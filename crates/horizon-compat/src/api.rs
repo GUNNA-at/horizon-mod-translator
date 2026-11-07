@@ -1088,6 +1088,7 @@ const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
 const BLOCK: &str = "net/minecraft/world/level/block/Block";
 const STATE_DEFINITION: &str = "net/minecraft/world/level/block/state/StateDefinition";
 const DATA_STORAGE: &str = "net/minecraft/world/level/storage/DimensionDataStorage";
+const SET_PLACED_BY_DESC: &str = "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;)V";
 pub(crate) const UPDATE_SHAPE: &str = "updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
 const UPDATE_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
 pub(crate) const CAN_SURVIVE: &str = "canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
@@ -1096,6 +1097,7 @@ pub(crate) const CAN_SURVIVE_KEY: &str =
 const SAVED_DATA: &str = "net/minecraft/world/level/saveddata/SavedData";
 const LEVEL_DATA: &str = "net/minecraft/world/level/storage/LevelData";
 const LEVEL_CHUNK: &str = "net/minecraft/world/level/chunk/LevelChunk";
+const CHUNK_ACCESS: &str = "net/minecraft/world/level/chunk/ChunkAccess";
 const SAVED_DATA_FACTORY: &str = "net/minecraft/world/level/saveddata/SavedData$Factory";
 const CHUNK_CACHE: &str = "net/minecraft/server/level/ServerChunkCache";
 const CHUNK_SOURCE: &str = "net/minecraft/world/level/chunk/ChunkSource";
@@ -1952,6 +1954,94 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let level = rt.get_field(a(0), "$level");
             call(rt, "net/minecraft/world/level/Level.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;", &[level, a(1)])
         }
+        // Where the chunk is, and what its level answers for it: its fluids, block entities and the
+        // world's height. The game keeps its sections and saves it: nothing is unsaved here.
+        (LEVEL_CHUNK | CHUNK_ACCESS, "getPos") => {
+            let (x, z) = (rt.get_field(a(0), "$x").i(), rt.get_field(a(0), "$z").i());
+            crate::api_common::chunk_pos(rt, x, z)
+        }
+        (LEVEL_CHUNK | CHUNK_ACCESS, "getFluidState")
+            if desc.starts_with("(Lnet/minecraft/core/BlockPos;)") =>
+        {
+            let level = rt.get_field(a(0), "$level");
+            call(
+                rt,
+                "net/minecraft/world/level/Level.getFluidState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/material/FluidState;",
+                &[level, a(1)],
+            )
+        }
+        (LEVEL_CHUNK | CHUNK_ACCESS, "getBlockEntity")
+            if desc.starts_with("(Lnet/minecraft/core/BlockPos;") =>
+        {
+            let level = rt.get_field(a(0), "$level");
+            call(
+                rt,
+                "net/minecraft/world/level/Level.getBlockEntity.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/entity/BlockEntity;",
+                &[level, a(1)],
+            )
+        }
+        // The mods' block entities in it, by position (the game's own are not objects here).
+        (LEVEL_CHUNK | CHUNK_ACCESS, "getBlockEntities" | "getBlockEntitiesPos") => {
+            let (x, z) = (rt.get_field(a(0), "$x").i(), rt.get_field(a(0), "$z").i());
+            let mut at: Vec<[i32; 3]> = rt
+                .block_entities
+                .keys()
+                .copied()
+                .filter(|p| p[0] >> 4 == x && p[2] >> 4 == z)
+                .collect();
+            at.sort_unstable();
+            let mut found = Vec::new();
+            for p in at {
+                let be = crate::glue::block_entity_at(rt, p);
+                if be.r() != 0 {
+                    let k = block_pos(rt, i64::from(p[0]), i64::from(p[1]), i64::from(p[2]));
+                    found.push((k, be));
+                }
+            }
+            if name == "getBlockEntitiesPos" {
+                let keys: Vec<V> = found.iter().map(|(k, _)| *k).collect();
+                return Some(crate::jutil::new_set_of(rt, &keys));
+            }
+            let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Default::default()));
+            for (k, be) in found {
+                crate::jutil::table_put(rt, m, k, be);
+            }
+            m
+        }
+        (LEVEL_CHUNK | CHUNK_ACCESS, "setUnsaved" | "markUnsaved") => V::Void,
+        (LEVEL_CHUNK | CHUNK_ACCESS, "isUnsaved" | "isEmpty") => V::I(0),
+        // `LevelHeightAccessor`'s, from the world's lowest y and height.
+        (LEVEL_CHUNK | CHUNK_ACCESS, n)
+            if matches!(
+                n,
+                "getMinBuildHeight"
+                    | "getMaxBuildHeight"
+                    | "getHeight"
+                    | "getMinSection"
+                    | "getMaxSection"
+                    | "getSectionsCount"
+                    | "getSectionIndex"
+                    | "getSectionIndexFromSectionY"
+                    | "getSectionYFromSectionIndex"
+                    | "isOutsideBuildHeight"
+            ) =>
+        {
+            let (min, height) = rt.host().map_or((-64, 384), |h| h.world_height());
+            let (min_section, max_section) = (min >> 4, ((min + height - 1) >> 4) + 1);
+            let y = a(1).i();
+            V::I(match n {
+                "getMinBuildHeight" => min,
+                "getMaxBuildHeight" => min + height,
+                "getHeight" => height,
+                "getMinSection" => min_section,
+                "getMaxSection" => max_section,
+                "getSectionsCount" => max_section - min_section,
+                "getSectionIndex" => (y >> 4) - min_section,
+                "getSectionIndexFromSectionY" => y - min_section,
+                "getSectionYFromSectionIndex" => y + min_section,
+                _ => i32::from(y < min || y >= min + height),
+            })
+        }
         // What `setBlock` would have done after the change (Create sets blocks quietly, then calls it):
         // the game already updated the neighbours; clients are told when the flags say so.
         (_, "markAndNotifyBlock") if level => {
@@ -2018,6 +2108,10 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getTickCount" => V::I(rt.host().map_or(0, |h| h.game_time()) as i32),
             // One level is modelled: the one the hook runs in.
             "overworld" | "getLevel" => crate::glue::level(rt),
+            "getAllLevels" => {
+                let l = crate::glue::level(rt);
+                crate::jutil::new_list(rt, vec![l])
+            }
             "isDedicatedServer" | "isPublished" | "isHardcore" => V::I(0),
             "isSameThread" => V::I(1),
             "getPlayerList" => crate::events::player_list(rt),
@@ -2291,6 +2385,18 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     let states = possible_states(rt, b);
                     crate::jutil::new_list(rt, states)
                 }
+                "getProperties" => {
+                    let props = definition_properties(rt, b);
+                    crate::jutil::new_list(rt, props)
+                }
+                // One of them by name, null for none (a mod finds another mod's `facing` so).
+                "getProperty" => {
+                    let wanted = rt.str_of(a(1)).unwrap_or("").to_owned();
+                    definition_properties(rt, b)
+                        .into_iter()
+                        .find(|p| crate::api_common::prop_parts(rt, *p).0 == wanted)
+                        .unwrap_or(V::NULL)
+                }
                 _ => return crate::api_common::call(rt, owner, name, desc, args),
             }
         }
@@ -2330,6 +2436,25 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let o = rt.new_object("java/util/Optional");
             rt.put_field(o, "value", V::NULL);
             o
+        }
+        // `Block.byItem(item)`: the block a block item places, air for any other item.
+        (BLOCK, "byItem") => block_of_item(rt, a(0)),
+        // `super.setPlacedBy(...)` from a mod's block: `Block`'s does nothing, and what the classes
+        // that override it do (a bed's head, a door's top half) the game's template did as the block
+        // was placed. (A diode's is `diodes`'.)
+        (o, "setPlacedBy")
+            if o.starts_with("net/minecraft/world/level/block/")
+                && crate::api_common::vanilla_is_a(o, BLOCK)
+                && SET_PLACED_BY_DESC == desc =>
+        {
+            V::Void
+        }
+        // `super.updateShape(...)` reaching `BlockBehaviour`'s: the state as it is.
+        (o, "updateShape")
+            if UPDATE_SHAPE.ends_with(desc)
+                && crate::blocks::update_shape_declarer(o) == Some("state/BlockBehaviour") =>
+        {
+            a(1)
         }
         (BLOCK, "<init>") => V::Void,
         // The API's base constructors a mod's own classes call (`super(properties)`): their state
@@ -2379,6 +2504,76 @@ pub(crate) fn possible_states(rt: &mut Rt, b: V) -> Vec<V> {
     }
     let texts: Vec<String> = combos.into_iter().map(|c| crate::host::join_state(&name, c)).collect();
     texts.iter().map(|t| state(rt, t)).collect()
+}
+
+/// 1.21.1's items that place a block of another name (`ItemNameBlockItem`s, a solid bucket).
+const ITEM_BLOCKS: [(&str, &str); 14] = [
+    ("minecraft:beetroot_seeds", "minecraft:beetroots"),
+    ("minecraft:carrot", "minecraft:carrots"),
+    ("minecraft:cocoa_beans", "minecraft:cocoa"),
+    ("minecraft:glow_berries", "minecraft:cave_vines"),
+    ("minecraft:melon_seeds", "minecraft:melon_stem"),
+    ("minecraft:pitcher_pod", "minecraft:pitcher_crop"),
+    ("minecraft:potato", "minecraft:potatoes"),
+    ("minecraft:powder_snow_bucket", "minecraft:powder_snow"),
+    ("minecraft:pumpkin_seeds", "minecraft:pumpkin_stem"),
+    ("minecraft:redstone", "minecraft:redstone_wire"),
+    ("minecraft:string", "minecraft:tripwire"),
+    ("minecraft:sweet_berries", "minecraft:sweet_berry_bush"),
+    ("minecraft:torchflower_seeds", "minecraft:torchflower_crop"),
+    ("minecraft:wheat_seeds", "minecraft:wheat"),
+];
+
+/// `Block.byItem(item)`: the block a block item places (a mod's `BlockItem` its own), air for any
+/// other item.
+fn block_of_item(rt: &mut Rt, item: V) -> V {
+    let item = crate::creative::as_item(rt, item);
+    let own = rt.get_field(item, "$block");
+    if own.r() != 0 {
+        return own;
+    }
+    let name = crate::api_common::item_like_name(rt, item);
+    let renamed = ITEM_BLOCKS
+        .iter()
+        .find(|(i, _)| *i == name)
+        .map(|(_, b)| *b);
+    let places = renamed.is_some()
+        || rt.class_of(item) == "net/minecraft/world/item/BlockItem"
+        || rt.host().is_some_and(|h| h.item_is_block(&name));
+    match renamed {
+        Some(b) => block(rt, b),
+        None if places && name != "minecraft:air" => block(rt, &name),
+        None => block(rt, "minecraft:air"),
+    }
+}
+
+/// The properties of block `b`'s states (`StateDefinition.getProperties()`), once each: a mod
+/// block's own, as its definition added them; a vanilla block's, its default state's in the game.
+fn definition_properties(rt: &mut Rt, b: V) -> Vec<V> {
+    let list = match rt.heap.get(b.r() as usize).map(|o| &o.data) {
+        Some(Data::Fields(_)) => rt.get_field(b, "$state-props"),
+        _ => V::NULL,
+    };
+    if list.r() != 0 {
+        let mut out: Vec<V> = Vec::new();
+        for p in crate::jutil::elements(rt, list) {
+            let n = crate::api_common::prop_parts(rt, p).0;
+            if !out
+                .iter()
+                .any(|q| crate::api_common::prop_parts(rt, *q).0 == n)
+            {
+                out.push(p);
+            }
+        }
+        return out;
+    }
+    let name = block_name(rt, b);
+    let text = rt
+        .host()
+        .and_then(|h| h.state_id(&name).and_then(|id| h.state_of_id(id)))
+        .unwrap_or(name);
+    let st = state(rt, &text);
+    crate::api_common::state_properties(rt, st)
 }
 
 /// Whether `owner` is vanilla's `Block` or one of its block classes (`RotatedPillarBlock`).

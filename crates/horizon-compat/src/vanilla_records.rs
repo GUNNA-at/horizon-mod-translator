@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 635] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 634] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1521,7 +1521,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 635] = [
     ("net/minecraft/world/level/levelgen/GeodeBlockSettings", "i(Lnet/minecraft/world/level/levelgen/feature/stateproviders/BlockStateProvider;Lnet/minecraft/world/level/levelgen/feature/stateproviders/BlockStateProvider;Lnet/minecraft/world/level/levelgen/feature/stateproviders/BlockStateProvider;Lnet/minecraft/world/level/levelgen/feature/stateproviders/BlockStateProvider;Lnet/minecraft/world/level/levelgen/feature/stateproviders/BlockStateProvider;Ljava/util/List;Lnet/minecraft/tags/TagKey;Lnet/minecraft/tags/TagKey;)V=fillingProvider,innerLayerProvider,alternateInnerLayerProvider,middleLayerProvider,outerLayerProvider,innerPlacements,cannotReplace,invalidBlocks|o"),
     ("net/minecraft/world/level/levelgen/GeodeCrackSettings", "i(DDI)V=generateCrackChance,baseCrackSize,crackPointOffset|o"),
     ("net/minecraft/world/level/levelgen/GeodeLayerSettings", "i(DDDD)V=filling,innerLayer,middleLayer,outerLayer|o"),
-    ("net/minecraft/world/level/levelgen/LegacyRandomSource$LegacyPositionalRandomFactory", "i(J)V=seed|o"),
     ("net/minecraft/world/level/levelgen/MarsagliaPolarGaussian", "i(Lnet/minecraft/util/RandomSource;)V=randomSource|o"),
     ("net/minecraft/world/level/levelgen/WorldOptions", "i(JZZLjava/util/Optional;)V=seed,generateStructures,generateBonusChest,legacyCustomOptions|gseed()J=seed|ggenerateStructures()Z=generateStructures|ggenerateBonusChest()Z=generateBonusChest|o"),
     ("net/minecraft/world/level/levelgen/XoroshiroRandomSource$XoroshiroPositionalRandomFactory", "i(JJ)V=seedLo,seedHi|o"),

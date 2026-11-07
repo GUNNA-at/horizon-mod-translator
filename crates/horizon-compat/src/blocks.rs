@@ -282,6 +282,135 @@ fn templated_class(class: &str) -> Option<&'static str> {
     None
 }
 
+/// 1.21.1's block classes that declare an `updateShape` of their own (read from their bytecode), by
+/// name under `net/minecraft/world/level/block/`.
+const UPDATE_SHAPE_CLASSES: [&str; 104] = [
+    "AmethystClusterBlock",
+    "AttachedStemBlock",
+    "BambooSaplingBlock",
+    "BambooStalkBlock",
+    "BannerBlock",
+    "BarrierBlock",
+    "BaseCoralPlantTypeBlock",
+    "BaseCoralWallFanBlock",
+    "BasePressurePlateBlock",
+    "BaseRailBlock",
+    "BaseTorchBlock",
+    "BedBlock",
+    "BeehiveBlock",
+    "BellBlock",
+    "BigDripleafBlock",
+    "BigDripleafStemBlock",
+    "BrushableBlock",
+    "BubbleColumnBlock",
+    "BushBlock",
+    "CactusBlock",
+    "CakeBlock",
+    "CampfireBlock",
+    "CandleBlock",
+    "CandleCakeBlock",
+    "CarpetBlock",
+    "CeilingHangingSignBlock",
+    "ChainBlock",
+    "ChestBlock",
+    "ChorusFlowerBlock",
+    "ChorusPlantBlock",
+    "CocoaBlock",
+    "ComparatorBlock",
+    "ConcretePowderBlock",
+    "ConduitBlock",
+    "CoralBlock",
+    "CoralFanBlock",
+    "CoralPlantBlock",
+    "CoralWallFanBlock",
+    "DecoratedPotBlock",
+    "DirtPathBlock",
+    "DoorBlock",
+    "DoublePlantBlock",
+    "EnderChestBlock",
+    "FaceAttachedHorizontalDirectionalBlock",
+    "FallingBlock",
+    "FarmBlock",
+    "FenceBlock",
+    "FenceGateBlock",
+    "FireBlock",
+    "FlowerPotBlock",
+    "FrogspawnBlock",
+    "GlowLichenBlock",
+    "GrowingPlantBodyBlock",
+    "GrowingPlantHeadBlock",
+    "HangingRootsBlock",
+    "HeavyCoreBlock",
+    "HugeMushroomBlock",
+    "IronBarsBlock",
+    "LadderBlock",
+    "LanternBlock",
+    "LeavesBlock",
+    "LightBlock",
+    "LightningRodBlock",
+    "LiquidBlock",
+    "MagmaBlock",
+    "MangrovePropaguleBlock",
+    "MangroveRootsBlock",
+    "MultifaceBlock",
+    "NetherPortalBlock",
+    "NoteBlock",
+    "ObserverBlock",
+    "piston/PistonHeadBlock",
+    "PitcherCropBlock",
+    "PointedDripstoneBlock",
+    "RedstoneWallTorchBlock",
+    "RedStoneWireBlock",
+    "RepeaterBlock",
+    "ScaffoldingBlock",
+    "SculkSensorBlock",
+    "SculkShriekerBlock",
+    "SculkVeinBlock",
+    "SeagrassBlock",
+    "SeaPickleBlock",
+    "SignBlock",
+    "SlabBlock",
+    "SmallDripleafBlock",
+    "SnowLayerBlock",
+    "SnowyDirtBlock",
+    "SoulFireBlock",
+    "SoulSandBlock",
+    "SporeBlossomBlock",
+    "StairBlock",
+    "StandingSignBlock",
+    "SugarCaneBlock",
+    "TrapDoorBlock",
+    "TripWireBlock",
+    "TripWireHookBlock",
+    "VineBlock",
+    "WallBannerBlock",
+    "WallBlock",
+    "WallHangingSignBlock",
+    "WallSignBlock",
+    "WallTorchBlock",
+    "WaterloggedTransparentBlock",
+];
+
+/// The class whose `updateShape` a call naming vanilla block class `class` runs (a mod block's
+/// `super.updateShape`): the nearest of it and the classes above it that declares one, by name
+/// under `net/minecraft/world/level/block/`, `state/BlockBehaviour` (which keeps the state) past
+/// them all. None for a class the table of 1.21.1's classes doesn't have.
+pub(crate) fn update_shape_declarer(class: &str) -> Option<&'static str> {
+    use crate::vanilla_classes::CLASSES;
+    let mut c = class;
+    for _ in 0..32 {
+        let short = c.strip_prefix("net/minecraft/world/level/block/")?;
+        if let Some(d) = UPDATE_SHAPE_CLASSES.iter().find(|d| **d == short) {
+            return Some(d);
+        }
+        if short == "state/BlockBehaviour" {
+            return Some("state/BlockBehaviour");
+        }
+        c = CLASSES[CLASSES.binary_search_by(|e| e.0.cmp(c)).ok()?].1;
+    }
+    None
+}
+
 /// The properties a vanilla block class adds in its own `createBlockStateDefinition`
 /// (`BlockStateProperties` fields), for a mod class that extends it.
 fn vanilla_definition(class: &str) -> &'static [&'static str] {
@@ -4185,6 +4314,133 @@ mod tests {
             })
         });
         assert_eq!(got, [red, blue, V::NULL]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's block definition answers its properties by name (`getProperty("type")`, null for one
+    /// it lacks) and a state each property's value (`getValues`); `Block.byItem` finds the block a
+    /// block item places, air for another item; a mod block's `super` calls reach vanilla's.
+    #[test]
+    fn a_definition_names_its_properties_and_items_find_their_blocks() {
+        let mut rt = Rt::new();
+        rt.vcall = Some(lambdas);
+        let p = props(&mut rt);
+        let slab = rt.new_object("net/minecraft/world/level/block/SlabBlock");
+        api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/SlabBlock.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V",
+            &[slab, p],
+        );
+        rt.registered
+            .insert(("block".into(), "ruby:slab".into()), slab);
+        let def = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/Block.getStateDefinition.()Lnet/minecraft/world/level/block/state/StateDefinition;",
+            &[slab],
+        );
+        let by_name = |rt: &mut Rt, n: &str| {
+            let n = rt.string(n);
+            api::call(
+                rt,
+                "net/minecraft/world/level/block/state/StateDefinition.getProperty.(Ljava/lang/String;)Lnet/minecraft/world/level/block/state/properties/Property;",
+                &[def, n],
+            )
+        };
+        let (kind, wet) = (by_name(&mut rt, "type"), by_name(&mut rt, "waterlogged"));
+        assert_eq!(api_common::prop_parts(&rt, kind).0, "type");
+        assert_eq!(api_common::prop_parts(&rt, wet).0, "waterlogged");
+        assert_eq!(by_name(&mut rt, "facing"), V::NULL);
+        let all = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/state/StateDefinition.getProperties.()Ljava/util/Collection;",
+            &[def],
+        );
+        assert_eq!(jutil::elements(&rt, all), [kind, wet]);
+        // The same objects as a state's `getValue` reads by.
+        let top = api::state(&mut rt, "ruby:slab[type=top,waterlogged=true]");
+        let values = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/state/BlockState.getValues.()Ljava/util/Map;",
+            &[top],
+        );
+        let get = "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;";
+        let (is_kind, is_wet) = (
+            api::call(&mut rt, get, &[values, kind]),
+            api::call(&mut rt, get, &[values, wet]),
+        );
+        let read = "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;";
+        assert_eq!(is_kind, api::call(&mut rt, read, &[top, kind]));
+        assert_eq!(is_wet, api_common::boolean(&mut rt, true));
+        assert_eq!(
+            api::call(&mut rt, "java/util/Map.size.()I", &[values]),
+            V::I(2)
+        );
+
+        let item_props = rt.new_object("net/minecraft/world/item/Item$Properties");
+        let slab_item = rt.new_object("net/minecraft/world/item/BlockItem");
+        api::call(
+            &mut rt,
+            "net/minecraft/world/item/BlockItem.<init>.(Lnet/minecraft/world/level/block/Block;Lnet/minecraft/world/item/Item$Properties;)V",
+            &[slab_item, slab, item_props],
+        );
+        let by_item = |rt: &mut Rt, item: V| {
+            let b = api::call(
+                rt,
+                "net/minecraft/world/level/block/Block.byItem.(Lnet/minecraft/world/item/Item;)Lnet/minecraft/world/level/block/Block;",
+                &[item],
+            );
+            api::block_name(rt, b)
+        };
+        assert_eq!(by_item(&mut rt, slab_item), "ruby:slab");
+        let carrot = api_common::item(&mut rt, "minecraft:carrot");
+        assert_eq!(
+            by_item(&mut rt, carrot),
+            "minecraft:carrots",
+            "a crop's seed item places the crop"
+        );
+        let diamond = api_common::item(&mut rt, "minecraft:diamond");
+        assert_eq!(by_item(&mut rt, diamond), "minecraft:air");
+
+        // `super.updateShape` keeps the state where no vanilla class between overrides it, and
+        // `super.setPlacedBy` leaves the placing to the game.
+        let (dir, level, pos) = (
+            api::direction(&mut rt, 2),
+            crate::glue::level(&mut rt),
+            api::block_pos(&mut rt, 0, 64, 0),
+        );
+        let air = api::state(&mut rt, "minecraft:air");
+        for owner in [
+            "net/minecraft/world/level/block/Block",
+            "net/minecraft/world/level/block/HorizontalDirectionalBlock",
+            "net/minecraft/world/level/block/BaseEntityBlock",
+        ] {
+            assert_eq!(
+                update_shape_declarer(owner),
+                Some("state/BlockBehaviour"),
+                "{owner}"
+            );
+        }
+        assert_eq!(
+            update_shape_declarer("net/minecraft/world/level/block/WeatheringCopperStairBlock"),
+            Some("StairBlock")
+        );
+        assert_eq!(
+            update_shape_declarer("net/minecraft/world/level/block/ButtonBlock"),
+            Some("FaceAttachedHorizontalDirectionalBlock")
+        );
+        let kept = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/HorizontalDirectionalBlock.updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
+            &[slab, top, dir, air, level, pos, pos],
+        );
+        assert_eq!(kept, top);
+        let stack = rt.new_object("net/minecraft/world/item/ItemStack");
+        let placed = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/BaseEntityBlock.setPlacedBy.(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;)V",
+            &[slab, level, pos, top, V::NULL, stack],
+        );
+        assert_eq!(placed, V::Void);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

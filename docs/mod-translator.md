@@ -6898,6 +6898,49 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `ConfigurationScreen` (38), a mod block's `super.updateShape` (34), `LevelChunk.getPos` (34),
     mod entities' attributes (`AttributeSupplier.Builder.build` 33, `EntityAttributeCreationEvent.put`
     32), `RandomSource.nextGaussian` (27).
+- [x] 2026-11-07 Part 101: a batch of packcov15's most used runtime gaps, in compat alone (each
+  in 23 to 34 mods of the pack).
+  - Random sources (`api_common`): a source made from a seed is vanilla's legacy one
+    (`java.util.Random`'s generator): `RandomSource.create(seed)`, `new LegacyRandomSource(seed)`
+    (and the single-threaded and thread-safe kinds) and `setSeed` draw what vanilla's would from
+    that seed, so a mod picking a look or a pattern by a seed gets the same each time.
+    `create()`, a fork and the thread kinds are seeded from the runtime's stream, as vanilla's from
+    a unique seed; a source without a seed of its own (the level's, a tick's) draws the runtime's
+    stream, composed as vanilla's `next(bits)` defaults compose it. New: `nextGaussian` (Marsaglia's
+    polar method, the pair's second kept), `nextLong`, `nextIntBetweenInclusive`, `triangle`,
+    `consumeCount`, `fork` and `forkPositional` (a factory of sources by position, `Mth.getSeed`,
+    or by a name's hash). `Direction.getRandom`, `Util.getRandom`, `getRandomSafe` and `shuffle`
+    draw from the source given. An entity's `getRandom` (the game's entities, players, a loot roll)
+    is a source of its own, kept.
+  - `Util` (`jlang`): `getPlatform` (the system's `Util$OS`, as vanilla reads `os.name`),
+    `backgroundExecutor`/`ioPool` (one pool, which runs what it is given at once) and
+    `offsetByCodepoints` (UTF-16 units, a surrogate pair moved over once).
+  - Block states: `StateDefinition.getProperty(name)` (null for none) and `getProperties` (a mod
+    block's definition's own, a vanilla block's from its default state in the game), and
+    `BlockState.getValues` (each property to its value, as `getValue` reads it). `Block.byItem` (a
+    block item's block, a crop's seed its crop, air for other items), `ItemStack.getItemHolder`.
+  - A mod block's `super` calls into vanilla's classes: `setPlacedBy` does nothing more (`Block`'s
+    is empty; what a bed's or a door's does, the game's template did as the block was placed), and
+    `updateShape` keeps the state where the nearest class declaring one is `BlockBehaviour` (72 of
+    the pack's 122 uses: `Block`, `HorizontalDirectionalBlock`, `BaseEntityBlock`,
+    `DirectionalBlock`...), by the 104 block classes of 1.21.1 that declare their own (read from
+    their bytecode; `blocks::update_shape_declarer`).
+  - Chunks: `LevelChunk`/`ChunkAccess.getPos`, its fluids, block entities (`getBlockEntity`, and the
+    mods' in it by position, `getBlockEntities`), the world's height in sections
+    (`getSectionIndex`, `getSectionsCount`...), `setUnsaved` (the game saves its chunks).
+    `MinecraftServer.getAllLevels` is the level the hook runs in, the one modelled.
+  - `CrashReport.forThrowable` (a `ReportedException`'s own report), `addCategory`, `setDetail`,
+    and `new ReportedException(report)`: the exception's message is the report's title and its
+    cause the report's exception, as vanilla's are, so the hook's log says what the mod reported.
+  - `LegacyRandomSource$LegacyPositionalRandomFactory` left `vanilla_records`' data classes (modelled
+    here now).
+  - Tests: compat 591 (6 new: a seeded source draws `new Random(42)`'s numbers, worked out apart
+    from the runtime, through every method, fork and positional factory, and `Direction.getRandom`,
+    `Util.getRandom` and `Util.shuffle` draw from it; an entity keeps its own source; `Util`'s
+    platform, pool and code points; a reported exception carries its report; a chunk's place and
+    the world's height in it, the server's levels; a mod slab's definition answers its properties
+    by name, a state its values, `byItem` its block and a crop's, a `super.updateShape` keeps the
+    state and `super.setPlacedBy` does nothing), translator 20.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
