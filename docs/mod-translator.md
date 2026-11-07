@@ -6941,6 +6941,46 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the world's height in it, the server's levels; a mod slab's definition answers its properties
     by name, a state its values, `byItem` its block and a crop's, a `super.updateShape` keeps the
     state and `super.setPlacedBy` does nothing), translator 20.
+- [x] 2026-11-07 Part 102: a mod block's `super.updateShape` into a vanilla class with a rule of
+  its own runs the game's rule. Of the pack's 215 classes calling one (read from their bytecode,
+  jars nested in jars too), 173 reach `BlockBehaviour`'s (Part 101: the state as it is); the other
+  42 go to classes with a rule: slabs, doors, fence gates, chains, ladders, trapdoors, bars, beds,
+  rails, plants, `FaceAttachedHorizontalDirectionalBlock` (Create's placard, clipboard and factory
+  panel), `MultifaceBlock`...
+  - World (`horizon-world`): `Behaviours::class_update_shape` runs `updateShape` from the first of
+    the classes it is given (simple names, nearest first) that the state's block has among its
+    classes, past the level's hook, on a view of the level that is only read
+    (`level/read_level.rs`: every read is the level's, writes go nowhere, a random of its own).
+    So the hook can run it from inside itself (`before_update_shape` holds the level as `&self`)
+    without being asked again.
+  - Game: `GameLevel::native_vanilla_update_shape` (a new API, fragment `vanilla_update_shape`)
+    takes the states as text, as the other level methods do; the translated bundles' shape update
+    hook gives it to compat as `Host::vanilla_update_shape` (compat-core, None by default).
+  - Compat: `super.updateShape` to a vanilla block class whose rule isn't `BlockBehaviour`'s asks
+    the host with the class and those above it up to the declaring one
+    (`blocks::update_shape_ancestry`: a weathering copper stair is asked as itself, then as
+    `StairBlock`), and goes on with the game's answer; where nothing answers (outside a shape
+    update, or a template without the class: a placard's is a plain block) the state stays.
+  - A mod block's classes are its template's, so the rule runs where the template has the class:
+    slabs, doors, fence gates, trapdoors, ladders, chains, bars, buttons, cakes. Still to do: the
+    rules of classes without a template (`FaceAttachedHorizontalDirectionalBlock`'s survival,
+    `MultifaceBlock`, `BushBlock`, `DoublePlantBlock`).
+  - Native hook fragments: seven of this branch's listed `native_hooks.rs` under `comments`,
+    which `tools/stamp_native_hooks.py` refuses (it stamps that file itself); dropped there.
+  - In the game (Create translated, `p102scene.sh`): a Create sliding door whose lower half is set
+    open opens its upper half (`DoorBlock`'s rule, run for Create's own `updateShape`, which goes on
+    to copy `visible`), and the log has no `updateShape` left unmapped or thrown. The door stays
+    when its floor is taken: Create's own `canSurvive` keeps a lower half anywhere (doors on
+    trains). Create's metal ladder showed the next gap: its `canSurvive` asks
+    `super.canSurvive` (`LadderBlock`'s), which nothing answers, so a rung on a wall fell with the
+    rung above it. `Block.canSurvive` (`BlockBehaviour`'s true) and `CropBlock`'s aren't answered
+    either: next, the same way as shape updates.
+  - Tests: compat 592 (1 new: a mod fence's `super.updateShape` is the host's answer, asked with
+    `FenceBlock`; a host without one keeps the state; the classes asked for copper stairs, a
+    button, a piston head, none for `HorizontalDirectionalBlock`), world `level::tests` 73 (1 new:
+    a fence's hook running `FenceBlock`'s rule joins the stone set beside it and isn't asked again,
+    unknown names are passed over, a class the block lacks runs nothing, a state past the table is
+    refused), translator 20.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

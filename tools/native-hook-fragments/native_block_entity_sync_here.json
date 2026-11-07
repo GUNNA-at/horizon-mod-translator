@@ -2,7 +2,5 @@
   "hooks": [],
   "rust_summary": "sending a block entity's data to players again from a level hook (`GameLevel::native_block_entity_sync_here`).",
   "doc_summary": "`GameLevel::native_block_entity_sync_here(pos)` is `native_block_entity_sync` for code a level hook runs (`tick_block`, `block_neighbor_changed`, a random tick): players are sent the block at `pos` and its block entity's update tag again, with the level's other block changes. Translated bundles answer `Level.sendBlockUpdated` and `ServerChunkCache.blockChanged` there with it (a nixie tube's new number reaches the clients drawing it): @API:native_block_entity_sync_here@.",
-  "comments": [
-    "crates/horizon-client/src/game/native_hooks.rs"
-  ]
+  "comments": []
 }

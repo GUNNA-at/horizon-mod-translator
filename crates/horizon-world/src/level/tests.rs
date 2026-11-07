@@ -3018,6 +3018,139 @@ fn update_shape_hook_can_answer_for_the_block() {
 }
 
 #[test]
+fn a_hook_can_run_a_vanilla_classes_update_shape() {
+    use std::cell::{Cell, RefCell};
+
+    /// A level whose hook answers a fence's shape update with what `classes`' rule gives, as a mod
+    /// fence's `super.updateShape` does.
+    struct Super {
+        inner: TestLevel,
+        b: &'static Behaviours,
+        fence: BlockId,
+        classes: &'static [&'static str],
+        asked: Cell<u32>,
+        answers: RefCell<Vec<Option<BlockStateId>>>,
+    }
+    impl LevelAccess for Super {
+        fn block_state(&self, pos: BlockPos) -> BlockStateId {
+            self.inner.block_state(pos)
+        }
+        fn set_raw(&mut self, pos: BlockPos, state: BlockStateId) -> Option<BlockStateId> {
+            self.inner.set_raw(pos, state)
+        }
+        fn is_loaded(&self, pos: BlockPos) -> bool {
+            self.inner.is_loaded(pos)
+        }
+        fn random(&mut self) -> &mut LegacyRandom {
+            self.inner.random()
+        }
+        fn game_time(&self) -> i64 {
+            self.inner.game_time()
+        }
+        fn emit(&mut self, event: LevelEvent) {
+            self.inner.emit(event);
+        }
+        fn before_update_shape(
+            &self,
+            ticks: &mut Ticks,
+            pos: BlockPos,
+            state: BlockStateId,
+            direction: Direction,
+            neighbour_pos: BlockPos,
+            neighbour: BlockStateId,
+            new: &mut Option<BlockStateId>,
+        ) {
+            if self.b.block(state) != self.fence {
+                return;
+            }
+            self.asked.set(self.asked.get() + 1);
+            let answer = self.b.class_update_shape(
+                self,
+                ticks,
+                self.classes,
+                state,
+                pos,
+                direction,
+                neighbour_pos,
+                neighbour,
+            );
+            self.answers.borrow_mut().push(answer);
+            *new = answer;
+        }
+    }
+    let Some(f) = fixture() else { return };
+    let b = &f.behaviours;
+    let fence = f.registry.default_state("minecraft:oak_fence").unwrap();
+    let with = |keys: &[&str]| {
+        let mut s = f.registry.state(fence).unwrap().clone();
+        for key in keys {
+            s.properties.insert((*key).into(), "true".into());
+        }
+        f.registry.resolve(&s).unwrap()
+    };
+    let stone = f.registry.default_state("minecraft:stone").unwrap();
+    let mut level = Super {
+        inner: TestLevel::new(b),
+        b,
+        fence: b.block(fence),
+        classes: &["FenceBlock"],
+        asked: Cell::new(0),
+        answers: RefCell::new(Vec::new()),
+    };
+    let mut ticks = Ticks::new(0);
+    ticks.add_empty_chunk(ChunkPos::new(0, 0)).unwrap();
+    let (pos, east, south) = (
+        BlockPos::new(1, 1, 1),
+        BlockPos::new(2, 1, 1),
+        BlockPos::new(1, 1, 2),
+    );
+    level.set_raw(pos, fence);
+    // Stone placed east: the fence's hook answers with `FenceBlock`'s rule, which joins it, and
+    // the rule doesn't ask the hook again.
+    b.set_block(&mut level, &mut ticks, east, stone, flags::UPDATE_ALL);
+    assert_eq!(level.block_state(pos), with(&["east"]));
+    assert_eq!(level.asked.get(), 1);
+    assert_eq!(*level.answers.borrow(), [Some(with(&["east"]))]);
+    // Names the game doesn't have, nearest first, are passed over for the first it has.
+    level.classes = &["WeatheringCopperFenceBlock", "FenceBlock"];
+    b.set_block(&mut level, &mut ticks, south, stone, flags::UPDATE_ALL);
+    assert_eq!(level.block_state(pos), with(&["east", "south"]));
+    // A class the block doesn't have runs nothing; the fence's own rule then does.
+    level.classes = &["CakeBlock"];
+    level.answers.borrow_mut().clear();
+    b.set_block(&mut level, &mut ticks, south, b.air(), flags::UPDATE_ALL);
+    assert_eq!(*level.answers.borrow(), [None]);
+    assert_eq!(level.block_state(pos), with(&["east"]));
+    // Asked directly, of a state not in the world: the rule reads the level as it is.
+    assert_eq!(
+        b.class_update_shape(
+            &level,
+            &mut ticks,
+            &["FenceBlock"],
+            fence,
+            pos,
+            Direction::East,
+            east,
+            stone
+        ),
+        Some(with(&["east"]))
+    );
+    assert_eq!(
+        b.class_update_shape(
+            &level,
+            &mut ticks,
+            &["FenceBlock"],
+            fence,
+            pos,
+            Direction::East,
+            east,
+            BlockStateId(u32::MAX)
+        ),
+        None
+    );
+}
+
+#[test]
 fn the_level_chooses_the_state_a_block_is_placed_in() {
     use crate::fluid::{FluidKind, FluidState};
     use horizon_core::geometry::Vec3;

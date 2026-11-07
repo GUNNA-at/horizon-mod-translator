@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "a vanilla block class's own shape update run for a mod's block (`native_vanilla_update_shape`).",
+  "doc_summary": "`native_vanilla_update_shape(ticks, classes, pos, state, direction, neighbour_pos, neighbour)` on a level is `updateShape` as a vanilla block class declares it, for the state `state` names: the rule of the first of `classes` (simple names, nearest first, as `StairBlock`) that the state's block has among its classes (a mod block's are its template's), past `native_update_shape`, with the level only read and the ticks it schedules in `ticks`. None for an unknown state or direction, or a block with none of the classes. A translated mod block's `super.updateShape` into a vanilla class (a fence, stairs, a slab, a plant) answers through it from inside `native_update_shape`: @API:vanilla_update_shape@.",
+  "comments": []
+}

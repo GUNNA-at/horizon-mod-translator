@@ -411,6 +411,37 @@ pub(crate) fn update_shape_declarer(class: &str) -> Option<&'static str> {
     None
 }
 
+/// The simple names of 1.21.1's block class `class` and the classes above it, nearest first, up to
+/// the one whose `updateShape` it runs ([`update_shape_declarer`]): where the game finds that rule
+/// among a mod block's template's classes, a renamed or untemplated class passed over (a flower's
+/// is its template's, the game's own `FlowerBlock`). Empty past `BlockBehaviour`'s.
+pub(crate) fn update_shape_ancestry(class: &str) -> Vec<&'static str> {
+    use crate::vanilla_classes::CLASSES;
+    let mut names = Vec::new();
+    let Some(mut at) = CLASSES.binary_search_by(|e| e.0.cmp(class)).ok() else {
+        return names;
+    };
+    for _ in 0..32 {
+        let (c, parent, _) = CLASSES[at];
+        let Some(short) = c.strip_prefix("net/minecraft/world/level/block/") else {
+            break;
+        };
+        if short == "state/BlockBehaviour" {
+            names.clear();
+            break;
+        }
+        names.push(short.rsplit('/').next().unwrap_or(short));
+        if UPDATE_SHAPE_CLASSES.contains(&short) {
+            break;
+        }
+        let Ok(next) = CLASSES.binary_search_by(|e| e.0.cmp(parent)) else {
+            break;
+        };
+        at = next;
+    }
+    names
+}
+
 /// The properties a vanilla block class adds in its own `createBlockStateDefinition`
 /// (`BlockStateProperties` fields), for a mod class that extends it.
 fn vanilla_definition(class: &str) -> &'static [&'static str] {
@@ -4441,6 +4472,128 @@ mod tests {
             &[slab, level, pos, top, V::NULL, stack],
         );
         assert_eq!(placed, V::Void);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod block extending a vanilla class with a shape rule of its own (`FenceBlock`) gets the
+    /// game's rule for its `super.updateShape`: the host is asked with that class and those above
+    /// it, nearest first, up to the declaring one, and the mod's code goes on with its answer.
+    /// Where the host runs no rule (outside a shape update), the state stays as it is.
+    #[test]
+    fn a_super_update_shape_into_a_vanilla_class_is_the_games_rule() {
+        const FENCE: &str = "test/RubyFence";
+        fn overrides(class: &str, short: &str) -> bool {
+            class == FENCE && short == api::UPDATE_SHAPE
+        }
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match short {
+                // `return super.updateShape(state, direction, neighbour, level, pos, neighbourPos);`
+                api::UPDATE_SHAPE if rt.class_of(args[0]) == FENCE => {
+                    let key = rt.static_key(&format!(
+                        "net/minecraft/world/level/block/FenceBlock.{}",
+                        api::UPDATE_SHAPE
+                    ));
+                    api::call(rt, key, args)
+                }
+                _ => api::call(rt, key, args),
+            }
+        }
+        type Asked = (Vec<String>, [i32; 3], String, usize, [i32; 3], String);
+        /// The game, whose fence rule joins stone.
+        #[derive(Default)]
+        struct Game {
+            asked: Vec<Asked>,
+        }
+        impl crate::host::Host for Game {
+            fn block_state(&self, _pos: [i32; 3]) -> String {
+                "minecraft:air".into()
+            }
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+                false
+            }
+            fn vanilla_update_shape(
+                &mut self,
+                classes: &[&str],
+                pos: [i32; 3],
+                state: &str,
+                direction: usize,
+                neighbour_pos: [i32; 3],
+                neighbour: &str,
+            ) -> Option<String> {
+                let names = classes.iter().map(|c| (*c).to_owned()).collect();
+                self.asked.push((
+                    names,
+                    pos,
+                    state.to_owned(),
+                    direction,
+                    neighbour_pos,
+                    neighbour.to_owned(),
+                ));
+                (classes.first() == Some(&"FenceBlock") && neighbour == "minecraft:stone")
+                    .then(|| state.replace("east=false", "east=true"))
+            }
+        }
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        rt.supers
+            .insert(FENCE, "net/minecraft/world/level/block/FenceBlock");
+        let fence = rt.new_object(FENCE);
+        rt.registered
+            .insert(("block".into(), "test:ruby_fence".into()), fence);
+        let state =
+            "test:ruby_fence[east=false,north=false,south=false,waterlogged=false,west=false]";
+        let joined =
+            "test:ruby_fence[east=true,north=false,south=false,waterlogged=false,west=false]";
+        let mut game = Game::default();
+        let east = 5;
+        let new = crate::glue::update_shape(
+            &mut rt,
+            &mut game,
+            [0, 64, 0],
+            state,
+            east,
+            [1, 64, 0],
+            "minecraft:stone",
+        );
+        assert_eq!(new.as_deref(), Some(joined));
+        let asked: Vec<Asked> = vec![(
+            vec!["FenceBlock".into()],
+            [0, 64, 0],
+            state.into(),
+            east,
+            [1, 64, 0],
+            "minecraft:stone".into(),
+        )];
+        assert_eq!(game.asked, asked);
+        let mut memory = crate::host::MemoryHost::default();
+        let kept = crate::glue::update_shape(
+            &mut rt,
+            &mut memory,
+            [0, 64, 0],
+            state,
+            east,
+            [1, 64, 0],
+            "minecraft:stone",
+        );
+        assert_eq!(kept.as_deref(), Some(state));
+        // The classes asked: a class's own name first (the game may know it), then its ancestors.
+        assert_eq!(
+            update_shape_ancestry("net/minecraft/world/level/block/WeatheringCopperStairBlock"),
+            ["WeatheringCopperStairBlock", "StairBlock"]
+        );
+        assert_eq!(
+            update_shape_ancestry("net/minecraft/world/level/block/ButtonBlock"),
+            ["ButtonBlock", "FaceAttachedHorizontalDirectionalBlock"]
+        );
+        assert_eq!(
+            update_shape_ancestry("net/minecraft/world/level/block/piston/PistonHeadBlock"),
+            ["PistonHeadBlock"]
+        );
+        assert!(
+            update_shape_ancestry("net/minecraft/world/level/block/HorizontalDirectionalBlock")
+                .is_empty()
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

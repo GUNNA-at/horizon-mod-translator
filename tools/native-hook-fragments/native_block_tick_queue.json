@@ -2,7 +2,5 @@
   "hooks": [],
   "rust_summary": "block ticks at a priority, and whether one is queued (`GameLevel::native_schedule_prioritized_block_tick` and `native_block_tick_queued` for level hooks, `native_schedule_prioritized_block_tick_at` and `native_block_tick_queued_at` from elsewhere).",
   "doc_summary": "`native_schedule_prioritized_block_tick(ticks, pos, block, delay, priority)` is `Level.scheduleTick(pos, block, delay, priority)`, the priority by `TickPriority`'s value (-3 extremely high to 3 extremely low): of the ticks due in one game tick, the higher priorities run first. `native_block_tick_queued(ticks, pos, block, this_tick)` is `LevelTicks.hasScheduledTick(pos, block)`, or with `this_tick` `willTickThisTick(pos, block)`: the tick was taken from the queue to run in the game tick under way. The `_at` forms act on the level in place from outside a level hook, and are false where the window isn't a server. Translated bundles answer a mod diode's `scheduleTick` with a priority and `getBlockTicks().willTickThisTick` with them (Create's latches and brass diodes keep vanilla's redstone timing): @API:native_block_tick_queue@.",
-  "comments": [
-    "crates/horizon-client/src/game/native_hooks.rs"
-  ]
+  "comments": []
 }

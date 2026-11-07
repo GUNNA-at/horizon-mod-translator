@@ -4510,7 +4510,8 @@ fn {id}_state_for_placement(
 // neighbour changes (`BlockState.updateShape`), by its own `updateShape`: a pipe, a cable or a pane
 // joining what is next to it. The level is only read; the ticks the block schedules go to the
 // level's. It runs inside the mod's own calls too (its `setBlock` updates the neighbours), on the
-// same runtime, so the block sees its block entity as the mod left it.
+// same runtime, so the block sees its block entity as the mod left it. A `super.updateShape` into
+// a vanilla class runs the game's rule for it (`native_vanilla_update_shape`).
 fn {id}_update_shape(
     level: &crate::game::GameLevel<'_>,
     ticks: &mut horizon_world::level::Ticks,
@@ -4562,6 +4563,9 @@ fn {id}_update_shape(
         }}
         fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
             false // the level is only read
+        }}
+        fn vanilla_update_shape(&mut self, classes: &[&str], pos: [i32; 3], state: &str, direction: usize, neighbour_pos: [i32; 3], neighbour: &str) -> Option<String> {{
+            self.level.native_vanilla_update_shape(self.ticks, classes, pos, state, direction, neighbour_pos, neighbour)
         }}
     }}
     let mut host = Host {{ level, ticks }};

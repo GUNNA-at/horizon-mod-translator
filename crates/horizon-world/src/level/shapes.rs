@@ -60,7 +60,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         }
     }
 
-    fn update_shape_at(
+    pub(super) fn update_shape_at(
         &mut self,
         depth: usize,
         state: BlockStateId,

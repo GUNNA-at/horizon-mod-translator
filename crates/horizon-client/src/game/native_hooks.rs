@@ -4452,6 +4452,45 @@ impl GameLevel<'_> {
     pub(super) fn native_state_occlusion(&self, text: &str) -> Option<(bool, bool)> {
         Some(state_occlusion(self.behaviours, self.native_state_from_text(text)?))
     }
+    /// `updateShape` as a vanilla block class declares it, for the state
+    /// `state` names at `pos` whose neighbour toward `direction`
+    /// (`Direction`'s ordinal) at `neighbour_pos` is `neighbour`: the rule of
+    /// the first of `classes` (simple names, nearest first, as `StairBlock`)
+    /// that the state's block has among its classes (a mod block's are its
+    /// template's), past `native_update_shape`, on this level only read. The
+    /// ticks it schedules go to `ticks`. What a mod block's
+    /// `super.updateShape` gets from inside `native_update_shape`: a fence
+    /// joins its neighbours, a slab's water flows. None for an unknown state
+    /// or direction, or a block with none of `classes`. API
+    /// @API:vanilla_update_shape@.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn native_vanilla_update_shape(
+        &self,
+        ticks: &mut Ticks,
+        classes: &[&str],
+        pos: [i32; 3],
+        state: &str,
+        direction: usize,
+        neighbour_pos: [i32; 3],
+        neighbour: &str,
+    ) -> Option<String> {
+        let (state, neighbour) = (
+            self.native_state_from_text(state)?,
+            self.native_state_from_text(neighbour)?,
+        );
+        let direction = *Direction::ALL.get(direction)?;
+        let new = self.behaviours.class_update_shape(
+            self,
+            ticks,
+            classes,
+            state,
+            BlockPos::new(pos[0], pos[1], pos[2]),
+            direction,
+            BlockPos::new(neighbour_pos[0], neighbour_pos[1], neighbour_pos[2]),
+            neighbour,
+        )?;
+        Some(self.native_state_id_text(new))
+    }
     /// The dimension this level is (`minecraft:the_nether`), as
     /// `Game::native_dimension` names the current one.
     pub(super) fn native_dimension_name(&self) -> &'static str {

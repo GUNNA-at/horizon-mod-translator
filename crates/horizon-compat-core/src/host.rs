@@ -574,6 +574,24 @@ pub trait Host {
     fn block_tick_queued(&mut self, _pos: [i32; 3], _block: &str, _this_tick: bool) -> bool {
         false
     }
+    /// `updateShape` as a vanilla block class declares it, for the block `state` at `pos` whose
+    /// neighbour toward `direction` (`Direction`'s ordinal) at `neighbour_pos` is `neighbour`
+    /// (states as [`Host::block_state`] writes them): the rule of the first of `classes` (simple
+    /// names, nearest first, as `StairBlock`) that the state's block has among its classes, with the
+    /// level only read; the ticks it schedules are the update's. What a mod block's
+    /// `super.updateShape` gets. None where nothing runs it (the default: outside a shape update).
+    #[allow(clippy::too_many_arguments)]
+    fn vanilla_update_shape(
+        &mut self,
+        _classes: &[&str],
+        _pos: [i32; 3],
+        _state: &str,
+        _direction: usize,
+        _neighbour_pos: [i32; 3],
+        _neighbour: &str,
+    ) -> Option<String> {
+        None
+    }
     /// The acting player (the one whose click or action runs the mod): sneaking.
     fn player_sneaking(&self) -> bool {
         false

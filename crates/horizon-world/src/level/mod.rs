@@ -114,6 +114,7 @@ mod place;
 mod portal;
 pub mod portal_travel;
 mod query;
+mod read_level;
 pub(crate) use query::data_2d;
 mod rails;
 mod redstone;
@@ -1010,6 +1011,43 @@ impl Behaviours {
     ) -> BlockStateId {
         self.sim(level, ticks)
             .update_shape(state, pos, direction, neighbour_pos, neighbour)
+    }
+    /// `updateShape` as a vanilla class declares it: the rule of the first of `classes` (simple
+    /// names, nearest first, as `StairBlock`) that `state`'s block has among its classes, and of the
+    /// classes after it, past the level's hook (`before_update_shape`). What a mod block's
+    /// `super.updateShape` asks of its template's classes from inside that hook, where the level is
+    /// only read: writes go nowhere, the ticks it requests are queued in `ticks`. None where the
+    /// block has none of `classes`, or for a state past the table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn class_update_shape<L: LevelAccess + ?Sized>(
+        &self,
+        level: &L,
+        ticks: &mut Ticks,
+        classes: &[&str],
+        state: BlockStateId,
+        pos: BlockPos,
+        direction: Direction,
+        neighbour_pos: BlockPos,
+        neighbour: BlockStateId,
+    ) -> Option<BlockStateId> {
+        let count = self.table.state_count();
+        if state.0 as usize >= count || neighbour.0 as usize >= count {
+            return None;
+        }
+        let chain = &self.data(state).chain;
+        let depth = classes
+            .iter()
+            .filter_map(|name| classes::Class::from_java(name))
+            .find_map(|class| chain.iter().position(|&c| c == class))?;
+        let mut read = read_level::ReadLevel::new(level);
+        Some(self.sim(&mut read, ticks).update_shape_at(
+            depth,
+            state,
+            pos,
+            direction,
+            neighbour_pos,
+            neighbour,
+        ))
     }
     /// `Block.updateFromNeighbourShapes`: a state adjusted to its neighbours.
     pub fn update_from_neighbour_shapes<L: LevelAccess + ?Sized>(

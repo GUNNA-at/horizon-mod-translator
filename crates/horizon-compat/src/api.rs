@@ -2456,6 +2456,14 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         {
             a(1)
         }
+        // `super.updateShape(...)` reaching a vanilla class's own (a fence joining its neighbours, a
+        // slab's water, a plant's survival): the game's rule, run from the shape update's hook.
+        (o, "updateShape")
+            if UPDATE_SHAPE.ends_with(desc)
+                && crate::blocks::update_shape_declarer(o).is_some() =>
+        {
+            class_update_shape(rt, o, args)
+        }
         (BLOCK, "<init>") => V::Void,
         // The API's base constructors a mod's own classes call (`super(properties)`): their state
         // lives in the runtime's fields, so nothing more to do.
@@ -2463,6 +2471,35 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "<init>") if o.starts_with("net/minecraft/world/item/") && o.ends_with("Item") => V::Void,
         _ => return crate::api_common::call(rt, owner, name, desc, args),
     })
+}
+
+/// A vanilla class's `updateShape` for a mod block's state: `super.updateShape(state, direction,
+/// neighbour, level, pos, neighbourPos)` from a class extending `class`. The host runs the rule of
+/// the nearest of `class` and the classes above it, up to the declaring one, that the state's block
+/// has among its classes (a mod block's are its template's); the state stays as it is where the
+/// host runs none (outside a shape update, or a template without the class).
+fn class_update_shape(rt: &mut Rt, class: &str, args: &[V]) -> V {
+    let a = |i: usize| args.get(i).copied().unwrap_or(V::Void);
+    let current = a(1);
+    let classes = crate::blocks::update_shape_ancestry(class);
+    let (Some(text), Some(neighbour)) = (
+        rt.str_of(current).map(str::to_owned),
+        rt.str_of(a(3)).map(str::to_owned),
+    ) else {
+        return current;
+    };
+    if classes.is_empty() {
+        return current;
+    }
+    let direction = usize::from(crate::api_common::direction_ordinal(rt, a(2)));
+    let (pos, neighbour_pos) = (pos_of(rt, a(5)), pos_of(rt, a(6)));
+    let new = rt.host_mut().and_then(|h| {
+        h.vanilla_update_shape(&classes, pos, &text, direction, neighbour_pos, &neighbour)
+    });
+    match new {
+        Some(new) if new != text => state(rt, &new),
+        _ => current,
+    }
 }
 
 /// The most states [`possible_states`] spells out; a definition with more (vanilla's largest,

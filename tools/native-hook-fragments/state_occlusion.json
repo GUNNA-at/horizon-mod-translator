@@ -3,7 +3,6 @@
   "rust_summary": "which faces of a block hide the faces beside it, for mods (`native_state_occlusion`, `native_face_occlusion`).",
   "doc_summary": "`native_state_occlusion(text)` says whether the state `text` names can hide its neighbours' faces (`BlockState.canOcclude`) and is an opaque full cube to the renderer (`isSolidRender`), on a game or a level; None for an unknown state. `native_face_occlusion(text, direction)` is that state's occlusion shape's face toward `direction` (`Direction`'s ordinal), as the game hides the faces beside it (`getFaceOcclusionShape`): boxes relative to the block's corner, none for a face that hides nothing; None for an unknown state and on a server, which draws nothing. Translated bundles answer `Block.shouldRenderFace` with them (Create's gauges draw their dials on the faces it lets through): @API:state_occlusion@.",
   "comments": [
-    "crates/horizon-client/src/game/native_hooks.rs",
     "crates/horizon-client/src/game/native_shapes.rs"
   ]
 }
