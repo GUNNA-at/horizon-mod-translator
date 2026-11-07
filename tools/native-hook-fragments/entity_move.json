@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "a mob moved by a mod's code as `Entity.move` moves it (`native_move_mob`), and a server's player's motion marked for their client (`native_mark_player_motion`).",
+  "doc_summary": "`native_move_mob(dimension, id, movement)` moves mob `id` by `movement` as `Entity.move(MoverType.SELF, movement)` does (a mod's belt carries it): its collisions and step-up, its fall and landing, the blocks it moves through, as its own motion moves it in its tick, whose motion is left to what the move does to it; it is where the move took it, None for no such mob, another dimension or a movement that isn't finite. `native_mark_player_motion(uuid)` marks the player `uuid`'s motion as the server holds it (`hurtMarked = true` on a server's player): it is sent to their client with their next tick, as a hurt one is, and they move by it; it runs as that player (`native_as_player`), false for no such player here, or dead. Bundles need \"hooks\": @API:entity_move@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mobs.rs"
+  ]
+}

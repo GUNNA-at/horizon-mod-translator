@@ -6704,6 +6704,46 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     awkward potion fluid, and a basin of awkward potion fluid with sugar 1000 mB of swiftness, both
     by t+120, each basin showing its potion's colour. Nothing threw. The scene's only unmapped calls
     left are `Integer.getInteger` and `LocalPlayer.isInvisible`.
+- [x] 2026-11-07 Part 95: Create's belts carry the game's mobs (a pig on a running belt
+  stood still: Create moves what a belt carries with `Entity.move(MoverType, Vec3)`, which the
+  game's mobs didn't answer, then sets its motion and `hurtMarked`, whose write reached nobody, so a
+  player on a server was never sent their ride). Measured first (`p95scene.sh`, on Part 94's
+  build): a running belt held a pig in place (its slowness) without carrying it, and the unmapped
+  calls were the pig's `move`, `setOnGround`, `maxUpStep`, `$zza`, `$xxa` and
+  `getPistonPushReaction`, and a player's `getPassengers`; the fan blew both (Part 90). Over the
+  pack, `move(MoverType, Vec3)` is called by 92 classes in 35 jars, `hurtMarked` named by 73 in 16,
+  `maxUpStep` by 24 in 13, `setOnGround` by 51 in 21.
+  - game: `native_move_mob(dimension, id, movement)` moves a mob as `Entity.move` does (its
+    collisions and step-up, its fall and landing, the blocks it moves through: the mob's own move,
+    `Mob::move_by`, which its tick's `do_move` now is with its own motion), and is where that took
+    it; `native_mark_player_motion(uuid)` marks a server's player's motion (`sync_velocity`, as a
+    hurt does) so their next tick sends it to their client (fragment `entity_move.json`).
+  - translator: a write to `Entity.hurtMarked` through a game class (`ServerPlayer`, a mod's own
+    entity's game superclass) is kept as any field write, then told to the runtime
+    (`Entity.$hurtMarked.(Z)V`); a mod's own field of that name is only kept. The game's host and
+    the one after a hit move mobs and mark players; a hit's own does both once the hit is over.
+  - compat: the game's mob answers `move` through the game (its object is where it went),
+    `setOnGround` (its physics' own), `maxUpStep` (`STEP_HEIGHT`'s default 0.6 for a living one, 0
+    for the rest), its walk inputs `$xxa`, `$yya`, `$zza` (still) and `getPistonPushReaction`
+    (`IGNORE` for clouds, markers, interactions and displays, `NORMAL` for the rest, as their
+    classes say). A server's player's `hurtMarked = true` sends their motion and is spent; a mob's,
+    a client's own player's and a mod's own entity's mark tell nobody. A server's player's `move`
+    leaves them where their client says (the marked motion moves them there); a player carries no
+    passengers, steps 0.6, is pushed by a piston, and is invisible while the effect lasts.
+  - compat: `Integer.getInteger` and `Long.getLong` give their default (no system properties here),
+    and `System.getProperty(key, default)` its default (it gave null).
+  - Tests: compat 579 (1 new: a mod moves the game's pig along and marks a player's motion once;
+    the pig's step, inputs and push reaction, a marker's; a client's mark tells nobody), translator
+    20 (1 new: a write to `ServerPlayer.hurtMarked` is told to the runtime, a mod's own field of
+    that name only kept).
+  - In game (`p95scene-c.sh`, Create's belt run by a creative motor at 32 rpm): the pig summoned on
+    the belt's start rides it, z 9.50, 11.46, 13.46, 15.33 at 20-tick steps (0.1 a tick, the belt's
+    speed), slowed and held to the middle as Create holds it, then drops off the far end at 16.63
+    and walks away; the fan beside it still blows a pig and the player (Part 90). A player standing
+    on a level belt still stays put: Create carries a player on their own client (the client's belt
+    hears the player in it and moves them there), which the window's game doesn't tell its mods
+    yet: the next part. `p94scene.sh` on this build still brews awkward and swiftness potions
+    (1000 mB each by t+120).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

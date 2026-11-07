@@ -2427,6 +2427,67 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 V::Void
             }
         }
+        // `hurtMarked = true` on a server's player: their motion as the server holds it is sent
+        // to their client, which moves them by it (a belt carries them), and the mark is spent,
+        // as `ServerEntity.sendChanges` spends it. A client's own mark tells nobody.
+        (o, "$hurtMarked")
+            if is_player(o) && is_player_class(rt.class_of(a(0))) && desc == "(Z)V" =>
+        {
+            let client = rt.class_of(a(0)) == LOCAL_PLAYER
+                || rt.host().is_some_and(|h| h.client_player_id().is_some());
+            if a(1).i() != 0 && !client {
+                let uuid = crate::network::player_uuid(rt, a(0))
+                    .or_else(|| rt.host().and_then(|h| h.player_id()));
+                if let Some(u) = uuid
+                    && rt.host_call(|h| h.mark_player_motion(u)).unwrap_or(false)
+                {
+                    rt.put_field(a(0), "hurtMarked", V::I(0));
+                }
+            }
+            V::Void
+        }
+        // Any other entity's mark: a mob's motion is sent to the players who see it as it
+        // changes, and a mod's own entity keeps the field as written.
+        (_, "$hurtMarked") if desc == "(Z)V" => V::Void,
+        // A server's player moves where their client takes them: the motion a mod sets and marks
+        // (`hurtMarked`) moves them there, and the server's copy follows what the client tells.
+        (o, "move")
+            if is_player(o)
+                && is_player_class(rt.class_of(a(0)))
+                && rt.class_of(a(0)) != LOCAL_PLAYER
+                && desc
+                    == "(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V" =>
+        {
+            V::Void
+        }
+        // Where a player stands is their physics' (`setOnGround`); a walking player's inputs reach a
+        // server only while riding (`$xxa`, `$zza`); they step as `STEP_HEIGHT`'s default says, carry
+        // no passengers here, and a piston (or a belt) pushes them.
+        (o, "setOnGround")
+            if is_player(o) && is_player_class(rt.class_of(a(0))) && desc == "(Z)V" =>
+        {
+            V::Void
+        }
+        (o, "$xxa" | "$yya" | "$zza")
+            if is_player(o)
+                && is_player_class(rt.class_of(a(0)))
+                && rt.class_of(a(0)) != LOCAL_PLAYER =>
+        {
+            V::F(0.0)
+        }
+        (o, "maxUpStep") if is_player(o) && is_player_class(rt.class_of(a(0))) => V::F(0.6),
+        (o, "getPassengers") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
+            crate::jutil::new_list(rt, Vec::new())
+        }
+        (o, "getPistonPushReaction") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
+            crate::blocks::push_reaction_named(rt, "normal")
+        }
+        // Invisible by the effect, as `Player.updateInvisibilityStatus` makes a player (a spectator
+        // is too, and none acts here).
+        (o, "isInvisible") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
+            let invisible = crate::mob_effects::has(rt, a(0), "minecraft:invisibility");
+            V::I(i32::from(invisible))
+        }
         // `hurt(source, amount)` on a server's player, through the game: nothing in creative, else
         // their frames, a raised shield, armor and effects, the knockback and the sound. The game's
         // damage hooks hear the mod's own source.

@@ -548,7 +548,14 @@ impl Mob {
     /// Entity.move with block collisions and step-up; updates collision flags
     /// and fall distance (Entity.checkFallDamage).
     pub fn do_move(&mut self, w: &MobWorld, events: &mut Vec<MobEvent>) {
-        let mut wanted = self.velocity;
+        self.move_by(w, self.velocity, events);
+    }
+    /// Entity.move(MoverType.SELF, movement) by any movement, as a mod's code
+    /// moves a mob (Create's belts carry what stands on them): what the
+    /// collisions, the landing and the blocks do to a motion is done to the
+    /// mob's own, as in `do_move`.
+    pub fn move_by(&mut self, w: &MobWorld, movement: Vec3, events: &mut Vec<MobEvent>) {
+        let mut wanted = movement;
         // Entity.move: a block the mob is stuck in (sweet berry bush) scales
         // this move once and stops it.
         if self.stuck_multiplier.length_squared() > 1.0e-7 {

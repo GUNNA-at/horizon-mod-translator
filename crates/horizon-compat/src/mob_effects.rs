@@ -116,6 +116,13 @@ fn active(rt: &mut Rt, entity: Option<Option<i32>>) -> Vec<EffectView> {
     rt.host_mut().and_then(|h| h.effects(entity)).unwrap_or_default()
 }
 
+/// Whether the entity of object `e` (the game's mob, a player) has the effect `id`
+/// (`minecraft:invisibility`); not one the host doesn't know.
+pub(crate) fn has(rt: &mut Rt, e: V, id: &str) -> bool {
+    let entity = crate::attributes::entity_of(rt, e).ok();
+    active(rt, entity).iter().any(|x| full(&x.id) == id)
+}
+
 /// The effect of `holder` that `entity` has.
 fn find(rt: &mut Rt, entity: Option<Option<i32>>, holder: V) -> Option<EffectView> {
     let id = full(&food::effect_id(rt, holder)?);

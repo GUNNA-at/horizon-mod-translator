@@ -616,6 +616,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 }
                 V::Void
             }
+            // No system properties or environment here: a property's default, else null.
+            "getProperty" if ks.len() == 2 => a(1),
             "getProperty" | "getenv" => V::NULL,
             "lineSeparator" => rt.string("\n"),
             _ => return None,
@@ -1356,6 +1358,13 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
             boxed(rt, v)
         }
         "valueOf" => boxed(rt, a(0)),
+        // `Integer.getInteger(name[, default])` and `Long.getLong`: a system property, of which the
+        // runtime has none: the default, boxed, else null.
+        "getInteger" | "getLong" => match ks.get(1) {
+            Some('L') => a(1),
+            Some(_) => boxed(rt, a(1)),
+            None => V::NULL,
+        },
         "parseInt" | "parseLong" | "parseDouble" | "parseFloat" | "parseShort" | "parseByte" => {
             let s = text(rt, a(0));
             if ks.len() > 1 && simple == "Integer" {

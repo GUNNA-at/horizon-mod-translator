@@ -386,6 +386,16 @@ fn is_shadow_field(f: &crate::class::Field) -> bool {
     f.annotations.iter().any(|a| a.ty == "Lorg/spongepowered/asm/mixin/Shadow;")
 }
 
+/// The call the runtime answers after a write to game field `m` it hears of, which is kept as any
+/// other first: `Entity.hurtMarked` (a server sends a marked player their motion, as
+/// `ServerEntity.sendChanges` does). None for the rest.
+fn heard_write(m: &Member) -> Option<&'static str> {
+    match (m.name.as_str(), m.desc.as_str()) {
+        ("hurtMarked", "Z") => Some("net/minecraft/world/entity/Entity.$hurtMarked.(Z)V"),
+        _ => None,
+    }
+}
+
 /// A method a mixin adds to the game's classes (or overwrites there), as the dispatcher of its
 /// `name.desc` finds it for a game object: through the mixin, its target or an interface it adds.
 struct Added {
@@ -2104,6 +2114,7 @@ impl<'a> Program<'a> {
             _ => None,
         };
         let game_read = if op == 0xb4 { self.game_field_read(&m, "o") } else { None };
+        let heard = if op == 0xb5 && !self.own(&self.field_owner(&m.owner, &m.name)) { heard_write(&m) } else { None };
         match op {
             0xb2 if self.own(&owner) => match zero {
                 Some(z) => format!("{init}let v = match rt.statics.get({skey:?}).copied() {{ None | Some(V::Void) => {z}, Some(v) => v }}; s.push(v); {go}"),
@@ -2118,6 +2129,8 @@ impl<'a> Program<'a> {
                 Some(z) => format!("let o = {pop}; s.push(match rt.get_field(o, {:?}) {{ V::Void => {z}, v => v }}); {go}", m.name),
                 None => format!("let o = {pop}; s.push(rt.get_field(o, {:?})); {go}", m.name),
             },
+            // A game field whose writes the runtime hears of: kept as any other, then told.
+            _ if heard.is_some() => format!("let v = {pop}; let o = {pop}; rt.put_field(o, {:?}, v); api::call(rt, {:?}, &[o, v]); {go}", m.name, heard.unwrap_or_default()),
             _ => format!("let v = {pop}; let o = {pop}; rt.put_field(o, {:?}, v); {go}", m.name),
         }
     }
@@ -2642,5 +2655,71 @@ mod field_tests {
         let p = super::Program::new(&classes);
         assert_eq!(p.field_owner("m/Child", "SHAPED"), "api/Serializer");
         assert_eq!(p.field_owner("m/MyItem", "ID"), "api/Item");
+    }
+
+    /// A write to `Entity.hurtMarked` is kept, then told to the runtime (a server sends the marked
+    /// player their motion), through whichever class the mod names it by (`ServerPlayer`, its own
+    /// entity's); a field of the mod's own of the same name is only kept.
+    #[test]
+    fn a_write_to_hurt_marked_is_told_to_the_runtime() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("mod-translator-marked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in [
+            "net/minecraft/world/entity",
+            "net/minecraft/server/level",
+            "m",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let files = [
+            (
+                "net/minecraft/world/entity/Entity.java",
+                "package net.minecraft.world.entity; public class Entity { public boolean hurtMarked; }",
+            ),
+            (
+                "net/minecraft/server/level/ServerPlayer.java",
+                "package net.minecraft.server.level; public class ServerPlayer extends net.minecraft.world.entity.Entity {}",
+            ),
+            (
+                "m/Belt.java",
+                "package m; public class Belt { void carry(net.minecraft.server.level.ServerPlayer p) { p.hurtMarked = true; } }",
+            ),
+            (
+                "m/Own.java",
+                "package m; public class Own { boolean hurtMarked; void mark() { this.hurtMarked = true; } }",
+            ),
+        ];
+        for (path, src) in files {
+            std::fs::write(root.join(path), src).unwrap();
+        }
+        let paths: Vec<_> = files.iter().map(|(p, _)| root.join(p)).collect();
+        assert!(
+            Command::new("javac")
+                .args(["-d", root.to_str().unwrap()])
+                .args(&paths)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let parse = |c: &str| ClassFile::parse(&std::fs::read(root.join(c)).unwrap()).unwrap();
+        let (belt, own) = ([parse("m/Belt.class")], [parse("m/Own.class")]);
+        let _ = std::fs::remove_dir_all(&root);
+        let told =
+            r#"api::call(rt, "net/minecraft/world/entity/Entity.$hurtMarked.(Z)V", &[o, v])"#;
+        let code = super::Program::new(&belt).emit();
+        assert!(
+            code.contains(r#"rt.put_field(o, "hurtMarked", v); "#) && code.contains(told),
+            "{code}"
+        );
+        let code = super::Program::new(&own).emit();
+        assert!(
+            code.contains(r#"rt.put_field(o, "hurtMarked", v); "#) && !code.contains(told),
+            "{code}"
+        );
     }
 }

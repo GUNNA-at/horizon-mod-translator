@@ -1122,6 +1122,16 @@ pub trait Host {
     fn teleport_entity(&mut self, _id: i32, _pos: [f64; 3]) -> bool {
         false
     }
+    /// Moves the mob `id` by `movement` (`Entity.move(MoverType.SELF, movement)`), with its
+    /// collisions, as its own motion moves it: where that took it, None for no such mob.
+    fn move_entity(&mut self, _id: i32, _movement: [f64; 3]) -> Option<[f64; 3]> {
+        None
+    }
+    /// Sends the player `uuid` their motion as the server holds it (`hurtMarked = true` on a
+    /// server's player): their client moves by it. False for a player the host doesn't have.
+    fn mark_player_motion(&mut self, _uuid: u128) -> bool {
+        false
+    }
     /// The text on the clipboard (`KeyboardHandler.getClipboard`), empty when none: a client's.
     fn clipboard(&self) -> String {
         String::new()
@@ -1589,6 +1599,9 @@ pub struct MemoryHost {
     pub motions: HashMap<i32, [f64; 3]>,
     /// The players' motions ([`Host::player_motion`]), by UUID.
     pub player_motions: HashMap<u128, [f64; 3]>,
+    /// The players whose motion was marked for their client ([`Host::mark_player_motion`]), in
+    /// order.
+    pub marked_players: Vec<u128>,
     /// The knockbacks given ([`Host::knockback_entity`]), in order: entity, strength, x, z.
     pub knockbacks: Vec<(i32, f64, f64, f64)>,
     /// The blows whose enchantment effects were asked for ([`Host::post_attack_effects`]), in order.
@@ -2276,6 +2289,26 @@ impl Host for MemoryHost {
             }
             None => false,
         }
+    }
+    // No blocks stop a move here.
+    fn move_entity(&mut self, id: i32, movement: [f64; 3]) -> Option<[f64; 3]> {
+        let e = self
+            .entities
+            .iter_mut()
+            .find(|e| e.id == id && e.health.is_some())?;
+        e.pos = [
+            e.pos[0] + movement[0],
+            e.pos[1] + movement[1],
+            e.pos[2] + movement[2],
+        ];
+        Some(e.pos)
+    }
+    fn mark_player_motion(&mut self, uuid: u128) -> bool {
+        let known = self.player_motion(uuid).is_some();
+        if known {
+            self.marked_players.push(uuid);
+        }
+        known
     }
     fn set_item_entity(&mut self, id: u32, item: &str, count: u32) -> bool {
         let Some(i) = self.item_entities.iter().position(|e| e.id == id) else { return false };

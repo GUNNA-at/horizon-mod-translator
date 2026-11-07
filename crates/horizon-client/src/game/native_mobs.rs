@@ -245,6 +245,37 @@ impl Game<'_> {
         m.needs_sync = true;
         true
     }
+    /// Moves mob `id` by `movement` as `Entity.move(MoverType.SELF,
+    /// movement)` does (a mod's belt carries it): its collisions and step-up,
+    /// its fall and landing, the blocks it moves through, as its own motion
+    /// moves it in its tick; that motion is left to what the move does to it.
+    /// Where the move took it, None for no such mob, another dimension or a
+    /// movement that isn't finite. API @API:entity_move@.
+    pub(super) fn native_move_mob(
+        &mut self,
+        dimension: &str,
+        id: u32,
+        movement: [f64; 3],
+    ) -> Option<[f64; 3]> {
+        if !self.native_mob_level(dimension) || !finite(movement) {
+            return None;
+        }
+        let i = self.mobs.iter().position(|m| m.id == id && !m.removed)?;
+        let mut m = self.mobs.remove(i);
+        let mut events = Vec::new();
+        {
+            let w = self.mob_world_base(&[]);
+            let movement = Vec3::new(movement[0], movement[1], movement[2]);
+            m.move_by(&w, movement, &mut events);
+        }
+        m.needs_sync = true;
+        let at = [m.position.x, m.position.y, m.position.z];
+        self.mobs.insert(i, m);
+        if let Err(e) = self.handle_mob_events(events) {
+            log::warn!("Horizon: a mod's move of mob {id}: {e}");
+        }
+        Some(at)
+    }
     /// The player `uuid`'s motion in blocks a tick as the server holds it
     /// (`getDeltaMovement` on a server's player), also inside a player's hook
     /// for the acting player: None for no such player here, or dead. API
@@ -276,6 +307,18 @@ impl Game<'_> {
             }
         });
         set
+    }
+    /// Marks the player `uuid`'s motion as the server holds it for their
+    /// client (`hurtMarked = true` on a server's player): it is sent to them
+    /// with their next tick, as `ServerEntity.sendChanges` sends a hurt one,
+    /// and they move by it (a mod's belt carries them). False for no such
+    /// player here, or dead. API @API:entity_move@.
+    pub(super) fn native_mark_player_motion(&mut self, uuid: u128) -> bool {
+        self.native_as_player(uuid, |game| {
+            if let Some(p) = game.player.as_mut() {
+                p.health.sync_velocity = true;
+            }
+        })
     }
     /// The window's own player's motion in blocks a tick
     /// (`LocalPlayer.getDeltaMovement`): None with no player. API

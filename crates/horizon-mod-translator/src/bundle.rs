@@ -2627,6 +2627,15 @@ fn world_writes(c: &str) -> String {
             let dimension = self.game.native_dimension().to_owned();
             u32::try_from(id).is_ok_and(|i| self.game.native_teleport_mob(&dimension, i, pos))
         }}
+        // `Entity.move(SELF, movement)` on a mob: the game's own move, with its collisions. A
+        // server's player marked (`hurtMarked`) is sent their motion with their next tick.
+        fn move_entity(&mut self, id: i32, movement: [f64; 3]) -> Option<[f64; 3]> {{
+            let dimension = self.game.native_dimension().to_owned();
+            self.game.native_move_mob(&dimension, u32::try_from(id).ok()?, movement)
+        }}
+        fn mark_player_motion(&mut self, uuid: u128) -> bool {{
+            self.game.native_mark_player_motion(uuid)
+        }}
 {attributes}{effects}{vitals}{level_events}"#,
         attributes = attribute_methods(c, "Some(&mut *self.game)"),
         effects = effect_methods(c, "Some(&mut *self.game)"),
@@ -2757,6 +2766,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
     let post_attack = later("Later { game }.post_attack_effects(victim, &by, &weapon)");
     let (health, push, teleport) = (later("Later { game }.set_entity_health(id, health)"), later("Later { game }.push_entity(id, velocity)"), later("Later { game }.teleport_entity(id, pos)"));
     let (motion, player_motion) = (later("Later { game }.set_entity_motion(id, motion)"), later("Later { game }.set_player_motion(uuid, motion)"));
+    let (moved, marked) = (later("Later { game }.move_entity(id, movement)"), later("Later { game }.mark_player_motion(uuid)"));
     let (orb, payload) = (later("game.native_spawn_experience_orb(at, value, motion)"), later("Later { game }.send_payload(to, &channel, &data)"));
     let attribute = later("Later { game }.change_attribute(entity, &attribute, &change)");
     let (give, take) = (later("Later { game }.add_effect(entity, &effect, force)"), later("Later { game }.remove_effect(entity, &effect)"));
@@ -2910,6 +2920,16 @@ fn hit_host(c: &str, server_send: &str) -> String {
         }}
         fn set_player_motion(&mut self, uuid: u128, motion: [f64; 3]) -> bool {{
             {player_motion}
+            true
+        }}
+        // A move and a mark in a hit, once it is over (where the move takes the mob isn't known
+        // here).
+        fn move_entity(&mut self, id: i32, movement: [f64; 3]) -> Option<[f64; 3]> {{
+            {moved}
+            None
+        }}
+        fn mark_player_motion(&mut self, uuid: u128) -> bool {{
+            {marked}
             true
         }}
         fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {{

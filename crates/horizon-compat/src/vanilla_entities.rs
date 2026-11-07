@@ -898,6 +898,42 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
+        // `move(MoverType, movement)`: the game moves it as its own motion does, with its
+        // collisions (Create's belts carry what stands on them). Where it lands, it is.
+        "move"
+            if desc
+                == "(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V" =>
+        {
+            let movement = xyz_of(rt, a(2));
+            if let Some(at) = with_host(rt, |h| h.move_entity(id, movement)).flatten() {
+                for (k, v) in ["$x", "$y", "$z"].into_iter().zip(at) {
+                    rt.put_field(e, k, V::D(v));
+                }
+            }
+            V::Void
+        }
+        // The game's physics sets where it stands from its own collisions, and sends its motion to
+        // the players who see it as it changes (`hurtMarked` asks no more of it).
+        "setOnGround" | "$hurtMarked" if desc.ends_with("V") => V::Void,
+        // How high it steps: `STEP_HEIGHT`'s default for a living one (the game doesn't tell a
+        // mob's own), none for the rest, as `Entity.maxUpStep` answers.
+        "maxUpStep" => V::F(if living { 0.6 } else { 0.0 }),
+        // A mob's walk inputs: the game doesn't tell them; still.
+        "$xxa" | "$yya" | "$zza" if living => V::F(0.0),
+        // What a piston, and so a belt, does with it: `IGNORE` for the kinds that override it so
+        // (a cloud, a marker, an interaction, a display), `NORMAL` for the rest.
+        "getPistonPushReaction" => {
+            let ignored = matches!(
+                kind.as_str(),
+                "minecraft:area_effect_cloud"
+                    | "minecraft:marker"
+                    | "minecraft:interaction"
+                    | "minecraft:block_display"
+                    | "minecraft:item_display"
+                    | "minecraft:text_display"
+            );
+            crate::blocks::push_reaction_named(rt, if ignored { "ignore" } else { "normal" })
+        }
         "teleportTo" | "setPos" | "moveTo" | "absMoveTo" if desc.starts_with("(DDD") || desc.starts_with("(Lnet/minecraft/world/phys/Vec3;") => {
             let to = if desc.starts_with("(DDD") { [a(1).d(), a(2).d(), a(3).d()] } else { xyz_of(rt, a(1)) };
             if with_host(rt, |h| h.teleport_entity(id, to)).unwrap_or(false) {
@@ -1160,6 +1196,133 @@ mod tests {
             "another player's isn't the client's"
         );
         assert_eq!(client.player_motions[&0x99], [0.0, -0.0784, 0.3]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod moves the game's mob as `Entity.move(MoverType.SELF, movement)` does (Create's belt
+    /// carries what stands on it): the game moves it, and its object is where that took it. What a
+    /// belt asks of what it carries answers as 1.21.1's classes do: a living one steps as
+    /// `STEP_HEIGHT`'s default says and anything else not at all, a mob's walk inputs are still,
+    /// a piston (so a belt) ignores a marker and pushes a pig and a player. Marking a server's
+    /// player's motion (`hurtMarked = true`) sends it to their client and spends the mark; a mob's
+    /// mark, an unmark and a client's own mark tell nobody. A server's player isn't moved by
+    /// `move` (their client moves them) and carries no passengers; they are invisible while the
+    /// effect lasts.
+    #[test]
+    fn a_mod_moves_the_games_mob_and_marks_a_players_motion() {
+        const MOVE: &str = "net/minecraft/world/entity/Entity.move.(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V";
+        const MARK: &str = "net/minecraft/world/entity/Entity.$hurtMarked.(Z)V";
+        const MARKED: &str = "net/minecraft/world/entity/Entity.$hurtMarked.()Z";
+        const STEP: &str = "net/minecraft/world/entity/Entity.maxUpStep.()F";
+        const REACTION: &str = "net/minecraft/world/entity/Entity.getPistonPushReaction.()Lnet/minecraft/world/level/material/PushReaction;";
+        let mut rt = Rt::new();
+        crate::install();
+        let named = |rt: &mut Rt, v: V| {
+            let n = api::call(rt, "java/lang/Enum.name.()Ljava/lang/String;", &[v]);
+            rt.str_of(n).unwrap_or_default().to_owned()
+        };
+        let mut host = MemoryHost::default();
+        host.entities.push(EntityView {
+            id: 7,
+            kind: "minecraft:pig".into(),
+            pos: [0.5, 64.0, 0.5],
+            yaw: 0.0,
+            health: Some((10.0, 10.0)),
+        });
+        host.entities.push(EntityView {
+            id: 8,
+            kind: "minecraft:marker".into(),
+            pos: [2.5, 64.0, 0.5],
+            yaw: 0.0,
+            health: None,
+        });
+        let uuid = 0x42u128;
+        host.player_id = Some(uuid);
+        host.players = vec![(uuid, [3.5, 64.0, 0.5])];
+        host.effects.insert(None, Vec::new());
+        rt.with_host(&mut host, |rt| {
+            let pig = of(rt, 7, "minecraft:pig", None);
+            let along = crate::api_common::vec3(rt, 0.0, 0.0, 0.25);
+            api::call(rt, MOVE, &[pig, V::NULL, along]);
+            api::call(rt, MOVE, &[pig, V::NULL, along]);
+            assert_eq!(
+                api::call(rt, "net/minecraft/world/entity/Entity.getZ.()D", &[pig]).d(),
+                1.0,
+                "where the game moved it"
+            );
+            api::call(
+                rt,
+                "net/minecraft/world/entity/Entity.setOnGround.(Z)V",
+                &[pig, V::I(1)],
+            );
+            assert_eq!(api::call(rt, STEP, &[pig]).f(), 0.6);
+            assert_eq!(
+                api::call(
+                    rt,
+                    "net/minecraft/world/entity/LivingEntity.$zza.()F",
+                    &[pig]
+                )
+                .f(),
+                0.0
+            );
+            let reaction = api::call(rt, REACTION, &[pig]);
+            assert_eq!(named(rt, reaction), "NORMAL");
+            let marker = of(rt, 8, "minecraft:marker", None);
+            assert_eq!(api::call(rt, STEP, &[marker]).f(), 0.0);
+            let reaction = api::call(rt, REACTION, &[marker]);
+            assert_eq!(named(rt, reaction), "IGNORE");
+            api::call(rt, MARK, &[pig, V::I(1)]);
+            // The player: a write of the field keeps it, then tells the runtime (the translator's).
+            let player = crate::menus::server_player(rt, uuid);
+            api::call(rt, MOVE, &[player, V::NULL, along]);
+            let riders = api::call(
+                rt,
+                "net/minecraft/world/entity/Entity.getPassengers.()Ljava/util/List;",
+                &[player],
+            );
+            assert!(crate::jutil::elements(rt, riders).is_empty());
+            let reaction = api::call(rt, REACTION, &[player]);
+            assert_eq!(named(rt, reaction), "NORMAL");
+            assert_eq!(api::call(rt, STEP, &[player]).f(), 0.6);
+            rt.put_field(player, "hurtMarked", V::I(0));
+            api::call(rt, MARK, &[player, V::I(0)]);
+            rt.put_field(player, "hurtMarked", V::I(1));
+            api::call(rt, MARK, &[player, V::I(1)]);
+            assert_eq!(
+                api::game_field(rt, player, "hurtMarked", "$hurtMarked", MARKED).i(),
+                0,
+                "the mark is spent"
+            );
+            let invisible = "net/minecraft/world/entity/Entity.isInvisible.()Z";
+            assert_eq!(api::call(rt, invisible, &[player]).i(), 0);
+            let effect = crate::host::EffectView {
+                id: "minecraft:invisibility".into(),
+                duration: 200,
+                ..Default::default()
+            };
+            rt.host_call(|h| h.add_effect(None, &effect, false));
+            assert_eq!(api::call(rt, invisible, &[player]).i(), 1);
+        });
+        assert_eq!(host.entities[0].pos, [0.5, 64.0, 1.0]);
+        assert_eq!(
+            host.players,
+            vec![(uuid, [3.5, 64.0, 0.5])],
+            "a server's player stays where their client said"
+        );
+        assert_eq!(host.marked_players, vec![uuid], "one mark sent");
+        // A client's own player's mark tells nobody.
+        let mut client = MemoryHost {
+            client: true,
+            client_player_id: Some(57),
+            player_id: Some(0x99),
+            ..MemoryHost::default()
+        };
+        rt.with_host(&mut client, |rt| {
+            let me = crate::network::local_player(rt);
+            rt.put_field(me, "hurtMarked", V::I(1));
+            api::call(rt, MARK, &[me, V::I(1)]);
+        });
+        assert!(client.marked_players.is_empty());
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
