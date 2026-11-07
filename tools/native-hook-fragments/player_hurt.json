@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "a server's player hurt by a named damage source (`native_hurt_player`), and a player's UUID by their entity id (`native_player_uuid_of`).",
+  "doc_summary": "`native_hurt_player(dimension, uuid, amount, hurt)` hurts the player `uuid` as `LivingEntity.hurt(source, amount)` does on a server's player, as `/damage` deals it: nothing in creative, else their invulnerability frames, a raised shield, armor and effects, the knockback away from `hurt.from`, the hurt sound and the death message's killer, the mob `hurt` names (a player's credit isn't kept). A damage type the game doesn't know (a mod's own) hurts as `minecraft:generic`. It runs as that player (`native_as_player`), also inside a player's hook for the acting player, and is false when it didn't hurt: no such player in `dimension`, dead, an amount that isn't finite, or a hit refused. `native_player_uuid_of(entity)` gives the UUID of the player whose entity id is `entity`: the acting player, or a player on this server; None for any other entity. Bundles need \"hooks\": @API:player_hurt@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mobs.rs"
+  ]
+}

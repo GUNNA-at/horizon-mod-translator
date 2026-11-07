@@ -1045,6 +1045,13 @@ pub trait Host {
     fn hurt_entity_by(&mut self, id: i32, amount: f32, _by: &HurtBy) -> bool {
         self.hurt_entity(id, amount)
     }
+    /// Hurts the server's player `uuid` by `amount` as `LivingEntity.hurt(source, amount)` does on a
+    /// `ServerPlayer`, the source told (`by`): nothing in creative, else their invulnerability
+    /// frames, a raised shield, armor and effects, the knockback and the hurt sound. Whether they
+    /// were hurt; false for a player the host doesn't have.
+    fn hurt_player_by(&mut self, _uuid: u128, _amount: f32, _by: &HurtBy) -> bool {
+        false
+    }
     /// Knocks the living mob `id` back as `LivingEntity.knockback(strength, x, z)` does: away from
     /// the direction (`x`, `z`), less its knockback resistance. False for no such mob.
     fn knockback_entity(&mut self, _id: i32, _strength: f64, _x: f64, _z: f64) -> bool {
@@ -1557,6 +1564,8 @@ pub struct MemoryHost {
     pub entities: Vec<EntityView>,
     /// The blows told with their sources ([`Host::hurt_entity_by`]), in order: entity, amount, source.
     pub blows: Vec<(i32, f32, HurtBy)>,
+    /// The blows told to players ([`Host::hurt_player_by`]), in order: player, amount, source.
+    pub player_blows: Vec<(u128, f32, HurtBy)>,
     /// The knockbacks given ([`Host::knockback_entity`]), in order: entity, strength, x, z.
     pub knockbacks: Vec<(i32, f64, f64, f64)>,
     /// The blows whose enchantment effects were asked for ([`Host::post_attack_effects`]), in order.
@@ -2153,6 +2162,10 @@ impl Host for MemoryHost {
     fn hurt_entity_by(&mut self, id: i32, amount: f32, by: &HurtBy) -> bool {
         self.blows.push((id, amount, by.clone()));
         self.hurt_entity(id, amount)
+    }
+    fn hurt_player_by(&mut self, uuid: u128, amount: f32, by: &HurtBy) -> bool {
+        self.player_blows.push((uuid, amount, by.clone()));
+        amount > 0.0
     }
     fn knockback_entity(&mut self, id: i32, strength: f64, x: f64, z: f64) -> bool {
         let living = self.entities.iter().any(|e| e.id == id && e.health.is_some());

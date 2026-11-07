@@ -2388,6 +2388,28 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 crate::hand::worn(rt, i)
             }
         },
+        // `hurt(source, amount)` on a server's player, through the game: nothing in creative, else
+        // their frames, a raised shield, armor and effects, the knockback and the sound. The game's
+        // damage hooks hear the mod's own source.
+        (o, "hurt" | "hurtServer")
+            if is_player(o) && is_player_class(rt.class_of(a(0))) && desc.ends_with("F)Z") =>
+        {
+            let (source, amount) = (a(args.len() - 2), a(args.len() - 1).f());
+            let blow = crate::damage::blow_of(rt, source);
+            let uuid = crate::network::player_uuid(rt, a(0))
+                .or_else(|| rt.host().and_then(|h| h.player_id()));
+            let deal = move |rt: &mut Rt| {
+                uuid.is_some_and(|u| {
+                    rt.host_call(|h| h.hurt_player_by(u, amount, &blow))
+                        .unwrap_or(false)
+                })
+            };
+            let hurt = match rt.get_field(a(0), "$entityId") {
+                V::I(id) => crate::damage::dealing(rt, id, source, deal),
+                _ => deal(rt),
+            };
+            V::I(i32::from(hurt))
+        }
         (o, n) if is_player(o) && matches!(n, "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isCreative" | "isSpectator" | "getItemInHand" | "getMainHandItem" | "getOffhandItem" | "getWeaponItem" | "level" | "getCommandSenderWorld" | "serverLevel" | "isLocalPlayer" | "mayBuild" | "$clientLevel") => {
             match n {
                 // Survival and creative players build; the hooks act for one of them.

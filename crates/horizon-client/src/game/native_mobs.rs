@@ -263,6 +263,58 @@ impl Game<'_> {
         };
         self.hurt_mob_by(id, amount, hurt, attacker)
     }
+    /// Hurts the player `uuid` by `amount` as `LivingEntity.hurt(source, amount)`
+    /// does on a server's player, as `/damage` deals it: nothing in creative,
+    /// else their invulnerability frames, a raised shield, armor and effects,
+    /// the knockback away from where the blow came from, the hurt sound, and
+    /// the death message's killer, the mob `hurt` names (a player's credit
+    /// isn't kept). A damage type the game doesn't know (a mod's own) hurts as
+    /// `minecraft:generic`. Also inside a player's hook, for the acting player.
+    /// False when it didn't hurt: no such player in `dimension`, dead, an
+    /// amount that isn't finite, or a hit refused. API @API:player_hurt@.
+    pub(super) fn native_hurt_player(
+        &mut self,
+        dimension: &str,
+        uuid: u128,
+        amount: f32,
+        hurt: &NativeHurt,
+    ) -> bool {
+        if !amount.is_finite() {
+            return false;
+        }
+        let from = hurt.from.filter(|f| finite(*f));
+        let mut hurt_it = false;
+        self.native_as_player(uuid, |game| {
+            if !game.native_mob_level(dimension) {
+                return;
+            }
+            let known = game.motion.health.damage.id(&hurt.damage_type).is_some();
+            let damage_type = if known {
+                hurt.damage_type.as_str()
+            } else {
+                "minecraft:generic"
+            };
+            let mob = hurt
+                .mob
+                .filter(|m| game.mobs.iter().any(|x| x.id == *m && !x.removed));
+            hurt_it = game.hurt_player_from(amount, from, damage_type, Some(mob));
+        });
+        hurt_it
+    }
+    /// The UUID of the player whose entity is `entity` (`Entity.getId`): the
+    /// acting player, or a player on this server. None for any other entity.
+    /// API @API:player_hurt@.
+    pub(super) fn native_player_uuid_of(&self, entity: i32) -> Option<u128> {
+        if self.player.as_ref().is_some_and(|p| p.entity_id == entity) {
+            return self.native_acting_player().map(|p| p.uuid);
+        }
+        let host = self.lan.as_ref()?;
+        host.hub
+            .guests
+            .iter()
+            .find(|g| g.placed && g.entity_id == entity)
+            .map(|g| g.uuid)
+    }
     fn hurt_mob_by(&mut self, id: u32, amount: f32, hurt: &NativeHurt, attacker: Option<Who>) -> bool {
         let source = Damage {
             kind: Self::damage_kind(&hurt.damage_type),

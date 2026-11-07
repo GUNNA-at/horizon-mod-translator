@@ -25,6 +25,7 @@ pub mod crafting;
 pub mod handlers;
 pub mod heaps;
 pub mod components;
+pub mod contacts;
 pub mod container_screens;
 pub mod capabilities;
 pub mod enchantments;

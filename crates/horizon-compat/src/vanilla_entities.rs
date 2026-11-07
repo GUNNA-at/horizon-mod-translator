@@ -894,7 +894,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
-        "isSpectator" | "isInvisible" | "isOnFire" | "isPassenger" | "isVehicle" | "isShiftKeyDown" | "isCrouching" | "isSilent" | "isNoGravity"
+        "isSpectator" | "isInvisible" | "isOnFire" | "isPassenger" | "isVehicle" | "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isSilent" | "isNoGravity"
         | "isInWater" | "isInLava" | "isInWaterOrRain" | "isUnderWater" | "isBaby" | "isSleeping" | "isUsingItem" | "isFallFlying" | "fireImmune"
         | "isSprinting" | "isSwimming" | "isInvulnerable" | "isCustomNameVisible" | "hasCustomName" => V::I(0),
         "isAttackable" | "canBeCollidedWith" | "isEffectiveAi" | "shouldBeSaved" => V::I(i32::from(name != "canBeCollidedWith")),

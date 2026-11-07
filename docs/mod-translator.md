@@ -6455,6 +6455,52 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     from a block set beside it later and doesn't turn to it; a rail whose floor is taken away drops
     as its item. Nothing new is unmapped, nothing threw. Seen: minecarts don't ride a mod rail (the
     game's minecarts know vanilla's four rails by name): later.
+- [x] 2026-11-07 Part 89: a mod block's own `entityInside` and `stepOn` run on the entities that
+  touch it (the game told of each contact, `native_block_entity_inside` and `native_block_step_on`,
+  and no translated mod listened: a running Create saw left the pig on it alone). Measured: the
+  pack's mods declare 179 contact methods: `entityInside` in 84 classes of 36 jars (Create's saw,
+  drill, belt, funnel, turntable and crushing wheels; Create Additions' barbed wire, grape bushes,
+  burners, SecurityCraft's mines and fields, Biomes O' Plenty's brambles), `stepOn` in 35 of 11
+  (Cataclysm's traps, Garnished's stones, magma slabs, Create's sticker), `fallOn` in 31 of 18,
+  `updateEntityAfterFallOn` in 29 of 13. What their bodies call most: `Entity.hurt` (16 classes of
+  14 jars from `entityInside`, 6 from `stepOn`), `Level.getBlockEntity`, `getBoundingBox` and
+  `AABB.intersects`, `isSteppingCarefully` (7), `LivingEntity.addEffect`, `makeStuckInBlock`,
+  `get`/`setDeltaMovement`.
+  - compat `contacts` (new module): `entity_inside` and `step_on` call the block's own method
+    (`Block`'s are empty: a block without one does nothing) with the entity's object, the level's,
+    the state and the position, as `Entity.checkInsideBlocks` and `Entity.move` do; the entity is
+    the game's by its id (a mob's object, an item entity's, another player's), the acting player
+    when a player. An item entity in a block that has a block entity is left to that block entity's
+    tick (`entities::item_contacts`, which also tells the block what lands on it).
+  - compat: a server's player's `hurt(source, amount)` is the game's (`Host::hurt_player_by`, new):
+    the game's damage hooks hear the mod's own source. A mob proxy doesn't step carefully because
+    the acting player sneaks (`isSteppingCarefully` was answered as the player's for any entity).
+  - game: `native_hurt_player(dimension, uuid, amount, hurt)` hurts a server's player as
+    `/damage` does (nothing in creative, the frames, a raised shield, armor, the knockback, the
+    sound; a mod's own damage type as `minecraft:generic`), as that player;
+    `native_player_uuid_of(entity)` (fragment `player_hurt.json`).
+  - translator: the hooks `block_entity_inside` and `block_step_on`. The game tells a contact in the
+    middle of the entity's move, with no game at hand: the block's method runs once the level's tick
+    (or the player's action) is over (`native_after_hit`), where the move left the entity, a
+    player's as that player (`native_as_player`), on the game host (a mob's, an item's) or the player
+    host (a player's). A state that isn't the engine's mod's is remembered and costs nothing more.
+    Every host hurts players (`hurt_player_by`; a hit's hooks after the hit). `contacts.rs` joins the
+    compat sources the bundle includes.
+  - Tests: compat 566 (4 new: a mod block's own `entityInside` hurts the mob in it with its damage
+    source, and the acting player through the game; its `stepOn` slows the mob and the player on it
+    unless they step carefully, a sneaking player doesn't make the mob careful; an item entity in a
+    block is the block's hooks' unless a block entity ticks there; a block without its own contact
+    methods, or a vanilla one, does nothing), translator 19, core 7.
+  - In game (`p89scene.sh`): Create's saws face up in glass pits on smooth stone. A pig over the saw
+    a creative motor turns (32 RPM) lands on its 12-pixel top (y + 0.75) and is hurt by 3.5 a hit
+    (Create's `DrillBlock.getDamage`: 2 + 1 + 0.5), a hit each 10 ticks, the others refused by its
+    invulnerability frames (3 taken, 18 refused): 10, 6.5, 3, dead; its porkchops land on the
+    running saw and bounce there (the saw's own handling of what lands on it). The pig on the saw
+    nobody turns keeps its 10. A survival player on the running saw: 20, 16.5, 13.8, 8, 5 in two
+    seconds (3.5 a hit, less the regeneration of a full food bar), and dead in four when left there.
+    Nothing new is unmapped, nothing threw. Seen: the death message is the generic one (`died`): the
+    game doesn't know Create's damage types (`create:mechanical_saw` hurts as `minecraft:generic`):
+    later.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
