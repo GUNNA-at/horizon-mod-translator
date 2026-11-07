@@ -944,7 +944,6 @@ const PROVIDER_CREATE: &str = "net/minecraft/client/renderer/blockentity/BlockEn
 const GET_RENDER_SHAPE: &str = "getRenderShape.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/RenderShape;";
 const GET_RENDER_SHAPE_KEY: &str =
     "net/minecraft/world/level/block/state/BlockBehaviour.getRenderShape.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/RenderShape;";
-const MODIFY_BAKING_RESULT: &str = "net/neoforged/neoforge/client/event/ModelEvent$ModifyBakingResult";
 
 /// `native_content_block` (startup): what draws the mod block's `state` in the world, by the mod's
 /// own code. `"invisible"` or `"entityblock_animated"` when its `getRenderShape` says so, and
@@ -972,11 +971,18 @@ pub fn render_shape(rt: &mut Rt, state: &str) -> Option<&'static str> {
             _ => {}
         }
     }
-    let models = swapped_models(rt);
-    let name = crate::host::split_state(state).0.to_owned();
-    let location = crate::render::model_location(&name, &name);
-    let key = rt.string(&location);
-    let model = crate::jutil::table_get(rt, models, key)?;
+    // The models a client swaps in are baked once it is set up, as its resources load.
+    client_setup(
+        rt,
+        &mut ShapeProbe {
+            state: state.to_owned(),
+            draws: 0,
+        },
+    );
+    let models = crate::baked_models::registry(rt);
+    let (block, variant) = crate::baked_models::state_variant(state);
+    let location = crate::baked_models::location(rt, block, &variant);
+    let model = crate::baked_models::at(rt, models, location);
     if model.r() == 0 || rt.get_field(model, "$probe").i() != 0 {
         return None;
     }
@@ -992,62 +998,70 @@ pub fn render_shape(rt: &mut Rt, state: &str) -> Option<&'static str> {
     let empty = !threw && quads.r() != 0 && crate::jutil::elements(rt, quads).is_empty();
     // A model drawn from its block entity's data (Create's factory gauge) has no quads without it
     // either: only a block whose renderer draws it is the renderer's.
-    (empty && renderer_draws(rt, state)).then_some("entityblock_animated")
+    let animated = empty && renderer_draws(rt, state);
+    if animated {
+        trace_once(rt, &format!("swapped-empty/{state}"), |_| {
+            format!(
+                "content: {state} is drawn by its block entity renderer: the model its client swaps in has no faces of its own"
+            )
+        });
+    }
+    animated.then_some("entityblock_animated")
 }
 
 /// Whether the mod's block entity renderer draws anything for a fresh block entity at `state`.
 /// Fires the client's setup: ask on a runtime of its own (the bundles' `with_probe_runtime`).
 fn renderer_draws(rt: &mut Rt, state: &str) -> bool {
-    const AT: [i32; 3] = [0, -4096, 0];
-    struct Probe {
-        state: String,
-        draws: usize,
-    }
-    impl Host for Probe {
-        fn block_state(&self, pos: [i32; 3]) -> String {
-            if pos == AT { self.state.clone() } else { "minecraft:air".into() }
-        }
-        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
-            false
-        }
-        fn is_server(&self) -> bool {
-            false
-        }
-        fn draw_model(&mut self, _model: &crate::host::Model, _pose: &[f32; 16], _color: u32, _light: u32) -> bool {
-            self.draws += 1;
-            true
-        }
-    }
-    let mut probe = Probe { state: state.to_owned(), draws: 0 };
-    render_block_entity(rt, &mut probe, AT, state, &std::collections::BTreeMap::new(), crate::render::FULL_BRIGHT);
+    let mut probe = ShapeProbe {
+        state: state.to_owned(),
+        draws: 0,
+    };
+    render_block_entity(
+        rt,
+        &mut probe,
+        ShapeProbe::AT,
+        state,
+        &std::collections::BTreeMap::new(),
+        crate::render::FULL_BRIGHT,
+    );
     probe.draws > 0
 }
 
-/// The block models after the mod's `ModelEvent.ModifyBakingResult` listeners ran, posted once per
-/// runtime over a probe model at each of the mod's blocks (its default state's location).
-fn swapped_models(rt: &mut Rt) -> V {
-    if let Some(&models) = rt.interned.get("compat:baked-models") {
-        return models;
+/// The client [`render_shape`] asks about a block: a level of that one block (air around it) that
+/// keeps nothing set, counting the faces drawn.
+struct ShapeProbe {
+    state: String,
+    draws: usize,
+}
+
+impl ShapeProbe {
+    const AT: [i32; 3] = [0, -4096, 0];
+}
+
+impl Host for ShapeProbe {
+    fn block_state(&self, pos: [i32; 3]) -> String {
+        if pos == Self::AT {
+            self.state.clone()
+        } else {
+            "minecraft:air".into()
+        }
     }
-    let models = rt.alloc("java/util/HashMap", crate::Data::Table(crate::Table::default()));
-    rt.interned.insert("compat:baked-models".into(), models);
-    let mut blocks: Vec<String> = rt
-        .registered
-        .iter()
-        .filter(|((r, _), v)| r == "block" && rt.class_of(**v) != "net/minecraft/world/level/block/Block")
-        .map(|((_, n), _)| n.clone())
-        .collect();
-    blocks.sort();
-    for name in blocks {
-        let probe = rt.new_object("net/minecraft/client/resources/model/BakedModel");
-        rt.put_field(probe, "$probe", V::I(1));
-        let key = rt.string(&crate::render::model_location(&name, &name));
-        crate::jutil::table_put(rt, models, key, probe);
+    fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+        false
     }
-    let ev = rt.new_object(MODIFY_BAKING_RESULT);
-    rt.put_field(ev, "$models", models);
-    crate::neo::post(rt, MODIFY_BAKING_RESULT, ev);
-    models
+    fn is_server(&self) -> bool {
+        false
+    }
+    fn draw_model(
+        &mut self,
+        _model: &crate::host::Model,
+        _pose: &[f32; 16],
+        _color: u32,
+        _light: u32,
+    ) -> bool {
+        self.draws += 1;
+        true
+    }
 }
 
 const CLIENT_TICK_PRE: &str = "net/neoforged/neoforge/client/event/ClientTickEvent$Pre";
@@ -1318,13 +1332,17 @@ pub fn client_level_unload(rt: &mut Rt, host: &mut dyn Host, dimension: &str) {
 
 /// The client's setup, once, on its first hook ([`crate::neo::fire_client_setup`]), then its first
 /// resource load with the game as host: the reload listeners the mods registered read the game's
-/// resources ([`crate::resources::reload`]).
+/// resources ([`crate::resources::reload`]), and the models are baked
+/// ([`crate::baked_models::client_resources_loaded`]).
 fn client_setup(rt: &mut Rt, host: &mut dyn Host) {
     if crate::neo::is_client(rt) {
         return;
     }
     crate::neo::fire_client_setup(rt);
-    rt.with_host(host, |rt| crate::resources::reload(rt, "assets"));
+    rt.with_host(host, |rt| {
+        crate::resources::reload(rt, "assets");
+        crate::baked_models::client_resources_loaded(rt);
+    });
 }
 
 /// `native_block_entity_submit` (client): draws the mod block entity at `pos` with the renderer its

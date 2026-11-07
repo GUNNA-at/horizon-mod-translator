@@ -993,9 +993,18 @@ pub(crate) fn text_of(rt: &Rt, v: V) -> String {
         "java/lang/Integer" => rt.get_field(v, "value").i().to_string(),
         "net/minecraft/core/Direction" => DIRECTION_NAMES[native(rt, v)[0].clamp(0, 5) as usize].to_owned(),
         "net/minecraft/core/Direction$Axis" => AXIS_NAMES[native(rt, v)[0].clamp(0, 2) as usize].to_owned(),
-        _ => match rt.str_of(v) {
+        class => match rt.str_of(v) {
             Some(s) => s.to_owned(),
-            None => rt.str_of(rt.get_field(v, "$name")).unwrap_or("").to_ascii_lowercase(),
+            None => {
+                let name = rt.str_of(rt.get_field(v, "$name")).unwrap_or("");
+                // A vanilla enum's constant by its serialized name, which isn't always its own
+                // name in lower case (`PistonType.DEFAULT` is `normal`).
+                if class.starts_with("net/minecraft/") {
+                    crate::blocks::enum_text(class, name)
+                } else {
+                    name.to_ascii_lowercase()
+                }
+            }
         },
     }
 }
@@ -1824,11 +1833,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/neoforged/neoforge/fluids/FluidStack", "hashFluidAndComponents") => V::I(stack_hash(rt, a(0), true)),
         // The missing texture's sprite name (`minecraft:missingno`), which a mod compares a sprite with.
         ("net/minecraft/client/renderer/texture/MissingTextureAtlasSprite", "getLocation") => rt.string("minecraft:missingno"),
-        // NeoForge's `ModelResourceLocation.standalone(id)`: the model at `id` itself.
-        ("net/minecraft/client/resources/model/ModelResourceLocation", "standalone") => {
-            let variant = rt.string("standalone");
-            crate::records::make(rt, "net/minecraft/client/resources/model/ModelResourceLocation", &[a(0), variant])
-        }
         // `BuiltInLootTables.register(key)` adds a table's key to vanilla's set and answers it.
         ("net/minecraft/world/level/storage/loot/BuiltInLootTables", "register") => a(0),
         // `LazyLoadedValue(supplier)`: the supplier asked once, at the first `get()`.
@@ -5451,6 +5455,37 @@ mod tests {
         assert_eq!(rt.str_of(t), Some("minecraft:furnace[facing=east,lit=true]"));
         // Equal states are the same object.
         assert_eq!(t, api::state(&mut rt, "minecraft:furnace[facing=east,lit=true]"));
+    }
+
+    /// A vanilla enum value is spelled in a state by its serialized name, not always its constant's
+    /// own: Create's piston sets its head's `type` to `PistonType.DEFAULT`, which is `normal`.
+    #[test]
+    fn a_vanilla_enum_value_is_set_by_its_serialized_name() {
+        let mut rt = Rt::new();
+        let kind = api::get_static(
+            &mut rt,
+            "net/minecraft/world/level/block/state/properties/BlockStateProperties.PISTON_TYPE",
+        );
+        let default = api::get_static(
+            &mut rt,
+            "net/minecraft/world/level/block/state/properties/PistonType.DEFAULT",
+        );
+        let sticky = api::get_static(
+            &mut rt,
+            "net/minecraft/world/level/block/state/properties/PistonType.STICKY",
+        );
+        let s = api::state(
+            &mut rt,
+            "minecraft:piston_head[facing=east,short=false,type=sticky]",
+        );
+        let t = api::call(&mut rt, SET, &[s, kind, default]);
+        assert_eq!(
+            rt.str_of(t),
+            Some("minecraft:piston_head[facing=east,short=false,type=normal]")
+        );
+        assert_eq!(api::call(&mut rt, GET, &[t, kind]), default);
+        let u = api::call(&mut rt, SET, &[t, kind, sticky]);
+        assert_eq!(u, s);
     }
 
     #[test]

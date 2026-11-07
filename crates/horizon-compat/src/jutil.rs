@@ -872,6 +872,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             crate::heaps::call(rt, name, desc, args).or_else(|| list_call(rt, name, desc, args))
         }
         'l' => list_call(rt, name, desc, args),
+        // The baked models' registry puts the game's model at a location it lacks when asked
+        // for one there, as vanilla's has one at each.
+        't' if class == crate::baked_models::REGISTRY
+            && matches!(name, "get" | "getOrDefault" | "containsKey") =>
+        {
+            crate::baked_models::at(rt, this, a(1));
+            map_call(rt, name, desc, args)
+        }
         't' if is_map(rt.class_of(this)) => map_call(rt, name, desc, args),
         't' => set_call(rt, name, args),
         'i' => iter_call(rt, name, args),

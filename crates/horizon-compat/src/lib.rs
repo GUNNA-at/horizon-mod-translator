@@ -10,6 +10,7 @@ pub mod api;
 pub mod api_common;
 pub mod attachments;
 pub mod attributes;
+pub mod baked_models;
 pub mod blocks;
 pub mod block_breaking;
 pub mod loot_params;

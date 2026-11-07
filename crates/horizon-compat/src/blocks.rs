@@ -479,7 +479,7 @@ pub(crate) fn vanilla_enum_constant(rt: &mut Rt, class: &str, text: &str) -> Opt
 const ENUM_NAMES: [(&str, &str, &str); 1] = [("/PistonType", "normal", "DEFAULT")];
 
 /// The serialized name of vanilla enum `class`'s constant `field` (`PistonType.DEFAULT` is `normal`).
-fn enum_text(class: &str, field: &str) -> String {
+pub(crate) fn enum_text(class: &str, field: &str) -> String {
     match ENUM_NAMES.iter().find(|(c, _, n)| class.ends_with(c) && *n == field) {
         Some(&(_, t, _)) => t.to_owned(),
         None => field.to_ascii_lowercase(),

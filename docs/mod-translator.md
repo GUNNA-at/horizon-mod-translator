@@ -6231,6 +6231,56 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Create puts the head (Part 83). The fake tracks stay through 100 ticks with random ticks off and
     200 at the default speed (3), and all are gone within 40 at 4096, as Create's: a fake track lives
     three random ticks unless something keeps it (`keepAlive`).
+- [x] 2026-11-07 Part 83: the baked models a mod finds by location, as vanilla's `ModelManager` keeps
+  them after the mods' model events, and the item models built on them. Counted on the pack's 367
+  jars: `ItemRenderer.getModel` in 50, `ModelManager.getModel(location)` 26, `new
+  ModelResourceLocation` 22 and its `standalone`/`inventory`/`vanilla` factories 23/9/2,
+  `ModelEvent.ModifyBakingResult` 18 (its `getModels` 17) and `BakingCompleted` 12, `getMissingModel`
+  11, `ItemRenderer.renderModelLists` 10, `ItemModelShaper.getItemModel` 6, `renderQuadList` 4.
+  - compat `baked_models` (new): `ModelResourceLocation` as vanilla's record (its variant in lower
+    case, printed `id#variant`, the three factories); one registry per runtime, keyed by those
+    locations: the mod's blocks (each at its default state's location) and items are in it before
+    the mods' `ModifyBakingResult` listeners run, then their `BakingCompleted` ones (posted now
+    too); a location no mod put a model at gets the game's when asked for (`get`,
+    `getOrDefault`, `containsKey`, `ModelManager.getModel`): an item's `item/` model, a
+    `standalone` model by its name, else the block state's model. `ItemRenderer.getModel` and
+    `ItemModelShaper.getItemModel` give the model at the item's location (the trident's and
+    spyglass's in-hand ones as vanilla's), so a model a mod wrapped there is the one it gets back,
+    and the wrapped one draws the item's faces; `renderModelLists` and `renderQuadList` put each
+    face into the consumer under the stack's pose (`putBulkData`, as vanilla's).
+  - `BlockModelShaper.stateToModelLocation` makes a location record with the state's properties in
+    name order (it was a string, and the registry was keyed by `name#` alone, so a swap Create put
+    at a block state with properties was never found); `glue::render_shape` looks up the state it
+    is asked about. A block's probe model now answers its state's faces outside the probe.
+  - compat: a vanilla enum value a mod sets in a state (`setValue`, a property's `getName(value)`)
+    is spelled by its serialized name, as `getSerializedName` gives it: `PistonType.DEFAULT` is
+    `normal` (it was `default`, the constant's own name in lower case, which the game refuses).
+    Create's mechanical piston sets its head so where its extension ends (`PistonType.DEFAULT` in 2
+    of the pack's jars, `STICKY` in 4); the head was missing after every extension. Measured with a
+    trace of the mod's block changes: the head's `setBlock` at +2 answered false, the poles' and
+    the planks' true.
+  - The mods' model events wait for the client: a runtime's registry made before its setup (the
+    probe runtime that reads render shapes, a mod's client code run early) posts
+    `ModifyBakingResult` and `BakingCompleted` once the setup is done and the client's resources
+    load, as vanilla bakes its models then, and the item models found in it before are found
+    again. Create filters the items whose models it swaps by their client extensions, which the
+    setup registers, once, the first time it is asked: asked before them, it kept none.
+  - compat: `Registry.containsValue(value)` is whether the value is registered there (7 of the
+    pack's jars). Create keeps only the custom-rendered items that are: unmapped, it answered
+    false and Create dropped every one, so its lectern drew no controller.
+  - Tests: compat 543 (6 new: a location is vanilla's record, with its factories; a state's
+    location lists its properties by name, replacing render's string test of it; the registry has
+    the game's model where no mod put one; an item model a mod wrapped is the one the item renderer
+    gives, and it draws the original's faces; the model events wait for the client's setup; a
+    vanilla enum value is set by its serialized name; and the registry key test asks
+    `containsValue`), translator 19, core 7.
+  - In game (`lectern.sh`): Create's swap lands in the registry (3870 of its 5313 locations hold a
+    model of Create's after its listeners; `create:linked_controller#inventory` its
+    `CustomRenderedItemModel`), and the lectern draws the controller on it, without anything
+    unmapped but `Entity.position` on the player. It draws dark: the controller's block is declared
+    an opaque full cube (Create's `LecternControllerBlock` extends vanilla's `LecternBlock`, whose
+    shape the declaration didn't know), so the light inside it, which lights its renderer, is 0
+    (Part 85). `kinsurvey7.sh`: the extending piston's head is at +2 (`type=normal`).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

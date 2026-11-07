@@ -496,13 +496,6 @@ pub const GET_QUADS_KEY: &str = "net/minecraft/client/resources/model/BakedModel
 const GET_QUADS_VANILLA: &str = "getQuads.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/util/RandomSource;)Ljava/util/List;";
 const GET_QUADS_VANILLA_KEY: &str = "net/minecraft/client/resources/model/BakedModel.getQuads.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/util/RandomSource;)Ljava/util/List;";
 
-/// A block state's model location, as `BlockModelShaper.stateToModelLocation` names it:
-/// `create:shaft#axis=x` (`name#` for a state without properties).
-pub fn model_location(name: &str, state: &str) -> String {
-    let props = state.split_once('[').map_or("", |(_, p)| p.trim_end_matches(']'));
-    format!("{name}#{props}")
-}
-
 /// A `ModelData.Builder`, starting from `from`'s values (null: none).
 fn model_data_builder(rt: &mut Rt, from: V) -> V {
     let b = rt.new_object("net/neoforged/neoforge/client/model/data/ModelData$Builder");
@@ -1639,14 +1632,6 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             draw_item(rt, stack, context, pose, light.i(), seed.i());
             V::Void
         }
-        // The stack's item model, standing for it: what `isGui3d` asks about.
-        (ITEM_RENDERER, "getModel") => {
-            let m = rt.new_object("net/minecraft/client/resources/model/BakedModel");
-            let item = crate::api_common::item_like_name(rt, rt.get_field(arg(args, 1), "$item"));
-            let s = rt.string(&item);
-            rt.put_field(m, "$item", s);
-            m
-        }
         ("net/minecraft/client/resources/model/BakedModel", "isGui3d") if rt.get_field(arg(args, 0), "$item").r() != 0 => {
             let item = rt.str_of(rt.get_field(arg(args, 0), "$item")).unwrap_or("").to_owned();
             V::I(rt.host().is_some_and(|h| h.item_is_block(&item)) as i32)
@@ -1708,11 +1693,12 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             "getRenderTypes" => single(rt, "net/neoforged/neoforge/client/ChunkRenderTypeSet"),
             "useAmbientOcclusion" | "isGui3d" | "usesBlockLight" => V::I(1),
             "isCustomRenderer" => V::I(0),
-            // A probe model (`glue::render_shape`) has a quad on every side, so a wrapper passing
-            // them through is told apart from one that draws nothing. Otherwise the game's faces of
-            // the model, which the mod may read, change and build models from.
+            // While `glue::render_shape` probes, every model has a quad on every side, so a
+            // wrapper passing them through is told apart from one that draws nothing. Otherwise the
+            // game's faces of the model (a probe's are its state's), which the mod may read, change
+            // and build models from.
             "getQuads" => {
-                let probing = rt.get_field(a(0), "$probe").i() != 0 || rt.interned.contains_key("compat:probing");
+                let probing = rt.interned.contains_key("compat:probing");
                 match crate::quads::handle(rt, a(0)) {
                     _ if probing => {
                         let this = a(0);
@@ -1784,20 +1770,6 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         },
         ("net/neoforged/neoforge/client/model/data/ModelProperty", "<init>") => V::Void,
         ("net/neoforged/neoforge/client/model/data/ModelProperty", "test") => V::I(1),
-        // The baked models a mod may replace (`glue::render_shape` posts it with probe models).
-        ("net/neoforged/neoforge/client/event/ModelEvent$ModifyBakingResult", "getModels") => rt.get_field(a(0), "$models"),
-        // A block state's model location (`create:shaft#axis=x`), kept as its string.
-        ("net/minecraft/client/renderer/block/BlockModelShaper", "stateToModelLocation") => {
-            let (name, state) = if desc.starts_with("(Lnet/minecraft/resources/ResourceLocation;") {
-                (rt.str_of(a(0)).unwrap_or("").to_owned(), a(1))
-            } else {
-                let text = rt.str_of(a(0)).unwrap_or("").to_owned();
-                (crate::host::split_state(&text).0.to_owned(), a(0))
-            };
-            let text = rt.str_of(state).unwrap_or("").to_owned();
-            let location = model_location(&name, &text);
-            rt.string(&location)
-        }
         // A block's or fluid's chunk layer (`ItemBlockRenderTypes.setRenderLayer`, Registrate's
         // `addLayer`): the host picks each quad's pass from its sprite's alpha (cut out where its
         // texels are clear, translucent where they are partly), so there is nothing to keep.
@@ -2491,12 +2463,6 @@ mod tests {
         let derived = call(&mut rt, "net/neoforged/neoforge/client/model/data/ModelData$Builder.build.()Lnet/neoforged/neoforge/client/model/data/ModelData;", &[d]).unwrap();
         assert_eq!(call(&mut rt, has, &[derived, prop]), Some(V::I(1)));
         assert_eq!(call(&mut rt, has, &[data, other]), Some(V::I(0)));
-    }
-
-    #[test]
-    fn model_locations_name_the_state_as_block_model_shaper_does() {
-        assert_eq!(model_location("create:shaft", "create:shaft[axis=x]"), "create:shaft#axis=x");
-        assert_eq!(model_location("create:gearbox", "create:gearbox"), "create:gearbox#");
     }
 
     #[test]

@@ -1102,6 +1102,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     Some(k) => rt.string(&k),
                     None => V::NULL,
                 },
+                // `containsValue(value)`: whether the value is registered in it (Create keeps only
+                // the custom-rendered items that are).
+                "containsValue" => V::I(registry_name_of(rt, &reg, a(1)).is_some() as i32),
                 "getResourceKey" => {
                     let v = match registry_name_of(rt, &reg, a(1)) {
                         Some(k) => rt.string(&format!("{reg}#{k}")),
@@ -2727,6 +2730,19 @@ mod tests {
         // Not an item: no key.
         let other = rt.string("minecraft:stone");
         assert_eq!(key(&mut rt, "ITEM", other), None);
+        // `containsValue`: whether it is registered there (Create keeps the custom-rendered items
+        // that are, and drops the rest).
+        let contains = |rt: &mut Rt, v: V| {
+            let r =
+                crate::api::get_static(rt, "net/minecraft/core/registries/BuiltInRegistries.ITEM");
+            crate::api::call(
+                rt,
+                "net/minecraft/core/DefaultedRegistry.containsValue.(Ljava/lang/Object;)Z",
+                &[r, v],
+            )
+        };
+        assert_eq!(contains(&mut rt, door), V::I(1));
+        assert_eq!(contains(&mut rt, other), V::I(0));
     }
 
     #[test]
