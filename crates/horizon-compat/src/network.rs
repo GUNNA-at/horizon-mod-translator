@@ -1860,6 +1860,28 @@ fn buffer_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "readFloat" => V::F(take_n(rt, b).map_or(0.0, f32::from_be_bytes)),
         "readDouble" => V::D(take_n(rt, b).map_or(0.0, f64::from_be_bytes)),
         "readVarInt" => V::I(read_var_int(rt, b).unwrap_or(0)),
+        // `readEnum(class)`: the constant at the ordinal `writeEnum` wrote (`getEnumConstants()[i]`).
+        "readEnum" => {
+            let class = rt.str_of(a(1)).unwrap_or("").replace('.', "/");
+            let ordinal = read_var_int(rt, b).unwrap_or(0);
+            match crate::jlang::enum_constants(rt, &class) {
+                Some(values) if (0..rt.array_len(values)).contains(&ordinal) => {
+                    rt.array_get(values, ordinal)
+                }
+                Some(values) => {
+                    let message = format!(
+                        "Index {ordinal} out of bounds for length {}",
+                        rt.array_len(values)
+                    );
+                    crate::jlang::throw_with(
+                        rt,
+                        "java/lang/ArrayIndexOutOfBoundsException",
+                        &message,
+                    )
+                }
+                None => V::NULL,
+            }
+        }
         "readVarLong" => V::J(read_var(rt, b, 10).map_or(0, |v| v as i64)),
         "readUtf" | "readResourceLocation" => match read_utf(rt, b) {
             Some(s) => rt.string(&s),
@@ -2429,5 +2451,48 @@ mod tests {
         assert_eq!(client.class_of(client.interned["test/player"]), "net/minecraft/client/player/LocalPlayer");
         // Nothing of this mod's has another id.
         assert!(!client.with_host(&mut client_host, |rt| receive(rt, "test:other", &data, None)));
+    }
+
+    /// `readEnum(class)` gives back the constant `writeEnum` wrote (a vanilla enum's, from its
+    /// `values()`), on either buffer; an ordinal past the constants throws, as the array does.
+    #[test]
+    fn read_enum_gives_back_the_constant_write_enum_wrote() {
+        const WRITE: &str = "net/minecraft/network/FriendlyByteBuf.writeEnum.(Ljava/lang/Enum;)Lnet/minecraft/network/FriendlyByteBuf;";
+        const WRITE_VAR_INT: &str = "net/minecraft/network/FriendlyByteBuf.writeVarInt.(I)Lnet/minecraft/network/FriendlyByteBuf;";
+        const READ: &str =
+            "net/minecraft/network/FriendlyByteBuf.readEnum.(Ljava/lang/Class;)Ljava/lang/Enum;";
+        const READ_REGISTRY: &str = "net/minecraft/network/RegistryFriendlyByteBuf.readEnum.(Ljava/lang/Class;)Ljava/lang/Enum;";
+        let mut rt = Rt::new();
+        crate::install();
+        let b = new_buffer(&mut rt);
+        let (east, negative) = (
+            sv(&mut rt, "net/minecraft/core/Direction.EAST"),
+            sv(
+                &mut rt,
+                "net/minecraft/core/Direction$AxisDirection.NEGATIVE",
+            ),
+        );
+        crate::api::call(&mut rt, WRITE, &[b, east]);
+        crate::api::call(&mut rt, WRITE_VAR_INT, &[b, V::I(1)]);
+        crate::api::call(&mut rt, WRITE_VAR_INT, &[b, V::I(6)]);
+        let (direction, axis_direction) = (
+            rt.class_literal("net/minecraft/core/Direction"),
+            rt.class_literal("net/minecraft/core/Direction$AxisDirection"),
+        );
+        assert_eq!(
+            crate::api::call(&mut rt, READ_REGISTRY, &[b, direction]),
+            east
+        );
+        assert_eq!(
+            crate::api::call(&mut rt, READ, &[b, axis_direction]),
+            negative
+        );
+        assert_eq!(crate::api::call(&mut rt, READ, &[b, direction]), V::NULL);
+        let thrown = rt.thrown.take().expect("the ordinal is past the constants");
+        assert_eq!(
+            rt.class_of(thrown),
+            "java/lang/ArrayIndexOutOfBoundsException"
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

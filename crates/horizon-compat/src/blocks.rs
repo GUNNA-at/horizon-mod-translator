@@ -795,6 +795,11 @@ fn dye_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             let c = DYES[id(rt)].1 as usize;
             map_color_constant(rt, c)
         }
+        // NeoForge's `getTag()`: the colour's item tag, `c:dyes/<colour>`.
+        "getTag" => {
+            let tag = format!("c:dyes/{}", DYES[id(rt)].0.to_ascii_lowercase());
+            crate::fluids::tag_key(rt, "item", &tag)
+        }
         // `byId`: out of range gives white, as vanilla's `ByIdMap.OutOfBoundsStrategy.ZERO`.
         "byId" => {
             let i = a(0).i();
@@ -2298,6 +2303,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             // `BucketItem(Fluid, Properties)`: the fluid it holds, vanilla's field `content`.
             if o == "net/minecraft/world/item/BucketItem" {
                 rt.put_field(a(0), "content", a(1));
+            }
+            // `DyeItem(DyeColor, Properties)`: the colour its `getDyeColor` gives back.
+            if o == "net/minecraft/world/item/DyeItem"
+                && desc.starts_with("(Lnet/minecraft/world/item/DyeColor;")
+            {
+                rt.put_field(a(0), "$dyeColor", a(1));
             }
             Some(V::Void)
         }

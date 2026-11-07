@@ -82,6 +82,11 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         "net/minecraft/client/gui/screens/inventory/MenuAccess" => c == "net/minecraft/client/gui/screens/inventory/AbstractContainerScreen",
         // A mod's container is FML's Java one (`neo::mod_container`).
         "net/neoforged/fml/ModContainer" => c == crate::neo::FML_CONTAINER,
+        // A component's contents (`getContents`): a translation or literal text.
+        "net/minecraft/network/chat/ComponentContents" => {
+            matches!(c, TRANSLATABLE_CONTENTS | LITERAL_CONTENTS)
+        }
+        PLAIN_TEXT_CONTENTS => c == LITERAL_CONTENTS,
         // DFU's codec interfaces: a `PrimitiveCodec` (a mod's own, Curios') is a `Codec`, and a
         // codec decodes and encodes.
         "com/mojang/serialization/Codec" => c == crate::codecs::PRIMITIVE_CODEC,
@@ -1676,6 +1681,28 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         let n = format!("minecraft:{}_dye", crate::blocks::DYES[i].0.to_ascii_lowercase());
         return Some(item(rt, &n));
     }
+    // `DyeItem.getDyeColor()`: the colour its constructor got (a mod's dye), else the one a vanilla
+    // dye's id names.
+    if owner == "net/minecraft/world/item/DyeItem" && name == "getDyeColor" {
+        let dye = args.first().copied().unwrap_or_default();
+        let own = rt.get_field(dye, "$dyeColor");
+        if own.r() != 0 {
+            return Some(own);
+        }
+        let id = item_like_name(rt, dye);
+        let colour = crate::blocks::DYES
+            .iter()
+            .position(|(d, _)| id == format!("minecraft:{}_dye", d.to_ascii_lowercase()));
+        return Some(match colour {
+            Some(i) => crate::api::api_enum(
+                rt,
+                "net/minecraft/world/item/DyeColor",
+                crate::blocks::DYES[i].0,
+                i as i32,
+            ),
+            None => V::NULL,
+        });
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
     const BASE: &str = "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase";
@@ -2280,6 +2307,41 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let d = crate::api::DIRECTIONS[native(rt, a(0))[0].clamp(0, 5) as usize];
             crate::api::block_pos(rt, d[0], d[1], d[2])
         }
+        // `step()`: the normal as a new `Vector3f`.
+        ("net/minecraft/core/Direction", "step") => {
+            let d = crate::api::DIRECTIONS[native(rt, a(0))[0].clamp(0, 5) as usize];
+            let v = rt.new_object("org/joml/Vector3f");
+            for (f, c) in ["x", "y", "z"].into_iter().zip(d) {
+                rt.put_field(v, f, V::F(c as f32));
+            }
+            v
+        }
+        // `getRotation()`: a new quaternion turning up to the direction, as vanilla builds it.
+        ("net/minecraft/core/Direction", "getRotation") => {
+            let q = direction_rotation(native(rt, a(0))[0].clamp(0, 5) as usize);
+            crate::render::new_quat(rt, q)
+        }
+        // `fromDelta(x, y, z)`: the direction whose normal points that way along one axis, null for
+        // a delta on none or more than one.
+        ("net/minecraft/core/Direction", "fromDelta") => {
+            let o = match (a(0).i().signum(), a(1).i().signum(), a(2).i().signum()) {
+                (0, -1, 0) => 0,
+                (0, 1, 0) => 1,
+                (0, 0, -1) => 2,
+                (0, 0, 1) => 3,
+                (-1, 0, 0) => 4,
+                (1, 0, 0) => 5,
+                _ => return Some(V::NULL),
+            };
+            direction(rt, o)
+        }
+        // `byName(name)`: the direction its serialized name names (`north`), else null.
+        ("net/minecraft/core/Direction", "byName") => {
+            let found = rt
+                .str_of(a(0))
+                .and_then(|n| DIRECTION_NAMES.iter().position(|d| *d == n));
+            found.map_or(V::NULL, |o| direction(rt, o as i64))
+        }
         ("net/minecraft/core/Direction", "name") => {
             let n = DIRECTION_NAMES[native(rt, a(0))[0].clamp(0, 5) as usize].to_ascii_uppercase();
             rt.string(&n)
@@ -2321,7 +2383,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         // `Direction.getNearest(x, y, z)`: the largest dot product with a direction's normal, the first
         // on ties, in `Direction`'s order; north unless one is above `Float.MIN_VALUE`.
-        ("net/minecraft/core/Direction", "getNearest") if args.len() >= 3 => {
+        ("net/minecraft/core/Direction", "getNearest")
+            if args.len() >= 3 || desc.starts_with("(Lnet/minecraft/world/phys/Vec3;") =>
+        {
             let f = |v: V| match v {
                 V::I(i) => i as f32,
                 V::F(x) => x as f32,
@@ -2329,7 +2393,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 V::J(j) => j as f32,
                 _ => 0.0,
             };
-            let (x, y, z) = (f(a(0)), f(a(1)), f(a(2)));
+            let (x, y, z) = if args.len() >= 3 {
+                (f(a(0)), f(a(1)), f(a(2)))
+            } else {
+                let p = xyz(rt, a(0));
+                (p[0] as f32, p[1] as f32, p[2] as f32)
+            };
             let (mut best, mut at) = (f32::from_bits(1), 2);
             for (i, n) in crate::api::DIRECTIONS.iter().enumerate() {
                 let dot = x * n[0] as f32 + y * n[1] as f32 + z * n[2] as f32;
@@ -2348,6 +2417,37 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/core/Direction$Axis", "test") => {
             let d = native(rt, a(1))[0];
             V::I((a(1).r() != 0 && [1, 1, 2, 2, 0, 0][d.clamp(0, 5) as usize] == native(rt, a(0))[0]) as i32)
+        }
+        // `Axis.getPlane()`: y is vertical, x and z horizontal.
+        ("net/minecraft/core/Direction$Axis", "getPlane") => {
+            let key = if native(rt, a(0))[0] == 1 {
+                "net/minecraft/core/Direction$Plane.VERTICAL"
+            } else {
+                "net/minecraft/core/Direction$Plane.HORIZONTAL"
+            };
+            crate::api::get_static(rt, key)
+        }
+        // `Axis.byName(name)`: `x`, `y` or `z`, else null.
+        ("net/minecraft/core/Direction$Axis", "byName") => {
+            let found = rt
+                .str_of(a(0))
+                .and_then(|n| AXIS_NAMES.iter().position(|x| *x == n));
+            found.map_or(V::NULL, |o| axis(rt, o as i64))
+        }
+        // `AxisDirection.values()`: positive, then negative.
+        ("net/minecraft/core/Direction$AxisDirection", "values") => {
+            let arr = rt.new_array(2, V::NULL);
+            for (i, key) in [
+                "net/minecraft/core/Direction$AxisDirection.POSITIVE",
+                "net/minecraft/core/Direction$AxisDirection.NEGATIVE",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let v = crate::api::get_static(rt, key);
+                rt.array_set(arr, i as i32, v);
+            }
+            arr
         }
         ("net/minecraft/core/Direction$AxisDirection", "opposite") => {
             let positive = native(rt, a(0))[0] == 0;
@@ -3820,6 +3920,34 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let with = if desc.contains("[Ljava/lang/Object;") { a(1) } else { V::NULL };
             component(rt, a(0), name == "translatable", with)
         }
+        // A component's contents (`getContents()`): a translation's key and arguments
+        // (`TranslatableContents`) or literal text (`PlainTextContents.LiteralContents`), the same
+        // object each time, as vanilla's component holds one.
+        ("net/minecraft/network/chat/Component" | MUTABLE_COMPONENT, "getContents") => {
+            component_contents(rt, a(0))
+        }
+        // `MutableComponent.create(contents)`: the component of those contents.
+        (MUTABLE_COMPONENT, "create") => component_of_contents(rt, a(0)),
+        // `new TranslatableContents(key, fallback, args)`.
+        (TRANSLATABLE_CONTENTS, "<init>") => {
+            rt.put_field(a(0), "$key", a(1));
+            rt.put_field(a(0), "$fallback", a(2));
+            rt.put_field(a(0), "$args", a(3));
+            V::Void
+        }
+        (TRANSLATABLE_CONTENTS, "getKey") => rt.get_field(a(0), "$key"),
+        (TRANSLATABLE_CONTENTS, "getFallback") => rt.get_field(a(0), "$fallback"),
+        // `getArgs()`: the arguments, an empty array where there are none (vanilla's `NO_ARGS`).
+        (TRANSLATABLE_CONTENTS, "getArgs") => {
+            let args = rt.get_field(a(0), "$args");
+            if args.r() != 0 {
+                args
+            } else {
+                rt.alloc("[Ljava/lang/Object;", Data::Array(Vec::new()))
+            }
+        }
+        (PLAIN_TEXT_CONTENTS | LITERAL_CONTENTS, "text") => rt.get_field(a(0), "text"),
+        (PLAIN_TEXT_CONTENTS, "create") => crate::records::make(rt, LITERAL_CONTENTS, &[a(0)]),
         // `CriterionTrigger.createCriterion(instance)`, its default method: the criterion record
         // of the trigger and the instance (Create's advancements, built in code).
         ("net/minecraft/advancements/CriterionTrigger", "createCriterion") => crate::records::make(rt, "net/minecraft/advancements/Criterion", &[a(0), a(1)]),
@@ -3930,6 +4058,55 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 }
 
 const MUTABLE_COMPONENT: &str = "net/minecraft/network/chat/MutableComponent";
+const TRANSLATABLE_CONTENTS: &str = "net/minecraft/network/chat/contents/TranslatableContents";
+const PLAIN_TEXT_CONTENTS: &str = "net/minecraft/network/chat/contents/PlainTextContents";
+const LITERAL_CONTENTS: &str =
+    "net/minecraft/network/chat/contents/PlainTextContents$LiteralContents";
+
+/// `Component.getContents()` of component `c`: its text as vanilla's contents classes hold it,
+/// made the first time it is asked.
+fn component_contents(rt: &mut Rt, c: V) -> V {
+    let made = rt.get_field(c, "$contents");
+    if made.r() != 0 {
+        return made;
+    }
+    let text = rt.get_field(c, "$text");
+    let contents = if rt.get_field(c, "$translate").i() != 0 {
+        let t = rt.new_object(TRANSLATABLE_CONTENTS);
+        let with = rt.get_field(c, "$with");
+        rt.put_field(t, "$key", text);
+        rt.put_field(t, "$args", with);
+        t
+    } else {
+        crate::records::make(rt, LITERAL_CONTENTS, &[text])
+    };
+    rt.put_field(c, "$contents", contents);
+    contents
+}
+
+/// `MutableComponent.create(contents)`: a translation's or literal text's component; contents of
+/// another kind (a key bind's, a score's) make a component of no text that gives them back.
+fn component_of_contents(rt: &mut Rt, contents: V) -> V {
+    let c = match rt.class_of(contents) {
+        TRANSLATABLE_CONTENTS => {
+            let (key, args) = (
+                rt.get_field(contents, "$key"),
+                rt.get_field(contents, "$args"),
+            );
+            component(rt, key, true, args)
+        }
+        LITERAL_CONTENTS => {
+            let text = rt.get_field(contents, "text");
+            component(rt, text, false, V::NULL)
+        }
+        _ => {
+            let none = rt.string("");
+            component(rt, none, false, V::NULL)
+        }
+    };
+    rt.put_field(c, "$contents", contents);
+    c
+}
 
 /// A text component: `text` itself (`Component.literal`) or the translation key it is
 /// (`Component.translatable`, with the arguments `with`, an `Object[]` or null).
@@ -4190,6 +4367,45 @@ const PLACE_CONTEXT: &str = "net/minecraft/world/item/context/BlockPlaceContext"
 const USE_ON_CONTEXT: &str = "net/minecraft/world/item/context/UseOnContext";
 /// `Direction.getNormal()` by ordinal (down, up, north, south, west, east).
 const DIRECTION_STEPS: [[i64; 3]; 6] = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]];
+
+/// `Direction.getRotation()` by ordinal: vanilla's quaternions (x, y, z, w), as JOML's
+/// `rotationX` and `rotationXYZ` compute them (`Math.sin` of the half angle, the cosine from it).
+fn direction_rotation(direction: usize) -> [f32; 4] {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    // JOML's `Math.sin` and `Math.cosFromSin` without fast math.
+    let sin_cos = |angle: f32| {
+        let sin = (f64::from(angle)).sin() as f32;
+        let cos = (1.0 - sin * sin).sqrt();
+        let a = angle + FRAC_PI_2;
+        let mut b = a - ((a / (2.0 * PI)) as i32) as f32 * (2.0 * PI);
+        if b < 0.0 {
+            b += 2.0 * PI;
+        }
+        (sin, if b >= PI { -cos } else { cos })
+    };
+    let rotation_x = |angle: f32| {
+        let (s, c) = sin_cos(angle * 0.5);
+        [s, 0.0, 0.0, c]
+    };
+    let rotation_xyz = |x: f32, y: f32, z: f32| {
+        let ((sx, cx), (sy, cy), (sz, cz)) = (sin_cos(x * 0.5), sin_cos(y * 0.5), sin_cos(z * 0.5));
+        let (cycz, sysz, sycz, cysz) = (cy * cz, sy * sz, sy * cz, cy * sz);
+        [
+            sx * cycz + cx * sysz,
+            cx * sycz - sx * cysz,
+            cx * cysz + sx * sycz,
+            cx * cycz - sx * sysz,
+        ]
+    };
+    match direction {
+        0 => rotation_x(PI),
+        1 => [0.0, 0.0, 0.0, 1.0],
+        2 => rotation_xyz(FRAC_PI_2, 0.0, PI),
+        3 => rotation_x(FRAC_PI_2),
+        4 => rotation_xyz(FRAC_PI_2, 0.0, FRAC_PI_2),
+        _ => rotation_xyz(FRAC_PI_2, 0.0, -FRAC_PI_2),
+    }
+}
 
 /// Java's `Math.min` on floating point: NaN if either is, -0.0 below 0.0.
 fn java_min(a: f64, b: f64) -> f64 {
@@ -6669,6 +6885,277 @@ mod tests {
             &[V::NULL],
         );
         assert_eq!(crate::jutil::elements(&rt, levels), [level]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A direction's step and rotation, and the lookups by delta, name and nearest vector, as
+    /// vanilla's `Direction` gives them; an axis's plane and name.
+    #[test]
+    fn directions_step_turn_and_are_found_as_vanilla_does() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+        let floats = |rt: &Rt, v: V, fields: &[&'static str]| {
+            fields
+                .iter()
+                .map(|f| rt.get_field(v, f).f())
+                .collect::<Vec<f32>>()
+        };
+        let west = direction(&mut rt, 4);
+        let step = c(
+            &mut rt,
+            "net/minecraft/core/Direction.step.()Lorg/joml/Vector3f;",
+            &[west],
+        );
+        assert_eq!(
+            (rt.class_of(step), floats(&rt, step, &["x", "y", "z"])),
+            ("org/joml/Vector3f", vec![-1.0, 0.0, 0.0])
+        );
+
+        // `getRotation()` turns up onto each direction's normal: v + 2w(q × v) + 2q × (q × v).
+        let cross = |a: [f32; 3], b: [f32; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        for (o, normal) in DIRECTION_STEPS.iter().enumerate() {
+            let d = direction(&mut rt, o as i64);
+            let q = c(
+                &mut rt,
+                "net/minecraft/core/Direction.getRotation.()Lorg/joml/Quaternionf;",
+                &[d],
+            );
+            let [x, y, z, w] = floats(&rt, q, &["x", "y", "z", "w"])[..] else {
+                panic!("four floats")
+            };
+            let up = [0.0, 1.0, 0.0];
+            let t = cross([x, y, z], up).map(|v| 2.0 * v);
+            let u = cross([x, y, z], t);
+            let turned = [0, 1, 2].map(|i| up[i] + w * t[i] + u[i]);
+            for i in 0..3 {
+                assert!(
+                    (turned[i] - normal[i] as f32).abs() < 1e-6,
+                    "{o}: {turned:?}"
+                );
+            }
+        }
+        // JOML's own numbers: up is no turn, south a quarter turn about x.
+        let (up, south) = (direction(&mut rt, 1), direction(&mut rt, 3));
+        let q = |rt: &mut Rt, d: V| {
+            let q = c(
+                rt,
+                "net/minecraft/core/Direction.getRotation.()Lorg/joml/Quaternionf;",
+                &[d],
+            );
+            floats(rt, q, &["x", "y", "z", "w"])
+        };
+        assert_eq!(q(&mut rt, up), vec![0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(q(&mut rt, south), vec![0.70710677, 0.0, 0.0, 0.70710677]);
+
+        // `fromDelta`: one axis only, by its sign.
+        let from = |rt: &mut Rt, [x, y, z]: [i32; 3]| {
+            c(
+                rt,
+                "net/minecraft/core/Direction.fromDelta.(III)Lnet/minecraft/core/Direction;",
+                &[V::I(x), V::I(y), V::I(z)],
+            )
+        };
+        for (delta, o) in [
+            ([0, 0, 5], 3),
+            ([0, -3, 0], 0),
+            ([2, 0, 0], 5),
+            ([-1, 0, 0], 4),
+        ] {
+            let want = direction(&mut rt, o);
+            assert_eq!(from(&mut rt, delta), want, "{delta:?}");
+        }
+        assert_eq!(
+            (from(&mut rt, [1, 1, 0]), from(&mut rt, [0, 0, 0])),
+            (V::NULL, V::NULL)
+        );
+
+        // `byName`: the serialized name, nothing else.
+        let by_name = |rt: &mut Rt, n: Option<&str>| {
+            let n = n.map_or(V::NULL, |n| rt.string(n));
+            c(
+                rt,
+                "net/minecraft/core/Direction.byName.(Ljava/lang/String;)Lnet/minecraft/core/Direction;",
+                &[n],
+            )
+        };
+        let north = direction(&mut rt, 2);
+        assert_eq!(by_name(&mut rt, Some("north")), north);
+        assert_eq!(
+            (by_name(&mut rt, Some("NORTH")), by_name(&mut rt, None)),
+            (V::NULL, V::NULL)
+        );
+
+        // `getNearest(vec)`: the largest dot product.
+        let v = vec3(&mut rt, 0.2, -0.9, 0.1);
+        let nearest = c(
+            &mut rt,
+            "net/minecraft/core/Direction.getNearest.(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/core/Direction;",
+            &[v],
+        );
+        assert_eq!(nearest, direction(&mut rt, 0));
+
+        // An axis's plane and name.
+        let (x_axis, y_axis) = (axis(&mut rt, 0), axis(&mut rt, 1));
+        let plane = |rt: &mut Rt, a: V| {
+            c(
+                rt,
+                "net/minecraft/core/Direction$Axis.getPlane.()Lnet/minecraft/core/Direction$Plane;",
+                &[a],
+            )
+        };
+        let (horizontal, vertical) = (
+            crate::api::get_static(&mut rt, "net/minecraft/core/Direction$Plane.HORIZONTAL"),
+            crate::api::get_static(&mut rt, "net/minecraft/core/Direction$Plane.VERTICAL"),
+        );
+        assert_eq!(
+            (plane(&mut rt, x_axis), plane(&mut rt, y_axis)),
+            (horizontal, vertical)
+        );
+        let z = rt.string("z");
+        let z_axis = c(
+            &mut rt,
+            "net/minecraft/core/Direction$Axis.byName.(Ljava/lang/String;)Lnet/minecraft/core/Direction$Axis;",
+            &[z],
+        );
+        assert_eq!(z_axis, axis(&mut rt, 2));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A dye item's colour: a vanilla dye's by its id, a mod's own by its constructor, none for an
+    /// item that isn't one; a colour's `c:dyes` item tag.
+    #[test]
+    fn a_dye_item_knows_its_colour_and_a_colour_its_tag() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+        const COLOUR: &str =
+            "net/minecraft/world/item/DyeItem.getDyeColor.()Lnet/minecraft/world/item/DyeColor;";
+        let (red, blue) = (
+            crate::api::get_static(&mut rt, "net/minecraft/world/item/DyeColor.RED"),
+            crate::api::get_static(&mut rt, "net/minecraft/world/item/DyeColor.BLUE"),
+        );
+        let red_dye = item(&mut rt, "minecraft:red_dye");
+        assert_eq!(c(&mut rt, COLOUR, &[red_dye]), red);
+        let glow = rt.new_object("t/GlowDyeItem");
+        c(
+            &mut rt,
+            "net/minecraft/world/item/DyeItem.<init>.(Lnet/minecraft/world/item/DyeColor;Lnet/minecraft/world/item/Item$Properties;)V",
+            &[glow, blue, V::NULL],
+        );
+        assert_eq!(c(&mut rt, COLOUR, &[glow]), blue);
+        let stick = item(&mut rt, "minecraft:stick");
+        assert_eq!(c(&mut rt, COLOUR, &[stick]), V::NULL);
+
+        let light_blue =
+            crate::api::get_static(&mut rt, "net/minecraft/world/item/DyeColor.LIGHT_BLUE");
+        let tag = c(
+            &mut rt,
+            "net/minecraft/world/item/DyeColor.getTag.()Lnet/minecraft/tags/TagKey;",
+            &[light_blue],
+        );
+        let id = rt.string("c:dyes/light_blue");
+        let location = c(
+            &mut rt,
+            "net/minecraft/resources/ResourceLocation.parse.(Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;",
+            &[id],
+        );
+        let same = c(
+            &mut rt,
+            "net/minecraft/tags/ItemTags.create.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/tags/TagKey;",
+            &[location],
+        );
+        assert_eq!(tag, same);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A component's contents: a translation's key and arguments, or literal text, the same object
+    /// each time and of the classes a mod tests for; a component made from contents.
+    #[test]
+    fn a_components_contents_are_its_translation_or_text() {
+        use super::*;
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+        const CONTENTS: &str = "net/minecraft/network/chat/Component.getContents.()Lnet/minecraft/network/chat/ComponentContents;";
+        const GET_KEY: &str =
+            "net/minecraft/network/chat/contents/TranslatableContents.getKey.()Ljava/lang/String;";
+        const GET_ARGS: &str = "net/minecraft/network/chat/contents/TranslatableContents.getArgs.()[Ljava/lang/Object;";
+        const TEXT: &str =
+            "net/minecraft/network/chat/contents/PlainTextContents.text.()Ljava/lang/String;";
+        const CREATE: &str = "net/minecraft/network/chat/MutableComponent.create.(Lnet/minecraft/network/chat/ComponentContents;)Lnet/minecraft/network/chat/MutableComponent;";
+        let is = |rt: &Rt, v: V| {
+            [
+                "net/minecraft/network/chat/ComponentContents",
+                TRANSLATABLE_CONTENTS,
+                PLAIN_TEXT_CONTENTS,
+            ]
+            .map(|class| rt.instance_of(v, class))
+        };
+
+        let key = rt.string("block.minecraft.stone");
+        let five = integer(&mut rt, 5);
+        let args = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![five]));
+        let t = c(
+            &mut rt,
+            "net/minecraft/network/chat/Component.translatable.(Ljava/lang/String;[Ljava/lang/Object;)Lnet/minecraft/network/chat/MutableComponent;",
+            &[key, args],
+        );
+        let contents = c(&mut rt, CONTENTS, &[t]);
+        assert_eq!(is(&rt, contents), [true, true, false]);
+        let got = c(&mut rt, GET_KEY, &[contents]);
+        assert_eq!(rt.str_of(got), Some("block.minecraft.stone"));
+        let got = c(&mut rt, GET_ARGS, &[contents]);
+        assert_eq!((rt.array_len(got), rt.array_get(got, 0)), (1, five));
+        assert_eq!(c(&mut rt, CONTENTS, &[t]), contents);
+
+        let hi = rt.string("Hi");
+        let literal = c(
+            &mut rt,
+            "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;",
+            &[hi],
+        );
+        let contents = c(&mut rt, CONTENTS, &[literal]);
+        assert_eq!(is(&rt, contents), [true, false, true]);
+        let got = c(&mut rt, TEXT, &[contents]);
+        assert_eq!(rt.str_of(got), Some("Hi"));
+
+        // `MutableComponent.create(new TranslatableContents("gui.done", null, NO_ARGS))`: that
+        // translation, with no arguments, and those very contents.
+        let done = rt.string("gui.done");
+        let no_args = rt.alloc("[Ljava/lang/Object;", Data::Array(Vec::new()));
+        let tc = rt.new_object(TRANSLATABLE_CONTENTS);
+        c(
+            &mut rt,
+            "net/minecraft/network/chat/contents/TranslatableContents.<init>.(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)V",
+            &[tc, done, V::NULL, no_args],
+        );
+        let made = c(&mut rt, CREATE, &[tc]);
+        assert_eq!(
+            component_json(&rt, made),
+            serde_json::json!({ "translate": "gui.done" })
+        );
+        assert_eq!(c(&mut rt, CONTENTS, &[made]), tc);
+        let got = c(&mut rt, GET_ARGS, &[tc]);
+        assert_eq!(rt.array_len(got), 0);
+        let text = c(
+            &mut rt,
+            "net/minecraft/network/chat/contents/PlainTextContents.create.(Ljava/lang/String;)Lnet/minecraft/network/chat/contents/PlainTextContents;",
+            &[hi],
+        );
+        let made = c(&mut rt, CREATE, &[text]);
+        assert_eq!(
+            component_json(&rt, made),
+            serde_json::json!({ "text": "Hi" })
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

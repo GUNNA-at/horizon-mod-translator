@@ -171,6 +171,17 @@ fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
             let level = horizon_compat::glue::level(rt);
             api::call(rt, "net/minecraft/world/level/Level.registryAccess.()Lnet/minecraft/core/RegistryAccess;", &[level])
         }
+        // Stone's key in the item registry, and that registry as the level's registries look it up.
+        "Lnet/minecraft/resources/ResourceKey;" => {
+            let items = api::get_static(rt, "net/minecraft/core/registries/Registries.ITEM");
+            let id = sample(rt, "Lnet/minecraft/resources/ResourceLocation;")?;
+            api::call(rt, "net/minecraft/resources/ResourceKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[items, id])
+        }
+        "Lnet/minecraft/core/HolderLookup$RegistryLookup;" | "Lnet/minecraft/core/HolderLookup;" | "Lnet/minecraft/core/HolderGetter;" => {
+            let registries = sample(rt, "Lnet/minecraft/core/HolderLookup$Provider;")?;
+            let items = api::get_static(rt, "net/minecraft/core/registries/Registries.ITEM");
+            api::call(rt, "net/minecraft/core/HolderLookup$Provider.lookupOrThrow.(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/HolderLookup$RegistryLookup;", &[registries, items])
+        }
         "Lnet/minecraft/world/entity/player/Player;" | "Lnet/minecraft/server/level/ServerPlayer;" => horizon_compat::menus::server_player(rt, PROBE_PLAYER),
         // A container of one slot and a slot of it, as a menu's are; an item handler and a fluid
         // tank of their own, as a block entity's are; the capabilities a mod asks for.

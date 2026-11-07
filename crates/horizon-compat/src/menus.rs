@@ -51,6 +51,7 @@ const PLAYER_EXTENSION: &str = "net/neoforged/neoforge/common/extensions/IPlayer
 const SERVER_PLAYER: &str = "net/minecraft/server/level/ServerPlayer";
 const LOCAL_PLAYER: &str = "net/minecraft/client/player/LocalPlayer";
 const NON_NULL_LIST: &str = "net/minecraft/core/NonNullList";
+const CONTAINER_HELPER: &str = "net/minecraft/world/ContainerHelper";
 
 /// `ClickType`'s constants, in order (their ordinals).
 pub(crate) const CLICK_TYPES: [&str; 7] = ["PICKUP", "QUICK_MOVE", "SWAP", "CLONE", "THROW", "QUICK_CRAFT", "PICKUP_ALL"];
@@ -1725,6 +1726,83 @@ const LIST_SIZE: &str = "net/minecraft/nbt/ListTag.size.()I";
 const LIST_COMPOUND: &str = "net/minecraft/nbt/ListTag.getCompound.(I)Lnet/minecraft/nbt/CompoundTag;";
 const STACK_SAVE: &str = "net/minecraft/world/item/ItemStack.save.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;";
 const STACK_PARSE: &str = "net/minecraft/world/item/ItemStack.parseOptional.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/CompoundTag;)Lnet/minecraft/world/item/ItemStack;";
+const COMPOUND_PUT: &str = "net/minecraft/nbt/CompoundTag.put.(Ljava/lang/String;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;";
+const COMPOUND_GET_LIST: &str =
+    "net/minecraft/nbt/CompoundTag.getList.(Ljava/lang/String;I)Lnet/minecraft/nbt/ListTag;";
+/// `Tag.TAG_COMPOUND`: the element type `getList` asks for.
+const TAG_COMPOUND: i32 = 10;
+
+/// `ContainerHelper`'s statics, as vanilla's: a stack taken from a list of stacks, or part of one,
+/// and a list saved to a tag's `Items` (each stack that isn't empty, with its `Slot`) and loaded
+/// back. Block entities save their grids with them.
+fn container_helper_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i| arg(args, i);
+    let at = |rt: &Rt, list: V, i: i32| usize::try_from(i).ok().filter(|&i| i < list_len(rt, list));
+    Some(match name {
+        // `removeItem(list, i, n)`: up to `n` split off the stack at `i`, if there is one.
+        "removeItem" => match at(rt, a(0), a(1).i()) {
+            Some(i) if a(2).i() > 0 && !is_empty(rt, list_get(rt, a(0), i)) => {
+                let there = list_get(rt, a(0), i);
+                split(rt, there, a(2).i())
+            }
+            _ => empty(rt),
+        },
+        // `takeItem(list, i)`: the stack at `i`, an empty one left in its place.
+        "takeItem" => match at(rt, a(0), a(1).i()) {
+            Some(i) => {
+                let (there, e) = (list_get(rt, a(0), i), empty(rt));
+                list_set(rt, a(0), i, e);
+                there
+            }
+            None => empty(rt),
+        },
+        // `saveAllItems(tag, items[, alwaysPutTag], registries)`: the tag, with `Items` unless the
+        // list saved nothing and `alwaysPutTag` is false.
+        "saveAllItems" => {
+            let (tag, items) = (a(0), a(1));
+            let (always, registries) = if desc.contains("NonNullList;Z") {
+                (truthy(a(2)), a(3))
+            } else {
+                (true, a(2))
+            };
+            let list = crate::tags::new_list(rt, Vec::new());
+            for i in 0..list_len(rt, items) {
+                let s = list_get(rt, items, i);
+                if is_empty(rt, s) {
+                    continue;
+                }
+                let entry = crate::tags::new_compound(rt);
+                let key = rt.string("Slot");
+                crate::api::call(rt, PUT_BYTE, &[entry, key, V::I(i32::from(i as u8 as i8))]);
+                let saved = crate::api::call(rt, STACK_SAVE, &[s, registries, entry]);
+                crate::api::call(rt, LIST_ADD, &[list, saved]);
+            }
+            if always || crate::api::call(rt, LIST_SIZE, &[list]).i() > 0 {
+                let key = rt.string("Items");
+                crate::api::call(rt, COMPOUND_PUT, &[tag, key, list]);
+            }
+            tag
+        }
+        // `loadAllItems(tag, items, registries)`: each stack of `Items` in the slot it names, if the
+        // list has it; the other slots as they were.
+        "loadAllItems" => {
+            let (tag, items, registries) = (a(0), a(1), a(2));
+            let key = rt.string("Items");
+            let list = crate::api::call(rt, COMPOUND_GET_LIST, &[tag, key, V::I(TAG_COMPOUND)]);
+            for k in 0..crate::api::call(rt, LIST_SIZE, &[list]).i() {
+                let entry = crate::api::call(rt, LIST_COMPOUND, &[list, V::I(k)]);
+                let key = rt.string("Slot");
+                let slot = (crate::api::call(rt, GET_BYTE, &[entry, key]).i() & 255) as usize;
+                if slot < list_len(rt, items) {
+                    let s = crate::api::call(rt, STACK_PARSE, &[registries, entry]);
+                    list_set(rt, items, slot, s);
+                }
+            }
+            V::Void
+        }
+        _ => return None,
+    })
+}
 
 /// Vanilla's number in `Inventory.save`'s `Slot` for slot `i` of ours: the 36 as they are, the
 /// armor's from 100, the off hand 150.
@@ -2969,6 +3047,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | OPTIONAL_DOUBLE
             | REGISTER_SCREENS
             | MENU_SCREENS
+            | CONTAINER_HELPER
     ) || (owner == GAME_MODE && matches!(name, "handleInventoryMouseClick" | "handleInventoryButtonClick"))
         || (player_owner(owner)
             && matches!(name, "getInventory" | "openMenu" | "closeContainer" | "doCloseContainer" | "clientSideCloseContainer" | "hasContainerOpen" | "initMenu" | "nextContainerCounter" | "drop"))
@@ -2997,6 +3076,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(V::Void)
         }
         GAME_MODE => game_mode_call(rt, name, args),
+        CONTAINER_HELPER => container_helper_call(rt, name, desc, args),
         o if player_owner(o) => player_call(rt, name, desc, args),
         _ => None,
     }
@@ -3590,6 +3670,110 @@ mod tests {
             let held = crate::api::call(rt, INV_GET, &[inv, V::I(0)]);
             assert_eq!(crate::api_common::item_like_name(rt, rt.get_field(held, "$item")), "minecraft:stick");
         });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `ContainerHelper`, as a block entity saves and loads its grid with it: each stack that isn't
+    /// empty under `Items` with its `Slot`, loaded back into the slots a grid has; a stack taken or
+    /// split off a slot.
+    #[test]
+    fn container_helper_saves_loads_and_takes_as_vanilla_does() {
+        const SAVE: &str = "net/minecraft/world/ContainerHelper.saveAllItems.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/NonNullList;Lnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag;";
+        const SAVE_IF: &str = "net/minecraft/world/ContainerHelper.saveAllItems.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/NonNullList;ZLnet/minecraft/core/HolderLookup$Provider;)Lnet/minecraft/nbt/CompoundTag;";
+        const LOAD: &str = "net/minecraft/world/ContainerHelper.loadAllItems.(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/core/NonNullList;Lnet/minecraft/core/HolderLookup$Provider;)V";
+        const REMOVE: &str = "net/minecraft/world/ContainerHelper.removeItem.(Ljava/util/List;II)Lnet/minecraft/world/item/ItemStack;";
+        const TAKE: &str = "net/minecraft/world/ContainerHelper.takeItem.(Ljava/util/List;I)Lnet/minecraft/world/item/ItemStack;";
+        const CONTAINS: &str = "net/minecraft/nbt/CompoundTag.contains.(Ljava/lang/String;)Z";
+        const GET_STRING: &str =
+            "net/minecraft/nbt/CompoundTag.getString.(Ljava/lang/String;)Ljava/lang/String;";
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+        let grid = |rt: &mut Rt, stacks: &[(&str, i32)]| {
+            let items: Vec<V> = stacks
+                .iter()
+                .map(|&(id, n)| {
+                    if n == 0 {
+                        empty(rt)
+                    } else {
+                        crate::api_common::stack(rt, id, n)
+                    }
+                })
+                .collect();
+            rt.alloc(NON_NULL_LIST, Data::List(items))
+        };
+        let view = |rt: &Rt, l: V| {
+            (0..list_len(rt, l))
+                .map(|i| stack_view(rt, list_get(rt, l, i)))
+                .collect::<Vec<_>>()
+        };
+        let some = |id: &str, n: i32| Some((id.to_owned(), n));
+
+        // Stone in slot 0, nothing in 1, a diamond in 2: two entries, slots 0 and 2.
+        let items = grid(
+            &mut rt,
+            &[("minecraft:stone", 5), ("", 0), ("minecraft:diamond", 1)],
+        );
+        let tag = crate::tags::new_compound(&mut rt);
+        assert_eq!(c(&mut rt, SAVE, &[tag, items, V::NULL]), tag);
+        let key = rt.string("Items");
+        let list = c(&mut rt, COMPOUND_GET_LIST, &[tag, key, V::I(TAG_COMPOUND)]);
+        assert_eq!(c(&mut rt, LIST_SIZE, &[list]), V::I(2));
+        let entry = |rt: &mut Rt, i: i32| {
+            let e = c(rt, LIST_COMPOUND, &[list, V::I(i)]);
+            let (slot, id) = (rt.string("Slot"), rt.string("id"));
+            let id = c(rt, GET_STRING, &[e, id]);
+            (
+                c(rt, GET_BYTE, &[e, slot]),
+                rt.str_of(id).unwrap_or("").to_owned(),
+            )
+        };
+        assert_eq!(entry(&mut rt, 0), (V::I(0), "minecraft:stone".to_owned()));
+        assert_eq!(entry(&mut rt, 1), (V::I(2), "minecraft:diamond".to_owned()));
+
+        // Loaded into a grid of two: the stone in its slot, the diamond's slot past the grid left
+        // out, and a slot the tag doesn't name kept as it was.
+        let into = grid(&mut rt, &[("minecraft:dirt", 1), ("minecraft:dirt", 3)]);
+        c(&mut rt, LOAD, &[tag, into, V::NULL]);
+        assert_eq!(
+            view(&rt, into),
+            vec![some("minecraft:stone", 5), some("minecraft:dirt", 3)]
+        );
+
+        // Nothing to save: an empty `Items` all the same, unless the caller says not to.
+        let none = grid(&mut rt, &[("", 0)]);
+        let (always, unless) = (
+            crate::tags::new_compound(&mut rt),
+            crate::tags::new_compound(&mut rt),
+        );
+        c(&mut rt, SAVE, &[always, none, V::NULL]);
+        c(&mut rt, SAVE_IF, &[unless, none, V::I(0), V::NULL]);
+        let key = rt.string("Items");
+        assert_eq!(
+            (
+                c(&mut rt, CONTAINS, &[always, key]),
+                c(&mut rt, CONTAINS, &[unless, key])
+            ),
+            (V::I(1), V::I(0))
+        );
+
+        // `removeItem`: two of the stone split off, three left; an empty slot, a slot past the
+        // list or no count gives an empty stack and changes nothing.
+        let part = c(&mut rt, REMOVE, &[items, V::I(0), V::I(2)]);
+        assert_eq!(stack_view(&rt, part), some("minecraft:stone", 2));
+        for (i, n) in [(1, 4), (3, 1), (-1, 1), (2, 0)] {
+            let got = c(&mut rt, REMOVE, &[items, V::I(i), V::I(n)]);
+            assert_eq!(stack_view(&rt, got), None, "removeItem({i}, {n})");
+        }
+        // `takeItem`: the whole diamond, its slot left empty; past the list, an empty stack.
+        let diamond = c(&mut rt, TAKE, &[items, V::I(2)]);
+        assert_eq!(stack_view(&rt, diamond), some("minecraft:diamond", 1));
+        let past = c(&mut rt, TAKE, &[items, V::I(7)]);
+        assert_eq!(stack_view(&rt, past), None);
+        assert_eq!(
+            view(&rt, items),
+            vec![some("minecraft:stone", 3), None, None]
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

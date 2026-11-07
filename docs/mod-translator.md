@@ -7008,6 +7008,43 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a stair), world `level::tests` 74 (1 new: a ladder hook running `LadderBlock`'s rule survives on
     its wall, fails without it, hangs from a rung above by the hook's own rule; a class the block
     lacks runs nothing, a state past the table is refused), translator 20.
+- [x] 2026-11-07 Part 104: the vanilla helpers the pack's mods call most that nothing answered
+  (packcov16's list, by the number of mods calling them), and the probe's samples for registry
+  keys.
+  - `ContainerHelper` (`menus`): `saveAllItems` (both forms: an empty `Items` all the same unless
+    the caller says not to), `loadAllItems` (into the slots the grid has, the others kept),
+    `removeItem` and `takeItem`, as 1.21.1's: 28, 24, 21 and 17 mods save and load their block
+    entities' grids with them.
+  - `Direction`: `step()` (22 mods: the normal as a `Vector3f`), `getRotation()` (17: vanilla's
+    quaternions, by JOML's `rotationX` and `rotationXYZ` arithmetic), `fromDelta` (11), `byName`
+    (10), `getNearest(Vec3)`; `Axis.getPlane` and `byName`, `AxisDirection.values()`.
+  - Dyes: `DyeItem.getDyeColor()` (20: a mod dye's colour from its constructor, a vanilla dye's
+    from its id), NeoForge's `DyeColor.getTag()` (10: `c:dyes/<colour>`).
+  - `FriendlyByteBuf.readEnum(class)` (20 and 18 mods, both buffers): the constant at the ordinal
+    `writeEnum` wrote, by the class's `values()`; past them, Java's
+    `ArrayIndexOutOfBoundsException`.
+  - `BlockState.isCollisionShapeFullBlock(level, pos)` (22): the collision shape `getCollisionShape`
+    gives there, tested as `Block.isShapeFullBlock` tests a shape.
+  - Components (29 mods ask `getContents()`): `TranslatableContents` (key, fallback, arguments) and
+    `PlainTextContents.LiteralContents`, made once per component and of the classes a mod's
+    `instanceof` tests (`ComponentContents`, `PlainTextContents`); `MutableComponent.create`
+    (11) makes the component of a translation or text and gives the same contents back.
+  - Probe (`horizon-mod-translator`'s coverage run): samples of a `ResourceKey` (stone's item key)
+    and a registry lookup (`HolderLookup$RegistryLookup`, `HolderGetter`: the item registry, as
+    the level's registries look it up). Without them `getOrThrow(key)` (33 and 20 mods) was
+    counted missing though compat answers it.
+  - Measured (packcov17, the same 367 jars): methods 80.0% (from 79.6%: 519 more mapped), uses
+    89.4% (from 89.1%), distinct missing API methods 11031 (from 11088); Create 78.1% of its
+    methods, 95.0% of its uses. Of the calls above only one mod's `super.isCollisionShapeFullBlock`
+    and one `ContainerHelper` subclass are left. Top of the list now: `getTextureManager` (46 mods),
+    `Player.awardStat` (38), NeoForge's `ConfigurationScreen` (38), mod entities' attributes
+    (`AttributeSupplier$Builder.build` 33, `EntityAttributeCreationEvent.put` 32), `HoverEvent` (32).
+  - Tests: compat 599 (6 new: `ContainerHelper` saves, loads, splits and takes as vanilla's;
+    `readEnum` gives back what `writeEnum` wrote, on both buffers, and throws past the constants; a
+    collision shape is a full block only when it fills it, a double slab's two halves together;
+    directions step, turn up onto their normals with JOML's numbers, and are found by delta, name
+    and nearest vector; a dye item's colour and a colour's tag; a component's contents, their
+    classes and a component made from them), translator 20.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

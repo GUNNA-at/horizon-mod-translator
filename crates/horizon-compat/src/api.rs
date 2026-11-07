@@ -2316,6 +2316,13 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     let ctx = if desc.contains("CollisionContext;)") { a(3) } else { crate::shapes::empty_context(rt) };
                     state_shape(rt, &text, n == "getCollisionShape", [a(0), a(1), a(2), ctx])
                 }
+                // `isCollisionShapeFullBlock(level, pos)`: whether that collision shape is the whole
+                // block (`Block.isShapeFullBlock`), as the state's cache has it.
+                "isCollisionShapeFullBlock" if desc == "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Z" => {
+                    let ctx = crate::shapes::empty_context(rt);
+                    let shape = state_shape(rt, &text, true, [a(0), a(1), a(2), ctx]);
+                    V::I(i32::from(crate::shapes::boxes(rt, shape).is_some_and(|b| crate::shapes::full_block(&b))))
+                }
                 // `getOcclusionShape(level, pos)`: the mod block's own, else its shape, as
                 // `BlockBehaviour`'s default gives it.
                 "getOcclusionShape" if desc == "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;" => {
@@ -3829,6 +3836,52 @@ mod tests {
         let behaviours = "net/minecraft/world/level/block/Block.getBlockSupportShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
         let shape = call(&mut rt, behaviours, &[post, post_state, level, pos]);
         assert_eq!(crate::shapes::boxes(&rt, shape), Some(vec![[6.0 * PX, 0.0, 6.0 * PX, 10.0 * PX, 1.0, 10.0 * PX]]));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `state.isCollisionShapeFullBlock(level, pos)`: whether the state's collision shape where it
+    /// stands is the whole block, its boxes together (a double slab's two halves) as well as one.
+    #[test]
+    fn a_collision_shape_is_a_full_block_only_when_it_fills_the_block() {
+        const FULL: &str = "net/minecraft/world/level/block/state/BlockState.isCollisionShapeFullBlock.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Z";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut h = crate::host::MemoryHost::default();
+        let bottom = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
+        let top = [0.0, 0.5, 0.0, 1.0, 1.0, 1.0];
+        for (x, block, boxes) in [
+            (0, "minecraft:stone", None),
+            (
+                1,
+                "minecraft:oak_slab[type=bottom,waterlogged=false]",
+                Some(vec![bottom]),
+            ),
+            (
+                2,
+                "minecraft:oak_slab[type=double,waterlogged=false]",
+                Some(vec![bottom, top]),
+            ),
+            (3, "minecraft:air", None),
+        ] {
+            h.blocks.insert([x, 64, 0], block.to_owned());
+            if let Some(b) = boxes {
+                h.collisions.insert([x, 64, 0], b);
+            }
+        }
+        let full = rt.with_host(&mut h, |rt| {
+            let level = crate::glue::level(rt);
+            (0..4)
+                .map(|x| {
+                    let text = rt
+                        .host()
+                        .map(|h| h.block_state([x, 64, 0]))
+                        .unwrap_or_default();
+                    let (s, p) = (state(rt, &text), block_pos(rt, i64::from(x), 64, 0));
+                    call(rt, FULL, &[s, level, p])
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(full, [V::I(1), V::I(0), V::I(1), V::I(0)]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }
