@@ -322,6 +322,7 @@ fn registry_name_of(rt: &Rt, registry: &str, obj: V) -> Option<String> {
             named.then(|| rt.str_of(obj)).flatten().filter(|n| n.contains(':') && !n.starts_with(crate::api::UNREGISTERED))
         })
         .or_else(|| crate::crafting::vanilla_entry_name(rt, registry, obj))
+        .or_else(|| (registry == "fluid_ingredient_type").then(|| crate::recipes::fluid_ingredient_type_name(rt, obj)).flatten())
         .map(str::to_owned)
 }
 
@@ -375,6 +376,8 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         "recipe_type" | "recipe_serializer" => {
             crate::crafting::vanilla_entry(rt, registry, id).unwrap_or(V::NULL)
         }
+        // NeoForge's own fluid ingredient types (`neoforge:single`...).
+        "fluid_ingredient_type" => crate::recipes::fluid_ingredient_type(rt, id).unwrap_or(V::NULL),
         // Enchantments are data the runtime doesn't list: a name is taken to be one, as the
         // game's data has it (`enchantments.rs`).
         "enchantment" if crate::recipes::valid_location(id) => crate::enchantments::value(rt, id),

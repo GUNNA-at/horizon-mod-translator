@@ -33,6 +33,8 @@ const PREDICATE_TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Obje
 const RECIPE_INPUT: &str = "net/minecraft/world/item/crafting/RecipeInput";
 const FLUID_INGREDIENT: &str = "net/neoforged/neoforge/fluids/crafting/FluidIngredient";
 const SIZED_FLUID: &str = "net/neoforged/neoforge/fluids/crafting/SizedFluidIngredient";
+const TAG_FLUID: &str = "net/neoforged/neoforge/fluids/crafting/TagFluidIngredient";
+const FLUID_INGREDIENT_TYPE: &str = "net/neoforged/neoforge/fluids/crafting/FluidIngredientType";
 const COMPONENT_PATCH: &str = "net/minecraft/core/component/DataComponentPatch";
 const STACK_ARRAY: &str = "[Lnet/minecraft/world/item/ItemStack;";
 const SIZED_ITEM: &str = "net/neoforged/neoforge/common/crafting/SizedIngredient";
@@ -412,6 +414,55 @@ fn fluid_ingredient(rt: &mut Rt, entries: &[String]) -> V {
     o
 }
 
+/// NeoForge's own fluid ingredient types by their names in `NeoForgeRegistries.FLUID_INGREDIENT_TYPES`
+/// (`NeoForgeMod.SINGLE_FLUID_INGREDIENT_TYPE` is `neoforge:single`).
+const FLUID_INGREDIENT_TYPES: [&str; 7] = [
+    "neoforge:single",
+    "neoforge:tag",
+    "neoforge:empty",
+    "neoforge:compound",
+    "neoforge:components",
+    "neoforge:difference",
+    "neoforge:intersection",
+];
+
+/// NeoForge's fluid ingredient type `id`, one object per name. Its codec reads an ingredient as
+/// `FluidIngredient.MAP_CODEC_NONEMPTY` does, its own `type` key among the others, as a dispatch
+/// hands it over.
+pub(crate) fn fluid_ingredient_type(rt: &mut Rt, id: &str) -> Option<V> {
+    let id = *FLUID_INGREDIENT_TYPES.iter().find(|t| **t == id)?;
+    let made = |rt: &mut Rt| {
+        let codec = codecs::native(rt, "fluid_ingredient_map");
+        let stream = crate::network::from_codec(rt, codec);
+        let t = crate::records::make(rt, FLUID_INGREDIENT_TYPE, &[codec, stream]);
+        let name = rt.string(id);
+        rt.put_field(t, "$id", name);
+        t
+    };
+    Some(rt.intern(format!("compat:fluid-ingredient-type/{id}"), made))
+}
+
+/// The name NeoForge's fluid ingredient type `obj` is registered under.
+pub(crate) fn fluid_ingredient_type_name(rt: &Rt, obj: V) -> Option<&str> {
+    let id = rt.str_of(rt.get_field(obj, "$id"))?;
+    let key = format!("compat:fluid-ingredient-type/{id}");
+    (rt.interned.get(&key) == Some(&obj)).then_some(id)
+}
+
+/// Which of NeoForge's types a fluid ingredient is (`getType`): `components` when it requires them
+/// of a stack, `empty` naming nothing, `tag` or `single` naming one, `compound` naming more.
+fn fluid_ingredient_kind(rt: &Rt, ingredient: V) -> &'static str {
+    if rt.get_field(ingredient, "$requires").r() != 0 {
+        return "neoforge:components";
+    }
+    match entries(rt, ingredient).as_slice() {
+        [] => "neoforge:empty",
+        [one] if one.starts_with('#') => "neoforge:tag",
+        [_] => "neoforge:single",
+        _ => "neoforge:compound",
+    }
+}
+
 /// The data components a fluid ingredient requires of a stack (`neoforge:components`), kept as
 /// `{"components": {...}, "strict": bool}`.
 fn requires(rt: &mut Rt, ingredient: V, needs: Option<Json>) {
@@ -643,13 +694,32 @@ fn fluid_ingredient_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args:
             };
             fluid_ingredient(rt, &[n])
         }
-        (FLUID_INGREDIENT, "tag") => {
+        (FLUID_INGREDIENT | TAG_FLUID, "tag") => {
             let e = tag_entry(rt, a(0));
             fluid_ingredient(rt, &[e])
         }
         (FLUID_INGREDIENT, "of") if desc.starts_with("([Lnet/minecraft/world/level/material/Fluid;") => {
             let names: Vec<String> = jutil::elements(rt, a(0)).into_iter().map(|f| fluids::name_of(rt, f)).collect();
             fluid_ingredient(rt, &names)
+        }
+        (FLUID_INGREDIENT, "of") if desc.starts_with("([Lnet/neoforged/neoforge/fluids/FluidStack;") => {
+            let names: Vec<String> = jutil::elements(rt, a(0))
+                .into_iter()
+                .map(|s| {
+                    let f = rt.get_field(s, "$fluid");
+                    fluids::name_of(rt, f)
+                })
+                .collect();
+            fluid_ingredient(rt, &names)
+        }
+        // `FluidIngredient.empty()` (and `of()`): the one empty ingredient.
+        (FLUID_INGREDIENT, "empty" | "of") if desc.starts_with("()") => {
+            let key = "compat:fluid-ingredient/empty".to_owned();
+            rt.intern(key, |rt| fluid_ingredient(rt, &[]))
+        }
+        (FLUID_INGREDIENT, "getType") => {
+            let kind = fluid_ingredient_kind(rt, a(0));
+            fluid_ingredient_type(rt, kind).unwrap_or_default()
         }
         (FLUID_INGREDIENT, "test") => V::I(fluid_ingredient_test(rt, a(0), a(1)) as i32),
         (FLUID_INGREDIENT, "getStacks") => {
@@ -985,6 +1055,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
             "net/neoforged/neoforge/common/crafting/CompoundIngredient"
                 | FLUID_INGREDIENT
                 | SIZED_FLUID
+                | TAG_FLUID
                 | SIZED_ITEM
                 | MANAGER
                 | CACHED_CHECK
@@ -1021,7 +1092,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner.starts_with(INGREDIENT) {
         return ingredient_call(rt, owner, name, desc, args);
     }
-    if owner == FLUID_INGREDIENT || owner == SIZED_FLUID {
+    if matches!(owner, FLUID_INGREDIENT | SIZED_FLUID | TAG_FLUID) {
         return fluid_ingredient_call(rt, owner, name, desc, args);
     }
     if owner == SIZED_ITEM {
@@ -1677,6 +1748,85 @@ mod tests {
         let sized = decode_native(&mut rt, "sized_fluid_ingredient", &serde_json::json!({"type": "neoforge:single", "fluid": "minecraft:lava", "amount": 250})).unwrap();
         assert_eq!(rt.get_field(sized, "$amount"), V::I(250));
         assert!(decode_native(&mut rt, "sized_fluid_ingredient", &serde_json::json!({"item": "minecraft:stick"})).is_err());
+    }
+
+    /// NeoForge's fluid ingredient types are in their registry under NeoForge's names, as Create
+    /// reads a fluid ingredient's `type` beside it (`FLUID_INGREDIENT_TYPES.byNameCodec()`): an
+    /// ingredient's `getType` is the type its form is written with, and the type's codec reads that
+    /// form back; a name NeoForge doesn't register is refused, and `empty()` is one ingredient.
+    #[test]
+    fn neoforges_fluid_ingredient_types_are_in_their_registry() {
+        const FI: &str = "net/neoforged/neoforge/fluids/crafting/FluidIngredient";
+        const FLUIDS: &str = "[Lnet/minecraft/world/level/material/Fluid;";
+        let mut rt = Rt::new();
+        crate::install();
+        let call = |rt: &mut Rt, key: &str, args: &[V]| {
+            let k = rt.static_key(key);
+            crate::api::call(rt, k, args)
+        };
+        // `FluidIngredient.<name>(<params>)`, which returns a fluid ingredient.
+        let make =
+            |rt: &mut Rt, method: &str, args: &[V]| call(rt, &format!("{FI}.{method}L{FI};"), args);
+        let k = rt.static_key(
+            "net/neoforged/neoforge/registries/NeoForgeRegistries.FLUID_INGREDIENT_TYPES",
+        );
+        let registry = crate::api::get_static(&mut rt, k);
+        let by_name = call(
+            &mut rt,
+            "net/minecraft/core/Registry.byNameCodec.()Lcom/mojang/serialization/Codec;",
+            &[registry],
+        );
+        let named = |rt: &mut Rt, n: &str| codecs::decode(rt, by_name, &Json::String(n.into()));
+        let single = named(&mut rt, "neoforge:single").unwrap();
+        let written = codecs::encode(&mut rt, by_name, single);
+        assert_eq!(
+            written,
+            Ok(crate::nbt::Nbt::String("neoforge:single".into()))
+        );
+        let unknown = named(&mut rt, "neoforge:nope").err();
+        assert_eq!(
+            unknown.as_deref(),
+            Some("Unknown registry key in fluid_ingredient_type: neoforge:nope")
+        );
+
+        let water = fluids::fluid(&mut rt, "minecraft:water");
+        let lava = fluids::fluid(&mut rt, "minecraft:lava");
+        let one = make(
+            &mut rt,
+            "single.(Lnet/minecraft/world/level/material/Fluid;)",
+            &[water],
+        );
+        let k = rt.static_key("net/minecraft/tags/FluidTags.WATER");
+        let water_tag = crate::api::get_static(&mut rt, k);
+        let tagged = make(&mut rt, "tag.(Lnet/minecraft/tags/TagKey;)", &[water_tag]);
+        let both = rt.alloc(FLUIDS, Data::Array(vec![water, lava]));
+        let either = make(&mut rt, &format!("of.({FLUIDS})"), &[both]);
+        let empty = make(&mut rt, "empty.()", &[]);
+        assert_eq!(make(&mut rt, "empty.()", &[]), empty);
+        let get_type =
+            format!("{FI}.getType.()Lnet/neoforged/neoforge/fluids/crafting/FluidIngredientType;");
+        let forms = [
+            (one, "neoforge:single"),
+            (tagged, "neoforge:tag"),
+            (either, "neoforge:compound"),
+            (empty, "neoforge:empty"),
+        ];
+        for (ingredient, name) in forms {
+            let ty = call(&mut rt, &get_type, &[ingredient]);
+            assert_eq!(Ok(ty), named(&mut rt, name), "{name}");
+        }
+
+        // The tag type's codec reads a tag ingredient as NeoForge writes one, `type` and all.
+        let tag_type = named(&mut rt, "neoforge:tag").unwrap();
+        let codec_of = "net/neoforged/neoforge/fluids/crafting/FluidIngredientType.codec.()Lcom/mojang/serialization/MapCodec;";
+        let codec = call(&mut rt, codec_of, &[tag_type]);
+        let form = serde_json::json!({"type": "neoforge:tag", "tag": "minecraft:lava"});
+        let read = codecs::decode(&mut rt, codec, &form).unwrap();
+        let lava_stack = fluids::fluid_stack(&mut rt, lava, 1000);
+        let water_stack = fluids::fluid_stack(&mut rt, water, 1000);
+        assert!(fluid_ingredient_test(&mut rt, read, lava_stack));
+        assert!(!fluid_ingredient_test(&mut rt, read, water_stack));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     const COOKING: &str = "test/CookingRecipe";

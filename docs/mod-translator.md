@@ -6655,6 +6655,30 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     compacting) within 20 ticks; a mixer made 3 fire charges of gunpowder, blaze powder and coal
     within 60; nothing threw, and nothing of the basin's crafting is unmapped (left: the mixer's
     brewing, `PotionBrewing`'s mixes).
+- [x] 2026-11-07 Part 93: Create's recipes with a fluid ingredient are read (none of its filling
+  recipes were, nor half its mixing and compacting: Create reads a fluid ingredient's `type` beside
+  it, through `NeoForgeRegistries.FLUID_INGREDIENT_TYPES.byNameCodec()`
+  (`CreateCodecs.FLAT_SIZED_FLUID_INGREDIENT_WITH_TYPE`), and that registry held nothing, so
+  `neoforge:single` was an unknown key). Measured over the pack: 250 recipe files in 17 jars hold a
+  typed fluid ingredient (246 `neoforge:single`, 4 `neoforge:components`), 103 of them Create:
+  Dragons Plus's, 39 TFMG's, 25 Create's; the registry is named in code by Create and KubeJS (which
+  registers its own types there).
+  - compat: NeoForge's seven fluid ingredient types are in `FLUID_INGREDIENT_TYPES` under its names
+    (`neoforge:single`, `tag`, `empty`, `compound`, `components`, `difference`, `intersection`),
+    one object each, found by name and named back; a type's codec reads an ingredient as
+    `FluidIngredient.MAP_CODEC_NONEMPTY` does. `FluidIngredient.getType` is the type an
+    ingredient is written with, `empty()` (and `of()`) the one empty ingredient, `of(FluidStack...)`
+    one of the stacks' fluids, and `TagFluidIngredient.tag` a tag's.
+  - Tests: compat 576 (1 new: NeoForge's fluid ingredient types found by name and written back by
+    it, an unknown name refused with vanilla's message, each ingredient's `getType` the type of its
+    form, `empty()` one ingredient, and the tag type's codec reading a tag ingredient back),
+    translator 19.
+  - In game: a spout of lava over a depot made a blaze cake of its base (250 mB), a spout of water
+    grass of dirt, and a press over a basin of lava andesite of two flint and a gravel (100 mB),
+    all by t+20; a mixer over a basin of water made dough of wheat flour by t+120. All Create's
+    filling (10), compacting (7) and sequenced assembly (3) recipes are read now, and 10 of its 11
+    mixing ones: `mud_by_mixing` names NeoForge's `neoforge:block_tag` item ingredient, which the
+    runtime doesn't read yet. Nothing threw.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
