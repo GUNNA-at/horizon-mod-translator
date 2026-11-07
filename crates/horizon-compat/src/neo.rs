@@ -358,6 +358,8 @@ pub fn fire_registrations(rt: &mut Rt) {
     fire_config_loading(rt);
     fire_common_setup(rt);
     crate::capabilities::fire(rt);
+    // Then the data map types (`RegistryManager.initDataMaps`).
+    crate::data_maps::fire(rt);
     // Then NeoForge's finish: the mods send each other messages ("Enqueue IMC"), read the ones
     // sent to them ("Process IMC"), complete their loading, and the network registry locks with
     // the payload types they registered.
@@ -1318,6 +1320,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 }
                 "isBound" => V::I(!id.is_empty() as i32),
                 "key" => rt.string(&format!("{reg}#{id}")),
+                // NeoForge's `getKey()`: the key, null for a holder not yet named.
+                "getKey" if id.is_empty() => V::NULL,
+                "getKey" => rt.string(&format!("{reg}#{id}")),
                 "unwrapKey" => {
                     let k = rt.string(&format!("{reg}#{id}"));
                     optional(rt, k)
@@ -1350,6 +1355,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "value" | "get") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => rt.get_field(a(0), "value"),
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "isBound") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => V::I(1),
+        // A direct holder has no key (`IHolderExtension.getKey`: `unwrapKey().orElse(null)`).
+        ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "getKey") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => V::NULL,
         // Vanilla's static registration (`Registry.register(BuiltInRegistries.X, id, value)`).
         ("net/minecraft/core/Registry", "register" | "registerForHolder") => {
             let reg = rt.str_of(a(0)).unwrap_or("").to_owned();
@@ -1605,7 +1612,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (REGISTRY_SET_BUILDER, "add") => a(0),
         // What FML found before loading: a mod's file, or null for one that isn't there (how mods
         // check for an optional one early).
-        (LOADING_MOD_LIST, "get") => rt.intern("compat:loading-mod-list".into(), |rt| rt.new_object(LOADING_MOD_LIST)),
+        (LOADING_MOD_LIST, "get")
+        | ("net/neoforged/fml/loading/FMLLoader", "getLoadingModList") => rt
+            .intern("compat:loading-mod-list".into(), |rt| {
+                rt.new_object(LOADING_MOD_LIST)
+            }),
         (LOADING_MOD_LIST, "getModFileById") => {
             let id = rt.str_of(a(1)).unwrap_or("").to_owned();
             if mod_loaded(rt, &id) {
@@ -1980,7 +1991,7 @@ const ADVANCED_DATA_MAP_BUILDER: &str = "net/neoforged/neoforge/registries/datam
 const ARGUMENT_TYPE_INFOS: &str = "net/minecraft/commands/synchronization/ArgumentTypeInfos";
 const SINGLETON_ARGUMENT_INFO: &str = "net/minecraft/commands/synchronization/SingletonArgumentInfo";
 /// NeoForge's own data maps (`NeoForgeDataMaps`), by field: their ids and registries.
-const NEOFORGE_DATA_MAPS: [(&str, &str); 8] = [
+const NEOFORGE_DATA_MAPS: [(&str, &str); 9] = [
     ("COMPOSTABLES", "item"),
     ("FURNACE_FUELS", "item"),
     ("MONSTER_ROOM_MOBS", "entity_type"),
@@ -1988,8 +1999,14 @@ const NEOFORGE_DATA_MAPS: [(&str, &str); 8] = [
     ("PARROT_IMITATIONS", "entity_type"),
     ("RAID_HERO_GIFTS", "villager_profession"),
     ("VIBRATION_FREQUENCIES", "game_event"),
+    ("VILLAGER_TYPES", "biome"),
     ("WAXABLES", "block"),
 ];
+
+/// The registry of NeoForge's own data map `NeoForgeDataMaps.<field>`, None for no such map.
+pub(crate) fn neoforge_data_map(field: &str) -> Option<&'static str> {
+    NEOFORGE_DATA_MAPS.iter().find(|(n, _)| *n == field).map(|&(_, r)| r)
+}
 const KOTLIN_CONTEXT: &str = "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext";
 const KOTLIN_CONTEXT_COMPANION: &str = "thedarkcolour/kotlinforforge/neoforge/KotlinModLoadingContext$Companion";
 

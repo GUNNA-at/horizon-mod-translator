@@ -31,6 +31,7 @@ pub mod container_screens;
 pub mod capabilities;
 pub mod enchantments;
 pub mod energy;
+pub mod data_maps;
 pub mod entities;
 pub mod events;
 pub mod faces;

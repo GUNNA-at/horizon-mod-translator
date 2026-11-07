@@ -324,6 +324,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::Void
         }
         (RESOURCE, "source") => rt.get_field(a(0), "source"),
+        // `super()` from a mod's listener: vanilla's constructor keeps nothing.
+        (SIMPLE, "<init>") => V::Void,
         (RESOURCE, "open" | "openAsReader") => {
             let stream = resource_stream(rt, a(0));
             if name == "open" || rt.thrown.is_some() {

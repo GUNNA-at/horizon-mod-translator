@@ -7158,6 +7158,45 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Tests: translator 22 (2 new: a multi-loader jar's Fabric build and what only it reaches stays
     out, while NeoForge's, its annotated, named and configured classes, optional integrations and
     bundled loader classes stay; a mixin config reads as Gson reads it), compat 607.
+- [x] 2026-11-08 Part 108: NeoForge's data maps (furnace fuels among them), and more of packcov20's list.
+  - Data maps (`data_maps`, a new compat module): values data files attach to a registry's entries,
+    built as NeoForge's `DataMapLoader` builds them. A type's file is
+    `data/<type namespace>/data_maps/<registry folder>/<type path>.json`. Each file in turn:
+    `replace` drops what came before; each value (by id or `#tag`, plain or `{"value": ...}`)
+    sets its entries' value, skipped where its `neoforge:conditions` don't hold; then `remove`
+    drops entries. A file with a value that doesn't decode is left out whole. NeoForge's own types
+    decode natively, a mod's with its codec. Asked through `Holder.getData(type)`,
+    `Registry.getData(type, key)` and `getDataMap(type)`; mods register their types in
+    `RegisterDataMapTypesEvent`, now posted after the capabilities as NeoForge's
+    `RegistrationEvents` posts it (Create registers its own there); a type registered twice is
+    refused. Not carried: other packs' copies of the same file (the game gives the first pack's),
+    an `AdvancedDataMapType`'s own merger and removers, NeoForge's own values for its types other
+    than fuels.
+  - Fuel: `ItemStack.getBurnTime(recipeType)` (22 mods) as NeoForge's. An empty stack is 0; else
+    the item's `getBurnTime(stack, type)` (a mod's override, called virtually), by default its
+    `neoforge:furnace_fuels` value: NeoForge's own file (vanilla's fuels, by item and by tag,
+    `#minecraft:non_flammable_wood` removed) under the pack's copy. A negative time is vanilla's
+    `IllegalStateException`. `FurnaceFuelBurnTimeEvent` is then posted, and its listeners may set
+    another (8 mods listen). `AbstractFurnaceBlockEntity.isFuel` is a time above 0; `getFuel()` is
+    vanilla's table.
+  - Smaller ones: `Holder.getKey()` (19 mods: the key, null for a direct holder or one not yet
+    named), `FMLLoader.getLoadingModList()` (20), `super()` of a mod's
+    `SimplePreparableReloadListener` (30), `Compostable(chance)`. Attachments' calls now answer only
+    the keys their module claims: a data map's `getData` reached them in the tests' checked chain.
+  - Probe: samples of a vanilla recipe (a shapeless one of two stones) and of a crafting input.
+    Without them, the recipe interfaces' calls that compat answers were counted missing (20 mods'
+    `getIngredients` and `getType`, 16 `getResultItem`, 14 `RecipeInput.getItem`).
+  - Measured (packcov21, the same 367 jars): methods 81.6% (from 81.3%: 326 more mapped), uses
+    90.3% (from 90.2%), distinct missing API methods 9934 (from 9978); Create 78.9% of its methods
+    (from 78.4%), 95.4% of its uses (from 95.2%). Every call above is off the list. Now at its top:
+    `getTextureManager` (46 mods), `Player.awardStat` (38), `ConfigurationScreen` (38),
+    `registerSpriteSet` (31), `ModelEvent$RegisterAdditional.register` (30), mob goals (28).
+  - Tests: compat 611 (4 new: NeoForge's fuels by item and tag with a pack's file over them (a
+    value of its own, one changed, one removed, conditions that hold and don't), an empty stack, a
+    furnace's `isFuel`; a file that doesn't decode is left out and `replace` drops NeoForge's own;
+    a mod item's own burn time, a listener that sees the stack and sets one, a negative time
+    thrown; a mod's own type of blocks read with its codec, by holder, by key and whole, nothing
+    for another registry, refused when registered twice), translator 22.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

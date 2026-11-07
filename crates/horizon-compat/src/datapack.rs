@@ -51,7 +51,7 @@ pub(crate) fn is_datapack(rt: &Rt, registry: &str) -> bool {
 }
 
 /// The folder of `registry`'s files below a data namespace (`create/potato_projectile/type`).
-fn folder(rt: &Rt, registry: &str) -> String {
+pub(crate) fn folder(rt: &Rt, registry: &str) -> String {
     match rt.interned.get(&format!("{NAMESPACE}{registry}")).and_then(|ns| rt.str_of(*ns)) {
         Some(ns) if ns != "minecraft" => format!("{ns}/{registry}"),
         _ => registry.to_owned(),
@@ -132,7 +132,7 @@ pub(crate) fn registration_order(a: &str, b: &str) -> std::cmp::Ordering {
 /// loaded (one the runtime carries, or one whose data is in the game's: a mod that is off leaves
 /// none), always, never, and their `not`, `and` and `or`. Any other kind, anywhere in the tree,
 /// doesn't hold: NeoForge couldn't read the file either.
-fn holds(rt: &Rt, c: &Json, namespaces: &[String]) -> bool {
+pub(crate) fn holds(rt: &Rt, c: &Json, namespaces: &[String]) -> bool {
     let values = || c.get("values").and_then(Json::as_array).into_iter().flatten();
     match c.get("type").and_then(Json::as_str) {
         Some("neoforge:true") => true,

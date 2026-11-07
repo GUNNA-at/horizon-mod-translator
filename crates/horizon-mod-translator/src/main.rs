@@ -243,6 +243,48 @@ fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
             api::call(rt, "net/minecraft/nbt/TagParser.<init>.(Lcom/mojang/brigadier/StringReader;)V", &[p, reader]);
             p
         }
+        // A vanilla recipe, as the recipe manager holds one (two stone make two stone), and the
+        // crafting grid a recipe is matched against (one stone).
+        "Lnet/minecraft/world/item/crafting/Recipe;"
+        | "Lnet/minecraft/world/item/crafting/CraftingRecipe;"
+        | "Lnet/minecraft/world/item/crafting/ShapelessRecipe;" => {
+            let stone = api::get_static(rt, "net/minecraft/world/item/Items.STONE");
+            let items = rt.alloc(
+                "[Lnet/minecraft/world/level/ItemLike;",
+                horizon_compat::Data::Array(vec![stone]),
+            );
+            let ingredient = api::call(
+                rt,
+                "net/minecraft/world/item/crafting/Ingredient.of.([Lnet/minecraft/world/level/ItemLike;)Lnet/minecraft/world/item/crafting/Ingredient;",
+                &[items],
+            );
+            let ingredients = sample(rt, "Lnet/minecraft/core/NonNullList;")?;
+            for _ in 0..2 {
+                api::call(
+                    rt,
+                    "net/minecraft/core/NonNullList.add.(Ljava/lang/Object;)Z",
+                    &[ingredients, ingredient],
+                );
+            }
+            let group = rt.string("");
+            let misc = api::get_static(
+                rt,
+                "net/minecraft/world/item/crafting/CraftingBookCategory.MISC",
+            );
+            let result = horizon_compat::api_common::stack(rt, "minecraft:stone", 2);
+            let r = rt.new_object("net/minecraft/world/item/crafting/ShapelessRecipe");
+            api::call(
+                rt,
+                "net/minecraft/world/item/crafting/ShapelessRecipe.<init>.(Ljava/lang/String;Lnet/minecraft/world/item/crafting/CraftingBookCategory;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/core/NonNullList;)V",
+                &[r, group, misc, result, ingredients],
+            );
+            r
+        }
+        "Lnet/minecraft/world/item/crafting/RecipeInput;" | "Lnet/minecraft/world/item/crafting/CraftingInput;" => {
+            let stone = sample(rt, "Lnet/minecraft/world/item/ItemStack;")?;
+            let list = api::call(rt, "java/util/List.of.(Ljava/lang/Object;)Ljava/util/List;", &[stone]);
+            api::call(rt, "net/minecraft/world/item/crafting/CraftingInput.of.(IILjava/util/List;)Lnet/minecraft/world/item/crafting/CraftingInput;", &[V::I(1), V::I(1), list])
+        }
         "Lnet/neoforged/neoforge/capabilities/BlockCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.BLOCK"),
         "Lnet/neoforged/neoforge/capabilities/EntityCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.ENTITY"),
         "Lnet/neoforged/neoforge/capabilities/ItemCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$FluidHandler.ITEM"),

@@ -52,6 +52,10 @@ fn builder(rt: &mut Rt, default: V, takes_holder: bool, serializable: bool) -> V
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
+    // A holder's methods of another kind (`Holder.getData(DataMapType)`) are another module's.
+    if !claims(owner, name, desc) {
+        return None;
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     match (owner, name) {
         (TYPE, "builder" | "serializable") => {
