@@ -182,6 +182,9 @@ impl Game<'_> {
             | Target::Tnt(id)
             | Target::Falling(id)
             | Target::Other(id) => Some(uuid_text(self.uuid_for(id))),
+            Target::Mod(id) => self
+                .mod_entity(id)
+                .map(|e| uuid_text(super::native_mod_entities::uuid_ints(e.uuid))),
             // Orbs and projectiles have no UUID here.
             Target::Orb(_) | Target::Projectile(_) => None,
         }
@@ -205,6 +208,9 @@ impl Game<'_> {
     }
     /// `Entity.getTags` (the `Tags` list of the saved entity).
     pub(super) fn tags_of(&self, t: Target) -> Vec<String> {
+        if let Target::Mod(id) = t {
+            return self.mod_entity(id).map(|e| e.tags.clone()).unwrap_or_default();
+        }
         let raw = match t {
             Target::Mob(id)
             | Target::Item(id)
@@ -225,7 +231,8 @@ impl Game<'_> {
             | Target::Orb(_)
             | Target::Projectile(_)
             | Target::Crystal(_)
-            | Target::Dragon(_) => None,
+            | Target::Dragon(_)
+            | Target::Mod(_) => None,
         };
         match raw.and_then(|r| r.get("Tags")) {
             Some(Tag::List(l)) => l

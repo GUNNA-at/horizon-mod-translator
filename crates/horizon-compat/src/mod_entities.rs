@@ -56,6 +56,8 @@ const ON_SYNCED_KEY: &str = "net/minecraft/world/entity/Entity.onSyncedDataUpdat
 const REMOVE: &str = "remove.(Lnet/minecraft/world/entity/Entity$RemovalReason;)V";
 const REMOVE_KEY: &str = "net/minecraft/world/entity/Entity.remove.(Lnet/minecraft/world/entity/Entity$RemovalReason;)V";
 const ADDITIONAL_SAVE: &str = "addAdditionalSaveData.(Lnet/minecraft/nbt/CompoundTag;)V";
+const SET_HEAD_ROT: (&str, &str) = ("net/minecraft/world/entity/Entity.setYHeadRot.(F)V", "setYHeadRot.(F)V");
+const SET_BODY_ROT: (&str, &str) = ("net/minecraft/world/entity/Entity.setYBodyRot.(F)V", "setYBodyRot.(F)V");
 const ADDITIONAL_SAVE_KEY: &str = "net/minecraft/world/entity/Entity.addAdditionalSaveData.(Lnet/minecraft/nbt/CompoundTag;)V";
 const ADDITIONAL_LOAD: &str = "readAdditionalSaveData.(Lnet/minecraft/nbt/CompoundTag;)V";
 const ADDITIONAL_LOAD_KEY: &str = "net/minecraft/world/entity/Entity.readAdditionalSaveData.(Lnet/minecraft/nbt/CompoundTag;)V";
@@ -181,7 +183,7 @@ pub(crate) fn on_base(rt: &mut Rt, e: V, short: &'static str, args: &[V]) -> V {
     api::virtual_call(rt, (key, short), &all)
 }
 
-fn xyz(rt: &Rt, e: V) -> [f64; 3] {
+pub(crate) fn xyz(rt: &Rt, e: V) -> [f64; 3] {
     [rt.get_field(e, "$x").d(), rt.get_field(e, "$y").d(), rt.get_field(e, "$z").d()]
 }
 
@@ -414,7 +416,12 @@ pub(crate) fn construct(rt: &mut Rt, e: V, ty: V, level: V) {
     set_pos(rt, e, [0.0; 3]);
 }
 
+/// A new entity's network id: the game's, one counter for every native mod
+/// ([`crate::host::Host::mod_entity_id`]), else this runtime's own from [`FIRST_ID`].
 fn next_id(rt: &mut Rt) -> i32 {
+    if let Some(id) = rt.host_mut().and_then(|h| h.mod_entity_id()) {
+        return id;
+    }
     let n = rt.interned.get("compat:next-entity-id").map_or(FIRST_ID, |v| v.i());
     rt.interned.insert("compat:next-entity-id".into(), V::I(n + 1));
     n
@@ -1411,6 +1418,16 @@ fn save(rt: &mut Rt, e: V, tag: V) {
         let k = rt.string(key);
         c(rt, "net/minecraft/nbt/CompoundTag.put.(Ljava/lang/String;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;", &[tag, k, list]);
     }
+    // Its yaw and pitch, two floats.
+    let list = rt.new_object("net/minecraft/nbt/ListTag");
+    c(rt, "net/minecraft/nbt/ListTag.<init>.()V", &[list]);
+    for field in ["$yRot", "$xRot"] {
+        let r = rt.get_field(e, field).f();
+        let f = c(rt, "net/minecraft/nbt/FloatTag.valueOf.(F)Lnet/minecraft/nbt/FloatTag;", &[V::F(r)]);
+        c(rt, "net/minecraft/nbt/ListTag.add.(Ljava/lang/Object;)Z", &[list, f]);
+    }
+    let k = rt.string("Rotation");
+    c(rt, "net/minecraft/nbt/CompoundTag.put.(Ljava/lang/String;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;", &[tag, k, list]);
     let u = rt.get_field(e, "uuid");
     let k = rt.string("UUID");
     c(rt, "net/minecraft/nbt/CompoundTag.putUUID.(Ljava/lang/String;Ljava/util/UUID;)V", &[tag, k, u]);
@@ -1430,9 +1447,18 @@ fn load(rt: &mut Rt, e: V, tag: V) {
     let k = rt.string("Pos");
     let list = c(rt, "net/minecraft/nbt/CompoundTag.getList.(Ljava/lang/String;I)Lnet/minecraft/nbt/ListTag;", &[tag, k, V::I(6)]);
     let p: Vec<f64> = (0..3).map(|i| c(rt, "net/minecraft/nbt/ListTag.getDouble.(I)D", &[list, V::I(i)]).d()).collect();
+    // Its yaw and pitch (none saved: 0), its head and body turned to the yaw.
+    let k = rt.string("Rotation");
+    let rotation = c(rt, "net/minecraft/nbt/CompoundTag.getList.(Ljava/lang/String;I)Lnet/minecraft/nbt/ListTag;", &[tag, k, V::I(5)]);
+    let [yaw, pitch] = [0, 1].map(|i| c(rt, "net/minecraft/nbt/ListTag.getFloat.(I)F", &[rotation, V::I(i)]).f());
+    rt.put_field(e, "$yRot", V::F(yaw));
+    rt.put_field(e, "$xRot", V::F(pitch));
     if p.len() == 3 {
         set_pos(rt, e, [p[0], p[1], p[2]]);
         set_old(rt, e);
+    }
+    for turn in [SET_HEAD_ROT, SET_BODY_ROT] {
+        api::virtual_call(rt, turn, &[e, V::F(yaw)]);
     }
     let k = rt.string("UUID");
     if c(rt, "net/minecraft/nbt/CompoundTag.hasUUID.(Ljava/lang/String;)Z", &[tag, k]).i() != 0 {

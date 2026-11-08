@@ -1753,6 +1753,27 @@ pub fn save_entities(rt: &mut Rt, host: &mut dyn Host, chunks: &[(i32, i32)], re
     rt.with_host(host, |rt| crate::entity_saves::save_chunks(rt, chunks, remove))
 }
 
+/// `native_mod_entities` (server): the mods' entities in the level `dimension` as the game's
+/// selectors match them ([`crate::entity_commands::seen`]).
+pub fn mod_entities(rt: &mut Rt, host: &mut dyn Host, dimension: &str) -> Vec<crate::entity_commands::Seen> {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::entity_commands::seen(rt, dimension))
+}
+
+/// `native_mod_entity_act` (server): `/kill` or `/tp` on the mods' entity `id` of the level
+/// `dimension`; whether it is one of theirs ([`crate::entity_commands::act`]).
+pub fn mod_entity_act(rt: &mut Rt, host: &mut dyn Host, dimension: &str, id: i32, what: &crate::entity_commands::Act) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::entity_commands::act(rt, dimension, id, what))
+}
+
+/// `native_mod_entity_nbt` (server): the compound of the mods' entity `id` of the level
+/// `dimension` as `/data get entity` reads it ([`crate::entity_commands::compound`]).
+pub fn mod_entity_nbt(rt: &mut Rt, host: &mut dyn Host, dimension: &str, id: i32) -> Option<std::collections::BTreeMap<String, crate::nbt::Nbt>> {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::entity_commands::compound(rt, dimension, id))
+}
+
 /// `native_register_commands` (server): the mods hear `RegisterCommandsEvent`, and their commands
 /// come back as native usages with the operator level each needs ([`crate::commands::register`]).
 pub fn register_commands(rt: &mut Rt, host: &mut dyn Host) -> Vec<(String, u8)> {

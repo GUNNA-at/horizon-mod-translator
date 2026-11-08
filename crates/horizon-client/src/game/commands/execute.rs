@@ -145,6 +145,7 @@ impl Game<'_> {
                 .iter()
                 .find(|o| o.id == id)
                 .map_or([0.0; 2], |o| [o.yaw, o.pitch]),
+            Target::Mod(id) => self.mod_entity(id).map_or([0.0; 2], |e| e.rotation),
             _ => [0.0; 2],
         }
     }
@@ -167,6 +168,8 @@ impl Game<'_> {
                 Some(a) if a.small => f64::from(0.9875f32),
                 _ => self.type_eye_height(&self.target_type(t)),
             },
+            // A mod's entity: the eyes its mod tells.
+            Target::Mod(id) => self.mod_entity(id).map_or(0.0, |e| f64::from(e.size[2])),
             // Entity.getEyeHeight: the type's dimensions.
             _ => self.type_eye_height(&self.target_type(t)),
         }
@@ -792,6 +795,9 @@ impl Game<'_> {
     pub(in crate::game) fn target_with_uuid(&self, uuid: [i32; 4]) -> Option<Target> {
         if Some(uuid) == self.level.player_uuid {
             return Some(Target::Player);
+        }
+        if let Some(t) = self.mod_entity_with_uuid(uuid) {
+            return Some(t);
         }
         self.persist.uuids.iter().find_map(|(&id, found)| {
             if *found != uuid {

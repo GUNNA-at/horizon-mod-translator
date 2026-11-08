@@ -8956,6 +8956,44 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     shafts turn at 16.0 and two summoned penguins stand beside Create's blocks, drawn with Waddles' model.
   - Found: `execute if entity @e[type=waddles:adelie_penguin]` fails with the penguins there: a selector's `type`
     doesn't match a translated mod's entities yet.
+- [x] 2026-11-08 Part 132: a translated mod's entities in the game's commands. Part 131 found
+  `execute if entity @e[type=waddles:adelie_penguin]` failing with the penguins there: the selectors knew only
+  the game's own entities, and a translated mod keeps its entities in its runtime.
+  - Three server hook points (fragment `mod_entity_commands`, docs/native-mods.md "Mod entities in commands").
+    `native_mod_entities(dimension, entities)`: each mod lists its entities of a level, asked when a selector
+    that can find entities runs (`@e`, `@n`, a UUID; `@p`, `@a` and `@r` find players only, `@s` keeps what
+    was found): network id, type, position, rotation, UUID, size, alive. They are `Target::Mod` to the commands:
+    `type=`, `distance=`, `sort=`, `limit=` and the rotations match them, `execute as` and `at` run from them,
+    `say` names them by their type, a scoreboard holds them by UUID.
+  - `native_mod_entity_act`: `/kill` is `Entity.kill()` (a mob dies of `generic_kill`, falls over for 20 ticks
+    and is no longer alive to the selectors), `/tp` is `TeleportCommand.performTeleport` within its level
+    (angles through `Mth.wrapDegrees`, the pitch clamped, `moveTo`, its head turned, its fall stopped, a
+    pathfinding mob's path dropped). `native_mod_entity_nbt`: `/data get entity` and `nbt=` read the mod's
+    `saveWithoutId`. A mod's entity now saves and loads `Rotation` as vanilla's does: it lost its yaw on a reload.
+  - Found on the way: each translated mod's runtime numbered its entities from 2^30 on its own, so in a pack
+    Create's first seat and Waddles' first penguin had the same network id, and anything the game did to one by
+    id reached both mods. The game now keeps one counter for every native mod (`next_mod_entity_id`), which the
+    translated hosts hand out (`Host::mod_entity_id`), as vanilla's `Entity.ENTITY_COUNTER` is one for all.
+  - The hook catalog test had failed since Part 96: the client's contact dispatcher
+    (`native_client_block_contacts`, which calls two hooks) read as a hook point. It is `pub(crate)` now.
+  - Tests: compat 2 new (a command sees a mod's penguin and cart with their type, place, size and UUID, moves the
+    penguin with its angles wrapped and its fall stopped, kills both, the penguin left dying and the cart gone,
+    and reads the penguin's compound without an `id`; another level's command finds none. Two runtimes' entities
+    both take 2^30 on their own and different ids from the host's one counter). All 706 compat, 7 compat-core,
+    24 + 3 translator and 580 game library tests pass (the hook catalog among them).
+  - Live, the scratch game built from the working tree with Create and Waddles (compiled in 3 min 47 s, 6 min 7 s
+    with the translator, Waddles' bundle and staging; the translated crates' rustcs at 10.7 GB together at most,
+    never under 35 GB free). Two penguins and a chicken summoned. `execute if entity @e[type=waddles:adelie_penguin]`:
+    "Test passed. Count: 2"; with `distance=..2.5`: failed (both 3.6 blocks away). `data get entity
+    @n[type=waddles:adelie_penguin]`: its compound (`Pos`, `Motion`, `Rotation`, `UUID`, `Health` 8.0f, `Age`...).
+    `execute as @e[type=waddles:adelie_penguin] run say waddle`: two "[Adélie Penguin] waddle". `tp
+    @n[type=waddles:adelie_penguin] -33 68 7 180 0`: "Teleported Adélie Penguin to -32.500000, 68.000000,
+    7.500000", and `Pos` reads it back; `execute at` it sets a gold block two above it, drawn over the penguin.
+    `kill @e[type=waddles:adelie_penguin,limit=1,sort=furthest]`: "Killed Adélie Penguin", one left 30 ticks on;
+    `kill` of both: none left, the chicken still there. `Rotation` read [180.0f, 0.0f] there; vanilla wraps it to
+    -180, which the act does now (the compat test).
+  - Not yet: a mod entity's custom name and tags (`/tag`, `name=`), `/data merge entity` on one, `/tp` into
+    another level, `/damage`, `/effect` and `/ride` on one.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

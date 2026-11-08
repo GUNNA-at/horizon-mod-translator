@@ -3314,6 +3314,45 @@ impl Game<'_> {
     ) {
         let _ = (chunks, remove, saved);
     }
+    /// The entities the native mods keep themselves in the server level `dimension`
+    /// (`minecraft:overworld`): those of their own types, which the game has none of (a
+    /// translated mod's mobs, Create's contraptions), pushed onto `entities` with their network
+    /// id, type, position, rotation, UUID, size, whether alive, custom name and tags. The game's
+    /// commands ask each time a selector runs: a selector finds them as it finds the game's own
+    /// (`type=`, `distance=`, `name=`, `tag=`, `sort=`...), and `/kill`, `/tp` and
+    /// `/data get entity` reach them through `native_mod_entity_act` and
+    /// `native_mod_entity_nbt`. Server-side. API @API:mod_entity_commands@.
+    pub(super) fn native_mod_entities(
+        &mut self,
+        dimension: &str,
+        entities: &mut Vec<super::native_mod_entities::ModEntity>,
+    ) {
+        let _ = (dimension, entities);
+    }
+    /// A command acts on entity `entity` of the server level `dimension`, one of a native mod's
+    /// own (`native_mod_entities`): `/kill` (`Entity.kill()`: a living one dies of
+    /// `generic_kill`, dropping its loot) or `/tp` (`teleportTo`, then its rotation). The mod
+    /// whose entity it is sets `done`. Server-side. API @API:mod_entity_commands@.
+    pub(super) fn native_mod_entity_act(
+        &mut self,
+        dimension: &str,
+        entity: i32,
+        act: &super::native_mod_entities::ModEntityAct,
+        done: &mut bool,
+    ) {
+        let _ = (dimension, entity, act, done);
+    }
+    /// The compound of entity `entity` of the server level `dimension`, one of a native mod's
+    /// own, as `/data get entity` and a selector's `nbt=` read it (`Entity.saveWithoutId`: no
+    /// `id`). The mod whose entity it is sets `nbt`. Server-side. API @API:mod_entity_commands@.
+    pub(super) fn native_mod_entity_nbt(
+        &mut self,
+        dimension: &str,
+        entity: i32,
+        nbt: &mut Option<horizon_world::nbt::Tag>,
+    ) {
+        let _ = (dimension, entity, nbt);
+    }
     /// An entity mounts or dismounts a vehicle (NeoForge's `EntityMountEvent`, posted from
     /// `Entity.startRiding` and `removeVehicle`): `entity` of type `kind` (`minecraft:player`,
     /// `minecraft:zombie`) in the server level `dimension`, getting on (`mounting`) or off the
@@ -3856,7 +3895,7 @@ impl Game<'_> {
     }
     /// The mods' blocks the window's own player touched in a move on its
     /// client's level, told to the client's mods in the order met.
-    pub(super) fn native_client_block_contacts(
+    pub(crate) fn native_client_block_contacts(
         &mut self,
         touched: Vec<horizon_client::block_contact::ClientContact>,
     ) {

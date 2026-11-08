@@ -1271,6 +1271,32 @@ items are left out (NeoForge's `RenderLivingEvent.Pre`, cancelled); its name tag
   gives it movement, sounds and saving, and the mod gives it a model and animations of its own. Tell yours apart by the
   ids the server half sends with mod messages (API 40), or by its custom name.
 
+### Mod entities in commands
+
+`crates/horizon-client/src/game/native_mod_entities.rs` (server): the entities a native mod keeps itself, of types the game
+has none of (a translated mod's mobs, Create's contraptions and seats), in the game's commands.
+
+- `native_mod_entities(dimension, entities)` is asked each time a selector that can find entities runs (`@e`, `@n`, a
+  UUID; `@p`, `@a` and `@r` find players only, and `@s` keeps the entity found before it). Push each of yours in the
+  server level `dimension` as a `ModEntity`: network id, type, feet, yaw and pitch, UUID, box (width, height, eye
+  height), whether alive, custom name and tags. Selectors match them as they match the game's own (`type=`,
+  `distance=`, `dx=`, `x_rotation=`, `name=`, `tag=`, `sort=`, `limit=`), `execute as` and `at` run from them, and
+  `say` speaks with their type's name.
+- `native_mod_entity_act(dimension, entity, act, done)` does a command's `act` to one of yours: `Kill` (`/kill`) or
+  `Teleport { position, rotation }` (`/tp` within its level; a `rotation` of None keeps its own). Set `done`.
+- `native_mod_entity_nbt(dimension, entity, nbt)` gives its compound as `/data get entity` and `nbt=` read it
+  (`saveWithoutId`: no `id`).
+- `next_mod_entity_id()` numbers a native mod's new entity from one counter for every mod (2^30 up, past the game's
+  own ids), as vanilla's `Entity.ENTITY_COUNTER` is one for all. Each mod counting its own, two mods' entities would
+  share ids: Create's first seat and Waddles' first penguin were both 2^30. A translated mod's host hands it out
+  (`Host::mod_entity_id`).
+
+A translated mod's entities answer through horizon-compat (`entity_commands`): `/kill` is `Entity.kill()` (a mob dies
+of `generic_kill` and falls over for 20 ticks, no longer alive to selectors), `/tp` is
+`TeleportCommand.performTeleport` within the level (`moveTo`, its head turned, its fall stopped, a pathfinding mob's
+path dropped), and its compound carries `Rotation` as vanilla's does. Not yet: a mod entity's custom name and tags
+(`/tag` and `name=` find none), `/data merge entity` on one, `/tp` to another level.
+
 ### Advancement triggers
 
 `crates/horizon-client/src/game/native_criteria.rs`: a mod's own criteria triggers, as a NeoForge mod registers a

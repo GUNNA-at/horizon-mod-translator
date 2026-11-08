@@ -1,0 +1,27 @@
+{
+  "hooks": [
+    {
+      "name": "mod_entities",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entities",
+      "side": "server",
+      "cancellable": false
+    },
+    {
+      "name": "mod_entity_act",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entity_act",
+      "side": "server",
+      "cancellable": false
+    },
+    {
+      "name": "mod_entity_nbt",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entity_nbt",
+      "side": "server",
+      "cancellable": false
+    }
+  ],
+  "rust_summary": "the entities a native mod keeps itself in the game's commands: those of a level as its selectors match them (`native_mod_entities`), `/kill` and `/tp` on one (`native_mod_entity_act`), and its compound for `/data get entity` and `nbt=` (`native_mod_entity_nbt`).",
+  "doc_summary": "a native mod's own entities, which the game has none of (a translated mod's mobs, Create's contraptions and seats), in the game's commands. `native_mod_entities(dimension, entities)` is asked each time a selector that can find entities runs (`@e`, `@n`, a UUID; not `@p`, `@a`, `@r` or `@s`): each mod pushes its entities in the server level `dimension` with their network id, type, position, rotation, UUID, size, whether alive, custom name and tags, and the selector matches them as it does the game's own (`type=`, `distance=`, `dx=`, `x_rotation=`, `sort=`, `limit=`...). `native_mod_entity_act(dimension, entity, act, done)` does a command's `act` to one: `Kill` (`Entity.kill()`: a living one dies of `generic_kill`) or `Teleport` (`TeleportCommand.performTeleport` within its level: `moveTo`, its head turned, its fall stopped, a pathfinding mob's path dropped); the mod whose entity it is sets `done`. `native_mod_entity_nbt(dimension, entity, nbt)` gets its compound as `/data get entity` and a selector's `nbt=` read it (`Entity.saveWithoutId`). Every native mod's entities take their network ids from one counter the game keeps (`next_mod_entity_id`, 2^30 up), as two mods counting their own would share ids. Bundles need \"hooks\": @API:mod_entity_commands@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mod_entities.rs"
+  ]
+}

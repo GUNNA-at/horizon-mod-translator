@@ -67,6 +67,9 @@ pub(super) enum Target {
     Tnt(u32),
     /// A falling block, by its entity id (`minecraft:falling_block`).
     Falling(u32),
+    /// An entity of a native mod's own type, by its network id: kept by its mod, which tells the
+    /// commands of it (`native_mod_entities`).
+    Mod(u32),
 }
 /// An entity of a type Horizon does not simulate: its compound lives in the
 /// entity memory (`persist.raw`), its position and rotation here.
@@ -141,7 +144,8 @@ fn non_player_entity_id(t: Target) -> Option<i32> {
     | Target::Crystal(id)
     | Target::Dragon(id)
     | Target::Tnt(id)
-    | Target::Falling(id)) = t
+    | Target::Falling(id)
+    | Target::Mod(id)) = t
     else {
         return None;
     };
@@ -525,6 +529,7 @@ impl Game<'_> {
                 .iter()
                 .find(|f| f.id == id)
                 .map(|f| [f.position.x, f.position.y, f.position.z]),
+            Target::Mod(id) => self.mod_entity(id).map(|e| e.position),
         }
     }
     pub(super) fn target_type(&self, t: Target) -> String {
@@ -573,6 +578,7 @@ impl Game<'_> {
             Target::Dragon(_) => "minecraft:ender_dragon".into(),
             Target::Tnt(_) => "minecraft:tnt".into(),
             Target::Falling(_) => "minecraft:falling_block".into(),
+            Target::Mod(id) => self.mod_entity(id).map_or_else(String::new, |e| e.kind.clone()),
         }
     }
     /// The name of the player the game acts for: a guest's own while their
@@ -619,6 +625,14 @@ impl Game<'_> {
                 let block = Text::translate(&format!("block.{block}"), &[]);
                 Text::translate("entity.minecraft.falling_block_type", &[block])
             }
+            Target::Mod(id)
+                if self
+                    .mod_entity(id)
+                    .is_some_and(|e| e.custom_name.is_some()) =>
+            {
+                let name = self.mod_entity(id).and_then(|e| e.custom_name.clone());
+                Text::literal(name.unwrap_or_default())
+            }
             Target::Mob(id)
                 if self
                     .mobs
@@ -655,6 +669,11 @@ impl Game<'_> {
     }
     /// EntitySelector.findEntities.
     pub(super) fn select(&mut self, s: &Selector) -> Vec<Target> {
+        // The mods' own entities as they are now, for a selector that can find them (`@p`, `@a`
+        // and `@r` find players only; `@s` keeps the entity a selector found before it).
+        if (s.include_entities && s.kind != 's') || s.uuid.is_some() {
+            self.refresh_mod_entities();
+        }
         if let Some(name) = &s.player_name {
             return self.player_named(name).into_iter().collect();
         }
@@ -864,11 +883,12 @@ impl Game<'_> {
         }
         candidates.extend(self.tnts.iter().map(|t| Target::Tnt(t.id)));
         candidates.extend(self.falling.iter().map(|f| Target::Falling(f.id)));
+        candidates.extend(self.mod_entity_candidates());
         candidates
     }
     /// The loaded levels, in the order the server holds them: the
     /// overworld, the nether, the end (MinecraftServer.getAllLevels).
-    fn loaded_dims(&self) -> Vec<Dim> {
+    pub(super) fn loaded_dims(&self) -> Vec<Dim> {
         let mut dims = vec![self.dim];
         dims.extend(self.levels.parked_dims());
         dims.sort_by_key(|d| match d {
@@ -897,6 +917,7 @@ impl Game<'_> {
             Target::Dragon(id),
             Target::Tnt(id),
             Target::Falling(id),
+            Target::Mod(id),
         ]
         .into_iter()
         .find(|t| self.level_holds(*t))
@@ -920,6 +941,7 @@ impl Game<'_> {
             Target::Dragon(id) => self.dragon.as_ref().is_some_and(|d| d.id == id),
             Target::Tnt(id) => self.tnts.iter().any(|t| t.id == id),
             Target::Falling(id) => self.falling.iter().any(|f| f.id == id),
+            Target::Mod(id) => self.mod_entity(id).is_some(),
         }
     }
     /// Run `f` with the level that holds the entity a target names in place
@@ -1544,6 +1566,13 @@ impl Game<'_> {
             }
             // Wall-mounted entities do not move.
             Target::Frame(_) | Target::Painting(_) => {}
+            Target::Mod(id) => {
+                let act = super::native_mod_entities::ModEntityAct::Teleport {
+                    position: pos,
+                    rotation,
+                };
+                self.act_on_mod_entity(id, &act);
+            }
         }
     }
     /// Teleport the local player into the command source's dimension. Unlike
@@ -2041,6 +2070,9 @@ impl Game<'_> {
             Target::Dragon(id) => self.kill_dragon(id),
             Target::Tnt(id) => self.tnts.retain(|t| t.id != id),
             Target::Falling(id) => self.falling.retain(|f| f.id != id),
+            Target::Mod(id) => {
+                self.act_on_mod_entity(id, &super::native_mod_entities::ModEntityAct::Kill);
+            }
         }
         // The orbs marked for removal are gone (Entity.kill removes them).
         let before = self.orb_ids();

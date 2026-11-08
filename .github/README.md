@@ -127,7 +127,8 @@ result comes from a scene set up by command, read back from the world's data and
 - **Survival.** Create's advancements, its potato cannon, its toolbox, and its saws' damage.
 - **Other mods' mobs.** Waddles' penguins, summoned by command or hatched from their spawn egg, walk
   their pen by their own AI goals and pathfinding, grow up from babies, and are saved with the world: all
-  five came back after it was closed and opened again.
+  five came back after it was closed and opened again. The game's commands see them as their own:
+  `@e[type=waddles:adelie_penguin]`, `execute as` and `at`, `tp`, `kill` and `data get entity`.
 - **From the launcher.** On a fresh launcher, `mods add-java` translated Waddles' jar and `--build` built a
   game with it in 4½ minutes, from this repository's source and its own Rust. That game, started as a player
   starts it, with no developer flags, summons the penguins and hatches them from their egg. Create took 16

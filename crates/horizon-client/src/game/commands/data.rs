@@ -151,6 +151,8 @@ impl Game<'_> {
             Target::Orb(id) => {
                 entity_nbt::orb_to_nbt(self.orbs.iter().find(|o| o.id == id)?, random_uuid())
             }
+            // A mod's own entity, as its mod saves it.
+            Target::Mod(id) => return self.mod_entity_nbt(id),
             Target::Projectile(id) => {
                 let p = self.creatures.projectiles.iter().find(|p| p.id == id)?;
                 let owner = if p.owner == Some(horizon_client::mobs::Who::Player) {

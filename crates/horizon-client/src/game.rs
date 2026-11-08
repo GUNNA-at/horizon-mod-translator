@@ -201,6 +201,7 @@ mod native_data_maps;
 mod native_effects;
 mod native_entities;
 mod native_entity_queries;
+mod native_mod_entities;
 mod native_actors;
 mod native_block_entity_drops;
 mod native_explosions;
@@ -2602,6 +2603,9 @@ struct Game<'a> {
     random_tick_sections: horizon_client::random_tick_sections::RandomTickSections,
     level_events: Vec<LevelEvent>,
     falling: Vec<FallingBlock>,
+    /// The translated mods' own entities as their mods last told them, for the commands
+    /// (`native_mod_entities`): asked again each time a selector runs.
+    mod_entities: Vec<native_mod_entities::ModEntity>,
     /// Blocks the server shows for a moment (`ClientboundAddTransientBlockPacket`).
     transient_blocks: transient_blocks::TransientBlocks,
     paintings: Vec<horizon_client::entities::Painting>,
@@ -18227,6 +18231,7 @@ impl<'a> Game<'a> {
             random_tick_sections: Default::default(),
             level_events: Vec::new(),
             falling: Vec::new(),
+            mod_entities: Vec::new(),
             transient_blocks: Default::default(),
             paintings: Vec::new(),
             painting_variants: prepared.painting_variants,

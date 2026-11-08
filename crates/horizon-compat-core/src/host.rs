@@ -520,6 +520,13 @@ pub trait Host {
     fn is_server(&self) -> bool {
         true
     }
+    /// The network id of an entity a mod makes now, from the one counter the game keeps for every
+    /// native mod's entities (2^30 up, past its own), as vanilla's `Entity.ENTITY_COUNTER` is one
+    /// for all: each runtime counting its own, two mods' entities would share ids (Create's first
+    /// seat and Waddles' first penguin both 2^30). None: the runtime counts its own.
+    fn mod_entity_id(&mut self) -> Option<i32> {
+        None
+    }
     /// The game time in ticks.
     fn game_time(&self) -> i64 {
         0
