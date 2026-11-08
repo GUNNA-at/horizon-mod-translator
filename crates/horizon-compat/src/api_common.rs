@@ -149,6 +149,8 @@ pub fn vanilla_class(rt: &Rt, v: V, c: &'static str) -> Option<&'static str> {
     table.binary_search_by(|(i, _)| (*i).cmp(id)).ok().map(|i| table[i].1)
 }
 
+const NETTY_CODEC_EXCEPTION: &str = "io/netty/handler/codec/CodecException";
+
 /// Java's own class families, for the runtime's objects (a `new HashMap<>()` is a `Map`, a
 /// `Collection` and `Iterable`): collections by kind, boxed numbers, strings, and the exceptions
 /// the runtime throws, each under its supertypes as the JDK declares them.
@@ -195,7 +197,23 @@ fn java_is_a(c: &str, class: &str) -> bool {
                 | "java/util/concurrent/CompletionException" | "java/util/concurrent/RejectedExecutionException"
                 | "com/google/gson/JsonParseException" | "com/google/gson/JsonSyntaxException" | "com/google/gson/JsonIOException"
                 | "net/minecraft/ResourceLocationException" | "net/minecraft/ReportedException"
+                | "org/apache/commons/lang3/NotImplementedException"
+        ) || java_is_a(c, NETTY_CODEC_EXCEPTION)
+            || c == NETTY_CODEC_EXCEPTION,
+        // Netty's codec exceptions, which the runtime throws reading a packet (as Netty's
+        // 4.1 declares them).
+        NETTY_CODEC_EXCEPTION => matches!(
+            c,
+            "io/netty/handler/codec/DecoderException"
+                | "io/netty/handler/codec/EncoderException"
+                | "io/netty/handler/codec/CorruptedFrameException"
+                | "io/netty/handler/codec/TooLongFrameException"
         ),
+        "io/netty/handler/codec/DecoderException" => {
+            matches!(c, "io/netty/handler/codec/CorruptedFrameException" | "io/netty/handler/codec/TooLongFrameException")
+        }
+        // Commons Lang's: `NotImplementedException extends UnsupportedOperationException`.
+        "java/lang/UnsupportedOperationException" => c == "org/apache/commons/lang3/NotImplementedException",
         "com/google/gson/JsonParseException" => matches!(c, "com/google/gson/JsonSyntaxException" | "com/google/gson/JsonIOException"),
         "java/lang/IllegalArgumentException" => matches!(c, "java/lang/NumberFormatException" | "java/util/IllegalFormatException"),
         "java/lang/IndexOutOfBoundsException" => matches!(c, "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/StringIndexOutOfBoundsException"),
@@ -1601,6 +1619,16 @@ fn held(v: V) -> V {
 
 /// `java.util.Optional`, whole: the factories, the tests and the lambda forms (`ifPresent`, `map`,
 /// `filter`...), which run the mod's lambdas the way the JDK does.
+/// What a holder holds (`Holder.value()`): a registry entry's holder, a mod's `DeferredHolder`, a
+/// direct one. A null holder throws `NullPointerException`, as calling `value()` on it does.
+pub(crate) fn holder_value(rt: &mut Rt, holder: V) -> V {
+    if holder.is_null() {
+        rt.throw_new("java/lang/NullPointerException");
+        return V::NULL;
+    }
+    crate::api::call(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder])
+}
+
 fn optional_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     const ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
     const RUN: &str = "java/lang/Runnable.run.()V";
@@ -3923,6 +3951,14 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/world/item/ItemStack", "is") if desc == "(Lnet/minecraft/world/item/Item;)Z" => {
             let (held, other) = (rt.get_field(a(0), "$item"), a(1));
             let same = held == other || item_like_name(rt, held) == item_like_name(rt, other);
+            V::I((same && !stack_empty(rt, a(0))) as i32)
+        }
+        // NeoForge's `is(Holder<Item>)`: `is((Item) holder.value())`. A mod's `stack.is(MY_WRENCH)`
+        // on its `DeferredItem` compiles to it.
+        ("net/minecraft/world/item/ItemStack", "is") if desc == "(Lnet/minecraft/core/Holder;)Z" => {
+            let item = holder_value(rt, a(1));
+            let held = rt.get_field(a(0), "$item");
+            let same = item.r() != 0 && (held == item || item_like_name(rt, held) == item_like_name(rt, item));
             V::I((same && !stack_empty(rt, a(0))) as i32)
         }
         ("net/minecraft/world/item/ItemStack", "copy") => {

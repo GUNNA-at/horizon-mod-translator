@@ -149,6 +149,13 @@ fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
             api::call(rt, "net/minecraft/world/phys/Vec3.<init>.(DDD)V", &[v, V::D(0.5), V::D(64.0), V::D(0.5)]);
             v
         }
+        // A registry, as `BuiltInRegistries` gives them: the items'.
+        "Lnet/minecraft/core/Registry;"
+        | "Lnet/minecraft/core/DefaultedRegistry;"
+        | "Lnet/minecraft/core/WritableRegistry;"
+        | "Lnet/minecraft/core/MappedRegistry;"
+        | "Lnet/minecraft/core/DefaultedMappedRegistry;"
+        | "Lnet/minecraft/core/IdMap;" => api::get_static(rt, "net/minecraft/core/registries/BuiltInRegistries.ITEM"),
         // A registry entry's holder, as `Registry.wrapAsHolder` gives one (stone's item).
         "Lnet/minecraft/core/Holder;" | "Lnet/minecraft/core/Holder$Reference;" => {
             let items = api::get_static(rt, "net/minecraft/core/registries/BuiltInRegistries.ITEM");

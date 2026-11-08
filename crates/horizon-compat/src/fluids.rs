@@ -790,6 +790,12 @@ fn fluid_stack_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
             V::I((!stack_empty(rt, s) && in_tag(rt, a(1), &n)) as i32)
         }
         "is" if desc.starts_with("(Lnet/minecraft/world/level/material/Fluid;") => V::I((rt.get_field(s, "$fluid") == a(1)) as i32),
+        // `is((Fluid) holder.value())`: a mod's `DeferredHolder` of its fluid, a vanilla fluid's
+        // holder.
+        "is" if desc.starts_with("(Lnet/minecraft/core/Holder;") => {
+            let held = crate::api_common::holder_value(rt, a(1));
+            V::I((held.r() != 0 && rt.get_field(s, "$fluid") == held) as i32)
+        }
         "is" if desc.starts_with("(Lnet/neoforged/neoforge/fluids/FluidType;") => {
             let f = rt.get_field(s, "$fluid");
             let t = on_fluid(rt, TYPE_OF, &[f]);
@@ -1070,6 +1076,21 @@ mod tests {
     use super::*;
     use crate::api::call as c;
     use crate::host::MemoryHost;
+
+    /// NeoForge 1.21.1's `FluidStack.is(Holder)`: `is((Fluid) holder.value())`.
+    #[test]
+    fn a_fluid_stack_is_its_holders_fluid() {
+        const IS: &str = "net/neoforged/neoforge/fluids/FluidStack.is.(Lnet/minecraft/core/Holder;)Z";
+        let mut rt = Rt::new();
+        crate::install();
+        let water = fluid(&mut rt, "minecraft:water");
+        let s = fluid_stack(&mut rt, water, 1000);
+        let water_holder = crate::neo::registry_holder(&mut rt, "fluid", "minecraft:water", V::NULL);
+        let lava_holder = crate::neo::registry_holder(&mut rt, "fluid", "minecraft:lava", V::NULL);
+        assert_eq!(c(&mut rt, IS, &[s, water_holder]), V::I(1));
+        assert_eq!(c(&mut rt, IS, &[s, lava_holder]), V::I(0));
+        assert!(rt.unmapped.is_empty() && rt.thrown.is_none(), "{:?}", rt.unmapped);
+    }
 
     #[test]
     fn a_fluid_type_answers_what_its_properties_say_and_neoforges_defaults() {

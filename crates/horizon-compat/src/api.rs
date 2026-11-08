@@ -288,6 +288,54 @@ fn stack_trace(rt: &Rt, e: V, caption: &str, indent: &str, out: &mut String, see
     }
 }
 
+/// `Throwable`'s own methods, as `name.descriptor`: what every throwable answers alike.
+const THROWABLE_METHODS: &[&str] = &[
+    "<init>.()V",
+    "<init>.(Ljava/lang/String;)V",
+    "<init>.(Ljava/lang/String;Ljava/lang/Throwable;)V",
+    "<init>.(Ljava/lang/Throwable;)V",
+    "getMessage.()Ljava/lang/String;",
+    "getLocalizedMessage.()Ljava/lang/String;",
+    "getCause.()Ljava/lang/Throwable;",
+    "initCause.(Ljava/lang/Throwable;)Ljava/lang/Throwable;",
+    "toString.()Ljava/lang/String;",
+    "addSuppressed.(Ljava/lang/Throwable;)V",
+    "getSuppressed.()[Ljava/lang/Throwable;",
+    "printStackTrace.()V",
+    "printStackTrace.(Ljava/io/PrintStream;)V",
+    "printStackTrace.(Ljava/io/PrintWriter;)V",
+    "fillInStackTrace.()Ljava/lang/Throwable;",
+    "getStackTrace.()[Ljava/lang/StackTraceElement;",
+    "setStackTrace.([Ljava/lang/StackTraceElement;)V",
+];
+
+/// A call of `Throwable`'s own on a throwable of a library's or the game's that no module models
+/// (Gson's `JsonParseException`, Netty's `DecoderException`, Commons' `NotImplementedException`,
+/// `javax`'s, the game's `ResourceLocationException`): the same call on `Throwable`, which sets
+/// and reads the message and the cause on the object, of its own class. None for a mod's class,
+/// which climbs its own superclasses ([`retry_classes`]).
+///
+/// Known by its name, as the JVM's classes name theirs. In the game's packages only a name ending
+/// in `Exception` says so: 1.21.1's Realms `RealmsError` records and DFU's `DataResult.Error` are
+/// no throwables, and its one throwable named so (`OldUsersConverter.ConversionError`) is never a
+/// mod's.
+fn foreign_throwable(rt: &mut Rt, key: &str) -> Option<&'static str> {
+    let (owner, rest) = key.split_once('.')?;
+    if owner.starts_with("java/")
+        || rt.supers.contains_key(owner)
+        || !THROWABLE_METHODS.contains(&rest)
+    {
+        return None;
+    }
+    let simple = owner.rsplit(['/', '$']).next().unwrap_or(owner);
+    let game = ["net/minecraft/", "net/neoforged/", "com/mojang/"]
+        .iter()
+        .any(|p| owner.starts_with(p));
+    let named =
+        simple.ends_with("Exception") || (!game && simple.ends_with("Error") && simple != "Error");
+    named.then(|| rt.static_key(&format!("java/lang/Throwable.{rest}")))
+}
+
 fn exception_class(key: &str) -> bool {
     if !key.starts_with("java/") {
         return false;
@@ -829,16 +877,23 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
 
 /// A call no arm of [`call_exact`] takes: the modules that claim its key, then what is left.
 fn through_chain(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
-    match chain(rt, key, args) {
+    if let Some(v) = chain(rt, key, args) {
+        return v;
+    }
+    if plain_super_init(rt, key, args) {
+        return V::Void;
+    }
+    if let Some(general) = foreign_throwable(rt, key) {
+        return call_exact(rt, general, args);
+    }
+    match crate::functions::invoke_through(rt, key, args)
+        .or_else(|| crate::annotations::element(rt, key, args))
+    {
         Some(v) => v,
-        None if plain_super_init(rt, key, args) => V::Void,
-        None => match crate::functions::invoke_through(rt, key, args).or_else(|| crate::annotations::element(rt, key, args)) {
-            Some(v) => v,
-            None => {
-                crate::miss(rt, key);
-                V::Void
-            }
-        },
+        None => {
+            crate::miss(rt, key);
+            V::Void
+        }
     }
 }
 
@@ -3124,6 +3179,111 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The libraries' and the game's throwables that no module models answer `Throwable`'s own
+    /// calls: Gson's `JsonParseException(message)`, Netty's `DecoderException(message, cause)`, the
+    /// game's `ResourceLocationException`. They are what Gson 2.10, Netty 4.1 and Commons Lang 3
+    /// declare them under (`catch (RuntimeException e)` catches a `DecoderException`). A mod's own
+    /// subclass climbs to them; DFU's `DataResult.Error` and Realms' `RealmsError` records only
+    /// look like throwables.
+    #[test]
+    fn the_libraries_and_the_games_throwables_are_throwables() {
+        const MESSAGE: &str = "getMessage.()Ljava/lang/String;";
+        let mut rt = Rt::new();
+        crate::install();
+        let k = |owner: &str, rest: &str| -> &'static str {
+            Box::leak(format!("{owner}.{rest}").into_boxed_str())
+        };
+        let text = |rt: &mut Rt, v: V| rt.str_of(v).map(str::to_owned);
+        let gson = "com/google/gson/JsonParseException";
+        let e = rt.new_object(gson);
+        let bad = rt.string("Expected a JSON object");
+        call(&mut rt, k(gson, "<init>.(Ljava/lang/String;)V"), &[e, bad]);
+        let m = call(&mut rt, k(gson, MESSAGE), &[e]);
+        assert_eq!(text(&mut rt, m).as_deref(), Some("Expected a JSON object"));
+        let s = call(&mut rt, k(gson, "toString.()Ljava/lang/String;"), &[e]);
+        assert_eq!(
+            text(&mut rt, s).as_deref(),
+            Some("com.google.gson.JsonParseException: Expected a JSON object")
+        );
+        let netty = "io/netty/handler/codec/DecoderException";
+        let d = rt.new_object(netty);
+        let short = rt.string("Packet was too short");
+        call(
+            &mut rt,
+            k(netty, "<init>.(Ljava/lang/String;Ljava/lang/Throwable;)V"),
+            &[d, short, e],
+        );
+        assert_eq!(
+            call(&mut rt, k(netty, "getCause.()Ljava/lang/Throwable;"), &[d]),
+            e
+        );
+        let game = "net/minecraft/ResourceLocationException";
+        let r = rt.new_object(game);
+        let odd = rt.string("Non [a-z0-9_.-] character in namespace of location: T:x");
+        call(&mut rt, k(game, "<init>.(Ljava/lang/String;)V"), &[r, odd]);
+        let m = call(&mut rt, k(game, MESSAGE), &[r]);
+        assert_eq!(rt.str_of(m), rt.str_of(odd));
+        // A mod's own, over Gson's: its constructor's `super(message)`, then the inherited call.
+        rt.supers.insert("t/BadConfigException", gson);
+        let mine = rt.new_object("t/BadConfigException");
+        call(
+            &mut rt,
+            k(gson, "<init>.(Ljava/lang/String;)V"),
+            &[mine, bad],
+        );
+        let m = call(&mut rt, k("t/BadConfigException", MESSAGE), &[mine]);
+        assert_eq!(text(&mut rt, m).as_deref(), Some("Expected a JSON object"));
+        assert!(
+            rt.unmapped.is_empty() && rt.thrown.is_none(),
+            "{:?}",
+            rt.unmapped
+        );
+        // What the libraries declare them under.
+        for (c, class, is) in [
+            (netty, "java/lang/RuntimeException", true),
+            (
+                "io/netty/handler/codec/TooLongFrameException",
+                "io/netty/handler/codec/DecoderException",
+                true,
+            ),
+            (
+                "io/netty/handler/codec/EncoderException",
+                "io/netty/handler/codec/CodecException",
+                true,
+            ),
+            (
+                "io/netty/handler/codec/EncoderException",
+                "io/netty/handler/codec/DecoderException",
+                false,
+            ),
+            (
+                "org/apache/commons/lang3/NotImplementedException",
+                "java/lang/UnsupportedOperationException",
+                true,
+            ),
+            (
+                "org/apache/commons/lang3/NotImplementedException",
+                "java/lang/RuntimeException",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                crate::api_common::api_is_a(c, class),
+                is,
+                "{c} instanceof {class}"
+            );
+        }
+        // Names that only look so, and a mod's class, aren't taken for one here.
+        for key in [
+            "com/mojang/serialization/DataResult$Error.toString.()Ljava/lang/String;",
+            "com/mojang/realmsclient/client/RealmsError$CustomError.toString.()Ljava/lang/String;",
+            "t/BadConfigException.getMessage.()Ljava/lang/String;",
+            "com/google/gson/JsonParseException.getAsString.()Ljava/lang/String;",
+        ] {
+            assert_eq!(foreign_throwable(&mut rt, key), None, "{key}");
+        }
+    }
 
     /// `getClass()` called through a type other than `Object` (Create's spout checks
     /// `handler.getClass() == FluidBucketWrapper.class` on an `IFluidHandlerItem`): `Object`'s own,

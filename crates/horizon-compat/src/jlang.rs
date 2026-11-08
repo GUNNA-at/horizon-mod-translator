@@ -1148,18 +1148,12 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
         "endsWith" => V::I(s.ends_with(&arg_s(rt, 1)) as i32),
         "contains" => V::I(s.contains(&arg_s(rt, 1)) as i32),
         "indexOf" | "lastIndexOf" => {
-            let needle: Vec<u16> = match ks.first() {
-                Some('I') => char::from_u32(a(1).i() as u32).map(|c| utf16(&c.to_string())).unwrap_or_default(),
-                _ => utf16(&arg_s(rt, 1)),
+            let needle = match ks.first() {
+                Some('I') => code_point_units(a(1).i()),
+                _ => Some(utf16(&arg_s(rt, 1))),
             };
             let from = ks.get(1).map(|_| a(2).i());
-            let positions: Vec<usize> = (0..=u.len().saturating_sub(needle.len())).filter(|&i| u.len() >= needle.len() && u[i..i + needle.len()] == needle[..]).collect();
-            let found = if name == "indexOf" {
-                positions.into_iter().find(|&i| from.is_none_or(|f| i as i32 >= f))
-            } else {
-                positions.into_iter().rev().find(|&i| from.is_none_or(|f| i as i32 <= f))
-            };
-            V::I(found.map_or(-1, |i| i as i32))
+            V::I(needle.map_or(-1, |n| index_of(&u, &n, from, name == "lastIndexOf")))
         }
         "substring" | "subSequence" => {
             let lo = (a(1).i().max(0) as usize).min(u.len());
@@ -1461,9 +1455,48 @@ fn builder(rt: &mut Rt, name: &str, ks: &[char], args: &[V]) -> Option<V> {
             set(rt, s);
             this
         }
-        "indexOf" => V::I(cur(rt).find(&text(rt, a(1))).map_or(-1, |i| utf16(&cur(rt)[..i]).len() as i32)),
+        // `indexOf(str[, from])`, `lastIndexOf(str[, from])`: as `String`'s.
+        "indexOf" | "lastIndexOf" => {
+            let (hay, needle) = (utf16(&cur(rt)), utf16(&text(rt, a(1))));
+            let from = ks.get(1).map(|_| a(2).i());
+            V::I(index_of(&hay, &needle, from, name == "lastIndexOf"))
+        }
         _ => return None,
     })
+}
+
+/// The UTF-16 units of a code point `indexOf(int)` looks for: a char's own unit (a lone surrogate
+/// too), a supplementary one's pair; None for no code point, which is never found.
+fn code_point_units(cp: i32) -> Option<Vec<u16>> {
+    match cp {
+        0..=0xFFFF => Some(vec![cp as u16]),
+        _ => char::from_u32(cp as u32).map(|c| utf16(&c.to_string())),
+    }
+}
+
+/// Java's `String.indexOf(str, from)` and `lastIndexOf(str, from)` over UTF-16 units, `from`
+/// clamped as the JDK clamps it: an empty needle is found where the search starts (at most the
+/// length), and `from` past the end finds nothing else.
+fn index_of(hay: &[u16], needle: &[u16], from: Option<i32>, last: bool) -> i32 {
+    let len = hay.len() as i64;
+    let n = needle.len() as i64;
+    let at = |i: i64| hay[i as usize..(i + n) as usize] == *needle;
+    if last {
+        let mut i = from.map_or(len, i64::from).min(len - n);
+        while i >= 0 {
+            if at(i) {
+                return i as i32;
+            }
+            i -= 1;
+        }
+        -1
+    } else {
+        let start = from.map_or(0, i64::from).max(0);
+        if start >= len {
+            return if n == 0 { len as i32 } else { -1 };
+        }
+        (start..=len - n).find(|&i| at(i)).map_or(-1, |i| i as i32)
+    }
 }
 
 fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &[V]) -> Option<V> {
@@ -3109,6 +3142,41 @@ mod tests {
             value_of(None),
             Err("java/lang/NullPointerException: Name is null".into())
         );
+    }
+
+    /// `indexOf` and `lastIndexOf` of `String` and `StringBuilder`, with and without where to
+    /// start, as JDK 21 answers them: the start clamped (an empty needle is found where the
+    /// search starts, at most the length; one before the start isn't), a code point by its units.
+    #[test]
+    fn index_of_and_last_index_of_are_the_jdks() {
+        let rt = &mut Rt::new();
+        let sb = rt.new_object("java/lang/StringBuilder");
+        let abcabc = rt.string("abcabc");
+        c(rt, "java/lang/StringBuilder.<init>.(Ljava/lang/String;)V", &[sb, abcabc]);
+        let [bc, empty, x] = ["bc", "", "x"].map(|t| rt.string(t));
+        let on = |rt: &mut Rt, key: &'static str, args: &[V]| c(rt, key, args).i();
+        const SB_LAST: &str = "java/lang/StringBuilder.lastIndexOf.(Ljava/lang/String;)I";
+        const SB_LAST_FROM: &str = "java/lang/StringBuilder.lastIndexOf.(Ljava/lang/String;I)I";
+        const SB_FROM: &str = "java/lang/StringBuilder.indexOf.(Ljava/lang/String;I)I";
+        const SB: &str = "java/lang/StringBuilder.indexOf.(Ljava/lang/String;)I";
+        assert_eq!(on(rt, SB_LAST, &[sb, bc]), 4);
+        assert_eq!(on(rt, SB_LAST_FROM, &[sb, bc, V::I(3)]), 1);
+        assert_eq!(on(rt, SB_FROM, &[sb, bc, V::I(2)]), 4);
+        assert_eq!(on(rt, SB_FROM, &[sb, empty, V::I(10)]), 6);
+        assert_eq!(on(rt, SB_LAST_FROM, &[sb, empty, V::I(-1)]), -1);
+        assert_eq!(on(rt, SB_LAST_FROM, &[sb, empty, V::I(99)]), 6);
+        assert_eq!(on(rt, SB, &[sb, x]), -1);
+        let [abc, smile, aaa, abab, ab] = ["abc", "a\u{1F600}b", "aaa", "abab", "ab"].map(|t| rt.string(t));
+        const CHAR_FROM: &str = "java/lang/String.indexOf.(II)I";
+        const CHAR: &str = "java/lang/String.indexOf.(I)I";
+        assert_eq!(on(rt, CHAR_FROM, &[abc, V::I('b' as i32), V::I(5)]), -1);
+        assert_eq!(on(rt, CHAR, &[smile, V::I(0x1F600)]), 1);
+        assert_eq!(on(rt, CHAR, &[smile, V::I(0xD83D)]), 1);
+        assert_eq!(on(rt, CHAR, &[abc, V::I(-1)]), -1);
+        assert_eq!(on(rt, "java/lang/String.lastIndexOf.(II)I", &[aaa, V::I('a' as i32), V::I(-5)]), -1);
+        assert_eq!(on(rt, "java/lang/String.indexOf.(Ljava/lang/String;I)I", &[abc, empty, V::I(7)]), 3);
+        assert_eq!(on(rt, "java/lang/String.lastIndexOf.(Ljava/lang/String;I)I", &[abab, ab, V::I(0)]), 0);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `Character`'s digits and surrogates, `String.lines`, `trim` and `strip`, and

@@ -2843,6 +2843,25 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             table_put(rt, this, a(1), a(2));
             found(rt, had)
         }
+        // `replace(key, old, new)`: puts `new` only where the key holds `old` (null too, for a key
+        // it holds); `replace(key, value)` only for a key it holds, giving the old value.
+        "replace" if desc.ends_with(")Z") => {
+            let holds = match table_get(rt, this, a(1)) {
+                Some(cur) => equals(rt, cur, a(2)) || (is_null(cur) && is_null(a(2))),
+                None => false,
+            };
+            if holds {
+                table_put(rt, this, a(1), a(3));
+            }
+            V::I(holds as i32)
+        }
+        "replace" => {
+            let had = table_get(rt, this, a(1));
+            if had.is_some() {
+                table_put(rt, this, a(1), a(2));
+            }
+            found(rt, had)
+        }
         "putIfAbsent" => match table_get(rt, this, a(1)) {
             Some(v) if !is_null(v) => v,
             _ => {
@@ -3948,6 +3967,48 @@ mod tests {
             }
             assert_eq!(got, want, "{view}");
         }
+    }
+
+    /// `Map.replace` as JDK 21's `HashMap` answers it: `replace(key, value)` puts only for a key the
+    /// map holds (one held as null too) and gives the old value; `replace(key, old, new)` only where
+    /// the key holds `old`.
+    #[test]
+    fn map_replace_changes_only_what_the_map_holds() {
+        const PUT: &str =
+            "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        const GET: &str = "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;";
+        const HAS: &str = "java/util/Map.containsKey.(Ljava/lang/Object;)Z";
+        const REPLACE: &str =
+            "java/util/Map.replace.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        const REPLACE_IF: &str =
+            "java/util/Map.replace.(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z";
+        let rt = &mut Rt::new();
+        let m = rt.new_object("java/util/HashMap");
+        c(rt, "java/util/HashMap.<init>.()V", &[m]);
+        let [a, b, cee, n, z] = ["a", "b", "c", "n", "z"].map(|t| rt.string(t));
+        let [one, two, three, four, five, seven, nine] = [1, 2, 3, 4, 5, 7, 9].map(|i| crate::api_common::integer(rt, i));
+        c(rt, PUT, &[m, a, one]);
+        c(rt, PUT, &[m, b, V::NULL]);
+        let int = |rt: &mut Rt, v: V| (!v.is_null()).then(|| crate::api::call(rt, "java/lang/Integer.intValue.()I", &[v]).i());
+        let old = c(rt, REPLACE, &[m, a, two]);
+        let now = c(rt, GET, &[m, a]);
+        assert_eq!((int(rt, old), int(rt, now)), (Some(1), Some(2)));
+        assert_eq!(c(rt, REPLACE, &[m, cee, three]), V::NULL);
+        assert_eq!(c(rt, HAS, &[m, cee]), V::I(0));
+        assert_eq!(c(rt, REPLACE, &[m, b, five]), V::NULL);
+        let now = c(rt, GET, &[m, b]);
+        assert_eq!(int(rt, now), Some(5));
+        assert_eq!(c(rt, REPLACE_IF, &[m, a, two, three]), V::I(1));
+        assert_eq!(c(rt, REPLACE_IF, &[m, a, nine, four]), V::I(0));
+        let now = c(rt, GET, &[m, a]);
+        assert_eq!(int(rt, now), Some(3));
+        assert_eq!(c(rt, REPLACE_IF, &[m, z, V::NULL, one]), V::I(0));
+        assert_eq!(c(rt, HAS, &[m, z]), V::I(0));
+        c(rt, PUT, &[m, n, V::NULL]);
+        assert_eq!(c(rt, REPLACE_IF, &[m, n, V::NULL, seven]), V::I(1));
+        let now = c(rt, GET, &[m, n]);
+        assert_eq!(int(rt, now), Some(7));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

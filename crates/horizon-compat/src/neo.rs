@@ -487,6 +487,32 @@ fn name_in(rt: &Rt, v: V) -> String {
     if s.contains(':') { s.to_owned() } else { format!("minecraft:{s}") }
 }
 
+/// `Holder.is(...)` of the entry `id` of `registry`, as 1.21.1's `Holder.Reference` and NeoForge's
+/// `DeferredHolder` answer:
+/// - a tag of its registry holds it, as the game's loaded tags have them;
+/// - a name or a key names it;
+/// - another holder names it too: `Reference.is(other)` is `other.is(key())`, which a direct
+///   holder never is;
+/// - a predicate accepts its key.
+fn holder_is(rt: &mut Rt, registry: &str, id: &str, desc: &str, other: V) -> V {
+    let plain = |r: &str| r.trim_start_matches("minecraft:").to_owned();
+    let is = if desc.starts_with("(Lnet/minecraft/tags/TagKey;") {
+        let tag_registry = plain(rt.str_of(rt.get_field(other, "$registry")).unwrap_or(""));
+        tag_registry == plain(registry) && in_tag(rt, &tag_registry, id, other).unwrap_or(false)
+    } else if desc.starts_with("(Lnet/minecraft/core/Holder;") {
+        let named = rt.str_of(rt.get_field(other, "$id")).map(str::to_owned);
+        let theirs = rt.str_of(rt.get_field(other, "$registry")).map(plain);
+        named.is_some_and(|n| n == id) && theirs.is_some_and(|r| r == plain(registry))
+    } else if desc.starts_with("(Ljava/util/function/Predicate;") {
+        let key = rt.string(&format!("{registry}#{id}"));
+        let test = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
+        rt.call_functional(test, other, &[key]).i() != 0
+    } else {
+        name_in(rt, other) == id
+    };
+    V::I(is as i32)
+}
+
 /// What `registry` holds under `id`: the mod's registrations (a datapack registry's files among
 /// them), vanilla's blocks and items.
 pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
@@ -1209,6 +1235,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.registered.get(&k).copied().unwrap_or(V::NULL)
         }
         (o, "getId") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => rt.get_field(a(0), "$id"),
+        // `DeferredHolder.is(...)`: its key's, as a registry's holder answers.
+        (o, "is") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && rt.get_field(a(0), "$id").r() != 0 => {
+            let reg = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned();
+            let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned();
+            holder_is(rt, &reg, &id, desc, a(1))
+        }
         // `DeferredHolder.equals`: a holder of the same key (registry and name), its own or the
         // registry's; `hashCode` is the key's.
         (o, "equals") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && desc == "(Ljava/lang/Object;)Z" => {
@@ -1452,13 +1484,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     optional(rt, k)
                 }
                 "getRegisteredName" => rt.string(&id),
-                // In a tag of its registry, as the game's loaded tags hold them.
-                "is" if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
-                    let tag_registry = rt.str_of(rt.get_field(a(1), "$registry")).unwrap_or("").trim_start_matches("minecraft:").to_owned();
-                    let inside = tag_registry == reg.trim_start_matches("minecraft:") && in_tag(rt, &tag_registry, &id, a(1)).unwrap_or(false);
-                    V::I(inside as i32)
-                }
-                "is" => V::I((name_in(rt, a(1)) == id) as i32),
+                "is" => holder_is(rt, &reg, &id, desc, a(1)),
                 _ => return None,
             }
         }
@@ -2976,6 +3002,65 @@ mod tests {
         assert_eq!(c(&mut rt, REGISTRY_ID, &[colours, thing]), V::I(-1));
         assert_eq!(c(&mut rt, REGISTRY_BY_ID, &[colours, V::I(0)]), V::NULL);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A stack is a holder's item, and a holder is another of the same entry, as NeoForge 1.21.1
+    /// has them: `ItemStack.is(Holder)` is `is(holder.value())` (`stack.is(MY_WRENCH)` on a mod's
+    /// `DeferredItem`); `DeferredHolder.is` compares its key with a name, a key or another holder's
+    /// key; `Holder.Reference.is(other)` is `other.is(key())`, which a direct holder never is.
+    #[test]
+    fn a_stack_is_its_holders_item_and_holders_are_one_by_key() {
+        const IS_HOLDER: &str = "net/minecraft/world/item/ItemStack.is.(Lnet/minecraft/core/Holder;)Z";
+        const CREATE_ITEM: &str = "net/neoforged/neoforge/registries/DeferredItem.createItem.(Lnet/minecraft/resources/ResourceLocation;)Lnet/neoforged/neoforge/registries/DeferredItem;";
+        const DEFERRED_IS: &str = "net/neoforged/neoforge/registries/DeferredHolder.is";
+        const WRAP: &str = "net/minecraft/core/Registry.wrapAsHolder.(Ljava/lang/Object;)Lnet/minecraft/core/Holder;";
+        const REFERENCE_IS: &str = "net/minecraft/core/Holder.is.(Lnet/minecraft/core/Holder;)Z";
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+        let is = |rt: &mut Rt, desc: &str, args: &[V]| {
+            let k: &'static str = Box::leak(format!("{DEFERRED_IS}.{desc}").into_boxed_str());
+            crate::api::call(rt, k, args)
+        };
+        // Two items of the mod's, registered, and their holders.
+        let (wrench, hammer) = (rt.new_object("t/WrenchItem"), rt.new_object("t/HammerItem"));
+        rt.registered.insert(("item".into(), "t:wrench".into()), wrench);
+        rt.registered.insert(("item".into(), "t:hammer".into()), hammer);
+        let (w, h) = (rt.string("t:wrench"), rt.string("t:hammer"));
+        let my_wrench = c(&mut rt, CREATE_ITEM, &[w]);
+        let my_hammer = c(&mut rt, CREATE_ITEM, &[h]);
+        let held = crate::api_common::stack(&mut rt, "t:wrench", 1);
+        assert_eq!(c(&mut rt, IS_HOLDER, &[held, my_wrench]), V::I(1));
+        assert_eq!(c(&mut rt, IS_HOLDER, &[held, my_hammer]), V::I(0));
+        // Vanilla's item through its registry's holder; an empty stack is no item's.
+        let items = crate::api::get_static(&mut rt, "net/minecraft/core/registries/BuiltInRegistries.ITEM");
+        let stone = crate::api::get_static(&mut rt, "net/minecraft/world/item/Items.STONE");
+        let stone_holder = c(&mut rt, WRAP, &[items, stone]);
+        let stones = crate::api_common::stack(&mut rt, "minecraft:stone", 3);
+        assert_eq!(c(&mut rt, IS_HOLDER, &[stones, stone_holder]), V::I(1));
+        assert_eq!(c(&mut rt, IS_HOLDER, &[held, stone_holder]), V::I(0));
+        let empty = crate::api::get_static(&mut rt, "net/minecraft/world/item/ItemStack.EMPTY");
+        assert_eq!(c(&mut rt, IS_HOLDER, &[empty, stone_holder]), V::I(0));
+        assert!(rt.thrown.is_none());
+        c(&mut rt, IS_HOLDER, &[held, V::NULL]);
+        let npe = rt.thrown.take().expect("a null holder throws");
+        assert_eq!(rt.class_of(npe), "java/lang/NullPointerException");
+        // `DeferredHolder.is`: by name, by key, by another holder of the same entry.
+        assert_eq!(is(&mut rt, "(Lnet/minecraft/resources/ResourceLocation;)Z", &[my_wrench, w]), V::I(1));
+        assert_eq!(is(&mut rt, "(Lnet/minecraft/resources/ResourceLocation;)Z", &[my_wrench, h]), V::I(0));
+        let item_registry = crate::api::get_static(&mut rt, "net/minecraft/core/registries/Registries.ITEM");
+        let key = c(&mut rt, "net/minecraft/resources/ResourceKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[item_registry, w]);
+        assert_eq!(is(&mut rt, "(Lnet/minecraft/resources/ResourceKey;)Z", &[my_wrench, key]), V::I(1));
+        assert_eq!(is(&mut rt, "(Lnet/minecraft/resources/ResourceKey;)Z", &[my_hammer, key]), V::I(0));
+        let wrench_again = c(&mut rt, WRAP, &[items, wrench]);
+        assert_eq!(is(&mut rt, "(Lnet/minecraft/core/Holder;)Z", &[my_wrench, wrench_again]), V::I(1));
+        assert_eq!(is(&mut rt, "(Lnet/minecraft/core/Holder;)Z", &[my_hammer, wrench_again]), V::I(0));
+        // The registry's holder: the same entry's by key, a direct holder of the same value not.
+        assert_eq!(c(&mut rt, REFERENCE_IS, &[wrench_again, my_wrench]), V::I(1));
+        assert_eq!(c(&mut rt, REFERENCE_IS, &[stone_holder, my_wrench]), V::I(0));
+        let direct = c(&mut rt, "net/minecraft/core/Holder.direct.(Ljava/lang/Object;)Lnet/minecraft/core/Holder;", &[stone]);
+        assert_eq!(c(&mut rt, REFERENCE_IS, &[stone_holder, direct]), V::I(0));
+        assert!(rt.unmapped.is_empty() && rt.thrown.is_none(), "{:?}", rt.unmapped);
     }
 
     /// A registry's tag as a set (`getOrCreateTag`, `getTag`, `getTagOrEmpty`) holds what the game's

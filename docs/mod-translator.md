@@ -8657,6 +8657,104 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Next: the library exceptions' constructors (any library throwable, as `exception_class`
     does for the JDK's), `Map.replace`, then the API's new gaps (`ItemStack.is(Holder)`,
     `ItemCost`, `Registry.getHolder`).
+- [x] 2026-11-08 Part 126: a stack is its holder's item, and the libraries' throwables are
+  throwables. A mod's `stack.is(MY_WRENCH)` on its own `DeferredItem` compiles to
+  `ItemStack.is(Holder)`, which 16 mods call and the runtime didn't answer. Part 125's honest probe
+  showed it. Gson's, Netty's, Commons' and the game's exceptions now take their message and cause
+  as Java's do, and `catch (RuntimeException e)` catches Netty's.
+  - Checked against NeoForge 21.1.256's bytecode (`javap` of the patched classes):
+    - `ItemStack.is(Holder<Item>)` is `is((Item) holder.value())`, and `FluidStack.is(Holder)`
+      is `is((Fluid) holder.value())`.
+    - `DeferredHolder.is(ResourceLocation)` compares its key's location. `is(ResourceKey)`
+      compares the key, and `is(Predicate)` tests it. `is(TagKey)` and `is(Holder)` ask the
+      holder it is bound to.
+    - `Holder.Reference.is(other)` is `other.is(key())`, which a `Holder.Direct` never is.
+  - Checked against the libraries' own jars (each class's superclass chain, read from Gson
+    2.10.1, Netty's codec 4.1 and Commons Lang 3.14.0) and 1.21.1's classes:
+    - every class whose simple name ends in `Exception` is a throwable;
+    - Netty's `DecoderException` and `EncoderException` extend `CodecException`, which extends
+      `RuntimeException`, and `TooLongFrameException` and `CorruptedFrameException` extend
+      `DecoderException`;
+    - Commons' `NotImplementedException` extends `UnsupportedOperationException`;
+    - in the game's classes, only names ending in `Error` mislead: Realms' `RealmsError` and its
+      records aren't throwables, and neither is DFU's `DataResult.Error`. The one throwable named
+      so, `OldUsersConverter.ConversionError`, is no mod's.
+  - Checked against JDK 21 (`Oracle4.java`):
+    - `HashMap.replace(key, value)` puts only for a key it holds (one held as null too) and
+      gives the old value. `replace(key, old, new)` puts only where the key holds `old`.
+    - `indexOf` and `lastIndexOf` of `String` and `StringBuilder` clamp their start:
+      - `"abcabc"`'s `indexOf("", 10)` is 6, `lastIndexOf("", -1)` is −1 and
+        `lastIndexOf("", 99)` is 6;
+      - `indexOf(0xD83D)` finds a lone surrogate's unit, and `indexOf(-1)` is −1.
+  - Compat:
+    - `ItemStack.is(Holder)` and `FluidStack.is(Holder)` use `holder_value`, which throws
+      `NullPointerException` for a null holder.
+    - `holder_is` (`neo.rs`) answers every `is` overload of a registry's holder and of a mod's
+      `DeferredHolder`, `DeferredItem` and `DeferredBlock`: by tag, name, key, another holder's
+      key, or a predicate on its key.
+    - `foreign_throwable` (`api.rs`) handles a call that no arm or module takes. If it is one of
+      `Throwable`'s own (its four constructors, `getMessage`, `getCause`, `toString`,
+      `addSuppressed`, `printStackTrace`...) on a library's, `javax`'s or the game's throwable,
+      it becomes `Throwable`'s. It runs after the modules, so those that model a throwable
+      (`ReportedException`, Brigadier's `CommandSyntaxException`) keep it. A mod's own subclass
+      climbs its superclasses to it, as before.
+    - `api_is_a` knows Netty's codec exceptions and Commons' `NotImplementedException`. The
+      runtime throws `DecoderException` itself, reading a packet: a mod's
+      `catch (RuntimeException e)` around it missed it.
+    - `Map.replace` in both forms, for every map the runtime keeps (`HashMap`, `EnumMap`,
+      fastutil's).
+    - `StringBuilder.indexOf(str, from)`, `lastIndexOf(str)` and `lastIndexOf(str, from)`. They
+      share `index_of` with `String`'s, whose start is now clamped as the JDK clamps it.
+  - The probe: an instance call on a registry (`Registry.getKey`, `getHolder`, `get`...) is
+    tried on `BuiltInRegistries.ITEM`. Part 125's fix left these calls without a real registry
+    to run on, so they counted as missing. In the game they are asked of one.
+  - Where Horizon differs, and why:
+    - A library's throwable is known by its name, not by its class file, which the runtime
+      doesn't read. A throwable without such a name (the game's `ThrowingComponent`) still
+      misses.
+    - `instanceof` knows only the libraries' throwables listed above under their JDK
+      supertypes. Others are an `Exception` by name alone.
+    - `ItemCost` and `MerchantOffer`'s shorter constructors are left for when the game asks the
+      mods' villager trades (`VillagerTradesEvent`). Until then, nothing runs a mod's trade
+      listing.
+  - Measured (packcov43, the same 367 jars, none stopped):
+    - API:
+      - methods 109046/130223 (83.7%, was 108922), uses 341371/372742 (91.6%, was 341173),
+        distinct missing 9162 (was 9212);
+      - Create 3292/3971 (82.9%, was 3290), uses 24391/25240 (96.6%, was 24388).
+    - 124 API calls answered, none newly missing:
+      - 39 by the runtime: `ItemStack.is(Holder)` (16 mods), `FluidStack.is(Holder)` (3),
+        `DeferredHolder.is` (7), and the game's throwables (13:
+        `GameTestAssertException`, `ResourceLocationException`, `ChunkReadException`,
+        `NbtFormatException`, `ChainedJsonException`...);
+      - 85 by the probe's registry: `Registry.getKey` (10), `getHolder` (7 and 3),
+        `getResourceKey` (6), `key` (6), `get` (5), `getHolderOrThrow` (4), `getTag` (4),
+        `IdMap.iterator` (4), `entrySet` (3)...
+    - Libraries: methods 61858/74081 (83.5%, was 61754), uses 336963/357517 (94.3%, was
+      336695), distinct missing 5179 (was 5213). Create's are 1325/1602, uses 14052/14416.
+    - 104 library calls answered, none newly missing:
+      - Gson's `JsonParseException` (27 mods, 4 and 2 more for its other constructors) and
+        `JsonSyntaxException` (12);
+      - Netty's `DecoderException` (10) and `EncoderException` (3);
+      - `Map.replace` (9);
+      - Commons' `NotImplementedException` (6 and 3);
+      - `javax`'s `IIOException`, `SSLException` and `ScriptException`;
+      - `StringBuilder.lastIndexOf` (1 and 1).
+  - Tests 693 (5 new):
+    - A mod's `DeferredItem` is its stack's holder, another's isn't, and vanilla stone's holder
+      is a stone stack's. An empty stack is no holder's item, and a null holder throws.
+    - `DeferredHolder.is` by name, key and holder. A registry holder is the same entry's
+      `DeferredItem`, and not a direct holder of the same value.
+    - A water `FluidStack` is water's holder's fluid, not lava's.
+    - Gson's, Netty's and the game's throwables keep their message and cause and print as
+      Java's. A mod's subclass of Gson's climbs to it. The libraries' throwables are what their
+      jars declare them under. `DataResult.Error`, `RealmsError.CustomError`, a mod's class and
+      a non-`Throwable` method aren't taken for one.
+    - `Map.replace` in both forms, as `HashMap` answers it.
+    - `indexOf` and `lastIndexOf` of `String` and `StringBuilder`, as the JDK's above.
+  - Next: the API's commonest gaps (`Minecraft.getTextureManager` 46 mods, `ConfigurationScreen`
+    38, `GoalSelector.addGoal` 28 and `Goal.<init>` 24, `RenderSystem.getModelViewStack` 24),
+    and the libraries' reflection (`Method.invoke` 57, `getDeclaredFields` 45).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
