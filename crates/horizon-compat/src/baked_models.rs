@@ -44,6 +44,10 @@ const GET_QUADS: &str = "getQuads.(Lnet/minecraft/world/level/block/state/BlockS
 const GET_QUADS_KEY: &str = "net/minecraft/client/resources/model/BakedModel.getQuads.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/util/RandomSource;)Ljava/util/List;";
 const RANDOM: &str = "net/minecraft/util/RandomSource.create.()Lnet/minecraft/util/RandomSource;";
 const SET_SEED: &str = "net/minecraft/util/RandomSource.setSeed.(J)V";
+const PARTICLE_ICON: &str = "net/minecraft/client/resources/model/BakedModel.getParticleIcon.(Lnet/neoforged/neoforge/client/model/data/ModelData;)Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
+const MODEL_DATA_OF: &str = "net/minecraft/client/resources/model/BakedModel.getModelData.(Lnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/neoforged/neoforge/client/model/data/ModelData;)Lnet/neoforged/neoforge/client/model/data/ModelData;";
+const LEVEL_MODEL_DATA: &str = "net/minecraft/world/level/Level.getModelData.(Lnet/minecraft/core/BlockPos;)Lnet/neoforged/neoforge/client/model/data/ModelData;";
+const MODEL_DATA_EMPTY: &str = "net/neoforged/neoforge/client/model/data/ModelData.EMPTY";
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
@@ -52,7 +56,14 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         LOCATION | MODEL_MANAGER | ITEM_MODEL_SHAPER | BAKING_COMPLETED
     ) || (owner == MODIFY_BAKING_RESULT && name == "getModels")
         || (owner == BLOCK_MODEL_SHAPER
-            && matches!(name, "stateToModelLocation" | "getModelManager"))
+            && matches!(
+                name,
+                "stateToModelLocation"
+                    | "getModelManager"
+                    | "getBlockModel"
+                    | "getParticleIcon"
+                    | "getTexture"
+            ))
         || (owner == ITEM_RENDERER
             && matches!(
                 name,
@@ -137,6 +148,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let id = id.unwrap_or_else(|| block.to_owned());
             location(rt, &id, &variant)
         }
+        (BLOCK_MODEL_SHAPER, "getBlockModel") => block_model(rt, a(1)),
+        // The sprite a state's blocks break into: its model's, with no model data.
+        (BLOCK_MODEL_SHAPER, "getParticleIcon") => {
+            let model = block_model(rt, a(1));
+            let empty = crate::api::get_static(rt, MODEL_DATA_EMPTY);
+            crate::menus::virt(rt, PARTICLE_ICON, model, &[empty])
+        }
+        // `getTexture(state, level, pos)`: its model's, given the model data at `pos` as the model
+        // takes it (a copycat's, its material's).
+        (BLOCK_MODEL_SHAPER, "getTexture") => {
+            let (state, level, pos) = (a(1), a(2), a(3));
+            let data = crate::menus::virt(rt, LEVEL_MODEL_DATA, level, &[pos]);
+            let model = block_model(rt, state);
+            let data = crate::menus::virt(rt, MODEL_DATA_OF, model, &[level, pos, state, data]);
+            crate::menus::virt(rt, PARTICLE_ICON, model, &[data])
+        }
         (MODIFY_BAKING_RESULT | BAKING_COMPLETED, "getModels") => rt.get_field(a(0), "$models"),
         (BAKING_COMPLETED, "getModelManager") => single(rt, MODEL_MANAGER),
         _ => return None,
@@ -165,6 +192,24 @@ fn location_text(rt: &Rt, location: V) -> String {
 /// hands them out.
 fn single(rt: &mut Rt, class: &'static str) -> V {
     rt.intern(format!("client/{class}"), |rt| rt.new_object(class))
+}
+
+/// The client's block model shaper (`BlockRenderDispatcher.getBlockModelShaper`).
+pub(crate) fn model_shaper(rt: &mut Rt) -> V {
+    single(rt, BLOCK_MODEL_SHAPER)
+}
+
+/// `BlockModelShaper.getBlockModel(state)`: the model at the state's location (a mod's where it put
+/// one there); the missing model for none.
+fn block_model(rt: &mut Rt, state: V) -> V {
+    let Some(text) = rt.str_of(state).map(str::to_owned) else {
+        return missing(rt);
+    };
+    let (block, variant) = state_variant(&text);
+    let block = block.to_owned();
+    let location = location(rt, &block, &variant);
+    let models = registry(rt);
+    at(rt, models, location)
 }
 
 /// `new ModelResourceLocation(id, variant)`.
@@ -659,6 +704,50 @@ mod tests {
             "net/neoforged/neoforge/client/model/BakedModelWrapper"
         );
         assert_eq!(rt.get_field(wrapped, "originalModel"), early);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const SHAPER_ICON: &str = "net/minecraft/client/renderer/block/BlockModelShaper.getParticleIcon.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
+    const SHAPER_TEXTURE: &str = "net/minecraft/client/renderer/block/BlockModelShaper.getTexture.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
+
+    /// Create's connected-texture casing: its model (`CTModel`, whose classes extend NeoForge's
+    /// `BakedModelWrapper` and leave `getParticleIcon` alone) wraps the game's at the block's
+    /// location. Asked through `BakedModel`, as the block model shaper asks it, the wrapper's
+    /// method runs: the casing's particle sprite, and the one for its model data at a position,
+    /// are the wrapped model's, not the missing sprite.
+    #[test]
+    fn a_mods_model_wrapper_gives_the_particle_sprite_of_the_model_it_wraps() {
+        let mut rt = runtime();
+        crate::neo::fire_client_setup(&mut rt);
+        rt.supers.insert(
+            "test/CtModel",
+            "net/neoforged/neoforge/client/model/BakedModelWrapper",
+        );
+        rt.supers
+            .insert("test/CasingBlock", "net/minecraft/world/level/block/Block");
+        let block = rt.new_object("test/CasingBlock");
+        rt.registered
+            .insert(("block".into(), "t:casing".into()), block);
+        let mut host = MemoryHost {
+            client: true,
+            ..MemoryHost::default()
+        };
+        host.models
+            .insert("t:casing".into(), (vec![], "t:block/casing".into()));
+        let sprites = rt.with_host(&mut host, |rt| {
+            let models = registry(rt);
+            let at = location(rt, "t:casing", "");
+            let original = crate::api::call(rt, MAP_GET, &[models, at]);
+            let wrapper = rt.new_object("test/CtModel");
+            crate::api::call(rt, WRAPPER_NEW, &[wrapper, original]);
+            crate::api::call(rt, MAP_PUT, &[models, at, wrapper]);
+            let (shaper, state) = (model_shaper(rt), crate::api::state(rt, "t:casing"));
+            let (level, pos) = (crate::glue::level(rt), crate::api::block_pos(rt, 0, 64, 0));
+            let icon = crate::api::call(rt, SHAPER_ICON, &[shaper, state]);
+            let texture = crate::api::call(rt, SHAPER_TEXTURE, &[shaper, state, level, pos]);
+            [icon, texture].map(|s| rt.str_of(rt.get_field(s, "$name")).unwrap_or("").to_owned())
+        });
+        assert_eq!(sprites, ["t:block/casing", "t:block/casing"]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

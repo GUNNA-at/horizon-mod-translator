@@ -1608,6 +1608,28 @@ pub fn render_particles(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3], part
     });
 }
 
+/// The game is about to draw the crumbs of the mod's block `state` at `pos`: as it breaks on this
+/// client (`hit` None) or as the window's player mines it (`hit` the face hit, by direction ordinal,
+/// and the point hit on it). The block's client extensions make them their way (Create's belts and
+/// funnels fewer, its water wheel's structure its wheel's), else vanilla's particle engine makes
+/// them of the block's own shape, model and colour ([`crate::particle_engine::block_effects`]): the
+/// game draws none of its own (true).
+pub fn block_effects(
+    rt: &mut Rt,
+    host: &mut dyn Host,
+    pos: [i32; 3],
+    state: &str,
+    hit: Option<(u8, [f64; 3])>,
+) -> bool {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| {
+        crate::particle_engine::block_effects(rt, pos, state, hit);
+    });
+    true
+}
+
 const SERVER_TICK_PRE: &str = "net/neoforged/neoforge/event/tick/ServerTickEvent$Pre";
 const SERVER_TICK_POST: &str = "net/neoforged/neoforge/event/tick/ServerTickEvent$Post";
 

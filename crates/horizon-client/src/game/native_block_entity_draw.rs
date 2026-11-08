@@ -862,6 +862,16 @@ impl Game<'_> {
         Some(namespaced(&material.sprite))
     }
 
+    /// The sprite the block state `state` names (`create:belt[...]`, as
+    /// `native_state_text` writes it) breaks into, as the game's own crumbs
+    /// take it: its model's `particle` texture, else its first face's. None
+    /// for an unknown state or one without a model.
+    /// API @API:block_effects@.
+    pub(super) fn native_block_particle_sprite(&self, state: &str) -> Option<String> {
+        let id = self.native_state_id_of(state)?;
+        Self::block_particle_sprite(&self.pack, BlockStateId(id)).map(|s| namespaced(&s))
+    }
+
     /// Block `block`'s faces in the state with `properties`, as
     /// [`Self::native_draw_block`] draws it (seed 42), each with its sprite:
     /// what a mod reads of a block's model (a water wheel takes its planks'

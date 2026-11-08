@@ -104,7 +104,7 @@ pub enum Tint {
 }
 
 /// `BlockColors`, the client's one (`Minecraft.getBlockColors()`, the event's).
-fn block_colors(rt: &mut Rt) -> V {
+pub(crate) fn block_colors(rt: &mut Rt) -> V {
     rt.intern("compat:colors/block-colors".into(), |rt| {
         rt.new_object(BLOCK_COLORS)
     })

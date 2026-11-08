@@ -15,6 +15,12 @@
 //!
 //! A type no mod gave a provider is vanilla's, or a mod's drawn without one: the game draws it
 //! ([`crate::particles`]).
+//!
+//! And a mod's blocks' crumbs: the game asks before it draws its own as one of them breaks or is
+//! mined ([`block_effects`]). The block's client extensions make them their way
+//! (`IClientBlockExtensions.addDestroyEffects`, `addHitEffects`), else the engine does as vanilla's
+//! `destroy` and `crack` do: `TerrainParticle`s (modelled here too) of the block's own shape, its
+//! model's sprite and its colour.
 use crate::{Data, Rt, V};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -24,6 +30,7 @@ const SINGLE_QUAD: &str = "net/minecraft/client/particle/SingleQuadParticle";
 const TEXTURE_SHEET: &str = "net/minecraft/client/particle/TextureSheetParticle";
 const SIMPLE_ANIMATED: &str = "net/minecraft/client/particle/SimpleAnimatedParticle";
 const NO_RENDER: &str = "net/minecraft/client/particle/NoRenderParticle";
+const TERRAIN: &str = "net/minecraft/client/particle/TerrainParticle";
 const ENGINE: &str = "net/minecraft/client/particle/ParticleEngine";
 const SPRITE_SET: &str = "net/minecraft/client/particle/ParticleEngine$MutableSpriteSet";
 const SPRITE_SET_API: &str = "net/minecraft/client/particle/SpriteSet";
@@ -108,6 +115,33 @@ const SET_UV: &str =
 const SET_VERTEX_COLOR: &str = "com/mojang/blaze3d/vertex/VertexConsumer.setColor.(FFFF)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
 const SET_LIGHT: &str = "com/mojang/blaze3d/vertex/VertexConsumer.setLight.(I)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
 const EMPTY_OPTIONAL: &str = "java/util/Optional.empty.()Ljava/util/Optional;";
+const RANDOM_CREATE: &str =
+    "net/minecraft/util/RandomSource.create.()Lnet/minecraft/util/RandomSource;";
+const NEXT_DOUBLE: &str = "net/minecraft/util/RandomSource.nextDouble.()D";
+/// `TerrainParticle(level, x, y, z, xSpeed, ySpeed, zSpeed, state, pos)`'s descriptor.
+const TERRAIN_INIT: &str = "(Lnet/minecraft/client/multiplayer/ClientLevel;DDDDDDLnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;)V";
+const UPDATE_SPRITE: &str = "net/minecraft/client/particle/TerrainParticle.updateSprite.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/client/particle/TerrainParticle;";
+const SET_POWER: &str =
+    "net/minecraft/client/particle/Particle.setPower.(F)Lnet/minecraft/client/particle/Particle;";
+const SCALE: &str =
+    "net/minecraft/client/particle/Particle.scale.(F)Lnet/minecraft/client/particle/Particle;";
+const SPRITE_U: &str = "net/minecraft/client/renderer/texture/TextureAtlasSprite.getU.(F)F";
+const SPRITE_V: &str = "net/minecraft/client/renderer/texture/TextureAtlasSprite.getV.(F)F";
+const SHAPER_PARTICLE_ICON: &str = "net/minecraft/client/renderer/block/BlockModelShaper.getParticleIcon.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
+const SHAPER_TEXTURE: &str = "net/minecraft/client/renderer/block/BlockModelShaper.getTexture.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/client/renderer/texture/TextureAtlasSprite;";
+const GET_COLOR: &str = "net/minecraft/client/color/block/BlockColors.getColor.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/core/BlockPos;I)I";
+const BLOCK_EXTENSIONS: &str = "net/neoforged/neoforge/client/extensions/common/IClientBlockExtensions.of.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/neoforged/neoforge/client/extensions/common/IClientBlockExtensions;";
+const ADD_DESTROY_EFFECTS: &str = "net/neoforged/neoforge/client/extensions/common/IClientBlockExtensions.addDestroyEffects.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/client/particle/ParticleEngine;)Z";
+const ADD_HIT_EFFECTS: &str = "net/neoforged/neoforge/client/extensions/common/IClientBlockExtensions.addHitEffects.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/Level;Lnet/minecraft/world/phys/HitResult;Lnet/minecraft/client/particle/ParticleEngine;)Z";
+const BREAKING_TINTED: &str = "net/neoforged/neoforge/client/extensions/common/IClientBlockExtensions.areBreakingParticlesTinted.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/client/multiplayer/ClientLevel;Lnet/minecraft/core/BlockPos;)Z";
+const STATE_IS_AIR: &str = "net/minecraft/world/level/block/state/BlockState.isAir.()Z";
+const STATE_SHAPE: &str = "net/minecraft/world/level/block/state/BlockState.getShape.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
+const STATE_RENDER_SHAPE: &str = "net/minecraft/world/level/block/state/BlockState.getRenderShape.()Lnet/minecraft/world/level/block/RenderShape;";
+const STATE_TERRAIN_PARTICLES: &str =
+    "net/minecraft/world/level/block/state/BlockState.shouldSpawnTerrainParticles.()Z";
+const LEVEL_BLOCK_STATE: &str = "net/minecraft/world/level/Level.getBlockState.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
+const HIT_DIRECTION: &str =
+    "net/minecraft/world/phys/BlockHitResult.getDirection.()Lnet/minecraft/core/Direction;";
 
 fn arg(args: &[V], i: usize) -> V {
     args.get(i).copied().unwrap_or_default()
@@ -525,6 +559,170 @@ fn buffer(rt: &mut Rt, texture: &str, translucent: bool) -> V {
     )
 }
 
+// ---- a block's crumbs ----
+
+/// The game is about to draw the crumbs of the mod's block `state` at `pos`: as it breaks (`hit`
+/// None: `ParticleEngine.destroy`, which vanilla's `LevelRenderer` runs for level event 2001) or as
+/// it is mined (`hit` the face hit, by ordinal, and where: `ParticleEngine.addBlockHitEffects`).
+/// The engine makes them as vanilla's does, the block's client extensions first.
+pub(crate) fn block_effects(rt: &mut Rt, pos: [i32; 3], state: &str, hit: Option<(u8, [f64; 3])>) {
+    let at = crate::api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));
+    match hit {
+        None => {
+            let state = crate::api::state(rt, state);
+            destroy(rt, at, state);
+        }
+        Some((face, point)) => {
+            let hit = crate::shapes::block_hit(rt, point, face.min(5), pos, false);
+            hit_effects(rt, at, hit);
+        }
+    }
+}
+
+/// `ParticleEngine.destroy(pos, state)`: unless the state is air, or its block's client extensions
+/// make their own (`addDestroyEffects`; their default makes none for a block without terrain
+/// particles), a grid of crumbs over each box of its shape, at least two a side and one each
+/// quarter block, each flying out from the box's middle.
+fn destroy(rt: &mut Rt, pos: V, state: V) {
+    if state.r() == 0 || crate::api::call(rt, STATE_IS_AIR, &[state]).i() != 0 {
+        return;
+    }
+    let (e, level) = (engine(rt), crate::glue::level(rt));
+    let ext = crate::api::call(rt, BLOCK_EXTENSIONS, &[state]);
+    let own = crate::menus::virt(rt, ADD_DESTROY_EFFECTS, ext, &[state, level, pos, e]);
+    if rt.thrown.is_some() {
+        rt.report_thrown("a block's addDestroyEffects");
+        return;
+    }
+    if own.i() != 0 {
+        return;
+    }
+    let shape = crate::api::call(rt, STATE_SHAPE, &[state, level, pos]);
+    let boxes = crate::shapes::boxes(rt, shape).unwrap_or_default();
+    let o = crate::api::pos_of(rt, pos).map(f64::from);
+    for b in crate::shapes::optimized(&boxes) {
+        let size = [0, 1, 2].map(|i| (b[i + 3] - b[i]).min(1.0));
+        let count = size.map(|s| ((s / 0.25).ceil() as i32).max(2));
+        for l in 0..count[0] {
+            for m in 0..count[1] {
+                for n in 0..count[2] {
+                    let step = [l, m, n];
+                    let f: [f64; 3] =
+                        std::array::from_fn(|i| (f64::from(step[i]) + 0.5) / f64::from(count[i]));
+                    let at = [0, 1, 2].map(|i| o[i] + (f[i] * size[i] + b[i]));
+                    let speed = [f[0] - 0.5, f[1] - 0.5, f[2] - 0.5];
+                    let p = new_terrain(rt, level, at, speed, state, pos);
+                    let p = virt(rt, UPDATE_SPRITE, p, &[state, pos]);
+                    if rt.thrown.is_some() {
+                        rt.report_thrown("a block's crumbs");
+                        return;
+                    }
+                    add(rt, p);
+                }
+            }
+        }
+    }
+}
+
+/// `ParticleEngine.addBlockHitEffects(pos, hit)` (NeoForge's): the block's client extensions crack
+/// it their way (`addHitEffects`), else a crumb on the face hit (`crack`).
+fn hit_effects(rt: &mut Rt, pos: V, hit: V) {
+    let (e, level) = (engine(rt), crate::glue::level(rt));
+    let state = crate::api::call(rt, LEVEL_BLOCK_STATE, &[level, pos]);
+    let ext = crate::api::call(rt, BLOCK_EXTENSIONS, &[state]);
+    let own = crate::menus::virt(rt, ADD_HIT_EFFECTS, ext, &[state, level, hit, e]);
+    if rt.thrown.is_some() {
+        rt.report_thrown("a block's addHitEffects");
+        return;
+    }
+    if own.i() == 0 {
+        let face = crate::api::call(rt, HIT_DIRECTION, &[hit]);
+        crack(rt, pos, face);
+    }
+}
+
+/// `ParticleEngine.crack(pos, side)`: a crumb of the block at `pos`, unless it is drawn invisible
+/// or makes no terrain particles: somewhere on face `side` of its shape's bounds, just outside it
+/// (anywhere inside them for no face), placed by the engine's own random, still, a fifth as fast as
+/// it would fly and 0.6 of its size.
+fn crack(rt: &mut Rt, pos: V, side: V) {
+    let level = crate::glue::level(rt);
+    let state = crate::api::call(rt, LEVEL_BLOCK_STATE, &[level, pos]);
+    let shape = crate::api::call(rt, STATE_RENDER_SHAPE, &[state]);
+    if crate::api_common::enum_ordinal(rt, shape) == 0
+        || crate::api::call(rt, STATE_TERRAIN_PARTICLES, &[state]).i() == 0
+    {
+        return;
+    }
+    let shape = crate::api::call(rt, STATE_SHAPE, &[state, level, pos]);
+    let boxes = crate::shapes::boxes(rt, shape).unwrap_or_default();
+    if boxes.is_empty() {
+        // Vanilla's `bounds()` throws for an empty shape, which a block hit never has.
+        return;
+    }
+    let b = crate::shapes::bounds(&boxes);
+    let [i, j, k] = crate::api::pos_of(rt, pos).map(f64::from);
+    let (inset, out) = (f64::from(0.2f32), f64::from(0.1f32));
+    let random = engine_random(rt);
+    let mut at = [i, j, k];
+    for (axis, c) in at.iter_mut().enumerate() {
+        let r = crate::menus::virt(rt, NEXT_DOUBLE, random, &[]).d();
+        *c = *c + r * (b[axis + 3] - b[axis] - inset) + out + b[axis];
+    }
+    if side.r() != 0 {
+        match crate::api_common::direction_ordinal(rt, side) {
+            0 => at[1] = j + b[1] - out,
+            1 => at[1] = j + b[4] + out,
+            2 => at[2] = k + b[2] - out,
+            3 => at[2] = k + b[5] + out,
+            4 => at[0] = i + b[0] - out,
+            5 => at[0] = i + b[3] + out,
+            _ => {}
+        }
+    }
+    let p = new_terrain(rt, level, at, [0.0; 3], state, pos);
+    let p = virt(rt, UPDATE_SPRITE, p, &[state, pos]);
+    let p = virt(rt, SET_POWER, p, &[V::F(0.2)]);
+    let p = virt(rt, SCALE, p, &[V::F(0.6)]);
+    if rt.thrown.is_some() {
+        rt.report_thrown("a block's crumb");
+        return;
+    }
+    add(rt, p);
+}
+
+/// The engine's own random source (`ParticleEngine.random`), which places `crack`'s crumbs.
+fn engine_random(rt: &mut Rt) -> V {
+    let e = engine(rt);
+    let r = rt.get_field(e, "$random");
+    if r.r() != 0 {
+        return r;
+    }
+    let r = crate::api::call(rt, RANDOM_CREATE, &[]);
+    rt.put_field(e, "$random", r);
+    r
+}
+
+/// `new TerrainParticle(level, x, y, z, xSpeed, ySpeed, zSpeed, state, pos)`.
+fn new_terrain(rt: &mut Rt, level: V, at: [f64; 3], speed: [f64; 3], state: V, pos: V) -> V {
+    let p = rt.new_object(TERRAIN);
+    let d = V::D;
+    let args = [
+        p,
+        level,
+        d(at[0]),
+        d(at[1]),
+        d(at[2]),
+        d(speed[0]),
+        d(speed[1]),
+        d(speed[2]),
+        state,
+        pos,
+    ];
+    construct(rt, TERRAIN, TERRAIN_INIT, &args);
+    p
+}
+
 // ---- render types, camera modes, sprite sets ----
 
 /// Vanilla's render type `name` (`ParticleRenderType.PARTICLE_SHEET_TRANSLUCENT`): one object each.
@@ -701,7 +899,7 @@ fn base_of(rt: &Rt, this: V) -> Option<&'static str> {
     for _ in 0..64 {
         if matches!(
             c,
-            PARTICLE | SINGLE_QUAD | TEXTURE_SHEET | SIMPLE_ANIMATED | NO_RENDER
+            PARTICLE | SINGLE_QUAD | TEXTURE_SHEET | SIMPLE_ANIMATED | NO_RENDER | TERRAIN
         ) {
             return Some(c);
         }
@@ -717,7 +915,7 @@ fn base_of(rt: &Rt, this: V) -> Option<&'static str> {
 /// The superclasses of the modelled classes (for [`crate::api::api_super`]).
 pub(crate) fn api_super(class: &str) -> Option<&'static str> {
     match class {
-        SIMPLE_ANIMATED => Some(TEXTURE_SHEET),
+        SIMPLE_ANIMATED | TERRAIN => Some(TEXTURE_SHEET),
         TEXTURE_SHEET => Some(SINGLE_QUAD),
         SINGLE_QUAD | NO_RENDER => Some(PARTICLE),
         _ => None,
@@ -772,6 +970,16 @@ fn declares(class: &str, name: &str, desc: &str) -> bool {
             ) || (name == "setColor" && desc == "(I)V")
         }
         NO_RENDER => matches!(name, "render" | "getRenderType"),
+        TERRAIN => matches!(
+            name,
+            "getRenderType"
+                | "getU0"
+                | "getU1"
+                | "getV0"
+                | "getV1"
+                | "getLightColor"
+                | "updateSprite"
+        ),
         _ => false,
     }
 }
@@ -939,14 +1147,28 @@ fn construct(rt: &mut Rt, owner: &str, desc: &str, args: &[V]) -> V {
     } else {
         init(rt, p, level, at);
     }
-    if matches!(owner, SINGLE_QUAD | TEXTURE_SHEET | SIMPLE_ANIMATED) {
+    if matches!(
+        owner,
+        SINGLE_QUAD | TEXTURE_SHEET | SIMPLE_ANIMATED | TERRAIN
+    ) {
         // `quadSize = 0.1F * (random.nextFloat() * 0.5F + 0.5F) * 2.0F`, once `Particle`'s is done.
         let random = rt.get_field(p, "random");
         let r = crate::menus::virt(rt, NEXT_FLOAT, random, &[]).f();
         set_f(rt, p, "quadSize", 0.1 * (r * 0.5 + 0.5) * 2.0);
     }
-    if matches!(owner, TEXTURE_SHEET | SIMPLE_ANIMATED) {
+    if matches!(owner, TEXTURE_SHEET | SIMPLE_ANIMATED | TERRAIN) {
         rt.put_field(p, "sprite", V::NULL);
+    }
+    if owner == TERRAIN {
+        // `(level, x, y, z, xSpeed, ySpeed, zSpeed, state[, pos])`: without one, the block it is
+        // in (`BlockPos.containing`).
+        let pos = if desc.contains("Lnet/minecraft/core/BlockPos;") {
+            a(9)
+        } else {
+            let [x, y, z] = at.map(|c| c.floor() as i64);
+            crate::api::block_pos(rt, x, y, z)
+        };
+        terrain_init(rt, p, level, a(8), pos);
     }
     if owner == SIMPLE_ANIMATED {
         // `(level, x, y, z, sprites, gravity)`.
@@ -959,6 +1181,44 @@ fn construct(rt: &mut Rt, owner: &str, desc: &str, args: &[V]) -> V {
         set_i(rt, p, "$hasFade", 0);
     }
     V::Void
+}
+
+/// `TerrainParticle`'s own constructor, once `TextureSheetParticle`'s is done: the block it came
+/// from, the sprite of the state's model (`BlockModelShaper.getParticleIcon`), falling with full
+/// gravity, grey, tinted by the block's colour where its client extensions say so (all but the
+/// grass block's), half the size, and drawn from a random quarter of its sprite (`uo`, `vo`).
+fn terrain_init(rt: &mut Rt, p: V, level: V, state: V, pos: V) {
+    rt.put_field(p, "pos", pos);
+    let shaper = crate::baked_models::model_shaper(rt);
+    let sprite = crate::api::call(rt, SHAPER_PARTICLE_ICON, &[shaper, state]);
+    if rt.thrown.is_some() {
+        return;
+    }
+    virt(rt, SET_SPRITE, p, &[sprite]);
+    set_f(rt, p, "gravity", 1.0);
+    for f in ["rCol", "gCol", "bCol"] {
+        set_f(rt, p, f, 0.6);
+    }
+    let ext = crate::api::call(rt, BLOCK_EXTENSIONS, &[state]);
+    let tinted = crate::menus::virt(rt, BREAKING_TINTED, ext, &[state, level, pos]).i() != 0;
+    if rt.thrown.is_some() {
+        return;
+    }
+    if tinted {
+        let colors = crate::colors::block_colors(rt);
+        let c = crate::api::call(rt, GET_COLOR, &[colors, state, level, pos, V::I(0)]).i();
+        for (f, shift) in [("rCol", 16), ("gCol", 8), ("bCol", 0)] {
+            let v = get_f(rt, p, f) * ((c >> shift & 0xFF) as f32 / 255.0);
+            set_f(rt, p, f, v);
+        }
+    }
+    let size = get_f(rt, p, "quadSize") / 2.0;
+    set_f(rt, p, "quadSize", size);
+    let random = rt.get_field(p, "random");
+    for f in ["uo", "vo"] {
+        let r = crate::menus::virt(rt, NEXT_FLOAT, random, &[]).f();
+        set_f(rt, p, f, r * 3.0);
+    }
 }
 
 /// `Particle.move(x, y, z)`: unless a fall stopped it for good, the particle moves by `(x, y, z)`,
@@ -1339,16 +1599,18 @@ fn set_pos(rt: &mut Rt, p: V, [x, y, z]: [f64; 3]) {
 
 /// The class a particle method's key names, as the module's own constant (keys are `'static`).
 fn modelled(owner: &str) -> Option<&'static str> {
-    [
-        PARTICLE,
-        SINGLE_QUAD,
-        TEXTURE_SHEET,
-        SIMPLE_ANIMATED,
-        NO_RENDER,
-    ]
-    .into_iter()
-    .find(|c| *c == owner)
+    CLASSES.into_iter().find(|c| *c == owner)
 }
+
+/// The modelled particle classes.
+const CLASSES: [&str; 6] = [
+    PARTICLE,
+    SINGLE_QUAD,
+    TEXTURE_SHEET,
+    SIMPLE_ANIMATED,
+    NO_RENDER,
+    TERRAIN,
+];
 
 /// Modelled class `class`'s own method `name.desc` on particle `args[0]`; None for one it doesn't
 /// declare.
@@ -1544,6 +1806,47 @@ fn particle_method(rt: &mut Rt, class: &str, name: &str, desc: &str, args: &[V])
         (SIMPLE_ANIMATED, "getRenderType") => render_type(rt, "PARTICLE_SHEET_TRANSLUCENT"),
         (NO_RENDER, "getRenderType") => render_type(rt, "NO_RENDER"),
         (NO_RENDER, "render") => V::Void,
+        (TERRAIN, "getRenderType") => render_type(rt, "TERRAIN_SHEET"),
+        // The quarter of its sprite it drew (`uo`, `vo`), turned across.
+        (TERRAIN, "getU0" | "getU1" | "getV0" | "getV1") => {
+            let sprite = rt.get_field(p, "sprite");
+            if sprite.r() == 0 {
+                rt.throw_new("java/lang/NullPointerException");
+                return Some(V::F(0.0));
+            }
+            let (uo, vo) = (get_f(rt, p, "uo"), get_f(rt, p, "vo"));
+            let (key, at) = match name {
+                "getU0" => (SPRITE_U, (uo + 1.0) / 4.0),
+                "getU1" => (SPRITE_U, uo / 4.0),
+                "getV0" => (SPRITE_V, vo / 4.0),
+                _ => (SPRITE_V, (vo + 1.0) / 4.0),
+            };
+            crate::menus::virt(rt, key, sprite, &[V::F(at)])
+        }
+        // The light where it is; where that is none at all (inside a block), the light of the block
+        // it came from.
+        (TERRAIN, "getLightColor") => {
+            let own = particle_method(rt, PARTICLE, name, desc, args)?;
+            if own.i() != 0 {
+                own
+            } else {
+                let (level, pos) = (rt.get_field(p, "level"), rt.get_field(p, "pos"));
+                V::I(crate::render::light_color(rt, level, pos))
+            }
+        }
+        // `updateSprite(state, pos)`: the sprite of the state's model as its model data at `pos`
+        // has it (`BlockModelShaper.getTexture`: a copycat's material); kept for a null position.
+        (TERRAIN, "updateSprite") => {
+            if a(2).r() != 0 {
+                let shaper = crate::baked_models::model_shaper(rt);
+                let level = rt.get_field(p, "level");
+                let sprite = crate::api::call(rt, SHAPER_TEXTURE, &[shaper, a(1), level, a(2)]);
+                if rt.thrown.is_none() {
+                    virt(rt, SET_SPRITE, p, &[sprite]);
+                }
+            }
+            p
+        }
         _ => return None,
     })
 }
@@ -1557,19 +1860,19 @@ const BUFFER_BUILDER: &str = "com/mojang/blaze3d/vertex/BufferBuilder";
 /// only to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     match owner {
-        PARTICLE | SINGLE_QUAD | TEXTURE_SHEET | SIMPLE_ANIMATED | NO_RENDER => {
-            name == "<init>"
-                || [
-                    PARTICLE,
-                    SINGLE_QUAD,
-                    TEXTURE_SHEET,
-                    SIMPLE_ANIMATED,
-                    NO_RENDER,
-                ]
-                .into_iter()
-                .any(|c| declares(c, name, desc))
+        PARTICLE | SINGLE_QUAD | TEXTURE_SHEET | SIMPLE_ANIMATED | NO_RENDER | TERRAIN => {
+            name == "<init>" || CLASSES.into_iter().any(|c| declares(c, name, desc))
         }
-        ENGINE => matches!(name, "register" | "add" | "createParticle" | "$providers"),
+        ENGINE => matches!(
+            name,
+            "register"
+                | "add"
+                | "createParticle"
+                | "$providers"
+                | "destroy"
+                | "crack"
+                | "addBlockHitEffects"
+        ),
         SPRITE_SET | SPRITE_SET_API => name == "get",
         RENDER_TYPE => matches!(name, "begin" | "isTranslucent" | "toString"),
         FACING => name == "setRotation",
@@ -1589,7 +1892,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| arg(args, i);
     Some(match owner {
-        PARTICLE | SINGLE_QUAD | TEXTURE_SHEET | SIMPLE_ANIMATED | NO_RENDER => {
+        PARTICLE | SINGLE_QUAD | TEXTURE_SHEET | SIMPLE_ANIMATED | NO_RENDER | TERRAIN => {
             let owner = modelled(owner)?;
             if name == "<init>" {
                 return Some(construct(rt, owner, desc, args));
@@ -1628,6 +1931,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             "add" => {
                 add(rt, a(1));
+                V::Void
+            }
+            // A mod breaking or cracking a block itself (a copycat, an anvil).
+            "destroy" => {
+                destroy(rt, a(1), a(2));
+                V::Void
+            }
+            "crack" => {
+                crack(rt, a(1), a(2));
+                V::Void
+            }
+            "addBlockHitEffects" => {
+                hit_effects(rt, a(1), a(2));
                 V::Void
             }
             // `createParticle(options, x, y, z, xSpeed, ySpeed, zSpeed)`: made by its provider and
@@ -2056,6 +2372,335 @@ mod tests {
             .collect();
         assert!(draws.iter().all(|d| (0.0..1.0).contains(d)), "{draws:?}");
         assert!(draws.windows(2).all(|w| w[0] != w[1]), "{draws:?}");
+    }
+
+    const DESTROY: &str = "net/minecraft/client/particle/ParticleEngine.destroy.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V";
+
+    fn sprite_name(rt: &Rt, p: V) -> String {
+        let sprite = rt.get_field(p, "sprite");
+        rt.str_of(rt.get_field(sprite, "$name"))
+            .unwrap_or("")
+            .to_owned()
+    }
+
+    /// A client whose setup ran, its level's blocks in `host`.
+    fn client() -> Rt {
+        crate::install();
+        let mut rt = Rt::new();
+        crate::neo::fire_client_setup(&mut rt);
+        rt
+    }
+
+    /// `ParticleEngine.destroy(pos, state)` of a bottom slab, as a mod calls it: crumbs over its
+    /// half block, four by two by four, each in the middle of its cell, falling with full gravity,
+    /// grey (a slab isn't tinted), half the usual size, of the slab's model's sprite. They draw on
+    /// the terrain sheet, blended, each a quarter of the sprite across.
+    #[test]
+    fn a_broken_block_breaks_into_crumbs_over_its_shape() {
+        let mut rt = client();
+        let slab = "minecraft:oak_slab[type=bottom,waterlogged=false]";
+        let mut host = MemoryHost {
+            client: true,
+            ..MemoryHost::default()
+        };
+        host.blocks.insert([2, 64, -3], slab.into());
+        host.outlines
+            .insert([2, 64, -3], vec![[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]);
+        host.models
+            .insert(slab.into(), (vec![], "minecraft:block/oak_planks".into()));
+        rt.with_host(&mut host, |rt| {
+            let (e, pos, state) = (
+                engine(rt),
+                crate::api::block_pos(rt, 2, 64, -3),
+                crate::api::state(rt, slab),
+            );
+            crate::api::call(rt, DESTROY, &[e, pos, state]);
+            tick(rt);
+        });
+        let crumbs = live(&rt);
+        let mut at: Vec<[f64; 3]> = crumbs
+            .iter()
+            .map(|p| ["x", "y", "z"].map(|f| rt.get_field(*p, f).d()))
+            .collect();
+        at.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut want = Vec::new();
+        for x in [2.125, 2.375, 2.625, 2.875] {
+            for y in [64.125, 64.375] {
+                for z in [-2.875, -2.625, -2.375, -2.125] {
+                    want.push([x, y, z]);
+                }
+            }
+        }
+        assert_eq!(at, want);
+        for p in &crumbs {
+            let p = *p;
+            assert_eq!(rt.get_field(p, "gravity").f(), 1.0);
+            assert_eq!(
+                ["rCol", "gCol", "bCol"].map(|f| rt.get_field(p, f).f()),
+                [0.6; 3]
+            );
+            let size = rt.get_field(p, "quadSize").f();
+            assert!((0.05..0.1).contains(&size), "{size}");
+            assert_eq!(sprite_name(&rt, p), "minecraft:block/oak_planks");
+        }
+        crate::glue::render_particles(&mut rt, &mut host, [2.5, 66.0, -6.0], 0.0);
+        assert_eq!(host.particle_quads.len(), 32);
+        for q in &host.particle_quads {
+            assert_eq!(q.sprite, "minecraft:block/oak_planks");
+            assert!(q.translucent);
+            assert_eq!(q.colors, [0xFF99_9999; 4]);
+            let (us, vs) = (q.uv.map(|c| c[0]), q.uv.map(|c| c[1]));
+            let span = |c: [f32; 4]| {
+                c.iter().copied().fold(f32::MIN, f32::max)
+                    - c.iter().copied().fold(f32::MAX, f32::min)
+            };
+            assert!(
+                (span(us) - 0.25).abs() < 1e-3 && (span(vs) - 0.25).abs() < 1e-3,
+                "{:?}",
+                q.uv
+            );
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Mining a block: a crumb just above its top face where it was hit on top, placed across the
+    /// face at random, barely moving and smaller (`setPower(0.2F)`, `scale(0.6F)`); in the dark
+    /// air there, lit as the block it came from. A barrier, which makes no terrain particles,
+    /// breaks into none.
+    #[test]
+    fn a_mined_block_cracks_on_the_face_hit() {
+        let mut rt = client();
+        let mut host = MemoryHost {
+            client: true,
+            ..MemoryHost::default()
+        };
+        host.blocks.insert([0, 64, 0], "minecraft:stone".into());
+        host.blocks.insert([5, 64, 0], "minecraft:barrier".into());
+        host.models.insert(
+            "minecraft:stone".into(),
+            (vec![], "minecraft:block/stone".into()),
+        );
+        host.light.insert([0, 65, 0], (0, 0));
+        host.light.insert([0, 64, 0], (7, 0));
+        rt.with_host(&mut host, |rt| {
+            block_effects(
+                rt,
+                [0, 64, 0],
+                "minecraft:stone",
+                Some((1, [0.3, 65.0, 0.6])),
+            );
+            block_effects(rt, [5, 64, 0], "minecraft:barrier", None);
+            tick(rt);
+        });
+        let crumbs = live(&rt);
+        assert_eq!(crumbs.len(), 1, "one crumb, and none of the barrier");
+        let p = crumbs[0];
+        let [x, y, z] = ["x", "y", "z"].map(|f| rt.get_field(p, f).d());
+        let (lo, hi) = (
+            f64::from(0.1f32),
+            1.0 - f64::from(0.2f32) + f64::from(0.1f32),
+        );
+        assert!((lo..hi).contains(&x) && (lo..hi).contains(&z), "{x} {z}");
+        assert!((y - (65.0 + f64::from(0.1f32))).abs() < 1e-12, "{y}");
+        // Particle's push: `(random + random + 1) * 0.15F` along a random direction, times `0.4F`
+        // on top of the `0.1F` lift, then `setPower(0.2F)` keeps a fifth of it.
+        let [xd, yd, zd] = ["xd", "yd", "zd"].map(|f| rt.get_field(p, f).d());
+        let push = (xd * xd + (yd - f64::from(0.1f32)).powi(2) + zd * zd).sqrt();
+        let unit = f64::from(0.15f32) * f64::from(0.4f32) * f64::from(0.2f32);
+        assert!(
+            (unit - 1e-9..3.0 * unit + 1e-9).contains(&push),
+            "{xd} {yd} {zd}"
+        );
+        let size = rt.get_field(p, "quadSize").f();
+        assert!((0.03..0.06).contains(&size), "{size}");
+        assert_eq!(rt.get_field(p, "bbWidth").f(), 0.2 * 0.6);
+        assert_eq!(sprite_name(&rt, p), "minecraft:block/stone");
+        let light = rt.with_host(&mut host, |rt| {
+            crate::api::call(rt, LIGHT, &[p, V::F(0.0)]).i()
+        });
+        assert_eq!(light, 7 << 4);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const BELT: &str = "test/BeltBlock";
+    const BELT_EFFECTS: &str = "test/BeltEffects";
+    const BELT_COLOR: &str = "test/BeltColor";
+    const NEW_TERRAIN: &str = "net/minecraft/client/particle/TerrainParticle.<init>.(Lnet/minecraft/client/multiplayer/ClientLevel;DDDDDDLnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/BlockPos;)V";
+
+    /// Mod code, as Create writes its belt's: client extensions whose `addDestroyEffects` makes one
+    /// crumb in the block's middle (Create's make fewer than vanilla's) and whose `addHitEffects`
+    /// cracks the block below instead (its water wheel's structure cracks the wheel); a colour
+    /// handler for the belt.
+    fn belt_code(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        let c = crate::api::call;
+        match (
+            rt.class_of(args[0]),
+            short.split_once('.').map_or(short, |(n, _)| n),
+        ) {
+            (BELT_EFFECTS, "addDestroyEffects") => {
+                let (state, level, pos, engine) = (args[1], args[2], args[3], args[4]);
+                let [x, y, z] = crate::api::pos_of(rt, pos).map(|v| f64::from(v) + 0.5);
+                let p = rt.new_object(TERRAIN);
+                let d = V::D;
+                c(
+                    rt,
+                    NEW_TERRAIN,
+                    &[
+                        p,
+                        level,
+                        d(x),
+                        d(y),
+                        d(z),
+                        d(0.0),
+                        d(0.0),
+                        d(0.0),
+                        state,
+                        pos,
+                    ],
+                );
+                let p = c(rt, UPDATE_SPRITE, &[p, state, pos]);
+                c(
+                    rt,
+                    "net/minecraft/client/particle/ParticleEngine.add.(Lnet/minecraft/client/particle/Particle;)V",
+                    &[engine, p],
+                );
+                V::I(1)
+            }
+            (BELT_EFFECTS, "addHitEffects") => {
+                let (hit, engine) = (args[3], args[4]);
+                let pos = c(
+                    rt,
+                    "net/minecraft/world/phys/BlockHitResult.getBlockPos.()Lnet/minecraft/core/BlockPos;",
+                    &[hit],
+                );
+                let below = c(
+                    rt,
+                    "net/minecraft/core/BlockPos.below.()Lnet/minecraft/core/BlockPos;",
+                    &[pos],
+                );
+                let face = c(rt, HIT_DIRECTION, &[hit]);
+                c(
+                    rt,
+                    "net/minecraft/client/particle/ParticleEngine.crack.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)V",
+                    &[engine, below, face],
+                );
+                V::I(1)
+            }
+            (BELT_COLOR, "getColor") => V::I(0x33_6699),
+            _ => c(rt, key, args),
+        }
+    }
+
+    /// The game asks before it draws a mod's block's crumbs. The belt's client extensions make its
+    /// own: breaking it, one crumb of its model's sprite, tinted by its colour handler; mining it,
+    /// a crumb of the block below. A block of the mod with no extensions of its own breaks into
+    /// vanilla's crumbs: a full block's sixty-four.
+    #[test]
+    fn a_mods_blocks_client_extensions_make_their_own_crumbs() {
+        let mut rt = client();
+        rt.vcall = Some(belt_code);
+        for class in [BELT_EFFECTS, BELT_COLOR] {
+            rt.supers.insert(class, "java/lang/Object");
+        }
+        rt.supers
+            .insert(BELT, "net/minecraft/world/level/block/Block");
+        let belt = rt.new_object(BELT);
+        let casing = rt.new_object("net/minecraft/world/level/block/Block");
+        rt.registered
+            .insert(("block".into(), "test:belt".into()), belt);
+        rt.registered
+            .insert(("block".into(), "test:casing".into()), casing);
+        let blocks = rt.alloc(
+            "[Lnet/minecraft/world/level/block/Block;",
+            Data::Array(vec![belt]),
+        );
+        let effects = rt.new_object(BELT_EFFECTS);
+        let ev = rt.new_object(
+            "net/neoforged/neoforge/client/extensions/common/RegisterClientExtensionsEvent",
+        );
+        crate::api::call(
+            &mut rt,
+            "net/neoforged/neoforge/client/extensions/common/RegisterClientExtensionsEvent.registerBlock.(Lnet/neoforged/neoforge/client/extensions/common/IClientBlockExtensions;[Lnet/minecraft/world/level/block/Block;)V",
+            &[ev, effects, blocks],
+        );
+        let color = rt.new_object(BELT_COLOR);
+        let ev =
+            rt.new_object("net/neoforged/neoforge/client/event/RegisterColorHandlersEvent$Block");
+        crate::api::call(
+            &mut rt,
+            "net/neoforged/neoforge/client/event/RegisterColorHandlersEvent$Block.register.(Lnet/minecraft/client/color/block/BlockColor;[Lnet/minecraft/world/level/block/Block;)V",
+            &[ev, color, blocks],
+        );
+
+        let mut host = MemoryHost {
+            client: true,
+            ..MemoryHost::default()
+        };
+        host.blocks.insert([0, 64, 0], "test:belt".into());
+        host.blocks.insert([0, 63, 0], "minecraft:stone".into());
+        host.blocks.insert([4, 64, 0], "test:casing".into());
+        for (state, sprite) in [
+            ("test:belt", "test:block/belt"),
+            ("minecraft:stone", "minecraft:block/stone"),
+            ("test:casing", "test:block/casing"),
+        ] {
+            host.models.insert(state.into(), (vec![], sprite.into()));
+        }
+        assert!(crate::glue::block_effects(
+            &mut rt,
+            &mut host,
+            [0, 64, 0],
+            "test:belt",
+            None
+        ));
+        rt.with_host(&mut host, tick);
+        let crumbs = live(&rt);
+        assert_eq!(crumbs.len(), 1);
+        let p = crumbs[0];
+        assert_eq!(
+            ["x", "y", "z"].map(|f| rt.get_field(p, f).d()),
+            [0.5, 64.5, 0.5]
+        );
+        assert_eq!(sprite_name(&rt, p), "test:block/belt");
+        let tint = [0x33, 0x66, 0x99].map(|c| 0.6 * (c as f32 / 255.0));
+        assert_eq!(
+            ["rCol", "gCol", "bCol"].map(|f| rt.get_field(p, f).f()),
+            tint
+        );
+
+        assert!(crate::glue::block_effects(
+            &mut rt,
+            &mut host,
+            [0, 64, 0],
+            "test:belt",
+            Some((1, [0.5, 65.0, 0.5]))
+        ));
+        rt.with_host(&mut host, tick);
+        let cracked: Vec<V> = live(&rt).into_iter().filter(|c| *c != p).collect();
+        assert_eq!(cracked.len(), 1);
+        assert_eq!(sprite_name(&rt, cracked[0]), "minecraft:block/stone");
+        let y = rt.get_field(cracked[0], "y").d();
+        assert!(
+            (y - (64.0 + f64::from(0.1f32))).abs() < 0.05,
+            "the stone's top: {y}"
+        );
+
+        let before = live(&rt).len();
+        assert!(crate::glue::block_effects(
+            &mut rt,
+            &mut host,
+            [4, 64, 0],
+            "test:casing",
+            None
+        ));
+        rt.with_host(&mut host, tick);
+        let casing_crumbs: Vec<V> = live(&rt)
+            .into_iter()
+            .filter(|c| sprite_name(&rt, *c) == "test:block/casing")
+            .collect();
+        assert_eq!(live(&rt).len() - before, 64);
+        assert_eq!(casing_crumbs.len(), 64);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

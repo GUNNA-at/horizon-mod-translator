@@ -2032,6 +2032,24 @@ impl Game<'_> {
     ) {
         let _ = (camera, partial, quads);
     }
+    /// The block `state` at `pos` is about to break into crumbs on this
+    /// client (`hit` None: the level's break effect, level event 2001), or to
+    /// crack where it is mined (`hit` the face hit, by direction ordinal:
+    /// down, up, north, south, west, east, and the point hit on it). Set
+    /// `handled` when your mod makes the crumbs itself, or wants none: the
+    /// game then draws none of its own (NeoForge's
+    /// `IClientBlockExtensions.addDestroyEffects` and `addHitEffects`).
+    /// `native_block_particle_sprite` names the sprite the game's own take.
+    /// Client-side. API @API:block_effects@.
+    pub(super) fn native_block_effects(
+        &mut self,
+        pos: [i32; 3],
+        state: BlockStateId,
+        hit: Option<(u8, [f64; 3])>,
+        handled: &mut bool,
+    ) {
+        let _ = (pos, state, hit, handled);
+    }
     /// Draw the mob `mob` (its id, kind, custom name and the frame's body
     /// and head turns and walk cycle, `LivingEntityRenderState`) on this
     /// client with a model of your own, once a frame while it is in view

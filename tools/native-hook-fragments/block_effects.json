@@ -1,0 +1,15 @@
+{
+  "hooks": [
+    {
+      "name": "block_effects",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_effects",
+      "side": "client"
+    }
+  ],
+  "rust_summary": "a client hook asked before the game draws a block's crumbs as it breaks or is mined (`native_block_effects`), with the sprite the game's own take (`native_block_particle_sprite`).",
+  "doc_summary": "`native_block_effects(pos, state, hit, handled)` runs on a client before the game draws a block's crumbs: as it breaks (`hit` None: level event 2001) or where the player mines it (`hit` the face hit, by direction ordinal, and the point hit). Set `handled` when your mod makes the crumbs itself, or wants none: the game then draws none of its own. A translated NeoForge mod's blocks answer it with their client extensions (`IClientBlockExtensions.addDestroyEffects`, `addHitEffects`), else with vanilla's particle engine's crumbs of the block's own shape, model and colour. `native_block_particle_sprite(state)` names the sprite a block state's model breaks into. Bundles need \"hooks\": @API:block_effects@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_hooks.rs",
+    "crates/horizon-client/src/game/native_block_entity_draw.rs"
+  ]
+}

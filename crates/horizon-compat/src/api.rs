@@ -2288,6 +2288,8 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "getDestroySpeed" => V::F(crate::blocks::state_facts(rt, &text).hardness),
                 // What the renderer asks of a state's faces (`faces`).
                 "canOcclude" if desc == "()Z" => V::I(i32::from(crate::faces::can_occlude(rt, &text))),
+                // Whether it breaks and cracks into crumbs (`ParticleEngine.destroy`, `crack`).
+                "shouldSpawnTerrainParticles" if desc == "()Z" => V::I(i32::from(crate::blocks::spawns_terrain_particles(rt, &text))),
                 "isSolidRender" if desc == "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Z" => {
                     V::I(i32::from(crate::faces::solid_render(rt, a(0), a(1), a(2))))
                 }

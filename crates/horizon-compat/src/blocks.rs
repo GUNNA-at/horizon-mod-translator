@@ -2735,6 +2735,31 @@ fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
     }
 }
 
+/// Whether vanilla block `name` (or a state of it) makes terrain particles, breaking or cracking:
+/// all but 1.21.1's two `noTerrainParticles` blocks, the barrier and the structure void.
+fn vanilla_terrain_particles(name: &str) -> bool {
+    !matches!(
+        crate::host::split_state(name).0,
+        "minecraft:barrier" | "minecraft:structure_void"
+    )
+}
+
+/// `state.shouldSpawnTerrainParticles()`: a mod's block as its properties say (`noTerrainParticles`,
+/// or copied from a vanilla block that makes none), a vanilla block as vanilla's.
+pub(crate) fn spawns_terrain_particles(rt: &Rt, text: &str) -> bool {
+    let Some((b, _)) = crate::faces::made_by_mod(rt, text) else {
+        return vanilla_terrain_particles(text);
+    };
+    let props = rt.get_field(b, "$properties");
+    if props.r() == 0 {
+        return true;
+    }
+    rt.get_field(props, "$noTerrainParticles").i() == 0
+        && rt
+            .str_of(rt.get_field(props, "$copy"))
+            .is_none_or(vanilla_terrain_particles)
+}
+
 /// The `BlockBehaviour.Properties` field `name` (1.21.1's) as the builder calls left it: what they
 /// stored, else what the vanilla block a copy came from has, else `Properties.of()`'s value.
 fn properties_field(rt: &mut Rt, p: V, name: &str) -> Option<V> {
@@ -2761,7 +2786,10 @@ fn properties_field(rt: &mut Rt, p: V, name: &str) -> Option<V> {
         "jumpFactor" => got(rt, "$jumpFactor").unwrap_or(V::F(1.0)),
         "hasCollision" => unless(rt, "$noCollision"),
         "canOcclude" => unless(rt, "$noOcclusion"),
-        "spawnTerrainParticles" => unless(rt, "$noTerrainParticles"),
+        "spawnTerrainParticles" => V::I(i32::from(
+            unless(rt, "$noTerrainParticles").i() != 0
+                && copy.as_deref().is_none_or(vanilla_terrain_particles),
+        )),
         "isRandomlyTicking" => flag(rt, "$randomTicks"),
         "replaceable" => flag(rt, "$replaceable"),
         "dynamicShape" => flag(rt, "$dynamicShape"),

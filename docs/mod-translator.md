@@ -8078,6 +8078,118 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       fire. Create's `SmokingType.affectEntity` calls `Entity.fireImmune` and
       `igniteForSeconds`, unmapped on a server's player. `DynamicTexture` (`<init>`, `bind`,
       `setFilter`) is unmapped too.
+- [x] 2026-11-08 Part 122: a mod's blocks' crumbs. When a translated mod's block breaks or is
+  mined, its crumbs are those NeoForge's particle engine makes. The block's client extensions make
+  their own (`addDestroyEffects`, `addHitEffects`), or vanilla's engine makes them from the block's
+  shape, model and colour, as `TerrainParticle`s, now modelled here. Create's casings break into
+  crumbs of their own texture. Its chutes and funnels break into fewer, by Create's own code. Mining
+  a large water wheel's structure cracks the wheel.
+  - Checked against 1.21.1's classes with NeoForge 21.1.256's patches (`TerrainParticle`,
+    `ParticleEngine`, `BlockModelShaper`, `BlockStateBase`, `IClientBlockExtensions`):
+    - `TerrainParticle` has two constructors; the one without a position takes the block it is in.
+      Its sprite is the state's model's particle icon (`BlockModelShaper.getParticleIcon`: the
+      model's `getParticleIcon(ModelData.EMPTY)`). It falls with gravity 1 and is grey (0.6). Where
+      the client extensions say so (`areBreakingParticlesTinted`: all blocks but the grass block,
+      by default), the block's colour tints it. It is half the usual size, and it draws a random
+      quarter of its sprite (`uo`, `vo`).
+    - It draws on the terrain sheet: the block atlas, blended. Where its own light is 0,
+      `getLightColor` is the level's light at its block. `updateSprite(state, pos)` takes the sprite
+      for the model data at `pos` (`getTexture`).
+    - `ParticleEngine.destroy(pos, state)` does nothing for air, nor where the client extensions'
+      `addDestroyEffects` makes the crumbs itself. That default makes none for a block without
+      terrain particles. Otherwise, over each box of the state's shape (`forAllBoxes`), it makes a
+      grid of crumbs: one a quarter block, at least two a side, each in its cell's middle, flying
+      out from the box's middle. Each crumb is `updateSprite`d.
+    - `crack(pos, side)` works only for a block that isn't drawn invisible and makes terrain
+      particles (`shouldSpawnTerrainParticles`). It makes one crumb at random across the face hit,
+      a tenth of a block off it, placed by the engine's own random. The crumb gets
+      `setPower(0.2F)` and `scale(0.6F)`.
+    - `addBlockHitEffects(pos, hit)` lets the client extensions' `addHitEffects` crack the block.
+      If they don't, it calls `crack` on the face hit.
+    - `BlockModelShaper.getTexture(state, level, pos)` reads the level's model data at `pos`, then
+      the model's own (`getModelData`), then the model's particle icon for that data.
+    - Vanilla gives `noTerrainParticles` only to the barrier and the structure void, both drawn
+      invisible. `ofFullCopy` and `ofLegacyCopy` copy it.
+  - Create 6.0.10:
+    - `ReducedDestroyEffects` serves its belts, tracks, funnels and chutes. On a `ClientLevel`, it
+      keeps each crumb of vanilla's grid at a chance of one over the shape's box count. It makes
+      them with `TerrainParticle`, `updateSprite` and `ParticleEngine.add`.
+    - `WaterWheelStructuralBlock$RenderProperties`: mining the structure cracks the wheel itself
+      (`crack(master, face)`), and breaking it makes no crumbs of its own.
+    - Its casings' models are `CTModel`s (connected textures), which wrap the game's model.
+  - The game's natives (`native_hooks.rs`, `native_block_entity_draw.rs`, fragment
+    `block_effects`):
+    - A new hook, `block_effects(pos, state, hit, handled)`, runs on a client before the game draws
+      a block's crumbs. It runs as the block breaks (level event 2001: `hit` None) and as it is
+      mined (`hit`: the face, by direction ordinal, and the point hit). `handled` leaves out the
+      game's own crumbs.
+    - `native_block_particle_sprite(state)` names the sprite the game's own crumbs of a state take.
+    - `crack_particle` is given the point hit. For the window's own mining that is its pick. For
+      the server's 2019 and 2020 events it is the window player's pick when it hits that face, else
+      the face's middle.
+  - Compat:
+    - `particle_engine.rs`:
+      - `TerrainParticle` joins the modelled classes.
+      - `ParticleEngine.destroy`, `crack` and `addBlockHitEffects` are new.
+      - `block_effects` answers the hook. It always answers handled for the translated mod's
+        blocks, so their crumbs are the engine's.
+    - `baked_models.rs`: `BlockModelShaper.getBlockModel` (the model a mod put at the state's
+      location), `getParticleIcon` and `getTexture`. `BlockRenderDispatcher.getBlockModelShaper`
+      gives the shaper.
+    - `BlockState.shouldSpawnTerrainParticles` reads the block's properties (`blocks.rs`).
+    - The hosts' `model_particle` now answers for a block state's model too, from the game's
+      `native_block_particle_sprite`. This covers the client's host and the block entity draw's.
+  - Fixed on the way (found in the game: Create's casings broke into white crumbs):
+    - A mod's subclass of NeoForge's `BakedModelWrapper` can be asked through `BakedModel` for a
+      method its own classes leave alone. The wrapper's method now runs and asks the model it
+      wraps, as the JVM dispatches it. Before, the wrapper was answered as a model of unknown
+      kind. Create's `CTModel` gave the missing sprite as its particle icon, which the game's
+      atlas lacks.
+    - A wrapper whose wrapped model is a mod's asks that model's own methods first.
+  - Where Horizon differs, and why:
+    - A vanilla block's crumbs stay the game's: the hook answers only for the translated mod's
+      blocks.
+    - `BlockRenderDispatcher.getBlockModel` still gives the game's model, not one a mod put at the
+      state's location. `BlockModelShaper.getBlockModel` does give the mod's.
+    - The crumbs draw with the mods' particles, so Part 121's limits hold for them: no frustum
+      culling, no particle groups.
+  - Measured (packcov35, the same 367 jars): methods 108800/130226 (83.5%, was 108738), uses
+    340988/372747 (91.5%, was 340904), distinct missing 9214 (was 9226). Create 3276/3972 (was
+    3273), uses 24362/25241 (96.5%, was 24359).
+    - All twelve block-particle calls missing before are answered, and none newly missing:
+      `BlockRenderDispatcher.getBlockModelShaper` (16 mods), `BlockModelShaper.getBlockModel`
+      (13), `TerrainParticle`'s two constructors (7 and 3), `getParticleIcon` (4), `setPower` (4),
+      `IClientBlockExtensions.addDestroyEffects` (4), `updateSprite` (3), `destroy` (3), `crack`
+      (3), `getTexture` (1) and `addBlockHitEffects` (1).
+    - The most used left are `Minecraft.getTextureManager` (46 mods), `ConfigurationScreen`'s
+      constructor (38) and `ModelEvent$RegisterAdditional.register` (30).
+  - Tests 672 (4 new):
+    - A bottom slab broken through `ParticleEngine.destroy` makes 32 crumbs (4 × 2 × 4), each at
+      the middle of its cell of the half block. They fall with gravity 1, are grey and half size,
+      and carry the slab's model's sprite. They draw on the block atlas, blended, each a quarter of
+      the sprite across, and nothing is unmapped.
+    - Stone mined on its top makes one crumb a tenth of a block above the face, placed at random
+      across it. Its push is a fifth of vanilla's random push. It is 0.6 times the size and lit as
+      the stone below the dark air. A barrier makes no crumbs.
+    - A mod's belt registers client extensions and a colour handler, as Create's does. Breaking it
+      makes its own single crumb, tinted by its colour. Mining it cracks the block below instead.
+      A block of the mod without extensions breaks into vanilla's 64 crumbs of its sprite.
+    - A mod's model wrapper at a block's location (`CTModel`-like) gives the wrapped model's
+      particle sprite through `getParticleIcon` and `getTexture`, not the missing sprite.
+  - In the game (`p122scene.sh`, Create, offscreen at 1280 × 720). In a row: stone, an andesite
+    casing, a chute and an andesite funnel, each broken in creative from the same spot in front
+    of it. Then a casing mined in survival, and a large water wheel's structure mined beside its
+    hub.
+    - The stone breaks into the game's own crumbs. The casing breaks into a full burst of its own
+      texture: wood and its grey frame. The chute and the funnel break into a few crumbs of their
+      textures, by Create's `ReducedDestroyEffects`.
+    - Mined in survival, the casing sheds small crumbs of its texture off the face hit, under the
+      breaking overlay.
+    - Mining the water wheel's structure sheds wooden crumbs at the wheel's hub, not at the block
+      hit. That is Create's `WaterWheelStructuralBlock` cracking its master.
+    - Nothing threw. Nothing about particles or models was unmapped.
+    - Before the wrapper fix, the casing's crumbs drew flat grey: 0.6 times white, the vertex
+      colour alone. The same build drew the chute, funnel and wheel textured.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

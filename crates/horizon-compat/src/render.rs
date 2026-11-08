@@ -488,6 +488,23 @@ fn arg(args: &[V], i: usize) -> V {
 }
 
 const BAKED_MODEL_WRAPPER: &str = "net/neoforged/neoforge/client/model/BakedModelWrapper";
+
+/// Whether `model` is of a mod's class extending NeoForge's `BakedModelWrapper` (Create's
+/// `CTModel`, through its `BakedModelWrapperWithData`).
+fn wraps(rt: &Rt, model: V) -> bool {
+    if !matches!(model, V::R(n) if n != 0) {
+        return false;
+    }
+    let mut class = rt.class_of(model);
+    while let Some(&sup) = rt.supers.get(class) {
+        if sup == BAKED_MODEL_WRAPPER {
+            return true;
+        }
+        class = sup;
+    }
+    false
+}
+
 const MODEL_DATA: &str = "net/neoforged/neoforge/client/model/data/ModelData";
 const GET_QUADS_DESC: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/util/RandomSource;Lnet/neoforged/neoforge/client/model/data/ModelData;Lnet/minecraft/client/renderer/RenderType;)Ljava/util/List;";
 /// NeoForge's `getQuads` (with model data and render type), the one chunk meshing asks.
@@ -1671,6 +1688,7 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             V::Void
         }
         ("net/minecraft/client/renderer/block/BlockRenderDispatcher", "getModelRenderer") => single(rt, "net/minecraft/client/renderer/block/ModelBlockRenderer"),
+        ("net/minecraft/client/renderer/block/BlockRenderDispatcher", "getBlockModelShaper") => crate::baked_models::model_shaper(rt),
         // Its cache of neighbours' light and shade: the host lights what it draws.
         ("net/minecraft/client/renderer/block/ModelBlockRenderer", "enableCaching" | "clearCache") => V::Void,
         // A block state's model: drawn by the host when a buffer made from it is.
@@ -1696,6 +1714,12 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
                 "getModelData" => Some(a(4)),
                 _ => None,
             });
+        }
+        // A mod's subclass of NeoForge's `BakedModelWrapper` asked through `BakedModel` for what its
+        // own classes leave alone (Create's `CTModel.getParticleIcon`): the wrapper's method runs,
+        // as the JVM dispatches it, and asks the model it wraps.
+        ("net/minecraft/client/resources/model/BakedModel", n) if wraps(rt, a(0)) => {
+            return client(rt, BAKED_MODEL_WRAPPER, n, desc, args);
         }
         ("net/minecraft/client/resources/model/BakedModel", n) => match n {
             "getRenderTypes" => single(rt, "net/neoforged/neoforge/client/ChunkRenderTypeSet"),
@@ -1742,6 +1766,13 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
                 } else {
                     vc(rt, GET_QUADS_VANILLA_KEY, GET_QUADS_VANILLA, &args)
                 });
+            }
+            // A mod's model wrapped (one wrapper in another): its own method, where it has one.
+            if inner.r() != 0 && rt.is_mod_class(rt.class_of(inner)) {
+                let vc = rt.vcall?;
+                let key = rt.static_key(&format!("{n}.{desc}"));
+                let owner_key = rt.static_key(&format!("net/minecraft/client/resources/model/BakedModel.{key}"));
+                return Some(vc(rt, owner_key, key, &args));
             }
             return client(rt, "net/minecraft/client/resources/model/BakedModel", n, desc, &args);
         }

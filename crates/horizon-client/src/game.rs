@@ -3613,6 +3613,12 @@ impl Game<'_> {
         if self.settings.extras.hide_block_particles {
             return;
         }
+        // A client mod's block may break into crumbs of its own, or none.
+        let mut handled = false;
+        self.native_block_effects(pos, state, None, &mut handled);
+        if handled {
+            return;
+        }
         let Some((sprite, tint)) = self.particle_sprite(state, pos) else {
             return;
         };
@@ -3622,9 +3628,17 @@ impl Game<'_> {
             self.particles.push(particle);
         });
     }
-    /// ClientLevel.addBreakingParticles: one crumb on the face being mined.
-    fn crack_particle(&mut self, pos: [i32; 3], face: [i32; 3], state: BlockStateId) {
+    /// ClientLevel.addBreakingParticles: one crumb on the face being mined,
+    /// hit at `at`.
+    fn crack_particle(&mut self, pos: [i32; 3], face: [i32; 3], at: [f64; 3], state: BlockStateId) {
         if self.settings.extras.hide_block_particles {
+            return;
+        }
+        // A client mod's block may crack its own way.
+        let mut handled = false;
+        let hit = Some((remote::face_direction(face), at));
+        self.native_block_effects(pos, state, hit, &mut handled);
+        if handled {
             return;
         }
         let Some((sprite, tint)) = self.particle_sprite(state, pos) else {

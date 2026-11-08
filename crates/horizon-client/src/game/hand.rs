@@ -263,7 +263,7 @@ impl Game<'_> {
                     );
                 }
                 if let Some(hit) = self.pick() {
-                    self.crack_particle(pos, hit.face, state);
+                    self.crack_particle(pos, hit.face, hit.point, state);
                 }
             }
         } else {

@@ -657,7 +657,9 @@ const BACKLOG_LIMIT: Duration = Duration::from_millis(50);
 /// columns (the packet names no `MenuType`).
 const MOUNT_MENU: &str = "horizon:mount";
 
-fn face_direction(face: [i32; 3]) -> u8 {
+/// A face's direction ordinal (down, up, north, south, west, east) by its
+/// normal; up for anything else.
+pub(super) fn face_direction(face: [i32; 3]) -> u8 {
     match face {
         [0, -1, 0] => 0,
         [0, 1, 0] => 1,

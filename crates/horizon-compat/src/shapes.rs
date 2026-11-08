@@ -429,7 +429,7 @@ pub(crate) fn nearest(v: [f64; 3]) -> u8 {
 }
 
 /// A `BlockHitResult` hitting block `pos` at `at` on face `face` (`inside`: from within the shape).
-fn block_hit(rt: &mut Rt, at: [f64; 3], face: u8, pos: [i32; 3], inside: bool) -> V {
+pub(crate) fn block_hit(rt: &mut Rt, at: [f64; 3], face: u8, pos: [i32; 3], inside: bool) -> V {
     let hit = rt.new_object("net/minecraft/world/phys/BlockHitResult");
     let (loc, dir) = (vec3(rt, at), crate::api_common::direction(rt, i64::from(face)));
     let p = api::block_pos(rt, i64::from(pos[0]), i64::from(pos[1]), i64::from(pos[2]));

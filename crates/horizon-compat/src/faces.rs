@@ -44,7 +44,7 @@ fn is_air(text: &str) -> bool {
 
 /// The block object a mod made for state `text` (with the properties it was given) and its class;
 /// None for a vanilla block, which the runtime stands for by its name.
-fn made_by_mod(rt: &Rt, text: &str) -> Option<(V, &'static str)> {
+pub(crate) fn made_by_mod(rt: &Rt, text: &str) -> Option<(V, &'static str)> {
     let (name, _) = crate::host::split_state(text);
     let b = rt.registered.get(&("block".to_owned(), name.to_owned())).copied().or_else(|| api::unregistered_block(rt, name))?;
     rt.str_of(b).is_none().then(|| (b, rt.class_of(b)))

@@ -363,7 +363,15 @@ impl Game<'_> {
                 sounds.pitch * 0.5,
             );
         }
-        self.crack_particle(pos, face, state);
+        // Where the window's player hits that face, else its middle.
+        let at = self
+            .pick()
+            .filter(|h| h.pos == pos && h.face == face)
+            .map_or_else(
+                || std::array::from_fn(|i| f64::from(pos[i]) + 0.5 + f64::from(face[i]) * 0.5),
+                |h| h.point,
+            );
+        self.crack_particle(pos, face, at, state);
     }
     /// `LevelEventHandler.potionSplashParticles` (2002 with `Effect`, 2007
     /// with `InstantEffect`): eight splash potion crumbs, and a hundred
