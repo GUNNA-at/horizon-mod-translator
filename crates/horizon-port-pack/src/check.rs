@@ -106,6 +106,24 @@ fn declares_1_21(range: &str) -> bool {
     }
 }
 
+/// What `jar`'s classes do ([`classes::census`]), each class under 16 MiB read.
+pub fn code_of(jar_path: &Path) -> Result<classes::Code, String> {
+    let file = fs::File::open(jar_path).map_err(|e| format!("{}: {e}", jar_path.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar_path.display()))?;
+    let mut bytes = Vec::new();
+    for i in 0..zip.len() {
+        let mut b = Vec::new();
+        if let Ok(mut e) = zip.by_index(i)
+            && e.name().is_ok_and(|n| n.ends_with(".class"))
+            && e.size() < 1 << 24
+            && e.read_to_end(&mut b).is_ok()
+        {
+            bytes.push(b);
+        }
+    }
+    Ok(classes::census(bytes.iter().map(Vec::as_slice)))
+}
+
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }

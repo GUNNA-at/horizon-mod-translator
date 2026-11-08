@@ -2626,13 +2626,15 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
                 }));
             } else {
                 for m in &out.mods {
-                    let what = match (&m.path, &m.native) {
-                        (Some(_), Some(_)) => "content and code",
-                        (Some(_), None) => "content",
-                        (None, Some(_)) => "code",
-                        (None, None) => "nothing",
-                    };
-                    println!("{}: {} ({what} translated). {}", m.mod_id, m.verdict.label(), m.summary);
+                    match (&m.path, &m.native) {
+                        (content, Some(native)) => {
+                            println!("{}: its code translated into Rust ({}){}.", m.mod_id, native.display(),
+                                if content.is_some() { ", its content into horizon-mods" } else { "" });
+                            println!("  Without its code it would be: {}. {}", m.verdict.label(), m.summary);
+                        }
+                        (Some(_), None) => println!("{}: {}, carried over. {}", m.mod_id, m.verdict.label(), m.summary),
+                        (None, None) => println!("{}: not installed. {}", m.mod_id, m.summary),
+                    }
                 }
                 for b in &out.bundled {
                     println!("  with {}, which a mod bundles", b.display());

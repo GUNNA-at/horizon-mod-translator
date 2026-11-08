@@ -211,17 +211,27 @@ fn translate(
             let _ = fs::remove_dir_all(natives.join(format!("{ns}_translated")));
         }
         let mods = game.join("horizon-mods").join(&ns);
-        // What only its code declares: machines (block entities) and mobs (entity types).
-        let machines = |classes: &[horizon_mod_translator::class::ClassFile]| {
+        // What only its code declares: machines (block entities) and mobs (entity types), by its
+        // registrations (Registrate's, DeferredRegister's) or by what its classes extend (a mod
+        // registering through a wrapper of its own, as multi-loader mods do: Waddles).
+        let registered = |classes: &[horizon_mod_translator::class::ClassFile]| {
             horizon_mod_translator::registrations(classes)
                 .iter()
                 .any(|r| r.registry == "block_entity_type" || r.registry == "entity_type")
         };
-        let machines = if jars.len() == 1 {
-            machines(&classes)
+        let registered = if jars.len() == 1 {
+            registered(&classes)
         } else {
-            horizon_mod_translator::classes(jar).is_ok_and(|c| machines(&c))
+            horizon_mod_translator::classes(jar).is_ok_and(|c| registered(&c))
         };
+        let extends = || {
+            check::code_of(jar).is_ok_and(|code| {
+                [crate::classes::Feature::BlockEntity, crate::classes::Feature::Entity]
+                    .iter()
+                    .any(|f| code.features.get(f).is_some_and(|n| *n > 0))
+            })
+        };
+        let machines = registered || extends();
         let mut placed = None;
         if content.is_dir() && (machines || !mods.exists()) {
             let own = out.join(format!("carry-over-{ns}"));
