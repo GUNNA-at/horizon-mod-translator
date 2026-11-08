@@ -1666,21 +1666,48 @@ fn kept_key(rt: &Rt, id: V) -> String {
     format!("compat:structure/{}", crate::neo::location(rt, id))
 }
 
+/// The template `id` names, or null: one the manager made or read before, else the one in the
+/// game's data (`data/<ns>/structure/<path>.nbt`, gzipped NBT: `StructureTemplateManager`'s
+/// resource source), read now and kept.
+fn template_by_id(rt: &mut Rt, id: V) -> V {
+    let key = kept_key(rt, id);
+    if let Some(&t) = rt.interned.get(&key) {
+        return t;
+    }
+    let location = crate::neo::location(rt, id);
+    let Some((ns, path)) = location.split_once(':') else {
+        return V::NULL;
+    };
+    let Some(packed) = crate::resources::file(rt, &format!("data/{ns}/structure/{path}.nbt"))
+    else {
+        return V::NULL;
+    };
+    // A file that doesn't read is no template, as vanilla logs it and gives none.
+    let Ok(root) = crate::streams::compressed_root(&packed) else {
+        return V::NULL;
+    };
+    let tag = crate::nbt::to_runtime(rt, &root);
+    let t = new_template(rt);
+    load(rt, t, tag);
+    rt.interned.insert(key, t);
+    t
+}
+
 fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match name {
         "getOrCreate" => {
-            let key = kept_key(rt, a(1));
-            if let Some(&t) = rt.interned.get(&key) {
-                return Some(t);
+            let found = template_by_id(rt, a(1));
+            if found.r() != 0 {
+                return Some(found);
             }
             let t = new_template(rt);
+            let key = kept_key(rt, a(1));
             rt.interned.insert(key, t);
             t
         }
         "get" if desc == "(Lnet/minecraft/resources/ResourceLocation;)Ljava/util/Optional;" => {
-            let key = kept_key(rt, a(1));
-            let t = rt.interned.get(&key).copied().unwrap_or(V::NULL);
+            let t = template_by_id(rt, a(1));
             crate::api_common::optional(rt, t)
         }
         "readStructure" if desc.starts_with("(Lnet/minecraft/nbt/CompoundTag;)") => {
@@ -1981,6 +2008,52 @@ mod tests {
 
     /// The settings' processors run as vanilla runs them (a mod's own `processBlock`, through
     /// `process`), the settings copy what they hold, and the server keeps a template by id.
+    /// A 2×1×1 template as a structure block saves it: gzipped NBT, stone and an oak log along x.
+    fn hut_file() -> Vec<u8> {
+        use crate::nbt::Nbt;
+        use std::collections::BTreeMap;
+        use std::io::Write;
+        let compound = |entries: Vec<(&str, Nbt)>| {
+            Nbt::Compound(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k.to_owned(), v))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+        };
+        let ints = |v: [i32; 3]| Nbt::List(v.iter().map(|&i| Nbt::Int(i)).collect());
+        let root = compound(vec![
+            ("size", ints([2, 1, 1])),
+            (
+                "palette",
+                Nbt::List(vec![
+                    compound(vec![("Name", Nbt::String("minecraft:stone".into()))]),
+                    compound(vec![
+                        ("Name", Nbt::String("minecraft:oak_log".into())),
+                        (
+                            "Properties",
+                            compound(vec![("axis", Nbt::String("x".into()))]),
+                        ),
+                    ]),
+                ]),
+            ),
+            (
+                "blocks",
+                Nbt::List(vec![
+                    compound(vec![("pos", ints([1, 0, 0])), ("state", Nbt::Int(1))]),
+                    compound(vec![("pos", ints([0, 0, 0])), ("state", Nbt::Int(0))]),
+                ]),
+            ),
+            ("entities", Nbt::List(Vec::new())),
+            ("DataVersion", Nbt::Int(DATA_VERSION)),
+        ]);
+        let mut raw = Vec::new();
+        crate::nbt::write_unnamed(&mut raw, &root);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&raw).unwrap();
+        gz.finish().unwrap()
+    }
+
     #[test]
     fn a_mods_processor_changes_what_a_template_places() {
         let mut rt = Rt::new();
@@ -1989,6 +2062,8 @@ mod tests {
         rt.vcall = Some(vcall);
         rt.supers.insert(STONE_TO_GRANITE, PROCESSOR);
         let mut host = MemoryHost::default();
+        host.resources
+            .insert("data/test/structure/hut.nbt".into(), hut_file());
         rt.with_host(&mut host, |rt| {
             let level = crate::glue::level(rt);
             let template = rt.new_object(TEMPLATE);
@@ -2030,6 +2105,15 @@ mod tests {
             let made = api::call(rt, "net/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplateManager.getOrCreate.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplate;", &[manager, id]);
             let kept = api::call(rt, get, &[manager, id]);
             assert_eq!(rt.get_field(kept, "value"), made);
+            // A mod's own template in its data (`data/test/structure/hut.nbt`), read when asked for.
+            let hut = rt.string("test:hut");
+            let found = api::call(rt, get, &[manager, hut]);
+            let t = rt.get_field(found, "value");
+            assert_ne!(t, V::NULL);
+            assert_eq!(
+                states_of(rt, t),
+                [([0, 0, 0], "minecraft:stone".to_owned()), ([1, 0, 0], "minecraft:oak_log[axis=x]".to_owned())]
+            );
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
         assert_eq!(

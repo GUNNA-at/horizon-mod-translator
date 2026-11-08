@@ -217,7 +217,7 @@ pub fn input_stream(rt: &mut Rt, bytes: Vec<u8>) -> V {
 }
 
 /// What is left to read of a stream or reader of this module, taken: reading is then at its end.
-fn take(rt: &mut Rt, v: V) -> Option<Vec<u8>> {
+pub(crate) fn take(rt: &mut Rt, v: V) -> Option<Vec<u8>> {
     match rt.heap.get_mut(v.r() as usize).map(|o| &mut o.data) {
         Some(Data::Bytes(b, at)) => {
             let rest = b.get(*at..).map(<[u8]>::to_vec).unwrap_or_default();
@@ -237,18 +237,25 @@ pub fn take_text(rt: &mut Rt, v: V) -> Option<String> {
     take(rt, v).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-/// Makes `this` (just allocated by `new`) a stream or reader over `bytes`.
-fn become_bytes(rt: &mut Rt, this: V, bytes: Vec<u8>) {
-    if let Some(o) = rt.heap.get_mut(this.r() as usize) {
-        o.data = Data::Bytes(bytes, 0);
+/// Makes `this` (just allocated by `new`) a stream or reader over `bytes`. A mod's own stream
+/// (`extends FilterInputStream`) keeps the fields it has (an inner class's `this$0`, set before
+/// `super(in)`).
+pub(crate) fn become_bytes(rt: &mut Rt, this: V, bytes: Vec<u8>) {
+    let Some(o) = rt.heap.get_mut(this.r() as usize) else {
+        return;
+    };
+    if let Data::Fields(fields) = std::mem::replace(&mut o.data, Data::Bytes(bytes, 0)) {
+        if !fields.is_empty() {
+            rt.side_fields.entry(this.r()).or_default().extend(fields);
+        }
     }
 }
 
-fn byte_array(rt: &mut Rt, bytes: &[u8]) -> V {
+pub(crate) fn byte_array(rt: &mut Rt, bytes: &[u8]) -> V {
     rt.alloc("[B", Data::Array(bytes.iter().map(|b| V::I(*b as i8 as i32)).collect()))
 }
 
-fn array_bytes(rt: &Rt, a: V) -> Vec<u8> {
+pub(crate) fn array_bytes(rt: &Rt, a: V) -> Vec<u8> {
     match rt.heap.get(a.r() as usize).map(|o| &o.data) {
         Some(Data::Array(v)) => v.iter().map(|b| b.i() as u8).collect(),
         _ => Vec::new(),
@@ -733,10 +740,23 @@ pub fn client_listeners_event(rt: &mut Rt) -> V {
     ev
 }
 
-fn stream_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+pub(crate) fn stream_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
+    // A mod's own stream with no bytes here (`extends InputStream`): Java's `InputStream` reads it
+    // through its own `read()`.
+    if name != "<init>"
+        && crate::streams::is_mod(rt, this)
+        && !matches!(
+            rt.heap.get(this.r() as usize).map(|o| &o.data),
+            Some(Data::Bytes(..))
+        )
+    {
+        return crate::streams::mod_read(rt, name, desc, args);
+    }
     Some(match (name, desc) {
+        // A mod's own stream's `super()`: nothing to take.
+        ("<init>", "()V") => V::Void,
         // `new ByteArrayInputStream(bytes[, offset, length])`, or a stream around another.
         ("<init>", "([B)V") => {
             let bytes = array_bytes(rt, a(1));

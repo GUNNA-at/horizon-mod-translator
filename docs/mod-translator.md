@@ -7387,6 +7387,55 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     its state turned; vanilla's transforms worked by hand (positions, a point, a turned box's
     corner, its box and size); a mod's processor changes what a template places, the settings
     copy what they hold, and the server keeps a template by id), translator 22.
+- [x] 2026-11-08 Part 113: NBT files (`NbtIo`), Java's data, gzip, file and byte-array streams,
+  and the templates mods ship in their data.
+  - NBT's binary form moved from the network module into `nbt.rs`, for packets and files alike:
+    a tag's type and payload, a file's unnamed root (its type, an empty name, the payload), the
+    512-level nesting limit, and strings in Java's modified UTF-8 (`writeUTF`: NUL as two bytes, a
+    character past the basic plane as its two surrogates). A string past 65535 bytes is written
+    empty, as `NbtIo.StringFallbackDataOutput` does.
+  - `NbtIo` (new module `streams.rs`): `read(path)` (null when there's no file), `write(tag, path)`,
+    `readCompressed` and `writeCompressed` by path or stream (gzip), `read(input[, accounter])` and
+    `write(tag, output)` on a data stream, `readAnyTag` and `writeAnyTag`, `writeUnnamedTag`. A root
+    that isn't a compound throws `IOException`, a file that isn't gzip's `ZipException`; reading or
+    writing a stream closes it, as `NbtIo`'s try-with-resources does.
+  - Java's streams: `FileInputStream`, `FileOutputStream`, `Files.newInputStream` and
+    `newOutputStream` (with their open options: made, emptied, appended, new only),
+    `ByteArrayOutputStream`, `BufferedOutputStream`, `FilterOutputStream`, `DataInputStream` and
+    `DataOutputStream` (`DataInput` and `DataOutput`: big-endian numbers, `readUTF`/`writeUTF`,
+    `readFully`, `skipBytes`, `size`), `GZIPInputStream` and `GZIPOutputStream` (each gzip member
+    read; written on `finish` or `close`), zlib's `InflaterInputStream` and `DeflaterOutputStream`,
+    `transferTo`, `nullInputStream`, `nullOutputStream`. A stream around another takes that one's
+    bytes when it is made; an output stream hands on what it is given at once (a file's onto its
+    end); errors throw the exception Java's would (`FileNotFoundException` with the system's reason,
+    `EOFException`, `UTFDataFormatException`, `IOException: Stream Closed`). A mod's own stream is
+    read and written through its own `read` and `write` (byte by byte through `write(int)` where
+    Java's `OutputStream` and `FilterOutputStream` do), closed through its `close`. A mod's stream
+    that set fields before `super(in)` keeps them, and a mod's `InputStream` is read through its
+    `read()` where Java's defaults do.
+  - The server's templates: `StructureTemplateManager.get` (and `getOrCreate`) read a template a
+    mod or the game ships (`data/<ns>/structure/<path>.nbt`) when it is first asked for, and keep it.
+  - Create's schematics: `SchematicExport` writes a schematic through `Files.newOutputStream` and
+    `NbtIo.writeCompressed`, `SchematicItem` reads it through `Files.newInputStream`,
+    `BufferedInputStream`, `GZIPInputStream`, `DataInputStream` and `NbtIo.read`, and the server's
+    upload loader writes the parts it receives through `Files.newOutputStream`.
+  - Not yet: `NbtAccounter`'s quota and usage (reads are unlimited), `TagType`'s readers, the
+    data fixer for templates saved by older versions, an `Inflater` or `Deflater` set up by hand.
+  - Measured (packcov26, the same 367 jars): methods 82.8% (from 82.7%: 61 more mapped), uses
+    91.0%, distinct missing API methods 9458 (from 9469); Create 81.0% of its methods (from
+    80.9%), 96.2% of its uses. No `NbtIo` key is missing now (11 before, used by 6 to 9 mods
+    each); the JDK's streams aren't counted (the probe measures Minecraft's, NeoForge's and Mojang's
+    APIs only).
+  - Tests: compat 636 (4 new: a schematic written through `Files.newOutputStream` and
+    `NbtIo.writeCompressed` is gzip's, its root unnamed and its strings in modified UTF-8, byte for
+    byte, reads back through `GZIPInputStream`, `DataInputStream` and `NbtIo.read` and by path, and
+    a missing or plain file throws what Java's would; data streams write Java's bytes for each kind
+    (worked out by hand from `DataOutput`'s spec) and read them back, with `EOFException` at the
+    end, gzip's kept until closed; a mod's own `InputStream` keeps its fields through `super()` and
+    is read through its `read()`, by `read(byte[])` and by a data stream around it; a mod's own
+    `OutputStream` gets a compressed write byte by byte through its `write(int)` and is closed
+    through its `close`; the structure test also reads a
+    gzipped template from the mod's data by id), translator 22.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

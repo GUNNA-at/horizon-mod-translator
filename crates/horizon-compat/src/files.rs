@@ -62,7 +62,7 @@ fn text(rt: &Rt, v: V) -> Option<String> {
 }
 
 /// Where `text` is on disk.
-fn on_disk(rt: &Rt, text: &str) -> PathBuf {
+pub(crate) fn on_disk(rt: &Rt, text: &str) -> PathBuf {
     let p = Path::new(text);
     if p.is_absolute() { p.to_owned() } else { game_dir(rt).join(p) }
 }
@@ -146,7 +146,7 @@ fn ends_with(a: &str, b: &str) -> bool {
 }
 
 /// Throws `class` with `message`, as Java's file system does; the call's value is then unused.
-fn throw(rt: &mut Rt, class: &'static str, message: &str) -> V {
+pub(crate) fn throw(rt: &mut Rt, class: &'static str, message: &str) -> V {
     let e = rt.new_object(class);
     let m = rt.string(message);
     rt.put_field(e, "message", m);
@@ -155,7 +155,7 @@ fn throw(rt: &mut Rt, class: &'static str, message: &str) -> V {
 }
 
 /// The exception Java's `Files` throws for an error of the disk's.
-fn throw_io(rt: &mut Rt, e: &std::io::Error, text: &str) -> V {
+pub(crate) fn throw_io(rt: &mut Rt, e: &std::io::Error, text: &str) -> V {
     use std::io::ErrorKind as K;
     let class = match e.kind() {
         K::NotFound => "java/nio/file/NoSuchFileException",
@@ -174,7 +174,7 @@ fn stream(rt: &mut Rt, items: Vec<V>) -> V {
 }
 
 /// The varargs' enum constants by name (`StandardOpenOption.APPEND`, `REPLACE_EXISTING`).
-fn has_option(rt: &Rt, options: V, name: &str) -> bool {
+pub(crate) fn has_option(rt: &Rt, options: V, name: &str) -> bool {
     crate::jutil::elements(rt, options).into_iter().any(|o| rt.str_of(rt.get_field(o, "$name")) == Some(name))
 }
 
@@ -484,6 +484,12 @@ fn files_method(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             Err(e) => throw_io(rt, &e, &p),
         },
+        // `newInputStream(path, options...)`: the file's bytes now ([`crate::streams`]).
+        "newInputStream" => match std::fs::read(&disk) {
+            Ok(bytes) => crate::streams::file_input(rt, bytes),
+            Err(e) => throw_io(rt, &e, &p),
+        },
+        "newOutputStream" => crate::streams::open_output(rt, &p, a(1)),
         // `writeString(path, text[, charset], options...)`.
         "writeString" => {
             let s = text(rt, a(1)).unwrap_or_default();

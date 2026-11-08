@@ -106,7 +106,7 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
             matches!(c, "java/lang/IllegalArgumentException" | "java/lang/IllegalStateException" | "java/lang/NullPointerException" | "java/lang/UnsupportedOperationException" | "java/lang/ClassCastException" | "java/lang/ArithmeticException" | "java/lang/IndexOutOfBoundsException" | "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/NumberFormatException")
                 || java_is_a(c, class)
         }
-        _ => crate::resources::is_a(c, class) || crate::gson::is_a(c, class) || java_is_a(c, class) || crate::vanilla_entities::is_a(c, class) || crate::fluid_wrappers::is_a(c, class) || crate::item_wrappers::is_a(c, class) || crate::energy::is_a(c, class),
+        _ => crate::resources::is_a(c, class) || crate::streams::is_a(c, class) || crate::gson::is_a(c, class) || java_is_a(c, class) || crate::vanilla_entities::is_a(c, class) || crate::fluid_wrappers::is_a(c, class) || crate::item_wrappers::is_a(c, class) || crate::energy::is_a(c, class),
     }
 }
 
@@ -202,7 +202,14 @@ fn java_is_a(c: &str, class: &str) -> bool {
         "java/util/NoSuchElementException" => c == "java/util/InputMismatchException",
         "java/io/IOException" => {
             (c.starts_with("java/") && c.ends_with("IOException") && c != class)
-                || matches!(c, "java/io/FileNotFoundException" | "java/io/EOFException" | "java/nio/file/FileSystemException")
+                || matches!(
+                    c,
+                    "java/io/FileNotFoundException"
+                        | "java/io/EOFException"
+                        | "java/io/UTFDataFormatException"
+                        | "java/util/zip/ZipException"
+                        | "java/nio/file/FileSystemException"
+                )
                 || api_is_a(c, "java/nio/file/FileSystemException")
         }
         "java/nio/file/FileSystemException" => matches!(

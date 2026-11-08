@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 111] = [
+const COMPAT: [(&str, &str); 112] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -154,6 +154,7 @@ const COMPAT: [(&str, &str); 111] = [
     ("gamerules.rs", include_str!("../../horizon-compat/src/gamerules.rs")),
     ("faces.rs", include_str!("../../horizon-compat/src/faces.rs")),
     ("shapes.rs", include_str!("../../horizon-compat/src/shapes.rs")),
+    ("streams.rs", include_str!("../../horizon-compat/src/streams.rs")),
     ("structures.rs", include_str!("../../horizon-compat/src/structures.rs")),
     ("sounds.rs", include_str!("../../horizon-compat/src/sounds.rs")),
     ("vanilla_sounds.rs", include_str!("../../horizon-compat/src/vanilla_sounds.rs")),
@@ -215,7 +216,7 @@ const COMPAT: [(&str, &str); 111] = [
 
 /// The registry crates the carried runtime uses, as the engine's `[dependencies]`: each must be
 /// in Horizon's Cargo.lock, at a version that lock holds.
-const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\npng = \"0.18\"\nregex = { version = \"1\", default-features = false, features = [\"std\", \"unicode-perl\", \"unicode-case\"] }\n";
+const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\npng = \"0.18\"\nregex = { version = \"1\", default-features = false, features = [\"std\", \"unicode-perl\", \"unicode-case\"] }\nflate2 = { version = \"1.1.10\", default-features = false, features = [\"zlib-rs\", \"runtime_detection\"] }\n";
 
 /// horizon-compat's modules for tools only (the port pack's), not carried: nothing carried uses them.
 #[cfg(test)]

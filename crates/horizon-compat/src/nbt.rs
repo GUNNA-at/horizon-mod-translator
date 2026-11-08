@@ -189,3 +189,284 @@ fn hash_entries<'a>(entries: impl Iterator<Item = (&'a String, &'a Nbt)> + Clone
     }
     h.finish()
 }
+
+/// A tag object (a `CompoundTag`, or any tag) as NBT; None for null.
+pub(crate) fn of_tag(rt: &Rt, tag: V) -> Option<Nbt> {
+    if tag.r() == 0 {
+        return None;
+    }
+    match rt.heap.get(tag.r() as usize).map(|o| &o.data) {
+        Some(Data::Map(_)) => Some(Nbt::Compound(from_runtime(rt, tag))),
+        _ => element_from_runtime(rt, tag),
+    }
+}
+
+/// NBT as a tag object: a `CompoundTag` for a compound.
+pub(crate) fn tag_of(rt: &mut Rt, n: &Nbt) -> V {
+    match n {
+        Nbt::Compound(c) => to_runtime(rt, c),
+        other => element_to_runtime(rt, other).unwrap_or(V::NULL),
+    }
+}
+
+// Binary NBT, as `Tag.write` writes it and `NbtIo` reads it back: big-endian numbers, strings as
+// `DataOutput.writeUTF` writes them (Java's modified UTF-8 after a u16 length), a list's element
+// type and count before its elements, a compound's entries (type, name, payload) up to `TAG_End`.
+
+/// The type id a tag is written with (`Tag.getId`).
+pub(crate) fn id(n: &Nbt) -> u8 {
+    match n {
+        Nbt::Byte(_) => 1,
+        Nbt::Short(_) => 2,
+        Nbt::Int(_) => 3,
+        Nbt::Long(_) => 4,
+        Nbt::Float(_) => 5,
+        Nbt::Double(_) => 6,
+        Nbt::ByteArray(_) => 7,
+        Nbt::String(_) => 8,
+        Nbt::List(_) => 9,
+        Nbt::Compound(_) => 10,
+        Nbt::IntArray(_) => 11,
+        Nbt::LongArray(_) => 12,
+    }
+}
+
+/// `s` in Java's modified UTF-8 (`DataOutput.writeUTF`'s bytes, without the length): U+0000 as two
+/// bytes, a character past the basic plane as its two UTF-16 surrogates of three bytes each.
+pub(crate) fn mutf8(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for unit in s.encode_utf16() {
+        match unit {
+            0x0001..=0x007f => out.push(unit as u8),
+            0x0000 | 0x0080..=0x07ff => {
+                out.extend_from_slice(&[0xc0 | (unit >> 6) as u8, 0x80 | (unit & 0x3f) as u8])
+            }
+            _ => out.extend_from_slice(&[
+                0xe0 | (unit >> 12) as u8,
+                0x80 | ((unit >> 6) & 0x3f) as u8,
+                0x80 | (unit & 0x3f) as u8,
+            ]),
+        }
+    }
+    out
+}
+
+/// Text from Java's modified UTF-8 (`DataInput.readUTF`); None for a malformed sequence, where
+/// Java throws `UTFDataFormatException`. A lone surrogate reads as U+FFFD.
+pub(crate) fn from_mutf8(b: &[u8]) -> Option<String> {
+    let mut units = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = u16::from(b[i]);
+        let cont = |k: usize| {
+            b.get(i + k)
+                .map(|&x| u16::from(x))
+                .filter(|x| x & 0xc0 == 0x80)
+        };
+        match c >> 4 {
+            0..=7 => {
+                units.push(c);
+                i += 1;
+            }
+            12 | 13 => {
+                units.push(((c & 0x1f) << 6) | (cont(1)? & 0x3f));
+                i += 2;
+            }
+            14 => {
+                units.push(((c & 0x0f) << 12) | ((cont(1)? & 0x3f) << 6) | (cont(2)? & 0x3f));
+                i += 3;
+            }
+            _ => return None,
+        }
+    }
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// A string as NBT writes it. One past `writeUTF`'s 65535 bytes is written empty, as
+/// `NbtIo.StringFallbackDataOutput` does when `writeUTF` throws.
+pub(crate) fn write_string(out: &mut Vec<u8>, s: &str) {
+    let b = mutf8(s);
+    let b = if b.len() > usize::from(u16::MAX) {
+        Vec::new()
+    } else {
+        b
+    };
+    out.extend_from_slice(&(b.len() as u16).to_be_bytes());
+    out.extend_from_slice(&b);
+}
+
+/// A tag's payload (`Tag.write`).
+pub(crate) fn write_payload(out: &mut Vec<u8>, n: &Nbt) {
+    match n {
+        Nbt::Byte(b) => out.push(*b as u8),
+        Nbt::Short(s) => out.extend_from_slice(&s.to_be_bytes()),
+        Nbt::Int(i) => out.extend_from_slice(&i.to_be_bytes()),
+        Nbt::Long(l) => out.extend_from_slice(&l.to_be_bytes()),
+        Nbt::Float(f) => out.extend_from_slice(&f.to_be_bytes()),
+        Nbt::Double(d) => out.extend_from_slice(&d.to_be_bytes()),
+        Nbt::ByteArray(a) => {
+            out.extend_from_slice(&(a.len() as i32).to_be_bytes());
+            out.extend(a.iter().map(|&b| b as u8));
+        }
+        Nbt::String(s) => write_string(out, s),
+        Nbt::List(items) => {
+            out.push(items.first().map_or(0, id));
+            out.extend_from_slice(&(items.len() as i32).to_be_bytes());
+            for i in items {
+                write_payload(out, i);
+            }
+        }
+        Nbt::Compound(c) => {
+            for (k, v) in c {
+                out.push(id(v));
+                write_string(out, k);
+                write_payload(out, v);
+            }
+            out.push(0);
+        }
+        Nbt::IntArray(a) => {
+            out.extend_from_slice(&(a.len() as i32).to_be_bytes());
+            for i in a {
+                out.extend_from_slice(&i.to_be_bytes());
+            }
+        }
+        Nbt::LongArray(a) => {
+            out.extend_from_slice(&(a.len() as i32).to_be_bytes());
+            for l in a {
+                out.extend_from_slice(&l.to_be_bytes());
+            }
+        }
+    }
+}
+
+/// `NbtIo.writeAnyTag`: the type id, then the payload; `TAG_End` (0) alone for none.
+pub(crate) fn write_any(out: &mut Vec<u8>, n: Option<&Nbt>) {
+    match n {
+        Some(n) => {
+            out.push(id(n));
+            write_payload(out, n);
+        }
+        None => out.push(0),
+    }
+}
+
+/// `NbtIo.writeUnnamedTag` (a file's root): the type id, an empty name, the payload.
+pub(crate) fn write_unnamed(out: &mut Vec<u8>, n: &Nbt) {
+    out.push(id(n));
+    write_string(out, "");
+    write_payload(out, n);
+}
+
+/// A reader of binary NBT over bytes; `at` is how far it read.
+pub(crate) struct Reader<'a> {
+    b: &'a [u8],
+    pub(crate) at: usize,
+}
+
+impl<'a> Reader<'a> {
+    pub(crate) fn new(b: &'a [u8]) -> Self {
+        Reader { b, at: 0 }
+    }
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.at.checked_add(n)?;
+        let s = self.b.get(self.at..end)?;
+        self.at = end;
+        Some(s)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+    fn i16(&mut self) -> Option<i16> {
+        Some(i16::from_be_bytes(self.take(2)?.try_into().ok()?))
+    }
+    fn i32(&mut self) -> Option<i32> {
+        Some(i32::from_be_bytes(self.take(4)?.try_into().ok()?))
+    }
+    fn i64(&mut self) -> Option<i64> {
+        Some(i64::from_be_bytes(self.take(8)?.try_into().ok()?))
+    }
+    /// A count before elements: no more than the bytes left could hold.
+    fn len(&mut self) -> Option<usize> {
+        let n = usize::try_from(self.i32()?).ok()?;
+        (n <= self.b.len() - self.at).then_some(n)
+    }
+    fn string(&mut self) -> Option<String> {
+        let n = usize::from(u16::from_be_bytes(self.take(2)?.try_into().ok()?));
+        from_mutf8(self.take(n)?)
+    }
+    /// A payload of type `id`; None past the end, for an unknown type or nesting past
+    /// `NbtAccounter`'s 512 levels.
+    fn tag(&mut self, id: u8, depth: u32) -> Option<Nbt> {
+        if depth > 512 {
+            return None;
+        }
+        Some(match id {
+            1 => Nbt::Byte(self.u8()? as i8),
+            2 => Nbt::Short(self.i16()?),
+            3 => Nbt::Int(self.i32()?),
+            4 => Nbt::Long(self.i64()?),
+            5 => Nbt::Float(f32::from_bits(self.i32()? as u32)),
+            6 => Nbt::Double(f64::from_bits(self.i64()? as u64)),
+            7 => {
+                let n = self.len()?;
+                Nbt::ByteArray(self.take(n)?.iter().map(|&b| b as i8).collect())
+            }
+            8 => Nbt::String(self.string()?),
+            9 => {
+                let t = self.u8()?;
+                let n = self.len()?;
+                let mut items = Vec::with_capacity(n);
+                for _ in 0..n {
+                    items.push(self.tag(t, depth + 1)?);
+                }
+                Nbt::List(items)
+            }
+            10 => {
+                let mut m = BTreeMap::new();
+                loop {
+                    let t = self.u8()?;
+                    if t == 0 {
+                        break;
+                    }
+                    let k = self.string()?;
+                    let v = self.tag(t, depth + 1)?;
+                    m.insert(k, v);
+                }
+                Nbt::Compound(m)
+            }
+            11 => {
+                let n = self.len()?;
+                (0..n)
+                    .map(|_| self.i32())
+                    .collect::<Option<Vec<_>>>()
+                    .map(Nbt::IntArray)?
+            }
+            12 => {
+                let n = self.len()?;
+                (0..n)
+                    .map(|_| self.i64())
+                    .collect::<Option<Vec<_>>>()
+                    .map(Nbt::LongArray)?
+            }
+            _ => return None,
+        })
+    }
+    /// `NbtIo.readAnyTag`'s form: Some(None) for `TAG_End`.
+    pub(crate) fn any(&mut self) -> Option<Option<Nbt>> {
+        match self.u8()? {
+            0 => Some(None),
+            t => Some(Some(self.tag(t, 0)?)),
+        }
+    }
+    /// `NbtIo.readUnnamedTag`'s form (a file's root): as [`Reader::any`], a name skipped after the
+    /// type.
+    pub(crate) fn unnamed(&mut self) -> Option<Option<Nbt>> {
+        match self.u8()? {
+            0 => Some(None),
+            t => {
+                self.string()?;
+                Some(Some(self.tag(t, 0)?))
+            }
+        }
+    }
+}

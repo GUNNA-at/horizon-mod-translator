@@ -13,6 +13,9 @@ serde_json = "1.0.151"
 png = "0.18"
 # `java.util.regex` (`jregex`): the engine Horizon's OptiFine reader uses, with its features.
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+# NBT files and Java's gzip and zlib streams (`NbtIo.readCompressed`, `GZIPInputStream`): the
+# deflate Horizon's own saves use, with its features.
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
 
 [lints]
 workspace = true

@@ -784,7 +784,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 80] = [
+const CHAIN: [Module; 81] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -851,6 +851,7 @@ const CHAIN: [Module; 80] = [
     crate::neo::call,
     crate::files::call,
     crate::resources::call,
+    crate::streams::call,
     crate::gson::call,
     crate::jregex::call,
     crate::jlang::call,
@@ -870,7 +871,7 @@ const CHAIN: [Module; 80] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 80] = [
+const CLAIMS: [Claims; 81] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -937,6 +938,7 @@ const CLAIMS: [Claims; 80] = [
     crate::neo::claims,
     crate::files::claims,
     crate::resources::claims,
+    crate::streams::claims,
     crate::gson::claims,
     crate::jregex::claims,
     crate::jlang::claims,
@@ -954,7 +956,7 @@ const CLAIMS: [Claims; 80] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 80] = [
+const MODULE_NAMES: [&str; 81] = [
     "diodes",
     "rails",
     "fake_players",
@@ -1021,6 +1023,7 @@ const MODULE_NAMES: [&str; 80] = [
     "neo",
     "files",
     "resources",
+    "streams",
     "gson",
     "jregex",
     "jlang",

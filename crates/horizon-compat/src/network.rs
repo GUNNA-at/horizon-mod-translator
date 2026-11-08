@@ -20,7 +20,6 @@
 //! Decoded numbers and booleans are raw values, as everywhere in this runtime: a constructor
 //! reference (`Packet::new`) takes its primitives raw.
 use crate::{Data, Rt, V, host::PayloadTarget, nbt::Nbt};
-use std::collections::BTreeMap;
 
 /// The class of the buffers made here.
 pub const BUF: &str = "net/minecraft/network/RegistryFriendlyByteBuf";
@@ -481,209 +480,24 @@ fn ordinal(rt: &Rt, v: V) -> i64 {
 
 // NBT, as `NbtIo.writeAnyTag` writes it on the network (a type byte, no name; 0 for none).
 
-fn nbt_id(n: &Nbt) -> u8 {
-    match n {
-        Nbt::Byte(_) => 1,
-        Nbt::Short(_) => 2,
-        Nbt::Int(_) => 3,
-        Nbt::Long(_) => 4,
-        Nbt::Float(_) => 5,
-        Nbt::Double(_) => 6,
-        Nbt::ByteArray(_) => 7,
-        Nbt::String(_) => 8,
-        Nbt::List(_) => 9,
-        Nbt::Compound(_) => 10,
-        Nbt::IntArray(_) => 11,
-        Nbt::LongArray(_) => 12,
-    }
-}
-
-fn put_nbt_string(out: &mut Vec<u8>, s: &str) {
-    let b = s.as_bytes();
-    let n = b.len().min(usize::from(u16::MAX));
-    out.extend_from_slice(&(n as u16).to_be_bytes());
-    out.extend_from_slice(&b[..n]);
-}
-
-fn put_nbt_payload(out: &mut Vec<u8>, n: &Nbt) {
-    match n {
-        Nbt::Byte(b) => out.push(*b as u8),
-        Nbt::Short(s) => out.extend_from_slice(&s.to_be_bytes()),
-        Nbt::Int(i) => out.extend_from_slice(&i.to_be_bytes()),
-        Nbt::Long(l) => out.extend_from_slice(&l.to_be_bytes()),
-        Nbt::Float(f) => out.extend_from_slice(&f.to_be_bytes()),
-        Nbt::Double(d) => out.extend_from_slice(&d.to_be_bytes()),
-        Nbt::ByteArray(a) => {
-            out.extend_from_slice(&(a.len() as i32).to_be_bytes());
-            out.extend(a.iter().map(|&b| b as u8));
-        }
-        Nbt::String(s) => put_nbt_string(out, s),
-        Nbt::List(items) => {
-            out.push(items.first().map_or(0, nbt_id));
-            out.extend_from_slice(&(items.len() as i32).to_be_bytes());
-            for i in items {
-                put_nbt_payload(out, i);
-            }
-        }
-        Nbt::Compound(c) => {
-            for (k, v) in c {
-                out.push(nbt_id(v));
-                put_nbt_string(out, k);
-                put_nbt_payload(out, v);
-            }
-            out.push(0);
-        }
-        Nbt::IntArray(a) => {
-            out.extend_from_slice(&(a.len() as i32).to_be_bytes());
-            for i in a {
-                out.extend_from_slice(&i.to_be_bytes());
-            }
-        }
-        Nbt::LongArray(a) => {
-            out.extend_from_slice(&(a.len() as i32).to_be_bytes());
-            for l in a {
-                out.extend_from_slice(&l.to_be_bytes());
-            }
-        }
-    }
-}
-
 fn put_nbt(rt: &mut Rt, buf: V, n: Option<&Nbt>) {
     let mut out = Vec::new();
-    match n {
-        Some(n) => {
-            out.push(nbt_id(n));
-            put_nbt_payload(&mut out, n);
-        }
-        None => out.push(0),
-    }
+    crate::nbt::write_any(&mut out, n);
     put(rt, buf, &out);
-}
-
-struct NbtReader<'a> {
-    b: &'a [u8],
-    at: usize,
-}
-
-impl NbtReader<'_> {
-    fn take(&mut self, n: usize) -> Option<&[u8]> {
-        let end = self.at.checked_add(n)?;
-        let s = self.b.get(self.at..end)?;
-        self.at = end;
-        Some(s)
-    }
-    fn u8(&mut self) -> Option<u8> {
-        Some(self.take(1)?[0])
-    }
-    fn i16(&mut self) -> Option<i16> {
-        Some(i16::from_be_bytes(self.take(2)?.try_into().ok()?))
-    }
-    fn i32(&mut self) -> Option<i32> {
-        Some(i32::from_be_bytes(self.take(4)?.try_into().ok()?))
-    }
-    fn i64(&mut self) -> Option<i64> {
-        Some(i64::from_be_bytes(self.take(8)?.try_into().ok()?))
-    }
-    fn len(&mut self) -> Option<usize> {
-        let n = usize::try_from(self.i32()?).ok()?;
-        (n <= self.b.len() - self.at).then_some(n)
-    }
-    fn string(&mut self) -> Option<String> {
-        let n = usize::from(u16::from_be_bytes(self.take(2)?.try_into().ok()?));
-        Some(String::from_utf8_lossy(self.take(n)?).into_owned())
-    }
-    fn tag(&mut self, id: u8, depth: u32) -> Option<Nbt> {
-        if depth > 512 {
-            return None;
-        }
-        Some(match id {
-            1 => Nbt::Byte(self.u8()? as i8),
-            2 => Nbt::Short(self.i16()?),
-            3 => Nbt::Int(self.i32()?),
-            4 => Nbt::Long(self.i64()?),
-            5 => Nbt::Float(f32::from_bits(self.i32()? as u32)),
-            6 => Nbt::Double(f64::from_bits(self.i64()? as u64)),
-            7 => {
-                let n = self.len()?;
-                Nbt::ByteArray(self.take(n)?.iter().map(|&b| b as i8).collect())
-            }
-            8 => Nbt::String(self.string()?),
-            9 => {
-                let t = self.u8()?;
-                let n = self.len()?;
-                let mut items = Vec::with_capacity(n);
-                for _ in 0..n {
-                    items.push(self.tag(t, depth + 1)?);
-                }
-                Nbt::List(items)
-            }
-            10 => {
-                let mut m = BTreeMap::new();
-                loop {
-                    let t = self.u8()?;
-                    if t == 0 {
-                        break;
-                    }
-                    let k = self.string()?;
-                    let v = self.tag(t, depth + 1)?;
-                    m.insert(k, v);
-                }
-                Nbt::Compound(m)
-            }
-            11 => {
-                let n = self.len()?;
-                let mut a = Vec::with_capacity(n);
-                for _ in 0..n {
-                    a.push(self.i32()?);
-                }
-                Nbt::IntArray(a)
-            }
-            12 => {
-                let n = self.len()?;
-                let mut a = Vec::with_capacity(n);
-                for _ in 0..n {
-                    a.push(self.i64()?);
-                }
-                Nbt::LongArray(a)
-            }
-            _ => return None,
-        })
-    }
 }
 
 /// A tag read off the buffer: Some(None) for none (`TAG_End`), None (thrown) when it doesn't parse.
 fn read_nbt(rt: &mut Rt, buf: V) -> Option<Option<Nbt>> {
     let parsed = bytes_mut(rt, buf).and_then(|(v, at)| {
-        let mut r = NbtReader { b: &v[*at..], at: 0 };
-        let out = match r.u8()? {
-            0 => Some(None),
-            t => Some(Some(r.tag(t, 0)?)),
-        };
+        let mut r = crate::nbt::Reader::new(&v[*at..]);
+        let out = r.any()?;
         *at += r.at;
-        out
+        Some(out)
     });
     if parsed.is_none() && rt.thrown.is_none() {
         rt.throw_new("io/netty/handler/codec/DecoderException");
     }
     parsed
-}
-
-/// A runtime tag (a `CompoundTag`, or any tag object) as NBT.
-fn tag_nbt(rt: &Rt, tag: V) -> Option<Nbt> {
-    if tag.r() == 0 {
-        return None;
-    }
-    match rt.heap.get(tag.r() as usize).map(|o| &o.data) {
-        Some(Data::Map(_)) => Some(Nbt::Compound(crate::nbt::from_runtime(rt, tag))),
-        _ => crate::nbt::element_from_runtime(rt, tag),
-    }
-}
-
-fn nbt_tag(rt: &mut Rt, n: &Nbt) -> V {
-    match n {
-        Nbt::Compound(c) => crate::nbt::to_runtime(rt, c),
-        other => crate::nbt::element_to_runtime(rt, other).unwrap_or(V::NULL),
-    }
 }
 
 // Item and fluid stacks: the count (amount), 0 for an empty one, then the item (fluid) by name.
@@ -920,7 +734,7 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
             put(rt, buf, &b);
         }
         TAG => {
-            let n = tag_nbt(rt, value);
+            let n = crate::nbt::of_tag(rt, value);
             put_nbt(rt, buf, n.as_ref());
         }
         // `codec.encodeStart(NbtOps.INSTANCE, value).getOrThrow(...)`, then `writeNbt`.
@@ -929,7 +743,7 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
             Err(e) => throw_with(rt, "io/netty/handler/codec/EncoderException", &format!("Failed to encode: {e}")),
         },
         OPTIONAL_TAG => {
-            let n = optional_held(rt, value).and_then(|v| tag_nbt(rt, v));
+            let n = optional_held(rt, value).and_then(|v| crate::nbt::of_tag(rt, v));
             put_nbt(rt, buf, n.as_ref());
         }
         BLOCK_POS => put_pos(rt, buf, value),
@@ -1100,7 +914,7 @@ fn decode_native(rt: &mut Rt, c: V, buf: V) -> Option<V> {
             new_byte_array(rt, &b)
         }
         TAG => match read_nbt(rt, buf)? {
-            Some(n) => nbt_tag(rt, &n),
+            Some(n) => crate::nbt::tag_of(rt, &n),
             None => V::NULL,
         },
         RESOURCE_KEY => {
@@ -1123,7 +937,7 @@ fn decode_native(rt: &mut Rt, c: V, buf: V) -> Option<V> {
         }
         OPTIONAL_TAG => {
             let v = match read_nbt(rt, buf)? {
-                Some(n) => nbt_tag(rt, &n),
+                Some(n) => crate::nbt::tag_of(rt, &n),
                 None => V::NULL,
             };
             crate::api_common::optional(rt, v)
@@ -1793,7 +1607,7 @@ fn buffer_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             b
         }
         "writeNbt" => {
-            let n = tag_nbt(rt, a(1));
+            let n = crate::nbt::of_tag(rt, a(1));
             put_nbt(rt, b, n.as_ref());
             b
         }
@@ -1891,7 +1705,7 @@ fn buffer_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "readUUID" => read_uuid(rt, b).unwrap_or(V::NULL),
         "readVec3" => read_vec3(rt, b).unwrap_or(V::NULL),
         "readNbt" | "readAnySizeNbt" => match read_nbt(rt, b) {
-            Some(Some(n)) => nbt_tag(rt, &n),
+            Some(Some(n)) => crate::nbt::tag_of(rt, &n),
             _ => V::NULL,
         },
         "readByteArray" => match read_count(rt, b).and_then(|n| take(rt, b, n)) {
@@ -1983,6 +1797,7 @@ fn buffer_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use crate::host::MemoryHost;
 
     fn sv(rt: &mut Rt, k: &'static str) -> V {

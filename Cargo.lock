@@ -1492,6 +1492,7 @@ dependencies = [
 name = "horizon-compat"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "horizon-compat-core",
  "png",
  "regex",
