@@ -743,7 +743,7 @@ mod tests {
         crate::install();
         let mut host = MemoryHost::default();
         for (id, kind) in [(7, "minecraft:cow"), (9, "minecraft:zombie"), (11, "minecraft:arrow")] {
-            host.entities.push(EntityView { id, kind: kind.into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: None });
+            host.entities.push(EntityView { id, kind: kind.into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: None, ..Default::default() });
         }
         rt.with_host(&mut host, |rt| {
             let level = crate::glue::level(rt);

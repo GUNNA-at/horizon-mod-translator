@@ -911,10 +911,12 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let p = xyz(rt, e);
             vec3(rt, p)
         }
-        "blockPosition" | "getOnPos" => {
+        "blockPosition"
+        | "getOnPos"
+        | "getOnPosLegacy"
+        | "getBlockPosBelowThatAffectsMyMovement" => {
             let p = xyz(rt, e);
-            let below = if name == "getOnPos" { 0.2 } else { 0.0 };
-            api::block_pos(rt, p[0].floor() as i64, (p[1] - below).floor() as i64, p[2].floor() as i64)
+            crate::api_common::feet_block(rt, name, p)
         }
         "setPos" if desc == "(DDD)V" => {
             base_set_pos(rt, e, [a(1).d(), a(2).d(), a(3).d()]);
@@ -1007,6 +1009,15 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "setXRot" => {
             rt.put_field(e, "$xRot", a(1));
             V::Void
+        }
+        // An entity has no head or body to turn: `Entity.setYHeadRot` and `setYBodyRot` do
+        // nothing, `getYHeadRot` is 0, and it shows its facing (`getVisualRotationYInDegrees`).
+        "setYHeadRot" | "setYBodyRot" if desc == "(F)V" => V::Void,
+        "getYHeadRot" if desc == "()F" => V::F(0.0),
+        "getVisualRotationYInDegrees" => rt.get_field(e, "$yRot"),
+        "getRotationVector" => {
+            let (x, y) = (rt.get_field(e, "$xRot").f(), rt.get_field(e, "$yRot").f());
+            crate::api_common::vec2(rt, x, y)
         }
         "setOldPosAndRot" => {
             set_old(rt, e);
@@ -2142,7 +2153,14 @@ mod tests {
         let steve: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
         let alex: u128 = 0x9999_aaaa_bbbb_cccc_dddd_eeee_ffff_0000;
         let (mut rt, ty) = runtime();
-        let cow = crate::host::EntityView { id: 30, kind: "minecraft:cow".into(), pos: [5.5, 64.0, 5.5], yaw: 0.0, health: Some((10.0, 10.0)) };
+        let cow = crate::host::EntityView {
+            id: 30,
+            kind: "minecraft:cow".into(),
+            pos: [5.5, 64.0, 5.5],
+            yaw: 0.0,
+            health: Some((10.0, 10.0)),
+            ..Default::default()
+        };
         let mut h = MemoryHost {
             players: vec![(steve, [1.5, 64.0, 2.5])],
             player_entity_ids: [(steve, 12)].into_iter().collect(),

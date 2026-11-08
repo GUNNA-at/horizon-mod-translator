@@ -477,12 +477,12 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 }
 
 /// An item entity's own methods, which it answers whichever class names them.
-const ITEM_ENTITY_METHODS: [&str; 51] = [
+const ITEM_ENTITY_METHODS: [&str; 55] = [
     "absMoveTo", "addDeltaMovement", "blockPosition", "discard", "fireImmune", "getAge", "getBbHeight", "getBbWidth", "getBoundingBox", "getCommandSenderWorld",
     "getControllingPassenger", "getDeltaMovement", "getId", "getItem", "getOnPos", "getOnPosLegacy", "getOwner", "getPersistentData", "getTarget", "getType", "getVehicle",
-    "getX", "getY", "getZ", "hasPickUpDelay", "isAlive", "isInLava", "isInWater", "isOnFire", "isPassenger", "isPickable", "isRemoved", "isShiftKeyDown", "isSpectator",
-    "isVehicle", "kill", "level", "moveTo", "onClientRemoval", "onGround", "position", "push", "remove", "setDefaultPickUpDelay", "setDeltaMovement", "setItem",
-    "setNoPickUpDelay", "setPickUpDelay", "setPos", "setRemoved", "teleportTo",
+    "getX", "getXRot", "getY", "getYRot", "getZ", "hasPickUpDelay", "isAlive", "isInLava", "isInWater", "isOnFire", "isPassenger", "isPickable", "isRemoved", "isShiftKeyDown",
+    "isSpectator", "isVehicle", "kill", "level", "moveTo", "onClientRemoval", "onGround", "position", "push", "remove", "setDefaultPickUpDelay", "setDeltaMovement", "setItem",
+    "setNoPickUpDelay", "setPickUpDelay", "setPos", "setRemoved", "setXRot", "setYRot", "teleportTo",
 ];
 
 pub fn call_key(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -620,9 +620,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         "getType" => crate::mod_entities::vanilla_type(rt, "minecraft:item"),
         "level" | "getCommandSenderWorld" => crate::glue::level(rt),
         "blockPosition" | "getOnPos" | "getOnPosLegacy" => {
-            let [x, y, z] = pos(rt, e);
-            let y = if name == "blockPosition" { y } else { y - 0.2 };
-            api::block_pos(rt, x.floor() as i64, y.floor() as i64, z.floor() as i64)
+            let p = pos(rt, e);
+            crate::api_common::feet_block(rt, name, p)
         }
         "position" => {
             let p = pos(rt, e);
@@ -631,6 +630,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         "getX" => V::D(pos(rt, e)[0]),
         "getY" => V::D(pos(rt, e)[1]),
         "getZ" => V::D(pos(rt, e)[2]),
+        // Its facing, kept on it: the game draws an item spinning by its age, whatever it is.
+        "getYRot" | "getXRot" => V::F(
+            rt.get_field(e, if name == "getYRot" { "$yRot" } else { "$xRot" })
+                .f(),
+        ),
+        "setYRot" | "setXRot" if desc == "(F)V" => {
+            if a(1).f().is_finite() {
+                rt.put_field(e, if name == "setYRot" { "$yRot" } else { "$xRot" }, a(1));
+            }
+            V::Void
+        }
         "getDeltaMovement" => {
             let m = motion(rt, e);
             vec3(rt, m)
@@ -922,7 +932,7 @@ mod tests {
         let mut rt = Rt::new();
         crate::install();
         let mut host = MemoryHost::default();
-        let view = |id: i32, kind: &str, pos: [f64; 3]| EntityView { id, kind: kind.into(), pos, yaw: 0.0, health: Some((10.0, 10.0)) };
+        let view = |id: i32, kind: &str, pos: [f64; 3]| EntityView { id, kind: kind.into(), pos, yaw: 0.0, health: Some((10.0, 10.0)), ..Default::default() };
         host.entities = vec![view(7, "minecraft:cow", [0.5, 64.0, 0.5]), view(9, "minecraft:zombie", [40.5, 64.0, 0.5])];
         // A player standing at the box's edge, half a block outside it: their 0.6 wide box reaches in.
         let uuid = 0x1234u128;

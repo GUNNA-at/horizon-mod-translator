@@ -1073,6 +1073,25 @@ fn mth_floor(d: f64) -> i32 {
     if d < i as f64 { i.wrapping_sub(1) } else { i }
 }
 
+/// The block an entity at `p` is in (`blockPosition`) or stands on, as `Entity.getOnPos(float)`
+/// finds it with no supporting block known: the one an offset below its feet (`getOnPos` 1.0E-5,
+/// `getOnPosLegacy` 0.2, `getBlockPosBelowThatAffectsMyMovement` 0.500001, as floats).
+pub(crate) fn feet_block(rt: &mut Rt, name: &str, p: [f64; 3]) -> V {
+    let below = match name {
+        "getOnPos" => 1.0e-5_f32,
+        "getOnPosLegacy" => 0.2,
+        "getBlockPosBelowThatAffectsMyMovement" => 0.500_001,
+        _ => 0.0,
+    };
+    let y = mth_floor(p[1] - f64::from(below));
+    crate::api::block_pos(
+        rt,
+        i64::from(mth_floor(p[0])),
+        i64::from(y),
+        i64::from(mth_floor(p[2])),
+    )
+}
+
 const VEC2: &str = "net/minecraft/world/phys/Vec2";
 
 pub(crate) fn vec2(rt: &mut Rt, x: f32, y: f32) -> V {
@@ -2525,6 +2544,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::I(now.map_or_else(|| rt.get_field(a(0), "$entityId").i(), |p| p.0))
         }
         (o, "getId") if desc == "()I" && is_player(o) && rt.class_of(a(0)) == LOCAL_PLAYER => V::I(rt.host().and_then(|h| h.client_player_id()).unwrap_or(0)),
+        // Whether the window's own player stands on something, as the client's game knows it
+        // (Create's turntable turns only a player standing on it); false before their world loads.
+        (o, "onGround" | "$onGround") if desc == "()Z" && is_player(o) && rt.class_of(a(0)) == LOCAL_PLAYER => {
+            V::I(i32::from(rt.host().and_then(|h| h.client_player_on_ground()).unwrap_or(false)))
+        }
         // A player's type is `EntityType.PLAYER` (`BuiltInRegistries.ENTITY_TYPE.getKey` names it).
         (o, "getType") if desc == "()Lnet/minecraft/world/entity/EntityType;" && is_player(o) && is_player_class(rt.class_of(a(0))) => {
             crate::mod_entities::vanilla_type(rt, "minecraft:player")
@@ -3212,7 +3236,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             && matches!(
                 n,
                 "getX" | "getY" | "getZ" | "position" | "getPosition" | "blockPosition" | "getEyeY" | "getEyePosition" | "getEyeHeight" | "getLookAngle" | "getViewVector" | "getXRot" | "getYRot" | "getYHeadRot" | "getBoundingBox" | "getBbWidth" | "getBbHeight"
+                    | "getRotationVector" | "getVisualRotationYInDegrees" | "getPreciseBodyRotation" | "$yHeadRot" | "$yBodyRot"
+                    | "getOnPos" | "getOnPosLegacy" | "getBlockPosBelowThatAffectsMyMovement"
             )
+            && (!n.starts_with('$') || desc == "()F")
             && (player_place(rt, a(0)).is_some() || is_player_class(rt.class_of(a(0)))) =>
         {
             let (p, yaw, pitch) = player_place(rt, a(0)).unwrap_or_default();
@@ -3222,7 +3249,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "getY" => V::D(p[1]),
                 "getZ" => V::D(p[2]),
                 "position" | "getPosition" => vec3(rt, p[0], p[1], p[2]),
-                "blockPosition" => crate::api::block_pos(rt, p[0].floor() as i64, p[1].floor() as i64, p[2].floor() as i64),
+                "blockPosition"
+                | "getOnPos"
+                | "getOnPosLegacy"
+                | "getBlockPosBelowThatAffectsMyMovement" => feet_block(rt, n, p),
                 "getEyeY" => V::D(eye),
                 "getEyePosition" => vec3(rt, p[0], eye, p[2]),
                 "getEyeHeight" => V::F(player_eye_height(rt) as f32),
@@ -3235,10 +3265,54 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "getBbWidth" => V::F(player_size(rt).0),
                 "getBbHeight" => V::F(player_size(rt).1),
                 "getXRot" => V::F(pitch),
-                "getYRot" | "getYHeadRot" => V::F(yaw),
+                // A player's head and body turn with their view, in the game.
+                "getYRot"
+                | "getYHeadRot"
+                | "getVisualRotationYInDegrees"
+                | "getPreciseBodyRotation"
+                | "$yHeadRot"
+                | "$yBodyRot" => V::F(yaw),
+                "getRotationVector" => vec2(rt, pitch, yaw),
                 _ => view_vector(rt, yaw, pitch),
             }
         }
+        // Turning a player. The window's own (`LocalPlayer`, on its client) turns as a client mod
+        // turns them (Create's turntable, in a frame): their view turns, and their client tells
+        // the server as it tells it their own turns. A server's player turns for the rest of the
+        // hook, as vanilla's copy does until their client next tells where they look; their
+        // client isn't told, as vanilla's isn't. A head and body follow the view in the game, and
+        // the pose between ticks is the game's own. An angle that isn't finite is dropped, as
+        // vanilla's `setYRot` drops it; a pitch is kept between -90 and 90, as 26.3's `setXRot`
+        // keeps it.
+        (
+            o,
+            n @ ("setYRot" | "setXRot" | "setYHeadRot" | "setYBodyRot" | "$yHeadRot" | "$yBodyRot"
+            | "setOldPosAndRot"),
+        ) if is_player(o)
+            && is_player_class(rt.class_of(a(0)))
+            && (desc == "(F)V" || (n == "setOldPosAndRot" && desc == "()V")) =>
+        {
+            let to = a(1).f();
+            let local = rt.class_of(a(0)) == LOCAL_PLAYER;
+            match n {
+                _ if !to.is_finite() => {}
+                "setYRot" | "setXRot" if local => {
+                    let (yaw, pitch) = if n == "setYRot" {
+                        (Some(to), None)
+                    } else {
+                        (None, Some(to))
+                    };
+                    rt.host_call(|h| h.turn_client_player(yaw, pitch));
+                }
+                "setYRot" => rt.put_field(a(0), "$yaw", V::F(to)),
+                "setXRot" => rt.put_field(a(0), "$pitch", V::F((to % 360.0).clamp(-90.0, 90.0))),
+                _ => {}
+            }
+            V::Void
+        }
+        // Any other entity's head and body written: a mob's are turned by `vanilla_entities`, and
+        // a mod's own entity keeps the field as written.
+        (_, "$yHeadRot" | "$yBodyRot") if desc == "(F)V" => V::Void,
         // How far the player is from another entity (`Entity.distanceTo`, a float, and
         // `distanceToSqr`), a point or a `Vec3`; an entity whose place isn't known is where they are.
         (o, n @ ("distanceTo" | "distanceToSqr")) if is_player(o) && player_place(rt, a(0)).is_some() => {
@@ -5788,6 +5862,99 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+    /// A client mod turns the window's own player (Create's turntable, in a frame): their view
+    /// turns in the game, and reads back so; a pitch past straight up is kept at it, and an angle
+    /// that isn't finite is dropped. On a server, turning the acting player turns the server's
+    /// copy for the rest of the hook, and the game, whose player's client holds their look, is not
+    /// told. Their head and body read as their view.
+    #[test]
+    fn a_mod_turns_the_window_player_and_a_servers_copy() {
+        const LOCAL: &str = "net/minecraft/client/player/LocalPlayer";
+        const PLAYER: &str = "net/minecraft/world/entity/player/Player";
+        let get = |rt: &mut Rt, key: &str, p: V| -> f32 {
+            crate::api::call(rt, Box::leak(key.to_owned().into_boxed_str()), &[p]).f()
+        };
+        let set = |rt: &mut Rt, key: &str, p: V, to: f32| {
+            crate::api::call(
+                rt,
+                Box::leak(key.to_owned().into_boxed_str()),
+                &[p, V::F(to)],
+            );
+        };
+        let mut rt = Rt::new();
+        crate::install();
+        rt.interned.insert("compat:client".into(), V::I(1));
+        let mut host = crate::host::MemoryHost {
+            place: Some(([0.5, 64.0, 0.5], 10.0, 0.0)),
+            client: true,
+            client_on_ground: true,
+            ..Default::default()
+        };
+        // Where they stand: on the block below their feet, a player on a block's top.
+        let stands = |rt: &mut Rt, me: V| {
+            let on = crate::api::call(
+                rt,
+                "net/minecraft/client/player/LocalPlayer.onGround.()Z",
+                &[me],
+            )
+            .i() != 0;
+            let below = crate::api::call(
+                rt,
+                "net/minecraft/client/player/LocalPlayer.getOnPos.()Lnet/minecraft/core/BlockPos;",
+                &[me],
+            );
+            (on, crate::api::pos_of(rt, below))
+        };
+        rt.with_host(&mut host, |rt| {
+            let me = crate::network::local_player(rt);
+            assert_eq!(stands(rt, me), (true, [0, 63, 0]));
+            set(rt, &format!("{LOCAL}.setYRot.(F)V"), me, 45.0);
+            set(
+                rt,
+                "net/minecraft/world/entity/Entity.setXRot.(F)V",
+                me,
+                120.0,
+            );
+            set(rt, &format!("{LOCAL}.setYRot.(F)V"), me, f32::INFINITY);
+            assert_eq!(get(rt, &format!("{LOCAL}.getYRot.()F"), me), 45.0);
+            assert_eq!(get(rt, &format!("{LOCAL}.getXRot.()F"), me), 90.0);
+            let body = crate::api::game_field(
+                rt,
+                me,
+                "yBodyRot",
+                "$yBodyRot",
+                "net/minecraft/client/player/LocalPlayer.$yBodyRot.()F",
+            );
+            assert_eq!(body.f(), 45.0);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+        assert_eq!(host.place, Some(([0.5, 64.0, 0.5], 45.0, 90.0)));
+        // Half a block up, in the air: over the block their feet are in.
+        host.place = Some(([-0.5, 64.5, 0.5], 45.0, 0.0));
+        host.client_on_ground = false;
+        rt.with_host(&mut host, |rt| {
+            let me = crate::network::local_player(rt);
+            assert_eq!(stands(rt, me), (false, [-1, 64, 0]));
+        });
+        let mut rt = Rt::new();
+        let mut host = crate::host::MemoryHost {
+            place: Some(([0.5, 64.0, 0.5], 10.0, 0.0)),
+            player_id: Some(42),
+            ..Default::default()
+        };
+        rt.with_host(&mut host, |rt| {
+            let player = super::acting_player(rt);
+            set(rt, &format!("{PLAYER}.setYRot.(F)V"), player, 45.0);
+            set(rt, &format!("{PLAYER}.setXRot.(F)V"), player, -30.0);
+            set(rt, &format!("{PLAYER}.setYHeadRot.(F)V"), player, 70.0);
+            assert_eq!(get(rt, &format!("{PLAYER}.getYRot.()F"), player), 45.0);
+            assert_eq!(get(rt, &format!("{PLAYER}.getXRot.()F"), player), -30.0);
+            assert_eq!(get(rt, &format!("{PLAYER}.getYHeadRot.()F"), player), 45.0);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+        assert_eq!(host.place, Some(([0.5, 64.0, 0.5], 10.0, 0.0)));
+    }
+
     /// A block item's state for a click (`BlockItem.getPlacementState`): its block's
     /// `getStateForPlacement`, asked through `Block` as vanilla's code asks it, runs the rule of
     /// the block's own class or the one above it that has one (a lever's is

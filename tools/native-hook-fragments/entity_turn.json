@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "a mob and the window's own player turned, and whether that player stands on something (`native_turn_mob`, `native_turn_client_player`, `native_client_player_on_ground`).",
+  "doc_summary": "`native_turn_mob(dimension, id, turn)` turns mob `id` as `Entity.setYRot` and `setXRot` and `LivingEntity.setYHeadRot` and `setYBodyRot` do, each by the angle the `NativeTurn` gives, the ones left out kept (a pitch is the remainder of 360, kept between -90 and 90): the players who see it are sent it, and its own goals may turn it again in its next tick, as vanilla's do; false for no such mob, another dimension or an angle that isn't finite. `native_turn_client_player(yaw, pitch)` turns the window's own player (`LocalPlayer.setYRot`, `setXRot`), as a client mod does to the player standing on a turning block: their view turns with it and their client tells the server as it tells it their own turns; false outside the window's game or with no player. `native_client_player_on_ground()` is whether the window's own player stands on something (`LocalPlayer.onGround`), None with no player. A mob's angles are read with the rest of it (`NativeMob`: `yaw`, `pitch`, `head_yaw`, `body_yaw`). Bundles need \"hooks\": @API:entity_turn@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mobs.rs"
+  ]
+}

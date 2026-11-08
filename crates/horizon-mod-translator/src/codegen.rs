@@ -392,6 +392,10 @@ fn is_shadow_field(f: &crate::class::Field) -> bool {
 fn heard_write(m: &Member) -> Option<&'static str> {
     match (m.name.as_str(), m.desc.as_str()) {
         ("hurtMarked", "Z") => Some("net/minecraft/world/entity/Entity.$hurtMarked.(Z)V"),
+        // A living entity's head and body, which the game turns (Create's seats align the mob
+        // they carry).
+        ("yHeadRot", "F") => Some("net/minecraft/world/entity/LivingEntity.$yHeadRot.(F)V"),
+        ("yBodyRot", "F") => Some("net/minecraft/world/entity/LivingEntity.$yBodyRot.(F)V"),
         _ => None,
     }
 }

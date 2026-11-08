@@ -297,6 +297,7 @@ mod tests {
             pos: [0.5, 64.2, 0.5],
             yaw: 0.0,
             health: Some((10.0, 10.0)),
+            ..Default::default()
         });
         host.effects.insert(Some(PIG), Vec::new());
         host.effects.insert(None, Vec::new());
@@ -421,6 +422,7 @@ mod tests {
                 pos: [x, 64.1, 0.5],
                 yaw: 0.0,
                 health: None,
+                ..Default::default()
             });
         }
         // A block entity of the block at x 6: its tick tells it of items.

@@ -21,8 +21,33 @@ pub(crate) struct NativeMob {
     pub(crate) pos: [f64; 3],
     /// Degrees; 0 faces south.
     pub(crate) yaw: f32,
+    /// Where it looks up or down (`Entity.getXRot`), degrees: -90 is up.
+    pub(crate) pitch: f32,
+    /// Its head's facing (`LivingEntity.getYHeadRot`), degrees.
+    pub(crate) head_yaw: f32,
+    /// Its body's facing (`LivingEntity.yBodyRot`), degrees.
+    pub(crate) body_yaw: f32,
     pub(crate) health: f32,
     pub(crate) max_health: f32,
+}
+
+/// How a native mod turns a mob (`native_turn_mob`): each angle in degrees, the ones left out kept.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct NativeTurn {
+    /// Where it faces (`Entity.setYRot`): 0 is south.
+    pub(crate) yaw: Option<f32>,
+    /// Where it looks up or down (`Entity.setXRot`): -90 is up.
+    pub(crate) pitch: Option<f32>,
+    /// Its head (`LivingEntity.setYHeadRot`).
+    pub(crate) head_yaw: Option<f32>,
+    /// Its body (`LivingEntity.setYBodyRot`).
+    pub(crate) body_yaw: Option<f32>,
+}
+
+/// `Entity.setXRot`'s pitch: the remainder of 360, kept between -90 and 90.
+fn entity_pitch(pitch: f32) -> f32 {
+    (pitch % 360.0).clamp(-90.0, 90.0)
 }
 
 /// What a mob starts with (`native_spawn_mob`); the default is a plain mob.
@@ -217,6 +242,63 @@ impl Game<'_> {
         m.needs_sync = true;
         true
     }
+    /// Turns mob `id` as `Entity.setYRot` and `setXRot` and `LivingEntity.setYHeadRot` and
+    /// `setYBodyRot` do, each by the angle `turn` gives (a pitch is the remainder of 360, kept
+    /// between -90 and 90): the players who see it are sent it, and its own goals may turn it again
+    /// in its next tick, as vanilla's do. False for no such mob, another dimension or an angle that
+    /// isn't finite. API @API:entity_turn@.
+    pub(super) fn native_turn_mob(&mut self, dimension: &str, id: u32, turn: &NativeTurn) -> bool {
+        let angles = [turn.yaw, turn.pitch, turn.head_yaw, turn.body_yaw];
+        if !self.native_mob_level(dimension) || angles.iter().flatten().any(|a| !a.is_finite()) {
+            return false;
+        }
+        let Some(m) = self.mobs.iter_mut().find(|m| m.id == id && !m.removed) else {
+            return false;
+        };
+        if let Some(yaw) = turn.yaw {
+            m.yaw = yaw;
+        }
+        if let Some(pitch) = turn.pitch {
+            m.head_pitch = entity_pitch(pitch);
+        }
+        if let Some(head) = turn.head_yaw {
+            m.head_yaw = head;
+        }
+        if let Some(body) = turn.body_yaw {
+            m.body_yaw = body;
+        }
+        m.needs_sync = true;
+        true
+    }
+    /// Turns the window's own player (`LocalPlayer.setYRot`, `setXRot`), as a client mod's code
+    /// does (Create turns the player standing on its turntable, or seated on a turning
+    /// contraption): their view turns with it, and their client tells the server as it tells it
+    /// their own turns. A pitch is the remainder of 360, kept between -90 and 90. False outside the
+    /// window's game, with no player, or an angle that isn't finite. API @API:entity_turn@.
+    pub(super) fn native_turn_client_player(
+        &mut self,
+        yaw: Option<f32>,
+        pitch: Option<f32>,
+    ) -> bool {
+        if !self.native_window()
+            || self.player.is_none()
+            || [yaw, pitch].iter().flatten().any(|a| !a.is_finite())
+        {
+            return false;
+        }
+        if let Some(yaw) = yaw {
+            self.yaw = yaw;
+        }
+        if let Some(pitch) = pitch {
+            self.pitch = entity_pitch(pitch);
+        }
+        // The player's own copy, synced from the view each tick: read in this frame too.
+        if let Some(p) = self.player.as_mut() {
+            p.yaw = self.yaw;
+            p.pitch = self.pitch;
+        }
+        true
+    }
     /// Mob `id`'s motion in blocks a tick (`Entity.getDeltaMovement`) in the
     /// level in place, `dimension`: None for no such mob, another dimension
     /// or a client's copy. API @API:entity_motion@.
@@ -376,6 +458,12 @@ impl Game<'_> {
     /// item in use): None with no player. API @API:client_block_contacts@.
     pub(super) fn native_client_player_input(&self) -> Option<[f32; 2]> {
         self.player.as_ref().map(|p| p.applied_input)
+    }
+    /// Whether the window's own player stands on something (`LocalPlayer.onGround`), as a
+    /// client mod asks before it carries or turns them (Create's turntable): None with no
+    /// player. API @API:entity_turn@.
+    pub(super) fn native_client_player_on_ground(&self) -> Option<bool> {
+        self.player.as_ref().map(|p| p.ground.on_ground)
     }
     /// Sets mob `id`'s health, cut to its maximum: false for no such mob,
     /// another dimension or a health that isn't above 0 (`native_kill_mob`
@@ -583,6 +671,9 @@ impl Game<'_> {
             kind: horizon_client::command::args::normalize(&m.kind.id),
             pos: [m.position.x, m.position.y, m.position.z],
             yaw: m.yaw,
+            pitch: m.head_pitch,
+            head_yaw: m.head_yaw,
+            body_yaw: m.body_yaw,
             health: m.health,
             max_health: m.attrs.max_health,
         }

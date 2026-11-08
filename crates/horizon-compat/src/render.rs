@@ -1640,14 +1640,22 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             single(rt, "net/minecraft/client/renderer/blockentity/BlockEntityRenderDispatcher")
         }
         ("net/minecraft/client/Minecraft", "getEntityRenderDispatcher") => single(rt, "net/minecraft/client/renderer/entity/EntityRenderDispatcher"),
-        ("net/minecraft/client/Minecraft", "isPaused") => V::I(0),
+        ("net/minecraft/client/Minecraft", "isPaused") => V::I(i32::from(rt.host().is_some_and(|h| h.paused()))),
         // F3: closed (debug overlays a mod draws over the world stay off).
         ("net/minecraft/client/Minecraft", "getDebugOverlay") => single(rt, "net/minecraft/client/gui/components/DebugScreenOverlay"),
         ("net/minecraft/client/gui/components/DebugScreenOverlay", _) if desc.ends_with(")Z") => V::I(0),
         ("net/minecraft/client/Minecraft", "isSameThread") => V::I(1),
+        // A frame's (`camera::render_frame`): its time in ticks and how far it is into its tick;
+        // another's: the drawing's partial tick, a tick a frame.
         ("net/minecraft/client/DeltaTracker" | "net/minecraft/client/DeltaTracker$Timer", n) => match n {
-            "getGameTimeDeltaPartialTick" => V::F(rt.host().map_or(0.0, |h| h.partial_tick())),
-            "getGameTimeDeltaTicks" | "getRealtimeDeltaTicks" => V::F(1.0),
+            "getGameTimeDeltaPartialTick" => match rt.get_field(a(0), "$partial") {
+                V::F(t) => V::F(t),
+                _ => V::F(rt.host().map_or(0.0, |h| h.partial_tick())),
+            },
+            "getGameTimeDeltaTicks" | "getRealtimeDeltaTicks" => match rt.get_field(a(0), "$realtime") {
+                V::F(t) => V::F(t),
+                _ => V::F(1.0),
+            },
             _ => return None,
         },
         // A block tesselated into a buffer being built (Create's contraption, `ShadedBlockSbbBuilder`):

@@ -855,6 +855,7 @@ mod tests {
             pos: [1.5, 64.0, -2.5],
             yaw: 0.0,
             health: Some((10.0, 10.0)),
+            ..Default::default()
         });
         host.entities.push(EntityView {
             id: 9,
@@ -862,6 +863,7 @@ mod tests {
             pos: [0.0, 64.0, 0.0],
             yaw: 0.0,
             health: None,
+            ..Default::default()
         });
         host.entity_nbts.insert(
             7,

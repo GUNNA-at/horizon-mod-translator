@@ -5402,6 +5402,18 @@ impl Game<'_> {
     pub(super) fn native_window(&self) -> bool {
         self.options.execution_role == ExecutionRole::Client
     }
+    /// How far the window's frame is from the last tick to the next, 0 to 1
+    /// (`DeltaTracker.getGameTimeDeltaPartialTick`): what a client mod's
+    /// `native_frame` moves by between ticks. API @API:render_frame@.
+    pub(super) fn native_frame_partial_tick(&self) -> f32 {
+        self.clock.fraction() as f32
+    }
+    /// Whether the window's game is paused (`Minecraft.isPaused`): a single
+    /// player screen that pauses it is open, its world not ticking.
+    /// API @API:render_frame@.
+    pub(super) fn native_paused(&self) -> bool {
+        self.pause
+    }
     /// Plays sound event `sound` (`minecraft:entity.generic.explode`, or a
     /// mod's own from its `assets/<id>/sounds.json`) at `at` for this
     /// player only, `delay` ticks from now (0 to 1200, a minute): a client

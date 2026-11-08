@@ -440,7 +440,7 @@ mod tests {
 
         let mut host = MemoryHost::default();
         for (id, kind, health) in [(7, "minecraft:zombie", Some((20.0, 20.0))), (8, "minecraft:cow", Some((10.0, 10.0))), (9, "minecraft:arrow", None)] {
-            host.entities.push(crate::host::EntityView { id, kind: kind.into(), pos: [0.5, 64.0, 0.5], yaw: 0.0, health });
+            host.entities.push(crate::host::EntityView { id, kind: kind.into(), pos: [0.5, 64.0, 0.5], yaw: 0.0, health, ..Default::default() });
         }
         let sword = BTreeMap::from([("id".to_owned(), Nbt::String("minecraft:iron_sword".into())), ("count".to_owned(), Nbt::Int(1))]);
         host.entity_nbts.insert(7, BTreeMap::from([("equipment".to_owned(), Nbt::Compound(BTreeMap::from([("mainhand".to_owned(), Nbt::Compound(sword))])))]));

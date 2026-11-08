@@ -2079,6 +2079,19 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     });
 }
 
+/// The window's frame ([`crate::camera::render_frame`]), once the client is set up: the frame's
+/// time in ticks (`realtime`) and how far it is into its tick (`partial`).
+pub fn render_frame(rt: &mut Rt, host: &mut dyn Host, realtime: f32, partial: f32) {
+    if !crate::neo::is_client(rt) {
+        return;
+    }
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        crate::camera::render_frame(rt, realtime, partial)
+    });
+}
+
 /// The client level's `tickBlockEntities`: every mod block entity the client holds whose block
 /// gives it a ticker there. Between the server's updates this is what moves Create's mixer and
 /// press heads and the items on belts and depots. One whose block is gone from the client's

@@ -1012,7 +1012,7 @@ mod tests {
         let mut rt = Rt::new();
         crate::install();
         let mut host = MemoryHost::default();
-        host.entities.push(EntityView { id: 7, kind: "minecraft:horse".into(), pos: [4.5, 64.0, 8.5], yaw: 30.0, health: Some((22.0, 30.0)) });
+        host.entities.push(EntityView { id: 7, kind: "minecraft:horse".into(), pos: [4.5, 64.0, 8.5], yaw: 30.0, health: Some((22.0, 30.0)), ..Default::default() });
         let armor = BTreeMap::from([("id".to_owned(), Nbt::String("minecraft:iron_horse_armor".into())), ("count".to_owned(), Nbt::Int(1))]);
         host.entity_nbts.insert(
             7,

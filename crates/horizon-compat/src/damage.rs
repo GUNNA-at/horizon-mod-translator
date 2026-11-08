@@ -1234,7 +1234,7 @@ mod tests {
         ];
         h.resources.insert("data/create/damage_type/crush.json".into(), br#"{"exhaustion": 0.0, "message_id": "create.crush", "scaling": "always"}"#.to_vec());
         h.resources.insert("data/minecraft/tags/damage_type/bypasses_armor.json".into(), br##"{"values": ["create:crush", {"id": "create:saw", "required": false}, "#minecraft:is_fire"]}"##.to_vec());
-        h.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [1.5, 64.0, -2.5], yaw: 0.0, health: Some((10.0, 10.0)) });
+        h.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [1.5, 64.0, -2.5], yaw: 0.0, health: Some((10.0, 10.0)), ..Default::default() });
         h.players.push((0xabc, [4.5, 64.0, 4.5]));
         h.player_entity_ids.insert(0xabc, 42);
         h
@@ -1463,7 +1463,14 @@ mod tests {
     }
 
     fn cow(health: f32) -> EntityView {
-        EntityView { id: 7, kind: "minecraft:cow".into(), pos: [1.5, 64.0, -2.5], yaw: 0.0, health: Some((health, 10.0)) }
+        EntityView {
+            id: 7,
+            kind: "minecraft:cow".into(),
+            pos: [1.5, 64.0, -2.5],
+            yaw: 0.0,
+            health: Some((health, 10.0)),
+            ..Default::default()
+        }
     }
 
     /// The sources a mod makes read as vanilla's: their types (a mod's own from its data, with the
@@ -1637,7 +1644,7 @@ mod tests {
         assert!(!incoming(&mut rt, &mut h, 7, "minecraft:cow", Some(&away), blow, &mut amount));
         assert_eq!(amount, 4.0, "doubled");
         // A pig nobody hurt has nobody to credit.
-        let pig = EntityView { id: 8, kind: "minecraft:pig".into(), pos: [0.5, 64.0, 0.5], yaw: 0.0, health: Some((10.0, 10.0)) };
+        let pig = EntityView { id: 8, kind: "minecraft:pig".into(), pos: [0.5, 64.0, 0.5], yaw: 0.0, health: Some((10.0, 10.0)), ..Default::default() };
         let (mut strength, mut x, mut z) = (0.4, 0.5, -0.5);
         assert!(!knockback(&mut rt, &mut h, 8, "minecraft:pig", Some(&pig), 0, &mut strength, &mut x, &mut z));
         assert_eq!(strength, 0.4);

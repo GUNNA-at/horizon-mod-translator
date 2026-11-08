@@ -7772,6 +7772,90 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       (`config override .../saves/P/serverconfig/create-server.toml`, three times).
     - Neither file was rewritten. Nothing threw, and no value was read before its config
       loaded.
+- [x] 2026-11-08 Part 119: mods turn mobs and players, and hear each frame
+  (`RenderFrameEvent`): Create's turntable turns what stands on it.
+  - Checked against 26.3's bytecode (`Entity`, `LivingEntity`, `Mob` and the mobs that override
+    its head limits):
+    - `Entity.getYHeadRot` is 0, and its `setYHeadRot` and `setYBodyRot` do nothing.
+      `LivingEntity`'s read and store the head and body angles.
+    - `getVisualRotationYInDegrees` is an entity's facing, a living one's body.
+      `getPreciseBodyRotation(partial)` lerps the old body angle to the new one.
+      `getRotationVector` is `Vec2(xRot, yRot)`.
+    - `setXRot` keeps the remainder of 360 between -90 and 90. `setYRot` and `setXRot` drop an
+      angle that isn't finite.
+    - `Entity.getOnPos()` is `getOnPos(1.0E-5F)`, `getOnPosLegacy` 0.2 and
+      `getBlockPosBelowThatAffectsMyMovement` 0.500001. With no supporting block known, that is
+      the block that far below the feet.
+    - A mob's head turns at most `getMaxHeadXRot` 40 and `getMaxHeadYRot` 75 degrees, by
+      `getHeadRotSpeed` 10 a tick. The mobs that differ are listed in `head_limits`.
+  - Create 6.0.10 uses them for its turntable:
+    - On the server, `TurntableBlock.entityInside` turns a living entity standing on a turning
+      table, s being the table's speed × 3/10 a tick: `setNoActionTime(20)`, its body and head
+      to `getYHeadRot() - s`, `setOnGround(false)`, `hurtMarked`, then
+      `setYRot(getYRot() - s)`.
+    - On the client, `ClientEvents.onRenderFrame` (`RenderFrameEvent.Pre`) calls
+      `TurntableHandler.gameRenderFrame(deltaTracker)`. It turns the window's player, while they
+      stand on a table (`getOnPos`, `onGround`) and the game isn't paused. The turn is the
+      speed × 2/3 × the tick rate / 20 × `getRealtimeDeltaTicks`, less away from the centre,
+      times `getGameTimeDeltaPartialTick`. The view (`setYRot`) and the body (`yBodyRot`) both
+      turn.
+  - The game's natives (`native_mobs.rs`, `native_hooks.rs`, fragments `entity_turn` and
+    `render_frame`):
+    - `native_turn_mob(dimension, id, turn)` turns a mob's facing, pitch, head and body. The
+      players who see it are sent it. Its own goals may turn it again in its next tick, as
+      vanilla's do.
+    - `native_turn_client_player(yaw, pitch)` turns the window's own player. Their client tells
+      the server, as it tells it their own turns.
+    - `native_client_player_on_ground` is whether that player stands on something.
+    - `native_frame_partial_tick` and `native_paused` (`Minecraft.isPaused`).
+    - The new hook `frame` runs each frame before the draw. `NativeMob` carries the mob's pitch,
+      head and body angles.
+  - The host (`horizon-compat-core`): `EntityView` gains a pitch, a head and a body angle.
+    `Host::turn_entity(id, Turn)`, `turn_client_player`, `client_player_on_ground` and `paused`
+    are new.
+  - Compat:
+    - Vanilla mobs (`vanilla_entities.rs`): the angles are read from the game, and the four
+      setters turn the mob through the host. A write to the `yHeadRot` or `yBodyRot` field turns
+      it too (the translator now hears those writes). `getRotationVector`, `getLookAngle` and
+      `getViewVector` follow, as do the head limits. `setOldPosAndRot`, `setOldRot`, `setOldPos`
+      and `setNoActionTime` are answered. A minecart or boat has no head, and turning one does
+      nothing yet.
+    - Players (`api_common.rs`): the window's own player turns through the host. A server's
+      player turns for the rest of the hook, and their client isn't told, as vanilla's isn't
+      until their client next sends where they look. Their head and body read as their view.
+      The window's player's `onGround` comes from the game. `getOnPos` and its two variants
+      follow vanilla's offsets.
+    - A mod's own entities and item entities keep their angles. `getOnPos` of a mod's entity
+      and of an item entity used the 0.2 offset of `getOnPosLegacy`. It now uses 1.0E-5, as
+      26.3's does.
+    - `RenderFrameEvent.Pre` and `Post` (`camera.rs`): each frame, with the frame's real-time
+      ticks and partial tick in a `DeltaTracker`. `DeltaTracker` reads them.
+      `Minecraft.isPaused` is the game's.
+  - Where Horizon differs, and why: the game has no point after its draw for mods. `Post` of a
+    frame is posted at the start of the next one, just before its `Pre`.
+  - Measured (packcov32, the same 367 jars): methods 108389/130226 (83.2%, was 108178), uses
+    340241/372747 (91.3%, was 339942), distinct missing 9292 (was 9352). Create 3254/3972 (was
+    3240), uses 24332/25241 (96.4%).
+  - Tests 661 (3 new):
+    - A mod turns the game's cow the way the turntable does, and reads its angles back. A pitch
+      past 90 stops at 90, an angle that isn't finite is dropped, and a written `yBodyRot`
+      reads back until the game turns the cow. The head limits are vanilla's. A minecart's head
+      is 0 and turning it does nothing.
+    - A mod turns the window's player and a server's copy of a player. The window's player
+      stands on the block below their feet and isn't on the ground half a block up.
+    - A frame's listeners turn the player by its real-time ticks and partial tick. Nothing is
+      made when no mod listens.
+  - In the game (`p119scene.sh`, Create, a creative motor at 16 RPM under each of two
+    turntables):
+    - A cow with no AI on one: the server turned it by 4.8° a tick, Create's 16 × 3/10. Its
+      `Rotation` read -196.8, -254.4 and -312.0, half a second apart, and it stayed on the
+      table.
+    - The player on the other: their view turned by about 120° a second (-153.7, -216.1,
+      -280.2, -339.4 and -394.9, half a second apart). It stood still once they stepped off.
+      Nothing threw.
+    - Cows with AI in a one-block glass pit jumped from time to time, on the turning table and
+      on a still one alike. That is their own AI, not the turn. A cow in the air isn't on the
+      ground, and the table doesn't turn it, as Create's check says.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

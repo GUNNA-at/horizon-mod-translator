@@ -40,6 +40,10 @@ const FOG_COLOR: &str = "net/neoforged/neoforge/client/event/ViewportEvent$Compu
 const RENDER_FOG: &str = "net/neoforged/neoforge/client/event/ViewportEvent$RenderFog";
 const VIEWPORT_EVENTS: [&str; 5] = [VIEWPORT, COMPUTE_ANGLES, COMPUTE_FOV, FOG_COLOR, RENDER_FOG];
 const LEVEL_STAGE: &str = "net/neoforged/neoforge/client/event/RenderLevelStageEvent";
+const FRAME_PRE: &str = "net/neoforged/neoforge/client/event/RenderFrameEvent$Pre";
+const FRAME_POST: &str = "net/neoforged/neoforge/client/event/RenderFrameEvent$Post";
+/// The window's frames' `DeltaTracker` ([`render_frame`]), one for them all.
+const FRAME_TRACKER: &str = "compat:frame-tracker";
 const STAGE: &str = "net/neoforged/neoforge/client/event/RenderLevelStageEvent$Stage";
 /// `RenderLevelStageEvent.Stage`'s stages, in the order a frame passes them.
 const STAGES: [&str; 11] = [
@@ -117,6 +121,7 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
 pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     match owner {
         CAMERA | NEAR_PLANE | GAME_RENDERER | SHADER | UNIFORM | ABSTRACT_UNIFORM | REGISTER_SHADERS | LEVEL_STAGE => true,
+        FRAME_PRE | FRAME_POST | "net/neoforged/neoforge/client/event/RenderFrameEvent" => name == "getPartialTick",
         STAGE => matches!(name, "toString" | "fromRenderType"),
         _ if VIEWPORT_EVENTS.contains(&owner) || HIGHLIGHT_EVENTS.contains(&owner) => true,
         MINECRAFT => matches!(name, "getCameraEntity" | "setCameraEntity"),
@@ -863,11 +868,49 @@ pub(crate) fn render_stages(rt: &mut Rt) {
     }
 }
 
+/// The window's frame, as NeoForge's `RenderFrameEvent` tells of it (`Minecraft.runTick` posts
+/// `Pre` before `GameRenderer.render` and `Post` after it): the last frame's `Post`, then this
+/// one's `Pre`, before the game turns the view by the mouse and draws. The game has no point after
+/// its draw, so a frame's `Post` waits for the next frame's start. Both carry the frame's
+/// `DeltaTracker` (`getPartialTick`): `realtime` the frame's time in ticks
+/// (`getRealtimeDeltaTicks`), `partial` how far it is into its tick
+/// (`getGameTimeDeltaPartialTick`). Nothing is made while no mod listens.
+pub(crate) fn render_frame(rt: &mut Rt, realtime: f32, partial: f32) {
+    let pre = !crate::neo::hearing(rt, FRAME_PRE).is_empty();
+    let post = !crate::neo::hearing(rt, FRAME_POST).is_empty();
+    if !pre && !post {
+        return;
+    }
+    if let Some(&tracker) = rt.interned.get(FRAME_TRACKER).filter(|_| post) {
+        let ev = rt.new_object(FRAME_POST);
+        rt.put_field(ev, "$partialTick", tracker);
+        crate::neo::post(rt, FRAME_POST, ev);
+    }
+    let tracker = rt.intern(FRAME_TRACKER.into(), |rt| {
+        rt.new_object("net/minecraft/client/DeltaTracker$Timer")
+    });
+    rt.put_field(tracker, "$realtime", V::F(realtime));
+    rt.put_field(tracker, "$partial", V::F(partial));
+    if pre {
+        let ev = rt.new_object(FRAME_PRE);
+        rt.put_field(ev, "$partialTick", tracker);
+        crate::neo::post(rt, FRAME_PRE, ev);
+    }
+}
+
 /// The calls this module models (`owner.name.desc`), or None.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let a = |i| arg(args, i);
     match owner {
+        FRAME_PRE | FRAME_POST | "net/neoforged/neoforge/client/event/RenderFrameEvent"
+            if name == "getPartialTick" =>
+        {
+            Some(match rt.get_field(a(0), "$partialTick") {
+                t if t.r() != 0 => t,
+                _ => single(rt, "net/minecraft/client/DeltaTracker"),
+            })
+        }
         CAMERA => camera_call(rt, name, desc, args),
         STAGE => stage_call(rt, name, args),
         NEAR_PLANE => near_plane_call(rt, name, args),
@@ -1161,6 +1204,82 @@ mod tests {
             assert_eq!(render_fog(rt, 0.5, at, 0, 3, 0.0, 192.0), None);
             assert_eq!(camera_angles(rt, 0.5), Some([0.0, 2.0, 5.0]));
         });
+    }
+
+    /// A mod turning the player as frames pass (Create's turntable): each frame's `Pre` carries
+    /// its time in ticks and how far it is into its tick, and the player turns by what the
+    /// listener works out from them, on the client and before the frame is drawn. The frame's
+    /// `Post` is heard as the next frame starts, with the frame's own time. With no listener
+    /// nothing is made.
+    #[test]
+    fn a_frames_listeners_turn_the_player_by_its_time() {
+        const DELTA: &str = "net/minecraft/client/DeltaTracker";
+        fn listener(rt: &mut Rt, _: u32, args: &[V]) -> Option<V> {
+            let ev = args[1];
+            let class = rt.class_of(ev).to_owned();
+            let dt = crate::api::call(
+                rt,
+                key(
+                    &class,
+                    "getPartialTick.()Lnet/minecraft/client/DeltaTracker;",
+                ),
+                &[ev],
+            );
+            let realtime = crate::api::call(rt, key(DELTA, "getRealtimeDeltaTicks.()F"), &[dt]).f();
+            let partial = crate::api::call(
+                rt,
+                key(DELTA, "getGameTimeDeltaPartialTick.(Z)F"),
+                &[dt, V::I(0)],
+            )
+            .f();
+            let line = if class == FRAME_PRE {
+                let player = crate::network::local_player(rt);
+                let yaw = crate::api::call(
+                    rt,
+                    "net/minecraft/client/player/LocalPlayer.getYRot.()F",
+                    &[player],
+                )
+                .f();
+                crate::api::call(
+                    rt,
+                    "net/minecraft/client/player/LocalPlayer.setYRot.(F)V",
+                    &[player, V::F(yaw - 10.0 * realtime * partial)],
+                );
+                format!("pre {realtime} {partial}")
+            } else {
+                format!("post {realtime} {partial}")
+            };
+            let line = rt.string(&line);
+            let heard = rt.intern("test:frames".into(), |rt| {
+                rt.alloc("java/util/ArrayList", Data::List(Vec::new()))
+            });
+            if let Some(Data::List(l)) = rt.heap.get_mut(heard.r() as usize).map(|o| &mut o.data) {
+                l.push(line);
+            }
+            Some(V::Void)
+        }
+        let (mut rt, mut host) = client([0.5, 64.5, 0.5], 90.0, 0.0);
+        host.client = true;
+        rt.with_host(&mut host, |rt| render_frame(rt, 0.5, 0.25));
+        assert!(!rt.interned.contains_key(FRAME_TRACKER));
+        rt.lambda_call = Some(listener);
+        for class in [FRAME_PRE, FRAME_POST] {
+            let l = rt.lambda_id("java/util/function/Consumer", 1, Vec::new());
+            rt.listeners.push((class.to_owned(), l));
+        }
+        rt.with_host(&mut host, |rt| render_frame(rt, 0.5, 0.25));
+        assert_eq!(host.place.map(|p| p.1), Some(88.75));
+        rt.with_host(&mut host, |rt| render_frame(rt, 1.0, 0.5));
+        assert_eq!(host.place.map(|p| p.1), Some(83.75));
+        let heard = rt.interned["test:frames"];
+        let lines: Vec<String> = match &rt.heap[heard.r() as usize].data {
+            Data::List(l) => l
+                .iter()
+                .map(|n| rt.str_of(*n).unwrap_or("").to_owned())
+                .collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(lines, ["pre 0.5 0.25", "post 0.5 0.25", "pre 1 0.5"]);
     }
 
     /// A mod drawing in the level's stages (an outline's renderer, a ghost block's): it hears every

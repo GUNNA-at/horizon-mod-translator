@@ -3,19 +3,21 @@
 //! 1.21.1 class (`Cow`, `Minecart`, `Zombie`) standing for the game's entity by its id, the same
 //! object while the game keeps the entity, so `instanceof Animal`, `AbstractMinecart` or `Enemy`
 //! answer as in Java ([`is_a`], asked by `api_common::api_is_a`) and a mod may key a map by it.
-//! It reads the entity's type, place, facing and health from the game ([`Host::entity`]) and acts
-//! through it: `hurt`, `kill`, `discard`, `setHealth`, `push` and `setDeltaMovement`,
-//! `teleportTo`. A player is the runtime's server player ([`crate::menus::server_player`]), an
-//! item entity `entities.rs`' object.
+//! It reads the entity's type, place, angles (facing, pitch, a living one's head and body) and
+//! health from the game ([`Host::entity`]) and acts through it: `hurt`, `kill`, `discard`,
+//! `setHealth`, `push` and `setDeltaMovement`, `teleportTo`, `setYRot` and `setXRot`,
+//! `setYHeadRot` and `setYBodyRot` ([`Host::turn_entity`]). A player is the runtime's server
+//! player ([`crate::menus::server_player`]), an item entity `entities.rs`' object.
 //!
 //! The tables are 1.21.1's names and sizes (from its `EntityType` fields' generic types, the
 //! `Builder.sized` and `eyeHeight` calls, and the classes' own superclasses and interfaces). A
 //! 26.3 type 1.21.1 lacks is a boat by its name (`oak_boat`), else a `PathfinderMob` when the
 //! game gives it health, else an `Entity`.
 //!
-//! Not modelled yet: a mob's motion, pitch, equipment and effects (none), its UUID (a stable one
-//! made from the id, as `lan::entity_uuid` makes for entities with none), and a blow's armour,
-//! knockback and attacker: `hurt` takes the amount off the health.
+//! Not modelled yet: a mob's equipment and effects (none), its UUID (a stable one made from the
+//! id, as `lan::entity_uuid` makes for entities with none), the angles of what isn't a mob (a
+//! minecart's, a boat's: none, and turning one does nothing), and a blow's armour, knockback and
+//! attacker: `hurt` takes the amount off the health.
 
 use crate::host::{EntityView, Host, Nbt};
 use crate::{Rt, V, api};
@@ -672,7 +674,7 @@ fn refresh(rt: &mut Rt, e: V, view: Option<&EntityView>, at: Option<[f64; 3]>) {
         }
     }
     if let Some(v) = view {
-        rt.put_field(e, "$yRot", V::F(v.yaw));
+        set_angles(rt, e, v);
         if let Some((health, max)) = v.health {
             rt.put_field(e, "$living", V::I(1));
             rt.put_field(e, "$health", V::F(health));
@@ -680,6 +682,48 @@ fn refresh(rt: &mut Rt, e: V, view: Option<&EntityView>, at: Option<[f64; 3]>) {
         }
     }
     rt.put_field(e, "$alive", V::I(1));
+}
+
+/// Keeps the game's angles of `e`'s entity: its facing, pitch, head and body.
+fn set_angles(rt: &mut Rt, e: V, v: &EntityView) {
+    for (k, a) in [
+        ("$yRot", v.yaw),
+        ("$xRot", v.pitch),
+        ("$yHeadRot", v.head_yaw),
+        ("$yBodyRot", v.body_yaw),
+    ] {
+        rt.put_field(e, k, V::F(a));
+    }
+}
+
+/// How far a mob of type `kind` turns its head: up or down (`Mob.getMaxHeadXRot`), to the side
+/// (`getMaxHeadYRot`) and in a tick (`getHeadRotSpeed`), in degrees, as 1.21.1's classes override
+/// Mob's 40, 75 and 10. The game doesn't tell a wolf that sits (20 up or down) or an armadillo
+/// that is scared (0 to the side).
+fn head_limits(kind: &str) -> (i32, i32, i32) {
+    let x = match kind {
+        "minecraft:axolotl" | "minecraft:dolphin" => 1,
+        "minecraft:guardian" | "minecraft:elder_guardian" | "minecraft:shulker" => 180,
+        "minecraft:slime" | "minecraft:magma_cube" => 0,
+        _ => 40,
+    };
+    let y = match kind {
+        "minecraft:axolotl" | "minecraft:dolphin" => 1,
+        "minecraft:frog" => 5,
+        "minecraft:goat" => 15,
+        "minecraft:camel" | "minecraft:breeze" => 30,
+        "minecraft:armadillo" => 32,
+        "minecraft:ravager" => 45,
+        "minecraft:sniffer" => 50,
+        "minecraft:shulker" => 180,
+        _ => 75,
+    };
+    let speed = match kind {
+        "minecraft:frog" => 35,
+        "minecraft:breeze" => 25,
+        _ => 10,
+    };
+    (x, y, speed)
 }
 
 /// Lets go of the objects whose entities the game no longer has and nothing asked for a while.
@@ -757,14 +801,88 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "getZ" => V::D(p[2]),
         "getBlockX" | "getBlockY" | "getBlockZ" => V::I(p[(name.as_bytes()[8] - b'X') as usize].floor() as i32),
         "position" | "getPosition" => vec3(rt, p),
-        "blockPosition" | "getOnPos" => {
-            let y = if name == "getOnPos" { p[1] - 1.0e-5 } else { p[1] };
-            api::block_pos(rt, p[0].floor() as i64, y.floor() as i64, p[2].floor() as i64)
+        "blockPosition" | "getOnPos" | "getOnPosLegacy" | "getBlockPosBelowThatAffectsMyMovement" => crate::api_common::feet_block(rt, name, p),
+        // Its angles as the game last told them: its facing and pitch, a living one's head and
+        // body (another has no head: 0, as `Entity.getYHeadRot`; it shows its facing). A pose
+        // between ticks (`getViewVector(partialTick)`, `getPreciseBodyRotation`) is the last
+        // tick's: the game doesn't tell the one before.
+        "getYRot" => V::F(rt.get_field(e, "$yRot").f()),
+        "getXRot" => V::F(rt.get_field(e, "$xRot").f()),
+        "getYHeadRot" | "$yHeadRot" if desc == "()F" => V::F(if living {
+            rt.get_field(e, "$yHeadRot").f()
+        } else {
+            0.0
+        }),
+        "getVisualRotationYInDegrees" | "getPreciseBodyRotation" | "$yBodyRot"
+            if desc.ends_with(")F") =>
+        {
+            V::F(
+                rt.get_field(e, if living { "$yBodyRot" } else { "$yRot" })
+                    .f(),
+            )
         }
-        "getYRot" | "getYHeadRot" | "getVisualRotationYInDegrees" => V::F(rt.get_field(e, "$yRot").f()),
-        "getXRot" => V::F(0.0),
-        // Where it looks: its facing, level (the game doesn't tell a mob's pitch).
-        "getLookAngle" | "getViewVector" | "getForward" => crate::api_common::view_vector(rt, rt.get_field(e, "$yRot").f(), 0.0),
+        "getRotationVector" => crate::api_common::vec2(
+            rt,
+            rt.get_field(e, "$xRot").f(),
+            rt.get_field(e, "$yRot").f(),
+        ),
+        // Where it looks: its facing and pitch.
+        "getLookAngle" | "getViewVector" | "getForward" => {
+            let (yaw, pitch) = (rt.get_field(e, "$yRot").f(), rt.get_field(e, "$xRot").f());
+            crate::api_common::view_vector(rt, yaw, pitch)
+        }
+        // Turning it: the game turns the mob, and the players who see it are sent it; its goals
+        // may turn it again in its next tick, as vanilla's do. A pitch is kept between -90 and 90,
+        // as 26.3's `setXRot` keeps it. Only a living one has a head and body to turn
+        // (`Entity.setYHeadRot` and `setYBodyRot` do nothing); the game doesn't turn the rest (a
+        // minecart, a boat).
+        "setYRot" | "setXRot" | "setYHeadRot" | "setYBodyRot" | "$yHeadRot" | "$yBodyRot"
+            if desc == "(F)V" =>
+        {
+            let to = a(1).f();
+            let turn = match name {
+                "setYRot" => crate::host::Turn {
+                    yaw: Some(to),
+                    ..Default::default()
+                },
+                "setXRot" => crate::host::Turn {
+                    pitch: Some(to),
+                    ..Default::default()
+                },
+                _ if !living => return Some(V::Void),
+                "setYHeadRot" | "$yHeadRot" => crate::host::Turn {
+                    head_yaw: Some(to),
+                    ..Default::default()
+                },
+                _ => crate::host::Turn {
+                    body_yaw: Some(to),
+                    ..Default::default()
+                },
+            };
+            if with_host(rt, |h| h.turn_entity(id, &turn)).unwrap_or(false) {
+                let view = rt.host().and_then(|h| h.entity(id));
+                if let Some(v) = view {
+                    set_angles(rt, e, &v);
+                }
+            }
+            // A field written (`yBodyRot = ...`): read back from the game, as the rest.
+            if let Some(field) = name.strip_prefix('$') {
+                rt.put_field(e, field, V::Void);
+            }
+            V::Void
+        }
+        // Its pose for drawing between ticks, and how long it has idled (what keeps a mob from
+        // wandering off: Create's turntable resets it): the game keeps its own.
+        "setOldPosAndRot" | "setOldRot" | "setOldPos" if desc == "()V" => V::Void,
+        "setNoActionTime" if living => V::Void,
+        "getMaxHeadXRot" | "getMaxHeadYRot" | "getHeadRotSpeed" if living => {
+            let (x, y, speed) = head_limits(&kind);
+            V::I(match name {
+                "getMaxHeadXRot" => x,
+                "getMaxHeadYRot" => y,
+                _ => speed,
+            })
+        }
         // What last hurt it, as the hits the runtime was told of name it (`damage::hurt_by`): its
         // revenge target, and who gets the credit for a kill (`getKillCredit`: a player that hurt
         // it first).
@@ -1157,6 +1275,7 @@ mod tests {
             pos: [1.5, 64.0, -2.5],
             yaw: 90.0,
             health: Some((10.0, 10.0)),
+            ..Default::default()
         });
         host.entities.push(EntityView {
             id: 8,
@@ -1164,6 +1283,7 @@ mod tests {
             pos: [4.5, 64.0, 0.5],
             yaw: 0.0,
             health: None,
+            ..Default::default()
         });
         rt.with_host(&mut host, |rt| {
             let size = |rt: &mut Rt, key: &'static str, e: V, pose: V| {
@@ -1233,6 +1353,108 @@ mod tests {
         assert_eq!(size("minecraft:zombie", true), (0.6, 1.95, 1.74));
     }
 
+    /// A mod turns the game's cow as Create's turntable turns what stands on it: its head and
+    /// body from its head's facing, then its facing; the game's cow turns, and the mod reads the
+    /// new angles back. A pitch is kept between -90 and 90, and one that isn't finite is refused.
+    /// A body written as a field (`yBodyRot = ...`, which Create's seats write) turns it too, and
+    /// is read back from the game afterwards, not as written. A minecart has no head or body, and
+    /// the game doesn't turn it.
+    #[test]
+    fn a_mod_turns_the_games_mob_and_reads_its_angles() {
+        const LIVING: &str = "net/minecraft/world/entity/LivingEntity";
+        let f = |rt: &mut Rt, key: &str, e: V| -> f32 {
+            api::call(rt, Box::leak(key.to_owned().into_boxed_str()), &[e]).f()
+        };
+        let set = |rt: &mut Rt, key: &str, e: V, to: f32| {
+            api::call(
+                rt,
+                Box::leak(key.to_owned().into_boxed_str()),
+                &[e, V::F(to)],
+            );
+        };
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        host.entities.push(EntityView {
+            id: 7,
+            kind: "minecraft:cow".into(),
+            pos: [1.5, 64.0, -2.5],
+            yaw: 90.0,
+            head_yaw: 100.0,
+            body_yaw: 80.0,
+            health: Some((10.0, 10.0)),
+            ..Default::default()
+        });
+        host.entities.push(EntityView {
+            id: 8,
+            kind: "minecraft:minecart".into(),
+            pos: [4.5, 64.0, 0.5],
+            yaw: 30.0,
+            head_yaw: 30.0,
+            body_yaw: 30.0,
+            health: None,
+            ..Default::default()
+        });
+        rt.with_host(&mut host, |rt| {
+            let cow = of(rt, 7, "minecraft:cow", None);
+            assert_eq!(f(rt, "net/minecraft/world/entity/Entity.getYRot.()F", cow), 90.0);
+            assert_eq!(f(rt, "net/minecraft/world/entity/Entity.getYHeadRot.()F", cow), 100.0);
+            assert_eq!(f(rt, "net/minecraft/world/entity/Entity.getVisualRotationYInDegrees.()F", cow), 80.0);
+            let speed = 6.0;
+            let diff = f(rt, "net/minecraft/world/entity/Entity.getYHeadRot.()F", cow) - speed;
+            api::call(rt, "net/minecraft/world/entity/LivingEntity.setNoActionTime.(I)V", &[cow, V::I(20)]);
+            set(rt, "net/minecraft/world/entity/Entity.setYBodyRot.(F)V", cow, diff);
+            set(rt, "net/minecraft/world/entity/Entity.setYHeadRot.(F)V", cow, diff);
+            let yaw = f(rt, "net/minecraft/world/entity/Entity.getYRot.()F", cow);
+            set(rt, "net/minecraft/world/entity/Entity.setYRot.(F)V", cow, yaw - speed);
+            assert_eq!(f(rt, "net/minecraft/world/entity/Entity.getYRot.()F", cow), 84.0);
+            assert_eq!(f(rt, "net/minecraft/world/entity/Entity.getYHeadRot.()F", cow), 94.0);
+            set(rt, "net/minecraft/world/entity/Entity.setXRot.(F)V", cow, -450.0);
+            assert_eq!(f(rt, "net/minecraft/world/entity/Entity.getXRot.()F", cow), -90.0);
+            set(rt, "net/minecraft/world/entity/Entity.setXRot.(F)V", cow, f32::NAN);
+            let look = api::call(rt, "net/minecraft/world/entity/Entity.getLookAngle.()Lnet/minecraft/world/phys/Vec3;", &[cow]);
+            assert!(rt.get_field(look, "y").d() > 0.999, "looking up");
+            let r = api::call(rt, "net/minecraft/world/entity/Entity.getRotationVector.()Lnet/minecraft/world/phys/Vec2;", &[cow]);
+            assert_eq!((rt.get_field(r, "x").f(), rt.get_field(r, "y").f()), (-90.0, 84.0));
+            // `cow.yBodyRot = 30`, as the translated code writes a field the game turns.
+            rt.put_field(cow, "yBodyRot", V::F(30.0));
+            api::call(rt, "net/minecraft/world/entity/LivingEntity.$yBodyRot.(F)V", &[cow, V::F(30.0)]);
+            let body = |rt: &mut Rt, cow: V| api::game_field(rt, cow, "yBodyRot", "$yBodyRot", "net/minecraft/world/entity/LivingEntity.$yBodyRot.()F").f();
+            assert_eq!(body(rt, cow), 30.0);
+            let (x, y, speed) = head_limits("minecraft:cow");
+            let limits = ["getMaxHeadXRot", "getMaxHeadYRot", "getHeadRotSpeed"].map(|n| api::call(rt, Box::leak(format!("net/minecraft/world/entity/Mob.{n}.()I").into_boxed_str()), &[cow]).i());
+            assert_eq!(limits, [x, y, speed]);
+            assert_eq!(limits, [40, 75, 10]);
+            let cart = of(rt, 8, "minecraft:minecart", None);
+            set(rt, "net/minecraft/world/entity/Entity.setYHeadRot.(F)V", cart, 10.0);
+            set(rt, "net/minecraft/world/entity/Entity.setYRot.(F)V", cart, 10.0);
+            assert_eq!(f(rt, "net/minecraft/world/entity/Entity.getYHeadRot.()F", cart), 0.0);
+            assert_eq!(f(rt, "net/minecraft/world/entity/Entity.getYRot.()F", cart), 30.0);
+            assert_eq!(f(rt, &format!("{LIVING}.getYRot.()F"), cow), 84.0);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+        let cow = &host.entities[0];
+        assert_eq!(
+            (cow.yaw, cow.pitch, cow.head_yaw, cow.body_yaw),
+            (84.0, -90.0, 94.0, 30.0)
+        );
+        assert_eq!(host.entities[1].yaw, 30.0);
+        // The game turns the cow's body on; read anew, the mod sees the game's.
+        host.entities[0].body_yaw = 45.0;
+        rt.with_host(&mut host, |rt| {
+            let cow = of(rt, 7, "minecraft:cow", None);
+            let body = api::game_field(
+                rt,
+                cow,
+                "yBodyRot",
+                "$yBodyRot",
+                "net/minecraft/world/entity/LivingEntity.$yBodyRot.()F",
+            )
+            .f();
+            assert_eq!(body, 45.0);
+        });
+    }
+
     /// A mod's code meets the game's cow: an `Animal` by `instanceof`, at the game's place, with
     /// its health; hurt, it loses health in the game, and a blow past its health kills it.
     #[test]
@@ -1240,8 +1462,8 @@ mod tests {
         let mut rt = Rt::new();
         crate::install();
         let mut host = MemoryHost::default();
-        host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [1.5, 64.0, -2.5], yaw: 90.0, health: Some((10.0, 10.0)) });
-        host.entities.push(EntityView { id: 8, kind: "minecraft:minecart".into(), pos: [4.5, 64.0, 0.5], yaw: 0.0, health: None });
+        host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [1.5, 64.0, -2.5], yaw: 90.0, health: Some((10.0, 10.0)), ..Default::default() });
+        host.entities.push(EntityView { id: 8, kind: "minecraft:minecart".into(), pos: [4.5, 64.0, 0.5], yaw: 0.0, health: None, ..Default::default() });
         host.entity_tags.insert("minecraft:arthropod".into(), vec!["minecraft:spider".into(), "minecraft:bee".into()]);
         rt.with_host(&mut host, |rt| {
             let cow = of(rt, 7, "minecraft:cow", None);
@@ -1319,6 +1541,7 @@ mod tests {
             pos: [0.5, 64.0, 0.5],
             yaw: 0.0,
             health: Some((10.0, 10.0)),
+            ..Default::default()
         });
         host.motions.insert(7, [0.0, -0.0784, 0.0]);
         let uuid = 0x42u128;
@@ -1409,6 +1632,7 @@ mod tests {
             pos: [0.5, 64.0, 0.5],
             yaw: 0.0,
             health: Some((10.0, 10.0)),
+            ..Default::default()
         });
         host.entities.push(EntityView {
             id: 8,
@@ -1416,6 +1640,7 @@ mod tests {
             pos: [2.5, 64.0, 0.5],
             yaw: 0.0,
             health: None,
+            ..Default::default()
         });
         let uuid = 0x42u128;
         host.player_id = Some(uuid);
@@ -1522,7 +1747,14 @@ mod tests {
         let mut rt = Rt::new();
         crate::install();
         let mut host = MemoryHost::default();
-        let view = |id: i32, kind: &str, pos: [f64; 3], health: Option<(f32, f32)>| EntityView { id, kind: kind.into(), pos, yaw: 0.0, health };
+        let view = |id: i32, kind: &str, pos: [f64; 3], health: Option<(f32, f32)>| EntityView {
+            id,
+            kind: kind.into(),
+            pos,
+            yaw: 0.0,
+            health,
+            ..Default::default()
+        };
         host.entities.extend([
             view(7, "minecraft:cow", [1.5, 64.0, -2.5], Some((10.0, 10.0))),
             view(9, "minecraft:zombie", [4.5, 64.0, -2.5], Some((20.0, 20.0))),

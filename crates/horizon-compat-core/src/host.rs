@@ -242,8 +242,27 @@ pub struct EntityView {
     pub pos: [f64; 3],
     /// Where it faces, in degrees (`getYRot`): 0 is south.
     pub yaw: f32,
+    /// Where it looks up or down, in degrees (`getXRot`): -90 is up.
+    pub pitch: f32,
+    /// A living mob's head and body facing, in degrees (`getYHeadRot`, `yBodyRot`); the rest's are
+    /// their facing.
+    pub head_yaw: f32,
+    pub body_yaw: f32,
     /// A living mob's health and maximum health; none for the rest.
     pub health: Option<(f32, f32)>,
+}
+
+/// How translated code turns an entity: each angle in degrees, the ones left out kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Turn {
+    /// Where it faces (`Entity.setYRot`): 0 is south.
+    pub yaw: Option<f32>,
+    /// Where it looks up or down (`Entity.setXRot`): -90 is up.
+    pub pitch: Option<f32>,
+    /// A living mob's head (`LivingEntity.setYHeadRot`).
+    pub head_yaw: Option<f32>,
+    /// A living mob's body (`LivingEntity.setYBodyRot`).
+    pub body_yaw: Option<f32>,
 }
 
 /// An attribute of a living entity, as translated code reads it through its `AttributeInstance`
@@ -1212,6 +1231,17 @@ pub trait Host {
     fn teleport_entity(&mut self, _id: i32, _pos: [f64; 3]) -> bool {
         false
     }
+    /// Turns the mob `id` by the angles `turn` gives (`Entity.setYRot`, `setXRot`,
+    /// `LivingEntity.setYHeadRot`, `setYBodyRot`; a pitch is kept between -90 and 90): false for
+    /// no such mob or an angle that isn't finite.
+    fn turn_entity(&mut self, _id: i32, _turn: &Turn) -> bool {
+        false
+    }
+    /// Turns a client's own player (`LocalPlayer.setYRot`, `setXRot`): their view turns with it.
+    /// False where there is no such player or an angle that isn't finite.
+    fn turn_client_player(&mut self, _yaw: Option<f32>, _pitch: Option<f32>) -> bool {
+        false
+    }
     /// Moves the mob `id` by `movement` (`Entity.move(MoverType.SELF, movement)`), with its
     /// collisions, as its own motion moves it: where that took it, None for no such mob.
     fn move_entity(&mut self, _id: i32, _movement: [f64; 3]) -> Option<[f64; 3]> {
@@ -1233,6 +1263,16 @@ pub trait Host {
     /// forward, -1 to 1, slowed by sneaking or by an item in use). None where there is none.
     fn client_player_input(&self) -> Option<[f32; 2]> {
         None
+    }
+    /// Whether a client's own player stands on something (`LocalPlayer.onGround`). None where
+    /// there is no such player.
+    fn client_player_on_ground(&self) -> Option<bool> {
+        None
+    }
+    /// On a client, whether its game is paused (`Minecraft.isPaused`): a single player screen that
+    /// pauses it is open. False elsewhere.
+    fn paused(&self) -> bool {
+        false
     }
     /// The text on the clipboard (`KeyboardHandler.getClipboard`), empty when none: a client's.
     fn clipboard(&self) -> String {
@@ -1783,6 +1823,8 @@ pub struct MemoryHost {
     pub client_player_id: Option<i32>,
     /// On a client, its own player's walking input ([`Host::client_player_input`]).
     pub client_input: [f32; 2],
+    /// On a client, whether its own player stands on something ([`Host::client_player_on_ground`]).
+    pub client_on_ground: bool,
     /// Sounds played, in order.
     pub sounds: Vec<Sound>,
     /// Instances' sounds started ([`Host::start_sound`]), in order: their ids are their places
@@ -2357,13 +2399,13 @@ impl Host for MemoryHost {
     fn summon(&mut self, kind: &str, pos: [f64; 3], nbt: &std::collections::BTreeMap<String, Nbt>) -> Option<i32> {
         let id = 1000 + i32::try_from(self.summoned.len() + self.lightning.len()).ok()?;
         self.summoned.push((kind.to_owned(), pos, nbt.clone()));
-        self.entities.push(EntityView { id, kind: kind.to_owned(), pos, yaw: 0.0, health: None });
+        self.entities.push(EntityView { id, kind: kind.to_owned(), pos, ..EntityView::default() });
         Some(id)
     }
     fn strike_lightning(&mut self, pos: [f64; 3], visual_only: bool, cause: Option<u128>) -> Option<i32> {
         let id = 1000 + i32::try_from(self.summoned.len() + self.lightning.len()).ok()?;
         self.lightning.push((pos, visual_only, cause));
-        self.entities.push(EntityView { id, kind: "minecraft:lightning_bolt".into(), pos, yaw: 0.0, health: None });
+        self.entities.push(EntityView { id, kind: "minecraft:lightning_bolt".into(), pos, ..EntityView::default() });
         Some(id)
     }
     fn entity_nbt(&mut self, id: i32) -> Option<std::collections::BTreeMap<String, Nbt>> {
@@ -2430,6 +2472,38 @@ impl Host for MemoryHost {
             None => false,
         }
     }
+    fn turn_entity(&mut self, id: i32, turn: &Turn) -> bool {
+        let angles = [turn.yaw, turn.pitch, turn.head_yaw, turn.body_yaw];
+        let Some(e) = self
+            .entities
+            .iter_mut()
+            .find(|e| e.id == id && e.health.is_some())
+        else {
+            return false;
+        };
+        if angles.iter().flatten().any(|a| !a.is_finite()) {
+            return false;
+        }
+        e.yaw = turn.yaw.unwrap_or(e.yaw);
+        e.pitch = turn
+            .pitch
+            .map_or(e.pitch, |p| (p % 360.0).clamp(-90.0, 90.0));
+        e.head_yaw = turn.head_yaw.unwrap_or(e.head_yaw);
+        e.body_yaw = turn.body_yaw.unwrap_or(e.body_yaw);
+        true
+    }
+    // A client's own player looks as `place` says.
+    fn turn_client_player(&mut self, yaw: Option<f32>, pitch: Option<f32>) -> bool {
+        let Some((_, y, p)) = self.place.as_mut().filter(|_| self.client) else {
+            return false;
+        };
+        if [yaw, pitch].iter().flatten().any(|a| !a.is_finite()) {
+            return false;
+        }
+        *y = yaw.unwrap_or(*y);
+        *p = pitch.map_or(*p, |a| (a % 360.0).clamp(-90.0, 90.0));
+        true
+    }
     // No blocks stop a move here.
     fn move_entity(&mut self, id: i32, movement: [f64; 3]) -> Option<[f64; 3]> {
         let e = self
@@ -2465,6 +2539,9 @@ impl Host for MemoryHost {
     }
     fn client_player_input(&self) -> Option<[f32; 2]> {
         self.client.then_some(self.client_input)
+    }
+    fn client_player_on_ground(&self) -> Option<bool> {
+        self.client.then_some(self.client_on_ground)
     }
     fn set_item_entity(&mut self, id: u32, item: &str, count: u32) -> bool {
         let Some(i) = self.item_entities.iter().position(|e| e.id == id) else { return false };

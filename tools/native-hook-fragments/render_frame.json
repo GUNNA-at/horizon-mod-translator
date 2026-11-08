@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the window's partial tick in a frame, and whether its game is paused (`native_frame_partial_tick`, `native_paused`).",
+  "doc_summary": "`native_frame_partial_tick()` is how far the window's frame is from the last tick to the next, 0 to 1 (`DeltaTracker.getGameTimeDeltaPartialTick`): with the frame's own time `native_frame(elapsed)` is given (`getRealtimeDeltaTicks` is that in ticks), what a client mod's frame code moves by between ticks, as NeoForge's `RenderFrameEvent` listeners do. `native_paused()` is whether the window's game is paused (`Minecraft.isPaused`: a single player screen that pauses it is open, its world not ticking). Bundles need \"hooks\": @API:render_frame@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_hooks.rs"
+  ]
+}

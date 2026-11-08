@@ -1172,8 +1172,8 @@ mod tests {
         rt.put_field(ty, "$width", V::F(0.25));
         rt.put_field(ty, "$height", V::F(0.25));
         let mut host = MemoryHost::default();
-        host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)) });
-        host.entities.push(EntityView { id: 8, kind: "minecraft:pig".into(), pos: [3.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)) });
+        host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)), ..Default::default() });
+        host.entities.push(EntityView { id: 8, kind: "minecraft:pig".into(), pos: [3.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)), ..Default::default() });
         host.blocks.insert([0, 64, 9], "minecraft:stone".into());
         host.collisions.insert([0, 64, 9], vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]);
         rt.with_host(&mut host, |rt| {
@@ -1282,7 +1282,14 @@ mod tests {
         const STEVE: u128 = 0x5;
         let steve_at = [-10.5, 64.0, -10.5];
         let mut host = MemoryHost::default();
-        host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)) });
+        host.entities.push(EntityView {
+            id: 7,
+            kind: "minecraft:cow".into(),
+            pos: [0.5, 64.0, 4.5],
+            yaw: 0.0,
+            health: Some((10.0, 10.0)),
+            ..Default::default()
+        });
         host.players.push((STEVE, steve_at));
         host.player_entity_ids.insert(STEVE, 9);
         rt.with_host(&mut host, |rt| {
@@ -1532,7 +1539,7 @@ mod tests {
         rt.put_field(ty, "$height", V::F(0.25));
         rt.registered.insert(("entity_type".into(), "test:pebble".into()), ty);
         let mut host = MemoryHost::default();
-        host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)) });
+        host.entities.push(EntityView { id: 7, kind: "minecraft:cow".into(), pos: [0.5, 64.0, 4.5], yaw: 0.0, health: Some((10.0, 10.0)), ..Default::default() });
         rt.with_host(&mut host, |rt| {
             let level = crate::glue::level(rt);
             let player = crate::menus::server_player(rt, 42);
