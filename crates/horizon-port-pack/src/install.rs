@@ -98,8 +98,10 @@ fn mod_id(carry: &Path) -> String {
 struct Translated {
     /// The native mod bundle, in `<game>/horizon-native-mods/`.
     native: PathBuf,
-    /// Where its content mod went when it stands over the carry-over's (a mod with machines).
+    /// Where its content mod went, in `<game>/horizon-mods/`.
     content: Option<PathBuf>,
+    /// Whether that content mod stands over the carry-over's (a mod with machines or mobs).
+    stands: bool,
 }
 
 /// The jars in translation groups: a mod with the mods built on it (the jars that need it, by their
@@ -153,9 +155,11 @@ fn groups(jars: &[PathBuf]) -> Vec<Vec<PathBuf>> {
 /// `<game>/horizon-native-mods/<id>_translated/` for the first mod's id (docs/mod-translator.md),
 /// with a content mod for the blocks each of them registers. A mod with block entities (machines)
 /// needs its code's own blocks, which a vanilla template would replace (a chute would be a pressure
-/// plate): its content mod goes to `horizon-mods/` with the data of `carried(jar)`, the jar's
-/// carry-over ([`check::check`]'s, made here when not given), and stands over the carry-over's. Any
-/// other mod's content mod goes there only when nothing else is there. What each jar became, by jar.
+/// plate), and a mod with entities (mobs) its code's own entity types and their look, which a
+/// carry-over doesn't have: its content mod goes to `horizon-mods/` with the data of `carried(jar)`,
+/// the jar's carry-over ([`check::check`]'s, made here when not given), and stands over the
+/// carry-over's. Any other mod's content mod goes there only when nothing else is there. What each
+/// jar became, by jar.
 /// A mod in another language (Kotlin) runs with what its language loader's jar in `pack` carries
 /// (Kotlin's library, Kotlin for Forge's), as far as the group's code reaches into it. The content
 /// mods of the mods its jars bundle are added to `bundled`.
@@ -207,15 +211,18 @@ fn translate(
             let _ = fs::remove_dir_all(natives.join(format!("{ns}_translated")));
         }
         let mods = game.join("horizon-mods").join(&ns);
+        // What only its code declares: machines (block entities) and mobs (entity types).
         let machines = |classes: &[horizon_mod_translator::class::ClassFile]| {
-            horizon_mod_translator::registrations(classes).iter().any(|r| r.registry == "block_entity_type")
+            horizon_mod_translator::registrations(classes)
+                .iter()
+                .any(|r| r.registry == "block_entity_type" || r.registry == "entity_type")
         };
         let machines = if jars.len() == 1 {
             machines(&classes)
         } else {
             horizon_mod_translator::classes(jar).is_ok_and(|c| machines(&c))
         };
-        let mut stands = None;
+        let mut placed = None;
         if content.is_dir() && (machines || !mods.exists()) {
             let own = out.join(format!("carry-over-{ns}"));
             let carried = match carried(jar) {
@@ -227,12 +234,13 @@ fn translate(
                 merge_data(&carry, &content, &ns);
             }
             let _ = fs::remove_dir_all(&own);
-            if copy_dir(&content, &mods).is_ok() && machines {
-                stands = Some(mods);
+            if copy_dir(&content, &mods).is_ok() {
+                placed = Some(mods);
             }
         }
         let _ = fs::remove_dir_all(&content);
-        done.push((jar.to_path_buf(), Translated { native: out.clone(), content: stands }));
+        let stands = machines && placed.is_some();
+        done.push((jar.to_path_buf(), Translated { native: out.clone(), content: placed, stands }));
     }
     // The mods the group's jars bundle (Create's Flywheel and Ponder): their look, a content mod of
     // their own each ([`horizon_mod_translator::bundle::write_group`]'s `content-nested-<id>`).
@@ -341,7 +349,7 @@ fn jars(jars: &[PathBuf], game: &Path, work: &Path, log: Log) -> Result<Outcome,
         match c {
             Ok(c) => {
                 // A translated content mod that stands keeps the carry-over's data, not its blocks.
-                let stands = translated.as_ref().is_some_and(|t| t.content.is_some());
+                let stands = translated.as_ref().is_some_and(|t| t.stands);
                 if c.verdict != Verdict::No && !stands && carry.join(horizon_mods::manifest::MANIFEST).is_file() {
                     carries.push(carry.clone());
                 }

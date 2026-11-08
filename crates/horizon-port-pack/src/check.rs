@@ -84,6 +84,28 @@ fn old_layout(names: &[String]) -> bool {
     has(["recipes", "loot_tables"]) && !has(["recipe", "loot_table"])
 }
 
+/// Whether the Minecraft versions a mod declares (`JarInfo::minecraft`) start at 1.21 or later:
+/// the first version its range names, when the range has a lower bound. A mod made for 1.21 that
+/// still ships 1.20's folder names (Waddles' `loot_tables/`) is a 1.21 mod.
+fn declares_1_21(range: &str) -> bool {
+    let range = range.trim();
+    if range.starts_with("[,") || range.starts_with("(,") {
+        return false;
+    }
+    let start = range.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let version: String = start
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = version.split('.').map(|p| p.parse::<u32>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(1), Some(minor)) => minor >= 21,
+        // The year versions (26.3).
+        (Some(major), _) => major > 1,
+        _ => false,
+    }
+}
+
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
@@ -140,7 +162,7 @@ pub fn check_with(
         crate::pipeline::write_json(&out.join("check.json"), &check)?;
         Ok(check)
     };
-    if old_layout(&names) {
+    if old_layout(&names) && !declares_1_21(&info.minecraft) {
         check.summary = "Made for Minecraft 1.20 or older: Horizon ports mods made for 1.21 \
                          and later."
             .into();
@@ -414,6 +436,42 @@ displayName = "Ruby"
         .unwrap();
         assert_eq!(c.verdict, Verdict::No);
         assert!(c.summary.contains("1.20 or older"));
+        // Declared for 1.21 in its mods.toml, it is a 1.21 mod whatever its folders are named.
+        let declared = [
+            TOML,
+            b"[[dependencies.ruby]]\nmodId = \"minecraft\"\ntype = \"required\"\nversionRange = \"[1.21, 1.22)\"\n",
+        ]
+        .concat();
+        let c = check(
+            &jar(
+                &dir,
+                &[
+                    ("META-INF/neoforge.mods.toml", declared.as_slice()),
+                    ("data/ruby/recipes/ruby.json", b"{}"),
+                ],
+            ),
+            &dir.join("out"),
+        )
+        .unwrap();
+        assert!(!c.summary.contains("1.20 or older"), "{}", c.summary);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_mod_declares_the_minecraft_it_starts_at() {
+        for (range, new) in [
+            ("[1.21, 1.22)", true),
+            ("[1.21.1,1.21.2)", true),
+            ("1.21.1", true),
+            (">=1.21", true),
+            ("~26.3", true),
+            ("[1.20.1,1.21)", false),
+            ("[1.20.4]", false),
+            ("(,1.21)", false),
+            ("", false),
+            ("*", false),
+        ] {
+            assert_eq!(declares_1_21(range), new, "{range}");
+        }
     }
 }

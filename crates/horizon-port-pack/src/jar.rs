@@ -13,6 +13,11 @@ pub struct JarInfo {
     pub license: String,
     /// Required dependencies by mod id (loaders and `minecraft` left out).
     pub depends: Vec<String>,
+    /// The Minecraft versions it declares it runs on, as written: mods.toml's `versionRange` of
+    /// its `minecraft` dependency (`[1.21, 1.22)`), fabric.mod.json's `depends.minecraft`
+    /// (`>=1.21`); empty when it declares none.
+    #[serde(default)]
+    pub minecraft: String,
     pub census: Census,
 }
 
@@ -102,6 +107,7 @@ pub fn mods_toml(text: &str) -> Result<JarInfo, String> {
     };
     let mod_id = get(first, "modId");
     let mut depends = Vec::new();
+    let mut minecraft = String::new();
     if let Some(deps) = doc
         .get("dependencies")
         .and_then(|d| d.get(&mod_id))
@@ -113,6 +119,9 @@ pub fn mods_toml(text: &str) -> Result<JarInfo, String> {
                 |t| t.eq_ignore_ascii_case("required"),
             );
             let id = get(Some(d), "modId");
+            if id == "minecraft" {
+                minecraft = get(Some(d), "versionRange");
+            }
             if required && !NOT_MODS.contains(&id.as_str()) && !id.is_empty() {
                 depends.push(id);
             }
@@ -124,6 +133,7 @@ pub fn mods_toml(text: &str) -> Result<JarInfo, String> {
         license: get(Some(&doc), "license"),
         mod_id,
         depends,
+        minecraft,
         census: Census::default(),
     })
 }
@@ -147,12 +157,18 @@ pub fn fabric(text: &str) -> Result<JarInfo, String> {
         .map(|(id, _)| id.clone())
         .filter(|id| !NOT_MODS.contains(&id.as_str()) && !id.starts_with("fabric"))
         .collect();
+    let minecraft = match &v["depends"]["minecraft"] {
+        serde_json::Value::Array(any) => any.first().and_then(|m| m.as_str()).unwrap_or(""),
+        m => m.as_str().unwrap_or(""),
+    }
+    .to_owned();
     Ok(JarInfo {
         mod_id: s("id"),
         name: s("name"),
         version: s("version"),
         license,
         depends,
+        minecraft,
         census: Census::default(),
     })
 }
