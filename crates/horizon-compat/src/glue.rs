@@ -1590,6 +1590,24 @@ pub fn render_mod_entities(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3]) -
     })
 }
 
+/// `native_particles_submit` (a client): the mods' own particles, each drawing itself as vanilla's
+/// `ParticleEngine.render` draws it ([`crate::particle_engine`]), seen from `camera`, `partial` of
+/// the way into the tick. Nothing to do when none is live.
+pub fn render_particles(rt: &mut Rt, host: &mut dyn Host, camera: [f64; 3], partial: f32) {
+    if !crate::particle_engine::any(rt) {
+        return;
+    }
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| {
+        crate::camera::prepare(rt, Some(camera));
+        crate::vertices::discard(rt);
+        crate::particle_engine::render(rt, partial);
+        crate::vertices::flush(rt, None);
+    });
+}
+
 const SERVER_TICK_PRE: &str = "net/neoforged/neoforge/event/tick/ServerTickEvent$Pre";
 const SERVER_TICK_POST: &str = "net/neoforged/neoforge/event/tick/ServerTickEvent$Post";
 
@@ -2064,8 +2082,8 @@ fn client_use_block(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], face: i64, 
 
 /// The client's tick, in `Minecraft.tick`'s order: `ClientTickEvent.Pre` (animation clocks advance
 /// here: catnip's `AnimationTickHolder`), the open screen's tick (and what screens left for it:
-/// payloads, opening and closing), the level's block entities, then `ClientTickEvent.Post`, and
-/// the mods' ticking sound instances.
+/// payloads, opening and closing), the level's block entities, the mods' particles, then
+/// `ClientTickEvent.Post`, and the mods' ticking sound instances.
 pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
@@ -2081,6 +2099,8 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
         let dimension = rt.host().map(|h| h.dimension()).unwrap_or_default();
         crate::mod_entities::tick_all(rt, &dimension);
         tick_client_block_entities(rt);
+        // The particle engine's (`ParticleEngine.tick`): the mods' own particles.
+        crate::particle_engine::tick(rt);
         let ev = rt.new_object(CLIENT_TICK_POST);
         crate::neo::post(rt, CLIENT_TICK_POST, ev);
         crate::keys::tick(rt);

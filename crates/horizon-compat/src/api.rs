@@ -45,7 +45,8 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
             .or_else(|| crate::entity_render::api_super(class))
             .or_else(|| crate::camera::api_super(class))
             .or_else(|| crate::item_wrappers::api_super(class))
-            .or_else(|| crate::vanilla_entities::api_super(class)),
+            .or_else(|| crate::vanilla_entities::api_super(class))
+            .or_else(|| crate::particle_engine::api_super(class)),
     }
 }
 
@@ -788,7 +789,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 85] = [
+const CHAIN: [Module; 86] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -801,6 +802,7 @@ const CHAIN: [Module; 85] = [
     crate::attachments::call,
     crate::sounds::call,
     crate::particles::call,
+    crate::particle_engine::call,
     crate::food::call,
     crate::attributes::call,
     crate::mob_effects::call,
@@ -879,7 +881,7 @@ const CHAIN: [Module; 85] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 85] = [
+const CLAIMS: [Claims; 86] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -892,6 +894,7 @@ const CLAIMS: [Claims; 85] = [
     crate::attachments::claims,
     crate::sounds::claims,
     crate::particles::claims,
+    crate::particle_engine::claims,
     crate::food::claims,
     crate::attributes::claims,
     crate::mob_effects::claims,
@@ -968,7 +971,7 @@ const CLAIMS: [Claims; 85] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 85] = [
+const MODULE_NAMES: [&str; 86] = [
     "diodes",
     "rails",
     "fake_players",
@@ -981,6 +984,7 @@ const MODULE_NAMES: [&str; 85] = [
     "attachments",
     "sounds",
     "particles",
+    "particle_engine",
     "food",
     "attributes",
     "mob_effects",
@@ -2833,6 +2837,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::capabilities::get_static(rt, o, f))
             .or_else(|| crate::sounds::get_static(rt, o, f))
             .or_else(|| crate::particles::get_static(rt, o, f))
+            .or_else(|| crate::particle_engine::get_static(rt, o, f))
             .or_else(|| crate::food::get_static(rt, o, f))
             .or_else(|| crate::attributes::get_static(rt, o, f))
             .or_else(|| crate::enchantments::get_static(rt, o, f))

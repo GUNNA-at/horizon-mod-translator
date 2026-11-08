@@ -68,7 +68,7 @@ const PENDING: &str = "compat:screen-pending";
 /// What waits for the client's next tick: `compat:deferred` objects, in order.
 const OUTBOX: &str = "compat:outbox";
 /// The texture `RenderSystem.setShaderTexture(0, ...)` named last: what textured quads sample.
-const SHADER_TEXTURE: &str = "compat:gui-texture";
+pub(crate) const SHADER_TEXTURE: &str = "compat:gui-texture";
 
 /// Vanilla's in-world menu background, tiled 32 x 32 (`Screen.renderMenuBackground`).
 const MENU_BACKGROUND: &str = "minecraft:textures/gui/inworld_menu_background.png";

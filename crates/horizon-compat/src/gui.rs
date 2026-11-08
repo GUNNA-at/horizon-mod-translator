@@ -57,7 +57,6 @@ const TOOLTIP_GATHER: &str = "net/neoforged/neoforge/client/event/RenderTooltipE
 const WINDOW: &str = "com/mojang/blaze3d/platform/Window";
 const MINECRAFT: &str = "net/minecraft/client/Minecraft";
 const LANGUAGE_MANAGER: &str = "net/minecraft/client/resources/language/LanguageManager";
-const PARTICLE_ENGINE: &str = "net/minecraft/client/particle/ParticleEngine";
 const GAME_MODE: &str = "net/minecraft/client/multiplayer/MultiPlayerGameMode";
 const GAME_TYPE: &str = "net/minecraft/world/level/GameType";
 const GAME_TYPES: [&str; 4] = ["SURVIVAL", "CREATIVE", "ADVENTURE", "SPECTATOR"];
@@ -2025,21 +2024,9 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
         // The client's runtime holds no server object, even in single player (the game's server
         // thread runs its own): a mod syncs over the network, as to a remote server.
         (MINECRAFT, "hasSingleplayerServer") => V::I(0),
-        // Mixin accessors onto the client: the screen open (none until one opens) and the particle
-        // engine, whose providers map a mod may fill (the game draws particles from its own).
+        // A mixin accessor onto the client: the screen open (none until one opens). The particle
+        // engine is [`crate::particle_engine`]'s.
         (MINECRAFT, "$screen") => V::NULL,
-        (MINECRAFT, "$particleEngine") => single(rt, PARTICLE_ENGINE),
-        (PARTICLE_ENGINE, "$providers") => {
-            let engine = a(0);
-            match rt.get_field(engine, "$providers") {
-                m if m.r() != 0 => m,
-                _ => {
-                    let m = rt.alloc("java/util/HashMap", crate::Data::Table(Default::default()));
-                    rt.put_field(engine, "$providers", m);
-                    m
-                }
-            }
-        }
         ("net/minecraft/client/renderer/RenderBuffers", "bufferSource" | "crumblingBufferSource") => {
             rt.intern("compat:gui-buffers".into(), |rt| rt.new_object("net/minecraft/client/renderer/MultiBufferSource$BufferSource"))
         }
@@ -2627,10 +2614,16 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner == MINECRAFT
             && matches!(
                 name,
-                "getWindow" | "renderBuffers" | "getLanguageManager" | "getLocale" | "hasSingleplayerServer" | "$screen" | "$particleEngine" | "getEntityModels" | "getBlockEntityRenderDispatcher"
+                "getWindow"
+                    | "renderBuffers"
+                    | "getLanguageManager"
+                    | "getLocale"
+                    | "hasSingleplayerServer"
+                    | "$screen"
+                    | "getEntityModels"
+                    | "getBlockEntityRenderDispatcher"
             ))
         || owner == LANGUAGE_MANAGER
-        || (owner == PARTICLE_ENGINE && name == "$providers")
 }
 
 /// The calls this module models (`owner.name.desc`), or None.

@@ -10937,6 +10937,20 @@ impl Game<'_> {
             &|b| world.light(b[0], b[1], b[2]),
             &mut out,
         );
+        // Client mods' own particles (`native_particles_submit`), each face as it drew it.
+        let mut quads = Vec::new();
+        self.native_particles_submit(camera.to_array(), alpha as f32, &mut quads);
+        for q in &quads {
+            let quad = horizon_client::particles::ModParticleQuad {
+                positions: q.positions,
+                sprite: &q.sprite,
+                uv: q.uv,
+                colors: q.colors,
+                light: q.light,
+                translucent: q.translucent,
+            };
+            self.particles.push_mod_quad(&quad, &mut out);
+        }
         // Breaking progress overlays (destroy_stage_0..9): ours and the other players'.
         self.mark_stage(out.len(), "DESTROY");
         for &(pos, stage) in &cracks {

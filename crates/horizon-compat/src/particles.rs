@@ -57,14 +57,27 @@ fn dust(rt: &mut Rt, rgb: [f32; 3], scale: f32) -> V {
 }
 
 /// A type's id: vanilla's, or a mod's by the name it is registered under.
-fn type_id(rt: &Rt, ty: V) -> Option<String> {
+pub(crate) fn type_id(rt: &Rt, ty: V) -> Option<String> {
     rt.str_of(rt.get_field(ty, "$id")).map(str::to_owned).or_else(|| rt.registered_name(ty, "particle_type").map(str::to_owned))
 }
 
-/// The type of `options`: its own, or itself for a type that is its own options (`SimpleParticleType`).
-fn type_of(rt: &Rt, options: V) -> V {
+/// The type of `options`: its own, what a mod's own options class answers (`getType()`), or itself
+/// for a type that is its own options (`SimpleParticleType`).
+fn type_of(rt: &mut Rt, options: V) -> V {
+    const GET_TYPE: &str = "net/minecraft/core/particles/ParticleOptions.getType.()Lnet/minecraft/core/particles/ParticleType;";
     match rt.get_field(options, "$type") {
         t if t.r() != 0 => t,
+        _ if rt.overrides.is_some_and(|o| {
+            o(
+                rt.class_of(options),
+                "getType.()Lnet/minecraft/core/particles/ParticleType;",
+            )
+        }) =>
+        {
+            let t = rt.call_functional(GET_TYPE, options, &[]);
+            rt.report_thrown("a particle options' getType");
+            if t.r() != 0 { t } else { options }
+        }
         _ => options,
     }
 }
@@ -173,7 +186,7 @@ pub(crate) fn read_options(rt: &mut Rt, buf: V) -> Option<V> {
 }
 
 /// What `options` (a type, or options of one) draws, at `at`.
-fn particles(rt: &Rt, options: V) -> Option<Particles> {
+fn particles(rt: &mut Rt, options: V) -> Option<Particles> {
     let ty = type_of(rt, options);
     let mut p = Particles { kind: type_id(rt, ty)?, ..Particles::default() };
     match rt.class_of(options) {
@@ -195,6 +208,12 @@ pub fn level_particle(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> V {
     // `(options, [force,] x, y, z, dx, dy, dz)`.
     let force = desc.starts_with("(Lnet/minecraft/core/particles/ParticleOptions;Z");
     let at = if force { 3 } else { 2 };
+    // A type a mod gave a provider: made by it, the mods' own particle (vanilla's particle engine).
+    let forced = force.then(|| a(2).i() != 0);
+    let (pos, speed) = ([a(at).d(), a(at + 1).d(), a(at + 2).d()], [a(at + 3).d(), a(at + 4).d(), a(at + 5).d()]);
+    if crate::particle_engine::level_particle(rt, a(1), forced, name == "addAlwaysVisibleParticle", pos, speed) {
+        return V::Void;
+    }
     let Some(mut p) = particles(rt, a(1)) else { return V::Void };
     p.at = [a(at).d(), a(at + 1).d(), a(at + 2).d()];
     p.delta = [a(at + 3).d(), a(at + 4).d(), a(at + 5).d()];
@@ -204,6 +223,20 @@ pub fn level_particle(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> V {
         h.particles(&p);
     }
     V::Void
+}
+
+/// `ParticleEngine.createParticle` of a type no mod gave a provider: the game draws it, as it draws
+/// a level's (vanilla's engine makes it whatever the particle setting).
+pub(crate) fn hand_to_game(rt: &mut Rt, options: V, at: [f64; 3], delta: [f64; 3]) {
+    let Some(mut p) = particles(rt, options) else {
+        return;
+    };
+    p.at = at;
+    p.delta = delta;
+    p.force = true;
+    if let Some(h) = rt.host_mut() {
+        h.particles(&p);
+    }
 }
 
 /// `ServerLevel.sendParticles(options, x, y, z, count, dx, dy, dz, speed)` (and to one player,

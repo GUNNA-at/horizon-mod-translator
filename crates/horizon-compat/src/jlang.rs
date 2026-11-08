@@ -572,6 +572,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 _ => return None,
             })
         }
+        // `Math.random()`: uniform in [0, 1), from the runtime's random stream (53 bits, as
+        // `Random.nextDouble` gives).
+        "java/lang/Math" | "java/lang/StrictMath" if name == "random" => Some(V::D(
+            (crate::api_common::next_random(rt) >> 11) as f64 * (1.0 / (1u64 << 53) as f64),
+        )),
         "java/lang/Math" | "java/lang/StrictMath" => math(name, &ks, args),
         "java/lang/Object" => Some(match name {
             // A vanilla block's or item's is its 1.21.1 class (`IceBlock`), as `instanceof` answers.
@@ -1581,7 +1586,6 @@ fn math(name: &str, ks: &[char], args: &[V]) -> Option<V> {
             'F' => V::F(if a(0).f() == 0.0 { 0.0 } else { a(0).f().signum() }),
             _ => V::D(if d(0) == 0.0 { 0.0 } else { d(0).signum() }),
         },
-        "random" => V::D(0.5),
         _ => return None,
     })
 }

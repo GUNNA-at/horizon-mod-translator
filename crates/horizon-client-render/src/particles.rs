@@ -1298,16 +1298,29 @@ impl ParticleEngine {
         override_limiter: bool,
         always_show: bool,
     ) {
-        let c = self.camera;
-        let d2 = (p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2);
         if let Some(requested) = &mut self.requested {
             requested.push((options.clone(), p, v));
             return;
         }
-        let minimal = self.calculate_particle_level(always_show) == 2;
-        if override_limiter || options.ty.override_limiter() || (d2 <= 1024.0 && !minimal) {
+        if self.admits(
+            p,
+            override_limiter || options.ty.override_limiter(),
+            always_show,
+        ) {
             self.create(options, p, v);
         }
+    }
+    /// `LevelRenderer.addParticleInternal`'s limit: whether a particle at `p`
+    /// is made, always when `force`d (the type's `overrideLimiter` or the
+    /// level call's), else within 32 blocks of the camera unless the
+    /// Particles option leaves it out (`always_show`: kept one time in ten at
+    /// minimal). Draws from the level's random as vanilla does, forced or not;
+    /// a client mod's own particles ask it too.
+    pub fn admits(&mut self, p: [f64; 3], force: bool, always_show: bool) -> bool {
+        let c = self.camera;
+        let d2 = (p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2);
+        let minimal = self.calculate_particle_level(always_show) == 2;
+        force || (d2 <= 1024.0 && !minimal)
     }
     /// `NoxiousGasCloudParticle.spawnNoxiousGasParticle`: the gas, as an
     /// always visible particle (`ClientLevel.addAlwaysVisibleParticle`).
@@ -4246,6 +4259,53 @@ impl ParticleEngine {
                 }
             }
         }
+    }
+}
+/// A face a client mod's particle drew this frame (`Particle.render` into the
+/// particle engine's buffer), for [`ParticleEngine::push_mod_quad`].
+pub struct ModParticleQuad<'a> {
+    /// Corners relative to the camera, in blocks, in the order drawn.
+    pub positions: [[f32; 3]; 4],
+    /// The atlas's sprite (`create:particle/air_flow_0`, `minecraft:block/stone`, `horizon/white`).
+    pub sprite: &'a str,
+    /// Each corner's place in the sprite, 0 to 1 across it.
+    pub uv: [[f32; 2]; 4],
+    /// Each corner's colour, `0xAARRGGBB`.
+    pub colors: [u32; 4],
+    /// `LightTexture.pack`ed: block light in bits 4..8, sky light in bits 20..24.
+    pub light: u32,
+    /// Its render type blends, after the translucent blocks.
+    pub translucent: bool,
+}
+impl ParticleEngine {
+    /// Draws `quad`, one of a client mod's particles' faces, with this
+    /// engine's quads: on the translucent particles' layer when its type
+    /// blends. False, drawing nothing, when the atlas lacks its sprite.
+    pub fn push_mod_quad(&self, quad: &ModParticleQuad, out: &mut Vec<Vertex>) -> bool {
+        let Some(&(r, _)) = self.atlas.get(quad.sprite.trim_start_matches("minecraft:")) else {
+            return false;
+        };
+        let block = (quad.light & 0xFFFF).min(240);
+        let sky = (quad.light >> 16 & 0xFFFF).min(240);
+        let layer = if quad.translucent {
+            crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
+        } else {
+            0
+        };
+        for ((pos, uv), argb) in quad.positions.iter().zip(quad.uv).zip(quad.colors) {
+            // RGBA in memory: 0xAABBGGRR.
+            let color = argb & 0xFF00_FF00 | (argb >> 16 & 0xFF) | (argb & 0xFF) << 16;
+            out.push(Vertex {
+                normal: [0; 4],
+                pos: *pos,
+                uv: [r.u0 + (r.u1 - r.u0) * uv[0], r.v0 + (r.v1 - r.v0) * uv[1]],
+                layer,
+                color,
+                light: sky | block << 8,
+                glint_uv: [0.0, 0.0],
+            });
+        }
+        true
     }
 }
 /// How brightly particle `ty` shines in HDR output, as `mesher::hdr_tier`: flames,

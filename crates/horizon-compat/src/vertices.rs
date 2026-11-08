@@ -342,6 +342,22 @@ fn draw_face(rt: &mut Rt, consumer: V, faces: Faces, last: bool) {
         *list = kept;
     }
     let Some((sprite, uv)) = sprite_and_uv(rt, consumer, uv) else { return };
+    // A particle's face (the particle engine's buffer): the game draws it with its own particles.
+    if rt.get_field(consumer, "$particles").i() != 0 {
+        let translucent = rt.get_field(consumer, "$translucent").i() != 0;
+        let quad = crate::host::ParticleQuad {
+            positions,
+            sprite,
+            uv,
+            colors,
+            light: light as u32,
+            translucent,
+        };
+        if let Some(h) = rt.host_mut() {
+            h.particle_quad(&quad);
+        }
+        return;
+    }
     let quad = Quad { positions, uv, sprite, facing: facing(&positions), cull: None, tint_index: -1, shade: false, light_emission: 0, colors };
     if let Some(h) = rt.host_mut() {
         h.draw_model(&Model::Quads(Arc::from([quad])), &crate::render::IDENTITY, u32::MAX, light as u32);
@@ -368,6 +384,28 @@ pub(crate) fn flush(rt: &mut Rt, only: Option<V>) {
     }
     if let Some(p) = values(rt, pending) {
         *p = kept;
+    }
+}
+
+/// A whole vertex at once (`addVertex(at).setUv(uv).setColor(argb).setLight(light)`): what a
+/// particle's quad writes for each corner.
+pub(crate) fn vertex(rt: &mut Rt, consumer: V, at: [f32; 3], uv: [f32; 2], argb: i32, light: i32) {
+    begin(rt, consumer, at);
+    set_last(
+        rt,
+        consumer,
+        3,
+        &[V::F(uv[0]), V::F(uv[1]), V::I(argb), V::I(light)],
+    );
+}
+
+/// Forgets the vertices of `consumer`'s face that wasn't finished (what threw while drawing it).
+pub(crate) fn drop_unfinished(rt: &mut Rt, consumer: V) {
+    let size = faces(rt, consumer).size();
+    let l = rt.get_field(consumer, "$verts");
+    if let Some(v) = values(rt, l) {
+        let n = v.len() / VERTEX;
+        v.truncate((n - n % size) * VERTEX);
     }
 }
 

@@ -770,6 +770,27 @@ pub(crate) struct NativeColoredLight {
     pub(crate) intensity: f32,
 }
 
+/// A face a client mod's particle draws (`native_particles_submit`), as
+/// vanilla's particle engine buffers it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct NativeParticleQuad {
+    /// Corners relative to the camera, in blocks, in the order drawn.
+    pub(crate) positions: [[f32; 3]; 4],
+    /// The atlas's sprite (`mymod:particle/spark_0`, `minecraft:block/stone`;
+    /// `horizon/white` for an untextured face).
+    pub(crate) sprite: String,
+    /// Each corner's place in the sprite, 0 to 1 across it.
+    pub(crate) uv: [[f32; 2]; 4],
+    /// Each corner's colour, `0xAARRGGBB`.
+    pub(crate) colors: [u32; 4],
+    /// The light, `LightTexture.pack`ed (block light in bits 4..8, sky light
+    /// in bits 20..24).
+    pub(crate) light: u32,
+    /// Blended and drawn after the translucent blocks (a translucent render
+    /// type's), else drawn opaque.
+    pub(crate) translucent: bool,
+}
+
 /// The zoom a native mod asks for (`native_zoom`): the factor (1 is none),
 /// eased through the field of view like the spyglass when `smooth`, and the
 /// scale of mouse turning.
@@ -1996,6 +2017,20 @@ impl Game<'_> {
     /// @API:level_submit@.
     pub(super) fn native_level_submit(&self, camera: [f64; 3], draw: &mut BlockEntityDraw) {
         let _ = (camera, draw);
+    }
+    /// Draw your mod's own particles on this client, once a frame, with the
+    /// game's: push each face into `quads` (its corners relative to `camera`,
+    /// the camera's position, in blocks). `partial` is how far the frame is
+    /// into the tick. A face whose sprite the atlas lacks isn't drawn. Make a
+    /// particle only when `native_particle_admitted` lets it be, as the game's
+    /// own particles are limited. API @API:particles_submit@.
+    pub(super) fn native_particles_submit(
+        &self,
+        camera: [f64; 3],
+        partial: f32,
+        quads: &mut Vec<NativeParticleQuad>,
+    ) {
+        let _ = (camera, partial, quads);
     }
     /// Draw the mob `mob` (its id, kind, custom name and the frame's body
     /// and head turns and walk cycle, `LivingEntityRenderState`) on this
@@ -5399,6 +5434,24 @@ impl Game<'_> {
         }
         self.particles.add_with(options, at, velocity, force, always);
         true
+    }
+    /// Whether a client mod's own particle at `at` is made, as the game's
+    /// particle engine limits its own (`LevelRenderer.addParticleInternal`):
+    /// always when `force`d (its type overrides the limiter, or the mod asked),
+    /// else within 32 blocks of the camera and as the Particles option allows,
+    /// which keeps `decreased` ones (`addAlwaysVisibleParticle`) one time in
+    /// ten at minimal. It draws from the level's random as vanilla does. False
+    /// on a server or for a position out of range. API @API:particles_submit@.
+    pub(super) fn native_particle_admitted(
+        &mut self,
+        at: [f64; 3],
+        force: bool,
+        decreased: bool,
+    ) -> bool {
+        if !self.native_window() || !at.iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        self.particles.admits(at, force, decreased)
     }
     /// Playing, with nothing over the world: keys and zoom apply.
     pub(super) fn native_playing(&self) -> bool {

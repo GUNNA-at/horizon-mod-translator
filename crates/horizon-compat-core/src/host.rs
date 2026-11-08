@@ -1375,6 +1375,18 @@ pub trait Host {
     /// Particles a mod makes: a client's game draws them (`Level.addParticle`), a server's sends
     /// them to the players near them (`ServerLevel.sendParticles`).
     fn particles(&mut self, _particles: &Particles) {}
+    /// Drawing the mods' own particles: adds `quad`, a face one of them drew this frame
+    /// (`Particle.render` into the particle engine's buffer). False when the game draws none.
+    fn particle_quad(&mut self, _quad: &ParticleQuad) -> bool {
+        false
+    }
+    /// Whether a client makes a particle a mod's provider would make at `at`, as the game's particle
+    /// engine decides for its own (`LevelRenderer.addParticleInternal`): always when `force`d, else
+    /// near the camera and as the particle setting allows (`decreased`: `addAlwaysVisibleParticle`,
+    /// which the lowest setting keeps one time in ten).
+    fn particle_admitted(&mut self, _at: [f64; 3], _force: bool, _decreased: bool) -> bool {
+        true
+    }
 
     // ---- A client's GUI: what a mod's `GuiGraphics` draws in a frame (a HUD layer, a screen) ----
 
@@ -1545,6 +1557,25 @@ pub struct Particles {
     pub force: bool,
     /// `addAlwaysVisibleParticle`: drawn at the lowest particle setting too.
     pub always: bool,
+}
+
+/// A face a mod's particle draws ([`Host::particle_quad`]), as vanilla's particle engine buffers it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParticleQuad {
+    /// Corners relative to the camera, in blocks, in the order drawn.
+    pub positions: [[f32; 3]; 4],
+    /// The sprite (`create:particle/air_flow_0`, `minecraft:block/stone`; `horizon/white` for an
+    /// untextured face) and each corner's place in it, 0 to 1 across.
+    pub sprite: String,
+    pub uv: [[f32; 2]; 4],
+    /// Each corner's colour, 0xAARRGGBB.
+    pub colors: [u32; 4],
+    /// The first corner's light, `LightTexture.pack`ed (block light in bits 4..8, sky light in
+    /// bits 20..24).
+    pub light: u32,
+    /// Its render type blends and draws after the translucent blocks (`isTranslucent`:
+    /// `PARTICLE_SHEET_TRANSLUCENT`, `TERRAIN_SHEET`, a mod's own type).
+    pub translucent: bool,
 }
 
 /// A criterion of one of the server's advancements whose trigger is a mod's
@@ -1833,6 +1864,8 @@ pub struct MemoryHost {
     pub playing_sounds: HashMap<u64, ([f64; 3], f32, f32)>,
     /// Particles made, in order.
     pub particles: Vec<Particles>,
+    /// Faces the mods' own particles drew, in order.
+    pub particle_quads: Vec<ParticleQuad>,
     /// The GUI's size while a mod draws on it ([`Host::gui_size`]), and what it drew, in order.
     pub gui: [i32; 2],
     pub drawn_gui: Vec<GuiDraw>,
@@ -2678,6 +2711,10 @@ impl Host for MemoryHost {
     }
     fn particles(&mut self, particles: &Particles) {
         self.particles.push(particles.clone());
+    }
+    fn particle_quad(&mut self, quad: &ParticleQuad) -> bool {
+        self.particle_quads.push(quad.clone());
+        true
     }
     fn gui_size(&self) -> [i32; 2] {
         self.gui

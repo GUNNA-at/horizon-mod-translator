@@ -96,6 +96,7 @@ pub mod network;
 pub mod quads;
 pub mod recipes;
 pub mod palette;
+pub mod particle_engine;
 pub mod particles;
 pub mod records;
 pub mod render;

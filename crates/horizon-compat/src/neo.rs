@@ -1932,6 +1932,9 @@ pub fn fire_client_setup(rt: &mut Rt) {
     // The mods' block and item colour handlers (`BlockColors.createDefault` and
     // `ItemColors.createDefault` post the events as the client is made).
     crate::colors::init(rt);
+    // The mods' particle providers (`RegisterParticleProvidersEvent`, once the client has made its
+    // particle engine).
+    crate::particle_engine::post_register(rt);
     // The mods' reload listeners, as the client's resource manager is made.
     let ev = crate::resources::client_listeners_event(rt);
     post(rt, crate::resources::CLIENT_LISTENERS_EVENT, ev);

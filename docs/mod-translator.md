@@ -7949,6 +7949,135 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     - Seen, not from the mods: after `item replace ... armor.chest` in survival, the HUD drew no
       armour row. The server's `Armor` read 6.0 and the client's inventory showed the
       chestplate. This is Horizon's own HUD and is left for a later part.
+- [x] 2026-11-08 Part 121: the mods' own particles. The providers a mod registers make its
+  particles, which run on vanilla's particle classes modelled here, and the game draws their quads.
+  Create's fans now blow their air currents' wisps.
+  - Checked against 1.21.1's particle classes, the ones NeoForge 21.1's mods extend, with NeoForge
+    21.1.256's patches (`ParticleEngine`, `Particle`, `SingleQuadParticle`, `TextureSheetParticle`,
+    `SimpleAnimatedParticle`, `NoRenderParticle`, `ClientLevel`, `LevelRenderer`, `Minecraft`):
+    - `RegisterParticleProvidersEvent` is posted on the mod bus in client setup, after the colour
+      handlers and before the reload listeners. `registerSpecial` keeps a provider.
+      `registerSprite` keeps a `ParticleProvider.Sprite`, whose particle then takes a random
+      sprite of its type's set (`pickSprite`). `registerSpriteSet` calls the mod's function with
+      the type's sprite set. A set's sprites are the textures `assets/<ns>/particles/<path>.json`
+      lists.
+    - `ClientLevel.addParticle` and `addAlwaysVisibleParticle` go through
+      `LevelRenderer.addParticleInternal`. The type's `getOverrideLimiter` or the overload's
+      `boolean` forces a particle, but `addAlwaysVisibleParticle` without one is never forced. A
+      forced particle is always made. Any other isn't made more than 32 blocks from the camera, nor
+      when the particle setting leaves it out (`calculateParticleLevel`, which draws from the
+      level's random each time).
+    - `ParticleEngine.createParticle` asks the type's provider (`makeParticle`) and adds what it
+      makes. Added particles join the engine at its next tick, each in its render type's queue. A
+      queue holds 16384, the oldest giving way.
+    - `Minecraft.tick` ticks the engine unless the game is paused. `ParticleEngine.tick` ticks the
+      queues in the render types' order (NeoForge sorts vanilla's `RENDER_ORDER` first) and drops
+      the particles no longer alive. `render` draws every type's particles but `NO_RENDER`'s, each
+      type's batch begun by its `begin`.
+    - `Particle`: its two constructors (the one given a speed adds a spread drawn from
+      `Math.random`), `tick` (gravity, `move`, friction, 0.7 on the ground) and `move` (the level's
+      block shapes through `Entity.collideBoundingBox`, `stoppedByCollision`, `onGround`).
+      `setSize`, `setPos`, `setPower`, `scale`, the colour, alpha and lifetime follow.
+    - `SingleQuadParticle.render` draws a quad facing the camera (`FacingCameraMode`'s
+      `LOOKAT_XYZ`, or `LOOKAT_Y`), turned by its `roll`. Its corners are `quadSize` from the
+      particle's lerped position.
+    - `TextureSheetParticle` adds the sprite's corners, `pickSprite` and `setSpriteFromAge`.
+      `SimpleAnimatedParticle` has friction 0.91, fades out past half its life, takes a frame for
+      its age and is fully bright. `NoRenderParticle` draws nothing.
+  - Create 6.0.10's fans use them:
+    - Create registers the type of `AirFlowParticleData` with
+      `registerSpriteSet(AirFlowParticle.Factory::new)`. The client side of an encased fan's air
+      current spawns its particles, and `AirFlowParticleData.getType()` is Create's own method.
+    - `AirFlowParticle` extends `SimpleAnimatedParticle`. It lives 40 ticks, without physics,
+      coloured 0xEEEEEE at alpha 0.25. Each tick it moves 1/8 block along the current, and it goes
+      once it leaves the current.
+    - Where the current processes, the processing type colours it (`morphAirFlow`). Smoking, past
+      fire, makes it a grey between black and 0x555555, and haunting, past soul fire, a teal
+      between black and 0x126568, both opaque. Both now and then spawn vanilla's smoke or soul fire
+      flames, which the game draws.
+    - Its `getLightColor` is the level's light where it is (`LevelRenderer.getLightColor`).
+  - The game's natives (`native_hooks.rs`, `particles.rs`, fragment `particles_submit`):
+    - The new hook `particles_submit` runs each frame where the game draws its particles, with the
+      camera and the partial tick. Each quad a mod's particle draws comes back as a
+      `NativeParticleQuad`: corners, sprite, uv, colours, light, and whether it is translucent.
+    - The game draws those quads from its particle atlas with its own particles
+      (`ParticleEngine::push_mod_quad`), a translucent one with its translucent ones.
+    - `native_particle_admitted(at, force, decreased)` is the check the game's own particles pass
+      (now `ParticleEngine::admits`). The mods' particles and the game's draw from the same random,
+      in the order they are asked.
+  - The host (`horizon-compat-core`): `ParticleQuad`, `Host::particle_quad` and
+    `Host::particle_admitted` are new.
+  - Compat (`particle_engine.rs`, new):
+    - The engine holds the providers by type id, the queues by render type in NeoForge's order, and
+      the particles waiting to join. `post_register` posts `RegisterParticleProvidersEvent` in
+      client setup.
+    - The mods' particle classes run on the five modelled classes. Their state is in the fields
+      vanilla declares, by the same names, so a mod's bytecode reads and writes them. What
+      vanilla's code calls on `this` (`move`, `remove`, `getLightColor`, `getQuadSize`, `getU0`...)
+      runs the mod's own method when its class has one.
+    - Collisions use the level's block shapes, read once per position per tick.
+    - Each render type's batch goes to the game through a buffer whose faces become
+      `ParticleQuad`s. Vanilla's types draw from the particle atlas, `TERRAIN_SHEET` from the block
+      atlas. A mod's own render type's `begin` runs, and the texture it binds is used.
+    - `client_tick` ticks the engine after the client's block entities, and
+      `glue::render_particles` draws it for the hook. Nothing is made when no mod registered a
+      provider.
+    - A type a mod registers with one of vanilla's providers (`FlameParticle.Provider::new`) is
+      drawn by the game from its sprites, as before (traced once). So is a type with no provider.
+  - Fixed on the way:
+    - `Math.random` and `StrictMath.random` returned 0.5 every time. They now draw a new number
+      each call. Before, every particle made with a speed got the same push.
+    - A mod's own particle options class is now asked its type (`getType()`). Before, Create's
+      `AirFlowParticleData` had no type and drew nothing.
+    - A call on null of `Particle.render`, `getRenderType`, `SpriteSet.get` or
+      `ParticleProvider.createParticle` throws `NullPointerException`, as the JVM's does. Before,
+      it was unmapped.
+  - Where Horizon differs, and why:
+    - Vanilla's own particle subclasses (`TerrainParticle`, `FlameParticle`, `RisingParticle`,
+      `BaseAshSmokeParticle`...) aren't modelled yet. A mod's class extending one doesn't run, and
+      a vanilla provider given a mod's type is the game's to draw. Block particles (`TerrainParticle`,
+      `ParticleEngine.crack` and `destroy`, `addDestroyEffects`) come next.
+    - A server's `sendParticles` with a mod's options reaches the client as the game's particle,
+      not the mod's (Create's rotation indicators).
+    - There is no frustum culling (`shouldCull`), no particle groups (`getParticleGroup`'s limits)
+      and no tracking emitters.
+    - A mod's own render type's GL state (blend, depth, shader) isn't applied, only the texture it
+      binds. `CUSTOM`'s particles draw from the particle atlas.
+    - A particle draws only into the buffer it is given. Faces it draws elsewhere are lost.
+    - A particle whose tick or render throws is dropped and reported. Vanilla's game would crash.
+  - Measured (packcov34, the same 367 jars): methods 108738/130226 (83.5%, was 108473), uses
+    340904/372747 (91.5%, was 340334), distinct missing 9226 (was 9279). Create 3273/3972 (was
+    3256), uses 24359/25241 (96.5%, was 24334). All ten of the particle calls most used before are
+    answered: `registerSpriteSet` (31 mods), `TextureSheetParticle`'s two constructors (24 and 23),
+    its `tick` (18), `SpriteSet.get` (16 and 7), `ParticleEngine.add` (13), `registerSpecial` (12),
+    `Particle.<init>` (9) and `SimpleAnimatedParticle.<init>` (8). The most used left are
+    `TerrainParticle`'s (7 + 3 mods), `addDestroyEffects` (4) and `WaterDropParticle` (3).
+  - Tests 668 (4 new):
+    - A mod's particle is made by its provider and falls, lands and draws its quad. A type
+      registered with `registerSpriteSet` gets its sprite set, and the provider's `TextureSheetParticle`
+      spawned 0.3 a tick downward falls to the block below and stops on it. Its quad faces the
+      camera with the sprite's uv, white and opaque, lit by the level's light where it is. It is
+      gone once its life is over. A type given vanilla's provider goes to the game, and nothing is
+      unmapped.
+    - An animated particle living 10 ticks takes its frames by age (0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2
+      over 11 ticks). Past half its life it fades out, and its red moves a fifth of the way to its
+      fade colour each tick. It goes at age 11, and it is fully bright.
+    - `Math.random` draws a new number each time.
+    - A call on null of `Particle.render`, `getRenderType`, `SpriteSet.get` or `createParticle`
+      throws `NullPointerException`.
+  - In the game (`p121scene.sh`, Create, offscreen at 1280 × 720): three encased fans side by
+    side, each turned by a creative motor, blow east along a black wall. Fire stands in front of
+    the second and soul fire in front of the third.
+    - Along the plain current, faint white wisps drift east: Create's own colour at alpha 0.25.
+      Past the fire they turn dark grey and opaque, past the soul fire teal and black. Vanilla's
+      smoke from the processing types rises among them, drawn by the game.
+    - The wisps move between frames two ticks apart, and hold still on the pause screen. Once the
+      motors are taken away, the currents end and the wisps are gone within three seconds.
+    - Nothing threw. Nothing about particles was unmapped.
+    - Seen, not from the particles: standing in the smoking current, the player wasn't set on
+      fire. Create's `SmokingType.affectEntity` calls `Entity.fireImmune` and
+      `igniteForSeconds`, unmapped on a server's player. `DynamicTexture` (`<init>`, `bind`,
+      `setFilter`) is unmapped too.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

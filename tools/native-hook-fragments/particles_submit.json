@@ -1,0 +1,14 @@
+{
+  "hooks": [
+    {
+      "name": "particles_submit",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_particles_submit",
+      "side": "client"
+    }
+  ],
+  "rust_summary": "a client draw hook for a mod's own particles (`native_particles_submit`), with the limit the game's particles keep (`native_particle_admitted`).",
+  "doc_summary": "`native_particles_submit(camera, partial, quads)` lets a client mod draw its own particles with the game's, once a frame: push each face into `quads` (`NativeParticleQuad`: its corners relative to `camera`, a sprite of the atlas and the place in it of each corner, each corner's colour, the light, and whether it blends after the translucent blocks). A translated NeoForge mod's particles draw this way, each by its own `Particle.render`. Before making a particle, ask `native_particle_admitted(at, force, decreased)`: the distance and Particles setting limit that vanilla's `LevelRenderer.addParticleInternal` applies. Bundles need \"hooks\": @API:particles_submit@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_hooks.rs"
+  ]
+}
