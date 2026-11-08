@@ -188,12 +188,16 @@ pub fn api_as_item(rt: &mut Rt, v: V) -> V {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     matches!(
         owner,
         TAB | BUILDER | OUTPUT | CONTENTS_EVENT | PARAMETERS | "net/minecraft/world/flag/FeatureFlagSet" | "net/minecraft/world/flag/FeatureFlagRegistry" | "net/minecraft/world/item/BlockItem"
     ) || name == "asItem"
+        || (name == "enabledFeatures" && desc == FLAGS && owner.starts_with("net/minecraft/"))
 }
+
+/// `enabledFeatures()`'s descriptor.
+const FLAGS: &str = "()Lnet/minecraft/world/flag/FeatureFlagSet;";
 
 /// A new tab builder's state: the tabs it comes before and after, none yet.
 fn new_builder(rt: &mut Rt, b: V) {
@@ -303,6 +307,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (CONTENTS_EVENT | PARAMETERS, "hasPermissions") => V::I(0),
         (CONTENTS_EVENT | PARAMETERS, "getFlags" | "enabledFeatures") => rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet")),
         ("net/minecraft/world/flag/FeatureFlagSet", "contains" | "isSubsetOf") => V::I(1),
+        // The features a level, a connection or a command source has on (`level.enabledFeatures()`):
+        // that one set.
+        (_, "enabledFeatures") if desc == FLAGS => rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet")),
         ("net/minecraft/world/flag/FeatureFlagRegistry", "allFlags" | "subset" | "fromNames") => {
             rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet"))
         }

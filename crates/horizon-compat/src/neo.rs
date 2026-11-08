@@ -406,6 +406,80 @@ fn registry_name_of(rt: &Rt, registry: &str, obj: V) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Whether entry `id` of `registry` is in its tag `tag` (a `TagKey`), as the game's loaded tags
+/// hold them; None for a registry whose tags this runtime can't ask.
+pub(crate) fn in_tag(rt: &mut Rt, registry: &str, id: &str, tag: V) -> Option<bool> {
+    let location = rt
+        .str_of(rt.get_field(tag, "$location"))
+        .unwrap_or("")
+        .to_owned();
+    Some(match registry.trim_start_matches("minecraft:") {
+        "block" => rt.host().is_some_and(|h| h.block_in_tag(id, &location)),
+        "fluid" => crate::fluids::in_tag(rt, tag, id),
+        "item" => crate::recipes::item_in_tag(rt, id, &location),
+        "biome" => rt.host().is_some_and(|h| h.biome_in_tag(id, &location)),
+        "damage_type" => crate::damage::in_tag(rt, id, &location),
+        "entity_type" => rt
+            .host()
+            .is_some_and(|h| h.entity_type_in_tag(id, &location)),
+        _ => return None,
+    })
+}
+
+/// Vanilla's defaulted registries (`BuiltInRegistries.registerDefaulted`) and the keys of their
+/// defaults.
+const DEFAULT_KEYS: [(&str, &str); 10] = [
+    ("game_event", "minecraft:step"),
+    ("fluid", "minecraft:empty"),
+    ("block", "minecraft:air"),
+    ("entity_type", "minecraft:pig"),
+    ("item", "minecraft:air"),
+    ("chunk_status", "minecraft:empty"),
+    ("villager_type", "minecraft:plains"),
+    ("villager_profession", "minecraft:none"),
+    ("memory_module_type", "minecraft:dummy"),
+    ("sensor_type", "minecraft:dummy"),
+];
+
+/// The key of `registry`'s default: vanilla's, or the one a mod's `RegistryBuilder.defaultKey` set;
+/// None for a registry with no default.
+fn default_key(rt: &Rt, registry: &str) -> Option<String> {
+    let set = rt
+        .interned
+        .get(&format!("default-key/{registry}"))
+        .and_then(|&v| rt.str_of(v))
+        .map(str::to_owned);
+    set.or_else(|| {
+        DEFAULT_KEYS
+            .iter()
+            .find(|(r, _)| *r == registry.trim_start_matches("minecraft:"))
+            .map(|(_, k)| (*k).to_owned())
+    })
+}
+
+/// The raw id of `registry`'s entry `key`, numbered as this runtime is first asked (a defaulted
+/// registry's default first, 0 as vanilla's air and empty fluid are), each one kept.
+fn raw_id(rt: &mut Rt, registry: &str, key: &str) -> i32 {
+    if let Some(v) = rt.interned.get(&format!("raw-id/{registry}/{key}")) {
+        return v.i();
+    }
+    let count = format!("raw-ids/{registry}");
+    if !rt.interned.contains_key(&count) {
+        rt.interned.insert(count.clone(), V::I(0));
+        if let Some(default) = default_key(rt, registry).filter(|d| d != key) {
+            raw_id(rt, registry, &default);
+        }
+    }
+    let id = rt.interned.get(&count).map_or(0, |v| v.i());
+    rt.interned.insert(count, V::I(id + 1));
+    rt.interned
+        .insert(format!("raw-id/{registry}/{key}"), V::I(id));
+    let name = rt.string(key);
+    rt.interned
+        .insert(format!("raw-name/{registry}/{id}"), name);
+    id
+}
+
 /// A registry lookup's id: a `ResourceLocation` (`ns:path`) or a `ResourceKey` (`registry#ns:path`).
 fn name_in(rt: &Rt, v: V) -> String {
     let s = rt.str_of(v).unwrap_or("");
@@ -558,10 +632,15 @@ fn make_registry(rt: &mut Rt, builder: V) -> V {
     let registry = rt.get_field(builder, "$key");
     if let Some(name) = rt.str_of(registry).map(str::to_owned)
         && !name.is_empty()
-        && !rt.custom_registries.contains(&name)
-        && !REGISTRIES.contains(&name.as_str())
     {
-        rt.custom_registries.push(name);
+        // `defaultKey(id)`: what the registry gives for what it doesn't hold.
+        let default = rt.get_field(builder, "$default");
+        if default.r() != 0 {
+            rt.interned.insert(format!("default-key/{name}"), default);
+        }
+        if !rt.custom_registries.contains(&name) && !REGISTRIES.contains(&name.as_str()) {
+            rt.custom_registries.push(name);
+        }
     }
     let callbacks = match rt.heap.get(rt.get_field(builder, "$bake").r() as usize).map(|o| &o.data) {
         Some(Data::List(v)) => v.clone(),
@@ -808,6 +887,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             a(0)
         }
         (REGISTRY_BUILDER, "create") => make_registry(rt, a(0)),
+        // `defaultKey(ResourceLocation | ResourceKey)`: the default's id, kept for the registry.
+        (REGISTRY_BUILDER, "defaultKey") => {
+            let id = name_in(rt, a(1));
+            let id = rt.string(&id);
+            rt.put_field(a(0), "$default", id);
+            a(0)
+        }
         // Its other settings (`sync`, `withIntrusiveHolders`, `maxId`, `defaultKey`...): nothing here
         // syncs registries or caps their ids.
         (REGISTRY_BUILDER, _) if desc.ends_with(")Lnet/neoforged/neoforge/registries/RegistryBuilder;") => a(0),
@@ -1186,10 +1272,35 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, n) if is_registry(o) && rt.str_of(a(0)).is_some() && !matches!(n, "register" | "registerForHolder") => {
             let reg = rt.str_of(a(0)).unwrap_or("").to_owned();
             match n {
-                "getKey" => match registry_name_of(rt, &reg, a(1)) {
+                // A defaulted registry names what it doesn't hold by its default key
+                // (`DefaultedMappedRegistry.getKey`); `getKeyOrNull` gives null for it.
+                "getKey" | "getKeyOrNull" => match registry_name_of(rt, &reg, a(1))
+                    .or_else(|| (n == "getKey").then(|| default_key(rt, &reg)).flatten())
+                {
                     Some(k) => rt.string(&k),
                     None => V::NULL,
                 },
+                "getDefaultKey" => match default_key(rt, &reg) {
+                    Some(k) => rt.string(&k),
+                    None => V::NULL,
+                },
+                // The raw ids it numbers its entries by (`getId(value)`, `byId(id)`): -1 and null
+                // for what it doesn't hold, a defaulted registry's default's instead.
+                "getId" if desc.ends_with(")I") => {
+                    let named = registry_name_of(rt, &reg, a(1)).or_else(|| default_key(rt, &reg));
+                    V::I(named.map_or(-1, |k| raw_id(rt, &reg, &k)))
+                }
+                "byId" => {
+                    let numbered = rt
+                        .interned
+                        .get(&format!("raw-name/{reg}/{}", a(1).i()))
+                        .and_then(|&k| rt.str_of(k))
+                        .map(str::to_owned);
+                    match numbered.or_else(|| default_key(rt, &reg)) {
+                        Some(k) => registry_get(rt, &reg, &k),
+                        None => V::NULL,
+                    }
+                }
                 // `containsValue(value)`: whether the value is registered in it (Create keeps only
                 // the custom-rendered items that are).
                 "containsValue" => V::I(registry_name_of(rt, &reg, a(1)).is_some() as i32),
@@ -1276,10 +1387,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 // An intrusive holder (Create's `ContraptionType.holder`): made with its value before
                 // the value is registered; its key is the name the value is registered under then.
                 "createIntrusiveHolder" => registry_holder(rt, &reg, "", a(1)),
-                // A tag's members: tags from data files aren't read yet, so every tag of a registry
-                // is empty here (fluid tags hold vanilla's water and lava: `fluids.rs`).
-                "getTagOrEmpty" => crate::jutil::new_list(rt, Vec::new()),
-                "getTag" => optional(rt, V::NULL),
+                // A tag of it: its set (`getOrCreateTag`), whose members are what the game's tags
+                // hold (`worldgen::tag_set`); those members (`getTagOrEmpty`); the set where it
+                // has some (`getTag`: a tag the game doesn't have is none).
+                "getOrCreateTag" => crate::worldgen::tag_set(rt, &reg, a(1)),
+                "getTagOrEmpty" => {
+                    let set = crate::worldgen::tag_set(rt, &reg, a(1));
+                    let holders = crate::worldgen::set_holders(rt, set);
+                    crate::jutil::new_list(rt, holders)
+                }
+                "getTag" => {
+                    let set = crate::worldgen::tag_set(rt, &reg, a(1));
+                    let held = !crate::worldgen::set_holders(rt, set).is_empty();
+                    optional(rt, if held { set } else { V::NULL })
+                }
                 _ => return None,
             }
         }
@@ -1331,16 +1452,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 // In a tag of its registry, as the game's loaded tags hold them.
                 "is" if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
                     let tag_registry = rt.str_of(rt.get_field(a(1), "$registry")).unwrap_or("").trim_start_matches("minecraft:").to_owned();
-                    let tag = rt.str_of(rt.get_field(a(1), "$location")).unwrap_or("").to_owned();
-                    let inside = tag_registry == reg.trim_start_matches("minecraft:")
-                        && match tag_registry.as_str() {
-                            "block" => rt.host().is_some_and(|h| h.block_in_tag(&id, &tag)),
-                            "fluid" => crate::fluids::in_tag(rt, a(1), &id),
-                            "item" => crate::recipes::item_in_tag(rt, &id, &tag),
-                            "biome" => rt.host().is_some_and(|h| h.biome_in_tag(&id, &tag)),
-                            "damage_type" => crate::damage::in_tag(rt, &id, &tag),
-                            _ => false,
-                        };
+                    let inside = tag_registry == reg.trim_start_matches("minecraft:") && in_tag(rt, &tag_registry, &id, a(1)).unwrap_or(false);
                     V::I(inside as i32)
                 }
                 "is" => V::I((name_in(rt, a(1)) == id) as i32),
@@ -2833,9 +2945,9 @@ mod tests {
         assert_eq!(key(&mut rt, "ITEM", door).as_deref(), Some("minecraft:spruce_door"));
         let stone = crate::api::block(&mut rt, "minecraft:stone");
         assert_eq!(key(&mut rt, "BLOCK", stone).as_deref(), Some("minecraft:stone"));
-        // Not an item: no key.
+        // Not an item: the default's key, as a defaulted registry names what it doesn't hold.
         let other = rt.string("minecraft:stone");
-        assert_eq!(key(&mut rt, "ITEM", other), None);
+        assert_eq!(key(&mut rt, "ITEM", other).as_deref(), Some("minecraft:air"));
         // `containsValue`: whether it is registered there (Create keeps the custom-rendered items
         // that are, and drops the rest).
         let contains = |rt: &mut Rt, v: V| {
@@ -2879,6 +2991,170 @@ mod tests {
         let ev = rt.new_object(REGISTER_EVENT);
         rt.put_field(ev, "$registry", key);
         assert_eq!(call(&mut rt, "net/neoforged/neoforge/registries/RegisterEvent.getRegistry.()Lnet/minecraft/core/Registry;", &[ev]), Some(registry));
+    }
+
+    /// Registries number and default as 1.21.1's (`DefaultedMappedRegistry`): the item registry's
+    /// default is air, numbered 0; an entry keeps its number and is found by it; what the
+    /// registry doesn't hold is named and numbered as air (`getKeyOrNull`: null), and an unknown
+    /// number is air. A mod's registry built with `defaultKey` has that default; one without has
+    /// none (-1, null).
+    #[test]
+    fn registries_number_their_entries_and_default_as_vanillas_do() {
+        const ITEMS: &str = "net/minecraft/core/registries/BuiltInRegistries.ITEM";
+        const GET_ID: &str = "net/minecraft/core/DefaultedRegistry.getId.(Ljava/lang/Object;)I";
+        const BY_ID: &str = "net/minecraft/core/DefaultedRegistry.byId.(I)Ljava/lang/Object;";
+        const GET_KEY: &str = "net/minecraft/core/DefaultedRegistry.getKey.(Ljava/lang/Object;)Lnet/minecraft/resources/ResourceLocation;";
+        const KEY_OR_NULL: &str = "net/minecraft/core/DefaultedRegistry.getKeyOrNull.(Ljava/lang/Object;)Lnet/minecraft/resources/ResourceLocation;";
+        const DEFAULT_KEY: &str = "net/minecraft/core/DefaultedRegistry.getDefaultKey.()Lnet/minecraft/resources/ResourceLocation;";
+        const REGISTRY_ID: &str = "net/minecraft/core/Registry.getId.(Ljava/lang/Object;)I";
+        const REGISTRY_BY_ID: &str = "net/minecraft/core/Registry.byId.(I)Ljava/lang/Object;";
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+        let text = |rt: &Rt, v: V| rt.str_of(v).map(str::to_owned);
+        let items = crate::api::get_static(&mut rt, ITEMS);
+        let stone = crate::api::get_static(&mut rt, "net/minecraft/world/item/Items.STONE");
+        let air = crate::api::get_static(&mut rt, "net/minecraft/world/item/Items.AIR");
+        let default = c(&mut rt, DEFAULT_KEY, &[items]);
+        assert_eq!(text(&rt, default).as_deref(), Some("minecraft:air"));
+        let stone_id = c(&mut rt, GET_ID, &[items, stone]);
+        assert_eq!(c(&mut rt, GET_ID, &[items, air]), V::I(0));
+        assert_ne!(stone_id, V::I(0));
+        assert_eq!(c(&mut rt, GET_ID, &[items, stone]), stone_id, "kept");
+        assert_eq!(c(&mut rt, BY_ID, &[items, stone_id]), stone);
+        let thing = rt.new_object("t/Thing");
+        assert_eq!(c(&mut rt, GET_ID, &[items, thing]), V::I(0));
+        let named = c(&mut rt, GET_KEY, &[items, thing]);
+        assert_eq!(text(&rt, named).as_deref(), Some("minecraft:air"));
+        assert_eq!(c(&mut rt, KEY_OR_NULL, &[items, thing]), V::NULL);
+        assert_eq!(c(&mut rt, BY_ID, &[items, V::I(4096)]), air);
+
+        // A mod's registries, one with a default and one without.
+        let make = |rt: &mut Rt, name: &str, default: Option<&str>| {
+            let loc = rt.string(name);
+            let key = c(
+                rt,
+                "net/minecraft/resources/ResourceKey.createRegistryKey.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;",
+                &[loc],
+            );
+            let builder = rt.new_object(REGISTRY_BUILDER);
+            c(
+                rt,
+                "net/neoforged/neoforge/registries/RegistryBuilder.<init>.(Lnet/minecraft/resources/ResourceKey;)V",
+                &[builder, key],
+            );
+            if let Some(d) = default {
+                let d = rt.string(d);
+                c(
+                    rt,
+                    "net/neoforged/neoforge/registries/RegistryBuilder.defaultKey.(Lnet/minecraft/resources/ResourceLocation;)Lnet/neoforged/neoforge/registries/RegistryBuilder;",
+                    &[builder, d],
+                );
+            }
+            c(
+                rt,
+                "net/neoforged/neoforge/registries/RegistryBuilder.create.()Lnet/minecraft/core/Registry;",
+                &[builder],
+            )
+        };
+        let shapes = make(&mut rt, "t:shape", Some("t:cube"));
+        let colours = make(&mut rt, "t:colour", None);
+        let cube = rt.new_object("t/Cube");
+        let id = rt.string("t:cube");
+        c(
+            &mut rt,
+            "net/minecraft/core/Registry.register.(Lnet/minecraft/core/Registry;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[shapes, id, cube],
+        );
+        let default = c(
+            &mut rt,
+            "net/minecraft/core/DefaultedRegistry.getDefaultKey.()Lnet/minecraft/resources/ResourceLocation;",
+            &[shapes],
+        );
+        assert_eq!(text(&rt, default).as_deref(), Some("t:cube"));
+        assert_eq!(c(&mut rt, REGISTRY_BY_ID, &[shapes, V::I(7)]), cube);
+        assert_eq!(c(&mut rt, REGISTRY_ID, &[colours, thing]), V::I(-1));
+        assert_eq!(c(&mut rt, REGISTRY_BY_ID, &[colours, V::I(0)]), V::NULL);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A registry's tag as a set (`getOrCreateTag`, `getTag`, `getTagOrEmpty`) holds what the game's
+    /// tags hold: the item tag's items, listed; a block's membership in a block tag, asked.
+    #[test]
+    fn a_registrys_tags_hold_what_the_games_tags_hold() {
+        const OR_CREATE: &str = "net/minecraft/core/DefaultedRegistry.getOrCreateTag.(Lnet/minecraft/tags/TagKey;)Lnet/minecraft/core/HolderSet$Named;";
+        const GET_TAG: &str =
+            "net/minecraft/core/Registry.getTag.(Lnet/minecraft/tags/TagKey;)Ljava/util/Optional;";
+        const OR_EMPTY: &str = "net/minecraft/core/Registry.getTagOrEmpty.(Lnet/minecraft/tags/TagKey;)Ljava/lang/Iterable;";
+        const WRAP: &str = "net/minecraft/core/Registry.wrapAsHolder.(Ljava/lang/Object;)Lnet/minecraft/core/Holder;";
+        const CONTAINS: &str =
+            "net/minecraft/core/HolderSet.contains.(Lnet/minecraft/core/Holder;)Z";
+        const SIZE: &str = "net/minecraft/core/HolderSet.size.()I";
+        const VALUE: &str = "net/minecraft/core/Holder.value.()Ljava/lang/Object;";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = crate::host::MemoryHost::default();
+        host.item_tags.insert(
+            "minecraft:logs".into(),
+            vec!["minecraft:oak_log".into(), "minecraft:birch_log".into()],
+        );
+        host.block_tags
+            .insert("minecraft:logs".into(), vec!["minecraft:oak_log".into()]);
+        rt.with_host(&mut host, |rt| {
+            let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+            let items =
+                crate::api::get_static(rt, "net/minecraft/core/registries/BuiltInRegistries.ITEM");
+            let blocks =
+                crate::api::get_static(rt, "net/minecraft/core/registries/BuiltInRegistries.BLOCK");
+            let item_logs = crate::api::get_static(rt, "net/minecraft/tags/ItemTags.LOGS");
+            let block_logs = crate::api::get_static(rt, "net/minecraft/tags/BlockTags.LOGS");
+            let set = c(rt, OR_CREATE, &[items, item_logs]);
+            assert_eq!(
+                c(rt, OR_CREATE, &[items, item_logs]),
+                set,
+                "one set per tag"
+            );
+            assert_eq!(c(rt, SIZE, &[set]), V::I(2));
+            let (oak, stone) = (
+                crate::api::get_static(rt, "net/minecraft/world/item/Items.OAK_LOG"),
+                crate::api::get_static(rt, "net/minecraft/world/item/Items.STONE"),
+            );
+            let (oak, stone) = (c(rt, WRAP, &[items, oak]), c(rt, WRAP, &[items, stone]));
+            assert_eq!(
+                (c(rt, CONTAINS, &[set, oak]), c(rt, CONTAINS, &[set, stone])),
+                (V::I(1), V::I(0))
+            );
+            let listed = c(rt, OR_EMPTY, &[items, item_logs]);
+            let first = crate::jutil::elements(rt, listed)[0];
+            let value = c(rt, VALUE, &[first]);
+            assert_eq!(
+                crate::api_common::item_like_name(rt, value),
+                "minecraft:oak_log"
+            );
+            let found = c(rt, GET_TAG, &[items, item_logs]);
+            assert_eq!(rt.get_field(found, "value"), set);
+            let planks = crate::fluids::tag_key(rt, "item", "t:nothing");
+            let none = c(rt, GET_TAG, &[items, planks]);
+            assert_eq!(
+                rt.get_field(none, "value"),
+                V::NULL,
+                "a tag the game doesn't have"
+            );
+            let block_set = c(rt, OR_CREATE, &[blocks, block_logs]);
+            let (oak, stone) = (
+                crate::api::get_static(rt, "net/minecraft/world/level/block/Blocks.OAK_LOG"),
+                crate::api::get_static(rt, "net/minecraft/world/level/block/Blocks.STONE"),
+            );
+            let (oak, stone) = (c(rt, WRAP, &[blocks, oak]), c(rt, WRAP, &[blocks, stone]));
+            assert_eq!(
+                (
+                    c(rt, CONTAINS, &[block_set, oak]),
+                    c(rt, CONTAINS, &[block_set, stone])
+                ),
+                (V::I(1), V::I(0))
+            );
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

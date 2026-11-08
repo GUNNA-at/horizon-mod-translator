@@ -11,6 +11,10 @@
 use crate::vanilla_records::{DATA_CLASSES, ENUMS, ENUM_CONSTANTS, FACTORIES, RECORDS};
 use crate::{Data, Rt, V};
 
+/// `EntityAttachments`: a data class of the table's that the runtime builds through it
+/// ([`make_data`]: an entity size's attachment points).
+pub(crate) const ENTITY_ATTACHMENTS: &str = "net/minecraft/world/entity/EntityAttachments";
+
 /// The record `class`'s components (`name`, descriptor), in declaration order.
 fn components(class: &str) -> Option<Vec<(&'static str, &'static str)>> {
     let i = RECORDS.binary_search_by(|(c, _)| (*c).cmp(class)).ok()?;

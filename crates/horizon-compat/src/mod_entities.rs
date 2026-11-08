@@ -138,6 +138,77 @@ fn size(rt: &Rt, ty: V) -> (f64, f64) {
     (if matches!(w, V::F(_)) { f64::from(w.f()) } else { 0.6 }, if matches!(h, V::F(_)) { f64::from(h.f()) } else { 1.8 })
 }
 
+/// `EntityAttachment`'s constants, in order, with where each is when an entity type doesn't say
+/// (its fallback, as a fraction of the height: at the top, at the feet, at the top, at the centre).
+const ATTACHMENTS: [(&str, f64); 4] = [
+    ("PASSENGER", 1.0),
+    ("VEHICLE", 0.0),
+    ("NAME_TAG", 1.0),
+    ("WARDEN_CHEST", 0.5),
+];
+const ATTACHMENT: &str = "net/minecraft/world/entity/EntityAttachment";
+const SHIFT_KEY_DOWN: (&str, &str) = (
+    "net/minecraft/world/entity/Entity.isShiftKeyDown.()Z",
+    "isShiftKeyDown.()Z",
+);
+const ATTACHMENTS_DESC: &str = "(Ljava/util/Map;)V";
+
+/// `new EntityDimensions(width, height, fixed)`: vanilla's default eye height and attachment
+/// points (`EntityAttachments.createDefault`: each attachment's fallback point).
+fn dimensions(rt: &mut Rt, w: f32, h: f32, fixed: bool) -> V {
+    let map = rt.alloc("java/util/EnumMap", Data::Table(Default::default()));
+    for (i, &(name, at)) in ATTACHMENTS.iter().enumerate() {
+        let key = api::api_enum(rt, ATTACHMENT, name, i as i32);
+        let point = crate::api_common::vec3(rt, 0.0, f64::from(h) * at, 0.0);
+        let points = jutil::new_list(rt, vec![point]);
+        jutil::table_put(rt, map, key, points);
+    }
+    let attachments = crate::records::make_data(
+        rt,
+        crate::records::ENTITY_ATTACHMENTS,
+        ATTACHMENTS_DESC,
+        &[map],
+    );
+    crate::records::make(
+        rt,
+        DIMENSIONS,
+        &[
+            V::F(w),
+            V::F(h),
+            V::F(h * 0.85),
+            attachments,
+            V::I(i32::from(fixed)),
+        ],
+    )
+}
+
+/// `EntityAttachments.scale(x, y, z)`: every point scaled.
+fn scale_attachments(rt: &mut Rt, attachments: V, by: [f32; 3]) -> V {
+    let held = rt.get_field(attachments, "attachments");
+    if held.r() == 0 {
+        return attachments;
+    }
+    let map = rt.alloc("java/util/EnumMap", Data::Table(Default::default()));
+    for (key, points) in jutil::table_pairs(rt, held) {
+        let scaled: Vec<V> = jutil::elements(rt, points)
+            .into_iter()
+            .map(|p| {
+                let [x, y, z] = crate::api_common::xyz(rt, p);
+                crate::api_common::vec3(
+                    rt,
+                    x * f64::from(by[0]),
+                    y * f64::from(by[1]),
+                    z * f64::from(by[2]),
+                )
+            })
+            .collect();
+        let list = jutil::new_list(rt, scaled);
+        jutil::table_put(rt, map, key, list);
+    }
+    let class = rt.class_of(attachments);
+    crate::records::make_data(rt, class, ATTACHMENTS_DESC, &[map])
+}
+
 /// `EntityDimensions.makeBoundingBox(position)`: the type's box, centred on x and z, from y up.
 fn make_box(rt: &Rt, e: V, p: [f64; 3]) -> [f64; 6] {
     let (w, h) = size(rt, rt.get_field(e, "$type"));
@@ -354,6 +425,8 @@ pub(crate) fn type_id(rt: &Rt, ty: V) -> Option<&str> {
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(name, "addFreshEntity" | "getEntity" | "getPlayerByUUID")
         || matches!(owner, TYPE_BUILDER | ENTITY_TYPE | SYNCHED | SYNCHED_BUILDER | ACCESSOR | ENTITY | "net/minecraft/network/syncher/EntityDataSerializer")
+        || (owner == DIMENSIONS && matches!(name, "fixed" | "scalable" | "scale" | "withEyeHeight" | "makeBoundingBox"))
+        || (name == "isSuppressingBounce" && owner.starts_with("net/minecraft/"))
         || (owner == MOB_CATEGORY && matches!(name, "getName" | "getSerializedName" | "getMaxInstancesPerChunk" | "isFriendly" | "isPersistent" | "getDespawnDistance" | "getNoDespawnDistance"))
         || crate::projectiles::is_projectile_class(owner)
 }
@@ -428,12 +501,80 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     {
         return Some(by_uuid(rt, a(1), name == "getPlayerByUUID"));
     }
+    // `Entity.isSuppressingBounce()`, for any entity: 1.21.1's is its `isShiftKeyDown()` (a
+    // sneaking player doesn't bounce on slime, a bed or Create's seats and sails).
+    if name == "isSuppressingBounce" && desc == "()Z" && a(0).r() != 0 {
+        return Some(api::virtual_call(rt, SHIFT_KEY_DOWN, &[a(0)]));
+    }
     match (owner, name) {
         (TYPE_BUILDER, "of") => {
             let b = rt.new_object(TYPE_BUILDER);
             rt.put_field(b, "$factory", a(0));
             rt.put_field(b, "$category", a(1));
             Some(b)
+        }
+        // `EntityDimensions` (a record: width, height, eye height, attachments, fixed): fixed or
+        // scalable at vanilla's default eye height (85% of the height) and attachment points,
+        // scaled (a scalable one, and only by other than 1), with another eye height, and its box
+        // at a position (as floats: half the width out, the height up).
+        (DIMENSIONS, "fixed" | "scalable")
+            if desc == "(FF)Lnet/minecraft/world/entity/EntityDimensions;" =>
+        {
+            Some(dimensions(rt, a(0).f(), a(1).f(), name == "fixed"))
+        }
+        (DIMENSIONS, "scale") => {
+            let (x, y) = if desc.starts_with("(FF)") {
+                (a(1).f(), a(2).f())
+            } else {
+                (a(1).f(), a(1).f())
+            };
+            let d = a(0);
+            if rt.get_field(d, "fixed").i() != 0 || (x == 1.0 && y == 1.0) {
+                return Some(d);
+            }
+            let [w, h, eye] = ["width", "height", "eyeHeight"].map(|f| rt.get_field(d, f).f());
+            let attachments = scale_attachments(rt, rt.get_field(d, "attachments"), [x, y, x]);
+            Some(crate::records::make(
+                rt,
+                DIMENSIONS,
+                &[
+                    V::F(w * x),
+                    V::F(h * y),
+                    V::F(eye * y),
+                    attachments,
+                    V::I(0),
+                ],
+            ))
+        }
+        (DIMENSIONS, "withEyeHeight") => {
+            let d = a(0);
+            let [w, h, attachments, fixed] =
+                ["width", "height", "attachments", "fixed"].map(|f| rt.get_field(d, f));
+            Some(crate::records::make(
+                rt,
+                DIMENSIONS,
+                &[w, h, a(1), attachments, fixed],
+            ))
+        }
+        (DIMENSIONS, "makeBoundingBox") => {
+            let p = if desc.starts_with("(Lnet/minecraft/world/phys/Vec3;") {
+                crate::api_common::xyz(rt, a(1))
+            } else {
+                [a(1).d(), a(2).d(), a(3).d()]
+            };
+            let half = f64::from(rt.get_field(a(0), "width").f() / 2.0);
+            let h = f64::from(rt.get_field(a(0), "height").f());
+            Some(crate::shapes::aabb(
+                rt,
+                [
+                    p[0] - half,
+                    p[1],
+                    p[2] - half,
+                    p[0] + half,
+                    p[1] + h,
+                    p[2] + half,
+                ],
+            ))
         }
         (TYPE_BUILDER, "sized") => {
             rt.put_field(a(0), "$width", a(1));
@@ -490,12 +631,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::I(r) => r,
             _ => 3,
         })),
+        // What `sized(width, height)` made: `EntityDimensions.scalable`.
         (ENTITY_TYPE, "getDimensions") => {
             let (w, h) = size(rt, a(0));
-            let d = rt.new_object(DIMENSIONS);
-            rt.put_field(d, "width", V::F(w as f32));
-            rt.put_field(d, "height", V::F(h as f32));
-            Some(d)
+            Some(dimensions(rt, w as f32, h as f32, false))
         }
         // An entity type tag, as the game's loaded tags hold it (`EntityTypeTags.ARTHROPOD`, a mod's
         // own).
@@ -848,6 +987,14 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             if rt.get_field(e, "$fire").i() < ticks {
                 rt.put_field(e, "$fire", V::I(ticks));
             }
+            V::Void
+        }
+        // Its shared flag for the shift key (`setShiftKeyDown`), off until set.
+        "isShiftKeyDown" if desc == "()Z" => {
+            V::I(i32::from(rt.get_field(e, "$shiftKeyDown").i() != 0))
+        }
+        "setShiftKeyDown" if desc == "(Z)V" => {
+            rt.put_field(e, "$shiftKeyDown", a(1));
             V::Void
         }
         // As its last base tick found it.
@@ -1592,6 +1739,87 @@ mod tests {
         rt.put_field(ty, "$range", V::I(4));
         rt.registered.insert(("entity_type".into(), "test:cart".into()), ty);
         (rt, ty)
+    }
+
+    /// Sizes as vanilla's `EntityDimensions` makes them: the eye at 85% of the height, a fixed
+    /// size the same when scaled, a scalable one's width, height and eye height scaled by the
+    /// factors (by 1, the same size), another eye height kept, and a size's box standing on its
+    /// position, centred on x and z.
+    #[test]
+    fn entity_sizes_scale_and_make_boxes_as_vanillas() {
+        const FIXED: &str = "net/minecraft/world/entity/EntityDimensions.fixed.(FF)Lnet/minecraft/world/entity/EntityDimensions;";
+        const SCALABLE: &str = "net/minecraft/world/entity/EntityDimensions.scalable.(FF)Lnet/minecraft/world/entity/EntityDimensions;";
+        const SCALE: &str = "net/minecraft/world/entity/EntityDimensions.scale.(F)Lnet/minecraft/world/entity/EntityDimensions;";
+        const SCALE_XY: &str = "net/minecraft/world/entity/EntityDimensions.scale.(FF)Lnet/minecraft/world/entity/EntityDimensions;";
+        const EYE: &str = "net/minecraft/world/entity/EntityDimensions.withEyeHeight.(F)Lnet/minecraft/world/entity/EntityDimensions;";
+        const BOX: &str = "net/minecraft/world/entity/EntityDimensions.makeBoundingBox.(DDD)Lnet/minecraft/world/phys/AABB;";
+        const SIZE: [&str; 3] = [
+            "net/minecraft/world/entity/EntityDimensions.width.()F",
+            "net/minecraft/world/entity/EntityDimensions.height.()F",
+            "net/minecraft/world/entity/EntityDimensions.eyeHeight.()F",
+        ];
+        let mut rt = Rt::new();
+        crate::install();
+        let size = |rt: &mut Rt, d: V| SIZE.map(|k| api::call(rt, k, &[d]).f());
+        let near =
+            |got: [f32; 3], want: [f32; 3]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-6);
+        let fixed = api::call(&mut rt, FIXED, &[V::F(0.5), V::F(1.0)]);
+        assert!(
+            near(size(&mut rt, fixed), [0.5, 1.0, 0.85]),
+            "{:?}",
+            size(&mut rt, fixed)
+        );
+        assert_eq!(api::call(&mut rt, SCALE, &[fixed, V::F(2.0)]), fixed);
+        let scalable = api::call(&mut rt, SCALABLE, &[V::F(0.9), V::F(0.9)]);
+        let twice = api::call(&mut rt, SCALE, &[scalable, V::F(2.0)]);
+        assert!(
+            near(size(&mut rt, twice), [1.8, 1.8, 1.53]),
+            "{:?}",
+            size(&mut rt, twice)
+        );
+        let squat = api::call(&mut rt, SCALE_XY, &[scalable, V::F(2.0), V::F(0.5)]);
+        assert!(
+            near(size(&mut rt, squat), [1.8, 0.45, 0.3825]),
+            "{:?}",
+            size(&mut rt, squat)
+        );
+        assert_eq!(
+            api::call(&mut rt, SCALE_XY, &[scalable, V::F(1.0), V::F(1.0)]),
+            scalable
+        );
+        let low = api::call(&mut rt, EYE, &[fixed, V::F(0.2)]);
+        assert!(near(size(&mut rt, low), [0.5, 1.0, 0.2]));
+        assert_eq!(
+            api::call(&mut rt, SCALE, &[low, V::F(3.0)]),
+            low,
+            "still fixed"
+        );
+        let b = api::call(&mut rt, BOX, &[fixed, V::D(1.0), V::D(2.0), V::D(3.0)]);
+        assert_eq!(
+            crate::shapes::aabb_of(&rt, b),
+            [0.75, 2.0, 2.75, 1.25, 3.0, 3.25]
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// An entity that sneaks doesn't bounce (`isSuppressingBounce`, 1.21.1's sneaking): a mod's
+    /// seat asks before it throws one up.
+    #[test]
+    fn a_sneaking_entity_suppresses_bouncing() {
+        const INIT: &str = "net/minecraft/world/entity/Entity.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V";
+        const SNEAK: &str = "net/minecraft/world/entity/Entity.setShiftKeyDown.(Z)V";
+        const SUPPRESSING: &str = "net/minecraft/world/entity/Entity.isSuppressingBounce.()Z";
+        let (mut rt, ty) = runtime();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let cart = rt.new_object(CART);
+            api::call(rt, INIT, &[cart, ty, level]);
+            assert_eq!(api::call(rt, SUPPRESSING, &[cart]), V::I(0));
+            api::call(rt, SNEAK, &[cart, V::I(1)]);
+            assert_eq!(api::call(rt, SUPPRESSING, &[cart]), V::I(1));
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A mod's entity reads the fields it takes from `Entity` (`this.noPhysics`, as Create's

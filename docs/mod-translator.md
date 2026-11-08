@@ -7246,6 +7246,56 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     a server, not on a client; a block event reaching an entity block's block entity and not a
     plain block's, a client level's model data and the null one thrown; widgets narrating into
     their screen's output, `joinForNarration`), translator 22.
+- [x] 2026-11-08 Part 110: what NeoForge asks a block state (light, friction, conductors, pick
+  stacks and more), entity sizes, registries' ids, defaults and tags, and results.
+  - Block state queries (`state_queries`, a new compat module): NeoForge's `IBlockStateExtension`
+    methods ask the state's block, a mod's override first, else `IBlockExtension`'s default as
+    1.21.1's: light emission (a mod's `lightLevel` function, a copied vanilla block's, and
+    vanilla's own by state: lit furnaces, candles by count, waterlogged sea pickles, a respawn
+    anchor by charge, copper bulbs, cave vines with berries, trial spawners and vaults...),
+    friction (the properties', a copied block's, ice's, blue ice's and slime's), the pick stack
+    (`getCloneItemStack`: vanilla's for crops and their seeds, stems, flower pots, cave vines,
+    kelp and vines, light blocks, portals and gateways (none)...), enchanting power
+    (`minecraft:enchantment_power_provider`), `canEntityDestroy` (the dragon's and the wither's
+    immune tags), ladders (`minecraft:climbable`), beds, burning (fire, lava), conduit and portal
+    frames, fluid overlays (glass, leaves), `collisionExtendsVertically` (fences, walls, gates),
+    `getAppearance`, `isEmpty`. `isRedstoneConductor` is vanilla's: a full cube conducts unless the
+    block's properties say otherwise (its own predicate, `Blocks.never`/`always`, and vanilla's
+    own non-conductors: glass, leaves, ice, pistons, TNT, observers, glowstone...);
+    `shouldCheckWeakPower` asks it. `ofFullCopy` of a mod block now copies its conductor and spawn
+    rules, jump factor and loot, as vanilla's full copy; `ofLegacyCopy` doesn't.
+  - Entity sizes: `EntityDimensions.fixed` and `scalable` at vanilla's default eye height (85% of
+    the height) and attachment points, `scale` (by one factor or two; a fixed size, or a factor
+    of 1, is the same size), `withEyeHeight`, `makeBoundingBox`; a mod entity's `getDimensions` is
+    such a record. `Entity.isSuppressingBounce` is its `isShiftKeyDown`, as 1.21.1's (a sneaking
+    entity doesn't bounce), a mod entity's shift flag kept.
+  - Registries: raw ids (`getId`, `byId`), numbered as the runtime is first asked and kept, a
+    defaulted registry's default first (0, as vanilla's air and empty fluid); `getDefaultKey`
+    (vanilla's 10 defaulted registries, a mod's `RegistryBuilder.defaultKey`); what a defaulted
+    registry doesn't hold is named, numbered and found as its default (`getKeyOrNull`: null), a
+    plain registry's is -1 and null. Tags: `getOrCreateTag` is the tag's named set (one per tag),
+    holding what the game's tags hold (item tags listed; a block's, fluid's, biome's, damage
+    type's and entity type's membership asked of the game); `getTagOrEmpty` its holders, `getTag`
+    it when it holds any. `Holder.is(tag)` asks entity type tags too.
+  - Results: `ItemInteractionResult.result()`; `SKIP_DEFAULT_BLOCK_INTERACTION` no longer consumes
+    the action (vanilla's: it stands for a pass); `InteractionResult.shouldSwing`,
+    `indicateItemUse`, `values()`, and the constants' ordinals and names (a mod's `switch`).
+  - Also: `ChestBlock.getConnectedDirection` (a double chest's other half), and `enabledFeatures()`
+    of a level, a connection or a command source (the one set, every feature on).
+  - Measured (packcov23, the same 367 jars): methods 82.0% (from 81.7%: 345 more mapped), uses
+    90.6% (from 90.5%), distinct missing API methods 9780 (from 9874); Create 79.7% of its methods
+    (from 79.2%), 95.8% of its uses (from 95.6%). Left of the batch: vanilla's per-block tables
+    (explosion resistance, flammability, `ignitedByLava`, light blocking, offsets, map colours,
+    tool-modified states), banner, pot and shulker box pick stacks, a mod's own stems and pots,
+    `EntityAttachments.withAttachments`, vanilla entities' `getDimensions`, and what needs the
+    game to list tags (`getTags`, `getTagNames`, `Holder.tags`, a block tag's members).
+  - Tests: compat 624 (8 new: a state's light is its block's function; redstone conducts through
+    full cubes unless the block says (glass, a full or legacy copy of it, a mod's predicate,
+    `Blocks.never`/`always`); NeoForge asks the block for friction, enchanting power, the pick
+    stack and the rest; entity sizes scale and make boxes as vanilla's; a sneaking entity doesn't
+    bounce; item results stand for plain results; registries number their entries and default;
+    a registry's tags hold the game's), one changed to vanilla's (a defaulted registry names what
+    it doesn't hold by its default key, not null), translator 22.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

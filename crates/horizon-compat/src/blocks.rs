@@ -1360,6 +1360,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
             (owner, name),
             ("net/minecraft/world/level/block/SignBlock", "getWoodType")
                 | ("net/minecraft/world/level/block/BedBlock", "getConnectedDirection")
+                | ("net/minecraft/world/level/block/ChestBlock", "getConnectedDirection")
                 | ("net/minecraft/world/level/block/FaceAttachedHorizontalDirectionalBlock", "getConnectedDirection")
         )
         || (name == "type" && owner.ends_with("SignBlock") && owner.starts_with("net/minecraft/world/level/block/"))
@@ -2169,6 +2170,28 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let o = crate::api_common::DIRECTION_NAMES.iter().position(|d| *d == facing).unwrap_or(2) as i64;
             Some(api::direction(rt, if head { o ^ 1 } else { o }))
         }
+        // `ChestBlock.getConnectedDirection(state)`: where a double chest's other half is, a
+        // quarter turn from its facing, clockwise for the left half, else counter-clockwise.
+        ("net/minecraft/world/level/block/ChestBlock", "getConnectedDirection") => {
+            let text = rt.str_of(a(0)).unwrap_or("").to_owned();
+            let (_, props) = crate::host::split_state(&text);
+            let facing = props
+                .iter()
+                .find(|(k, _)| *k == "facing")
+                .map_or("north", |(_, v)| *v);
+            let left = props.iter().any(|(k, v)| *k == "type" && *v == "left");
+            // North, east, south, west by ordinal: clockwise seen from above.
+            let ring = [2i64, 5, 3, 4];
+            let at = crate::api_common::DIRECTION_NAMES
+                .iter()
+                .position(|d| *d == facing)
+                .unwrap_or(2) as i64;
+            let o = match ring.iter().position(|&r| r == at) {
+                Some(i) => ring[(i + if left { 1 } else { 3 }) % 4],
+                None => at,
+            };
+            Some(api::direction(rt, o))
+        }
         // `FaceAttachedHorizontalDirectionalBlock.getConnectedDirection(state)` (a lever's, a
         // button's): the side it hangs from, down from a ceiling, up from a floor, else its facing.
         ("net/minecraft/world/level/block/FaceAttachedHorizontalDirectionalBlock", "getConnectedDirection") => {
@@ -2442,11 +2465,27 @@ fn named(rt: &mut Rt, class: &'static str, name: &'static str) -> V {
     })
 }
 
+/// What of a block's properties 1.21.1's `Properties.ofFullCopy` takes and `ofLegacyCopy` doesn't:
+/// the jump factor, the predicates, the drops (and whether a vanilla block's predicates came along).
+const FULL_COPY_ONLY: [&str; 10] = [
+    "$jumpFactor",
+    "$isRedstoneConductor",
+    "$isValidSpawn",
+    "$hasPostProcess",
+    "$isSuffocating",
+    "$isViewBlocking",
+    "$noLootTable",
+    "$dropsLike",
+    "$lootFrom",
+    "$fullCopy",
+];
+
 /// `BlockBehaviour.Properties` (1.21.1's builder, every method): each call is kept on the object as
 /// a `$` field. The game reads destroy time, resistance, sound, light, occlusion, collision, tool,
-/// friction, random ticks, map colour, push reaction and replaceable; the predicates
-/// (`isRedstoneConductor`, `isSuffocating`, `isViewBlocking`, `isValidSpawn`, `hasPostProcess`,
-/// `emissiveRendering`) and the other flags are kept for it but not read yet.
+/// friction, random ticks, map colour, push reaction and replaceable; a state's
+/// `isRedstoneConductor` asks its predicate (`state_queries`); the other predicates
+/// (`isSuffocating`, `isViewBlocking`, `isValidSpawn`, `hasPostProcess`, `emissiveRendering`) and
+/// the other flags are kept for it but not read yet.
 fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     if name == "of" {
@@ -2461,18 +2500,26 @@ fn block_properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V
         "ofFullCopy" | "ofLegacyCopy" | "copy" => {
             let p = rt.new_object(BLOCK_PROPERTIES);
             let from = a(0);
+            let full = name == "ofFullCopy";
             match rt.str_of(from) {
-                // A vanilla block (`Blocks.ANDESITE`): named, its values from the table.
+                // A vanilla block (`Blocks.ANDESITE`): named, its values from the table, and
+                // whether its predicates came along (`$fullCopy`).
                 Some(n) => {
                     let s = rt.string(&n.to_owned());
                     rt.put_field(p, "$copy", s);
+                    if full {
+                        rt.put_field(p, "$fullCopy", V::I(1));
+                    }
                 }
-                // A mod block: what its own properties recorded.
+                // A mod block: what its own properties recorded; `ofLegacyCopy` leaves out what
+                // only `ofFullCopy` takes.
                 None => {
                     let src = rt.get_field(from, "$properties");
                     if let Some(Data::Fields(f)) = rt.heap.get(src.r() as usize).map(|o| o.data.clone()) {
                         for (k, v) in f {
-                            rt.put_field(p, k, v);
+                            if full || !FULL_COPY_ONLY.contains(&k) {
+                                rt.put_field(p, k, v);
+                            }
                         }
                     }
                 }

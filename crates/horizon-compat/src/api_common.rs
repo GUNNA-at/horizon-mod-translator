@@ -523,6 +523,7 @@ fn plain_enum_values(rt: &mut Rt, class: &str) -> Option<V> {
     let names: Vec<&'static str> = match PLAIN_ENUMS.iter().find(|(c, _)| *c == class) {
         Some((_, names)) => names.to_vec(),
         None if class == "net/minecraft/world/InteractionHand" => vec!["MAIN_HAND", "OFF_HAND"],
+        None if !result_names(class).is_empty() => result_names(class).to_vec(),
         None => return None,
     };
     let values: Vec<V> = names.iter().filter_map(|n| get_static(rt, class, n)).collect();
@@ -3030,9 +3031,25 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let client = a(0).i() != 0;
             result(rt, owner, if client { "SUCCESS" } else { "CONSUME" })
         }
+        // An item result consumes the action when the plain result it stands for does (both
+        // block-interaction passes are a pass).
         ("net/minecraft/world/InteractionResult" | "net/minecraft/world/ItemInteractionResult", "consumesAction") => {
             let n = name_of(rt, a(0));
-            V::I(matches!(n.as_str(), "SUCCESS" | "CONSUME" | "SUCCESS_NO_ITEM_USED" | "CONSUME_PARTIAL" | "SKIP_DEFAULT_BLOCK_INTERACTION") as i32)
+            V::I(matches!(n.as_str(), "SUCCESS" | "CONSUME" | "SUCCESS_NO_ITEM_USED" | "CONSUME_PARTIAL") as i32)
+        }
+        ("net/minecraft/world/InteractionResult", "shouldSwing") => V::I(matches!(name_of(rt, a(0)).as_str(), "SUCCESS" | "SUCCESS_NO_ITEM_USED") as i32),
+        ("net/minecraft/world/InteractionResult", "indicateItemUse") => V::I(matches!(name_of(rt, a(0)).as_str(), "SUCCESS" | "CONSUME") as i32),
+        // `ItemInteractionResult.result()`: the plain result it stands for.
+        ("net/minecraft/world/ItemInteractionResult", "result") if desc == "()Lnet/minecraft/world/InteractionResult;" => {
+            let n = name_of(rt, a(0));
+            let plain = match n.as_str() {
+                "SUCCESS" => "SUCCESS",
+                "CONSUME" => "CONSUME",
+                "CONSUME_PARTIAL" => "CONSUME_PARTIAL",
+                "FAIL" => "FAIL",
+                _ => "PASS",
+            };
+            result(rt, "net/minecraft/world/InteractionResult", plain)
         }
         ("net/minecraft/world/phys/BlockHitResult", "<init>") => {
             // (Vec3 location, Direction, BlockPos, boolean inside[, boolean worldBorder])
@@ -4568,12 +4585,44 @@ pub(crate) fn give_player(rt: &mut Rt, stack: V) -> bool {
     gave >= count
 }
 
-/// An `InteractionResult` / `ItemInteractionResult` constant, by name (interned: compared by identity).
+/// `InteractionResult`'s constants and `ItemInteractionResult`'s, in their declaration order.
+const RESULTS: [&str; 6] = [
+    "SUCCESS",
+    "SUCCESS_NO_ITEM_USED",
+    "CONSUME",
+    "CONSUME_PARTIAL",
+    "PASS",
+    "FAIL",
+];
+const ITEM_RESULTS: [&str; 6] = [
+    "SUCCESS",
+    "CONSUME",
+    "CONSUME_PARTIAL",
+    "PASS_TO_DEFAULT_BLOCK_INTERACTION",
+    "SKIP_DEFAULT_BLOCK_INTERACTION",
+    "FAIL",
+];
+
+fn result_names(class: &str) -> &'static [&'static str] {
+    match class {
+        "net/minecraft/world/InteractionResult" => &RESULTS,
+        "net/minecraft/world/ItemInteractionResult" => &ITEM_RESULTS,
+        _ => &[],
+    }
+}
+
+/// An `InteractionResult` / `ItemInteractionResult` constant, by name (interned: compared by
+/// identity), with its ordinal and name (a mod's `switch` on one reads the ordinal).
 pub fn result(rt: &mut Rt, class: &str, name: &str) -> V {
     let (class, name) = (class.to_owned(), name.to_owned());
     rt.intern(format!("result/{class}/{name}"), move |rt| {
         let c: &'static str = rt.static_key(&class);
-        rt.alloc(c, Data::Str(name))
+        let ordinal = result_names(c).iter().position(|n| *n == name).unwrap_or(0) as i32;
+        let label = rt.string(&name);
+        let o = rt.alloc(c, Data::Str(name));
+        rt.put_field(o, "$ordinal", V::I(ordinal));
+        rt.put_field(o, "$name", label);
+        o
     })
 }
 
@@ -5540,6 +5589,70 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+    /// `ItemInteractionResult` as 1.21.1's: `result()` is the plain result it stands for (both
+    /// block-interaction passes are a pass), and it consumes the action when that does; the plain
+    /// results' `values()` and ordinals are in declaration order (a mod's `switch` reads them).
+    #[test]
+    fn item_results_stand_for_plain_results() {
+        use super::*;
+        const ITEM_RESULT: &str = "net/minecraft/world/ItemInteractionResult.result.()Lnet/minecraft/world/InteractionResult;";
+        const CONSUMES: &str = "net/minecraft/world/ItemInteractionResult.consumesAction.()Z";
+        const VALUES: &str = "net/minecraft/world/InteractionResult.values.()[Lnet/minecraft/world/InteractionResult;";
+        const ORDINAL: &str = "net/minecraft/world/InteractionResult.ordinal.()I";
+        let mut rt = Rt::new();
+        crate::install();
+        let names = [
+            "SUCCESS",
+            "CONSUME",
+            "CONSUME_PARTIAL",
+            "PASS_TO_DEFAULT_BLOCK_INTERACTION",
+            "SKIP_DEFAULT_BLOCK_INTERACTION",
+            "FAIL",
+        ];
+        let (mut plain, mut consumes) = (Vec::new(), Vec::new());
+        for n in names {
+            let r = crate::api::get_static(
+                &mut rt,
+                format!("net/minecraft/world/ItemInteractionResult.{n}").leak(),
+            );
+            let p = crate::api::call(&mut rt, ITEM_RESULT, &[r]);
+            plain.push(name_of(&rt, p));
+            consumes.push(crate::api::call(&mut rt, CONSUMES, &[r]).i());
+        }
+        assert_eq!(
+            plain,
+            [
+                "SUCCESS",
+                "CONSUME",
+                "CONSUME_PARTIAL",
+                "PASS",
+                "PASS",
+                "FAIL"
+            ]
+        );
+        assert_eq!(consumes, [1, 1, 1, 0, 0, 0]);
+        let pass = crate::api::get_static(&mut rt, "net/minecraft/world/InteractionResult.PASS");
+        let skip = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/world/ItemInteractionResult.SKIP_DEFAULT_BLOCK_INTERACTION",
+        );
+        assert_eq!(
+            crate::api::call(&mut rt, ITEM_RESULT, &[skip]),
+            pass,
+            "the one constant"
+        );
+        let values = crate::api::call(&mut rt, VALUES, &[]);
+        let all = crate::jutil::elements(&rt, values);
+        assert_eq!(all.len(), 6);
+        assert_eq!(all[4], pass);
+        let ordinals: Vec<i32> = all
+            .iter()
+            .map(|&v| crate::api::call(&mut rt, ORDINAL, &[v]).i())
+            .collect();
+        assert_eq!(ordinals, [0, 1, 2, 3, 4, 5]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// The game's version as a mod made for 1.21.1 reads it: that version's `version.json` (name,
     /// protocol, pack formats, data version).
     #[test]

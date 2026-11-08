@@ -365,21 +365,65 @@ fn holder_set(rt: &mut Rt, registry: &str, j: &Json) -> Result<V, String> {
     Ok(set)
 }
 
+/// Tag `tag` (a `TagKey`) of `registry` as its named holder set (`Registry.getOrCreateTag`), one
+/// per tag: its members are what the game's tags hold.
+pub(crate) fn tag_set(rt: &mut Rt, registry: &str, tag: V) -> V {
+    let location = rt
+        .str_of(rt.get_field(tag, "$location"))
+        .unwrap_or("")
+        .to_owned();
+    rt.intern(format!("compat:tag-set/{registry}/{location}"), |rt| {
+        let set = rt.new_object(HOLDER_SET_NAMED);
+        let (r, text) = (
+            rt.string(registry),
+            rt.string(&Json::String(format!("#{location}")).to_string()),
+        );
+        rt.put_field(set, "$registry", r);
+        rt.put_field(set, "$set", text);
+        set
+    })
+}
+
+/// The tag a named holder set is (its `TagKey`); None for another set.
+fn set_tag(rt: &mut Rt, set: V) -> Option<V> {
+    if rt.class_of(set) != HOLDER_SET_NAMED {
+        return None;
+    }
+    let registry = rt.str_of(rt.get_field(set, "$registry"))?.to_owned();
+    let text = rt.str_of(rt.get_field(set, "$set"))?.to_owned();
+    let tag = serde_json::from_str::<Json>(&text)
+        .ok()?
+        .as_str()?
+        .strip_prefix('#')?
+        .to_owned();
+    Some(crate::fluids::tag_key(rt, &registry, &tag))
+}
+
 /// The holders of holder set `set`: those it was made of (`HolderSet.direct`), or the members the
 /// host's registries give the set's JSON, in order. A list of ids reads as written where the host
-/// keeps no registries; a tag has no members there.
-fn set_holders(rt: &mut Rt, set: V) -> Vec<V> {
+/// keeps no registries, and an item tag as the game's item tags hold it; another tag has no
+/// members there.
+pub(crate) fn set_holders(rt: &mut Rt, set: V) -> Vec<V> {
     let made = rt.get_field(set, "$holders");
     if made.r() != 0 {
         return crate::jutil::elements(rt, made);
     }
     let registry = rt.str_of(rt.get_field(set, "$registry")).unwrap_or("").to_owned();
     let text = rt.str_of(rt.get_field(set, "$set")).unwrap_or("").to_owned();
-    let ids = rt.host().and_then(|h| h.holder_set(&registry, &text)).unwrap_or_else(|| match serde_json::from_str::<Json>(&text) {
-        Ok(Json::String(id)) if !id.starts_with('#') => vec![id],
-        Ok(Json::Array(items)) => items.iter().filter_map(Json::as_str).map(str::to_owned).collect(),
-        _ => Vec::new(),
-    });
+    let listed = rt.host().and_then(|h| h.holder_set(&registry, &text));
+    let ids = match listed {
+        Some(ids) => ids,
+        None => match serde_json::from_str::<Json>(&text) {
+            Ok(Json::String(id)) if !id.starts_with('#') => vec![id],
+            Ok(Json::String(tag)) if registry == "item" => crate::recipes::tag_items(rt, &tag),
+            Ok(Json::Array(items)) => items
+                .iter()
+                .filter_map(Json::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        },
+    };
     ids.iter()
         .map(|id| {
             let id = if id.contains(':') { id.clone() } else { format!("minecraft:{id}") };
@@ -393,6 +437,34 @@ fn set_holders(rt: &mut Rt, set: V) -> Vec<V> {
 /// entry.
 fn set_contains(rt: &mut Rt, set: V, holder: V) -> bool {
     let id = rt.str_of(rt.get_field(holder, "$id")).map(str::to_owned);
+    // A tag's set the host's registries don't list: whether the game's tags put the entry in it.
+    if let (Some(id), Some(tag)) = (id.as_deref(), set_tag(rt, set)) {
+        let registry = rt
+            .str_of(rt.get_field(set, "$registry"))
+            .unwrap_or("")
+            .to_owned();
+        let text = rt
+            .str_of(rt.get_field(set, "$set"))
+            .unwrap_or("")
+            .to_owned();
+        let listed = rt.host().and_then(|h| h.holder_set(&registry, &text));
+        match listed {
+            Some(ids) => {
+                return ids.iter().any(|i| {
+                    if i.contains(':') {
+                        i == id
+                    } else {
+                        format!("minecraft:{i}") == id
+                    }
+                });
+            }
+            None => {
+                if let Some(inside) = crate::neo::in_tag(rt, &registry, id, tag) {
+                    return inside;
+                }
+            }
+        }
+    }
     set_holders(rt, set).into_iter().any(|h| h == holder || id.as_ref().is_some_and(|id| rt.str_of(rt.get_field(h, "$id")) == Some(id.as_str())))
 }
 
@@ -443,12 +515,9 @@ fn holder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
             }
             "isBound" => V::I(1),
             "unwrapKey" => {
+                let key = set_tag(rt, a(0));
                 let o = rt.new_object("java/util/Optional");
-                if rt.class_of(a(0)) == HOLDER_SET_NAMED {
-                    let registry = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned();
-                    let text = rt.str_of(rt.get_field(a(0), "$set")).unwrap_or("").to_owned();
-                    let tag = serde_json::from_str::<Json>(&text).ok().and_then(|j| j.as_str().map(|s| s.trim_start_matches('#').to_owned())).unwrap_or_default();
-                    let key = crate::fluids::tag_key(rt, &registry, &tag);
+                if let Some(key) = key {
                     rt.put_field(o, "value", key);
                 }
                 o
