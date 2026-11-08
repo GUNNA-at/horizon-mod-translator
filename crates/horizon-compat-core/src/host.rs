@@ -965,6 +965,15 @@ pub trait Host {
     fn score_stat(&mut self, _player: u128, _ty: &str, _key: &str, _change: Option<i32>) -> bool {
         false
     }
+    /// `CriteriaTriggers.BRED_ANIMALS.trigger(player, parent, partner, child)` for a mod's animals
+    /// (`Animal.finalizeSpawnChildFromBreeding`): the server's player `player`'s open
+    /// `minecraft:bred_animals` criteria whose `parent`, `partner` and `child` predicates the
+    /// animals pass (the parents either way round) are granted, as the game's own breeding grants
+    /// them. `child` is None for a breeding that made none. False when the host can't reach the
+    /// player.
+    fn trigger_bred(&mut self, _player: u128, _parent: &BredEntity, _partner: &BredEntity, _child: Option<&BredEntity>) -> bool {
+        false
+    }
     /// The open world's folder (beside its `level.dat`), where a server's mods keep their files
     /// (`MinecraftServer.getWorldPath`, the levels' saved data), from `ServerAboutToStartEvent` on;
     /// None where the host has no world (a client's).
@@ -1678,6 +1687,18 @@ pub struct ModCriterion {
     pub conditions: String,
 }
 
+/// One animal of a breeding as `BredAnimalsTrigger` tests it ([`Host::trigger_bred`]): an
+/// `EntityPredicate` of its type, place and age.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BredEntity {
+    /// Its type (`waddles:adelie_penguin`).
+    pub kind: String,
+    /// Its feet.
+    pub position: [f64; 3],
+    /// Whether it is a baby (`isBaby`).
+    pub baby: bool,
+}
+
 /// A server's player's progress in one advancement ([`Host::advancement_progress`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AdvancementProgressView {
@@ -2029,6 +2050,8 @@ pub struct MemoryHost {
     pub stats: Vec<(u128, String, String, i32)>,
     /// The scoreboard's changes asked for ([`Host::score_stat`]), in order.
     pub stat_scores: Vec<(u128, String, String, Option<i32>)>,
+    /// The breedings told ([`Host::trigger_bred`]), in order: player, parent, partner, child.
+    pub bred: Vec<(u128, BredEntity, BredEntity, Option<BredEntity>)>,
     /// The world's folder ([`Host::world_dir`]).
     pub world_dir: Option<std::path::PathBuf>,
 }
@@ -3063,6 +3086,13 @@ impl Host for MemoryHost {
         }
         self.stat_scores
             .push((player, ty.to_owned(), key.to_owned(), change));
+        true
+    }
+    fn trigger_bred(&mut self, player: u128, parent: &BredEntity, partner: &BredEntity, child: Option<&BredEntity>) -> bool {
+        if !self.reaches(player) {
+            return false;
+        }
+        self.bred.push((player, parent.clone(), partner.clone(), child.cloned()));
         true
     }
     fn world_dir(&self) -> Option<std::path::PathBuf> {

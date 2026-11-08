@@ -3,8 +3,8 @@
 //! priority, each locking the controls it needs, `Goal.Flag`), `TargetingConditions`, `Sensing`,
 //! and the vanilla goals mods build their mobs of: floating, strolling (also away from water),
 //! looking at players and around, panicking, melee attacks, leaping at a target, following an item
-//! held out and a parent, keeping away from an entity, and the target goals (the one that hurt it,
-//! the nearest it may attack).
+//! held out and a parent, breeding, keeping away from an entity, and the target goals (the one that
+//! hurt it, the nearest it may attack).
 //!
 //! A goal is the object of its class (a mod's, or vanilla's when the mod makes one: `new
 //! RandomStrollGoal(this, 1.0)`), its state in fields of vanilla's names where subclasses read them
@@ -36,6 +36,7 @@ const MELEE: &str = "net/minecraft/world/entity/ai/goal/MeleeAttackGoal";
 const LEAP: &str = "net/minecraft/world/entity/ai/goal/LeapAtTargetGoal";
 const TEMPT: &str = "net/minecraft/world/entity/ai/goal/TemptGoal";
 const FOLLOW_PARENT: &str = "net/minecraft/world/entity/ai/goal/FollowParentGoal";
+const BREED: &str = "net/minecraft/world/entity/ai/goal/BreedGoal";
 const AVOID: &str = "net/minecraft/world/entity/ai/goal/AvoidEntityGoal";
 const TARGET_GOAL: &str = "net/minecraft/world/entity/ai/goal/target/TargetGoal";
 const HURT_BY: &str = "net/minecraft/world/entity/ai/goal/target/HurtByTargetGoal";
@@ -47,8 +48,8 @@ const SERVER_PLAYER: &str = "net/minecraft/server/level/ServerPlayer";
 const LIVING: &str = "net/minecraft/world/entity/LivingEntity";
 
 /// The vanilla goals modelled here, `Goal`'s own defaults first.
-const MODELLED: [&str; 15] =
-    [GOAL, FLOAT, LOOK_AT_PLAYER, RANDOM_LOOK, STROLL, WATER_AVOIDING, PANIC, MELEE, LEAP, TEMPT, FOLLOW_PARENT, AVOID, TARGET_GOAL, HURT_BY, NEAREST];
+const MODELLED: [&str; 16] =
+    [GOAL, FLOAT, LOOK_AT_PLAYER, RANDOM_LOOK, STROLL, WATER_AVOIDING, PANIC, MELEE, LEAP, TEMPT, FOLLOW_PARENT, BREED, AVOID, TARGET_GOAL, HURT_BY, NEAREST];
 
 pub(crate) const CAN_USE: (&str, &str) = ("net/minecraft/world/entity/ai/goal/Goal.canUse.()Z", "canUse.()Z");
 const CAN_CONTINUE: (&str, &str) = ("net/minecraft/world/entity/ai/goal/Goal.canContinueToUse.()Z", "canContinueToUse.()Z");
@@ -80,6 +81,7 @@ const ALERT_OTHER: (&str, &str) = (
     "alertOther.(Lnet/minecraft/world/entity/Mob;Lnet/minecraft/world/entity/LivingEntity;)V",
 );
 const SHOULD_PANIC: (&str, &str) = ("net/minecraft/world/entity/ai/goal/PanicGoal.findRandomPosition.()Z", "findRandomPosition.()Z");
+const BREED_NOW: (&str, &str) = ("net/minecraft/world/entity/ai/goal/BreedGoal.breed.()V", "breed.()V");
 const PREDICATE_TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
 const NONE_OF: &str = "java/util/EnumSet.noneOf.(Ljava/lang/Class;)Ljava/util/EnumSet;";
 
@@ -703,6 +705,22 @@ fn construct(rt: &mut Rt, owner: &str, desc: &str, args: &[V]) -> Option<V> {
             rt.put_field(g, "mob", mob);
             rt.put_field(g, "speedModifier", V::D(a(2).d()));
         }
+        BREED => {
+            // `(animal, speed[, partnerClass])`: a partner of the animal's own class by default.
+            rt.put_field(g, "animal", mob);
+            let level = mobs::level(rt, mob);
+            rt.put_field(g, "level", level);
+            let class = if desc.contains("Ljava/lang/Class;") {
+                a(3)
+            } else {
+                let own = rt.class_of(mob).to_owned();
+                rt.class_literal(&own)
+            };
+            rt.put_field(g, "partnerClass", class);
+            rt.put_field(g, "speedModifier", V::D(a(2).d()));
+            rt.put_field(g, "loveTime", V::I(0));
+            set_flags(rt, g, MOVE | LOOK);
+        }
         AVOID => {
             // `(mob, class, maxDist, walkSpeed, sprintSpeed[, predicate...])`.
             rt.put_field(g, "mob", mob);
@@ -1243,6 +1261,51 @@ fn kind_call(rt: &mut Rt, k: &'static str, name: &str, desc: &str, args: &[V]) -
             V::Void
         }
 
+        // `BreedGoal`: in love, it goes to the nearest animal within eight blocks it may mate with
+        // (`canMate`: of its class, in love too) that doesn't panic; three seconds on, within three
+        // blocks of it, they breed. Its partner panicking, out of love or gone, it gives up, as it
+        // does six seconds on.
+        (BREED, "canUse") => {
+            if !mobs::in_love(rt, mob) {
+                return Some(b(false));
+            }
+            let partner = free_partner(rt, g, mob);
+            rt.put_field(g, "partner", partner);
+            b(partner.r() != 0)
+        }
+        (BREED, "canContinueToUse") => {
+            let p = obj(rt, g, "partner");
+            b(p.r() != 0 && mobs::is_alive(rt, p) && mobs::in_love(rt, p) && int(rt, g, "loveTime") < 60 && !mobs::is_panicking(rt, p))
+        }
+        (BREED, "stop") => {
+            rt.put_field(g, "partner", V::NULL);
+            rt.put_field(g, "loveTime", V::I(0));
+            V::Void
+        }
+        (BREED, "tick") => {
+            let p = obj(rt, g, "partner");
+            if p.r() == 0 {
+                return Some(V::Void);
+            }
+            let look = mobs::look_control(rt, mob);
+            let max = mobs::max_head_x_rot(rt, mob) as f32;
+            mobs::look_at_entity(rt, look, p, 10.0, max);
+            let nav = mobs::navigation(rt, mob);
+            let speed = dbl(rt, g, "speedModifier");
+            crate::pathing::move_to_entity(rt, nav, p, speed);
+            let t = int(rt, g, "loveTime") + 1;
+            rt.put_field(g, "loveTime", V::I(t));
+            if t >= adjusted(rt, g, 60) && mobs::distance_sqr(rt, mob, p) < 9.0 {
+                call_void(rt, BREED_NOW, &[g]);
+            }
+            V::Void
+        }
+        (BREED, "breed") => {
+            let (level, p) = (obj(rt, g, "level"), obj(rt, g, "partner"));
+            mobs::spawn_child_from_breeding(rt, mob, level, p);
+            V::Void
+        }
+
         // `AvoidEntityGoal`: the nearest of the class within reach seen, it walks away from it to a
         // place farther from it, and runs once it is within seven blocks.
         (AVOID, "canUse") => {
@@ -1740,6 +1803,48 @@ fn tempted_by(rt: &mut Rt, items: V, p: V) -> bool {
         }
     }
     false
+}
+
+/// `BreedGoal.PARTNER_TARGETING`: not combat, within eight blocks, seen or not.
+fn partner_conditions(rt: &mut Rt) -> V {
+    rt.intern("compat:partner-targeting".into(), |rt| {
+        let c = new_conditions(rt, false);
+        rt.put_field(c, "range", V::D(8.0));
+        put_bool(rt, c, "checkLineOfSight", false);
+        c
+    })
+}
+
+/// `BreedGoal.getFreePartner()`: of the goal's partner class within eight blocks of `animal`'s box
+/// (`getNearbyEntities`), the nearest it may mate with that doesn't panic; null when none.
+fn free_partner(rt: &mut Rt, g: V, animal: V) -> V {
+    let class = obj(rt, g, "partnerClass");
+    let bb = mobs::bounds(rt, animal);
+    let area = [bb[0] - 8.0, bb[1] - 8.0, bb[2] - 8.0, bb[3] + 8.0, bb[4] + 8.0, bb[5] + 8.0];
+    let c = partner_conditions(rt);
+    let mut best = f64::MAX;
+    let mut found = V::NULL;
+    for o in entities_of_class(rt, class, area) {
+        if !conditions_test(rt, c, animal, o) || !mobs::can_mate(rt, animal, o) || mobs::is_panicking(rt, o) {
+            continue;
+        }
+        let d = mobs::distance_sqr(rt, animal, o);
+        if d < best {
+            best = d;
+            found = o;
+        }
+    }
+    found
+}
+
+/// `PathfinderMob.isPanicking()` of a mod's mob run by goals: one of its goals that runs is a
+/// `PanicGoal` (a mod's own panic goal extends it).
+pub(crate) fn panicking(rt: &mut Rt, mob: V) -> bool {
+    let sel = obj(rt, mob, "goalSelector");
+    if sel.r() == 0 {
+        return false;
+    }
+    goals(rt, sel).into_iter().any(|w| running(rt, w) && rt.instance_of(wrapped_goal(rt, w), PANIC))
 }
 
 /// The level's searches by targeting conditions: `getNearestPlayer(conditions, entity[, x, y,

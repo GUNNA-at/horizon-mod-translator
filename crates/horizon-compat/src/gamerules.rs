@@ -142,6 +142,11 @@ pub(crate) fn blocks_drop(rt: &Rt) -> bool {
     by_id(rt, "doTileDrops").is_none_or(|v| v != 0)
 }
 
+/// Whether mobs drop their loot and experience (`doMobLoot`, vanilla's `RULE_DOMOBLOOT`).
+pub(crate) fn mobs_drop(rt: &Rt) -> bool {
+    by_id(rt, "doMobLoot").is_none_or(|v| v != 0)
+}
+
 fn is_int(rt: &Rt, key: V) -> bool {
     rt.get_field(rt.get_field(key, "$type"), "$int").i() != 0
 }

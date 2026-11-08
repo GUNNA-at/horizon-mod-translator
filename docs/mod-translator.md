@@ -9043,6 +9043,49 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     game's own items' `interactLivingEntity` on one (bucket, shears, saddle), breeding (`BreedGoal`,
     `spawnChildFromBreeding`: Waddles' penguins fall in love and stay apart), Pick Block on a mod's entity,
     the critical hit's particles following it, a sweep hitting other mods' entities, Fire Aspect on one.
+- [x] 2026-11-08 Part 134: a translated mod's animals breed. Part 133 put Waddles' penguins in love; their
+  `BreedGoal`, the one goal of theirs compat didn't model, ran as a plain `Goal` that never starts (read from
+  `goals.rs`; not measured live before this change).
+  - horizon-compat `goals`: 1.21.1's `BreedGoal` (`(animal, speed[, partnerClass])`, `MOVE` and `LOOK`). In love
+    (`isInLove`), it takes the nearest animal of its partner class within eight blocks of its box
+    (`getNearbyEntities` with `PARTNER_TARGETING`: not combat, eight blocks, unseen too) that it may mate with
+    (`canMate`) and that doesn't panic (`isPanicking`); each tick it looks at it and walks to it, and once its
+    `loveTime` reaches `adjustedTickDelay(60)` (30 of its every-other-tick runs) within three blocks it breeds
+    (`breed`, virtual: a mod's egg-laying goal keeps its own). It gives up when its partner dies, leaves love or
+    panics, or at `loveTime` 60. `PathfinderMob.isPanicking` is a running `PanicGoal` among its goals.
+  - `mobs`: `Animal.canMate` (another of its very class, both in love), `spawnChildFromBreeding` (NeoForge
+    1.21.1's: `getBreedOffspring`, `BabyEntitySpawnEvent`, the baby `setBaby(true)` and `moveTo` the parent's feet
+    facing south, `finalizeSpawnChildFromBreeding`, `addFreshEntityWithPassengers`) and
+    `finalizeSpawnChildFromBreeding` (the love cause of this parent or else its partner gets `awardStat(ANIMALS_BRED)`
+    and the `bred_animals` trigger; both parents `setAge(6000)` and `resetLove`; entity event 18; with `doMobLoot`
+    an orb of `nextInt(7) + 1` points). Each call is virtual, a mod's own override first. `world_events`: NeoForge's
+    `BabyEntitySpawnEvent` (`getParentA`, `getParentB`, `getCausedByPlayer`, `getChild`, `setChild`, cancelable;
+    canceled, both parents rest out of love with no baby). `gamerules`: `doMobLoot`.
+  - The game: `native_trigger_bred(uuid, parent, partner, child)` (fragment `bred_animals`, native_criteria.rs) runs
+    its own `BredAnimalsTrigger` for a mod's animals, each as its type, feet and age, so breeding one earns "The
+    Parrots and the Bats"; compat-core's `Host::trigger_bred` and the translator's server host carry it.
+  - Found on the way: a mod mob's tick asked `getControllingPassenger` of 1.21.1's descriptor (a `LivingEntity`),
+    which nothing answered (an unmapped call each tick); a mod's entity answers null, as for `getVehicle`.
+  - Found on the way, too: the translator's server host took each animal through a closure of a `&BredEntity`,
+    which doesn't compile (its result borrows the argument, and an annotated reference makes the closure
+    higher-ranked); the translator's tests don't compile the code they generate, the game's build did.
+  - Tests: compat 2 new (two penguins in love with their `BreedGoal`s, one fed by a player: the nearer one out of
+    love isn't taken, the baby is born on tick 52 to 64 where a parent stands, at -24000; both parents at 6000 (one
+    tick more aged) and out of love; one orb of 1 to 7 points; the player's `animals_bred` and the trigger with the
+    three of them. A listener canceling `BabyEntitySpawnEvent`, told of the second parent's player and the proposed
+    baby: no baby, orb or credit, both parents resting). All 715 compat, 27 translator and 580 game library tests
+    pass.
+  - Live, the game built from the working tree with Create and Waddles, a fresh survival player with 10 cod: two
+    penguins summoned with their AI two blocks apart, 2.5 blocks ahead, each right-clicked with cod (`InLove` 596
+    and 600, 8 cod left). 40 ticks on there were two penguins, 70 ticks on three: the parents at `Age` 5983 and
+    5982, the baby at -23983 (born 17 ticks before it was read, about 60 ticks after the second was fed), none in
+    love; hearts burst over the parent. The orb was already picked up: the player's experience went from 0 to 6
+    points. The `minecraft.custom:minecraft.animals_bred` objective read 1, the chat said "has made the advancement
+    [The Parrots and the Bats]" with its toast, and `@s[advancements={minecraft:husbandry/breed_an_animal=true}]`
+    passed. The game's log had no panic, unmapped call or exception.
+  - Not yet: natural spawning of a mod's mobs (Waddles' penguins come by its own `waddles:penguin_spawn` biome
+    modifier on `#c:is_snowy` biomes and its `RegisterSpawnPlacementsEvent` rule), a brain's `IS_PANICKING`
+    memory for `isPanicking`, the breeding hearts' particles on the client copy of the partner.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

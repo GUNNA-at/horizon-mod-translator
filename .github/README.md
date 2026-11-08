@@ -130,7 +130,8 @@ result comes from a scene set up by command, read back from the world's data and
   five came back after it was closed and opened again. The game's commands see them as their own:
   `@e[type=waddles:adelie_penguin]`, `execute as` and `at`, `tp`, `kill` and `data get entity`.
   Players hit and feed them: a punch takes 1 of a penguin's 8 health, a sword kills it, and cod puts a
-  grown one in love for 30 seconds and makes a baby grow.
+  grown one in love for 30 seconds and makes a baby grow. Two fed penguins have a baby, the player gets
+  the experience and "The Parrots and the Bats".
 - **From the launcher.** On a fresh launcher, `mods add-java` translated Waddles' jar and `--build` built a
   game with it in 4½ minutes, from this repository's source and its own Rust. That game, started as a player
   starts it, with no developer flags, summons the penguins and hatches them from their egg. Create took 16
@@ -138,8 +139,8 @@ result comes from a scene set up by command, read back from the world's data and
   Create and Waddles became an instance of its own (`--new-instance`, or a modpack dropped on the window) and
   played both mods in one world.
 
-Not working yet: trains, other mods' mobs breeding and spawning naturally, NeoForge's config
-screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack has not been run in one game yet.
+Not working yet: trains, other mods' mobs spawning naturally, NeoForge's config screens, and part
+of the client's rendering. See [open gaps](#open-gaps). The whole pack has not been run in one game yet.
 
 ## Try it
 

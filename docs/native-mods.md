@@ -1332,9 +1332,32 @@ then a mod item's `interactLivingEntity`. A mob's `mobInteract` is 1.21.1's `Ani
 the time it has left (`ageUp`); either eats one from the hand (`usePlayerItem`), none from a creative player's.
 
 Not yet: a leash, a name tag or a spawn egg on a mod's mob (`checkAndHandleImportantInteractions`), the game's items'
-own `interactLivingEntity` on one (a bucket, shears, a saddle), breeding (`BreedGoal`, `spawnChildFromBreeding`),
-Pick Block on a mod's entity, the critical hit's particles following it (they burst where it stood), a sweep hitting
-other mods' entities, post-attack enchantments (Fire Aspect) on one.
+own `interactLivingEntity` on one (a bucket, shears, a saddle), Pick Block on a mod's entity, the critical hit's
+particles following it (they burst where it stood), a sweep hitting other mods' entities, post-attack enchantments
+(Fire Aspect) on one.
+
+### Mod animals breeding
+
+`native_trigger_bred(uuid, parent, partner, child)` (server, `crates/horizon-client/src/game/native_criteria.rs`) is
+the game's own `bred_animals` advancement trigger for a native mod's animals (`CriteriaTriggers.BRED_ANIMALS.trigger`,
+from `Animal.finalizeSpawnChildFromBreeding`). Each animal is its type, its feet and whether it is a baby; `child` is
+None for a breeding that made none. The player's open `minecraft:bred_animals` criteria whose `parent`, `partner` and
+`child` predicates the animals pass (the parents either way round) are granted as the game's own breeding grants
+them, so breeding any mod's animal earns "The Parrots and the Bats". It reaches a player as `native_trigger_criterion`
+does, and answers false off a server or when the player wasn't reached.
+
+A translated mod's animals breed through horizon-compat (`goals`, `mobs`) as on a NeoForge 1.21.1 server. Its
+`BreedGoal`: an animal in love goes to the nearest animal of the goal's partner class within eight blocks that it may
+mate with (`canMate`: another of its very class, in love too) and that doesn't panic (`isPanicking`: a running
+`PanicGoal`). Three seconds on (`adjustedTickDelay(60)` of the goal's ticks), within three blocks of it, it breeds
+(`breed`); it gives up when its partner leaves love, panics or dies, or after six seconds.
+`Animal.spawnChildFromBreeding` then asks the class for its baby (`getBreedOffspring`) and posts NeoForge's
+`BabyEntitySpawnEvent`: a listener cancels the breeding (both parents rest as after one, with no baby) or gives
+another baby. The baby is made one (`setBaby`), moved to where the parent stands and added with its passengers.
+`finalizeSpawnChildFromBreeding` comes first: the player who fed this parent, or else its partner, gets the
+`animals_bred` statistic and the trigger above. Both parents rest 6000 ticks out of love, their players see the
+hearts (entity event 18), and with `doMobLoot` an experience orb of 1 to 7 points drops. Each of these calls is
+virtual, so a mod's own `canMate`, `breed` or `spawnChildFromBreeding` (an animal that lays eggs) runs instead.
 
 ### Advancement triggers
 

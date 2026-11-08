@@ -149,6 +149,28 @@ const SET_IN_LOVE: Key = key!("net/minecraft/world/entity/animal/Animal", "setIn
 const CAN_FALL_IN_LOVE: Key = key!("net/minecraft/world/entity/animal/Animal", "canFallInLove.()Z");
 const GET_AGE: Key = key!("net/minecraft/world/entity/AgeableMob", "getAge.()I");
 const AGE_UP: Key = key!("net/minecraft/world/entity/AgeableMob", "ageUp.(IZ)V");
+const SET_AGE: Key = key!("net/minecraft/world/entity/AgeableMob", "setAge.(I)V");
+const SET_BABY: Key = key!("net/minecraft/world/entity/AgeableMob", "setBaby.(Z)V");
+const BREED_OFFSPRING: Key = key!(
+    "net/minecraft/world/entity/AgeableMob",
+    "getBreedOffspring.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/entity/AgeableMob;)Lnet/minecraft/world/entity/AgeableMob;"
+);
+const IS_IN_LOVE: Key = key!("net/minecraft/world/entity/animal/Animal", "isInLove.()Z");
+const RESET_LOVE: Key = key!("net/minecraft/world/entity/animal/Animal", "resetLove.()V");
+const LOVE_CAUSE: Key = key!("net/minecraft/world/entity/animal/Animal", "getLoveCause.()Lnet/minecraft/server/level/ServerPlayer;");
+const CAN_MATE: Key = key!("net/minecraft/world/entity/animal/Animal", "canMate.(Lnet/minecraft/world/entity/animal/Animal;)Z");
+const SPAWN_CHILD: Key = key!(
+    "net/minecraft/world/entity/animal/Animal",
+    "spawnChildFromBreeding.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/entity/animal/Animal;)V"
+);
+const FINALIZE_CHILD: Key = key!(
+    "net/minecraft/world/entity/animal/Animal",
+    "finalizeSpawnChildFromBreeding.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/entity/animal/Animal;Lnet/minecraft/world/entity/AgeableMob;)V"
+);
+const IS_PANICKING: Key = key!("net/minecraft/world/entity/PathfinderMob", "isPanicking.()Z");
+const MOVE_TO: Key = key!("net/minecraft/world/entity/Entity", "moveTo.(DDDFF)V");
+const AWARD_STAT_ID: &str = "net/minecraft/world/entity/player/Player.awardStat.(Lnet/minecraft/resources/ResourceLocation;)V";
+const ADD_WITH_PASSENGERS: &str = "net/minecraft/server/level/ServerLevel.addFreshEntityWithPassengers.(Lnet/minecraft/world/entity/Entity;)V";
 /// `Entity.interact(Player, InteractionHand)`'s descriptor (`Mob.interact`, final).
 const INTERACT_DESC: &str = "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResult;";
 const GET_ITEM_IN_HAND: &str =
@@ -3698,6 +3720,12 @@ fn living_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         ("resetLove", "()V") => unit(put_i(rt, e, "inLove", 0)),
         ("setInLove", _) => unit(set_in_love(rt, e, a(1))),
         ("getLoveCause", _) => obj(rt, e, "$loveCause"),
+        // Breeding.
+        ("canMate", "(Lnet/minecraft/world/entity/animal/Animal;)Z") => bool_v(vanilla_can_mate(rt, e, a(1))),
+        ("isPanicking", "()Z") if mob => bool_v(crate::goals::panicking(rt, e)),
+        ("getBreedOffspring", _) => V::NULL,
+        ("spawnChildFromBreeding", _) => unit(spawn_child(rt, e, a(1), a(2))),
+        ("finalizeSpawnChildFromBreeding", _) => unit(finalize_child(rt, e, a(1), a(2), a(3))),
         // What it saves.
         ("addAdditionalSaveData", "(Lnet/minecraft/nbt/CompoundTag;)V") => unit(save_living(rt, e, a(1))),
         ("readAdditionalSaveData", "(Lnet/minecraft/nbt/CompoundTag;)V") => unit(load_living(rt, e, a(1))),
@@ -3783,6 +3811,138 @@ fn age_up(rt: &mut Rt, e: V, seconds: i32) {
     let age = int(rt, e, "$age");
     let grown = age + seconds * 20;
     set_age(rt, e, if age < 0 { grown.min(0) } else { grown });
+}
+
+// ---- breeding ----
+
+/// The level a mod's entity is in (`level()`): the one it was made in, or the runtime's.
+pub(crate) fn level(rt: &mut Rt, e: V) -> V {
+    match obj(rt, e, "$level") {
+        l if l.r() != 0 => l,
+        _ => crate::glue::level(rt),
+    }
+}
+
+/// `isInLove()` (virtual).
+pub(crate) fn in_love(rt: &mut Rt, e: V) -> bool {
+    own_or(rt, e, IS_IN_LOVE, &[], |v| v.i() != 0, |rt| int(rt, e, "inLove") > 0)
+}
+
+/// `e.canMate(other)` (virtual).
+pub(crate) fn can_mate(rt: &mut Rt, e: V, other: V) -> bool {
+    own_or(rt, e, CAN_MATE, &[other], |v| v.i() != 0, |rt| vanilla_can_mate(rt, e, other))
+}
+
+/// `Animal.canMate(other)`: another animal of its very class, both in love.
+fn vanilla_can_mate(rt: &mut Rt, e: V, other: V) -> bool {
+    other.r() != 0 && other != e && rt.class_of(other) == rt.class_of(e) && in_love(rt, e) && in_love(rt, other)
+}
+
+/// `isPanicking()` (virtual): a mob's panic goal runs.
+pub(crate) fn is_panicking(rt: &mut Rt, e: V) -> bool {
+    if !is_mod_mob(rt, e) {
+        return false;
+    }
+    own_or(rt, e, IS_PANICKING, &[], |v| v.i() != 0, |rt| crate::goals::panicking(rt, e))
+}
+
+/// `e.spawnChildFromBreeding(level, mate)` (virtual), as `BreedGoal.breed` calls it.
+pub(crate) fn spawn_child_from_breeding(rt: &mut Rt, e: V, level: V, mate: V) {
+    own_or(rt, e, SPAWN_CHILD, &[level, mate], |_| (), |rt| spawn_child(rt, e, level, mate));
+}
+
+/// `getLoveCause()` (virtual): the player who fed it, null when none (or not an animal).
+pub(crate) fn love_cause(rt: &mut Rt, e: V) -> V {
+    if e.r() == 0 || !is_mod_living(rt, e) || !rt.instance_of_static(e, ANIMAL) {
+        return V::NULL;
+    }
+    own_or(rt, e, LOVE_CAUSE, &[], |v| v, |rt| obj(rt, e, "$loveCause"))
+}
+
+/// `Animal.spawnChildFromBreeding(level, mate)` (NeoForge 1.21.1): the class's baby
+/// (`getBreedOffspring`), told to `BabyEntitySpawnEvent` first. A listener canceling it leaves both
+/// parents resting as after a breeding (age 6000, out of love) and no baby; one may give another
+/// baby. The baby, made one (`setBaby`), joins the level where this parent stands, after
+/// `finalizeSpawnChildFromBreeding`.
+fn spawn_child(rt: &mut Rt, e: V, level: V, mate: V) {
+    let proposed = own_or(rt, e, BREED_OFFSPRING, &[level, mate], |v| v, |_| V::NULL);
+    let (canceled, child) = crate::world_events::baby_spawn(rt, e, mate, proposed);
+    if canceled {
+        for p in [e, mate] {
+            set_age_virtual(rt, p, 6000);
+        }
+        for p in [e, mate] {
+            reset_love_virtual(rt, p);
+        }
+        return;
+    }
+    if child.r() == 0 {
+        return;
+    }
+    api::virtual_call(rt, SET_BABY, &[child, V::I(1)]);
+    rt.report_thrown(SET_BABY.1);
+    let at = position(rt, e);
+    api::virtual_call(rt, MOVE_TO, &[child, V::D(at[0]), V::D(at[1]), V::D(at[2]), V::F(0.0), V::F(0.0)]);
+    rt.report_thrown(MOVE_TO.1);
+    own_or(rt, e, FINALIZE_CHILD, &[level, mate, child], |_| (), |rt| finalize_child(rt, e, level, mate, child));
+    api::call(rt, ADD_WITH_PASSENGERS, &[level, child]);
+    rt.report_thrown("addFreshEntityWithPassengers");
+}
+
+/// `Animal.finalizeSpawnChildFromBreeding(level, mate, baby)`: the player who fed this parent (or
+/// else its mate) has bred an animal (the `animals_bred` statistic, the `bred_animals`
+/// advancement trigger); both parents rest 6000 ticks out of love, this one's players see the
+/// hearts (event 18), and with `doMobLoot` an experience orb of 1 to 7 points drops where it
+/// stands.
+fn finalize_child(rt: &mut Rt, e: V, _level: V, mate: V, child: V) {
+    let cause = match love_cause(rt, e) {
+        c if c.r() != 0 => c,
+        _ => love_cause(rt, mate),
+    };
+    if cause.r() != 0 {
+        let id = rt.string("minecraft:animals_bred");
+        api::call(rt, AWARD_STAT_ID, &[cause, id]);
+        rt.report_thrown("awardStat");
+        trigger_bred(rt, cause, e, mate, child);
+    }
+    set_age_virtual(rt, e, 6000);
+    set_age_virtual(rt, mate, 6000);
+    reset_love_virtual(rt, e);
+    reset_love_virtual(rt, mate);
+    crate::mod_entities::broadcast_event(rt, e, 18);
+    if crate::gamerules::mobs_drop(rt) {
+        let value = random_int(rt, e, 7) + 1;
+        let at = position(rt, e);
+        rt.host_call(|h| h.spawn_experience_orb(at, value as u32, None));
+    }
+}
+
+/// `CriteriaTriggers.BRED_ANIMALS.trigger(player, parent, partner, child)`: the game tests its
+/// criteria on the animals' types, places and ages.
+fn trigger_bred(rt: &mut Rt, player: V, parent: V, partner: V, child: V) {
+    let Some(uuid) = crate::network::player_uuid(rt, player) else {
+        return;
+    };
+    let (parent, partner) = (bred_entity(rt, parent), bred_entity(rt, partner));
+    let child = (child.r() != 0).then(|| bred_entity(rt, child));
+    rt.host_call(|h| h.trigger_bred(uuid, &parent, &partner, child.as_ref()));
+}
+
+fn bred_entity(rt: &mut Rt, e: V) -> crate::host::BredEntity {
+    let ty = rt.get_field(e, "$type");
+    let kind = crate::mod_entities::type_id(rt, ty).unwrap_or_default().to_owned();
+    let baby = is_mod_living(rt, e) && is_baby(rt, e);
+    crate::host::BredEntity { kind, position: position(rt, e), baby }
+}
+
+/// `setAge(age)` (virtual).
+fn set_age_virtual(rt: &mut Rt, e: V, age: i32) {
+    own_or(rt, e, SET_AGE, &[V::I(age)], |_| (), |rt| set_age(rt, e, age));
+}
+
+/// `resetLove()` (virtual).
+fn reset_love_virtual(rt: &mut Rt, e: V) {
+    own_or(rt, e, RESET_LOVE, &[], |_| (), |rt| put_i(rt, e, "inLove", 0));
 }
 
 /// `LivingEntity.getScale()` (final) of a mod's living entity: its scale attribute, kept within
@@ -4142,5 +4302,144 @@ mod tests {
             assert_eq!(api_super(SMOOTH_LOOK), Some(LOOK_CONTROL));
         });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    const BREED_GOAL: &str = "net/minecraft/world/entity/ai/goal/BreedGoal";
+    const BABY_SPAWN: &str = "net/neoforged/neoforge/event/entity/living/BabyEntitySpawnEvent";
+
+    /// The penguin's own `getBreedOffspring` (Waddles' makes one of its type); nothing else of its
+    /// class is its own.
+    fn breeding_overrides(class: &str, key: &str) -> bool {
+        class == PENGUIN && key.starts_with("getBreedOffspring.")
+    }
+
+    fn breeding_vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        if short.starts_with("getBreedOffspring.") {
+            let ty = rt.get_field(args[0], "$type");
+            let baby = rt.new_object(PENGUIN);
+            api::call(rt, INIT, &[baby, ty, args[1]]);
+            return baby;
+        }
+        api::call(rt, key, args)
+    }
+
+    /// Penguins with a `BreedGoal` each, in the level at `at`.
+    fn breeders(rt: &mut Rt, ty: V, at: &[[f64; 3]]) -> Vec<V> {
+        let mut all = Vec::new();
+        for &p in at {
+            let e = penguin(rt, ty, p);
+            assert!(crate::mod_entities::join(rt, e, false));
+            let g = rt.new_object(BREED_GOAL);
+            api::call(rt, "net/minecraft/world/entity/ai/goal/BreedGoal.<init>.(Lnet/minecraft/world/entity/animal/Animal;D)V", &[g, e, V::D(1.0)]);
+            let sel = obj(rt, e, "goalSelector");
+            api::call(rt, "net/minecraft/world/entity/ai/goal/GoalSelector.addGoal.(ILnet/minecraft/world/entity/ai/goal/Goal;)V", &[sel, V::I(2), g]);
+            all.push(e);
+        }
+        all
+    }
+
+    fn babies(rt: &mut Rt) -> Vec<V> {
+        let all = crate::mod_entities::in_box(rt, [-8.0, 0.0, -8.0, 8.0, 4.0, 8.0]);
+        all.into_iter().filter(|&e| int(rt, e, "$age") < 0).collect()
+    }
+
+    /// Two penguins in love, one fed by a player, find each other (the nearer one out of love
+    /// isn't taken) and, three seconds of the goal's ticks on, have a baby where one of them
+    /// stands; both rest 6000 ticks out of love, an orb of 1 to 7 points drops, and the player
+    /// has bred an animal (the statistic, the advancement trigger with the three of them).
+    #[test]
+    fn two_animals_in_love_have_a_baby_and_rest() {
+        let (mut rt, ty) = runtime();
+        rt.overrides = Some(breeding_overrides);
+        rt.vcall = Some(breeding_vcall);
+        let mut host = floor();
+        host.player_id = Some(7);
+        rt.with_host(&mut host, |rt| {
+            let all = breeders(rt, ty, &[[0.5, 1.0, 0.5], [2.5, 1.0, 0.5], [1.5, 1.0, 1.5]]);
+            let (a, b, c) = (all[0], all[1], all[2]);
+            let player = crate::menus::server_player(rt, 7);
+            set_in_love(rt, a, player);
+            set_in_love(rt, b, V::NULL);
+            let mut born = None;
+            for t in 1..=80 {
+                for &e in &all {
+                    step(rt, e);
+                }
+                if let Some(&baby) = babies(rt).first() {
+                    born = Some((t, baby));
+                    break;
+                }
+            }
+            let (t, baby) = born.expect("a baby");
+            assert!((52..=64).contains(&t), "born on tick {t}: 30 of the goal's every-other-tick runs");
+            assert_eq!(babies(rt), [baby], "one baby");
+            assert_eq!(int(rt, baby, "$age"), -24000);
+            assert_eq!(rt.class_of(baby), PENGUIN);
+            let at = position(rt, baby);
+            let near = |e: V| {
+                let p = position(rt, e);
+                (p[0] - at[0]).abs() < 0.5 && (p[2] - at[2]).abs() < 0.5
+            };
+            assert!(near(a) || near(b), "where a parent stands: {at:?}");
+            for e in [a, b] {
+                assert!((5999..=6000).contains(&int(rt, e, "$age")), "resting: {}", int(rt, e, "$age"));
+                assert_eq!(int(rt, e, "inLove"), 0);
+            }
+            assert_eq!((int(rt, c, "$age"), int(rt, c, "inLove")), (0, 0), "the one out of love has no part");
+        });
+        assert_eq!(host.orbs.len(), 1);
+        assert!((1..=7).contains(&host.orbs[0].1), "{:?}", host.orbs);
+        assert_eq!(host.orbs[0].0[1], 1.0);
+        assert!(host.stats.contains(&(7, "minecraft:custom".into(), "minecraft:animals_bred".into(), 1)), "{:?}", host.stats);
+        assert_eq!(host.bred.len(), 1);
+        let (player, parent, partner, child) = &host.bred[0];
+        assert_eq!(*player, 7);
+        assert_eq!((parent.kind.as_str(), parent.baby, partner.kind.as_str(), partner.baby), ("test:penguin", false, "test:penguin", false));
+        assert!(child.as_ref().is_some_and(|c| c.kind == "test:penguin" && c.baby));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    fn cancel_babies(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+        let ev = args[1];
+        let cause = api::call(rt, "net/neoforged/neoforge/event/entity/living/BabyEntitySpawnEvent.getCausedByPlayer.()Lnet/minecraft/world/entity/player/Player;", &[ev]);
+        let child = api::call(rt, "net/neoforged/neoforge/event/entity/living/BabyEntitySpawnEvent.getChild.()Lnet/minecraft/world/entity/AgeableMob;", &[ev]);
+        rt.interned.insert("test:cause".into(), cause);
+        rt.interned.insert("test:child".into(), child);
+        api::call(rt, "net/neoforged/bus/api/ICancellableEvent.setCanceled.(Z)V", &[ev, V::I(1)]);
+        Some(V::Void)
+    }
+
+    /// A listener canceling `BabyEntitySpawnEvent` (it was told of the player who fed them and the
+    /// baby proposed) leaves the parents resting out of love with no baby, orb or credit.
+    #[test]
+    fn a_listener_cancels_the_baby() {
+        let (mut rt, ty) = runtime();
+        rt.overrides = Some(breeding_overrides);
+        rt.vcall = Some(breeding_vcall);
+        rt.lambda_call = Some(cancel_babies);
+        let l = rt.lambda_id("java/util/function/Consumer", 1, vec![]);
+        rt.listeners.push((BABY_SPAWN.to_owned(), l));
+        let mut host = floor();
+        host.player_id = Some(7);
+        rt.with_host(&mut host, |rt| {
+            let all = breeders(rt, ty, &[[0.5, 1.0, 0.5], [1.5, 1.0, 0.5]]);
+            let player = crate::menus::server_player(rt, 7);
+            set_in_love(rt, all[0], V::NULL);
+            set_in_love(rt, all[1], player);
+            for _ in 0..80 {
+                for &e in &all {
+                    step(rt, e);
+                }
+            }
+            assert!(babies(rt).is_empty());
+            for &e in &all {
+                assert!((5900..=6000).contains(&int(rt, e, "$age")), "resting: {}", int(rt, e, "$age"));
+                assert_eq!(int(rt, e, "inLove"), 0);
+            }
+            assert_eq!(rt.interned.get("test:cause").copied(), Some(player), "the second parent's player");
+            assert!(rt.interned.get("test:child").is_some_and(|c| c.r() != 0));
+        });
+        assert!(host.orbs.is_empty() && host.bred.is_empty());
+        assert!(!host.stats.iter().any(|s| s.2 == "minecraft:animals_bred"));
     }
 }

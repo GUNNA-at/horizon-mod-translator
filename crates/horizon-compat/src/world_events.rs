@@ -21,6 +21,8 @@
 //! - A projectile about to hit ([`projectile_impact`], `ProjectileImpactEvent`), cancelable, and the
 //!   ammo an entity finds for its weapon ([`get_projectile`], `LivingGetProjectileEvent`), which a
 //!   listener changes.
+//! - Two animals about to have a baby ([`baby_spawn`], `BabyEntitySpawnEvent`): a listener cancels
+//!   the breeding or gives another baby.
 //!
 //! Create mirrors breaks and placements with its wand of symmetry, wears its extendo grip down on
 //! them, glues a block placed with super glue in the off hand, pulses its haunted bell from a
@@ -52,6 +54,7 @@ pub(crate) const ENTITY_JOIN: &str = "net/neoforged/neoforge/event/entity/Entity
 pub(crate) const ENTITY_LEAVE: &str = "net/neoforged/neoforge/event/entity/EntityLeaveLevelEvent";
 const PROJECTILE_IMPACT: &str = "net/neoforged/neoforge/event/entity/ProjectileImpactEvent";
 const GET_PROJECTILE: &str = "net/neoforged/neoforge/event/entity/living/LivingGetProjectileEvent";
+const BABY_SPAWN: &str = "net/neoforged/neoforge/event/entity/living/BabyEntitySpawnEvent";
 const EVENT_HOOKS: &str = "net/neoforged/neoforge/event/EventHooks";
 const COMMON_HOOKS: &str = "net/neoforged/neoforge/common/CommonHooks";
 const PLAYER: &str = "net/minecraft/world/entity/player/Player";
@@ -65,7 +68,8 @@ const LAST_CLICK: &str = "compat:last-click";
 
 /// The events' classes above them, so a listener for `BlockEvent` (or `PlayerEvent`, or any
 /// event) hears them.
-const SUPERS: [(&str, &str); 18] = [
+const SUPERS: [(&str, &str); 19] = [
+    (BABY_SPAWN, EVENT),
     (ENTITY_JOIN, ENTITY_EVENT),
     (ENTITY_LEAVE, ENTITY_EVENT),
     (PROJECTILE_IMPACT, ENTITY_EVENT),
@@ -87,7 +91,7 @@ const SUPERS: [(&str, &str); 18] = [
 ];
 
 fn know_classes(rt: &mut Rt) {
-    if rt.supers.get(BREAK) != Some(&BLOCK_EVENT) || rt.supers.get(LOGGING_IN) != Some(&NETWORK_EVENT) {
+    if rt.supers.get(BREAK) != Some(&BLOCK_EVENT) || rt.supers.get(LOGGING_IN) != Some(&NETWORK_EVENT) || rt.supers.get(BABY_SPAWN) != Some(&EVENT) {
         for (class, sup) in SUPERS {
             rt.supers.insert(class, sup);
         }
@@ -384,6 +388,29 @@ pub(crate) fn projectile_impact(rt: &mut Rt, e: V, hit: V) -> bool {
     rt.get_field(ev, "$canceled").i() != 0
 }
 
+/// `BabyEntitySpawnEvent` (`Animal.spawnChildFromBreeding`): animals `a` and `b` are about to have
+/// `child` (null: none), caused by the player who fed `a` (or else `b`). Whether a listener
+/// canceled the breeding, and the baby the listeners left.
+pub(crate) fn baby_spawn(rt: &mut Rt, a: V, b: V, child: V) -> (bool, V) {
+    if !listened(rt, BABY_SPAWN) {
+        return (false, child);
+    }
+    let ev = rt.new_object(BABY_SPAWN);
+    baby_spawn_init(rt, ev, a, b, child);
+    crate::neo::post(rt, BABY_SPAWN, ev);
+    (rt.get_field(ev, "$canceled").i() != 0, rt.get_field(ev, "$child"))
+}
+
+/// `new BabyEntitySpawnEvent(parentA, parentB, proposedChild)`: the player is `parentA`'s love
+/// cause, or else `parentB`'s.
+fn baby_spawn_init(rt: &mut Rt, ev: V, a: V, b: V, child: V) {
+    let cause = match crate::mobs::love_cause(rt, a) {
+        c if c.r() != 0 => c,
+        _ => crate::mobs::love_cause(rt, b),
+    };
+    put_all(rt, ev, &[("$parentA", a), ("$parentB", b), ("$causedByPlayer", cause), ("$child", child)]);
+}
+
 /// `CommonHooks.getProjectile(entity, weapon, ammo)`: `LivingGetProjectileEvent`, where a mod
 /// listens. The ammo `entity` shoots from `weapon` as its listeners leave it (`ammo` unheard).
 pub(crate) fn get_projectile(rt: &mut Rt, entity: V, weapon: V, ammo: V) -> V {
@@ -404,7 +431,7 @@ fn block_event(rt: &Rt, v: V) -> bool {
 
 /// The keys [`call`] may answer.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(owner, BREAK | PLACE | MULTI_PLACE | SNAPSHOT | PLAYER_TICK | PLAYER_TICK_PRE | PLAYER_TICK_POST | ENTITY_JOIN | ENTITY_LEAVE | PROJECTILE_IMPACT | GET_PROJECTILE)
+    matches!(owner, BREAK | PLACE | MULTI_PLACE | SNAPSHOT | PLAYER_TICK | PLAYER_TICK_PRE | PLAYER_TICK_POST | ENTITY_JOIN | ENTITY_LEAVE | PROJECTILE_IMPACT | GET_PROJECTILE | BABY_SPAWN)
         || (owner == EVENT_HOOKS && name == "onProjectileImpact")
         || (owner == COMMON_HOOKS && name == "getProjectile")
         || owner.starts_with(NETWORK_EVENT)
@@ -454,6 +481,29 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if owner == COMMON_HOOKS && name == "getProjectile" {
         return Some(get_projectile(rt, a(0), a(1), a(2)));
+    }
+    if owner == BABY_SPAWN || (matches!(owner, EVENT | CANCELLABLE) && rt.class_of(ev) == BABY_SPAWN) {
+        return Some(match name {
+            "<init>" => {
+                know_classes(rt);
+                baby_spawn_init(rt, ev, a(1), a(2), a(3));
+                V::Void
+            }
+            "getParentA" => rt.get_field(ev, "$parentA"),
+            "getParentB" => rt.get_field(ev, "$parentB"),
+            "getCausedByPlayer" => rt.get_field(ev, "$causedByPlayer"),
+            "getChild" => rt.get_field(ev, "$child"),
+            "setChild" => {
+                rt.put_field(ev, "$child", a(1));
+                V::Void
+            }
+            "isCanceled" => V::I(rt.get_field(ev, "$canceled").i()),
+            "setCanceled" => {
+                rt.put_field(ev, "$canceled", V::I(a(1).i()));
+                V::Void
+            }
+            _ => return None,
+        });
     }
     if owner == GET_PROJECTILE || (matches!(owner, LIVING_EVENT | ENTITY_EVENT | EVENT) && rt.class_of(ev) == GET_PROJECTILE) {
         return Some(match name {

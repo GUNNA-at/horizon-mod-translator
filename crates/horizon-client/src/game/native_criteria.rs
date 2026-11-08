@@ -92,6 +92,38 @@ impl Game<'_> {
                 .is_some()
     }
 
+    /// The game's own `minecraft:bred_animals` trigger for a native mod's
+    /// animals (`Animal.finalizeSpawnChildFromBreeding`:
+    /// `CriteriaTriggers.BRED_ANIMALS.trigger(player, parent, partner,
+    /// child)`), for the server's player with that UUID. Each animal is its
+    /// type, its feet and whether it is a baby; `child` is None for a
+    /// breeding that made none. Their open criteria whose `parent`, `partner`
+    /// and `child` predicates the animals pass (the parents either way round)
+    /// are granted, as the game's own breeding grants them: any animal earns
+    /// "The Parrots and the Bats". The player is reached as
+    /// `native_trigger_criterion` reaches them; false off a server or when
+    /// they weren't. API @API:bred_animals@.
+    pub(super) fn native_trigger_bred(
+        &mut self,
+        uuid: u128,
+        parent: (&str, [f64; 3], bool),
+        partner: (&str, [f64; 3], bool),
+        child: Option<(&str, [f64; 3], bool)>,
+    ) -> bool {
+        if self.remote.is_some() {
+            return false;
+        }
+        let view = |(kind, position, baby): (&str, [f64; 3], bool)| EntityView {
+            kind: kind.to_owned(),
+            position,
+            baby,
+            ..EntityView::default()
+        };
+        let (parent, partner, child) = (view(parent), view(partner), child.map(view));
+        self.as_criteria_player(uuid, |g| g.trigger_bred(&parent, &partner, child.as_ref()))
+            .is_some()
+    }
+
     /// The criteria of the server's advancements whose trigger is a mod's
     /// (a namespaced id outside `minecraft`), in the tree's order: what a
     /// NeoForge server's `PlayerAdvancements` listens for on the mods' own

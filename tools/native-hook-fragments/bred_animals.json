@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the game's own `bred_animals` advancement trigger for a server mod's animals (`native_trigger_bred`).",
+  "doc_summary": "`native_trigger_bred(uuid, parent, partner, child)` is `CriteriaTriggers.BRED_ANIMALS.trigger` for a native mod's animals (`Animal.finalizeSpawnChildFromBreeding`): each animal is its type, its feet and whether it is a baby (`child` None for a breeding that made none), and the player's open `minecraft:bred_animals` criteria whose `parent`, `partner` and `child` predicates they pass (the parents either way round) are granted as the game's own breeding grants them, so breeding any mod's animal earns \"The Parrots and the Bats\". It reaches a player as `native_trigger_criterion` does. Bundles need \"hooks\": @API:bred_animals@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_criteria.rs"
+  ]
+}

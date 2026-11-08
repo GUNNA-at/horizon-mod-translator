@@ -2997,7 +2997,8 @@ fn world_writes(c: &str) -> String {
 }
 
 /// A server host's advancements: the criteria of the mods' triggers its players listen for, a
-/// player's progress, and criteria granted through the game (`native_criteria.rs`).
+/// player's progress, criteria granted through the game, and the game's own `bred_animals` trigger
+/// for a mod's animals (`native_criteria.rs`).
 fn advancement_methods(c: &str) -> String {
     format!(
         r#"        fn mod_criteria(&mut self) -> Option<Vec<{c}::host::ModCriterion>> {{
@@ -3016,6 +3017,10 @@ fn advancement_methods(c: &str) -> String {
         }}
         fn criterion_player_holds(&mut self, player: u128, advancement: &str, criterion: &str) -> bool {{
             self.game.native_criterion_player_holds(player, advancement, criterion)
+        }}
+        fn trigger_bred(&mut self, player: u128, parent: &{c}::host::BredEntity, partner: &{c}::host::BredEntity, child: Option<&{c}::host::BredEntity>) -> bool {{
+            let (a, b) = ((parent.kind.as_str(), parent.position, parent.baby), (partner.kind.as_str(), partner.position, partner.baby));
+            self.game.native_trigger_bred(player, a, b, child.map(|e| (e.kind.as_str(), e.position, e.baby)))
         }}
 "#
     )

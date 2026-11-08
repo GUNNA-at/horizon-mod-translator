@@ -1251,7 +1251,8 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "getRandom" => rt.get_field(e, "random"),
         // A mod's entity rides nothing here.
         "isPassenger" | "isSpectator" | "isAlwaysTicking" | "isInvisible" | "isSilent" | "noCulling" => V::I(0),
-        "getVehicle" | "getControllingPassenger" if desc.ends_with("Lnet/minecraft/world/entity/Entity;") => V::NULL,
+        // 1.21.1's `getControllingPassenger` is a `LivingEntity`.
+        "getVehicle" | "getControllingPassenger" if desc.ends_with("Lnet/minecraft/world/entity/Entity;") || desc.ends_with("Lnet/minecraft/world/entity/LivingEntity;") => V::NULL,
         "getRootVehicle" => e,
         // `Entity`'s: drawn, hit by a player's blow, but not picked by the crosshair.
         "shouldRender" | "shouldRenderAtSqrDistance" | "isAttackable" => V::I(1),
