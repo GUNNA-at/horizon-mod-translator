@@ -19,7 +19,7 @@
 //! minecart's, a boat's: none, and turning one does nothing), and a blow's armour, knockback and
 //! attacker: `hurt` takes the amount off the health.
 
-use crate::host::{EntityView, Host, Nbt};
+use crate::host::{EntityView, FireChange, Host, Nbt};
 use crate::{Rt, V, api};
 
 const ENTITY: &str = "net/minecraft/world/entity/Entity";
@@ -1097,8 +1097,46 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
-        "isSpectator" | "isInvisible" | "isOnFire" | "isPassenger" | "isVehicle" | "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isSilent" | "isNoGravity"
-        | "isInWater" | "isInLava" | "isInWaterOrRain" | "isUnderWater" | "isBaby" | "isSleeping" | "isUsingItem" | "isFallFlying" | "fireImmune"
+        // Its fire as the game holds it: it burns while its remaining ticks are above 0, unless its
+        // kind never burns (a blaze); `displayFireAnimation` is `isOnFire` (it is no spectator). A
+        // host that can't tell has it never burn.
+        "isOnFire" | "displayFireAnimation" | "fireImmune" | "getRemainingFireTicks"
+            if desc.starts_with("()") =>
+        {
+            let fire = rt
+                .host()
+                .and_then(|h| h.entity_fire(id))
+                .unwrap_or_default();
+            V::I(match name {
+                "fireImmune" => i32::from(fire.immune),
+                "getRemainingFireTicks" => fire.ticks,
+                _ => i32::from(!fire.immune && fire.ticks > 0),
+            })
+        }
+        // Setting it alight or putting it out, through the game, which tells the players who see it:
+        // `setRemainingFireTicks`, `igniteForSeconds` (final: `Mth.floor(seconds * 20.0F)` ticks),
+        // `igniteForTicks` (a living one's scaled by its burning time), `clearFire`
+        // (`setRemainingFireTicks(0)`) and `extinguishFire` (the extinguish sound for one that
+        // burns, then the fire out).
+        "setRemainingFireTicks"
+        | "igniteForTicks"
+        | "igniteForSeconds"
+        | "clearFire"
+        | "extinguishFire"
+            if desc.ends_with(")V") =>
+        {
+            let change = match name {
+                "setRemainingFireTicks" => FireChange::Set(a(1).i()),
+                "igniteForTicks" => FireChange::Ignite(a(1).i()),
+                "igniteForSeconds" => FireChange::Ignite((a(1).f() * 20.0).floor() as i32),
+                "clearFire" => FireChange::Set(0),
+                _ => FireChange::Extinguish,
+            };
+            with_host(rt, |h| h.set_entity_fire(id, change));
+            V::Void
+        }
+        "isSpectator" | "isInvisible" | "isPassenger" | "isVehicle" | "isShiftKeyDown" | "isCrouching" | "isSteppingCarefully" | "isSilent" | "isNoGravity"
+        | "isInWater" | "isInLava" | "isInWaterOrRain" | "isUnderWater" | "isBaby" | "isSleeping" | "isUsingItem" | "isFallFlying"
         | "isSprinting" | "isSwimming" | "isInvulnerable" | "isCustomNameVisible" | "hasCustomName" => V::I(0),
         "isAttackable" | "canBeCollidedWith" | "isEffectiveAi" | "shouldBeSaved" => V::I(i32::from(name != "canBeCollidedWith")),
         "getVehicle" | "getControllingPassenger" | "getFirstPassenger" | "getCustomName" | "getTarget" => V::NULL,
@@ -1241,7 +1279,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             crate::entities::spawn_at(rt, [p[0], p[1] + offset, p[2]], stack)
         }
-        "getRemainingFireTicks" | "getAirSupply" | "getTicksFrozen" | "getArmorValue" => V::I(0),
+        "getAirSupply" | "getTicksFrozen" | "getArmorValue" => V::I(0),
         _ => return None,
     })
 }
@@ -1600,6 +1638,106 @@ mod tests {
             "another player's isn't the client's"
         );
         assert_eq!(client.player_motions[&0x99], [0.0, -0.0784, 0.3]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod sets the game's mob and a server's player alight and puts them out as 1.21.1's
+    /// `Entity` does (Create's fan over fire sets what it blows alight, its fan over water puts it
+    /// out): `igniteForSeconds(2.5F)` is 50 ticks, a shorter ignition keeps the longer fire,
+    /// `clearFire` puts it out silently and `extinguishFire` with the sound, only for one that
+    /// burns. A blaze with fire ticks doesn't burn (`fireImmune`). On a client, its own player's
+    /// flames are the server's: it reads them and changes none.
+    #[test]
+    fn a_mod_sets_the_games_mob_and_players_alight_and_puts_them_out() {
+        const ON_FIRE: &str = "net/minecraft/world/entity/Entity.isOnFire.()Z";
+        const SHOWN: &str = "net/minecraft/world/entity/Entity.displayFireAnimation.()Z";
+        const IMMUNE: &str = "net/minecraft/world/entity/Entity.fireImmune.()Z";
+        const TICKS: &str = "net/minecraft/world/entity/Entity.getRemainingFireTicks.()I";
+        const SET: &str = "net/minecraft/world/entity/LivingEntity.setRemainingFireTicks.(I)V";
+        const SECONDS: &str = "net/minecraft/world/entity/Entity.igniteForSeconds.(F)V";
+        const IGNITE: &str = "net/minecraft/world/entity/Entity.igniteForTicks.(I)V";
+        const CLEAR: &str = "net/minecraft/world/entity/Entity.clearFire.()V";
+        const EXTINGUISH: &str = "net/minecraft/world/entity/Entity.extinguishFire.()V";
+        const PLAYER_CLEAR: &str = "net/minecraft/world/entity/player/Player.clearFire.()V";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        for (id, kind) in [(7, "minecraft:pig"), (8, "minecraft:blaze")] {
+            host.entities.push(EntityView {
+                id,
+                kind: kind.into(),
+                pos: [0.5, 64.0, 0.5],
+                health: Some((10.0, 10.0)),
+                ..Default::default()
+            });
+        }
+        host.fires.insert(
+            8,
+            crate::host::Fire {
+                ticks: 20,
+                immune: true,
+            },
+        );
+        let uuid = 0x42u128;
+        host.players = vec![(uuid, [3.5, 64.0, 0.5])];
+        rt.with_host(&mut host, |rt| {
+            let pig = of(rt, 7, "minecraft:pig", None);
+            let reads = |rt: &mut Rt, e: V| {
+                [ON_FIRE, SHOWN, IMMUNE, TICKS].map(|k| api::call(rt, k, &[e]).i())
+            };
+            assert_eq!(reads(rt, pig), [0, 0, 0, 0]);
+            api::call(rt, SECONDS, &[pig, V::F(2.5)]);
+            assert_eq!(reads(rt, pig), [1, 1, 0, 50]);
+            api::call(rt, IGNITE, &[pig, V::I(10)]);
+            assert_eq!(
+                api::call(rt, TICKS, &[pig]).i(),
+                50,
+                "a shorter ignition keeps the fire"
+            );
+            api::call(rt, SET, &[pig, V::I(5)]);
+            assert_eq!(api::call(rt, TICKS, &[pig]).i(), 5);
+            api::call(rt, EXTINGUISH, &[pig]);
+            api::call(rt, EXTINGUISH, &[pig]);
+            api::call(rt, SET, &[pig, V::I(3)]);
+            api::call(rt, CLEAR, &[pig]);
+            assert_eq!(reads(rt, pig), [0, 0, 0, 0]);
+            let blaze = of(rt, 8, "minecraft:blaze", None);
+            assert_eq!(reads(rt, blaze), [0, 0, 1, 20]);
+            // A server's player, by UUID.
+            let player = crate::menus::server_player(rt, uuid);
+            assert_eq!(reads(rt, player), [0, 0, 0, 0]);
+            api::call(rt, SECONDS, &[player, V::F(8.0)]);
+            assert_eq!(reads(rt, player), [1, 1, 0, 160]);
+            api::call(rt, EXTINGUISH, &[player]);
+            assert_eq!(api::call(rt, ON_FIRE, &[player]).i(), 0);
+            api::call(rt, SET, &[player, V::I(40)]);
+            api::call(rt, PLAYER_CLEAR, &[player]);
+        });
+        assert_eq!(host.fires[&7].ticks, 0);
+        assert_eq!(host.player_fires[&uuid], 0);
+        assert_eq!(
+            host.extinguished,
+            [Ok(7), Err(uuid)],
+            "a sound for each one put out that burned"
+        );
+        // A client: its own player's flames, as the server sent them.
+        let mut client = MemoryHost {
+            client: true,
+            client_player_id: Some(57),
+            player_id: Some(0x99),
+            ..MemoryHost::default()
+        };
+        client.player_fires.insert(0x99, 1);
+        rt.with_host(&mut client, |rt| {
+            let me = crate::network::local_player(rt);
+            assert_eq!(api::call(rt, ON_FIRE, &[me]).i(), 1);
+            api::call(rt, CLEAR, &[me]);
+            assert_eq!(
+                api::call(rt, ON_FIRE, &[me]).i(),
+                1,
+                "the server's to put out"
+            );
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

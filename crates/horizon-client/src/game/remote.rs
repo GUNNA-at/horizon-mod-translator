@@ -579,6 +579,10 @@ pub(super) struct Remote {
     /// The player's own shared flag 5 (`Entity.isInvisible`) as the server
     /// last set it.
     pub(super) own_invisible: bool,
+    /// The player's own shared flag 0 (`Entity.isOnFire` on a client: the
+    /// flames over their view) as the server last set it. A client's own fire
+    /// ticks never count: vanilla's `baseTick` clears them each tick there.
+    pub(super) own_on_fire: bool,
     /// `LivingEntity.DATA_ARROW_COUNT_ID` and `DATA_STINGER_COUNT_ID` of the
     /// own player, as the server synced them.
     pub(super) own_arrows: i32,
@@ -1018,6 +1022,7 @@ impl Game<'_> {
             level_player_textures: HashMap::new(),
             glowing: Default::default(),
             own_invisible: false,
+            own_on_fire: false,
             own_arrows: 0,
             own_stingers: 0,
             own_shoulders: [None; 2],
@@ -2911,6 +2916,7 @@ impl Game<'_> {
                 if let Some(r) = self.remote.as_mut() {
                     r.carried = Some(0);
                     r.own_invisible = false;
+                    r.own_on_fire = false;
                     r.online_mode = p.online_mode;
                     r.enforces_secure_chat = p.enforces_secure_chat;
                     r.entity_id = p.player_id;
@@ -2953,6 +2959,7 @@ impl Game<'_> {
                     // (its shared flags) to the new one; without it they reset.
                     if let Some(r) = self.remote.as_mut() {
                         r.own_invisible = false;
+                        r.own_on_fire = false;
                     }
                 }
                 let dimension_changed = self.dim != Dim::from_id(&p.spawn.dimension);
@@ -3439,12 +3446,16 @@ impl Game<'_> {
                             // Its invisible bit (Entity.isInvisible): the
                             // Invisibility effect's, or a plugin's that hides
                             // the real body under a pose (#3788).
+                            // Its on-fire bit: the flames over the view, set
+                            // by the server alone (a fan of a mod, a burning
+                            // arrow's hit).
                             (0, Value::Byte(flags)) => {
                                 if let Some(pl) = self.player.as_mut() {
                                     pl.sprinting = flags & 0x08 != 0;
                                 }
                                 if let Some(r) = self.remote.as_mut() {
                                     r.own_invisible = flags & 0x20 != 0;
+                                    r.own_on_fire = flags & 0x01 != 0;
                                 }
                             }
                             // Entity.DATA_AIR_SUPPLY_ID and

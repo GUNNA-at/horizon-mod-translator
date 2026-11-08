@@ -597,6 +597,14 @@ impl Game<'_> {
             self.remote.as_ref().is_some_and(|r| r.own_invisible),
         )
     }
+    /// `Entity.isOnFire` for the player itself: on a server's client the flag
+    /// the server sent (`own_on_fire`), else their own fire ticks.
+    pub(super) fn own_on_fire(&self) -> bool {
+        match &self.remote {
+            Some(r) => r.own_on_fire,
+            None => self.player.as_ref().is_some_and(|p| p.fire_ticks > 0),
+        }
+    }
     /// Whether the player's own body is drawn (`body_visible`).
     pub(super) fn own_body_visible(&self) -> bool {
         body_visible(self.own_invisible(), self.own_team())

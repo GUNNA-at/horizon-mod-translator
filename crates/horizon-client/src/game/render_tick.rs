@@ -349,9 +349,7 @@ impl Game<'_> {
             partial,
             block_overlay,
             water,
-            on_fire: self.camera_type.first_person()
-                && !self.spectator()
-                && self.player.as_ref().is_some_and(|p| p.fire_ticks > 0),
+            on_fire: self.camera_type.first_person() && !self.spectator() && self.own_on_fire(),
             gui_overlays: &gui_overlays,
         })
     }

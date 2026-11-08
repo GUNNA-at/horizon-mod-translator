@@ -9,7 +9,8 @@
 //! printed `id#variant`), `ModelManager.getModel`, `ItemModelShaper.getItemModel`,
 //! `ItemRenderer.getModel` (the trident's and spyglass's in-hand models), `ModelEvent
 //! .BakingCompleted`, and a model's faces drawn into a vertex consumer (`renderModelLists`,
-//! `renderQuadList`: each face's `putBulkData`, as vanilla's).
+//! `renderQuadList`: each face's `putBulkData`, as vanilla's). Before the baking events,
+//! `ModelEvent.RegisterAdditional` asks the mods for the models of their own they want loaded.
 use crate::jutil::{elements, table_get, table_put};
 use crate::{Data, Rt, Table, V};
 
@@ -32,6 +33,8 @@ const ITEM_RENDERER: &str = "net/minecraft/client/renderer/entity/ItemRenderer";
 const MODIFY_BAKING_RESULT: &str =
     "net/neoforged/neoforge/client/event/ModelEvent$ModifyBakingResult";
 const BAKING_COMPLETED: &str = "net/neoforged/neoforge/client/event/ModelEvent$BakingCompleted";
+const REGISTER_ADDITIONAL: &str =
+    "net/neoforged/neoforge/client/event/ModelEvent$RegisterAdditional";
 /// What `getMissingModel` names: vanilla's missing model.
 const MISSING: &str = "minecraft:builtin/missing";
 const LAST: &str =
@@ -55,6 +58,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         owner,
         LOCATION | MODEL_MANAGER | ITEM_MODEL_SHAPER | BAKING_COMPLETED
     ) || (owner == MODIFY_BAKING_RESULT && name == "getModels")
+        || (owner == REGISTER_ADDITIONAL && name == "register")
         || (owner == BLOCK_MODEL_SHAPER
             && matches!(
                 name,
@@ -165,6 +169,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             crate::menus::virt(rt, PARTICLE_ICON, model, &[data])
         }
         (MODIFY_BAKING_RESULT | BAKING_COMPLETED, "getModels") => rt.get_field(a(0), "$models"),
+        // `RegisterAdditional.register(location)`: a model the mod wants loaded with the others by
+        // its own name (Flywheel's partial models), there before `ModifyBakingResult`'s listeners
+        // look. Another variant is refused, as NeoForge's precondition refuses it.
+        (REGISTER_ADDITIONAL, "register") => {
+            if rt.str_of(rt.get_field(a(1), "variant")) != Some("standalone") {
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IllegalArgumentException",
+                    "Side-loaded models must use the 'standalone' variant",
+                ));
+            }
+            let models = rt.get_field(a(0), "$models");
+            at(rt, models, a(1));
+            V::Void
+        }
         (BAKING_COMPLETED, "getModelManager") => single(rt, MODEL_MANAGER),
         _ => return None,
     })
@@ -283,9 +302,10 @@ pub(crate) fn client_resources_loaded(rt: &mut Rt) {
     }
 }
 
-/// The mods' model events on `models`: `ModifyBakingResult`, then `BakingCompleted`.
+/// The mods' model events on `models`: `RegisterAdditional` (the models of their own they want
+/// loaded), `ModifyBakingResult`, then `BakingCompleted`.
 fn bake(rt: &mut Rt, models: V) {
-    for event in [MODIFY_BAKING_RESULT, BAKING_COMPLETED] {
+    for event in [REGISTER_ADDITIONAL, MODIFY_BAKING_RESULT, BAKING_COMPLETED] {
         let ev = rt.new_object(event);
         rt.put_field(ev, "$models", models);
         crate::neo::post(rt, event, ev);
@@ -459,6 +479,7 @@ mod tests {
     const HASH: &str = "java/lang/Object.hashCode.()I";
     const GET_BUFFER: &str = "net/minecraft/client/renderer/MultiBufferSource.getBuffer.(Lnet/minecraft/client/renderer/RenderType;)Lcom/mojang/blaze3d/vertex/VertexConsumer;";
     const WRAPPER_NEW: &str = "net/neoforged/neoforge/client/model/BakedModelWrapper.<init>.(Lnet/minecraft/client/resources/model/BakedModel;)V";
+    const REGISTER: &str = "net/neoforged/neoforge/client/event/ModelEvent$RegisterAdditional.register.(Lnet/minecraft/client/resources/model/ModelResourceLocation;)V";
 
     fn runtime() -> Rt {
         let mut rt = Rt::new();
@@ -671,6 +692,46 @@ mod tests {
         crate::api::call(rt, WRAPPER_NEW, &[wrapper, original]);
         crate::api::call(rt, MAP_PUT, &[models, location, wrapper]);
         Some(V::Void)
+    }
+
+    /// A listener as Flywheel's partial models' (`PartialModelEventHandler`): it asks for a model
+    /// of its own by name through `RegisterAdditional`.
+    fn register_partial(rt: &mut Rt, _id: u32, args: &[V]) -> Option<V> {
+        let partial = location(rt, "t:block/gear_partial", "standalone");
+        crate::api::call(rt, REGISTER, &[args[1], partial]);
+        Some(V::Void)
+    }
+
+    /// The models of its own a mod asks for through `ModelEvent.RegisterAdditional` (Flywheel's
+    /// partial models) are loaded with the others, before `ModifyBakingResult`: the registry's
+    /// keys hold them (a listener wrapping the models it finds there finds them), and not a model
+    /// no one asked for. One of another variant is refused, as NeoForge's precondition refuses it.
+    #[test]
+    fn a_mods_additional_models_are_loaded_with_the_others() {
+        const KEY_SET: &str = "java/util/Map.keySet.()Ljava/util/Set;";
+        const CONTAINS: &str = "java/util/Set.contains.(Ljava/lang/Object;)Z";
+        let mut rt = runtime();
+        crate::neo::fire_client_setup(&mut rt);
+        rt.lambda_call = Some(register_partial);
+        let listener = rt.lambda_id("java/util/function/Consumer", 1, Vec::new());
+        rt.listeners
+            .push((REGISTER_ADDITIONAL.to_owned(), listener));
+        let models = registry(&mut rt);
+        let keys = crate::api::call(&mut rt, KEY_SET, &[models]);
+        let partial = location(&mut rt, "t:block/gear_partial", "standalone");
+        let other = location(&mut rt, "t:block/other", "standalone");
+        assert_eq!(
+            crate::api::call(&mut rt, CONTAINS, &[keys, partial]),
+            V::I(1)
+        );
+        assert_eq!(crate::api::call(&mut rt, CONTAINS, &[keys, other]), V::I(0));
+        let event = rt.new_object(REGISTER_ADDITIONAL);
+        rt.put_field(event, "$models", models);
+        let item = location(&mut rt, "t:wand", "inventory");
+        crate::api::call(&mut rt, REGISTER, &[event, item]);
+        let thrown = rt.thrown.take().map(|e| rt.class_of(e));
+        assert_eq!(thrown, Some("java/lang/IllegalArgumentException"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// The mods' model events come once the client is set up and its resources load, as vanilla

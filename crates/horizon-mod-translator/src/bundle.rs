@@ -753,6 +753,11 @@ fn client_host(c: &str, id: &str) -> String {
         fn set_player_motion(&mut self, _uuid: u128, motion: [f64; 3]) -> bool {{
             self.game.get_mut().is_some_and(|g| g.native_set_client_player_motion(motion))
         }}
+        // And sees its own player's flames (the server's to change).
+        fn player_fire(&mut self, _uuid: u128) -> Option<{c}::host::Fire> {{
+            let f = self.game.get().native_client_player_fire()?;
+            Some({c}::host::Fire {{ ticks: f.ticks, immune: f.immune }})
+        }}
         // The client moves its own player, and knows their keys (Create's belts carry them there).
         fn move_client_player(&mut self, movement: [f64; 3]) -> bool {{
             self.game.get_mut().is_some_and(|g| g.native_move_client_player(movement))
@@ -2852,6 +2857,25 @@ fn world_writes(c: &str) -> String {
         fn mark_player_motion(&mut self, uuid: u128) -> bool {{
             self.game.native_mark_player_motion(uuid)
         }}
+        // A mob's fire, and a server's player's as that player: `getRemainingFireTicks`,
+        // `fireImmune`; `setRemainingFireTicks`, `igniteForTicks`, `extinguishFire`.
+        fn entity_fire(&self, id: i32) -> Option<{c}::host::Fire> {{
+            let f = self.game.native_mob_fire(self.game.native_dimension(), u32::try_from(id).ok()?)?;
+            Some({c}::host::Fire {{ ticks: f.ticks, immune: f.immune }})
+        }}
+        fn set_entity_fire(&mut self, id: i32, change: {c}::host::FireChange) -> bool {{
+            let dimension = self.game.native_dimension().to_owned();
+            let change = match change {{ {c}::host::FireChange::Set(t) => crate::game::native_fire::NativeFireChange::Set(t), {c}::host::FireChange::Ignite(t) => crate::game::native_fire::NativeFireChange::Ignite(t), {c}::host::FireChange::Extinguish => crate::game::native_fire::NativeFireChange::Extinguish }};
+            u32::try_from(id).is_ok_and(|i| self.game.native_set_mob_fire(&dimension, i, change))
+        }}
+        fn player_fire(&mut self, uuid: u128) -> Option<{c}::host::Fire> {{
+            let f = self.game.native_player_fire(uuid)?;
+            Some({c}::host::Fire {{ ticks: f.ticks, immune: f.immune }})
+        }}
+        fn set_player_fire(&mut self, uuid: u128, change: {c}::host::FireChange) -> bool {{
+            let change = match change {{ {c}::host::FireChange::Set(t) => crate::game::native_fire::NativeFireChange::Set(t), {c}::host::FireChange::Ignite(t) => crate::game::native_fire::NativeFireChange::Ignite(t), {c}::host::FireChange::Extinguish => crate::game::native_fire::NativeFireChange::Extinguish }};
+            self.game.native_set_player_fire(uuid, change)
+        }}
 {attributes}{effects}{vitals}{level_events}{advancements}{stats}{world}"#,
         attributes = attribute_methods(c, "Some(&mut *self.game)"),
         effects = effect_methods(c, "Some(&mut *self.game)"),
@@ -3031,6 +3055,7 @@ fn hit_host(c: &str, server_send: &str) -> String {
     let turn = later("Later { game }.turn_entity(id, &turn)");
     let (motion, player_motion) = (later("Later { game }.set_entity_motion(id, motion)"), later("Later { game }.set_player_motion(uuid, motion)"));
     let (moved, marked) = (later("Later { game }.move_entity(id, movement)"), later("Later { game }.mark_player_motion(uuid)"));
+    let (fire, player_fire) = (later("Later { game }.set_entity_fire(id, change)"), later("Later { game }.set_player_fire(uuid, change)"));
     let (orb, payload) = (later("game.native_spawn_experience_orb(at, value, motion)"), later("Later { game }.send_payload(to, &channel, &data)"));
     let attribute = later("Later { game }.change_attribute(entity, &attribute, &change)");
     let (give, take) = (later("Later { game }.add_effect(entity, &effect, force)"), later("Later { game }.remove_effect(entity, &effect)"));
@@ -3195,6 +3220,16 @@ fn hit_host(c: &str, server_send: &str) -> String {
         }}
         fn mark_player_motion(&mut self, uuid: u128) -> bool {{
             {marked}
+            true
+        }}
+        // Fire set or put out in a hit (a mod's enchantment sets the victim alight), once it is
+        // over.
+        fn set_entity_fire(&mut self, id: i32, change: {c}::host::FireChange) -> bool {{
+            {fire}
+            true
+        }}
+        fn set_player_fire(&mut self, uuid: u128, change: {c}::host::FireChange) -> bool {{
+            {player_fire}
             true
         }}
         fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {{

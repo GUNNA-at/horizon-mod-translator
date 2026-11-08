@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the fire of a mob, of a server's player and of the window's own player, read and changed (`native_mob_fire`, `native_set_mob_fire`, `native_player_fire`, `native_set_player_fire`, `native_client_player_fire`).",
+  "doc_summary": "`native_mob_fire(dimension, id)` is mob `id`'s fire: its remaining fire ticks (`Entity.getRemainingFireTicks`: it burns while they are above 0) and whether its kind never burns (`fireImmune`); None for no such mob, another dimension or a client's copy. `native_set_mob_fire(dimension, id, change)` changes it as vanilla's `Entity` does: `NativeFireChange::Set(ticks)` (`setRemainingFireTicks`), `Ignite(ticks)` (`igniteForTicks`: at least that long, scaled by its burning time, which fire protection lowers) or `Extinguish` (`extinguishFire`: the extinguish sound for one that burns, then the fire out); the players who see it are sent whether it burns. `native_player_fire(uuid)` and `native_set_player_fire(uuid, change)` read and change a server's player's fire, as that player (`native_as_player`): their client shows the flames, and a player who can't be hurt keeps at most 1 tick. `native_client_player_fire()` is the window's own player's fire as their client shows it. Bundles need \"hooks\": @API:entity_fire@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_fire.rs"
+  ]
+}

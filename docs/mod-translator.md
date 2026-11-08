@@ -8190,6 +8190,117 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     - Nothing threw. Nothing about particles or models was unmapped.
     - Before the wrapper fix, the casing's crumbs drew flat grey: 0.6 times white, the vertex
       colour alone. The same build drew the chute, funnel and wheel textured.
+- [x] 2026-11-08 Part 123: fire on entities. A translated mod sets the game's mobs and players
+  alight, reads their fire and puts it out, as 1.21.1's `Entity` does. A mod's own models are
+  loaded through `ModelEvent.RegisterAdditional`.
+  - Checked against 1.21.1 (NeoForge 21.1.256):
+    - `igniteForSeconds(s)` is final: `igniteForTicks(Mth.floor(s * 20.0F))`.
+      `Entity.igniteForTicks(t)` raises the remaining fire ticks to `t`, never lowers them.
+      `LivingEntity.igniteForTicks` first scales `t` by the `burning_time` attribute
+      (`Mth.ceil`), which fire protection lowers.
+    - `setRemainingFireTicks` sets them; a player who can't be hurt keeps at most 1.
+      `clearFire()` is `setRemainingFireTicks(0)`. `extinguishFire()` plays the extinguish sound
+      on a server for one that was burning (`wasOnFire`: volume 0.7, pitch
+      `1.6 + (nextFloat - nextFloat) * 0.4`), then calls `clearFire()`.
+    - `isOnFire()` is `!fireImmune() && (remainingFireTicks > 0 || clientSide && sharedFlag(0))`,
+      and `fireImmune()` is the type's. `displayFireAnimation()` is
+      `isOnFire() && !isSpectator()`.
+    - A client clears its own fire ticks every tick (`Entity.baseTick`). There, `isOnFire()` is
+      only the flag the server sent, and `ScreenEffectRenderer` draws the player's flames by it.
+    - `ModelEvent.RegisterAdditional.register(location)` takes only `standalone` locations; any
+      other throws `IllegalArgumentException` (`Preconditions.checkArgument`). The models it
+      registers are loaded and baked with the rest, before `ModifyBakingResult`.
+  - Create 6.0.10's use:
+    - The encased fan acts each tick, on the server, on what its air current catches.
+      `SmokingType` sets what isn't `fireImmune` alight (`igniteForSeconds(2)`) and hurts it (2).
+      `BlastingType` does the same with `igniteForSeconds(10)` and 4.
+    - `SplashingType` puts out what `isOnFire` (`clearFire`, then the extinguish sound through
+      the level).
+    - Flywheel's partial models register through `RegisterAdditional`.
+  - The game's natives (`native_fire.rs`, fragment `entity_fire`):
+    - `native_mob_fire(dimension, id)` and `native_set_mob_fire(dimension, id, change)`: a mob's
+      remaining fire ticks and whether its kind is fire-immune. A change is
+      `NativeFireChange::Set`, `Ignite` or `Extinguish`, through the game's own
+      `Mob::ignite_for_ticks` and `extinguish_fire`.
+    - `native_player_fire(uuid)` and `native_set_player_fire(uuid, change)`: a server's player,
+      as that player, through `set_remaining_fire_ticks`, `ignite_for_ticks` and the game's
+      extinguish sound.
+    - `native_client_player_fire()`: the window's own player's fire as their client shows it.
+  - Compat:
+    - The hosts gain `entity_fire`, `set_entity_fire`, `player_fire` and `set_player_fire`
+      (`Fire`, `FireChange`). `MemoryHost` keeps them and records each extinguish that played a
+      sound.
+    - Two kinds of entity answer `isOnFire`, `displayFireAnimation`, `fireImmune`,
+      `getRemainingFireTicks`, `setRemainingFireTicks`, `igniteForSeconds`, `igniteForTicks`,
+      `clearFire` and `extinguishFire` through the hosts:
+      - the game's mobs (`vanilla_entities.rs`);
+      - a server's players (`api_common.rs`).
+    - A client reads its own player's flames and changes none. A fake player stays its own.
+    - A mod's own entity also shows its flames (`displayFireAnimation`). Its `extinguishFire`
+      plays vanilla's sound on a server if it burned (`mod_entities.rs`).
+    - The bundle's server hosts change fire through the game. Inside a hit, the change is made
+      once the hit is over, as motion is. The client's host reads its own player's flames.
+    - `baked_models.rs` posts `RegisterAdditional` before the baking events. `register` loads
+      the model into the registry at once, so `ModifyBakingResult`'s listeners find it among the
+      keys.
+  - Fixed on the way (found in the game: the player set alight by the fan saw no flames):
+    - A server's client applied its own player's shared flags for sprinting and invisibility,
+      but not the on-fire bit. Fire that only the server set never reached the player's screen:
+      a mod's fan, a burning arrow's hit.
+    - The client now keeps that bit (`own_on_fire`). The screen's flames follow it, as vanilla
+      draws them by `isOnFire()`. The window's own game in frame still reads its fire ticks.
+  - Where Horizon differs, and why:
+    - `extinguishFire` on the game's mob or player uses the game's 26.3 `clearFire`, which keeps
+      a negative countdown (`min(0, ticks)`); 1.21.1's sets 0. Its sound plays for one burning
+      now, not one that burned at the end of its last tick (`wasOnFire`).
+    - The game's ignition also stops freezing (26.3); 1.21.1's doesn't.
+    - Item entities, boats and minecarts still never burn for a mod. Inside a hit's hooks a mob's
+      fire reads as out (the hit has no world to read).
+  - Measured (packcov36, the same 367 jars):
+    - Methods 108900/130226 (83.6%, was 108800); uses 341147/372747 (91.5%, was 340988);
+      distinct missing 9197 (was 9214).
+    - Create 3281/3972 (was 3276), uses 24372/25241 (96.6%, was 24362).
+    - All 17 fire and model calls missing before are answered, and none is newly missing. Among
+      them:
+      - `ModelEvent$RegisterAdditional.register` (30 mods);
+      - `Entity.setRemainingFireTicks` (16);
+      - `Entity.igniteForSeconds` (14);
+      - `Entity.clearFire` (8);
+      - `LivingEntity.setRemainingFireTicks` (7);
+      - `LivingEntity.clearFire` (5).
+    - The most used left are `Minecraft.getTextureManager` (46 mods), `ConfigurationScreen`'s
+      constructor (38) and `GoalSelector.addGoal` (28).
+  - Tests 675 (3 new):
+    - A mod sets the game's pig alight for 2.5 s: 50 ticks, burning and showing it. A shorter
+      ignition keeps the longer fire. `clearFire` puts it out silently, and `extinguishFire`
+      with one sound, only while it burns.
+    - A blaze with fire ticks doesn't burn (`fireImmune`).
+    - A server's player lit for 8 s has 160 ticks, and is put out with a sound.
+    - A client reads its own player's flames and can't put them out.
+    - A mod's listener registers a partial model through `RegisterAdditional`. The registry's
+      keys hold it, and not a model no one asked for. An `inventory` location is refused with
+      `IllegalArgumentException`.
+    - A mod's entity set alight shows its flames until `extinguishFire`. It plays the extinguish
+      sound at its feet once (volume 0.7, `NEUTRAL`, pitch within 1.6 ± 0.4), and the second
+      call is silent.
+  - In the game (`p123scene.sh`, Create, offscreen at 1280 × 720), two encased fans on creative
+    motors blow east:
+    - The smoke lane blows through fire on netherrack.
+    - The water lane blows through waterlogged iron bars, which Create lets the air through.
+    - A cow (no AI, invulnerable) stands in each lane. The water lane's cow, and a third outside
+      both lanes, start burning (`Fire:2000s`).
+    - After 200 ticks, `/data get` reads:
+      - the smoke lane's cow at 40 fire ticks (Create's `igniteForSeconds(2)` each tick);
+      - the water lane's cow at 0 (put out);
+      - the third cow at 1720 (still burning).
+    - The picture matches: flames on the first and last cows, none on the middle one in the
+      fan's spray.
+    - The player in survival, sent into the smoke lane (`/tp`), reads 40 and sees vanilla's
+      flames over the screen. Sent into the water lane, they read -20 (put out: a player's
+      fire-immune countdown) and the flames are gone.
+    - Before the on-fire-bit fix, the player read 40 in the smoke lane but saw no flames.
+    - Nothing threw, and nothing about fire was unmapped.
+    - The mod entity's `extinguishFire` came after this run and is covered by its test.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -126,7 +126,7 @@ fn spawnable(pos: [f64; 3]) -> bool {
 impl Game<'_> {
     /// Whether this is a level that simulates (not a client's copy) and the one
     /// in place is `dimension`.
-    fn native_mob_level(&self, dimension: &str) -> bool {
+    pub(super) fn native_mob_level(&self, dimension: &str) -> bool {
         self.remote.is_none() && dimension == self.dim.id()
     }
     /// Spawns a mob of `kind` (`minecraft:zombie`) at `pos` in the level in

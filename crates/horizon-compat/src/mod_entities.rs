@@ -1089,14 +1089,43 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
-        // Its fire: the ticks it has left to burn (`remainingFireTicks`).
-        "isOnFire" => V::I(i32::from(rt.get_field(e, "$fire").i() > 0)),
+        // Its fire: the ticks it has left to burn (`remainingFireTicks`). It shows its flames
+        // while it burns (`displayFireAnimation`: none is a spectator).
+        "isOnFire" | "displayFireAnimation" => V::I(i32::from(rt.get_field(e, "$fire").i() > 0)),
         "getRemainingFireTicks" => V::I(rt.get_field(e, "$fire").i()),
         "setRemainingFireTicks" => {
             rt.put_field(e, "$fire", a(1));
             V::Void
         }
         "clearFire" => {
+            rt.put_field(e, "$fire", V::I(0));
+            V::Void
+        }
+        // `extinguishFire`: on a server, one that burns plays the extinguish sound
+        // (`playEntityOnFireExtinguishedSound`: volume 0.7, the pitch from two draws of its random,
+        // under `NEUTRAL`), then `clearFire`.
+        "extinguishFire" => {
+            if rt.get_field(e, "$fire").i() > 0 && !crate::neo::is_client(rt) {
+                let random = rt.get_field(e, "random");
+                let next = |rt: &mut Rt| {
+                    api::call(
+                        rt,
+                        "net/minecraft/util/RandomSource.nextFloat.()F",
+                        &[random],
+                    )
+                    .f()
+                };
+                let pitch = 1.6 + (next(rt) - next(rt)) * 0.4;
+                let at = xyz(rt, e);
+                let sound = crate::host::Sound {
+                    event: "minecraft:entity.generic.extinguish_fire".into(),
+                    at,
+                    source: 6,
+                    volume: 0.7,
+                    pitch,
+                };
+                crate::sounds::play_id(rt, sound);
+            }
             rt.put_field(e, "$fire", V::I(0));
             V::Void
         }
@@ -2100,6 +2129,45 @@ mod tests {
             let fall = api::game_field(rt, cart, "fallDistance", "$fallDistance", FALL_DISTANCE);
             assert_eq!((no_physics, hurt, fall), (V::I(0), V::I(0), V::F(0.0)));
         });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's entity put out on a server (`extinguishFire`, as Create's fan over water does):
+    /// one that burns shows its flames until then (`displayFireAnimation`), and plays vanilla's
+    /// extinguish sound at its feet (volume 0.7, a pitch of 1.6 ± 0.4 under `NEUTRAL`); one that
+    /// doesn't burn is put out silently.
+    #[test]
+    fn a_mods_entity_put_out_plays_the_extinguish_sound_if_it_burned() {
+        const INIT: &str = "net/minecraft/world/entity/Entity.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V";
+        const IGNITE: &str = "net/minecraft/world/entity/Entity.igniteForSeconds.(F)V";
+        const SHOWN: &str = "net/minecraft/world/entity/Entity.displayFireAnimation.()Z";
+        const PUT_OUT: &str = "net/minecraft/world/entity/Entity.extinguishFire.()V";
+        let (mut rt, ty) = runtime();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let cart = rt.new_object(CART);
+            api::call(rt, INIT, &[cart, ty, level]);
+            set_pos(rt, cart, [2.5, 64.0, -3.5]);
+            api::call(rt, IGNITE, &[cart, V::F(1.0)]);
+            assert_eq!(api::call(rt, SHOWN, &[cart]), V::I(1));
+            api::call(rt, PUT_OUT, &[cart]);
+            assert_eq!(api::call(rt, SHOWN, &[cart]), V::I(0));
+            api::call(rt, PUT_OUT, &[cart]);
+        });
+        let [sound] = host.sounds.as_slice() else {
+            panic!("{:?}", host.sounds)
+        };
+        assert_eq!(
+            (sound.event.as_str(), sound.at, sound.source, sound.volume),
+            (
+                "minecraft:entity.generic.extinguish_fire",
+                [2.5, 64.0, -3.5],
+                6,
+                0.7
+            )
+        );
+        assert!((1.2..=2.0).contains(&sound.pitch), "{}", sound.pitch);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

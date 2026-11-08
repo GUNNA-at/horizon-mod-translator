@@ -205,6 +205,7 @@ mod native_actors;
 mod native_block_entity_drops;
 mod native_explosions;
 mod native_falling;
+mod native_fire;
 mod native_hits;
 mod native_hooks;
 mod native_inventories;

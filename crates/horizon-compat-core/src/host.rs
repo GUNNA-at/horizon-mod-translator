@@ -265,6 +265,29 @@ pub struct Turn {
     pub body_yaw: Option<f32>,
 }
 
+/// An entity's fire as the game holds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fire {
+    /// Its remaining fire ticks (`Entity.getRemainingFireTicks`): it burns while they are above
+    /// 0.
+    pub ticks: i32,
+    /// Whether its kind never burns (`Entity.fireImmune`): a blaze, a strider.
+    pub immune: bool,
+}
+
+/// What translated code does to an entity's fire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FireChange {
+    /// `Entity.setRemainingFireTicks(ticks)`: a player who can't be hurt keeps at most 1.
+    Set(i32),
+    /// `Entity.igniteForTicks(ticks)`: alight at least that long, a living one's ticks scaled by
+    /// its burning time (`LivingEntity.igniteForTicks`: the attribute, which fire protection
+    /// lowers).
+    Ignite(i32),
+    /// `Entity.extinguishFire()`: one that burns plays the extinguish sound, then its fire is out.
+    Extinguish,
+}
+
 /// An attribute of a living entity, as translated code reads it through its `AttributeInstance`
 /// (`getValue`, `getBaseValue`, `getModifiers`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1227,6 +1250,25 @@ pub trait Host {
     fn set_player_motion(&mut self, _uuid: u128, _motion: [f64; 3]) -> bool {
         false
     }
+    /// The mob `id`'s fire: None for no such mob, or a host that can't tell.
+    fn entity_fire(&self, _id: i32) -> Option<Fire> {
+        None
+    }
+    /// Changes the mob `id`'s fire as `change` says; the players who see it are sent whether it
+    /// burns. False for no such mob.
+    fn set_entity_fire(&mut self, _id: i32, _change: FireChange) -> bool {
+        false
+    }
+    /// The player `uuid`'s fire as this side holds it (a server's player's, a client's own
+    /// player's flames): None for a player the host doesn't have.
+    fn player_fire(&mut self, _uuid: u128) -> Option<Fire> {
+        None
+    }
+    /// Changes the server's player `uuid`'s fire as `change` says: their client and the players
+    /// who see them are sent whether they burn. False for a player the host doesn't have.
+    fn set_player_fire(&mut self, _uuid: u128, _change: FireChange) -> bool {
+        false
+    }
     /// Moves the mob `id` to `pos` at once (`Entity.teleportTo`).
     fn teleport_entity(&mut self, _id: i32, _pos: [f64; 3]) -> bool {
         false
@@ -1794,6 +1836,14 @@ pub struct MemoryHost {
     pub motions: HashMap<i32, [f64; 3]>,
     /// The players' motions ([`Host::player_motion`]), by UUID.
     pub player_motions: HashMap<u128, [f64; 3]>,
+    /// The mobs' fire ([`Host::entity_fire`]): a living mob without one doesn't burn. A change
+    /// sets the ticks as vanilla's `Entity` does, with no burning time to scale an ignition.
+    pub fires: HashMap<i32, Fire>,
+    /// The players' remaining fire ticks ([`Host::player_fire`]), by UUID.
+    pub player_fires: HashMap<u128, i32>,
+    /// The extinguish sounds played ([`FireChange::Extinguish`] on one that burned): the mob's id,
+    /// else the player's UUID.
+    pub extinguished: Vec<Result<i32, u128>>,
     /// The players whose motion was marked for their client ([`Host::mark_player_motion`]), in
     /// order.
     pub marked_players: Vec<u128>,
@@ -2495,6 +2545,54 @@ impl Host for MemoryHost {
             self.player_motions.insert(uuid, motion);
         }
         known
+    }
+    fn entity_fire(&self, id: i32) -> Option<Fire> {
+        let living = self
+            .entities
+            .iter()
+            .any(|e| e.id == id && e.health.is_some());
+        living.then(|| self.fires.get(&id).copied().unwrap_or_default())
+    }
+    fn set_entity_fire(&mut self, id: i32, change: FireChange) -> bool {
+        let Some(mut fire) = self.entity_fire(id) else {
+            return false;
+        };
+        fire.ticks = match change {
+            FireChange::Set(ticks) => ticks,
+            FireChange::Ignite(ticks) => fire.ticks.max(ticks),
+            FireChange::Extinguish => {
+                if fire.ticks > 0 && !fire.immune {
+                    self.extinguished.push(Ok(id));
+                }
+                0
+            }
+        };
+        self.fires.insert(id, fire);
+        true
+    }
+    fn player_fire(&mut self, uuid: u128) -> Option<Fire> {
+        let known = self.player_id == Some(uuid) || self.players.iter().any(|p| p.0 == uuid);
+        known.then(|| Fire {
+            ticks: self.player_fires.get(&uuid).copied().unwrap_or_default(),
+            immune: false,
+        })
+    }
+    fn set_player_fire(&mut self, uuid: u128, change: FireChange) -> bool {
+        let Some(fire) = self.player_fire(uuid) else {
+            return false;
+        };
+        let ticks = match change {
+            FireChange::Set(ticks) => ticks,
+            FireChange::Ignite(ticks) => fire.ticks.max(ticks),
+            FireChange::Extinguish => {
+                if fire.ticks > 0 {
+                    self.extinguished.push(Err(uuid));
+                }
+                0
+            }
+        };
+        self.player_fires.insert(uuid, ticks);
+        true
     }
     fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {
         match self.entities.iter_mut().find(|e| e.id == id && e.health.is_some()) {

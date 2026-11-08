@@ -2800,6 +2800,58 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 V::Void
             }
         }
+        // A player's fire as this side holds it: a server's player's, as that player (the game
+        // sends their client the flames, and the players who see them), a client's own player's
+        // flames as the server sent them (a client changes none). A player never is fire-immune,
+        // and `displayFireAnimation` is `isOnFire` (no spectator acts here). A fake player is its
+        // own.
+        (
+            o,
+            n @ ("isOnFire"
+            | "displayFireAnimation"
+            | "fireImmune"
+            | "getRemainingFireTicks"
+            | "setRemainingFireTicks"
+            | "igniteForTicks"
+            | "igniteForSeconds"
+            | "clearFire"
+            | "extinguishFire"),
+        ) if is_player(o)
+            && is_player_class(rt.class_of(a(0)))
+            && rt.class_of(a(0)) != crate::fake_players::FAKE_PLAYER =>
+        {
+            let own = rt.class_of(a(0)) == LOCAL_PLAYER;
+            let client = rt.host().is_some_and(|h| h.client_player_id().is_some());
+            let uuid = crate::network::player_uuid(rt, a(0))
+                .or_else(|| rt.host().and_then(|h| h.player_id()))
+                .or(own.then_some(0))
+                .filter(|_| own || !client);
+            let change = match n {
+                "setRemainingFireTicks" => crate::host::FireChange::Set(a(1).i()),
+                "igniteForTicks" => crate::host::FireChange::Ignite(a(1).i()),
+                // Final: `igniteForTicks(Mth.floor(seconds * 20.0F))`.
+                "igniteForSeconds" => {
+                    crate::host::FireChange::Ignite((a(1).f() * 20.0).floor() as i32)
+                }
+                // `setRemainingFireTicks(0)`.
+                "clearFire" => crate::host::FireChange::Set(0),
+                "extinguishFire" => crate::host::FireChange::Extinguish,
+                "fireImmune" => return Some(V::I(0)),
+                _ => {
+                    let fire = uuid.and_then(|u| rt.host_call(|h| h.player_fire(u)).flatten());
+                    let ticks = fire.map_or(0, |f| f.ticks);
+                    return Some(V::I(if n == "getRemainingFireTicks" {
+                        ticks
+                    } else {
+                        i32::from(ticks > 0)
+                    }));
+                }
+            };
+            if let Some(u) = uuid.filter(|_| !client) {
+                rt.host_call(|h| h.set_player_fire(u, change));
+            }
+            V::Void
+        }
         // `hurtMarked = true` on a server's player: their motion as the server holds it is sent
         // to their client, which moves them by it (a belt carries them), and the mark is spent,
         // as `ServerEntity.sendChanges` spends it. A client's own mark tells nobody.
