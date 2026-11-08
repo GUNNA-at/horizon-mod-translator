@@ -1310,6 +1310,13 @@ fn collide(rt: &Rt, b: [f64; 6], motion: [f64; 3]) -> [f64; 3] {
             area[i + 3] += motion[i];
         }
     }
+    let shapes = shapes_in(rt, area);
+    collide_with(b, motion, &shapes)
+}
+
+/// `level.getBlockCollisions(null, area)`: the blocks' collision boxes that meet `area`, in the
+/// level's coordinates.
+pub(crate) fn shapes_in(rt: &Rt, area: [f64; 6]) -> Vec<[f64; 6]> {
     // `BlockCollisions`: the blocks in the area and a block round it, leaving out the corners and
     // edges of that rim, and on its faces all but the shapes taller than a block (which are the
     // only ones that can reach in).
@@ -1342,6 +1349,12 @@ fn collide(rt: &Rt, b: [f64; 6], motion: [f64; 3]) -> [f64; 3] {
             }
         }
     }
+    shapes
+}
+
+/// `Entity.collideWithShapes(motion, box, shapes)`: `motion` cut short where box `b` meets one of
+/// `shapes`, along y, then the shorter of x and z, then the other.
+pub(crate) fn collide_with(b: [f64; 6], motion: [f64; 3], shapes: &[[f64; 6]]) -> [f64; 3] {
     if shapes.is_empty() {
         return motion;
     }
@@ -1352,26 +1365,26 @@ fn collide(rt: &Rt, b: [f64; 6], motion: [f64; 3]) -> [f64; 3] {
         b[axis + 3] += by;
     };
     if d[1] != 0.0 {
-        d[1] = collide_axis(1, &b, &shapes, d[1]);
+        d[1] = collide_axis(1, &b, shapes, d[1]);
         if d[1] != 0.0 {
             shift(&mut b, 1, d[1]);
         }
     }
     let z_first = d[0].abs() < d[2].abs();
     if z_first && d[2] != 0.0 {
-        d[2] = collide_axis(2, &b, &shapes, d[2]);
+        d[2] = collide_axis(2, &b, shapes, d[2]);
         if d[2] != 0.0 {
             shift(&mut b, 2, d[2]);
         }
     }
     if d[0] != 0.0 {
-        d[0] = collide_axis(0, &b, &shapes, d[0]);
+        d[0] = collide_axis(0, &b, shapes, d[0]);
         if !z_first && d[0] != 0.0 {
             shift(&mut b, 0, d[0]);
         }
     }
     if !z_first && d[2] != 0.0 {
-        d[2] = collide_axis(2, &b, &shapes, d[2]);
+        d[2] = collide_axis(2, &b, shapes, d[2]);
     }
     d
 }

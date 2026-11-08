@@ -46,7 +46,9 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
             .or_else(|| crate::camera::api_super(class))
             .or_else(|| crate::item_wrappers::api_super(class))
             .or_else(|| crate::vanilla_entities::api_super(class))
-            .or_else(|| crate::particle_engine::api_super(class)),
+            .or_else(|| crate::particle_engine::api_super(class))
+            .or_else(|| crate::goals::api_super(class))
+            .or_else(|| crate::mobs::api_super(class)),
     }
 }
 
@@ -925,7 +927,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 86] = [
+const CHAIN: [Module; 89] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -964,6 +966,9 @@ const CHAIN: [Module; 86] = [
     crate::components::call_key,
     crate::capabilities::call_key,
     crate::projectiles::call,
+    crate::goals::call,
+    crate::pathing::call,
+    crate::mobs::call,
     crate::mod_entities::call_key,
     crate::entities::call_key,
     crate::creative::call,
@@ -1017,7 +1022,7 @@ const CHAIN: [Module; 86] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 86] = [
+const CLAIMS: [Claims; 89] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -1056,6 +1061,9 @@ const CLAIMS: [Claims; 86] = [
     crate::components::claims,
     crate::capabilities::claims,
     crate::projectiles::claims,
+    crate::goals::claims,
+    crate::pathing::claims,
+    crate::mobs::claims,
     crate::mod_entities::claims,
     crate::entities::claims,
     crate::creative::claims,
@@ -1107,7 +1115,7 @@ const CLAIMS: [Claims; 86] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 86] = [
+const MODULE_NAMES: [&str; 89] = [
     "diodes",
     "rails",
     "fake_players",
@@ -1146,6 +1154,9 @@ const MODULE_NAMES: [&str; 86] = [
     "components",
     "capabilities",
     "projectiles",
+    "goals",
+    "pathing",
+    "mobs",
     "mod_entities",
     "entities",
     "creative",
@@ -2958,6 +2969,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::fluids::get_static(rt, o, f))
             .or_else(|| crate::neo_tags::get_static(rt, o, f))
             .or_else(|| crate::mod_entities::get_static(rt, o, f))
+            .or_else(|| crate::pathing::get_static(rt, o, f))
             .or_else(|| crate::projectiles::get_static(rt, o, f))
             .or_else(|| crate::tanks::get_static(rt, o, f))
             .or_else(|| crate::energy::get_static(rt, o, f))

@@ -470,6 +470,9 @@ fn read(rt: &mut Rt, e: V, holder: V) -> Option<AttributeView> {
     if crate::fake_players::is_fake(rt, e) {
         return fake_read(rt, e, &id);
     }
+    if crate::mobs::is_mod_living(rt, e) {
+        return mob_read(rt, e, holder, &id);
+    }
     let entity = entity_of(rt, e);
     if let Ok(entity) = entity
         && let Some(view) = rt.host_mut().and_then(|h| h.attribute(entity, &id))
@@ -523,9 +526,57 @@ fn fake_kept(rt: &Rt, e: V, id: &str) -> V {
 
 /// Makes `change` to fake player `e`'s attribute `id`, kept on it: whether it was made.
 fn fake_change(rt: &mut Rt, e: V, id: &str, change: &AttributeChange) -> bool {
-    let Some(mut view) = fake_read(rt, e, id) else {
+    let Some(view) = fake_read(rt, e, id) else {
         return false;
     };
+    keep(rt, e, id, view, change)
+}
+
+/// A mod's living entity's attribute (`holder`, of the game's id `id`): its type's base (the
+/// supplier a mod gave its type, `DefaultAttributes`), with what was changed of it kept on it as on
+/// a fake player, its value in the attribute's range; None for one its type lacks.
+fn mob_read(rt: &mut Rt, e: V, holder: V, id: &str) -> Option<AttributeView> {
+    let ty = rt.get_field(e, "$type");
+    let base = crate::attribute_suppliers::type_base(rt, ty, holder)?;
+    let mut view = AttributeView { value: base, base, modifiers: Vec::new() };
+    let kept = fake_kept(rt, e, id);
+    if kept.r() != 0 {
+        view.base = rt.get_field(kept, "$base").d();
+        let modifiers = crate::jutil::elements(rt, rt.get_field(kept, "$modifiers"));
+        view.modifiers = modifiers.into_iter().map(|m| modifier_view(rt, m, rt.get_field(m, "$permanent").i() != 0)).collect();
+    }
+    let computed = AttributeView::computed(view.base, &view.modifiers);
+    view.value = sanitize(rt, holder, computed);
+    Some(view)
+}
+
+/// Makes `change` to a mod's living entity's attribute, kept on it; a lower most health takes its
+/// health down with it (`LivingEntity.onAttributeUpdated`).
+fn mob_change(rt: &mut Rt, e: V, holder: V, id: &str, change: &AttributeChange) -> bool {
+    let Some(view) = mob_read(rt, e, holder, id) else {
+        return false;
+    };
+    let made = keep(rt, e, id, view, change);
+    if made && id == "minecraft:max_health" {
+        crate::mobs::max_health_changed(rt, e);
+    }
+    made
+}
+
+/// A mod's living entity's attribute of registry id `registry_id` (`minecraft:generic.movement_speed`):
+/// its value, or its base; the attribute's default where its type lacks it.
+pub(crate) fn mob_value(rt: &mut Rt, e: V, registry_id: &str, base_only: bool) -> f64 {
+    let holder = attribute(rt, registry_id);
+    match game_id(rt, holder).and_then(|id| mob_read(rt, e, holder, &id)) {
+        Some(v) if base_only => v.base,
+        Some(v) => v.value,
+        None => default(rt, holder),
+    }
+}
+
+/// Makes `change` to `view`, `e`'s attribute `id` (a fake player's, a mod's mob's), and keeps the
+/// result on `e`: whether it was made.
+fn keep(rt: &mut Rt, e: V, id: &str, mut view: AttributeView, change: &AttributeChange) -> bool {
     let made = view.apply(change);
     let kept = rt.new_object(FAKE_ATTRIBUTE);
     rt.put_field(kept, "$base", V::D(view.base));
@@ -587,6 +638,9 @@ pub(crate) fn default(rt: &mut Rt, holder: V) -> f64 {
 fn change(rt: &mut Rt, e: V, holder: V, change: &AttributeChange) -> bool {
     if crate::fake_players::is_fake(rt, e) {
         return game_id(rt, holder).is_some_and(|id| fake_change(rt, e, &id, change));
+    }
+    if crate::mobs::is_mod_living(rt, e) {
+        return game_id(rt, holder).is_some_and(|id| mob_change(rt, e, holder, &id, change));
     }
     let (Ok(entity), Some(id)) = (entity_of(rt, e), game_id(rt, holder)) else {
         return false;

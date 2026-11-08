@@ -459,12 +459,6 @@ pub(crate) fn set_control(rt: &mut Rt, sel: V, bits: u8, enabled: bool) {
     rt.put_field(sel, "$disabled", V::I(i32::from(d)));
 }
 
-/// The goals of `sel` running now (vanilla's `getRunningGoals()` of old, which mods still ask by
-/// filtering the set).
-pub(crate) fn running_goals(rt: &mut Rt, sel: V) -> Vec<V> {
-    goals(rt, sel).into_iter().filter(|&w| running(rt, w)).map(|w| wrapped_goal(rt, w)).collect()
-}
-
 // ---- dispatch ----
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone.
@@ -478,6 +472,9 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
+    if !claims(owner, name, desc) {
+        return None;
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     if api::is_level(owner) {
         return level_call(rt, name, desc, args);

@@ -557,6 +557,9 @@ fn attack_anim(rt: &Rt, e: V, partial: f32) -> f32 {
 }
 
 fn is_baby(rt: &mut Rt, e: V) -> bool {
+    if crate::mobs::is_mod_living(rt, e) {
+        return crate::mobs::is_baby(rt, e);
+    }
     let class = rt.class_of(e);
     rt.overrides.is_some_and(|o| o(class, "isBaby.()Z")) && crate::api::virtual_call(rt, ("net/minecraft/world/entity/LivingEntity.isBaby.()Z", "isBaby.()Z"), &[e]).i() != 0
 }
@@ -567,6 +570,9 @@ fn entity_scale(rt: &mut Rt, e: V) -> f32 {
     let class = rt.class_of(e);
     if rt.overrides.is_some_and(|o| o(class, "getScale.()F")) {
         return crate::api::virtual_call(rt, ("net/minecraft/world/entity/LivingEntity.getScale.()F", "getScale.()F"), &[e]).f();
+    }
+    if crate::mobs::is_mod_living(rt, e) {
+        return crate::mobs::scale(rt, e);
     }
     1.0
 }

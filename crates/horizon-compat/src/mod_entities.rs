@@ -414,15 +414,19 @@ fn define_id(rt: &mut Rt, class_literal: V) -> i32 {
         Some(v) => v.i() + 1,
         None => {
             let mut c: Option<&'static str> = rt.supers.get(class.as_str()).copied();
-            let mut found = ENTITY_DATA;
+            let mut found = None;
+            let mut top = class.as_str();
             while let Some(k) = c {
                 if let Some(v) = rt.interned.get(&key(k)) {
-                    found = v.i() + 1;
+                    found = Some(v.i() + 1);
                     break;
                 }
+                top = k;
                 c = rt.supers.get(k).copied();
             }
-            found
+            // None of its classes defined one: past what its vanilla class defines (a mob's own
+            // start after `LivingEntity`'s and `Mob`'s).
+            found.unwrap_or_else(|| crate::mobs::data_start(top).unwrap_or(ENTITY_DATA))
         }
     };
     rt.interned.insert(key(&class), V::I(next));
@@ -499,7 +503,7 @@ pub(crate) fn type_id(rt: &Rt, ty: V) -> Option<&str> {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    matches!(name, "addFreshEntity" | "getEntity" | "getPlayerByUUID")
+    matches!(name, "addFreshEntity" | "getEntity" | "getPlayerByUUID" | "broadcastEntityEvent")
         || matches!(owner, TYPE_BUILDER | ENTITY_TYPE | SYNCHED | SYNCHED_BUILDER | ACCESSOR | ENTITY | "net/minecraft/network/syncher/EntityDataSerializer")
         || (owner == DIMENSIONS && matches!(name, "fixed" | "scalable" | "scale" | "withEyeHeight" | "makeBoundingBox"))
         || (name == "isSuppressingBounce" && owner.starts_with("net/minecraft/"))
@@ -564,6 +568,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             set_live(rt, items);
         }
         return Some(V::I(1));
+    }
+    // `level.broadcastEntityEvent(entity, event)` of a mod's entity: its players' copies hear it.
+    if name == "broadcastEntityEvent" && desc == "(Lnet/minecraft/world/entity/Entity;B)V" && is_mod_entity(rt, a(1)) {
+        broadcast_event(rt, a(1), a(2).i());
+        return Some(V::Void);
     }
     if name == "getEntity" && desc == "(I)Lnet/minecraft/world/entity/Entity;" {
         let id = a(1).i();
@@ -688,6 +697,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             );
             Some(a(0))
         }
+        (TYPE_BUILDER, "fireImmune") if desc == "()Lnet/minecraft/world/entity/EntityType$Builder;" => {
+            rt.put_field(a(0), "$fireImmune", V::I(1));
+            Some(a(0))
+        }
+        (ENTITY_TYPE, "fireImmune") if desc == "()Z" => Some(V::I(i32::from(rt.get_field(a(0), "$fireImmune").i() != 0))),
         (TYPE_BUILDER, "spawnDimensionsScale")
             if desc == "(F)Lnet/minecraft/world/entity/EntityType$Builder;" =>
         {
@@ -707,6 +721,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "$noSave",
                 "$noSummon",
                 "$spawnScale",
+                "$fireImmune",
             ] {
                 let v = rt.get_field(a(0), f);
                 rt.put_field(t, f, v);
@@ -1350,8 +1365,9 @@ fn save(rt: &mut Rt, e: V, tag: V) {
     let u = rt.get_field(e, "uuid");
     let k = rt.string("UUID");
     c(rt, "net/minecraft/nbt/CompoundTag.putUUID.(Ljava/lang/String;Ljava/util/UUID;)V", &[tag, k, u]);
-    // A mod's projectile that keeps no data of its own saves its vanilla class's.
-    if crate::projectiles::is_projectile_class(vanilla_base(rt, e)) {
+    // A mod's projectile that keeps no data of its own saves its vanilla class's, and a living
+    // entity its health, age... (`crate::mobs`).
+    if crate::projectiles::is_projectile_class(vanilla_base(rt, e)) || crate::mobs::is_mod_living(rt, e) {
         on_base(rt, e, ADDITIONAL_SAVE, &[tag]);
     } else {
         virtual_call(rt, e, ADDITIONAL_SAVE_KEY, ADDITIONAL_SAVE, &[tag]);
@@ -1374,7 +1390,7 @@ fn load(rt: &mut Rt, e: V, tag: V) {
         let u = c(rt, "net/minecraft/nbt/CompoundTag.getUUID.(Ljava/lang/String;)Ljava/util/UUID;", &[tag, k]);
         rt.put_field(e, "uuid", u);
     }
-    if crate::projectiles::is_projectile_class(vanilla_base(rt, e)) {
+    if crate::projectiles::is_projectile_class(vanilla_base(rt, e)) || crate::mobs::is_mod_living(rt, e) {
         on_base(rt, e, ADDITIONAL_LOAD, &[tag]);
     } else {
         virtual_call(rt, e, ADDITIONAL_LOAD_KEY, ADDITIONAL_LOAD, &[tag]);
@@ -1396,7 +1412,7 @@ fn gravity(rt: &mut Rt, e: V) -> f64 {
 /// it alight for fifteen seconds); its fire burning down on a server (a client's goes out); and below
 /// the world, gone (`onBelowWorld`, virtual). Not modelled: a fluid's current pushing it, fire and
 /// lava hurting it, a fire-immune type's fire going out faster, portals, powder snow, riding.
-fn base_tick(rt: &mut Rt, e: V) {
+pub(crate) fn base_tick(rt: &mut Rt, e: V) {
     let first = rt.get_field(e, "$ticked").i() == 0;
     let (water, lava) = fluids_touched(rt, e);
     rt.put_field(e, "$inWater", V::I(i32::from(water)));
@@ -1461,6 +1477,12 @@ pub fn tick_all(rt: &mut Rt, dimension: &str) {
         if rt.get_field(e, "removalReason").r() != 0 || rt.str_of(rt.get_field(e, "$dimension")).is_some_and(|d| d != dimension) {
             continue;
         }
+        // A server's mob may leave first, far from every player (`checkDespawn`).
+        crate::mobs::check_despawn(rt, e);
+        rt.report_thrown("checkDespawn");
+        if rt.get_field(e, "removalReason").r() != 0 {
+            continue;
+        }
         set_old(rt, e);
         let t = rt.get_field(e, "tickCount").i();
         rt.put_field(e, "tickCount", V::I(t + 1));
@@ -1514,6 +1536,12 @@ const MOVE: u8 = 1;
 const DATA: u8 = 2;
 const GONE: u8 = 3;
 const PART: u8 = 4;
+/// Something of one entity (after its id): an entity event ([`EVENT`], then the event), or a living
+/// entity's hurt, swing or state ([`crate::mobs::receive`]).
+const ENTITY_OP: u8 = 5;
+const EVENT: u8 = 0;
+const HANDLE_EVENT: &str = "handleEntityEvent.(B)V";
+const HANDLE_EVENT_KEY: &str = "net/minecraft/world/entity/Entity.handleEntityEvent.(B)V";
 /// Where a message's synched values end, as vanilla's `SynchedEntityData` packs them.
 const DATA_END: u8 = 0xFF;
 /// The most bytes one message carries, under the game's cap (`mod_net::MAX_DATA`, 30 000).
@@ -1711,16 +1739,27 @@ pub fn track(rt: &mut Rt, dimension: &str) {
             send_to(rt, player, &m);
         }
         let fresh: Vec<u128> = now.iter().copied().filter(|p| !before.contains(p)).collect();
+        // A living entity's health, age, equipment... (`crate::mobs::state_bytes`), when they change.
+        let living = crate::mobs::is_mod_living(rt, e);
+        let state = if living { crate::mobs::state_bytes(rt, e) } else { Vec::new() };
+        let state_changed = living && crate::mobs::state_changed(rt, e, &state);
+        let mut state_message = vec![ENTITY_OP];
+        state_message.extend(var(id as u32 as u64));
+        state_message.extend(crate::mobs::state_message(&state));
         if !fresh.is_empty() {
             let m = spawn_message(rt, e);
             for &player in &fresh {
                 send_to(rt, player, &m);
+                if living {
+                    send_to(rt, player, &state_message);
+                }
             }
         }
         let kept: Vec<u128> = now.iter().copied().filter(|p| before.contains(p)).collect();
         // Moved since it was last sent: the players who had it get where it is now.
+        let head = crate::mobs::head_yaw(rt, e);
         let last = (rt.get_field(e, "$sentX"), rt.get_field(e, "$sentY"), rt.get_field(e, "$sentZ"), rt.get_field(e, "$sentYRot"), rt.get_field(e, "$sentXRot"));
-        let moved = last != (V::D(p[0]), V::D(p[1]), V::D(p[2]), V::F(r[0]), V::F(r[1]));
+        let moved = last != (V::D(p[0]), V::D(p[1]), V::D(p[2]), V::F(r[0]), V::F(r[1])) || rt.get_field(e, "$sentHead") != V::F(head);
         if moved {
             let mut m = var(id as u32 as u64);
             for d in p {
@@ -1729,6 +1768,7 @@ pub fn track(rt: &mut Rt, dimension: &str) {
             for f in r {
                 m.extend(f.to_be_bytes());
             }
+            m.extend(head.to_be_bytes());
             for &player in &kept {
                 moves.push((player, m.clone()));
             }
@@ -1738,6 +1778,12 @@ pub fn track(rt: &mut Rt, dimension: &str) {
         rt.put_field(e, "$sentZ", V::D(p[2]));
         rt.put_field(e, "$sentYRot", V::F(r[0]));
         rt.put_field(e, "$sentXRot", V::F(r[1]));
+        rt.put_field(e, "$sentHead", V::F(head));
+        if state_changed {
+            for &player in &kept {
+                send_to(rt, player, &state_message);
+            }
+        }
         let data = rt.get_field(e, "entityData");
         if rt.get_field(data, "$dirty").i() != 0 {
             rt.put_field(data, "$dirty", V::I(0));
@@ -1763,7 +1809,7 @@ pub fn track(rt: &mut Rt, dimension: &str) {
         }
     }
     for (player, ms) in by_player {
-        for chunk in ms.chunks(MAX_MESSAGE / 40) {
+        for chunk in ms.chunks(MAX_MESSAGE / 44) {
             let mut out = vec![MOVE];
             out.extend(var(chunk.len() as u64));
             for m in chunk {
@@ -1771,6 +1817,34 @@ pub fn track(rt: &mut Rt, dimension: &str) {
             }
             send_to(rt, player, &out);
         }
+    }
+}
+
+/// Tells the players a mod's entity was sent to `body` of it ([`ENTITY_OP`]'s): on a server only.
+pub(crate) fn send_living(rt: &mut Rt, e: V, body: &[u8]) {
+    if !rt.host().is_some_and(|h| h.is_server()) {
+        return;
+    }
+    let id = rt.get_field(e, "$id").i();
+    let mut m = vec![ENTITY_OP];
+    m.extend(var(id as u32 as u64));
+    m.extend_from_slice(body);
+    for player in sent_to(rt, e) {
+        send_to(rt, player, &m);
+    }
+}
+
+/// `level.broadcastEntityEvent(e, event)` on a server: the copies of `e` its players have run
+/// `handleEntityEvent(event)`.
+pub(crate) fn broadcast_event(rt: &mut Rt, e: V, event: i32) {
+    send_living(rt, e, &[EVENT, event as u8]);
+}
+
+/// `handleEntityEvent(event)` on a client's copy: the class's own, else a living entity's
+/// ([`crate::mobs::handle_event`]).
+fn entity_event(rt: &mut Rt, e: V, event: i32) {
+    if virtual_call(rt, e, HANDLE_EVENT_KEY, HANDLE_EVENT, &[V::I(event)]).is_none() && crate::mobs::is_mod_living(rt, e) {
+        crate::mobs::handle_event(rt, e, event);
     }
 }
 
@@ -1822,7 +1896,13 @@ pub fn receive(rt: &mut Rt, data: &[u8]) {
                 let id = read_int(rt, buf);
                 let p = [read_f64(rt, buf), read_f64(rt, buf), read_f64(rt, buf)];
                 let r = [read_f32(rt, buf), read_f32(rt, buf)];
+                let head = read_f32(rt, buf);
                 if let Some(e) = by_id(rt, id) {
+                    if crate::mobs::is_mod_living(rt, e) {
+                        crate::mobs::client_move(rt, e, p, r, head);
+                        rt.report_thrown("lerpTo");
+                        continue;
+                    }
                     let args = [V::D(p[0]), V::D(p[1]), V::D(p[2]), V::F(r[0]), V::F(r[1]), V::I(3)];
                     if virtual_call(rt, e, LERP_KEY, LERP, &args).is_none() {
                         set_pos(rt, e, p);
@@ -1837,6 +1917,17 @@ pub fn receive(rt: &mut Rt, data: &[u8]) {
             let id = read_int(rt, buf);
             if let Some(e) = by_id(rt, id) {
                 read_data(rt, buf, e);
+            }
+        }
+        ENTITY_OP => {
+            let id = read_int(rt, buf);
+            let rest = data[data.len() - remaining(rt, buf)..].to_vec();
+            if let Some(e) = by_id(rt, id) {
+                match rest.as_slice() {
+                    [EVENT, event, ..] => entity_event(rt, e, i32::from(*event as i8)),
+                    body => crate::mobs::receive(rt, e, body),
+                }
+                rt.report_thrown("entity message");
             }
         }
         GONE => {
@@ -1904,6 +1995,7 @@ fn client_spawn(rt: &mut Rt, buf: V) {
     rt.put_field(e, "$xRot", V::F(r[1]));
     set_pos(rt, e, p);
     set_old(rt, e);
+    crate::mobs::client_spawned(rt, e);
     read_data(rt, buf, e);
     virtual_call(rt, e, READ_SPAWN_KEY, READ_SPAWN, &[buf]);
     rt.report_thrown("readSpawnData");

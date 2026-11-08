@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 628] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 625] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1443,9 +1443,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 628] = [
     ("net/minecraft/world/entity/ai/behavior/ShufflingList$WeightedEntry", "i(Ljava/lang/Object;I)V=data,weight|ggetRandWeight()D=randWeight|ggetData()Ljava/lang/Object;=data|ggetWeight()I=weight|o"),
     ("net/minecraft/world/entity/ai/behavior/declarative/BehaviorBuilder", "i(Lnet/minecraft/world/entity/ai/behavior/declarative/BehaviorBuilder$TriggerWithResult;)V=trigger|o"),
     ("net/minecraft/world/entity/ai/behavior/declarative/MemoryAccessor", "i(Lnet/minecraft/world/entity/ai/Brain;Lnet/minecraft/world/entity/ai/memory/MemoryModuleType;Lcom/mojang/datafixers/kinds/App;)V=brain,memoryType,value|gvalue()Lcom/mojang/datafixers/kinds/App;=value|o"),
-    ("net/minecraft/world/entity/ai/control/BodyRotationControl", "i(Lnet/minecraft/world/entity/Mob;)V=mob|o"),
-    ("net/minecraft/world/entity/ai/control/JumpControl", "i(Lnet/minecraft/world/entity/Mob;)V=mob|o"),
-    ("net/minecraft/world/entity/ai/control/LookControl", "i(Lnet/minecraft/world/entity/Mob;)V=mob|ggetWantedX()D=wantedX|ggetWantedY()D=wantedY|ggetWantedZ()D=wantedZ|o"),
     ("net/minecraft/world/entity/ai/memory/ExpirableValue", "i(Ljava/lang/Object;J)V=value,timeToLive|ggetTimeToLive()J=timeToLive|ggetValue()Ljava/lang/Object;=value|o"),
     ("net/minecraft/world/entity/ai/memory/WalkTarget", "i(Lnet/minecraft/world/entity/ai/behavior/PositionTracker;FI)V=target,speedModifier,closeEnoughDist|ggetTarget()Lnet/minecraft/world/entity/ai/behavior/PositionTracker;=target|ggetSpeedModifier()F=speedModifier|ggetCloseEnoughDist()I=closeEnoughDist|o"),
     ("net/minecraft/world/entity/ai/sensing/SensorType", "i(Ljava/util/function/Supplier;)V=factory|o"),

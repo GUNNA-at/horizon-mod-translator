@@ -1327,6 +1327,27 @@ fn supplier_of(rt: &mut Rt, ty: V) -> V {
     }
 }
 
+/// The base the attribute `holder` has on an entity of type `ty`: its type's supplier's
+/// (`DefaultAttributes.getSupplier`), or for a type that has none `Mob.createMobAttributes()`'s
+/// (vanilla's `LivingEntity` would fail to construct); None for one the supplier lacks.
+pub(crate) fn type_base(rt: &mut Rt, ty: V, holder: V) -> Option<f64> {
+    let mut supplier = supplier_of(rt, ty);
+    if supplier.r() == 0 {
+        supplier = rt.intern("compat:mob-attribute-supplier".into(), |rt| {
+            match FACTORIES.iter().find(|f| f.0 == "net/minecraft/world/entity/Mob" && f.1 == "createMobAttributes") {
+                Some(f) => {
+                    let b = run_factory(rt, f);
+                    build(rt, b)
+                }
+                None => V::NULL,
+            }
+        });
+    }
+    let id = attribute_key(rt, holder)?;
+    let e = entry(rt, supplier, &id)?;
+    Some(rt.get_field(e, "$base").d())
+}
+
 fn supplier_by_id(rt: &mut Rt, id: &str) -> V {
     let mods = mod_suppliers(rt);
     if let Some(Data::Map(m)) = rt.heap.get(mods.r() as usize).map(|o| &o.data)

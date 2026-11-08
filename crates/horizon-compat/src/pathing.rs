@@ -12,7 +12,6 @@
 //! (a carpet, a low snow layer) and blocked when it is higher (a slab, stairs, a chest).
 use crate::{Data, Rt, V, api, jutil, mobs};
 
-pub(crate) const NAVIGATION: &str = "net/minecraft/world/entity/ai/navigation/PathNavigation";
 pub(crate) const GROUND: &str = "net/minecraft/world/entity/ai/navigation/GroundPathNavigation";
 const PATH: &str = "net/minecraft/world/level/pathfinder/Path";
 const NODE: &str = "net/minecraft/world/level/pathfinder/Node";
@@ -1518,6 +1517,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         DEFAULT_RANDOM_POS | LAND_RANDOM_POS | RANDOM_POS => return random_pos_call(rt, owner, name, args),
         _ => {}
+    }
+    if !owner.starts_with("net/minecraft/world/entity/ai/navigation/") {
+        return None;
     }
     // A navigation: its own state, by vanilla's methods.
     let nav = a(0);

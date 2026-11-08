@@ -112,7 +112,6 @@ const SET_SPEED: Key = key!("net/minecraft/world/entity/LivingEntity", "setSpeed
 const IS_PERSISTENT: Key = key!("net/minecraft/world/entity/Mob", "isPersistenceRequired.()Z");
 const CUSTOM_PERSISTENCE: Key = key!("net/minecraft/world/entity/Mob", "requiresCustomPersistence.()Z");
 const REMOVE_FAR: Key = key!("net/minecraft/world/entity/Mob", "removeWhenFarAway.(D)Z");
-const HANDLE_EVENT: Key = key!("net/minecraft/world/entity/Entity", "handleEntityEvent.(B)V");
 const IS_BABY: Key = key!("net/minecraft/world/entity/LivingEntity", "isBaby.()Z");
 const MAX_UP_STEP: Key = key!("net/minecraft/world/entity/Entity", "maxUpStep.()F");
 const MAX_FALL: Key = key!("net/minecraft/world/entity/Entity", "getMaxFallDistance.()I");
@@ -546,13 +545,15 @@ pub(crate) fn do_hurt_target(rt: &mut Rt, mob: V, target: V) -> bool {
 /// `Mob.isWithinMeleeAttackRange(target)` (virtual): its attack box (its box widened by
 /// `sqrt(2.04) - 0.6` each way across) meets the target's.
 pub(crate) fn within_melee_range(rt: &mut Rt, mob: V, target: V) -> bool {
-    own_or(rt, mob, MELEE_RANGE, &[target], |v| v.i() != 0, |rt| {
-        let reach = f64::from(2.04f32).sqrt() - f64::from(0.6f32);
-        let b = bounds(rt, mob);
-        let a = [b[0] - reach, b[1], b[2] - reach, b[3] + reach, b[4], b[5] + reach];
-        let t = bounds(rt, target);
-        a[0] < t[3] && a[3] > t[0] && a[1] < t[4] && a[4] > t[1] && a[2] < t[5] && a[5] > t[2]
-    })
+    own_or(rt, mob, MELEE_RANGE, &[target], |v| v.i() != 0, |rt| melee_range(rt, mob, target))
+}
+
+fn melee_range(rt: &mut Rt, mob: V, target: V) -> bool {
+    let reach = f64::from(2.04f32).sqrt() - f64::from(0.6f32);
+    let b = bounds(rt, mob);
+    let a = [b[0] - reach, b[1], b[2] - reach, b[3] + reach, b[4], b[5] + reach];
+    let t = bounds(rt, target);
+    a[0] < t[3] && a[3] > t[0] && a[1] < t[4] && a[4] > t[1] && a[2] < t[5] && a[5] > t[2]
 }
 
 /// `getSensing().hasLineOfSight(e)`: once a tick for each entity.
@@ -746,13 +747,15 @@ pub(crate) fn max_up_step(rt: &mut Rt, e: V) -> f32 {
 /// `getMaxFallDistance()` (virtual): `Mob`'s, 3 blocks without a target, else as far as its
 /// health spares (on normal difficulty).
 pub(crate) fn max_fall_distance(rt: &mut Rt, mob: V) -> i32 {
-    own_or(rt, mob, MAX_FALL, &[], V::i, |rt| {
-        if target(rt, mob).r() == 0 {
-            return 3;
-        }
-        let i = (health(rt, mob) - max_health(rt, mob) * 0.33) as i32 - 4;
-        i.max(0) + 3
-    })
+    own_or(rt, mob, MAX_FALL, &[], V::i, |rt| fall_distance(rt, mob))
+}
+
+fn fall_distance(rt: &mut Rt, mob: V) -> i32 {
+    if !rt.instance_of_static(mob, MOB) || target(rt, mob).r() == 0 {
+        return 3;
+    }
+    let i = (health(rt, mob) - max_health(rt, mob) * 0.33) as i32 - 4;
+    i.max(0) + 3
 }
 
 /// `moveControl.setWantedPosition(x, y, z, speed)` (virtual).
@@ -771,12 +774,14 @@ pub(crate) fn speed(rt: &mut Rt, e: V) -> f32 {
 
 /// `setSpeed(speed)` (virtual): a mob's forward input follows it (`Mob.setSpeed`).
 fn set_speed(rt: &mut Rt, e: V, s: f32) {
-    own_or(rt, e, SET_SPEED, &[V::F(s)], |_| (), |rt| {
-        put_f(rt, e, "$speed", s);
-        if rt.instance_of_static(e, MOB) {
-            put_f(rt, e, "zza", s);
-        }
-    });
+    own_or(rt, e, SET_SPEED, &[V::F(s)], |_| (), |rt| put_speed(rt, e, s));
+}
+
+fn put_speed(rt: &mut Rt, e: V, s: f32) {
+    put_f(rt, e, "$speed", s);
+    if rt.instance_of_static(e, MOB) {
+        put_f(rt, e, "zza", s);
+    }
 }
 
 /// `PathfinderMob.getWalkTargetValue(pos, level)` (virtual): how much it likes to walk to `p`.
@@ -1014,12 +1019,6 @@ fn update_control_flags(rt: &mut Rt, mob: V) {
     goals::set_control(rt, sel, goals::LOOK, free);
 }
 
-/// The type's `fireImmune()`.
-fn fire_immune(rt: &Rt, e: V) -> bool {
-    let ty = obj(rt, e, "$type");
-    ty.r() != 0 && truth(rt, ty, "$fireImmune")
-}
-
 fn type_name(rt: &Rt, e: V) -> String {
     crate::mod_entities::type_id(rt, obj(rt, e, "$type")).unwrap_or("").to_owned()
 }
@@ -1119,8 +1118,7 @@ fn base_tick(rt: &mut Rt, e: V) {
         let t = int(rt, e, "ambientSoundTime");
         put_i(rt, e, "ambientSoundTime", t + 1);
         if random_int(rt, e, 1000) < t {
-            let interval = own_or(rt, e, AMBIENT_INTERVAL, &[], V::i, |_| 80);
-            put_i(rt, e, "ambientSoundTime", -interval);
+            reset_ambient_time(rt, e);
             own_or(rt, e, PLAY_AMBIENT, &[], |_| (), |rt| play_ambient(rt, e));
         }
     }
@@ -1359,11 +1357,11 @@ fn server_ai_step(rt: &mut Rt, mob: V) {
     own_or(rt, mob, CUSTOM_AI, &[], |_| (), |_| ());
     let mv = obj(rt, mob, "moveControl");
     if mv.r() != 0 {
-        own_or(rt, mv, MOVE_TICK, &[], |_| (), |rt| move_tick(rt, mv));
+        own_or(rt, mv, MOVE_TICK, &[], |_| (), |rt| move_control_tick(rt, mv));
     }
     let look = obj(rt, mob, "lookControl");
     if look.r() != 0 {
-        own_or(rt, look, LOOK_TICK, &[], |_| (), |rt| look_tick(rt, look));
+        own_or(rt, look, LOOK_TICK, &[], |_| (), |rt| look_control_tick(rt, look));
     }
     let jump = obj(rt, mob, "jumpControl");
     if jump.r() != 0 {
@@ -1763,6 +1761,8 @@ fn steps(rt: &mut Rt, e: V, moved: [f64; 3], ground: bool) {
         let pos = api::block_pos(rt, i64::from(at[0]), i64::from(at[1]), i64::from(at[2]));
         let block_state = crate::api_common::state(rt, &state);
         vcall(rt, STEP_SOUND, &[e, pos, block_state]);
+    } else {
+        play_step_sound(rt, e, &state);
     }
 }
 
@@ -1842,11 +1842,15 @@ fn set_operation(rt: &mut Rt, c: V, i: usize) {
     rt.put_field(c, "operation", op);
 }
 
-/// The vanilla control `class` is or extends: its own, or the one it climbs to.
-fn control_kind(class: &str) -> Option<&'static str> {
+/// The vanilla control class `class` is or extends: a mod's control's first vanilla class, or the
+/// one this models that it climbs to.
+fn control_kind(rt: &Rt, class: &str) -> Option<&'static str> {
     let mut c = class;
+    while let Some(&up) = rt.supers.get(c) {
+        c = up;
+    }
     loop {
-        if let Some(k) = [MOVE_CONTROL, LOOK_CONTROL, JUMP_CONTROL, BODY_CONTROL].into_iter().find(|k| *k == c) {
+        if let Some(k) = [FLYING_MOVE, SMOOTH_MOVE, SMOOTH_LOOK, MOVE_CONTROL, LOOK_CONTROL, JUMP_CONTROL, BODY_CONTROL].into_iter().find(|k| *k == c) {
             return Some(k);
         }
         c = api_super(c)?;
@@ -2127,4 +2131,1706 @@ fn body_tick(rt: &mut Rt, c: V) {
             put_f(rt, mob, "yBodyRot", rotate_if_necessary(body, head, max * (1.0 - f)));
         }
     }
+}
+
+// ---- sounds ----
+
+const SOUND_SOURCE: Key = key!("net/minecraft/world/entity/Entity", "getSoundSource.()Lnet/minecraft/sounds/SoundSource;");
+const PLAY_HURT_SOUND: Key = key!("net/minecraft/world/entity/LivingEntity", "playHurtSound.(Lnet/minecraft/world/damagesource/DamageSource;)V");
+const PLAY_ATTACK_SOUND: Key = key!("net/minecraft/world/entity/Mob", "playAttackSound.()V");
+const SOUND_SOURCES: &str = "net/minecraft/sounds/SoundSource";
+
+/// `getSoundSource()` (virtual), as its ordinal: a monster's `HOSTILE` (5), any other's `NEUTRAL` (6).
+fn sound_source(rt: &mut Rt, e: V) -> usize {
+    if overridden(rt, e, SOUND_SOURCE.1) {
+        let s = vcall(rt, SOUND_SOURCE, &[e]);
+        if s.r() != 0 {
+            return crate::api_common::enum_ordinal(rt, s).clamp(0, 9) as usize;
+        }
+    }
+    if rt.instance_of_static(e, MONSTER) { 5 } else { 6 }
+}
+
+/// `playSound` of sound `id` at it: a server's, which the players near it hear (vanilla's
+/// `level.playSound(null, ...)`; a client's would be its own player's only, and a mob is none); a
+/// silent entity's, none.
+fn play_named(rt: &mut Rt, e: V, id: &str, volume: f32, pitch: f32) {
+    if !server(rt) || id.is_empty() || truth(rt, e, "$silent") {
+        return;
+    }
+    let at = position(rt, e);
+    let source = sound_source(rt, e);
+    crate::sounds::play_id(rt, crate::host::Sound { event: id.to_owned(), at, source, volume, pitch });
+}
+
+/// `playSound(event, volume, pitch)` (virtual) of a `SoundEvent` or a holder of one; none plays
+/// nothing.
+fn play_event(rt: &mut Rt, e: V, event: V, volume: f32, pitch: f32) {
+    if event.r() == 0 {
+        return;
+    }
+    if overridden(rt, e, PLAY_SOUND.1) {
+        vcall(rt, PLAY_SOUND, &[e, event, V::F(volume), V::F(pitch)]);
+        return;
+    }
+    if let Some(id) = crate::sounds::sound_id(rt, event) {
+        play_named(rt, e, &id, volume, pitch);
+    }
+}
+
+/// `isBaby()` (virtual): an ageable mob below age 0.
+pub(crate) fn is_baby(rt: &mut Rt, e: V) -> bool {
+    own_or(rt, e, IS_BABY, &[], |v| v.i() != 0, |rt| rt.instance_of_static(e, AGEABLE) && int(rt, e, "$age") < 0)
+}
+
+/// `getVoicePitch()`: about 1, a baby's about 1.5.
+fn voice_pitch(rt: &mut Rt, e: V) -> f32 {
+    let (a, b) = (random_float(rt, e), random_float(rt, e));
+    (a - b) * 0.2 + if is_baby(rt, e) { 1.5 } else { 1.0 }
+}
+
+/// `LivingEntity.makeSound(event)`: at its volume and its voice's pitch (both virtual).
+fn make_sound(rt: &mut Rt, e: V, event: V) {
+    if event.r() == 0 {
+        return;
+    }
+    let volume = own_or(rt, e, SOUND_VOLUME, &[], V::f, |_| 1.0);
+    let pitch = own_or(rt, e, VOICE_PITCH, &[], V::f, |rt| voice_pitch(rt, e));
+    play_event(rt, e, event, volume, pitch);
+}
+
+fn vanilla_sound(rt: &mut Rt, id: &str) -> V {
+    crate::sounds::vanilla_event(rt, id).unwrap_or(V::NULL)
+}
+
+/// `LivingEntity.getHurtSound(source)`: a monster's `entity.hostile.hurt`, any other's
+/// `entity.generic.hurt`.
+fn default_hurt_sound(rt: &mut Rt, e: V) -> V {
+    let id = if rt.instance_of_static(e, MONSTER) { "minecraft:entity.hostile.hurt" } else { "minecraft:entity.generic.hurt" };
+    vanilla_sound(rt, id)
+}
+
+fn default_death_sound(rt: &mut Rt, e: V) -> V {
+    let id = if rt.instance_of_static(e, MONSTER) { "minecraft:entity.hostile.death" } else { "minecraft:entity.generic.death" };
+    vanilla_sound(rt, id)
+}
+
+fn death_sound(rt: &mut Rt, e: V) -> V {
+    own_or(rt, e, DEATH_SOUND, &[], |v| v, |rt| default_death_sound(rt, e))
+}
+
+/// `Mob.playHurtSound(source)`: its ambient sound put off, then `LivingEntity`'s, its hurt sound
+/// (virtual).
+fn play_hurt_sound(rt: &mut Rt, e: V, source: V) {
+    if rt.instance_of_static(e, MOB) {
+        reset_ambient_time(rt, e);
+    }
+    let s = own_or(rt, e, HURT_SOUND, &[source], |v| v, |rt| default_hurt_sound(rt, e));
+    make_sound(rt, e, s);
+}
+
+fn reset_ambient_time(rt: &mut Rt, e: V) {
+    let interval = own_or(rt, e, AMBIENT_INTERVAL, &[], V::i, |rt| ambient_interval(rt, e));
+    put_i(rt, e, "ambientSoundTime", -interval);
+}
+
+/// `getAmbientSoundInterval()`: 80 ticks, an animal's 120.
+fn ambient_interval(rt: &Rt, e: V) -> i32 {
+    if rt.instance_of_static(e, ANIMAL) { 120 } else { 80 }
+}
+
+/// `Mob.playAmbientSound()`: its ambient sound (virtual: none unless the class has one).
+fn play_ambient(rt: &mut Rt, e: V) {
+    let s = own_or(rt, e, AMBIENT_SOUND, &[], |v| v, |_| V::NULL);
+    make_sound(rt, e, s);
+}
+
+/// `Entity.playStepSound(pos, state)`: the block's step sound at 0.15 of its volume, through the
+/// class's own `playSound` where it has one (and the sound is vanilla's).
+fn play_step_sound(rt: &mut Rt, e: V, state: &str) {
+    let Some(sounds) = rt.host().and_then(|h| h.block_sounds(state)) else { return };
+    let (volume, pitch) = (sounds.volume * 0.15, sounds.pitch);
+    let event = if overridden(rt, e, PLAY_SOUND.1) { vanilla_sound(rt, &sounds.events[1]) } else { V::NULL };
+    if event.r() != 0 {
+        play_event(rt, e, event, volume, pitch);
+    } else {
+        play_named(rt, e, &sounds.events[1], volume, pitch);
+    }
+}
+
+// ---- fights ----
+
+const INVULNERABLE_TO: Key = key!("net/minecraft/world/entity/Entity", "isInvulnerableTo.(Lnet/minecraft/world/damagesource/DamageSource;)Z");
+const FIRE_IMMUNE: Key = key!("net/minecraft/world/entity/Entity", "fireImmune.()Z");
+const SET_LAST_HURT_BY: Key = key!("net/minecraft/world/entity/LivingEntity", "setLastHurtByMob.(Lnet/minecraft/world/entity/LivingEntity;)V");
+const DROP_CUSTOM: Key = key!(
+    "net/minecraft/world/entity/LivingEntity",
+    "dropCustomDeathLoot.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/damagesource/DamageSource;Z)V"
+);
+const BASE_XP: Key = key!("net/minecraft/world/entity/LivingEntity", "getBaseExperienceReward.()I");
+const SOURCE_ENTITY: &str = "net/minecraft/world/damagesource/DamageSource.getEntity.()Lnet/minecraft/world/entity/Entity;";
+const SOURCE_DIRECT: &str = "net/minecraft/world/damagesource/DamageSource.getDirectEntity.()Lnet/minecraft/world/entity/Entity;";
+const SOURCE_POSITION: &str = "net/minecraft/world/damagesource/DamageSource.getSourcePosition.()Lnet/minecraft/world/phys/Vec3;";
+const PROJECTILE: &str = "net/minecraft/world/entity/projectile/Projectile";
+const AWARD_XP: &str = "net/minecraft/world/entity/ExperienceOrb.award.(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/phys/Vec3;I)V";
+/// What the swing of an arm lasts (`getCurrentSwingDuration`, without haste or fatigue).
+const SWING_DURATION: i32 = 6;
+
+/// A source of damage type `id` (`minecraft:mob_attack`) dealt and credited to `by` (null: none).
+fn damage_source(rt: &mut Rt, id: &str, by: V) -> V {
+    crate::damage::source(rt, id, by, by, V::NULL)
+}
+
+fn source_type(rt: &Rt, s: V) -> String {
+    rt.str_of(rt.get_field(s, "$type")).unwrap_or("").to_owned()
+}
+
+/// `source.is(tag)`: its damage type in damage type tag `tag`.
+fn source_in(rt: &mut Rt, s: V, tag: &str) -> bool {
+    let id = source_type(rt, s);
+    !id.is_empty() && crate::damage::in_tag(rt, &id, tag)
+}
+
+/// `source.getEntity()`: whom the blow is credited to.
+fn source_entity(rt: &mut Rt, s: V) -> V {
+    if s.r() == 0 {
+        return V::NULL;
+    }
+    api::call(rt, SOURCE_ENTITY, &[s])
+}
+
+/// `e.hurt(source, amount)` (virtual): whether it took the blow. A mod's living entity's own, else
+/// vanilla's here; any other entity's as it answers (a player's and the game's mobs' through the
+/// game).
+pub(crate) fn hurt(rt: &mut Rt, e: V, source: V, amount: f32) -> bool {
+    if e.r() == 0 {
+        return false;
+    }
+    if is_mod_living(rt, e) {
+        return own_or(rt, e, HURT, &[source, V::F(amount)], |v| v.i() != 0, |rt| living_hurt(rt, e, source, amount));
+    }
+    vcall(rt, HURT, &[e, source, V::F(amount)]).i() != 0
+}
+
+fn hurt_by_type(rt: &mut Rt, e: V, id: &str, amount: f32) -> bool {
+    let s = damage_source(rt, id, V::NULL);
+    hurt(rt, e, s, amount)
+}
+
+/// The type's `fireImmune()`, or the class's own (virtual).
+fn fire_immune(rt: &mut Rt, e: V) -> bool {
+    own_or(rt, e, FIRE_IMMUNE, &[], |v| v.i() != 0, |rt| {
+        let ty = obj(rt, e, "$type");
+        ty.r() != 0 && truth(rt, ty, "$fireImmune")
+    })
+}
+
+/// `Entity.isInvulnerableTo(source)`: a removed entity, an invulnerable one (but to what bypasses
+/// that, or a creative player), a fire-immune one to fire, one immune to falls to a fall.
+fn invulnerable_to(rt: &mut Rt, e: V, source: V) -> bool {
+    if removed(rt, e) {
+        return true;
+    }
+    if truth(rt, e, "$invulnerable") && !source_in(rt, source, "minecraft:bypasses_invulnerability") {
+        let by = source_entity(rt, source);
+        if !(is_player(rt, by) && is_creative(rt, by)) {
+            return true;
+        }
+    }
+    if source_in(rt, source, "minecraft:is_fire") && fire_immune(rt, e) {
+        return true;
+    }
+    source_in(rt, source, "minecraft:is_fall") && type_in_tag(rt, e, "minecraft:fall_damage_immune")
+}
+
+fn is_invulnerable_to(rt: &mut Rt, e: V, source: V) -> bool {
+    own_or(rt, e, INVULNERABLE_TO, &[source], |v| v.i() != 0, |rt| invulnerable_to(rt, e, source))
+}
+
+/// `LivingEntity.hurt(source, amount)` on a server: nothing for one invulnerable to it, dead, or
+/// burning under fire resistance; frozen extra types take five times a freezing blow, a helmet
+/// three quarters of a falling block's. Within its frames after a blow (`invulnerableTime` past 10)
+/// only what tops the last blow hurts it; else the whole blow does, and it flashes, is knocked back
+/// away from the source (a projectile's way) and cries out, or dies with its death sound. The
+/// blow's living cause is what last hurt it, a player its last attacker for a hundred ticks.
+fn living_hurt(rt: &mut Rt, e: V, source: V, amount: f32) -> bool {
+    if is_invulnerable_to(rt, e, source) || !server(rt) || health(rt, e) <= 0.0 {
+        return false;
+    }
+    if source_in(rt, source, "minecraft:is_fire") && crate::mob_effects::has(rt, e, "minecraft:fire_resistance") {
+        return false;
+    }
+    put_i(rt, e, "noActionTime", 0);
+    let mut amount = amount;
+    if source_in(rt, source, "minecraft:is_freezing") && type_in_tag(rt, e, "minecraft:freeze_hurts_extra_types") {
+        amount *= 5.0;
+    }
+    let helmet = equipment(rt, e, 5);
+    if source_in(rt, source, "minecraft:damages_helmet") && !crate::api_common::stack_empty(rt, helmet) {
+        amount *= 0.75;
+    }
+    let walk = obj(rt, e, "walkAnimation");
+    if walk.r() != 0 {
+        put_f(rt, walk, "speed", 1.5);
+    }
+    let mut full = true;
+    if int(rt, e, "invulnerableTime") as f32 > 10.0 && !source_in(rt, source, "minecraft:bypasses_cooldown") {
+        let last = flt(rt, e, "lastHurt");
+        if amount <= last {
+            return false;
+        }
+        actually_hurt_virtual(rt, e, source, amount - last);
+        put_f(rt, e, "lastHurt", amount);
+        full = false;
+    } else {
+        put_f(rt, e, "lastHurt", amount);
+        put_i(rt, e, "invulnerableTime", 20);
+        actually_hurt_virtual(rt, e, source, amount);
+        put_i(rt, e, "hurtDuration", 10);
+        put_i(rt, e, "hurtTime", 10);
+    }
+    let by = source_entity(rt, source);
+    if by.r() != 0 {
+        let wind = source_type(rt, source) == "minecraft:wind_charge" && type_in_tag(rt, e, "minecraft:no_anger_from_wind_charge");
+        if rt.instance_of(by, LIVING) && !source_in(rt, source, "minecraft:no_anger") && !wind {
+            own_or(rt, e, SET_LAST_HURT_BY, &[by], |_| (), |rt| set_last_hurt_by(rt, e, by));
+        }
+        if is_player(rt, by) {
+            put_i(rt, e, "lastHurtByPlayerTime", 100);
+            rt.put_field(e, "$lastHurtByPlayer", by);
+        }
+    }
+    if full {
+        crate::mod_entities::send_living(rt, e, &[HURT_OP]);
+        if !source_in(rt, source, "minecraft:no_impact") {
+            put_bool(rt, e, "hurtMarked", true);
+        }
+        if !source_in(rt, source, "minecraft:no_knockback") {
+            let (dx, dz) = knock_direction(rt, e, source);
+            knock_back(rt, e, 0.4, dx, dz);
+        }
+    }
+    if health(rt, e) <= 0.0 {
+        if full {
+            let s = death_sound(rt, e);
+            make_sound(rt, e, s);
+        }
+        own_or(rt, e, DIE, &[source], |_| (), |rt| die(rt, e, source));
+    } else if full {
+        own_or(rt, e, PLAY_HURT_SOUND, &[source], |_| (), |rt| play_hurt_sound(rt, e, source));
+    }
+    rt.put_field(e, "$lastDamageSource", source);
+    rt.put_field(e, "$lastDamageStamp", V::J(game_time(rt)));
+    true
+}
+
+/// Which way a blow pushes: back along a projectile's flight, else away from where it came from.
+fn knock_direction(rt: &mut Rt, e: V, source: V) -> (f64, f64) {
+    let direct = api::call(rt, SOURCE_DIRECT, &[source]);
+    let projectile = direct.r() != 0
+        && ((crate::mod_entities::is_mod_entity(rt, direct) && crate::projectiles::is_projectile_class(crate::mod_entities::vanilla_base(rt, direct)))
+            || rt.instance_of(direct, PROJECTILE));
+    if projectile {
+        let m = motion(rt, direct);
+        return (-m[0], -m[2]);
+    }
+    let at = api::call(rt, SOURCE_POSITION, &[source]);
+    if at.r() == 0 {
+        return (0.0, 0.0);
+    }
+    let (from, p) = (crate::api_common::xyz(rt, at), position(rt, e));
+    (from[0] - p[0], from[2] - p[2])
+}
+
+/// `setLastHurtByMob(by)`: what last hurt it, and when.
+fn set_last_hurt_by(rt: &mut Rt, e: V, by: V) {
+    rt.put_field(e, "$lastHurtBy", by);
+    let t = int(rt, e, "tickCount");
+    put_i(rt, e, "$lastHurtByTimestamp", t);
+}
+
+/// `setLastHurtMob(target)`: the living entity it last hit, and when.
+fn set_last_hurt_mob(rt: &mut Rt, e: V, target: V) {
+    let living = target.r() != 0 && rt.instance_of(target, LIVING);
+    rt.put_field(e, "$lastHurtMob", if living { target } else { V::NULL });
+    let t = int(rt, e, "tickCount");
+    put_i(rt, e, "$lastHurtMobTimestamp", t);
+}
+
+fn actually_hurt_virtual(rt: &mut Rt, e: V, source: V, amount: f32) {
+    own_or(rt, e, ACTUALLY_HURT, &[source, V::F(amount)], |_| (), |rt| actually_hurt(rt, e, source, amount));
+}
+
+/// `LivingEntity.actuallyHurt(source, amount)`: less what its armor takes (`CombatRules`) and a
+/// resistance effect, then its absorption hearts first, its health the rest.
+fn actually_hurt(rt: &mut Rt, e: V, source: V, amount: f32) {
+    if is_invulnerable_to(rt, e, source) {
+        return;
+    }
+    let mut damage = amount;
+    if !source_in(rt, source, "minecraft:bypasses_armor") {
+        let armor = attribute(rt, e, "minecraft:generic.armor").floor() as f32;
+        let toughness = attribute(rt, e, "minecraft:generic.armor_toughness") as f32;
+        damage = after_armor(damage, armor, toughness);
+    }
+    let absorption = flt(rt, e, "$absorption");
+    let absorbed = damage.min(absorption);
+    set_absorption(rt, e, (absorption - absorbed).max(0.0));
+    let rest = damage - absorbed;
+    if rest != 0.0 {
+        let h = health(rt, e);
+        set_health(rt, e, h - rest);
+    }
+}
+
+/// `CombatRules.getDamageAfterAbsorb`: armor takes up to 80% (its points over 25, at least a fifth
+/// of them, less for a heavy blow unless tough).
+fn after_armor(damage: f32, armor: f32, toughness: f32) -> f32 {
+    let f = 2.0 + toughness / 4.0;
+    let v = armor - damage / f;
+    let lo = armor * 0.2;
+    let f1 = if v < lo { lo } else { v.min(20.0) };
+    damage * (1.0 - f1 / 25.0)
+}
+
+/// `setAbsorptionAmount(f)`: kept between 0 and its most absorption.
+fn set_absorption(rt: &mut Rt, e: V, f: f32) {
+    let max = attribute(rt, e, "minecraft:generic.max_absorption") as f32;
+    put_f(rt, e, "$absorption", f.clamp(0.0, max.max(0.0)));
+}
+
+/// `e.knockback(strength, x, z)` (virtual) for a living entity: a mod's here, the game's mobs
+/// through the game; a player's comes with the blow the game deals them.
+fn knock_back(rt: &mut Rt, e: V, strength: f64, x: f64, z: f64) {
+    if is_mod_living(rt, e) {
+        own_or(rt, e, KNOCKBACK, &[V::D(strength), V::D(x), V::D(z)], |_| (), |rt| knockback(rt, e, strength, x, z));
+    } else if !is_player(rt, e) {
+        vcall(rt, KNOCKBACK, &[e, V::D(strength), V::D(x), V::D(z)]);
+    }
+}
+
+/// `LivingEntity.knockback(strength, x, z)`: less its knockback resistance, half its motion kept
+/// and the rest pushed away from `(x, z)`; on the ground, up too (at most 0.4).
+fn knockback(rt: &mut Rt, e: V, strength: f64, x: f64, z: f64) {
+    let strength = strength * (1.0 - attribute(rt, e, "minecraft:generic.knockback_resistance"));
+    if strength <= 0.0 {
+        return;
+    }
+    put_bool(rt, e, "hasImpulse", true);
+    let m = motion(rt, e);
+    let (mut x, mut z) = (x, z);
+    while x * x + z * z < f64::from(1.0e-5f32) {
+        x = (random_double(rt, e) - random_double(rt, e)) * 0.01;
+        z = (random_double(rt, e) - random_double(rt, e)) * 0.01;
+    }
+    let len = (x * x + z * z).sqrt();
+    let (px, pz) = (x / len * strength, z / len * strength);
+    let y = if truth(rt, e, "$onGround") { (m[1] / 2.0 + strength).min(0.4) } else { m[1] };
+    set_motion(rt, e, [m[0] / 2.0 - px, y, m[2] / 2.0 - pz]);
+}
+
+/// `LivingEntity.die(source)`: once; a server's drops its loot and experience and tells its
+/// players (event 3: they see it die); then it lies dying (`Pose.DYING`).
+fn die(rt: &mut Rt, e: V, source: V) {
+    if removed(rt, e) || truth(rt, e, "dead") {
+        return;
+    }
+    put_bool(rt, e, "dead", true);
+    if server(rt) {
+        drop_all_death_loot(rt, e, source);
+        crate::mod_entities::broadcast_event(rt, e, 3);
+    }
+    if let Some(dying) = crate::api_common::plain_enum(rt, POSE, "DYING") {
+        rt.put_field(e, "$pose", dying);
+    }
+}
+
+/// `dropAllDeathLoot(level, source)`: with mob drops on, the class's own death loot
+/// (`dropCustomDeathLoot`, told whether a player hit it lately); then, if a player did, its
+/// experience. Not modelled: the type's loot table and its equipment.
+fn drop_all_death_loot(rt: &mut Rt, e: V, source: V) {
+    let recently = int(rt, e, "lastHurtByPlayerTime") > 0;
+    let drops = rt.host().and_then(|h| h.game_rule("mob_drops")).is_none_or(|v| v != 0);
+    let level = obj(rt, e, "$level");
+    if drops {
+        own_or(rt, e, DROP_CUSTOM, &[level, source, V::I(i32::from(recently))], |_| (), |_| ());
+    }
+    if recently && drops {
+        let xp = own_or(rt, e, BASE_XP, &[], V::i, |rt| base_experience(rt, e));
+        if xp > 0 {
+            let p = position(rt, e);
+            let at = crate::api_common::vec3(rt, p[0], p[1], p[2]);
+            api::call(rt, AWARD_XP, &[level, at, V::I(xp)]);
+        }
+    }
+}
+
+/// `getBaseExperienceReward()`: a mob's `xpReward` (a monster's 5), an animal's 1 to 3.
+fn base_experience(rt: &mut Rt, e: V) -> i32 {
+    if rt.instance_of_static(e, ANIMAL) {
+        return 1 + random_int(rt, e, 3);
+    }
+    if rt.instance_of_static(e, MOB) { int(rt, e, "xpReward") } else { 0 }
+}
+
+/// `Mob.doHurtTarget(target)`: a blow of its attack damage (`mob_attack`); one that lands knocks the
+/// target back by its attack knockback (slowing it too), and it remembers whom it hit.
+fn hurt_target(rt: &mut Rt, mob: V, target: V) -> bool {
+    if target.r() == 0 {
+        return false;
+    }
+    let damage = attribute(rt, mob, "minecraft:generic.attack_damage") as f32;
+    let source = damage_source(rt, "minecraft:mob_attack", mob);
+    let hit = hurt(rt, target, source, damage);
+    if hit {
+        let knock = attribute(rt, mob, "minecraft:generic.attack_knockback") as f32;
+        if knock > 0.0 && rt.instance_of(target, LIVING) {
+            let yaw = flt(rt, mob, "$yRot");
+            knock_back(rt, target, f64::from(knock * 0.5), f64::from(sin_deg(yaw)), f64::from(-cos_deg(yaw)));
+            let m = motion(rt, mob);
+            set_motion(rt, mob, [m[0] * 0.6, m[1], m[2] * 0.6]);
+        }
+        set_last_hurt_mob(rt, mob, target);
+        own_or(rt, mob, PLAY_ATTACK_SOUND, &[], |_| (), |_| ());
+    }
+    hit
+}
+
+/// `LivingEntity.swing(hand, updateSelf)`: a swing starts unless one is under way and not yet half
+/// done; a server tells its players (vanilla's animate packet).
+fn swing(rt: &mut Rt, e: V, hand: i32, _update_self: bool) {
+    let t = int(rt, e, "swingTime");
+    if truth(rt, e, "swinging") && t < SWING_DURATION / 2 && t >= 0 {
+        return;
+    }
+    put_i(rt, e, "swingTime", -1);
+    put_bool(rt, e, "swinging", true);
+    let h = hand_value(rt, hand);
+    rt.put_field(e, "swingingArm", h);
+    if server(rt) {
+        crate::mod_entities::send_living(rt, e, &[SWING_OP, hand.clamp(0, 1) as u8]);
+    }
+}
+
+fn hand_value(rt: &mut Rt, hand: i32) -> V {
+    crate::api_common::get_static(rt, HAND, if hand == 1 { "OFF_HAND" } else { "MAIN_HAND" }).unwrap_or(V::NULL)
+}
+
+/// `updateSwingTime()`: the swing's ticks counted to its end, its share the attack animation.
+fn update_swing_time(rt: &mut Rt, e: V) {
+    let mut t = int(rt, e, "swingTime");
+    if truth(rt, e, "swinging") {
+        t += 1;
+        if t >= SWING_DURATION {
+            t = 0;
+            put_bool(rt, e, "swinging", false);
+        }
+    } else {
+        t = 0;
+    }
+    put_i(rt, e, "swingTime", t);
+    put_f(rt, e, "attackAnim", t as f32 / SWING_DURATION as f32);
+}
+
+// ---- the client's copy ----
+
+/// What a server tells a mod's living entity's clients, after [`crate::mod_entities`]'s message
+/// and its id (0 is an entity event, which that module reads): a hurt (its flash), a swing (which
+/// hand), and its state ([`state_bytes`]).
+const HURT_OP: u8 = 1;
+const SWING_OP: u8 = 2;
+const STATE_OP: u8 = 3;
+const ADD_PARTICLE: &str = "net/minecraft/world/level/Level.addParticle.(Lnet/minecraft/core/particles/ParticleOptions;DDDDDD)V";
+const RANDOM_GAUSSIAN: &str = "net/minecraft/util/RandomSource.nextGaussian.()D";
+
+/// `LivingEntity.lerpTo(x, y, z, yRot, xRot, steps)`: where the server put it, reached over `steps`
+/// ticks of its AI step.
+fn lerp_to(rt: &mut Rt, e: V, p: [f64; 3], y_rot: f32, x_rot: f32, steps: i32) {
+    for (f, v) in ["lerpX", "lerpY", "lerpZ"].into_iter().zip(p) {
+        rt.put_field(e, f, V::D(v));
+    }
+    rt.put_field(e, "lerpYRot", V::D(f64::from(y_rot)));
+    rt.put_field(e, "lerpXRot", V::D(f64::from(x_rot)));
+    put_i(rt, e, "lerpSteps", steps);
+}
+
+/// `lerpPositionAndRotationStep(steps, ...)`: a `1/steps` share of the way to where the server put
+/// it, turning the short way round.
+fn lerp_step(rt: &mut Rt, e: V, steps: i32) {
+    let d = 1.0 / f64::from(steps.max(1));
+    let p = position(rt, e);
+    let to = [dbl(rt, e, "lerpX"), dbl(rt, e, "lerpY"), dbl(rt, e, "lerpZ")];
+    let at = [p[0] + d * (to[0] - p[0]), p[1] + d * (to[1] - p[1]), p[2] + d * (to[2] - p[2])];
+    let (y, x) = (f64::from(flt(rt, e, "$yRot")), f64::from(flt(rt, e, "$xRot")));
+    let yaw = (y + d * wrap_d(dbl(rt, e, "lerpYRot") - y)) as f32;
+    let pitch = (x + d * (dbl(rt, e, "lerpXRot") - x)) as f32;
+    crate::mod_entities::set_pos(rt, e, at);
+    put_f(rt, e, "$yRot", yaw % 360.0);
+    put_f(rt, e, "$xRot", pitch % 360.0);
+}
+
+/// A client's new copy faces where the server's does, its head and body too
+/// (`recreateFromPacket`).
+pub(crate) fn client_spawned(rt: &mut Rt, e: V) {
+    if !is_mod_living(rt, e) {
+        return;
+    }
+    let yaw = flt(rt, e, "$yRot");
+    for f in ["yHeadRot", "yHeadRotO", "yBodyRot", "yBodyRotO"] {
+        put_f(rt, e, f, yaw);
+    }
+}
+
+/// Where the server's head yaw goes to a client (with its moves): its `yHeadRot`; 0 for an entity
+/// with no head.
+pub(crate) fn head_yaw(rt: &Rt, e: V) -> f32 {
+    if is_mod_living(rt, e) { flt(rt, e, "yHeadRot") } else { 0.0 }
+}
+
+/// A client's move of a mod's living entity: `lerpTo` over three ticks and `lerpHeadTo` (both
+/// virtual).
+pub(crate) fn client_move(rt: &mut Rt, e: V, p: [f64; 3], rot: [f32; 2], head: f32) {
+    let lerp = key!("net/minecraft/world/entity/Entity", "lerpTo.(DDDFFI)V");
+    let args = [V::D(p[0]), V::D(p[1]), V::D(p[2]), V::F(rot[0]), V::F(rot[1]), V::I(3)];
+    own_or(rt, e, lerp, &args, |_| (), |rt| lerp_to(rt, e, p, rot[0], rot[1], 3));
+    let lerp_head = key!("net/minecraft/world/entity/Entity", "lerpHeadTo.(FI)V");
+    own_or(rt, e, lerp_head, &[V::F(head), V::I(3)], |_| (), |rt| {
+        rt.put_field(e, "lerpYHeadRot", V::D(f64::from(head)));
+        put_i(rt, e, "lerpHeadSteps", 3);
+    });
+}
+
+/// A message about a mod's living entity a client's runtime got (its op past the entity's id).
+pub(crate) fn receive(rt: &mut Rt, e: V, body: &[u8]) {
+    if !is_mod_living(rt, e) {
+        return;
+    }
+    match body {
+        [HURT_OP, ..] => client_hurt(rt, e),
+        [SWING_OP, hand, ..] => {
+            let hand = i32::from(*hand);
+            let h = hand_value(rt, hand);
+            own_or(rt, e, SWING, &[h], |_| (), |rt| swing(rt, e, hand, false));
+        }
+        [STATE_OP, rest @ ..] => apply_state(rt, e, rest),
+        _ => {}
+    }
+}
+
+/// `LivingEntity.handleDamageEvent` on a client: its walk shudders and it flashes red for ten ticks.
+fn client_hurt(rt: &mut Rt, e: V) {
+    let walk = obj(rt, e, "walkAnimation");
+    if walk.r() != 0 {
+        put_f(rt, walk, "speed", 1.5);
+    }
+    put_i(rt, e, "invulnerableTime", 20);
+    put_i(rt, e, "hurtDuration", 10);
+    put_i(rt, e, "hurtTime", 10);
+}
+
+/// `handleEntityEvent(event)` for a mod's living entity on a client: 3 it dies (no health left, a
+/// generic death), 20 a mob's spawn puff, 60 the puff it leaves in, 18 an animal's hearts.
+pub(crate) fn handle_event(rt: &mut Rt, e: V, event: i32) {
+    match event {
+        3 => {
+            put_f(rt, e, "$health", 0.0);
+            let generic = damage_source(rt, "minecraft:generic", V::NULL);
+            own_or(rt, e, DIE, &[generic], |_| (), |rt| die(rt, e, generic));
+        }
+        20 | 60 => poof(rt, e),
+        18 if rt.instance_of_static(e, ANIMAL) => {
+            for _ in 0..7 {
+                let speed = [gaussian(rt, e) * 0.02, gaussian(rt, e) * 0.02, gaussian(rt, e) * 0.02];
+                let at = [random_x(rt, e, 1.0), random_y(rt, e) + 0.5, random_z(rt, e, 1.0)];
+                add_particle(rt, e, "net/minecraft/core/particles/ParticleTypes.HEART", at, speed);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `makePoofParticles()`: twenty puffs about its box.
+fn poof(rt: &mut Rt, e: V) {
+    for _ in 0..20 {
+        let d = [gaussian(rt, e) * 0.02, gaussian(rt, e) * 0.02, gaussian(rt, e) * 0.02];
+        let at = [random_x(rt, e, 1.0) - d[0] * 10.0, random_y(rt, e) - d[1] * 10.0, random_z(rt, e, 1.0) - d[2] * 10.0];
+        add_particle(rt, e, "net/minecraft/core/particles/ParticleTypes.POOF", at, d);
+    }
+}
+
+fn add_particle(rt: &mut Rt, e: V, kind: &'static str, at: [f64; 3], speed: [f64; 3]) {
+    let options = api::get_static(rt, kind);
+    let mut level = obj(rt, e, "$level");
+    if level.r() == 0 {
+        level = crate::glue::level(rt);
+    }
+    let args = [level, options, V::D(at[0]), V::D(at[1]), V::D(at[2]), V::D(speed[0]), V::D(speed[1]), V::D(speed[2])];
+    api::call(rt, ADD_PARTICLE, &args);
+}
+
+fn gaussian(rt: &mut Rt, e: V) -> f64 {
+    let r = random(rt, e);
+    api::call(rt, RANDOM_GAUSSIAN, &[r]).d()
+}
+
+/// `getRandomX(scale)`: somewhere across its width.
+fn random_x(rt: &mut Rt, e: V, scale: f64) -> f64 {
+    let w = f64::from(crate::mod_entities::own_size(rt, e)[0]);
+    position(rt, e)[0] + w * ((2.0 * random_double(rt, e) - 1.0) * scale)
+}
+
+fn random_y(rt: &mut Rt, e: V) -> f64 {
+    let h = f64::from(crate::mod_entities::own_size(rt, e)[1]);
+    position(rt, e)[1] + h * random_double(rt, e)
+}
+
+fn random_z(rt: &mut Rt, e: V, scale: f64) -> f64 {
+    let w = f64::from(crate::mod_entities::own_size(rt, e)[0]);
+    position(rt, e)[2] + w * ((2.0 * random_double(rt, e) - 1.0) * scale)
+}
+
+/// What a client draws of a mod's living entity that its synched data would carry in vanilla: its
+/// health, whether it is a baby, aggressive (a zombie's raised arms), left-handed and without AI,
+/// and what it holds and wears (each slot's item and count).
+pub(crate) fn state_bytes(rt: &mut Rt, e: V) -> Vec<u8> {
+    let mut out = health(rt, e).to_be_bytes().to_vec();
+    let baby = rt.instance_of_static(e, AGEABLE) && int(rt, e, "$age") < 0;
+    let flags = u8::from(baby) | u8::from(truth(rt, e, "$aggressive")) << 1 | u8::from(truth(rt, e, "$leftHanded")) << 2 | u8::from(truth(rt, e, "$noAi")) << 3;
+    out.push(flags);
+    for slot in EQUIPMENT {
+        let s = obj(rt, e, slot);
+        let (id, count) = if s.r() == 0 || crate::api_common::stack_empty(rt, s) {
+            (String::new(), 0)
+        } else {
+            (crate::api_common::item_like_name(rt, rt.get_field(s, "$item")), rt.get_field(s, "$count").i().max(0))
+        };
+        put_var(&mut out, id.len() as u64);
+        out.extend_from_slice(id.as_bytes());
+        put_var(&mut out, count as u64);
+    }
+    out
+}
+
+/// Whether `state` differs from what its players were last sent (which it now is).
+pub(crate) fn state_changed(rt: &mut Rt, e: V, state: &[u8]) -> bool {
+    let hex: String = state.iter().map(|b| format!("{b:02x}")).collect();
+    if rt.str_of(rt.get_field(e, "$sentState")) == Some(hex.as_str()) {
+        return false;
+    }
+    let s = rt.string(&hex);
+    rt.put_field(e, "$sentState", s);
+    true
+}
+
+/// The message of `state` for a client.
+pub(crate) fn state_message(state: &[u8]) -> Vec<u8> {
+    let mut m = vec![STATE_OP];
+    m.extend_from_slice(state);
+    m
+}
+
+/// [`state_bytes`] on a client.
+fn apply_state(rt: &mut Rt, e: V, b: &[u8]) {
+    let Some(&[h0, h1, h2, h3, flags]) = b.get(0..5).and_then(|s| <&[u8; 5]>::try_from(s).ok()) else { return };
+    put_f(rt, e, "$health", f32::from_be_bytes([h0, h1, h2, h3]));
+    if rt.instance_of_static(e, AGEABLE) {
+        // A client's age is only whether it is a baby (`AgeableMob.getAge`: -1 or 1).
+        put_i(rt, e, "$age", if flags & 1 != 0 { -1 } else { 1 });
+    }
+    put_bool(rt, e, "$aggressive", flags & 2 != 0);
+    put_bool(rt, e, "$leftHanded", flags & 4 != 0);
+    put_bool(rt, e, "$noAi", flags & 8 != 0);
+    let mut at = 5;
+    for slot in EQUIPMENT {
+        let Some(len) = read_var(b, &mut at) else { return };
+        let Some(id) = b.get(at..at + len as usize).and_then(|s| std::str::from_utf8(s).ok()).map(str::to_owned) else { return };
+        at += len as usize;
+        let Some(count) = read_var(b, &mut at) else { return };
+        let stack = if id.is_empty() || count == 0 { empty_stack(rt) } else { crate::api_common::stack(rt, &id, count as i32) };
+        rt.put_field(e, slot, stack);
+    }
+}
+
+fn put_var(out: &mut Vec<u8>, mut u: u64) {
+    loop {
+        if u < 0x80 {
+            out.push(u as u8);
+            return;
+        }
+        out.push((u as u8 & 0x7F) | 0x80);
+        u >>= 7;
+    }
+}
+
+fn read_var(b: &[u8], at: &mut usize) -> Option<u64> {
+    let mut u = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *b.get(*at)?;
+        *at += 1;
+        u |= u64::from(byte & 0x7F) << shift;
+        if byte & 0x80 == 0 {
+            return Some(u);
+        }
+    }
+    None
+}
+
+// ---- despawning, health, equipment, saving ----
+
+const DESPAWN_DISTANCE: &str = "net/minecraft/world/entity/MobCategory.getDespawnDistance.()I";
+const NO_DESPAWN_DISTANCE: &str = "net/minecraft/world/entity/MobCategory.getNoDespawnDistance.()I";
+/// Its slots' stacks, by `EquipmentSlot` ordinal: main hand, off hand, feet, legs, chest, head, body.
+const EQUIPMENT: [&str; 7] = ["$equip0", "$equip1", "$equip2", "$equip3", "$equip4", "$equip5", "$equip6"];
+
+/// `Mob.checkDespawn()` on a server, before its tick: one that needn't stay is gone when no player is
+/// within its category's despawn distance (128), or now and then once idle for 30 seconds beyond 32
+/// blocks; within 32 it stays busy. An animal never goes (`removeWhenFarAway`). Not modelled: a
+/// monster's leaving on peaceful (the runtime doesn't know the difficulty), NeoForge's
+/// `MobDespawnEvent`.
+fn despawn_check(rt: &mut Rt, e: V) {
+    if !is_mod_mob(rt, e) || !server(rt) || removed(rt, e) {
+        return;
+    }
+    let persistent = own_or(rt, e, IS_PERSISTENT, &[], |v| v.i() != 0, |rt| truth(rt, e, "$persistenceRequired"))
+        || own_or(rt, e, CUSTOM_PERSISTENCE, &[], |v| v.i() != 0, |_| false);
+    if persistent {
+        put_i(rt, e, "noActionTime", 0);
+        return;
+    }
+    let p = position(rt, e);
+    let players = rt.host().map(|h| h.players()).unwrap_or_default();
+    let Some(d) = players.iter().map(|(_, q)| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) + (q[2] - p[2]).powi(2)).reduce(f64::min) else {
+        return;
+    };
+    let ty = obj(rt, e, "$type");
+    let category = if ty.r() != 0 { obj(rt, ty, "$category") } else { V::NULL };
+    let (far, near) = if category.r() != 0 {
+        (api::call(rt, DESPAWN_DISTANCE, &[category]).i(), api::call(rt, NO_DESPAWN_DISTANCE, &[category]).i())
+    } else {
+        (128, 32)
+    };
+    let remove_far = |rt: &mut Rt| own_or(rt, e, REMOVE_FAR, &[V::D(d)], |v| v.i() != 0, |rt| !rt.instance_of_static(e, ANIMAL));
+    let discard = |rt: &mut Rt| {
+        api::call(rt, "net/minecraft/world/entity/Entity.discard.()V", &[e]);
+    };
+    if d > f64::from(far * far) && remove_far(rt) {
+        discard(rt);
+    }
+    let l = f64::from(near * near);
+    if no_action_time(rt, e) > 600 && random_int(rt, e, 800) == 0 && d > l && remove_far(rt) {
+        discard(rt);
+    } else if d < l {
+        put_i(rt, e, "noActionTime", 0);
+    }
+}
+
+/// `onAttributeUpdated(MAX_HEALTH)`: health above the new most comes down to it.
+pub(crate) fn max_health_changed(rt: &mut Rt, e: V) {
+    let max = max_health(rt, e);
+    if health(rt, e) > max {
+        put_f(rt, e, "$health", max);
+    }
+}
+
+fn empty_stack(rt: &mut Rt) -> V {
+    api::get_static(rt, "net/minecraft/world/item/ItemStack.EMPTY")
+}
+
+/// The stack in its slot `slot` (an `EquipmentSlot` ordinal).
+fn equipment(rt: &mut Rt, e: V, slot: usize) -> V {
+    let s = obj(rt, e, EQUIPMENT[slot.min(6)]);
+    if s.r() != 0 { s } else { empty_stack(rt) }
+}
+
+fn slot_of(rt: &Rt, slot: V) -> usize {
+    crate::api_common::enum_ordinal(rt, slot).clamp(0, 6) as usize
+}
+
+/// The slot of an `InteractionHand`: the main hand's 0, the off hand's 1.
+fn hand_slot(rt: &Rt, hand: V) -> usize {
+    usize::from(crate::api_common::enum_ordinal(rt, hand) == 1)
+}
+
+/// The stacks of slots `slots`, as a list.
+fn stacks(rt: &mut Rt, e: V, slots: std::ops::RangeInclusive<usize>) -> V {
+    let mut items = Vec::new();
+    for s in slots {
+        items.push(equipment(rt, e, s));
+    }
+    crate::jutil::new_list(rt, items)
+}
+
+const PUT_FLOAT: &str = "net/minecraft/nbt/CompoundTag.putFloat.(Ljava/lang/String;F)V";
+const PUT_SHORT: &str = "net/minecraft/nbt/CompoundTag.putShort.(Ljava/lang/String;S)V";
+const PUT_INT: &str = "net/minecraft/nbt/CompoundTag.putInt.(Ljava/lang/String;I)V";
+const PUT_BOOLEAN: &str = "net/minecraft/nbt/CompoundTag.putBoolean.(Ljava/lang/String;Z)V";
+const GET_FLOAT: &str = "net/minecraft/nbt/CompoundTag.getFloat.(Ljava/lang/String;)F";
+const GET_SHORT: &str = "net/minecraft/nbt/CompoundTag.getShort.(Ljava/lang/String;)S";
+const GET_INT: &str = "net/minecraft/nbt/CompoundTag.getInt.(Ljava/lang/String;)I";
+const GET_BOOLEAN: &str = "net/minecraft/nbt/CompoundTag.getBoolean.(Ljava/lang/String;)Z";
+const CONTAINS: &str = "net/minecraft/nbt/CompoundTag.contains.(Ljava/lang/String;)Z";
+
+fn tag_put(rt: &mut Rt, tag: V, key: &'static str, name: &str, v: V) {
+    let k = rt.string(name);
+    api::call(rt, key, &[tag, k, v]);
+}
+
+fn tag_get(rt: &mut Rt, tag: V, key: &'static str, name: &str) -> V {
+    let k = rt.string(name);
+    api::call(rt, key, &[tag, k])
+}
+
+fn tag_int(rt: &mut Rt, tag: V, key: &'static str, name: &str) -> i32 {
+    match tag_get(rt, tag, key, name) {
+        V::I(i) => i,
+        V::J(j) => j as i32,
+        _ => 0,
+    }
+}
+
+/// `addAdditionalSaveData(tag)` of `LivingEntity` and the classes under it: its health, hurt and
+/// death times, absorption; a mob's pickup, persistence, handedness and AI; an ageable mob's age; an
+/// animal's love.
+fn save_living(rt: &mut Rt, e: V, tag: V) {
+    let (health, absorption) = (health(rt, e), flt(rt, e, "$absorption"));
+    let (hurt, death, by) = (int(rt, e, "hurtTime"), int(rt, e, "deathTime"), int(rt, e, "$lastHurtByTimestamp"));
+    tag_put(rt, tag, PUT_FLOAT, "Health", V::F(health));
+    tag_put(rt, tag, PUT_SHORT, "HurtTime", V::I(hurt));
+    tag_put(rt, tag, PUT_INT, "HurtByTimestamp", V::I(by));
+    tag_put(rt, tag, PUT_SHORT, "DeathTime", V::I(death));
+    tag_put(rt, tag, PUT_FLOAT, "AbsorptionAmount", V::F(absorption));
+    if rt.instance_of_static(e, MOB) {
+        for (name, field) in [("CanPickUpLoot", "$canPickUpLoot"), ("PersistenceRequired", "$persistenceRequired"), ("LeftHanded", "$leftHanded")] {
+            let b = int(rt, e, field);
+            tag_put(rt, tag, PUT_BOOLEAN, name, V::I(i32::from(b != 0)));
+        }
+        if truth(rt, e, "$noAi") {
+            tag_put(rt, tag, PUT_BOOLEAN, "NoAI", V::I(1));
+        }
+    }
+    if rt.instance_of_static(e, AGEABLE) {
+        let (age, forced) = (int(rt, e, "$age"), int(rt, e, "forcedAge"));
+        tag_put(rt, tag, PUT_INT, "Age", V::I(age));
+        tag_put(rt, tag, PUT_INT, "ForcedAge", V::I(forced));
+    }
+    if rt.instance_of_static(e, ANIMAL) {
+        let love = int(rt, e, "inLove");
+        tag_put(rt, tag, PUT_INT, "InLove", V::I(love));
+    }
+}
+
+/// `readAdditionalSaveData(tag)`: [`save_living`]'s keys back.
+fn load_living(rt: &mut Rt, e: V, tag: V) {
+    let absorption = tag_get(rt, tag, GET_FLOAT, "AbsorptionAmount").f();
+    set_absorption(rt, e, absorption);
+    let k = rt.string("Health");
+    if api::call(rt, CONTAINS, &[tag, k]).i() != 0 {
+        let h = tag_get(rt, tag, GET_FLOAT, "Health").f();
+        set_health(rt, e, h);
+    }
+    for (name, field, key) in [("HurtTime", "hurtTime", GET_SHORT), ("DeathTime", "deathTime", GET_SHORT), ("HurtByTimestamp", "$lastHurtByTimestamp", GET_INT)] {
+        let v = tag_int(rt, tag, key, name);
+        put_i(rt, e, field, v);
+    }
+    if rt.instance_of_static(e, MOB) {
+        for (name, field) in [("CanPickUpLoot", "$canPickUpLoot"), ("PersistenceRequired", "$persistenceRequired"), ("LeftHanded", "$leftHanded"), ("NoAI", "$noAi")] {
+            let b = tag_int(rt, tag, GET_BOOLEAN, name);
+            put_bool(rt, e, field, b != 0);
+        }
+    }
+    if rt.instance_of_static(e, AGEABLE) {
+        let age = tag_int(rt, tag, GET_INT, "Age");
+        set_age(rt, e, age);
+        let forced = tag_int(rt, tag, GET_INT, "ForcedAge");
+        put_i(rt, e, "forcedAge", forced);
+    }
+    if rt.instance_of_static(e, ANIMAL) {
+        let love = tag_int(rt, tag, GET_INT, "InLove");
+        put_i(rt, e, "inLove", love);
+    }
+}
+
+// ---- flying and swimming controls ----
+
+const FLYING_MOVE: &str = "net/minecraft/world/entity/ai/control/FlyingMoveControl";
+const SMOOTH_MOVE: &str = "net/minecraft/world/entity/ai/control/SmoothSwimmingMoveControl";
+const SMOOTH_LOOK: &str = "net/minecraft/world/entity/ai/control/SmoothSwimmingLookControl";
+
+/// The vanilla control control `c` is of ([`control_kind`] of its class).
+fn control_class(rt: &Rt, c: V) -> Option<&'static str> {
+    control_kind(rt, rt.class_of(c))
+}
+
+/// A move control's tick as its vanilla class runs it: a flying one's, a swimming one's, or
+/// `MoveControl`'s.
+fn move_control_tick(rt: &mut Rt, c: V) {
+    match control_class(rt, c) {
+        Some(FLYING_MOVE) => flying_tick(rt, c),
+        Some(SMOOTH_MOVE) => smooth_move_tick(rt, c),
+        _ => move_tick(rt, c),
+    }
+}
+
+fn look_control_tick(rt: &mut Rt, c: V) {
+    match control_class(rt, c) {
+        Some(SMOOTH_LOOK) => smooth_look_tick(rt, c),
+        _ => look_tick(rt, c),
+    }
+}
+
+/// `FlyingMoveControl.tick()`: toward where it wants to be, up or down too, at its flying speed
+/// off the ground, without gravity; waiting, it sinks again (unless it hovers in place).
+fn flying_tick(rt: &mut Rt, c: V) {
+    let mob = obj(rt, c, "mob");
+    if mob.r() == 0 {
+        return;
+    }
+    if operation_of(rt, c) != 1 {
+        if !truth(rt, c, "hoversInPlace") {
+            put_bool(rt, mob, "$noGravity", false);
+        }
+        put_f(rt, mob, "yya", 0.0);
+        put_f(rt, mob, "zza", 0.0);
+        return;
+    }
+    set_operation(rt, c, 0);
+    put_bool(rt, mob, "$noGravity", true);
+    let p = position(rt, mob);
+    let (dx, dy, dz) = (dbl(rt, c, "wantedX") - p[0], dbl(rt, c, "wantedY") - p[1], dbl(rt, c, "wantedZ") - p[2]);
+    if dx * dx + dy * dy + dz * dz < MIN_SPEED_SQR {
+        put_f(rt, mob, "yya", 0.0);
+        put_f(rt, mob, "zza", 0.0);
+        return;
+    }
+    let f = atan2_deg(dz, dx) - 90.0;
+    let yaw = flt(rt, mob, "$yRot");
+    put_f(rt, mob, "$yRot", rotlerp(yaw, f, 90.0));
+    let speed_id = if truth(rt, mob, "$onGround") { "minecraft:generic.movement_speed" } else { "minecraft:generic.flying_speed" };
+    let f1 = (dbl(rt, c, "speedModifier") * attribute(rt, mob, speed_id)) as f32;
+    set_speed(rt, mob, f1);
+    let flat = (dx * dx + dz * dz).sqrt();
+    if dy.abs() > EQUAL_EPSILON || flat.abs() > EQUAL_EPSILON {
+        let f2 = -atan2_deg(dy, flat);
+        let pitch = flt(rt, mob, "$xRot");
+        put_f(rt, mob, "$xRot", rotlerp(pitch, f2, int(rt, c, "maxTurn") as f32));
+        put_f(rt, mob, "yya", if dy > 0.0 { f1 } else { -f1 });
+    }
+}
+
+/// `SmoothSwimmingMoveControl.tick()`: in water it swims toward where it wants to be, pitching up
+/// and down, kept afloat a little; out of water it crawls, slower the more it must turn.
+fn smooth_move_tick(rt: &mut Rt, c: V) {
+    let mob = obj(rt, c, "mob");
+    if mob.r() == 0 {
+        return;
+    }
+    let water = truth(rt, mob, "$inWater");
+    if truth(rt, c, "applyGravity") && water {
+        let m = motion(rt, mob);
+        set_motion(rt, mob, [m[0], m[1] + 0.005, m[2]]);
+    }
+    let nav = navigation(rt, mob);
+    let done = nav.r() == 0 || own_or(rt, nav, NAV_DONE, &[], |v| v.i() != 0, |rt| pathing::is_done(rt, nav));
+    if operation_of(rt, c) != 1 || done {
+        set_speed(rt, mob, 0.0);
+        for f in ["xxa", "yya", "zza"] {
+            put_f(rt, mob, f, 0.0);
+        }
+        return;
+    }
+    let p = position(rt, mob);
+    let (dx, dy, dz) = (dbl(rt, c, "wantedX") - p[0], dbl(rt, c, "wantedY") - p[1], dbl(rt, c, "wantedZ") - p[2]);
+    if dx * dx + dy * dy + dz * dz < MIN_SPEED_SQR {
+        put_f(rt, mob, "zza", 0.0);
+        return;
+    }
+    let f = atan2_deg(dz, dx) - 90.0;
+    let yaw = rotlerp(flt(rt, mob, "$yRot"), f, int(rt, c, "maxTurnY") as f32);
+    put_f(rt, mob, "$yRot", yaw);
+    put_f(rt, mob, "yBodyRot", yaw);
+    put_f(rt, mob, "yHeadRot", yaw);
+    let f1 = (dbl(rt, c, "speedModifier") * attribute(rt, mob, "minecraft:generic.movement_speed")) as f32;
+    if water {
+        set_speed(rt, mob, f1 * flt(rt, c, "inWaterSpeedModifier"));
+        let flat = (dx * dx + dz * dz).sqrt();
+        if dy.abs() > EQUAL_EPSILON || flat.abs() > EQUAL_EPSILON {
+            let max = int(rt, c, "maxTurnX") as f32;
+            let f3 = wrap(-atan2_deg(dy, flat)).clamp(-max, max);
+            let pitch = flt(rt, mob, "$xRot");
+            put_f(rt, mob, "$xRot", rotlerp(pitch, f3, 5.0));
+        }
+        let pitch = flt(rt, mob, "$xRot");
+        put_f(rt, mob, "zza", cos_deg(pitch) * f1);
+        put_f(rt, mob, "yya", -sin_deg(pitch) * f1);
+    } else {
+        let turn = wrap(yaw - f).abs();
+        let factor = 1.0 - ((turn - 10.0) / 50.0).clamp(0.0, 1.0);
+        set_speed(rt, mob, f1 * flt(rt, c, "outsideWaterSpeedModifier") * factor);
+    }
+}
+
+/// `SmoothSwimmingLookControl.tick()`: the head turned a little past what it looks at (20 degrees
+/// over, 10 down), back to the body otherwise (level again when it doesn't swim a path); the body
+/// follows a head turned past its reach, four degrees a tick.
+fn smooth_look_tick(rt: &mut Rt, look: V) {
+    let mob = obj(rt, look, "mob");
+    if mob.r() == 0 {
+        return;
+    }
+    let cooldown = int(rt, look, "lookAtCooldown");
+    if cooldown > 0 {
+        put_i(rt, look, "lookAtCooldown", cooldown - 1);
+        let yaw = if overridden(rt, look, Y_ROT_D.1) {
+            let o = vcall(rt, Y_ROT_D, &[look]);
+            of_optional_float(rt, o)
+        } else {
+            wanted_yaw(rt, look, mob)
+        };
+        if let Some(y) = yaw {
+            let head = flt(rt, mob, "yHeadRot");
+            put_f(rt, mob, "yHeadRot", rotate_towards(head, y + 20.0, flt(rt, look, "yMaxRotSpeed")));
+        }
+        let pitch = if overridden(rt, look, X_ROT_D.1) {
+            let o = vcall(rt, X_ROT_D, &[look]);
+            of_optional_float(rt, o)
+        } else {
+            wanted_pitch(rt, look, mob)
+        };
+        if let Some(x) = pitch {
+            let now = flt(rt, mob, "$xRot");
+            put_f(rt, mob, "$xRot", rotate_towards(now, x + 10.0, flt(rt, look, "xMaxRotAngle")));
+        }
+    } else {
+        let nav = navigation(rt, mob);
+        if nav.r() == 0 || own_or(rt, nav, NAV_DONE, &[], |v| v.i() != 0, |rt| pathing::is_done(rt, nav)) {
+            let now = flt(rt, mob, "$xRot");
+            put_f(rt, mob, "$xRot", rotate_towards(now, 0.0, 5.0));
+        }
+        let (head, body) = (flt(rt, mob, "yHeadRot"), flt(rt, mob, "yBodyRot"));
+        put_f(rt, mob, "yHeadRot", rotate_towards(head, body, flt(rt, look, "yMaxRotSpeed")));
+    }
+    let f = wrap(flt(rt, mob, "yHeadRot") - flt(rt, mob, "yBodyRot"));
+    let max = int(rt, look, "maxYRotFromCenter") as f32;
+    let body = flt(rt, mob, "yBodyRot");
+    if f < -max {
+        put_f(rt, mob, "yBodyRot", body - 4.0);
+    } else if f > max {
+        put_f(rt, mob, "yBodyRot", body + 4.0);
+    }
+}
+
+/// `Mob.lookAt(entity, maxYaw, maxPitch)`: its facing turned toward `target`'s eyes (a non-living
+/// one's middle), at most so far each way.
+fn mob_look_at(rt: &mut Rt, mob: V, target: V, max_yaw: f32, max_pitch: f32) {
+    let (p, q) = (position(rt, mob), position(rt, target));
+    let (dx, dz) = (q[0] - p[0], q[2] - p[2]);
+    let to = if rt.instance_of(target, LIVING) {
+        eye_y(rt, target)
+    } else {
+        let b = bounds(rt, target);
+        (b[1] + b[4]) / 2.0
+    };
+    let dy = to - eye_y(rt, mob);
+    let flat = (dx * dx + dz * dz).sqrt();
+    let yaw = atan2_deg(dz, dx) - 90.0;
+    let pitch = -atan2_deg(dy, flat);
+    let x = flt(rt, mob, "$xRot");
+    put_f(rt, mob, "$xRot", rotate_towards(x, pitch, max_pitch));
+    let y = flt(rt, mob, "$yRot");
+    put_f(rt, mob, "$yRot", rotate_towards(y, yaw, max_yaw));
+}
+
+// ---- what the class's code asks ----
+
+const TYPE_LEVEL: &str = "(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V";
+const SOUND_SOURCE_NAMES: [&str; 10] = ["MASTER", "MUSIC", "RECORDS", "WEATHER", "BLOCKS", "HOSTILE", "NEUTRAL", "PLAYERS", "AMBIENT", "VOICE"];
+const ARM: &str = "net/minecraft/world/entity/HumanoidArm";
+const CHECK_DESPAWN: Key = key!("net/minecraft/world/entity/Entity", "checkDespawn.()V");
+const HEART_TICKS: i32 = 600;
+
+/// Whether `class` is `LivingEntity` or a vanilla class under it (`Animal`, `Zombie`...).
+fn living_tree(class: &str) -> bool {
+    let mut c = class;
+    for _ in 0..16 {
+        if c == LIVING {
+            return true;
+        }
+        match crate::vanilla_entities::api_super(c) {
+            Some(up) => c = up,
+            None => return false,
+        }
+    }
+    false
+}
+
+fn control_owner(owner: &str) -> bool {
+    matches!(owner, MOVE_CONTROL | LOOK_CONTROL | JUMP_CONTROL | BODY_CONTROL | FLYING_MOVE | SMOOTH_MOVE | SMOOTH_LOOK)
+}
+
+/// `Entity`'s methods a living entity has its own of (`LivingEntity.hurt`, `tick`...), which a call
+/// naming `Entity` (another module's, the game's) on a mod's living entity runs.
+fn living_entity_method(name: &str) -> bool {
+    matches!(
+        name,
+        "tick"
+            | "baseTick"
+            | "hurt"
+            | "isAlive"
+            | "isPickable"
+            | "isPushable"
+            | "isAttackable"
+            | "kill"
+            | "move"
+            | "lerpTo"
+            | "lerpHeadTo"
+            | "getYHeadRot"
+            | "setYHeadRot"
+            | "setYBodyRot"
+            | "getVisualRotationYInDegrees"
+            | "getPreciseBodyRotation"
+            | "handleEntityEvent"
+            | "isInvulnerableTo"
+            | "fireImmune"
+            | "getSoundSource"
+            | "checkDespawn"
+            | "causeFallDamage"
+            | "playStepSound"
+            | "isAlliedTo"
+            | "getRandomX"
+            | "getRandomY"
+            | "getRandomZ"
+            | "addAdditionalSaveData"
+            | "readAdditionalSaveData"
+            | "onGround"
+            | "setOnGround"
+            | "resetFallDistance"
+            | "getMaxFallDistance"
+            | "maxUpStep"
+            | "getAirSupply"
+            | "setAirSupply"
+            | "getMaxAirSupply"
+    )
+}
+
+/// The superclass of a vanilla control class this module models: what a call on a control of one
+/// it doesn't climbs to ([`crate::api::api_super`]).
+pub(crate) fn api_super(class: &str) -> Option<&'static str> {
+    match class {
+        FLYING_MOVE | SMOOTH_MOVE => Some(MOVE_CONTROL),
+        SMOOTH_LOOK => Some(LOOK_CONTROL),
+        _ => None,
+    }
+}
+
+/// The keys [`call`] may answer, by owner, name and descriptor alone.
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    control_owner(owner) || owner == WALK_ANIMATION || (owner == ENTITY && living_entity_method(name)) || living_tree(owner)
+}
+
+/// A mod's living entity's calls into vanilla's classes above it (its constructor, `super.tick()`,
+/// `getNavigation()`...), and its controls' and walk animation's. A call this doesn't answer goes to
+/// what `Entity` answers for any mod entity ([`crate::mod_entities`]); one on another living entity
+/// (a player, the game's own mobs) to the modules after this.
+pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
+    let (owner, name, desc) = crate::parts(key)?;
+    if !claims(owner, name, desc) {
+        return None;
+    }
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    if control_owner(owner) {
+        return control_call(rt, owner, name, desc, args);
+    }
+    if owner == WALK_ANIMATION {
+        return walk_call(rt, name, desc, args);
+    }
+    let e = a(0);
+    if name == "<init>" {
+        if owner == ENTITY || desc != TYPE_LEVEL || !is_mod_living(rt, e) {
+            return None;
+        }
+        construct(rt, e, a(1), a(2));
+        return Some(V::Void);
+    }
+    if !is_mod_living(rt, e) {
+        return None;
+    }
+    if let Some(v) = living_call(rt, name, desc, args) {
+        return Some(v);
+    }
+    if owner == ENTITY {
+        return None;
+    }
+    crate::mod_entities::call(rt, ENTITY, name, desc, args)
+}
+
+fn unit(_: ()) -> V {
+    V::Void
+}
+
+fn bool_v(b: bool) -> V {
+    V::I(i32::from(b))
+}
+
+/// What vanilla's `LivingEntity`, `Mob`, `PathfinderMob`, `AgeableMob` and `Animal` answer for a
+/// mod's living entity (their own code, not the class's overrides: a call here is the class's
+/// `super`, or the vanilla method it doesn't override).
+fn living_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let e = a(0);
+    let mob = rt.instance_of_static(e, MOB);
+    Some(match (name, desc) {
+        // Its tick.
+        ("tick", "()V") => unit(tick(rt, e)),
+        ("baseTick", "()V") => unit(base_tick(rt, e)),
+        ("aiStep", "()V") => unit(ai_step(rt, e)),
+        ("travel", "(Lnet/minecraft/world/phys/Vec3;)V") => {
+            let input = crate::api_common::xyz(rt, a(1));
+            unit(travel(rt, e, input))
+        }
+        ("tickDeath", "()V") => unit(tick_death(rt, e)),
+        ("customServerAiStep" | "registerGoals" | "playAttackSound" | "onSyncedDataUpdated" | "defineSynchedData", _) => V::Void,
+        ("startSeenByPlayer" | "stopSeenByPlayer" | "setDropChance" | "ageBoundaryReached", _) => V::Void,
+        ("checkDespawn", "()V") => unit(despawn_check(rt, e)),
+        ("isEffectiveAi", "()Z") => bool_v(effective_ai(rt, e)),
+        ("isNoAi", "()Z") => bool_v(truth(rt, e, "$noAi")),
+        ("setNoAi", "(Z)V") => unit(put_bool(rt, e, "$noAi", a(1).i() != 0)),
+        ("serverAiStep", "()V") if mob => unit(server_ai_step(rt, e)),
+        // Its health.
+        ("getHealth", "()F") => V::F(health(rt, e)),
+        ("setHealth", "(F)V") => unit(set_health(rt, e, a(1).f())),
+        ("getMaxHealth", "()F") => V::F(max_health(rt, e)),
+        ("heal", "(F)V") => {
+            let h = health(rt, e);
+            if h > 0.0 {
+                set_health(rt, e, h + a(1).f());
+            }
+            V::Void
+        }
+        ("isDeadOrDying", "()Z") => bool_v(health(rt, e) <= 0.0),
+        ("isAlive", "()Z") => bool_v(living_alive(rt, e)),
+        ("isHurt", "()Z") => {
+            let h = health(rt, e);
+            bool_v(h > 0.0 && h < max_health(rt, e))
+        }
+        ("getAbsorptionAmount", "()F") => V::F(flt(rt, e, "$absorption")),
+        ("setAbsorptionAmount", "(F)V") => unit(set_absorption(rt, e, a(1).f())),
+        ("getArmorValue", "()I") => V::I(attribute(rt, e, "minecraft:generic.armor").floor() as i32),
+        ("getScale", "()F") => V::F(scale(rt, e)),
+        ("getAgeScale", "()F") => V::F(if is_baby(rt, e) { 0.5 } else { 1.0 }),
+        // Its fights.
+        ("hurt", "(Lnet/minecraft/world/damagesource/DamageSource;F)Z") => bool_v(living_hurt(rt, e, a(1), a(2).f())),
+        ("actuallyHurt", "(Lnet/minecraft/world/damagesource/DamageSource;F)V") => unit(actually_hurt(rt, e, a(1), a(2).f())),
+        ("die", "(Lnet/minecraft/world/damagesource/DamageSource;)V") => unit(die(rt, e, a(1))),
+        ("dropAllDeathLoot", _) => unit(drop_all_death_loot(rt, e, a(2))),
+        ("dropCustomDeathLoot", _) => V::Void,
+        ("kill", "()V") => {
+            let s = damage_source(rt, "minecraft:generic_kill", V::NULL);
+            hurt(rt, e, s, f32::MAX);
+            V::Void
+        }
+        ("knockback", "(DDD)V") => unit(knockback(rt, e, a(1).d(), a(2).d(), a(3).d())),
+        ("isInvulnerableTo", "(Lnet/minecraft/world/damagesource/DamageSource;)Z") => bool_v(invulnerable_to(rt, e, a(1))),
+        ("fireImmune", "()Z") => {
+            let ty = obj(rt, e, "$type");
+            bool_v(ty.r() != 0 && truth(rt, ty, "$fireImmune"))
+        }
+        ("doHurtTarget", "(Lnet/minecraft/world/entity/Entity;)Z") if mob => bool_v(hurt_target(rt, e, a(1))),
+        ("isWithinMeleeAttackRange", _) if mob => bool_v(melee_range(rt, e, a(1))),
+        ("swing", "(Lnet/minecraft/world/InteractionHand;)V") => {
+            let hand = crate::api_common::enum_ordinal(rt, a(1)).max(0);
+            unit(swing(rt, e, hand, false))
+        }
+        ("swing", "(Lnet/minecraft/world/InteractionHand;Z)V") => {
+            let hand = crate::api_common::enum_ordinal(rt, a(1)).max(0);
+            unit(swing(rt, e, hand, a(2).i() != 0))
+        }
+        ("getLastHurtByMob", _) => last_hurt_by_mob(rt, e),
+        ("setLastHurtByMob", _) => unit(set_last_hurt_by(rt, e, a(1))),
+        ("getLastHurtByMobTimestamp", "()I") => V::I(last_hurt_by_mob_timestamp(rt, e)),
+        ("getLastHurtMob", _) => obj(rt, e, "$lastHurtMob"),
+        ("setLastHurtMob", _) => unit(set_last_hurt_mob(rt, e, a(1))),
+        ("getLastHurtMobTimestamp", "()I") => V::I(int(rt, e, "$lastHurtMobTimestamp")),
+        ("setLastHurtByPlayer", _) => {
+            rt.put_field(e, "$lastHurtByPlayer", a(1));
+            put_i(rt, e, "lastHurtByPlayerTime", 100);
+            V::Void
+        }
+        ("getLastDamageSource", _) => last_damage_source(rt, e),
+        ("getKillCredit", _) => {
+            let by = obj(rt, e, "$lastHurtByPlayer");
+            if by.r() != 0 { by } else { last_hurt_by_mob(rt, e) }
+        }
+        ("canAttack", "(Lnet/minecraft/world/entity/LivingEntity;)Z") => bool_v(a(1).r() != 0 && can_be_seen_as_enemy(rt, a(1))),
+        ("isAlliedTo", _) => V::I(0),
+        ("getExperienceReward", _) => V::I(own_or(rt, e, BASE_XP, &[], V::i, |rt| base_experience(rt, e))),
+        ("getBaseExperienceReward", "()I") => V::I(base_experience(rt, e)),
+        ("isBlocking" | "isUsingItem" | "isFallFlying" | "isAutoSpinAttack" | "isSleeping" | "isInvertedHealAndHarm", "()Z") => V::I(0),
+        ("isAffectedByPotions" | "attackable" | "isAttackable", "()Z") => V::I(1),
+        ("isPickable", "()Z") => bool_v(!removed(rt, e)),
+        ("isPushable", "()Z") => {
+            let alive = living_alive(rt, e);
+            bool_v(alive && !on_climbable(rt, e))
+        }
+        ("getArrowCount", "()I") => V::I(int(rt, e, "$arrows")),
+        ("setArrowCount", "(I)V") => unit(put_i(rt, e, "$arrows", a(1).i())),
+        // Its sounds.
+        ("getSoundSource", _) => {
+            let i = if rt.instance_of_static(e, MONSTER) { 5 } else { 6 };
+            crate::api_common::plain_enum(rt, SOUND_SOURCES, SOUND_SOURCE_NAMES[i]).unwrap_or(V::NULL)
+        }
+        ("getHurtSound", _) => default_hurt_sound(rt, e),
+        ("getDeathSound", _) => default_death_sound(rt, e),
+        ("getAmbientSound", _) => V::NULL,
+        ("playHurtSound", _) => unit(play_hurt_sound(rt, e, a(1))),
+        ("playAmbientSound", "()V") => unit(play_ambient(rt, e)),
+        ("getAmbientSoundInterval", "()I") => V::I(ambient_interval(rt, e)),
+        ("getSoundVolume", "()F") => V::F(1.0),
+        ("getVoicePitch", "()F") => V::F(voice_pitch(rt, e)),
+        ("makeSound", _) => unit(make_sound(rt, e, a(1))),
+        ("playStepSound", _) => {
+            let state = rt.str_of(a(2)).unwrap_or("").to_owned();
+            unit(play_step_sound(rt, e, &state))
+        }
+        // How it moves.
+        ("move", "(Lnet/minecraft/world/entity/MoverType;Lnet/minecraft/world/phys/Vec3;)V") => {
+            let d = crate::api_common::xyz(rt, a(2));
+            unit(move_self(rt, e, d))
+        }
+        ("jumpFromGround", "()V") => unit(jump_from_ground(rt, e)),
+        ("getJumpPower", "()F") => V::F(jump_power(rt, e)),
+        ("setJumping", "(Z)V") => unit(put_bool(rt, e, "jumping", a(1).i() != 0)),
+        ("getSpeed", "()F") => V::F(flt(rt, e, "$speed")),
+        ("setSpeed", "(F)V") => unit(put_speed(rt, e, a(1).f())),
+        ("setXxa", "(F)V") => unit(put_f(rt, e, "xxa", a(1).f())),
+        ("setYya", "(F)V") => unit(put_f(rt, e, "yya", a(1).f())),
+        ("setZza", "(F)V") => unit(put_f(rt, e, "zza", a(1).f())),
+        ("moveRelative", "(FLnet/minecraft/world/phys/Vec3;)V") => {
+            let input = crate::api_common::xyz(rt, a(2));
+            unit(move_relative(rt, e, a(1).f(), input))
+        }
+        ("onClimbable", "()Z") => bool_v(on_climbable(rt, e)),
+        ("onGround", "()Z") => bool_v(truth(rt, e, "$onGround")),
+        ("setOnGround", "(Z)V") => unit(put_bool(rt, e, "$onGround", a(1).i() != 0)),
+        ("resetFallDistance", "()V") => unit(put_f(rt, e, "fallDistance", 0.0)),
+        ("causeFallDamage", "(FFLnet/minecraft/world/damagesource/DamageSource;)Z") => bool_v(cause_fall_damage(rt, e, a(1).f(), a(2).f(), a(3))),
+        ("getMaxFallDistance", "()I") => V::I(fall_distance(rt, e)),
+        ("maxUpStep", "()F") => V::F(attribute(rt, e, "minecraft:generic.step_height") as f32),
+        ("canBreatheUnderwater", "()Z") => bool_v(type_in_tag(rt, e, "minecraft:can_breathe_under_water")),
+        ("getAirSupply", "()I") => V::I(int(rt, e, "$air")),
+        ("setAirSupply", "(I)V") => unit(put_i(rt, e, "$air", a(1).i())),
+        ("getMaxAirSupply", "()I") => V::I(MAX_AIR),
+        ("lerpTo", "(DDDFFI)V") => unit(lerp_to(rt, e, [a(1).d(), a(2).d(), a(3).d()], a(4).f(), a(5).f(), a(6).i())),
+        ("lerpHeadTo", "(FI)V") => {
+            rt.put_field(e, "lerpYHeadRot", V::D(f64::from(a(1).f())));
+            unit(put_i(rt, e, "lerpHeadSteps", a(2).i()))
+        }
+        ("getYHeadRot", "()F") => V::F(flt(rt, e, "yHeadRot")),
+        ("setYHeadRot", "(F)V") => unit(put_f(rt, e, "yHeadRot", a(1).f())),
+        ("setYBodyRot", "(F)V") => unit(put_f(rt, e, "yBodyRot", a(1).f())),
+        ("getVisualRotationYInDegrees", "()F") => V::F(flt(rt, e, "yBodyRot")),
+        ("getPreciseBodyRotation", "(F)F") => {
+            let (old, now) = (flt(rt, e, "yBodyRotO"), flt(rt, e, "yBodyRot"));
+            V::F(old + a(1).f() * (now - old))
+        }
+        ("getMaxHeadXRot", "()I") => V::I(40),
+        ("getMaxHeadYRot", "()I") => V::I(75),
+        ("getHeadRotSpeed", "()I") => V::I(10),
+        ("lookAt", "(Lnet/minecraft/world/entity/Entity;FF)V") => unit(mob_look_at(rt, e, a(1), a(2).f(), a(3).f())),
+        ("getRandomX", "(D)D") => V::D(random_x(rt, e, a(1).d())),
+        ("getRandomY", "()D") => V::D(random_y(rt, e)),
+        ("getRandomZ", "(D)D") => V::D(random_z(rt, e, a(1).d())),
+        ("handleEntityEvent", "(B)V") => unit(handle_event(rt, e, a(1).i())),
+        ("spawnAnim", "()V") => {
+            if server(rt) {
+                crate::mod_entities::broadcast_event(rt, e, 20);
+            } else {
+                poof(rt, e);
+            }
+            V::Void
+        }
+        // What it holds and wears.
+        ("getItemBySlot", _) => {
+            let slot = slot_of(rt, a(1));
+            equipment(rt, e, slot)
+        }
+        ("setItemSlot", _) => {
+            let slot = slot_of(rt, a(1));
+            unit(rt.put_field(e, EQUIPMENT[slot], a(2)))
+        }
+        ("getItemInHand", _) => {
+            let slot = hand_slot(rt, a(1));
+            equipment(rt, e, slot)
+        }
+        ("setItemInHand", _) => {
+            let slot = hand_slot(rt, a(1));
+            unit(rt.put_field(e, EQUIPMENT[slot], a(2)))
+        }
+        ("getMainHandItem", _) => equipment(rt, e, 0),
+        ("getOffhandItem", _) => equipment(rt, e, 1),
+        ("getHandSlots", "()Ljava/lang/Iterable;") => stacks(rt, e, 0..=1),
+        ("getArmorSlots", "()Ljava/lang/Iterable;") => stacks(rt, e, 2..=5),
+        ("getAllSlots", "()Ljava/lang/Iterable;") => stacks(rt, e, 0..=5),
+        ("getArmorAndBodyArmorSlots", "()Ljava/lang/Iterable;") => stacks(rt, e, 2..=6),
+        ("getUseItem", _) => empty_stack(rt),
+        ("isHolding", "(Lnet/minecraft/world/item/Item;)Z") => {
+            let want = crate::api_common::item_like_name(rt, a(1));
+            let held = (0..2).any(|i| {
+                let s = obj(rt, e, EQUIPMENT[i]);
+                s.r() != 0 && crate::api_common::item_like_name(rt, rt.get_field(s, "$item")) == want
+            });
+            bool_v(held)
+        }
+        ("getMainArm", _) => {
+            let arm = if truth(rt, e, "$leftHanded") { "LEFT" } else { "RIGHT" };
+            crate::api_common::plain_enum(rt, ARM, arm).unwrap_or(V::NULL)
+        }
+        ("isLeftHanded", "()Z") => bool_v(truth(rt, e, "$leftHanded")),
+        ("setLeftHanded", "(Z)V") => unit(put_bool(rt, e, "$leftHanded", a(1).i() != 0)),
+        ("canPickUpLoot", "()Z") => bool_v(truth(rt, e, "$canPickUpLoot")),
+        ("setCanPickUpLoot", "(Z)V") => unit(put_bool(rt, e, "$canPickUpLoot", a(1).i() != 0)),
+        // A mob's AI.
+        ("getNavigation", _) if mob => obj(rt, e, "navigation"),
+        ("getMoveControl", _) if mob => obj(rt, e, "moveControl"),
+        ("getLookControl", _) if mob => obj(rt, e, "lookControl"),
+        ("getJumpControl", _) if mob => obj(rt, e, "jumpControl"),
+        ("getSensing", _) if mob => obj(rt, e, "$sensing"),
+        ("getTarget", _) if mob => obj(rt, e, "$target"),
+        ("setTarget", _) if mob => unit(rt.put_field(e, "$target", a(1))),
+        ("isAggressive", "()Z") => bool_v(truth(rt, e, "$aggressive")),
+        ("setAggressive", "(Z)V") => unit(put_bool(rt, e, "$aggressive", a(1).i() != 0)),
+        ("isPersistenceRequired", "()Z") => bool_v(truth(rt, e, "$persistenceRequired")),
+        ("setPersistenceRequired", "()V") => unit(put_bool(rt, e, "$persistenceRequired", true)),
+        ("requiresCustomPersistence", "()Z") => V::I(0),
+        ("removeWhenFarAway", "(D)Z") => bool_v(!rt.instance_of_static(e, ANIMAL)),
+        ("getMaxSpawnClusterSize", "()I") => V::I(4),
+        ("getPathfindingMalus", _) if mob => {
+            let k = crate::api_common::enum_ordinal(rt, a(1)).clamp(0, 25) as usize;
+            V::F(pathing::malus(rt, e, k))
+        }
+        ("setPathfindingMalus", _) if mob => {
+            let k = crate::api_common::enum_ordinal(rt, a(1)).clamp(0, 25) as usize;
+            unit(pathing::set_malus(rt, e, k, a(2).f()))
+        }
+        ("getWalkTargetValue", _) if mob => {
+            let p = api::pos_of(rt, a(1));
+            V::F(walk_target_default(rt, e, p))
+        }
+        ("isPathFinding", "()Z") if mob => {
+            let nav = obj(rt, e, "navigation");
+            bool_v(nav.r() != 0 && !pathing::is_done(rt, nav))
+        }
+        ("isWithinRestriction", "()Z") if mob => {
+            let p = block_position(rt, e);
+            bool_v(within_restriction(rt, e, p))
+        }
+        ("isWithinRestriction", "(Lnet/minecraft/core/BlockPos;)Z") if mob => {
+            let p = api::pos_of(rt, a(1));
+            bool_v(within_restriction(rt, e, p))
+        }
+        ("restrictTo", "(Lnet/minecraft/core/BlockPos;I)V") if mob => {
+            let p = api::pos_of(rt, a(1));
+            for (f, v) in ["$restrictX", "$restrictY", "$restrictZ"].into_iter().zip(p) {
+                put_i(rt, e, f, v);
+            }
+            unit(put_f(rt, e, "$restrictRadius", a(2).i() as f32))
+        }
+        ("getRestrictCenter", _) if mob => {
+            let (c, _) = restriction(rt, e).unwrap_or(([0; 3], -1.0));
+            api::block_pos(rt, i64::from(c[0]), i64::from(c[1]), i64::from(c[2]))
+        }
+        ("getRestrictRadius", "()F") if mob => V::F(flt_or(rt, e, "$restrictRadius", -1.0)),
+        ("hasRestriction", "()Z") if mob => bool_v(restriction(rt, e).is_some()),
+        ("clearRestriction", "()V") if mob => unit(put_f(rt, e, "$restrictRadius", -1.0)),
+        ("finalizeSpawn", _) if mob => {
+            // `Mob.finalizeSpawn`: one in twenty left-handed.
+            let left = random_float(rt, e) < 0.05;
+            put_bool(rt, e, "$leftHanded", left);
+            a(4)
+        }
+        ("mobInteract", _) if mob => api::get_static(rt, "net/minecraft/world/InteractionResult.PASS"),
+        ("isLeashed", "()Z") => V::I(0),
+        ("getLeashHolder", _) => V::NULL,
+        // An ageable mob's age, an animal's love.
+        ("getAge", "()I") => V::I(int(rt, e, "$age")),
+        ("setAge", "(I)V") => unit(set_age(rt, e, a(1).i())),
+        ("isBaby", "()Z") => bool_v(rt.instance_of_static(e, AGEABLE) && int(rt, e, "$age") < 0),
+        ("setBaby", "(Z)V") => unit(if rt.instance_of_static(e, AGEABLE) { set_age(rt, e, if a(1).i() != 0 { -24000 } else { 0 }) }),
+        ("ageUp", "(I)V" | "(IZ)V") => {
+            let age = int(rt, e, "$age");
+            let grown = age + a(1).i() * 20;
+            unit(set_age(rt, e, if age < 0 { grown.min(0) } else { grown }))
+        }
+        ("canBreed", "()Z") => V::I(1),
+        ("isInLove", "()Z") => bool_v(int(rt, e, "inLove") > 0),
+        ("canFallInLove", "()Z") => bool_v(int(rt, e, "inLove") <= 0),
+        ("getInLoveTime", "()I") => V::I(int(rt, e, "inLove")),
+        ("setInLoveTime", "(I)V") => unit(put_i(rt, e, "inLove", a(1).i())),
+        ("resetLove", "()V") => unit(put_i(rt, e, "inLove", 0)),
+        ("setInLove", _) => {
+            put_i(rt, e, "inLove", HEART_TICKS);
+            crate::mod_entities::broadcast_event(rt, e, 18);
+            V::Void
+        }
+        // What it saves.
+        ("addAdditionalSaveData", "(Lnet/minecraft/nbt/CompoundTag;)V") => unit(save_living(rt, e, a(1))),
+        ("readAdditionalSaveData", "(Lnet/minecraft/nbt/CompoundTag;)V") => unit(load_living(rt, e, a(1))),
+        _ => return None,
+    })
+}
+
+/// `LivingEntity.getScale()` (final) of a mod's living entity: its scale attribute, kept within
+/// 1/16 to 16 (`sanitizeScale`). A baby's half size is its dimensions' (`getAgeScale`) and its
+/// model's.
+pub(crate) fn scale(rt: &mut Rt, e: V) -> f32 {
+    (attribute(rt, e, "minecraft:generic.scale") as f32).clamp(0.0625, 16.0)
+}
+
+/// `checkDespawn()` (virtual) of a mod's mob on a server, before its tick.
+pub(crate) fn check_despawn(rt: &mut Rt, e: V) {
+    if is_mod_mob(rt, e) && server(rt) && !removed(rt, e) {
+        own_or(rt, e, CHECK_DESPAWN, &[], |_| (), |rt| despawn_check(rt, e));
+    }
+}
+
+/// The calls on a control: its constructor (a flying one's turn and hovering, a swimming one's
+/// turns and speeds), and vanilla's methods by the control it is.
+fn control_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let c = a(0);
+    if c.r() == 0 {
+        return None;
+    }
+    if name == "<init>" {
+        let kind = control_kind(rt, owner)?;
+        let base = match kind {
+            FLYING_MOVE | SMOOTH_MOVE => MOVE_CONTROL,
+            SMOOTH_LOOK => LOOK_CONTROL,
+            k => k,
+        };
+        init_control(rt, c, base, a(1));
+        match kind {
+            FLYING_MOVE => {
+                put_i(rt, c, "maxTurn", a(2).i());
+                put_bool(rt, c, "hoversInPlace", a(3).i() != 0);
+            }
+            SMOOTH_MOVE => {
+                put_i(rt, c, "maxTurnX", a(2).i());
+                put_i(rt, c, "maxTurnY", a(3).i());
+                put_f(rt, c, "inWaterSpeedModifier", a(4).f());
+                put_f(rt, c, "outsideWaterSpeedModifier", a(5).f());
+                put_bool(rt, c, "applyGravity", a(6).i() != 0);
+            }
+            SMOOTH_LOOK => put_i(rt, c, "maxYRotFromCenter", a(2).i()),
+            _ => {}
+        }
+        return Some(V::Void);
+    }
+    let kind = control_class(rt, c)?;
+    let wanted = |rt: &Rt, f: &'static str| V::D(dbl(rt, c, f));
+    Some(match kind {
+        MOVE_CONTROL | FLYING_MOVE | SMOOTH_MOVE => match (name, desc) {
+            ("tick", "()V") => unit(move_control_tick(rt, c)),
+            ("setWantedPosition", "(DDDD)V") => unit(set_wanted(rt, c, [a(1).d(), a(2).d(), a(3).d()], a(4).d())),
+            ("hasWanted", "()Z") => bool_v(operation_of(rt, c) == 1),
+            ("getSpeedModifier", "()D") => wanted(rt, "speedModifier"),
+            ("getWantedX", "()D") => wanted(rt, "wantedX"),
+            ("getWantedY", "()D") => wanted(rt, "wantedY"),
+            ("getWantedZ", "()D") => wanted(rt, "wantedZ"),
+            ("strafe", "(FF)V") => {
+                set_operation(rt, c, 2);
+                put_f(rt, c, "strafeForwards", a(1).f());
+                put_f(rt, c, "strafeRight", a(2).f());
+                unit(rt.put_field(c, "speedModifier", V::D(0.25)))
+            }
+            ("setWait", "()V") => unit(set_operation(rt, c, 0)),
+            ("rotlerp", "(FFF)F") => V::F(rotlerp(a(1).f(), a(2).f(), a(3).f())),
+            _ => return None,
+        },
+        LOOK_CONTROL | SMOOTH_LOOK => {
+            let mob = obj(rt, c, "mob");
+            match (name, desc) {
+                ("tick", "()V") => unit(look_control_tick(rt, c)),
+                ("setLookAt", "(DDDFF)V") => unit(set_look_at(rt, c, [a(1).d(), a(2).d(), a(3).d()], a(4).f(), a(5).f())),
+                ("setLookAt", "(DDD)V") => {
+                    let (yaw, pitch) = (head_rot_speed(rt, mob) as f32, max_head_x_rot(rt, mob) as f32);
+                    unit(set_look_at(rt, c, [a(1).d(), a(2).d(), a(3).d()], yaw, pitch))
+                }
+                ("setLookAt", "(Lnet/minecraft/world/phys/Vec3;)V") => {
+                    let at = crate::api_common::xyz(rt, a(1));
+                    let (yaw, pitch) = (head_rot_speed(rt, mob) as f32, max_head_x_rot(rt, mob) as f32);
+                    unit(set_look_at(rt, c, at, yaw, pitch))
+                }
+                ("setLookAt", "(Lnet/minecraft/world/entity/Entity;)V") => {
+                    let at = look_target(rt, a(1));
+                    let (yaw, pitch) = (head_rot_speed(rt, mob) as f32, max_head_x_rot(rt, mob) as f32);
+                    unit(set_look_at(rt, c, at, yaw, pitch))
+                }
+                ("setLookAt", "(Lnet/minecraft/world/entity/Entity;FF)V") => {
+                    let at = look_target(rt, a(1));
+                    unit(set_look_at(rt, c, at, a(2).f(), a(3).f()))
+                }
+                ("isLookingAtTarget", "()Z") => bool_v(int(rt, c, "lookAtCooldown") > 0),
+                ("getWantedX", "()D") => wanted(rt, "wantedX"),
+                ("getWantedY", "()D") => wanted(rt, "wantedY"),
+                ("getWantedZ", "()D") => wanted(rt, "wantedZ"),
+                ("resetXRotOnTick", "()Z") => V::I(1),
+                ("clampHeadRotationToBody", "()V") => unit(clamp_head(rt, mob)),
+                ("getYRotD", _) => {
+                    let y = wanted_yaw(rt, c, mob);
+                    optional_float(rt, y)
+                }
+                ("getXRotD", _) => {
+                    let x = wanted_pitch(rt, c, mob);
+                    optional_float(rt, x)
+                }
+                ("rotateTowards", "(FFF)F") => V::F(rotate_towards(a(1).f(), a(2).f(), a(3).f())),
+                _ => return None,
+            }
+        }
+        JUMP_CONTROL => match name {
+            "jump" => unit(put_bool(rt, c, "jump", true)),
+            "tick" => {
+                let mob = obj(rt, c, "mob");
+                let j = truth(rt, c, "jump");
+                if mob.r() != 0 {
+                    put_bool(rt, mob, "jumping", j);
+                }
+                unit(put_bool(rt, c, "jump", false))
+            }
+            _ => return None,
+        },
+        _ => match name {
+            "clientTick" => unit(body_tick(rt, c)),
+            _ => return None,
+        },
+    })
+}
+
+/// `WalkAnimationState`'s: how fast a limb swings (a tick ago and now, between them), how far it
+/// has swung, and its update.
+fn walk_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let w = a(0);
+    if w.r() == 0 {
+        return None;
+    }
+    Some(match (name, desc) {
+        ("<init>", "()V") => {
+            for f in ["speedOld", "speed", "position"] {
+                put_f(rt, w, f, 0.0);
+            }
+            V::Void
+        }
+        ("setSpeed", "(F)V") => unit(put_f(rt, w, "speed", a(1).f())),
+        ("update", "(FF)V") => unit(walk_update(rt, w, a(1).f(), a(2).f())),
+        ("speed", "()F") => V::F(flt(rt, w, "speed")),
+        ("speed", "(F)F") => {
+            let (old, now) = (flt(rt, w, "speedOld"), flt(rt, w, "speed"));
+            V::F(old + a(1).f() * (now - old))
+        }
+        ("position", "()F") => V::F(flt(rt, w, "position")),
+        ("position", "(F)F") => V::F(flt(rt, w, "position") - flt(rt, w, "speed") * (1.0 - a(1).f())),
+        ("isMoving", "()Z") => bool_v(flt(rt, w, "speed") > 1.0e-5),
+        _ => return None,
+    })
 }
