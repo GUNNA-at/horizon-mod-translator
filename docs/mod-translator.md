@@ -8776,6 +8776,15 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     which deleted the text between them. Test `tests/test_translator_progress.py` (filled twice, the text
     between kept; datagen-only calls leave the totals; missing methods read as Java declares them).
   - After each pack run: `record`, then `render`, then commit and push with the Part.
+- [x] 2026-11-08 The repos are public: `GUNNA-at/horizon-mod-translator` (branch `mod-translator`) and
+  `GUNNA-at/horizon-mixins` (branch `sibling-crates`), each a copy of a public MIT upstream
+  (`horizon-rust/horizon`, `horizon-rust/horizon-mixins`) with this work on top.
+  - Checked before: no secrets in the 386 commits (keys, tokens, passwords, hosts), no Mojang files (the
+    tree check flags only the translator's own Java test stubs, 1973 lines written for the tests).
+  - The commits' author is GitHub's noreply address, so no personal email is published. Rewriting the
+    author changed every hash and no tree; the log and `progress.json` name the new hashes. Both repos were
+    made afresh from the rewritten history, so no old commit stays reachable on GitHub; the earlier private
+    ones are kept, renamed `horizon-mod-translator-old` and `horizon-mixins-old`. Actions stay off.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

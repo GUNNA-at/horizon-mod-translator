@@ -5,7 +5,7 @@ primary_target: ".github/README.md"
 related_targets: [".github/README.ru.md"]
 ---
 
-Scope: the GitHub README of the private repo GUNNA-at/horizon-mod-translator (`.github/README.md`, with
+Scope: the GitHub README of the public repo GUNNA-at/horizon-mod-translator (`.github/README.md`, with
 `.github/README.ru.md` as its Russian twin). Mode: Read.
 
 Audience and job: people the owner shows the project to (what it is, does it work, the numbers) and Horizon's

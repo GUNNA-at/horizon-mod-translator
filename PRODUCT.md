@@ -38,7 +38,7 @@ against Horizon's engine. Its coverage is measured, not claimed: every call that
 - Reference sources: NeoForge 21.1.256's and Minecraft 1.21.1's bytecode (`javap`), the libraries' own
   jars, and JDK 21 oracles for java.* behaviour.
 - The work is a log of numbered Parts in `docs/mod-translator.md` (126 as of 2026-11-08), each committed
-  and pushed to the private repo `GUNNA-at/horizon-mod-translator`, branch `mod-translator`.
+  and pushed to the public repo `GUNNA-at/horizon-mod-translator`, branch `mod-translator`.
 
 ## Capabilities and Constraints
 
