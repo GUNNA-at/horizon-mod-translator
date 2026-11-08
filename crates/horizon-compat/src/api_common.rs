@@ -398,7 +398,6 @@ const TICKET_TYPE: &str = "net/minecraft/server/level/TicketType";
 const LOCAL_DATE: &str = "java/time/LocalDate";
 const BOUNDS_INTS: &str = "net/minecraft/advancements/critereon/MinMaxBounds$Ints";
 const BOUNDS_DOUBLES: &str = "net/minecraft/advancements/critereon/MinMaxBounds$Doubles";
-const STAT_TYPE: &str = "net/minecraft/stats/StatType";
 const LOOT_PARAMS: &str = "net/minecraft/world/level/storage/loot/parameters/LootContextParams";
 const LOOT_PARAM: &str = "net/minecraft/world/level/storage/loot/parameters/LootContextParam";
 const LOOT_PARAM_SET: &str = "net/minecraft/world/level/storage/loot/parameters/LootContextParamSet";
@@ -410,20 +409,7 @@ fn loot_param_builder(rt: &mut Rt, b: V) {
     rt.put_field(b, "$required", required);
     rt.put_field(b, "$optional", optional);
 }
-const STAT: &str = "net/minecraft/stats/Stat";
 const STOPWATCH: &str = "com/google/common/base/Stopwatch";
-/// `Stats`' stat types, by field, with their registry ids.
-const STAT_TYPES: [(&str, &str); 9] = [
-    ("BLOCK_MINED", "minecraft:mined"),
-    ("ITEM_CRAFTED", "minecraft:crafted"),
-    ("ITEM_USED", "minecraft:used"),
-    ("ITEM_BROKEN", "minecraft:broken"),
-    ("ITEM_PICKED_UP", "minecraft:picked_up"),
-    ("ITEM_DROPPED", "minecraft:dropped"),
-    ("ENTITY_KILLED", "minecraft:killed"),
-    ("ENTITY_KILLED_BY", "minecraft:killed_by"),
-    ("CUSTOM", "minecraft:custom"),
-];
 /// `TimeUnit`'s constants (ordinal order) in nanoseconds.
 const TIME_UNIT_NANOS: [i128; 7] = [1, 1_000, 1_000_000, 1_000_000_000, 60_000_000_000, 3_600_000_000_000, 86_400_000_000_000];
 
@@ -2023,22 +2009,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             m
         }
         ("org/slf4j/Marker", "getName") => rt.get_field(a(0), "$name"),
-        // `StatType.get(value[, formatter])`: the stat of that value, one per type and value.
-        (STAT_TYPE, "get") => {
-            let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned();
-            let value = rt.str_of(a(1)).map_or_else(|| format!("#{}", a(1).r()), str::to_owned);
-            let formatter = if desc.contains("Lnet/minecraft/stats/StatFormatter;") { a(2) } else { get_static(rt, "net/minecraft/stats/StatFormatter", "DEFAULT").unwrap_or(V::NULL) };
-            let (t, v) = (a(0), a(1));
-            rt.intern(format!("compat:stat/{id}/{value}"), move |rt| {
-                let s = rt.new_object(STAT);
-                rt.put_field(s, "type", t);
-                rt.put_field(s, "value", v);
-                rt.put_field(s, "formatter", formatter);
-                s
-            })
-        }
-        (STAT, "getType") => rt.get_field(a(0), "type"),
-        (STAT, "getValue") => rt.get_field(a(0), "value"),
         // A mod's own loot parameters and their sets (`new LootContextParamSet.Builder()
         // .required(LootContextParams.THIS_ENTITY).build()`): what each holds, by identity.
         (LOOT_PARAM, "<init>") => {
@@ -5626,24 +5596,6 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             let class: &'static str = if owner == BOUNDS_INTS { BOUNDS_INTS } else { BOUNDS_DOUBLES };
             rt.intern(format!("const/{class}.ANY"), |rt| bounds(rt, class, None, None))
         }
-        // `Stats`' stat types (`Stats.CUSTOM`), one object each with its registry id, and its
-        // custom stats' ids (`Stats.JUMP` is `minecraft:jump`).
-        "net/minecraft/stats/Stats" => match STAT_TYPES.iter().find(|(f, _)| *f == field) {
-            Some(&(_, id)) => rt.intern(format!("compat:stat-type/{id}"), |rt| {
-                let t = rt.new_object(STAT_TYPE);
-                let n = rt.string(id);
-                rt.put_field(t, "$id", n);
-                t
-            }),
-            None if field.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_') => rt.string(&format!("minecraft:{}", field.to_ascii_lowercase())),
-            None => return None,
-        },
-        "net/minecraft/stats/StatFormatter" if matches!(field, "DEFAULT" | "DIVIDE_BY_TEN" | "DISTANCE" | "TIME") => rt.intern(format!("compat:stat-formatter/{field}"), |rt| {
-            let f = rt.new_object("net/minecraft/stats/StatFormatter");
-            let n = rt.string(field);
-            rt.put_field(f, "$name", n);
-            f
-        }),
         // A loot context's parameters (`LootContextParams.THIS_ENTITY`), one per id: each of
         // 1.21.1's 12 is named by its field.
         LOOT_PARAMS if !field.is_empty() && field.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') => {

@@ -879,6 +879,26 @@ pub trait Host {
     ) -> bool {
         false
     }
+    /// The server's player `player`'s value of the statistic of type `ty` and value `key`
+    /// (`ServerStatsCounter.getValue`), both registry ids: `minecraft:custom` and
+    /// `minecraft:jump`, `minecraft:mined` and `minecraft:stone`, a mod's custom statistic. None
+    /// when the host can't reach the player.
+    fn stat_value(&mut self, _player: u128, _ty: &str, _key: &str) -> Option<i32> {
+        None
+    }
+    /// Sets that statistic of the server's player `player` to `value` (`ServerStatsCounter.setValue`):
+    /// kept and sent to their client as the game's own statistics are; the scoreboard isn't told.
+    /// False when the host can't reach the player.
+    fn set_stat(&mut self, _player: u128, _ty: &str, _key: &str, _value: i32) -> bool {
+        false
+    }
+    /// The scoreboard's part of `ServerPlayer.awardStat` and `resetStat`
+    /// (`Scoreboard.forAllObjectives(stat, player, ...)`): the player's score in each objective
+    /// whose criterion is that statistic goes up by `change`, or is reset when it is None. False
+    /// when the host can't reach the player.
+    fn score_stat(&mut self, _player: u128, _ty: &str, _key: &str, _change: Option<i32>) -> bool {
+        false
+    }
     /// Spawns an experience orb worth `value` points at `at` (`new ExperienceOrb` added with
     /// `Level.addFreshEntity`), moving by `motion` when given, else with vanilla's random motion.
     /// False when none spawned.
@@ -1819,6 +1839,11 @@ pub struct MemoryHost {
     pub granted: Vec<(u128, String, String)>,
     /// The criteria whose `player` predicate a player fails: player, advancement, criterion.
     pub player_fails: Vec<(u128, String, String)>,
+    /// The players' statistics ([`Host::stat_value`], [`Host::set_stat`]): player, type, value,
+    /// count. Only the players in `players` (or `player_id`'s) are reached.
+    pub stats: Vec<(u128, String, String, i32)>,
+    /// The scoreboard's changes asked for ([`Host::score_stat`]), in order.
+    pub stat_scores: Vec<(u128, String, String, Option<i32>)>,
 }
 
 /// A vanilla block's container in a [`MemoryHost`].
@@ -2700,6 +2725,47 @@ impl Host for MemoryHost {
             .player_fails
             .iter()
             .any(|(p, a, c)| *p == player && a == advancement && c == criterion)
+    }
+    fn stat_value(&mut self, player: u128, ty: &str, key: &str) -> Option<i32> {
+        if !self.reaches(player) {
+            return None;
+        }
+        let found = self
+            .stats
+            .iter()
+            .find(|(p, t, k, _)| *p == player && t == ty && k == key);
+        Some(found.map_or(0, |s| s.3))
+    }
+    fn set_stat(&mut self, player: u128, ty: &str, key: &str, value: i32) -> bool {
+        if !self.reaches(player) {
+            return false;
+        }
+        match self
+            .stats
+            .iter_mut()
+            .find(|(p, t, k, _)| *p == player && t == ty && k == key)
+        {
+            Some(s) => s.3 = value,
+            None => self
+                .stats
+                .push((player, ty.to_owned(), key.to_owned(), value)),
+        }
+        true
+    }
+    fn score_stat(&mut self, player: u128, ty: &str, key: &str, change: Option<i32>) -> bool {
+        if !self.reaches(player) {
+            return false;
+        }
+        self.stat_scores
+            .push((player, ty.to_owned(), key.to_owned(), change));
+        true
+    }
+}
+
+impl MemoryHost {
+    /// Whether `player` is one of this host's players: the acting one, or one it lists.
+    fn reaches(&self, player: u128) -> bool {
+        self.player_id == Some(player) || self.players.iter().any(|(p, _)| *p == player)
     }
 }
 

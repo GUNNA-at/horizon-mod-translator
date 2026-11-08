@@ -233,7 +233,11 @@ impl Game<'_> {
     /// no player's state is swapped in (`native_tick`, `native_menu_clicked`).
     /// None off a server, or when the player isn't on or can't be reached
     /// from here.
-    fn as_criteria_player<T>(&mut self, uuid: u128, f: impl FnOnce(&mut Self) -> T) -> Option<T> {
+    pub(super) fn as_criteria_player<T>(
+        &mut self,
+        uuid: u128,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> Option<T> {
         if self.remote.is_some() {
             return None;
         }

@@ -83,6 +83,20 @@ impl Stats {
     pub(super) fn custom(&mut self, key: &str, n: i32) {
         namespaced(key, |key| self.add("custom", key, n));
     }
+    /// The value of statistic `key` of type `ty`, both ids (`minecraft:custom`, a mod's own).
+    pub(super) fn value(&self, ty: &str, key: &str) -> i32 {
+        self.values
+            .get(ty)
+            .and_then(|m| m.get(key))
+            .copied()
+            .unwrap_or(0)
+    }
+    /// `ServerStatsCounter.setValue`: statistic `key` of type `ty` (ids) is `value`, sent to the
+    /// client with the next statistics it asks for; the scoreboard isn't told.
+    pub(super) fn set(&mut self, ty: &str, key: &str, value: i32) {
+        *entry(entry(&mut self.values, ty), key) = value;
+        self.mark_dirty(ty, key);
+    }
     /// `ServerStatsCounter.markAllDirty`: everything goes out on the next request.
     pub(super) fn mark_all_dirty(&mut self) {
         self.dirty = self
@@ -469,5 +483,27 @@ mod tests {
         );
         s.mark_all_dirty();
         assert_eq!(s.take_dirty().len(), 3);
+    }
+
+    /// A statistic set outright (a mod's `ServerStatsCounter.setValue`) is sent to the client as
+    /// it is, of any namespace, while the scoreboard hears nothing of it; read back by its ids.
+    #[test]
+    fn a_set_statistic_is_sent_but_not_scored() {
+        let mut s = Stats::default();
+        s.add("used", "minecraft:diamond", 4);
+        s.events.clear();
+        s.take_dirty();
+        s.set("minecraft:used", "minecraft:diamond", 9);
+        s.set("minecraft:custom", "create:crushed", 2);
+        assert_eq!(s.value("minecraft:used", "minecraft:diamond"), 9);
+        assert_eq!(s.get("used", "minecraft:diamond"), 9);
+        assert_eq!(s.value("minecraft:custom", "create:crushed"), 2);
+        assert_eq!(s.value("minecraft:custom", "create:missing"), 0);
+        assert!(s.events.is_empty());
+        let sent: Vec<(String, String, i32)> = vec![
+            ("minecraft:custom".into(), "create:crushed".into(), 2),
+            ("minecraft:used".into(), "minecraft:diamond".into(), 9),
+        ];
+        assert_eq!(s.take_dirty(), sent);
     }
 }

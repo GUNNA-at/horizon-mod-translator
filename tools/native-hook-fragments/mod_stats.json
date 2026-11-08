@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "a mod's statistics of a server's player: a statistic's value (`native_stat_value`), one set (`native_set_stat`) and the scoreboard's part of an award or reset (`native_score_stat`).",
+  "doc_summary": "`native_stat_value(uuid, type, key)` is a server's player's value of a statistic (`ServerStatsCounter.getValue`), by the ids of its type and value (`minecraft:custom` and a mod's own custom statistic, `minecraft:mined` and a block); `native_set_stat(uuid, type, key, value)` sets one (`ServerStatsCounter.setValue`: saved with the game's statistics and sent to the player's client, the scoreboard not told); `native_score_stat(uuid, type, key, change)` is the scoreboard's part of `ServerPlayer.awardStat` (the player's score in each objective of that statistic's criterion goes up by `change`) and of `resetStat` (none: reset). They reach a player as `native_award_criterion` does. A translated mod's `awardStat` and `getStats()` go through them. Bundles need \"hooks\": @API:mod_stats@.",
+  "comments": ["crates/horizon-client/src/game/native_stats.rs"]
+}

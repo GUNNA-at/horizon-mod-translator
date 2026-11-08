@@ -7565,6 +7565,52 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     spec's tree of value specs, the level comments, a correction of an empty config heard change by
     change, `Range.toString`, the builder's mistakes; TOML read and written as Night Config does;
     and Night Config's comments by level), translator 22.
+- [x] 2026-11-08 Part 116: players' statistics as a mod awards and reads them: the game's own
+  counters.
+  - New module `player_stats.rs` (after `player_advancements.rs` in the dispatch chain):
+    `Player.awardStat` (a statistic or a custom statistic's id, once or `n` times), `resetStat`,
+    `ServerPlayer.getStats()` and `LocalPlayer.getStats()`, a counter's `getValue` (of a statistic,
+    or of a type and value), `setValue` and `increment` (no further than `Integer.MAX_VALUE`, as
+    `StatsCounter.increment`); `StatType.get`, `contains`, `getRegistry` and `iterator` (its
+    statistics in the order they were made), moved here from `api_common.rs` with `Stats`' types
+    and custom statistics and `StatFormatter`'s constants; NeoForge's `StatAwardEvent`, posted with
+    each value a counter is to take (the total, not the award), as NeoForge's own
+    `StatsCounter.setValue` posts it: a listener changes the statistic or the value, or cancels it,
+    and a listener for `PlayerEvent` hears it too.
+  - A server's player's counter is the game's: the host reaches the player by UUID, as the
+    advancements do (`Host::stat_value`, `set_stat`, `score_stat`), by the ids the game keeps a
+    statistic by (the type's, `minecraft:used`, and the value's in the type's registry,
+    `minecraft:diamond`; a custom statistic's is its own id, a mod's too). An award
+    (`ServerPlayer.awardStat`) is the counter's `increment`, then the player's score goes up by the
+    amount in each objective of that statistic's criterion, even when a listener canceled the
+    value, as `ServerPlayer.awardStat` tells the scoreboard after the counter; a reset sets 0 and
+    resets those scores; a value set or incremented on the counter is saved and sent to the
+    player's client, the scoreboard not told. A mod reads the game's counts back, the game's own
+    statistics among them (blocks mined, mobs killed).
+  - Game (`native_stats.rs`, API @API:mod_stats@, fragment `mod_stats.json`):
+    `native_stat_value`, `native_set_stat` (`Stats::set`: kept, saved with the player's statistics,
+    marked to be sent, no change for the scoreboard), `native_score_stat` (a change in the
+    statistics' changes, which the scoreboard applies under the player's name as it does the
+    game's own); `as_criteria_player` is shared with the advancements.
+  - A player off a server awards nothing (`Player.awardStat` and `resetStat` are empty there), a
+    fake player neither (`FakePlayer`'s own); a counter the game can't reach (a client's, one of a
+    player not on the server) keeps its values itself, each zero until set.
+  - Not yet: the game's own awards don't post `StatAwardEvent` to the mods; a client's counter
+    doesn't take the statistics the server sends (`ClientboundAwardStatsPacket`).
+  - Measured (packcov29, the same 367 jars): methods 108121/130226 (83.0%, +114),
+    uses 339862/372747 (91.2%, +245), distinct missing API methods 9366 (from 9387); Create
+    3240/3972 (81.6%), uses 24314/25241 (96.3%). The statistics' keys missing went from 26 to 5
+    (a recipe book's three, two obfuscated names of an old mod's).
+  - Tests: compat 651 (3 new: a server's players' awards (a custom statistic by id, an item's
+    used `n` times, `Stats.JUMP`, another player's kill) land in the game's counters by its ids and
+    are scored with their amounts, the game's own count of stone mined is read back by type and
+    value, a reset is scored as one, a value set or incremented isn't, a count stops at
+    `Integer.MAX_VALUE`, a counter is one object a player; a listener for any player's event hears
+    each total, doubles what it keeps and cancels a jump, which is still scored; a client's player
+    awards nothing and its counter keeps its own, a player the game can't reach keeps theirs, a
+    type's statistics are one object a value, listed as made), horizon-client 1 new (a statistic
+    set outright is sent but not scored; not run here: it builds with the game's tests), translator
+    22.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

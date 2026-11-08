@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 114] = [
+const COMPAT: [(&str, &str); 115] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -178,6 +178,7 @@ const COMPAT: [(&str, &str); 114] = [
     ("tooltips.rs", include_str!("../../horizon-compat/src/tooltips.rs")),
     ("damage.rs", include_str!("../../horizon-compat/src/damage.rs")),
     ("player_advancements.rs", include_str!("../../horizon-compat/src/player_advancements.rs")),
+    ("player_stats.rs", include_str!("../../horizon-compat/src/player_stats.rs")),
     ("world_events.rs", include_str!("../../horizon-compat/src/world_events.rs")),
     ("datapack.rs", include_str!("../../horizon-compat/src/datapack.rs")),
     ("vanilla_entities.rs", include_str!("../../horizon-compat/src/vanilla_entities.rs")),
@@ -2690,12 +2691,13 @@ fn world_writes(c: &str) -> String {
         fn mark_player_motion(&mut self, uuid: u128) -> bool {{
             self.game.native_mark_player_motion(uuid)
         }}
-{attributes}{effects}{vitals}{level_events}{advancements}"#,
+{attributes}{effects}{vitals}{level_events}{advancements}{stats}"#,
         attributes = attribute_methods(c, "Some(&mut *self.game)"),
         effects = effect_methods(c, "Some(&mut *self.game)"),
         vitals = vital_methods(c, "Some(&mut *self.game)"),
         level_events = level_event_methods("Some(&mut *self.game)"),
         advancements = advancement_methods(c),
+        stats = STAT_METHODS,
     )
 }
 
@@ -2723,6 +2725,18 @@ fn advancement_methods(c: &str) -> String {
 "#
     )
 }
+
+/// A server host's players' statistics, the game's own counters (`native_stats.rs`).
+const STAT_METHODS: &str = r#"        fn stat_value(&mut self, player: u128, ty: &str, key: &str) -> Option<i32> {
+            self.game.native_stat_value(player, ty, key)
+        }
+        fn set_stat(&mut self, player: u128, ty: &str, key: &str, value: i32) -> bool {
+            self.game.native_set_stat(player, ty, key, value)
+        }
+        fn score_stat(&mut self, player: u128, ty: &str, key: &str, change: Option<i32>) -> bool {
+            self.game.native_score_stat(player, ty, key, change)
+        }
+"#;
 
 /// A host's living entities' attributes, through the game `game` gives (`Option<&mut Game>`):
 /// the player in place's whole map, a mob's plain values and the rest of its attributes
