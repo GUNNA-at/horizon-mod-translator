@@ -40,3 +40,25 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 DESIGN.md, and every shipping raster carrying its provenance
 
 Unresolved: the alternates (measurement report, pipeline walkthrough) stay open for a re-pick.
+
+## Finish (2026-11-08)
+
+Review: run in the thread, not by the finish-reviewer agent (agents are spawned only when the user asks;
+disclosed to the user). One batched round on GitHub's own rendering (markdown API + github-markdown-css):
+desktop light and dark, a 390 px phone, Russian dark.
+
+- Held to the contract: the first viewport is the masthead, the language switch, the one-paragraph answer,
+  the numbers line and the two doors; no badge wall, no feature grid.
+- Fixed in the round: the numbers table (share first, counts under it, so it fits a phone), the gap tables'
+  headers, the `horizon-mixins apply` line that ran past its code block, each figure's provenance comment.
+- Accepted: the dark accent `#a08cff` sits above the validator's categorical lightness band (L 0.708 against
+  0.67). It is Horizon's own accent token, the chart is an emphasis form (one accent line against a context
+  gray), and both lines carry legend entries and direct end labels. On a phone the figures' small text is
+  small; every figure's numbers are in the tables as text.
+
+Verdict: ships.
+
+Documenter: the world is Horizon's, inherited (`docs/design-system.md`, `crates/horizon-theme`), so this
+build records no DESIGN.md of its own. Its figure system lives in `tools/translator_progress.py`. No raster
+ships: every figure is an SVG drawn from `docs/translator/progress.json` and names its source and its type's
+licence in a comment.
