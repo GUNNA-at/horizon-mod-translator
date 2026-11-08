@@ -788,7 +788,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 82] = [
+const CHAIN: [Module; 83] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -842,6 +842,7 @@ const CHAIN: [Module; 82] = [
     crate::gamerules::call,
     crate::value_providers::call,
     crate::nightconfig::call,
+    crate::mod_configs::call,
     crate::rotation::call,
     crate::structures::call,
     crate::crops::call,
@@ -876,7 +877,7 @@ const CHAIN: [Module; 82] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 82] = [
+const CLAIMS: [Claims; 83] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -930,6 +931,7 @@ const CLAIMS: [Claims; 82] = [
     crate::gamerules::claims,
     crate::value_providers::claims,
     crate::nightconfig::claims,
+    crate::mod_configs::claims,
     crate::rotation::claims,
     crate::structures::claims,
     crate::crops::claims,
@@ -962,7 +964,7 @@ const CLAIMS: [Claims; 82] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 82] = [
+const MODULE_NAMES: [&str; 83] = [
     "diodes",
     "rails",
     "fake_players",
@@ -1016,6 +1018,7 @@ const MODULE_NAMES: [&str; 82] = [
     "gamerules",
     "value_providers",
     "nightconfig",
+    "mod_configs",
     "rotation",
     "structures",
     "crops",
@@ -2801,6 +2804,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::gamerules::get_static(rt, o, f))
             .or_else(|| crate::value_providers::get_static(rt, o, f))
             .or_else(|| crate::nightconfig::get_static(rt, o, f))
+            .or_else(|| crate::mod_configs::get_static(rt, o, f))
             .or_else(|| crate::codecs::get_static(rt, o, f))
             .or_else(|| crate::recipes::get_static(rt, o, f))
             .or_else(|| crate::components::get_static(rt, o, f))

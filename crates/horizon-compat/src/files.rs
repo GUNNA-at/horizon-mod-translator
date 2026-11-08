@@ -19,8 +19,10 @@ const FML_CONFIG: &str = "net/neoforged/fml/loading/FMLConfig";
 /// FML's folders by constant, in its order: (name, path in the game's folder, a folder FML makes
 /// when it starts).
 const FML_FOLDERS: [(&str, &str, bool); 4] = [("GAMEDIR", "", true), ("MODSDIR", "mods", true), ("CONFIGDIR", "config", true), ("FMLCONFIG", "config/fml.toml", false)];
-/// Where tests put the game's folder (`Rt::statics`); the game uses its working directory.
-pub const GAME_DIR: &str = "compat:game-dir";
+/// Where the runtime keeps the game's folder (`Rt::statics`): the game's runtimes set it to their
+/// working directory ([`Rt::use_game_dir`]), tests to folders of their own; none, the working
+/// directory is the game's folder still, but the mods' configs stay in memory.
+pub use crate::GAME_DIR;
 
 pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
     matches!(owner, PATH | PATHS | FILES | FILE | FILE_TIME | FML_PATHS | FML_CONFIG)
@@ -48,7 +50,7 @@ fn clean(text: &str) -> String {
     out
 }
 
-fn new_path(rt: &mut Rt, text: &str) -> V {
+pub(crate) fn new_path(rt: &mut Rt, text: &str) -> V {
     rt.alloc(PATH, Data::Str(clean(text)))
 }
 

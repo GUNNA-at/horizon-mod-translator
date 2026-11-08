@@ -89,6 +89,7 @@ pub mod ops;
 pub mod neo;
 pub mod neo_tags;
 pub mod nightconfig;
+pub mod mod_configs;
 pub mod network;
 pub mod quads;
 pub mod recipes;

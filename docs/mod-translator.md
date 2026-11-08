@@ -7488,6 +7488,83 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     names another, an unknown id falls back, vanilla's cow egg spawns cows, `byId` finds each
     egg; NeoForge's `DeferredSpawnEggItem` is a `SpawnEggItem` and an `Item` to `instanceof`),
     translator 22.
+- [x] 2026-11-08 Part 115: mods' configs as FML keeps them: TOML files with their comments, corrected
+  when wrong, saved.
+  - New module `mod_configs.rs` (before `neo.rs` in the dispatch chain), in place of the stand-in
+    that gave each config value its default: NeoForge's `ModConfigSpec` and FML's config tracking,
+    natively.
+    - The builder as NeoForge's: each `define*` overload (a boolean, a value of the default's
+      class, a validator's, a range of ints, longs, doubles or any comparable, a collection's, a
+      list with its element validator, new-element supplier and size range, an enum with its
+      converter and the constants it allows), the comments it adds (` Default: 42`, ` Range: > 0`,
+      `Allowed Values: CHEST, HEAD`; NeoForge's warning for a blank one), translation keys,
+      `worldRestart`/`gameRestart`, `push`/`pop` (a level's comment and key), `configure`, `build`;
+      what NeoForge throws for (a comment, key, range or restart type left over when a level starts
+      or the spec is built, a pop past the top, a null default or validator, a range whose min is
+      above its max).
+    - The spec: `getSpec`/`getValues` (a config of the value specs, one of the values),
+      `getLevelComment`/`getLevelTranslationKey`, `isCorrect`, `correct` (telling the listeners
+      Night Config's spec tells: each level or value added, replaced or removed, each comment that
+      isn't the spec's), `acceptConfig`, `afterReload`, `resetCaches(restartType)`, `save`,
+      `validateSpec` (a server's config can't hold a value that waits for the game to restart). Each
+      value spec's comment, translation key, range, restart type, class (`Object` for a range's, as
+      NeoForge's), `test`, `correct` (a range's nearest bound, else the default; a list keeps its
+      valid elements), default; a list's `testElement`, new-element supplier and size range.
+      `Range.of`, `test`, `correct`, `toString` (`> 0`, `< 5`, `0 ~ 10`).
+    - A value reads its loaded config as its class does (an `IntValue` an `Integer` of any number,
+      an `EnumValue` a constant by name as its converter reads it), the default where there is
+      none, cached until a reload of its restart type; read before its config loads, it throws
+      `IllegalStateException` as NeoForge's does. `set` (read at once unless the value waits for a
+      restart), `save`, `getPath`, `getSpec`, `next`, `clearCache`; a value handed on as a
+      `Supplier`, `BooleanSupplier`, `IntSupplier`... answers as itself.
+  - Loading as FML's `ConfigTracker`: the configs a mod registers load, in order, once the
+    registries are (a `STARTUP` one at once), then each `ModConfigEvent.Loading` is posted (all
+    loaded first: this runtime posts each event to every mod it carries). A config is the file
+    `config/<mod>-<type>.toml` in the game's folder: a missing one is copied from `defaultconfigs/`
+    or written from the spec's defaults; one the spec finds wrong (a value out of range or of
+    another type, a key it doesn't define, a comment not its own) is backed up
+    (`<name>-1.toml.bak`, five kept) and corrected; one that isn't TOML is backed up and made
+    again. A save writes the file whole (beside it, then renamed: the game's runtimes read the
+    same files) and posts `ModConfigEvent.Reloading`. Also `ModConfig.getLoadedConfig` and
+    `getFullPath`, `LoadedConfig`, `ModConfigs` (`getModConfigs`, `getConfigFileNames`,
+    `getConfigSet`, `getFileMap`), `ConfigTracker.INSTANCE` (`registerConfig`, `loadConfigs`,
+    `unloadConfigs`, `loadDefaultServerConfigs`, `acceptSyncedConfig`), `ModConfig$Type.extension`,
+    a config event a mod makes itself; two configs of one file throw as FML's tracker does.
+  - TOML as Night Config 3.8 reads and writes it, in Rust: comments before an entry (and after it
+    on its line) are its comment, those before a table's header the table's; dotted and quoted
+    keys, inline tables, arrays of tables, each kind of string with its escapes, integers of each
+    base (an `Integer` when it fits, else a `Long`), `inf` and `nan`, dates kept as written; written
+    with a tab per level, comments as `#` lines, values before tables, a level holding only tables
+    left out unless it has a comment, Java's doubles, the system's line ends.
+  - Night Config's comments are kept by the level holding them now (`setComment("a.b", c)` puts it
+    in `a`'s comments under `b`), as Night Config keeps them; a null comment removes one.
+  - The game's runtimes keep the mods' files in the game's folder (`Rt::use_game_dir`, called by
+    the bundle's runtime makers): its working directory, `--gameDir`. The translator's probe sets
+    none and keeps each config in memory, its defaults.
+  - Not yet: a file changed while the game runs isn't read again (FML watches the folder); a
+    server's configs load with the rest, from `config/`, not the world's `serverconfig/`;
+    NeoForge's `ConfigurationScreen`.
+  - Measured (packcov28, the same 367 jars): methods 82.9% (124 more mapped), uses 91.1% (162 more),
+    distinct missing API methods 9387 (from 9427); Create 81.5% of its methods (from 81.2%),
+    96.3% of its uses (from 96.2%). 40 of the 43 config keys missing before are mapped
+    (`ModConfigSpec.save` was missing in 14 mods, `ValueSpec.getComment` in 8, `getValues` in 7,
+    `ValueSpec.test` and `ConfigValue.getPath` in 6, `ILoadedConfig.config` in 6...); left are
+    `IConfigSpec.isCorrect` and `correct` (answered on NeoForge's spec: the probe's receiver is a
+    bare `IConfigSpec`, which Java can't have) and FML's own `NightConfigWrapper`.
+  - Tests: compat 648 (8 new, replacing the test of the defaults' stand-in: the MDK's example
+    config and a section of machines (a world-restart range with a translation key, an enum of two
+    allowed slots) make a new file with the spec's comments and defaults, read back boxed as Java
+    boxes them, and a second runtime of the game reads it as it is; a player's wrong file (a
+    boolean "maybe", a number out of range, a list with a number among its ids, an unknown key, a
+    missing one, comments not the spec's, an enum's name in lower case) is backed up and corrected,
+    and corrected again the next start with the older backup moved up; a file that isn't TOML is
+    backed up and made again, a pack's `defaultconfigs/` file copied; `set` is read at once unless
+    the value waits for a restart, `save` writes the file and posts `Reloading`, `resetCaches`
+    reads the rest; without a game folder a value read before loading throws, the defaults are in
+    memory with their comments by path, `getFullPath` throws, a save still posts `Reloading`; the
+    spec's tree of value specs, the level comments, a correction of an empty config heard change by
+    change, `Range.toString`, the builder's mistakes; TOML read and written as Night Config does;
+    and Night Config's comments by level), translator 22.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

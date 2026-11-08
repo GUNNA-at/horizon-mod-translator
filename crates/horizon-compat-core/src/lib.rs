@@ -151,6 +151,11 @@ pub struct Object {
 /// The bit marking a lambda object's id ([`Object::cid`]).
 pub const LAMBDA: u32 = 1 << 31;
 
+/// Where a runtime keeps the game's folder ([`Rt::statics`], a string): the folder the mods' files
+/// are in (their configs, in `config/`). A runtime with none keeps its mods' configs in memory (the
+/// translator's probe); tests set a folder of their own.
+pub const GAME_DIR: &str = "compat:game-dir";
+
 /// A generated dispatcher: `(rt, receiver's class id, the call's API key, args)`.
 pub type Dispatch = fn(&mut Rt, u32, &'static str, &[V]) -> V;
 
@@ -681,6 +686,17 @@ impl Rt {
         let v = make(self);
         self.interned.insert(key, v);
         v
+    }
+
+    /// Sets the game's folder ([`GAME_DIR`]) to the working directory (the game's `--gameDir`,
+    /// where its `saves/` and `options.txt` are) unless one is set already: what the game's runtimes
+    /// do as they start, so the mods' configs are files in its `config/` folder, as FML keeps them.
+    pub fn use_game_dir(&mut self) {
+        if !self.statics.contains_key(GAME_DIR) {
+            let dir = std::env::current_dir().unwrap_or_default();
+            let v = self.string(&dir.to_string_lossy());
+            self.statics.insert(GAME_DIR, v);
+        }
     }
 
     /// Listens with `class`'s static `@SubscribeEvent` methods: an `@EventBusSubscriber` class, or

@@ -1,10 +1,11 @@
 //! Night Config (`com.electronwill.nightconfig`), which NeoForge ships and some mods' config
 //! libraries use themselves (SpectreLib, inside comforts): its configs in memory, natively. A
 //! config is an object holding its values (`$map`, a `LinkedHashMap`, where a nested config is a
-//! value) and its comments (`$comments`, by dotted path); a path is a list of keys or a dotted
-//! string. A file config is a config with a path: as NeoForge's own configs here (`neo.rs`), a
-//! translated mod has no config files, so `load` reads nothing and the values stay what the mod
-//! puts in (its defaults), and `save` writes nothing.
+//! value) and its comments (`$comments`, by key: a nested value's comment is its own level's, as
+//! Night Config keeps them); a path is a list of keys or a dotted string. NeoForge's mod configs
+//! and their TOML files are `mod_configs.rs`'s; a file config a mod opens through Night Config
+//! itself is a config with a path, whose `load` reads nothing yet (its values stay what the mod
+//! puts in, its defaults) and whose `save` writes nothing.
 use crate::{Data, Rt, Table, V, jutil};
 
 const NC: &str = "com/electronwill/nightconfig/";
@@ -55,7 +56,7 @@ fn new_map(rt: &mut Rt) -> V {
 }
 
 /// A config of `class` holding `map` (none: a new one).
-fn new_config(rt: &mut Rt, class: &'static str, map: Option<V>) -> V {
+pub(crate) fn new_config(rt: &mut Rt, class: &'static str, map: Option<V>) -> V {
     let c = rt.new_object(class);
     init(rt, c, map);
     c
@@ -71,12 +72,12 @@ fn init(rt: &mut Rt, c: V, map: Option<V>) {
     rt.put_field(c, "$comments", comments);
 }
 
-fn is_config(rt: &Rt, v: V) -> bool {
+pub(crate) fn is_config(rt: &Rt, v: V) -> bool {
     v.r() != 0 && rt.get_field(v, "$map").r() != 0
 }
 
 /// `c`'s values, made if a mod's own config class never ran a constructor of Night Config's.
-fn values(rt: &mut Rt, c: V) -> V {
+pub(crate) fn values(rt: &mut Rt, c: V) -> V {
     if !is_config(rt, c) {
         init(rt, c, None);
     }
@@ -93,7 +94,7 @@ fn path(rt: &Rt, p: V) -> Vec<String> {
 
 /// The config holding `path`'s last key, and that key: nested configs made on the way when `make`,
 /// else None where a level is missing.
-fn parent(rt: &mut Rt, config: V, path: &[String], make: bool) -> Option<(V, String)> {
+pub(crate) fn parent(rt: &mut Rt, config: V, path: &[String], make: bool) -> Option<(V, String)> {
     let (last, levels) = path.split_last()?;
     let mut c = config;
     for k in levels {
@@ -160,7 +161,7 @@ fn as_i64(v: V) -> Option<i64> {
 
 /// The constant of enum `class` that `value` names (its name, or its ordinal where `method` allows),
 /// as `EnumGetMethod.get` finds it; a constant is itself.
-fn enum_of(rt: &mut Rt, value: V, class: &str, method: V) -> Option<V> {
+pub(crate) fn enum_of(rt: &mut Rt, value: V, class: &str, method: V) -> Option<V> {
     let how = if method.r() != 0 { crate::api_common::enum_name(rt, method, false) } else { V::NULL };
     let how = rt.str_of(how).unwrap_or("NAME").to_owned();
     let constants = crate::jlang::enum_constants(rt, class)?;
@@ -193,10 +194,26 @@ fn enum_class(rt: &Rt, desc: &str, args: &[V]) -> String {
     }
 }
 
-/// The comment key of a path: its keys joined by dots.
-fn comment_key(rt: &mut Rt, p: V) -> V {
-    let joined = path(rt, p).join(".");
-    rt.string(&joined)
+/// `c`'s comments, by key (made with its values if need be).
+pub(crate) fn comments(rt: &mut Rt, c: V) -> V {
+    values(rt, c);
+    match rt.get_field(c, "$comments") {
+        m if m.r() != 0 => m,
+        _ => {
+            let m = new_map(rt);
+            rt.put_field(c, "$comments", m);
+            m
+        }
+    }
+}
+
+/// Where the comment of `p` is kept: the comments of the level holding its last key (made on the
+/// way when `make`), and that key; None where a level is missing.
+fn comment_slot(rt: &mut Rt, config: V, p: V, make: bool) -> Option<(V, V)> {
+    let path = path(rt, p);
+    let (c, k) = parent(rt, config, &path, make)?;
+    let comments = comments(rt, c);
+    Some((comments, rt.string(&k)))
 }
 
 /// A format of Night Config's (`InMemoryFormat.withUniversalSupport()`, `TomlFormat.instance()`):
@@ -403,25 +420,32 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             f if f.r() != 0 => f,
             _ => format(rt, IN_MEMORY),
         },
-        "setComment" => {
-            values(rt, this);
-            let (comments, k) = (rt.get_field(this, "$comments"), comment_key(rt, a(1)));
-            jutil::table_put(rt, comments, k, a(2));
-            V::NULL
-        }
+        // The comment kept by the level holding the path's last key; a null one removed. The
+        // previous comment.
+        "setComment" => match comment_slot(rt, this, a(1), true) {
+            Some((comments, k)) if a(2).is_null() => {
+                jutil::table_remove(rt, comments, k).unwrap_or(V::NULL)
+            }
+            Some((comments, k)) => jutil::table_put(rt, comments, k, a(2)),
+            None => V::NULL,
+        },
         "getComment" | "removeComment" | "containsComment" => {
-            values(rt, this);
-            let (comments, k) = (rt.get_field(this, "$comments"), comment_key(rt, a(1)));
-            match name {
-                "getComment" => jutil::table_get(rt, comments, k).unwrap_or(V::NULL),
-                "removeComment" => jutil::table_remove(rt, comments, k).unwrap_or(V::NULL),
-                _ => V::I(jutil::table_get(rt, comments, k).is_some() as i32),
+            match (name, comment_slot(rt, this, a(1), false)) {
+                ("getComment", Some((comments, k))) => {
+                    jutil::table_get(rt, comments, k).unwrap_or(V::NULL)
+                }
+                ("removeComment", Some((comments, k))) => {
+                    jutil::table_remove(rt, comments, k).unwrap_or(V::NULL)
+                }
+                ("containsComment", Some((comments, k))) => {
+                    V::I(jutil::table_get(rt, comments, k).is_some_and(|c| !c.is_null()) as i32)
+                }
+                ("containsComment", None) => V::I(0),
+                _ => V::NULL,
             }
         }
-        "commentMap" => {
-            values(rt, this);
-            rt.get_field(this, "$comments")
-        }
+        // This level's comments, by key.
+        "commentMap" => comments(rt, this),
         "clearComments" => {
             let fresh = new_map(rt);
             rt.put_field(this, "$comments", fresh);
@@ -448,7 +472,8 @@ mod tests {
 
     /// SpectreLib's way (comforts): a config of the default map creator, values set by path lists
     /// and dotted strings into nested configs, read back with defaults for what isn't there; an enum
-    /// stored as its name read back as the constant, ignoring case as asked; comments by path.
+    /// stored as its name read back as the constant, ignoring case as asked; comments by path, each
+    /// kept by its own level.
     #[test]
     fn a_config_keeps_values_by_path_and_reads_enums_by_name() {
         let mut rt = Rt::new();
@@ -489,6 +514,12 @@ mod tests {
         let note = rt.string("Whether sleeping bags work");
         c(&mut rt, "com/electronwill/nightconfig/core/CommentedConfig.setComment.(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", &[config, dotted, note]);
         assert_eq!(c(&mut rt, "com/electronwill/nightconfig/core/CommentedConfig.getComment.(Ljava/lang/String;)Ljava/lang/String;", &[config, dotted]), note);
+        // Kept by the level holding it, under its own key, as Night Config keeps it; a null one
+        // removes it.
+        assert_eq!(c(&mut rt, "com/electronwill/nightconfig/core/CommentedConfig.getComment.(Ljava/lang/String;)Ljava/lang/String;", &[sub, enabled]), note);
+        let previous = c(&mut rt, "com/electronwill/nightconfig/core/CommentedConfig.setComment.(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", &[config, dotted, V::NULL]);
+        assert_eq!(previous, note);
+        assert_eq!(c(&mut rt, "com/electronwill/nightconfig/core/CommentedConfig.containsComment.(Ljava/lang/String;)Z", &[sub, enabled]), V::I(0));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }
