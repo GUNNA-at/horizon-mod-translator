@@ -1857,6 +1857,16 @@ pub fn gui_layer(rt: &mut Rt, host: &mut dyn Host, layer: &str, pre: bool) -> bo
     rt.with_host(host, |rt| crate::gui::draw_layers(rt, layer, pre))
 }
 
+/// `native_gui_pre` and `native_gui_post` (client): `RenderGuiEvent.Pre` before the HUD's layers
+/// draw on `host`'s GUI (`pre`), `Post` after them ([`crate::gui::render_gui`]). True when a mod
+/// canceled `Pre`: the game hides the layers.
+pub fn render_gui(rt: &mut Rt, host: &mut dyn Host, pre: bool) -> bool {
+    // A hook's outermost entry: no translated frame holds values, so garbage can go.
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| crate::gui::render_gui(rt, pre))
+}
+
 /// `native_compute_fov` (client): the world's field of view as the mods' `ViewportEvent.ComputeFov`
 /// listeners leave it; None when no mod listens. `host` only reads.
 pub fn compute_fov(rt: &mut Rt, host: &mut dyn Host, partial: f32, camera: [f64; 3], degrees: f32) -> Option<f32> {

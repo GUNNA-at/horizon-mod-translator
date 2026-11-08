@@ -43,7 +43,7 @@ const LEVEL_STAGE: &str = "net/neoforged/neoforge/client/event/RenderLevelStageE
 const FRAME_PRE: &str = "net/neoforged/neoforge/client/event/RenderFrameEvent$Pre";
 const FRAME_POST: &str = "net/neoforged/neoforge/client/event/RenderFrameEvent$Post";
 /// The window's frames' `DeltaTracker` ([`render_frame`]), one for them all.
-const FRAME_TRACKER: &str = "compat:frame-tracker";
+pub(crate) const FRAME_TRACKER: &str = "compat:frame-tracker";
 const STAGE: &str = "net/neoforged/neoforge/client/event/RenderLevelStageEvent$Stage";
 /// `RenderLevelStageEvent.Stage`'s stages, in the order a frame passes them.
 const STAGES: [&str; 11] = [

@@ -1283,37 +1283,62 @@ fn tint(rt: &Rt) -> u32 {
     rt.interned.get(TINT).map_or(u32::MAX, |v| v.i() as u32)
 }
 
-/// `innerBlit`: part `uv` of `texture` into the rectangle `x0..x1, y0..y1` under `m`. Texture
-/// coordinates past 0..1 repeat the texture (GL's wrap, as vanilla's 32 x 32 menu background
-/// tiles over a screen): such a blit is drawn a tile at a time, up to 4096 tiles.
-fn blit(rt: &mut Rt, m: &M4, texture: &str, [x0, x1, y0, y1]: [f32; 4], uv: [f32; 4]) {
+/// GL's repeat wrap, which vanilla's textures draw with: a blit into `x0..x1, y0..y1` whose
+/// texture coordinates `uv` run past 0..1 is drawn a tile at a time (vanilla's 32 x 32 menu
+/// background over a screen), each piece with its coordinates within 0..1, up to 4096 pieces.
+/// Coordinates within one tile are moved into 0..1 whichever way they run (a frame of a sprite
+/// sheet picked by a negative index, as Ponder's placement indicator picks one).
+fn wrapped([x0, x1, y0, y1]: [f32; 4], uv: [f32; 4]) -> Vec<([f32; 4], [f32; 4])> {
     let [u0, v0, u1, v1] = uv;
-    let span = |a: f32, b: f32| (b.ceil() - a.floor()).max(1.0);
-    let repeats = u1 > u0 && v1 > v0 && (u0 < 0.0 || v0 < 0.0 || u1 > 1.0 || v1 > 1.0);
-    if repeats && uv.iter().all(|c| c.is_finite()) && span(u0, u1) * span(v0, v1) <= 4096.0 {
-        // The pieces of `a..b` between whole numbers.
-        let cuts = |a: f32, b: f32| {
-            let mut out = Vec::new();
-            let mut s = a;
-            while s < b {
-                let e = (s.floor() + 1.0).min(b);
-                out.push((s, e));
-                s = e;
-            }
-            out
-        };
-        let x_at = |u: f32| x0 + (x1 - x0) * (u - u0) / (u1 - u0);
-        let y_at = |v: f32| y0 + (y1 - y0) * (v - v0) / (v1 - v0);
-        for (ua, ub) in cuts(u0, u1) {
-            let bu = ua.floor();
-            for (va, vb) in cuts(v0, v1) {
-                let bv = va.floor();
-                blit_one(rt, m, texture, [x_at(ua), x_at(ub), y_at(va), y_at(vb)], [ua - bu, va - bv, ub - bu, vb - bv]);
-            }
-        }
-        return;
+    let whole = vec![([x0, x1, y0, y1], uv)];
+    if !uv.iter().all(|c| c.is_finite()) || uv.iter().all(|c| (0.0..=1.0).contains(c)) {
+        return whole;
     }
-    blit_one(rt, m, texture, [x0, x1, y0, y1], uv);
+    // The tile both of an axis's coordinates lie in, if one holds them.
+    let tile = |a: f32, b: f32| {
+        let k = a.min(b).floor();
+        (a.max(b) <= k + 1.0).then_some(k)
+    };
+    if let (Some(ku), Some(kv)) = (tile(u0, u1), tile(v0, v1)) {
+        return vec![([x0, x1, y0, y1], [u0 - ku, v0 - kv, u1 - ku, v1 - kv])];
+    }
+    let span = |a: f32, b: f32| (b.ceil() - a.floor()).max(1.0);
+    if u1 <= u0 || v1 <= v0 || span(u0, u1) * span(v0, v1) > 4096.0 {
+        return whole;
+    }
+    // The pieces of `a..b` between whole numbers.
+    let cuts = |a: f32, b: f32| {
+        let mut out = Vec::new();
+        let mut s = a;
+        while s < b {
+            let e = (s.floor() + 1.0).min(b);
+            out.push((s, e));
+            s = e;
+        }
+        out
+    };
+    let x_at = |u: f32| x0 + (x1 - x0) * (u - u0) / (u1 - u0);
+    let y_at = |v: f32| y0 + (y1 - y0) * (v - v0) / (v1 - v0);
+    let mut pieces = Vec::new();
+    for (ua, ub) in cuts(u0, u1) {
+        let bu = ua.floor();
+        for (va, vb) in cuts(v0, v1) {
+            let bv = va.floor();
+            pieces.push((
+                [x_at(ua), x_at(ub), y_at(va), y_at(vb)],
+                [ua - bu, va - bv, ub - bu, vb - bv],
+            ));
+        }
+    }
+    pieces
+}
+
+/// `innerBlit`: part `uv` of `texture` into the rectangle `x0..x1, y0..y1` under `m`, the
+/// texture repeating past 0..1 ([`wrapped`]).
+fn blit(rt: &mut Rt, m: &M4, texture: &str, rect: [f32; 4], uv: [f32; 4]) {
+    for (piece, at) in wrapped(rect, uv) {
+        blit_one(rt, m, texture, piece, at);
+    }
 }
 
 fn blit_one(rt: &mut Rt, m: &M4, texture: &str, [x0, x1, y0, y1]: [f32; 4], uv: [f32; 4]) {
@@ -1358,13 +1383,27 @@ pub(crate) fn blit_at(rt: &mut Rt, m: &M4, texture: &str, rect: [f32; 4], uv: [f
     blit(rt, m, texture, rect, uv);
 }
 
-/// A blit into GUI rectangle `rect` (`[x0, y0, x1, y1]`, already through the pose), its colour
-/// `argb` (a vertex's) times the shader colour.
-pub(crate) fn blit_tinted(rt: &mut Rt, texture: &str, rect: [f32; 4], uv: [f32; 4], argb: u32) {
+/// A blit into GUI rectangle `[x0, y0, x1, y1]` (already through the pose), its colour `argb` (a
+/// vertex's) times the shader colour, the texture repeating past 0..1 ([`wrapped`]).
+pub(crate) fn blit_tinted(
+    rt: &mut Rt,
+    texture: &str,
+    [x0, y0, x1, y1]: [f32; 4],
+    uv: [f32; 4],
+    argb: u32,
+) {
     let shader = tint(rt);
     let times = |shift: u32| ((argb >> shift & 0xFF) * (shader >> shift & 0xFF) / 255) << shift;
     let tint = times(24) | times(16) | times(8) | times(0);
-    blit_rect(rt, texture, rect, uv, tint);
+    for ([a0, a1, b0, b1], at) in wrapped([x0, x1, y0, y1], uv) {
+        blit_rect(
+            rt,
+            texture,
+            [a0.min(a1), b0.min(b1), a0.max(a1), b0.max(b1)],
+            at,
+            tint,
+        );
+    }
 }
 
 fn texture_name(rt: &Rt, v: V) -> String {
@@ -2270,7 +2309,16 @@ fn layers_event(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 /// The mods' layers the game draws at its layer `layer` (`minecraft:hotbar`), before it (`pre`)
 /// or after it, in order: each with whether it stands in for vanilla's layer there.
+#[cfg(test)]
 fn layers_at(rt: &mut Rt, layer: &str, pre: bool) -> Vec<(V, bool)> {
+    named_layers_at(rt, layer, pre)
+        .into_iter()
+        .map(|(_, l, replaces)| (l, replaces))
+        .collect()
+}
+
+/// [`layers_at`], each with its name: a replacement's is the vanilla layer's it stands in for.
+fn named_layers_at(rt: &mut Rt, layer: &str, pre: bool) -> Vec<(String, V, bool)> {
     let mut out = Vec::new();
     let mut anchor: Option<String> = None;
     for e in layer_entries(rt) {
@@ -2279,7 +2327,7 @@ fn layers_at(rt: &mut Rt, layer: &str, pre: bool) -> Vec<(V, bool)> {
         let vanilla = VANILLA_LAYERS.contains(&id.as_str());
         if vanilla {
             if drawn.r() != 0 && rt.get_field(e, "$replaces").i() != 0 && replaceable(&id) == Some(layer) && pre {
-                out.push((drawn, true));
+                out.push((id.clone(), drawn, true));
             }
             anchor = Some(id);
             continue;
@@ -2289,10 +2337,142 @@ fn layers_at(rt: &mut Rt, layer: &str, pre: bool) -> Vec<(V, bool)> {
             None => ("minecraft:hotbar", true),
         };
         if hook == layer && before == pre {
-            out.push((drawn, false));
+            out.push((id, drawn, false));
         }
     }
     out
+}
+
+/// Vanilla's layers (`VanillaGuiLayers`) the game's layer `layer` draws, which
+/// `RenderGuiLayerEvent` is posted for around it. Some of the game's draw several
+/// (`minecraft:player_health` the health, armor, food and air rows); the camera overlays, the
+/// spectator tooltip, the demo and debug overlays and the saving indicator aren't layers the game
+/// tells of.
+fn drawn_by(layer: &str) -> Vec<&'static str> {
+    match layer {
+        "minecraft:contextual_info_bar" => vec![
+            "minecraft:jump_meter",
+            "minecraft:experience_bar",
+            "minecraft:experience_level",
+        ],
+        "minecraft:player_health" => vec![
+            "minecraft:player_health",
+            "minecraft:armor_level",
+            "minecraft:food_level",
+            "minecraft:air_level",
+        ],
+        "minecraft:camera_overlays"
+        | "minecraft:spectator_tooltip"
+        | "minecraft:demo_overlay"
+        | "minecraft:debug_overlay"
+        | "minecraft:saving_indicator" => Vec::new(),
+        l => VANILLA_LAYERS.iter().copied().filter(|v| *v == l).collect(),
+    }
+}
+
+/// The layer list's entry for vanilla's layer `id`.
+fn vanilla_entry(rt: &mut Rt, id: &str) -> Option<V> {
+    layer_entries(rt)
+        .into_iter()
+        .find(|&e| rt.str_of(rt.get_field(e, "$id")) == Some(id))
+}
+
+// ---- the HUD's events ----
+
+/// NeoForge's events around the HUD (`GuiLayerManager.render`): `RenderGuiEvent.Pre` and `Post`
+/// around all of its layers, `RenderGuiLayerEvent.Pre` and `Post` around each.
+const GUI_EVENT: &str = "net/neoforged/neoforge/client/event/RenderGuiEvent";
+const GUI_PRE: &str = "net/neoforged/neoforge/client/event/RenderGuiEvent$Pre";
+const GUI_POST: &str = "net/neoforged/neoforge/client/event/RenderGuiEvent$Post";
+const LAYER_EVENT: &str = "net/neoforged/neoforge/client/event/RenderGuiLayerEvent";
+const LAYER_PRE: &str = "net/neoforged/neoforge/client/event/RenderGuiLayerEvent$Pre";
+const LAYER_POST: &str = "net/neoforged/neoforge/client/event/RenderGuiLayerEvent$Post";
+/// What `RenderGuiLayerEvent.getLayer` gives for one of vanilla's layers: the game draws it, and
+/// drawing it again (`render`) draws nothing.
+const VANILLA_LAYER: &str = "net/minecraft/client/gui/LayeredDraw$Layer";
+
+/// The events' classes' supers, for a listener of `RenderGuiEvent` or `RenderGuiLayerEvent`
+/// itself.
+fn know_events(rt: &mut Rt) {
+    const SUPERS: [(&str, &str); 6] = [
+        (GUI_PRE, GUI_EVENT),
+        (GUI_POST, GUI_EVENT),
+        (LAYER_PRE, LAYER_EVENT),
+        (LAYER_POST, LAYER_EVENT),
+        (GUI_EVENT, "net/neoforged/bus/api/Event"),
+        (LAYER_EVENT, "net/neoforged/bus/api/Event"),
+    ];
+    for (class, sup) in SUPERS {
+        if rt.supers.get(class) != Some(&sup) {
+            rt.supers.insert(class, sup);
+        }
+    }
+}
+
+/// The frame's `DeltaTracker`: the one `RenderFrameEvent` had this frame (its real-time ticks and
+/// partial tick), else the client's, which reads the game's partial tick.
+fn delta_tracker(rt: &mut Rt) -> V {
+    if let Some(&t) = rt.interned.get(crate::camera::FRAME_TRACKER) {
+        return t;
+    }
+    rt.intern("client/net/minecraft/client/DeltaTracker".into(), |rt| {
+        rt.new_object("net/minecraft/client/DeltaTracker")
+    })
+}
+
+/// `RenderGuiEvent.Pre` (`pre`) or `Post` for the HUD drawn now, with a `GuiGraphics` on the
+/// host's GUI: true when a mod canceled `Pre`, and the game hides all of the HUD's layers.
+pub(crate) fn render_gui(rt: &mut Rt, pre: bool) -> bool {
+    let class = if pre { GUI_PRE } else { GUI_POST };
+    know_events(rt);
+    if crate::neo::hearing(rt, class).is_empty() {
+        return false;
+    }
+    frame(rt);
+    let ev = rt.new_object(class);
+    let g = graphics(rt);
+    rt.put_field(ev, "$guiGraphics", g);
+    let delta = delta_tracker(rt);
+    rt.put_field(ev, "$partialTick", delta);
+    begin_drawing(rt);
+    crate::neo::post(rt, class, ev);
+    end_drawing(rt);
+    pre && rt.get_field(ev, "$canceled").i() != 0
+}
+
+/// `RenderGuiLayerEvent.Pre` (`pre`) or `Post` for the layer named `name`, which `layer` draws (a
+/// mod's, or [`VANILLA_LAYER`] for the game's): whether a mod canceled `Pre`.
+fn layer_event(rt: &mut Rt, pre: bool, name: &str, layer: V, delta: V) -> bool {
+    let class = if pre { LAYER_PRE } else { LAYER_POST };
+    if crate::neo::hearing(rt, class).is_empty() {
+        return false;
+    }
+    let ev = rt.new_object(class);
+    let g = graphics(rt);
+    rt.put_field(ev, "$guiGraphics", g);
+    rt.put_field(ev, "$partialTick", delta);
+    let n = rt.string(name);
+    rt.put_field(ev, "$name", n);
+    rt.put_field(ev, "$layer", layer);
+    crate::neo::post(rt, class, ev);
+    pre && rt.get_field(ev, "$canceled").i() != 0
+}
+
+/// The calls on the HUD's events: what they carry, and `Pre`'s cancelling.
+fn hud_event(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let ev = arg(args, 0);
+    Some(match name {
+        "getGuiGraphics" => rt.get_field(ev, "$guiGraphics"),
+        "getPartialTick" => rt.get_field(ev, "$partialTick"),
+        "getName" => rt.get_field(ev, "$name"),
+        "getLayer" => rt.get_field(ev, "$layer"),
+        "isCanceled" => V::I(rt.get_field(ev, "$canceled").i()),
+        "setCanceled" => {
+            rt.put_field(ev, "$canceled", V::I(i32::from(arg(args, 1).i() != 0)));
+            V::Void
+        }
+        _ => return None,
+    })
 }
 
 /// A fresh `GuiGraphics` for a frame's drawing: its pose the identity.
@@ -2313,26 +2493,73 @@ pub(crate) fn frame(rt: &mut Rt) {
 }
 
 /// Draws the mods' HUD layers at the game's layer `layer`, before it (`pre`) or after it, through
-/// the host's GUI. True when one of them stands in for the layer (`replaceLayer`): the game's own
-/// drawing of it is skipped.
+/// the host's GUI, each between its `RenderGuiLayerEvent.Pre` and `Post` (a canceled `Pre` skips
+/// it), and posts those events for vanilla's layers the game's draws ([`drawn_by`]). True when
+/// the game's own drawing of the layer is skipped: one of the mods' layers stands in for it
+/// (`replaceLayer`), or a mod canceled the `Pre` of each of vanilla's layers it draws. One that
+/// draws several can't hide one of them: it draws them all, and their `Post` comes for those not
+/// canceled.
 pub fn draw_layers(rt: &mut Rt, layer: &str, pre: bool) -> bool {
-    let picked = layers_at(rt, layer, pre);
-    if picked.is_empty() {
+    know_events(rt);
+    let picked = named_layers_at(rt, layer, pre);
+    let names = drawn_by(layer);
+    let told = !names.is_empty()
+        && !crate::neo::hearing(rt, if pre { LAYER_PRE } else { LAYER_POST }).is_empty();
+    if picked.is_empty() && !told {
         return false;
     }
     frame(rt);
-    let delta = rt.intern("client/net/minecraft/client/DeltaTracker".into(), |rt| rt.new_object("net/minecraft/client/DeltaTracker"));
-    rt.interned.insert(DRAWING.into(), V::I(1));
-    let mut replaced = false;
-    for (l, replaces) in picked {
+    let delta = delta_tracker(rt);
+    begin_drawing(rt);
+    let mut skipped = false;
+    // The game's own layer drawn: vanilla's it draws are told `Post`, unless canceled.
+    if !pre && told {
+        let vanilla = rt.intern(VANILLA_LAYER.into(), |rt| rt.new_object(VANILLA_LAYER));
+        for name in &names {
+            let canceled = match vanilla_entry(rt, name) {
+                Some(e) => {
+                    let hidden = rt.get_field(e, "$hidden").i() != 0;
+                    rt.put_field(e, "$hidden", V::I(0));
+                    hidden
+                }
+                None => false,
+            };
+            if !canceled {
+                layer_event(rt, false, name, vanilla, delta);
+            }
+        }
+    }
+    for (name, l, replaces) in picked {
+        skipped |= replaces;
+        if layer_event(rt, true, &name, l, delta) {
+            continue;
+        }
         let g = graphics(rt);
         rt.call_functional(LAYER_RENDER, l, &[g, delta]);
         rt.report_thrown("gui layer");
-        replaced |= replaces;
+        layer_event(rt, false, &name, l, delta);
     }
-    rt.interned.remove(DRAWING);
-    rt.interned.remove(TINT);
-    replaced
+    // Before the game's layer, unless a mod's stands in for it: vanilla's it draws are told `Pre`.
+    if pre && told && !skipped {
+        let vanilla = rt.intern(VANILLA_LAYER.into(), |rt| rt.new_object(VANILLA_LAYER));
+        let mut hidden = 0;
+        for name in &names {
+            let canceled = layer_event(rt, true, name, vanilla, delta);
+            if let Some(e) = vanilla_entry(rt, name) {
+                rt.put_field(e, "$hidden", V::I(i32::from(canceled)));
+            }
+            hidden += usize::from(canceled);
+        }
+        if hidden == names.len() {
+            skipped = true;
+        } else if hidden > 0 {
+            crate::glue::trace_once(rt, &format!("gui-hide/{layer}"), |_| {
+                format!("client: a mod hid part of GUI layer {layer}, drawn whole")
+            });
+        }
+    }
+    end_drawing(rt);
+    skipped
 }
 
 /// `RegisterGuiLayersEvent`, posted with the client's setup.
@@ -2385,6 +2612,17 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | CHAT
             | GL_STATE
     ) || owner.starts_with(TOOLTIP_EVENT)
+        || ((owner.starts_with(GUI_EVENT) || owner.starts_with(LAYER_EVENT))
+            && matches!(
+                name,
+                "getGuiGraphics"
+                    | "getPartialTick"
+                    | "getName"
+                    | "getLayer"
+                    | "isCanceled"
+                    | "setCanceled"
+            ))
+        || (owner == VANILLA_LAYER && name == "render")
         || crate::char_sinks::claims(owner, name)
         || (owner == MINECRAFT
             && matches!(
@@ -2404,6 +2642,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     match owner {
         GRAPHICS => graphics_call(rt, name, desc, args),
         LAYERS_EVENT => layers_event(rt, name, args),
+        o if o.starts_with(GUI_EVENT) || o.starts_with(LAYER_EVENT) => hud_event(rt, name, args),
+        // One of vanilla's layers as an event gives it: the game draws it.
+        VANILLA_LAYER if rt.class_of(arg(args, 0)) == VANILLA_LAYER => Some(V::Void),
         // GL state a mod sets (`_activeTexture`, `_bindTexture`, `_depthMask`), as `RenderSystem`'s:
         // the game's renderer keeps its own. What reads GL back (`_getActiveTexture`, `_genTexture`)
         // stays unmapped.
@@ -2599,6 +2840,173 @@ mod tests {
         let d = rt.new_object("Layer");
         layers_event(&mut rt, "replaceLayer", &[V::NULL, chat, d]);
         assert_eq!(layers_at(&mut rt, "minecraft:chat", true), vec![(d, true)]);
+    }
+
+    /// A mod hearing the HUD's events (`GuiLayerManager.render`): `RenderGuiEvent.Pre` before the
+    /// layers, each layer between its `RenderGuiLayerEvent.Pre` and `Post`, `RenderGuiEvent.Post`
+    /// after them, drawing on the GUI. A canceled layer `Pre` hides the game's layer, which isn't
+    /// told `Post`; one the game draws with others (the food row with the health rows) still
+    /// draws, and the others are told `Post`. A mod's layer has its own events. A canceled
+    /// `RenderGuiEvent.Pre` hides them all. With no listener, nothing is posted.
+    #[test]
+    fn the_huds_events_come_around_it_and_its_layers() {
+        fn key(class: &str, rest: &str) -> &'static str {
+            Box::leak(format!("{class}.{rest}").into_boxed_str())
+        }
+        fn heard(rt: &mut Rt, line: String) {
+            let line = rt.string(&line);
+            let list = rt.intern("test:heard".into(), |rt| {
+                rt.alloc("java/util/ArrayList", Data::List(Vec::new()))
+            });
+            if let Some(Data::List(l)) = rt.heap.get_mut(list.r() as usize).map(|o| &mut o.data) {
+                l.push(line);
+            }
+        }
+        fn listener(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            if id == 2 {
+                heard(rt, "draw test:above_hotbar".into());
+                return Some(V::Void);
+            }
+            let ev = args[1];
+            let class = rt.class_of(ev).to_owned();
+            let g = crate::api::call(
+                rt,
+                key(
+                    &class,
+                    "getGuiGraphics.()Lnet/minecraft/client/gui/GuiGraphics;",
+                ),
+                &[ev],
+            );
+            assert_eq!(rt.class_of(g), GRAPHICS);
+            let delta = crate::api::call(
+                rt,
+                key(
+                    &class,
+                    "getPartialTick.()Lnet/minecraft/client/DeltaTracker;",
+                ),
+                &[ev],
+            );
+            assert_eq!(rt.class_of(delta), "net/minecraft/client/DeltaTracker");
+            let line = match class.as_str() {
+                GUI_PRE => {
+                    if rt.interned.contains_key("test:hide-hud") {
+                        crate::api::call(rt, key(&class, "setCanceled.(Z)V"), &[ev, V::I(1)]);
+                    }
+                    "gui pre".to_owned()
+                }
+                GUI_POST => {
+                    crate::api::call(
+                        rt,
+                        "net/minecraft/client/gui/GuiGraphics.fill.(IIIII)V",
+                        &[g, V::I(0), V::I(0), V::I(4), V::I(2), V::I(-1)],
+                    );
+                    "gui post".to_owned()
+                }
+                _ => {
+                    let name = crate::api::call(
+                        rt,
+                        key(
+                            &class,
+                            "getName.()Lnet/minecraft/resources/ResourceLocation;",
+                        ),
+                        &[ev],
+                    );
+                    let name = rt.str_of(name).unwrap_or("").to_owned();
+                    let hotbar = get_static(
+                        rt,
+                        "net/neoforged/neoforge/client/gui/VanillaGuiLayers",
+                        "HOTBAR",
+                    )
+                    .unwrap();
+                    let food = get_static(
+                        rt,
+                        "net/neoforged/neoforge/client/gui/VanillaGuiLayers",
+                        "FOOD_LEVEL",
+                    )
+                    .unwrap();
+                    let hidden = [hotbar, food]
+                        .iter()
+                        .any(|&h| rt.str_of(h) == Some(name.as_str()));
+                    if class == LAYER_PRE && hidden {
+                        crate::api::call(rt, key(&class, "setCanceled.(Z)V"), &[ev, V::I(1)]);
+                    }
+                    let side = if class == LAYER_PRE { "pre" } else { "post" };
+                    format!("layer {side} {name}")
+                }
+            };
+            heard(rt, line);
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        let mut host = MemoryHost {
+            gui: [320, 240],
+            client: true,
+            ..MemoryHost::default()
+        };
+        rt.with_host(&mut host, |rt| {
+            assert!(!render_gui(rt, true));
+            assert!(!draw_layers(rt, "minecraft:hotbar", true));
+        });
+        assert!(!rt.interned.contains_key(VANILLA_LAYER));
+        rt.lambda_call = Some(listener);
+        for class in [GUI_PRE, GUI_POST, LAYER_PRE, LAYER_POST] {
+            let l = rt.lambda_id("java/util/function/Consumer", 1, Vec::new());
+            rt.listeners.push((class.to_owned(), l));
+        }
+        let layer = rt.lambda_id("net/minecraft/client/gui/LayeredDraw$Layer", 2, Vec::new());
+        let hotbar = get_static(
+            &mut rt,
+            "net/neoforged/neoforge/client/gui/VanillaGuiLayers",
+            "HOTBAR",
+        )
+        .unwrap();
+        let id = rt.string("test:above_hotbar");
+        layers_event(&mut rt, "registerAbove", &[V::NULL, hotbar, id, layer]);
+        rt.with_host(&mut host, |rt| {
+            assert!(!render_gui(rt, true));
+            assert!(draw_layers(rt, "minecraft:hotbar", true));
+            assert!(!draw_layers(rt, "minecraft:hotbar", false));
+            assert!(!draw_layers(rt, "minecraft:player_health", true));
+            assert!(!draw_layers(rt, "minecraft:player_health", false));
+            assert!(!render_gui(rt, false));
+            rt.interned.insert("test:hide-hud".into(), V::I(1));
+            assert!(render_gui(rt, true));
+        });
+        let list = rt.interned["test:heard"];
+        let lines: Vec<String> = match &rt.heap[list.r() as usize].data {
+            Data::List(l) => l
+                .iter()
+                .map(|n| rt.str_of(*n).unwrap_or("").to_owned())
+                .collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            lines,
+            [
+                "gui pre",
+                "layer pre minecraft:hotbar",
+                "layer pre test:above_hotbar",
+                "draw test:above_hotbar",
+                "layer post test:above_hotbar",
+                "layer pre minecraft:player_health",
+                "layer pre minecraft:armor_level",
+                "layer pre minecraft:food_level",
+                "layer pre minecraft:air_level",
+                "layer post minecraft:player_health",
+                "layer post minecraft:armor_level",
+                "layer post minecraft:air_level",
+                "gui post",
+                "gui pre",
+            ]
+        );
+        assert_eq!(
+            host.drawn_gui,
+            vec![GuiDraw::Fill(
+                [[0.0, 0.0], [0.0, 2.0], [4.0, 2.0], [4.0, 0.0]],
+                0xFFFF_FFFF
+            )]
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

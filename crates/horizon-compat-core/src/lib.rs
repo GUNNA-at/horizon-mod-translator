@@ -470,6 +470,20 @@ impl Rt {
         }
     }
 
+    /// `LambdaMetafactory`'s adaptation of a lambda's result to what the interface method `key`
+    /// (`[owner.]name.desc`) returns: a primitive taken out of the box the implementation returned
+    /// (`Pair::getSecond` as a `ToDoubleFunction`), and widened (an `int` to a `double`).
+    pub fn adapt_return(&self, r: V, key: &str) -> V {
+        match key.rsplit(')').next().and_then(|d| d.chars().next()) {
+            Some(kind @ ('Z' | 'B' | 'C' | 'S' | 'I' | 'J' | 'F' | 'D')) => {
+                let mut one = [r];
+                self.adapt_args(&mut one, &kind.to_string());
+                one[0]
+            }
+            _ => r,
+        }
+    }
+
     /// Calls a functional-interface method on `target` (a lambda or a mod object).
     pub fn call_functional(&mut self, key: &'static str, target: V, args: &[V]) -> V {
         let mut all = vec![target];
@@ -486,7 +500,7 @@ impl Rt {
             && let Some(lc) = self.lambda_call
             && let Some(r) = lc(self, cid & !LAMBDA, &all)
         {
-            return r;
+            return self.adapt_return(r, key);
         }
         // A mod object implementing the interface: dispatch on its class by `name.desc`.
         let short: &'static str = key.split_once('.').map_or(key, |(_, r)| r);

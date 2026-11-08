@@ -7856,6 +7856,99 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     - Cows with AI in a one-block glass pit jumped from time to time, on the turning table and
       on a still one alike. That is their own AI, not the turn. A cow in the air isn't on the
       ground, and the table doesn't turn it, as Create's check says.
+- [x] 2026-11-08 Part 120: the HUD's events (`RenderGuiEvent`, `RenderGuiLayerEvent`). Ponder's
+  placement indicator draws at the crosshair. Two general fixes came with it: a lambda's result is
+  adapted as `LambdaMetafactory` adapts it, and GUI quads repeat their texture past 0..1.
+  - Checked against NeoForge 21.1.256 (`GuiLayerManager`, `Gui`, `GameRenderer`):
+    - `GuiLayerManager.render` posts `RenderGuiEvent.Pre` first. If a listener cancels it, no
+      layer draws and `Post` isn't posted.
+    - Otherwise each layer gets `RenderGuiLayerEvent.Pre(name, layer)`. If that isn't canceled,
+      the layer draws and `RenderGuiLayerEvent.Post` follows. `RenderGuiEvent.Post` comes after
+      the last layer.
+    - The layers F1 hides are wrapped in a condition, so their events still come with F1.
+      `GameRenderer.render` calls `Gui.render` in a world whether or not F1 hides the HUD.
+    - Both events carry the `GuiGraphics` and the frame's `DeltaTracker`. The layer events add
+      the layer's id (`getName`, a `VanillaGuiLayers` id for vanilla's) and the layer itself
+      (`getLayer`). Both `Pre`s can be canceled.
+  - Ponder 1.0.82 (in Create 6.0.10) uses the layer event:
+    - `afterRenderOverlayLayer` hears `RenderGuiLayerEvent.Post`. When `getName()` is
+      `VanillaGuiLayers.CROSSHAIR` (compared by reference), it calls
+      `PlacementClient.onRenderCrosshairOverlay`.
+    - `PlacementClient.tick` (`ClientTickEvent.Pre`) asks the placement helpers about the block
+      under the crosshair and the item in hand. Create's shaft helper (`PoleHelper`) offers the
+      end of the shaft's line nearest the point looked at
+      (`orderedByDistance`: `Comparator.comparingDouble(Pair::getSecond)`).
+    - While a helper has a target, the indicator fades in over 10 ticks at the crosshair. It is
+      the frame of a 16-frame sheet (`placement_indicator.png`, 22.5° a frame) that the target's
+      direction on screen picks (`VecHelper.projectToPlayerView`). A direction left of up gives
+      a negative frame index, and GL's repeat wrap reads its v of -0.25 as 0.75.
+  - The game's natives (`native_hooks.rs`, fragment `gui_render`):
+    - `native_gui_pre(batch, canceled)` comes before the HUD's layers each frame in a world, and
+      `native_gui_post(batch)` after them.
+    - Setting `canceled` hides every layer `native_gui_layer_pre` names, and the spyglass's
+      overlay. `post` then doesn't come.
+    - Screens, toasts and the debug screen still draw.
+  - Compat (`gui.rs`, `glue.rs`):
+    - `render_gui` posts `RenderGuiEvent.Pre` and `Post` through the two hooks. Nothing is made
+      when no mod listens.
+    - The layer hooks now post `RenderGuiLayerEvent.Pre` and `Post` for vanilla's layers too,
+      not only around the mods' own layers. Their names are the interned strings
+      `VanillaGuiLayers` answers, so a comparison by reference holds.
+    - `drawn_by` maps each of the game's layers to vanilla's layers it draws. The health hook
+      draws the health, armour, food and air rows, and the contextual bar the jump meter,
+      experience bar and level.
+    - A canceled `Pre` of each vanilla layer the game's layer draws hides it. A `Post` comes for
+      each one not canceled.
+  - Fixed on the way:
+    - A lambda's result now becomes what its interface method returns (`Rt::adapt_return`, in
+      `call_functional` and the generated `vcall_miss`). A box is unboxed where a primitive is
+      due, and a primitive is widened (an `int` where a `double` is due).
+      `Pair::getSecond` as a `ToDoubleFunction` returned the boxed `Double`, which read as 0.
+      Every pole helper then took its first direction, the shaft's west end whichever end the
+      player looked at. The same held for any method reference returning a box where a
+      primitive is due (a `Predicate`, a `ToIntFunction`).
+    - A quad built with the `Tesselator` now repeats its texture past 0..1, as `GuiGraphics.blit`
+      already did (`wrapped`). Before, Ponder's frame with v of -0.25 drew nothing.
+  - Where Horizon differs, and why:
+    - F1 hides the layers in Horizon before they are asked, so they get no events with F1.
+    - One of the game's layers that draws several rows can't hide one row. If a mod cancels the
+      `Pre` of only some of them, it draws them all (traced once).
+    - The events follow Horizon's drawing order.
+    - `camera_overlays`, `spectator_tooltip`, `demo_overlay`, `debug_overlay` and
+      `saving_indicator` get none, as Horizon draws those elsewhere.
+    - Each event gets its own `GuiGraphics`.
+  - Measured (packcov33, the same 367 jars): methods 108473/130226 (83.3%, was 108389), uses
+    340334/372747 (91.3%, was 340241), distinct missing 9279 (was 9292). Create 3256/3972 (was
+    3254), uses 24334/25241 (96.4%).
+  - Tests 664 (3 new):
+    - The HUD's events come around it and its layers: `RenderGuiEvent.Pre` and `Post` around
+      everything, each vanilla layer's `Pre` and `Post`, and a mod's layer above the hotbar
+      between its own. A canceled `Pre` of the hotbar hides it, and so does the whole HUD's.
+      Canceling only the food row's draws the health row whole and leaves its `Post` out.
+      Nothing is made when no mod listens.
+    - A sheet's frame picked by a negative index draws as GL repeats the texture (v -0.25 to
+      0.75), at the crosshair.
+    - A lambda returning a box where a primitive is due is unboxed (`comparingDouble` sorts by
+      the boxed keys), and an `int` is widened where a `double` is due.
+  - In the game (`p120scene.sh`, Create, offscreen at 1280 × 720):
+    - A shaft along x at eye height, a shaft in hand. Looking at its east half, Ponder's
+      indicator fades in at the crosshair over 10 ticks, pointing right. At its west half it
+      points left (frame 12, from v -0.25). With stone east of the shaft it points left, and
+      with stone west of it right. Each is what Ponder's bytecode gives for that target
+      (`projectToPlayerView`, the angle `-acos`, then `360 -` it left of up).
+    - Before the fixes nothing drew there. With only the wrap fixed, the arrow pointed west
+      whichever half the player looked at.
+    - With an empty hand nothing draws there. The rest of the HUD is as before: hotbar, item
+      name, hearts, food and experience bar.
+    - With goggles on, looking at a creative motor at 16 RPM, Create's `goggle_info` layer
+      draws "Generator Stats:", "Kinetic Stress Capacity:" and "262,144su at current speed", in
+      creative and in survival.
+    - Nothing threw. New unmapped calls: `BlockState.<init>`, and the `Player` fields
+      `walkDist`, `walkDistO`, `bob` and `oBob`. The fields are view bobbing in
+      `projectToPlayerView`, read as 0, so the arrow ignores the bob.
+    - Seen, not from the mods: after `item replace ... armor.chest` in survival, the HUD drew no
+      armour row. The server's `Armor` read 6.0 and the client's inventory showed the
+      chestplate. This is Horizon's own HUD and is left for a later part.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

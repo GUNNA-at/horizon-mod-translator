@@ -1575,6 +1575,65 @@ mod tests {
         assert_eq!(*uv, [0.0, 0.0, 11.0 / 32.0, 0.5]);
     }
 
+    /// A textured quad built with the `Tesselator` under matrix `m`, white, its corners
+    /// `(x, y, u, v)` in the order given, drawn with the shader texture `texture`.
+    fn tesselated_quad(rt: &mut Rt, texture: &str, m: V, corners: [(f32, f32, f32, f32); 4]) {
+        let tex = rt.string(texture);
+        crate::api::call(
+            rt,
+            "com/mojang/blaze3d/systems/RenderSystem.setShaderTexture.(ILnet/minecraft/resources/ResourceLocation;)V",
+            &[V::I(0), tex],
+        );
+        let t = crate::api::call(
+            rt,
+            "com/mojang/blaze3d/vertex/Tesselator.getInstance.()Lcom/mojang/blaze3d/vertex/Tesselator;",
+            &[],
+        );
+        let quads = crate::api::get_static(rt, "com/mojang/blaze3d/vertex/VertexFormat$Mode.QUADS");
+        let format = crate::api::get_static(
+            rt,
+            "com/mojang/blaze3d/vertex/DefaultVertexFormat.POSITION_TEX_COLOR",
+        );
+        let b = crate::api::call(
+            rt,
+            "com/mojang/blaze3d/vertex/Tesselator.begin.(Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;Lcom/mojang/blaze3d/vertex/VertexFormat;)Lcom/mojang/blaze3d/vertex/BufferBuilder;",
+            &[t, quads, format],
+        );
+        for (x, y, u, v) in corners {
+            let c = crate::api::call(
+                rt,
+                "com/mojang/blaze3d/vertex/BufferBuilder.addVertex.(Lorg/joml/Matrix4f;FFF)Lcom/mojang/blaze3d/vertex/VertexConsumer;",
+                &[b, m, V::F(x), V::F(y), V::F(0.0)],
+            );
+            let c = crate::api::call(
+                rt,
+                "com/mojang/blaze3d/vertex/VertexConsumer.setColor.(IIII)Lcom/mojang/blaze3d/vertex/VertexConsumer;",
+                &[c, V::I(255), V::I(255), V::I(255), V::I(255)],
+            );
+            crate::api::call(
+                rt,
+                "com/mojang/blaze3d/vertex/VertexConsumer.setUv.(FF)Lcom/mojang/blaze3d/vertex/VertexConsumer;",
+                &[c, V::F(u), V::F(v)],
+            );
+        }
+        let mesh = crate::api::call(
+            rt,
+            "com/mojang/blaze3d/vertex/BufferBuilder.buildOrThrow.()Lcom/mojang/blaze3d/vertex/MeshData;",
+            &[b],
+        );
+        crate::api::call(
+            rt,
+            "com/mojang/blaze3d/vertex/BufferUploader.drawWithShader.(Lcom/mojang/blaze3d/vertex/MeshData;)V",
+            &[mesh],
+        );
+    }
+
+    fn matrix(rt: &mut Rt) -> V {
+        let m = rt.new_object("org/joml/Matrix4f");
+        crate::api::call(rt, "org/joml/Matrix4f.<init>.()V", &[m]);
+        m
+    }
+
     #[test]
     fn a_quad_built_with_the_tesselator_draws_as_a_blit_of_the_shader_texture() {
         crate::install();
@@ -1582,26 +1641,61 @@ mod tests {
         let mut h = host();
         rt.with_host(&mut h, |rt| {
             crate::gui::begin_drawing(rt);
-            let tex = rt.string("create:textures/gui/value_settings.png");
-            crate::api::call(rt, "com/mojang/blaze3d/systems/RenderSystem.setShaderTexture.(ILnet/minecraft/resources/ResourceLocation;)V", &[V::I(0), tex]);
-            let t = crate::api::call(rt, "com/mojang/blaze3d/vertex/Tesselator.getInstance.()Lcom/mojang/blaze3d/vertex/Tesselator;", &[]);
-            let quads = crate::api::get_static(rt, "com/mojang/blaze3d/vertex/VertexFormat$Mode.QUADS");
-            let format = crate::api::get_static(rt, "com/mojang/blaze3d/vertex/DefaultVertexFormat.POSITION_TEX_COLOR");
-            let b = crate::api::call(rt, "com/mojang/blaze3d/vertex/Tesselator.begin.(Lcom/mojang/blaze3d/vertex/VertexFormat$Mode;Lcom/mojang/blaze3d/vertex/VertexFormat;)Lcom/mojang/blaze3d/vertex/BufferBuilder;", &[t, quads, format]);
-            let m = rt.new_object("org/joml/Matrix4f");
-            crate::api::call(rt, "org/joml/Matrix4f.<init>.()V", &[m]);
+            let m = matrix(rt);
             crate::api::call(rt, "org/joml/Matrix4f.translate.(FFF)Lorg/joml/Matrix4f;", &[m, V::F(10.0), V::F(20.0), V::F(0.0)]);
             // drawTexturedQuad's order: bottom left, bottom right, top right, top left.
-            for (x, y, u, v) in [(0.0, 8.0, 0.0, 0.25), (16.0, 8.0, 0.5, 0.25), (16.0, 0.0, 0.5, 0.0), (0.0, 0.0, 0.0, 0.0)] {
-                let c = crate::api::call(rt, "com/mojang/blaze3d/vertex/BufferBuilder.addVertex.(Lorg/joml/Matrix4f;FFF)Lcom/mojang/blaze3d/vertex/VertexConsumer;", &[b, m, V::F(x), V::F(y), V::F(0.0)]);
-                let c = crate::api::call(rt, "com/mojang/blaze3d/vertex/VertexConsumer.setColor.(IIII)Lcom/mojang/blaze3d/vertex/VertexConsumer;", &[c, V::I(255), V::I(255), V::I(255), V::I(255)]);
-                crate::api::call(rt, "com/mojang/blaze3d/vertex/VertexConsumer.setUv.(FF)Lcom/mojang/blaze3d/vertex/VertexConsumer;", &[c, V::F(u), V::F(v)]);
-            }
-            let mesh = crate::api::call(rt, "com/mojang/blaze3d/vertex/BufferBuilder.buildOrThrow.()Lcom/mojang/blaze3d/vertex/MeshData;", &[b]);
-            crate::api::call(rt, "com/mojang/blaze3d/vertex/BufferUploader.drawWithShader.(Lcom/mojang/blaze3d/vertex/MeshData;)V", &[mesh]);
+            let corners = [(0.0, 8.0, 0.0, 0.25), (16.0, 8.0, 0.5, 0.25), (16.0, 0.0, 0.5, 0.0), (0.0, 0.0, 0.0, 0.0)];
+            tesselated_quad(rt, "create:textures/gui/value_settings.png", m, corners);
             crate::gui::end_drawing(rt);
         });
         assert_eq!(h.drawn_gui, vec![GuiDraw::Blit("create:textures/gui/value_settings.png".into(), [0.0, 0.0, 0.5, 0.25], [10.0, 20.0, 26.0, 28.0], u32::MAX)]);
+    }
+
+    #[test]
+    fn a_sheets_frame_picked_by_a_negative_index_draws_as_gl_repeats_the_texture() {
+        crate::install();
+        let mut rt = Rt::new();
+        let mut h = host();
+        rt.with_host(&mut h, |rt| {
+            crate::gui::begin_drawing(rt);
+            // Ponder's placement indicator: a 2 x 2 quad scaled by 0.75 and 12 at the crosshair,
+            // the frame of a 16-frame sheet its angle picks, -90 degrees picking frame -4.
+            let m = matrix(rt);
+            crate::api::call(
+                rt,
+                "org/joml/Matrix4f.translate.(FFF)Lorg/joml/Matrix4f;",
+                &[m, V::F(213.5), V::F(120.0), V::F(50.0)],
+            );
+            crate::api::call(
+                rt,
+                "org/joml/Matrix4f.scale.(FFF)Lorg/joml/Matrix4f;",
+                &[m, V::F(9.0), V::F(9.0), V::F(1.0)],
+            );
+            let (top, bottom) = (-4.0 * 0.0625, -3.0 * 0.0625);
+            let corners = [
+                (-1.0, -1.0, 0.0, top),
+                (-1.0, 1.0, 0.0, bottom),
+                (1.0, 1.0, 1.0, bottom),
+                (1.0, -1.0, 1.0, top),
+            ];
+            tesselated_quad(
+                rt,
+                "ponder:textures/gui/placement_indicator.png",
+                m,
+                corners,
+            );
+            crate::gui::end_drawing(rt);
+        });
+        // GL's repeat wrap reads v -0.25 as 0.75: the sheet's frame 12.
+        assert_eq!(
+            h.drawn_gui,
+            vec![GuiDraw::Blit(
+                "ponder:textures/gui/placement_indicator.png".into(),
+                [0.0, 0.75, 1.0, 0.8125],
+                [204.5, 111.0, 222.5, 129.0],
+                u32::MAX
+            )]
+        );
     }
 
     #[test]

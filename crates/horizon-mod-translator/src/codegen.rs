@@ -1151,7 +1151,7 @@ impl<'a> Program<'a> {
             "        }\n",
             "    }\n",
             "    match lambda_call(rt, cid & !horizon_compat::LAMBDA, args) {\n",
-            "        Some(r) => r,\n",
+            "        Some(r) => rt.adapt_return(r, key),\n",
             "        None => api::call(rt, owner_key, args),\n",
             "    }\n",
             "}\n\n",

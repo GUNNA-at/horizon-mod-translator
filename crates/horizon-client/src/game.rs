@@ -2822,6 +2822,9 @@ struct Game<'a> {
     spawn_counts: HashMap<Dim, (i32, [i32; 8])>,
     /// PauseScreen.showPauseMenu (false after F3+Escape).
     pause_menu: bool,
+    /// A mod hid this frame's HUD (`RenderGuiEvent.Pre` canceled in `native_gui_pre`): none of
+    /// its layers draw (`gui_layer`).
+    gui_canceled: bool,
     pause_focus: Option<u8>,
     death_focus: Option<u8>,
     /// MultiPlayerGameMode.previousLocalPlayerMode (F3+N goes back to it).
@@ -8199,8 +8202,16 @@ impl Game<'_> {
         // max(Hud.leftHeight, Hud.rightHeight) after the bars: the item name and
         // the action bar sit above it.
         let mut bar_height = 39;
+        // NeoForge's `GuiLayerManager.render`: `RenderGuiEvent.Pre` before the layers, each frame
+        // in a world (F1 or not, a screen open or not). A mod that cancels it hides them all, the
+        // spyglass's camera overlay with them, and `Post` doesn't come.
+        let mut canceled = false;
+        self.native_gui_pre(&mut batch, &mut canceled);
+        self.gui_canceled = canceled;
         if show_hud {
-            self.draw_spyglass(&mut batch);
+            if !self.gui_canceled {
+                self.draw_spyglass(&mut batch);
+            }
             // Hud.extractCrosshair / extractItemHotbar / extractPlayerHealth /
             // extractVehicleHealth and the experience bar, laid out by hud_layout.
             let indicator = self.settings.attack_indicator;
@@ -8433,6 +8444,9 @@ impl Game<'_> {
         } else {
             self.draw_chat(&mut batch);
             self.draw_tab_list(&mut batch);
+        }
+        if !std::mem::take(&mut self.gui_canceled) {
+            self.native_gui_post(&mut batch);
         }
         // Screen.extractBlurredBackground blurs the world and HUD, while the
         // screen's background, widgets, toasts and debug overlay stay sharp.
@@ -18316,6 +18330,7 @@ impl<'a> Game<'a> {
             rendered_mobs: Default::default(),
             spawn_counts: HashMap::new(),
             pause_menu: true,
+            gui_canceled: false,
             pause_focus: None,
             death_focus: None,
             previous_mode: None,

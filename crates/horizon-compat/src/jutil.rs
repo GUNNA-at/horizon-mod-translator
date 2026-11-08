@@ -3211,6 +3211,53 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
+    /// Catnip orders a pole's directions with `Comparator.comparingDouble(Pair::getSecond)`: a
+    /// method reference returning `Object` (a boxed `Double`) as a `ToDoubleFunction`, which Java
+    /// unboxes. An `int` a `ToDoubleFunction` returns is widened.
+    #[test]
+    fn a_lambda_returning_a_box_where_a_primitive_is_due_is_unboxed() {
+        // Lambda 1: the distance kept with each word, boxed; lambda 2: a word's length as an int.
+        fn second(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let w = rt.str_of(args[1]).unwrap_or("").to_owned();
+            Some(match id {
+                1 => {
+                    let d = if w == "east" { 0.35 } else { 0.72 };
+                    crate::mixin::box_value(rt, V::D(d), 'D')
+                }
+                _ => V::I(w.len() as i32),
+            })
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(second);
+        let by_distance = rt.lambda_id("java/util/function/ToDoubleFunction", 1, vec![]);
+        let cmp = c(
+            &mut rt,
+            "java/util/Comparator.comparingDouble.(Ljava/util/function/ToDoubleFunction;)Ljava/util/Comparator;",
+            &[by_distance],
+        );
+        let words: Vec<V> = ["west", "east"].iter().map(|w| rt.string(w)).collect();
+        let list = new_list(&mut rt, words);
+        c(
+            &mut rt,
+            "java/util/List.sort.(Ljava/util/Comparator;)V",
+            &[list, cmp],
+        );
+        let texts: Vec<String> = elements(&rt, list)
+            .iter()
+            .map(|&v| rt.str_of(v).unwrap_or("null").to_owned())
+            .collect();
+        assert_eq!(texts, ["east", "west"]);
+        let by_length = rt.lambda_id("java/util/function/ToDoubleFunction", 2, vec![]);
+        let word = rt.string("north");
+        let r = rt.call_functional(
+            "java/util/function/ToDoubleFunction.applyAsDouble.(Ljava/lang/Object;)D",
+            by_length,
+            &[word],
+        );
+        assert_eq!(r, V::D(5.0));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// Create keeps which of a contraption's block entities to draw in a `BitSet`: set by range,
     /// walked with `nextSetBit`, trimmed with `andNot`; the hash is the JDK's.
     #[test]

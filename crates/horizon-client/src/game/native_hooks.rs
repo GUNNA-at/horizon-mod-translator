@@ -1451,6 +1451,20 @@ impl Game<'_> {
     pub(super) fn native_gui_layer_post(&mut self, layer: &str, batch: &mut HudBatch) {
         let _ = (layer, batch);
     }
+    /// Before the HUD's layers draw, each frame in a world, F1 or not and a
+    /// screen open or not (`RenderGuiEvent.Pre`): draw under all of them,
+    /// or set `canceled` to hide them all (every layer `native_gui_layer_pre`
+    /// names, and the spyglass's overlay). Screens, toasts and the debug
+    /// screen still draw. API @API:gui_render@.
+    pub(super) fn native_gui_pre(&mut self, batch: &mut HudBatch, canceled: &mut bool) {
+        let _ = (batch, canceled);
+    }
+    /// After the HUD's layers (`RenderGuiEvent.Post`): draw over all of
+    /// them. Not told in a frame whose `native_gui_pre` hid them. API
+    /// @API:gui_render@.
+    pub(super) fn native_gui_post(&mut self, batch: &mut HudBatch) {
+        let _ = batch;
+    }
     /// A player right-clicks the entity `entity` (`Entity.getId`) of type
     /// `kind` (`minecraft:cow`) with `self.hand`, holding `stack` (none in an
     /// empty hand): where `Player.interactOn` starts, before the entity's own
@@ -5528,13 +5542,17 @@ impl Game<'_> {
     }
     /// Draws one vanilla HUD layer between the mods' hooks: `native_gui_layer_pre`
     /// (which may hide it), the layer, then `native_gui_layer_post`. `None` when
-    /// a mod hid the layer.
+    /// a mod hid the layer, or the whole HUD.
     pub(super) fn gui_layer<R>(
         &mut self,
         layer: &str,
         batch: &mut HudBatch,
         draw: impl FnOnce(&mut Self, &mut HudBatch) -> R,
     ) -> Option<R> {
+        // A mod hid the whole HUD (`native_gui_pre`): no layer draws, and none is told.
+        if self.gui_canceled {
+            return None;
+        }
         let mut canceled = false;
         self.native_gui_layer_pre(layer, batch, &mut canceled);
         let drawn = (!canceled).then(|| draw(self, batch));

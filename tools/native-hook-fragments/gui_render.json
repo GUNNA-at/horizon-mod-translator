@@ -1,0 +1,23 @@
+{
+  "hooks": [
+    {
+      "name": "gui_pre",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_gui_pre",
+      "neoforge": "RenderGuiEvent.Pre",
+      "side": "client",
+      "cancellable": true
+    },
+    {
+      "name": "gui_post",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_gui_post",
+      "neoforge": "RenderGuiEvent.Post",
+      "side": "client",
+      "cancellable": false
+    }
+  ],
+  "rust_summary": "the HUD as a whole, before and after its layers (`native_gui_pre`, `native_gui_post`).",
+  "doc_summary": "`native_gui_pre(batch, canceled)` fires before the HUD's layers draw, each frame in a world (F1 or not, a screen open or not), and `native_gui_post(batch)` after them: NeoForge's `RenderGuiEvent.Pre` and `Post`. Draw in `pre` to go under every layer, in `post` to go over them all. Setting `canceled` in `pre` hides every layer `native_gui_layer_pre` names, and the spyglass's overlay; `post` then doesn't fire. Screens, toasts and the debug screen still draw. Bundles need \"hooks\": @API:gui_render@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_hooks.rs"
+  ]
+}
