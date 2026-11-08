@@ -1275,7 +1275,7 @@ thread_local! {
 }
 
 /// The collision boxes of the block at `pos`, relative to it.
-fn block_boxes(rt: &Rt, pos: [i32; 3]) -> Rc<[[f64; 6]]> {
+pub(crate) fn block_boxes(rt: &Rt, pos: [i32; 3]) -> Rc<[[f64; 6]]> {
     if let Some(b) = BOXES.with(|c| c.borrow().as_ref().and_then(|m| m.get(&pos).cloned())) {
         return b;
     }

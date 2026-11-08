@@ -12,6 +12,7 @@
 use crate::api;
 use crate::host::Nbt;
 use crate::{Rt, V};
+use std::collections::BTreeMap;
 
 const ENTITY: &str = "net/minecraft/world/entity/Entity";
 const ENTITY_TYPE: &str = "net/minecraft/world/entity/EntityType";
@@ -75,6 +76,25 @@ const LIST_COMPOUND: &str =
     "net/minecraft/nbt/ListTag.getCompound.(I)Lnet/minecraft/nbt/CompoundTag;";
 const STACK_GET: &str = "net/minecraft/world/item/ItemStack.get.(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;";
 const APPLY: &str = "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
+const ADD_FRESH: &str = "net/minecraft/world/level/Level.addFreshEntity.(Lnet/minecraft/world/entity/Entity;)Z";
+const BLOCK_POSITION: &str = "net/minecraft/world/entity/Entity.blockPosition.()Lnet/minecraft/core/BlockPos;";
+const DIFFICULTY_AT: (&str, &str) = (
+    "net/minecraft/world/level/ServerLevelAccessor.getCurrentDifficultyAt.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/DifficultyInstance;",
+    "getCurrentDifficultyAt.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/DifficultyInstance;",
+);
+const FINALIZE_SPAWN: (&str, &str) = (
+    "net/minecraft/world/entity/Mob.finalizeSpawn.(Lnet/minecraft/world/level/ServerLevelAccessor;Lnet/minecraft/world/DifficultyInstance;Lnet/minecraft/world/entity/MobSpawnType;Lnet/minecraft/world/entity/SpawnGroupData;)Lnet/minecraft/world/entity/SpawnGroupData;",
+    "finalizeSpawn.(Lnet/minecraft/world/level/ServerLevelAccessor;Lnet/minecraft/world/DifficultyInstance;Lnet/minecraft/world/entity/MobSpawnType;Lnet/minecraft/world/entity/SpawnGroupData;)Lnet/minecraft/world/entity/SpawnGroupData;",
+);
+const SET_POS: (&str, &str) = ("net/minecraft/world/entity/Entity.setPos.(DDD)V", "setPos.(DDD)V");
+const MOVE_TO: (&str, &str) = ("net/minecraft/world/entity/Entity.moveTo.(DDDFF)V", "moveTo.(DDDFF)V");
+const PLAY_AMBIENT: (&str, &str) = ("net/minecraft/world/entity/Mob.playAmbientSound.()V", "playAmbientSound.()V");
+const CTX_LEVEL: &str = "net/minecraft/world/item/context/UseOnContext.getLevel.()Lnet/minecraft/world/level/Level;";
+const CTX_STACK: &str = "net/minecraft/world/item/context/UseOnContext.getItemInHand.()Lnet/minecraft/world/item/ItemStack;";
+const CTX_POS: &str = "net/minecraft/world/item/context/UseOnContext.getClickedPos.()Lnet/minecraft/core/BlockPos;";
+const CTX_FACE: &str = "net/minecraft/world/item/context/UseOnContext.getClickedFace.()Lnet/minecraft/core/Direction;";
+const FACE_INDEX: &str = "net/minecraft/core/Direction.get3DDataValue.()I";
+const SHRINK: &str = "net/minecraft/world/item/ItemStack.shrink.(I)V";
 const SUPPLIER_GET: &str = "java/util/function/Supplier.get.()Ljava/lang/Object;";
 
 /// Vanilla's types that aren't saved (`EntityType.Builder.noSave`), and those of them a command
@@ -164,7 +184,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if desc
                 == "(Lnet/minecraft/nbt/CompoundTag;Lnet/minecraft/world/level/Level;Ljava/util/function/Function;)Lnet/minecraft/world/entity/Entity;" =>
         {
-            load_recursive(rt, a(0), a(1), a(2))
+            load_recursive(rt, a(0), a(1), Some(a(2)))
         }
         (
             ENTITY_TYPE,
@@ -346,9 +366,9 @@ fn create(rt: &mut Rt, tag: V, level: V) -> V {
 
 /// `EntityType.loadEntityRecursive(tag, level, function)`: the entity the tag makes (none when
 /// making it threw a `RuntimeException`, which vanilla logs and drops) as the function gives it
-/// back, then each of its passengers (`Passengers`) the same way, riding it
+/// back (as made, without one), then each of its passengers (`Passengers`) the same way, riding it
 /// (`startRiding(vehicle, true)`).
-fn load_recursive(rt: &mut Rt, tag: V, level: V, function: V) -> V {
+fn load_recursive(rt: &mut Rt, tag: V, level: V, function: Option<V>) -> V {
     let e = create(rt, tag, level);
     if let Some(ex) = rt.thrown {
         if rt.instance_of(ex, "java/lang/RuntimeException") {
@@ -356,18 +376,22 @@ fn load_recursive(rt: &mut Rt, tag: V, level: V, function: V) -> V {
         }
         return V::NULL;
     }
-    // `Optional.map` asks for its function first.
-    if function.r() == 0 {
-        rt.throw_new(NPE);
-        return V::NULL;
-    }
-    if e.r() == 0 {
-        return V::NULL;
-    }
-    let e = rt.call_functional(APPLY, function, &[e]);
-    if e.r() == 0 || matches!(e, V::Void) || rt.thrown.is_some() {
-        return V::NULL;
-    }
+    let e = match function {
+        // `Optional.map` asks for its function first.
+        Some(function) if function.r() == 0 => {
+            rt.throw_new(NPE);
+            return V::NULL;
+        }
+        _ if e.r() == 0 => return V::NULL,
+        Some(function) => {
+            let e = rt.call_functional(APPLY, function, &[e]);
+            if e.r() == 0 || matches!(e, V::Void) || rt.thrown.is_some() {
+                return V::NULL;
+            }
+            e
+        }
+        None => e,
+    };
     let k = rt.string("Passengers");
     if api::call(rt, CONTAINS, &[tag, k, V::I(9)]).i() != 0 {
         let list = api::call(rt, GET_LIST, &[tag, k, V::I(10)]);
@@ -387,6 +411,189 @@ fn load_recursive(rt: &mut Rt, tag: V, level: V, function: V) -> V {
         }
     }
     e
+}
+
+// ---- the game's world: a mod's entities in its commands, its chunks and a spawn egg's click ----
+
+/// The entity types the mods registered (none of vanilla's), sorted, each with whether `/summon`
+/// makes it (`EntityType.canSummon`: one not built `noSummon`).
+pub fn mod_types(rt: &Rt) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = rt
+        .registered
+        .iter()
+        .filter(|((registry, id), _)| registry == "entity_type" && !crate::vanilla_entities::is_vanilla_type(id))
+        .map(|((_, id), &ty)| (id.clone(), rt.get_field(ty, "$noSummon").i() == 0))
+        .collect();
+    out.sort();
+    out
+}
+
+/// An entity of a mod's type from its compound (`native_load_entity`: `/summon`, a chunk's saved
+/// entities), made in the level the hook runs in with its passengers riding it
+/// (`EntityType.loadEntityRecursive`), a mob finalized as `/summon` without NBT does it
+/// (`finalizeSpawn` with `MobSpawnType.COMMAND`), then joining the level with them
+/// (`tryAddFreshEntityWithPassengers`; a chunk's `loadedFromDisk`). None for a compound naming no
+/// mod's type; false when it didn't join: it made none, or an entity of its UUID is in the level.
+pub fn load_into_level(rt: &mut Rt, tag: &BTreeMap<String, Nbt>, finalize: bool, from_disk: bool) -> Option<bool> {
+    let id = match tag.get("id") {
+        Some(Nbt::String(id)) => id.clone(),
+        _ => return None,
+    };
+    if crate::vanilla_entities::is_vanilla_type(&id) || !rt.registered.contains_key(&("entity_type".to_owned(), id)) {
+        return None;
+    }
+    let level = crate::glue::level(rt);
+    let t = crate::nbt::to_runtime(rt, tag);
+    let e = load_recursive(rt, t, level, None);
+    if rt.thrown.is_some() {
+        rt.report_thrown("EntityType.loadEntityRecursive");
+        return Some(false);
+    }
+    if e.r() == 0 {
+        return Some(false);
+    }
+    if finalize && crate::mobs::is_mob(rt, e) {
+        finalize_spawn(rt, e, level, "net/minecraft/world/entity/MobSpawnType.COMMAND");
+    }
+    let tree = crate::mod_entities::self_and_passengers(rt, e);
+    if tree.iter().any(|&x| crate::mod_entities::is_mod_entity(rt, x) && crate::mod_entities::uuid_taken(rt, x)) {
+        return Some(false);
+    }
+    Some(add_tree(rt, level, &tree, from_disk))
+}
+
+/// `addFreshEntityWithPassengers`: each of `tree` joins the level, the vehicle first (a mod's entity
+/// its list, one of vanilla's the game). Whether the first joined.
+fn add_tree(rt: &mut Rt, level: V, tree: &[V], from_disk: bool) -> bool {
+    let mut joined = false;
+    for (i, &x) in tree.iter().enumerate() {
+        let ok = if crate::mod_entities::is_mod_entity(rt, x) {
+            crate::mod_entities::join(rt, x, from_disk)
+        } else {
+            api::call(rt, ADD_FRESH, &[level, x]).i() != 0
+        };
+        rt.report_thrown("addFreshEntity");
+        joined |= i == 0 && ok;
+    }
+    joined
+}
+
+/// NeoForge's `EventHooks.finalizeMobSpawn` for mob `e` in `level`: its `finalizeSpawn` (its own,
+/// else its vanilla class's) with the difficulty where it stands, by the `MobSpawnType` constant named.
+fn finalize_spawn(rt: &mut Rt, e: V, level: V, spawn_type: &'static str) {
+    let kind = api::get_static(rt, spawn_type);
+    finalize_mob(rt, e, level, kind);
+}
+
+/// [`finalize_spawn`] by a `MobSpawnType` value.
+pub(crate) fn finalize_mob(rt: &mut Rt, e: V, level: V, kind: V) {
+    let at = api::call(rt, BLOCK_POSITION, &[e]);
+    let difficulty = api::virtual_call(rt, DIFFICULTY_AT, &[level, at]);
+    rt.thrown = None;
+    api::virtual_call(rt, FINALIZE_SPAWN, &[e, level, difficulty, kind, V::NULL]);
+    rt.report_thrown("finalizeSpawn");
+}
+
+/// The mods' entities in `chunks` of the level the hook runs in, by chunk, as the chunks' entity
+/// files hold them (`native_save_entities`: `Entity.save`, so none for a passenger, which its
+/// vehicle holds, nor of a type that isn't saved). With `remove` the chunks unload: the entities
+/// leave the level ([`crate::mod_entities::unload`]).
+pub fn save_chunks(rt: &mut Rt, chunks: &[(i32, i32)], remove: bool) -> Vec<((i32, i32), BTreeMap<String, Nbt>)> {
+    let dimension = rt.host().map(|h| h.dimension()).unwrap_or_else(|| "minecraft:overworld".into());
+    let mut out = Vec::new();
+    for e in crate::mod_entities::live(rt) {
+        if rt.get_field(e, "removalReason").r() != 0
+            || rt.str_of(rt.get_field(e, "$dimension")).is_some_and(|d| d != dimension)
+        {
+            continue;
+        }
+        let at = (rt.get_field(e, "$x").d().floor() as i32 >> 4, rt.get_field(e, "$z").d().floor() as i32 >> 4);
+        if !chunks.contains(&at) {
+            continue;
+        }
+        let tag = crate::tags::new_compound(rt);
+        if save(rt, e, tag, false) {
+            out.push((at, crate::nbt::from_runtime(rt, tag)));
+        }
+        rt.report_thrown("Entity.save");
+        if remove {
+            crate::mod_entities::unload(rt, e);
+        }
+    }
+    out
+}
+
+/// `SpawnEggItem.useOn(context)` on a server, for a mod's egg that has none of its own: its type
+/// (`getType(stack)`) spawned on the block clicked, or beside it on the face clicked when that
+/// block has a collision shape (`EntityType.spawn` with `MobSpawnType.SPAWN_EGG`), and the stack
+/// one smaller once it did. A spawner clicked isn't set to the type: the game's spawners spawn
+/// only its own. True: the click is taken (`CONSUME`).
+pub(crate) fn egg_use_on(rt: &mut Rt, egg: V, ctx: V) -> bool {
+    let level = api::call(rt, CTX_LEVEL, &[ctx]);
+    if level.r() == 0 || rt.get_field(level, "isClientSide").i() != 0 {
+        return true;
+    }
+    let stack = api::call(rt, CTX_STACK, &[ctx]);
+    let pos = api::call(rt, CTX_POS, &[ctx]);
+    let face = api::call(rt, CTX_FACE, &[ctx]);
+    let clicked = api::pos_of(rt, pos);
+    let face_index = api::call(rt, FACE_INDEX, &[face]).i();
+    let empty = crate::particle_engine::block_boxes(rt, clicked).is_empty();
+    let at = if empty {
+        clicked
+    } else {
+        let s = [[0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0]][face_index.clamp(0, 5) as usize];
+        [clicked[0] + s[0], clicked[1] + s[1], clicked[2] + s[2]]
+    };
+    let ty = api::virtual_call(rt, EGG_TYPE, &[egg, stack]);
+    if ty.r() == 0 || rt.thrown.is_some() {
+        rt.report_thrown("SpawnEggItem.getType");
+        return true;
+    }
+    let higher = at != clicked && face_index == 1;
+    if spawn_from_egg(rt, ty, level, at, higher) {
+        api::call(rt, SHRINK, &[stack, V::I(1)]);
+    }
+    rt.report_thrown("SpawnEggItem.useOn");
+    true
+}
+
+/// `EntityType.spawn(level, stack, player, pos, SPAWN_EGG, true, higher)`: the type's new entity
+/// over the middle of block `at`, let down onto what it stands on there (`getYOffset`: from the
+/// block below too when `higher`), facing a random way; a mob's head and body that way too,
+/// finalized and making its ambient sound; then it joins with its passengers. Whether it did.
+fn spawn_from_egg(rt: &mut Rt, ty: V, level: V, at: [i32; 3], higher: bool) -> bool {
+    let e = api::call(rt, CREATE_IN, &[ty, level]);
+    if e.r() == 0 || rt.thrown.is_some() {
+        rt.report_thrown("EntityType.create");
+        return false;
+    }
+    let (x, z) = (f64::from(at[0]) + 0.5, f64::from(at[2]) + 0.5);
+    let floor = f64::from(at[1]);
+    api::virtual_call(rt, SET_POS, &[e, V::D(x), V::D(floor + 1.0), V::D(z)]);
+    let size = crate::mod_entities::own_size(rt, e);
+    let (half, height) = (f64::from(size[0]) / 2.0, f64::from(size[1]));
+    let entity_box = [x - half, floor + 1.0, z - half, x + half, floor + 1.0 + height, z + half];
+    let cube = [f64::from(at[0]), floor - if higher { 1.0 } else { 0.0 }, f64::from(at[2]), f64::from(at[0]) + 1.0, floor + 1.0, f64::from(at[2]) + 1.0];
+    let shapes: Vec<[f64; 6]> = crate::particle_engine::shapes_in(rt, cube)
+        .into_iter()
+        .filter(|s| s[0] < cube[3] && s[3] > cube[0] && s[1] < cube[4] && s[4] > cube[1] && s[2] < cube[5] && s[5] > cube[2])
+        .collect();
+    let fall = crate::particle_engine::collide_with(entity_box, [0.0, if higher { -2.0 } else { -1.0 }, 0.0], &shapes)[1];
+    let yaw = crate::made_entities::random_yaw(rt);
+    api::virtual_call(rt, MOVE_TO, &[e, V::D(x), V::D(floor + 1.0 + fall), V::D(z), V::F(yaw), V::F(0.0)]);
+    if crate::mobs::is_mob(rt, e) {
+        rt.put_field(e, "yHeadRot", V::F(yaw));
+        rt.put_field(e, "yBodyRot", V::F(yaw));
+        finalize_spawn(rt, e, level, "net/minecraft/world/entity/MobSpawnType.SPAWN_EGG");
+        api::virtual_call(rt, PLAY_AMBIENT, &[e]);
+        rt.report_thrown("playAmbientSound");
+    }
+    let tree = crate::mod_entities::self_and_passengers(rt, e);
+    if crate::mod_entities::is_mod_entity(rt, e) && crate::mod_entities::uuid_taken(rt, e) {
+        return false;
+    }
+    add_tree(rt, level, &tree, false)
 }
 
 /// A spawn egg's calls: the type it spawns (`getType`: the one its stack's entity data names by
@@ -976,6 +1183,105 @@ mod tests {
         assert_eq!(api::call(&mut rt, by_id, &[cow]), vanilla);
         let player = api::get_static(&mut rt, "net/minecraft/world/entity/EntityType.PLAYER");
         assert_eq!(api::call(&mut rt, by_id, &[player]), V::NULL);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A cart's compound as a chunk's entity file holds it.
+    fn cart_nbt(laps: i32) -> BTreeMap<String, Nbt> {
+        BTreeMap::from([
+            ("id".to_owned(), Nbt::String("test:cart".into())),
+            ("Pos".to_owned(), Nbt::List(vec![Nbt::Double(1.5), Nbt::Double(64.0), Nbt::Double(-3.25)])),
+            ("UUID".to_owned(), Nbt::IntArray(vec![1, 2, 3, 4])),
+            ("Laps".to_owned(), Nbt::Int(laps)),
+        ])
+    }
+
+    /// The game hands a mod's entity's compound over (`/summon`, a chunk loading): the entity joins
+    /// the level with what it saved; a second of its UUID doesn't, and a compound of vanilla's type
+    /// or of no registered type isn't a mod's. It saves with its chunk alone; as its chunk unloads
+    /// it saves once more and leaves, so it isn't saved again and its UUID is free for the chunk's
+    /// next load.
+    #[test]
+    fn a_mods_entity_comes_in_from_its_compound_and_goes_with_its_chunk() {
+        let (mut rt, _) = runtime();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            assert_eq!(mod_types(rt), vec![("test:cart".to_owned(), true)]);
+            assert_eq!(load_into_level(rt, &cart_nbt(7), false, false), Some(true));
+            let live = crate::mod_entities::live(rt);
+            assert_eq!(live.len(), 1);
+            assert_eq!(rt.get_field(live[0], "laps").i(), 7);
+            assert_eq!(api::call(rt, GET_X, &[live[0]]).d(), 1.5);
+            assert_eq!(load_into_level(rt, &cart_nbt(8), false, true), Some(false), "its UUID is taken");
+            for id in ["minecraft:pig", "test:none"] {
+                let other = BTreeMap::from([("id".to_owned(), Nbt::String(id.into()))]);
+                assert_eq!(load_into_level(rt, &other, false, false), None, "{id}");
+            }
+            assert_eq!(crate::mod_entities::live(rt).len(), 1);
+
+            assert!(save_chunks(rt, &[(5, 5), (0, 0)], false).is_empty());
+            let saved = save_chunks(rt, &[(0, -1)], false);
+            assert_eq!(saved.len(), 1);
+            let (at, nbt) = &saved[0];
+            assert_eq!(*at, (0, -1));
+            assert_eq!(nbt.get("id"), Some(&Nbt::String("test:cart".into())));
+            assert_eq!(nbt.get("Laps"), Some(&Nbt::Int(7)));
+            assert_eq!(nbt.get("UUID"), Some(&Nbt::IntArray(vec![1, 2, 3, 4])));
+
+            let unloaded = save_chunks(rt, &[(0, -1)], true);
+            assert_eq!(unloaded.len(), 1);
+            let reason = rt.get_field(live[0], "removalReason");
+            assert_eq!(reason_name(rt, reason), "UNLOADED_TO_CHUNK");
+            assert!(save_chunks(rt, &[(0, -1)], false).is_empty(), "saved once, as it left");
+            assert_eq!(load_into_level(rt, &unloaded[0].1, false, true), Some(true), "back with the chunk");
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's spawn egg with no `useOn` of its own, used on the top of a stone: its type stands on
+    /// the stone, at the block's middle, and the stack is one egg smaller; on the air above the
+    /// stone (a block with no collision shape), the egg's type goes in that very block.
+    #[test]
+    fn a_mods_spawn_egg_spawns_its_type_on_the_block_clicked() {
+        let (mut rt, _) = runtime();
+        let egg = rt.new_object(DEFERRED_SPAWN_EGG);
+        let supplier = rt.new_object("test/CartSupplier");
+        let props = rt.new_object("net/minecraft/world/item/Item$Properties");
+        api::call(
+            &mut rt,
+            "net/neoforged/neoforge/common/DeferredSpawnEggItem.<init>.(Ljava/util/function/Supplier;IILnet/minecraft/world/item/Item$Properties;)V",
+            &[egg, supplier, V::I(0), V::I(0), props],
+        );
+        rt.registered.insert(("item".into(), "test:cart_spawn_egg".into()), egg);
+        let mut host = MemoryHost::default();
+        host.blocks.insert([0, 0, 0], "minecraft:stone".into());
+        host.held = Some(("test:cart_spawn_egg".into(), 3));
+        let click = |hit_pos: [i32; 3]| crate::glue::Placement {
+            pos: [hit_pos[0], hit_pos[1] + 1, hit_pos[2]],
+            hit_pos,
+            face: 1,
+            hit: [f64::from(hit_pos[0]) + 0.5, f64::from(hit_pos[1]) + 1.0, f64::from(hit_pos[2]) + 0.5],
+            inside: false,
+            yaw: 0.0,
+            pitch: 0.0,
+            item: "test:cart_spawn_egg".into(),
+            hand: crate::hand::MAIN,
+            replace_clicked: false,
+        };
+        assert!(crate::glue::use_item_on(&mut rt, &mut host, &click([0, 0, 0])));
+        let live = crate::mod_entities::live(&rt);
+        assert_eq!(live.len(), 1);
+        let place = |rt: &mut Rt, e: V| ["getX", "getY", "getZ"].map(|n| {
+            let key = rt.static_key(&format!("net/minecraft/world/entity/Entity.{n}.()D"));
+            api::call(rt, key, &[e]).d()
+        });
+        assert_eq!(place(&mut rt, live[0]), [0.5, 1.0, 0.5]);
+        assert_eq!(host.held, Some(("test:cart_spawn_egg".to_owned(), 2)));
+
+        assert!(crate::glue::use_item_on(&mut rt, &mut host, &click([3, 4, 3])));
+        let live = crate::mod_entities::live(&rt);
+        assert_eq!(live.len(), 2);
+        assert_eq!(place(&mut rt, live[1]), [3.5, 4.0, 3.5], "in the air it was clicked on");
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

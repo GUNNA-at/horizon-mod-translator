@@ -94,10 +94,11 @@ fn begin(rt: &mut Rt, e: V, kind: &str, level: V) {
 
 /// `EntityType.spawn(level, [consumer,] pos, spawnType, ...)` and the `create` of the same
 /// arguments: the type's new entity (`create(level)`), at the middle of block `pos`'s floor facing
-/// a random way, finalized as the game adds it when it is a mob, handed to `consumer`, then added
-/// with its passengers when `add`. Null when the type makes none. The offset above the block a
-/// spawn egg asks for, and the stack's own name and data, aren't applied.
-pub(crate) fn spawn(rt: &mut Rt, ty: V, level: V, pos: V, consumer: V, add: bool) -> V {
+/// a random way, finalized when it is a mob (one of vanilla's as the game adds it, a mod's by its
+/// `finalizeSpawn` with `kind`, its head and body turned the way it faces), handed to `consumer`,
+/// then added with its passengers when `add`. Null when the type makes none. The offset above the
+/// block a spawn egg asks for, and the stack's own name and data, aren't applied.
+pub(crate) fn spawn(rt: &mut Rt, ty: V, level: V, pos: V, consumer: V, kind: V, add: bool) -> V {
     let e = api::call(rt, CREATE, &[ty, level]);
     if e.r() == 0 {
         return V::NULL;
@@ -108,6 +109,10 @@ pub(crate) fn spawn(rt: &mut Rt, ty: V, level: V, pos: V, consumer: V, add: bool
     api::virtual_call(rt, MOVE_TO, &[e, V::D(f64::from(p[0]) + 0.5), V::D(f64::from(p[1])), V::D(f64::from(p[2]) + 0.5), V::F(yaw), V::F(0.0)]);
     if is_made(rt, e) && is_a(rt.class_of(e), MOB) {
         rt.put_field(e, "$finalize", V::I(1));
+    } else if crate::mobs::is_mod_mob(rt, e) {
+        rt.put_field(e, "yHeadRot", V::F(yaw));
+        rt.put_field(e, "yBodyRot", V::F(yaw));
+        crate::entity_saves::finalize_mob(rt, e, level, kind);
     }
     if consumer.r() != 0 {
         rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", consumer, &[e]);
@@ -474,6 +479,11 @@ fn vec_of(rt: &Rt, v: V) -> [f64; 3] {
 }
 
 /// A double in [0, 1) from the runtime's random (`RandomSource.nextDouble`).
+/// `Mth.wrapDegrees(level.random.nextFloat() * 360.0F)`: the way a spawned entity faces.
+pub(crate) fn random_yaw(rt: &mut Rt) -> f32 {
+    wrap_degrees(unit(rt) as f32 * 360.0)
+}
+
 fn unit(rt: &mut Rt) -> f64 {
     (crate::api_common::next_random(rt) >> 11) as f64 / (1u64 << 53) as f64
 }

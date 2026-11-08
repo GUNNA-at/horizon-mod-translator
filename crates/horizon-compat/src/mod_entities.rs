@@ -75,6 +75,66 @@ fn live_list(rt: &mut Rt) -> V {
     rt.intern(LIVE.into(), |rt| jutil::new_list(rt, Vec::new()))
 }
 
+/// A mod's entity joins the level's list (`PersistentEntitySectionManager.addEntity`): NeoForge's
+/// `EntityJoinLevelEvent` first (`from_disk` for one its chunk loaded), whose listener may keep it
+/// out. Whether it is in the list.
+pub(crate) fn join(rt: &mut Rt, e: V, from_disk: bool) -> bool {
+    let l = live_list(rt);
+    if jutil::elements(rt, l).contains(&e) {
+        return true;
+    }
+    if crate::world_events::entity_joins(rt, e, from_disk) {
+        return false;
+    }
+    let mut items = jutil::elements(rt, l);
+    items.push(e);
+    set_live(rt, items);
+    true
+}
+
+/// `e` and its passengers, theirs after each (`Entity.getSelfAndPassengers`).
+pub(crate) fn self_and_passengers(rt: &Rt, e: V) -> Vec<V> {
+    let mut out = vec![e];
+    let mut i = 0;
+    while i < out.len() {
+        let next = crate::riding::passengers(rt, out[i]);
+        out.extend(next.into_iter().filter(|p| p.r() != 0));
+        i += 1;
+    }
+    out
+}
+
+/// Whether another entity of `e`'s UUID is in the level's list and not removed: a second of it
+/// doesn't join (`tryAddFreshEntityWithPassengers`, `EntityLookup.add`).
+pub(crate) fn uuid_taken(rt: &mut Rt, e: V) -> bool {
+    let u = rt.get_field(e, "uuid");
+    if u.r() == 0 {
+        return false;
+    }
+    for x in live(rt) {
+        if x == e || rt.get_field(x, "removalReason").r() != 0 {
+            continue;
+        }
+        let v = rt.get_field(x, "uuid");
+        if v.r() != 0 && api::call(rt, "java/util/UUID.equals.(Ljava/lang/Object;)Z", &[u, v]).i() != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// The chunk of mod entity `e` unloads with it and its passengers on (`Entity.setRemoved`
+/// with `UNLOADED_TO_CHUNK`, saved first): they stop ticking, their riders stay on, and they leave
+/// the list at the level's next tick, which tells their players ([`tick_all`]).
+pub(crate) fn unload(rt: &mut Rt, e: V) {
+    for x in self_and_passengers(rt, e) {
+        if is_mod_entity(rt, x) && rt.get_field(x, "removalReason").r() == 0 {
+            let reason = removal(rt, 2);
+            rt.put_field(x, "removalReason", reason);
+        }
+    }
+}
+
 fn set_live(rt: &mut Rt, items: Vec<V>) {
     let l = live_list(rt);
     if let Some(o) = rt.heap.get_mut(l.r() as usize) {
@@ -556,18 +616,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     // The level's: a mod's entity joins its list (an item entity is `entities`').
     if name == "addFreshEntity" && is_mod_entity(rt, a(1)) {
-        let e = a(1);
-        let l = live_list(rt);
-        if !jutil::elements(rt, l).contains(&e) {
-            // NeoForge's `EntityJoinLevelEvent` first: a listener may keep it out.
-            if crate::world_events::entity_joins(rt, e, false) {
-                return Some(V::I(0));
-            }
-            let mut items = jutil::elements(rt, l);
-            items.push(e);
-            set_live(rt, items);
-        }
-        return Some(V::I(1));
+        return Some(V::I(i32::from(join(rt, a(1), false))));
     }
     // `level.broadcastEntityEvent(entity, event)` of a mod's entity: its players' copies hear it.
     if name == "broadcastEntityEvent" && desc == "(Lnet/minecraft/world/entity/Entity;B)V" && is_mod_entity(rt, a(1)) {
@@ -744,13 +793,13 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // `create(level, consumer, pos, spawnType, offset, offsetMore)` and the `spawn`s: the type's
         // entity placed on the block, finalized as the game adds it when a mob, and (`spawn`) added.
         (ENTITY_TYPE, "create" | "spawn") if desc.starts_with("(Lnet/minecraft/server/level/ServerLevel;") => {
-            let (consumer, pos) = match desc {
-                d if d.starts_with("(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;") => (V::NULL, a(2)),
-                d if d.starts_with("(Lnet/minecraft/server/level/ServerLevel;Ljava/util/function/Consumer;") => (a(2), a(3)),
-                d if d.starts_with("(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/item/ItemStack;") => (V::NULL, a(4)),
+            let (consumer, pos, kind) = match desc {
+                d if d.starts_with("(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;") => (V::NULL, a(2), a(3)),
+                d if d.starts_with("(Lnet/minecraft/server/level/ServerLevel;Ljava/util/function/Consumer;") => (a(2), a(3), a(4)),
+                d if d.starts_with("(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/item/ItemStack;") => (V::NULL, a(4), a(5)),
                 _ => return None,
             };
-            Some(crate::made_entities::spawn(rt, a(0), a(1), pos, consumer, name == "spawn"))
+            Some(crate::made_entities::spawn(rt, a(0), a(1), pos, consumer, kind, name == "spawn"))
         }
         (ENTITY_TYPE, "getWidth") => Some(V::F(type_size(rt, a(0)).0)),
         (ENTITY_TYPE, "getHeight") => Some(V::F(type_size(rt, a(0)).1)),

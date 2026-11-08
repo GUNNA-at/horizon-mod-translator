@@ -715,7 +715,14 @@ pub fn use_item_on(rt: &mut Rt, host: &mut dyn Host, click: &Placement) -> bool 
     let Some(&item) = rt.registered.get(&("item".to_owned(), click.item.clone())) else { return false };
     let class = rt.class_of(item);
     if !rt.overrides.is_some_and(|o| o(class, USE_ON)) {
-        return false;
+        // A mod's spawn egg (NeoForge's `DeferredSpawnEggItem`): vanilla's `SpawnEggItem.useOn`.
+        if !rt.instance_of_static(item, "net/minecraft/world/item/SpawnEggItem") {
+            return false;
+        }
+        return rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| {
+            let ctx = crate::api_common::use_on_context(rt, click);
+            crate::entity_saves::egg_use_on(rt, item, ctx)
+        }));
     }
     rt.with_host(host, |rt| crate::hand::with_hand(rt, |rt| {
         let Some(vc) = rt.vcall else { return false };
@@ -1721,6 +1728,29 @@ pub fn server_stopping(rt: &mut Rt, host: &mut dyn Host) {
 pub fn level_save(rt: &mut Rt, host: &mut dyn Host, dimension: &str) {
     rt.safe_point();
     rt.with_host(host, |rt| crate::world_data::level_saved(rt, dimension));
+}
+
+/// `native_entity_types`: the entity types the mods registered, each with whether `/summon` makes
+/// it, for the game's commands ([`crate::entity_saves::mod_types`]).
+pub fn entity_types(rt: &mut Rt) -> Vec<(String, bool)> {
+    crate::entity_saves::mod_types(rt)
+}
+
+/// `native_load_entity` (server): an entity of a type the game has none of, from its compound
+/// (`/summon`, `finalize` without NBT; a chunk's, `from_disk`), made in the level the hook runs in.
+/// None when no mod's type is named; else whether it joined
+/// ([`crate::entity_saves::load_into_level`]).
+pub fn load_entity(rt: &mut Rt, host: &mut dyn Host, tag: &std::collections::BTreeMap<String, crate::nbt::Nbt>, finalize: bool, from_disk: bool) -> Option<bool> {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::entity_saves::load_into_level(rt, tag, finalize, from_disk))
+}
+
+/// `native_save_entities` (server): the mods' entities in `chunks` of the level the hook runs in, as
+/// the chunks' entity files hold them; with `remove`, the chunks unload and they leave the level
+/// ([`crate::entity_saves::save_chunks`]).
+pub fn save_entities(rt: &mut Rt, host: &mut dyn Host, chunks: &[(i32, i32)], remove: bool) -> Vec<((i32, i32), std::collections::BTreeMap<String, crate::nbt::Nbt>)> {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::entity_saves::save_chunks(rt, chunks, remove))
 }
 
 /// `native_register_commands` (server): the mods hear `RegisterCommandsEvent`, and their commands

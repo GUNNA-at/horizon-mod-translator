@@ -296,7 +296,7 @@ pub(crate) fn is_mod_living(rt: &Rt, e: V) -> bool {
         && !crate::made_entities::is_made(rt, e)
 }
 
-fn is_mod_mob(rt: &Rt, e: V) -> bool {
+pub(crate) fn is_mod_mob(rt: &Rt, e: V) -> bool {
     is_mod_living(rt, e) && rt.instance_of_static(e, MOB)
 }
 
