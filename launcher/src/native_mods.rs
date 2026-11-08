@@ -1241,10 +1241,38 @@ fn apply(rust: &Toolchain, tool: &Path, source: &Path, mods: &Path, out: &Path) 
     cmd
 }
 
+/// The mods' Rust past which a build is not incremental ([`Build::incremental`]): incremental
+/// compilation keeps each crate's analysis besides its code, which for the translator's bundles
+/// (Create's is about 150 MB of Rust) costs tens of gigabytes and saves little, since a
+/// translation rewrites its crates whole. A bundle of a mod's own code stays far below it.
+const INCREMENTAL_LIMIT: u64 = 64 << 20;
+
+/// How much Rust the mods in `dir` hold, in bytes.
+fn rust_bytes(dir: &Path) -> u64 {
+    files(dir)
+        .unwrap_or_default()
+        .iter()
+        .filter(|(name, _)| name.ends_with(".rs"))
+        .filter_map(|(_, path)| fs::metadata(path).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// The `cargo build` arguments for `profile`, without incremental compilation when not
+/// `incremental` (the mods' Rust is past [`INCREMENTAL_LIMIT`]).
+fn profile_args(profile: Profile, incremental: bool) -> Vec<String> {
+    let mut args = vec!["--profile".to_owned(), profile.name().to_owned()];
+    if !incremental {
+        args.push("--config".into());
+        args.push(format!("profile.{}.incremental=false", profile.name()));
+    }
+    args
+}
+
 /// The build of the game in `stage` with `profile` (game-build.yml's, for `Release`), into `target`. It starts
 /// outside any Cargo configuration of the player's ([`rust_toolchain::outside_configs`]), so only
 /// the workspace's own (`stage/.cargo/config.toml`, when it has one) applies.
-fn compile(rust: &Toolchain, stage: &Path, target: &Path, profile: Profile) -> Command {
+fn compile(rust: &Toolchain, stage: &Path, target: &Path, profile: Profile, incremental: bool) -> Command {
     let mut cmd = cargo(rust, stage, "build");
     // Cargo's progress bar (units done of the total) is read from its output. Incremental
     // compilation, the `fast` profile's, is not turned off by the player's environment: the
@@ -1252,7 +1280,7 @@ fn compile(rust: &Toolchain, stage: &Path, target: &Path, profile: Profile) -> C
     cmd.env("CARGO_TARGET_DIR", target)
         .env("CARGO_TERM_PROGRESS_WHEN", "always")
         .env("CARGO_TERM_PROGRESS_WIDTH", "100");
-    cmd.args(["--locked", "--profile", profile.name()]);
+    cmd.arg("--locked").args(profile_args(profile, incremental));
     if has_mods_feature(stage) {
         cmd.args(["--features", FEATURES]);
     }
@@ -1309,9 +1337,11 @@ fn post_build_programs(
     target: &Path,
     programs: &Path,
     profile: Profile,
+    incremental: bool,
     progress: &impl Fn(Step),
 ) -> Result<Vec<(crates::PostBuild, PathBuf)>, String> {
     let steps = crates::post_builds(stage)?;
+    let profile_kind = profile;
     let profile = profile.name();
     let _ = fs::remove_dir_all(programs);
     let mut out = Vec::new();
@@ -1319,15 +1349,9 @@ fn post_build_programs(
         progress(Step::PostBuildCompile(step.mod_id.clone()));
         let mut cmd = cargo(rust, stage, "build");
         cmd.env("CARGO_TARGET_DIR", target);
-        cmd.args([
-            "--locked",
-            "--profile",
-            profile,
-            "-p",
-            &step.package,
-            "--bin",
-            &step.bin,
-        ]);
+        cmd.arg("--locked")
+            .args(profile_args(profile_kind, incremental))
+            .args(["-p", &step.package, "--bin", &step.bin]);
         run(
             cmd,
             &format!("Building {}'s post-build step", step.mod_id),
@@ -1598,9 +1622,10 @@ pub fn build(
         let target = real.join("target");
         // A revision without `[profile.fast]` builds with `release`: the build says so.
         let profile = profile_of(&stage, profile);
+        let incremental = rust_bytes(&incoming) <= INCREMENTAL_LIMIT;
         let (mut crates, mut total, mut name) = (0, None, String::new());
         run(
-            compile(&rust, &stage, &target, profile),
+            compile(&rust, &stage, &target, profile, incremental),
             "Compiling the game",
             |line| {
                 for event in parse_cargo(line) {
@@ -1636,6 +1661,7 @@ pub fn build(
             &target,
             &real.join("programs").join("post-build"),
             profile,
+            incremental,
             &progress,
         )?;
         progress(Step::Install);
@@ -2635,7 +2661,7 @@ mod tests {
             dir: PathBuf::from("/rust/1.99.1-x"),
         };
         let stage = dir("stage-config");
-        let cmd = compile(&rust, &stage, Path::new("/native/target"), Profile::Fast);
+        let cmd = compile(&rust, &stage, Path::new("/native/target"), Profile::Fast, true);
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -2660,10 +2686,33 @@ mod tests {
         // The workspace's own configuration still applies.
         fs::create_dir_all(stage.join(".cargo")).unwrap();
         fs::write(stage.join(".cargo/config.toml"), "").unwrap();
-        let cmd = compile(&rust, &stage, Path::new("/native/target"), Profile::Fast);
+        let cmd = compile(&rust, &stage, Path::new("/native/target"), Profile::Fast, true);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args[1], "--config");
         assert_eq!(args[2], stage.join(".cargo/config.toml"));
+        assert!(!args.iter().any(|a| a.to_string_lossy().contains("incremental")));
+    }
+
+    #[test]
+    fn a_translated_mods_build_is_not_incremental() {
+        let rust = Toolchain {
+            dir: PathBuf::from("/rust/1.99.1-x"),
+        };
+        let stage = dir("stage-incremental");
+        let cmd = compile(&rust, &stage, Path::new("/native/target"), Profile::Fast, false);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args.iter().position(|a| a == "profile.fast.incremental=false");
+        assert!(at.is_some_and(|i| args[i - 1] == "--config"), "{args:?}");
+        // A mod of its own code builds incrementally; the translator's Create doesn't.
+        let mods = dir("rust-bytes");
+        fs::create_dir_all(mods.join("small/src")).unwrap();
+        fs::write(mods.join("small/src/lib.rs"), "pub fn f() {}").unwrap();
+        fs::write(mods.join("small/notes.json"), vec![b' '; 1 << 20]).unwrap();
+        assert_eq!(rust_bytes(&mods), 13);
+        assert!(rust_bytes(&mods) <= INCREMENTAL_LIMIT);
     }
 
     #[test]
@@ -2686,7 +2735,7 @@ mod tests {
         let rust = Toolchain {
             dir: PathBuf::from("/rust/1.99.1-x"),
         };
-        let cmd = compile(&rust, &d, Path::new("/native/target"), Profile::Fast);
+        let cmd = compile(&rust, &d, Path::new("/native/target"), Profile::Fast, true);
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.windows(2).any(|w| w == ["--profile", "fast"]));
     }
