@@ -1,7 +1,7 @@
 <h1 align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="/docs/translator/masthead-dark.svg">
-    <img alt="Universal Mod Translator: NeoForge 1.21.1 mods and modpacks, rebuilt as native Rust for Horizon" src="/docs/translator/masthead-light.svg" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/masthead-dark.svg">
+    <img alt="Universal Mod Translator: NeoForge 1.21.1 mods and modpacks, rebuilt as native Rust for Horizon" src="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/masthead-light.svg" width="100%">
   </picture>
 </h1>
 
@@ -26,8 +26,8 @@ a list of supported ones. Create and its addons are the test case.
 ## Where it stands
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="/docs/translator/progress-dark.svg">
-  <img alt="Line charts of coverage over every measurement run, for the whole pack and for Create" src="/docs/translator/progress-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/progress-dark.svg">
+  <img alt="Line charts of coverage over every measurement run, for the whole pack and for Create" src="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/progress-light.svg" width="100%">
 </picture>
 
 <sub>**Figure 1.** Each run translates the same 367 jars of a CurseForge pack (Create Ultimate Selection 2,
@@ -39,15 +39,15 @@ instance methods only on real objects, so a few counted answers were taken back.
 <!-- progress:table -->
 | Run 43, 367 jars | Methods answered | Call sites answered |
 |---|---:|---:|
-| Minecraft and NeoForge API | 109,046 of 130,223 · **83.7%** | 341,371 of 372,742 · **91.6%** |
-| Java libraries (JDK, Guava, Gson, fastutil, JOML…) | 61,858 of 74,081 · **83.5%** | 336,963 of 357,517 · **94.3%** |
-| Create 6.0.10: API | 3,292 of 3,971 · **82.9%** | 24,391 of 25,240 · **96.6%** |
-| Create 6.0.10: libraries | 1,325 of 1,602 · **82.7%** | 14,052 of 14,416 · **97.5%** |
+| Minecraft and NeoForge API | **83.7%**<br><sub>109,046 of 130,223</sub> | **91.6%**<br><sub>341,371 of 372,742</sub> |
+| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **83.5%**<br><sub>61,858 of 74,081</sub> | **94.3%**<br><sub>336,963 of 357,517</sub> |
+| Create 6.0.10, its API calls | **82.9%**<br><sub>3,292 of 3,971</sub> | **96.6%**<br><sub>24,391 of 25,240</sub> |
+| Create 6.0.10, its library calls | **82.7%**<br><sub>1,325 of 1,602</sub> | **97.5%**<br><sub>14,052 of 14,416</sub> |
 <!-- /progress -->
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="/docs/translator/jars-dark.svg">
-  <img alt="Bar chart of the pack's jars grouped by the share of their game calls answered" src="/docs/translator/jars-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/jars-dark.svg">
+  <img alt="Bar chart of the pack's jars grouped by the share of their game calls answered" src="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/jars-light.svg" width="100%">
 </picture>
 
 <sub>**Figure 2.** The same run, jar by jar. A jar with no game calls is a library or a pack of data. The
@@ -157,8 +157,8 @@ incremental compilation, and keep 15 GB of disk free.
 ## How it works
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="/docs/translator/pipeline-dark.svg">
-  <img alt="Five stages from a mod jar to Horizon: read, weave, translate, answer, build" src="/docs/translator/pipeline-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/pipeline-dark.svg">
+  <img alt="Five stages from a mod jar to Horizon: read, weave, translate, answer, build" src="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/pipeline-light.svg" width="100%">
 </picture>
 
 1. **Read.** The class parser and instruction decoder read every class of the jar, and of the jars it bundles
@@ -207,7 +207,7 @@ files are never committed. Every translation is built from the user's own jars.
 The API methods the most jars still miss, from the latest run:
 
 <!-- progress:gaps -->
-| Missing API method | Jars that call it | Call sites |
+| Missing API method | Jars | Call sites |
 |---|---:|---:|
 | `Minecraft.getTextureManager()` | 46 | 106 |
 | `new ConfigurationScreen(ModContainer, Screen)` | 38 | 38 |
@@ -223,7 +223,7 @@ The API methods the most jars still miss, from the latest run:
 <summary>The library methods the most jars still miss</summary>
 
 <!-- progress:lib_gaps -->
-| Missing library method | Jars that call it | Call sites |
+| Missing library method | Jars | Call sites |
 |---|---:|---:|
 | `Method.invoke(Object, Object[])` | 57 | 126 |
 | `Class.getDeclaredFields()` | 45 | 84 |

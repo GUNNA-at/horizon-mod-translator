@@ -1,7 +1,7 @@
 <h1 align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="/docs/translator/masthead-ru-dark.svg">
-    <img alt="Universal Mod Translator: моды и модпаки NeoForge 1.21.1, пересобранные в нативный Rust для Horizon" src="/docs/translator/masthead-ru-light.svg" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/masthead-ru-dark.svg">
+    <img alt="Universal Mod Translator: моды и модпаки NeoForge 1.21.1, пересобранные в нативный Rust для Horizon" src="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/masthead-ru-light.svg" width="100%">
   </picture>
 </h1>
 
@@ -26,8 +26,8 @@ Rust отвечает на **83,7 %** методов Minecraft и NeoForge, к�
 ## Где мы сейчас
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="/docs/translator/progress-ru-dark.svg">
-  <img alt="Графики покрытия по всем прогонам замеров, для всего пака и для Create" src="/docs/translator/progress-ru-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/progress-ru-dark.svg">
+  <img alt="Графики покрытия по всем прогонам замеров, для всего пака и для Create" src="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/progress-ru-light.svg" width="100%">
 </picture>
 
 <sub>**Рисунок 1.** Каждый прогон переводит одни и те же 367 джаров пака с CurseForge (Create Ultimate
@@ -40,15 +40,15 @@ Selection 2, Create Aeronautics и аддоны к ним). Для каждог�
 <!-- progress:table -->
 | Прогон 43, 367 джаров | Отвечено методов | Отвечено вызовов |
 |---|---:|---:|
-| API Minecraft и NeoForge | 109 046 из 130 223 · **83,7 %** | 341 371 из 372 742 · **91,6 %** |
-| Библиотеки Java (JDK, Guava, Gson, fastutil, JOML…) | 61 858 из 74 081 · **83,5 %** | 336 963 из 357 517 · **94,3 %** |
-| Create 6.0.10: API | 3 292 из 3 971 · **82,9 %** | 24 391 из 25 240 · **96,6 %** |
-| Create 6.0.10: библиотеки | 1 325 из 1 602 · **82,7 %** | 14 052 из 14 416 · **97,5 %** |
+| API Minecraft и NeoForge | **83,7 %**<br><sub>109 046 из 130 223</sub> | **91,6 %**<br><sub>341 371 из 372 742</sub> |
+| Библиотеки Java<br><sub>JDK, Guava, Gson, fastutil, JOML и другие</sub> | **83,5 %**<br><sub>61 858 из 74 081</sub> | **94,3 %**<br><sub>336 963 из 357 517</sub> |
+| Create 6.0.10, вызовы API | **82,9 %**<br><sub>3 292 из 3 971</sub> | **96,6 %**<br><sub>24 391 из 25 240</sub> |
+| Create 6.0.10, вызовы библиотек | **82,7 %**<br><sub>1 325 из 1 602</sub> | **97,5 %**<br><sub>14 052 из 14 416</sub> |
 <!-- /progress -->
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="/docs/translator/jars-ru-dark.svg">
-  <img alt="Столбики: джары пака по доле отвеченных вызовов игры" src="/docs/translator/jars-ru-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/jars-ru-dark.svg">
+  <img alt="Столбики: джары пака по доле отвеченных вызовов игры" src="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/jars-ru-light.svg" width="100%">
 </picture>
 
 <sub>**Рисунок 2.** Тот же прогон, по джарам. Джар без вызовов игры это библиотека или набор данных. Город
@@ -158,8 +158,8 @@ horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative 
 ## Как это работает
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="/docs/translator/pipeline-ru-dark.svg">
-  <img alt="Пять шагов от джара мода до Horizon: чтение, вплетение, перевод, ответ, сборка" src="/docs/translator/pipeline-ru-light.svg" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/pipeline-ru-dark.svg">
+  <img alt="Пять шагов от джара мода до Horizon: чтение, вплетение, перевод, ответ, сборка" src="https://github.com/GUNNA-at/horizon-mod-translator/raw/mod-translator/docs/translator/pipeline-ru-light.svg" width="100%">
 </picture>
 
 1. **Чтение.** Парсер классов и декодер инструкций читают каждый класс джара и вложенных в него джаров
@@ -209,7 +209,7 @@ horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative 
 Методы API, которых не хватает большему числу джаров, по последнему прогону:
 
 <!-- progress:gaps -->
-| Метод API, которого нет | Джаров вызывают | Вызовов |
+| Метод API, которого нет | Джаров | Вызовов |
 |---|---:|---:|
 | `Minecraft.getTextureManager()` | 46 | 106 |
 | `new ConfigurationScreen(ModContainer, Screen)` | 38 | 38 |
@@ -225,7 +225,7 @@ horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative 
 <summary>Методы библиотек, которых не хватает большему числу джаров</summary>
 
 <!-- progress:lib_gaps -->
-| Метод библиотеки, которого нет | Джаров вызывают | Вызовов |
+| Метод библиотеки, которого нет | Джаров | Вызовов |
 |---|---:|---:|
 | `Method.invoke(Object, Object[])` | 57 | 126 |
 | `Class.getDeclaredFields()` | 45 | 84 |
