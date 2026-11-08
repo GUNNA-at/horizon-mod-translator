@@ -8862,6 +8862,20 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Not yet: the game's selectors and entity commands (`kill`, `tp`, `data`) find no mod entity (their
     lists don't hold them), a player's blows and right clicks pass through them (the client picks only the
     game's entities), and they don't spawn naturally.
+  - Measured (packcov44, Parts 128 and 129 since run 43, the same 367 jars, none stopped):
+    - API: methods 110665/130223 (85.0%, was 109046), uses 345142/372742 (92.6%, was 341371),
+      distinct missing 8576 (was 9162); Create 3315/3971 (83.5%, was 3292), uses 24416/25240 (96.7%,
+      was 24391). Libraries unchanged (83.5%, uses 94.3%).
+    - 611 API methods answered in at least one more jar, nearly all the mob AI's: by class (jar-methods)
+      `LivingEntity` 141, `Mob` 138, `PathfinderMob` 137, `PathNavigation` 90, `Path` 67, `Monster` 60,
+      `GoalSelector` 50, `TargetingConditions` 49, `Goal` 44, `NearestAttackableTargetGoal` 39, `Animal`
+      37; most used `GoalSelector.addGoal` (28 mods), `new Goal()` (24), `PathNavigation.stop` (21).
+    - 23 newly missing, all a vanilla class's `tick()` named by a mod's `super.tick()`
+      (`PathfinderMob.tick` 8, `Monster.tick` 5, `Zombie`, `Skeleton`, `WaterAnimal`, `TamableAnimal`...):
+      `mobs.rs` now claims them ahead of `mod_entities`' generic `tick`, and the probe's receivers (null, a
+      bare object, the game's player and cow) are no mod entity of a level, so its tick leaves a call
+      unmapped there. On a mod's own mob the key reaches the same `tick` that the level's ticking runs
+      (`mobs.rs`), the one that moves Waddles' penguins.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
