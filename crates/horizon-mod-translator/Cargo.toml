@@ -17,3 +17,5 @@ workspace = true
 [dev-dependencies]
 # The content manifests it writes, read back as the game reads them.
 horizon-mods = { path = "../horizon-mods" }
+# The bundle manifests it writes, read back as the launcher reads them.
+toml = "1.1.6"

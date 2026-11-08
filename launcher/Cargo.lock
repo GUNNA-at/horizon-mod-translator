@@ -2645,6 +2645,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-compat"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "horizon-compat-core",
+ "png 0.18.1",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
+name = "horizon-compat-core"
+version = "0.1.0"
+
+[[package]]
 name = "horizon-core"
 version = "0.1.0"
 dependencies = [
@@ -2717,6 +2732,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-mod-translator"
+version = "0.1.0"
+dependencies = [
+ "horizon-compat",
+ "serde",
+ "serde_json",
+ "zip",
+]
+
+[[package]]
 name = "horizon-mods"
 version = "0.1.0"
 dependencies = [
@@ -2735,6 +2760,8 @@ dependencies = [
 name = "horizon-port-pack"
 version = "0.1.0"
 dependencies = [
+ "horizon-compat",
+ "horizon-mod-translator",
  "horizon-mods",
  "serde",
  "serde_json",

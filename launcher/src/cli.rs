@@ -621,6 +621,24 @@ enum ModsCmd {
         #[arg(long)]
         trust_native_code: bool,
     },
+    /// Translate Java mods into an instance (docs/mod-translator.md): a NeoForge 1.21.1 mod's jar,
+    /// a folder of jars, or a modpack (.mrpack, CurseForge zip or instance folder). What they carry
+    /// (blocks, items, recipes, worldgen) becomes content mods, their code a native mod translated
+    /// into Rust; all are turned on. No Java code runs. Then `native-build` builds the game with
+    /// them, or pass --build
+    AddJava {
+        /// The jar, folder or modpack
+        path: PathBuf,
+        /// The instance (default: the selected one)
+        #[arg(long)]
+        instance: Option<String>,
+        /// Build the game with them right away, as `native-build` does (needs --trust-native-code)
+        #[arg(long)]
+        build: bool,
+        /// With --build: you trust the translated code with full access to this computer
+        #[arg(long)]
+        trust_native_code: bool,
+    },
     /// Look for newer versions of the native mods installed from GitHub (the latest release, or the
     /// default branch's head for a mod installed from a commit), and install them
     UpdateGithub {
@@ -1230,50 +1248,7 @@ fn execute(command: Cmd, as_json: bool) -> Result<(), String> {
             if !trust_native_code {
                 return Err("Native mods run with full access to this computer. Read their source, then pass --trust-native-code.".into());
             }
-            let started = std::time::Instant::now();
-            let profile = match profile.as_deref().and_then(native_mods::Profile::parse) {
-                Some(profile) => profile,
-                None => {
-                    native_mods::Profile::from_setting(backend::Settings::load().native_release)
-                }
-            };
-            let target = match &instance {
-                Some(name) => instances::find(name)?,
-                None => instances::selected(),
-            };
-            let base = match version {
-                Some(v) => backend::resolve_version(Some(&v))?,
-                None => {
-                    let plays = target.resolve_version(None).ok();
-                    native_mods::base_for(plays.as_deref(), &backend::installed(), update)
-                        .ok_or("No version is installed yet.")?
-                }
-            };
-            let folder = match folder {
-                Some(folder) => folder,
-                None => native_mods::installed_mods(&target.home)?,
-            };
-            let built = native_mods::build(
-                &base,
-                &folder,
-                &target,
-                allow_version_mismatch,
-                profile,
-                |step| {
-                    let secs = started.elapsed().as_secs();
-                    eprintln!("[{:>2}:{:02}] {}", secs / 60, secs % 60, step.label())
-                },
-            )
-            .map_err(|e| match e.starts_with(native_mods::MISMATCH) {
-                true => {
-                    format!("{e} They often still build: pass --allow-version-mismatch to try.")
-                }
-                false => e,
-            })?;
-            println!(
-                "{built} built and selected for its instance ({:.0} s).",
-                started.elapsed().as_secs_f64()
-            );
+            native_build(folder, instance, version, update, allow_version_mismatch, profile)?;
         }
         Cmd::Remove { tag } => {
             backend::remove_version(&tag)?;
@@ -2202,6 +2177,63 @@ fn github_native(
     Ok(())
 }
 
+/// Builds the native mods of `folder` (default: the ones installed and turned on in `instance`'s
+/// game folder) into the game the instance then plays (`native-build`, `mods add-java --build`).
+fn native_build(
+    folder: Option<PathBuf>,
+    instance: Option<String>,
+    version: Option<String>,
+    update: bool,
+    allow_version_mismatch: bool,
+    profile: Option<String>,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let profile = match profile.as_deref().and_then(native_mods::Profile::parse) {
+        Some(profile) => profile,
+        None => {
+            native_mods::Profile::from_setting(backend::Settings::load().native_release)
+        }
+    };
+    let target = match &instance {
+        Some(name) => instances::find(name)?,
+        None => instances::selected(),
+    };
+    let base = match version {
+        Some(v) => backend::resolve_version(Some(&v))?,
+        None => {
+            let plays = target.resolve_version(None).ok();
+            native_mods::base_for(plays.as_deref(), &backend::installed(), update)
+                .ok_or("No version is installed yet.")?
+        }
+    };
+    let folder = match folder {
+        Some(folder) => folder,
+        None => native_mods::installed_mods(&target.home)?,
+    };
+    let built = native_mods::build(
+        &base,
+        &folder,
+        &target,
+        allow_version_mismatch,
+        profile,
+        |step| {
+            let secs = started.elapsed().as_secs();
+            eprintln!("[{:>2}:{:02}] {}", secs / 60, secs % 60, step.label())
+        },
+    )
+    .map_err(|e| match e.starts_with(native_mods::MISMATCH) {
+        true => {
+            format!("{e} They often still build: pass --allow-version-mismatch to try.")
+        }
+        false => e,
+    })?;
+    println!(
+        "{built} built and selected for its instance ({:.0} s).",
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
     use horizon_launcher::browser::{horizon, installed, java_instance, Kind, Query, SourceId};
     use horizon_launcher::modpacks;
@@ -2214,6 +2246,7 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
         | ModsCmd::Update { instance, .. }
         | ModsCmd::Remove { instance, .. }
         | ModsCmd::AddGithub { instance, .. }
+        | ModsCmd::AddJava { instance, .. }
         | ModsCmd::UpdateGithub { instance, .. }
         | ModsCmd::Enable { instance, .. }
         | ModsCmd::Disable { instance, .. } => match instance {
@@ -2561,6 +2594,65 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
                 all,
                 trust_native_code,
             )?;
+        }
+        ModsCmd::AddJava {
+            path,
+            instance,
+            build,
+            trust_native_code,
+        } => {
+            if java.is_some() {
+                return Err("Java mods are translated into Horizon instances: a Java instance runs their jars as they are.".into());
+            }
+            if build && !trust_native_code {
+                return Err("The translated code runs with full access to this computer. Pass --trust-native-code with --build, or build later with native-build.".into());
+            }
+            let added = native_mods::add_java(&path, &home, &|line| eprintln!("{line}"))?;
+            let out = &added.outcome;
+            if as_json {
+                json(serde_json::json!({
+                    "mods": out.mods.iter().map(|m| serde_json::json!({
+                        "id": m.mod_id,
+                        "verdict": m.verdict.label(),
+                        "summary": m.summary,
+                        "content": m.path,
+                        "native": m.native,
+                    })).collect::<Vec<_>>(),
+                    "bundled": out.bundled,
+                    "left_off": out.left_off,
+                    "resourcepacks": out.resourcepacks,
+                    "report": out.report,
+                    "enabled": added.enabled,
+                }));
+            } else {
+                for m in &out.mods {
+                    let what = match (&m.path, &m.native) {
+                        (Some(_), Some(_)) => "content and code",
+                        (Some(_), None) => "content",
+                        (None, Some(_)) => "code",
+                        (None, None) => "nothing",
+                    };
+                    println!("{}: {} ({what} translated). {}", m.mod_id, m.verdict.label(), m.summary);
+                }
+                for b in &out.bundled {
+                    println!("  with {}, which a mod bundles", b.display());
+                }
+                for l in &out.left_off {
+                    println!("  left off: {l}");
+                }
+                if let Some(r) = &out.report {
+                    println!("Report: {}", r.display());
+                }
+                println!("Turned on: {}", added.enabled.join(", "));
+            }
+            if out.mods.iter().all(|m| m.native.is_none()) {
+                return Ok(());
+            }
+            if build {
+                native_build(None, instance, None, false, false, None)?;
+            } else if !as_json {
+                println!("Build the game with them next: horizon-launcher native-build --trust-native-code");
+            }
         }
         ModsCmd::UpdateGithub {
             id,

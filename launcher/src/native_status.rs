@@ -98,7 +98,7 @@ pub fn horizon_label(version: &str) -> String {
     }
 }
 
-/// The native mods turned on in game folder `home`, read from their `.hnmod`s. One that can't be
+/// The native mods turned on in game folder `home`, read from their `.hnmod`s and translated folders. One that can't be
 /// read always counts, with its file name and no version, so it needs a build (which says why):
 /// the on/off list is keyed by the manifest id, which an unreadable file can't give.
 pub fn enabled(home: &Path) -> Vec<Mod> {
@@ -114,6 +114,17 @@ pub fn enabled(home: &Path) -> Vec<Mod> {
                 }
             }
             Err(_) => out.push((stem(&path), String::new(), None)),
+        }
+    }
+    // The Java mods translated into it (`native_mods::add_java`), folders.
+    for dir in native_mods::translated(home) {
+        match native_mods::folder_mod(&dir) {
+            Some((id, version, digest)) => {
+                if java::is_enabled(home, &id) {
+                    out.push((id, version, digest));
+                }
+            }
+            None => out.push((stem(&dir), String::new(), None)),
         }
     }
     out

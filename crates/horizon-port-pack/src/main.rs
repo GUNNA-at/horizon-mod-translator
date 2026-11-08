@@ -119,6 +119,9 @@ fn main() -> ExitCode {
                         println!("      code translated to native Rust -> {}", n.display());
                     }
                 }
+                for b in &out.bundled {
+                    println!("  + {} (bundled with a translated mod)", b.display());
+                }
                 for l in &out.left_off {
                     println!("  left off: {l}");
                 }
