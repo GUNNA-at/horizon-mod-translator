@@ -8785,6 +8785,83 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     author changed every hash and no tree; the log and `progress.json` name the new hashes. Both repos were
     made afresh from the rewritten history, so no old commit stays reachable on GitHub; the earlier private
     ones are kept, renamed `horizon-mod-translator-old` and `horizon-mixins-old`. Actions stay off.
+- [x] 2026-11-08 Part 128: the mods' mobs think and move. A mod's class that extends `LivingEntity`, `Mob`,
+  `PathfinderMob`, `AgeableMob`, `Animal`, `Monster` or `WaterAnimal` runs as vanilla's does, on three new
+  modules (7,600 lines; all of the mod's own overrides first, called virtually as the JVM does):
+  - `goals.rs`: `Goal` (its flags, the defaults a mod's goal inherits), `WrappedGoal` and `GoalSelector` (each
+    tick the goals that may run, by priority, each locking the controls it needs), `TargetingConditions`,
+    `Sensing`, and the vanilla goals mods build their mobs of: floating, strolling (also away from water),
+    looking at players and around, panicking, melee attacks, leaping, tempting, following a parent, avoiding
+    an entity, and the target goals (the one that hurt it, the nearest attackable).
+  - `pathing.rs`: `GroundPathNavigation`, `Path`, `Node`, 1.21.1's A* `PathFinder` over a `WalkNodeEvaluator`
+    (steps up a block, drops as far as it may fall, floats or wades, keeps off fences, lava, fire and cactus;
+    each node costs its `PathType`'s malus), and the random places goals walk to (`DefaultRandomPos`,
+    `LandRandomPos`).
+  - `mobs.rs`: health and attributes, the base tick (air, hurt and death times), the AI step (goals,
+    navigation, controls), `travel` (block friction, swimming, gravity, collisions with stepping up), the
+    controls (`MoveControl`, `LookControl`, `JumpControl`, `BodyRotationControl`, `FlyingMoveControl`,
+    the smooth swimming ones), body and head turning, the walk animation (`WalkAnimationState`), being hurt
+    (invulnerable frames, armour, knockback, sounds), dying (twenty ticks, the death event), equipment, age
+    and love, saving and loading (`Health`, `Age`, `InLove`, `LeftHanded`, `NoAI`...), despawning far from
+    players (`checkDespawn` by its `MobCategory`).
+  - Dispatch: the three modules answer before `mod_entities`, so a call naming a vanilla class
+    (`Animal.getHealth`, `PathfinderMob.getNavigation`) reaches the mob's state, and the rest of `Entity`'s
+    falls to `mod_entities` as before. `checked_chain` tests that the module answering a key claims it.
+  - The client's copy: the server runs the AI and tells the players' copies through `mod_entities`'
+    messages (`ENTITY_OP` 5): sub-op 0 an entity event (`handleEntityEvent`: death, hearts, poof), 1 a hurt
+    (its flash and sound), 2 a swing, 3 the state (health, baby, aggressive, left-handed, no AI, the seven
+    equipment slots), sent when it changes. Moves now carry the head's yaw; a copy follows them over three
+    ticks (`lerpTo`, `lerpHeadTo`) and animates its walk as vanilla's client does.
+  - Tests: compat 702 (9 new: an animal walks where its move control sends it; a blow within the hurt frames
+    hurts only by what tops the last, and death takes twenty ticks; a client's copy gets health, age,
+    handedness and equipment; what an animal saves loads into a new one; a flying move control lifts it
+    without gravity; calls naming vanilla classes reach the mob; reduced tick delays; unmodelled goals
+    climb to what they extend; path kinds in `PathType`'s order).
+  - Measured on Waddles 0.11.1 (penguins): 96 of its 100 API methods answered; the four left are natural
+    spawning (`MobSpawnSettingsBuilder.addSpawn`, `BiomeInfo$Builder.getMobSpawnSettings`,
+    `RegisterSpawnPlacementsEvent.register`). In the game the penguin could be neither summoned nor hatched:
+    the game knew no entity type of a mod's (Part 129).
+- [x] 2026-11-08 Part 129: the mods' entities enter the game's world. Until now the game knew no entity type of a
+  mod's: `/summon waddles:adelie_penguin` failed to parse ("Can't find element"), a mod's spawn egg did
+  nothing, and a mod's entity lived only in the runtime: never saved with its chunk, kept across worlds.
+  - Three game hooks (fragment `mod_entity_saves`):
+    - `native_entity_types(types)`: the mods' types with whether `/summon` makes them; `build_registries`
+      adds them after vanilla's to `minecraft:entity_type`, the selectors' types and `summon`'s.
+    - `native_load_entity(tag, finalize, from_disk, made)`: an entity of a type the game doesn't know,
+      from its compound. `/summon` asks it first for a type outside `minecraft` that the game has no mob
+      of (`finalize` without an NBT argument); a loading chunk asks it for each entity of a namespace other
+      than `minecraft` before keeping the compound as unknown. `made` false: the summon fails as vanilla's
+      (`commands.summon.failed.uuid`), a chunk's is dropped as vanilla drops a duplicate.
+    - `native_save_entities(chunks, remove, saved)`: `entity_chunks` (autosave, quit, a dimension left, a
+      chunk unloading, a structure block's template) adds the mods' entities of those chunks; with
+      `remove` they leave with the chunks.
+  - The runtime (`entity_saves.rs`): `mod_types`; `load_into_level` (the compound's entity made in the
+    hook's level with its passengers, `loadEntityRecursive` without a function; a mob finalized with
+    `MobSpawnType.COMMAND`; the tree joins, `EntityJoinLevelEvent` with `loadedFromDisk` for a chunk's;
+    a second of a UUID the level holds doesn't); `save_chunks` (`Entity.save` of each root in the chunks
+    and the level's dimension; unloaded ones are `UNLOADED_TO_CHUNK`, so not saved twice, their UUID free
+    again, and their players told at the next tick). The level's mod entities go when the server stops.
+  - A mod's spawn egg without a `useOn` of its own (NeoForge's `DeferredSpawnEggItem`) runs vanilla's
+    `SpawnEggItem.useOn`: the type beside a block with a collision shape (else in it), let down onto what
+    is under it (`getYOffset`), facing a random way, a mob's head and body too, finalized with
+    `SPAWN_EGG`, its ambient sound, then joining; the stack shrinks. `EntityType.spawn` by a mod now
+    finalizes a mod's mob with the spawn type it names.
+  - Tests: compat 704 (2 new: a compound's entity joins and a second of its UUID doesn't, vanilla's and
+    unknown types aren't a mod's, it saves with its chunk alone, unloads once and loads back; a spawn egg
+    on stone stands it on the stone and shrinks the stack, in the air it stays in the block clicked); the
+    game's `commands_take_a_mods_entity_types` (`summon test:penguin` and `kill @e[type=test:penguin]`
+    refused before the type is added and parsed after; a `noSummon` type is named by selectors alone). The
+    game's lib tests compile again: Part 117's `WorldLoader.save_root` was missing from three of
+    `world_loading`'s tests.
+  - Live (Waddles 0.11.1 beside Create's bundle, the game on its server thread): three
+    `/summon waddles:adelie_penguin` and a baby (`{Age:-24000}`) each answer "Summoned new Adélie
+    Penguin"; the penguins wander their snow pen over six frames 40 ticks apart; the spawn egg on a snow
+    block in survival hatches a fifth and leaves 1 of 2; after `save-all`, quitting and opening the world
+    again, all five stand in the pen (the overworld's entity regions hold them). Neither run's log has a
+    thrown exception.
+  - Not yet: the game's selectors and entity commands (`kill`, `tp`, `data`) find no mod entity (their
+    lists don't hold them), a player's blows and right clicks pass through them (the client picks only the
+    game's entities), and they don't spawn naturally.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

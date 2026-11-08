@@ -845,6 +845,7 @@ mod tests {
         let (release, wait) = std::sync::mpsc::channel();
         let loader = WorldLoader {
             cancelled: false,
+            save_root: PathBuf::new(),
             upgrade: Default::default(),
             handle: std::thread::spawn(move || {
                 wait.recv().unwrap();
@@ -864,6 +865,7 @@ mod tests {
         let (release, wait) = std::sync::mpsc::channel();
         let loader = WorldLoader {
             cancelled: false,
+            save_root: PathBuf::new(),
             upgrade: Default::default(),
             handle: std::thread::spawn(move || {
                 wait.recv().unwrap();
@@ -884,6 +886,7 @@ mod tests {
     fn worker_panics_reach_the_client() {
         let loader = WorldLoader {
             cancelled: false,
+            save_root: PathBuf::new(),
             upgrade: Default::default(),
             handle: std::thread::spawn(|| panic!("broken world initialization")),
         };

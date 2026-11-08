@@ -815,6 +815,28 @@ impl Game<'_> {
             None
         }
     }
+    /// `/summon` of a type a native mod registered (`native_load_entity`): the entity from the
+    /// command's compound, or an empty one (a mob then finalized), at `pos`. None when no mod
+    /// takes the type; else whether it joined.
+    pub(super) fn summon_mod_entity(
+        &mut self,
+        kind: &str,
+        pos: [f64; 3],
+        nbt: Option<&str>,
+    ) -> R<Option<bool>> {
+        let mut tag = match nbt {
+            Some(nbt) => parse_snbt(nbt).map_err(|e| err("argument.nbt.invalid", &[&e]))?.0,
+            None => Tag::Compound(Default::default()),
+        };
+        if !matches!(tag, Tag::Compound(_)) {
+            return Err(err("argument.nbt.expected.compound", &[]));
+        }
+        set_key(&mut tag, "id", Tag::String(kind.into()));
+        place_summoned(&mut tag, pos);
+        let mut made = None;
+        self.native_load_entity(&tag, nbt.is_none(), false, &mut made);
+        Ok(made)
+    }
     /// The `summon <entity> <pos> <nbt>` form.
     pub(super) fn summon_with_nbt(
         &mut self,

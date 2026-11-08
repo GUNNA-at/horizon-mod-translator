@@ -3273,6 +3273,47 @@ impl Game<'_> {
     ) {
         let _ = (dimension, entity, kind, pos, loaded_from_disk, canceled);
     }
+    /// The entity types the native mods register that the game has none of
+    /// (`minecraft:entity_type` after vanilla's, as a modded server's registry
+    /// holds them): push each with whether `/summon` makes it
+    /// (`EntityType.canSummon`). The commands take them (`summon`'s entity, a
+    /// selector's `type=`), and an entity of one reaches
+    /// `native_load_entity`. Asked as a world opens and as a client joins one.
+    /// API @API:mod_entity_saves@.
+    pub(super) fn native_entity_types(&mut self, types: &mut Vec<(String, bool)>) {
+        let _ = types;
+    }
+    /// An entity of a type the game has none of, from its compound
+    /// (`EntityType.loadEntityRecursive`, its `id` naming the type): `/summon`
+    /// (`finalize` when the command gave no NBT: a mob's `finalizeSpawn`), a
+    /// chunk's saved entities as it loads (`from_disk`), a structure's. Set
+    /// `made` to whether it joined the level the server's game holds (false: a
+    /// mod kept it out, or its UUID is taken); a type that is your mod's must
+    /// set it. Left None, the game keeps the compound and saves it back with
+    /// its chunk. Server-side. API @API:mod_entity_saves@.
+    pub(super) fn native_load_entity(
+        &mut self,
+        tag: &horizon_world::nbt::Tag,
+        finalize: bool,
+        from_disk: bool,
+        made: &mut Option<bool>,
+    ) {
+        let _ = (tag, finalize, from_disk, made);
+    }
+    /// The compounds of the native mods' entities in `chunks` of the level the
+    /// server's game holds, pushed with their chunk, for the chunks' entity
+    /// files (`Entity.save`, as `EntityStorage.storeEntities` writes them);
+    /// with `remove` the chunks unload, and the entities leave the level
+    /// (`RemovalReason.UNLOADED_TO_CHUNK`). Each save and unload of a chunk's
+    /// entities. Server-side. API @API:mod_entity_saves@.
+    pub(super) fn native_save_entities(
+        &mut self,
+        chunks: &[(i32, i32)],
+        remove: bool,
+        saved: &mut Vec<((i32, i32), horizon_world::nbt::Tag)>,
+    ) {
+        let _ = (chunks, remove, saved);
+    }
     /// An entity mounts or dismounts a vehicle (NeoForge's `EntityMountEvent`, posted from
     /// `Entity.startRiding` and `removeVehicle`): `entity` of type `kind` (`minecraft:player`,
     /// `minecraft:zombie`) in the server level `dimension`, getting on (`mounting`) or off the

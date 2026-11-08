@@ -1,0 +1,28 @@
+{
+  "hooks": [
+    {
+      "name": "entity_types",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_entity_types",
+      "side": "both",
+      "cancellable": false
+    },
+    {
+      "name": "load_entity",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_load_entity",
+      "side": "server",
+      "cancellable": false
+    },
+    {
+      "name": "save_entities",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_save_entities",
+      "side": "server",
+      "cancellable": false
+    }
+  ],
+  "rust_summary": "the entities of a native mod's own types in the game's world: their types in the commands' registries (`native_entity_types`), one made from its compound by `/summon` or a loading chunk (`native_load_entity`), and theirs saved and unloaded with the chunks (`native_save_entities`).",
+  "doc_summary": "a native mod's own entity types, which the game has none of, in its world. `native_entity_types(types)` pushes each type with whether `/summon` makes it: the commands take them as a modded server's `minecraft:entity_type` registry holds them after vanilla's (`summon`'s entity, a selector's `type=`). `native_load_entity(tag, finalize, from_disk, made)` gets the compound of an entity of a type the game doesn't know (`EntityType.loadEntityRecursive`): `/summon`'s (`finalize` when the command gave no NBT, as `SummonCommand` finalizes a mob then) and each one a chunk loads (`from_disk`); a mod whose type it is makes it in the level the server's game holds and sets `made` to whether it joined (false when its UUID is taken or a mod kept it out, and `/summon` then fails as vanilla's does); left None, the game keeps the compound and saves it back with its chunk. `native_save_entities(chunks, remove, saved)` asks for the compounds of the mods' entities in those chunks each time the game saves or unloads them, pushed with their chunk; with `remove` the chunks unload and the entities leave the level (`UNLOADED_TO_CHUNK`). Bundles need \"hooks\": @API:mod_entity_saves@.",
+  "comments": [
+    "crates/horizon-client/src/game/persist.rs",
+    "crates/horizon-client/src/game/commands/data.rs"
+  ]
+}

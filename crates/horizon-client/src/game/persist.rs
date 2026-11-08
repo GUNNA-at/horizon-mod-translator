@@ -305,6 +305,15 @@ impl Game<'_> {
                 if uuid.is_some_and(|u| self.restored_vehicle(u).is_some()) {
                     continue;
                 }
+                // A native mod's type: the mods make it (`native_load_entity`); one that
+                // didn't join is gone, as vanilla drops an entity whose UUID the level holds.
+                if !kind.is_empty() && !kind.starts_with("minecraft:") {
+                    let mut made = None;
+                    self.native_load_entity(&tag, false, from_disk, &mut made);
+                    if made.is_some() {
+                        continue;
+                    }
+                }
                 if (matches!(
                     kind.as_str(),
                     "minecraft:experience_orb"
@@ -1276,6 +1285,14 @@ impl Game<'_> {
             if let Some(list) = unknown {
                 out.entry(*key).or_default().extend(list);
             }
+        }
+        // The native mods' entities in these chunks (`native_save_entities`), which leave with
+        // them when they unload.
+        let chunks: Vec<(i32, i32)> = keys.iter().copied().collect();
+        let mut saved = Vec::new();
+        self.native_save_entities(&chunks, remove, &mut saved);
+        for (key, tag) in saved {
+            out.entry(key).or_default().push(tag);
         }
         if remove {
             let gone = |p: Vec3| keys.contains(&chunk_of(p));

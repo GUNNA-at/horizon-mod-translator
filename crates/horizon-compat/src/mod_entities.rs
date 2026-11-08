@@ -31,8 +31,8 @@ const MOB_CATEGORIES: [(&str, i32, bool, bool, i32); 8] = [
 /// `Entity.RemovalReason`'s constants in order, and whether each destroys the entity.
 const REMOVALS: [(&str, bool); 5] =
     [("KILLED", true), ("DISCARDED", true), ("UNLOADED_TO_CHUNK", false), ("UNLOADED_WITH_PLAYER", false), ("CHANGED_DIMENSION", false)];
-/// The level's entities of mods, in the order they were added.
-const LIVE: &str = "compat:mod-entities";
+/// The level's entities of mods, in the order they were added; the server's go when it stops.
+pub(crate) const LIVE: &str = "compat:mod-entities";
 /// The first id an entity a mod makes gets: far above the game's own entities', so a lookup by id
 /// on either side never finds the other's.
 const FIRST_ID: i32 = 1 << 30;

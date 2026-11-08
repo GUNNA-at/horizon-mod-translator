@@ -2094,6 +2094,25 @@ impl Game<'_> {
         {
             return Err(err("commands.summon.invalidPosition", &[]));
         }
+        // A native mod's type: the mods make it (`SummonCommand.createEntity`, a mob finalized
+        // when no NBT was given).
+        if !kind.starts_with("minecraft:") && !self.res.mob_types().contains_key(&kind) {
+            let nbt = match ctx.get("nbt") {
+                Some(Arg::Str(nbt)) => Some(nbt.clone()),
+                _ => None,
+            };
+            match self.summon_mod_entity(&kind, pos, nbt.as_deref())? {
+                Some(true) => {
+                    let name = Text::translate(&entity_name_key(&kind), &[]);
+                    self.feedback(Text::translate("commands.summon.success", &[name]));
+                    return Ok(1);
+                }
+                // `tryAddFreshEntityWithPassengers` refused it: its UUID is taken, or a mod
+                // kept it out.
+                Some(false) => return Err(err("commands.summon.failed.uuid", &[])),
+                None => {}
+            }
+        }
         let short = kind.trim_start_matches("minecraft:").to_owned();
         if let Some(Arg::Str(nbt)) = ctx.get("nbt").cloned() {
             // With an NBT argument the entity is built from it, unfinalized.

@@ -287,6 +287,24 @@ fn add_component_type(reg: &mut Registries, name: &str) {
     }
 }
 
+/// A native mod's entity type among the command registries' own: the type registry's ids, the types
+/// selectors name and, when `/summon` makes it, `summon`'s.
+fn add_entity_type(reg: &mut Registries, name: &str, summonable: bool) {
+    let insert = |list: &mut Vec<String>| {
+        if !list.iter().any(|known| known == name) {
+            let at = list.partition_point(|known| known.as_str() < name);
+            list.insert(at, name.to_owned());
+        }
+    };
+    if let Some(types) = reg.by_registry.get_mut("minecraft:entity_type") {
+        insert(&mut types.ids);
+    }
+    insert(&mut reg.entity_types);
+    if summonable {
+        insert(&mut reg.summonable);
+    }
+}
+
 /// The `minecraft:` ids of the `extension` files under `root`, sorted.
 fn ids_under(root: &Path, extension: &str) -> Vec<String> {
     ids_in(root, extension, "minecraft")
@@ -552,11 +570,18 @@ impl Game<'_> {
                 break;
             }
         }
+        // The native mods' entity types (`native_entity_types`), after vanilla's as a modded
+        // server's registry holds them: `summon` makes them, selectors name them.
+        let mut mod_types = Vec::new();
+        self.native_entity_types(&mut mod_types);
         let reg = &mut self.ui.registries;
         // The mods' persistent data component types (`native_component_types`), registered after
         // vanilla's as a modded server's registry holds them, so item arguments take them too.
         for (_, name) in horizon_protocol::item::custom::entries() {
             add_component_type(reg, name);
+        }
+        for (name, summonable) in &mod_types {
+            add_entity_type(reg, name, *summonable);
         }
         reg.timelines = self.ui.timelines.keys().cloned().collect();
         reg.time_markers = self
@@ -1599,6 +1624,30 @@ mod tests {
         assert!(tree.parse(line, &reg).executable().is_ok(), "{line}");
         let removal = "give @s test:pot[!test:meal]";
         assert!(tree.parse(removal, &reg).executable().is_ok(), "{removal}");
+    }
+
+    /// `/summon` and a selector's `type=` name a mod's entity type once the mods registered it (as
+    /// Waddles' penguin), refused before; a type built `noSummon` is named by selectors alone.
+    #[test]
+    fn commands_take_a_mods_entity_types() {
+        let mut reg = Registries::default();
+        reg.permission = 4;
+        reg.entity_types = vec!["minecraft:pig".to_owned(), "minecraft:player".to_owned()];
+        reg.summonable = vec!["minecraft:pig".to_owned()];
+        let tree = horizon_client::command::vanilla::game_dispatcher();
+        let summon = "summon test:penguin ~ ~ ~";
+        let select = "kill @e[type=test:penguin]";
+        for line in [summon, select] {
+            assert!(tree.parse(line, &reg).executable().is_err(), "unknown before: {line}");
+        }
+        add_entity_type(&mut reg, "test:penguin", true);
+        add_entity_type(&mut reg, "test:penguin", true);
+        add_entity_type(&mut reg, "test:seat", false);
+        assert_eq!(reg.entity_types, ["minecraft:pig", "minecraft:player", "test:penguin", "test:seat"]);
+        assert_eq!(reg.summonable, ["minecraft:pig", "test:penguin"]);
+        for line in [summon, select, "kill @e[type=test:seat]"] {
+            assert!(tree.parse(line, &reg).executable().is_ok(), "{line}");
+        }
     }
 
     #[test]

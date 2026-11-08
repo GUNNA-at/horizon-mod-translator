@@ -1873,13 +1873,15 @@ pub(crate) fn server_stopped(rt: &mut Rt) {
     server_event(rt, "ServerStoppedEvent");
     // Then its configs unload ([`crate::mod_configs::server_stopped`]).
     crate::mod_configs::server_stopped(rt);
-    // The server's commands went with it (`crate::commands`).
+    // The server's commands went with it (`crate::commands`), and its levels' entities, saved with
+    // their chunks (`crate::entity_saves::save_chunks`).
     for key in [
         SERVER_RUNNING,
         "compat:server",
         "compat:level",
         "compat:commands",
         crate::glue::SERVER_LEVELS,
+        crate::mod_entities::LIVE,
     ] {
         rt.interned.remove(key);
     }
