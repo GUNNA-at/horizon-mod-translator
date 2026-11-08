@@ -37,6 +37,10 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
         // A space's glyph draws nothing (Create's display boards skip it by `instanceof`).
         crate::gui::EMPTY_GLYPH => Some("net/minecraft/client/gui/font/glyphs/BakedGlyph"),
         NOISE_GENERATOR => Some(CHUNK_GENERATOR),
+        // NeoForge's spawn egg of a type registered later is vanilla's spawn egg.
+        "net/neoforged/neoforge/common/DeferredSpawnEggItem" => {
+            Some("net/minecraft/world/item/SpawnEggItem")
+        }
         _ => crate::models::api_super(class)
             .or_else(|| crate::entity_render::api_super(class))
             .or_else(|| crate::camera::api_super(class))
@@ -784,7 +788,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 81] = [
+const CHAIN: [Module; 82] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -831,6 +835,7 @@ const CHAIN: [Module; 81] = [
     crate::world_events::call,
     crate::made_entities::call,
     crate::vanilla_entities::call,
+    crate::entity_saves::call,
     crate::commands::call,
     crate::brigadier::call,
     crate::functions::call,
@@ -871,7 +876,7 @@ const CHAIN: [Module; 81] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 81] = [
+const CLAIMS: [Claims; 82] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -918,6 +923,7 @@ const CLAIMS: [Claims; 81] = [
     crate::world_events::claims,
     crate::made_entities::claims,
     crate::vanilla_entities::claims,
+    crate::entity_saves::claims,
     crate::commands::claims,
     crate::brigadier::claims,
     crate::functions::claims,
@@ -956,7 +962,7 @@ const CLAIMS: [Claims; 81] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 81] = [
+const MODULE_NAMES: [&str; 82] = [
     "diodes",
     "rails",
     "fake_players",
@@ -1003,6 +1009,7 @@ const MODULE_NAMES: [&str; 81] = [
     "world_events",
     "made_entities",
     "vanilla_entities",
+    "entity_saves",
     "commands",
     "brigadier",
     "functions",

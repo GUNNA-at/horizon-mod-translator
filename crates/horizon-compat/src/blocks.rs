@@ -2460,6 +2460,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 rt.put_field(a(0), "backgroundColor", a(2));
                 rt.put_field(a(0), "highlightColor", a(3));
             }
+            // Vanilla's `SpawnEggItem(type, background, highlight, properties)`: the type it spawns
+            // and its colours.
+            if o == "net/minecraft/world/item/SpawnEggItem"
+                && desc.starts_with("(Lnet/minecraft/world/entity/EntityType;II")
+            {
+                rt.put_field(a(0), "defaultType", a(1));
+                rt.put_field(a(0), "backgroundColor", a(2));
+                rt.put_field(a(0), "highlightColor", a(3));
+            }
             // `BlockItem(Block, Properties)` and its kinds: the block it places (`Block.asItem()` finds it).
             if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") {
                 rt.put_field(a(0), "$block", a(1));

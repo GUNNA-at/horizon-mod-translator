@@ -667,6 +667,26 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.put_field(a(0), "$interval", a(1));
             Some(a(0))
         }
+        // A type that isn't saved (`noSave`: its entities have no id to save under), one a command
+        // can't summon, and how much bigger than its entities a spawn's box is.
+        (TYPE_BUILDER, "noSave" | "noSummon") => {
+            rt.put_field(
+                a(0),
+                if name == "noSave" {
+                    "$noSave"
+                } else {
+                    "$noSummon"
+                },
+                V::I(1),
+            );
+            Some(a(0))
+        }
+        (TYPE_BUILDER, "spawnDimensionsScale")
+            if desc == "(F)Lnet/minecraft/world/entity/EntityType$Builder;" =>
+        {
+            rt.put_field(a(0), "$spawnScale", a(1));
+            Some(a(0))
+        }
         (TYPE_BUILDER, "build") => {
             let t = rt.new_object(ENTITY_TYPE);
             for f in [
@@ -677,6 +697,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "$eye",
                 "$range",
                 "$interval",
+                "$noSave",
+                "$noSummon",
+                "$spawnScale",
             ] {
                 let v = rt.get_field(a(0), f);
                 rt.put_field(t, f, v);

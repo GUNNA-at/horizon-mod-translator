@@ -19,10 +19,11 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
         return true;
     }
     // The class trees the runtime climbs for calls too (`ZombieModel` → `HumanoidModel`,
-    // `MobRenderer` → `LivingEntityRenderer`).
+    // `MobRenderer` → `LivingEntityRenderer`), and through one of those to a vanilla class, that
+    // class's supertypes (NeoForge's `DeferredSpawnEggItem` is a `SpawnEggItem`, so an `Item`).
     let mut k = c;
     while let Some(sup) = crate::api::api_super(k) {
-        if sup == class {
+        if sup == class || vanilla_is_a(sup, class) {
             return true;
         }
         k = sup;

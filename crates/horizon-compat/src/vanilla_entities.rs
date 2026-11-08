@@ -1032,6 +1032,76 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 a(1)
             }
         }
+        // `load(tag)` (NeoForge's `deserializeNBT(provider, tag)`) as vanilla reads it, of what the
+        // game lets a mod set: its motion (a component over 10 is dropped), its place (clamped to
+        // the world's bounds; one the tag lacks is the origin, as vanilla reads zeros), a living
+        // one's health when the tag has it, and the mod data (`NeoForgeData`, the tag's own
+        // compound). Its rotation, name, fire, air and the rest stay the game's.
+        "load" | "deserializeNBT" if desc.ends_with("Lnet/minecraft/nbt/CompoundTag;)V") => {
+            let tag = a(args.len() - 1);
+            if tag.r() == 0 {
+                rt.throw_new("java/lang/NullPointerException");
+                return Some(V::Void);
+            }
+            let nbt = crate::nbt::from_runtime(rt, tag);
+            let three = |k: &str| match nbt.get(k) {
+                Some(Nbt::List(l)) => [0, 1, 2].map(|i| match l.get(i) {
+                    Some(Nbt::Double(d)) => *d,
+                    _ => 0.0,
+                }),
+                _ => [0.0; 3],
+            };
+            let motion = three("Motion").map(|v| if v.abs() > 10.0 { 0.0 } else { v });
+            let p = three("Pos");
+            let to = [
+                p[0].clamp(-3.000_051_2e7, 3.000_051_2e7),
+                p[1].clamp(-2.0e7, 2.0e7),
+                p[2].clamp(-3.000_051_2e7, 3.000_051_2e7),
+            ];
+            // "Entity has invalid position", in the crash report vanilla wraps it in.
+            if !to.iter().all(|v| v.is_finite()) {
+                rt.throw_new("net/minecraft/ReportedException");
+                return Some(V::Void);
+            }
+            with_host(rt, |h| h.set_entity_motion(id, motion));
+            if with_host(rt, |h| h.teleport_entity(id, to)).unwrap_or(false) {
+                for (k, v) in ["$x", "$y", "$z"].into_iter().zip(to) {
+                    rt.put_field(e, k, V::D(v));
+                }
+            }
+            let health = match nbt.get("Health") {
+                Some(Nbt::Byte(n)) => Some(f32::from(*n)),
+                Some(Nbt::Short(n)) => Some(f32::from(*n)),
+                Some(Nbt::Int(n)) => Some(*n as f32),
+                Some(Nbt::Long(n)) => Some(*n as f32),
+                Some(Nbt::Float(n)) => Some(*n),
+                Some(Nbt::Double(n)) => Some(*n as f32),
+                _ => None,
+            };
+            if let (true, Some(h)) = (living, health) {
+                api::call(
+                    rt,
+                    "net/minecraft/world/entity/LivingEntity.setHealth.(F)V",
+                    &[e, V::F(h)],
+                );
+            }
+            let k = rt.string("NeoForgeData");
+            if api::call(
+                rt,
+                "net/minecraft/nbt/CompoundTag.contains.(Ljava/lang/String;I)Z",
+                &[tag, k, V::I(10)],
+            )
+            .i() != 0
+            {
+                let data = api::call(
+                    rt,
+                    "net/minecraft/nbt/CompoundTag.getCompound.(Ljava/lang/String;)Lnet/minecraft/nbt/CompoundTag;",
+                    &[tag, k],
+                );
+                rt.put_field(e, "$data", data);
+            }
+            V::Void
+        }
         // `spawnAtLocation(stack[, offsetY])`, or an item's: a new item entity at its feet (raised by
         // the offset), added to the level; none for an empty stack, or on a client.
         "spawnAtLocation" => {

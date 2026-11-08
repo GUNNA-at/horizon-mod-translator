@@ -7436,6 +7436,58 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `OutputStream` gets a compressed write byte by byte through its `write(int)` and is closed
     through its `close`; the structure test also reads a
     gzipped template from the mod's data by id), translator 22.
+- [x] 2026-11-08 Part 114: entities to NBT and back, entity types by id, spawn eggs' types.
+  - New module `entity_saves.rs`, after the entity modules in the dispatch chain, each step the
+    entity's own call so a mod's entity, an entity a mod made of vanilla's type and the game's own
+    each answer as they do:
+    - `Entity.save` (none for a passenger: its vehicle saves it, through its own `isPassenger`),
+      `saveAsPassenger` (none for an entity removed for good: a mod's entity keeps its
+      `RemovalReason` and saves only when unloaded with its chunk; the game's own, or one a mod
+      made, once removed; none for a type that isn't saved; else the type's id under `id`, then
+      `saveWithoutId`), `getEncodeId` (the registry id of `getType()`, none for a type built
+      `noSave` and vanilla's four: the player, lightning bolts, fishing bobbers, leash knots).
+    - `EntityType.by(tag)` (`ResourceLocation.parse`: an id vanilla can't read throws
+      `ResourceLocationException`), `byString` (`tryParse`: finds none), both through the
+      registry (a mod's types, vanilla's by their ids, a bare id vanilla's);
+      `create(tag, level)` (the type's `create(level)`, then the new entity's `load(tag)`);
+      `loadEntityRecursive(tag, level, function)` (a `RuntimeException` while making one is
+      dropped as vanilla logs it; the function's entity, then each of `Passengers` the same way,
+      told to ride it with `startRiding(vehicle, true)`).
+    - `canSerialize`, `canSummon` (a mod's builder's `noSave` and `noSummon` are kept now),
+      `getDefaultLootTable` (`<ns>:entities/<path>`), `toShortString`, `getSpawnAABB` (the
+      builder's `spawnDimensionsScale`; vanilla's slimes and magma cubes 4), `RemovalReason`'s
+      `shouldSave` and `shouldDestroy`.
+    - `SpawnEggItem.getType(stack)` (the type the stack's entity data names by `id`, when the
+      registry holds it, else the egg's own `getDefaultType`: a NeoForge egg's supplier's, the
+      type vanilla's constructor got, a vanilla egg's by its name), `spawnsEntity`, `getColor`,
+      `byId` (the egg NeoForge maps a type to, else the egg made with it, else vanilla's).
+  - The game's entity loads what the game lets a mod set (`load`, NeoForge's `deserializeNBT`):
+    its motion (a component over 10 dropped), its place (clamped to the world's bounds; a
+    non-finite one throws as vanilla's crash does), a living one's health, and the mod data
+    (`NeoForgeData`, the tag's own compound). An entity a mod made and hasn't added rides nothing
+    and is ridden by nothing, and says why it was removed (`getRemovalReason`).
+  - Not yet: riding (`startRiding` on the game's entities and on mods' entities that don't seat
+    their own), the game's entity's rotation, name, fire and air from a compound (no host setter),
+    `loadEntitiesRecursive`, `updateCustomEntityTag`, vanilla eggs' colours.
+  - Measured (packcov27, the same 367 jars): methods 82.8% (88 more mapped), uses 91.1% (from
+    91.0%), distinct missing API methods 9427 (from 9458); Create 81.2% of its methods (from
+    81.0%), 96.2% of its uses. Every key above is mapped now (`Entity.save` and `load` were missing
+    in 9 mods each, `EntityType.create(tag, level)` in 8, `loadEntityRecursive` in 7,
+    `SpawnEggItem.getType` in 10); `createDefaultStackConfig` (4) and `SpawnEggItem.getDefaultInstance`
+    (1) are left.
+  - Tests: compat 641 (5 new: a mod's cart saves under `test:cart` with its place and laps, and
+    `create(tag, level)` makes a new cart there with its UUID and laps; `by`/`byString` find the
+    mod's type and vanilla's, none for unknown ids, `by` throws for an id vanilla can't read;
+    `save` leaves out a passenger (`saveAsPassenger` doesn't), a discarded cart (one unloaded with
+    its chunk saves), a `noSave` type's entity; vanilla's player can be neither saved nor
+    summoned, a lightning bolt only summoned; `loadEntityRecursive` hands the vehicle and then its
+    passenger to the function and seats the passenger, forced, and drops the exception of an
+    unreadable id; the game's cow saves under `minecraft:cow` with the game's compound, a
+    lightning bolt doesn't, and a load moves the cow, sets its motion (12 dropped) and health and
+    its mod data; spawn eggs: a NeoForge egg spawns its supplier's type, its stack's entity data
+    names another, an unknown id falls back, vanilla's cow egg spawns cows, `byId` finds each
+    egg; NeoForge's `DeferredSpawnEggItem` is a `SpawnEggItem` and an `Item` to `instanceof`),
+    translator 22.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

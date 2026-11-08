@@ -548,7 +548,6 @@ fn made_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             crate::api_common::vec3(rt, m[0], m[1], m[2])
         }
         "getType" => crate::mod_entities::vanilla_type(rt, &kind),
-        "getEncodeId" => rt.string(&kind),
         "level" | "getCommandSenderWorld" => match rt.get_field(e, "$level") {
             l @ V::R(n) if n != 0 => l,
             _ => crate::glue::level(rt),
@@ -579,6 +578,22 @@ fn made_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         "isAlive" => V::I(i32::from(held)),
         "isRemoved" => V::I(i32::from(!held)),
+        "getRemovalReason" => match state(rt, e) {
+            DISCARDED => crate::api::get_static(
+                rt,
+                "net/minecraft/world/entity/Entity$RemovalReason.DISCARDED",
+            ),
+            _ => V::NULL,
+        },
+        // Not in a level yet: nothing rides it and it rides nothing.
+        "isPassenger" | "isVehicle" => V::I(0),
+        "getVehicle" | "getControllingPassenger" | "getFirstPassenger"
+            if desc.starts_with("()") =>
+        {
+            V::NULL
+        }
+        "getRootVehicle" => e,
+        "getPassengers" => crate::jutil::new_list(rt, Vec::new()),
         "discard" | "remove" | "setRemoved" | "kill" => {
             rt.put_field(e, "$made", V::I(DISCARDED));
             V::Void

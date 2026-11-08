@@ -895,7 +895,7 @@ fn empty_custom_data(rt: &mut Rt) -> V {
 }
 
 /// The tag `data` (a `CustomData`) holds, as NBT.
-fn custom_nbt(rt: &Rt, data: V) -> BTreeMap<String, Nbt> {
+pub(crate) fn custom_nbt(rt: &Rt, data: V) -> BTreeMap<String, Nbt> {
     if data.r() == 0 {
         return BTreeMap::new();
     }
