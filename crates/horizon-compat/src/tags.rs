@@ -775,6 +775,28 @@ mod tests {
         assert_eq!(hex, "57235f72ffcb541ba1cc281f73b4a37a");
     }
 
+    /// The game's runtimes draw their own UUIDs (`UUID.randomUUID()`, version 4), as a JVM's
+    /// `SecureRandom` gives them: the next session's runtime never makes the first one's again, so
+    /// the ids a mod saved (Create's railway graphs) stay its own.
+    #[test]
+    fn each_game_runtime_draws_its_own_uuids() {
+        let first = |rt: &mut Rt| {
+            let u = call(rt, "java/util/UUID.randomUUID.()Ljava/util/UUID;", &[]);
+            let t = call(rt, "java/util/UUID.toString.()Ljava/lang/String;", &[u]);
+            rt.str_of(t).unwrap_or_default().to_owned()
+        };
+        let (mut one, mut two) = (Rt::new(), Rt::new());
+        one.seed_from_entropy();
+        two.seed_from_entropy();
+        let (a, b) = (first(&mut one), first(&mut two));
+        assert_ne!(a, b);
+        for u in [&a, &b] {
+            // Version 4, IETF variant.
+            assert_eq!(&u[14..15], "4", "{u}");
+            assert!(matches!(&u[19..20], "8" | "9" | "a" | "b"), "{u}");
+        }
+    }
+
     #[test]
     fn lists_of_compounds_survive_a_save() {
         let mut rt = Rt::new();

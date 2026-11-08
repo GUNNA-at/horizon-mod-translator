@@ -699,6 +699,27 @@ impl Rt {
         }
     }
 
+    /// Seeds the runtime's random stream ([`Rt::random_state`]) from the system, as a JVM seeds what
+    /// draws without a seed (`UUID.randomUUID()`, `new Random()`, `RandomSource.create()`): the
+    /// game's runtimes draw differently each run and from each other, so the ids a mod saves (Create's
+    /// railway graphs, trains) are never made again for something else. A runtime left as `Rt::new`
+    /// made it draws the same numbers each time (tests, the translator's probe).
+    pub fn seed_from_entropy(&mut self) {
+        use std::hash::BuildHasher;
+        static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        // `RandomState` keys its hasher from the system's randomness.
+        let seed = std::collections::hash_map::RandomState::new().hash_one((
+            nanos,
+            std::process::id(),
+            made,
+        ));
+        self.random_state = seed.max(1);
+    }
+
     /// Listens with `class`'s static `@SubscribeEvent` methods: an `@EventBusSubscriber` class, or
     /// `bus.register(Foo.class)`.
     pub fn subscribe_class(&mut self, class: &str) {

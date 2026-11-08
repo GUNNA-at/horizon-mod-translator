@@ -7688,6 +7688,24 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       source's level id, saves folder and dimension paths, `getStorageFolder` of a mod's
       dimension, `getServerDirectory`. A client's runtime gets null.
   - Translator 22. The game changes build with the next game build.
+  - In the game (`p117scene.sh`, Create, one world played twice): session 1 laid six straight
+    tracks and saved. `data/create_tracks.dat` was 343 bytes, DataVersion 3955, with one graph
+    of two nodes and its signal block. Quitting left the file as it was, since nothing had
+    changed since the save. Session 2 read it back: that graph's `Points` came back from Create's
+    own `TrackGraph.read`. Session 2 then laid a second line and saved, and the file held both
+    graphs.
+  - That run found every runtime drawing the same random numbers. Each started from one fixed
+    seed, so the second session's new graph got the first session's UUID and replaced the graph
+    it had read. In Java, `UUID.randomUUID()`, `new Random()` and `RandomSource.create()` draw
+    from the system. Fixed with core's `Rt::seed_from_entropy`, which seeds the runtime's random
+    stream from the system's randomness, the time, the process and a count. The bundle's
+    runtime makers call it after `use_game_dir`: the client's and server's, world generation's,
+    and the one for questions asked before a game runs. Tests and the coverage probe make their
+    own runtimes, which keep the fixed seed and stay reproducible.
+    With the fix, session 2's file held two graphs with different ids and colours: the first at
+    x=-43 and the new one at x=-35. Both lines of track are drawn.
+  - Test 655: two runtimes seeded from the system draw different first `randomUUID`s, each a
+    version 4 UUID with the IETF variant.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
