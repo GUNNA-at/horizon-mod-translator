@@ -1,0 +1,37 @@
+{
+  "hooks": [
+    {
+      "name": "mod_entity_attack",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entity_attack",
+      "neoforge": "Player.attack",
+      "side": "server",
+      "cancellable": false
+    },
+    {
+      "name": "mod_entity_interact",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entity_interact",
+      "neoforge": "Player.interactOn",
+      "side": "server",
+      "cancellable": false
+    },
+    {
+      "name": "client_mod_entity_hit",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_mod_entity_hit",
+      "neoforge": "ProjectileUtil.getEntityHitResult",
+      "side": "client",
+      "cancellable": false
+    },
+    {
+      "name": "client_mod_entity_interact",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_mod_entity_interact",
+      "neoforge": "MultiPlayerGameMode.interact",
+      "side": "client",
+      "cancellable": false
+    }
+  ],
+  "rust_summary": "a player's blows and clicks on the entities a native mod keeps itself: the one the window's view meets (`native_client_mod_entity_hit`) and the click as the client predicts it (`native_client_mod_entity_interact`), the blow the server's game works out and the mod's entity takes (`native_mod_entity_attack`), and the click the mod makes on the server (`native_mod_entity_interact`).",
+  "doc_summary": "a player's blows and clicks on a native mod's own entities (a translated mod's mobs). `native_client_mod_entity_hit(eye, look, reach, hit)` (the window's game) asks for the mod's entity the view meets first: each mod puts its nearest pickable one in `hit` (network id, distance along the view, where the view meets its box, its feet), and the game weighs it against the block and its own entities in the way, so the crosshair targets it, a left click sends the server an attack of it and a right click an interaction. `native_client_mod_entity_interact(entity, hand, click)` predicts a click on the client's copy (`MultiPlayerGameMode.interact`): `Consume` and `Success` end the click (`Success` swings), anything else lets the hand's item use and the other hand go on. On the server, past `native_attack_entity`, the game works out the blow as `Player.attack` does (the weapon, the attack strength, a critical hit on a living one, the enchantments, the extra knockback) and asks `native_mod_entity_attack(dimension, entity, blow, struck)`: the mod whose entity it is has it take the blow (`isAttackable`, `skipAttackInteraction`, `hurt` from the player's `player_attack` source, the knockback along the player's look) and sets `struck` (whether it could be hit and was hurt, its health before and after, its place and size, whether alive); the game then does the player's side (sounds, the critical hit's and damage's particles, a sword's sweep at the game's mobs around it, the weapon's use and wear, the exhaustion). Past `native_interact_entity`, `native_mod_entity_interact(dimension, entity, hand, click)` makes the click (`Player.interactOn`: the entity's `interact`, a mob's `mobInteract`, then a mod item's `interactLivingEntity`); the player's state is swapped in for both. Bundles need \"hooks\": @API:mod_entity_hits@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mod_hits.rs"
+  ]
+}

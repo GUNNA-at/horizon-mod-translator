@@ -3353,6 +3353,65 @@ impl Game<'_> {
     ) {
         let _ = (dimension, entity, nbt);
     }
+    /// A player's blow on entity `entity` of the server level `dimension`, one of a native mod's
+    /// own (`native_mod_entities`), past `native_attack_entity`: the game worked it out as
+    /// `Player.attack` does (`blow`: the damage, its type, the extra knockback and its direction),
+    /// and the mod whose entity it is has it take the blow (`isAttackable`,
+    /// `skipAttackInteraction`, `hurt` from the player's source, the knockback) and sets `struck`
+    /// to what it did. The game then does the player's side of a blow that landed. The player's
+    /// state is swapped in. Server-side. API @API:mod_entity_hits@.
+    pub(super) fn native_mod_entity_attack(
+        &mut self,
+        dimension: &str,
+        entity: i32,
+        blow: &super::native_mod_hits::ModEntityBlow,
+        struck: &mut Option<super::native_mod_hits::ModEntityStruck>,
+    ) {
+        let _ = (dimension, entity, blow, struck);
+    }
+    /// A player's click with `hand` on entity `entity` of the server level `dimension`, one of a
+    /// native mod's own, past `native_interact_entity`: `Player.interactOn`, the entity's own
+    /// `interact` (a mob's `mobInteract`: an animal eats its food from the hand and falls in
+    /// love), then the held item's `interactLivingEntity`. The mod whose entity it is sets `click`
+    /// to what it came to; a `Success` swings the hand. The player's state is swapped in.
+    /// Server-side. API @API:mod_entity_hits@.
+    pub(super) fn native_mod_entity_interact(
+        &mut self,
+        dimension: &str,
+        entity: i32,
+        hand: Hand,
+        click: &mut Option<super::native_mod_hits::ModEntityClick>,
+    ) {
+        let _ = (dimension, entity, hand, click);
+    }
+    /// The window's view, from the eyes at `eye` along the unit vector `look`, within `reach`
+    /// blocks: a native mod whose own entity it meets before `hit`'s (a pickable one, its box
+    /// grown by its pick radius: `ProjectileUtil.getEntityHitResult`) puts it there, the nearest
+    /// winning. The game weighs it against the block and its own entities in the way, and a click
+    /// on it goes to the server as an attack or an interaction of that entity. The window's game
+    /// only. API @API:mod_entity_hits@.
+    pub(super) fn native_client_mod_entity_hit(
+        &self,
+        eye: [f64; 3],
+        look: [f64; 3],
+        reach: f64,
+        hit: &mut Option<super::native_mod_hits::ModEntityHit>,
+    ) {
+        let _ = (eye, look, reach, hit);
+    }
+    /// The window's player clicks a native mod's own entity `entity` with `hand`
+    /// (`MultiPlayerGameMode.interact`, after the click went to the server): the mod predicts it
+    /// on its copy of the entity (`Player.interactOn`) and sets `click`. `Consume` and `Success`
+    /// end the click (`Success` swings); otherwise the hand's own item use and the other hand go
+    /// on. The window's game only. API @API:mod_entity_hits@.
+    pub(super) fn native_client_mod_entity_interact(
+        &mut self,
+        entity: i32,
+        hand: Hand,
+        click: &mut Option<super::native_mod_hits::ModEntityClick>,
+    ) {
+        let _ = (entity, hand, click);
+    }
     /// An entity mounts or dismounts a vehicle (NeoForge's `EntityMountEvent`, posted from
     /// `Entity.startRiding` and `removeVehicle`): `entity` of type `kind` (`minecraft:player`,
     /// `minecraft:zombie`) in the server level `dimension`, getting on (`mounting`) or off the

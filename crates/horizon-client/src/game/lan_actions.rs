@@ -1923,6 +1923,9 @@ impl Game<'_> {
             }
             S::Attack(p) => self.guest_attack(host, conn, p.id),
             S::Interact(p) => {
+                // A translated mod's own entity: where its mod says it is now
+                // (game/native_mod_hits.rs).
+                let mod_target = self.current_mod_entity(p.id);
                 // handleInteract: a target inside the world border, within the entity
                 // interaction range plus 3 of its box, or nothing happens.
                 if let Some(target) = self.guest_target_box(host, gi, p.id)
@@ -1931,6 +1934,12 @@ impl Game<'_> {
                             g.within_entity_interaction_range(&target, 3.0)
                         }) != Some(true))
                 {
+                    return;
+                }
+                if let Some(target) = mod_target {
+                    let hand = if p.hand == 1 { Hand::Off } else { Hand::Main };
+                    let swung = self.as_guest(host, conn, |g| g.interact_mod_entity(&target, hand));
+                    self.lan_swing_back(host, conn, swung);
                     return;
                 }
                 let before = host.hub.guests[gi].vehicle;
@@ -2657,6 +2666,14 @@ impl Game<'_> {
         if let Some(b) = self.tracked_special_box(id) {
             return Some(b);
         }
+        // A translated mod's own entity, as its mod last told it.
+        if let Some(e) = u32::try_from(id).ok().and_then(|i| self.mod_entity(i)) {
+            let ([x, y, z], half) = (e.position, f64::from(e.size[0]) / 2.0);
+            return Some(Aabb::new(
+                Vec3::new(x - half, y, z - half),
+                Vec3::new(x + half, y + f64::from(e.size[1]), z + half),
+            ));
+        }
         self.creatures
             .projectiles
             .iter()
@@ -2671,6 +2688,9 @@ impl Game<'_> {
         if host.hub.guests[gi].spectator() {
             return;
         }
+        // A translated mod's own entity: where its mod says it is now
+        // (game/native_mod_hits.rs).
+        let mod_target = self.current_mod_entity(id);
         // handleAttack: a target inside the world border, then
         // `isWithinAttackRange(mainHandItem, box, 3.0)` before anything else, players,
         // mobs, objects and fireballs alike.
@@ -2709,6 +2729,23 @@ impl Game<'_> {
                 canceled
             }) == Some(true)
         {
+            return;
+        }
+        if let Some(target) = mod_target {
+            let sent = self
+                .as_guest(host, conn, |g| {
+                    let marked = g
+                        .player
+                        .as_mut()
+                        .is_some_and(|p| std::mem::take(&mut p.health.sync_velocity));
+                    g.attack_mod_entity(&target);
+                    g.swing_arm();
+                    let p = g.player.as_mut()?;
+                    let sent = std::mem::replace(&mut p.health.sync_velocity, marked);
+                    sent.then_some(p.velocity)
+                })
+                .flatten();
+            self.send_guest_motion(host, conn, sent);
             return;
         }
         if let Some(victim) = Self::pvp_victim(host, conn, id) {

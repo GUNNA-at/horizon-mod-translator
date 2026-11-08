@@ -1071,6 +1071,17 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             rt.put_field(e, "$motion", m);
             V::Void
         }
+        // `push(x, y, z)`: its motion grows by that, and it was pushed (`hasImpulse`).
+        "push" if desc == "(DDD)V" => {
+            let m = rt.get_field(e, "$motion");
+            let [x, y, z] = if m.r() == 0 { [0.0; 3] } else { crate::api_common::xyz(rt, m) };
+            let m = vec3(rt, [x + a(1).d(), y + a(2).d(), z + a(3).d()]);
+            rt.put_field(e, "$motion", m);
+            rt.put_field(e, "hasImpulse", V::I(1));
+            V::Void
+        }
+        "skipAttackInteraction" => V::I(0),
+        "getPickRadius" => V::F(0.0),
         "getYRot" => rt.get_field(e, "$yRot"),
         "getXRot" => rt.get_field(e, "$xRot"),
         // Where it looks (`calculateViewVector`): now, or a share `partialTick` of the way from the
@@ -1242,7 +1253,9 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "isPassenger" | "isSpectator" | "isAlwaysTicking" | "isInvisible" | "isSilent" | "noCulling" => V::I(0),
         "getVehicle" | "getControllingPassenger" if desc.ends_with("Lnet/minecraft/world/entity/Entity;") => V::NULL,
         "getRootVehicle" => e,
-        "shouldRender" | "shouldRenderAtSqrDistance" | "isPickable" | "isAttackable" => V::I((name != "isPickable" && name != "isAttackable") as i32),
+        // `Entity`'s: drawn, hit by a player's blow, but not picked by the crosshair.
+        "shouldRender" | "shouldRenderAtSqrDistance" | "isAttackable" => V::I(1),
+        "isPickable" => V::I(0),
         "getName" | "getDisplayName" => {
             let ty = rt.get_field(e, "$type");
             let id = description_id(rt, ty);

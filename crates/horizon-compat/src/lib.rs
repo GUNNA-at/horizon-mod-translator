@@ -111,6 +111,7 @@ pub mod screens;
 pub mod shapes;
 pub mod streams;
 pub mod entity_commands;
+pub mod entity_hits;
 pub mod entity_saves;
 pub mod structures;
 pub mod sounds;

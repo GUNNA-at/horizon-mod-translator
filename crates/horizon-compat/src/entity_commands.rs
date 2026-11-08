@@ -47,6 +47,8 @@ pub struct Seen {
     pub size: [f32; 3],
     /// `isAlive`: not removed, and a living one's health above 0.
     pub alive: bool,
+    /// Whether it is a living entity (`instanceof LivingEntity`): a mob, not a contraption.
+    pub living: bool,
     /// Its custom name, when it has one. Not modelled for a mod's entity yet: none.
     pub custom_name: Option<String>,
     /// `getTags`. Not modelled for a mod's entity yet: none.
@@ -78,7 +80,7 @@ fn here(rt: &Rt, dimension: &str) -> Vec<V> {
 }
 
 /// The level `dimension`'s mod entity of network id `id`.
-fn by_id(rt: &Rt, dimension: &str, id: i32) -> Option<V> {
+pub(crate) fn by_id(rt: &Rt, dimension: &str, id: i32) -> Option<V> {
     here(rt, dimension).into_iter().find(|&e| rt.get_field(e, "$id").i() == id)
 }
 
@@ -100,6 +102,7 @@ pub fn seen(rt: &mut Rt, dimension: &str) -> Vec<Seen> {
             uuid: (u128::from(msb as u64) << 64) | u128::from(lsb as u64),
             size,
             alive,
+            living: crate::mobs::is_mod_living(rt, e),
             custom_name: None,
             tags: Vec::new(),
         });
@@ -223,6 +226,7 @@ mod tests {
             assert_eq!(seen[0].position, [0.5, 1.0, 0.5]);
             assert_eq!(seen[0].size, [0.6, 1.0, 0.85], "the type's box, its eyes 85% up");
             assert!(seen.iter().all(|s| s.alive));
+            assert_eq!(seen.iter().map(|s| s.living).collect::<Vec<_>>(), [true, false], "a penguin lives, a cart doesn't");
             let (msb, lsb) = crate::tags::uuid_bits(rt, rt.get_field(penguin, "uuid"));
             assert_eq!(seen[0].uuid, (u128::from(msb as u64) << 64) | u128::from(lsb as u64));
             assert_ne!(seen[0].uuid, seen[1].uuid);

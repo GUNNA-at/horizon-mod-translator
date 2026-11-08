@@ -26,6 +26,8 @@ pub(crate) struct ModEntity {
     pub size: [f32; 3],
     /// `Entity.isAlive`: not removed, and a living one's health above 0.
     pub alive: bool,
+    /// Whether it is a living entity (a mob, not a contraption): a blow on it may be critical.
+    pub living: bool,
     /// Its custom name (a name tag's, `setCustomName`), when it has one.
     pub custom_name: Option<String>,
     /// `Entity.getTags`.

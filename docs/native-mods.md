@@ -1297,6 +1297,45 @@ of `generic_kill` and falls over for 20 ticks, no longer alive to selectors), `/
 path dropped), and its compound carries `Rotation` as vanilla's does. Not yet: a mod entity's custom name and tags
 (`/tag` and `name=` find none), `/data merge entity` on one, `/tp` to another level.
 
+### Mod entities hit and clicked
+
+`crates/horizon-client/src/game/native_mod_hits.rs`: a player's blows and clicks on the entities a native mod keeps
+itself (a translated mod's mobs). The game keeps the player, the mod keeps the entity.
+
+- `native_client_mod_entity_hit(eye, look, reach, hit)` (the window's game, a server's client) asks for the mod's
+  entity the view meets first: put your nearest pickable one in `hit` (`ModEntityHit`: network id, distance along the
+  view, where the view meets its box, its feet) unless `hit` already holds a nearer one. The game weighs it against the
+  block and its own entities in the way: the crosshair targets it, a left click sends the server an attack of it
+  (`ServerboundAttackPacket`) and a right click an interaction (`ServerboundInteractPacket`, with where the view met
+  it less its feet).
+- `native_client_mod_entity_interact(entity, hand, click)` predicts the click on the client's copy
+  (`MultiPlayerGameMode.interact`): `Consume` and `Success` end the click (`Success` swings the hand); `Pass`, `Fail` or
+  None let the hand's item use and the other hand go on.
+- `native_mod_entity_attack(dimension, entity, blow, struck)` (server), past `native_attack_entity`: the game has worked
+  the blow out as `Player.attack` does (`ModEntityBlow`: the weapon's damage scaled by the attack strength, a critical
+  hit's on a living one, the enchantments' against its type, the damage type, the extra knockback's strength and the
+  `(sin yaw, -cos yaw)` it pushes along). Have yours take it and set `struck` (`ModEntityStruck`: whether it could be hit
+  at all and was hurt, a living one's health before and after, its feet and size, whether alive). The game then does the
+  player's side of a blow that landed: the knockback, no-damage, critical, strong or weak sound, the critical hit's and
+  the enchantments' particles around its box and the damage indicators, a sword's sweep at the game's mobs around it,
+  the `damage_dealt` and `used` statistics, `native_hurt_enemy`, the weapon's wear and 0.1 exhaustion.
+- `native_mod_entity_interact(dimension, entity, hand, click)` (server), past `native_interact_entity`: make the click
+  and set its `click`. The hand swings for `Success`.
+
+The player's state (position, inventory, mode, hand) is swapped in for the server hooks, as for a guest's other
+actions. A translated mod's entities answer through horizon-compat (`entity_hits`): the view meets an `isPickable`
+one, its box grown by `getPickRadius`; a blow needs `isAttackable` and no `skipAttackInteraction`, then `hurt`s it
+from the player's `player_attack` (or `mace_smash`) source, credited to the player, and pushes a living one with
+`knockback` (another with `push`). A click is `Player.interactOn`: the entity's `interact` (a mob's `mobInteract`),
+then a mod item's `interactLivingEntity`. A mob's `mobInteract` is 1.21.1's `Animal.mobInteract`: its food
+(`isFood`) puts a grown one in love for 600 ticks (`setInLove`, the heart event) and makes a baby grow by a tenth of
+the time it has left (`ageUp`); either eats one from the hand (`usePlayerItem`), none from a creative player's.
+
+Not yet: a leash, a name tag or a spawn egg on a mod's mob (`checkAndHandleImportantInteractions`), the game's items'
+own `interactLivingEntity` on one (a bucket, shears, a saddle), breeding (`BreedGoal`, `spawnChildFromBreeding`),
+Pick Block on a mod's entity, the critical hit's particles following it (they burst where it stood), a sweep hitting
+other mods' entities, post-attack enchantments (Fire Aspect) on one.
+
 ### Advancement triggers
 
 `crates/horizon-client/src/game/native_criteria.rs`: a mod's own criteria triggers, as a NeoForge mod registers a

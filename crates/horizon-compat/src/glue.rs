@@ -1774,6 +1774,38 @@ pub fn mod_entity_nbt(rt: &mut Rt, host: &mut dyn Host, dimension: &str, id: i32
     rt.with_host(host, |rt| crate::entity_commands::compound(rt, dimension, id))
 }
 
+/// `native_client_mod_entity_hit` (the window's client): the mods' entity the view from `eye` along
+/// `look` meets first within `reach` blocks ([`crate::entity_hits::aimed`]).
+pub fn client_mod_entity_hit(rt: &mut Rt, host: &mut dyn Host, eye: [f64; 3], look: [f64; 3], reach: f64) -> Option<crate::entity_hits::Aimed> {
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| crate::entity_hits::aimed(rt, eye, look, reach))
+}
+
+/// `native_mod_entity_attack` (server): the acting player's blow on the mods' entity `id` of the level
+/// `dimension`; None when it isn't one of theirs ([`crate::entity_hits::attack`]).
+pub fn mod_entity_attack(rt: &mut Rt, host: &mut dyn Host, dimension: &str, id: i32, blow: &crate::entity_hits::Blow) -> Option<crate::entity_hits::Struck> {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::entity_hits::attack(rt, dimension, id, blow))
+}
+
+/// `native_mod_entity_interact` (server): the acting player's click with `hand` (0 main, 1 off) on
+/// the mods' entity `id` of the level `dimension`; None when it isn't one of theirs
+/// ([`crate::entity_hits::interact`]).
+pub fn mod_entity_interact(rt: &mut Rt, host: &mut dyn Host, dimension: &str, id: i32, hand: u8) -> Option<crate::events::Answer> {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::entity_hits::interact(rt, Some(dimension), id, hand))
+}
+
+/// `native_client_mod_entity_interact` (the window's client): the click with `hand` on the client's
+/// copy of the mods' entity `id`, as `MultiPlayerGameMode.interact` predicts it before the server
+/// hears of it ([`crate::entity_hits::interact`]).
+pub fn client_mod_entity_interact(rt: &mut Rt, host: &mut dyn Host, id: i32, hand: u8) -> Option<crate::events::Answer> {
+    rt.safe_point();
+    client_setup(rt, host);
+    rt.with_host(host, |rt| crate::entity_hits::interact(rt, None, id, hand))
+}
+
 /// `native_register_commands` (server): the mods hear `RegisterCommandsEvent`, and their commands
 /// come back as native usages with the operator level each needs ([`crate::commands::register`]).
 pub fn register_commands(rt: &mut Rt, host: &mut dyn Host) -> Vec<(String, u8)> {

@@ -8994,6 +8994,54 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     -180, which the act does now (the compat test).
   - Not yet: a mod entity's custom name and tags (`/tag`, `name=`), `/data merge entity` on one, `/tp` into
     another level, `/damage`, `/effect` and `/ride` on one.
+- [x] 2026-11-08 Part 133: a player hits and feeds a translated mod's mobs. Measured first in the game built for
+  Part 132: a penguin summoned two blocks ahead kept its 8.0 health under creative and survival punches (the
+  crosshair outlined the snow block behind it), cod in hand right-clicked on it left `InLove` 0 and the stack at 5,
+  and a baby only aged by the clock. The window's client never picked a mod's entity, and the server had no attack
+  or click for one; `Animal.mobInteract` answered `PASS`.
+  - Four hook points (fragment `mod_entity_hits`, docs/native-mods.md "Mod entities hit and clicked"). On the
+    window's client, `native_client_mod_entity_hit(eye, look, reach, hit)`: each mod puts its nearest pickable
+    entity along the view in `hit`, and the game weighs it against the block and its own entities in the way
+    (`GameRenderer.pick`). A left click then sends `ServerboundAttackPacket` for it, a right click
+    `ServerboundInteractPacket` (where the view met it, less its feet), and the mod predicts the click on its copy
+    (`native_client_mod_entity_interact`, `MultiPlayerGameMode.interact`). On the server, past
+    `native_attack_entity`, the game works the blow out as `Player.attack` does for its own targets (weapon,
+    attack strength, a critical hit on a living one, enchantments, extra knockback) and the mod takes it
+    (`native_mod_entity_attack`: `isAttackable`, `skipAttackInteraction`, `hurt` from the player's
+    `player_attack` source, the knockback along the player's look); the game does the player's side (the attack
+    sounds, critical and damage particles, a sword's sweep at its own mobs, `damage_dealt`, the weapon's wear,
+    exhaustion). Past `native_interact_entity`, `native_mod_entity_interact` is `Player.interactOn`: the entity's
+    `interact`, a mob's `mobInteract`, then a mod item's `interactLivingEntity`.
+  - horizon-compat (`entity_hits`, `mobs`): 1.21.1's `Animal.mobInteract`. Its food (`isFood`) in hand, a grown
+    one on a server eats one (`usePlayerItem`; none from a creative player's stack) and falls in love for 600
+    ticks (`setInLove`: `loveCause`, the hearts' event 18 to its players); a baby eats one and grows a tenth of
+    the time it has left (`ageUp`); a client's copy answers as vanilla's does (`CONSUME` for a grown one, the
+    server deciding). A mod's entity can be pushed (`push`), skips no blow, has no pick radius, and is
+    attackable (it answered false before) but not pickable unless living, as vanilla's `Entity`.
+  - Found on the way: the outline was the block's along the view whatever stood before it (`pick()` alone), so it
+    showed behind the targeted penguin, and by the same code behind the game's own mobs. It is a block hit's only
+    now: an entity nearer than the block takes the crosshair (`GameRenderer.pick`). Not yet seen live: the build
+    with it was stopped before its run.
+  - Tests: compat 7 new (a ray meets a box at its near face and at once from inside; `InteractionResult`s answer
+    by their names; a grown penguin eats cod from the hand (`SUCCESS`, `InLove` 600, 5 cod to 4) and passes a
+    second click while in love, an unknown id answers nothing; a creative player's cod stays 5 and a stick
+    passes; a baby at -24000 grows to -21600 (`CONSUME`), and a client's grown copy answers `CONSUME` without
+    love; a punch of 5 takes it from 20 to 15, the knockback pushes it away from the player, the source is the
+    player's, a second blow inside its hurt frames lands nothing; the view meets the nearer of two penguins
+    2.7 blocks along it, none behind or out of reach) and the commands test tells the penguin living from the
+    cart. All 713 compat, 27 translator and 580 game library tests pass.
+  - Live, the game built from the working tree with Create and Waddles, a NoAI penguin two blocks ahead (three
+    runs alike): a creative punch takes it from 8.0 to 7.0 (`HurtTime` 5 a few ticks on), a survival one to 6.0;
+    cod right-clicked on it: `InLove` 600 and 4 cod left; a baby summoned at `Age` -24000 fed one: -21614, 2380
+    ticks grown besides the few it aged (`getSpeedUpSecondsWhenFeeding` truncates a tenth of its 1199 seconds
+    left to 119), and 3 cod left. Diamond sword blows
+    clicked a few ticks apart dealt 2.1, 3.4 and 2.9 at their attack strengths, one inside the hurt frames
+    counting only its 1.3 over the blow before, as vanilla's do: the penguin died on the third blow in one run, the
+    fourth in another, and lived through five quick ones in the third.
+  - Not yet: a leash, a name tag or a spawn egg on a mod's mob (`checkAndHandleImportantInteractions`), the
+    game's own items' `interactLivingEntity` on one (bucket, shears, saddle), breeding (`BreedGoal`,
+    `spawnChildFromBreeding`: Waddles' penguins fall in love and stay apart), Pick Block on a mod's entity,
+    the critical hit's particles following it, a sweep hitting other mods' entities, Fire Aspect on one.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

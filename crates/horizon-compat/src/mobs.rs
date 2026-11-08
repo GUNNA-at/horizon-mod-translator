@@ -136,6 +136,24 @@ const RESET_X_ROT: Key = key!("net/minecraft/world/entity/ai/control/LookControl
 const CLAMP_HEAD: Key = key!("net/minecraft/world/entity/ai/control/LookControl", "clampHeadRotationToBody.()V");
 const Y_ROT_D: Key = key!("net/minecraft/world/entity/ai/control/LookControl", "getYRotD.()Ljava/util/Optional;");
 const X_ROT_D: Key = key!("net/minecraft/world/entity/ai/control/LookControl", "getXRotD.()Ljava/util/Optional;");
+const MOB_INTERACT: Key = key!(
+    "net/minecraft/world/entity/Mob",
+    "mobInteract.(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResult;"
+);
+const IS_FOOD: Key = key!("net/minecraft/world/entity/animal/Animal", "isFood.(Lnet/minecraft/world/item/ItemStack;)Z");
+const USE_PLAYER_ITEM: Key = key!(
+    "net/minecraft/world/entity/animal/Animal",
+    "usePlayerItem.(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;)V"
+);
+const SET_IN_LOVE: Key = key!("net/minecraft/world/entity/animal/Animal", "setInLove.(Lnet/minecraft/world/entity/player/Player;)V");
+const CAN_FALL_IN_LOVE: Key = key!("net/minecraft/world/entity/animal/Animal", "canFallInLove.()Z");
+const GET_AGE: Key = key!("net/minecraft/world/entity/AgeableMob", "getAge.()I");
+const AGE_UP: Key = key!("net/minecraft/world/entity/AgeableMob", "ageUp.(IZ)V");
+/// `Entity.interact(Player, InteractionHand)`'s descriptor (`Mob.interact`, final).
+const INTERACT_DESC: &str = "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResult;";
+const GET_ITEM_IN_HAND: &str =
+    "net/minecraft/world/entity/player/Player.getItemInHand.(Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/item/ItemStack;";
+const CONSUME: &str = "net/minecraft/world/item/ItemStack.consume.(ILnet/minecraft/world/entity/LivingEntity;)V";
 
 /// `LivingEntity`'s air: what it holds at most (`getMaxAirSupply`).
 const MAX_AIR: i32 = 300;
@@ -2501,7 +2519,7 @@ fn set_absorption(rt: &mut Rt, e: V, f: f32) {
 
 /// `e.knockback(strength, x, z)` (virtual) for a living entity: a mod's here, the game's mobs
 /// through the game; a player's comes with the blow the game deals them.
-fn knock_back(rt: &mut Rt, e: V, strength: f64, x: f64, z: f64) {
+pub(crate) fn knock_back(rt: &mut Rt, e: V, strength: f64, x: f64, z: f64) {
     if is_mod_living(rt, e) {
         own_or(rt, e, KNOCKBACK, &[V::D(strength), V::D(x), V::D(z)], |_| (), |rt| knockback(rt, e, strength, x, z));
     } else if !is_player(rt, e) {
@@ -3299,6 +3317,7 @@ fn living_entity_method(name: &str) -> bool {
             | "getRandomX"
             | "getRandomY"
             | "getRandomZ"
+            | "interact"
             | "addAdditionalSaveData"
             | "readAdditionalSaveData"
             | "onGround"
@@ -3653,7 +3672,16 @@ fn living_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             put_bool(rt, e, "$leftHanded", left);
             a(4)
         }
-        ("mobInteract", _) if mob => api::get_static(rt, "net/minecraft/world/InteractionResult.PASS"),
+        // A player's click on it: `Mob.interact` (final), whose `mobInteract` is an animal's food here.
+        ("interact", INTERACT_DESC) if mob => interact(rt, e, a(1), a(2)),
+        ("interact", INTERACT_DESC) => interaction_result(rt, "PASS"),
+        ("mobInteract", _) if rt.instance_of_static(e, ANIMAL) => animal_interact(rt, e, a(1), a(2)),
+        ("mobInteract", _) if mob => interaction_result(rt, "PASS"),
+        ("usePlayerItem", _) if rt.instance_of_static(e, ANIMAL) => {
+            api::call(rt, CONSUME, &[a(3), V::I(1), a(1)]);
+            V::Void
+        }
+        ("isFood", "(Lnet/minecraft/world/item/ItemStack;)Z") => V::I(0),
         ("isLeashed", "()Z") => V::I(0),
         ("getLeashHolder", _) => V::NULL,
         // An ageable mob's age, an animal's love.
@@ -3661,27 +3689,100 @@ fn living_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         ("setAge", "(I)V") => unit(set_age(rt, e, a(1).i())),
         ("isBaby", "()Z") => bool_v(rt.instance_of_static(e, AGEABLE) && int(rt, e, "$age") < 0),
         ("setBaby", "(Z)V") => unit(if rt.instance_of_static(e, AGEABLE) { set_age(rt, e, if a(1).i() != 0 { -24000 } else { 0 }) }),
-        ("ageUp", "(I)V" | "(IZ)V") => {
-            let age = int(rt, e, "$age");
-            let grown = age + a(1).i() * 20;
-            unit(set_age(rt, e, if age < 0 { grown.min(0) } else { grown }))
-        }
+        ("ageUp", "(I)V" | "(IZ)V") => unit(age_up(rt, e, a(1).i())),
         ("canBreed", "()Z") => V::I(1),
         ("isInLove", "()Z") => bool_v(int(rt, e, "inLove") > 0),
         ("canFallInLove", "()Z") => bool_v(int(rt, e, "inLove") <= 0),
         ("getInLoveTime", "()I") => V::I(int(rt, e, "inLove")),
         ("setInLoveTime", "(I)V") => unit(put_i(rt, e, "inLove", a(1).i())),
         ("resetLove", "()V") => unit(put_i(rt, e, "inLove", 0)),
-        ("setInLove", _) => {
-            put_i(rt, e, "inLove", HEART_TICKS);
-            crate::mod_entities::broadcast_event(rt, e, 18);
-            V::Void
-        }
+        ("setInLove", _) => unit(set_in_love(rt, e, a(1))),
+        ("getLoveCause", _) => obj(rt, e, "$loveCause"),
         // What it saves.
         ("addAdditionalSaveData", "(Lnet/minecraft/nbt/CompoundTag;)V") => unit(save_living(rt, e, a(1))),
         ("readAdditionalSaveData", "(Lnet/minecraft/nbt/CompoundTag;)V") => unit(load_living(rt, e, a(1))),
         _ => return None,
     })
+}
+
+/// `InteractionResult`'s constant `name` (`PASS`, `SUCCESS`, `CONSUME`).
+fn interaction_result(rt: &mut Rt, name: &str) -> V {
+    crate::api_common::result(rt, "net/minecraft/world/InteractionResult", name)
+}
+
+/// Whether `r` (an `InteractionResult`) used the click (`consumesAction`).
+fn consumes(rt: &Rt, r: V) -> bool {
+    r.r() != 0 && matches!(rt.str_of(r), Some("SUCCESS" | "SUCCESS_NO_ITEM_USED" | "CONSUME" | "CONSUME_PARTIAL"))
+}
+
+/// `Mob.interact(player, hand)` (final): a mob that isn't alive passes; else what it does with the
+/// click itself (`mobInteract`, virtual: an animal's food). Not modelled: a leash, a name tag and
+/// a spawn egg of its kind (`checkAndHandleImportantInteractions`).
+fn interact(rt: &mut Rt, e: V, player: V, hand: V) -> V {
+    if !is_alive(rt, e) {
+        return interaction_result(rt, "PASS");
+    }
+    let r = own_or(rt, e, MOB_INTERACT, &[player, hand], |v| v, |rt| vanilla_mob_interact(rt, e, player, hand));
+    if consumes(rt, r) { r } else { interaction_result(rt, "PASS") }
+}
+
+/// `mobInteract` as vanilla's class above a mod's mob answers it: an animal's food, else nothing.
+fn vanilla_mob_interact(rt: &mut Rt, e: V, player: V, hand: V) -> V {
+    if rt.instance_of_static(e, ANIMAL) {
+        animal_interact(rt, e, player, hand)
+    } else {
+        interaction_result(rt, "PASS")
+    }
+}
+
+/// `Animal.mobInteract(player, hand)` (1.21.1): with its food in hand (`isFood`), a grown one not
+/// in love on a server takes one (`usePlayerItem`) and falls in love with the player (`setInLove`:
+/// `SUCCESS`); a baby takes one and grows a tenth of the time it has left (`ageUp`: `SUCCESS` on a
+/// client, `CONSUME` on a server); a client's grown one answers `CONSUME`. Anything else passes.
+fn animal_interact(rt: &mut Rt, e: V, player: V, hand: V) -> V {
+    let stack = api::call(rt, GET_ITEM_IN_HAND, &[player, hand]);
+    let food = !crate::api_common::stack_empty(rt, stack) && own_or(rt, e, IS_FOOD, &[stack], |v| v.i() != 0, |_| false);
+    if !food {
+        return interaction_result(rt, "PASS");
+    }
+    let age = own_or(rt, e, GET_AGE, &[], V::i, |rt| int(rt, e, "$age"));
+    let server = server(rt);
+    if server && age == 0 && own_or(rt, e, CAN_FALL_IN_LOVE, &[], |v| v.i() != 0, |rt| int(rt, e, "inLove") <= 0) {
+        use_player_item(rt, e, player, hand, stack);
+        own_or(rt, e, SET_IN_LOVE, &[player], |_| (), |rt| set_in_love(rt, e, player));
+        return interaction_result(rt, "SUCCESS");
+    }
+    if is_baby(rt, e) {
+        use_player_item(rt, e, player, hand, stack);
+        // `getSpeedUpSecondsWhenFeeding(-age)`: a tenth of the seconds left.
+        let seconds = ((-age / 20) as f32 * 0.1) as i32;
+        own_or(rt, e, AGE_UP, &[V::I(seconds), V::I(1)], |_| (), |rt| age_up(rt, e, seconds));
+        return interaction_result(rt, if server { "CONSUME" } else { "SUCCESS" });
+    }
+    interaction_result(rt, if server { "PASS" } else { "CONSUME" })
+}
+
+/// `usePlayerItem(player, hand, stack)` (virtual): one of the stack used (`consume(1, player)`,
+/// none from a creative player's).
+fn use_player_item(rt: &mut Rt, e: V, player: V, hand: V, stack: V) {
+    own_or(rt, e, USE_PLAYER_ITEM, &[player, hand, stack], |_| (), |rt| {
+        api::call(rt, CONSUME, &[stack, V::I(1), player]);
+    });
+}
+
+/// `Animal.setInLove(player)`: in love for 600 ticks, for `player` (`loveCause`, none for null),
+/// and its players see the hearts (event 18).
+fn set_in_love(rt: &mut Rt, e: V, player: V) {
+    put_i(rt, e, "inLove", HEART_TICKS);
+    rt.put_field(e, "$loveCause", player);
+    crate::mod_entities::broadcast_event(rt, e, 18);
+}
+
+/// `AgeableMob.ageUp(seconds)`: `seconds` older, a baby no older than grown.
+fn age_up(rt: &mut Rt, e: V, seconds: i32) {
+    let age = int(rt, e, "$age");
+    let grown = age + seconds * 20;
+    set_age(rt, e, if age < 0 { grown.min(0) } else { grown });
 }
 
 /// `LivingEntity.getScale()` (final) of a mod's living entity: its scale attribute, kept within

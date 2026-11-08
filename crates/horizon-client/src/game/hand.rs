@@ -336,6 +336,7 @@ impl Game<'_> {
             || before(self.mob_hit().map(|h| h.1))
             || before(self.guest_hit().map(|h| h.1))
             || before(self.redirectable_hit().map(|h| h.1))
+            || self.mod_entity_hit().is_some()
     }
     /// `LocalPlayer.isHandsBusy`: paddling a boat.
     pub(super) fn hands_busy(&self) -> bool {

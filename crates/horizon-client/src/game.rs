@@ -202,6 +202,7 @@ mod native_effects;
 mod native_entities;
 mod native_entity_queries;
 mod native_mod_entities;
+mod native_mod_hits;
 mod native_actors;
 mod native_block_entity_drops;
 mod native_explosions;
@@ -15250,6 +15251,9 @@ impl Game<'_> {
         let adventure = self.mode == horizon_client::command::args::GameMode::Adventure;
         let outline = if !self.ui.hide_gui && (self.may_build() || adventure) {
             self.pick()
+                // An entity nearer than the block takes the crosshair (`GameRenderer.pick`: an
+                // `EntityHitResult`), and the outline is a block hit's only.
+                .filter(|_| !self.entity_targeted())
                 .filter(|h| {
                     self.may_build()
                         || !self.block_action_restricted(h.pos)

@@ -6952,6 +6952,11 @@ impl Game<'_> {
             r.use_target = None;
         }
         let sneaking = self.keys.contains(&KeyCode::ShiftLeft);
+        // A translated mod's own entity nearer than any of the game's: its
+        // mod answers (game/native_mod_hits.rs).
+        if let Some(hit) = self.mod_entity_targeted() {
+            return self.use_mod_entity(hit, hand, sneaking);
+        }
         // A boat, minecart, item frame, armor stand or painting nearer than
         // any mob: the server uses it (AbstractBoat.interact boards it).
         if let Some(hit) = self.remote_object_hit(false)
@@ -8236,9 +8241,14 @@ impl Game<'_> {
             return true;
         }
         let mut instant = false;
+        // A translated mod's own entity nearer than any of the game's: the
+        // server deals the blow through its mod (game/native_mod_hits.rs).
+        if let Some(hit) = self.mod_entity_targeted() {
+            self.send(S::Attack(play::Attack { id: hit.entity }));
+            self.reset_attack_strength();
         // A ghast's fireball or a wind charge nearer than any mob: the
         // server turns it (game/deflect.rs).
-        if let Some((i, distance)) = self.redirectable_hit()
+        } else if let Some((i, distance)) = self.redirectable_hit()
             && self.mob_hit().is_none_or(|(_, d)| distance <= d)
             && self.before_block(distance)
             && self.creatures.projectiles[i].id != 0
