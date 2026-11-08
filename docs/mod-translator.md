@@ -8925,6 +8925,37 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Not yet: a dropped modpack still goes to the Modpacks page's import (its content), not through the
     translator; a Windows player's build is untested (the translator and runtime type-check for
     `x86_64-pc-windows-gnu`, the launcher's Windows path is upstream's).
+- [x] 2026-11-08 Part 131: Create, and a modpack, built by the launcher. Part 130 built Waddles (256 KB of jar); the
+  launcher had never built a translation the size of Create's.
+  - Past 64 MiB of the mods' Rust the launcher's build turns incremental compilation off
+    (`native_mods::INCREMENTAL_LIMIT`, `profile.<p>.incremental=false`): its analysis cache for crates this size
+    runs to tens of gigabytes and a new translation rewrites them whole. (A scratch build of Create without it had
+    taken 4 GB of target.)
+  - A Java modpack dropped on the window becomes a new instance with its mods translated
+    (`import::translate_new`: named after the pack, "(2)" when taken, removed again when nothing of the pack is
+    usable), selected on the Mods page, where Build builds it; before, it went to the Modpacks page's content
+    import. `mods add-java <jar|folder|pack> --new-instance` does it from the command line; `instance import`, an
+    MCP tool, keeps the Modpacks import and names the translating command. The hint after `add-java` now names the
+    instance (`native-build --instance '<id>'`). Strings in the launcher's 10 languages.
+  - Tests: launcher 1 new (a jar given an instance of its own gets one named after its mod, its content on in that
+    instance's `horizon-mods.txt`; a second one is "Rubies (2)"; a jar with nothing to use leaves no instance).
+    The launcher's import, i18n, modpacks and native tests and all 68 bin tests pass.
+  - Live, the release launcher on the scratch home of Part 130. `instance create "Create test"`, then
+    `mods add-java create.jar --instance create-test`: 16 s, `create`, `flywheel`, `ponder` and `create_translated`
+    on (542 blocks, 142 items carried; the code 363 files, 127 MiB, 1.15 million lines of Rust). `native-build`:
+    the fork's source at `bbfe9bf` downloaded, the game compiled (354 crates, non-incremental) and installed as
+    `native-bbfe9bf-7c4ef1d53b42`: 4 min 11 s, the translated rustcs at 11 GB together at most, swap +2.3 GB,
+    never under 35 GB free. That game on the instance's folder: a creative motor turns three shafts and a cogwheel,
+    each at `Speed` 16.0 (`data get block`), the cogwheel's teeth turned between two frames, and nine of Create's
+    blocks (casings, fluid tank, item vault, depot, basin, mechanical press, water wheel) stand drawn with their
+    models. No exception; the 16 unmapped calls are Flywheel's OpenGL setup (LWJGL).
+  - Then a pack: a folder "Gears and Penguins" with `mods/create.jar` and Waddles' jar.
+    `mods add-java "Gears and Penguins" --new-instance`: 85 s (the pack's inventory asks Modrinth by hash, then two
+    translation groups), the instance `gears-and-penguins` with all six on. `native-build --instance
+    gears-and-penguins`: 2 min 17 s, only `waddles_translated` compiled anew on the shared target. In that game the
+    shafts turn at 16.0 and two summoned penguins stand beside Create's blocks, drawn with Waddles' model.
+  - Found: `execute if entity @e[type=waddles:adelie_penguin]` fails with the penguins there: a selector's `type`
+    doesn't match a translated mod's entities yet.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

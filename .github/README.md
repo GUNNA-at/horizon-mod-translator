@@ -130,7 +130,10 @@ result comes from a scene set up by command, read back from the world's data and
   five came back after it was closed and opened again.
 - **From the launcher.** On a fresh launcher, `mods add-java` translated Waddles' jar and `--build` built a
   game with it in 4½ minutes, from this repository's source and its own Rust. That game, started as a player
-  starts it, with no developer flags, summons the penguins and hatches them from their egg.
+  starts it, with no developer flags, summons the penguins and hatches them from their egg. Create took 16
+  seconds to translate and 4 minutes to build the same way, and its shafts turn in that game. A folder with
+  Create and Waddles became an instance of its own (`--new-instance`, or a modpack dropped on the window) and
+  played both mods in one world.
 
 Not working yet: trains, hitting and feeding other mods' mobs, their natural spawning, NeoForge's config
 screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack has not been run in one game yet.
@@ -153,8 +156,10 @@ horizon-launcher play
 `add-java` turns on the mod's content (`horizon-mods/`) and its code, translated into Rust
 (`horizon-native-mods/<id>_translated/`). `--build` downloads this repository's source at the commit the translator
 was built from, applies the bundle with horizon-mixins and compiles the game: 4½ minutes the first time for
-Waddles on an M-series Mac, far longer for Create, then only what changed. Without `--build`, `horizon-launcher native-build --trust-native-code` or the Mods page's
-Build button does it later.
+Waddles on an M-series Mac, 4 minutes for Create, then only what changed. Without `--build`,
+`horizon-launcher native-build --trust-native-code` or the Mods page's Build button does it later.
+`--new-instance` gives the mods an instance of their own, named after the pack; a modpack dropped on the launcher's
+window does the same.
 
 By hand, a step at a time (what the launcher runs):
 

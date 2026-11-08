@@ -761,7 +761,7 @@ trusting native code is the player's decision, never an agent's.
 
 ## Java mods, translated
 
-`horizon-launcher mods add-java <jar|folder|pack> [--instance NAME] [--build --trust-native-code]` translates
+`horizon-launcher mods add-java <jar|folder|pack> [--instance NAME | --new-instance] [--build --trust-native-code]` translates
 NeoForge 1.21.1 mods into an instance ([mod-translator.md](mod-translator.md)): one mod's jar, a folder of jars, or
 a modpack (`.mrpack`, a CurseForge zip or instance folder). No Java code runs. `horizon_port_pack::install` reads the
 jars, carries their data (blocks, items, recipes, loot, tags, worldgen) over into content mods in `horizon-mods/`,
@@ -770,6 +770,19 @@ and translates their code into Rust: one native mod folder per mod with the mods
 a jar bundles (Create's Flywheel and Ponder). A mod whose code makes machines or mobs (classes extending the game's
 block entities or entities) gets the translator's content mod, its code's own declarations and look with the carried
 data, instead of the carry-over's templates. Then `native-build`, or `--build` at once, builds the game with them.
+
+`--new-instance` makes an instance for them first, named after the modpack (or the mod), with "(2)" when the name
+is taken; the hint and `--build` then name it. On the launcher's window, a mod's `.jar` dropped anywhere is
+translated into the selected instance, and a Java modpack (an `.mrpack` with a mod loader, a CurseForge zip)
+becomes a new instance with its mods translated (`import::translate_new`), selected on the Mods page, where
+**Build** builds the game with them. An instance whose pack gave nothing Horizon can use is removed again.
+`instance import` keeps sending a Java modpack to the Modpacks import (its content as a profile of its own), and
+says how to translate it instead.
+
+A translated mod's Rust can be large (Create's: 363 files, 127 MiB, 1.15 million lines): past 64 MiB of the mods' Rust, the build turns
+incremental compilation off (`native_mods::INCREMENTAL_LIMIT`), which for such crates would keep tens of gigabytes
+of analysis and save little, since a new translation rewrites them whole. Create builds this way in about four
+minutes on an M-series Mac, with rustc at about 11 GB.
 
 A translated mod is a folder, not a `.hnmod`: Create's is about 150 MB of Rust, over a registry file's 64 MiB. The
 launcher takes the folders in `horizon-native-mods/` holding a `horizon-mixin.toml` as it takes `.hnmod` files: on
