@@ -7,7 +7,8 @@
 //! configured feature's JSON goes to [`feature`], read with the codec the feature was made with
 //! (`Feature(Codec)`), and [`place`] runs the mod's `place` on it. The world they read and write
 //! is the host's (the generator's region), and the `RandomSource` they get draws from the host's
-//! random (`Host::random`): the feature's own stream, as vanilla hands it.
+//! random (`Host::random`): the feature's own stream, as vanilla hands it. A server config they
+//! read is the running server's ([`crate::mod_configs::follow_server`]).
 //!
 //! What features use of vanilla's worldgen is here too: `BulkSectionAccess` and the sections it
 //! gives (raw section writes, as the host keeps them), `SectionPos`'s coordinates,
@@ -127,6 +128,7 @@ pub fn placement(rt: &mut Rt, kind: &str, json: &str) -> Option<Result<V, String
 /// The positions modifier `modifier` makes of `origin`, as `getPositions` streams them, on the
 /// host's world and random stream.
 pub fn positions(rt: &mut Rt, modifier: V, origin: [i32; 3]) -> Result<Vec<[i32; 3]>, String> {
+    crate::mod_configs::follow_server(rt);
     let context = rt.intern("compat:worldgen/context".into(), |rt| {
         let c = rt.new_object(CONTEXT);
         let level = level(rt);
@@ -177,6 +179,7 @@ pub fn feature(rt: &mut Rt, kind: &str, json: &str) -> Option<Result<V, String>>
 /// The mod's `place` of configured feature `configured` at `origin`, on the host's world and
 /// random stream: whether it placed anything.
 pub fn place(rt: &mut Rt, configured: V, origin: [i32; 3]) -> Result<bool, String> {
+    crate::mod_configs::follow_server(rt);
     // `Feature.place(config, level, generator, random, origin)`: none where the region can't write.
     if !rt.host().is_none_or(|h| h.can_write(origin)) {
         return Ok(false);
@@ -202,6 +205,7 @@ pub fn place(rt: &mut Rt, configured: V, origin: [i32; 3]) -> Result<bool, Strin
 /// `would_survive` predicate). None where the block isn't the mod's or its code leaves it to the
 /// block's rule.
 pub fn survives(rt: &mut Rt, state: &str, position: [i32; 3]) -> Option<bool> {
+    crate::mod_configs::follow_server(rt);
     let (b, class) = crate::glue::mod_block(rt, state)?;
     let level = level(rt);
     let st = crate::api::state(rt, state);
@@ -246,6 +250,7 @@ pub fn biome_modifier(rt: &mut Rt, kind: &str, json: &str) -> Option<Result<V, S
 /// an inline placed feature's JSON; after the call, what the lists hold then. The host answers the
 /// biome's data and the holder sets' members.
 pub fn modify_biome(rt: &mut Rt, modifier: V, biome: &str, phase: usize, features: &mut Vec<Vec<String>>) -> Result<(), String> {
+    crate::mod_configs::follow_server(rt);
     let phase = PHASES.get(phase).map(|_| phase_constant(rt, phase)).ok_or_else(|| format!("no biome modifier phase {phase}"))?;
     let value = biome_value(rt, biome);
     let holder = crate::neo::registry_holder(rt, "biome", biome, value);

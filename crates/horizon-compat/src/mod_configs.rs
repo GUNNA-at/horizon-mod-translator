@@ -11,6 +11,10 @@
 //! Config's `TomlWriter` writes it and tells the mod (`ModConfigEvent.Reloading`). A runtime with no
 //! game folder set (the probe, tests that set none) keeps each config in memory, its defaults, as
 //! NeoForge keeps its default server configs.
+//!
+//! A server's configs load again as its server starts, a file in the world's `serverconfig/`
+//! overriding the one in `config/`, and unload as it stops ([`server_starting`],
+//! [`server_stopped`]). The client and world generation follow them ([`follow_server`]).
 use crate::{Data, Rt, V, jutil, nightconfig};
 use std::path::{Path, PathBuf};
 
@@ -1756,8 +1760,12 @@ pub(crate) fn register(rt: &mut Rt, container: V, ty: V, spec: V, file: V) -> V 
 /// NeoForge's "Config loading" step, once the registries are frozen and before common setup: each
 /// config registered loads, in the order registered, then each `ModConfigEvent.Loading` is posted
 /// (all loaded first: this runtime posts an event to every mod it carries, and a listener reading
-/// its own values on another mod's event finds them loaded). A server's configs load with the rest
-/// (NeoForge loads them as its server starts).
+/// its own values on another mod's event finds them loaded). A server's configs load with the rest,
+/// from `config/`. NeoForge loads them as its server starts, and the client shares them with its
+/// integrated server. Here they stand in for those until a server starts: the server's own runtime
+/// opens them again as it starts ([`server_starting`]), and the client's and world generation's
+/// follow it ([`follow_server`]). Horizon asks a mod's code for its creative tabs and biome
+/// modifiers before any world is open, where NeoForge would ask with a server's configs loaded.
 pub(crate) fn load_pending(rt: &mut Rt) {
     let Some(pending) = rt.interned.remove(PENDING) else {
         return;
@@ -1778,6 +1786,208 @@ fn config_dir(rt: &Rt) -> Option<PathBuf> {
     rt.statics
         .contains_key(crate::files::GAME_DIR)
         .then(|| crate::files::game_dir(rt).join("config"))
+}
+
+// --- A server's configs -----------------------------------------------------------------------
+
+/// The server configs a server in this process runs with, by game folder: the generation of its
+/// start, and its world's `serverconfig/` folder. The other runtimes of that game follow them
+/// ([`follow_server`]).
+struct Served {
+    game: PathBuf,
+    generation: u64,
+    overrides: Option<PathBuf>,
+}
+
+static SERVED: std::sync::Mutex<Vec<Served>> = std::sync::Mutex::new(Vec::new());
+/// How many times [`SERVED`] changed.
+static SERVED_CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The server starts in this process, each a generation of server configs.
+static SERVER_STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The generation of the server configs this runtime has; none for those in `config/`.
+const FOLLOWED: &str = "compat:server-configs";
+/// [`SERVED_CHANGES`] when this runtime last looked.
+const SEEN: &str = "compat:server-configs-seen";
+
+/// What NeoForge writes in a world's `serverconfig/` (`ServerLifecycleHooks.getServerConfigPath`).
+const SERVER_CONFIG_README: &str = "Any server configs put in this folder will override the corresponding server config from <instance path>/config/<config path>.\nIf the config being transferred is in a subfolder of the base config folder make sure to include that folder here in the path to the file you are overwriting.\nFor example if you are overwriting a config with the path <instance path>/config/ExampleMod/config-server.toml, you would need to put it in serverconfig/ExampleMod/config-server.toml\n";
+
+fn served() -> std::sync::MutexGuard<'static, Vec<Served>> {
+    SERVED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `ServerLifecycleHooks.handleServerAboutToStart`'s first step, before `ServerAboutToStartEvent`:
+/// the server's configs load (`ConfigTracker.loadConfigs(SERVER, config/, <world>/serverconfig/)`)
+/// and each mod hears `ModConfigEvent.Loading`. The world's `serverconfig/` folder is made, with
+/// NeoForge's `readme.txt`; a config's file there is read instead of the one in `config/`
+/// (`resolveBasePath`). The client and world generation of the same game follow these configs
+/// ([`follow_server`]).
+pub(crate) fn server_starting(rt: &mut Rt) {
+    let base = config_dir(rt);
+    let overrides = match (&base, crate::world_data::world_folder(rt)) {
+        (Some(_), Some(world)) => {
+            let dir = Path::new(&world).join("serverconfig");
+            let made = std::fs::create_dir_all(&dir).and_then(|()| {
+                let readme = dir.join("readme.txt");
+                match readme.exists() {
+                    true => Ok(()),
+                    false => std::fs::write(readme, SERVER_CONFIG_README),
+                }
+            });
+            if let Err(e) = made {
+                eprintln!(
+                    "horizon-compat: the world's {} can't be made ({e})",
+                    dir.display()
+                );
+            }
+            Some(dir)
+        }
+        _ => None,
+    };
+    let generation = SERVER_STARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if Rt::tracing() {
+        eprintln!(
+            "horizon-compat: the server's configs load (start {generation}; overrides in {:?})",
+            overrides.as_deref()
+        );
+    }
+    load_server(rt, overrides.as_deref());
+    rt.interned.insert(FOLLOWED.into(), V::J(generation as i64));
+    if base.is_some() {
+        let game = crate::files::game_dir(rt);
+        let mut served = served();
+        served.retain(|s| s.game != game);
+        served.push(Served {
+            game,
+            generation,
+            overrides,
+        });
+        SERVED_CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// `ServerLifecycleHooks.handleServerStopped`'s last step, after `ServerStoppedEvent`: the
+/// server's configs unload (`ConfigTracker.unloadConfigs(SERVER)`), and each mod hears
+/// `ModConfigEvent.Unloading`. The client and world generation of the same game go back to those in
+/// `config/`.
+pub(crate) fn server_stopped(rt: &mut Rt) {
+    unload(rt, "SERVER");
+    let Some(V::J(generation)) = rt.interned.remove(FOLLOWED) else {
+        return;
+    };
+    if config_dir(rt).is_some() {
+        let game = crate::files::game_dir(rt);
+        let mut served = served();
+        let before = served.len();
+        served.retain(|s| !(s.game == game && s.generation == generation as u64));
+        if served.len() != before {
+            SERVED_CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// The server configs of a runtime that shares them with its game's server (the client's and world
+/// generation's, as a JVM shares the integrated server's): those of the server running in this
+/// process, with its world's overrides, else those in `config/`. When that server starts or stops,
+/// they open again from there and each mod hears `ModConfigEvent.Loading`; the values that wait for
+/// a world to restart read their config again. A runtime keeping no files follows nothing.
+pub(crate) fn follow_server(rt: &mut Rt) {
+    let changes = SERVED_CHANGES.load(std::sync::atomic::Ordering::Relaxed) as i64;
+    if rt.interned.get(SEEN) == Some(&V::J(changes)) {
+        return;
+    }
+    rt.interned.insert(SEEN.into(), V::J(changes));
+    if config_dir(rt).is_none() {
+        return;
+    }
+    let game = crate::files::game_dir(rt);
+    let (generation, overrides) = served()
+        .iter()
+        .find(|s| s.game == game)
+        .map_or((0, None), |s| (s.generation, s.overrides.clone()));
+    let followed = match rt.interned.get(FOLLOWED) {
+        Some(&V::J(g)) => g as u64,
+        _ => 0,
+    };
+    if generation == followed {
+        return;
+    }
+    if Rt::tracing() {
+        eprintln!(
+            "horizon-compat: the server's configs followed (start {generation}; 0: none, config/)"
+        );
+    }
+    reset_world_values(rt);
+    load_server(rt, overrides.as_deref());
+    match generation {
+        0 => rt.interned.remove(FOLLOWED),
+        g => rt.interned.insert(FOLLOWED.into(), V::J(g as i64)),
+    };
+}
+
+/// `ConfigTracker.loadConfigs(SERVER, config/, overrides)` as a world starts: a value that waits for
+/// a world restart reads again, though it was read from `config/` while those stood in.
+fn load_server(rt: &mut Rt, overrides: Option<&Path>) {
+    let configs = registered(rt, |rt, c| of_type(rt, c, "SERVER"));
+    for &c in &configs {
+        let spec = field(rt, c, "$spec");
+        if rt.class_of(spec) == SPEC {
+            reset_caches(rt, spec, "WORLD");
+        }
+    }
+    let base = config_dir(rt);
+    load_all(rt, &configs, base.as_deref(), overrides);
+}
+
+/// `ConfigTracker.loadConfigs`: each config opened from its file in `base` (in memory where this
+/// runtime keeps no files), or in `overrides` where that folder has its file
+/// (`resolveBasePath`); then each mod hears `ModConfigEvent.Loading`.
+fn load_all(rt: &mut Rt, configs: &[V], base: Option<&Path>, overrides: Option<&Path>) {
+    for &c in configs {
+        let file = text(rt, field(rt, c, "$fileName")).unwrap_or_default();
+        let dir = base.map(|base| match overrides {
+            Some(o) if o.join(&file).exists() => {
+                if Rt::tracing() {
+                    eprintln!(
+                        "horizon-compat: config override {}",
+                        o.join(&file).display()
+                    );
+                }
+                o.to_owned()
+            }
+            _ => base.to_owned(),
+        });
+        open(rt, c, dir);
+    }
+    for &c in configs {
+        post_event(rt, LOADING, c);
+    }
+}
+
+/// `ConfigTracker.unloadConfigs(type)`: each loaded config of the type unloaded (`acceptConfig(null)`),
+/// and each mod hears `ModConfigEvent.Unloading`.
+fn unload(rt: &mut Rt, ty: &str) {
+    for c in registered(rt, |rt, c| {
+        of_type(rt, c, ty) && !rt.get_field(c, "$loaded").is_null()
+    }) {
+        rt.put_field(c, "$loaded", V::NULL);
+        let spec = field(rt, c, "$spec");
+        accept(rt, spec, V::NULL);
+        post_event(rt, UNLOADING, c);
+    }
+}
+
+/// `resetCaches(WORLD)` on every config's spec, as NeoForge does as a server stops
+/// (`NeoForgeMod.serverStopping`) and as the client leaves one (`ClientNeoForgeMod`, on
+/// `ClientPlayerNetworkEvent.LoggingOut`): the values that wait for a world to restart read their
+/// config again.
+pub(crate) fn reset_world_values(rt: &mut Rt) {
+    for c in registered(rt, |_, _| true) {
+        let spec = field(rt, c, "$spec");
+        if rt.class_of(spec) == SPEC {
+            reset_caches(rt, spec, "WORLD");
+        }
+    }
 }
 
 thread_local! {
@@ -2082,32 +2292,26 @@ fn tracker_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             };
             register(rt, a(3), a(1), a(2), file)
         }
-        // `loadConfigs(type, folder[, override folder])`: each config of the type opened from there.
+        // `loadConfigs(type, folder[, override folder])`: each config of the type opened from
+        // there, or from the override folder where that has its file.
         "loadConfigs" => {
             let ty = text(rt, rt.get_field(a(1), "$name")).unwrap_or_default();
-            let dir = match (config_dir(rt), text(rt, a(2))) {
+            let on_disk = |rt: &Rt, v: V| match (config_dir(rt), text(rt, v)) {
                 (Some(_), Some(d)) => Some(crate::files::on_disk(rt, &d)),
                 _ => None,
             };
+            let base = on_disk(rt, a(2));
+            let overrides = match crate::neo::desc_params(desc).len() {
+                3 => on_disk(rt, a(3)),
+                _ => None,
+            };
             let configs = registered(rt, |rt, c| of_type(rt, c, &ty));
-            for &c in &configs {
-                open(rt, c, dir.clone());
-            }
-            for c in configs {
-                post_event(rt, LOADING, c);
-            }
+            load_all(rt, &configs, base.as_deref(), overrides.as_deref());
             V::Void
         }
         "unloadConfigs" => {
             let ty = text(rt, rt.get_field(a(1), "$name")).unwrap_or_default();
-            for c in registered(rt, |rt, c| {
-                of_type(rt, c, &ty) && !rt.get_field(c, "$loaded").is_null()
-            }) {
-                rt.put_field(c, "$loaded", V::NULL);
-                let spec = field(rt, c, "$spec");
-                accept(rt, spec, V::NULL);
-                post_event(rt, UNLOADING, c);
-            }
+            unload(rt, &ty);
             V::Void
         }
         "loadDefaultServerConfigs" => {
@@ -3464,17 +3668,31 @@ mod tests {
 
     /// Registers `spec` as `ruby`'s common config and returns the listener's events.
     fn register_common(rt: &mut Rt, spec: V) -> V {
+        register_as(rt, spec, "COMMON", 0)
+    }
+
+    /// Registers `spec` as `ruby`'s config of type `ty` (its ordinal `n`) and returns the listener's
+    /// events.
+    fn register_as(rt: &mut Rt, spec: V, ty: &'static str, n: i32) -> V {
         let events = jutil::new_list(rt, Vec::new());
         let listener = rt.lambda_id("java/util/function/Consumer", 3, vec![events]);
         rt.listeners.push((CONFIG_EVENT.to_owned(), listener));
         let container = crate::neo::mod_container(rt, "ruby");
-        let common = crate::api::api_enum(rt, CONFIG_TYPE, "COMMON", 0);
+        let ty = crate::api::api_enum(rt, CONFIG_TYPE, ty, n);
         c(
             rt,
             "net/neoforged/fml/ModContainer.registerConfig.(Lnet/neoforged/fml/config/ModConfig$Type;Lnet/neoforged/fml/config/IConfigSpec;)V",
-            &[container, common, spec],
+            &[container, ty, spec],
         );
         events
+    }
+
+    /// The events the listener heard, by class.
+    fn heard(rt: &Rt, events: V) -> Vec<&'static str> {
+        jutil::elements(rt, events)
+            .iter()
+            .map(|e| rt.class_of(*e))
+            .collect()
     }
 
     fn value(rt: &mut Rt, v: V, name_desc: &str) -> V {
@@ -3727,6 +3945,206 @@ mod tests {
                 &[ruby.speed]
             ),
             V::D(0.25)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server's host: the world in its folder.
+    struct World(PathBuf);
+    impl crate::host::Host for World {
+        fn block_state(&self, _pos: [i32; 3]) -> String {
+            "minecraft:air".into()
+        }
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+            false
+        }
+        fn dimension(&self) -> String {
+            "minecraft:overworld".into()
+        }
+        fn world_dir(&self) -> Option<PathBuf> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn magic(rt: &mut Rt, ruby: &Ruby) -> V {
+        c(rt, &format!("{INT_VALUE}.getAsInt.()I"), &[ruby.magic])
+    }
+
+    fn speed(rt: &mut Rt, ruby: &Ruby) -> V {
+        c(
+            rt,
+            &format!("{DOUBLE_VALUE}.getAsDouble.()D"),
+            &[ruby.speed],
+        )
+    }
+
+    /// The file `ruby`'s config was read from (`ModConfig.getFullPath`).
+    fn full_path(rt: &mut Rt) -> String {
+        let id = rt.string("ruby");
+        let configs = c(
+            rt,
+            "net/neoforged/fml/config/ModConfigs.getModConfigs.(Ljava/lang/String;)Ljava/util/List;",
+            &[id],
+        );
+        let config = jutil::elements(rt, configs)[0];
+        let path = c(
+            rt,
+            "net/neoforged/fml/config/ModConfig.getFullPath.()Ljava/nio/file/Path;",
+            &[config],
+        );
+        rt.str_of(path).unwrap_or("").to_owned()
+    }
+
+    /// A world brought from 1.21.1 with its own file for `ruby`'s server config: a magic number of
+    /// 7 and a speed of 0.75.
+    fn world_with_override(dir: &Path) -> PathBuf {
+        let world = dir.join("saves/W");
+        std::fs::create_dir_all(world.join("serverconfig")).unwrap();
+        let theirs = DEFAULT_FILE
+            .replace("magicNumber = 42", "magicNumber = 7")
+            .replace("speed = 0.5", "speed = 0.75");
+        std::fs::write(world.join("serverconfig/ruby-server.toml"), theirs).unwrap();
+        world
+    }
+
+    /// NeoForge 21.1's server: a server config loads as the server starts, from the world's
+    /// `serverconfig/` where that has its file (else `config/`), which the server makes with its
+    /// readme. A value waiting for a world restart reads again as the server stops, and the config
+    /// unloads once it stopped.
+    #[test]
+    fn a_servers_configs_load_as_it_starts_with_the_worlds_own_files() {
+        let mut rt = Rt::new();
+        crate::install();
+        let dir = game(&mut rt, "server-start");
+        let ruby = ruby_spec(&mut rt);
+        let events = register_as(&mut rt, ruby.spec, "SERVER", 2);
+        load_pending(&mut rt);
+        // Until a server starts, the file in `config/` stands in for its configs.
+        assert_eq!(file(&dir.join("config/ruby-server.toml")), DEFAULT_FILE);
+        assert_eq!(magic(&mut rt, &ruby), V::I(42));
+        assert_eq!(speed(&mut rt, &ruby), V::D(0.5));
+        let world = world_with_override(&dir);
+        let mut host = World(world.clone());
+        crate::glue::server_about_to_start(&mut rt, &mut host);
+        assert_eq!(heard(&rt, events), [LOADING, LOADING]);
+        assert_eq!(magic(&mut rt, &ruby), V::I(7));
+        assert_eq!(speed(&mut rt, &ruby), V::D(0.75));
+        assert_eq!(
+            full_path(&mut rt),
+            world
+                .join("serverconfig/ruby-server.toml")
+                .to_string_lossy()
+        );
+        let readme = std::fs::read_to_string(world.join("serverconfig/readme.txt")).unwrap();
+        assert!(
+            readme.starts_with("Any server configs put in this folder will override the corresponding server config from <instance path>/config/<config path>.\n"),
+            "{readme}"
+        );
+        assert_eq!(file(&dir.join("config/ruby-server.toml")), DEFAULT_FILE);
+        // Set now, a value waiting for a world restart reads the old one until the server stops.
+        let quarter = crate::mixin::box_value(&mut rt, V::D(0.25), 'D');
+        c(
+            &mut rt,
+            &format!("{CONFIG_VALUE}.set.(Ljava/lang/Object;)V"),
+            &[ruby.speed, quarter],
+        );
+        assert_eq!(speed(&mut rt, &ruby), V::D(0.75));
+        crate::glue::server_stopping(&mut rt, &mut host);
+        assert_eq!(speed(&mut rt, &ruby), V::D(0.25));
+        crate::glue::world_lifecycle(&mut rt, &mut host, "close_final");
+        assert_eq!(heard(&rt, events), [LOADING, LOADING, UNLOADING]);
+        magic(&mut rt, &ruby);
+        let e = rt.thrown.take().expect("read once its config unloaded");
+        let message = rt.get_field(e, "message");
+        assert_eq!(
+            (rt.class_of(e), rt.str_of(message)),
+            (
+                "java/lang/IllegalStateException",
+                Some("Cannot get config value before config is loaded.")
+            )
+        );
+        // The next world without a file of its own reads the one in `config/`.
+        let other = dir.join("saves/Other");
+        std::fs::create_dir_all(&other).unwrap();
+        crate::glue::server_about_to_start(&mut rt, &mut World(other.clone()));
+        assert_eq!(magic(&mut rt, &ruby), V::I(42));
+        assert_eq!(
+            full_path(&mut rt),
+            dir.join("config/ruby-server.toml").to_string_lossy()
+        );
+        assert!(other.join("serverconfig/readme.txt").is_file());
+        crate::glue::world_lifecycle(&mut rt, &mut World(other), "close_final");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A JVM's client shares its integrated server's configs: the client's runtime (and world
+    /// generation's) has those of the server running in this process, its world's own files among
+    /// them, and goes back to `config/` once it stopped; each change, the mod hears `Loading`.
+    #[test]
+    fn the_client_follows_the_server_running_in_this_process() {
+        let mut server = Rt::new();
+        crate::install();
+        let dir = game(&mut server, "follow");
+        let theirs = ruby_spec(&mut server);
+        register_as(&mut server, theirs.spec, "SERVER", 2);
+        load_pending(&mut server);
+        let mut client = Rt::new();
+        same_game(&mut client, &dir);
+        let ruby = ruby_spec(&mut client);
+        let events = register_as(&mut client, ruby.spec, "SERVER", 2);
+        load_pending(&mut client);
+        follow_server(&mut client);
+        assert_eq!(heard(&client, events), [LOADING], "no server yet");
+        assert_eq!(magic(&mut client, &ruby), V::I(42));
+        let world = world_with_override(&dir);
+        let mut host = World(world.clone());
+        crate::glue::server_about_to_start(&mut server, &mut host);
+        follow_server(&mut client);
+        assert_eq!(magic(&mut client, &ruby), V::I(7));
+        assert_eq!(
+            full_path(&mut client),
+            world
+                .join("serverconfig/ruby-server.toml")
+                .to_string_lossy()
+        );
+        follow_server(&mut client);
+        assert_eq!(heard(&client, events), [LOADING, LOADING]);
+        crate::glue::world_lifecycle(&mut server, &mut host, "close_final");
+        follow_server(&mut client);
+        assert_eq!(magic(&mut client, &ruby), V::I(42));
+        assert_eq!(heard(&client, events), [LOADING, LOADING, LOADING]);
+        assert!(client.unmapped.is_empty(), "{:?}", client.unmapped);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// FML's own call, `ConfigTracker.loadConfigs(type, folder, override folder)`: a config whose
+    /// file the override folder has is read from there.
+    #[test]
+    fn the_tracker_reads_a_config_from_the_override_folder_that_has_it() {
+        let mut rt = Rt::new();
+        crate::install();
+        let dir = game(&mut rt, "tracker-override");
+        let ruby = ruby_spec(&mut rt);
+        register_as(&mut rt, ruby.spec, "SERVER", 2);
+        let world = world_with_override(&dir);
+        let tracker = get_static(&mut rt, TRACKER, "INSTANCE").unwrap();
+        let server = crate::api::api_enum(&mut rt, CONFIG_TYPE, "SERVER", 2);
+        let (base, overrides) = (
+            crate::files::new_path(&mut rt, &dir.join("config").to_string_lossy()),
+            crate::files::new_path(&mut rt, &world.join("serverconfig").to_string_lossy()),
+        );
+        c(
+            &mut rt,
+            &format!(
+                "{TRACKER}.loadConfigs.(Lnet/neoforged/fml/config/ModConfig$Type;Ljava/nio/file/Path;Ljava/nio/file/Path;)V"
+            ),
+            &[tracker, server, base, overrides],
+        );
+        assert_eq!(magic(&mut rt, &ruby), V::I(7));
+        assert!(
+            !dir.join("config/ruby-server.toml").exists(),
+            "not made in `config/`"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1800,9 +1800,11 @@ fn server_event(rt: &mut Rt, name: &str) {
     post(rt, class, ev);
 }
 
-/// NeoForge's `ServerAboutToStartEvent`: the server is there before it loads anything.
+/// NeoForge's `ServerAboutToStartEvent`: the server is there before it loads anything. Its configs
+/// load first ([`crate::mod_configs::server_starting`]).
 pub(crate) fn server_about_to_start(rt: &mut Rt) {
     rt.interned.insert(SERVER_RUNNING.into(), V::I(1));
+    crate::mod_configs::server_starting(rt);
     server_event(rt, "ServerAboutToStartEvent");
 }
 
@@ -1814,8 +1816,11 @@ pub(crate) fn server_started(rt: &mut Rt) {
     server_event(rt, "ServerStartedEvent");
 }
 
-/// NeoForge's `ServerStoppingEvent`, with the worlds still loaded.
+/// NeoForge's `ServerStoppingEvent`, with the worlds still loaded. NeoForge's own listener comes
+/// first: the config values that wait for a world to restart read their config again
+/// ([`crate::mod_configs::reset_world_values`]).
 pub(crate) fn server_stopping(rt: &mut Rt) {
+    crate::mod_configs::reset_world_values(rt);
     server_event(rt, "ServerStoppingEvent");
 }
 
@@ -1840,6 +1845,8 @@ pub(crate) fn server_stopped(rt: &mut Rt) {
         post(rt, LEVEL_UNLOAD, ev);
     }
     server_event(rt, "ServerStoppedEvent");
+    // Then its configs unload ([`crate::mod_configs::server_stopped`]).
+    crate::mod_configs::server_stopped(rt);
     // The server's commands went with it (`crate::commands`).
     for key in [
         SERVER_RUNNING,

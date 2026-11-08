@@ -1420,14 +1420,16 @@ pub fn client_level_unload(rt: &mut Rt, host: &mut dyn Host, dimension: &str) {
 /// resources ([`crate::resources::reload`]), and the models are baked
 /// ([`crate::baked_models::client_resources_loaded`]).
 fn client_setup(rt: &mut Rt, host: &mut dyn Host) {
-    if crate::neo::is_client(rt) {
-        return;
+    if !crate::neo::is_client(rt) {
+        crate::neo::fire_client_setup(rt);
+        rt.with_host(host, |rt| {
+            crate::resources::reload(rt, "assets");
+            crate::baked_models::client_resources_loaded(rt);
+        });
     }
-    crate::neo::fire_client_setup(rt);
-    rt.with_host(host, |rt| {
-        crate::resources::reload(rt, "assets");
-        crate::baked_models::client_resources_loaded(rt);
-    });
+    // The server's configs, as the server in this process has them: a JVM's client shares the
+    // integrated server's ([`crate::mod_configs::follow_server`]).
+    rt.with_host(host, crate::mod_configs::follow_server);
 }
 
 /// [`client_setup`] on the runtime that probes how blocks draw (the bundles' `with_probe_runtime`),

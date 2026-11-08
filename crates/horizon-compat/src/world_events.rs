@@ -316,6 +316,9 @@ pub fn client_level_unload(rt: &mut Rt, dimension: &str) {
     if held > 1 {
         return;
     }
+    // NeoForge's own listener on `LoggingOut` comes first (`ClientNeoForgeMod`): the config values
+    // that wait for a world to restart read their config again.
+    crate::mod_configs::reset_world_values(rt);
     network_event(rt, LOGGING_OUT);
     if let Some(level) = rt.interned.remove("compat:level") {
         let ev = rt.new_object(LEVEL_UNLOAD);

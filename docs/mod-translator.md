@@ -7706,6 +7706,72 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     x=-43 and the new one at x=-35. Both lines of track are drawn.
   - Test 655: two runtimes seeded from the system draw different first `randomUUID`s, each a
     version 4 UUID with the IETF variant.
+- [x] 2026-11-08 Part 118: a server's configs load as NeoForge 21.1 loads them, as its server
+  starts, a file in the world's `serverconfig/` overriding the one in `config/`.
+  - Checked against NeoForge 21.1's bytecode (`ServerLifecycleHooks`, `ConfigTracker`,
+    `ModConfig`, `ModConfigSpec`, `NeoForgeMod`, `ClientNeoForgeMod`, `ConfigSync`):
+    - `handleServerAboutToStart` first loads the SERVER configs: `loadConfigs(SERVER, config/,
+      <world>/serverconfig/)`. Its `getServerConfigPath` makes the folder and a `readme.txt`.
+    - `resolveBasePath` reads a config from the override folder when that folder has its file.
+    - `handleServerStopped` unloads them after `ServerStoppedEvent`.
+    - On `ServerStoppingEvent`, and on the client's `LoggingOut`, every config's values that
+      wait for a world restart are reset (`resetCaches(WORLD)`).
+    - A JVM's client shares the integrated server's configs. A client of another server gets
+      that server's (`ConfigSync`), or defaults from a server that sends none.
+  - `mod_configs.rs`:
+    - `server_starting`, called from `neo::server_about_to_start` before the event:
+      - makes the world's `serverconfig/` with NeoForge's readme, where files are kept and the
+        world is known;
+      - opens each SERVER config from `config/`, or from `serverconfig/` where that has its file.
+        Values waiting for a world restart read again;
+      - posts `ModConfigEvent.Loading`;
+      - publishes the start (a generation, the override folder) for the other runtimes of the
+        same game folder in this process.
+    - `server_stopped`, after `ServerStoppedEvent`, unloads them (`Unloading`) and withdraws the
+      start. A value read then throws NeoForge's `IllegalStateException` ("Cannot get config
+      value before config is loaded.").
+    - `reset_world_values`, NeoForge's own listeners: before `ServerStoppingEvent` mods hear, and
+      before the client's `LoggingOut`.
+    - `follow_server`: a runtime that shares the server's configs gets the server's while it
+      runs and those in `config/` after. When that changes, it opens them again from there and
+      its mods hear `Loading`. The client runs it at each client hook (`glue::client_setup`),
+      world generation at its placements, features, block checks and biome modifiers. It costs
+      an atomic read and a lookup when nothing changed.
+    - The tracker's `loadConfigs(type, folder, override folder)` reads from the override folder
+      as `resolveBasePath` does. `unloadConfigs` and the server's stop share `unload`.
+  - Where Horizon differs, and why: every runtime still loads the SERVER configs from `config/`
+    at the "Config loading" step, standing in until a server starts. Horizon asks a mod's code
+    for its creative tabs (the probe runtime) and biome modifiers (world generation's) when the
+    content is built, before any world opens. NeoForge asks for both with a server's configs
+    loaded, and reading them earlier would throw. The server's runtime hears `Loading` twice for
+    them, at its start and as its server starts. A client of another process's server keeps
+    those in `config/`, since no Horizon server sends its configs yet.
+  - Measured (packcov31, the same 367 jars): unchanged, methods 108178/130226 (83.1%), uses
+    339942/372747 (91.2%), distinct missing 9352. Create 3240/3972. This part changes when and
+    from where configs load. It adds no new API methods (the tracker's `loadConfigs` was
+    answered).
+  - Tests 658 (3 new):
+    - A server config loads as the server starts, from the world's `serverconfig/`. Before
+      that, `config/` stands in. NeoForge's readme is made, and `getFullPath` is the world's
+      file. A world-restart value read from the stand-in reads the world's. A value set while
+      the world runs reads again only once the server stops. After the stop it unloads
+      (`Unloading`), and reading it throws NeoForge's exception. The next world, with no file
+      of its own, reads `config/`.
+    - The client follows the server running in this process: the world's override while it
+      runs, `config/` once it stopped, `Loading` at each change and none when nothing changed.
+    - FML's `loadConfigs(type, folder, override folder)` reads the override folder's file and
+      makes none in `config/`.
+  - In the game (`p118scene.sh`, Create, one world played twice, `HORIZON_COMPAT_TRACE` lines):
+    - Session 1: the server made the world's `serverconfig/` with NeoForge's `readme.txt` (469
+      bytes, its text exactly). `config/create-server.toml` was written. The server loaded its
+      configs (start 1, overrides in the world's `serverconfig/`), and the client and world
+      generation followed.
+    - Between sessions, the world got its own `create-server.toml`: `config/`'s, with
+      `tickrateSyncTimer` 30 instead of 20.
+    - Session 2: the server, the client and world generation each read the world's file
+      (`config override .../saves/P/serverconfig/create-server.toml`, three times).
+    - Neither file was rewritten. Nothing threw, and no value was read before its config
+      loaded.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
