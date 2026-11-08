@@ -8755,6 +8755,27 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Next: the API's commonest gaps (`Minecraft.getTextureManager` 46 mods, `ConfigurationScreen`
     38, `GoalSelector.addGoal` 28 and `Goal.<init>` 24, `RenderSystem.getModelViewStack` 24),
     and the libraries' reflection (`Method.invoke` 57, `getDeclaredFields` 45).
+- [x] 2026-11-08 Part 127: the translator's README, with its progress in numbers and figures. The repo
+  `GUNNA-at/horizon-mod-translator` (private, branch `mod-translator`) now opens on `.github/README.md`
+  (English) and `.github/README.ru.md` (Russian); Horizon's own `README.md` is untouched. Both are written
+  from `PRODUCT.md` with the impeccable design skill: what it is, where it stands, what works in the game,
+  how to try it, how it works, where the translator stops and Horizon begins, how the numbers are checked,
+  and the open gaps.
+  - `tools/translator_progress.py record <run dir>` sums a pack run's `coverage` reports as
+    `packcov_summary.py` and `libcov_summary.py` do (datagen-only APIs left out) and keeps every run in
+    `docs/translator/progress.json`, with the newest run's per-jar numbers and commonest gaps. All 43 runs
+    are in it, runs 2 and 10 (no summary at the time) summed from their reports now.
+  - `render` draws the figures from that file, light and dark, English and Russian
+    (`docs/translator/*.svg`). They are Horizon's design system: the launcher's sky (`launcher/src/sky.rs`:
+    its bands, stars, sun and far hills, the same numbers) under the name, with a skyline made of the pack,
+    one column per jar; coverage over the runs for the pack and for Create; the jars by their share of
+    calls answered; the five stages from a jar to the game. Text is measured with the fonts and embedded
+    as subsets (Geist, Geist Mono, Bricolage Grotesque; OFL). It then rewrites the numbers between the
+    `<!-- progress:... -->` markers of both READMEs.
+  - Fixed on the way: an empty marker block let the block pattern run on to the next block's end,
+    which deleted the text between them. Test `tests/test_translator_progress.py` (filled twice, the text
+    between kept; datagen-only calls leave the totals; missing methods read as Java declares them).
+  - After each pack run: `record`, then `render`, then commit and push with the Part.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

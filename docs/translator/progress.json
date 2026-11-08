@@ -1,0 +1,1299 @@
+{
+ "runs": [
+  {
+   "run": 1,
+   "id": "packcov",
+   "date": "2026-11-04T17:38",
+   "commit": null,
+   "part": null,
+   "probe": "bare",
+   "jars": 367,
+   "api": {
+    "methods": [71383, 133391],
+    "uses": [260702, 379617],
+    "missing": 16305
+   },
+   "create": {
+    "methods": [1857, 3990],
+    "uses": [20228, 25378]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 2,
+   "id": "packcov2",
+   "date": "2026-11-05T10:02",
+   "commit": null,
+   "part": null,
+   "probe": "bare",
+   "jars": 367,
+   "api": {
+    "methods": [78704, 130683],
+    "uses": [269634, 369268],
+    "missing": 14771
+   },
+   "create": {
+    "methods": [2130, 3994],
+    "uses": [20814, 25380]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 3,
+   "id": "packcov3",
+   "date": "2026-11-05T21:13",
+   "commit": null,
+   "part": null,
+   "probe": "bare",
+   "jars": 367,
+   "api": {
+    "methods": [82751, 130683],
+    "uses": [276645, 369268],
+    "missing": 14291
+   },
+   "create": {
+    "methods": [2290, 3994],
+    "uses": [21340, 25380]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 4,
+   "id": "packcov4",
+   "date": "2026-11-05T21:56",
+   "commit": null,
+   "part": null,
+   "probe": "bare",
+   "jars": 367,
+   "api": {
+    "methods": [83313, 130683],
+    "uses": [277698, 369268],
+    "missing": 14188
+   },
+   "create": {
+    "methods": [2308, 3994],
+    "uses": [21366, 25380]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 5,
+   "id": "packcov5",
+   "date": "2026-11-06T00:23",
+   "commit": null,
+   "part": null,
+   "probe": "bare",
+   "jars": 367,
+   "api": {
+    "methods": [83924, 130683],
+    "uses": [279095, 369268],
+    "missing": 14076
+   },
+   "create": {
+    "methods": [2330, 3994],
+    "uses": [21415, 25380]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 6,
+   "id": "packcov6",
+   "date": "2026-11-06T06:14",
+   "commit": "cb3e755",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [93680, 130683],
+    "uses": [304060, 369268],
+    "missing": 12712
+   },
+   "create": {
+    "methods": [2695, 3994],
+    "uses": [22852, 25380]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 7,
+   "id": "packcov7",
+   "date": "2026-11-06T06:34",
+   "commit": "65fde88",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [95569, 133181],
+    "uses": [312625, 379190],
+    "missing": 12789
+   },
+   "create": {
+    "methods": [2700, 3994],
+    "uses": [22861, 25380]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 8,
+   "id": "packcov8",
+   "date": "2026-11-06T07:38",
+   "commit": "5daeb23",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [96505, 133182],
+    "uses": [317131, 379191],
+    "missing": 12669
+   },
+   "create": {
+    "methods": [2728, 3994],
+    "uses": [22902, 25380]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 9,
+   "id": "packcov9",
+   "date": "2026-11-06T08:25",
+   "commit": "19e945c",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [98120, 133182],
+    "uses": [320014, 379191],
+    "missing": 12388
+   },
+   "create": {
+    "methods": [2797, 3994],
+    "uses": [23051, 25380]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 10,
+   "id": "packcov10",
+   "date": "2026-11-06T10:53",
+   "commit": null,
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [98795, 133194],
+    "uses": [321037, 379207],
+    "missing": 12268
+   },
+   "create": {
+    "methods": [2836, 3995],
+    "uses": [23119, 25382]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 11,
+   "id": "packcov11",
+   "date": "2026-11-06T15:26",
+   "commit": null,
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [99900, 133194],
+    "uses": [323371, 379207],
+    "missing": 12091
+   },
+   "create": {
+    "methods": [2883, 3995],
+    "uses": [23244, 25382]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 12,
+   "id": "packcov12",
+   "date": "2026-11-07T08:21",
+   "commit": "ec1652d",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [101937, 133194],
+    "uses": [326806, 379207],
+    "missing": 11590
+   },
+   "create": {
+    "methods": [3007, 3995],
+    "uses": [23512, 25382]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 13,
+   "id": "packcov13",
+   "date": "2026-11-07T11:10",
+   "commit": "57f34e5",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [102186, 133194],
+    "uses": [327145, 379207],
+    "missing": 11519
+   },
+   "create": {
+    "methods": [3031, 3995],
+    "uses": [23557, 25382]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 14,
+   "id": "packcov14",
+   "date": "2026-11-07T11:44",
+   "commit": "c66c8c3",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [104295, 133194],
+    "uses": [334138, 379207],
+    "missing": 11389
+   },
+   "create": {
+    "methods": [3074, 3995],
+    "uses": [23982, 25382]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 15,
+   "id": "packcov15",
+   "date": "2026-11-07T12:49",
+   "commit": "69615a5",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [103973, 131670],
+    "uses": [332873, 375372],
+    "missing": 11230
+   },
+   "create": {
+    "methods": [3071, 3972],
+    "uses": [23918, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 16,
+   "id": "packcov16",
+   "date": "2026-11-07T13:42",
+   "commit": "8935342",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [104831, 131670],
+    "uses": [334478, 375372],
+    "missing": 11088
+   },
+   "create": {
+    "methods": [3093, 3972],
+    "uses": [23962, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 17,
+   "id": "packcov17",
+   "date": "2026-11-07T14:14",
+   "commit": "fe50afe",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [105350, 131670],
+    "uses": [335471, 375372],
+    "missing": 11031
+   },
+   "create": {
+    "methods": [3104, 3972],
+    "uses": [23988, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 18,
+   "id": "packcov18",
+   "date": "2026-11-07T14:43",
+   "commit": "9f5f63d",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [105718, 131670],
+    "uses": [336097, 375372],
+    "missing": 10993
+   },
+   "create": {
+    "methods": [3110, 3972],
+    "uses": [24010, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 19,
+   "id": "packcov19",
+   "date": "2026-11-07T15:04",
+   "commit": "8230ad0",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [105938, 131670],
+    "uses": [336609, 375372],
+    "missing": 10960
+   },
+   "create": {
+    "methods": [3115, 3972],
+    "uses": [24020, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 20,
+   "id": "packcov20",
+   "date": "2026-11-07T15:26",
+   "commit": "02005d6",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [105875, 130226],
+    "uses": [336106, 372747],
+    "missing": 9978
+   },
+   "create": {
+    "methods": [3115, 3972],
+    "uses": [24020, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 21,
+   "id": "packcov21",
+   "date": "2026-11-08T00:04",
+   "commit": "3ac24e7",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [106201, 130226],
+    "uses": [336632, 372747],
+    "missing": 9934
+   },
+   "create": {
+    "methods": [3133, 3972],
+    "uses": [24074, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 22,
+   "id": "packcov22",
+   "date": "2026-11-08T00:31",
+   "commit": "1a89f1d",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [106416, 130226],
+    "uses": [337072, 372747],
+    "missing": 9878
+   },
+   "create": {
+    "methods": [3145, 3972],
+    "uses": [24121, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 23,
+   "id": "packcov23",
+   "date": "2026-11-08T01:25",
+   "commit": "720759f",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [106791, 130226],
+    "uses": [337675, 372747],
+    "missing": 9780
+   },
+   "create": {
+    "methods": [3167, 3972],
+    "uses": [24176, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 24,
+   "id": "packcov24",
+   "date": "2026-11-08T02:01",
+   "commit": "be30788",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [107586, 130226],
+    "uses": [339001, 372747],
+    "missing": 9514
+   },
+   "create": {
+    "methods": [3198, 3972],
+    "uses": [24226, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 25,
+   "id": "packcov25",
+   "date": "2026-11-08T02:31",
+   "commit": "08eecd4",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [107734, 130226],
+    "uses": [339253, 372747],
+    "missing": 9469
+   },
+   "create": {
+    "methods": [3215, 3972],
+    "uses": [24272, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 26,
+   "id": "packcov26",
+   "date": "2026-11-08T02:57",
+   "commit": "7b4546e",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [107795, 130226],
+    "uses": [339332, 372747],
+    "missing": 9458
+   },
+   "create": {
+    "methods": [3217, 3972],
+    "uses": [24275, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 27,
+   "id": "packcov27",
+   "date": "2026-11-08T03:23",
+   "commit": "6c62e40",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [107883, 130226],
+    "uses": [339455, 372747],
+    "missing": 9427
+   },
+   "create": {
+    "methods": [3227, 3972],
+    "uses": [24291, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 28,
+   "id": "packcov28",
+   "date": "2026-11-08T04:19",
+   "commit": "46784ac",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108007, 130226],
+    "uses": [339617, 372747],
+    "missing": 9387
+   },
+   "create": {
+    "methods": [3236, 3972],
+    "uses": [24309, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 29,
+   "id": "packcov29",
+   "date": "2026-11-08T04:40",
+   "commit": "afa9c6f",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108121, 130226],
+    "uses": [339862, 372747],
+    "missing": 9366
+   },
+   "create": {
+    "methods": [3240, 3972],
+    "uses": [24314, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 30,
+   "id": "packcov30",
+   "date": "2026-11-08T05:30",
+   "commit": "9616c6b",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108178, 130226],
+    "uses": [339942, 372747],
+    "missing": 9352
+   },
+   "create": {
+    "methods": [3240, 3972],
+    "uses": [24314, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 31,
+   "id": "packcov31",
+   "date": "2026-11-08T06:03",
+   "commit": "e197ed5",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108178, 130226],
+    "uses": [339942, 372747],
+    "missing": 9352
+   },
+   "create": {
+    "methods": [3240, 3972],
+    "uses": [24314, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 32,
+   "id": "packcov32",
+   "date": "2026-11-08T06:39",
+   "commit": "d84f3bf",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108389, 130226],
+    "uses": [340241, 372747],
+    "missing": 9292
+   },
+   "create": {
+    "methods": [3254, 3972],
+    "uses": [24332, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 33,
+   "id": "packcov33",
+   "date": "2026-11-08T08:00",
+   "commit": "6bc47fc",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108473, 130226],
+    "uses": [340334, 372747],
+    "missing": 9279
+   },
+   "create": {
+    "methods": [3256, 3972],
+    "uses": [24334, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 34,
+   "id": "packcov34",
+   "date": "2026-11-08T09:20",
+   "commit": "b155ff7",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108738, 130226],
+    "uses": [340904, 372747],
+    "missing": 9226
+   },
+   "create": {
+    "methods": [3273, 3972],
+    "uses": [24359, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 35,
+   "id": "packcov35",
+   "date": "2026-11-08T10:21",
+   "commit": "7fb5ce9",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108800, 130226],
+    "uses": [340988, 372747],
+    "missing": 9214
+   },
+   "create": {
+    "methods": [3276, 3972],
+    "uses": [24362, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 36,
+   "id": "packcov36",
+   "date": "2026-11-08T11:00",
+   "commit": "b1d8749",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108900, 130226],
+    "uses": [341147, 372747],
+    "missing": 9197
+   },
+   "create": {
+    "methods": [3281, 3972],
+    "uses": [24372, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 37,
+   "id": "packcov37",
+   "date": "2026-11-08T11:10",
+   "commit": "091e738",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108948, 130226],
+    "uses": [341262, 372747],
+    "missing": 9186
+   },
+   "create": {
+    "methods": [3288, 3972],
+    "uses": [24380, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 38,
+   "id": "packcov38",
+   "date": "2026-11-08T12:22",
+   "commit": "091e738",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [109059, 130226],
+    "uses": [341413, 372747],
+    "missing": 9151
+   },
+   "create": {
+    "methods": [3297, 3972],
+    "uses": [24396, 25241]
+   },
+   "libs": null,
+   "libs_create": null
+  },
+  {
+   "run": 39,
+   "id": "packcov39",
+   "date": "2026-11-08T12:34",
+   "commit": "32559d1",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [109059, 130226],
+    "uses": [341413, 372747],
+    "missing": 9151
+   },
+   "create": {
+    "methods": [3297, 3972],
+    "uses": [24396, 25241]
+   },
+   "libs": {
+    "methods": [47300, 56376],
+    "uses": [222397, 239635],
+    "missing": 3937
+   },
+   "libs_create": {
+    "methods": [1290, 1603],
+    "uses": [13783, 14418]
+   }
+  },
+  {
+   "run": 40,
+   "id": "packcov40",
+   "date": "2026-11-08T13:06",
+   "commit": "32559d1",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108921, 130223],
+    "uses": [341172, 372742],
+    "missing": 9213
+   },
+   "create": {
+    "methods": [3290, 3971],
+    "uses": [24388, 25240]
+   },
+   "libs": {
+    "methods": [61697, 74081],
+    "uses": [336591, 357517],
+    "missing": 5222
+   },
+   "libs_create": {
+    "methods": [1323, 1602],
+    "uses": [14048, 14416]
+   }
+  },
+  {
+   "run": 41,
+   "id": "packcov41",
+   "date": "2026-11-08T13:08",
+   "commit": "32559d1",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108921, 130223],
+    "uses": [341172, 372742],
+    "missing": 9213
+   },
+   "create": {
+    "methods": [3290, 3971],
+    "uses": [24388, 25240]
+   },
+   "libs": {
+    "methods": [61704, 74081],
+    "uses": [336604, 357517],
+    "missing": 5221
+   },
+   "libs_create": {
+    "methods": [1323, 1602],
+    "uses": [14048, 14416]
+   }
+  },
+  {
+   "run": 42,
+   "id": "packcov42",
+   "date": "2026-11-08T13:12",
+   "commit": "32559d1",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [108922, 130223],
+    "uses": [341173, 372742],
+    "missing": 9212
+   },
+   "create": {
+    "methods": [3290, 3971],
+    "uses": [24388, 25240]
+   },
+   "libs": {
+    "methods": [61754, 74081],
+    "uses": [336695, 357517],
+    "missing": 5213
+   },
+   "libs_create": {
+    "methods": [1324, 1602],
+    "uses": [14050, 14416]
+   }
+  },
+  {
+   "run": 43,
+   "id": "packcov43",
+   "date": "2026-11-08T13:34",
+   "commit": "7a80744",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [109046, 130223],
+    "uses": [341371, 372742],
+    "missing": 9162
+   },
+   "create": {
+    "methods": [3292, 3971],
+    "uses": [24391, 25240]
+   },
+   "libs": {
+    "methods": [61858, 74081],
+    "uses": [336963, 357517],
+    "missing": 5179
+   },
+   "libs_create": {
+    "methods": [1325, 1602],
+    "uses": [14052, 14416]
+   }
+  }
+ ],
+ "latest": {
+  "run": 43,
+  "jars": [
+   ["AI-Improvements-1.21-0.5.3", 23, 26, 30, 33],
+   ["Advanced Stands MC 1.21.1 - 2.0.0 Neoforge", 157, 160, 378, 383],
+   ["AdvancementPlaques-1.21.1-neoforge-1.6.8", 50, 55, 57, 62],
+   ["AmbientSounds_NEOFORGE_v6.3.10_mc1.21.1", 118, 136, 162, 181],
+   ["Applied-Mekanistics-1.6.3", 89, 96, 105, 112],
+   ["Aquaculture-1.21.1-2.7.21", 602, 737, 1160, 1306],
+   ["Auroras-1.21-1.6.2", 92, 96, 124, 128],
+   ["Auto Pickup Filter - Neoforge 1.21.1-2.0.0", 33, 33, 40, 40],
+   ["BEB-NeoForge-1.21-6.0.0", 22, 22, 22, 22],
+   ["BHMenu-NeoForge-1.21-2.4.4", 110, 154, 319, 378],
+   ["BTP-NeoForge-1.21.1-2.0.1", 23, 23, 31, 31],
+   ["BadOptimizations-2.4.1-1.21.1", 40, 54, 42, 56],
+   ["Better Item Despawn - Neoforge-1.21.1-1.1.0", 48, 53, 50, 55],
+   ["BetterAdvancements-NeoForge-1.21.1-0.4.3.21", 122, 150, 165, 200],
+   ["BetterF3-11.0.3-NeoForge-1.21.1", 159, 220, 249, 317],
+   ["BetterThirdPerson-neoforge-1.9.0", 32, 34, 37, 39],
+   ["BiomesOPlenty-neoforge-1.21.1-21.1.0.14", 518, 692, 2948, 3348],
+   ["Chimes-v2.1.1-1.21.1-NeoForge", 198, 210, 472, 489],
+   ["ClimateRivers-v21.1.3-1.21.1-NeoForge", 7, 25, 7, 25],
+   ["Clumps-neoforge-1.21.1-19.0.0.1", 21, 29, 23, 31],
+   ["Controlling-neoforge-1.21.1-19.0.5", 63, 98, 94, 133],
+   ["Create Encased-1.21.1-1.8-ht2", 220, 223, 452, 455],
+   ["Create-Structures-Arise-1.21.1-NeoForge-176.49.49", 98, 115, 117, 134],
+   ["CreateDragonsPlus-1.11.7b", 599, 685, 1368, 1477],
+   ["CreativeCore_NEOFORGE_v2.13.44_mc1.21.1", 612, 706, 1506, 1606],
+   ["CreeperOverhaul-neoforge-1.21.1-4.0.6", 178, 286, 243, 372],
+   ["Cucumber-1.21.1-8.0.15", 494, 537, 837, 885],
+   ["Custom Nether Portals - Neoforge - MC 1.21.1- 3.0.0", 76, 89, 124, 145],
+   ["Design-n-Decor-1.21.1-2.1.0", 295, 311, 742, 759],
+   ["DiagonalFences-v21.1.1-1.21.1-NeoForge", 128, 144, 173, 191],
+   ["DiagonalWalls-v21.1.2-1.21.1-NeoForge", 128, 144, 173, 191],
+   ["DiagonalWindows-v21.1.1-1.21.1-NeoForge", 128, 144, 173, 191],
+   ["DnDesires-1.21.1-2.3a-BETA", 579, 619, 1437, 1480],
+   ["DungeonsAriseSevenSeas-1.21.x-1.0.4-neoforge", 1, 1, 1, 1],
+   ["EW-NeoForge-1.21.1-1.0.0", 45, 45, 46, 46],
+   ["EasyAnvils-v21.1.0-1.21.1-NeoForge", 232, 260, 338, 375],
+   ["EasyMagic-v21.1.4-1.21.1-NeoForge", 173, 210, 233, 273],
+   ["ExplorersCompass-1.21.1-3.4.0-neoforge", 207, 241, 317, 358],
+   ["Explorify v1.6.5.mod", 0, 0, 0, 0],
+   ["ExtendedAE-1.21-2.2.35-neoforge", 647, 752, 1777, 1891],
+   ["FarmersDelight-1.21.1-1.3.4", 931, 1109, 2481, 2689],
+   ["FarmersStructures-1.0.6-1.21.1_neoforge", 8, 8, 8, 8],
+   ["FastSuite-1.21.1-6.0.7", 31, 39, 38, 46],
+   ["FramedBlocks-10.5.3", 1272, 1502, 7256, 7536],
+   ["Geophilic v3.7.mod", 0, 0, 0, 0],
+   ["GlitchCore-neoforge-1.21.1-2.1.0.0", 95, 111, 101, 117],
+   ["Glodium-1.21-2.2-neoforge", 130, 131, 163, 164],
+   ["HopoBetterMineshaft-[1.21-1.21.3]-1.3.0b", 0, 0, 0, 0],
+   ["HopoBetterRuinedPortals-[1.21.1-1.21.3]-1.4.4b", 0, 0, 0, 0],
+   ["Iceberg-1.21.1-neoforge-1.3.2", 276, 335, 359, 419],
+   ["ImmediatelyFast-NeoForge-1.6.14+1.21.1", 99, 134, 147, 191],
+   ["Immersive-Aeronautics1.1.4-1.21.1-NeoForge", 1092, 1468, 3795, 4273],
+   ["ImmersiveUI-NEOFORGE-0.3.3+1.21.1", 65, 69, 104, 108],
+   ["Item-Magnet-Neoforge-1.21.1-1.0.0", 61, 62, 67, 68],
+   ["Jade-1.21.1-NeoForge-15.10.6", 677, 870, 1428, 1652],
+   ["JustEnoughProfessions-neoforge-1.21.1-4.0.5", 49, 52, 60, 63],
+   ["JustEnoughResources-NeoForge-1.21.1-1.6.0.17", 211, 274, 326, 396],
+   ["KineticGrip-1.21.1-1.0.4", 69, 74, 75, 80],
+   ["L_Ender's Cataclysm 1.21.1-3.32", 1672, 2286, 12574, 14666],
+   ["LegendaryTooltips-1.21.1-neoforge-1.5.5", 83, 92, 109, 120],
+   ["LockedSlots-Neoforge-1.21.1-1.0.0", 20, 20, 24, 24],
+   ["Measurements-neoforge-1.21.1-3.0.3", 108, 113, 118, 123],
+   ["Mekanism-1.21.1-10.7.19.85", 2200, 2705, 8913, 9640],
+   ["MekanismGenerators-1.21.1-10.7.19.85", 235, 247, 440, 465],
+   ["MekanismTools-1.21.1-10.7.19.85", 121, 149, 198, 228],
+   ["MouseTweaks-neoforge-mc1.21-2.26.1", 28, 54, 30, 56],
+   ["MultiArrowEffects-Neoforge-1.21.1-2.0.0", 16, 16, 16, 16],
+   ["MysticalAgradditions-1.21.1-8.0.13", 113, 116, 150, 156],
+   ["MysticalAgriculture-1.21.1-8.0.24", 584, 642, 2049, 2130],
+   ["NaturesCompass-1.21.1-3.4.0-neoforge", 194, 223, 293, 325],
+   ["NeoAuth-1.21.1-1.0.0", 56, 92, 97, 143],
+   ["NightLib-Neoforge-1.21.1-1.3.0", 19, 19, 19, 19],
+   ["NoChatReports-NEOFORGE-1.21.1-v2.9.1", 122, 182, 209, 283],
+   ["OctoLib-NEOFORGE-0.6.2+1.21", 162, 176, 262, 276],
+   ["Placebo-1.21.1-9.9.1", 373, 409, 541, 581],
+   ["Prism-1.21.1-neoforge-1.0.11", 35, 40, 41, 46],
+   ["PuzzlesLib-v21.1.39-1.21.1-NeoForge", 945, 1577, 1239, 1902],
+   ["RPG Potions - Neoforge - MC 1.21.1 - 1.2.0", 158, 185, 206, 239],
+   ["SOB-NeoForge-1.21.1-1.0.0", 24, 24, 24, 24],
+   ["SableStuffAdditionsCompat v1.0.3-1.21.1", 49, 49, 62, 62],
+   ["Searchables-neoforge-1.21.1-1.0.2", 27, 27, 27, 27],
+   ["StorageDrawers-neoforge-1.21.1-13.11.4", 542, 571, 1315, 1354],
+   ["Structory_26.2_v1.3.7", 0, 0, 0, 0],
+   ["TerraBlender-neoforge-1.21.1-4.1.0.8", 61, 111, 105, 175],
+   ["ToastControl-1.21.1-9.0.1", 39, 47, 45, 53],
+   ["VS-Sable-HoseConnectors-0.2.2-1.21.1", 223, 227, 983, 992],
+   ["VisualWorkbench-v21.1.1-1.21.1-NeoForge", 96, 104, 105, 113],
+   ["Waddles-neoforge-1.21-0.11.1", 82, 100, 91, 110],
+   ["Waves-1.21.x-1.6.1", 276, 287, 399, 410],
+   ["[1.21.1] SecurityCraft v1.10.2.1", 1787, 2239, 7880, 8473],
+   ["[Neoforge]ctov-3.6.3", 42, 42, 44, 44],
+   ["adastra-1.21.1-1.16.26-neoforge", 1070, 1315, 3112, 3448],
+   ["ae2jeiintegration-1.2.1", 54, 54, 78, 78],
+   ["ae2wtlib-19.5.1", 189, 212, 346, 369],
+   ["aeroworks-1.2.10", 237, 238, 452, 453],
+   ["alltheleaks-1.1.13+1.21.1-neoforge", 237, 305, 518, 600],
+   ["alternate_current-mc1.21-1.9.0", 53, 60, 58, 65],
+   ["amendments-1.21-2.1.9-neoforge", 782, 964, 2121, 2340],
+   ["animal_armor_trims-neoforge-1.21.1-2.3.1", 37, 42, 51, 57],
+   ["anvilcore-10.1 Release-neoforge-1.21.1", 134, 143, 178, 191],
+   ["appleskin-neoforge-mc1.21-3.0.9", 108, 117, 178, 187],
+   ["appliedenergistics2-19.2.18", 1781, 2123, 6944, 7409],
+   ["aquaculturedelight-1.2.0-neoforge-1.21.1", 137, 140, 1112, 1137],
+   ["architectury-13.0.11-neoforge", 472, 711, 596, 842],
+   ["ars_creo-1.21.1-5.4.0", 157, 159, 212, 214],
+   ["ars_elemancy-1.21.1-1.18.3", 392, 443, 658, 715],
+   ["ars_elemental-1.21.1-0.7.10.1", 976, 1348, 2983, 3461],
+   ["ars_nouveau-1.21.1-5.13.1", 2503, 3499, 14131, 15735],
+   ["ars_sable-1.21.1-1.1.2", 133, 148, 270, 303],
+   ["arseng-2.1.1-beta", 148, 148, 180, 180],
+   ["artifacts-neoforge-13.2.1", 587, 710, 1326, 1476],
+   ["athena-neoforge-1.21-4.0.2", 85, 96, 157, 168],
+   ["attributefix-neoforge-1.21.1-21.1.3", 8, 8, 8, 8],
+   ["automessage-merged-1.21.1-3.0.0", 30, 36, 44, 50],
+   ["baguettelib-1.21.1-NeoForge-2.0.3", 104, 112, 130, 138],
+   ["balm-neoforge-1.21.1-21.0.65", 540, 727, 941, 1158],
+   ["beautifulcampfires-neoforge-1.21.1-1.0.2", 49, 49, 49, 49],
+   ["bellsandwhistles-0.4.7-1.21.1", 62, 62, 131, 131],
+   ["betterarcheology-neoforge-1.21.1-1.3.8", 382, 430, 847, 905],
+   ["betterchunkloading-1.21-5.4", 92, 133, 124, 177],
+   ["bits_n_bobs-0.0.44", 458, 472, 1127, 1141],
+   ["block_factorys_bosses-2.1.2-neo-1.21.1", 1326, 1650, 5767, 6626],
+   ["blockui-1.0.209-1.21.1", 464, 559, 760, 870],
+   ["blueprint-1.21.1-8.1.0", 825, 1069, 1776, 2063],
+   ["bobberdetector-neoforge1.21.1-1.0.3", 50, 50, 59, 59],
+   ["bookshelf-neoforge-1.21.1-21.1.81", 340, 388, 589, 640],
+   ["buildinggadgets2-1.3.9", 621, 673, 1579, 1637],
+   ["caelus-neoforge-7.0.1+1.21.1", 47, 53, 50, 56],
+   ["carryon-neoforge-1.21.1-2.2.4.4-patched-no-slowness", 404, 449, 574, 621],
+   ["cbcaeronauticsmissiles-0.2.0", 418, 430, 891, 903],
+   ["chat_heads-0.15.7-neoforge-1.21", 66, 83, 86, 105],
+   ["chefsdelight-1.0.6", 27, 33, 28, 34],
+   ["cherishedworlds-neoforge-10.1.1+1.21.1", 25, 55, 31, 66],
+   ["chipped-neoforge-1.21.1-4.0.2", 247, 265, 350, 368],
+   ["chisel-neoforge-2.0.0+mc1.21.1", 126, 131, 169, 180],
+   ["chisels-and-bits-neoforge-21.1.32", 1039, 1201, 3156, 3354],
+   ["chunksending-1.21-2.9", 9, 11, 10, 12],
+   ["cleanswing-1.10-1.21", 22, 25, 22, 25],
+   ["climbable_ropes-2.0.1", 116, 125, 236, 248],
+   ["cloth-config-15.0.140-neoforge", 215, 235, 722, 755],
+   ["collective-1.21.1-8.46", 429, 585, 1282, 1559],
+   ["comforts-neoforge-9.0.5+1.21.1", 274, 348, 486, 582],
+   ["common-storage-lib-neoforge-1.21.1-0.0.10", 213, 233, 536, 559],
+   ["configured-neoforge-1.21.1-2.6.3", 206, 246, 445, 493],
+   ["connectedglass-1.1.14-neoforge-mc1.21", 20, 22, 43, 46],
+   ["connectivity-1.21.1-7.6", 67, 86, 109, 133],
+   ["copycats-3.0.9+mc.1.21.1-neoforge", 518, 569, 1803, 1869],
+   ["corpse-neoforge-1.21.1-1.1.13", 418, 450, 696, 729],
+   ["corpsecurioscompat-1.21.1-NeoForge-3.1.3", 54, 54, 65, 65],
+   ["cosmeticarmorreworked-1.21.1-v1-neoforge", 171, 223, 240, 295],
+   ["cosmeticcorpsecompat-1.21.1-NeoForge--1.0.0", 20, 20, 21, 21],
+   ["create-1.21.1-6.0.10", 3292, 3971, 24391, 25240],
+   ["create-aeronautics-bundled-1.21.1-1.3.2", 1386, 1531, 6204, 6378],
+   ["create-central-kitchen-2.4.0", 122, 130, 263, 271],
+   ["create-confectionery1.21.1_v1.1.3b", 213, 235, 1387, 1413],
+   ["create-enchantment-industry-2.4.2", 647, 722, 1875, 1981],
+   ["create-gunsmithing-1.21.1-1.4.9", 245, 270, 404, 429],
+   ["create-new-age-1.1.7c+neoforge-mc1.21.1", 334, 365, 781, 813],
+   ["create-stuff-additions1.21.1_v2.1.3", 610, 688, 4173, 4389],
+   ["create_aeronautics_automated_logistics-0.4.4", 465, 474, 1557, 1569],
+   ["create_aeronautics_ftb_chunks-1.21.1-NeoForge-1.0.3", 111, 115, 148, 153],
+   ["create_aeronautics_throwable_rope_connector-0.3.0", 315, 324, 466, 475],
+   ["create_aquatic_ambitions-1.21.1-2.0.4", 238, 249, 346, 357],
+   ["create_bitterballen+1.21.1-1.0.4", 358, 393, 832, 877],
+   ["create_connected-1.1.14-mc1.21.1", 595, 657, 1866, 1943],
+   ["create_easy_structures-0.2a-neoforge-1.21.1", 64, 64, 131, 131],
+   ["create_furnitures-1.1.2-neoforge-1.21.1", 87, 89, 1931, 1940],
+   ["create_hypertube-0.6.0-NEOFORGE", 506, 531, 1226, 1253],
+   ["create_jetpack-forge-5.2.1", 162, 179, 222, 239],
+   ["create_mechanical_extruder-1.21.1-2.2.2-6.0.10", 124, 131, 150, 165],
+   ["create_mekanism_compat-0.1.20", 132, 139, 192, 199],
+   ["create_mf-1.0.1-overhauled", 291, 315, 1405, 1463],
+   ["create_oxidized-0.1.3", 1, 1, 1, 1],
+   ["create_pattern_schematics-2.0.10", 207, 210, 301, 304],
+   ["create_power_loader-2.0.3-mc1.21.1", 184, 193, 285, 294],
+   ["create_radar-0.4.9.4-1.21.1", 563, 579, 1621, 1639],
+   ["create_rustic_structures-1.0.1-neoforge-1.21.1", 8, 8, 8, 8],
+   ["create_sophback_compat-1.0", 0, 0, 0, 0],
+   ["create_submarine-2.2.4", 758, 831, 2046, 2141],
+   ["create_things_and_misc-4.1.1-neoforge-1.21.1", 434, 472, 3215, 3305],
+   ["create_tilting_control-0.9.0", 278, 285, 762, 769],
+   ["create_ultimate_factory-2.2.4-neoforge-1.21.1", 8, 8, 8, 8],
+   ["create_vibrant_vaults-0.3.2", 78, 79, 113, 114],
+   ["create_winery-2.0.2-neoforge-1.21.1", 260, 272, 1196, 1245],
+   ["createaddition-1.5.10", 497, 515, 1131, 1150],
+   ["createaeronauticscurios-neoforge-1.21.1-1.0", 26, 27, 31, 32],
+   ["createappliedkinetics-1.5.3-1.21.1", 46, 46, 55, 55],
+   ["createbb-4.0.1", 79, 91, 112, 124],
+   ["createbetterfps-1.21.1-1.1.4", 27, 29, 27, 29],
+   ["createbigcannons-5.11.7+mc.1.21.1", 1131, 1245, 5285, 5451],
+   ["createcmo-1.3.0-create-6.0.x-neoforge-1.21.1", 151, 152, 286, 287],
+   ["createdeco-2.1.3", 197, 218, 580, 634],
+   ["createdieselgenerators-1.21.1-1.3.15", 733, 787, 2289, 2348],
+   ["createenchantablemachinery-3.6.0+mc1.21.1-neoforge", 274, 276, 783, 800],
+   ["createframed-1.21.1-1.7.3", 87, 88, 124, 129],
+   ["createoreexcavation-1.21-1.6.8", 428, 447, 869, 892],
+   ["createpropulsion-1.1.4", 630, 639, 1944, 1953],
+   ["createrailwaysnavigator-neoforge-1.21.1-beta-0.9.0-C6", 390, 414, 1794, 1834],
+   ["creatingspace-1.21.1-1.7.20", 774, 869, 2059, 2163],
+   ["cristellib-neoforge-1.21.1-3.0.2.1", 112, 138, 218, 245],
+   ["cryonicconfig-neoforge-1.0.0+mc1.21.11", 5, 5, 5, 5],
+   ["cupboard-1.21.1-4.2", 39, 42, 42, 45],
+   ["curios-neoforge-9.5.1+1.21.1", 458, 581, 864, 1006],
+   ["defaultoptions-neoforge-1.21.1-21.1.8", 28, 39, 41, 52],
+   ["disenchanting_table-merged-1.21.1-5.0.2", 172, 190, 590, 650],
+   ["domum-ornamentum-1.0.231-main", 493, 538, 1092, 1143],
+   ["doubledoors-1.21.1-7.2", 26, 32, 66, 73],
+   ["dragonlib-neoforge-1.21.1-beta-3.0.26", 954, 1280, 1608, 1984],
+   ["dummmmmmy-1.21-2.1.1-neoforge", 263, 313, 335, 385],
+   ["dynamiclights-1.21.1.2NF", 89, 91, 125, 129],
+   ["easel_does_it-1.21.1-2.0.3", 215, 228, 289, 302],
+   ["easy-villagers-neoforge-1.21.1-1.1.42", 528, 617, 1253, 1377],
+   ["easy_mob_farm-neoforge-1.21.1-10.9.0", 462, 538, 912, 1021],
+   ["eatinganimation-1.21.0-6.0.1", 41, 59, 51, 73],
+   ["electroenergetics-1.21.1-1.1.1", 725, 777, 3909, 3969],
+   ["elevatorid-neoforge-1.21.1-1.11.4", 212, 247, 271, 306],
+   ["elytraslot-neoforge-9.0.2+1.21.1", 76, 89, 90, 103],
+   ["enchdesc-neoforge-1.21.1-21.1.11", 28, 30, 29, 31],
+   ["ender_pack-merged-1.21.1-2.2.0", 128, 133, 402, 423],
+   ["endersdelight-1.3.0", 171, 177, 231, 238],
+   ["ends_delight-2.5.1+neoforge.1.21.1-patched", 201, 223, 320, 362],
+   ["entity_model_features-3.3.11-1.21-neoforge", 188, 232, 313, 358],
+   ["entity_texture_features-7.2.5-1.21-neoforge", 305, 424, 628, 761],
+   ["entityculling-neoforge-1.10.5-mc1.21.1", 278, 315, 389, 429],
+   ["escalated-1.2.1-create.6.0.8-mc.1.21.1-neoforge", 220, 222, 456, 458],
+   ["factory_blocks-neoforge-1.4.0+mc1.21.1", 27, 29, 33, 35],
+   ["fallingleaves-1.21.1-2.5.1", 132, 147, 159, 174],
+   ["fancymenu_neoforge_3.9.12_MC_1.21.1", 889, 1245, 4650, 5256],
+   ["fast-ip-ping-v1.0.11-mc1.21.1-neoforge", 1, 4, 1, 4],
+   ["fastasyncworldsave-1.21-2.6", 9, 13, 10, 14],
+   ["fastpaintings-1.21-1.3.0-neoforge", 107, 117, 126, 136],
+   ["ferritecore-7.0.3-neoforge", 22, 27, 27, 32],
+   ["framework-neoforge-1.21.1-0.13.11", 278, 370, 344, 437],
+   ["ftb-chunks-neoforge-2101.1.21", 428, 492, 957, 1033],
+   ["ftb-library-neoforge-2101.1.35", 554, 640, 1326, 1422],
+   ["ftb-quests-neoforge-2101.1.34", 698, 751, 2403, 2479],
+   ["ftb-teams-neoforge-2101.1.11", 209, 222, 509, 528],
+   ["ftb-xmod-compat-neoforge-21.1.11", 45, 46, 93, 94],
+   ["fusion-1.3.5-neoforge-mc1.21.1", 308, 401, 637, 766],
+   ["garnished-2.1.9.2+1.21.1-neoforged", 444, 505, 1990, 2131],
+   ["geckolib-neoforge-1.21.1-4.9.3", 347, 428, 704, 825],
+   ["gml-6.0.2", 210, 245, 296, 342],
+   ["goblintraders-neoforge-1.21.1-1.11.2", 211, 267, 262, 335],
+   ["golden_foods-merged-1.21.1-2.4.0", 79, 88, 263, 279],
+   ["gpumemleakfix-1.21-1.8", 9, 10, 9, 10],
+   ["guardvillagers-2.4.12-1.21.1", 389, 600, 620, 920],
+   ["guideme-21.1.15", 747, 951, 1285, 1524],
+   ["handcrafted-neoforge-1.21.1-4.0.3", 252, 276, 706, 731],
+   ["immersive_aircraft-1.4.6+1.21.1-neoforge", 434, 472, 772, 811],
+   ["immersive_armors-1.7.6+1.21.1-neoforge", 227, 250, 408, 436],
+   ["inventorysorter-1.21.1-24.0.24", 107, 117, 151, 161],
+   ["iris-neoforge-1.8.14-beta.1+mc1.21.1", 481, 695, 1094, 1437],
+   ["irons_lib-1.21.1-2.1.0", 448, 511, 732, 812],
+   ["irons_spellbooks-1.21.1-3.16.3", 2098, 2710, 11162, 12326],
+   ["jamlib-neoforge-1.3.6+1.21.1", 51, 72, 116, 146],
+   ["jei-1.21.1-neoforge-19.44.0.403", 637, 798, 1533, 1723],
+   ["jmi-neoforge-1.21.1-1.9", 65, 72, 85, 93],
+   ["journeymap-neoforge-1.21.1-6.0.2", 935, 1303, 3130, 4082],
+   ["justzoom_neoforge_2.1.0_MC_1.21.1", 42, 48, 54, 60],
+   ["kleeslabs-neoforge-1.21.1-21.1.11", 70, 72, 98, 101],
+   ["konkrete_neoforge_1.9.9_MC_1.21", 89, 96, 199, 209],
+   ["kotlinforforge-5.12.0-all", 0, 0, 0, 0],
+   ["kubejs-neoforge-2101.7.2-build.368", 1650, 2203, 3853, 4654],
+   ["lionfishapi-3.1", 110, 123, 159, 172],
+   ["lithostitched-1.8.0+beta4-neoforge-21.1", 493, 705, 1800, 2170],
+   ["livingthings-neoforge-1.21.1-2.3.2", 407, 591, 1256, 1700],
+   ["longer_following_time-merged-1.21.1-1.2.0", 35, 38, 36, 39],
+   ["lootr-neoforge-1.21.1-1.11.38.127", 708, 891, 1471, 1714],
+   ["lukis-grand-capitals-1.1.3", 0, 0, 0, 0],
+   ["mcw-bridges-3.1.2-mc1.21.1neoforge", 89, 89, 264, 264],
+   ["mcw-doors-1.1.5-mc1.21.1neoforge", 65, 65, 97, 97],
+   ["mcw-furniture-3.4.1-mc1.21.1neoforge", 154, 161, 433, 440],
+   ["mcw-lights-1.1.5-mc1.21.1neoforge", 92, 92, 313, 313],
+   ["mcw-mcwfences-1.2.1-mc1.21.1neoforge", 88, 89, 156, 158],
+   ["mcw-mcwpaths-1.1.1-mc1.21.1neoforge", 48, 48, 81, 81],
+   ["mcw-mcwstairs-1.0.2-mc1.21.1neoforge", 67, 67, 153, 153],
+   ["mcw-mcwwindows-2.4.2-mc1.21.1neoforge", 100, 101, 316, 317],
+   ["mcw-roofs-2.3.2-mc1.21.1neoforge", 97, 98, 291, 292],
+   ["mcw-trapdoors-1.1.5-mc1.21.1neoforge", 26, 26, 30, 30],
+   ["mechanicals-1.21.1-1.1.6", 1213, 1361, 3025, 3214],
+   ["medieval_buildings-1.21.1-1.1.1-neoforge", 1, 1, 1, 1],
+   ["medieval_buildings_end_edition-1.21.1-1.0.4-neoforge", 17, 19, 17, 19],
+   ["medieval_buildings_nether_edition-1.21.1-1.0.2-neoforge", 0, 0, 0, 0],
+   ["melody_neoforge_1.0.10_MC_1.21", 17, 20, 20, 23],
+   ["minecolonies-1.1.1368-1.21.1", 2005, 2567, 12853, 14216],
+   ["modernfix-neoforge-5.27.24+mc1.21.1", 304, 433, 438, 585],
+   ["molten_vents-1.21.1-2.1.1", 84, 87, 115, 118],
+   ["monolib-neoforge-1.21.1-4.1.2", 122, 135, 150, 165],
+   ["moonlight-1.21.1-3.6.9-neoforge", 1624, 2161, 4347, 5055],
+   ["more_beautiful_torches-merged-1.21.1-3.1.1", 35, 36, 38, 39],
+   ["more_bows_and_arrows-merged-1.21.1-5.0.5", 163, 190, 356, 409],
+   ["multipiston-1.2.58-1.21.1", 99, 100, 111, 112],
+   ["new_shield_variants-neoforge-1.21.1-2.2.0", 133, 166, 178, 215],
+   ["new_slab_variants-merged-1.21.1-3.0.1", 210, 422, 754, 1147],
+   ["notenoughanimations-neoforge-1.12.4-mc1.21.1", 296, 340, 506, 556],
+   ["ntgl-1.21.1-3.2.0", 1034, 1195, 3475, 3674],
+   ["oceansdelight-neoforge-1.0.4-1.21.1", 54, 54, 59, 59],
+   ["particular-1.21.1-NeoForge-1.5.7", 195, 220, 454, 481],
+   ["pipez-neoforge-1.21.1-1.2.31", 549, 573, 1090, 1115],
+   ["player-animation-lib-forge-2.0.4+1.21.1", 40, 40, 54, 54],
+   ["polyeng-0.4.1", 9, 9, 9, 9],
+   ["polylib-2100.1.0-build.183-neoforge", 560, 618, 1001, 1065],
+   ["polymorph-neoforge-1.1.0+1.21.1", 128, 154, 220, 246],
+   ["portablespawner-neoforge-1.21.1-1.0.0", 19, 20, 23, 24],
+   ["potion_combiner-1.21.1-Neoforge-1.0.0", 131, 132, 150, 151],
+   ["pretty_in_pink-1.0.4-1.21.1", 40, 40, 46, 46],
+   ["prickle-neoforge-1.21.1-21.1.11", 6, 6, 6, 6],
+   ["railways-0.2.1+neoforge-mc1.21.1", 1003, 1165, 3318, 3543],
+   ["rechiseled-1.1.6a-neoforge-mc1.21", 123, 132, 182, 191],
+   ["rechiseledcreate-1.0.2a-neoforge-mc1.21", 92, 93, 120, 121],
+   ["recipeessentials-1.21.1-4.7", 27, 36, 36, 45],
+   ["redirected-neoforge-1.0.0-1.21.1", 52, 62, 52, 63],
+   ["reeses-sodium-options-neoforge-1.8.3+mc1.21.4", 51, 62, 61, 74],
+   ["refinedstorage-jei-integration-neoforge-1.0.0", 20, 20, 32, 32],
+   ["refinedstorage-neoforge-2.0.9", 821, 902, 2802, 2905],
+   ["refinedstorage-quartz-arsenal-neoforge-1.0.8", 68, 69, 74, 75],
+   ["refurbished_furniture-neoforge-1.21.1-1.0.22", 907, 1037, 3372, 3553],
+   ["resourcefulconfig-neoforge-1.21-3.0.11", 143, 205, 320, 453],
+   ["resourcefullib-neoforge-1.21-3.0.12", 440, 511, 725, 805],
+   ["rhino-2101.2.7-build.81", 0, 0, 0, 0],
+   ["rightclickharvest-neoforge-4.6.1+1.21.1", 69, 71, 74, 76],
+   ["ritchiesprojectilelib-2.1.2-mc.1.21.1-neoforge", 103, 114, 123, 134],
+   ["sable-neoforge-1.21.1-2.0.6", 1466, 1957, 5278, 5946],
+   ["secretdoors-1.21.1-v1.0.0", 30, 31, 32, 33],
+   ["shrink-2.0.1.47-neoforge", 85, 89, 117, 121],
+   ["simplemagnets-1.1.12c-neoforge-mc1.21", 129, 138, 220, 230],
+   ["skinlayers3d-neoforge-1.11.3-mc1.21.1", 267, 297, 406, 441],
+   ["sliceanddice-4.3.4-neoforge", 341, 359, 560, 580],
+   ["smarterfarmers-1.21-2.2.4-neoforge", 102, 136, 138, 180],
+   ["smoothchunk-1.21-4.1", 4, 9, 4, 9],
+   ["snowundertrees-1.21.1-1.5.1", 85, 100, 120, 136],
+   ["sodium-neoforge-0.8.13+mc1.21.1", 475, 656, 980, 1209],
+   ["sodiumextras-neoforge-1.0.8-1.21.1", 88, 96, 120, 128],
+   ["sodiumoptionsapi-neoforge-1.0.10-1.21.1", 52, 66, 60, 76],
+   ["sophisticatedbackpacks-1.21.1-3.26.9.2195", 869, 975, 1988, 2109],
+   ["sophisticatedbackpackscreateintegration-1.21.1-0.1.5.29", 86, 91, 110, 115],
+   ["sophisticatedcore-1.21.1-1.5.7.2381", 979, 1109, 3017, 3175],
+   ["sophisticatedstorage-1.21.1-1.6.2.2159", 820, 937, 2457, 2623],
+   ["sophisticatedstoragecreateintegration-1.21.1-0.1.17.132", 110, 112, 160, 162],
+   ["sophisticatedstorageinmotion-1.21.1-0.10.30.261", 353, 399, 650, 704],
+   ["sound-physics-remastered-neoforge-1.21.1-1.5.1", 127, 141, 170, 184],
+   ["spark-1.10.124-neoforge", 67, 102, 91, 131],
+   ["sparsestructures-neoforge-1.21.1-3.0", 19, 19, 21, 21],
+   ["structureessentials-1.21.1-5.0", 108, 138, 147, 183],
+   ["structurize-1.0.832-1.21.1", 796, 928, 1871, 2015],
+   ["supermartijn642configlib-1.1.8-neoforge-mc1.21", 15, 20, 17, 22],
+   ["supermartijn642corelib-1.1.24-neoforge-mc1.21", 486, 551, 772, 844],
+   ["tfmg-1.2.0", 924, 982, 4375, 4462],
+   ["torchmaster-neoforge-1.21.1-21.1.13", 268, 284, 359, 375],
+   ["towntalk-1.2.0", 4, 5, 4, 5],
+   ["trading_floor-3.0.16", 186, 207, 269, 297],
+   ["trashcans-1.1.1-neoforge-mc1.21", 102, 103, 159, 160],
+   ["trashslot-neoforge-1.21.1-21.1.11", 76, 78, 115, 117],
+   ["trimeffects-neoforge-mc1.21-2.1.1", 39, 41, 43, 45],
+   ["txnilib-neoforge-1.0.24-1.21.1", 56, 61, 67, 72],
+   ["underwater_village-1.0.2-neoforge-1.21.1", 8, 8, 8, 8],
+   ["unlocked_typing-merged-1.21.1-3.0.1", 54, 59, 87, 92],
+   ["variantsandventures-neoforge-1.0.26+mc1.21.1", 213, 303, 287, 395],
+   ["villagernames-1.21.1-8.5", 39, 46, 79, 93],
+   ["waystones-neoforge-1.21.1-21.1.34", 529, 576, 1249, 1297],
+   ["waystonessable-1.0.3", 80, 80, 104, 104],
+   ["weaponmaster_ydm-1.21.1-neoforge-4.2.7", 181, 195, 740, 764],
+   ["wider_ender_chests-neoforge-1.21.1-1.0.4", 46, 51, 48, 53],
+   ["xptome-1.21.1-2.4", 60, 70, 68, 78],
+   ["yeetusexperimentus-neoforge-87.0.0", 1, 1, 1, 1],
+   ["yet_another_config_lib_v3-3.8.2+1.21.1-neoforge", 175, 226, 399, 470],
+   ["zombie_variants-neoforge-1.0.3-1.21.1", 69, 74, 329, 348]
+  ],
+  "missing": [
+   ["net/minecraft/client/Minecraft.getTextureManager.()Lnet/minecraft/client/renderer/texture/TextureManager;", 46, 106],
+   ["net/neoforged/neoforge/client/gui/ConfigurationScreen.<init>.(Lnet/neoforged/fml/ModContainer;Lnet/minecraft/client/gui/screens/Screen;)V", 38, 38],
+   ["net/minecraft/world/entity/ai/goal/GoalSelector.addGoal.(ILnet/minecraft/world/entity/ai/goal/Goal;)V", 28, 174],
+   ["net/minecraft/world/entity/ai/goal/Goal.<init>.()V", 24, 164],
+   ["com/mojang/blaze3d/systems/RenderSystem.getModelViewStack.()Lorg/joml/Matrix4fStack;", 24, 40],
+   ["net/minecraft/client/renderer/texture/TextureManager.register.(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/client/renderer/texture/AbstractTexture;)V", 24, 40],
+   ["net/neoforged/neoforge/client/event/RegisterClientTooltipComponentFactoriesEvent.register.(Ljava/lang/Class;Ljava/util/function/Function;)V", 23, 23],
+   ["net/minecraft/world/level/Level.broadcastEntityEvent.(Lnet/minecraft/world/entity/Entity;B)V", 22, 78],
+   ["net/minecraft/client/renderer/texture/DynamicTexture.<init>.(Lcom/mojang/blaze3d/platform/NativeImage;)V", 22, 39],
+   ["net/minecraft/world/entity/ai/navigation/PathNavigation.stop.()V", 21, 126],
+   ["net/minecraft/server/level/ChunkMap.getPlayers.(Lnet/minecraft/world/level/ChunkPos;Z)Ljava/util/List;", 21, 31],
+   ["net/minecraft/world/level/storage/loot/entries/LootItem.lootTableItem.(Lnet/minecraft/world/level/ItemLike;)Lnet/minecraft/world/level/storage/loot/entries/LootPoolSingletonContainer$Builder;", 21, 30]
+  ],
+  "lib_missing": [
+   ["java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", 57, 126],
+   ["java/lang/Class.getDeclaredFields.()[Ljava/lang/reflect/Field;", 45, 84],
+   ["java/lang/reflect/Field.getType.()Ljava/lang/Class;", 43, 94],
+   ["com/google/gson/Gson.fromJson.(Ljava/io/Reader;Ljava/lang/Class;)Ljava/lang/Object;", 40, 55],
+   ["com/google/gson/Gson.fromJson.(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Object;", 35, 68],
+   ["java/lang/reflect/Modifier.isStatic.(I)Z", 34, 65],
+   ["java/lang/reflect/Array.newInstance.(Ljava/lang/Class;I)Ljava/lang/Object;", 33, 62],
+   ["java/io/FileWriter.<init>.(Ljava/io/File;)V", 33, 46],
+   ["java/lang/reflect/Field.getModifiers.()I", 31, 67],
+   ["java/lang/Thread.<init>.(Ljava/lang/Runnable;Ljava/lang/String;)V", 30, 80],
+   ["java/lang/Thread.start.()V", 28, 72],
+   ["java/lang/Thread.setDaemon.(Z)V", 28, 65]
+  ]
+ }
+}
