@@ -606,7 +606,6 @@
   "Up to date: {instance} plays these mods.": "Актуально: {instance} играет с этими модами.",
   "On this computer": "На этом компьютере",
   "Needs preparing": "Нужна подготовка",
-  "{name} is a Java modpack: importing it on the Modpacks page.": "{name} — модпак Java: импортируем на странице «Модпаки».",
   "Alpha": "Альфа",
   "Add mods": "Добавить моды",
   "PARTNER": "ПАРТНЁР",
@@ -736,5 +735,8 @@
   "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Изменения сохраняются сразу. Параметры, которые нельзя применить во время работы, ждут перезапуска, о чем указано на странице.",
   "No mod in it has code that could be translated.": "Ни в одном его моде нет кода, который можно перевести.",
   "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods} переведён в {instance} и включён. Соберите с ним игру на странице «Моды».",
-  "Translating the Java mod into Rust…": "Перевод мода Java на Rust…"
+  "Translating the Java mod into Rust…": "Перевод мода Java на Rust…",
+  "Translating the Java modpack into a new instance…": "Перевод модпака Java в новый экземпляр…",
+  "Made the instance {instance}: its mods' blocks and items are turned on; none of them has code to translate.": "Создан экземпляр {instance}: блоки и предметы его модов включены; кода для перевода нет ни в одном.",
+  "Made the instance {instance} and translated {mods} into it. Build the game with them here.": "Создан экземпляр {instance}, в него переведены {mods}. Соберите с ними игру здесь."
 }

@@ -1,7 +1,8 @@
 //! Files dropped anywhere on the window (`horizon_launcher::import`): a shared instance becomes
-//! a new instance, a Java modpack goes to the Modpacks import, a resource or shader pack into
-//! the selected instance, a Java mod's jar is translated into it (`native_mods::add_java`). The
-//! Packs section and the world rows take their own drops first.
+//! a new instance, a Java modpack too, with its mods translated into it (`import::translate_new`);
+//! a resource or shader pack goes into the selected instance, a Java mod's jar is translated into
+//! it (`native_mods::add_java`). The Modpacks page imports a Java modpack as a profile of its own
+//! instead. The Packs section and the world rows take their own drops first.
 use super::*;
 use gpui::ExternalPaths;
 use horizon_launcher::import::{self, Dropped};
@@ -13,6 +14,8 @@ pub(super) struct Importing {
     busy: usize,
     /// Java mods being translated.
     translating: usize,
+    /// Java modpacks being translated into new instances.
+    translating_packs: usize,
     /// What the last drop did, or why not.
     note: Option<Result<String, String>>,
 }
@@ -27,14 +30,7 @@ impl Launcher {
             match import::what(&file) {
                 Err(e) => self.importing.note = Some(Err(e)),
                 Ok(Dropped::Instance) => self.import_instance(file, cx),
-                Ok(Dropped::Modpack) => {
-                    self.show_modpack(None);
-                    self.pack_job(move |log| horizon_launcher::modpacks::import(&file, log));
-                    self.importing.note = Some(Ok(trf(
-                        "{name} is a Java modpack: importing it on the Modpacks page.",
-                        &[("name", &name)],
-                    )));
-                }
+                Ok(Dropped::Modpack) => self.translate_modpack(file, cx),
                 Ok(Dropped::Pack(_)) => {
                     let Some(i) = self.selected_instance().cloned() else {
                         continue;
@@ -125,6 +121,47 @@ impl Launcher {
         .detach();
     }
 
+    /// Makes a new instance of the Java modpack `file` on a background thread, with its mods
+    /// translated into it (`import::translate_new`), and selects it on the Mods page, where Build
+    /// builds the game with them.
+    fn translate_modpack(&mut self, file: PathBuf, cx: &mut Context<Self>) {
+        self.importing.translating_packs += 1;
+        self.importing.note = None;
+        let task = cx
+            .background_executor()
+            .spawn(async move { import::translate_new(&file, &|_| {}) });
+        cx.spawn(async move |this, cx| {
+            let made = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.importing.translating_packs -= 1;
+                this.importing.note = Some(made.map(|(i, added)| {
+                    this.reload_instances();
+                    this.select_instance(&i);
+                    this.go(Page::Mods);
+                    let mods: Vec<&str> = added
+                        .outcome
+                        .mods
+                        .iter()
+                        .filter(|m| m.native.is_some())
+                        .map(|m| m.mod_id.as_str())
+                        .collect();
+                    match mods.is_empty() {
+                        true => trf(
+                            "Made the instance {instance}: its mods' blocks and items are turned on; none of them has code to translate.",
+                            &[("instance", &i.name)],
+                        ),
+                        false => trf(
+                            "Made the instance {instance} and translated {mods} into it. Build the game with them here.",
+                            &[("instance", &i.name), ("mods", &mods.join(", "))],
+                        ),
+                    }
+                }));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// The root's drop target: every drop the sections don't take.
     pub(super) fn import_drop_target(
         &self,
@@ -144,6 +181,9 @@ impl Launcher {
             (_, n) if n > 0 => text(theme::LABEL)
                 .text_color(t.ink_soft)
                 .child(tr("Making the instance from the shared file…")),
+            _ if self.importing.translating_packs > 0 => text(theme::LABEL)
+                .text_color(t.ink_soft)
+                .child(tr("Translating the Java modpack into a new instance…")),
             _ if self.importing.translating > 0 => text(theme::LABEL)
                 .text_color(t.ink_soft)
                 .child(tr("Translating the Java mod into Rust…")),

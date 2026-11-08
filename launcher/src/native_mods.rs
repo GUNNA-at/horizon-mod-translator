@@ -423,6 +423,7 @@ pub fn folder_mod(dir: &Path) -> Option<(String, String, Option<String>)> {
 }
 
 /// What [`add_java`] did: the port's outcome, and the mods it turned on.
+#[derive(Debug)]
 pub struct Added {
     pub outcome: horizon_port_pack::install::Outcome,
     /// The ids turned on in `horizon-mods.txt`: content mods, then native ones.

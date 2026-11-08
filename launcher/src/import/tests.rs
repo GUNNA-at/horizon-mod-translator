@@ -228,3 +228,49 @@ fn an_export_comes_back_as_an_instance_and_nothing_escapes_its_folder() {
     assert!(import_into(&java, NONE, &maker(&made)).is_err());
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Java mods given a new instance get one named after them, with their content turned on in its
+/// own list of mods, and "(2)" when the name is taken; when Horizon can use nothing of them, no
+/// instance is left behind.
+#[test]
+fn java_mods_get_an_instance_of_their_own() {
+    let dir = scratch("translate-new");
+    let toml = |id: &str, name: &str| {
+        format!(
+            "modLoader=\"javafml\"\nlicense=\"MIT\"\n[[mods]]\nmodId=\"{id}\"\nversion=\"1.0\"\n\
+             displayName=\"{name}\"\n"
+        )
+    };
+    let rubies = dir.join("drop/rubies-1.0.jar");
+    zip_file(
+        &rubies,
+        &[
+            ("META-INF/neoforge.mods.toml", toml("rubies", "Rubies").as_bytes()),
+            (
+                "data/rubies/recipe/ruby_block.json",
+                br#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:diamond"],"result":{"id":"minecraft:diamond_block","count":1}}"#,
+            ),
+        ],
+    );
+    let homes = dir.join("instances");
+    let create = maker(&homes);
+    let (first, added) = translate_new_with(&rubies, &|_| {}, &create).unwrap();
+    assert_eq!(first.name, "Rubies");
+    assert_eq!(added.enabled, ["rubies"]);
+    assert!(first
+        .home
+        .join("horizon-mods/rubies/data/rubies/recipe/ruby_block.json")
+        .is_file());
+    let list = fs::read_to_string(first.home.join("horizon-mods.txt")).unwrap();
+    assert!(list.lines().any(|l| l == "mod.rubies:true"), "{list}");
+    let (second, _) = translate_new_with(&rubies, &|_| {}, &create).unwrap();
+    assert_eq!(second.name, "Rubies (2)");
+    assert_ne!(second.home, first.home);
+
+    let lib = dir.join("drop/lib.jar");
+    zip_file(&lib, &[("META-INF/neoforge.mods.toml", toml("lib", "Lib").as_bytes())]);
+    let err = translate_new_with(&lib, &|_| {}, &create).unwrap_err();
+    assert!(err.contains("lib.jar"), "{err}");
+    assert!(!homes.join("lib").exists());
+    let _ = fs::remove_dir_all(&dir);
+}

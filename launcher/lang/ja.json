@@ -617,7 +617,6 @@
   "Edit instance": "Edit instance",
   "No worlds to put in.": "No worlds to put in.",
   "On this computer": "On this computer",
-  "{name} is a Java modpack: importing it on the Modpacks page.": "{name} is a Java modpack: importing it on the Modpacks page.",
   "Upload this log to mclo.gs, a paste service for Minecraft logs? Anyone with the link can read it, until it is deleted or unread for 90 days. Your home folder, user name and account names are taken out first.": "Upload this log to mclo.gs, a paste service for Minecraft logs? Anyone with the link can read it, until it is deleted or unread for 90 days. Your home folder, user name and account names are taken out first.",
   "{count} lines, the game is running": "{count} lines, the game is running",
   "Move to trash": "Move to trash",
@@ -736,5 +735,8 @@
   "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "変更は随時保存されます。ゲーム実行中に適用できない設定は再起動を待ち、その旨が表示されます。",
   "No mod in it has code that could be translated.": "翻訳できるコードを持つ MOD がありません。",
   "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods} を {instance} に翻訳して有効にしました。Mods ページでゲームをビルドしてください。",
-  "Translating the Java mod into Rust…": "Java の MOD を Rust に翻訳中…"
+  "Translating the Java mod into Rust…": "Java の MOD を Rust に翻訳中…",
+  "Translating the Java modpack into a new instance…": "Java モッドパックを新しいインスタンスに翻訳中…",
+  "Made the instance {instance}: its mods' blocks and items are turned on; none of them has code to translate.": "インスタンス {instance} を作成しました。MOD のブロックとアイテムを有効にしました。翻訳するコードを持つ MOD はありません。",
+  "Made the instance {instance} and translated {mods} into it. Build the game with them here.": "インスタンス {instance} を作成し、{mods} を翻訳しました。ここでそれらを含めてゲームをビルドしてください。"
 }

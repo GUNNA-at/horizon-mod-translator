@@ -346,10 +346,11 @@ enum InstanceCmd {
         #[arg(long)]
         remove: bool,
     },
-    /// Import what a file is, as dropping it on the window does: a shared instance (a .mrpack
-    /// without mod loaders, such as `instance export` writes, or a game folder zip) becomes a
-    /// new instance; a Java modpack goes to the Modpacks import; a resource or shader pack into
-    /// the instance (default: the selected one)
+    /// Import what a file is: a shared instance (a .mrpack without mod loaders, such as
+    /// `instance export` writes, or a game folder zip) becomes a new instance; a Java modpack goes
+    /// to the Modpacks import (dropped on the window it becomes a new instance with its mods
+    /// translated, as `mods add-java --new-instance` does); a resource or shader pack into the
+    /// instance (default: the selected one)
     Import {
         file: PathBuf,
         /// The instance a pack goes into
@@ -630,8 +631,11 @@ enum ModsCmd {
         /// The jar, folder or modpack
         path: PathBuf,
         /// The instance (default: the selected one)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "new_instance")]
         instance: Option<String>,
+        /// Make a new instance for them instead, named after the modpack or the mod
+        #[arg(long)]
+        new_instance: bool,
         /// Build the game with them right away, as `native-build` does (needs --trust-native-code)
         #[arg(long)]
         build: bool,
@@ -2598,16 +2602,27 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
         ModsCmd::AddJava {
             path,
             instance,
+            new_instance,
             build,
             trust_native_code,
         } => {
-            if java.is_some() {
+            if java.is_some() && !new_instance {
                 return Err("Java mods are translated into Horizon instances: a Java instance runs their jars as they are.".into());
             }
             if build && !trust_native_code {
                 return Err("The translated code runs with full access to this computer. Pass --trust-native-code with --build, or build later with native-build.".into());
             }
-            let added = native_mods::add_java(&path, &home, &|line| eprintln!("{line}"))?;
+            let log = |line: String| eprintln!("{line}");
+            let (added, instance) = match new_instance {
+                true => {
+                    let (made, added) = horizon_launcher::import::translate_new(&path, &log)?;
+                    if !as_json {
+                        println!("Made the instance {} in {}", made.name, made.home.display());
+                    }
+                    (added, Some(made.id))
+                }
+                false => (native_mods::add_java(&path, &home, &log)?, instance),
+            };
             let out = &added.outcome;
             if as_json {
                 json(serde_json::json!({
@@ -2623,6 +2638,7 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
                     "resourcepacks": out.resourcepacks,
                     "report": out.report,
                     "enabled": added.enabled,
+                    "instance": instance,
                 }));
             } else {
                 for m in &out.mods {
@@ -2653,7 +2669,8 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
             if build {
                 native_build(None, instance, None, false, false, None)?;
             } else if !as_json {
-                println!("Build the game with them next: horizon-launcher native-build --trust-native-code");
+                let which = instance.map(|i| format!(" --instance '{i}'")).unwrap_or_default();
+                println!("Build the game with them next: horizon-launcher native-build{which} --trust-native-code");
             }
         }
         ModsCmd::UpdateGithub {
@@ -3176,6 +3193,11 @@ fn instance(action: InstanceCmd, as_json: bool) -> Result<(), String> {
                     println!(
                         "Port and play it: horizon-launcher modpack port {}",
                         pack.slug
+                    );
+                    println!(
+                        "Or translate its mods into Rust in an instance of its own: \
+                         horizon-launcher mods add-java '{}' --new-instance",
+                        file.display()
                     );
                 }
                 Dropped::Pack(_) => {

@@ -617,7 +617,6 @@
   "Edit instance": "Editar instância",
   "No worlds to put in.": "Nenhum mundo para colocar.",
   "On this computer": "Neste computador",
-  "{name} is a Java modpack: importing it on the Modpacks page.": "{name} é um modpack Java: importando-o na página Modpacks.",
   "Upload this log to mclo.gs, a paste service for Minecraft logs? Anyone with the link can read it, until it is deleted or unread for 90 days. Your home folder, user name and account names are taken out first.": "Enviar este log ao mclo.gs, um serviço de colagem para logs do Minecraft? Qualquer pessoa com o link pode lê-lo, até ele ser excluído ou ficar 90 dias sem ser lido. Sua pasta pessoal, nome de usuário e nomes de conta são removidos antes.",
   "{count} lines, the game is running": "{count} linhas, o jogo está rodando",
   "Move to trash": "Mover para a lixeira",
@@ -736,5 +735,8 @@
   "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "As alterações são salvas conforme você as faz. As que o jogo não puder aplicar enquanto roda esperarão a reinicialização.",
   "No mod in it has code that could be translated.": "Nenhum mod nele tem código que possa ser traduzido.",
   "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods} traduzido para {instance} e ativado. Compile o jogo com ele na página Mods.",
-  "Translating the Java mod into Rust…": "Traduzindo o mod Java para Rust…"
+  "Translating the Java mod into Rust…": "Traduzindo o mod Java para Rust…",
+  "Translating the Java modpack into a new instance…": "Traduzindo o modpack Java para uma nova instância…",
+  "Made the instance {instance}: its mods' blocks and items are turned on; none of them has code to translate.": "Instância {instance} criada: os blocos e itens dos mods estão ativados; nenhum deles tem código para traduzir.",
+  "Made the instance {instance} and translated {mods} into it. Build the game with them here.": "Instância {instance} criada e {mods} traduzido nela. Compile o jogo com eles aqui."
 }

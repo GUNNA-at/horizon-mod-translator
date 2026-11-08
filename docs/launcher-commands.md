@@ -521,7 +521,7 @@ MCP: `instance_shortcut`.
 
 ## `horizon-launcher instance import`
 
-Import what a file is, as dropping it on the window does: a shared instance (a .mrpack without mod loaders, such as `instance export` writes, or a game folder zip) becomes a new instance; a Java modpack goes to the Modpacks import; a resource or shader pack into the instance (default: the selected one).
+Import what a file is: a shared instance (a .mrpack without mod loaders, such as `instance export` writes, or a game folder zip) becomes a new instance; a Java modpack goes to the Modpacks import (dropped on the window it becomes a new instance with its mods translated, as `mods add-java --new-instance` does); a resource or shader pack into the instance (default: the selected one).
 
     horizon-launcher instance import <FILE>
 
@@ -894,6 +894,7 @@ Translate Java mods into an instance (docs/mod-translator.md): a NeoForge 1.21.1
 
 - `PATH`: The jar, folder or modpack
 - `--instance`: The instance (default: the selected one)
+- `--new-instance`: Make a new instance for them instead, named after the modpack or the mod
 - `--build`: Build the game with them right away, as `native-build` does (needs --trust-native-code)
 - `--trust-native-code`: With --build: you trust the translated code with full access to this computer
 

@@ -203,18 +203,43 @@ pub fn carried(work: &Path) -> Vec<PathBuf> {
     mods
 }
 
+/// The name of the pack at `path`: its own, else its file's (a mod list is named `modlist`).
+fn pack_name(path: &Path, pack: &Pack) -> String {
+    let name = pack.name.trim();
+    if name.is_empty() || name == "modlist" {
+        return stem(path);
+    }
+    name.to_string()
+}
+
+fn stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// What the Java mods at `path` are called: a mod jar's mod's name, a modpack's name, else the
+/// file's or folder's.
+pub fn name_of(path: &Path) -> String {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jar")) {
+        return horizon_port_pack::jar::read(path)
+            .ok()
+            .map(|info| info.name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| stem(path));
+    }
+    match horizon_port_pack::import::import(path) {
+        Ok(pack) => pack_name(path, &pack),
+        Err(_) => stem(path),
+    }
+}
+
 /// Imports the pack at `path` into `ports/<slug>/` and writes its coverage report from
 /// metadata (Modrinth answers by file hash; nothing is downloaded yet). Importing the same pack
 /// again keeps the jars and ports it already has.
 pub fn import(path: &Path, log: Log) -> Result<Imported, String> {
     let pack = horizon_port_pack::import::import(path)?;
-    let name = if pack.name.is_empty() || pack.name == "modlist" {
-        path.file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    } else {
-        pack.name.clone()
-    };
+    let name = pack_name(path, &pack);
     let work = ports_dir().join(slug(&name));
     log(format!("Importing {name} into {}", work.display()));
     pipeline::import(path, &work, log)?;

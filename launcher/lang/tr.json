@@ -617,7 +617,6 @@
   "Edit instance": "Edit instance",
   "No worlds to put in.": "No worlds to put in.",
   "On this computer": "On this computer",
-  "{name} is a Java modpack: importing it on the Modpacks page.": "{name} is a Java modpack: importing it on the Modpacks page.",
   "Upload this log to mclo.gs, a paste service for Minecraft logs? Anyone with the link can read it, until it is deleted or unread for 90 days. Your home folder, user name and account names are taken out first.": "Upload this log to mclo.gs, a paste service for Minecraft logs? Anyone with the link can read it, until it is deleted or unread for 90 days. Your home folder, user name and account names are taken out first.",
   "{count} lines, the game is running": "{count} lines, the game is running",
   "Move to trash": "Move to trash",
@@ -736,5 +735,8 @@
   "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Değişiklikler yapıldıkça kaydedilir. Oyun çalışırken uygulanamayanlar yeniden başlatmayı bekler ve sayfa bunu belirtir.",
   "No mod in it has code that could be translated.": "İçinde çevrilebilecek kodu olan bir mod yok.",
   "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods}, {instance} içine çevrildi ve açıldı. Oyunu Modlar sayfasında onunla derleyin.",
-  "Translating the Java mod into Rust…": "Java modu Rust'a çevriliyor…"
+  "Translating the Java mod into Rust…": "Java modu Rust'a çevriliyor…",
+  "Translating the Java modpack into a new instance…": "Java mod paketi yeni bir örneğe çevriliyor…",
+  "Made the instance {instance}: its mods' blocks and items are turned on; none of them has code to translate.": "{instance} örneği oluşturuldu: modlarının blokları ve eşyaları açık; hiçbirinde çevrilecek kod yok.",
+  "Made the instance {instance} and translated {mods} into it. Build the game with them here.": "{instance} örneği oluşturuldu ve {mods} içine çevrildi. Oyunu burada onlarla derleyin."
 }

@@ -606,7 +606,6 @@
   "Up to date: {instance} plays these mods.": "Auf dem neuesten Stand: {instance} spielt mit diesen Mods.",
   "On this computer": "Auf diesem Computer",
   "Needs preparing": "Vorbereitung erforderlich",
-  "{name} is a Java modpack: importing it on the Modpacks page.": "{name} ist ein Java-Modpack: Es wird auf der Modpacks-Seite importiert.",
   "Alpha": "Alpha",
   "Add mods": "Mods hinzufügen",
   "PARTNER": "PARTNER",
@@ -736,5 +735,8 @@
   "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Änderungen werden sofort gespeichert. Einstellungen, die während des Betriebs nicht geändert werden können, erfordern einen Neustart.",
   "No mod in it has code that could be translated.": "Kein Mod darin hat Code, der sich übersetzen lässt.",
   "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods} in {instance} übersetzt und eingeschaltet. Baue das Spiel damit auf der Seite Mods.",
-  "Translating the Java mod into Rust…": "Der Java-Mod wird in Rust übersetzt…"
+  "Translating the Java mod into Rust…": "Der Java-Mod wird in Rust übersetzt…",
+  "Translating the Java modpack into a new instance…": "Das Java-Modpack wird in eine neue Instanz übersetzt…",
+  "Made the instance {instance}: its mods' blocks and items are turned on; none of them has code to translate.": "Instanz {instance} erstellt: Die Blöcke und Gegenstände ihrer Mods sind eingeschaltet; keiner hat Code zum Übersetzen.",
+  "Made the instance {instance} and translated {mods} into it. Build the game with them here.": "Instanz {instance} erstellt und {mods} hinein übersetzt. Baue das Spiel hier damit."
 }

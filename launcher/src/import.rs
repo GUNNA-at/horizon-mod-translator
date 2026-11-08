@@ -6,7 +6,8 @@
 //!   `overrides/` (and `client-overrides/`) go into the instance's folder; each of its `files`
 //!   is downloaded from Modrinth and checked against its SHA-512 (`browser::download`).
 //! - A `.mrpack` for a mod loader, or a CurseForge modpack zip (`manifest.json`): a Java
-//!   modpack, for the Modpacks import (`modpacks::import`).
+//!   modpack. Dropped on the window it becomes a new instance with its mods translated into it
+//!   ([`translate_new`]); `instance import` gives it to the Modpacks import (`modpacks::import`).
 //! - A zip with `pack.mcmeta`: a data pack (`data/`) or a resource pack; with `shaders/`, or a
 //!   `.hshader`: a shader pack.
 //! - A mod's `.jar` (NeoForge's, Forge's or Fabric's metadata in it): a Java mod, translated into
@@ -17,6 +18,7 @@
 use crate::browser::{download, FileRef};
 use crate::export::{FILES, FOLDERS};
 use crate::instances::{self, Instance};
+use crate::native_mods::{self, Added};
 use crate::packs;
 use std::fs;
 use std::io::Read;
@@ -31,7 +33,8 @@ const OVERRIDES: [&str; 2] = ["overrides/", "client-overrides/"];
 pub enum Dropped {
     /// A shared instance: a new instance is made from it.
     Instance,
-    /// A Java modpack, for the Modpacks import.
+    /// A Java modpack: translated into a new instance ([`translate_new`]), or the Modpacks
+    /// import's.
     Modpack,
     /// A resource or shader pack, for the selected instance.
     Pack(packs::Kind),
@@ -179,13 +182,7 @@ pub fn import_into(
         .filter(|n| !n.is_empty())
         .map(str::to_string)
         .unwrap_or(stem);
-    let instance = (1..20)
-        .map(|n| match n {
-            1 => base.clone(),
-            n => format!("{base} ({n})"),
-        })
-        .find_map(|name| create(&name).ok())
-        .ok_or_else(|| format!("Could not make an instance called {base}."))?;
+    let instance = unique(&base, create)?;
     let home = instance.home.clone();
     let filled = fill(&mut zip, index.as_ref(), &home, progress);
     if let Err(e) = filled {
@@ -193,6 +190,54 @@ pub fn import_into(
         return Err(e);
     }
     Ok(instance)
+}
+
+/// A new instance called `base`, or "`base` (2)" and on when that name is taken.
+fn unique(base: &str, create: &dyn Fn(&str) -> Result<Instance, String>) -> Result<Instance, String> {
+    (1..20)
+        .map(|n| match n {
+            1 => base.to_string(),
+            n => format!("{base} ({n})"),
+        })
+        .find_map(|name| create(&name).ok())
+        .ok_or_else(|| format!("Could not make an instance called {base}."))
+}
+
+/// Makes a new instance for the Java mods at `source` (a modpack, a mod's jar or a folder of
+/// jars) and translates them into it, as [`native_mods::add_java`] does: their content mods and
+/// their code, translated into Rust, turned on. Named after the pack or the mod, with "(2)" when
+/// the name is taken. When nothing of it could be translated or carried over, the instance is
+/// removed again.
+pub fn translate_new(source: &Path, log: &dyn Fn(String)) -> Result<(Instance, Added), String> {
+    translate_new_with(source, log, &|name| instances::create(name, None))
+}
+
+/// [`translate_new`] with the instance made by `create`.
+pub fn translate_new_with(
+    source: &Path,
+    log: &dyn Fn(String),
+    create: &dyn Fn(&str) -> Result<Instance, String>,
+) -> Result<(Instance, Added), String> {
+    if !source.exists() {
+        return Err(format!("{}: not found", source.display()));
+    }
+    let instance = unique(&crate::modpacks::name_of(source), create)?;
+    let added = native_mods::add_java(source, &instance.home, log).and_then(|added| {
+        match added.enabled.is_empty() {
+            true => Err(format!(
+                "Nothing in {} could be translated or carried over.",
+                name_of(source)
+            )),
+            false => Ok(added),
+        }
+    });
+    match added {
+        Ok(added) => Ok((instance, added)),
+        Err(e) => {
+            let _ = fs::remove_dir_all(&instance.home);
+            Err(e)
+        }
+    }
 }
 
 fn fill(

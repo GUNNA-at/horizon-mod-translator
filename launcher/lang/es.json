@@ -606,7 +606,6 @@
   "Up to date: {instance} plays these mods.": "Al día: {instance} juega con estos mods.",
   "On this computer": "En este equipo",
   "Needs preparing": "Requiere preparación",
-  "{name} is a Java modpack: importing it on the Modpacks page.": "{name} es un modpack de Java: importándolo en la página Modpacks.",
   "Alpha": "Alfa",
   "Add mods": "Añadir mods",
   "PARTNER": "COLABORADOR",
@@ -736,5 +735,8 @@
   "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Los cambios se guardan al realizarlos. Los que el juego no pueda aplicar en ejecución esperarán a reiniciar, y la página lo indicará.",
   "No mod in it has code that could be translated.": "Ningún mod que contiene tiene código que se pueda traducir.",
   "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods} traducido a {instance} y activado. Compila el juego con él en la página Mods.",
-  "Translating the Java mod into Rust…": "Traduciendo el mod de Java a Rust…"
+  "Translating the Java mod into Rust…": "Traduciendo el mod de Java a Rust…",
+  "Translating the Java modpack into a new instance…": "Traduciendo el modpack de Java a una nueva instancia…",
+  "Made the instance {instance}: its mods' blocks and items are turned on; none of them has code to translate.": "Se creó la instancia {instance}: los bloques y objetos de sus mods están activados; ninguno tiene código que traducir.",
+  "Made the instance {instance} and translated {mods} into it. Build the game with them here.": "Se creó la instancia {instance} y se tradujo {mods} en ella. Compila el juego con ellos aquí."
 }
