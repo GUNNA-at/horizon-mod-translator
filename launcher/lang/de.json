@@ -733,5 +733,8 @@
   "No backup yet.": "Noch kein Backup.",
   "Replace the world": "Welt ersetzen",
   "Back up now": "Jetzt sichern",
-  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Änderungen werden sofort gespeichert. Einstellungen, die während des Betriebs nicht geändert werden können, erfordern einen Neustart."
+  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Änderungen werden sofort gespeichert. Einstellungen, die während des Betriebs nicht geändert werden können, erfordern einen Neustart.",
+  "No mod in it has code that could be translated.": "Kein Mod darin hat Code, der sich übersetzen lässt.",
+  "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods} in {instance} übersetzt und eingeschaltet. Baue das Spiel damit auf der Seite Mods.",
+  "Translating the Java mod into Rust…": "Der Java-Mod wird in Rust übersetzt…"
 }

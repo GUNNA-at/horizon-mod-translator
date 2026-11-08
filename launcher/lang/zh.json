@@ -733,5 +733,8 @@
   "No backup yet.": "暂无备份。",
   "Replace the world": "替换世界",
   "Back up now": "立即备份",
-  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "修改会实时保存。游戏运行中无法生效的修改将在重启后应用，页面会对此予以说明。"
+  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "修改会实时保存。游戏运行中无法生效的修改将在重启后应用，页面会对此予以说明。",
+  "No mod in it has code that could be translated.": "其中没有可以翻译代码的模组。",
+  "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "已将 {mods} 翻译到 {instance} 并启用。请在模组页面用它构建游戏。",
+  "Translating the Java mod into Rust…": "正在将 Java 模组翻译为 Rust…"
 }

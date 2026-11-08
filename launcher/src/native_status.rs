@@ -195,9 +195,14 @@ pub fn fingerprint(home: &Path, version: Option<&str>) -> String {
     let mut out = format!("{}\n{version:?}\n", home.display());
     // The on/off list (`browser::java::is_enabled`).
     out += &fs::read_to_string(home.join("horizon-mods.txt")).unwrap_or_default();
+    // A translated mod's manifest is written again with every translation of it.
+    let translated = native_mods::translated(home)
+        .into_iter()
+        .map(|dir| dir.join("horizon-mixin.toml"));
     for path in hnmods(home)
         .into_iter()
         .flat_map(|p| [p.clone(), p.with_extension("origin.json")])
+        .chain(translated)
         .chain([home.join("mod-browser.json")])
     {
         let meta = fs::metadata(&path).ok();

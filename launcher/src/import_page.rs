@@ -1,6 +1,7 @@
 //! Files dropped anywhere on the window (`horizon_launcher::import`): a shared instance becomes
 //! a new instance, a Java modpack goes to the Modpacks import, a resource or shader pack into
-//! the selected instance. The Packs section and the world rows take their own drops first.
+//! the selected instance, a Java mod's jar is translated into it (`native_mods::add_java`). The
+//! Packs section and the world rows take their own drops first.
 use super::*;
 use gpui::ExternalPaths;
 use horizon_launcher::import::{self, Dropped};
@@ -10,6 +11,8 @@ use std::path::PathBuf;
 pub(super) struct Importing {
     /// Shared instances being made.
     busy: usize,
+    /// Java mods being translated.
+    translating: usize,
     /// What the last drop did, or why not.
     note: Option<Result<String, String>>,
 }
@@ -44,6 +47,11 @@ impl Launcher {
                             )
                         }));
                     self.game_packs.stale();
+                }
+                Ok(Dropped::JavaMod) => {
+                    if let Some(i) = self.selected_instance().cloned() {
+                        self.translate_java(file, i, cx);
+                    }
                 }
                 Ok(Dropped::DataPack) => {
                     self.importing.note = Some(Err(trf(
@@ -81,6 +89,42 @@ impl Launcher {
         .detach();
     }
 
+    /// Translates the Java mod `file` into `instance` on a background thread: its content mods
+    /// and its code, translated into Rust, turned on; the Mods page's Build then builds the game
+    /// with them.
+    fn translate_java(&mut self, file: PathBuf, instance: instances::Instance, cx: &mut Context<Self>) {
+        self.importing.translating += 1;
+        self.importing.note = None;
+        let task = cx.background_executor().spawn(async move {
+            horizon_launcher::native_mods::add_java(&file, &instance.home, &|_| {})
+                .map(|added| (added, instance))
+        });
+        cx.spawn(async move |this, cx| {
+            let done = task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.importing.translating -= 1;
+                this.importing.note = Some(done.and_then(|(added, i)| {
+                    let mods: Vec<&str> = added
+                        .outcome
+                        .mods
+                        .iter()
+                        .filter(|m| m.native.is_some())
+                        .map(|m| m.mod_id.as_str())
+                        .collect();
+                    match mods.is_empty() {
+                        true => Err(tr("No mod in it has code that could be translated.").into()),
+                        false => Ok(trf(
+                            "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.",
+                            &[("mods", &mods.join(", ")), ("instance", &i.name)],
+                        )),
+                    }
+                }));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// The root's drop target: every drop the sections don't take.
     pub(super) fn import_drop_target(
         &self,
@@ -100,6 +144,9 @@ impl Launcher {
             (_, n) if n > 0 => text(theme::LABEL)
                 .text_color(t.ink_soft)
                 .child(tr("Making the instance from the shared file…")),
+            _ if self.importing.translating > 0 => text(theme::LABEL)
+                .text_color(t.ink_soft)
+                .child(tr("Translating the Java mod into Rust…")),
             (Some(Ok(said)), _) => text(theme::LABEL)
                 .text_color(t.ink_soft)
                 .child(said.clone()),

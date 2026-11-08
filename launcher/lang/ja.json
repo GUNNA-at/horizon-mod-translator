@@ -733,5 +733,8 @@
   "No backup yet.": "バックアップはまだありません。",
   "Replace the world": "ワールドを置き換える",
   "Back up now": "今すぐバックアップ",
-  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "変更は随時保存されます。ゲーム実行中に適用できない設定は再起動を待ち、その旨が表示されます。"
+  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "変更は随時保存されます。ゲーム実行中に適用できない設定は再起動を待ち、その旨が表示されます。",
+  "No mod in it has code that could be translated.": "翻訳できるコードを持つ MOD がありません。",
+  "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods} を {instance} に翻訳して有効にしました。Mods ページでゲームをビルドしてください。",
+  "Translating the Java mod into Rust…": "Java の MOD を Rust に翻訳中…"
 }

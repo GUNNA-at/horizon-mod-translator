@@ -8876,6 +8876,55 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       bare object, the game's player and cow) are no mod entity of a level, so its tick leaves a call
       unmapped there. On a mod's own mob the key reaches the same `tick` that the level's ticking runs
       (`mobs.rs`), the one that moves Waddles' penguins.
+- [x] 2026-11-08 Part 130: from a Java mod to a game that runs it, in the launcher. Until now a translated mod
+  reached the game through scratch scripts (a bundle, a copy of the tree, the hook fragments stamped by hand,
+  horizon-mixins applied, a cargo build, `--dev-mod` for the content), on this Mac only.
+  - `horizon-launcher mods add-java <jar|folder|modpack> [--instance NAME] [--build --trust-native-code]`
+    (`native_mods::add_java`): `horizon_port_pack::install` into the instance's folder, the content mods and the
+    translated code's folders (`horizon-native-mods/<id>_translated/`) turned on in `horizon-mods.txt`, with the
+    content mods of the mods a jar bundles (`install::Outcome::bundled`: Create's Flywheel and Ponder). `--build`
+    runs `native-build` after it. Kept out of the MCP tools (`cli_tools::NOT_TOOLS`): turning a mod's code into a
+    native mod and building it is the player's decision. A mod's `.jar` dropped on the launcher's window is
+    translated into the selected instance (`import::Dropped::JavaMod`); the Mods page's Build builds it.
+  - The bundle says what to build it on. The translator pins the commit it was built from (`build.rs`: the
+    checkout's `HEAD`, else `HORIZON_TRANSLATOR_REVISION` or `GITHUB_SHA`) as `[compatibility] horizon_revision`,
+    and writes `horizon-source.toml` beside it: `horizon_repository` (this fork), `mixins_repository` and
+    `mixins_revision` (the horizon-mixins fork with sibling crates). horizon-mixins refuses other keys in the
+    manifest, hence the second file.
+  - The launcher reads it (`Bundle::repository`, `mixins_repository`): the build downloads the named repository's
+    archive at the pinned commit, builds horizon-mixins from the named one, refuses mods naming different
+    repositories, and completes the archive's hook catalog from its pending fragments as a release's stamp
+    would (`complete_catalog`: each missing hook at version 1, with `side`, `neoforge`, `cancellable`). It takes
+    the folders in `horizon-native-mods/` with a `horizon-mixin.toml` as it takes `.hnmod` files (on by their
+    manifest's id; only sources, manifests and data copied, `content/` left out; Create's bundle is about
+    150 MB, past a registry file's 64 MiB), and the Mods page counts them for "Up to date".
+  - Two install fixes the launcher run found. A mod whose code makes mobs now installs the translator's content
+    mod (its code's entity types and look, with the carry-over's data) as one with machines did: Waddles registers
+    its penguin through a multi-loader wrapper the registration scan doesn't see, so a mod whose classes extend
+    the game's entities or block entities counts too (`check::code_of`). And a mod declaring Minecraft 1.21 or
+    later in its metadata (`JarInfo::minecraft`) is no longer refused as 1.20's for its `loot_tables/` folder.
+  - Tests: translator 1 (a bundle pins the checkout's commit, and its source file names the fork, the
+    horizon-mixins fork and a commit of it, read back as TOML); launcher 4 new (the source file read and a
+    non-repository refused; one repository from the mods or the upstream one, two refused; a catalog completed
+    from fragments, a known hook kept; a translated folder taken when on, its content left out, digested as a
+    build records it, a stray `build.sh` refused) and a dropped mod jar told from a library jar; port-pack 2
+    (a mod declared for 1.21; the ranges `[1.21, 1.22)`, `>=1.21`, `~26.3` are 1.21 or later, `[1.20.1,1.21)`,
+    `(,1.21)` aren't). All the launcher's tests pass but `an_app_bundle_updates_in_place`, which runs a copy of
+    `/usr/bin/true` re-signed ad hoc and fails on this Mac before and after (`backend.rs` untouched).
+  - Live, a player's path on a scratch launcher home: `install nightly-2026-11-01-c9d474d` (its resources cloned
+    from this checkout's prepared ones: the Minecraft folder here has 26.3's json but not its jar), then
+    `mods add-java Waddles-neoforge-1.21-0.11.1.jar` (0.2 s: `waddles` and `waddles_translated` on), then
+    `native-build --trust-native-code`: Rust 1.99.1 downloaded, horizon-mixins built from the fork, the fork's
+    source at the pinned `3a905952` downloaded and its catalog completed, the bundle applied and its crates
+    checked against the lock, the game compiled (341 crates) and installed as `native-3a90595-184539c1b768`, the
+    instance's version: 4 min 32 s in all. That game, started on the instance's folder with no `--dev-mod` (the
+    mods from `horizon-mods.txt`): three `/summon waddles:adelie_penguin` answer "Summoned new Adélie Penguin",
+    the spawn egg in survival hatches a fourth and leaves 1 of 2, the four stand in their pen drawn with
+    Waddles' model and texture. The log has no exception; it says the carried biome modifier (natural spawning)
+    is skipped: `MobSpawnSettings$SpawnerData.CODEC` is not read yet.
+  - Not yet: a dropped modpack still goes to the Modpacks page's import (its content), not through the
+    translator; a Windows player's build is untested (the translator and runtime type-check for
+    `x86_64-pc-windows-gnu`, the launcher's Windows path is upstream's).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

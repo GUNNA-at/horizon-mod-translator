@@ -733,5 +733,8 @@
   "No backup yet.": "Brak kopii zapasowych.",
   "Replace the world": "Zastąp świat",
   "Back up now": "Utwórz kopię teraz",
-  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Zmiany są zapisywane na bieżąco. Te, których gra nie może zastosować w trakcie działania, wymagają restartu, o czym informuje strona."
+  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Zmiany są zapisywane na bieżąco. Te, których gra nie może zastosować w trakcie działania, wymagają restartu, o czym informuje strona.",
+  "No mod in it has code that could be translated.": "Żaden mod w nim nie ma kodu, który da się przetłumaczyć.",
+  "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "Przetłumaczono {mods} do {instance} i włączono. Zbuduj z nim grę na stronie Mody.",
+  "Translating the Java mod into Rust…": "Tłumaczenie moda Java na Rust…"
 }

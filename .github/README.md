@@ -128,15 +128,35 @@ result comes from a scene set up by command, read back from the world's data and
 - **Other mods' mobs.** Waddles' penguins, summoned by command or hatched from their spawn egg, walk
   their pen by their own AI goals and pathfinding, grow up from babies, and are saved with the world: all
   five came back after it was closed and opened again.
+- **From the launcher.** On a fresh launcher, `mods add-java` translated Waddles' jar and `--build` built a
+  game with it in 4½ minutes, from this repository's source and its own Rust. That game, started as a player
+  starts it, with no developer flags, summons the penguins and hatches them from their egg.
 
 Not working yet: trains, hitting and feeding other mods' mobs, their natural spawning, NeoForge's config
 screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack has not been run in one game yet.
 
 ## Try it
 
-There is no single command for a whole pack yet; that is the goal. Today a mod goes through these steps.
-You need Horizon's build prerequisites and resources prepared from your own Minecraft install (see
-[Horizon's README](../README.md)).
+The Horizon launcher on this branch does it in one command: it translates the mod, builds the game with it, and the
+instance plays that build. It needs resources prepared from your own Minecraft (see [Horizon's README](../README.md))
+and brings its own Rust.
+
+```sh
+# The launcher of this branch: it carries the translator.
+cargo build --release --manifest-path launcher/Cargo.toml
+
+# A mod's jar, a folder of jars, or a modpack (.mrpack, CurseForge zip or instance folder).
+horizon-launcher mods add-java Waddles-neoforge-1.21-0.11.1.jar --build --trust-native-code
+horizon-launcher play
+```
+
+`add-java` turns on the mod's content (`horizon-mods/`) and its code, translated into Rust
+(`horizon-native-mods/<id>_translated/`). `--build` downloads this repository's source at the commit the translator
+was built from, applies the bundle with horizon-mixins and compiles the game: 4½ minutes the first time for
+Waddles on an M-series Mac, far longer for Create, then only what changed. Without `--build`, `horizon-launcher native-build --trust-native-code` or the Mods page's
+Build button does it later.
+
+By hand, a step at a time (what the launcher runs):
 
 ```sh
 # 1. What a jar needs: every API call it makes, and the share the runtime answers.

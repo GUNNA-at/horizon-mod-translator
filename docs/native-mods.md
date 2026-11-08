@@ -759,6 +759,38 @@ trusting native code is the player's decision, never an agent's.
    it is, and their clean-up never removes a native build. An instance built before this (the **Native mods**
    instance the default home's mods used to go to) keeps its worlds and its build.
 
+## Java mods, translated
+
+`horizon-launcher mods add-java <jar|folder|pack> [--instance NAME] [--build --trust-native-code]` translates
+NeoForge 1.21.1 mods into an instance ([mod-translator.md](mod-translator.md)): one mod's jar, a folder of jars, or
+a modpack (`.mrpack`, a CurseForge zip or instance folder). No Java code runs. `horizon_port_pack::install` reads the
+jars, carries their data (blocks, items, recipes, loot, tags, worldgen) over into content mods in `horizon-mods/`,
+and translates their code into Rust: one native mod folder per mod with the mods built on it
+(`horizon-native-mods/<id>_translated/`). Each is turned on in `horizon-mods.txt`, with the content mods of the mods
+a jar bundles (Create's Flywheel and Ponder). A mod whose code makes machines or mobs (classes extending the game's
+block entities or entities) gets the translator's content mod, its code's own declarations and look with the carried
+data, instead of the carry-over's templates. Then `native-build`, or `--build` at once, builds the game with them.
+
+A translated mod is a folder, not a `.hnmod`: Create's is about 150 MB of Rust, over a registry file's 64 MiB. The
+launcher takes the folders in `horizon-native-mods/` holding a `horizon-mixin.toml` as it takes `.hnmod` files: on
+by their manifest's id, and only the files a `.hnmod` may carry copied into the build (sources, manifests, data;
+anything else, or a link, stops it), their `content/` folders left out. The Mods page counts them for **Up to date**.
+
+The translated code calls hook points and a compat runtime that are in the translator's fork, not in Horizon's
+releases yet, so a bundle names where its Horizon comes from:
+
+- `horizon-mixin.toml`'s `[compatibility] horizon_revision`: the commit the translator was built from (its
+  `build.rs`: the checkout's `HEAD`, else `HORIZON_TRANSLATOR_REVISION` or `GITHUB_SHA`);
+- `horizon-source.toml` beside it (horizon-mixins takes no other key in `[compatibility]`): `horizon_repository`
+  (`owner/name`), `mixins_repository` and `mixins_revision` (the horizon-mixins whose bundle crates may depend on
+  their mod's other crates: a translated mod is its runtime, its code and its engine).
+
+The build downloads the named repository's archive at the pinned commit and builds horizon-mixins from the named
+repository at its commit; mods naming different repositories are refused, and mods naming none build from Horizon's
+and horizon-mixins' own, as before. A commit between releases has hook points its catalog doesn't list yet (each
+change adds a fragment in `tools/native-hook-fragments/`, which a release stamps into `native-hooks.json`): the
+launcher adds them to the downloaded source's catalog, each at version 1 as the stamp would, before applying.
+
 ## Rebuilds stay on the instance's Horizon
 
 A build starts from the version the instance plays (`native_mods::base_for`). When that is a native build, the

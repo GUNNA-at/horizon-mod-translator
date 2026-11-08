@@ -886,6 +886,19 @@ Install a native mod from a GitHub link (docs/native-mods.md, "Install from GitH
 
 MCP: none: the player's switch.
 
+## `horizon-launcher mods add-java`
+
+Translate Java mods into an instance (docs/mod-translator.md): a NeoForge 1.21.1 mod's jar, a folder of jars, or a modpack (.mrpack, CurseForge zip or instance folder). What they carry (blocks, items, recipes, worldgen) becomes content mods, their code a native mod translated into Rust; all are turned on. No Java code runs. Then `native-build` builds the game with them, or pass --build.
+
+    horizon-launcher mods add-java <PATH>
+
+- `PATH`: The jar, folder or modpack
+- `--instance`: The instance (default: the selected one)
+- `--build`: Build the game with them right away, as `native-build` does (needs --trust-native-code)
+- `--trust-native-code`: With --build: you trust the translated code with full access to this computer
+
+MCP: none: the player's switch.
+
 ## `horizon-launcher mods update-github`
 
 Look for newer versions of the native mods installed from GitHub (the latest release, or the default branch's head for a mod installed from a commit), and install them.

@@ -9,6 +9,8 @@
 //!   modpack, for the Modpacks import (`modpacks::import`).
 //! - A zip with `pack.mcmeta`: a data pack (`data/`) or a resource pack; with `shaders/`, or a
 //!   `.hshader`: a shader pack.
+//! - A mod's `.jar` (NeoForge's, Forge's or Fabric's metadata in it): a Java mod, translated into
+//!   the selected instance (`native_mods::add_java`).
 //!
 //! Only what an instance holds is taken from a shared zip ([`crate::export::FILES`],
 //! [`crate::export::FOLDERS`], `saves/`), and every path is checked to stay inside its folder.
@@ -35,7 +37,17 @@ pub enum Dropped {
     Pack(packs::Kind),
     /// A data pack: it goes into a world.
     DataPack,
+    /// A Java mod's jar: translated into the selected instance (`native_mods::add_java`).
+    JavaMod,
 }
+
+/// The files a mod jar names itself in: NeoForge's, Forge's, Fabric's (and Quilt's).
+const MOD_METADATA: [&str; 4] = [
+    "META-INF/neoforge.mods.toml",
+    "META-INF/mods.toml",
+    "fabric.mod.json",
+    "quilt.mod.json",
+];
 
 fn open(file: &Path) -> Result<zip::ZipArchive<fs::File>, String> {
     fs::File::open(file)
@@ -68,6 +80,13 @@ pub fn what(file: &Path) -> Result<Dropped, String> {
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
     match ext.as_deref() {
         Some("hshader") => return Ok(Dropped::Pack(packs::Kind::Shader)),
+        Some("jar") => {
+            let zip = open(file)?;
+            return match MOD_METADATA.iter().any(|m| zip.index_for_name(m).is_some()) {
+                true => Ok(Dropped::JavaMod),
+                false => Err(format!("{name} is a jar but no mod: it names no mod in it.")),
+            };
+        }
         Some("mrpack") => {
             let index = read_index(&mut open(file)?)?;
             let loaders = index["dependencies"]
@@ -81,7 +100,7 @@ pub fn what(file: &Path) -> Result<Dropped, String> {
         Some("zip") => {}
         _ => {
             return Err(format!(
-                "{name} can't be imported: drop a .mrpack, a .zip or a .hshader."
+                "{name} can't be imported: drop a .mrpack, a .zip, a mod's .jar or a .hshader."
             ))
         }
     }

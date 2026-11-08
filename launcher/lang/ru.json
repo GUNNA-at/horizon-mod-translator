@@ -733,5 +733,8 @@
   "No backup yet.": "Резервных копий пока нет.",
   "Replace the world": "Заменить мир",
   "Back up now": "Создать копию сейчас",
-  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Изменения сохраняются сразу. Параметры, которые нельзя применить во время работы, ждут перезапуска, о чем указано на странице."
+  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Изменения сохраняются сразу. Параметры, которые нельзя применить во время работы, ждут перезапуска, о чем указано на странице.",
+  "No mod in it has code that could be translated.": "Ни в одном его моде нет кода, который можно перевести.",
+  "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods} переведён в {instance} и включён. Соберите с ним игру на странице «Моды».",
+  "Translating the Java mod into Rust…": "Перевод мода Java на Rust…"
 }

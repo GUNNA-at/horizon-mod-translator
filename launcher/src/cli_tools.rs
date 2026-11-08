@@ -18,6 +18,8 @@ const NOT_TOOLS: &[&str] = &[
     // They install native code nobody reviewed, and say it first: the player's decision.
     "mods add-github",
     "mods update-github",
+    // It turns a Java mod's code into a native mod, and with --build compiles it: the same.
+    "mods add-java",
     "play",
     "server",
     "account sign-in",

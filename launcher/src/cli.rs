@@ -3196,6 +3196,13 @@ fn instance(action: InstanceCmd, as_json: bool) -> Result<(), String> {
                         file.display()
                     ))
                 }
+                Dropped::JavaMod => {
+                    return Err(format!(
+                        "{} is a Java mod: translate it into an instance with horizon-launcher \
+                         mods add-java <file>",
+                        file.display()
+                    ))
+                }
             }
         }
         InstanceCmd::Export {

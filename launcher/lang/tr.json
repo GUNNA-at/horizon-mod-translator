@@ -733,5 +733,8 @@
   "No backup yet.": "Henüz yedek yok.",
   "Replace the world": "Dünyayı değiştir",
   "Back up now": "Şimdi yedekle",
-  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Değişiklikler yapıldıkça kaydedilir. Oyun çalışırken uygulanamayanlar yeniden başlatmayı bekler ve sayfa bunu belirtir."
+  "Changes save as you make them. Those the game can't take while it runs wait for a restart, and the page says so.": "Değişiklikler yapıldıkça kaydedilir. Oyun çalışırken uygulanamayanlar yeniden başlatmayı bekler ve sayfa bunu belirtir.",
+  "No mod in it has code that could be translated.": "İçinde çevrilebilecek kodu olan bir mod yok.",
+  "Translated {mods} into {instance} and turned it on. Build the game with it on the Mods page.": "{mods}, {instance} içine çevrildi ve açıldı. Oyunu Modlar sayfasında onunla derleyin.",
+  "Translating the Java mod into Rust…": "Java modu Rust'a çevriliyor…"
 }

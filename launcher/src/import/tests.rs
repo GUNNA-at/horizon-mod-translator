@@ -129,6 +129,27 @@ fn says_what_a_dropped_file_is() {
             put(&p, b"png");
             (p, Err(()))
         },
+        {
+            let p = dir.join("waddles.jar");
+            zip_file(
+                &p,
+                &[
+                    ("META-INF/neoforge.mods.toml", b"[[mods]]\nmodId = \"waddles\"\n"),
+                    ("com/girafi/waddles/Waddles.class", b"\xca\xfe"),
+                ],
+            );
+            (p, Ok(Dropped::JavaMod))
+        },
+        {
+            let p = dir.join("fabric.jar");
+            zip_file(&p, &[("fabric.mod.json", b"{}")]);
+            (p, Ok(Dropped::JavaMod))
+        },
+        {
+            let p = dir.join("library.jar");
+            zip_file(&p, &[("org/lib/A.class", b"\xca\xfe")]);
+            (p, Err(()))
+        },
     ];
     for (file, want) in cases {
         assert_eq!(what(&file).map_err(|_| ()), want, "{}", file.display());
