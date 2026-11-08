@@ -143,7 +143,8 @@ cargo run --release -p horizon-mod-translator -- bundle create.jar out/ --with a
 
 # 3. Apply the bundle to a copy of Horizon's tree and build the game.
 #    horizon-mixins lives in its own repository (GUNNA-at/horizon-mixins).
-horizon-mixins apply --workspace <copy of this tree> --mods <folder with out/, without out/content> --out stage
+horizon-mixins apply --workspace <copy of this tree> \
+  --mods <folder with out/, without out/content> --out stage
 (cd stage && CARGO_INCREMENTAL=0 cargo build --profile fast -p horizon-client)
 
 # 4. Play. The mod's blocks, items and recipes load from out/content.

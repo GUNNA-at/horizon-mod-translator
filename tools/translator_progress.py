@@ -418,12 +418,18 @@ class Svg:
         style = "".join(f for f in faces if f)
         head = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {self.w:g} {self.h:g}" '
                 f'width="{self.w:g}" height="{self.h:g}" role="img" aria-labelledby="t d">'
-                f'<title id="t">{esc(self.title)}</title><desc id="d">{esc(self.desc)}</desc>')
+                f'<title id="t">{esc(self.title)}</title><desc id="d">{esc(self.desc)}</desc>{PROVENANCE}')
         defs = "".join(self.defs)
         if style or defs:
             head += "<defs>" + (f"<style>{style}</style>" if style else "") + defs + "</defs>"
         return head + "".join(self.body) + "</svg>\n"
 
+
+# Where every figure comes from, and the licence of the type subsets it carries.
+PROVENANCE = ("<!-- Made by tools/translator_progress.py from docs/translator/progress.json. Type: subsets of "
+              "Geist and Geist Mono (Copyright 2024 The Geist Project Authors) and Bricolage Grotesque (Copyright "
+              "2022 The Bricolage Grotesque Project Authors), under the SIL Open Font License 1.1: "
+              "crates/horizon-theme/fonts/OFL-Geist.txt, OFL-BricolageGrotesque.txt. -->")
 
 # ---------------------------------------------------------------------------------------------
 # The masthead: the launcher's sky (launcher/src/sky.rs), its skyline the pack itself, one column

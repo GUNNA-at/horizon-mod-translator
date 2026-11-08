@@ -144,7 +144,8 @@ cargo run --release -p horizon-mod-translator -- bundle create.jar out/ --with a
 
 # 3. Наложить бандл на копию дерева Horizon и собрать игру.
 #    horizon-mixins живёт в своём репозитории (GUNNA-at/horizon-mixins).
-horizon-mixins apply --workspace <копия этого дерева> --mods <папка с out/ без out/content> --out stage
+horizon-mixins apply --workspace <копия этого дерева> \
+  --mods <папка с out/ без out/content> --out stage
 (cd stage && CARGO_INCREMENTAL=0 cargo build --profile fast -p horizon-client)
 
 # 4. Играть. Блоки, предметы и рецепты мода грузятся из out/content.
