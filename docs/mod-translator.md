@@ -9020,8 +9020,8 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     attackable (it answered false before) but not pickable unless living, as vanilla's `Entity`.
   - Found on the way: the outline was the block's along the view whatever stood before it (`pick()` alone), so it
     showed behind the targeted penguin, and by the same code behind the game's own mobs. It is a block hit's only
-    now: an entity nearer than the block takes the crosshair (`GameRenderer.pick`). Not yet seen live: the build
-    with it was stopped before its run.
+    now: an entity nearer than the block takes the crosshair (`GameRenderer.pick`). Seen live: no outline behind a
+    pig or a penguin under the crosshair, the snow's own when the view turns to the floor.
   - Tests: compat 7 new (a ray meets a box at its near face and at once from inside; `InteractionResult`s answer
     by their names; a grown penguin eats cod from the hand (`SUCCESS`, `InLove` 600, 5 cod to 4) and passes a
     second click while in love, an unknown id answers nothing; a creative player's cod stays 5 and a stick
@@ -9037,7 +9037,8 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     left to 119), and 3 cod left. Diamond sword blows
     clicked a few ticks apart dealt 2.1, 3.4 and 2.9 at their attack strengths, one inside the hurt frames
     counting only its 1.3 over the blow before, as vanilla's do: the penguin died on the third blow in one run, the
-    fourth in another, and lived through five quick ones in the third.
+    fourth in another, and lived through five quick ones in the third. A blow at full strength (15 ticks after the
+    one before) dealt the sword's 7 and killed the penguin left at 6.0 in one.
   - Not yet: a leash, a name tag or a spawn egg on a mod's mob (`checkAndHandleImportantInteractions`), the
     game's own items' `interactLivingEntity` on one (bucket, shears, saddle), breeding (`BreedGoal`,
     `spawnChildFromBreeding`: Waddles' penguins fall in love and stay apart), Pick Block on a mod's entity,
