@@ -55,6 +55,7 @@ pub mod tooltips;
 pub mod damage;
 pub mod player_advancements;
 pub mod player_stats;
+pub mod world_data;
 pub mod world_events;
 pub mod datapack;
 pub mod vanilla_entities;

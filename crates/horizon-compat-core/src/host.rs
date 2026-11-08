@@ -899,6 +899,12 @@ pub trait Host {
     fn score_stat(&mut self, _player: u128, _ty: &str, _key: &str, _change: Option<i32>) -> bool {
         false
     }
+    /// The open world's folder (beside its `level.dat`), where a server's mods keep their files
+    /// (`MinecraftServer.getWorldPath`, the levels' saved data), from `ServerAboutToStartEvent` on;
+    /// None where the host has no world (a client's).
+    fn world_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     /// Spawns an experience orb worth `value` points at `at` (`new ExperienceOrb` added with
     /// `Level.addFreshEntity`), moving by `motion` when given, else with vanilla's random motion.
     /// False when none spawned.
@@ -1844,6 +1850,8 @@ pub struct MemoryHost {
     pub stats: Vec<(u128, String, String, i32)>,
     /// The scoreboard's changes asked for ([`Host::score_stat`]), in order.
     pub stat_scores: Vec<(u128, String, String, Option<i32>)>,
+    /// The world's folder ([`Host::world_dir`]).
+    pub world_dir: Option<std::path::PathBuf>,
 }
 
 /// A vanilla block's container in a [`MemoryHost`].
@@ -2759,6 +2767,9 @@ impl Host for MemoryHost {
         self.stat_scores
             .push((player, ty.to_owned(), key.to_owned(), change));
         true
+    }
+    fn world_dir(&self) -> Option<std::path::PathBuf> {
+        self.world_dir.clone()
     }
 }
 

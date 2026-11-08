@@ -681,6 +681,10 @@ impl Game<'_> {
         ready: &Sender<Ready>,
         opening: Opening,
     ) -> Result<()> {
+        // The world's folder is the server's from its start (`getWorldPath`).
+        if let Ok(world) = &opening.world {
+            self.world_root = world.save_root.clone();
+        }
         // MinecraftServer.loadLevel's start: nothing is loaded yet.
         self.native_server_about_to_start(false);
         self.native_lifecycle_open_started();

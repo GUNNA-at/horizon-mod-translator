@@ -3012,6 +3012,16 @@ impl Game<'_> {
     pub(super) fn native_level_unload(&mut self, dimension: &str) {
         let _ = dimension;
     }
+    /// `dimension`'s level was saved on the server (NeoForge's
+    /// `LevelEvent.Save`, posted at the end of `ServerLevel.save`): its chunks
+    /// and entities are written, so a mod writes what it keeps for the level
+    /// (its saved data, in `native_world_dir()`) beside them. Each save
+    /// reaches it, the level in place: the autosave, `/save-all`, a level's
+    /// last save before `native_level_unload`, and the final save when the
+    /// server stops, each level in turn. Server-side. API @API:level_save@.
+    pub(super) fn native_level_save(&mut self, dimension: &str) {
+        let _ = dimension;
+    }
     /// Chunk `chunk` (`[x, z]`, in chunks) of `dimension` came into the world
     /// (NeoForge's `ChunkEvent.Load`): `new` when it was just generated, false
     /// when read from the save. A flat world's chunk that leaves before it's

@@ -50,22 +50,82 @@ fn run(rt: &mut Rt, host: &mut dyn Host, state: &str, key: &'static str, extra: 
     true
 }
 
-/// The level translated code sees: one object (so `level == level` holds), the authoritative
-/// server's (`isClientSide` is a field mods read).
+/// The level translated code sees (`isClientSide` is a field mods read). The client's runtime
+/// (the render thread's) has one, the client's level (`level == level` holds); the server's has one
+/// a dimension ([`server_level`]), the one the hook runs in.
 pub fn level(rt: &mut Rt) -> V {
+    if !crate::neo::is_client(rt) {
+        let dimension = rt
+            .host()
+            .map(|h| h.dimension())
+            .unwrap_or_else(|| OVERWORLD.to_owned());
+        return server_level(rt, &dimension);
+    }
     if let Some(l) = rt.interned.get("compat:level") {
         return *l;
     }
-    // The client's runtime (the render thread's) draws a client level.
-    let client = crate::neo::is_client(rt);
-    let l = rt.new_object(if client { "net/minecraft/client/multiplayer/ClientLevel" } else { "net/minecraft/server/level/ServerLevel" });
-    rt.put_field(l, "isClientSide", V::I(client as i32));
+    let l = rt.new_object("net/minecraft/client/multiplayer/ClientLevel");
+    rt.put_field(l, "isClientSide", V::I(1));
     rt.interned.insert("compat:level".into(), l);
-    // Loading it, mods hear `LevelEvent.Load` (Create sets up its kinetic networks there).
+    level_loaded(rt, l);
+    l
+}
+
+/// The server's levels made so far, in the order they were (`MinecraftServer.getAllLevels`).
+pub(crate) const SERVER_LEVELS: &str = "compat:server-levels";
+const OVERWORLD: &str = "minecraft:overworld";
+
+/// The server's level of `dimension` (`minecraft:the_nether`): one object a dimension, whose
+/// `dimension()` it is, made the first time a hook runs there or a mod asks the server for it,
+/// and loaded then (`LevelEvent.Load`); the Overworld's first, as `MinecraftServer.createLevels`
+/// makes it before the others. Kept until the server stops ([`crate::neo::server_stopped`]).
+pub(crate) fn server_level(rt: &mut Rt, dimension: &str) -> V {
+    let key = format!("compat:level/{dimension}");
+    if let Some(l) = rt.interned.get(&key) {
+        return *l;
+    }
+    if dimension != OVERWORLD {
+        server_level(rt, OVERWORLD);
+        // A mod hearing the Overworld load may have asked for this one.
+        if let Some(l) = rt.interned.get(&key) {
+            return *l;
+        }
+    }
+    let l = rt.new_object("net/minecraft/server/level/ServerLevel");
+    rt.put_field(l, "isClientSide", V::I(0));
+    let d = rt.string(dimension);
+    rt.put_field(l, "$dimension", d);
+    rt.interned.insert(key, l);
+    let made = rt.intern(SERVER_LEVELS.into(), |rt| {
+        crate::jutil::new_list(rt, Vec::new())
+    });
+    crate::jutil::list_add(rt, made, l);
+    level_loaded(rt, l);
+    l
+}
+
+/// The dimension of level `level` (`Level.dimension()`): a server's level's own; the hook's for any
+/// other (the client's, a mod's own level).
+pub(crate) fn level_dimension(rt: &Rt, level: V) -> String {
+    let own = if level.r() != 0 {
+        rt.str_of(rt.get_field(level, "$dimension"))
+    } else {
+        None
+    };
+    match own {
+        Some(d) => d.to_owned(),
+        None => rt
+            .host()
+            .map(|h| h.dimension())
+            .unwrap_or_else(|| OVERWORLD.to_owned()),
+    }
+}
+
+/// A level made: mods hear it load (`LevelEvent.Load`; Create sets up its kinetic networks there).
+fn level_loaded(rt: &mut Rt, l: V) {
     let ev = rt.new_object(LEVEL_LOAD);
     rt.put_field(ev, "$level", l);
     crate::neo::post(rt, LEVEL_LOAD, ev);
-    l
 }
 
 const LEVEL_LOAD: &str = "net/neoforged/neoforge/event/level/LevelEvent$Load";
@@ -1552,7 +1612,11 @@ pub fn server_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
 /// server loads anything; `ServerLifecycleHooks.getCurrentServer()` is the server from here on.
 pub fn server_about_to_start(rt: &mut Rt, host: &mut dyn Host) {
     rt.safe_point();
-    rt.with_host(host, crate::neo::server_about_to_start);
+    rt.with_host(host, |rt| {
+        // The world's folder is the server's from here on (mods read their data from it now).
+        crate::world_data::world_folder(rt);
+        crate::neo::server_about_to_start(rt);
+    });
 }
 
 /// `native_world_lifecycle` (server): the world open (`ServerStartingEvent`, then
@@ -1573,6 +1637,14 @@ pub fn world_lifecycle(rt: &mut Rt, host: &mut dyn Host, phase: &str) {
 pub fn server_stopping(rt: &mut Rt, host: &mut dyn Host) {
     rt.safe_point();
     rt.with_host(host, crate::neo::server_stopping);
+}
+
+/// `native_level_save` (server): the game saved `dimension`'s level (`ServerLevel.save`, an
+/// autosave, a `/save-all`, the server stopping): the mods' saved data that changed goes to the
+/// world's files, then mods hear `LevelEvent.Save` ([`crate::world_data`]).
+pub fn level_save(rt: &mut Rt, host: &mut dyn Host, dimension: &str) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::world_data::level_saved(rt, dimension));
 }
 
 /// `native_register_commands` (server): the mods hear `RegisterCommandsEvent`, and their commands

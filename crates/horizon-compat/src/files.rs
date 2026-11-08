@@ -54,7 +54,7 @@ pub(crate) fn new_path(rt: &mut Rt, text: &str) -> V {
     rt.alloc(PATH, Data::Str(clean(text)))
 }
 
-fn new_file(rt: &mut Rt, text: &str) -> V {
+pub(crate) fn new_file(rt: &mut Rt, text: &str) -> V {
     rt.alloc(FILE, Data::Str(clean(text)))
 }
 
@@ -70,7 +70,7 @@ pub(crate) fn on_disk(rt: &Rt, text: &str) -> PathBuf {
 }
 
 /// `a.resolve(b)`: `b` when it is absolute or `a` is empty, `a` when `b` is empty.
-fn resolve(a: &str, b: &str) -> String {
+pub(crate) fn resolve(a: &str, b: &str) -> String {
     if b.starts_with('/') || a.is_empty() {
         b.to_owned()
     } else if b.is_empty() {

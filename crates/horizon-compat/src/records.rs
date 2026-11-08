@@ -4,7 +4,7 @@
 //! [`crate::vanilla_records`], as each record's class file declares them. This is the last mapping a
 //! call reaches: the records the runtime models natively (`TagKey`, `DimensionType`) answer first.
 //!
-//! The same for vanilla's plain data classes (`Tuple`, `LevelResource`, `ModelLayerLocation`): the
+//! The same for vanilla's plain data classes (`Tuple`, `ModelLayerLocation`, `DisplayInfo`): the
 //! constructors that only store their arguments, the getters and setters that only read and write a
 //! field, and `equals`/`hashCode` as the class has them (`Object`'s, or field by field), all read
 //! from their bytecode. And an enum constant's `equals` and `hashCode`, `Enum`'s: identity.
@@ -366,9 +366,9 @@ mod tests {
 
     const TUPLE: &str = "net/minecraft/util/Tuple";
 
-    /// FramedBlocks keeps pairs in vanilla's `Tuple` (its state cache) and Mekanism and others name
-    /// world folders with `new LevelResource(id)`: built, read back, set, and compared as their
-    /// classes do (`Tuple` keeps `Object`'s `equals`: two pairs of the same things differ).
+    /// FramedBlocks keeps pairs in vanilla's `Tuple` (its state cache): built, read back, set, and
+    /// compared as its class does (`Tuple` keeps `Object`'s `equals`: two pairs of the same things
+    /// differ).
     #[test]
     fn a_plain_vanilla_data_class_keeps_what_it_was_given() {
         let mut rt = Rt::new();
@@ -386,12 +386,6 @@ mod tests {
         let equals = "net/minecraft/util/Tuple.equals.(Ljava/lang/Object;)Z";
         assert_eq!(crate::api::call(&mut rt, equals, &[t, twin]), V::I(0));
         assert_eq!(crate::api::call(&mut rt, equals, &[t, t]), V::I(1));
-
-        let folder = rt.new_object("net/minecraft/world/level/storage/LevelResource");
-        let id = rt.string("serverconfig");
-        crate::api::call(&mut rt, "net/minecraft/world/level/storage/LevelResource.<init>.(Ljava/lang/String;)V", &[folder, id]);
-        let got = crate::api::call(&mut rt, "net/minecraft/world/level/storage/LevelResource.getId.()Ljava/lang/String;", &[folder]);
-        assert_eq!(rt.str_of(got), Some("serverconfig"));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

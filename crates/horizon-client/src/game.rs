@@ -14862,6 +14862,7 @@ impl Game<'_> {
         if wait {
             self.save.flush()?;
         }
+        self.native_level_saved();
         Ok(())
     }
     /// `GameRenderer.tryTakeScreenshotIfNeeded`: while a local world without a

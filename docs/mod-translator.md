@@ -7611,6 +7611,83 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     type's statistics are one object a value, listed as made), horizon-client 1 new (a statistic
     set outright is sent but not scored; not run here: it builds with the game's tests), translator
     22.
+- [x] 2026-11-08 Part 117: mods' world data saved with the world, a level per dimension, and the
+  world's folder as 1.21.1 names it.
+  - New module `world_data.rs` (after `player_stats.rs` in the dispatch chain), taking over
+    `api.rs`'s saved data, which lived in memory only:
+    - `ServerLevel.getDataStorage()` (and `ServerChunkCache`'s) is NeoForge's
+      `DimensionDataStorage`, one a dimension. `get` and `computeIfAbsent` keep one object a name.
+      The first time a mod asks for a name, it is read from `<name>.dat` in the `data/` folder of
+      the dimension's 1.21.1 folder (`DimensionType.getStorageFolder`: the world's own for the
+      Overworld, `DIM-1` for the Nether, `DIM1` for the End, `dimensions/<ns>/<path>` for a mod's).
+      The file may be gzipped or plain, as `isGzip` tells them apart, and the factory's deserializer
+      gets its `data`. `set` keeps an object under a name.
+    - `SavedData.setDirty`, `isDirty` and `save(File, Provider)`: when dirty, the file gets
+      `{data: save(new CompoundTag(), provider), DataVersion: 3955}`, gzipped. It is written to a
+      file beside the old one, then moved over it, so a crash never leaves half a file. The data
+      is clean afterwards. A mod's own `save(File, Provider)` is the one called.
+    - `new SavedData.Factory(constructor, deserializer)` with no data fixer's type.
+    - A world brought from 1.21.1 keeps its mods' data: the game's upgrade leaves `data/*.dat`,
+      `DIM-1/data` and `DIM1/data` where they were, and that is where they are read.
+  - Data a mod couldn't read back is never written over: no world folder known yet (a block's
+    tick before the server said), a file that isn't NBT, or a deserializer that threw (the
+    exception goes no further). The mod gets new data from its constructor, and the player's
+    file stays as it was. A client's runtime keeps its saved data in memory, since a client has
+    no world.
+  - The world's folder (`Host::world_dir`, the game's `native_world_dir()`) is known from
+    `ServerAboutToStartEvent` on, where FTB Teams reads its data:
+    - `MinecraftServer.getWorldPath(LevelResource)` gives 1.21.1's ids where 26.3 keeps them:
+      the players' `playerdata`, `stats` and `advancements` are under `players/`, `resources.zip`
+      under `resourcepacks/`. A mod's own `new LevelResource("serverconfig")` sits beside them.
+    - `LevelResource`'s twelve constants, `getId` and `toString`.
+    - `getServerDirectory()`, the game's folder (`Path.of("")`).
+    - The server's `storageSource`, as an access transformer opens it: `LevelStorageAccess`'s
+      `getLevelId`, `getLevelPath`, `getDimensionPath` and `getWorldDir` (the saves folder).
+  - The server has a level a dimension (`compat:level/<dimension>`), each its own `dimension()`
+    and data storage, where there was one level object:
+    - `MinecraftServer.overworld()` is the Overworld's level, whichever level the hook is in.
+    - `getLevel(key)` finds vanilla's three dimensions and the host's own, and gives null for any
+      other.
+    - `getAllLevels()` lists the levels made, the Overworld first.
+    - Each level posts `LevelEvent.Load` when made, the Overworld's first, as
+      `MinecraftServer.createLevels` loads it first. Each one unloads with the server
+      (`LevelEvent.Unload`, in the order they loaded).
+    - A server stopped forgets its world's folder and saved data, so the next world's are its own.
+  - The level saved: the game's new hook `native_level_save(dimension)` (API @API:level_save@,
+    fragment `level_save.json`). It runs at the end of `save_level` for the level in place: the
+    autosave, `/save-all`, the save of each parked level, a level's last save before it closes,
+    and the final save. The bundle's `level_save` saves that dimension's data storage (as
+    `ServerLevel.saveLevelData` does), then posts `LevelEvent.Save` about its level.
+  - The game sets `world_root` before `native_server_about_to_start`:
+    - integrated, from the world loader's `save_root`;
+    - dedicated, from the `WorldRequest` it then loads.
+  - Every server hook's host has `world_dir`.
+  - Measured (packcov30, the same 367 jars): methods 108178/130226 (83.1%, +57),
+    uses 339942/372747 (91.2%, +80), distinct missing API methods 9352 (from 9366); Create
+    3240/3972 (81.6%), uses 24314/25241 (96.3%): unchanged, since its saved data was answered
+    already, in memory only. Now covered: `getWorldPath` (23 mods), `LevelStorageAccess`'s four
+    methods, `DimensionDataStorage.set` and `save`, `SavedData.save` (both),
+    `getServerDirectory`, `ServerChunkCache.getDataStorage`, `DimensionType.getStorageFolder`,
+    and `IntegratedServer`'s `getWorldPath` and `getServerDirectory`. The first run showed
+    `computeIfAbsent` missing for 43 mods: the coverage probe passes a null factory, and the
+    record's accessor gave nothing on null. The factory's components are now read as its fields.
+  - Tests: 654 (4 new; `saved_data_is_made_once_per_name` went into the first):
+    - Create's `create_tracks` is read from the world's `data/`, one object a name. `get` of a
+      name with no file is null, and `computeIfAbsent` makes it. Data marked dirty is written at
+      the level's save as 1.21.1 writes it (gzipped `{data, DataVersion: 3955}`, no temporary file
+      left behind) and is clean afterwards. Data never marked isn't written. A new runtime reads
+      what was saved, and a stopped server's next world reads its own.
+    - Data a mod couldn't read is never written over: a file that isn't NBT, a deserializer that
+      throws, data asked for before the world folder was known.
+    - A hook in the Nether: the Overworld loads first, and each level has its own `dimension()`.
+      `getLevel` finds the Nether and gives null for a dimension the server doesn't have.
+      `getAllLevels` lists both. The Nether's data goes to `DIM-1/data` and is the Nether's own,
+      and `LevelEvent.Save` is about the Nether.
+    - A mod finds the world's files where the game keeps them: `ROOT`, the players' folders,
+      `datapacks`, a mod's own `LevelResource` (with `getId` and `toString`), the storage
+      source's level id, saves folder and dimension paths, `getStorageFolder` of a mod's
+      dimension, `getServerDirectory`. A client's runtime gets null.
+  - Translator 22. The game changes build with the next game build.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

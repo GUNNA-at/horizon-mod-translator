@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 629] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 628] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1587,7 +1587,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 629] = [
     ("net/minecraft/world/level/saveddata/maps/MapFrame", "i(Lnet/minecraft/core/BlockPos;II)V=pos,rotation,entityId|ggetPos()Lnet/minecraft/core/BlockPos;=pos|ggetRotation()I=rotation|ggetEntityId()I=entityId|o"),
     ("net/minecraft/world/level/storage/DataVersion", "i(ILjava/lang/String;)V=version,series|ggetSeries()Ljava/lang/String;=series|ggetVersion()I=version|o"),
     ("net/minecraft/world/level/storage/DerivedLevelData", "i(Lnet/minecraft/world/level/storage/WorldData;Lnet/minecraft/world/level/storage/ServerLevelData;)V=worldData,wrapped|o"),
-    ("net/minecraft/world/level/storage/LevelResource", "i(Ljava/lang/String;)V=id|ggetId()Ljava/lang/String;=id|o"),
     ("net/minecraft/world/level/storage/LevelSummary", "i(Lnet/minecraft/world/level/LevelSettings;Lnet/minecraft/world/level/storage/LevelVersion;Ljava/lang/String;ZZZLjava/nio/file/Path;)V=settings,levelVersion,levelId,requiresManualConversion,locked,experimental,icon|ggetLevelId()Ljava/lang/String;=levelId|ggetIcon()Ljava/nio/file/Path;=icon|grequiresManualConversion()Z=requiresManualConversion|gisExperimental()Z=experimental|ggetSettings()Lnet/minecraft/world/level/LevelSettings;=settings|glevelVersion()Lnet/minecraft/world/level/storage/LevelVersion;=levelVersion|gisLocked()Z=locked|o"),
     ("net/minecraft/world/level/storage/loot/LootContext$Builder", "i(Lnet/minecraft/world/level/storage/loot/LootParams;)V=params|o"),
     ("net/minecraft/world/level/storage/loot/ValidationContext", "i(Lnet/minecraft/util/ProblemReporter;Lnet/minecraft/world/level/storage/loot/parameters/LootContextParamSet;Ljava/util/Optional;Ljava/util/Set;)V=reporter,params,resolver,visitedElements|greporter()Lnet/minecraft/util/ProblemReporter;=reporter|o"),

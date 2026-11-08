@@ -845,7 +845,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // the server's runtime; null before and after, and in the client's (a client's world can
         // be another machine's).
         ("net/neoforged/neoforge/server/ServerLifecycleHooks", "getCurrentServer") => {
-            if is_client(rt) || !(rt.interned.contains_key(SERVER_RUNNING) || rt.interned.contains_key("compat:level")) {
+            if is_client(rt)
+                || !(rt.interned.contains_key(SERVER_RUNNING)
+                    || rt.interned.contains_key(crate::glue::SERVER_LEVELS))
+            {
                 V::NULL
             } else {
                 server(rt)
@@ -1816,14 +1819,19 @@ pub(crate) fn server_stopping(rt: &mut Rt) {
     server_event(rt, "ServerStoppingEvent");
 }
 
-/// The server gone: its level unloads (`LevelEvent.Unload`), then `ServerStoppedEvent`; the next
-/// world gets a new server and level (a new `LevelEvent.Load`), and `getCurrentServer()` is null
-/// until then.
+/// The server gone: its levels unload (`LevelEvent.Unload`, in the order they loaded), then
+/// `ServerStoppedEvent`; the next world gets a new server and levels (a new `LevelEvent.Load`) and
+/// its own saved data, and `getCurrentServer()` is null until then.
 pub(crate) fn server_stopped(rt: &mut Rt) {
     if !rt.interned.contains_key(SERVER_RUNNING) && !rt.interned.contains_key("compat:server") {
         return;
     }
-    if let Some(&level) = rt.interned.get("compat:level") {
+    let mut levels = match rt.interned.get(crate::glue::SERVER_LEVELS) {
+        Some(&made) => crate::jutil::elements(rt, made),
+        None => Vec::new(),
+    };
+    levels.extend(rt.interned.get("compat:level").copied());
+    for level in levels {
         let ev = rt.new_object(LEVEL_UNLOAD);
         rt.put_field(ev, "$level", level);
         if Rt::tracing() {
@@ -1833,9 +1841,17 @@ pub(crate) fn server_stopped(rt: &mut Rt) {
     }
     server_event(rt, "ServerStoppedEvent");
     // The server's commands went with it (`crate::commands`).
-    for key in [SERVER_RUNNING, "compat:server", "compat:level", "compat:commands"] {
+    for key in [
+        SERVER_RUNNING,
+        "compat:server",
+        "compat:level",
+        "compat:commands",
+        crate::glue::SERVER_LEVELS,
+    ] {
         rt.interned.remove(key);
     }
+    rt.interned.retain(|k, _| !k.starts_with("compat:level/"));
+    crate::world_data::forget(rt);
 }
 
 /// The messages sent to mod `id` and not yet read, in the order they were sent.

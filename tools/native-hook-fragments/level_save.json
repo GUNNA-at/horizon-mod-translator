@@ -1,0 +1,13 @@
+{
+  "hooks": [
+    {
+      "name": "level_save",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_level_save",
+      "neoforge": "LevelEvent.Save",
+      "side": "server",
+      "cancellable": false
+    }
+  ],
+  "rust_summary": "a server's level saved (`native_level_save`).",
+  "doc_summary": "a server's level saved, on the single player server thread and on a dedicated server: `native_level_save(dimension)` once the game has saved that level's chunks and entities (NeoForge's `LevelEvent.Save`, posted at the end of `ServerLevel.save`), so a mod writes what it keeps for the level beside them. Every save reaches it: the autosave, `/save-all`, a level closing after 300 ticks with nobody in it (before its `native_level_unload`) and the final save when the server stops, each level in turn. The open world's folder is `native_world_dir()`, from `native_server_about_to_start` on. Bundles that use it need \"hooks\": @API:level_save@."
+}

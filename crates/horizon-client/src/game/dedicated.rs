@@ -769,18 +769,21 @@ impl Game<'_> {
         self.server_lists = Some(lists.clone());
         log("INFO", &format!("Preparing level \"{level_name}\""));
         let folder = world_dir.to_string_lossy().into_owned();
-        // MinecraftServer.loadLevel's start: nothing is loaded yet.
-        self.native_server_about_to_start(true);
-        self.native_lifecycle_open_started();
-        // The registries the server sends are read while the world prepares.
-        let sync = super::lan::preload_sync_data(&self.options.resources);
-        self.load_world(WorldRequest::new(
+        let request = WorldRequest::new(
             &folder,
             Some(&level_name),
             Some(props.seed),
             game_mode == 1,
             None,
-        )?)?;
+        )?;
+        // The world's folder is the server's from its start (`getWorldPath`).
+        self.world_root = request.save_root.clone();
+        // MinecraftServer.loadLevel's start: nothing is loaded yet.
+        self.native_server_about_to_start(true);
+        self.native_lifecycle_open_started();
+        // The registries the server sends are read while the world prepares.
+        let sync = super::lan::preload_sync_data(&self.options.resources);
+        self.load_world(request)?;
         if new_world {
             self.level.hardcore = props.hardcore;
         }

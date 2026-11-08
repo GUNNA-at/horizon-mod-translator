@@ -671,6 +671,16 @@ impl Game<'_> {
         self.native_level_unload(dim.id());
     }
 
+    /// The mods hear the level in place saved (`LevelEvent.Save`, at the end
+    /// of `ServerLevel.save`), on a server.
+    pub(super) fn native_level_saved(&mut self) {
+        if self.remote.is_some() || self.options.execution_role.is_client() {
+            return;
+        }
+        let dim = self.dim;
+        self.native_level_save(dim.id());
+    }
+
     /// Every level still open closes with the server, however it ends
     /// (`MinecraftServer.stopServer`'s `level.close()` loop), in vanilla's
     /// order of its levels: the Overworld, the Nether, the End.

@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 115] = [
+const COMPAT: [(&str, &str); 116] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -179,6 +179,7 @@ const COMPAT: [(&str, &str); 115] = [
     ("damage.rs", include_str!("../../horizon-compat/src/damage.rs")),
     ("player_advancements.rs", include_str!("../../horizon-compat/src/player_advancements.rs")),
     ("player_stats.rs", include_str!("../../horizon-compat/src/player_stats.rs")),
+    ("world_data.rs", include_str!("../../horizon-compat/src/world_data.rs")),
     ("world_events.rs", include_str!("../../horizon-compat/src/world_events.rs")),
     ("datapack.rs", include_str!("../../horizon-compat/src/datapack.rs")),
     ("vanilla_entities.rs", include_str!("../../horizon-compat/src/vanilla_entities.rs")),
@@ -2691,13 +2692,14 @@ fn world_writes(c: &str) -> String {
         fn mark_player_motion(&mut self, uuid: u128) -> bool {{
             self.game.native_mark_player_motion(uuid)
         }}
-{attributes}{effects}{vitals}{level_events}{advancements}{stats}"#,
+{attributes}{effects}{vitals}{level_events}{advancements}{stats}{world}"#,
         attributes = attribute_methods(c, "Some(&mut *self.game)"),
         effects = effect_methods(c, "Some(&mut *self.game)"),
         vitals = vital_methods(c, "Some(&mut *self.game)"),
         level_events = level_event_methods("Some(&mut *self.game)"),
         advancements = advancement_methods(c),
         stats = STAT_METHODS,
+        world = WORLD_METHODS,
     )
 }
 
@@ -2735,6 +2737,13 @@ const STAT_METHODS: &str = r#"        fn stat_value(&mut self, player: u128, ty:
         }
         fn score_stat(&mut self, player: u128, ty: &str, key: &str, change: Option<i32>) -> bool {
             self.game.native_score_stat(player, ty, key, change)
+        }
+"#;
+
+/// A server host's world folder, where the mods keep their files and the levels' saved data
+/// (`native_world_dir`).
+const WORLD_METHODS: &str = r#"        fn world_dir(&self) -> Option<std::path::PathBuf> {
+            self.game.native_world_dir()
         }
 "#;
 
@@ -3508,6 +3517,7 @@ fn {id}_{hook}(game: &mut crate::game::Game<'_>, {params}) {{
     };
     let about = format!("let _ = dedicated;\n    {krate}::hook_runtime(\"server_about_to_start\", |rt| {c}::glue::server_about_to_start(rt, &mut host));");
     let stopping = format!("let _ = dedicated;\n    {krate}::hook_runtime(\"server_stopping\", |rt| {c}::glue::server_stopping(rt, &mut host));");
+    let level_save = format!("{krate}::hook_runtime(\"level_save\", |rt| {c}::glue::level_save(rt, &mut host, dimension));");
     let phases = "let _ = (context, error_text);\n    use crate::game::native_lifecycle::WorldPhase;\n    let phase = match phase {\n        WorldPhase::WorldOpenReady => \"open_ready\",\n        WorldPhase::WorldOpenFailed => \"open_failed\",\n        WorldPhase::WorldCloseFinal => \"close_final\",\n        WorldPhase::WorldCloseFailed => \"close_failed\",\n    };\n";
     let lifecycle = format!("{phases}    {krate}::hook_runtime(\"world_lifecycle\", |rt| {c}::glue::world_lifecycle(rt, &mut host, phase));");
     // The mods' commands: registered when a world opens to players, run for a player (their state
@@ -3615,6 +3625,7 @@ fn {id}_{hook}(game: &mut crate::game::Game<'_>, effect: &str, entity: Option<i3
         ("perform_console_command", console),
         ("server_about_to_start", server_hook("server_about_to_start", "dedicated: bool", "the server is about to load its worlds (`ServerAboutToStartEvent`)", &about)),
         ("server_stopping", server_hook("server_stopping", "dedicated: bool", "the server begins to stop (`ServerStoppingEvent`)", &stopping)),
+        ("level_save", server_hook("level_save", "dimension: &str", "the server saved a level (`LevelEvent.Save`)", &level_save)),
         ("world_lifecycle", server_hook(
             "world_lifecycle",
             "context: &crate::game::native_lifecycle::NativeLifecycleContext, phase: crate::game::native_lifecycle::WorldPhase, error_text: &str",
@@ -4658,12 +4669,13 @@ const CLIENT_BINDINGS: [(&str, &str); 42] = [
     ("camera_shake", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"partial\", ty = \"f32\", value = \"partial\" },\n    { name = \"shake\", ty = \"&mut crate::game::native_hooks::NativeShake\", value = \"&mut *shake\" },\n"),
 ];
 
-const BLOCK_ENTITY_BINDINGS: [(&str, &str); 62] = [
+const BLOCK_ENTITY_BINDINGS: [(&str, &str); 63] = [
     ("register_commands", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"commands\", ty = \"&mut Vec<crate::game::native_server::NativeCommand>\", value = \"&mut *commands\" },\n"),
     ("perform_command", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"&crate::game::native_server::NativeServerPlayer\", value = \"player\" },\n    { name = \"command\", ty = \"&str\", value = \"command\" },\n    { name = \"ran\", ty = \"&mut bool\", value = \"&mut *ran\" },\n"),
     ("perform_console_command", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"command\", ty = \"&str\", value = \"command\" },\n    { name = \"ran\", ty = \"&mut bool\", value = \"&mut *ran\" },\n"),
     ("server_about_to_start", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dedicated\", ty = \"bool\", value = \"dedicated\" },\n"),
     ("server_stopping", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dedicated\", ty = \"bool\", value = \"dedicated\" },\n"),
+    ("level_save", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n"),
     ("world_lifecycle", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"context\", ty = \"&crate::game::native_lifecycle::NativeLifecycleContext\", value = \"context\" },\n    { name = \"phase\", ty = \"crate::game::native_lifecycle::WorldPhase\", value = \"phase\" },\n    { name = \"error_text\", ty = \"&str\", value = \"error_text\" },\n"),
     ("player_logged_in", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"name\", ty = \"&str\", value = \"name\" },\n"),
     ("player_logged_out", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"name\", ty = \"&str\", value = \"name\" },\n"),

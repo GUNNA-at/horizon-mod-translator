@@ -280,6 +280,8 @@ impl WorldRequest {
 
 pub(super) struct WorldLoader {
     pub cancelled: bool,
+    /// The world's folder, known before it is prepared.
+    pub save_root: PathBuf,
     /// What the world's upgrade has done (`UpgradeProgress`), which
     /// `FileFixerProgressScreen` shows while the file fixers run.
     pub upgrade: Arc<horizon_world::datafix::progress::UpgradeProgress>,
@@ -296,6 +298,7 @@ impl WorldLoader {
     ) -> Result<Self> {
         let upgrade = Arc::new(horizon_world::datafix::progress::UpgradeProgress::new());
         let worker_upgrade = upgrade.clone();
+        let save_root = request.save_root.clone();
         let handle = std::thread::Builder::new()
             .name("World initialization".into())
             .spawn(move || {
@@ -305,6 +308,7 @@ impl WorldLoader {
             })?;
         Ok(Self {
             cancelled: false,
+            save_root,
             upgrade,
             handle,
         })
@@ -315,6 +319,7 @@ impl WorldLoader {
     pub fn cancel(self) -> Self {
         Self {
             cancelled: true,
+            save_root: self.save_root.clone(),
             upgrade: self.upgrade.clone(),
             handle: std::thread::spawn(move || {
                 drop(self.finish());

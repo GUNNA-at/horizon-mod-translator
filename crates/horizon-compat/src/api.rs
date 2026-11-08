@@ -788,7 +788,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 84] = [
+const CHAIN: [Module; 85] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -833,6 +833,7 @@ const CHAIN: [Module; 84] = [
     crate::damage::call,
     crate::player_advancements::call,
     crate::player_stats::call,
+    crate::world_data::call,
     crate::world_events::call,
     crate::made_entities::call,
     crate::vanilla_entities::call,
@@ -878,7 +879,7 @@ const CHAIN: [Module; 84] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 84] = [
+const CLAIMS: [Claims; 85] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -923,6 +924,7 @@ const CLAIMS: [Claims; 84] = [
     crate::damage::claims,
     crate::player_advancements::claims,
     crate::player_stats::claims,
+    crate::world_data::claims,
     crate::world_events::claims,
     crate::made_entities::claims,
     crate::vanilla_entities::claims,
@@ -966,7 +968,7 @@ const CLAIMS: [Claims; 84] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 84] = [
+const MODULE_NAMES: [&str; 85] = [
     "diodes",
     "rails",
     "fake_players",
@@ -1011,6 +1013,7 @@ const MODULE_NAMES: [&str; 84] = [
     "damage",
     "player_advancements",
     "player_stats",
+    "world_data",
     "world_events",
     "made_entities",
     "vanilla_entities",
@@ -1122,18 +1125,15 @@ fn checked_chain(rt: &mut Rt, key: &'static str, args: &[V], claimed: u128) -> O
 const STATE: &str = "net/minecraft/world/level/block/state/BlockState";
 const BLOCK: &str = "net/minecraft/world/level/block/Block";
 const STATE_DEFINITION: &str = "net/minecraft/world/level/block/state/StateDefinition";
-const DATA_STORAGE: &str = "net/minecraft/world/level/storage/DimensionDataStorage";
 const SET_PLACED_BY_DESC: &str = "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;)V";
 pub(crate) const UPDATE_SHAPE: &str = "updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
 const UPDATE_SHAPE_KEY: &str = "net/minecraft/world/level/block/state/BlockBehaviour.updateShape.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/core/Direction;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;";
 pub(crate) const CAN_SURVIVE: &str = "canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
 pub(crate) const CAN_SURVIVE_KEY: &str =
     "net/minecraft/world/level/block/state/BlockBehaviour.canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
-const SAVED_DATA: &str = "net/minecraft/world/level/saveddata/SavedData";
 const LEVEL_DATA: &str = "net/minecraft/world/level/storage/LevelData";
 const LEVEL_CHUNK: &str = "net/minecraft/world/level/chunk/LevelChunk";
 const CHUNK_ACCESS: &str = "net/minecraft/world/level/chunk/ChunkAccess";
-const SAVED_DATA_FACTORY: &str = "net/minecraft/world/level/saveddata/SavedData$Factory";
 const CHUNK_CACHE: &str = "net/minecraft/server/level/ServerChunkCache";
 const CHUNK_SOURCE: &str = "net/minecraft/world/level/chunk/ChunkSource";
 const CHUNK_GENERATOR: &str = "net/minecraft/world/level/chunk/ChunkGenerator";
@@ -1877,7 +1877,16 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             ),
             _ => return None,
         },
-        (_, "getChunkSource") if level => rt.intern("compat:chunk-source".into(), |rt| rt.new_object("net/minecraft/server/level/ServerChunkCache")),
+        // A level's chunk cache, its dimension's (its saved data is that level's).
+        (_, "getChunkSource") if level => {
+            let d = crate::glue::level_dimension(rt, a(0));
+            rt.intern(format!("compat:chunk-source/{d}"), |rt| {
+                let cache = rt.new_object("net/minecraft/server/level/ServerChunkCache");
+                let dimension = rt.string(&d);
+                rt.put_field(cache, "$dimension", dimension);
+                cache
+            })
+        }
         // The level's generator, a noise-based one as every dimension of a normal world has (Create's
         // belts ask whether it is the debug world's `DebugLevelSource`, whose blocks may not change).
         (CHUNK_CACHE | CHUNK_SOURCE, "getGenerator") => {
@@ -1945,7 +1954,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, "dimensionType") if level => rt.intern("compat:dimension-type".into(), |rt| rt.new_object("net/minecraft/world/level/dimension/DimensionType")),
         // Its dimension type's holder: vanilla's three dimensions have types of their own names.
         (_, "dimensionTypeRegistration") if level => {
-            let id = rt.host().map(|h| h.dimension()).unwrap_or_else(|| "minecraft:overworld".to_owned());
+            let id = crate::glue::level_dimension(rt, a(0));
             let ty = call(rt, "net/minecraft/world/level/Level.dimensionType.()Lnet/minecraft/world/level/dimension/DimensionType;", &[a(0)]);
             rt.intern(format!("compat:dimension-type-holder/{id}"), |rt| crate::neo::registry_holder(rt, "dimension_type", &id, ty))
         }
@@ -1958,7 +1967,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // The level's key (`Level.OVERWORLD`): `dimension#minecraft:overworld`.
         (_, "dimension") if level && desc == "()Lnet/minecraft/resources/ResourceKey;" => {
-            let d = rt.host().map(|h| h.dimension()).unwrap_or_else(|| "minecraft:overworld".to_owned());
+            let d = crate::glue::level_dimension(rt, a(0));
             rt.string(&format!("dimension#{d}"))
         }
         (_, "isDebug") if level => V::I(0),
@@ -2112,40 +2121,48 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // A client level has no server (`ClientLevel.getServer` is null).
         (_, "getServer") if level && rt.get_field(a(0), "isClientSide").i() != 0 => V::NULL,
         (_, "getServer") if level => rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer")),
-        // Saved data (`DimensionDataStorage`): one object per name, made by its factory's
-        // constructor the first time it's asked for. Kept in memory: not yet written to the world's
-        // `data/` folder, so a mod's networks (Create's trains) start over with the game.
-        (_, "getDataStorage") if level => rt.intern("compat:data-storage".into(), |rt| rt.new_object(DATA_STORAGE)),
-        (SAVED_DATA_FACTORY, "<init>") => {
-            rt.put_field(a(0), "$constructor", a(1));
-            rt.put_field(a(0), "$deserializer", a(2));
-            V::Void
-        }
-        (DATA_STORAGE, n @ ("computeIfAbsent" | "get")) => {
-            let key = format!("saved-data/{}", rt.str_of(a(2)).unwrap_or_default());
-            match rt.interned.get(&key) {
-                Some(d) => *d,
-                None if n == "get" => V::NULL,
-                None => {
-                    let make = rt.get_field(a(1), "$constructor");
-                    let d = rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", make, &[]);
-                    if d.r() != 0 {
-                        rt.interned.insert(key, d);
-                    }
-                    d
-                }
-            }
-        }
-        (SAVED_DATA, "setDirty") => V::Void,
-        (SAVED_DATA, "isDirty") => V::I(0),
-        (SAVED_DATA, "<init>") => V::Void,
         ("net/minecraft/server/MinecraftServer" | "net/minecraft/server/dedicated/DedicatedServer", n) => match n {
             "getTickCount" => V::I(rt.host().map_or(0, |h| h.game_time()) as i32),
-            // One level is modelled: the one the hook runs in.
-            "overworld" | "getLevel" => crate::glue::level(rt),
-            "getAllLevels" => {
+            // A client's runtime has its one level (a client can't reach the server's).
+            "overworld" | "getLevel" | "getAllLevels" if crate::neo::is_client(rt) => {
                 let l = crate::glue::level(rt);
-                crate::jutil::new_list(rt, vec![l])
+                if n == "getAllLevels" {
+                    crate::jutil::new_list(rt, vec![l])
+                } else {
+                    l
+                }
+            }
+            // The server's levels, one a dimension (`crate::glue::server_level`).
+            "overworld" => crate::glue::server_level(rt, "minecraft:overworld"),
+            // A level the server has (vanilla's three, or the one the hook runs in); null for another,
+            // as `MinecraftServer.getLevel` answers for a dimension it lacks.
+            "getLevel" => {
+                let key = rt.str_of(a(1)).unwrap_or("").to_owned();
+                let id = key
+                    .rsplit_once('#')
+                    .map_or(key.as_str(), |(_, id)| id)
+                    .to_owned();
+                let here = rt.host().map(|h| h.dimension());
+                if matches!(
+                    id.as_str(),
+                    "minecraft:overworld" | "minecraft:the_nether" | "minecraft:the_end"
+                ) || here.as_deref() == Some(id.as_str())
+                {
+                    crate::glue::server_level(rt, &id)
+                } else {
+                    V::NULL
+                }
+            }
+            // The levels the server has loaded, the Overworld first.
+            "getAllLevels" => {
+                crate::glue::server_level(rt, "minecraft:overworld");
+                let made = rt
+                    .interned
+                    .get(crate::glue::SERVER_LEVELS)
+                    .copied()
+                    .unwrap_or_default();
+                let all = crate::jutil::elements(rt, made);
+                crate::jutil::new_list(rt, all)
             }
             "isDedicatedServer" | "isPublished" | "isHardcore" => V::I(0),
             "isSameThread" => V::I(1),
@@ -2809,6 +2826,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::nightconfig::get_static(rt, o, f))
             .or_else(|| crate::mod_configs::get_static(rt, o, f))
             .or_else(|| crate::player_stats::get_static(rt, o, f))
+            .or_else(|| crate::world_data::get_static(rt, o, f))
             .or_else(|| crate::codecs::get_static(rt, o, f))
             .or_else(|| crate::recipes::get_static(rt, o, f))
             .or_else(|| crate::components::get_static(rt, o, f))
@@ -3711,32 +3729,6 @@ mod tests {
             call(rt, key, &[]);
             assert!(rt.thrown.is_none(), "the next hook starts afresh");
         });
-    }
-
-    #[test]
-    fn saved_data_is_made_once_per_name() {
-        // A mod's `SavedData.Factory` constructor (a lambda): each call makes a new object.
-        fn construct(rt: &mut Rt, _id: u32, _args: &[V]) -> Option<V> {
-            Some(rt.new_object("test/Tracks"))
-        }
-        let mut rt = Rt::new();
-        rt.lambda_call = Some(construct);
-        let make = rt.lambda_id("java/util/function/Supplier", 1, Vec::new());
-        let factory = rt.new_object(SAVED_DATA_FACTORY);
-        call(&mut rt, "net/minecraft/world/level/saveddata/SavedData$Factory.<init>.(Ljava/util/function/Supplier;Ljava/util/function/BiFunction;)V", &[factory, make, V::NULL]);
-        let level = rt.new_object("net/minecraft/server/level/ServerLevel");
-        let storage = call(&mut rt, "net/minecraft/server/level/ServerLevel.getDataStorage.()Lnet/minecraft/world/level/storage/DimensionDataStorage;", &[level]);
-        let compute = "net/minecraft/world/level/storage/DimensionDataStorage.computeIfAbsent.(Lnet/minecraft/world/level/saveddata/SavedData$Factory;Ljava/lang/String;)Lnet/minecraft/world/level/saveddata/SavedData;";
-        let get = "net/minecraft/world/level/storage/DimensionDataStorage.get.(Lnet/minecraft/world/level/saveddata/SavedData$Factory;Ljava/lang/String;)Lnet/minecraft/world/level/saveddata/SavedData;";
-        let name = rt.string("create_tracks");
-        let other = rt.string("create_logistics");
-        assert_eq!(call(&mut rt, get, &[storage, factory, name]), V::NULL);
-        let first = call(&mut rt, compute, &[storage, factory, name]);
-        assert_eq!(rt.class_of(first), "test/Tracks");
-        assert_eq!(call(&mut rt, compute, &[storage, factory, name]), first);
-        assert_eq!(call(&mut rt, get, &[storage, factory, name]), first);
-        let second = call(&mut rt, compute, &[storage, factory, other]);
-        assert_ne!(second, first);
     }
 
     const IS_FACE_STURDY: &str = "net/minecraft/world/level/block/state/BlockState.isFaceSturdy.(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z";
