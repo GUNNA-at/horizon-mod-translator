@@ -639,6 +639,137 @@ fn guava_strings(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -
     })
 }
 
+const GUAVA_OPTIONAL: &str = "com/google/common/base/Optional";
+
+/// Guava's `Optional` (Create's `SeatBlock.getLeashed(level, player).or(player)`): absent or
+/// present, never holding null, as Guava's `Absent` and `Present` are. `of`, `or` and `transform`
+/// refuse null (`NullPointerException`); `get` on an absent one throws `IllegalStateException`.
+fn guava_optional(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    const APPLY: &str =
+        "com/google/common/base/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
+    const SUPPLY: &str = "com/google/common/base/Supplier.get.()Ljava/lang/Object;";
+    const NPE: &str = "java/lang/NullPointerException";
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let null = |v: V| matches!(v, V::R(0) | V::Void);
+    let make = |rt: &mut Rt, v: V| -> V {
+        if matches!(v, V::R(0) | V::Void) {
+            return rt.intern("compat:guava-absent".into(), |rt| rt.new_object(GUAVA_OPTIONAL));
+        }
+        let o = rt.new_object(GUAVA_OPTIONAL);
+        rt.put_field(o, "$value", v);
+        o
+    };
+    // Guava's `checkNotNull` throws with no message; `or(null)` and a null result say why.
+    let refuse = |rt: &mut Rt, msg: &str| {
+        if msg.is_empty() {
+            rt.throw_new(NPE);
+            V::NULL
+        } else {
+            crate::jlang::throw_with(rt, NPE, msg)
+        }
+    };
+    // The factories, and the conversions from and to `java.util.Optional` (null for null).
+    match (name, desc) {
+        ("absent", _) => return Some(make(rt, V::NULL)),
+        ("of", _) if null(a(0)) => return Some(refuse(rt, "")),
+        ("of" | "fromNullable", _) => return Some(make(rt, a(0))),
+        ("fromJavaUtil", _) if null(a(0)) => return Some(V::NULL),
+        ("fromJavaUtil", _) => {
+            let v = rt.get_field(a(0), "value");
+            return Some(make(rt, v));
+        }
+        ("toJavaUtil", "(Lcom/google/common/base/Optional;)Ljava/util/Optional;") if null(a(0)) => return Some(V::NULL),
+        ("presentInstances", _) => {
+            let items: Vec<V> = elements(rt, a(0)).into_iter().map(|o| rt.get_field(o, "$value")).filter(|&v| !null(v)).collect();
+            return Some(new_list(rt, items));
+        }
+        _ => {}
+    }
+    let this = a(0);
+    let v = rt.get_field(this, "$value");
+    let present = !null(v);
+    Some(match (name, desc) {
+        ("isPresent", _) => V::I(i32::from(present)),
+        ("get", _) if !present => crate::jlang::throw_with(rt, "java/lang/IllegalStateException", "Optional.get() cannot be called on an absent value"),
+        ("get", _) => v,
+        ("orNull", _) => if present { v } else { V::NULL },
+        ("or", "(Ljava/lang/Object;)Ljava/lang/Object;") if null(a(1)) => refuse(rt, "use Optional.orNull() instead of Optional.or(null)"),
+        ("or", "(Ljava/lang/Object;)Ljava/lang/Object;") => if present { v } else { a(1) },
+        ("or", "(Lcom/google/common/base/Optional;)Lcom/google/common/base/Optional;") if null(a(1)) => refuse(rt, ""),
+        ("or", "(Lcom/google/common/base/Optional;)Lcom/google/common/base/Optional;") => if present { this } else { a(1) },
+        ("or", "(Lcom/google/common/base/Supplier;)Ljava/lang/Object;") if null(a(1)) => refuse(rt, ""),
+        ("or", "(Lcom/google/common/base/Supplier;)Ljava/lang/Object;") if present => v,
+        ("or", "(Lcom/google/common/base/Supplier;)Ljava/lang/Object;") => {
+            let r = rt.call_functional(SUPPLY, a(1), &[]);
+            if rt.thrown.is_some() {
+                return Some(V::NULL);
+            }
+            if null(r) {
+                refuse(
+                    rt,
+                    "use Optional.orNull() instead of a Supplier that returns null",
+                )
+            } else {
+                r
+            }
+        }
+        ("transform", _) if null(a(1)) => refuse(rt, ""),
+        ("transform", _) if !present => this,
+        ("transform", _) => {
+            let r = rt.call_functional(APPLY, a(1), &[v]);
+            if rt.thrown.is_some() {
+                return Some(V::NULL);
+            }
+            if null(r) {
+                refuse(
+                    rt,
+                    "the Function passed to Optional.transform() must not return null.",
+                )
+            } else {
+                make(rt, r)
+            }
+        }
+        ("toJavaUtil", _) => crate::api_common::optional(rt, if present { v } else { V::NULL }),
+        ("asSet", _) => {
+            let items: &[V] = if present {
+                std::slice::from_ref(&v)
+            } else {
+                &[]
+            };
+            new_set_of(rt, items)
+        }
+        ("equals", _) => {
+            let other = a(1);
+            let w = if rt.class_of(other) == GUAVA_OPTIONAL {
+                rt.get_field(other, "$value")
+            } else {
+                V::Void
+            };
+            let same = rt.class_of(other) == GUAVA_OPTIONAL
+                && if present {
+                    !null(w) && equals(rt, v, w)
+                } else {
+                    null(w)
+                };
+            V::I(i32::from(same))
+        }
+        ("hashCode", _) => V::I(if present {
+            0x598d_f91c_i32.wrapping_add(hash(rt, v))
+        } else {
+            0x79a3_1aac
+        }),
+        ("toString", _) => {
+            let text = if present {
+                format!("Optional.of({})", rt.to_java_string(v, 'L'))
+            } else {
+                "Optional.absent()".to_owned()
+            };
+            rt.string(&text)
+        }
+        _ => return None,
+    })
+}
+
 fn is_map(class: &str) -> bool {
     class.ends_with("Map") || class.ends_with("Map$Values")
 }
@@ -785,6 +916,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if matches!(owner, SPLITTER | JOINER | OBJECT_ARRAYS) {
         return guava_strings(rt, owner, name, desc, args);
+    }
+    if owner == GUAVA_OPTIONAL {
+        return guava_optional(rt, name, desc, args);
     }
     // Vanilla's strategies for stacks (`ItemStackLinkedSet.TYPE_AND_TAG`); a mod's own runs its code.
     if owner == STRATEGY {
@@ -3659,5 +3793,155 @@ mod tests {
         let other = rt.new_object("t/Made");
         assert_eq!(c(&mut rt, cas, &[r, V::NULL, other]), made);
         assert_eq!(c(&mut rt, "java/util/concurrent/atomic/AtomicReference.getAcquire.()Ljava/lang/Object;", &[r]), made);
+    }
+
+    /// Guava's `Optional` (Create's seats: `getLeashed(level, player).or(player)`): `or` gives the
+    /// value, else the default, and refuses a null default; `get` on an absent one throws;
+    /// `transform` maps a present value only; to and from `java.util.Optional`; `equals`,
+    /// `hashCode` and `toString` as Guava's `Present` and `Absent` answer them.
+    #[test]
+    fn guavas_optional_gives_its_value_or_the_default() {
+        fn vcall(rt: &mut Rt, _key: &'static str, _short: &'static str, args: &[V]) -> V {
+            // A mod's own supplier (`() -> "made"`) and function (`s -> s + "!"`).
+            if args.len() == 1 {
+                return rt.string("made");
+            }
+            let s = rt.to_java_string(args[1], 'L');
+            rt.string(&format!("{s}!"))
+        }
+        let mut rt = Rt::new();
+        rt.vcall = Some(vcall);
+        let thrown = |rt: &mut Rt| rt.thrown.take().map(|e| (rt.class_of(e), rt.to_java_string(rt.get_field(e, "message"), 'L')));
+        let of = |rt: &mut Rt, v: V| c(rt, "com/google/common/base/Optional.of.(Ljava/lang/Object;)Lcom/google/common/base/Optional;", &[v]);
+        let get = |rt: &mut Rt, o: V| c(rt, "com/google/common/base/Optional.get.()Ljava/lang/Object;", &[o]);
+        let text = |rt: &mut Rt, v: V| rt.to_java_string(v, 'L');
+        let absent = c(&mut rt, "com/google/common/base/Optional.absent.()Lcom/google/common/base/Optional;", &[]);
+        let (player, mob) = (rt.new_object("t/Player"), rt.new_object("t/Mob"));
+        let or = "com/google/common/base/Optional.or.(Ljava/lang/Object;)Ljava/lang/Object;";
+        assert_eq!(c(&mut rt, or, &[absent, player]), player);
+        let leashed = of(&mut rt, mob);
+        assert_eq!(c(&mut rt, or, &[leashed, player]), mob);
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/base/Optional.isPresent.()Z",
+                &[absent]
+            ),
+            V::I(0)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/base/Optional.orNull.()Ljava/lang/Object;",
+                &[absent]
+            ),
+            V::NULL
+        );
+        // Null is refused where Guava refuses it.
+        c(&mut rt, or, &[absent, V::NULL]);
+        assert_eq!(
+            thrown(&mut rt),
+            Some((
+                "java/lang/NullPointerException",
+                "use Optional.orNull() instead of Optional.or(null)".to_owned()
+            ))
+        );
+        of(&mut rt, V::NULL);
+        assert_eq!(
+            thrown(&mut rt).map(|(class, _)| class),
+            Some("java/lang/NullPointerException")
+        );
+        assert_eq!(get(&mut rt, absent), V::NULL);
+        assert_eq!(
+            thrown(&mut rt),
+            Some((
+                "java/lang/IllegalStateException",
+                "Optional.get() cannot be called on an absent value".to_owned()
+            ))
+        );
+        // `or(Optional)` and `or(Supplier)`.
+        let or_optional = "com/google/common/base/Optional.or.(Lcom/google/common/base/Optional;)Lcom/google/common/base/Optional;";
+        assert_eq!(c(&mut rt, or_optional, &[absent, leashed]), leashed);
+        let other = of(&mut rt, player);
+        assert_eq!(c(&mut rt, or_optional, &[leashed, other]), leashed);
+        let supplier = rt.new_object("t/Supplier");
+        let made = c(
+            &mut rt,
+            "com/google/common/base/Optional.or.(Lcom/google/common/base/Supplier;)Ljava/lang/Object;",
+            &[absent, supplier],
+        );
+        assert_eq!(text(&mut rt, made), "made");
+        // `transform` maps a present value; an absent one stays absent.
+        let a = rt.string("a");
+        let some = of(&mut rt, a);
+        let function = rt.new_object("t/Function");
+        let transform = "com/google/common/base/Optional.transform.(Lcom/google/common/base/Function;)Lcom/google/common/base/Optional;";
+        let mapped = c(&mut rt, transform, &[some, function]);
+        let mapped = get(&mut rt, mapped);
+        assert_eq!(text(&mut rt, mapped), "a!");
+        let still = c(&mut rt, transform, &[absent, function]);
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/base/Optional.isPresent.()Z",
+                &[still]
+            ),
+            V::I(0)
+        );
+        // To `java.util.Optional` and back.
+        let java = c(
+            &mut rt,
+            "com/google/common/base/Optional.toJavaUtil.()Ljava/util/Optional;",
+            &[some],
+        );
+        assert_eq!(
+            (rt.class_of(java), rt.get_field(java, "value")),
+            ("java/util/Optional", a)
+        );
+        let back = c(
+            &mut rt,
+            "com/google/common/base/Optional.fromJavaUtil.(Ljava/util/Optional;)Lcom/google/common/base/Optional;",
+            &[java],
+        );
+        assert_eq!(get(&mut rt, back), a);
+        let empty = c(
+            &mut rt,
+            "com/google/common/base/Optional.toJavaUtil.()Ljava/util/Optional;",
+            &[absent],
+        );
+        assert_eq!(rt.get_field(empty, "value"), V::NULL);
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/base/Optional.toJavaUtil.(Lcom/google/common/base/Optional;)Ljava/util/Optional;",
+                &[V::NULL]
+            ),
+            V::NULL
+        );
+        // Equal by value; Guava's hashes and texts.
+        let a2 = rt.string("a");
+        let same = of(&mut rt, a2);
+        let equals = "com/google/common/base/Optional.equals.(Ljava/lang/Object;)Z";
+        assert_eq!(c(&mut rt, equals, &[some, same]), V::I(1));
+        assert_eq!(c(&mut rt, equals, &[some, absent]), V::I(0));
+        assert_eq!(c(&mut rt, equals, &[absent, absent]), V::I(1));
+        let hash = "com/google/common/base/Optional.hashCode.()I";
+        assert_eq!(c(&mut rt, hash, &[some]), V::I(0x598d_f91c + 97));
+        assert_eq!(c(&mut rt, hash, &[absent]), V::I(0x79a3_1aac));
+        let to_string = "com/google/common/base/Optional.toString.()Ljava/lang/String;";
+        let shown = c(&mut rt, to_string, &[some]);
+        assert_eq!(text(&mut rt, shown), "Optional.of(a)");
+        let shown = c(&mut rt, to_string, &[absent]);
+        assert_eq!(text(&mut rt, shown), "Optional.absent()");
+        // `presentInstances` keeps the present values, in order.
+        let b = rt.string("b");
+        let some_b = of(&mut rt, b);
+        let list = new_list(&mut rt, vec![some, absent, some_b]);
+        let present = c(
+            &mut rt,
+            "com/google/common/base/Optional.presentInstances.(Ljava/lang/Iterable;)Ljava/lang/Iterable;",
+            &[list],
+        );
+        assert_eq!(elements(&rt, present), vec![a, b]);
     }
 }

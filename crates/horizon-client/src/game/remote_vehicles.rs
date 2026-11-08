@@ -118,6 +118,8 @@ impl Game<'_> {
         let Some(me) = self.remote.as_ref().map(|r| r.entity_id) else {
             return;
         };
+        // A mod's entity's copy holds its passengers too (Create's seat).
+        self.native_client_mod_passengers(vehicle, passengers);
         let vehicle_id = vehicle as u32;
         for m in &mut self.mobs {
             // `Entity.isVehicle` (the saddle reins of a ridden horse): the
@@ -227,14 +229,22 @@ impl Game<'_> {
                 c.position
                     .add_vector(Vec3::new(0.0, super::minecarts::SEAT, 0.0))
             });
-            if cart.is_none() {
+            // A mod's entity (Create's seat): its `positionRider` places the
+            // rider.
+            let seat = cart.or_else(|| {
+                let me = self.remote.as_ref()?.entity_id;
+                let mut seat = None;
+                self.native_client_mod_seat(id as i32, me, &mut seat);
+                seat.map(|[x, y, z]| Vec3::new(x, y, z))
+            });
+            if seat.is_none() {
                 // Entity.baseTick: a passenger whose vehicle is gone stops
                 // riding it. Nothing with the id is in the level any more (it
                 // died, or the world it rode in was left), so the seat goes.
                 self.riding = None;
                 return false;
             }
-            cart
+            seat
         };
         if let Some(p) = self.player.as_mut() {
             self.previous_position = p.position;

@@ -116,6 +116,10 @@ impl Game<'_> {
             return;
         };
         let (keys, dead) = (input_keys(g.input), g.dead || g.health <= 0.0);
+        // A mod's entity seats its riders and lets them off itself (`native_ride_player`).
+        if !dead && self.mod_vehicle(vehicle) {
+            return;
+        }
         let boat = self.boats.iter().position(|b| b.id == vehicle);
         let cart = self.carts.iter().any(|c| c.id == vehicle);
         let mount = self.mobs.iter().any(|m| m.id == vehicle);

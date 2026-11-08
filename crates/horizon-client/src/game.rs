@@ -221,6 +221,7 @@ mod native_panel;
 mod native_panel_recipes;
 mod native_projectiles;
 mod native_recipes;
+mod native_ride;
 mod native_server;
 mod native_shaders;
 mod native_shapes;
@@ -2673,6 +2674,9 @@ struct Game<'a> {
     cart_models: minecarts::CartModels,
     /// The boat the player rides.
     riding: Option<u32>,
+    /// The mods' entities the server's players ride (Create's seats), and who their levels were
+    /// last told rides them (`native_ride`).
+    mod_vehicles: std::collections::HashMap<u32, native_ride::ModVehicle>,
     /// The vehicle the player's file names, waiting for it to be in the world
     /// (`ServerPlayer.loadAndSpawnParentVehicle`).
     pending_vehicle: Option<[i32; 4]>,
@@ -18276,6 +18280,7 @@ impl<'a> Game<'a> {
             trim_slots: Vec::new(),
             cart_models: prepared.cart_models,
             riding: None,
+            mod_vehicles: Default::default(),
             pending_vehicle: None,
             ender_items: vec![None; 27],
             ender_open: None,

@@ -117,6 +117,20 @@ impl Game<'_> {
                     // gives way to its seat, as `rideTick` places it.
                     let Some((at, before)) = self.text_displays.get(&(v as i32)).map(|d| d.seat())
                     else {
+                        // A mob or player on a mod's entity (Create's seat): where its
+                        // `positionRider` puts their feet.
+                        let mut seat = None;
+                        self.native_client_mod_seat(v as i32, self.mobs[i].id as i32, &mut seat);
+                        if let Some([x, y, z]) = seat {
+                            let m = &mut self.mobs[i];
+                            m.previous = m.position;
+                            m.position = Vec3::new(x, y, z);
+                            m.velocity = Vec3::ZERO;
+                            m.fall_distance = 0.0;
+                            m.on_ground = false;
+                            m.extra.passenger = true;
+                            m.ai.nav.stop();
+                        }
                         continue;
                     };
                     let m = &mut self.mobs[i];

@@ -3424,7 +3424,24 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
             V::I(i32::from(holding))
         }
-        // Players ride nothing here, and stand or crouch (`Entity.getPose`).
+        // A player's riding (`crate::riding`): what they ride as the game has it, getting on a
+        // mod's entity, getting off anything. A fake player rides nothing (`fake_players`).
+        (
+            o,
+            n @ ("isPassenger"
+            | "getVehicle"
+            | "getRootVehicle"
+            | "getVehicleAttachmentPoint"
+            | "startRiding"
+            | "stopRiding"
+            | "removeVehicle"),
+        ) if is_player(o)
+            && is_player_class(rt.class_of(a(0)))
+            && rt.class_of(a(0)) != crate::fake_players::FAKE_PLAYER =>
+        {
+            return crate::riding::player_call(rt, n, desc, args);
+        }
+        // Other entities ride nothing here, and players stand or crouch (`Entity.getPose`).
         (o, "isPassenger") if is_player(o) => V::I(0),
         (o, "getPose") if is_player(o) && player_object(rt, a(0)) => {
             let crouching = rt.host().is_some_and(|h| h.player_sneaking());

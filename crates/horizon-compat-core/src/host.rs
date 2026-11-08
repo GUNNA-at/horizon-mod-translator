@@ -288,6 +288,23 @@ pub enum FireChange {
     Extinguish,
 }
 
+/// A server's player getting on, sitting on, or off an entity a mod made (`Entity.startRiding`,
+/// `Entity.rideTick`'s `positionRider`, `LivingEntity.dismountVehicle`): the mod's entity carries
+/// them, the game seats them ([`Host::ride_player`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Ride {
+    /// On the mod's entity `vehicle`, at `at`. Their client and the players who see them hear
+    /// they ride it (`ClientboundSetPassengersPacket`).
+    Board { vehicle: i32, at: [f64; 3] },
+    /// Still on it, at `at` (where its `positionRider` puts them this tick).
+    Sit([f64; 3]),
+    /// Off it, at `to` (`ServerPlayer.dismountTo`).
+    Leave { to: [f64; 3] },
+    /// Off a vehicle of the game's (a boat, a minecart, a horse), where the game lets its riders
+    /// off (`LivingEntity.stopRiding`).
+    Dismount,
+}
+
 /// An attribute of a living entity, as translated code reads it through its `AttributeInstance`
 /// (`getValue`, `getBaseValue`, `getModifiers`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1269,6 +1286,27 @@ pub trait Host {
     fn set_player_fire(&mut self, _uuid: u128, _change: FireChange) -> bool {
         false
     }
+    /// The id of the entity the server's player `uuid` rides (a boat's, a horse's, a mod's
+    /// entity's): None for none, or for a player the host doesn't have.
+    fn player_vehicle(&mut self, _uuid: u128) -> Option<i32> {
+        None
+    }
+    /// Whether the server's player `uuid` holds the key that gets them off what they ride
+    /// (`Player.wantsToStopRiding`: sneaking).
+    fn player_wants_off(&mut self, _uuid: u128) -> bool {
+        false
+    }
+    /// Seats the server's player `uuid` on a mod's entity, moves them in their seat, or lets them
+    /// off, as `ride` says. False for a player the host doesn't have, one riding something else
+    /// of the game's (a boat, a horse), or one that rides nothing being moved or let off.
+    fn ride_player(&mut self, _uuid: u128, _ride: Ride) -> bool {
+        false
+    }
+    /// The id of the entity a client's own player rides, as their server told them
+    /// (`ClientboundSetPassengersPacket`): None for none, or where there is no such player.
+    fn client_player_vehicle(&self) -> Option<i32> {
+        None
+    }
     /// Moves the mob `id` to `pos` at once (`Entity.teleportTo`).
     fn teleport_entity(&mut self, _id: i32, _pos: [f64; 3]) -> bool {
         false
@@ -1844,6 +1882,13 @@ pub struct MemoryHost {
     /// The extinguish sounds played ([`FireChange::Extinguish`] on one that burned): the mob's id,
     /// else the player's UUID.
     pub extinguished: Vec<Result<i32, u128>>,
+    /// What the players ride ([`Host::player_vehicle`]), by UUID: a mod's entity a player is seated
+    /// on through [`Host::ride_player`], or another vehicle a test gives them.
+    pub vehicles: HashMap<u128, i32>,
+    /// The players holding sneak ([`Host::player_wants_off`]).
+    pub wanting_off: Vec<u128>,
+    /// Each seat change made ([`Host::ride_player`]), in order.
+    pub rides: Vec<(u128, Ride)>,
     /// The players whose motion was marked for their client ([`Host::mark_player_motion`]), in
     /// order.
     pub marked_players: Vec<u128>,
@@ -1902,6 +1947,8 @@ pub struct MemoryHost {
     pub client: bool,
     /// On a client, the local player's entity id ([`Host::client_player_id`]).
     pub client_player_id: Option<i32>,
+    /// What a client's own player rides ([`Host::client_player_vehicle`]).
+    pub client_vehicle: Option<i32>,
     /// On a client, its own player's walking input ([`Host::client_player_input`]).
     pub client_input: [f32; 2],
     /// On a client, whether its own player stands on something ([`Host::client_player_on_ground`]).
@@ -2432,6 +2479,9 @@ impl Host for MemoryHost {
     fn client_player_id(&self) -> Option<i32> {
         self.client_player_id
     }
+    fn client_player_vehicle(&self) -> Option<i32> {
+        self.client_vehicle
+    }
     fn damage_types(&self) -> Vec<DamageTypeView> {
         self.damage_types.clone()
     }
@@ -2592,6 +2642,34 @@ impl Host for MemoryHost {
             }
         };
         self.player_fires.insert(uuid, ticks);
+        true
+    }
+    fn player_vehicle(&mut self, uuid: u128) -> Option<i32> {
+        self.vehicles.get(&uuid).copied()
+    }
+    fn player_wants_off(&mut self, uuid: u128) -> bool {
+        self.wanting_off.contains(&uuid)
+    }
+    fn ride_player(&mut self, uuid: u128, ride: Ride) -> bool {
+        let known = self.player_id == Some(uuid) || self.players.iter().any(|p| p.0 == uuid);
+        let riding = self.vehicles.get(&uuid).copied();
+        let ok = match ride {
+            Ride::Board { vehicle, .. } => known && riding.is_none_or(|v| v == vehicle),
+            Ride::Sit(_) | Ride::Leave { .. } | Ride::Dismount => known && riding.is_some(),
+        };
+        if !ok {
+            return false;
+        }
+        match ride {
+            Ride::Board { vehicle, .. } => {
+                self.vehicles.insert(uuid, vehicle);
+            }
+            Ride::Leave { .. } | Ride::Dismount => {
+                self.vehicles.remove(&uuid);
+            }
+            Ride::Sit(_) => {}
+        }
+        self.rides.push((uuid, ride));
         true
     }
     fn teleport_entity(&mut self, id: i32, pos: [f64; 3]) -> bool {

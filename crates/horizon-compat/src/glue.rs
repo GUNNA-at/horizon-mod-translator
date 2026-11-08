@@ -1415,6 +1415,40 @@ pub fn client_level_unload(rt: &mut Rt, host: &mut dyn Host, dimension: &str) {
     rt.with_host(host, |rt| crate::world_events::client_level_unload(rt, dimension));
 }
 
+/// `native_client_mod_passengers` (client): who rides the entity `vehicle`, as the server said
+/// (`ClientboundSetPassengersPacket`), for a mod's entity's copy ([`crate::riding::client_passengers`]).
+/// False for a vehicle that isn't a mod's entity the client has.
+pub fn client_mod_passengers(
+    rt: &mut Rt,
+    host: &mut dyn Host,
+    vehicle: i32,
+    riders: &[i32],
+) -> bool {
+    rt.safe_point();
+    if !crate::neo::is_client(rt) {
+        return false;
+    }
+    rt.with_host(host, |rt| {
+        crate::riding::client_passengers(rt, vehicle, riders)
+    })
+}
+
+/// `native_client_mod_seat` (client): where the copy of the mod's entity `vehicle` seats the rider
+/// `rider` ([`crate::riding::client_seat`]). None for a vehicle that isn't a mod's entity the client
+/// has.
+pub fn client_mod_seat(
+    rt: &mut Rt,
+    host: &mut dyn Host,
+    vehicle: i32,
+    rider: i32,
+) -> Option<[f64; 3]> {
+    rt.safe_point();
+    if !crate::neo::is_client(rt) {
+        return None;
+    }
+    rt.with_host(host, |rt| crate::riding::client_seat(rt, vehicle, rider))
+}
+
 /// The client's setup, once, on its first hook ([`crate::neo::fire_client_setup`]), then its first
 /// resource load with the game as host: the reload listeners the mods registered read the game's
 /// resources ([`crate::resources::reload`]), and the models are baked

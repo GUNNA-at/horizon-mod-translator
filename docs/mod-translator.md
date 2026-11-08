@@ -8301,6 +8301,150 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     - Before the on-fire-bit fix, the player read 40 in the smoke lane but saw no flames.
     - Nothing threw, and nothing about fire was unmapped.
     - The mod entity's `extinguishFire` came after this run and is covered by its test.
+- [x] 2026-11-08 Part 124: a server's players ride the mods' entities, as Create's seats carry
+  them. A player who uses a seat sits on the `SeatEntity` it makes, where Create's `positionRider`
+  puts them. Shift gets them off where its `getDismountLocationForPassenger` says, and they are
+  let off when the seat goes.
+  - Checked against 1.21.1 (NeoForge 21.1.256):
+    - `Entity.startRiding(vehicle, force)` is false for the vehicle they ride already. Unless
+      forced, they get on only when `canRide` (not sneaking, `boardingCooldown` run out) and
+      `vehicle.canAddPassenger` (vanilla's: nobody rides it yet). One who rides something gets
+      off it first. NeoForge asks `EntityMountEvent` before.
+    - `addPassenger` puts the rider last, except that on a server a player goes first when the
+      first isn't one. `removePassenger` sets the rider's `boardingCooldown` to 60.
+    - `ServerPlayer.startRiding` places the player at once (`positionRider`) and teleports their
+      client there.
+    - Each tick, `ServerLevel.tickPassenger` lets off a rider whose vehicle is gone or another.
+      Else `Player.rideTick` gets one who sneaks off (on a server), and the vehicle places the
+      rest (`positionRider(p, Entity::setPos)`).
+    - Vanilla's `positionRider` puts the rider's feet at `getPassengerRidingPosition(p)` (where
+      the vehicle stands, plus its passenger attachment: its height, straight up) less
+      `p.getVehicleAttachmentPoint(vehicle)` (a player's `(0, 0.6, 0)`).
+    - `LivingEntity.dismountVehicle` lets them off where `getDismountLocationForPassenger` says
+      (vanilla's: on top of the vehicle's box). Off a removed vehicle, they stay where they are,
+      but no lower than its feet.
+    - `Entity.setRemoved` lets its riders off.
+  - Create 6.0.10's use:
+    - `SeatBlock.useItemOn`:
+      - a sneaking or fake player passes, and a dye recolours the seat;
+      - a seat a player sits on passes;
+      - a seat a mob sits on is emptied (`ejectPassengers`), and the player gets on;
+      - else `sitDown(level, pos, getLeashed(level, player).or(player))`: a mob the player
+        leads, else the player. `getLeashed` answers Guava's `Optional` (`of`, `absent`, `or`).
+    - `sitDown` makes a `SeatEntity` (0.25 × 0.35, its box centred on its place) in the seat's
+      middle and calls `startRiding(seat, true)`.
+    - `SeatEntity.positionRider` puts a player 0.1875 below its place (`1/16` + riding position
+      − attachment). `getDismountLocationForPassenger` is vanilla's plus 0.5 up. Its server tick
+      discards a seat entity nobody rides, or whose block is no longer a seat.
+  - The game's natives (`native_ride.rs`, fragment `mod_riding`):
+    - `native_player_vehicle(uuid)` is what a server's player rides, and
+      `native_player_wants_off(uuid)` whether they sneak.
+    - `native_ride_player(uuid, ride)`:
+      - `NativeRide::Board { vehicle, at }` seats them on a mod's entity;
+      - `Sit(at)` keeps them in the seat;
+      - `Leave { to }` lets them off there;
+      - `Dismount` lets them off a vehicle of the game's.
+    - `native_client_player_vehicle()` is what the window's own player rides.
+    - The game's tracker doesn't hold the mods' entities. The level's players hear who rides one
+      from `lan_mod_passengers` (`ClientboundSetPassengersPacket`), at the end of the tick, after
+      the mods' messages that bring the entity. The game's vehicle tick leaves a guest on a mod's
+      entity alone.
+    - Client hooks:
+      - `client_mod_passengers(vehicle, riders)` hears every passengers packet;
+      - `client_mod_seat(vehicle, rider, seat)` asks each tick where a mod's entity seats a rider
+        the client draws. The window's own player (`remote_ride`) and others
+        (`position_riders`) are placed there and drawn sitting.
+  - Compat (`riding.rs`):
+    - A mod's entity keeps its passengers. These calls answer from them, the mod's overrides
+      first: `getPassengers`, `isVehicle`, `hasPassenger`, `getFirstPassenger`, `addPassenger`,
+      `removePassenger`, `ejectPassengers`, `canAddPassenger`, `positionRider`,
+      `getPassengerAttachmentPoint` and `getDismountLocationForPassenger`.
+    - A server's player's riding calls reach the game through the hosts (`player_vehicle`,
+      `player_wants_off`, `ride_player`): `startRiding`, `stopRiding`, `removeVehicle`,
+      `isPassenger`, `getVehicle` and `getRootVehicle`. Inside a hit, the change waits until the
+      hit is over.
+    - After each tick of a mod's entity, its riders are placed or let off (`tick_riders`). A
+      removed one lets them off (`eject_removed`).
+    - A client's copy of the entity seats the riders its client draws (`client_passengers`,
+      `client_seat`).
+    - Guava's `Optional` (`jutil.rs`) refuses null where Guava does. It answers:
+      - `absent`, `of`, `fromNullable`, `fromJavaUtil` and `toJavaUtil`;
+      - `or` (a value, an `Optional` or a `Supplier`), `orNull`, `get`, `isPresent`,
+        `transform`, `asSet` and `presentInstances`;
+      - `equals`, `hashCode` and `toString`.
+  - Fixed on the way:
+    - The pack measurement's probe builds a few receivers of each API class a mod calls, in the
+      order of the calls' names. A mod's calls that return an `Entity` (`ServerLevel.getEntity`,
+      `getVehicle`...) could fill `Entity`'s share before its constructor. The probe then never
+      ran a mod entity's inherited calls on an entity its constructor built, and counted them
+      missing (`setPosRaw`, `refreshDimensions`, `getRemovalReason`, `baseTick`...).
+      Constructors now come first (`made_receivers`).
+    - That fix alone, on Part 123's code (packcov37): 11 calls answered, none newly missing.
+      Methods 108948 (was 108900), uses 341262 (was 341147), distinct missing 9186 (was 9197);
+      Create 3288 (was 3281), uses 24380 (was 24372).
+    - In the game, the player first didn't sit: `getLeashed(...).or(player)` gave nothing, as
+      Guava's `Optional` wasn't modelled.
+    - The passengers packet first went out before the seat's spawn. It now goes after the mods'
+      messages.
+    - Moving from one seat to the next in one use unseated the player. Leaving the first marked
+      a teleport, which takes a rider off. `Leave` no longer marks one.
+  - Where Horizon differs, and why:
+    - Only a server's players ride a mod's entity. The game's mobs don't (Create seats a mob the
+      player leads), and nor do the mods' own entities.
+    - No `EntityMountEvent` for a mod's entity.
+    - Boarding sends no teleport. The rider's client seats them itself once it hears the
+      passengers packet.
+    - Every player in the level hears who rides a mod's entity, not only those tracking it.
+    - A player who logs out on a seat comes back standing: their vehicle isn't saved with them
+      (`RootVehicle`).
+    - Another player's view of a rider is covered by a test, not seen in the game: only one
+      window runs at a time here.
+  - Measured (packcov38, the same 367 jars):
+    - Methods 109059/130226 (83.7%, was 108948); uses 341413/372747 (91.6%, was 341262);
+      distinct missing 9151 (was 9186).
+    - Create 3297/3972 (83.0%, was 3288), uses 24396/25241 (96.7%, was 24380).
+    - 35 riding calls missing before are answered, and none is newly missing. Among them:
+      - `Player.startRiding` (12 mods), `Entity.startRiding` (9 and 7, the forced one);
+      - `ServerPlayer.stopRiding` (11), `Entity.stopRiding` (9), `LivingEntity.stopRiding` (7);
+      - `Entity.getVehicleAttachmentPoint` (7), `Entity.getDismountLocationForPassenger` (7).
+    - Left about riding: `onPassengerTurned` (3 mods), `ClientboundSetPassengersPacket`'s own
+      (2 to 3), `getIndirectPassengers` and `hasIndirectPassenger` (2 each), and the game's
+      vehicles' and mobs' riding calls (`Boat`, `AbstractMinecart`, `Zombie`...).
+    - The measurement counts only calls to the game's API (`net/minecraft/`, `net/neoforged/`,
+      `com/mojang/`). The libraries a mod calls aren't measured, which is why Guava's
+      `Optional` showed up only in the game.
+  - Tests 681 (6 new):
+    - A server's player on a mod's entity, as vanilla has them:
+      - seated at the top of its box less 0.6, and kept there each tick;
+      - let off on top of its box once they sneak;
+      - then kept off for the 60 ticks of their boarding cooldown, and while they sneak, unless
+        forced.
+    - A mod's own `positionRider` and dismount location (Create's) place its rider, and
+      `stopRiding` lets them off there.
+    - A mod's entity takes one passenger unless forced. One removed lets its riders off, the
+      last on first, no lower than its feet.
+    - A rider the game has put on something else is off the mod's entity at its next tick.
+    - A client's copy seats its own player where the server seats them, also when it heard of
+      the rider before the entity came. The passengers the server sends replace its own.
+    - Guava's `Optional`:
+      - `absent().or(player)` is the player, and `of(mob).or(player)` the mob;
+      - `or(null)` and `of(null)` throw `NullPointerException`, and `get` on an absent one
+        `IllegalStateException`, with Guava's messages;
+      - `or(Optional)`, `or(Supplier)`, `transform`, to and from `java.util.Optional`;
+      - equal by value, with Guava's hashes and texts, and `presentInstances`.
+  - In the game (`p124scene.sh` and `p124pics.sh`, Create, offscreen at 1280 × 720): a red seat
+    and a blue one beside it on a stone floor, the player's hand empty.
+    - Using the red seat at (−23, 69, 2) seats them at (−22.5, 68.8125, 2.5): the seat's middle,
+      0.1875 below its bottom. The server reads `68.81249999403954`: Java's float arithmetic
+      (`0.35f`, `1/16f`) comes through.
+    - First person, the eyes are lower. From the front, the player sits with their legs forward.
+    - Sneaking lets them off at 69.675, and they land on top of the seat (69.5). The client and
+      the server agree.
+    - Using the seat again within the boarding cooldown seats them on a new seat entity
+      (forced).
+    - Using the blue seat moves them onto it.
+    - Removing the blue seat under them lets them off at the seat's feet (69.0), on the floor.
+    - Nothing threw, and nothing about riding was unmapped.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

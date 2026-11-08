@@ -1,0 +1,21 @@
+{
+  "hooks": [
+    {
+      "name": "client_mod_passengers",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_mod_passengers",
+      "side": "client",
+      "cancellable": false
+    },
+    {
+      "name": "client_mod_seat",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_client_mod_seat",
+      "side": "client",
+      "cancellable": false
+    }
+  ],
+  "rust_summary": "a server's players riding a mod's entities (`native_player_vehicle`, `native_player_wants_off`, `native_ride_player`, `native_client_player_vehicle`), and the client's hooks that seat its riders (`native_client_mod_passengers`, `native_client_mod_seat`).",
+  "doc_summary": "a server's players on the entities a mod makes, as Create's seats carry them. `native_player_vehicle(uuid)` is what the player rides as the server holds them (`Entity.getVehicle`), a vehicle of the game's or a mod's entity; `native_player_wants_off(uuid)` whether they sneak, which gets a rider off (`Player.wantsToStopRiding`). `native_ride_player(uuid, ride)` puts them on, in or off one: `NativeRide::Board { vehicle, at }` seats them on the mod's entity `vehicle` with their feet at `at` (`startRiding`; the players in the level are told who rides it at the end of the tick, `ClientboundSetPassengersPacket`, as the game's tracker doesn't hold the mod's entities), `Sit(at)` keeps a rider in the seat each tick (`positionRider`), `Leave { to }` lets them off it, their client teleported to `to` (`ServerPlayer.dismountTo`), and `Dismount` lets them off a vehicle of the game's, where the game lets its riders off. `native_client_player_vehicle()` is what the window's own player rides as their client was told. On the client, `native_client_mod_passengers(vehicle, riders)` hears every passengers packet, and `native_client_mod_seat(vehicle, rider, seat)` asks, each tick, where a mod's entity seats a rider the client draws on it (the window's own player, a mob, another player), which the server sends no position for: the rider's feet, left None for a vehicle that isn't a mod's entity. Bundles that use the hooks need \"hooks\": @API:mod_riding@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_ride.rs"
+  ]
+}

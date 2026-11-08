@@ -82,7 +82,13 @@ fn set_live(rt: &mut Rt, items: Vec<V>) {
     }
 }
 
-fn virtual_call(rt: &mut Rt, e: V, owner_key: &'static str, key: &'static str, args: &[V]) -> Option<V> {
+pub(crate) fn virtual_call(
+    rt: &mut Rt,
+    e: V,
+    owner_key: &'static str,
+    key: &'static str,
+    args: &[V],
+) -> Option<V> {
     let class = rt.class_of(e);
     if !rt.overrides.is_some_and(|o| o(class, key)) {
         return None;
@@ -184,7 +190,7 @@ fn pose_name(rt: &Rt, pose: V) -> String {
 
 /// A mod entity's width, height and eye height now: `getDimensions(getPose())`, as vanilla's
 /// `refreshDimensions` keeps them (a mod's own overrides answer).
-fn own_size(rt: &mut Rt, e: V) -> [f32; 3] {
+pub(crate) fn own_size(rt: &mut Rt, e: V) -> [f32; 3] {
     let pose = api::virtual_call(rt, (GET_POSE_KEY, GET_POSE), &[e]);
     let d = api::virtual_call(rt, (GET_DIMENSIONS_KEY, GET_DIMENSIONS), &[e, pose]);
     if d.r() == 0 {
@@ -499,6 +505,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (name == "isSuppressingBounce" && owner.starts_with("net/minecraft/"))
         || (owner == MOB_CATEGORY && matches!(name, "getName" | "getSerializedName" | "getMaxInstancesPerChunk" | "isFriendly" | "isPersistent" | "getDespawnDistance" | "getNoDespawnDistance"))
         || crate::projectiles::is_projectile_class(owner)
+        || (owner == crate::riding::MOVE_FUNCTION && name == "accept")
 }
 
 /// The level's entity of UUID `uuid` (`ServerLevel.getEntity(UUID)`, `Level.getPlayerByUUID`): a
@@ -887,6 +894,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             construct(rt, a(0), a(1), a(2));
             Some(V::Void)
         }
+        // The seat a rider's place is read through (`Entity.MoveFunction`).
+        (crate::riding::MOVE_FUNCTION, "accept") => crate::riding::seat_call(rt, name, args),
         // A mod's projectile's calls name its vanilla class (`ThrowableItemProjectile.setPos`).
         (o, _) if (o == ENTITY || crate::projectiles::is_projectile_class(o)) && is_mod_entity(rt, a(0)) => entity_call(rt, name, desc, args),
         _ => None,
@@ -903,6 +912,10 @@ fn description_id(rt: &Rt, ty: V) -> String {
 fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let e = a(0);
+    // Its passengers (`crate::riding`).
+    if let Some(v) = crate::riding::vehicle_call(rt, name, desc, args) {
+        return Some(v);
+    }
     Some(match name {
         "getX" if desc == "()D" => rt.get_field(e, "$x"),
         "getY" if desc == "()D" => rt.get_field(e, "$y"),
@@ -1056,9 +1069,13 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             if rt.get_field(e, "removalReason").r() == 0 {
                 rt.put_field(e, "removalReason", a(1));
             }
+            // `Entity.setRemoved`: its riders get off.
+            crate::riding::eject_removed(rt, e);
             V::Void
         }
-        "onRemovedFromLevel" | "onClientRemoval" | "ejectPassengers" | "onAddedToLevel" | "refreshDimensions" => V::Void,
+        "onRemovedFromLevel" | "onClientRemoval" | "onAddedToLevel" | "refreshDimensions" => {
+            V::Void
+        }
         // `Entity.tick`: the base tick (virtual: a class's own `baseTick` first).
         "tick" => {
             if virtual_call(rt, e, BASE_TICK_KEY, BASE_TICK, &[]).is_none() {
@@ -1150,9 +1167,9 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "isInWater" => V::I(rt.get_field(e, "$inWater").i()),
         "isInLava" => V::I(i32::from(rt.get_field(e, "$inLava").i() != 0 && rt.get_field(e, "$ticked").i() != 0)),
         "getRandom" => rt.get_field(e, "random"),
-        "getPassengers" => crate::jutil::new_list(rt, Vec::new()),
-        "hasPassenger" | "isPassenger" | "isVehicle" | "isSpectator" | "isAlwaysTicking" | "isInvisible" | "isSilent" | "noCulling" => V::I(0),
-        "getVehicle" | "getControllingPassenger" | "getFirstPassenger" | "getRootVehicle" if desc.ends_with("Lnet/minecraft/world/entity/Entity;") && name != "getRootVehicle" => V::NULL,
+        // A mod's entity rides nothing here.
+        "isPassenger" | "isSpectator" | "isAlwaysTicking" | "isInvisible" | "isSilent" | "noCulling" => V::I(0),
+        "getVehicle" | "getControllingPassenger" if desc.ends_with("Lnet/minecraft/world/entity/Entity;") => V::NULL,
         "getRootVehicle" => e,
         "shouldRender" | "shouldRenderAtSqrDistance" | "isPickable" | "isAttackable" => V::I((name != "isPickable" && name != "isAttackable") as i32),
         "getName" | "getDisplayName" => {
@@ -1308,6 +1325,10 @@ fn remove(rt: &mut Rt, e: V, reason: V) {
         rt.put_field(e, "removalReason", reason);
     }
     rt.report_thrown("remove");
+    // `Entity.setRemoved`: its riders get off.
+    if rt.get_field(e, "removalReason").r() != 0 {
+        crate::riding::eject_removed(rt, e);
+    }
 }
 
 /// `Entity.saveWithoutId`: where it is and how it moves, its id, then the subclass's own
@@ -1449,6 +1470,8 @@ pub fn tick_all(rt: &mut Rt, dimension: &str) {
             on_base(rt, e, TICK, &[]);
         }
         rt.report_thrown("Entity.tick");
+        // Then its riders (`tickPassenger`).
+        crate::riding::tick_riders(rt, e);
     }
     // A server's: those removed are sent their removal (`track` sends none to a removed entity's
     // players), then leave the list.
@@ -1843,6 +1866,11 @@ fn remaining(rt: &Rt, buf: V) -> usize {
 
 fn by_id(rt: &Rt, id: i32) -> Option<V> {
     live(rt).into_iter().find(|&e| rt.get_field(e, "$id").i() == id)
+}
+
+/// The level's mod entity of id `id` (one not yet removed), if any.
+pub(crate) fn live_by_id(rt: &Rt, id: i32) -> Option<V> {
+    by_id(rt, id).filter(|&e| rt.get_field(e, "removalReason").r() == 0)
 }
 
 /// A spawn message: the entity made from its type in the client's level, given the server's id,

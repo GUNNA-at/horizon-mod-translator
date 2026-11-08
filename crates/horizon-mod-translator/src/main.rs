@@ -346,28 +346,35 @@ fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
     })
 }
 
-/// The receivers the mod makes of each API class it calls: a constructor of the class it calls,
-/// and the API methods it calls that return the class, up to [`STATICS_PER_CLASS`] of each class.
+/// The receivers the mod makes of each API class it calls: the constructors of the class it calls
+/// (a mod's own entity is the object `Entity(EntityType, Level)` builds, the receiver of its
+/// `super.tick()`), then the API methods it calls that return the class, up to
+/// [`STATICS_PER_CLASS`] of each kind per class: the methods returning `Entity` (`getVehicle`,
+/// `ServerLevel.getEntity`...) no longer crowd the constructor out.
 fn made_receivers(calls: &std::collections::BTreeMap<horizon_mod_translator::class::Member, usize>) -> std::collections::BTreeMap<String, Vec<Receiver>> {
-    let mut by: std::collections::BTreeMap<String, Vec<Receiver>> = Default::default();
+    let mut built: std::collections::BTreeMap<String, Vec<Receiver>> = Default::default();
+    let mut returned: std::collections::BTreeMap<String, Vec<Receiver>> = Default::default();
     for m in calls.keys() {
         let key: &'static str = Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
         let n = horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + 1;
-        let (class, r) = if m.name == "<init>" {
-            (m.owner.as_str(), Receiver::New(key, n))
+        let (class, r, by) = if m.name == "<init>" {
+            (m.owner.as_str(), Receiver::New(key, n), &mut built)
         } else {
             let Some(ret) = m.desc.rsplit(')').next().and_then(|r| r.strip_prefix('L')).and_then(|r| r.strip_suffix(';')) else { continue };
             if !horizon_mod_translator::is_api(ret) {
                 continue;
             }
-            (ret, Receiver::Returned(key, n))
+            (ret, Receiver::Returned(key, n), &mut returned)
         };
         let list = by.entry(class.to_owned()).or_default();
         if list.len() < STATICS_PER_CLASS {
             list.push(r);
         }
     }
-    by
+    for (class, rs) in returned {
+        built.entry(class).or_default().extend(rs);
+    }
+    built
 }
 
 /// The static fields of API classes the mod's classes refer to, by their declared class: up to

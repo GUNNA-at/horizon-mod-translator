@@ -78,6 +78,7 @@ pub mod made_entities;
 pub mod mixin;
 pub mod mob_effects;
 pub mod mod_entities;
+pub mod riding;
 pub mod projectiles;
 pub mod models;
 pub mod entity_render;

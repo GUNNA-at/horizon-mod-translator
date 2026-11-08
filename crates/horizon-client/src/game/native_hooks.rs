@@ -1277,6 +1277,27 @@ impl Game<'_> {
     pub(super) fn native_client_level_unload(&mut self, dimension: &str) {
         let _ = dimension;
     }
+    /// The client heard who rides `vehicle` (`ClientboundSetPassengersPacket`),
+    /// `riders` by entity id, the window's own player's among them: a mod's
+    /// entity's copy takes them as its passengers. Every such packet, before
+    /// the game seats its own player. Client-side. API @API:mod_riding@.
+    pub(super) fn native_client_mod_passengers(&mut self, vehicle: i32, riders: &[i32]) {
+        let _ = (vehicle, riders);
+    }
+    /// Where the client's copy of a mod's entity `vehicle` seats `rider`
+    /// (`Entity.rideTick`: the vehicle's `positionRider`), the rider's feet,
+    /// in `seat`; left None for a vehicle that isn't a mod's entity the client
+    /// has. Each tick for the window's own player riding one, and for each
+    /// mob and player it draws on one, which the server sends no position for.
+    /// Client-side. API @API:mod_riding@.
+    pub(super) fn native_client_mod_seat(
+        &mut self,
+        vehicle: i32,
+        rider: i32,
+        seat: &mut Option<[f64; 3]>,
+    ) {
+        let _ = (vehicle, rider, seat);
+    }
     /// Once a tick, in every `Game`: the window's (in single player, on LAN
     /// and on servers), and the server's own (`native_window` is false
     /// there: the single player server thread, a dedicated server).
