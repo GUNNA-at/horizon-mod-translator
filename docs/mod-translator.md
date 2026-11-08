@@ -7343,6 +7343,50 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     game's entities and a player are their type's or pose's size; vanilla enums give their
     serialized names; a block item's placement state follows its block's rule; a direct set of
     values holds the holders its function gives), translator 22.
+- [x] 2026-11-08 Part 112: structure templates (`StructureTemplate`), their place settings and
+  processors, the server's templates by id.
+  - Templates: 1.21.1's `StructureTemplate` with NeoForge's additions, in a new module
+    (`structures.rs`). `fillFromWorld` keeps a box's blocks (but the block to leave out) by position
+    from its corner, with their block entities' data (`saveWithId`), ordered as vanilla orders them
+    (plain full blocks, then the other blocks, then those with data, each by y, x, z), and the
+    entities in it but players. `save` writes vanilla's structure file (each block's palette id in
+    the order first met, the palette or palettes, the entities, the size, data version 3955);
+    `load` and the manager's `readStructure` read it back (a state the palette lacks is air).
+    `placeInWorld` places one palette (the settings' random picks it): each block turned about the
+    pivot and moved to the offset, run through the processors (`process`, a mod's own, then
+    `finalizeProcessing`), its state mirrored then turned (a mod block's own `mirror` and
+    `rotate`); a block with data clears its place for a barrier, then loads the data (a loot
+    container gets a new seed); water there waterlogs a waterloggable block (from a source beside
+    it when its own flows); unless the settings know the shape, the outer faces of what was placed
+    and each placed block take their neighbours' shapes; the entities are made from their data,
+    turned and added. Each level call is the level's own, so Create's schematic level takes the
+    blocks through its overrides. `filterBlocks`, `transform` (a position, a point),
+    `calculateRelativePosition`, `calculateConnectedPosition`, `transformedVec3d`,
+    `getZeroPositionWithTransform`, `getBoundingBox` and `getSize(rotation)` follow vanilla's
+    formulas; also `getAuthor`, `setAuthor`, and `Palette.blocks()` and `blocks(block)`.
+  - `StructurePlaceSettings`: vanilla's fields under vanilla's names (a mod's accessors read them),
+    its defaults, setters and getters, its processors (`addProcessor`, `popProcessor`,
+    `clearProcessors`), `copy`, `getRandom(pos)` (the source set, else one seeded from the
+    position) and `getRandomPalette`. `StructureProcessor`'s defaults: `process` asks
+    `processBlock`, which keeps the block; `finalizeProcessing` and `processEntity` keep what they
+    are given. `Entity.rotate` and `mirror`: the yaw a template turns an entity to.
+  - The server's templates (`MinecraftServer.getStructureManager`, and `ServerLevel`'s):
+    `getOrCreate` keeps a new template under its id, `get` gives the one kept, `readStructure(tag)`
+    loads one.
+  - Not yet: loading a template file that a mod or data pack ships (`structure/*.nbt`, gzipped)
+    waits for NbtIo's compressed files. Filling and placing entities call `Entity.save` and
+    `EntityType.create(tag, level)`, which are still missing. The static
+    `updateShapeAtEdge(level, flags, shape, x, y, z)` takes a `DiscreteVoxelShape`, which the
+    runtime has no model of. Jigsaw pools and structure pieces (world generation) are not here.
+  - Measured (packcov25, the same 367 jars): methods 82.7% (from 82.6%: 148 more mapped), uses
+    91.0% (from 90.9%), distinct missing API methods 9469 (from 9514); Create 80.9% of its methods
+    (from 80.5%), 96.2% of its uses (from 96.0%). Of the 65 structure-template keys missing before,
+    one is left (`updateShapeAtEdge` above).
+  - Tests: compat 632 (3 new: a template filled from the world saves as vanilla's file, loads back
+    and places a quarter turn clockwise elsewhere, each block where vanilla's formula puts it and
+    its state turned; vanilla's transforms worked by hand (positions, a point, a turned box's
+    corner, its box and size); a mod's processor changes what a template places, the settings
+    copy what they hold, and the server keeps a template by id), translator 22.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

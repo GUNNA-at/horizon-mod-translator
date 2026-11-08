@@ -101,6 +101,7 @@ pub mod rotation;
 pub mod scan;
 pub mod screens;
 pub mod shapes;
+pub mod structures;
 pub mod sounds;
 pub mod tags;
 pub mod tanks;
