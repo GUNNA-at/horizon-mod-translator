@@ -28,7 +28,7 @@ mod.jar ──► class parser ──► IR (stack → SSA-ish locals) ──►
 
 ## Progress (update after every step; commit on branch `mod-translator`)
 
-- [x] `install` command: jar/folder/pack → `horizon-mods/` (commit f1dbd01). Tested on Macaw's Fences
+- [x] `install` command: jar/folder/pack → `horizon-mods/` (commit 40c07a2). Tested on Macaw's Fences
       (150 blocks, 222 recipes) and Create (content refused: code). Not yet checked in game: needs
       `versions/26.3/26.3.jar` in the Minecraft folder (play 26.3 once) to run `horizon-prepare`.
 - [x] Class parser + API coverage report (`cargo run -p horizon-mod-translator -- coverage <jar>`).
@@ -184,14 +184,14 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   when the level is first used. Hook test covers a static subscriber and a registered object.
 - [x] Block entities: `BlockEntityType.create` (the factory), the Java fields (`level`, `worldPosition`,
   `blockState`), the glue puts each in the level with its current state; `ModConfigSpec` values are their defaults.
-- [x] Reflection (commit f3eec22): a generated `reflect(rt, class, what, args)` table initialises classes
+- [x] Reflection (commit efec369): a generated `reflect(rt, class, what, args)` table initialises classes
   (`Class.forName`), runs no-argument constructors (`newInstance`, `getConstructor().newInstance()`, Flywheel's
   `DependencyInjection`), returns enum constants (`getEnumConstants`, Create's `readEnum`) and lists
   `META-INF/services` providers of the jar and its jarjar (`ServiceLoader`, catnip's platform helpers).
   `Class.forName` of a class neither the mod's nor the platform's throws `ClassNotFoundException` (optional
   dependencies). `Object.hashCode/equals` are Object's own (identity), so `super.hashCode()` in an override no
   longer recurses; `Rt::call_functional` dispatches mod objects by `name.desc`. Differential: 78 results.
-- [x] Dispatch by class id (commit 59f833f): objects carry their mod class's id (`Object::cid`, generated
+- [x] Dispatch by class id (commit 69d952f): objects carry their mod class's id (`Object::cid`, generated
   `CLASS_IDS`); each instance method some mod class implements gets a dispatcher `d_<name>_<hash>(rt, cid,
   owner_key, args)` that jumps on the id (runs of ids as ranges), plus `o_...(cid)` (overrides). Lambdas carry
   `LAMBDA | id` and `lambda_call` matches on the id. `instanceof` answers are cached by name addresses.
@@ -207,7 +207,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   every shaft Speed 16.0 with a Network id (Create's own RotationPropagator, KineticNetwork, stress values). 40
   ticks of the 4 block entities take 7.8 ms (class-id dispatch; 30 ms before), ~13 objects allocated per block
   entity tick. Engine compile 5 min (9 before). Load (all registrations) 0.2 s.
-- [x] Garbage collector (commit 9774764, `horizon-compat-core/src/gc.rs`): mark and sweep from the runtime's roots
+- [x] Garbage collector (commit d02b30b, `horizon-compat-core/src/gc.rs`): mark and sweep from the runtime's roots
   (statics, registries, interned values, strings, block entities, listeners, suppliers, `Rt::pinned`), freed slots
   reused. It runs at a hook's outermost entry (`Rt::safe_point`, no translated frame live) once the live count passes
   `collect_at`. Stress check in the harness (`GC_STRESS=1`: a collection at every hook entry): after load 33,641 of
@@ -230,7 +230,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   (`native_block_entity_update_tag`, `blockChanged` → `native_block_entity_sync`), the client tick
   (`ClientTickEvent`, catnip's `AnimationTickHolder`), and drawing through `native_block_entity_submit`
   (PoseStack, JOML, catnip's buffers as natives: one draw call per buffer, no per-vertex translated code).
-  - [x] Runtime side (commit 18dff8f): setup events (common, client, `RegisterRenderers`), `enqueueWork` and
+  - [x] Runtime side (commit f12b0d9): setup events (common, client, `RegisterRenderers`), `enqueueWork` and
     `CompletableFuture`, PoseStack/JOML/Axis natives (`horizon-compat/src/render.rs`), catnip's
     `SuperByteBuffer` as intrinsics drawn through `Host::draw_model` (one call per buffer), and the glue:
     `glue::render_block_entity`, `glue::block_entity_update_tag`, `glue::client_tick`, client `level`.
@@ -244,7 +244,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `CreateClient`'s constructor); catnip's real buffer is `ShadeSeparatingSuperByteBuffer` (the legacy
     `DefaultSuperByteBuffer.rotate` returns null); `Quaternionf.setAngleAxis`, `Direction.toYRot`,
     Flywheel's `TransformStack.of` (a mixin method on `PoseStack`), `Collections.binarySearch`.
-  - [x] Bundle hooks (`bundle.rs`, commit 4393432): `block_entity_submit` (Host: `partial_tick`, `draw_model`:
+  - [x] Bundle hooks (`bundle.rs`, commit 6d96fea): `block_entity_submit` (Host: `partial_tick`, `draw_model`:
     push, multiply the pose, draw, pop; light from `LightTexture.pack` to Horizon's `sky16 | block16 << 8`),
     `block_entity_update_tag` (live tag, else the saved nbt), `tick` (client tick when `native_window()`),
     and `block_changed` → `native_block_entity_sync` in the server hosts.
@@ -285,13 +285,13 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Harness (`scratchpad/harness`): 531 blocks registered; motor + 3 shafts at 16 RPM with a
     network; 0 unmapped calls while ticking; the client's 4 parts turn between frames; the shape
     probe runs on its own runtime (it makes that runtime a client).
-  - [x] Every block and item from the mod's own registration (commits 83dfd35, bd499b9; harness
+  - [x] Every block and item from the mod's own registration (commits 744380d, 2384b40; harness
     `DECLARE=<content dir>`): `blocks.rs` records `BlockBehaviour.Properties` / `Item.Properties` calls and
     each block's state definition, and the bundle's `native_content` hook declares them
     (`Content::declare_block/declare_item`). Create: 465 blocks (186 from files alone) and 107 items, none
     refused, with Create's hardness, sounds, map colours, stack sizes, states and defaults. Registrate
     composes property callbacks with `NonNullFunction.andThen`, whose body is a private interface lambda:
-    private methods are now called directly however they are reached (commit 16e6333).
+    private methods are now called directly however they are reached (commit fdd5124).
   - [x] Shapes (`shapes.rs`): `VoxelShape`/`Shapes`/`Block.box`/joins/`AABB`/`CollisionContext`; each block
     with its own `getShape` is asked for every state's outline (empty context, origin, no level) and
     declares it (content `shapes`: one list, by one property, or by state against a default; up to 64
@@ -866,7 +866,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `toIntArray`/`toLongArray`..., and fastutil's `add(int)` on a primitive list, which was taken
     for `add(index, element)` and kept a null (any `IntArrayList` a mod filled was empty values).
   - [x] 2026-11-04 **In game: a mechanical bearing turns its contraption** (`scratchpad/bearinggame.sh`,
-    build of 785a983): a creative motor under a bearing under an oak stair; the server assembles the
+    build of 70c4c11): a creative motor under a bearing under an oak stair; the server assembles the
     stair (the block above reads air, the bearing `Running: 1b`, angle 62.4° at tick 10), the client
     gets the entity and Create's `ContraptionEntityRenderer` draws the stair turning on the bearing's
     rotating top (screenshots t10/t20/t30 show the step on the left, side-on, then on the right).
@@ -1041,7 +1041,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     before. Gaps: payloads a client sends (`ConfigureWorldshaperPacket`...) run without the
     sender's hand; vanilla's own components (damage, a name) aren't read from the game's stack;
     the off hand is empty to mods; stacks given to the player lose their components. In game
-    (build of 129aba2, `beltgame.sh`): the connector's first click on a shaft keeps
+    (build of c560c04, `beltgame.sh`): the connector's first click on a shaft keeps
     `create:belt_first_shaft` = `[I; 98, 184, -23]` on the game's stack (`data get entity @s
     Inventory`); the second click stopped the server thread (the runtime entered twice, see
     "Interaction events" below).
@@ -1075,7 +1075,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     component and wears the paper to 1; a paper at 7 breaks (the hand empties). No unmapped calls.
     `COMPONENTS`, `HOLD`, `USE` print the same as before. Gaps: a mod item's hooks run from the
     main hand only (an item used from the off hand is the game's); a mod's `Consumer` passed to
-    `hurtAndBreak` isn't called on a break. In game (build of 129aba2, `sandgame.sh`): a survival
+    `hurtAndBreak` isn't called on a break. In game (build of c560c04, `sandgame.sh`): a survival
     player with the sandpaper and rose quartz in the off hand polishes one (2 left in the off hand),
     the paper wears to 1, and a worn paper breaks.
   - [x] 2026-11-04 A mod item's hooks from either hand. The game asks its hooks once per hand, as
@@ -1120,8 +1120,8 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `regress.sh` set prints the same (hash order aside). Gaps: `LeftClickBlock`, `EntityInteract`
     and the client's own posting (Create's client listeners: its value boxes, the wrench's
     preview) aren't posted yet; listeners' priorities aren't kept (the order they were added).
-  - [x] 2026-11-04 Checked in game (build of 4ec8610; the game build of 184baf2 had stopped at the
-    generated placement hook, whose `Placement` lacked the new `hand`: 4ec8610 gives it the main
+  - [x] 2026-11-04 Checked in game (build of 2fd8a2f; the game build of 5465eef had stopped at the
+    generated placement hook, whose `Placement` lacked the new `hand`: 2fd8a2f gives it the main
     hand's). `casegame.sh` (new): a survival player's andesite alloy on a stripped oak log makes
     andesite casing (alloy 3 → 2); on stone nothing happens (2 stay); an empty hand on a stripped
     birch log leaves it. `sandgame.sh` round 3 (new): the paper in the off hand, 3 rose quartz in
@@ -1139,7 +1139,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     block. Harness `COMPONENTS=1` with `TICKED=1` (new: the shafts' block entities tick before the
     clicks, and the belt's three times after, each with its saved compound, as the game does):
     before the fix the ticks leave air, middle, middle, middle, air (the game's result); after it
-    start, middle × 3, end, each with `Length` 5. In game (build of 68d5473, `scratchpad/beltgame.sh`):
+    start, middle × 3, end, each with `Length` 5. In game (build of f787ace, `scratchpad/beltgame.sh`):
     the two clicks leave `create:belt` start, middle × 3, end between the shafts, the hand 5 → 4;
     a creative motor on the first pulley, and an iron ingot summoned over it is taken off the
     ground into the belt (`BeltBlock.entityInside`: no item entity left, as in Java) and drawn
@@ -1648,7 +1648,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - 2026-11-04 Load order, and the rest of what loading missed (Create + 10 addons, harness).
     A lambda is an instance of its functional interface, so its default methods run (`Function`'s
     `andThen` on a method reference...): `Function.apply` (23) and Registrate's `asProvider` (5)
-    went. Mapped (cd88f31): java.nio's `Path`, `Paths`, `Files` and java.io's `File` over the game
+    went. Mapped (f2f5354): java.nio's `Path`, `Paths`, `Files` and java.io's `File` over the game
     folder, FML's `FMLPaths` (`GAMEDIR`, `MODSDIR`, `CONFIGDIR`, `FMLCONFIG`, folders made as FML
     makes them), Java's `IOException` family; NeoForge's data attachments (`AttachmentType`
     builders, a holder's `getData`/`setData`/`hasData`/`removeData`; the default made once per
@@ -1657,7 +1657,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     methods, `ItemAbilities`; codecs of components, tag and resource keys and vanilla enums, `and`
     on record products; stream codecs from codecs. An unknown vanilla `CODEC` is a counted miss
     with a codec that fails when used, instead of null. Misses at load 134 → 27 (25 kinds).
-    The rest (f168990):
+    The rest (162244d):
     - FML constructs each `@Mod` class first; a class holding registers initialises when the
       constructor reaches it (or after, if none does). `start` used to initialise every such class
       before the constructors, so Create's `AllArmorMaterials` read its sound entries before
@@ -1683,7 +1683,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Build note: the engine's rustc peaks at ~6.6 GB and macOS
     swap (on the disk) grows ~5 GB, so the watchdog killed one build at < 4 GB free: keep 15 GB.
   - 2026-11-04 The pack's 28 mods again (`scratchpad/lt`, round 5, on a snapshot of the runtime
-    at f168990): all 28 load to the end; distinct misses 350 → 239, kinds summed per mod 757 →
+    at 162244d): all 28 load to the end; distinct misses 350 → 239, kinds summed per mod 757 →
     454. Calls went up (10K → 158K) because FramedBlocks now gets as far as its state cache, run
     once per block state: vanilla's `Tuple` (48K `getA`/`getB`) and `framedblocks$initCache`, a
     method FramedBlocks' mixin adds to vanilla's `BlockStateBase` (38K). By breadth (mods hitting
@@ -1744,7 +1744,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       28 mods) is the group of an optional `conditions` list (empty by default), NeoForge's
       `LootModifier.codecStart` a required one. Loot conditions themselves aren't modelled: a list
       of them fails to read. Test `codecs::tests::a_loot_functions_shared_fields_read_as_vanillas`.
-  - [x] 2026-11-05 The pack's 28 mods, round 6 (snapshot at e88c88b): all 28 load to the end;
+  - [x] 2026-11-05 The pack's 28 mods, round 6 (snapshot at 13608a0): all 28 load to the end;
     distinct misses 239 → 207, kinds summed per mod 454 → 344, unmapped calls 158K → 44K
     (`Tuple`'s getters are a vanilla data class now). Widest: `MapCodec.forGetter` 8 and
     `Codec.fieldOf` 5 (each left by a miss before it: a mod's own `Codec` class,
@@ -1799,7 +1799,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       other blocks oak) and `sign.type()`; `BedBlock.getConnectedDirection(state)` (Comforts' 512).
     Tests `jutil::tests::streams_reduce_and_guavas_factories_make_their_collections`,
     `blocks::tests::signs_keep_their_wood_and_beds_find_their_other_half`.
-  - [x] 2026-11-05 The pack's 28 mods, round 7 (snapshot at 0c931d6, before the round-6 small
+  - [x] 2026-11-05 The pack's 28 mods, round 7 (snapshot at fe6d03d, before the round-6 small
     fixes): all 28 load to the end; distinct misses 207 → 190, kinds summed per mod 344 → 337,
     unmapped calls 43,758 → 5,740. FramedBlocks 38,202 → 61 (mixins into the game's classes).
     Mekanism's `capabilities`/`tickers` (154 each), `getName` (87), `getItemHolder`,
@@ -1860,7 +1860,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     trigger made by the mod itself (`new PlayerTrigger()`) is a plain object.
     Tests `ops::tests::a_mods_own_codec_reads_and_writes_through_the_combinators`,
     `nbt_ops_build_and_read_tags_as_minecrafts`.
-  - [x] 2026-11-05 Load round 8 (the 28 jars, snapshot `38040f6`): 28 load, exit 0. 180 distinct
+  - [x] 2026-11-05 Load round 8 (the 28 jars, snapshot `20a34a7`): 28 load, exit 0. 180 distinct
     misses (190), 312 kinds (337); calls 7,940 (5,740). The calls grew because reads of game
     fields now count: `Block.stateDefinition` read in mods' constructors (`this.stateDefinition
     .any()`: 2,731 in Macaw's furniture and roofs, Create Furnitures, Easy Villagers and others)
@@ -1925,7 +1925,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `Class.getClassLoader()` answers one loader object (`ServiceLoader.load` ignores it).
     Tests `api_common::tests::a_custom_hash_set_keeps_stacks_by_their_type`,
     `jutil::tests::tree_map_sorts_keys_and_sets_ignore_duplicates`.
-  - [x] 2026-11-05 Load round 9 (the 28 jars, snapshot `945def5`): 28 load, exit 0. 150 distinct
+  - [x] 2026-11-05 Load round 9 (the 28 jars, snapshot `82f2cab`): 28 load, exit 0. 150 distinct
     misses (180), 256 kinds (312), calls 6,967 (7,940). Mekanism registers 200 blocks, as many as
     its code declares; rounds 7 and 8 counted 201, one registration with no block behind it. Every
     block it registers has its blockstate file (`advanced_bounding_block`'s is a leftover no code
@@ -1979,7 +1979,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     crates depend on each other, `<package> = { path = "../<crate id>" }` (the stage puts each at
     `native-crates/<mod>/<crate id>`; the plan checks the id names another of the mod's crates, the
     name is its package's, and there is no cycle; scratchpad clone, branch `sibling-crates`,
-    eb84389, test `a_bundle_crate_depends_on_another_crate_of_its_mod`). A bundle
+    a053a55, test `a_bundle_crate_depends_on_another_crate_of_its_mod`). A bundle
     (`bundle::write_group`, as the port pack and the game's builds write it) is now `runtime/`
     (horizon-compat's sources as a crate), `code-<mod>-<n>/` (each mod's classes, a mod at a time,
     in crates of about 8 MB; `HORIZON_TRANSLATOR_CRATE_MB`; classes no member jar holds go to
@@ -2042,7 +2042,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `isUnbound` on that key as the game holds it (Create's tool menu on Left Alt). Tests
     `blocks::tests::a_vanilla_armour_material_answers_its_values`,
     `screens::tests::a_mods_own_key_mapping_answers_on_the_key_it_was_made_with`.
-  - [x] 2026-11-05 Load round 10 (the 28 jars, snapshot `bb82114`): 28 load, exit 0. Kinds summed
+  - [x] 2026-11-05 Load round 10 (the 28 jars, snapshot `ada554d`): 28 load, exit 0. Kinds summed
     per mod 256 → 238, distinct 237 → 227 (counted by key), calls 6,967 → 3,970: `MapColor.col`'s
     2,928, `ItemProperties.register` and the armour materials' reads are gone. Uncaught: FramedBlocks'
     `Invalid shape` (1) and Mekanism's `Current server is null` (2), as before. Widest now:
@@ -2206,7 +2206,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     world. Tests: `jlang::tests::a_mods_iterable_walks_its_own_iterator_for_for_each`, the saved
     stack test reads its patch, the player events test reads `ServerLevel.players`; 246 compat
     tests pass.
-  - [x] 2026-11-05 Load round 11 (05a5b75's runtime, the 28-jar set): all 28 done, blocks,
+  - [x] 2026-11-05 Load round 11 (31d0d53's runtime, the 28-jar set): all 28 done, blocks,
     items and declarations as round 10 (3651 / 2893 / 3647), kinds of unmapped call 238 to 225
     (StorageDrawers 11 to 4, immersive_aircraft 10 to 6; Jade now runs further, to 2). Vanilla
     kinds as templates: a mod block whose first vanilla class is a fence, fence gate, wall,
@@ -2249,7 +2249,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `tags::tests::a_name_uuid_is_javas`, `api_common::tests::{bounds_match_as_vanillas_records_do,
     dates_and_time_units_are_javas}`, `codegen::field_tests::an_inherited_constant_is_the_api_interfaces_the_chain_implements`;
     252 compat tests and 14 translator tests pass.
-  - [x] 2026-11-05 In game with 05a5b75 and 295bf8a (Create with the ten addons): kinds of
+  - [x] 2026-11-05 In game with 31d0d53 and 71128af (Create with the ten addons): kinds of
     unmapped call 32 to 28, none new; the rest are Flywheel probing OpenGL (its backend stays
     off), two `super.getShape` to vanilla kinds, `BlockState.getProperties` and the local
     player's look before the world. Enchantable machinery keeps its enchantments through
@@ -2272,7 +2272,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     an_enum_property_filters_a_vanilla_enums_constants,
     super_get_shape_to_a_vanilla_kind_follows_the_state}`,
     `neo::tests::the_current_server_is_there_once_the_world_is`; 256 compat tests pass.
-  - [x] 2026-11-05 Load round 12 (the 28 jars, snapshot `7afb7f7`): 28 load, exit 0; 3651 blocks
+  - [x] 2026-11-05 Load round 12 (the 28 jars, snapshot `e7de4d3`): 28 load, exit 0; 3651 blocks
     and 2893 items, as in round 11. Distinct unmapped calls 217 to 155: Farmer's Delight 23 to
     10, FramedBlocks 17 to 8, Mekanism 74 to 50, lootr 9 to 2, immersive_aircraft 6 to 1, Jade and
     geckolib to none. Three uncaught exceptions were left, each traced to its root and fixed here:
@@ -2299,7 +2299,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `api::tests::a_state_is_its_blocks_holder_and_a_level_its_own_side`,
     `render::tests::a_mods_own_render_type_is_one_by_its_name`, and the rail filter now through
     `RailShape.isAscending` itself; 259 compat tests pass.
-  - [x] 2026-11-05 Load round 13 (snapshot `8701863`), each load test now given the jar's own
+  - [x] 2026-11-05 Load round 13 (snapshot `6efc2d1`), each load test now given the jar's own
     `assets/` and `data/` (and its addons') and then vanilla 1.21.1's as `HORIZON_COMPAT_RESOURCES`,
     as the game's resource root gives them: 28 load, exit 0, and no uncaught exception in any of
     them (3 in round 12). FramedBlocks gets through its common setup now that its rail slopes are
@@ -2345,7 +2345,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `mob_griefing` off, `raids` off, fire spread 0, `random_tick_speed` 7),
     `menus::tests::optional_doubles_and_longs_hold_their_kind`, `Util.toMap` in
     `jutil::tests::streams_join_and_collect_to_maps_as_java_does`; 264 compat and 14 translator
-    tests pass. In game (the build of the step before, e41df47, `cemgame.sh`): 14 kinds of unmapped
+    tests pass. In game (the build of the step before, 70b9ca6, `cemgame.sh`): 14 kinds of unmapped
     calls, from 28; door, ladder and lever shapes, `BlockState.getProperties`, the local player's eye
     position and look angle and Flywheel's GL capability reads no longer show. Left: Flywheel's
     shader compiler (its GL backend, which Horizon's renderer replaces) and 3 `Object.get` on null.
@@ -2380,7 +2380,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `blocks::tests::a_tools_attributes_add_its_tiers_damage`,
     `creative::tests::a_tab_built_from_its_constructor_keeps_its_title`; 272 compat and 14
     translator tests pass.
-  - [x] 2026-11-05 Round 14 (snapshot 8aee561, the 28 mods): unmapped calls at load, counted per
+  - [x] 2026-11-05 Round 14 (snapshot f7d80df, the 28 mods): unmapped calls at load, counted per
     mod, 140 to 74; no uncaught exception, every mod's blocks and items as before (SecurityCraft
     1215/81, mcw-furniture 662/654, Mekanism 200/381). Then its misses of comforts, Mekanism,
     FarmersDelight and immersive_aircraft: Night Config in memory (`nightconfig.rs`: `Config.of`,
@@ -2416,7 +2416,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `new SizedIngredient(ingredient, count)`, `of(item or tag, count)`, `test` (as many of its items
     or more), `getItems` (stacks of that many), `equals`, `hashCode`, `toString`. Test
     `recipes::tests::a_sized_ingredient_wants_as_many_of_its_items`; 278 compat tests pass.
-  - [x] 2026-11-05 Round 15 (snapshot fdc19df): 79 calls unanswered across the 28 mods (74 in round
+  - [x] 2026-11-05 Round 15 (snapshot 4866eb6): 79 calls unanswered across the 28 mods (74 in round
     14). FarmersDelight 9 to 7, comforts 5 to 0, immersive_aircraft 1 to 0. Mekanism went from 35 to 48
     because its field reflection now works and its `SyncMapper` gets further: it now asks
     `Field.isAnnotationPresent` 2607 times and builds getters through `LambdaMetafactory` and
@@ -2461,7 +2461,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `invoke::tests::bound_and_constant_handles_answer_as_javas`, and
     `codegen::annotation_tests::reflection_sees_runtime_annotations_and_element_defaults`
     (javac-compiled: a `CLASS` annotation stays out). 285 compat and 15 translator tests pass.
-  - [x] 2026-11-05 Round 16 (snapshot c37ebab): 48 calls unanswered across the 28 mods (79 in round
+  - [x] 2026-11-05 Round 16 (snapshot 8e2081b): 48 calls unanswered across the 28 mods (79 in round
     15), no uncaught exceptions. SecurityCraft registers 671 items (81 in round 15): the block items
     its `@Reinforced` and `@RegisterItemBlock` fields name, and its one miss left is
     `EnumProxy.<init>` (NeoForge's enum extensions, which the translator doesn't apply yet). Mekanism
@@ -2484,7 +2484,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `recipes::tests::a_sized_fluid_ingredient_written_back_takes_the_same_stacks`, and
     `recipes::tests::a_sized_ingredient_wants_as_many_of_its_items` (now through `STREAM_CODEC` and
     back). 289 compat and 15 translator tests pass.
-  - [x] 2026-11-05 Round 17 (snapshot 71ef340): 42 calls unanswered across the 28 mods (48 in round
+  - [x] 2026-11-05 Round 17 (snapshot 7da12b5): 42 calls unanswered across the 28 mods (48 in round
     16), no uncaught exceptions. Mekanism went from 20 to 16, FramedBlocks from 5 to 3. What's left
     at load is mostly codecs of vanilla's data types (worldgen's `PlacedFeature.CODEC`,
     `Biome.LIST_CODEC`, `OreConfiguration$TargetBlockState.CODEC`; `MinMaxBounds$Doubles.CODEC`,
@@ -3816,7 +3816,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   pass.
 - [x] 2026-11-06 Part 17: round 12 in game; a mod's component types in item arguments; a mod block entity's
   components on its drops.
-  - Round 12 (commit `f0790e0`, hzcheck jar with the component checks) in game:
+  - Round 12 (commit `f75c1c1`, hzcheck jar with the component checks) in game:
     - `getEntitiesOfClass(LivingEntity, player box inflated)` now finds the player beside the mobs: "living near:
       minecraft:cow 448, minecraft:pig 449, minecraft:player 2".
     - Components: "max 250, the copy's damage 5, built 7, the map has damage true (5), its patch empty false, a
@@ -5432,7 +5432,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `api::tests::get_class_through_any_type_is_the_objects_class`.
   - Left: the composter's handler (`ForwardingItemHandler` over its `SidedInvWrapper`), entities'
     handlers (minecarts, `PlayerInvWrapper`), and `isBlockRegistered` for the vanilla providers.
-  - In game (the funnel round, `funnelgame.sh`, build of a53f72f): andesite funnels facing up on a
+  - In game (the funnel round, `funnelgame.sh`, build of 0153391): andesite funnels facing up on a
     chest, a furnace and a hopper (kept off by a redstone block, so it can't take the items itself)
     each took the stack dropped on them: the chest holds 5 iron ingots in slot 0, the furnace 3 raw
     iron in its input slot (through `SidedInvWrapper`'s top face), the hopper 7 dirt; no item
@@ -6812,7 +6812,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - compat: `codecs::probe_receiver` makes the codec ones, of the runtime's own codec objects.
   - Tests: compat 581 (1 new: the probe's codec receivers answer a field's `forGetter`, the
     instance's `group` and a group's `apply` as the codec building's own do), translator 20.
-  - Measured (packcov14, HEAD c66c8c3 with this, 367 jars, none failed): methods 104295/133194
+  - Measured (packcov14, HEAD 4fc656e with this, 367 jars, none failed): methods 104295/133194
     (78.3%; packcov13 76.7%), uses 334138/379207 (88.1%; 86.3%), distinct missing 11389 (11519);
     Create 3074/3995 (76.9%; 75.9%), uses 23982/25382 (94.5%; 92.8%). No jar misses the codec
     builders (`forGetter` 107 jars before, `Instance.group`, `Products.P2.apply`), `Slot.getItem`,
@@ -6889,7 +6889,7 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     reaching the game's or NeoForge's data providers through their superclasses or interfaces, the
     ones in a `datagen` package, and the classes nested in them (182 API methods only Create's data
     generator calls, 168 only AE2's).
-  - Measured (packcov15, HEAD 69615a5 with this, 367 jars, none failed): methods 103973/131670
+  - Measured (packcov15, HEAD fbfc87f with this, 367 jars, none failed): methods 103973/131670
     (79.0%; packcov14 78.3%), uses 332873/375372 (88.7%; 88.1%), distinct missing 11230 (11389);
     Create 3071/3972 (77.3%), uses 23918/25241 (94.8%). No jar misses `BlockState.cycle`,
     `StreamCodec.apply` or `Holder.value` (47, 43 and 47 mods before), and the loot builders of
