@@ -8445,6 +8445,218 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     - Using the blue seat moves them onto it.
     - Removing the blue seat under them lets them off at the seat's feet (69.0), on the floor.
     - Nothing threw, and nothing about riding was unmapped.
+- [x] 2026-11-08 Part 125: the libraries' calls, measured and answered. The pack measurement now
+  also counts each mod's calls into the libraries every mod is given (the JDK, Guava, Gson,
+  fastutil, JOML...), as it counts the API's. Its first count stopped on 29 mods, at
+  `Integer.parseInt(s, 0)`, and listed the JDK's commonest gaps. Those are answered now, checked
+  against JDK 21. The main ones are `Enum.valueOf` (208 mods), `Throwable.addSuppressed` (109),
+  `System.out` and `printStackTrace`, parsing and printing numbers, `Math`'s exact and floor
+  methods, list iterators, `Collections.shuffle` and more of the streams. On the way, the probe
+  stopped counting 138 API calls as answered that weren't.
+  - The measurement (`coverage` with `LIBS=1`, `lib.rs`):
+    - `LIBRARIES` and `library_of` map a package to its library. The libraries are the ones the
+      game's process gives every mod: the JDK, Guava, Gson, fastutil, JOML, Apache Commons,
+      Log4j and SLF4J, Netty, LWJGL, NightConfig, Mixin and MixinExtras, ASM, ICU4J and FML's
+      own. Kotlin isn't one, because Kotlin for Forge brings it as a mod.
+    - `library_calls` lists the library methods a jar's classes call, counted once per class.
+      It leaves out:
+      - a library class the jar carries itself, since that copy is the mod's own code;
+      - the bootstrap methods of `invokedynamic` sites (`LambdaMetafactory`,
+        `StringConcatFactory`), since nothing calls them;
+      - a functional interface's own method (`Runnable.run`, `Function.apply`, MixinExtras'
+        `Operation.call`), and the method of any library interface the jar's lambdas implement
+        (log4j's `TriConsumer.accept`). The mod's lambda or class answers those.
+    - The probe tries each library call the same way it tries the API's, on samples of the
+      libraries' types (`lib_sample`). For example, a `List` gets an `ArrayList`, an `IntStream`
+      gets `IntStream.range(0, 3)`, and an `Object`, `Comparable` or `CharSequence` gets a
+      string. It prints `libraries: mapped ...` and one `lib-missing` line per call it can't
+      answer.
+  - The probe's fixes, which apply to the API's calls too:
+    - A static call got one receiver slot too many, so a handler that checks its argument
+      count (`Arrays.equals`) didn't answer. `static_calls` now says which calls take no
+      receiver: `invokestatic`, and the static method handles behind method references
+      (`Integer::sum`, kind 6, `REF_invokeStatic`).
+    - An instance call was also tried with its arguments in the receiver's slot. A handler
+      could answer that for the wrong reason, so 138 API calls were counted as answered that
+      weren't. This attempt is gone.
+    - A primitive parameter now gets its kind's zero instead of null.
+  - Checked against JDK 21 (`Oracle.java`, `Oracle2.java` and `Oracle3.java`, run on the JDK at
+    hand):
+    - Parsing integers:
+      - A radix outside 2 to 36 throws `NumberFormatException` "radix 0 less than
+        Character.MIN_RADIX" (or "greater than Character.MAX_RADIX"), even for an empty
+        string.
+      - null throws "Cannot parse null string".
+      - A bad digit or an overflow throws `For input string: "12" under radix 2`; "under radix"
+        is left off for radix 10.
+      - `Short` and `Byte` throw `Value out of range. Value:"40000" Radix:10`.
+      - `parseUnsignedInt` throws "String value 4294967296 exceeds range of unsigned int." and
+        "Illegal leading minus sign on unsigned string -1.".
+      - `decode` takes `0x`, `0X`, `#` and a leading `0` (octal) after the sign. It throws "Zero
+        length string" and "Sign character in wrong position" (`0x-1`).
+    - `Double.parseDouble` trims every character up to `' '`. It takes `NaN` and `Infinity`
+      with a sign, and an `f`, `F`, `d` or `D` suffix (`1e5f`). It throws "empty String" for
+      an empty or blank string, and `For input string: "infinity"` otherwise.
+    - `Integer.toString(v, radix)` falls back to radix 10 outside 2 to 36.
+    - `Math`:
+      - the exact methods throw `ArithmeticException` "integer overflow" or "long overflow",
+        and `absExact` "Overflow to represent absolute value of Integer.MIN_VALUE";
+      - `floorDiv`, `floorMod`, `ceilDiv` and `ceilMod` throw "/ by zero";
+      - `floorDiv(MIN_VALUE, -1)` is `MIN_VALUE`, and the `(long, int)` forms answer a long.
+    - `Enum.valueOf(class, name)`:
+      - throws `IllegalArgumentException` "No enum constant Oracle.Mode.FAST", with the class
+        name dotted;
+      - throws `NullPointerException` "Name is null" for a null name;
+      - matches the name exactly ("speed" isn't `SPEED`).
+    - `Class.getCanonicalName` is null for an anonymous class (`Oracle$2`). An array's is
+      `int[][]` or `Oracle.Mode[]`.
+    - Throwables:
+      - `addSuppressed(null)` throws `NullPointerException` "Cannot suppress a null exception.".
+      - `addSuppressed(this)` throws `IllegalArgumentException` "Self-suppression not
+        permitted", with the throwable as its cause.
+      - `getSuppressed` gives a copy in the order the throwables were added.
+      - `fillInStackTrace` returns the same throwable.
+    - Strings and characters:
+      - `trim` drops every character up to `' '`. `strip`, `stripLeading`, `stripTrailing` and
+        `isBlank` use `Character.isWhitespace`, which differs from Rust's: it includes `\u001C`
+        to `\u001F`, and leaves out the no-break spaces ` `, ` ` and ` `.
+      - `lines` splits `"a\nb\r\nc\r\n\nd"` into `[a, b, c, , d]`. A trailing line end makes no
+        empty last line.
+      - `Character.digit('7', 0)` is −1. `toChars(0x1F600)` is two chars, the second 56832.
+    - Collections and streams:
+      - `Collections.shuffle(list, new Random(42))` puts `1..=8` in the order
+        `[3, 7, 4, 2, 5, 1, 8, 6]`.
+      - A `ListIterator` that removes "b", sets "c" to "C" and adds "c2" behind it, then walks
+        back, logs `0a 1b 1c 3d <d<c2<C<a` and leaves `[a, C, c2, d]`.
+        - `listIterator(9)` on 4 elements throws "Index: 9, Size: 4".
+        - `remove` before any `next` throws `IllegalStateException`.
+      - `SimpleEntry("k", 1)` prints `k=1`, hashes to 106 and equals `Map.entry("k", 1)`. A
+        `SimpleImmutableEntry`'s `setValue` throws `UnsupportedOperationException`.
+      - `IntStream.max` answers an `OptionalInt`, which is empty for an empty stream. An empty
+        stream's `sum` is 0.
+      - `DoubleStream.max` follows `Math.max`, so `NaN` wins and 0.0 beats −0.0.
+      - `Stream.concat`, `Stream.builder` and `StreamSupport.stream` keep their order.
+  - Compat:
+    - `jlang.rs`:
+      - `Integer`, `Long`, `Short` and `Byte` answer `parseX` and `valueOf` with a radix,
+        `decode`, the unsigned family (`parseUnsignedInt`, `toUnsignedString`,
+        `compareUnsigned`, `divideUnsigned`...) and `toString(v, radix)`.
+      - `Double` and `Float` answer `parseX` and `valueOf(String)`.
+      - `Math` and `StrictMath` answer the exact, floor and ceil methods, `multiplyFull` and
+        `multiplyHigh`, in `i128` (`integer_math`).
+      - `Enum.valueOf` finds a mod enum's constant through its `values()`.
+      - `Object.clone` gives a shallow copy of an array or a `Cloneable` mod object. Other
+        classes throw `CloneNotSupportedException`. `notify` and `notifyAll` do nothing.
+      - `Class.getCanonicalName` is answered.
+      - `Character` answers `digit`, `forDigit`, `toChars`, `toCodePoint`, `charCount` and the
+        surrogate tests. `isWhitespace` and `isSpaceChar` are Java's.
+      - `String` answers `strip`, `stripLeading`, `stripTrailing`, `isBlank` and `lines`, and
+        `trim` is Java's.
+      - `System.out` and `System.err` are `PrintStream`s. They answer `print`, `println`,
+        `printf`, `format`, `append`, `write`, `flush`, `close` and `checkError`.
+    - `api.rs`:
+      - throwables keep what they suppress (`addSuppressed`, `getSuppressed`);
+      - `printStackTrace` writes the throwable, what it suppressed and its causes, as Java lays
+        them out ("Suppressed: ", "Caused by: ", "[CIRCULAR REFERENCE: ...]");
+      - `getStackTrace` is empty, and `setStackTrace` and `fillInStackTrace` keep the
+        throwable as it is.
+    - `jutil.rs`:
+      - `ListIterator` and `List.listIterator(i)`;
+      - `Collections.shuffle`, with the mod's `Random` or the runtime's own;
+      - `Collections.emptyIterator` and `emptyListIterator`;
+      - `Objects.requireNonNullElseGet`;
+      - `AbstractMap.SimpleEntry` and `SimpleImmutableEntry`;
+      - `Stream.empty`, `concat` and `builder`, `Iterable.spliterator`,
+        `Spliterators.spliteratorUnknownSize` and `StreamSupport.stream`;
+      - `IntStream`, `LongStream` and `DoubleStream` keep their kind through `map`, and their
+        `max`, `min` and `average` answer `OptionalInt`, `OptionalLong` or `OptionalDouble`.
+      - fastutil's entries (`Object2IntMap$Entry.getIntValue`, `Int2ObjectMap$Entry.getIntKey`,
+        `Long2ObjectMap$Entry.getLongKey`...) are the runtime's map entries.
+  - Fixed on the way: `Integer.parseInt(s, 0)` panicked on Rust's radix check, which stopped 29
+    mods' measurement. It now throws as the JDK does.
+  - Where Horizon differs, and why:
+    - Hexadecimal floating-point text (`0x1.8p1`) isn't parsed; it throws
+      `NumberFormatException`.
+    - `Character.digit` knows only ASCII digits and letters.
+    - `parseUnsignedLong` gives approximate messages for some overflows.
+    - `DoubleStream`'s `sum` and `average` add plainly, where the JDK compensates for rounding.
+    - What a mod prints shows only when tracing (`HORIZON_COMPAT_TRACE`). A stack trace has no
+      frames: translated code has none to give.
+    - `Object.wait` stays unmapped, because only one thread runs a mod's code.
+    - `Objects.requireNonNull` and `requireNonNullElse` still let null through, and
+      `Map.entry` is still mutable, as before.
+  - Measured (packcov42, the same 367 jars, none stopped):
+    - API:
+      - methods 108922/130223 (83.6%, was 109059/130226), uses 341173/372742 (91.5%, was
+        341413/372747), distinct missing 9212 (was 9151);
+      - Create 3290/3971 (82.9%, was 3297/3972), uses 24388/25240 (96.6%, was 24396/25241).
+    - The API's drop is all the probe's own fix: 137 calls are newly missing and none is newly
+      answered. Three of them are datagen calls (`ModelFile$UncheckedModelFile.<init>`), which
+      the summary leaves out of the total. The real gaps this showed:
+      - `ItemStack.is(Holder)` (16 mods) and `FluidStack.is(Holder)` (3);
+      - `ItemCost.<init>(ItemLike, int)` (13) and `(ItemLike)` (4);
+      - `Registry.getHolder(ResourceKey)` (7), `get(ResourceLocation)` (5) and
+        `getHolderOrThrow` (4);
+      - `BlockItem.onItemUseFirst` (5) and `BasicItemListing.<init>` (3).
+    - Libraries, first counted here: methods 61754/74081 (83.4%), uses 336695/357517 (94.2%),
+      distinct missing 5213. Create's are 1324/1602 (82.6%), uses 14050/14416 (97.5%).
+    - Missing by library (distinct methods, jar-methods, uses):
+
+      | Library | Distinct | Jar-methods | Uses |
+      |---|---:|---:|---:|
+      | JDK | 2489 | 7191 | 12605 |
+      | JOML | 734 | 1558 | 2502 |
+      | LWJGL | 877 | 1310 | 1968 |
+      | Gson | 123 | 545 | 1069 |
+      | Guava | 279 | 473 | 811 |
+      | fastutil | 276 | 457 | 672 |
+      | Commons | 138 | 240 | 473 |
+      | ASM | 73 | 136 | 222 |
+      | Netty | 92 | 123 | 176 |
+
+    - The first count (packcov39, Part 124's runtime) finished 338 jars. On those 338, now:
+      - methods 48399/56317 (85.9%, was 47300/56376), uses 226669/239264 (94.7%, was
+        222397/239635);
+      - 1280 calls answered;
+      - 59 calls left the count: MixinExtras' `Operation.call`, a functional interface's own;
+      - 181 calls newly missing, which the old probe had answered for the wrong reason.
+    - Answered, by mods:
+      - `Enum.valueOf` 208, `addSuppressed` 109;
+      - `Exception.printStackTrace` 44 and `PrintStream.println` 44;
+      - `Stream.empty` and `concat` 29 each, `Math.floorMod` 26 and `floorDiv` 17;
+      - fastutil's entries 24, `ListIterator` 16 and `IntStream.max` 16;
+      - `Arrays.equals` 15, `StreamSupport.stream` 13, `Collections.shuffle` 13,
+        `SimpleEntry` 13, `requireNonNullElseGet` 12 and `getCanonicalName` 11;
+      - the method references `Integer.sum` 30, `Long.sum` 6, `Double.sum` 5 and `Float.sum` 4.
+    - Newly missing:
+      - library exceptions' constructors: Gson's `JsonParseException(String)` (24 mods) and
+        `JsonSyntaxException` (10), Netty's `DecoderException` (7);
+      - `URI(String)` 14, `BigDecimal(String)` 10, `SimpleDateFormat` 10, `Map.replace` 9 and
+        `DecimalFormat.format` 7.
+    - The commonest library gaps left:
+      - reflection: `Method.invoke` (57 mods), `getDeclaredFields` (45) and `Field.getType`
+        (43);
+      - Gson's `fromJson(Reader)`;
+      - readers and writers (`FileReader`, `FileWriter`, `PrintWriter`, `BufferedWriter`,
+        `Files.newBufferedReader`);
+      - threads, JOML's matrix stacks, `Properties`, and `Calendar` and `Date`.
+  - Tests 688 (7 new), translator 23 (1 new):
+    - Numbers parse and print as the JDK's above: every radix, sign, overflow and message, plus
+      `decode`, the unsigned family and `parseDouble`'s trimming and suffixes.
+    - `Math`'s integer methods answer and fail as the JDK's.
+    - `Enum.valueOf` finds a mod enum's constant by name, and fails for a wrong or null name
+      with the JDK's messages.
+    - Characters, `lines`, `strip`, `trim` and canonical names are the JDK's.
+    - Throwables keep what they suppress. `printStackTrace` lays out what they suppressed, their
+      causes and a cycle. `System.out` prints.
+    - The shuffle with seed 42, the list iterator's walk, and `SimpleEntry`'s text, hash and
+      immutability are the JDK's.
+    - Streams concatenate and build in order, and reduce to the optionals above.
+    - A jar's library calls are the JDK's and the game's libraries'. A method reference's
+      static handle takes no receiver, and a virtual one does.
+  - Next: the library exceptions' constructors (any library throwable, as `exception_class`
+    does for the JDK's), `Map.replace`, then the API's new gaps (`ItemStack.is(Holder)`,
+    `ItemCost`, `Registry.getHolder`).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

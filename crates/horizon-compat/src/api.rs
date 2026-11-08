@@ -256,6 +256,38 @@ fn throwable_string(rt: &Rt, e: V) -> String {
     }
 }
 
+const THROWABLES: &str = "[Ljava/lang/Throwable;";
+
+/// What throwable `e` suppressed (`addSuppressed`), in order.
+fn suppressed(rt: &Rt, e: V) -> Vec<V> {
+    match rt.get_field(e, "$suppressed") {
+        v @ V::R(r) if r != 0 => crate::jutil::elements(rt, v),
+        _ => Vec::new(),
+    }
+}
+
+/// `printStackTrace`'s text, without frames: `e` after `caption`, what it suppressed (indented,
+/// `Suppressed: `), then its cause (`Caused by: `), as the JDK prints them; one seen before is a
+/// circular reference.
+fn stack_trace(rt: &Rt, e: V, caption: &str, indent: &str, out: &mut String, seen: &mut Vec<V>) {
+    if seen.contains(&e) {
+        out.push_str(&format!(
+            "{indent}{caption}[CIRCULAR REFERENCE: {}]\n",
+            throwable_string(rt, e)
+        ));
+        return;
+    }
+    seen.push(e);
+    out.push_str(&format!("{indent}{caption}{}\n", throwable_string(rt, e)));
+    for s in suppressed(rt, e) {
+        stack_trace(rt, s, "Suppressed: ", &format!("{indent}\t"), out, seen);
+    }
+    let cause = rt.get_field(e, "cause");
+    if cause.r() != 0 && cause != e {
+        stack_trace(rt, cause, "Caused by: ", indent, out, seen);
+    }
+}
+
 fn exception_class(key: &str) -> bool {
     if !key.starts_with("java/") {
         return false;
@@ -697,6 +729,13 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             };
             rt.string(&out)
         }
+        "java/lang/Class.getCanonicalName.()Ljava/lang/String;" => {
+            let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+            match crate::jlang::canonical_name(&n) {
+                Some(c) => rt.string(&c),
+                None => V::NULL,
+            }
+        }
         // Java's constructors: `(String)`, `(String, Throwable)`, `(Throwable)` (whose message is
         // the cause's `toString()`, as `Throwable(Throwable)` sets it) and `()`.
         k if exception_class(k) && k.contains(".<init>.") => {
@@ -731,6 +770,48 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             let text = throwable_string(rt, a(0));
             rt.string(&text)
         }
+        // `addSuppressed(e)`, kept for `getSuppressed()` (try-with-resources adds the failure of
+        // closing a resource to the one it rethrows): the throwable itself or null throws, as the
+        // JDK's does.
+        k if exception_class(k) && k.contains(".addSuppressed.") => {
+            let (this, e) = (a(0), a(1));
+            if e == this {
+                let iae = rt.new_object("java/lang/IllegalArgumentException");
+                let m = rt.string("Self-suppression not permitted");
+                rt.put_field(iae, "message", m);
+                rt.put_field(iae, "cause", this);
+                rt.thrown = Some(iae);
+            } else if e.r() == 0 {
+                crate::jlang::throw_with(
+                    rt,
+                    "java/lang/NullPointerException",
+                    "Cannot suppress a null exception.",
+                );
+            } else {
+                let mut all = suppressed(rt, this);
+                all.push(e);
+                let arr = rt.alloc(THROWABLES, Data::Array(all));
+                rt.put_field(this, "$suppressed", arr);
+            }
+            V::Void
+        }
+        k if exception_class(k) && k.contains(".getSuppressed.") => {
+            let all = suppressed(rt, a(0));
+            rt.alloc(THROWABLES, Data::Array(all))
+        }
+        // No frames are kept: the trace is the throwable, what it suppressed and its causes,
+        // printed to `System.err` (or the `System.out` it is given).
+        k if exception_class(k) && k.contains(".printStackTrace.") => {
+            let mut trace = String::new();
+            stack_trace(rt, a(0), "", "", &mut trace, &mut Vec::new());
+            let out =
+                k.contains("(Ljava/io/PrintStream;)") && rt.get_field(a(1), "$err") == V::I(0);
+            crate::jlang::print_std(!out, &trace);
+            V::Void
+        }
+        k if exception_class(k) && k.contains(".fillInStackTrace.") => a(0),
+        k if exception_class(k) && k.contains(".getStackTrace.") => rt.alloc("[Ljava/lang/StackTraceElement;", Data::Array(Vec::new())),
+        k if exception_class(k) && k.contains(".setStackTrace.") => V::Void,
         // `array.clone()` (an enum's `values()`): a shallow copy.
         k if k.starts_with('[') && k.contains(".clone.") => {
             let this = a(0);

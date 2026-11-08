@@ -870,6 +870,160 @@ pub fn api_calls(classes: &[ClassFile]) -> BTreeMap<Member, usize> {
     m
 }
 
+/// The libraries the game's process gives every mod, besides the game's API: the JDK, and what
+/// Minecraft 1.21.1 and NeoForge bring on their class path (Guava, Gson, fastutil, JOML, Apache
+/// Commons, Log4j and SLF4J, Netty, LWJGL, NightConfig, Mixin and MixinExtras, ASM, ICU4J, FML's
+/// own). A mod's calls into them are the runtime's to answer, as its calls into the API are.
+/// Kotlin isn't one: Kotlin for Forge brings it as a mod of the pack.
+pub const LIBRARIES: &[(&str, &str)] = &[
+    ("java/", "jdk"),
+    ("javax/", "jdk"),
+    ("jdk/", "jdk"),
+    ("sun/", "jdk"),
+    ("com/google/common/", "guava"),
+    ("com/google/gson/", "gson"),
+    ("it/unimi/dsi/fastutil/", "fastutil"),
+    ("org/joml/", "joml"),
+    ("org/apache/commons/lang3/", "commons"),
+    ("org/apache/commons/io/", "commons"),
+    ("org/apache/logging/log4j/", "logging"),
+    ("org/slf4j/", "logging"),
+    ("io/netty/", "netty"),
+    ("org/lwjgl/", "lwjgl"),
+    ("com/electronwill/nightconfig/", "nightconfig"),
+    ("org/spongepowered/asm/", "mixin"),
+    ("com/llamalad7/mixinextras/", "mixin"),
+    ("org/objectweb/asm/", "asm"),
+    ("com/ibm/icu/", "icu"),
+    ("org/apache/maven/artifact/", "fml"),
+    ("cpw/mods/", "fml"),
+];
+
+/// The library `owner` belongs to ([`LIBRARIES`]): `jdk`, `guava`...; None for any other class.
+pub fn library_of(owner: &str) -> Option<&'static str> {
+    LIBRARIES
+        .iter()
+        .find(|(p, _)| owner.starts_with(p))
+        .map(|&(_, l)| l)
+}
+
+/// A functional interface's own method, the one a lambda implements (`Runnable.run`,
+/// `Function.apply`, Guava's `Supplier.get`...): the receiver's code answers it, a mod's lambda or
+/// class, as the runtime's own functional objects answer theirs.
+pub fn functional_call(owner: &str, name: &str) -> bool {
+    match owner {
+        "java/lang/Runnable" => name == "run",
+        // MixinExtras' `Operation.call`, on what a `@WrapOperation` is given: the wrapped call.
+        "com/llamalad7/mixinextras/injector/wrapoperation/Operation" => name == "call",
+        "java/util/concurrent/Callable" => name == "call",
+        "com/google/common/base/Supplier" => name == "get",
+        "com/google/common/base/Function" | "com/google/common/base/Predicate" => name == "apply",
+        o if o.starts_with("java/util/function/") => matches!(
+            name,
+            "apply"
+                | "accept"
+                | "test"
+                | "get"
+                | "getAsBoolean"
+                | "getAsInt"
+                | "getAsLong"
+                | "getAsDouble"
+                | "applyAsInt"
+                | "applyAsLong"
+                | "applyAsDouble"
+        ),
+        _ => false,
+    }
+}
+
+/// The interfaces the classes' lambdas implement, with the method each implements: an
+/// `invokedynamic` site of `LambdaMetafactory` names the method and returns the interface.
+fn lambda_methods(classes: &[ClassFile]) -> std::collections::BTreeSet<(String, String)> {
+    let mut found = std::collections::BTreeSet::new();
+    for c in classes {
+        for i in 0..c.pool.len() as u16 {
+            let Some((bsm, name, desc)) = c.indy(i) else { continue };
+            let lambda = c
+                .bootstrap
+                .get(bsm as usize)
+                .and_then(|(h, _)| c.handle(*h))
+                .is_some_and(|(_, m)| m.owner == "java/lang/invoke/LambdaMetafactory");
+            if let (true, Some(iface)) = (
+                lambda,
+                desc.rsplit(')')
+                    .next()
+                    .and_then(|r| r.strip_prefix('L'))
+                    .and_then(|r| r.strip_suffix(';')),
+            ) {
+                found.insert((iface.to_owned(), name));
+            }
+        }
+    }
+    found
+}
+
+/// The methods the classes call with `invokestatic`, or through a static method handle (a
+/// method reference, `Integer::sum`): they take no receiver.
+pub fn static_calls(classes: &[ClassFile]) -> std::collections::BTreeSet<Member> {
+    const REF_INVOKE_STATIC: u8 = 6;
+    let mut out = std::collections::BTreeSet::new();
+    for c in classes {
+        for i in 0..c.pool.len() as u16 {
+            if let Some((REF_INVOKE_STATIC, m)) = c.handle(i) {
+                out.insert(m);
+            }
+        }
+        for m in &c.methods {
+            let Some(code) = &m.code else { continue };
+            for i in insn::decode(&code.bytes).unwrap_or_default() {
+                let idx = match i.arg {
+                    insn::Operand::Int(idx) if i.op == 0xb8 => idx as u16,
+                    insn::Operand::IndexCount(idx, _) if i.op == 0xb8 => idx,
+                    _ => continue,
+                };
+                if let Some(member) = c.member(idx) {
+                    out.insert(member);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The library methods the classes call ([`LIBRARIES`]), each with the number of classes calling
+/// it, as [`api_calls`] counts the API's. Left out:
+/// - a library the jar carries inside it (its own copy of a class), which is the mod's code;
+/// - the bootstrap methods of `invokedynamic` sites (`LambdaMetafactory`, `StringConcatFactory`,
+///   `ObjectMethods`), which the translator lowers itself and nothing calls;
+/// - a functional interface's own method ([`functional_call`]), and the method of any library
+///   interface the jar's lambdas implement (log4j's `TriConsumer.accept`): the receiver answers
+///   those, a mod's lambda or class.
+pub fn library_calls(classes: &[ClassFile]) -> BTreeMap<Member, usize> {
+    let own: std::collections::BTreeSet<&str> = classes.iter().map(|c| c.name.as_str()).collect();
+    let lambdas = lambda_methods(classes);
+    let mut m = BTreeMap::new();
+    for c in classes {
+        let boot: std::collections::BTreeSet<Member> = c
+            .bootstrap
+            .iter()
+            .filter_map(|(h, _)| c.handle(*h).map(|(_, m)| m))
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for call in c.called().into_iter().filter(|m| {
+            library_of(&m.owner).is_some()
+                && !own.contains(m.owner.as_str())
+                && !boot.contains(m)
+                && !functional_call(&m.owner, &m.name)
+                && !lambdas.contains(&(m.owner.clone(), m.name.clone()))
+        }) {
+            if seen.insert(call.clone()) {
+                *m.entry(call).or_insert(0) += 1;
+            }
+        }
+    }
+    m
+}
+
 pub mod bundle;
 pub mod codegen;
 pub mod insn;
@@ -1238,6 +1392,165 @@ mod mixin_census_tests {
             Some(serde_json::json!({ "a": "\"//\"", "b": [] }))
         );
         assert_eq!(read(r#"{"a": 1,}"#), None);
+    }
+
+    /// The library calls a jar's classes make: the JDK's, Guava's, fastutil's... each counted once
+    /// per class that calls it; not the game's API, not another mod's classes, and not a library
+    /// class the jar carries itself.
+    #[test]
+    fn a_jars_library_calls_are_the_jdks_and_the_games_libraries() {
+        use class::Const;
+        fn class(name: &str, calls: &[(&str, &str, &str)]) -> ClassFile {
+            let mut pool = vec![Const::Unused];
+            let utf8 = |pool: &mut Vec<Const>, t: &str| {
+                pool.push(Const::Utf8(t.to_owned()));
+                pool.len() as u16 - 1
+            };
+            for &(owner, name, desc) in calls {
+                let o = utf8(&mut pool, owner);
+                pool.push(Const::Class(o));
+                let c = pool.len() as u16 - 1;
+                let (n, d) = (utf8(&mut pool, name), utf8(&mut pool, desc));
+                pool.push(Const::NameAndType(n, d));
+                let nt = pool.len() as u16 - 1;
+                pool.push(Const::MethodRef(c, nt));
+            }
+            ClassFile {
+                pool,
+                access: 0x21,
+                name: name.into(),
+                superclass: Some("java/lang/Object".into()),
+                interfaces: Vec::new(),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                bootstrap: Vec::new(),
+                annotations: Vec::new(),
+            }
+        }
+        let add = ("java/util/List", "add", "(Ljava/lang/Object;)Z");
+        let or = (
+            "com/google/common/base/Optional",
+            "or",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+        );
+        let concat = (
+            "java/lang/invoke/StringConcatFactory",
+            "makeConcatWithConstants",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+        );
+        let mut seat = class(
+            "a/Seat",
+            &[
+                add,
+                or,
+                (
+                    "net/minecraft/world/entity/Entity",
+                    "startRiding",
+                    "(Lnet/minecraft/world/entity/Entity;Z)Z",
+                ),
+                ("other/Mod", "go", "()V"),
+                ("java/lang/Runnable", "run", "()V"),
+                concat,
+            ],
+        );
+        // The string concatenation's bootstrap method, as `invokedynamic` names it.
+        let concat_ref = seat.pool.len() as u16 - 1;
+        seat.pool.push(Const::MethodHandle(6, concat_ref));
+        seat.bootstrap
+            .push((seat.pool.len() as u16 - 1, Vec::new()));
+        // A lambda of log4j's `TriConsumer` (`LambdaMetafactory.metafactory`), whose `accept` the
+        // class also calls: the lambda answers it.
+        let mut text = |t: &str| {
+            seat.pool.push(Const::Utf8(t.to_owned()));
+            seat.pool.len() as u16 - 1
+        };
+        let (lmf, meta, meta_desc) = (
+            text("java/lang/invoke/LambdaMetafactory"),
+            text("metafactory"),
+            text("()V"),
+        );
+        let (accept, accept_desc) = (
+            text("accept"),
+            text("()Lorg/apache/logging/log4j/util/TriConsumer;"),
+        );
+        let (tri, tri_accept, tri_desc) = (
+            text("org/apache/logging/log4j/util/TriConsumer"),
+            text("accept"),
+            text("(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V"),
+        );
+        let pool = &mut seat.pool;
+        pool.push(Const::Class(lmf));
+        pool.push(Const::NameAndType(meta, meta_desc));
+        pool.push(Const::MethodRef(
+            pool.len() as u16 - 2,
+            pool.len() as u16 - 1,
+        ));
+        pool.push(Const::MethodHandle(6, pool.len() as u16 - 1));
+        let handle = pool.len() as u16 - 1;
+        pool.push(Const::NameAndType(accept, accept_desc));
+        pool.push(Const::InvokeDynamic(
+            seat.bootstrap.len() as u16,
+            pool.len() as u16 - 1,
+        ));
+        seat.bootstrap.push((handle, Vec::new()));
+        let pool = &mut seat.pool;
+        pool.push(Const::Class(tri));
+        pool.push(Const::NameAndType(tri_accept, tri_desc));
+        pool.push(Const::InterfaceMethodRef(
+            pool.len() as u16 - 2,
+            pool.len() as u16 - 1,
+        ));
+        let mut belt = class(
+            "a/Belt",
+            &[
+                add,
+                ("it/unimi/dsi/fastutil/ints/IntArrayList", "add", "(I)Z"),
+                ("org/joml/Vector3f", "length", "()F"),
+                ("java/lang/Integer", "sum", "(II)I"),
+            ],
+        );
+        // Method references: `Integer::sum` (a static handle) and `Vector3f::length` (a virtual
+        // one). Each call above takes six constants, its method reference last.
+        let sum = belt.pool.len() as u16 - 1;
+        belt.pool.push(Const::MethodHandle(6, sum));
+        belt.pool.push(Const::MethodHandle(5, sum - 6));
+        let classes = [
+            seat,
+            belt,
+            // The jar's own copy of a library class: its calls into it are the mod's.
+            class("org/joml/Vector3f", &[]),
+        ];
+        let found: Vec<(String, usize)> = library_calls(&classes)
+            .into_iter()
+            .map(|(m, n)| (format!("{}.{}", m.owner, m.name), n))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("com/google/common/base/Optional.or".to_owned(), 1),
+                ("it/unimi/dsi/fastutil/ints/IntArrayList.add".to_owned(), 1),
+                ("java/lang/Integer.sum".to_owned(), 1),
+                ("java/util/List.add".to_owned(), 2)
+            ]
+        );
+        // What takes no receiver: what a static handle points at (the method reference, and the
+        // bootstrap methods), not what a virtual one does.
+        let statics: Vec<String> = static_calls(&classes)
+            .into_iter()
+            .map(|m| format!("{}.{}", m.owner, m.name))
+            .collect();
+        assert_eq!(
+            statics,
+            [
+                "java/lang/Integer.sum",
+                "java/lang/invoke/LambdaMetafactory.metafactory",
+                "java/lang/invoke/StringConcatFactory.makeConcatWithConstants"
+            ]
+        );
+        assert_eq!(library_of("java/util/List"), Some("jdk"));
+        assert_eq!(library_of("com/google/common/base/Optional"), Some("guava"));
+        assert_eq!(library_of("net/minecraft/world/entity/Entity"), None);
+        assert_eq!(library_of("kotlin/jvm/internal/Intrinsics"), None);
     }
 
     /// A multi-loader jar's Fabric build stays out of the program: a class over Fabric's loader API

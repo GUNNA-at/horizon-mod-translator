@@ -76,6 +76,93 @@ fn platform_class(name: &str) -> bool {
     .any(|p| name.starts_with(p))
 }
 
+/// `Enum.valueOf(type, name)`, which a mod enum's own `valueOf(String)` calls: the constant of
+/// enum class `type` named `name`, as its `values()` lists them, else the JDK's exceptions.
+fn enum_value_of(rt: &mut Rt, class: V, name: V) -> V {
+    if class.r() == 0 {
+        rt.throw_new("java/lang/NullPointerException");
+        return V::NULL;
+    }
+    let c = rt.str_of(class).unwrap_or("").to_owned();
+    let Some(values) = enum_constants(rt, &c) else {
+        return throw_with(
+            rt,
+            "java/lang/IllegalArgumentException",
+            &format!("{} is not an enum class", c.replace('/', ".")),
+        );
+    };
+    let wanted = rt.str_of(name).map(str::to_owned);
+    for e in crate::jutil::elements(rt, values) {
+        let n = crate::api_common::enum_name(rt, e, false);
+        if wanted.is_some() && rt.str_of(n) == wanted.as_deref() {
+            return e;
+        }
+    }
+    match wanted {
+        None => throw_with(rt, "java/lang/NullPointerException", "Name is null"),
+        // `getCanonicalName`: a nested enum's outer class joined with a dot.
+        Some(w) => throw_with(
+            rt,
+            "java/lang/IllegalArgumentException",
+            &format!("No enum constant {}.{w}", c.replace(['/', '$'], ".")),
+        ),
+    }
+}
+
+/// `Class.getCanonicalName()` of class `name` (internal form, or an array's descriptor): dotted, a
+/// member class after its outer one; an array's is its element's with `[]`. None (Java's null)
+/// for an anonymous or local class (`Outer$1`, `Outer$1Local`).
+pub(crate) fn canonical_name(name: &str) -> Option<String> {
+    if let Some(element) = name.strip_prefix('[') {
+        let inner = match element.as_bytes().first()? {
+            b'L' => canonical_name(element[1..].strip_suffix(';')?)?,
+            b'[' => canonical_name(element)?,
+            &b => match b {
+                b'I' => "int",
+                b'J' => "long",
+                b'Z' => "boolean",
+                b'B' => "byte",
+                b'C' => "char",
+                b'S' => "short",
+                b'F' => "float",
+                b'D' => "double",
+                _ => return None,
+            }
+            .to_owned(),
+        };
+        return Some(inner + "[]");
+    }
+    if name
+        .split('$')
+        .skip(1)
+        .any(|p| p.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(name.replace(['/', '$'], "."))
+}
+
+/// `Object.clone()`, which a `Cloneable` class's `super.clone()` reaches: a new object of the
+/// same class holding the same fields (a shallow copy, as the JVM's); any other class throws
+/// `CloneNotSupportedException` naming it.
+fn object_clone(rt: &mut Rt, this: V) -> V {
+    if this.r() == 0 {
+        rt.throw_new("java/lang/NullPointerException");
+        return V::NULL;
+    }
+    let class = rt.class_of(this);
+    if !class.starts_with('[') && !rt.is_a(class, "java/lang/Cloneable") {
+        return throw_with(rt, "java/lang/CloneNotSupportedException", &class.replace('/', "."));
+    }
+    let Some((cid, data)) = rt.heap.get(this.r() as usize).map(|o| (o.cid, o.data.clone())) else { return V::NULL };
+    let side = rt.side_fields.get(&this.r()).cloned();
+    let copy = rt.alloc_cid(class, cid, data);
+    if let Some(f) = side {
+        rt.side_fields.insert(copy.r(), f);
+    }
+    copy
+}
+
 /// Throws a new `class` with `msg`; the value a throwing call leaves (null).
 pub(crate) fn throw_with(rt: &mut Rt, class: &'static str, msg: &str) -> V {
     let e = rt.new_object(class);
@@ -427,6 +514,7 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
             owner,
             "java/util/ServiceLoader"
                 | PROVIDER
+                | PRINT_STREAM
                 | "org/apache/logging/log4j/Logger"
                 | "org/slf4j/Logger"
                 | "java/util/logging/Logger"
@@ -447,6 +535,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     if owner == "java/util/ServiceLoader" || owner == PROVIDER {
         return service_loader(rt, name, args);
+    }
+    if owner == PRINT_STREAM {
+        return print_stream(rt, name, desc, args);
     }
     if !owner.starts_with("java/lang/") {
         return None;
@@ -553,12 +644,61 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "isDigit" => V::I(c.is_ascii_digit() as i32),
                 "isLetter" | "isAlphabetic" => V::I(c.is_alphabetic() as i32),
                 "isLetterOrDigit" => V::I(c.is_alphanumeric() as i32),
-                "isWhitespace" | "isSpaceChar" => V::I(c.is_whitespace() as i32),
+                "isWhitespace" => V::I(java_whitespace(c) as i32),
+                "isSpaceChar" => V::I((c.is_whitespace() && !c.is_control()) as i32),
                 "isUpperCase" => V::I(c.is_uppercase() as i32),
                 "isLowerCase" => V::I(c.is_lowercase() as i32),
                 "toUpperCase" => V::I(c.to_uppercase().next().unwrap_or(c) as i32),
                 "toLowerCase" => V::I(c.to_lowercase().next().unwrap_or(c) as i32),
                 "getNumericValue" => V::I(c.to_digit(36).map_or(-1, |d| d as i32)),
+                // `digit(c, radix)`: -1 for a radix out of 2..=36 or a character that isn't one of
+                // its digits.
+                "digit" => V::I(
+                    u32::try_from(a(1).i())
+                        .ok()
+                        .filter(|r| (2..=36).contains(r))
+                        .and_then(|r| c.to_digit(r))
+                        .map_or(-1, |d| d as i32),
+                ),
+                "forDigit" => {
+                    let (d, r) = (a(0).i(), a(1).i());
+                    V::I(if (2..=36).contains(&r) && (0..r).contains(&d) {
+                        char::from_digit(d as u32, r as u32).map_or(0, |c| c as i32)
+                    } else {
+                        0
+                    })
+                }
+                // A code point's UTF-16 units; one outside Unicode throws.
+                "toChars" => {
+                    let cp = a(0).i();
+                    let Some(ch) = u32::try_from(cp).ok().filter(|&u| u <= 0x10FFFF) else {
+                        return Some(throw_with(
+                            rt,
+                            "java/lang/IllegalArgumentException",
+                            &format!("Not a valid Unicode code point: 0x{:X}", cp as u32),
+                        ));
+                    };
+                    let units: Vec<V> = if ch < 0x10000 {
+                        vec![V::I(ch as i32)]
+                    } else {
+                        let s = ch - 0x10000;
+                        vec![
+                            V::I((0xD800 + (s >> 10)) as i32),
+                            V::I((0xDC00 + (s & 0x3FF)) as i32),
+                        ]
+                    };
+                    rt.alloc("[C", Data::Array(units))
+                }
+                // Unchecked, as the JDK computes it.
+                "toCodePoint" => V::I(
+                    (a(0).i() << 10)
+                        .wrapping_add(a(1).i())
+                        .wrapping_add(0x10000 - (0xD800 << 10) - 0xDC00),
+                ),
+                "charCount" => V::I(if a(0).i() >= 0x10000 { 2 } else { 1 }),
+                "isHighSurrogate" => V::I((0xD800..0xDC00).contains(&a(0).i()) as i32),
+                "isLowSurrogate" => V::I((0xDC00..0xE000).contains(&a(0).i()) as i32),
+                "isSurrogate" => V::I((0xD800..0xE000).contains(&a(0).i()) as i32),
                 "valueOf" => {
                     let o = rt.new_object("java/lang/Character");
                     rt.put_field(o, "value", a(0));
@@ -577,7 +717,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "java/lang/Math" | "java/lang/StrictMath" if name == "random" => Some(V::D(
             (crate::api_common::next_random(rt) >> 11) as f64 * (1.0 / (1u64 << 53) as f64),
         )),
-        "java/lang/Math" | "java/lang/StrictMath" => math(name, &ks, args),
+        "java/lang/Math" | "java/lang/StrictMath" => integer_math(rt, name, desc, args).or_else(|| math(name, &ks, args)),
         "java/lang/Object" => Some(match name {
             // A vanilla block's or item's is its 1.21.1 class (`IceBlock`), as `instanceof` answers.
             "getClass" => {
@@ -597,6 +737,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 for_each(rt, a(0), a(1), desc);
                 V::Void
             }
+            // One thread runs a runtime: nobody waits on a monitor to be woken.
+            "notify" | "notifyAll" => V::Void,
+            "clone" => object_clone(rt, a(0)),
             _ => return None,
         }),
         "java/lang/System" => Some(match name {
@@ -636,6 +779,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let c = rt.class_of(a(0));
                 rt.class_literal(c)
             }
+            "valueOf" => enum_value_of(rt, a(0), a(1)),
             _ => return None,
         }),
         "java/lang/Class" => Some(match name {
@@ -986,7 +1130,7 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
         }
         "length" => V::I(u.len() as i32),
         "isEmpty" => V::I(u.is_empty() as i32),
-        "isBlank" => V::I(s.trim().is_empty() as i32),
+        "isBlank" => V::I(s.chars().all(java_whitespace) as i32),
         "hashCode" => V::I(string_hash(&s)),
         "equals" | "contentEquals" => V::I((Some(s.as_str()) == rt.str_of(a(1))) as i32),
         "equalsIgnoreCase" => V::I(rt.str_of(a(1)).is_some_and(|o| o.to_lowercase() == s.to_lowercase()) as i32),
@@ -1024,9 +1168,26 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
         }
         "toLowerCase" => new_str(rt, s.to_lowercase()),
         "toUpperCase" => new_str(rt, s.to_uppercase()),
-        "trim" | "strip" => new_str(rt, s.trim().to_owned()),
-        "stripLeading" => new_str(rt, s.trim_start().to_owned()),
-        "stripTrailing" => new_str(rt, s.trim_end().to_owned()),
+        // `trim` drops the characters up to a space; `strip` Java's whitespace.
+        "trim" => new_str(rt, s.trim_matches(|c: char| c <= ' ').to_owned()),
+        "strip" => new_str(rt, s.trim_matches(java_whitespace).to_owned()),
+        "stripLeading" => new_str(rt, s.trim_start_matches(java_whitespace).to_owned()),
+        "stripTrailing" => new_str(rt, s.trim_end_matches(java_whitespace).to_owned()),
+        // `lines()`: split at `\n`, `\r` and `\r\n`, with no empty line after a last terminator.
+        "lines" => {
+            let mut items = Vec::new();
+            let mut rest = s.as_str();
+            while !rest.is_empty() {
+                let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
+                items.push(new_str(rt, rest[..end].to_owned()));
+                rest = &rest[end..];
+                rest = rest
+                    .strip_prefix("\r\n")
+                    .or_else(|| rest.strip_prefix(['\n', '\r']))
+                    .unwrap_or(rest);
+            }
+            rt.alloc("java/util/stream/Stream", Data::Stream(items))
+        }
         "intern" | "toString" => {
             let v = rt.string(&s);
             v
@@ -1321,15 +1482,7 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
         rt.put_field(o, "value", v);
         o
     };
-    let parse = |s: &str| -> V {
-        let t = s.trim();
-        match simple {
-            "Long" => V::J(t.parse().unwrap_or(0)),
-            "Double" => V::D(t.parse().unwrap_or(0.0)),
-            "Float" => V::F(t.parse().unwrap_or(0.0)),
-            _ => V::I(t.parse().unwrap_or(0)),
-        }
-    };
+    let radix = if ks.len() > 1 { a(1).i() } else { 10 };
     // `xValue()` on any boxed number, with Java's narrowing; a number a collection holds raw
     // (fastutil's primitive collections) is its own value.
     if let Some(kind) = name.strip_suffix("Value") {
@@ -1358,8 +1511,10 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
     }
     Some(match name {
         "valueOf" if ks.first() == Some(&'L') => {
-            let s = text(rt, a(0));
-            let v = parse(&s);
+            let v = parse_number(rt, simple, a(0), radix);
+            if rt.thrown.is_some() {
+                return Some(V::NULL);
+            }
             boxed(rt, v)
         }
         "valueOf" => boxed(rt, a(0)),
@@ -1370,12 +1525,86 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
             Some(_) => boxed(rt, a(1)),
             None => V::NULL,
         },
-        "parseInt" | "parseLong" | "parseDouble" | "parseFloat" | "parseShort" | "parseByte" => {
-            let s = text(rt, a(0));
-            if ks.len() > 1 && simple == "Integer" {
-                V::I(i32::from_str_radix(s.trim(), a(1).i() as u32).unwrap_or(0))
+        "parseInt" | "parseLong" | "parseDouble" | "parseFloat" | "parseShort" | "parseByte" => parse_number(rt, simple, a(0), radix),
+        "parseUnsignedInt" | "parseUnsignedLong" => {
+            let long = name == "parseUnsignedLong";
+            let s = rt.str_of(a(0)).map(str::to_owned);
+            match parse_unsigned(s.as_deref(), radix, long) {
+                Ok(v) if long => V::J(v),
+                Ok(v) => V::I(v as i32),
+                Err(m) => {
+                    throw_with(rt, "java/lang/NumberFormatException", &m);
+                    if long { V::J(0) } else { V::I(0) }
+                }
+            }
+        }
+        // `decode`: a sign, then `0x`, `#` or `0` for hexadecimal or octal digits.
+        "decode" => {
+            let Some(s) = rt.str_of(a(0)).map(str::to_owned) else {
+                rt.throw_new("java/lang/NullPointerException");
+                return Some(V::NULL);
+            };
+            match decode_integer(&s, if simple == "Long" { 64 } else { 32 }) {
+                Ok(v) => {
+                    let v = if simple == "Long" {
+                        V::J(v)
+                    } else {
+                        V::I(v as i32)
+                    };
+                    boxed(rt, v)
+                }
+                Err(m) => throw_with(rt, "java/lang/NumberFormatException", &m),
+            }
+        }
+        "toString" if ks.len() == 2 => {
+            let v = match a(0) {
+                V::J(j) => j,
+                v => i64::from(v.i()),
+            };
+            new_str(rt, radix_string(i128::from(v), a(1).i()))
+        }
+        "toUnsignedString" => {
+            let v = match a(0) {
+                V::J(j) => i128::from(j as u64),
+                v => i128::from(v.i() as u32),
+            };
+            new_str(rt, radix_string(v, radix))
+        }
+        "toUnsignedInt" | "toUnsignedLong" => {
+            let x = i64::from(a(0).i());
+            let m = match simple {
+                "Byte" => x & 0xff,
+                "Short" => x & 0xffff,
+                _ => x & 0xffff_ffff,
+            };
+            if name == "toUnsignedInt" {
+                V::I(m as i32)
             } else {
-                parse(&s)
+                V::J(m)
+            }
+        }
+        "compareUnsigned" => V::I(match (a(0), a(1)) {
+            (V::J(x), V::J(y)) => (x as u64).cmp(&(y as u64)) as i32,
+            (x, y) => (x.i() as u32).cmp(&(y.i() as u32)) as i32,
+        }),
+        "divideUnsigned" | "remainderUnsigned" => {
+            let (x, y, long) = match (a(0), a(1)) {
+                (V::J(x), V::J(y)) => (x as u64, y as u64, true),
+                (x, y) => (u64::from(x.i() as u32), u64::from(y.i() as u32), false),
+            };
+            if y == 0 {
+                throw_with(rt, "java/lang/ArithmeticException", "/ by zero");
+                return Some(if long { V::J(0) } else { V::I(0) });
+            }
+            let r = if name == "divideUnsigned" {
+                x / y
+            } else {
+                x % y
+            };
+            if long {
+                V::J(r as i64)
+            } else {
+                V::I(r as u32 as i32)
             }
         }
         "toString" if ks.is_empty() => {
@@ -1468,6 +1697,341 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
     })
 }
 
+/// `NumberFormatException.forInputString`: the text, then the radix when it isn't 10.
+fn for_input(s: &str, radix: i32) -> String {
+    if radix == 10 {
+        format!("For input string: \"{s}\"")
+    } else {
+        format!("For input string: \"{s}\" under radix {radix}")
+    }
+}
+
+/// `Character.isWhitespace`: the Unicode separators but the no-break spaces, and the tab, line,
+/// form-feed and file-to-unit separator controls.
+fn java_whitespace(c: char) -> bool {
+    matches!(c, '\t'..='\r' | '\u{1C}'..='\u{1F}')
+        || (c.is_whitespace()
+            && !c.is_control()
+            && !matches!(c, '\u{A0}' | '\u{2007}' | '\u{202F}'))
+}
+
+/// The length Java gives a string: its UTF-16 units.
+fn len16(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// `Integer.parseInt(s, radix)` (`bits` 32) and `Long.parseLong` (64) as the JDK parses: an
+/// optional sign, then only digits of the radix (no spaces), in range; else the message of the
+/// JDK's `NumberFormatException`.
+fn parse_integer(s: Option<&str>, radix: i32, bits: u32) -> Result<i64, String> {
+    let Some(s) = s else { return Err("Cannot parse null string".into()) };
+    if radix < 2 {
+        return Err(format!("radix {radix} less than Character.MIN_RADIX"));
+    }
+    if radix > 36 {
+        return Err(format!("radix {radix} greater than Character.MAX_RADIX"));
+    }
+    let digits = s.strip_prefix(['-', '+']).unwrap_or(s);
+    if digits.is_empty() {
+        return Err(for_input(s, radix));
+    }
+    let max = (1i128 << (bits - 1)) - 1;
+    let mut v: i128 = 0;
+    for c in digits.chars() {
+        let d = c
+            .to_digit(radix as u32)
+            .ok_or_else(|| for_input(s, radix))?;
+        v = v * i128::from(radix) + i128::from(d);
+        if v > max + 1 {
+            return Err(for_input(s, radix));
+        }
+    }
+    let v = if s.starts_with('-') { -v } else { v };
+    if v > max {
+        return Err(for_input(s, radix));
+    }
+    Ok(v as i64)
+}
+
+/// `Integer.parseUnsignedInt(s, radix)` and `Long.parseUnsignedLong` (`long`): no minus sign, up
+/// to the unsigned type's largest; the value's bits as the signed type holds them.
+fn parse_unsigned(s: Option<&str>, radix: i32, long: bool) -> Result<i64, String> {
+    let Some(s) = s else { return Err("Cannot parse null string".into()) };
+    let len = len16(s);
+    if len == 0 {
+        return Err(for_input(s, radix));
+    }
+    if s.starts_with('-') {
+        return Err(format!(
+            "Illegal leading minus sign on unsigned string {s}."
+        ));
+    }
+    // Short enough to be in the signed type's range: parsed as one.
+    let short = if long {
+        len <= 12 || (radix == 10 && len <= 18)
+    } else {
+        len <= 5 || (radix == 10 && len <= 9)
+    };
+    if short {
+        return parse_integer(Some(s), radix, if long { 64 } else { 32 });
+    }
+    if !long {
+        let v = parse_integer(Some(s), radix, 64)?;
+        return if v >> 32 == 0 {
+            Ok(v)
+        } else {
+            Err(format!("String value {s} exceeds range of unsigned int."))
+        };
+    }
+    if !(2..=36).contains(&radix) {
+        return parse_integer(Some(s), radix, 64);
+    }
+    let (head, last) = s.split_at(s.len() - s.chars().last().map_or(0, char::len_utf8));
+    let first = parse_integer(Some(head), radix, 64).map_err(|_| {
+        let at = head
+            .chars()
+            .position(|c| c.to_digit(radix as u32).is_none() && c != '+')
+            .unwrap_or(0);
+        format!("Error at index {at} in: \"{head}\"")
+    })?;
+    let Some(d) = last.chars().next().and_then(|c| c.to_digit(radix as u32)) else {
+        return Err(format!("Bad digit at end of {s}"));
+    };
+    let v = i128::from(first) * i128::from(radix) + i128::from(d);
+    if v > i128::from(u64::MAX) {
+        return Err(format!("String value {s} exceeds range of unsigned long."));
+    }
+    Ok(v as u64 as i64)
+}
+
+/// `Integer.decode` / `Long.decode` (`bits`): a sign, then `0x`, `0X` or `#` for hexadecimal
+/// digits, a leading `0` for octal ones.
+fn decode_integer(s: &str, bits: u32) -> Result<i64, String> {
+    if s.is_empty() {
+        return Err("Zero length string".into());
+    }
+    let negative = s.starts_with('-');
+    let rest = s.strip_prefix(['-', '+']).unwrap_or(s);
+    let (radix, digits) = if let Some(d) = rest
+        .strip_prefix("0x")
+        .or_else(|| rest.strip_prefix("0X"))
+        .or_else(|| rest.strip_prefix('#'))
+    {
+        (16, d)
+    } else if rest.len() > 1
+        && let Some(d) = rest.strip_prefix('0')
+    {
+        (8, d)
+    } else {
+        (10, rest)
+    };
+    if digits.starts_with(['-', '+']) {
+        return Err("Sign character in wrong position".into());
+    }
+    let constant = if negative {
+        format!("-{digits}")
+    } else {
+        digits.to_owned()
+    };
+    parse_integer(Some(&constant), radix, bits)
+}
+
+/// `Double.parseDouble` / `Float.parseFloat` text as the JDK reads it: trimmed of the characters
+/// up to a space, an optional sign, then `NaN`, `Infinity` or a decimal number with an optional
+/// exponent and an optional `f`/`d` suffix. The text Rust's parser reads the same (its decimal
+/// grammar is Java's), or the JDK's message. Hexadecimal floating-point text isn't read.
+fn floating_text(s: &str) -> Result<String, String> {
+    let t = s.trim_matches(|c: char| c <= ' ');
+    if t.is_empty() {
+        return Err("empty String".into());
+    }
+    let (sign, body) = match t.as_bytes()[0] {
+        b'-' => ("-", &t[1..]),
+        b'+' => ("", &t[1..]),
+        _ => ("", t),
+    };
+    match body {
+        "NaN" => return Ok("NaN".into()),
+        "Infinity" => return Ok(format!("{sign}inf")),
+        _ => {}
+    }
+    let num = body.strip_suffix(['f', 'F', 'd', 'D']).unwrap_or(body);
+    let decimal = num
+        .bytes()
+        .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-'))
+        && !num.starts_with(['+', '-']);
+    if !decimal || num.parse::<f64>().is_err() {
+        return Err(format!("For input string: \"{t}\""));
+    }
+    Ok(format!("{sign}{num}"))
+}
+
+/// `parseX(s[, radix])` and `valueOf(s[, radix])` of the boxed number class `simple` (`Integer`,
+/// `Long`, `Short`, `Byte`, `Double`, `Float`) as the JDK parses: the value, else a
+/// `NumberFormatException` with the JDK's message (a null floating text, a
+/// `NullPointerException`), the type's zero left.
+fn parse_number(rt: &mut Rt, simple: &str, s: V, radix: i32) -> V {
+    let text = rt.str_of(s).map(str::to_owned);
+    let parsed = match simple {
+        "Double" | "Float" => {
+            let Some(t) = text else {
+                rt.throw_new("java/lang/NullPointerException");
+                return if simple == "Float" { V::F(0.0) } else { V::D(0.0) };
+            };
+            floating_text(&t).map(|n| if simple == "Float" { V::F(n.parse().unwrap_or(0.0)) } else { V::D(n.parse().unwrap_or(0.0)) })
+        }
+        "Long" => parse_integer(text.as_deref(), radix, 64).map(V::J),
+        "Short" | "Byte" => parse_integer(text.as_deref(), radix, 32).and_then(|v| {
+            let fits = if simple == "Short" {
+                i16::try_from(v).is_ok()
+            } else {
+                i8::try_from(v).is_ok()
+            };
+            if fits {
+                Ok(V::I(v as i32))
+            } else {
+                Err(format!(
+                    "Value out of range. Value:\"{}\" Radix:{radix}",
+                    text.as_deref().unwrap_or("")
+                ))
+            }
+        }),
+        _ => parse_integer(text.as_deref(), radix, 32).map(|v| V::I(v as i32)),
+    };
+    parsed.unwrap_or_else(|m| {
+        throw_with(rt, "java/lang/NumberFormatException", &m);
+        match simple {
+            "Long" => V::J(0),
+            "Double" => V::D(0.0),
+            "Float" => V::F(0.0),
+            _ => V::I(0),
+        }
+    })
+}
+
+/// `Integer.toString(v, radix)` / `Long.toString` (and the unsigned forms, given the unsigned
+/// value): lowercase digits after a minus sign; a radix out of 2..=36 is 10.
+fn radix_string(v: i128, radix: i32) -> String {
+    let radix = if (2..=36).contains(&radix) {
+        radix as u32
+    } else {
+        10
+    };
+    let mut n = v.unsigned_abs();
+    let mut digits = Vec::new();
+    loop {
+        digits.push(char::from_digit((n % u128::from(radix)) as u32, radix).unwrap_or('0'));
+        n /= u128::from(radix);
+        if n == 0 {
+            break;
+        }
+    }
+    if v < 0 {
+        digits.push('-');
+    }
+    digits.iter().rev().collect()
+}
+
+/// `Math`'s integer arithmetic that can fail, as the JDK's: the `*Exact` methods (an overflow
+/// throws `ArithmeticException`, "integer overflow" or "long overflow" by the result's type), and
+/// `floorDiv`, `floorMod`, `ceilDiv`, `ceilMod` in each overload (`floorMod(long, int)` is an
+/// int), a zero divisor throwing "/ by zero". None for the other methods.
+fn integer_math(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let ret = desc.rsplit(')').next()?;
+    if !matches!(ret, "I" | "J") {
+        return None;
+    }
+    let long = ret == "J";
+    let a = |i: usize| match args.get(i) {
+        Some(V::I(x)) => i128::from(*x),
+        Some(V::J(x)) => i128::from(*x),
+        _ => 0,
+    };
+    let (x, y) = (a(0), a(1));
+    let fail = |rt: &mut Rt, msg: &str| {
+        throw_with(rt, "java/lang/ArithmeticException", msg);
+        Some(if long { V::J(0) } else { V::I(0) })
+    };
+    let exact = |rt: &mut Rt, r: i128| {
+        let fits = if long {
+            i64::try_from(r).is_ok()
+        } else {
+            i32::try_from(r).is_ok()
+        };
+        if !fits {
+            return fail(
+                rt,
+                if long {
+                    "long overflow"
+                } else {
+                    "integer overflow"
+                },
+            );
+        }
+        Some(if long { V::J(r as i64) } else { V::I(r as i32) })
+    };
+    let divides = matches!(
+        name,
+        "floorDiv" | "floorMod" | "ceilDiv" | "ceilMod" | "divideExact"
+    );
+    if divides && y == 0 {
+        return fail(rt, "/ by zero");
+    }
+    // Wrapped to the result's type, as Java's division wraps `MIN_VALUE / -1`.
+    let wrap = |r: i128| Some(if long { V::J(r as i64) } else { V::I(r as i32) });
+    match name {
+        "addExact" => exact(rt, x + y),
+        "subtractExact" => exact(rt, x - y),
+        "multiplyExact" => exact(rt, x * y),
+        "divideExact" => exact(rt, x / y),
+        "incrementExact" => exact(rt, x + 1),
+        "decrementExact" => exact(rt, x - 1),
+        "negateExact" => exact(rt, -x),
+        "toIntExact" => match i32::try_from(x) {
+            Ok(v) => Some(V::I(v)),
+            Err(_) => fail(rt, "integer overflow"),
+        },
+        "absExact"
+            if x == if long {
+                i128::from(i64::MIN)
+            } else {
+                i128::from(i32::MIN)
+            } =>
+        {
+            fail(
+                rt,
+                if long {
+                    "Overflow to represent absolute value of Long.MIN_VALUE"
+                } else {
+                    "Overflow to represent absolute value of Integer.MIN_VALUE"
+                },
+            )
+        }
+        "absExact" => exact(rt, x.abs()),
+        "floorDiv" => wrap(x.div_euclid(y) - i128::from(y < 0 && x.rem_euclid(y) != 0)),
+        "floorMod" => {
+            let r = x % y;
+            wrap(if r != 0 && (r < 0) != (y < 0) {
+                r + y
+            } else {
+                r
+            })
+        }
+        "ceilDiv" => wrap(x / y + i128::from(x % y != 0 && (x < 0) == (y < 0))),
+        "ceilMod" => {
+            let r = x % y;
+            wrap(if r != 0 && (x < 0) == (y < 0) {
+                r - y
+            } else {
+                r
+            })
+        }
+        "multiplyFull" => wrap(x * y),
+        "multiplyHigh" => wrap((x * y) >> 64),
+        _ => None,
+    }
+}
+
 /// `Math.round(float)` as the JDK computes it: floor(a + 1/2) exactly, from the bits (0.49999997
 /// rounds to 0, where adding a half in floats would round it up), NaN to 0, beyond the ints
 /// saturated.
@@ -1546,17 +2110,6 @@ fn math(name: &str, ks: &[char], args: &[V]) -> Option<V> {
         "round" => match k {
             'F' => V::I(round_f32(a(0).f())),
             _ => V::J(round_f64(d(0))),
-        },
-        // `ceilDiv`: the quotient rounded up.
-        "ceilDiv" => match (a(0), a(1)) {
-            (V::I(x), V::I(y)) if y != 0 => V::I(x.wrapping_div(y) + i32::from((x % y != 0) && ((x ^ y) >= 0))),
-            (V::J(x), V::J(y)) if y != 0 => V::J(x.wrapping_div(y) + i64::from((x % y != 0) && ((x ^ y) >= 0))),
-            _ => return None,
-        },
-        "floorDiv" | "floorMod" => match (a(0), a(1)) {
-            (V::I(x), V::I(y)) if y != 0 => V::I(if name == "floorDiv" { x.div_euclid(y) - if (x.rem_euclid(y) != 0) && y < 0 { 1 } else { 0 } } else { ((x % y) + y) % y }),
-            (V::J(x), V::J(y)) if y != 0 => V::J(if name == "floorDiv" { (x as f64 / y as f64).floor() as i64 } else { ((x % y) + y) % y }),
-            _ => return None,
         },
         "clamp" => match (a(0), a(1), a(2)) {
             (V::J(v), V::I(lo), V::I(hi)) => V::I((v.clamp(lo as i64, hi as i64)) as i32),
@@ -2113,6 +2666,620 @@ mod tests {
             assert_eq!(fmt(&mut rt, d, x), want, "{pattern}");
         }
     }
+
+    /// A call's value, or what it threw: the exception's class and message.
+    fn outcome(rt: &mut Rt, key: &'static str, args: &[V]) -> Result<V, String> {
+        let v = crate::api::call(rt, key, args);
+        match rt.thrown.take() {
+            Some(e) => {
+                let m = rt.get_field(e, "message");
+                Err(format!(
+                    "{}: {}",
+                    rt.class_of(e),
+                    rt.str_of(m).unwrap_or("")
+                ))
+            }
+            None => Ok(v),
+        }
+    }
+
+    /// The boxed numbers parse as JDK 21's (the values and `NumberFormatException` messages are
+    /// its): an optional sign and only digits of the radix, in range, the radix checked; floating
+    /// text trimmed, with `NaN`, `Infinity` and a type suffix; `decode`'s prefixes; the unsigned
+    /// forms; and print in a radix.
+    #[test]
+    fn numbers_parse_and_print_as_the_jdks() {
+        fn parse(rt: &mut Rt, key: &'static str, s: Option<&str>, more: &[V]) -> Result<V, String> {
+            let mut args = vec![s.map_or(V::NULL, |s| rt.string(s))];
+            args.extend_from_slice(more);
+            outcome(rt, key, &args)
+        }
+        let rt = &mut Rt::new();
+        let nfe = |m: &str| Err(format!("java/lang/NumberFormatException: {m}"));
+        const INT: &str = "java/lang/Integer.parseInt.(Ljava/lang/String;)I";
+        const INT_RADIX: &str = "java/lang/Integer.parseInt.(Ljava/lang/String;I)I";
+        assert_eq!(parse(rt, INT, Some("+7"), &[]), Ok(V::I(7)));
+        assert_eq!(parse(rt, INT, Some("-2147483648"), &[]), Ok(V::I(i32::MIN)));
+        assert_eq!(
+            parse(rt, INT, Some("2147483648"), &[]),
+            nfe("For input string: \"2147483648\"")
+        );
+        assert_eq!(
+            parse(rt, INT, Some(" 42"), &[]),
+            nfe("For input string: \" 42\"")
+        );
+        assert_eq!(
+            parse(rt, INT, Some("-"), &[]),
+            nfe("For input string: \"-\"")
+        );
+        assert_eq!(parse(rt, INT, None, &[]), nfe("Cannot parse null string"));
+        assert_eq!(
+            parse(rt, INT_RADIX, Some("-FF"), &[V::I(16)]),
+            Ok(V::I(-255))
+        );
+        assert_eq!(parse(rt, INT_RADIX, Some("z"), &[V::I(36)]), Ok(V::I(35)));
+        assert_eq!(
+            parse(rt, INT_RADIX, Some("12"), &[V::I(2)]),
+            nfe("For input string: \"12\" under radix 2")
+        );
+        assert_eq!(
+            parse(rt, INT_RADIX, Some("ff"), &[V::I(0)]),
+            nfe("radix 0 less than Character.MIN_RADIX")
+        );
+        assert_eq!(
+            parse(rt, INT_RADIX, Some("1"), &[V::I(37)]),
+            nfe("radix 37 greater than Character.MAX_RADIX")
+        );
+        let ten = parse(
+            rt,
+            "java/lang/Integer.valueOf.(Ljava/lang/String;I)Ljava/lang/Integer;",
+            Some("12"),
+            &[V::I(8)],
+        )
+        .unwrap();
+        assert_eq!(rt.get_field(ten, "value"), V::I(10));
+        const LONG: &str = "java/lang/Long.parseLong.(Ljava/lang/String;)J";
+        assert_eq!(
+            parse(rt, LONG, Some("9223372036854775807"), &[]),
+            Ok(V::J(i64::MAX))
+        );
+        assert_eq!(
+            parse(rt, LONG, Some("9223372036854775808"), &[]),
+            nfe("For input string: \"9223372036854775808\"")
+        );
+        assert_eq!(
+            parse(rt, LONG, Some("10L"), &[]),
+            nfe("For input string: \"10L\"")
+        );
+        assert_eq!(
+            parse(
+                rt,
+                "java/lang/Short.parseShort.(Ljava/lang/String;)S",
+                Some("40000"),
+                &[]
+            ),
+            nfe("Value out of range. Value:\"40000\" Radix:10")
+        );
+        assert_eq!(
+            parse(
+                rt,
+                "java/lang/Byte.parseByte.(Ljava/lang/String;I)B",
+                Some("7f"),
+                &[V::I(16)]
+            ),
+            Ok(V::I(127))
+        );
+        assert_eq!(
+            parse(
+                rt,
+                "java/lang/Byte.parseByte.(Ljava/lang/String;I)B",
+                Some("80"),
+                &[V::I(16)]
+            ),
+            nfe("Value out of range. Value:\"80\" Radix:16")
+        );
+        const UINT: &str = "java/lang/Integer.parseUnsignedInt.(Ljava/lang/String;I)I";
+        assert_eq!(parse(rt, UINT, Some("ffffffff"), &[V::I(16)]), Ok(V::I(-1)));
+        assert_eq!(
+            parse(rt, UINT, Some("1ffffffff"), &[V::I(16)]),
+            nfe("String value 1ffffffff exceeds range of unsigned int.")
+        );
+        assert_eq!(
+            parse(rt, UINT, Some("-1"), &[V::I(10)]),
+            nfe("Illegal leading minus sign on unsigned string -1.")
+        );
+        const ULONG: &str = "java/lang/Long.parseUnsignedLong.(Ljava/lang/String;)J";
+        assert_eq!(
+            parse(rt, ULONG, Some("18446744073709551615"), &[]),
+            Ok(V::J(-1))
+        );
+        assert_eq!(
+            parse(rt, ULONG, Some("18446744073709551616"), &[]),
+            nfe("String value 18446744073709551616 exceeds range of unsigned long.")
+        );
+        const DECODE: &str = "java/lang/Integer.decode.(Ljava/lang/String;)Ljava/lang/Integer;";
+        for (text, want) in [
+            ("0x1F", 31),
+            ("#ff", 255),
+            ("-010", -8),
+            ("0", 0),
+            ("-0x80000000", i32::MIN),
+        ] {
+            let v = parse(rt, DECODE, Some(text), &[]).unwrap();
+            assert_eq!(rt.get_field(v, "value"), V::I(want), "{text}");
+        }
+        assert_eq!(parse(rt, DECODE, Some(""), &[]), nfe("Zero length string"));
+        assert_eq!(
+            parse(rt, DECODE, Some("0x"), &[]),
+            nfe("For input string: \"\" under radix 16")
+        );
+        assert_eq!(
+            parse(rt, DECODE, Some("0x-1"), &[]),
+            nfe("Sign character in wrong position")
+        );
+        assert_eq!(
+            parse(rt, DECODE, Some("0xZZ"), &[]),
+            nfe("For input string: \"ZZ\" under radix 16")
+        );
+        const DOUBLE: &str = "java/lang/Double.parseDouble.(Ljava/lang/String;)D";
+        for (text, want) in [
+            (" 1.5 ", 1.5),
+            ("1e5f", 100000.0),
+            ("-Infinity", f64::NEG_INFINITY),
+            ("1.", 1.0),
+            (".5", 0.5),
+            ("0.1", 0.1),
+        ] {
+            assert_eq!(parse(rt, DOUBLE, Some(text), &[]), Ok(V::D(want)), "{text}");
+        }
+        assert!(parse(rt, DOUBLE, Some("+NaN"), &[]).is_ok_and(|v| v.d().is_nan()));
+        assert_eq!(parse(rt, DOUBLE, Some("   "), &[]), nfe("empty String"));
+        assert_eq!(
+            parse(rt, DOUBLE, Some(" x "), &[]),
+            nfe("For input string: \"x\"")
+        );
+        for text in ["infinity", "1e", "1.0dd"] {
+            assert_eq!(
+                parse(rt, DOUBLE, Some(text), &[]),
+                nfe(&format!("For input string: \"{text}\""))
+            );
+        }
+        assert_eq!(
+            parse(
+                rt,
+                "java/lang/Float.parseFloat.(Ljava/lang/String;)F",
+                Some("3.4028236e38"),
+                &[]
+            ),
+            Ok(V::F(f32::INFINITY))
+        );
+        assert_eq!(
+            parse(
+                rt,
+                "java/lang/Float.parseFloat.(Ljava/lang/String;)F",
+                Some("0.1"),
+                &[]
+            ),
+            Ok(V::F(0.1))
+        );
+
+        let mut print = |key: &'static str, args: &[V]| {
+            let v = crate::api::call(rt, key, args);
+            rt.str_of(v).unwrap_or("?").to_owned()
+        };
+        assert_eq!(
+            print(
+                "java/lang/Integer.toString.(II)Ljava/lang/String;",
+                &[V::I(-255), V::I(16)]
+            ),
+            "-ff"
+        );
+        assert_eq!(
+            print(
+                "java/lang/Integer.toString.(II)Ljava/lang/String;",
+                &[V::I(255), V::I(99)]
+            ),
+            "255"
+        );
+        assert_eq!(
+            print(
+                "java/lang/Integer.toString.(II)Ljava/lang/String;",
+                &[V::I(i32::MIN), V::I(2)]
+            ),
+            "-10000000000000000000000000000000"
+        );
+        assert_eq!(
+            print(
+                "java/lang/Long.toString.(JI)Ljava/lang/String;",
+                &[V::J(i64::MAX), V::I(36)]
+            ),
+            "1y2p0ij32e8e7"
+        );
+        assert_eq!(
+            print(
+                "java/lang/Integer.toUnsignedString.(I)Ljava/lang/String;",
+                &[V::I(-1)]
+            ),
+            "4294967295"
+        );
+        assert_eq!(
+            crate::api::call(rt, "java/lang/Byte.toUnsignedInt.(B)I", &[V::I(-1)]),
+            V::I(255)
+        );
+        assert_eq!(
+            crate::api::call(rt, "java/lang/Short.toUnsignedInt.(S)I", &[V::I(-1)]),
+            V::I(65535)
+        );
+        assert_eq!(
+            crate::api::call(rt, "java/lang/Integer.toUnsignedLong.(I)J", &[V::I(-1)]),
+            V::J(4294967295)
+        );
+        assert_eq!(
+            crate::api::call(
+                rt,
+                "java/lang/Integer.compareUnsigned.(II)I",
+                &[V::I(-1), V::I(1)]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            crate::api::call(
+                rt,
+                "java/lang/Long.compareUnsigned.(JJ)I",
+                &[V::J(1), V::J(-1)]
+            ),
+            V::I(-1)
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `Math`'s integer methods as JDK 21's: floor and ceiling division and modulus in each
+    /// overload, exact where `/` would round toward zero or wrap, a zero divisor throwing; the
+    /// `*Exact` ones throwing on overflow where `Integer.sum` wraps.
+    #[test]
+    fn math_integer_methods_fail_as_the_jdks() {
+        let mut rt = Rt::new();
+        let mut m = |key: &'static str, args: &[V]| outcome(&mut rt, key, args);
+        let ae = |msg: &str| Err(format!("java/lang/ArithmeticException: {msg}"));
+        assert_eq!(
+            m("java/lang/Math.floorMod.(II)I", &[V::I(-7), V::I(3)]),
+            Ok(V::I(2))
+        );
+        assert_eq!(
+            m("java/lang/Math.floorMod.(II)I", &[V::I(7), V::I(-3)]),
+            Ok(V::I(-2))
+        );
+        assert_eq!(
+            m("java/lang/Math.floorMod.(II)I", &[V::I(i32::MIN), V::I(-1)]),
+            Ok(V::I(0))
+        );
+        assert_eq!(
+            m("java/lang/Math.floorMod.(II)I", &[V::I(1), V::I(0)]),
+            ae("/ by zero")
+        );
+        assert_eq!(
+            m("java/lang/Math.floorMod.(JI)I", &[V::J(-7), V::I(3)]),
+            Ok(V::I(2))
+        );
+        assert_eq!(
+            m("java/lang/Math.floorMod.(JJ)J", &[V::J(i64::MAX), V::J(7)]),
+            Ok(V::J(0))
+        );
+        assert_eq!(
+            m("java/lang/Math.floorDiv.(II)I", &[V::I(-7), V::I(3)]),
+            Ok(V::I(-3))
+        );
+        assert_eq!(
+            m("java/lang/Math.floorDiv.(II)I", &[V::I(i32::MIN), V::I(-1)]),
+            Ok(V::I(i32::MIN))
+        );
+        assert_eq!(
+            m("java/lang/Math.floorDiv.(JJ)J", &[V::J(7), V::J(-2)]),
+            Ok(V::J(-4))
+        );
+        assert_eq!(
+            m(
+                "java/lang/Math.floorDiv.(JJ)J",
+                &[V::J(9007199254740993), V::J(1)]
+            ),
+            Ok(V::J(9007199254740993))
+        );
+        assert_eq!(
+            m(
+                "java/lang/Math.floorDiv.(JI)J",
+                &[V::J(-9007199254740993), V::I(2)]
+            ),
+            Ok(V::J(-4503599627370497))
+        );
+        assert_eq!(
+            m("java/lang/Math.floorDiv.(JJ)J", &[V::J(i64::MIN), V::J(-1)]),
+            Ok(V::J(i64::MIN))
+        );
+        assert_eq!(
+            m("java/lang/Math.floorDiv.(JJ)J", &[V::J(1), V::J(0)]),
+            ae("/ by zero")
+        );
+        assert_eq!(
+            m("java/lang/Math.ceilDiv.(II)I", &[V::I(-7), V::I(2)]),
+            Ok(V::I(-3))
+        );
+        assert_eq!(
+            m("java/lang/Math.ceilDiv.(II)I", &[V::I(7), V::I(2)]),
+            Ok(V::I(4))
+        );
+        assert_eq!(
+            m("java/lang/Math.ceilDiv.(II)I", &[V::I(i32::MIN), V::I(-1)]),
+            Ok(V::I(i32::MIN))
+        );
+        assert_eq!(
+            m("java/lang/Math.ceilMod.(II)I", &[V::I(7), V::I(2)]),
+            Ok(V::I(-1))
+        );
+        assert_eq!(
+            m("java/lang/Math.addExact.(II)I", &[V::I(i32::MAX), V::I(1)]),
+            ae("integer overflow")
+        );
+        assert_eq!(
+            m("java/lang/Math.addExact.(II)I", &[V::I(2), V::I(3)]),
+            Ok(V::I(5))
+        );
+        assert_eq!(
+            m("java/lang/Math.addExact.(JJ)J", &[V::J(i64::MAX), V::J(1)]),
+            ae("long overflow")
+        );
+        assert_eq!(
+            m(
+                "java/lang/Math.multiplyExact.(II)I",
+                &[V::I(65536), V::I(65536)]
+            ),
+            ae("integer overflow")
+        );
+        assert_eq!(
+            m(
+                "java/lang/Math.multiplyExact.(JI)J",
+                &[V::J(i64::MAX), V::I(2)]
+            ),
+            ae("long overflow")
+        );
+        assert_eq!(
+            m("java/lang/Math.toIntExact.(J)I", &[V::J(1 << 31)]),
+            ae("integer overflow")
+        );
+        assert_eq!(
+            m("java/lang/Math.toIntExact.(J)I", &[V::J(-5)]),
+            Ok(V::I(-5))
+        );
+        assert_eq!(
+            m("java/lang/Math.absExact.(I)I", &[V::I(i32::MIN)]),
+            ae("Overflow to represent absolute value of Integer.MIN_VALUE")
+        );
+        assert_eq!(
+            m("java/lang/Integer.sum.(II)I", &[V::I(i32::MAX), V::I(1)]),
+            Ok(V::I(i32::MIN))
+        );
+    }
+
+    /// `Enum.valueOf(type, name)`, which a mod enum's `valueOf(String)` is: the constant its
+    /// `values()` names so, else what JDK 21 throws (the class by its canonical name).
+    #[test]
+    fn enum_value_of_finds_a_mod_enums_constant_by_name() {
+        fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
+            if (class, what) != ("t/Oracle$Mode", "values") {
+                return None;
+            }
+            let mut values = Vec::new();
+            for (i, n) in ["SPEED", "TORQUE"].into_iter().enumerate() {
+                let e = rt.new_object("t/Oracle$Mode");
+                let name = rt.string(n);
+                crate::api::call(
+                    rt,
+                    "java/lang/Enum.<init>.(Ljava/lang/String;I)V",
+                    &[e, name, V::I(i as i32)],
+                );
+                values.push(rt.intern(format!("test/mode/{n}"), |_| e));
+            }
+            Some(rt.alloc("[Lt/Oracle$Mode;", Data::Array(values)))
+        }
+        let mut rt = Rt::new();
+        rt.supers.insert("t/Oracle$Mode", "java/lang/Enum");
+        rt.reflect = Some(reflect);
+        let class = class_object(&mut rt, "t/Oracle$Mode");
+        const VALUE_OF: &str =
+            "java/lang/Enum.valueOf.(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;";
+        let mut value_of = |name: Option<&str>| {
+            let n = name.map_or(V::NULL, |n| rt.string(n));
+            outcome(&mut rt, VALUE_OF, &[class, n])
+        };
+        let torque = value_of(Some("TORQUE")).unwrap();
+        let name = crate::api_common::enum_name(&mut rt, torque, false);
+        assert_eq!(rt.str_of(name), Some("TORQUE"));
+        let mut value_of = |name: Option<&str>| {
+            let n = name.map_or(V::NULL, |n| rt.string(n));
+            outcome(&mut rt, VALUE_OF, &[class, n])
+        };
+        assert_eq!(
+            value_of(Some("FAST")),
+            Err("java/lang/IllegalArgumentException: No enum constant t.Oracle.Mode.FAST".into())
+        );
+        assert_eq!(
+            value_of(Some("speed")),
+            Err("java/lang/IllegalArgumentException: No enum constant t.Oracle.Mode.speed".into())
+        );
+        assert_eq!(
+            value_of(None),
+            Err("java/lang/NullPointerException: Name is null".into())
+        );
+    }
+
+    /// `Character`'s digits and surrogates, `String.lines`, `trim` and `strip`, and
+    /// `Class.getCanonicalName`, as JDK 21 answers them.
+    #[test]
+    fn characters_lines_and_canonical_names_are_the_jdks() {
+        let mut rt = Rt::new();
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Character.digit.(CI)I",
+                &[V::I('f' as i32), V::I(16)]
+            ),
+            V::I(15)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Character.digit.(CI)I",
+                &[V::I('g' as i32), V::I(16)]
+            ),
+            V::I(-1)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Character.digit.(CI)I",
+                &[V::I('7' as i32), V::I(0)]
+            ),
+            V::I(-1)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Character.toCodePoint.(CC)I",
+                &[V::I(0xD83D), V::I(0xDE00)]
+            ),
+            V::I(128512)
+        );
+        let units = c(
+            &mut rt,
+            "java/lang/Character.toChars.(I)[C",
+            &[V::I(0x1F600)],
+        );
+        assert_eq!(
+            crate::jutil::elements(&rt, units),
+            [V::I(0xD83D), V::I(56832)]
+        );
+        let text = rt.string("a\nb\r\nc\r\n\nd");
+        let lines = c(
+            &mut rt,
+            "java/lang/String.lines.()Ljava/util/stream/Stream;",
+            &[text],
+        );
+        let got: Vec<String> = crate::jutil::elements(&rt, lines)
+            .into_iter()
+            .map(|v| rt.str_of(v).unwrap_or("?").to_owned())
+            .collect();
+        assert_eq!(got, ["a", "b", "c", "", "d"]);
+        let one = rt.string("a\n");
+        let lines = c(
+            &mut rt,
+            "java/lang/String.lines.()Ljava/util/stream/Stream;",
+            &[one],
+        );
+        assert_eq!(crate::jutil::elements(&rt, lines).len(), 1);
+        // `trim` drops what is up to a space (a control), not a no-break or an em space; `strip`
+        // Java's whitespace (the em space, the tab), not a control.
+        let padded = rt.string("\u{1}\u{A0}x\u{2003}\t");
+        let trimmed = c(
+            &mut rt,
+            "java/lang/String.trim.()Ljava/lang/String;",
+            &[padded],
+        );
+        assert_eq!(rt.str_of(trimmed), Some("\u{A0}x\u{2003}"));
+        let stripped = c(
+            &mut rt,
+            "java/lang/String.strip.()Ljava/lang/String;",
+            &[padded],
+        );
+        assert_eq!(rt.str_of(stripped), Some("\u{1}\u{A0}x"));
+        for (class, want) in [
+            ("t/Oracle$Mode", Some("t.Oracle.Mode")),
+            ("[[I", Some("int[][]")),
+            ("[Lt/Oracle$Mode;", Some("t.Oracle.Mode[]")),
+            ("t/Oracle$2", None),
+        ] {
+            let k = class_object(&mut rt, class);
+            let v = crate::api::call(
+                &mut rt,
+                "java/lang/Class.getCanonicalName.()Ljava/lang/String;",
+                &[k],
+            );
+            assert_eq!(rt.str_of(v), want, "{class}");
+        }
+    }
+
+    /// A throwable keeps what it suppressed (try-with-resources' closing failures), refusing null
+    /// and itself as JDK 21 does; `printStackTrace` and the stack's methods are answered; prints
+    /// to `System.out` and `System.err` go through their streams.
+    #[test]
+    fn throwables_keep_what_they_suppress_and_streams_print() {
+        let mut rt = Rt::new();
+        let e = rt.new_object("java/lang/RuntimeException");
+        let x = rt.string("x");
+        crate::api::call(
+            &mut rt,
+            "java/lang/RuntimeException.<init>.(Ljava/lang/String;)V",
+            &[e, x],
+        );
+        const ADD: &str = "java/lang/Throwable.addSuppressed.(Ljava/lang/Throwable;)V";
+        assert_eq!(
+            outcome(&mut rt, ADD, &[e, V::NULL]),
+            Err("java/lang/NullPointerException: Cannot suppress a null exception.".into())
+        );
+        crate::api::call(&mut rt, ADD, &[e, e]);
+        let iae = rt.thrown.take().unwrap();
+        assert_eq!(rt.class_of(iae), "java/lang/IllegalArgumentException");
+        assert_eq!(rt.get_field(iae, "cause"), e);
+        const GET: &str = "java/lang/Throwable.getSuppressed.()[Ljava/lang/Throwable;";
+        let none = crate::api::call(&mut rt, GET, &[e]);
+        assert_eq!(rt.array_len(none), 0);
+        let (a, b) = (
+            rt.new_object("java/lang/IllegalStateException"),
+            rt.new_object("java/lang/IllegalStateException"),
+        );
+        crate::api::call(&mut rt, ADD, &[e, a]);
+        crate::api::call(&mut rt, ADD, &[e, b]);
+        let all = crate::api::call(&mut rt, GET, &[e]);
+        assert_eq!(crate::jutil::elements(&rt, all), [a, b]);
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "java/lang/Throwable.fillInStackTrace.()Ljava/lang/Throwable;",
+                &[e]
+            ),
+            e
+        );
+        crate::api::call(&mut rt, "java/lang/Exception.printStackTrace.()V", &[e]);
+        let out = crate::api::get_static(&mut rt, "java/lang/System.out");
+        assert_eq!(
+            crate::api::get_static(&mut rt, "java/lang/System.out"),
+            out,
+            "one System.out"
+        );
+        crate::api::call(
+            &mut rt,
+            "java/lang/Throwable.printStackTrace.(Ljava/io/PrintStream;)V",
+            &[e, out],
+        );
+        crate::api::call(
+            &mut rt,
+            "java/io/PrintStream.println.(Ljava/lang/String;)V",
+            &[out, x],
+        );
+        let f = rt.string("%d%n");
+        let values = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![V::I(3)]));
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "java/io/PrintStream.printf.(Ljava/lang/String;[Ljava/lang/Object;)Ljava/io/PrintStream;",
+                &[out, f, values]
+            ),
+            out
+        );
+        assert!(
+            rt.unmapped.is_empty() && rt.thrown.is_none(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
 }
 
 /// What a mod logs at `info`, `warn` or `error`, printed when tracing (`HORIZON_COMPAT_TRACE`): the
@@ -2143,6 +3310,89 @@ fn mod_log(rt: &Rt, level: &str, desc: &str, args: &[V]) {
         out.push_str(part);
     }
     eprintln!("horizon-compat: mod {level}: {out}");
+}
+
+const PRINT_STREAM: &str = "java/io/PrintStream";
+
+/// `System.out` and `System.err` (`err`): one stream each.
+pub(crate) fn std_stream(rt: &mut Rt, err: bool) -> V {
+    rt.intern(format!("compat:std/{err}"), |rt| {
+        let s = rt.new_object(PRINT_STREAM);
+        rt.put_field(s, "$err", V::I(err as i32));
+        s
+    })
+}
+
+/// What a mod prints to `System.out` or `System.err` (`err`), which NeoForge's console takes as
+/// its log: printed when tracing (`HORIZON_COMPAT_TRACE`), as the mods' log is.
+pub(crate) fn print_std(err: bool, text: &str) {
+    if Rt::tracing() {
+        let to = if err { "stderr" } else { "stdout" };
+        for line in text.strip_suffix('\n').unwrap_or(text).split('\n') {
+            eprintln!("horizon-compat: mod {to}: {line}");
+        }
+    }
+}
+
+/// A `PrintStream` (`System.out`, `System.err`): `print`, `println`, `printf`, `format`,
+/// `append` and `write` print what they are given ([`print_std`]); `flush` and `close` have
+/// nothing to do.
+fn print_stream(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let ks = kinds(desc);
+    let text = match name {
+        "print" | "println" | "append" => {
+            let mut s = match ks.first() {
+                None => String::new(),
+                Some('[') => crate::jutil::elements(rt, a(1))
+                    .iter()
+                    .map(|v| char::from_u32(v.i() as u32 & 0xffff).unwrap_or('\u{fffd}'))
+                    .collect(),
+                Some(&k) => rt.to_java_string(a(1), k),
+            };
+            if name == "println" {
+                s.push('\n');
+            }
+            s
+        }
+        // `printf(format, args...)`, with a locale first or not.
+        "printf" | "format" => {
+            let at = if desc.starts_with("(Ljava/util/Locale;") {
+                2
+            } else {
+                1
+            };
+            let f = text(rt, a(at));
+            let values = crate::jutil::elements(rt, a(at + 1));
+            format_java(rt, &f, &values)
+        }
+        "write" => match ks.as_slice() {
+            ['I'] => char::from(a(1).i() as u8).to_string(),
+            _ => {
+                let bytes: Vec<u8> = crate::jutil::elements(rt, a(1))
+                    .iter()
+                    .map(|v| v.i() as u8)
+                    .collect();
+                let (from, len) = if ks.len() == 3 {
+                    (a(2).i().max(0) as usize, a(3).i().max(0) as usize)
+                } else {
+                    (0, bytes.len())
+                };
+                String::from_utf8_lossy(
+                    bytes
+                        .get(from..from.saturating_add(len))
+                        .unwrap_or_default(),
+                )
+                .into_owned()
+            }
+        },
+        "flush" | "close" => return Some(V::Void),
+        "checkError" => return Some(V::I(0)),
+        _ => return None,
+    };
+    print_std(rt.get_field(this, "$err").i() != 0, &text);
+    Some(if desc.ends_with(")V") { V::Void } else { this })
 }
 
 /// Small libraries mods lean on: loggers (printed only when tracing), commons-lang `Pair`,

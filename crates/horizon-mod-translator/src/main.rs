@@ -35,6 +35,8 @@ fn translate(jar: &Path, out: &Path) -> Result<(), String> {
 enum Receiver {
     /// Null: a static method's, or one answered whatever the receiver.
     Null,
+    /// A library class's object as its constructor with no arguments makes it (`new ArrayList()`).
+    Init,
     /// A bare object of the owner's class.
     Bare,
     /// The probe's server player, the player in place ([`probe_host`]).
@@ -351,17 +353,198 @@ fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
 /// `super.tick()`), then the API methods it calls that return the class, up to
 /// [`STATICS_PER_CLASS`] of each kind per class: the methods returning `Entity` (`getVehicle`,
 /// `ServerLevel.getEntity`...) no longer crowd the constructor out.
-fn made_receivers(calls: &std::collections::BTreeMap<horizon_mod_translator::class::Member, usize>) -> std::collections::BTreeMap<String, Vec<Receiver>> {
+/// A value of a library's type for the measure's probe of a library call, as a mod has one: an
+/// empty `ArrayList` for a `List`, a `HashMap` for a `Map`, an absent Guava `Optional`, a JOML
+/// vector... None for a type with no sample here ([`sample`] then answers, or null stays).
+fn lib_sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
+    use horizon_compat::{V, api};
+    let made = |rt: &mut horizon_compat::Rt, class: &'static str, init: &'static str, args: &[V]| {
+        let o = rt.new_object(class);
+        let mut a = vec![o];
+        a.extend_from_slice(args);
+        api::call(rt, init, &a);
+        o
+    };
+    Some(match ty {
+        "Ljava/util/List;" | "Ljava/util/Collection;" | "Ljava/lang/Iterable;" | "Ljava/util/ArrayList;" | "Ljava/util/AbstractList;" | "Ljava/util/AbstractCollection;" => {
+            made(rt, "java/util/ArrayList", "java/util/ArrayList.<init>.()V", &[])
+        }
+        "Ljava/util/Map;" | "Ljava/util/HashMap;" | "Ljava/util/AbstractMap;" => made(rt, "java/util/HashMap", "java/util/HashMap.<init>.()V", &[]),
+        "Ljava/util/LinkedHashMap;" => made(rt, "java/util/LinkedHashMap", "java/util/LinkedHashMap.<init>.()V", &[]),
+        "Ljava/util/TreeMap;" | "Ljava/util/SortedMap;" | "Ljava/util/NavigableMap;" => made(rt, "java/util/TreeMap", "java/util/TreeMap.<init>.()V", &[]),
+        "Ljava/util/Set;" | "Ljava/util/HashSet;" | "Ljava/util/AbstractSet;" => made(rt, "java/util/HashSet", "java/util/HashSet.<init>.()V", &[]),
+        "Ljava/util/LinkedHashSet;" => made(rt, "java/util/LinkedHashSet", "java/util/LinkedHashSet.<init>.()V", &[]),
+        "Ljava/util/TreeSet;" | "Ljava/util/SortedSet;" | "Ljava/util/NavigableSet;" => made(rt, "java/util/TreeSet", "java/util/TreeSet.<init>.()V", &[]),
+        "Ljava/util/Deque;" | "Ljava/util/Queue;" | "Ljava/util/ArrayDeque;" => made(rt, "java/util/ArrayDeque", "java/util/ArrayDeque.<init>.()V", &[]),
+        "Ljava/util/LinkedList;" => made(rt, "java/util/LinkedList", "java/util/LinkedList.<init>.()V", &[]),
+        "Ljava/util/Iterator;" => {
+            let list = made(rt, "java/util/ArrayList", "java/util/ArrayList.<init>.()V", &[]);
+            api::call(rt, "java/util/List.iterator.()Ljava/util/Iterator;", &[list])
+        }
+        "Ljava/util/ListIterator;" => {
+            let list = made(rt, "java/util/ArrayList", "java/util/ArrayList.<init>.()V", &[]);
+            api::call(rt, "java/util/List.listIterator.()Ljava/util/ListIterator;", &[list])
+        }
+        "Ljava/util/Spliterator;" => {
+            let list = made(rt, "java/util/ArrayList", "java/util/ArrayList.<init>.()V", &[]);
+            api::call(rt, "java/util/List.spliterator.()Ljava/util/Spliterator;", &[list])
+        }
+        "Ljava/util/stream/IntStream;" => api::call(rt, "java/util/stream/IntStream.range.(II)Ljava/util/stream/IntStream;", &[V::I(0), V::I(3)]),
+        "Ljava/util/stream/LongStream;" => api::call(rt, "java/util/stream/LongStream.empty.()Ljava/util/stream/LongStream;", &[]),
+        "Ljava/util/stream/DoubleStream;" => api::call(rt, "java/util/stream/DoubleStream.empty.()Ljava/util/stream/DoubleStream;", &[]),
+        // fastutil's typed entries are entries of their key's and value's kinds.
+        "Lit/unimi/dsi/fastutil/objects/Object2IntMap$Entry;" => {
+            let k = rt.string("stone");
+            api::call(
+                rt,
+                "java/util/Map.entry.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map$Entry;",
+                &[k, V::I(0)],
+            )
+        }
+        "Lit/unimi/dsi/fastutil/ints/Int2ObjectMap$Entry;" => {
+            let v = rt.string("stone");
+            api::call(
+                rt,
+                "java/util/Map.entry.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map$Entry;",
+                &[V::I(0), v],
+            )
+        }
+        "Lit/unimi/dsi/fastutil/longs/Long2ObjectMap$Entry;" => {
+            let v = rt.string("stone");
+            api::call(rt, "java/util/Map.entry.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map$Entry;", &[V::J(0), v])
+        }
+        "Ljava/util/Optional;" => api::call(rt, "java/util/Optional.empty.()Ljava/util/Optional;", &[]),
+        "Ljava/util/stream/Stream;" => {
+            let list = made(rt, "java/util/ArrayList", "java/util/ArrayList.<init>.()V", &[]);
+            api::call(rt, "java/util/List.stream.()Ljava/util/stream/Stream;", &[list])
+        }
+        "Ljava/lang/Object;" | "Ljava/lang/Comparable;" | "Ljava/lang/CharSequence;" => rt.string("stone"),
+        "Ljava/lang/Integer;" | "Ljava/lang/Number;" => api::call(rt, "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;", &[V::I(0)]),
+        "Ljava/lang/StringBuilder;" => made(rt, "java/lang/StringBuilder", "java/lang/StringBuilder.<init>.()V", &[]),
+        "Ljava/util/UUID;" => made(rt, "java/util/UUID", "java/util/UUID.<init>.(JJ)V", &[V::J(1), V::J(2)]),
+        "Ljava/util/Random;" => made(rt, "java/util/Random", "java/util/Random.<init>.()V", &[]),
+        "Ljava/util/concurrent/atomic/AtomicInteger;" => made(rt, "java/util/concurrent/atomic/AtomicInteger", "java/util/concurrent/atomic/AtomicInteger.<init>.()V", &[]),
+        "Ljava/util/concurrent/atomic/AtomicBoolean;" => made(rt, "java/util/concurrent/atomic/AtomicBoolean", "java/util/concurrent/atomic/AtomicBoolean.<init>.()V", &[]),
+        "Ljava/util/concurrent/atomic/AtomicReference;" => made(rt, "java/util/concurrent/atomic/AtomicReference", "java/util/concurrent/atomic/AtomicReference.<init>.()V", &[]),
+        "Lcom/google/common/base/Optional;" => api::call(rt, "com/google/common/base/Optional.absent.()Lcom/google/common/base/Optional;", &[]),
+        "Lcom/google/common/collect/ImmutableList;" => api::call(rt, "com/google/common/collect/ImmutableList.of.()Lcom/google/common/collect/ImmutableList;", &[]),
+        "Lcom/google/common/collect/ImmutableSet;" => api::call(rt, "com/google/common/collect/ImmutableSet.of.()Lcom/google/common/collect/ImmutableSet;", &[]),
+        "Lcom/google/common/collect/ImmutableMap;" => api::call(rt, "com/google/common/collect/ImmutableMap.of.()Lcom/google/common/collect/ImmutableMap;", &[]),
+        "Lcom/google/gson/JsonObject;" | "Lcom/google/gson/JsonElement;" => made(rt, "com/google/gson/JsonObject", "com/google/gson/JsonObject.<init>.()V", &[]),
+        "Lcom/google/gson/JsonArray;" => made(rt, "com/google/gson/JsonArray", "com/google/gson/JsonArray.<init>.()V", &[]),
+        "Lit/unimi/dsi/fastutil/ints/IntList;" | "Lit/unimi/dsi/fastutil/ints/IntArrayList;" | "Lit/unimi/dsi/fastutil/ints/IntCollection;" => {
+            made(rt, "it/unimi/dsi/fastutil/ints/IntArrayList", "it/unimi/dsi/fastutil/ints/IntArrayList.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/objects/ObjectList;" | "Lit/unimi/dsi/fastutil/objects/ObjectArrayList;" | "Lit/unimi/dsi/fastutil/objects/ObjectCollection;" => {
+            made(rt, "it/unimi/dsi/fastutil/objects/ObjectArrayList", "it/unimi/dsi/fastutil/objects/ObjectArrayList.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/ints/Int2ObjectMap;" | "Lit/unimi/dsi/fastutil/ints/Int2ObjectOpenHashMap;" => {
+            made(rt, "it/unimi/dsi/fastutil/ints/Int2ObjectOpenHashMap", "it/unimi/dsi/fastutil/ints/Int2ObjectOpenHashMap.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/longs/Long2ObjectMap;" | "Lit/unimi/dsi/fastutil/longs/Long2ObjectOpenHashMap;" => {
+            made(rt, "it/unimi/dsi/fastutil/longs/Long2ObjectOpenHashMap", "it/unimi/dsi/fastutil/longs/Long2ObjectOpenHashMap.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/objects/Object2IntMap;" | "Lit/unimi/dsi/fastutil/objects/Object2IntOpenHashMap;" => {
+            made(rt, "it/unimi/dsi/fastutil/objects/Object2IntOpenHashMap", "it/unimi/dsi/fastutil/objects/Object2IntOpenHashMap.<init>.()V", &[])
+        }
+        "Ljava/util/Map$Entry;" => {
+            let map = made(rt, "java/util/HashMap", "java/util/HashMap.<init>.()V", &[]);
+            let k = rt.string("stone");
+            api::call(
+                rt,
+                "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                &[map, k, k],
+            );
+            let entries = api::call(rt, "java/util/Map.entrySet.()Ljava/util/Set;", &[map]);
+            let it = api::call(
+                rt,
+                "java/util/Set.iterator.()Ljava/util/Iterator;",
+                &[entries],
+            );
+            api::call(rt, "java/util/Iterator.next.()Ljava/lang/Object;", &[it])
+        }
+        "Ljava/util/Comparator;" => api::call(
+            rt,
+            "java/util/Comparator.naturalOrder.()Ljava/util/Comparator;",
+            &[],
+        ),
+        "Ljava/nio/file/Path;" => {
+            let name = rt.string("stone");
+            let none = rt.new_array(0, V::NULL);
+            api::call(
+                rt,
+                "java/nio/file/Path.of.(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;",
+                &[name, none],
+            )
+        }
+        "Ljava/io/File;" => {
+            let name = rt.string("stone");
+            made(rt, "java/io/File", "java/io/File.<init>.(Ljava/lang/String;)V", &[name])
+        }
+        "Lcom/google/common/collect/Multimap;" | "Lcom/google/common/collect/ListMultimap;" | "Lcom/google/common/collect/ArrayListMultimap;" => {
+            api::call(rt, "com/google/common/collect/ArrayListMultimap.create.()Lcom/google/common/collect/ArrayListMultimap;", &[])
+        }
+        "Lcom/google/common/collect/SetMultimap;" | "Lcom/google/common/collect/HashMultimap;" => {
+            api::call(rt, "com/google/common/collect/HashMultimap.create.()Lcom/google/common/collect/HashMultimap;", &[])
+        }
+        "Lcom/google/common/collect/Table;" | "Lcom/google/common/collect/HashBasedTable;" => {
+            api::call(rt, "com/google/common/collect/HashBasedTable.create.()Lcom/google/common/collect/HashBasedTable;", &[])
+        }
+        "Lit/unimi/dsi/fastutil/objects/ObjectSet;" | "Lit/unimi/dsi/fastutil/objects/ObjectOpenHashSet;" => {
+            made(rt, "it/unimi/dsi/fastutil/objects/ObjectOpenHashSet", "it/unimi/dsi/fastutil/objects/ObjectOpenHashSet.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/ints/IntSet;" | "Lit/unimi/dsi/fastutil/ints/IntOpenHashSet;" => {
+            made(rt, "it/unimi/dsi/fastutil/ints/IntOpenHashSet", "it/unimi/dsi/fastutil/ints/IntOpenHashSet.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/longs/LongSet;" | "Lit/unimi/dsi/fastutil/longs/LongOpenHashSet;" => {
+            made(rt, "it/unimi/dsi/fastutil/longs/LongOpenHashSet", "it/unimi/dsi/fastutil/longs/LongOpenHashSet.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/longs/LongList;" | "Lit/unimi/dsi/fastutil/longs/LongArrayList;" => {
+            made(rt, "it/unimi/dsi/fastutil/longs/LongArrayList", "it/unimi/dsi/fastutil/longs/LongArrayList.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/longs/Long2IntMap;" | "Lit/unimi/dsi/fastutil/longs/Long2IntOpenHashMap;" => {
+            made(rt, "it/unimi/dsi/fastutil/longs/Long2IntOpenHashMap", "it/unimi/dsi/fastutil/longs/Long2IntOpenHashMap.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/objects/Object2ObjectMap;" | "Lit/unimi/dsi/fastutil/objects/Object2ObjectOpenHashMap;" => {
+            made(rt, "it/unimi/dsi/fastutil/objects/Object2ObjectOpenHashMap", "it/unimi/dsi/fastutil/objects/Object2ObjectOpenHashMap.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/objects/Reference2IntMap;" | "Lit/unimi/dsi/fastutil/objects/Reference2IntOpenHashMap;" => {
+            made(rt, "it/unimi/dsi/fastutil/objects/Reference2IntOpenHashMap", "it/unimi/dsi/fastutil/objects/Reference2IntOpenHashMap.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/objects/Reference2ReferenceMap;" | "Lit/unimi/dsi/fastutil/objects/Reference2ReferenceOpenHashMap;" => {
+            made(rt, "it/unimi/dsi/fastutil/objects/Reference2ReferenceOpenHashMap", "it/unimi/dsi/fastutil/objects/Reference2ReferenceOpenHashMap.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/PriorityQueue;" | "Lit/unimi/dsi/fastutil/objects/ObjectHeapPriorityQueue;" => {
+            made(rt, "it/unimi/dsi/fastutil/objects/ObjectHeapPriorityQueue", "it/unimi/dsi/fastutil/objects/ObjectHeapPriorityQueue.<init>.()V", &[])
+        }
+        "Lit/unimi/dsi/fastutil/objects/ObjectIterator;" => {
+            let list = made(rt, "it/unimi/dsi/fastutil/objects/ObjectArrayList", "it/unimi/dsi/fastutil/objects/ObjectArrayList.<init>.()V", &[]);
+            api::call(rt, "it/unimi/dsi/fastutil/objects/ObjectArrayList.iterator.()Lit/unimi/dsi/fastutil/objects/ObjectListIterator;", &[list])
+        }
+        "Lorg/joml/Vector3f;" | "Lorg/joml/Vector3fc;" => made(rt, "org/joml/Vector3f", "org/joml/Vector3f.<init>.()V", &[]),
+        "Lorg/joml/Vector4f;" | "Lorg/joml/Vector4fc;" => made(rt, "org/joml/Vector4f", "org/joml/Vector4f.<init>.()V", &[]),
+        "Lorg/joml/Matrix4f;" | "Lorg/joml/Matrix4fc;" => made(rt, "org/joml/Matrix4f", "org/joml/Matrix4f.<init>.()V", &[]),
+        "Lorg/joml/Matrix3f;" | "Lorg/joml/Matrix3fc;" => made(rt, "org/joml/Matrix3f", "org/joml/Matrix3f.<init>.()V", &[]),
+        "Lorg/joml/Quaternionf;" | "Lorg/joml/Quaternionfc;" => made(rt, "org/joml/Quaternionf", "org/joml/Quaternionf.<init>.()V", &[]),
+        _ => return None,
+    })
+}
+
+fn made_receivers(
+    calls: &std::collections::BTreeMap<horizon_mod_translator::class::Member, usize>,
+    statics: &std::collections::BTreeSet<horizon_mod_translator::class::Member>,
+    keep: fn(&str) -> bool,
+) -> std::collections::BTreeMap<String, Vec<Receiver>> {
     let mut built: std::collections::BTreeMap<String, Vec<Receiver>> = Default::default();
     let mut returned: std::collections::BTreeMap<String, Vec<Receiver>> = Default::default();
     for m in calls.keys() {
         let key: &'static str = Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
-        let n = horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + 1;
+        let n = horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + usize::from(!statics.contains(m));
         let (class, r, by) = if m.name == "<init>" {
             (m.owner.as_str(), Receiver::New(key, n), &mut built)
         } else {
             let Some(ret) = m.desc.rsplit(')').next().and_then(|r| r.strip_prefix('L')).and_then(|r| r.strip_suffix(';')) else { continue };
-            if !horizon_mod_translator::is_api(ret) {
+            if !keep(ret) {
                 continue;
             }
             (ret, Receiver::Returned(key, n), &mut returned)
@@ -652,17 +835,44 @@ fn main() -> ExitCode {
         let statics = if hosted { static_receivers(&classes) } else { Default::default() };
         // And on what the mod makes of the method's class: an object its constructor builds, or
         // what an API method returning that class gives (`NonNullList.withSize`), null arguments.
-        let made = if hosted { made_receivers(&calls) } else { Default::default() };
+        // A static call (`invokestatic`) has no receiver: its arguments are all it is given.
+        let statics_called = horizon_mod_translator::static_calls(&runtime);
+        let made = if hosted { made_receivers(&calls, &statics_called, horizon_mod_translator::is_api) } else { Default::default() };
         let (mut mapped, mut sites, mut mapped_sites) = (0usize, 0usize, 0usize);
         let mut missing: Vec<(usize, String)> = Vec::new();
-        let answers = |key: &'static str, owner: &'static str, n: usize, receiver: Receiver, fill: Args| {
+        let answers = |key: &'static str, owner: &'static str, n: usize, receiver: Receiver, fill: Args, lib: bool| {
             let mut rt = horizon_compat::Rt::new();
+            let pick = |rt: &mut horizon_compat::Rt, ty: &str| if lib { lib_sample(rt, ty).or_else(|| sample(rt, ty)) } else { sample(rt, ty) };
             let call = |rt: &mut horizon_compat::Rt| {
+                // Null for each reference, the zero of its kind for a primitive (which is never a
+                // reference), after the receiver's place when there is one.
                 let mut args = vec![horizon_compat::V::NULL; n];
+                let declared = param_types(key.rsplit_once('.').map_or("()V", |(_, d)| d));
+                let offset = n - declared.len().min(n);
+                for (i, ty) in declared.iter().enumerate() {
+                    if let Some(slot) = args.get_mut(offset + i) {
+                        *slot = match *ty {
+                            "I" | "Z" | "B" | "C" | "S" => horizon_compat::V::I(0),
+                            "J" => horizon_compat::V::J(0),
+                            "F" => horizon_compat::V::F(0.0),
+                            "D" => horizon_compat::V::D(0.0),
+                            _ => horizon_compat::V::NULL,
+                        };
+                    }
+                }
                 match receiver {
                     Receiver::Null => {}
                     Receiver::Bare => args[0] = rt.new_object(owner),
-                    Receiver::Sample => args[0] = sample(rt, &format!("L{owner};")).unwrap_or_else(|| rt.new_object(owner)),
+                    Receiver::Init => {
+                        let o = rt.new_object(owner);
+                        let init = rt.static_key(&format!("{owner}.<init>.()V"));
+                        horizon_compat::api::call(rt, init, &[o]);
+                        if !rt.unmapped.is_empty() || rt.thrown.is_some() {
+                            return false;
+                        }
+                        args[0] = o;
+                    }
+                    Receiver::Sample => args[0] = pick(rt, &format!("L{owner};")).unwrap_or_else(|| rt.new_object(owner)),
                     Receiver::Alternate => args[0] = alternate(rt, owner).unwrap_or_else(|| rt.new_object(owner)),
                     Receiver::Player => args[0] = horizon_compat::menus::server_player(rt, PROBE_PLAYER),
                     Receiver::Mob => args[0] = horizon_compat::vanilla_entities::of(rt, PROBE_MOB, "minecraft:cow", None),
@@ -701,7 +911,7 @@ fn main() -> ExitCode {
                 };
                 if let Some(first) = first {
                     for (i, ty) in params.iter().enumerate() {
-                        if let (Some(v), true) = (sample(rt, ty), first + i < n) {
+                        if let (Some(v), true) = (pick(rt, ty), first + i < n) {
                             args[first + i] = v;
                         }
                     }
@@ -722,7 +932,8 @@ fn main() -> ExitCode {
         };
         for (m, n) in &calls {
             let key: &'static str = Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
-            let arity = horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + 1;
+            let is_static = statics_called.contains(m);
+            let arity = horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + usize::from(!is_static);
             sites += n;
             let owner: &'static str = Box::leak(m.owner.clone().into_boxed_str());
             let entity = hosted && entity_class(owner);
@@ -743,9 +954,13 @@ fn main() -> ExitCode {
             // Null arguments first; hosted, also each of its declared type (a state, a position, a
             // stack, the player), on the same receivers and on a value of the owner's type.
             let fills: &[Args] = if hosted { &[Args::Null, Args::Instance] } else { &[Args::Null] };
-            if fills.iter().any(|&fill| receivers.iter().any(|&r| answers(key, owner, arity, r, fill)))
-                || (hosted && (answers(key, owner, arity, Receiver::Sample, Args::Instance) || answers(key, owner, arity, Receiver::Null, Args::Static)))
-            {
+            let answered = if is_static {
+                answers(key, owner, arity, Receiver::Null, Args::Null, false) || (hosted && answers(key, owner, arity, Receiver::Null, Args::Static, false))
+            } else {
+                fills.iter().any(|&fill| receivers.iter().any(|&r| answers(key, owner, arity, r, fill, false)))
+                    || (hosted && answers(key, owner, arity, Receiver::Sample, Args::Instance, false))
+            };
+            if answered {
                 mapped += 1;
                 mapped_sites += n;
             } else {
@@ -764,6 +979,59 @@ fn main() -> ExitCode {
             let limit = if m == "all" { usize::MAX } else { 60 };
             for (n, k) in missing.iter().take(limit) {
                 println!("  missing {n:5} {k}");
+            }
+        }
+        // LIBS=1: the calls into the libraries every mod has (the JDK, Guava, fastutil, JOML...),
+        // which the runtime answers as it answers the API's, measured the same way: on null, a
+        // bare object, what the mod makes of the class (its constructors, and the API's or the
+        // libraries' methods returning it), and a sample of the library's type (an `ArrayList`
+        // for a `List`). Listed as `lib-missing`.
+        if std::env::var_os("LIBS").is_some() {
+            let libs = horizon_mod_translator::library_calls(&runtime);
+            let made_lib = if hosted {
+                let mut both = calls.clone();
+                both.extend(libs.iter().map(|(m, n)| (m.clone(), *n)));
+                made_receivers(&both, &statics_called, |c| horizon_mod_translator::library_of(c).is_some())
+            } else {
+                Default::default()
+            };
+            let (mut mapped, mut sites, mut mapped_sites) = (0usize, 0usize, 0usize);
+            let mut missing: Vec<(usize, String)> = Vec::new();
+            for (m, n) in &libs {
+                let key: &'static str =
+                    Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
+                let is_static = statics_called.contains(m);
+                let arity = horizon_mod_translator::codegen::arg_kinds(&m.desc).len()
+                    + usize::from(!is_static);
+                sites += n;
+                let owner: &'static str = Box::leak(m.owner.clone().into_boxed_str());
+                let mut receivers = vec![Receiver::Null, Receiver::Bare, Receiver::Init];
+                receivers.extend(made_lib.get(owner).map_or(&[][..], Vec::as_slice).iter().copied());
+                let fills: &[Args] = if hosted { &[Args::Null, Args::Instance] } else { &[Args::Null] };
+                let answered = if is_static {
+                    answers(key, owner, arity, Receiver::Null, Args::Null, true) || (hosted && answers(key, owner, arity, Receiver::Null, Args::Static, true))
+                } else {
+                    fills.iter().any(|&fill| receivers.iter().any(|&r| answers(key, owner, arity, r, fill, true)))
+                        || (hosted && answers(key, owner, arity, Receiver::Sample, Args::Instance, true))
+                };
+                if answered {
+                    mapped += 1;
+                    mapped_sites += n;
+                } else {
+                    missing.push((*n, key.to_owned()));
+                }
+            }
+            missing.sort_by(|a, b| b.0.cmp(&a.0));
+            println!(
+                "  libraries: mapped {mapped} of {} library methods ({:.1}%), {mapped_sites} of {sites} class uses ({:.1}%)",
+                libs.len(),
+                100.0 * mapped as f64 / libs.len().max(1) as f64,
+                100.0 * mapped_sites as f64 / sites.max(1) as f64
+            );
+            if std::env::var_os("MISSING").is_some() {
+                for (n, k) in &missing {
+                    println!("  lib-missing {n:5} {k}");
+                }
             }
         }
         let methods: usize = classes.iter().map(|c| c.methods.len()).sum();

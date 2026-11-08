@@ -2382,7 +2382,7 @@ pub(crate) fn optional_int(rt: &mut Rt, v: Option<i32>) -> V {
 }
 
 /// An `OptionalInt`, `OptionalLong` or `OptionalDouble` (`class`) of `v`, of the class's kind.
-fn optional_number(rt: &mut Rt, class: &'static str, v: Option<V>) -> V {
+pub(crate) fn optional_number(rt: &mut Rt, class: &'static str, v: Option<V>) -> V {
     let o = rt.new_object(class);
     rt.put_field(o, "$present", V::I(v.is_some() as i32));
     let zero = match class {

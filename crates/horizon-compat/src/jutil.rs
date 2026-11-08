@@ -150,6 +150,12 @@ pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
             Some(Data::Fields(f)) if f.contains_key("value") && rt.class_of(v).starts_with("java/lang/") => {
                 return rt.java_hash(f["value"]);
             }
+            // A map entry's: its key's hash and its value's, xor'd.
+            Some(Data::List(kv)) if kv.len() == 2 && is_entry(rt.class_of(v)) => {
+                let (k, x) = (kv[0], kv[1]);
+                let half = |rt: &mut Rt, x: V| if x.is_null() { 0 } else { hash(rt, x) };
+                return half(rt, k) ^ half(rt, x);
+            }
             // JOML's `Vector2i.hashCode`: `31 * (31 + x) + y`.
             Some(Data::Fields(_)) if rt.class_of(v) == "org/joml/Vector2i" => {
                 let (x, y) = (rt.get_field(v, "x").i(), rt.get_field(v, "y").i());
@@ -556,6 +562,154 @@ pub fn elements(rt: &Rt, v: V) -> Vec<V> {
 const SPLITTER: &str = "com/google/common/base/Splitter";
 /// What `Stream.generate` gives: its supplier, until `limit` makes it a stream of so many.
 const GENERATED_STREAM: &str = "java/util/stream/Stream$Generated";
+const STREAM: &str = "java/util/stream/Stream";
+const INT_STREAM: &str = "java/util/stream/IntStream";
+const LONG_STREAM: &str = "java/util/stream/LongStream";
+const DOUBLE_STREAM: &str = "java/util/stream/DoubleStream";
+const STREAM_BUILDER: &str = "java/util/stream/Stream$Builder";
+const LIST_ITERATOR: &str = "java/util/ListIterator";
+const SIMPLE_ENTRY: &str = "java/util/AbstractMap$SimpleEntry";
+const SIMPLE_IMMUTABLE_ENTRY: &str = "java/util/AbstractMap$SimpleImmutableEntry";
+
+/// Whether `class` is a map entry's: `Map.entry`'s, a map's own, or `AbstractMap`'s simple ones.
+pub(crate) fn is_entry(class: &str) -> bool {
+    matches!(
+        class,
+        "java/util/Map$Entry" | SIMPLE_ENTRY | SIMPLE_IMMUTABLE_ENTRY
+    )
+}
+
+/// What an iterable or an iterator goes through, from where it is: a collection's elements, an
+/// iterator's remaining ones, a mod's own by its `iterator()`, `hasNext()` and `next()`.
+fn drain(rt: &mut Rt, v: V) -> Vec<V> {
+    if v.r() == 0 {
+        return Vec::new();
+    }
+    if !matches!(
+        rt.heap.get(v.r() as usize).map(|o| &o.data),
+        Some(Data::Fields(_))
+    ) {
+        return elements(rt, v);
+    }
+    let it = if rt.class_overrides(rt.class_of(v), "hasNext.()Z") {
+        v
+    } else {
+        rt.call_functional("java/lang/Iterable.iterator.()Ljava/util/Iterator;", v, &[])
+    };
+    let mut out = Vec::new();
+    while it.r() != 0
+        && rt.thrown.is_none()
+        && rt
+            .call_functional("java/util/Iterator.hasNext.()Z", it, &[])
+            .i()
+            != 0
+        && rt.thrown.is_none()
+    {
+        out.push(rt.call_functional("java/util/Iterator.next.()Ljava/lang/Object;", it, &[]));
+    }
+    out
+}
+
+/// `Stream.builder()`'s builder: `add` (itself back) and `accept` keep an element, `build` makes
+/// the stream of them.
+fn stream_builder_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let this = args.first().copied().unwrap_or_default();
+    Some(match name {
+        "add" | "accept" => {
+            let e = args.get(1).copied().unwrap_or(V::NULL);
+            list_mut(rt, this)?.push(e);
+            if name == "add" { this } else { V::Void }
+        }
+        "build" => {
+            let items = list(rt, this)?.clone();
+            rt.alloc(STREAM, Data::Stream(items))
+        }
+        _ => return None,
+    })
+}
+
+/// A `ListIterator` over a list (`$list`), between elements at `$cursor`; `$last` is the index
+/// `next` or `previous` gave last (-1 after `add` or `remove`), which `set` and `remove` act on.
+fn list_iter_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let src = rt.get_field(this, "$list");
+    let (cursor, last) = (
+        rt.get_field(this, "$cursor").i(),
+        rt.get_field(this, "$last").i(),
+    );
+    let len = list(rt, src).map_or(0, Vec::len) as i32;
+    let at = |i: i32| usize::try_from(i).ok();
+    Some(match name {
+        "hasNext" => V::I((cursor < len) as i32),
+        "hasPrevious" => V::I((cursor > 0) as i32),
+        "nextIndex" => V::I(cursor),
+        "previousIndex" => V::I(cursor - 1),
+        "next" | "previous" => {
+            let i = if name == "next" { cursor } else { cursor - 1 };
+            let Some(&v) = at(i).and_then(|i| list(rt, src)?.get(i)) else {
+                rt.throw_new("java/util/NoSuchElementException");
+                return Some(V::NULL);
+            };
+            rt.put_field(
+                this,
+                "$cursor",
+                V::I(if name == "next" { cursor + 1 } else { i }),
+            );
+            rt.put_field(this, "$last", V::I(i));
+            v
+        }
+        "remove" | "set" if last < 0 => {
+            rt.throw_new("java/lang/IllegalStateException");
+            V::Void
+        }
+        "remove" => {
+            if let (Some(l), Some(i)) = (list_mut(rt, src), at(last))
+                && i < l.len()
+            {
+                l.remove(i);
+            }
+            if last < cursor {
+                rt.put_field(this, "$cursor", V::I(cursor - 1));
+            }
+            rt.put_field(this, "$last", V::I(-1));
+            V::Void
+        }
+        "set" => {
+            if let (Some(l), Some(i)) = (list_mut(rt, src), at(last))
+                && let Some(slot) = l.get_mut(i)
+            {
+                *slot = a(1);
+            }
+            V::Void
+        }
+        "add" => {
+            if let (Some(l), Some(i)) = (list_mut(rt, src), at(cursor)) {
+                l.insert(i.min(l.len()), a(1));
+            }
+            rt.put_field(this, "$cursor", V::I(cursor + 1));
+            rt.put_field(this, "$last", V::I(-1));
+            V::Void
+        }
+        "forEachRemaining" => {
+            let rest: Vec<V> = list(rt, src)
+                .map(|l| l.iter().skip(at(cursor).unwrap_or(0)).copied().collect())
+                .unwrap_or_default();
+            rt.put_field(this, "$cursor", V::I(len));
+            if !rest.is_empty() {
+                rt.put_field(this, "$last", V::I(len - 1));
+            }
+            for e in rest {
+                rt.call_functional(ACCEPT, a(1), &[e]);
+                if rt.thrown.is_some() {
+                    break;
+                }
+            }
+            V::Void
+        }
+        _ => return None,
+    })
+}
 const JOINER: &str = "com/google/common/base/Joiner";
 const OBJECT_ARRAYS: &str = "com/google/common/collect/ObjectArrays";
 
@@ -867,6 +1021,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if let Some(v) = statics(rt, owner, name, desc, args) {
         return Some(v);
     }
+    match rt.class_of(a(0)) {
+        LIST_ITERATOR => return list_iter_call(rt, name, args),
+        STREAM_BUILDER => return stream_builder_call(rt, name, args),
+        _ => {}
+    }
     if rt.class_of(a(0)) == GENERATED_STREAM {
         if name != "limit" {
             return None;
@@ -1000,7 +1159,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
     }
     match data_kind? {
-        'l' if rt.class_of(this) == "java/util/Map$Entry" => entry_call(rt, name, args),
+        'l' if is_entry(rt.class_of(this)) => entry_call(rt, name, args),
         // A priority queue moves its elements as a heap; the rest it shares with a list.
         'l' if crate::heaps::is_heap(rt, this) => {
             crate::heaps::call(rt, name, desc, args).or_else(|| list_call(rt, name, desc, args))
@@ -1530,6 +1689,107 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             sort(rt, a(0), args.get(1).copied().unwrap_or(V::NULL));
             V::Void
         }
+        // `shuffle(list[, random])`: each place from the end swapped with one at or before it,
+        // drawn by the random's `nextInt(i + 1)` (the runtime's own draws without one).
+        ("java/util/Collections", "shuffle") if list(rt, a(0)).is_some() => {
+            let n = list(rt, a(0)).map_or(0, Vec::len);
+            for i in (1..n).rev() {
+                let j = if desc.contains("Random") && a(1).r() != 0 {
+                    crate::api::call(
+                        rt,
+                        "java/util/Random.nextInt.(I)I",
+                        &[a(1), V::I(i as i32 + 1)],
+                    )
+                    .i()
+                } else {
+                    (crate::api_common::next_random(rt) % (i as u64 + 1)) as i32
+                };
+                if rt.thrown.is_some() {
+                    break;
+                }
+                if let (Ok(j), Some(l)) = (usize::try_from(j), list_mut(rt, a(0)))
+                    && j <= i
+                {
+                    l.swap(i, j);
+                }
+            }
+            V::Void
+        }
+        ("java/util/Collections", "emptyIterator" | "emptyListIterator") => new_iter(rt, Vec::new()),
+        // `requireNonNullElseGet(o, supplier)`: `o`, else what the supplier gives, which must not
+        // be null either.
+        ("java/util/Objects", "requireNonNullElseGet") => {
+            if a(0).r() != 0 {
+                a(0)
+            } else if a(1).r() == 0 {
+                crate::jlang::throw_with(rt, "java/lang/NullPointerException", "supplier")
+            } else {
+                let v = rt.call_functional(SUPPLY, a(1), &[]);
+                if rt.thrown.is_none() && v.is_null() {
+                    crate::jlang::throw_with(rt, "java/lang/NullPointerException", "supplier.get()")
+                } else {
+                    v
+                }
+            }
+        }
+        // `new AbstractMap.SimpleEntry(key, value)` (or of another entry): a map entry, as
+        // `Map.entry` makes, of its own class.
+        (SIMPLE_ENTRY | SIMPLE_IMMUTABLE_ENTRY, "<init>") => {
+            let (k, v) = if let Some(kv) =
+                list(rt, a(1)).filter(|kv| kv.len() == 2 && is_entry(rt.class_of(a(1))))
+            {
+                (kv[0], kv[1])
+            } else if desc.starts_with("(Ljava/util/Map$Entry;") {
+                let k = rt.call_functional(
+                    "java/util/Map$Entry.getKey.()Ljava/lang/Object;",
+                    a(1),
+                    &[],
+                );
+                (
+                    k,
+                    rt.call_functional(
+                        "java/util/Map$Entry.getValue.()Ljava/lang/Object;",
+                        a(1),
+                        &[],
+                    ),
+                )
+            } else {
+                (a(1), a(2))
+            };
+            if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
+                o.data = Data::List(vec![k, v]);
+            }
+            V::Void
+        }
+        // Empty streams, and two streams one after the other.
+        (STREAM | INT_STREAM | LONG_STREAM | DOUBLE_STREAM, "empty") => {
+            let class: &'static str = rt.static_key(owner);
+            rt.alloc(class, Data::Stream(Vec::new()))
+        }
+        (STREAM | INT_STREAM | LONG_STREAM | DOUBLE_STREAM, "concat") => {
+            let mut items = elements(rt, a(0));
+            items.extend(elements(rt, a(1)));
+            let class: &'static str = rt.static_key(owner);
+            rt.alloc(class, Data::Stream(items))
+        }
+        (STREAM, "builder") => rt.alloc(STREAM_BUILDER, Data::List(Vec::new())),
+        // A spliterator here holds what it would go through; a stream of one holds the same.
+        (_, "spliterator") if desc == "()Ljava/util/Spliterator;" => {
+            let items = drain(rt, a(0));
+            rt.alloc("java/util/Spliterator", Data::Stream(items))
+        }
+        ("java/util/Spliterators", "spliteratorUnknownSize" | "spliterator")
+            if desc.starts_with("(Ljava/util/Iterator;") =>
+        {
+            let items = drain(rt, a(0));
+            rt.alloc("java/util/Spliterator", Data::Stream(items))
+        }
+        ("java/util/stream/StreamSupport", "stream")
+            if desc.starts_with("(Ljava/util/Spliterator;") =>
+        {
+            let items = elements(rt, a(0));
+            rt.alloc(STREAM, Data::Stream(items))
+        }
         ("java/util/Collections", "reverse") => {
             if let Some(l) = list_mut(rt, a(0)) {
                 l.reverse();
@@ -1944,7 +2204,23 @@ fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
                 _ => V::I(found.map_or(-1, |i| i as i32)),
             }
         }
-        "iterator" | "listIterator" | "descendingIterator" => {
+        // A list iterator walks the list itself, by index: it sets, adds and removes in place.
+        "listIterator" => {
+            let at = if desc.starts_with("(I)") { a(1).i() } else { 0 };
+            if at < 0 || at as usize > len {
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IndexOutOfBoundsException",
+                    &format!("Index: {at}, Size: {len}"),
+                ));
+            }
+            let it = rt.new_object(LIST_ITERATOR);
+            rt.put_field(it, "$list", this);
+            rt.put_field(it, "$cursor", V::I(at));
+            rt.put_field(it, "$last", V::I(-1));
+            it
+        }
+        "iterator" | "descendingIterator" => {
             let mut items = list(rt, this)?.clone();
             if name == "descendingIterator" {
                 items.reverse();
@@ -2201,7 +2477,13 @@ fn remove_from(rt: &mut Rt, src: V, item: V) {
             }
         }
         Some((Data::Table(_), _)) => {
-            let key = if rt.class_of(item) == "java/util/Map$Entry" { list(rt, item).and_then(|l| l.first().copied()).unwrap_or(item) } else { item };
+            let key = if is_entry(rt.class_of(item)) {
+                list(rt, item)
+                    .and_then(|l| l.first().copied())
+                    .unwrap_or(item)
+            } else {
+                item
+            };
             table_remove(rt, src, key);
         }
         _ => {}
@@ -2217,6 +2499,10 @@ fn entry_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         // fastutil's typed accessors (`getIntKey`, `getIntValue`, `getLongKey`...).
         n if n.starts_with("get") && n.ends_with("Key") => kv[0],
         n if n.starts_with("get") && n.ends_with("Value") => kv[1],
+        "setValue" if rt.class_of(this) == SIMPLE_IMMUTABLE_ENTRY => {
+            rt.throw_new("java/lang/UnsupportedOperationException");
+            V::NULL
+        }
         "setValue" => {
             let v = args.get(1).copied().unwrap_or_default();
             let old = std::mem::replace(&mut list_mut(rt, this)?[1], v);
@@ -2931,6 +3217,25 @@ fn multimap_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// A whole number a stream holds (an int or a long), as a long.
+fn whole(v: V) -> i64 {
+    match v {
+        V::J(j) => j,
+        v => i64::from(v.i()),
+    }
+}
+
+/// A number a stream holds, as a double.
+fn real(v: V) -> f64 {
+    match v {
+        V::I(x) => f64::from(x),
+        V::J(x) => x as f64,
+        V::F(x) => f64::from(x),
+        V::D(x) => x,
+        _ => 0.0,
+    }
+}
+
 fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -2941,13 +3246,65 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let stream = |rt: &mut Rt, items: Vec<V>| rt.alloc("java/util/stream/Stream", Data::Stream(items));
     const APPLY: &str = "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;";
     const TEST: &str = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
+    let class = rt.class_of(this);
     Some(match name {
+        // A primitive stream's own kind follows (`mapToInt` makes an `IntStream`, its `map`
+        // keeps one).
         "map" | "mapToObj" | "mapToInt" | "mapToLong" | "mapToDouble" => {
             let mut out = Vec::with_capacity(items.len());
             for e in items {
                 out.push(rt.call_functional(APPLY, a(1), &[e]));
             }
-            stream(rt, out)
+            let kind = match name {
+                "mapToInt" => INT_STREAM,
+                "mapToLong" => LONG_STREAM,
+                "mapToDouble" => DOUBLE_STREAM,
+                "map" if matches!(class, INT_STREAM | LONG_STREAM | DOUBLE_STREAM) => class,
+                _ => STREAM,
+            };
+            rt.alloc(kind, Data::Stream(out))
+        }
+        "asLongStream" => rt.alloc(
+            LONG_STREAM,
+            Data::Stream(items.iter().map(|v| V::J(whole(*v))).collect()),
+        ),
+        "asDoubleStream" => rt.alloc(
+            DOUBLE_STREAM,
+            Data::Stream(items.iter().map(|v| V::D(real(*v))).collect()),
+        ),
+        // A primitive stream's `max()` and `min()` (an `OptionalInt`... of the first of equal
+        // ones; doubles as `Math.max` takes them: NaN wins, 0.0 over -0.0) and `average()` (an
+        // `OptionalDouble`; whole numbers summed exactly first).
+        "max" | "min" | "average" if args.len() == 1 => {
+            let optional = match class {
+                LONG_STREAM if name != "average" => "java/util/OptionalLong",
+                DOUBLE_STREAM => "java/util/OptionalDouble",
+                _ if name == "average" => "java/util/OptionalDouble",
+                _ => "java/util/OptionalInt",
+            };
+            let max = name == "max";
+            let best = if name == "average" {
+                let n = items.len() as f64;
+                (!items.is_empty()).then(|| {
+                    V::D(if class == DOUBLE_STREAM {
+                        items.iter().map(|&v| real(v)).sum::<f64>() / n
+                    } else {
+                        items.iter().map(|&v| i128::from(whole(v))).sum::<i128>() as f64 / n
+                    })
+                })
+            } else {
+                items.iter().copied().reduce(|b, e| {
+                    let better = match (e, b) {
+                        (V::D(x), V::D(y)) => {
+                            let wins = if max { x > y || (x == 0.0 && y == 0.0 && y.is_sign_negative()) } else { x < y || (x == 0.0 && y == 0.0 && x.is_sign_negative()) };
+                            (x.is_nan() && !y.is_nan()) || wins
+                        }
+                        (x, y) => if max { whole(x) > whole(y) } else { whole(x) < whole(y) },
+                    };
+                    if better { e } else { b }
+                })
+            };
+            crate::menus::optional_number(rt, optional, best)
         }
         "flatMap" => {
             let mut out = Vec::new();
@@ -2992,7 +3349,8 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         }
         "limit" => stream(rt, items.into_iter().take(a(1).j().max(0) as usize).collect()),
         "skip" => stream(rt, items.into_iter().skip(a(1).j().max(0) as usize).collect()),
-        "boxed" | "sequential" | "parallel" | "unordered" | "onClose" => this,
+        "boxed" => rt.alloc(STREAM, Data::Stream(items)),
+        "sequential" | "parallel" | "unordered" | "onClose" => this,
         // A stream here holds its elements, nothing to release (`Files.list` in try-with-resources).
         "close" => V::Void,
         "forEach" | "forEachOrdered" => {
@@ -3089,6 +3447,11 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
                 o
             }
         }
+        "sum" if items.is_empty() => match class {
+            LONG_STREAM => V::J(0),
+            DOUBLE_STREAM => V::D(0.0),
+            _ => V::I(0),
+        },
         "sum" => items.iter().fold(V::I(0), |acc, v| match (acc, *v) {
             (V::I(x), V::I(y)) => V::I(x.wrapping_add(y)),
             (V::I(x), V::J(y)) | (V::J(y), V::I(x)) => V::J(y.wrapping_add(x as i64)),
@@ -3943,5 +4306,213 @@ mod tests {
             &[list],
         );
         assert_eq!(elements(&rt, present), vec![a, b]);
+    }
+
+    fn texts(rt: &Rt, v: V) -> Vec<String> {
+        elements(rt, v)
+            .into_iter()
+            .map(|e| rt.to_java_string(e, 'L'))
+            .collect()
+    }
+
+    /// `Collections.shuffle` with a seeded `Random` swaps as JDK 21's (its order from seed 42); a
+    /// `ListIterator` walks the list itself, setting, adding and removing in place as the JDK's
+    /// (the same walk, the same log and list); `AbstractMap.SimpleEntry` is an entry by its key and
+    /// value, the immutable one refusing `setValue`.
+    #[test]
+    fn shuffles_list_iterators_and_simple_entries_are_the_jdks() {
+        let rt = &mut Rt::new();
+        let ints: Vec<V> = (1..=8).map(|i| crate::api_common::integer(rt, i)).collect();
+        let list = new_list(rt, ints);
+        let random = rt.new_object("java/util/Random");
+        c(rt, "java/util/Random.<init>.(J)V", &[random, V::J(42)]);
+        c(
+            rt,
+            "java/util/Collections.shuffle.(Ljava/util/List;Ljava/util/Random;)V",
+            &[list, random],
+        );
+        assert_eq!(texts(rt, list), ["3", "7", "4", "2", "5", "1", "8", "6"]);
+
+        let letters: Vec<V> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|t| rt.string(t))
+            .collect();
+        let list = new_list(rt, letters);
+        let it = c(
+            rt,
+            "java/util/List.listIterator.()Ljava/util/ListIterator;",
+            &[list],
+        );
+        let mut log = String::new();
+        while c(rt, "java/util/ListIterator.hasNext.()Z", &[it]) == V::I(1) {
+            let i = c(rt, "java/util/ListIterator.nextIndex.()I", &[it]).i();
+            let e = c(
+                rt,
+                "java/util/ListIterator.next.()Ljava/lang/Object;",
+                &[it],
+            );
+            let t = rt.str_of(e).unwrap_or("?").to_owned();
+            if t == "b" {
+                c(rt, "java/util/ListIterator.remove.()V", &[it]);
+            } else if t == "c" {
+                let (big, more) = (rt.string("C"), rt.string("c2"));
+                c(
+                    rt,
+                    "java/util/ListIterator.set.(Ljava/lang/Object;)V",
+                    &[it, big],
+                );
+                c(
+                    rt,
+                    "java/util/ListIterator.add.(Ljava/lang/Object;)V",
+                    &[it, more],
+                );
+            }
+            log.push_str(&format!("{i}{t} "));
+        }
+        while c(rt, "java/util/ListIterator.hasPrevious.()Z", &[it]) == V::I(1) {
+            let e = c(
+                rt,
+                "java/util/ListIterator.previous.()Ljava/lang/Object;",
+                &[it],
+            );
+            log.push('<');
+            log.push_str(rt.str_of(e).unwrap_or("?"));
+        }
+        assert_eq!(log, "0a 1b 1c 3d <d<c2<C<a");
+        assert_eq!(texts(rt, list), ["a", "C", "c2", "d"]);
+        let from_two = c(
+            rt,
+            "java/util/List.listIterator.(I)Ljava/util/ListIterator;",
+            &[list, V::I(2)],
+        );
+        let e = c(
+            rt,
+            "java/util/ListIterator.next.()Ljava/lang/Object;",
+            &[from_two],
+        );
+        let before = c(rt, "java/util/ListIterator.previousIndex.()I", &[from_two]);
+        assert_eq!((rt.str_of(e), before), (Some("c2"), V::I(2)));
+        c(
+            rt,
+            "java/util/List.listIterator.(I)Ljava/util/ListIterator;",
+            &[list, V::I(9)],
+        );
+        let thrown = rt.thrown.take().unwrap();
+        assert_eq!(rt.class_of(thrown), "java/lang/IndexOutOfBoundsException");
+        let fresh = c(
+            rt,
+            "java/util/List.listIterator.()Ljava/util/ListIterator;",
+            &[list],
+        );
+        c(rt, "java/util/ListIterator.remove.()V", &[fresh]);
+        assert_eq!(
+            rt.thrown.take().map(|e| rt.class_of(e)),
+            Some("java/lang/IllegalStateException")
+        );
+
+        let (k, one, two) = (
+            rt.string("k"),
+            crate::api_common::integer(rt, 1),
+            crate::api_common::integer(rt, 2),
+        );
+        let entry = rt.new_object(SIMPLE_ENTRY);
+        c(
+            rt,
+            "java/util/AbstractMap$SimpleEntry.<init>.(Ljava/lang/Object;Ljava/lang/Object;)V",
+            &[entry, k, one],
+        );
+        assert_eq!(rt.to_java_string(entry, 'L'), "k=1");
+        assert_eq!(hash(rt, entry), 106);
+        let same = c(
+            rt,
+            "java/util/Map.entry.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map$Entry;",
+            &[k, one],
+        );
+        assert!(equals(rt, entry, same));
+        assert_eq!(
+            c(
+                rt,
+                "java/util/Map$Entry.setValue.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[entry, two]
+            ),
+            one
+        );
+        assert_eq!(
+            c(
+                rt,
+                "java/util/Map$Entry.getValue.()Ljava/lang/Object;",
+                &[entry]
+            ),
+            two
+        );
+        let fixed = rt.new_object(SIMPLE_IMMUTABLE_ENTRY);
+        c(
+            rt,
+            "java/util/AbstractMap$SimpleImmutableEntry.<init>.(Ljava/util/Map$Entry;)V",
+            &[fixed, same],
+        );
+        assert_eq!(
+            c(
+                rt,
+                "java/util/Map$Entry.getKey.()Ljava/lang/Object;",
+                &[fixed]
+            ),
+            k
+        );
+        c(
+            rt,
+            "java/util/Map$Entry.setValue.(Ljava/lang/Object;)Ljava/lang/Object;",
+            &[fixed, two],
+        );
+        assert_eq!(
+            rt.thrown.take().map(|e| rt.class_of(e)),
+            Some("java/lang/UnsupportedOperationException")
+        );
+    }
+
+    /// Streams as JDK 21 makes them: empty ones, two after one another, a builder's, a
+    /// spliterator's; a primitive stream's `max`, `min` and `average` optionals (the first of
+    /// equal ones; doubles as `Math.max`) and an empty one's sum.
+    #[test]
+    fn streams_concatenate_build_and_reduce_to_optionals() {
+        let rt = &mut Rt::new();
+        let ints = |rt: &mut Rt, class: &'static str, xs: Vec<V>| rt.alloc(class, Data::Stream(xs));
+        let optional = |rt: &mut Rt, o: V| rt.to_java_string(rt.get_field(o, "$value"), 'L') + if rt.get_field(o, "$present").i() == 0 { " (empty)" } else { "" };
+        let s = ints(rt, INT_STREAM, vec![V::I(3), V::I(9), V::I(-2)]);
+        let max = c(rt, "java/util/stream/IntStream.max.()Ljava/util/OptionalInt;", &[s]);
+        assert_eq!((rt.class_of(max), optional(rt, max)), ("java/util/OptionalInt", "9".into()));
+        let empty = c(rt, "java/util/stream/IntStream.empty.()Ljava/util/stream/IntStream;", &[]);
+        let min = c(rt, "java/util/stream/IntStream.min.()Ljava/util/OptionalInt;", &[empty]);
+        assert_eq!(optional(rt, min), "0 (empty)");
+        assert_eq!(c(rt, "java/util/stream/IntStream.sum.()I", &[empty]), V::I(0));
+        let s = ints(rt, INT_STREAM, vec![V::I(1), V::I(2), V::I(4)]);
+        let avg = c(rt, "java/util/stream/IntStream.average.()Ljava/util/OptionalDouble;", &[s]);
+        assert_eq!(rt.get_field(avg, "$value"), V::D(2.3333333333333335));
+        let s = ints(rt, LONG_STREAM, vec![V::J(5), V::J(1 << 40)]);
+        let max = c(rt, "java/util/stream/LongStream.max.()Ljava/util/OptionalLong;", &[s]);
+        assert_eq!((rt.class_of(max), rt.get_field(max, "$value")), ("java/util/OptionalLong", V::J(1099511627776)));
+        let s = ints(rt, DOUBLE_STREAM, vec![V::D(-0.0), V::D(0.0)]);
+        let max = c(rt, "java/util/stream/DoubleStream.max.()Ljava/util/OptionalDouble;", &[s]);
+        assert!(rt.get_field(max, "$value").d().is_sign_positive());
+        let s = ints(rt, DOUBLE_STREAM, vec![V::D(1.0), V::D(f64::NAN), V::D(2.0)]);
+        let max = c(rt, "java/util/stream/DoubleStream.max.()Ljava/util/OptionalDouble;", &[s]);
+        assert!(rt.get_field(max, "$value").d().is_nan());
+
+        let (one, two, three) = (crate::api_common::integer(rt, 1), crate::api_common::integer(rt, 2), crate::api_common::integer(rt, 3));
+        let (a, b) = (ints(rt, STREAM, vec![one, two]), ints(rt, STREAM, vec![three]));
+        let both = c(rt, "java/util/stream/Stream.concat.(Ljava/util/stream/Stream;Ljava/util/stream/Stream;)Ljava/util/stream/Stream;", &[a, b]);
+        assert_eq!(elements(rt, both), [one, two, three]);
+        let none = c(rt, "java/util/stream/Stream.empty.()Ljava/util/stream/Stream;", &[]);
+        assert_eq!(c(rt, "java/util/stream/Stream.count.()J", &[none]), V::J(0));
+        let builder = c(rt, "java/util/stream/Stream.builder.()Ljava/util/stream/Stream$Builder;", &[]);
+        let (x, y) = (rt.string("x"), rt.string("y"));
+        assert_eq!(c(rt, "java/util/stream/Stream$Builder.add.(Ljava/lang/Object;)Ljava/util/stream/Stream$Builder;", &[builder, x]), builder);
+        c(rt, "java/util/stream/Stream$Builder.add.(Ljava/lang/Object;)Ljava/util/stream/Stream$Builder;", &[builder, y]);
+        let built = c(rt, "java/util/stream/Stream$Builder.build.()Ljava/util/stream/Stream;", &[builder]);
+        assert_eq!(elements(rt, built), [x, y]);
+        let list = new_list(rt, vec![one, two]);
+        let split = c(rt, "java/util/List.spliterator.()Ljava/util/Spliterator;", &[list]);
+        let s = c(rt, "java/util/stream/StreamSupport.stream.(Ljava/util/Spliterator;Z)Ljava/util/stream/Stream;", &[split, V::I(0)]);
+        assert_eq!(elements(rt, s), [one, two]);
     }
 }

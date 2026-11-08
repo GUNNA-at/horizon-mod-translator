@@ -5897,6 +5897,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             })
         }
         "java/lang/Boolean" if field == "TRUE" || field == "FALSE" => boolean(rt, field == "TRUE"),
+        "java/lang/System" if field == "out" || field == "err" => crate::jlang::std_stream(rt, field == "err"),
         // The primitives' classes (`int.class` is `Integer.TYPE`), one object each.
         "java/lang/Integer" | "java/lang/Long" | "java/lang/Boolean" | "java/lang/Byte" | "java/lang/Character" | "java/lang/Short" | "java/lang/Float" | "java/lang/Double" | "java/lang/Void"
             if field == "TYPE" =>

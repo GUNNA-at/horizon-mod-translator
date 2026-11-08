@@ -1051,7 +1051,14 @@ impl Rt {
         };
         match self.heap.get(v.r() as usize).map(|o| &o.data) {
             Some(Data::List(kv))
-                if depth < 16 && class == "java/util/Map$Entry" && kv.len() == 2 =>
+                if depth < 16
+                    && matches!(
+                        class,
+                        "java/util/Map$Entry"
+                            | "java/util/AbstractMap$SimpleEntry"
+                            | "java/util/AbstractMap$SimpleImmutableEntry"
+                    )
+                    && kv.len() == 2 =>
             {
                 format!(
                     "{}={}",
