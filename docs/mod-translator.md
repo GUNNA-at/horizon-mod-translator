@@ -7296,6 +7296,53 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     bounce; item results stand for plain results; registries number their entries and default;
     a registry's tags hold the game's), one changed to vanilla's (a defaulted registry names what
     it doesn't hold by its default key, not null), translator 22.
+- [x] 2026-11-08 Part 111: entity sizes in a pose, vanilla enums' serialized names, block items'
+  placement, holder sets.
+  - Entity sizes: `getDimensions(pose)` and `getDefaultDimensions(pose)` as 1.21.1's. A mod's
+    entity is its type's size (`EntityType.Builder.sized`, now with `eyeHeight`); a living one
+    (`LivingEntity.getDimensions`, final) asleep is `SLEEPING_DIMENSIONS` (a fixed 0.2 by 0.2,
+    the eye at 0.2), else `getDefaultDimensions` (the type's at its age's scale: half for a baby)
+    at its scale, each asked of the mod's own overrides first. Its `getBbWidth`, `getBbHeight`,
+    `getEyeHeight` and `getEyeY` read the size in its pose, as `refreshDimensions` keeps it;
+    `getPose`, `setPose` and `hasPose` (standing until set), `getAgeScale`, and `AgeableMob`'s
+    `getAge`, `setAge`, `setBaby` and `isBaby`. The game's entities are their type's size (the
+    1.21.1 table, a living one asleep as above); a player its pose's (`Player.POSES`: standing,
+    crouching, swimming, fall flying, spin attack, sleeping, dying; any other is standing, with
+    its vehicle point 0.6 up). Vanilla entity types now answer their own sizes (`getWidth`,
+    `getHeight`, `getDimensions`), not the builder's default. A call a mod entity makes through
+    its vanilla class (`LivingEntity.getScale`, `AgeableMob.setBaby`) now climbs 1.21.1's entity
+    classes to the one that answers it. The player's `getPose` answers only for a player now (it
+    answered a mod entity's and a cow's too).
+  - Serialized names: `StringRepresentable.getSerializedName` of any vanilla enum constant, named
+    on the interface or its class: the constant's name in lower case, but where 1.21.1's differs
+    (read from its sources): `ItemDisplayContext`'s first and third person hands
+    (`firstperson_righthand`), `PistonType.DEFAULT` (`normal`), `Rotation.CLOCKWISE_180` (`180`),
+    `PackType`, `CloudStatus`, `FontOption`, telemetry's server type, structure spawn boxes,
+    density functions' rarity mappers and markers (`flat_cache`, `cache_2d`), enchantments'
+    particle position sources, a heightmap's (its name as it is), a team's sidebar slot
+    (`sidebar.team.<colour>`).
+  - Block items: `BlockItem.place(context)` (Create's deployer and schematicannon place through
+    it) places as `useOn` does; `getPlacementState` asks the block's `getStateForPlacement` (a mod
+    block's own) and keeps it where `canPlace` lets it (`mustSurvive`, then `canSurvive` at the
+    clicked place); `placeBlock` sets the state there (flags 11). `getStateForPlacement` reaching
+    vanilla through `Block` (a mod block that keeps its vanilla base's, a vanilla block) now runs
+    the rule of the class whose method runs (1.21.1's classes that declare it, read from its
+    sources), not `Block`'s default state; and a rule sets a property the default state's text
+    doesn't name (a lever placed looking down is on the floor; a log's axis was never set).
+    `BlockPlaceContext(player, hand, stack, hit)` reads its hit (it read the stack as one).
+  - Holder sets: `direct(holderGetter, values)` (an array or a collection), `unwrap()` (a tag's
+    key or the holders), `HolderSet.Named.key()`, `canSerializeIn`.
+  - The probe now gives a sample of a pose, a vanilla enum constant, NBT's ops, a holder set and a
+    block place or use-on context (the player's click on top of a block).
+  - Measured (packcov24, the same 367 jars): methods 82.6% (from 82.0%: 795 more mapped), uses
+    90.9% (from 90.6%), distinct missing API methods 9514 (from 9780); Create 80.5% of its methods
+    (from 79.7%), 96.0% of its uses (from 95.8%). Left of the batch: `ItemStack.getTooltipLines`
+    (vanilla's enchantment and attribute lines), JSON as ops (`JsonOps`), a few enums' names with
+    no constant the probe can reach (`NoteBlockInstrument`, `Panda.Gene`).
+  - Tests: compat 629 (5 new: a mod's entity is its type's size in its pose (asleep, a baby); the
+    game's entities and a player are their type's or pose's size; vanilla enums give their
+    serialized names; a block item's placement state follows its block's rule; a direct set of
+    values holds the holders its function gives), translator 22.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

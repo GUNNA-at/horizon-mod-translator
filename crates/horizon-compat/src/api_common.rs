@@ -534,6 +534,32 @@ fn plain_enum_values(rt: &mut Rt, class: &str) -> Option<V> {
     Some(arr)
 }
 
+const BLOCK_ITEM_GET_BLOCK: (&str, &str) = (
+    "net/minecraft/world/item/BlockItem.getBlock.()Lnet/minecraft/world/level/block/Block;",
+    "getBlock.()Lnet/minecraft/world/level/block/Block;",
+);
+const STATE_FOR_PLACEMENT: (&str, &str) = (
+    "net/minecraft/world/level/block/Block.getStateForPlacement.(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;",
+    "getStateForPlacement.(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;",
+);
+const BLOCK_ITEM_CAN_PLACE: (&str, &str) = (
+    "net/minecraft/world/item/BlockItem.canPlace.(Lnet/minecraft/world/item/context/BlockPlaceContext;Lnet/minecraft/world/level/block/state/BlockState;)Z",
+    "canPlace.(Lnet/minecraft/world/item/context/BlockPlaceContext;Lnet/minecraft/world/level/block/state/BlockState;)Z",
+);
+const BLOCK_ITEM_MUST_SURVIVE: (&str, &str) = (
+    "net/minecraft/world/item/BlockItem.mustSurvive.()Z",
+    "mustSurvive.()Z",
+);
+const STATE_CAN_SURVIVE: &str = "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase.canSurvive.(Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
+
+/// Whether `v` is a player object: the game's (a server's player, the client's own, a fake one)
+/// or a mod's subclass of `Player`.
+fn player_object(rt: &Rt, v: V) -> bool {
+    v.r() != 0
+        && (is_player_class(rt.class_of(v))
+            || rt.instance_of(v, "net/minecraft/world/entity/player/Player"))
+}
+
 pub(crate) fn is_player_class(c: &str) -> bool {
     matches!(
         c,
@@ -2997,10 +3023,53 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (o, "addItem") if is_player(o) => V::I(give_player(rt, a(1)) as i32),
         // An item's `useOn` that reaches vanilla's `Item`: nothing happens.
         ("net/minecraft/world/item/Item", "useOn") => result(rt, "net/minecraft/world/InteractionResult", "PASS"),
-        // A mod's block item calling `super.useOn(context)`: the stack in the context's hand placed.
-        ("net/minecraft/world/item/BlockItem", "useOn") => {
+        // A mod's block item calling `super.useOn(context)`, or `place(context)` (vanilla's
+        // `useOn` is `place(new BlockPlaceContext(context))`; Create's deployer and schematic
+        // cannon place through it): the stack in the context's hand placed, as the game places it.
+        ("net/minecraft/world/item/BlockItem", "useOn" | "place") => {
             let stack = rt.get_field(a(1), "$item");
             crate::item_use::block_item_use_on(rt, stack, a(1))
+        }
+        // `BlockItem.getPlacementState(context)`: its block's state for the click
+        // (`getStateForPlacement`, a mod block's own), kept only where `canPlace` lets it.
+        ("net/minecraft/world/item/BlockItem", "getPlacementState") => {
+            let block = crate::api::virtual_call(rt, BLOCK_ITEM_GET_BLOCK, &[a(0)]);
+            let state = if block.r() != 0 {
+                crate::api::virtual_call(rt, STATE_FOR_PLACEMENT, &[block, a(1)])
+            } else {
+                V::NULL
+            };
+            if state.r() != 0
+                && crate::api::virtual_call(rt, BLOCK_ITEM_CAN_PLACE, &[a(0), a(1), state]).i() != 0
+            {
+                state
+            } else {
+                V::NULL
+            }
+        }
+        // `BlockItem.canPlace(context, state)`: the state survives at the clicked place where the
+        // item says it must (`mustSurvive`, vanilla's yes), and nothing's in its way
+        // (`isUnobstructed`: the entities there aren't asked, so nothing is).
+        ("net/minecraft/world/item/BlockItem", "canPlace")
+            if desc
+                == "(Lnet/minecraft/world/item/context/BlockPlaceContext;Lnet/minecraft/world/level/block/state/BlockState;)Z" =>
+        {
+            let must = crate::api::virtual_call(rt, BLOCK_ITEM_MUST_SURVIVE, &[a(0)]).i() != 0;
+            let (level, pos) = (rt.get_field(a(1), "$level"), rt.get_field(a(1), "$pos"));
+            V::I(i32::from(
+                !must || crate::api::call(rt, STATE_CAN_SURVIVE, &[a(2), level, pos]).i() != 0,
+            ))
+        }
+        ("net/minecraft/world/item/BlockItem", "mustSurvive") => V::I(1),
+        // `BlockItem.placeBlock(context, state)`: the state set at the clicked place (flags 11:
+        // neighbours told, clients told, re-rendered at once).
+        ("net/minecraft/world/item/BlockItem", "placeBlock") => {
+            let (level, pos) = (rt.get_field(a(1), "$level"), rt.get_field(a(1), "$pos"));
+            crate::api::call(
+                rt,
+                "net/minecraft/world/level/Level.setBlock.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;I)Z",
+                &[level, pos, a(2), V::I(11)],
+            )
         }
         // `Item.use` reaching vanilla's: the game's own use of the stack goes on (eating a food,
         // placing a block item's block).
@@ -3114,7 +3183,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         ("net/minecraft/world/item/context/BlockPlaceContext" | "net/minecraft/world/item/context/UseOnContext", "<init>") => {
             // (Level, Player, InteractionHand, ItemStack, BlockHitResult), (Player, InteractionHand,
-            // BlockHitResult) or (UseOnContext): the fields the getters read.
+            // ItemStack, BlockHitResult) (a block place context's: the player's level), (Player,
+            // InteractionHand, BlockHitResult) (also the player's stack in that hand) or
+            // (UseOnContext): the fields the getters read.
             let ctx = a(0);
             if desc.starts_with("(Lnet/minecraft/world/item/context/UseOnContext;") {
                 for f in ["$level", "$player", "$item", "$hand", "$hitResult"] {
@@ -3127,6 +3198,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             }
             let (level, player, hand, item, h) = if desc.starts_with("(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;") {
                 (a(1), a(2), a(3), a(4), a(5))
+            } else if desc.starts_with("(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;") {
+                let level = crate::api::call(rt, "net/minecraft/world/entity/player/Player.level.()Lnet/minecraft/world/level/Level;", &[a(1)]);
+                (level, a(1), a(2), a(3), a(4))
             } else if desc.starts_with("(Lnet/minecraft/world/entity/player/Player;") {
                 let player = a(1);
                 // `player.level()` and `player.getItemInHand(hand)` through the whole chain: a fake
@@ -3248,9 +3322,27 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         // Players ride nothing here, and stand or crouch (`Entity.getPose`).
         (o, "isPassenger") if is_player(o) => V::I(0),
-        (o, "getPose") if is_player(o) => {
+        (o, "getPose") if is_player(o) && player_object(rt, a(0)) => {
             let crouching = rt.host().is_some_and(|h| h.player_sneaking());
             plain_enum(rt, POSE, if crouching { "CROUCHING" } else { "STANDING" }).unwrap_or(V::NULL)
+        }
+        // A player's size in a pose (`Player.getDefaultDimensions`: its `POSES`, standing for any
+        // other; `LivingEntity.getDimensions` adds its scale attribute, whose base the game's
+        // players keep here, and asleep is `SLEEPING_DIMENSIONS`, as `POSES` has it too).
+        (o, "getDimensions" | "getDefaultDimensions")
+            if is_player(o)
+                && desc == crate::vanilla_entities::POSE_DIMENSIONS
+                && player_object(rt, a(0)) =>
+        {
+            let pose = constant(rt, a(1));
+            let (w, h, eye, fixed, vehicle) = match pose.as_str() {
+                "SLEEPING" => (0.2, 0.2, 0.2, true, 0.0),
+                "FALL_FLYING" | "SWIMMING" | "SPIN_ATTACK" => (0.6, 0.6, 0.4, false, 0.0),
+                "CROUCHING" => (0.6, 1.5, 1.27, false, 0.6),
+                "DYING" => (0.2, 0.2, 1.62, true, 0.0),
+                _ => (0.6, 1.8, 1.62, false, 0.6),
+            };
+            crate::mod_entities::sized(rt, w, h, eye, fixed, vehicle)
         }
         ("net/minecraft/world/entity/player/Inventory", "getSelectionSize") => V::I(9),
         // Item cooldowns aren't kept for a mod's uses yet: none is ever cooling down.
@@ -4278,8 +4370,155 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 }
             }
         }
+        // A vanilla enum's name in data (`StringRepresentable.getSerializedName`, named on the
+        // interface or on its class): its constant's, as vanilla spells it.
+        (_, "getSerializedName") if desc == "()Ljava/lang/String;" && api_constant(rt, a(0)) => {
+            let class = rt.class_of(a(0));
+            let constant = constant(rt, a(0));
+            let text = serialized_name(class, &constant);
+            rt.string(&text)
+        }
         _ => return None,
     })
+}
+
+/// Whether `v` is a constant of one of vanilla's enums as the runtime makes them (`api_enum`: a
+/// name and an ordinal).
+fn api_constant(rt: &Rt, v: V) -> bool {
+    v.r() != 0
+        && matches!(rt.get_field(v, "$ordinal"), V::I(_))
+        && rt.str_of(rt.get_field(v, "$name")).is_some()
+        && rt.class_of(v).starts_with("net/minecraft/")
+}
+
+/// Vanilla's serialized names that aren't their constant's name in lower case, by class and
+/// constant.
+const SERIALIZED_NAMES: [(&str, &str, &str); 23] = [
+    (
+        "net/minecraft/world/level/levelgen/DensityFunctions$Marker$Type",
+        "FlatCache",
+        "flat_cache",
+    ),
+    (
+        "net/minecraft/world/level/levelgen/DensityFunctions$Marker$Type",
+        "Cache2D",
+        "cache_2d",
+    ),
+    (
+        "net/minecraft/world/level/levelgen/DensityFunctions$Marker$Type",
+        "CacheOnce",
+        "cache_once",
+    ),
+    (
+        "net/minecraft/world/level/levelgen/DensityFunctions$Marker$Type",
+        "CacheAllInCell",
+        "cache_all_in_cell",
+    ),
+    (
+        "net/minecraft/world/item/ItemDisplayContext",
+        "THIRD_PERSON_LEFT_HAND",
+        "thirdperson_lefthand",
+    ),
+    (
+        "net/minecraft/world/item/ItemDisplayContext",
+        "THIRD_PERSON_RIGHT_HAND",
+        "thirdperson_righthand",
+    ),
+    (
+        "net/minecraft/world/item/ItemDisplayContext",
+        "FIRST_PERSON_LEFT_HAND",
+        "firstperson_lefthand",
+    ),
+    (
+        "net/minecraft/world/item/ItemDisplayContext",
+        "FIRST_PERSON_RIGHT_HAND",
+        "firstperson_righthand",
+    ),
+    (
+        "net/minecraft/world/level/block/state/properties/PistonType",
+        "DEFAULT",
+        "normal",
+    ),
+    (
+        "net/minecraft/world/level/block/Rotation",
+        "CLOCKWISE_180",
+        "180",
+    ),
+    (
+        "net/minecraft/world/level/block/Rotation",
+        "CLOCKWISE_90",
+        "clockwise_90",
+    ),
+    (
+        "net/minecraft/server/packs/PackType",
+        "CLIENT_RESOURCES",
+        "assets",
+    ),
+    ("net/minecraft/server/packs/PackType", "SERVER_DATA", "data"),
+    ("net/minecraft/client/CloudStatus", "OFF", "false"),
+    ("net/minecraft/client/CloudStatus", "FANCY", "true"),
+    (
+        "net/minecraft/client/gui/font/FontOption",
+        "JAPANESE_VARIANTS",
+        "jp",
+    ),
+    (
+        "net/minecraft/client/telemetry/TelemetryProperty$ServerType",
+        "OTHER",
+        "server",
+    ),
+    (
+        "net/minecraft/world/level/levelgen/structure/StructureSpawnOverride$BoundingBoxType",
+        "STRUCTURE",
+        "full",
+    ),
+    (
+        "net/minecraft/world/level/levelgen/structure/StructureSpawnOverride$BoundingBoxType",
+        "PIECE",
+        "piece",
+    ),
+    (
+        "net/minecraft/world/level/levelgen/DensityFunctions$WeirdScaledSampler$RarityValueMapper",
+        "TYPE1",
+        "type_1",
+    ),
+    (
+        "net/minecraft/world/level/levelgen/DensityFunctions$WeirdScaledSampler$RarityValueMapper",
+        "TYPE2",
+        "type_2",
+    ),
+    (
+        "net/minecraft/world/item/enchantment/effects/SpawnParticlesEffect$PositionSourceType",
+        "BOUNDING_BOX",
+        "in_bounding_box",
+    ),
+    (
+        "net/minecraft/world/item/enchantment/effects/SpawnParticlesEffect$PositionSourceType",
+        "ENTITY_POSITION",
+        "entity_position",
+    ),
+];
+
+/// `getSerializedName` of vanilla's enum constant `constant` of `class`: its name in lower case,
+/// but a heightmap's (as it is), a display slot's for a team colour (`sidebar.team.<colour>`) and
+/// the other names vanilla gives ([`SERIALIZED_NAMES`]).
+pub(crate) fn serialized_name(class: &str, constant: &str) -> String {
+    if let Some((_, _, n)) = SERIALIZED_NAMES
+        .iter()
+        .find(|(c, k, _)| *c == class && *k == constant)
+    {
+        return (*n).to_owned();
+    }
+    match class {
+        "net/minecraft/world/level/levelgen/Heightmap$Types" => constant.to_owned(),
+        "net/minecraft/world/scores/DisplaySlot" if constant.starts_with("TEAM_") => {
+            format!(
+                "sidebar.team.{}",
+                constant["TEAM_".len()..].to_ascii_lowercase()
+            )
+        }
+        _ => constant.to_ascii_lowercase(),
+    }
 }
 
 const MUTABLE_COMPONENT: &str = "net/minecraft/network/chat/MutableComponent";
@@ -5589,6 +5828,117 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+    /// A block item's state for a click (`BlockItem.getPlacementState`): its block's
+    /// `getStateForPlacement`, asked through `Block` as vanilla's code asks it, runs the rule of
+    /// the block's own class or the one above it that has one (a lever's is
+    /// `FaceAttachedHorizontalDirectionalBlock`'s: looking down, on the floor facing the way the
+    /// player faces), kept where it survives. The click is a context made as a mod makes one, of a
+    /// player, a hand, a stack and a hit (`BlockPlaceContext`'s own constructor), which places
+    /// where the hit says (in the air it clicked, which it replaces).
+    #[test]
+    fn a_block_items_placement_state_follows_its_blocks_rule() {
+        const HIT_INIT: &str = "net/minecraft/world/phys/BlockHitResult.<init>.(Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/core/Direction;Lnet/minecraft/core/BlockPos;Z)V";
+        const CONTEXT_INIT: &str = "net/minecraft/world/item/context/BlockPlaceContext.<init>.(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/phys/BlockHitResult;)V";
+        const PLACEMENT_STATE: &str = "net/minecraft/world/item/BlockItem.getPlacementState.(Lnet/minecraft/world/item/context/BlockPlaceContext;)Lnet/minecraft/world/level/block/state/BlockState;";
+        const CLICKED_POS: &str = "net/minecraft/world/item/context/BlockPlaceContext.getClickedPos.()Lnet/minecraft/core/BlockPos;";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = crate::host::MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let player = crate::menus::server_player(rt, 42);
+            rt.put_field(player, "$yaw", V::F(0.0));
+            rt.put_field(player, "$pitch", V::F(90.0));
+            let hand = crate::api::get_static(rt, "net/minecraft/world/InteractionHand.MAIN_HAND");
+            let stack = super::stack(rt, "minecraft:lever", 1);
+            let at = super::vec3(rt, 0.5, 65.0, 0.5);
+            let up = crate::api::direction(rt, 1);
+            let pos = crate::api::block_pos(rt, 0, 64, 0);
+            let hit = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+            crate::api::call(rt, HIT_INIT, &[hit, at, up, pos, V::I(0)]);
+            let ctx = rt.new_object(super::PLACE_CONTEXT);
+            crate::api::call(rt, CONTEXT_INIT, &[ctx, player, hand, stack, hit]);
+            let clicked = crate::api::call(rt, CLICKED_POS, &[ctx]);
+            assert_eq!(
+                crate::api::pos_of(rt, clicked),
+                [0, 64, 0],
+                "the air clicked is replaced"
+            );
+            let lever = super::item(rt, "minecraft:lever");
+            let state = crate::api::call(rt, PLACEMENT_STATE, &[lever, ctx]);
+            let text = rt.str_of(state).unwrap_or("").to_owned();
+            assert!(
+                text.contains("face=floor") && text.contains("facing=south"),
+                "{text}"
+            );
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A vanilla enum's name in data (`getSerializedName`), asked through the interface or its
+    /// class: its constant's in lower case (`EquipmentSlot.MAINHAND` is `mainhand`) but where
+    /// vanilla's differs (`ItemDisplayContext.FIRST_PERSON_RIGHT_HAND` is `firstperson_righthand`,
+    /// a heightmap keeps its name, a team's sidebar is `sidebar.team.<colour>`).
+    #[test]
+    fn vanilla_enums_give_their_serialized_names() {
+        const NAME: &str =
+            "net/minecraft/util/StringRepresentable.getSerializedName.()Ljava/lang/String;";
+        const CONTEXT_NAME: &str =
+            "net/minecraft/world/item/ItemDisplayContext.getSerializedName.()Ljava/lang/String;";
+        let mut rt = Rt::new();
+        crate::install();
+        let named = |rt: &mut Rt, key: &'static str, constant: &'static str| {
+            let v = crate::api::get_static(rt, constant);
+            let s = crate::api::call(rt, key, &[v]);
+            rt.str_of(s).map(str::to_owned)
+        };
+        assert_eq!(
+            named(
+                &mut rt,
+                NAME,
+                "net/minecraft/world/entity/EquipmentSlot.MAINHAND"
+            )
+            .as_deref(),
+            Some("mainhand")
+        );
+        assert_eq!(
+            named(
+                &mut rt,
+                CONTEXT_NAME,
+                "net/minecraft/world/item/ItemDisplayContext.FIRST_PERSON_RIGHT_HAND"
+            )
+            .as_deref(),
+            Some("firstperson_righthand")
+        );
+        assert_eq!(
+            named(
+                &mut rt,
+                NAME,
+                "net/minecraft/world/item/ItemDisplayContext.GUI"
+            )
+            .as_deref(),
+            Some("gui")
+        );
+        assert_eq!(
+            named(
+                &mut rt,
+                NAME,
+                "net/minecraft/world/level/levelgen/Heightmap$Types.MOTION_BLOCKING"
+            )
+            .as_deref(),
+            Some("MOTION_BLOCKING")
+        );
+        assert_eq!(
+            named(
+                &mut rt,
+                NAME,
+                "net/minecraft/world/scores/DisplaySlot.TEAM_DARK_AQUA"
+            )
+            .as_deref(),
+            Some("sidebar.team.dark_aqua")
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `ItemInteractionResult` as 1.21.1's: `result()` is the plain result it stands for (both
     /// block-interaction passes are a pass), and it consumes the action when that does; the plain
     /// results' `values()` and ordinals are in declaration order (a mod's `switch` reads them).

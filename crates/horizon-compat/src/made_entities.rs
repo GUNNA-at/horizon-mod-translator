@@ -592,6 +592,16 @@ fn made_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "getBbHeight" => V::F(crate::vanilla_entities::dimensions(&kind).1),
         "getEyeHeight" => V::F(crate::vanilla_entities::dimensions(&kind).2),
         "getEyeY" => V::D(p[1] + f64::from(crate::vanilla_entities::dimensions(&kind).2)),
+        "getPose" => {
+            crate::api_common::plain_enum(rt, "net/minecraft/world/entity/Pose", "STANDING")
+                .unwrap_or(V::NULL)
+        }
+        "getDimensions" | "getDefaultDimensions"
+            if desc == crate::vanilla_entities::POSE_DIMENSIONS =>
+        {
+            let living = crate::vanilla_entities::is_living_type(&kind);
+            crate::vanilla_entities::pose_dimensions(rt, &kind, living, name, a(1))
+        }
 
         // Where it is and which way it faces.
         "setPos" | "setPosRaw" if desc.starts_with("(DDD)") || desc.starts_with("(Lnet/minecraft/world/phys/Vec3;)") => {

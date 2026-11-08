@@ -313,7 +313,7 @@ pub fn result_of(rt: &mut Rt, r: V) -> Result<V, String> {
     Ok(rt.get_field(r, "$value"))
 }
 
-fn either(rt: &mut Rt, left: bool, v: V) -> V {
+pub(crate) fn either(rt: &mut Rt, left: bool, v: V) -> V {
     let e = rt.new_object(EITHER);
     rt.put_field(e, if left { "$left" } else { "$right" }, v);
     rt.put_field(e, "$isLeft", V::I(left as i32));

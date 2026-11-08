@@ -914,15 +914,16 @@ fn vanilla_placement(rt: &mut Rt, class: &str, b: V, ctx: V) -> V {
         }
     };
     const NAMES: [&str; 6] = ["down", "up", "north", "south", "west", "east"];
-    let set = |text: &str, key: &str, value: &str| -> String {
+    // The property set, or added where the state's text doesn't name it (a vanilla block's
+    // default state is its name alone: the game fills in the rest).
+    fn set<'a>(text: &'a str, key: &'a str, value: &'a str) -> String {
         let (block, mut props) = crate::host::split_state(text);
-        for p in props.iter_mut() {
-            if p.0 == key {
-                p.1 = value;
-            }
+        match props.iter_mut().find(|p| p.0 == key) {
+            Some(p) => p.1 = value,
+            None => props.push((key, value)),
         }
         crate::host::join_state(block, props)
-    };
+    }
     let out = match class.rsplit('/').next().unwrap_or("") {
         "RotatedPillarBlock" => {
             let face = ordinal(rt, "net/minecraft/world/item/context/BlockPlaceContext.getClickedFace.()Lnet/minecraft/core/Direction;");
@@ -969,6 +970,146 @@ const DEFAULT_SHAPE_BLOCKS: [&str; 99] = [
     "WaterloggedTransparentBlock", "WeatheringCopperBulbBlock", "WeatheringCopperFullBlock", "WeatheringCopperGrateBlock", "WebBlock",
     "WetSpongeBlock",
 ];
+
+/// The block classes of 1.21.1 declaring their own `getStateForPlacement(context)`, as Minecraft
+/// 1.21.1's classes say (`piston/` names that package's); `Block`'s gives the default state.
+const PLACEMENT_DECLARED: [&str; 103] = [
+    "AbstractFurnaceBlock",
+    "AbstractSkullBlock",
+    "AmethystClusterBlock",
+    "AnvilBlock",
+    "BambooStalkBlock",
+    "BannerBlock",
+    "BarrelBlock",
+    "BarrierBlock",
+    "BaseCoralPlantTypeBlock",
+    "BaseCoralWallFanBlock",
+    "BaseFireBlock",
+    "BaseRailBlock",
+    "BedBlock",
+    "BeehiveBlock",
+    "BellBlock",
+    "BigDripleafBlock",
+    "CalibratedSculkSensorBlock",
+    "CampfireBlock",
+    "CandleBlock",
+    "CarvedPumpkinBlock",
+    "CeilingHangingSignBlock",
+    "ChainBlock",
+    "ChestBlock",
+    "ChiseledBookShelfBlock",
+    "ChorusPlantBlock",
+    "CocoaBlock",
+    "CommandBlock",
+    "ConcretePowderBlock",
+    "ConduitBlock",
+    "CoralBlock",
+    "CrafterBlock",
+    "DecoratedPotBlock",
+    "DiodeBlock",
+    "DirtPathBlock",
+    "DispenserBlock",
+    "DoorBlock",
+    "DoublePlantBlock",
+    "EnderChestBlock",
+    "EndPortalFrameBlock",
+    "EndRodBlock",
+    "FaceAttachedHorizontalDirectionalBlock",
+    "FarmBlock",
+    "FenceBlock",
+    "FenceGateBlock",
+    "FireBlock",
+    "GlazedTerracottaBlock",
+    "GrowingPlantBlock",
+    "HangingRootsBlock",
+    "HeavyCoreBlock",
+    "HopperBlock",
+    "HugeMushroomBlock",
+    "InfestedRotatedPillarBlock",
+    "IronBarsBlock",
+    "JigsawBlock",
+    "KelpBlock",
+    "LadderBlock",
+    "LanternBlock",
+    "LeavesBlock",
+    "LecternBlock",
+    "LightningRodBlock",
+    "LoomBlock",
+    "MangrovePropaguleBlock",
+    "MangroveRootsBlock",
+    "MultifaceBlock",
+    "NoteBlock",
+    "ObserverBlock",
+    "PinkPetalsBlock",
+    "piston/PistonBaseBlock",
+    "PitcherCropBlock",
+    "PointedDripstoneBlock",
+    "RedstoneLampBlock",
+    "RedstoneWallTorchBlock",
+    "RedStoneWireBlock",
+    "RepeaterBlock",
+    "RotatedPillarBlock",
+    "ScaffoldingBlock",
+    "SculkSensorBlock",
+    "SculkShriekerBlock",
+    "SeagrassBlock",
+    "SeaPickleBlock",
+    "ShulkerBoxBlock",
+    "SkullBlock",
+    "SlabBlock",
+    "SmallDripleafBlock",
+    "SnowLayerBlock",
+    "SnowyDirtBlock",
+    "StairBlock",
+    "StandingSignBlock",
+    "StonecutterBlock",
+    "TallSeagrassBlock",
+    "TrapDoorBlock",
+    "TripWireBlock",
+    "TripWireHookBlock",
+    "TurtleEggBlock",
+    "VaultBlock",
+    "VineBlock",
+    "WallBannerBlock",
+    "WallBlock",
+    "WallHangingSignBlock",
+    "WallSignBlock",
+    "WallSkullBlock",
+    "WallTorchBlock",
+    "WaterloggedTransparentBlock",
+];
+
+/// The nearest of the game's classes to object `v`: its own for a vanilla object, else the first
+/// above a mod's class.
+fn vanilla_class(rt: &Rt, v: V) -> Option<&'static str> {
+    if v.r() == 0 {
+        return None;
+    }
+    let mut c = rt.type_of(v);
+    for _ in 0..64 {
+        if c.starts_with("net/minecraft/") {
+            return Some(c);
+        }
+        c = rt.supers.get(c).copied()?;
+    }
+    None
+}
+
+/// Whether 1.21.1's class `c` is `class` or below it, as the generated table of its classes says.
+fn vanilla_below(c: &str, class: &str) -> bool {
+    use crate::vanilla_classes::CLASSES;
+    let mut c = c;
+    for _ in 0..32 {
+        if c == class {
+            return true;
+        }
+        match CLASSES.binary_search_by(|e| e.0.cmp(c)) {
+            Ok(i) => c = CLASSES[i].1,
+            Err(_) => return false,
+        }
+    }
+    false
+}
 
 /// The block classes of 1.21.1 declaring their own `getCollisionShape(state, level, pos, context)`,
 /// as Minecraft 1.21.1's class files say (`piston/` names that package's).
@@ -2256,10 +2397,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let text = if props.is_empty() { block } else { format!("{block}[{props}]") };
             Some(api::state(rt, &text))
         }
-        // `super.getStateForPlacement(context)` reaching a vanilla class: its own rule where it has one
-        // that only reads the click, else `Block`'s (the default state).
+        // `super.getStateForPlacement(context)` reaching a vanilla class, or a call through `Block`
+        // reaching vanilla's method (a block of a mod's class that keeps its vanilla base's, a
+        // vanilla block): the rule of the class whose method runs, the receiver's nearest vanilla
+        // class's or one above it, where it has one that only reads the click, else `Block`'s (the
+        // default state).
         (o, "getStateForPlacement") if o.starts_with("net/minecraft/world/level/block/") && desc.starts_with("(Lnet/minecraft/world/item/context/BlockPlaceContext;)") => {
-            Some(vanilla_placement(rt, o, a(0), a(1)))
+            let own = vanilla_class(rt, a(0)).filter(|c| vanilla_below(c, o)).unwrap_or(o);
+            let runs = declaring_class(own, &PLACEMENT_DECLARED).unwrap_or(o);
+            Some(vanilla_placement(rt, runs, a(0), a(1)))
         }
         (o, "<init>") if o.starts_with("net/minecraft/world/level/block/") && desc.contains("Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;") => {
             let props = args.iter().skip(1).copied().find(|v| v.r() != 0 && rt.class_of(*v) == BLOCK_PROPERTIES).unwrap_or(V::NULL);

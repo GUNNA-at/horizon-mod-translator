@@ -40,7 +40,8 @@ pub(crate) fn api_super(class: &str) -> Option<&'static str> {
         _ => crate::models::api_super(class)
             .or_else(|| crate::entity_render::api_super(class))
             .or_else(|| crate::camera::api_super(class))
-            .or_else(|| crate::item_wrappers::api_super(class)),
+            .or_else(|| crate::item_wrappers::api_super(class))
+            .or_else(|| crate::vanilla_entities::api_super(class)),
     }
 }
 

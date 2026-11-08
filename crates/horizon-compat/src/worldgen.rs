@@ -474,9 +474,23 @@ fn holder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let set_made_here = |rt: &Rt| matches!(rt.class_of(a(0)), HOLDER_SET_DIRECT | HOLDER_SET_NAMED);
     Some(match (owner, name) {
-        // `HolderSet.direct(holders...)`, `direct(list)`, `empty()`: a set of those holders.
-        (HOLDER_SET, "direct" | "empty") if !desc.starts_with("(Ljava/util/function/Function;") => {
-            let holders = if name == "empty" { Vec::new() } else { crate::jutil::elements(rt, a(0)) };
+        // `HolderSet.direct(holders...)`, `direct(list)`, `empty()`: a set of those holders;
+        // `direct(holderGetter, values)` (an array or a collection), each value's holder.
+        (HOLDER_SET, "direct" | "empty") => {
+            let holders = if name == "empty" {
+                Vec::new()
+            } else if desc.starts_with("(Ljava/util/function/Function;") {
+                let mut held = Vec::new();
+                for v in crate::jutil::elements(rt, a(1)) {
+                    held.push(rt.call_functional(APPLY, a(0), &[v]));
+                    if rt.thrown.is_some() {
+                        break;
+                    }
+                }
+                held
+            } else {
+                crate::jutil::elements(rt, a(0))
+            };
             let set = rt.new_object(HOLDER_SET_DIRECT);
             let list = crate::jutil::new_list(rt, holders);
             rt.put_field(set, "$holders", list);
@@ -513,7 +527,19 @@ fn holder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
                 }
                 o
             }
-            "isBound" => V::I(1),
+            // Whether it may be written for an owner: the runtime's sets are the game's own.
+            "isBound" | "canSerializeIn" => V::I(1),
+            // `unwrap()`: a tag's set its tag's key (left), a direct one its holders (right);
+            // `Named.key()`, the tag's key.
+            "unwrap" => match set_tag(rt, a(0)) {
+                Some(key) => crate::codecs::either(rt, true, key),
+                None => {
+                    let holders = set_holders(rt, a(0));
+                    let list = crate::jutil::new_list(rt, holders);
+                    crate::codecs::either(rt, false, list)
+                }
+            },
+            "key" if owner == HOLDER_SET_NAMED => set_tag(rt, a(0)).unwrap_or(V::NULL),
             "unwrapKey" => {
                 let key = set_tag(rt, a(0));
                 let o = rt.new_object("java/util/Optional");
@@ -1694,6 +1720,64 @@ mod tests {
             };
             Some(format!(r#"{{"temperature": {temperature}, "downfall": 0.5, "has_precipitation": true}}"#))
         }
+    }
+
+    /// A set a mod makes of values through the function giving each one's holder
+    /// (`HolderSet.direct(holderGetter, values)`): those holders, in order; a direct set unwraps
+    /// to its holders (the right side), and may be written for any owner (`canSerializeIn`).
+    #[test]
+    fn a_direct_set_of_values_holds_the_holders_its_function_gives() {
+        fn holder_of(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
+            if key == "apply.(Ljava/lang/Object;)Ljava/lang/Object;"
+                && rt.class_of(args[0]) == "test/HolderOf"
+            {
+                let items = crate::api::get_static(
+                    rt,
+                    "net/minecraft/core/registries/BuiltInRegistries.ITEM",
+                );
+                return crate::api::call(
+                    rt,
+                    "net/minecraft/core/Registry.wrapAsHolder.(Ljava/lang/Object;)Lnet/minecraft/core/Holder;",
+                    &[items, args[1]],
+                );
+            }
+            crate::api::call(rt, owner_key, args)
+        }
+        const DIRECT: &str = "net/minecraft/core/HolderSet.direct.(Ljava/util/function/Function;[Ljava/lang/Object;)Lnet/minecraft/core/HolderSet$Direct;";
+        const GET: &str = "net/minecraft/core/HolderSet.get.(I)Lnet/minecraft/core/Holder;";
+        const VALUE: &str = "net/minecraft/core/Holder.value.()Ljava/lang/Object;";
+        const UNWRAP: &str =
+            "net/minecraft/core/HolderSet.unwrap.()Lcom/mojang/datafixers/util/Either;";
+        const SERIALIZES: &str =
+            "net/minecraft/core/HolderSet.canSerializeIn.(Lnet/minecraft/core/HolderOwner;)Z";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(holder_of);
+        let f = rt.new_object("test/HolderOf");
+        let stone = crate::api::get_static(&mut rt, "net/minecraft/world/item/Items.STONE");
+        let dirt = crate::api::get_static(&mut rt, "net/minecraft/world/item/Items.DIRT");
+        let values = rt.alloc("[Ljava/lang/Object;", crate::Data::Array(vec![stone, dirt]));
+        let set = crate::api::call(&mut rt, DIRECT, &[f, values]);
+        let held: Vec<V> = (0..2)
+            .map(|i| {
+                let h = crate::api::call(&mut rt, GET, &[set, V::I(i)]);
+                crate::api::call(&mut rt, VALUE, &[h])
+            })
+            .collect();
+        assert_eq!(held, vec![stone, dirt]);
+        let either = crate::api::call(&mut rt, UNWRAP, &[set]);
+        assert_eq!(
+            rt.get_field(either, "$isLeft"),
+            V::I(0),
+            "a direct set's holders"
+        );
+        let right = rt.get_field(either, "$right");
+        assert_eq!(crate::jutil::elements(&rt, right).len(), 2);
+        assert_eq!(
+            crate::api::call(&mut rt, SERIALIZES, &[set, V::NULL]),
+            V::I(1)
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A mod's biome modifier type (Farmer's Delight's `add_features_by_filter`): its serializer, a

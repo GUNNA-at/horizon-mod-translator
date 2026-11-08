@@ -418,6 +418,12 @@ pub(crate) fn is_vanilla_type(id: &str) -> bool {
     type_entry(id).is_some()
 }
 
+/// The superclass of 1.21.1's entity class `class` (`LivingEntity`'s `Entity`): a call a mod's
+/// entity makes through its vanilla class climbs to the class that answers it.
+pub(crate) fn api_super(class: &str) -> Option<&'static str> {
+    class_entry(class).map(|e| e.1).filter(|s| !s.is_empty())
+}
+
 fn class_entry(c: &str) -> Option<&'static (&'static str, &'static str, &'static [&'static str])> {
     CLASSES.binary_search_by(|e| e.0.cmp(c)).ok().map(|i| &CLASSES[i])
 }
@@ -442,6 +448,27 @@ pub fn class_for(kind: &str, living: bool) -> &'static str {
 /// Vanilla's entity type `kind`'s box (width, height) and eye height, as [`size`] gives them.
 pub(crate) fn dimensions(kind: &str) -> (f32, f32, f32) {
     size(kind, false)
+}
+
+pub(crate) const POSE_DIMENSIONS: &str =
+    "(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+
+/// `getDimensions(pose)` (and `getDefaultDimensions`) of vanilla's entity of type `kind`: its
+/// type's (`EntityType.getDimensions`); a living one's asleep a fixed fifth of a block
+/// (`LivingEntity.SLEEPING_DIMENSIONS`), else its type's at its age's and its own scale, which
+/// the game doesn't tell here (a grown one's, 1).
+pub(crate) fn pose_dimensions(rt: &mut Rt, kind: &str, living: bool, name: &str, pose: V) -> V {
+    let sleeping = pose.r() != 0 && rt.str_of(rt.get_field(pose, "$name")) == Some("SLEEPING");
+    if living && name == "getDimensions" && sleeping {
+        return crate::mod_entities::sized(rt, 0.2, 0.2, 0.2, true, 0.0);
+    }
+    let (w, h, eye) = size(kind, living);
+    crate::mod_entities::sized(rt, w, h, eye, false, 0.0)
+}
+
+/// Whether vanilla's entity type `kind` is of a living class (a mob, an armor stand).
+pub(crate) fn is_living_type(kind: &str) -> bool {
+    type_entry(kind).is_some_and(|t| is_a(t.1, "net/minecraft/world/entity/LivingEntity"))
 }
 
 /// An entity type's box (width, height) and eye height: 1.21.1's, a boat's for 26.3's boats, a
@@ -765,6 +792,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "getBbWidth" => V::F(width),
         "getBbHeight" => V::F(height),
         "getEyeHeight" => V::F(eye),
+        "getDimensions" | "getDefaultDimensions" if desc == POSE_DIMENSIONS => {
+            pose_dimensions(rt, &kind, living, name, a(1))
+        }
+        // Its pose: the game doesn't tell a mob's, so standing (a player's is its own).
+        "getPose" => {
+            crate::api_common::plain_enum(rt, "net/minecraft/world/entity/Pose", "STANDING")
+                .unwrap_or(V::NULL)
+        }
+        "getScale" | "getAgeScale" if living && desc == "()F" => V::F(1.0),
         "getEyeY" => V::D(p[1] + f64::from(eye)),
         "getEyePosition" => vec3(rt, [p[0], p[1] + f64::from(eye), p[2]]),
         "level" | "getCommandSenderWorld" => crate::glue::level(rt),
@@ -1031,6 +1067,81 @@ mod tests {
     fn the_tables_are_sorted_for_their_searches() {
         assert!(TYPES.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(CLASSES.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    /// The game's entities' sizes in a pose (`getDimensions`), as 1.21.1's give them: a cow its
+    /// type's (0.9 by 1.4, eyes at 1.3), asleep a fixed fifth of a block; a minecart its type's in
+    /// any pose; a player its pose's (crouching 1.5 high with the eyes at 1.27, swimming 0.6, dying
+    /// a fixed fifth with the eyes still at 1.62, and a pose it has no size for as standing).
+    #[test]
+    fn the_games_entities_are_their_types_size_in_a_pose() {
+        const ENTITY_SIZE: &str = "net/minecraft/world/entity/Entity.getDimensions.(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+        const LIVING_SIZE: &str = "net/minecraft/world/entity/LivingEntity.getDimensions.(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+        const PLAYER_SIZE: &str = "net/minecraft/world/entity/player/Player.getDefaultDimensions.(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = MemoryHost::default();
+        host.entities.push(EntityView {
+            id: 7,
+            kind: "minecraft:cow".into(),
+            pos: [1.5, 64.0, -2.5],
+            yaw: 90.0,
+            health: Some((10.0, 10.0)),
+        });
+        host.entities.push(EntityView {
+            id: 8,
+            kind: "minecraft:minecart".into(),
+            pos: [4.5, 64.0, 0.5],
+            yaw: 0.0,
+            health: None,
+        });
+        rt.with_host(&mut host, |rt| {
+            let size = |rt: &mut Rt, key: &'static str, e: V, pose: V| {
+                let d = api::call(rt, key, &[e, pose]);
+                (
+                    ["width", "height", "eyeHeight"].map(|f| rt.get_field(d, f).f()),
+                    rt.get_field(d, "fixed").i() != 0,
+                )
+            };
+            let standing = api::get_static(rt, "net/minecraft/world/entity/Pose.STANDING");
+            let sleeping = api::get_static(rt, "net/minecraft/world/entity/Pose.SLEEPING");
+            let crouching = api::get_static(rt, "net/minecraft/world/entity/Pose.CROUCHING");
+            let swimming = api::get_static(rt, "net/minecraft/world/entity/Pose.SWIMMING");
+            let dying = api::get_static(rt, "net/minecraft/world/entity/Pose.DYING");
+            let jumping = api::get_static(rt, "net/minecraft/world/entity/Pose.LONG_JUMPING");
+            let cow = of(rt, 7, "minecraft:cow", None);
+            let cart = of(rt, 8, "minecraft:minecart", None);
+            assert_eq!(
+                size(rt, ENTITY_SIZE, cow, standing),
+                ([0.9, 1.4, 1.3], false)
+            );
+            assert_eq!(
+                size(rt, LIVING_SIZE, cow, sleeping),
+                ([0.2, 0.2, 0.2], true)
+            );
+            assert_eq!(
+                size(rt, ENTITY_SIZE, cart, sleeping),
+                ([0.98, 0.7, 0.595], false)
+            );
+            let player = crate::menus::server_player(rt, 42);
+            assert_eq!(
+                size(rt, LIVING_SIZE, player, crouching),
+                ([0.6, 1.5, 1.27], false)
+            );
+            assert_eq!(
+                size(rt, LIVING_SIZE, player, swimming),
+                ([0.6, 0.6, 0.4], false)
+            );
+            assert_eq!(
+                size(rt, LIVING_SIZE, player, dying),
+                ([0.2, 0.2, 1.62], true)
+            );
+            assert_eq!(
+                size(rt, PLAYER_SIZE, player, jumping),
+                ([0.6, 1.8, 1.62], false)
+            );
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A cow is an `Animal`, a `Mob`, a `LivingEntity` and an `Entity`, not an `Enemy`; a zombie

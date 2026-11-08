@@ -152,14 +152,67 @@ const SHIFT_KEY_DOWN: (&str, &str) = (
     "isShiftKeyDown.()Z",
 );
 const ATTACHMENTS_DESC: &str = "(Ljava/util/Map;)V";
+const LIVING: &str = "net/minecraft/world/entity/LivingEntity";
+const POSE: &str = "net/minecraft/world/entity/Pose";
+const POSE_DIMENSIONS: &str =
+    "(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+const GET_DIMENSIONS: &str = "getDimensions.(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+const GET_DIMENSIONS_KEY: &str = "net/minecraft/world/entity/Entity.getDimensions.(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+const DEFAULT_DIMENSIONS: &str = "getDefaultDimensions.(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+const DEFAULT_DIMENSIONS_KEY: &str = "net/minecraft/world/entity/LivingEntity.getDefaultDimensions.(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+const TYPE_DIMENSIONS_KEY: &str = "net/minecraft/world/entity/EntityType.getDimensions.()Lnet/minecraft/world/entity/EntityDimensions;";
+const SCALE_KEY: &str = "net/minecraft/world/entity/EntityDimensions.scale.(F)Lnet/minecraft/world/entity/EntityDimensions;";
+const GET_POSE: &str = "getPose.()Lnet/minecraft/world/entity/Pose;";
+const GET_POSE_KEY: &str =
+    "net/minecraft/world/entity/Entity.getPose.()Lnet/minecraft/world/entity/Pose;";
+const GET_SCALE: &str = "getScale.()F";
+const GET_SCALE_KEY: &str = "net/minecraft/world/entity/LivingEntity.getScale.()F";
+const AGE_SCALE: &str = "getAgeScale.()F";
+const AGE_SCALE_KEY: &str = "net/minecraft/world/entity/LivingEntity.getAgeScale.()F";
+const IS_BABY: &str = "isBaby.()Z";
+const IS_BABY_KEY: &str = "net/minecraft/world/entity/LivingEntity.isBaby.()Z";
+
+/// The name of a `Pose` constant; empty for null.
+fn pose_name(rt: &Rt, pose: V) -> String {
+    if pose.r() == 0 {
+        return String::new();
+    }
+    rt.str_of(rt.get_field(pose, "$name"))
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// A mod entity's width, height and eye height now: `getDimensions(getPose())`, as vanilla's
+/// `refreshDimensions` keeps them (a mod's own overrides answer).
+fn own_size(rt: &mut Rt, e: V) -> [f32; 3] {
+    let pose = api::virtual_call(rt, (GET_POSE_KEY, GET_POSE), &[e]);
+    let d = api::virtual_call(rt, (GET_DIMENSIONS_KEY, GET_DIMENSIONS), &[e, pose]);
+    if d.r() == 0 {
+        let (w, h, eye) = type_size(rt, rt.get_field(e, "$type"));
+        return [w, h, eye];
+    }
+    ["width", "height", "eyeHeight"].map(|f| rt.get_field(d, f).f())
+}
 
 /// `new EntityDimensions(width, height, fixed)`: vanilla's default eye height and attachment
 /// points (`EntityAttachments.createDefault`: each attachment's fallback point).
 fn dimensions(rt: &mut Rt, w: f32, h: f32, fixed: bool) -> V {
+    sized(rt, w, h, h * 0.85, fixed, 0.0)
+}
+
+/// `EntityDimensions` of a width, height and eye height, with each attachment at its fallback
+/// point but the vehicle's, `vehicle` up (a player's sits on its mount 0.6 up,
+/// `Player.DEFAULT_VEHICLE_ATTACHMENT`; vanilla's fallback is the feet, 0).
+pub(crate) fn sized(rt: &mut Rt, w: f32, h: f32, eye: f32, fixed: bool, vehicle: f64) -> V {
     let map = rt.alloc("java/util/EnumMap", Data::Table(Default::default()));
     for (i, &(name, at)) in ATTACHMENTS.iter().enumerate() {
         let key = api::api_enum(rt, ATTACHMENT, name, i as i32);
-        let point = crate::api_common::vec3(rt, 0.0, f64::from(h) * at, 0.0);
+        let y = if name == "VEHICLE" {
+            vehicle
+        } else {
+            f64::from(h) * at
+        };
+        let point = crate::api_common::vec3(rt, 0.0, y, 0.0);
         let points = jutil::new_list(rt, vec![point]);
         jutil::table_put(rt, map, key, points);
     }
@@ -175,11 +228,28 @@ fn dimensions(rt: &mut Rt, w: f32, h: f32, fixed: bool) -> V {
         &[
             V::F(w),
             V::F(h),
-            V::F(h * 0.85),
+            V::F(eye),
             attachments,
             V::I(i32::from(fixed)),
         ],
     )
+}
+
+/// An entity type's width, height and eye height: a mod's as its builder said (`sized`, then
+/// `eyeHeight`, else 85% of the height; the builder's default 0.6 by 1.8), vanilla's own as its
+/// table holds them.
+pub(crate) fn type_size(rt: &Rt, ty: V) -> (f32, f32, f32) {
+    if !matches!(rt.get_field(ty, "$width"), V::F(_))
+        && let Some(id) = type_id(rt, ty).filter(|id| crate::vanilla_entities::is_vanilla_type(id))
+    {
+        return crate::vanilla_entities::dimensions(id);
+    }
+    let (w, h) = size(rt, ty);
+    let (w, h) = (w as f32, h as f32);
+    match rt.get_field(ty, "$eye") {
+        V::F(eye) => (w, h, eye),
+        _ => (w, h, h * 0.85),
+    }
 }
 
 /// `EntityAttachments.scale(x, y, z)`: every point scaled.
@@ -576,9 +646,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 ],
             ))
         }
+        // `sized` makes new dimensions (at the default eye height); `eyeHeight` sets theirs.
         (TYPE_BUILDER, "sized") => {
             rt.put_field(a(0), "$width", a(1));
             rt.put_field(a(0), "$height", a(2));
+            rt.put_field(a(0), "$eye", V::Void);
+            Some(a(0))
+        }
+        (TYPE_BUILDER, "eyeHeight")
+            if desc == "(F)Lnet/minecraft/world/entity/EntityType$Builder;" =>
+        {
+            rt.put_field(a(0), "$eye", a(1));
             Some(a(0))
         }
         (TYPE_BUILDER, "clientTrackingRange" | "setTrackingRange") => {
@@ -591,7 +669,15 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (TYPE_BUILDER, "build") => {
             let t = rt.new_object(ENTITY_TYPE);
-            for f in ["$factory", "$category", "$width", "$height", "$range", "$interval"] {
+            for f in [
+                "$factory",
+                "$category",
+                "$width",
+                "$height",
+                "$eye",
+                "$range",
+                "$interval",
+            ] {
                 let v = rt.get_field(a(0), f);
                 rt.put_field(t, f, v);
             }
@@ -621,8 +707,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             };
             Some(crate::made_entities::spawn(rt, a(0), a(1), pos, consumer, name == "spawn"))
         }
-        (ENTITY_TYPE, "getWidth") => Some(V::F(size(rt, a(0)).0 as f32)),
-        (ENTITY_TYPE, "getHeight") => Some(V::F(size(rt, a(0)).1 as f32)),
+        (ENTITY_TYPE, "getWidth") => Some(V::F(type_size(rt, a(0)).0)),
+        (ENTITY_TYPE, "getHeight") => Some(V::F(type_size(rt, a(0)).1)),
         (ENTITY_TYPE, "clientTrackingRange") => Some(V::I(match rt.get_field(a(0), "$range") {
             V::I(r) => r,
             _ => 5,
@@ -631,10 +717,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::I(r) => r,
             _ => 3,
         })),
-        // What `sized(width, height)` made: `EntityDimensions.scalable`.
+        // What `sized(width, height)` made: `EntityDimensions.scalable`, at the type's eye height.
         (ENTITY_TYPE, "getDimensions") => {
-            let (w, h) = size(rt, a(0));
-            Some(dimensions(rt, w as f32, h as f32, false))
+            let (w, h, eye) = type_size(rt, a(0));
+            Some(sized(rt, w, h, eye, false, 0.0))
         }
         // An entity type tag, as the game's loaded tags hold it (`EntityTypeTags.ARTHROPOD`, a mod's
         // own).
@@ -1018,11 +1104,81 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             remove(rt, e, r);
             V::Void
         }
-        "getEyeY" => V::D(rt.get_field(e, "$y").d() + size(rt, rt.get_field(e, "$type")).1 * 0.85),
+        // Its size in its pose (`Entity.dimensions`, which `refreshDimensions` takes from
+        // `getDimensions(getPose())`, the mod's own if it overrides it).
+        "getEyeY" => V::D(rt.get_field(e, "$y").d() + f64::from(own_size(rt, e)[2])),
         "getEyePosition" if desc == "()Lnet/minecraft/world/phys/Vec3;" => {
             let p = xyz(rt, e);
-            let h = size(rt, rt.get_field(e, "$type")).1 * 0.85;
+            let h = f64::from(own_size(rt, e)[2]);
             vec3(rt, [p[0], p[1] + h, p[2]])
+        }
+        "getBbWidth" | "getBbHeight" | "getEyeHeight" if desc == "()F" => V::F(
+            own_size(rt, e)[match name {
+                "getBbWidth" => 0,
+                "getBbHeight" => 1,
+                _ => 2,
+            }],
+        ),
+        // Its pose (`DATA_POSE`, standing until set).
+        "getPose" => match rt.get_field(e, "$pose") {
+            p if p.r() != 0 => p,
+            _ => crate::api_common::plain_enum(rt, POSE, "STANDING").unwrap_or(V::NULL),
+        },
+        "setPose" => {
+            rt.put_field(e, "$pose", a(1));
+            V::Void
+        }
+        "hasPose" => {
+            let pose = api::call(rt, GET_POSE_KEY, &[e]);
+            V::I(i32::from(pose_name(rt, pose) == pose_name(rt, a(1))))
+        }
+        // `Entity.getDimensions(pose)`: its type's. A living entity's (`LivingEntity`'s, final):
+        // asleep a fixed fifth of a block, else `getDefaultDimensions(pose)` at its scale, which
+        // is its type's at its age's (half for a baby, `getAgeScale`).
+        "getDimensions" if desc == POSE_DIMENSIONS => {
+            let ty = rt.get_field(e, "$type");
+            if !rt.instance_of(e, LIVING) {
+                return Some(api::call(rt, TYPE_DIMENSIONS_KEY, &[ty]));
+            }
+            if pose_name(rt, a(1)) == "SLEEPING" {
+                return Some(sized(rt, 0.2, 0.2, 0.2, true, 0.0));
+            }
+            let d = api::virtual_call(rt, (DEFAULT_DIMENSIONS_KEY, DEFAULT_DIMENSIONS), &[e, a(1)]);
+            let scale = api::virtual_call(rt, (GET_SCALE_KEY, GET_SCALE), &[e]).f();
+            api::call(rt, SCALE_KEY, &[d, V::F(scale)])
+        }
+        "getDefaultDimensions" if desc == POSE_DIMENSIONS => {
+            let ty = rt.get_field(e, "$type");
+            let d = api::call(rt, TYPE_DIMENSIONS_KEY, &[ty]);
+            let scale = api::virtual_call(rt, (AGE_SCALE_KEY, AGE_SCALE), &[e]).f();
+            api::call(rt, SCALE_KEY, &[d, V::F(scale)])
+        }
+        // Its scale attribute's base (the runtime keeps no attribute modifiers for a mod's entity).
+        "getScale" if desc == "()F" => V::F(1.0),
+        "getAgeScale" if desc == "()F" => {
+            let baby = api::virtual_call(rt, (IS_BABY_KEY, IS_BABY), &[e]).i() != 0;
+            V::F(if baby { 0.5 } else { 1.0 })
+        }
+        // `AgeableMob`'s age (a baby's below 0: `setBaby` makes it -24000) and `LivingEntity`'s
+        // `isBaby`; an entity of no ageing class is never one.
+        "isBaby" if desc == "()Z" => {
+            let ageable = rt.instance_of(e, "net/minecraft/world/entity/AgeableMob");
+            V::I(i32::from(ageable && rt.get_field(e, "$age").i() < 0))
+        }
+        "getAge" if desc == "()I" && rt.instance_of(e, "net/minecraft/world/entity/AgeableMob") => {
+            V::I(rt.get_field(e, "$age").i())
+        }
+        "setAge"
+            if desc == "(I)V" && rt.instance_of(e, "net/minecraft/world/entity/AgeableMob") =>
+        {
+            rt.put_field(e, "$age", a(1));
+            V::Void
+        }
+        "setBaby"
+            if desc == "(Z)V" && rt.instance_of(e, "net/minecraft/world/entity/AgeableMob") =>
+        {
+            rt.put_field(e, "$age", V::I(if a(1).i() != 0 { -24000 } else { 0 }));
+            V::Void
         }
         // `spawnAtLocation(stack[, offsetY])`, or an item's (`(item[, offsetY])`): a new item entity
         // at its feet (raised by the offset), added to the level; none for an empty stack, or on a
@@ -1799,6 +1955,75 @@ mod tests {
             crate::shapes::aabb_of(&rt, b),
             [0.75, 2.0, 2.75, 1.25, 3.0, 3.25]
         );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's entity is its type's size (`sized`, then `eyeHeight`) in any pose
+    /// (`Entity.getDimensions`), which `getBbWidth`, `getBbHeight` and `getEyeY` read in its pose;
+    /// a living one's (`LivingEntity`'s) asleep is a fixed fifth of a block with the eye at the
+    /// top, and a baby's (`AgeableMob.setBaby`) half its type's.
+    #[test]
+    fn a_mods_entity_is_its_types_size_in_its_pose() {
+        const CALF: &str = "test/Calf";
+        const OF: &str = "net/minecraft/world/entity/EntityType$Builder.of.(Lnet/minecraft/world/entity/EntityType$EntityFactory;Lnet/minecraft/world/entity/MobCategory;)Lnet/minecraft/world/entity/EntityType$Builder;";
+        const SIZED: &str = "net/minecraft/world/entity/EntityType$Builder.sized.(FF)Lnet/minecraft/world/entity/EntityType$Builder;";
+        const EYE: &str = "net/minecraft/world/entity/EntityType$Builder.eyeHeight.(F)Lnet/minecraft/world/entity/EntityType$Builder;";
+        const BUILD: &str = "net/minecraft/world/entity/EntityType$Builder.build.(Ljava/lang/String;)Lnet/minecraft/world/entity/EntityType;";
+        const INIT: &str = "net/minecraft/world/entity/Entity.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V";
+        const LIVING_SIZE: &str = "net/minecraft/world/entity/LivingEntity.getDimensions.(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+        const ENTITY_SIZE: &str = "net/minecraft/world/entity/Entity.getDimensions.(Lnet/minecraft/world/entity/Pose;)Lnet/minecraft/world/entity/EntityDimensions;";
+        const SET_POSE: &str =
+            "net/minecraft/world/entity/Entity.setPose.(Lnet/minecraft/world/entity/Pose;)V";
+        const WIDTH: &str = "net/minecraft/world/entity/Entity.getBbWidth.()F";
+        const HEIGHT: &str = "net/minecraft/world/entity/Entity.getBbHeight.()F";
+        const EYE_Y: &str = "net/minecraft/world/entity/Entity.getEyeY.()D";
+        const SET_BABY: &str = "net/minecraft/world/entity/AgeableMob.setBaby.(Z)V";
+        let (mut rt, cart_type) = runtime();
+        rt.supers
+            .insert(CALF, "net/minecraft/world/entity/animal/Animal");
+        let factory = rt.new_object("test/CalfFactory");
+        let creature = api::get_static(&mut rt, "net/minecraft/world/entity/MobCategory.CREATURE");
+        let b = api::call(&mut rt, OF, &[factory, creature]);
+        api::call(&mut rt, SIZED, &[b, V::F(0.9), V::F(1.4)]);
+        api::call(&mut rt, EYE, &[b, V::F(1.3)]);
+        let name = rt.string("calf");
+        let ty = api::call(&mut rt, BUILD, &[b, name]);
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let calf = rt.new_object(CALF);
+            api::call(rt, INIT, &[calf, ty, level]);
+            let cart = rt.new_object(CART);
+            api::call(rt, INIT, &[cart, cart_type, level]);
+            let size = |rt: &Rt, d: V| {
+                (
+                    ["width", "height", "eyeHeight"].map(|f| rt.get_field(d, f).f()),
+                    rt.get_field(d, "fixed").i() != 0,
+                )
+            };
+            let standing = api::get_static(rt, "net/minecraft/world/entity/Pose.STANDING");
+            let sleeping = api::get_static(rt, "net/minecraft/world/entity/Pose.SLEEPING");
+            let d = api::call(rt, LIVING_SIZE, &[calf, standing]);
+            assert_eq!(size(rt, d), ([0.9, 1.4, 1.3], false));
+            let d = api::call(rt, LIVING_SIZE, &[calf, sleeping]);
+            assert_eq!(size(rt, d), ([0.2, 0.2, 0.2], true));
+            assert_eq!(
+                (
+                    api::call(rt, WIDTH, &[calf]),
+                    api::call(rt, HEIGHT, &[calf])
+                ),
+                (V::F(0.9), V::F(1.4))
+            );
+            assert_eq!(api::call(rt, EYE_Y, &[calf]), V::D(f64::from(1.3f32)));
+            api::call(rt, SET_BABY, &[calf, V::I(1)]);
+            let d = api::call(rt, LIVING_SIZE, &[calf, standing]);
+            assert_eq!(size(rt, d), ([0.45, 0.7, 0.65], false));
+            api::call(rt, SET_POSE, &[calf, sleeping]);
+            assert_eq!(api::call(rt, HEIGHT, &[calf]), V::F(0.2), "asleep");
+            // Not a living entity: its type's (the builder's default 0.6 by 1.8) even asleep.
+            let d = api::call(rt, ENTITY_SIZE, &[cart, sleeping]);
+            assert_eq!(size(rt, d), ([0.6, 1.8, 1.8 * 0.85], false));
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

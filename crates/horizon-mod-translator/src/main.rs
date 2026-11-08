@@ -288,6 +288,55 @@ fn sample(rt: &mut horizon_compat::Rt, ty: &str) -> Option<horizon_compat::V> {
         "Lnet/neoforged/neoforge/capabilities/BlockCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.BLOCK"),
         "Lnet/neoforged/neoforge/capabilities/EntityCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.ENTITY"),
         "Lnet/neoforged/neoforge/capabilities/ItemCapability;" => api::get_static(rt, "net/neoforged/neoforge/capabilities/Capabilities$FluidHandler.ITEM"),
+        // A vanilla enum's constant, as a mod names one (`EquipmentSlot.MAINHAND`), and a pose.
+        "Lnet/minecraft/util/StringRepresentable;" => api::get_static(rt, "net/minecraft/world/entity/EquipmentSlot.MAINHAND"),
+        "Lnet/minecraft/world/entity/Pose;" => api::get_static(rt, "net/minecraft/world/entity/Pose.STANDING"),
+        // The ops the game reads and writes NBT with.
+        "Lcom/mojang/serialization/DynamicOps;" => api::get_static(rt, "net/minecraft/nbt/NbtOps.INSTANCE"),
+        // A set of stone's item holder (`HolderSet.direct`).
+        "Lnet/minecraft/core/HolderSet;" | "Lnet/minecraft/core/HolderSet$Direct;" => {
+            let stone = sample(rt, "Lnet/minecraft/core/Holder;")?;
+            let holders = rt.alloc(
+                "[Lnet/minecraft/core/Holder;",
+                horizon_compat::Data::Array(vec![stone]),
+            );
+            api::call(
+                rt,
+                "net/minecraft/core/HolderSet.direct.([Lnet/minecraft/core/Holder;)Lnet/minecraft/core/HolderSet$Direct;",
+                &[holders],
+            )
+        }
+        // The probe player's click on the top of the block at (0, 64, 0), holding stone.
+        "Lnet/minecraft/world/item/context/BlockPlaceContext;"
+        | "Lnet/minecraft/world/item/context/UseOnContext;" => {
+            let at = sample(rt, "Lnet/minecraft/world/phys/Vec3;")?;
+            let up = sample(rt, "Lnet/minecraft/core/Direction;")?;
+            let pos = sample(rt, "Lnet/minecraft/core/BlockPos;")?;
+            let hit = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+            api::call(
+                rt,
+                "net/minecraft/world/phys/BlockHitResult.<init>.(Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/core/Direction;Lnet/minecraft/core/BlockPos;Z)V",
+                &[hit, at, up, pos, V::I(0)],
+            );
+            let level = horizon_compat::glue::level(rt);
+            let player = sample(rt, "Lnet/minecraft/world/entity/player/Player;")?;
+            let hand = sample(rt, "Lnet/minecraft/world/InteractionHand;")?;
+            let stack = sample(rt, "Lnet/minecraft/world/item/ItemStack;")?;
+            let (class, init) = if ty.contains("BlockPlaceContext") {
+                (
+                    "net/minecraft/world/item/context/BlockPlaceContext",
+                    "net/minecraft/world/item/context/BlockPlaceContext.<init>.(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/phys/BlockHitResult;)V",
+                )
+            } else {
+                (
+                    "net/minecraft/world/item/context/UseOnContext",
+                    "net/minecraft/world/item/context/UseOnContext.<init>.(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/phys/BlockHitResult;)V",
+                )
+            };
+            let ctx = rt.new_object(class);
+            api::call(rt, init, &[ctx, level, player, hand, stack, hit]);
+            ctx
+        }
         _ if class.is_some_and(level_class) => horizon_compat::glue::level(rt),
         _ if class.is_some_and(|c| matches!(c.strip_prefix("net/minecraft/world/entity/"), Some("Entity" | "LivingEntity" | "Mob" | "PathfinderMob" | "AgeableMob" | "animal/Animal"))) => {
             horizon_compat::vanilla_entities::of(rt, PROBE_MOB, "minecraft:cow", None)
