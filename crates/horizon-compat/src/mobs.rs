@@ -3834,3 +3834,206 @@ fn walk_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::MemoryHost;
+
+    const PENGUIN: &str = "test/Penguin";
+    const INIT: &str = "net/minecraft/world/entity/animal/Animal.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V";
+    const SAVE: &str = "net/minecraft/world/entity/animal/Animal.addAdditionalSaveData.(Lnet/minecraft/nbt/CompoundTag;)V";
+    const LOAD: &str = "net/minecraft/world/entity/animal/Animal.readAdditionalSaveData.(Lnet/minecraft/nbt/CompoundTag;)V";
+
+    /// A runtime with a mod's animal class that has no code of its own, and its type: 0.6 by 1 block.
+    fn runtime() -> (Rt, V) {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.supers.insert(PENGUIN, ANIMAL);
+        let ty = rt.new_object("net/minecraft/world/entity/EntityType");
+        rt.put_field(ty, "$width", V::F(0.6));
+        rt.put_field(ty, "$height", V::F(1.0));
+        rt.registered.insert(("entity_type".into(), "test:penguin".into()), ty);
+        (rt, ty)
+    }
+
+    /// A server's world: a stone floor at y 0, 17 by 17 blocks.
+    fn floor() -> MemoryHost {
+        let mut host = MemoryHost::default();
+        for x in -8..=8 {
+            for z in -8..=8 {
+                host.blocks.insert([x, 0, z], "minecraft:stone".into());
+            }
+        }
+        host
+    }
+
+    fn penguin(rt: &mut Rt, ty: V, at: [f64; 3]) -> V {
+        let level = crate::glue::level(rt);
+        let e = rt.new_object(PENGUIN);
+        api::call(rt, INIT, &[e, ty, level]);
+        crate::mod_entities::set_pos(rt, e, at);
+        e
+    }
+
+    /// One level tick of `e`: last tick's place kept, then its tick.
+    fn step(rt: &mut Rt, e: V) {
+        let p = position(rt, e);
+        for (f, v) in ["xo", "yo", "zo"].into_iter().zip(p) {
+            rt.put_field(e, f, V::D(v));
+        }
+        let t = int(rt, e, "tickCount");
+        put_i(rt, e, "tickCount", t + 1);
+        tick(rt, e);
+    }
+
+    #[test]
+    fn a_mods_animal_walks_where_its_move_control_sends_it_on_the_floor() {
+        let (mut rt, ty) = runtime();
+        let mut host = floor();
+        rt.with_host(&mut host, |rt| {
+            let e = penguin(rt, ty, [0.5, 1.0, 0.5]);
+            let mv = obj(rt, e, "moveControl");
+            for _ in 0..30 {
+                set_wanted_position(rt, mv, [4.5, 1.0, 0.5], 0.35);
+                step(rt, e);
+            }
+            let p = position(rt, e);
+            assert!(p[0] > 2.5 && p[0] < 5.0, "walked east: {p:?}");
+            assert!((p[2] - 0.5).abs() < 0.3, "kept its line: {p:?}");
+            assert_eq!(p[1], 1.0, "stands on the floor");
+            assert!(truth(rt, e, "$onGround"));
+            // Facing east (yaw 270), its legs swinging.
+            assert!(wrap(flt(rt, e, "$yRot") - 270.0).abs() < 1.0, "{}", flt(rt, e, "$yRot"));
+            let walk = obj(rt, e, "walkAnimation");
+            assert!(api::call(rt, "net/minecraft/world/entity/WalkAnimationState.isMoving.()Z", &[walk]).i() != 0);
+        });
+    }
+
+    #[test]
+    fn a_blow_within_its_frames_hurts_only_by_what_tops_the_last_and_death_takes_twenty_ticks() {
+        let (mut rt, ty) = runtime();
+        let mut host = floor();
+        rt.with_host(&mut host, |rt| {
+            let e = penguin(rt, ty, [0.5, 1.0, 0.5]);
+            assert_eq!(health(rt, e), 20.0);
+            let generic = damage_source(rt, "minecraft:generic", V::NULL);
+            assert!(hurt(rt, e, generic, 5.0));
+            assert_eq!((health(rt, e), int(rt, e, "hurtTime"), int(rt, e, "invulnerableTime")), (15.0, 10, 20));
+            assert!(!hurt(rt, e, generic, 3.0), "no more than the last blow");
+            assert_eq!(health(rt, e), 15.0);
+            assert!(hurt(rt, e, generic, 8.0));
+            assert_eq!(health(rt, e), 12.0, "8 less the 5 it took");
+            assert!(hurt(rt, e, generic, 40.0));
+            assert_eq!(health(rt, e), 0.0);
+            assert!(truth(rt, e, "dead"));
+            for _ in 0..19 {
+                step(rt, e);
+            }
+            assert!(!removed(rt, e), "still falling over");
+            step(rt, e);
+            assert!(removed(rt, e), "gone after twenty ticks");
+        });
+        assert!(host.orbs.is_empty(), "no player killed it: no experience");
+    }
+
+    #[test]
+    fn a_clients_copy_gets_its_health_age_handedness_and_what_it_holds() {
+        let (mut rt, ty) = runtime();
+        let mut host = floor();
+        rt.with_host(&mut host, |rt| {
+            let server = penguin(rt, ty, [0.5, 1.0, 0.5]);
+            set_health(rt, server, 12.5);
+            set_age(rt, server, -24000);
+            put_bool(rt, server, "$leftHanded", true);
+            let sword = crate::api_common::stack(rt, "minecraft:iron_sword", 1);
+            let main = api::get_static(rt, "net/minecraft/world/entity/EquipmentSlot.MAINHAND");
+            api::call(rt, "net/minecraft/world/entity/Mob.setItemSlot.(Lnet/minecraft/world/entity/EquipmentSlot;Lnet/minecraft/world/item/ItemStack;)V", &[server, main, sword]);
+            let state = state_bytes(rt, server);
+            assert!(state_changed(rt, server, &state));
+            assert!(!state_changed(rt, server, &state), "sent once");
+            let client = penguin(rt, ty, [0.5, 1.0, 0.5]);
+            receive(rt, client, &state_message(&state));
+            assert_eq!(health(rt, client), 12.5);
+            assert!(is_baby(rt, client));
+            assert!(truth(rt, client, "$leftHanded"));
+            let held = api::call(rt, "net/minecraft/world/entity/LivingEntity.getMainHandItem.()Lnet/minecraft/world/item/ItemStack;", &[client]);
+            assert_eq!(crate::api_common::item_like_name(rt, rt.get_field(held, "$item")), "minecraft:iron_sword");
+            let off = api::call(rt, "net/minecraft/world/entity/LivingEntity.getOffhandItem.()Lnet/minecraft/world/item/ItemStack;", &[client]);
+            assert!(crate::api_common::stack_empty(rt, off));
+        });
+    }
+
+    #[test]
+    fn what_a_mods_animal_saves_loads_back_into_a_new_one() {
+        let (mut rt, ty) = runtime();
+        let mut host = floor();
+        rt.with_host(&mut host, |rt| {
+            let e = penguin(rt, ty, [0.5, 1.0, 0.5]);
+            set_health(rt, e, 7.0);
+            set_age(rt, e, -100);
+            put_i(rt, e, "inLove", 300);
+            put_bool(rt, e, "$leftHanded", true);
+            put_bool(rt, e, "$persistenceRequired", true);
+            let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
+            api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
+            api::call(rt, SAVE, &[e, tag]);
+            assert_eq!(tag_get(rt, tag, GET_FLOAT, "Health"), V::F(7.0), "vanilla's key");
+            assert_eq!(tag_int(rt, tag, GET_INT, "Age"), -100);
+            let fresh = penguin(rt, ty, [0.5, 1.0, 0.5]);
+            api::call(rt, LOAD, &[fresh, tag]);
+            assert_eq!(health(rt, fresh), 7.0);
+            assert_eq!(int(rt, fresh, "$age"), -100);
+            assert_eq!(int(rt, fresh, "inLove"), 300);
+            assert!(truth(rt, fresh, "$leftHanded") && truth(rt, fresh, "$persistenceRequired"));
+        });
+    }
+
+    #[test]
+    fn a_flying_move_control_lifts_it_toward_a_point_above_without_gravity() {
+        let (mut rt, ty) = runtime();
+        let mut host = floor();
+        rt.with_host(&mut host, |rt| {
+            let e = penguin(rt, ty, [0.5, 1.0, 0.5]);
+            // Still the first tick (it hasn't moved yet), on the ground the next.
+            step(rt, e);
+            step(rt, e);
+            assert!(truth(rt, e, "$onGround"), "landed");
+            let c = rt.new_object(FLYING_MOVE);
+            api::call(rt, "net/minecraft/world/entity/ai/control/FlyingMoveControl.<init>.(Lnet/minecraft/world/entity/Mob;IZ)V", &[c, e, V::I(20), V::I(1)]);
+            rt.put_field(e, "moveControl", c);
+            // Off the ground at its walking speed (0.7, the attribute's default): up by 0.7 * 0.7
+            // in the first tick, less the fall it had from standing (gravity 0.08, less 2%); then
+            // in the air at 0.02 a tick, its rise slowing by 2% a tick.
+            set_wanted_position(rt, c, [0.5, 6.0, 0.5], 1.0);
+            step(rt, e);
+            let y = position(rt, e)[1];
+            assert!((y - (1.0 + 0.7 * 0.7 - 0.08 * 0.98)).abs() < 1.0e-3, "{y}");
+            for _ in 0..3 {
+                set_wanted_position(rt, c, [0.5, 6.0, 0.5], 1.0);
+                step(rt, e);
+            }
+            assert!(position(rt, e)[1] > 2.6, "kept rising: {:?}", position(rt, e));
+            assert!(truth(rt, e, "$noGravity"));
+        });
+    }
+
+    #[test]
+    fn calls_naming_its_vanilla_classes_reach_the_mobs_state_and_the_entitys() {
+        let (mut rt, ty) = runtime();
+        let mut host = floor();
+        rt.with_host(&mut host, |rt| {
+            let e = penguin(rt, ty, [0.5, 1.0, 0.5]);
+            let nav = api::call(rt, "net/minecraft/world/entity/PathfinderMob.getNavigation.()Lnet/minecraft/world/entity/ai/navigation/PathNavigation;", &[e]);
+            assert!(nav.r() != 0 && nav == obj(rt, e, "navigation"));
+            assert_eq!(api::call(rt, "net/minecraft/world/entity/animal/Animal.getHealth.()F", &[e]), V::F(20.0));
+            assert_eq!(api::call(rt, "net/minecraft/world/entity/animal/Animal.getX.()D", &[e]), V::D(0.5));
+            let other = penguin(rt, ty, [2.5, 1.0, 0.5]);
+            api::call(rt, "net/minecraft/world/entity/Mob.setTarget.(Lnet/minecraft/world/entity/LivingEntity;)V", &[e, other]);
+            assert_eq!(target(rt, e), other);
+            // A control's own class climbs to the vanilla one it extends.
+            assert_eq!(api_super(SMOOTH_LOOK), Some(LOOK_CONTROL));
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+}
