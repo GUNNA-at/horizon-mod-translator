@@ -3423,6 +3423,12 @@ fn living_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         ("die", "(Lnet/minecraft/world/damagesource/DamageSource;)V") => unit(die(rt, e, a(1))),
         ("dropAllDeathLoot", _) => unit(drop_all_death_loot(rt, e, a(2))),
         ("dropCustomDeathLoot", _) => V::Void,
+        // `EntityType.getDefaultLootTable()`: `<namespace>:entities/<path>` of its type's id.
+        ("getDefaultLootTable" | "getLootTable", "()Lnet/minecraft/resources/ResourceKey;") => {
+            let id = type_name(rt, e);
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id.as_str()));
+            rt.string(&format!("loot_table#{ns}:entities/{path}"))
+        }
         ("kill", "()V") => {
             let s = damage_source(rt, "minecraft:generic_kill", V::NULL);
             hurt(rt, e, s, f32::MAX);
