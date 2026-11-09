@@ -9444,6 +9444,50 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     tick; a mod's entity saves its own vectors with `Entity`'s helpers; a multimap over a factory holds its
     collections; the difficulty's), 2 extended (a mod's entity starts with `walkDist`; sneaking's `isDiscrete` and
     `isDescending`). 734 compat, 15 compat-core and 25 translator unit tests pass.
+- [x] 2026-11-09 Part 141: the client draws Create's train: each carriage's blocks, its bogey and wheels, and the
+  coupling between the carriages, where the server's carriages stand.
+  - A carriage's place on its track travels in its synched data (`CARRIAGE_DATA`), in a serializer of Create's own
+    class (`CarriageSyncDataSerializer`, whose `codec()` is its own `STREAM_CODEC`). The runtime sent only the
+    values whose serializer kept its codec (vanilla's, and `EntityDataSerializer.forValueType`'s), so the client's
+    carriage never heard where it was: Create's renderer skips a carriage until its client tick has placed it
+    (`validForRender`, `firstPositionUpdate`), and the world showed the track and the station alone. A serializer's
+    codec is now what its `codec()` answers, the mod's own when it overrides it (asked once, then kept), in the
+    spawn message and in each change. The client's carriage then finds its train (`bindCarriage`: the client's
+    railway manager has it from `AddTrainPacket`), follows the server's (`CarriageSyncData.approach`,
+    `updateContraptionAnchors`, `alignEntity`) and `CarriageContraptionEntityRenderer` draws it.
+  - `Entity.getPosition(F)`, `getEyePosition(F)` and `getLightProbePosition(F)` of a mod's entity: where it is a
+    fraction of the way through its tick, from `xo` to where it is, as `Mth.lerp` (its eyes and the light it reads
+    its eye height above). Create anchors each bogey's coupling there; `CarriageCouplingRenderer` (on
+    `RenderLevelStageEvent.AFTER_PARTICLES`) draws the cable and its heads between the two carriages.
+  - What the carriage's tick asked (Part 140's list): `Entity.moveTo(Vec3)` (the place, and `xo`, at the rotation
+    it has), `TickRateManager.isEntityFrozen` (no), and of a player near it `noPhysics` (no) and
+    `getSelfAndPassengers()` (the player). `getSelfAndPassengers`, `getPassengersAndSelf` and
+    `getIndirectPassengers` of a mod's entity walk its passengers depth first, as vanilla's streams do (each before
+    its own passengers, or after them); the walk the runtime used for saves and spawns (breadth first) is the same
+    one now.
+  - In game (`scratchpad/p140live.sh`, `MODE=trains`, build of this Part): the line of track, the station and the
+    two carriages of Part 140, the train assembled by the station's button ("┬8a453: Unnamed Train, 2 Wagons",
+    "Waiting at: Track Station"), its carriages at (21.5, 101, 20.5) and (25.5, 101, 20.5). Seen from beside the
+    track 60 ticks later (F1, `train.png`), the client draws both carriages where the server's stand: each bogey's
+    frame, wheels and shafts on the rails, the railway casing on it and the controls on top with their cover and
+    lever (the first facing east, the second west, as they were placed), and the coupling's cable and heads
+    between them; as the world drew the blocks before they were assembled. With the trace on, the carriage's
+    client tick (`tickContraption` → `updateContraptionAnchors`, `alignEntity`) runs on the main thread each tick;
+    no panic or exception in the log.
+    - The press, the depot and Waddles' penguins as before (`MODE=check`): the press at 16, its stroke read at
+      `Ticks` 2, then 12, the depot then held an iron sheet and an empty hand took it; a penguin walked from (4.5,
+      100, −1.5) to (3.6, 100, 2.8) at its 8.0 health. With the trace on, nothing unmapped beyond the client's GL
+      shader and `DynamicTexture` calls of before; no panic or exception.
+  - Not yet: the train doesn't drive (no schedule, no controls). A carriage's looping sounds (Create's
+    `CarriageSounds$LoopingSound`) ask `AbstractSoundInstance.resolve` and the `Gui`'s `SubtitleOverlay` (to show
+    their subtitle again each second), which aren't mapped (the test runs without audio, so the game started none).
+  - Run 47 (the pack's 367 jars): API methods 85.2% (110,900 of 130,223; 110,886 before), call sites 92.7%
+    (345,523 of 372,742; 345,506 before), 8,492 distinct methods missing (8,495 before); Create's 3,327 of its
+    3,971 methods (3,323 before), 24,432 of its 25,240 calls; libraries 83.5% and 94.3%, as before.
+  - Tests: compat 3 new (a value in a mod's own serializer reaches the client's copy: it fails without the change,
+    the copy's count 0 for the server's 2; a mod's entity walks its passengers and theirs as vanilla's streams; a
+    mod's entity within a tick is between its last place and this one). 737 compat, 15 compat-core and 25
+    translator unit tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

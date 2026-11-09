@@ -94,16 +94,9 @@ pub(crate) fn join(rt: &mut Rt, e: V, from_disk: bool) -> bool {
     true
 }
 
-/// `e` and its passengers, theirs after each (`Entity.getSelfAndPassengers`).
+/// `e` and its passengers, each before its own (`Entity.getSelfAndPassengers`).
 pub(crate) fn self_and_passengers(rt: &Rt, e: V) -> Vec<V> {
-    let mut out = vec![e];
-    let mut i = 0;
-    while i < out.len() {
-        let next = crate::riding::passengers(rt, out[i]);
-        out.extend(next.into_iter().filter(|p| p.r() != 0));
-        i += 1;
-    }
-    out
+    crate::riding::passenger_tree(rt, e, true)
 }
 
 /// Whether another entity of `e`'s UUID is in the level's list and not removed: a second of it
@@ -934,7 +927,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.put_field(s, "$codec", a(0));
             Some(s)
         }
-        ("net/minecraft/network/syncher/EntityDataSerializer", "codec") => Some(rt.get_field(a(0), "$codec")),
+        ("net/minecraft/network/syncher/EntityDataSerializer", "codec") => {
+            Some(serializer_codec(rt, a(0)))
+        }
         ("net/minecraft/network/syncher/EntityDataSerializer", "createAccessor") => {
             let acc = rt.new_object(ACCESSOR);
             rt.put_field(acc, "$id", a(1));
@@ -1024,6 +1019,26 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let p = xyz(rt, e);
             vec3(rt, p)
         }
+        // Where it was `partial` of the way through its last tick, from `xo`, `yo`, `zo` to where
+        // it is, its eyes `getEyeHeight()` above (`getPosition(F)`, `getEyePosition(F)`, and
+        // `getLightProbePosition(F)`, where its light is read: Create's carriage renderer anchors the
+        // couplings between carriages at the first and lights them at the last).
+        "getPosition" | "getEyePosition" | "getLightProbePosition"
+            if desc == "(F)Lnet/minecraft/world/phys/Vec3;" =>
+        {
+            let t = f64::from(a(1).f());
+            let now = xyz(rt, e);
+            let [x, y, z] = [("xo", 0), ("yo", 1), ("zo", 2)].map(|(f, i)| {
+                let old = rt.get_field(e, f).d();
+                old + t * (now[i] - old)
+            });
+            let eye = if name == "getPosition" {
+                0.0
+            } else {
+                f64::from(own_size(rt, e)[2])
+            };
+            vec3(rt, [x, y + eye, z])
+        }
         "blockPosition"
         | "getOnPos"
         | "getOnPosLegacy"
@@ -1044,8 +1059,16 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             set_pos_raw(rt, e, [a(1).d(), a(2).d(), a(3).d()]);
             V::Void
         }
-        "moveTo" | "absMoveTo" if desc.starts_with("(DDD") => {
-            let p = [a(1).d(), a(2).d(), a(3).d()];
+        // `moveTo(x, y, z[, yRot, xRot])`, `absMoveTo`, and `moveTo(Vec3)` at the rotation it has
+        // (Create's carriage, made again where its train's anchor is).
+        "moveTo" | "absMoveTo"
+            if desc.starts_with("(DDD") || desc == "(Lnet/minecraft/world/phys/Vec3;)V" =>
+        {
+            let p = if desc.starts_with("(DDD") {
+                [a(1).d(), a(2).d(), a(3).d()]
+            } else {
+                of_vec3(rt, a(1))
+            };
             for f in ["xo", "xOld"] {
                 rt.put_field(e, f, V::D(p[0]));
             }
@@ -1746,6 +1769,30 @@ fn place(rt: &Rt, e: V) -> ([f64; 3], [f32; 2]) {
     (xyz(rt, e), [rt.get_field(e, "$yRot").f(), rt.get_field(e, "$xRot").f()])
 }
 
+const SERIALIZER_CODEC: &str = "codec.()Lnet/minecraft/network/codec/StreamCodec;";
+const SERIALIZER_CODEC_KEY: &str = "net/minecraft/network/syncher/EntityDataSerializer.codec.()Lnet/minecraft/network/codec/StreamCodec;";
+
+/// The stream codec serializer `s` writes its values with: vanilla's and `forValueType`'s keep it;
+/// a mod's own serializer class answers its `codec()` (Create's `CarriageSyncDataSerializer`, a
+/// carriage's place on its track), kept once asked.
+fn serializer_codec(rt: &mut Rt, s: V) -> V {
+    if s.r() == 0 {
+        return V::NULL;
+    }
+    match rt.get_field(s, "$codec") {
+        V::R(c) if c != 0 => V::R(c),
+        _ => {
+            let c =
+                virtual_call(rt, s, SERIALIZER_CODEC_KEY, SERIALIZER_CODEC, &[]).unwrap_or(V::NULL);
+            rt.report_thrown("EntityDataSerializer.codec");
+            if c.r() != 0 {
+                rt.put_field(s, "$codec", c);
+            }
+            c
+        }
+    }
+}
+
 /// The synched values that have a codec, after vanilla `Entity`'s own: index, then the value.
 fn put_data(rt: &mut Rt, buf: V, e: V) {
     let data = rt.get_field(e, "entityData");
@@ -1755,7 +1802,7 @@ fn put_data(rt: &mut Rt, buf: V, e: V) {
         _ => Vec::new(),
     };
     for (i, value) in items.iter().enumerate().skip(ENTITY_DATA as usize).take(DATA_END as usize - ENTITY_DATA as usize) {
-        let codec = sers.get(i).map_or(V::NULL, |&s| rt.get_field(s, "$codec"));
+        let codec = serializer_codec(rt, sers.get(i).copied().unwrap_or(V::NULL));
         if codec.r() == 0 || value.r() == 0 && matches!(value, V::R(_)) {
             continue;
         }
@@ -1782,7 +1829,7 @@ fn read_data(rt: &mut Rt, buf: V, e: V) {
         if i == DATA_END {
             return;
         }
-        let codec = sers.get(i as usize).map_or(V::NULL, |&s| rt.get_field(s, "$codec"));
+        let codec = serializer_codec(rt, sers.get(i as usize).copied().unwrap_or(V::NULL));
         if codec.r() == 0 {
             // A value this side can't read: what follows can't be found either.
             return;
@@ -2171,6 +2218,9 @@ mod tests {
     const DEFINE: &str = "net/minecraft/network/syncher/SynchedEntityData$Builder.define.(Lnet/minecraft/network/syncher/EntityDataAccessor;Ljava/lang/Object;)Lnet/minecraft/network/syncher/SynchedEntityData$Builder;";
     const DEFINE_ID: &str = "net/minecraft/network/syncher/SynchedEntityData.defineId.(Ljava/lang/Class;Lnet/minecraft/network/syncher/EntityDataSerializer;)Lnet/minecraft/network/syncher/EntityDataAccessor;";
     const FACTORY_CREATE: &str = "create.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)Lnet/minecraft/world/entity/Entity;";
+    /// A serializer of the mod's own class, as Create's `CarriageSyncDataSerializer`: its
+    /// `codec()` is the mod's.
+    const OWN_SERIALIZER: &str = "test/CountSerializer";
 
     /// A cart as a mod writes one: it counts its ticks in synched data and leaves after three.
     fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
@@ -2198,6 +2248,10 @@ mod tests {
                 rt.statics.insert("t.heard", V::I(n + 1));
                 V::Void
             }
+            // The mod's serializer writes its values as var ints.
+            SERIALIZER_CODEC => {
+                api::get_static(rt, "net/minecraft/network/codec/ByteBufCodecs.VAR_INT")
+            }
             FACTORY_CREATE if rt.class_of(e) == "test/CartFactory" => {
                 let cart = rt.new_object(CART);
                 api::call(rt, "net/minecraft/world/entity/Entity.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V", &[cart, args[1], args[2]]);
@@ -2209,17 +2263,28 @@ mod tests {
 
     fn overrides(class: &str, key: &str) -> bool {
         (class == CART || class == MINECART) && matches!(key, DEFINE_SYNCHED | TICK | ON_SYNCED)
+            || class == OWN_SERIALIZER && key == SERIALIZER_CODEC
     }
 
     /// A runtime as the mod's: the cart's class, its synched count (an `INT`), its type registered
     /// as `test:cart`, sent within 4 chunks.
     fn runtime() -> (Rt, V) {
+        runtime_counting(|rt| {
+            api::get_static(
+                rt,
+                "net/minecraft/network/syncher/EntityDataSerializers.INT",
+            )
+        })
+    }
+
+    /// [`runtime`] with the cart counting in the serializer `serializer` makes.
+    fn runtime_counting(serializer: fn(&mut Rt) -> V) -> (Rt, V) {
         let mut rt = Rt::new();
         crate::install();
         rt.vcall = Some(vcall);
         rt.overrides = Some(overrides);
         rt.supers.insert(CART, ENTITY);
-        let int = api::get_static(&mut rt, "net/minecraft/network/syncher/EntityDataSerializers.INT");
+        let int = serializer(&mut rt);
         let class = rt.string(CART);
         let count = api::call(&mut rt, DEFINE_ID, &[class, int]);
         rt.statics.insert("t.COUNT", count);
@@ -2648,15 +2713,6 @@ mod tests {
             set_pos(rt, cart, [3.5, 64.0, 0.5]);
         });
         assert_eq!(xyz(&client, copy), [3.5, 64.0, 0.5], "moved where the server's went");
-        let count = |rt: &mut Rt, e: V| {
-            let data = rt.get_field(e, "entityData");
-            let acc = rt.statics.get("t.COUNT").copied().unwrap_or_default();
-            let v = api::call(rt, GET, &[data, acc]);
-            match v {
-                V::R(_) => rt.get_field(v, "value").i(),
-                raw => raw.i(),
-            }
-        };
         assert_eq!(count(&mut client, copy), count(&mut server, cart), "its count as the server's");
         assert_eq!(count(&mut server, cart), 2);
         // Its third tick discards it: the client's copy goes with it.
@@ -2665,6 +2721,93 @@ mod tests {
         assert!(live(&client).is_empty(), "removed on the client");
         assert_eq!(client.statics.get("t.last-left").copied(), Some(copy), "EntityLeaveLevelEvent on the client");
         assert_eq!(client.statics.get("t.joined").map(|v| v.i()), Some(1));
+    }
+
+    /// The cart's synched count.
+    fn count(rt: &mut Rt, e: V) -> i32 {
+        let data = rt.get_field(e, "entityData");
+        let acc = rt.statics.get("t.COUNT").copied().unwrap_or_default();
+        let v = api::call(rt, GET, &[data, acc]);
+        match v {
+            V::R(_) => rt.get_field(v, "value").i(),
+            raw => raw.i(),
+        }
+    }
+
+    /// A value in a serializer of the mod's own class (one with its own `codec()`, as Create's
+    /// `CarriageSyncDataSerializer` for a carriage's place on its track) reaches the client's copy
+    /// in the codec that `codec()` answers, and the copy hears it (`onSyncedDataUpdated`).
+    #[test]
+    fn a_value_in_a_mods_own_serializer_reaches_the_clients_copy() {
+        let own = |rt: &mut Rt| rt.new_object(OWN_SERIALIZER);
+        let (mut server, ty) = runtime_counting(own);
+        let (mut client, _) = runtime_counting(own);
+        let mut host = MemoryHost {
+            players: vec![(1, [0.0, 64.0, 0.0])],
+            ..MemoryHost::default()
+        };
+        server.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let cart = api::call(rt, "net/minecraft/world/entity/EntityType.create.(Lnet/minecraft/world/level/Level;)Lnet/minecraft/world/entity/Entity;", &[ty, level]);
+            set_pos(rt, cart, [0.5, 64.0, 0.5]);
+            api::call(rt, "net/minecraft/world/level/Level.addFreshEntity.(Lnet/minecraft/world/entity/Entity;)Z", &[level, cart]);
+        });
+        let mut client_host = MemoryHost::default();
+        for _ in 0..2 {
+            server.with_host(&mut host, |rt| tick_all(rt, "minecraft:overworld"));
+            for (_, _, data) in std::mem::take(&mut host.payloads) {
+                client.with_host(&mut client_host, |rt| receive(rt, &data));
+            }
+        }
+        let copies = live(&client);
+        assert_eq!(copies.len(), 1);
+        assert_eq!(
+            count(&mut client, copies[0]),
+            2,
+            "the server's count, two ticks on"
+        );
+        assert!(
+            client.statics.get("t.heard").is_some_and(|n| n.i() > 0),
+            "heard by the copy"
+        );
+        assert!(server.unmapped.is_empty(), "{:?}", server.unmapped);
+        assert!(client.unmapped.is_empty(), "{:?}", client.unmapped);
+    }
+
+    /// A mod's entity within a tick, between its last tick's place and this one's as vanilla's
+    /// `Mth.lerp` from `xo` to `getX()` (`getPosition(F)`), its eyes its eye height above
+    /// (`getEyePosition(F)`), its light read at its eyes (`getLightProbePosition(F)`).
+    #[test]
+    fn a_mods_entity_within_a_tick_is_between_its_last_place_and_this_one() {
+        const POSITION: &str =
+            "net/minecraft/world/entity/Entity.getPosition.(F)Lnet/minecraft/world/phys/Vec3;";
+        const EYES: &str =
+            "net/minecraft/world/entity/Entity.getEyePosition.(F)Lnet/minecraft/world/phys/Vec3;";
+        const LIGHT_PROBE: &str = "net/minecraft/world/entity/Entity.getLightProbePosition.(F)Lnet/minecraft/world/phys/Vec3;";
+        const EYE_HEIGHT: &str = "net/minecraft/world/entity/Entity.getEyeHeight.()F";
+        let (mut rt, ty) = runtime();
+        rt.put_field(ty, "$width", V::F(0.5));
+        rt.put_field(ty, "$height", V::F(1.0));
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let cart = api::call(rt, "net/minecraft/world/entity/EntityType.create.(Lnet/minecraft/world/level/Level;)Lnet/minecraft/world/entity/Entity;", &[ty, level]);
+            let to = "net/minecraft/world/entity/Entity.moveTo.(DDD)V";
+            api::call(rt, to, &[cart, V::D(1.0), V::D(64.0), V::D(-2.0)]);
+            set_pos(rt, cart, [3.0, 65.0, -2.0]);
+            let at = |rt: &mut Rt, key: &'static str, t: f32| {
+                let v = api::call(rt, key, &[cart, V::F(t)]);
+                ["x", "y", "z"].map(|f| rt.get_field(v, f).d())
+            };
+            assert_eq!(at(rt, POSITION, 0.0), [1.0, 64.0, -2.0], "where it was");
+            assert_eq!(at(rt, POSITION, 0.25), [1.5, 64.25, -2.0]);
+            assert_eq!(at(rt, POSITION, 1.0), [3.0, 65.0, -2.0], "where it is");
+            let eye = f64::from(api::call(rt, EYE_HEIGHT, &[cart]).f());
+            assert!(eye > 0.0);
+            assert_eq!(at(rt, EYES, 0.5), [2.0, 64.5 + eye, -2.0]);
+            assert_eq!(at(rt, LIGHT_PROBE, 0.5), [2.0, 64.5 + eye, -2.0], "lit at its eyes");
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A mod listening to entities joining and leaving as Create does (its contraptions' list):

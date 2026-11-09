@@ -2959,6 +2959,14 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (o, "getPassengers") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
             crate::jutil::new_list(rt, Vec::new())
         }
+        // With no passengers, a player's self and passengers are itself (Create's contraption
+        // collisions walk them), and `Player.tick`'s `noPhysics` is its spectating: none here.
+        (o, "getSelfAndPassengers" | "getPassengersAndSelf")
+            if is_player(o) && is_player_class(rt.class_of(a(0))) =>
+        {
+            rt.alloc("java/util/stream/Stream", Data::Stream(vec![a(0)]))
+        }
+        (o, "$noPhysics") if is_player(o) && is_player_class(rt.class_of(a(0))) => V::I(0),
         (o, "getPistonPushReaction") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
             crate::blocks::push_reaction_named(rt, "normal")
         }

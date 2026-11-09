@@ -2087,7 +2087,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // for mods), and the game syncs changed blocks and block entities itself.
         (_, "tickRateManager") if level => rt.intern("compat:tick-rate".into(), |rt| rt.new_object("net/minecraft/server/ServerTickRateManager")),
         ("net/minecraft/world/TickRateManager" | "net/minecraft/server/ServerTickRateManager", n) => match n {
-            "isFrozen" | "isSteppingForward" | "isSprinting" => V::I(0),
+            "isFrozen" | "isSteppingForward" | "isSprinting" | "isEntityFrozen" => V::I(0),
             "runsNormally" => V::I(1),
             "tickrate" => V::F(20.0),
             "nanosecondsPerTick" => V::J(50_000_000),

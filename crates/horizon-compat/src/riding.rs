@@ -12,7 +12,7 @@
 //! - A client's copy of the entity seats the riders its client draws, its own player included
 //!   ([`client_seat`]).
 use crate::host::Ride;
-use crate::{Rt, V, api, jutil};
+use crate::{Data, Rt, V, api, jutil};
 
 pub(crate) const MOVE_FUNCTION: &str = "net/minecraft/world/entity/Entity$MoveFunction";
 /// The `MoveFunction` a seat is read through: the place `accept` was given for the rider.
@@ -267,6 +267,25 @@ fn remove_passenger(rt: &mut Rt, e: V, p: V) {
     rt.report_thrown("removePassenger");
 }
 
+/// `e` and its passengers as vanilla's streams walk them, depth first: each before its own
+/// (`Entity.getSelfAndPassengers`), or after them (`getPassengersAndSelf`).
+pub(crate) fn passenger_tree(rt: &Rt, e: V, self_first: bool) -> Vec<V> {
+    fn walk(rt: &Rt, e: V, self_first: bool, out: &mut Vec<V>) {
+        if self_first {
+            out.push(e);
+        }
+        for p in passengers(rt, e).into_iter().filter(|p| p.r() != 0) {
+            walk(rt, p, self_first, out);
+        }
+        if !self_first {
+            out.push(e);
+        }
+    }
+    let mut out = Vec::new();
+    walk(rt, e, self_first, &mut out);
+    out
+}
+
 /// The mod's entity `e`'s calls about its passengers (`Entity`'s, for a mod's entity): None for
 /// others.
 pub(crate) fn vehicle_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
@@ -276,6 +295,17 @@ pub(crate) fn vehicle_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> O
         ("getPassengers", "()Ljava/util/List;") => {
             let items = passengers(rt, e);
             jutil::new_list(rt, items)
+        }
+        // Itself before its passengers (`getSelfAndPassengers`) or after them
+        // (`getPassengersAndSelf`), as streams; `getIndirectPassengers` without it (Create's
+        // contraption collisions and seats walk them).
+        ("getSelfAndPassengers" | "getPassengersAndSelf", "()Ljava/util/stream/Stream;") => {
+            let all = passenger_tree(rt, e, name == "getSelfAndPassengers");
+            rt.alloc("java/util/stream/Stream", Data::Stream(all))
+        }
+        ("getIndirectPassengers", "()Ljava/lang/Iterable;") => {
+            let all = passenger_tree(rt, e, true).split_off(1);
+            jutil::new_list(rt, all)
         }
         ("isVehicle", "()Z") => V::I(i32::from(!passengers(rt, e).is_empty())),
         ("hasPassenger", "(Lnet/minecraft/world/entity/Entity;)Z") => {
@@ -766,6 +796,41 @@ mod tests {
             );
         });
         assert_eq!(host.vehicles.get(&ME), Some(&id));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's entity's passengers and theirs as vanilla's streams walk them, depth first: each
+    /// before its own (`getSelfAndPassengers`), after them (`getPassengersAndSelf`), or without the
+    /// one asked (`getIndirectPassengers`); a player carrying nobody is itself alone.
+    #[test]
+    fn a_mods_entity_walks_its_passengers_and_theirs_as_vanillas_streams() {
+        const SELF_FIRST: &str =
+            "net/minecraft/world/entity/Entity.getSelfAndPassengers.()Ljava/util/stream/Stream;";
+        const SELF_LAST: &str =
+            "net/minecraft/world/entity/Entity.getPassengersAndSelf.()Ljava/util/stream/Stream;";
+        const INDIRECT: &str =
+            "net/minecraft/world/entity/Entity.getIndirectPassengers.()Ljava/lang/Iterable;";
+        let (mut rt, ty) = runtime();
+        let mut host = MemoryHost {
+            player_id: Some(ME),
+            ..MemoryHost::default()
+        };
+        rt.with_host(&mut host, |rt| {
+            let [train, carriage, guard] =
+                [0.5, 3.5, 6.5].map(|x| seat(rt, PLAIN, ty, [x, 64.0, 0.5]));
+            let me = crate::menus::server_player(rt, ME);
+            set_passengers(rt, train, vec![carriage, guard]);
+            set_passengers(rt, carriage, vec![me]);
+            let walk = |rt: &mut Rt, key: &'static str, e: V| {
+                let all = api::call(rt, key, &[e]);
+                jutil::elements(rt, all)
+            };
+            assert_eq!(walk(rt, SELF_FIRST, train), [train, carriage, me, guard]);
+            assert_eq!(walk(rt, SELF_LAST, train), [me, carriage, guard, train]);
+            assert_eq!(walk(rt, INDIRECT, train), [carriage, me, guard]);
+            assert_eq!(walk(rt, SELF_FIRST, me), [me]);
+            assert_eq!(walk(rt, SELF_LAST, me), [me]);
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
