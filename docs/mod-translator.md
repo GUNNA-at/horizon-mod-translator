@@ -9637,6 +9637,48 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     and each blocker is the member to map); compat 1 new (an unmapped call runs the game's own code carried for
     it, a static one from the class above; what nothing carried stays a miss). 745 compat, 15 compat-core and
     25 translator unit tests pass, and the differential test.
+- [x] 2026-11-09 Part 145: more of the game's own code stands: a method several classes have code for, by the
+  object's class; a field through the mapped method that only returns or sets it; and the game's own libraries.
+  - Part 144 left out any method another class of its line also has code for (1,133 of the pack's missing
+    ones): the object's class picks the code, and the runtime's objects don't always say which class of the
+    game's they are. Now such a call stands when every class at or below the call's type with code for it
+    stands (up to 24). The runtime runs the one of the receiver's class (`Linked::derived`: from the receiver's
+    class, or the first above it the code carries, up as the JVM resolves), and each carried class says where a
+    class below it has code for a method too (a mark the translator leaves, `!name` of the descriptor): an
+    object known only as that class may be of the one below, so the call stays a miss there rather than run
+    the wrong method. A `super` call of such a method can't be told from the object's own at run time: it
+    blocks the method making it. A constructor is its own class's only (it was found up the line).
+  - A field the runtime keeps no state for often has a mapped method that only returns it (`Entity.position`
+    and `position()`) or only sets it (`aload_0, getfield, return`; `aload_0, load_1, putfield, return`): a read
+    or a write of the field in translated code is then that method's call (`Deriver::accessors`,
+    `codegen::set_accessors`; a write isn't kept in the object, where it would hide what the game makes of the
+    field afterwards).
+  - The install's libraries the API reaches into are read as the game's jars are (`game_jars_in`:
+    DataFixerUpper, Brigadier, authlib, NeoForge's event bus and loader; `game-jars` lists what is found).
+    Brigadier's and authlib's classes the runtime doesn't model are code like the game's; authlib's
+    Yggdrasil client and the narrator stay out.
+  - `DERIVE=1` says why a call can't stand by itself: `[absent]` (the jars don't have it), `[no code]`,
+    `[many classes]`, `[super call]`.
+  - Run 51 (the pack's 367 jars): API methods 91.1% (118,625 of 130,262; 117,273 in run 50), call sites 95.6%
+    (356,370 of 372,790; 354,713), 5,110 distinct methods missing (5,812 before). Of the methods answered,
+    7,768 are the game's own code (10,882 call sites): 2,696 in classes translated with the mods, 5,072
+    standing for unmapped ones (3,753 before). Create's 3,570 of its 3,976 methods (3,530 before), 24,731 of
+    its 25,245 calls. Libraries as before.
+    - What is left is spread thin: of the 5,360 distinct methods still blocked, the member that frees the most
+      by itself frees 22 (`FriendlyByteBuf.source`), and sixty of them free 361 together. The large groups
+      wait on several members at once: an entity's synched data (`Entity.entityData` and each `DATA_*`
+      constant, 328 methods), the server's reloadable registries (185), `LootContext`'s and the random
+      sources' constructors (their fields are written by code the runtime never hears of, 177 and 57).
+  - In game (`scratchpad/p143live.sh`, build of this Part, the install found by itself: Create's bundle carries
+    164 game classes and 3,825 standing methods in 2,086 carried classes, 176 MB for 166 without): the train
+    ride as before (the player on the carriage at x 22.12, 21.00, 18.79, 15.51 every 10 ticks, at x 1.79,
+    y 103.0001001 where the track ends), the press (`Ticks` 2, then 12), the depot's iron sheet taken by hand,
+    three of four penguins walking. Both scenes' logs name the same unmapped calls as Part 144's build: none
+    new.
+  - Tests: the translator's two game-code tests cover the new rules (a method with code in two classes stands
+    with both and marks the upper class; a `super` call blocks; a field is read through the mapped method that
+    only returns it), and the compat test the lookup (the receiver's class's method runs; a marked class is a
+    miss). 745 compat, 15 compat-core and 25 translator unit tests pass, and the differential test.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

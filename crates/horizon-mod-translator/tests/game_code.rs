@@ -36,11 +36,15 @@ public class BlockPos {
     public int secret() { return hidden; }
     public int both() { return sum() + secret(); }
     public int again() { return 1; }
+    private int kept;
+    public int getKept() { return kept; }
+    public int keptTwice() { return kept * 2; }
 }";
 
 const LOWER: &str = "package net.minecraft.core;
 public class Lower extends BlockPos {
     public int again() { return 2; }
+    public int viaSuper() { return super.again() + 1; }
 }";
 
 const USES: &str = "package example;
@@ -164,9 +168,12 @@ fn the_games_own_code_joins_the_program_as_far_as_it_is_reached() {
 }
 
 /// A method of a modelled class stands where its code asks only what is mapped: `sum` calls two
-/// mapped getters. `secret` reads a field nothing answers, `both` calls it, and `again` is
-/// declared once more below: each is blocked, by the member to map. The method that stands is
-/// carried in a class named for its own.
+/// mapped getters. `secret` reads a field nothing answers and `both` calls it: each is blocked,
+/// by the member to map. `again` has code in the class below too: the call stands with both, each
+/// carried in a class named for its own, and the upper class is marked (an object known only as
+/// it may be the lower one's). A `super` call of such a method can't be told from the object's
+/// own at run time, and blocks. `keptTwice` reads a field a mapped method only returns: it stands,
+/// reading through that method.
 #[test]
 fn a_method_stands_where_its_code_asks_only_what_is_mapped() {
     if !has("javac") {
@@ -177,41 +184,63 @@ fn a_method_stands_where_its_code_asks_only_what_is_mapped() {
     let (game, _) = jars(&dir);
     let game = Game::open(&[&game]).unwrap();
     let mapped = Mapped {
-        method: &|m, _| matches!(m.name.as_str(), "getX" | "getY"),
+        method: &|m, _| matches!(m.name.as_str(), "getX" | "getY" | "getKept"),
         field: &|_, _, _| false,
         constant: &|_| false,
         translated: &|_| false,
     };
     let mut deriver = Deriver::new(&game, mapped);
-    let pos = "net/minecraft/core/BlockPos";
-    let blockers = |d: &mut Deriver, name: &str| {
-        d.blockers(pos, name, "()I", true)
+    let (pos, lower) = ("net/minecraft/core/BlockPos", "net/minecraft/core/Lower");
+    let blockers = |d: &mut Deriver, class: &str, name: &str| {
+        d.blockers(class, name, "()I", true)
             .into_iter()
             .collect::<Vec<_>>()
     };
-    assert_eq!(blockers(&mut deriver, "sum"), Vec::<String>::new());
+    assert_eq!(blockers(&mut deriver, pos, "sum"), Vec::<String>::new());
     assert_eq!(
-        blockers(&mut deriver, "secret"),
+        blockers(&mut deriver, pos, "secret"),
         ["net/minecraft/core/BlockPos.hidden"]
     );
     assert_eq!(
-        blockers(&mut deriver, "both"),
+        blockers(&mut deriver, pos, "both"),
         ["net/minecraft/core/BlockPos.hidden"]
     );
+    assert_eq!(blockers(&mut deriver, pos, "again"), Vec::<String>::new());
     assert_eq!(
-        blockers(&mut deriver, "again"),
-        ["net/minecraft/core/BlockPos.again.()I"]
+        blockers(&mut deriver, lower, "viaSuper"),
+        ["net/minecraft/core/BlockPos.again.()I [super call]"]
+    );
+    // A field nothing answers that a mapped method only returns is read through that method.
+    assert_eq!(blockers(&mut deriver, pos, "keptTwice"), Vec::<String>::new());
+    assert_eq!(
+        deriver.accessors.get(&(pos.to_owned(), "kept".to_owned(), false)).map(String::as_str),
+        Some("net/minecraft/core/BlockPos.getKept.()I")
     );
     let classes = deriver.classes();
-    assert_eq!(classes.len(), 1);
-    assert_eq!(classes[0].name, "hz/derived/net/minecraft/core/BlockPos");
+    let shape: Vec<(&str, Vec<&str>, Vec<&str>)> = classes
+        .iter()
+        .map(|c| {
+            (
+                c.name.as_str(),
+                c.methods.iter().map(|m| m.name.as_str()).collect(),
+                c.fields.iter().map(|f| f.name.as_str()).collect(),
+            )
+        })
+        .collect();
     assert_eq!(
-        classes[0]
-            .methods
-            .iter()
-            .map(|m| m.name.as_str())
-            .collect::<Vec<_>>(),
-        ["sum"]
+        shape,
+        [
+            (
+                "hz/derived/net/minecraft/core/BlockPos",
+                vec!["again", "keptTwice", "sum"],
+                vec!["!again"]
+            ),
+            ("hz/derived/net/minecraft/core/Lower", vec!["again"], vec![]),
+        ]
+    );
+    assert_eq!(
+        classes[1].superclass.as_deref(),
+        Some("hz/derived/net/minecraft/core/BlockPos")
     );
     let _ = std::fs::remove_dir_all(dir);
 }

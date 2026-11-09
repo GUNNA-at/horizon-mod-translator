@@ -44,7 +44,7 @@ const WIDE: [&str; 8] = [
 /// The parts of the game no translation of their code can stand for: OpenGL and the window
 /// (the engine draws, in its own way), the mod loader's own machinery, and what only runs when a
 /// mod's data is generated or tested, never in a player's game.
-const NOT_CODE: [&str; 17] = [
+const NOT_CODE: [&str; 19] = [
     "com/mojang/blaze3d/",
     "net/minecraft/client/main/",
     "net/minecraft/client/renderer/texture/",
@@ -56,6 +56,8 @@ const NOT_CODE: [&str; 17] = [
     "net/minecraft/util/datafix/",
     "net/minecraft/realms/",
     "com/mojang/realmsclient/",
+    "com/mojang/authlib/yggdrasil/",
+    "com/mojang/text2speech/",
     "net/neoforged/bus/",
     "net/neoforged/fml/",
     "net/neoforged/neoforgespi/",
@@ -71,7 +73,8 @@ pub fn game_code(class: &str) -> bool {
 }
 
 /// The jars of a NeoForge 1.21.1 install under a launcher's `libraries` folder, in the order
-/// [`program_with`] reads them: NeoForge's patched classes of the game, the game's own, NeoForge's.
+/// [`program_with`] reads them: NeoForge's patched classes of the game, the game's own, NeoForge's,
+/// then the libraries of Mojang's and NeoForge's the API reaches into.
 /// None when the folder has no such install (the newest NeoForge 21.1 there, if several).
 pub fn game_jars_in(libraries: &Path) -> Option<Vec<std::path::PathBuf>> {
     let dirs = |d: std::path::PathBuf, prefix: &str| {
@@ -102,12 +105,30 @@ pub fn game_jars_in(libraries: &Path) -> Option<Vec<std::path::PathBuf>> {
     let (game, stamp) = dirs(libraries.join("net/minecraft/client"), "1.21.1-")
         .into_iter()
         .find(|(d, v)| d.join(format!("client-{v}-srg.jar")).is_file())?;
-    let jars = vec![
+    let mut jars = vec![
         neo.join(format!("neoforge-{version}-client.jar")),
         game.join(format!("client-{stamp}-srg.jar")),
         neo.join(format!("neoforge-{version}-universal.jar")),
     ];
-    jars.iter().all(|j| j.is_file()).then_some(jars)
+    if !jars.iter().all(|j| j.is_file()) {
+        return None;
+    }
+    // The game's own libraries the API reaches into (the newest of each the folder has): their
+    // methods stand for unmapped ones as the game's do.
+    for (folder, name) in [
+        ("com/mojang/datafixerupper", "datafixerupper"),
+        ("com/mojang/brigadier", "brigadier"),
+        ("com/mojang/authlib", "authlib"),
+        ("net/neoforged/bus", "bus"),
+        ("net/neoforged/fancymodloader/loader", "loader"),
+    ] {
+        let found = dirs(libraries.join(folder), "")
+            .into_iter()
+            .map(|(d, v)| d.join(format!("{name}-{v}.jar")))
+            .find(|j| j.is_file());
+        jars.extend(found);
+    }
+    Some(jars)
 }
 
 /// The player's NeoForge 1.21.1 install ([`game_jars_in`]): under `HORIZON_NEOFORGE_LIBRARIES`

@@ -995,6 +995,7 @@ fn derived_classes(
             deriver.blockers(&m.owner, &m.name, &m.desc, !is_static);
         }
     }
+    horizon_mod_translator::codegen::set_accessors(deriver.accessors.clone());
     Ok(deriver.classes())
 }
 
@@ -1143,6 +1144,21 @@ fn main() -> ExitCode {
             println!("  skipped {n:5} {k} (may find none: Mixin skips them too)");
         }
         return ExitCode::SUCCESS;
+    }
+    // `game-jars [libraries dir]`: the NeoForge install's jars `bundle` reads by itself, a line each.
+    if args.first().map(String::as_str) == Some("game-jars") {
+        let found = match args.get(1) {
+            Some(dir) => horizon_mod_translator::game_jars_in(Path::new(dir)),
+            None => horizon_mod_translator::find_game_jars(),
+        };
+        for j in found.iter().flatten() {
+            println!("{}", j.display());
+        }
+        return if found.is_some() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
     }
     // `game-code <mod jar>... --game <jar>...`: what of the game's own code the mods reach
     // (`program_with`), by package, and the largest classes.

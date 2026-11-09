@@ -4,26 +4,41 @@
 //! turn. `Entity.distanceToSqr(Entity)` is three reads of each position and a sum: with the
 //! positions mapped, the game's own code is the answer, and nothing has to be written for it.
 //!
-//! A method can't stand when its code reads or writes a field the runtime keeps no state for,
-//! calls something neither mapped nor able to stand, or when a class below declares it again
-//! (the object's own class picks the code, and the runtime's objects don't always say which of
-//! the game's classes they are): each such member is a blocker, the thing to map to let it stand.
+//! A method can't stand when its code reads or writes a field the runtime keeps no state for, or
+//! calls something neither mapped nor able to stand: each such member is a blocker, the thing to
+//! map to let it stand. A call the object's class answers (`invokevirtual`, `invokeinterface`)
+//! stands when every class at or below the call's type that has code for it does: the runtime
+//! then runs the one of the object's class ([`MARK`]).
 use crate::{
-    class::{ClassFile, Const, Member, Method},
+    class::{ClassFile, Const, Field, Member, Method},
     insn,
 };
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::Read,
     path::Path,
 };
+
+/// Before a method's name, as a field of a class of standing methods: a class below this one has
+/// code for the method too, so an object known only as this class may be of that one, and the
+/// method found here or above isn't the one to run (`Linked::derived` in horizon-compat-core).
+pub const MARK: &str = "!";
+
+/// More classes with code for one call than this, and it is not looked into: an interface every
+/// widget implements is the runtime's to answer.
+const MOST_CLASSES: usize = 24;
 
 /// The classes of the game's own jars, each from the first jar that has it (the NeoForge
 /// install's patched classes before the game's unpatched ones).
 pub struct Game {
     classes: HashMap<String, ClassFile>,
-    /// The classes declaring an instance method of each name and descriptor.
-    declared: HashMap<(String, String), Vec<String>>,
+    /// The classes with code for an instance method of each name and descriptor.
+    coded: HashMap<(String, String), Vec<String>>,
+    /// The methods that only return an instance field (`return this.f`), by the field's class
+    /// and name: (the method's class, its name, its descriptor).
+    getters: HashMap<(String, String), Vec<Key>>,
+    /// The methods that only set one (`this.f = x`), the same way.
+    setters: HashMap<(String, String), Vec<Key>>,
 }
 
 impl Game {
@@ -55,23 +70,64 @@ impl Game {
     }
 
     pub fn of(classes: Vec<ClassFile>) -> Game {
-        let mut declared: HashMap<(String, String), Vec<String>> = HashMap::new();
+        let mut coded: HashMap<(String, String), Vec<String>> = HashMap::new();
         for c in &classes {
             for m in c
                 .methods
                 .iter()
-                .filter(|m| m.access & 0x000a == 0 && !m.name.starts_with('<'))
+                .filter(|m| m.access & 0x000a == 0 && m.code.is_some() && !m.name.starts_with('<'))
             {
-                declared
+                coded
                     .entry((m.name.clone(), m.desc.clone()))
                     .or_default()
                     .push(c.name.clone());
             }
         }
-        Game {
+        let mut game = Game {
             classes: classes.into_iter().map(|c| (c.name.clone(), c)).collect(),
-            declared,
+            coded,
+            getters: HashMap::new(),
+            setters: HashMap::new(),
+        };
+        // `aload_0, getfield, return` and `aload_0, load_1, putfield, return`: a field's accessor.
+        let (mut getters, mut setters): (
+            HashMap<(String, String), Vec<Key>>,
+            HashMap<(String, String), Vec<Key>>,
+        ) = Default::default();
+        for c in game.classes.values() {
+            for m in c
+                .methods
+                .iter()
+                .filter(|m| m.access & 0x0008 == 0 && !m.name.starts_with('<'))
+            {
+                let Some(b) = m.code.as_ref().map(|code| code.bytes.as_slice()) else {
+                    continue;
+                };
+                let (field, to) = match *b {
+                    [0x2a, 0xb4, hi, lo, 0xac..=0xb0] if m.desc.starts_with("()") => {
+                        (u16::from_be_bytes([hi, lo]), &mut getters)
+                    }
+                    [0x2a, 0x1b | 0x1f | 0x23 | 0x27 | 0x2b, 0xb5, hi, lo, 0xb1]
+                        if m.desc.ends_with(")V") =>
+                    {
+                        (u16::from_be_bytes([hi, lo]), &mut setters)
+                    }
+                    _ => continue,
+                };
+                if let Some(f) = c.member(field)
+                    && let Some(class) = game.field_class(&f.owner, &f.name)
+                {
+                    to.entry((class.to_owned(), f.name)).or_default().push((
+                        c.name.clone(),
+                        m.name.clone(),
+                        m.desc.clone(),
+                    ));
+                }
+            }
         }
+        game.getters = getters;
+        game.setters = setters;
+        game
     }
 
     pub fn class(&self, name: &str) -> Option<&ClassFile> {
@@ -105,8 +161,8 @@ impl Game {
         out
     }
 
-    /// The method a call of `owner.name desc` runs when nothing below `owner` declares it: the
-    /// first class up that declares it, then a default method of an interface.
+    /// The method a call of `owner.name desc` names, as the JVM resolves it: the first class up
+    /// that declares it, then an interface's.
     pub fn method(&self, owner: &str, name: &str, desc: &str) -> Option<(&ClassFile, &Method)> {
         self.above(owner).into_iter().find_map(|c| {
             let c = &self.classes[c];
@@ -124,25 +180,26 @@ impl Game {
             .find(|c| self.classes[*c].fields.iter().any(|f| f.name == name))
     }
 
-    /// Whether another class below `class` or above it has code for the instance method too:
-    /// which runs is then the object's class to say, and a `super` call's to pass on.
-    pub fn declared_again(&self, class: &str, name: &str, desc: &str) -> bool {
-        let has_code = |c: &str| {
-            self.classes[c]
-                .methods
-                .iter()
-                .any(|m| m.name == name && m.desc == desc && m.code.is_some())
-        };
-        let above = self.above(class);
-        self.declared
+    /// The classes strictly below `class` with code for the instance method.
+    pub fn coded_below(&self, class: &str, name: &str, desc: &str) -> Vec<&str> {
+        self.coded
             .get(&(name.to_owned(), desc.to_owned()))
-            .is_some_and(|d| {
-                d.iter().any(|c| {
-                    c != class
-                        && has_code(c)
-                        && (above.contains(&c.as_str()) || self.above(c).contains(&class))
-                })
-            })
+            .into_iter()
+            .flatten()
+            .filter(|c| c.as_str() != class && self.above(c).contains(&class))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Whether a class above `class` has code for the instance method too.
+    fn coded_above(&self, class: &str, name: &str, desc: &str) -> bool {
+        self.above(class).into_iter().any(|c| {
+            c != class
+                && self.classes[c]
+                    .methods
+                    .iter()
+                    .any(|m| m.name == name && m.desc == desc && m.code.is_some())
+        })
     }
 }
 
@@ -161,12 +218,19 @@ pub struct Mapped<'a> {
 
 type Key = (String, String, String);
 
-/// Finds what can stand, remembering each method it looked at.
+/// Finds what can stand, remembering each call and each method's code it looked at.
 pub struct Deriver<'a> {
     pub game: &'a Game,
     mapped: Mapped<'a>,
-    /// A method's blockers, none when it can stand; no entry yet while it is being looked at.
-    known: HashMap<Key, BTreeSet<String>>,
+    /// A call's blockers (none: it stands), by owner, name, descriptor and whether the object's
+    /// class answers it.
+    calls: HashMap<(Key, bool), BTreeSet<String>>,
+    /// The blockers of a method's own code, by its class; no entry while it is looked at.
+    bodies: HashMap<Key, BTreeSet<String>>,
+    /// The fields of the API's objects that code which stands reads or writes through a mapped
+    /// method that does only that (`Entity.position` by `position()`): by the field's class and
+    /// name and whether it is a write, the method's key.
+    pub accessors: BTreeMap<(String, String, bool), String>,
     looking: HashSet<Key>,
     asked: HashMap<(Member, bool), bool>,
 }
@@ -176,7 +240,9 @@ impl<'a> Deriver<'a> {
         Deriver {
             game,
             mapped,
-            known: HashMap::new(),
+            calls: HashMap::new(),
+            bodies: HashMap::new(),
+            accessors: BTreeMap::new(),
             looking: HashSet::new(),
             asked: HashMap::new(),
         }
@@ -205,9 +271,11 @@ impl<'a> Deriver<'a> {
         a
     }
 
-    /// The blockers of `owner.name desc` (none: the game's code can stand for it): the members
-    /// to map before it can. `dispatched`: called on an object whose class picks the code
-    /// (`invokevirtual`, `invokeinterface`), so a method declared again below can't stand.
+    /// The blockers of a call of `owner.name desc` (none: the game's code can stand for it): the
+    /// members to map before it can. `dispatched`: the object's class answers it
+    /// (`invokevirtual`, `invokeinterface`), so each class at or below the owner with code for it
+    /// must stand; otherwise the one method the JVM resolves (a static one, a constructor, a
+    /// private one, a `super` call).
     pub fn blockers(
         &mut self,
         owner: &str,
@@ -215,38 +283,96 @@ impl<'a> Deriver<'a> {
         desc: &str,
         dispatched: bool,
     ) -> BTreeSet<String> {
-        let key = (owner.to_owned(), name.to_owned(), desc.to_owned());
-        if let Some(b) = self.known.get(&key) {
+        let key = (
+            (owner.to_owned(), name.to_owned(), desc.to_owned()),
+            dispatched,
+        );
+        if let Some(b) = self.calls.get(&key) {
+            return b.clone();
+        }
+        let b = self.call_blockers(owner, name, desc, dispatched);
+        self.calls.insert(key, b.clone());
+        b
+    }
+
+    fn call_blockers(
+        &mut self,
+        owner: &str,
+        name: &str,
+        desc: &str,
+        dispatched: bool,
+    ) -> BTreeSet<String> {
+        let game = self.game;
+        let own = format!("{owner}.{name}.{desc}");
+        // Why a call can't stand by itself, after its name: the jars don't have the method (a
+        // library's class), nothing has code for it, too many classes do, or it is a `super`
+        // call of a method the object's class may have its own code for.
+        let why = |what: &str| BTreeSet::from([format!("{own} [{what}]")]);
+        let named = game.method(owner, name, desc);
+        let instance = named.is_none_or(|(_, m)| m.access & 0x000a == 0) && !name.starts_with('<');
+        if !(dispatched && instance) {
+            let Some((c, m)) = named else {
+                return why("absent");
+            };
+            if m.code.is_none() {
+                return why("no code");
+            }
+            // The runtime finds a method by the object's class: a `super` call must run this
+            // one whatever that class has, which it can tell only when no other class has code.
+            if instance
+                && (!game.coded_below(&c.name, name, desc).is_empty()
+                    || game.coded_above(&c.name, name, desc))
+            {
+                return why("super call");
+            }
+            return self.body(c, m);
+        }
+        let mut classes: Vec<&'a str> = game.coded_below(owner, name, desc);
+        match named {
+            Some((c, m)) if m.code.is_some() => classes.push(c.name.as_str()),
+            Some(_) => {}
+            None if classes.is_empty() => return why("absent"),
+            None => {}
+        }
+        if classes.is_empty() {
+            return why("no code");
+        }
+        if classes.len() > MOST_CLASSES {
+            return why("many classes");
+        }
+        let mut out = BTreeSet::new();
+        for class in classes {
+            let c = &game.classes[class];
+            if let Some(m) = c.methods.iter().find(|m| m.name == name && m.desc == desc) {
+                out.extend(self.body(c, m));
+            }
+        }
+        out
+    }
+
+    /// The blockers of one method's own code.
+    fn body(&mut self, c: &'a ClassFile, m: &'a Method) -> BTreeSet<String> {
+        let key = (c.name.clone(), m.name.clone(), m.desc.clone());
+        if let Some(b) = self.bodies.get(&key) {
             return b.clone();
         }
         // A method that calls itself, or two each other: nothing more to learn on the way back.
         if !self.looking.insert(key.clone()) {
             return BTreeSet::new();
         }
-        let b = self.look(owner, name, desc, dispatched);
+        let b = self.scan(c, m);
         self.looking.remove(&key);
-        self.known.insert(key, b.clone());
+        self.bodies.insert(key, b.clone());
         b
     }
 
-    fn look(&mut self, owner: &str, name: &str, desc: &str, dispatched: bool) -> BTreeSet<String> {
+    fn scan(&mut self, c: &'a ClassFile, m: &'a Method) -> BTreeSet<String> {
         let game = self.game;
-        let own = format!("{owner}.{name}.{desc}");
-        let Some((c, m)) = game.method(owner, name, desc) else {
-            return BTreeSet::from([own]);
-        };
         let Some(code) = &m.code else {
-            return BTreeSet::from([own]);
+            return BTreeSet::new();
         };
-        let _ = dispatched;
-        if m.access & 0x000a == 0
-            && !name.starts_with('<')
-            && game.declared_again(&c.name, name, desc)
-        {
-            return BTreeSet::from([own]);
-        }
         let Ok(insns) = insn::decode(&code.bytes) else {
-            return BTreeSet::from([own]);
+            return BTreeSet::from([format!("{}.{}.{} [unreadable]", c.name, m.name, m.desc)]);
         };
         let mut out = BTreeSet::new();
         for i in insns {
@@ -283,6 +409,17 @@ impl<'a> Deriver<'a> {
                         // A write the runtime never hears of changes nothing in the game.
                         _ => false,
                     };
+                    // A field the runtime has no answer for, which a mapped method only returns
+                    // or only sets: the read or the write is that method's call.
+                    if !mapped
+                        && matches!(i.op, 0xb4 | 0xb5)
+                        && let Some(key) = self.accessor(&class, &r.name, i.op == 0xb5)
+                    {
+                        // By the class the reference names too, as the translated code has it.
+                        self.accessors
+                            .insert((r.owner.clone(), r.name.clone(), i.op == 0xb5), key);
+                        continue;
+                    }
                     if !mapped {
                         let how = if matches!(i.op, 0xb3 | 0xb5) {
                             "write "
@@ -313,15 +450,53 @@ impl<'a> Deriver<'a> {
         out
     }
 
-    /// The methods looked at that stand, by the owner a call names, name and descriptor: the
-    /// ones asked for, and what they call that the runtime doesn't answer.
+    /// The mapped method that only returns (or, `write`, only sets) field `name` of `class`, as
+    /// a key (`owner.name.desc`), if the game has one.
+    pub fn accessor(&mut self, class: &str, name: &str, write: bool) -> Option<String> {
+        let id = (class.to_owned(), name.to_owned(), write);
+        if let Some(k) = self.accessors.get(&id) {
+            return Some(k.clone());
+        }
+        let game = self.game;
+        let list = if write { &game.setters } else { &game.getters };
+        let found = list
+            .get(&(class.to_owned(), name.to_owned()))?
+            .iter()
+            .find(|(c, n, d)| {
+                self.answers(
+                    &Member {
+                        owner: c.clone(),
+                        name: n.clone(),
+                        desc: d.clone(),
+                    },
+                    false,
+                )
+            })?;
+        let key = format!("{}.{}.{}", found.0, found.1, found.2);
+        self.accessors.insert(id, key.clone());
+        Some(key)
+    }
+
+    /// The blockers of a call of `r` from code that stands.
+    fn call(&mut self, r: &Member, is_static: bool, dispatched: bool) -> BTreeSet<String> {
+        if !crate::is_api(&r.owner)
+            || (self.mapped.translated)(&r.owner)
+            || self.answers(r, is_static)
+        {
+            return BTreeSet::new();
+        }
+        self.blockers(&r.owner, &r.name, &r.desc, dispatched)
+    }
+
+    /// The methods whose code stands, by their own class, name and descriptor: those of the calls
+    /// asked for, and what they call that the runtime doesn't answer.
     pub fn standing(&self) -> Vec<Member> {
         let mut out: Vec<Member> = self
-            .known
+            .bodies
             .iter()
             .filter(|(_, b)| b.is_empty())
-            .map(|((o, n, d), _)| Member {
-                owner: o.clone(),
+            .map(|((c, n, d), _)| Member {
+                owner: c.clone(),
                 name: n.clone(),
                 desc: d.clone(),
             })
@@ -331,26 +506,40 @@ impl<'a> Deriver<'a> {
     }
 
     /// The classes holding the methods that stand ([`horizon_compat::linked::DERIVED`] before the
-    /// game class's name): each method in the class that declares it, with its class's constants;
-    /// above it the same classes of its supertypes, so that a call naming a class below the
-    /// declaring one finds the method as the JVM resolves it.
+    /// game class's name): each method in the class of its own, with that class's constants.
+    /// Above it and at each call's owner the same classes of the game's, so that a call naming
+    /// a class below finds the method as the JVM resolves it; and where a class below one of
+    /// them has code for a method too, the mark that says so ([`MARK`]).
     pub fn classes(&self) -> Vec<ClassFile> {
         let game = self.game;
         let named = |c: &str| format!("{}{c}", horizon_compat::linked::DERIVED);
-        let mut methods: std::collections::BTreeMap<&str, Vec<&Method>> = Default::default();
+        let mut methods: BTreeMap<&str, Vec<&Method>> = BTreeMap::new();
         let mut wanted: BTreeSet<&str> = BTreeSet::new();
+        let mut dispatched: BTreeSet<(&str, &str)> = BTreeSet::new();
         for m in self.standing() {
-            let Some((c, method)) = game.method(&m.owner, &m.name, &m.desc) else {
+            let Some(c) = game.class(&m.owner) else {
                 continue;
             };
-            let list = methods.entry(c.name.as_str()).or_default();
-            if !list
+            let Some(method) = c
+                .methods
                 .iter()
-                .any(|x| x.name == method.name && x.desc == method.desc)
-            {
-                list.push(method);
+                .find(|x| x.name == m.name && x.desc == m.desc)
+            else {
+                continue;
+            };
+            methods.entry(c.name.as_str()).or_default().push(method);
+            wanted.extend(game.above(&c.name));
+            if method.access & 0x000a == 0 && !method.name.starts_with('<') {
+                dispatched.insert((method.name.as_str(), method.desc.as_str()));
             }
-            if let Some(o) = game.class(&m.owner) {
+        }
+        for ((owner, _, _), _) in self
+            .calls
+            .iter()
+            .filter(|(_, b)| b.is_empty())
+            .map(|(k, b)| (&k.0, b))
+        {
+            if let Some(o) = game.class(owner) {
                 wanted.extend(game.above(&o.name));
             }
         }
@@ -373,7 +562,16 @@ impl<'a> Deriver<'a> {
                     .filter(|i| game.class(i).is_some())
                     .map(|i| named(i))
                     .collect(),
-                fields: Vec::new(),
+                fields: dispatched
+                    .iter()
+                    .filter(|(n, d)| !game.coded_below(&c.name, n, d).is_empty())
+                    .map(|(n, d)| Field {
+                        access: 0,
+                        name: format!("{MARK}{n}"),
+                        desc: (*d).to_owned(),
+                        annotations: Vec::new(),
+                    })
+                    .collect(),
                 methods: methods
                     .get(c.name.as_str())
                     .into_iter()
@@ -384,16 +582,5 @@ impl<'a> Deriver<'a> {
                 annotations: Vec::new(),
             })
             .collect()
-    }
-
-    /// The blockers of a call of `r` from code that stands.
-    fn call(&mut self, r: &Member, is_static: bool, dispatched: bool) -> BTreeSet<String> {
-        if !crate::is_api(&r.owner)
-            || (self.mapped.translated)(&r.owner)
-            || self.answers(r, is_static)
-        {
-            return BTreeSet::new();
-        }
-        self.blockers(&r.owner, &r.name, &r.desc, dispatched)
     }
 }

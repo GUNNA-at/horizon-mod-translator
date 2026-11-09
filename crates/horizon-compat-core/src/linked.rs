@@ -244,11 +244,56 @@ impl Linked {
         m
     }
 
-    /// The game's own code for `key` (`name.desc`) of the game class `class`, where the translator
-    /// carried it with the mods ([`DERIVED`]): the class's, or one above it's.
-    pub fn derived(&self, class: &str, key: &str) -> Option<Method> {
-        let id = self.id(&format!("{DERIVED}{class}"))?;
-        self.resolve(id, key_hash(key))
+    /// The game's own code for a call of `key` (`name.desc`) naming the game class `owner`, where
+    /// the translator carried it with the mods ([`DERIVED`]): the method of the receiver's class
+    /// (`receiver`, when it is one carried and at or below the owner) or of the owner, or the
+    /// first above it, as the JVM resolves the call. None where a class below that one has code
+    /// for the method too (the mark the translator leaves, a field `!name` of the descriptor):
+    /// the object may be of that class, and its code isn't the one found. A constructor is its
+    /// own class's only.
+    pub fn derived(&self, receiver: Option<&str>, owner: &str, key: &str) -> Option<Method> {
+        let own = self.id(&format!("{DERIVED}{owner}"));
+        let (name, desc) = key.split_once('.')?;
+        if name == "<init>" {
+            return self.own(own?, key_hash(key)).map(|m| m.0);
+        }
+        let start = receiver
+            .and_then(|r| self.id(&format!("{DERIVED}{r}")))
+            .filter(|&r| own.is_none_or(|o| self.at_or_below(r, o)))
+            .or(own)?;
+        let marked =
+            self.class(start)?.fields.lines().any(|l| {
+                l.strip_prefix("0 !").and_then(|l| l.split_once(' ')) == Some((name, desc))
+            });
+        if marked {
+            None
+        } else {
+            self.resolve(start, key_hash(key))
+        }
+    }
+
+    /// Whether class `class` is `above` or has it among its supertypes.
+    fn at_or_below(&self, class: u32, above: u32) -> bool {
+        let (mut todo, mut seen) = (vec![class], HashSet::new());
+        while let Some(id) = todo.pop() {
+            if id == above {
+                return true;
+            }
+            if let Some(d) = self.class(id).filter(|_| seen.insert(id)) {
+                todo.extend(
+                    d.superclass
+                        .iter()
+                        .chain(d.interfaces)
+                        .filter_map(|s| self.id(s)),
+                );
+            }
+        }
+        false
+    }
+
+    /// Whether the code has a class of the game's standing methods for `class` ([`DERIVED`]).
+    pub fn has_derived(&self, class: &str) -> bool {
+        self.id(&format!("{DERIVED}{class}")).is_some()
     }
 
     /// Whether class `class` has `key` (`name.desc`) itself or through a translated superclass or

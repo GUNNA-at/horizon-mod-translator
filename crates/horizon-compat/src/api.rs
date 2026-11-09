@@ -154,7 +154,7 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         return call_exact(rt, object, args);
     }
     // The game's own code for it, which the translator carried where it asks only what is mapped.
-    if let Some(f) = derived(rt, key, owner, rest) {
+    if let Some(f) = derived(rt, key, owner, rest, args) {
         uncount(rt, key);
         return f(rt, args);
     }
@@ -169,22 +169,47 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
 }
 
 /// The game's own method for API key `key` (`owner.rest`) among the linked code
-/// ([`crate::linked::Linked::derived`]), found once per key and thread.
-fn derived(rt: &Rt, key: &'static str, owner: &str, rest: &str) -> Option<crate::linked::Method> {
-    type Found = std::collections::HashMap<(usize, usize, usize), Option<crate::linked::Method>>;
+/// ([`crate::linked::Linked::derived`]): the one the receiver's class has (`args[0]`'s, or the
+/// first class above it the code carries), found once per key, class and thread.
+fn derived(
+    rt: &Rt,
+    key: &'static str,
+    owner: &str,
+    rest: &str,
+    args: &[V],
+) -> Option<crate::linked::Method> {
+    type Found =
+        std::collections::HashMap<(usize, usize, usize, usize), Option<crate::linked::Method>>;
     thread_local! {
         static DERIVED: std::cell::RefCell<Found> = std::cell::RefCell::new(Found::new());
     }
     let linked = rt.linked?;
+    let class = match args.first() {
+        Some(&v @ V::R(n)) if n != 0 => rt.class_of(v),
+        _ => "",
+    };
     let id = (
         std::ptr::from_ref(linked) as usize,
         key.as_ptr() as usize,
         key.len(),
+        class.as_ptr() as usize,
     );
     if let Some(f) = DERIVED.with(|d| d.borrow().get(&id).copied()) {
         return f;
     }
-    let f = linked.derived(owner, rest);
+    // The receiver's class as the code has it: itself, or the first above it that is carried.
+    let mut receiver = (!class.is_empty()).then_some(class);
+    let mut steps = 0;
+    while let Some(c) = receiver.filter(|c| !linked.has_derived(c)) {
+        steps += 1;
+        receiver = rt
+            .supers
+            .get(c)
+            .copied()
+            .or_else(|| api_super(c))
+            .filter(|_| steps < 64);
+    }
+    let f = linked.derived(receiver, owner, rest);
     DERIVED.with(|d| d.borrow_mut().insert(id, f));
     f
 }
@@ -3315,23 +3340,28 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 mod tests {
     use super::*;
 
-    /// A call nothing maps runs the game's own method the translator carried for it: the class
-    /// named for the game class, or one above it (a static method, a constructor too), and it is
-    /// no miss. A method nothing carried stays one.
+    /// A call nothing maps runs the game's own method the translator carried for it: the one of
+    /// the receiver's class, or of a class above it (a static one too), and it is no miss. Where
+    /// a class below the receiver's has code for the method too (the translator's mark), the
+    /// object may be of that class: the call stays a miss, as one nothing carried does.
     #[test]
     fn an_unmapped_call_runs_the_games_own_code_carried_for_it() {
-        use crate::linked::{ClassDef, Linked, Registry};
+        use crate::linked::{ClassDef, Linked, Method, Registry};
         fn twice(_: &mut Rt, args: &[V]) -> V {
             V::I(args[0].i() * 2)
         }
         fn plus_one(_: &mut Rt, args: &[V]) -> V {
             V::I(args[1].i() + 1)
         }
+        fn plus_hundred(_: &mut Rt, args: &[V]) -> V {
+            V::I(args[1].i() + 100)
+        }
         const fn class(
             name: &'static str,
             id: u32,
             superclass: Option<&'static str>,
-            methods: &'static [(&'static str, crate::linked::Method, bool)],
+            methods: &'static [(&'static str, Method, bool)],
+            fields: &'static str,
         ) -> ClassDef {
             ClassDef {
                 name,
@@ -3341,23 +3371,33 @@ mod tests {
                 methods,
                 mixed: &[],
                 reflect: None,
-                fields: "",
+                fields,
                 annotations: "",
                 subscribers: &[],
             }
         }
-        static CLASSES: [ClassDef; 2] = [
+        const THING: &str = "hz/derived/net/minecraft/hztest/Thing";
+        static CLASSES: [ClassDef; 3] = [
             class(
                 "hz/derived/net/minecraft/hztest/Above",
                 1,
                 None,
                 &[("twice.(I)I", twice, false)],
+                "",
             ),
             class(
-                "hz/derived/net/minecraft/hztest/Thing",
+                THING,
                 2,
                 Some("hz/derived/net/minecraft/hztest/Above"),
                 &[("plusOne.(I)I", plus_one, false)],
+                "0 !plusOne (I)I",
+            ),
+            class(
+                "hz/derived/net/minecraft/hztest/Lower",
+                3,
+                Some(THING),
+                &[("plusOne.(I)I", plus_hundred, false)],
+                "",
             ),
         ];
         static REGISTRY: Registry = Registry {
@@ -3380,19 +3420,26 @@ mod tests {
             .i(),
             42
         );
-        let thing = rt.new_object("net/minecraft/hztest/Thing");
+        let lower = rt.new_object("net/minecraft/hztest/Lower");
         assert_eq!(
             call(
                 &mut rt,
                 "net/minecraft/hztest/Thing.plusOne.(I)I",
-                &[thing, V::I(6)]
+                &[lower, V::I(6)]
             )
             .i(),
-            7
+            106
         );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
-        call(&mut rt, "net/minecraft/hztest/Thing.other.()I", &[thing]);
+        let thing = rt.new_object("net/minecraft/hztest/Thing");
+        call(
+            &mut rt,
+            "net/minecraft/hztest/Thing.plusOne.(I)I",
+            &[thing, V::I(6)],
+        );
         assert_eq!(rt.unmapped.len(), 1);
+        call(&mut rt, "net/minecraft/hztest/Thing.other.()I", &[lower]);
+        assert_eq!(rt.unmapped.len(), 2);
     }
 
     /// No module of the chain claims an intrinsic's key before the one whose arm it answers with:

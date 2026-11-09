@@ -14,7 +14,7 @@ runtime written in Rust answers their calls into Minecraft, NeoForge and Java. I
 a list of supported ones. Create and its addons are the test case.
 
 <!-- progress:headline -->
-**90.0%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **95.2%** of their call sites. Java's libraries: **94.3%** of the calls. Create alone: **97.8%** of its call sites. Run 50, 9 November 2026.
+**91.1%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **95.6%** of their call sites. Java's libraries: **94.3%** of the calls. Create alone: **98.0%** of its call sites. Run 51, 9 November 2026.
 <!-- /progress -->
 
 | If you were shown this | If you work on Horizon |
@@ -39,12 +39,12 @@ game's own code: a method the runtime doesn't have counts when the game's own me
 player's NeoForge install, can answer it.</sub>
 
 <!-- progress:table -->
-| Run 50, 367 jars | Methods answered | Call sites answered |
+| Run 51, 367 jars | Methods answered | Call sites answered |
 |---|---:|---:|
-| Minecraft and NeoForge API | **90.0%**<br><sub>117,273 of 130,261</sub> | **95.2%**<br><sub>354,713 of 372,789</sub> |
-| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **4.9%**<br><sub>6,416 of 130,261</sub> | **2.5%**<br><sub>9,225 of 372,789</sub> |
+| Minecraft and NeoForge API | **91.1%**<br><sub>118,625 of 130,262</sub> | **95.6%**<br><sub>356,370 of 372,790</sub> |
+| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **6.0%**<br><sub>7,768 of 130,262</sub> | **2.9%**<br><sub>10,882 of 372,790</sub> |
 | Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **83.5%**<br><sub>61,862 of 74,081</sub> | **94.3%**<br><sub>336,967 of 357,517</sub> |
-| Create 6.0.10, its API calls | **88.8%**<br><sub>3,530 of 3,975</sub> | **97.8%**<br><sub>24,683 of 25,244</sub> |
+| Create 6.0.10, its API calls | **89.8%**<br><sub>3,570 of 3,976</sub> | **98.0%**<br><sub>24,731 of 25,245</sub> |
 | Create 6.0.10, its library calls | **82.8%**<br><sub>1,326 of 1,602</sub> | **97.5%**<br><sub>14,053 of 14,416</sub> |
 <!-- /progress -->
 
@@ -63,6 +63,7 @@ jar's number of game calls on a log scale, the checkered top the share not answe
 <!-- progress:history -->
 | Run | Date | API methods | Call sites | Create, call sites |
 |---:|---|---:|---:|---:|
+| 51 | 2026-11-09 | 91.1% | 95.6% | 98.0% |
 | 50 | 2026-11-09 | 90.0% | 95.2% | 97.8% |
 | 49 | 2026-11-09 | 85.2% | 92.7% | 96.8% |
 | 48 | 2026-11-09 | 85.2% | 92.7% | 96.8% |
