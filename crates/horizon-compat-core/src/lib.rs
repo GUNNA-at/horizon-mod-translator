@@ -31,11 +31,20 @@ impl std::hash::Hasher for FxHasher {
         for c in &mut chunks {
             self.add(u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]));
         }
+        // The last 1 to 7 bytes, as a word padded with zeros, put together from loads that may
+        // overlap: copying them into a buffer was a call to `memmove` at every field lookup.
         let rest = chunks.remainder();
-        if !rest.is_empty() {
-            let mut word = [0u8; 8];
-            word[..rest.len()].copy_from_slice(rest);
-            self.add(u64::from_le_bytes(word));
+        let n = rest.len();
+        if n >= 4 {
+            let lo = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+            let hi = u32::from_le_bytes([rest[n - 4], rest[n - 3], rest[n - 2], rest[n - 1]]);
+            self.add(u64::from(lo) | (u64::from(hi) << (8 * (n - 4))));
+        } else if n > 0 {
+            self.add(
+                u64::from(rest[0])
+                    | (u64::from(rest[n / 2]) << (8 * (n / 2)))
+                    | (u64::from(rest[n - 1]) << (8 * (n - 1))),
+            );
         }
     }
     #[inline]
@@ -520,6 +529,22 @@ impl Rt {
                 self.registered.insert((registry, name), obj);
             }
         }
+    }
+
+    /// The object registered as `name` in `registry` ([`Rt::registered`]), found without making
+    /// a key of its own: a hook finds its block's at every tick of every block entity.
+    pub fn registry_entry(&self, registry: &str, name: &str) -> Option<V> {
+        thread_local! {
+            static KEY: std::cell::RefCell<(String, String)> = const { std::cell::RefCell::new((String::new(), String::new())) };
+        }
+        KEY.with(|key| {
+            let mut key = key.borrow_mut();
+            key.0.clear();
+            key.0.push_str(registry);
+            key.1.clear();
+            key.1.push_str(name);
+            self.registered.get(&*key).copied()
+        })
     }
 
     /// The registered name of a mod object (`create:shaft`), if it is one.
@@ -1383,6 +1408,28 @@ impl<const N: usize> Stack<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hash of any bytes is FxHash's over them as words, the last padded with zeros: the same
+    /// as copying them into a zeroed word, for every length of tail and every byte.
+    #[test]
+    fn the_hash_reads_words_padded_with_zeros() {
+        use std::hash::Hasher;
+        fn padded(bytes: &[u8]) -> u64 {
+            let mut h = FxHasher::default();
+            for c in bytes.chunks(8) {
+                let mut word = [0u8; 8];
+                word[..c.len()].copy_from_slice(c);
+                h.add(u64::from_le_bytes(word));
+            }
+            h.finish()
+        }
+        let bytes: Vec<u8> = (0..40u32).map(|i| (i * 73 + 41) as u8 | 0x81).collect();
+        for len in 0..bytes.len() {
+            let mut h = FxHasher::default();
+            h.write(&bytes[..len]);
+            assert_eq!(h.finish(), padded(&bytes[..len]), "{len} bytes");
+        }
+    }
 
     /// A hook the game runs while the runtime waits for it in a call (`host_call`) gets that
     /// runtime, once at a time: a hook inside that hook doesn't, unless the runtime waits again.

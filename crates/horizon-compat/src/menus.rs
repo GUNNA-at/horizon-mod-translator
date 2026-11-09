@@ -1317,7 +1317,7 @@ fn still_valid_block(rt: &mut Rt, access: V, player: V, block: V) -> bool {
     }
     let p = crate::api::pos_of(rt, pos);
     let state = rt.host().map(|h| h.block_state(p)).unwrap_or_default();
-    let (there, _) = crate::host::split_state(&state);
+    let there = crate::host::state_block(&state);
     if there != crate::api_common::item_like_name(rt, block) {
         return false;
     }

@@ -258,7 +258,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         if let Some(v) = crate::block_breaking::block_override(rt, &text, e.key, e.short, args) {
             return Some(v);
         }
-        let (block_name, _) = split_state(&text);
+        let block_name = crate::host::state_block(&text);
         let block = api::block(rt, block_name);
         let mut all = vec![block];
         all.extend_from_slice(args);
@@ -414,7 +414,7 @@ fn vanilla_friction(block: &str) -> f32 {
 /// vanilla's default, a full collision cube.
 fn conductor(rt: &mut Rt, state: V, level: V, pos: V) -> bool {
     let text = rt.str_of(state).unwrap_or("minecraft:air").to_owned();
-    let (name, _) = split_state(&text);
+    let name = crate::host::state_block(&text);
     let block = api::block(rt, name);
     let rule = match mod_properties(rt, block) {
         Some(props) => {

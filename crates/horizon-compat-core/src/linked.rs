@@ -294,6 +294,9 @@ pub fn dispatch(
     owner_key: &'static str,
     args: &[V],
 ) -> V {
+    if counting() {
+        count("virtual", owner_key);
+    }
     let Some(l) = rt.linked else {
         return vcall_miss(rt, cid, owner_key, key, args);
     };
@@ -338,7 +341,7 @@ pub fn vcall_miss(
         // lambda's own (by name: a bridge's descriptor differs).
         let icid = rt.class_ids.get(iface).copied().unwrap_or(0);
         if icid != 0
-            && let Some(f) = rt.linked.and_then(|l| l.resolve(icid, key_hash(key)))
+            && let Some(f) = rt.linked.and_then(|l| l.resolve(icid, kept_hash(key)))
         {
             return f(rt, args);
         }
@@ -360,10 +363,86 @@ pub fn lambda_call(rt: &mut Rt, lid: u32, args: &[V]) -> Option<V> {
     Some(f(rt, full))
 }
 
+/// Whether calls are counted (`HORIZON_COMPAT_COUNT` set): read once.
+pub fn counting() -> bool {
+    static ON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+    match ON.load(std::sync::atomic::Ordering::Relaxed) {
+        2 => {
+            let on = std::env::var_os("HORIZON_COMPAT_COUNT").is_some();
+            ON.store(u8::from(on), std::sync::atomic::Ordering::Relaxed);
+            on
+        }
+        on => on == 1,
+    }
+}
+
+/// With `HORIZON_COMPAT_COUNT` set, every call of a kind (`virtual`: the code's own virtual
+/// calls by the key they name, `owner.name.desc`; `API`: the calls into the API) is counted by
+/// its key on its thread, and every 2^24 of them the most frequent are written to the log
+/// (stderr) and counted anew: where a mod's time goes.
+pub fn count(kind: &'static str, key: &'static str) {
+    type Counts = (u64, HashMap<(usize, usize), (&'static str, u64)>);
+    thread_local! {
+        static COUNTS: std::cell::RefCell<HashMap<&'static str, Counts>> = std::cell::RefCell::new(HashMap::default());
+    }
+    COUNTS.with(|c| {
+        let mut all = c.borrow_mut();
+        let c = all.entry(kind).or_default();
+        c.0 += 1;
+        c.1.entry((key.as_ptr() as usize, key.len()))
+            .or_insert((key, 0))
+            .1 += 1;
+        if c.0 < 1 << 24 {
+            return;
+        }
+        // The same key in two crates is two literals: counted as one.
+        let mut merged: HashMap<&'static str, u64> = HashMap::default();
+        for (k, n) in c.1.values() {
+            *merged.entry(k).or_default() += n;
+        }
+        let mut top: Vec<(&'static str, u64)> = merged.into_iter().collect();
+        top.sort_by_key(|e| std::cmp::Reverse(e.1));
+        let thread = std::thread::current().name().unwrap_or("?").to_owned();
+        let lines: Vec<String> = top
+            .iter()
+            .take(40)
+            .map(|(k, n)| format!("  {n:>10}  {k}"))
+            .collect();
+        eprintln!(
+            "horizon-compat: the most frequent of {} {kind} calls on {thread}:\n{}",
+            c.0,
+            lines.join("\n")
+        );
+        *c = Counts::default();
+    });
+}
+
+/// [`key_hash`] of a key the runtime names (its own constants), kept by the key's address and
+/// length: hashing it a byte at a time at every call cost more than the call (a block entity
+/// ticker's `tick` key is 172 bytes, hashed at every tick of every block entity).
+fn kept_hash(key: &'static str) -> u64 {
+    const SLOTS: usize = 64;
+    thread_local! {
+        static KEPT: std::cell::RefCell<[(usize, usize, u64); SLOTS]> = const { std::cell::RefCell::new([(0, 0, 0); SLOTS]) };
+    }
+    let (at, len) = (key.as_ptr() as usize, key.len());
+    let slot = ((at >> 3) ^ len) % SLOTS;
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        let (a, l, h) = kept[slot];
+        if a == at && l == len {
+            return h;
+        }
+        let h = key_hash(key);
+        kept[slot] = (at, len, h);
+        h
+    })
+}
+
 /// Virtual dispatch by key (`name.desc`): the API's calls back into the code.
 pub fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
     let cid = rt.recv_cid(args);
-    dispatch(rt, cid, key_hash(key), key, owner_key, args)
+    dispatch(rt, cid, kept_hash(key), key, owner_key, args)
 }
 
 /// Reflection over the translated classes ([`Rt::reflect`]).
@@ -583,6 +662,20 @@ mod tests {
         assert_eq!(key_hash(""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(key_hash("a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(key_hash("foobar"), 0x8594_4171_f739_67e8);
+    }
+
+    /// A kept hash is the key's own, however many keys share its slot: two hundred keys, more
+    /// than there are slots, asked twice over.
+    #[test]
+    fn a_kept_hash_is_the_keys_hash() {
+        let keys: Vec<&'static str> = (0..200)
+            .map(|i| &*String::leak(format!("m{i}.()V")))
+            .collect();
+        for _ in 0..2 {
+            for k in &keys {
+                assert_eq!(kept_hash(k), key_hash(k), "{k}");
+            }
+        }
     }
 
     /// A call finds the method as the JVM resolves it: the receiver's class first (what a mixin

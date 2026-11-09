@@ -136,7 +136,7 @@ fn block_at(rt: &Rt, p: [i32; 3]) -> String {
 fn growth_speed(rt: &mut Rt, state: V, level: V, pos: V) -> f32 {
     let p = api::pos_of(rt, pos);
     let text = rt.str_of(state).unwrap_or("").to_owned();
-    let (block, _) = crate::host::split_state(&text);
+    let block = crate::host::state_block(&text);
     let block = block.to_owned();
     let mut speed = 1.0f32;
     for i in -1..=1 {
@@ -174,7 +174,7 @@ fn growth_speed(rt: &mut Rt, state: V, level: V, pos: V) -> f32 {
 
 /// Whether the block in state `text` is a `FarmBlock`: farmland, or a mod block of a class below it.
 fn is_farm_block(rt: &Rt, text: &str) -> bool {
-    let (block, _) = crate::host::split_state(text);
+    let block = crate::host::state_block(text);
     block == "minecraft:farmland" || crate::glue::mod_block(rt, text).is_some_and(|(_, class)| crate::neo::reaches(rt, class, FARM))
 }
 

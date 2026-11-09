@@ -96,6 +96,9 @@ pub fn game_field(rt: &mut Rt, o: V, name: &'static str, own: &'static str, key:
 /// member it inherits from the API, as `javac` writes inherited calls) is
 /// resolved up the class's superclasses, as the JVM resolves it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
+    if crate::linked::counting() {
+        crate::linked::count("API", key);
+    }
     let depth = DEPTH.with(|d| {
         d.set(d.get() + 1);
         d.get()
@@ -379,16 +382,24 @@ fn trace_unmapped(rt: &Rt, key: &'static str, args: &[V]) {
     }
 }
 
+/// Where the calls of a key none of [`call_exact`]'s own arms takes go: the API's intrinsic for
+/// it, if it has one, then the modules of [`CHAIN`] that claim it (as bits). Those arms and their
+/// guards read the key alone, and so do the claims, so it is found once per key.
+#[derive(Clone, Copy)]
+struct Route {
+    intrinsic: Option<(Intrinsic, bool)>,
+    claimed: u128,
+}
+
 thread_local! {
-    /// The keys (by address and length) none of [`call_exact`]'s own arms takes: its arms and
-    /// their guards read the key alone, so such a key goes straight to the modules next time.
-    static TO_CHAIN: std::cell::RefCell<crate::HashMap<(usize, usize), ()>> = std::cell::RefCell::new(crate::HashMap::default());
+    /// The routes found so far, by key (its address and length): one lookup per call.
+    static ROUTES: std::cell::RefCell<crate::HashMap<(usize, usize), Route>> = std::cell::RefCell::new(crate::HashMap::default());
 }
 
 fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     let id = (key.as_ptr() as usize, key.len());
-    if TO_CHAIN.with(|c| c.borrow().contains_key(&id)) {
-        return through_chain(rt, key, args);
+    if let Some(route) = ROUTES.with(|r| r.borrow().get(&id).copied()) {
+        return routed(rt, key, args, route);
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     match key {
@@ -871,15 +882,25 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             }
         }
         _ => {
-            TO_CHAIN.with(|c| c.borrow_mut().insert(id, ()));
-            through_chain(rt, key, args)
+            let route = Route { intrinsic: intrinsic(key), claimed: claimed(key) };
+            ROUTES.with(|r| r.borrow_mut().insert(id, route));
+            routed(rt, key, args, route)
         }
     }
 }
 
-/// A call no arm of [`call_exact`] takes: the modules that claim its key, then what is left.
-fn through_chain(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
-    if let Some(v) = chain(rt, key, args) {
+/// A call no arm of [`call_exact`] takes: its intrinsic's answer, else the modules that claim its
+/// key, then what is left.
+fn routed(rt: &mut Rt, key: &'static str, args: &[V], route: Route) -> V {
+    if let Some((f, reads)) = route.intrinsic
+        && let Some(v) = f(rt, args)
+    {
+        if reads && checking() {
+            check_intrinsic(rt, key, args, route.claimed, v);
+        }
+        return v;
+    }
+    if let Some(v) = chain(rt, key, args, route.claimed) {
         return v;
     }
     if plain_super_init(rt, key, args) {
@@ -895,6 +916,58 @@ fn through_chain(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         None => {
             crate::miss(rt, key);
             V::Void
+        }
+    }
+}
+
+/// An intrinsic: the API's answer to one key's call, given at once, as a JVM's JIT answers its
+/// intrinsics, instead of offering the call to the modules in turn; None leaves it to them.
+type Intrinsic = fn(&mut Rt, &[V]) -> Option<V>;
+
+const BE_GET_LEVEL: &str = "net/minecraft/world/level/block/entity/BlockEntity.getLevel.()Lnet/minecraft/world/level/Level;";
+const BE_HAS_LEVEL: &str = "net/minecraft/world/level/block/entity/BlockEntity.hasLevel.()Z";
+const BE_GET_POS: &str = "net/minecraft/world/level/block/entity/BlockEntity.getBlockPos.()Lnet/minecraft/core/BlockPos;";
+const BE_GET_STATE: &str = "net/minecraft/world/level/block/entity/BlockEntity.getBlockState.()Lnet/minecraft/world/level/block/state/BlockState;";
+const MAP_VALUES: &str = "java/util/Map.values.()Ljava/util/Collection;";
+const COLLECTION_FOR_EACH: &str = "java/util/Collection.forEach.(Ljava/util/function/Consumer;)V";
+
+/// The API's intrinsics, and whether each only reads (then tests check its every answer against
+/// the chain's): the calls mods make most, in their block entities' ticks (Create's kinetic
+/// block entity reads its level twice and walks its behaviours, a map's values, at every tick),
+/// where offering each to the modules in turn, through their long matches, took a quarter of the
+/// tick. Each answers what the module chain answers, with the same arm's code, for the receivers
+/// that arm takes, and leaves every other receiver to the chain (a mod's own map class, a heap);
+/// no module claims its key before the one whose arm it is (`intrinsics_come_first`).
+fn intrinsic(key: &str) -> Option<(Intrinsic, bool)> {
+    fn this(args: &[V]) -> V {
+        args.first().copied().unwrap_or_default()
+    }
+    Some(match key {
+        // `api_common`'s block entity arms, which `world` passes these to.
+        BE_GET_LEVEL => (|rt, args| Some(rt.get_field(this(args), "level")), true),
+        BE_HAS_LEVEL => (|rt, args| Some(V::I((rt.get_field(this(args), "level").r() != 0) as i32)), true),
+        BE_GET_POS => (|rt, args| Some(rt.get_field(this(args), "$pos")), true),
+        BE_GET_STATE => (|rt, args| Some(rt.get_field(this(args), "$state")), true),
+        MAP_VALUES => (crate::jutil::plain_map_values, false),
+        COLLECTION_FOR_EACH => (crate::jutil::plain_list_for_each, false),
+        _ => return None,
+    })
+}
+
+/// Tests (and `HORIZON_COMPAT_CHECK_DISPATCH=1`): a reading intrinsic's answer `v` is the one the
+/// module chain gives.
+fn check_intrinsic(rt: &mut Rt, key: &'static str, args: &[V], claimed: u128, v: V) {
+    let chained = chain(rt, key, args, claimed);
+    if chained != Some(v) {
+        let message = format!("horizon-compat: the intrinsic for {key} answered {v:?}, the modules {chained:?}");
+        if cfg!(test) {
+            panic!("{message}");
+        }
+        thread_local! {
+            static TOLD: std::cell::RefCell<crate::HashMap<(usize, usize), ()>> = std::cell::RefCell::new(crate::HashMap::default());
+        }
+        if TOLD.with(|t| t.borrow_mut().insert((key.as_ptr() as usize, key.len()), ()).is_none()) {
+            eprintln!("{message}");
         }
     }
 }
@@ -1210,24 +1283,13 @@ const MODULE_NAMES: [&str; 90] = [
     "records",
 ];
 
-thread_local! {
-    /// By key (its address and length): the modules of [`CHAIN`] that claim it, as bits.
-    static CLAIMED: std::cell::RefCell<crate::HashMap<(usize, usize), u128>> = std::cell::RefCell::new(crate::HashMap::default());
-}
-
 /// The modules of [`CHAIN`] that claim `key`, as bits (all of them for a key that isn't
-/// `owner.name.desc`).
+/// `owner.name.desc`): worked out once per key, with its [`Route`].
 fn claimed(key: &'static str) -> u128 {
-    let id = (key.as_ptr() as usize, key.len());
-    if let Some(bits) = CLAIMED.with(|c| c.borrow().get(&id).copied()) {
-        return bits;
-    }
-    let bits = match crate::parts(key) {
+    match crate::parts(key) {
         Some((owner, name, desc)) => CLAIMS.iter().enumerate().filter(|(_, claims)| claims(owner, name, desc)).fold(0u128, |bits, (i, _)| bits | 1 << i),
         None => (1u128 << CHAIN.len()) - 1,
-    };
-    CLAIMED.with(|c| c.borrow_mut().insert(id, bits));
-    bits
+    }
 }
 
 /// Whether every call checks that the module answering it claims its key
@@ -1239,8 +1301,7 @@ fn checking() -> bool {
 
 /// Offers the call to each module of [`CHAIN`] that claims its key, in order: the first that
 /// answers does.
-fn chain(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
-    let claimed = claimed(key);
+fn chain(rt: &mut Rt, key: &'static str, args: &[V], claimed: u128) -> Option<V> {
     if checking() {
         return checked_chain(rt, key, args, claimed);
     }
@@ -1360,7 +1421,7 @@ const GET_RENDER_SHAPE_KEY: &str =
 /// block's by its class (`vanilla_shapes.rs`: chests and beds animated, signs and air invisible).
 /// Everything else is a model.
 fn render_shape(rt: &mut Rt, state: V, text: &str) -> V {
-    let (name, _) = crate::host::split_state(text);
+    let name = crate::host::state_block(text);
     let ordinal = match crate::glue::mod_block(rt, text) {
         Some((b, class)) => {
             if rt.overrides.is_some_and(|o| o(class, GET_RENDER_SHAPE))
@@ -1421,7 +1482,7 @@ fn state_shape(rt: &mut Rt, text: &str, collision: bool, args: [V; 4]) -> V {
     {
         return crate::shapes::shape(rt, &boxes);
     }
-    let (b, _) = crate::host::split_state(text);
+    let b = crate::host::state_block(text);
     if matches!(b, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") {
         return crate::shapes::shape(rt, &[]);
     }
@@ -1489,7 +1550,7 @@ fn support_shape(rt: &mut Rt, text: &str, [state, level, pos]: [V; 3]) -> V {
     let class = match own {
         Some((_, class)) => crate::rotation::vanilla_base(rt, class),
         None => {
-            let (name, _) = crate::host::split_state(text);
+            let name = crate::host::state_block(text);
             let table = &crate::vanilla_classes::BLOCKS;
             table.binary_search_by(|(id, _)| (*id).cmp(name)).map_or("net/minecraft/world/level/block/Block", |i| table[i].1)
         }
@@ -1588,8 +1649,8 @@ pub fn field_id(field: &str) -> String {
 
 /// A block value: the mod's own Block object when it registered one by that name.
 pub fn block(rt: &mut Rt, name: &str) -> V {
-    if let Some(v) = rt.registered.get(&("block".to_owned(), name.to_owned())) {
-        return *v;
+    if let Some(v) = rt.registry_entry("block", name) {
+        return v;
     }
     if let Some(b) = unregistered_block(rt, name) {
         return b;
@@ -1626,7 +1687,7 @@ pub(crate) fn unregistered_block(rt: &Rt, name: &str) -> Option<V> {
 
 /// Keeps a new state of a block not registered yet, for [`adopt_names`] (and the block alive with it).
 pub(crate) fn note_unregistered(rt: &mut Rt, text: &str, state: V) {
-    let (name, _) = crate::host::split_state(text);
+    let name = crate::host::state_block(text);
     let Some(b) = unregistered_block(rt, name) else { return };
     let all = rt.intern("compat:unregistered-states".into(), |rt| rt.alloc("java/util/ArrayList", Data::List(Vec::new())));
     let pair = rt.alloc("java/util/List", Data::List(vec![b, state]));
@@ -2347,7 +2408,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         {
             let (state, text) = level_state(rt, a(0), a(1));
             let direction = usize::from(crate::api_common::direction_ordinal(rt, a(2)));
-            let (b, _) = crate::host::split_state(&text);
+            let b = crate::host::state_block(&text);
             let unstable = direction == 0 && rt.host().is_some_and(|h| h.block_in_tag(b, "minecraft:unstable_bottom_center"));
             V::I(i32::from(!unstable && face_sturdy(rt, &text, [state, a(0), a(1)], direction, SUPPORT_CENTER)))
         }
@@ -2384,7 +2445,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // Block states
         (STATE | "net/minecraft/world/level/block/state/BlockBehaviour$BlockStateBase", n) => {
             let text = rt.str_of(a(0)).unwrap_or("minecraft:air").to_owned();
-            let (b, _) = crate::host::split_state(&text);
+            let b = crate::host::state_block(&text);
             match n {
                 // `StateHolder.owner`, read as a field where an access transformer opens it: the
                 // state's block.
@@ -3202,6 +3263,87 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No module of the chain claims an intrinsic's key before the one whose arm it answers with:
+    /// a module that did would be asked first through the chain, and the intrinsic would skip it.
+    #[test]
+    fn intrinsics_come_first() {
+        let first = |key: &'static str| MODULE_NAMES[claimed(key).trailing_zeros() as usize];
+        for key in [BE_GET_LEVEL, BE_HAS_LEVEL, BE_GET_POS, BE_GET_STATE] {
+            assert!(intrinsic(key).is_some(), "{key}");
+            assert_eq!(first(key), "world", "{key}");
+        }
+        for key in [MAP_VALUES, COLLECTION_FOR_EACH] {
+            assert!(intrinsic(key).is_some(), "{key}");
+            assert_eq!(first(key), "jutil", "{key}");
+        }
+    }
+
+    thread_local! {
+        static SEEN: std::cell::RefCell<Vec<V>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The test's one lambda, a `Consumer`: keeps what it is given.
+    fn keep(_: &mut Rt, _: u32, args: &[V]) -> Option<V> {
+        SEEN.with(|s| s.borrow_mut().push(args[1]));
+        Some(V::Void)
+    }
+
+    /// The intrinsics answer as the module chain does, receiver by receiver: a block entity's
+    /// level, position and state as its constructor and `setLevel` set them (tests check every
+    /// reading intrinsic's answer against the chain's as they call it); a map's values, in its
+    /// order, and none for a map the runtime doesn't hold (a mod's own class); a list's elements
+    /// to `forEach`'s action, in order, and nothing for a receiver that isn't Java's `ArrayList`.
+    #[test]
+    fn intrinsics_answer_as_the_chain() {
+        crate::install();
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(keep);
+        rt.supers.insert("test/DialBlockEntity", "net/minecraft/world/level/block/entity/BlockEntity");
+        let be = rt.new_object("test/DialBlockEntity");
+        let (ty, pos, state) = (rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType"), block_pos(&mut rt, 1, 2, 3), state(&mut rt, "minecraft:stone"));
+        call(&mut rt, "net/minecraft/world/level/block/entity/BlockEntity.<init>.(Lnet/minecraft/world/level/block/entity/BlockEntityType;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V", &[be, ty, pos, state]);
+        assert_eq!(call(&mut rt, BE_HAS_LEVEL, &[be]), V::I(0));
+        assert_eq!(call(&mut rt, BE_GET_LEVEL, &[be]), V::NULL);
+        let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+        call(&mut rt, "net/minecraft/world/level/block/entity/BlockEntity.setLevel.(Lnet/minecraft/world/level/Level;)V", &[be, level]);
+        assert_eq!(call(&mut rt, BE_HAS_LEVEL, &[be]), V::I(1));
+        assert_eq!(call(&mut rt, BE_GET_LEVEL, &[be]), level);
+        assert_eq!(call(&mut rt, BE_GET_POS, &[be]), pos);
+        assert_eq!(call(&mut rt, BE_GET_STATE, &[be]), state);
+
+        let values = |rt: &mut Rt, m: V, through_chain: bool| -> Option<Vec<V>> {
+            let v = if through_chain { chain(rt, MAP_VALUES, &[m], claimed(MAP_VALUES)) } else { crate::jutil::plain_map_values(rt, &[m]) };
+            v.map(|l| crate::jutil::elements(rt, l))
+        };
+        for class in ["java/util/HashMap", "java/util/LinkedHashMap", "java/util/TreeMap"] {
+            let m = rt.new_object(class);
+            let init = rt.static_key(&format!("{class}.<init>.()V"));
+            call(&mut rt, init, &[m]);
+            for (k, v) in [("b", 2), ("a", 1), ("c", 3)] {
+                let k = rt.string(k);
+                call(&mut rt, "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[m, k, V::I(v)]);
+            }
+            let fast = values(&mut rt, m, false);
+            assert_eq!(fast.as_ref().map(Vec::len), Some(3), "{class}");
+            assert_eq!(fast, values(&mut rt, m, true), "{class}");
+        }
+        let own = rt.new_object("test/OwnMap");
+        assert_eq!(values(&mut rt, own, false), None);
+
+        let action = rt.lambda_id("java/util/function/Consumer", 1, vec![]);
+        let each = |rt: &mut Rt, l: V, through_chain: bool| -> (Option<V>, Vec<V>) {
+            SEEN.with(|s| s.borrow_mut().clear());
+            let r = if through_chain { chain(rt, COLLECTION_FOR_EACH, &[l, action], claimed(COLLECTION_FOR_EACH)) } else { crate::jutil::plain_list_for_each(rt, &[l, action]) };
+            (r, SEEN.with(|s| s.borrow().clone()))
+        };
+        let list = crate::jutil::new_list(&mut rt, vec![V::I(7), V::I(8), V::I(9)]);
+        let fast = each(&mut rt, list, false);
+        assert_eq!(fast, (Some(V::Void), vec![V::I(7), V::I(8), V::I(9)]));
+        assert_eq!(fast, each(&mut rt, list, true));
+        let queue = rt.alloc("java/util/PriorityQueue", Data::List(vec![V::I(1)]));
+        assert_eq!(each(&mut rt, queue, false), (None, vec![]));
+    }
 
     /// The libraries' and the game's throwables that no module models answer `Throwable`'s own
     /// calls: Gson's `JsonParseException(message)`, Netty's `DecoderException(message, cause)`, the

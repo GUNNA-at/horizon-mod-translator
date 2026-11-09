@@ -1214,7 +1214,7 @@ fn suffocating(rt: &Rt, p: [i32; 3]) -> bool {
 
 /// A mod's block's `BlockBehaviour.Properties`.
 fn mod_block_properties(rt: &Rt, name: &str) -> Option<V> {
-    let b = rt.registered.get(&("block".to_owned(), name.to_owned())).copied()?;
+    let b = rt.registry_entry("block", name)?;
     let props = rt.get_field(b, "$properties");
     (props.r() != 0).then_some(props)
 }

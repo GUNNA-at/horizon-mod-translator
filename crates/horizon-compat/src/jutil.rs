@@ -2231,12 +2231,7 @@ fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let items = list(rt, this)?.clone();
             rt.alloc("java/util/stream/Stream", Data::Stream(items))
         }
-        "forEach" => {
-            for e in list(rt, this)?.clone() {
-                rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", a(1), &[e]);
-            }
-            V::Void
-        }
+        "forEach" => list_for_each(rt, this, a(1))?,
         "removeIf" => {
             let items = list(rt, this)?.clone();
             let mut keep = Vec::new();
@@ -2785,6 +2780,42 @@ fn is_null(v: V) -> bool {
     matches!(v, V::R(0) | V::Void)
 }
 
+/// A map's `values()`: a list of them, in the map's order.
+fn map_values(rt: &mut Rt, this: V) -> V {
+    let vals: Vec<V> = table_entries(rt, this).into_iter().map(|(_, v)| v).collect();
+    new_list(rt, vals)
+}
+
+/// The API's intrinsic for `Map.values()` ([`crate::api`]): one of Java's own maps (a `HashMap`, a
+/// `TreeMap`) answers as [`call`] answers it, through [`map_call`]; any other receiver (a mod's
+/// own map class, Guava's) is left to the modules.
+pub(crate) fn plain_map_values(rt: &mut Rt, args: &[V]) -> Option<V> {
+    let this = *args.first()?;
+    let class = rt.class_of(this);
+    let plain = class.starts_with("java/util/") && is_map(class) && matches!(rt.heap.get(this.r() as usize).map(|o| &o.data), Some(Data::Table(_)));
+    plain.then(|| map_values(rt, this))
+}
+
+/// A list's `forEach(action)`: `action` takes each element in turn, over the elements it had
+/// when it began.
+fn list_for_each(rt: &mut Rt, this: V, action: V) -> Option<V> {
+    for e in list(rt, this)?.clone() {
+        rt.call_functional("java/util/function/Consumer.accept.(Ljava/lang/Object;)V", action, &[e]);
+    }
+    Some(V::Void)
+}
+
+/// The API's intrinsic for `Collection.forEach(action)` ([`crate::api`]): an `ArrayList` of Java's
+/// own (what `new ArrayList()` and `values()` make) answers as [`call`] answers it, through
+/// [`list_call`]; any other receiver is left to the modules.
+pub(crate) fn plain_list_for_each(rt: &mut Rt, args: &[V]) -> Option<V> {
+    let this = *args.first()?;
+    if rt.class_of(this) != "java/util/ArrayList" {
+        return None;
+    }
+    list_for_each(rt, this, args.get(1).copied().unwrap_or_default())
+}
+
 fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -2922,10 +2953,7 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             rt.iter_sources.insert(s.r(), this);
             s
         }
-        "values" => {
-            let vals: Vec<V> = table_entries(rt, this).into_iter().map(|(_, v)| v).collect();
-            new_list(rt, vals)
-        }
+        "values" => map_values(rt, this),
         // fastutil's typed entry sets (`int2ObjectEntrySet`, `object2IntEntrySet`...) are its entry set.
         n if n == "entrySet" || (n.ends_with("EntrySet") && n.contains('2')) => {
             let es: Vec<(V, V)> = table_entries(rt, this);

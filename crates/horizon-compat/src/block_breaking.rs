@@ -246,7 +246,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 "liquid" => V::I(liquid(rt, &text) as i32),
                 // `blocksMotion`: solid, but never a cobweb or a bamboo sapling.
                 "blocksMotion" => {
-                    let (block, _) = crate::host::split_state(&text);
+                    let block = crate::host::state_block(&text);
                     V::I((!matches!(block, "minecraft:cobweb" | "minecraft:bamboo_sapling") && solid(rt, &text)) as i32)
                 }
                 "onDestroyedByPlayer" => match block_override(rt, &text, DESTROYED_KEY, DESTROYED, &[st, a(1), a(2), a(3), a(4), a(5)]) {
@@ -466,7 +466,7 @@ fn drop_resources(rt: &mut Rt, st: V, level: V, pos: V, be: V, entity: V, tool: 
 pub(crate) fn destroy_block(rt: &mut Rt, level: V, pos: V, drop: bool, entity: V) -> bool {
     let p = api::pos_of(rt, pos);
     let here = rt.host().map_or_else(|| "minecraft:air".to_owned(), |h| h.block_state(p));
-    let (block, _) = crate::host::split_state(&here);
+    let block = crate::host::state_block(&here);
     if matches!(block, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") {
         return false;
     }
@@ -496,7 +496,7 @@ pub(crate) fn fluid_block(rt: &mut Rt, here: &str) -> String {
 /// `BlockState.liquid()` of state `text`: water and lava, and a mod's fluid's block (a
 /// `LiquidBlock`), as vanilla's `Properties.liquid()` marks them.
 fn liquid(rt: &Rt, text: &str) -> bool {
-    let (block, _) = crate::host::split_state(text);
+    let block = crate::host::state_block(text);
     matches!(block, "minecraft:water" | "minecraft:lava")
         || mod_block_object(rt, text).is_some_and(|b| rt.is_a(rt.class_of(b), "net/minecraft/world/level/block/LiquidBlock"))
 }
@@ -559,8 +559,8 @@ fn virt(rt: &mut Rt, key: &'static str, this: V, args: &[V]) -> V {
 
 /// The mod block object registered for state `text`'s block (one made of its `Properties`).
 fn mod_block_object(rt: &Rt, text: &str) -> Option<V> {
-    let (name, _) = crate::host::split_state(text);
-    rt.registered.get(&("block".to_owned(), name.to_owned())).copied().filter(|b| rt.str_of(*b).is_none())
+    let name = crate::host::state_block(text);
+    rt.registry_entry("block", name).filter(|b| rt.str_of(*b).is_none())
 }
 
 /// Mod block `text`'s own `nd` (its class's, or a mod superclass's), `key` being vanilla's, on

@@ -45,8 +45,8 @@ fn is_air(text: &str) -> bool {
 /// The block object a mod made for state `text` (with the properties it was given) and its class;
 /// None for a vanilla block, which the runtime stands for by its name.
 pub(crate) fn made_by_mod(rt: &Rt, text: &str) -> Option<(V, &'static str)> {
-    let (name, _) = crate::host::split_state(text);
-    let b = rt.registered.get(&("block".to_owned(), name.to_owned())).copied().or_else(|| api::unregistered_block(rt, name))?;
+    let name = crate::host::state_block(text);
+    let b = rt.registry_entry("block", name).or_else(|| api::unregistered_block(rt, name))?;
     rt.str_of(b).is_none().then(|| (b, rt.class_of(b)))
 }
 
@@ -56,7 +56,7 @@ fn vanilla_class(rt: &Rt, text: &str) -> &'static str {
     match made_by_mod(rt, text) {
         Some((_, class)) => crate::rotation::vanilla_base(rt, class),
         None => {
-            let (name, _) = crate::host::split_state(text);
+            let name = crate::host::state_block(text);
             let table = &crate::vanilla_classes::BLOCKS;
             table.binary_search_by(|(id, _)| (*id).cmp(name)).map_or("net/minecraft/world/level/block/Block", |i| table[i].1)
         }

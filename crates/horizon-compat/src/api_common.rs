@@ -666,8 +666,8 @@ pub fn state(rt: &mut Rt, text: &str) -> V {
 
 pub fn item(rt: &mut Rt, name: &str) -> V {
     let name = if name.contains(':') { name.to_owned() } else { format!("minecraft:{name}") };
-    if let Some(v) = rt.registered.get(&("item".to_owned(), name.clone())) {
-        return *v;
+    if let Some(v) = rt.registry_entry("item", &name) {
+        return v;
     }
     // A vanilla block's item is a `BlockItem` where the game says so (a mod checks `instanceof
     // BlockItem`: Create's deployer won't place against a block it can't replace); without a host to
@@ -4759,7 +4759,7 @@ fn block_entity_changed(rt: &mut Rt, be: V) {
         return;
     }
     let text = rt.str_of(state).unwrap_or("minecraft:air").to_owned();
-    let (block, _) = crate::host::split_state(&text);
+    let block = crate::host::state_block(&text);
     if matches!(block, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") {
         return;
     }

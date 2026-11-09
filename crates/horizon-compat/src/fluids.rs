@@ -108,8 +108,8 @@ pub fn is_fluid_class(c: &str) -> bool {
 /// A fluid by registered name: vanilla's (`minecraft:water`, one object each) or the one a mod
 /// registered under it; null when there is none.
 pub fn fluid(rt: &mut Rt, name: &str) -> V {
-    if let Some(v) = rt.registered.get(&("fluid".to_owned(), name.to_owned())) {
-        return *v;
+    if let Some(v) = rt.registry_entry("fluid", name) {
+        return v;
     }
     let Some(&(_, class)) = VANILLA.iter().find(|(n, _)| *n == name) else { return V::NULL };
     let v = rt.alloc(class, Data::Str(name.to_owned()));

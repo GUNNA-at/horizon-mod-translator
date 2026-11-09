@@ -353,7 +353,7 @@ fn vanilla_class_of(rt: &Rt, block: V) -> &'static str {
 
 /// `BaseRailBlock.isRail(state)`: in `#minecraft:rails`, of a rail's class.
 fn is_rail(rt: &mut Rt, text: &str) -> bool {
-    let (name, _) = split_state(text);
+    let name = crate::host::state_block(text);
     if !rt.host().is_some_and(|h| h.block_in_tag(name, RAILS)) {
         return false;
     }

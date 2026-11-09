@@ -9264,6 +9264,63 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Next: the translated code's own speed. Most of the server's time is now Create's tick itself: a field read by
     name from its object's map (each a hash lookup, often a cache miss), a class's initialisation checked by name
     at each static access, and calls into the API matched by their names.
+- [x] 2026-11-09 Part 138: the calls a mod's tick makes most are answered at once, and a field read copies nothing.
+  Counted first: with `HORIZON_COMPAT_COUNT=1` (new) the runtime counts every call into the API and every virtual
+  call of the translated code by its key, on each thread, and writes the 40 most frequent to the log every 2^24
+  calls. On the field of Part 137 (32 rows of 48 of Create's shafts, 1,568 kinetic block entities, `/tick sprint`),
+  four keys were 86% of the API's calls, about 3.6 million each of 16.8 million: `BlockEntity.getLevel()`,
+  `BlockEntity.hasLevel()`, `Map.values()` and `Collection.forEach(Consumer)`, which Create's block entity makes at
+  every tick (it reads its level and walks its behaviours, a map's values). Each went through the whole API: a
+  lookup of its key, then every module that claims it in turn, through their long `match`es (`world` claims every
+  key and passes the block entity's to `api_common`), 28 to 62 ns a call in a micro-benchmark (not committed).
+  - Intrinsics (as a JVM's JIT has them): `api` answers six keys itself, with the code of the arm that answers them
+    in the chain: a block entity's `getLevel()`, `hasLevel()`, `getBlockPos()` and `getBlockState()` (its fields),
+    `Map.values()` of Java's own maps (`HashMap`, `LinkedHashMap`, `TreeMap`...: their values in the map's order),
+    and `Collection.forEach` of an `ArrayList` (its action takes each element). Any other receiver (a mod's own map
+    class, a queue) goes to the chain as before. Tests (and `HORIZON_COMPAT_CHECK_DISPATCH=1`) check each reading
+    intrinsic's answer against the chain's at every call, and that no module claims an intrinsic's key before the
+    module whose arm it mirrors.
+  - A key's way through the API is found once and kept as one `Route` (its intrinsic and the modules that claim
+    it, as bits), where two tables were asked at each call. `blocks` claimed every `values` key for an enum's
+    `values()`, so each `Map.values()` was offered to it first; it now claims those that return an array.
+  - The API's calls back into the code (`vcall`: a block entity ticker's `tick`, a key of 172 bytes) hashed their
+    key a byte at a time at each call; the hash is now kept by the key's address and length (64 slots).
+  - The block entity's ticker is given the level the block entity was put in (`setLevel`), as vanilla's
+    `LevelChunk` passes its own level, without looking up the server's at each tick.
+  - The hooks read a state's block with `host::state_block` (new) where `split_state` also listed its properties
+    (a `Vec` at every tick of every block entity: 5.3% of the server thread in the profile of this Part's first
+    build), and find a mod's block object with `Rt::registry_entry` (new), which reuses one key where each lookup
+    made two `String`s (`mod_block`, 4%).
+  - `FxHasher` put the last 1 to 7 bytes of what it hashes (a field's name: `level` is 5) into a word through
+    `memmove`, at every field read; it now reads them with overlapping loads, and every hash is the same.
+  - Measured in the micro-benchmark, ns per call before → after: `getLevel()` 60.7 → 13.8, `hasLevel()` 61.8 →
+    16.0, `Map.values()` 49.2 → 20.1, `forEach` 27.8 → 11.3, `getBlockPos()` 66 → 12.8, `getBlock()` (no
+    intrinsic) 95.8 → 76.8; a field read 6.4 → 5.4 ns.
+  - Tick time (the field of Part 137, seed 136, `/tick sprint`, the server's own report, the server thread awake
+    throughout at priority 28 to 46), the builds in turn in one session: Part 137's 3.64, 3.68, 3.61 and 3.63 ms per
+    tick (400 ticks, then 3 × 1000); the new build's 2.76, 2.76, 2.76 and 2.77, and 2.68, 2.68, 2.69 and 2.67 when
+    run again last; the first build of this Part (the intrinsics, the routes and the kept hashes alone) 3.05 to
+    3.12. The bare platform: 0.47 to 0.57 ms. About 25% less per tick: 1.97 → 1.41 µs per kinetic block entity
+    and tick.
+  - In the game (the new build with Create and Waddles, a fresh world of seed 136, the scenes on the platform,
+    driven by `horizon-ctl`): a creative motor turns a shaft and a mechanical press at `Speed` 16.0; a survival
+    player puts an iron ingot on the depot under it, `/data get block` reads the press during its stroke (`Ticks` 2,
+    then 12), the depot then holds an iron sheet, and an empty hand takes it back. Of six Waddles penguins summoned
+    on the platform, four walked by their own goals within 300 ticks (with Part 137's build, three of six: a
+    penguin may stand that long, as the single one of the first run did), at their 8.0 health. The field of shafts
+    took its speed (the last of the last row at 16.0). No panic or exception in the log.
+  - Tests: compat 2 new (no module claims an intrinsic's key before the module whose arm it mirrors; the
+    intrinsics answer as the chain does: a block entity's level, position and state after its constructor and
+    `setLevel`, the values of a `HashMap`, a `LinkedHashMap` and a `TreeMap`, in order, none for a map class of a
+    mod's own, `forEach` over a list in order and nothing for a queue); compat-core 2 new (a kept hash is the key's
+    own, with more keys than slots; the hasher's tail hashes as the bytes padded with zeros, for every length up to
+    40). The differential, hook and weave integration tests and all others pass: 726 compat, 14 compat-core and 25
+    translator unit tests.
+  - Next: fields by slot. The new build's profile on the same field: a field read by name (a lookup in its object's
+    map, then the name compared) is 12% of the server thread, and the hook alone reads four of a block entity's
+    fields that way at each of its ticks (its level, its ticker, the state that ticker was made for, its position).
+    Then the fingerprint of the game's compound at each tick (8.6%), which the game could spare by telling the
+    runtime when it changed a mod block entity's data.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

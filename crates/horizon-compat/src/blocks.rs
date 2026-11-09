@@ -680,11 +680,11 @@ const GET_PUSH_REACTION_KEY: &str =
 /// and pull it, placing doesn't replace it, a full cube's faces are sturdy. (A mod block's own
 /// faces come from its shapes: `api::face_sturdy`.)
 pub(crate) fn state_facts(rt: &Rt, text: &str) -> BlockFacts {
-    let (name, _) = crate::host::split_state(text);
+    let name = crate::host::state_block(text);
     let java = BlockFacts { hardness: 0.0, push: 0, replaceable: false, sturdy: (1 << 18) - 1 };
     let from_game = |text: &str| rt.host().and_then(|h| h.block_facts(text));
     // A vanilla block's object is its name; a mod's holds fields.
-    let Some(b) = rt.registered.get(&("block".to_owned(), name.to_owned())).copied().filter(|b| rt.str_of(*b).is_none()) else {
+    let Some(b) = rt.registry_entry("block", name).filter(|b| rt.str_of(*b).is_none()) else {
         return from_game(text).unwrap_or(java);
     };
     let props = rt.get_field(b, "$properties");
@@ -1511,7 +1511,9 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         || (name == "canSurvive" && api::CAN_SURVIVE.ends_with(desc) && can_survive_declarer(owner).is_some())
         || (name == "mayPlaceOn" && plant_class(owner).is_some_and(|c| BUSH_SOIL.contains(&c)))
         || (owner == "net/minecraft/world/level/block/DoublePlantBlock" && name == "placeAt")
-        || matches!(name, "values" | "registerDefaultState" | "defaultBlockState" | "defaultMapColor")
+        // An enum's `values()`, an array: not a map's or a list's `values()`, which every mod calls.
+        || (name == "values" && desc.starts_with("()["))
+        || matches!(name, "registerDefaultState" | "defaultBlockState" | "defaultMapColor")
         || (name == "getSerializedName" && enum_class(owner))
         || (name == "toString" && enum_class(owner) && owner.starts_with("net/minecraft/world/level/block/state/properties/"))
         || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "createBlockStateDefinition" | "getStateForPlacement" | "<init>"))
@@ -1920,7 +1922,7 @@ fn plant_class(owner: &str) -> Option<&str> {
 /// 1.21.1's `BlockTags.DIRT` holds grass and podzol, which 26.3's `dirt` doesn't.
 fn bush_soil(rt: &Rt, class: &str, soil: &str) -> Option<bool> {
     BUSH_SOIL.contains(&class).then(|| {
-        let (block, _) = crate::host::split_state(soil);
+        let block = crate::host::state_block(soil);
         let dirt = crate::vanilla_tags::current("block", "minecraft:dirt").unwrap_or_else(|| "minecraft:dirt".into());
         block == "minecraft:farmland" || rt.host().is_some_and(|h| h.block_in_tag(block, &dirt))
     })

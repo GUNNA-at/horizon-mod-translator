@@ -3115,6 +3115,12 @@ impl MemoryHost {
     }
 }
 
+/// The block a state's text names (`create:shaft` of `create:shaft[axis=x]`): [`split_state`]'s
+/// first part, without reading the properties (a list made at every tick of every block entity).
+pub fn state_block(state: &str) -> &str {
+    state.split_once('[').map_or(state, |(block, _)| block)
+}
+
 /// A block state string split into its block and properties.
 pub fn split_state(state: &str) -> (&str, Vec<(&str, &str)>) {
     match state.split_once('[') {

@@ -477,7 +477,7 @@ pub(crate) fn clip_through(rt: &mut Rt, level: V, from: [f64; 3], to: [f64; 3], 
         let boxes = match block_mode {
             1 => host.outline_boxes(p).or_else(|| host.collision_boxes(p)),
             3 => {
-                let (block, _) = crate::host::split_state(&text);
+                let block = crate::host::state_block(&text);
                 Some(if host.block_in_tag(block, "minecraft:fall_damage_resetting") { vec![FULL] } else { Vec::new() })
             }
             _ => host.collision_boxes(p),

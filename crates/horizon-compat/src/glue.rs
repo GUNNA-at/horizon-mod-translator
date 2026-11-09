@@ -11,8 +11,8 @@ const NEIGHBOR: &str = "neighborChanged.(Lnet/minecraft/world/level/block/state/
 
 /// The mod's Block object behind a state, and its class, when the mod registered it.
 pub(crate) fn mod_block(rt: &Rt, state: &str) -> Option<(V, &'static str)> {
-    let (name, _) = crate::host::split_state(state);
-    let b = rt.registered.get(&("block".to_owned(), name.to_owned())).copied().or_else(|| api::unregistered_block(rt, name))?;
+    let name = crate::host::state_block(state);
+    let b = rt.registry_entry("block", name).or_else(|| api::unregistered_block(rt, name))?;
     let class = rt.class_of(b);
     (class != "net/minecraft/world/level/block/Block").then_some((b, class))
 }
@@ -302,7 +302,7 @@ impl Held for std::collections::BTreeMap<String, crate::nbt::Nbt> {
 /// The mod's block entity object at `pos`, made with `newBlockEntity` and loaded from what the game
 /// holds of it (`held`) the first time.
 fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, held: &dyn Held) -> Option<V> {
-    let (block, _) = crate::host::split_state(state);
+    let block = crate::host::state_block(state);
     if let Some(be) = rt.block_entities.get(&pos).copied() {
         // The same block entity, unless the block changed or the game hands a fresh one (an empty
         // compound where the live one had saved data): then it is made again.
@@ -453,7 +453,7 @@ pub(crate) fn block_entity_at(rt: &mut Rt, pos: [i32; 3]) -> V {
     rt.put_field(be, "level", l);
     rt.put_field(be, "$demand", V::I(1));
     rt.block_entities.insert(pos, be);
-    let (block, _) = crate::host::split_state(&state);
+    let block = crate::host::state_block(&state);
     rt.block_entity_meta.insert(pos, (block.to_owned(), false));
     be
 }
@@ -466,11 +466,16 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
     let Some((b, _)) = mod_block(rt, state) else { return false };
     rt.with_host(host, |rt| {
         let Some(be) = block_entity(rt, pos, state, &*held) else { return false };
-        let level = level(rt);
-        // In its level, with the block's current state, as the game's block entity is.
-        if rt.get_field(be, "level").r() == 0 {
-            rt.put_field(be, "level", level);
-        }
+        // In its level, with the block's current state, as the game's block entity is: the level
+        // it was put in (`setLevel`), which its chunk's ticker passes it (`LevelChunk.this.level`).
+        let level = match rt.get_field(be, "level") {
+            l if l.r() != 0 => l,
+            _ => {
+                let l = level(rt);
+                rt.put_field(be, "level", l);
+                l
+            }
+        };
         let (st, ticker) = ticker_for(rt, be, b, level, state);
         if ticker.r() != 0 {
             let p = ticked_pos(rt, be, pos);
@@ -497,7 +502,7 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
 /// changed since is taken first. A block entity not live here leaves the game's data as it is.
 pub fn block_entity_save(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, held: &mut dyn Held) -> bool {
     rt.safe_point();
-    let (block, _) = crate::host::split_state(state);
+    let block = crate::host::state_block(state);
     let Some(be) = rt.block_entities.get(&pos).copied() else { return false };
     if rt.block_entity_meta.get(&pos).is_none_or(|(b, _)| b != block) {
         return false;
@@ -527,7 +532,7 @@ fn save_held(rt: &mut Rt, pos: [i32; 3], be: V, state: &str, held: &mut dyn Held
     let saved = !nbt.is_empty();
     let seen = held.write(nbt);
     rt.put_field(be, "$seen", V::J(seen as i64));
-    let (block, _) = crate::host::split_state(state);
+    let block = crate::host::state_block(state);
     rt.block_entity_meta.insert(pos, (block.to_owned(), saved));
 }
 
@@ -615,7 +620,7 @@ fn replaced(rt: &mut Rt, pos: [i32; 3], old: &str, new: &str, moved: bool) {
 /// entity at `pos` stays the old block's while it runs; one its code left there when the block
 /// changed is let go, as the chunk drops it.
 fn removed(rt: &mut Rt, b: V, class: &'static str, pos: [i32; 3], old: &str, new: &str, moved: bool) {
-    let (old_block, _) = crate::host::split_state(old);
+    let old_block = crate::host::state_block(old);
     let changed = old_block != crate::host::split_state(new).0;
     let kept = rt.block_entities.get(&pos).copied().filter(|_| rt.block_entity_meta.get(&pos).is_some_and(|(held, _)| held == old_block));
     let mark = removing_key(pos);
@@ -695,7 +700,7 @@ pub fn loot_drops(
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
     rt.with_host(host, |rt| {
-        let (block, _) = crate::host::split_state(state);
+        let block = crate::host::state_block(state);
         let live = rt.block_entities.get(&pos).copied().filter(|_| rt.block_entity_meta.get(&pos).is_some_and(|(held, _)| held == block));
         let be = rt.interned.remove(&broken_key(pos)).or(live).unwrap_or(V::NULL);
         let level = level(rt);
@@ -926,7 +931,7 @@ pub fn state_for_placement(rt: &mut Rt, host: &mut dyn Host, state: &str, placem
         }
         // Only a state of the block placed is an answer (the game checks it too).
         let text = rt.str_of(r)?.to_owned();
-        let (name, _) = crate::host::split_state(state);
+        let name = crate::host::state_block(state);
         (crate::host::split_state(&text).0 == name).then_some(Some(text))
     })
 }
@@ -1367,7 +1372,7 @@ pub fn block_entity_data(
 
 /// The client's copy of the mod block entity at `pos`, and whether it was made just now.
 fn client_block_entity_object(rt: &mut Rt, pos: [i32; 3], state: &str) -> Option<(V, bool)> {
-    let (block, _) = crate::host::split_state(state);
+    let block = crate::host::state_block(state);
     let vc = rt.vcall?;
     Some(match rt.block_entities.get(&pos).copied() {
         Some(be) if rt.block_entity_meta.get(&pos).is_some_and(|(b, _)| b == block) => (be, false),
@@ -1391,7 +1396,7 @@ fn client_block_entity_object(rt: &mut Rt, pos: [i32; 3], state: &str) -> Option
 
 /// The client's block entity `be` loads `nbt`, an update tag (`handleUpdateTag`).
 fn load_update_tag(rt: &mut Rt, be: V, pos: [i32; 3], state: &str, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) {
-    let (block, _) = crate::host::split_state(state);
+    let block = crate::host::state_block(state);
     let Some(vc) = rt.vcall else { return };
     // An empty update tag isn't sent (vanilla's chunk data carries none), so nothing is loaded.
     if !nbt.is_empty() {
@@ -2392,7 +2397,7 @@ fn tick_client_block_entities(rt: &mut Rt) {
     let level = level(rt);
     for (pos, be) in held {
         let Some(state) = rt.host().map(|h| h.block_state(pos)) else { return };
-        let (block, _) = crate::host::split_state(&state);
+        let block = crate::host::state_block(&state);
         if rt.block_entity_meta.get(&pos).is_none_or(|(b, _)| b != block) {
             block_entity_removed(rt, pos);
             continue;
@@ -3057,7 +3062,7 @@ mod tests {
         host.blocks.insert(at, off.into());
         let turns = |n: i32| std::collections::BTreeMap::from([("turns".to_owned(), Nbt::Int(n))]);
         let mut game = Counted::default();
-        let mut tick = |rt: &mut Rt, host: &mut MemoryHost, game: &mut Counted, state: &str| assert!(block_entity_tick(rt, host, at, state, game));
+        let tick = |rt: &mut Rt, host: &mut MemoryHost, game: &mut Counted, state: &str| assert!(block_entity_tick(rt, host, at, state, game));
         tick(&mut rt, &mut host, &mut game, off);
         assert_eq!((&game.nbt, game.writes), (&turns(1), 1), "written after its first tick");
         tick(&mut rt, &mut host, &mut game, off);
