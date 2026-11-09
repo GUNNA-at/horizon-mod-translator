@@ -13,6 +13,71 @@ fn main() {
     if let Some(revision) = given.or_else(head) {
         println!("cargo:rustc-env=HORIZON_TRANSLATOR_REVISION={revision}");
     }
+    named_classes();
+}
+
+/// The game and loader classes the runtime's source (and this translator's) names, sorted, as
+/// `NAMED_CLASSES` in `$OUT_DIR/named_classes.rs`, and the packages it names (`.../`, a family it
+/// answers for by the class's short name) as `NAMED_PACKAGES`: a class one of them names is
+/// modelled there, or its objects may come from there. Any other class of the game is code like
+/// a library's (`horizon_mod_translator::runtime_names`).
+fn named_classes() {
+    let Ok(here) = std::env::var("CARGO_MANIFEST_DIR") else {
+        return;
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for dir in ["../horizon-compat/src", "../horizon-compat-core/src", "src"] {
+        let dir = Path::new(&here).join(dir);
+        println!("cargo:rerun-if-changed={}", dir.display());
+        let mut todo = vec![dir];
+        while let Some(d) = todo.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    todo.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    names_in(&std::fs::read_to_string(&p).unwrap_or_default(), &mut names);
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    for (list, package) in [("NAMED_CLASSES", false), ("NAMED_PACKAGES", true)] {
+        out.push_str(&format!("pub const {list}: &[&str] = &[\n"));
+        for n in names.iter().filter(|n| n.ends_with('/') == package) {
+            out.push_str(&format!("    {n:?},\n"));
+        }
+        out.push_str("];\n");
+    }
+    let to = Path::new(&std::env::var("OUT_DIR").unwrap_or_default()).join("named_classes.rs");
+    std::fs::write(to, out).expect("OUT_DIR is writable");
+}
+
+/// Each `net/minecraft/...`, `net/neoforged/...` or `com/mojang/...` class or package (`.../`)
+/// name in `text`, up to what can't be part of one (a member's `.`, a quote).
+fn names_in(text: &str, names: &mut std::collections::BTreeSet<String>) {
+    for root in ["net/minecraft/", "net/neoforged/", "com/mojang/"] {
+        let mut from = 0;
+        while let Some(at) = text[from..].find(root) {
+            let start = from + at;
+            let len = text[start..]
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'$'))
+                .count();
+            let name = &text[start..start + len];
+            // A parameter's type in a method's descriptor (`(L...;L...;)`) names what a mapped
+            // method is given, which says nothing of who models it; its return type does (the
+            // runtime makes that object).
+            let parameter = text[..start]
+                .strip_suffix('L')
+                .map(|b| b.trim_end_matches('['))
+                .is_some_and(|b| b.ends_with('(') || b.ends_with(';'));
+            if !(parameter && text[start + len..].starts_with(';')) {
+                names.insert(name.to_owned());
+            }
+            from = start + len.max(1);
+        }
+    }
 }
 
 fn is_revision(text: &str) -> bool {

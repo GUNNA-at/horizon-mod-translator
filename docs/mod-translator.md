@@ -9585,6 +9585,58 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     sideways up to a shape's face and on along the other axis; a payload to those tracking a player leaves the
     player out; a client keeps its own place for an entity it moves: it fails without the change, the carriage's
     copy at x 3.5 where it stays at 0.5). 744 compat, 15 compat-core and 25 translator unit tests pass.
+- [x] 2026-11-09 Part 144: the game's own code answers what the runtime doesn't map: the translator reads the
+  player's own NeoForge 1.21.1 install and translates, with the mods, the game's methods they need. Nothing of
+  the game is in this repository or in a release: the code comes from the jars on the player's disk, as a
+  launcher's NeoForge install made them.
+  - Until now every game method a mod calls had to be written in `horizon-compat` by hand (8,485 distinct ones
+    were left). Most of the game's methods are code over a few things the engine really owns (a level's blocks,
+    an entity's place, a registry): with those mapped, the game's own bytecode is the rest.
+  - `bundle --game <jar>...` (found by itself where a launcher keeps the install: Minecraft's own, CurseForge's,
+    Prism's, Modrinth's `libraries`, or `HORIZON_NEOFORGE_LIBRARIES`; `--no-game` for none): NeoForge's patched
+    classes, the game's (`client-1.21.1-*-srg.jar`), NeoForge's own. Two ways in:
+    - A class the runtime doesn't model (its name, or its package as a family, appears nowhere in the
+      runtime's source or the translator's; listed when the translator is built, `NAMED_CLASSES`) is a library
+      class like Kotlin's: translated as far as the mods reach into it (`program_with`, `reach_with`). OpenGL,
+      the loader's machinery, datagen, datafixers and Realms stay out (`NOT_CODE`, and any class naming LWJGL).
+      The reach is narrower than a library's: a call reaches a game method only in a class its type can be, and
+      a created class runs, for the runtime's sake, only what a class above it that isn't translated declares
+      (Kotlin's rule ran every public method, and pulled Realms' screens and the datafixers in).
+      An object the runtime made of such a class has none of its fields: a read of one asks the runtime as any
+      game field's does, unless translated code built the object (`$vt`, set at its `new`), so nothing reads as
+      a silent zero. A mixin into such a class still counts as one into the game.
+    - A method of a class the runtime does model (`Level`, `Entity`, `ItemStack`) stands for an unmapped one
+      when its code asks only what the runtime answers, or what stands the same way (`derive.rs`): each call,
+      each field read (as translated code reads it, on the probe's objects) and each constant is asked of the
+      runtime; a write to a field the runtime never hears of, a method without code, or one another class of
+      its line also has code for (the object's class would pick, and a `super` call pass on) blocks it. What
+      stands is carried in a class named for its own (`hz/derived/<class>`, static methods and constructors
+      too) and a call nothing maps runs it (`Linked::derived`), after everything the runtime has.
+  - `coverage` with `GAME_JARS` counts both as mapped and says how many (`by the game's own code`), measures
+    what the game's code calls in its turn (`game code: ... API methods it calls`, `game-missing`), and with
+    `DERIVE=1` lists for each method still missing what blocks it: the members to map next, by how many
+    methods each one frees.
+  - Run 50 (the pack's 367 jars, with the install's jars): API methods 90.0% (117,273 of 130,261; 85.2% in run
+    49), call sites 95.2% (354,713 of 372,789; 92.7%), 5,812 distinct methods missing (8,485 before). Of the
+    methods answered, 6,416 are the game's own code (9,225 call sites): 2,663 in classes translated with the
+    mods, 3,753 standing for unmapped ones. Create's 3,530 of its 3,975 methods (3,329 before), 24,683 of its
+    25,244 calls. The game's code the mods reach calls 23,361 API methods in its turn (summed over the jars),
+    17,421 of them mapped: what is left there is reported with the mods' own gaps. Libraries 83.5% and 94.3%,
+    as before. Without the install's jars the numbers are run 49's.
+    - What blocks the most methods still missing (`DERIVE=1`, the pack): `Entity.entityData` (129 methods read
+      it), `MinecraftServer.resources` and what it leads to (70), `LootContext`'s and the random sources'
+      constructors (57 to 67 each), `ServerChunkCache.chunkMap` (46). 2,458 are blocked only by themselves: no
+      code (an interface's method), or code in more than one class of their line.
+  - In game (`scratchpad/p143live.sh`, build of this Part with the game's jars: Create's bundle carries 161
+    game classes and 1,316 standing methods, 4 MB more of 170): the train ride of Part 143 as before (the player
+    on the carriage at x 22.12, 21.13, 19.24, 16.43 every 10 ticks, at x 1.79, y 103.0001001 where the track
+    ends), the press (`Ticks` 2, then 10), the depot's iron sheet taken by hand, and three of four penguins
+    walking. `DynamicTexture.bind()`, unmapped in Part 143's log, is no longer: the game's own method ran.
+  - Tests: translator 2 new, from a made-up game jar compiled by `javac` (a game class joins the program as far
+    as it is reached, one the runtime names stays out; a method stands where its code asks only what is mapped,
+    and each blocker is the member to map); compat 1 new (an unmapped call runs the game's own code carried for
+    it, a static one from the class above; what nothing carried stays a miss). 745 compat, 15 compat-core and
+    25 translator unit tests pass, and the differential test.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

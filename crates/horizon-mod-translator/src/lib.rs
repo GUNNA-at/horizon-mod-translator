@@ -1,6 +1,7 @@
 //! Ahead-of-time translator from NeoForge mod bytecode to native Rust
 //! Horizon mods (`docs/mod-translator.md`).
 pub mod class;
+pub mod derive;
 pub mod reach;
 
 use class::{ClassFile, Member};
@@ -13,6 +14,167 @@ pub fn is_api(owner: &str) -> bool {
     ["net/minecraft/", "net/neoforged/", "com/mojang/", "thedarkcolour/kotlinforforge/neoforge/KotlinMod", "thedarkcolour/kotlinforforge/KotlinMod"]
         .iter()
         .any(|p| owner.starts_with(p))
+}
+
+include!(concat!(env!("OUT_DIR"), "/named_classes.rs"));
+
+/// Whether the runtime's source (or this translator's) names the class or its package: it models
+/// it, or its objects may come from it ([`NAMED_CLASSES`] and [`NAMED_PACKAGES`], listed when this
+/// crate is built).
+pub fn runtime_names(class: &str) -> bool {
+    NAMED_CLASSES.binary_search(&class).is_ok()
+        || NAMED_PACKAGES
+            .iter()
+            .any(|p| !WIDE.contains(p) && class.starts_with(p))
+}
+
+/// The packages the runtime's source names only to tell the game's classes from a mod's, or one
+/// side's from the other's: naming one says nothing of the classes in it.
+const WIDE: [&str; 8] = [
+    "com/mojang/",
+    "net/minecraft/",
+    "net/minecraft/client/",
+    "net/minecraft/core/",
+    "net/minecraft/world/",
+    "net/minecraft/world/level/",
+    "net/neoforged/",
+    "net/neoforged/neoforge/",
+];
+
+/// The parts of the game no translation of their code can stand for: OpenGL and the window
+/// (the engine draws, in its own way), the mod loader's own machinery, and what only runs when a
+/// mod's data is generated or tested, never in a player's game.
+const NOT_CODE: [&str; 17] = [
+    "com/mojang/blaze3d/",
+    "net/minecraft/client/main/",
+    "net/minecraft/client/renderer/texture/",
+    "net/minecraft/data/",
+    "net/minecraft/gametest/",
+    "net/minecraft/server/Main",
+    "net/minecraft/server/dedicated/",
+    "net/minecraft/server/gui/",
+    "net/minecraft/util/datafix/",
+    "net/minecraft/realms/",
+    "com/mojang/realmsclient/",
+    "net/neoforged/bus/",
+    "net/neoforged/fml/",
+    "net/neoforged/neoforgespi/",
+    "net/neoforged/neoforge/data/",
+    "net/neoforged/neoforge/common/data/",
+    "net/neoforged/neoforge/client/model/generators/",
+];
+
+/// Whether a class of the game's own jars (the player's NeoForge install) is code to translate as
+/// a library's is: one the runtime doesn't name ([`runtime_names`]), outside [`NOT_CODE`].
+pub fn game_code(class: &str) -> bool {
+    is_api(class) && !runtime_names(class) && !NOT_CODE.iter().any(|p| class.starts_with(p))
+}
+
+/// The jars of a NeoForge 1.21.1 install under a launcher's `libraries` folder, in the order
+/// [`program_with`] reads them: NeoForge's patched classes of the game, the game's own, NeoForge's.
+/// None when the folder has no such install (the newest NeoForge 21.1 there, if several).
+pub fn game_jars_in(libraries: &Path) -> Option<Vec<std::path::PathBuf>> {
+    let dirs = |d: std::path::PathBuf, prefix: &str| {
+        let mut v: Vec<(Vec<u32>, String)> = std::fs::read_dir(&d)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.starts_with(prefix))
+            .map(|n| {
+                (
+                    n.split(|c: char| !c.is_ascii_digit())
+                        .filter_map(|p| p.parse().ok())
+                        .collect(),
+                    n,
+                )
+            })
+            .collect();
+        v.sort();
+        v.into_iter()
+            .rev()
+            .map(move |(_, n)| (d.join(&n), n))
+            .collect::<Vec<_>>()
+    };
+    let (neo, version) = dirs(libraries.join("net/neoforged/neoforge"), "21.1.")
+        .into_iter()
+        .find(|(d, v)| d.join(format!("neoforge-{v}-client.jar")).is_file())?;
+    let (game, stamp) = dirs(libraries.join("net/minecraft/client"), "1.21.1-")
+        .into_iter()
+        .find(|(d, v)| d.join(format!("client-{v}-srg.jar")).is_file())?;
+    let jars = vec![
+        neo.join(format!("neoforge-{version}-client.jar")),
+        game.join(format!("client-{stamp}-srg.jar")),
+        neo.join(format!("neoforge-{version}-universal.jar")),
+    ];
+    jars.iter().all(|j| j.is_file()).then_some(jars)
+}
+
+/// The player's NeoForge 1.21.1 install ([`game_jars_in`]): under `HORIZON_NEOFORGE_LIBRARIES`
+/// when set, else where the launchers keep their libraries (Minecraft's own, CurseForge's,
+/// Prism's, Modrinth's), the first that has one.
+pub fn find_game_jars() -> Option<Vec<std::path::PathBuf>> {
+    if let Some(dir) = std::env::var_os("HORIZON_NEOFORGE_LIBRARIES") {
+        return game_jars_in(Path::new(&dir));
+    }
+    let home = std::path::PathBuf::from(
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?,
+    );
+    let roaming = std::env::var_os("APPDATA").map(std::path::PathBuf::from);
+    let mut places = vec![
+        home.join("Library/Application Support/minecraft/libraries"),
+        home.join(".minecraft/libraries"),
+        home.join("Documents/curseforge/minecraft/Install/libraries"),
+        home.join("curseforge/minecraft/Install/libraries"),
+        home.join("Library/Application Support/PrismLauncher/libraries"),
+        home.join(".local/share/PrismLauncher/libraries"),
+        home.join("Library/Application Support/ModrinthApp/meta/libraries"),
+        home.join(".local/share/ModrinthApp/meta/libraries"),
+    ];
+    if let Some(r) = roaming {
+        places.extend([
+            r.join(".minecraft/libraries"),
+            r.join("PrismLauncher/libraries"),
+            r.join("ModrinthApp/meta/libraries"),
+        ]);
+    }
+    places.iter().find_map(|p| game_jars_in(p))
+}
+
+/// The classes of the game's own jars that are code ([`game_code`]) and name no LWJGL class,
+/// without their annotations (the loader's own `@EventBusSubscriber` classes are not a mod's).
+fn game_classes(
+    jars: &[&Path],
+    have: &mut std::collections::HashSet<String>,
+) -> Result<Vec<ClassFile>, String> {
+    let mut out = Vec::new();
+    for jar in jars {
+        let f = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
+        let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", jar.display()))?;
+        for i in 0..zip.len() {
+            let Ok(mut e) = zip.by_index(i) else { continue };
+            let Ok(name) = e.name().map(|n| n.into_owned()) else {
+                continue;
+            };
+            let Some(class) = name.strip_suffix(".class") else {
+                continue;
+            };
+            if !game_code(class) || have.contains(class) {
+                continue;
+            }
+            let mut b = Vec::new();
+            if e.read_to_end(&mut b).is_ok()
+                && let Ok(mut c) = ClassFile::parse(&b)
+                && !(0..c.pool.len() as u16)
+                    .any(|i| c.class_name(i).is_ok_and(|n| n.starts_with("org/lwjgl/")))
+                && have.insert(c.name.clone())
+            {
+                c.annotations.clear();
+                out.push(c);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The language loader a jar's mods name (`modLoader`: `javafml`, `kotlinforforge`...).
@@ -197,6 +359,18 @@ fn declares_mod<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> bool {
 /// the implementations a reached service interface lists. What the runtime provides
 /// ([`is_api`]) stays out.
 pub fn program_of(jars: &[&Path], libraries: &[&Path]) -> Result<(Vec<ClassFile>, usize, usize), String> {
+    program_with(jars, libraries, &[])
+}
+
+/// [`program_of`], with the game's own jars (`game`: the NeoForge install's patched client and
+/// NeoForge's jar) as one more library: the classes of the game the runtime doesn't model
+/// ([`game_code`]) are translated from the player's own copy as far as the mods reach into them,
+/// so a mod's call into one runs the game's own code over what the runtime maps.
+pub fn program_with(
+    jars: &[&Path],
+    libraries: &[&Path],
+    game: &[&Path],
+) -> Result<(Vec<ClassFile>, usize, usize), String> {
     let mut out = Vec::new();
     let mut have = std::collections::HashSet::new();
     let mut nested = Vec::new();
@@ -228,6 +402,11 @@ pub fn program_of(jars: &[&Path], libraries: &[&Path]) -> Result<(Vec<ClassFile>
         }
         library.extend(out[from..].iter().map(|c| c.name.clone()));
     }
+    let own_game = game_classes(game, &mut have)?;
+    let game_names: std::collections::HashSet<String> =
+        own_game.iter().map(|c| c.name.clone()).collect();
+    library.extend(game_names.iter().cloned());
+    out.extend(own_game);
     let all: Vec<&Path> = jars.iter().chain(libraries).copied().collect();
     let services = services_of(&all)?;
     // Another loader's build beside NeoForge's (a multi-loader jar's Fabric classes, a Forge
@@ -245,7 +424,18 @@ pub fn program_of(jars: &[&Path], libraries: &[&Path]) -> Result<(Vec<ClassFile>
         out.retain(|c| !theirs.contains(&c.name));
         library.retain(|c| !theirs.contains(c));
     }
-    let mut reached = reach::reach(&out, &library, &services, &is_api);
+    let all_game = if game.is_empty() {
+        None
+    } else {
+        Some(derive::Game::open(game)?)
+    };
+    let mut reached = reach::reach_with(
+        &out,
+        &library,
+        &services,
+        &|c| is_api(c) && !game_names.contains(c),
+        all_game.as_ref(),
+    );
     let kept = reached.len();
     let program = out
         .into_iter()
@@ -868,6 +1058,38 @@ pub fn api_calls(classes: &[ClassFile]) -> BTreeMap<Member, usize> {
         }
     }
     m
+}
+
+/// The methods of the classes `outside` names that the code of `classes` calls: each method's own
+/// instructions, so a class cut down to what can run ([`program_with`]) counts only that. With
+/// how many of the classes call each, and whether the call is static.
+pub fn code_calls(
+    classes: &[&ClassFile],
+    outside: &dyn Fn(&str) -> bool,
+) -> BTreeMap<Member, (usize, bool)> {
+    let mut out: BTreeMap<Member, (usize, bool)> = BTreeMap::new();
+    for c in classes {
+        let mut seen = std::collections::BTreeSet::new();
+        for code in c.methods.iter().filter_map(|m| m.code.as_ref()) {
+            let Ok(insns) = insn::decode(&code.bytes) else {
+                continue;
+            };
+            for i in insns.iter().filter(|i| (0xb6..=0xb9).contains(&i.op)) {
+                let idx = match i.arg {
+                    insn::Operand::Int(v) => v as u16,
+                    insn::Operand::IndexCount(v, _) => v,
+                    _ => continue,
+                };
+                if let Some(m) = c.member(idx).filter(|m| outside(&m.owner))
+                    && seen.insert(m.clone())
+                {
+                    let e = out.entry(m).or_insert((0, i.op == 0xb8));
+                    e.0 += 1;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The libraries the game's process gives every mod, besides the game's API: the JDK, and what

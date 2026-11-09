@@ -37,6 +37,11 @@ struct Walk<'a> {
     /// Each created class's supertypes, and the class: a call's method in one of them may run.
     above_created: HashSet<String>,
     called: HashSet<Sig>,
+    /// The types each signature was called through (the owner a call names).
+    called_through: HashMap<Sig, HashSet<String>>,
+    /// The game's own classes, when its code is a library here: what tells which of that
+    /// code's methods a call can reach.
+    game: Option<&'a crate::derive::Game>,
     /// The library classes with an instance method of each signature (with code).
     declared: HashMap<Sig, Vec<&'a str>>,
     todo: Vec<(&'a ClassFile, &'a Method)>,
@@ -146,6 +151,61 @@ impl<'a> Walk<'a> {
         })
     }
 
+    /// The class and everything above it, through the program's classes and the game's.
+    fn ups(&self, class: &str) -> HashSet<String> {
+        let (mut out, mut todo) = (HashSet::new(), vec![class.to_owned()]);
+        while let Some(c) = todo.pop() {
+            let Some(cf) = self
+                .by_name
+                .get(c.as_str())
+                .copied()
+                .or_else(|| self.game.and_then(|g| g.class(&c)))
+            else {
+                continue;
+            };
+            if out.insert(c) {
+                todo.extend(cf.superclass.iter().chain(&cf.interfaces).cloned());
+            }
+        }
+        out
+    }
+
+    fn known(&self, class: &str) -> bool {
+        self.by_name.contains_key(class) || self.game.is_some_and(|g| g.class(class).is_some())
+    }
+
+    /// Whether a call through `owner` can reach an object of `class` (one of the game's own):
+    /// the class is below the owner, or the owner is a type nothing here describes (Java's).
+    fn receives(&self, class: &str, owner: &str) -> bool {
+        !self.known(owner) || self.ups(class).contains(owner)
+    }
+
+    /// The methods of a game class that code outside the translation can call: those a class
+    /// above it that isn't translated declares (the runtime calls a block's `getShape`), and
+    /// Java's own interfaces' ([`JAVA_CALLS`]).
+    fn called_from_outside(&self, class: &str) -> HashSet<Sig> {
+        let mut out = HashSet::new();
+        for up in self.ups(class) {
+            if self.is_library(&up) {
+                continue;
+            }
+            if let Some(cf) = self
+                .by_name
+                .get(up.as_str())
+                .copied()
+                .or_else(|| self.game.and_then(|g| g.class(&up)))
+            {
+                out.extend(
+                    cf.methods
+                        .iter()
+                        .filter(|m| m.access & 0x000a == 0)
+                        .map(|m| (m.name.clone(), m.desc.clone())),
+                );
+            }
+        }
+        out
+    }
+
     /// An instance of the class is created: the calls made so far may run its methods, and
     /// those it inherits.
     fn create(&mut self, class: &str) {
@@ -154,6 +214,11 @@ impl<'a> Walk<'a> {
         }
         self.init(class);
         let outside = self.is_library(class) && self.outside_supertype(class);
+        // The game's own code is too large to run whole behind each class with a supertype the
+        // runtime has: only what can be called there, and what a call through a type above the
+        // class reaches.
+        let narrow = (self.game.is_some() && crate::game_code(class))
+            .then(|| self.called_from_outside(class));
         for a in self.ancestors(class) {
             self.above_created.insert(a.to_owned());
             if !self.is_library(a) {
@@ -165,7 +230,15 @@ impl<'a> Walk<'a> {
                 .iter()
                 .filter(|m| m.access & 0x0008 == 0 && m.code.is_some() && !m.name.starts_with('<'))
                 .map(|m| (m.access, (m.name.clone(), m.desc.clone())))
-                .filter(|(access, sig)| (outside && access & 0x0002 == 0) || self.called.contains(sig))
+                .filter(|(access, sig)| match &narrow {
+                    Some(out) => {
+                        (outside && access & 0x0002 == 0 && (out.contains(sig) || JAVA_CALLS.contains(&sig.0.as_str())))
+                            || self.called_through.get(sig).is_some_and(|owners| owners.iter().any(|o| self.receives(class, o)))
+                            // What any object is asked (a map's key, a logged value).
+                            || (matches!(sig.0.as_str(), "toString" | "equals" | "hashCode") && self.called.contains(sig))
+                    }
+                    None => (outside && access & 0x0002 == 0) || self.called.contains(sig),
+                })
                 .map(|(_, sig)| sig)
                 .collect();
             for (n, d) in sigs {
@@ -176,12 +249,28 @@ impl<'a> Walk<'a> {
 
     /// A virtual or interface call to `sig`: the method of that signature in each library class a
     /// created class has above it (or is) may run.
-    fn call(&mut self, sig: Sig) {
-        if !self.called.insert(sig.clone()) {
+    fn call(&mut self, owner: &str, sig: Sig) {
+        let through = self
+            .called_through
+            .entry(sig.clone())
+            .or_default()
+            .insert(owner.to_owned());
+        let first = self.called.insert(sig.clone());
+        if !(first || (through && self.game.is_some())) {
             return;
         }
         let targets: Vec<&'a str> = self.declared.get(&sig).into_iter().flatten().copied().filter(|c| self.above_created.contains(*c)).collect();
         for c in targets {
+            // A method of the game's own: only where an object the call can reach has it (the
+            // class is below the call's type, or above it and so inherited there).
+            if self.game.is_some()
+                && crate::game_code(c)
+                && self.known(owner)
+                && !self.ups(c).contains(owner)
+                && !self.ups(owner).contains(c)
+            {
+                continue;
+            }
             self.run(c, &sig.0, &sig.1);
         }
     }
@@ -194,7 +283,7 @@ impl<'a> Walk<'a> {
                 1..=4 | 6 => self.init(&m.owner),
                 5 | 9 => {
                     self.keep(&m.owner);
-                    self.call((m.name.clone(), m.desc.clone()));
+                    self.call(&m.owner, (m.name.clone(), m.desc.clone()));
                 }
                 8 => self.create(&m.owner),
                 _ => self.keep(&m.owner),
@@ -227,7 +316,7 @@ impl<'a> Walk<'a> {
                 0xb6 | 0xb9 => {
                     if let Some(r) = c.member(idx) {
                         self.keep(&r.owner);
-                        self.call((r.name, r.desc));
+                        self.call(&r.owner, (r.name, r.desc));
                     }
                 }
                 0xb7 => {
@@ -318,6 +407,54 @@ impl<'a> Walk<'a> {
 /// The library classes (`library`, less what the runtime provides) the program's other classes
 /// reach, with the methods of each that can run ([`Reached`]).
 pub fn reach(classes: &[ClassFile], library: &HashSet<String>, services: &BTreeMap<String, Vec<String>>, provided: &dyn Fn(&str) -> bool) -> Reached {
+    reach_with(classes, library, services, provided, None)
+}
+
+/// The methods Java's own interfaces have, by name: what Java's code calls on an object of the
+/// game's that implements one (a `Comparable`, an `Iterator`, a `Supplier`), whatever the class.
+const JAVA_CALLS: [&str; 30] = [
+    "accept",
+    "apply",
+    "applyAsDouble",
+    "applyAsInt",
+    "applyAsLong",
+    "call",
+    "charAt",
+    "close",
+    "compare",
+    "compareTo",
+    "equals",
+    "get",
+    "getAsBoolean",
+    "getAsDouble",
+    "getAsInt",
+    "getAsLong",
+    "getKey",
+    "getValue",
+    "hasNext",
+    "hashCode",
+    "iterator",
+    "length",
+    "next",
+    "remove",
+    "run",
+    "size",
+    "subSequence",
+    "test",
+    "toString",
+    "isEmpty",
+];
+
+/// [`reach`], with the game's own classes (`game`) when its code is among the libraries: a call
+/// then reaches a method of that code only in a class its type can be, and a created class of it
+/// runs, for the code outside the translation, only what that code can call.
+pub fn reach_with(
+    classes: &[ClassFile],
+    library: &HashSet<String>,
+    services: &BTreeMap<String, Vec<String>>,
+    provided: &dyn Fn(&str) -> bool,
+    game: Option<&crate::derive::Game>,
+) -> Reached {
     let mut declared: HashMap<Sig, Vec<&str>> = HashMap::new();
     for c in classes.iter().filter(|c| library.contains(&c.name)) {
         for m in c.methods.iter().filter(|m| m.access & 0x0008 == 0 && m.code.is_some() && !m.name.starts_with('<')) {
@@ -333,6 +470,8 @@ pub fn reach(classes: &[ClassFile], library: &HashSet<String>, services: &BTreeM
         created: HashSet::new(),
         above_created: HashSet::new(),
         called: HashSet::new(),
+        called_through: HashMap::new(),
+        game,
         declared,
         todo: Vec::new(),
     };

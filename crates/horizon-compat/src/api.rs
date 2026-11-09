@@ -153,6 +153,11 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         let object = rt.static_key(&format!("java/lang/Object.{rest}"));
         return call_exact(rt, object, args);
     }
+    // The game's own code for it, which the translator carried where it asks only what is mapped.
+    if let Some(f) = derived(rt, key, owner, rest) {
+        uncount(rt, key);
+        return f(rt, args);
+    }
     trace_unmapped(rt, key, args);
     if runaway(rt) {
         let secs = rt.hook_first_miss.map_or(0, |t| t.elapsed().as_secs());
@@ -161,6 +166,27 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         return r;
     }
     chained(rt, key, args).unwrap_or(r)
+}
+
+/// The game's own method for API key `key` (`owner.rest`) among the linked code
+/// ([`crate::linked::Linked::derived`]), found once per key and thread.
+fn derived(rt: &Rt, key: &'static str, owner: &str, rest: &str) -> Option<crate::linked::Method> {
+    type Found = std::collections::HashMap<(usize, usize, usize), Option<crate::linked::Method>>;
+    thread_local! {
+        static DERIVED: std::cell::RefCell<Found> = std::cell::RefCell::new(Found::new());
+    }
+    let linked = rt.linked?;
+    let id = (
+        std::ptr::from_ref(linked) as usize,
+        key.as_ptr() as usize,
+        key.len(),
+    );
+    if let Some(f) = DERIVED.with(|d| d.borrow().get(&id).copied()) {
+        return f;
+    }
+    let f = linked.derived(owner, rest);
+    DERIVED.with(|d| d.borrow_mut().insert(id, f));
+    f
 }
 
 /// Calls nothing maps, in one hook, past which the hook is taken to be stuck ([`runaway`]).
@@ -3288,6 +3314,86 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call nothing maps runs the game's own method the translator carried for it: the class
+    /// named for the game class, or one above it (a static method, a constructor too), and it is
+    /// no miss. A method nothing carried stays one.
+    #[test]
+    fn an_unmapped_call_runs_the_games_own_code_carried_for_it() {
+        use crate::linked::{ClassDef, Linked, Registry};
+        fn twice(_: &mut Rt, args: &[V]) -> V {
+            V::I(args[0].i() * 2)
+        }
+        fn plus_one(_: &mut Rt, args: &[V]) -> V {
+            V::I(args[1].i() + 1)
+        }
+        const fn class(
+            name: &'static str,
+            id: u32,
+            superclass: Option<&'static str>,
+            methods: &'static [(&'static str, crate::linked::Method, bool)],
+        ) -> ClassDef {
+            ClassDef {
+                name,
+                id,
+                superclass,
+                interfaces: &[],
+                methods,
+                mixed: &[],
+                reflect: None,
+                fields: "",
+                annotations: "",
+                subscribers: &[],
+            }
+        }
+        static CLASSES: [ClassDef; 2] = [
+            class(
+                "hz/derived/net/minecraft/hztest/Above",
+                1,
+                None,
+                &[("twice.(I)I", twice, false)],
+            ),
+            class(
+                "hz/derived/net/minecraft/hztest/Thing",
+                2,
+                Some("hz/derived/net/minecraft/hztest/Above"),
+                &[("plusOne.(I)I", plus_one, false)],
+            ),
+        ];
+        static REGISTRY: Registry = Registry {
+            classes: &CLASSES,
+            lambdas: &[],
+            added: &[],
+            game_interfaces: &[],
+            subscriber_options: &[],
+        };
+        static LINKED: std::sync::OnceLock<Linked> = std::sync::OnceLock::new();
+        crate::install();
+        let mut rt = Rt::new();
+        rt.link(LINKED.get_or_init(|| Linked::new([&REGISTRY], &[])));
+        assert_eq!(
+            call(
+                &mut rt,
+                "net/minecraft/hztest/Thing.twice.(I)I",
+                &[V::I(21)]
+            )
+            .i(),
+            42
+        );
+        let thing = rt.new_object("net/minecraft/hztest/Thing");
+        assert_eq!(
+            call(
+                &mut rt,
+                "net/minecraft/hztest/Thing.plusOne.(I)I",
+                &[thing, V::I(6)]
+            )
+            .i(),
+            7
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        call(&mut rt, "net/minecraft/hztest/Thing.other.()I", &[thing]);
+        assert_eq!(rt.unmapped.len(), 1);
+    }
 
     /// No module of the chain claims an intrinsic's key before the one whose arm it answers with:
     /// a module that did would be asked first through the chain, and the intrinsic would skip it.

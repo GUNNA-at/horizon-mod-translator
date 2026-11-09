@@ -40,6 +40,8 @@ FONT_DIR = ROOT / "crates" / "horizon-theme" / "fonts"
 MAPPED = re.compile(r"mapped: (\d+) of (\d+) API methods \([\d.]+%\), (\d+) of (\d+) class uses")
 MISSING = re.compile(r"^\s*missing\s+(\d+) (\S+)")
 LIBS = re.compile(r"libraries: mapped (\d+) of (\d+) library methods \([\d.]+%\), (\d+) of (\d+) class uses")
+GAME = re.compile(r"by the game's own code: (\d+) methods of classes translated with the mod \((\d+) class uses\), "
+                  r"(\d+) standing for unmapped ones \((\d+) class uses\)")
 LIB_MISSING = re.compile(r"^\s*lib-missing\s+(\d+) (\S+)")
 DATAGEN = (
     "net/minecraft/data/",
@@ -82,7 +84,10 @@ def parse_report(text):
             lib_missing[mm.group(2)] = int(mm.group(1))
     lm = LIBS.search(text)
     libs = tuple(map(int, lm.groups())) if lm else None
-    return {"api": (x, y, a, b), "missing": missing, "libs": libs, "lib_missing": lib_missing}
+    # Of the mapped ones, those the game's own code answers (translated from the player's install).
+    gm = GAME.search(text)
+    game = (int(gm.group(1)) + int(gm.group(3)), int(gm.group(2)) + int(gm.group(4))) if gm else None
+    return {"api": (x, y, a, b), "missing": missing, "libs": libs, "lib_missing": lib_missing, "game": game}
 
 
 def top_gaps(by_key, skip=()):
@@ -97,7 +102,7 @@ def measure(run_dir):
     api = [0, 0, 0, 0]
     libs = [0, 0, 0, 0]
     have_libs = False
-    create = create_libs = None
+    create = create_libs = game = None
     for name in sorted(os.listdir(out)):
         if not name.endswith(".txt"):
             continue
@@ -110,6 +115,8 @@ def measure(run_dir):
         for key, n in rep["missing"].items():
             mods, uses = by_key.get(key, (0, 0))
             by_key[key] = (mods + 1, uses + n)
+        if rep["game"]:
+            game = [s + v for s, v in zip(game or [0, 0], rep["game"])]
         if rep["libs"]:
             have_libs = True
             libs = [s + v for s, v in zip(libs, rep["libs"])]
@@ -127,6 +134,8 @@ def measure(run_dir):
         "libs": {**pair(libs), "missing": len(by_lib)} if have_libs else None,
         "libs_create": pair(create_libs) if create_libs else None,
     }
+    if game:
+        entry["game"] = {"methods": [game[0], api[1]], "uses": [game[1], api[3]]}
     latest = {
         "jars": jars,
         "missing": top_gaps(by_key),
@@ -775,6 +784,7 @@ README_WORDS = {
                      "the calls. Create alone: **{cr_u}** of its call sites. Run {run}, {date}."),
         "table_head": "| Run {run}, {jars} jars | Methods answered | Call sites answered |\n|---|---:|---:|",
         "rows": [("api", "Minecraft and NeoForge API"),
+                 ("game", "…of it by the game's own code<br><sub>translated from the player's NeoForge install</sub>"),
                  ("libs", "Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub>"),
                  ("create", "Create 6.0.10, its API calls"), ("libs_create", "Create 6.0.10, its library calls")],
         "cell": "**{p}**<br><sub>{a} of {b}</sub>",
@@ -788,6 +798,7 @@ README_WORDS = {
                      "его вызовов. Прогон {run}, {date}."),
         "table_head": "| Прогон {run}, {jars} джаров | Отвечено методов | Отвечено вызовов |\n|---|---:|---:|",
         "rows": [("api", "API Minecraft и NeoForge"),
+                 ("game", "…из них собственным кодом игры<br><sub>переведён из установки NeoForge у игрока</sub>"),
                  ("libs", "Библиотеки Java<br><sub>JDK, Guava, Gson, fastutil, JOML и другие</sub>"),
                  ("create", "Create 6.0.10, вызовы API"), ("libs_create", "Create 6.0.10, вызовы библиотек")],
         "cell": "**{p}**<br><sub>{a} из {b}</sub>",

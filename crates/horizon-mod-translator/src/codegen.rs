@@ -1045,7 +1045,9 @@ impl<'a> Program<'a> {
         let methods: Vec<String> = c
             .methods
             .iter()
-            .filter(|m| m.code.is_some() && m.access & 0x0008 == 0 && !m.name.starts_with('<'))
+            // A class of the game's methods standing for unmapped ones is asked by key for any
+            // of them, a static one or a constructor too.
+            .filter(|m| m.code.is_some() && (c.name.starts_with(horizon_compat::linked::DERIVED) || (m.access & 0x0008 == 0 && !m.name.starts_with('<'))))
             .map(|m| format!("({:?}, {}, {})", format!("{}.{}", m.name, m.desc), fn_name(&c.name, &m.name, &m.desc), m.access & 0x0002 != 0))
             .collect();
         // What a mixin adds to the class, or overwrites in it, is the class's own, before its own.
@@ -1882,7 +1884,17 @@ impl<'a> Program<'a> {
             0xbb => {
                 let class = c.class_name(idx as u16).unwrap_or_default();
                 let init = if class != c.name { self.ensure(&class) } else { String::new() };
-                format!("{init}let v = rt.new_object_id({class:?}, {}); s.push(v); {go}", self.cid(&class))
+                // An object of the game's own translated code, or of a class above which there
+                // is some: marked as built here, its fields its own (`game_built_read`).
+                let built = if self.game_built(&class) {
+                    " rt.put_field(v, \"$vt\", V::I(1));"
+                } else {
+                    ""
+                };
+                format!(
+                    "{init}let v = rt.new_object_id({class:?}, {});{built} s.push(v); {go}",
+                    self.cid(&class)
+                )
             }
             0xbc => {
                 let zero = match idx {
@@ -2042,7 +2054,7 @@ impl<'a> Program<'a> {
             "D" => Some("V::D(0.0)"),
             _ => None,
         };
-        let game_read = if op == 0xb4 { self.game_field_read(&m, "o") } else { None };
+        let game_read = if op == 0xb4 { self.game_field_read(&m, "o").or_else(|| self.game_built_read(&m, "o")) } else { None };
         let heard = if op == 0xb5 && !self.own(&self.field_owner(&m.owner, &m.name)) { heard_write(&m) } else { None };
         match op {
             0xb2 if self.own(&owner) => match zero {
@@ -2081,6 +2093,48 @@ impl<'a> Program<'a> {
         };
         let (name, own, key) = (&m.name, format!("${}", m.name), format!("{owner}.${}.(){}", m.name, m.desc));
         Some(format!("match api::game_field(rt, {o}, {name:?}, {own:?}, {key:?}) {{ V::Void => {zero}, v => v }}"))
+    }
+
+    /// Whether `class`, or a translated class above it, is of the game's own code
+    /// ([`crate::game_code`]).
+    fn game_built(&self, class: &str) -> bool {
+        let mut at = self.classes.get(class);
+        let mut steps = 0;
+        while let Some(c) = at.filter(|_| steps < 1024) {
+            if crate::game_code(&c.name) {
+                return true;
+            }
+            steps += 1;
+            at = c.superclass.as_deref().and_then(|s| self.classes.get(s));
+        }
+        false
+    }
+
+    /// Reading instance field `m` of object `o` when a class of the game's own translated code
+    /// declares it: the object's own, when translated code built it (`$vt`, set where it is
+    /// made); an object the runtime made of that class has no such state, and the read asks the
+    /// runtime as a read of any game field does ([`Self::game_field_read`]), so nothing reads as
+    /// a silent zero. None for any other field.
+    fn game_built_read(&self, m: &Member, o: &str) -> Option<String> {
+        let owner = self.field_owner(&m.owner, &m.name);
+        if !self.own(&owner) || !crate::game_code(&owner) {
+            return None;
+        }
+        let zero = match m.desc.as_str() {
+            "I" | "Z" | "B" | "S" | "C" => "V::I(0)",
+            "J" => "V::J(0)",
+            "F" => "V::F(0.0)",
+            "D" => "V::D(0.0)",
+            _ => "V::Void",
+        };
+        let (name, own, key) = (
+            &m.name,
+            format!("${}", m.name),
+            format!("{owner}.${}.(){}", m.name, m.desc),
+        );
+        Some(format!(
+            "match rt.get_field({o}, {name:?}) {{ V::Void if matches!(rt.get_field({o}, \"$vt\"), V::Void) => match api::game_field(rt, {o}, {name:?}, {own:?}, {key:?}) {{ V::Void => {zero}, v => v }}, V::Void => {zero}, v => v }}"
+        ))
     }
 
     /// A field access some mixin weaves at (`@At("FIELD")`): made as a call would be, of a method

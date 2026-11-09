@@ -994,7 +994,13 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
     let count = |plan: &mut Plan, what: String| *plan.unsupported.entry(what).or_default() += 1;
     for (mixin, default_require) in order {
         for target_name in mixin.mixin_targets() {
-            let Some(target) = by_name.get(target_name.as_str()) else {
+            // A class of the game's own code translated with the mods (what of it they reach,
+            // or its methods standing for unmapped ones) is still the game's to a mixin: only
+            // part of it is here, and the runtime's objects of it aren't this code's.
+            let Some(target) = by_name
+                .get(target_name.as_str())
+                .filter(|_| !crate::is_api(&target_name))
+            else {
                 let targets = plan.vanilla.entry(mixin.name.clone()).or_default();
                 if !targets.contains(&target_name) {
                     targets.push(target_name.clone());

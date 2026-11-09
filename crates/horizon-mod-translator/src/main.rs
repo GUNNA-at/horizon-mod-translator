@@ -692,6 +692,312 @@ fn entity_class(owner: &str) -> bool {
         || owner.starts_with("net/neoforged/neoforge/common/extensions/IPlayerExtension")
 }
 
+/// Whether the runtime answers API method `key` of class `owner`: called with `n` arguments (the
+/// receiver first, `receiver` saying what stands there; `fill` what the others are), does it count
+/// as unmapped. `hosted`: with a game to ask (`probe_host`). `lib`: a library's method, its
+/// samples first.
+fn answers_of(
+    hosted: bool,
+    key: &'static str,
+    owner: &'static str,
+    n: usize,
+    receiver: Receiver,
+    fill: Args,
+    lib: bool,
+    field: Option<(&'static str, &'static str)>,
+) -> bool {
+    let mut rt = horizon_compat::Rt::new();
+    let pick = |rt: &mut horizon_compat::Rt, ty: &str| {
+        if lib {
+            lib_sample(rt, ty).or_else(|| sample(rt, ty))
+        } else {
+            sample(rt, ty)
+        }
+    };
+    let call = |rt: &mut horizon_compat::Rt| {
+        // Null for each reference, the zero of its kind for a primitive (which is never a
+        // reference), after the receiver's place when there is one.
+        let mut args = vec![horizon_compat::V::NULL; n];
+        let declared = param_types(key.rsplit_once('.').map_or("()V", |(_, d)| d));
+        let offset = n - declared.len().min(n);
+        for (i, ty) in declared.iter().enumerate() {
+            if let Some(slot) = args.get_mut(offset + i) {
+                *slot = match *ty {
+                    "I" | "Z" | "B" | "C" | "S" => horizon_compat::V::I(0),
+                    "J" => horizon_compat::V::J(0),
+                    "F" => horizon_compat::V::F(0.0),
+                    "D" => horizon_compat::V::D(0.0),
+                    _ => horizon_compat::V::NULL,
+                };
+            }
+        }
+        match receiver {
+            Receiver::Null => {}
+            Receiver::Bare => args[0] = rt.new_object(owner),
+            Receiver::Init => {
+                let o = rt.new_object(owner);
+                let init = rt.static_key(&format!("{owner}.<init>.()V"));
+                horizon_compat::api::call(rt, init, &[o]);
+                if !rt.unmapped.is_empty() || rt.thrown.is_some() {
+                    return false;
+                }
+                args[0] = o;
+            }
+            Receiver::Sample => {
+                args[0] = pick(rt, &format!("L{owner};")).unwrap_or_else(|| rt.new_object(owner))
+            }
+            Receiver::Alternate => {
+                args[0] = alternate(rt, owner).unwrap_or_else(|| rt.new_object(owner))
+            }
+            Receiver::Player => args[0] = horizon_compat::menus::server_player(rt, PROBE_PLAYER),
+            Receiver::Mob => {
+                args[0] = horizon_compat::vanilla_entities::of(rt, PROBE_MOB, "minecraft:cow", None)
+            }
+            Receiver::Level => args[0] = horizon_compat::glue::level(rt),
+            Receiver::New(init, n) => {
+                let class = init.split_once('.').map_or(owner, |(c, _)| c);
+                let o = rt.new_object(class);
+                let mut a = vec![horizon_compat::V::NULL; n];
+                a[0] = o;
+                horizon_compat::api::call(rt, init, &a);
+                if !rt.unmapped.is_empty() || rt.thrown.is_some() {
+                    return false;
+                }
+                args[0] = o;
+            }
+            Receiver::Returned(maker, n) => {
+                let v = horizon_compat::api::call(rt, maker, &vec![horizon_compat::V::NULL; n]);
+                if v == horizon_compat::V::NULL
+                    || v == horizon_compat::V::Void
+                    || !rt.unmapped.is_empty()
+                    || rt.thrown.is_some()
+                {
+                    return false;
+                }
+                args[0] = v;
+            }
+            Receiver::Static(field) => {
+                let v = horizon_compat::api::get_static(rt, field);
+                if v == horizon_compat::V::NULL
+                    || v == horizon_compat::V::Void
+                    || !rt.unmapped.is_empty()
+                {
+                    return false;
+                }
+                args[0] = v;
+            }
+        }
+        let params = param_types(key.rsplit_once('.').map_or("()V", |(_, d)| d));
+        let first = match fill {
+            Args::Null => None,
+            Args::Instance => Some(1),
+            Args::Static => Some(0),
+        };
+        if let Some(first) = first {
+            for (i, ty) in params.iter().enumerate() {
+                if let (Some(v), true) = (pick(rt, ty), first + i < n) {
+                    args[first + i] = v;
+                }
+            }
+            // The samples' own making must have gone through.
+            if !rt.unmapped.is_empty() || rt.thrown.is_some() {
+                return false;
+            }
+        }
+        // A field of the API's object, read as translated code reads it (`field`: its name, and
+        // the runtime's own for it): mapped when something is there.
+        if let Some((name, own)) = field {
+            let v = horizon_compat::api::game_field(rt, args[0], name, own, key);
+            return v != horizon_compat::V::Void && rt.unmapped.is_empty();
+        }
+        horizon_compat::api::call(rt, key, &args);
+        rt.unmapped.is_empty()
+    };
+    if hosted {
+        let mut host = probe_host();
+        rt.with_host(&mut host, call)
+    } else {
+        call(&mut rt)
+    }
+}
+
+/// What a program's calls are asked on besides null and a bare object: the static fields of the
+/// API its classes read (`statics`, by the field's class), and what its code makes of each class
+/// (`made`).
+struct Probe {
+    hosted: bool,
+    statics: std::collections::BTreeMap<String, Vec<&'static str>>,
+    made: std::collections::BTreeMap<String, Vec<Receiver>>,
+}
+
+impl Probe {
+    fn receivers(&self, owner: &'static str) -> Vec<Receiver> {
+        let mut receivers = vec![Receiver::Null, Receiver::Bare];
+        if self.hosted && entity_class(owner) {
+            receivers.extend([Receiver::Player, Receiver::Mob]);
+        }
+        if self.hosted && level_class(owner) {
+            receivers.push(Receiver::Level);
+        }
+        if self.hosted && has_alternate(owner) {
+            receivers.push(Receiver::Alternate);
+        }
+        receivers.extend(
+            self.statics
+                .get(owner)
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .map(|&f| Receiver::Static(f)),
+        );
+        receivers.extend(
+            self.made
+                .get(owner)
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .copied(),
+        );
+        receivers
+    }
+
+    /// Whether the runtime answers the method: on each receiver, null arguments and (hosted) ones
+    /// of their declared types, and on a value of the owner's type.
+    fn asks(&self, m: &horizon_mod_translator::class::Member, is_static: bool) -> bool {
+        let key: &'static str =
+            Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
+        let arity =
+            horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + usize::from(!is_static);
+        let owner: &'static str = Box::leak(m.owner.clone().into_boxed_str());
+        let hosted = self.hosted;
+        let fills: &[Args] = if hosted {
+            &[Args::Null, Args::Instance]
+        } else {
+            &[Args::Null]
+        };
+        if is_static {
+            return answers_of(
+                hosted,
+                key,
+                owner,
+                arity,
+                Receiver::Null,
+                Args::Null,
+                false,
+                None,
+            ) || (hosted
+                && answers_of(
+                    hosted,
+                    key,
+                    owner,
+                    arity,
+                    Receiver::Null,
+                    Args::Static,
+                    false,
+                    None,
+                ));
+        }
+        let receivers = self.receivers(owner);
+        fills.iter().any(|&fill| {
+            receivers
+                .iter()
+                .any(|&r| answers_of(hosted, key, owner, arity, r, fill, false, None))
+        }) || (hosted
+            && answers_of(
+                hosted,
+                key,
+                owner,
+                arity,
+                Receiver::Sample,
+                Args::Instance,
+                false,
+                None,
+            ))
+    }
+
+    /// Whether a read of instance field `name` (of type `desc`) of the API class `owner` finds
+    /// something: the object's own state, or the runtime's answer for the field.
+    fn reads(&self, owner: &str, name: &str, desc: &str) -> bool {
+        let key: &'static str = Box::leak(format!("{owner}.${name}.(){desc}").into_boxed_str());
+        let owner: &'static str = Box::leak(owner.to_owned().into_boxed_str());
+        let field: (&'static str, &'static str) = (
+            Box::leak(name.to_owned().into_boxed_str()),
+            Box::leak(format!("${name}").into_boxed_str()),
+        );
+        let mut receivers = self.receivers(owner);
+        receivers.push(Receiver::Sample);
+        receivers.iter().any(|&r| {
+            answers_of(
+                self.hosted,
+                key,
+                owner,
+                1,
+                r,
+                Args::Null,
+                false,
+                Some(field),
+            )
+        })
+    }
+
+    /// Whether static field `field` (`owner.NAME`) of the API has a value.
+    fn constant(&self, field: &str) -> bool {
+        let field: &'static str = Box::leak(field.to_owned().into_boxed_str());
+        let mut rt = horizon_compat::Rt::new();
+        let mut host = probe_host();
+        rt.with_host(&mut host, |rt| {
+            let v = horizon_compat::api::get_static(rt, field);
+            v != horizon_compat::V::NULL && v != horizon_compat::V::Void && rt.unmapped.is_empty()
+        })
+    }
+}
+
+/// The game's own methods that stand for what the program calls of the API and the runtime
+/// doesn't map (`derive`), as classes to translate with it; asked of the runtime with a game
+/// (`Probe`, hosted).
+fn derived_classes(
+    program: &[horizon_mod_translator::class::ClassFile],
+    game: &[&Path],
+) -> Result<Vec<horizon_mod_translator::class::ClassFile>, String> {
+    horizon_compat::install();
+    let game = horizon_mod_translator::derive::Game::open(game)?;
+    let own: std::collections::HashSet<&str> = program.iter().map(|c| c.name.as_str()).collect();
+    let all: Vec<&horizon_mod_translator::class::ClassFile> = program.iter().collect();
+    let calls = horizon_mod_translator::code_calls(&all, &|c| {
+        horizon_mod_translator::is_api(c) && !own.contains(c)
+    });
+    let statics_called = calls
+        .iter()
+        .filter(|(_, (_, is_static))| *is_static)
+        .map(|(m, _)| m.clone())
+        .collect();
+    let counts = calls.iter().map(|(m, (n, _))| (m.clone(), *n)).collect();
+    let probe = Probe {
+        hosted: true,
+        statics: static_receivers(program),
+        made: made_receivers(&counts, &statics_called, horizon_mod_translator::is_api),
+    };
+    let (asks, reads, constant, translated) = (
+        |m: &horizon_mod_translator::class::Member, is_static: bool| probe.asks(m, is_static),
+        |owner: &str, name: &str, desc: &str| probe.reads(owner, name, desc),
+        |field: &str| probe.constant(field),
+        |c: &str| own.contains(c),
+    );
+    let mut deriver = horizon_mod_translator::derive::Deriver::new(
+        &game,
+        horizon_mod_translator::derive::Mapped {
+            method: &asks,
+            field: &reads,
+            constant: &constant,
+            translated: &translated,
+        },
+    );
+    for (m, (_, is_static)) in &calls {
+        if !probe.asks(m, *is_static) {
+            deriver.blockers(&m.owner, &m.name, &m.desc, !is_static);
+        }
+    }
+    Ok(deriver.classes())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // `bundle <jar> <out> [--with <addon jar>]... [--library <jar>]... [--runtime <horizon-compat-core
@@ -701,20 +1007,52 @@ fn main() -> ExitCode {
     // links the runtime core instead of carrying it.
     if args.first().map(String::as_str) == Some("bundle") && args.len() >= 3 {
         let (mut with, mut libraries, mut runtime, mut rest) = (Vec::new(), Vec::new(), None, args[3..].iter());
+        let mut game = Vec::new();
+        let mut find_game = true;
         while let Some(a) = rest.next() {
+            if a == "--no-game" {
+                find_game = false;
+                continue;
+            }
             match (a.as_str(), rest.next()) {
                 ("--with", Some(j)) => with.push(Path::new(j)),
                 ("--library", Some(j)) => libraries.push(Path::new(j)),
+                ("--game", Some(j)) => game.push(Path::new(j)),
                 ("--runtime", Some(dir)) => runtime = Some(Path::new(dir)),
                 _ => {
-                    eprintln!("bundle <jar> <out dir> [--with <addon jar>]... [--library <jar>]... [--runtime <horizon-compat-core dir>]");
+                    eprintln!(
+                        "bundle <jar> <out dir> [--with <addon jar>]... [--library <jar>]... [--game <jar of the NeoForge install>]... [--no-game] [--runtime <horizon-compat-core dir>]"
+                    );
                     return ExitCode::FAILURE;
                 }
             }
         }
         let jars: Vec<&Path> = std::iter::once(Path::new(&args[1])).chain(with).collect();
-        let result = horizon_mod_translator::program_of(&jars, &libraries).and_then(|(c, library, kept)| {
+        // No `--game`: the player's own NeoForge install, where a launcher keeps one.
+        let found = if game.is_empty() && find_game {
+            horizon_mod_translator::find_game_jars().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if let Some(first) = found.first() {
+            println!(
+                "the game's own code from {}",
+                first
+                    .parent()
+                    .and_then(Path::parent)
+                    .unwrap_or(first)
+                    .display()
+            );
+        }
+        game.extend(found.iter().map(|p| p.as_path()));
+        let result = horizon_mod_translator::program_with(&jars, &libraries, &game).and_then(|(mut c, library, kept)| {
             println!("{} classes, {kept} of them of the {library} in the libraries the jars bundle", c.len());
+            if !game.is_empty() {
+                let own = c.iter().filter(|k| horizon_mod_translator::game_code(&k.name)).count();
+                let derived = derived_classes(&c, &game)?;
+                println!("  of the game's own code: {own} classes the runtime doesn't model, and {} methods of {} it does", derived.iter().map(|k| k.methods.len()).sum::<usize>(), derived.len());
+                c.extend(derived);
+            }
             horizon_mod_translator::bundle::write_group(&jars, &c, Path::new(&args[2]), runtime)
         });
         return match result {
@@ -806,6 +1144,71 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+    // `game-code <mod jar>... --game <jar>...`: what of the game's own code the mods reach
+    // (`program_with`), by package, and the largest classes.
+    if args.first().map(String::as_str) == Some("game-code") && args.len() >= 2 {
+        let split = args
+            .iter()
+            .position(|a| a == "--game")
+            .unwrap_or(args.len());
+        let jars: Vec<&Path> = args[1..split].iter().map(Path::new).collect();
+        let game: Vec<&Path> = args[split..]
+            .iter()
+            .filter(|a| *a != "--game")
+            .map(Path::new)
+            .collect();
+        let program = match horizon_mod_translator::program_with(&jars, &[], &game) {
+            Ok((c, _, _)) => c,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let own: Vec<_> = program
+            .iter()
+            .filter(|c| horizon_mod_translator::game_code(&c.name))
+            .collect();
+        let size = |c: &horizon_mod_translator::class::ClassFile| {
+            c.methods
+                .iter()
+                .filter_map(|m| m.code.as_ref())
+                .map(|code| code.bytes.len())
+                .sum::<usize>()
+        };
+        let methods: usize = own
+            .iter()
+            .map(|c| c.methods.iter().filter(|m| m.code.is_some()).count())
+            .sum();
+        let mods: usize = program
+            .iter()
+            .filter(|c| !horizon_mod_translator::game_code(&c.name))
+            .map(size)
+            .sum();
+        println!(
+            "game code reached: {} classes, {methods} methods, {} bytes of code (the mods' own: {mods})",
+            own.len(),
+            own.iter().map(|c| size(c)).sum::<usize>()
+        );
+        let mut by: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        for c in &own {
+            let e = by
+                .entry(c.name.split('/').take(4).collect::<Vec<_>>().join("/"))
+                .or_default();
+            e.0 += 1;
+            e.1 += size(c);
+        }
+        let mut by: Vec<_> = by.into_iter().collect();
+        by.sort_by_key(|e| std::cmp::Reverse(e.1.1));
+        for (p, (n, b)) in by.iter().take(40) {
+            println!("  {n:5} classes {b:8} bytes  {p}");
+        }
+        if std::env::var_os("LIST").is_some() {
+            for c in &own {
+                println!("  class {} {}", size(c), c.name);
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
     if args.first().map(String::as_str) != Some("coverage") || args.len() < 2 {
         eprintln!("usage: horizon-mod-translator coverage <jar>... | mixins <jar>... | weaves <mod jar> <addon jar>... | translate <jar> <out dir> | bundle <jar> <out dir> [--with <addon jar>]... [--runtime <horizon-compat-core dir>]");
         return ExitCode::FAILURE;
@@ -829,6 +1232,54 @@ fn main() -> ExitCode {
             .cloned()
             .collect();
         let calls = horizon_mod_translator::api_calls(&runtime);
+        // GAME_JARS (the NeoForge install's jars, `:` between them): the game's own code the mod
+        // reaches is translated with it (`program_with`), so a call into it is no call of the API:
+        // it runs the game's method, where the class (or one below it) has it with code.
+        let game_jars: Vec<std::path::PathBuf> = std::env::var("GAME_JARS")
+            .map(|v| {
+                v.split(':')
+                    .filter(|p| !p.is_empty())
+                    .map(Into::into)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let game_refs: Vec<&Path> = game_jars.iter().map(|p| p.as_path()).collect();
+        let with_game = if game_refs.is_empty() {
+            Vec::new()
+        } else {
+            horizon_mod_translator::program_with(&[Path::new(jar)], &[], &game_refs)
+                .map(|p| p.0)
+                .unwrap_or_default()
+        };
+        let game_part: std::collections::HashMap<&str, &horizon_mod_translator::class::ClassFile> =
+            with_game
+                .iter()
+                .filter(|c| horizon_mod_translator::game_code(&c.name))
+                .map(|c| (c.name.as_str(), c))
+                .collect();
+        let above = |class: &str, owner: &str| {
+            let (mut todo, mut seen) = (vec![class.to_owned()], std::collections::HashSet::new());
+            while let Some(c) = todo.pop() {
+                if c == owner {
+                    return true;
+                }
+                if let Some(cf) = game_part.get(c.as_str()).filter(|_| seen.insert(c.clone())) {
+                    todo.extend(cf.superclass.iter().chain(&cf.interfaces).cloned());
+                }
+            }
+            false
+        };
+        let through_game = |m: &horizon_mod_translator::class::Member| {
+            let has = |c: &horizon_mod_translator::class::ClassFile| {
+                c.methods
+                    .iter()
+                    .any(|x| x.name == m.name && x.desc == m.desc && x.code.is_some())
+            };
+            game_part.contains_key(m.owner.as_str())
+                && game_part
+                    .values()
+                    .any(|c| has(c) && (above(&m.owner, &c.name) || above(&c.name, &m.owner)))
+        };
         // Which of them the runtime maps: call each and see whether it counts as unmapped. Null
         // arguments first; then, as a handler may answer only for an object of its class, with an
         // object of the owner's class as the receiver (or first argument of a static call). With
@@ -839,109 +1290,64 @@ fn main() -> ExitCode {
         // method's class (`BuiltInRegistries.ITEM` for `DefaultedRegistry.getKey`, `MobEffects.SPEED`
         // for `Holder.value`, `Codec.STRING` for `PrimitiveCodec.fieldOf`), as its calls get them.
         let hosted = std::env::var_os("PROBE").is_some_and(|p| p == "hosted");
-        let statics = if hosted { static_receivers(&classes) } else { Default::default() };
+        let statics = if hosted {
+            static_receivers(if with_game.is_empty() {
+                &classes
+            } else {
+                &with_game
+            })
+        } else {
+            Default::default()
+        };
+        // What the game's code the mod reaches calls of the API in its turn.
+        let own_game: Vec<&horizon_mod_translator::class::ClassFile> =
+            game_part.values().copied().collect();
+        let theirs = horizon_mod_translator::code_calls(&own_game, &|c| {
+            horizon_mod_translator::is_api(c) && !game_part.contains_key(c)
+        });
         // And on what the mod makes of the method's class: an object its constructor builds, or
         // what an API method returning that class gives (`NonNullList.withSize`), null arguments.
         // A static call (`invokestatic`) has no receiver: its arguments are all it is given.
         let statics_called = horizon_mod_translator::static_calls(&runtime);
-        let made = if hosted { made_receivers(&calls, &statics_called, horizon_mod_translator::is_api) } else { Default::default() };
+        let made = if hosted {
+            let (mut both, mut both_static) = (calls.clone(), statics_called.clone());
+            for (m, (n, is_static)) in &theirs {
+                *both.entry(m.clone()).or_insert(0) += n;
+                if *is_static {
+                    both_static.insert(m.clone());
+                }
+            }
+            made_receivers(&both, &both_static, horizon_mod_translator::is_api)
+        } else {
+            Default::default()
+        };
         let (mut mapped, mut sites, mut mapped_sites) = (0usize, 0usize, 0usize);
         let mut missing: Vec<(usize, String)> = Vec::new();
-        let answers = |key: &'static str, owner: &'static str, n: usize, receiver: Receiver, fill: Args, lib: bool| {
-            let mut rt = horizon_compat::Rt::new();
-            let pick = |rt: &mut horizon_compat::Rt, ty: &str| if lib { lib_sample(rt, ty).or_else(|| sample(rt, ty)) } else { sample(rt, ty) };
-            let call = |rt: &mut horizon_compat::Rt| {
-                // Null for each reference, the zero of its kind for a primitive (which is never a
-                // reference), after the receiver's place when there is one.
-                let mut args = vec![horizon_compat::V::NULL; n];
-                let declared = param_types(key.rsplit_once('.').map_or("()V", |(_, d)| d));
-                let offset = n - declared.len().min(n);
-                for (i, ty) in declared.iter().enumerate() {
-                    if let Some(slot) = args.get_mut(offset + i) {
-                        *slot = match *ty {
-                            "I" | "Z" | "B" | "C" | "S" => horizon_compat::V::I(0),
-                            "J" => horizon_compat::V::J(0),
-                            "F" => horizon_compat::V::F(0.0),
-                            "D" => horizon_compat::V::D(0.0),
-                            _ => horizon_compat::V::NULL,
-                        };
-                    }
-                }
-                match receiver {
-                    Receiver::Null => {}
-                    Receiver::Bare => args[0] = rt.new_object(owner),
-                    Receiver::Init => {
-                        let o = rt.new_object(owner);
-                        let init = rt.static_key(&format!("{owner}.<init>.()V"));
-                        horizon_compat::api::call(rt, init, &[o]);
-                        if !rt.unmapped.is_empty() || rt.thrown.is_some() {
-                            return false;
-                        }
-                        args[0] = o;
-                    }
-                    Receiver::Sample => args[0] = pick(rt, &format!("L{owner};")).unwrap_or_else(|| rt.new_object(owner)),
-                    Receiver::Alternate => args[0] = alternate(rt, owner).unwrap_or_else(|| rt.new_object(owner)),
-                    Receiver::Player => args[0] = horizon_compat::menus::server_player(rt, PROBE_PLAYER),
-                    Receiver::Mob => args[0] = horizon_compat::vanilla_entities::of(rt, PROBE_MOB, "minecraft:cow", None),
-                    Receiver::Level => args[0] = horizon_compat::glue::level(rt),
-                    Receiver::New(init, n) => {
-                        let class = init.split_once('.').map_or(owner, |(c, _)| c);
-                        let o = rt.new_object(class);
-                        let mut a = vec![horizon_compat::V::NULL; n];
-                        a[0] = o;
-                        horizon_compat::api::call(rt, init, &a);
-                        if !rt.unmapped.is_empty() || rt.thrown.is_some() {
-                            return false;
-                        }
-                        args[0] = o;
-                    }
-                    Receiver::Returned(maker, n) => {
-                        let v = horizon_compat::api::call(rt, maker, &vec![horizon_compat::V::NULL; n]);
-                        if v == horizon_compat::V::NULL || v == horizon_compat::V::Void || !rt.unmapped.is_empty() || rt.thrown.is_some() {
-                            return false;
-                        }
-                        args[0] = v;
-                    }
-                    Receiver::Static(field) => {
-                        let v = horizon_compat::api::get_static(rt, field);
-                        if v == horizon_compat::V::NULL || v == horizon_compat::V::Void || !rt.unmapped.is_empty() {
-                            return false;
-                        }
-                        args[0] = v;
-                    }
-                }
-                let params = param_types(key.rsplit_once('.').map_or("()V", |(_, d)| d));
-                let first = match fill {
-                    Args::Null => None,
-                    Args::Instance => Some(1),
-                    Args::Static => Some(0),
-                };
-                if let Some(first) = first {
-                    for (i, ty) in params.iter().enumerate() {
-                        if let (Some(v), true) = (pick(rt, ty), first + i < n) {
-                            args[first + i] = v;
-                        }
-                    }
-                    // The samples' own making must have gone through.
-                    if !rt.unmapped.is_empty() || rt.thrown.is_some() {
-                        return false;
-                    }
-                }
-                horizon_compat::api::call(rt, key, &args);
-                rt.unmapped.is_empty()
-            };
-            if hosted {
-                let mut host = probe_host();
-                rt.with_host(&mut host, call)
-            } else {
-                call(&mut rt)
-            }
+        let answers =
+            |key: &'static str,
+             owner: &'static str,
+             n: usize,
+             receiver: Receiver,
+             fill: Args,
+             lib: bool| answers_of(hosted, key, owner, n, receiver, fill, lib, None);
+        let probe = Probe {
+            hosted,
+            statics: statics.clone(),
+            made: made.clone(),
         };
+        let asks =
+            |m: &horizon_mod_translator::class::Member, is_static: bool| probe.asks(m, is_static);
+        let (mut derived, mut derived_sites) = (0usize, 0usize);
         for (m, n) in &calls {
             let key: &'static str = Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
             let is_static = statics_called.contains(m);
             let arity = horizon_mod_translator::codegen::arg_kinds(&m.desc).len() + usize::from(!is_static);
             sites += n;
+            if through_game(m) {
+                derived += 1;
+                derived_sites += n;
+                continue;
+            }
             let owner: &'static str = Box::leak(m.owner.clone().into_boxed_str());
             let entity = hosted && entity_class(owner);
             let level = hosted && level_class(owner);
@@ -975,17 +1381,106 @@ fn main() -> ExitCode {
             }
         }
         missing.sort_by(|a, b| b.0.cmp(&a.0));
+        // With GAME_JARS: which of the missing methods the game's own code can stand for over
+        // what the runtime maps (`derive`): a bundle made with those jars carries them, so they
+        // count as mapped; for the rest, what blocks it (listed with DERIVE=1).
+        let (mut stands, mut stand_sites) = (0usize, 0usize);
+        let mut derive_lines = Vec::new();
+        if !game_refs.is_empty()
+            && let Ok(game) = horizon_mod_translator::derive::Game::open(&game_refs)
+        {
+            let constant = |field: &str| probe.constant(field);
+            let reads = |owner: &str, name: &str, desc: &str| probe.reads(owner, name, desc);
+            let translated = |c: &str| game_part.contains_key(c);
+            let mut deriver = horizon_mod_translator::derive::Deriver::new(
+                &game,
+                horizon_mod_translator::derive::Mapped {
+                    method: &asks,
+                    field: &reads,
+                    constant: &constant,
+                    translated: &translated,
+                },
+            );
+            missing.retain(|(n, k)| {
+                let mut parts = k.splitn(3, '.');
+                let (Some(owner), Some(name), Some(desc)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    return true;
+                };
+                let m = horizon_mod_translator::class::Member {
+                    owner: owner.to_owned(),
+                    name: name.to_owned(),
+                    desc: desc.to_owned(),
+                };
+                let blockers = deriver.blockers(owner, name, desc, !statics_called.contains(&m));
+                if blockers.is_empty() {
+                    stands += 1;
+                    stand_sites += n;
+                    derive_lines.push(format!("  derivable {n:5} {k}"));
+                } else {
+                    derive_lines.push(format!(
+                        "  blocked {n:5} {k} <- {}",
+                        blockers
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    ));
+                }
+                !blockers.is_empty()
+            });
+        }
+        mapped += derived + stands;
+        mapped_sites += derived_sites + stand_sites;
         println!(
             "  mapped: {mapped} of {} API methods ({:.1}%), {mapped_sites} of {sites} class uses ({:.1}%)",
             calls.len(),
             100.0 * mapped as f64 / calls.len().max(1) as f64,
             100.0 * mapped_sites as f64 / sites.max(1) as f64
         );
+        if !game_refs.is_empty() {
+            println!(
+                "  by the game's own code: {derived} methods of classes translated with the mod ({derived_sites} class uses), {stands} standing for unmapped ones ({stand_sites} class uses)"
+            );
+        }
         // MISSING=1 lists the 60 most called gaps; MISSING=all every one.
         if let Some(m) = std::env::var_os("MISSING") {
             let limit = if m == "all" { usize::MAX } else { 60 };
             for (n, k) in missing.iter().take(limit) {
                 println!("  missing {n:5} {k}");
+            }
+        }
+        if std::env::var_os("DERIVE").is_some() {
+            for l in &derive_lines {
+                println!("{l}");
+            }
+        }
+        if !game_part.is_empty() {
+            // What that code calls of the API the runtime maps, asked as the mod's calls are.
+            let (mut mapped, mut sites, mut mapped_sites) = (0usize, 0usize, 0usize);
+            let mut missing: Vec<(usize, String)> = Vec::new();
+            for (m, (n, is_static)) in &theirs {
+                sites += n;
+                if asks(m, *is_static) {
+                    mapped += 1;
+                    mapped_sites += n;
+                } else {
+                    missing.push((*n, format!("{}.{}.{}", m.owner, m.name, m.desc)));
+                }
+            }
+            missing.sort_by_key(|m| std::cmp::Reverse(m.0));
+            println!(
+                "  game code: {} classes; mapped {mapped} of {} API methods it calls ({:.1}%), {mapped_sites} of {sites} class uses ({:.1}%)",
+                own_game.len(),
+                theirs.len(),
+                100.0 * mapped as f64 / theirs.len().max(1) as f64,
+                100.0 * mapped_sites as f64 / sites.max(1) as f64
+            );
+            if std::env::var_os("MISSING").is_some() {
+                for (n, k) in &missing {
+                    println!("  game-missing {n:5} {k}");
+                }
             }
         }
         // LIBS=1: the calls into the libraries every mod has (the JDK, Guava, fastutil, JOML...),

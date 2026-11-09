@@ -14,7 +14,7 @@ runtime written in Rust answers their calls into Minecraft, NeoForge and Java. I
 a list of supported ones. Create and its addons are the test case.
 
 <!-- progress:headline -->
-**85.2%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **92.7%** of their call sites. Java's libraries: **94.3%** of the calls. Create alone: **96.8%** of its call sites. Run 49, 9 November 2026.
+**90.0%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **95.2%** of their call sites. Java's libraries: **94.3%** of the calls. Create alone: **97.8%** of its call sites. Run 50, 9 November 2026.
 <!-- /progress -->
 
 | If you were shown this | If you work on Horizon |
@@ -34,14 +34,17 @@ a list of supported ones. Create and its addons are the test case.
 Create Aeronautics and their addons). For every Minecraft and NeoForge method a jar calls, a probe asks the
 runtime whether it answers it. *Methods* counts each method once per jar. *Call sites* counts every place the
 code calls one. The step at run 6 is the probe starting to call through a game host. From run 40 on, it calls
-instance methods only on real objects, so a few counted answers were taken back.</sub>
+instance methods only on real objects, so a few counted answers were taken back. The step at run 50 is the
+game's own code: a method the runtime doesn't have counts when the game's own method, translated from the
+player's NeoForge install, can answer it.</sub>
 
 <!-- progress:table -->
-| Run 49, 367 jars | Methods answered | Call sites answered |
+| Run 50, 367 jars | Methods answered | Call sites answered |
 |---|---:|---:|
-| Minecraft and NeoForge API | **85.2%**<br><sub>110,915 of 130,223</sub> | **92.7%**<br><sub>345,542 of 372,742</sub> |
+| Minecraft and NeoForge API | **90.0%**<br><sub>117,273 of 130,261</sub> | **95.2%**<br><sub>354,713 of 372,789</sub> |
+| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **4.9%**<br><sub>6,416 of 130,261</sub> | **2.5%**<br><sub>9,225 of 372,789</sub> |
 | Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **83.5%**<br><sub>61,862 of 74,081</sub> | **94.3%**<br><sub>336,967 of 357,517</sub> |
-| Create 6.0.10, its API calls | **83.8%**<br><sub>3,329 of 3,971</sub> | **96.8%**<br><sub>24,435 of 25,240</sub> |
+| Create 6.0.10, its API calls | **88.8%**<br><sub>3,530 of 3,975</sub> | **97.8%**<br><sub>24,683 of 25,244</sub> |
 | Create 6.0.10, its library calls | **82.8%**<br><sub>1,326 of 1,602</sub> | **97.5%**<br><sub>14,053 of 14,416</sub> |
 <!-- /progress -->
 
@@ -60,6 +63,7 @@ jar's number of game calls on a log scale, the checkered top the share not answe
 <!-- progress:history -->
 | Run | Date | API methods | Call sites | Create, call sites |
 |---:|---|---:|---:|---:|
+| 50 | 2026-11-09 | 90.0% | 95.2% | 97.8% |
 | 49 | 2026-11-09 | 85.2% | 92.7% | 96.8% |
 | 48 | 2026-11-09 | 85.2% | 92.7% | 96.8% |
 | 47 | 2026-11-09 | 85.2% | 92.7% | 96.8% |
@@ -227,7 +231,11 @@ incremental compilation, and keep 15 GB of disk free.
    string concatenation), exceptions with their handler tables, records, switches over strings and enums.
 4. **Answer.** Calls that leave the mod go to `horizon-compat`. It holds Rust implementations of the
    Minecraft, NeoForge and Java library methods mods use, written against Horizon's engine: registries,
-   levels, block states, entities, items, fluids, rendering, networking, collections, streams.
+   levels, block states, entities, items, fluids, rendering, networking, collections, streams. Where it has
+   no answer, the game's own code can be one: the translator reads the player's NeoForge 1.21.1 install and
+   translates, with the mods, the game classes the runtime doesn't model and the methods of those it does
+   whose code asks only what is already answered. Nothing of the game is shipped: it comes from the
+   player's own jars.
 5. **Build.** `bundle` splits the result into crates. Each crate carries its own classes, and the runtime
    links them as the game starts, resolving each virtual call as the JVM does. The engine over the crates stays
    small however many mods are translated together. `horizon-mixins` applies the bundle at Horizon's native
@@ -256,7 +264,7 @@ files are never committed. Every translation is built from the user's own jars.
   figures above.
 - **The specification.** Behaviour is checked against NeoForge 21.1.256's and Minecraft 1.21.1's bytecode
   (`javap`), against the libraries' own jars, and against JDK 21 oracles for `java.*`.
-- **Tests.** `horizon-compat` has 740 unit tests. The translator's tests include a differential test: the
+- **Tests.** `horizon-compat` has 745 unit tests. The translator's tests include a differential test: the
   same Java runs on the JVM and translated, and the results must match bit for bit.
 - **In the game.** Scenes are set up and read back with `horizon-ctl`: block and entity data, and
   screenshots.
@@ -269,13 +277,13 @@ The API methods the most jars still miss, from the latest run:
 | Missing API method | Jars | Call sites |
 |---|---:|---:|
 | `Minecraft.getTextureManager()` | 46 | 106 |
-| `new ConfigurationScreen(ModContainer, Screen)` | 38 | 38 |
 | `RenderSystem.getModelViewStack()` | 24 | 40 |
 | `TextureManager.register(ResourceLocation, AbstractTexture)` | 24 | 40 |
-| `RegisterClientTooltipComponentFactoriesEvent.register(Class, Function)` | 23 | 23 |
 | `Level.broadcastEntityEvent(Entity, byte)` | 22 | 78 |
 | `new DynamicTexture(NativeImage)` | 22 | 39 |
 | `ChunkMap.getPlayers(ChunkPos, boolean)` | 21 | 31 |
+| `PlayerEvent.PlayerChangedDimensionEvent.getEntity()` | 21 | 22 |
+| `MinecraftServer.reloadableRegistries()` | 20 | 43 |
 <!-- /progress -->
 
 <details>

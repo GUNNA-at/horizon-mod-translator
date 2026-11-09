@@ -18,6 +18,12 @@ pub type LambdaFn = fn(&mut Rt, Vec<V>) -> V;
 /// constructor's `<init>.desc`, an enum's `values`). None when the class has no such member.
 pub type ReflectFn = fn(&mut Rt, &str, &[V]) -> Option<V>;
 
+/// The classes that hold the game's own methods standing for ones the runtime doesn't map: a
+/// class of this prefix before a game class's name has that class's methods (static ones and
+/// constructors too) whose code, in the player's own copy of the game, asks only what the runtime
+/// answers. A call nothing maps runs the one of its key ([`Linked::derived`]).
+pub const DERIVED: &str = "hz/derived/";
+
 /// FNV-1a over 64 bits: a method key's (`name.desc`) hash. Generated code passes it with each
 /// virtual call, so finding the method hashes no string; the translator computes the same.
 pub const fn key_hash(key: &str) -> u64 {
@@ -236,6 +242,13 @@ impl Linked {
         let m = self.resolve_uncached(cid, kh);
         RESOLVED.with(|r| r.borrow_mut().insert(id, m));
         m
+    }
+
+    /// The game's own code for `key` (`name.desc`) of the game class `class`, where the translator
+    /// carried it with the mods ([`DERIVED`]): the class's, or one above it's.
+    pub fn derived(&self, class: &str, key: &str) -> Option<Method> {
+        let id = self.id(&format!("{DERIVED}{class}"))?;
+        self.resolve(id, key_hash(key))
     }
 
     /// Whether class `class` has `key` (`name.desc`) itself or through a translated superclass or
