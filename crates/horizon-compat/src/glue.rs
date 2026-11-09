@@ -1760,6 +1760,35 @@ pub fn mod_entities(rt: &mut Rt, host: &mut dyn Host, dimension: &str) -> Vec<cr
     rt.with_host(host, |rt| crate::entity_commands::seen(rt, dimension))
 }
 
+/// `native_mod_spawn_types` (server): the mods' entity types as natural spawning reads them
+/// ([`crate::spawning::spawn_types`]).
+pub fn mod_spawn_types(rt: &mut Rt, host: &mut dyn Host) -> Vec<crate::spawning::SpawnType> {
+    rt.safe_point();
+    rt.with_host(host, crate::spawning::spawn_types)
+}
+
+/// `native_mod_spawn_rules` (server): whether the mods' entity type `entity` may spawn at `pos` for
+/// `reason` (a `MobSpawnType` constant's name) in the level the hook runs in
+/// ([`crate::spawning::spawn_rules`]).
+pub fn mod_spawn_rules(rt: &mut Rt, host: &mut dyn Host, entity: &str, reason: &str, pos: [i32; 3]) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::spawning::spawn_rules(rt, entity, reason, pos))
+}
+
+/// `native_mod_spawn_mob` (server): a mob of the mods' type the spawner placed, made, checked,
+/// finalized and added to the level the hook runs in ([`crate::spawning::spawn_mob`]).
+pub fn mod_spawn_mob(rt: &mut Rt, host: &mut dyn Host, request: &crate::spawning::SpawnRequest<'_>) -> crate::spawning::SpawnOutcome {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::spawning::spawn_mob(rt, request))
+}
+
+/// `native_mod_spawn_census` (server): the mods' entities in the level `dimension` as the spawn
+/// caps count them ([`crate::spawning::census`]).
+pub fn mod_spawn_census(rt: &mut Rt, host: &mut dyn Host, dimension: &str) -> Vec<crate::spawning::Census> {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::spawning::census(rt, dimension))
+}
+
 /// `native_mod_entity_act` (server): `/kill` or `/tp` on the mods' entity `id` of the level
 /// `dimension`; whether it is one of theirs ([`crate::entity_commands::act`]).
 pub fn mod_entity_act(rt: &mut Rt, host: &mut dyn Host, dimension: &str, id: i32, what: &crate::entity_commands::Act) -> bool {

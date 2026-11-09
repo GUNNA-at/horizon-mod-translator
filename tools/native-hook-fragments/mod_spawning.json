@@ -1,0 +1,33 @@
+{
+  "hooks": [
+    {
+      "name": "mod_spawn_types",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_spawn_types",
+      "side": "server",
+      "cancellable": false
+    },
+    {
+      "name": "mod_spawn_rules",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_spawn_rules",
+      "side": "server",
+      "cancellable": false
+    },
+    {
+      "name": "mod_spawn_mob",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_spawn_mob",
+      "side": "server",
+      "cancellable": false
+    },
+    {
+      "name": "mod_spawn_census",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_spawn_census",
+      "side": "server",
+      "cancellable": false
+    }
+  ],
+  "rust_summary": "a native mod's entity types in the game's natural spawning and chunk generation: their facts (`native_mod_spawn_types`), their spawn rules (`native_mod_spawn_rules`), the mob itself where the spawner placed it (`native_mod_spawn_mob`) and the mod's own entities as the spawn caps count them (`native_mod_spawn_census`); `native_valid_spawn` answers `BlockState.isValidSpawn` for a mod's rules.",
+  "doc_summary": "a native mod's mobs, which the game has none of (a translated mod's penguins), in natural spawning and chunk generation. A biome's spawns name a mod's entity type once its pack's biome modifiers added it (`neoforge:add_spawns`); the game's spawner picks it as it picks its own and asks the mod for what only its code knows. `native_mod_spawn_types(types)` is asked once: each mod pushes its types with their category, size, spawn box scale, whether fire immune, spawning far from players and summonable, and their placement type and heightmap (`SpawnPlacements`). `native_mod_spawn_rules(entity, reason, pos, ok)` is `SpawnPlacements.checkSpawnRules` of one of them at a block (its own placement type's test first, where it registered one of its own); `reason` is the `MobSpawnType` constant's name (`NATURAL`, `CHUNK_GENERATION`). `native_mod_spawn_mob(request, outcome)` makes the mob where the spawner placed it (`getMobForSpawn`, `moveTo` with the request's yaw), checks the place (natural spawning's despawn distance, then the mob's `checkSpawnRules` and `checkSpawnObstruction`, with the pass's pending mobs in its way), finalizes it with its pack's group data and adds it to the mod's level: `Uncreated`, `Refused`, or `Joined` with its box, `getMaxSpawnClusterSize` and whether its pack is full. `native_mod_spawn_census(dimension, census)` gives the mod's own entities in a server level as `NaturalSpawner.createState` counts them, with the boxes of those that block building, which stand in the way of the game's own spawns. The spawn pass holds the level: the hooks get it to read only, and `native_valid_spawn(pos, fire_immune)` answers `BlockState.isValidSpawn` of its blocks. Bundles need \"hooks\": @API:mod_spawning@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_mod_spawns.rs"
+  ]
+}

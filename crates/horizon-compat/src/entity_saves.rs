@@ -306,7 +306,7 @@ fn can_serialize(rt: &Rt, ty: V) -> bool {
 
 /// How much bigger than the type its spawn's box is: a mod's type's builder sets it
 /// (`spawnDimensionsScale`), vanilla's are 1 but for slimes and magma cubes.
-fn spawn_scale(rt: &Rt, ty: V) -> f32 {
+pub(crate) fn spawn_scale(rt: &Rt, ty: V) -> f32 {
     match rt.get_field(ty, "$spawnScale") {
         V::F(scale) => scale,
         _ if crate::mod_entities::type_id(rt, ty).is_some_and(|id| SPAWN_SCALED.contains(&id)) => {
@@ -318,7 +318,7 @@ fn spawn_scale(rt: &Rt, ty: V) -> f32 {
 
 /// The entity type the registry holds under `id` (a mod's, vanilla's), as its `getOptional` finds
 /// it: none for an id it doesn't hold.
-fn type_named(rt: &mut Rt, id: &str) -> Option<V> {
+pub(crate) fn type_named(rt: &mut Rt, id: &str) -> Option<V> {
     let ty = crate::neo::registry_get(rt, "entity_type", id);
     let known = ty.r() != 0
         && (rt.registered_name(ty, "entity_type").is_some()
@@ -464,7 +464,7 @@ pub fn load_into_level(rt: &mut Rt, tag: &BTreeMap<String, Nbt>, finalize: bool,
 
 /// `addFreshEntityWithPassengers`: each of `tree` joins the level, the vehicle first (a mod's entity
 /// its list, one of vanilla's the game). Whether the first joined.
-fn add_tree(rt: &mut Rt, level: V, tree: &[V], from_disk: bool) -> bool {
+pub(crate) fn add_tree(rt: &mut Rt, level: V, tree: &[V], from_disk: bool) -> bool {
     let mut joined = false;
     for (i, &x) in tree.iter().enumerate() {
         let ok = if crate::mod_entities::is_mod_entity(rt, x) {
@@ -487,11 +487,21 @@ fn finalize_spawn(rt: &mut Rt, e: V, level: V, spawn_type: &'static str) {
 
 /// [`finalize_spawn`] by a `MobSpawnType` value.
 pub(crate) fn finalize_mob(rt: &mut Rt, e: V, level: V, kind: V) {
+    finalize_mob_in_group(rt, e, level, kind, V::NULL);
+}
+
+/// [`finalize_mob`] with the group data its pack shares (`SpawnGroupData`, null for a pack's first
+/// mob): the group `finalizeSpawn` gives back, for the pack's next mob (an exception leaves it).
+pub(crate) fn finalize_mob_in_group(rt: &mut Rt, e: V, level: V, kind: V, group: V) -> V {
     let at = api::call(rt, BLOCK_POSITION, &[e]);
     let difficulty = api::virtual_call(rt, DIFFICULTY_AT, &[level, at]);
     rt.thrown = None;
-    api::virtual_call(rt, FINALIZE_SPAWN, &[e, level, difficulty, kind, V::NULL]);
-    rt.report_thrown("finalizeSpawn");
+    let out = api::virtual_call(rt, FINALIZE_SPAWN, &[e, level, difficulty, kind, group]);
+    if rt.thrown.is_some() {
+        rt.report_thrown("finalizeSpawn");
+        return group;
+    }
+    out
 }
 
 /// The mods' entities in `chunks` of the level the hook runs in, by chunk, as the chunks' entity

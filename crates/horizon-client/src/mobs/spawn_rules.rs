@@ -201,18 +201,40 @@ fn immune_tag(s: Species) -> Option<&'static str> {
 }
 /// `BlockState.isValidSpawn(level, pos, type)` for the block at a position.
 pub fn is_valid_spawn<L: SpawnLevel>(s: Species, l: &L, x: i32, y: i32, z: i32) -> bool {
-    if name(l, x, y, z) == "minecraft:magma_block" {
-        return fire_immune(s);
-    }
     let bit = match s {
         Species::Ocelot | Species::Parrot => data::VALID_SPAWN_LEAVES,
         Species::PolarBear => data::VALID_SPAWN_ICE,
         _ => data::VALID_SPAWN,
     };
+    valid_spawn_with(bit, fire_immune(s), l, x, y, z)
+}
+/// `isValidSpawn` for a plain entity type (a translated mod's): the blocks
+/// most types spawn on, magma blocks only when it is fire immune.
+pub fn is_valid_spawn_for<L: SpawnLevel>(fire_immune: bool, l: &L, x: i32, y: i32, z: i32) -> bool {
+    valid_spawn_with(data::VALID_SPAWN, fire_immune, l, x, y, z)
+}
+/// `isValidSpawn` for a type that spawns on the blocks `bit` marks, magma
+/// blocks only when it is fire immune.
+fn valid_spawn_with<L: SpawnLevel>(bit: u16, fire_immune: bool, l: &L, x: i32, y: i32, z: i32) -> bool {
+    if name(l, x, y, z) == "minecraft:magma_block" {
+        return fire_immune;
+    }
     flags(l, x, y, z) & bit != 0
 }
 /// `NaturalSpawner.isValidEmptySpawnBlock` for an entity type.
 pub fn is_valid_empty_spawn<L: SpawnLevel>(s: Species, l: &L, x: i32, y: i32, z: i32) -> bool {
+    valid_empty_spawn_with(fire_immune(s), immune_tag(s), l, x, y, z)
+}
+/// `isValidEmptySpawnBlock` for a type with these facts: whether it is fire
+/// immune, and the block tag it is `immuneTo`.
+fn valid_empty_spawn_with<L: SpawnLevel>(
+    fire_immune: bool,
+    immune_tag: Option<&str>,
+    l: &L,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> bool {
     // The exported flag is the zombie's answer; only blocks a zombie finds
     // dangerous can answer differently for another type.
     if flags(l, x, y, z) & data::VALID_EMPTY_SPAWN != 0 {
@@ -235,8 +257,8 @@ pub fn is_valid_empty_spawn<L: SpawnLevel>(s: Species, l: &L, x: i32, y: i32, z:
     if !burning && !other {
         return false;
     }
-    let immune = immune_tag(s).is_some_and(|t| l.block_tag(t, block));
-    let dangerous = !immune && (burning && !fire_immune(s) || other);
+    let immune = immune_tag.is_some_and(|t| l.block_tag(t, block));
+    let dangerous = !immune && (burning && !fire_immune || other);
     !dangerous
         && !f.full_collision
         && f.fluid == Fluid::None
@@ -249,6 +271,32 @@ pub fn is_spawn_position_ok<L: SpawnLevel>(s: Species, l: &L, x: i32, y: i32, z:
             is_valid_spawn(s, l, x, y - 1, z)
                 && is_valid_empty_spawn(s, l, x, y, z)
                 && is_valid_empty_spawn(s, l, x, y + 1, z)
+        }
+        data::Placement::InWater => {
+            fluid(l, x, y, z) == Fluid::Water
+                && flags(l, x, y + 1, z) & data::REDSTONE_CONDUCTOR == 0
+        }
+        data::Placement::InLava => fluid(l, x, y, z) == Fluid::Lava,
+        data::Placement::NoRestrictions => true,
+    }
+}
+/// `SpawnPlacements.isSpawnPositionOk` for a translated mod's entity type: its
+/// placement type's own test (`ON_GROUND` reads the block below and the two
+/// it would stand in as a plain type does: no leaves or ice, magma when it is
+/// fire immune). A mod's own placement type answers with its spawn rules.
+pub fn is_spawn_position_ok_for<L: SpawnLevel>(
+    placement: data::Placement,
+    fire_immune: bool,
+    l: &L,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> bool {
+    match placement {
+        data::Placement::OnGround => {
+            is_valid_spawn_for(fire_immune, l, x, y - 1, z)
+                && valid_empty_spawn_with(fire_immune, None, l, x, y, z)
+                && valid_empty_spawn_with(fire_immune, None, l, x, y + 1, z)
         }
         data::Placement::InWater => {
             fluid(l, x, y, z) == Fluid::Water

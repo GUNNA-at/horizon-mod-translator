@@ -180,6 +180,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             codec(rt, "compat:codec/xmap", vec![tag, to, V::I(0), from, V::I(0)])
         }),
         ("net/minecraft/core/Vec3i", "CODEC") => native(rt, "vec3i"),
+        ("net/minecraft/world/level/biome/MobSpawnSettings$SpawnerData", "CODEC") => native(rt, "spawner_data"),
         ("net/minecraft/world/phys/Vec3", "CODEC") => native(rt, "vec3"),
         ("net/minecraft/core/UUIDUtil", "CODEC") => native(rt, "uuid"),
         ("net/minecraft/core/UUIDUtil", "STRING_CODEC" | "LENIENT_CODEC") => native(rt, "uuid_string"),

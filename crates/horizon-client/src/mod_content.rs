@@ -1978,6 +1978,9 @@ fn place_in_biomes(
     let biome_tags = bundle(biome_tags, BIOME_TAGS)?;
     let placed: BTreeSet<String> = bundle(placed, PLACED_FEATURES)?.into_keys().collect();
     let feature_tags = bundle(None, FEATURE_TAGS)?;
+    let (categories, type_tags) = entity_types_for_spawns(overlay)?;
+    let type_ids: BTreeSet<String> = categories.keys().cloned().collect();
+    let vanilla = doc.clone();
     biomes::apply(
         &mut doc,
         modifiers,
@@ -1991,9 +1994,74 @@ fn place_in_biomes(
             ids: &placed,
             tags: &feature_tags,
         },
+        &biomes::Entities {
+            reg: biomes::Registry {
+                what: "entity type",
+                ids: &type_ids,
+                tags: &type_tags,
+            },
+            categories: &categories,
+        },
         warnings,
     )?;
+    // The game's own biome table (`Biomes::load`: the spawns natural spawning
+    // and chunk generation pick from, the climate, the colours) reads the
+    // biome files, not this bundle: each biome a modifier changed is written
+    // there too.
+    if let (J::Obj(modified), J::Obj(vanilla)) = (&doc, &vanilla) {
+        let vanilla: BTreeMap<&str, &J> = vanilla.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        for (id, text) in modified {
+            let J::Str(text) = text else { continue };
+            if matches!(vanilla.get(id.as_str()), Some(J::Str(was)) if was == text) {
+                continue;
+            }
+            let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
+            overlay.write(&format!("data/{ns}/worldgen/biome/{path}.json"), text.as_bytes())?;
+        }
+    }
     overlay.write(BIOMES, &serde_json::to_vec(&doc)?)
+}
+
+/// The entity types the spawn modifiers name, each with its category: the
+/// root's (`entity-types.json` with the mods' rows) and the translated mods'
+/// own; and the entity type tags (`data/<ns>/tags/entity_type/`, with the
+/// mods' entries merged), by tag id.
+fn entity_types_for_spawns(
+    overlay: &Overlay<'_>,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+    let mut categories = BTreeMap::new();
+    let table = out_path(overlay, "entity-types.json");
+    if table.exists()
+        && let J::Obj(rows) = read_json(&table)?
+    {
+        for (id, row) in rows {
+            if let Some(J::Str(category)) = row.get("category") {
+                categories.insert(id, category.clone());
+            }
+        }
+    }
+    categories.extend(horizon_world::worldgen::foreign::entity_types());
+    let mut tags = BTreeMap::new();
+    for ns in fs::read_dir(out_path(overlay, "data")).into_iter().flatten().flatten() {
+        let root = ns.path().join("tags/entity_type");
+        let ns = ns.file_name().to_string_lossy().into_owned();
+        let mut dirs = vec![root.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let rel = path.strip_prefix(&root).ok().and_then(|r| r.to_str());
+                if let Some(rel) = rel.and_then(|r| r.strip_suffix(".json")) {
+                    let id = format!("{ns}:{}", rel.replace('\\', "/"));
+                    tags.insert(id, fs::read_to_string(&path)?);
+                }
+            }
+        }
+    }
+    Ok((categories, tags))
 }
 
 #[path = "mod_content_biomes.rs"]

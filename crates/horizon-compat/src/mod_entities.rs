@@ -757,6 +757,20 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.put_field(a(0), "$fireImmune", V::I(1));
             Some(a(0))
         }
+        // A type natural spawning may make however far from a player (`canSpawnFarFromPlayer`;
+        // a creature's and a misc entity's may anyway).
+        (TYPE_BUILDER, "canSpawnFarFromPlayer") if desc == "()Lnet/minecraft/world/entity/EntityType$Builder;" => {
+            rt.put_field(a(0), "$canSpawnFar", V::I(1));
+            Some(a(0))
+        }
+        (ENTITY_TYPE, "canSpawnFarFromPlayer") if desc == "()Z" => {
+            let far = rt.get_field(a(0), "$canSpawnFar").i() != 0
+                || match rt.get_field(a(0), "$category") {
+                    c if !c.is_null() => matches!(crate::api_common::enum_ordinal(rt, c), 1 | 7),
+                    _ => type_id(rt, a(0)).is_some_and(|id| matches!(crate::vanilla_entities::category(id), "CREATURE" | "MISC")),
+                };
+            Some(V::I(i32::from(far)))
+        }
         (ENTITY_TYPE, "fireImmune") if desc == "()Z" => Some(V::I(i32::from(rt.get_field(a(0), "$fireImmune").i() != 0))),
         (TYPE_BUILDER, "spawnDimensionsScale")
             if desc == "(F)Lnet/minecraft/world/entity/EntityType$Builder;" =>
@@ -778,6 +792,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "$noSummon",
                 "$spawnScale",
                 "$fireImmune",
+                "$canSpawnFar",
             ] {
                 let v = rt.get_field(a(0), f);
                 rt.put_field(t, f, v);

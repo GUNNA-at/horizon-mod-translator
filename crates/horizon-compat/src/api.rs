@@ -927,11 +927,12 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 89] = [
+const CHAIN: [Module; 90] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
     crate::attribute_suppliers::call,
+    crate::spawning::call,
     crate::block_breaking::call,
     crate::loot_params::call,
     mutable_pos,
@@ -1022,11 +1023,12 @@ const CHAIN: [Module; 89] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 89] = [
+const CLAIMS: [Claims; 90] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
     crate::attribute_suppliers::claims,
+    crate::spawning::claims,
     crate::block_breaking::claims,
     crate::loot_params::claims,
     |owner, _, _| owner == MUTABLE_POS,
@@ -1115,11 +1117,12 @@ const CLAIMS: [Claims; 89] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 89] = [
+const MODULE_NAMES: [&str; 90] = [
     "diodes",
     "rails",
     "fake_players",
     "attribute_suppliers",
+    "spawning",
     "block_breaking",
     "loot_params",
     "mutable_pos",
@@ -2969,6 +2972,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             .or_else(|| crate::fluids::get_static(rt, o, f))
             .or_else(|| crate::neo_tags::get_static(rt, o, f))
             .or_else(|| crate::mod_entities::get_static(rt, o, f))
+            .or_else(|| crate::spawning::get_static(rt, o, f))
             .or_else(|| crate::pathing::get_static(rt, o, f))
             .or_else(|| crate::projectiles::get_static(rt, o, f))
             .or_else(|| crate::tanks::get_static(rt, o, f))

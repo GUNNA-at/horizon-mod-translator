@@ -1564,6 +1564,7 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
                 _ => Err(format!("Input is not a list of 3 elements: {j}")),
             }
         }
+        "spawner_data" => crate::spawning::decode_spawner(rt, j),
         "uuid" => {
             let ints: Vec<i64> = j.as_array().map(|a| a.iter().filter_map(Json::as_i64).collect()).unwrap_or_default();
             match ints[..] {

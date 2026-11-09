@@ -99,12 +99,42 @@ pub const PHASES: [&str; 5] = ["BEFORE_EVERYTHING", "ADD", "REMOVE", "MODIFY", "
 /// each an id (`minecraft:patch_grass_plain`), or an inline placed feature's JSON.
 pub type StepFeatures = Vec<Vec<String>>;
 
+/// One spawner of a biome's mob spawn settings (`MobSpawnSettings.SpawnerData`): an entity type
+/// (`minecraft:rabbit`), its weight among its category's spawners, and its pack's size.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Spawner {
+    pub entity: String,
+    pub weight: u32,
+    pub min: u32,
+    pub max: u32,
+}
+
+/// A biome's mob spawn settings as NeoForge's `MobSpawnSettingsBuilder` holds them while biome
+/// modifiers edit them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Spawns {
+    /// The spawners by `MobCategory`, by its serialized name (`creature`), in their order; a
+    /// category left out has none.
+    pub categories: BTreeMap<String, Vec<Spawner>>,
+    /// The spawn costs by entity type: its energy budget and charge (`MobSpawnCost`).
+    pub costs: BTreeMap<String, (f64, f64)>,
+    /// `creatureGenerationProbability`: the chance of each creature pack chunk generation places.
+    pub probability: f32,
+}
+
 /// A mod's biome modifier, read from its file: what its `modify(biome, phase, builder)` does to
-/// a biome's placed features.
+/// a biome's placed features and mob spawns.
 pub trait BiomeModifier: Send + Sync {
     /// Runs the modifier on biome `biome` in phase `phase` (an index of [`PHASES`]), editing
-    /// `features` as the builder's lists let it.
-    fn modify(&self, biomes: &dyn Biomes, biome: &str, phase: usize, features: &mut StepFeatures) -> Result<(), String>;
+    /// `features` and `spawns` as the builder's lists let it.
+    fn modify(
+        &self,
+        biomes: &dyn Biomes,
+        biome: &str,
+        phase: usize,
+        features: &mut StepFeatures,
+        spawns: &mut Spawns,
+    ) -> Result<(), String>;
 }
 
 /// What a mod registers: its own worldgen types, by id.
@@ -121,6 +151,12 @@ pub trait Handler: Send + Sync {
     /// biome modifier serializers; `None` when it isn't the mod's.
     fn biome_modifier(&self, _kind: &str, _json: &str) -> Option<Result<Arc<dyn BiomeModifier>, String>> {
         None
+    }
+    /// The entity types the mod registers, each with its category's serialized name
+    /// (`creature`): NeoForge's `add_spawns` files a spawner under its type's category, and the
+    /// spawn modifiers' entity type sets name them. Asked as the content root builds.
+    fn entity_types(&self) -> Vec<(String, String)> {
+        Vec::new()
     }
     /// The blocks whose survival the mod's code decides (`farmersdelight:wild_cabbages`): the
     /// generator asks [`Handler::survives`] about their states only. Asked once, as it registers.
@@ -214,6 +250,11 @@ pub(crate) fn feature(kind: &str, json: &str) -> Option<Result<Arc<dyn Feature>,
 /// `json` describes, or why the mod's codec refused it; `None` where no mod registered the type.
 pub fn biome_modifier(kind: &str, json: &str) -> Option<Result<Arc<dyn BiomeModifier>, String>> {
     handlers().iter().find_map(|h| h.biome_modifier(kind, json))
+}
+
+/// Every registered mod's entity types with their categories ([`Handler::entity_types`]).
+pub fn entity_types() -> Vec<(String, String)> {
+    handlers().iter().flat_map(|h| h.entity_types()).collect()
 }
 
 /// The states of `registry` whose survival a registered handler decides.

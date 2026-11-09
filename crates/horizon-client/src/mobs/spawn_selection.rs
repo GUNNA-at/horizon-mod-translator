@@ -300,6 +300,62 @@ fn spawns_far_from_player(s: Species, category: Category) -> bool {
 /// An entity type's species, width, height and category.
 pub type MobType = (Species, f32, f32, Category);
 
+/// A translated mod's entity type (`waddles:adelie_penguin`) as natural
+/// spawning reads it; the mod's own code answers for its rules and its mob.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModMobType {
+    pub category: Category,
+    pub width: f32,
+    pub height: f32,
+    /// `EntityType.spawnDimensionsScale`.
+    pub spawn_scale: f32,
+    pub fire_immune: bool,
+    /// `EntityType.canSpawnFarFromPlayer`.
+    pub far_from_player: bool,
+    /// `EntityType.canSummon`.
+    pub summonable: bool,
+    /// `SpawnPlacements.getPlacementType`: a mod's own placement type reads
+    /// as `NoRestrictions` here, its test being part of the mod's spawn rules
+    /// ([`NaturalLevel::mod_spawn_rules`]).
+    pub placement: super::data::Placement,
+    /// `SpawnPlacements.getHeightmapType`.
+    pub heightmap: Heightmap,
+}
+/// A mod's mob the spawner asks its mod to make: `getMobForSpawn`, `moveTo`,
+/// `isValidPositionForMob` (natural spawning) or `checkSpawnPosition` (chunk
+/// generation), `finalizeSpawn` with the pack's group data, and
+/// `addFreshEntityWithPassengers`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModSpawn<'a> {
+    pub entity: &'a str,
+    pub position: [f64; 3],
+    pub yaw: f32,
+    pub reason: Reason,
+    /// The first of its pack to join: the pack's group data starts empty.
+    pub first: bool,
+    /// The pack's size with it (`isMaxGroupSizeReached`).
+    pub group_size: u32,
+    /// The nearest player's squared distance (natural spawning's despawn
+    /// test); None at chunk generation.
+    pub distance: Option<f64>,
+}
+/// What came of a [`ModSpawn`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ModSpawned {
+    /// The type made no mob: natural spawning ends its pass there, chunk
+    /// generation tries the same column again.
+    Uncreated,
+    /// The mob refused the place (too far, its rules, an obstruction).
+    Refused,
+    /// It joined the level: its box, `getMaxSpawnClusterSize`, and whether
+    /// its pack is full (`isMaxGroupSizeReached`).
+    Joined {
+        bounds: Aabb,
+        max_cluster: u32,
+        group_full: bool,
+    },
+}
+
 pub trait NaturalLevel: SpawnLevel {
     fn min_y(&self) -> i32;
     /// `getMaxY()`: the highest buildable block.
@@ -343,6 +399,20 @@ pub trait NaturalLevel: SpawnLevel {
     fn heightmap(&self, kind: Heightmap, x: i32, z: i32) -> i32;
     /// `isPathfindable(PathComputationType.LAND)` of the block.
     fn pathfindable_land(&self, x: i32, y: i32, z: i32) -> bool;
+    /// A translated mod's entity type, which [`NaturalLevel::mob_type`] does
+    /// not know.
+    fn mod_mob_type(&self, _entity: &str) -> Option<ModMobType> {
+        None
+    }
+    /// `SpawnPlacements.checkSpawnRules` of a mod's type at a block (a mod's
+    /// own placement type's `isSpawnPositionOk` first), by its mod's code.
+    fn mod_spawn_rules(&self, _entity: &str, _reason: Reason, _pos: [i32; 3]) -> bool {
+        false
+    }
+    /// Has a mod make a mob of its type where the spawner placed it.
+    fn spawn_mod_mob(&self, _spawn: &ModSpawn) -> ModSpawned {
+        ModSpawned::Uncreated
+    }
 }
 
 /// The heightmap types `SpawnPlacements` registers.
@@ -533,6 +603,15 @@ fn spawn_dimensions_scale(s: Species) -> f32 {
 /// `EntityType.getSpawnAABB`.
 pub fn spawn_aabb(s: Species, x: f64, y: f64, z: f64, width: f32, height: f32) -> Aabb {
     let scale = spawn_dimensions_scale(s);
+    let half = f64::from(scale * width / 2.0);
+    Aabb::new(
+        Vec3::new(x - half, y, z - half),
+        Vec3::new(x + half, y + f64::from(scale * height), z + half),
+    )
+}
+/// `EntityType.getSpawnAABB` of a type whose spawn box is `scale` times its
+/// size (a mod's).
+pub fn spawn_aabb_scaled(scale: f32, x: f64, y: f64, z: f64, width: f32, height: f32) -> Aabb {
     let half = f64::from(scale * width / 2.0);
     Aabb::new(
         Vec3::new(x - half, y, z - half),
@@ -1033,8 +1112,10 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
     let mut nearest = Nearest::new(start);
     for _ in 0..3 {
         let (mut x, mut z) = (x0, z0);
-        // The group's entry, its type and where it was picked.
-        let mut current: Option<(SpawnEntry, Option<MobType>, [i32; 3])> = None;
+        // The group's entry, its type (a mod's where the game has none) and
+        // where it was picked.
+        let mut current: Option<(SpawnEntry, Option<MobType>, Option<ModMobType>, [i32; 3])> =
+            None;
         let mut group_index = 0u32;
         let mut max = (random.next_float() * 4.0).ceil() as i32;
         let mut ll = 0;
@@ -1064,11 +1145,56 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
                 };
                 max = sample_count(&entry, random) as i32;
                 let kind = l.mob_type(&entry.entity);
-                current = Some((entry, kind, [x, y, z]));
+                let modded = kind.is_none().then(|| l.mod_mob_type(&entry.entity)).flatten();
+                current = Some((entry, kind, modded, [x, y, z]));
             }
-            let (entry, kind, picked_at) = current.as_ref().unwrap_or_else(|| unreachable!());
+            let (entry, kind, modded, picked_at) =
+                current.as_ref().unwrap_or_else(|| unreachable!());
             // The list the entry was picked from holds it where it was picked.
             let listed = *picked_at == [x, y, z];
+            if let Some(m) = modded {
+                if !valid_position_for_mod_type(l, category, entry, m, listed, [x, y, z], distance) {
+                    continue;
+                }
+                let passed = state.can_spawn(l, &entry.entity, [x, y, z]);
+                trace(Event::Test(entry.entity.clone(), [x, y, z], passed));
+                if !passed {
+                    continue;
+                }
+                let yaw = random.next_float() * 360.0;
+                let spawn = ModSpawn {
+                    entity: &entry.entity,
+                    position: [xx, f64::from(y), zz],
+                    yaw,
+                    reason: Reason::Natural,
+                    first: group_index == 0,
+                    group_size: group_index + 1,
+                    distance: Some(distance),
+                };
+                match l.spawn_mod_mob(&spawn) {
+                    // getMobForSpawn gave null.
+                    ModSpawned::Uncreated => return,
+                    ModSpawned::Refused => continue,
+                    ModSpawned::Joined {
+                        bounds,
+                        max_cluster,
+                        group_full,
+                    } => {
+                        group_index += 1;
+                        spawned.push(bounds);
+                        cluster += 1;
+                        state.after_spawn(l, &entry.entity, m.category, [x, y, z]);
+                        trace(Event::Spawn(entry.entity.clone(), [xx, f64::from(y), zz], yaw));
+                        if cluster >= max_cluster {
+                            return;
+                        }
+                        if group_full {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
             let valid = valid_position_for_type(
                 l,
                 random,
@@ -1243,6 +1369,49 @@ fn valid_position_for_type<L: NaturalLevel, R: RandomSource>(
         height,
     ))
 }
+/// `isValidSpawnPostitionForType` for a translated mod's entity type: the
+/// type's facts as its mod tells them, its placement and spawn rules by the
+/// mod's code.
+#[allow(clippy::too_many_arguments)]
+fn valid_position_for_mod_type<L: NaturalLevel>(
+    l: &L,
+    category: Category,
+    entry: &SpawnEntry,
+    m: &ModMobType,
+    listed: bool,
+    pos: [i32; 3],
+    distance: f64,
+) -> bool {
+    if m.category == Category::Misc {
+        return false;
+    }
+    let despawn = f64::from(m.category.despawn_distance().pow(2));
+    if !m.far_from_player && distance > despawn {
+        return false;
+    }
+    let [x, y, z] = pos;
+    if !m.summonable || !spawn_rules::is_spawn_position_ok_for(m.placement, m.fire_immune, l, x, y, z) {
+        return false;
+    }
+    if !listed
+        && !mobs_at(l, category, x, y, z)
+            .iter()
+            .any(|e| same_spawner(e, entry))
+    {
+        return false;
+    }
+    if !l.mod_spawn_rules(&entry.entity, Reason::Natural, pos) {
+        return false;
+    }
+    l.no_collision(spawn_aabb_scaled(
+        m.spawn_scale,
+        f64::from(x) + 0.5,
+        f64::from(y),
+        f64::from(z) + 0.5,
+        m.width,
+        m.height,
+    ))
+}
 
 /// What chunk generation spawning did (for differential tests).
 #[derive(Clone, Debug, PartialEq)]
@@ -1288,11 +1457,59 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
         let mut z = zo + random.next_int_bound(16).unwrap_or(0);
         let (start_x, start_z) = (x, z);
         let kind = l.mob_type(&entry.entity);
+        let modded = kind.is_none().then(|| l.mod_mob_type(&entry.entity)).flatten();
         for _ in 0..count {
             let mut success = false;
             let mut attempts = 0;
             while !success && attempts < 4 {
                 attempts += 1;
+                if let Some(m) = &modded {
+                    let pos = top_non_colliding_at(l, m.heightmap, m.placement, x, z);
+                    trace(GenEvent::Column(x, z));
+                    let ok = m.summonable
+                        && spawn_rules::is_spawn_position_ok_for(m.placement, m.fire_immune, l, pos[0], pos[1], pos[2]);
+                    if ok {
+                        let width = f64::from(m.width);
+                        let fx = f64::from(x).clamp(f64::from(xo) + width, f64::from(xo) + 16.0 - width);
+                        let fz = f64::from(z).clamp(f64::from(zo) + width, f64::from(zo) + 16.0 - width);
+                        let fy = f64::from(pos[1]);
+                        let block = [fx.floor() as i32, pos[1], fz.floor() as i32];
+                        if !l.no_collision(spawn_aabb_scaled(m.spawn_scale, fx, fy, fz, m.width, m.height))
+                            || !l.mod_spawn_rules(&entry.entity, Reason::ChunkGeneration, block)
+                        {
+                            continue;
+                        }
+                        let yaw = random.next_float() * 360.0;
+                        let spawn = ModSpawn {
+                            entity: &entry.entity,
+                            position: [fx, fy, fz],
+                            yaw,
+                            reason: Reason::ChunkGeneration,
+                            first: group_index == 0,
+                            group_size: group_index + 1,
+                            distance: None,
+                        };
+                        match l.spawn_mod_mob(&spawn) {
+                            // An entity that failed to be made: the same column again.
+                            ModSpawned::Uncreated => continue,
+                            ModSpawned::Refused => {}
+                            ModSpawned::Joined { .. } => {
+                                group_index += 1;
+                                trace(GenEvent::Spawn(entry.entity.clone(), [fx, fy, fz], yaw));
+                                success = true;
+                            }
+                        }
+                    }
+                    x += random.next_int_bound(5).unwrap_or(0) - random.next_int_bound(5).unwrap_or(0);
+                    z += random.next_int_bound(5).unwrap_or(0) - random.next_int_bound(5).unwrap_or(0);
+                    while x < xo || x >= xo + 16 || z < zo || z >= zo + 16 {
+                        x = start_x + random.next_int_bound(5).unwrap_or(0)
+                            - random.next_int_bound(5).unwrap_or(0);
+                        z = start_z + random.next_int_bound(5).unwrap_or(0)
+                            - random.next_int_bound(5).unwrap_or(0);
+                    }
+                    continue;
+                }
                 let Some((species, width, height, _)) = kind else {
                     break;
                 };
@@ -1358,6 +1575,16 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
 /// dimensions that have one, then the placement type's adjustment.
 fn top_non_colliding<L: NaturalLevel>(l: &L, entity: &str, x: i32, z: i32) -> [i32; 3] {
     let heightmap = Heightmap::from_name(l.mob_data().heightmap(entity));
+    top_non_colliding_at(l, heightmap, l.mob_data().placement(entity), x, z)
+}
+/// `getTopNonCollidingPos` of a type with this heightmap and placement type.
+fn top_non_colliding_at<L: NaturalLevel>(
+    l: &L,
+    heightmap: Heightmap,
+    placement: super::data::Placement,
+    x: i32,
+    z: i32,
+) -> [i32; 3] {
     let mut y = l.heightmap(heightmap, x, z);
     if l.has_ceiling() {
         loop {
@@ -1373,10 +1600,11 @@ fn top_non_colliding<L: NaturalLevel>(l: &L, entity: &str, x: i32, z: i32) -> [i
             }
         }
     }
-    if l.mob_data().placement(entity) == super::data::Placement::OnGround
-        && l.pathfindable_land(x, y - 1, z)
-    {
+    if placement == super::data::Placement::OnGround && l.pathfindable_land(x, y - 1, z) {
         y -= 1;
     }
     [x, y, z]
 }
+
+#[cfg(test)]
+mod tests;

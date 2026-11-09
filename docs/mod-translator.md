@@ -9086,6 +9086,66 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Not yet: natural spawning of a mod's mobs (Waddles' penguins come by its own `waddles:penguin_spawn` biome
     modifier on `#c:is_snowy` biomes and its `RegisterSpawnPlacementsEvent` rule), a brain's `IS_PANICKING`
     memory for `isPanicking`, the breeding hearts' particles on the client copy of the partner.
+- [x] 2026-11-09 Part 135: a translated mod's mobs spawn naturally. Waddles' penguins came only by command or egg:
+  the content root's biome modifiers skipped `neoforge:add_spawns` and every spawn edit of a mod's own modifier,
+  and the game's spawner knew only its own entity types.
+  - Biome modifiers (`mod_content_biomes`): NeoForge's `add_spawns`, `remove_spawns`, `add_spawn_costs` and
+    `remove_spawn_costs` (their codecs' checks: counts at least 1 and in order, weights not negative), and a
+    code modifier's spawn edits (`MobSpawnSettingsBuilder.addSpawn`, `addMobCharge`, `getSpawner`...), written
+    into 26.3's `natural_mob_spawns` attribute under each type's category; vanilla's own entries keep their
+    JSON byte for byte, and a spawner of an unknown type is dropped with a warning. The types come from the
+    root's entity table, the translated mods' registries (`Handler::entity_types`) and the entity type tags.
+  - horizon-compat `spawning`: `RegisterSpawnPlacementsEvent` (placement type, heightmap, predicate; `AND`, `OR`,
+    `REPLACE` merged as `MergedSpawnPredicate`), `SpawnPlacements.checkSpawnRules`, vanilla's predicates mods
+    name (`Animal.checkAnimalSpawnRules`, `isBrightEnoughToSpawn`, `Monster.checkMonsterSpawnRules`,
+    `isDarkEnoughToSpawn`, `Mob.checkMobSpawnRules`, `checkSurfaceWaterAnimalSpawnRules`), `SpawnerData` (fields
+    under vanilla's names, `Weight`), `AgeableMobGroupData`, and the game's questions as its spawner runs: the
+    types (`spawn_types`), a place's rules (`spawn_rules`), the mob made, moved, checked (despawn distance,
+    `checkSpawnRules`, `checkSpawnObstruction` with the pass's pending mobs; a generation region holds no
+    entities), finalized with its pack's group data and added (`spawn_mob`), and the mods' entities for the
+    caps (`census`).
+  - The game (fragment `mod_spawning`, docs/native-mods.md "Mod mobs in natural spawning"): four hook points,
+    `native_mod_spawn_types`, `_rules`, `_mob` and `_census`, and `native_valid_spawn` for a mod's
+    `isValidSpawn`. `mobs::spawn_selection` takes a biome entry the game has no type for to the mod's
+    (`mod_mob_type`) in `spawnCategoryForPosition` and `spawnMobsForChunkGeneration`, with vanilla's draws and
+    control flow (a mob its mod cannot make ends a natural pass, and has chunk generation try the same column
+    again); the mods' entities count towards the caps and stand in the way of the game's spawns.
+  - Found on the way: the game's own biome table (`Biomes::load`: the spawns its spawner picks from, the
+    climate, the colours) reads the biome files (`data/minecraft/worldgen/biome/`), while the content root
+    wrote the modifiers into the worldgen loader's bundle alone, so a spawn a modifier added never reached the
+    spawner (the first live run met no penguin, the overlay's bundle listing them in every snowy biome); each
+    biome a modifier changes is now written to its file as well. The translator's runtime list lacked the new
+    compat module (its test caught it), and the data-class table held `AgeableMobGroupData`, which the runtime
+    now models by hand.
+  - Tests: compat 7 new (`SpawnerData` reads vanilla's fields and refuses what vanilla's codec does; a code
+    modifier adds its spawner after the biome's and its cost through the builder, removes the cows' cost, and
+    keeps another mod's spawner; registrations merge as `MergedSpawnPredicate`, only `REPLACE` changing the
+    placement; vanilla's predicates read the block below and the light; an animal's own check takes grass
+    always and stone only by day; a pack of ageable mobs shares its group data, babies never first; the spawner
+    makes a penguin facing the yaw given and the caps count it, refuses one where another stands, where a mob
+    of the pass stands or in water, makes none of an unknown type, and at chunk generation sees no entities);
+    client library 5 new (`spawn_selection`: a mod's type that answers as vanilla's cow makes the very draws,
+    tests and spawns of the cow, naturally and at chunk generation, and a mob its mod cannot make ends the pass;
+    the spawn modifiers file a spawner under its type's category and keep vanilla's entries as they were; a
+    spawn modifier reaches the game's own biome table, through the biome files), the unknown-names test now on
+    an unknown entity type, and the game library's 1 (a mod's type reads as the spawner needs it). All 722
+    compat, 27 translator, 581 game and 1241 client library tests pass.
+  - In the game (seed 135, one build with Create and Waddles, driven by `horizon-ctl`): chunk generation in the
+    snowy plains brought 5 penguins with their chunks, beside 4 rabbits and 45 polar bears (the frozen ocean
+    around brings those); right after it all 5 stood on grass in the snowy plains, and in a second run 2 of
+    them had already walked onto a frozen river. Then a flat grass field of 14 by 14 chunks, made snowy plains over a deep ocean so no
+    land animal around fills the cap: the creature pass of tick 1200 spawned 7 rabbits and 5 penguins (two
+    packs of each) where none stood, every penguin on the field's grass. From tick 1600 on the creature count
+    read 12, the penguins counted with the rabbits, and the creature passes stayed shut at the cap of 10 for
+    the 11 400 ticks left, as vanilla's do. A temporary trace of the spawner (each pass's categories, counts
+    and counted entities) measured it and is not committed. It also explained an earlier field, cleared with
+    `/kill`, that never got a creature: the mobs `/kill` reaches in loaded chunks that don't tick stay there
+    dead (a mob dies as it ticks), and the caps count them, as vanilla's `NaturalSpawner.createState` does;
+    there they were 10 creatures, the whole cap.
+  - Not yet: NeoForge's `SpawnPlacementCheck`, `PositionCheck` and `FinalizeSpawn` events and
+    `LivingPackSizeEvent` (their default answers are taken), a mod's spawn rules or `finalizeSpawn` drawing
+    from the level's random (they draw from the mod's own), a mod's spawn placement over a vanilla type, spawners
+    and trial spawners of a mod's type.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

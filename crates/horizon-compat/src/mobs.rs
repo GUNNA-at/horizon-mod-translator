@@ -836,9 +836,11 @@ pub(crate) fn walk_target_value(rt: &mut Rt, mob: V, p: [i32; 3]) -> f32 {
 
 /// Vanilla's: an animal's grass below is worth 10, else the light; a monster likes the dark.
 fn walk_target_default(rt: &Rt, mob: V, p: [i32; 3]) -> f32 {
+    // `getPathfindingCostFromLightLevels`: the brightness of `getMaxLocalRawBrightness` (the sky's
+    // light darkened by the time of day and the weather) less 0.5.
     let light = || {
-        let (block, sky) = rt.host().map_or((0, 15), |h| h.light(p));
-        let f = f32::from(block.max(sky)) / 15.0;
+        let level = crate::level_env::raw_brightness(rt, p, crate::level_env::sky_darken(rt)).clamp(0, 15);
+        let f = level as f32 / 15.0;
         f / (4.0 - 3.0 * f) - 0.5
     };
     if rt.instance_of_static(mob, ANIMAL) {
@@ -1290,6 +1292,25 @@ fn ai_step(rt: &mut Rt, e: V) {
             put_i(rt, e, "inLove", love - 1);
         }
     }
+}
+
+/// `AgeableMob.finalizeSpawn`'s group data: a pack's first mob starts it (`new
+/// AgeableMobGroupData(true)`: babies by a chance of 0.05); each after the first may be a baby by
+/// that chance; the group counts each one.
+fn ageable_group(rt: &mut Rt, e: V, group: V) -> V {
+    let group = if group.r() == 0 { crate::spawning::ageable_group_data(rt, true, 0.05) } else { group };
+    if !rt.instance_of_static(group, crate::spawning::AGEABLE_GROUP) {
+        return group;
+    }
+    let size = rt.get_field(group, "groupSize").i();
+    if rt.get_field(group, "shouldSpawnBaby").i() != 0 && size > 0 {
+        let chance = rt.get_field(group, "babySpawnChance").f();
+        if random_float(rt, e) <= chance {
+            set_age(rt, e, -24000);
+        }
+    }
+    rt.put_field(group, "groupSize", V::I(size + 1));
+    group
 }
 
 /// `AgeableMob.setAge(age)`: crossing from baby to grown (or back) tells the mob
@@ -3650,6 +3671,13 @@ fn living_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         ("requiresCustomPersistence", "()Z") => V::I(0),
         ("removeWhenFarAway", "(D)Z") => bool_v(!rt.instance_of_static(e, ANIMAL)),
         ("getMaxSpawnClusterSize", "()I") => V::I(4),
+        // Where a natural spawn may stand (`Mob.checkSpawnRules`, `checkSpawnObstruction`), and a
+        // pack that is never full but by its cluster size (`isMaxGroupSizeReached`).
+        ("checkSpawnRules", "(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/world/entity/MobSpawnType;)Z") if mob => {
+            bool_v(crate::spawning::mob_check_spawn_rules(rt, e))
+        }
+        ("checkSpawnObstruction", "(Lnet/minecraft/world/level/LevelReader;)Z") if mob => bool_v(crate::spawning::mob_check_obstruction(rt, e)),
+        ("isMaxGroupSizeReached", "(I)Z") if mob => V::I(0),
         ("getPathfindingMalus", _) if mob => {
             let k = crate::api_common::enum_ordinal(rt, a(1)).clamp(0, 25) as usize;
             V::F(pathing::malus(rt, e, k))
@@ -3689,10 +3717,11 @@ fn living_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         ("hasRestriction", "()Z") if mob => bool_v(restriction(rt, e).is_some()),
         ("clearRestriction", "()V") if mob => unit(put_f(rt, e, "$restrictRadius", -1.0)),
         ("finalizeSpawn", _) if mob => {
+            let group = if rt.instance_of_static(e, AGEABLE) { ageable_group(rt, e, a(4)) } else { a(4) };
             // `Mob.finalizeSpawn`: one in twenty left-handed.
             let left = random_float(rt, e) < 0.05;
             put_bool(rt, e, "$leftHanded", left);
-            a(4)
+            group
         }
         // A player's click on it: `Mob.interact` (final), whose `mobInteract` is an animal's food here.
         ("interact", INTERACT_DESC) if mob => interact(rt, e, a(1), a(2)),

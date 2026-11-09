@@ -191,9 +191,11 @@ mod moving_pistons;
 mod music;
 mod names;
 mod narrator;
+mod native_actors;
 mod native_attributes;
 mod native_biome_colors;
 mod native_block_entity_draw;
+mod native_block_entity_drops;
 mod native_claimed_items;
 mod native_components;
 mod native_criteria;
@@ -201,10 +203,6 @@ mod native_data_maps;
 mod native_effects;
 mod native_entities;
 mod native_entity_queries;
-mod native_mod_entities;
-mod native_mod_hits;
-mod native_actors;
-mod native_block_entity_drops;
 mod native_explosions;
 mod native_falling;
 mod native_fire;
@@ -216,6 +214,9 @@ mod native_lifecycle;
 mod native_menus;
 mod native_mob_draw;
 mod native_mobs;
+mod native_mod_entities;
+mod native_mod_hits;
+mod native_mod_spawns;
 mod native_motion;
 mod native_mounts;
 mod native_net;
@@ -2607,6 +2608,10 @@ struct Game<'a> {
     /// The translated mods' own entities as their mods last told them, for the commands
     /// (`native_mod_entities`): asked again each time a selector runs.
     mod_entities: Vec<native_mod_entities::ModEntity>,
+    /// The translated mods' entity types natural spawning may make, as their mods told them once
+    /// (`native_mod_spawn_types`).
+    mod_spawn_types:
+        std::cell::OnceCell<HashMap<String, horizon_client::mobs::spawn_selection::ModMobType>>,
     /// Blocks the server shows for a moment (`ClientboundAddTransientBlockPacket`).
     transient_blocks: transient_blocks::TransientBlocks,
     paintings: Vec<horizon_client::entities::Painting>,
@@ -18236,6 +18241,7 @@ impl<'a> Game<'a> {
             level_events: Vec::new(),
             falling: Vec::new(),
             mod_entities: Vec::new(),
+            mod_spawn_types: Default::default(),
             transient_blocks: Default::default(),
             paintings: Vec::new(),
             painting_variants: prepared.painting_variants,

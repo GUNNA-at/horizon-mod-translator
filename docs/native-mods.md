@@ -1359,6 +1359,47 @@ another baby. The baby is made one (`setBaby`), moved to where the parent stands
 hearts (entity event 18), and with `doMobLoot` an experience orb of 1 to 7 points drops. Each of these calls is
 virtual, so a mod's own `canMate`, `breed` or `spawnChildFromBreeding` (an animal that lays eggs) runs instead.
 
+### Mod mobs in natural spawning
+
+`crates/horizon-client/src/game/native_mod_spawns.rs` (server): a native mod's mobs, of types the game has none of (a
+translated mod's penguins), in natural spawning and chunk generation. A biome's spawns name a mod's type once its
+pack's biome modifiers added it; the game's spawner (`mobs::spawn_selection`) picks it from them as it picks its own,
+with the same draws, and asks the mod for what only its code knows.
+
+- `native_mod_spawn_types(types)` is asked once, the first time a spawn meets a type the game doesn't know. Push each
+  of your types as a `ModSpawnType`: id, category (`creature`), width and height, spawn box scale
+  (`spawnDimensionsScale`), whether fire immune, spawning far from players (`canSpawnFarFromPlayer`) and summonable
+  (`canSummon`), placement type (`on_ground`, `in_water`, `in_lava`, `no_restrictions`, or `custom` for one of your
+  own, whose test your spawn rules make) and heightmap (`MOTION_BLOCKING_NO_LEAVES`).
+- `native_mod_spawn_rules(entity, reason, pos, ok)`: `SpawnPlacements.checkSpawnRules` of one of your types at a
+  block, your own placement type's test first; `reason` is the `MobSpawnType` constant's name (`NATURAL`,
+  `CHUNK_GENERATION`). Set `ok`.
+- `native_mod_spawn_mob(request, outcome)`: make a mob of your type where the spawner placed it (`getMobForSpawn`,
+  `moveTo` with the request's yaw), check the place (natural spawning's despawn distance from `distance`, then the
+  mob's `checkSpawnRules` and `checkSpawnObstruction` with the pass's `pending` boxes in its way), finalize it with its
+  pack's group data (empty for the pack's `first`) and add it with its passengers. Set `outcome`: `Uncreated` (none
+  made: natural spawning ends its pass, chunk generation tries the same column again), `Refused`, or `Joined` with
+  its box, `getMaxSpawnClusterSize` and whether its pack is full at `group_size` (`isMaxGroupSizeReached`).
+- `native_mod_spawn_census(dimension, census)` is asked once a pass: push your entities in that server level as
+  `NaturalSpawner.createState` counts them (type, category, block, whether a mob that must stay), with the box of
+  each that blocks building. They count towards each category's cap, each player's and the spawn costs' charges, and
+  stand in the way of the game's own spawns (`isUnobstructed`).
+
+The spawn pass holds the level, so the hooks get the game to read only; `native_valid_spawn(pos, fire_immune)`
+answers `BlockState.isValidSpawn` of its blocks for a mod's rules (`Mob.checkMobSpawnRules`). Two draws differ from
+vanilla's order: the spawner draws the mob's yaw before its mod makes it (vanilla, after), and a mod's predicates and
+`finalizeSpawn` draw from the mod's own random, not the level's.
+
+A translated mod's types answer through horizon-compat (`spawning`) as on NeoForge 1.21.1: `RegisterSpawnPlacementsEvent`
+(placement type, heightmap and predicate, merged by `AND`, `OR` and `REPLACE` as `MergedSpawnPredicate`), the vanilla
+predicates mods name (`Animal.checkAnimalSpawnRules`, `isBrightEnoughToSpawn`, `Monster.checkMonsterSpawnRules`,
+`Mob.checkMobSpawnRules`, `WaterAnimal.checkSurfaceWaterAnimalSpawnRules`), `AgeableMobGroupData` for a pack of
+ageable mobs (after the first, each a baby one time in twenty), and the biome modifiers that edit spawns: NeoForge's `neoforge:add_spawns`,
+`remove_spawns`, `add_spawn_costs` and `remove_spawn_costs`, and a mod's own through `MobSpawnSettingsBuilder`. The
+content root writes each biome they change into the worldgen loader's bundle and into the biome's own file
+(`data/minecraft/worldgen/biome/`), the one the game's biome table, and so its spawner, reads. Not yet: NeoForge's `SpawnPlacementCheck`, `PositionCheck` and `FinalizeSpawn` events (their default answers are taken),
+`LivingPackSizeEvent`, and a mod's registration over a vanilla type, which the game spawns by its own rules.
+
 ### Advancement triggers
 
 `crates/horizon-client/src/game/native_criteria.rs`: a mod's own criteria triggers, as a NeoForge mod registers a

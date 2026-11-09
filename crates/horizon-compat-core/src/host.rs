@@ -1073,6 +1073,14 @@ pub trait Host {
     fn block_facts(&self, _state: &str) -> Option<BlockFacts> {
         None
     }
+    /// Whether a mob may spawn standing on the block at `pos` (`BlockState.isValidSpawn(level,
+    /// pos, type)`), for a type that is fire immune or not, as the game's blocks hold it: a face
+    /// sturdy on top that gives off less than 14 light; magma only for a fire-immune type; never a
+    /// block whose rule names vanilla's own mobs (leaves, ice) or none (glass, barriers). None where
+    /// the host keeps no blocks.
+    fn valid_spawn(&self, _pos: [i32; 3], _fire_immune: bool) -> Option<bool> {
+        None
+    }
     /// Whether block `block` (`minecraft:oak_leaves`) is in block tag `tag` (`minecraft:leaves`, no
     /// `#`), as the game's loaded tags hold it (`BlockState.is(TagKey)`). False for a tag the game
     /// doesn't have.

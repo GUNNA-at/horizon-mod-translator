@@ -3353,6 +3353,55 @@ impl Game<'_> {
     ) {
         let _ = (dimension, entity, nbt);
     }
+    /// The entity types of the native mods that natural spawning may make (a translated mod's
+    /// mobs: Waddles' penguins), pushed onto `types` with their category, size, spawn box scale,
+    /// whether fire immune, spawning far from players and summonable, and their placement type
+    /// and heightmap (`SpawnPlacements`). The game asks once, as a spawn pass first meets a type
+    /// it has none of in a biome's spawns. Server-side. API @API:mod_spawning@.
+    pub(super) fn native_mod_spawn_types(
+        &self,
+        types: &mut Vec<super::native_mod_spawns::ModSpawnType>,
+    ) {
+        let _ = types;
+    }
+    /// Whether one of a native mod's entity types may spawn at block `pos` for `reason` (a
+    /// `MobSpawnType` constant's name: `NATURAL`, `CHUNK_GENERATION`): its own placement type's
+    /// test where it registered one, then `SpawnPlacements.checkSpawnRules` with the predicates
+    /// the mods registered. The mod whose type it is sets `ok`. The spawn pass holds the level,
+    /// which the mod only reads. Server-side. API @API:mod_spawning@.
+    pub(super) fn native_mod_spawn_rules(
+        &self,
+        entity: &str,
+        reason: &str,
+        pos: [i32; 3],
+        ok: &mut Option<bool>,
+    ) {
+        let _ = (entity, reason, pos, ok);
+    }
+    /// A mob of one of a native mod's entity types where natural spawning or chunk generation
+    /// placed it (`request`): the mod whose type it is makes it (`getMobForSpawn`), moves it there,
+    /// checks the place (natural spawning's despawn distance, then its `checkSpawnRules` and
+    /// `checkSpawnObstruction`, with the pass's pending mobs in its way), finalizes it with its
+    /// pack's group data, adds it to its own level and sets `outcome`. The spawn pass holds the
+    /// level, which the mod only reads. Server-side. API @API:mod_spawning@.
+    pub(super) fn native_mod_spawn_mob(
+        &self,
+        request: &super::native_mod_spawns::ModSpawnRequest,
+        outcome: &mut Option<super::native_mod_spawns::ModSpawnOutcome>,
+    ) {
+        let _ = (request, outcome);
+    }
+    /// The entities the native mods keep themselves in the server level `dimension` as the spawn
+    /// caps count them (`NaturalSpawner.createState`): type, category, block, whether a mob that
+    /// must stay, and the box of each that blocks building, which stands in a spawn's way. Asked
+    /// once per spawn pass. Server-side. API @API:mod_spawning@.
+    pub(super) fn native_mod_spawn_census(
+        &self,
+        dimension: &str,
+        census: &mut Vec<super::native_mod_spawns::ModCensus>,
+    ) {
+        let _ = (dimension, census);
+    }
     /// A player's blow on entity `entity` of the server level `dimension`, one of a native mod's
     /// own (`native_mod_entities`), past `native_attack_entity`: the game worked it out as
     /// `Player.attack` does (`blow`: the damage, its type, the extra knockback and its direction),
@@ -5069,6 +5118,20 @@ impl Game<'_> {
         }
         let light = self.world.light(pos[0], pos[1], pos[2]);
         (light & 15, light >> 4)
+    }
+    /// `BlockState.isValidSpawn` of the block at `pos` in the world in place for an entity type
+    /// that is fire immune or not: a sturdy top that gives off less light than 14, never leaves,
+    /// ice, glass or a barrier, and a magma block only for a fire immune one. What a native mod's
+    /// spawn rules read of the footing (`SpawnPlacementTypes.ON_GROUND`). API @API:mod_spawning@.
+    pub(super) fn native_valid_spawn(&self, pos: [i32; 3], fire_immune: bool) -> Option<bool> {
+        let w = self.mob_world_base(&[]);
+        Some(horizon_client::mobs::spawn_rules::is_valid_spawn_for(
+            fire_immune,
+            &w,
+            pos[0],
+            pos[1],
+            pos[2],
+        ))
     }
     /// The rain and thunder levels of the world in place, each 0.0 to 1.0
     /// (`Level.getRainLevel` and `Level.getThunderLevel`): what a solar panel

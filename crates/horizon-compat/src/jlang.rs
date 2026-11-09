@@ -2692,7 +2692,7 @@ mod tests {
         assert_eq!(fmt(&mut rt, i, 3.5), "4");
         let pct = c(&mut rt, "java/text/NumberFormat.getPercentInstance.()Ljava/text/NumberFormat;", &[]);
         assert_eq!(fmt(&mut rt, pct, 0.256), "26%");
-        for (pattern, x, want) in [("#.##", 0.456, ".46"), ("#.##", 0.0, "0"), ("0.00", 3.14159, "3.14"), ("#,##0.0", 1234.56, "1,234.6"), ("00", 7.0, "07")] {
+        for (pattern, x, want) in [("#.##", 0.456, ".46"), ("#.##", 0.0, "0"), ("0.00", 1.23456, "1.23"), ("#,##0.0", 1234.56, "1,234.6"), ("00", 7.0, "07")] {
             let d = rt.new_object("java/text/DecimalFormat");
             let p = rt.string(pattern);
             c(&mut rt, "java/text/DecimalFormat.<init>.(Ljava/lang/String;)V", &[d, p]);

@@ -3580,8 +3580,8 @@ fn biome_modifiers_refuse_unknown_names() {
     let base = biome_base("biome-modifiers-errors");
     let scratch = base.parent().unwrap().to_owned();
     // A name the root doesn't have, or a type not read yet: that modifier is
-    // skipped with a warning (another mod's ids, `#c:` tags and `add_spawns`
-    // are common in real mods), and the mods still load.
+    // skipped with a warning (another mod's ids and entity types, `#c:` tags
+    // and `add_carvers` are common in real mods), and the mods still load.
     for (i, (modifier, warning)) in [
         (
             r##"{"type":"neoforge:add_features","biomes":"#minecraft:is_moon",
@@ -3599,8 +3599,14 @@ fn biome_modifiers_refuse_unknown_names() {
             "unknown placed feature zinc:ore_tin",
         ),
         (
-            r#"{"type":"neoforge:add_spawns","biomes":"minecraft:plains","spawners":[]}"#,
-            "biome modifier type \"add_spawns\" skipped",
+            r#"{"type":"neoforge:add_spawns","biomes":"minecraft:plains",
+                "spawners":{"type":"zinc:golem","weight":1,"minCount":1,"maxCount":2}}"#,
+            "unknown entity type zinc:golem: skipped",
+        ),
+        (
+            r#"{"type":"neoforge:add_carvers","biomes":"minecraft:plains",
+                "carvers":"minecraft:cave","step":"air"}"#,
+            "biome modifier type \"add_carvers\" skipped",
         ),
     ]
     .into_iter()
@@ -3750,6 +3756,91 @@ fn biome_modifiers_take_one_biome_or_a_list() {
     assert_eq!(
         features["minecraft:desert"],
         serde_json::json!([["minecraft:fossil"], ["minecraft:lake"]])
+    );
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+/// `neoforge:add_spawns` reaches the game's own biome table, which reads the
+/// biome files (`data/minecraft/worldgen/biome/`), not the worldgen bundle:
+/// the spawners natural spawning and chunk generation pick from list the
+/// mod's mob after vanilla's, and a biome no modifier names keeps its file.
+#[test]
+fn biome_spawn_modifiers_reach_the_games_biome_table() {
+    let base = biome_base("biome-modifier-spawns");
+    let scratch = base.parent().unwrap().to_owned();
+    let biome = |temperature: f64| {
+        format!(
+            r#"{{"temperature":{temperature},"attributes":{{"minecraft:gameplay/natural_mob_spawns":
+                {{"argument":{{"spawn_costs":{{}},"spawns_by_category":{{"creature":[{{"type":"minecraft:rabbit",
+                "count":{{"type":"minecraft:uniform","max_inclusive":3,"min_inclusive":2}},"weight":10}}]}}}},
+                "modifier":"overlay"}}}}}}"#
+        )
+    };
+    let biomes = BTreeMap::from([
+        ("minecraft:snowy_plains", biome(0.0)),
+        ("minecraft:plains", biome(0.8)),
+    ]);
+    fs::write(
+        base.join("worldgen/biomes.json"),
+        serde_json::to_string(&biomes).unwrap(),
+    )
+    .unwrap();
+    let files = base.join("data/minecraft/worldgen/biome");
+    fs::create_dir_all(&files).unwrap();
+    for (id, text) in &biomes {
+        let name = id.trim_start_matches("minecraft:");
+        fs::write(files.join(format!("{name}.json")), text).unwrap();
+    }
+    let colormaps = base.join("assets/minecraft/textures/colormap");
+    fs::create_dir_all(&colormaps).unwrap();
+    for name in ["grass", "foliage", "dry_foliage"] {
+        let file = fs::File::create(colormaps.join(format!("{name}.png"))).unwrap();
+        let mut png = png::Encoder::new(file, 1, 1);
+        png.set_color(png::ColorType::Rgb);
+        let mut writer = png.write_header().unwrap();
+        writer.write_image_data(&[0, 0, 0]).unwrap();
+    }
+    fs::write(
+        base.join("entity-types.json"),
+        r#"{"minecraft:rabbit":{"category":"creature"},"minecraft:fox":{"category":"creature"}}"#,
+    )
+    .unwrap();
+    let m = zinc_mod(
+        &scratch.join("zinc"),
+        &[(
+            "foxes",
+            r#"{"type":"neoforge:add_spawns","biomes":"minecraft:snowy_plains",
+                "spawners":{"type":"minecraft:fox","weight":7,"minCount":1,"maxCount":3}}"#,
+        )],
+    );
+    let out = scratch.join("out");
+    build(&base, &[m], &out).unwrap();
+    let table = crate::biome::Biomes::load(&out).unwrap();
+    let creatures = |id: &str| -> Vec<(String, u32, u32, u32)> {
+        table.get(table.id(id)).spawns["creature"]
+            .iter()
+            .map(|e| (e.entity.clone(), e.weight, e.min, e.max))
+            .collect()
+    };
+    assert_eq!(
+        creatures("minecraft:snowy_plains"),
+        [
+            ("minecraft:rabbit".to_owned(), 10, 2, 3),
+            ("minecraft:fox".to_owned(), 7, 1, 3)
+        ]
+    );
+    assert_eq!(
+        creatures("minecraft:plains"),
+        [("minecraft:rabbit".to_owned(), 10, 2, 3)]
+    );
+    assert_eq!(
+        fs::read(out.join("data/minecraft/worldgen/biome/plains.json")).unwrap(),
+        fs::read(files.join("plains.json")).unwrap()
+    );
+    // The base's files are the overlay's links' targets: they stay vanilla's.
+    assert_eq!(
+        fs::read_to_string(files.join("snowy_plains.json")).unwrap(),
+        biomes["minecraft:snowy_plains"]
     );
     let _ = fs::remove_dir_all(&scratch);
 }

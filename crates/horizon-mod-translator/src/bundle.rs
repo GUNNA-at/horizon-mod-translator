@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 123] = [
+const COMPAT: [(&str, &str); 124] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
@@ -223,6 +223,7 @@ const COMPAT: [(&str, &str); 123] = [
     ("vanilla_classes.rs", include_str!("../../horizon-compat/src/vanilla_classes.rs")),
     ("value_providers.rs", include_str!("../../horizon-compat/src/value_providers.rs")),
     ("vanilla_tag_keys.rs", include_str!("../../horizon-compat/src/vanilla_tag_keys.rs")),
+    ("spawning.rs", include_str!("../../horizon-compat/src/spawning.rs")),
 ];
 
 /// The registry crates the carried runtime uses, as the engine's `[dependencies]`: each must be
@@ -1411,7 +1412,7 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
     // content root when a biome modifier file does: read with the mod's codec and run by its code,
     // on the generator's region and random stream, or on the root's biomes.
     {{
-        use horizon_world::worldgen::foreign::{{BiomeModifier, Biomes, Feature, Handler, Placement, Random, StepFeatures, World}};
+        use horizon_world::worldgen::foreign::{{BiomeModifier, Biomes, Feature, Handler, Placement, Random, Spawner, Spawns, StepFeatures, World}};
         struct Draws<'a>(&'a mut dyn Random);
         impl {krate}::compat::host::HostRandom for Draws<'_> {{
             fn next_int(&mut self) -> i32 {{ self.0.next_int() }}
@@ -1502,13 +1503,35 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
         }}
         struct ModBiomeModifier({krate}::compat::V);
         impl BiomeModifier for ModBiomeModifier {{
-            fn modify(&self, biomes: &dyn Biomes, biome: &str, phase: usize, features: &mut StepFeatures) -> Result<(), String> {{
+            fn modify(&self, biomes: &dyn Biomes, biome: &str, phase: usize, features: &mut StepFeatures, spawns: &mut Spawns) -> Result<(), String> {{
                 let mut root = Root(biomes);
-                {krate}::with_worldgen_runtime(|rt| {{
+                // The biome's mob spawns as the mod's `MobSpawnSettingsBuilder` holds them, and back.
+                let mut mobs = {c}::spawning::BiomeSpawns {{
+                    categories: spawns
+                        .categories
+                        .iter()
+                        .map(|(category, list)| (category.clone(), list.iter().map(|s| {c}::spawning::Spawner {{ entity: s.entity.clone(), weight: s.weight, min: s.min, max: s.max }}).collect()))
+                        .collect(),
+                    costs: spawns.costs.clone(),
+                    probability: spawns.probability,
+                }};
+                let done = {krate}::with_worldgen_runtime(|rt| {{
                     rt.safe_point();
-                    rt.with_host(&mut root, |rt| {c}::worldgen::modify_biome(rt, self.0, biome, phase, features))
+                    rt.with_host(&mut root, |rt| {c}::worldgen::modify_biome(rt, self.0, biome, phase, features, &mut mobs))
                 }})
-                .unwrap_or_else(|| Err("the mod's worldgen code is already running on this thread".to_owned()))
+                .unwrap_or_else(|| Err("the mod's worldgen code is already running on this thread".to_owned()));
+                if done.is_ok() {{
+                    *spawns = Spawns {{
+                        categories: mobs
+                            .categories
+                            .into_iter()
+                            .map(|(category, list)| (category, list.into_iter().map(|s| Spawner {{ entity: s.entity, weight: s.weight, min: s.min, max: s.max }}).collect()))
+                            .collect(),
+                        costs: mobs.costs,
+                        probability: mobs.probability,
+                    }};
+                }}
+                done
             }}
         }}
         struct ModFeature({krate}::compat::V);
@@ -1548,6 +1571,10 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
             }}
             fn survival_blocks(&self) -> Vec<String> {{
                 {krate}::with_probe_runtime(|rt| {c}::blocks::survival_blocks(rt))
+            }}
+            // The mod's entity types and their categories, for the spawn modifiers' files.
+            fn entity_types(&self) -> Vec<(String, String)> {{
+                {krate}::with_worldgen_runtime(|rt| {c}::spawning::entity_categories(rt)).unwrap_or_default()
             }}
             fn survives(&self, world: &mut dyn World, state: &str, position: [i32; 3]) -> Option<Result<bool, String>> {{
                 // A survival question draws nothing.
@@ -2547,6 +2574,89 @@ fn game_host(c: &str, server_send: &str) -> String {
 {stacks}"#)
 }
 
+/// The host natural spawning's hooks get (`native_mod_spawn_*`): the server's game, which a spawn
+/// pass only reads. A mob's spawn rules, its finalizing and its joining read the world around it
+/// (blocks, light, weather, the entities in its way, the players); the mob joins the mod's own
+/// level, and what its code would change in the game's waits for nothing: it is not made.
+fn spawn_host(c: &str) -> String {
+    let (reads, entities) = (world_reads("self.game", c), entity_reads(c));
+    format!(r#"    struct Host<'a, 'b> {{
+        game: &'a crate::game::Game<'b>,
+    }}
+    impl {c}::host::Host for Host<'_, '_> {{
+        fn block_state(&self, pos: [i32; 3]) -> String {{
+            self.game.native_state_text_at(pos)
+        }}
+        fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
+            self.game.native_block_name_in_tag(block, tag)
+        }}
+        fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
+            self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
+        }}
+        fn block_occlusion(&self, state: &str) -> Option<(bool, bool)> {{
+            self.game.native_state_occlusion(state)
+        }}
+        fn dimension(&self) -> String {{
+            self.game.native_dimension().to_owned()
+        }}
+        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
+            self.game.native_fluid_name_in_tag(fluid, tag)
+        }}
+        fn fluid_flow(&self, pos: [i32; 3]) -> [f64; 3] {{
+            self.game.native_fluid_flow_at(pos)
+        }}
+        fn item_is_block(&self, item: &str) -> bool {{
+            self.game.native_item_facts(item).is_some_and(|(block, _)| block)
+        }}
+        fn item_stack_limit(&self, item: &str) -> Option<u32> {{
+            self.game.native_item_facts(item).map(|(_, limit)| limit)
+        }}
+        fn item_max_damage(&self, item: &str) -> Option<u32> {{
+            Some(self.game.native_item_max_damage(item))
+        }}
+        fn item_equip_slot(&self, item: &str) -> Option<String> {{
+            self.game.native_item_equip_slot(item).map(str::to_owned)
+        }}
+        fn collision_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            let o = [f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])];
+            let boxes = self.game.mob_world_base(&[]).block_collision_boxes(pos[0], pos[1], pos[2]);
+            Some(boxes.iter().map(|b| {{
+                let (lo, hi) = (b.min_position(), b.max_position());
+                [lo.x - o[0], lo.y - o[1], lo.z - o[2], hi.x - o[0], hi.y - o[1], hi.z - o[2]]
+            }}).collect())
+        }}
+        fn outline_boxes(&self, pos: [i32; 3]) -> Option<Vec<[f64; 6]>> {{
+            Some(self.game.native_outline_boxes(pos))
+        }}
+        // `BlockState.isValidSpawn` of the game's block there (a spawn's footing).
+        fn valid_spawn(&self, pos: [i32; 3], fire_immune: bool) -> Option<bool> {{
+            self.game.native_valid_spawn(pos, fire_immune)
+        }}
+        // A spawn pass changes no block.
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {{
+            false
+        }}
+        // A new entity's network id, from the game's one counter for every translated mod's.
+        fn mod_entity_id(&mut self) -> Option<i32> {{
+            Some(crate::game::native_mod_entities::next_mod_entity_id())
+        }}
+        fn players(&self) -> Vec<(u128, [f64; 3])> {{
+            let dim = self.game.native_dimension();
+            self.game.native_server_players().into_iter().filter(|p| p.dimension == dim).map(|p| (p.uuid, p.position)).collect()
+        }}
+        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
+            self.game.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
+        }}
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
+        }}
+        fn game_time(&self) -> i64 {{
+            self.game.native_game_time()
+        }}
+{reads}{entities}    }}
+"#)
+}
+
 /// A server level's tick (`LevelTickEvent.Pre` before it, `.Post` after), on the server's game
 /// holding that level.
 fn level_tick(id: &str, krate: &str, c: &str, host: &str, post: bool) -> String {
@@ -2616,14 +2726,60 @@ fn world_reads(get: &str, c: &str) -> String {
     )
 }
 
+/// A host's reads of the level's entities (`self.game` a `Game`): the players in it, any entity by
+/// its id (its type and place as the commands read them, a mob's facing and health), those in a
+/// box, and an entity type's tags. Its text for a translation key is the game's language, as a
+/// vanilla server's `Language` (an entity's name, `Component.getString`).
+fn entity_reads(c: &str) -> String {
+    format!(
+        r#"        // The players in this level, living (another level's at the same place aren't here); inside
+        // a player's action, that player as they are now, though its hub is out of reach.
+        fn player_entities(&self) -> Vec<(i32, u128, [f64; 3])> {{
+            let dim = self.game.native_dimension();
+            let acting = self.game.native_acting_player().zip(self.game.native_acting_player_entity()).map(|(p, id)| ((id, p.uuid, p.position), p.health > 0.0 && p.dimension == dim));
+            let mut all: Vec<(i32, u128, [f64; 3])> = self.game.lan.as_ref().map_or_else(Vec::new, |host| host.hub.guests.iter().filter(|g| g.placed).filter_map(|g| match acting {{
+                Some((now, here)) if now.1 == g.uuid => here.then_some(now),
+                _ => (!g.dead && g.dimension == dim).then_some((g.entity_id, g.uuid, g.position)),
+            }}).collect());
+            if let Some((now, true)) = acting
+                && !all.iter().any(|q| q.1 == now.1)
+            {{
+                all.push(now);
+            }}
+            all
+        }}
+        fn translate(&self, key: &str) -> Option<String> {{
+            horizon_client::lang::has(key).then(|| horizon_client::lang::get(key))
+        }}
+        fn entity_type_in_tag(&self, kind: &str, tag: &str) -> bool {{
+            self.game.res.mob_data().entity_has(tag, kind)
+        }}
+        fn entities_in(&self, b: [f64; 6]) -> Vec<{c}::host::EntityView> {{
+            let dim = self.game.native_dimension();
+            self.game.native_entities_in(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().filter_map(|id| {c}::host::Host::entity(self, id)).collect()
+        }}
+        fn entity(&self, id: i32) -> Option<{c}::host::EntityView> {{
+            let t = self.game.level_entity(id)?;
+            let pos = self.game.target_position(t)?;
+            let kind = self.game.target_type(t);
+            let mob = u32::try_from(id).ok().and_then(|i| self.game.native_mob(self.game.native_dimension(), i));
+            let yaw = mob.as_ref().map_or(0.0, |m| m.yaw);
+            let (pitch, head_yaw, body_yaw) = mob.as_ref().map_or((0.0, yaw, yaw), |m| (m.pitch, m.head_yaw, m.body_yaw));
+            Some({c}::host::EntityView {{ id, kind, pos, yaw, pitch, head_yaw, body_yaw, health: mob.map(|m| (m.health, m.max_health)) }})
+        }}
+"#
+    )
+}
+
 /// A server host's redstone and block ticks, and the level's entities (`self.game` a `&mut Game`):
 /// any entity by its id (its type and place as the commands read them, a mob's facing and health),
 /// and a mob hurt, killed, removed, healed, pushed or moved through the native mob helpers. Its
 /// text for a translation key is the game's language, as a vanilla server's `Language` (an
 /// entity's name, `Component.getString`).
 fn world_writes(c: &str) -> String {
+    let entities = entity_reads(c);
     format!(
-        r#"        // A new entity's network id, from the game's one counter for every translated mod's.
+        r#"{entities}        // A new entity's network id, from the game's one counter for every translated mod's.
         fn mod_entity_id(&mut self) -> Option<i32> {{
             Some(crate::game::native_mod_entities::next_mod_entity_id())
         }}
@@ -2721,28 +2877,6 @@ fn world_writes(c: &str) -> String {
                 }})
                 .collect()
         }}
-        // The players in this level, living (another level's at the same place aren't here); inside
-        // a player's action, that player as they are now, though its hub is out of reach.
-        fn player_entities(&self) -> Vec<(i32, u128, [f64; 3])> {{
-            let dim = self.game.native_dimension();
-            let acting = self.game.native_acting_player().zip(self.game.native_acting_player_entity()).map(|(p, id)| ((id, p.uuid, p.position), p.health > 0.0 && p.dimension == dim));
-            let mut all: Vec<(i32, u128, [f64; 3])> = self.game.lan.as_ref().map_or_else(Vec::new, |host| host.hub.guests.iter().filter(|g| g.placed).filter_map(|g| match acting {{
-                Some((now, here)) if now.1 == g.uuid => here.then_some(now),
-                _ => (!g.dead && g.dimension == dim).then_some((g.entity_id, g.uuid, g.position)),
-            }}).collect());
-            if let Some((now, true)) = acting
-                && !all.iter().any(|q| q.1 == now.1)
-            {{
-                all.push(now);
-            }}
-            all
-        }}
-        fn translate(&self, key: &str) -> Option<String> {{
-            horizon_client::lang::has(key).then(|| horizon_client::lang::get(key))
-        }}
-        fn entity_type_in_tag(&self, kind: &str, tag: &str) -> bool {{
-            self.game.res.mob_data().entity_has(tag, kind)
-        }}
         fn neighbor_signal(&mut self, pos: [i32; 3]) -> i32 {{
             let dimension = self.game.native_dimension().to_owned();
             self.game.native_neighbor_signal(&dimension, pos)
@@ -2759,19 +2893,6 @@ fn world_writes(c: &str) -> String {
         }}
         fn block_tick_queued(&mut self, pos: [i32; 3], block: &str, this_tick: bool) -> bool {{
             self.game.native_block_tick_queued_at(pos, block, this_tick)
-        }}
-        fn entities_in(&self, b: [f64; 6]) -> Vec<{c}::host::EntityView> {{
-            let dim = self.game.native_dimension();
-            self.game.native_entities_in(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().filter_map(|id| {c}::host::Host::entity(self, id)).collect()
-        }}
-        fn entity(&self, id: i32) -> Option<{c}::host::EntityView> {{
-            let t = self.game.level_entity(id)?;
-            let pos = self.game.target_position(t)?;
-            let kind = self.game.target_type(t);
-            let mob = u32::try_from(id).ok().and_then(|i| self.game.native_mob(self.game.native_dimension(), i));
-            let yaw = mob.as_ref().map_or(0.0, |m| m.yaw);
-            let (pitch, head_yaw, body_yaw) = mob.as_ref().map_or((0.0, yaw, yaw), |m| (m.pitch, m.head_yaw, m.body_yaw));
-            Some({c}::host::EntityView {{ id, kind, pos, yaw, pitch, head_yaw, body_yaw, health: mob.map(|m| (m.health, m.max_health)) }})
         }}
         fn hurt_entity(&mut self, id: i32, amount: f32) -> bool {{
             let dimension = self.game.native_dimension().to_owned();
@@ -3772,6 +3893,7 @@ fn block_entity_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
     // A player's hooks reach their client too: a menu the mod opens, a payload it sends.
     let player_host = player_host(&c, &format!("{server_effects}{server_send}"));
     let host = game_host(&c, &server_send);
+    let spawn_host = spawn_host(&c);
     let (read_host, level_host) = (level_read_host(&c), level_host(krate));
     // A hit's hooks have no game at hand: the hurt mob as the game holds it then, and a host of
     // what the game told of the hit.
@@ -4011,6 +4133,84 @@ fn {id}_mod_entities(game: &mut crate::game::Game<'_>, dimension: &str, entities
             living: e.living,
             custom_name: e.custom_name,
             tags: e.tags,
+        }});
+    }}
+}}
+"#)),
+        ("mod_spawn_types", format!(r#"// Generated by horizon-mod-translator: the translated mod's entity types as natural spawning reads
+// them (`native_mod_spawn_types`): category, size, placement type and heightmap.
+fn {id}_mod_spawn_types(game: &crate::game::Game<'_>, types: &mut Vec<crate::game::native_mod_spawns::ModSpawnType>) {{
+{spawn_host}    let mut host = Host {{ game }};
+    for t in {krate}::hook_runtime("mod_spawn_types", |rt| {c}::glue::mod_spawn_types(rt, &mut host)) {{
+        if types.iter().any(|known| known.id == t.id) {{
+            continue;
+        }}
+        types.push(crate::game::native_mod_spawns::ModSpawnType {{
+            id: t.id,
+            category: t.category,
+            width: t.width,
+            height: t.height,
+            spawn_scale: t.spawn_scale,
+            fire_immune: t.fire_immune,
+            far_from_player: t.far_from_player,
+            summonable: t.summonable,
+            placement: t.placement,
+            heightmap: t.heightmap,
+        }});
+    }}
+}}
+"#)),
+        ("mod_spawn_rules", format!(r#"// Generated by horizon-mod-translator: whether one of the translated mod's entity types may spawn at
+// a block (`native_mod_spawn_rules`): its own placement type's test where it has one, then
+// `SpawnPlacements.checkSpawnRules` with the predicates the mods registered.
+fn {id}_mod_spawn_rules(game: &crate::game::Game<'_>, entity: &str, reason: &str, pos: [i32; 3], ok: &mut Option<bool>) {{
+    if ok.is_some() || !{krate}::ours(entity) {{
+        return;
+    }}
+{spawn_host}    let mut host = Host {{ game }};
+    *ok = Some({krate}::hook_runtime("mod_spawn_rules", |rt| {c}::glue::mod_spawn_rules(rt, &mut host, entity, reason, pos)));
+}}
+"#)),
+        ("mod_spawn_mob", format!(r#"// Generated by horizon-mod-translator: a mob of one of the translated mod's entity types where the
+// spawner placed it (`native_mod_spawn_mob`): the mod makes it, moves it there, checks the place,
+// finalizes it with its pack's group data and adds it to its level.
+fn {id}_mod_spawn_mob(game: &crate::game::Game<'_>, request: &crate::game::native_mod_spawns::ModSpawnRequest, outcome: &mut Option<crate::game::native_mod_spawns::ModSpawnOutcome>) {{
+    use crate::game::native_mod_spawns::ModSpawnOutcome;
+    if outcome.is_some() || !{krate}::ours(&request.entity) {{
+        return;
+    }}
+{spawn_host}    let mut host = Host {{ game }};
+    let asked = {c}::spawning::SpawnRequest {{
+        entity: &request.entity,
+        position: request.position,
+        yaw: request.yaw,
+        reason: request.reason,
+        first: request.first,
+        group_size: request.group_size,
+        distance: request.distance,
+        pending: &request.pending,
+    }};
+    let made = {krate}::hook_runtime("mod_spawn_mob", |rt| Some({c}::glue::mod_spawn_mob(rt, &mut host, &asked)));
+    *outcome = made.map(|m| match m {{
+        {c}::spawning::SpawnOutcome::Uncreated => ModSpawnOutcome::Uncreated,
+        {c}::spawning::SpawnOutcome::Refused => ModSpawnOutcome::Refused,
+        {c}::spawning::SpawnOutcome::Joined {{ bounds, max_cluster, group_full }} => ModSpawnOutcome::Joined {{ bounds, max_cluster, group_full }},
+    }});
+}}
+"#)),
+        ("mod_spawn_census", format!(r#"// Generated by horizon-mod-translator: the translated mod's own entities in a level of the server's
+// game as the spawn caps count them (`native_mod_spawn_census`), with the boxes of those that stand
+// in a spawn's way.
+fn {id}_mod_spawn_census(game: &crate::game::Game<'_>, dimension: &str, census: &mut Vec<crate::game::native_mod_spawns::ModCensus>) {{
+{spawn_host}    let mut host = Host {{ game }};
+    for e in {krate}::hook_runtime("mod_spawn_census", |rt| {c}::glue::mod_spawn_census(rt, &mut host, dimension)) {{
+        census.push(crate::game::native_mod_spawns::ModCensus {{
+            kind: e.kind,
+            category: e.category,
+            block: e.block,
+            mob: e.mob,
+            persistent: e.persistent,
+            blocks: e.blocks,
         }});
     }}
 }}
@@ -5139,11 +5339,15 @@ const CLIENT_BINDINGS: [(&str, &str); 51] = [
     ("camera_shake", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"partial\", ty = \"f32\", value = \"partial\" },\n    { name = \"shake\", ty = \"&mut crate::game::native_hooks::NativeShake\", value = \"&mut *shake\" },\n"),
 ];
 
-const BLOCK_ENTITY_BINDINGS: [(&str, &str); 71] = [
+const BLOCK_ENTITY_BINDINGS: [(&str, &str); 75] = [
     ("entity_types", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"types\", ty = \"&mut Vec<(String, bool)>\", value = \"&mut *types\" },\n"),
     ("load_entity", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"tag\", ty = \"&horizon_world::nbt::Tag\", value = \"tag\" },\n    { name = \"finalize\", ty = \"bool\", value = \"finalize\" },\n    { name = \"from_disk\", ty = \"bool\", value = \"from_disk\" },\n    { name = \"made\", ty = \"&mut Option<bool>\", value = \"&mut *made\" },\n"),
     ("save_entities", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"chunks\", ty = \"&[(i32, i32)]\", value = \"chunks\" },\n    { name = \"remove\", ty = \"bool\", value = \"remove\" },\n    { name = \"saved\", ty = \"&mut Vec<((i32, i32), horizon_world::nbt::Tag)>\", value = \"&mut *saved\" },\n"),
     ("mod_entities", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n    { name = \"entities\", ty = \"&mut Vec<crate::game::native_mod_entities::ModEntity>\", value = \"&mut *entities\" },\n"),
+    ("mod_spawn_types", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"types\", ty = \"&mut Vec<crate::game::native_mod_spawns::ModSpawnType>\", value = \"&mut *types\" },\n"),
+    ("mod_spawn_rules", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"entity\", ty = \"&str\", value = \"entity\" },\n    { name = \"reason\", ty = \"&str\", value = \"reason\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"ok\", ty = \"&mut Option<bool>\", value = \"&mut *ok\" },\n"),
+    ("mod_spawn_mob", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"request\", ty = \"&crate::game::native_mod_spawns::ModSpawnRequest\", value = \"request\" },\n    { name = \"outcome\", ty = \"&mut Option<crate::game::native_mod_spawns::ModSpawnOutcome>\", value = \"&mut *outcome\" },\n"),
+    ("mod_spawn_census", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n    { name = \"census\", ty = \"&mut Vec<crate::game::native_mod_spawns::ModCensus>\", value = \"&mut *census\" },\n"),
     ("mod_entity_act", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n    { name = \"entity\", ty = \"i32\", value = \"entity\" },\n    { name = \"act\", ty = \"&crate::game::native_mod_entities::ModEntityAct\", value = \"act\" },\n    { name = \"done\", ty = \"&mut bool\", value = \"&mut *done\" },\n"),
     ("mod_entity_nbt", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n    { name = \"entity\", ty = \"i32\", value = \"entity\" },\n    { name = \"nbt\", ty = \"&mut Option<horizon_world::nbt::Tag>\", value = \"&mut *nbt\" },\n"),
     ("mod_entity_attack", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"dimension\", ty = \"&str\", value = \"dimension\" },\n    { name = \"entity\", ty = \"i32\", value = \"entity\" },\n    { name = \"blow\", ty = \"&crate::game::native_mod_hits::ModEntityBlow\", value = \"blow\" },\n    { name = \"struck\", ty = \"&mut Option<crate::game::native_mod_hits::ModEntityStruck>\", value = \"&mut *struck\" },\n"),

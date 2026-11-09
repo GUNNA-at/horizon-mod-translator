@@ -247,9 +247,17 @@ pub fn biome_modifier(rt: &mut Rt, kind: &str, json: &str) -> Option<Result<V, S
 /// The mod's `modify(biome, phase, builder)` of biome modifier `modifier`, for biome `biome` in
 /// phase `phase` (an index of [`PHASES`]). `features` is the biome's placed features by
 /// generation step, as the builder's lists hold them (`BiomeGenerationSettingsBuilder`): an id, or
-/// an inline placed feature's JSON; after the call, what the lists hold then. The host answers the
-/// biome's data and the holder sets' members.
-pub fn modify_biome(rt: &mut Rt, modifier: V, biome: &str, phase: usize, features: &mut Vec<Vec<String>>) -> Result<(), String> {
+/// an inline placed feature's JSON; after the call, what the lists hold then. `spawns` is the
+/// biome's mob spawn settings as NeoForge's `MobSpawnSettingsBuilder` holds them; after the call,
+/// what the builder holds then. The host answers the biome's data and the holder sets' members.
+pub fn modify_biome(
+    rt: &mut Rt,
+    modifier: V,
+    biome: &str,
+    phase: usize,
+    features: &mut Vec<Vec<String>>,
+    spawns: &mut crate::spawning::BiomeSpawns,
+) -> Result<(), String> {
     crate::mod_configs::follow_server(rt);
     let phase = PHASES.get(phase).map(|_| phase_constant(rt, phase)).ok_or_else(|| format!("no biome modifier phase {phase}"))?;
     let value = biome_value(rt, biome);
@@ -266,6 +274,8 @@ pub fn modify_biome(rt: &mut Rt, modifier: V, biome: &str, phase: usize, feature
     rt.put_field(generation, "$features", steps);
     let builder = rt.new_object(BIOME_INFO_BUILDER);
     rt.put_field(builder, "$generation", generation);
+    let mobs = crate::spawning::settings_builder(rt, spawns);
+    rt.put_field(builder, "$spawns", mobs);
     let Some(vcall) = rt.vcall else { return Err("no mod code to run".into()) };
     vcall(rt, MODIFY_KEY, MODIFY, &[modifier, holder, phase, builder]);
     if let Some(e) = rt.thrown.take() {
@@ -276,6 +286,7 @@ pub fn modify_biome(rt: &mut Rt, modifier: V, biome: &str, phase: usize, feature
         out.push(crate::jutil::elements(rt, list).into_iter().map(|h| placed_entry(rt, h)).collect::<Result<Vec<_>, _>>()?);
     }
     *features = out;
+    *spawns = crate::spawning::read_settings(rt, mobs);
     Ok(())
 }
 
@@ -578,6 +589,8 @@ fn holder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
         // The builder a biome modifier edits: the biome's generation settings, each step's list of
         // placed feature holders, which grow to the step added to (`addFeatureStepsUpTo`).
         (BIOME_INFO_BUILDER, "getGenerationSettings") => rt.get_field(a(0), "$generation"),
+        // Its mob spawn settings (`MobSpawnSettingsBuilder`), which `crate::spawning` answers.
+        (BIOME_INFO_BUILDER, "getMobSpawnSettings") => rt.get_field(a(0), "$spawns"),
         (GENERATION_BUILDER | PLAIN_BUILDER, "addFeature" | "getFeatures") if rt.get_field(a(0), "$features").r() != 0 => {
             let step = if desc.starts_with("(I") { a(1).i() } else { rt.get_field(a(1), "$ordinal").i() };
             let steps = rt.get_field(a(0), "$features");
@@ -1806,7 +1819,7 @@ mod tests {
         let mut run = |rt: &mut Rt, biome: &str, mut features: Vec<Vec<String>>| {
             rt.with_host(&mut host, |rt| {
                 for phase in 0..PHASES.len() {
-                    modify_biome(rt, modifier, biome, phase, &mut features).unwrap();
+                    modify_biome(rt, modifier, biome, phase, &mut features, &mut Default::default()).unwrap();
                 }
             });
             features

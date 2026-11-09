@@ -81,6 +81,7 @@ pub mod mod_entities;
 pub mod goals;
 pub mod pathing;
 pub mod mobs;
+pub mod spawning;
 pub mod riding;
 pub mod projectiles;
 pub mod models;

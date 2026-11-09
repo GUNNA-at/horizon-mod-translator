@@ -1,6 +1,7 @@
 //! The game's side of `NaturalSpawner` (`mobs::spawn_selection`): the level
 //! it reads, the spawning chunks and caps of `ServerChunkCache.tickChunks`,
 //! and the mobs it adds (finalized with the game's `finalizeSpawn`).
+use super::native_mod_spawns::{self, ModCensus, ModSpawnOutcome, ModSpawnRequest};
 use super::{Dim, Game};
 use horizon_client::vanillagen::VanillaTerrain;
 use horizon_client::{
@@ -11,10 +12,11 @@ use horizon_client::{
         Mob, MobWorld, Species,
         data::{self, MobData},
         seen_grid::SeenGrid,
-        spawn_rules::{Dimension, SpawnLevel},
+        spawn_rules::{Dimension, Reason, SpawnLevel},
         spawn_selection::{
-            self, Category, Counted, Heightmap, NaturalLevel, SpawnCost, SpawnPlayer, SpawnRequest,
-            SpawnState, Spawned, StructureAt, StructureSpawns,
+            self, Category, Counted, Heightmap, ModMobType, ModSpawn, ModSpawned, NaturalLevel,
+            SpawnCost, SpawnPlayer, SpawnRequest, SpawnState, Spawned, StructureAt,
+            StructureSpawns,
         },
     },
 };
@@ -101,6 +103,17 @@ pub(super) struct GameLevel<'g, 'a> {
     /// holds the game); the first ones scan, as the build costs a few scans.
     pub(super) boxes: std::cell::OnceCell<MobBoxes>,
     pub(super) box_queries: std::cell::Cell<u32>,
+    /// The translated mods' own entities in the level, as their mods told them the first time a
+    /// spawn needed them ([`Game::mod_spawn_census`]).
+    pub(super) census: std::cell::OnceCell<Vec<ModCensus>>,
+}
+/// A box as min x, y, z, max x, y, z.
+fn corners(b: Aabb) -> [f64; 6] {
+    let (lo, hi) = (b.min_position(), b.max_position());
+    [lo.x, lo.y, lo.z, hi.x, hi.y, hi.z]
+}
+fn from_corners(c: [f64; 6]) -> Aabb {
+    Aabb::new(Vec3::new(c[0], c[1], c[2]), Vec3::new(c[3], c[4], c[5]))
 }
 const SCANNED_QUERIES: u32 = 8;
 /// A mob not removed: its index in `Game::mobs`, box, alive, and whether
@@ -175,6 +188,10 @@ impl GameLevel<'_, '_> {
     fn zoomed_biome(&self, x: i32, y: i32, z: i32) -> Option<&BiomeInfo> {
         let [x, y, z] = self.zoomed(x, y, z);
         self.biome(x, y, z)
+    }
+    /// The mods' own entities in the level.
+    pub(super) fn census(&self) -> &[ModCensus] {
+        self.census.get_or_init(|| self.game.mod_spawn_census())
     }
 }
 impl SpawnLevel for GameLevel<'_, '_> {
@@ -336,6 +353,11 @@ impl NaturalLevel for GameLevel<'_, '_> {
             && !self
                 .mobs_near(bounds)
                 .any(|(_, b, alive, _)| alive && b.intersects(bounds))
+            && !self
+                .census()
+                .iter()
+                .filter_map(|e| e.blocks)
+                .any(|b| from_corners(b).intersects(bounds))
     }
     fn spawn_mobs(&self) -> bool {
         self.game.ui.rules.bool("spawn_mobs")
@@ -360,6 +382,49 @@ impl NaturalLevel for GameLevel<'_, '_> {
     }
     fn pathfindable_land(&self, x: i32, y: i32, z: i32) -> bool {
         self.w.data.state(self.state(x, y, z)).flags & data::LAND != 0
+    }
+    fn mod_mob_type(&self, entity: &str) -> Option<ModMobType> {
+        self.game.mod_spawn_types().get(entity).copied()
+    }
+    fn mod_spawn_rules(&self, entity: &str, reason: Reason, pos: [i32; 3]) -> bool {
+        let mut ok = None;
+        let reason = native_mod_spawns::reason_name(reason);
+        self.game
+            .native_mod_spawn_rules(entity, reason, pos, &mut ok);
+        ok.unwrap_or(false)
+    }
+    /// The mob joins its mod's level at once; its box stands in the way of the pass's next mobs
+    /// as those the game adds once the pass ends do.
+    fn spawn_mod_mob(&self, spawn: &ModSpawn) -> ModSpawned {
+        let request = ModSpawnRequest {
+            entity: spawn.entity.to_owned(),
+            position: spawn.position,
+            yaw: spawn.yaw,
+            reason: native_mod_spawns::reason_name(spawn.reason),
+            first: spawn.first,
+            group_size: spawn.group_size,
+            distance: spawn.distance,
+            pending: self.pending.borrow().iter().map(|&b| corners(b)).collect(),
+        };
+        let mut outcome = None;
+        self.game.native_mod_spawn_mob(&request, &mut outcome);
+        match outcome {
+            None | Some(ModSpawnOutcome::Uncreated) => ModSpawned::Uncreated,
+            Some(ModSpawnOutcome::Refused) => ModSpawned::Refused,
+            Some(ModSpawnOutcome::Joined {
+                bounds,
+                max_cluster,
+                group_full,
+            }) => {
+                let bounds = from_corners(bounds);
+                self.pending.borrow_mut().push(bounds);
+                ModSpawned::Joined {
+                    bounds,
+                    max_cluster,
+                    group_full,
+                }
+            }
+        }
     }
 }
 impl horizon_client::mobs::spawner::SpawnerLevel for GameLevel<'_, '_> {
@@ -404,6 +469,7 @@ impl<'a> Game<'a> {
             pending_ids: Default::default(),
             boxes: Default::default(),
             box_queries: Default::default(),
+            census: Default::default(),
         }
     }
     /// Creates a mob the spawner accepted, finalized the game's way; the
@@ -542,6 +608,14 @@ impl<'a> Game<'a> {
         let last_state;
         {
             let level = self.natural_level();
+            // The game's mobs, then the translated mods' own entities.
+            let mods = level.census().iter().map(|e| Counted {
+                entity: &e.kind,
+                category: Category::from_name(&e.category),
+                block: e.block,
+                is_mob: e.mob,
+                persistent: e.persistent,
+            });
             let counted: Vec<Counted> = self
                 .mobs
                 .iter()
@@ -557,6 +631,7 @@ impl<'a> Game<'a> {
                     persistent: m.persistent
                         || horizon_client::mobs::ai::requires_custom_persistence(m),
                 })
+                .chain(mods)
                 .collect();
             let players = players
                 .iter()
