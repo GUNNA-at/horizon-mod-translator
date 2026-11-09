@@ -1553,6 +1553,31 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             let class: &'static str = rt.static_key(o);
             rt.alloc(class, Data::Table(Table::default()))
         }
+        // `Multimaps.newMultimap(map, factory)` (`newListMultimap`, `newSetMultimap`): an empty
+        // multimap whose keys hold the factory's collections, a set holding each value once.
+        (
+            "com/google/common/collect/Multimaps",
+            "newMultimap" | "newListMultimap" | "newSetMultimap" | "newSortedSetMultimap",
+        ) => {
+            let sets = match name {
+                "newListMultimap" => false,
+                "newSetMultimap" | "newSortedSetMultimap" => true,
+                _ => {
+                    let made = rt.call_functional(
+                        "com/google/common/base/Supplier.get.()Ljava/lang/Object;",
+                        a(1),
+                        &[],
+                    );
+                    rt.class_of(made).ends_with("Set")
+                }
+            };
+            let class = if sets {
+                "com/google/common/collect/HashMultimap"
+            } else {
+                "com/google/common/collect/ArrayListMultimap"
+            };
+            rt.alloc(class, Data::Table(Table::default()))
+        }
         // `MultimapBuilder.hashKeys().arrayListValues().build()`: the keys' order makes no
         // difference here; the values' kind says whether a key holds a list or a set.
         ("com/google/common/collect/MultimapBuilder", "hashKeys" | "linkedHashKeys" | "treeKeys" | "enumKeys") => {
@@ -4164,6 +4189,42 @@ mod tests {
         let got = c(&mut rt, "com/google/common/collect/Multimap.get.(Ljava/lang/Object;)Ljava/util/Collection;", &[m, block]);
         assert_eq!(elements(&rt, got), [V::I(7), V::I(8)]);
         assert_eq!(c(&mut rt, "com/google/common/collect/Multimap.size.()I", &[m]), V::I(2));
+    }
+
+    /// `Multimaps.newMultimap(new HashMap<>(), HashSet::new)` (Create's station screen): the keys
+    /// hold the factory's collections, a set each value once, a list every one in order.
+    #[test]
+    fn a_multimap_over_a_factory_holds_its_collections() {
+        let mut rt = Rt::new();
+        crate::install();
+        // What generated code does for an object no mod class is: the API call by the method's key.
+        fn vcall(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+            crate::api::call(rt, key, args)
+        }
+        rt.vcall = Some(vcall);
+        let new = "com/google/common/collect/Multimaps.newMultimap.(Ljava/util/Map;Lcom/google/common/base/Supplier;)Lcom/google/common/collect/Multimap;";
+        let put = "com/google/common/collect/Multimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z";
+        let entries = "com/google/common/collect/Multimap.entries.()Ljava/util/Collection;";
+        let key = rt.string("station");
+        for (factory, held) in [
+            ("java/util/HashSet", vec![V::I(4)]),
+            ("java/util/ArrayList", vec![V::I(4), V::I(4)]),
+        ] {
+            let backing = new_set_of(&mut rt, &[]);
+            let make = crate::functions::constructor(&mut rt, factory, "()V");
+            let m = c(&mut rt, new, &[backing, make]);
+            assert_eq!(c(&mut rt, put, &[m, key, V::I(4)]), V::I(1));
+            c(&mut rt, put, &[m, key, V::I(4)]);
+            let got = c(
+                &mut rt,
+                "com/google/common/collect/Multimap.get.(Ljava/lang/Object;)Ljava/util/Collection;",
+                &[m, key],
+            );
+            assert_eq!(elements(&rt, got), held, "{factory}");
+            let all = c(&mut rt, entries, &[m]);
+            assert_eq!(elements(&rt, all).len(), held.len(), "{factory}");
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

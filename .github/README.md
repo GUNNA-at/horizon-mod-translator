@@ -14,7 +14,7 @@ runtime written in Rust answers their calls into Minecraft, NeoForge and Java. I
 a list of supported ones. Create and its addons are the test case.
 
 <!-- progress:headline -->
-**85.0%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **92.6%** of their call sites. Java's libraries: **94.3%** of the calls. Create alone: **96.7%** of its call sites. Run 44, 8 November 2026.
+**85.2%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **92.7%** of their call sites. Java's libraries: **94.3%** of the calls. Create alone: **96.8%** of its call sites. Run 46, 9 November 2026.
 <!-- /progress -->
 
 | If you were shown this | If you work on Horizon |
@@ -37,12 +37,12 @@ code calls one. The step at run 6 is the probe starting to call through a game h
 instance methods only on real objects, so a few counted answers were taken back.</sub>
 
 <!-- progress:table -->
-| Run 44, 367 jars | Methods answered | Call sites answered |
+| Run 46, 367 jars | Methods answered | Call sites answered |
 |---|---:|---:|
-| Minecraft and NeoForge API | **85.0%**<br><sub>110,665 of 130,223</sub> | **92.6%**<br><sub>345,142 of 372,742</sub> |
-| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **83.5%**<br><sub>61,858 of 74,081</sub> | **94.3%**<br><sub>336,963 of 357,517</sub> |
-| Create 6.0.10, its API calls | **83.5%**<br><sub>3,315 of 3,971</sub> | **96.7%**<br><sub>24,416 of 25,240</sub> |
-| Create 6.0.10, its library calls | **82.7%**<br><sub>1,325 of 1,602</sub> | **97.5%**<br><sub>14,052 of 14,416</sub> |
+| Minecraft and NeoForge API | **85.2%**<br><sub>110,886 of 130,223</sub> | **92.7%**<br><sub>345,506 of 372,742</sub> |
+| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **83.5%**<br><sub>61,862 of 74,081</sub> | **94.3%**<br><sub>336,967 of 357,517</sub> |
+| Create 6.0.10, its API calls | **83.7%**<br><sub>3,323 of 3,971</sub> | **96.8%**<br><sub>24,425 of 25,240</sub> |
+| Create 6.0.10, its library calls | **82.8%**<br><sub>1,326 of 1,602</sub> | **97.5%**<br><sub>14,053 of 14,416</sub> |
 <!-- /progress -->
 
 <picture>
@@ -60,6 +60,7 @@ jar's number of game calls on a log scale, the checkered top the share not answe
 <!-- progress:history -->
 | Run | Date | API methods | Call sites | Create, call sites |
 |---:|---|---:|---:|---:|
+| 46 | 2026-11-09 | 85.2% | 92.7% | 96.8% |
 | 44 | 2026-11-08 | 85.0% | 92.6% | 96.7% |
 | 43 | 2026-11-08 | 83.7% | 91.6% | 96.6% |
 | 42 | 2026-11-08 | 83.6% | 91.5% | 96.6% |
@@ -136,6 +137,10 @@ result comes from a scene set up by command, read back from the world's data and
 - **Logistics and redstone.** Funnels, hoppers, stockpile switches, redstone links, nixie tubes, display
   boards, controller rails, mechanical pistons and rope pulleys.
 - **Survival.** Create's advancements, its potato cannon, its toolbox, and its saws' damage.
+- **Trains.** A line of track, a station and two carriages, each a bogey with blocks super-glued onto it:
+  a click on the station opens Create's assembly screen, and its button makes them a train. `/create
+  trains` lists "Unnamed Train, 2 Wagons" waiting at the station, and each carriage is an entity in the
+  world. The trains don't drive yet.
 - **Other mods' mobs.** Waddles' penguins, summoned by command or hatched from their spawn egg, walk
   their pen by their own AI goals and pathfinding, grow up from babies, and are saved with the world: all
   five came back after it was closed and opened again. The game's commands see them as their own:
@@ -153,7 +158,7 @@ result comes from a scene set up by command, read back from the world's data and
   Create and Waddles became an instance of its own (`--new-instance`, or a modpack dropped on the window) and
   played both mods in one world.
 
-Not working yet: trains, NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack has not been run in one game yet.
+Not working yet: trains on the move (they assemble and wait at their station), NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack has not been run in one game yet.
 
 ## Try it
 
@@ -234,7 +239,7 @@ incremental compilation, and keep 15 GB of disk free.
 | [`horizon-port-pack`](../crates/horizon-port-pack) | A pack's content: assets, data, recipes, loot tables, tags, worldgen |
 | Horizon | The engine. It gets general hooks (`tools/native-hook-fragments/`), never code for one mod |
 
-About 182,000 lines of Rust across the three crates, most of it the API surface. Mojang's and the mods'
+About 183,000 lines of Rust across the three crates, most of it the API surface. Mojang's and the mods'
 files are never committed. Every translation is built from the user's own jars.
 
 ## How the numbers are checked
@@ -246,7 +251,7 @@ files are never committed. Every translation is built from the user's own jars.
   figures above.
 - **The specification.** Behaviour is checked against NeoForge 21.1.256's and Minecraft 1.21.1's bytecode
   (`javap`), against the libraries' own jars, and against JDK 21 oracles for `java.*`.
-- **Tests.** `horizon-compat` has 726 unit tests. The translator's tests include a differential test: the
+- **Tests.** `horizon-compat` has 734 unit tests. The translator's tests include a differential test: the
   same Java runs on the JVM and translated, and the results must match bit for bit.
 - **In the game.** Scenes are set up and read back with `horizon-ctl`: block and entity data, and
   screenshots.

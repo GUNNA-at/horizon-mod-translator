@@ -777,9 +777,11 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
             }
         }
         FLUID_STACK => put_fluid(rt, buf, value),
+        // A component whole (its translation key and arguments, style and siblings), as vanilla's
+        // `ComponentSerialization.STREAM_CODEC` writes it: a train's name stays translatable.
         COMPONENT => {
-            let s = text(rt, rt.get_field(value, "$text"));
-            put_utf(rt, buf, &s);
+            let n = crate::api_common::component_nbt(rt, value);
+            put_nbt(rt, buf, Some(&n));
         }
         ENUM => {
             let o = ordinal(rt, value);
@@ -1001,13 +1003,10 @@ fn decode_native(rt: &mut Rt, c: V, buf: V) -> Option<V> {
             let name = location.strip_prefix("minecraft:").unwrap_or(&location).to_owned();
             rt.string(&name)
         }
-        COMPONENT => {
-            let s = read_utf(rt, buf)?;
-            let t = rt.new_object("net/minecraft/network/chat/MutableComponent");
-            let s = rt.string(&s);
-            rt.put_field(t, "$text", s);
-            t
-        }
+        COMPONENT => match read_nbt(rt, buf)? {
+            Some(n) => crate::api_common::component_from_nbt(rt, &n),
+            None => V::NULL,
+        },
         _ => V::NULL,
     })
 }
@@ -1996,6 +1995,62 @@ mod tests {
         let y = -60i64 & 0xFFF;
         assert_eq!(bytes, (x | z | y).to_be_bytes().to_vec());
         assert_eq!(native(&rt, back)[..3], [-36, -60, 1_000_001]);
+    }
+
+    /// A component in a packet (`ComponentSerialization.STREAM_CODEC`, a Create train's name):
+    /// its NBT as vanilla's `NbtOps` writes it (plain text a string tag; a translation a compound
+    /// whose `with` of mixed tags holds each under `""`), and back whole, so the client reads
+    /// "Unnamed Train" in its own language, not the server's key.
+    #[test]
+    fn a_component_travels_whole_and_stays_translatable() {
+        let mut rt = Rt::new();
+        crate::install();
+        let codec = sv(
+            &mut rt,
+            "net/minecraft/network/chat/ComponentSerialization.STREAM_CODEC",
+        );
+        let plain = rt.string("Train");
+        let plain = crate::api_common::component(&mut rt, plain, false, V::NULL);
+        let (bytes, back) = round_trip(&mut rt, codec, plain);
+        // `TAG_String` (8), then the UTF: two bytes of length and the text.
+        assert_eq!(bytes, [&[8u8, 0, 5][..], b"Train"].concat());
+        assert_eq!(
+            crate::api_common::component_json(&rt, back),
+            serde_json::json!({ "text": "Train" })
+        );
+        // A translation of a string and a styled component, a bold sibling after it.
+        let id = rt.string("fbfc9");
+        let station = rt.string("Station");
+        let station = crate::api_common::component(&mut rt, station, false, V::NULL);
+        let gold = rt.string("GOLD,");
+        rt.put_field(station, "$style", gold);
+        let with = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![id, station]));
+        let key = rt.string("create.train.arrived_at");
+        let name = crate::api_common::component(&mut rt, key, true, with);
+        let tail = rt.string("!");
+        let tail = crate::api_common::component(&mut rt, tail, false, V::NULL);
+        let bold = rt.string("BOLD,");
+        rt.put_field(tail, "$style", bold);
+        let extra = crate::jutil::new_list(&mut rt, vec![tail]);
+        rt.put_field(name, "$extra", extra);
+        let (bytes, back) = round_trip(&mut rt, codec, name);
+        let sent = crate::nbt::Reader::new(&bytes)
+            .any()
+            .flatten()
+            .expect("a tag");
+        let expected = serde_json::json!({
+            "translate": "create.train.arrived_at",
+            "with": [{ "": "fbfc9" }, { "": { "text": "Station", "color": "gold" } }],
+            "extra": [{ "text": "!", "bold": 1 }],
+        });
+        assert_eq!(crate::recipes::nbt_json(&sent), expected);
+        let whole = serde_json::json!({
+            "translate": "create.train.arrived_at",
+            "with": ["fbfc9", { "text": "Station", "color": "gold" }],
+            "extra": [{ "text": "!", "bold": true }],
+        });
+        assert_eq!(crate::api_common::component_json(&rt, back), whole);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

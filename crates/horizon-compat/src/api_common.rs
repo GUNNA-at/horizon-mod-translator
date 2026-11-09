@@ -4851,37 +4851,157 @@ fn component_core_json(rt: &Rt, c: V) -> serde_json::Value {
     Value::Object(o)
 }
 
+/// A component as NBT, as vanilla's `ComponentSerialization.CODEC` writes it with `NbtOps`: plain
+/// text alone as a string, else [`component_json`]'s compound, where a list of tags of different
+/// types (`with`'s text and components) holds each in a compound under `""`.
+pub(crate) fn component_nbt(rt: &Rt, c: V) -> crate::nbt::Nbt {
+    use crate::nbt::Nbt;
+    use serde_json::Value;
+    fn tag(j: &Value) -> Option<Nbt> {
+        Some(match j {
+            Value::Object(o) => Nbt::Compound(
+                o.iter()
+                    .filter_map(|(k, v)| Some((k.clone(), tag(v)?)))
+                    .collect(),
+            ),
+            Value::Array(a) => {
+                let items: Vec<Nbt> = a.iter().filter_map(tag).collect();
+                let mixed = items
+                    .windows(2)
+                    .any(|w| std::mem::discriminant(&w[0]) != std::mem::discriminant(&w[1]));
+                if mixed {
+                    Nbt::List(
+                        items
+                            .into_iter()
+                            .map(|t| Nbt::Compound([(String::new(), t)].into_iter().collect()))
+                            .collect(),
+                    )
+                } else {
+                    Nbt::List(items)
+                }
+            }
+            other => crate::recipes::json_nbt(other)?,
+        })
+    }
+    let j = component_json(rt, c);
+    if let Value::Object(o) = &j
+        && o.len() == 1
+        && let Some(Value::String(text)) = o.get("text")
+    {
+        return Nbt::String(text.clone());
+    }
+    tag(&j).unwrap_or_else(|| Nbt::String(String::new()))
+}
+
+/// [`component_nbt`]'s tag back as a component.
+pub(crate) fn component_from_nbt(rt: &mut Rt, n: &crate::nbt::Nbt) -> V {
+    component_from_json(rt, &crate::recipes::nbt_json(n))
+}
+
+/// A list element as `NbtOps` reads it: one a list of mixed tags wrapped (`{"": x}`) is `x`.
+fn unwrapped(j: &serde_json::Value) -> &serde_json::Value {
+    match j.as_object() {
+        Some(o) if o.len() == 1 => o.get("").unwrap_or(j),
+        _ => j,
+    }
+}
+
 /// A component vanilla's serializer reads from `j`: a string is literal text, an array its first
-/// part (its siblings left out), an object its `translate` (with `with`) or `text`.
+/// part with the rest its siblings, an object its `translate` (with `with`) or `text`, its style
+/// (`color`, `bold`...) and its siblings (`extra`).
 pub(crate) fn component_from_json(rt: &mut Rt, j: &serde_json::Value) -> V {
     use serde_json::Value;
-    match j {
-        Value::Object(o) => match o.get("translate").and_then(Value::as_str) {
-            Some(key) => {
-                let key = rt.string(key);
-                let args: Vec<V> = match o.get("with") {
-                    Some(Value::Array(a)) => a
-                        .iter()
-                        .map(|v| match v {
-                            Value::String(s) => rt.string(s),
-                            Value::Number(n) if n.is_i64() => integer(rt, n.as_i64().unwrap_or(0) as i32),
-                            Value::Bool(b) => boolean(rt, *b),
-                            other => component_from_json(rt, other),
-                        })
-                        .collect(),
-                    _ => Vec::new(),
+    match unwrapped(j) {
+        Value::Object(o) => {
+            let c = match o.get("translate").and_then(Value::as_str) {
+                Some(key) => {
+                    let key = rt.string(key);
+                    let args: Vec<V> = match o.get("with") {
+                        Some(Value::Array(a)) => a
+                            .iter()
+                            .map(|v| match unwrapped(v) {
+                                Value::String(s) => rt.string(s),
+                                Value::Number(n) if n.is_i64() => {
+                                    integer(rt, n.as_i64().unwrap_or(0) as i32)
+                                }
+                                Value::Bool(b) => boolean(rt, *b),
+                                other => component_from_json(rt, other),
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let with = if args.is_empty() {
+                        V::NULL
+                    } else {
+                        rt.alloc("[Ljava/lang/Object;", Data::Array(args))
+                    };
+                    component(rt, key, true, with)
+                }
+                None => {
+                    let text = o
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    let t = rt.string(&text);
+                    component(rt, t, false, V::NULL)
+                }
+            };
+            // The style's tokens, as `component_json` reads them: the colour, then each format on
+            // or off (`!BOLD`).
+            let mut tokens = String::new();
+            if let Some(colour) = o.get("color").and_then(Value::as_str) {
+                tokens.push_str(&if colour.starts_with('#') {
+                    colour.to_owned()
+                } else {
+                    colour.to_ascii_uppercase()
+                });
+                tokens.push(',');
+            }
+            for (key, token) in [
+                ("bold", "BOLD"),
+                ("italic", "ITALIC"),
+                ("underlined", "UNDERLINE"),
+                ("strikethrough", "STRIKETHROUGH"),
+                ("obfuscated", "OBFUSCATED"),
+            ] {
+                let on = match o.get(key) {
+                    Some(Value::Bool(b)) => *b,
+                    Some(Value::Number(n)) => n.as_i64() != Some(0),
+                    _ => continue,
                 };
-                let with = if args.is_empty() { V::NULL } else { rt.alloc("[Ljava/lang/Object;", Data::Array(args)) };
-                component(rt, key, true, with)
+                if !on {
+                    tokens.push('!');
+                }
+                tokens.push_str(token);
+                tokens.push(',');
             }
-            None => {
-                let text = o.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
-                let t = rt.string(&text);
-                component(rt, t, false, V::NULL)
+            if !tokens.is_empty() {
+                let t = rt.string(&tokens);
+                rt.put_field(c, "$style", t);
             }
-        },
-        Value::Array(a) => match a.first() {
-            Some(first) => component_from_json(rt, first),
+            if let Some(Value::Array(extra)) = o.get("extra") {
+                let parts: Vec<V> = extra.iter().map(|e| component_from_json(rt, e)).collect();
+                let list = crate::jutil::new_list(rt, parts);
+                rt.put_field(c, "$extra", list);
+            }
+            c
+        }
+        Value::Array(a) => match a.split_first() {
+            Some((first, rest)) => {
+                let c = component_from_json(rt, first);
+                if !rest.is_empty() {
+                    let mut extra = crate::jutil::elements(rt, rt.get_field(c, "$extra"));
+                    extra.extend(
+                        rest.iter()
+                            .map(|e| component_from_json(rt, e))
+                            .collect::<Vec<_>>(),
+                    );
+                    let list = crate::jutil::new_list(rt, extra);
+                    rt.put_field(c, "$extra", list);
+                }
+                c
+            }
             None => {
                 let t = rt.string("");
                 component(rt, t, false, V::NULL)

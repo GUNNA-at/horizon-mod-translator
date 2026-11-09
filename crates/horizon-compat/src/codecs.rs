@@ -1122,7 +1122,7 @@ pub(crate) fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String>
                 None => Nbt::Compound(BTreeMap::new()),
             }
         }
-        "component" => crate::recipes::json_nbt(&crate::api_common::component_json(rt, v)).ok_or("Not a component")?,
+        "component" => crate::api_common::component_nbt(rt, v),
         n if n.starts_with("tag_key/") || n.starts_with("hashed_tag_key/") => {
             let location = rt.str_of(rt.get_field(v, "$location")).ok_or("Not a tag key")?.to_owned();
             Nbt::String(if n.starts_with("hashed") { format!("#{location}") } else { location })

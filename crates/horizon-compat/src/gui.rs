@@ -819,6 +819,15 @@ fn text_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
             let font = crate::neo::location(rt, a(1));
             rt.intern(format!("compat:font-set/{font}"), |rt| rt.new_object(FONT_SET))
         }
+        // A mod's font made of the game's (Create's `NoShadowFontWrapper`:
+        // `super(font.fonts, false)`): its `fonts` give each font's set as `getFontSet` does, and
+        // the text goes to the host either way.
+        (FONT, "<init>") if desc == "(Ljava/util/function/Function;Z)V" => V::Void,
+        (FONT, "$fonts") => crate::functions::bound(
+            rt,
+            "net/minecraft/client/gui/Font.getFontSet.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/gui/font/FontSet;",
+            a(0),
+        ),
         (FONT_SET, "whiteGlyph") => rt.intern("compat:white-glyph".into(), |rt| rt.new_object(BAKED_GLYPH)),
         (BAKED_GLYPH, "renderType") => {
             let mode = rt.get_field(a(1), "$ordinal").i().clamp(0, 2) as usize;

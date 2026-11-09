@@ -64,6 +64,131 @@ pub(crate) fn raw_brightness(rt: &Rt, pos: [i32; 3], darkening: i32) -> i32 {
     block.max(sky - darkening)
 }
 
+pub(crate) const DIFFICULTY: &str = "net/minecraft/world/Difficulty";
+pub(crate) const DIFFICULTY_INSTANCE: &str = "net/minecraft/world/DifficultyInstance";
+/// `Difficulty`'s constants by id (their ordinal).
+const DIFFICULTIES: [&str; 4] = ["PEACEFUL", "EASY", "NORMAL", "HARD"];
+/// `DimensionType.MOON_BRIGHTNESS_PER_PHASE`.
+const MOON_BRIGHTNESS: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
+const TRANSLATABLE: &str = "net/minecraft/network/chat/Component.translatable.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;";
+
+/// `Difficulty.byId(id)`: an id past the last wraps round (`ByIdMap`'s `WRAP`).
+fn difficulty(rt: &mut Rt, id: i32) -> V {
+    let id = id.rem_euclid(4);
+    crate::api::api_enum(rt, DIFFICULTY, DIFFICULTIES[id as usize], id)
+}
+
+/// `DifficultyInstance.calculateDifficulty`: the effective difficulty of difficulty `id` when the
+/// world's clock reads `level_time`, in a chunk players spent `inhabited` ticks in, under a moon of
+/// brightness `moon`.
+fn effective_difficulty(id: i32, level_time: i64, inhabited: i64, moon: f32) -> f32 {
+    if id == 0 {
+        return 0.0;
+    }
+    let global = ((level_time as f32 + -72000.0) / 1_440_000.0).clamp(0.0, 1.0) * 0.25;
+    let mut local =
+        (inhabited as f32 / 3_600_000.0).clamp(0.0, 1.0) * if id == 3 { 1.0 } else { 0.75 };
+    local += (moon * 0.25).clamp(0.0, global);
+    if id == 1 {
+        local *= 0.5;
+    }
+    id as f32 * (0.75 + global + local)
+}
+
+/// A `DifficultyInstance` of difficulty `id` whose effective difficulty is `effective`.
+fn difficulty_instance(rt: &mut Rt, id: i32, effective: f32) -> V {
+    let o = rt.new_object(DIFFICULTY_INSTANCE);
+    let base = difficulty(rt, id);
+    rt.put_field(o, "$base", base);
+    rt.put_field(o, "$effective", V::F(effective));
+    o
+}
+
+/// The world's difficulty and the regional difficulty at `pos`, as the game works them out.
+fn local_difficulty(rt: &Rt, pos: [i32; 3]) -> (i32, f32) {
+    rt.host().map_or((2, 1.5), |h| h.local_difficulty(pos))
+}
+
+/// `Difficulty`'s and `DifficultyInstance`'s own methods: what a mod's mob is equipped and
+/// enchanted by as it spawns (`finalizeSpawn` gets the instance). None for another class's.
+pub(crate) fn difficulty_call(
+    rt: &mut Rt,
+    owner: &str,
+    name: &str,
+    desc: &str,
+    args: &[V],
+) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    match owner {
+        DIFFICULTY => {
+            let key = |rt: &Rt| {
+                DIFFICULTIES[crate::api_common::enum_ordinal(rt, a(0)).clamp(0, 3) as usize]
+                    .to_lowercase()
+            };
+            Some(match (name, desc) {
+                ("getId", "()I") => V::I(crate::api_common::enum_ordinal(rt, a(0))),
+                ("byId", "(I)Lnet/minecraft/world/Difficulty;") => difficulty(rt, a(0).i()),
+                ("byName", "(Ljava/lang/String;)Lnet/minecraft/world/Difficulty;") => {
+                    let name = rt.str_of(a(0)).unwrap_or_default().to_owned();
+                    match DIFFICULTIES.iter().position(|d| {
+                        d.eq_ignore_ascii_case(&name)
+                            && name.bytes().all(|b| !b.is_ascii_uppercase())
+                    }) {
+                        Some(id) => difficulty(rt, id as i32),
+                        None => V::NULL,
+                    }
+                }
+                ("getKey" | "getSerializedName", "()Ljava/lang/String;") => {
+                    let key = key(rt);
+                    rt.string(&key)
+                }
+                ("getDisplayName" | "getInfo", "()Lnet/minecraft/network/chat/Component;") => {
+                    let info = if name == "getInfo" { ".info" } else { "" };
+                    let text = rt.string(&format!("options.difficulty.{}{info}", key(rt)));
+                    crate::api::call(rt, TRANSLATABLE, &[text])
+                }
+                _ => return None,
+            })
+        }
+        DIFFICULTY_INSTANCE => {
+            let effective = |rt: &Rt| rt.get_field(a(0), "$effective").f();
+            Some(match (name, desc) {
+                ("<init>", "(Lnet/minecraft/world/Difficulty;JJF)V") => {
+                    let id = crate::api_common::enum_ordinal(rt, a(1));
+                    rt.put_field(a(0), "$base", a(1));
+                    rt.put_field(
+                        a(0),
+                        "$effective",
+                        V::F(effective_difficulty(id, a(2).j(), a(3).j(), a(4).f())),
+                    );
+                    V::Void
+                }
+                ("getDifficulty", "()Lnet/minecraft/world/Difficulty;") => {
+                    rt.get_field(a(0), "$base")
+                }
+                ("getEffectiveDifficulty", "()F") => V::F(effective(rt)),
+                // Hard: at least `Difficulty.HARD.ordinal()`.
+                ("isHard", "()Z") => V::I(i32::from(effective(rt) >= 3.0)),
+                ("isHarderThan", "(F)Z") => V::I(i32::from(effective(rt) > a(1).f())),
+                // 0 below 2, 1 above 4, linear between: the chance a zombie picks up loot, a skeleton's
+                // enchanted bow.
+                ("getSpecialMultiplier", "()F") => {
+                    let e = effective(rt);
+                    V::F(if e < 2.0 {
+                        0.0
+                    } else if e > 4.0 {
+                        1.0
+                    } else {
+                        (e - 2.0) / 2.0
+                    })
+                }
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// The level's answer to `name` (`desc`, `args` with the level first), or None for another call.
 pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -88,6 +213,20 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
         ("getTimeOfDay", _) => V::F(time_of_day(rt)),
         ("getSunAngle", _) => V::F(time_of_day(rt) * std::f32::consts::TAU),
         ("getMoonPhase", _) => V::I(((fixed_time(rt).unwrap_or_else(|| day_time(rt)) / 24000 % 8 + 8) % 8) as i32),
+        ("getMoonBrightness", "()F") => V::F(MOON_BRIGHTNESS[((fixed_time(rt).unwrap_or_else(|| day_time(rt)) / 24000 % 8 + 8) % 8) as usize]),
+        // `getCurrentDifficultyAt(pos)`: the regional difficulty there, as the game works it out;
+        // `getDifficulty()`, the world's.
+        (
+            "getCurrentDifficultyAt",
+            "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/DifficultyInstance;",
+        ) => {
+            let (id, effective) = local_difficulty(rt, pos(rt, 1));
+            difficulty_instance(rt, id, effective)
+        }
+        ("getDifficulty", "()Lnet/minecraft/world/Difficulty;") => {
+            let (id, _) = local_difficulty(rt, [0, 0, 0]);
+            difficulty(rt, id)
+        }
         ("isDay", _) => V::I((fixed_time(rt).is_none() && sky_darken(rt) < 4) as i32),
         ("isNight", _) => V::I((fixed_time(rt).is_none() && sky_darken(rt) >= 4) as i32),
         ("getRainLevel", _) => V::F(weather(rt).0),
@@ -309,6 +448,158 @@ mod tests {
     fn level_call(rt: &mut Rt, name_desc: &str, args: &[V]) -> V {
         let key: &'static str = Box::leak(format!("{LEVEL}.{name_desc}").into_boxed_str());
         crate::api::call(rt, key, args)
+    }
+
+    /// Where blocks and entities tick is the game's (its players' simulation distance): Create
+    /// makes a train's carriage an entity only where `isPositionEntityTicking` says yes, and asks
+    /// of a chunk by position or by its `ChunkPos.asLong`.
+    #[test]
+    fn a_mod_asks_the_game_which_chunks_tick() {
+        let server = "net/minecraft/server/level/ServerLevel";
+        let call = |rt: &mut Rt, key: &str, args: &[V]| {
+            crate::api::call(
+                rt,
+                Box::leak(format!("{server}.{key}").into_boxed_str()),
+                args,
+            )
+        };
+        let mut host = MemoryHost {
+            frozen_chunks: vec![[1, -1]],
+            ..MemoryHost::default()
+        };
+        with_host(&mut host, |rt| {
+            let level = rt.new_object(server);
+            // Block (20, 100, -3) is in chunk (1, -1); (15, 100, -3) in (0, -1).
+            let frozen = crate::api::block_pos(rt, 20, 100, -3);
+            let ticking = crate::api::block_pos(rt, 15, 100, -3);
+            for name in ["isPositionEntityTicking", "isNaturalSpawningAllowed"] {
+                let key = format!("{name}.(Lnet/minecraft/core/BlockPos;)Z");
+                assert_eq!(call(rt, &key, &[level, frozen]), V::I(0), "{name}");
+                assert_eq!(call(rt, &key, &[level, ticking]), V::I(1), "{name}");
+            }
+            assert_eq!(
+                level_call(
+                    rt,
+                    "shouldTickBlocksAt.(Lnet/minecraft/core/BlockPos;)Z",
+                    &[level, frozen]
+                ),
+                V::I(0)
+            );
+            // `ChunkPos.asLong(x, z)`: x in the low 32 bits, z in the high.
+            let as_long =
+                |x: i32, z: i32| V::J((i64::from(x) & 0xFFFF_FFFF) | (i64::from(z) << 32));
+            assert_eq!(
+                call(rt, "shouldTickBlocksAt.(J)Z", &[level, as_long(1, -1)]),
+                V::I(0)
+            );
+            assert_eq!(
+                call(rt, "shouldTickBlocksAt.(J)Z", &[level, as_long(-1, 1)]),
+                V::I(1)
+            );
+            assert_eq!(
+                call(rt, "areEntitiesLoaded.(J)Z", &[level, as_long(1, -1)]),
+                V::I(1)
+            );
+        });
+    }
+
+    /// The regional difficulty a mod's mob spawns with (`getCurrentDifficultyAt`) is the game's,
+    /// and an instance a mod makes works its effective difficulty out as vanilla does: the wiki's
+    /// ranges (easy 0.75 to 1.5, normal 1.5 to 4.0, hard up to 6.75; peaceful 0).
+    #[test]
+    fn a_level_and_a_mod_get_vanillas_regional_difficulty() {
+        const INSTANCE: &str = "net/minecraft/world/DifficultyInstance";
+        let call = |rt: &mut Rt, key: &str, args: &[V]| {
+            crate::api::call(rt, Box::leak(key.to_owned().into_boxed_str()), args)
+        };
+        let mut host = MemoryHost {
+            difficulty: Some((3, 3.375)),
+            ..MemoryHost::default()
+        };
+        with_host(&mut host, |rt| {
+            let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+            let pos = crate::api::block_pos(rt, 4, 64, -9);
+            let d = level_call(
+                rt,
+                "getCurrentDifficultyAt.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/DifficultyInstance;",
+                &[level, pos],
+            );
+            let hard = crate::api::get_static(rt, "net/minecraft/world/Difficulty.HARD");
+            assert_eq!(
+                call(
+                    rt,
+                    &format!("{INSTANCE}.getDifficulty.()Lnet/minecraft/world/Difficulty;"),
+                    &[d]
+                ),
+                hard
+            );
+            assert_eq!(
+                level_call(
+                    rt,
+                    "getDifficulty.()Lnet/minecraft/world/Difficulty;",
+                    &[level]
+                ),
+                hard
+            );
+            assert_eq!(
+                call(rt, &format!("{INSTANCE}.getEffectiveDifficulty.()F"), &[d]),
+                V::F(3.375)
+            );
+            assert_eq!(call(rt, &format!("{INSTANCE}.isHard.()Z"), &[d]), V::I(1));
+            assert_eq!(
+                call(
+                    rt,
+                    &format!("{INSTANCE}.isHarderThan.(F)Z"),
+                    &[d, V::F(3.375)]
+                ),
+                V::I(0)
+            );
+            assert_eq!(
+                call(rt, &format!("{INSTANCE}.getSpecialMultiplier.()F"), &[d]),
+                V::F(0.6875)
+            );
+            // `new DifficultyInstance(difficulty, levelTime, chunkInhabitedTime, moonPhaseFactor)`.
+            let made = |rt: &mut Rt, name: &str, time: i64, inhabited: i64, moon: f32| {
+                let difficulty = crate::api::get_static(
+                    rt,
+                    Box::leak(format!("net/minecraft/world/Difficulty.{name}").into_boxed_str()),
+                );
+                let o = rt.new_object(INSTANCE);
+                call(
+                    rt,
+                    &format!("{INSTANCE}.<init>.(Lnet/minecraft/world/Difficulty;JJF)V"),
+                    &[o, difficulty, V::J(time), V::J(inhabited), V::F(moon)],
+                );
+                let effective =
+                    call(rt, &format!("{INSTANCE}.getEffectiveDifficulty.()F"), &[o]).f();
+                let special = call(rt, &format!("{INSTANCE}.getSpecialMultiplier.()F"), &[o]).f();
+                (effective, special)
+            };
+            // The longest-played chunk of an old world under a full moon, and a new world's.
+            let (old, full_moon, new) = (72_000 + 1_440_000, 1.0, 0);
+            assert_eq!(made(rt, "EASY", new, 0, full_moon), (0.75, 0.0));
+            assert_eq!(made(rt, "EASY", old, 3_600_000, full_moon), (1.5, 0.0));
+            assert_eq!(made(rt, "NORMAL", new, 0, full_moon), (1.5, 0.0));
+            assert_eq!(made(rt, "NORMAL", old, 3_600_000, full_moon), (4.0, 1.0));
+            assert_eq!(made(rt, "HARD", old, 3_600_000, full_moon), (6.75, 1.0));
+            assert_eq!(made(rt, "PEACEFUL", old, 3_600_000, full_moon), (0.0, 0.0));
+            // `Difficulty.byId` wraps round; its key names it.
+            let easy = call(
+                rt,
+                "net/minecraft/world/Difficulty.byId.(I)Lnet/minecraft/world/Difficulty;",
+                &[V::I(5)],
+            );
+            assert_eq!(
+                easy,
+                crate::api::get_static(rt, "net/minecraft/world/Difficulty.EASY")
+            );
+            let key = call(
+                rt,
+                "net/minecraft/world/Difficulty.getKey.()Ljava/lang/String;",
+                &[easy],
+            );
+            assert_eq!(rt.str_of(key), Some("easy"));
+        });
     }
 
     #[test]

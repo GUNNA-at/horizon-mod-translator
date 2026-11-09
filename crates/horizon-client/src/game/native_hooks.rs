@@ -5173,6 +5173,27 @@ impl Game<'_> {
     pub(super) fn native_day_time(&self) -> i64 {
         self.world.day_time
     }
+    /// The world's difficulty id (0 peaceful to 3 hard) and the regional
+    /// difficulty at `pos` (`Level.getCurrentDifficultyAt`, its
+    /// `DifficultyInstance.getEffectiveDifficulty`: the difficulty, the clock,
+    /// the time players spent in its chunk, the moon): what a mod's mob is
+    /// equipped and enchanted by as it spawns. API @API:native_world_state@.
+    pub(super) fn native_local_difficulty(&self, pos: [i32; 3]) -> (i32, f32) {
+        let d = self.local_difficulty([f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])]);
+        (i32::from(d.base), d.effective)
+    }
+    /// Whether the chunk at `pos` ticks its blocks and its entities, as
+    /// `(blocks, entities)` (`Level.shouldTickBlocksAt`,
+    /// `ServerLevel.isPositionEntityTicking`: from every player's tickets and
+    /// the forced chunks): where a mod's train keeps its carriages as entities.
+    /// API @API:native_world_state@.
+    pub(super) fn native_ticking(&self, pos: [i32; 3]) -> (bool, bool) {
+        let levels = self.tickets.levels();
+        (
+            levels.block_ticking_at(pos[0], pos[2]),
+            levels.entity_ticking_at(pos[0], pos[2]),
+        )
+    }
     /// The lowest block y and the height of the world in place
     /// (`LevelHeightAccessor.getMinY` and `getHeight`): how deep a quarry or a
     /// miner may dig. API @API:native_world_state@.

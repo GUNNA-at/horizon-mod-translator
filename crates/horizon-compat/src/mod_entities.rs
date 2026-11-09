@@ -390,7 +390,17 @@ pub(crate) fn construct(rt: &mut Rt, e: V, ty: V, level: V) {
         rt.put_field(e, f, V::I(0));
     }
     rt.put_field(e, "invulnerableTime", V::I(0));
-    rt.put_field(e, "fallDistance", V::F(0.0));
+    // Its fall and the distances it walked, moved and flew (Create's glue copies `walkDist` into
+    // `walkDistO` each tick).
+    for f in [
+        "fallDistance",
+        "walkDist",
+        "walkDistO",
+        "moveDist",
+        "flyDist",
+    ] {
+        rt.put_field(e, f, V::F(0.0));
+    }
     let zero = vec3(rt, [0.0; 3]);
     rt.put_field(e, "$motion", zero);
     let uuid = api::call(rt, "java/util/UUID.randomUUID.()Ljava/util/UUID;", &[]);
@@ -573,7 +583,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(name, "addFreshEntity" | "getEntity" | "getPlayerByUUID" | "broadcastEntityEvent")
         || matches!(owner, TYPE_BUILDER | ENTITY_TYPE | SYNCHED | SYNCHED_BUILDER | ACCESSOR | ENTITY | "net/minecraft/network/syncher/EntityDataSerializer")
         || (owner == DIMENSIONS && matches!(name, "fixed" | "scalable" | "scale" | "withEyeHeight" | "makeBoundingBox"))
-        || (name == "isSuppressingBounce" && owner.starts_with("net/minecraft/"))
+        || (matches!(name, "isSuppressingBounce" | "isDiscrete" | "isDescending") && owner.starts_with("net/minecraft/"))
         || (owner == MOB_CATEGORY && matches!(name, "getName" | "getSerializedName" | "getMaxInstancesPerChunk" | "isFriendly" | "isPersistent" | "getDespawnDistance" | "getNoDespawnDistance"))
         || crate::projectiles::is_projectile_class(owner)
         || (owner == crate::riding::MOVE_FUNCTION && name == "accept")
@@ -643,9 +653,13 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
     {
         return Some(by_uuid(rt, a(1), name == "getPlayerByUUID"));
     }
-    // `Entity.isSuppressingBounce()`, for any entity: 1.21.1's is its `isShiftKeyDown()` (a
-    // sneaking player doesn't bounce on slime, a bed or Create's seats and sails).
-    if name == "isSuppressingBounce" && desc == "()Z" && a(0).r() != 0 {
+    // `Entity.isSuppressingBounce()`, `isDiscrete()` and `isDescending()`, for any entity: 1.21.1's
+    // are its `isShiftKeyDown()` (a sneaking player doesn't bounce on slime, a bed or Create's
+    // seats and sails, is seen less far by mobs, and goes down scaffolding).
+    if matches!(name, "isSuppressingBounce" | "isDiscrete" | "isDescending")
+        && desc == "()Z"
+        && a(0).r() != 0
+    {
         return Some(api::virtual_call(rt, SHIFT_KEY_DOWN, &[a(0)]));
     }
     match (owner, name) {
@@ -1147,6 +1161,18 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let u = rt.get_field(e, "uuid");
             api::call(rt, "java/util/UUID.toString.()Ljava/lang/String;", &[u])
         }
+        // `newDoubleList(double...)` and `newFloatList(float...)`: what a mod's save writes its own
+        // vectors with (Create's contraptions their initial orientation).
+        "newDoubleList" | "newFloatList" => {
+            let values = match rt.heap.get(a(1).r() as usize).map(|o| &o.data) {
+                Some(Data::Array(v)) if a(1).r() != 0 => v.clone(),
+                _ => {
+                    rt.throw_new("java/lang/NullPointerException");
+                    return Some(V::NULL);
+                }
+            };
+            number_list(rt, &values, name == "newFloatList")
+        }
         "level" | "getCommandSenderWorld" => rt.get_field(e, "$level"),
         "getType" => rt.get_field(e, "$type"),
         "isAlive" => V::I((rt.get_field(e, "removalReason").r() == 0) as i32),
@@ -1170,7 +1196,9 @@ fn entity_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             crate::riding::eject_removed(rt, e);
             V::Void
         }
-        "onRemovedFromLevel" | "onClientRemoval" | "onAddedToLevel" | "refreshDimensions" => {
+        // `onSyncedDataUpdated(key)` (an override's `super` call) refreshes the dimensions for its
+        // pose, which don't change here.
+        "onRemovedFromLevel" | "onClientRemoval" | "onAddedToLevel" | "refreshDimensions" | "onSyncedDataUpdated" => {
             V::Void
         }
         // `Entity.tick`: the base tick (virtual: a class's own `baseTick` first).
@@ -1431,32 +1459,51 @@ fn remove(rt: &mut Rt, e: V, reason: V) {
     }
 }
 
+/// A `ListTag` of `values`, each a `DoubleTag` (`Entity.newDoubleList`) or, with `floats`, a
+/// `FloatTag` (`newFloatList`).
+fn number_list(rt: &mut Rt, values: &[V], floats: bool) -> V {
+    let list = rt.new_object("net/minecraft/nbt/ListTag");
+    api::call(rt, "net/minecraft/nbt/ListTag.<init>.()V", &[list]);
+    for &v in values {
+        let t = if floats {
+            api::call(
+                rt,
+                "net/minecraft/nbt/FloatTag.valueOf.(F)Lnet/minecraft/nbt/FloatTag;",
+                &[V::F(v.f())],
+            )
+        } else {
+            api::call(
+                rt,
+                "net/minecraft/nbt/DoubleTag.valueOf.(D)Lnet/minecraft/nbt/DoubleTag;",
+                &[V::D(v.d())],
+            )
+        };
+        api::call(
+            rt,
+            "net/minecraft/nbt/ListTag.add.(Ljava/lang/Object;)Z",
+            &[list, t],
+        );
+    }
+    list
+}
+
 /// `Entity.saveWithoutId`: where it is and how it moves, its id, then the subclass's own
 /// (`addAdditionalSaveData`).
 fn save(rt: &mut Rt, e: V, tag: V) {
     let c = |rt: &mut Rt, k: &'static str, args: &[V]| api::call(rt, k, args);
     let p = xyz(rt, e);
     let m = of_vec3(rt, rt.get_field(e, "$motion"));
-    for (key, values) in [("Pos", p), ("Motion", m)] {
-        let list = rt.new_object("net/minecraft/nbt/ListTag");
-        c(rt, "net/minecraft/nbt/ListTag.<init>.()V", &[list]);
-        for v in values {
-            let d = c(rt, "net/minecraft/nbt/DoubleTag.valueOf.(D)Lnet/minecraft/nbt/DoubleTag;", &[V::D(v)]);
-            c(rt, "net/minecraft/nbt/ListTag.add.(Ljava/lang/Object;)Z", &[list, d]);
-        }
+    // Its yaw and pitch, two floats.
+    let r = [rt.get_field(e, "$yRot").f(), rt.get_field(e, "$xRot").f()].map(V::F);
+    for (key, values, floats) in [
+        ("Pos", p.map(V::D).to_vec(), false),
+        ("Motion", m.map(V::D).to_vec(), false),
+        ("Rotation", r.to_vec(), true),
+    ] {
+        let list = number_list(rt, &values, floats);
         let k = rt.string(key);
         c(rt, "net/minecraft/nbt/CompoundTag.put.(Ljava/lang/String;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;", &[tag, k, list]);
     }
-    // Its yaw and pitch, two floats.
-    let list = rt.new_object("net/minecraft/nbt/ListTag");
-    c(rt, "net/minecraft/nbt/ListTag.<init>.()V", &[list]);
-    for field in ["$yRot", "$xRot"] {
-        let r = rt.get_field(e, field).f();
-        let f = c(rt, "net/minecraft/nbt/FloatTag.valueOf.(F)Lnet/minecraft/nbt/FloatTag;", &[V::F(r)]);
-        c(rt, "net/minecraft/nbt/ListTag.add.(Ljava/lang/Object;)Z", &[list, f]);
-    }
-    let k = rt.string("Rotation");
-    c(rt, "net/minecraft/nbt/CompoundTag.put.(Ljava/lang/String;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;", &[tag, k, list]);
     let u = rt.get_field(e, "uuid");
     let k = rt.string("UUID");
     c(rt, "net/minecraft/nbt/CompoundTag.putUUID.(Ljava/lang/String;Ljava/util/UUID;)V", &[tag, k, u]);
@@ -2314,23 +2361,46 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
-    /// An entity that sneaks doesn't bounce (`isSuppressingBounce`, 1.21.1's sneaking): a mod's
-    /// seat asks before it throws one up.
+    /// An entity that sneaks doesn't bounce, is discrete and descends (`isSuppressingBounce`,
+    /// `isDiscrete`, `isDescending`: 1.21.1's sneaking): a mod's seat asks before it throws one up,
+    /// a mob's sight of a player before it follows them.
     #[test]
     fn a_sneaking_entity_suppresses_bouncing() {
         const INIT: &str = "net/minecraft/world/entity/Entity.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V";
         const SNEAK: &str = "net/minecraft/world/entity/Entity.setShiftKeyDown.(Z)V";
-        const SUPPRESSING: &str = "net/minecraft/world/entity/Entity.isSuppressingBounce.()Z";
+        const SNEAKING: [&str; 3] = [
+            "net/minecraft/world/entity/Entity.isSuppressingBounce.()Z",
+            "net/minecraft/world/entity/Entity.isDiscrete.()Z",
+            "net/minecraft/world/entity/Entity.isDescending.()Z",
+        ];
         let (mut rt, ty) = runtime();
         let mut host = MemoryHost::default();
         rt.with_host(&mut host, |rt| {
             let level = crate::glue::level(rt);
             let cart = rt.new_object(CART);
             api::call(rt, INIT, &[cart, ty, level]);
-            assert_eq!(api::call(rt, SUPPRESSING, &[cart]), V::I(0));
+            for key in SNEAKING {
+                assert_eq!(api::call(rt, key, &[cart]), V::I(0), "{key}");
+            }
             api::call(rt, SNEAK, &[cart, V::I(1)]);
-            assert_eq!(api::call(rt, SUPPRESSING, &[cart]), V::I(1));
+            for key in SNEAKING {
+                assert_eq!(api::call(rt, key, &[cart]), V::I(1), "{key}");
+            }
         });
+        // The acting player sneaks as the game says.
+        for sneaking in [false, true] {
+            host.sneaking = sneaking;
+            rt.with_host(&mut host, |rt| {
+                let player = crate::api_common::acting_player(rt);
+                for key in SNEAKING {
+                    assert_eq!(
+                        api::call(rt, key, &[player]),
+                        V::I(i32::from(sneaking)),
+                        "{key}"
+                    );
+                }
+            });
+        }
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
@@ -2352,6 +2422,51 @@ mod tests {
             let hurt = api::game_field(rt, cart, "hurtMarked", "$hurtMarked", HURT_MARKED);
             let fall = api::game_field(rt, cart, "fallDistance", "$fallDistance", FALL_DISTANCE);
             assert_eq!((no_physics, hurt, fall), (V::I(0), V::I(0), V::F(0.0)));
+            // Create's glue copies how far it walked each tick (`walkDistO = walkDist`).
+            const WALK_DIST: &str = "net/minecraft/world/entity/Entity.$walkDist.()F";
+            assert_eq!(
+                api::game_field(rt, cart, "walkDist", "$walkDist", WALK_DIST),
+                V::F(0.0)
+            );
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// What a mod's entity saves with `Entity`'s helpers (Create's oriented contraptions their
+    /// initial orientation): a list of a double tag, or a float tag, per value; its override of
+    /// `onSyncedDataUpdated` may call `Entity`'s.
+    #[test]
+    fn a_mods_entity_saves_its_own_vectors_with_entitys_helpers() {
+        const INIT: &str = "net/minecraft/world/entity/Entity.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V";
+        const DOUBLES: &str =
+            "net/minecraft/world/entity/Entity.newDoubleList.([D)Lnet/minecraft/nbt/ListTag;";
+        const FLOATS: &str =
+            "net/minecraft/world/entity/Entity.newFloatList.([F)Lnet/minecraft/nbt/ListTag;";
+        const SIZE: &str = "net/minecraft/nbt/ListTag.size.()I";
+        const DOUBLE_AT: &str = "net/minecraft/nbt/ListTag.getDouble.(I)D";
+        const FLOAT_AT: &str = "net/minecraft/nbt/ListTag.getFloat.(I)F";
+        const ELEMENT_TYPE: &str = "net/minecraft/nbt/ListTag.getElementType.()B";
+        const SYNCED: &str = "net/minecraft/world/entity/Entity.onSyncedDataUpdated.(Lnet/minecraft/network/syncher/EntityDataAccessor;)V";
+        let (mut rt, ty) = runtime();
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let cart = rt.new_object(CART);
+            api::call(rt, INIT, &[cart, ty, level]);
+            let doubles = rt.alloc("[D", Data::Array(vec![V::D(0.5), V::D(-2.25), V::D(1e9)]));
+            let list = api::call(rt, DOUBLES, &[cart, doubles]);
+            assert_eq!(api::call(rt, SIZE, &[list]), V::I(3));
+            // `Tag.TAG_DOUBLE` is 6, `TAG_FLOAT` 5.
+            assert_eq!(api::call(rt, ELEMENT_TYPE, &[list]), V::I(6));
+            let read: Vec<V> = (0..3)
+                .map(|i| api::call(rt, DOUBLE_AT, &[list, V::I(i)]))
+                .collect();
+            assert_eq!(read, [V::D(0.5), V::D(-2.25), V::D(1e9)]);
+            let floats = rt.alloc("[F", Data::Array(vec![V::F(90.0), V::F(-12.5)]));
+            let list = api::call(rt, FLOATS, &[cart, floats]);
+            assert_eq!(api::call(rt, ELEMENT_TYPE, &[list]), V::I(5));
+            assert_eq!(api::call(rt, FLOAT_AT, &[list, V::I(1)]), V::F(-12.5));
+            assert_eq!(api::call(rt, SYNCED, &[cart, V::NULL]), V::Void);
         });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }

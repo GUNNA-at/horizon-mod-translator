@@ -96,9 +96,13 @@ pub fn game_field(rt: &mut Rt, o: V, name: &'static str, own: &'static str, key:
 /// member it inherits from the API, as `javac` writes inherited calls) is
 /// resolved up the class's superclasses, as the JVM resolves it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
-    if crate::linked::counting() {
-        crate::linked::count("API", key);
+    if crate::linked::diagnosing() {
+        return crate::linked::observed(rt, "API", key, args, |rt| call_unobserved(rt, key, args));
     }
+    call_unobserved(rt, key, args)
+}
+
+fn call_unobserved(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     let depth = DEPTH.with(|d| {
         d.set(d.get() + 1);
         d.get()
@@ -1865,6 +1869,9 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner == crate::level_env::BLOCK_IN_WORLD {
         return crate::level_env::block_in_world(rt, name, args);
     }
+    if let Some(v) = crate::level_env::difficulty_call(rt, owner, name, desc, args) {
+        return Some(v);
+    }
     if owner == CHUNK_STATUS {
         return chunk_status_call(rt, name, args);
     }
@@ -2046,7 +2053,25 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             V::I(c) => V::I(c),
             _ => V::I(rt.host().is_some_and(|h| !h.is_server()) as i32),
         },
-        (_, "isLoaded" | "hasChunkAt" | "hasChunk" | "isAreaLoaded" | "hasChunksAt" | "isInWorldBounds") if level => V::I(1),
+        (_, "isLoaded" | "hasChunkAt" | "hasChunk" | "isAreaLoaded" | "hasChunksAt" | "isInWorldBounds" | "areEntitiesLoaded") if level => V::I(1),
+        // Whether the chunk ticks its blocks (`shouldTickBlocksAt`, of a position or a chunk's
+        // `ChunkPos.asLong`) or its entities (`isPositionEntityTicking`, `isNaturalSpawningAllowed`),
+        // as the game's tickets say: Create keeps a train's carriages as entities only there.
+        (_, "shouldTickBlocksAt" | "isPositionEntityTicking" | "isNaturalSpawningAllowed")
+            if level && desc.ends_with(")Z") =>
+        {
+            let p = match a(1) {
+                V::J(chunk) => [(chunk as i32) << 4, 0, ((chunk >> 32) as i32) << 4],
+                pos if desc.starts_with("(Lnet/minecraft/core/BlockPos;") => pos_of(rt, pos),
+                _ => return None,
+            };
+            let (blocks, entities) = rt.host().map_or((true, true), |h| h.ticking(p));
+            V::I(i32::from(if name == "shouldTickBlocksAt" {
+                blocks
+            } else {
+                entities
+            }))
+        }
         // `mayInteract(player, pos)`: vanilla's `Level` says yes; its `ServerLevel` asks the server's
         // spawn protection and world border, neither of which mods get here, so it says yes too.
         (_, "mayInteract") if level && desc == "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/core/BlockPos;)Z" => V::I(1),

@@ -540,6 +540,20 @@ pub trait Host {
     fn day_time(&self) -> i64 {
         self.game_time()
     }
+    /// The world's difficulty and the regional difficulty at `pos` (`Level.getCurrentDifficultyAt`:
+    /// the difficulty, the clock, the time players spent in its chunk and the moon) as
+    /// `(difficulty id, effective difficulty)`, the id 0 peaceful to 3 hard. A new world's normal
+    /// by default.
+    fn local_difficulty(&self, _pos: [i32; 3]) -> (i32, f32) {
+        (2, 1.5)
+    }
+    /// Whether the chunk at `pos` ticks its blocks and its entities, as `(blocks, entities)`
+    /// (`Level.shouldTickBlocksAt`, `ServerLevel.isPositionEntityTicking`: a player's simulation
+    /// distance or a forced chunk; blocks tick a chunk further). Every chunk a mod reaches does,
+    /// by default.
+    fn ticking(&self, _pos: [i32; 3]) -> (bool, bool) {
+        (true, true)
+    }
     /// The light at `pos` as `(block, sky)`, each 0 to 15 (`Level.getBrightness` of
     /// `LightLayer.BLOCK` and `SKY`): open daylight where the host keeps none.
     fn light(&self, _pos: [i32; 3]) -> (u8, u8) {
@@ -2029,6 +2043,11 @@ pub struct MemoryHost {
     pub read_only: bool,
     /// The time of day ([`Host::day_time`]).
     pub day_time: i64,
+    /// The difficulty and the regional difficulty everywhere ([`Host::local_difficulty`]); None:
+    /// the trait's default.
+    pub difficulty: Option<(i32, f32)>,
+    /// The chunks (x, z) whose blocks and entities don't tick ([`Host::ticking`]).
+    pub frozen_chunks: Vec<[i32; 2]>,
     /// Light by position, `(block, sky)`; unset positions are in open daylight.
     pub light: HashMap<[i32; 3], (u8, u8)>,
     /// The rain and thunder levels.
@@ -2112,6 +2131,13 @@ impl Host for MemoryHost {
     }
     fn day_time(&self) -> i64 {
         self.day_time
+    }
+    fn local_difficulty(&self, _pos: [i32; 3]) -> (i32, f32) {
+        self.difficulty.unwrap_or((2, 1.5))
+    }
+    fn ticking(&self, pos: [i32; 3]) -> (bool, bool) {
+        let ticks = !self.frozen_chunks.contains(&[pos[0] >> 4, pos[2] >> 4]);
+        (ticks, ticks)
     }
     fn light(&self, pos: [i32; 3]) -> (u8, u8) {
         self.light.get(&pos).copied().unwrap_or((0, 15))

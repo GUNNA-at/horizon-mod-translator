@@ -1241,19 +1241,34 @@ fn unescape_regex(p: &str) -> Option<String> {
     Some(out)
 }
 
-/// `String.format` for the conversions mods use: `%s %d %f %.Nf %x %c %b %%` and `%n`.
+/// `String.format` for the conversions mods use: `%s %d %f %.Nf %x %c %b %%` and `%n`, an argument
+/// by its index (`%2$s`, from 1) or the one before again (`%<s`), and `,` grouping thousands.
 fn format_java(rt: &Rt, f: &str, vals: &[V]) -> String {
     let mut out = String::new();
     let mut it = f.chars().peekable();
     let mut next = 0;
+    let mut last = 0;
     while let Some(c) = it.next() {
         if c != '%' {
             out.push(c);
             continue;
         }
         let mut spec = String::new();
+        while let Some(&d) = it.peek().filter(|d| d.is_ascii_digit()) {
+            spec.push(d);
+            it.next();
+        }
+        let mut index = None;
+        if it.peek() == Some(&'$') && !spec.is_empty() {
+            it.next();
+            index = spec.parse::<usize>().ok().map(|n| n.saturating_sub(1));
+            spec.clear();
+        } else if spec.is_empty() && it.peek() == Some(&'<') {
+            it.next();
+            index = Some(last);
+        }
         while let Some(&d) = it.peek() {
-            if d.is_ascii_digit() || d == '.' || d == '-' || d == '0' || d == ',' || d == '+' {
+            if d.is_ascii_digit() || matches!(d, '.' | '-' | ',' | '+' | '#' | ' ' | '(') {
                 spec.push(d);
                 it.next();
             } else {
@@ -1261,28 +1276,35 @@ fn format_java(rt: &Rt, f: &str, vals: &[V]) -> String {
             }
         }
         let Some(conv) = it.next() else { break };
-        let v = vals.get(next).copied().unwrap_or_default();
+        // An ordinary specifier takes the next argument; one with an index doesn't move it on.
+        let k = index.unwrap_or(next);
+        if !matches!(conv, '%' | 'n') {
+            last = k;
+            if index.is_none() {
+                next += 1;
+            }
+        }
+        let v = vals.get(k).copied().unwrap_or_default();
         let unbox = |v: V| match v {
             V::R(_) if rt.class_of(v).starts_with("java/lang/") && rt.str_of(v).is_none() => rt.get_field(v, "value"),
             v => v,
         };
+        let grouped = spec.contains(',');
         let piece = match conv {
             '%' => "%".to_owned(),
             'n' => "\n".to_owned(),
             's' | 'S' => {
-                next += 1;
                 let t = text(rt, v);
                 if conv == 'S' { t.to_uppercase() } else { t }
             }
             'd' => {
-                next += 1;
-                match unbox(v) {
+                let t = match unbox(v) {
                     V::J(j) => j.to_string(),
                     x => x.i().to_string(),
-                }
+                };
+                if grouped { thousands(&t) } else { t }
             }
             'x' | 'X' => {
-                next += 1;
                 let t = match unbox(v) {
                     V::J(j) => format!("{j:x}"),
                     x => format!("{:x}", x.i()),
@@ -1290,7 +1312,6 @@ fn format_java(rt: &Rt, f: &str, vals: &[V]) -> String {
                 if conv == 'X' { t.to_uppercase() } else { t }
             }
             'f' | 'e' | 'g' => {
-                next += 1;
                 let x = match unbox(v) {
                     V::F(x) => x as f64,
                     V::D(x) => x,
@@ -1299,20 +1320,38 @@ fn format_java(rt: &Rt, f: &str, vals: &[V]) -> String {
                     _ => 0.0,
                 };
                 let prec = spec.split_once('.').and_then(|(_, p)| p.parse().ok()).unwrap_or(6);
-                fixed_half_up(x, prec)
+                let t = fixed_half_up(x, prec);
+                if grouped { thousands(&t) } else { t }
             }
-            'c' => {
-                next += 1;
-                char::from_u32(unbox(v).i() as u32).map(String::from).unwrap_or_default()
-            }
-            'b' => {
-                next += 1;
-                (unbox(v).i() != 0).to_string()
+            'c' => char::from_u32(unbox(v).i() as u32)
+                .map(String::from)
+                .unwrap_or_default(),
+            // `%b`: null is false, a `Boolean` its value, anything else true.
+            'b' | 'B' => {
+                let b = match v {
+                    V::R(0) => false,
+                    V::R(_) if rt.class_of(v) == "java/lang/Boolean" => {
+                        rt.get_field(v, "value").i() != 0
+                    }
+                    V::R(_) => true,
+                    x => x.i() != 0,
+                };
+                if conv == 'B' {
+                    b.to_string().to_uppercase()
+                } else {
+                    b.to_string()
+                }
             }
             other => format!("%{spec}{other}"),
         };
         // Width (`%5d`, `%-5s`, `%05d`).
-        let width: usize = spec.split('.').next().unwrap_or("").trim_start_matches(['-', '0', '+', ',']).parse().unwrap_or(0);
+        let width: usize = spec
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_start_matches(['-', '0', '+', ',', '#', ' ', '('])
+            .parse()
+            .unwrap_or(0);
         if piece.chars().count() < width {
             let pad = width - piece.chars().count();
             if spec.starts_with('-') {
@@ -1328,6 +1367,27 @@ fn format_java(rt: &Rt, f: &str, vals: &[V]) -> String {
         } else {
             out.push_str(&piece);
         }
+    }
+    out
+}
+
+/// `t`'s whole part with a `,` between each three digits (`%,d`, `%,.2f`), as an English locale
+/// groups them.
+fn thousands(t: &str) -> String {
+    let (sign, rest) = t.strip_prefix('-').map_or(("", t), |r| ("-", r));
+    let (whole, frac) = rest
+        .split_once('.')
+        .map_or((rest, None), |(w, f)| (w, Some(f)));
+    let mut out = String::from(sign);
+    for (i, c) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if let Some(f) = frac {
+        out.push('.');
+        out.push_str(f);
     }
     out
 }
@@ -2666,6 +2726,94 @@ mod tests {
         let arr = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![n, i, d]));
         let out = c(&mut rt, "java/lang/String.format.(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;", &[f, arr]);
         assert_eq!(rt.str_of(out), Some("shaft has 007 rpm (0.13)"));
+    }
+
+    /// Create's `/create trains` writes its lines with arguments by index
+    /// (`"┬%1$s: %2$s, %3$d Wagons"`, `"├─In %1$s near [%2$s]".formatted(...)`); what the JDK
+    /// prints for each.
+    #[test]
+    fn a_format_takes_arguments_by_index_and_groups_thousands() {
+        let mut rt = Rt::new();
+        let format = |rt: &mut Rt, f: &str, vals: Vec<V>| {
+            let f = rt.string(f);
+            let arr = rt.alloc("[Ljava/lang/Object;", Data::Array(vals));
+            let out = c(
+                rt,
+                "java/lang/String.format.(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;",
+                &[f, arr],
+            );
+            rt.str_of(out).unwrap_or("?").to_owned()
+        };
+        let id = rt.string("fbfc9");
+        let name = rt.string("Train");
+        let three = c(
+            &mut rt,
+            "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;",
+            &[V::I(3)],
+        );
+        assert_eq!(
+            format(&mut rt, "┬%1$s: %2$s, %3$d Wagons", vec![id, name, three]),
+            "┬fbfc9: Train, 3 Wagons"
+        );
+        // Out of order, one argument twice, an ordinary one after them starting from the first.
+        assert_eq!(
+            format(&mut rt, "%2$s/%1$s/%2$s %s", vec![id, name]),
+            "Train/fbfc9/Train fbfc9"
+        );
+        assert_eq!(
+            format(&mut rt, "%s %<s %s", vec![id, name]),
+            "fbfc9 fbfc9 Train"
+        );
+        assert_eq!(
+            format(&mut rt, "[%1$-7s|%2$5s]", vec![id, name]),
+            "[fbfc9  |Train]"
+        );
+        let big = c(
+            &mut rt,
+            "java/lang/Long.valueOf.(J)Ljava/lang/Long;",
+            &[V::J(-1_234_567)],
+        );
+        let small = c(
+            &mut rt,
+            "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;",
+            &[V::I(999)],
+        );
+        let d = c(
+            &mut rt,
+            "java/lang/Double.valueOf.(D)Ljava/lang/Double;",
+            &[V::D(12345.678)],
+        );
+        assert_eq!(
+            format(&mut rt, "%,d %,d %,.1f", vec![big, small, d]),
+            "-1,234,567 999 12,345.7"
+        );
+        let yes = crate::api::call(
+            &mut rt,
+            "java/lang/Boolean.valueOf.(Z)Ljava/lang/Boolean;",
+            &[V::I(1)],
+        );
+        let no = crate::api::call(
+            &mut rt,
+            "java/lang/Boolean.valueOf.(Z)Ljava/lang/Boolean;",
+            &[V::I(0)],
+        );
+        assert_eq!(
+            format(&mut rt, "%b %b %b %B", vec![yes, no, V::NULL, id]),
+            "true false false TRUE"
+        );
+        let near = rt.string("├─In %1$s near [%2$s]");
+        let dim = rt.string("minecraft:overworld");
+        let pos = rt.string("20, 100, 20");
+        let arr = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![dim, pos]));
+        let out = c(
+            &mut rt,
+            "java/lang/String.formatted.([Ljava/lang/Object;)Ljava/lang/String;",
+            &[near, arr],
+        );
+        assert_eq!(
+            rt.str_of(out),
+            Some("├─In minecraft:overworld near [20, 100, 20]")
+        );
     }
 
     #[test]

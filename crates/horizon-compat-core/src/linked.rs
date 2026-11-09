@@ -294,11 +294,24 @@ pub fn dispatch(
     owner_key: &'static str,
     args: &[V],
 ) -> V {
-    if counting() {
-        count("virtual", owner_key);
+    if diagnosing() {
+        return observed(rt, "virtual", owner_key, args, |rt| {
+            dispatch_unobserved(rt, cid, kh, key, owner_key, args)
+        });
     }
+    dispatch_unobserved(rt, cid, kh, key, owner_key, args)
+}
+
+fn dispatch_unobserved(
+    rt: &mut Rt,
+    cid: u32,
+    kh: u64,
+    key: &'static str,
+    owner_key: &'static str,
+    args: &[V],
+) -> V {
     let Some(l) = rt.linked else {
-        return vcall_miss(rt, cid, owner_key, key, args);
+        return miss(rt, cid, owner_key, key, args);
     };
     if let Some(f) = l.resolve(cid, kh) {
         return f(rt, args);
@@ -319,7 +332,7 @@ pub fn dispatch(
             }
         }
     }
-    vcall_miss(rt, cid, owner_key, key, args)
+    miss(rt, cid, owner_key, key, args)
 }
 
 /// No translated class of the receiver has `key`: a lambda's own method (or a default method of
@@ -331,6 +344,15 @@ pub fn vcall_miss(
     key: &'static str,
     args: &[V],
 ) -> V {
+    if diagnosing() {
+        return observed(rt, "virtual", owner_key, args, |rt| {
+            miss(rt, cid, owner_key, key, args)
+        });
+    }
+    miss(rt, cid, owner_key, key, args)
+}
+
+fn miss(rt: &mut Rt, cid: u32, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
     if cid & LAMBDA == 0 {
         return crate::api::call(rt, owner_key, args);
     }
@@ -363,16 +385,137 @@ pub fn lambda_call(rt: &mut Rt, lid: u32, args: &[V]) -> Option<V> {
     Some(f(rt, full))
 }
 
-/// Whether calls are counted (`HORIZON_COMPAT_COUNT` set): read once.
-pub fn counting() -> bool {
-    static ON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+/// The diagnostics of calls the environment asks for, read once: bit 1 counts them
+/// (`HORIZON_COMPAT_COUNT`, [`count`]), bit 2 traces some ([`observed`]).
+fn diagnostics() -> u8 {
+    const UNREAD: u8 = 0x80;
+    static ON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(UNREAD);
     match ON.load(std::sync::atomic::Ordering::Relaxed) {
-        2 => {
-            let on = std::env::var_os("HORIZON_COMPAT_COUNT").is_some();
-            ON.store(u8::from(on), std::sync::atomic::Ordering::Relaxed);
+        UNREAD => {
+            let on = u8::from(std::env::var_os("HORIZON_COMPAT_COUNT").is_some())
+                | (u8::from(!traced_parts().is_empty()) << 1);
+            ON.store(on, std::sync::atomic::Ordering::Relaxed);
             on
         }
-        on => on == 1,
+        on => on,
+    }
+}
+
+/// Whether calls are counted (`HORIZON_COMPAT_COUNT` set).
+pub fn counting() -> bool {
+    diagnostics() & 1 != 0
+}
+
+/// Whether calls are counted or traced: the one check a call makes when neither is asked for.
+pub fn diagnosing() -> bool {
+    diagnostics() != 0
+}
+
+/// The parts of keys whose calls are traced: `HORIZON_COMPAT_CALLS=<part>[,<part>...]`.
+fn traced_parts() -> &'static [String] {
+    static PARTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    PARTS.get_or_init(|| {
+        std::env::var("HORIZON_COMPAT_CALLS")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+/// A call of a kind (`virtual`, `API`) by `key`, made by `call`, counted and traced as the
+/// environment asks ([`diagnosing`]). With `HORIZON_COMPAT_CALLS=<part of a key>[,<another>...]`
+/// each call whose key holds one of the parts is written to the log (stderr) as it starts, with
+/// what it is called on and with, and as it returns, with what it gives or throws: the first 64
+/// calls of each such key on each thread (or `HORIZON_COMPAT_CALLS_MAX`). Its depth is how many
+/// calls of either kind it runs in. Where a mod's code leaves the way it takes in the JVM (a
+/// screen it doesn't open, an item it doesn't use), the calls it made on the way say where.
+pub fn observed(
+    rt: &mut Rt,
+    kind: &'static str,
+    key: &'static str,
+    args: &[V],
+    call: impl FnOnce(&mut Rt) -> V,
+) -> V {
+    thread_local! {
+        static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        static SHOWN: std::cell::RefCell<HashMap<(usize, usize), u32>> = std::cell::RefCell::new(HashMap::default());
+    }
+    struct Out(u32);
+    impl Drop for Out {
+        fn drop(&mut self) {
+            DEPTH.set(self.0);
+        }
+    }
+    let on = diagnostics();
+    if on & 1 != 0 {
+        count(kind, key);
+    }
+    if on & 2 == 0 {
+        return call(rt);
+    }
+    static MAX: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let max = *MAX.get_or_init(|| {
+        std::env::var("HORIZON_COMPAT_CALLS_MAX")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(64)
+    });
+    let depth = DEPTH.get();
+    let shown = traced_parts().iter().any(|p| key.contains(p.as_str()))
+        && SHOWN.with_borrow_mut(|s| {
+            let n = s.entry((key.as_ptr() as usize, key.len())).or_default();
+            *n += 1;
+            *n <= max
+        });
+    let thread = std::thread::current();
+    let thread = thread.name().unwrap_or("?");
+    if shown {
+        let with: Vec<String> = args.iter().map(|&v| described(rt, v)).collect();
+        eprintln!(
+            "horizon-compat: {thread} {depth:>3} > {kind} {key} ({})",
+            with.join(", ")
+        );
+    }
+    let out = Out(depth);
+    DEPTH.set(depth + 1);
+    let r = call(rt);
+    drop(out);
+    if shown {
+        let threw = match rt.thrown {
+            Some(e) => format!(", threw {}", described(rt, e)),
+            None => String::new(),
+        };
+        eprintln!(
+            "horizon-compat: {thread} {depth:>3} < {key} = {}{threw}",
+            described(rt, r)
+        );
+    }
+    r
+}
+
+/// A value as a trace shows it: a number, `null`, a string's or a class's text, an enum
+/// constant's name, else the object's class and heap index.
+fn described(rt: &Rt, v: V) -> String {
+    match v {
+        V::Void => "void".into(),
+        V::I(n) => n.to_string(),
+        V::J(n) => format!("{n}L"),
+        V::F(x) => format!("{x}f"),
+        V::D(x) => format!("{x}d"),
+        V::R(0) => "null".into(),
+        V::R(r) => {
+            let class = rt.class_of(v);
+            if let Some(s) = rt.str_of(v) {
+                let s: String = s.chars().take(80).collect();
+                return format!("{class} {s:?}");
+            }
+            match rt.str_of(rt.get_field(v, "$name")) {
+                Some(name) => format!("{class}.{name}"),
+                None => format!("{class}#{r}"),
+            }
+        }
     }
 }
 

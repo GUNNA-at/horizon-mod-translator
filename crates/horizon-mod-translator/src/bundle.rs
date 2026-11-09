@@ -2792,6 +2792,12 @@ fn world_reads(get: &str, c: &str) -> String {
         r#"        fn day_time(&self) -> i64 {{
             {get}.native_day_time()
         }}
+        fn local_difficulty(&self, pos: [i32; 3]) -> (i32, f32) {{
+            {get}.native_local_difficulty(pos)
+        }}
+        fn ticking(&self, pos: [i32; 3]) -> (bool, bool) {{
+            {get}.native_ticking(pos)
+        }}
         fn light(&self, pos: [i32; 3]) -> (u8, u8) {{
             {get}.native_light(pos)
         }}

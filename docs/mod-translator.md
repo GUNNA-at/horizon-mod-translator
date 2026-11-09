@@ -9372,6 +9372,78 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `getVisibilityPercent` (vanilla sees a sneaking player at 0.8 of the range), and
     `ServerLevelAccessor.getCurrentDifficultyAt`, asked by the runtime's own `finalizeSpawn` for the mobs a mod
     spawns. Next, with the fields by slot of Part 138.
+- [x] 2026-11-09 Part 140: Create's train station opens its screen and assembles a train, whose carriages become
+  entities; a trace of the calls a mod makes; components travel whole; the regional difficulty and sneaking a mod
+  asks for.
+  - `HORIZON_COMPAT_CALLS=<part of a key>[,<another>...]` (new): each virtual call of the translated code and each
+    call into the API whose key holds one of the parts is written to the log as it starts, with what it is called
+    on and with (a number, `null`, a string's text, an enum constant's name, else the object's class), and as it
+    returns, with what it gives or throws, each with its thread and its depth (the calls it runs in). The first 64
+    calls of each key on each thread, or `HORIZON_COMPAT_CALLS_MAX`. It shares the one check each call makes with
+    `HORIZON_COMPAT_COUNT` (Part 138), so neither costs anything when off. Where a mod's code turns off the way it
+    takes in the JVM (a screen that doesn't open, an item that isn't used), the calls it made on the way say where.
+  - The station: a right click on Create's track station in assembly mode left the game on the world, and nothing
+    in the log said why. The trace (`useItemOn,displayScreen,getStation,createEdgePoint,...`) showed the client's
+    whole path: `useItemOn` → `onBlockEntityUse` (PASS) → catnip's `executeOnClientOnly` → `withBlockEntityDo` →
+    `displayScreen`, where the client's copy of the station had no `GlobalStation` (`getStation()` null): its
+    `createEdgePoint` found no point of its id in the client's railway graph. The graph had come over
+    (`sync_rail_graph`, handled by catnip's `handleInternal` on the client), and the id was the test's doing: it
+    set the station a second time with its data, and loading data onto a station gives it a new id (as in the
+    JVM), while its edge point keeps the old one. Set once, in assembly mode, the click opens Create's own
+    "Train Assembly" screen, drawn natively: the bogeys it counts, its hints, its buttons and their tooltips.
+  - Carriages: Create keeps a carriage as an entity only where its chunk ticks entities
+    (`CarriageEntityHandler.isActiveChunk`: `ServerLevel.isPositionEntityTicking`), which wasn't answered, so an
+    assembled train had none. `isPositionEntityTicking`, `isNaturalSpawningAllowed` and `shouldTickBlocksAt` (of a
+    position or of a chunk's `ChunkPos.asLong`) are the game's now (`native_ticking`, new: from every player's
+    tickets and the forced chunks; a host without it says yes, as `isLoaded` does), and `areEntitiesLoaded` yes.
+    The carriage saves itself through `Entity.newDoubleList` and `newFloatList`, which a mod's entity now has, as
+    it has `walkDist`, `walkDistO`, `moveDist` and `flyDist` from the start (Create's glue copies them each tick)
+    and `Entity.onSyncedDataUpdated` for its override's `super` call.
+  - Components in packets (`ComponentSerialization.STREAM_CODEC`) went as their plain text, so a translation
+    reached the client as its key: the station screen's name box read `create.train.unnamed`. They go whole now,
+    as the NBT vanilla's `NbtOps` writes (plain text a string tag, else a compound; a list of mixed tags, as a
+    translation's `with` of text and components, holds each under `""`), and come back with their key, arguments,
+    style and siblings. `Component.Serializer.fromJson` reads a style and siblings too (it dropped them), and an
+    array as its first part with the rest as siblings. The data codec writes plain text as a string tag as well.
+  - `String.format` and `formatted`: an argument by its index (`%2$s`), the one before again (`%<s`), `,`
+    grouping (`%,d`, `%,.1f`) and `%b` of an object, as the JDK writes them: `/create trains` printed
+    `┬%1$s: %2$s, %3$d Wagons`.
+  - `Multimaps.newMultimap(map, factory)` (and `newListMultimap`, `newSetMultimap`): a multimap whose keys hold
+    the factory's sets or lists. A mod's font made of the game's (`Font(Function, boolean)`, its `fonts`: Create's
+    `NoShadowFontWrapper`, the station screen's name box).
+  - `Level.getCurrentDifficultyAt(pos)` and `Level.getDifficulty()`: the regional difficulty a mod's mob spawns
+    with (`finalizeSpawn`) is the game's own (`native_local_difficulty`, new: the difficulty, the clock, the time
+    players spent in the chunk, the moon), as a `DifficultyInstance` (its effective difficulty, `isHard`,
+    `isHarderThan`, `getSpecialMultiplier`), and an instance a mod makes works its difficulty out as 1.21.1 does.
+    `Difficulty`'s `getId`, `byId`, `byName`, `getKey`, `getDisplayName`; `Level.getMoonBrightness`.
+  - `Entity.isDiscrete()` and `isDescending()` are its `isShiftKeyDown()`, as `isSuppressingBounce()` was: a mob
+    sees a sneaking player at 0.8 of its range.
+  - In the game (a fresh world, the platform of Part 137, driven by `horizon-ctl`): a line of track along x at
+    y 100, two carriages on it (a small bogey, a railway casing and train controls, one facing each way, at x 21
+    and x 25), each held together by super glue (a bogey holds blocks only along its axis, as in the JVM), and a
+    station beside the track's middle, set once in assembly mode. A click on it opened the "Train Assembly"
+    screen; a click on its train button (`horizon-ctl click-at 220 194`, GUI pixels) sent `StationEditPacket`, and
+    the server assembled the train. `/create trains` then listed it: "┬b2bec: Unnamed Train, 2 Wagons", "On Track:
+    5d1c2", "Owned by Player00496", "Waiting at: Track Station", "Idle, No Schedule", "In minecraft:overworld near
+    [21, 101, 20]". The screen turned into the "Track Station" screen with "Unnamed Train" in its name box.
+    `@e[type=create:carriage_contraption]` found its two carriages, at (21.5, 101, 20.5) and (25.5, 101, 20.5),
+    their `CarriageIndex` 0 and 1, still there 60 ticks later. No panic or exception in the log.
+    - The press, the depot and Waddles' penguins as in Part 139: the press at 16, its stroke read at `Ticks` 2, then
+      10, the depot then held an iron sheet and an empty hand took it; a penguin walked from (4.5, 100, −1.5) to
+      (−4.0, 100, 1.1) at its 8.0 health. With the trace on, nothing unmapped beyond the client's GL shader and
+      `DynamicTexture` calls of before; no panic or exception.
+  - Not yet: the client doesn't draw the carriages (the world shows the track and the station; the carriages'
+    blocks left it when they were assembled), and the train doesn't drive. With the trace on, the carriage's tick
+    asks what isn't mapped yet: `Entity.moveTo(Vec3)`, `TickRateManager.isEntityFrozen`, and of the player near
+    it `noPhysics` and `getSelfAndPassengers()` (Create's contraption collisions). Next.
+  - Run 46 (the pack's 367 jars): API methods 85.2% (110,886 of 130,223; 110,783 before), call sites 92.7%
+    (345,506 of 372,742), 8,495 distinct methods missing (8,527 before); Create's 3,323 of its 3,971 methods,
+    24,425 of its 25,240 calls; libraries 83.5% and 94.3% (61,862 and 336,967).
+  - Tests: compat 6 new (a format takes arguments by index and groups thousands, as the JDK prints Create's train
+    lines; a component travels whole and stays translatable, its bytes vanilla's; a mod asks the game which chunks
+    tick; a mod's entity saves its own vectors with `Entity`'s helpers; a multimap over a factory holds its
+    collections; the difficulty's), 2 extended (a mod's entity starts with `walkDist`; sneaking's `isDiscrete` and
+    `isDescending`). 734 compat, 15 compat-core and 25 translator unit tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
