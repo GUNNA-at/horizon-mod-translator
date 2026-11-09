@@ -495,6 +495,18 @@ fn mapping_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
+        // A vanilla mapping set down or up (`setDown`): the game's player walks by it as vanilla's
+        // reads `isDown()` (Create's train controls hold the driver still, then give the keys back).
+        "setDown" if !own(rt, a(0)) => {
+            let name = rt
+                .str_of(rt.get_field(a(0), "$name"))
+                .unwrap_or("")
+                .to_owned();
+            if let Some(h) = rt.host_mut() {
+                h.set_mapping_down(&name, a(1).i() != 0);
+            }
+            V::Void
+        }
         "set" | "setAll" | "resetMapping" | "resetToggleKeys" | "setDown" | "release" => V::Void,
         _ => return None,
     })
@@ -677,6 +689,41 @@ mod tests {
         h.lang.insert("key.glass.zoom".into(), "Zoom".into());
         h.lang.insert("key.glass.menu".into(), "Glass menu".into());
         h
+    }
+
+    /// A mod sets one of the game's movement mappings down or up (`KeyMapping.setDown`, as Create's
+    /// train controls do to keep the driver still): the game's mapping follows it, and `isDown()`
+    /// reads it, until it is set again.
+    #[test]
+    fn a_mod_sets_the_games_movement_mappings_down_and_up() {
+        const SET_DOWN: &str = "net/minecraft/client/KeyMapping.setDown.(Z)V";
+        const IS_DOWN: &str = "net/minecraft/client/KeyMapping.isDown.()Z";
+        let mut rt = Rt::new();
+        crate::install();
+        let mut h = host();
+        h.mappings
+            .insert("key.forward".into(), ("key.keyboard.w".into(), true));
+        rt.with_host(&mut h, |rt| {
+            let forward = crate::screens::key_mapping(rt, "key.forward");
+            assert_eq!(crate::api::call(rt, IS_DOWN, &[forward]), V::I(1), "held");
+            crate::api::call(rt, SET_DOWN, &[forward, V::I(0)]);
+            assert_eq!(
+                crate::api::call(rt, IS_DOWN, &[forward]),
+                V::I(0),
+                "let go by the mod"
+            );
+            assert_eq!(
+                rt.host().and_then(|h| h.mapping("key.forward")),
+                Some(("key.keyboard.w".into(), false))
+            );
+            crate::api::call(rt, SET_DOWN, &[forward, V::I(1)]);
+            assert_eq!(
+                crate::api::call(rt, IS_DOWN, &[forward]),
+                V::I(1),
+                "given back"
+            );
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Presses click the mappings bound to their key as NeoForge's `KeyMappingLookup` finds them, and

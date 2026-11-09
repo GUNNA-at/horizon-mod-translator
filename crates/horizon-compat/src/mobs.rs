@@ -669,15 +669,21 @@ pub(crate) fn visibility_percent(rt: &mut Rt, target: V, _looker: V) -> f64 {
 
 /// `LivingEntity.hasLineOfSight(e)`: nothing a collider blocks between their eyes, within 128.
 pub(crate) fn has_line_of_sight(rt: &mut Rt, mob: V, e: V) -> bool {
+    let level = obj(rt, mob, "$level");
+    line_of_sight(rt, level, mob, e)
+}
+
+/// `LivingEntity.hasLineOfSight(e)` of `viewer` in `level`: nothing that collides between its eyes
+/// and `e`'s, within 128 blocks.
+pub(crate) fn line_of_sight(rt: &mut Rt, level: V, viewer: V, e: V) -> bool {
     if e.r() == 0 {
         return false;
     }
-    let (from, to) = (eye_pos(rt, mob), eye_pos(rt, e));
+    let (from, to) = (eye_pos(rt, viewer), eye_pos(rt, e));
     let d = ((from[0] - to[0]).powi(2) + (from[1] - to[1]).powi(2) + (from[2] - to[2]).powi(2)).sqrt();
     if d > 128.0 {
         return false;
     }
-    let level = obj(rt, mob, "$level");
     // `ClipContext.Block.COLLIDER`, `ClipContext.Fluid.NONE`.
     let hit = crate::shapes::clip_through(rt, level, from, to, 0, 0);
     rt.get_field(hit, "$miss").i() != 0

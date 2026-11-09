@@ -1576,6 +1576,11 @@ pub trait Host {
     fn key_held(&self, _key: &str) -> bool {
         false
     }
+    /// Sets vanilla key mapping `name` (`key.forward`) down or up, as `KeyMapping.setDown` does:
+    /// the game's player walks, jumps, sneaks and sprints by it until its key is next pressed or
+    /// released (Create's train controls keep the driver still while they drive, then give the
+    /// keys back as they are held).
+    fn set_mapping_down(&mut self, _name: &str, _down: bool) {}
     /// The key the player bound a mod's key mapping `name` (`key.create.toolmenu`) to on the
     /// bundle's page in Options > Mods, as `options.txt` names keys (`key.keyboard.h`); `default`,
     /// the key the mod made it with, when they chose none.
@@ -3013,6 +3018,11 @@ impl Host for MemoryHost {
     }
     fn key_held(&self, key: &str) -> bool {
         self.keys_held.iter().any(|k| k == key)
+    }
+    fn set_mapping_down(&mut self, name: &str, down: bool) {
+        if let Some(m) = self.mappings.get_mut(name) {
+            m.1 = down;
+        }
     }
     fn mod_key(&self, name: &str, default: &str) -> String {
         self.mod_keys.get(name).cloned().unwrap_or_else(|| default.to_owned())

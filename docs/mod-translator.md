@@ -9488,6 +9488,49 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the copy's count 0 for the server's 2; a mod's entity walks its passengers and theirs as vanilla's streams; a
     mod's entity within a tick is between its last place and this one). 737 compat, 15 compat-core and 25
     translator unit tests pass.
+- [x] 2026-11-09 Part 142: Create's train is driven from its controls: a right click on the carriage's controls takes
+  them, and W drives the train off the station and along its track.
+  - A mod that takes the movement keys from the player: Create's `ControlsHandler` reads the keys as they are held
+    (`InputConstants.isKeyDown`), sends them to the server (`ControlsInputPacket`: those pressed, those let go, and
+    all of them again every five ticks), and then sets the game's mappings up (`KeyMapping.setDown(false)`) so the
+    player doesn't walk while they drive; letting go of the controls sets each one back to what is held. `setDown`
+    of the game's own mappings did nothing, so the player walked off with W (and the server's `control()` lets go
+    of a player more than eight blocks from the controls). `KeyMapping.setDown` of a vanilla mapping is now the
+    game's (`native_set_mapping_down`, new): the movement keys as the game reads them that tick, and `isDown`
+    answers what was set (attack and use as the mouse holds them).
+  - The server then heard W and still held the train: `control()` looks for each key with
+    `heldControls.contains(Integer.valueOf(0))` in the list the packet read, and a number a codec reads
+    (`ByteBufCodecs.VAR_INT`) is kept as the int it is, which the runtime's equality didn't take for a boxed
+    `Integer` of the same value (traced: 121 calls of `control()`, each answering yes, and no "departing"
+    prompt). An `Integer` is now its value, boxed or not: `Objects.equals`, `Integer.equals`, a list's
+    `contains` and `indexOf`, a map's and a set's keys (its hash already was the value).
+  - `LivingEntity.hasLineOfSight(e)` of a player: nothing that collides between their eyes and the entity's,
+    within 128 blocks, as a mob's. The server asks it of the sender of `ContraptionInteractionPacket` (a contraption
+    is reached three blocks less without it); it wasn't mapped.
+  - In game (`scratchpad/p142live.sh`, `MODE=trains DRIVE=1`, build of this Part): the train of Part 141 at the
+    station, its carriages at x 21.5 and 25.5. On the ground south of the first carriage, a right click on its
+    controls: Create's train HUD shows above the hotbar (the throttle and the direction). W held: after 2 s the
+    player had moved 0.21 blocks (one tick's walk before the mod set W up) and the carriages stood at x 15.04 and
+    19.04 (6.46 blocks: from rest at Create's acceleration), the "Departing" prompt over the hotbar, and 2 s later
+    at x 1.0 and 5.0, where the track ends. `/create trains`: no longer "Waiting at: Track Station", "near [1, 101,
+    20]". The player, left on the ground, is more than eight blocks from the controls: Create lets go of them
+    ("Stopped controlling contraption"), sets W back to what is held, and they walk again, as in the JVM for a
+    driver who isn't on the train. No panic or exception in the log.
+    - The press, the depot and Waddles' penguins as before (`MODE=check`): the press at 16, its stroke read at
+      `Ticks` 2, then 10, the depot then held an iron sheet and an empty hand took it; a penguin walked from (4.5,
+      100, −1.5) to (1.3, 100, −1.5) at its 8.0 health.
+  - Not yet: riding the train. A player standing on a carriage moves with it by its collision shapes
+    (`ContraptionCollider`, on each side), which need the client's player in the mod's code
+    (`Level.getEntityCollisions`, `Entity.setPos`, `xo` and `zo` of the `LocalPlayer`) and the server's
+    `fallDistance`. `ServerPlayer.swing(hand, true)` after a contraption interaction (the arm's swing seen by the
+    others) isn't mapped.
+  - Run 48 (the pack's 367 jars): API methods 85.2% (110,907 of 130,223; 110,900 before), call sites 92.7%
+    (345,533 of 372,742; 345,523 before), 8,487 distinct methods missing (8,492 before); Create's 3,328 of its
+    3,971 methods (3,327 before), 24,434 of its 25,240 calls; libraries 83.5% and 94.3%, as before.
+  - Tests: compat 3 new (a mod sets the game's movement mappings down and up; a player sees a mod's entity unless a
+    block is between, the sender of a packet as its handler has them; a number a packet read is found by a mod's
+    box of it: it fails without the change, `contains` 0 for key 0). 740 compat, 15 compat-core and 25 translator
+    unit tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -1102,7 +1102,7 @@ pub fn local_player(rt: &mut Rt) -> V {
 }
 
 /// A payload handler's `IPayloadContext`: from `player` (a server's runtime), or from the server.
-fn context(rt: &mut Rt, player: Option<u128>) -> V {
+pub(crate) fn context(rt: &mut Rt, player: Option<u128>) -> V {
     let ctx = rt.new_object(CONTEXT);
     let p = match player {
         Some(uuid) => {
@@ -2104,6 +2104,47 @@ mod tests {
         assert_eq!(bytes, [2, 5, 0xac, 0x02]);
         assert_eq!(rt.class_of(back), rt.class_of(set));
         assert_eq!(crate::jutil::elements(&rt, back), [V::I(5), V::I(300)]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A number a packet read (`ByteBufCodecs.VAR_INT`) is the `Integer` a mod boxes of it: Create's
+    /// controls look for the keys a player holds with `heldControls.contains(0)` in the list
+    /// `ControlsInputPacket` read, and its server kept the train still while W was held.
+    #[test]
+    fn a_number_a_packet_read_is_found_by_a_mods_box_of_it() {
+        const VALUE_OF: &str = "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;";
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(lambdas);
+        let int = sv(&mut rt, "net/minecraft/network/codec/ByteBufCodecs.VAR_INT");
+        let list_op = call(&mut rt, "net/minecraft/network/codec/ByteBufCodecs.list.()Lnet/minecraft/network/codec/StreamCodec$CodecOperation;", &[]).unwrap();
+        let codec = call(&mut rt, "net/minecraft/network/codec/StreamCodec.apply.(Lnet/minecraft/network/codec/StreamCodec$CodecOperation;)Lnet/minecraft/network/codec/StreamCodec;", &[int, list_op]).unwrap();
+        let w = crate::api::call(&mut rt, VALUE_OF, &[V::I(0)]);
+        let held = crate::jutil::new_list(&mut rt, vec![w]);
+        let (_, read) = round_trip(&mut rt, codec, held);
+        for (key, held) in [(0, 1), (1, 0)] {
+            let boxed = crate::api::call(&mut rt, VALUE_OF, &[V::I(key)]);
+            let found = crate::api::call(
+                &mut rt,
+                "java/util/List.contains.(Ljava/lang/Object;)Z",
+                &[read, boxed],
+            );
+            assert_eq!(found, V::I(held), "key {key}");
+            let first = crate::api::call(
+                &mut rt,
+                "java/util/List.get.(I)Ljava/lang/Object;",
+                &[read, V::I(0)],
+            );
+            let same = crate::api::call(
+                &mut rt,
+                "java/lang/Integer.equals.(Ljava/lang/Object;)Z",
+                &[boxed, first],
+            );
+            assert_eq!(
+                same,
+                V::I(held),
+                "Integer.valueOf({key}).equals(the key read)"
+            );
+        }
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

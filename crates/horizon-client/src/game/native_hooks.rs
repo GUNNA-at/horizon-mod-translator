@@ -6038,17 +6038,34 @@ impl Game<'_> {
     /// A vanilla key mapping (`key.use`, `key.inventory`, any the Controls
     /// screen lists): the key bound to it, as options.txt names keys
     /// (`key.mouse.right`, `key.keyboard.e`), and whether it is held now
-    /// (attack and use as the game reads them, a toggled one included).
+    /// (the movement keys, attack and use as the game reads them: a toggled
+    /// one, or one a mod set down or up, included).
     /// `&self`: a mod screen's hooks read it (`KeyMapping.isDown`,
     /// `matchesMouse`). API @API:mod_screen_input@.
     pub(super) fn native_mapping_binding(&self, name: &str) -> (String, bool) {
         let key = self.settings.keys.get(name).to_owned();
-        let held = match name {
-            "key.attack" => self.left,
-            "key.use" => self.right,
+        let held = match MAPPINGS.iter().find(|m| m.0 == name) {
+            Some((_, Some(k))) => self.keys.contains(k),
+            _ if name == "key.attack" => self.left,
+            _ if name == "key.use" => self.right,
             _ => self.native_key_held(&key),
         };
         (key, held)
+    }
+    /// Vanilla key mapping `name` set down or up by a mod (`KeyMapping.setDown`):
+    /// the window's player walks, jumps, sneaks and sprints by it, as
+    /// vanilla's reads `isDown()`, until its key is next pressed or released.
+    /// The mappings of the game's movement keys only (`key.forward`...
+    /// `key.sprint`). API @API:mod_screen_input@.
+    pub(super) fn native_set_mapping_down(&mut self, name: &str, down: bool) {
+        let Some(&(_, Some(key))) = MAPPINGS.iter().find(|m| m.0 == name) else {
+            return;
+        };
+        if down {
+            self.keys.insert(key);
+        } else {
+            self.keys.remove(&key);
+        }
     }
     /// Whether key `key` (`key.keyboard.left.shift`, `key.mouse.right`) is
     /// held now (`InputConstants.isKeyDown`): the modifiers from the window's

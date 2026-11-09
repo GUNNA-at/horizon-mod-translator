@@ -970,6 +970,11 @@ fn client_host(c: &str, id: &str) -> String {
         fn key_held(&self, key: &str) -> bool {{
             self.game.get().native_key_held(key)
         }}
+        fn set_mapping_down(&mut self, name: &str, down: bool) {{
+            if let Some(g) = self.game.get_mut() {{
+                g.native_set_mapping_down(name, down);
+            }}
+        }}
         // A mod mapping's key as the player chose it on the bundle's page in Options > Mods.
         fn mod_key(&self, name: &str, default: &str) -> String {{
             self.game.get().native_mod_key("{id}", name, default)

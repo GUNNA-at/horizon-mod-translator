@@ -2967,6 +2967,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             rt.alloc("java/util/stream/Stream", Data::Stream(vec![a(0)]))
         }
         (o, "$noPhysics") if is_player(o) && is_player_class(rt.class_of(a(0))) => V::I(0),
+        // `LivingEntity.hasLineOfSight(e)` of a player: nothing that collides between their eyes
+        // and `e`'s, within 128 blocks (Create's contraption interactions reach three blocks less
+        // without it).
+        (o, "hasLineOfSight")
+            if is_player(o)
+                && is_player_class(rt.class_of(a(0)))
+                && desc == "(Lnet/minecraft/world/entity/Entity;)Z" =>
+        {
+            let level = crate::glue::level(rt);
+            V::I(i32::from(crate::mobs::line_of_sight(rt, level, a(0), a(1))))
+        }
         (o, "getPistonPushReaction") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
             crate::blocks::push_reaction_named(rt, "normal")
         }

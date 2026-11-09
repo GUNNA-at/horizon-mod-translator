@@ -994,10 +994,20 @@ impl Rt {
         match (self.str_of(a), self.str_of(b)) {
             (Some(x), Some(y)) => x == y,
             _ => {
-                matches!((a, b), (V::R(x), V::R(y)) if x != 0 && y != 0
-                    && self.class_of(a) == "java/lang/Integer" && self.class_of(b) == "java/lang/Integer"
-                    && self.get_field(a, "value") == self.get_field(b, "value"))
+                matches!((self.integer_value(a), self.integer_value(b)), (Some(x), Some(y)) if x == y)
             }
+        }
+    }
+
+    /// The value of an `Integer`: one boxed here, or the int a codec read in its place
+    /// (`ByteBufCodecs.VAR_INT`), which Java holds boxed as well.
+    fn integer_value(&self, v: V) -> Option<i32> {
+        match v {
+            V::I(i) => Some(i),
+            V::R(r) if r != 0 && self.class_of(v) == "java/lang/Integer" => {
+                Some(self.get_field(v, "value").i())
+            }
+            _ => None,
         }
     }
 

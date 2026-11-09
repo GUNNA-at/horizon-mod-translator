@@ -2810,6 +2810,43 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
+    /// A player sees a mod's entity unless something that collides is between their eyes and its
+    /// (`LivingEntity.hasLineOfSight`: Create's contraption interactions reach less without it).
+    #[test]
+    fn a_player_sees_a_mods_entity_unless_a_block_is_between() {
+        const SEES: &str = "net/minecraft/server/level/ServerPlayer.hasLineOfSight.(Lnet/minecraft/world/entity/Entity;)Z";
+        let (mut rt, ty) = runtime();
+        rt.put_field(ty, "$width", V::F(0.5));
+        rt.put_field(ty, "$height", V::F(1.0));
+        let mut host = MemoryHost {
+            player_id: Some(7),
+            players: vec![(7, [0.5, 64.0, 0.5])],
+            ..MemoryHost::default()
+        };
+        let cart = rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let cart = api::call(rt, "net/minecraft/world/entity/EntityType.create.(Lnet/minecraft/world/level/Level;)Lnet/minecraft/world/entity/Entity;", &[ty, level]);
+            set_pos(rt, cart, [0.5, 64.0, 6.5]);
+            cart
+        });
+        let sees = |rt: &mut Rt, host: &mut MemoryHost| {
+            rt.with_host(host, |rt| {
+                // The sender of a packet, as its handler has them (Create's `ContraptionInteractionPacket`).
+                let ctx = crate::network::context(rt, Some(7));
+                let me = api::call(rt, "net/neoforged/neoforge/network/handling/IPayloadContext.player.()Lnet/minecraft/world/entity/player/Player;", &[ctx]);
+                api::call(rt, SEES, &[me, cart])
+            })
+        };
+        assert_eq!(sees(&mut rt, &mut host), V::I(1), "nothing between");
+        host.blocks.insert([0, 65, 3], "minecraft:stone".into());
+        assert_eq!(
+            sees(&mut rt, &mut host),
+            V::I(0),
+            "a stone between their eyes"
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// A mod listening to entities joining and leaving as Create does (its contraptions' list):
     /// it hears each cart join (and keeps the second out), then the first leave once discarded.
     fn joins(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
