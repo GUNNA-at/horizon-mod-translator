@@ -99,9 +99,10 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 124] = [
+const COMPAT: [(&str, &str); 125] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
+    ("linked.rs", include_str!("../../horizon-compat-core/src/linked.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
     ("api_common.rs", include_str!("../../horizon-compat/src/api_common.rs")),
     ("baked_models.rs", include_str!("../../horizon-compat/src/baked_models.rs")),
@@ -241,7 +242,7 @@ fn inlined_core() -> String {
     let (_, tail) = rest.split_once("// END ENGINE ENTRY POINTS").expect("core entry point markers");
     let mods: String = COMPAT
         .iter()
-        .filter(|(n, _)| !matches!(*n, "host.rs" | "gc.rs"))
+        .filter(|(n, _)| !matches!(*n, "host.rs" | "gc.rs" | "linked.rs"))
         .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
         .collect();
     let (_, helpers) = COMPAT_ROOT.split_once("// BEGIN RUNTIME HELPERS").expect("compat runtime helper markers");
@@ -5539,7 +5540,7 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
             let (parts, lib) = program.emit_groups(40, owners.len() + 1, &group);
             // A class no member jar holds is a library's they bundle.
             let groups: Vec<(String, Vec<String>)> = members.iter().map(|(_, ns)| ns.clone()).chain(["lib".to_owned()]).zip(parts).collect();
-            let split = crate::split::split(&groups, &lib, &runtime_crate, &prefix, crate_bytes());
+            let split = crate::split::split(&groups, &runtime_crate, &prefix, crate_bytes(), &program.dispatchers());
             let mut deps = format!("{ENGINE_DEPENDENCIES}{} = {{ path = \"../runtime\" }}\n", package(&runtime_crate));
             for c in &split.crates {
                 let name = package(&crate::split::crate_name(&prefix, &c.id));
@@ -5562,7 +5563,6 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
                     fs::remove_dir_all(e.path()).map_err(|e| e.to_string())?;
                 }
             }
-            let lib = lib.replacen("pub fn init(rt: &mut Rt) {\n", "pub fn init(rt: &mut Rt) {\n    link_crates();\n", 1);
             (
                 vec![("lib.rs".to_owned(), format!("{lib}\n{}", split.engine))],
                 deps,

@@ -351,7 +351,7 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
     if obj.r() == 0 {
         return None;
     }
-    let short = rt.vkeys.keys().copied().find(|k| k.starts_with(&prefix))?;
+    let short = rt.vkeys.range(prefix.as_str()..).next().copied().filter(|k| k.starts_with(&prefix))?;
     let mut all = Vec::with_capacity(args.len());
     for (v, k) in args.iter().zip(kinds(&short[short.find('(').unwrap_or(0)..])) {
         all.push(crate::mixin::unbox(rt, *v, k));
@@ -2491,14 +2491,11 @@ mod tests {
             }
             Some(V::Void)
         }
-        fn none(_: &mut Rt, _: u32, _: &'static str, _: &[V]) -> V {
-            V::Void
-        }
         let mut rt = Rt::new();
         rt.supers.insert("t/Machine", "java/lang/Object");
         rt.vcall = Some(vcall);
         rt.reflect = Some(reflect);
-        rt.vkeys.insert("getEnergy.()J", (none, |_| true));
+        rt.vkeys.insert("getEnergy.()J");
         let class = class_object(&mut rt, "t/Machine");
         let machine = rt.new_object("t/Machine");
         rt.put_field(machine, "energy", V::J(5));

@@ -9146,6 +9146,59 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `LivingPackSizeEvent` (their default answers are taken), a mod's spawn rules or `finalizeSpawn` drawing
     from the level's random (they draw from the mod's own), a mod's spawn placement over a vanilla type, spawners
     and trial spawners of a mod's type.
+- [x] 2026-11-09 Part 136: the engine's tables move into the code crates; a virtual call resolves at run time.
+  The translator built one engine crate per translation group (a mod and every jar it shares classes with), and that
+  crate held the whole group's tables: a dispatcher per method key (`match cid` over every class that has it), the
+  overrides, the lambdas, reflection, fields, annotations, class ids and listeners. Create's engine crate alone was
+  13.2 MB of Rust (9,185 dispatchers) beside its 14 code crates. Measured on the pack (367 jars, grouped as
+  `install.rs` groups them): 146 groups, 139 with classes, and one of 158 jars (237 MB of classes, about 1.5 GB as
+  Rust at Create's ratio), joined by the libraries they share. Its one engine crate would hold the dispatchers of
+  all 158 jars, where Create with ten addons already made a 17 MB engine crate whose rustc took about 9 GB alone.
+  - horizon-compat-core `linked` (new): a code part registers its own classes (`Registry`: each `ClassDef` with
+    its superclass, interfaces, methods by key, what mixins add to it, reflection, fields, annotations and event
+    listeners), its lambdas, the methods mixins add to the game's classes (by owner key, or checked against their
+    targets), the game interfaces mixins give the game's classes, and its listeners' options. `Linked::new` joins
+    an engine's registries once; `Rt::link` gives a runtime the class ids, supers, interfaces, listeners and method
+    keys from it. A virtual call resolves as the JVM resolves it: what mixins add first, then the class's own
+    method, up the superclasses, then the default methods of their superinterfaces breadth first (private ones
+    skipped); the answer is kept per thread by class and key. The call site passes the key's FNV-1a hash, computed
+    by the translator, so no string is hashed on a call; two keys of a class with one hash are reported.
+  - The translator: each part emits its `REGISTRY_<n>`; the dispatchers (`d_*`, still what the code calls) are
+    one-line shims to `linked::dispatch` in each crate that calls them. Each code crate lists its parts'
+    registries (`REGISTRIES`) and the functions other crates call (`EXPORTS`). The engine keeps `start`, the
+    scan and the services, and links its crates once when a runtime first needs them (`OnceLock`); `overrides`
+    and `init` read the linked class space. The runtime crate carries `linked.rs` with the rest of the core.
+  - `Rt::vkeys` is now the sorted set of every instance method key (it mapped each key to its dispatcher), and
+    reflection's lookup of a method by name and parameter types (`Method.invoke`, `MethodHandle.type`) reads its
+    range instead of walking every key.
+  - Measured: Create's engine crate 13.2 MB → 236 KB of Rust, beside 16 code crates; bundling Create 1.67 s at
+    392 MB. The game build with Create and Waddles, every translated crate anew: 3 min 02 s (the same rebuild in
+    Parts 132 and 133: 3 min 46 s and 3 min 26 s), the translated rustcs at 12 GB together at most, swap
+    unchanged. The engine no longer grows with the group: a group of any size is its code crates, each built on
+    its own, plus a list of them.
+  - Tests: compat-core 5 new (the key hash on FNV-1a's own vectors; resolution order: a mixin's method before the
+    class's own, the class's before its superclass's, a superinterface's default method, a private interface
+    method skipped, nothing for the game's objects; a mixin's method on a game class by owner key and by checked
+    target; a lambda called with its captures; reflection, fields, annotations, services and what `Rt::link`
+    registers); translator: the split test on the new links, and 1 new (a crate lists its parts' registries). The
+    integration tests that compile the generated code and compare it with the JVM (differential, weave, hook)
+    pass. All 722 compat, 12 compat-core and 25 translator unit tests pass.
+  - In the game (the new build with Create and Waddles, a fresh world of seed 136, driven by `horizon-ctl`): a
+    creative motor turns a shaft and a mechanical press at `Speed` 16.0; a survival player puts an iron ingot on the
+    depot under it, the press comes down, the depot holds an iron sheet, and an empty hand takes it back. A
+    summoned Waddles penguin walked 8.8 blocks by its own goals in 300 ticks, at its 8.0 health. 32 rows of 48
+    shafts took their speed from their motors (the last of the last row at 16.0). No panic or exception in the
+    log. (The scene's content root needs NeoForge's common tags: without `c:ingots/iron` the pressing recipe
+    matched nothing and the ingot stayed on the depot.)
+  - Tick time, the new build against Part 135's (the same content, seed 136 and scene; `/tick sprint`, the server's
+    own report): 32 rows of 48 shafts, each row turned by a creative motor, every shaft at `Speed` 16.0. Part 135's
+    `match` dispatchers: 99.5, 100.2 and 101.2 ms per tick over 400, 1000 and 1000 ticks; the run-time dispatch:
+    98.8, 98.2 and 102.0. Resolving at run time costs nothing measurable here. Both spend about 60 µs per kinetic
+    block entity and tick (the bare ground: 6 to 8 ms): the translated code's own speed (it reads each field by
+    name from its object's map, and checks a class's initialisation by name at each static access), and the
+    next thing to profile.
+  - Not yet: one bundle for a whole pack (one runtime and class space for every group), and the volume of Rust a
+    pack makes (about 2.5 GB for this one).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

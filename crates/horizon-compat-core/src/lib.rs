@@ -62,6 +62,7 @@ impl std::hash::Hasher for FxHasher {
 
 pub mod gc;
 pub mod host;
+pub mod linked;
 
 /// A JVM value. References index [`Rt::heap`]; 0 is null.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -156,9 +157,6 @@ pub const LAMBDA: u32 = 1 << 31;
 /// translator's probe); tests set a folder of their own.
 pub const GAME_DIR: &str = "compat:game-dir";
 
-/// A generated dispatcher: `(rt, receiver's class id, the call's API key, args)`.
-pub type Dispatch = fn(&mut Rt, u32, &'static str, &[V]) -> V;
-
 thread_local! {
     /// The runtimes waiting for the game in a call on this thread ([`Rt::host_call`]), innermost
     /// last, each with whether a hook has it now ([`reenter`]).
@@ -233,9 +231,11 @@ pub struct Rt {
     pub lambda_call: Option<fn(&mut Rt, u32, &[V]) -> Option<V>>,
     /// Mod class ids by name (generated `CLASS_IDS`).
     pub class_ids: HashMap<&'static str, u32>,
-    /// Each instance method some mod class implements (`name.desc`): its dispatcher, and whether a
-    /// class id implements it.
-    pub vkeys: HashMap<&'static str, (Dispatch, fn(u32) -> bool)>,
+    /// Every instance method some mod class has (`name.desc`), sorted: what reflection finds a
+    /// method in by its name and parameter types.
+    pub vkeys: linked::Keys,
+    /// The engine's class space ([`Rt::link`]): what a virtual call finds its method in.
+    pub linked: Option<&'static linked::Linked>,
     /// `instanceof` answers by (class, target) names' addresses: both are static strings.
     is_a_cache: std::cell::RefCell<HashMap<(usize, usize, usize, usize), bool>>,
     /// Methods an uncaught exception left, innermost first (with `HORIZON_COMPAT_TRACE`).
@@ -331,7 +331,8 @@ impl Default for Rt {
             vcall: None,
             lambda_call: None,
             class_ids: HashMap::default(),
-            vkeys: HashMap::default(),
+            vkeys: Default::default(),
+            linked: None,
             is_a_cache: Default::default(),
             unwinding: Vec::new(),
             registered_index: Default::default(),

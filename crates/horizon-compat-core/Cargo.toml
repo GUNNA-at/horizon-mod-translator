@@ -3,7 +3,7 @@ name = "horizon-compat-core"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Object model for NeoForge mods translated to native Rust: values, the heap, strings, dispatch tables"
+description = "Object model for NeoForge mods translated to native Rust: values, the heap, strings, the class space linked at run time"
 
 [lints]
 workspace = true

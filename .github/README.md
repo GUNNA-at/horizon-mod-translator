@@ -207,15 +207,17 @@ incremental compilation, and keep 15 GB of disk free.
 4. **Answer.** Calls that leave the mod go to `horizon-compat`. It holds Rust implementations of the
    Minecraft, NeoForge and Java library methods mods use, written against Horizon's engine: registries,
    levels, block states, entities, items, fluids, rendering, networking, collections, streams.
-5. **Build.** `bundle` splits the result into crates. `horizon-mixins` applies it at Horizon's native hooks,
-   and Cargo compiles it into the game with everything else.
+5. **Build.** `bundle` splits the result into crates. Each crate carries its own classes, and the runtime
+   links them as the game starts, resolving each virtual call as the JVM does. The engine over the crates stays
+   small however many mods are translated together. `horizon-mixins` applies the bundle at Horizon's native
+   hooks, and Cargo compiles it into the game with everything else.
 
 ## Where the translator stops and Horizon begins
 
 | Part | Owns |
 |---|---|
 | [`horizon-mod-translator`](../crates/horizon-mod-translator) | Reading jars, weaving mixins, translating bytecode, bundling, and the `coverage` report |
-| [`horizon-compat-core`](../crates/horizon-compat-core) | The runtime's object model: values, heap, dispatch tables, the host interface. A change here rebuilds every translated engine |
+| [`horizon-compat-core`](../crates/horizon-compat-core) | The runtime's object model: values, heap, the class space linked at run time, the host interface. A change here rebuilds every translated engine |
 | [`horizon-compat`](../crates/horizon-compat) | The Java API surface mods call, in Rust, mapped onto Horizon |
 | `horizon-mixins` | Applying bundles to a copy of Horizon's tree at its native hooks (`native-hooks.json`) |
 | [`horizon-port-pack`](../crates/horizon-port-pack) | A pack's content: assets, data, recipes, loot tables, tags, worldgen |
@@ -233,7 +235,7 @@ files are never committed. Every translation is built from the user's own jars.
   figures above.
 - **The specification.** Behaviour is checked against NeoForge 21.1.256's and Minecraft 1.21.1's bytecode
   (`javap`), against the libraries' own jars, and against JDK 21 oracles for `java.*`.
-- **Tests.** `horizon-compat` has 704 unit tests. The translator's tests include a differential test: the
+- **Tests.** `horizon-compat` has 722 unit tests. The translator's tests include a differential test: the
   same Java runs on the JVM and translated, and the results must match bit for bit.
 - **In the game.** Scenes are set up and read back with `horizon-ctl`: block and entity data, and
   screenshots.

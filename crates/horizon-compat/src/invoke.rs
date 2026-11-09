@@ -131,7 +131,7 @@ fn handle_type(rt: &mut Rt, h: V) -> V {
                 prefix.push_str(&descriptor_of(&class_name(rt, *p)));
             }
             prefix.push(')');
-            let ret = rt.vkeys.keys().find(|k| k.starts_with(&prefix)).map(|k| k[prefix.len()..].to_owned()).unwrap_or_else(|| "Ljava/lang/Object;".into());
+            let ret = rt.vkeys.range(prefix.as_str()..).next().filter(|k| k.starts_with(&prefix)).map(|k| k[prefix.len()..].to_owned()).unwrap_or_else(|| "Ljava/lang/Object;".into());
             let ret = rt.class_literal(descriptor_class(&ret));
             let owner = rt.class_literal(&class);
             let mut all = vec![owner];

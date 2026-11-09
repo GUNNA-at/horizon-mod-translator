@@ -1,0 +1,729 @@
+//! The translated code's class space, linked when its engine starts. Each part of the code
+//! registers its own classes, methods and lambdas ([`Registry`]); a virtual call then finds its
+//! method from the receiver's class as the JVM resolves it (the class and its superclasses, then
+//! the default methods of their superinterfaces), once per class and method on each thread.
+//!
+//! The tables live beside the code they name, so an engine is as big as the list of its crates,
+//! however many mods it holds: a whole-group dispatcher per method grew with every class of
+//! every mod translated together, and Create's engine crate was 13 MB of them.
+use crate::{HashMap, LAMBDA, Rt, V};
+use std::collections::{BTreeSet, HashSet, VecDeque};
+
+/// A translated method: `(rt, args)`, the receiver first for an instance method.
+pub type Method = fn(&mut Rt, &[V]) -> V;
+/// A lambda's implementation, called with every value it runs with: the captured ones, then the
+/// call's own arguments.
+pub type LambdaFn = fn(&mut Rt, Vec<V>) -> V;
+/// Reflection on one class: `(rt, what, args)` with `what` as in [`Rt::reflect`] (`<clinit>`, a
+/// constructor's `<init>.desc`, an enum's `values`). None when the class has no such member.
+pub type ReflectFn = fn(&mut Rt, &str, &[V]) -> Option<V>;
+
+/// FNV-1a over 64 bits: a method key's (`name.desc`) hash. Generated code passes it with each
+/// virtual call, so finding the method hashes no string; the translator computes the same.
+pub const fn key_hash(key: &str) -> u64 {
+    let b = key.as_bytes();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    while i < b.len() {
+        h ^= b[i] as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    h
+}
+
+/// A translated class, as the part of the code that holds it registers it.
+pub struct ClassDef {
+    pub name: &'static str,
+    /// Its id: what its objects carry ([`crate::Object::cid`]), 1 and up.
+    pub id: u32,
+    pub superclass: Option<&'static str>,
+    /// Its interfaces, with those its mixins add.
+    pub interfaces: &'static [&'static str],
+    /// Its instance methods with code (`name.desc`), each with whether it is private: a private
+    /// one is never an interface's default method.
+    pub methods: &'static [(&'static str, Method, bool)],
+    /// What its mixins add to it or overwrite there, in their order: a call finds these before the
+    /// class's own.
+    pub mixed: &'static [(&'static str, Method)],
+    pub reflect: Option<ReflectFn>,
+    /// Its declared fields as reflection sees them: an `access name descriptor` line each; empty
+    /// for none.
+    pub fields: &'static str,
+    /// The annotations reflection sees on it, a line each; empty for none.
+    pub annotations: &'static str,
+    /// Its `@SubscribeEvent` methods: (event class, method key, static, lambda id).
+    pub subscribers: &'static [(&'static str, &'static str, bool, u32)],
+}
+
+/// A method a mixin adds to the game's classes (or overwrites there): a call reaches it on a game
+/// object, or on a mod object whose classes don't have the method, by the call's owner key.
+pub struct Added {
+    pub key: &'static str,
+    /// The method, after its mixin's class is initialised and its field initialisers ran on the
+    /// object.
+    pub run: Method,
+    /// Owner keys whose calls are this method's whatever the receiver.
+    pub owners: &'static [&'static str],
+    /// Owner keys whose calls are its on an object of one of `targets`.
+    pub checked: &'static [&'static str],
+    pub targets: &'static [&'static str],
+}
+
+/// What one part of the translated code registers.
+pub struct Registry {
+    pub classes: &'static [ClassDef],
+    /// Lambda implementations by id: the lambdas this part makes first.
+    pub lambdas: &'static [(u32, LambdaFn)],
+    pub added: &'static [Added],
+    /// The interfaces its mixins add to the game's classes, by target ([`Rt::add_game_interfaces`]).
+    pub game_interfaces: &'static [(&'static str, &'static [&'static str])],
+    /// The `@SubscribeEvent(priority, receiveCanceled)` of its methods whose options aren't the
+    /// default, by method key ([`Rt::subscriber_options`]).
+    pub subscriber_options: &'static [(&'static str, (u8, bool))],
+}
+
+/// One engine's class space: its parts' registries, linked.
+pub struct Linked {
+    /// By class id.
+    classes: Vec<Option<&'static ClassDef>>,
+    ids: HashMap<&'static str, u32>,
+    /// Each class's methods by key hash, sorted: (hash, method, private). By class id.
+    methods: Vec<Box<[(u64, Method, bool)]>>,
+    /// Each class's mixins' methods, in their order. By class id.
+    mixed: Vec<Box<[(u64, Method)]>>,
+    lambdas: Vec<Option<LambdaFn>>,
+    added: HashMap<u64, Vec<&'static Added>>,
+    /// `META-INF/services`: an interface's implementations.
+    services: HashMap<&'static str, &'static [&'static str]>,
+    registries: Vec<&'static Registry>,
+}
+
+impl Linked {
+    /// Links `registries` (every part's) and the services the engine's jars list. Two keys of one
+    /// class with the same hash would make one call reach the other's method: the link says so
+    /// and keeps the first.
+    pub fn new(
+        registries: impl IntoIterator<Item = &'static Registry>,
+        services: &'static [(&'static str, &'static [&'static str])],
+    ) -> Linked {
+        let registries: Vec<&'static Registry> = registries.into_iter().collect();
+        let defs = || registries.iter().flat_map(|r| r.classes.iter());
+        let top = defs().map(|d| d.id as usize).max().unwrap_or(0);
+        let mut l = Linked {
+            classes: vec![None; top + 1],
+            ids: HashMap::default(),
+            methods: vec![Box::default(); top + 1],
+            mixed: vec![Box::default(); top + 1],
+            lambdas: Vec::new(),
+            added: HashMap::default(),
+            services: services.iter().copied().collect(),
+            registries: Vec::new(),
+        };
+        for d in defs() {
+            let id = d.id as usize;
+            l.classes[id] = Some(d);
+            l.ids.insert(d.name, d.id);
+            let mut methods: Vec<(u64, Method, bool, &str)> = d
+                .methods
+                .iter()
+                .map(|&(k, m, p)| (key_hash(k), m, p, k))
+                .collect();
+            methods.sort_by_key(|e| e.0);
+            methods.dedup_by(|b, a| {
+                let same = a.0 == b.0;
+                if same && a.3 != b.3 {
+                    eprintln!(
+                        "horizon-compat: {} has two methods whose keys hash alike: {} and {}",
+                        d.name, a.3, b.3
+                    );
+                }
+                same
+            });
+            l.methods[id] = methods.into_iter().map(|(h, m, p, _)| (h, m, p)).collect();
+            l.mixed[id] = d.mixed.iter().map(|&(k, m)| (key_hash(k), m)).collect();
+        }
+        for r in &registries {
+            for &(lid, f) in r.lambdas {
+                let i = lid as usize;
+                if l.lambdas.len() <= i {
+                    l.lambdas.resize(i + 1, None);
+                }
+                l.lambdas[i] = Some(f);
+            }
+            for a in r.added {
+                l.added.entry(key_hash(a.key)).or_default().push(a);
+            }
+        }
+        l.registries = registries;
+        l
+    }
+
+    /// The class with id `cid`; None for the game's objects (0) and lambdas.
+    fn class(&self, cid: u32) -> Option<&'static ClassDef> {
+        self.classes.get(cid as usize).copied().flatten()
+    }
+
+    /// A class's id by name; None for a class the code doesn't have.
+    pub fn id(&self, class: &str) -> Option<u32> {
+        self.ids.get(class).copied()
+    }
+
+    fn own(&self, id: u32, kh: u64) -> Option<(Method, bool)> {
+        let list = self.methods.get(id as usize)?;
+        list.binary_search_by_key(&kh, |e| e.0)
+            .ok()
+            .map(|i| (list[i].1, list[i].2))
+    }
+
+    /// The method a call of key hash `kh` runs on an object of class `cid`, as the JVM resolves it:
+    /// the class and its superclasses (what their mixins add first), then the default methods of
+    /// their superinterfaces, breadth first. None when no translated class has it (the game's, a
+    /// lambda's).
+    fn resolve_uncached(&self, cid: u32, kh: u64) -> Option<Method> {
+        let mut chain: Vec<&'static ClassDef> = Vec::new();
+        let mut c = self.class(cid);
+        while let Some(d) = c {
+            if let Some(&(_, m)) = self.mixed[d.id as usize].iter().find(|e| e.0 == kh) {
+                return Some(m);
+            }
+            if let Some((m, _)) = self.own(d.id, kh) {
+                return Some(m);
+            }
+            chain.push(d);
+            // A superclass cycle is no class file javac writes; stop rather than spin.
+            if chain.len() > 1024 {
+                return None;
+            }
+            c = d
+                .superclass
+                .and_then(|s| self.id(s))
+                .and_then(|id| self.class(id));
+        }
+        let mut queue: VecDeque<&'static str> = chain
+            .iter()
+            .flat_map(|d| d.interfaces.iter().copied())
+            .collect();
+        let mut seen: HashSet<&'static str> = HashSet::new();
+        while let Some(i) = queue.pop_front() {
+            if !seen.insert(i) {
+                continue;
+            }
+            let Some(d) = self.id(i).and_then(|id| self.class(id)) else {
+                continue;
+            };
+            if let Some((m, false)) = self.own(d.id, kh) {
+                return Some(m);
+            }
+            queue.extend(d.interfaces.iter().copied());
+        }
+        None
+    }
+
+    /// [`Linked::resolve_uncached`], kept for this thread by (class, key).
+    pub fn resolve(&self, cid: u32, kh: u64) -> Option<Method> {
+        type Id = (usize, u32, u64);
+        thread_local! {
+            static RESOLVED: std::cell::RefCell<HashMap<Id, Option<Method>>> = std::cell::RefCell::new(HashMap::default());
+        }
+        if cid == 0 || cid & LAMBDA != 0 {
+            return None;
+        }
+        let id = (std::ptr::from_ref(self) as usize, cid, kh);
+        if let Some(m) = RESOLVED.with(|r| r.borrow().get(&id).copied()) {
+            return m;
+        }
+        let m = self.resolve_uncached(cid, kh);
+        RESOLVED.with(|r| r.borrow_mut().insert(id, m));
+        m
+    }
+
+    /// Whether class `class` has `key` (`name.desc`) itself or through a translated superclass or
+    /// superinterface (the generated `overrides`).
+    pub fn overrides(&self, class: &str, key: &str) -> bool {
+        self.id(class)
+            .is_some_and(|id| self.resolve(id, key_hash(key)).is_some())
+    }
+
+    /// Every class registered.
+    pub fn classes(&self) -> impl Iterator<Item = &'static ClassDef> + '_ {
+        self.classes.iter().flatten().copied()
+    }
+}
+
+impl Rt {
+    /// Joins this runtime to an engine's class space: its classes' ids, superclasses, interfaces
+    /// and listeners, and the calls the API makes back into the code (`vcall`, `lambda_call`,
+    /// `reflect`). The engine sets `overrides` itself, as a function of its own.
+    pub fn link(&mut self, linked: &'static Linked) {
+        self.linked = Some(linked);
+        self.vcall = Some(vcall);
+        self.lambda_call = Some(lambda_call);
+        self.reflect = Some(reflect);
+        for d in linked.classes() {
+            self.class_ids.insert(d.name, d.id);
+            if let Some(s) = d.superclass {
+                self.supers.insert(d.name, s);
+            }
+            if !d.interfaces.is_empty() {
+                self.interfaces.insert(d.name, d.interfaces);
+            }
+            if !d.subscribers.is_empty() {
+                self.subscribers.insert(d.name, d.subscribers.to_vec());
+            }
+            self.vkeys.extend(d.methods.iter().map(|m| m.0));
+        }
+        for r in &linked.registries {
+            for &(target, interfaces) in r.game_interfaces {
+                self.add_game_interfaces(target, interfaces);
+            }
+            for &(key, options) in r.subscriber_options {
+                self.subscriber_options.insert(key, options);
+            }
+        }
+    }
+}
+
+/// A virtual call: the method the receiver's class (`cid`) has for `key` (hash `kh`); else one a
+/// mixin adds to the game's classes, by the call's owner key; else the API's (or a lambda's own).
+pub fn dispatch(
+    rt: &mut Rt,
+    cid: u32,
+    kh: u64,
+    key: &'static str,
+    owner_key: &'static str,
+    args: &[V],
+) -> V {
+    let Some(l) = rt.linked else {
+        return vcall_miss(rt, cid, owner_key, key, args);
+    };
+    if let Some(f) = l.resolve(cid, kh) {
+        return f(rt, args);
+    }
+    if cid & LAMBDA == 0
+        && let Some(V::R(r)) = args.first()
+        && *r != 0
+        && let Some(list) = l.added.get(&kh)
+    {
+        for a in list.iter().filter(|a| a.key == key) {
+            if a.owners.contains(&owner_key) {
+                return (a.run)(rt, args);
+            }
+            if a.checked.contains(&owner_key)
+                && a.targets.iter().any(|t| rt.instance_of(args[0], t))
+            {
+                return (a.run)(rt, args);
+            }
+        }
+    }
+    vcall_miss(rt, cid, owner_key, key, args)
+}
+
+/// No translated class of the receiver has `key`: a lambda's own method (or a default method of
+/// its interface), or the API's.
+pub fn vcall_miss(
+    rt: &mut Rt,
+    cid: u32,
+    owner_key: &'static str,
+    key: &'static str,
+    args: &[V],
+) -> V {
+    if cid & LAMBDA == 0 {
+        return crate::api::call(rt, owner_key, args);
+    }
+    let recv = args.first().copied().unwrap_or_default();
+    if let Some((iface, sam)) = rt.lambda_info.get(&recv.r()).copied() {
+        // A method its interface has code for runs as declared (a default method, though it may
+        // share the functional method's name: an overload); of the rest, the functional one is the
+        // lambda's own (by name: a bridge's descriptor differs).
+        let icid = rt.class_ids.get(iface).copied().unwrap_or(0);
+        if icid != 0
+            && let Some(f) = rt.linked.and_then(|l| l.resolve(icid, key_hash(key)))
+        {
+            return f(rt, args);
+        }
+        if !(key.starts_with(sam) && key.as_bytes().get(sam.len()) == Some(&b'.')) {
+            return crate::api::call(rt, owner_key, args);
+        }
+    }
+    match lambda_call(rt, cid & !LAMBDA, args) {
+        Some(r) => rt.adapt_return(r, key),
+        None => crate::api::call(rt, owner_key, args),
+    }
+}
+
+/// A call on a lambda object (`lid`: its implementation's id), `args[0]` the lambda.
+pub fn lambda_call(rt: &mut Rt, lid: u32, args: &[V]) -> Option<V> {
+    let f = rt.linked?.lambdas.get(lid as usize).copied().flatten()?;
+    let mut full = rt.captured(args.first().copied().unwrap_or_default());
+    full.extend_from_slice(args.get(1..).unwrap_or_default());
+    Some(f(rt, full))
+}
+
+/// Virtual dispatch by key (`name.desc`): the API's calls back into the code.
+pub fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
+    let cid = rt.recv_cid(args);
+    dispatch(rt, cid, key_hash(key), key, owner_key, args)
+}
+
+/// Reflection over the translated classes ([`Rt::reflect`]).
+pub fn reflect(rt: &mut Rt, class: &str, what: &str, args: &[V]) -> Option<V> {
+    let l = rt.linked?;
+    if what == "services"
+        && let Some(names) = l.services.get(class).copied()
+    {
+        let a = rt.new_array(names.len() as i32, V::NULL);
+        for (i, n) in names.iter().enumerate() {
+            let v = rt.string(n);
+            rt.array_set(a, i as i32, v);
+        }
+        return Some(a);
+    }
+    let d = l.id(class).and_then(|id| l.class(id))?;
+    if let Some(r) = d.reflect
+        && let Some(v) = r(rt, what, args)
+    {
+        return Some(v);
+    }
+    match what {
+        "fields" if !d.fields.is_empty() => Some(rt.string(d.fields)),
+        "annotations" if !d.annotations.is_empty() => Some(rt.string(d.annotations)),
+        _ => None,
+    }
+}
+
+const TO_STRING: u64 = key_hash("toString.()Ljava/lang/String;");
+
+/// `String.valueOf(v)` for an object: its translated class's own `toString()`, an enum constant's
+/// name, or `v` itself (strings, boxes and the game's objects, which the runtime prints).
+pub fn java_string(rt: &mut Rt, v: V) -> V {
+    if !matches!(v, V::R(_)) || v.r() == 0 || rt.str_of(v).is_some() {
+        return v;
+    }
+    let cid = rt.cid(v);
+    if let Some(f) = rt.linked.and_then(|l| l.resolve(cid, TO_STRING)) {
+        return f(rt, &[v]);
+    }
+    let name = rt.get_field(v, "$name");
+    if rt.str_of(name).is_some() { name } else { v }
+}
+
+/// Every key (`name.desc`) of an instance method some translated class has, sorted: what
+/// reflection looks a method up in by its name and parameter types.
+pub type Keys = BTreeSet<&'static str>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api_miss(_: &mut Rt, _: &'static str, _: &[V]) -> V {
+        V::I(-1)
+    }
+
+    fn install() {
+        crate::install_fns(crate::Fns {
+            call: api_miss,
+            get_static: |_, _| V::Void,
+            constructor_arg: |_, _| V::Void,
+            fire_registrations: |_| {},
+            api_is_a: |_, _| false,
+            vanilla_class: |_, _, _| None,
+        });
+    }
+
+    fn base_tick(_: &mut Rt, _: &[V]) -> V {
+        V::I(1)
+    }
+    fn child_tick(_: &mut Rt, _: &[V]) -> V {
+        V::I(2)
+    }
+    fn mixin_tick(_: &mut Rt, _: &[V]) -> V {
+        V::I(3)
+    }
+    fn power_default(_: &mut Rt, _: &[V]) -> V {
+        V::I(4)
+    }
+    fn private_helper(_: &mut Rt, _: &[V]) -> V {
+        V::I(5)
+    }
+    fn deeper_helper(_: &mut Rt, _: &[V]) -> V {
+        V::I(6)
+    }
+    fn mixin_name(_: &mut Rt, _: &[V]) -> V {
+        V::I(7)
+    }
+    fn to_string(rt: &mut Rt, _: &[V]) -> V {
+        rt.string("machine")
+    }
+    fn add(_: &mut Rt, full: Vec<V>) -> V {
+        V::I(full.iter().map(|v| v.i()).sum())
+    }
+    fn base_reflect(rt: &mut Rt, what: &str, _: &[V]) -> Option<V> {
+        (what == "<clinit>").then(|| {
+            rt.statics.insert("m/Base.READY", V::I(1));
+            V::Void
+        })
+    }
+
+    const POWER: &str = "power.()I";
+    const HELPER: &str = "helper.()I";
+    const NAME: &str = "name.()I";
+    const ENTITY: &str = "net/minecraft/world/entity/Entity";
+
+    static CLASSES: [ClassDef; 5] = [
+        ClassDef {
+            name: "m/Base",
+            id: 1,
+            superclass: Some("net/minecraft/world/level/block/entity/BlockEntity"),
+            interfaces: &["m/Powered"],
+            methods: &[
+                ("tick.()V", base_tick, false),
+                ("toString.()Ljava/lang/String;", to_string, false),
+            ],
+            mixed: &[],
+            reflect: Some(base_reflect),
+            fields: "2 energy J",
+            annotations: "",
+            subscribers: &[],
+        },
+        ClassDef {
+            name: "m/Child",
+            id: 2,
+            superclass: Some("m/Base"),
+            interfaces: &[],
+            methods: &[("tick.()V", child_tick, false)],
+            mixed: &[],
+            reflect: None,
+            fields: "",
+            annotations: "",
+            subscribers: &[(
+                "net/neoforged/neoforge/event/tick/ServerTickEvent$Post",
+                "m/Child.onTick.(Lnet/neoforged/neoforge/event/tick/ServerTickEvent$Post;)V",
+                false,
+                0,
+            )],
+        },
+        ClassDef {
+            name: "m/Mixed",
+            id: 3,
+            superclass: Some("m/Base"),
+            interfaces: &[],
+            methods: &[("tick.()V", child_tick, false)],
+            mixed: &[("tick.()V", mixin_tick)],
+            reflect: None,
+            fields: "",
+            annotations: "",
+            subscribers: &[],
+        },
+        ClassDef {
+            name: "m/Powered",
+            id: 4,
+            superclass: Some("java/lang/Object"),
+            interfaces: &["m/Deeper"],
+            methods: &[
+                (POWER, power_default, false),
+                (HELPER, private_helper, true),
+            ],
+            mixed: &[],
+            reflect: None,
+            fields: "",
+            annotations: "",
+            subscribers: &[],
+        },
+        ClassDef {
+            name: "m/Deeper",
+            id: 5,
+            superclass: Some("java/lang/Object"),
+            interfaces: &[],
+            methods: &[(HELPER, deeper_helper, false)],
+            mixed: &[],
+            reflect: None,
+            fields: "",
+            annotations: "",
+            subscribers: &[],
+        },
+    ];
+
+    static ADDED: [Added; 1] = [Added {
+        key: NAME,
+        run: mixin_name,
+        owners: &[
+            "m/EntityMixin.name.()I",
+            "net/minecraft/world/entity/Entity.name.()I",
+        ],
+        checked: &["net/minecraft/world/Nameable.name.()I"],
+        targets: &[ENTITY],
+    }];
+
+    static REGISTRY: Registry = Registry {
+        classes: &CLASSES,
+        lambdas: &[(0, add)],
+        added: &ADDED,
+        game_interfaces: &[(ENTITY, &["m/EntityAccess"])],
+        subscriber_options: &[],
+    };
+
+    static SERVICES: [(&str, &[&str]); 1] = [("m/Powered", &["m/Child"])];
+
+    fn runtime() -> Rt {
+        static LINKED: std::sync::OnceLock<Linked> = std::sync::OnceLock::new();
+        install();
+        let mut rt = Rt::new();
+        rt.link(LINKED.get_or_init(|| Linked::new([&REGISTRY], &SERVICES)));
+        rt
+    }
+
+    fn call(rt: &mut Rt, receiver: V, owner_key: &'static str, key: &'static str) -> i32 {
+        let cid = rt.cid(receiver);
+        dispatch(rt, cid, key_hash(key), key, owner_key, &[receiver]).i()
+    }
+
+    #[test]
+    fn the_key_hash_is_fnv_1a() {
+        assert_eq!(key_hash(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(key_hash("a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(key_hash("foobar"), 0x8594_4171_f739_67e8);
+    }
+
+    /// A call finds the method as the JVM resolves it: the receiver's class first (what a mixin
+    /// adds to it before its own), then its superclasses, then the default methods of their
+    /// superinterfaces breadth first, where a private method is no default; past them, the API's.
+    #[test]
+    fn a_call_finds_its_method_as_the_jvm_resolves_it() {
+        let mut rt = runtime();
+        let (base, child, mixed) = (
+            rt.new_object("m/Base"),
+            rt.new_object("m/Child"),
+            rt.new_object("m/Mixed"),
+        );
+        let owner = "net/minecraft/world/level/block/entity/BlockEntity.tick.()V";
+        assert_eq!(call(&mut rt, base, owner, "tick.()V"), 1);
+        assert_eq!(call(&mut rt, child, owner, "tick.()V"), 2);
+        assert_eq!(call(&mut rt, mixed, owner, "tick.()V"), 3);
+        assert_eq!(call(&mut rt, child, "m/Powered.power.()I", POWER), 4);
+        assert_eq!(call(&mut rt, child, "m/Powered.helper.()I", HELPER), 6);
+        assert_eq!(
+            call(
+                &mut rt,
+                child,
+                "net/minecraft/world/level/block/entity/BlockEntity.isRemoved.()Z",
+                "isRemoved.()Z"
+            ),
+            -1
+        );
+        // Asked again (kept now), the same.
+        assert_eq!(call(&mut rt, child, owner, "tick.()V"), 2);
+        let linked = rt.linked.unwrap();
+        assert!(linked.overrides("m/Child", POWER));
+        assert!(!linked.overrides("m/Child", "isRemoved.()Z"));
+        assert!(!linked.overrides("m/Unknown", POWER));
+        // The API's calls back in by key.
+        let vcall = rt.vcall.unwrap();
+        assert_eq!(vcall(&mut rt, owner, "tick.()V", &[child]).i(), 2);
+    }
+
+    /// A method a mixin adds to a game class answers a call whose owner key is its own (the mixin's,
+    /// its target's), on any object; a call through an interface it adds only on an object of its
+    /// target. A lambda never takes it.
+    #[test]
+    fn a_method_a_mixin_adds_to_the_game_answers_by_the_calls_owner() {
+        let mut rt = runtime();
+        let entity = rt.new_object(ENTITY);
+        let stack = rt.new_object("net/minecraft/world/item/ItemStack");
+        assert_eq!(
+            call(
+                &mut rt,
+                entity,
+                "net/minecraft/world/entity/Entity.name.()I",
+                NAME
+            ),
+            7
+        );
+        assert_eq!(call(&mut rt, stack, "m/EntityMixin.name.()I", NAME), 7);
+        assert_eq!(
+            call(
+                &mut rt,
+                entity,
+                "net/minecraft/world/Nameable.name.()I",
+                NAME
+            ),
+            7
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                stack,
+                "net/minecraft/world/Nameable.name.()I",
+                NAME
+            ),
+            -1
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                entity,
+                "net/minecraft/world/entity/Mob.name.()I",
+                NAME
+            ),
+            -1
+        );
+        assert!(rt.instance_of(entity, "m/EntityAccess"));
+    }
+
+    /// A lambda runs its implementation with its captured values first; its functional method by
+    /// name, and others are the API's.
+    #[test]
+    fn a_lambda_runs_with_its_captured_values_first() {
+        let mut rt = runtime();
+        let lambda = rt.lambda_id("m/Base.lambda$0.(II)I", 0, vec![V::I(10)]);
+        assert_eq!(lambda_call(&mut rt, 0, &[lambda, V::I(5)]), Some(V::I(15)));
+        assert_eq!(lambda_call(&mut rt, 9, &[lambda, V::I(5)]), None);
+        rt.lambda_info.insert(
+            lambda.r(),
+            ("java/util/function/IntUnaryOperator", "applyAsInt"),
+        );
+        let vcall = rt.vcall.unwrap();
+        assert_eq!(
+            vcall(
+                &mut rt,
+                "java/util/function/IntUnaryOperator.applyAsInt.(I)I",
+                "applyAsInt.(I)I",
+                &[lambda, V::I(5)]
+            )
+            .i(),
+            15
+        );
+        assert_eq!(vcall(&mut rt, "java/util/function/IntUnaryOperator.andThen.(Ljava/util/function/IntUnaryOperator;)Ljava/util/function/IntUnaryOperator;", "andThen.(Ljava/util/function/IntUnaryOperator;)Ljava/util/function/IntUnaryOperator;", &[lambda, V::NULL]).i(), -1);
+    }
+
+    /// Reflection reaches a class's own function, then its fields and annotations; the services an
+    /// interface lists; nothing of a class the code doesn't have. A runtime joined to the space
+    /// knows the classes' ids, superclasses, listeners and the interfaces mixins add.
+    #[test]
+    fn reflection_and_the_runtime_see_the_registered_classes() {
+        let mut rt = runtime();
+        assert_eq!(rt.reflect("m/Base", "<clinit>", &[]), Some(V::Void));
+        assert_eq!(rt.statics.get("m/Base.READY"), Some(&V::I(1)));
+        let fields = rt.reflect("m/Base", "fields", &[]).unwrap();
+        assert_eq!(rt.str_of(fields), Some("2 energy J"));
+        assert_eq!(rt.reflect("m/Base", "annotations", &[]), None);
+        assert_eq!(rt.reflect("m/Child", "fields", &[]), None);
+        let services = rt.reflect("m/Powered", "services", &[]).unwrap();
+        let first = rt.array_get(services, 0);
+        assert_eq!(rt.str_of(first), Some("m/Child"));
+        assert_eq!(rt.reflect("m/Unknown", "<clinit>", &[]), None);
+        assert_eq!(rt.class_ids.get("m/Child"), Some(&2));
+        assert_eq!(rt.supers.get("m/Child"), Some(&"m/Base"));
+        assert!(rt.is_a("m/Child", "m/Deeper"));
+        assert_eq!(rt.subscribers.get("m/Child").map(Vec::len), Some(1));
+        assert!(rt.vkeys.contains(POWER));
+        // `String.valueOf`: the class's own `toString()`, else an enum constant's name.
+        let child = rt.new_object("m/Child");
+        let text = java_string(&mut rt, child);
+        assert_eq!(rt.str_of(text), Some("machine"));
+        let constant = rt.new_object("m/Deeper");
+        let name = rt.string("NORTH");
+        rt.put_field(constant, "$name", name);
+        assert_eq!(java_string(&mut rt, constant), name);
+    }
+}
