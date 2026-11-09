@@ -396,6 +396,8 @@ impl Game<'_> {
             .spawn(move || {
                 // MinecraftServer.spin's Thread.setPriority(8).
                 horizon_threads::favour_current();
+                // Not napped with its window hidden: players wait for its ticks.
+                let _serving = horizon_threads::serving();
                 let result = serve(
                     &res,
                     pack,

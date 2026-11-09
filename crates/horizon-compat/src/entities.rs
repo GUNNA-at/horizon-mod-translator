@@ -696,9 +696,18 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 /// game's collision box holds lower in the cell than the mod's item-only shape would: a basin's),
 /// then `entityInside` for an item whose box meets its cell. Only for blocks overriding either.
 pub fn item_contacts(rt: &mut Rt, at: [i32; 3], block: V, state: V) {
-    let class = rt.class_of(block);
-    let overrides = |k: &str| rt.overrides.is_some_and(|o| o(class, k));
-    let (falls, inside) = (overrides(AFTER_FALL_ON), overrides(ENTITY_INSIDE));
+    // Which of the two its class overrides, asked once for each block (on the block's object).
+    let overridden = match rt.get_field(block, "$contacts") {
+        V::I(m) => m,
+        _ => {
+            let class = rt.class_of(block);
+            let overrides = |k: &str| rt.overrides.is_some_and(|o| o(class, k));
+            let m = i32::from(overrides(AFTER_FALL_ON)) | (i32::from(overrides(ENTITY_INSIDE)) << 1);
+            rt.put_field(block, "$contacts", V::I(m));
+            m
+        }
+    };
+    let (falls, inside) = (overridden & 1 != 0, overridden & 2 != 0);
     if !falls && !inside {
         return;
     }

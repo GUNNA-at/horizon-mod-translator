@@ -1913,6 +1913,18 @@ impl Game<'_> {
     pub(super) fn native_block_entity_tick(&mut self, pos: [i32; 3], entity: &mut ModBlockEntity) {
         let _ = (pos, entity);
     }
+    /// The block entity at `pos`, when its `id` is yours, writes into its
+    /// saved compound `nbt` what it holds now, as vanilla's chunk saves each
+    /// of its block entities (`saveWithFullMetadata`) and `/data` reads one
+    /// (`saveWithoutMetadata`): what it changed since it last wrote (a block
+    /// entity that writes only when it changed, or when asked here) is in it.
+    /// Asked on the server for the mod block entities of the chunks about to
+    /// be saved (the autosave, unloading, a dimension change, closing the
+    /// world) and for the block a `/data` command reads. It is out of the
+    /// world during the call, as in `native_block_entity_tick`. API @API:block_entity_save@.
+    pub(super) fn native_block_entity_save(&mut self, pos: [i32; 3], entity: &mut ModBlockEntity) {
+        let _ = (pos, entity);
+    }
     /// A consumable's effect of a mod's own kind: the item's `on_consume_effects`
     /// entry is of a type in a namespace of its own, and the loader kept it
     /// for this call. The kind and the JSON the file wrote are here; the acting
@@ -7049,6 +7061,45 @@ impl Game<'_> {
         }
         self.native_block_entity_tick([pos.0, pos.1, pos.2], &mut taken);
         self.put_back_mod_block_entity(pos, taken, &items);
+    }
+    /// The mod block entities of the chunks `chunks` write what they hold
+    /// now into their saved data (`native_block_entity_save`), before the
+    /// chunks save: vanilla's chunk saves each of its block entities
+    /// (`ChunkSerializer.write`, `saveWithFullMetadata`).
+    pub(super) fn save_mod_block_entities(&mut self, chunks: &[(i32, i32)]) {
+        // A client's copies are what the server sent; they save nothing.
+        if self.remote.is_some() || !self.world.block_entities.has_mods() {
+            return;
+        }
+        let positions: Vec<Pos> = chunks
+            .iter()
+            .flat_map(|c| self.world.block_entities.mods_in(*c).copied())
+            .collect();
+        for pos in positions {
+            self.save_mod_block_entity(pos);
+        }
+    }
+    /// The mod block entity at `pos` writes what it holds now into its saved
+    /// data (`native_block_entity_save`); one a call has out of the world
+    /// (an empty id) is left alone.
+    pub(super) fn save_mod_block_entity(&mut self, pos: Pos) {
+        if self.remote.is_some() {
+            return;
+        }
+        let Some(BlockEntity::Mod(m)) = self.world.block_entities.get_mut(&pos) else {
+            return;
+        };
+        if m.id.is_empty() {
+            return;
+        }
+        // An empty id marks its place while the mod has it.
+        let mut taken = std::mem::take(&mut **m);
+        self.native_block_entity_save([pos.0, pos.1, pos.2], &mut taken);
+        if let Some(BlockEntity::Mod(m)) = self.world.block_entities.get_mut(&pos)
+            && m.id.is_empty()
+        {
+            **m = taken;
+        }
     }
     /// Puts back a mod block entity taken out for a call, unless the call
     /// removed or replaced it, with what its `setChanged` does.

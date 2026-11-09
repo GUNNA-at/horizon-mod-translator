@@ -361,6 +361,8 @@ impl Game<'_> {
             }
             DataRef::Block(p) => {
                 let key = (p[0], p[1], p[2]);
+                // A mod's block entity writes what it holds now.
+                self.save_mod_block_entity(key);
                 let name = self.data_block_name(*p);
                 let e = self
                     .world

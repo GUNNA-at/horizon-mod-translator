@@ -9199,6 +9199,71 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     next thing to profile.
   - Not yet: one bundle for a whole pack (one runtime and class space for every group), and the volume of Rust a
     pack makes (about 2.5 GB for this one).
+- [x] 2026-11-09 Part 137: a mod block entity's tick is its own code, its data is written when it changed, and macOS
+  no longer naps the server.
+  Profiled first (macOS `sample` of the server thread during `/tick sprint` over 32 rows of 48 of Create's shafts,
+  each row turned by a creative motor: 1,568 kinetic block entities): Create's own block entity tick was 16% of the
+  server's time. The rest was the wrapper around it, again at every tick of every block entity: its block's
+  `getTicker` asked anew (15%: Create's `IBE.getTicker` checks the type with `Class.isAssignableFrom`, which
+  compares class names), the whole block entity saved (`saveAdditional`, 24%) and converted twice (the runtime's
+  tag to its NBT, then to the game's compound), the game's compound converted to the runtime's NBT beforehand only
+  to be compared with what the block entity last wrote (about 25% with the conversion back), and the garbage all of
+  it made (4%).
+  - The ticker is made when the block entity first ticks and again only for a new state of its block, as vanilla's
+    `LevelChunk.updateBlockEntityTicker`; the block entity is given its block's state when that changes
+    (`setBlockState`), and its ticker gets its own `getBlockPos()` (vanilla's `BoundTickingBlockEntity`). The
+    client's copies tick the same way.
+  - Writing: what the game holds of a mod block entity (the compound its chunk saves and `/data` shows) is
+    written after its first tick, then when the block entity changed: `setChanged`, `Level.blockEntityChanged`,
+    or players sent its data (`sendBlockUpdated`, Create's `sendData`). Vanilla's chunk saves its block entities
+    when one of them marked it unsaved.
+  - Reading: the hook hands what the game holds as `glue::Held`, with its fingerprint (a fold-multiply hash of the
+    game's compound, nothing converted; SipHash took most of that time). The runtime converts it only when it is
+    news to the block entity: made from it, or changed by the game since (`/data merge block`), which it loads and
+    is then changed, as vanilla's `BlockDataAccessor.setData` calls `setChanged`.
+  - A new hook point, `native_block_entity_save` (fragment `block_entity_save`): a mod block entity writes what it
+    holds now into its saved data. The game asks it for the mod block entities of the chunks it is about to save
+    (the autosave, unloading, a dimension change, closing the world: vanilla's `ChunkSerializer.write` saves each
+    block entity then) and for the block a `/data` command reads (`data_of`: `get`, `merge`, `modify`, `execute
+    if data`), so a change made without `setChanged` (Create's press counting its stroke, items moving along a
+    belt) is in both, as in vanilla. A client's copies save nothing.
+  - Smaller: whether a block overrides `updateEntityAfterFallOn` or `entityInside` (the items resting on it or in
+    it) is asked once for each block instead of twice at each tick of each block entity (it was 8% of the
+    server's time: two lookups by class name), and the server's level is found without `format!` (4.5%).
+  - App Nap. The tick time of one build jumped from 4 to 35 ms per tick in the middle of a run, at the same moment
+    in every run, while the profile kept its shape: every function, the game's own included, ran 8 to 9 times
+    slower. About 35 seconds after the game's window stops showing (`--offscreen`, as every scene here runs;
+    minimised or covered for a player), macOS naps the app: every thread goes to the background band, priority 4
+    on the efficiency cores, whatever the server thread asked for (`favour_current`); a power assertion held by
+    another process (`caffeinate`) and `taskpolicy -B` don't stop it. Part 136's figures (98 to 102 ms per tick)
+    were taken in that state, after its scenes' first minute. `horizon_threads::serving()` (new) holds an
+    `NSProcessInfo` activity (user-initiated, idle system sleep allowed) through the Objective-C runtime; the
+    integrated server's thread holds one while it runs a world, which players wait for whether or not its window
+    shows (a LAN guest, the window's own client). With it the server thread kept priority 28 to 46 to the end.
+  - Measured (the same field, seed and fixed platform at y 100; `/tick sprint`, the server's own report; the
+    thread priorities read at each sprint). Part 136's build: 14.01 ms per tick over the first 400 ticks, awake
+    (priority 46), then 64.38 and 100.90 over 1000 ticks each as it was napped (priority 4): its own figures were
+    these. The new build over 400 then 5 × 1000 ticks: 3.56, 3.59, 3.57, 3.58, 3.60 and 3.53 ms per tick, and the
+    bare platform 0.54 to 0.74 ms. Awake against awake that is 3.9 times faster, about 8.6 µs → 1.9 µs per
+    kinetic block entity and tick, and it stays awake. Before the smaller cuts and the App Nap fix the new code
+    ran 3.95 to 4.08 ms awake and 26 to 37 ms napped.
+  - Tests: compat 2 new (the dial: written after its first tick, then only at its `setChanged` or as players are
+    sent its data, the game's data read only when the game changed it, its ticker made once for a state of its
+    block and again for a new one; asked to save, a block entity writes what it holds now, a change of the game's
+    taken first, and nothing where none is live). The hook integration test (the counter block entity's saved data
+    each tick, a `/data merge` loaded), the differential and weave tests and all others pass: 724 compat and 25
+    translator unit tests. The hook catalog matches the hook points (`catalog_matches_hook_points`'s rules).
+  - In the game (the new build with Create and Waddles, a fresh world of seed 136, the scenes on the platform,
+    driven by `horizon-ctl`): a creative motor turns a shaft and a mechanical press at `Speed` 16.0; a survival
+    player puts an iron ingot on the depot under it, and `/data get block` reads the press twice during its
+    stroke, a few ticks apart: `Ticks` 2, then 12 (Create counts the stroke without `setChanged`; asked by
+    `/data`, the press writes what it holds then). The depot then holds an iron sheet, and an empty hand takes it
+    back. A summoned Waddles penguin walked by its own goals, at its 8.0 health. The field of shafts took its
+    speed (the last of the last row at 16.0) and ticked at 3.19, 3.22, 3.21 and 3.23 ms per tick after the other
+    scenes' minute and a half, the server thread at priority 28 throughout. No panic or exception in the log.
+  - Next: the translated code's own speed. Most of the server's time is now Create's tick itself: a field read by
+    name from its object's map (each a hash lookup, often a cache miss), a class's initialisation checked by name
+    at each static access, and calls into the API matched by their names.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

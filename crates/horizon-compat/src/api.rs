@@ -2060,9 +2060,10 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 _ => depth,
             })
         }
-        // Players see the block entity's new data (Create's `sendData`).
+        // Players see the block entity's new data (Create's `sendData`), and the game holds it.
         ("net/minecraft/server/level/ServerChunkCache" | "net/minecraft/world/level/chunk/ChunkSource", "blockChanged") => {
             let p = pos_of(rt, a(1));
+            crate::glue::block_entity_dirty(rt, p);
             if let Some(h) = rt.host_mut() {
                 h.block_changed(p);
             }
@@ -2070,6 +2071,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (_, "sendBlockUpdated") if level => {
             let p = pos_of(rt, a(1));
+            crate::glue::block_entity_dirty(rt, p);
             if let Some(h) = rt.host_mut() {
                 h.block_changed(p);
             }
@@ -2092,7 +2094,12 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.host_call(|h| h.update_neighbors(update, &block));
             V::Void
         }
-        (_, "blockEntityChanged") if level => V::Void,
+        // `Level.blockEntityChanged`: its chunk is to be saved, with the block entity's data.
+        (_, "blockEntityChanged") if level => {
+            let p = pos_of(rt, a(1));
+            crate::glue::block_entity_dirty(rt, p);
+            V::Void
+        }
         // `Clearable.tryClear(object)`: a container (a mod's block entity, the runtime's own) empties
         // by its `clearContent`; anything else stays.
         ("net/minecraft/world/Clearable", "tryClear") => {

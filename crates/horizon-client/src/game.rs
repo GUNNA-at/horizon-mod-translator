@@ -12012,6 +12012,7 @@ impl Game<'_> {
         self.save.save_forced_chunks(&self.streaming.forced)?;
         self.streaming.save(&mut self.world, true);
         let keys: Vec<_> = self.world.modified.drain().collect();
+        self.save_mod_block_entities(&keys);
         let chunks = self.with_entities(keys.iter().filter_map(|k| self.world.chunks.get(k)));
         self.save
             .save(&chunks, self.pack.assets.registry, world_biomes!(self))?;
@@ -14910,6 +14911,7 @@ impl Game<'_> {
         self.save.save_forced_chunks(&self.streaming.forced)?;
         self.streaming.save(&mut self.world, wait);
         let keys: Vec<_> = self.world.modified.drain().collect();
+        self.save_mod_block_entities(&keys);
         let chunks = self.with_entities(keys.iter().filter_map(|k| self.world.chunks.get(k)));
         self.save
             .save_later(&chunks, self.pack.assets.registry, world_biomes!(self))?;
@@ -16220,6 +16222,8 @@ impl Game<'_> {
             .filter(|c| self.world.modified.remove(&(c.x, c.z)))
             .cloned()
             .collect();
+        let keys: Vec<(i32, i32)> = dirty.iter().map(|c| (c.x, c.z)).collect();
+        self.save_mod_block_entities(&keys);
         let modified = horizon_client::spans::time("with_entities", || self.with_entities(&dirty));
         horizon_client::spans::time("unload_entities", || self.unload_entities(&unloaded));
         if !unloaded.is_empty() {

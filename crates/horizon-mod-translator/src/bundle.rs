@@ -517,6 +517,90 @@ fn nbt_conversions(c: &str) -> String {
     )
 }
 
+/// What the game holds of a mod block entity (its compound) as the runtime reads it
+/// (`glue::Held`): with its fingerprint ready, converted only when the runtime asks, and what the
+/// block entity saved kept in `written`. Nested items of a hook that has [`nbt_conversions`].
+fn held_nbt(c: &str) -> String {
+    format!(
+        r#"    #[allow(dead_code)]
+    struct Held<'a> {{
+        nbt: &'a Compound,
+        fingerprint: u64,
+        written: Option<Compound>,
+    }}
+    #[allow(dead_code)]
+    fn held(nbt: &Compound) -> Held<'_> {{
+        Held {{ nbt, fingerprint: fingerprint(nbt), written: None }}
+    }}
+    /// Hashed at every tick of every block entity to see whether the game changed it: a
+    /// fold-multiply hash (SipHash took most of that time); no one feeds it chosen input.
+    #[allow(dead_code)]
+    fn fingerprint(nbt: &Compound) -> u64 {{
+        use std::hash::{{Hash, Hasher}};
+        struct Fold(u64);
+        impl Fold {{
+            fn mix(&mut self, word: u64) {{
+                let m = u128::from(self.0 ^ word) * 0x9e37_79b9_7f4a_7c15;
+                self.0 = (m as u64) ^ ((m >> 64) as u64);
+            }}
+        }}
+        impl Hasher for Fold {{
+            fn write(&mut self, bytes: &[u8]) {{
+                let mut words = bytes.chunks_exact(8);
+                for w in &mut words {{
+                    self.mix(u64::from_le_bytes([w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]]));
+                }}
+                let rest = words.remainder();
+                if !rest.is_empty() {{
+                    let mut w = [0u8; 8];
+                    w[..rest.len()].copy_from_slice(rest);
+                    self.mix(u64::from_le_bytes(w) ^ ((rest.len() as u64) << 60));
+                }}
+            }}
+            fn write_u8(&mut self, i: u8) {{
+                self.mix(u64::from(i));
+            }}
+            fn write_u16(&mut self, i: u16) {{
+                self.mix(u64::from(i));
+            }}
+            fn write_u32(&mut self, i: u32) {{
+                self.mix(u64::from(i));
+            }}
+            fn write_u64(&mut self, i: u64) {{
+                self.mix(i);
+            }}
+            fn write_usize(&mut self, i: usize) {{
+                self.mix(i as u64);
+            }}
+            fn finish(&self) -> u64 {{
+                self.0
+            }}
+        }}
+        let mut h = Fold(0x243f_6a88_85a3_08d3);
+        nbt.hash(&mut h);
+        h.finish()
+    }}
+    impl {c}::glue::Held for Held<'_> {{
+        fn fingerprint(&self) -> u64 {{
+            self.fingerprint
+        }}
+        fn is_empty(&self) -> bool {{
+            self.nbt.is_empty()
+        }}
+        fn read(&self) -> std::collections::BTreeMap<String, Nbt> {{
+            self.nbt.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect()
+        }}
+        fn write(&mut self, nbt: std::collections::BTreeMap<String, Nbt>) -> u64 {{
+            let written = nbt.iter().filter_map(|(k, v)| Some((JavaString::from(k.as_str()), to_tag(v)?))).collect::<Compound>();
+            self.fingerprint = fingerprint(&written);
+            self.written = Some(written);
+            self.fingerprint
+        }}
+    }}
+"#
+    )
+}
+
 /// A server-side host's `send_payload`: a mod payload to the players `to` names, each through the
 /// game's mod message channel.
 /// A server host's sounds and particles: for the players near them in the level the game holds.
@@ -1040,6 +1124,7 @@ fn client_host(c: &str, id: &str) -> String {
 fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
     let c = format!("{krate}::compat");
     let conversions = nbt_conversions(&c);
+    let held = held_nbt(&c);
     let client_host = client_host(&c, id);
     // The host a client's draws get: the game, and the frame's pose stack and geometry.
     let reads = world_reads("self.game", &c);
@@ -1382,11 +1467,11 @@ fn {id}_block_entity_update_tag(
     entity: &horizon_client::containers::ModBlockEntity,
     tag: &mut Option<horizon_world::nbt::Compound>,
 ) {{
-{conversions}    if tag.is_some() || !{krate}::ours(&entity.id) {{
+{conversions}{held}    if tag.is_some() || !{krate}::ours(&entity.id) {{
         return;
     }}
     // What the game holds of it, which a block entity made before its data was set takes first.
-    let saved: std::collections::BTreeMap<String, Nbt> = entity.nbt.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect();
+    let saved = held(&entity.nbt);
     let live = {krate}::hook_runtime("block_entity_update_tag", |rt| {c}::glue::block_entity_update_tag(rt, pos, &saved));
     *tag = Some(match live {{
         Some(nbt) => nbt.iter().filter_map(|(k, v)| Some((JavaString::from(k.as_str()), to_tag(v)?))).collect::<Compound>(),
@@ -3888,6 +3973,7 @@ fn block_entity_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
     // south, west, east) and the position next to `pos` that way.
     let front = "    let d = facing as u8;\n    let front = match d {\n        0 => [pos[0], pos[1] - 1, pos[2]],\n        1 => [pos[0], pos[1] + 1, pos[2]],\n        2 => [pos[0], pos[1], pos[2] - 1],\n        3 => [pos[0], pos[1], pos[2] + 1],\n        4 => [pos[0] - 1, pos[1], pos[2]],\n        _ => [pos[0] + 1, pos[1], pos[2]],\n    };\n";
     let conversions = nbt_conversions(&c);
+    let held = held_nbt(&c);
     let (reads, writes) = (world_reads("self.game", &c), world_writes(&c));
     let server_send = server_send(&c);
     let server_effects = server_effects(&c);
@@ -4634,56 +4720,44 @@ fn {id}_block_entity_ticks(block: &str, ticks: &mut bool) {{
         ("block_entity_inside", contact("block_entity_inside", "entity_inside", "an entity in the translated mod's block (`native_block_entity_inside`:\n// `BlockBehaviour.entityInside`, each block its box is in as it moves)")),
         ("block_step_on", contact("block_step_on", "step_on", "an entity on the translated mod's block (`native_block_step_on`:\n// `Block.stepOn`, the block under it on the ground as it moves)")),
         ("block_entity_tick", format!(r#"// Generated by horizon-mod-translator: a server tick of the translated mod's block entity.
+// What the game holds of it is converted only when the block entity takes it (made from it, or
+// changed by the game since) and written only when it saved (it changed: `setChanged`).
 fn {id}_block_entity_tick(
     game: &mut crate::game::Game<'_>,
     pos: [i32; 3],
     entity: &mut horizon_client::containers::ModBlockEntity,
 ) {{
-    use horizon_world::nbt::{{Compound, JavaString, Tag}};
-    use {c}::nbt::Nbt;
-    use std::collections::BTreeMap;
-    if !{krate}::ours(&entity.id) {{
+{conversions}{held}    if !{krate}::ours(&entity.id) {{
         return;
     }}
-    fn to_nbt(tag: &Tag) -> Option<Nbt> {{
-        Some(match tag {{
-            Tag::Byte(b) => Nbt::Byte(*b),
-            Tag::Short(s) => Nbt::Short(*s),
-            Tag::Int(i) => Nbt::Int(*i),
-            Tag::Long(l) => Nbt::Long(*l),
-            Tag::Float(f) => Nbt::Float(f32::from_bits(*f)),
-            Tag::Double(d) => Nbt::Double(f64::from_bits(*d)),
-            Tag::String(s) => Nbt::String(s.to_string_lossy()),
-            Tag::Compound(c) => Nbt::Compound(c.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect()),
-            Tag::List(l) => Nbt::List(l.iter().filter_map(to_nbt).collect()),
-            Tag::ByteArray(a) => Nbt::ByteArray(a.iter().map(|b| *b as i8).collect()),
-            Tag::IntArray(a) => Nbt::IntArray(a.clone()),
-            Tag::LongArray(a) => Nbt::LongArray(a.clone()),
-            Tag::End => return None,
-        }})
+{host}    let state = game.native_state_text_at(pos);
+    let mut saved = held(&entity.nbt);
+    let mut host = Host {{ game }};
+    {krate}::hook_runtime("block_entity_tick", |rt| {c}::glue::block_entity_tick(rt, &mut host, pos, &state, &mut saved));
+    // What the block entity saved, all of it: keys it dropped are gone.
+    let written = saved.written;
+    if let Some(written) = written {{
+        entity.nbt = written;
     }}
-    fn to_tag(n: &Nbt) -> Option<Tag> {{
-        Some(match n {{
-            Nbt::Byte(b) => Tag::Byte(*b),
-            Nbt::Short(s) => Tag::Short(*s),
-            Nbt::Int(i) => Tag::Int(*i),
-            Nbt::Long(l) => Tag::Long(*l),
-            Nbt::Float(f) => Tag::Float(f.to_bits()),
-            Nbt::Double(d) => Tag::Double(d.to_bits()),
-            Nbt::String(s) => Tag::String(JavaString::from(s.as_str())),
-            Nbt::Compound(c) => Tag::Compound(c.iter().filter_map(|(k, v)| Some((JavaString::from(k.as_str()), to_tag(v)?))).collect::<Compound>()),
-            Nbt::List(l) => Tag::List(l.iter().filter_map(to_tag).collect()),
-            Nbt::ByteArray(a) => Tag::ByteArray(a.iter().map(|b| *b as u8).collect()),
-            Nbt::IntArray(a) => Tag::IntArray(a.clone()),
-            Nbt::LongArray(a) => Tag::LongArray(a.clone()),
-        }})
+}}
+"#)),
+        ("block_entity_save", format!(r#"// Generated by horizon-mod-translator: the translated mod's live block entity writes what it holds
+// now into the game's data, as its chunk saves or a `/data` command reads it.
+fn {id}_block_entity_save(
+    game: &mut crate::game::Game<'_>,
+    pos: [i32; 3],
+    entity: &mut horizon_client::containers::ModBlockEntity,
+) {{
+{conversions}{held}    if !{krate}::ours(&entity.id) {{
+        return;
     }}
 {host}    let state = game.native_state_text_at(pos);
-    let mut nbt: BTreeMap<String, Nbt> = entity.nbt.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect();
+    let mut saved = held(&entity.nbt);
     let mut host = Host {{ game }};
-    if {krate}::hook_runtime("block_entity_tick", |rt| {c}::glue::block_entity_tick(rt, &mut host, pos, &state, &mut nbt)) {{
-        // What the block entity saved, all of it: keys it dropped are gone.
-        entity.nbt = nbt.iter().filter_map(|(k, v)| Some((JavaString::from(k.as_str()), to_tag(v)?))).collect::<Compound>();
+    {krate}::hook_runtime("block_entity_save", |rt| {c}::glue::block_entity_save(rt, &mut host, pos, &state, &mut saved));
+    let written = saved.written;
+    if let Some(written) = written {{
+        entity.nbt = written;
     }}
 }}
 "#)),
@@ -4697,14 +4771,13 @@ fn {id}_block_entity_components(
     entity: &horizon_client::containers::ModBlockEntity,
     components: &mut Vec<(String, horizon_world::nbt::Tag)>,
 ) {{
-{conversions}    use std::collections::BTreeMap;
-    if !{krate}::ours(&entity.id) {{
+{conversions}{held}    if !{krate}::ours(&entity.id) {{
         return;
     }}
 {host}    let state = game.native_state_text_at(pos);
-    let nbt: BTreeMap<String, Nbt> = entity.nbt.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), to_nbt(v)?))).collect();
+    let saved = held(&entity.nbt);
     let mut host = Host {{ game }};
-    let named = {krate}::hook_runtime("block_entity_components", |rt| {c}::glue::block_entity_components(rt, &mut host, pos, &state, &nbt));
+    let named = {krate}::hook_runtime("block_entity_components", |rt| {c}::glue::block_entity_components(rt, &mut host, pos, &state, &saved));
     components.extend(named.iter().filter_map(|(name, value)| Some((name.clone(), to_tag(value)?))));
 }}
 "#)),
@@ -5340,7 +5413,7 @@ const CLIENT_BINDINGS: [(&str, &str); 51] = [
     ("camera_shake", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"partial\", ty = \"f32\", value = \"partial\" },\n    { name = \"shake\", ty = \"&mut crate::game::native_hooks::NativeShake\", value = \"&mut *shake\" },\n"),
 ];
 
-const BLOCK_ENTITY_BINDINGS: [(&str, &str); 75] = [
+const BLOCK_ENTITY_BINDINGS: [(&str, &str); 76] = [
     ("entity_types", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"types\", ty = \"&mut Vec<(String, bool)>\", value = \"&mut *types\" },\n"),
     ("load_entity", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"tag\", ty = \"&horizon_world::nbt::Tag\", value = \"tag\" },\n    { name = \"finalize\", ty = \"bool\", value = \"finalize\" },\n    { name = \"from_disk\", ty = \"bool\", value = \"from_disk\" },\n    { name = \"made\", ty = \"&mut Option<bool>\", value = \"&mut *made\" },\n"),
     ("save_entities", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"chunks\", ty = \"&[(i32, i32)]\", value = \"chunks\" },\n    { name = \"remove\", ty = \"bool\", value = \"remove\" },\n    { name = \"saved\", ty = \"&mut Vec<((i32, i32), horizon_world::nbt::Tag)>\", value = \"&mut *saved\" },\n"),
@@ -5399,6 +5472,7 @@ const BLOCK_ENTITY_BINDINGS: [(&str, &str); 75] = [
     ("block_entity", "    { name = \"block\", ty = \"&str\", value = \"block\" },\n    { name = \"entity\", ty = \"&mut Option<(String, horizon_world::nbt::Compound)>\", value = \"&mut *entity\" },\n"),
     ("block_entity_ticks", "    { name = \"block\", ty = \"&str\", value = \"block\" },\n    { name = \"ticks\", ty = \"&mut bool\", value = \"&mut *ticks\" },\n"),
     ("block_entity_tick", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"entity\", ty = \"&mut horizon_client::containers::ModBlockEntity\", value = \"&mut *entity\" },\n"),
+    ("block_entity_save", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"entity\", ty = \"&mut horizon_client::containers::ModBlockEntity\", value = \"&mut *entity\" },\n"),
     ("block_entity_components", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"entity\", ty = \"&horizon_client::containers::ModBlockEntity\", value = \"entity\" },\n    { name = \"components\", ty = \"&mut Vec<(String, horizon_world::nbt::Tag)>\", value = \"&mut *components\" },\n"),
     ("right_click_block", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"face\", ty = \"[i32; 3]\", value = \"face\" },\n    { name = \"canceled\", ty = \"&mut bool\", value = \"&mut *canceled\" },\n"),
     ("use_item_on", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"stack\", ty = \"&horizon_client::items::ItemStack\", value = \"stack\" },\n    { name = \"pos\", ty = \"[i32; 3]\", value = \"pos\" },\n    { name = \"face\", ty = \"[i32; 3]\", value = \"face\" },\n    { name = \"claimed\", ty = \"&mut bool\", value = \"&mut *claimed\" },\n"),

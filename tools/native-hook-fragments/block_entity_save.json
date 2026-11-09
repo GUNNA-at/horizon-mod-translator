@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "name": "block_entity_save",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_save"
+    }
+  ],
+  "rust_summary": "a mod block entity writing what it holds now into its saved data before its chunk saves or a `/data` command reads it (`native_block_entity_save`).",
+  "doc_summary": "`native_block_entity_save(pos, entity)` asks a mod block entity to write what it holds now into its saved compound (`entity.nbt`), as vanilla's chunk saves each of its block entities (`saveWithFullMetadata`) and `/data` reads one: asked on the server for the mod block entities of the chunks about to be saved (the autosave, unloading, a dimension change, closing the world) and for the block a `/data` command reads. A block entity that writes its data only when it changed (`setChanged`) stays exact where it is read. Server-side.\n\nBundles that use it need `\"hooks\": @API:block_entity_save@`."
+}

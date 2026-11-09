@@ -117,6 +117,11 @@ result comes from a scene set up by command, read back from the world's data and
   Create's own models.
 - **Kinetics.** A creative motor turns shafts, cogwheels, gearboxes and belts. Speedometers and
   stressometers read it, and the goggles show the stress figures.
+- **Speed.** A server tick with 1,568 of Create's kinetic block entities (32 rows of 48 shafts, each row
+  turned by a creative motor) takes 3.6 ms, 0.6 of it the bare ground: about 1.9 µs per block entity. It
+  took 14 ms before the wrapper around each one's tick was cut down (its ticker made once for its block's
+  state, its data written when it changed). The server keeps that speed with the game's window hidden:
+  macOS used to nap it after half a minute, 8 to 9 times slower.
 - **Belts.** Items, mobs and players ride a belt at its speed and drop off its end.
 - **Processing.** Presses compact over basins with Minecraft's recipes and Create's own. Mixers brew
   potions over lit blaze burners. Fans smelt over lava, smoke over a campfire and wash in water.
@@ -235,7 +240,7 @@ files are never committed. Every translation is built from the user's own jars.
   figures above.
 - **The specification.** Behaviour is checked against NeoForge 21.1.256's and Minecraft 1.21.1's bytecode
   (`javap`), against the libraries' own jars, and against JDK 21 oracles for `java.*`.
-- **Tests.** `horizon-compat` has 722 unit tests. The translator's tests include a differential test: the
+- **Tests.** `horizon-compat` has 724 unit tests. The translator's tests include a differential test: the
   same Java runs on the JVM and translated, and the results must match bit for bit.
 - **In the game.** Scenes are set up and read back with `horizon-ctl`: block and entity data, and
   screenshots.

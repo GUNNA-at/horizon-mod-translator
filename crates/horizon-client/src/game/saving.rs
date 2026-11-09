@@ -154,6 +154,7 @@ impl Game<'_> {
                     let started = Instant::now();
                     for _ in 0..SNAPSHOTS_PER_FRAME {
                         let Some(&key) = keys.front() else { break };
+                        self.save_mod_block_entities(&[key]);
                         let chunks = self.with_entities(self.world.chunks.get(&key));
                         self.save.save_later(
                             &chunks,

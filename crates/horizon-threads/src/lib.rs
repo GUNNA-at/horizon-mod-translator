@@ -46,6 +46,130 @@ fn favour() -> bool {
     false
 }
 
+/// While it lives, macOS doesn't nap the game (App Nap). An app none of whose
+/// windows shows (minimised, covered, `--offscreen`) is otherwise moved, after
+/// half a minute or so, to the background band: every thread at priority 4 on
+/// the efficiency cores, whatever `favour_current` asked. A server thread
+/// there ticked 8 to 9 times slower (the same field of a mod's machines: 4 ms
+/// per tick, then 35). The integrated server's thread holds one while it runs a
+/// world, which players wait for whether or not the window shows: a LAN
+/// guest, the window's own client. The system may still sleep when idle.
+/// Nothing elsewhere.
+pub struct Serving {
+    #[cfg(target_os = "macos")]
+    token: *mut std::ffi::c_void,
+}
+
+/// See [`Serving`].
+pub fn serving() -> Serving {
+    Serving {
+        #[cfg(target_os = "macos")]
+        token: nap::begin(c"A world is running"),
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        nap::end(self.token);
+    }
+}
+
+/// `NSProcessInfo`'s activities, through the Objective-C runtime.
+#[cfg(target_os = "macos")]
+mod nap {
+    use std::ffi::{CStr, c_char, c_void};
+
+    type Id = *mut c_void;
+
+    #[link(name = "Foundation", kind = "framework")]
+    unsafe extern "C" {}
+
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Id;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    /// `NSActivityUserInitiatedAllowingIdleSystemSleep`.
+    const USER_INITIATED_ALLOWING_IDLE_SLEEP: u64 = 0x00FF_FFFF & !(1 << 20);
+
+    /// `[[NSProcessInfo processInfo] beginActivityWithOptions:reason:]`,
+    /// retained; null where the runtime gave none.
+    pub(super) fn begin(reason: &CStr) -> Id {
+        // SAFETY: `objc_msgSend` is called through the exact signature of each
+        // method it sends (receiver, selector, then the method's own
+        // arguments); every receiver is checked for null first; the pool is
+        // pushed and popped on this thread, and the token kept past it is
+        // retained.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Id) -> Id =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let send_text: unsafe extern "C" fn(Id, Id, *const c_char) -> Id =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let send_begin: unsafe extern "C" fn(Id, Id, u64, Id) -> Id =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let info_class = objc_getClass(c"NSProcessInfo".as_ptr());
+            let string_class = objc_getClass(c"NSString".as_ptr());
+            if info_class.is_null() || string_class.is_null() {
+                return std::ptr::null_mut();
+            }
+            let pool = objc_autoreleasePoolPush();
+            let info = send(info_class, sel_registerName(c"processInfo".as_ptr()));
+            let text = send_text(
+                string_class,
+                sel_registerName(c"stringWithUTF8String:".as_ptr()),
+                reason.as_ptr(),
+            );
+            let mut token = std::ptr::null_mut();
+            if !info.is_null() && !text.is_null() {
+                token = send_begin(
+                    info,
+                    sel_registerName(c"beginActivityWithOptions:reason:".as_ptr()),
+                    USER_INITIATED_ALLOWING_IDLE_SLEEP,
+                    text,
+                );
+                if !token.is_null() {
+                    token = send(token, sel_registerName(c"retain".as_ptr()));
+                }
+            }
+            objc_autoreleasePoolPop(pool);
+            token
+        }
+    }
+
+    /// `[[NSProcessInfo processInfo] endActivity:token]`, and the token
+    /// released.
+    pub(super) fn end(token: Id) {
+        if token.is_null() {
+            return;
+        }
+        // SAFETY: as in `begin`; `token` is the retained object `begin` gave,
+        // released once here.
+        unsafe {
+            let send: unsafe extern "C" fn(Id, Id) -> Id =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let send_end: unsafe extern "C" fn(Id, Id, Id) =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let send_release: unsafe extern "C" fn(Id, Id) =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let pool = objc_autoreleasePoolPush();
+            let info_class = objc_getClass(c"NSProcessInfo".as_ptr());
+            if !info_class.is_null() {
+                let info = send(info_class, sel_registerName(c"processInfo".as_ptr()));
+                if !info.is_null() {
+                    send_end(info, sel_registerName(c"endActivity:".as_ptr()), token);
+                }
+            }
+            send_release(token, sel_registerName(c"release".as_ptr()));
+            objc_autoreleasePoolPop(pool);
+        }
+    }
+}
+
 /// The CPU time the calling thread has used, where only an OS call gives it
 /// precisely. Windows counts it exactly only in cycles of the time-stamp
 /// counter (`QueryThreadCycleTime`; `GetThreadTimes` moves in scheduler ticks

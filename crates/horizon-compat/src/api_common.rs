@@ -3589,6 +3589,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::Void
         }
         (o, "setChanged") if o.ends_with("BlockEntity") && desc == "()V" => {
+            // What the game holds of it is written again (vanilla's chunk is marked unsaved).
+            rt.put_field(a(0), "$dirty", V::I(1));
             block_entity_changed(rt, a(0));
             V::Void
         }

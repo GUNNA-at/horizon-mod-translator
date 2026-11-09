@@ -80,7 +80,8 @@ const OVERWORLD: &str = "minecraft:overworld";
 /// and loaded then (`LevelEvent.Load`); the Overworld's first, as `MinecraftServer.createLevels`
 /// makes it before the others. Kept until the server stops ([`crate::neo::server_stopped`]).
 pub(crate) fn server_level(rt: &mut Rt, dimension: &str) -> V {
-    let key = format!("compat:level/{dimension}");
+    // Asked at each block entity's tick: no formatting machinery.
+    let key = ["compat:level/", dimension].concat();
     if let Some(l) = rt.interned.get(&key) {
         return *l;
     }
@@ -267,15 +268,47 @@ pub fn block_entity_ticks(rt: &Rt, block: &str) -> bool {
     implements(rt, block, GET_TICKER)
 }
 
-/// The mod's block entity object at `pos`, made with `newBlockEntity` and loaded from `nbt` the first time.
-fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) -> Option<V> {
+/// What the game holds of a mod block entity: the compound it saves with its chunk and shows
+/// (`/data get block`). The runtime reads it only when it is news to the live block entity (made
+/// from it, or changed by the game since: `/data merge block`), which its fingerprint tells, and
+/// writes it only when the block entity changed ([`block_entity_tick`]).
+pub trait Held {
+    /// The same data, the same fingerprint.
+    fn fingerprint(&self) -> u64;
+    fn is_empty(&self) -> bool;
+    /// The data, as the runtime's NBT.
+    fn read(&self) -> std::collections::BTreeMap<String, crate::nbt::Nbt>;
+    /// Replaces the data with what the block entity saved; the fingerprint of what the game holds now.
+    fn write(&mut self, nbt: std::collections::BTreeMap<String, crate::nbt::Nbt>) -> u64;
+}
+
+/// The runtime's own NBT standing for the game's (tests, and a hook that holds a converted copy).
+impl Held for std::collections::BTreeMap<String, crate::nbt::Nbt> {
+    fn fingerprint(&self) -> u64 {
+        crate::nbt::data_hash(self)
+    }
+    fn is_empty(&self) -> bool {
+        std::collections::BTreeMap::is_empty(self)
+    }
+    fn read(&self) -> std::collections::BTreeMap<String, crate::nbt::Nbt> {
+        self.clone()
+    }
+    fn write(&mut self, nbt: std::collections::BTreeMap<String, crate::nbt::Nbt>) -> u64 {
+        *self = nbt;
+        crate::nbt::data_hash(self)
+    }
+}
+
+/// The mod's block entity object at `pos`, made with `newBlockEntity` and loaded from what the game
+/// holds of it (`held`) the first time.
+fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, held: &dyn Held) -> Option<V> {
     let (block, _) = crate::host::split_state(state);
     if let Some(be) = rt.block_entities.get(&pos).copied() {
         // The same block entity, unless the block changed or the game hands a fresh one (an empty
         // compound where the live one had saved data): then it is made again.
-        let fresh = rt.block_entity_meta.get(&pos).is_some_and(|(b, saved)| b != block || (*saved && nbt.is_empty()));
+        let fresh = rt.block_entity_meta.get(&pos).is_some_and(|(b, saved)| b != block || (*saved && held.is_empty()));
         if !fresh {
-            take_saved(rt, pos, be, nbt);
+            take_saved(rt, pos, be, held);
             return Some(be);
         }
         rt.block_entities.remove(&pos);
@@ -289,30 +322,27 @@ fn block_entity(rt: &mut Rt, pos: [i32; 3], state: &str, nbt: &std::collections:
     if be.r() == 0 {
         return None;
     }
-    load_saved(rt, be, nbt);
+    load_saved(rt, be, held);
     rt.block_entities.insert(pos, be);
     Some(be)
 }
 
-/// What the game holds of the live block entity `be` at `pos` (`nbt`), when that is news to it.
+/// What the game holds of the live block entity `be` at `pos` (`held`), when that is news to it.
 /// Made when something asked for it, before the game first ticked it or sent it to players: the
 /// game's saved data goes in now, as vanilla's chunk load (or `/setblock`'s data) would have put it
-/// in. Changed since it last saved (`/data merge block`): it loads that and players are sent it, as
-/// vanilla's `BlockDataAccessor.setData` does (`sendBlockUpdated`), once.
-fn take_saved(
-    rt: &mut Rt,
-    pos: [i32; 3],
-    be: V,
-    nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
-) {
+/// in. Changed since the block entity last saw it (`/data merge block`): it loads that, is changed,
+/// and players are sent it, as vanilla's `BlockDataAccessor.setData` does (`setChanged`,
+/// `sendBlockUpdated`), once.
+fn take_saved(rt: &mut Rt, pos: [i32; 3], be: V, held: &dyn Held) {
     if rt.get_field(be, "$demand").i() != 0 {
         rt.put_field(be, "$demand", V::I(0));
-        load_saved(rt, be, nbt);
-    } else if let V::J(written) = rt.get_field(be, "$written")
-        && written != crate::nbt::data_hash(nbt) as i64
+        load_saved(rt, be, held);
+    } else if let V::J(seen) = rt.get_field(be, "$seen")
+        && seen != held.fingerprint() as i64
     {
-        load_saved(rt, be, nbt);
-        rt.put_field(be, "$written", V::J(crate::nbt::data_hash(nbt) as i64));
+        load_saved(rt, be, held);
+        rt.put_field(be, "$seen", V::J(held.fingerprint() as i64));
+        rt.put_field(be, "$dirty", V::I(1));
         if let Some(h) = rt.host_mut() {
             h.block_changed(pos);
         }
@@ -322,18 +352,60 @@ fn take_saved(
 /// Loads the game's saved data into block entity `be`. Only saved data, as vanilla's: a block
 /// entity just placed keeps what its constructor set (an empty compound would read every field as
 /// absent: Create's creative motor would lose its default speed). What it kept of the stack it was
-/// placed from comes back from `components` (`BlockEntity.loadWithComponents`).
-fn load_saved(rt: &mut Rt, be: V, nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>) {
+/// placed from comes back from `components` (`BlockEntity.loadWithComponents`). The block entity has
+/// seen the data then: it isn't loaded again until the game changes it.
+fn load_saved(rt: &mut Rt, be: V, held: &dyn Held) {
     let Some(vc) = rt.vcall else { return };
-    if !nbt.is_empty() {
-        let tag = crate::nbt::to_runtime(rt, nbt);
-        let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
-        vc(rt, LOAD_KEY, LOAD, &[be, tag, provider]);
-        rt.report_thrown("loadAdditional");
+    if held.is_empty() {
+        return;
     }
+    let nbt = held.read();
+    let tag = crate::nbt::to_runtime(rt, &nbt);
+    let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
+    vc(rt, LOAD_KEY, LOAD, &[be, tag, provider]);
+    rt.report_thrown("loadAdditional");
     if let Some(crate::nbt::Nbt::Compound(kept)) = nbt.get(KEPT) {
         let kept: Vec<(String, crate::nbt::Nbt)> = kept.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         crate::components::load_kept(rt, be, &kept);
+    }
+    rt.put_field(be, "$seen", V::J(held.fingerprint() as i64));
+}
+
+/// The block entity at `pos` changed (`setChanged`, `Level.blockEntityChanged`, players sent its
+/// data): what the game holds of it is written again at the end of its next tick, as vanilla's
+/// chunk is marked unsaved and saves it.
+pub(crate) fn block_entity_dirty(rt: &mut Rt, pos: [i32; 3]) {
+    if let Some(be) = rt.block_entities.get(&pos).copied() {
+        rt.put_field(be, "$dirty", V::I(1));
+    }
+}
+
+/// The ticker of block entity `be` for its block's state `state` (`block`'s `getTicker`), and that
+/// state's object. Vanilla's chunk gives a block entity each new state of its block
+/// (`setBlockState`) and makes its ticker again for it (`LevelChunk.updateBlockEntityTicker`); the
+/// same state keeps the ticker it has.
+fn ticker_for(rt: &mut Rt, be: V, block: V, level: V, state: &str) -> (V, V) {
+    let had = rt.get_field(be, "$tickerState");
+    if had.r() != 0 && rt.str_of(had) == Some(state) {
+        return (had, rt.get_field(be, "$ticker"));
+    }
+    let st = api::state(rt, state);
+    rt.put_field(be, "$state", st);
+    rt.put_field(be, "blockState", st);
+    let Some(vc) = rt.vcall else { return (st, V::NULL) };
+    let ty = rt.get_field(be, "$type");
+    let ticker = vc(rt, GET_TICKER_KEY, GET_TICKER, &[block, level, st, ty]);
+    rt.put_field(be, "$ticker", ticker);
+    rt.put_field(be, "$tickerState", st);
+    (st, ticker)
+}
+
+/// Where block entity `be` is, the position its ticker is given (vanilla's
+/// `BoundTickingBlockEntity` passes `getBlockPos()`).
+fn ticked_pos(rt: &mut Rt, be: V, pos: [i32; 3]) -> V {
+    match rt.get_field(be, "$pos") {
+        p if p.r() != 0 => p,
+        _ => api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64),
     }
 }
 
@@ -386,27 +458,22 @@ pub(crate) fn block_entity_at(rt: &mut Rt, pos: [i32; 3]) -> V {
     be
 }
 
-/// `native_block_entity_tick`: one server tick of the mod's block entity at `pos`, whose saved
-/// compound is `nbt` (read before, written after).
-pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, nbt: &mut std::collections::BTreeMap<String, crate::nbt::Nbt>) -> bool {
+/// `native_block_entity_tick`: one server tick of the mod's block entity at `pos`, of which the game
+/// holds `held` (read when it is news to the block entity, written when the block entity changed).
+pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, held: &mut dyn Held) -> bool {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
     let Some((b, _)) = mod_block(rt, state) else { return false };
     rt.with_host(host, |rt| {
-        let Some(be) = block_entity(rt, pos, state, nbt) else { return false };
-        let Some(vc) = rt.vcall else { return false };
+        let Some(be) = block_entity(rt, pos, state, &*held) else { return false };
         let level = level(rt);
-        let st = api::state(rt, state);
         // In its level, with the block's current state, as the game's block entity is.
         if rt.get_field(be, "level").r() == 0 {
             rt.put_field(be, "level", level);
         }
-        rt.put_field(be, "$state", st);
-        rt.put_field(be, "blockState", st);
-        let ty = rt.get_field(be, "$type");
-        let ticker = vc(rt, GET_TICKER_KEY, GET_TICKER, &[b, level, st, ty]);
+        let (st, ticker) = ticker_for(rt, be, b, level, state);
         if ticker.r() != 0 {
-            let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+            let p = ticked_pos(rt, be, pos);
             rt.call_functional(TICKER_TICK, ticker, &[level, p, st, be]);
         }
         rt.report_thrown("the block entity's tick");
@@ -414,22 +481,54 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
         if rt.host().is_some_and(|h| h.is_server()) {
             crate::entities::item_contacts(rt, pos, b, st);
         }
-        let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
-        api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
-        let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
-        vc(rt, SAVE_KEY, SAVE, &[be, tag, provider]);
-        rt.report_thrown("saveAdditional");
-        *nbt = crate::nbt::from_runtime(rt, tag);
-        // `saveWithoutMetadata`: what it kept of its stack goes beside its own data.
-        let kept = crate::components::kept_saved(rt, be);
-        if !kept.is_empty() {
-            nbt.insert(KEPT.to_owned(), crate::nbt::Nbt::Compound(kept.into_iter().collect()));
+        // Written after its first tick, then when it changed since it last was: vanilla's chunk
+        // saves its block entities when it is saved, marked unsaved by their `setChanged`.
+        if !matches!(rt.get_field(be, "$dirty"), V::I(0)) {
+            save_held(rt, pos, be, state, held);
         }
-        rt.put_field(be, "$written", V::J(crate::nbt::data_hash(nbt) as i64));
-        let (block, _) = crate::host::split_state(state);
-        rt.block_entity_meta.insert(pos, (block.to_owned(), !nbt.is_empty()));
         true
     })
+}
+
+/// `native_block_entity_save`: the mod's live block entity at `pos` writes what it holds now into
+/// what the game holds of it (`held`), as vanilla's chunk saves each of its block entities
+/// (`saveWithFullMetadata`) and `/data` reads one: what it changed without `setChanged` since it last
+/// wrote (Create's press counting its stroke, the items moving on a belt) is in it. What the game
+/// changed since is taken first. A block entity not live here leaves the game's data as it is.
+pub fn block_entity_save(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, held: &mut dyn Held) -> bool {
+    rt.safe_point();
+    let (block, _) = crate::host::split_state(state);
+    let Some(be) = rt.block_entities.get(&pos).copied() else { return false };
+    if rt.block_entity_meta.get(&pos).is_none_or(|(b, _)| b != block) {
+        return false;
+    }
+    rt.with_host(host, |rt| {
+        take_saved(rt, pos, be, &*held);
+        save_held(rt, pos, be, state, held);
+        true
+    })
+}
+
+/// Block entity `be` at `pos` saves itself (`saveWithoutMetadata`) into what the game holds of it.
+fn save_held(rt: &mut Rt, pos: [i32; 3], be: V, state: &str, held: &mut dyn Held) {
+    let Some(vc) = rt.vcall else { return };
+    rt.put_field(be, "$dirty", V::I(0));
+    let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
+    api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
+    let provider = rt.new_object("net/minecraft/core/HolderLookup$Provider");
+    vc(rt, SAVE_KEY, SAVE, &[be, tag, provider]);
+    rt.report_thrown("saveAdditional");
+    let mut nbt = crate::nbt::from_runtime(rt, tag);
+    // `saveWithoutMetadata`: what it kept of its stack goes beside its own data.
+    let kept = crate::components::kept_saved(rt, be);
+    if !kept.is_empty() {
+        nbt.insert(KEPT.to_owned(), crate::nbt::Nbt::Compound(kept.into_iter().collect()));
+    }
+    let saved = !nbt.is_empty();
+    let seen = held.write(nbt);
+    rt.put_field(be, "$seen", V::J(seen as i64));
+    let (block, _) = crate::host::split_state(state);
+    rt.block_entity_meta.insert(pos, (block.to_owned(), saved));
 }
 
 /// The block entity at `pos` was removed (its block broken or replaced).
@@ -1156,11 +1255,7 @@ const CLIENT_TICK_POST: &str = "net/neoforged/neoforge/client/event/ClientTickEv
 /// `saved` is what the game holds of it, which it takes first when that is news to it
 /// ([`take_saved`]): a block set with data (`/setblock`) whose block entity its `onPlace` made
 /// already sends that data, as vanilla's block entity has loaded it before its chunk sends it.
-pub fn block_entity_update_tag(
-    rt: &mut Rt,
-    pos: [i32; 3],
-    saved: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
-) -> Option<std::collections::BTreeMap<String, crate::nbt::Nbt>> {
+pub fn block_entity_update_tag(rt: &mut Rt, pos: [i32; 3], saved: &dyn Held) -> Option<std::collections::BTreeMap<String, crate::nbt::Nbt>> {
     rt.safe_point();
     let be = rt.block_entities.get(&pos).copied()?;
     take_saved(rt, pos, be, saved);
@@ -1177,16 +1272,10 @@ pub fn block_entity_update_tag(
 /// `native_block_entity_components` (server): what the mod block entity at `pos` gives the item its
 /// block drops (`BlockEntity.collectComponents()`), by component name, each as its codec writes it:
 /// its object here, else one made from its saved data. None for a block that isn't the mod's.
-pub fn block_entity_components(
-    rt: &mut Rt,
-    host: &mut dyn Host,
-    pos: [i32; 3],
-    state: &str,
-    nbt: &std::collections::BTreeMap<String, crate::nbt::Nbt>,
-) -> Vec<(String, crate::nbt::Nbt)> {
+pub fn block_entity_components(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, held: &dyn Held) -> Vec<(String, crate::nbt::Nbt)> {
     rt.safe_point();
     rt.with_host(host, |rt| {
-        let Some(be) = block_entity(rt, pos, state, nbt) else { return Vec::new() };
+        let Some(be) = block_entity(rt, pos, state, held) else { return Vec::new() };
         let map = crate::components::collect_components(rt, be);
         crate::components::saved(rt, map)
     })
@@ -2295,8 +2384,7 @@ pub fn render_frame(rt: &mut Rt, host: &mut dyn Host, realtime: f32, partial: f3
 /// press heads and the items on belts and depots. One whose block is gone from the client's
 /// world is let go, as vanilla removes it with its block.
 fn tick_client_block_entities(rt: &mut Rt) {
-    let Some(vc) = rt.vcall else { return };
-    if rt.block_entities.is_empty() {
+    if rt.vcall.is_none() || rt.block_entities.is_empty() {
         return;
     }
     let mut held: Vec<([i32; 3], V)> = rt.block_entities.iter().map(|(p, be)| (*p, *be)).collect();
@@ -2310,13 +2398,9 @@ fn tick_client_block_entities(rt: &mut Rt) {
             continue;
         }
         let Some((b, _)) = mod_block(rt, &state) else { continue };
-        let st = api::state(rt, &state);
-        rt.put_field(be, "$state", st);
-        rt.put_field(be, "blockState", st);
-        let ty = rt.get_field(be, "$type");
-        let ticker = vc(rt, GET_TICKER_KEY, GET_TICKER, &[b, level, st, ty]);
+        let (st, ticker) = ticker_for(rt, be, b, level, &state);
         if ticker.r() != 0 {
-            let p = api::block_pos(rt, pos[0] as i64, pos[1] as i64, pos[2] as i64);
+            let p = ticked_pos(rt, be, pos);
             rt.call_functional(TICKER_TICK, ticker, &[level, p, st, be]);
         }
         rt.report_thrown("the block entity's client tick");
@@ -2682,10 +2766,10 @@ mod tests {
         // Broken, it names what its item keeps, each as its type's codec writes it; a block that
         // isn't the mod's names nothing.
         use crate::nbt::Nbt;
-        let named = block_entity_components(&mut rt, &mut host, pos, "test:pot", &Default::default());
+        let named = block_entity_components(&mut rt, &mut host, pos, "test:pot", &std::collections::BTreeMap::new());
         assert_eq!(named, [("test:lid".to_owned(), Nbt::Int(2)), ("test:meal".to_owned(), Nbt::String("stew".into()))]);
         host.blocks.insert([9, 64, 9], "minecraft:stone".into());
-        assert!(block_entity_components(&mut rt, &mut host, [9, 64, 9], "minecraft:stone", &Default::default()).is_empty());
+        assert!(block_entity_components(&mut rt, &mut host, [9, 64, 9], "minecraft:stone", &std::collections::BTreeMap::new()).is_empty());
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
@@ -2876,6 +2960,163 @@ mod tests {
         ));
         assert_eq!(rt.get_field(be, "loads").i(), 2, "the change loaded once");
         assert_eq!(saved, changed);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// What the game holds of a block entity, counting what the runtime reads and writes of it.
+    #[derive(Default)]
+    struct Counted {
+        nbt: std::collections::BTreeMap<String, crate::nbt::Nbt>,
+        reads: std::cell::Cell<u32>,
+        writes: u32,
+    }
+    impl Held for Counted {
+        fn fingerprint(&self) -> u64 {
+            crate::nbt::data_hash(&self.nbt)
+        }
+        fn is_empty(&self) -> bool {
+            self.nbt.is_empty()
+        }
+        fn read(&self) -> std::collections::BTreeMap<String, crate::nbt::Nbt> {
+            self.reads.set(self.reads.get() + 1);
+            self.nbt.clone()
+        }
+        fn write(&mut self, nbt: std::collections::BTreeMap<String, crate::nbt::Nbt>) -> u64 {
+            self.writes += 1;
+            self.nbt = nbt;
+            crate::nbt::data_hash(&self.nbt)
+        }
+    }
+
+    const DIAL: &str = "test/DialBlock";
+    const DIAL_ENTITY: &str = "test/DialBlockEntity";
+
+    /// The test dial: its block makes a block entity and gives it a ticker (lambda 7, counted on the
+    /// block as `tickers`); its block entity saves and loads its `turns`.
+    fn dial_code(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+        const INIT: &str = "net/minecraft/world/level/block/entity/BlockEntity.<init>.(Lnet/minecraft/world/level/block/entity/BlockEntityType;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;)V";
+        match short {
+            NEW_BLOCK_ENTITY if rt.class_of(args[0]) == DIAL => {
+                let be = rt.new_object(DIAL_ENTITY);
+                api::call(rt, INIT, &[be, V::NULL, args[1], args[2]]);
+                be
+            }
+            GET_TICKER if rt.class_of(args[0]) == DIAL => {
+                let n = rt.get_field(args[0], "tickers").i();
+                rt.put_field(args[0], "tickers", V::I(n + 1));
+                rt.lambda_id("test/DialTicker", 7, Vec::new())
+            }
+            SAVE if rt.class_of(args[0]) == DIAL_ENTITY => {
+                let (k, turns) = (rt.string("turns"), rt.get_field(args[0], "turns"));
+                api::call(rt, "net/minecraft/nbt/CompoundTag.putInt.(Ljava/lang/String;I)V", &[args[1], k, turns]);
+                V::Void
+            }
+            LOAD if rt.class_of(args[0]) == DIAL_ENTITY => {
+                let k = rt.string("turns");
+                let turns = api::call(rt, "net/minecraft/nbt/CompoundTag.getInt.(Ljava/lang/String;)I", &[args[1], k]);
+                rt.put_field(args[0], "turns", turns);
+                V::Void
+            }
+            _ => api::call(rt, key, args),
+        }
+    }
+
+    /// The dial's ticker: a turn a tick, and `setChanged` at its third, as Create's kinetic block
+    /// entities say it only when their speed or network changes.
+    fn dial_tick(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+        if id != 7 {
+            return None;
+        }
+        let be = args[4];
+        let turns = rt.get_field(be, "turns").i() + 1;
+        rt.put_field(be, "turns", V::I(turns));
+        if turns == 3 {
+            api::call(rt, "net/minecraft/world/level/block/entity/BlockEntity.setChanged.()V", &[be]);
+        }
+        Some(V::Void)
+    }
+
+    /// What the game holds of a block entity is written after its first tick, then only when the
+    /// block entity changed (`setChanged`, or players were sent its data: `sendBlockUpdated`), as
+    /// vanilla's chunk saves its block entities when marked unsaved. The game's data is read only
+    /// when the game changed it (`/data merge block`): the block entity loads it, and is changed.
+    /// Its ticker is made once for its block's state, and again for a new state
+    /// (`LevelChunk.updateBlockEntityTicker`).
+    #[test]
+    fn a_block_entity_is_written_when_it_changed_and_read_when_the_game_changed_it() {
+        use crate::nbt::Nbt;
+        const SEND: &str = "net/minecraft/world/level/Level.sendBlockUpdated.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/block/state/BlockState;I)V";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(dial_code);
+        rt.lambda_call = Some(dial_tick);
+        let block = rt.new_object(DIAL);
+        rt.registered.insert(("block".into(), "test:dial".into()), block);
+        let (at, off, on) = ([2, 64, 2], "test:dial[lit=false]", "test:dial[lit=true]");
+        let mut host = MemoryHost::default();
+        host.blocks.insert(at, off.into());
+        let turns = |n: i32| std::collections::BTreeMap::from([("turns".to_owned(), Nbt::Int(n))]);
+        let mut game = Counted::default();
+        let mut tick = |rt: &mut Rt, host: &mut MemoryHost, game: &mut Counted, state: &str| assert!(block_entity_tick(rt, host, at, state, game));
+        tick(&mut rt, &mut host, &mut game, off);
+        assert_eq!((&game.nbt, game.writes), (&turns(1), 1), "written after its first tick");
+        tick(&mut rt, &mut host, &mut game, off);
+        assert_eq!((&game.nbt, game.writes), (&turns(1), 1), "unchanged as far as it said");
+        tick(&mut rt, &mut host, &mut game, off);
+        assert_eq!((&game.nbt, game.writes), (&turns(3), 2), "written as it said `setChanged`");
+        assert_eq!(game.reads.get(), 0, "the game's data was never news to it");
+        game.nbt = turns(10);
+        tick(&mut rt, &mut host, &mut game, off);
+        assert_eq!((game.reads.get(), &game.nbt, game.writes), (1, &turns(11), 3), "the game's change loaded, then written as changed");
+        rt.with_host(&mut host, |rt| {
+            let (l, p, st) = (level(rt), api::block_pos(rt, 2, 64, 2), api::state(rt, off));
+            api::call(rt, SEND, &[l, p, st, st, V::I(3)]);
+        });
+        tick(&mut rt, &mut host, &mut game, off);
+        assert_eq!((&game.nbt, game.writes), (&turns(12), 4), "written as players were sent its data");
+        assert_eq!(rt.get_field(block, "tickers"), V::I(1), "one ticker for one state");
+        host.blocks.insert(at, on.into());
+        tick(&mut rt, &mut host, &mut game, on);
+        tick(&mut rt, &mut host, &mut game, on);
+        assert_eq!(rt.get_field(block, "tickers"), V::I(2), "made again for the new state");
+        let be = rt.block_entities[&at];
+        assert_eq!(rt.get_field(be, "turns"), V::I(14), "ticked on its new ticker");
+        assert_eq!(rt.str_of(rt.get_field(be, "blockState")), Some(on), "given its new state");
+        assert_eq!((game.reads.get(), game.writes), (1, 4));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Asked to save (its chunk saving, `/data` reading it), a live block entity writes what it holds
+    /// now, a change it made without `setChanged` included; a change the game made is taken first.
+    /// Where none is live, the game's data stays.
+    #[test]
+    fn a_block_entity_asked_to_save_writes_what_it_holds_now() {
+        use crate::nbt::Nbt;
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(dial_code);
+        rt.lambda_call = Some(dial_tick);
+        let block = rt.new_object(DIAL);
+        rt.registered.insert(("block".into(), "test:dial".into()), block);
+        let (at, state) = ([2, 64, 2], "test:dial[lit=false]");
+        let mut host = MemoryHost::default();
+        host.blocks.insert(at, state.into());
+        let turns = |n: i32| std::collections::BTreeMap::from([("turns".to_owned(), Nbt::Int(n))]);
+        let mut away = turns(5);
+        assert!(!block_entity_save(&mut rt, &mut host, at, state, &mut away), "none live there yet");
+        assert_eq!(away, turns(5));
+        let mut game = Counted::default();
+        for _ in 0..2 {
+            assert!(block_entity_tick(&mut rt, &mut host, at, state, &mut game));
+        }
+        assert_eq!(game.nbt, turns(1), "it said nothing of its second turn");
+        assert!(block_entity_save(&mut rt, &mut host, at, state, &mut game));
+        assert_eq!((&game.nbt, game.writes), (&turns(2), 2), "asked, it writes its second turn");
+        game.nbt = turns(7);
+        assert!(block_entity_save(&mut rt, &mut host, at, state, &mut game));
+        assert_eq!((game.reads.get(), &game.nbt), (1, &turns(7)), "the game's change taken first");
+        assert!(block_entity_tick(&mut rt, &mut host, at, state, &mut game));
+        assert_eq!(rt.get_field(rt.block_entities[&at], "turns"), V::I(8));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

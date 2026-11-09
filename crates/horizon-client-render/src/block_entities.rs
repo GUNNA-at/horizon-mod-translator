@@ -225,6 +225,10 @@ impl BlockEntities {
     pub fn has_mods(&self) -> bool {
         !self.mods.is_empty()
     }
+    /// The mod block entities in chunk `chunk` (its x and z).
+    pub fn mods_in(&self, chunk: (i32, i32)) -> impl Iterator<Item = &Pos> {
+        self.mods.get(&chunk).into_iter().flatten()
+    }
     /// The mod block entities within `radius` blocks of `x`, `z` (by chunk, so
     /// far ones are skipped whole; the caller checks each distance).
     pub fn mods_near(&self, x: f64, z: f64, radius: f64) -> impl Iterator<Item = &Pos> {
