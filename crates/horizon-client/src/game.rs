@@ -16227,6 +16227,9 @@ impl Game<'_> {
         let modified = horizon_client::spans::time("with_entities", || self.with_entities(&dirty));
         horizon_client::spans::time("unload_entities", || self.unload_entities(&unloaded));
         if !unloaded.is_empty() {
+            // Saved, the mods' block entities leave with their chunks (`ServerLevel.unload`).
+            let chunks: Vec<(i32, i32)> = unloaded.iter().map(|c| (c.x, c.z)).collect();
+            self.unload_mod_block_entities(&chunks);
             let gone: horizon_client::fast_hash::FxHashSet<(i32, i32)> =
                 unloaded.iter().map(|c| (c.x, c.z)).collect();
             self.world

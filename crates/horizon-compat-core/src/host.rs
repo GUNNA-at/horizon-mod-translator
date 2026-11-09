@@ -516,6 +516,11 @@ pub trait Host {
     fn dimension(&self) -> String {
         "minecraft:overworld".into()
     }
+    /// Whether the hook's level is `dimension`: [`Host::dimension`] without making its name, asked
+    /// as each hook starts ([`crate::Rt::with_host`]).
+    fn dimension_is(&self, dimension: &str) -> bool {
+        self.dimension() == dimension
+    }
     /// Whether the world is the authoritative server (`Level.isClientSide()` is the negation).
     fn is_server(&self) -> bool {
         true
@@ -1805,6 +1810,8 @@ pub struct BlockSounds {
 #[derive(Default)]
 pub struct MemoryHost {
     pub blocks: HashMap<[i32; 3], String>,
+    /// The dimension its blocks are in; None: the Overworld.
+    pub dimension: Option<String>,
     pub time: i64,
     pub sneaking: bool,
     pub creative: bool,
@@ -2094,6 +2101,11 @@ impl Host for MemoryHost {
     }
     fn is_server(&self) -> bool {
         !self.client
+    }
+    fn dimension(&self) -> String {
+        self.dimension
+            .clone()
+            .unwrap_or_else(|| "minecraft:overworld".into())
     }
     fn game_time(&self) -> i64 {
         self.time

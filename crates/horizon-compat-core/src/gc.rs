@@ -35,7 +35,19 @@ impl Rt {
             }
         };
         todo.extend(self.strings.values().copied());
-        for &v in self.statics.values().chain(self.registered.values()).chain(self.interned.values()).chain(self.block_entities.values()).chain(self.pinned.iter()) {
+        for &v in self
+            .statics
+            .values()
+            .chain(self.registered.values())
+            .chain(self.interned.values())
+            .chain(self.block_entities.values())
+            .chain(
+                self.parked_block_entities
+                    .values()
+                    .flat_map(|(live, _)| live.values()),
+            )
+            .chain(self.pinned.iter())
+        {
             push(v, &mut todo);
         }
         for (_, v) in &self.listeners {

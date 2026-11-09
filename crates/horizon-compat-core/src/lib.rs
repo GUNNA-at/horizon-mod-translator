@@ -211,6 +211,10 @@ pub fn reenter<R>(at: usize, f: impl FnOnce(&mut Rt) -> R) -> Option<R> {
     Some(f(unsafe { &mut *rt.as_ptr() }))
 }
 
+/// A dimension's live block entities and their [`Rt::block_entity_meta`], while a hook runs in
+/// another ([`Rt::parked_block_entities`]).
+pub type ParkedBlockEntities = (HashMap<[i32; 3], V>, HashMap<[i32; 3], (String, bool)>);
+
 /// The translated mod's runtime state.
 pub struct Rt {
     pub heap: Vec<Object>,
@@ -308,10 +312,18 @@ pub struct Rt {
     /// FML's scan of each jar (`ModList.getAllScanData`), registered by generated code: the ids
     /// of the jar's mods (`,` between them) and a line per annotation the translator found.
     pub scan_data: Vec<(&'static str, &'static str)>,
-    /// The mod's live block entities, by position.
+    /// The mod's live block entities, by position, in [`Rt::block_entity_dimension`].
     pub block_entities: HashMap<[i32; 3], V>,
     /// For each live block entity: its block, and whether its last save wrote anything.
     pub block_entity_meta: HashMap<[i32; 3], (String, bool)>,
+    /// The dimension of the two maps above (`minecraft:overworld`): the last hook's. One runtime
+    /// serves every level of its thread (the server's ticks each dimension in turn), and a position
+    /// is a place in one of them, so the block entities of the others wait in
+    /// [`Rt::parked_block_entities`] until a hook runs there ([`Rt::enter_dimension`]).
+    pub block_entity_dimension: String,
+    /// The live block entities (and their [`Rt::block_entity_meta`]) of the dimensions other than
+    /// [`Rt::block_entity_dimension`], by dimension.
+    pub parked_block_entities: HashMap<String, ParkedBlockEntities>,
     /// Keys made at runtime (`static_key`).
     keys: HashMap<String, &'static str>,
     /// The runtime's random stream (`RandomSource` without the game's own).
@@ -367,6 +379,8 @@ impl Default for Rt {
             scan_data: Vec::new(),
             block_entities: HashMap::default(),
             block_entity_meta: HashMap::default(),
+            block_entity_dimension: "minecraft:overworld".into(),
+            parked_block_entities: HashMap::default(),
             keys: HashMap::default(),
             random_state: 0x9E37_79B9_7F4A_7C15,
             hook_misses: 0,
@@ -386,8 +400,14 @@ impl Rt {
         k
     }
 
-    /// Runs `f` with `host` as the game. The host is borrowed for exactly this call.
+    /// Runs `f` with `host` as the game, among the block entities of the host's dimension. The
+    /// host is borrowed for exactly this call.
     pub fn with_host<R>(&mut self, host: &mut dyn host::Host, f: impl FnOnce(&mut Rt) -> R) -> R {
+        let left = if host.dimension_is(&self.block_entity_dimension) {
+            None
+        } else {
+            self.enter_dimension(&host.dimension())
+        };
         // SAFETY: the pointer lives in `self.host` only until `f` returns, while `host` is
         // mutably borrowed by this call; nothing else can reach it, and it is cleared after.
         let erased: &mut (dyn host::Host + 'static) = unsafe { std::mem::transmute(host) };
@@ -397,12 +417,39 @@ impl Rt {
         }
         let r = f(self);
         self.host = previous;
+        // A hook run inside another's call, in another dimension (a guest's action): the outer
+        // call goes on among its own block entities.
+        if let Some(left) = left
+            && previous.is_some()
+        {
+            self.enter_dimension(&left);
+        }
         // A hook that made many calls nothing maps: how close it came to being taken as stuck.
         if previous.is_none() && self.hook_misses >= 100_000 && Rt::tracing() {
             let secs = self.hook_first_miss.map_or(0.0, |t| t.elapsed().as_secs_f32());
             eprintln!("horizon-compat: a hook made {} calls nothing maps in {secs:.1} s", self.hook_misses);
         }
         r
+    }
+
+    /// Makes `dimension`'s block entities the live ones ([`Rt::block_entities`]), and parks those
+    /// of the dimension that was live; that dimension, or None when `dimension` was live already.
+    pub fn enter_dimension(&mut self, dimension: &str) -> Option<String> {
+        if self.block_entity_dimension == dimension {
+            return None;
+        }
+        let (live, meta) = self
+            .parked_block_entities
+            .remove(dimension)
+            .unwrap_or_default();
+        let live = std::mem::replace(&mut self.block_entities, live);
+        let meta = std::mem::replace(&mut self.block_entity_meta, meta);
+        let left = std::mem::replace(&mut self.block_entity_dimension, dimension.to_owned());
+        if !live.is_empty() || !meta.is_empty() {
+            self.parked_block_entities
+                .insert(left.clone(), (live, meta));
+        }
+        Some(left)
     }
 
     pub fn host(&self) -> Option<&dyn host::Host> {
@@ -1429,6 +1476,57 @@ mod tests {
             h.write(&bytes[..len]);
             assert_eq!(h.finish(), padded(&bytes[..len]), "{len} bytes");
         }
+    }
+
+    /// A hook works among the block entities of its host's dimension: one position holds one in
+    /// each dimension, each found again as a hook runs there; a hook run inside another's call, in
+    /// another dimension, leaves the outer call among its own; and the parked ones live on.
+    #[test]
+    fn block_entities_are_kept_by_dimension() {
+        let mut rt = Rt::new();
+        let at = [1, 64, 1];
+        let mut overworld = host::MemoryHost::default();
+        let mut nether = host::MemoryHost {
+            dimension: Some("minecraft:the_nether".into()),
+            ..Default::default()
+        };
+        let (a, b) = (rt.new_object("t/A"), rt.new_object("t/B"));
+        rt.with_host(&mut overworld, |rt| rt.block_entities.insert(at, a));
+        rt.with_host(&mut nether, |rt| {
+            assert_eq!(
+                rt.block_entities.get(&at),
+                None,
+                "none of the Nether's there yet"
+            );
+            rt.block_entities.insert(at, b);
+        });
+        rt.collect();
+        assert_eq!(
+            (rt.class_of(a), rt.class_of(b)),
+            ("t/A", "t/B"),
+            "the parked one lives on"
+        );
+        rt.with_host(&mut overworld, |rt| {
+            assert_eq!(rt.block_entities.get(&at), Some(&a));
+            rt.with_host(&mut nether, |rt| {
+                assert_eq!(rt.block_entities.get(&at), Some(&b))
+            });
+            assert_eq!(
+                rt.block_entities.get(&at),
+                Some(&a),
+                "the outer call's own again"
+            );
+        });
+        assert_eq!(
+            rt.enter_dimension("minecraft:the_nether").as_deref(),
+            Some("minecraft:overworld")
+        );
+        assert_eq!(rt.block_entities.get(&at), Some(&b));
+        assert_eq!(
+            rt.enter_dimension("minecraft:the_nether"),
+            None,
+            "there already"
+        );
     }
 
     /// A hook the game runs while the runtime waits for it in a call (`host_call`) gets that

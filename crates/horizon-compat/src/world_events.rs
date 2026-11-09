@@ -312,6 +312,12 @@ pub fn client_level_load(rt: &mut Rt, dimension: &str) {
 /// the level's `LevelEvent.Unload`; the client's block entities go with it, and the next server's
 /// level is a new one (its `LevelEvent.Load`).
 pub fn client_level_unload(rt: &mut Rt, dimension: &str) {
+    // The level's block entities go with it (a dimension left: the next level came first).
+    rt.parked_block_entities.remove(dimension);
+    if rt.block_entity_dimension == dimension {
+        rt.block_entities.clear();
+        rt.block_entity_meta.clear();
+    }
     let held = rt.interned.get(CLIENT_LEVELS).map_or(0, |v| v.i());
     rt.interned.insert(CLIENT_LEVELS.into(), V::I((held - 1).max(0)));
     if Rt::tracing() {
@@ -331,6 +337,7 @@ pub fn client_level_unload(rt: &mut Rt, dimension: &str) {
     }
     rt.block_entities.clear();
     rt.block_entity_meta.clear();
+    rt.parked_block_entities.clear();
     // `Minecraft.level` and `.player` are null until the next server's.
     if let Some(&mc) = rt.interned.get("client/net/minecraft/client/Minecraft") {
         rt.put_field(mc, "level", V::NULL);

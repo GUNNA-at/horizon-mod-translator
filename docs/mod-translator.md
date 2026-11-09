@@ -9321,6 +9321,57 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     fields that way at each of its ticks (its level, its ticker, the state that ticker was made for, its position).
     Then the fingerprint of the game's compound at each tick (8.6%), which the game could spare by telling the
     runtime when it changed a mod block entity's data.
+- [x] 2026-11-09 Part 139: a mod's block entities are kept by dimension, and leave the world with their chunk.
+  The server's runtime serves every level of its thread (the server thread ticks each dimension in turn), but it
+  kept its block entities in one map by position, and let one go only when its block was broken or replaced. A
+  block entity in the Nether at the coordinates of one in the Overworld was the same object, with the other level
+  as its `level` (it stayed right only because it loads what the game holds whenever that is news to it: it took
+  each level's data in turn). The block entities of a chunk that unloaded, or of a level that closed, stayed in the
+  runtime with all they hold (behaviours, inventories, their place in Create's networks) until the game closed, and
+  with the chunk back the old object went on, where vanilla makes one from the chunk's saved data.
+  - The runtime keeps its block entities by dimension. A hook works among those of its host's dimension (each host
+    says which with `Host::dimension_is`, new, which makes no `String`), and the others wait parked, still roots for
+    the collector. A hook run inside another's call in another dimension (a guest's action) gets its own, and the
+    outer call gets its own back. A block entity's update tag, asked as its chunk is sent with no game at hand,
+    finds its level by the server's level ticking then (`block_contact::current_level`, new).
+  - A new hook, `native_block_entities_unload(chunk)`: the game asks it after the chunk saved, as the chunk unloads
+    (`update_world`) or its level closes (`close_idle_levels`), for each chunk holding a mod's block entity. The
+    runtime then does what vanilla's `LevelChunk.clearAllBlockEntities` does in `ServerLevel.unload`: NeoForge's
+    `onChunkUnloaded` for each of the chunk's block entities, then `setRemoved` for each, and it lets them go.
+    Create's mark themselves unloaded first, so their `setRemoved` keeps their kinetic network as it is, where a
+    removed block breaks it and stops what it turned. The game makes them again from their saved data when the
+    chunk comes back. A client's level that unloads takes its copies of that dimension with it.
+  - In the game (a fresh world, seed 136, the scenes on the platform of Part 137, driven by `horizon-ctl`):
+    - One place in two dimensions: a shaft at (0, 102, −4), turned by a creative motor at its west end in the
+      Overworld and by one at its east end in the Nether (the other way round). Each read its own speed in its own
+      level, 16 in the Overworld and −16 in the Nether, before and after the player went from one to the other.
+      Part 138's build read the same in this scene, its one object taking each level's data in turn.
+    - The Nether's level, left alone 400 ticks, closed, and its three block entities were let go (with
+      `HORIZON_COMPAT_TRACE`, which now reports it: "chunk [0, -1] of minecraft:the_nether unloaded: its 3 mod block
+      entities let go, 3 held", the three held being the Overworld's). Back in the Nether, the shaft turned at −16
+      again, its motor made from its saved data.
+    - The Overworld's chunks unloaded as the player went 4,000 blocks away. With the field of Part 137 (1,568 kinetic
+      block entities in 20 chunks), each chunk let its block entities go, the last with none held. Back, the field
+      was made again from its saved data, and the last shaft of its first row and of its last turned at 16.
+    - The press, the depot and Waddles' penguins as in Part 138: the press's stroke read at `Ticks` 2, then 12, the
+      depot then held an iron sheet and an empty hand took it; of four penguins, the first and the third had
+      walked 300 ticks later, at their 8.0 health. No panic or exception in the logs.
+    - Tick time on the field (`/tick sprint`, the server's report, the builds in turn in one session): this
+      Part's 2.72, 2.73, 2.72 and 2.74 ms, then 2.68, 2.68, 2.69 and 2.69; Part 138's 2.75, 2.69, 2.68 and 2.71,
+      then 2.65, 2.67, 2.67 and 2.65. About 1% apart, within each build's own spread.
+    - After the trip both builds ticked the field about 8% slower than before it: Part 138's 2.68 ms before it,
+      2.98 and 2.92 after; this Part's 2.76 to 2.80 before (with the trace on), 3.02 and 2.92 after. Part 138's runtime never let the field go,
+      so the cause is elsewhere. Not found yet.
+  - Tests: compat 2 new (one position holds a block entity in each dimension: each is made, ticks, saves and is
+    sent in its own level, and none is in the End; a chunk's block entities leave with it: each is told its chunk
+    unloaded, then each is removed, another chunk's stays, and one is made again from its saved data); compat-core
+    1 new (block entities kept by dimension: the parked ones live through a collection, and a hook in another
+    dimension inside another's call leaves the outer call among its own). 728 compat, 15 compat-core and 25
+    translator unit tests pass.
+  - Seen with the trace on, not mapped: `Entity.isDiscrete()` on a server player, asked by the runtime's own
+    `getVisibilityPercent` (vanilla sees a sneaking player at 0.8 of the range), and
+    `ServerLevelAccessor.getCurrentDifficultyAt`, asked by the runtime's own `finalizeSpawn` for the mobs a mod
+    spawns. Next, with the fields by slot of Part 138.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

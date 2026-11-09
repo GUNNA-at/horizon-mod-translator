@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "name": "block_entities_unload",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entities_unload"
+    }
+  ],
+  "rust_summary": "a chunk's mod block entities leaving the world with it after it saved, as it unloads or its level closes (`native_block_entities_unload`).",
+  "doc_summary": "`native_block_entities_unload(chunk)` tells the mods that the block entities of chunk `chunk` (`[x, z]`, in chunks) leave the world with it, as vanilla's `ServerLevel.unload` lets them go (`LevelChunk.clearAllBlockEntities`: NeoForge's `onChunkUnloaded` for each, then `setRemoved` for each). Asked on the server after the chunk saved, for a chunk holding a mod's block entity, as it unloads or its level closes; the game drops them after the call and makes them again from their saved data when the chunk comes back. Its blocks are no longer readable. Server-side.\n\nBundles that use it need `\"hooks\": @API:block_entities_unload@`."
+}

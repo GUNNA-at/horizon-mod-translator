@@ -123,6 +123,11 @@ result comes from a scene set up by command, read back from the world's data and
   state, its data written when it changed), and 3.6 ms before the API answered the calls mods make most at
   once, as a JIT's intrinsics. The server keeps that speed with the game's window hidden: macOS used to nap
   it after half a minute, 8 to 9 times slower.
+- **Dimensions and unloading.** A machine in the Nether and one at the same coordinates in the Overworld
+  run apart: a shaft turns at 16 in one and at −16 in the other. Create's block entities leave the world with
+  their chunk, as in Minecraft: each is told its chunk unloaded, then removed, and the chunk brings it back
+  from its saved data. A field of 1,568 was let go when the player went 4,000 blocks away, and turned at its
+  speed again when they came back.
 - **Belts.** Items, mobs and players ride a belt at its speed and drop off its end.
 - **Processing.** Presses compact over basins with Minecraft's recipes and Create's own. Mixers brew
   potions over lit blaze burners. Fans smelt over lava, smoke over a campfire and wash in water.
@@ -229,7 +234,7 @@ incremental compilation, and keep 15 GB of disk free.
 | [`horizon-port-pack`](../crates/horizon-port-pack) | A pack's content: assets, data, recipes, loot tables, tags, worldgen |
 | Horizon | The engine. It gets general hooks (`tools/native-hook-fragments/`), never code for one mod |
 
-About 168,000 lines of Rust across the three crates, most of it the API surface. Mojang's and the mods'
+About 182,000 lines of Rust across the three crates, most of it the API surface. Mojang's and the mods'
 files are never committed. Every translation is built from the user's own jars.
 
 ## How the numbers are checked

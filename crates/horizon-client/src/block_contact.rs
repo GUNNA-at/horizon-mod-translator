@@ -65,6 +65,13 @@ pub fn on_client<R>(f: impl FnOnce() -> R) -> (R, Vec<ClientContact>) {
     (result, CLIENT.take().unwrap_or_default())
 }
 
+/// The dimension of the server level this thread is in now ([`in_level`]): None between levels
+/// and off the server's threads. A native mod's hook with no game at hand (a block entity's
+/// update tag, asked as its chunk is sent) finds its level by it.
+pub fn current_level() -> Option<&'static str> {
+    LEVEL.get()
+}
+
 /// Scope authority to this thread and restore it even on an error or panic.
 /// Nested guest actions may temporarily enter a different dimension.
 pub fn in_level<R>(dimension: Option<&'static str>, f: impl FnOnce() -> R) -> R {

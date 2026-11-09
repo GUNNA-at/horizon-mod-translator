@@ -1925,6 +1925,18 @@ impl Game<'_> {
     pub(super) fn native_block_entity_save(&mut self, pos: [i32; 3], entity: &mut ModBlockEntity) {
         let _ = (pos, entity);
     }
+    /// The block entities of chunk `chunk` (`[x, z]`, in chunks) leave the
+    /// world with it, as vanilla's `ServerLevel.unload` lets them go
+    /// (`LevelChunk.clearAllBlockEntities`): yours let go of what they keep
+    /// for the level (NeoForge's `onChunkUnloaded` for each, then
+    /// `setRemoved` for each), and your runtime forgets them. Asked on the
+    /// server after the chunk saved, for a chunk holding a mod's block
+    /// entity, as it unloads or its level closes; the game drops them after
+    /// the call and makes them again from their saved data when the chunk
+    /// comes back. Its blocks are no longer readable. API @API:block_entities_unload@.
+    pub(super) fn native_block_entities_unload(&mut self, chunk: [i32; 2]) {
+        let _ = chunk;
+    }
     /// A consumable's effect of a mod's own kind: the item's `on_consume_effects`
     /// entry is of a type in a namespace of its own, and the loader kept it
     /// for this call. The kind and the JSON the file wrote are here; the acting
@@ -7077,6 +7089,20 @@ impl Game<'_> {
             .collect();
         for pos in positions {
             self.save_mod_block_entity(pos);
+        }
+    }
+    /// The mod block entities of the chunks `chunks` leave the world with them
+    /// (`native_block_entities_unload`), after the chunks saved and before
+    /// the game drops them.
+    pub(super) fn unload_mod_block_entities(&mut self, chunks: &[(i32, i32)]) {
+        // A client's copies go with its chunks on their own.
+        if self.remote.is_some() || !self.world.block_entities.has_mods() {
+            return;
+        }
+        for &(x, z) in chunks {
+            if self.world.block_entities.mods_in((x, z)).next().is_some() {
+                self.native_block_entities_unload([x, z]);
+            }
         }
     }
     /// The mod block entity at `pos` writes what it holds now into its saved

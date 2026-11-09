@@ -503,16 +503,65 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
 pub fn block_entity_save(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state: &str, held: &mut dyn Held) -> bool {
     rt.safe_point();
     let block = crate::host::state_block(state);
-    let Some(be) = rt.block_entities.get(&pos).copied() else { return false };
-    if rt.block_entity_meta.get(&pos).is_none_or(|(b, _)| b != block) {
-        return false;
-    }
     rt.with_host(host, |rt| {
+        let Some(be) = rt.block_entities.get(&pos).copied() else {
+            return false;
+        };
+        if rt
+            .block_entity_meta
+            .get(&pos)
+            .is_none_or(|(b, _)| b != block)
+        {
+            return false;
+        }
         take_saved(rt, pos, be, &*held);
         save_held(rt, pos, be, state, held);
         true
     })
 }
+
+/// `native_block_entities_unload`: the block entities of chunk `chunk` (in chunks, `[x, z]`) leave
+/// the world with it, after it saved, as vanilla's `LevelChunk.clearAllBlockEntities` lets them go
+/// (`ServerLevel.unload`): each is told its chunk unloaded (NeoForge's `onChunkUnloaded`: Create's
+/// mark themselves unloaded, so what follows keeps their network as it is, where a broken one would
+/// leave it), then each is removed (`setRemoved`), and the runtime lets them go. The game makes them
+/// again from their saved data when the chunk comes back.
+pub fn block_entities_unload(rt: &mut Rt, host: &mut dyn Host, chunk: [i32; 2]) {
+    rt.safe_point();
+    rt.with_host(host, |rt| {
+        let mut gone: Vec<([i32; 3], V)> = rt.block_entities.iter().filter(|(p, _)| [p[0] >> 4, p[2] >> 4] == chunk).map(|(p, be)| (*p, *be)).collect();
+        if gone.is_empty() {
+            return;
+        }
+        // In a fixed order: the chunk's map is a `HashMap` in vanilla too, but this one's order
+        // changes from run to run.
+        gone.sort_unstable_by_key(|(p, _)| *p);
+        if let Some(vc) = rt.vcall {
+            for &(_, be) in &gone {
+                vc(rt, ON_CHUNK_UNLOADED_KEY, ON_CHUNK_UNLOADED, &[be]);
+                rt.report_thrown(ON_CHUNK_UNLOADED);
+            }
+            for &(_, be) in &gone {
+                vc(rt, SET_REMOVED_KEY, SET_REMOVED, &[be]);
+                rt.report_thrown(SET_REMOVED);
+            }
+        }
+        let n = gone.len();
+        for (pos, _) in gone {
+            block_entity_removed(rt, pos);
+        }
+        let key = format!("{}{chunk:?}", rt.block_entity_dimension);
+        trace_some(rt, "unloaded", &key, 64, |rt| {
+            let held = rt.block_entities.len() + rt.parked_block_entities.values().map(|(live, _)| live.len()).sum::<usize>();
+            format!("server: chunk {chunk:?} of {} unloaded: its {n} mod block entities let go, {held} held", rt.block_entity_dimension)
+        });
+    });
+}
+
+const ON_CHUNK_UNLOADED: &str = "onChunkUnloaded.()V";
+// `IBlockEntityExtension`'s, which every block entity inherits (a default method: the API's).
+const ON_CHUNK_UNLOADED_KEY: &str =
+    "net/minecraft/world/level/block/entity/BlockEntity.onChunkUnloaded.()V";
 
 /// Block entity `be` at `pos` saves itself (`saveWithoutMetadata`) into what the game holds of it.
 fn save_held(rt: &mut Rt, pos: [i32; 3], be: V, state: &str, held: &mut dyn Held) {
@@ -1260,8 +1309,18 @@ const CLIENT_TICK_POST: &str = "net/neoforged/neoforge/client/event/ClientTickEv
 /// `saved` is what the game holds of it, which it takes first when that is news to it
 /// ([`take_saved`]): a block set with data (`/setblock`) whose block entity its `onPlace` made
 /// already sends that data, as vanilla's block entity has loaded it before its chunk sends it.
-pub fn block_entity_update_tag(rt: &mut Rt, pos: [i32; 3], saved: &dyn Held) -> Option<std::collections::BTreeMap<String, crate::nbt::Nbt>> {
+/// `dimension` is the level whose chunk or block is sent (the server's level ticking now), and
+/// None where the thread has none (a chunk sent past the view distance).
+pub fn block_entity_update_tag(
+    rt: &mut Rt,
+    dimension: Option<&str>,
+    pos: [i32; 3],
+    saved: &dyn Held,
+) -> Option<std::collections::BTreeMap<String, crate::nbt::Nbt>> {
     rt.safe_point();
+    if let Some(dimension) = dimension {
+        rt.enter_dimension(dimension);
+    }
     let be = rt.block_entities.get(&pos).copied()?;
     take_saved(rt, pos, be, saved);
     let vc = rt.vcall?;
@@ -2940,7 +2999,7 @@ mod tests {
             std::collections::BTreeMap::from([("Text".to_owned(), Nbt::String(t.into()))])
         };
         let mut saved = text("RUST");
-        let sent = block_entity_update_tag(&mut rt, at, &saved).expect("it is live");
+        let sent = block_entity_update_tag(&mut rt, None, at, &saved).expect("it is live");
         assert_eq!(sent.get("Text"), Some(&Nbt::String("RUST".into())));
         assert!(block_entity_tick(
             &mut rt,
@@ -2953,7 +3012,7 @@ mod tests {
         assert_eq!(saved, text("RUST"));
 
         let changed = text("MODS");
-        let sent = block_entity_update_tag(&mut rt, at, &changed).expect("it is live");
+        let sent = block_entity_update_tag(&mut rt, None, at, &changed).expect("it is live");
         assert_eq!(sent.get("Text"), Some(&Nbt::String("MODS".into())));
         let mut saved = changed.clone();
         assert!(block_entity_tick(
@@ -3022,8 +3081,30 @@ mod tests {
                 rt.put_field(args[0], "turns", turns);
                 V::Void
             }
+            GET_UPDATE_TAG if rt.class_of(args[0]) == DIAL_ENTITY => {
+                let tag = rt.new_object("net/minecraft/nbt/CompoundTag");
+                api::call(rt, "net/minecraft/nbt/CompoundTag.<init>.()V", &[tag]);
+                let (k, turns) = (rt.string("turns"), rt.get_field(args[0], "turns"));
+                api::call(
+                    rt,
+                    "net/minecraft/nbt/CompoundTag.putInt.(Ljava/lang/String;I)V",
+                    &[tag, k, turns],
+                );
+                tag
+            }
+            ON_CHUNK_UNLOADED | SET_REMOVED if rt.class_of(args[0]) == DIAL_ENTITY => {
+                let turns = rt.get_field(args[0], "turns").i();
+                HEARD.with(|h| h.borrow_mut().push((short, turns)));
+                V::Void
+            }
             _ => api::call(rt, key, args),
         }
+    }
+
+    thread_local! {
+        /// What the test dials' block entities were told (`onChunkUnloaded`, `setRemoved`), with
+        /// their turns then.
+        static HEARD: std::cell::RefCell<Vec<(&'static str, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
     /// The dial's ticker: a turn a tick, and `setChanged` at its third, as Create's kinetic block
@@ -3122,6 +3203,155 @@ mod tests {
         assert_eq!((game.reads.get(), &game.nbt), (1, &turns(7)), "the game's change taken first");
         assert!(block_entity_tick(&mut rt, &mut host, at, state, &mut game));
         assert_eq!(rt.get_field(rt.block_entities[&at], "turns"), V::I(8));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The test dial's block, registered, in a runtime that runs its code.
+    fn dial_runtime() -> Rt {
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(dial_code);
+        rt.lambda_call = Some(dial_tick);
+        let block = rt.new_object(DIAL);
+        rt.registered
+            .insert(("block".into(), "test:dial".into()), block);
+        rt
+    }
+
+    /// One position holds a block entity in each dimension (the server's runtime serves them all):
+    /// each is made in its own level, ticks, saves and is sent to players on its own.
+    #[test]
+    fn a_position_holds_a_block_entity_in_each_dimension() {
+        use crate::nbt::Nbt;
+        let mut rt = dial_runtime();
+        let (at, state) = ([2, 64, 2], "test:dial[lit=false]");
+        let mut overworld = MemoryHost::default();
+        let mut nether = MemoryHost {
+            dimension: Some("minecraft:the_nether".into()),
+            ..Default::default()
+        };
+        overworld.blocks.insert(at, state.into());
+        nether.blocks.insert(at, state.into());
+        let (mut here, mut there) = (Counted::default(), Counted::default());
+        for _ in 0..3 {
+            assert!(block_entity_tick(
+                &mut rt,
+                &mut overworld,
+                at,
+                state,
+                &mut here
+            ));
+        }
+        assert!(block_entity_tick(
+            &mut rt,
+            &mut nether,
+            at,
+            state,
+            &mut there
+        ));
+        assert!(block_entity_save(
+            &mut rt,
+            &mut overworld,
+            at,
+            state,
+            &mut here
+        ));
+        assert!(block_entity_save(
+            &mut rt,
+            &mut nether,
+            at,
+            state,
+            &mut there
+        ));
+        let turns = |n: i32| std::collections::BTreeMap::from([("turns".to_owned(), Nbt::Int(n))]);
+        assert_eq!((&here.nbt, &there.nbt), (&turns(3), &turns(1)));
+        let level_of = |rt: &mut Rt, host: &mut MemoryHost| {
+            rt.with_host(host, |rt| {
+                let be = rt.block_entities[&at];
+                level_dimension(rt, rt.get_field(be, "level"))
+            })
+        };
+        assert_eq!(level_of(&mut rt, &mut nether), "minecraft:the_nether");
+        assert_eq!(level_of(&mut rt, &mut overworld), "minecraft:overworld");
+        // Sent as the level ticking then sends its chunk: each its own.
+        let sent = |rt: &mut Rt, dimension: &str, game: &Counted| {
+            block_entity_update_tag(rt, Some(dimension), at, game).map(|t| t["turns"].clone())
+        };
+        assert_eq!(
+            sent(&mut rt, "minecraft:the_nether", &there),
+            Some(Nbt::Int(1))
+        );
+        assert_eq!(
+            sent(&mut rt, "minecraft:overworld", &here),
+            Some(Nbt::Int(3))
+        );
+        assert_eq!(
+            sent(&mut rt, "minecraft:the_end", &here),
+            None,
+            "none live there: its saved data is sent"
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A chunk's block entities leave the world with it, after it saved, as vanilla's
+    /// `LevelChunk.clearAllBlockEntities` lets them go: each is told its chunk unloaded, then each
+    /// is removed, and the runtime forgets them; another chunk's stays. With its chunk back, a
+    /// block entity is made again from what it saved.
+    #[test]
+    fn a_chunks_block_entities_leave_the_world_with_it() {
+        let mut rt = dial_runtime();
+        let state = "test:dial[lit=false]";
+        // Two in chunk [0, 0] (two and three turns), one in chunk [1, 0].
+        let (a, b, other) = ([2, 64, 2], [3, 64, 15], [16, 64, 2]);
+        let mut host = MemoryHost::default();
+        let mut games: Vec<Counted> = (0..3).map(|_| Counted::default()).collect();
+        for ((at, ticks), game) in [(a, 2), (b, 3), (other, 1)].into_iter().zip(&mut games) {
+            host.blocks.insert(at, state.into());
+            for _ in 0..ticks {
+                assert!(block_entity_tick(&mut rt, &mut host, at, state, game));
+            }
+        }
+        let first = rt.block_entities[&a];
+        HEARD.with(|h| h.borrow_mut().clear());
+        assert!(
+            block_entity_save(&mut rt, &mut host, a, state, &mut games[0]),
+            "the chunk saves first"
+        );
+        block_entities_unload(&mut rt, &mut host, [0, 0]);
+        let heard = HEARD.with(|h| h.borrow().clone());
+        assert_eq!(
+            heard,
+            [
+                (ON_CHUNK_UNLOADED, 2),
+                (ON_CHUNK_UNLOADED, 3),
+                (SET_REMOVED, 2),
+                (SET_REMOVED, 3)
+            ],
+            "told it unloaded, each, then removed, each"
+        );
+        assert!(
+            !rt.block_entities.contains_key(&a)
+                && !rt.block_entities.contains_key(&b)
+                && !rt.block_entity_meta.contains_key(&a)
+        );
+        assert!(
+            rt.block_entities.contains_key(&other),
+            "another chunk's stays"
+        );
+        assert!(block_entity_tick(
+            &mut rt,
+            &mut host,
+            a,
+            state,
+            &mut games[0]
+        ));
+        let again = rt.block_entities[&a];
+        assert_ne!(again, first, "made again");
+        assert_eq!(
+            rt.get_field(again, "turns"),
+            V::I(3),
+            "from its two saved turns, then one more"
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

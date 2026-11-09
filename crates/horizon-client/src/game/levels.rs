@@ -642,6 +642,8 @@ impl Game<'_> {
             let chunks: Vec<_> = self.world.chunks.values().cloned().collect();
             self.native_chunks_changed(&chunks);
             self.save_level(true)?;
+            let keys: Vec<(i32, i32)> = chunks.iter().map(|c| (c.x, c.z)).collect();
+            self.unload_mod_block_entities(&keys);
             self.enter_level(None, back)?;
             self.levels.parked.remove(&dim);
             self.native_level_closed(dim);
