@@ -659,9 +659,10 @@ fn server_send(c: &str) -> String {
             }}
             let players: Vec<u128> = all
                 .into_iter()
-                .filter(|&(_, at)| match to {{
+                .filter(|&(uuid, at)| match to {{
                     {c}::host::PayloadTarget::Server | {c}::host::PayloadTarget::Player(_) => false,
                     {c}::host::PayloadTarget::All => true,
+                    {c}::host::PayloadTarget::Others(player) => uuid != player,
                     {c}::host::PayloadTarget::Near {{ x, y, z, radius }} => {{
                         let d = [at[0] - x, at[1] - y, at[2] - z];
                         d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= radius * radius
@@ -883,6 +884,20 @@ fn client_host(c: &str, id: &str) -> String {
         }}
         fn client_player_on_ground(&self) -> Option<bool> {{
             self.game.get().native_client_player_on_ground()
+        }}
+        // Puts them somewhere and says where they stood as the tick began, and what entities they
+        // collide with (Create's contraptions carry a player standing on them).
+        fn set_client_player_pos(&mut self, pos: [f64; 3]) -> bool {{
+            self.game.get_mut().is_some_and(|g| g.native_set_client_player_pos(pos))
+        }}
+        fn set_client_player_on_ground(&mut self, on_ground: bool) -> bool {{
+            self.game.get_mut().is_some_and(|g| g.native_set_client_player_on_ground(on_ground))
+        }}
+        fn client_player_old_pos(&self) -> Option<[f64; 3]> {{
+            self.game.get().native_client_player_old_pos()
+        }}
+        fn client_entity_collisions(&self, area: [f64; 6]) -> Vec<[f64; 6]> {{
+            self.game.get().native_client_entity_collisions(area)
         }}
         // A client command's answer: a line in the window's chat, the whole component as the
         // window draws one (translations, siblings, styles).

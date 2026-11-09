@@ -1302,6 +1302,18 @@ fn intersects(a: &[f64; 6], b: &[f64; 6]) -> bool {
 /// the level's blocks (`level.getBlockCollisions` over the box stretched along it), along y, then
 /// along the shorter of x and z, then the other (`collideWithShapes`).
 fn collide(rt: &Rt, b: [f64; 6], motion: [f64; 3]) -> [f64; 3] {
+    collide_among(rt, b, motion, Vec::new())
+}
+
+/// `Entity.collideBoundingBox(entity, motion, box, level, others)`: `motion` cut short where box `b`
+/// meets the boxes `others` (the entities it collides with) or the level's blocks over the box
+/// stretched along it (`getBlockCollisions`), along y, then the shorter of x and z, then the other.
+pub(crate) fn collide_among(
+    rt: &Rt,
+    b: [f64; 6],
+    motion: [f64; 3],
+    mut others: Vec<[f64; 6]>,
+) -> [f64; 3] {
     let mut area = b;
     for i in 0..3 {
         if motion[i] < 0.0 {
@@ -1310,8 +1322,8 @@ fn collide(rt: &Rt, b: [f64; 6], motion: [f64; 3]) -> [f64; 3] {
             area[i + 3] += motion[i];
         }
     }
-    let shapes = shapes_in(rt, area);
-    collide_with(b, motion, &shapes)
+    others.extend(shapes_in(rt, area));
+    collide_with(b, motion, &others)
 }
 
 /// `level.getBlockCollisions(null, area)`: the blocks' collision boxes that meet `area`, in the

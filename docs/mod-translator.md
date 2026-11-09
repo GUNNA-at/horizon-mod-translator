@@ -9531,6 +9531,60 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     block is between, the sender of a packet as its handler has them; a number a packet read is found by a mod's
     box of it: it fails without the change, `contains` 0 for key 0). 740 compat, 15 compat-core and 25 translator
     unit tests pass.
+- [x] 2026-11-09 Part 143: a player rides Create's train: standing on a carriage, they are carried along the line
+  with it, and are still on it where it stops.
+  - Create carries a player who stands on a contraption on their own client (`ContraptionCollider`, after the
+    entities' tick, in `ClientTickEvent.Post`): it pushes them out of the contraption's blocks, sets them down
+    (`setOnGround(true)`), and moves them by the contraption's motion where they stand (`getContactPointMotion`,
+    through its copy of `Entity.collide`). Of the window's own player that needs `Entity.setPos` (the game's
+    `native_set_client_player_pos`, new: their feet there, as the tick began kept, so the frame draws them between
+    the two), `setOnGround` (`native_set_client_player_on_ground`, new: they stand, jump and walk as on the ground
+    until their next move finds out again), `xo`, `yo` and `zo` (`native_client_player_old_pos`, new: where they
+    stood as the tick began), and `getIndirectPassengers` (none); of the level, `getEntityCollisions` of that
+    player (`native_client_entity_collisions`, new: the boxes of what they collide with by the game's own rules,
+    a boat, a living shulker, a happy ghast held still), and `Entity.collideBoundingBox(entity, motion, box, level,
+    shapes)`: the motion cut short by the shapes given and the level's blocks, along y, then the shorter of x and
+    z, then the other, as an entity's own move. `setPos`, `xo`, `getIndirectPassengers`, `getEntityCollisions` and
+    `collideBoundingBox` weren't mapped for them, and a player's `setOnGround` did nothing.
+  - With them the player stood on the carriage, and the train left them behind: as it drove west they were pushed
+    east, at its speed, and fell to the track after 40 ticks. Traced: the client's carriage was put in two places
+    a tick, where the server's was (the runtime's move message, as `Entity.lerpTo` puts an entity) and then by its
+    own tick (`CarriageSyncData.approach`, behind the server's, then `alignEntity`), so between its `xo`
+    (set in its tick, before `alignEntity`) and where it ended, it went back a little each tick, and Create
+    carried the player by that. Vanilla's client doesn't move an entity it moves itself when the server's moves
+    arrive (`ClientPacketListener.handleMoveEntity` and `handleTeleportEntity` ask `isControlledByLocalInstance()`),
+    and a carriage answers true: each side's follows its train. A client's copy of a mod's entity whose class
+    answers `isControlledByLocalInstance()` true now keeps its own place; one whose class doesn't answer it
+    follows the server's moves, as before (the runtime's client doesn't drive a mod's vehicle; its server does).
+  - `PacketDistributor.sendToPlayersTrackingEntity(player, ...)` goes to every player but that one (a player's
+    own client doesn't track them; `...AndSelf` adds them). Create tells the others of a rider's limb swing so
+    (`LimbSwingUpdatePacket`), and it went to the rider too.
+  - In game (`scratchpad/p143live.sh`, `MODE=trains DRIVE=1 RIDE=1`, build of this Part): the train of Part 142,
+    each carriage's casing three blocks long. The player on the first carriage's casing, east of its controls, at
+    x 22.5, y 103.0001001 (its top, and the 1.0E-4 above it Create's collider leaves); a right click on the
+    controls, then W held. Every half second the player was at x 22.12, 21.00, 18.83 and 15.85, at y 103.0001001;
+    after 2 s the carriages, as the server has them, stood at x 12.68 and 16.68 and the player at 14.55. Where
+    the track ends (the carriages at x 1.0 and 5.0) the player stood on the first carriage at x 1.79, y
+    103.0001001: 0.79 east of its anchor, where they stood 1.0 east of it before W (0.21 less: the one tick's walk
+    W gave the player in Part 142 before Create set it up). The build before this Part's last change carried them east
+    (22.5 to 24.2 in 20 ticks) and dropped them at y 100.25. No panic or exception in the log.
+    - The press, the depot and Waddles' penguins as before (`MODE=check`): the press at 16, its stroke read at
+      `Ticks` 2, then 10, the depot then held an iron sheet and an empty hand took it. A penguin alone idled the
+      300 ticks of the first check; of four summoned in a row (`PENG=4`), one walked from (12.5, 100, −1.5) to
+      (18.4, 100, −2.4) while three idled, and two that had spawned on their own near the world's spawn walked too.
+  - Not yet: the server's side of the ride. `ClientMotionPacket` (the rider's motion, sent each tick) asks
+    `ServerPlayer.fallDistance` and `causeFallDamage`, which aren't mapped, so a rider's fall isn't measured or
+    cleared there; a dedicated server would kick a rider for flying (Create clears
+    `connection.aboveGroundTickCount`; the integrated server allows flight). `ServerPlayer.swing(hand, true)`
+    after a contraption interaction isn't mapped either.
+  - Run 49 (the pack's 367 jars): API methods 85.2% (110,915 of 130,223; 110,907 before), call sites 92.7%
+    (345,542 of 372,742; 345,533 before), 8,485 distinct methods missing (8,487 before); Create's 3,329 of its
+    3,971 methods (3,328 before), 24,435 of its 25,240 calls; libraries 83.5% and 94.3%, as before.
+  - Tests: compat 4 new (a client mod carries the window's player: `setPos` there, `setOnGround`, `xo` and `zo`
+    where the tick began; a box moved among shapes stops where vanilla's does: down onto a block's top or a boat's,
+    sideways up to a shape's face and on along the other axis; a payload to those tracking a player leaves the
+    player out; a client keeps its own place for an entity it moves: it fails without the change, the carriage's
+    copy at x 3.5 where it stays at 0.5). 744 compat, 15 compat-core and 25 translator unit tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

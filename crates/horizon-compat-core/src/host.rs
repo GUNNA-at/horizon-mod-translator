@@ -125,6 +125,9 @@ pub enum PayloadTarget {
     Player(u128),
     /// To every player on the server (`sendToAllPlayers`).
     All,
+    /// To every player on the server but the player `uuid`: those who see that player
+    /// (`sendToPlayersTrackingEntity` of a player leaves the player out).
+    Others(u128),
     /// To the players near a point of a dimension (`sendToPlayersNear`, and those tracking a chunk or
     /// an entity, which this treats as everyone within the radius): x, y, z, radius in blocks.
     Near { x: f64, y: f64, z: f64, radius: f64 },
@@ -1392,6 +1395,30 @@ pub trait Host {
     fn client_player_on_ground(&self) -> Option<bool> {
         None
     }
+    /// Puts a client's own player at `pos` (their feet) as `Entity.setPos` does, as a client mod's
+    /// code puts them (Create's contraptions carry a player standing on them, each tick): their box
+    /// goes with them, and where they stood as the tick began stays. False where there is no such
+    /// player.
+    fn set_client_player_pos(&mut self, _pos: [f64; 3]) -> bool {
+        false
+    }
+    /// Sets whether a client's own player stands on something (`Entity.setOnGround`) until their
+    /// next move finds it out again: on a contraption, as on the ground, they jump and walk off it.
+    /// False where there is no such player.
+    fn set_client_player_on_ground(&mut self, _on_ground: bool) -> bool {
+        false
+    }
+    /// Where a client's own player stood as this tick began (`xo`, `yo`, `zo`). None where there
+    /// is no such player.
+    fn client_player_old_pos(&self) -> Option<[f64; 3]> {
+        None
+    }
+    /// The boxes of the entities a client's own player collides with (a boat, a living shulker:
+    /// the game's own rules) that meet `area` (min x, y, z, max x, y, z): `Level.getEntityCollisions`
+    /// of that player.
+    fn client_entity_collisions(&self, _area: [f64; 6]) -> Vec<[f64; 6]> {
+        Vec::new()
+    }
     /// On a client, whether its game is paused (`Minecraft.isPaused`): a single player screen that
     /// pauses it is open. False elsewhere.
     fn paused(&self) -> bool {
@@ -2015,6 +2042,11 @@ pub struct MemoryHost {
     pub client_input: [f32; 2],
     /// On a client, whether its own player stands on something ([`Host::client_player_on_ground`]).
     pub client_on_ground: bool,
+    /// On a client, where its own player stood as the tick began ([`Host::client_player_old_pos`]).
+    pub client_old_pos: Option<[f64; 3]>,
+    /// On a client, the boxes of the entities its own player collides with
+    /// ([`Host::client_entity_collisions`] gives those that meet the area asked).
+    pub client_entity_boxes: Vec<[f64; 6]>,
     /// Sounds played, in order.
     pub sounds: Vec<Sound>,
     /// Instances' sounds started ([`Host::start_sound`]), in order: their ids are their places
@@ -2832,6 +2864,31 @@ impl Host for MemoryHost {
     }
     fn client_player_on_ground(&self) -> Option<bool> {
         self.client.then_some(self.client_on_ground)
+    }
+    /// The client's own player is `place`'s.
+    fn set_client_player_pos(&mut self, pos: [f64; 3]) -> bool {
+        match self.place.as_mut().filter(|_| self.client) {
+            Some((at, ..)) => {
+                *at = pos;
+                true
+            }
+            None => false,
+        }
+    }
+    fn set_client_player_on_ground(&mut self, on_ground: bool) -> bool {
+        self.client_on_ground = on_ground;
+        self.client
+    }
+    fn client_player_old_pos(&self) -> Option<[f64; 3]> {
+        self.client_old_pos.filter(|_| self.client)
+    }
+    fn client_entity_collisions(&self, area: [f64; 6]) -> Vec<[f64; 6]> {
+        let meets = |b: &[f64; 6]| (0..3).all(|i| b[i] < area[i + 3] && b[i + 3] > area[i]);
+        self.client_entity_boxes
+            .iter()
+            .copied()
+            .filter(meets)
+            .collect()
     }
     fn set_item_entity(&mut self, id: u32, item: &str, count: u32) -> bool {
         let Some(i) = self.item_entities.iter().position(|e| e.id == id) else { return false };

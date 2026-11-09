@@ -1726,6 +1726,8 @@ const READ_SPAWN: &str = "readSpawnData.(Lnet/minecraft/network/RegistryFriendly
 const READ_SPAWN_KEY: &str = "net/neoforged/neoforge/entity/IEntityWithComplexSpawn.readSpawnData.(Lnet/minecraft/network/RegistryFriendlyByteBuf;)V";
 const LERP: &str = "lerpTo.(DDDFFI)V";
 const LERP_KEY: &str = "net/minecraft/world/entity/Entity.lerpTo.(DDDFFI)V";
+const LOCAL_CONTROL: &str = "isControlledByLocalInstance.()Z";
+const LOCAL_CONTROL_KEY: &str = "net/minecraft/world/entity/Entity.isControlledByLocalInstance.()Z";
 const CLIENT_REMOVAL: &str = "onClientRemoval.()V";
 const CLIENT_REMOVAL_KEY: &str = "net/minecraft/world/entity/Entity.onClientRemoval.()V";
 
@@ -2058,6 +2060,16 @@ fn var(mut u: u64) -> Vec<u8> {
     }
 }
 
+/// Whether a client's copy of mod entity `e` is one its client moves itself, as its class answers
+/// `isControlledByLocalInstance()` (Create's carriages: each side's follows its train). A class
+/// without an answer of its own is moved by its server: a mod's vehicle isn't driven by its client
+/// here, its server moves it.
+fn moved_by_client(rt: &mut Rt, e: V) -> bool {
+    let own = virtual_call(rt, e, LOCAL_CONTROL_KEY, LOCAL_CONTROL, &[]);
+    rt.report_thrown("isControlledByLocalInstance");
+    own.is_some_and(|v| v.i() != 0)
+}
+
 /// A message of [`CHANNEL`] the server sent the client's runtime.
 pub fn receive(rt: &mut Rt, data: &[u8]) {
     let buf = crate::network::buffer_with(rt, data.to_vec());
@@ -2096,6 +2108,11 @@ pub fn receive(rt: &mut Rt, data: &[u8]) {
                 let r = [read_f32(rt, buf), read_f32(rt, buf)];
                 let head = read_f32(rt, buf);
                 if let Some(e) = by_id(rt, id) {
+                    // `ClientPacketListener.handleMoveEntity` (and `handleTeleportEntity`): an
+                    // entity its client moves itself keeps the place it has there.
+                    if moved_by_client(rt, e) {
+                        continue;
+                    }
                     if crate::mobs::is_mod_living(rt, e) {
                         crate::mobs::client_move(rt, e, p, r, head);
                         rt.report_thrown("lerpTo");
@@ -2221,6 +2238,8 @@ mod tests {
     /// A serializer of the mod's own class, as Create's `CarriageSyncDataSerializer`: its
     /// `codec()` is the mod's.
     const OWN_SERIALIZER: &str = "test/CountSerializer";
+    /// An entity its client moves itself (`isControlledByLocalInstance`), as Create's carriage.
+    const CARRIAGE: &str = "test/Carriage";
 
     /// A cart as a mod writes one: it counts its ticks in synched data and leaves after three.
     fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
@@ -2257,6 +2276,17 @@ mod tests {
                 api::call(rt, "net/minecraft/world/entity/Entity.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V", &[cart, args[1], args[2]]);
                 cart
             }
+            FACTORY_CREATE if rt.class_of(e) == "test/CarriageFactory" => {
+                let carriage = rt.new_object(CARRIAGE);
+                api::call(
+                    rt,
+                    "net/minecraft/world/entity/Entity.<init>.(Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/world/level/Level;)V",
+                    &[carriage, args[1], args[2]],
+                );
+                carriage
+            }
+            // The carriage's client moves it (it follows its train there).
+            LOCAL_CONTROL => V::I(1),
             _ => api::call(rt, owner_key, args),
         }
     }
@@ -2264,6 +2294,7 @@ mod tests {
     fn overrides(class: &str, key: &str) -> bool {
         (class == CART || class == MINECART) && matches!(key, DEFINE_SYNCHED | TICK | ON_SYNCED)
             || class == OWN_SERIALIZER && key == SERIALIZER_CODEC
+            || class == CARRIAGE && key == LOCAL_CONTROL
     }
 
     /// A runtime as the mod's: the cart's class, its synched count (an `INT`), its type registered
@@ -2721,6 +2752,63 @@ mod tests {
         assert!(live(&client).is_empty(), "removed on the client");
         assert_eq!(client.statics.get("t.last-left").copied(), Some(copy), "EntityLeaveLevelEvent on the client");
         assert_eq!(client.statics.get("t.joined").map(|v| v.i()), Some(1));
+    }
+
+    /// A client's copy of an entity whose class says its client moves it (`isControlledByLocalInstance`:
+    /// Create's carriages follow their train on each side) keeps its own place as the server's moves
+    /// arrive, as vanilla's client does; one whose class doesn't say so follows them.
+    #[test]
+    fn a_client_keeps_its_own_place_for_an_entity_it_moves() {
+        /// The carriage's type, `test:carriage`.
+        fn carriage_type(rt: &mut Rt) -> V {
+            rt.supers.insert(CARRIAGE, ENTITY);
+            let ty = rt.new_object(ENTITY_TYPE);
+            let factory = rt.new_object("test/CarriageFactory");
+            rt.put_field(ty, "$factory", factory);
+            rt.put_field(ty, "$range", V::I(4));
+            rt.registered
+                .insert(("entity_type".into(), "test:carriage".into()), ty);
+            ty
+        }
+        let (mut server, cart_type) = runtime();
+        let (mut client, _) = runtime();
+        let carriage = carriage_type(&mut server);
+        carriage_type(&mut client);
+        let mut host = MemoryHost {
+            players: vec![(1, [0.0, 64.0, 0.0])],
+            ..MemoryHost::default()
+        };
+        let mut client_host = MemoryHost::default();
+        server.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            for (ty, z) in [(carriage, 0.5), (cart_type, 2.5)] {
+                let e = api::call(rt, "net/minecraft/world/entity/EntityType.create.(Lnet/minecraft/world/level/Level;)Lnet/minecraft/world/entity/Entity;", &[ty, level]);
+                set_pos(rt, e, [0.5, 64.0, z]);
+                api::call(rt, "net/minecraft/world/level/Level.addFreshEntity.(Lnet/minecraft/world/entity/Entity;)Z", &[level, e]);
+            }
+        });
+        // Sent, then both moved three blocks east on the server.
+        for x in [None, Some(3.5)] {
+            server.with_host(&mut host, |rt| {
+                for e in live(rt).into_iter().filter(|_| x.is_some()) {
+                    let p = xyz(rt, e);
+                    set_pos(rt, e, [x.unwrap_or_default(), p[1], p[2]]);
+                }
+                tick_all(rt, "minecraft:overworld");
+            });
+            for (_, _, data) in std::mem::take(&mut host.payloads) {
+                client.with_host(&mut client_host, |rt| receive(rt, &data));
+            }
+        }
+        let copies: Vec<(&str, [f64; 3])> = live(&client)
+            .into_iter()
+            .map(|e| (client.class_of(e), xyz(&client, e)))
+            .collect();
+        assert_eq!(
+            copies,
+            [(CARRIAGE, [0.5, 64.0, 0.5]), (CART, [3.5, 64.0, 2.5])]
+        );
+        assert!(client.unmapped.is_empty(), "{:?}", client.unmapped);
     }
 
     /// The cart's synched count.

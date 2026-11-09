@@ -465,6 +465,61 @@ impl Game<'_> {
     pub(super) fn native_client_player_on_ground(&self) -> Option<bool> {
         self.player.as_ref().map(|p| p.ground.on_ground)
     }
+    /// Puts the window's own player at `pos` (their feet), as a client mod
+    /// puts them (`Entity.setPos`: Create's contraptions carry a player
+    /// standing on them, each tick): their box goes with them, where they
+    /// stood as the tick began stays (the frame draws them between the two),
+    /// and their client tells the server where they are. False outside the
+    /// window's game, with no player, a place that isn't finite, or a player
+    /// riding, asleep or dead. API @API:client_block_contacts@.
+    pub(super) fn native_set_client_player_pos(&mut self, pos: [f64; 3]) -> bool {
+        let still =
+            self.riding.is_some() || self.sleeping.is_some() || self.screen == super::Screen::Dead;
+        if !self.native_window() || !finite(pos) || still {
+            return false;
+        }
+        let Some(player) = self.player.as_mut() else {
+            return false;
+        };
+        player.position = Vec3::new(pos[0], pos[1], pos[2]);
+        true
+    }
+    /// Sets whether the window's own player stands on something
+    /// (`Entity.setOnGround`) until their next move finds it out again: a
+    /// contraption a player stands on holds them as the ground does (they
+    /// jump, and walk at the ground's pace). False outside the window's game
+    /// or with no player. API @API:client_block_contacts@.
+    pub(super) fn native_set_client_player_on_ground(&mut self, on_ground: bool) -> bool {
+        if !self.native_window() {
+            return false;
+        }
+        let Some(player) = self.player.as_mut() else {
+            return false;
+        };
+        player.ground.on_ground = on_ground;
+        true
+    }
+    /// Where the window's own player stood as this tick began (`xo`, `yo`,
+    /// `zo`): None with no player. API @API:client_block_contacts@.
+    pub(super) fn native_client_player_old_pos(&self) -> Option<[f64; 3]> {
+        let at = self.player.as_ref().map(|_| self.previous_position)?;
+        Some([at.x, at.y, at.z])
+    }
+    /// The boxes of the entities the window's own player collides with (a
+    /// boat, a living shulker, a happy ghast held still: the game's own
+    /// rules, as their own move meets them) that meet `area`, min x, y, z,
+    /// max x, y, z (`Level.getEntityCollisions` of that player).
+    /// API @API:client_block_contacts@.
+    pub(super) fn native_client_entity_collisions(&self, area: [f64; 6]) -> Vec<[f64; 6]> {
+        self.player_entity_collisions()
+            .into_iter()
+            .map(|b| {
+                let (lo, hi) = (b.min_position(), b.max_position());
+                [lo.x, lo.y, lo.z, hi.x, hi.y, hi.z]
+            })
+            .filter(|b| (0..3).all(|i| b[i] < area[i + 3] && b[i + 3] > area[i]))
+            .collect()
+    }
     /// Sets mob `id`'s health, cut to its maximum: false for no such mob,
     /// another dimension or a health that isn't above 0 (`native_kill_mob`
     /// kills). A dying mob's too, as `LivingEntity.setHealth` sets it: one a

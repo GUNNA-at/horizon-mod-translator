@@ -1433,6 +1433,11 @@ fn distribute(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "sendToPlayer" => player_uuid(rt, args[0]).map_or(PayloadTarget::All, PayloadTarget::Player),
         // (level, excluded player, x, y, z, radius, ...)
         "sendToPlayersNear" if n >= 8 => PayloadTarget::Near { x: args[2].d(), y: args[3].d(), z: args[4].d(), radius: args[5].d() },
+        // Those tracking a player: everyone but the player (a player's own client doesn't track them;
+        // `...AndSelf` adds them back). Create tells the others of a rider's limb swing so.
+        "sendToPlayersTrackingEntity" if crate::api_common::player_object(rt, args[0]) => {
+            player_uuid(rt, args[0]).map_or(PayloadTarget::All, PayloadTarget::Others)
+        }
         // Those tracking an entity or a chunk: the clients that don't have it drop what's about it.
         "sendToAllPlayers" | "sendToPlayersInDimension" | "sendToPlayersTrackingEntity" | "sendToPlayersTrackingEntityAndSelf" | "sendToPlayersTrackingChunk" => PayloadTarget::All,
         _ => return None,
@@ -2362,6 +2367,42 @@ mod tests {
         assert_eq!(client.class_of(client.interned["test/player"]), "net/minecraft/client/player/LocalPlayer");
         // Nothing of this mod's has another id.
         assert!(!client.with_host(&mut client_host, |rt| receive(rt, "test:other", &data, None)));
+    }
+
+    /// A payload to those tracking a player goes to every player but that one (a player's own client
+    /// doesn't track them: Create tells the others of a rider's limb swing so); to those tracking a
+    /// mod's entity, or a player and the player, it goes to everyone.
+    #[test]
+    fn a_payload_to_those_tracking_a_player_leaves_the_player_out() {
+        const PAYLOADS: &str = "(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/network/protocol/common/custom/CustomPacketPayload;[Lnet/minecraft/network/protocol/common/custom/CustomPacketPayload;)V";
+        let tracking: &'static str = format!("net/neoforged/neoforge/network/PacketDistributor.sendToPlayersTrackingEntity.{PAYLOADS}").leak();
+        let and_self: &'static str = format!("net/neoforged/neoforge/network/PacketDistributor.sendToPlayersTrackingEntityAndSelf.{PAYLOADS}").leak();
+        let mut rt = Rt::new();
+        register(&mut rt);
+        let uuid = 0x0123_4567_89ab_cdef_0011_2233_4455_6677_u128;
+        let player = crate::menus::server_player(&mut rt, uuid);
+        let carriage = rt.new_object("test/Carriage");
+        let packet = rt.new_object("test/Packet");
+        let pos = crate::api::block_pos(&mut rt, 4, 5, 6);
+        rt.put_field(packet, "pos", pos);
+        rt.put_field(packet, "speed", V::F(1.0));
+        let more = rt.new_array(0, V::NULL);
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            for (key, about) in [(tracking, player), (and_self, player), (tracking, carriage)] {
+                call(rt, key, &[about, packet, more]);
+            }
+        });
+        let to: Vec<PayloadTarget> = host.payloads.iter().map(|p| p.0).collect();
+        assert_eq!(
+            to,
+            [
+                PayloadTarget::Others(uuid),
+                PayloadTarget::All,
+                PayloadTarget::All
+            ]
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `readEnum(class)` gives back the constant `writeEnum` wrote (a vanilla enum's, from its

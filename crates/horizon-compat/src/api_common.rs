@@ -566,7 +566,7 @@ const STATE_CAN_SURVIVE: &str = "net/minecraft/world/level/block/state/BlockBeha
 
 /// Whether `v` is a player object: the game's (a server's player, the client's own, a fake one)
 /// or a mod's subclass of `Player`.
-fn player_object(rt: &Rt, v: V) -> bool {
+pub(crate) fn player_object(rt: &Rt, v: V) -> bool {
     v.r() != 0
         && (is_player_class(rt.class_of(v))
             || rt.instance_of(v, "net/minecraft/world/entity/player/Player"))
@@ -2940,13 +2940,43 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 _ => 0.0,
             })
         }
-        // Where a player stands is their physics' (`setOnGround`); a walking player's inputs reach a
-        // server only while riding (`$xxa`, `$zza`); they step as `STEP_HEIGHT`'s default says, carry
-        // no passengers here, and a piston (or a belt) pushes them.
+        // Where a player stands is their physics' (`setOnGround`), but for a client mod setting the
+        // window's own player down (Create's contraptions hold a player standing on them as the
+        // ground does: they jump, and walk at the ground's pace, until their next move finds out
+        // again); a walking player's inputs reach a server only while riding (`$xxa`, `$zza`); they
+        // step as `STEP_HEIGHT`'s default says, carry no passengers here, and a piston (or a belt)
+        // pushes them.
         (o, "setOnGround")
             if is_player(o) && is_player_class(rt.class_of(a(0))) && desc == "(Z)V" =>
         {
+            if rt.class_of(a(0)) == LOCAL_PLAYER {
+                rt.host_call(|h| h.set_client_player_on_ground(a(1).i() != 0));
+            }
             V::Void
+        }
+        // A client mod putting the window's own player somewhere (`setPos`: Create's contraptions
+        // carry a player standing on them, each tick), and where they stood as the tick began
+        // (`xo`, `yo`, `zo`: what the frame draws them from).
+        (o, "setPos")
+            if is_player(o)
+                && rt.class_of(a(0)) == LOCAL_PLAYER
+                && matches!(desc, "(DDD)V" | "(Lnet/minecraft/world/phys/Vec3;)V") =>
+        {
+            let to = if desc == "(DDD)V" {
+                [a(1).d(), a(2).d(), a(3).d()]
+            } else {
+                ["x", "y", "z"].map(|k| rt.get_field(a(1), k).d())
+            };
+            rt.host_call(|h| h.set_client_player_pos(to));
+            V::Void
+        }
+        (o, n @ ("$xo" | "$yo" | "$zo"))
+            if is_player(o) && rt.class_of(a(0)) == LOCAL_PLAYER && desc == "()D" =>
+        {
+            let old = rt.host().and_then(|h| h.client_player_old_pos());
+            let now = player_place(rt, a(0)).map(|(p, ..)| p);
+            let i = usize::from(n.as_bytes()[1] - b'x');
+            V::D(old.or(now).unwrap_or_default()[i])
         }
         (o, "$xxa" | "$yya" | "$zza")
             if is_player(o)
@@ -2956,7 +2986,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             V::F(0.0)
         }
         (o, "maxUpStep") if is_player(o) && is_player_class(rt.class_of(a(0))) => V::F(0.6),
-        (o, "getPassengers") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
+        (o, "getPassengers" | "getIndirectPassengers")
+            if is_player(o) && is_player_class(rt.class_of(a(0))) =>
+        {
             crate::jutil::new_list(rt, Vec::new())
         }
         // With no passengers, a player's self and passengers are itself (Create's contraption
@@ -6200,6 +6232,60 @@ mod tests {
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
         assert_eq!(host.place, Some(([0.5, 64.0, 0.5], 10.0, 0.0)));
+    }
+
+    /// A client mod carries the window's own player (Create's contraptions move a player standing on
+    /// them each tick): `setPos` puts them there and `setOnGround` sets them down, as the game's
+    /// player; `xo` and `zo` are where they stood as the tick began.
+    #[test]
+    fn a_client_mod_carries_the_window_player() {
+        const LOCAL: &str = "net/minecraft/client/player/LocalPlayer";
+        let call = |rt: &mut Rt, key: String, args: &[V]| {
+            crate::api::call(rt, Box::leak(key.into_boxed_str()), args)
+        };
+        let mut rt = Rt::new();
+        crate::install();
+        rt.interned.insert("compat:client".into(), V::I(1));
+        let mut host = crate::host::MemoryHost {
+            place: Some(([0.5, 64.0, 0.5], 10.0, 0.0)),
+            client: true,
+            client_old_pos: Some([0.25, 64.0, 0.5]),
+            ..Default::default()
+        };
+        rt.with_host(&mut host, |rt| {
+            let me = crate::network::local_player(rt);
+            assert_eq!(call(rt, format!("{LOCAL}.$xo.()D"), &[me]), V::D(0.25));
+            call(
+                rt,
+                format!("{LOCAL}.setPos.(DDD)V"),
+                &[me, V::D(3.5), V::D(65.0), V::D(-2.5)],
+            );
+            assert_eq!(call(rt, format!("{LOCAL}.getX.()D"), &[me]), V::D(3.5));
+            let to = super::vec3(rt, 4.0, 65.5, -2.0);
+            call(
+                rt,
+                "net/minecraft/world/entity/Entity.setPos.(Lnet/minecraft/world/phys/Vec3;)V"
+                    .into(),
+                &[me, to],
+            );
+            call(rt, format!("{LOCAL}.setOnGround.(Z)V"), &[me, V::I(1)]);
+            assert_eq!(call(rt, format!("{LOCAL}.onGround.()Z"), &[me]), V::I(1));
+            let riders = call(
+                rt,
+                format!("{LOCAL}.getIndirectPassengers.()Ljava/lang/Iterable;"),
+                &[me],
+            );
+            assert!(crate::jutil::elements(rt, riders).is_empty());
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+        assert_eq!(host.place, Some(([4.0, 65.5, -2.0], 10.0, 0.0)));
+        assert!(host.client_on_ground);
+        // With no start of the tick at hand: where they are.
+        host.client_old_pos = None;
+        rt.with_host(&mut host, |rt| {
+            let me = crate::network::local_player(rt);
+            assert_eq!(call(rt, format!("{LOCAL}.$zo.()D"), &[me]), V::D(-2.0));
+        });
     }
 
     /// A block item's state for a click (`BlockItem.getPlacementState`): its block's

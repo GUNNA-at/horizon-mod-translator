@@ -1002,10 +1002,37 @@
     "methods": [1326, 1602],
     "uses": [14053, 14416]
    }
+  },
+  {
+   "run": 49,
+   "id": "packcov49",
+   "date": "2026-11-09T08:23",
+   "commit": "f65e3b55c4",
+   "part": null,
+   "probe": "hosted",
+   "jars": 367,
+   "api": {
+    "methods": [110915, 130223],
+    "uses": [345542, 372742],
+    "missing": 8485
+   },
+   "create": {
+    "methods": [3329, 3971],
+    "uses": [24435, 25240]
+   },
+   "libs": {
+    "methods": [61862, 74081],
+    "uses": [336967, 357517],
+    "missing": 5176
+   },
+   "libs_create": {
+    "methods": [1326, 1602],
+    "uses": [14053, 14416]
+   }
   }
  ],
  "latest": {
-  "run": 48,
+  "run": 49,
   "jars": [
    ["AI-Improvements-1.21-0.5.3", 26, 26, 33, 33],
    ["Advanced Stands MC 1.21.1 - 2.0.0 Neoforge", 157, 160, 378, 383],
@@ -1069,7 +1096,7 @@
    ["LegendaryTooltips-1.21.1-neoforge-1.5.5", 83, 92, 109, 120],
    ["LockedSlots-Neoforge-1.21.1-1.0.0", 20, 20, 24, 24],
    ["Measurements-neoforge-1.21.1-3.0.3", 108, 113, 118, 123],
-   ["Mekanism-1.21.1-10.7.19.85", 2222, 2705, 8938, 9640],
+   ["Mekanism-1.21.1-10.7.19.85", 2223, 2705, 8939, 9640],
    ["MekanismGenerators-1.21.1-10.7.19.85", 235, 247, 440, 465],
    ["MekanismTools-1.21.1-10.7.19.85", 124, 149, 201, 228],
    ["MouseTweaks-neoforge-mc1.21-2.26.1", 28, 54, 30, 56],
@@ -1114,7 +1141,7 @@
    ["ars_creo-1.21.1-5.4.0", 157, 159, 212, 214],
    ["ars_elemancy-1.21.1-1.18.3", 422, 443, 689, 715],
    ["ars_elemental-1.21.1-0.7.10.1", 1103, 1348, 3192, 3461],
-   ["ars_nouveau-1.21.1-5.13.1", 2719, 3499, 14714, 15735],
+   ["ars_nouveau-1.21.1-5.13.1", 2720, 3499, 14715, 15735],
    ["ars_sable-1.21.1-1.1.2", 133, 148, 270, 303],
    ["arseng-2.1.1-beta", 148, 148, 180, 180],
    ["artifacts-neoforge-13.2.1", 608, 710, 1359, 1476],
@@ -1128,7 +1155,7 @@
    ["betterarcheology-neoforge-1.21.1-1.3.8", 391, 430, 857, 905],
    ["betterchunkloading-1.21-5.4", 92, 133, 124, 177],
    ["bits_n_bobs-0.0.44", 458, 472, 1127, 1141],
-   ["block_factorys_bosses-2.1.2-neo-1.21.1", 1422, 1650, 6047, 6626],
+   ["block_factorys_bosses-2.1.2-neo-1.21.1", 1423, 1650, 6049, 6626],
    ["blockui-1.0.209-1.21.1", 464, 559, 760, 870],
    ["blueprint-1.21.1-8.1.0", 849, 1069, 1800, 2063],
    ["bobberdetector-neoforge1.21.1-1.0.3", 50, 50, 59, 59],
@@ -1158,8 +1185,8 @@
    ["corpsecurioscompat-1.21.1-NeoForge-3.1.3", 54, 54, 65, 65],
    ["cosmeticarmorreworked-1.21.1-v1-neoforge", 171, 223, 240, 295],
    ["cosmeticcorpsecompat-1.21.1-NeoForge--1.0.0", 20, 20, 21, 21],
-   ["create-1.21.1-6.0.10", 3328, 3971, 24434, 25240],
-   ["create-aeronautics-bundled-1.21.1-1.3.2", 1388, 1531, 6206, 6378],
+   ["create-1.21.1-6.0.10", 3329, 3971, 24435, 25240],
+   ["create-aeronautics-bundled-1.21.1-1.3.2", 1389, 1531, 6207, 6378],
    ["create-central-kitchen-2.4.0", 122, 130, 263, 271],
    ["create-confectionery1.21.1_v1.1.3b", 224, 235, 1398, 1413],
    ["create-enchantment-industry-2.4.2", 653, 722, 1884, 1981],
@@ -1205,7 +1232,7 @@
    ["createoreexcavation-1.21-1.6.8", 428, 447, 869, 892],
    ["createpropulsion-1.1.4", 630, 639, 1944, 1953],
    ["createrailwaysnavigator-neoforge-1.21.1-beta-0.9.0-C6", 390, 414, 1794, 1834],
-   ["creatingspace-1.21.1-1.7.20", 777, 869, 2062, 2163],
+   ["creatingspace-1.21.1-1.7.20", 778, 869, 2063, 2163],
    ["cristellib-neoforge-1.21.1-3.0.2.1", 112, 138, 218, 245],
    ["cryonicconfig-neoforge-1.0.0+mc1.21.11", 5, 5, 5, 5],
    ["cupboard-1.21.1-4.2", 39, 42, 42, 45],
@@ -1233,7 +1260,7 @@
    ["entityculling-neoforge-1.10.5-mc1.21.1", 280, 315, 391, 429],
    ["escalated-1.2.1-create.6.0.8-mc.1.21.1-neoforge", 220, 222, 456, 458],
    ["factory_blocks-neoforge-1.4.0+mc1.21.1", 27, 29, 33, 35],
-   ["fallingleaves-1.21.1-2.5.1", 132, 147, 159, 174],
+   ["fallingleaves-1.21.1-2.5.1", 133, 147, 160, 174],
    ["fancymenu_neoforge_3.9.12_MC_1.21.1", 893, 1245, 4658, 5256],
    ["fast-ip-ping-v1.0.11-mc1.21.1-neoforge", 1, 4, 1, 4],
    ["fastasyncworldsave-1.21-2.6", 9, 13, 10, 14],
@@ -1329,7 +1356,7 @@
    ["rhino-2101.2.7-build.81", 0, 0, 0, 0],
    ["rightclickharvest-neoforge-4.6.1+1.21.1", 69, 71, 74, 76],
    ["ritchiesprojectilelib-2.1.2-mc.1.21.1-neoforge", 104, 114, 124, 134],
-   ["sable-neoforge-1.21.1-2.0.6", 1473, 1957, 5285, 5946],
+   ["sable-neoforge-1.21.1-2.0.6", 1474, 1957, 5286, 5946],
    ["secretdoors-1.21.1-v1.0.0", 30, 31, 32, 33],
    ["shrink-2.0.1.47-neoforge", 85, 89, 117, 121],
    ["simplemagnets-1.1.12c-neoforge-mc1.21", 129, 138, 220, 230],

@@ -563,7 +563,11 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || (owner.starts_with("net/minecraft/world/level/block/") && matches!(name, "box" | "isFaceFull" | "isShapeFullBlock"))
         || (name == "clip" && api::is_level(owner))
         || (name == "<init>" && owner.ends_with("/level/ClipContext"))
+        || (owner == ENTITY && name == "collideBoundingBox")
 }
+
+const ENTITY: &str = "net/minecraft/world/entity/Entity";
+const COLLIDE_BOUNDING_BOX: &str = "(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/AABB;Lnet/minecraft/world/level/Level;Ljava/util/List;)Lnet/minecraft/world/phys/Vec3;";
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -571,6 +575,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let shape_of = |rt: &Rt, v: V| boxes(rt, v).unwrap_or_default();
     Some(match (owner, name) {
+        // `Entity.collideBoundingBox(entity, motion, box, level, shapes)`: how far `box` gets of
+        // `motion` among the shapes given (the entities it collides with: `getEntityCollisions`)
+        // and the level's blocks, along y, then the shorter of x and z, then the other (what an
+        // entity's own move does; Create's contraptions move a player standing on them by it). The
+        // blocks' shapes are the empty context's (not the entity's own: scaffolding, powder snow),
+        // and the world border isn't among them.
+        (ENTITY, "collideBoundingBox") if desc == COLLIDE_BOUNDING_BOX => {
+            let motion = xyz(rt, a(1));
+            let b = aabb_of(rt, a(2));
+            let others: Vec<Box3> = crate::jutil::elements(rt, a(4))
+                .into_iter()
+                .flat_map(|s| shape_of(rt, s))
+                .collect();
+            let allowed = crate::particle_engine::collide_among(rt, b, motion, others);
+            vec3(rt, allowed)
+        }
         // `BlockGetter.clip(context)`: where a ray through the level stops.
         (o, "clip") if api::is_level(o) && desc == LEVEL_CLIP => level_clip(rt, a(0), a(1)),
         // `new ClipContext(from, to, block, fluid, entity)`: the entity's collision context (the
@@ -1368,6 +1388,88 @@ mod tests {
             // From inside the stone: a hit a thousandth of the way along, inside, on the face
             // looking back.
             assert!(matches!(ray(rt, [0.5, 64.5, 3.5], [0.5, 64.5, 5.5], COLLIDER, NONE), (at, f, [0, 64, 3], true, false) if near(at, [0.5, 64.5, 3.502]) && f == north));
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `Entity.collideBoundingBox(entity, motion, box, level, shapes)` of the window's player, with
+    /// the shapes of what they collide with (`level.getEntityCollisions`, or a contraption's blocks):
+    /// down onto a block's top or a boat's, and sideways up to a shape's face, sliding on along the
+    /// other axis, as their own move does.
+    #[test]
+    fn a_box_moved_among_shapes_stops_where_vanillas_does() {
+        use crate::host::MemoryHost;
+        const COLLISIONS: &str = "net/minecraft/world/level/Level.getEntityCollisions.(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/AABB;)Ljava/util/List;";
+        let collide_key: &'static str =
+            format!("{ENTITY}.collideBoundingBox.{COLLIDE_BOUNDING_BOX}").leak();
+        // Stone at y 64, and a boat (1.375 wide, 0.5625 high) floating two blocks east of it.
+        let mut h = MemoryHost {
+            client: true,
+            place: Some(([0.5, 65.0, 0.5], 0.0, 0.0)),
+            ..MemoryHost::default()
+        };
+        h.blocks.insert([0, 64, 0], "minecraft:stone".into());
+        h.client_entity_boxes
+            .push([1.8125, 64.0, -0.1875, 3.1875, 64.5625, 1.1875]);
+        let mut rt = Rt::new();
+        crate::install();
+        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.with_host(&mut h, |rt| {
+            let me = crate::network::local_player(rt);
+            let level = crate::glue::level(rt);
+            // What a box `b` gets of `motion` among the given shapes, or among those the player
+            // collides with over the box stretched along it.
+            let mut moved = |b: Box3, motion: [f64; 3], given: Option<Vec<Box3>>| {
+                let bb = aabb(rt, b);
+                let shapes = match given {
+                    Some(boxes) => {
+                        let shapes = boxes.into_iter().map(|b| shape(rt, &[b])).collect();
+                        crate::jutil::new_list(rt, shapes)
+                    }
+                    None => {
+                        let mut area = b;
+                        (0..3).for_each(|i| {
+                            if motion[i] < 0.0 {
+                                area[i] += motion[i]
+                            } else {
+                                area[i + 3] += motion[i]
+                            }
+                        });
+                        let area = aabb(rt, area);
+                        api::call(rt, COLLISIONS, &[level, me, area])
+                    }
+                };
+                let m = vec3(rt, motion);
+                let got = api::call(rt, collide_key, &[me, m, bb, level, shapes]);
+                xyz(rt, got)
+            };
+            // Falling half a block onto the stone, then onto the boat (no block under it).
+            assert_eq!(
+                moved([0.2, 65.5, 0.2, 0.8, 67.3, 0.8], [0.0, -1.0, 0.0], None),
+                [0.0, -0.5, 0.0]
+            );
+            assert_eq!(
+                moved([2.2, 65.0, 0.2, 2.8, 66.8, 0.8], [0.0, -1.0, 0.0], None),
+                [0.0, -0.4375, 0.0]
+            );
+            assert_eq!(
+                moved(
+                    [2.2, 65.0, 0.2, 2.8, 66.8, 0.8],
+                    [0.0, -1.0, 0.0],
+                    Some(Vec::new())
+                ),
+                [0.0, -1.0, 0.0]
+            );
+            // East into a contraption's block at x 4: a quarter block, and on north-south past it.
+            let block = vec![[4.0, 66.0, 0.0, 5.0, 67.0, 1.0]];
+            assert_eq!(
+                moved(
+                    [3.25, 66.0, 0.25, 3.75, 67.8, 0.75],
+                    [1.0, 0.0, 0.5],
+                    Some(block)
+                ),
+                [0.25, 0.0, 0.5]
+            );
         });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }

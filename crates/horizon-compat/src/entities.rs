@@ -469,7 +469,7 @@ fn entities_of(rt: &mut Rt, class: Option<V>, area: V, predicate: Option<V>) -> 
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     let block = matches!(owner, "net/minecraft/world/level/block/Block" | "net/minecraft/world/level/block/state/BlockBehaviour");
-    matches!(name, "getEntitiesOfClass" | "getEntities" | "addFreshEntity")
+    matches!(name, "getEntitiesOfClass" | "getEntities" | "addFreshEntity" | "getEntityCollisions")
         || matches!(owner, EXPERIENCE_ORB | ITEM_ENTITY)
         || (block && matches!(name, "updateEntityAfterFallOn" | "entityInside" | "stepOn" | "popResource"))
         || (owner == CONTAINERS && matches!(name, "dropItemStack" | "dropContents" | "dropContentsOnDestroy"))
@@ -510,6 +510,39 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             list_set(rt, list, kept);
         }
         return Some(list);
+    }
+    // `getEntityCollisions(entity, box)` of the window's own player: the boxes of the entities they
+    // collide with (a boat, a living shulker: the game's own rules) that meet the box grown by
+    // 1.0E-7, each a shape; none for a box of next to no size (Create's contraptions move a player
+    // standing on them among these).
+    if name == "getEntityCollisions"
+        && desc
+            == "(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/phys/AABB;)Ljava/util/List;"
+        && rt.class_of(a(1)) == "net/minecraft/client/player/LocalPlayer"
+    {
+        let b = crate::shapes::aabb_of(rt, a(2));
+        // `AABB.getSize()`: the mean of its sides.
+        let size = (b[3] - b[0] + b[4] - b[1] + b[5] - b[2]) / 3.0;
+        let boxes = if size < 1.0e-7 {
+            Vec::new()
+        } else {
+            let area = [
+                b[0] - 1.0e-7,
+                b[1] - 1.0e-7,
+                b[2] - 1.0e-7,
+                b[3] + 1.0e-7,
+                b[4] + 1.0e-7,
+                b[5] + 1.0e-7,
+            ];
+            rt.host()
+                .map(|h| h.client_entity_collisions(area))
+                .unwrap_or_default()
+        };
+        let shapes = boxes
+            .into_iter()
+            .map(|b| crate::shapes::shape(rt, &[b]))
+            .collect();
+        return Some(crate::jutil::new_list(rt, shapes));
     }
     if name == "addFreshEntity" && is_item_entity(rt, a(1)) {
         return Some(V::I(add(rt, a(1)) as i32));
