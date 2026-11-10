@@ -199,7 +199,7 @@ fn a_mixin_into_a_translated_class_is_woven_as_mixin_weaves_it() {
         let f = horizon_mod_translator::codegen::fn_name("weave/Probe", name, desc);
         let args = if desc.starts_with("()") { String::new() } else { format!("V::I({arg})") };
         main.push_str(&format!(
-            "    let r = {f}(&mut rt, &[{args}]);\n    if let Some(e) = rt.thrown.take() {{ println!(\"{name}({arg}) threw {{}}\", rt.class_of(e)); }} else {{ println!(\"{name}({arg}) = {{}}\", rt.str_of(r).map(str::to_owned).unwrap_or_else(|| r.i().to_string())); }}\n"
+            "    let r = rt.entered(|rt| {f}(rt, &[{args}]), |r| *r);\n    if let Some(e) = rt.thrown.take() {{ println!(\"{name}({arg}) threw {{}}\", rt.class_of(e)); }} else {{ println!(\"{name}({arg}) = {{}}\", rt.str_of(r).map(str::to_owned).unwrap_or_else(|| r.i().to_string())); }}\n"
         ));
     }
     main.push_str("}\n");

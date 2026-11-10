@@ -155,6 +155,10 @@ pub struct Object {
     /// The mod class's id (generated `CLASS_IDS`), [`LAMBDA`] plus the implementation's id for a
     /// lambda, 0 for everything else. Virtual calls jump on it.
     pub cid: u32,
+    /// When it was made, by the count of objects made since the last whole collection (0 for
+    /// one that was there then): what tells the objects a call made from those before it, so
+    /// its garbage can go when it ends ([`gc`]).
+    pub born: u32,
     pub data: Data,
 }
 
@@ -339,6 +343,30 @@ pub struct Rt {
     /// that grows a string without end runs up between two collections (none frees inside a
     /// hook), for whoever watches for one.
     pub allocated: u64,
+    /// The calls from the runtime's own code into the mods' that are in progress, outermost
+    /// first ([`Rt::entered`]).
+    pub entries: Vec<gc::Entry>,
+    /// How many calls of the runtime's own code are in progress under the innermost of
+    /// [`Rt::entries`]: 0 while the mods' code itself runs there, which is where a collection
+    /// may read the stack for what that code holds. 1 where there is no entry: a hook's own
+    /// code, which holds values nothing tells of.
+    pub native: u32,
+    /// Objects made so far.
+    pub made: u64,
+    /// [`Rt::made`] at the last whole collection: [`Object::born`] counts from it.
+    pub born_base: u64,
+    /// [`Rt::made`] at which a call from the mods' code next asks whether to collect, and at
+    /// the last collection inside a hook.
+    pub young_due: u64,
+    pub young_last: u64,
+    /// The collections inside hooks so far: those made while a call ran, those at a call's
+    /// end, the objects they freed, and the objects they looked at.
+    pub young_runs: (u64, u64, u64, u64),
+    /// What the last whole collection left.
+    pub live_at_collection: u64,
+    /// Objects a call makes, at least, before it is collected for itself ([`gc::YOUNG_MIN`],
+    /// or what the environment says).
+    pub young_min: u64,
 }
 
 impl Default for Rt {
@@ -393,6 +421,15 @@ impl Default for Rt {
             hook_misses: 0,
             hook_first_miss: None,
             allocated: 0,
+            entries: Vec::new(),
+            native: 1,
+            made: 0,
+            born_base: 0,
+            young_due: 0,
+            young_last: 0,
+            young_runs: (0, 0, 0, 0),
+            live_at_collection: 0,
+            young_min: gc::young_min().0,
         }
     }
 }
@@ -409,6 +446,8 @@ impl Rt {
         rt.host = None;
         rt.thrown = None;
         rt.unwinding.clear();
+        rt.entries.clear();
+        rt.native = 1;
         (rt.hook_misses, rt.hook_first_miss) = (0, None);
         // Which side of the game a runtime is on (`side:...` among what it keeps by name) is its
         // own to find: the copy for the server's thread is not the client the first was made.
@@ -642,7 +681,12 @@ impl Rt {
 
     pub fn new() -> Rt {
         let mut rt = Rt::default();
-        rt.heap.push(Object { class: "null", cid: 0, data: Data::Array(Vec::new()) });
+        rt.heap.push(Object {
+            class: "null",
+            cid: 0,
+            born: 0,
+            data: Data::Array(Vec::new()),
+        });
         for (c, sup) in JDK_SUPERS {
             rt.supers.insert(c, sup);
         }
@@ -659,11 +703,23 @@ impl Rt {
             Data::Array(v) | Data::List(v) => 16 * v.len() as u64,
             _ => 0,
         };
+        self.made += 1;
+        let born = self.next_born() - 1;
         if let Some(r) = self.free.pop() {
-            self.heap[r as usize] = Object { class, cid, data };
+            self.heap[r as usize] = Object {
+                class,
+                cid,
+                born,
+                data,
+            };
             return V::R(r);
         }
-        self.heap.push(Object { class, cid, data });
+        self.heap.push(Object {
+            class,
+            cid,
+            born,
+            data,
+        });
         V::R(self.heap.len() as u32 - 1)
     }
 
@@ -671,6 +727,10 @@ impl Rt {
     /// value): collects garbage when enough was allocated.
     pub fn safe_point(&mut self) {
         if self.host.is_none() {
+            // None of the mods' code runs: whatever a call that never came back left of
+            // itself (one that panicked) is no call in progress.
+            self.entries.clear();
+            self.native = 1;
             self.maybe_collect();
         }
     }
@@ -1189,7 +1249,8 @@ impl Rt {
 
     pub fn captured(&self, v: V) -> Vec<V> {
         match self.heap.get(v.r() as usize).map(|o| &o.data) {
-            Some(Data::Array(c)) => c.clone(),
+            // (No lambda object, `null`, captured nothing: the heap's first object is an array.)
+            Some(Data::Array(c)) if v.r() != 0 => c.clone(),
             _ => Vec::new(),
         }
     }
@@ -1469,11 +1530,33 @@ fn vanilla_class(rt: &Rt, v: V, c: &'static str) -> Option<&'static str> {
 /// The API calls generated code makes, through the installed mapping.
 pub mod api {
     use super::{Rt, V, fns};
+    /// A call from the mods' code (or from a call of theirs that found no code) into the
+    /// runtime's own. Where the mods' code runs right above (no call of the runtime's is in
+    /// progress under the innermost entry), this is where the garbage it made can be
+    /// collected while it goes on: every value it holds is in its frames ([`Rt::young_point`]).
+    /// What the runtime's code holds while it answers is told of nowhere, so calls made from
+    /// inside it are no such place.
     pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
-        (fns().call)(rt, key, args)
+        if rt.native == 0 && rt.made >= rt.young_due {
+            rt.young_point();
+        }
+        if super::gc::checking() {
+            rt.check_collected(key, args);
+        }
+        let made = rt.made;
+        rt.native += 1;
+        let r = (fns().call)(rt, key, args);
+        rt.native = rt.native.saturating_sub(1);
+        if rt.made - made >= rt.young_min {
+            rt.call_ended(made, r);
+        }
+        r
     }
     pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
-        (fns().get_static)(rt, key)
+        rt.native += 1;
+        let r = (fns().get_static)(rt, key);
+        rt.native = rt.native.saturating_sub(1);
+        r
     }
     /// A game class's field the code reads itself (one an access transformer opens:
     /// `properties.lightEmission`): what was written under its name; else the state the runtime
@@ -1495,10 +1578,15 @@ pub mod api {
 pub mod neo {
     use super::{Rt, V, fns};
     pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
-        (fns().constructor_arg)(rt, class)
+        rt.native += 1;
+        let r = (fns().constructor_arg)(rt, class);
+        rt.native = rt.native.saturating_sub(1);
+        r
     }
     pub fn fire_registrations(rt: &mut Rt) {
-        (fns().fire_registrations)(rt)
+        rt.native += 1;
+        (fns().fire_registrations)(rt);
+        rt.native = rt.native.saturating_sub(1);
     }
 }
 // END ENGINE ENTRY POINTS

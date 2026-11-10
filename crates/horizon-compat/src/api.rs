@@ -407,7 +407,8 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     // The game's own code for it, which the translator carried where it asks only what is mapped.
     if let Some(f) = derived(rt, key, owner, rest, args) {
         uncount(rt, key);
-        return f(rt, args);
+        // (From the runtime's own code into code as the mods' is: an entry.)
+        return rt.entered(|rt| f(rt, args), |r| *r);
     }
     trace_unmapped(rt, key, args);
     if runaway(rt, key) {

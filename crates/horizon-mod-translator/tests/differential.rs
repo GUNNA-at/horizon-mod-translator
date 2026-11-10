@@ -264,8 +264,10 @@ fn translated_fixture_matches_the_jvm() {
                 'J' => "r.j()",
                 _ => "r.i()",
             };
+            // Each as the runtime calls into translated code: an entry, under which the
+            // collector may run (`HORIZON_COMPAT_GC_MIN` makes it, every few objects).
             main.push_str(&format!(
-                "    let r = {f}(&mut rt, &[{}]); println!(\"{name}({input}) = {{}}\", {fmt});\n",
+                "    let r = rt.entered(|rt| {f}(rt, &[{}]), |r| *r); println!(\"{name}({input}) = {{}}\", {fmt});\n",
                 rust_value(desc, input)
             ));
             // What it left thrown, for whoever reads a mismatch.
@@ -278,6 +280,8 @@ fn translated_fixture_matches_the_jvm() {
     main.push_str("    let file = rt.reflect(\"hz/files\", \"defaults/fixture.json\", &[]).map(|a| (rt.array_len(a), rt.array_get(a, 14)));\n    let members = rt.reflect(\"hz/members\", \"Fixture\", &[]).and_then(|m| rt.str_of(m).map(|m| m.lines().any(|l| l == \"9 sumTo (I)I\")));\n    let absent = rt.reflect(\"hz/files\", \"nothing\", &[]).is_none();\n    eprintln!(\"tables {file:?} {members:?} {absent}\");\n");
     // And what the runtime had no answer for.
     main.push_str("    let mut unmapped: Vec<_> = rt.unmapped.keys().collect();\n    unmapped.sort();\n    for k in unmapped { eprintln!(\"unmapped {k}\"); }\n");
+    // The collections that ran meanwhile: none, unless the environment asks for them often.
+    main.push_str("    eprintln!(\"collections {:?}\", rt.young_runs);\n");
     main.push_str("}\n");
     fs::write(krate.join("src/main.rs"), main).unwrap();
     fs::write(krate.join("src/fixture.rs"), &module).unwrap();
@@ -294,6 +298,29 @@ fn translated_fixture_matches_the_jvm() {
         notes.contains("tables Some((15, I(-1))) Some(true) true"),
         "{notes}"
     );
+    // Run with `HORIZON_COMPAT_GC_MIN=<n>` (and `HORIZON_COMPAT_GC_CHECK`), the fixture is the
+    // collector's test: it collects every n objects, while calls run and as they end, and the
+    // answers below are still the JVM's.
+    if std::env::var_os("HORIZON_COMPAT_GC_MIN").is_some() {
+        let runs = notes
+            .lines()
+            .find_map(|l| l.strip_prefix("collections "))
+            .unwrap_or("none told of")
+            .to_owned();
+        let counts: Vec<u64> = runs
+            .trim_matches(['(', ')'])
+            .split(", ")
+            .filter_map(|n| n.parse().ok())
+            .collect();
+        assert!(
+            matches!(counts[..], [in_calls, at_ends, freed, _] if in_calls > 0 && at_ends > 0 && freed > 0),
+            "collections: {runs}"
+        );
+        assert!(!notes.contains("GC CHECK"), "{notes}");
+        eprintln!(
+            "collections (in calls, at their ends, objects freed, objects looked at): {runs}"
+        );
+    }
     let wrong: Vec<String> = expected
         .lines()
         .zip(actual.lines())

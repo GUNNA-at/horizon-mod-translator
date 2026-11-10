@@ -482,18 +482,28 @@ fn miss(rt: &mut Rt, cid: u32, owner_key: &'static str, key: &'static str, args:
             return crate::api::call(rt, owner_key, args);
         }
     }
-    match lambda_call(rt, cid & !LAMBDA, args) {
+    // (From the mods' own code, or from the runtime's through [`vcall`], which is the entry.)
+    let run = lambda_of(rt, cid & !LAMBDA, args).map(|(f, full)| f(rt, full));
+    match run {
         Some(r) => rt.adapt_return(r, key),
         None => crate::api::call(rt, owner_key, args),
     }
 }
 
-/// A call on a lambda object (`lid`: its implementation's id), `args[0]` the lambda.
-pub fn lambda_call(rt: &mut Rt, lid: u32, args: &[V]) -> Option<V> {
+/// The implementation of the lambda `lid` and what it runs with on `args` (`args[0]` the
+/// lambda object): the values it captured, then the call's own.
+fn lambda_of(rt: &Rt, lid: u32, args: &[V]) -> Option<(LambdaFn, Vec<V>)> {
     let f = rt.linked?.lambdas.get(lid as usize).copied().flatten()?;
     let mut full = rt.captured(args.first().copied().unwrap_or_default());
     full.extend_from_slice(args.get(1..).unwrap_or_default());
-    Some(f(rt, full))
+    Some((f, full))
+}
+
+/// A call on a lambda object (`lid`: its implementation's id), `args[0]` the lambda, from the
+/// runtime's own code: an entry into the mods' ([`Rt::entered`]).
+pub fn lambda_call(rt: &mut Rt, lid: u32, args: &[V]) -> Option<V> {
+    let (f, full) = lambda_of(rt, lid, args)?;
+    Some(rt.entered(move |rt| f(rt, full), |r| *r))
 }
 
 /// The diagnostics of calls the environment asks for, read once: bit 1 counts them
@@ -696,7 +706,10 @@ fn kept_hash(key: &'static str) -> u64 {
 /// Virtual dispatch by key (`name.desc`): the API's calls back into the code.
 pub fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
     let cid = rt.recv_cid(args);
-    dispatch_any(rt, cid, kept_hash(key), key, owner_key, args)
+    rt.entered(
+        |rt| dispatch_any(rt, cid, kept_hash(key), key, owner_key, args),
+        |r| *r,
+    )
 }
 
 /// Reflection over the translated classes ([`Rt::reflect`]).
@@ -714,7 +727,7 @@ pub fn reflect(rt: &mut Rt, class: &str, what: &str, args: &[V]) -> Option<V> {
     }
     let d = l.id(class).and_then(|id| l.class(id))?;
     if let Some(r) = d.reflect
-        && let Some(v) = r(rt, what, args)
+        && let Some(v) = rt.entered(|rt| r(rt, what, args), |made| made.unwrap_or_default())
     {
         return Some(v);
     }
@@ -745,12 +758,17 @@ fn string_at(rt: &mut Rt, v: V, depth: u32) -> V {
     }
     let cid = rt.cid(v);
     if let Some(f) = rt.linked.and_then(|l| l.resolve(cid, TO_STRING)) {
-        return f(rt, &[v]);
+        return rt.entered(|rt| f(rt, &[v]), |r| *r);
     }
-    if depth < 16
-        && let Some(text) = collection_string(rt, v, depth)
-    {
-        return rt.alloc("java/lang/String", Data::Str(text));
+    if depth < 16 {
+        // It holds the collection's elements while it asks each for its text: the runtime's
+        // own code, as far as a collection goes.
+        rt.native += 1;
+        let text = collection_string(rt, v, depth);
+        rt.native = rt.native.saturating_sub(1);
+        if let Some(text) = text {
+            return rt.alloc("java/lang/String", Data::Str(text));
+        }
     }
     // (A lambda has no class the API knows: it prints as an object of its own.)
     if cid & LAMBDA == 0 && !rt.prints(v) && !rt.class_of(v).contains('.') {

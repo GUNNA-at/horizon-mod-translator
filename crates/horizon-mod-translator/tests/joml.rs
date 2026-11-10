@@ -477,7 +477,7 @@ fn translated_joml_matches_the_jvm() {
     for (name, inputs) in CASES {
         let f = horizon_mod_translator::codegen::fn_name("JomlFixture", name, "(I)J");
         for input in *inputs {
-            main.push_str(&format!("    let r = {f}(&mut rt, &[V::I({input})]); println!(\"{name}({input}) = {{}}\", r.j());\n"));
+            main.push_str(&format!("    let r = rt.entered(|rt| {f}(rt, &[V::I({input})]), |r| *r); println!(\"{name}({input}) = {{}}\", r.j());\n"));
             main.push_str(&format!("    if let Some(t) = rt.thrown.take() {{ eprintln!(\"{name}({input}) threw {{}}\", rt.class_of(t)); }}\n"));
         }
     }

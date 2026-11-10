@@ -10566,6 +10566,43 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     has a method of that name then) by the descriptor it was made with, so
     `lookup().unreflect(method).bindTo(listener).invokeWithArguments(args)` calls it.
   - Tests: 832 compat.
+- [x] 2026-11-10 Part 177: garbage is collected while a hook runs.
+  - The collector ran between hooks alone, since the generated code keeps its values in Rust
+    locals no collector sees; one reload listener of the pack is a single hook that made tens
+    of gigabytes of garbage (launches 16 and 17 died there). Now each object carries when it
+    was made (`born`, a count since the last whole collection, in what was padding), and each
+    call from the runtime's own code into the mods' is an entry (`Rt::entered`: a method
+    through `vcall`, a lambda, a constructor through reflection, the game's own carried code).
+    The objects made since an entry began are that call's own: whatever the runtime's code
+    above it holds in its locals is older, and is kept whole, with all it refers to. Of the
+    call's own objects only the older objects, the roots and the mods' frames can hold one.
+  - When a call ends none of its frames is left: its objects are collected exactly, its
+    result a root. That holds for an entry and for a call from the mods' code into the
+    runtime's as well (a `forEach` and all its turns made). While an entry runs, its objects
+    are collected at a call it makes into the runtime (`api::call`, with none of the
+    runtime's own code in between), and its frames are read as they lie on the stack, with
+    the registers a call preserves: a word that could be a reference to one of the call's
+    objects keeps that object. The generated code holds its values in arrays on the stack or
+    in registers, so nothing it uses can be missed; a number that only looks like a reference
+    keeps some garbage a while.
+  - A call is collected once it has made 400,000 objects, as many as its last collection
+    left, and an eighth of what the last whole collection left. Not a share of what the heap
+    holds: that counts the garbage, and a call that made much would wait the longer. The
+    heap is read by up to eight threads (which objects are the call's; which older object
+    refers to one).
+  - What this does not reach yet: garbage of the turns of a loop the runtime itself runs
+    (`Map.forEach` and the like), each turn too small to be collected for itself, waits for
+    the loop's end, since what the loop holds meanwhile is told of nowhere.
+  - `HORIZON_COMPAT_GC=off` or `exit` (no stack reading) switch it; with
+    `HORIZON_COMPAT_GC_CHECK` what it frees stays marked and a call that is handed such an
+    object says so; `HORIZON_COMPAT_GC_MIN=<n>` collects every n objects. The translated
+    fixtures (differential, weave, Gson, JOML, the hook) run each case as an entry and pass
+    with a collection at every chance (n = 1), checked and not: the differential one alone
+    then collects 2,305 times inside calls and 831 times at their ends, and its answers are
+    the JVM's.
+  - A whole collection waits while an entry is in progress, and one left by a call that never
+    came back is dropped by the next. The heap's first object answers no captured values.
+  - Tests: 21 compat-core.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

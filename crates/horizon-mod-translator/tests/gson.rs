@@ -659,7 +659,7 @@ fn translated_gson_matches_the_jvm() {
             horizon_mod_translator::codegen::fn_name("GsonFixture", name, "(I)Ljava/lang/String;");
         for input in *inputs {
             main.push_str(&format!(
-                "    let r = {f}(&mut rt, &[V::I({input})]);\n    let text = rt.str_of(r).unwrap_or(\"null\").replace('\\\\', \"\\\\\\\\\").replace('\\n', \"\\\\n\");\n    println!(\"{name}({input}) = {{text}}\");\n"
+                "    let r = rt.entered(|rt| {f}(rt, &[V::I({input})]), |r| *r);\n    let text = rt.str_of(r).unwrap_or(\"null\").replace('\\\\', \"\\\\\\\\\").replace('\\n', \"\\\\n\");\n    println!(\"{name}({input}) = {{text}}\");\n"
             ));
             main.push_str(&format!("    if let Some(t) = rt.thrown.take() {{ eprintln!(\"{name}({input}) threw {{}}\", rt.class_of(t)); }}\n"));
         }
